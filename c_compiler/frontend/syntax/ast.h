@@ -422,6 +422,8 @@ struct ConstraintExpr;
 #define kASTUnparenthesizedDecltypeEntity (1ULL << 57)  // Deferred decltype operand uses the declared type, not its value category.
 #define kASTSourceDesignatedInitializer (1ULL << 58)  // Designated-initializer-clause written in source, not synthesized by lowering.
 #define kASTVirtualCallerContract (1ULL << 59)  // P3097 caller check with a runtime dedup guard.
+#define kASTInlinedConstructor (1ULL << 60)  // inline_call that replaced a constructor call.
+#define kASTInlinedDestructor (1ULL << 61)  // inline_call that replaced a destructor call.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
@@ -536,6 +538,8 @@ int64_t ASTNodeConstantValue(ASTNode* node);
 // True for call-like nodes (ordinary/inline calls and the variadic/atomic
 // builtins) whose arguments live in a child vector starting at child_id 1.
 bool ASTIsCallNode(ASTNode* node);
+bool ASTIsInlinedConstructor(ASTNode* node);
+bool ASTIsInlinedDestructor(ASTNode* node);
 
 // A unary AST node with a single child.
 typedef struct {
@@ -561,6 +565,10 @@ typedef struct {
   ASTNode base;
   struct ASTNode* inlined;     // @wire 16
   struct ASTNode* ret_value;   // @wire 17
+  // Object a constructor/destructor call acted on, captured before inlining
+  // copies `this` into a local.  Used to pair inlined destructor statements
+  // with the declaration they destroy.
+  struct Symbol* cxx_receiver;  // @wire 18
 } InlineCallASTNode;
 
 ASTNode* NewInlineCallASTNode(TypeRecord* type, SourceLocation location,

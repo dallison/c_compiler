@@ -1087,6 +1087,16 @@ int64_t ASTNodeConstantValue(ASTNode* node) {
 // atomic builtins.  These are all VectorASTNodes whose callee/target occupies
 // child slot 0 and whose argument list is stored in the child vector starting
 // at child_id 1, so callers indexing the argument vector must subtract one.
+bool ASTIsInlinedConstructor(ASTNode* node) {
+  return node != NULL && node->op == AST_OP(inline_call) &&
+         (node->flags & kASTInlinedConstructor) != 0;
+}
+
+bool ASTIsInlinedDestructor(ASTNode* node) {
+  return node != NULL && node->op == AST_OP(inline_call) &&
+         (node->flags & kASTInlinedDestructor) != 0;
+}
+
 bool ASTIsCallNode(ASTNode* node) {
   if (node == NULL) {
     return false;
@@ -1625,6 +1635,7 @@ static ASTNode* InlineCallASTNodeClone(const ASTNode* node,
   ASTNodeBaseCopy(&to->base, node);
   to->inlined = ASTNodeClone(from->inlined, func, data, &to->base);
   to->ret_value = ASTNodeClone(from->ret_value, func, data, &to->base);
+  to->cxx_receiver = from->cxx_receiver;
   ASTNodeVisit(to->inlined, ReconnectInlineCallGoto, 0, to);
   return func(&to->base, data);
 }
@@ -1666,6 +1677,7 @@ ASTNode* NewInlineCallASTNode(TypeRecord* type, SourceLocation location,
     ret_value->parent = (ASTNode*)node;
     ret_value->child_id = 1;
   }
+  node->cxx_receiver = NULL;
   return (ASTNode*)node;
 }
 
@@ -4951,6 +4963,9 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
     case kASTShapeInlineCall: {
       InlineCallASTNode* n = ASTArenaAlloc(sizeof(InlineCallASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &inline_call_vtbl);
+      n->inlined = NULL;
+      n->ret_value = NULL;
+      n->cxx_receiver = NULL;
       return &n->base;
     }
     case kASTShapeVector: {

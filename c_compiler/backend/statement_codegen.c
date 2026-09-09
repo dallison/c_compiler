@@ -700,6 +700,9 @@ static ASTNode* CXXElidableStructReturnInitializer(ASTNode* initializer,
       !TypeIsStructOrUnion(target)) {
     return NULL;
   }
+  if (ASTIsInlinedConstructor(expr)) {
+    return expr;
+  }
   if ((expr->op == AST_OP(call) || expr->op == AST_OP(inline_call) ||
        expr->op == AST_OP(compound_literal) || expr->op == AST_OP(comma) ||
        expr->op == AST_OP(question) || expr->op == AST_OP(spaceship)) &&
@@ -816,6 +819,8 @@ static Symbol* GetDaveCCConstexprEndCatchFunction(SourceLocation location) {
 }
 
 static bool IsDestructorStatement(ASTNode* stmt);
+static ASTNode* PeelToDestructorReceiver(ASTNode* receiver);
+static Symbol* InlineCallReceiverSymbol(InlineCallASTNode* call);
 
 // A cleanup landing pad scheduled during body codegen and emitted after the
 // function's return path (so it is only reached via the unwinder).  Running the
@@ -833,7 +838,15 @@ static Symbol* CleanupReceiverSymbol(ASTNode* dtor_stmt) {
   if (!IsDestructorStatement(dtor_stmt)) {
     return NULL;
   }
-  VectorASTNode* call = (VectorASTNode*)((ExpressionStatementASTNode*)dtor_stmt)->expr;
+  ASTNode* expr = ((ExpressionStatementASTNode*)dtor_stmt)->expr;
+  if (ASTIsInlinedDestructor(expr)) {
+    InlineCallASTNode* call = (InlineCallASTNode*)expr;
+    if (call->cxx_receiver != NULL) {
+      return call->cxx_receiver;
+    }
+    return InlineCallReceiverSymbol(call);
+  }
+  VectorASTNode* call = (VectorASTNode*)expr;
   ASTNode* receiver = NULL;
   if (call->left->op == AST_OP(dot) || call->left->op == AST_OP(arrow)) {
     // Pre-lowering shape: receiver.~T().
@@ -843,13 +856,7 @@ static Symbol* CleanupReceiverSymbol(ASTNode* dtor_stmt) {
     // is the (address-of) `this` argument.
     receiver = call->children->value.p[0];
   }
-  while (receiver != NULL &&
-         (receiver->op == AST_OP(address) || receiver->op == AST_OP(contents))) {
-    receiver = ((UnaryASTNode*)receiver)->sub;
-  }
-  if (receiver != NULL && receiver->op == AST_OP(subscript)) {
-    receiver = ((BinaryASTNode*)receiver)->left;  // array element: arr[k].~T()
-  }
+  receiver = PeelToDestructorReceiver(receiver);
   if (receiver != NULL && receiver->op == AST_OP(identifier)) {
     return ((IdentifierASTNode*)receiver)->symbol;
   }
@@ -983,7 +990,13 @@ static bool IsDestructorStatement(ASTNode* stmt) {
     return false;
   }
   ExpressionStatementASTNode* expr_stmt = (ExpressionStatementASTNode*)stmt;
-  if (expr_stmt->expr == NULL || expr_stmt->expr->op != AST_OP(call)) {
+  if (expr_stmt->expr == NULL) {
+    return false;
+  }
+  if (ASTIsInlinedDestructor(expr_stmt->expr)) {
+    return true;
+  }
+  if (expr_stmt->expr->op != AST_OP(call)) {
     return false;
   }
   VectorASTNode* call = (VectorASTNode*)expr_stmt->expr;
@@ -1014,6 +1027,62 @@ static bool IsDestructorStatement(ASTNode* stmt) {
     return name->value.string != NULL && name->value.string->value[0] == '~';
   }
   return false;
+}
+
+static ASTNode* PeelToDestructorReceiver(ASTNode* receiver) {
+  while (receiver != NULL) {
+    if (receiver->op == AST_OP(init)) {
+      receiver = ((BinaryASTNode*)receiver)->right;
+      continue;
+    }
+    if (receiver->op == AST_OP(expr_init)) {
+      receiver = ((ExpressionInitializerASTNode*)receiver)->expr;
+      continue;
+    }
+    if (receiver->op == AST_OP(cast)) {
+      receiver = ((CastASTNode*)receiver)->expr;
+      continue;
+    }
+    if (receiver->op == AST_OP(address) || receiver->op == AST_OP(contents)) {
+      receiver = ((UnaryASTNode*)receiver)->sub;
+      continue;
+    }
+    if (receiver->op == AST_OP(subscript)) {
+      receiver = ((BinaryASTNode*)receiver)->left;
+      continue;
+    }
+    break;
+  }
+  return receiver;
+}
+
+static Symbol* InlineCallReceiverSymbol(InlineCallASTNode* call) {
+  if (call == NULL || call->inlined == NULL ||
+      call->inlined->op != AST_OP(compound)) {
+    return NULL;
+  }
+  CompoundStatementASTNode* body = (CompoundStatementASTNode*)call->inlined;
+  if (body->statements == NULL || body->statements->length == 0) {
+    return NULL;
+  }
+  ASTNode* first = body->statements->value.p[0];
+  if (first == NULL || first->op != AST_OP(decl_list)) {
+    return NULL;
+  }
+  DeclarationListASTNode* decls = (DeclarationListASTNode*)first;
+  if (decls->declarations == NULL || decls->declarations->length == 0) {
+    return NULL;
+  }
+  ASTNode* decl = decls->declarations->value.p[0];
+  if (decl == NULL || decl->op != AST_OP(vardecl)) {
+    return NULL;
+  }
+  ASTNode* receiver = PeelToDestructorReceiver(
+      ((VariableDeclarationASTNode*)decl)->initializer);
+  if (receiver != NULL && receiver->op == AST_OP(identifier)) {
+    return ((IdentifierASTNode*)receiver)->symbol;
+  }
+  return NULL;
 }
 
 static bool StatementMayFallThrough(ASTNode* stmt) {
@@ -1261,27 +1330,38 @@ static void GenerateVariableDeclaration(Generator* gen,
         GenerateOverAlignedDefinition(gen, node);
   }
   if (node->initializer != NULL) {
-    ASTNode* elidable = CXXElidableStructReturnInitializer(
-        node->initializer, node->symbol->type);
-    if (elidable != NULL) {
-      IRNode* old_struct_address = gen->current_struct_address;
-      IRNode* ref = NULL;
-      if (SymbolNeedsDynamicStackAllocation(node->symbol) &&
-          node->symbol->value.other != NULL) {
-        IRNode* holder = node->symbol->value.other;
-        ref = GeneratorReloadSpilledValue(
-            gen, holder, holder->type->next);
-      } else {
-        IRNode* var = GeneratorGetVariable(gen, node->symbol);
-        ref =
-            IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), var)),
-                      NewPointerTo(kQualPlain, node->symbol->type));
-      }
-      gen->current_struct_address = ref;
-      GenerateExpression(gen, elidable);
-      gen->current_struct_address = old_struct_address;
+    if (gen->inlined_constructor_this != NULL &&
+        TypeIsPointer(node->symbol->type) &&
+        node->symbol->type->next != NULL &&
+        TypeIsStructOrUnion(node->symbol->type->next)) {
+      IRNode* dest = gen->inlined_constructor_this;
+      gen->inlined_constructor_this = NULL;
+      IRNode* var = GeneratorGetVariable(gen, node->symbol);
+      IRNode* store = GeneratorEmit(gen, NewIR2(IR_OP(storea), var, dest));
+      IRSetVarDef(store, node->symbol);
     } else {
-      GenerateExpression(gen, node->initializer);
+      ASTNode* elidable = CXXElidableStructReturnInitializer(
+          node->initializer, node->symbol->type);
+      if (elidable != NULL) {
+        IRNode* old_struct_address = gen->current_struct_address;
+        IRNode* ref = NULL;
+        if (SymbolNeedsDynamicStackAllocation(node->symbol) &&
+            node->symbol->value.other != NULL) {
+          IRNode* holder = node->symbol->value.other;
+          ref = GeneratorReloadSpilledValue(
+              gen, holder, holder->type->next);
+        } else {
+          IRNode* var = GeneratorGetVariable(gen, node->symbol);
+          ref =
+              IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), var)),
+                        NewPointerTo(kQualPlain, node->symbol->type));
+        }
+        gen->current_struct_address = ref;
+        GenerateExpression(gen, elidable);
+        gen->current_struct_address = old_struct_address;
+      } else {
+        GenerateExpression(gen, node->initializer);
+      }
     }
   } else if (!TypeIsVLA(node->symbol->type)) {
     if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {

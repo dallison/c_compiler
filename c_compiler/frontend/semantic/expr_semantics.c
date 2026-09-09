@@ -3772,8 +3772,7 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             constructor_call = callee != NULL && TypeIsFunction(callee->type) &&
                                callee->type->info.function.is_constructor;
           }
-        } else if (e->expr->op == AST_OP(inline_call) &&
-                   TypeIsVoid(e->expr->type) &&
+        } else if (ASTIsInlinedConstructor(e->expr) &&
                    TypeIsStructOrUnion(target->type)) {
           // Direct initialization whose constructor call was inlined.  The
           // inlined body already constructs into the object; do not convert
@@ -4517,6 +4516,32 @@ static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call,
   return NewDeclarationListASTNode(decls, location);
 }
 
+static Symbol* CallThisReceiverSymbol(VectorASTNode* call) {
+  if (call == NULL || call->children == NULL || call->children->length == 0) {
+    return NULL;
+  }
+  ASTNode* receiver = call->children->value.p[0];
+  while (receiver != NULL) {
+    if (receiver->op == AST_OP(address) || receiver->op == AST_OP(contents)) {
+      receiver = ((UnaryASTNode*)receiver)->sub;
+      continue;
+    }
+    if (receiver->op == AST_OP(subscript)) {
+      receiver = ((BinaryASTNode*)receiver)->left;
+      continue;
+    }
+    if (receiver->op == AST_OP(cast)) {
+      receiver = ((CastASTNode*)receiver)->expr;
+      continue;
+    }
+    break;
+  }
+  if (receiver != NULL && receiver->op == AST_OP(identifier)) {
+    return ((IdentifierASTNode*)receiver)->symbol;
+  }
+  return NULL;
+}
+
 // Inline a function call.
 // 1. Create new symbols for all formal args.
 // 2. Assign all actual values to new symbols.
@@ -4532,7 +4557,10 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
   inliner.return_is_reference =
       info->symbol != NULL && info->symbol->type != NULL &&
       TypeIsReference(info->symbol->type->next);
-  
+  Symbol* cxx_receiver =
+      (info->is_constructor || info->is_destructor) ? CallThisReceiverSymbol(call)
+                                                    : NULL;
+
   VectorAppend(statements,
                CopyArguments(info, call, &inliner));
   ASTNode* inlined = NewCompoundStatementASTNode(statements, info->body->location);
@@ -4579,6 +4607,13 @@ static ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
   ASTNode* result =
       NewInlineCallASTNode(call->base.type, location, inlined, ret_node);
   result->value_category = call->base.value_category;
+  if (info->is_constructor) {
+    result->flags |= kASTInlinedConstructor;
+  }
+  if (info->is_destructor) {
+    result->flags |= kASTInlinedDestructor;
+  }
+  ((InlineCallASTNode*)result)->cxx_receiver = cxx_receiver;
   return result;
 }
 
@@ -4924,11 +4959,11 @@ static bool CalleeNamesItsFunction(ASTNode* callee) {
 // 7. It has no named-return-value object. NRVO binds that local directly to the
 //    callee's hidden aggregate-result slot, which does not exist after inlining.
 //
-// Constructors may be inlined when they initialize a named variable
-// (`T x(args)`).  Other constructor expressions construct a temporary and
-// rely on codegen to retarget `this` via current_struct_address, which an
-// inline_call cannot do.  Destructors are never inlined: exception cleanup
-// recognizes `receiver.~T()` expression statements.
+// Constructors and destructors may be inlined.  A constructor call that
+// constructs a temporary is retargeted onto the enclosing object during
+// codegen via current_struct_address.  Inlined destructor statements keep
+// kASTInlinedDestructor so exception cleanup can still pair them with the
+// object they destroy.
 //
 // Why the goto prohibition.  Well, the GotoStatementASTNode contains
 // a resolved reference to its label.  We clone the body to
@@ -4983,7 +5018,22 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   // picked yet.  Copying one of those into the caller leaves it there
   // untyped, with no later pass that would come back and resolve it.
   if (func->body != NULL && (func->body->flags & kASTAnalyzed) == 0) {
-    return false;
+    // Synthesized special members are queued as pending definitions and may
+    // not have been analyzed when a caller is analyzed.  Analyze the body
+    // now so a trivial defaulted copy constructor can be inlined.
+    if (!func->is_constructor && !func->is_destructor) {
+      return false;
+    }
+    TypeRecord* saved_function = compiler->current_function;
+    Struct* saved_access = compiler->current_class_access_context;
+    compiler->current_function = func->symbol != NULL ? func->symbol->type : NULL;
+    compiler->current_class_access_context = func->cxx_member_owner;
+    AnalyzeStatement(func->body);
+    compiler->current_function = saved_function;
+    compiler->current_class_access_context = saved_access;
+    if ((func->body->flags & kASTAnalyzed) == 0) {
+      return false;
+    }
   }
   // A function's preconditions and postconditions are generated around its
   // body when the function itself is compiled, from the assertion list on its
@@ -5023,16 +5073,6 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   // invalid object accesses.
   if (func->cxx_member_owner != NULL &&
       func->cxx_member_owner->virtual_bases.length != 0) {
-    return false;
-  }
-  // Exception cleanup ranges are built by recognizing the compiler-inserted
-  // `receiver.~T()` statements at the end of a block and pairing them with the
-  // declarations above (see statement_codegen.c).  Turning such a call into an
-  // inline_call hides that shape, so the block gets no cleanup range at all and
-  // an exception unwinding through it destroys nothing.  Some destructor
-  // statements are also analyzed before they are wrapped in an expression
-  // statement, so a call-site parent check is not enough.
-  if (func->is_destructor) {
     return false;
   }
   // __attribute__((always_inline)) forces inlining even without the 'inline'
@@ -10113,14 +10153,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (call_ok && TypeIsFunction(node->left->type) &&
       CalleeNamesItsFunction(node->left)) {
     FunctionInfo* func = &node->left->type->info.function;
-    ASTNode* parent = node->base.parent;
-    // Direct `T x(args)` binds `this` to x in the call arguments.  Functional
-    // casts and designated initializers construct a temporary and retarget
-    // `this` during codegen; inlining would keep the temporary.
-    bool constructor_needs_call =
-        func->is_constructor && (parent == NULL || parent->op != AST_OP(vardecl));
-    if (!TypeIsStructOrUnion(return_type) && !constructor_needs_call &&
-        FunctionCanBeInlined(func)) {
+    if (!TypeIsStructOrUnion(return_type) && FunctionCanBeInlined(func)) {
       // Clone the function's body and replace the call by
       // an inline_call node.
       ASTNode* inline_call = InlineFunctionCall(func, node);

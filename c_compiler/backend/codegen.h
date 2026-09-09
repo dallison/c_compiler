@@ -78,6 +78,9 @@ typedef struct Generator {
 
   IRNode* struct_return_value;  // Struct return value node.
   IRNode* current_struct_address;
+  // Destination object for an inlined constructor whose `this` should be the
+  // enclosing initializer slot rather than the original temporary actual.
+  IRNode* inlined_constructor_this;
 
   IRNode* return_label;  // All returns branch to the same label.
 

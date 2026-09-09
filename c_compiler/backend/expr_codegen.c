@@ -1926,6 +1926,10 @@ static bool CXXDesignatedInitFunctionalCastConstructor(ASTNode* init,
     }
     return false;
   }
+  if (ASTIsInlinedConstructor(init)) {
+    *ctor_call = init;
+    return true;
+  }
   if (init->op == AST_OP(comma)) {
     BinaryASTNode* comma = (BinaryASTNode*)init;
     return CXXDesignatedInitFunctionalCastConstructor(comma->left, ctor_call);
@@ -3792,7 +3796,20 @@ static IRNode* GenerateInlineCall(Generator* gen, InlineCallASTNode* node) {
     // destination for their destination.
     gen->current_struct_address = NULL;
   }
+  IRNode* ctor_this = NULL;
+  IRNode* saved_struct_address = gen->current_struct_address;
+  if (ASTIsInlinedConstructor(&node->base) &&
+      gen->current_struct_address != NULL) {
+    ctor_this = FreshCallAddress(gen, gen->current_struct_address);
+    gen->current_struct_address = NULL;
+  }
+  IRNode* saved_ctor_this = gen->inlined_constructor_this;
+  gen->inlined_constructor_this = ctor_this;
   GenerateStatement(gen, node->inlined);
+  gen->inlined_constructor_this = saved_ctor_this;
+  if (ctor_this != NULL) {
+    gen->current_struct_address = saved_struct_address;
+  }
   IRNode* result = NULL;
   if (node->ret_value != NULL) {
     result = GenerateExpression(gen, node->ret_value);

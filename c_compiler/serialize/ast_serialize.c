@@ -376,6 +376,7 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       InlineCallASTNode* c = (InlineCallASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindAST, c->inlined);
       SWriteRef(ctx, buf, 17, kSerialKindAST, c->ret_value);
+      SWriteRef(ctx, buf, 18, kSerialKindSymbol, c->cxx_receiver);
       break;
     }
     case kASTShapeVector: {
@@ -739,6 +740,10 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 17) {
         c->ret_value = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 18) {
+        c->cxx_receiver = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
         return;
       }
       break;

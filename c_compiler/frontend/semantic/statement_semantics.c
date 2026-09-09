@@ -540,9 +540,8 @@ static ASTNode* NewAnalyzedDestructorStatement(TypeRecord* type,
   }
   ASTNode* call =
       NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
-  call = AnalyzeExpression(call);
   ASTNode* statement = NewExpressionStatementASTNode(call, location);
-  statement->flags |= kASTAnalyzed;
+  AnalyzeStatement(statement);
   return statement;
 }
 
@@ -3052,9 +3051,7 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
           callee != NULL && TypeIsFunction(callee->type) &&
           callee->type->info.function.is_constructor;
     }
-  } else if (initializer_expr != NULL &&
-             initializer_expr->op == AST_OP(inline_call) &&
-             TypeIsVoid(initializer_expr->type) &&
+  } else if (ASTIsInlinedConstructor(initializer_expr) &&
              TypeIsStructOrUnion(node->symbol->type)) {
     // Direct initialization whose constructor was inlined.  The inlined body
     // already constructs into the object; do not convert void to the class.

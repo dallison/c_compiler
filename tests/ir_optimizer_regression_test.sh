@@ -514,9 +514,9 @@ if ! grep -Eq 'jmp[[:space:]]+\*' <<<"$dense_switch_asm"; then
   exit 1
 fi
 
-# Direct `T x(args)` inlines the constructor into stores of `this`.  Copy
-# initialization may still call the copy constructor (it constructs a
-# temporary that codegen retargets).  Destructors are never inlined.
+# Direct `T x(args)` and copy-initialization inline constructors into stores
+# of `this`.  Inlined destructors keep kASTInlinedDestructor so EH cleanup
+# can still pair them with the object they destroy.
 CXX_DUMP_SOURCE="$WORK/cxx_optimizer_dump.cc"
 cp "$CXX_SOURCE" "$CXX_DUMP_SOURCE"
 "$DAVECC" -target x86_64 -std=c++20 -O2 -Xsave-ir -S \
@@ -546,8 +546,17 @@ if grep -Eq '[[:space:]]call[[:space:]]' <<<"$cpp_loop_asm"; then
   echo "cpp_loop x86_64 asm retained a call after constructor inlining" >&2
   exit 1
 fi
-if grep -Eq 'call[[:space:]]+_ZN11AccumulatorC1Ei' "$WORK/cxx_optimizer.s"; then
-  echo "x86_64 still calls Accumulator(int) after constructor inlining" >&2
+cpp_copy_asm=$(
+  awk '/^_Z8cpp_copyi:/{inside=1} \
+       inside{print} \
+       /^\.func_end__Z8cpp_copyi:/{exit}' "$WORK/cxx_optimizer.s"
+)
+if grep -Eq '[[:space:]]call[[:space:]]' <<<"$cpp_copy_asm"; then
+  echo "cpp_copy x86_64 asm retained a call after constructor inlining" >&2
+  exit 1
+fi
+if grep -Eq 'call[[:space:]]+_ZN11AccumulatorC1E' "$WORK/cxx_optimizer.s"; then
+  echo "x86_64 still calls Accumulator constructors after inlining" >&2
   exit 1
 fi
 

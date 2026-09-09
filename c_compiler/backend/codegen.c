@@ -236,6 +236,7 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   gen->continue_label = NULL;
   gen->struct_return_value = NULL;
   gen->current_struct_address = NULL;
+  gen->inlined_constructor_this = NULL;
   gen->return_label = NULL;
   VectorInit(&gen->int_constant_pool);
   VectorInit(&gen->fp_constant_pool);
