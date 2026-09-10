@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 #include "dstring.h"
 #include "vector.h"
@@ -102,6 +103,8 @@ SourceLocation NewSourceLocation(Source* sou, int lineno, size_t start,
                                  size_t end);
 void DecodeSourceLocation(SourceLocation location, const char** filename,
                           int* lineno, int* start, int* end);
+// True when `location` was recorded in `filename` (exact or directory suffix).
+bool SourceLocationIsFile(SourceLocation location, const char* filename);
 
 void SourceLocationNumbers(SourceLocation location, int* fileno, int* lineno,
                            int* colno);

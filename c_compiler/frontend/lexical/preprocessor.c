@@ -699,7 +699,7 @@ void PreprocessorDestruct(Preprocessor* p) {
   SetDestructWithContents(&p->pragma_once_files, free, false);
 }
 
-void PreprocessorReset(Preprocessor* p) {
+static void PreprocessorResetMacros(Preprocessor* p, bool clear_pragma_once) {
   HashTableTraverse(&p->macros, DeleteMacroTree, NULL);
   HashTableClear(&p->macros);
   for (size_t i = 0; i < p->macro_stack.length; i++) {
@@ -708,11 +708,52 @@ void PreprocessorReset(Preprocessor* p) {
     free(saved);
   }
   VectorClear(&p->macro_stack);
-  SetClearWithContents(&p->pragma_once_files, free, false);
+  if (clear_pragma_once) {
+    SetClearWithContents(&p->pragma_once_files, free, false);
+  }
   p->directive_produced_output = false;
   p->module_leading_group_has_other_content = false;
   p->module_file_started = false;
   PredefineMacros(p);
+}
+
+void PreprocessorReset(Preprocessor* p) {
+  PreprocessorResetMacros(p, true);
+}
+
+static void CollectMacroNode(BinaryTreeNode* node, int depth, void* data) {
+  (void)depth;
+  VectorAppend((Vector*)data, node);
+}
+
+static void CollectMacroBucket(void* entry, void* data) {
+  if (entry != NULL) {
+    BinaryTreeTraverse((BinaryTree*)entry, CollectMacroNode, data);
+  }
+}
+
+void PreprocessorResetForNewTranslationUnit(Preprocessor* p,
+                                            const char* previous_source) {
+  Vector macros = {0};
+  HashTableTraverse(&p->macros, CollectMacroBucket, &macros);
+  for (size_t i = 0; i < macros.length; i++) {
+    Macro* macro = (Macro*)macros.value.p[i];
+    if (macro != NULL && !macro->undefined &&
+        SourceLocationIsFile(macro->location, previous_source)) {
+      macro->undefined = true;
+    }
+  }
+  VectorDestruct(&macros);
+
+  for (size_t i = 0; i < p->macro_stack.length; i++) {
+    Macro* saved = p->macro_stack.value.p[i];
+    MacroDestruct(saved);
+    free(saved);
+  }
+  VectorClear(&p->macro_stack);
+  p->directive_produced_output = false;
+  p->module_leading_group_has_other_content = false;
+  p->module_file_started = false;
 }
 
 void PreprocessorAddUserIncludePath(Preprocessor* p, const char* path) {

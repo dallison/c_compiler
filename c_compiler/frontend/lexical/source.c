@@ -141,6 +141,35 @@ void DecodeSourceLocation(SourceLocation location, const char** filename,
   }
 }
 
+bool SourceLocationIsFile(SourceLocation location, const char* filename) {
+  if (filename == NULL || location == SOURCE_LOCATION_COMMAND_LINE ||
+      location == SOURCE_LOCATION_MISSING) {
+    return false;
+  }
+  const char* loc_file = NULL;
+  int lineno = 0;
+  int start = 0;
+  int end = 0;
+  DecodeSourceLocation(location, &loc_file, &lineno, &start, &end);
+  if (loc_file == NULL) {
+    return false;
+  }
+  if (strcmp(loc_file, filename) == 0) {
+    return true;
+  }
+  size_t loc_len = strlen(loc_file);
+  size_t file_len = strlen(filename);
+  if (loc_len > file_len && loc_file[loc_len - file_len - 1] == '/' &&
+      strcmp(loc_file + loc_len - file_len, filename) == 0) {
+    return true;
+  }
+  if (file_len > loc_len && filename[file_len - loc_len - 1] == '/' &&
+      strcmp(filename + file_len - loc_len, loc_file) == 0) {
+    return true;
+  }
+  return false;
+}
+
 void SourceLocationNumbers(SourceLocation location, int* fileno, int* lineno,
                            int* colno) {
   *fileno = *lineno = *colno = 0;

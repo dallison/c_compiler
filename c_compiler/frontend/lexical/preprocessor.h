@@ -61,6 +61,11 @@ typedef struct {
 void PreprocessorInit(Preprocessor* p);
 void PreprocessorDestruct(Preprocessor* p);
 void PreprocessorReset(Preprocessor* p);
+// After finishing one -flto translation unit, drop macros defined in that
+// primary source so they do not leak into the next file, but keep header
+// include-guard macros and `#pragma once` state.
+void PreprocessorResetForNewTranslationUnit(Preprocessor* p,
+                                            const char* previous_source);
 
 void PreprocessorAddUserIncludePath(Preprocessor* p, const char* path);
 void PreprocessorAddSystemIncludePath(Preprocessor* p, const char* path);

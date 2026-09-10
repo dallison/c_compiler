@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -26,6 +27,7 @@
 #include "expr_evaluator.h"
 #include "init_semantics.h"
 #include "lex.h"
+#include "preprocessor.h"
 #include "semantics.h"
 #include "syntax.h"
 #include "debug.h"
@@ -116,6 +118,8 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-fdeps-file", kCompilerOptionString, kOptionDepsFile, false, "Write P1689R5 module dependency information"},
     {"-fdeps-format", kCompilerOptionString, kOptionDepsFormat, false, "Module dependency format (p1689r5)"},
     {"-fdeps-scan-only", kCompilerOptionBool, kOptionDepsScanOnly, false, "Scan module dependencies without compiling"},
+    {"-flto", kCompilerOptionBool, kOptionLTO, false,
+     "Link-time optimization: compile all sources together for cross-TU inlining"},
     {NULL, 0, 0, false, NULL},
 };
 
@@ -1348,6 +1352,22 @@ static bool LocalStaticAlreadyRegistered(Symbol* symbol) {
   return false;
 }
 
+static void RemoveUninitializedStaticForSymbol(Symbol* symbol) {
+  if (symbol == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < compiler->uninitialized_static_variables.length;) {
+    UninitializedStaticVariable* existing =
+        compiler->uninitialized_static_variables.value.p[i];
+    if (existing != NULL && existing->symbol == symbol) {
+      UninitializedStaticVariableDelete(existing);
+      VectorDeleteElement(&compiler->uninitialized_static_variables, i);
+      continue;
+    }
+    i++;
+  }
+}
+
 static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
   Vector declarations;
   VectorInit(&declarations);
@@ -1858,6 +1878,16 @@ static bool AsmNameInVector(Vector* names, const char* asm_name) {
   return false;
 }
 
+static const char* FunctionEmitName(Symbol* symbol) {
+  if (symbol == NULL) {
+    return "";
+  }
+  if (symbol->asm_name.length != 0) {
+    return symbol->asm_name.value;
+  }
+  return symbol->name.value;
+}
+
 static bool FunctionAsmNameAlreadyEmitted(const char* asm_name) {
   return CompilerStringIndexContains(
       compiler->emitted_function_name_index, asm_name);
@@ -2151,7 +2181,7 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
   if (compiler->syntax_only || NumErrors() != 0) {
     return false;
   }
-  if (FunctionAsmNameAlreadyEmitted(decl->symbol->asm_name.value)) {
+  if (FunctionAsmNameAlreadyEmitted(FunctionEmitName(decl->symbol))) {
     return false;
   }
   bool dependent_function_body =
@@ -2191,10 +2221,10 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
   GeneratorInit(&codegen, syntax, compiler->current_function);
   void* code = GenerateFunction(&codegen);
   VectorAppend(&compiler->functions, code);
-  VectorAppend(&compiler->emitted_function_asm_names,
-               NewString(decl->symbol->asm_name.value));
-  CompilerStringIndexInsert(compiler->emitted_function_name_index,
-                            decl->symbol->asm_name.value, decl->symbol);
+  const char* emit_name = FunctionEmitName(decl->symbol);
+  VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));
+  CompilerStringIndexInsert(compiler->emitted_function_name_index, emit_name,
+                            decl->symbol);
 
   if (compiler->debug_output) {
     BuildDebugInfoAfterCodegen(&compiler->debug_builder, decl->symbol);
@@ -2209,7 +2239,18 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
 
 static void CompileFunctionDefinitionNode(
     Syntax* syntax, VariableDeclarationASTNode* decl) {
-  if (FunctionAsmNameAlreadyEmitted(decl->symbol->asm_name.value)) {
+  if (compiler->lto_defer_codegen) {
+    for (size_t i = 0; i < compiler->lto_pending_functions.length; i++) {
+      VariableDeclarationASTNode* pending =
+          compiler->lto_pending_functions.value.p[i];
+      if (pending != NULL && pending->symbol == decl->symbol) {
+        return;
+      }
+    }
+    VectorAppend(&compiler->lto_pending_functions, decl);
+    return;
+  }
+  if (FunctionAsmNameAlreadyEmitted(FunctionEmitName(decl->symbol))) {
     return;
   }
   CheckMainSignature(syntax, decl->symbol);
@@ -2305,19 +2346,24 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
               // Extern or static variable definition.
               if (decl->initializer == NULL) {
                 // No initializer.  Add as unitialized static variable.
-                UninitializedStaticVariable* var =
-                    malloc(sizeof(UninitializedStaticVariable));
-                var->symbol = decl->symbol;
-                var->is_global = !StorageIs(decl->symbol->storage, STO(static));
-                var->is_weak = SymbolHasWeakBinding(decl->symbol);
-                var->size = decl->symbol->type != NULL
-                                ? decl->symbol->type->size
-                                : 0;
-                var->alignment = SymbolEffectiveAlignment(decl->symbol);
-                var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
-                var->is_local = decl->symbol->flags.is_local;
-                VectorAppend(&compiler->uninitialized_static_variables, var);
-                RegisterCXXGlobalObject(decl->symbol);
+                // Tentative `int x;` in a later LTO TU reuses the same
+                // Symbol*, so skip a second BSS entry.
+                if (!LocalStaticAlreadyRegistered(decl->symbol)) {
+                  UninitializedStaticVariable* var =
+                      malloc(sizeof(UninitializedStaticVariable));
+                  var->symbol = decl->symbol;
+                  var->is_global =
+                      !StorageIs(decl->symbol->storage, STO(static));
+                  var->is_weak = SymbolHasWeakBinding(decl->symbol);
+                  var->size = decl->symbol->type != NULL
+                                  ? decl->symbol->type->size
+                                  : 0;
+                  var->alignment = SymbolEffectiveAlignment(decl->symbol);
+                  var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
+                  var->is_local = decl->symbol->flags.is_local;
+                  VectorAppend(&compiler->uninitialized_static_variables, var);
+                  RegisterCXXGlobalObject(decl->symbol);
+                }
               } else {
                 decl->symbol->flags.is_tentative_decl = false;
                 if (TypeContainsAuto(decl->symbol->type)) {
@@ -2438,7 +2484,10 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   fprintf(compiler->ast_output_file, "Initializer\n");
                   ASTNodePrint(simplified_init, 0, compiler->ast_output_file);
                 }
-                AddInitializedStaticVariable(decl, simplified_init);
+                RemoveUninitializedStaticForSymbol(decl->symbol);
+                if (!InitializedStaticAlreadyRegistered(decl->symbol)) {
+                  AddInitializedStaticVariable(decl, simplified_init);
+                }
                 RegisterCXXGlobalObject(decl->symbol);
               }
             }
@@ -3166,6 +3215,11 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->pack_stack);
   compiler->num_errors = 0;
   compiler->syntax_only = false;
+  compiler->lto = false;
+  compiler->lto_defer_codegen = false;
+  compiler->lto_tu_index = 0;
+  VectorInit(&compiler->lto_pending_functions);
+  compiler->lto_options = NULL;
   compiler->constexpr_codegen_recover = false;
   compiler->immediate_function_context_depth = 0;
   compiler->constant_evaluation_required_depth = 0;
@@ -3342,6 +3396,7 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   // 0 means unlimited, matching Clang's -ferror-limit=0.
   compiler->max_errors = max_errors <= 0 ? INT_MAX : max_errors;
   compiler->syntax_only = OptionBoolValue(kOptionSyntaxOnly, options, false);
+  compiler->lto = OptionBoolValue(kOptionLTO, options, false);
   compiler->enable_all_warnings = false;
   compiler->convert_warnings_to_errors = false;
   if (options != NULL) {
@@ -3543,9 +3598,11 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   SyntaxInit(&compiler->syntax, &compiler->lex);
 }
 
-// Process macro definition and include path options and process warning
-// options
-static void InitComplexOptions(Compiler* compiler, Vector* options) {
+static void ApplyPreprocessorCommandLineOptions(Compiler* compiler,
+                                                Vector* options) {
+  if (options == NULL) {
+    return;
+  }
   for (size_t i = 0; i < options->length; i++) {
     CompilerOptionValue* option_value = options->value.p[i];
     switch (option_value->opt) {
@@ -3581,6 +3638,19 @@ static void InitComplexOptions(Compiler* compiler, Vector* options) {
         PreprocessorUndefineMacro(&compiler->preprocessor,
                                   &option_value->value.svalue);
         break;
+      default:
+        break;
+    }
+  }
+}
+
+// Process macro definition and include path options and process warning
+// options
+static void InitComplexOptions(Compiler* compiler, Vector* options) {
+  ApplyPreprocessorCommandLineOptions(compiler, options);
+  for (size_t i = 0; i < options->length; i++) {
+    CompilerOptionValue* option_value = options->value.p[i];
+    switch (option_value->opt) {
       case kOptionWarning: {
         const char* v = option_value->value.svalue.value;
         // Global -Werror/-Wno-error are resolved in InitBasicOptionsOrDie.
@@ -3672,6 +3742,7 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestruct(&compiler->declaration_asts);
   VectorDestruct(&compiler->cxx_defined_classes);
   VectorDestruct(&compiler->functions_being_analyzed);
+  VectorDestruct(&compiler->lto_pending_functions);
   for (size_t i = compiler->pending_template_instantiation_head;
        i < compiler->pending_template_instantiations.length; i++) {
     ASTNodeDelete((ASTNode*)compiler->pending_template_instantiations.value.p[i]);
@@ -4074,39 +4145,28 @@ static void CheckUnusedGlobalVariables(void) {
   }
 }
 
-// Compile a source file, returning name of object file allocated from
-// the heap.  Compiler has already been initialized.
-// Runs preprocessing, parsing and semantic analysis for the current translation
-// unit, leaving the compiler's symbol/type/AST graph populated but NOT running
-// code generation.  Returns true if the front end completed without errors.
-// Used by the hidden -Xemit-module driver hook (and by module tooling) to obtain
-// the post-semantic interface without producing an object file.
-bool CompileFrontEndOnly(Compiler* compiler) {
-  CreateGlobalSymbolTables();
-  DeclarePredefinedTypesAndMacros(&compiler->preprocessor);
-
+static void ParseCurrentTranslationUnit(Compiler* compiler) {
   LexNextToken(&compiler->lex);
   while (!LexEof(&compiler->lex)) {
     SyntaxResetForNewDeclaration(&compiler->syntax);
     CompileDeclaration(&compiler->syntax);
   }
+}
+
+bool CompileFrontEndOnly(Compiler* compiler) {
+  // Runs preprocessing, parsing and semantic analysis for the current
+  // translation unit without code generation.  Used by -Xemit-module.
+  CreateGlobalSymbolTables();
+  DeclarePredefinedTypesAndMacros(&compiler->preprocessor);
+
+  ParseCurrentTranslationUnit(compiler);
   CheckUnusedStaticFunctions();
   CheckUnusedGlobalVariables();
   CheckUnusedPrivateFields();
   return NumErrors() == 0;
 }
 
-static String* Compile(Compiler* compiler, Vector* options) {
-  // Create global symbol tables and predefine internal types.
-  CreateGlobalSymbolTables();
-  DeclarePredefinedTypesAndMacros(&compiler->preprocessor);
-  
-  // Main loop.
-  LexNextToken(&compiler->lex);
-  while (!LexEof(&compiler->lex)) {
-    SyntaxResetForNewDeclaration(&compiler->syntax);
-    CompileDeclaration(&compiler->syntax);
-  }
+static String* CompileAfterParse(Compiler* compiler, Vector* options) {
   CheckUnusedStaticFunctions();
   CheckUnusedGlobalVariables();
   CheckUnusedPrivateFields();
@@ -4204,6 +4264,33 @@ static String* Compile(Compiler* compiler, Vector* options) {
   return object_filename;
 }
 
+static String* Compile(Compiler* compiler, Vector* options) {
+  CreateGlobalSymbolTables();
+  DeclarePredefinedTypesAndMacros(&compiler->preprocessor);
+  ParseCurrentTranslationUnit(compiler);
+  return CompileAfterParse(compiler, options);
+}
+
+static bool CompilerSwitchInputFile(Compiler* compiler, const char* filename) {
+  PreprocessorResetForNewTranslationUnit(&compiler->preprocessor,
+                                         compiler->infile.value);
+  StringSet(&compiler->infile,
+            strcmp(filename, "-") == 0 ? "stdin" : filename);
+  ApplyPreprocessorCommandLineOptions(compiler, compiler->lto_options);
+  return LexSwitchToFile(&compiler->lex, filename);
+}
+
+static void DrainLTOPendingFunctions(Compiler* compiler) {
+  compiler->lto_defer_codegen = false;
+  for (size_t i = 0; i < compiler->lto_pending_functions.length; i++) {
+    CompileFunctionDefinitionNode(
+        &compiler->syntax,
+        (VariableDeclarationASTNode*)compiler->lto_pending_functions.value
+            .p[i]);
+  }
+  VectorClear(&compiler->lto_pending_functions);
+}
+
 String* CompileTranslationUnit(const char* filename, Vector* options, Vector* target_opts) {
   ClearAllFiles();
 
@@ -4228,6 +4315,58 @@ String* CompileTranslationUnitFromString(const char* filename, const char* code,
   compiler = malloc(sizeof(Compiler));
   CompilerInitFromString(compiler, filename, code, options);
   String* object_file = Compile(compiler, options);
+  CompilerDelete(compiler);
+  compiler = NULL;
+  ClearAllFiles();
+  return object_file;
+}
+
+String* CompileLTOTranslationUnits(Vector* filenames, Vector* options,
+                                   Vector* target_opts) {
+  if (filenames == NULL || filenames->length == 0) {
+    return NULL;
+  }
+  ClearAllFiles();
+  compiler = malloc(sizeof(Compiler));
+  const char* first = (const char*)filenames->value.p[0];
+  if (!CompilerInitFromFile(compiler, first, options, target_opts)) {
+    fprintf(stderr, "Cannot open file %s\n", first);
+    return NULL;
+  }
+  compiler->lto = true;
+  compiler->lto_options = options;
+  compiler->lto_defer_codegen = filenames->length > 1;
+
+  CreateGlobalSymbolTables();
+  DeclarePredefinedTypesAndMacros(&compiler->preprocessor);
+
+  for (size_t i = 0; i < filenames->length; i++) {
+    const char* filename = (const char*)filenames->value.p[i];
+    if (i > 0) {
+      RetireLTOFileScopeInternalSymbols((int)i - 1);
+      if (!CompilerSwitchInputFile(compiler, filename)) {
+        fprintf(stderr, "Cannot open file %s\n", filename);
+        CompilerDelete(compiler);
+        compiler = NULL;
+        ClearAllFiles();
+        return NULL;
+      }
+    }
+    compiler->lto_tu_index = (int)i;
+    ParseCurrentTranslationUnit(compiler);
+    if (NumErrors() != 0) {
+      break;
+    }
+  }
+
+  if (NumErrors() == 0) {
+    DrainLTOPendingFunctions(compiler);
+  } else {
+    compiler->lto_defer_codegen = false;
+  }
+  StringSet(&compiler->infile, first);
+
+  String* object_file = CompileAfterParse(compiler, options);
   CompilerDelete(compiler);
   compiler = NULL;
   ClearAllFiles();

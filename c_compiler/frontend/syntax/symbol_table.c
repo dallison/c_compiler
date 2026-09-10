@@ -11,6 +11,7 @@
 #include "type.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 // Global symbol tables are fixed size hash tables.  These are their
 // sizes.
@@ -849,6 +850,80 @@ bool UninstallGlobalSymbol(Symbol* symbol, bool is_tag) {
   }
   symbol->namespace_ = NULL;
   return true;
+}
+
+static void CollectSymbolFromNode(BinaryTreeNode* node, int depth, void* data) {
+  (void)depth;
+  SymbolNode* sn = (SymbolNode*)node;
+  if (sn != NULL && sn->symbol != NULL) {
+    VectorAppend((Vector*)data, sn->symbol);
+  }
+}
+
+static void CollectSymbolsFromBucket(void* entry, void* data) {
+  if (entry != NULL) {
+    BinaryTreeTraverse((BinaryTree*)entry, CollectSymbolFromNode, data);
+  }
+}
+
+static bool SymbolIsFromPrimaryTranslationUnit(Symbol* sym) {
+  return sym != NULL &&
+         SourceLocationIsFile(sym->location, compiler->infile.value);
+}
+
+static bool SymbolIsFileScopeEnumConstant(Symbol* sym) {
+  return sym != NULL && sym->flags.value_set && !sym->flags.is_defined &&
+         !sym->flags.is_local && !TypeIsFunction(sym->type) &&
+         !StorageIs(sym->storage, STO(typedef)) &&
+         !StorageIs(sym->storage, STO(static));
+}
+
+void RetireLTOFileScopeInternalSymbols(int tu_index) {
+  Vector symbols = {0};
+  HashTableTraverse(&compiler->global_symbol_table, CollectSymbolsFromBucket,
+                     &symbols);
+  for (size_t i = 0; i < symbols.length; i++) {
+    Symbol* sym = symbols.value.p[i];
+    if (sym == NULL) {
+      continue;
+    }
+    if (StorageIs(sym->storage, STO(static))) {
+      if (!SymbolIsFromPrimaryTranslationUnit(sym) ||
+          StringContainsString(&sym->name, ".lto.")) {
+        continue;
+      }
+      UninstallGlobalSymbol(sym, false);
+      StringAppend(&sym->name, ".lto.");
+      StringAppendInt64(&sym->name, tu_index);
+      if (sym->asm_name.length != 0) {
+        StringAppend(&sym->asm_name, ".lto.");
+        StringAppendInt64(&sym->asm_name, tu_index);
+      }
+      free(sym->cached_target_symbol_name);
+      sym->cached_target_symbol_name = NULL;
+      InsertGlobalSymbol(sym);
+      continue;
+    }
+    if (!SymbolIsFromPrimaryTranslationUnit(sym)) {
+      continue;
+    }
+    if (StorageIs(sym->storage, STO(typedef)) ||
+        SymbolIsFileScopeEnumConstant(sym)) {
+      UninstallGlobalSymbol(sym, false);
+    }
+  }
+  VectorDestruct(&symbols);
+
+  Vector tags = {0};
+  HashTableTraverse(&compiler->global_tag_table, CollectSymbolsFromBucket,
+                     &tags);
+  for (size_t i = 0; i < tags.length; i++) {
+    Symbol* sym = tags.value.p[i];
+    if (SymbolIsFromPrimaryTranslationUnit(sym)) {
+      UninstallGlobalSymbol(sym, true);
+    }
+  }
+  VectorDestruct(&tags);
 }
 
 bool UninstallNamespaceSymbol(Namespace* ns, Symbol* symbol, bool is_tag) {

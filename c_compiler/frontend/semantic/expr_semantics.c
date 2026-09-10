@@ -4947,6 +4947,34 @@ static bool CalleeNamesItsFunction(ASTNode* callee) {
   return symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type);
 }
 
+static FunctionInfo* FunctionInfoForCallInlining(FunctionInfo* func) {
+  if (func == NULL) {
+    return NULL;
+  }
+  if (func->body != NULL) {
+    return func;
+  }
+  if (func->symbol != NULL && func->symbol->value.func_defn != NULL &&
+      func->symbol->value.func_defn->type != NULL &&
+      TypeIsFunction(func->symbol->value.func_defn->type) &&
+      func->symbol->value.func_defn->type->info.function.body != NULL) {
+    return &func->symbol->value.func_defn->type->info.function;
+  }
+  return func;
+}
+
+static bool FunctionTypeIsBeingAnalyzed(TypeRecord* func_type) {
+  if (func_type == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < compiler->functions_being_analyzed.length; i++) {
+    if (compiler->functions_being_analyzed.value.p[i] == func_type) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // We can only inline a function if:
 // 1. It is defined and has a body
 // 2. It is not the current function.
@@ -4975,7 +5003,7 @@ static bool CalleeNamesItsFunction(ASTNode* callee) {
 // NOTE: a tail-recursive inline function will not be inlined because
 // the tail recursion is converted into a goto statement.
 static bool FunctionCanBeInlined(FunctionInfo* func) {
-  if (!OptLevel2()) {
+  if (func == NULL || !OptLevel2()) {
     // Only at -O2 and above.
     return false;
   }
@@ -5019,16 +5047,36 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   // untyped, with no later pass that would come back and resolve it.
   if (func->body != NULL && (func->body->flags & kASTAnalyzed) == 0) {
     // Synthesized special members are queued as pending definitions and may
-    // not have been analyzed when a caller is analyzed.  Analyze the body
-    // now so a trivial defaulted copy constructor can be inlined.
-    if (!func->is_constructor && !func->is_destructor) {
+    // not have been analyzed when a caller is analyzed.  -flto also delays
+    // analysis until every translation unit has been parsed.  Analyze the
+    // body now so a trivial defaulted copy constructor or a later-TU callee
+    // can be inlined.
+    bool analyze_now = func->is_constructor || func->is_destructor ||
+                       compiler->lto;
+    if (!analyze_now) {
+      return false;
+    }
+    TypeRecord* func_type =
+        func->symbol != NULL ? func->symbol->type : NULL;
+    if (FunctionTypeIsBeingAnalyzed(func_type)) {
       return false;
     }
     TypeRecord* saved_function = compiler->current_function;
     Struct* saved_access = compiler->current_class_access_context;
-    compiler->current_function = func->symbol != NULL ? func->symbol->type : NULL;
+    compiler->current_function = func_type;
     compiler->current_class_access_context = func->cxx_member_owner;
+    if (func_type != NULL) {
+      VectorAppend(&compiler->functions_being_analyzed, func_type);
+    }
     AnalyzeStatement(func->body);
+    if (func_type != NULL) {
+      for (size_t i = compiler->functions_being_analyzed.length; i-- > 0;) {
+        if (compiler->functions_being_analyzed.value.p[i] == func_type) {
+          VectorDeleteElement(&compiler->functions_being_analyzed, i);
+          break;
+        }
+      }
+    }
     compiler->current_function = saved_function;
     compiler->current_class_access_context = saved_access;
     if ((func->body->flags & kASTAnalyzed) == 0) {
@@ -5078,8 +5126,9 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   // __attribute__((always_inline)) forces inlining even without the 'inline'
   // keyword (and bypasses the size heuristic below).
   bool force_inline = func->symbol != NULL && func->symbol->flags.always_inline;
-  bool unmarked_at_o3 = OptLevel3() && !func->is_inline && !force_inline;
-  if ((!func->is_inline && !force_inline && !unmarked_at_o3) ||
+  bool unmarked_small = (OptLevel3() || compiler->lto) && !func->is_inline &&
+                        !force_inline;
+  if ((!func->is_inline && !force_inline && !unmarked_small) ||
       !func->symbol->flags.is_defined ||
       func->body == NULL || compiler->current_function == NULL ||
       compiler->current_function->info.function.is_constexpr ||
@@ -5109,7 +5158,7 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
     return true;
   }
   int max_nodes =
-      unmarked_at_o3 ? kMaxUnmarkedInlineNodeCount : kMaxInlineNodeCount;
+      unmarked_small ? kMaxUnmarkedInlineNodeCount : kMaxInlineNodeCount;
   return finder.node_count < max_nodes;
 }
 
@@ -10152,7 +10201,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   // a function (not a function pointer) and it was tagged as inline.
   if (call_ok && TypeIsFunction(node->left->type) &&
       CalleeNamesItsFunction(node->left)) {
-    FunctionInfo* func = &node->left->type->info.function;
+    FunctionInfo* func =
+        FunctionInfoForCallInlining(&node->left->type->info.function);
     if (!TypeIsStructOrUnion(return_type) && FunctionCanBeInlined(func)) {
       // Clone the function's body and replace the call by
       // an inline_call node.

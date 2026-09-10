@@ -58,6 +58,7 @@ typedef enum {
   kOptionDepsScanOnly,       // Scan module dependencies without compiling.
   kOptionConstexprEval,      // Constant evaluator: auto, pcode, ast, or audit.
   kOptionContracts,          // Contract semantic: ignore/observe/enforce/quick-enforce.
+  kOptionLTO,                // -flto: compile all sources in one whole-program unit.
 } CompilerOption;
 
 // This holds the strings from the command line, split into two

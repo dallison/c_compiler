@@ -1813,7 +1813,15 @@ static void MarkCXX26AutomaticNameIndependent(Symbol* symbol) {
   symbol->flags.is_name_independent = true;
 }
 
+static void SymbolSetLocationFromLexIfMissing(Syntax* syntax, Symbol* symbol) {
+  if (symbol != NULL && symbol->location == 0 && syntax != NULL &&
+      syntax->lex != NULL) {
+    symbol->location = syntax->lex->current_token_location;
+  }
+}
+
 bool SyntaxAddSymbol(Syntax* syntax, Symbol* symbol) {
+  SymbolSetLocationFromLexIfMissing(syntax, symbol);
   if (syntax->local_symbol_stack == NULL) {
     MarkExportedDeclaration(syntax, symbol);
     if (InNamedNamespace(syntax)) {
@@ -1951,6 +1959,7 @@ Symbol* SyntaxFindTopScopeSymbol(Syntax* syntax, String* name) {
 }
 
 bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
+  SymbolSetLocationFromLexIfMissing(syntax, symbol);
   if (syntax->local_tag_stack == NULL) {
     MarkExportedDeclaration(syntax, symbol);
     if (InNamedNamespace(syntax)) {

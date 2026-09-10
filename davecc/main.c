@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1167,6 +1168,255 @@ static void DefaultObjectPath(const char* input, String* output) {
   }
 }
 
+#define DCC_LTO_MAGIC_V1 "DCCLTO01"
+#define DCC_LTO_MAGIC_V2 "DCCLTO02"
+
+static bool WriteU32(FILE* fp, uint32_t value) {
+  return fwrite(&value, 4, 1, fp) == 1;
+}
+
+static bool ReadU32(FILE* fp, uint32_t* value) {
+  return fread(value, 4, 1, fp) == 1;
+}
+
+static bool WriteCountedString(FILE* fp, const char* value) {
+  uint32_t len = (uint32_t)(value == NULL ? 0 : strlen(value));
+  if (!WriteU32(fp, len)) {
+    return false;
+  }
+  return len == 0 || fwrite(value, 1, len, fp) == len;
+}
+
+static bool ReadCountedString(FILE* fp, char** out) {
+  uint32_t len = 0;
+  if (!ReadU32(fp, &len)) {
+    return false;
+  }
+  char* buf = malloc((size_t)len + 1);
+  if (buf == NULL) {
+    return false;
+  }
+  if (len > 0 && fread(buf, 1, len, fp) != len) {
+    free(buf);
+    return false;
+  }
+  buf[len] = '\0';
+  *out = buf;
+  return true;
+}
+
+static const char* ResolvedExistingPath(const char* path, char* resolved) {
+  if (path != NULL && realpath(path, resolved) != NULL) {
+    return resolved;
+  }
+  return path;
+}
+
+static CompilerOptionValue* NewStringCompilerOption(CompilerOption opt,
+                                                    const char* value) {
+  CompilerOptionValue* o = calloc(1, sizeof(CompilerOptionValue));
+  o->opt = opt;
+  StringInit(&o->value.svalue, value == NULL ? "" : value);
+  return o;
+}
+
+static CompilerOptionValue* NewBoolCompilerOption(CompilerOption opt) {
+  CompilerOptionValue* o = calloc(1, sizeof(CompilerOptionValue));
+  o->opt = opt;
+  o->value.bvalue = true;
+  return o;
+}
+
+static void CollectOptionStrings(Vector* options, CompilerOption kind,
+                                 Vector* out) {
+  if (options == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < options->length; i++) {
+    CompilerOptionValue* opt = options->value.p[i];
+    if (opt != NULL && opt->opt == kind) {
+      VectorAppend(out, opt->value.svalue.value);
+    }
+  }
+}
+
+static bool WriteCountedStringList(FILE* fp, Vector* options,
+                                   CompilerOption kind, bool resolve_paths) {
+  Vector values = {0};
+  CollectOptionStrings(options, kind, &values);
+  if (!WriteU32(fp, (uint32_t)values.length)) {
+    VectorDestruct(&values);
+    return false;
+  }
+  for (size_t i = 0; i < values.length; i++) {
+    const char* value = (const char*)values.value.p[i];
+    char resolved[PATH_MAX];
+    if (resolve_paths) {
+      value = ResolvedExistingPath(value, resolved);
+    }
+    if (!WriteCountedString(fp, value)) {
+      VectorDestruct(&values);
+      return false;
+    }
+  }
+  VectorDestruct(&values);
+  return true;
+}
+
+static bool ReadCountedStringListAsOptions(FILE* fp, Vector* options,
+                                           CompilerOption kind) {
+  uint32_t n = 0;
+  if (!ReadU32(fp, &n)) {
+    return false;
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    char* value = NULL;
+    if (!ReadCountedString(fp, &value)) {
+      return false;
+    }
+    if (options != NULL) {
+      VectorAppend(options, NewStringCompilerOption(kind, value));
+    }
+    free(value);
+  }
+  return true;
+}
+
+static bool WriteOptionalStringOption(FILE* fp, Vector* options,
+                                      CompilerOption kind) {
+  String* value = OptionStringValue(kind, options);
+  return WriteCountedString(fp, value == NULL ? "" : value->value);
+}
+
+static bool ReadOptionalStringOption(FILE* fp, Vector* options,
+                                     CompilerOption kind) {
+  char* value = NULL;
+  if (!ReadCountedString(fp, &value)) {
+    return false;
+  }
+  if (options != NULL && value != NULL && value[0] != '\0') {
+    VectorAppend(options, NewStringCompilerOption(kind, value));
+  }
+  free(value);
+  return true;
+}
+
+static bool WriteLTOObjectFile(const char* object_path, Vector* source_paths,
+                               Vector* compiler_options) {
+  FILE* fp = fopen(object_path, "wb");
+  if (fp == NULL) {
+    fprintf(stderr, "Cannot write LTO object %s\n", object_path);
+    return false;
+  }
+  uint32_t n = (uint32_t)source_paths->length;
+  uint32_t flags = 0;
+  if (OptionBoolValue(kOptionNoStandardIncludes, compiler_options, false)) {
+    flags |= 1u;
+  }
+  if (fwrite(DCC_LTO_MAGIC_V2, 1, 8, fp) != 8 || !WriteU32(fp, n)) {
+    fclose(fp);
+    return false;
+  }
+  for (size_t i = 0; i < source_paths->length; i++) {
+    const char* source = (const char*)source_paths->value.p[i];
+    char resolved[PATH_MAX];
+    if (!WriteCountedString(fp, ResolvedExistingPath(source, resolved))) {
+      fclose(fp);
+      return false;
+    }
+  }
+  bool ok = WriteCountedStringList(fp, compiler_options, kOptionDefineMacro,
+                                   false) &&
+            WriteCountedStringList(fp, compiler_options, kOptionUndefineMacro,
+                                   false) &&
+            WriteCountedStringList(fp, compiler_options, kOptionIncludePath,
+                                   true) &&
+            WriteCountedStringList(fp, compiler_options,
+                                   kOptionSystemIncludePath, true) &&
+            WriteU32(fp, flags) &&
+            WriteOptionalStringOption(fp, compiler_options, kOptionTarget) &&
+            WriteOptionalStringOption(fp, compiler_options, kOptionStandard) &&
+            WriteOptionalStringOption(fp, compiler_options, kOptionOptimize);
+  fclose(fp);
+  return ok;
+}
+
+static bool TryReadLTOObjectFile(const char* path, Vector* source_paths,
+                                 Vector* stub_options) {
+  FILE* fp = fopen(path, "rb");
+  if (fp == NULL) {
+    return false;
+  }
+  char magic[8];
+  uint32_t n = 0;
+  if (fread(magic, 1, 8, fp) != 8 || !ReadU32(fp, &n)) {
+    fclose(fp);
+    return false;
+  }
+  bool v2 = memcmp(magic, DCC_LTO_MAGIC_V2, 8) == 0;
+  if (!v2 && memcmp(magic, DCC_LTO_MAGIC_V1, 8) != 0) {
+    fclose(fp);
+    return false;
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    char* buf = NULL;
+    if (!ReadCountedString(fp, &buf)) {
+      fclose(fp);
+      return false;
+    }
+    VectorAppend(source_paths, NewString(buf));
+    free(buf);
+  }
+  if (!v2) {
+    fclose(fp);
+    return true;
+  }
+  uint32_t flags = 0;
+  bool ok = ReadCountedStringListAsOptions(fp, stub_options,
+                                           kOptionDefineMacro) &&
+            ReadCountedStringListAsOptions(fp, stub_options,
+                                           kOptionUndefineMacro) &&
+            ReadCountedStringListAsOptions(fp, stub_options,
+                                           kOptionIncludePath) &&
+            ReadCountedStringListAsOptions(fp, stub_options,
+                                           kOptionSystemIncludePath) &&
+            ReadU32(fp, &flags) &&
+            ReadOptionalStringOption(fp, stub_options, kOptionTarget) &&
+            ReadOptionalStringOption(fp, stub_options, kOptionStandard) &&
+            ReadOptionalStringOption(fp, stub_options, kOptionOptimize);
+  if (ok && stub_options != NULL && (flags & 1u) != 0) {
+    VectorAppend(stub_options,
+                 NewBoolCompilerOption(kOptionNoStandardIncludes));
+  }
+  fclose(fp);
+  return ok;
+}
+
+static void PrependCompilerOptions(Vector* dest, Vector* prefix) {
+  if (dest == NULL || prefix == NULL || prefix->length == 0) {
+    return;
+  }
+  Vector merged = {0};
+  for (size_t i = 0; i < prefix->length; i++) {
+    VectorAppend(&merged, prefix->value.p[i]);
+  }
+  for (size_t i = 0; i < dest->length; i++) {
+    VectorAppend(&merged, dest->value.p[i]);
+  }
+  VectorDestruct(dest);
+  *dest = merged;
+}
+
+static void CollectCompilerInputFiles(Vector* compiler_options,
+                                      Vector* sources) {
+  for (size_t i = 0; i < compiler_options->length; i++) {
+    CompilerOptionValue* opt = compiler_options->value.p[i];
+    if (opt->opt == kOptionInputFile) {
+      VectorAppend(sources, opt->value.svalue.value);
+    }
+  }
+}
+
 static bool WriteModuleDependencies(const char* path, const char* input,
                                     const char* primary_output,
                                     const ModuleDependencyScan* scan) {
@@ -1561,38 +1811,130 @@ int main(int argc, char * argv[]) {
     }
   }
 
-  // Any C files to compile?
-  if (run_compiler) {
-    for (size_t i = 0; i < compiler_options.length; i++) {
-      CompilerOptionValue* opt = compiler_options.value.p[i];
-      if (opt->opt == kOptionInputFile) {
-        // One import store per translation unit: LoadedModule graphs must stay
-        // alive through that compile and be released before CompilerDelete.
-        TranslationUnitImportState* import_state =
-            TranslationUnitImportStateCreate(&compiler_options);
-        CompilerSetImportState(import_state,
-                               (TranslationUnitImportReleaseFn)
-                                   TranslationUnitImportStateRelease);
-        SetModuleImportHandler(DriverImportModule, import_state);
+  // Any C files to compile, or LTO objects to lower at link time?
+  Vector c_sources = {0};
+  CollectCompilerInputFiles(&compiler_options, &c_sources);
+  bool lto_flag = OptionBoolValue(kOptionLTO, &compiler_options, false);
+  bool assembly_only =
+      OptionBoolValue(kOptionAssemblyOutput, &compiler_options, false);
+  bool syntax_only =
+      OptionBoolValue(kOptionSyntaxOnly, &compiler_options, false);
+  bool emit_lto_stubs =
+      compile_only && lto_flag && !assembly_only && !syntax_only;
 
-        String* object_file = CompileTranslationUnit(opt->value.svalue.value,
-                                                     &compiler_options,
-                                                     target_opts);
-        SetModuleImportHandler(NULL, NULL);
-        CompilerSetImportState(NULL, NULL);
-        TranslationUnitImportStateDelete(import_state);
-
-        if (object_file != NULL) {
-          VectorAppend(&linker_args, object_file->value);
-        } else {
-          if (!OptionBoolValue(kOptionSyntaxOnly, &compiler_options, false)) {
-            fprintf(stderr, "Failed to compile\n");
-          }
+  if (emit_lto_stubs) {
+    if (c_sources.length == 0) {
+      fprintf(stderr, "-c -flto requires a source file\n");
+      exit(1);
+    }
+    String* output = OptionStringValue(kOptionOutputFile, &compiler_options);
+    if (output != NULL) {
+      if (!WriteLTOObjectFile(output->value, &c_sources, &compiler_options)) {
+        exit(1);
+      }
+    } else {
+      for (size_t i = 0; i < c_sources.length; i++) {
+        const char* source = (const char*)c_sources.value.p[i];
+        String object_path;
+        DefaultObjectPath(source, &object_path);
+        Vector one = {0};
+        VectorAppend(&one, (void*)source);
+        bool ok = WriteLTOObjectFile(object_path.value, &one, &compiler_options);
+        VectorDestruct(&one);
+        StringDestruct(&object_path);
+        if (!ok) {
           exit(1);
         }
       }
     }
+  } else {
+    Vector lto_files = {0};
+    Vector owned_lto_paths = {0};
+    Vector stub_options = {0};
+    for (size_t i = 1; i < linker_args.length;) {
+      const char* arg = (const char*)linker_args.value.p[i];
+      if (arg == NULL || arg[0] == '-') {
+        i++;
+        continue;
+      }
+      size_t before = owned_lto_paths.length;
+      if (TryReadLTOObjectFile(arg, &owned_lto_paths, &stub_options)) {
+        for (size_t j = before; j < owned_lto_paths.length; j++) {
+          String* source = (String*)owned_lto_paths.value.p[j];
+          VectorAppend(&lto_files, source->value);
+        }
+        VectorDeleteElement(&linker_args, i);
+      } else {
+        i++;
+      }
+    }
+    PrependCompilerOptions(&compiler_options, &stub_options);
+    if (lto_flag || lto_files.length > 0) {
+      for (size_t i = 0; i < c_sources.length; i++) {
+        VectorAppend(&lto_files, c_sources.value.p[i]);
+      }
+    }
+
+    if (lto_files.length > 0) {
+      TranslationUnitImportState* import_state =
+          TranslationUnitImportStateCreate(&compiler_options);
+      CompilerSetImportState(import_state,
+                             (TranslationUnitImportReleaseFn)
+                                 TranslationUnitImportStateRelease);
+      SetModuleImportHandler(DriverImportModule, import_state);
+
+      String* object_file =
+          CompileLTOTranslationUnits(&lto_files, &compiler_options, target_opts);
+      SetModuleImportHandler(NULL, NULL);
+      CompilerSetImportState(NULL, NULL);
+      TranslationUnitImportStateDelete(import_state);
+
+      if (object_file != NULL) {
+        VectorAppend(&linker_args, object_file->value);
+      } else {
+        if (!syntax_only) {
+          fprintf(stderr, "Failed to compile\n");
+        }
+        exit(1);
+      }
+    } else if (run_compiler) {
+      for (size_t i = 0; i < compiler_options.length; i++) {
+        CompilerOptionValue* opt = compiler_options.value.p[i];
+        if (opt->opt == kOptionInputFile) {
+          // One import store per translation unit: LoadedModule graphs must stay
+          // alive through that compile and be released before CompilerDelete.
+          TranslationUnitImportState* import_state =
+              TranslationUnitImportStateCreate(&compiler_options);
+          CompilerSetImportState(import_state,
+                                 (TranslationUnitImportReleaseFn)
+                                     TranslationUnitImportStateRelease);
+          SetModuleImportHandler(DriverImportModule, import_state);
+
+          String* object_file = CompileTranslationUnit(opt->value.svalue.value,
+                                                       &compiler_options,
+                                                       target_opts);
+          SetModuleImportHandler(NULL, NULL);
+          CompilerSetImportState(NULL, NULL);
+          TranslationUnitImportStateDelete(import_state);
+
+          if (object_file != NULL) {
+            VectorAppend(&linker_args, object_file->value);
+          } else {
+            if (!syntax_only) {
+              fprintf(stderr, "Failed to compile\n");
+            }
+            exit(1);
+          }
+        }
+      }
+    }
+    VectorDestruct(&lto_files);
+    VectorDestruct(&stub_options);
+    VectorDestructWithContents(&owned_lto_paths,
+                               (VectorElementDestructor)StringDelete,
+                               /*free_element=*/false);
   }
+  VectorDestruct(&c_sources);
   
   if (asm_files.length > 0) {
     String object_filename = {0};
