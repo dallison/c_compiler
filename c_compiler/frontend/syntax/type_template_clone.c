@@ -4016,9 +4016,13 @@ static void RebindBodyCloneDecltypeExpressions(
     }
     VectorAppend(visited_types, current);
     if (current->dependent_decltype_expr != NULL) {
+      // `decltype` is unevaluated: cloning `*declval<T&>()` must not demand a
+      // function body from declaration-only templates such as `std::declval`.
+      compiler->speculative_template_instantiation_depth++;
       ASTNode* rebound =
           ASTNodeClone(current->dependent_decltype_expr,
                        CloneTemplateFunctionBodyNode, clone, NULL);
+      compiler->speculative_template_instantiation_depth--;
       if (rebound != NULL) {
         VectorAppend(rebound_types, current);
         VectorAppend(original_expressions, current->dependent_decltype_expr);

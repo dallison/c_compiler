@@ -4497,9 +4497,25 @@ static bool CXXPostfixExpressionNamesType(ASTNode* node) {
   if (id->symbol == NULL) {
     return false;
   }
+  // Concepts, variable templates and function templates are not types, so
+  // `C<T>{}` / `trait_v<T>{}` is not a functional cast.  Treating them as
+  // types also steals the function body after a trailing requires-clause
+  // such as `requires (C<T>) { ... }` or `requires trait_v<T> { ... }`.
+  if (id->symbol->flags.is_concept) {
+    return false;
+  }
   if (id->template_arguments != NULL) {
-    return id->symbol->flags.is_template ||
-           StorageIs(id->symbol->storage, STO(typedef));
+    if (StorageIs(id->symbol->storage, STO(typedef))) {
+      return true;
+    }
+    if (id->symbol->type == NULL) {
+      return false;
+    }
+    if (TypeIsFunction(id->symbol->type)) {
+      return false;
+    }
+    return TypeIsStructOrUnion(id->symbol->type) ||
+           TypeIsEnum(id->symbol->type);
   }
   if (id->symbol->type == NULL) {
     return false;

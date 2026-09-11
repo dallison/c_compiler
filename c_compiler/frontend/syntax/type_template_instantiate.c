@@ -1763,12 +1763,17 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     template_definition = templ->value.func_defn;
   }
   if (template_definition->type->info.function.body == NULL) {
-    SyntaxError(parser->syntax,
-                "Function template definition is required for instantiation");
-    if (owns_completed_args) {
-      TemplateArgumentVectorDelete(completed_args);
+    // Declaration-only templates such as `std::declval` may be specialized for
+    // their signature in unevaluated / speculative probes.  An evaluated
+    // instantiation still requires a definition.
+    if (compiler->speculative_template_instantiation_depth == 0) {
+      SyntaxError(parser->syntax,
+                  "Function template definition is required for instantiation");
+      if (owns_completed_args) {
+        TemplateArgumentVectorDelete(completed_args);
+      }
+      return templ;
     }
-    return templ;
   }
   bool saved_substitution_failed = parser->template_substitution_failed;
   parser->template_substitution_failed = false;
@@ -2299,10 +2304,16 @@ static bool DeduceFunctionTemplateOneTemplateArgument(Vector* args,
     }
     // [temp.deduct.type]: a type named by a qualified-id whose nested-name-
     // specifier is dependent (`typename basic_string<CharT>::const_iterator`)
-    // is a non-deduced context.  Skip only that argument so sibling parameters
+    // is a non-deduced context.  Defer it in phase 1 so sibling parameters
     // (`Allocator` in `match_results<...::const_iterator, Allocator>`) can still
-    // be deduced from the corresponding actual template arguments.
+    // be deduced.  Phase 2 retries this compiler's nested-type extension; a
+    // failure must not reject the candidate, because the parameter may still
+    // come from another argument or a default.
     if (TemplateArgumentHasDependentMemberName(formal_arg)) {
+      if (!g_deduce_defer_bare_member) {
+        DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
+                                           formal_arg->type, actual_arg->type);
+      }
       return true;
     }
     return DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
@@ -2820,22 +2831,47 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
   }
   if (formal->template_origin != NULL &&
       formal->dependent_member_name != NULL) {
-    TypeRecord* owner =
-        TypeInstantiateClassTemplate(&compiler->syntax, formal->template_origin,
-                                     formal->template_arguments);
     bool ok = false;
-    if (owner != NULL && TypeIsStructOrUnion(owner) &&
-        owner->info.struct_info != NULL) {
-      StructMember* member =
-          FindStructMember(owner->info.struct_info,
-                           formal->dependent_member_name);
-      if (member != NULL && member->symbol != NULL &&
-          StorageIs(member->symbol->storage, STO(typedef))) {
-        ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
-                                                member->symbol->type, actual);
+    // `typename Owner<T, N>::Inner` against a nested class of a concrete
+    // `Owner<A, B>` specialization: recover T and N from the enclosing
+    // class's template arguments.  Structural matching of Inner's members
+    // can bind type parameters (e.g. `T value`) while leaving a non-type
+    // parameter that appears only as an array bound (`int data[N]`) unset.
+    if (TypeIsStructOrUnion(actual) && actual->info.struct_info != NULL) {
+      Struct* parent = actual->info.struct_info->lexical_parent;
+      if (parent != NULL && parent->tag_symbol != NULL &&
+          parent->tag_symbol->type != NULL &&
+          ClassTemplateOriginMatches(
+              ClassTemplateOriginOf(parent->tag_symbol->type),
+              formal->template_origin)) {
+        StructMember* nested =
+            FindStructMember(parent, formal->dependent_member_name);
+        if (nested != NULL &&
+            actual->info.struct_info->tag_name != NULL &&
+            StringEqualString(actual->info.struct_info->tag_name,
+                              formal->dependent_member_name)) {
+          ok = DeduceFunctionTemplateTemplateArguments(
+              args, explicit_arg_count, formal, parent->tag_symbol->type);
+        }
       }
     }
-    TypeRecordDelete(owner);
+    if (!ok) {
+      TypeRecord* owner =
+          TypeInstantiateClassTemplate(&compiler->syntax, formal->template_origin,
+                                       formal->template_arguments);
+      if (owner != NULL && TypeIsStructOrUnion(owner) &&
+          owner->info.struct_info != NULL) {
+        StructMember* member =
+            FindStructMember(owner->info.struct_info,
+                             formal->dependent_member_name);
+        if (member != NULL && member->symbol != NULL &&
+            StorageIs(member->symbol->storage, STO(typedef))) {
+          ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
+                                                  member->symbol->type, actual);
+        }
+      }
+      TypeRecordDelete(owner);
+    }
     return ok;
   }
   int bare_parameter_index = -1;
@@ -2857,14 +2893,27 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
                                               formal->next, actual_referent);
   }
 
-  if (formal->declarator == kDeclArray &&
-      formal->info.array.template_parameter_index >= 0) {
-    int index = formal->info.array.template_parameter_index;
+  int array_nttp_index = -1;
+  if (formal->declarator == kDeclArray) {
+    array_nttp_index = formal->info.array.template_parameter_index;
+    if (array_nttp_index < 0 && formal->info.array.is_dependent_bound &&
+        formal->info.array.size.vla.size != NULL &&
+        formal->info.array.size.vla.size->op == AST_OP(identifier)) {
+      IdentifierASTNode* bound =
+          (IdentifierASTNode*)formal->info.array.size.vla.size;
+      if (bound->symbol != NULL && bound->symbol->flags.is_template_parameter &&
+          !bound->symbol->flags.is_template_type_parameter) {
+        array_nttp_index = bound->symbol->template_parameter_index;
+      }
+    }
+  }
+  if (array_nttp_index >= 0) {
     if (actual->declarator != kDeclArray || actual->info.array.is_vla ||
         actual->info.array.is_dependent_bound ||
         actual->info.array.template_parameter_index >= 0 ||
         !SetDeducedFunctionTemplateNonTypeArgument(
-            args, explicit_arg_count, index, actual->info.array.size.fixed)) {
+            args, explicit_arg_count, array_nttp_index,
+            actual->info.array.size.fixed)) {
       return false;
     }
   }
