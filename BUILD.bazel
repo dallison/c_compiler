@@ -1269,6 +1269,21 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "ltodump",
+    srcs = ["ltodump/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":ar_lib",
+        ":compiler",
+        ":elf",
+        ":linker",
+        ":loader",
+        ":serialize",
+        ":utils",
+    ],
+)
+
 cc_test(
     name = "p_code_vm_test",
     srcs = ["tests/p_code_vm_test.c"],
