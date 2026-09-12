@@ -241,7 +241,8 @@ static void TypeTraitStripAllQualifiers(TypeRecord* type) {
   }
 }
 
-static TypeRecord* TypeRecordStripCvRefForTraitPlaceholder(TypeRecord* type) {
+static COMPILER_UNUSED TypeRecord* TypeRecordStripCvRefForTraitPlaceholder(
+    TypeRecord* type) {
   TypeRecord* owned =
       TypeRecordCalculateSize(TypeRecordCloneSpine(type));
   if (owned == NULL) {
@@ -1064,8 +1065,8 @@ static bool TypeTraitMemberPointerInvoke(Syntax* syntax, Vector* type_args,
                                          bool check_nothrow,
                                          TypeRecord** result_out);
 
-static size_t TypeTraitCallableFormalArgCount(Syntax* syntax,
-                                              TypeRecord* callable) {
+static COMPILER_UNUSED size_t TypeTraitCallableFormalArgCount(
+    Syntax* syntax, TypeRecord* callable) {
   callable = MaterializeTraitType(syntax, callable);
   if (callable == NULL) {
     return (size_t)-1;
@@ -1109,9 +1110,8 @@ static size_t TypeTraitCallableFormalArgCount(Syntax* syntax,
   return formal_count;
 }
 
-static ASTNode* TypeTraitSynthesizeFunctorInvoke(Syntax* syntax,
-                                                    TypeRecord* callable,
-                                                    Vector* type_args) {
+static COMPILER_UNUSED ASTNode* TypeTraitSynthesizeFunctorInvoke(
+    Syntax* syntax, TypeRecord* callable, Vector* type_args) {
   if (callable == NULL || type_args == NULL || type_args->length < 2) {
     return NULL;
   }
@@ -1298,8 +1298,8 @@ static bool TypeTraitIsMemberObjectPointer(TypeRecord* type) {
          !TypeTraitIsMemberFunctionPointer(type);
 }
 
-static bool TypeTraitObjectCompatibleWithClass(Syntax* syntax, TypeRecord* object,
-                                               Struct* class_info) {
+static COMPILER_UNUSED bool TypeTraitObjectCompatibleWithClass(
+    Syntax* syntax, TypeRecord* object, Struct* class_info) {
   object = MaterializeTraitType(syntax, object);
   if (object == NULL || class_info == NULL) {
     return false;

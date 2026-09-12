@@ -34,7 +34,6 @@
 static TemplateArgument* NewTemplateParameterTypeArgumentForType(int index,
                                                                  TypeRecord* type);
 static bool ParseMemberPointerDeclarator(TypeParser* parser);
-static void DebugTypeParseLeavingToken(TypeParser* parser, const char* where);
 
 void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
                     Storage storage, ParserContext context) {

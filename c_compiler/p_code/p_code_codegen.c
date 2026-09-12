@@ -2672,6 +2672,9 @@ static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
     case IR_OP(savesp):
     case IR_OP(restoresp):
       return LowerStackPointerOps(pcode, node);
+
+    default:
+      break;
   }
   // If we get here we've failed to handle the IR node.
   assert(false);

@@ -1050,8 +1050,9 @@ static ASTNode* NewRangeForADLCall(Syntax* syntax, Symbol* range_sym,
                           NewIdentifierASTNode(function, location), args);
 }
 
-static ASTNode* NewRangeForMemberAccess(Symbol* object, const char* name,
-                                        SourceLocation location) {
+static COMPILER_UNUSED ASTNode* NewRangeForMemberAccess(Symbol* object,
+                                                        const char* name,
+                                                        SourceLocation location) {
   return NewBinaryASTNode(
       AST_OP(dot), NULL, location,
       NewIdentifierASTNode(object, location),
@@ -1172,10 +1173,9 @@ static ASTNode* NewRangeForMemberIteratorLoop(Syntax* syntax,
       NewRangeForMemberCall(range_sym, "end", location), stmt, location);
 }
 
-static ASTNode* NewRangeForADLIteratorLoop(Syntax* syntax,
-                                           RangeForBinding* binding,
-                                           Symbol* range_sym, ASTNode* stmt,
-                                           SourceLocation location) {
+static COMPILER_UNUSED ASTNode* NewRangeForADLIteratorLoop(
+    Syntax* syntax, RangeForBinding* binding, Symbol* range_sym, ASTNode* stmt,
+    SourceLocation location) {
   return NewRangeForIteratorLoop(
       syntax, binding, NULL,
       NewRangeForADLCall(syntax, range_sym, "begin", location),

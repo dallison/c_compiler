@@ -5759,6 +5759,9 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
     case IR_OP(savesp):
     case IR_OP(restoresp):
       return LowerStackPointerOps(g, node);
+
+    default:
+      break;
   }
 
   // If we get here we've failed to handle the IR node.

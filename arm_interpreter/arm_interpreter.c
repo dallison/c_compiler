@@ -1018,8 +1018,7 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
       const DaveHostChronoLocalInfoRequestWire* request =
           (const DaveHostChronoLocalInfoRequestWire*)ResolveHostPtr(
               interpreter, (uint32_t)a2, sizeof(DaveHostChronoLocalInfoRequestWire));
-      if (request == NULL || request->abbrev_capacity == 0 ||
-          request->abbrev_capacity > SIZE_MAX / 2) {
+      if (request == NULL || request->abbrev_capacity == 0) {
         return -DAVE_HOST_EINVAL;
       }
       const char* zone =

@@ -4,7 +4,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-static bool Int64AddOverflow(int64_t left, int64_t right, int64_t* result) {
+#ifndef COMPILER_UNUSED
+#if defined(__GNUC__) || defined(__clang__)
+#define COMPILER_UNUSED __attribute__((unused))
+#else
+#define COMPILER_UNUSED
+#endif
+#endif
+
+static COMPILER_UNUSED bool Int64AddOverflow(int64_t left, int64_t right,
+                                             int64_t* result) {
   if ((right > 0 && left > INT64_MAX - right) ||
       (right < 0 && left < INT64_MIN - right)) {
     return true;
@@ -13,7 +22,8 @@ static bool Int64AddOverflow(int64_t left, int64_t right, int64_t* result) {
   return false;
 }
 
-static bool Int64SubOverflow(int64_t left, int64_t right, int64_t* result) {
+static COMPILER_UNUSED bool Int64SubOverflow(int64_t left, int64_t right,
+                                             int64_t* result) {
   if ((right > 0 && left < INT64_MIN + right) ||
       (right < 0 && left > INT64_MAX + right)) {
     return true;
@@ -22,7 +32,8 @@ static bool Int64SubOverflow(int64_t left, int64_t right, int64_t* result) {
   return false;
 }
 
-static bool Int64MulOverflow(int64_t left, int64_t right, int64_t* result) {
+static COMPILER_UNUSED bool Int64MulOverflow(int64_t left, int64_t right,
+                                             int64_t* result) {
   if (left == 0 || right == 0) {
     *result = 0;
     return false;

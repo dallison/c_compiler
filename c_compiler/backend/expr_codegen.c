@@ -4249,7 +4249,6 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  // `ex.error() == 23 && ex.what()[0] == 'b'`).  Use an IR tmp merge like
  // the conditional operator instead.
  if (gen->for_constant_evaluation) {
-   bool value_is_used = true;
    TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
    IRNode* short_label = NewIR(IR_OP(label));
    IRNode* end_label = NewIR(IR_OP(label));
@@ -5536,8 +5535,9 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
 
     case AST_OP(noexcept_expr): {
       int64_t value = 0;
-      bool evaluated = EvaluateIntegerExpression(node, &value);
-      assert(evaluated);
+      if (!EvaluateIntegerExpression(node, &value)) {
+        assert(false);
+      }
       result = GeneratorGetIntConstant(gen, node->type, value);
       break;
     }

@@ -3688,8 +3688,9 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     switch (arg_location->type) {
       case kArgLocationFPRegisterAggregate: {
         RVFloatingAggregate aggregate;
-        bool ok = GetFloatingAggregate(arg_node->type, &aggregate);
-        assert(ok);
+        if (!GetFloatingAggregate(arg_node->type, &aggregate)) {
+          assert(false);
+        }
         TargetInstruction* address = Materialize(rv, arg_node);
         for (int member = 0; member < aggregate.count; member++) {
           RVOpcode load_opcode =
@@ -4562,6 +4563,9 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     case IR_OP(savesp):
     case IR_OP(restoresp):
       return LowerStackPointerOps(rv, node);
+
+    default:
+      break;
   }
 
   // If we get here we've failed to handle the IR node.
@@ -4913,8 +4917,9 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
       ArgLocation location = ArgumentLocation(entry, args);
       if (location.type == kArgLocationFPRegisterAggregate) {
         RVFloatingAggregate aggregate;
-        bool ok = GetFloatingAggregate(variable_type, &aggregate);
-        assert(ok);
+        if (!GetFloatingAggregate(variable_type, &aggregate)) {
+          assert(false);
+        }
         HomeFloatingAggregateArgument(rv, entry, location, &aggregate);
       } else if (location.type == kArgLocationRegisterPair) {
         int offset = AllocateSavedArgumentArea(
@@ -4956,8 +4961,9 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         ArgLocation location = ArgumentLocation(entry, args);
         if (location.type == kArgLocationFPRegisterAggregate) {
           RVFloatingAggregate aggregate;
-          bool ok = GetFloatingAggregate(variable_type, &aggregate);
-          assert(ok);
+          if (!GetFloatingAggregate(variable_type, &aggregate)) {
+            assert(false);
+          }
           HomeFloatingAggregateArgument(rv, entry, location, &aggregate);
         } else if (location.type == kArgLocationRegister) {
           int offset = AllocateSavedArgumentArea(rv, 8, 8);

@@ -1446,7 +1446,7 @@ typedef struct {
   bool compact_inline;
 } ARMExidxRecord;
 
-static int CompareARMExidxRecord(const void* a, const void* b) {
+static COMPILER_UNUSED int CompareARMExidxRecord(const void* a, const void* b) {
   const ARMExidxRecord* left = a;
   const ARMExidxRecord* right = b;
   return left->function < right->function
@@ -1454,12 +1454,14 @@ static int CompareARMExidxRecord(const void* a, const void* b) {
              : (left->function > right->function ? 1 : 0);
 }
 
-static uint64_t DecodeARMPrel31(uint64_t place, uint32_t value) {
+static COMPILER_UNUSED uint64_t DecodeARMPrel31(uint64_t place,
+                                                uint32_t value) {
   int32_t offset = (int32_t)(value << 1) >> 1;
   return place + (int64_t)offset;
 }
 
-static uint32_t EncodeARMPrel31(uint64_t place, uint64_t target) {
+static COMPILER_UNUSED uint32_t EncodeARMPrel31(uint64_t place,
+                                                uint64_t target) {
   return (uint32_t)((int64_t)target - (int64_t)place) & 0x7fffffffu;
 }
 

@@ -1682,7 +1682,8 @@ static void Assemble_extr(AARCH64Assembler* assembler) {
       ((int)lsb << 10) | (rn.num << 5) | rd.num);
 }
 
-static void AssembleMovInstruction(AARCH64Assembler* assembler, Register* rd,
+static COMPILER_UNUSED void AssembleMovInstruction(AARCH64Assembler* assembler,
+                                                   Register* rd,
                                    int sf, int opc, int imm16, int hw) {
   (void)assembler;
   AARCH64EmitMoveWide(&ASMO, rd, sf, opc, imm16, hw);

@@ -315,7 +315,8 @@ static char* MetaTraitReadSourceLine(const char* filename, int lineno) {
   return line;
 }
 
-static TypeRecord* MetaTraitReparseReflectedTypeFromSource(SourceLocation location) {
+static COMPILER_UNUSED TypeRecord* MetaTraitReparseReflectedTypeFromSource(
+    SourceLocation location) {
   if (location == SOURCE_LOCATION_MISSING ||
       location == SOURCE_LOCATION_COMMAND_LINE ||
       compiler->syntax.lex == NULL) {
@@ -501,7 +502,7 @@ static TypeRecord* MetaTraitParseTypeFromSourceText(const char* filename,
   return TypeRecordCalculateSize(type);
 }
 
-static TypeRecord* MetaTraitBuildTemplateIdFromReflectionSource(
+static COMPILER_UNUSED TypeRecord* MetaTraitBuildTemplateIdFromReflectionSource(
     SourceLocation location, TypeRecord* query) {
   if (query == NULL) {
     return NULL;
@@ -624,7 +625,8 @@ found_close:;
   return rebuilt;
 }
 
-static bool MetaTraitNeedsTemplateArgumentRecovery(TypeRecord* query) {
+static COMPILER_UNUSED bool MetaTraitNeedsTemplateArgumentRecovery(
+    TypeRecord* query) {
   if (query == NULL) {
     return false;
   }

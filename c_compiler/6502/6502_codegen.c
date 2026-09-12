@@ -958,11 +958,6 @@ static TargetInstruction* Zero(W65C02Generator* g) {
   return GetIntConstant(g, NULL, kTargetType8Bit, 0);
 }
 
-static TargetInstruction* One(W65C02Generator* g) {
-  return GetIntConstant(g, NULL, kTargetType8Bit, 1);
-}
-
-
 static void AddLiteral(W65C02Generator* g, TargetConstant* con, const void* data,
                        size_t length) {
   con->literal_id = CompilerAddBufferLiteral(data, length);
@@ -5912,7 +5907,7 @@ static bool FunctionUsesCalleeArgCleanup(TypeRecord* function_type) {
          !TypeIsStructOrUnion(function_type->next);
 }
 
-static size_t FunctionArgumentStackSize(TypeRecord* function_type) {
+static COMPILER_UNUSED size_t FunctionArgumentStackSize(TypeRecord* function_type) {
   size_t size = 0;
   Vector* prototype = &function_type->info.function.prototype;
   for (size_t i = 0; i < prototype->length; i++) {
@@ -7975,6 +7970,9 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
       
     case IR_OP(nrvoval):
       abort();      // TODO
+
+    default:
+      break;
   }
   // If we get here we've failed to handle the IR node.
   assert(false);

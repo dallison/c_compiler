@@ -3162,6 +3162,7 @@ static TargetInstruction* LowerVectorOperation(X86_64Generator* rv,
       break;
     default:
       assert(false);
+      return NULL;
   }
 
   TargetInstruction* destination = Materialize(rv, node->inputs.value.p[0]);
@@ -4955,6 +4956,9 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(savesp):
     case IR_OP(restoresp):
       return LowerStackPointerOps(rv, node);
+
+    default:
+      break;
   }
 
   // If we get here we've failed to handle the IR node.

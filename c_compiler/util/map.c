@@ -309,9 +309,9 @@ MapValueType* MapSearch(Map* map, MapKeyType key) {
   return &result->value;
 }
 
-void* MapFindPointerKey(Map* map, void* key) {
+void* MapFindPointerKey(Map* map, const void* key) {
   MapKeyType k;
-  k.p = key;
+  k.p = (void*)key;
   return MapFind(map, k);
 }
 

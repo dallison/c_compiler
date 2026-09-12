@@ -115,7 +115,7 @@ void MapClone(Map* dest, Map* src);
 
 // Finds a value given an key.  Returns NULL if it is not found.
 void* MapFind(Map* map, MapKeyType key);
-void* MapFindPointerKey(Map* map, void* key);
+void* MapFindPointerKey(Map* map, const void* key);
 void* MapFindInt64Key(Map* map, int64_t key);
 
 // Search the map and return NULL or pointer to MapKeyValue found.

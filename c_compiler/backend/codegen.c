@@ -1520,23 +1520,39 @@ static void VisitBlockForResult(Generator* gen, BasicBlock* block, ReturnVisitor
   if (last_inst == NULL) {
     return;
   }
-  if (IRIsReturn(last_inst)) {
-    v->result_known = true;
-    return;
-  }
   if (VisitBlockForResultInstruction(last_inst, v)) {
     return;
   }
-  // Look in the block for a result assignment.
+  // `return asm(...)` emits the asm immediately before the shared epilogue
+  // label, so this block ends on the asm rather than on a result opcode.
+  if (last_inst->opcode == IR_OP(asm)) {
+    v->found_result = true;
+    v->result_known = true;
+    return;
+  }
+  // Look in the block for a result assignment.  A `ret` terminator is not
+  // itself a result; it usually follows resulti/resulta/memcpy-to-structreturn
+  // in the same block.  `return asm(...)` is a DaveCC extension that leaves
+  // the value in the ABI return register, so an asm followed by a return jump
+  // also counts.
+  bool saw_asm = false;
   for (IRNode* inst = BasicBlockBegin(block);
        !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
        inst = IRNext(inst)) {
     if (VisitBlockForResultInstruction(inst, v)) {
       return;
     }
+    if (inst->opcode == IR_OP(asm)) {
+      saw_asm = true;
+    }
+    if (saw_asm && (inst->flags & kIRReturnJump) != 0) {
+      v->found_result = true;
+      v->result_known = true;
+      return;
+    }
   }
-   
-  if (block == gen->exit_block) {
+
+  if (IRIsReturn(last_inst) || block == gen->exit_block) {
     v->result_known = true;
     return;
   }
