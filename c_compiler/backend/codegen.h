@@ -148,7 +148,13 @@ bool SymbolNeedsDynamicStackAllocation(Symbol* symbol);
 bool TypeReturnedThroughHiddenPointer(TypeRecord* type);
 bool TypeUsesNativeVectorABI(TypeRecord* type);
 
+void OptimizeFunctionIR(Generator* gen);
+void GenerateFunctionIR(Generator* gen);
 void* GenerateFunction(Generator* gen);
+void GeneratorStealCode(Generator* gen, List* dst);
+void GeneratorAdoptCode(Generator* gen, List* src);
+void GeneratorRebuildPools(Generator* gen);
+void BuildBasicBlocks(Generator* gen);
 
 int GeneratorNumCalls(Generator* gen);
 uint64_t CXXExceptionTypeID(TypeRecord* type);

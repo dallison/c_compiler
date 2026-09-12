@@ -702,6 +702,7 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
                              STO(static));
   symbol->flags.invented = true;
   symbol->flags.is_defined = true;
+  symbol->flags.is_weak = true;
   symbol->location = parser->lex->current_token_location;
   SyntaxAddSymbol(parser->syntax, symbol);
   if (complete == source && source_offset == 0) {
@@ -854,6 +855,7 @@ static Symbol* RegisterCXXVBTableForSubobject(TypeParser* parser,
                              STO(static));
   symbol->flags.invented = true;
   symbol->flags.is_defined = true;
+  symbol->flags.is_weak = true;
   symbol->location = parser->lex->current_token_location;
   SyntaxAddSymbol(parser->syntax, symbol);
   if (complete == source && source_offset == 0) {

@@ -523,17 +523,9 @@ typedef struct Compiler {
   bool optimize_for_size;
   bool pic;
   bool syntax_only;  // -fsyntax-only: frontend only, no code generation.
-  bool lto;  // -flto: whole-program compile of every source in this run.
-  // Parse every LTO translation unit before analyzing function bodies so
-  // calls can inline callees defined in a later file.
-  bool lto_defer_codegen;
-  int lto_tu_index;  // 0-based index of the translation unit being parsed.
-  // Non-owning VariableDeclarationASTNode* function definitions delayed until
-  // every LTO source has been parsed.
-  Vector lto_pending_functions;
-  // Non-owning pointer to the command-line option vector, used to re-apply -D
-  // and -I after resetting the preprocessor between LTO translation units.
-  Vector* lto_options;
+  bool lto;  // -flto: emit or consume IR modules instead of per-TU native objects.
+  bool lto_ir_only;  // Generate IR and skip target lowering (write a DCCLTO03 object).
+  struct LTOModule* lto_module;
   bool exceptions_enabled;  // C++ exception handling enabled (-f[no-]exceptions).
   bool printf_specialize;    // Rewrite constant printf-family calls by profile.
   bool module_header;        // Compiling the object half of a header unit.
@@ -601,6 +593,8 @@ bool CompilerInitFromFile(Compiler* compiler, const char* filename,
                           Vector* options, Vector* target_opts);
 bool CompilerInitFromString(Compiler* compiler, const char* filename,
                             const char* code, Vector* options);
+bool CompilerInitForLTOLink(Compiler* compiler, const char* filename,
+                            Vector* options, Vector* target_opts);
 bool CompilerInitForAssembler(const char* filename, Vector* options);
 
 void CompilerDestruct(Compiler* compiler);
@@ -641,11 +635,11 @@ void CompilerSetImportState(void* state, TranslationUnitImportReleaseFn release)
 String* CompileTranslationUnit(const char* filename, Vector* options, Vector* target_opts);
 String* CompileTranslationUnitFromString(const char* filename, const char* code,
                                          Vector* options);
-// Compile every filename in `filenames` (const char*) as one translation unit
-// so unmarked callees defined in another file can be inlined at -O2.  Returns
-// the object (or assembly) path, or NULL on failure.
-String* CompileLTOTranslationUnits(Vector* filenames, Vector* options,
+String* CompilerEmitTranslationUnit(struct Compiler* compiler, Vector* options);
+bool CompileTranslationUnitToLTOIR(const char* filename, Vector* options,
                                    Vector* target_opts);
+void CompilerPrepareForIRLoad(void);
+#include "lto_module.h"
 int CompilerAddStringLiteral(String* value, int element_size);
 int CompilerAddBufferLiteral(const void* data, size_t length);
 StringLiteral* CompilerFindStringLiteral(int literal_id);

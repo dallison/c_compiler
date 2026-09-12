@@ -5047,10 +5047,10 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   // untyped, with no later pass that would come back and resolve it.
   if (func->body != NULL && (func->body->flags & kASTAnalyzed) == 0) {
     // Synthesized special members are queued as pending definitions and may
-    // not have been analyzed when a caller is analyzed.  -flto also delays
-    // analysis until every translation unit has been parsed.  Analyze the
-    // body now so a trivial defaulted copy constructor or a later-TU callee
-    // can be inlined.
+    // not have been analyzed when a caller is analyzed.  Analyze the body
+    // now so a trivial defaulted copy constructor can be inlined.  Under
+    // -flto, unmarked same-TU callees are also analyzed here so the AST
+    // inliner can snapshot their bodies into the caller before IR is stored.
     bool analyze_now = func->is_constructor || func->is_destructor ||
                        compiler->lto;
     if (!analyze_now) {
@@ -5128,7 +5128,8 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   bool force_inline = func->symbol != NULL && func->symbol->flags.always_inline;
   bool unmarked_small = (OptLevel3() || compiler->lto) && !func->is_inline &&
                         !force_inline;
-  if ((!func->is_inline && !force_inline && !unmarked_small) ||
+  if (func->symbol == NULL ||
+      (!func->is_inline && !force_inline && !unmarked_small) ||
       !func->symbol->flags.is_defined ||
       func->body == NULL || compiler->current_function == NULL ||
       compiler->current_function->info.function.is_constexpr ||

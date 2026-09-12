@@ -2219,18 +2219,32 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
   SyntaxPrepareCXXLocalStatics(syntax, decl->base.type);
   Generator codegen;
   GeneratorInit(&codegen, syntax, compiler->current_function);
-  void* code = GenerateFunction(&codegen);
-  VectorAppend(&compiler->functions, code);
-  const char* emit_name = FunctionEmitName(decl->symbol);
-  VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));
-  CompilerStringIndexInsert(compiler->emitted_function_name_index, emit_name,
-                            decl->symbol);
+  if (compiler->lto_ir_only) {
+    GenerateFunctionIR(&codegen);
+    if (compiler->lto_module == NULL) {
+      compiler->lto_module = LTOModuleCreate();
+    }
+    LTOModuleAddFunction(compiler->lto_module, &codegen);
+    const char* emit_name = FunctionEmitName(decl->symbol);
+    VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));
+    CompilerStringIndexInsert(compiler->emitted_function_name_index, emit_name,
+                              decl->symbol);
+    AddLocalStatics(syntax, decl->base.type);
+    GeneratorDestruct(&codegen);
+  } else {
+    void* code = GenerateFunction(&codegen);
+    VectorAppend(&compiler->functions, code);
+    const char* emit_name = FunctionEmitName(decl->symbol);
+    VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));
+    CompilerStringIndexInsert(compiler->emitted_function_name_index, emit_name,
+                              decl->symbol);
 
-  if (compiler->debug_output) {
-    BuildDebugInfoAfterCodegen(&compiler->debug_builder, decl->symbol);
+    if (compiler->debug_output) {
+      BuildDebugInfoAfterCodegen(&compiler->debug_builder, decl->symbol);
+    }
+    AddLocalStatics(syntax, decl->base.type);
+    GeneratorDestruct(&codegen);
   }
-  AddLocalStatics(syntax, decl->base.type);
-  GeneratorDestruct(&codegen);
   SyntaxRegisterFunctionInitFiniAttributes(syntax, decl->symbol);
   compiler->current_function = saved_current_function;
   compiler->current_class_access_context = saved_class_access_context;
@@ -2239,17 +2253,6 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
 
 static void CompileFunctionDefinitionNode(
     Syntax* syntax, VariableDeclarationASTNode* decl) {
-  if (compiler->lto_defer_codegen) {
-    for (size_t i = 0; i < compiler->lto_pending_functions.length; i++) {
-      VariableDeclarationASTNode* pending =
-          compiler->lto_pending_functions.value.p[i];
-      if (pending != NULL && pending->symbol == decl->symbol) {
-        return;
-      }
-    }
-    VectorAppend(&compiler->lto_pending_functions, decl);
-    return;
-  }
   if (FunctionAsmNameAlreadyEmitted(FunctionEmitName(decl->symbol))) {
     return;
   }
@@ -3216,10 +3219,8 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->num_errors = 0;
   compiler->syntax_only = false;
   compiler->lto = false;
-  compiler->lto_defer_codegen = false;
-  compiler->lto_tu_index = 0;
-  VectorInit(&compiler->lto_pending_functions);
-  compiler->lto_options = NULL;
+  compiler->lto_ir_only = false;
+  compiler->lto_module = NULL;
   compiler->constexpr_codegen_recover = false;
   compiler->immediate_function_context_depth = 0;
   compiler->constant_evaluation_required_depth = 0;
@@ -3742,7 +3743,6 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestruct(&compiler->declaration_asts);
   VectorDestruct(&compiler->cxx_defined_classes);
   VectorDestruct(&compiler->functions_being_analyzed);
-  VectorDestruct(&compiler->lto_pending_functions);
   for (size_t i = compiler->pending_template_instantiation_head;
        i < compiler->pending_template_instantiations.length; i++) {
     ASTNodeDelete((ASTNode*)compiler->pending_template_instantiations.value.p[i]);
@@ -3775,6 +3775,10 @@ void CompilerDestruct(Compiler* compiler) {
     compiler->target->cleanup(compiler->functions.value.p[i]);
   }
   VectorDestruct(&compiler->functions);
+  if (compiler->lto_module != NULL) {
+    LTOModuleDelete(compiler->lto_module);
+    compiler->lto_module = NULL;
+  }
   VectorDestructWithContents(
       &compiler->emitted_function_asm_names,
       (VectorElementDestructor)StringDelete, /*free_element=*/false);
@@ -3919,6 +3923,17 @@ bool CompilerInitFromString(Compiler* compiler, const char* filename,
   LexInitFromString(&compiler->lex, filename, code_string,
                     &compiler->preprocessor);
 
+  return true;
+}
+
+bool CompilerInitForLTOLink(Compiler* compiler, const char* filename,
+                            Vector* options, Vector* target_opts) {
+  if (!CompilerInitCommon(compiler, filename, options, target_opts)) {
+    return false;
+  }
+  String* code_string = NewString("/* lto */\n");
+  LexInitFromString(&compiler->lex, filename, code_string,
+                    &compiler->preprocessor);
   return true;
 }
 
@@ -4205,6 +4220,20 @@ static String* CompileAfterParse(Compiler* compiler, Vector* options) {
   }
   PruneUnreferencedCXXMetadata();
   PruneUnreferencedInlineVariables();
+  if (compiler->lto_ir_only) {
+    if (compiler->lto_module == NULL) {
+      compiler->lto_module = LTOModuleCreate();
+    }
+    LTOModuleCaptureCompilerState(compiler->lto_module, compiler);
+    char tu_id[17];
+    LTOMakeTUId(compiler->infile.value, tu_id);
+    LTOModuleRenameInternalSymbols(compiler->lto_module, tu_id);
+    return NumErrors() == 0 ? NewString("") : NULL;
+  }
+  return CompilerEmitTranslationUnit(compiler, options);
+}
+
+String* CompilerEmitTranslationUnit(Compiler* compiler, Vector* options) {
   bool output_asm_only = OptionBoolValue(kOptionAssemblyOutput, options, false);
   if (compiler->target->emit_program_file != NULL) {
     return compiler->target->emit_program_file(compiler, options,
@@ -4271,26 +4300,6 @@ static String* Compile(Compiler* compiler, Vector* options) {
   return CompileAfterParse(compiler, options);
 }
 
-static bool CompilerSwitchInputFile(Compiler* compiler, const char* filename) {
-  PreprocessorResetForNewTranslationUnit(&compiler->preprocessor,
-                                         compiler->infile.value);
-  StringSet(&compiler->infile,
-            strcmp(filename, "-") == 0 ? "stdin" : filename);
-  ApplyPreprocessorCommandLineOptions(compiler, compiler->lto_options);
-  return LexSwitchToFile(&compiler->lex, filename);
-}
-
-static void DrainLTOPendingFunctions(Compiler* compiler) {
-  compiler->lto_defer_codegen = false;
-  for (size_t i = 0; i < compiler->lto_pending_functions.length; i++) {
-    CompileFunctionDefinitionNode(
-        &compiler->syntax,
-        (VariableDeclarationASTNode*)compiler->lto_pending_functions.value
-            .p[i]);
-  }
-  VectorClear(&compiler->lto_pending_functions);
-}
-
 String* CompileTranslationUnit(const char* filename, Vector* options, Vector* target_opts) {
   ClearAllFiles();
 
@@ -4321,56 +4330,36 @@ String* CompileTranslationUnitFromString(const char* filename, const char* code,
   return object_file;
 }
 
-String* CompileLTOTranslationUnits(Vector* filenames, Vector* options,
+bool CompileTranslationUnitToLTOIR(const char* filename, Vector* options,
                                    Vector* target_opts) {
-  if (filenames == NULL || filenames->length == 0) {
-    return NULL;
-  }
   ClearAllFiles();
   compiler = malloc(sizeof(Compiler));
-  const char* first = (const char*)filenames->value.p[0];
-  if (!CompilerInitFromFile(compiler, first, options, target_opts)) {
-    fprintf(stderr, "Cannot open file %s\n", first);
-    return NULL;
+  if (!CompilerInitFromFile(compiler, filename, options, target_opts)) {
+    fprintf(stderr, "Cannot open file %s\n", filename);
+    free(compiler);
+    compiler = NULL;
+    ClearAllFiles();
+    return false;
   }
   compiler->lto = true;
-  compiler->lto_options = options;
-  compiler->lto_defer_codegen = filenames->length > 1;
+  compiler->lto_ir_only = true;
+  String* result = Compile(compiler, options);
+  bool ok = result != NULL && NumErrors() == 0;
+  if (result != NULL) {
+    StringDelete(result);
+  }
+  if (!ok) {
+    CompilerDelete(compiler);
+    compiler = NULL;
+    ClearAllFiles();
+    return false;
+  }
+  return true;
+}
 
+void CompilerPrepareForIRLoad(void) {
   CreateGlobalSymbolTables();
   DeclarePredefinedTypesAndMacros(&compiler->preprocessor);
-
-  for (size_t i = 0; i < filenames->length; i++) {
-    const char* filename = (const char*)filenames->value.p[i];
-    if (i > 0) {
-      RetireLTOFileScopeInternalSymbols((int)i - 1);
-      if (!CompilerSwitchInputFile(compiler, filename)) {
-        fprintf(stderr, "Cannot open file %s\n", filename);
-        CompilerDelete(compiler);
-        compiler = NULL;
-        ClearAllFiles();
-        return NULL;
-      }
-    }
-    compiler->lto_tu_index = (int)i;
-    ParseCurrentTranslationUnit(compiler);
-    if (NumErrors() != 0) {
-      break;
-    }
-  }
-
-  if (NumErrors() == 0) {
-    DrainLTOPendingFunctions(compiler);
-  } else {
-    compiler->lto_defer_codegen = false;
-  }
-  StringSet(&compiler->infile, first);
-
-  String* object_file = CompileAfterParse(compiler, options);
-  CompilerDelete(compiler);
-  compiler = NULL;
-  ClearAllFiles();
-  return object_file;
 }
 
 int CharSize() {

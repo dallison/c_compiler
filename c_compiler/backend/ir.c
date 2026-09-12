@@ -301,6 +301,63 @@ static int next_ir_id = 1;
 
 void IRResetNodeId() { next_ir_id = 1; }
 
+void IRRenumberList(List* code) {
+  IRResetNodeId();
+  if (code == NULL) {
+    return;
+  }
+  for (ListElement* e = code->first; e != NULL; e = e->next) {
+    ((IRNode*)e)->id = next_ir_id++;
+  }
+}
+
+static IRVariable* IRAddressVariable(IRNode* origin) {
+  IRNode* inst = origin;
+  int steps = 0;
+  while (inst != NULL && steps++ < 32) {
+    if (IRIsVariable(inst)) {
+      return (IRVariable*)inst;
+    }
+    if (inst->inputs.length == 0) {
+      break;
+    }
+    if (IRIsLoad(inst) || IRIsStore(inst) || inst->opcode == IR_OP(adda) ||
+        inst->opcode == IR_OP(addressof)) {
+      inst = (IRNode*)inst->inputs.value.p[0];
+      continue;
+    }
+    break;
+  }
+  return NULL;
+}
+
+void IRRepairVarDefUse(List* code) {
+  if (code == NULL) {
+    return;
+  }
+  for (ListElement* e = code->first; e != NULL; e = e->next) {
+    IRNode* node = (IRNode*)e;
+    if ((node->flags & kIRVarDef) != 0) {
+      IRVariable* var = IRAddressVariable(node);
+      if (var != NULL && var->symbol != NULL) {
+        node->var.def = var->symbol;
+      } else {
+        node->flags &= ~kIRVarDef;
+        node->var.def = NULL;
+      }
+    }
+    if ((node->flags & kIRVarUse) != 0) {
+      IRVariable* var = IRAddressVariable(node);
+      if (var != NULL && var->symbol != NULL) {
+        node->var.use = var->symbol;
+      } else {
+        node->flags &= ~kIRVarUse;
+        node->var.use = NULL;
+      }
+    }
+  }
+}
+
 void IRInit(IRNode* inst, IROpcode opcode) {
   ListElementInit(&inst->header);
   inst->id = next_ir_id++;

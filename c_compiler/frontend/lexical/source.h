@@ -133,5 +133,12 @@ bool SourceEof(Source* ctx);
 void SourcePrintLocation(SourceLocation location);
 void SourceTraverseFiles(void* data,
                          void (*func)(int index, File* file, void* data));
+size_t SourceFileCount(void);
+File* SourceFileAt(size_t index);
+// Append a file table entry used by deserialized LTO debug locations.
+uint32_t SourceImportFile(const char* filename, bool is_system_header,
+                          const int64_t* lines, size_t nlines);
+SourceLocation SourceRemapLocationFile(SourceLocation location,
+                                       uint32_t new_file_index);
 
 #endif /* source_h */

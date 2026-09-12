@@ -51,6 +51,7 @@ typedef enum {
   kSerialKindStructMember,
   kSerialKindNamespace,
   kSerialKindAST,
+  kSerialKindIRNode,
   kSerialKindCount,
 } SerialKind;
 
@@ -88,6 +89,7 @@ typedef struct SerializeContext {
   // dependencies are still interned through direct graph references.
   bool writing_module_interface;
   bool writing_internal_partition;
+  bool writing_lto_ir;
   bool error;
 } SerializeContext;
 

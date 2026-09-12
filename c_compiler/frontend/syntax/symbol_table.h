@@ -194,10 +194,6 @@ Symbol* FindGlobalTag(String* name);
 
 // Removes a symbol from a lookup table without deleting the Symbol object.
 bool UninstallGlobalSymbol(Symbol* symbol, bool is_tag);
-// After an -flto translation unit is parsed, hide its file-scope `static`
-// names so the next file can reuse them.  Identifiers in the finished unit
-// already hold Symbol* pointers.
-void RetireLTOFileScopeInternalSymbols(int tu_index);
 bool UninstallNamespaceSymbol(Namespace* ns, Symbol* symbol, bool is_tag);
 bool UninstallLocalSymbol(LocalSymbolTable* table, Symbol* symbol);
 void NamespaceRollbackToSizes(Namespace* ns, size_t alias_count,

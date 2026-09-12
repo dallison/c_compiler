@@ -48,11 +48,13 @@ const WireFieldDesc* SerializeGetFields(SerialKind kind, size_t* count) {
 void SerializeRegisterTypeKinds(void);
 void SerializeRegisterSymbolKinds(void);
 void SerializeRegisterASTKinds(void);
+void SerializeRegisterIRKinds(void);
 
 void SerializeRegisterAllKinds(void) {
   SerializeRegisterTypeKinds();
   SerializeRegisterSymbolKinds();
   SerializeRegisterASTKinds();
+  SerializeRegisterIRKinds();
 }
 
 //
@@ -70,6 +72,7 @@ void SerializeContextInit(SerializeContext* ctx) {
   VectorInit(&ctx->string_lens);
   ctx->writing_module_interface = false;
   ctx->writing_internal_partition = false;
+  ctx->writing_lto_ir = false;
   ctx->error = false;
 }
 
@@ -123,6 +126,10 @@ SerialHandle SerializeInternString(SerializeContext* ctx, String* s) {
 SerialHandle SerializeIntern(SerializeContext* ctx, SerialKind kind,
                              void* ptr) {
   if (ptr == NULL) {
+    return kSerialNullHandle;
+  }
+  if (ctx->writing_lto_ir &&
+      (kind == kSerialKindAST || kind == kSerialKindNamespace)) {
     return kSerialNullHandle;
   }
   const SerialKindVtable* vt = SerializeGetKindVtable(kind);

@@ -303,6 +303,59 @@ void GeneratorDestruct(Generator* gen) {
   VectorDestruct(&gen->basic_blocks);
 }
 
+void GeneratorStealCode(Generator* gen, List* dst) {
+  for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
+       node = IRNext(node)) {
+    node->block = NULL;
+  }
+  *dst = gen->code;
+  ListInit(&gen->code);
+}
+
+void GeneratorAdoptCode(Generator* gen, List* src) {
+  ListTraverse(&gen->code, DestructIRNode, NULL);
+  ListDestruct(&gen->code);
+  gen->code = *src;
+  ListInit(src);
+}
+
+void GeneratorRebuildPools(Generator* gen) {
+  VectorDestructWithContents(&gen->variable_pool, NULL, /*free_element=*/true);
+  VectorInit(&gen->variable_pool);
+  VectorDestructWithContents(&gen->int_constant_pool, NULL,
+                             /*free_element=*/true);
+  VectorInit(&gen->int_constant_pool);
+  VectorDestructWithContents(&gen->fp_constant_pool, NULL,
+                             /*free_element=*/true);
+  VectorInit(&gen->fp_constant_pool);
+  for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
+       node = IRNext(node)) {
+    if (IRIsVariable(node) && node->opcode != IR_OP(tmp) &&
+        node->opcode != IR_OP(structreturn)) {
+      IRVariable* var = (IRVariable*)node;
+      PoolEntry* entry = malloc(sizeof(PoolEntry));
+      entry->value.symbol = var->symbol;
+      entry->type = var->symbol != NULL && var->symbol->type != NULL
+                        ? var->symbol->type->type
+                        : 0;
+      entry->pooled = node;
+      VectorAppend(&gen->variable_pool, entry);
+    } else if (IRIsIntConst(node)) {
+      PoolEntry* entry = malloc(sizeof(PoolEntry));
+      entry->value.ivalue = IRIntConstValue(node);
+      entry->type = node->type != NULL ? node->type->type : 0;
+      entry->pooled = node;
+      VectorAppend(&gen->int_constant_pool, entry);
+    } else if (IRIsConst(node) && !IRIsIntConst(node)) {
+      PoolEntry* entry = malloc(sizeof(PoolEntry));
+      entry->value.fvalue = ((IRConstant*)node)->value.fvalue;
+      entry->type = node->type != NULL ? node->type->type : 0;
+      entry->pooled = node;
+      VectorAppend(&gen->fp_constant_pool, entry);
+    }
+  }
+}
+
 // Check if the node is using (reading) a variable.  If so,
 // mark the write instruction with the VarUse flag.  This is necessary
 // so that the SSA conversions know that this is a read from a variable.
@@ -1262,7 +1315,7 @@ static void StraightenGraph(Generator* gen) {
 // every instruction in the block if the block is entered).
 //
 // Block boundaries are marked by labels and branches.
-static void BuildBasicBlocks(Generator* gen) {
+void BuildBasicBlocks(Generator* gen) {
   // The branches vector holds a list of all the branches we encounter in the
   // code.  Each branch adds an edge from its block to the block starting with
   // the label to which it is branching.
@@ -1909,7 +1962,122 @@ static void ScalarizeVectorOperations(Generator* gen) {
   }
 }
 
-void* GenerateFunction(Generator* gen) {
+void OptimizeFunctionIR(Generator* gen) {
+  MarkVariablesWhoseAddressEscapes(gen);
+
+  if (OptLevel2()) {
+    ScalarReplacementOptimization(gen);
+  }
+
+  if (compiler->print_back_end || compiler->ir_output_file != stdout) {
+    GeneratorPrintIR(gen, compiler->ir_output_file);
+  }
+
+  BuildBasicBlocks(gen);
+
+  if (compiler->print_back_end || compiler->ir_output_file != stdout) {
+    fprintf(compiler->ir_output_file, "Before SSA conversion\n");
+    PrintBasicBlocks(gen, compiler->ir_output_file);
+  }
+
+  CheckReturn(gen);
+  RemoveUnreachableBlocks(gen);
+
+  if (OptLevel2() && compiler->ir_optimizations.code_motion &&
+      compiler->ir_optimizations.derived_induction_vars &&
+      compiler->ir_optimizations.loop_preheaders) {
+    DerivedInductionVariableOptimization(gen);
+  }
+
+  GeneratorConvertToSSA(gen);
+
+  if (compiler->print_back_end || compiler->ir_output_file != stdout) {
+    fprintf(compiler->ir_output_file, "After SSA conversion\n");
+    PrintBasicBlocks(gen, compiler->ir_output_file);
+  }
+
+  DetectUninitializedVars(gen);
+
+  if (OptLevel2()) {
+    StrengthReductionOptimization(gen);
+
+    if (compiler->ir_optimizations.gvn) {
+      GlobalValueNumberingOptimization(gen);
+    }
+
+    if (compiler->ir_optimizations.sccp) {
+      if (SparseConditionalConstantPropagation(gen, NULL)) {
+        AnalyzeCFG(gen);
+      }
+    }
+
+    if (compiler->ir_optimizations.const_prop) {
+      ConstantPropagationOptimization(gen);
+    }
+
+    if (compiler->ir_optimizations.copy_prop) {
+      CopyPropagationOptimization(gen);
+    }
+
+    if (compiler->ir_optimizations.dce) {
+      DeadCodeEliminationOptimization(gen);
+    }
+
+    MemoryOptimization(gen);
+
+    if (compiler->ir_optimizations.code_motion &&
+        compiler->ir_optimizations.loop_preheaders) {
+      CodeMotionOptimization(gen);
+    }
+
+    if (compiler->ir_optimizations.induction_vars) {
+      InductionVariableOptimization(gen);
+    }
+
+    if (compiler->ir_optimizations.copy_prop) {
+      CopyPropagationOptimization(gen);
+    }
+    MemoryOptimization(gen);
+    if (compiler->ir_optimizations.dce) {
+      DeadCodeEliminationOptimization(gen);
+    }
+  }
+
+  DetectInvalidValueReads(gen);
+
+  if (!compiler->keep_ssa) {
+    GeneratorRemoveSSA(gen);
+  }
+
+  if (OptLevel2() && !compiler->keep_ssa) {
+    AutoVectorizeOptimization(gen);
+  }
+
+  if (OptLevel3() && !compiler->keep_ssa) {
+    LoopUnrollOptimization(gen);
+    MemoryOptimization(gen);
+    AutoVectorizeOptimization(gen);
+  }
+
+  RemoveUnreachableBlocks(gen);
+
+  if (OptLevel2() && compiler->ir_optimizations.tail_call) {
+    TailCallOptimization(gen);
+  }
+
+  if (compiler->print_back_end) {
+    fprintf(compiler->ir_output_file, "After SSA has been removed\n");
+  }
+
+  if (compiler->print_back_end || compiler->ir_output_file != stdout) {
+    PrintBasicBlocks(gen, compiler->ir_output_file);
+  }
+
+  ScalarizeVectorOperations(gen);
+  TrapFunctionAfterCodegen(gen);
+}
+
+void GenerateFunctionIR(Generator* gen) {
   CompoundStatementASTNode* body = (CompoundStatementASTNode*)gen->func->info.function.body;
   // Template and inline ASTs can be emitted more than once. IR label nodes are
   // owned by one Generator and are destroyed with its IR, so never reuse the
@@ -1969,157 +2137,10 @@ void* GenerateFunction(Generator* gen) {
     GenerateNoexceptGuardTerminate(gen, &noexcept_guard);
   }
 
-  MarkVariablesWhoseAddressEscapes(gen);
+  OptimizeFunctionIR(gen);
+}
 
-  if (OptLevel2()) {
-    // Split constant-offset aggregate accesses into scalars before SSA so
-    // the new temporaries get phis and can be allocated to registers.
-    ScalarReplacementOptimization(gen);
-  }
-
-  if (compiler->print_back_end || compiler->ir_output_file != stdout) {
-    GeneratorPrintIR(gen, compiler->ir_output_file);
-  }
-  
-  BuildBasicBlocks(gen);
-
-  if (compiler->print_back_end|| compiler->ir_output_file != stdout) {
-    fprintf(compiler->ir_output_file, "Before SSA conversion\n");
-    PrintBasicBlocks(gen, compiler->ir_output_file);
-  }
-  
-  CheckReturn(gen);
-
-  // Remove any unreachable blocks before we go into SSA conversion.
-  RemoveUnreachableBlocks(gen);
-
-  if (OptLevel2() && compiler->ir_optimizations.code_motion &&
-      compiler->ir_optimizations.derived_induction_vars &&
-      compiler->ir_optimizations.loop_preheaders) {
-    // Build derived pointer recurrences while the IR still uses ordinary
-    // variables; the following SSA conversion then creates their phis.
-    DerivedInductionVariableOptimization(gen);
-  }
-
-  //  printf("Before SSA\n");
-  //  PrintBasicBlocks(gen);
-  // Convert the IR graph to Static Single Assignment form.  This enables
-  // optimizations.
-  GeneratorConvertToSSA(gen);
-
-  if (compiler->print_back_end|| compiler->ir_output_file != stdout) {
-    fprintf(compiler->ir_output_file, "After SSA conversion\n");
-    PrintBasicBlocks(gen, compiler->ir_output_file);
-  }
-
-  // Find all uninitialized variables.
-  DetectUninitializedVars(gen);
-
-  if (OptLevel2()) {
-    // Perform strength reduction optimization.  This simplifies instructions.
-    StrengthReductionOptimization(gen);
-
-    if (compiler->ir_optimizations.gvn) {
-     // Do Global Value Numbering.  This finds and uses common subexpressions.
-      GlobalValueNumberingOptimization(gen);
-    }
-
-    if (compiler->ir_optimizations.sccp) {
-      // Propagate constants through SSA names, phis, and executable edges.
-      if (SparseConditionalConstantPropagation(gen, NULL)) {
-        // SCCP can remove infeasible CFG edges.  Downstream LICM and induction
-        // passes consume dominators and LoopInfo, so do not leave them pointing
-        // at the pre-SCCP graph.
-        AnalyzeCFG(gen);
-      }
-    }
-    
-    if (compiler->ir_optimizations.const_prop) {
-    // Propagate constants.
-      ConstantPropagationOptimization(gen);
-    }
-
-    if (compiler->ir_optimizations.copy_prop) {
-      CopyPropagationOptimization(gen);
-    }
-
-    if (compiler->ir_optimizations.dce) {
-      DeadCodeEliminationOptimization(gen);
-    }
-
-    MemoryOptimization(gen);
-
-    if (compiler->ir_optimizations.code_motion &&
-        compiler->ir_optimizations.loop_preheaders) {
-      // Perform code motion for loops.
-      CodeMotionOptimization(gen);
-    }
-
-    // Canonical induction updates already produce the post-update value.  Use
-    // it directly instead of reloading the induction variable in the latch.
-    if (compiler->ir_optimizations.induction_vars) {
-      InductionVariableOptimization(gen);
-    }
-
-    // Code motion and copy propagation can expose another short chain of dead
-    // computations.  Keep this bounded rather than introducing an implicit
-    // pass-manager fixed point.
-    if (compiler->ir_optimizations.copy_prop) {
-      CopyPropagationOptimization(gen);
-    }
-    MemoryOptimization(gen);
-    if (compiler->ir_optimizations.dce) {
-      DeadCodeEliminationOptimization(gen);
-    }
-  }
-
-  DetectInvalidValueReads(gen);
-    
-  // printf("AFTER otimizations\n");
-  // PrintBasicBlocks(gen);
-
-  if (!compiler->keep_ssa) {
-    // Remove any SSA nodes we added, converting back from SSA form.
-    GeneratorRemoveSSA(gen);
-  }
-
-  if (OptLevel2() && !compiler->keep_ssa) {
-    AutoVectorizeOptimization(gen);
-  }
-
-  if (OptLevel3() && !compiler->keep_ssa) {
-    LoopUnrollOptimization(gen);
-    // Unrolled copies of a load/store accumulator sit in one block; forwarding
-    // them now turns the copies into a value chain the allocator can keep in
-    // a single register.
-    MemoryOptimization(gen);
-    AutoVectorizeOptimization(gen);
-  }
-  
-  // It's possible that the optimizations have made some blocks unreaachable
-  // now, so see if we have any.
-  RemoveUnreachableBlocks(gen);
-
-  if (OptLevel2() && compiler->ir_optimizations.tail_call) {
-    // Find all tail calls when not in SSA form.
-    TailCallOptimization(gen);
-  }
-
-  if (compiler->print_back_end) {
-     fprintf(compiler->ir_output_file, "After SSA has been removed\n");
-  }
-
-  if (compiler->print_back_end|| compiler->ir_output_file != stdout) {
-    PrintBasicBlocks(gen, compiler->ir_output_file);
-  }
-
-  ScalarizeVectorOperations(gen);
-  
-  TrapFunctionAfterCodegen(gen);
-  
-  // Generate lowered code for the target.
-  void* code = compiler->target->codegen(gen);
-
-  // We now have a target-specific code sequence for the function.
-  return code;
+void* GenerateFunction(Generator* gen) {
+  GenerateFunctionIR(gen);
+  return compiler->target->codegen(gen);
 }

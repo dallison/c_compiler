@@ -125,9 +125,6 @@ typedef struct {
 // Initializes a lexical analyzer from a file.
 bool LexInitFromFile(Lex* lex, const char* filename,
                      Preprocessor* preprocessor);
-// Replace the current input file without re-initializing lexer strings.
-// Used to parse the next translation unit during -flto.
-bool LexSwitchToFile(Lex* lex, const char* filename);
 bool LexInitFromString(Lex* lex, const char* filename, String* string,
                        Preprocessor* preprocessor);
 

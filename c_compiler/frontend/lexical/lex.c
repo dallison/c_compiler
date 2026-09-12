@@ -1949,34 +1949,6 @@ bool LexInitFromFile(Lex* lex, const char* filename,
   return true;
 }
 
-bool LexSwitchToFile(Lex* lex, const char* filename) {
-  FILE* in = fopen(filename, "r");
-  if (in == NULL) {
-    fprintf(stderr, "No such file %s\n", filename);
-    return false;
-  }
-  if (lex->source != NULL) {
-    SourceDelete(lex->source);
-    lex->source = NULL;
-  }
-  lex->source = NewSourceFromFile(filename, in);
-  lex->pos = 0;
-  lex->current_token = TOK(bad);
-  lex->current_greatereq_is_split = false;
-  lex->in_comment = false;
-  lex->preprocessor_mode = false;
-  lex->replay_active = false;
-  lex->replay_tokens = NULL;
-  lex->replay_index = 0;
-  lex->replay_injected_value = NULL;
-  StringClear(&lex->line);
-  StringClear(&lex->spelling);
-  StringClear(&lex->literal_spelling);
-  StringClear(&lex->suffix);
-  StringClear(&lex->ud_suffix);
-  return true;
-}
-
 bool LexInitFromString(Lex* lex, const char* filename, String* code,
                        Preprocessor* preprocessor) {
   lex->source = NewSourceFromString(filename, code);

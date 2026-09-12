@@ -354,6 +354,10 @@ void IRInit(IRNode* inst, IROpcode opcode);
 void IRDestruct(IRNode* inst);
 void IRDelete(IRNode* inst);
 void IRResetNodeId(void);
+void IRRenumberList(List* code);
+// After deserialize or inlining, drop or rebind kIRVarDef/kIRVarUse so SSA
+// rename can find the address operand's IRVariable.
+void IRRepairVarDefUse(List* code);
 
 IRNode* IRSetType(IRNode* node, TypeRecord* type);
 

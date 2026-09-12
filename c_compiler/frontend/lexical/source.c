@@ -437,3 +437,41 @@ void SourceTraverseFiles(void* data,
     func((int)i, all_files.value.p[i], data);
   }
 }
+
+size_t SourceFileCount(void) { return all_files.length; }
+
+File* SourceFileAt(size_t index) {
+  if (index >= all_files.length) {
+    return NULL;
+  }
+  return (File*)all_files.value.p[index];
+}
+
+uint32_t SourceImportFile(const char* filename, bool is_system_header,
+                          const int64_t* lines, size_t nlines) {
+  File* file = malloc(sizeof(File));
+  StringInit(&file->name, filename != NULL ? filename : "");
+  VectorInit(&file->lines);
+  file->is_system_header = is_system_header;
+  for (size_t i = 0; i < nlines; i++) {
+    VectorAppend(&file->lines, (void*)(intptr_t)lines[i]);
+  }
+  uint32_t index = (uint32_t)all_files.length;
+  VectorAppend(&all_files, file);
+  return index;
+}
+
+SourceLocation SourceRemapLocationFile(SourceLocation location,
+                                       uint32_t new_file_index) {
+  if (location == SOURCE_LOCATION_COMMAND_LINE ||
+      location == SOURCE_LOCATION_MISSING) {
+    return location;
+  }
+  uint32_t line_index = (location >> LOC_LINE_SHIFT) & LOC_LINE_MASK;
+  uint32_t length = (location >> LOC_LENGTH_SHIFT) & LOC_LENGTH_MASK;
+  uint32_t start = (location >> LOC_START_SHIFT) & LOC_START_MASK;
+  return ((SourceLocation)new_file_index << LOC_FILE_SHIFT) |
+         ((SourceLocation)line_index << LOC_LINE_SHIFT) |
+         ((SourceLocation)start << LOC_START_SHIFT) |
+         ((SourceLocation)length << LOC_LENGTH_SHIFT);
+}
