@@ -862,6 +862,32 @@ static void Assemble_tprel(ARMAssembler* assembler) {
   StringDestruct(&symbol);
 }
 
+static void Assemble_tlsgd(ARMAssembler* assembler) {
+  ARMReg rd;
+  if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler) ||
+      !LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected destination register and TLS symbol");
+    return;
+  }
+  String symbol;
+  StringInit(&symbol, ASM.lex.spelling.value);
+  LexNextToken(&ASM.lex);
+
+  // ldr rd, [pc, #4] / add rd, pc, rd / b .+8 / .word R_ARM_TLS_GD32
+  // The add's PC equals the literal address, so a zero addend yields the GOT
+  // pair address in rd and the branch skips the literal.
+  EmitInst(assembler, 0xe59f0004u | ((uint32_t)rd.num << 12));
+  EmitInst(assembler, 0xe08f0000u | ((uint32_t)rd.num << 12) | (uint32_t)rd.num);
+  EmitInst(assembler, 0xea000000u);
+  int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
+  AssemblerRelocation* reloc =
+      NewAssemblerRelocation(GetOrCreateSymbol(assembler, symbol.value),
+                             R_ARM_TLS_GD32, ASMO.current_section, here, 0);
+  AssemblerAddRelocation(&ASM, reloc);
+  EmitInst(assembler, 0);
+  StringDestruct(&symbol);
+}
+
 static void AssembleBranch(ARMAssembler* assembler, int cond, bool link) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     String sym;
@@ -1450,6 +1476,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(clrex);
   INST(mrc);
   INST(tprel);
+  INST(tlsgd);
   INST(b);
   INST(bl);
   INST(beq);

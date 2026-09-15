@@ -15,3 +15,13 @@ __davecc_linux_syscall6:
 	svc #0
 	pop {r4, r5, r7}
 	bx lr
+
+.global __tls_get_addr
+.type __tls_get_addr, @function
+
+__tls_get_addr:
+	mrc p15, 0, r2, c13, c0, 3
+	add r2, r2, #8
+	ldr r1, [r0, #4]
+	add r0, r2, r1
+	bx lr

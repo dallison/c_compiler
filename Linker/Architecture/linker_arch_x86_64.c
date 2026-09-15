@@ -72,6 +72,16 @@ static void HandlePICRelocation(
       }
       break;
 
+    case R_X86_64_TLSGD:
+      DynamicLinkerNoteTLSGD(dynamic, symbol);
+      break;
+
+    case R_X86_64_GOTTPOFF:
+      if (symbol != NULL) {
+        symbol->got_index = append_data_to_got(dynamic, symbol);
+      }
+      break;
+
     case R_X86_64_64: {
       Relocation* rel_reloc = NewDataAddressRelocation(
           symbol, reloc, R_X86_64_RELATIVE, R_X86_64_GLOB_DAT);
@@ -142,7 +152,9 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_X86_64_GOTPCREL:
     case R_X86_64_GOTPCRELX:
     case R_X86_64_REX_GOTPCRELX:
-    case R_X86_64_GOT32: {
+    case R_X86_64_GOT32:
+    case R_X86_64_TLSGD:
+    case R_X86_64_GOTTPOFF: {
       uint64_t addr = S + A;
       if (symbol != NULL && symbol->got_index >= 0 &&
           linker->dynamic_linker != NULL) {
@@ -213,12 +225,21 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
       // A slot for one of the GOT-based TLS models holds an offset or a
       // module id rather than an address, and some targets allocate those out
       // of this same list, so they keep the form resolved by name.
-      by_symbol = symbol->from_dynamic_library || LinkerSymbolIsTLS(symbol);
-      reloc_type = by_symbol ? R_X86_64_64 : R_X86_64_RELATIVE;
+      if (LinkerSymbolIsTLS(symbol)) {
+        by_symbol = symbol->from_dynamic_library;
+        reloc_type = R_X86_64_TPOFF64;
+      } else {
+        by_symbol = symbol->from_dynamic_library;
+        reloc_type = by_symbol ? R_X86_64_64 : R_X86_64_RELATIVE;
+      }
       break;
     case kGOTRelocationTLSOffset:
+      by_symbol = symbol->from_dynamic_library;
+      reloc_type = R_X86_64_DTPOFF64;
+      break;
     case kGOTRelocationTLSModuleId:
-      reloc_type = R_X86_64_64;
+      by_symbol = symbol->from_dynamic_library;
+      reloc_type = R_X86_64_DTPMOD64;
       break;
   }
   int64_t offset = (int64_t)contents->data.buffered.length;

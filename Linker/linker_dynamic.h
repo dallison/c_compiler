@@ -130,6 +130,8 @@ struct Relocation* NewDataAddressRelocation(struct LinkerSymbol* symbol,
 void DynamicLinkerBuildDynamicRelocations(struct Linker* linker);
 void DynamicLinkerBuildPLTRelocations(struct Linker* linker);
 void DynamicLinkerGatherDynamicRelocations(struct Linker* linker);
+void DynamicLinkerNoteTLSGD(struct DynamicLinker* dynamic,
+                            struct LinkerSymbol* symbol);
 void DynamicLinkerCreateDynamicLinkerGroups(Linker* linker);
 void DynamicLinkerFixupDynamicSymbolTable(struct Linker* linker,
                                           Buffer* dynsym,

@@ -2823,7 +2823,9 @@ static void PrintInstruction(X86_64Emitter* emitter, TargetInstruction* inst,
         char namebuf[256];
         const char* symname =
             TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
-        if ((inst->flags & X86_64_GOTPCREL_RELOC) != 0) {
+        if ((inst->flags & X86_64_TLSGD_RELOC) != 0) {
+          fprintf(fp, "%s@TLSGD(%%rip), ", symname);
+        } else if ((inst->flags & X86_64_GOTPCREL_RELOC) != 0) {
           // A GOTPCREL operand names a slot containing the symbol address, so
           // load that slot rather than materializing the slot's own address.
           fprintf(fp, "%s@GOTPCREL(%%rip), ", symname);

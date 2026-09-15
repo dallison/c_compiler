@@ -73,12 +73,7 @@ static void HandlePICRelocation(DynamicLinker* dynamic, LinkerSymbol* symbol,
       break;
  
     case R_RISCV_TLS_GD_HI20:
-      if (symbol != NULL) {
-        // This needs two GOT entries.
-        symbol->got_index = append_data_to_got(dynamic, symbol);
-        append_data_to_got(dynamic, symbol);
-        symbol->got_index--;    // Back to first entry.
-      }
+      DynamicLinkerNoteTLSGD(dynamic, symbol);
       break;
 
     case R_RISCV_CALL_PLT:
@@ -337,7 +332,9 @@ static void ApplyRelocation(Linker* linker,
       int32_t pcdiff = (int32_t)(reloc->offset - hi20_reloc->offset);
       S = symbol->address;
       
-      if (hi20_reloc->type == R_RISCV_GOT_HI20) {
+      if (hi20_reloc->type == R_RISCV_GOT_HI20 ||
+          hi20_reloc->type == R_RISCV_TLS_GD_HI20 ||
+          hi20_reloc->type == R_RISCV_TLS_GOT_HI20) {
         // Refers to Global offset table relocation.
         uint64_t got_address = linker->dynamic_linker->
             got_group->address;
@@ -385,7 +382,9 @@ static void ApplyRelocation(Linker* linker,
       SetBitField32(target_address+4, 20, 12, lo12);
       return;
     }
-    case R_RISCV_GOT_HI20: {
+    case R_RISCV_GOT_HI20:
+    case R_RISCV_TLS_GD_HI20:
+    case R_RISCV_TLS_GOT_HI20: {
       // LinkerSymbol contains a got_index that is the offset into the
       // global offset table.  The instruction will be an auipc
       // instruction that contains the offset relative to the current
@@ -498,13 +497,20 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
       // A slot for one of the GOT-based TLS models holds an offset or a
       // module id rather than an address, and some targets allocate those out
       // of this same list, so they keep the form resolved by name.
-      by_symbol = symbol->from_dynamic_library || LinkerSymbolIsTLS(symbol);
-      reloc_type = by_symbol ? R_RISCV_64 : R_RISCV_RELATIVE;
+      if (LinkerSymbolIsTLS(symbol)) {
+        by_symbol = symbol->from_dynamic_library;
+        reloc_type = R_RISCV_TLS_TPREL64;
+      } else {
+        by_symbol = symbol->from_dynamic_library;
+        reloc_type = by_symbol ? R_RISCV_64 : R_RISCV_RELATIVE;
+      }
       break;
     case kGOTRelocationTLSOffset:
+      by_symbol = symbol->from_dynamic_library;
       reloc_type = R_RISCV_TLS_DTPREL64;
       break;
     case kGOTRelocationTLSModuleId:
+      by_symbol = symbol->from_dynamic_library;
       reloc_type = R_RISCV_TLS_DTPMOD64;
       break;
   }

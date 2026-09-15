@@ -407,6 +407,10 @@ typedef struct  {
 #define R_ARM_PLT32 27
 #define R_ARM_CALL 28
 #define R_ARM_JUMP24 29
+#define R_ARM_TLS_GD32 104
+#define R_ARM_TLS_LDM32 105
+#define R_ARM_TLS_LDO32 106
+#define R_ARM_TLS_IE32 107
 #define R_ARM_TLS_LE32 108
 // ELF TLS Variant I reserves two words at the ARM thread pointer.
 #define ARM_TLS_TCB_SIZE 8

@@ -126,6 +126,32 @@ static int GetDataGOTOffset(DynamicLinker* s, LinkerSymbol* symbol) {
   return symbol->got_index;
 }
 
+void DynamicLinkerNoteTLSGD(DynamicLinker* dynamic, LinkerSymbol* symbol) {
+  if (dynamic == NULL || symbol == NULL) {
+    return;
+  }
+  Vector* entries = &dynamic->global_offset_table.tls_gd_entries;
+  for (size_t i = 0; i < entries->length; i++) {
+    if (entries->value.p[i] == symbol) {
+      return;
+    }
+  }
+  VectorAppend(entries, symbol);
+}
+
+static void AssignTLSGOTIndices(DynamicLinker* dynamic) {
+  int index = (int)dynamic->global_offset_table.data_entries.length;
+  Vector* ie = &dynamic->global_offset_table.tls_ie_entries;
+  for (size_t i = 0; i < ie->length; i++) {
+    ((LinkerSymbol*)ie->value.p[i])->got_index = index++;
+  }
+  Vector* gd = &dynamic->global_offset_table.tls_gd_entries;
+  for (size_t i = 0; i < gd->length; i++) {
+    ((LinkerSymbol*)gd->value.p[i])->got_index = index;
+    index += 2;
+  }
+}
+
 // NOTE: the function's GOT offset is relative to the end of
 // the data GOT entries.  We don't know how many data entries
 // there are yet, so the actual offset will need be calculated later.
@@ -162,6 +188,8 @@ static void BuildGlobalOffsetTableContents(struct Linker* linker,
                             ELFWriterSectionContents* got_contents,
                             ELFWriterSectionContents* got_plt_contents) {
   DynamicLinker* dynamic = linker->dynamic_linker;
+
+  AssignTLSGOTIndices(dynamic);
 
   // Add data entries.
   Vector* data_entries = &dynamic->global_offset_table.data_entries;
@@ -496,7 +524,11 @@ static void StoreAddressRelocation(Linker* linker, Buffer* contents,
     int symbol_index = reloc->symbol->dynamic_index != -1
                            ? reloc->symbol->dynamic_index
                            : reloc->symbol->index;
-    assert(symbol_index != -1);
+    if (symbol_index == -1) {
+      // TLS GOT slots for a definition in this image do not need a dynsym
+      // entry: symbol index 0 means "this object" to the loader.
+      symbol_index = 0;
+    }
     StoreDynamicRelocation(linker, contents, index, offset, symbol_index,
                            reloc->addend, reloc->type);
     return;

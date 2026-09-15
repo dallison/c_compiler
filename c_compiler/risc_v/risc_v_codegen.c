@@ -375,6 +375,8 @@ const char* RVOpcodeName(int op) {
       return "lla";
     case RV_OP(tprel):
       return "tprel";
+    case RV_OP(tlsgd):
+      return "tlsgd";
     case RV_OP(sext_w):
       return "sext.w";
 
@@ -1508,13 +1510,25 @@ static COMPILER_UNUSED TargetInstruction* LoadVariableValue(RVGenerator* rv, IRN
   return Emit(rv, NewInstruction2(opcode, addr, offset));
 }
 
+static TargetInstruction* TlsGetAddrCall(RVGenerator* rv, IRNode* node) {
+  IRVariable* variable = (IRVariable*)node;
+  TargetInstruction* symbol = GetSymbol(rv, node, variable->symbol);
+  TargetInstruction* index =
+      Emit(rv, NewInstruction1(RV_OP(tlsgd), symbol));
+  rv->not_leaf = true;
+  rv->base.num_calls++;
+  TargetInstruction* arg0 =
+      SetDestOrMove(rv, index, IntArgumentRegister(rv, 0), RV_OP(mv));
+  TargetInstruction* regarg =
+      Emit(rv, NewInstruction2(RV_OP(regarg), NULL, arg0));
+  TargetInstruction* fn = GetSymbol(rv, NULL, rv->base.__tls_get_addr);
+  return Emit(rv, NewInstruction2(RV_OP(call), fn, regarg));
+}
+
 static TargetInstruction* GetTlsVariableAddress(RVGenerator* rv,
                                                 IRNode* node) {
   if (compiler->tls_model != TLS(local_exec)) {
-    fprintf(stderr,
-            "error: RISC-V only supports the local-exec TLS model for static "
-            "executables\n");
-    abort();
+    return TlsGetAddrCall(rv, node);
   }
   IRVariable* variable = (IRVariable*)node;
   TargetInstruction* symbol = GetSymbol(rv, node, variable->symbol);

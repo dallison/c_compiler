@@ -1442,12 +1442,14 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\tmrc p15, 0, %s, c13, c0, 3\n",
               GetRegisterName(inst, kSize32Bit, buf1, sizeof(buf1)));
       return;
-    case ARM_OP(tprel): {
+    case ARM_OP(tprel):
+    case ARM_OP(tlsgd): {
       assert(inst->operand[0] != NULL &&
              inst->operand[0]->opcode == (TargetOpcode)ARM_OP(symbol));
       TargetSymbol* symbol = (TargetSymbol*)inst->operand[0];
       char symbol_buf[256];
-      fprintf(fp, "\ttprel %s, %s\n",
+      fprintf(fp, "\t%s %s, %s\n",
+              (ARMOpcode)inst->opcode == ARM_OP(tlsgd) ? "tlsgd" : "tprel",
               GetRegisterName(inst, kSize32Bit, buf1, sizeof(buf1)),
               TargetSymbolName(symbol->symbol, symbol_buf,
                                sizeof(symbol_buf)));

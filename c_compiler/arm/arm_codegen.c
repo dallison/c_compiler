@@ -61,6 +61,7 @@ const char* ARMOpcodeName(int op) {
   case ARM_OP(sp): return "sp";  // Stack pointer pseudo operation.
   case ARM_OP(tp): return "tp";  // Thread pointer pseudo operation.
   case ARM_OP(tprel): return "tprel";
+  case ARM_OP(tlsgd): return "tlsgd";
 
   // Function result registers.
   case ARM_OP(resulti): return "resulti";
@@ -1631,13 +1632,26 @@ static TargetInstruction* MoveImmediate(ARMGenerator* g, TargetInstruction* src,
 // Materialize a value into a register.  This loads a constant into a register
 // or returns the instruction associated with the node if it's
 // already in a register.
+static TargetInstruction* TlsGetAddrCall(ARMGenerator* g, IRNode* node) {
+  IRVariable* variable = (IRVariable*)node;
+  TargetInstruction* symbol = GetSymbol(g, node, variable->symbol);
+  TargetInstruction* index =
+      Emit(g, SetInstructionSize(NewInstruction1(ARM_OP(tlsgd), symbol),
+                                 kSize32Bit));
+  g->not_leaf = true;
+  g->base.num_calls++;
+  TargetInstruction* arg0 =
+      SetDestOrMove(g, index, IntArgumentRegister(g, 0), ARM_OP(mov));
+  TargetInstruction* regarg =
+      Emit(g, NewInstruction2(ARM_OP(regarg), NULL, arg0));
+  TargetInstruction* fn = GetSymbol(g, NULL, g->base.__tls_get_addr);
+  return Emit(g, NewInstruction2(ARM_OP(bl), fn, regarg));
+}
+
 static TargetInstruction* GetTlsVariableAddress(ARMGenerator* g,
                                                 IRNode* node) {
   if (compiler->tls_model != TLS(local_exec)) {
-    fprintf(stderr,
-            "error: ARM only supports the local-exec TLS model for static "
-            "executables\n");
-    abort();
+    return TlsGetAddrCall(g, node);
   }
   IRVariable* variable = (IRVariable*)node;
   TargetInstruction* symbol = GetSymbol(g, node, variable->symbol);

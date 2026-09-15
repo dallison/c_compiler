@@ -488,6 +488,10 @@ static bool ParseMemory(X86_64Assembler* assembler, X86Op* op) {
       op->reloc_type = R_X86_64_TPOFF32;
     } else if (StringEqual(&suffix, "GOTPCREL")) {
       op->reloc_type = R_X86_64_GOTPCREL;
+    } else if (StringEqual(&suffix, "TLSGD")) {
+      op->reloc_type = R_X86_64_TLSGD;
+    } else if (StringEqual(&suffix, "GOTTPOFF")) {
+      op->reloc_type = R_X86_64_GOTTPOFF;
     } else if (suffix.length > 0) {
       AssemblerError(&ASM, "Unsupported symbol suffix '@%s'", suffix.value);
       StringDestruct(&symbol_name);

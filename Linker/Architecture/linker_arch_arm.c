@@ -166,9 +166,14 @@ static void HandlePICRelocation(
   switch (reloc->type) {
     case R_ARM_GOT_BREL:
     case R_ARM_GOT_PREL:
+    case R_ARM_TLS_IE32:
       if (symbol != NULL) {
         symbol->got_index = append_data_to_got(dynamic, symbol);
       }
+      break;
+
+    case R_ARM_TLS_GD32:
+      DynamicLinkerNoteTLSGD(dynamic, symbol);
       break;
 
     case R_ARM_PLT32:
@@ -295,7 +300,9 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       return;
     }
 
-    case R_ARM_GOT_PREL: {
+    case R_ARM_GOT_PREL:
+    case R_ARM_TLS_GD32:
+    case R_ARM_TLS_IE32: {
       uint64_t got_entry = GOTEntryAddress(linker, symbol);
       *(int32_t*)target_address =
           (int32_t)((int64_t)got_entry + A - (int64_t)P);
@@ -379,8 +386,12 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
       reloc_type = by_symbol ? R_ARM_GLOB_DAT : R_ARM_RELATIVE;
       break;
     case kGOTRelocationTLSOffset:
+      by_symbol = symbol->from_dynamic_library;
+      reloc_type = R_ARM_TLS_DTPREL32;
+      break;
     case kGOTRelocationTLSModuleId:
-      reloc_type = R_ARM_ABS32;
+      by_symbol = symbol->from_dynamic_library;
+      reloc_type = R_ARM_TLS_DTPMOD32;
       break;
   }
   int64_t offset = contents->data.buffered.length;

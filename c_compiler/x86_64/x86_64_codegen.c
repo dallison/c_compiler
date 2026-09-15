@@ -1350,13 +1350,28 @@ static TargetInstruction* ThreadPointer(X86_64Generator* rv) {
   return Emit(rv, NewInstruction(X86_64_OP(tp)));
 }
 
+static TargetInstruction* TlsGetAddrCall(X86_64Generator* rv, IRNode* node) {
+  IRVariable* variable = (IRVariable*)node;
+  TargetInstruction* symbol = GetSymbol(rv, node, variable->symbol);
+  TargetInstruction* index =
+      Emit(rv, NewInstruction1(X86_64_OP(lea_rip), symbol));
+  index->flags |= X86_64_TLSGD_RELOC;
+  rv->not_leaf = true;
+  rv->base.num_calls++;
+  TargetInstruction* arg0 = SetDestOrMoveToArgReg(
+      rv, NULL, index, IntArgumentRegister(rv, 0), X86_64_OP(mv));
+  TargetInstruction* regarg =
+      Emit(rv, NewInstruction2(X86_64_OP(regarg), NULL, arg0));
+  TargetInstruction* fn = GetSymbol(rv, NULL, rv->base.__tls_get_addr);
+  return Emit(rv, NewInstruction2(X86_64_OP(call), fn, regarg));
+}
+
 static TargetInstruction* GetTlsVariableAddress(X86_64Generator* rv, IRNode* node) {
   switch (compiler->tls_model) {
     case TLS(global_dynamic):
     case TLS(local_dynamic):
     case TLS(initial_exec):
-      DiagnoseUnsupportedTlsModel(rv, TlsModelName(compiler->tls_model));
-      return NULL;
+      return TlsGetAddrCall(rv, node);
     case TLS(local_exec): {
       TargetInstruction* tp = ThreadPointer(rv);
       TargetInstruction* offset =
@@ -1377,7 +1392,8 @@ static void GetTlsAddressAndOffset(X86_64Generator* rv, IRNode* addr_node,
     case TLS(global_dynamic):
     case TLS(local_dynamic):
     case TLS(initial_exec):
-      DiagnoseUnsupportedTlsModel(rv, TlsModelName(compiler->tls_model));
+      *addr = TlsGetAddrCall(rv, addr_node);
+      *offset = GetIntConstant(rv, NULL, kTargetType64Bit, 0);
       break;
     case TLS(local_exec): {
       TargetInstruction* tp_offset =

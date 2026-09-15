@@ -154,6 +154,7 @@ typedef enum {
   // specifications.
 
   ARM_OP(tprel),  // Materialize a local-exec TLS offset.
+  ARM_OP(tlsgd),  // Materialize the global-dynamic TLS index GOT address.
 
   // Atomic operations expanded by the emitter after register allocation.
   ARM_OP(atomic_load),

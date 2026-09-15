@@ -1150,11 +1150,13 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\t%-12s%s\n", "call", SymbolName(sym, buf3, sizeof(buf3)));
       return;
     }
-    case RV_OP(tprel): {
+    case RV_OP(tprel):
+    case RV_OP(tlsgd): {
       assert(inst->operand[0] != NULL &&
              inst->operand[0]->opcode == (TargetOpcode)RV_OP(symbol));
       TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
-      fprintf(fp, "\t%-12s%s, %s\n", "tprel",
+      fprintf(fp, "\t%-12s%s, %s\n",
+              (RVOpcode)inst->opcode == RV_OP(tlsgd) ? "tlsgd" : "tprel",
               GetRegisterName(inst, buf1, sizeof(buf1)),
               SymbolName(sym, buf3, sizeof(buf3)));
       return;

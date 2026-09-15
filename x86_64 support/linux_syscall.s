@@ -14,3 +14,12 @@ __davecc_linux_syscall6:
 	mov %r11, %r9
 	syscall
 	ret
+
+.global __tls_get_addr
+.type __tls_get_addr, @function
+
+__tls_get_addr:
+	movq %fs:0, %rax
+	addq $8, %rax
+	addq 8(%rdi), %rax
+	ret

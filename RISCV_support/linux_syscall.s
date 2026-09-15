@@ -13,3 +13,12 @@ __davecc_linux_syscall6:
 	mv a5, a6
 	ecall
 	ret
+
+.global __tls_get_addr
+.type __tls_get_addr, @function
+
+__tls_get_addr:
+	ld a1, 8(a0)
+	addi a0, x4, 16
+	add a0, a0, a1
+	ret

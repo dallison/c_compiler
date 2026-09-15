@@ -277,6 +277,7 @@ typedef enum {
   RV_OP(la),      // Load address.
   RV_OP(lla),     // Load local address.
   RV_OP(tprel),   // Load local-exec TLS address relative to tp.
+  RV_OP(tlsgd),   // Materialize the global-dynamic TLS index GOT address.
   RV_OP(sext_w),  // Sign extend word.
 
   // Integer argument registers.

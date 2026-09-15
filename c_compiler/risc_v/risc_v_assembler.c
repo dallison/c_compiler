@@ -214,6 +214,7 @@ DECLARE_INST_FUNC(li);
 DECLARE_INST_FUNC(la);
 DECLARE_INST_FUNC(lla);
 DECLARE_INST_FUNC(tprel);
+DECLARE_INST_FUNC(tlsgd);
 DECLARE_INST_FUNC(sext_w);
 DECLARE_INST_FUNC(seqz);
 DECLARE_INST_FUNC(snez);
@@ -436,6 +437,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(la);
   INST(lla);
   INST(tprel);
+  INST(tlsgd);
   INST2(sext_w, sext.w);
   INST(seqz);
   INST(snez);
@@ -2019,6 +2021,46 @@ static void Assemble_tprel(RVAssembler* assembler) {
       &ASM, NewAssemblerRelocation(sym, R_RISCV_TPREL_LO12_I,
                                    ASMO.current_section,
                                    (int32_t)AssemblerCurrentAddress(&ASM), 0));
+  AssemblerEmitWord(
+      &ASM, ASMO.current_section,
+      ITypeInstruction(RV_OPCODE(op_imm), rd, rd, RV_F3(addi), 0));
+  StringDestruct(&symbol_name);
+}
+
+static void Assemble_tlsgd(RVAssembler* assembler) {
+  int rd = Register(assembler, kRVRegTypeInt, "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected TLS symbol name");
+    return;
+  }
+  String symbol_name;
+  StringInit(&symbol_name, ASM.lex.spelling.value);
+  LexNextToken(&ASM.lex);
+  AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name.value);
+
+  char label_name[256];
+  snprintf(label_name, sizeof(label_name), ".tlsgd_label_%" PRId64 "",
+           AssemblerCurrentAddress(&ASM));
+  AssemblerSymbol* label = GetOrCreateSymbol(assembler, label_name);
+  label->value = AssemblerCurrentAddress(&ASM);
+  label->exported = true;
+  label->defined = true;
+
+  AssemblerAddRelocation(
+      &ASM, NewAssemblerRelocation(sym, R_RISCV_TLS_GD_HI20,
+                                   ASMO.current_section,
+                                   (int32_t)AssemblerCurrentAddress(&ASM), 0));
+  AssemblerEmitWord(&ASM, ASMO.current_section,
+                    UTypeInstruction(RV_OPCODE(auipc), rd, 0));
+
+  AssemblerRelocation* lo_reloc = NewAssemblerRelocation(
+      label, R_RISCV_PCREL_LO12_I, ASMO.current_section,
+      (int32_t)AssemblerCurrentAddress(&ASM), 0);
+  AssemblerAddRelocation(&ASM, lo_reloc);
   AssemblerEmitWord(
       &ASM, ASMO.current_section,
       ITypeInstruction(RV_OPCODE(op_imm), rd, rd, RV_F3(addi), 0));
