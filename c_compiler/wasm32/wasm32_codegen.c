@@ -2503,6 +2503,35 @@ static TargetInstruction* LowerIRNode(Wasm32Generator* wasm, IRNode* node) {
     case IR_OP(loc):
       return LowerLocation(wasm, node);
 
+    case IR_OP(vadd):
+    case IR_OP(vsub):
+    case IR_OP(vmul):
+    case IR_OP(vdiv):
+    case IR_OP(vmod):
+    case IR_OP(vlsl):
+    case IR_OP(vlsr):
+    case IR_OP(vasr):
+    case IR_OP(vand):
+    case IR_OP(vor):
+    case IR_OP(vxor):
+    case IR_OP(vneg):
+    case IR_OP(vonescomp):
+    case IR_OP(vcmpeq):
+    case IR_OP(vcmpne):
+    case IR_OP(vcmplt):
+    case IR_OP(vcmple):
+    case IR_OP(vcmpgt):
+    case IR_OP(vcmpge):
+    case IR_OP(vcmpltu):
+    case IR_OP(vcmpleu):
+    case IR_OP(vcmpgtu):
+    case IR_OP(vcmpgeu):
+    case IR_OP(vectorarg):
+    case IR_OP(resultv):
+    case IR_OP(capturev):
+      Fail(wasm, "vector operation must be software-expanded before wasm32 lowering");
+      return NULL;
+
     default:
       Fail(wasm, IROpcodeName(node->opcode));
       return NULL;

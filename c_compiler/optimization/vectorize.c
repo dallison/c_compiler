@@ -303,9 +303,16 @@ static bool AnalyzeCountedLoop(Generator* gen, LoopInfo* loop,
   return true;
 }
 
-static bool TargetKeepsNativeVectors(void) {
-  return StringEqual(compiler->target_name, "x86_64") ||
-         StringEqual(compiler->target_name, "aarch64");
+// 8-bit targets have no SIMD and a 16-byte vector expands into too much code.
+// Every other backend either keeps native SIMD (x86-64, AArch64) or software-
+// expands the vector IR in ScalarizeVectorOperations before lowering.
+static bool TargetSupportsAutoVectorization(void) {
+  if (compiler->target_name == NULL) {
+    return false;
+  }
+  return !StringEqual(compiler->target_name, "6502") &&
+         !StringEqual(compiler->target_name, "65c02") &&
+         !StringEqual(compiler->target_name, "65C02");
 }
 
 static int MemoryWidth(IRNode* inst) {
@@ -1449,7 +1456,7 @@ static void SLPVectorize(Generator* gen) {
 }
 
 void AutoVectorizeOptimization(Generator* gen) {
-  if (!OptLevel2() || !TargetKeepsNativeVectors()) {
+  if (!OptLevel2() || !TargetSupportsAutoVectorization()) {
     return;
   }
 

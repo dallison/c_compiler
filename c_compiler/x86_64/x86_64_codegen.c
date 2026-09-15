@@ -4880,6 +4880,22 @@ static TargetInstruction* LowerIRNode(X86_64Generator* rv, Generator* gen,
     case IR_OP(vcmpgt):
       return LowerVectorOperation(rv, node);
 
+    case IR_OP(vmod):
+    case IR_OP(vlsl):
+    case IR_OP(vlsr):
+    case IR_OP(vasr):
+    case IR_OP(vneg):
+    case IR_OP(vonescomp):
+    case IR_OP(vcmpne):
+    case IR_OP(vcmple):
+    case IR_OP(vcmpge):
+    case IR_OP(vcmpltu):
+    case IR_OP(vcmpleu):
+    case IR_OP(vcmpgtu):
+    case IR_OP(vcmpgeu):
+      assert(false && "vector operation must be software-expanded before x86-64 lowering");
+      return NULL;
+
     case IR_OP(memzero):
       return LowerMemzero(rv, node);
 

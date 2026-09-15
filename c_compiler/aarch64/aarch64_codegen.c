@@ -5075,7 +5075,9 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
     case IR_OP(vneg):
     case IR_OP(vonescomp):
     case IR_OP(vcmpne):
-      break;
+      assert(false && "vector operation must be software-expanded before AArch64 lowering");
+      COMPILER_UNREACHABLE();
+      return NULL;
 
     case IR_OP(memzero):
       return LowerMemzero(g, node);

@@ -4269,6 +4269,35 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
       assert(false && "bit operation must be software-expanded before RISC-V lowering");
       return NULL;
 
+    case IR_OP(vadd):
+    case IR_OP(vsub):
+    case IR_OP(vmul):
+    case IR_OP(vdiv):
+    case IR_OP(vmod):
+    case IR_OP(vlsl):
+    case IR_OP(vlsr):
+    case IR_OP(vasr):
+    case IR_OP(vand):
+    case IR_OP(vor):
+    case IR_OP(vxor):
+    case IR_OP(vneg):
+    case IR_OP(vonescomp):
+    case IR_OP(vcmpeq):
+    case IR_OP(vcmpne):
+    case IR_OP(vcmplt):
+    case IR_OP(vcmple):
+    case IR_OP(vcmpgt):
+    case IR_OP(vcmpge):
+    case IR_OP(vcmpltu):
+    case IR_OP(vcmpleu):
+    case IR_OP(vcmpgtu):
+    case IR_OP(vcmpgeu):
+    case IR_OP(vectorarg):
+    case IR_OP(resultv):
+    case IR_OP(capturev):
+      assert(false && "vector operation must be software-expanded before RISC-V lowering");
+      return NULL;
+
     case IR_OP(localvar):
     case IR_OP(argument):
     case IR_OP(tempvar):
