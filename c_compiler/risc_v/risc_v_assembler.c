@@ -8,6 +8,7 @@
 
 #include "risc_v_assembler.h"
 #include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -203,6 +204,41 @@ DECLARE_INST_FUNC(fmv_x_d);
 DECLARE_INST_FUNC(fcvt_d_l);
 DECLARE_INST_FUNC(fcvt_d_lu);
 DECLARE_INST_FUNC(fmv_d_x);
+
+DECLARE_INST_FUNC(vsetivli);
+DECLARE_INST_FUNC(vle8_v);
+DECLARE_INST_FUNC(vle16_v);
+DECLARE_INST_FUNC(vle32_v);
+DECLARE_INST_FUNC(vle64_v);
+DECLARE_INST_FUNC(vse8_v);
+DECLARE_INST_FUNC(vse16_v);
+DECLARE_INST_FUNC(vse32_v);
+DECLARE_INST_FUNC(vse64_v);
+DECLARE_INST_FUNC(vadd_vv);
+DECLARE_INST_FUNC(vsub_vv);
+DECLARE_INST_FUNC(vmul_vv);
+DECLARE_INST_FUNC(vdiv_vv);
+DECLARE_INST_FUNC(vdivu_vv);
+DECLARE_INST_FUNC(vrem_vv);
+DECLARE_INST_FUNC(vremu_vv);
+DECLARE_INST_FUNC(vsll_vv);
+DECLARE_INST_FUNC(vsrl_vv);
+DECLARE_INST_FUNC(vsra_vv);
+DECLARE_INST_FUNC(vand_vv);
+DECLARE_INST_FUNC(vor_vv);
+DECLARE_INST_FUNC(vxor_vv);
+DECLARE_INST_FUNC(vfadd_vv);
+DECLARE_INST_FUNC(vfsub_vv);
+DECLARE_INST_FUNC(vfmul_vv);
+DECLARE_INST_FUNC(vfdiv_vv);
+DECLARE_INST_FUNC(vmseq_vv);
+DECLARE_INST_FUNC(vmsne_vv);
+DECLARE_INST_FUNC(vmslt_vv);
+DECLARE_INST_FUNC(vmsle_vv);
+DECLARE_INST_FUNC(vmsltu_vv);
+DECLARE_INST_FUNC(vmsleu_vv);
+DECLARE_INST_FUNC(vmv_v_i);
+DECLARE_INST_FUNC(vmerge_vim);
 
 // Pseudo ops
 DECLARE_INST_FUNC(nop);
@@ -427,6 +463,41 @@ static void InitializeInstructions(Map* instructions) {
   INST2(fcvt_d_lu, fcvt.d.lu);
   INST2(fmv_d_x, fmv.d.x);
 
+  INST(vsetivli);
+  INST2(vle8_v, vle8.v);
+  INST2(vle16_v, vle16.v);
+  INST2(vle32_v, vle32.v);
+  INST2(vle64_v, vle64.v);
+  INST2(vse8_v, vse8.v);
+  INST2(vse16_v, vse16.v);
+  INST2(vse32_v, vse32.v);
+  INST2(vse64_v, vse64.v);
+  INST2(vadd_vv, vadd.vv);
+  INST2(vsub_vv, vsub.vv);
+  INST2(vmul_vv, vmul.vv);
+  INST2(vdiv_vv, vdiv.vv);
+  INST2(vdivu_vv, vdivu.vv);
+  INST2(vrem_vv, vrem.vv);
+  INST2(vremu_vv, vremu.vv);
+  INST2(vsll_vv, vsll.vv);
+  INST2(vsrl_vv, vsrl.vv);
+  INST2(vsra_vv, vsra.vv);
+  INST2(vand_vv, vand.vv);
+  INST2(vor_vv, vor.vv);
+  INST2(vxor_vv, vxor.vv);
+  INST2(vfadd_vv, vfadd.vv);
+  INST2(vfsub_vv, vfsub.vv);
+  INST2(vfmul_vv, vfmul.vv);
+  INST2(vfdiv_vv, vfdiv.vv);
+  INST2(vmseq_vv, vmseq.vv);
+  INST2(vmsne_vv, vmsne.vv);
+  INST2(vmslt_vv, vmslt.vv);
+  INST2(vmsle_vv, vmsle.vv);
+  INST2(vmsltu_vv, vmsltu.vv);
+  INST2(vmsleu_vv, vmsleu.vv);
+  INST2(vmv_v_i, vmv.v.i);
+  INST2(vmerge_vim, vmerge.vim);
+
   // Pseudo ops
   INST(nop);
   INST(not);
@@ -548,6 +619,7 @@ static struct PrefixedReg {
     {"ft", 2, 0, RV_FP_TEMP_START_1, RV_FP_TEMP_END_1, kRVRegTypeFloat},
     {"ft", 2, 2, RV_FP_TEMP_START_2, RV_FP_TEMP_END_2, kRVRegTypeFloat},
     {"f", 1, 0, 0, RV_NUM_FLOAT_REGS, kRVRegTypeFloat},
+    {"v", 1, 0, 0, RV_NUM_VECTOR_REGS, kRVRegTypeVector},
     {NULL, 0, 0, 0, 0, 0}};
 
 static int ExtractRegNumber(String* reg_name, size_t i) {
@@ -632,7 +704,12 @@ static int Register(RVAssembler* assembler, RVRegisterType type_needed,
   }
 
   if (type != type_needed) {
-    const char* reg_type = type == kRVRegTypeInt ? "integer" : "float";
+    const char* reg_type = "integer";
+    if (type == kRVRegTypeFloat) {
+      reg_type = "float";
+    } else if (type == kRVRegTypeVector) {
+      reg_type = "vector";
+    }
     AssemblerError(&ASM, "Invalid register type; got %s expected %s", reg_type,
                    type_name);
     return 0;
@@ -2144,6 +2221,175 @@ static void AssembleConditionalBranchZero(RVAssembler* assembler, int funct3) {
 
 ASSEMBLE_CONDITIONAL_BRANCH_ZERO(beqz);
 ASSEMBLE_CONDITIONAL_BRANCH_ZERO(bnez);
+
+// OP-V funct3 values.
+#define RV_V_OPIVV 0
+#define RV_V_OPFVV 1
+#define RV_V_OPMVV 2
+#define RV_V_OPIVI 3
+
+static void AssembleVectorVV(RVAssembler* assembler, int funct3, int funct6) {
+  int regs[3];
+  if (!ParseRegisterTriple(assembler, kRVRegTypeVector, "vector", regs)) {
+    return;
+  }
+  // Assembly is vd, vs2, vs1; encoding is rd=vd, rs1=vs1, rs2=vs2.
+  int encoded[3] = {regs[0], regs[2], regs[1]};
+  AssembleALUReg(assembler, RV_OPCODE(op_v), funct3, (funct6 << 1) | 1,
+                 encoded);
+}
+
+#define ASSEMBLE_VECTOR_VV(name, funct3, funct6)                 \
+  static void Assemble_##name(RVAssembler* assembler) {          \
+    AssembleVectorVV(assembler, funct3, funct6);                 \
+  }
+
+ASSEMBLE_VECTOR_VV(vadd_vv, RV_V_OPIVV, 0x00)
+ASSEMBLE_VECTOR_VV(vsub_vv, RV_V_OPIVV, 0x02)
+ASSEMBLE_VECTOR_VV(vand_vv, RV_V_OPIVV, 0x09)
+ASSEMBLE_VECTOR_VV(vor_vv, RV_V_OPIVV, 0x0a)
+ASSEMBLE_VECTOR_VV(vxor_vv, RV_V_OPIVV, 0x0b)
+ASSEMBLE_VECTOR_VV(vsll_vv, RV_V_OPIVV, 0x25)
+ASSEMBLE_VECTOR_VV(vsrl_vv, RV_V_OPIVV, 0x28)
+ASSEMBLE_VECTOR_VV(vsra_vv, RV_V_OPIVV, 0x29)
+ASSEMBLE_VECTOR_VV(vmseq_vv, RV_V_OPIVV, 0x18)
+ASSEMBLE_VECTOR_VV(vmsne_vv, RV_V_OPIVV, 0x19)
+ASSEMBLE_VECTOR_VV(vmsltu_vv, RV_V_OPIVV, 0x1a)
+ASSEMBLE_VECTOR_VV(vmslt_vv, RV_V_OPIVV, 0x1b)
+ASSEMBLE_VECTOR_VV(vmsleu_vv, RV_V_OPIVV, 0x1c)
+ASSEMBLE_VECTOR_VV(vmsle_vv, RV_V_OPIVV, 0x1d)
+ASSEMBLE_VECTOR_VV(vmul_vv, RV_V_OPMVV, 0x25)
+ASSEMBLE_VECTOR_VV(vdivu_vv, RV_V_OPMVV, 0x20)
+ASSEMBLE_VECTOR_VV(vdiv_vv, RV_V_OPMVV, 0x21)
+ASSEMBLE_VECTOR_VV(vremu_vv, RV_V_OPMVV, 0x22)
+ASSEMBLE_VECTOR_VV(vrem_vv, RV_V_OPMVV, 0x23)
+ASSEMBLE_VECTOR_VV(vfadd_vv, RV_V_OPFVV, 0x00)
+ASSEMBLE_VECTOR_VV(vfsub_vv, RV_V_OPFVV, 0x02)
+ASSEMBLE_VECTOR_VV(vfmul_vv, RV_V_OPFVV, 0x24)
+ASSEMBLE_VECTOR_VV(vfdiv_vv, RV_V_OPFVV, 0x20)
+
+#undef ASSEMBLE_VECTOR_VV
+
+static void AssembleVectorLoadStore(RVAssembler* assembler, bool is_load,
+                                    int width) {
+  int vd_or_vs3 = Register(assembler, kRVRegTypeVector, "vector");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (!LexMatch(&ASM.lex, TOK(lparen))) {
+    AssemblerError(&ASM, "Expected (rs1)");
+    return;
+  }
+  int rs1 = Register(assembler, kRVRegTypeInt, "integer");
+  if (!LexMatch(&ASM.lex, TOK(rparen))) {
+    AssemblerError(&ASM, "Missing close paren");
+    return;
+  }
+  // Unit-stride, unmasked (vm=1), lumop/sumop=0, mew=0, nf=0.
+  uint32_t inst = (1u << 25) | ((uint32_t)rs1 << 15) |
+                  ((uint32_t)width << 12) | ((uint32_t)vd_or_vs3 << 7) |
+                  (is_load ? RV_OPCODE(load_fp) : RV_OPCODE(store_fp));
+  AssemblerEmitWord(&ASM, ASMO.current_section, (int32_t)inst);
+}
+
+#define ASSEMBLE_VLE(name, width)                                 \
+  static void Assemble_##name(RVAssembler* assembler) {           \
+    AssembleVectorLoadStore(assembler, true, width);              \
+  }
+#define ASSEMBLE_VSE(name, width)                                 \
+  static void Assemble_##name(RVAssembler* assembler) {           \
+    AssembleVectorLoadStore(assembler, false, width);             \
+  }
+
+ASSEMBLE_VLE(vle8_v, 0)
+ASSEMBLE_VLE(vle16_v, 5)
+ASSEMBLE_VLE(vle32_v, 6)
+ASSEMBLE_VLE(vle64_v, 7)
+ASSEMBLE_VSE(vse8_v, 0)
+ASSEMBLE_VSE(vse16_v, 5)
+ASSEMBLE_VSE(vse32_v, 6)
+ASSEMBLE_VSE(vse64_v, 7)
+
+#undef ASSEMBLE_VLE
+#undef ASSEMBLE_VSE
+
+static void Assemble_vsetivli(RVAssembler* assembler) {
+  int rd = Register(assembler, kRVRegTypeInt, "integer");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  int avl = (int)AssemblerEvaluateExpression(&ASM);
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected SEW (e8, e16, e32, e64)");
+    return;
+  }
+  int sew = -1;
+  if (strcmp(ASM.lex.spelling.value, "e8") == 0) {
+    sew = 0;
+  } else if (strcmp(ASM.lex.spelling.value, "e16") == 0) {
+    sew = 1;
+  } else if (strcmp(ASM.lex.spelling.value, "e32") == 0) {
+    sew = 2;
+  } else if (strcmp(ASM.lex.spelling.value, "e64") == 0) {
+    sew = 3;
+  } else {
+    AssemblerError(&ASM, "Invalid SEW: %s", ASM.lex.spelling.value);
+    return;
+  }
+  LexNextToken(&ASM.lex);
+  // Optional , m1, ta, ma — ignored; we always encode m1, ta, ma.
+  while (LexMatch(&ASM.lex, TOK(comma))) {
+    if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+      LexNextToken(&ASM.lex);
+    } else {
+      break;
+    }
+  }
+  int vtype = 0xc0 | (sew << 3);  // vma=1, vta=1, vlmul=m1
+  uint32_t inst = (1u << 31) | ((uint32_t)(vtype & 0x7ff) << 20) |
+                  ((uint32_t)(avl & 0x1f) << 15) | (7u << 12) |
+                  ((uint32_t)rd << 7) | RV_OPCODE(op_v);
+  AssemblerEmitWord(&ASM, ASMO.current_section, (int32_t)inst);
+}
+
+static void Assemble_vmv_v_i(RVAssembler* assembler) {
+  int vd = Register(assembler, kRVRegTypeVector, "vector");
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  int imm = (int)AssemblerEvaluateExpression(&ASM);
+  // OPIVI vmv.v.i: funct6=010111, vm=1, vs2=0, simm5 in vs1.
+  int regs[3] = {vd, imm & 0x1f, 0};
+  AssembleALUReg(assembler, RV_OPCODE(op_v), RV_V_OPIVI, (0x17 << 1) | 1, regs);
+}
+
+static void Assemble_vmerge_vim(RVAssembler* assembler) {
+  int regs[2];
+  if (!ParseRegisterPair(assembler, kRVRegTypeVector, "vector", regs)) {
+    return;
+  }
+  if (!LexMatch(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "Missing comma");
+    return;
+  }
+  int imm = (int)AssemblerEvaluateExpression(&ASM);
+  // OPIVI vmerge.vim: funct6=010111, vm=0, vs2=regs[1], simm5 in vs1.
+  int encoded[3] = {regs[0], imm & 0x1f, regs[1]};
+  AssembleALUReg(assembler, RV_OPCODE(op_v), RV_V_OPIVI, (0x17 << 1) | 0,
+                 encoded);
+}
+
+#undef RV_V_OPIVV
+#undef RV_V_OPFVV
+#undef RV_V_OPMVV
+#undef RV_V_OPIVI
 
 UNDEFINED_INST(rcall);
 UNDEFINED_INST(callf);

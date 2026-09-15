@@ -10,6 +10,7 @@
 #define risc_v_interpreter_h
 
 #include <setjmp.h>
+#include <stdint.h>
 
 #include "loader.h"
 #include "risc_v_machine.h"
@@ -132,9 +133,12 @@ struct RISCVGuestThread;
 typedef struct RISCVInterpreter {
   Loader* loader;
   int64_t iregs[RV_NUM_INT_REGS];
-  double fregs[RV_NUM_FLOAT_REGS];;
+  double fregs[RV_NUM_FLOAT_REGS];
+  uint8_t vregs[RV_NUM_VECTOR_REGS][RV_VLEN_BYTES];
+  int vl;
+  int sew_bytes;
   int64_t old_iregs[RV_NUM_INT_REGS];
-  double old_fregs[RV_NUM_FLOAT_REGS];;
+  double old_fregs[RV_NUM_FLOAT_REGS];
 
   int32_t startup_code[3];
   int32_t call_return_code[2];

@@ -14,6 +14,7 @@
 #include "compiler.h"
 #include "debug.h"
 #include "member_pointer.h"
+#include "type_compare.h"
 
 #include "risc_v_optimize.h"
 #include "target_basic_block.h"
@@ -331,6 +332,57 @@ const char* RVOpcodeName(int op) {
     case RV_OP(fmv_d_x):
       return "fmv.d.x";
 
+    case RV_OP(vle):
+      return "vle.v";
+    case RV_OP(vse):
+      return "vse.v";
+    case RV_OP(vadd):
+      return "vadd.vv";
+    case RV_OP(vsub):
+      return "vsub.vv";
+    case RV_OP(vmul):
+      return "vmul.vv";
+    case RV_OP(vdiv):
+      return "vdiv.vv";
+    case RV_OP(vdivu):
+      return "vdivu.vv";
+    case RV_OP(vmod):
+      return "vrem.vv";
+    case RV_OP(vmodu):
+      return "vremu.vv";
+    case RV_OP(vlsl):
+      return "vsll.vv";
+    case RV_OP(vlsr):
+      return "vsrl.vv";
+    case RV_OP(vasr):
+      return "vsra.vv";
+    case RV_OP(vand):
+      return "vand.vv";
+    case RV_OP(vor):
+      return "vor.vv";
+    case RV_OP(vxor):
+      return "vxor.vv";
+    case RV_OP(vfadd):
+      return "vfadd.vv";
+    case RV_OP(vfsub):
+      return "vfsub.vv";
+    case RV_OP(vfmul):
+      return "vfmul.vv";
+    case RV_OP(vfdiv):
+      return "vfdiv.vv";
+    case RV_OP(vcmeq):
+      return "vmseq.vv";
+    case RV_OP(vcmne):
+      return "vmsne.vv";
+    case RV_OP(vcmlt):
+      return "vmslt.vv";
+    case RV_OP(vcmle):
+      return "vmsle.vv";
+    case RV_OP(vcmltu):
+      return "vmsltu.vv";
+    case RV_OP(vcmleu):
+      return "vmsleu.vv";
+
     case RV_OP(nop):
       return "nop";
     case RV_OP(not):
@@ -489,6 +541,7 @@ bool RVIsExpression(TargetInstruction* inst) {
     case RV_OP(sd):
     case RV_OP(fsw):
     case RV_OP(fsd):
+    case RV_OP(vse):
     case RV_OP(loc):
     case RV_OP(named_label):
     case RV_OP(regarg):
@@ -530,6 +583,7 @@ bool RVIsLoad(TargetInstruction* inst) {
     case RV_OP(lhu):
     case RV_OP(flw):
     case RV_OP(fld):
+    case RV_OP(vle):
       return true;
     default:
       return false;
@@ -556,6 +610,7 @@ bool RVIsStore(TargetInstruction* inst) {
     case RV_OP(lh):
     case RV_OP(fsw):
     case RV_OP(fsd):
+    case RV_OP(vse):
       return true;
     default:
       return false;
@@ -4254,6 +4309,140 @@ static TargetInstruction* LowerAtomic(RVGenerator* rv, IRNode* node) {
   }
 }
 
+static TargetInstruction* SetSimdArrangement(TargetInstruction* inst,
+                                             int vector_bytes, int elem_bytes) {
+  int elem_log = 0;
+  if (elem_bytes == 2) {
+    elem_log = 1;
+  } else if (elem_bytes == 4) {
+    elem_log = 2;
+  } else if (elem_bytes == 8) {
+    elem_log = 3;
+  }
+  inst->flags = (inst->flags & ~(RV_SIMD_ELEM_MASK | RV_SIMD_128)) |
+                (elem_log << RV_SIMD_ELEM_SHIFT) |
+                (vector_bytes == 16 ? RV_SIMD_128 : 0);
+  return inst;
+}
+
+static TargetInstruction* LowerVectorOperation(RVGenerator* rv, IRNode* node) {
+  assert(node->inputs.length == 3);
+  TypeRecord* vector_type = (TypeRecord*)node->aux;
+  if (!TypeIsVector(vector_type)) {
+    vector_type = ((IRNode*)node->inputs.value.p[0])->type;
+    if (TypeIsPointer(vector_type)) {
+      vector_type = vector_type->next;
+    }
+  }
+  assert(TypeIsVector(vector_type));
+  TypeRecord* element = TypeVectorElement(vector_type);
+  assert(element != NULL);
+  bool is_float = TypeUsesFloat32Representation(element) ||
+                  TypeUsesFloat64Representation(element);
+  bool is_unsigned = TypeIsUnsigned(element);
+
+  RVOpcode opcode;
+  bool swap_operands = false;
+  switch (node->opcode) {
+    case IR_OP(vadd):
+      opcode = is_float ? RV_OP(vfadd) : RV_OP(vadd);
+      break;
+    case IR_OP(vsub):
+      opcode = is_float ? RV_OP(vfsub) : RV_OP(vsub);
+      break;
+    case IR_OP(vmul):
+      opcode = is_float ? RV_OP(vfmul) : RV_OP(vmul);
+      break;
+    case IR_OP(vdiv):
+      opcode = is_float ? RV_OP(vfdiv)
+                        : (is_unsigned ? RV_OP(vdivu) : RV_OP(vdiv));
+      break;
+    case IR_OP(vmod):
+      opcode = is_unsigned ? RV_OP(vmodu) : RV_OP(vmod);
+      break;
+    case IR_OP(vlsl):
+      opcode = RV_OP(vlsl);
+      break;
+    case IR_OP(vlsr):
+      opcode = RV_OP(vlsr);
+      break;
+    case IR_OP(vasr):
+      opcode = RV_OP(vasr);
+      break;
+    case IR_OP(vand):
+      opcode = RV_OP(vand);
+      break;
+    case IR_OP(vor):
+      opcode = RV_OP(vor);
+      break;
+    case IR_OP(vxor):
+      opcode = RV_OP(vxor);
+      break;
+    case IR_OP(vcmpeq):
+      opcode = RV_OP(vcmeq);
+      break;
+    case IR_OP(vcmpne):
+      opcode = RV_OP(vcmne);
+      break;
+    case IR_OP(vcmplt):
+      opcode = RV_OP(vcmlt);
+      break;
+    case IR_OP(vcmple):
+      opcode = RV_OP(vcmle);
+      break;
+    case IR_OP(vcmpgt):
+      opcode = RV_OP(vcmlt);
+      swap_operands = true;
+      break;
+    case IR_OP(vcmpge):
+      opcode = RV_OP(vcmle);
+      swap_operands = true;
+      break;
+    case IR_OP(vcmpltu):
+      opcode = RV_OP(vcmltu);
+      break;
+    case IR_OP(vcmpleu):
+      opcode = RV_OP(vcmleu);
+      break;
+    case IR_OP(vcmpgtu):
+      opcode = RV_OP(vcmltu);
+      swap_operands = true;
+      break;
+    case IR_OP(vcmpgeu):
+      opcode = RV_OP(vcmleu);
+      swap_operands = true;
+      break;
+    default:
+      assert(false &&
+             "vector operation must be software-expanded before RISC-V lowering");
+      COMPILER_UNREACHABLE();
+  }
+
+  TargetInstruction* destination = Materialize(rv, node->inputs.value.p[0]);
+  TargetInstruction* left_address = Materialize(rv, node->inputs.value.p[1]);
+  TargetInstruction* right_address = Materialize(rv, node->inputs.value.p[2]);
+  TargetInstruction* zero = GetIntConstant(rv, NULL, kTargetType32Bit, 0);
+  TargetInstruction* left = Emit(
+      rv, SetSimdArrangement(NewInstruction2(RV_OP(vle), left_address, zero),
+                             vector_type->size, element->size));
+  TargetInstruction* right = Emit(
+      rv, SetSimdArrangement(NewInstruction2(RV_OP(vle), right_address, zero),
+                             vector_type->size, element->size));
+  if (swap_operands) {
+    TargetInstruction* temporary = left;
+    left = right;
+    right = temporary;
+  }
+  TargetInstruction* operation = Emit(
+      rv, SetSimdArrangement(NewInstruction2(opcode, left, right),
+                             vector_type->size, element->size));
+  TargetInstruction* store = Emit(
+      rv, SetSimdArrangement(
+              NewInstruction3(RV_OP(vse), operation, destination, zero),
+              vector_type->size, element->size));
+  return SetLoweredNode(node, store);
+}
+
 static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
                                       IRNode* node) {
   // If we have already lowered the IR node, return it.
@@ -4280,8 +4469,6 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     case IR_OP(vand):
     case IR_OP(vor):
     case IR_OP(vxor):
-    case IR_OP(vneg):
-    case IR_OP(vonescomp):
     case IR_OP(vcmpeq):
     case IR_OP(vcmpne):
     case IR_OP(vcmplt):
@@ -4292,6 +4479,10 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
     case IR_OP(vcmpleu):
     case IR_OP(vcmpgtu):
     case IR_OP(vcmpgeu):
+      return LowerVectorOperation(rv, node);
+
+    case IR_OP(vneg):
+    case IR_OP(vonescomp):
     case IR_OP(vectorarg):
     case IR_OP(resultv):
     case IR_OP(capturev):

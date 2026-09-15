@@ -1995,7 +1995,40 @@ static void ScalarizeVectorOperations(Generator* gen) {
             (node->opcode == IR_OP(vadd) ||
              node->opcode == IR_OP(vsub) ||
              node->opcode == IR_OP(vmul))));
-      if (native_x86 || native_aarch64 || native_arm) {
+      bool native_riscv =
+          StringEqual(compiler->target_name, "riscv") &&
+          vector_type != NULL &&
+          (vector_type->size == 8 || vector_type->size == 16) &&
+          element != NULL &&
+          ((TypeIsIntegral(element) &&
+            (node->opcode == IR_OP(vadd) ||
+             node->opcode == IR_OP(vsub) ||
+             node->opcode == IR_OP(vmul) ||
+             node->opcode == IR_OP(vdiv) ||
+             node->opcode == IR_OP(vmod) ||
+             node->opcode == IR_OP(vlsl) ||
+             node->opcode == IR_OP(vlsr) ||
+             node->opcode == IR_OP(vasr) ||
+             node->opcode == IR_OP(vand) ||
+             node->opcode == IR_OP(vor) ||
+             node->opcode == IR_OP(vxor) ||
+             node->opcode == IR_OP(vcmpeq) ||
+             node->opcode == IR_OP(vcmpne) ||
+             node->opcode == IR_OP(vcmplt) ||
+             node->opcode == IR_OP(vcmple) ||
+             node->opcode == IR_OP(vcmpgt) ||
+             node->opcode == IR_OP(vcmpge) ||
+             node->opcode == IR_OP(vcmpltu) ||
+             node->opcode == IR_OP(vcmpleu) ||
+             node->opcode == IR_OP(vcmpgtu) ||
+             node->opcode == IR_OP(vcmpgeu))) ||
+           ((TypeUsesFloat32Representation(element) ||
+             TypeUsesFloat64Representation(element)) &&
+            (node->opcode == IR_OP(vadd) ||
+             node->opcode == IR_OP(vsub) ||
+             node->opcode == IR_OP(vmul) ||
+             node->opcode == IR_OP(vdiv))));
+      if (native_x86 || native_aarch64 || native_arm || native_riscv) {
         node = next;
         continue;
       }

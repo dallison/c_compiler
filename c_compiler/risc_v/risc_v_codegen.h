@@ -254,6 +254,33 @@ typedef enum {
   RV_OP(fcvt_d_lu),
   RV_OP(fmv_d_x),
 
+  // RVV (VLEN=128).  Memory-to-memory vector IR lowers to vle / op / vse.
+  RV_OP(vle),
+  RV_OP(vse),
+  RV_OP(vadd),
+  RV_OP(vsub),
+  RV_OP(vmul),
+  RV_OP(vdiv),
+  RV_OP(vdivu),
+  RV_OP(vmod),
+  RV_OP(vmodu),
+  RV_OP(vlsl),
+  RV_OP(vlsr),
+  RV_OP(vasr),
+  RV_OP(vand),
+  RV_OP(vor),
+  RV_OP(vxor),
+  RV_OP(vfadd),
+  RV_OP(vfsub),
+  RV_OP(vfmul),
+  RV_OP(vfdiv),
+  RV_OP(vcmeq),
+  RV_OP(vcmne),
+  RV_OP(vcmlt),
+  RV_OP(vcmle),
+  RV_OP(vcmltu),
+  RV_OP(vcmleu),
+
   // Pseudo ops
   RV_OP(nop),
   RV_OP(not),
@@ -353,6 +380,12 @@ typedef enum {
 #define RV_ATOMIC_FAILURE_ORDER_SHIFT 25
 #define RV_ATOMIC_FAILURE_ORDER_MASK (7 << RV_ATOMIC_FAILURE_ORDER_SHIFT)
 #define RV_ATOMIC_WEAK (1 << 28)
+
+// SIMD element size (log2 of bytes: 0=e8, 1=e16, 2=e32, 3=e64) and 128-bit
+// occupancy.  Bits 8-11 are free of other RV instruction flags.
+#define RV_SIMD_ELEM_SHIFT 8
+#define RV_SIMD_ELEM_MASK (3 << RV_SIMD_ELEM_SHIFT)
+#define RV_SIMD_128 (1 << 11)
 
 typedef struct {
   int reg_num;

@@ -16,6 +16,7 @@
 typedef enum {
   kRegTypeInt,
   kRegTypeFloat,
+  kRegTypeVector,
 } RegisterType;
 
 void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p, FILE* fp);

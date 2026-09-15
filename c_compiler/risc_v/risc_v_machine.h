@@ -11,6 +11,13 @@
 
 #define RV_NUM_INT_REGS 32
 #define RV_NUM_FLOAT_REGS 32
+#define RV_NUM_VECTOR_REGS 32
+#define RV_VLEN_BYTES 16
+#define RV_VECTOR_MASK_REG 0
+#define RV_VECTOR_TEMP_START 1
+#define RV_VECTOR_TEMP_END 23
+#define RV_VECTOR_SAVED_START 24
+#define RV_VECTOR_SAVED_END 31
 
 #define RV_INT_ZERO_REG 0
 
@@ -106,6 +113,7 @@ typedef enum {
   RV_OPCODE(store_fp) = 0x27,
   RV_OPCODE(op_fp) = 0x53,
   RV_OPCODE(amo) = 0x2f,
+  RV_OPCODE(op_v) = 0x57,
   // TODO: FMADD.S etc.
 } RVInstOpcode;
 

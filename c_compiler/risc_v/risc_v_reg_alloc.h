@@ -22,10 +22,11 @@
 struct RVGenerator;
 struct RVInstruction;
 
-// We have 2 register types, integer (64 bit), float int point (64 bit).
+// Integer (64-bit), float (64-bit F/D), and vector (VLEN=128 RVV).
 typedef enum {
   kRVRegTypeInt,
   kRVRegTypeFloat,
+  kRVRegTypeVector,
 } RVRegisterType;
 
 typedef struct RVRegister {
@@ -45,12 +46,14 @@ typedef struct {
   struct RVGenerator* rv;
   RVRegister int_regs[RV_NUM_INT_REGS];
   RVRegister float_regs[RV_NUM_FLOAT_REGS];
+  RVRegister vector_regs[RV_NUM_VECTOR_REGS];
 
   // We need to save some registers on entry to a procedure and restore them on
   // exit.  These bit sets keep a record of the registers of each type that
   // we have used.
   BitSet used_int_regs;
   BitSet used_float_regs;
+  BitSet used_vector_regs;
   
   int current_spilled_region_size;
   int max_spilled_region_size;

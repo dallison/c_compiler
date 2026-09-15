@@ -61,6 +61,10 @@ void RVRegisterAllocatorInit(RVRegisterAllocator* allocator, RVGenerator* rv) {
     InitializeRegister(&allocator->float_regs[i], i, kRVRegTypeFloat);
   }
 
+  for (int i = 0; i < RV_NUM_VECTOR_REGS; i++) {
+    InitializeRegister(&allocator->vector_regs[i], i, kRVRegTypeVector);
+  }
+
   // Reserve some registers.
   allocator->int_regs[RV_INT_ZERO_REG].base.reserved = true;
   allocator->int_regs[RV_FP_REG].base.reserved = true;
@@ -73,9 +77,11 @@ void RVRegisterAllocatorInit(RVRegisterAllocator* allocator, RVGenerator* rv) {
   allocator->int_regs[RV_INT_TEMP_START_2 + 1].base.reserved = true;
   allocator->int_regs[RV_INT_TEMP_START_2 + 2].base.reserved = true;
   allocator->int_regs[RV_INT_TEMP_START_2 + 3].base.reserved = true;
+  allocator->vector_regs[RV_VECTOR_MASK_REG].base.reserved = true;
 
   BitSetInit(&allocator->used_int_regs);
   BitSetInit(&allocator->used_float_regs);
+  BitSetInit(&allocator->used_vector_regs);
   
   allocator->current_spilled_region_size = 0;
   allocator->max_spilled_region_size = 0;
@@ -93,6 +99,7 @@ RVRegisterAllocator* NewRVRegisterAllocator(RVGenerator* pcode) {
 void RVRegisterAllocatorDestruct(RVRegisterAllocator* allocator) {
   BitSetDestruct(&allocator->used_int_regs);
   BitSetDestruct(&allocator->used_float_regs);
+  BitSetDestruct(&allocator->used_vector_regs);
   BitSetDestruct(&allocator->preserved_instructions);
   MapDestruct(&allocator->reassignable_spills);
 }
@@ -124,15 +131,31 @@ static struct {
     {kRVRegTypeFloat, RV_FP_ARG_START, RV_FP_ARG_END, "fa", 0, true},
     {kRVRegTypeFloat, RV_FP_SAVED_START_1, RV_FP_SAVED_END_1, "fs", 0, false},
     {kRVRegTypeFloat, RV_FP_SAVED_START_2, RV_FP_SAVED_END_2, "fs", 2, false},
+    {kRVRegTypeVector, RV_VECTOR_TEMP_START, RV_VECTOR_TEMP_END, "v",
+     RV_VECTOR_TEMP_START, true},
+    {kRVRegTypeVector, RV_VECTOR_SAVED_START, RV_VECTOR_SAVED_END, "v",
+     RV_VECTOR_SAVED_START, false},
 };
 
 #define NUM_REG_RANGES (sizeof(register_ranges) / sizeof(register_ranges[0]))
 
+static RVRegister* RegsForType(RVRegisterAllocator* allocator,
+                               RVRegisterType type) {
+  switch (type) {
+    case kRVRegTypeInt:
+      return allocator->int_regs;
+    case kRVRegTypeFloat:
+      return allocator->float_regs;
+    case kRVRegTypeVector:
+      return allocator->vector_regs;
+  }
+  return allocator->int_regs;
+}
+
 static void DumpRegisters(RVRegisterAllocator* allocator) {
   char buf[32];
-  for (RVRegisterType type = kRVRegTypeInt; type <= kRVRegTypeFloat; type++) {
-    RVRegister* regs =
-        type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
+  for (RVRegisterType type = kRVRegTypeInt; type <= kRVRegTypeVector; type++) {
+    RVRegister* regs = RegsForType(allocator, type);
     for (int i = 0; i < NUM_REG_RANGES; i++) {
       if (register_ranges[i].type == type) {
         for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
@@ -159,8 +182,7 @@ static void AssignRegister(RVRegister* reg, TargetInstruction* inst) {
 
 static RVRegister* FindFreeRegister(RVRegisterAllocator* allocator,
                                     RVRegisterType type, bool can_use_temp) {
-  RVRegister* regs =
-      type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
+  RVRegister* regs = RegsForType(allocator, type);
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
       // If we are told not to use a temp register, ignore any that are
@@ -273,11 +295,15 @@ static void FreeRegisters(RVRegisterAllocator* allocator,
 // Is the register meant to be saved by the callee?
 static bool IsSavedReg(RVRegister* reg) {
   int num = reg->base.num;
-  if ((num >= RV_INT_SAVED_START_1 && num <= RV_INT_SAVED_END_1) ||
-      (num >= RV_INT_SAVED_START_2 && num <= RV_INT_SAVED_END_2) ||
-      (num >= RV_FP_SAVED_START_1 && num <= RV_FP_SAVED_END_1) ||
-      (num >= RV_FP_SAVED_START_2 && num <= RV_FP_SAVED_END_2)) {
-    return true;
+  switch (reg->type) {
+    case kRVRegTypeInt:
+      return (num >= RV_INT_SAVED_START_1 && num <= RV_INT_SAVED_END_1) ||
+             (num >= RV_INT_SAVED_START_2 && num <= RV_INT_SAVED_END_2);
+    case kRVRegTypeFloat:
+      return (num >= RV_FP_SAVED_START_1 && num <= RV_FP_SAVED_END_1) ||
+             (num >= RV_FP_SAVED_START_2 && num <= RV_FP_SAVED_END_2);
+    case kRVRegTypeVector:
+      return num >= RV_VECTOR_SAVED_START && num <= RV_VECTOR_SAVED_END;
   }
   return false;
 }
@@ -356,8 +382,7 @@ static bool InstructionHasExternalDefs(RVRegisterAllocator* allocator,
 // without them there is often no callee-saved register to reclaim at all.
 static TargetInstruction* FindSpillVictim(RVRegisterAllocator* allocator,
                                    RVRegisterType type, bool can_use_temp) {
-  RVRegister* regs =
-      type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
+  RVRegister* regs = RegsForType(allocator, type);
   int min_cost = INT_MAX;
   TargetInstruction* victim = NULL;
   int min_var_cost = INT_MAX;
@@ -557,7 +582,8 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
                                                                         NULL,
                                                                         kTargetType32Bit,
                                                                         allocator->current_spilled_region_size));
-  allocator->current_spilled_region_size += 8;    // Space for one register.
+  allocator->current_spilled_region_size +=
+      (((RVRegister*)inst->reg)->type == kRVRegTypeVector) ? 16 : 8;
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
@@ -634,8 +660,7 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
 static void EvictPhysicalRegister(RVRegisterAllocator* allocator,
                                   RVRegisterType type, int num,
                                   TargetInstruction* keep) {
-  RVRegister* regs =
-      type == kRVRegTypeInt ? allocator->int_regs : allocator->float_regs;
+  RVRegister* regs = RegsForType(allocator, type);
   TargetInstruction* owner = regs[num].base.owner;
   if (owner == NULL || owner == keep || regs[num].base.reserved) {
     return;
@@ -682,6 +707,9 @@ static RVRegister* AllocateRegisterWithType(RVRegisterAllocator* allocator,
     case kRVRegTypeFloat:
       BitSetInsert(&allocator->used_float_regs, reg->base.num);
       break;
+    case kRVRegTypeVector:
+      BitSetInsert(&allocator->used_vector_regs, reg->base.num);
+      break;
   }
   return reg;
 }
@@ -707,6 +735,32 @@ static RVRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case RV_OP(fcvt_s_l):
     case RV_OP(fcvt_d_l):
       return kRVRegTypeFloat;
+
+    case RV_OP(vle):
+    case RV_OP(vadd):
+    case RV_OP(vsub):
+    case RV_OP(vmul):
+    case RV_OP(vdiv):
+    case RV_OP(vdivu):
+    case RV_OP(vmod):
+    case RV_OP(vmodu):
+    case RV_OP(vlsl):
+    case RV_OP(vlsr):
+    case RV_OP(vasr):
+    case RV_OP(vand):
+    case RV_OP(vor):
+    case RV_OP(vxor):
+    case RV_OP(vfadd):
+    case RV_OP(vfsub):
+    case RV_OP(vfmul):
+    case RV_OP(vfdiv):
+    case RV_OP(vcmeq):
+    case RV_OP(vcmne):
+    case RV_OP(vcmlt):
+    case RV_OP(vcmle):
+    case RV_OP(vcmltu):
+    case RV_OP(vcmleu):
+      return kRVRegTypeVector;
 
     case RV_OP(fcvt_w_d):
     case RV_OP(fcvt_wu_d):
@@ -786,6 +840,8 @@ dynamic_alloc:
     if (IsSavedReg(reg)) {
       if (reg_type == kRVRegTypeFloat) {
         BitSetInsert(&allocator->used_float_regs, reg->base.num);
+      } else if (reg_type == kRVRegTypeVector) {
+        BitSetInsert(&allocator->used_vector_regs, reg->base.num);
       } else {
         BitSetInsert(&allocator->used_int_regs, reg->base.num);
       }
@@ -1045,6 +1101,7 @@ static void AllocateRegisterOnce(RVRegisterAllocator* allocator,
     case RV_OP(loc):
     case RV_OP(atomic_store):
     case RV_OP(atomic_fence):
+    case RV_OP(vse):
       // These instructions do not have registers allocated to them.  They still
       // have to be marked processed: their reads have had reloads inserted by
       // now, so a later spill of one of their operands must repair the read
@@ -1170,6 +1227,13 @@ static void InitializeBasicBlockRegisters(RVRegisterAllocator* allocator,
   }
   for (int i = 0; i < RV_NUM_FLOAT_REGS; i++) {
      RVRegister* reg = &allocator->float_regs[i];
+     if (reg->base.reserved) {
+       continue;
+     }
+     reg->base.owner = NULL;
+  }
+  for (int i = 0; i < RV_NUM_VECTOR_REGS; i++) {
+     RVRegister* reg = &allocator->vector_regs[i];
      if (reg->base.reserved) {
        continue;
      }
@@ -1324,8 +1388,7 @@ static TargetInstruction* RVRegHolder(RVRegisterAllocator* alloc,
                                       TargetBasicBlock* block, int num,
                                       RVRegisterType type) {
   TargetInstruction* h = TargetNewInstruction(TARGET_OP(tmp));
-  RVRegister* reg = (type == kRVRegTypeInt) ? &alloc->int_regs[num]
-                                            : &alloc->float_regs[num];
+  RVRegister* reg = &RegsForType(alloc, type)[num];
   h->reg = &reg->base;
   h->block = block;
   TargetTrackOrphanInstruction(&alloc->rv->base, h);
@@ -1374,8 +1437,7 @@ static void RVEmitMove(RVRegisterAllocator* alloc, TargetBasicBlock* block,
   if (move_desc->src == RV_ARG_MOVE_MEMORY) {
     TargetInstruction* reload = TargetNewInstruction1(
         (TargetOpcode)RV_OP(reload), move_desc->spill);
-    RVRegister* regs = (move_desc->type == kRVRegTypeInt) ? alloc->int_regs
-                                                          : alloc->float_regs;
+    RVRegister* regs = RegsForType(alloc, move_desc->type);
     reload->reg = &regs[move_desc->dst].base;
     reload->flags |= TARGET_INST_PROCESSED;
     reload->uses = 1;
@@ -1760,6 +1822,10 @@ const char* RVRegisterNameFromNum(int num, RVRegisterType type, char* buf,
 
     case kRVRegTypeFloat:
       snprintf(buf, len, "f%d", num);
+      break;
+
+    case kRVRegTypeVector:
+      snprintf(buf, len, "v%d", num);
       break;
   }
   return buf;

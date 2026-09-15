@@ -68,6 +68,10 @@ static const char* RegisterNameFromNum(int num, RegisterType type, char* buf,
     case kRegTypeFloat:
       snprintf(buf, len, "f%d", num);
       break;
+
+    case kRegTypeVector:
+      snprintf(buf, len, "v%d", num);
+      break;
   }
   return buf;
 }
@@ -443,6 +447,16 @@ void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p,
     }
     case RV_OPCODE(load_fp): {
       int funct3 = (inst >> 12) & 0x7;
+      if (funct3 == 0 || funct3 == 5 || funct3 == 6 || funct3 == 7) {
+        static const char* mnemonics[] = {"vle8.v", NULL, NULL, NULL, NULL,
+                                          "vle16.v", "vle32.v", "vle64.v"};
+        PrintMnemonic(fp, mnemonics[funct3]);
+        DisassemblePrintRegister(fp, rd, kRegTypeVector, "");
+        fprintf(fp, ", (");
+        DisassemblePrintRegister(fp, rs1, kRegTypeInt, "");
+        fprintf(fp, ")");
+        break;
+      }
       int64_t immed = inst >> 20;  // Auto sign extended to 64 bits.
       const char* mnemonic = funct3 == RV_F3(flw) ? "flw" : "fld";
       PrintMnemonic(fp, mnemonic);
@@ -451,11 +465,22 @@ void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p,
     }
     case RV_OPCODE(store_fp): {
       int funct3 = (inst >> 12) & 0x7;
+      if (funct3 == 0 || funct3 == 5 || funct3 == 6 || funct3 == 7) {
+        static const char* mnemonics[] = {"vse8.v", NULL, NULL, NULL, NULL,
+                                          "vse16.v", "vse32.v", "vse64.v"};
+        PrintMnemonic(fp, mnemonics[funct3]);
+        DisassemblePrintRegister(fp, rd, kRegTypeVector, "");
+        fprintf(fp, ", (");
+        DisassemblePrintRegister(fp, rs1, kRegTypeInt, "");
+        fprintf(fp, ")");
+        break;
+      }
       int64_t immed_hi = inst >> 25;       // Auto sign extended to 64 bits.
       int64_t immed = immed_hi << 5 | rd;  // rd is the low 5 bits of offset.
       const char* mnemonic = funct3 == RV_F3(fsw) ? "fsw" : "fsd";
       PrintMnemonic(fp, mnemonic);
       PrintStore(fp, rs1, rs2, (int)immed);
+      break;
     }
     case RV_OPCODE(op_fp): {
       int rm = (inst >> 12) & 0x7;
@@ -664,6 +689,63 @@ void DisassembleRiscVInstruction(RISCVInterpreter* interpreter, void* p,
           PrintOpFpMov(fp, rd, rs2, rm, t_rd, t_rs1);
           break;
       }
+    }
+    case RV_OPCODE(op_v): {
+      int funct3 = (inst >> 12) & 0x7;
+      int vm = (inst >> 25) & 1;
+      int funct6 = (inst >> 26) & 0x3f;
+      if (funct3 == 7) {
+        int avl = rs1;
+        int vtype = (inst >> 20) & 0x7ff;
+        int sew = (vtype >> 3) & 7;
+        static const char* sew_name[] = {"e8", "e16", "e32", "e64"};
+        PrintMnemonic(fp, "vsetivli");
+        DisassemblePrintRegister(fp, rd, kRegTypeInt, "");
+        fprintf(fp, ", %d, %s, m1, ta, ma", avl,
+                sew < 4 ? sew_name[sew] : "e?");
+        break;
+      }
+      const char* name = "vop";
+      if (funct3 == 3 && funct6 == 0x17) {
+        name = vm ? "vmv.v.i" : "vmerge.vim";
+      } else if (funct3 == 0) {
+        switch (funct6) {
+          case 0x00: name = "vadd.vv"; break;
+          case 0x02: name = "vsub.vv"; break;
+          case 0x09: name = "vand.vv"; break;
+          case 0x0a: name = "vor.vv"; break;
+          case 0x0b: name = "vxor.vv"; break;
+          case 0x18: name = "vmseq.vv"; break;
+          case 0x19: name = "vmsne.vv"; break;
+          case 0x1a: name = "vmsltu.vv"; break;
+          case 0x1b: name = "vmslt.vv"; break;
+          case 0x1c: name = "vmsleu.vv"; break;
+          case 0x1d: name = "vmsle.vv"; break;
+          case 0x25: name = "vsll.vv"; break;
+          case 0x28: name = "vsrl.vv"; break;
+          case 0x29: name = "vsra.vv"; break;
+        }
+      } else if (funct3 == 1) {
+        switch (funct6) {
+          case 0x00: name = "vfadd.vv"; break;
+          case 0x02: name = "vfsub.vv"; break;
+          case 0x20: name = "vfdiv.vv"; break;
+          case 0x24: name = "vfmul.vv"; break;
+        }
+      } else if (funct3 == 2) {
+        switch (funct6) {
+          case 0x20: name = "vdivu.vv"; break;
+          case 0x21: name = "vdiv.vv"; break;
+          case 0x22: name = "vremu.vv"; break;
+          case 0x23: name = "vrem.vv"; break;
+          case 0x25: name = "vmul.vv"; break;
+        }
+      }
+      PrintMnemonic(fp, name);
+      DisassemblePrintRegister(fp, rd, kRegTypeVector, "");
+      DisassemblePrintRegister(fp, rs2, kRegTypeVector, ", ");
+      DisassemblePrintRegister(fp, rs1, kRegTypeVector, ", ");
+      break;
     }
     default:
       break;

@@ -153,6 +153,7 @@ static int StackFrameSize(RVEmitter* emitter) {
 
   stack_frame_size += BitSetCount(&emitter->regs->used_int_regs) * 8;
   stack_frame_size += BitSetCount(&emitter->regs->used_float_regs) * 8;
+  stack_frame_size += BitSetCount(&emitter->regs->used_vector_regs) * RV_VLEN_BYTES;
   stack_frame_size += emitter->spill_region_size;
   if (HasExceptionStructReturn(emitter)) {
     stack_frame_size += 8;
@@ -169,6 +170,7 @@ static bool EmptyStackFrame(RVEmitter* emitter) {
          emitter->rv->saved_regs.length == 0 &&
          BitSetCount(&emitter->regs->used_int_regs) == 0 &&
          BitSetCount(&emitter->regs->used_float_regs) == 0 &&
+         BitSetCount(&emitter->regs->used_vector_regs) == 0 &&
          emitter->spill_region_size == 0;
 }
 
@@ -482,6 +484,26 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
     BitSetIteratorNext(&it);
   }
 
+  BitSetIteratorStart(&it, &emitter->regs->used_vector_regs);
+  if (!BitSetIteratorDone(&it)) {
+    fprintf(fp, "\t// Saved vector registers.\n");
+  }
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    int offset = saved_reg_offset;
+    saved_reg_offset -= RV_VLEN_BYTES;
+    if (offset >= -2048 && offset <= 2047) {
+      fprintf(fp, "\taddi t0, sp, %d\n", offset);
+    } else {
+      fprintf(fp, "\tli t0, %d\n", offset);
+      fprintf(fp, "\tadd t0, sp, t0\n");
+    }
+    fprintf(fp, "\tvsetivli    zero, 16, e8, m1, ta, ma\n");
+    fprintf(fp, "\tvse8.v %s, (t0)\n",
+            RVRegisterNameFromNum(reg, kRVRegTypeVector, buf1, sizeof(buf1)));
+    BitSetIteratorNext(&it);
+  }
+
   if (HasExceptionStructReturn(emitter)) {
     fprintf(fp, "\tsd a0, %d(sp)\t// hidden result pointer\n",
             saved_reg_offset);
@@ -539,6 +561,22 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
     BitSetIteratorNext(&it);
   }
 
+  BitSetIteratorStart(&it, &emitter->regs->used_vector_regs);
+  while (!BitSetIteratorDone(&it)) {
+    int reg = (int)BitSetIteratorValue(&it);
+    if (offset >= -2048 && offset <= 2047) {
+      fprintf(fp, "\taddi t0, sp, %d\n", offset);
+    } else {
+      fprintf(fp, "\tli t0, %d\n", offset);
+      fprintf(fp, "\tadd t0, sp, t0\n");
+    }
+    fprintf(fp, "\tvsetivli    zero, 16, e8, m1, ta, ma\n");
+    fprintf(fp, "\tvle8.v %s, (t0)\n",
+            RVRegisterNameFromNum(reg, kRVRegTypeVector, buf1, sizeof(buf1)));
+    offset -= RV_VLEN_BYTES;
+    BitSetIteratorNext(&it);
+  }
+
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame.
   } else {
@@ -574,7 +612,8 @@ static void RestoreExceptionLandingState(RVEmitter* emitter, FILE* fp) {
   // hidden result pointer, which is this function's own.
   int offset = emitter->saved_reg_offset -
                8 * BitSetCount(&emitter->regs->used_int_regs) -
-               8 * BitSetCount(&emitter->regs->used_float_regs);
+               8 * BitSetCount(&emitter->regs->used_float_regs) -
+               RV_VLEN_BYTES * BitSetCount(&emitter->regs->used_vector_regs);
   if (struct_return_phys >= 0 && HasExceptionStructReturn(emitter)) {
     char buf[8];
     fprintf(fp, "\tld %s, %d(sp)\t// hidden result pointer\n",
@@ -1054,6 +1093,113 @@ static void PrintExtendedAsm(FILE* fp, RVAsmInstruction* inst,
 }
 
 // Main instruction printer.
+static void PrintVsetivli(FILE* fp, TargetInstruction* inst) {
+  int elem_log = (inst->flags >> RV_SIMD_ELEM_SHIFT) & 3;
+  int vec_bytes = (inst->flags & RV_SIMD_128) ? 16 : 8;
+  int sew = 1 << elem_log;
+  int vl = vec_bytes / sew;
+  static const char* sew_name[] = {"e8", "e16", "e32", "e64"};
+  fprintf(fp, "\tvsetivli    zero, %d, %s, m1, ta, ma\n", vl, sew_name[elem_log]);
+}
+
+static void PrintVectorAddr(FILE* fp, const char* base, int offset) {
+  if (offset >= -2048 && offset <= 2047) {
+    fprintf(fp, "\taddi t0, %s, %d\n", base, offset);
+  } else if (offset < 0) {
+    fprintf(fp, "\tli t0, %d\n", -offset);
+    fprintf(fp, "\tsub t0, %s, t0\n", base);
+  } else {
+    fprintf(fp, "\tli t0, %d\n", offset);
+    fprintf(fp, "\tadd t0, %s, t0\n", base);
+  }
+}
+
+static const char* VectorMemMnemonic(bool load, int elem_log) {
+  static const char* loads[] = {"vle8.v", "vle16.v", "vle32.v", "vle64.v"};
+  static const char* stores[] = {"vse8.v", "vse16.v", "vse32.v", "vse64.v"};
+  return load ? loads[elem_log] : stores[elem_log];
+}
+
+static bool IsVectorCompare(RVOpcode opcode) {
+  return opcode == RV_OP(vcmeq) || opcode == RV_OP(vcmne) ||
+         opcode == RV_OP(vcmlt) || opcode == RV_OP(vcmle) ||
+         opcode == RV_OP(vcmltu) || opcode == RV_OP(vcmleu);
+}
+
+static bool PrintVectorInstruction(TargetInstruction* inst, FILE* fp) {
+  RVOpcode opcode = (RVOpcode)inst->opcode;
+  if (opcode < RV_OP(vle) || opcode > RV_OP(vcmleu)) {
+    return false;
+  }
+  char buf1[8], buf2[8], buf3[8];
+  int elem_log = (inst->flags >> RV_SIMD_ELEM_SHIFT) & 3;
+  if (opcode == RV_OP(vle)) {
+    int offset = TargetIsConst(inst->operand[1])
+                     ? (int)TargetIntValue(inst->operand[1])
+                     : 0;
+    const char* base = GetRegisterName(inst->operand[0], buf2, sizeof(buf2));
+    PrintVsetivli(fp, inst);
+    if (offset == 0) {
+      fprintf(fp, "\t%-12s%s, (%s)\n", VectorMemMnemonic(true, elem_log),
+              GetRegisterName(inst, buf1, sizeof(buf1)), base);
+    } else {
+      PrintVectorAddr(fp, base, offset);
+      fprintf(fp, "\t%-12s%s, (t0)\n", VectorMemMnemonic(true, elem_log),
+              GetRegisterName(inst, buf1, sizeof(buf1)));
+    }
+    return true;
+  }
+  if (opcode == RV_OP(vse)) {
+    int offset = TargetIsConst(inst->operand[2])
+                     ? (int)TargetIntValue(inst->operand[2])
+                     : 0;
+    const char* base = GetRegisterName(inst->operand[1], buf2, sizeof(buf2));
+    PrintVsetivli(fp, inst);
+    if (offset == 0) {
+      fprintf(fp, "\t%-12s%s, (%s)\n", VectorMemMnemonic(false, elem_log),
+              GetRegisterName(inst->operand[0], buf1, sizeof(buf1)), base);
+    } else {
+      PrintVectorAddr(fp, base, offset);
+      fprintf(fp, "\t%-12s%s, (t0)\n", VectorMemMnemonic(false, elem_log),
+              GetRegisterName(inst->operand[0], buf1, sizeof(buf1)));
+    }
+    return true;
+  }
+  PrintVsetivli(fp, inst);
+  if (IsVectorCompare(opcode)) {
+    fprintf(fp, "\t%-12sv0, %s, %s\n", RVOpcodeName(inst->opcode),
+            GetRegisterName(inst->operand[0], buf2, sizeof(buf2)),
+            GetRegisterName(inst->operand[1], buf3, sizeof(buf3)));
+    fprintf(fp, "\tvmv.v.i     %s, 0\n",
+            GetRegisterName(inst, buf1, sizeof(buf1)));
+    fprintf(fp, "\tvmerge.vim  %s, %s, -1\n",
+            GetRegisterName(inst, buf1, sizeof(buf1)),
+            GetRegisterName(inst, buf2, sizeof(buf2)));
+    return true;
+  }
+  fprintf(fp, "\t%-12s%s, %s, %s\n", RVOpcodeName(inst->opcode),
+          GetRegisterName(inst, buf1, sizeof(buf1)),
+          GetRegisterName(inst->operand[0], buf2, sizeof(buf2)),
+          GetRegisterName(inst->operand[1], buf3, sizeof(buf3)));
+  return true;
+}
+
+static void PrintVectorSpill(RVRegister* reg, int offset, bool reload,
+                             int id, FILE* fp) {
+  char buf1[8];
+  if (offset >= -2048 && offset <= 2047) {
+    fprintf(fp, "\taddi t0, s0, -%d\n", offset);
+  } else {
+    fprintf(fp, "\tli t0, %d\n", offset);
+    fprintf(fp, "\tsub t0, s0, t0\n");
+  }
+  fprintf(fp, "\tvsetivli    zero, 16, e8, m1, ta, ma\n");
+  fprintf(fp, "\t%s %s, (t0)\t// %s spilled @%d\n",
+          reload ? "vle8.v" : "vse8.v",
+          RVRegisterName(reg, buf1, sizeof(buf1)),
+          reload ? "Reloaded" : "Spilled", id);
+}
+
 static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
   if (inst->block == NULL) {
@@ -1096,6 +1242,10 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
 
   if (show_id) {
     fprintf(fp, "/* @%d */ ", inst->id);
+  }
+
+  if (PrintVectorInstruction(inst, fp)) {
+    return;
   }
   
   // Buffers for register name printing.
@@ -1205,6 +1355,10 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
     case RV_OP(spill): {
       RVRegister* reg = (RVRegister*)inst->reg;
       int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
+      if (reg->type == kRVRegTypeVector) {
+        PrintVectorSpill(reg, offset, false, inst->operand[0]->id, fp);
+        return;
+      }
       const int spill_addr = RV_SPILL_ADDR;
       if (!RVIsPossibleImmediate(offset)) {
         fprintf(fp, "\t%-12s%s, %d\n",
@@ -1234,6 +1388,10 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       RVRegister* reg = (RVRegister*)inst->reg;
       TargetInstruction* spill = inst->operand[0];
       int offset = (int)TargetIntValue(spill->operand[1]) + emitter->first_spill_offset;
+      if (reg->type == kRVRegTypeVector) {
+        PrintVectorSpill(reg, offset, true, spill->operand[0]->id, fp);
+        return;
+      }
       const int spill_addr = RV_SPILL_ADDR;
       if (!RVIsPossibleImmediate(offset)) {
         fprintf(fp, "\t%-12s%s, %d\n",

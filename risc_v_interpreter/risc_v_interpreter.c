@@ -805,6 +805,309 @@ void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader,
                                 trace_regs, trace_instructions);
 }
 
+static uint64_t VectorLaneU(const uint8_t* vreg, int i, int sew) {
+  uint64_t value = 0;
+  memcpy(&value, vreg + (size_t)i * (size_t)sew, (size_t)sew);
+  return value;
+}
+
+static int64_t VectorLaneS(const uint8_t* vreg, int i, int sew) {
+  uint64_t value = VectorLaneU(vreg, i, sew);
+  int shift = 64 - 8 * sew;
+  return (int64_t)(value << shift) >> shift;
+}
+
+static void VectorSetLane(uint8_t* vreg, int i, int sew, uint64_t value) {
+  memcpy(vreg + (size_t)i * (size_t)sew, &value, (size_t)sew);
+}
+
+static int VectorWidthBytes(int width) {
+  switch (width) {
+    case 0:
+      return 1;
+    case 5:
+      return 2;
+    case 6:
+      return 4;
+    case 7:
+      return 8;
+    default:
+      return 0;
+  }
+}
+
+static bool VectorMaskBit(const uint8_t* v0, int i) {
+  return (v0[i / 8] >> (i % 8)) & 1;
+}
+
+static void VectorSetMaskBit(uint8_t* v0, int i, bool value) {
+  uint8_t bit = (uint8_t)(1u << (i % 8));
+  if (value) {
+    v0[i / 8] |= bit;
+  } else {
+    v0[i / 8] &= (uint8_t)~bit;
+  }
+}
+
+static void ExecuteVectorMem(RISCVInterpreter* interpreter, int32_t inst,
+                             bool is_load) {
+  int vd = (inst >> 7) & 0x1f;
+  int rs1 = (inst >> 15) & 0x1f;
+  int width = (inst >> 12) & 0x7;
+  int mop = (inst >> 26) & 0x3;
+  int lumop = (inst >> 20) & 0x1f;
+  int sew = VectorWidthBytes(width);
+  if (mop != 0 || lumop != 0 || sew == 0) {
+    fprintf(stderr, "Unsupported vector memory instruction 0x%08x\n", inst);
+    DumpStateAndExit(interpreter);
+  }
+  int vl = interpreter->vl;
+  size_t bytes = (size_t)vl * (size_t)sew;
+  if (bytes > RV_VLEN_BYTES) {
+    bytes = RV_VLEN_BYTES;
+  }
+  uint8_t* host = (uint8_t*)(uintptr_t)interpreter->iregs[rs1];
+  GuestMemoryLock(interpreter);
+  if (is_load) {
+    memcpy(interpreter->vregs[vd], host, bytes);
+  } else {
+    memcpy(host, interpreter->vregs[vd], bytes);
+    GuestMemoryDidWrite(interpreter);
+  }
+  GuestMemoryUnlock(interpreter);
+}
+
+static void ExecuteOPV(RISCVInterpreter* interpreter, int32_t inst) {
+  int vd = (inst >> 7) & 0x1f;
+  int funct3 = (inst >> 12) & 0x7;
+  int vs1 = (inst >> 15) & 0x1f;
+  int vs2 = (inst >> 20) & 0x1f;
+  int vm = (inst >> 25) & 1;
+  int funct6 = (inst >> 26) & 0x3f;
+
+  if (funct3 == 7) {
+    if ((inst & (1u << 31)) == 0) {
+      fprintf(stderr, "Unsupported vsetvli 0x%08x\n", inst);
+      DumpStateAndExit(interpreter);
+    }
+    int avl = vs1;
+    int vtype = (inst >> 20) & 0x7ff;
+    int sew_log = (vtype >> 3) & 7;
+    int sew = 1 << sew_log;
+    int vlmax = RV_VLEN_BYTES / sew;
+    int vl = avl < vlmax ? avl : vlmax;
+    interpreter->vl = vl;
+    interpreter->sew_bytes = sew;
+    if (vd != 0) {
+      interpreter->iregs[vd] = vl;
+    }
+    return;
+  }
+
+  int sew = interpreter->sew_bytes;
+  int vl = interpreter->vl;
+  if (sew != 1 && sew != 2 && sew != 4 && sew != 8) {
+    fprintf(stderr, "Invalid SEW for vector op 0x%08x\n", inst);
+    DumpStateAndExit(interpreter);
+  }
+  int lanes = vl;
+  if (lanes * sew > RV_VLEN_BYTES) {
+    lanes = RV_VLEN_BYTES / sew;
+  }
+
+  uint8_t* dest = interpreter->vregs[vd];
+  const uint8_t* left = interpreter->vregs[vs2];
+  const uint8_t* right = interpreter->vregs[vs1];
+
+  if (funct3 == 3 && funct6 == 0x17) {
+    int64_t imm = (int64_t)(int32_t)(vs1 << 27) >> 27;
+    if (vm) {
+      for (int i = 0; i < lanes; i++) {
+        VectorSetLane(dest, i, sew, (uint64_t)imm);
+      }
+    } else {
+      uint8_t result[RV_VLEN_BYTES];
+      memcpy(result, dest, RV_VLEN_BYTES);
+      for (int i = 0; i < lanes; i++) {
+        uint64_t value = VectorMaskBit(interpreter->vregs[0], i)
+                             ? (uint64_t)imm
+                             : VectorLaneU(left, i, sew);
+        VectorSetLane(result, i, sew, value);
+      }
+      memcpy(dest, result, RV_VLEN_BYTES);
+    }
+    return;
+  }
+
+  uint8_t result[RV_VLEN_BYTES];
+  memcpy(result, dest, RV_VLEN_BYTES);
+
+  if (funct3 == 0) {
+    bool is_compare = funct6 >= 0x18 && funct6 <= 0x1d;
+    if (is_compare) {
+      memset(result, 0, RV_VLEN_BYTES);
+      for (int i = 0; i < lanes; i++) {
+        bool cond = false;
+        uint64_t a = VectorLaneU(left, i, sew);
+        uint64_t b = VectorLaneU(right, i, sew);
+        int64_t sa = VectorLaneS(left, i, sew);
+        int64_t sb = VectorLaneS(right, i, sew);
+        switch (funct6) {
+          case 0x18:
+            cond = a == b;
+            break;
+          case 0x19:
+            cond = a != b;
+            break;
+          case 0x1a:
+            cond = a < b;
+            break;
+          case 0x1b:
+            cond = sa < sb;
+            break;
+          case 0x1c:
+            cond = a <= b;
+            break;
+          case 0x1d:
+            cond = sa <= sb;
+            break;
+        }
+        VectorSetMaskBit(result, i, cond);
+      }
+      memcpy(dest, result, RV_VLEN_BYTES);
+      return;
+    }
+    for (int i = 0; i < lanes; i++) {
+      uint64_t a = VectorLaneU(left, i, sew);
+      uint64_t b = VectorLaneU(right, i, sew);
+      int64_t sa = VectorLaneS(left, i, sew);
+      int64_t sb = VectorLaneS(right, i, sew);
+      uint64_t r = 0;
+      int shift_mask = sew * 8 - 1;
+      switch (funct6) {
+        case 0x00:
+          r = a + b;
+          break;
+        case 0x02:
+          r = a - b;
+          break;
+        case 0x09:
+          r = a & b;
+          break;
+        case 0x0a:
+          r = a | b;
+          break;
+        case 0x0b:
+          r = a ^ b;
+          break;
+        case 0x25:
+          r = a << (b & (uint64_t)shift_mask);
+          break;
+        case 0x28:
+          r = a >> (b & (uint64_t)shift_mask);
+          break;
+        case 0x29:
+          r = (uint64_t)(sa >> (sb & shift_mask));
+          break;
+        default:
+          fprintf(stderr, "Unsupported OPIVV 0x%08x\n", inst);
+          DumpStateAndExit(interpreter);
+      }
+      VectorSetLane(result, i, sew, r);
+    }
+    memcpy(dest, result, RV_VLEN_BYTES);
+    return;
+  }
+
+  if (funct3 == 2) {
+    for (int i = 0; i < lanes; i++) {
+      uint64_t a = VectorLaneU(left, i, sew);
+      uint64_t b = VectorLaneU(right, i, sew);
+      int64_t sa = VectorLaneS(left, i, sew);
+      int64_t sb = VectorLaneS(right, i, sew);
+      uint64_t r = 0;
+      switch (funct6) {
+        case 0x25:
+          r = a * b;
+          break;
+        case 0x20:
+          r = b == 0 ? (uint64_t)-1 : a / b;
+          break;
+        case 0x21:
+          r = sb == 0 ? (uint64_t)-1 : (uint64_t)(sa / sb);
+          break;
+        case 0x22:
+          r = b == 0 ? a : a % b;
+          break;
+        case 0x23:
+          r = sb == 0 ? (uint64_t)sa : (uint64_t)(sa % sb);
+          break;
+        default:
+          fprintf(stderr, "Unsupported OPMVV 0x%08x\n", inst);
+          DumpStateAndExit(interpreter);
+      }
+      VectorSetLane(result, i, sew, r);
+    }
+    memcpy(dest, result, RV_VLEN_BYTES);
+    return;
+  }
+
+  if (funct3 == 1) {
+    for (int i = 0; i < lanes; i++) {
+      if (sew == 8) {
+        double a, b, r;
+        memcpy(&a, left + i * 8, 8);
+        memcpy(&b, right + i * 8, 8);
+        switch (funct6) {
+          case 0x00:
+            r = a + b;
+            break;
+          case 0x02:
+            r = a - b;
+            break;
+          case 0x24:
+            r = a * b;
+            break;
+          case 0x20:
+            r = a / b;
+            break;
+          default:
+            fprintf(stderr, "Unsupported OPFVV 0x%08x\n", inst);
+            DumpStateAndExit(interpreter);
+        }
+        memcpy(result + i * 8, &r, 8);
+      } else {
+        float a, b, r;
+        memcpy(&a, left + i * 4, 4);
+        memcpy(&b, right + i * 4, 4);
+        switch (funct6) {
+          case 0x00:
+            r = a + b;
+            break;
+          case 0x02:
+            r = a - b;
+            break;
+          case 0x24:
+            r = a * b;
+            break;
+          case 0x20:
+            r = a / b;
+            break;
+          default:
+            fprintf(stderr, "Unsupported OPFVV 0x%08x\n", inst);
+            DumpStateAndExit(interpreter);
+        }
+        memcpy(result + i * 4, &r, 4);
+      }
+    }
+    memcpy(dest, result, RV_VLEN_BYTES);
+    return;
+  }
+
+  fprintf(stderr, "Unsupported OP-V 0x%08x\n", inst);
+  DumpStateAndExit(interpreter);
+}
+
 void RISCVInterpreterPrepareMain(RISCVInterpreter* interpreter,
                                  uint64_t entry_address, int argc,
                                  char** argv) {
@@ -1343,6 +1646,10 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
       }
       case RV_OPCODE(load_fp): {
         int funct3 = (inst >> 12) & 0x7;
+        if (funct3 == 0 || funct3 == 5 || funct3 == 6 || funct3 == 7) {
+          ExecuteVectorMem(interpreter, inst, true);
+          break;
+        }
         int64_t immed = inst >> 20;  // Auto sign extended to 64 bits.
         GuestMemoryLock(interpreter);
         if (funct3 == RV_F3(flw)) {
@@ -1355,6 +1662,10 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
       }
       case RV_OPCODE(store_fp): {
         int funct3 = (inst >> 12) & 0x7;
+        if (funct3 == 0 || funct3 == 5 || funct3 == 6 || funct3 == 7) {
+          ExecuteVectorMem(interpreter, inst, false);
+          break;
+        }
         int64_t immed_hi = inst >> 25;       // Auto sign extended to 64 bits.
         int64_t immed = immed_hi << 5 | rd;  // rd is the low 5 bits of offset.
         GuestMemoryLock(interpreter);
@@ -1582,6 +1893,9 @@ void RISCVInterpreterCycle(RISCVInterpreter* interpreter) {
         }
         break;
       }
+      case RV_OPCODE(op_v):
+        ExecuteOPV(interpreter, inst);
+        break;
       default:
         break;
     }
@@ -1611,6 +1925,9 @@ typedef struct {
   int64_t pc;
   int64_t iregs[RV_NUM_INT_REGS];
   double fregs[RV_NUM_FLOAT_REGS];
+  uint8_t vregs[RV_NUM_VECTOR_REGS][RV_VLEN_BYTES];
+  int vl;
+  int sew_bytes;
   bool running;
   int exit_code;
 } RISCVSavedState;
@@ -1620,6 +1937,9 @@ static void RISCVInterpreterSaveState(RISCVInterpreter* interpreter,
   saved->pc = interpreter->pc;
   memcpy(saved->iregs, interpreter->iregs, sizeof(saved->iregs));
   memcpy(saved->fregs, interpreter->fregs, sizeof(saved->fregs));
+  memcpy(saved->vregs, interpreter->vregs, sizeof(saved->vregs));
+  saved->vl = interpreter->vl;
+  saved->sew_bytes = interpreter->sew_bytes;
   saved->running = interpreter->running;
   saved->exit_code = interpreter->exit_code;
 }
@@ -1629,6 +1949,9 @@ static void RISCVInterpreterRestoreState(RISCVInterpreter* interpreter,
   interpreter->pc = saved->pc;
   memcpy(interpreter->iregs, saved->iregs, sizeof(interpreter->iregs));
   memcpy(interpreter->fregs, saved->fregs, sizeof(interpreter->fregs));
+  memcpy(interpreter->vregs, saved->vregs, sizeof(interpreter->vregs));
+  interpreter->vl = saved->vl;
+  interpreter->sew_bytes = saved->sew_bytes;
   interpreter->running = saved->running;
   interpreter->exit_code = saved->exit_code;
 }
