@@ -2185,9 +2185,23 @@ static bool StoreConstexprPCodeSourceStringArgument(PCodeVM* vm,
     *reason = "could not register constexpr source string argument";
     return false;
   }
-  // The returned constexpr object may store this pointer, so keep it alive for
-  // the remainder of compilation rather than tying it to this VM invocation.
+  // The constructed object may store this pointer.  Keep the bytes alive for
+  // the rest of compilation and in the static-data table so materialization
+  // can recover a guest string literal instead of the host address.
   (void)allocations;
+  if (!pcode_static_data_initialized) {
+    VectorInit(&pcode_static_data);
+    pcode_static_data_initialized = true;
+  }
+  ConstexprPCodeStaticData* entry = malloc(sizeof(*entry));
+  if (entry == NULL) {
+    *reason = "could not register constexpr source string argument";
+    return false;
+  }
+  StringInit(&entry->name, NULL);
+  entry->memory = (unsigned char*)memory;
+  entry->size = size;
+  VectorAppend(&pcode_static_data, entry);
   *sp -= sizeof(uint64_t);
   uint64_t address = (uint64_t)(uintptr_t)memory;
   memcpy(*sp, &address, sizeof(address));

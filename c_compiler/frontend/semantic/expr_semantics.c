@@ -3072,6 +3072,50 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
     node->base.value_category = kValueCategoryPrvalue;
     return;
   }
+  if (CompilerIsCXX() &&
+      (TypeIsPointer(colon->left->type) || TypeIsArray(colon->left->type)) &&
+      (TypeIsPointer(colon->right->type) || TypeIsArray(colon->right->type))) {
+    // [expr.cond]: mixed pointer/array arms decay to a prvalue pointer.
+    // Leaving `p ? ptr_member : ""` as an lvalue of pointer type makes a
+    // later by-value `const char*` argument take the address of the member
+    // instead of loading the stored pointer.
+    TypeRecord* left_pointee =
+        TypeIsArray(colon->left->type) || TypeIsPointer(colon->left->type)
+            ? colon->left->type->next
+            : NULL;
+    TypeRecord* right_pointee =
+        TypeIsArray(colon->right->type) || TypeIsPointer(colon->right->type)
+            ? colon->right->type->next
+            : NULL;
+    if (left_pointee != NULL && right_pointee != NULL) {
+      Qualifiers cv_mask =
+          kQualConst | kQualVolatile | kQualRestrict | kQualAtomic;
+      if (TypeEqualIgnoringTopLevelQualifierMask(left_pointee, right_pointee,
+                                                 cv_mask) ||
+          TypeIsVoid(left_pointee) || TypeIsVoid(right_pointee)) {
+        TypeRecord* pointee = TypeRecordCopy(
+            TypeIsVoid(left_pointee) ? left_pointee :
+            TypeIsVoid(right_pointee) ? right_pointee : left_pointee);
+        pointee->qualifiers =
+            (left_pointee->qualifiers | right_pointee->qualifiers) & cv_mask;
+        TypeRecord* result = NewPointerTo(kQualPlain, pointee);
+        if (TypeIsArray(colon->left->type)) {
+          colon->left->flags |= kASTNeedAddress;
+        }
+        if (TypeIsArray(colon->right->type)) {
+          colon->right->flags |= kASTNeedAddress;
+        }
+        ASTNodeSetType(colon->left, result);
+        ASTNodeSetType(colon->right, result);
+        ASTNodeSetType((ASTNode*)colon, result);
+        ASTNodeSetType((ASTNode*)node, result);
+        colon->base.value_category = kValueCategoryPrvalue;
+        node->base.value_category = kValueCategoryPrvalue;
+        TypeRecordDelete(result);
+        return;
+      }
+    }
+  }
   InsertNumericConversions(colon, false);
   if (colon->base.type != NULL && TypeIsComplex(colon->base.type)) {
     ASTNode* operands[] = {colon->left, colon->right};

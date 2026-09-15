@@ -2436,6 +2436,7 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
                                           TypeRecord* type,
                                           SourceLocation location,
                                           bool preserve_external_addresses);
+static const char* ConstexprValueRawCString(ConstexprValue* value);
 
 static bool EvaluateConstexprStatementExpression(ConstEvalContext* ctx,
                                                  ASTNode* node,
@@ -2588,6 +2589,24 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
     }
     expr = NewStringConstantASTNode(
         contents, TypeRecordCopy(value->address_object->type), location);
+  } else if (TypeIsPointer(type) && type->next != NULL &&
+             TypeIsCharFamily(type->next)) {
+    // P-code constexpr evaluation stores string-literal addresses as host
+    // integers.  Reconstruct a guest string literal so runtime materialization
+    // does not emit that interpreter pointer.
+    const char* text = ConstexprValueRawCString(value);
+    if (text != NULL) {
+      size_t length = strlen(text);
+      String* contents = NewStringWithLength(text, length);
+      TypeRecord* array = NewBasicArrayTypeRecord(
+          kQualPlain, (int)length + 1, false);
+      TypeRecordChain(array, TypeRecordCopy(type->next));
+      TypeRecordCalculateSize(array);
+      expr = NewStringConstantASTNode(contents, array, location);
+    }
+  }
+  if (expr != NULL) {
+    return NewExpressionInitializerASTNode(expr, location);
   } else if (preserve_external_addresses &&
              (TypeIsPointer(type) || TypeIsReference(type)) &&
              value->is_address && value->address_binding != NULL &&
