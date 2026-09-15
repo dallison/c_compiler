@@ -402,8 +402,10 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
   VectorAppend(relocs, reloc);
 }
 
-static void FixupGOTEntry(LinkerSymbol* symbol, Buffer* got_plt_buffer,
+static void FixupGOTEntry(Linker* linker, LinkerSymbol* symbol,
+                          Buffer* got_plt_buffer,
                           uint64_t plt_address, int plt_entry_size) {
+  (void)linker;
   (void)plt_entry_size;
   (void)symbol;
   // Lazy binding: GOT entry initially points to the PLT resolver stub.
@@ -423,9 +425,10 @@ static void AddPLTEntry(Linker* linker, LinkerSymbol* symbol,
   BufferAppendWordLE(&contents->data.buffered, 0);
 }
 
-static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
+static void SetupResolverPLTEntry(Linker* linker, ProcedureLinkageTable* plt,
                                   Buffer* plt_buffer, uint64_t got_address,
                                   uint64_t plt_address) {
+  (void)linker;
   (void)plt;
   uint32_t* p = (uint32_t*)plt_buffer->value;
 

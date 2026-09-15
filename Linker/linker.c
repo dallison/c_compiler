@@ -1723,6 +1723,20 @@ static void ClearSegmentFixedAddresses(Segment* segment) {
   }
 }
 
+static void RebaseFixedAddress(Segment* segment, uint64_t from, uint64_t to) {
+  for (size_t i = 0; i < segment->regions.length; i++) {
+    SegmentMemoryRegion* region = segment->regions.value.p[i];
+    if (region->start != from) {
+      continue;
+    }
+    uint64_t size =
+        region->config_end == 0 ? 0 : region->config_end - region->start;
+    region->start = to;
+    region->next = to;
+    region->config_end = size == 0 ? 0 : to + size;
+  }
+}
+
 // Link all files passed to the linker together.  This gathers the sections
 // with the same names into the same place and assigns addresses to the
 // sections and symbols.
@@ -1770,6 +1784,13 @@ void LinkerLinkAllFiles(Linker* linker) {
     ClearSegmentFixedAddresses(&linker->code_segment);
     ClearSegmentFixedAddresses(&linker->dynamic_segment);
     ClearSegmentFixedAddresses(&linker->data_segment);
+  } else if (linker->elf_machine_type == ELF_MACHINE_TYPE_RISC_V &&
+             linker->ops != NULL && !linker->ops->is_64_bit) {
+    // RISC-V 32 and 64 use the same ELF machine number, so they share the
+    // default configuration.  Replace its RV64 fixed VAs with valid RV32 VAs
+    // after the input ELF class has selected the linker word size.
+    RebaseFixedAddress(&linker->code_segment, 0x400000000ULL, 0x40000000ULL);
+    RebaseFixedAddress(&linker->data_segment, 0x410000000ULL, 0x41000000ULL);
   }
   // Resolve all undefined symbols in libraries.
   ResolveUndefinedSymbols(linker);

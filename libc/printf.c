@@ -624,10 +624,10 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
       if (IsWidthModifier(fmt)) {
         unsigned long long raw = GetWidthArgument(fmt, ap, *is_unsigned);
         long long signed_value = SignExtendWidth(raw, fmt->modifier_width);
-        if (!*is_unsigned && signed_value < 0) {
+        if (!*is_unsigned &&
+            (((unsigned long long)signed_value >> 63) != 0)) {
           *negative = true;
-          *value_ll =
-              (unsigned long long)(-(signed_value + 1)) + 1;
+          *value_ll = 0ULL - (unsigned long long)signed_value;
         } else {
           *value_ll = *is_unsigned
                           ? MaskToWidth(raw, fmt->modifier_width)
@@ -672,10 +672,9 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
                                    : (long long)va_arg(*ap, int);
           break;
       }
-      long long signed_value = (long long)*value_ll;
-      if (!*is_unsigned && signed_value < 0) {
+      if (!*is_unsigned && ((*value_ll >> 63) != 0)) {
         *negative = true;
-        *value_ll = (unsigned long long)(-(signed_value + 1)) + 1;
+        *value_ll = 0ULL - *value_ll;
       }
       break;
     case 'p':

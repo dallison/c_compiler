@@ -249,8 +249,10 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
   VectorAppend(relocs, reloc);
 }
 
-static void FixupGOTEntry(LinkerSymbol* symbol, Buffer* got_plt_buffer,
+static void FixupGOTEntry(Linker* linker, LinkerSymbol* symbol,
+                          Buffer* got_plt_buffer,
                           uint64_t plt_address, int plt_entry_size) {
+  (void)linker;
   (void)plt_entry_size;
   uint64_t* p = (uint64_t*)got_plt_buffer->value + symbol->got_index;
   *p = plt_address + (uint64_t)symbol->plt_index * 16 + 6;
@@ -271,9 +273,10 @@ static void AddPLTEntry(Linker* linker, LinkerSymbol* symbol,
 }
 
 // pushq GOT+8(%rip); jmp *GOT+16(%rip); nopl 0x0(%rax)
-static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
+static void SetupResolverPLTEntry(Linker* linker, ProcedureLinkageTable* plt,
                                   Buffer* plt_buffer, uint64_t got_address,
                                   uint64_t plt_address) {
+  (void)linker;
   (void)plt;
   uint8_t* p = (uint8_t*)plt_buffer->value;
   int32_t push_disp = (int32_t)((got_address + 8) - (plt_address + 6));

@@ -20,6 +20,7 @@
 #include "dstring.h"
 #include "vector.h"
 #include "risc_v_assembler.h"
+#include "risc_v32_assembler.h"
 #include "6502_assembler.h"
 #include "p_code_assembler.h"
 #include "x86_64_assembler.h"
@@ -288,6 +289,7 @@ typedef struct {
 static const TargetRuntime target_runtimes[] = {
     {"pcode", kTargetOSNone, "libcpcode.a", "//:libc_pcode", NULL, NULL, true, false},
     {"riscv", kTargetOSNone, "libcriscv.a", "//:libc_riscv", NULL, NULL, false, false},
+    {"riscv32", kTargetOSNone, "libcriscv32.a", "//:libc_riscv32", NULL, NULL, false, false},
     {"aarch64", kTargetOSNone, "libcaarch64.a", "//:libc_aarch64", NULL, NULL, true, false},
     {"arm", kTargetOSNone, "libcarm.a", "//:libc_arm", NULL, NULL, true, false},
     {"x86_64", kTargetOSNone, "libcx86_64.a", "//:libc_x86_64", NULL, NULL, true, false},
@@ -308,6 +310,8 @@ static const TargetRuntime target_runtimes[] = {
      "arm_linux_start.o", "//:arm_linux_start", false, true},
     {"riscv", kTargetOSLinux, "libcriscv_linux.a", "//:libc_riscv_linux",
      "riscv_linux_start.o", "//:riscv_linux_start", false, true},
+    {"riscv32", kTargetOSLinux, "libcriscv32_linux.a", "//:libc_riscv32_linux",
+     "riscv32_linux_start.o", "//:riscv32_linux_start", false, true},
 };
 
 static bool TargetNameMatches(const char* target, const char* canonical) {
@@ -319,6 +323,9 @@ static bool TargetNameMatches(const char* target, const char* canonical) {
   }
   if (strcmp(canonical, "riscv") == 0) {
     return strcmp(target, "risc-v") == 0;
+  }
+  if (strcmp(canonical, "riscv32") == 0) {
+    return strcmp(target, "risc-v32") == 0;
   }
   if (strcmp(canonical, "aarch64") == 0) {
     return strcmp(target, "armv8") == 0;
@@ -1812,6 +1819,10 @@ int main(int argc, char * argv[]) {
         assembler = (Assembler*)NewRVAssembler(asm_filename, &output_filename);
         asm_run = AssembleRVInstruction;
         destructor = (AssemblerDestructor)RVAssemblerDestruct;
+      } else if (StringEqual(&target, "riscv32") || StringEqual(&target, "risc-v32")) {
+        assembler = (Assembler*)NewRV32Assembler(asm_filename, &output_filename);
+        asm_run = AssembleRV32Instruction;
+        destructor = (AssemblerDestructor)RV32AssemblerDestruct;
       } else if (StringEqual(&target, "aarch64")) {
         assembler = NewAARCH64Assembler(asm_filename, &output_filename);
         asm_run = AssembleAARCH64Instruction;

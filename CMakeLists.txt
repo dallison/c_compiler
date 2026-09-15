@@ -398,11 +398,13 @@ install(PROGRAMS
   bin/davecc-aarch64
   bin/davecc-arm
   bin/davecc-riscv
+  bin/davecc-riscv32
   bin/davecc-x86_64
   bin/run-65c02
   bin/run-aarch64
   bin/run-arm
   bin/run-riscv
+  bin/run-riscv32
   bin/run-x86_64
   DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
@@ -418,6 +420,7 @@ foreach(archive
     libcaarch64.a
     libcarm.a
     libcriscv.a
+    libcriscv32.a
     libcx86_64.a)
   install(FILES "${CMAKE_BINARY_DIR}/libc/${archive}"
           DESTINATION "${DAVECC_INSTALL_LIBDIR}"

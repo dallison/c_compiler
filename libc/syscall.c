@@ -13,13 +13,27 @@
 
 #if defined(__DAVECC_NATIVE_LINUX__)
 typedef struct {
+#if defined(__risc_v__) && defined(__ILP32__)
+  long long tv_sec;
+  long long tv_nsec;
+#else
   long tv_sec;
   long tv_nsec;
+#endif
 } DaveLinuxTimespec;
 
 time_t time(time_t* result) {
   DaveLinuxTimespec value;
-  if (syscall(SYS_clock_gettime, 0, &value) < 0) {
+  if (syscall(
+#if defined(__risc_v__) && defined(__ILP32__)
+          SYS_clock_gettime64,
+#else
+          SYS_clock_gettime,
+#endif
+          0, &value) < 0) {
+    return (time_t)-1;
+  }
+  if ((time_t)value.tv_sec != value.tv_sec) {
     return (time_t)-1;
   }
   if (result != NULL) {
@@ -30,7 +44,13 @@ time_t time(time_t* result) {
 
 clock_t clock(void) {
   DaveLinuxTimespec value;
-  if (syscall(SYS_clock_gettime, 2, &value) < 0) {
+  if (syscall(
+#if defined(__risc_v__) && defined(__ILP32__)
+          SYS_clock_gettime64,
+#else
+          SYS_clock_gettime,
+#endif
+          2, &value) < 0) {
     return (clock_t)-1;
   }
   return (clock_t)(value.tv_sec * CLOCKS_PER_SEC +

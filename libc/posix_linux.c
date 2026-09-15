@@ -45,7 +45,51 @@ pid_t fork(void) {
 }
 
 pid_t waitpid(pid_t pid, int* status, int options) {
+#if defined(__risc_v__) && defined(__ILP32__)
+  // RV32 uses the post-2038 asm-generic syscall set, which omits wait4.
+  // waitid returns the same information in siginfo_t; translate its child
+  // fields to the traditional waitpid status encoding.
+  uint32_t info[32] = {0};
+  int id_type;
+  unsigned int id;
+  if (pid > 0) {
+    id_type = 1;  // P_PID
+    id = (unsigned int)pid;
+  } else if (pid == -1) {
+    id_type = 0;  // P_ALL
+    id = 0;
+  } else {
+    id_type = 2;  // P_PGID
+    id = pid == 0 ? 0 : (unsigned int)-pid;
+  }
+  if (syscall(SYS_waitid, id_type, id, info, options | 4, NULL, 0) < 0) {
+    return -1;
+  }
+  pid_t result = (pid_t)info[3];
+  if (result == 0) {
+    return 0;
+  }
+  if (status != NULL) {
+    int code = (int)info[2];
+    int child_status = (int)info[5];
+    if (code == 1) {          // CLD_EXITED
+      *status = child_status << 8;
+    } else if (code == 2) {   // CLD_KILLED
+      *status = child_status;
+    } else if (code == 3) {   // CLD_DUMPED
+      *status = child_status | 0x80;
+    } else if (code == 5) {   // CLD_STOPPED
+      *status = (child_status << 8) | 0x7f;
+    } else if (code == 6) {   // CLD_CONTINUED
+      *status = 0xffff;
+    } else {
+      *status = 0;
+    }
+  }
+  return result;
+#else
   return (pid_t)syscall(SYS_wait4, pid, status, options, NULL, 0, 0);
+#endif
 }
 
 int isatty(int fd) {

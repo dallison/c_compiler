@@ -58,7 +58,8 @@ typedef struct LinkerArchitecture {
                         GOTRelocation relocation_type);
   
   // Fixup the GOT entry for the symbol now that addresses are known.
-  void (*fixup_got_entry)(LinkerSymbol* symbol, Buffer* got_plt_buffer,
+  void (*fixup_got_entry)(Linker* linker, LinkerSymbol* symbol,
+                          Buffer* got_plt_buffer,
                           uint64_t plt_address, int plt_entry_size);
   
   // Add entry to the PLT section for the given symbol.
@@ -68,7 +69,7 @@ typedef struct LinkerArchitecture {
   // Setup the resolver entry in the PLT.  This is the first entry
   // and calls the runtile symbol resolver for lazy symbol
   // resolution.
-  void (*setup_resolver_plt_entry)(ProcedureLinkageTable* plt,
+  void (*setup_resolver_plt_entry)(Linker* linker, ProcedureLinkageTable* plt,
                                    Buffer* plt_buffer,
                                    uint64_t got_address,
                                    uint64_t plt_address);

@@ -51,7 +51,7 @@ lldiv_t lldiv(long long int numer, long long int denom) {
 #endif
 }
 
-#if defined(__arm__)
+#if defined(__arm__) || (defined(__risc_v__) && defined(__ILP32__))
 // 32-bit ARM has no hardware 64-bit multiply, divide or modulo.  The code
 // generator lowers those operations into calls to the libgcc-style runtime
 // helpers below.  These implementations deliberately use only 64-bit add,
@@ -140,5 +140,117 @@ long long __moddi3(long long a, long long b) {
   __udivmoddi4(ua, ub, &r);
   return negate ? -(long long)r : (long long)r;
 }
-#endif  // __arm__
+
+#if defined(__risc_v__) && defined(__ILP32__)
+unsigned long long __ashldi3(unsigned long long a, int n) {
+  unsigned alo = (unsigned)a;
+  unsigned ahi = (unsigned)(a >> 32);
+  n &= 63;
+  unsigned lo, hi;
+  if (n == 0) {
+    return a;
+  }
+  if (n >= 32) {
+    lo = 0;
+    hi = alo << (n - 32);
+  } else {
+    lo = alo << n;
+    hi = (ahi << n) | (alo >> (32 - n));
+  }
+  return ((unsigned long long)hi << 32) | lo;
+}
+
+unsigned long long __lshrdi3(unsigned long long a, int n) {
+  unsigned alo = (unsigned)a;
+  unsigned ahi = (unsigned)(a >> 32);
+  n &= 63;
+  unsigned lo, hi;
+  if (n == 0) {
+    return a;
+  }
+  if (n >= 32) {
+    hi = 0;
+    lo = ahi >> (n - 32);
+  } else {
+    hi = ahi >> n;
+    lo = (alo >> n) | (ahi << (32 - n));
+  }
+  return ((unsigned long long)hi << 32) | lo;
+}
+
+long long __ashrdi3(long long a, int n) {
+  unsigned alo = (unsigned)a;
+  int ahi = (int)(unsigned)((unsigned long long)a >> 32);
+  n &= 63;
+  unsigned lo;
+  int hi;
+  if (n == 0) {
+    return a;
+  }
+  if (n >= 32) {
+    hi = ahi >> 31;
+    lo = (unsigned)(ahi >> (n - 32));
+  } else {
+    hi = ahi >> n;
+    lo = (alo >> n) | ((unsigned)ahi << (32 - n));
+  }
+  return (long long)(((unsigned long long)(unsigned)hi << 32) | lo);
+}
+
+long long __davecc_double_to_i64(double value) {
+  union {
+    double value;
+    unsigned long long bits;
+  } input;
+  input.value = value;
+  unsigned sign = (unsigned)(input.bits >> 63);
+  unsigned exponent = (unsigned)((input.bits >> 52) & 0x7ff);
+  if (exponent == 0x7ff) {
+    return sign ? (long long)0x8000000000000000ULL
+                : (long long)0x7fffffffffffffffULL;
+  }
+  int e = (int)exponent - 1023;
+  if (e < 0) {
+    return 0;
+  }
+  if (e > 63 || (e == 63 && sign == 0)) {
+    return sign ? (long long)0x8000000000000000ULL
+                : (long long)0x7fffffffffffffffULL;
+  }
+  unsigned long long magnitude =
+      (input.bits & ((1ULL << 52) - 1)) | (1ULL << 52);
+  if (e >= 52) {
+    magnitude <<= e - 52;
+  } else {
+    magnitude >>= 52 - e;
+  }
+  return sign ? (long long)(0ULL - magnitude) : (long long)magnitude;
+}
+
+unsigned long long __davecc_double_to_u64(double value) {
+  union {
+    double value;
+    unsigned long long bits;
+  } input;
+  input.value = value;
+  unsigned sign = (unsigned)(input.bits >> 63);
+  unsigned exponent = (unsigned)((input.bits >> 52) & 0x7ff);
+  if (sign != 0 || (int)exponent - 1023 < 0) {
+    return 0;
+  }
+  int e = (int)exponent - 1023;
+  if (exponent == 0x7ff || e > 63) {
+    return 0xffffffffffffffffULL;
+  }
+  unsigned long long magnitude =
+      (input.bits & ((1ULL << 52) - 1)) | (1ULL << 52);
+  if (e >= 52) {
+    magnitude <<= e - 52;
+  } else {
+    magnitude >>= 52 - e;
+  }
+  return magnitude;
+}
+#endif
+#endif  // __arm__ || RV32 ILP32
 

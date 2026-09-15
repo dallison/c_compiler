@@ -10,6 +10,25 @@
 static pthread_mutex_t fallback_heap_mutex = PTHREAD_MUTEX_INITIALIZER;
 static __thread int fallback_heap_lock_depth;
 
+typedef struct {
+  uint64_t guest_address;
+  void* host_address;
+  size_t size;
+} RISCVGuestHeapAllocation;
+
+static void* ResolveGuestHeapAddressLocked(RISCVProcessRuntime* process,
+                                           uint64_t addr, size_t size) {
+  for (size_t i = 0; i < process->heap_allocations.length; i++) {
+    RISCVGuestHeapAllocation* allocation =
+        process->heap_allocations.value.p[i];
+    uint64_t start = allocation->guest_address;
+    if (addr >= start && addr + size <= start + allocation->size) {
+      return (char*)allocation->host_address + (addr - start);
+    }
+  }
+  return NULL;
+}
+
 static void* ResolveGuestAddressThreadMapsLocked(RISCVProcessRuntime* process,
                                                  uint64_t addr, size_t size) {
   for (size_t i = 0; i < process->threads.length; i++) {
@@ -42,6 +61,10 @@ static void* ResolveGuestAddressFullLocked(RISCVProcessRuntime* process,
   if (mapped != NULL) {
     return mapped;
   }
+  mapped = ResolveGuestHeapAddressLocked(process, addr, size);
+  if (mapped != NULL) {
+    return mapped;
+  }
   Loader* loader = process->loader;
   if (loader == NULL) {
     return NULL;
@@ -54,44 +77,57 @@ static void* ResolveGuestAddressFullLocked(RISCVProcessRuntime* process,
       return (void*)(uintptr_t)addr;
     }
   }
+  uint64_t runtime = 0;
+  if (LoaderLinkedAddressToRuntime(loader, NULL, addr, &runtime)) {
+    for (size_t i = 0; i < loader->regions.length; i++) {
+      Region* region = loader->regions.value.p[i];
+      uint64_t start = (uint64_t)(uintptr_t)region->address;
+      uint64_t end = start + (uint64_t)region->length;
+      if (runtime >= start && runtime + size <= end) {
+        return (void*)(uintptr_t)runtime;
+      }
+    }
+  }
   return NULL;
 }
 
 static void WaitForGuestMapReaders(RISCVProcessRuntime* process) {
+  pthread_mutex_lock(&process->memory_mutex);
   pthread_mutex_lock(&process->mutex);
   pthread_mutex_unlock(&process->mutex);
+  pthread_mutex_unlock(&process->memory_mutex);
 }
 
 static bool GuestReadMemory(RISCVProcessRuntime* process, uint64_t guest_addr,
                             void* buf, size_t size) {
-  pthread_mutex_lock(&process->mutex);
   pthread_mutex_lock(&process->memory_mutex);
+  pthread_mutex_lock(&process->mutex);
   void* host = ResolveGuestAddressFullLocked(process, guest_addr, size);
   if (host == NULL) {
-    pthread_mutex_unlock(&process->memory_mutex);
     pthread_mutex_unlock(&process->mutex);
+    pthread_mutex_unlock(&process->memory_mutex);
     return false;
   }
   memcpy(buf, host, size);
-  pthread_mutex_unlock(&process->memory_mutex);
   pthread_mutex_unlock(&process->mutex);
+  pthread_mutex_unlock(&process->memory_mutex);
   return true;
 }
 
 static bool GuestWriteMemory(RISCVProcessRuntime* process, uint64_t guest_addr,
                              const void* buf, size_t size) {
-  pthread_mutex_lock(&process->mutex);
   pthread_mutex_lock(&process->memory_mutex);
+  pthread_mutex_lock(&process->mutex);
   void* host = ResolveGuestAddressFullLocked(process, guest_addr, size);
   if (host == NULL) {
-    pthread_mutex_unlock(&process->memory_mutex);
     pthread_mutex_unlock(&process->mutex);
+    pthread_mutex_unlock(&process->memory_mutex);
     return false;
   }
   memcpy(host, buf, size);
   process->write_epoch++;
-  pthread_mutex_unlock(&process->memory_mutex);
   pthread_mutex_unlock(&process->mutex);
+  pthread_mutex_unlock(&process->memory_mutex);
   return true;
 }
 
@@ -251,8 +287,11 @@ bool RISCVProcessRuntimeInit(RISCVProcessRuntime* process, Loader* loader) {
     return false;
   }
   VectorInit(&process->threads);
+  VectorInit(&process->heap_allocations);
+  process->next_heap_address = RISC_V_HEAP_BASE;
   process->next_tid = 2;
   if (!GuestAddrWaitTableInit(&process->addr_wait_table)) {
+    VectorDestruct(&process->heap_allocations);
     VectorDestruct(&process->threads);
     pthread_key_delete(process->current_thread_key);
     pthread_mutex_destroy(&process->heap_mutex);
@@ -304,6 +343,8 @@ void RISCVProcessRuntimeDestruct(RISCVProcessRuntime* process) {
     VectorAppend(&process->threads, main_thread);
   }
   pthread_mutex_unlock(&process->mutex);
+  pthread_mutex_unlock(&process->memory_mutex);
+  pthread_mutex_unlock(&process->memory_mutex);
 
   for (size_t i = 0; i < worker_count; i++) {
     pthread_join(worker_hosts[i], NULL);
@@ -315,6 +356,13 @@ void RISCVProcessRuntimeDestruct(RISCVProcessRuntime* process) {
     WaitForGuestMapReaders(process);
     DestroyGuestThread(main_thread);
   }
+  for (size_t i = 0; i < process->heap_allocations.length; i++) {
+    RISCVGuestHeapAllocation* allocation =
+        process->heap_allocations.value.p[i];
+    free(allocation->host_address);
+    free(allocation);
+  }
+  VectorDestruct(&process->heap_allocations);
   VectorDestruct(&process->threads);
   GuestAddrWaitTableDestruct(&process->addr_wait_table);
   pthread_key_delete(process->current_thread_key);
@@ -361,6 +409,129 @@ void* RISCVProcessResolveGuestAddress(RISCVProcessRuntime* process,
   void* result = ResolveGuestAddressFullLocked(process, addr, size);
   pthread_mutex_unlock(&process->mutex);
   return result;
+}
+
+static bool GuestHeapRangeAvailableLocked(RISCVProcessRuntime* process,
+                                          size_t size,
+                                          uint64_t* guest_address,
+                                          uint64_t* next_address) {
+  uint64_t span = ((uint64_t)(size == 0 ? 1 : size) + 15) & ~15ULL;
+  uint64_t start = process->next_heap_address;
+  uint64_t end = start + span;
+  if (end < start || end > RISC_V_TLS_BASE) {
+    return false;
+  }
+  *guest_address = start;
+  *next_address = end;
+  return true;
+}
+
+bool RISCVProcessGuestHeapMalloc(RISCVProcessRuntime* process, size_t size,
+                                 uint32_t* guest_address) {
+  if (process == NULL || !process->initialized || guest_address == NULL) {
+    return false;
+  }
+  RISCVGuestHeapAllocation* allocation = malloc(sizeof(*allocation));
+  if (allocation == NULL) {
+    return false;
+  }
+  allocation->host_address = malloc(size == 0 ? 1 : size);
+  if (allocation->host_address == NULL) {
+    free(allocation);
+    return false;
+  }
+  pthread_mutex_lock(&process->memory_mutex);
+  pthread_mutex_lock(&process->mutex);
+  uint64_t next_address;
+  bool ok = GuestHeapRangeAvailableLocked(
+      process, size, &allocation->guest_address, &next_address);
+  if (ok) {
+    allocation->size = size == 0 ? 1 : size;
+    process->next_heap_address = next_address;
+    VectorAppend(&process->heap_allocations, allocation);
+    *guest_address = (uint32_t)allocation->guest_address;
+  }
+  pthread_mutex_unlock(&process->mutex);
+  pthread_mutex_unlock(&process->memory_mutex);
+  if (!ok) {
+    free(allocation->host_address);
+    free(allocation);
+  }
+  return ok;
+}
+
+bool RISCVProcessGuestHeapRealloc(RISCVProcessRuntime* process,
+                                  uint32_t old_guest_address, size_t size,
+                                  uint32_t* new_guest_address) {
+  if (old_guest_address == 0) {
+    return RISCVProcessGuestHeapMalloc(process, size, new_guest_address);
+  }
+  if (process == NULL || !process->initialized || new_guest_address == NULL) {
+    return false;
+  }
+  if (size == 0) {
+    RISCVProcessGuestHeapFree(process, old_guest_address);
+    *new_guest_address = 0;
+    return true;
+  }
+  pthread_mutex_lock(&process->memory_mutex);
+  pthread_mutex_lock(&process->mutex);
+  for (size_t i = 0; i < process->heap_allocations.length; i++) {
+    RISCVGuestHeapAllocation* allocation =
+        process->heap_allocations.value.p[i];
+    if (allocation->guest_address != old_guest_address) {
+      continue;
+    }
+    uint64_t new_guest = allocation->guest_address;
+    uint64_t next_address = process->next_heap_address;
+    if (size > allocation->size &&
+        !GuestHeapRangeAvailableLocked(process, size, &new_guest,
+                                       &next_address)) {
+      pthread_mutex_unlock(&process->mutex);
+      pthread_mutex_unlock(&process->memory_mutex);
+      return false;
+    }
+    void* host = realloc(allocation->host_address, size);
+    if (host == NULL) {
+      pthread_mutex_unlock(&process->mutex);
+      pthread_mutex_unlock(&process->memory_mutex);
+      return false;
+    }
+    allocation->host_address = host;
+    allocation->guest_address = new_guest;
+    allocation->size = size;
+    process->next_heap_address = next_address;
+    *new_guest_address = (uint32_t)new_guest;
+    pthread_mutex_unlock(&process->mutex);
+    pthread_mutex_unlock(&process->memory_mutex);
+    return true;
+  }
+  pthread_mutex_unlock(&process->mutex);
+  pthread_mutex_unlock(&process->memory_mutex);
+  return false;
+}
+
+void RISCVProcessGuestHeapFree(RISCVProcessRuntime* process,
+                               uint32_t guest_address) {
+  if (process == NULL || !process->initialized || guest_address == 0) {
+    return;
+  }
+  pthread_mutex_lock(&process->memory_mutex);
+  pthread_mutex_lock(&process->mutex);
+  for (size_t i = 0; i < process->heap_allocations.length; i++) {
+    RISCVGuestHeapAllocation* allocation =
+        process->heap_allocations.value.p[i];
+    if (allocation->guest_address == guest_address) {
+      VectorDeleteElement(&process->heap_allocations, i);
+      pthread_mutex_unlock(&process->mutex);
+      free(allocation->host_address);
+      free(allocation);
+      pthread_mutex_unlock(&process->memory_mutex);
+      return;
+    }
+  }
+  pthread_mutex_unlock(&process->mutex);
+  pthread_mutex_unlock(&process->memory_mutex);
 }
 
 static int RunWorker(RISCVGuestThread* thread) {

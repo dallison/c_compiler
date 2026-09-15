@@ -42,6 +42,10 @@ void DynamicLinkerInit(DynamicLinker* s, Linker* linker) {
 
   // Initialize architecture specific info.
   linker->arch->init_dynamic_linker(s);
+  if (linker->elf_machine_type == ELF_MACHINE_TYPE_RISC_V &&
+      linker->ops != NULL && !linker->ops->is_64_bit) {
+    s->global_offset_table.entry_size = 4;
+  }
 
   VectorInit(&s->global_offset_table.data_entries);
   VectorInit(&s->global_offset_table.tls_ie_entries);
@@ -263,7 +267,7 @@ void DynamicLinkerFixupGOT(Linker* linker) {
     // into the GOT.  The plt_index is the absolute index
     // into the PLT.
     //
-    linker->arch->fixup_got_entry(symbol, got_plt_buffer, plt_address,
+    linker->arch->fixup_got_entry(linker, symbol, got_plt_buffer, plt_address,
                                   dynamic->procedure_linkage_table.entry_size);
   }
 }
@@ -313,7 +317,8 @@ void DynamicLinkerFixupPLT(Linker* linker) {
   
   // Add the first entry to the PLT.  This is a call to the dynamic loader's
   // symbol resolver.
-  linker->arch->setup_resolver_plt_entry(plt, plt_buffer, got_address, plt_address);
+  linker->arch->setup_resolver_plt_entry(linker, plt, plt_buffer, got_address,
+                                         plt_address);
   
   // Fixup the actual PLT trampolines now.
   for (size_t i = 0; i < plt->trampolines.length; i++) {

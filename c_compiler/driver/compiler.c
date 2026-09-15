@@ -41,6 +41,7 @@
 #include "6502_target.h"
 #include "p_code_target.h"
 #include "risc_v_target.h"
+#include "risc_v32_target.h"
 #include "aarch64_target.h"
 #include "arm_target.h"
 #include "common_emitter.h"
@@ -235,6 +236,8 @@ static struct CompilerTargetDefinition{
   {"riscv", {"riscv", "risc-v"}, NewRVTarget, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupportsC11Atomics | kTargetSupports8ByteAtomics},
+  {"riscv32", {"riscv32", "risc-v32"}, NewRV32Target, false, 0,
+   kTargetSupportsThreads | kTargetSupportsAtomics},
   {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupports8ByteAtomics},
