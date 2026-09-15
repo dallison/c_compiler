@@ -1,7 +1,7 @@
 #include "vars.s"
 
 // Long division routines.  4 and 8 byte.
-.text
+.section ".text.__udiv4", "ax", @progbits
 
 .global __sdiv4
 .global __udiv4

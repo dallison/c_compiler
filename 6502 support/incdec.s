@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __inc1
 .global __inc21
@@ -38,6 +38,7 @@
 .global __rdecf
 .global __rdecd
 
+.section ".text.__inc1", "ax", @progbits
 __inc1:
   TAX
   LDA 0,X
@@ -50,6 +51,7 @@ __inc1:
   STA (__t2)
   RTS
 
+.section ".text.__rinc1", "ax", @progbits
 __rinc1:
   TAX
   CLC
@@ -58,6 +60,7 @@ __rinc1:
   STA 0,X
   RTS
 
+.section ".text.__inc21", "ax", @progbits
 __inc21:
   TAX
   LDA 0,X
@@ -75,6 +78,7 @@ __inc21:
   RTS
 
 // Increment register in X by 1
+.section ".text.__rinc21", "ax", @progbits
 __rinc21:
   TAX
   CLC
@@ -87,8 +91,10 @@ __rinc21:
   RTS
 
 
+.section ".text.__inc2", "ax", @progbits
 __inc2:
   LDY #0
+.section ".text.__inc2b", "ax", @progbits
 __inc2b:
   STX __t0
   STY __t1
@@ -107,8 +113,10 @@ __inc2b:
   STA (__t2), Y
   RTS
 
+.section ".text.__rinc2", "ax", @progbits
 __rinc2:
   LDY #0
+.section ".text.__rinc2b", "ax", @progbits
 __rinc2b:
   STX __t0
   STY __t1
@@ -122,6 +130,7 @@ __rinc2b:
   STA 1,X
   RTS
 
+.section ".text.__inc4", "ax", @progbits
 __inc4:
   TAX
   LDA 0,X
@@ -146,6 +155,7 @@ __inc4:
   STA (__t2), Y
   RTS
 
+.section ".text.__rinc4", "ax", @progbits
 __rinc4:
   TAX
   CLC
@@ -164,6 +174,7 @@ __rinc4:
   RTS
 
 
+.section ".text.__inc8", "ax", @progbits
 __inc8:
   TAX
   LDA 0,X
@@ -204,6 +215,7 @@ __inc8:
   STA (__t2), Y
   RTS
 
+.section ".text.__rinc8", "ax", @progbits
 __rinc8:
   TAX
   CLC
@@ -233,16 +245,21 @@ __rinc8:
   STA 7,X
   RTS
 
+.section ".text.__incf", "ax", @progbits
 __incf:
 __incfb:
+.section ".text.__incd", "ax", @progbits
 __incd:
 __incdb:
+.section ".text.__rincf", "ax", @progbits
 __rincf:
 __rincfb:
+.section ".text.__rincd", "ax", @progbits
 __rincd:
 __rincdb:
 RTS
 
+.section ".text.__dec1", "ax", @progbits
 __dec1:
   TAX
   LDA 0,X
@@ -255,6 +272,7 @@ __dec1:
   STA (__t2)
   RTS
 
+.section ".text.__rdec1", "ax", @progbits
 __rdec1:
   TAX
   SEC
@@ -263,6 +281,7 @@ __rdec1:
   STA 0,X
   RTS
 
+.section ".text.__dec21", "ax", @progbits
 __dec21:
   TAX
   LDA 0,X
@@ -279,6 +298,7 @@ __dec21:
   STA (__t2), Y
   RTS
 
+.section ".text.__rdec21", "ax", @progbits
 __rdec21:
   TAX
   SEC
@@ -290,8 +310,10 @@ __rdec21:
   STA 1,X
   RTS
 
+.section ".text.__dec2", "ax", @progbits
 __dec2:
   LDY #0
+.section ".text.__dec2b", "ax", @progbits
 __dec2b:
   STX __t0
   STY __t1
@@ -310,8 +332,10 @@ __dec2b:
   STA (__t2), Y
   RTS
 
+.section ".text.__rdec2", "ax", @progbits
 __rdec2:
   LDY #0
+.section ".text.__rdec2b", "ax", @progbits
 __rdec2b:
   STX __t0
   STY __t1
@@ -325,6 +349,7 @@ __rdec2b:
   STA 1,X
   RTS
 
+.section ".text.__dec4", "ax", @progbits
 __dec4:
   TAX
   LDA 0,X
@@ -349,6 +374,7 @@ __dec4:
   STA (__t2), Y
   RTS
 
+.section ".text.__rdec4", "ax", @progbits
 __rdec4:
   TAX
   SEC
@@ -366,6 +392,7 @@ __rdec4:
   STA 3,X
   RTS
 
+.section ".text.__dec8", "ax", @progbits
 __dec8:
   TAX
   LDA 0,X
@@ -406,6 +433,7 @@ __dec8:
   STA (__t2), Y
   RTS
 
+.section ".text.__rdec8", "ax", @progbits
 __rdec8:
   TAX
   SEC
@@ -435,12 +463,16 @@ __rdec8:
   STA 7,X
   RTS
 
+.section ".text.__decf", "ax", @progbits
 __decf:
 __decfb:
+.section ".text.__decd", "ax", @progbits
 __decd:
 __decdb:
+.section ".text.__rdecf", "ax", @progbits
 __rdecf:
 __rdecfb:
+.section ".text.__rdecd", "ax", @progbits
 __rdecd:
 __rdecdb:
   RTS

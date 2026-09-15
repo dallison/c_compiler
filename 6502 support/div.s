@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 // Only declare symbols defined in this file.  Declaring symbols that live in
 // other archive members (longdiv.s, longlongdiv.s, fdiv.s) creates undefined
@@ -25,9 +25,11 @@
 .set remainder mt1
 .set quotient mt2
 
+.section ".text.__sdiv1", "ax", @progbits
 __sdiv1:
   RTS
 
+.section ".text.__udiv1", "ax", @progbits
 __udiv1:
   RTS
 
@@ -36,6 +38,7 @@ __udiv1:
 // TODO: this is wrong for negative numbers according to C99.
 // We need to round the quotient toward zero and the sign of the remainer
 // can be negative.
+.section ".text.__sdiv2", "ax", @progbits
 __sdiv2:
   PHA
   LDA 0,X
@@ -88,6 +91,7 @@ sdiv2_l2:
   STA 1,X
   RTS
 
+.section ".text.__sdiv2", "ax", @progbits
 __udiv2:
   PHA
   LDA 0,X
@@ -136,6 +140,7 @@ udiv2_l2:
         BNE udiv2_l1
         RTS
 
+.section ".text.__smod2", "ax", @progbits
 __smod2:
   PHA
   LDA 0,X
@@ -188,6 +193,7 @@ smod2_l2:
   STA 1,X
   RTS
 
+.section ".text.__smod2", "ax", @progbits
 __umod2:
   PHA
   LDA 0,X
@@ -212,6 +218,7 @@ umod2_1:
  
 
 
+.section ".text.__smod2", "ax", @progbits
 __smod1:
 __umod1:
   RTS
@@ -221,6 +228,7 @@ __umod1:
 // sp+0,1: result address
 // sp+2,3: numerator
 // sp+4,5: demoninator
+.section ".text.__smod2", "ax", @progbits
 __cdivmod2:
   LDX #4              // Minimum frame.
   JSR __enter_leaf_nomask

@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+.section ".text.__load_indirect8", "ax", @progbits
 
 // Load eight bytes through a pointer held in a zero-page register.
 // X: zero-page offset of the two-byte address register.

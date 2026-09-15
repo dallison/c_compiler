@@ -1,7 +1,7 @@
 #include "vars.s"
 #include "fp.s"
 
-.text
+.section ".text.__fneg", "ax", @progbits
 
 __fneg:
   TAY

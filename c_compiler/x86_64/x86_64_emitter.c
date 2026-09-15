@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include "common_emitter.h"
 #include "compiler.h"
 #include "eh_metadata.h"
 #include "x86_64_assembler.h"
@@ -3119,7 +3120,7 @@ static void ReloadStructReturnRegisterAtLandingPad(X86_64Emitter* emitter,
 
 void X86_64PrintFunction(X86_64Emitter* emitter, FILE* fp) {
   const char* func_name = emitter->rv->base.function_name.value;
-  fprintf(fp, "\t.text\n");
+  EmitFunctionSection(fp, func_name);
   if (emitter->rv->base.is_weak) {
     fprintf(fp, "\t.weak %s\n", func_name);
   } else if (emitter->rv->base.is_global) {
@@ -3157,6 +3158,7 @@ void X86_64PrintCXXAdjustorThunks(FILE* fp) {
         TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
     const char* target_name =
         TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    EmitFunctionSection(fp, thunk_name);
     fprintf(fp, "\t.weak  %s\n", thunk_name);
     fprintf(fp, "\t.type %s, @function\n\n", thunk_name);
     fprintf(fp, "%s:\n", thunk_name);

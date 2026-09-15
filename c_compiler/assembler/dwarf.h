@@ -26,10 +26,17 @@ typedef struct {
   int file;
   int line;
   int col;
+  int section;
   uint64_t address;
 } LocationEntry;
 
-LocationEntry* NewLocationEntry(int file, int line, int col, uint64_t address);
+LocationEntry* NewLocationEntry(int file, int line, int col, int section,
+                                uint64_t address);
+
+typedef struct {
+  int32_t offset;
+  int section;
+} DwarfAddressFixup;
 
 typedef struct {
   String* filename;
@@ -51,6 +58,7 @@ typedef struct {
   uint8_t line_range;
   int32_t
       address_offset;  // Offset into debug_line section for initial address.
+  Vector address_fixups;  // DwarfAddressFixup* for each set_address.
 } Dwarf;
 
 void DwarfInit(Dwarf* dwarf);
@@ -61,7 +69,7 @@ struct AssemblerRelocation* DwarfDebugLineRelocation(
     Dwarf* dwarf, struct AssemblerSymbol* symbol, int reloc_type,
     int section_index);
 void DwarfAddFile(Dwarf* dwarf, String* filename);
-void DwarfAddLocation(Dwarf* dwarf, int file, int line, int col,
+void DwarfAddLocation(Dwarf* dwarf, int file, int line, int col, int section,
                       uint64_t address);
 
 #endif /* dwarf_h */

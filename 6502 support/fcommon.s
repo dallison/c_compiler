@@ -1,7 +1,7 @@
 #include "vars.s"
 #include "fp.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 
 // Assemble a 32-bit float.
@@ -9,6 +9,7 @@
 // fsign: sign bit (0x80 or 0)
 // fmantissa: 40 bits of mantissa with explicit 1 in bit 31.
 // X: index into zero page for result.
+.section ".text.__fassemble", "ax", @progbits
 __fassemble:
   // Exponent and sign are in top byte
   LDA fexp
@@ -36,6 +37,7 @@ __fassemble:
 // sp+2: exponent
 // sp+4: mantissa (8 bytes).  Take top 3 bytes at offset sp+9
 // X: offset into zero page for result
+.section ".text.__packIEEE754", "ax", @progbits
 __packIEEE754:
   LDA (__sp)
   STA fsign
@@ -58,6 +60,7 @@ __packIEEE754:
   ROR fmantissa+1
   JMP __fassemble
   
+.section ".text.__fzero", "ax", @progbits
 __fzero:
   PLX
   LDA #0
@@ -67,6 +70,7 @@ __fzero:
   STA 3,X
   RTS
 
+.section ".text.__fzero_mantissa", "ax", @progbits
 __fzero_mantissa:
   STZ fmantissa+0
   STZ fmantissa+1
@@ -75,6 +79,7 @@ __fzero_mantissa:
   STZ fmantissa+4
   RTS
 
+.section ".text.__fmantissa_is_zero", "ax", @progbits
 __fmantissa_is_zero:
   LDA fmantissa+4
   ORA fmantissa+3
@@ -90,6 +95,7 @@ __fmantissa_is_zero:
 //   fexpA: exponent with bias
 //   fmanA: middle 3 bytes set to mantissa
 //   fsignA: sign (0x80 or 0)
+.section ".text.__funpackA", "ax", @progbits
 __funpackA:
   LDA 3,X
   STA fexpA      // Bottom 7 bits of exponent (with sign bit)
@@ -117,6 +123,7 @@ __funpackA:
   RTS
 
 // Y: index of float in zero page.
+.section ".text.__funpackB", "ax", @progbits
 __funpackB:
   LDA 3,Y
   STA fexpB      // Bottom 7 bits of exponent (with sign bit)
@@ -154,6 +161,7 @@ __funpackB:
 // it is and decrement exponent each shift.
 //
 // The mantissa must contain a valid encoding - not zero, Nan or infinity.
+.section ".text.__fnormalize", "ax", @progbits
 __fnormalize:
 fnorm_right:             // If top byte is non-zero, shift right until 0.
   LDA fmantissa+4
@@ -182,6 +190,7 @@ fendnorm:
   RTS
 
 // Round the fmantissa using IEEE754 round to zero even rule.
+.section ".text.__fround", "ax", @progbits
 __fround:
   LDA fmantissa+0
   BIT #0x80     // Lowest byte top bit set?
@@ -209,6 +218,7 @@ round_up:
   RTS
 
 // X: offset of A in zero page in IEE754 format.
+.section ".text.__fcheckA0", "ax", @progbits
 __fcheckA0:
   LDA 3,X
   AND #0x7f   // Mask off sign bit.
@@ -218,6 +228,7 @@ __fcheckA0:
   RTS
 
 // Y: offset of B in zero page in IEE754 format.
+.section ".text.__fcheckB0", "ax", @progbits
 __fcheckB0:
   LDA 3,Y
   AND #0x7f   // Mask off sign bit.
@@ -229,6 +240,7 @@ __fcheckB0:
 // Result is B.
 // X: dest offset in zero page.
 // Y: offset of B in zero page
+.section ".text.__fresB", "ax", @progbits
 __fresB:
   LDA #4
   STA __t1
@@ -244,6 +256,7 @@ fres_B_loop:
 // Result is A.
 // X: offset of A in zero page
 // Y: dest offset in zero page.
+.section ".text.__fresA", "ax", @progbits
 __fresA:
   LDA #4
   STA __t1
@@ -256,6 +269,7 @@ fres_A_loop:
   BNE fres_A_loop
   RTS
 
+.section ".text.__fres0", "ax", @progbits
 __fres0:
   LDY #4
   LDA #0
@@ -268,6 +282,7 @@ fres_0_loop:
 
 // Entry:
 // frshift: number of bits to shift
+.section ".text.__frshiftB", "ax", @progbits
 __frshiftB:
   LSR fmanB+4
   ROR fmanB+3
@@ -278,6 +293,7 @@ __frshiftB:
   BNE __frshiftB
   RTS
 
+.section ".text.__frshiftA", "ax", @progbits
 __frshiftA:
   LSR fmanA+4
   ROR fmanA+3
@@ -288,6 +304,7 @@ __frshiftA:
   BNE __frshiftA
   RTS
 
+.section ".text.__fnegmantissa", "ax", @progbits
 __fnegmantissa:
   SEC
   LDA #0
@@ -311,6 +328,7 @@ __fnegmantissa:
 // Infinity is 0x7f800000
 
 // X: offset into zero page for result.
+.section ".text.__fnan", "ax", @progbits
 __fnan:
   LDA #0x7f
   STA 0,X
@@ -321,6 +339,7 @@ __fnan:
   RTS
 
 // X: offset into zero page for result.
+.section ".text.__finf", "ax", @progbits
 __finf:
   LDA #0x7f
   STA 0,X
@@ -332,6 +351,7 @@ __finf:
   RTS
 
 // X: offset into zero page
+.section ".text.__fisnanA", "ax", @progbits
 __fisnanA:
   LDA 3,X
   AND #0x7f
@@ -352,6 +372,7 @@ notnaninf:
   RTS
 
 // Y: offset into zero page
+.section ".text.__fisnanB", "ax", @progbits
 __fisnanB:
   LDA 3,Y
   AND #0x7f
@@ -370,6 +391,7 @@ __fisnanB:
 
 
 // X: offset into zero page
+.section ".text.__fisinfA", "ax", @progbits
 __fisinfA:
   LDA 3,X
   AND #0x7f
@@ -388,6 +410,7 @@ __fisinfA:
 
 
 // Y: offset into zero page
+.section ".text.__fisinfB", "ax", @progbits
 __fisinfB:
   LDA 3,Y
   AND #0x7f
@@ -411,6 +434,7 @@ __fisinfB:
 // uint8_t exp;
 // uint32_t mantissa;
 
+.section ".text.__unpackIEEE754", "ax", @progbits
 __unpackIEEE754:
   // Load fp address into t0,t1
   LDA (__sp)

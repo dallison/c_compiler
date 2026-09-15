@@ -504,6 +504,7 @@ typedef enum {
   SHF(strings) = 0x20,               // Contains strings.
   SHF(tls) = (1 << 10),              // Thread Local Storage.
   SHF(link_order) = (1 << 7),        // Preserve section order for linking.
+  SHF(gnu_retain) = 0x200000,        // Do not GC this section (--gc-sections).
 } ELFSectionFlags;
 
 // A section header.

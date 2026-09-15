@@ -216,6 +216,10 @@ typedef struct Linker {
   int64_t origin;             // Origin address (or zero for default).
   void* stacktrace_info;      // Linker-owned stacktrace metadata state.
   
+  // Discard allocatable input sections that nothing reachable references.
+  bool gc_sections;
+  bool print_gc_sections;
+
   // Debug printing.
   bool print_symbol_tables;
   bool print_relocations;

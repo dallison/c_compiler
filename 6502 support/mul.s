@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 // Only declare symbols defined in this file.  __umul4/__smul4 live in
 // longmul.s; declaring them here would pull that member into every link.
@@ -23,6 +23,7 @@
 // For signed multiply we check the sign bits of the 2 operands.
 // If they are different we know one of them is negative.  We negate
 // the negative one and then negate the result.
+.section ".text.__smul1", "ax", @progbits
 __smul1:
   PHA
   LDA 0,X
@@ -61,6 +62,7 @@ smul1b:
   STA 0,X
   RTS
 
+.section ".text.__smul1", "ax", @progbits
 __umul1:
   PHA
   LDA 0,X
@@ -92,6 +94,7 @@ umul1_l2:
   STA 0,X
   RTS
 
+.section ".text.__smul2", "ax", @progbits
 __smul2:
   PHA
   LDA 0,X
@@ -144,6 +147,7 @@ smul2b:
   STA 1,X
   RTS
 
+.section ".text.__smul2", "ax", @progbits
 __umul2:
   PHA
   LDA 0,X
@@ -192,6 +196,7 @@ umul2_l2:
 // X: offset of multiplicand in zero page.
 // Perform multiplication by:
 // b = a * 8 + a * 2
+.section ".text.__umul2_10", "ax", @progbits
 __umul2_10:
   PHA
   LDY #0
@@ -239,6 +244,7 @@ mul2_10_done:
   RTS
 
 // Signed multiply int by 10
+.section ".text.__umul2_10", "ax", @progbits
 __smul2_10:
   PHA
   LDY #0

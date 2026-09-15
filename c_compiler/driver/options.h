@@ -59,6 +59,8 @@ typedef enum {
   kOptionConstexprEval,      // Constant evaluator: auto, pcode, ast, or audit.
   kOptionContracts,          // Contract semantic: ignore/observe/enforce/quick-enforce.
   kOptionLTO,                // -flto: compile all sources in one whole-program unit.
+  kOptionFunctionSections,   // -ffunction-sections: one ELF section per function.
+  kOptionNoFunctionSections, // -fno-function-sections: share a single .text.
 } CompilerOption;
 
 // This holds the strings from the command line, split into two

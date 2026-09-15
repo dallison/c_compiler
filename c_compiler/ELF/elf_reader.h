@@ -27,6 +27,8 @@ typedef struct ELFReaderSection {
   uint64_t address;             // Address assigned to section.
   uint64_t offset;              // Offset into output section.
   int32_t output_section_index; // Section index in output.
+  bool discarded;               // Unused allocatable section dropped by GC.
+  Vector gc_refs;               // ELFReaderSection* this section relocates to.
 } ELFReaderSection;
 
 ELFReaderSection* NewELFReaderSection(void);

@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+.section ".text.__umul4", "ax", @progbits
 
 .global __umul4
 .global __smul4

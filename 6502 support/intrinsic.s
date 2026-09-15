@@ -7,7 +7,7 @@
 //
 
 #include "vars.s"
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __builtin_isalnum
 .global __builtin_isalpha
@@ -33,6 +33,7 @@
 
 // All the ctype is* functions take the integer to check in X,Y and
 // return 0 or 1 in A.
+.section ".text.__builtin_isdigit", "ax", @progbits
 __builtin_isdigit:
   CPY #0
   BNE is_false
@@ -49,10 +50,12 @@ is_true:
   SEC
   RTS
 
+.section ".text.__builtin_isalpha", "ax", @progbits
 __builtin_isalpha:
   JSR __builtin_isupper
   BCS is_true
 
+.section ".text.__builtin_islower", "ax", @progbits
 __builtin_islower:
   CPY #0
   BNE is_false
@@ -62,6 +65,7 @@ __builtin_islower:
   BCC is_true
   BRA is_false
 
+.section ".text.__builtin_isupper", "ax", @progbits
 __builtin_isupper:
   CPY #0
   BNE is_false
@@ -71,6 +75,7 @@ __builtin_isupper:
   BCC is_true
   BRA is_false\
   
+.section ".text.__builtin_toupper", "ax", @progbits
 __builtin_toupper:
   JSR __builtin_islower
   BCC is_false
@@ -78,6 +83,7 @@ __builtin_toupper:
   SBC #'a'-'A'      // Carry is set.
   RTS
   
+.section ".text.__builtin_tolower", "ax", @progbits
 __builtin_tolower:
   JSR __builtin_isupper
   BCC is_false
@@ -86,11 +92,13 @@ __builtin_tolower:
   RTS
   
 // Is A alphanumeric.  Carry set = yes.
+.section ".text.__builtin_isalnum", "ax", @progbits
 __builtin_isalnum:
   JSR __builtin_isdigit
   BCS is_false
   JMP __builtin_isalpha
 
+.section ".text.__builtin_isspace", "ax", @progbits
 __builtin_isspace:
   CPY #0
   BNE is_false
@@ -105,6 +113,7 @@ __builtin_isspace:
   LDA #1
   RTS             // Carry is set.
   
+.section ".text.__builtin_isxdigit", "ax", @progbits
 __builtin_isxdigit:
   JSR __builtin_isdigit
   BCS is_true
@@ -120,6 +129,7 @@ __builtin_isxdigit:
   CLC
   RTS
 
+.section ".text.__builtin_isblank", "ax", @progbits
 __builtin_isblank:
   CPY #0
   BNE is_false
@@ -137,6 +147,7 @@ is_true1:
   RTS
 
 
+.section ".text.__builtin_iscntrl", "ax", @progbits
 __builtin_iscntrl:
   CPY #0
   BNE is_false1
@@ -144,6 +155,7 @@ __builtin_iscntrl:
   BCC is_true1
   BCS is_false1
 
+.section ".text.__builtin_isgraph", "ax", @progbits
 __builtin_isgraph:
   CPY #0
   BNE is_false1
@@ -151,6 +163,7 @@ __builtin_isgraph:
   BNE is_true1
   BEQ is_false1
 
+.section ".text.__builtin_isprint", "ax", @progbits
 __builtin_isprint:
   CPY #0
   BNE is_false1
@@ -165,6 +178,7 @@ __builtin_isprint:
 // 0x40
 // 0x5b...0x60
 // 0x7b...0x7e
+.section ".text.__builtin_ispunct", "ax", @progbits
 __builtin_ispunct:
   CPY #0
   BNE is_false1
@@ -188,6 +202,7 @@ __builtin_ispunct:
 // __mem_src
 // __mem_size
 // Result in __mem_dest
+.section ".text.__builtin_memcpy", "ax", @progbits
 __builtin_memcpy:
   LDA __mem_dest
   STA __t0
@@ -230,6 +245,7 @@ end_memcpy:
 // __mem_src (contains value to set in lower byte)
 // __mem_size
 // Result in __mem_dest
+.section ".text.__builtin_memset", "ax", @progbits
 __builtin_memset:
   LDA __mem_dest
   STA __t0
@@ -267,6 +283,7 @@ end_memset:
 // __mem_src (arg 1)
 // __mem_size bytes
 // Result in X,Y
+.section ".text.__builtin_memcmp", "ax", @progbits
 __builtin_memcmp:
   LDA __mem_size+1
   BEQ memcmp_small
@@ -321,6 +338,7 @@ memcmp_end2:
 // __mem_src,+1: address of va_list
 // __mem_dest,+1: destination address
 // X,Y: number of bytes.
+.section ".text.__builtin_va_arg", "ax", @progbits
 __builtin_va_arg:
   STX __mem_size
   STY __mem_size+1
@@ -351,6 +369,7 @@ __builtin_va_arg:
   // __mem_size contains the number of bytes to read into (__mem_dest)
   JMP __builtin_memcpy
 
+.section ".text.__builtin_va_arg2", "ax", @progbits
 __builtin_va_arg2:
   // Load the contents of va_list and push onto stack.
   LDA (__mem_src)
@@ -380,6 +399,7 @@ __builtin_va_arg2:
   RTS
 
 
+.section ".text.__builtin_va_arg4", "ax", @progbits
 __builtin_va_arg4:
   // Load the contents of va_list and push onto stack.
   LDA (__mem_src)
@@ -407,6 +427,7 @@ __builtin_va_arg4:
   STZ __mem_size+1
   JMP __builtin_memcpy
 
+.section ".text.__builtin_va_arg8", "ax", @progbits
 __builtin_va_arg8:
   // Load the contents of va_list and push onto stack.
   LDA (__mem_src)

@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+.section ".text.__enter", "ax", @progbits
 
 // Regular enter and leave with register save mask.
 .global __enter

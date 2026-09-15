@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __spill1
 .global __spill2
@@ -15,6 +15,7 @@
 // Entry:
 // ret+0: offset into zero page
 // ret+1,2: offset subtracted from frame pointer to spill location.
+.section ".text.__spill1", "ax", @progbits
 __spill1:
   PHP
   PHA
@@ -62,6 +63,7 @@ sp1_skip:  // t2,t3 contain address of data for spill
   PLP
   RTS
 
+.section ".text.__spill2", "ax", @progbits
 __spill2:
   PHP
   PHA
@@ -112,6 +114,7 @@ sp2_skip:  // t2,t3 contain address of data for spill
   PLP
   RTS
 
+.section ".text.__spill4", "ax", @progbits
 __spill4:
   PHP
   PHA
@@ -166,6 +169,7 @@ sp4_skip:  // t2,t3 contain address of data for spill
   RTS
 
 
+.section ".text.__spill8", "ax", @progbits
 __spill8:
   PHP
   PHA
@@ -220,6 +224,7 @@ spill8loop:
   RTS
 
 
+.section ".text.__reload1", "ax", @progbits
 __reload1:
   PHP
   PHA
@@ -268,6 +273,7 @@ rl1_skip:  // t2,t3 contain address of data for spill
   PLP
   RTS
 
+.section ".text.__reload2", "ax", @progbits
 __reload2:
   PHP
   PHA
@@ -319,6 +325,7 @@ rl2_skip:  // t2,t3 contain address of data for spill
   PLP
   RTS
 
+.section ".text.__reload4", "ax", @progbits
 __reload4:
   PHP
   PHA
@@ -374,6 +381,7 @@ reload4loop:
   PLP
   RTS
 
+.section ".text.__reload8", "ax", @progbits
 __reload8:
   PHP
   PHA

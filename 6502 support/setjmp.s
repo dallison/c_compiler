@@ -9,7 +9,7 @@
 #include "vars.s"
 #include "fp.s"
 
-.text
+.section ".text.setjmp", "ax", @progbits
 
 .global setjmp
 .global longjmp

@@ -1,11 +1,12 @@
 #include "vars.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __zeromem1
 .global __zeromem2
 .global __load_inline_mem_params
 
+.section ".text.__zeromem1", "ax", @progbits
 __zeromem1:
   LDA #1
   JSR __load_inline_mem_params
@@ -21,6 +22,7 @@ zm1l:
 end_zm1:
   RTS
 
+.section ".text.__zeromem2", "ax", @progbits
 __zeromem2:
   LDA #5
   JSR __load_inline_mem_params

@@ -160,11 +160,13 @@ double AssemblerGetDoubleConst(Assembler* assembler) {
   return v;
 }
 
-LocationEntry* NewLocationEntry(int file, int line, int col, uint64_t address) {
+LocationEntry* NewLocationEntry(int file, int line, int col, int section,
+                                uint64_t address) {
   LocationEntry* loc = malloc(sizeof(LocationEntry));
   loc->file = file;
   loc->line = line;
   loc->col = col;
+  loc->section = section;
   loc->address = address;
   return loc;
 }
@@ -1311,6 +1313,7 @@ static void HandleDirective_loc(Assembler* assembler) {
 
   if (assembler->object.pass == 1) {
     DwarfAddLocation(&assembler->object.dwarf, file, line, col,
+                     assembler->object.current_section,
                      AssemblerCurrentAddress(assembler));
   }
 }

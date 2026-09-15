@@ -120,6 +120,10 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-fdeps-scan-only", kCompilerOptionBool, kOptionDepsScanOnly, false, "Scan module dependencies without compiling"},
     {"-flto", kCompilerOptionBool, kOptionLTO, false,
      "Link-time optimization: compile all sources together for cross-TU inlining"},
+    {"-ffunction-sections", kCompilerOptionBool, kOptionFunctionSections, false,
+     "Place each function in its own ELF section for unused-section GC"},
+    {"-fno-function-sections", kCompilerOptionBool, kOptionNoFunctionSections,
+     false, "Emit all functions in a shared .text section"},
     {NULL, 0, 0, false, NULL},
 };
 
@@ -3509,6 +3513,20 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
       compiler->printf_specialize = true;
     } else if (opt->opt == kOptionNoPrintfSpecialize) {
       compiler->printf_specialize = false;
+    }
+  }
+  // 6502 programs are statically linked into 64 KiB, so unused functions
+  // should be separable for --gc-sections.  Other targets keep a shared
+  // .text unless the user asks for per-function sections.
+  compiler->function_sections =
+      strcmp(target->canonical_name, "6502") == 0 ||
+      strcmp(target->canonical_name, "65c02") == 0;
+  for (size_t i = 0; i < options->length; i++) {
+    CompilerOptionValue* opt = options->value.p[i];
+    if (opt->opt == kOptionFunctionSections) {
+      compiler->function_sections = true;
+    } else if (opt->opt == kOptionNoFunctionSections) {
+      compiler->function_sections = false;
     }
   }
   compiler->module_header =

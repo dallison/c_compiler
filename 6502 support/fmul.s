@@ -1,7 +1,7 @@
 #include "vars.s"
 #include "fp.s"
 
-.text
+.section ".text.__fmul", "ax", @progbits
 
 // We do a 32 bit mutliplication and take the top 32 bits for the result.
 // The inputs are fmanA and fmanB and the output is fmantissa.  The 64

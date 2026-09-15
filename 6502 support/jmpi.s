@@ -17,7 +17,7 @@
 //
 
 #include "vars.s"
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __jmp_i0
 .global __jmp_i1
@@ -36,35 +36,51 @@
 .global __jmp_i14
 .global __jmp_i15
 
+.section ".text.__jmp_i0", "ax", @progbits
 __jmp_i0:
   JMP (__i0)
+.section ".text.__jmp_i1", "ax", @progbits
 __jmp_i1:
   JMP (__i1)
+.section ".text.__jmp_i2", "ax", @progbits
 __jmp_i2:
   JMP (__i2)
+.section ".text.__jmp_i3", "ax", @progbits
 __jmp_i3:
   JMP (__i3)
+.section ".text.__jmp_i4", "ax", @progbits
 __jmp_i4:
   JMP (__i4)
+.section ".text.__jmp_i5", "ax", @progbits
 __jmp_i5:
   JMP (__i5)
+.section ".text.__jmp_i6", "ax", @progbits
 __jmp_i6:
   JMP (__i6)
+.section ".text.__jmp_i7", "ax", @progbits
 __jmp_i7:
   JMP (__i7)
+.section ".text.__jmp_i8", "ax", @progbits
 __jmp_i8:
   JMP (__i8)
+.section ".text.__jmp_i9", "ax", @progbits
 __jmp_i9:
   JMP (__i9)
+.section ".text.__jmp_i10", "ax", @progbits
 __jmp_i10:
   JMP (__i10)
+.section ".text.__jmp_i11", "ax", @progbits
 __jmp_i11:
   JMP (__i11)
+.section ".text.__jmp_i12", "ax", @progbits
 __jmp_i12:
   JMP (__i12)
+.section ".text.__jmp_i13", "ax", @progbits
 __jmp_i13:
   JMP (__i13)
+.section ".text.__jmp_i14", "ax", @progbits
 __jmp_i14:
   JMP (__i14)
+.section ".text.__jmp_i15", "ax", @progbits
 __jmp_i15:
   JMP (__i15)

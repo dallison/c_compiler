@@ -27,6 +27,7 @@ LINKER_OBJS = \
 	linker_main.o \
 	linker_file.o \
 	linker_symbols.o \
+	linker_gc.o \
 	linker_reloc.o \
 	linker_dynamic.o \
 	linker_config.o \

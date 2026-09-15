@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+.section ".text.__load_inline_mem_params", "ax", @progbits
 
 .global __load_inline_mem_params
 
