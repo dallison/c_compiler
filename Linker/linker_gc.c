@@ -37,6 +37,10 @@ static bool SectionIsGCRoot(const String* name, int64_t flags) {
          SectionNameEquals(name, ".preinit_array") ||
          SectionNameEquals(name, ".init_array") ||
          SectionNameEquals(name, ".fini_array") ||
+         SectionNameHasPrefix(name, ".eh_frame") ||
+         SectionNameHasPrefix(name, ".gcc_except_table") ||
+         SectionNameHasPrefix(name, ".ARM.exidx") ||
+         SectionNameHasPrefix(name, ".ARM.extab") ||
          SectionNameHasPrefix(name, ".init_array.") ||
          SectionNameHasPrefix(name, ".preinit_array.") ||
          SectionNameHasPrefix(name, ".fini_array.") ||
