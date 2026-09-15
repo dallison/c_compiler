@@ -259,6 +259,20 @@ const char* ARMOpcodeName(int op) {
     case ARM_OP(fneg): return "fneg";
     case ARM_OP(fcvt): return "fcvt";
 
+  case ARM_OP(vadd): return "vadd";
+  case ARM_OP(vsub): return "vsub";
+  case ARM_OP(vand): return "vand";
+  case ARM_OP(vorr): return "vorr";
+  case ARM_OP(veor): return "veor";
+  case ARM_OP(vcmeq): return "vcmeq";
+  case ARM_OP(vcmgt): return "vcmgt";
+  case ARM_OP(vcmge): return "vcmge";
+  case ARM_OP(vcmhi): return "vcmhi";
+  case ARM_OP(vcmhs): return "vcmhs";
+  case ARM_OP(vfadd): return "vfadd";
+  case ARM_OP(vfsub): return "vfsub";
+  case ARM_OP(vfmul): return "vfmul";
+
   case ARM_OP(xxx): return "xxx";
     case ARM_OP(not): return "not";
     case ARM_OP(nop): return "nop";
@@ -595,6 +609,15 @@ int ARMGetRegisterSize(TargetInstruction* inst) {
 static TargetInstruction* SetInstructionSize(TargetInstruction* inst, int size) {
   inst->flags = (inst->flags & ~(3<<16)) | (size << 16);
   return inst;
+}
+
+static TargetInstruction* SetSimdArrangement(TargetInstruction* inst,
+                                             int vector_bytes, int elem_bytes) {
+  int elem_log = elem_bytes <= 1 ? 0 : elem_bytes == 2 ? 1 : elem_bytes == 4 ? 2 : 3;
+  inst->flags = (inst->flags & ~ARM_SIMD_ELEM_MASK) |
+                (elem_log << ARM_SIMD_ELEM_SHIFT);
+  return SetInstructionSize(
+      inst, vector_bytes == 16 ? kSize128Bit : kSize64Bit);
 }
 
 // Copy size from operand.
@@ -5425,6 +5448,96 @@ static TargetInstruction* LowerAtomic(ARMGenerator* g, IRNode* node) {
   }
 }
 
+static TargetInstruction* LowerVectorOperation(ARMGenerator* g, IRNode* node) {
+  assert(node->inputs.length == 3);
+  TypeRecord* vector_type = (TypeRecord*)node->aux;
+  if (!TypeIsVector(vector_type)) {
+    vector_type = ((IRNode*)node->inputs.value.p[0])->type;
+    if (TypeIsPointer(vector_type)) {
+      vector_type = vector_type->next;
+    }
+  }
+  assert(TypeIsVector(vector_type));
+  TypeRecord* element = TypeVectorElement(vector_type);
+  assert(element != NULL);
+  bool is_float = TypeUsesFloat32Representation(element) ||
+                  TypeUsesFloat64Representation(element);
+
+  ARMOpcode opcode;
+  bool swap_operands = false;
+  switch (node->opcode) {
+    case IR_OP(vadd):
+      opcode = is_float ? ARM_OP(vfadd) : ARM_OP(vadd);
+      break;
+    case IR_OP(vsub):
+      opcode = is_float ? ARM_OP(vfsub) : ARM_OP(vsub);
+      break;
+    case IR_OP(vmul):
+      assert(is_float && "integer vmul must be software-expanded before ARM lowering");
+      opcode = ARM_OP(vfmul);
+      break;
+    case IR_OP(vand): opcode = ARM_OP(vand); break;
+    case IR_OP(vor): opcode = ARM_OP(vorr); break;
+    case IR_OP(vxor): opcode = ARM_OP(veor); break;
+    case IR_OP(vcmpeq): opcode = ARM_OP(vcmeq); break;
+    case IR_OP(vcmpgt): opcode = ARM_OP(vcmgt); break;
+    case IR_OP(vcmpge): opcode = ARM_OP(vcmge); break;
+    case IR_OP(vcmplt):
+      opcode = ARM_OP(vcmgt);
+      swap_operands = true;
+      break;
+    case IR_OP(vcmple):
+      opcode = ARM_OP(vcmge);
+      swap_operands = true;
+      break;
+    case IR_OP(vcmpgtu): opcode = ARM_OP(vcmhi); break;
+    case IR_OP(vcmpgeu): opcode = ARM_OP(vcmhs); break;
+    case IR_OP(vcmpltu):
+      opcode = ARM_OP(vcmhi);
+      swap_operands = true;
+      break;
+    case IR_OP(vcmpleu):
+      opcode = ARM_OP(vcmhs);
+      swap_operands = true;
+      break;
+    default:
+      assert(false && "vector operation must be software-expanded before ARM lowering");
+      COMPILER_UNREACHABLE();
+  }
+
+  int vec_size = vector_type->size == 16 ? kSize128Bit : kSize64Bit;
+  TargetInstruction* destination = Materialize(g, node->inputs.value.p[0]);
+  TargetInstruction* left_address = Materialize(g, node->inputs.value.p[1]);
+  TargetInstruction* right_address = Materialize(g, node->inputs.value.p[2]);
+  TargetInstruction* left = Emit(
+      g, SetInstructionSize(
+             NewInstruction2(
+                 ARM_OP(fldr), left_address,
+                 GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+             vec_size));
+  TargetInstruction* right = Emit(
+      g, SetInstructionSize(
+             NewInstruction2(
+                 ARM_OP(fldr), right_address,
+                 GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+             vec_size));
+  if (swap_operands) {
+    TargetInstruction* temporary = left;
+    left = right;
+    right = temporary;
+  }
+  TargetInstruction* operation = Emit(
+      g, SetSimdArrangement(NewInstruction2(opcode, left, right),
+                            vector_type->size, element->size));
+  TargetInstruction* store = Emit(
+      g, SetInstructionSize(
+             NewInstruction3(
+                 ARM_OP(fstr), operation, destination,
+                 GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+             vec_size));
+  return SetLoweredNode(node, store);
+}
+
 static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
                                       IRNode* node) {
   // If we have already lowered the IR node, return it.
@@ -5439,18 +5552,10 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
     case IR_OP(vadd):
     case IR_OP(vsub):
     case IR_OP(vmul):
-    case IR_OP(vdiv):
-    case IR_OP(vmod):
-    case IR_OP(vlsl):
-    case IR_OP(vlsr):
-    case IR_OP(vasr):
     case IR_OP(vand):
     case IR_OP(vor):
     case IR_OP(vxor):
-    case IR_OP(vneg):
-    case IR_OP(vonescomp):
     case IR_OP(vcmpeq):
-    case IR_OP(vcmpne):
     case IR_OP(vcmplt):
     case IR_OP(vcmple):
     case IR_OP(vcmpgt):
@@ -5459,6 +5564,16 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
     case IR_OP(vcmpleu):
     case IR_OP(vcmpgtu):
     case IR_OP(vcmpgeu):
+      return LowerVectorOperation(g, node);
+
+    case IR_OP(vdiv):
+    case IR_OP(vmod):
+    case IR_OP(vlsl):
+    case IR_OP(vlsr):
+    case IR_OP(vasr):
+    case IR_OP(vneg):
+    case IR_OP(vonescomp):
+    case IR_OP(vcmpne):
     case IR_OP(vectorarg):
     case IR_OP(resultv):
     case IR_OP(capturev):

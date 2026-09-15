@@ -34,6 +34,11 @@ struct TargetBasicBlock;
 #define kARMInstructionSize (1 << 16)
 #define kSize32Bit 1
 #define kSize64Bit 2
+#define kSize128Bit 3
+
+// SIMD element size for NEON three-same ops: log2(elem_bytes) in bits 12-13.
+#define ARM_SIMD_ELEM_SHIFT 12
+#define ARM_SIMD_ELEM_MASK (3 << 12)
 
 // ARM addressing modes. The value is stored in bit 21:18
 //  of the TargetInstruction's flags member.
@@ -333,6 +338,21 @@ typedef enum {
   ARM_OP(scvtf),
   ARM_OP(ucvtf),
   ARM_OP(fneg),
+
+  // Advanced SIMD (NEON).  Integer and float vector ops, plus compares.
+  ARM_OP(vadd),
+  ARM_OP(vsub),
+  ARM_OP(vand),
+  ARM_OP(vorr),
+  ARM_OP(veor),
+  ARM_OP(vcmeq),
+  ARM_OP(vcmgt),
+  ARM_OP(vcmge),
+  ARM_OP(vcmhi),
+  ARM_OP(vcmhs),
+  ARM_OP(vfadd),
+  ARM_OP(vfsub),
+  ARM_OP(vfmul),
    
   ARM_OP(xxx),
   ARM_OP(not),

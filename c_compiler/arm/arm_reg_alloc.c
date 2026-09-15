@@ -17,6 +17,7 @@
 static void AllocateRegister(ARMRegisterAllocator* allocator,
                              TargetInstruction* inst);
 static ARMRegisterType RegisterTypeFromInstruction(TargetInstruction* inst);
+static bool IsSavedReg(ARMRegister* reg);
 
 static const char* ARMRegisterNameFromNum1(int num, ARMRegisterType type, int size,
                                     bool allow_no_size,
@@ -108,6 +109,7 @@ void ARMRegisterAllocatorDelete(ARMRegisterAllocator* alloc) {
 // Size for registers.
 #define kSize32Bit 1
 #define kSize64Bit 2
+#define kSize128Bit 3
 
 // The arm ABI divides registers into various ranges, some of which are
 // temporary and some preserved across calls.  We use this array to
@@ -157,12 +159,22 @@ static void DumpRegisters(ARMRegisterAllocator* allocator) {
   }
 }
 
-static void AssignRegister(ARMRegister* reg, TargetInstruction* inst) {
+static void AssignRegister(ARMRegisterAllocator* allocator, ARMRegister* reg,
+                           TargetInstruction* inst) {
   assert(inst->reg == NULL);
   inst->reg = &reg->base;
   reg->base.owner = inst;
   inst->uses = (int)inst->users.length;
   inst->flags |= TARGET_INST_PROCESSED;
+  if (reg->type == kARMRegTypeFloat &&
+      ARMGetRegisterSize(inst) == kSize128Bit) {
+    int pair = reg->base.num + 2;
+    assert(pair < ARM_NUM_FLOAT_REGS);
+    allocator->float_regs[pair].base.owner = inst;
+    if (IsSavedReg(&allocator->float_regs[pair])) {
+      BitSetInsert(&allocator->used_float_regs, pair);
+    }
+  }
 }
 
 static bool IsFrameFreeStructReturnLeaf(ARMRegisterAllocator* allocator) {
@@ -176,11 +188,13 @@ static bool IsFrameFreeStructReturnLeaf(ARMRegisterAllocator* allocator) {
 }
 
 static ARMRegister* FindFreeRegister(ARMRegisterAllocator* allocator,
-                                    ARMRegisterType type, bool can_use_temp) {
+                                    ARMRegisterType type, bool can_use_temp,
+                                    int size) {
   ARMRegister* regs =
       type == kARMRegTypeInt ? allocator->int_regs : allocator->float_regs;
   bool frame_free_leaf = type == kARMRegTypeInt && can_use_temp &&
                          IsFrameFreeStructReturnLeaf(allocator);
+  bool quad = type == kARMRegTypeFloat && size == kSize128Bit;
   int passes = frame_free_leaf ? 2 : 1;
   for (int pass = 0; pass < passes; pass++) {
     bool want_temp = frame_free_leaf && pass == 0;
@@ -197,12 +211,22 @@ static ARMRegister* FindFreeRegister(ARMRegisterAllocator* allocator,
       // Float registers are allocated in double-precision (d-register) units:
       // each allocation consumes an even/odd s-register pair, named by its even
       // low half.  This keeps a `float` and a `double` from aliasing the same
-      // physical storage.  Integer registers step by one.
-      int step = (type == kARMRegTypeFloat) ? 2 : 1;
+      // physical storage.  128-bit NEON values occupy two consecutive D units
+      // (a Q register), so they step by four S registers.  Integer registers
+      // step by one.
+      int step = (type == kARMRegTypeFloat) ? (quad ? 4 : 2) : 1;
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j += step) {
-        if (!regs[j].base.reserved && regs[j].base.owner == NULL) {
-          return &regs[j];
+        if (regs[j].base.reserved || regs[j].base.owner != NULL) {
+          continue;
         }
+        if (quad) {
+          if (j + 2 > register_ranges[i].end ||
+              regs[j + 2].base.reserved ||
+              regs[j + 2].base.owner != NULL) {
+            continue;
+          }
+        }
+        return &regs[j];
       }
     }
   }
@@ -211,7 +235,22 @@ static ARMRegister* FindFreeRegister(ARMRegisterAllocator* allocator,
   return NULL;
 }
 
+static void FreeQuadPair(ARMRegisterAllocator* allocator, ARMRegister* reg,
+                         TargetInstruction* owner) {
+  if (reg->type != kARMRegTypeFloat || owner == NULL ||
+      ARMGetRegisterSize(owner) != kSize128Bit) {
+    return;
+  }
+  int pair = reg->base.num + 2;
+  if (pair < ARM_NUM_FLOAT_REGS &&
+      allocator->float_regs[pair].base.owner == owner) {
+    allocator->float_regs[pair].base.owner = NULL;
+  }
+}
+
 static void FreeRegister(ARMRegisterAllocator* allocator, ARMRegister* reg) {
+  TargetInstruction* owner = reg->base.owner;
+  FreeQuadPair(allocator, reg, owner);
   reg->base.owner = NULL;
 }
 
@@ -641,12 +680,19 @@ static ARMRegister* SpillInstruction(ARMRegisterAllocator* allocator, TargetInst
   // We don't set the spilled instruction yet because TargetRetargetInstruction
   // will see it and retarget it to the spill.
   TrapSpill(inst);
+  int spill_bytes = ARMGetRegisterSize(inst) == kSize128Bit ? 16 : 8;
+  if (spill_bytes == 16) {
+    allocator->current_spilled_region_size =
+        (allocator->current_spilled_region_size + 15) & ~15;
+  }
   TargetInstruction* spill = TargetNewInstruction2((TargetOpcode)ARM_OP(spill), NULL,
                                                    TargetGetIntConstant(&allocator->g->base,
                                                                         NULL,
                                                                         kTargetType32Bit,
                                                                         allocator->current_spilled_region_size));
-  allocator->current_spilled_region_size += 8;    // Space for one register.
+  spill->flags = (spill->flags & ~(3 << 16)) |
+                 (inst->flags & (3 << 16));
+  allocator->current_spilled_region_size += spill_bytes;
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
@@ -714,6 +760,7 @@ static ARMRegister* SpillInstruction(ARMRegisterAllocator* allocator, TargetInst
   for (size_t i = 0; i < inst->users.length; i++) {
     RepairProcessedRead(allocator, inst->users.value.p[i], inst, spill);
   }
+  FreeQuadPair(allocator, reg, inst);
   reg->base.owner = NULL;
   inst->flags |= TARGET_INST_SPILLED;
   return reg;
@@ -724,15 +771,28 @@ static ARMRegister* AllocateRegisterWithType(ARMRegisterAllocator* allocator,
                                             TargetInstruction* inst,
                                             ARMRegisterType type,
                                             bool can_use_temp) {
-  ARMRegister* reg = FindFreeRegister(allocator, type, can_use_temp);
+  int size = ARMGetRegisterSize(inst);
+  ARMRegister* reg = FindFreeRegister(allocator, type, can_use_temp, size);
 
   if (reg == NULL) {
-    TargetInstruction* victim =
-        FindSpillVictim(allocator, type, can_use_temp);
-    // FindSpillVictim may have released a stale owner from an earlier spill.
-    reg = FindFreeRegister(allocator, type, can_use_temp);
-    if (reg == NULL && victim != NULL) {
-      reg = SpillInstruction(allocator, victim);
+    // A 128-bit Q register occupies two D units; one spill may free only one
+    // of them, so keep spilling until a Q-aligned pair is available.
+    for (;;) {
+      TargetInstruction* victim =
+          FindSpillVictim(allocator, type, can_use_temp);
+      // FindSpillVictim may have released a stale owner from an earlier spill.
+      reg = FindFreeRegister(allocator, type, can_use_temp, size);
+      if (reg != NULL) {
+        break;
+      }
+      if (victim == NULL) {
+        break;
+      }
+      ARMRegister* spilled = SpillInstruction(allocator, victim);
+      if (size != kSize128Bit) {
+        reg = spilled;
+        break;
+      }
     }
   }
   if (reg == NULL) {
@@ -788,6 +848,19 @@ static ARMRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case  ARM_OP(scvtf):
     case  ARM_OP(ucvtf):
     case  ARM_OP(fneg):
+    case ARM_OP(vadd):
+    case ARM_OP(vsub):
+    case ARM_OP(vand):
+    case ARM_OP(vorr):
+    case ARM_OP(veor):
+    case ARM_OP(vcmeq):
+    case ARM_OP(vcmgt):
+    case ARM_OP(vcmge):
+    case ARM_OP(vcmhi):
+    case ARM_OP(vcmhs):
+    case ARM_OP(vfadd):
+    case ARM_OP(vfsub):
+    case ARM_OP(vfmul):
     case ARM_OP(fvarreg):
       return kARMRegTypeFloat;
 
@@ -802,7 +875,7 @@ static ARMRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
 
     default:
       if ((ARMOpcode)inst->opcode >= ARM_OP(fldr) &&
-          (ARMOpcode)inst->opcode <= ARM_OP(fneg)) {
+          (ARMOpcode)inst->opcode <= ARM_OP(vfmul)) {
         return kARMRegTypeFloat;
       }
       return kARMRegTypeInt;
@@ -829,14 +902,14 @@ static void AllocateVariableRegister(ARMRegisterAllocator* allocator,
           &allocator->int_regs[(is_leaf ? ARM_FIRST_LEAF_INT_REG_VAR
                                        : ARM_FIRST_INT_REG_VAR) +
                                allocator->g->struct_return_reg];
-      AssignRegister(reg, inst);
+      AssignRegister(allocator, reg, inst);
       return;
     }
   }
 
   ARMRegister* reg = AllocateRegisterWithType(allocator, inst->block, inst,
                                  reg_type, CanUseTemp(allocator, inst));
-  AssignRegister(reg, inst);
+  AssignRegister(allocator, reg, inst);
 }
 
 static COMPILER_UNUSED void AllocateForRmov(ARMRegisterAllocator* allocator,
@@ -931,10 +1004,12 @@ static void ReloadSpills(ARMRegisterAllocator* allocator,
       // original spilled instruction (see SpillInstruction).
       TargetInstruction* spilled_value =
           (spill->operand[0] != NULL) ? spill->operand[0] : inst;
+      reload->flags = (reload->flags & ~(3 << 16)) |
+                      (spilled_value->flags & (3 << 16));
       ARMRegisterType reg_type = RegisterTypeFromInstruction(spilled_value);
       ARMRegister *reg = AllocateRegisterWithType(allocator, reload->block, reload,
                                      reg_type, CanUseTemp(allocator, reload));
-      AssignRegister(reg, reload);
+      AssignRegister(allocator, reg, reload);
       // This reload is for a single instruction.
       reload->uses = 1;
       // Protect this reload's register from being chosen to satisfy a later
@@ -1029,7 +1104,7 @@ static void AllocateRegisterOnce(ARMRegisterAllocator* allocator,
     ARMRegister* source_reg = (ARMRegister*)inst->operand[0]->reg;
     if (source_reg->base.num >= ARM_INT_ARG_START &&
         source_reg->base.num <= ARM_INT_ARG_END) {
-      AssignRegister(source_reg, inst->dest);
+      AssignRegister(allocator, source_reg, inst->dest);
     }
   }
 
@@ -1045,7 +1120,7 @@ static void AllocateRegisterOnce(ARMRegisterAllocator* allocator,
     reg = AllocateRegisterWithType(allocator, inst->block, inst,
                                    kARMRegTypeInt,
                                    CanUseTemp(allocator, inst));
-    AssignRegister(reg, inst);
+    AssignRegister(allocator, reg, inst);
     FreeRegisters(allocator, inst);
     inst->flags |= TARGET_INST_PROCESSED;
     SyncReassignableSpill(allocator, inst, inst->dest);
@@ -1239,7 +1314,7 @@ static void AllocateRegisterOnce(ARMRegisterAllocator* allocator,
     }
   }
 
-  AssignRegister(reg, inst);
+  AssignRegister(allocator, reg, inst);
 
   // If nobody is using this register free it up immediately.
   // TODO: argument registers are not used explicitly but can't be freed here.
@@ -1688,6 +1763,8 @@ static const char* ARMRegisterNameFromNum1(int num, ARMRegisterType type, int si
     case kARMRegTypeFloat:
       if (size == kSize32Bit || size == 0) {
         snprintf(buf, len, "s%d", num);
+      } else if (size == kSize128Bit) {
+        snprintf(buf, len, "q%d", num / 4);
       } else {
         snprintf(buf, len, "d%d", num / 2);
       }

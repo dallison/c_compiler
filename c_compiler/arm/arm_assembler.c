@@ -22,6 +22,7 @@ typedef enum {
   kARMRegTypeInt = 0,
   kARMRegTypeFloatS = 1,
   kARMRegTypeFloatD = 2,
+  kARMRegTypeFloatQ = 3,
 } ARMRegisterType;
 
 typedef struct {
@@ -218,6 +219,11 @@ static bool ParseIntRegName(const char* name, ARMReg* reg) {
     reg->type = kARMRegTypeFloatD;
     reg->num = (int)strtol(name + 1, NULL, 10);
     return reg->num >= 0 && reg->num < 16;
+  }
+  if (name[0] == 'q' && isdigit((unsigned char)name[1])) {
+    reg->type = kARMRegTypeFloatQ;
+    reg->num = (int)strtol(name + 1, NULL, 10);
+    return reg->num >= 0 && reg->num < 8;
   }
   return false;
 }
@@ -1197,6 +1203,163 @@ static void Assemble_gotaddr(ARMAssembler* assembler) {
 }
 
 static bool IsDoubleReg(const ARMReg* r) { return r->type == kARMRegTypeFloatD; }
+static bool IsQuadReg(const ARMReg* r) { return r->type == kARMRegTypeFloatQ; }
+
+static int NeonDNum(const ARMReg* r) {
+  if (IsQuadReg(r)) {
+    return r->num * 2;
+  }
+  return r->num;
+}
+
+static uint32_t NeonThreeSame(uint32_t base, const ARMReg* dd, const ARMReg* dn,
+                              const ARMReg* dm, int size, bool q) {
+  return base | ((uint32_t)size << 20) | ((uint32_t)q << 6) |
+         EncVfpDd(NeonDNum(dd)) | EncVfpDn(NeonDNum(dn)) |
+         EncVfpDm(NeonDNum(dm));
+}
+
+static bool ParseNeonThree(ARMAssembler* assembler, ARMReg* dd, ARMReg* dn,
+                           ARMReg* dm) {
+  return ParseRegister(assembler, dd) && ExpectComma(assembler) &&
+         ParseRegister(assembler, dn) && ExpectComma(assembler) &&
+         ParseRegister(assembler, dm);
+}
+
+static void AssembleNeonInt(ARMAssembler* assembler, uint32_t base, int size) {
+  ARMReg dd, dn, dm;
+  if (!ParseNeonThree(assembler, &dd, &dn, &dm)) {
+    return;
+  }
+  bool q = IsQuadReg(&dd);
+  if (!q && !IsDoubleReg(&dd)) {
+    AssemblerError(&ASM, "NEON integer op requires a D or Q register");
+    return;
+  }
+  EmitInst(assembler, NeonThreeSame(base, &dd, &dn, &dm, size, q));
+}
+
+static void Assemble_vadd_i8(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000800u, 0); }
+static void Assemble_vadd_i16(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000800u, 1); }
+static void Assemble_vadd_i32(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000800u, 2); }
+static void Assemble_vadd_i64(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000800u, 3); }
+static void Assemble_vsub_i8(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000800u, 0); }
+static void Assemble_vsub_i16(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000800u, 1); }
+static void Assemble_vsub_i32(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000800u, 2); }
+static void Assemble_vsub_i64(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000800u, 3); }
+static void Assemble_vceq_i8(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000810u, 0); }
+static void Assemble_vceq_i16(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000810u, 1); }
+static void Assemble_vceq_i32(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000810u, 2); }
+static void Assemble_vcgt_s8(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000300u, 0); }
+static void Assemble_vcgt_s16(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000300u, 1); }
+static void Assemble_vcgt_s32(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000300u, 2); }
+static void Assemble_vcge_s8(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000300u, 0); }
+static void Assemble_vcge_s16(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000300u, 1); }
+static void Assemble_vcge_s32(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000300u, 2); }
+static void Assemble_vcgt_u8(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000310u, 0); }
+static void Assemble_vcgt_u16(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000310u, 1); }
+static void Assemble_vcgt_u32(ARMAssembler* a) { AssembleNeonInt(a, 0xf2000310u, 2); }
+static void Assemble_vcge_u8(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000310u, 0); }
+static void Assemble_vcge_u16(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000310u, 1); }
+static void Assemble_vcge_u32(ARMAssembler* a) { AssembleNeonInt(a, 0xf3000310u, 2); }
+
+static void AssembleNeonBitwise(ARMAssembler* assembler, uint32_t base) {
+  ARMReg dd, dn, dm;
+  if (!ParseNeonThree(assembler, &dd, &dn, &dm)) {
+    return;
+  }
+  bool q = IsQuadReg(&dd);
+  if (!q && !IsDoubleReg(&dd)) {
+    AssemblerError(&ASM, "NEON bitwise op requires a D or Q register");
+    return;
+  }
+  EmitInst(assembler, NeonThreeSame(base, &dd, &dn, &dm, 0, q));
+}
+
+static void Assemble_vand(ARMAssembler* a) { AssembleNeonBitwise(a, 0xf2000110u); }
+static void Assemble_vorr(ARMAssembler* a) { AssembleNeonBitwise(a, 0xf2200110u); }
+static void Assemble_veor(ARMAssembler* a) { AssembleNeonBitwise(a, 0xf3000110u); }
+
+static void AssembleNeonOrVfpF32(ARMAssembler* assembler, uint32_t vfp_base,
+                                 uint32_t neon_base) {
+  ARMReg sd, sn, sm;
+  if (!ParseNeonThree(assembler, &sd, &sn, &sm)) {
+    return;
+  }
+  if (IsQuadReg(&sd) || IsDoubleReg(&sd)) {
+    EmitInst(assembler, NeonThreeSame(neon_base, &sd, &sn, &sm, 0,
+                                      IsQuadReg(&sd)));
+    return;
+  }
+  EmitInst(assembler, vfp_base | EncVfpSd(sd.num) | EncVfpSn(sn.num) |
+                          EncVfpSm(sm.num));
+}
+
+static void AssembleNeonOrVfpF64(ARMAssembler* assembler, uint32_t vfp_base,
+                                 uint32_t neon_base) {
+  ARMReg sd, sn, sm;
+  if (!ParseNeonThree(assembler, &sd, &sn, &sm)) {
+    return;
+  }
+  if (IsQuadReg(&sd)) {
+    EmitInst(assembler, NeonThreeSame(neon_base, &sd, &sn, &sm, 1, true));
+    return;
+  }
+  EmitInst(assembler, vfp_base | (1u << 8) | EncVfpDd(sd.num) |
+                          EncVfpDn(sn.num) | EncVfpDm(sm.num));
+}
+
+static void Assemble_vadd_f32(ARMAssembler* a) {
+  AssembleNeonOrVfpF32(a, 0xee300a00u, 0xf2000d00u);
+}
+static void Assemble_vsub_f32(ARMAssembler* a) {
+  AssembleNeonOrVfpF32(a, 0xee300a40u, 0xf2200d00u);
+}
+static void Assemble_vmul_f32(ARMAssembler* a) {
+  AssembleNeonOrVfpF32(a, 0xee200a00u, 0xf2000d10u);
+}
+static void Assemble_vadd_f64(ARMAssembler* a) {
+  AssembleNeonOrVfpF64(a, 0xee300a00u, 0xf2000d00u);
+}
+static void Assemble_vsub_f64(ARMAssembler* a) {
+  AssembleNeonOrVfpF64(a, 0xee300a40u, 0xf2200d00u);
+}
+static void Assemble_vmul_f64(ARMAssembler* a) {
+  AssembleNeonOrVfpF64(a, 0xee200a00u, 0xf2000d10u);
+}
+
+static void AssembleNeonLoadStore(ARMAssembler* assembler, bool load) {
+  ARMReg rd;
+  ARMOp addr;
+  if (LexMatch(&ASM.lex, TOK(lbrace))) {
+    if (!ParseRegister(assembler, &rd) ||
+        !LexMatch(&ASM.lex, TOK(rbrace))) {
+      AssemblerError(&ASM, "Expected {Dn|Qn}");
+      return;
+    }
+  } else if (!ParseRegister(assembler, &rd)) {
+    return;
+  }
+  if (!ExpectComma(assembler) || !ParseOperand(assembler, &addr) ||
+      addr.kind != kARMOpMem) {
+    AssemblerError(&ASM, "Expected memory operand");
+    return;
+  }
+  bool q = IsQuadReg(&rd);
+  if (!q && !IsDoubleReg(&rd)) {
+    AssemblerError(&ASM, "vld1/vst1 requires a D or Q register");
+    return;
+  }
+  int d = NeonDNum(&rd);
+  uint32_t type = q ? 0xau : 0x7u;
+  uint32_t size = 2;  // 32-bit elements
+  uint32_t inst = (load ? 0xf4200000u : 0xf4000000u) | EncVfpDd(d) |
+                  ((uint32_t)addr.base << 16) | (type << 8) | (size << 6) | 0xfu;
+  EmitInst(assembler, inst);
+}
+
+static void Assemble_vld1(ARMAssembler* a) { AssembleNeonLoadStore(a, true); }
+static void Assemble_vst1(ARMAssembler* a) { AssembleNeonLoadStore(a, false); }
 
 // vmov.f32 sd, sm  -- single-precision register copy.
 static void Assemble_vmov_f32(ARMAssembler* assembler) {
@@ -1247,7 +1410,12 @@ static void Assemble_vmov(ARMAssembler* assembler) {
   bool a_float = a.type != kARMRegTypeInt;
   bool b_float = b.type != kARMRegTypeInt;
   if (a_float && b_float) {
-    if (IsDoubleReg(&a)) {
+    if (IsQuadReg(&a) && IsQuadReg(&b)) {
+      int da = a.num * 2;
+      int db = b.num * 2;
+      EmitInst(assembler, 0xeeb00b40 | EncVfpDd(da) | EncVfpDm(db));
+      EmitInst(assembler, 0xeeb00b40 | EncVfpDd(da + 1) | EncVfpDm(db + 1));
+    } else if (IsDoubleReg(&a)) {
       EmitInst(assembler, 0xeeb00b40 | EncVfpDd(a.num) | EncVfpDm(b.num));
     } else {
       EmitInst(assembler, 0xeeb00a40 | EncVfpSd(a.num) | EncVfpSm(b.num));
@@ -1536,12 +1704,12 @@ static void InitializeInstructions(Map* instructions) {
   INST(fneg);
   INST(vabs);
   INST(vsqrt);
-  INST2("vadd.f32", vadd);
-  INST2("vadd.f64", vadd);
-  INST2("vsub.f32", vsub);
-  INST2("vsub.f64", vsub);
-  INST2("vmul.f32", vmul);
-  INST2("vmul.f64", vmul);
+  INST2("vadd.f32", vadd_f32);
+  INST2("vadd.f64", vadd_f64);
+  INST2("vsub.f32", vsub_f32);
+  INST2("vsub.f64", vsub_f64);
+  INST2("vmul.f32", vmul_f32);
+  INST2("vmul.f64", vmul_f64);
   INST2("vdiv.f32", vdiv);
   INST2("vdiv.f64", vdiv);
   INST2("vcmp.f32", vcmp);
@@ -1552,6 +1720,34 @@ static void InitializeInstructions(Map* instructions) {
   INST2("vabs.f64", vabs);
   INST2("vsqrt.f32", vsqrt);
   INST2("vsqrt.f64", vsqrt);
+  INST2("vadd.i8", vadd_i8);
+  INST2("vadd.i16", vadd_i16);
+  INST2("vadd.i32", vadd_i32);
+  INST2("vadd.i64", vadd_i64);
+  INST2("vsub.i8", vsub_i8);
+  INST2("vsub.i16", vsub_i16);
+  INST2("vsub.i32", vsub_i32);
+  INST2("vsub.i64", vsub_i64);
+  INST2("vceq.i8", vceq_i8);
+  INST2("vceq.i16", vceq_i16);
+  INST2("vceq.i32", vceq_i32);
+  INST2("vcgt.s8", vcgt_s8);
+  INST2("vcgt.s16", vcgt_s16);
+  INST2("vcgt.s32", vcgt_s32);
+  INST2("vcge.s8", vcge_s8);
+  INST2("vcge.s16", vcge_s16);
+  INST2("vcge.s32", vcge_s32);
+  INST2("vcgt.u8", vcgt_u8);
+  INST2("vcgt.u16", vcgt_u16);
+  INST2("vcgt.u32", vcgt_u32);
+  INST2("vcge.u8", vcge_u8);
+  INST2("vcge.u16", vcge_u16);
+  INST2("vcge.u32", vcge_u32);
+  INST(vand);
+  INST(vorr);
+  INST(veor);
+  INST2("vld1.32", vld1);
+  INST2("vst1.32", vst1);
   INST(fcvtsd);
   INST(fcvtds);
   INST(vmrs);

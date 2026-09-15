@@ -1935,12 +1935,210 @@ static bool ExecuteExclusive(ARMInterpreter* interpreter, uint32_t insn) {
   return true;
 }
 
+static void ReadNeonBits(ARMInterpreter* interpreter, int d, bool q,
+                         uint8_t out[16]) {
+  memset(out, 0, 16);
+  memcpy(out, &interpreter->sregs[2 * d], q ? 16 : 8);
+}
+
+static void WriteNeonBits(ARMInterpreter* interpreter, int d, bool q,
+                          const uint8_t in[16]) {
+  memcpy(&interpreter->sregs[2 * d], in, q ? 16 : 8);
+}
+
+static uint64_t NeonLoadLane(const uint8_t* v, int elem, int i) {
+  uint64_t value = 0;
+  memcpy(&value, v + (size_t)i * (size_t)elem, (size_t)elem);
+  return value;
+}
+
+static void NeonStoreLane(uint8_t* v, int elem, int i, uint64_t value) {
+  memcpy(v + (size_t)i * (size_t)elem, &value, (size_t)elem);
+}
+
+static int64_t NeonSignExtend(uint64_t value, int elem) {
+  int bits = elem * 8;
+  int shift = 64 - bits;
+  return (int64_t)(value << shift) >> shift;
+}
+
+static bool ExecuteNeon(ARMInterpreter* interpreter, uint32_t insn) {
+  // Advanced SIMD load/store: 1111 0100 0 UL ... vld1/vst1.
+  if ((insn & 0xff000000u) == 0xf4000000u) {
+    bool load = ((insn >> 21) & 1u) != 0;
+    int rn = (int)((insn >> 16) & 0xfu);
+    int d = VfpDd(insn);
+    uint32_t type = (insn >> 8) & 0xfu;
+    bool q = type == 0xau;
+    uint64_t addr = ReadReg(interpreter, rn);
+    int bytes = q ? 16 : 8;
+    if (load) {
+      uint8_t bits[16];
+      memset(bits, 0, sizeof(bits));
+      for (int i = 0; i < bytes; i += 4) {
+        uint32_t word = Load32(interpreter, addr + (uint64_t)i);
+        memcpy(bits + i, &word, 4);
+      }
+      WriteNeonBits(interpreter, d, q, bits);
+    } else {
+      uint8_t bits[16];
+      ReadNeonBits(interpreter, d, q, bits);
+      for (int i = 0; i < bytes; i += 4) {
+        uint32_t word;
+        memcpy(&word, bits + i, 4);
+        Store32(interpreter, addr + (uint64_t)i, word);
+      }
+    }
+    return true;
+  }
+
+  if ((insn & 0xfe000000u) != 0xf2000000u) {
+    return false;
+  }
+
+  bool q = ((insn >> 6) & 1u) != 0;
+  int size = (int)((insn >> 20) & 3u);
+  int dd = VfpDd(insn);
+  int dn = VfpDn(insn);
+  int dm = VfpDm(insn);
+  int bytes = q ? 16 : 8;
+  uint8_t left[16];
+  uint8_t right[16];
+  uint8_t result[16];
+  ReadNeonBits(interpreter, dn, q, left);
+  ReadNeonBits(interpreter, dm, q, right);
+  memset(result, 0, sizeof(result));
+
+  if ((insn & 0xfea00f10u) == 0xf2000d00u ||
+      (insn & 0xfea00f10u) == 0xf2200d00u ||
+      (insn & 0xfea00f10u) == 0xf2000d10u) {
+    bool is_sub = (insn & 0xfea00f10u) == 0xf2200d00u;
+    bool is_mul = (insn & 0xfea00f10u) == 0xf2000d10u;
+    bool f64 = size == 1;
+    int elem = f64 ? 8 : 4;
+    int lanes = bytes / elem;
+    for (int i = 0; i < lanes; i++) {
+      if (f64) {
+        double a, b, r;
+        memcpy(&a, left + i * 8, 8);
+        memcpy(&b, right + i * 8, 8);
+        r = is_mul ? a * b : is_sub ? a - b : a + b;
+        memcpy(result + i * 8, &r, 8);
+      } else {
+        float a, b, r;
+        memcpy(&a, left + i * 4, 4);
+        memcpy(&b, right + i * 4, 4);
+        r = is_mul ? a * b : is_sub ? a - b : a + b;
+        memcpy(result + i * 4, &r, 4);
+      }
+    }
+    WriteNeonBits(interpreter, dd, q, result);
+    return true;
+  }
+
+  int elem = 1 << size;
+  if (elem > bytes) {
+    return false;
+  }
+  int lanes = bytes / elem;
+  enum {
+    kNeonAdd,
+    kNeonSub,
+    kNeonAnd,
+    kNeonOrr,
+    kNeonEor,
+    kNeonCeq,
+    kNeonCgtS,
+    kNeonCgeS,
+    kNeonCgtU,
+    kNeonCgeU
+  } op;
+  if ((insn & 0xff800f10u) == 0xf2000800u) {
+    op = kNeonAdd;
+  } else if ((insn & 0xff800f10u) == 0xf3000800u) {
+    op = kNeonSub;
+  } else if ((insn & 0xffb00f10u) == 0xf2000110u) {
+    op = kNeonAnd;
+    elem = 1;
+    lanes = bytes;
+  } else if ((insn & 0xffb00f10u) == 0xf2200110u) {
+    op = kNeonOrr;
+    elem = 1;
+    lanes = bytes;
+  } else if ((insn & 0xffb00f10u) == 0xf3000110u) {
+    op = kNeonEor;
+    elem = 1;
+    lanes = bytes;
+  } else if ((insn & 0xff800f10u) == 0xf3000810u) {
+    op = kNeonCeq;
+  } else if ((insn & 0xff800f10u) == 0xf2000300u) {
+    op = kNeonCgtS;
+  } else if ((insn & 0xff800f10u) == 0xf3000300u) {
+    op = kNeonCgeS;
+  } else if ((insn & 0xff800f10u) == 0xf2000310u) {
+    op = kNeonCgtU;
+  } else if ((insn & 0xff800f10u) == 0xf3000310u) {
+    op = kNeonCgeU;
+  } else {
+    return false;
+  }
+
+  uint64_t mask = elem == 8 ? ~0ull : ((1ull << (elem * 8)) - 1ull);
+  uint64_t all_ones = mask;
+  for (int i = 0; i < lanes; i++) {
+    uint64_t a = NeonLoadLane(left, elem, i) & mask;
+    uint64_t b = NeonLoadLane(right, elem, i) & mask;
+    uint64_t r = 0;
+    switch (op) {
+      case kNeonAdd:
+        r = (a + b) & mask;
+        break;
+      case kNeonSub:
+        r = (a - b) & mask;
+        break;
+      case kNeonAnd:
+        r = a & b;
+        break;
+      case kNeonOrr:
+        r = a | b;
+        break;
+      case kNeonEor:
+        r = a ^ b;
+        break;
+      case kNeonCeq:
+        r = a == b ? all_ones : 0;
+        break;
+      case kNeonCgtS:
+        r = NeonSignExtend(a, elem) > NeonSignExtend(b, elem) ? all_ones : 0;
+        break;
+      case kNeonCgeS:
+        r = NeonSignExtend(a, elem) >= NeonSignExtend(b, elem) ? all_ones : 0;
+        break;
+      case kNeonCgtU:
+        r = a > b ? all_ones : 0;
+        break;
+      case kNeonCgeU:
+        r = a >= b ? all_ones : 0;
+        break;
+    }
+    NeonStoreLane(result, elem, i, r);
+  }
+  WriteNeonBits(interpreter, dd, q, result);
+  return true;
+}
+
 static bool ExecuteInstruction(ARMInterpreter* interpreter, uint32_t insn,
                                bool* pc_updated) {
   *pc_updated = false;
   uint32_t cond = (insn >> 28) & 0xfu;
   if (!ConditionPass(interpreter, cond)) {
     return true;
+  }
+
+  // Unconditional NEON (top nibble 0xF): three-same 0xF2/F3, vld1/vst1 0xF4.
+  if ((insn & 0xfe000000u) == 0xf2000000u ||
+      (insn & 0xff000000u) == 0xf4000000u) {
+    return ExecuteNeon(interpreter, insn);
   }
 
   if (insn == ARM_BREAKPOINT_INSN) {

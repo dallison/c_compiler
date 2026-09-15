@@ -1074,6 +1074,22 @@ static void PrintRmov(ARMEmitter* emitter, TargetInstruction* inst, FILE* fp) {
       assert(false);
   }
   char buf1[8], buf2[8];
+  if (rmov_size == kSize128Bit) {
+    char buf3[8], buf4[8];
+    ARMRegister* dest = (ARMRegister*)inst->operand[0]->reg;
+    ARMRegister* src = (ARMRegister*)inst->operand[1]->reg;
+    fprintf(fp, "\tvmov.f64   %s, %s\n",
+            ARMRegisterNameFromNum(dest->base.num, kARMRegTypeFloat, kSize64Bit,
+                                   buf1, sizeof(buf1)),
+            ARMRegisterNameFromNum(src->base.num, kARMRegTypeFloat, kSize64Bit,
+                                   buf2, sizeof(buf2)));
+    fprintf(fp, "\tvmov.f64   %s, %s\n",
+            ARMRegisterNameFromNum(dest->base.num + 2, kARMRegTypeFloat,
+                                   kSize64Bit, buf3, sizeof(buf3)),
+            ARMRegisterNameFromNum(src->base.num + 2, kARMRegTypeFloat,
+                                   kSize64Bit, buf4, sizeof(buf4)));
+    return;
+  }
   fprintf(
       fp, "\t%-12s%s, %s\n", mnemonic,
       ARMRegisterName((ARMRegister*)inst->operand[0]->reg, ARMGetRegisterSize(inst), buf1, sizeof(buf1)),
@@ -1382,6 +1398,144 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
   }
 }
 
+static void PrintFpPairMem(FILE* fp, bool load, ARMRegister* reg, int offset) {
+  char lo[8];
+  char hi[8];
+  ARMRegisterName(reg, kSize64Bit, lo, sizeof(lo));
+  ARMRegisterNameFromNum(reg->base.num + 2, kARMRegTypeFloat, kSize64Bit, hi,
+                         sizeof(hi));
+  const char* mnemonic = load ? "vldr" : "vstr";
+  if (offset + 8 <= 0x3fc) {
+    fprintf(fp, "\t%s %s, [fp, #-%d]\n", mnemonic, lo, offset);
+    fprintf(fp, "\t%s %s, [fp, #-%d]", mnemonic, hi, offset + 8);
+  } else {
+    fprintf(fp, "\tmovw ip, #%d\n", offset & 0xffff);
+    if (offset > 0xffff) {
+      fprintf(fp, "\tmovt ip, #%d\n", (offset >> 16) & 0xffff);
+    }
+    fprintf(fp, "\tsub ip, fp, ip\n");
+    fprintf(fp, "\t%s %s, [ip]\n", mnemonic, lo);
+    fprintf(fp, "\t%s %s, [ip, #8]", mnemonic, hi);
+  }
+}
+
+static void PrintNeonMemOp(ARMEmitter* emitter, TargetInstruction* inst,
+                           bool load, FILE* fp) {
+  char buf1[8];
+  char buf2[8];
+  TargetInstruction* vec = load ? inst : inst->operand[0];
+  TargetInstruction* addr = load ? inst->operand[0] : inst->operand[1];
+  TargetInstruction* off_inst = load ? inst->operand[1] : inst->operand[2];
+  int offset = 0;
+  if (off_inst != NULL && TargetIsConst(off_inst)) {
+    offset = (int)TargetIntValue(off_inst);
+    if ((inst->flags &
+         (kARMFrameStorageOffset | kARMIncomingFrameOffset)) != 0) {
+      offset = AdjustInstructionFrameOffset(emitter, inst, offset);
+    } else if (offset < 0 && IsFramePointerRegister(addr)) {
+      offset = AdjustFrameOffset(emitter, offset);
+    }
+  }
+  const char* qname = GetRegisterName(vec, kSize128Bit, buf1, sizeof(buf1));
+  const char* base = GetRegisterName(addr, kSize32Bit, buf2, sizeof(buf2));
+  const char* mnemonic = load ? "vld1.32" : "vst1.32";
+  if (offset == 0) {
+    fprintf(fp, "\t%s {%s}, [%s]\n", mnemonic, qname, base);
+  } else if (offset > 0) {
+    fprintf(fp, "\tadd ip, %s, #%d\n", base, offset);
+    fprintf(fp, "\t%s {%s}, [ip]\n", mnemonic, qname);
+  } else {
+    fprintf(fp, "\tsub ip, %s, #%d\n", base, -offset);
+    fprintf(fp, "\t%s {%s}, [ip]\n", mnemonic, qname);
+  }
+}
+
+static bool PrintNeonDataProc(TargetInstruction* inst, FILE* fp) {
+  switch ((ARMOpcode)inst->opcode) {
+    case ARM_OP(vadd):
+    case ARM_OP(vsub):
+    case ARM_OP(vand):
+    case ARM_OP(vorr):
+    case ARM_OP(veor):
+    case ARM_OP(vcmeq):
+    case ARM_OP(vcmgt):
+    case ARM_OP(vcmge):
+    case ARM_OP(vcmhi):
+    case ARM_OP(vcmhs):
+    case ARM_OP(vfadd):
+    case ARM_OP(vfsub):
+    case ARM_OP(vfmul):
+      break;
+    default:
+      return false;
+  }
+  int size_log = (inst->flags >> ARM_SIMD_ELEM_SHIFT) & 3;
+  static const char* int_suffix[] = {"i8", "i16", "i32", "i64"};
+  static const char* signed_suffix[] = {"s8", "s16", "s32", "s64"};
+  static const char* unsigned_suffix[] = {"u8", "u16", "u32", "u64"};
+  static const char* float_suffix[] = {"f32", "f32", "f32", "f64"};
+  const char* suffix = int_suffix[size_log];
+  const char* base = "vadd";
+  bool bitwise = false;
+  switch ((ARMOpcode)inst->opcode) {
+    case ARM_OP(vadd): base = "vadd"; break;
+    case ARM_OP(vsub): base = "vsub"; break;
+    case ARM_OP(vand): base = "vand"; bitwise = true; break;
+    case ARM_OP(vorr): base = "vorr"; bitwise = true; break;
+    case ARM_OP(veor): base = "veor"; bitwise = true; break;
+    case ARM_OP(vcmeq):
+      base = "vceq";
+      suffix = int_suffix[size_log];
+      break;
+    case ARM_OP(vcmgt):
+      base = "vcgt";
+      suffix = signed_suffix[size_log];
+      break;
+    case ARM_OP(vcmge):
+      base = "vcge";
+      suffix = signed_suffix[size_log];
+      break;
+    case ARM_OP(vcmhi):
+      base = "vcgt";
+      suffix = unsigned_suffix[size_log];
+      break;
+    case ARM_OP(vcmhs):
+      base = "vcge";
+      suffix = unsigned_suffix[size_log];
+      break;
+    case ARM_OP(vfadd):
+      base = "vadd";
+      suffix = float_suffix[size_log];
+      break;
+    case ARM_OP(vfsub):
+      base = "vsub";
+      suffix = float_suffix[size_log];
+      break;
+    case ARM_OP(vfmul):
+      base = "vmul";
+      suffix = float_suffix[size_log];
+      break;
+    default:
+      return false;
+  }
+  char buf1[8], buf2[8], buf3[8];
+  int reg_size = ARMGetRegisterSize(inst);
+  if (bitwise) {
+    fprintf(fp, "\t%-12s%s, %s, %s\n", base,
+            GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+            GetRegisterName(inst->operand[0], reg_size, buf2, sizeof(buf2)),
+            GetRegisterName(inst->operand[1], reg_size, buf3, sizeof(buf3)));
+  } else {
+    char mnem[16];
+    snprintf(mnem, sizeof(mnem), "%s.%s", base, suffix);
+    fprintf(fp, "\t%-12s%s, %s, %s\n", mnem,
+            GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+            GetRegisterName(inst->operand[0], reg_size, buf2, sizeof(buf2)),
+            GetRegisterName(inst->operand[1], reg_size, buf3, sizeof(buf3)));
+  }
+  return true;
+}
+
 // Main instruction printer.
 static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
@@ -1435,6 +1589,32 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
   char buf2[8];
 
   int reg_size = ARMGetRegisterSize(inst);
+
+  if (PrintNeonDataProc(inst, fp)) {
+    return;
+  }
+  if (((ARMOpcode)inst->opcode == ARM_OP(fldr) ||
+       (ARMOpcode)inst->opcode == ARM_OP(fstr)) &&
+      reg_size == kSize128Bit) {
+    PrintNeonMemOp(emitter, inst, (ARMOpcode)inst->opcode == ARM_OP(fldr), fp);
+    return;
+  }
+  if ((ARMOpcode)inst->opcode == ARM_OP(fmov) && reg_size == kSize128Bit) {
+    char buf3[8], buf4[8];
+    int dest_num = inst->dest != NULL ? inst->dest->reg->num : inst->reg->num;
+    int src_num = inst->operand[0]->reg->num;
+    fprintf(fp, "\tvmov.f64   %s, %s\n",
+            ARMRegisterNameFromNum(dest_num, kARMRegTypeFloat, kSize64Bit,
+                                   buf1, sizeof(buf1)),
+            ARMRegisterNameFromNum(src_num, kARMRegTypeFloat, kSize64Bit,
+                                   buf2, sizeof(buf2)));
+    fprintf(fp, "\tvmov.f64   %s, %s\n",
+            ARMRegisterNameFromNum(dest_num + 2, kARMRegTypeFloat, kSize64Bit,
+                                   buf3, sizeof(buf3)),
+            ARMRegisterNameFromNum(src_num + 2, kARMRegTypeFloat, kSize64Bit,
+                                   buf4, sizeof(buf4)));
+    return;
+  }
   
   // Special case instructions.
   switch ((ARMOpcode)inst->opcode) {
@@ -1563,6 +1743,11 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       if (spill_size == 0) {
         spill_size = kSize32Bit;
       }
+      if (spill_size == kSize128Bit) {
+        PrintFpPairMem(fp, false, reg, offset);
+        fprintf(fp, "\t// Spilled @%d\n", inst->operand[0]->id);
+        return;
+      }
       const char* register_name =
           ARMRegisterName(reg, spill_size, buf1, sizeof(buf1));
       int direct_limit = reg->type == kARMRegTypeInt ? 0xfff : 0x3fc;
@@ -1589,6 +1774,11 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                             : ARMGetRegisterSize(spill->operand[0]);
       if (reload_size == 0) {
         reload_size = kSize32Bit;
+      }
+      if (reload_size == kSize128Bit) {
+        PrintFpPairMem(fp, true, reg, offset);
+        fprintf(fp, "\t// Reloaded spilled @%d\n", spill->operand[0]->id);
+        return;
       }
       const char* register_name =
           ARMRegisterName(reg, reload_size, buf1, sizeof(buf1));
