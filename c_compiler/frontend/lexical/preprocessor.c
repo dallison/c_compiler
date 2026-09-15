@@ -594,9 +594,19 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   } else if (StringEqual(compiler->target_name, "risc-v") ||
              StringEqual(compiler->target_name, "riscv")) {
     PreprocessorDefineMacro(p, "__risc_v__", "1");
+    PreprocessorDefineMacro(p, "__riscv", "1");
+    PreprocessorDefineMacro(p, "__riscv_xlen", "64");
     PreprocessorDefineMacro(p, "__WORDSIZE", "64");
     PreprocessorDefineMacro(p, "__LP64__", "1");
     PreprocessorDefineMacro(p, "_LP64", "1");
+  } else if (StringEqual(compiler->target_name, "risc-v32") ||
+             StringEqual(compiler->target_name, "riscv32")) {
+    PreprocessorDefineMacro(p, "__risc_v__", "1");
+    PreprocessorDefineMacro(p, "__riscv", "1");
+    PreprocessorDefineMacro(p, "__riscv_xlen", "32");
+    PreprocessorDefineMacro(p, "__WORDSIZE", "32");
+    PreprocessorDefineMacro(p, "__ILP32__", "1");
+    PreprocessorDefineMacro(p, "_ILP32", "1");
   } else if (StringEqual(compiler->target_name, "wasm32") ||
              StringEqual(compiler->target_name, "wasm")) {
     PreprocessorDefineMacro(p, "__wasm__", "1");

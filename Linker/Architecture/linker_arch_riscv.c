@@ -6,8 +6,25 @@
 //  Copyright © 2019 David Allison. All rights reserved.
 //
 
+#include <stdint.h>
 #include <stdlib.h>
 #include "linker_arch_riscv.h"
+
+static bool IsRV32(const Linker* linker) {
+  return linker->ops != NULL && !linker->ops->is_64_bit;
+}
+
+static int64_t RVCodeSegmentStart(const Linker* linker) {
+  return IsRV32(linker) ? 0x40000000LL : LINKER_CODE_SEGMENT_START_ADDRESS;
+}
+
+static int64_t RVDataSegmentStart(const Linker* linker) {
+  return IsRV32(linker) ? 0x41000000LL : LINKER_DATA_SEGMENT_START_ADDRESS;
+}
+
+static int RVLoadFunct3(const Linker* linker) {
+  return IsRV32(linker) ? RV_F3(lw) : RV_F3(ld);
+}
 
 static int64_t CodeStartAddress(Linker* linker) {
   int64_t address;
@@ -17,11 +34,11 @@ static int64_t CodeStartAddress(Linker* linker) {
     address =  LINKER_DSO_CODE_SEGMENT_START_ADDRESS +
     LinkerSectionHeaderOffset(linker) + 1 * linker->ops->program_header_size;
   } else if (linker->fully_static) {
-    address =  LINKER_CODE_SEGMENT_START_ADDRESS +
+    address =  RVCodeSegmentStart(linker) +
     LinkerSectionHeaderOffset(linker);
   } else {
     // Dynamic executable, 2 extra segments: INTERP and DYNAMIC.
-    address =  LINKER_CODE_SEGMENT_START_ADDRESS +
+    address =  RVCodeSegmentStart(linker) +
     LinkerSectionHeaderOffset(linker) + 2 * linker->ops->program_header_size;
   }
   // We know how many sections there are now.  This is the number of groups + the number
@@ -46,10 +63,10 @@ static int64_t DataStartAddress(Linker* linker, int64_t code_start, int64_t code
     address += LinkerSectionHeaderOffset(linker) + 1 * linker->ops->program_header_size;
   } else if (linker->fully_static) {
     // For a static executable the data segment has a fixed address.
-    address = LINKER_DATA_SEGMENT_START_ADDRESS + LinkerSectionHeaderOffset(linker);
+    address = RVDataSegmentStart(linker) + LinkerSectionHeaderOffset(linker);
   } else {
     // For a static executable the data segment has a fixed address.
-    address = LINKER_DATA_SEGMENT_START_ADDRESS +
+    address = RVDataSegmentStart(linker) +
     LinkerSectionHeaderOffset(linker) +
     2 * linker->ops->program_header_size;
   }
@@ -86,12 +103,14 @@ static void HandlePICRelocation(DynamicLinker* dynamic, LinkerSymbol* symbol,
       }
       break;
       
+    case R_RISCV_32:
     case R_RISCV_64: {
       // A data word holding an address.  RISC-V has no GLOB_DAT, so a symbol
       // the loader has to resolve keeps this same type and is told apart by
       // carrying a dynamic symbol index.
+      int abs_type = reloc->type == R_RISCV_32 ? R_RISCV_32 : R_RISCV_64;
       Relocation* rel_reloc = NewDataAddressRelocation(
-          symbol, reloc, R_RISCV_RELATIVE, R_RISCV_64);
+          symbol, reloc, R_RISCV_RELATIVE, abs_type);
       VectorAppend(&dynamic->data_relocations, rel_reloc);
       break;
     }
@@ -499,22 +518,28 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
       // of this same list, so they keep the form resolved by name.
       if (LinkerSymbolIsTLS(symbol)) {
         by_symbol = symbol->from_dynamic_library;
-        reloc_type = R_RISCV_TLS_TPREL64;
+        reloc_type = IsRV32(linker) ? R_RISCV_TLS_TPREL32 : R_RISCV_TLS_TPREL64;
       } else {
         by_symbol = symbol->from_dynamic_library;
-        reloc_type = by_symbol ? R_RISCV_64 : R_RISCV_RELATIVE;
+        reloc_type = by_symbol
+                         ? (IsRV32(linker) ? R_RISCV_32 : R_RISCV_64)
+                         : R_RISCV_RELATIVE;
       }
       break;
     case kGOTRelocationTLSOffset:
       by_symbol = symbol->from_dynamic_library;
-      reloc_type = R_RISCV_TLS_DTPREL64;
+      reloc_type = IsRV32(linker) ? R_RISCV_TLS_DTPREL32 : R_RISCV_TLS_DTPREL64;
       break;
     case kGOTRelocationTLSModuleId:
       by_symbol = symbol->from_dynamic_library;
-      reloc_type = R_RISCV_TLS_DTPMOD64;
+      reloc_type = IsRV32(linker) ? R_RISCV_TLS_DTPMOD32 : R_RISCV_TLS_DTPMOD64;
       break;
   }
-  BufferAppendLongLE(&contents->data.buffered, 0);
+  if (IsRV32(linker)) {
+    BufferAppendWordLE(&contents->data.buffered, 0);
+  } else {
+    BufferAppendLongLE(&contents->data.buffered, 0);
+  }
   
   // Add relocation.
   Relocation* reloc = NewLinkerSymbolRelocation(symbol,
@@ -524,12 +549,25 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
 }
 
 // The GOT entry in the .got.plt is set to the address of the plt.
-static void FixupGOTEntry(LinkerSymbol* symbol, Buffer* got_plt_buffer,
+static void FixupGOTEntry(Linker* linker, LinkerSymbol* symbol,
+                          Buffer* got_plt_buffer,
                           uint64_t plt_address, int plt_entry_size) {
   // The GOT entry points to the first entry in the PLT, which contains
   // the symbol resolver code.
-  uint64_t* p = (uint64_t*)got_plt_buffer->value + symbol->got_index;
-  *p = plt_address;
+  (void)plt_entry_size;
+  size_t pointer_size = IsRV32(linker) ? 4 : 8;
+  size_t offset = (size_t)symbol->got_index * pointer_size;
+  if (pointer_size == 4) {
+    if (plt_address > UINT32_MAX) {
+      LinkerError(NULL, "RISC-V32 PLT address exceeds 32 bits");
+      return;
+    }
+    uint32_t* p = (uint32_t*)(got_plt_buffer->value + offset);
+    *p = (uint32_t)plt_address;
+  } else {
+    uint64_t* p = (uint64_t*)(got_plt_buffer->value + offset);
+    *p = plt_address;
+  }
 }
 
 
@@ -562,8 +600,9 @@ static void AddPLTEntry(Linker* linker, LinkerSymbol* symbol,
   word = UTypeInstruction(RV_OPCODE(auipc), t3, 0);
   BufferAppendWordLE(&contents->data.buffered, word);
   
-  // ld t3, %pcrel_lo(1b)(t3)
-  word = ITypeInstruction(RV_OPCODE(load), t3, t3, RV_F3(ld), 0);
+  // lw/ld t3, %pcrel_lo(1b)(t3)
+  word = ITypeInstruction(RV_OPCODE(load), t3, t3,
+                          RVLoadFunct3(linker), 0);
   BufferAppendWordLE(&contents->data.buffered, word);
 
   // jalr t1, t3
@@ -631,7 +670,7 @@ static void AddPLTEntry(Linker* linker, LinkerSymbol* symbol,
 // t1 contains the byte offset from the start of the .got.plt for the
 //    function to call, which can be used to determine the relocation
 //    and thus the symbol.
-static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
+static void SetupResolverPLTEntry(Linker* linker, ProcedureLinkageTable* plt,
                                   Buffer* plt_buffer,
                                   uint64_t got_address,
                                   uint64_t plt_address) {
@@ -646,14 +685,18 @@ static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
   int32_t hi20, lo12;
   SplitValue(addr_diff, &hi20, &lo12);
   
+  int ptr_size = IsRV32(linker) ? 4 : 8;
+  int load_f3 = ptr_size == 4 ? RV_F3(lw) : RV_F3(ld);
+  int srli_amt = ptr_size == 4 ? 2 : 1;
+
   // 1:   auipc  t2, %pcrel_hi(.got.plt)
   p[0] = UTypeInstruction(RV_OPCODE(auipc), t2, hi20);
   
   // sub    t1, t1, t3               # shifted .got.plt offset + hdr size + 12
   p[1] = RTypeInstruction(RV_OPCODE(op), t1, t1, t3, RV_F3(sub), RV_F7(sub));
 
-  // ld t3, %pcrel_lo(1b)(t2)    # _dl_runtime_resolve
-  p[2] = ITypeInstruction(RV_OPCODE(load), t3, t2, RV_F3(ld), lo12);
+  // lw/ld t3, %pcrel_lo(1b)(t2)    # _dl_runtime_resolve
+  p[2] = ITypeInstruction(RV_OPCODE(load), t3, t2, load_f3, lo12);
   
   // addi   t1, t1, -(hdr size + 12) # shifted .got.plt offset
   p[3] = ITypeInstruction(RV_OPCODE(op_imm), t1, t1, RV_F3(addi), -(32+12));
@@ -662,10 +705,10 @@ static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
   p[4] = ITypeInstruction(RV_OPCODE(op_imm), t0, t2, RV_F3(addi), lo12);
   
   // srli   t1, t1, log2(16/PTRSIZE) # .got.plt offset
-  p[5] = RTypeInstruction(RV_OPCODE(op_imm), t1, t1, 1, RV_F3(srli), RV_F7(srli));
+  p[5] = RTypeInstruction(RV_OPCODE(op_imm), t1, t1, srli_amt, RV_F3(srli), RV_F7(srli));
   
-  // ld t0, PTRSIZE(t0)          # link map
-  p[6] = ITypeInstruction(RV_OPCODE(load), t0, t0, RV_F3(ld), 8);
+  // lw/ld t0, PTRSIZE(t0)          # link map
+  p[6] = ITypeInstruction(RV_OPCODE(load), t0, t0, load_f3, ptr_size);
   
   // jr     t3
   p[7] = ITypeInstruction(RV_OPCODE(jalr), 0, t3,

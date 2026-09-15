@@ -9,7 +9,12 @@
 #ifndef setjmp_h
 #define setjmp_h
 
-#if defined(__risc_v__)
+#if defined(__risc_v__) && defined(__ILP32__)
+struct __jmp_buf {
+  // Integer saves occupy 0..52; callee-saved FP registers start at 112.
+  unsigned long long regs[26];
+};
+#elif defined(__risc_v__)
 struct __jmp_buf {
   long regs[32];
 };

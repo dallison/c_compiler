@@ -170,7 +170,7 @@ for tool in \
 done
 
 for archive in libc65c02.a libcaarch64.a libcarm.a libcpcode.a libcriscv.a \
-               libcx86_64.a; do
+               libcriscv32.a libcx86_64.a; do
   install_required_file 0644 "libc/$archive" "$actual_libdir/$archive"
 done
 install_required_file 0644 "6502_support/6502rom.exe" "$actual_libdir/6502rom.exe"

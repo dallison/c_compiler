@@ -203,7 +203,18 @@ int thrd_sleep(const struct timespec* duration, struct timespec* remaining) {
   if (duration == NULL || duration->tv_sec < 0 || duration->tv_nsec < 0 ||
       duration->tv_nsec >= 1000000000)
     return -1;
+#if defined(__risc_v__) && defined(__ILP32__)
+  long long native_duration[2] = {duration->tv_sec, duration->tv_nsec};
+  long long native_remaining[2];
+  long result = syscall(SYS_clock_nanosleep_time64, 0, 0, native_duration,
+                        remaining != NULL ? native_remaining : NULL, 0, 0);
+  if (result < 0 && remaining != NULL) {
+    remaining->tv_sec = (time_t)native_remaining[0];
+    remaining->tv_nsec = (long)native_remaining[1];
+  }
+#else
   long result = syscall(SYS_nanosleep, duration, remaining);
+#endif
   return result == 0 ? 0 : (errno == EINTR ? -2 : -1);
 }
 
@@ -335,11 +346,20 @@ int __davecc_addr_wait(const volatile void* address, const void* expected,
   if (size != sizeof(unsigned int)) return thrd_error;
   unsigned int expected_value = *(const unsigned int*)expected;
   struct timespec timeout;
-  struct timespec* timeout_pointer = NULL;
+  void* timeout_pointer = NULL;
+#if defined(__risc_v__) && defined(__ILP32__)
+  long long native_timeout[2];
+#endif
   if (timeout_us >= 0) {
     timeout.tv_sec = timeout_us / 1000000;
     timeout.tv_nsec = (timeout_us % 1000000) * 1000;
+#if defined(__risc_v__) && defined(__ILP32__)
+    native_timeout[0] = timeout.tv_sec;
+    native_timeout[1] = timeout.tv_nsec;
+    timeout_pointer = native_timeout;
+#else
     timeout_pointer = &timeout;
+#endif
   }
   long result =
       syscall(SYS_futex, address, 0, expected_value, timeout_pointer, 0, 0);
@@ -399,9 +419,15 @@ unsigned int __davecc_hardware_concurrency(void) {
 
 long long __davecc_monotonic_time_us(void) {
 #if defined(__DAVECC_HAS_NATIVE_THREADS__)
+#if defined(__risc_v__) && defined(__ILP32__)
+  long long value[2];
+  if (syscall(SYS_clock_gettime64, 1, value) == 0)
+    return value[0] * 1000000 + value[1] / 1000;
+#else
   struct timespec value;
   if (syscall(SYS_clock_gettime, 1, &value) == 0)
     return (long long)value.tv_sec * 1000000 + value.tv_nsec / 1000;
+#endif
   return (long long)clock();
 #elif defined(__DAVECC_HAS_HOST_CLOCK__)
   long long result = 0;
@@ -417,9 +443,15 @@ long long __davecc_monotonic_time_us(void) {
 
 long long __davecc_realtime_time_us(void) {
 #if defined(__DAVECC_HAS_NATIVE_THREADS__)
+#if defined(__risc_v__) && defined(__ILP32__)
+  long long value[2];
+  if (syscall(SYS_clock_gettime64, 0, value) == 0)
+    return value[0] * 1000000 + value[1] / 1000;
+#else
   struct timespec value;
   if (syscall(SYS_clock_gettime, 0, &value) == 0)
     return (long long)value.tv_sec * 1000000 + value.tv_nsec / 1000;
+#endif
 #elif defined(__DAVECC_HAS_HOST_CLOCK__)
   long long result = 0;
   if (syscall(SYS_REALTIME_TIME, &result) == 0) {

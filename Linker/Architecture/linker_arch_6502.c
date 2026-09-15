@@ -106,20 +106,29 @@ static void AddGOTEntry(Linker* linker, LinkerSymbol* symbol,
 
 }
 
-static void FixupGOTEntry(LinkerSymbol* symbol, Buffer* got_plt_buffer,
+static void FixupGOTEntry(Linker* linker, LinkerSymbol* symbol,
+                          Buffer* got_plt_buffer,
                           uint64_t plt_address, int plt_entry_size) {
-
+  (void)linker;
+  (void)symbol;
+  (void)got_plt_buffer;
+  (void)plt_address;
+  (void)plt_entry_size;
 }
 
 static void AddPLTEntry(Linker* linker, LinkerSymbol* symbol,
                         ELFWriterSectionContents* contents) {
 }
 
-static void SetupResolverPLTEntry(ProcedureLinkageTable* plt,
+static void SetupResolverPLTEntry(Linker* linker, ProcedureLinkageTable* plt,
                                   Buffer* plt_buffer,
                                   uint64_t got_address,
                                   uint64_t plt_address) {
- 
+  (void)linker;
+  (void)plt;
+  (void)plt_buffer;
+  (void)got_address;
+  (void)plt_address;
 }
 
 static void FixupPLTEntry(ProcedureLinkageTable* plt,

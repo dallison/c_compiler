@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fcntl.h>
 #include <random>
@@ -73,6 +74,24 @@ extern "C" int HeapThread(void*) {
 int main(int argc, char** argv) {
   if (argc > 1) destructor_path = argv[1];
   if (global_constructor_ran != 1) return 1;
+
+#if defined(__risc_v__) && defined(__ILP32__)
+  volatile double wide_fp = 4294967297.0;
+  volatile double wide_unsigned_fp = 9223372036854775808.0;
+  volatile long long wide_positive = 4294967297LL;
+  volatile long long wide_negative = -4294967297LL;
+  volatile unsigned long long wide_unsigned = 9223372036854775808ULL;
+  if ((long long)wide_fp != 4294967297LL) return 44;
+  if ((double)wide_positive != 4294967297.0) return 45;
+  if ((double)wide_negative != -4294967297.0) return 46;
+  char wide_format[32];
+  if (snprintf(wide_format, sizeof(wide_format), "%lld", wide_negative) < 0 ||
+      strcmp(wide_format, "-4294967297") != 0)
+    return 47;
+  if ((unsigned long long)wide_unsigned_fp != 9223372036854775808ULL)
+    return 48;
+  if ((double)wide_unsigned != 9223372036854775808.0) return 49;
+#endif
 
   errno = 0;
   FILE* missing = fopen("/definitely/not/a/davecc/file", "r");

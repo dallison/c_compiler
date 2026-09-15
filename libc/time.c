@@ -115,12 +115,25 @@ int timespec_get(struct timespec* result, int base) {
 
   int64_t microseconds = 0;
 #if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__risc_v__) && defined(__ILP32__)
+  int64_t native_time[2];
+  if (syscall(SYS_clock_gettime64, 0, native_time) < 0) {
+    return 0;
+  }
+  if ((time_t)native_time[0] != native_time[0] ||
+      (long)native_time[1] != native_time[1]) {
+    return 0;
+  }
+  result->tv_sec = (time_t)native_time[0];
+  result->tv_nsec = (long)native_time[1];
+#else
   struct timespec native_time;
   if (syscall(SYS_clock_gettime, 0, &native_time) < 0) {
     return 0;
   }
   result->tv_sec = native_time.tv_sec;
   result->tv_nsec = native_time.tv_nsec;
+#endif
   return TIME_UTC;
 #elif defined(__DAVECC_HAS_HOST_CLOCK__)
   if (syscall(SYS_REALTIME_TIME, &microseconds) != 0) {

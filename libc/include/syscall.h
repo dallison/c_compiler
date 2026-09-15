@@ -13,6 +13,12 @@
 
 #if defined(__DAVECC_NATIVE_LINUX__)
 #include <sys/syscall.h>
+#if defined(__risc_v__) && defined(__ILP32__)
+// RV32 was introduced after the Linux time64 transition.  Its kernel ABI does
+// not implement the legacy futex syscall number.
+#undef SYS_futex
+#define SYS_futex SYS_futex_time64
+#endif
 #define __DAVECC_HAS_NATIVE_THREADS__ 1
 #define __DAVECC_HAS_TLS_THREAD_ERRNO__ 1
 #define __DAVECC_HAS_HEAP_LOCK__ 1

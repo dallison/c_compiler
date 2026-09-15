@@ -13,6 +13,7 @@
 #define RISC_V_MAX_GUEST_THREADS 16
 #define RISC_V_STACK_BASE 0x70000000ull
 #define RISC_V_TLS_BASE 0x60000000ull
+#define RISC_V_HEAP_BASE 0x50000000ull
 
 typedef enum {
   kRISCVGuestThreadIdle,
@@ -53,6 +54,8 @@ typedef struct RISCVProcessRuntime {
   pthread_mutex_t heap_mutex;
   pthread_key_t current_thread_key;
   Vector threads;
+  Vector heap_allocations;
+  uint64_t next_heap_address;
   uint64_t next_tid;
   int active_joins;
   RISCVGuestThread* main_thread;
@@ -81,6 +84,13 @@ RISCVGuestThread* RISCVProcessAttachMainThread(RISCVProcessRuntime* process,
 RISCVGuestThread* RISCVProcessGetCurrentThread(RISCVProcessRuntime* process);
 void* RISCVProcessResolveGuestAddress(RISCVProcessRuntime* process,
                                       uint64_t addr, size_t size);
+bool RISCVProcessGuestHeapMalloc(RISCVProcessRuntime* process, size_t size,
+                                 uint32_t* guest_address);
+bool RISCVProcessGuestHeapRealloc(RISCVProcessRuntime* process,
+                                  uint32_t old_guest_address, size_t size,
+                                  uint32_t* new_guest_address);
+void RISCVProcessGuestHeapFree(RISCVProcessRuntime* process,
+                               uint32_t guest_address);
 
 int64_t RISCVSyscallThreadCreate(RISCVGuestThread* caller, uint64_t fn,
                                  uint64_t arg, uint64_t tls_init_fn,

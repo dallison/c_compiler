@@ -881,6 +881,12 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
             loader->arch->machine_type);
     return false;
   }
+  // RISC-V ELF32 cannot MAP_FIXED at its linked addresses on macOS (they sit
+  // below 4GB).  Translate linked VAs at runtime the same way ARM ELF32 does.
+  if (loader->arch->machine_type == ELF_MACHINE_TYPE_RISC_V &&
+      loader->elf_file->ops != NULL && !loader->elf_file->ops->is_64_bit) {
+    loader->arch->ignore_vaddr = true;
+  }
   
   // Set origin to the directory name of the executable file, or empty
   // string if there isn't one.

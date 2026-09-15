@@ -45,6 +45,7 @@ compile_profile aarch64-unknown-linux-davecc 63 56 220
 compile_profile x86_64-unknown-linux-davecc 0 257 56
 compile_profile arm-unknown-linux-davecc 3 322 120
 compile_profile riscv-unknown-linux-davecc 63 56 220
+compile_profile riscv32-unknown-linux-davecc 63 56 220
 
 cat >"$WORK/interpreter.c" <<'SRC'
 #ifdef __linux__

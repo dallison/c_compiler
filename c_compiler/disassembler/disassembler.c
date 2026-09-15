@@ -89,7 +89,8 @@ DAsmArchitecture DAsmArchitectureFromName(const char* name) {
   if (strcmp(name, "6502") == 0 || strcmp(name, "65c02") == 0) {
     return kDAsm6502;
   }
-  if (strcmp(name, "riscv") == 0 || strcmp(name, "risc-v") == 0) {
+  if (strcmp(name, "riscv") == 0 || strcmp(name, "risc-v") == 0 ||
+      strcmp(name, "riscv32") == 0 || strcmp(name, "risc-v32") == 0) {
     return kDAsmRiscV;
   }
   if (strcmp(name, "aarch64") == 0 || strcmp(name, "arm64") == 0) {

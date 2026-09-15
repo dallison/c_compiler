@@ -81,7 +81,7 @@ void __davecc_linux_tls_init(void* thread_pointer, void* initial_stack) {
   for (uintptr_t index = 0; index < program_header_count; ++index) {
     const unsigned char* header =
         (const unsigned char*)program_headers + index * program_header_size;
-#if defined(__arm__)
+#if defined(__arm__) || (defined(__risc_v__) && defined(__ILP32__))
     const DaveELF32ProgramHeader* program =
         (const DaveELF32ProgramHeader*)header;
 #else

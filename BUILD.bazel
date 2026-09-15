@@ -220,6 +220,7 @@ sh_binary(
         ":libc_headers",
         ":libc_pcode",
         ":libc_riscv",
+        ":libc_riscv32",
         ":libc_x86_64",
         ":pcode",
         ":riscv",
@@ -277,6 +278,7 @@ COMMON_INCLUDES = [
     "c_compiler/arm",
     "c_compiler/p_code",
     "c_compiler/risc_v",
+    "c_compiler/risc_v32",
     "c_compiler/wasm32",
     "c_compiler/x86_64",
     "c_compiler/AR",
@@ -716,6 +718,7 @@ cc_library(
         "c_compiler/arm/*.h",
         "c_compiler/p_code/*.h",
         "c_compiler/risc_v/*.h",
+        "c_compiler/risc_v32/*.h",
         "c_compiler/x86_64/*.h",
     ]),
     copts = COMMON_COPTS,
@@ -826,6 +829,12 @@ cc_library(
         "c_compiler/risc_v/risc_v_optimize.c",
         "c_compiler/risc_v/risc_v_reg_alloc.c",
         "c_compiler/risc_v/risc_v_target.c",
+        "c_compiler/risc_v32/risc_v32_assembler.c",
+        "c_compiler/risc_v32/risc_v32_codegen.c",
+        "c_compiler/risc_v32/risc_v32_emitter.c",
+        "c_compiler/risc_v32/risc_v32_optimize.c",
+        "c_compiler/risc_v32/risc_v32_reg_alloc.c",
+        "c_compiler/risc_v32/risc_v32_target.c",
         "c_compiler/wasm32/wasm32_codegen.c",
         "c_compiler/wasm32/wasm32_data.c",
         "c_compiler/wasm32/wasm32_emitter.c",
@@ -2210,6 +2219,197 @@ cd "$$work"
 "$$archivist" r "$$out_file" *.o
 """,
 )
+genrule(
+    name = "libc_riscv32",
+    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
+        "libc/include/**/*.h",
+        "RISCV32_support/*.s",
+    ]) + [
+        "libc/guest_heap.c",
+        ":davecc",
+        ":archivist",
+    ],
+    outs = ["libc/libcriscv32.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libcriscv32.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$$(pwd)/$(execpath :davecc)"
+archivist="$$(pwd)/$(execpath :archivist)"
+cflags=(-target riscv32 -O1 -c -isystem libc/include -Ilibc)
+
+runtime_srcs=(
+  "RISCV32_support/cxx_guard.s"
+  "RISCV32_support/cxx_rtti_vtables.s"
+  "RISCV32_support/start.s"
+  "RISCV32_support/eh_transfer.s"
+  "RISCV32_support/longjmp.s"
+  "RISCV32_support/setjmp.s"
+)
+
+runtime_objs=()
+for src in "$${runtime_srcs[@]}"; do
+  obj="$$work/rt_$$(basename "$${src%.s}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  runtime_objs+=("$$obj")
+done
+
+libc_srcs=(
+  "libc/abs.c"
+  "libc/assert_fail.c"
+  "libc/atoi.c"
+  "libc/atol.c"
+  "libc/bsearch.c"
+  "libc/calloc.c"
+  "libc/cdiv.c"
+  "libc/ckdint.c"
+  "libc/complex_core.c"
+  "libc/complex_exp.c"
+  "libc/complex_hyperbolic.c"
+  "libc/complex_inverse.c"
+  "libc/complex_sqrt.c"
+  "libc/complex_trig.c"
+  "libc/ctype.c"
+  "libc/cxx_guard.c"
+  "libc/cxx_new.c"
+  "libc/cxx_rtti.c"
+  "libc/cxx_tls.c"
+  "libc/cxx_tls_stubs.c"
+  "libc/davecc_lifecycle.c"
+  "libc/eh_cxa.c"
+  "libc/eh_frame.c"
+  "libc/eh_frame_pointer.c"
+  "libc/eh_terminate.c"
+  "libc/eh_personality.c"
+  "libc/eh_throw.c"
+  "libc/gxx_personality.c"
+  "libc/lsda.c"
+  "libc/unwind_api.c"
+  "libc/exit.c"
+  "libc/fclose.c"
+  "libc/fflush.c"
+  "libc/fgetc.c"
+  "libc/fgets.c"
+  "libc/fopen.c"
+  "libc/fpfuncs.c"
+  "libc/fputc.c"
+  "libc/fputs.c"
+  "libc/fread.c"
+  "libc/free.c"
+  "libc/free_sized.c"
+  "libc/fseek.c"
+  "libc/ftoa.c"
+  "libc/fwrite.c"
+  "libc/getenv.c"
+  "libc/itoa_int.c"
+  "libc/itoa_long.c"
+  "libc/itoa_longlong.c"
+  "libc/itoa_ptr.c"
+  "libc/gets.c"
+  "libc/ldexp.c"
+  "libc/malloc.c"
+  "libc/memccpy.c"
+  "libc/memchr.c"
+  "libc/memcmp.c"
+  "libc/memcpy.c"
+  "libc/memmove.c"
+  "libc/memset.c"
+  "libc/memset_explicit.c"
+  "libc/modf.c"
+  "libc/perror.c"
+  "libc/errno.c"
+  "libc/posix.c"
+  "libc/posix_close.c"
+  "libc/posix_fs.c"
+  "libc/posix_linux.c"
+  "libc/posix_lseek.c"
+  "libc/posix_open.c"
+  "libc/posix_read.c"
+  "libc/printf.c"
+  "libc/printf_common.c"
+  "libc/printf_literal.c"
+  "libc/printf_long.c"
+  "libc/qsort.c"
+  "libc/rand.c"
+  "libc/realloc.c"
+  "libc/scanf.c"
+  "libc/signal.c"
+  "libc/sincos.c"
+  "libc/stdio.c"
+  "libc/stdio_flags.c"
+  "libc/stdio_setvbuf.c"
+  "libc/strcat.c"
+  "libc/strchr.c"
+  "libc/strcmp.c"
+  "libc/strcpy.c"
+  "libc/strcspn.c"
+  "libc/strerror.c"
+  "libc/strings.c"
+  "libc/strlen.c"
+  "libc/strdup.c"
+  "libc/strncat.c"
+  "libc/strncmp.c"
+  "libc/strncpy.c"
+  "libc/strpbrk.c"
+  "libc/strrchr.c"
+  "libc/strspn.c"
+  "libc/strstr.c"
+  "libc/strtod.c"
+  "libc/strtok.c"
+  "libc/strtol.c"
+  "libc/strtoll.c"
+  "libc/strtoul.c"
+  "libc/strtoull.c"
+  "libc/stdlib_extra.c"
+  "libc/stacktrace.c"
+  "libc/syscall.c"
+  "libc/tmpfile.c"
+  "libc/time.c"
+  "libc/ungetc.c"
+  "libc/acos.c"
+  "libc/asin.c"
+  "libc/atan.c"
+  "libc/atan2.c"
+  "libc/ceil.c"
+  "libc/exp.c"
+  "libc/fabs.c"
+  "libc/fenv.c"
+  "libc/floor.c"
+  "libc/frexp.c"
+  "libc/log.c"
+  "libc/math_extra.c"
+  "libc/locale_c.c"
+  "libc/inttypes.c"
+  "libc/uchar.c"
+  "libc/wchar.c"
+  "libc/wctype.c"
+  "libc/pow.c"
+  "libc/sqrt.c"
+  "libc/tan.c"
+  "libc/threads.c"
+  "libc/guest_heap.c"
+)
+
+libc_objs=()
+for src in "$${libc_srcs[@]}"; do
+  obj="$$work/$$(basename "$${src%.c}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  libc_objs+=("$$obj")
+done
+cxx_objs=()
+for src in libc/*.cc; do
+  obj="$$work/cxx_$$(basename "$${src%.cc}").o"
+  "$$davecc" "$${cflags[@]}" -std=c++20 "$$src" -o "$$obj"
+  cxx_objs+=("$$obj")
+done
+
+"$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}" "$${cxx_objs[@]}"
+""",
+)
 
 linux_start_object(
     name = "aarch64_linux_start",
@@ -2253,6 +2453,13 @@ linux_start_object(
     architecture = "riscv",
     source = "RISCV_support/linux_start.s",
     output = "riscv_linux_start.o",
+)
+
+linux_start_object(
+    name = "riscv32_linux_start",
+    architecture = "riscv32",
+    source = "RISCV32_support/linux_start.s",
+    output = "riscv32_linux_start.o",
 )
 
 linux_libc_archive(
@@ -2375,6 +2582,23 @@ linux_libc_archive(
         "RISCV_support/setjmp.s",
     ],
     output = "libcriscv_linux.a",
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+)
+
+linux_libc_archive(
+    name = "libc_riscv32_linux",
+    architecture = "riscv32",
+    syscall_source = "RISCV32_support/linux_syscall.s",
+    clone_source = "RISCV32_support/linux_clone.s",
+    support_sources = [
+        "RISCV32_support/cxx_guard.s",
+        "RISCV32_support/cxx_rtti_vtables.s",
+        "RISCV32_support/eh_transfer.s",
+        "RISCV32_support/longjmp.s",
+        "RISCV32_support/setjmp.s",
+    ],
+    output = "libcriscv32_linux.a",
     libc_srcs = LIBC_SRCS,
     libc_cxx_srcs = LIBC_CXX_SRCS,
 )
@@ -2689,6 +2913,7 @@ LIBC_TEST_DATA = LIBC_SRCS + LIBC_CXX_SRCS + [
     "libc/tests/**",
     "x86_64 support/*.s",
     "RISCV_support/*.s",
+    "RISCV32_support/*.s",
 ])
 
 sh_test(
@@ -4338,6 +4563,66 @@ sh_test(
         ":libc_riscv_linux",
         ":native_linux_smoke_source",
         ":riscv_linux_start",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_riscv32_minimal_smoke_test",
+    srcs = ["tests/native_linux_riscv32_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_riscv32_linux)",
+        "$(rootpath :riscv32_linux_start)",
+        "$(rootpath :native_linux_dynamic_minimal_source)",
+        "minimal",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_riscv32_linux",
+        ":native_linux_dynamic_minimal_source",
+        ":riscv32_linux_start",
+    ],
+    env_inherit = [
+        "COLIMA",
+        "COLIMA_HOME",
+        "COLIMA_PROFILE",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "native_linux_riscv32_smoke_test",
+    srcs = ["tests/native_linux_riscv32_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_riscv32_linux)",
+        "$(rootpath :riscv32_linux_start)",
+        "$(rootpath :native_linux_smoke_source)",
+        "full",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_riscv32_linux",
+        ":native_linux_smoke_source",
+        ":riscv32_linux_start",
     ],
     env_inherit = [
         "COLIMA",

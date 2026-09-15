@@ -163,6 +163,7 @@ typedef struct RISCVInterpreter {
   uint32_t reservation_size;
   uint64_t reservation_epoch;
   jmp_buf debugger;
+  bool xlen32;
 } RISCVInterpreter;
 
 void RISCVInterpreterInit(RISCVInterpreter* interpreter, Loader* loader, uint64_t entry_address, int argc, char** argv,
