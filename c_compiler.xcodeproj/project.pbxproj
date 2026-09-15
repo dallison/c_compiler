@@ -218,6 +218,9 @@
 		E59DB52826262D830091BD9E /* linker_config.h in Headers */ = {isa = PBXBuildFile; fileRef = E59DB52626262D830091BD9E /* linker_config.h */; };
 		E59DB52926262D830091BD9E /* linker_config.h in Headers */ = {isa = PBXBuildFile; fileRef = E59DB52626262D830091BD9E /* linker_config.h */; };
 		E59DB52B26262D830091BD9E /* linker_config.c in Sources */ = {isa = PBXBuildFile; fileRef = E59DB52726262D830091BD9E /* linker_config.c */; };
+		E59DB61026262D830091BD9E /* linker_script.h in Headers */ = {isa = PBXBuildFile; fileRef = E59DB60E26262D830091BD9E /* linker_script.h */; };
+		E59DB61126262D830091BD9E /* linker_script.h in Headers */ = {isa = PBXBuildFile; fileRef = E59DB60E26262D830091BD9E /* linker_script.h */; };
+		E59DB61226262D830091BD9E /* linker_script.c in Sources */ = {isa = PBXBuildFile; fileRef = E59DB60F26262D830091BD9E /* linker_script.c */; };
 		E5AB5FAF208799E8006CA8FB /* risc_v_optimize.h in Headers */ = {isa = PBXBuildFile; fileRef = E5AB5FAD208799E8006CA8FB /* risc_v_optimize.h */; };
 		E5AB5FB0208799E8006CA8FB /* risc_v_optimize.c in Sources */ = {isa = PBXBuildFile; fileRef = E5AB5FAE208799E8006CA8FB /* risc_v_optimize.c */; };
 		E5AB5FBA208E7282006CA8FB /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = E5AB5FB9208E7282006CA8FB /* main.c */; };
@@ -1016,7 +1019,8 @@
 		E59DB5202617F8100091BD9E /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
 		E59DB52626262D830091BD9E /* linker_config.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = linker_config.h; sourceTree = "<group>"; };
 		E59DB52726262D830091BD9E /* linker_config.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = linker_config.c; sourceTree = "<group>"; };
-		E59DB52C2627C9C60091BD9E /* default.lcfg */ = {isa = PBXFileReference; lastKnownFileType = text; path = default.lcfg; sourceTree = "<group>"; };
+		E59DB60E26262D830091BD9E /* linker_script.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = linker_script.h; sourceTree = "<group>"; };
+		E59DB60F26262D830091BD9E /* linker_script.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = linker_script.c; sourceTree = "<group>"; };
 		E5A10D54209788FA009C6D1C /* memcpy.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = memcpy.c; sourceTree = "<group>"; };
 		E5A10D55209789A1009C6D1C /* memset.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = memset.c; sourceTree = "<group>"; };
 		E5A10D5620978C51009C6D1C /* strcmp.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = strcmp.c; sourceTree = "<group>"; };
@@ -1737,9 +1741,10 @@
 				E5D0A40520F00371002EA6BE /* linker_dynamic.c */,
 				E59DB52626262D830091BD9E /* linker_config.h */,
 				E59DB52726262D830091BD9E /* linker_config.c */,
+				E59DB60E26262D830091BD9E /* linker_script.h */,
+				E59DB60F26262D830091BD9E /* linker_script.c */,
 				E5360BCD2005844B00EDD8F1 /* linker.c */,
 				E5360BCE2005844B00EDD8F1 /* linker.h */,
-				E59DB52C2627C9C60091BD9E /* default.lcfg */,
 			);
 			path = Linker;
 			sourceTree = "<group>";
@@ -2600,6 +2605,7 @@
 				E5360BE72005963B00EDD8F1 /* map.h in Headers */,
 				E5360BDD2005963B00EDD8F1 /* vector.h in Headers */,
 				E59DB52826262D830091BD9E /* linker_config.h in Headers */,
+				E59DB61026262D830091BD9E /* linker_script.h in Headers */,
 				E5360BE52005963B00EDD8F1 /* bitset.h in Headers */,
 				E5360BDF2005963B00EDD8F1 /* hashtable.h in Headers */,
 				E581DD9B223302B200A3BD39 /* loader_arch.h in Headers */,
@@ -2641,6 +2647,7 @@
 			files = (
 				E57CB97422C5A3D90068119C /* linker_main.h in Headers */,
 				E59DB52926262D830091BD9E /* linker_config.h in Headers */,
+				E59DB61126262D830091BD9E /* linker_script.h in Headers */,
 				E57CB95F22C5A2780068119C /* linkerlibrary.h in Headers */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -3869,6 +3876,7 @@
 				E57CB96B22C5A2C50068119C /* linker_arch_6502.c in Sources */,
 				E57CB96522C5A2A70068119C /* linker_symbols.c in Sources */,
 				E59DB52B26262D830091BD9E /* linker_config.c in Sources */,
+				E59DB61226262D830091BD9E /* linker_script.c in Sources */,
 				E57CB97522C5A3D90068119C /* linker_main.c in Sources */,
 				E57CB96122C5A2780068119C /* linkerlibrary.m in Sources */,
 				E57CB96822C5A2B40068119C /* linker_dynamic.c in Sources */,

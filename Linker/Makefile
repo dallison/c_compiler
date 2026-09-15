@@ -33,6 +33,7 @@ LINKER_OBJS = \
 	linker_reloc.o \
 	linker_dynamic.o \
 	linker_config.o \
+	linker_script.o \
 	$(ARCH_OBJS)
 
 $(LIB): $(LINKER_OBJS)

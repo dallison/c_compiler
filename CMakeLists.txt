@@ -130,6 +130,7 @@ davecc_library(davecc_linker
   Linker/Architecture/linker_arch_riscv.c
   Linker/linker.c
   Linker/linker_config.c
+  Linker/linker_script.c
   Linker/linker_dynamic.c
   Linker/linker_file.c
   Linker/linker_main.c
