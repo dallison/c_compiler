@@ -57,8 +57,8 @@ typedef struct Wasm32Generator {
   // Locals beyond the parameters, grouped by value type.  The final local
   // index of an instruction is num_params + type_base[t] + ordinal.
   int num_params;
-  int num_locals[4];
-  int type_base[4];
+  int num_locals[WASM32_NUM_VALUE_TYPES];
+  int type_base[WASM32_NUM_VALUE_TYPES];
 
   // The instruction whose local holds the base of this function's shadow
   // frame, or NULL when the function needs no frame.

@@ -15,6 +15,8 @@ static const char* TypeName(WasmValueType type) {
       return "f32";
     case kWasmTypeF64:
       return "f64";
+    case kWasmTypeV128:
+      return "v128";
     case kWasmTypeI32:
       return "i32";
     default:
@@ -35,9 +37,9 @@ static void PrintSignature(Wasm32Generator* wasm, FILE* fp) {
 }
 
 static void PrintLocals(Wasm32Generator* wasm, FILE* fp) {
-  static const WasmValueType kTypeOrder[4] = {kWasmTypeI32, kWasmTypeI64,
-                                              kWasmTypeF32, kWasmTypeF64};
-  for (int i = 0; i < 4; i++) {
+  static const WasmValueType kTypeOrder[WASM32_NUM_VALUE_TYPES] = {
+      kWasmTypeI32, kWasmTypeI64, kWasmTypeF32, kWasmTypeF64, kWasmTypeV128};
+  for (int i = 0; i < WASM32_NUM_VALUE_TYPES; i++) {
     for (int j = 0; j < wasm->num_locals[i]; j++) {
       fprintf(fp, "  (local %s)\n", TypeName(kTypeOrder[i]));
     }

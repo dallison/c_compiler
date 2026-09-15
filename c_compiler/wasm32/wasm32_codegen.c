@@ -56,6 +56,9 @@ int Wasm32OpcodeEncoding(int op) {
 }
 
 WasmValueType Wasm32InstructionType(TargetInstruction* inst) {
+  if ((inst->flags & WASM32_FLAG_TYPE_V128) != 0) {
+    return kWasmTypeV128;
+  }
   switch (inst->flags & WASM32_FLAG_TYPE_MASK) {
     case WASM32_FLAG_TYPE_I64:
       return kWasmTypeI64;
@@ -80,11 +83,15 @@ void Wasm32SetInstructionType(TargetInstruction* inst, WasmValueType type) {
     case kWasmTypeF64:
       bits = WASM32_FLAG_TYPE_F64;
       break;
+    case kWasmTypeV128:
+      bits = WASM32_FLAG_TYPE_V128;
+      break;
     default:
       bits = WASM32_FLAG_TYPE_I32;
       break;
   }
-  inst->flags = (inst->flags & ~WASM32_FLAG_TYPE_MASK) | bits;
+  inst->flags =
+      (inst->flags & ~(WASM32_FLAG_TYPE_MASK | WASM32_FLAG_TYPE_V128)) | bits;
 }
 
 int Wasm32TypeIndex(WasmValueType type) {
@@ -95,6 +102,8 @@ int Wasm32TypeIndex(WasmValueType type) {
       return 2;
     case kWasmTypeF64:
       return 3;
+    case kWasmTypeV128:
+      return 4;
     default:
       return 0;
   }
@@ -109,7 +118,8 @@ WasmValueType Wasm32TypeForCType(TypeRecord* type) {
   if (TypeIsFloatingPoint(type)) {
     return type->size <= 4 ? kWasmTypeF32 : kWasmTypeF64;
   }
-  if (TypeIsPointerOrArray(type) || TypeIsStructOrUnion(type)) {
+  if (TypeIsPointerOrArray(type) || TypeIsStructOrUnion(type) ||
+      TypeIsVector(type)) {
     return kWasmTypeI32;
   }
   return type->size > 4 ? kWasmTypeI64 : kWasmTypeI32;
@@ -117,6 +127,9 @@ WasmValueType Wasm32TypeForCType(TypeRecord* type) {
 
 // How many bytes of a value a wasm local of this type holds.
 static int WasmTypeSize(WasmValueType type) {
+  if (type == kWasmTypeV128) {
+    return 16;
+  }
   return (type == kWasmTypeI64 || type == kWasmTypeF64) ? 8 : 4;
 }
 
@@ -174,6 +187,7 @@ bool Wasm32ProducesValue(TargetInstruction* inst) {
     case W_OP(i64_store8):
     case W_OP(i64_store16):
     case W_OP(i64_store32):
+    case W_OP(v128_store):
     case W_OP(memory_copy):
     case W_OP(memory_fill):
       return false;
@@ -220,6 +234,7 @@ bool Wasm32OperandIsImmediate(TargetInstruction* inst, int index) {
     case W_OP(i64_load16_u):
     case W_OP(i64_load32_s):
     case W_OP(i64_load32_u):
+    case W_OP(v128_load):
       return index == 1;
     case W_OP(i32_store):
     case W_OP(i64_store):
@@ -230,6 +245,7 @@ bool Wasm32OperandIsImmediate(TargetInstruction* inst, int index) {
     case W_OP(i64_store8):
     case W_OP(i64_store16):
     case W_OP(i64_store32):
+    case W_OP(v128_store):
       return index == 2;
     case W_OP(call):
       return index == 0;
@@ -2262,6 +2278,235 @@ static TargetInstruction* LowerVaCopy(Wasm32Generator* wasm, IRNode* node) {
                                         value, destination_offset));
 }
 
+static Wasm32Opcode SimdBinaryOpcode(IROpcode opcode, TypeRecord* element) {
+  int size = element->size;
+  bool is_float = TypeUsesFloat32Representation(element) ||
+                  TypeUsesFloat64Representation(element);
+
+  if (opcode == IR_OP(vand)) {
+    return W_OP(v128_and);
+  }
+  if (opcode == IR_OP(vor)) {
+    return W_OP(v128_or);
+  }
+  if (opcode == IR_OP(vxor)) {
+    return W_OP(v128_xor);
+  }
+
+  if (is_float) {
+    if (size == 4) {
+      switch (opcode) {
+        case IR_OP(vadd):
+          return W_OP(f32x4_add);
+        case IR_OP(vsub):
+          return W_OP(f32x4_sub);
+        case IR_OP(vmul):
+          return W_OP(f32x4_mul);
+        case IR_OP(vdiv):
+          return W_OP(f32x4_div);
+        case IR_OP(vcmpeq):
+          return W_OP(f32x4_eq);
+        case IR_OP(vcmpne):
+          return W_OP(f32x4_ne);
+        case IR_OP(vcmplt):
+          return W_OP(f32x4_lt);
+        case IR_OP(vcmple):
+          return W_OP(f32x4_le);
+        case IR_OP(vcmpgt):
+          return W_OP(f32x4_gt);
+        case IR_OP(vcmpge):
+          return W_OP(f32x4_ge);
+        default:
+          break;
+      }
+    } else if (size == 8) {
+      switch (opcode) {
+        case IR_OP(vadd):
+          return W_OP(f64x2_add);
+        case IR_OP(vsub):
+          return W_OP(f64x2_sub);
+        case IR_OP(vmul):
+          return W_OP(f64x2_mul);
+        case IR_OP(vdiv):
+          return W_OP(f64x2_div);
+        case IR_OP(vcmpeq):
+          return W_OP(f64x2_eq);
+        case IR_OP(vcmpne):
+          return W_OP(f64x2_ne);
+        case IR_OP(vcmplt):
+          return W_OP(f64x2_lt);
+        case IR_OP(vcmple):
+          return W_OP(f64x2_le);
+        case IR_OP(vcmpgt):
+          return W_OP(f64x2_gt);
+        case IR_OP(vcmpge):
+          return W_OP(f64x2_ge);
+        default:
+          break;
+      }
+    }
+    return kWasm32_num_opcodes;
+  }
+
+  switch (size) {
+    case 1:
+      switch (opcode) {
+        case IR_OP(vadd):
+          return W_OP(i8x16_add);
+        case IR_OP(vsub):
+          return W_OP(i8x16_sub);
+        case IR_OP(vcmpeq):
+          return W_OP(i8x16_eq);
+        case IR_OP(vcmpne):
+          return W_OP(i8x16_ne);
+        case IR_OP(vcmplt):
+          return W_OP(i8x16_lt_s);
+        case IR_OP(vcmpltu):
+          return W_OP(i8x16_lt_u);
+        case IR_OP(vcmpgt):
+          return W_OP(i8x16_gt_s);
+        case IR_OP(vcmpgtu):
+          return W_OP(i8x16_gt_u);
+        case IR_OP(vcmple):
+          return W_OP(i8x16_le_s);
+        case IR_OP(vcmpleu):
+          return W_OP(i8x16_le_u);
+        case IR_OP(vcmpge):
+          return W_OP(i8x16_ge_s);
+        case IR_OP(vcmpgeu):
+          return W_OP(i8x16_ge_u);
+        default:
+          break;
+      }
+      break;
+    case 2:
+      switch (opcode) {
+        case IR_OP(vadd):
+          return W_OP(i16x8_add);
+        case IR_OP(vsub):
+          return W_OP(i16x8_sub);
+        case IR_OP(vmul):
+          return W_OP(i16x8_mul);
+        case IR_OP(vcmpeq):
+          return W_OP(i16x8_eq);
+        case IR_OP(vcmpne):
+          return W_OP(i16x8_ne);
+        case IR_OP(vcmplt):
+          return W_OP(i16x8_lt_s);
+        case IR_OP(vcmpltu):
+          return W_OP(i16x8_lt_u);
+        case IR_OP(vcmpgt):
+          return W_OP(i16x8_gt_s);
+        case IR_OP(vcmpgtu):
+          return W_OP(i16x8_gt_u);
+        case IR_OP(vcmple):
+          return W_OP(i16x8_le_s);
+        case IR_OP(vcmpleu):
+          return W_OP(i16x8_le_u);
+        case IR_OP(vcmpge):
+          return W_OP(i16x8_ge_s);
+        case IR_OP(vcmpgeu):
+          return W_OP(i16x8_ge_u);
+        default:
+          break;
+      }
+      break;
+    case 4:
+      switch (opcode) {
+        case IR_OP(vadd):
+          return W_OP(i32x4_add);
+        case IR_OP(vsub):
+          return W_OP(i32x4_sub);
+        case IR_OP(vmul):
+          return W_OP(i32x4_mul);
+        case IR_OP(vcmpeq):
+          return W_OP(i32x4_eq);
+        case IR_OP(vcmpne):
+          return W_OP(i32x4_ne);
+        case IR_OP(vcmplt):
+          return W_OP(i32x4_lt_s);
+        case IR_OP(vcmpltu):
+          return W_OP(i32x4_lt_u);
+        case IR_OP(vcmpgt):
+          return W_OP(i32x4_gt_s);
+        case IR_OP(vcmpgtu):
+          return W_OP(i32x4_gt_u);
+        case IR_OP(vcmple):
+          return W_OP(i32x4_le_s);
+        case IR_OP(vcmpleu):
+          return W_OP(i32x4_le_u);
+        case IR_OP(vcmpge):
+          return W_OP(i32x4_ge_s);
+        case IR_OP(vcmpgeu):
+          return W_OP(i32x4_ge_u);
+        default:
+          break;
+      }
+      break;
+    case 8:
+      switch (opcode) {
+        case IR_OP(vadd):
+          return W_OP(i64x2_add);
+        case IR_OP(vsub):
+          return W_OP(i64x2_sub);
+        case IR_OP(vmul):
+          return W_OP(i64x2_mul);
+        case IR_OP(vcmpeq):
+          return W_OP(i64x2_eq);
+        case IR_OP(vcmpne):
+          return W_OP(i64x2_ne);
+        case IR_OP(vcmplt):
+          return W_OP(i64x2_lt_s);
+        case IR_OP(vcmpgt):
+          return W_OP(i64x2_gt_s);
+        case IR_OP(vcmple):
+          return W_OP(i64x2_le_s);
+        case IR_OP(vcmpge):
+          return W_OP(i64x2_ge_s);
+        default:
+          break;
+      }
+      break;
+    default:
+      break;
+  }
+  return kWasm32_num_opcodes;
+}
+
+static TargetInstruction* LowerVectorOperation(Wasm32Generator* wasm,
+                                               IRNode* node) {
+  TypeRecord* vector_type = (TypeRecord*)node->aux;
+  if (!TypeIsVector(vector_type) && node->inputs.length > 0) {
+    vector_type = ((IRNode*)node->inputs.value.p[0])->type;
+    if (TypeIsPointer(vector_type)) {
+      vector_type = vector_type->next;
+    }
+  }
+  TypeRecord* element =
+      TypeIsVector(vector_type) ? TypeVectorElement(vector_type) : NULL;
+  Wasm32Opcode opcode =
+      element != NULL ? SimdBinaryOpcode(node->opcode, element)
+                      : kWasm32_num_opcodes;
+  if (!TypeIsVector(vector_type) || vector_type->size != 16 ||
+      opcode == kWasm32_num_opcodes || node->inputs.length != 3) {
+    Fail(wasm,
+         "vector operation must be software-expanded before wasm32 lowering");
+    return NULL;
+  }
+
+  TargetInstruction* destination = Materialize(wasm, node->inputs.value.p[0]);
+  TargetInstruction* left_address = Materialize(wasm, node->inputs.value.p[1]);
+  TargetInstruction* right_address = Materialize(wasm, node->inputs.value.p[2]);
+  TargetInstruction* left =
+      EmitLoad(wasm, W_OP(v128_load), left_address, 0, kWasmTypeV128);
+  TargetInstruction* right =
+      EmitLoad(wasm, W_OP(v128_load), right_address, 0, kWasmTypeV128);
+  TargetInstruction* result =
+      EmitBinary(wasm, opcode, kWasmTypeV128, left, right);
+  return SetLoweredNode(
+      node, EmitStore(wasm, W_OP(v128_store), destination, result, 0));
+}
+
 static TargetInstruction* LowerIRNode(Wasm32Generator* wasm, IRNode* node) {
   if (node->data.ptr != NULL) {
     return node->data.ptr;
@@ -2507,15 +2752,9 @@ static TargetInstruction* LowerIRNode(Wasm32Generator* wasm, IRNode* node) {
     case IR_OP(vsub):
     case IR_OP(vmul):
     case IR_OP(vdiv):
-    case IR_OP(vmod):
-    case IR_OP(vlsl):
-    case IR_OP(vlsr):
-    case IR_OP(vasr):
     case IR_OP(vand):
     case IR_OP(vor):
     case IR_OP(vxor):
-    case IR_OP(vneg):
-    case IR_OP(vonescomp):
     case IR_OP(vcmpeq):
     case IR_OP(vcmpne):
     case IR_OP(vcmplt):
@@ -2526,6 +2765,14 @@ static TargetInstruction* LowerIRNode(Wasm32Generator* wasm, IRNode* node) {
     case IR_OP(vcmpleu):
     case IR_OP(vcmpgtu):
     case IR_OP(vcmpgeu):
+      return LowerVectorOperation(wasm, node);
+
+    case IR_OP(vmod):
+    case IR_OP(vlsl):
+    case IR_OP(vlsr):
+    case IR_OP(vasr):
+    case IR_OP(vneg):
+    case IR_OP(vonescomp):
     case IR_OP(vectorarg):
     case IR_OP(resultv):
     case IR_OP(capturev):

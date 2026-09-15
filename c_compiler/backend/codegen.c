@@ -2028,7 +2028,45 @@ static void ScalarizeVectorOperations(Generator* gen) {
              node->opcode == IR_OP(vsub) ||
              node->opcode == IR_OP(vmul) ||
              node->opcode == IR_OP(vdiv))));
-      if (native_x86 || native_aarch64 || native_arm || native_riscv) {
+      // Wasm SIMD is v128 only.  Integer vdiv/vmod and i8 mul have no opcode,
+      // and shifts take a splat i32 count rather than a per-lane vector.
+      bool native_wasm32 =
+          (StringEqual(compiler->target_name, "wasm32") ||
+           StringEqual(compiler->target_name, "wasm")) &&
+          vector_type != NULL && vector_type->size == 16 &&
+          element != NULL &&
+          ((TypeIsIntegral(element) &&
+            (node->opcode == IR_OP(vadd) ||
+             node->opcode == IR_OP(vsub) ||
+             node->opcode == IR_OP(vand) ||
+             node->opcode == IR_OP(vor) ||
+             node->opcode == IR_OP(vxor) ||
+             (node->opcode == IR_OP(vmul) && element->size >= 2) ||
+             node->opcode == IR_OP(vcmpeq) ||
+             node->opcode == IR_OP(vcmpne) ||
+             node->opcode == IR_OP(vcmplt) ||
+             node->opcode == IR_OP(vcmple) ||
+             node->opcode == IR_OP(vcmpgt) ||
+             node->opcode == IR_OP(vcmpge) ||
+             ((node->opcode == IR_OP(vcmpltu) ||
+               node->opcode == IR_OP(vcmpleu) ||
+               node->opcode == IR_OP(vcmpgtu) ||
+               node->opcode == IR_OP(vcmpgeu)) &&
+              element->size <= 4))) ||
+           ((TypeUsesFloat32Representation(element) ||
+             TypeUsesFloat64Representation(element)) &&
+            (node->opcode == IR_OP(vadd) ||
+             node->opcode == IR_OP(vsub) ||
+             node->opcode == IR_OP(vmul) ||
+             node->opcode == IR_OP(vdiv) ||
+             node->opcode == IR_OP(vcmpeq) ||
+             node->opcode == IR_OP(vcmpne) ||
+             node->opcode == IR_OP(vcmplt) ||
+             node->opcode == IR_OP(vcmple) ||
+             node->opcode == IR_OP(vcmpgt) ||
+             node->opcode == IR_OP(vcmpge))));
+      if (native_x86 || native_aarch64 || native_arm || native_riscv ||
+          native_wasm32) {
         node = next;
         continue;
       }

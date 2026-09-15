@@ -601,6 +601,7 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
              StringEqual(compiler->target_name, "wasm")) {
     PreprocessorDefineMacro(p, "__wasm__", "1");
     PreprocessorDefineMacro(p, "__wasm32__", "1");
+    PreprocessorDefineMacro(p, "__wasm_simd128__", "1");
     PreprocessorDefineMacro(p, "__WORDSIZE", "32");
     PreprocessorDefineMacro(p, "__ILP32__", "1");
     PreprocessorDefineMacro(p, "_ILP32", "1");

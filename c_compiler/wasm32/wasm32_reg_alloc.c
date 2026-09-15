@@ -18,7 +18,7 @@ int Wasm32LocalIndex(TargetInstruction* inst) {
 // index is only known once every type's population is counted.  The first
 // pass records a per-type ordinal and the second turns it into an index.
 void Wasm32AllocateLocals(Wasm32Generator* wasm) {
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < WASM32_NUM_VALUE_TYPES; i++) {
     wasm->num_locals[i] = 0;
   }
   VectorClear(&wasm->local_values);
@@ -43,7 +43,7 @@ void Wasm32AllocateLocals(Wasm32Generator* wasm) {
   }
 
   int base = wasm->num_params;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < WASM32_NUM_VALUE_TYPES; i++) {
     wasm->type_base[i] = base;
     base += wasm->num_locals[i];
   }

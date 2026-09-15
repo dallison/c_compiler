@@ -21,6 +21,9 @@
 // sub-opcode with this bit set.
 #define WASM_PREFIX_FC 0x10000
 
+// Prefix byte for SIMD (v128) opcodes: 0xFD followed by a LEB128 sub-opcode.
+#define WASM_PREFIX_FD 0x20000
+
 // The first 32 entries must mirror the TargetOpcode enumeration in
 // target_generator.h exactly: same order, same count.  The names may differ
 // but the positions may not.  A static assertion below checks this.
@@ -291,6 +294,80 @@
   V(memory_copy, WASM_PREFIX_FC | 10)                                         \
   V(memory_fill, WASM_PREFIX_FC | 11)
 
+#define WASM32_SIMD_OPCODES(V)                                                \
+  V(v128_load, WASM_PREFIX_FD | 0x00)                                         \
+  V(v128_store, WASM_PREFIX_FD | 0x0b)                                        \
+  V(v128_and, WASM_PREFIX_FD | 0x4e)                                          \
+  V(v128_or, WASM_PREFIX_FD | 0x50)                                           \
+  V(v128_xor, WASM_PREFIX_FD | 0x51)                                          \
+  V(i8x16_eq, WASM_PREFIX_FD | 0x23)                                          \
+  V(i8x16_ne, WASM_PREFIX_FD | 0x24)                                          \
+  V(i8x16_lt_s, WASM_PREFIX_FD | 0x25)                                        \
+  V(i8x16_lt_u, WASM_PREFIX_FD | 0x26)                                        \
+  V(i8x16_gt_s, WASM_PREFIX_FD | 0x27)                                        \
+  V(i8x16_gt_u, WASM_PREFIX_FD | 0x28)                                        \
+  V(i8x16_le_s, WASM_PREFIX_FD | 0x29)                                        \
+  V(i8x16_le_u, WASM_PREFIX_FD | 0x2a)                                        \
+  V(i8x16_ge_s, WASM_PREFIX_FD | 0x2b)                                        \
+  V(i8x16_ge_u, WASM_PREFIX_FD | 0x2c)                                        \
+  V(i8x16_add, WASM_PREFIX_FD | 0x6e)                                         \
+  V(i8x16_sub, WASM_PREFIX_FD | 0x71)                                         \
+  V(i16x8_eq, WASM_PREFIX_FD | 0x2d)                                          \
+  V(i16x8_ne, WASM_PREFIX_FD | 0x2e)                                          \
+  V(i16x8_lt_s, WASM_PREFIX_FD | 0x2f)                                        \
+  V(i16x8_lt_u, WASM_PREFIX_FD | 0x30)                                        \
+  V(i16x8_gt_s, WASM_PREFIX_FD | 0x31)                                        \
+  V(i16x8_gt_u, WASM_PREFIX_FD | 0x32)                                        \
+  V(i16x8_le_s, WASM_PREFIX_FD | 0x33)                                        \
+  V(i16x8_le_u, WASM_PREFIX_FD | 0x34)                                        \
+  V(i16x8_ge_s, WASM_PREFIX_FD | 0x35)                                        \
+  V(i16x8_ge_u, WASM_PREFIX_FD | 0x36)                                        \
+  V(i16x8_add, WASM_PREFIX_FD | 0x8e)                                         \
+  V(i16x8_sub, WASM_PREFIX_FD | 0x91)                                         \
+  V(i16x8_mul, WASM_PREFIX_FD | 0x95)                                         \
+  V(i32x4_eq, WASM_PREFIX_FD | 0x37)                                          \
+  V(i32x4_ne, WASM_PREFIX_FD | 0x38)                                          \
+  V(i32x4_lt_s, WASM_PREFIX_FD | 0x39)                                        \
+  V(i32x4_lt_u, WASM_PREFIX_FD | 0x3a)                                        \
+  V(i32x4_gt_s, WASM_PREFIX_FD | 0x3b)                                        \
+  V(i32x4_gt_u, WASM_PREFIX_FD | 0x3c)                                        \
+  V(i32x4_le_s, WASM_PREFIX_FD | 0x3d)                                         \
+  V(i32x4_le_u, WASM_PREFIX_FD | 0x3e)                                        \
+  V(i32x4_ge_s, WASM_PREFIX_FD | 0x3f)                                        \
+  V(i32x4_ge_u, WASM_PREFIX_FD | 0x40)                                        \
+  V(i32x4_add, WASM_PREFIX_FD | 0xae)                                         \
+  V(i32x4_sub, WASM_PREFIX_FD | 0xb1)                                         \
+  V(i32x4_mul, WASM_PREFIX_FD | 0xb5)                                         \
+  V(i64x2_eq, WASM_PREFIX_FD | 0xd6)                                          \
+  V(i64x2_ne, WASM_PREFIX_FD | 0xd7)                                          \
+  V(i64x2_lt_s, WASM_PREFIX_FD | 0xd8)                                        \
+  V(i64x2_gt_s, WASM_PREFIX_FD | 0xd9)                                        \
+  V(i64x2_le_s, WASM_PREFIX_FD | 0xda)                                        \
+  V(i64x2_ge_s, WASM_PREFIX_FD | 0xdb)                                        \
+  V(i64x2_add, WASM_PREFIX_FD | 0xce)                                         \
+  V(i64x2_sub, WASM_PREFIX_FD | 0xd1)                                         \
+  V(i64x2_mul, WASM_PREFIX_FD | 0xd5)                                         \
+  V(f32x4_eq, WASM_PREFIX_FD | 0x41)                                          \
+  V(f32x4_ne, WASM_PREFIX_FD | 0x42)                                          \
+  V(f32x4_lt, WASM_PREFIX_FD | 0x43)                                          \
+  V(f32x4_gt, WASM_PREFIX_FD | 0x44)                                          \
+  V(f32x4_le, WASM_PREFIX_FD | 0x45)                                          \
+  V(f32x4_ge, WASM_PREFIX_FD | 0x46)                                          \
+  V(f32x4_add, WASM_PREFIX_FD | 0xe4)                                          \
+  V(f32x4_sub, WASM_PREFIX_FD | 0xe5)                                          \
+  V(f32x4_mul, WASM_PREFIX_FD | 0xe6)                                          \
+  V(f32x4_div, WASM_PREFIX_FD | 0xe7)                                          \
+  V(f64x2_eq, WASM_PREFIX_FD | 0x47)                                          \
+  V(f64x2_ne, WASM_PREFIX_FD | 0x48)                                          \
+  V(f64x2_lt, WASM_PREFIX_FD | 0x49)                                          \
+  V(f64x2_gt, WASM_PREFIX_FD | 0x4a)                                          \
+  V(f64x2_le, WASM_PREFIX_FD | 0x4b)                                          \
+  V(f64x2_ge, WASM_PREFIX_FD | 0x4c)                                          \
+  V(f64x2_add, WASM_PREFIX_FD | 0xf0)                                          \
+  V(f64x2_sub, WASM_PREFIX_FD | 0xf1)                                          \
+  V(f64x2_mul, WASM_PREFIX_FD | 0xf2)                                          \
+  V(f64x2_div, WASM_PREFIX_FD | 0xf3)
+
 #define WASM32_OPCODES(V)                                                     \
   WASM32_TARGET_OPCODES(V)                                                    \
   WASM32_PSEUDO_OPCODES(V)                                                    \
@@ -302,7 +379,8 @@
   WASM32_I32_OPCODES(V)                                                       \
   WASM32_I64_OPCODES(V)                                                       \
   WASM32_FLOAT_OPCODES(V)                                                     \
-  WASM32_CONVERT_OPCODES(V)
+  WASM32_CONVERT_OPCODES(V)                                                   \
+  WASM32_SIMD_OPCODES(V)
 
 #define W_OP(op) kWasm32_##op
 
@@ -319,9 +397,12 @@ typedef enum {
   kWasmTypeI64 = 0x7E,
   kWasmTypeF32 = 0x7D,
   kWasmTypeF64 = 0x7C,
+  kWasmTypeV128 = 0x7B,
   kWasmTypeFuncRef = 0x70,
   kWasmTypeVoid = 0x40,  // Empty block type.
 } WasmValueType;
+
+#define WASM32_NUM_VALUE_TYPES 5
 
 // Instruction flag bits.  The lower 16 bits of TargetInstruction::flags are
 // reserved by the shared target layer, so everything here lives above that.
@@ -331,6 +412,7 @@ typedef enum {
 #define WASM32_FLAG_TYPE_I64 (1 << WASM32_FLAG_TYPE_SHIFT)
 #define WASM32_FLAG_TYPE_F32 (2 << WASM32_FLAG_TYPE_SHIFT)
 #define WASM32_FLAG_TYPE_F64 (3 << WASM32_FLAG_TYPE_SHIFT)
+#define WASM32_FLAG_TYPE_V128 (1 << 20)
 
 // The instruction produces no value, so the emitter must not assign it a
 // local or expect anything on the stack afterwards.
@@ -360,7 +442,8 @@ typedef enum {
 const char* Wasm32OpcodeName(int op);
 
 // The wasm binary encoding for an opcode, or WASM_NO_ENCODING for pseudo ops.
-// Values with WASM_PREFIX_FC set are 0xFC-prefixed multi-byte opcodes.
+// Values with WASM_PREFIX_FC or WASM_PREFIX_FD set are prefixed multi-byte
+// opcodes.
 int Wasm32OpcodeEncoding(int op);
 
 #endif /* wasm32_machine_h */

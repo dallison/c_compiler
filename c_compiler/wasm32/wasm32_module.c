@@ -50,6 +50,9 @@ static void WriteOpcode(Buffer* buf, Wasm32Opcode opcode) {
   if ((encoding & WASM_PREFIX_FC) != 0) {
     BufferAppendByte(buf, (char)0xFC);
     WasmWriteULEB128(buf, encoding & ~WASM_PREFIX_FC);
+  } else if ((encoding & WASM_PREFIX_FD) != 0) {
+    BufferAppendByte(buf, (char)0xFD);
+    WasmWriteULEB128(buf, encoding & ~WASM_PREFIX_FD);
   } else {
     BufferAppendByte(buf, (char)encoding);
   }
@@ -167,6 +170,9 @@ static int MemoryAccessAlignment(Wasm32Opcode opcode) {
     case W_OP(i64_store):
     case W_OP(f64_store):
       return 3;
+    case W_OP(v128_load):
+    case W_OP(v128_store):
+      return 4;
     default:
       return 2;
   }
@@ -197,6 +203,8 @@ static bool IsMemoryAccess(Wasm32Opcode opcode) {
     case W_OP(i64_store8):
     case W_OP(i64_store16):
     case W_OP(i64_store32):
+    case W_OP(v128_load):
+    case W_OP(v128_store):
       return true;
     default:
       return false;
@@ -367,16 +375,16 @@ void Wasm32EncodeFunctionBody(Wasm32Generator* wasm, Wasm32ObjectFile* object,
   Wasm32Encoder encoder = {object, relocs};
 
   // Local declarations, grouped by type in the order the indices assume.
-  static const WasmValueType kTypeOrder[4] = {kWasmTypeI32, kWasmTypeI64,
-                                              kWasmTypeF32, kWasmTypeF64};
+  static const WasmValueType kTypeOrder[WASM32_NUM_VALUE_TYPES] = {
+      kWasmTypeI32, kWasmTypeI64, kWasmTypeF32, kWasmTypeF64, kWasmTypeV128};
   int groups = 0;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < WASM32_NUM_VALUE_TYPES; i++) {
     if (wasm->num_locals[i] > 0) {
       groups++;
     }
   }
   WasmWriteULEB128(out, (uint64_t)groups);
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < WASM32_NUM_VALUE_TYPES; i++) {
     if (wasm->num_locals[i] > 0) {
       WasmWriteULEB128(out, (uint64_t)wasm->num_locals[i]);
       BufferAppendByte(out, (char)kTypeOrder[i]);
