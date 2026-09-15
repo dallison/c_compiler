@@ -14,6 +14,7 @@
 #include "type_compare.h"
 #include <string.h>
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include "target_generator.h"
 
@@ -55,6 +56,28 @@ FILE* EmitAssemblyFile(String* src_file, String* asm_file) {
   return fp;
 }
 
+
+void EmitFunctionSection(FILE* fp, const char* func_name) {
+  if (compiler != NULL && compiler->function_sections && func_name != NULL &&
+      func_name[0] != '\0') {
+    fprintf(fp, "\t.section \".text.%s\", \"ax\", @progbits\n", func_name);
+  } else {
+    fprintf(fp, "\t.text\n");
+  }
+}
+
+void EmitFunctionSectionToModule(AsmModule* module, const char* func_name) {
+  if (compiler != NULL && compiler->function_sections && func_name != NULL &&
+      func_name[0] != '\0') {
+    char name[512];
+    snprintf(name, sizeof(name), ".text.%s", func_name);
+    AsmModuleSection(module, name, SHT(progbits),
+                     SHF(alloc) | SHF(execinstr), compiler->alignment);
+  } else {
+    AsmModuleSection(module, ".text", SHT(progbits),
+                     SHF(alloc) | SHF(execinstr), compiler->alignment);
+  }
+}
 
 void EmitDataStart(FILE* fp) { fprintf(fp, "\t.data\n"); }
 

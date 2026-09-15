@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+.section ".text.__store_indirect4", "ax", @progbits
 
 // Store four bytes through a pointer held in a zero-page register.
 // X: zero-page offset of the four-byte source register.

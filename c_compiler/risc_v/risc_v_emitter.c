@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include "common_emitter.h"
 #include "compiler.h"
 #include "eh_metadata.h"
 #include "risc_v_assembler.h"
@@ -1756,6 +1757,7 @@ static void RVPrintEHMetadata(RVEmitter* emitter, FILE* fp,
 
 void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->rv->base.function_name.value;
+  EmitFunctionSection(fp, func_name);
   if (emitter->rv->base.is_weak) {
     fprintf(fp, "\t.weak %s\n", func_name);
   } else if (emitter->rv->base.is_global) {
@@ -1792,6 +1794,7 @@ void RVPrintCXXAdjustorThunks(FILE* fp) {
         TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
     const char* target_name =
         TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    EmitFunctionSection(fp, thunk_name);
     fprintf(fp, "\t.weak %s\n", thunk_name);
     fprintf(fp, "\t.type %s, @function\n", thunk_name);
     fprintf(fp, "%s:\n", thunk_name);

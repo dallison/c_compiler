@@ -415,6 +415,15 @@ String* Link(int argc, char** argv) {
       } else if (strcmp(argv[i], "-Xsections") == 0) {
               linker.print_sections = true;
               option_ok = true;
+      } else if (strcmp(argv[i], "--gc-sections") == 0) {
+        linker.gc_sections = true;
+        option_ok = true;
+      } else if (strcmp(argv[i], "--no-gc-sections") == 0) {
+        linker.gc_sections = false;
+        option_ok = true;
+      } else if (strcmp(argv[i], "--print-gc-sections") == 0) {
+        linker.print_gc_sections = true;
+        option_ok = true;
       } else if (strcmp(argv[i], "-static") == 0) {
         linker.fully_static = true;
         option_ok = true;

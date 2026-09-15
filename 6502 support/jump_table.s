@@ -7,7 +7,7 @@
 //
 
 #include "vars.s"
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __jump_table1
 .global __jump_table2
@@ -18,6 +18,7 @@
 // Entry A: offet into zero page containing entry offset into table.
 // We multiply this by 2 to get the byte offset into the table.
 // The table is immediately after the JSR instruction
+.section ".text.__jump_table1", "ax", @progbits
 __jump_table1:
   TAY               // Offset of entry number in zero page.
   TSX               // X = stack pointer
@@ -59,6 +60,7 @@ jp1_skip:
   STA __t2+1
   JMP (__t2)
 
+.section ".text.__jump_table2", "ax", @progbits
 __jump_table2:
   TAY               // Offset of entry number in zero page.
   TSX               // X = stack pointer
@@ -103,6 +105,7 @@ jp2_skip:
   STA __t2+1
   JMP (__t2)
 
+.section ".text.__jump_table4", "ax", @progbits
 __jump_table4:
   TAY               // Offset of entry number in zero page.
   TSX               // X = stack pointer
@@ -147,6 +150,7 @@ jp4_skip:
   STA __t2+1
   JMP (__t2)
 
+.section ".text.__jump_table8", "ax", @progbits
 __jump_table8:
   TAY               // Offset of entry number in zero page.
   TSX               // X = stack pointer

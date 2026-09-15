@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __pushmem1
 .global __pushmem2
@@ -8,6 +8,7 @@
 .global __pushmem_xy2
 .global __load_inline_mem_params
 
+.section ".text.__pushmem_xy1", "ax", @progbits
 __pushmem_xy1:
   STX __mem_src
   STY __mem_src+1
@@ -15,6 +16,7 @@ __pushmem_xy1:
   JSR __load_inline_mem_params
   BRA pushmem1_start
 
+.section ".text.__pushmem1", "ax", @progbits
 __pushmem1:
   LDA #2
   JSR __load_inline_mem_params
@@ -39,6 +41,7 @@ pm1l:
 end_pm1:
   RTS
 
+.section ".text.__pushmem_xy2", "ax", @progbits
 __pushmem_xy2:
   STX __mem_src
   STY __mem_src+1
@@ -46,6 +49,7 @@ __pushmem_xy2:
   JSR __load_inline_mem_params
   BRA pushmem2_start
 
+.section ".text.__pushmem2", "ax", @progbits
 __pushmem2:
   LDA #6
   JSR __load_inline_mem_params

@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+.section ".text.syscall", "ax", @progbits
 
 .global syscall
 

@@ -13,6 +13,7 @@
 #include <string.h>
 #include "6502_assembler.h"
 #include "6502_reg_alloc.h"
+#include "common_emitter.h"
 #include "compiler.h"
 #include "map.h"
 
@@ -1374,6 +1375,7 @@ void W65C02EmitterDelete(W65C02Emitter* emitter) {
 
 void W65C02PrintFunction(W65C02Emitter* emitter, FILE* fp) {
   const char* func_name = emitter->g->base.function_name.value;
+  EmitFunctionSection(fp, func_name);
   if (emitter->g->base.is_weak) {
     fprintf(fp, "\t.weak %s\n", func_name);
   } else if (emitter->g->base.is_global) {
@@ -1413,6 +1415,7 @@ void W65C02PrintCXXAdjustorThunks(FILE* fp) {
         TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
     uint16_t adjustment = (uint16_t)thunk->this_adjustment;
 
+    EmitFunctionSection(fp, thunk_name);
     fprintf(fp, "\t.weak %s\n", thunk_name);
     fprintf(fp, "\t.type %s, @function\n", thunk_name);
     fprintf(fp, "%s:\n", thunk_name);

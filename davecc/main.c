@@ -560,6 +560,15 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
     VectorAppend(linker_args, "-static");
   }
 
+  // Function-level ELF sections only shrink the image if the linker
+  // discards the ones that nothing reachable references.
+  if (!VectorContainsCString(linker_args, "--gc-sections") &&
+      !VectorContainsCString(linker_args, "--no-gc-sections") &&
+      (runtime->static_only ||
+       OptionBoolValue(kOptionFunctionSections, compiler_options, false))) {
+    VectorAppend(linker_args, "--gc-sections");
+  }
+
   if (runtime->use_main_entry &&
       !VectorContainsCString(linker_args, "-e")) {
     VectorAppend(linker_args, "-e");
@@ -756,6 +765,18 @@ static int ParseArg(int i, int argc, char** argv,
       VectorAppend(linker_args, argv[i]);
       // Get next arg into linker too.
       VectorAppend(linker_args, argv[i+1]);
+      i++;
+    } else if (StringEqual(option, "--gc-sections") ||
+               StringEqual(option, "--no-gc-sections") ||
+               StringEqual(option, "--print-gc-sections")) {
+      VectorAppend(linker_args, argv[i]);
+    } else if (StringEqual(option, "-e")) {
+      if (i == argc - 1) {
+        fprintf(stderr, "-e needs a symbol name\n");
+        exit(1);
+      }
+      VectorAppend(linker_args, argv[i]);
+      VectorAppend(linker_args, argv[i + 1]);
       i++;
     } else if (StringEqual(option, "-static")) {
       VectorAppend(linker_args, argv[i]);

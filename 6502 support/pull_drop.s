@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+.section ".text.__pullreg2_drop2", "ax", @progbits
 
 .global __pullreg2_drop2
 

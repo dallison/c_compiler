@@ -14,6 +14,7 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <stdlib.h>
+#include "common_emitter.h"
 #include "compiler.h"
 #include "p_code_assembler.h"
 #include "p_code_reg_alloc.h"
@@ -530,6 +531,7 @@ static void PCodePrintExceptionTable(PCodeEmitter* emitter, FILE* fp,
 
 void PCodePrintFunction(PCodeEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->pcode->base.function_name.value;
+  EmitFunctionSection(fp, func_name);
   if (emitter->pcode->base.is_weak) {
     fprintf(fp, "\t.weak %s\n", func_name);
   } else if (emitter->pcode->base.is_global) {

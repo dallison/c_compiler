@@ -6,7 +6,7 @@
 //  Copyright © 2021 David Allison. All rights reserved.
 //
 #include "vars.s"
-.text
+.section ".text.__udiv8", "ax", @progbits
 
 .global __sdiv8
 .global __udiv8

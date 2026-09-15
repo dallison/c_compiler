@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include "common_emitter.h"
 #include "compiler.h"
 #include "eh_metadata.h"
 #include "aarch64_assembler.h"
@@ -3642,6 +3643,7 @@ static void AARCH64EmitEHMetadata(AARCH64Emitter* emitter, AsmModule* module,
 
 void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   const char* func_name = emitter->g->base.function_name.value;
+  EmitFunctionSection(fp, func_name);
   if (emitter->g->base.is_weak) {
     fprintf(fp, "\t.weak %s\n", func_name);
   } else if (emitter->g->base.is_global) {
@@ -3668,6 +3670,7 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
 
 void AARCH64EmitFunctionToModule(AARCH64Emitter* emitter, AsmModule* module) {
   const char* function = emitter->g->base.function_name.value;
+  EmitFunctionSectionToModule(module, function);
   AsmModuleSymbol(module, function, SYM_TYPE(func),
                   emitter->g->base.is_weak
                       ? SYM_BIND(weak)
@@ -3716,6 +3719,7 @@ void AARCH64PrintCXXAdjustorThunks(FILE* fp) {
         TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
     const char* target_name =
         TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    EmitFunctionSection(fp, thunk_name);
     fprintf(fp, "\t.weak %s\n", thunk_name);
     fprintf(fp, "\t.type %s, @function\n", thunk_name);
     fprintf(fp, "%s:\n", thunk_name);
@@ -3735,8 +3739,6 @@ void AARCH64EmitCXXAdjustorThunksToModule(AsmModule* module) {
   if (compiler->cxx_this_adjustor_thunks.length == 0) {
     return;
   }
-  AsmModuleSection(module, ".text", SHT(progbits),
-                   SHF(alloc) | SHF(execinstr), 4);
   for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
     CXXThisAdjustorThunk* thunk =
         compiler->cxx_this_adjustor_thunks.value.p[i];
@@ -3748,6 +3750,7 @@ void AARCH64EmitCXXAdjustorThunksToModule(AsmModule* module) {
         TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
     const char* target_name =
         TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    EmitFunctionSectionToModule(module, thunk_name);
     AsmModuleSymbol(module, thunk_name, SYM_TYPE(func), SYM_BIND(weak), 0, 4,
                     false, true, false);
     AsmModuleLabel(module, thunk_name);

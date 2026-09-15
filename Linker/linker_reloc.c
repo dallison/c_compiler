@@ -192,7 +192,11 @@ void LinkerApplyAllRelocations(Linker* linker) {
   for (size_t file_index = 0; file_index < linker->files.length; file_index++) {
     ObjectFile* file = linker->files.value.p[file_index];
     for (size_t reloc_index = 0; reloc_index < file->relocations.length; reloc_index++) {
-      ApplyRelocation(linker, file, file->relocations.value.p[reloc_index]);
+      Relocation* reloc = file->relocations.value.p[reloc_index];
+      if (reloc->section != NULL && reloc->section->discarded) {
+        continue;
+      }
+      ApplyRelocation(linker, file, reloc);
     }
   }
 }

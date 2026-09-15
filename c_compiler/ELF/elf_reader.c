@@ -21,11 +21,14 @@ ELFReaderSection* NewELFReaderSection() {
   section->address = 0;
   section->offset = 0;
   section->output_section_index = 0;
+  section->discarded = false;
+  VectorInit(&section->gc_refs);
   return section;
 }
 
 void ELFReaderSectionDelete(ELFReaderSection* section) {
   StringDestruct(&section->name);
+  VectorDestruct(&section->gc_refs);
 }
 
 void ELFReaderFileInit(ELFReaderFile* elf, String* filename) {
@@ -177,11 +180,14 @@ void ELFReaderFileDestruct(ELFReaderFile* elf) {
   // For ELF32 the header and the per-section/segment headers were decoded into
   // heap-allocated wide structures, so free them here.  For ELF64 they point
   // directly into the file mapping and are not owned.
-  if (elf->owns_decoded) {
-    for (size_t i = 0; i < elf->sections.length; i++) {
-      ELFReaderSection* section = elf->sections.value.p[i];
+  for (size_t i = 0; i < elf->sections.length; i++) {
+    ELFReaderSection* section = elf->sections.value.p[i];
+    if (elf->owns_decoded) {
       free(section->header);
     }
+    ELFReaderSectionDelete(section);
+  }
+  if (elf->owns_decoded) {
     for (size_t i = 0; i < elf->segments.length; i++) {
       free(elf->segments.value.p[i]);
     }

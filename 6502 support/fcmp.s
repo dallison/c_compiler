@@ -1,7 +1,7 @@
 #include "vars.s"
 #include "fp.s"
 
-.text
+.section ".text.__cmpeqf", "ax", @progbits
 
 // Entry:
 // A: offset of boolean result (1 = true)

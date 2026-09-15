@@ -28,6 +28,8 @@ void EmitTlsBSSStart(FILE* fp);
 void EmitTlsBSSVariable(UninitializedStaticVariable* var, FILE* fp);
 void EmitTlsVariable(InitializedStaticVariable* var, FILE* fp);
 void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp);
+void EmitFunctionSection(FILE* fp, const char* func_name);
+void EmitFunctionSectionToModule(AsmModule* module, const char* func_name);
 
 // The recorded init or fini functions, in the order they have to run.  A
 // backend that writes no assembly gets the ordering from here instead of

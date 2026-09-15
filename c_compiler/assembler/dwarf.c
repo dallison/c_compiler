@@ -32,6 +32,7 @@ void DwarfInit(Dwarf* dwarf) {
 
   VectorInit(&dwarf->file_table);
   VectorInit(&dwarf->locations);
+  VectorInit(&dwarf->address_fixups);
 
   // These are default values anc can be overwritten.  The defaults
   // are chosen for a RISC machine.  The line base and range are
@@ -55,6 +56,7 @@ void DwarfDestruct(Dwarf* dwarf) {
                              (VectorElementDestructor)FileEntryDestruct,
                              /*free_element=*/true);
   VectorDestructWithContents(&dwarf->locations, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&dwarf->address_fixups, NULL, /*free_element=*/true);
 }
 
 FileEntry* NewFileEntry(String* filename, int dir) {
@@ -99,23 +101,24 @@ void DwarfAddFile(Dwarf* dwarf, String* filename) {
   VectorAppend(&dwarf->file_table, NewFileEntry(basename, (int)dir));
 }
 
-void DwarfAddLocation(Dwarf* dwarf, int file, int line, int col,
+void DwarfAddLocation(Dwarf* dwarf, int file, int line, int col, int section,
                       uint64_t address) {
   if (dwarf->locations.length > 0) {
     LocationEntry* last_loc = VectorLast(&dwarf->locations);
-    if (last_loc->address == address) {
+    if (last_loc->address == address && last_loc->section == section) {
       last_loc->file = file;
       last_loc->line = line;
       last_loc->col = col;
       return;
     }
   }
-  VectorAppend(&dwarf->locations, NewLocationEntry(file, line, col, address));
+  VectorAppend(&dwarf->locations,
+               NewLocationEntry(file, line, col, section, address));
 }
 
 // These come directly from the DWARF4 spec:
 // http://www.dwarfstd.org/doc/DWARF4.pdf
-static void WriteULEB128(int32_t value, Buffer* buffer) {
+static void WriteULEB128(uint32_t value, Buffer* buffer) {
   do {
     char byte = value & 0x7f;
     value >>= 7;
@@ -229,53 +232,53 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
   int current_column = 0;
   for (size_t i = 0; i < dwarf->locations.length; i++) {
     LocationEntry* loc = dwarf->locations.value.p[i];
+    bool new_sequence =
+        prev_loc == NULL || loc->section != prev_loc->section ||
+        loc->address < prev_loc->address;
+    if (new_sequence) {
+      if (prev_loc != NULL) {
+        BufferAppendByte(debug_line, 0);
+        WriteULEB128(1, debug_line);
+        BufferAppendByte(debug_line, DW_LNE(end_sequence));
+      }
+      current_file = 1;
+      current_column = 0;
+      // Start a sequence at this location's section.  The set_address
+      // operand is relocated to that section's base.
+      BufferAppendByte(debug_line, DW_LNS(advance_line));
+      WriteSLEB128(loc->line - 1, debug_line);
+      BufferAppendByte(debug_line, 0);
+      WriteULEB128(9, debug_line);
+      BufferAppendByte(debug_line, DW_LNE(set_address));
+      DwarfAddressFixup* fixup = malloc(sizeof(DwarfAddressFixup));
+      fixup->offset = (int32_t)debug_line->length;
+      fixup->section = loc->section;
+      VectorAppend(&dwarf->address_fixups, fixup);
+      if (dwarf->address_fixups.length == 1) {
+        dwarf->address_offset = fixup->offset;
+      }
+      BufferAppendLongLE(debug_line, 0);
+      BufferAppendByte(debug_line, DW_LNS(advance_pc));
+      WriteULEB128((uint32_t)(loc->address / dwarf->min_instruction_length),
+                   debug_line);
+    }
     if (loc->file != current_file) {
       BufferAppendByte(debug_line, DW_LNS(set_file));
-      WriteULEB128(loc->file, debug_line);
+      WriteULEB128((uint32_t)loc->file, debug_line);
       current_file = loc->file;
     }
     if (loc->col != current_column) {
       BufferAppendByte(debug_line, DW_LNS(set_column));
-      WriteULEB128(loc->col, debug_line);
+      WriteULEB128((uint32_t)loc->col, debug_line);
       current_column = loc->col;
     }
-    if (prev_loc == NULL) {
-      // No previous location means this is the first location.  We need
-      // to set the initial line and address.  The address is associated
-      // with a relocation referring to the .text of the current file.
-      BufferAppendByte(debug_line, DW_LNS(advance_line));
-      WriteSLEB128(loc->line - 1,
-                   debug_line);  //  First line is 1 so we subtract 1.
-
-      // Use extended opcode DW_LNE(set_address) to set the address.
-      // First byte is zero.
-      BufferAppendByte(debug_line, 0);
-
-      // Followed by the length of the instruction.
-      WriteULEB128(9, debug_line);  // Address is 8 bytes, plus sub-opcode.
-
-      // Followed by the sub-opcode.
-      BufferAppendByte(debug_line, DW_LNE(set_address));
-
-      // Followed by the address (this will be relocated).  We record the offset
-      // so that the relocation can be applied.
-      dwarf->address_offset = (int32_t)debug_line->length;
-      BufferAppendLongLE(debug_line, 0);
-
-      // We advance the address.  The address is going to be relative to
-      // the start of .text so it will be small.  We cast it to 32 bits.
-      BufferAppendByte(debug_line, DW_LNS(advance_pc));
-      WriteULEB128((int32_t)loc->address / dwarf->min_instruction_length,
-                   debug_line);
+    if (new_sequence) {
       BufferAppendByte(debug_line, DW_LNS(copy));
     } else {
       int line_diff = loc->line - prev_loc->line;
-      int32_t address_diff = (int32_t)((loc->address - prev_loc->address) /
-                                       dwarf->min_instruction_length);
+      uint32_t address_diff = (uint32_t)((loc->address - prev_loc->address) /
+                                         dwarf->min_instruction_length);
 
-      // Use standard opcodes for every row.  This is slightly larger than
-      // selecting DWARF special opcodes, but preserves exact address and line
-      // deltas for every target and keeps this assembler's line program simple.
       if (line_diff != 0) {
         BufferAppendByte(debug_line, DW_LNS(advance_line));
         WriteSLEB128(line_diff, debug_line);

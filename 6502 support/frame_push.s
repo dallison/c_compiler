@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __push_var1
 .global __push_var1b
@@ -21,24 +21,28 @@
 
 // Push a local variable at frame offset X,Y. The one-byte entry points clear
 // the high offset byte; the `b` variants accept the full 16-bit offset.
+.section ".text.__push_var1", "ax", @progbits
 __push_var1:
   LDY #0
 __push_var1b:
   JSR __varaddr
   BRA push_frame1
 
+.section ".text.__push_var2", "ax", @progbits
 __push_var2:
   LDY #0
 __push_var2b:
   JSR __varaddr
   BRA push_frame2
 
+.section ".text.__push_var4", "ax", @progbits
 __push_var4:
   LDY #0
 __push_var4b:
   JSR __varaddr
   BRA push_frame4
 
+.section ".text.__push_var8", "ax", @progbits
 __push_var8:
   LDY #0
 __push_var8b:
@@ -46,6 +50,7 @@ __push_var8b:
   BRA push_frame8
 
 // Push an argument at frame offset X,Y.
+.section ".text.__push_var1", "ax", @progbits
 __push_arg1:
   LDY #0
 __push_arg1b:
@@ -56,6 +61,7 @@ push_frame1:
   STA (__sp)
   RTS
 
+.section ".text.__push_var2", "ax", @progbits
 __push_arg2:
   LDY #0
 __push_arg2b:
@@ -69,6 +75,7 @@ push_frame2:
   STA (__sp),Y
   RTS
 
+.section ".text.__push_var4", "ax", @progbits
 __push_arg4:
   LDY #0
 __push_arg4b:
@@ -83,6 +90,7 @@ push_frame4_loop:
   BPL push_frame4_loop
   RTS
 
+.section ".text.__push_var8", "ax", @progbits
 __push_arg8:
   LDY #0
 __push_arg8b:

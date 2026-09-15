@@ -1,7 +1,7 @@
 #include "vars.s"
 #include "fp.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __add128
 .global __add256
@@ -20,6 +20,7 @@
 // shifts.  Shift it into the mantissa of the result from the left.  The
 // exponent is the count of the shift + 127.
 
+.section ".text.__i1tof", "ax", @progbits
 __i1tof:
   PHA
   LDA 0,X       // Check for zero
@@ -62,6 +63,7 @@ tof_done:
   PLX
   JMP __fassemble
 
+.section ".text.__ui1tof", "ax", @progbits
 __ui1tof:
   PHA
   LDA 0,X       // Check for zero
@@ -89,6 +91,7 @@ ui1tof_loop:
   INC fexp
   BRA ui1tof_loop
 
+.section ".text.__i2tof", "ax", @progbits
 __i2tof:
   PHA
   LDA 0,X       // Check for zero
@@ -135,6 +138,7 @@ i2tof_loop:
   INC fexp
   BRA i2tof_loop
 
+.section ".text.__ui2tof", "ax", @progbits
 __ui2tof:
   PHA
   LDA 0,X       // Check for zero
@@ -178,6 +182,7 @@ tof_done2:
   JMP __fassemble
 
 
+.section ".text.__i4tof", "ax", @progbits
 __i4tof:
   PHA
   LDA 0,X       // Check for zero
@@ -240,6 +245,7 @@ i4tof_loop:
   INC fexp
   BRA i4tof_loop
 
+.section ".text.__ui4tof", "ax", @progbits
 __ui4tof:
   PHA
   LDA 0,X       // Check for zero
@@ -292,6 +298,7 @@ tof_done3:
   PLX
   JMP __fassemble
 
+.section ".text.__i8tof", "ax", @progbits
 __i8tof:
   PHA
   LDA 0,X       // Check for zero
@@ -386,6 +393,7 @@ i8tof_loop:
   INC fexp
   BRA i8tof_loop
 
+.section ".text.__ui8tof", "ax", @progbits
 __ui8tof:
   PHA
   LDA 0,X       // Check for zero  LDA 0,X       // Check for zero
@@ -463,6 +471,7 @@ tof_done4:
 // Entry:
 // A: offset into zero page for int reg output
 // X: offset into zero page for float input
+.section ".text.__ftoi2", "ax", @progbits
 __ftoi2:
 __ftoui2:
   PHA
@@ -546,6 +555,7 @@ ftoi2_zero:
 // Entry:
 // A: offset into zero page for int reg output
 // X: offset into zero page for float input
+.section ".text.__ftoi1", "ax", @progbits
 __ftoi1:
 __ftoui1:
   PHA
@@ -622,6 +632,7 @@ ftoi1_zero:
 // Entry:
 // A: offset into zero page for int reg output
 // X: offset into zero page for float input
+.section ".text.__ftoi4", "ax", @progbits
 __ftoi4:
 __ftoui4:
   PHA
@@ -735,6 +746,7 @@ ftoi8_zero:
 // Entry:
 // A: offset into zero page for int reg output
 // X: offset into zero page for float input
+.section ".text.__ftoi8", "ax", @progbits
 __ftoi8:
 __ftoui8:
   PHA
@@ -841,6 +853,7 @@ ftoi8_loop2:
 // sp+0: a
 // sp+2: b
 // Calculates a += b
+.section ".text.__add128", "ax", @progbits
 __add128:
    // Load a into t0,t1
   LDA (__sp)
@@ -873,6 +886,7 @@ add128_loop:
 // sp+0: a
 // sp+2: b
 // Calculates a += b
+.section ".text.__add256", "ax", @progbits
 __add256:
    // Load a into t0,t1
   LDA (__sp)
@@ -905,6 +919,7 @@ add256_loop:
 // Calculates a <<= 1
 .set t mt1
 
+.section ".text.__lshift128", "ax", @progbits
 __lshift128:
   // Load a into t0,t1
   LDA (__sp)
@@ -942,6 +957,7 @@ lshift128_loop3:
 // This is called from a C function.  The args on the stack are:
 // sp+0: a
 // Calculates a <<= 1
+.section ".text.__lshift256", "ax", @progbits
 __lshift256:
   // Load a into t0,t1
   LDA (__sp)
@@ -979,6 +995,7 @@ lshift256_loop3:
 // This is called from a C function.  The args on the stack are:
 // sp+0: a
 // Calculates a >>= 1
+.section ".text.__rshift256", "ax", @progbits
 __rshift256:
   // Load a into t0,t1
   LDA (__sp)
@@ -1015,6 +1032,7 @@ rshift256_loop3:
 // Entry:
 // sp+0: a
 // Calculates ++a
+.section ".text.__inc128", "ax", @progbits
 __inc128:
   // Load a into t0,t1
   LDA (__sp)
@@ -1039,6 +1057,7 @@ inc128_loop:
 // Entry:
 // sp+0: a
 // Calculates ++a
+.section ".text.__inc256", "ax", @progbits
 __inc256:
   // Load a into t0,t1
   LDA (__sp)

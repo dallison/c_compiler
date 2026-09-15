@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.text
+.section ".text.__davecc_6502_hardware_stack_pointer", "ax", @progbits
 
 .global __davecc_6502_hardware_stack_pointer
 .type __davecc_6502_hardware_stack_pointer, @function

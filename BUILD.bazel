@@ -701,6 +701,7 @@ cc_library(
         "Linker/linker_config.c",
         "Linker/linker_dynamic.c",
         "Linker/linker_file.c",
+        "Linker/linker_gc.c",
         "Linker/linker_main.c",
         "Linker/linker_reloc.c",
         "Linker/linker_stacktrace.c",
@@ -4633,6 +4634,19 @@ sh_test(
     srcs = ["tests/6502_indirect_copy_test.sh"],
     args = ["$(rootpath :davecc)"],
     data = [":davecc"],
+)
+
+sh_test(
+    name = "function_sections_gc_test",
+    srcs = ["tests/function_sections_gc_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :elfdump)",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
+    ],
 )
 
 sh_test(

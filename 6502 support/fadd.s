@@ -2,7 +2,7 @@
 #include "fp.s"
 
 // Single precision floating point addition and subtraction.
-.text
+.section ".text.__fadd", "ax", @progbits
 
 fadd_res_B:
   PLX

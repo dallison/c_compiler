@@ -6,7 +6,7 @@
 //  Copyright © 2021 David Allison. All rights reserved.
 //
 #include "vars.s"
-.text
+.section ".text.__umul8", "ax", @progbits
 
 .global __umul8
 .global __smul8

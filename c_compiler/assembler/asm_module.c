@@ -634,6 +634,7 @@ void AsmModuleEmit(AsmModule* module, Assembler* assembler) {
         if (assembler->object.pass == 1) {
           DwarfAddLocation(&assembler->object.dwarf, op->u.location.file,
                            op->u.location.line, op->u.location.column,
+                           assembler->object.current_section,
                            AssemblerCurrentAddress(assembler));
         }
         break;
@@ -725,6 +726,7 @@ static void WriteSection(FILE* out, const AsmModuleOp* op,
     size_t n = 0;
     if ((op->u.section.flags & SHF(alloc)) != 0) flags[n++] = 'a';
     if ((op->u.section.flags & SHF(write)) != 0) flags[n++] = 'w';
+    if ((op->u.section.flags & SHF(execinstr)) != 0) flags[n++] = 'x';
     if ((op->u.section.flags & SHF(merge)) != 0) flags[n++] = 'M';
     if ((op->u.section.flags & SHF(strings)) != 0) flags[n++] = 'S';
     if ((op->u.section.flags & SHF(tls)) != 0) flags[n++] = 'T';

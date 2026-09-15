@@ -1,11 +1,12 @@
 #include "vars.s"
 
-.text
+// Functions are emitted in per-symbol ELF sections.
 
 .global __copymem1
 .global __copymem2
 .global __load_inline_mem_params
 
+.section ".text.__copymem2", "ax", @progbits
 __copymem2:
   LDA #7
   JSR __load_inline_mem_params
@@ -40,6 +41,7 @@ copymem2_small_loop:
 end_cm2:
   RTS
 
+.section ".text.__copymem1", "ax", @progbits
 __copymem1:
   LDA #3
   JSR __load_inline_mem_params

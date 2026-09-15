@@ -1,7 +1,7 @@
 #include "vars.s"
 #include "fp.s"
 
-.text
+.section ".text.__fdiv", "ax", @progbits
 
 // Divide 48-bit numbers.  For mantissa division we need to divide a
 // 48 bit number with the upper 24 bits populated by another with the

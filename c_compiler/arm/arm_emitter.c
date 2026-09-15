@@ -13,6 +13,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include "codegen.h"
+#include "common_emitter.h"
 #include "compiler.h"
 #include "arm_assembler.h"
 #include "elf.h"
@@ -2393,6 +2394,7 @@ void ARMPrintEHABISupport(FILE* fp) {
 
 void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
   const char* func_name = emitter->g->base.function_name.value;
+  EmitFunctionSection(fp, func_name);
   if (emitter->g->base.is_weak) {
     fprintf(fp, "\t.weak %s\n", func_name);
   } else if (emitter->g->base.is_global) {
@@ -2431,6 +2433,7 @@ void ARMPrintCXXAdjustorThunks(FILE* fp) {
         TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
     const char* target_name =
         TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    EmitFunctionSection(fp, thunk_name);
     fprintf(fp, "\t.weak %s\n", thunk_name);
     fprintf(fp, "\t.type %s, @function\n", thunk_name);
     fprintf(fp, "%s:\n", thunk_name);

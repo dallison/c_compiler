@@ -528,6 +528,7 @@ typedef struct Compiler {
   struct LTOModule* lto_module;
   bool exceptions_enabled;  // C++ exception handling enabled (-f[no-]exceptions).
   bool printf_specialize;    // Rewrite constant printf-family calls by profile.
+  bool function_sections;    // Emit each function in its own ELF section.
   bool module_header;        // Compiling the object half of a header unit.
   bool print_front_end;
   bool print_back_end;

@@ -19,6 +19,7 @@
 #include "linker_symbols.h"
 #include "linker_file.h"
 #include "linker_dynamic.h"
+#include "linker_gc.h"
 #include "linker_stacktrace.h"
 #include <sys/stat.h>
 #include <limits.h>
@@ -152,6 +153,8 @@ void LinkerInit(Linker* linker) {
   linker->stacktrace_info = NULL;
   linker->num_errors = 0;
 
+  linker->gc_sections = false;
+  linker->print_gc_sections = false;
   linker->print_relocations = false;
   linker->print_symbol_tables = false;
   linker->print_sections = false;
@@ -770,7 +773,8 @@ static void LinkerGroupArraySections(Linker* linker) {
           file->elf_file->sections.value.p[section_index];
       LinkerArrayKind kind;
       int32_t priority;
-      if (!LinkerClassifyArraySection(section, &kind, &priority)) {
+      if (section->discarded ||
+          !LinkerClassifyArraySection(section, &kind, &priority)) {
         continue;
       }
 
@@ -1155,12 +1159,31 @@ static void PrintSectionMap(Map* map) {
   MapTraverse(map, PrintSectionMapKV, NULL);
 }
 
+// Map per-function and per-object subsections onto the output section the
+// linker config already knows about (.text.foo -> .text).
+static const char* CanonicalSectionGroupName(const String* name) {
+  if (name->length > 6 && strncmp(name->value, ".text.", 6) == 0) {
+    return ".text";
+  }
+  if (name->length > 6 && strncmp(name->value, ".data.", 6) == 0) {
+    return ".data";
+  }
+  if (name->length > 8 && strncmp(name->value, ".rodata.", 8) == 0) {
+    return ".rodata";
+  }
+  if (name->length > 5 && strncmp(name->value, ".bss.", 5) == 0) {
+    return ".bss";
+  }
+  return name->value;
+}
+
 // Group all sections with the given type into a the section_groups
 // vector in the Linker.
 static void GroupSections(Linker* linker, int32_t section_type,
                           int32_t section_flags) {
   Map section_map;
   MapInitForStringKeys(&section_map);
+  Vector owned_keys = {0};
 
   // Build a map of section name vs vectors of pointers to ELFReaderSections
   // with the type given.  A traversal will be in alphabetic order by
@@ -1175,6 +1198,9 @@ static void GroupSections(Linker* linker, int32_t section_type,
     }
     for (size_t j = 0; j < sections->length; j++) {
       ELFReaderSection* section = sections->value.p[j];
+      if (section->discarded) {
+        continue;
+      }
       if (section_flags != 0 && (section->header->flags & section_flags) == 0) {
         continue;
       }
@@ -1182,14 +1208,20 @@ static void GroupSections(Linker* linker, int32_t section_type,
           LinkerIsArrayInputSection(section)) {
         continue;
       }
-      Vector* result_vec = MapFindPointerKey(&section_map, &section->name);
+      const char* group_name = CanonicalSectionGroupName(&section->name);
+      String lookup;
+      StringInit(&lookup, group_name);
+      Vector* result_vec = MapFindPointerKey(&section_map, &lookup);
       if (result_vec == NULL) {
+        String* key = NewString(group_name);
+        VectorAppend(&owned_keys, key);
         result_vec = NewVector();
         MapKeyValue kv;
-        kv.key.p = &section->name;
+        kv.key.p = key;
         kv.value.p = result_vec;
         MapInsert(&section_map, kv);
       }
+      StringDestruct(&lookup);
       VectorAppend(result_vec, section);
     }
   }
@@ -1211,6 +1243,10 @@ static void GroupSections(Linker* linker, int32_t section_type,
 
   // We don't need this section map now that we have the section groups.
   MapDestruct(&section_map);
+  for (size_t i = 0; i < owned_keys.length; i++) {
+    StringDelete(owned_keys.value.p[i]);
+  }
+  VectorDestruct(&owned_keys);
 }
 
 static bool SegmentContainsSection(Segment* segment, String* section_name) {
@@ -1779,6 +1815,11 @@ void LinkerLinkAllFiles(Linker* linker) {
   // out of the GOT whether or not there is a loader to relocate them.
   DynamicLinkerGatherDynamicRelocations(linker);
   bool static_got = DynamicLinkerNeedsStaticGOT(linker);
+
+  // Drop unreferenced allocatable input sections before they are merged
+  // into output section groups.  Per-function .text.* pieces stay distinct
+  // until this point so an unused function can be discarded on its own.
+  LinkerGarbageCollectSections(linker);
   
   // Find all PROGBITS sections and group by name.  These are sections
   // that have data associated with them in the ELF file.  This also
@@ -2093,6 +2134,9 @@ static void AddSymbolListToOutput(void* entry, void* data) {
     int32_t type = ELF_ST_TYPE(sym->header->info);
     int32_t binding = ELF_ST_BIND(sym->header->info);
     int32_t section_index;
+    if (sym->section != NULL && sym->section->discarded) {
+      continue;
+    }
     if (!sym->defined) {
       section_index = 0;
     } else if (sym->section == NULL) {

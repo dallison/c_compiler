@@ -361,12 +361,18 @@ void AsmObjectAddRelocationForSymbol(AsmObject* object, AssemblerSymbol* symbol,
 int AsmObjectAddSection(AsmObject* object, String* name, int32_t type,
                         int32_t flags, int32_t alignment) {
   if (name != NULL) {
-    if (StringEqual(name, ".text")) {
-      flags |= SHF(execinstr);
+    if (StringEqual(name, ".text") || StringStartsWith(name, ".text.")) {
+      flags |= SHF(alloc) | SHF(execinstr);
       type = SHT(progbits);
-    } else if (StringEqual(name, ".data")) {
-      flags |= SHF(write);
+    } else if (StringEqual(name, ".data") || StringStartsWith(name, ".data.")) {
+      flags |= SHF(alloc) | SHF(write);
       type = SHT(progbits);
+    } else if (StringEqual(name, ".rodata") ||
+               StringStartsWith(name, ".rodata.")) {
+      flags |= SHF(alloc);
+      if (type == SHT(null)) {
+        type = SHT(progbits);
+      }
     } else if (StringEqual(name, ".ARM.exidx")) {
       type = SHT(ARM_EXIDX);
       flags |= SHF(link_order) | SHF(alloc);
@@ -609,12 +615,35 @@ static void AddSections(AsmObject* object, ELFWriterFile* elf) {
                             section->alignment, &section->contents, entry_size);
 
     if (is_debug_line_section) {
-      AssemblerSymbol* text = AsmObjectFindSymbol(object, ".text");
-      if (text != NULL) {
-        AssemblerRelocation* addr_reloc = DwarfDebugLineRelocation(
-            &object->dwarf, text, object->reloc_types[kRelocSet64],
-            elf_section->index);
-        AsmObjectAddRelocation(object, addr_reloc);
+      if (object->dwarf.address_fixups.length == 0) {
+        AssemblerSymbol* text = AsmObjectFindSymbol(object, ".text");
+        if (text != NULL) {
+          AssemblerRelocation* addr_reloc = DwarfDebugLineRelocation(
+              &object->dwarf, text, object->reloc_types[kRelocSet64],
+              elf_section->index);
+          AsmObjectAddRelocation(object, addr_reloc);
+        }
+      }
+      for (size_t f = 0; f < object->dwarf.address_fixups.length; f++) {
+        DwarfAddressFixup* fixup = object->dwarf.address_fixups.value.p[f];
+        AssemblerSymbol* sym = NULL;
+        if (fixup->section >= 0 &&
+            (size_t)fixup->section < object->sections.length) {
+          AssemblerSection* src = object->sections.value.p[fixup->section];
+          if (src->name != NULL) {
+            sym = AsmObjectFindSymbol(object, src->name->value);
+          }
+        }
+        if (sym == NULL) {
+          sym = AsmObjectFindSymbol(object, ".text");
+        }
+        if (sym != NULL) {
+          object->dwarf.address_offset = fixup->offset;
+          AssemblerRelocation* addr_reloc = DwarfDebugLineRelocation(
+              &object->dwarf, sym, object->reloc_types[kRelocSet64],
+              elf_section->index);
+          AsmObjectAddRelocation(object, addr_reloc);
+        }
       }
     }
 
