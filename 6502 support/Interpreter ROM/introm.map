@@ -1,35 +1,19 @@
-# Interpreter ROM linker map file
+/* Interpreter ROM linker script (GNU ld / LLVM lld MEMORY + SECTIONS). */
 
-.set false 0
-.set true 1
-.set text 1
-.set data 2
-.set dynamic 3
-.set interp 3
-
-.set M_6502 6502
-
-layout {
-  machine: M_6502
-  type: "introm"
-
-  segment {
-    type: text
-    alignment: 1
-    region {
-      name: "text"
-      section: ".text"
-      section: ".rodata"
-      start_addr: 0xc000
-      size: 0x3ffa
-    }
-    region {
-      name: "hwvectors"
-      section: ".hwvectors"
-      start_addr: 0xfffa
-      size: 6
-      alignment: 1
-    }
-  }
+MEMORY
+{
+  text (rx) : ORIGIN = 0xc000, LENGTH = 0x3ffa
+  hwvectors (r) : ORIGIN = 0xfffa, LENGTH = 6
 }
 
+SECTIONS
+{
+  .text : {
+    *(.text)
+    *(.rodata)
+  } > text
+
+  .hwvectors : {
+    *(.hwvectors)
+  } > hwvectors
+}

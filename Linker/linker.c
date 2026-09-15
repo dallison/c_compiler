@@ -7,6 +7,7 @@
 //
 
 #include "linker.h"
+#include "linker_script.h"
 #include "linker_arch.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,45 +78,30 @@ void VLinkerWarning(ObjectFile* file, const char* warn, const char* error, va_li
 void LinkerInitConfigLayout(Linker* linker,
                             const char* config_file,
                             const char* layout_type_name) {
-  ConfigParserInit(&linker->config_parser, config_file);
-  bool ok = ConfigParserParse(&linker->config_parser);
-  if (!ok) {
-    fprintf(stderr, "Failed to parse linker config file %s\n", config_file);
-    exit(1);
-  }
-  // Find the layout in the config.  This is done by machine id and layout
-  // type name.
-  ConfigNode* layouts = ConfigObjectFind(linker->config_parser.root, "layout");
-  if (layouts == NULL) {
-    fprintf(stderr, "There are no layouts in config file %s\n", config_file);
-    exit(1);
-  }
-  ConfigNodeVectorize(layouts);
-  
-  ConfigNode* layout_found = NULL;
-  for (size_t i = 0; i < layouts->value.vector_value.length; i++) {
-    ConfigNode* layout = layouts->value.vector_value.value.p[i];
-    ConfigNode* machine = ConfigObjectFind(layout->value.object_value, "machine");
-    if (machine != NULL) {
-      if (machine->value.int_value == linker->elf_machine_type) {
-        ConfigNode* type = ConfigObjectFind(layout->value.object_value, "type");
-        if (type != NULL) {
-          if (StringEqual(&type->value.string_value, layout_type_name)) {
-            layout_found = layout;
-            break;
-          }
-        }
-      }
+  bool ok;
+  if (config_file != NULL) {
+    ok = LinkerScriptParseFile(config_file, linker->elf_machine_type,
+                               &linker->config);
+    if (!ok) {
+      fprintf(stderr, "Failed to parse linker script %s\n", config_file);
+      exit(1);
+    }
+  } else {
+    ok = LinkerScriptLoadBuiltin(linker->elf_machine_type, layout_type_name,
+                                 &linker->config);
+    if (!ok) {
+      fprintf(stderr, "Failed to load built-in linker script for layout %s\n",
+              layout_type_name);
+      exit(1);
     }
   }
-  if (layout_found == NULL) {
-    fprintf(stderr, "Cannot find layout type %s in config file %s\n", layout_type_name, config_file);
+  if (linker->config.errors != 0) {
+    fprintf(stderr, "Exiting due to linker script errors\n");
     exit(1);
   }
-  LinkerConfigInit(&linker->config, layout_found->value.object_value);
-  if (linker->config.errors != 0) {
-    fprintf(stderr, "Exiting due to config errors\n");
-    exit(1);
+  if (linker->config.entry_symbol.length > 0 &&
+      StringEqual(&linker->entry_symbol, "_start")) {
+    StringSet(&linker->entry_symbol, linker->config.entry_symbol.value);
   }
 }
 
@@ -155,6 +141,7 @@ void LinkerInit(Linker* linker) {
   linker->print_relocations = false;
   linker->print_symbol_tables = false;
   linker->print_sections = false;
+  LinkerConfigInitEmpty(&linker->config);
 
   // Initialize and add the architectures.
   VectorAppend(&linker->architectures, NewPCodeLinkerArchitecture());
@@ -202,6 +189,7 @@ void LinkerDestruct(Linker* linker) {
   VectorDestructWithContents(&linker->library_search_path, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
   VectorDestructWithContents(&linker->needed_libraries, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
   VectorDestructWithContents(&linker->rpath, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
+  LinkerConfigDestruct(&linker->config);
 }
 
 void LinkerInitArchitecture(Linker* linker) {
@@ -390,9 +378,11 @@ void SegmentMemoryRegionInit(SegmentMemoryRegion* region, ConfigRegion* config) 
   region->actual_end = 0;
   region->next = region->start;
   region->falign = config->falign;
+  region->trailing_align = config->trailing_align;
   VectorInit(&region->sections);
   for (size_t i = 0; i < config->sections.length; i++) {
-    VectorAppend(&region->sections, NewString(config->sections.value.p[i]));
+    String* section = config->sections.value.p[i];
+    VectorAppend(&region->sections, NewString(section->value));
   }
 }
 
@@ -419,6 +409,7 @@ SegmentMemoryRegion* NewInternalSegmentMemoryRegion(void) {
   r->actual_end = r->config_end = 0;
   r->next = 0;
   r->falign = false;
+  r->trailing_align = 0;
   return r;
 }
 
@@ -458,7 +449,8 @@ static void AssignGroupRegion(Segment* segment, SectionGroup* group) {
    for (size_t i = 0; region_index == -1 && i < segment->regions.length; i++) {
      SegmentMemoryRegion* region = segment->regions.value.p[i];
      for (size_t j = 0; j < region->sections.length; j++) {
-       if (StringEqualString(region->sections.value.p[j], section_name)) {
+       String* pattern = region->sections.value.p[j];
+       if (LinkerConfigPatternMatch(pattern->value, section_name->value)) {
          region_index = (int)i;
          break;
        }
@@ -1217,7 +1209,8 @@ static bool SegmentContainsSection(Segment* segment, String* section_name) {
   for (size_t i = 0; i < segment->config->regions.length; i++) {
     ConfigRegion* region = segment->config->regions.value.p[i];
     for (size_t j = 0; j < region->sections.length; j++) {
-      if (StringEqualString(region->sections.value.p[j], section_name)) {
+      String* pattern = region->sections.value.p[j];
+      if (LinkerConfigPatternMatch(pattern->value, section_name->value)) {
         return true;
       }
     }
@@ -1230,7 +1223,8 @@ static SegmentMemoryRegion* SegmentRegionForSection(Segment* segment,
   for (size_t i = 0; i < segment->regions.length; i++) {
     SegmentMemoryRegion* region = segment->regions.value.p[i];
     for (size_t j = 0; j < region->sections.length; j++) {
-      if (StringEqual(region->sections.value.p[j], section_name)) {
+      if (LinkerConfigPatternMatch(
+              ((String*)region->sections.value.p[j])->value, section_name)) {
         return region;
       }
     }
@@ -1248,6 +1242,9 @@ static void AssignSectionGroupsToSegments(Linker* linker) {
     SectionGroup* group = linker->section_groups.value.p[i];
     Segment* segment = NULL;
     bool use_default_region = false;
+    if (LinkerConfigShouldDiscard(&linker->config, group->name.value)) {
+      continue;
+    }
     if ((group->flags & SHF(tls)) != 0) {
       segment = &linker->tls_segment;
     } else if (SegmentContainsSection(&linker->code_segment, &group->name)) {
@@ -1300,6 +1297,46 @@ static LinkerSymbol* InventSymbol(Linker* linker, const char* name, int size, ui
   sym->size = size;
   sym->address = address;
   return sym;
+}
+
+static uint64_t AlignUpU64(uint64_t value, uint64_t align) {
+  if (align <= 1) {
+    return value;
+  }
+  return ((value + align - 1) / align) * align;
+}
+
+static void ApplyScriptSymbols(Linker* linker, uint64_t image_end) {
+  for (size_t i = 0; i < linker->config.script_symbols.length; i++) {
+    ConfigScriptSymbol* spec = linker->config.script_symbols.value.p[i];
+    LinkerSymbol* existing =
+        LinkerFindSymbol(&linker->global_symbol_table, spec->name.value);
+    if (spec->provide && existing != NULL && existing->defined) {
+      continue;
+    }
+    uint64_t address = image_end;
+    if (spec->has_absolute) {
+      address = spec->absolute;
+    } else if (!spec->image_end && spec->patterns.length > 0) {
+      bool found = false;
+      uint64_t end = 0;
+      for (size_t g = 0; g < linker->section_groups.length; g++) {
+        SectionGroup* group = linker->section_groups.value.p[g];
+        if (LinkerConfigSectionMatches(&spec->patterns, group->name.value)) {
+          uint64_t group_end = group->address + LinkerSectionGroupSize(group);
+          if (!found || group_end > end) {
+            end = group_end;
+            found = true;
+          }
+        }
+      }
+      if (found) {
+        address = end;
+      }
+    }
+    address = AlignUpU64(address, spec->align);
+    InventSymbol(linker, spec->name.value, 8, address);
+  }
 }
 
 static SectionGroup* FindSectionGroup(Linker* linker, const char* name) {
@@ -1522,7 +1559,7 @@ static int SectionOrderInRegion(const SectionGroup* group) {
   }
   for (size_t i = 0; i < group->region->sections.length; i++) {
     String* configured_name = group->region->sections.value.p[i];
-    if (strcmp(configured_name->value, group->name.value) == 0) {
+    if (LinkerConfigPatternMatch(configured_name->value, group->name.value)) {
       return (int)i;
     }
   }
@@ -1701,10 +1738,23 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
     VectorAppend(&group->components, pad_group);
  }
   
+  for (size_t i = 0; i < segment->regions.length; i++) {
+    SegmentMemoryRegion* region = segment->regions.value.p[i];
+    if (region->trailing_align > 1) {
+      uint64_t aligned =
+          ((region->next + region->trailing_align - 1) /
+           region->trailing_align) *
+          region->trailing_align;
+      region->next = aligned;
+      if (aligned > region->actual_end) {
+        region->actual_end = aligned;
+      }
+      if (aligned > addr) {
+        addr = aligned;
+      }
+    }
+  }
   SetSegmentEndAddress(segment, addr);
-  
-  // Now we need to order the groups by region and thus address.
-  // VectorSortPointers(&segment->sections, CompareGroupRegion);
 }
 
 static ConfigSegment* FakeConfigSegment() {
@@ -1931,6 +1981,7 @@ void LinkerLinkAllFiles(Linker* linker) {
 
   // Define the '_end' symbol for the last assigned address.
   InventSymbol(linker, "_end", 8, addr);
+  ApplyScriptSymbols(linker, addr);
 
   // Expose the linked .eh_frame range to the in-process unwind runtime.
   InventEHFrameBounds(linker);

@@ -154,6 +154,7 @@ typedef struct SegmentMemoryRegion {
   uint64_t config_end;       // Configured end address or 0 for unlimited.
   uint64_t actual_end;              // End address calculated by linker
   uint64_t next;      // Next address to use.
+  uint64_t trailing_align;
 } SegmentMemoryRegion;
 
 void SegmentMemoryRegionInit(SegmentMemoryRegion* region, ConfigRegion* config);
@@ -220,7 +221,6 @@ typedef struct Linker {
   bool print_relocations;
   bool print_sections;
   
-  ConfigParser config_parser;
   LinkerConfig config;
   
   int num_errors;
