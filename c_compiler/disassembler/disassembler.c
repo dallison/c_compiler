@@ -64,6 +64,9 @@ bool DAsmArchitectureFromELFMachine(int machine, DAsmArchitecture* arch) {
     case ELF_MACHINE_TYPE_XTENSA:
       *arch = kDAsmXtensa;
       return true;
+    case ELF_MACHINE_TYPE_BPF:
+      *arch = kDAsmBPF;
+      return true;
     default:
       *arch = kDAsmUnknown;
       return false;
@@ -84,6 +87,8 @@ const char* DAsmArchitectureName(DAsmArchitecture arch) {
       return "x86_64";
     case kDAsmXtensa:
       return "xtensa";
+    case kDAsmBPF:
+      return "bpf";
     case kDAsmUnknown:
       return "unknown";
   }
@@ -113,6 +118,10 @@ DAsmArchitecture DAsmArchitectureFromName(const char* name) {
       strcmp(name, "xtensa-esp32") == 0) {
     return kDAsmXtensa;
   }
+  if (strcmp(name, "bpf") == 0 || strcmp(name, "bpfel") == 0 ||
+      strcmp(name, "ebpf") == 0) {
+    return kDAsmBPF;
+  }
   return kDAsmUnknown;
 }
 
@@ -128,6 +137,8 @@ size_t DAsmDefaultInstructionSize(DAsmArchitecture arch) {
       return 1;
     case kDAsmXtensa:
       return 3;
+    case kDAsmBPF:
+      return 8;
     case kDAsmUnknown:
       return 1;
   }
@@ -150,6 +161,8 @@ bool DAsmDisassembleInstruction(DAsmArchitecture arch, const void* bytes,
       return DAsmDisassembleX86_64(bytes, length, address, inst);
     case kDAsmXtensa:
       return DAsmDisassembleXtensa(bytes, length, address, inst);
+    case kDAsmBPF:
+      return DAsmDisassembleBPF(bytes, length, address, inst);
     case kDAsmUnknown:
       return false;
   }

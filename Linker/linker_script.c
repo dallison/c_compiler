@@ -1910,6 +1910,31 @@ static const char kBuiltinEsp32Program[] =
     "  /DISCARD/ : { *(.comment .note .note.*) }\n"
     "}\n";
 
+static const char kBuiltinBpfProgram[] =
+    "PHDRS\n"
+    "{\n"
+    "  text PT_LOAD FLAGS(5);\n"
+    "  data PT_LOAD FLAGS(6);\n"
+    "  dynamic PT_DYNAMIC;\n"
+    "  interp PT_INTERP;\n"
+    "}\n"
+    "MEMORY\n"
+    "{\n"
+    "  text (rx) : ORIGIN = 0x400000000, LENGTH = 0\n"
+    "  data (rw) : ORIGIN = 0x410000000, LENGTH = 0\n"
+    "}\n"
+    "SECTIONS\n"
+    "{\n"
+    "  .text : {\n"
+    "    *(.text* .rodata* .davecc_stacktrace .eh_frame* .gcc_except_table)\n"
+    "  } > text :text\n"
+    "  .data : {\n"
+    "    *(.got .got.plt .data* .preinit_array* .init_array* .fini_array*)\n"
+    "  } > data :data\n"
+    "  .bss : { *(.bss* COMMON) } > data\n"
+    "  /DISCARD/ : { *(.comment .note .note.*) }\n"
+    "}\n";
+
 static const char kBuiltinPcodeProgram[] =
     "PHDRS\n"
     "{\n"
@@ -2052,6 +2077,7 @@ static const BuiltinScript kBuiltinScripts[] = {
     {ELF_MACHINE_TYPE_RISC_V, ELFCLASS64, "program", kBuiltinRiscvProgram},
     {ELF_MACHINE_TYPE_XTENSA, ELFCLASS32, "program", kBuiltinEsp32Program},
     {ELF_MACHINE_TYPE_PCODE, 0, "program", kBuiltinPcodeProgram},
+    {ELF_MACHINE_TYPE_BPF, 0, "program", kBuiltinBpfProgram},
     {ELF_MACHINE_TYPE_AARCH64, 0, "program", kBuiltinAarch64Program},
     {ELF_MACHINE_TYPE_ARM, 0, "program", kBuiltinArmProgram},
     {ELF_MACHINE_TYPE_X86, 0, "program", kBuiltinX86Program},

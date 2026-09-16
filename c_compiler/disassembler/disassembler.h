@@ -25,6 +25,7 @@ typedef enum {
   kDAsmARM,
   kDAsmX86_64,
   kDAsmXtensa,
+  kDAsmBPF,
 } DAsmArchitecture;
 
 typedef struct {

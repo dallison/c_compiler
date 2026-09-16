@@ -280,6 +280,7 @@ COMMON_INCLUDES = [
     "c_compiler/6502",
     "c_compiler/aarch64",
     "c_compiler/arm",
+    "c_compiler/bpf",
     "c_compiler/p_code",
     "c_compiler/risc_v",
     "c_compiler/risc_v32",
@@ -510,6 +511,7 @@ cc_library(
         "c_compiler/disassembler/disassembler_6502.c",
         "c_compiler/disassembler/disassembler_aarch64.c",
         "c_compiler/disassembler/disassembler_arm.c",
+        "c_compiler/disassembler/disassembler_bpf.c",
         "c_compiler/disassembler/disassembler_riscv.c",
         "c_compiler/disassembler/disassembler_tool.c",
         "c_compiler/disassembler/disassembler_x86_64.c",
@@ -681,6 +683,7 @@ cc_library(
         "c_compiler/Loader/Architecture/loader_arch_arm.c",
         "c_compiler/Loader/Architecture/loader_arch_x86_64.c",
         "c_compiler/Loader/Architecture/loader_arch_pcode.c",
+        "c_compiler/Loader/Architecture/loader_arch_bpf.c",
         "c_compiler/Loader/Architecture/loader_arch_riscv.c",
         "c_compiler/Loader/Architecture/loader_arch_xtensa.c",
         "c_compiler/Loader/loader.c",
@@ -717,6 +720,7 @@ cc_library(
         "Linker/Architecture/linker_arch_x86_64.c",
         "Linker/Architecture/linker_arch_xtensa.c",
         "Linker/Architecture/linker_arch_pcode.c",
+        "Linker/Architecture/linker_arch_bpf.c",
         "Linker/Architecture/linker_arch_riscv.c",
         "Linker/linker.c",
         "Linker/linker_config.c",
@@ -821,6 +825,12 @@ cc_library(
         "c_compiler/arm/arm_optimize.c",
         "c_compiler/arm/arm_reg_alloc.c",
         "c_compiler/arm/arm_target.c",
+        "c_compiler/bpf/bpf_assembler.c",
+        "c_compiler/bpf/bpf_codegen.c",
+        "c_compiler/bpf/bpf_emitter.c",
+        "c_compiler/bpf/bpf_optimize.c",
+        "c_compiler/bpf/bpf_reg_alloc.c",
+        "c_compiler/bpf/bpf_target.c",
         "c_compiler/assembler/asm_expr.c",
         "c_compiler/assembler/asm_module.c",
         "c_compiler/assembler/asm_object.c",
@@ -1360,6 +1370,7 @@ cc_binary(
         ":6502",
         ":aarch64",
         ":arm",
+        ":bpf",
         ":pcode",
         ":riscv",
         ":esp32",
@@ -1515,6 +1526,38 @@ cc_binary(
         ":linker",
         ":loader",
         ":p_code_lib",
+        ":utils",
+    ],
+)
+
+cc_library(
+    name = "bpf_lib",
+    srcs = [
+        "bpf_interpreter/bpf_interpreter.c",
+    ],
+    hdrs = glob([
+        "bpf_interpreter/*.h",
+    ]),
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES + ["bpf_interpreter"],
+    deps = [
+        ":elf",
+        ":linker",
+        ":loader",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "bpf",
+    srcs = ["bpf_interpreter/main.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES + ["bpf_interpreter"],
+    deps = [
+        ":bpf_lib",
+        ":elf",
+        ":linker",
+        ":loader",
         ":utils",
     ],
 )
@@ -3241,6 +3284,19 @@ filegroup(
 filegroup(
     name = "filesystem_cpp_backend_smoke_source",
     srcs = ["tests/filesystem_cpp_backend_smoke.cpp"],
+)
+
+sh_test(
+    name = "bpf_runtime_smoke_test",
+    srcs = ["tests/bpf_runtime_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :bpf)",
+    ],
+    data = [
+        ":davecc",
+        ":bpf",
+    ],
 )
 
 sh_test(

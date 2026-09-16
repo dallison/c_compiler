@@ -35,6 +35,7 @@ set(DAVECC_COMMON_INCLUDES
   c_compiler/6502
   c_compiler/aarch64
   c_compiler/arm
+  c_compiler/bpf
   c_compiler/p_code
   c_compiler/risc_v
   c_compiler/risc_v32
@@ -109,6 +110,7 @@ davecc_library(davecc_disassembler
   c_compiler/disassembler/disassembler_6502.c
   c_compiler/disassembler/disassembler_aarch64.c
   c_compiler/disassembler/disassembler_arm.c
+  c_compiler/disassembler/disassembler_bpf.c
   c_compiler/disassembler/disassembler_riscv.c
   c_compiler/disassembler/disassembler_tool.c
   c_compiler/disassembler/disassembler_x86_64.c
@@ -127,6 +129,7 @@ davecc_library(davecc_loader
   c_compiler/Loader/Architecture/loader_arch_arm.c
   c_compiler/Loader/Architecture/loader_arch_x86_64.c
   c_compiler/Loader/Architecture/loader_arch_pcode.c
+  c_compiler/Loader/Architecture/loader_arch_bpf.c
   c_compiler/Loader/Architecture/loader_arch_riscv.c
   c_compiler/Loader/Architecture/loader_arch_xtensa.c
   c_compiler/Loader/loader.c
@@ -143,6 +146,7 @@ davecc_library(davecc_linker
   Linker/Architecture/linker_arch_x86_64.c
   Linker/Architecture/linker_arch_xtensa.c
   Linker/Architecture/linker_arch_pcode.c
+  Linker/Architecture/linker_arch_bpf.c
   Linker/Architecture/linker_arch_riscv.c
   Linker/linker.c
   Linker/linker_config.c
@@ -175,6 +179,12 @@ davecc_library(davecc_compiler
   c_compiler/arm/arm_optimize.c
   c_compiler/arm/arm_reg_alloc.c
   c_compiler/arm/arm_target.c
+  c_compiler/bpf/bpf_assembler.c
+  c_compiler/bpf/bpf_codegen.c
+  c_compiler/bpf/bpf_emitter.c
+  c_compiler/bpf/bpf_optimize.c
+  c_compiler/bpf/bpf_reg_alloc.c
+  c_compiler/bpf/bpf_target.c
   c_compiler/assembler/asm_expr.c
   c_compiler/assembler/assembler.c
   c_compiler/assembler/dwarf.c
@@ -366,6 +376,16 @@ target_link_libraries(davecc_x86_64_bin PRIVATE davecc_x86_64_lib davecc_elf dav
 davecc_executable(davecc_esp32_bin esp32 xtensa_interpreter/main.c)
 target_link_libraries(davecc_esp32_bin PRIVATE davecc_xtensa_lib davecc_elf davecc_loader davecc_utils)
 
+davecc_library(davecc_bpf_lib
+  bpf_interpreter/bpf_interpreter.c
+)
+target_include_directories(davecc_bpf_lib PUBLIC bpf_interpreter)
+target_link_libraries(davecc_bpf_lib PUBLIC davecc_elf davecc_linker davecc_loader davecc_utils)
+
+davecc_executable(davecc_bpf_bin bpf bpf_interpreter/main.c)
+target_include_directories(davecc_bpf_bin PRIVATE bpf_interpreter)
+target_link_libraries(davecc_bpf_bin PRIVATE davecc_bpf_lib davecc_elf davecc_linker davecc_loader davecc_utils)
+
 add_custom_target(davecc_tools
   DEPENDS
     davecc_bin
@@ -388,6 +408,7 @@ add_custom_target(davecc_tools
     davecc_arm_bin
     davecc_x86_64_bin
     davecc_esp32_bin
+    davecc_bpf_bin
 )
 
 install(TARGETS
@@ -399,6 +420,7 @@ install(TARGETS
   davecc_arm_bin
   davecc_x86_64_bin
   davecc_esp32_bin
+  davecc_bpf_bin
   RUNTIME DESTINATION "${DAVECC_INSTALL_LIBEXECDIR}"
 )
 

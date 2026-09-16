@@ -26,6 +26,7 @@
 #include "p_code_assembler.h"
 #include "x86_64_assembler.h"
 #include "arm_assembler.h"
+#include "bpf_assembler.h"
 #include "compiler.h"
 #include "errors.h"
 #include "linker_main.h"
@@ -349,6 +350,9 @@ static bool TargetNameMatches(const char* target, const char* canonical) {
   }
   if (strcmp(canonical, "wasm32") == 0) {
     return strcmp(target, "wasm") == 0;
+  }
+  if (strcmp(canonical, "bpf") == 0) {
+    return strcmp(target, "bpfel") == 0 || strcmp(target, "ebpf") == 0;
   }
   return false;
 }
@@ -1885,6 +1889,11 @@ int main(int argc, char * argv[]) {
         assembler = (Assembler*)NewPCodeAssembler(asm_filename, &output_filename);
         asm_run = AssemblePCodeInstruction;
         destructor = (AssemblerDestructor)PCodeAssemblerDestruct;
+      } else if (StringEqual(&target, "bpf") || StringEqual(&target, "bpfel") ||
+                 StringEqual(&target, "ebpf")) {
+        assembler = (Assembler*)NewBPFAssembler(asm_filename, &output_filename);
+        asm_run = AssembleBPFInstruction;
+        destructor = (AssemblerDestructor)BPFAssemblerDestruct;
       } else {
         fprintf(stderr, "Unknown assembler architecture %s\n", target.value);
         exit(1);

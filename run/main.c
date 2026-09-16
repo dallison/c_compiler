@@ -19,6 +19,7 @@ typedef struct {
 
 static const RunTarget run_targets[] = {
     {ELF_MACHINE_TYPE_PCODE, "pcode", "PCODE", "pcode", false, false},
+    {ELF_MACHINE_TYPE_BPF, "bpf", "BPF", "bpf", true, false},
     {ELF_MACHINE_TYPE_RISC_V, "riscv", "RISCV", "riscv", false, false},
     {ELF_MACHINE_TYPEW65C02, "6502", "6502", "6502", false, true},
     {ELF_MACHINE_TYPE_AARCH64, "aarch64", "AARCH64", "aarch64", true,
