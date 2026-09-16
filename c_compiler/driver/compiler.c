@@ -44,6 +44,7 @@
 #include "risc_v32_target.h"
 #include "aarch64_target.h"
 #include "arm_target.h"
+#include "bpf_target.h"
 #include "common_emitter.h"
 #include "x86_64_target.h"
 #include "x86_target.h"
@@ -257,6 +258,7 @@ static struct CompilerTargetDefinition{
   {"65c02", {"65c02", "65C02"}, New65c02Target, true, 2, 0},
   {"wasm32", {"wasm32", "wasm"}, NewWasm32Target, true, 0,
    kTargetSupportsAtomics | kTargetSupports8ByteAtomics},
+  {"bpf", {"bpf", "bpfel", "ebpf"}, NewBPFTarget, true, 0, 0},
 };
 
 #define kNumTargets (sizeof(compiler_targets) / sizeof(compiler_targets[0]))
@@ -3503,7 +3505,8 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   // still overrides the target default with last-one-wins semantics.
   compiler->exceptions_enabled =
       strcmp(target->canonical_name, "6502") != 0 &&
-      strcmp(target->canonical_name, "65c02") != 0;
+      strcmp(target->canonical_name, "65c02") != 0 &&
+      strcmp(target->canonical_name, "bpf") != 0;
   for (size_t i = 0; i < options->length; i++) {
     CompilerOptionValue* opt = options->value.p[i];
     if (opt->opt == kOptionExceptions) {

@@ -35,6 +35,16 @@ Equivalent static cross-target profiles are available for
 provides file I/O, filesystem operations, clocks, random data, heap allocation,
 TLS, and C11 threads.
 
+Linux eBPF is `bpf-unknown-linux-davecc` (aliases `bpf`, `bpfel`, `ebpf`). It is
+a freestanding ELF backend with no libc; compile with `-nostdlib` and run the
+result with the `bpf` interpreter:
+
+```sh
+bazel-bin/davecc -target bpf-unknown-linux-davecc -nostdlib -static \
+  -Wl,-e -Wl,main program.c -o program
+bazel-bin/bpf program
+```
+
 ### x86_64 testing with Colima
 
 On an Apple Silicon macOS host, start a QEMU-backed x86_64 Linux profile and

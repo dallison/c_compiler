@@ -61,6 +61,9 @@ bool DAsmArchitectureFromELFMachine(int machine, DAsmArchitecture* arch) {
     case ELF_MACHINE_TYPE_X86_64:
       *arch = kDAsmX86_64;
       return true;
+    case ELF_MACHINE_TYPE_BPF:
+      *arch = kDAsmBPF;
+      return true;
     default:
       *arch = kDAsmUnknown;
       return false;
@@ -79,6 +82,8 @@ const char* DAsmArchitectureName(DAsmArchitecture arch) {
       return "arm";
     case kDAsmX86_64:
       return "x86_64";
+    case kDAsmBPF:
+      return "bpf";
     case kDAsmUnknown:
       return "unknown";
   }
@@ -104,6 +109,10 @@ DAsmArchitecture DAsmArchitectureFromName(const char* name) {
       strcmp(name, "amd64") == 0) {
     return kDAsmX86_64;
   }
+  if (strcmp(name, "bpf") == 0 || strcmp(name, "bpfel") == 0 ||
+      strcmp(name, "ebpf") == 0) {
+    return kDAsmBPF;
+  }
   return kDAsmUnknown;
 }
 
@@ -117,6 +126,8 @@ size_t DAsmDefaultInstructionSize(DAsmArchitecture arch) {
       return 4;
     case kDAsmX86_64:
       return 1;
+    case kDAsmBPF:
+      return 8;
     case kDAsmUnknown:
       return 1;
   }
@@ -137,6 +148,8 @@ bool DAsmDisassembleInstruction(DAsmArchitecture arch, const void* bytes,
       return DAsmDisassembleARM(bytes, length, address, inst);
     case kDAsmX86_64:
       return DAsmDisassembleX86_64(bytes, length, address, inst);
+    case kDAsmBPF:
+      return DAsmDisassembleBPF(bytes, length, address, inst);
     case kDAsmUnknown:
       return false;
   }

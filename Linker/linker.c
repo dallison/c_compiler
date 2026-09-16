@@ -35,6 +35,7 @@
 #include "linker_arch_arm.h"
 #include "linker_arch_x86_64.h"
 #include "linker_arch_x86.h"
+#include "linker_arch_bpf.h"
 
 void LinkerError(ObjectFile* file, const char* error, ...) {
   va_list ap;
@@ -156,6 +157,7 @@ void LinkerInit(Linker* linker) {
   VectorAppend(&linker->architectures, NewARMLinkerArchitecture());
   VectorAppend(&linker->architectures, NewX86_64LinkerArchitecture());
   VectorAppend(&linker->architectures, NewX86LinkerArchitecture());
+  VectorAppend(&linker->architectures, NewBPFLinkerArchitecture());
 
   // Add the contents of LD_LIBRARY_PATH to the library search path.
   char* ld_library_path = getenv("LD_LIBRARY_PATH");

@@ -180,6 +180,7 @@ static void TestElfBuiltins(void) {
       {ELF_MACHINE_TYPE_RISC_V, false, 0x40000000ull},
       {ELF_MACHINE_TYPE_RISC_V, true, 0x400000000ull},
       {ELF_MACHINE_TYPE_PCODE, true, 0x400000000ull},
+      {ELF_MACHINE_TYPE_BPF, true, 0x400000000ull},
       {ELF_MACHINE_TYPE_AARCH64, true, 0x400000000ull},
       {ELF_MACHINE_TYPE_ARM, false, 0x40000000ull},
       {ELF_MACHINE_TYPE_X86, false, 0x08048000ull},

@@ -637,6 +637,14 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__W65C02__", "1");
     PreprocessorDefineMacro(p, "__6502__", "1");
     PreprocessorDefineMacro(p, "__DAVECC_LEGACY_RTTI__", "1");
+  } else if (StringEqual(compiler->target_name, "bpf") ||
+             StringEqual(compiler->target_name, "bpfel") ||
+             StringEqual(compiler->target_name, "ebpf")) {
+    PreprocessorDefineMacro(p, "__bpf__", "1");
+    PreprocessorDefineMacro(p, "__BPF__", "1");
+    PreprocessorDefineMacro(p, "__WORDSIZE", "64");
+    PreprocessorDefineMacro(p, "__LP64__", "1");
+    PreprocessorDefineMacro(p, "_LP64", "1");
   }
 
   if (CompilerTargetTripleIsLinux(&compiler->target_triple)) {

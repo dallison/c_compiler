@@ -381,6 +381,15 @@ typedef struct  {
 #define ELF_MACHINE_TYPE_X86_64 62
 #define ELF_MACHINE_TYPE_X86 3
 #define ELF_MACHINE_TYPE_386 ELF_MACHINE_TYPE_X86
+#define ELF_MACHINE_TYPE_BPF 247
+
+// Linux eBPF relocation types (ELFCLASS64, little-endian / bpfel).
+#define R_BPF_NONE 0
+#define R_BPF_64_64 1
+#define R_BPF_64_ABS64 2
+#define R_BPF_64_ABS32 3
+#define R_BPF_64_NODYLD32 4
+#define R_BPF_64_32 10
 
 // ARM ELF flags.
 #define EF_ARM_EABI_VER5 0x05000000
