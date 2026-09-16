@@ -23,9 +23,10 @@ bool LinkerScriptParseFile(const char* filename, int elf_machine_type,
 bool LinkerScriptParseString(const char* filename, const char* text,
                              int elf_machine_type, LinkerConfig* config);
 
-// Load the built-in script for this ELF machine and layout type
-// ("program", "rom", or "introm").
-bool LinkerScriptLoadBuiltin(int elf_machine_type, const char* layout_type,
-                             LinkerConfig* config);
+// Load the built-in script for this ELF machine, ELF class, and layout type
+// ("program", "rom", or "introm").  The class distinguishes targets such as
+// RV32 and RV64 that share one ELF machine ID.
+bool LinkerScriptLoadBuiltin(int elf_machine_type, bool is_64_bit,
+                             const char* layout_type, LinkerConfig* config);
 
 #endif /* linker_script_h */

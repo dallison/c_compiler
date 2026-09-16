@@ -119,7 +119,8 @@ static void TestStandardScript(void) {
 
 static void Test6502RomBuiltin(void) {
   LinkerConfig config = {0};
-  CHECK(LinkerScriptLoadBuiltin(ELF_MACHINE_TYPEW65C02, "rom", &config));
+  CHECK(LinkerScriptLoadBuiltin(ELF_MACHINE_TYPEW65C02, true, "rom",
+                                &config));
   ConfigSegment* text = FindSeg(&config, kConfigSegmentTypeText);
   CHECK(text != NULL);
   CHECK(text->alignment == 1);
@@ -171,16 +172,23 @@ static void TestIntromScript(void) {
 }
 
 static void TestElfBuiltins(void) {
-  const int machines[] = {
-      ELF_MACHINE_TYPE_RISC_V,
-      ELF_MACHINE_TYPE_PCODE,
-      ELF_MACHINE_TYPE_AARCH64,
-      ELF_MACHINE_TYPE_ARM,
-      ELF_MACHINE_TYPE_X86_64,
+  static const struct {
+    int machine;
+    bool is_64_bit;
+    uint64_t text_start;
+  } builtins[] = {
+      {ELF_MACHINE_TYPE_RISC_V, false, 0x40000000ull},
+      {ELF_MACHINE_TYPE_RISC_V, true, 0x400000000ull},
+      {ELF_MACHINE_TYPE_PCODE, true, 0x400000000ull},
+      {ELF_MACHINE_TYPE_AARCH64, true, 0x400000000ull},
+      {ELF_MACHINE_TYPE_ARM, false, 0x40000000ull},
+      {ELF_MACHINE_TYPE_X86, false, 0x08048000ull},
+      {ELF_MACHINE_TYPE_X86_64, true, 0x400000000ull},
   };
-  for (size_t i = 0; i < sizeof(machines) / sizeof(machines[0]); i++) {
+  for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
     LinkerConfig config = {0};
-    CHECK(LinkerScriptLoadBuiltin(machines[i], "program", &config));
+    CHECK(LinkerScriptLoadBuiltin(builtins[i].machine, builtins[i].is_64_bit,
+                                  "program", &config));
     ConfigSegment* text = FindSeg(&config, kConfigSegmentTypeText);
     ConfigSegment* data = FindSeg(&config, kConfigSegmentTypeData);
     CHECK(text != NULL && data != NULL);
@@ -192,14 +200,12 @@ static void TestElfBuiltins(void) {
     CHECK(RegionHas(text_r, ".text"));
     CHECK(RegionHas(data_r, ".data"));
     CHECK(RegionHas(data_r, ".bss"));
-    if (machines[i] == ELF_MACHINE_TYPE_ARM) {
-      CHECK(text_r->start_addr == 0x40000000ull);
+    CHECK(text_r->start_addr == builtins[i].text_start);
+    if (builtins[i].machine == ELF_MACHINE_TYPE_ARM) {
       CHECK(RegionHas(text_r, ".ARM.exidx"));
       CHECK(RegionHas(text_r, ".ARM.extab"));
-    } else {
-      CHECK(text_r->start_addr == 0x400000000ull);
     }
-    if (machines[i] == ELF_MACHINE_TYPE_PCODE) {
+    if (builtins[i].machine == ELF_MACHINE_TYPE_PCODE) {
       CHECK(RegionHas(text_r, ".davecc_except_table"));
     }
     LinkerConfigDestruct(&config);
@@ -225,8 +231,8 @@ static void TestCommentsAndHash(void) {
 
 static void TestMissingBuiltin(void) {
   LinkerConfig config = {0};
-  CHECK(!LinkerScriptLoadBuiltin(ELF_MACHINE_TYPEW65C02, "no-such-layout",
-                                 &config));
+  CHECK(!LinkerScriptLoadBuiltin(ELF_MACHINE_TYPEW65C02, false,
+                                 "no-such-layout", &config));
   CHECK(config.errors != 0);
   LinkerConfigDestruct(&config);
 }

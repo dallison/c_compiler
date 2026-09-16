@@ -1859,6 +1859,31 @@ static const char kBuiltinRiscvProgram[] =
     "  /DISCARD/ : { *(.comment .note .note.*) }\n"
     "}\n";
 
+static const char kBuiltinRiscv32Program[] =
+    "PHDRS\n"
+    "{\n"
+    "  text PT_LOAD FLAGS(5);\n"
+    "  data PT_LOAD FLAGS(6);\n"
+    "  dynamic PT_DYNAMIC;\n"
+    "  interp PT_INTERP;\n"
+    "}\n"
+    "MEMORY\n"
+    "{\n"
+    "  text (rx) : ORIGIN = 0x40000000, LENGTH = 0\n"
+    "  data (rw) : ORIGIN = 0x41000000, LENGTH = 0\n"
+    "}\n"
+    "SECTIONS\n"
+    "{\n"
+    "  .text : {\n"
+    "    *(.text* .rodata* .davecc_stacktrace .eh_frame* .gcc_except_table)\n"
+    "  } > text :text\n"
+    "  .data : {\n"
+    "    *(.got .got.plt .data* .preinit_array* .init_array* .fini_array*)\n"
+    "  } > data :data\n"
+    "  .bss : { *(.bss* COMMON) } > data\n"
+    "  /DISCARD/ : { *(.comment .note .note.*) }\n"
+    "}\n";
+
 static const char kBuiltinPcodeProgram[] =
     "PHDRS\n"
     "{\n"
@@ -1988,30 +2013,35 @@ static const char kBuiltinX86Program[] =
 
 typedef struct {
   int machine;
+  int elf_class;  // 0 matches either class.
   const char* type;
   const char* script;
 } BuiltinScript;
 
 static const BuiltinScript kBuiltinScripts[] = {
-    {ELF_MACHINE_TYPEW65C02, "rom", kBuiltin6502Rom},
-    {ELF_MACHINE_TYPEW65C02, "program", kBuiltin6502Program},
-    {ELF_MACHINE_TYPEW65C02, "introm", kBuiltin6502Introm},
-    {ELF_MACHINE_TYPE_RISC_V, "program", kBuiltinRiscvProgram},
-    {ELF_MACHINE_TYPE_PCODE, "program", kBuiltinPcodeProgram},
-    {ELF_MACHINE_TYPE_AARCH64, "program", kBuiltinAarch64Program},
-    {ELF_MACHINE_TYPE_ARM, "program", kBuiltinArmProgram},
-    {ELF_MACHINE_TYPE_X86, "program", kBuiltinX86Program},
-    {ELF_MACHINE_TYPE_X86_64, "program", kBuiltinX86_64Program},
+    {ELF_MACHINE_TYPEW65C02, 0, "rom", kBuiltin6502Rom},
+    {ELF_MACHINE_TYPEW65C02, 0, "program", kBuiltin6502Program},
+    {ELF_MACHINE_TYPEW65C02, 0, "introm", kBuiltin6502Introm},
+    {ELF_MACHINE_TYPE_RISC_V, ELFCLASS32, "program", kBuiltinRiscv32Program},
+    {ELF_MACHINE_TYPE_RISC_V, ELFCLASS64, "program", kBuiltinRiscvProgram},
+    {ELF_MACHINE_TYPE_PCODE, 0, "program", kBuiltinPcodeProgram},
+    {ELF_MACHINE_TYPE_AARCH64, 0, "program", kBuiltinAarch64Program},
+    {ELF_MACHINE_TYPE_ARM, 0, "program", kBuiltinArmProgram},
+    {ELF_MACHINE_TYPE_X86, 0, "program", kBuiltinX86Program},
+    {ELF_MACHINE_TYPE_X86_64, 0, "program", kBuiltinX86_64Program},
 };
 
-bool LinkerScriptLoadBuiltin(int elf_machine_type, const char* layout_type,
-                             LinkerConfig* config) {
+bool LinkerScriptLoadBuiltin(int elf_machine_type, bool is_64_bit,
+                             const char* layout_type, LinkerConfig* config) {
   if (layout_type == NULL) {
     layout_type = "program";
   }
+  int elf_class = is_64_bit ? ELFCLASS64 : ELFCLASS32;
   for (size_t i = 0; i < sizeof(kBuiltinScripts) / sizeof(kBuiltinScripts[0]);
        i++) {
     if (kBuiltinScripts[i].machine == elf_machine_type &&
+        (kBuiltinScripts[i].elf_class == 0 ||
+         kBuiltinScripts[i].elf_class == elf_class) &&
         strcmp(kBuiltinScripts[i].type, layout_type) == 0) {
       return LinkerScriptParseString("<builtin>", kBuiltinScripts[i].script,
                                      elf_machine_type, config);
