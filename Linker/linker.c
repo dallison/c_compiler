@@ -34,6 +34,7 @@
 #include "linker_arch_aarch64.h"
 #include "linker_arch_arm.h"
 #include "linker_arch_x86_64.h"
+#include "linker_arch_x86.h"
 
 void LinkerError(ObjectFile* file, const char* error, ...) {
   va_list ap;
@@ -153,6 +154,7 @@ void LinkerInit(Linker* linker) {
   VectorAppend(&linker->architectures, NewAARCH64LinkerArchitecture());
   VectorAppend(&linker->architectures, NewARMLinkerArchitecture());
   VectorAppend(&linker->architectures, NewX86_64LinkerArchitecture());
+  VectorAppend(&linker->architectures, NewX86LinkerArchitecture());
 
   // Add the contents of LD_LIBRARY_PATH to the library search path.
   char* ld_library_path = getenv("LD_LIBRARY_PATH");
@@ -879,15 +881,11 @@ static void ReadRelocations(Linker* linker, ELFReaderFile* elf_file,
     for (int64_t ri = 0; ri < num_relocations; ri++) {
       // Decode the on-disk relocation into a canonical (wide) relocation.  The
       // relocation is consumed immediately, so a stack temporary suffices.
-      ELFRelocation* reloc;
-      if (ops->is_64_bit) {
-        reloc = (ELFRelocation*)reloc_addr;
-      } else {
-        ops->ReadRelocation(&reloc_storage, reloc_addr);
-        reloc = &reloc_storage;
-      }
-      LinkerReadRelocation(linker, file, elf_file, reloc, symbol_table_address,
-                           reloc_section, symtab, strtab);
+      ELFFormatReadRelocation(ops,
+                              reloc_section->header->type == SHT(rela),
+                              &reloc_storage, reloc_addr);
+      LinkerReadRelocation(linker, file, elf_file, &reloc_storage,
+                           symbol_table_address, reloc_section, symtab, strtab);
       reloc_addr += reloc_section->header->entsize;
     }
   }
@@ -2146,6 +2144,9 @@ static void BuildOutputSection(Linker* linker, ELFWriterFile* elf, Segment* segm
         if (entsize != 0) {
           section->header.entsize = entsize;
         }
+        if (gsect->section.new->header.info != 0) {
+          section->header.info = gsect->section.new->header.info;
+        }
         // Propagate user data if it is set.
         if (gsect->section.new->user_data != NULL) {
           section->user_data = gsect->section.new->user_data;
@@ -2290,18 +2291,15 @@ static void AssignSectionIndexes(Linker* linker, ELFWriterFile* elf) {
       AssignGroupSectionIndexes(linker->dynamic_segment.sections.value.p[i], &section_index);
     }
     
-    // Fixup the dynamic symbol table now that we know the symbol addresses.
-    DynamicLinkerFixupDynamicSymbolTable(linker,
-                                         FindDynamicSymbolTableBuffer(elf),
-                                         (int32_t)elf->sections.length - 1);
-    
     ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, ".dynsym", ".dynstr");
-    const char* dyn_relocations =
-        linker->elf_machine_type == ELF_MACHINE_TYPE_ARM ? ".rel.dyn"
-                                                         : ".rela.dyn";
-    const char* plt_relocations =
-        linker->elf_machine_type == ELF_MACHINE_TYPE_ARM ? ".rel.plt"
-                                                         : ".rela.plt";
+    ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, ".gnu_hash",
+                                   ".dynsym");
+    ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, ".dynamic",
+                                   ".dynstr");
+    bool uses_rel = linker->elf_machine_type == ELF_MACHINE_TYPE_ARM ||
+                    linker->elf_machine_type == ELF_MACHINE_TYPE_X86;
+    const char* dyn_relocations = uses_rel ? ".rel.dyn" : ".rela.dyn";
+    const char* plt_relocations = uses_rel ? ".rel.plt" : ".rela.plt";
     ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, dyn_relocations,
                                    ".dynsym");
     ELFWriterAddSectionFixupByName(elf, kFixupFieldLink, plt_relocations,
@@ -2316,6 +2314,16 @@ static void AssignSectionIndexes(Linker* linker, ELFWriterFile* elf) {
   
   for (size_t i = 0; i < linker->tls_segment.sections.length; i++) {
     AssignGroupSectionIndexes(linker->tls_segment.sections.value.p[i], &section_index);
+  }
+
+  if (!linker->fully_static) {
+    // Dynamic symbols need the final output indexes of data and TLS sections,
+    // so populate .dynsym only after every allocatable group is indexed.
+    ELFWriterSection* bss = ELFWriterFindSection(elf, ".bss");
+    int32_t bss_section_index =
+        bss != NULL ? bss->index : 0;
+    DynamicLinkerFixupDynamicSymbolTable(
+        linker, FindDynamicSymbolTableBuffer(elf), bss_section_index);
   }
 }
 

@@ -216,11 +216,17 @@ static void CreateRelocationSections(ELFWriterFile* elf,
       String relocation_section_name;
       // Invent relocation section name.
       StringInit(&relocation_section_name, "");
-      StringPrintf(&relocation_section_name, ".rela%s", section->name.value);
-    
+      if (elf->ops->is_64_bit) {
+        StringPrintf(&relocation_section_name, ".rela%s", section->name.value);
+      } else {
+        // SysV i386 objects use SHT_REL with in-place addends (GCC/clang -m32).
+        StringPrintf(&relocation_section_name, ".rel%s", section->name.value);
+      }
+
       // Add relocation section after section it refers to.
-      ELFWriterSection* reloc_sect = ELFWriterAddStandardSection(elf, relocation_section_name.value,
-                                                              SHT(rela), 0);
+      ELFWriterSection* reloc_sect = ELFWriterAddStandardSection(
+          elf, relocation_section_name.value,
+          elf->ops->is_64_bit ? SHT(rela) : SHT(rel), 0);
       // All relocation sections link to the symtab section so that
       // they can find the symbol.
       ELFWriterAddSectionFixup(elf, kFixupFieldLink, reloc_sect, symtab);

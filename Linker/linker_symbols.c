@@ -352,6 +352,17 @@ void LinkerReadSymbol(Linker* linker,
 }
 
 LinkerSymbol* LinkerInventSymbol(Linker* linker, const char* name, int size) {
+  LinkerSymbol* existing =
+      LinkerFindSymbol(&linker->global_symbol_table, (void*)name);
+  if (existing != NULL) {
+    existing->header->size = size;
+    existing->header->info = (STB(global) << 4) | STT(notype);
+    existing->header->shndx = SHN_ABS;
+    existing->defined = true;
+    existing->invented = true;
+    existing->size = size;
+    return existing;
+  }
   ELFSymbol* elf_sym = calloc(1, sizeof(ELFSymbol));
   elf_sym->size = size;
   elf_sym->info = (STB(global) << 4) | STT(notype);

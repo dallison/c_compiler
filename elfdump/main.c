@@ -719,16 +719,10 @@ static void PrintRelocations(ELFReaderFile* elf) {
     const char* reloc_addr = elf->base + reloc_section->header->offset;
     ELFRelocation reloc_storage;
     for (int64_t ri = 0; ri < num_relocations; ri++) {
-      // An ELF32 relocation is narrower on disk than the canonical structure,
-      // so decode it rather than casting it in place.
-      ELFRelocation* reloc;
-      if (elf->ops->is_64_bit) {
-        reloc = (ELFRelocation*)reloc_addr;
-      } else {
-        elf->ops->ReadRelocation(&reloc_storage, reloc_addr);
-        reloc = &reloc_storage;
-      }
-      PrintRelocation(elf, ri, reloc, symbol_table_address,
+      ELFFormatReadRelocation(
+          elf->ops, reloc_section->header->type == SHT(rela),
+          &reloc_storage, reloc_addr);
+      PrintRelocation(elf, ri, &reloc_storage, symbol_table_address,
                      reloc_section, symtab, strtab);
       reloc_addr += reloc_section->header->entsize;
     }

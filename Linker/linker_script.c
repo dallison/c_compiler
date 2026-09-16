@@ -519,7 +519,8 @@ static uint64_t PageSizeForMachine(int machine) {
 
 static uint64_t SizeofHeadersForMachine(int machine) {
   bool elf64 = machine != ELF_MACHINE_TYPEW65C02 &&
-               machine != ELF_MACHINE_TYPE_ARM;
+               machine != ELF_MACHINE_TYPE_ARM &&
+               machine != ELF_MACHINE_TYPE_X86;
   return elf64 ? 64ull + 4ull * 56ull : 52ull + 4ull * 32ull;
 }
 
@@ -1960,6 +1961,31 @@ static const char kBuiltinX86_64Program[] =
     "  /DISCARD/ : { *(.comment .note .note.*) }\n"
     "}\n";
 
+static const char kBuiltinX86Program[] =
+    "PHDRS\n"
+    "{\n"
+    "  text PT_LOAD FLAGS(5);\n"
+    "  data PT_LOAD FLAGS(6);\n"
+    "  dynamic PT_DYNAMIC;\n"
+    "  interp PT_INTERP;\n"
+    "}\n"
+    "MEMORY\n"
+    "{\n"
+    "  text (rx) : ORIGIN = 0x08048000, LENGTH = 0\n"
+    "  data (rw) : ORIGIN = 0x09000000, LENGTH = 0\n"
+    "}\n"
+    "SECTIONS\n"
+    "{\n"
+    "  .text : {\n"
+    "    *(.text* .rodata* .davecc_stacktrace .eh_frame* .gcc_except_table)\n"
+    "  } > text :text\n"
+    "  .data : {\n"
+    "    *(.got .got.plt .data* .preinit_array* .init_array* .fini_array*)\n"
+    "  } > data :data\n"
+    "  .bss : { *(.bss* COMMON) } > data\n"
+    "  /DISCARD/ : { *(.comment .note .note.*) }\n"
+    "}\n";
+
 typedef struct {
   int machine;
   const char* type;
@@ -1974,6 +2000,7 @@ static const BuiltinScript kBuiltinScripts[] = {
     {ELF_MACHINE_TYPE_PCODE, "program", kBuiltinPcodeProgram},
     {ELF_MACHINE_TYPE_AARCH64, "program", kBuiltinAarch64Program},
     {ELF_MACHINE_TYPE_ARM, "program", kBuiltinArmProgram},
+    {ELF_MACHINE_TYPE_X86, "program", kBuiltinX86Program},
     {ELF_MACHINE_TYPE_X86_64, "program", kBuiltinX86_64Program},
 };
 

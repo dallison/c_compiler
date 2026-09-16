@@ -352,7 +352,9 @@ static void CollectRelocations(ELFReaderFile* elf, Vector* relocations) {
     size_t num_relocations = (size_t)(reltab->header->size / reltab->header->entsize);
     for (size_t i = 0; i < num_relocations; i++) {
       ELFRelocation elf_rel;
-      elf->ops->ReadRelocation(&elf_rel, rel);
+      ELFFormatReadRelocation(elf->ops,
+                              reltab->header->type == SHT(rela),
+                              &elf_rel, rel);
       rel += reltab->header->entsize;
       uint32_t symbol_index = ELF_R_SYM(elf_rel.info);
       if (symbol_index * symtab->header->entsize >= symtab->header->size) {

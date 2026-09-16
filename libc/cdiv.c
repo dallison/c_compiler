@@ -51,7 +51,8 @@ lldiv_t lldiv(long long int numer, long long int denom) {
 #endif
 }
 
-#if defined(__arm__) || (defined(__risc_v__) && defined(__ILP32__))
+#if defined(__arm__) || defined(__i386__) || \
+    (defined(__risc_v__) && defined(__ILP32__))
 // 32-bit ARM has no hardware 64-bit multiply, divide or modulo.  The code
 // generator lowers those operations into calls to the libgcc-style runtime
 // helpers below.  These implementations deliberately use only 64-bit add,
@@ -72,6 +73,32 @@ unsigned long long __muldi3(unsigned long long a, unsigned long long b) {
   }
   return result;
 }
+
+#if !defined(__risc_v__) || !defined(__ILP32__)
+unsigned long long __ashldi3(unsigned long long value, int count) {
+  count &= 63;
+  while (count-- != 0) {
+    value <<= 1;
+  }
+  return value;
+}
+
+unsigned long long __lshrdi3(unsigned long long value, int count) {
+  count &= 63;
+  while (count-- != 0) {
+    value >>= 1;
+  }
+  return value;
+}
+
+long long __ashrdi3(long long value, int count) {
+  count &= 63;
+  while (count-- != 0) {
+    value >>= 1;
+  }
+  return value;
+}
+#endif
 
 // Unsigned 64-bit division returning the quotient and, optionally, the
 // remainder.  Classic restoring shift/subtract long division.
@@ -252,5 +279,5 @@ unsigned long long __davecc_double_to_u64(double value) {
   return magnitude;
 }
 #endif
-#endif  // __arm__ || RV32 ILP32
+#endif  // __arm__ || __i386__ || RV32 ILP32
 

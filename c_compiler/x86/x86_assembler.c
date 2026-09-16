@@ -1,11 +1,12 @@
 //
-//  x86_64_assembler.c
+//  x86_assembler.c
 //  c_compiler
 //
-//  AT&T-syntax x86_64 assembler using the generic ELF assembler driver.
+//  AT&T-syntax x86 assembler using the generic ELF assembler driver.
 //
 
-#include "x86_64_assembler.h"
+#include "x86_assembler.h"
+#include "x86_profile.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -16,7 +17,7 @@
 
 #include "elf.h"
 #include "map.h"
-#include "x86_64_machine.h"
+#include "x86_machine.h"
 
 typedef enum {
   kX86Size8 = 1,
@@ -54,7 +55,7 @@ typedef struct {
 } X86Op;
 
 typedef struct {
-  X86_64Assembler* assembler;
+  X86Assembler* assembler;
   uint8_t bytes[16];
   size_t len;
   int rex;
@@ -83,7 +84,7 @@ static int CompareString(const void* a, const void* b) {
   return strcmp(s1->key.p, s2->key.p);
 }
 
-static AssemblerSymbol* GetOrCreateSymbol(X86_64Assembler* assembler,
+static AssemblerSymbol* GetOrCreateSymbol(X86Assembler* assembler,
                                           const char* name) {
   AssemblerSymbol* sym = AssemblerFindSymbol(&assembler->base, name);
   if (sym == NULL) {
@@ -95,7 +96,7 @@ static AssemblerSymbol* GetOrCreateSymbol(X86_64Assembler* assembler,
   return sym;
 }
 
-static void EncodeInit(X86Encode* enc, X86_64Assembler* assembler) {
+static void EncodeInit(X86Encode* enc, X86Assembler* assembler) {
   enc->assembler = assembler;
   enc->len = 0;
   enc->rex = -1;
@@ -120,6 +121,9 @@ static void EncodeLegacyPrefix(X86Encode* enc, uint8_t byte) {
 }
 
 static void SetRexW(X86Encode* enc) {
+  if (!enc->assembler->profile->supports_rex) {
+    return;
+  }
   if (enc->rex < 0) {
     enc->rex = 0x40;
   }
@@ -127,6 +131,12 @@ static void SetRexW(X86Encode* enc) {
 }
 
 static void SetRexR(X86Encode* enc, int reg) {
+  if (!enc->assembler->profile->supports_rex) {
+    if (reg & 8) {
+      AssemblerError(&enc->assembler->base, "Register r8-r15 not available in i386 mode");
+    }
+    return;
+  }
   if (enc->rex < 0) {
     enc->rex = 0x40;
   }
@@ -136,6 +146,12 @@ static void SetRexR(X86Encode* enc, int reg) {
 }
 
 static void SetRexX(X86Encode* enc, int index) {
+  if (!enc->assembler->profile->supports_rex) {
+    if (index & 8) {
+      AssemblerError(&enc->assembler->base, "Register r8-r15 not available in i386 mode");
+    }
+    return;
+  }
   if (enc->rex < 0) {
     enc->rex = 0x40;
   }
@@ -145,6 +161,12 @@ static void SetRexX(X86Encode* enc, int index) {
 }
 
 static void SetRexB(X86Encode* enc, int rm) {
+  if (!enc->assembler->profile->supports_rex) {
+    if (rm & 8) {
+      AssemblerError(&enc->assembler->base, "Register r8-r15 not available in i386 mode");
+    }
+    return;
+  }
   if (enc->rex < 0) {
     enc->rex = 0x40;
   }
@@ -300,7 +322,7 @@ static bool ParseRegSuffix(const char* name, size_t len, X86Reg* reg) {
 #define ASM assembler->base
 #define ASMO (assembler->base.object)
 
-static bool ParseRegister(X86_64Assembler* assembler, X86Reg* reg,
+static bool ParseRegister(X86Assembler* assembler, X86Reg* reg,
                           bool allow_rip, bool* is_rip) {
   if (is_rip != NULL) {
     *is_rip = false;
@@ -336,7 +358,7 @@ static bool ParseRegister(X86_64Assembler* assembler, X86Reg* reg,
   return true;
 }
 
-static bool ParseMemoryTail(X86_64Assembler* assembler, X86Op* op) {
+static bool ParseMemoryTail(X86Assembler* assembler, X86Op* op) {
   if (!LexMatch(&ASM.lex, TOK(lparen))) {
     AssemblerError(&ASM, "Expected ( in memory operand");
     return false;
@@ -395,7 +417,18 @@ static void InitMemOp(X86Op* op) {
   op->reloc_type = 0;
 }
 
-static bool ParseBareSymbolImmediate(X86_64Assembler* assembler, X86Op* op) {
+static int X86DefaultAbsReloc(const X86Profile* profile) {
+  return profile->is_64bit ? R_X86_64_64 : R_386_32;
+}
+
+static int X86DefaultPcReloc(const X86Profile* profile, bool is_call) {
+  if (!profile->is_64bit) {
+    return R_386_PC32;
+  }
+  return is_call ? R_X86_64_PLT32 : R_X86_64_PC32;
+}
+
+static bool ParseBareSymbolImmediate(X86Assembler* assembler, X86Op* op) {
   String symbol_name;
   String suffix;
   StringInit(&symbol_name, NULL);
@@ -405,9 +438,20 @@ static bool ParseBareSymbolImmediate(X86_64Assembler* assembler, X86Op* op) {
   op->imm = 0;
   op->sym = GetOrCreateSymbol(assembler, symbol_name.value);
   op->sym_known = false;
-  op->reloc_type = R_X86_64_64;
-  if (StringEqual(&suffix, "TPOFF")) {
-    op->reloc_type = R_X86_64_TPOFF64;
+  op->reloc_type = X86DefaultAbsReloc(assembler->profile);
+  if (!assembler->profile->is_64bit &&
+      StringEqual(&symbol_name, "_GLOBAL_OFFSET_TABLE_")) {
+    op->reloc_type = R_386_GOTPC;
+    op->imm = 3;
+  } else if (StringEqual(&suffix, "TPOFF")) {
+    op->reloc_type =
+        assembler->profile->is_64bit ? R_X86_64_TPOFF64 : R_386_32;
+  } else if (!assembler->profile->is_64bit &&
+             StringEqual(&suffix, "GOTPC")) {
+    op->reloc_type = R_386_GOTPC;
+    // The PIC sequence emitted by the i386 backend obtains the address of
+    // its local pop instruction.  The relocation field is three bytes later.
+    op->imm = 3;
   } else if (suffix.length > 0) {
     AssemblerError(&ASM, "Unsupported symbol suffix '@%s'", suffix.value);
     StringDestruct(&symbol_name);
@@ -420,7 +464,7 @@ static bool ParseBareSymbolImmediate(X86_64Assembler* assembler, X86Op* op) {
   return true;
 }
 
-static bool ParseSegmentOverrideFromCurrent(X86_64Assembler* assembler,
+static bool ParseSegmentOverrideFromCurrent(X86Assembler* assembler,
                                             int* segment_prefix) {
   if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
     return false;
@@ -442,14 +486,14 @@ static bool ParseSegmentOverrideFromCurrent(X86_64Assembler* assembler,
   return true;
 }
 
-static bool ParseSegmentOverride(X86_64Assembler* assembler, int* segment_prefix) {
+static bool ParseSegmentOverride(X86Assembler* assembler, int* segment_prefix) {
   if (!LexMatch(&ASM.lex, TOK(percent))) {
     return false;
   }
   return ParseSegmentOverrideFromCurrent(assembler, segment_prefix);
 }
 
-static bool ParseMemory(X86_64Assembler* assembler, X86Op* op) {
+static bool ParseMemory(X86Assembler* assembler, X86Op* op) {
   InitMemOp(op);
 
   if (LexLookingAt(&ASM.lex, TOK(percent))) {
@@ -486,6 +530,9 @@ static bool ParseMemory(X86_64Assembler* assembler, X86Op* op) {
     op->sym_value = op->sym->value;
     if (StringEqual(&suffix, "TPOFF")) {
       op->reloc_type = R_X86_64_TPOFF32;
+    } else if (!assembler->profile->is_64bit &&
+               StringEqual(&suffix, "GOT")) {
+      op->reloc_type = R_386_GOT32;
     } else if (StringEqual(&suffix, "GOTPCREL")) {
       op->reloc_type = R_X86_64_GOTPCREL;
     } else if (StringEqual(&suffix, "TLSGD")) {
@@ -508,7 +555,7 @@ static bool ParseMemory(X86_64Assembler* assembler, X86Op* op) {
   return ParseMemoryTail(assembler, op);
 }
 
-static bool ParseOperand(X86_64Assembler* assembler, X86Op* op) {
+static bool ParseOperand(X86Assembler* assembler, X86Op* op) {
   memset(op, 0, sizeof(*op));
 
   if (LexLookingAt(&ASM.lex, TOK(number))) {
@@ -571,7 +618,7 @@ static bool ParseOperand(X86_64Assembler* assembler, X86Op* op) {
   return false;
 }
 
-static bool ExpectComma(X86_64Assembler* assembler) {
+static bool ExpectComma(X86Assembler* assembler) {
   if (!LexMatch(&ASM.lex, TOK(comma))) {
     AssemblerError(&ASM, "Expected comma");
     return false;
@@ -602,6 +649,29 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
     return;
   }
   if (mem->rip_relative || (mem->base.num < 0 && mem->sym != NULL)) {
+    if (!enc->assembler->profile->supports_rex) {
+      EncodeModRM(enc, 0, reg_field, 5);
+      enc->disp_pos = enc->len;
+      enc->disp_size = 4;
+      if (mem->sym != NULL &&
+          (!mem->sym_known || mem->reloc_type != 0)) {
+        // ELF32 uses REL, so the addend belongs in the relocated field.
+        EncodeDisp(enc, 4, (int32_t)mem->disp);
+        int reloc_type =
+            mem->reloc_type != 0 ? mem->reloc_type : R_386_32;
+        int32_t disp_offset = (int32_t)(AssemblerCurrentAddress(base) +
+                                        enc->num_prefixes + enc->len);
+        AssemblerRelocation* reloc = NewAssemblerRelocation(
+            mem->sym, reloc_type, base->object.current_section, disp_offset,
+            0);
+        AssemblerAddRelocation(base, reloc);
+      } else {
+        int64_t target =
+            mem->sym_known ? mem->sym_value + mem->disp : mem->disp;
+        EncodeDisp(enc, 4, (int32_t)target);
+      }
+      return;
+    }
     SetRexW(enc);
     EncodeModRM(enc, 0, reg_field, 5);
     enc->disp_pos = enc->len;
@@ -640,7 +710,8 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
   int64_t disp = mem->disp;
   if (mem->sym != NULL &&
       (mem->reloc_type == R_X86_64_TPOFF64 ||
-       mem->reloc_type == R_X86_64_TPOFF32)) {
+       mem->reloc_type == R_X86_64_TPOFF32 ||
+       mem->reloc_type == R_386_GOT32)) {
     if (base_reg < 0) {
       AssemblerError(&enc->assembler->base,
                      "TPOFF memory operand requires a base register");
@@ -655,15 +726,15 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
     }
     enc->disp_pos = enc->len;
     enc->disp_size = 4;
-    for (int i = 0; i < 4; i++) {
-      EncodeByte(enc, 0);
-    }
+    int32_t in_place_addend =
+        enc->assembler->profile->uses_rela ? 0 : (int32_t)mem->disp;
+    EncodeDisp(enc, 4, in_place_addend);
     int64_t next_ip = AssemblerCurrentAddress(base) + enc->num_prefixes +
                       (enc->rex >= 0 ? 1 : 0) + enc->len + enc->tail_bytes;
     int32_t disp_offset = (int32_t)(next_ip - 4);
     AssemblerRelocation* reloc = NewAssemblerRelocation(
         mem->sym, mem->reloc_type, base->object.current_section, disp_offset,
-        (int32_t)mem->disp);
+        enc->assembler->profile->uses_rela ? (int32_t)mem->disp : 0);
     AssemblerAddRelocation(base, reloc);
     return;
   }
@@ -715,7 +786,7 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
 }
 
 static void EncodeRegOperand(X86Encode* enc, int reg_field, const X86Reg* reg);
-static void EmitMovqXmmParsed(X86_64Assembler* assembler, const X86Op* src,
+static void EmitMovqXmmParsed(X86Assembler* assembler, const X86Op* src,
                               const X86Op* dst);
 
 static void EncodeRegOperand(X86Encode* enc, int reg_field, const X86Reg* reg) {
@@ -764,7 +835,7 @@ static void EmitOpcodeBytes(X86Encode* enc, uint8_t prefix66, uint8_t prefix_f2,
   EncodeByte(enc, opcode);
 }
 
-static void EmitALURegImm(X86_64Assembler* assembler, int op_ext, X86Size size,
+static void EmitALURegImm(X86Assembler* assembler, int op_ext, X86Size size,
                           const X86Reg* dst, int64_t imm) {
   X86Encode enc;
   EncodeInit(&enc, assembler);
@@ -798,7 +869,7 @@ static void EmitALURegImm(X86_64Assembler* assembler, int op_ext, X86Size size,
 // access width, so the operand size of a mov comes from the mnemonic
 // (movb/movw/movl/movq), not from the register operand.  force_bits selects
 // that size (0 means use the register's own size, i.e. 64-bit names -> 64).
-static void EmitMovSized(X86_64Assembler* assembler, int force_bits) {
+static void EmitMovSized(X86Assembler* assembler, int force_bits) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -842,7 +913,8 @@ static void EmitMovSized(X86_64Assembler* assembler, int force_bits) {
         int offset = (int32_t)(AssemblerCurrentAddress(&ASM) - enc.imm_size);
         AssemblerRelocation* reloc = NewAssemblerRelocation(
             src.sym,
-            src.reloc_type != 0 ? src.reloc_type : R_X86_64_64,
+            src.reloc_type != 0 ? src.reloc_type
+                                : X86DefaultAbsReloc(assembler->profile),
             ASMO.current_section, offset, 0);
         AssemblerAddRelocation(&ASM, reloc);
         return;
@@ -859,6 +931,22 @@ static void EmitMovSized(X86_64Assembler* assembler, int force_bits) {
         EncodeImm(&enc, 8, src.imm);
       }
     } else if (reg.size == kX86Size32) {
+      if (src.sym != NULL) {
+        EncodeByte(&enc, 0xc7);
+        EncodeRegOperand(&enc, 0, &reg);
+        enc.imm_pos = enc.len;
+        enc.imm_size = 4;
+        EncodeImm(&enc, 4, 0);
+        EncodeFinish(&enc);
+        int offset = (int32_t)(AssemblerCurrentAddress(&ASM) - enc.imm_size);
+        AssemblerRelocation* reloc = NewAssemblerRelocation(
+            src.sym,
+            src.reloc_type != 0 ? src.reloc_type
+                                : X86DefaultAbsReloc(assembler->profile),
+            ASMO.current_section, offset, 0);
+        AssemblerAddRelocation(&ASM, reloc);
+        return;
+      }
       EncodeByte(&enc, 0xc7);
       EncodeRegOperand(&enc, 0, &reg);
       EncodeImm(&enc, 4, src.imm);
@@ -941,7 +1029,7 @@ static void EmitMovSized(X86_64Assembler* assembler, int force_bits) {
   AssemblerError(&ASM, "Unsupported mov operand combination");
 }
 
-static COMPILER_UNUSED void EmitMov(X86_64Assembler* assembler) {
+static COMPILER_UNUSED void EmitMov(X86Assembler* assembler) {
   EmitMovSized(assembler, 0);
 }
 
@@ -949,7 +1037,7 @@ static COMPILER_UNUSED void EmitMov(X86_64Assembler* assembler) {
 //   0F B6 movzbl/q, 0F BE movsbl/q, 0F B7 movzwl/q, 0F BF movswl/q.
 // The destination is always a (64-bit named) register; the source is a byte or
 // word in memory or a register.
-static void EmitMovExtend(X86_64Assembler* assembler, uint8_t opcode) {
+static void EmitMovExtend(X86Assembler* assembler, uint8_t opcode) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -978,7 +1066,7 @@ static void EmitMovExtend(X86_64Assembler* assembler, uint8_t opcode) {
   EncodeFinish(&enc);
 }
 
-static void EmitPushPop(X86_64Assembler* assembler, bool is_push) {
+static void EmitPushPop(X86Assembler* assembler, bool is_push) {
   X86Op op;
   if (!ParseOperand(assembler, &op) || op.kind != kX86OpReg) {
     AssemblerError(&ASM, "%s expects a register operand",
@@ -1004,7 +1092,7 @@ static void EmitPushPop(X86_64Assembler* assembler, bool is_push) {
   EncodeFinish(&enc);
 }
 
-static void EmitALU(X86_64Assembler* assembler, int reg_opcode, int op_ext,
+static void EmitALU(X86Assembler* assembler, int reg_opcode, int op_ext,
                     int force_bits) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
@@ -1021,6 +1109,25 @@ static void EmitALU(X86_64Assembler* assembler, int reg_opcode, int op_ext,
   }
 
   if (dst.kind == kX86OpReg && src.kind == kX86OpImm) {
+    if (src.sym != NULL) {
+      if (src.reloc_type != R_386_GOTPC ||
+          dst.reg.size != kX86Size32) {
+        AssemblerError(&ASM, "Unsupported symbolic ALU immediate");
+        return;
+      }
+      X86Encode enc;
+      EncodeInit(&enc, assembler);
+      EncodeByte(&enc, 0x81);
+      EncodeRegOperand(&enc, op_ext, &dst.reg);
+      EncodeImm(&enc, 4, src.imm);
+      EncodeFinish(&enc);
+      int32_t offset =
+          (int32_t)(AssemblerCurrentAddress(&ASM) - sizeof(int32_t));
+      AssemblerRelocation* reloc = NewAssemblerRelocation(
+          src.sym, src.reloc_type, ASMO.current_section, offset, 0);
+      AssemblerAddRelocation(&ASM, reloc);
+      return;
+    }
     EmitALURegImm(assembler, op_ext, dst.reg.size, &dst.reg, src.imm);
     return;
   }
@@ -1062,7 +1169,7 @@ static void EmitALU(X86_64Assembler* assembler, int reg_opcode, int op_ext,
   AssemblerError(&ASM, "Unsupported ALU operand combination");
 }
 
-static void EmitCmp(X86_64Assembler* assembler) {
+static void EmitCmp(X86Assembler* assembler) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1105,7 +1212,7 @@ static void EmitCmp(X86_64Assembler* assembler) {
   AssemblerError(&ASM, "Unsupported cmp operand combination");
 }
 
-static void EmitLea(X86_64Assembler* assembler) {
+static void EmitLea(X86Assembler* assembler) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1125,7 +1232,7 @@ static void EmitLea(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
-static void EmitBranch(X86_64Assembler* assembler, int opcode, bool is_call) {
+static void EmitBranch(X86Assembler* assembler, int opcode, bool is_call) {
   int32_t start = (int32_t)AssemblerCurrentAddress(&ASM);
   bool known = false;
   int64_t target = 0;
@@ -1154,22 +1261,26 @@ static void EmitBranch(X86_64Assembler* assembler, int opcode, bool is_call) {
   }
 
   size_t total_len = (enc.rex >= 0 ? 1 : 0) + enc.len + 4;
-  int32_t rel =
-      known ? (int32_t)(target - (start + (int32_t)total_len)) : 0;
+  int32_t rel = known ? (int32_t)(target - (start + (int32_t)total_len))
+                      : (assembler->profile->is_64bit ? 0 : -4);
   enc.disp_pos = enc.len;
   EncodeDisp(&enc, 4, rel);
   EncodeFinish(&enc);
 
   if (!known && sym != NULL) {
-    int reloc_type = is_call ? R_X86_64_PLT32 : R_X86_64_PC32;
+    int reloc_type = X86DefaultPcReloc(assembler->profile, is_call);
+    if (!assembler->profile->is_64bit && is_call && ASMO.pic) {
+      reloc_type = R_386_PLT32;
+    }
+    int32_t addend = assembler->profile->is_64bit ? -4 : 0;
     AssemblerRelocation* reloc = NewAssemblerRelocation(
         sym, reloc_type, ASMO.current_section,
-        (int32_t)(start + (enc.rex >= 0 ? 1 : 0) + enc.disp_pos), -4);
+        (int32_t)(start + (enc.rex >= 0 ? 1 : 0) + enc.disp_pos), addend);
     AssemblerAddRelocation(&ASM, reloc);
   }
 }
 
-static void EmitMovabs(X86_64Assembler* assembler) {
+static void EmitMovabs(X86Assembler* assembler) {
   X86Op imm, dst;
   if (!ParseOperand(assembler, &imm) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1192,7 +1303,8 @@ static void EmitMovabs(X86_64Assembler* assembler) {
     int offset = (int32_t)(AssemblerCurrentAddress(&ASM) - enc.imm_size);
     AssemblerRelocation* reloc = NewAssemblerRelocation(
         imm.sym,
-        imm.reloc_type != 0 ? imm.reloc_type : R_X86_64_64,
+        imm.reloc_type != 0 ? imm.reloc_type
+                            : X86DefaultAbsReloc(assembler->profile),
         ASMO.current_section, offset, 0);
     AssemblerAddRelocation(&ASM, reloc);
     return;
@@ -1204,7 +1316,7 @@ static void EmitMovabs(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
-static void EmitShift(X86_64Assembler* assembler, int op_ext, X86Size size) {
+static void EmitShift(X86Assembler* assembler, int op_ext, X86Size size) {
   X86Op count, dst;
   if (!ParseOperand(assembler, &count) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1251,7 +1363,7 @@ static void EmitShift(X86_64Assembler* assembler, int op_ext, X86Size size) {
   EncodeFinish(&enc);
 }
 
-static void EmitBitScan(X86_64Assembler* assembler, uint8_t opcode,
+static void EmitBitScan(X86Assembler* assembler, uint8_t opcode,
                         X86Size size) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
@@ -1281,7 +1393,7 @@ static void EmitBitScan(X86_64Assembler* assembler, uint8_t opcode,
   EncodeFinish(&enc);
 }
 
-static void EmitUnary(X86_64Assembler* assembler, int op_ext, X86Size size) {
+static void EmitUnary(X86Assembler* assembler, int op_ext, X86Size size) {
   X86Op dst;
   if (!ParseOperand(assembler, &dst)) {
     return;
@@ -1304,7 +1416,7 @@ static void EmitUnary(X86_64Assembler* assembler, int op_ext, X86Size size) {
   EncodeFinish(&enc);
 }
 
-static void EmitImul(X86_64Assembler* assembler, X86Size size) {
+static void EmitImul(X86Assembler* assembler, X86Size size) {
   X86Op op1, op2, op3;
   if (!ParseOperand(assembler, &op1)) {
     return;
@@ -1362,7 +1474,7 @@ static void EmitImul(X86_64Assembler* assembler, X86Size size) {
   EncodeFinish(&enc);
 }
 
-static void EmitDivOp(X86_64Assembler* assembler, int op_ext, X86Size size) {
+static void EmitDivOp(X86Assembler* assembler, int op_ext, X86Size size) {
   X86Op divisor;
   if (!ParseOperand(assembler, &divisor)) {
     return;
@@ -1385,7 +1497,7 @@ static void EmitDivOp(X86_64Assembler* assembler, int op_ext, X86Size size) {
   EncodeFinish(&enc);
 }
 
-static void EmitTest(X86_64Assembler* assembler, X86Size size) {
+static void EmitTest(X86Assembler* assembler, X86Size size) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1409,7 +1521,7 @@ static void EmitTest(X86_64Assembler* assembler, X86Size size) {
   EncodeFinish(&enc);
 }
 
-static void EmitSetcc(X86_64Assembler* assembler, int opcode) {
+static void EmitSetcc(X86Assembler* assembler, int opcode) {
   X86Op dst;
   if (!ParseOperand(assembler, &dst) || dst.kind != kX86OpReg ||
       dst.reg.is_xmm) {
@@ -1426,7 +1538,7 @@ static void EmitSetcc(X86_64Assembler* assembler, int opcode) {
   EncodeFinish(&enc);
 }
 
-static void EmitNoOperands(X86_64Assembler* assembler, bool rex_w, uint8_t opcode) {
+static void EmitNoOperands(X86Assembler* assembler, bool rex_w, uint8_t opcode) {
   X86Encode enc;
   EncodeInit(&enc, assembler);
   if (rex_w) {
@@ -1436,7 +1548,7 @@ static void EmitNoOperands(X86_64Assembler* assembler, bool rex_w, uint8_t opcod
   EncodeFinish(&enc);
 }
 
-static void EmitIndirectCall(X86_64Assembler* assembler) {
+static void EmitIndirectCall(X86Assembler* assembler) {
   (void)LexMatch(&ASM.lex, TOK(star));
   X86Op target;
   if (!ParseOperand(assembler, &target)) {
@@ -1457,7 +1569,7 @@ static void EmitIndirectCall(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
-static void EmitIndirectJmp(X86_64Assembler* assembler) {
+static void EmitIndirectJmp(X86Assembler* assembler) {
   (void)LexMatch(&ASM.lex, TOK(star));
   X86Op target;
   if (!ParseOperand(assembler, &target)) {
@@ -1478,7 +1590,7 @@ static void EmitIndirectJmp(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
-static void EmitSSE(X86_64Assembler* assembler, uint8_t prefix66, uint8_t prefix_f2,
+static void EmitSSE(X86Assembler* assembler, uint8_t prefix66, uint8_t prefix_f2,
                     uint8_t prefix_f3, uint8_t opcode, bool int_dst) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
@@ -1518,7 +1630,7 @@ static void EmitSSE(X86_64Assembler* assembler, uint8_t prefix66, uint8_t prefix
   EncodeFinish(&enc);
 }
 
-static void EmitSSEMove(X86_64Assembler* assembler, uint8_t prefix_f2,
+static void EmitSSEMove(X86Assembler* assembler, uint8_t prefix_f2,
                         uint8_t prefix_f3, bool store) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
@@ -1556,7 +1668,7 @@ static void EmitSSEMove(X86_64Assembler* assembler, uint8_t prefix_f2,
   EncodeFinish(&enc);
 }
 
-static void Assemble_movdqu(X86_64Assembler* assembler) {
+static void Assemble_movdqu(X86Assembler* assembler) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1585,7 +1697,7 @@ static void Assemble_movdqu(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
-static void EmitMovdParsed(X86_64Assembler* assembler, const X86Op* src,
+static void EmitMovdParsed(X86Assembler* assembler, const X86Op* src,
                            const X86Op* dst, bool gpr_to_xmm) {
   X86Encode enc;
   EncodeInit(&enc, assembler);
@@ -1618,7 +1730,7 @@ static void EmitMovdParsed(X86_64Assembler* assembler, const X86Op* src,
   EncodeFinish(&enc);
 }
 
-static void EmitMovqXmmParsed(X86_64Assembler* assembler, const X86Op* src,
+static void EmitMovqXmmParsed(X86Assembler* assembler, const X86Op* src,
                               const X86Op* dst) {
   if (src->kind == kX86OpImm && src->sym == NULL &&
       dst->kind == kX86OpReg && dst->reg.is_xmm) {
@@ -1679,7 +1791,7 @@ static void EmitMovqXmmParsed(X86_64Assembler* assembler, const X86Op* src,
   EncodeFinish(&enc);
 }
 
-static void EmitMovqXmm(X86_64Assembler* assembler) {
+static void EmitMovqXmm(X86Assembler* assembler) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1688,7 +1800,7 @@ static void EmitMovqXmm(X86_64Assembler* assembler) {
   EmitMovqXmmParsed(assembler, &src, &dst);
 }
 
-static void EmitFnegSs(X86_64Assembler* assembler) {
+static void EmitFnegSs(X86Assembler* assembler) {
   X86Op dst;
   if (!ParseOperand(assembler, &dst) || dst.kind != kX86OpReg || !dst.reg.is_xmm) {
     AssemblerError(&ASM, "fneg_ss expects XMM destination/source");
@@ -1701,7 +1813,7 @@ static void EmitFnegSs(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
-static void EmitFnegSd(X86_64Assembler* assembler) {
+static void EmitFnegSd(X86Assembler* assembler) {
   X86Op dst;
   if (!ParseOperand(assembler, &dst) || dst.kind != kX86OpReg || !dst.reg.is_xmm) {
     AssemblerError(&ASM, "fneg_sd expects XMM destination/source");
@@ -1714,57 +1826,65 @@ static void EmitFnegSd(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
-static void Assemble_movw(X86_64Assembler* assembler) { EmitMovSized(assembler, 16); }
-static void Assemble_movabs(X86_64Assembler* assembler) { EmitMovabs(assembler); }
-static void Assemble_andq(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4, 64); }
-static void Assemble_orq(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1, 64); }
-static void Assemble_xorq(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6, 64); }
-static void Assemble_xorl(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6, 32); }
-static void Assemble_addl(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0, 32); }
-static void Assemble_subl(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5, 32); }
-static void Assemble_cmpb(X86_64Assembler* assembler) { EmitCmp(assembler); }
-static void Assemble_cmpl(X86_64Assembler* assembler) { EmitCmp(assembler); }
-static void Assemble_cmpw(X86_64Assembler* assembler) { EmitCmp(assembler); }
-static void Assemble_test(X86_64Assembler* assembler) { EmitTest(assembler, kX86Size64); }
-static void Assemble_testq(X86_64Assembler* assembler) { EmitTest(assembler, kX86Size64); }
-static void Assemble_testl(X86_64Assembler* assembler) { EmitTest(assembler, kX86Size32); }
-static void Assemble_not(X86_64Assembler* assembler) { EmitUnary(assembler, 2, kX86Size64); }
-static void Assemble_notq(X86_64Assembler* assembler) { EmitUnary(assembler, 2, kX86Size64); }
-static void Assemble_neg(X86_64Assembler* assembler) { EmitUnary(assembler, 3, kX86Size64); }
-static void Assemble_negq(X86_64Assembler* assembler) { EmitUnary(assembler, 3, kX86Size64); }
-static void Assemble_imul(X86_64Assembler* assembler) { EmitImul(assembler, kX86Size64); }
-static void Assemble_imulq(X86_64Assembler* assembler) { EmitImul(assembler, kX86Size64); }
-static void Assemble_imull(X86_64Assembler* assembler) { EmitImul(assembler, kX86Size32); }
-static void Assemble_idiv(X86_64Assembler* assembler) { EmitDivOp(assembler, 7, kX86Size64); }
-static void Assemble_idivq(X86_64Assembler* assembler) { EmitDivOp(assembler, 7, kX86Size64); }
-static void Assemble_idivl(X86_64Assembler* assembler) { EmitDivOp(assembler, 7, kX86Size32); }
-static void Assemble_div(X86_64Assembler* assembler) { EmitDivOp(assembler, 6, kX86Size64); }
-static void Assemble_divq(X86_64Assembler* assembler) { EmitDivOp(assembler, 6, kX86Size64); }
-static void Assemble_divl(X86_64Assembler* assembler) { EmitDivOp(assembler, 6, kX86Size32); }
-static void Assemble_shlq(X86_64Assembler* assembler) { EmitShift(assembler, 4, kX86Size64); }
-static void Assemble_shrq(X86_64Assembler* assembler) { EmitShift(assembler, 5, kX86Size64); }
-static void Assemble_sarq(X86_64Assembler* assembler) { EmitShift(assembler, 7, kX86Size64); }
-static void Assemble_shll(X86_64Assembler* assembler) { EmitShift(assembler, 4, kX86Size32); }
-static void Assemble_shrl(X86_64Assembler* assembler) { EmitShift(assembler, 5, kX86Size32); }
-static void Assemble_sarl(X86_64Assembler* assembler) { EmitShift(assembler, 7, kX86Size32); }
-static void Assemble_shl(X86_64Assembler* assembler) { EmitShift(assembler, 4, kX86Size64); }
-static void Assemble_shr(X86_64Assembler* assembler) { EmitShift(assembler, 5, kX86Size64); }
-static void Assemble_sar(X86_64Assembler* assembler) { EmitShift(assembler, 7, kX86Size64); }
-static void Assemble_rolq(X86_64Assembler* assembler) { EmitShift(assembler, 0, kX86Size64); }
-static void Assemble_rorq(X86_64Assembler* assembler) { EmitShift(assembler, 1, kX86Size64); }
-static void Assemble_roll(X86_64Assembler* assembler) { EmitShift(assembler, 0, kX86Size32); }
-static void Assemble_rorl(X86_64Assembler* assembler) { EmitShift(assembler, 1, kX86Size32); }
-static void Assemble_bsfq(X86_64Assembler* assembler) { EmitBitScan(assembler, 0xbc, kX86Size64); }
-static void Assemble_bsrq(X86_64Assembler* assembler) { EmitBitScan(assembler, 0xbd, kX86Size64); }
-static void Assemble_bsfl(X86_64Assembler* assembler) { EmitBitScan(assembler, 0xbc, kX86Size32); }
-static void Assemble_bsrl(X86_64Assembler* assembler) { EmitBitScan(assembler, 0xbd, kX86Size32); }
-static void Assemble_sete(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x94); }
-static void Assemble_setne(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x95); }
-static void Assemble_setl(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x9c); }
-static void Assemble_setb(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x92); }
-static void Assemble_setg(X86_64Assembler* assembler) { EmitSetcc(assembler, 0x9f); }
+static void Assemble_movw(X86Assembler* assembler) { EmitMovSized(assembler, 16); }
+static void Assemble_movabs(X86Assembler* assembler) { EmitMovabs(assembler); }
+static void Assemble_andq(X86Assembler* assembler) { EmitALU(assembler, 0x21, 4, 64); }
+static void Assemble_andl(X86Assembler* assembler) { EmitALU(assembler, 0x21, 4, 32); }
+static void Assemble_orq(X86Assembler* assembler) { EmitALU(assembler, 0x09, 1, 64); }
+static void Assemble_orl(X86Assembler* assembler) { EmitALU(assembler, 0x09, 1, 32); }
+static void Assemble_xorq(X86Assembler* assembler) { EmitALU(assembler, 0x31, 6, 64); }
+static void Assemble_xorl(X86Assembler* assembler) { EmitALU(assembler, 0x31, 6, 32); }
+static void Assemble_addl(X86Assembler* assembler) { EmitALU(assembler, 0x01, 0, 32); }
+static void Assemble_adcl(X86Assembler* assembler) { EmitALU(assembler, 0x11, 2, 32); }
+static void Assemble_subl(X86Assembler* assembler) { EmitALU(assembler, 0x29, 5, 32); }
+static void Assemble_sbbl(X86Assembler* assembler) { EmitALU(assembler, 0x19, 3, 32); }
+static void Assemble_cmpb(X86Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_cmpl(X86Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_cmpw(X86Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_test(X86Assembler* assembler) { EmitTest(assembler, kX86Size64); }
+static void Assemble_testq(X86Assembler* assembler) { EmitTest(assembler, kX86Size64); }
+static void Assemble_testl(X86Assembler* assembler) { EmitTest(assembler, kX86Size32); }
+static void Assemble_not(X86Assembler* assembler) { EmitUnary(assembler, 2, kX86Size64); }
+static void Assemble_notq(X86Assembler* assembler) { EmitUnary(assembler, 2, kX86Size64); }
+static void Assemble_notl(X86Assembler* assembler) { EmitUnary(assembler, 2, kX86Size32); }
+static void Assemble_neg(X86Assembler* assembler) { EmitUnary(assembler, 3, kX86Size64); }
+static void Assemble_negq(X86Assembler* assembler) { EmitUnary(assembler, 3, kX86Size64); }
+static void Assemble_negl(X86Assembler* assembler) { EmitUnary(assembler, 3, kX86Size32); }
+static void Assemble_imul(X86Assembler* assembler) { EmitImul(assembler, kX86Size64); }
+static void Assemble_imulq(X86Assembler* assembler) { EmitImul(assembler, kX86Size64); }
+static void Assemble_imull(X86Assembler* assembler) { EmitImul(assembler, kX86Size32); }
+static void Assemble_idiv(X86Assembler* assembler) { EmitDivOp(assembler, 7, kX86Size64); }
+static void Assemble_idivq(X86Assembler* assembler) { EmitDivOp(assembler, 7, kX86Size64); }
+static void Assemble_idivl(X86Assembler* assembler) { EmitDivOp(assembler, 7, kX86Size32); }
+static void Assemble_div(X86Assembler* assembler) { EmitDivOp(assembler, 6, kX86Size64); }
+static void Assemble_divq(X86Assembler* assembler) { EmitDivOp(assembler, 6, kX86Size64); }
+static void Assemble_divl(X86Assembler* assembler) { EmitDivOp(assembler, 6, kX86Size32); }
+static void Assemble_shlq(X86Assembler* assembler) { EmitShift(assembler, 4, kX86Size64); }
+static void Assemble_shrq(X86Assembler* assembler) { EmitShift(assembler, 5, kX86Size64); }
+static void Assemble_sarq(X86Assembler* assembler) { EmitShift(assembler, 7, kX86Size64); }
+static void Assemble_shll(X86Assembler* assembler) { EmitShift(assembler, 4, kX86Size32); }
+static void Assemble_shrl(X86Assembler* assembler) { EmitShift(assembler, 5, kX86Size32); }
+static void Assemble_sarl(X86Assembler* assembler) { EmitShift(assembler, 7, kX86Size32); }
+static void Assemble_shl(X86Assembler* assembler) { EmitShift(assembler, 4, kX86Size64); }
+static void Assemble_shr(X86Assembler* assembler) { EmitShift(assembler, 5, kX86Size64); }
+static void Assemble_sar(X86Assembler* assembler) { EmitShift(assembler, 7, kX86Size64); }
+static void Assemble_rolq(X86Assembler* assembler) { EmitShift(assembler, 0, kX86Size64); }
+static void Assemble_rorq(X86Assembler* assembler) { EmitShift(assembler, 1, kX86Size64); }
+static void Assemble_roll(X86Assembler* assembler) { EmitShift(assembler, 0, kX86Size32); }
+static void Assemble_rorl(X86Assembler* assembler) { EmitShift(assembler, 1, kX86Size32); }
+static void Assemble_bsfq(X86Assembler* assembler) { EmitBitScan(assembler, 0xbc, kX86Size64); }
+static void Assemble_bsrq(X86Assembler* assembler) { EmitBitScan(assembler, 0xbd, kX86Size64); }
+static void Assemble_bsfl(X86Assembler* assembler) { EmitBitScan(assembler, 0xbc, kX86Size32); }
+static void Assemble_bsrl(X86Assembler* assembler) { EmitBitScan(assembler, 0xbd, kX86Size32); }
+static void Assemble_sete(X86Assembler* assembler) { EmitSetcc(assembler, 0x94); }
+static void Assemble_setne(X86Assembler* assembler) { EmitSetcc(assembler, 0x95); }
+static void Assemble_setl(X86Assembler* assembler) { EmitSetcc(assembler, 0x9c); }
+static void Assemble_setb(X86Assembler* assembler) { EmitSetcc(assembler, 0x92); }
+static void Assemble_setg(X86Assembler* assembler) { EmitSetcc(assembler, 0x9f); }
+static void Assemble_setge(X86Assembler* assembler) { EmitSetcc(assembler, 0x9d); }
+static void Assemble_setae(X86Assembler* assembler) { EmitSetcc(assembler, 0x93); }
 
-static void EmitAtomicCmpxchg(X86_64Assembler* assembler, X86Size size) {
+static void EmitAtomicCmpxchg(X86Assembler* assembler, X86Size size) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1790,20 +1910,20 @@ static void EmitAtomicCmpxchg(X86_64Assembler* assembler, X86Size size) {
   EncodeFinish(&enc);
 }
 
-static void Assemble_atomic_cmpxchgb(X86_64Assembler* assembler) {
+static void Assemble_atomic_cmpxchgb(X86Assembler* assembler) {
   EmitAtomicCmpxchg(assembler, kX86Size8);
 }
-static void Assemble_atomic_cmpxchgw(X86_64Assembler* assembler) {
+static void Assemble_atomic_cmpxchgw(X86Assembler* assembler) {
   EmitAtomicCmpxchg(assembler, kX86Size16);
 }
-static void Assemble_atomic_cmpxchgl(X86_64Assembler* assembler) {
+static void Assemble_atomic_cmpxchgl(X86Assembler* assembler) {
   EmitAtomicCmpxchg(assembler, kX86Size32);
 }
-static void Assemble_atomic_cmpxchgq(X86_64Assembler* assembler) {
+static void Assemble_atomic_cmpxchgq(X86Assembler* assembler) {
   EmitAtomicCmpxchg(assembler, kX86Size64);
 }
 
-static void EmitAtomicXadd(X86_64Assembler* assembler, X86Size size) {
+static void EmitAtomicXadd(X86Assembler* assembler, X86Size size) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1829,27 +1949,27 @@ static void EmitAtomicXadd(X86_64Assembler* assembler, X86Size size) {
   EncodeFinish(&enc);
 }
 
-static void Assemble_atomic_xaddb(X86_64Assembler* assembler) {
+static void Assemble_atomic_xaddb(X86Assembler* assembler) {
   EmitAtomicXadd(assembler, kX86Size8);
 }
-static void Assemble_atomic_xaddw(X86_64Assembler* assembler) {
+static void Assemble_atomic_xaddw(X86Assembler* assembler) {
   EmitAtomicXadd(assembler, kX86Size16);
 }
-static void Assemble_atomic_xaddl(X86_64Assembler* assembler) {
+static void Assemble_atomic_xaddl(X86Assembler* assembler) {
   EmitAtomicXadd(assembler, kX86Size32);
 }
-static void Assemble_atomic_xaddq(X86_64Assembler* assembler) {
+static void Assemble_atomic_xaddq(X86Assembler* assembler) {
   EmitAtomicXadd(assembler, kX86Size64);
 }
 
-static void Assemble_cqo(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x99); }
-static void Assemble_cdq(X86_64Assembler* assembler) { EmitNoOperands(assembler, false, 0x99); }
-static void Assemble_cltq(X86_64Assembler* assembler) { EmitNoOperands(assembler, true, 0x98); }
+static void Assemble_cqo(X86Assembler* assembler) { EmitNoOperands(assembler, true, 0x99); }
+static void Assemble_cdq(X86Assembler* assembler) { EmitNoOperands(assembler, false, 0x99); }
+static void Assemble_cltq(X86Assembler* assembler) { EmitNoOperands(assembler, true, 0x98); }
 // movslq (a.k.a. movsxd): sign-extend an r/m32 source into a 64-bit register.
 // Encoded as REX.W + 0x63 /r.  (The no-operand cltq form is no longer emitted
 // by the code generator; sign-extension of a value already in a register is
 // lowered to a shift pair instead.)
-static void EmitMovsxd(X86_64Assembler* assembler) {
+static void EmitMovsxd(X86Assembler* assembler) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1874,51 +1994,51 @@ static void EmitMovsxd(X86_64Assembler* assembler) {
   EncodeFinish(&enc);
 }
 
-static void Assemble_movslq(X86_64Assembler* assembler) { EmitMovsxd(assembler); }
-static void Assemble_rcall(X86_64Assembler* assembler) { EmitIndirectCall(assembler); }
-static void Assemble_movss(X86_64Assembler* assembler) { EmitSSEMove(assembler, false, true, false); }
-static void Assemble_movsd(X86_64Assembler* assembler) { EmitSSEMove(assembler, true, false, false); }
-static void Assemble_storesd(X86_64Assembler* assembler) { EmitSSEMove(assembler, true, false, true); }
-static void Assemble_storess(X86_64Assembler* assembler) { EmitSSEMove(assembler, false, true, true); }
-static void Assemble_addss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x58, false); }
-static void Assemble_addsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x58, false); }
-static void Assemble_subss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x5c, false); }
-static void Assemble_subsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x5c, false); }
-static void Assemble_mulss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x59, false); }
-static void Assemble_mulsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x59, false); }
-static void Assemble_divss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x5e, false); }
-static void Assemble_divsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x5e, false); }
-static void Assemble_sqrtss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x51, false); }
-static void Assemble_sqrtsd(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x51, false); }
-static void Assemble_ucomiss(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x2e, false); }
-static void Assemble_ucomisd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x2e, false); }
-static void Assemble_paddb(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfc, false); }
-static void Assemble_paddw(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfd, false); }
-static void Assemble_paddd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfe, false); }
-static void Assemble_paddq(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xd4, false); }
-static void Assemble_psubb(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xf8, false); }
-static void Assemble_psubw(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xf9, false); }
-static void Assemble_psubd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfa, false); }
-static void Assemble_psubq(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfb, false); }
-static void Assemble_pand(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xdb, false); }
-static void Assemble_por(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xeb, false); }
-static void Assemble_pxor(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xef, false); }
-static void Assemble_pcmpeqb(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x74, false); }
-static void Assemble_pcmpeqw(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x75, false); }
-static void Assemble_pcmpeqd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x76, false); }
-static void Assemble_pcmpgtb(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x64, false); }
-static void Assemble_pcmpgtw(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x65, false); }
-static void Assemble_pcmpgtd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x66, false); }
-static void Assemble_addps(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x58, false); }
-static void Assemble_addpd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x58, false); }
-static void Assemble_subps(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x5c, false); }
-static void Assemble_subpd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x5c, false); }
-static void Assemble_mulps(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x59, false); }
-static void Assemble_mulpd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x59, false); }
-static void Assemble_divps(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x5e, false); }
-static void Assemble_divpd(X86_64Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x5e, false); }
+static void Assemble_movslq(X86Assembler* assembler) { EmitMovsxd(assembler); }
+static void Assemble_rcall(X86Assembler* assembler) { EmitIndirectCall(assembler); }
+static void Assemble_movss(X86Assembler* assembler) { EmitSSEMove(assembler, false, true, false); }
+static void Assemble_movsd(X86Assembler* assembler) { EmitSSEMove(assembler, true, false, false); }
+static void Assemble_storesd(X86Assembler* assembler) { EmitSSEMove(assembler, true, false, true); }
+static void Assemble_storess(X86Assembler* assembler) { EmitSSEMove(assembler, false, true, true); }
+static void Assemble_addss(X86Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x58, false); }
+static void Assemble_addsd(X86Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x58, false); }
+static void Assemble_subss(X86Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x5c, false); }
+static void Assemble_subsd(X86Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x5c, false); }
+static void Assemble_mulss(X86Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x59, false); }
+static void Assemble_mulsd(X86Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x59, false); }
+static void Assemble_divss(X86Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x5e, false); }
+static void Assemble_divsd(X86Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x5e, false); }
+static void Assemble_sqrtss(X86Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x51, false); }
+static void Assemble_sqrtsd(X86Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x51, false); }
+static void Assemble_ucomiss(X86Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x2e, false); }
+static void Assemble_ucomisd(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x2e, false); }
+static void Assemble_paddb(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfc, false); }
+static void Assemble_paddw(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfd, false); }
+static void Assemble_paddd(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfe, false); }
+static void Assemble_paddq(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xd4, false); }
+static void Assemble_psubb(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xf8, false); }
+static void Assemble_psubw(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xf9, false); }
+static void Assemble_psubd(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfa, false); }
+static void Assemble_psubq(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xfb, false); }
+static void Assemble_pand(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xdb, false); }
+static void Assemble_por(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xeb, false); }
+static void Assemble_pxor(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0xef, false); }
+static void Assemble_pcmpeqb(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x74, false); }
+static void Assemble_pcmpeqw(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x75, false); }
+static void Assemble_pcmpeqd(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x76, false); }
+static void Assemble_pcmpgtb(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x64, false); }
+static void Assemble_pcmpgtw(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x65, false); }
+static void Assemble_pcmpgtd(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x66, false); }
+static void Assemble_addps(X86Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x58, false); }
+static void Assemble_addpd(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x58, false); }
+static void Assemble_subps(X86Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x5c, false); }
+static void Assemble_subpd(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x5c, false); }
+static void Assemble_mulps(X86Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x59, false); }
+static void Assemble_mulpd(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x59, false); }
+static void Assemble_divps(X86Assembler* assembler) { EmitSSE(assembler, false, false, false, 0x5e, false); }
+static void Assemble_divpd(X86Assembler* assembler) { EmitSSE(assembler, true, false, false, 0x5e, false); }
 
-static void EmitSSEConvertFromInt(X86_64Assembler* assembler, uint8_t prefix_f2,
+static void EmitSSEConvertFromInt(X86Assembler* assembler, uint8_t prefix_f2,
                                   uint8_t prefix_f3, uint8_t opcode) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
@@ -1946,17 +2066,17 @@ static void EmitSSEConvertFromInt(X86_64Assembler* assembler, uint8_t prefix_f2,
   EncodeFinish(&enc);
 }
 
-static void Assemble_cvtsi2ss(X86_64Assembler* assembler) {
+static void Assemble_cvtsi2ss(X86Assembler* assembler) {
   EmitSSEConvertFromInt(assembler, false, true, 0x2a);
 }
-static void Assemble_cvtsi2sd(X86_64Assembler* assembler) {
+static void Assemble_cvtsi2sd(X86Assembler* assembler) {
   EmitSSEConvertFromInt(assembler, true, false, 0x2a);
 }
-static void Assemble_cvttss2si(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x2c, true); }
-static void Assemble_cvttsd2si(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x2c, true); }
-static void Assemble_cvtss2sd(X86_64Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x5a, false); }
-static void Assemble_cvtsd2ss(X86_64Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x5a, false); }
-static void Assemble_movd(X86_64Assembler* assembler) {
+static void Assemble_cvttss2si(X86Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x2c, true); }
+static void Assemble_cvttsd2si(X86Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x2c, true); }
+static void Assemble_cvtss2sd(X86Assembler* assembler) { EmitSSE(assembler, false, false, true, 0x5a, false); }
+static void Assemble_cvtsd2ss(X86Assembler* assembler) { EmitSSE(assembler, false, true, false, 0x5a, false); }
+static void Assemble_movd(X86Assembler* assembler) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
       !ParseOperand(assembler, &dst)) {
@@ -1965,75 +2085,92 @@ static void Assemble_movd(X86_64Assembler* assembler) {
   EmitMovdParsed(assembler, &src, &dst,
                  dst.kind == kX86OpReg && dst.reg.is_xmm);
 }
-static void Assemble_movq_xmm(X86_64Assembler* assembler) { EmitMovqXmm(assembler); }
-static void Assemble_fneg_ss(X86_64Assembler* assembler) { EmitFnegSs(assembler); }
-static void Assemble_fneg_sd(X86_64Assembler* assembler) { EmitFnegSd(assembler); }
+static void Assemble_movq_xmm(X86Assembler* assembler) { EmitMovqXmm(assembler); }
+static void Assemble_fneg_ss(X86Assembler* assembler) { EmitFnegSs(assembler); }
+static void Assemble_fneg_sd(X86Assembler* assembler) { EmitFnegSd(assembler); }
 
-static void Assemble_mov(X86_64Assembler* assembler) { EmitMovSized(assembler, 64); }
-static void Assemble_movq(X86_64Assembler* assembler) { EmitMovSized(assembler, 64); }
-static void Assemble_movl(X86_64Assembler* assembler) { EmitMovSized(assembler, 32); }
-static void Assemble_movb(X86_64Assembler* assembler) { EmitMovSized(assembler, 8); }
-static void Assemble_movsbq(X86_64Assembler* assembler) { EmitMovExtend(assembler, 0xbe); }
-static void Assemble_movzbq(X86_64Assembler* assembler) { EmitMovExtend(assembler, 0xb6); }
-static void Assemble_movswq(X86_64Assembler* assembler) { EmitMovExtend(assembler, 0xbf); }
-static void Assemble_movzwq(X86_64Assembler* assembler) { EmitMovExtend(assembler, 0xb7); }
-static void Assemble_push(X86_64Assembler* assembler) {
+static void Assemble_mov(X86Assembler* assembler) { EmitMovSized(assembler, 64); }
+static void Assemble_movq(X86Assembler* assembler) { EmitMovSized(assembler, 64); }
+static void Assemble_movl(X86Assembler* assembler) { EmitMovSized(assembler, 32); }
+static void Assemble_movb(X86Assembler* assembler) { EmitMovSized(assembler, 8); }
+static void Assemble_movsbq(X86Assembler* assembler) { EmitMovExtend(assembler, 0xbe); }
+static void Assemble_movzbq(X86Assembler* assembler) { EmitMovExtend(assembler, 0xb6); }
+static void Assemble_movswq(X86Assembler* assembler) { EmitMovExtend(assembler, 0xbf); }
+static void Assemble_movzwq(X86Assembler* assembler) { EmitMovExtend(assembler, 0xb7); }
+static void Assemble_push(X86Assembler* assembler) {
   EmitPushPop(assembler, true);
 }
-static void Assemble_pushq(X86_64Assembler* assembler) {
+static void Assemble_pushq(X86Assembler* assembler) {
   EmitPushPop(assembler, true);
 }
-static void Assemble_pop(X86_64Assembler* assembler) {
+static void Assemble_pushl(X86Assembler* assembler) {
+  EmitPushPop(assembler, true);
+}
+static void Assemble_pop(X86Assembler* assembler) {
   EmitPushPop(assembler, false);
 }
-static void Assemble_popq(X86_64Assembler* assembler) {
+static void Assemble_popq(X86Assembler* assembler) {
   EmitPushPop(assembler, false);
 }
-static void Assemble_add(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0, 64); }
-static void Assemble_addq(X86_64Assembler* assembler) { EmitALU(assembler, 0x01, 0, 64); }
-static void Assemble_sub(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5, 64); }
-static void Assemble_subq(X86_64Assembler* assembler) { EmitALU(assembler, 0x29, 5, 64); }
-static void Assemble_and(X86_64Assembler* assembler) { EmitALU(assembler, 0x21, 4, 64); }
-static void Assemble_or(X86_64Assembler* assembler) { EmitALU(assembler, 0x09, 1, 64); }
-static void Assemble_xor(X86_64Assembler* assembler) { EmitALU(assembler, 0x31, 6, 64); }
-static void Assemble_cmp(X86_64Assembler* assembler) { EmitCmp(assembler); }
-static void Assemble_cmpq(X86_64Assembler* assembler) { EmitCmp(assembler); }
-static void Assemble_lea(X86_64Assembler* assembler) { EmitLea(assembler); }
-static void Assemble_leaq(X86_64Assembler* assembler) { EmitLea(assembler); }
-static void Assemble_call(X86_64Assembler* assembler) {
+static void Assemble_popl(X86Assembler* assembler) {
+  EmitPushPop(assembler, false);
+}
+static void Assemble_add(X86Assembler* assembler) { EmitALU(assembler, 0x01, 0, 64); }
+static void Assemble_addq(X86Assembler* assembler) { EmitALU(assembler, 0x01, 0, 64); }
+static void Assemble_sub(X86Assembler* assembler) { EmitALU(assembler, 0x29, 5, 64); }
+static void Assemble_subq(X86Assembler* assembler) { EmitALU(assembler, 0x29, 5, 64); }
+static void Assemble_and(X86Assembler* assembler) { EmitALU(assembler, 0x21, 4, 64); }
+static void Assemble_or(X86Assembler* assembler) { EmitALU(assembler, 0x09, 1, 64); }
+static void Assemble_xor(X86Assembler* assembler) { EmitALU(assembler, 0x31, 6, 64); }
+static void Assemble_cmp(X86Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_cmpq(X86Assembler* assembler) { EmitCmp(assembler); }
+static void Assemble_lea(X86Assembler* assembler) { EmitLea(assembler); }
+static void Assemble_leaq(X86Assembler* assembler) { EmitLea(assembler); }
+static void Assemble_call(X86Assembler* assembler) {
   if (LexLookingAt(&ASM.lex, TOK(star))) {
     EmitIndirectCall(assembler);
   } else {
     EmitBranch(assembler, -1, true);
   }
 }
-static void Assemble_jmp(X86_64Assembler* assembler) {
+static void Assemble_jmp(X86Assembler* assembler) {
   if (LexLookingAt(&ASM.lex, TOK(star))) {
     EmitIndirectJmp(assembler);
     return;
   }
   EmitBranch(assembler, -1, false);
 }
-static void Assemble_ret(X86_64Assembler* assembler) {
+static void Assemble_ret(X86Assembler* assembler) {
+  if (LexLookingAt(&ASM.lex, TOK(number))) {
+    bool known = false;
+    int64_t imm = AssemblerEvaluateKnownExpression(&ASM, &known);
+    if (!known || imm < 0 || imm > 0xffff) {
+      AssemblerError(&ASM, "ret immediate must be a 16-bit constant");
+      return;
+    }
+    AssemblerEmitByte(&ASM, ASMO.current_section, 0xc2);
+    AssemblerEmitWord(&ASM, ASMO.current_section, (int32_t)imm);
+    return;
+  }
   (void)assembler;
   AssemblerEmitByte(&ASM, ASMO.current_section, 0xc3);
 }
-static void Assemble_leave(X86_64Assembler* assembler) {
+static void Assemble_leave(X86Assembler* assembler) {
   (void)assembler;
   AssemblerEmitByte(&ASM, ASMO.current_section, 0xc9);
 }
-static void Assemble_nop(X86_64Assembler* assembler) {
+static void Assemble_nop(X86Assembler* assembler) {
   (void)assembler;
   AssemblerEmitByte(&ASM, ASMO.current_section, 0x90);
 }
 
-static void Assemble_syscall(X86_64Assembler* assembler) {
+static void Assemble_syscall(X86Assembler* assembler) {
   (void)assembler;
   AssemblerEmitByte(&ASM, ASMO.current_section, 0x0f);
   AssemblerEmitByte(&ASM, ASMO.current_section, 0x05);
 }
 
-static void Assemble_mfence(X86_64Assembler* assembler) {
+static void Assemble_mfence(X86Assembler* assembler) {
   (void)assembler;
   AssemblerEmitByte(&ASM, ASMO.current_section, 0x0f);
   AssemblerEmitByte(&ASM, ASMO.current_section, 0xae);
@@ -2041,7 +2178,7 @@ static void Assemble_mfence(X86_64Assembler* assembler) {
 }
 
 #define JCC(name, opcode)                                                    \
-  static void Assemble_##name(X86_64Assembler* assembler) {                  \
+  static void Assemble_##name(X86Assembler* assembler) {                  \
     EmitBranch(assembler, opcode, false);                                    \
   }
 
@@ -2086,6 +2223,10 @@ static void InitializeInstructions(Map* instructions) {
   INST(movzbq);
   INST(movswq);
   INST(movzwq);
+  INST2(movzbq, movzbl);
+  INST2(movsbq, movsbl);
+  INST2(movswq, movswl);
+  INST2(movzwq, movzwl);
   INST(movabs);
   INST(movss);
   INST(movsd);
@@ -2096,17 +2237,23 @@ static void InitializeInstructions(Map* instructions) {
   INST(movdqu);
   INST(push);
   INST(pushq);
+  INST(pushl);
   INST(pop);
   INST(popq);
+  INST(popl);
   INST(add);
   INST(addq);
   INST(addl);
+  INST(adcl);
   INST(sub);
   INST(subq);
   INST(subl);
+  INST(sbbl);
   INST(and);
+  INST(andl);
   INST(andq);
   INST(or);
+  INST(orl);
   INST(orq);
   INST(xor);
   INST(xorq);
@@ -2122,8 +2269,10 @@ static void InitializeInstructions(Map* instructions) {
   INST(divl);
   INST(not);
   INST(notq);
+  INST(notl);
   INST(neg);
   INST(negq);
+  INST(negl);
   INST(shl);
   INST(shlq);
   INST(shr);
@@ -2175,6 +2324,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(setl);
   INST(setb);
   INST(setg);
+  INST(setge);
+  INST(setae);
   INST(atomic_cmpxchgb);
   INST(atomic_cmpxchgw);
   INST(atomic_cmpxchgl);
@@ -2238,15 +2389,23 @@ static void InitializeInstructions(Map* instructions) {
 #undef INST
 #undef INST2
 
-bool X86_64AssemblerInit(X86_64Assembler* assembler, String* infile,
-                           String* outfile) {
-  static int reloc_types[] = {
+bool X86AssemblerInitWithProfile(X86Assembler* assembler, String* infile,
+                                 String* outfile, const X86Profile* profile) {
+  assembler->profile = profile != NULL ? profile : &kX86ProfileAMD64;
+
+  static int amd64_reloc_types[] = {
       R_X86_64_16,    R_X86_64_32,    R_X86_64_64,    R_X86_64_16,
       R_X86_64_32,    R_X86_64_64,    R_X86_64_16,    R_X86_64_32,
       R_X86_64_64,    R_X86_64_PLT32, R_X86_64_GOTPCREL, R_X86_64_TPOFF64,
   };
+  static int i386_reloc_types[] = {
+      R_386_32, R_386_32, R_386_32, R_386_32, R_386_32, R_386_32,
+      R_386_32, R_386_32, R_386_32, R_386_PC32, R_386_32, R_386_32,
+  };
+  int* reloc_types = assembler->profile->is_64bit ? amd64_reloc_types
+                                                  : i386_reloc_types;
 
-  if (!AssemblerInit(&assembler->base, ELF_MACHINE_TYPE_X86_64, 0, reloc_types,
+  if (!AssemblerInit(&assembler->base, assembler->profile->elf_machine, 0, reloc_types,
                      infile, outfile)) {
     return false;
   }
@@ -2260,30 +2419,36 @@ bool X86_64AssemblerInit(X86_64Assembler* assembler, String* infile,
   return true;
 }
 
-X86_64Assembler* NewX86_64Assembler(String* infile, String* outfile) {
-  X86_64Assembler* assembler = malloc(sizeof(X86_64Assembler));
-  X86_64AssemblerInit(assembler, infile, outfile);
+X86Assembler* NewX86Assembler(String* infile, String* outfile) {
+  X86Assembler* assembler = malloc(sizeof(X86Assembler));
+  X86AssemblerInit(assembler, infile, outfile);
   return assembler;
 }
 
-void X86_64AssemblerDestruct(X86_64Assembler* assembler) {
+void X86AssemblerDestruct(X86Assembler* assembler) {
   AssemblerDestruct(&assembler->base);
   MapDestruct(&assembler->instructions);
 }
 
-void X86_64AssemblerDelete(X86_64Assembler* assembler) {
-  X86_64AssemblerDestruct(assembler);
+void X86AssemblerDelete(X86Assembler* assembler) {
+  X86AssemblerDestruct(assembler);
   free(assembler);
 }
 
-void AssembleX86_64Instruction(Assembler* base, String* word) {
-  X86_64Assembler* assembler = (X86_64Assembler*)base;
+void AssembleX86Instruction(Assembler* base, String* word) {
+  X86Assembler* assembler = (X86Assembler*)base;
   void* asm_func = MapFindPointerKey(&assembler->instructions, word->value);
   if (asm_func != NULL) {
-    void (*func)(X86_64Assembler*) = asm_func;
+    void (*func)(X86Assembler*) = asm_func;
     func(assembler);
   } else {
     AssemblerError(&assembler->base, "Syntax error; unknown instruction: %s",
                    word->value);
   }
+}
+
+
+bool X86AssemblerInit(X86Assembler* assembler, String* infile,
+                           String* outfile) {
+  return X86AssemblerInitWithProfile(assembler, infile, outfile, &kX86ProfileAMD64);
 }

@@ -280,6 +280,7 @@ COMMON_INCLUDES = [
     "c_compiler/risc_v",
     "c_compiler/risc_v32",
     "c_compiler/wasm32",
+    "c_compiler/x86",
     "c_compiler/x86_64",
     "c_compiler/AR",
     "c_compiler/ELF",
@@ -696,6 +697,7 @@ cc_library(
         "Linker/Architecture/linker_arch_6502.c",
         "Linker/Architecture/linker_arch_aarch64.c",
         "Linker/Architecture/linker_arch_arm.c",
+        "Linker/Architecture/linker_arch_x86.c",
         "Linker/Architecture/linker_arch_x86_64.c",
         "Linker/Architecture/linker_arch_pcode.c",
         "Linker/Architecture/linker_arch_riscv.c",
@@ -719,6 +721,7 @@ cc_library(
         "c_compiler/p_code/*.h",
         "c_compiler/risc_v/*.h",
         "c_compiler/risc_v32/*.h",
+        "c_compiler/x86/*.h",
         "c_compiler/x86_64/*.h",
     ]),
     copts = COMMON_COPTS,
@@ -844,12 +847,14 @@ cc_library(
         "c_compiler/wasm32/wasm32_reg_alloc.c",
         "c_compiler/wasm32/wasm32_stackify.c",
         "c_compiler/wasm32/wasm32_target.c",
-        "c_compiler/x86_64/x86_64_assembler.c",
-        "c_compiler/x86_64/x86_64_codegen.c",
-        "c_compiler/x86_64/x86_64_emitter.c",
-        "c_compiler/x86_64/x86_64_optimize.c",
-        "c_compiler/x86_64/x86_64_reg_alloc.c",
-        "c_compiler/x86_64/x86_64_target.c",
+        "c_compiler/x86/x86_assembler.c",
+        "c_compiler/x86/x86_codegen.c",
+        "c_compiler/x86/x86_i386_wide.c",
+        "c_compiler/x86/x86_emitter.c",
+        "c_compiler/x86/x86_optimize.c",
+        "c_compiler/x86/x86_profile.c",
+        "c_compiler/x86/x86_reg_alloc.c",
+        "c_compiler/x86/x86_target.c",
         "c_compiler/frontend/semantic/semantics.c",
         "c_compiler/frontend/lexical/source.c",
         "c_compiler/optimization/ssa.c",
@@ -5443,4 +5448,48 @@ touch "$@"
         ":arm",
     ],
     tags = ["manual"],
+)
+
+sh_test(
+    name = "x86_i386_smoke_test",
+    srcs = ["tests/x86_i386_smoke_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [":davecc"],
+)
+
+sh_test(
+    name = "x86_i386_exec_test",
+    srcs = ["tests/x86_i386_exec_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [
+        ":davecc",
+        "libc/cdiv.c",
+    ],
+    env_inherit = [
+        "COLIMA_HOME",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+    timeout = "long",
+)
+
+sh_test(
+    name = "x86_i386_dynamic_test",
+    srcs = ["tests/x86_i386_dynamic_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [":davecc"],
+    env_inherit = [
+        "COLIMA_HOME",
+        "HOME",
+        "PATH",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+    timeout = "long",
 )
