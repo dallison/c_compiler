@@ -98,6 +98,8 @@ long syscall(int n, ...) {
 // Implemented in aarch64 support/syscall.s
 #elif defined(__arm__)
 // Implemented in arm support/syscall.s
+#elif defined(__xtensa__)
+// Implemented in xtensa_support/syscall.s
 #elif defined(__6502__)
 // Implemented in 6502runtime.s
 #elif defined(__wasm32__)

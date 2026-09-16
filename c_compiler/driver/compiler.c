@@ -42,6 +42,7 @@
 #include "p_code_target.h"
 #include "risc_v_target.h"
 #include "risc_v32_target.h"
+#include "xtensa_target.h"
 #include "aarch64_target.h"
 #include "arm_target.h"
 #include "common_emitter.h"
@@ -243,6 +244,7 @@ static struct CompilerTargetDefinition{
        kTargetSupportsC11Atomics | kTargetSupports8ByteAtomics},
   {"riscv32", {"riscv32", "risc-v32"}, NewRV32Target, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics},
+  {"esp32", {"esp32", "xtensa-esp32"}, NewXTENSATarget, true, 0, 0},
   {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupports8ByteAtomics},

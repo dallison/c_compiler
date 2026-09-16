@@ -520,7 +520,8 @@ static uint64_t PageSizeForMachine(int machine) {
 static uint64_t SizeofHeadersForMachine(int machine) {
   bool elf64 = machine != ELF_MACHINE_TYPEW65C02 &&
                machine != ELF_MACHINE_TYPE_ARM &&
-               machine != ELF_MACHINE_TYPE_X86;
+               machine != ELF_MACHINE_TYPE_X86 &&
+               machine != ELF_MACHINE_TYPE_XTENSA;
   return elf64 ? 64ull + 4ull * 56ull : 52ull + 4ull * 32ull;
 }
 
@@ -1884,6 +1885,31 @@ static const char kBuiltinRiscv32Program[] =
     "  /DISCARD/ : { *(.comment .note .note.*) }\n"
     "}\n";
 
+static const char kBuiltinEsp32Program[] =
+    "PHDRS\n"
+    "{\n"
+    "  text PT_LOAD FLAGS(5);\n"
+    "  data PT_LOAD FLAGS(6);\n"
+    "}\n"
+    "MEMORY\n"
+    "{\n"
+    "  iram (rx) : ORIGIN = 0x40080000, LENGTH = 0x20000\n"
+    "  dram (rw) : ORIGIN = 0x3ffb0000, LENGTH = 0x50000\n"
+    "}\n"
+    "SECTIONS\n"
+    "{\n"
+    "  .text : {\n"
+    "    *(.literal* .text* .rodata* .davecc_stacktrace .eh_frame* "
+    ".gcc_except_table)\n"
+    "  } > iram :text\n"
+    "  .data : {\n"
+    "    *(.data* .preinit_array* .init_array* .fini_array*)\n"
+    "  } > dram :data\n"
+    "  .bss : { *(.bss* COMMON) } > dram :data\n"
+    "  .xtensa.info : { *(.xtensa.info) } > iram :text\n"
+    "  /DISCARD/ : { *(.comment .note .note.*) }\n"
+    "}\n";
+
 static const char kBuiltinPcodeProgram[] =
     "PHDRS\n"
     "{\n"
@@ -2024,6 +2050,7 @@ static const BuiltinScript kBuiltinScripts[] = {
     {ELF_MACHINE_TYPEW65C02, 0, "introm", kBuiltin6502Introm},
     {ELF_MACHINE_TYPE_RISC_V, ELFCLASS32, "program", kBuiltinRiscv32Program},
     {ELF_MACHINE_TYPE_RISC_V, ELFCLASS64, "program", kBuiltinRiscvProgram},
+    {ELF_MACHINE_TYPE_XTENSA, ELFCLASS32, "program", kBuiltinEsp32Program},
     {ELF_MACHINE_TYPE_PCODE, 0, "program", kBuiltinPcodeProgram},
     {ELF_MACHINE_TYPE_AARCH64, 0, "program", kBuiltinAarch64Program},
     {ELF_MACHINE_TYPE_ARM, 0, "program", kBuiltinArmProgram},

@@ -622,6 +622,14 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__WORDSIZE", "32");
     PreprocessorDefineMacro(p, "__ILP32__", "1");
     PreprocessorDefineMacro(p, "_ILP32", "1");
+  } else if (StringEqual(compiler->target_name, "esp32") ||
+             StringEqual(compiler->target_name, "xtensa-esp32")) {
+    PreprocessorDefineMacro(p, "__XTENSA__", "1");
+    PreprocessorDefineMacro(p, "__xtensa__", "1");
+    PreprocessorDefineMacro(p, "ESP32", "1");
+    PreprocessorDefineMacro(p, "__WORDSIZE", "32");
+    PreprocessorDefineMacro(p, "__ILP32__", "1");
+    PreprocessorDefineMacro(p, "_ILP32", "1");
   } else if (StringEqual(compiler->target_name, "wasm32") ||
              StringEqual(compiler->target_name, "wasm")) {
     PreprocessorDefineMacro(p, "__wasm__", "1");

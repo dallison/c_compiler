@@ -204,6 +204,11 @@ ELFWriterSection* ELFWriterFindSection(ELFWriterFile* elf, const char* name) {
 }
 
 // Add relocation sections for all relocations.
+static bool UsesRelaRelocations(const ELFWriterFile* elf) {
+  return elf->ops->is_64_bit ||
+         elf->header.machine == ELF_MACHINE_TYPE_XTENSA;
+}
+
 static void CreateRelocationSections(ELFWriterFile* elf,
                            Vector* relocation_sections,
                            ELFWriterSection* symtab) {
@@ -216,7 +221,8 @@ static void CreateRelocationSections(ELFWriterFile* elf,
       String relocation_section_name;
       // Invent relocation section name.
       StringInit(&relocation_section_name, "");
-      if (elf->ops->is_64_bit) {
+      bool uses_rela = UsesRelaRelocations(elf);
+      if (uses_rela) {
         StringPrintf(&relocation_section_name, ".rela%s", section->name.value);
       } else {
         // SysV i386 objects use SHT_REL with in-place addends (GCC/clang -m32).
@@ -226,14 +232,17 @@ static void CreateRelocationSections(ELFWriterFile* elf,
       // Add relocation section after section it refers to.
       ELFWriterSection* reloc_sect = ELFWriterAddStandardSection(
           elf, relocation_section_name.value,
-          elf->ops->is_64_bit ? SHT(rela) : SHT(rel), 0);
+          uses_rela ? SHT(rela) : SHT(rel), 0);
       // All relocation sections link to the symtab section so that
       // they can find the symbol.
       ELFWriterAddSectionFixup(elf, kFixupFieldLink, reloc_sect, symtab);
       ELFWriterAddSectionFixup(elf, kFixupFieldInfo, reloc_sect, section);
       
       // RELA sections have a fixed entry size.
-      reloc_sect->header.entsize = elf->ops->relocation_size;
+      reloc_sect->header.entsize =
+          uses_rela && !elf->ops->is_64_bit
+              ? sizeof(ELF32Relocation)
+              : elf->ops->relocation_size;
       // Take ownership of the relocations, freeing the empty vector the new
       // section was created with.
       VectorDelete(reloc_sect->relocations);
@@ -300,7 +309,8 @@ static void WriteSectionHeaders(ELFWriterFile* elf,
         bool section_found = false;
         for (size_t j = 0; j < relocation_sections->length; j++) {
           if (relocation_sections->value.p[j] == section) {
-            data_length = section->relocations->length * elf->ops->relocation_size;
+            data_length =
+                section->relocations->length * section->header.entsize;
             section_found = true;
             break;
           }
@@ -401,7 +411,18 @@ static void WriteSectionContents(ELFWriterFile* elf,
             for (size_t reloc_index = 0;
                  reloc_index < section->relocations->length; reloc_index++) {
               ELFRelocation* reloc = section->relocations->value.p[reloc_index];
-              elf->ops->WriteRelocation(reloc, fp);
+              if (section->header.type == SHT(rela) &&
+                  !elf->ops->is_64_bit) {
+                ELF32Relocation out = {
+                    .offset = (ELF32_Addr)reloc->offset,
+                    .info = ELF32_R_INFO(ELF64_R_SYM(reloc->info),
+                                         ELF64_R_TYPE(reloc->info)),
+                    .addend = (ELF32_Sword)reloc->addend,
+                };
+                fwrite(&out, sizeof(out), 1, fp);
+              } else {
+                elf->ops->WriteRelocation(reloc, fp);
+              }
             }
             section_found = true;
             break;

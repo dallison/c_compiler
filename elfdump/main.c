@@ -83,6 +83,9 @@ static void PrintHeader(ELFReaderFile* elf) {
     case ELF_MACHINE_TYPE_AARCH64:
       machine = "AARCH64";
       break;
+    case ELF_MACHINE_TYPE_XTENSA:
+      machine = "Xtensa";
+      break;
   }
   printf("Machine:\t%s\n", machine);
   switch (header->type) {

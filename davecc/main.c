@@ -21,6 +21,7 @@
 #include "vector.h"
 #include "risc_v_assembler.h"
 #include "risc_v32_assembler.h"
+#include "xtensa_assembler.h"
 #include "6502_assembler.h"
 #include "p_code_assembler.h"
 #include "x86_64_assembler.h"
@@ -290,6 +291,8 @@ static const TargetRuntime target_runtimes[] = {
     {"pcode", kTargetOSNone, "libcpcode.a", "//:libc_pcode", NULL, NULL, true, false},
     {"riscv", kTargetOSNone, "libcriscv.a", "//:libc_riscv", NULL, NULL, false, false},
     {"riscv32", kTargetOSNone, "libcriscv32.a", "//:libc_riscv32", NULL, NULL, false, false},
+    {"esp32", kTargetOSNone, "libcxtensa.a", "//:libc_xtensa",
+     "esp32_start.o", "//:esp32_start", false, true},
     {"aarch64", kTargetOSNone, "libcaarch64.a", "//:libc_aarch64", NULL, NULL, true, false},
     {"arm", kTargetOSNone, "libcarm.a", "//:libc_arm", NULL, NULL, true, false},
     {"x86_64", kTargetOSNone, "libcx86_64.a", "//:libc_x86_64", NULL, NULL, true, false},
@@ -326,6 +329,9 @@ static bool TargetNameMatches(const char* target, const char* canonical) {
   }
   if (strcmp(canonical, "riscv32") == 0) {
     return strcmp(target, "risc-v32") == 0;
+  }
+  if (strcmp(canonical, "esp32") == 0) {
+    return strcmp(target, "xtensa-esp32") == 0;
   }
   if (strcmp(canonical, "aarch64") == 0) {
     return strcmp(target, "armv8") == 0;
@@ -1844,6 +1850,12 @@ int main(int argc, char * argv[]) {
         assembler = (Assembler*)NewRV32Assembler(asm_filename, &output_filename);
         asm_run = AssembleRV32Instruction;
         destructor = (AssemblerDestructor)RV32AssemblerDestruct;
+      } else if (StringEqual(&target, "esp32") ||
+                 StringEqual(&target, "xtensa-esp32")) {
+        assembler =
+            (Assembler*)NewXTENSAAssembler(asm_filename, &output_filename);
+        asm_run = AssembleXTENSAInstruction;
+        destructor = (AssemblerDestructor)XTENSAAssemblerDestruct;
       } else if (StringEqual(&target, "aarch64")) {
         assembler = NewAARCH64Assembler(asm_filename, &output_filename);
         asm_run = AssembleAARCH64Instruction;

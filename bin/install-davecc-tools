@@ -156,6 +156,7 @@ install_required_executable aarch64 "$actual_libexecdir/aarch64"
 install_required_executable arm "$actual_libexecdir/arm"
 install_required_executable pcode "$actual_libexecdir/pcode"
 install_required_executable riscv "$actual_libexecdir/riscv"
+install_required_executable esp32 "$actual_libexecdir/esp32"
 install_required_executable x86_64 "$actual_libexecdir/x86_64"
 install_required_executable run "$actual_bindir/run"
 
@@ -165,15 +166,17 @@ for tool in \
   armasm armdasm \
   elfdump \
   rvasm riscvdasm \
+  xtensadasm \
   x86asm x86_64dasm; do
   install_required_executable "$tool" "$actual_bindir/$tool"
 done
 
 for archive in libc65c02.a libcaarch64.a libcarm.a libcpcode.a libcriscv.a \
-               libcriscv32.a libcx86_64.a; do
+               libcriscv32.a libcxtensa.a libcx86_64.a; do
   install_required_file 0644 "libc/$archive" "$actual_libdir/$archive"
 done
 install_required_file 0644 "6502_support/6502rom.exe" "$actual_libdir/6502rom.exe"
+install_required_file 0644 "libc/esp32_start.o" "$actual_libdir/esp32_start.o"
 
 headers=$(find_dir "libc/include")
 (cd "$headers" && tar cf - .) | (cd "$actual_includedir" && tar xf -)

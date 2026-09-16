@@ -35,6 +35,7 @@
 #include "linker_arch_arm.h"
 #include "linker_arch_x86_64.h"
 #include "linker_arch_x86.h"
+#include "linker_arch_xtensa.h"
 
 void LinkerError(ObjectFile* file, const char* error, ...) {
   va_list ap;
@@ -156,6 +157,7 @@ void LinkerInit(Linker* linker) {
   VectorAppend(&linker->architectures, NewARMLinkerArchitecture());
   VectorAppend(&linker->architectures, NewX86_64LinkerArchitecture());
   VectorAppend(&linker->architectures, NewX86LinkerArchitecture());
+  VectorAppend(&linker->architectures, NewXtensaLinkerArchitecture());
 
   // Add the contents of LD_LIBRARY_PATH to the library search path.
   char* ld_library_path = getenv("LD_LIBRARY_PATH");
@@ -507,7 +509,8 @@ uint64_t SegmentEndAddress(Segment* segment) {
   uint64_t end = 0;
   for (size_t i = 0; i < segment->regions.length; i++) {
     SegmentMemoryRegion* region = segment->regions.value.p[i];
-    uint64_t region_end = region->config_end;
+    uint64_t region_end =
+        region->falign ? region->next : region->config_end;
     if (region->next > region_end) {
       region_end = region->next;
     }
@@ -554,7 +557,11 @@ uint64_t RegionNextAddress(SectionGroup* group) {
 uint64_t RegionPadding(SectionGroup* group) {
   SegmentMemoryRegion* region = group->region;
   assert(region != NULL);
-  if (region->config_end != 0) {
+  // Byte-addressed ELF load regions use LENGTH as a capacity limit, not as a
+  // request to materialize the unused address space in the output file.
+  // Non-file-aligned regions are fixed images (notably 6502 ROMs) and retain
+  // the historical fill-to-end behavior.
+  if (region->config_end != 0 && !region->falign) {
     return region->config_end - region->next;
   }
   return 0;
@@ -1170,6 +1177,8 @@ static const char* CanonicalSectionGroupName(const String* name) {
 
 // Group all sections with the given type into a the section_groups
 // vector in the Linker.
+static bool SegmentContainsSection(Segment* segment, String* section_name);
+
 static void GroupSections(Linker* linker, int32_t section_type,
                           int32_t section_flags) {
   Map section_map;
@@ -1193,7 +1202,14 @@ static void GroupSections(Linker* linker, int32_t section_type,
         continue;
       }
       if (section_flags != 0 && (section->header->flags & section_flags) == 0) {
-        continue;
+        // An explicit linker-script placement is authoritative even for
+        // metadata sections that are intentionally non-allocatable in input
+        // objects (for example Xtensa's .xtensa.info).
+        if (section_type != SHT(progbits) ||
+            (!SegmentContainsSection(&linker->code_segment, &section->name) &&
+             !SegmentContainsSection(&linker->data_segment, &section->name))) {
+          continue;
+        }
       }
       if (section_type == SHT(progbits) &&
           LinkerIsArrayInputSection(section)) {
@@ -1874,6 +1890,12 @@ void LinkerLinkAllFiles(Linker* linker) {
   // that have data associated with them in the ELF file.  This also
   // adds the grouped sections to the appropriate segment (code, data or tls).
   GroupSections(linker, SHT(progbits), SHF(alloc));
+
+  if (linker->elf_machine_type == ELF_MACHINE_TYPE_XTENSA) {
+    // Xtensa objects carry ABI and literal-pool policy in .xtensa.info.
+    // Preserve that non-allocatable NOTE section in linked output.
+    GroupSections(linker, SHT(note), 0);
+  }
 
   if (linker->elf_machine_type == ELF_MACHINE_TYPE_ARM) {
     GroupSections(linker, SHT(ARM_EXIDX), 0);

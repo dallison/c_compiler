@@ -28,13 +28,18 @@ set(DAVECC_COMMON_INCLUDES
   c_compiler/optimization
   c_compiler/assembler
   c_compiler/util
+  c_compiler/serialize
   c_compiler/driver
+  c_compiler/lto
   c_compiler/disassembler
   c_compiler/6502
   c_compiler/aarch64
   c_compiler/arm
   c_compiler/p_code
   c_compiler/risc_v
+  c_compiler/risc_v32
+  c_compiler/xtensa
+  c_compiler/wasm32
   c_compiler/x86
   c_compiler/x86_64
   c_compiler/AR
@@ -94,6 +99,11 @@ davecc_library(davecc_elf
 )
 target_link_libraries(davecc_elf PUBLIC davecc_utils)
 
+davecc_library(davecc_xtensa_isa
+  c_compiler/xtensa/xtensa_isa.c
+)
+target_link_libraries(davecc_xtensa_isa PUBLIC davecc_utils)
+
 davecc_library(davecc_disassembler
   c_compiler/disassembler/disassembler.c
   c_compiler/disassembler/disassembler_6502.c
@@ -102,8 +112,9 @@ davecc_library(davecc_disassembler
   c_compiler/disassembler/disassembler_riscv.c
   c_compiler/disassembler/disassembler_tool.c
   c_compiler/disassembler/disassembler_x86_64.c
+  c_compiler/disassembler/disassembler_xtensa.c
 )
-target_link_libraries(davecc_disassembler PUBLIC davecc_elf davecc_utils)
+target_link_libraries(davecc_disassembler PUBLIC davecc_elf davecc_utils davecc_xtensa_isa)
 
 davecc_library(davecc_ar
   c_compiler/AR/ar.c
@@ -117,8 +128,10 @@ davecc_library(davecc_loader
   c_compiler/Loader/Architecture/loader_arch_x86_64.c
   c_compiler/Loader/Architecture/loader_arch_pcode.c
   c_compiler/Loader/Architecture/loader_arch_riscv.c
+  c_compiler/Loader/Architecture/loader_arch_xtensa.c
   c_compiler/Loader/loader.c
   c_compiler/Loader/loader_dynamic.c
+  c_compiler/Loader/loader_lifecycle.c
 )
 target_link_libraries(davecc_loader PUBLIC davecc_elf davecc_utils)
 
@@ -128,6 +141,7 @@ davecc_library(davecc_linker
   Linker/Architecture/linker_arch_arm.c
   Linker/Architecture/linker_arch_x86.c
   Linker/Architecture/linker_arch_x86_64.c
+  Linker/Architecture/linker_arch_xtensa.c
   Linker/Architecture/linker_arch_pcode.c
   Linker/Architecture/linker_arch_riscv.c
   Linker/linker.c
@@ -139,7 +153,7 @@ davecc_library(davecc_linker
   Linker/linker_reloc.c
   Linker/linker_symbols.c
 )
-target_link_libraries(davecc_linker PUBLIC davecc_ar davecc_elf davecc_loader davecc_utils)
+target_link_libraries(davecc_linker PUBLIC davecc_ar davecc_elf davecc_loader davecc_utils davecc_xtensa_isa)
 
 davecc_library(davecc_compiler
   c_compiler/6502/6502_assembler.c
@@ -227,6 +241,13 @@ davecc_library(davecc_compiler
   c_compiler/risc_v/risc_v_optimize.c
   c_compiler/risc_v/risc_v_reg_alloc.c
   c_compiler/risc_v/risc_v_target.c
+  c_compiler/xtensa/xtensa_assembler.c
+  c_compiler/xtensa/xtensa_codegen.c
+  c_compiler/xtensa/xtensa_emitter.c
+  c_compiler/xtensa/xtensa_optimize.c
+  c_compiler/xtensa/xtensa_profile.c
+  c_compiler/xtensa/xtensa_reg_alloc.c
+  c_compiler/xtensa/xtensa_target.c
   c_compiler/x86/x86_assembler.c
   c_compiler/x86/x86_codegen.c
   c_compiler/x86/x86_i386_wide.c
@@ -237,7 +258,7 @@ davecc_library(davecc_compiler
   c_compiler/x86/x86_target.c
 )
 target_compile_definitions(davecc_compiler PUBLIC DAVECC_SYSROOT_HDRS=libc/include)
-target_link_libraries(davecc_compiler PUBLIC davecc_elf davecc_utils)
+target_link_libraries(davecc_compiler PUBLIC davecc_elf davecc_utils davecc_xtensa_isa)
 
 davecc_library(davecc_6502_lib
   6502_interpreter/6502_debugger.c
@@ -277,6 +298,11 @@ davecc_library(davecc_x86_64_lib
 )
 target_link_libraries(davecc_x86_64_lib PUBLIC davecc_elf davecc_linker davecc_loader davecc_utils)
 
+davecc_library(davecc_xtensa_lib
+  xtensa_interpreter/xtensa_interpreter.c
+)
+target_link_libraries(davecc_xtensa_lib PUBLIC davecc_elf davecc_loader davecc_utils davecc_xtensa_isa)
+
 davecc_executable(davecc_bin davecc davecc/main.c)
 target_link_libraries(davecc_bin PRIVATE davecc_ar davecc_compiler davecc_elf davecc_linker davecc_loader davecc_utils)
 
@@ -308,6 +334,9 @@ target_link_libraries(davecc_armdasm_bin PRIVATE davecc_disassembler davecc_elf 
 davecc_executable(davecc_x86_64dasm_bin x86_64dasm x86_64dasm/main.c)
 target_link_libraries(davecc_x86_64dasm_bin PRIVATE davecc_disassembler davecc_elf davecc_utils)
 
+davecc_executable(davecc_xtensadasm_bin xtensadasm xtensadasm/main.c)
+target_link_libraries(davecc_xtensadasm_bin PRIVATE davecc_disassembler davecc_elf davecc_utils)
+
 davecc_executable(davecc_x86asm_bin x86asm x86asm/main.c)
 target_link_libraries(davecc_x86asm_bin PRIVATE davecc_compiler davecc_elf davecc_utils)
 
@@ -334,6 +363,9 @@ target_link_libraries(davecc_arm_bin PRIVATE davecc_arm_lib davecc_elf davecc_li
 davecc_executable(davecc_x86_64_bin x86_64 x86_64_interpreter/main.c)
 target_link_libraries(davecc_x86_64_bin PRIVATE davecc_x86_64_lib davecc_elf davecc_linker davecc_loader davecc_utils)
 
+davecc_executable(davecc_esp32_bin esp32 xtensa_interpreter/main.c)
+target_link_libraries(davecc_esp32_bin PRIVATE davecc_xtensa_lib davecc_elf davecc_loader davecc_utils)
+
 add_custom_target(davecc_tools
   DEPENDS
     davecc_bin
@@ -346,6 +378,7 @@ add_custom_target(davecc_tools
     davecc_aarch64dasm_bin
     davecc_armdasm_bin
     davecc_x86_64dasm_bin
+    davecc_xtensadasm_bin
     davecc_x86asm_bin
     davecc_rvasm_bin
     davecc_aarch64asm_bin
@@ -354,6 +387,7 @@ add_custom_target(davecc_tools
     davecc_aarch64_bin
     davecc_arm_bin
     davecc_x86_64_bin
+    davecc_esp32_bin
 )
 
 install(TARGETS
@@ -364,6 +398,7 @@ install(TARGETS
   davecc_aarch64_bin
   davecc_arm_bin
   davecc_x86_64_bin
+  davecc_esp32_bin
   RUNTIME DESTINATION "${DAVECC_INSTALL_LIBEXECDIR}"
 )
 
@@ -375,6 +410,7 @@ install(TARGETS
   davecc_aarch64dasm_bin
   davecc_armdasm_bin
   davecc_x86_64dasm_bin
+  davecc_xtensadasm_bin
   davecc_x86asm_bin
   davecc_rvasm_bin
   davecc_aarch64asm_bin
@@ -390,6 +426,7 @@ install(TARGETS
   davecc_aarch64dasm_bin
   davecc_armdasm_bin
   davecc_x86_64dasm_bin
+  davecc_xtensadasm_bin
   davecc_x86asm_bin
   davecc_rvasm_bin
   davecc_aarch64asm_bin
@@ -410,6 +447,7 @@ install(PROGRAMS
   bin/run-arm
   bin/run-riscv
   bin/run-riscv32
+  bin/run-esp32
   bin/run-x86_64
   DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )

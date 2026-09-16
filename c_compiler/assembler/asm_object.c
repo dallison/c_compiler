@@ -172,6 +172,7 @@ void AsmObjectInit(AsmObject* object, int16_t elf_machine_type,
   switch (elf_machine_type) {
     case ELF_MACHINE_TYPE_ARM:
     case ELF_MACHINE_TYPE_X86:
+    case ELF_MACHINE_TYPE_XTENSA:
       object->is_64_bit = false;
       break;
     default:
@@ -187,7 +188,8 @@ void AsmObjectInit(AsmObject* object, int16_t elf_machine_type,
   DwarfInit(&object->dwarf);
   if (elf_machine_type == ELF_MACHINE_TYPEW65C02 ||
       elf_machine_type == ELF_MACHINE_TYPE_X86_64 ||
-      elf_machine_type == ELF_MACHINE_TYPE_X86) {
+      elf_machine_type == ELF_MACHINE_TYPE_X86 ||
+      elf_machine_type == ELF_MACHINE_TYPE_XTENSA) {
     object->dwarf.min_instruction_length = 1;
   }
 }

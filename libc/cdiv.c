@@ -51,7 +51,7 @@ lldiv_t lldiv(long long int numer, long long int denom) {
 #endif
 }
 
-#if defined(__arm__) || defined(__i386__) || \
+#if defined(__arm__) || defined(__i386__) || defined(__xtensa__) || \
     (defined(__risc_v__) && defined(__ILP32__))
 // 32-bit ARM has no hardware 64-bit multiply, divide or modulo.  The code
 // generator lowers those operations into calls to the libgcc-style runtime
@@ -74,7 +74,7 @@ unsigned long long __muldi3(unsigned long long a, unsigned long long b) {
   return result;
 }
 
-#if !defined(__risc_v__) || !defined(__ILP32__)
+#if (!defined(__risc_v__) || !defined(__ILP32__)) && !defined(__xtensa__)
 unsigned long long __ashldi3(unsigned long long value, int count) {
   count &= 63;
   while (count-- != 0) {
@@ -168,7 +168,7 @@ long long __moddi3(long long a, long long b) {
   return negate ? -(long long)r : (long long)r;
 }
 
-#if defined(__risc_v__) && defined(__ILP32__)
+#if (defined(__risc_v__) && defined(__ILP32__)) || defined(__xtensa__)
 unsigned long long __ashldi3(unsigned long long a, int n) {
   unsigned alo = (unsigned)a;
   unsigned ahi = (unsigned)(a >> 32);
@@ -224,6 +224,7 @@ long long __ashrdi3(long long a, int n) {
   return (long long)(((unsigned long long)(unsigned)hi << 32) | lo);
 }
 
+#if !defined(__xtensa__)
 long long __davecc_double_to_i64(double value) {
   union {
     double value;
@@ -279,5 +280,6 @@ unsigned long long __davecc_double_to_u64(double value) {
   return magnitude;
 }
 #endif
-#endif  // __arm__ || __i386__ || RV32 ILP32
+#endif
+#endif  // __arm__ || __i386__ || __xtensa__ || RV32 ILP32
 

@@ -31,6 +31,9 @@ extern char* __PrintScientificFormat(double f, int precision, char* buf,
                                      size_t size);
 extern char* __PrintGeneralFormat(double f, int precision, char* buf,
                                   size_t size);
+typedef double PrintfFloat;
+#else
+typedef unsigned long long PrintfFloat;
 #endif
 
 // Values for field_width and precision.  Positive numbers
@@ -532,7 +535,11 @@ STATIC void WriteCount(ConversionFormat* fmt, int count, void* p) {
       *(ptrdiff_t*)p = count;
       break;
     case kModLongDouble:
+#ifndef PRINTF_DISABLE_FLOAT
       *(long double*)p = count;
+#else
+      *(long long*)p = count;
+#endif
       break;
     default:
       *(int*)p = count;
@@ -608,7 +615,7 @@ STATIC unsigned long long GetWidthArgument(ConversionFormat* fmt, va_list* ap,
 
 STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
                             unsigned long long* value_ll, const char** value_s,
-                            char* value_c, double* value_f, void** value_p,
+                            char* value_c, PrintfFloat* value_f, void** value_p,
                             bool* is_unsigned, bool* negative) {
   switch (cmd) {
     case 'd':
@@ -665,7 +672,11 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
           *value_ll = (long long)va_arg(*ap, ptrdiff_t);
           break;
         case kModLongDouble:
+#ifndef PRINTF_DISABLE_FLOAT
           *value_f = (int)va_arg(*ap, long double);
+#else
+          *value_ll = 0;
+#endif
           break;
        default:
           *value_ll = *is_unsigned ? (long long)va_arg(*ap, unsigned int)
@@ -681,6 +692,7 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
     case 'n':
       *value_p = va_arg(*ap, void*);
       break;
+#ifndef PRINTF_DISABLE_FLOAT
     case 'f':
     case 'g':
     case 'e':
@@ -690,6 +702,7 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
         *value_f = va_arg(*ap, double);
       }
       break;
+#endif
     case 's':
       *value_s = va_arg(*ap, const char*);
       break;
@@ -710,7 +723,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
   unsigned long long value_ll;
   const char* value_s;
   char value_c;
-  double value_f;
+  PrintfFloat value_f;
   void* value_p;
 
   while (*p != '\0') {
@@ -868,7 +881,7 @@ STATIC int StringWriter(const char* s, size_t len, void* data) {
 
 #if !defined(__6502__) && !defined(__risc_v__) && !defined(__aarch64__) && \
     !defined(__arm__) && !defined(__x86_64__) && !defined(__p_code__) &&   \
-    !defined(__wasm32__)
+    !defined(__wasm32__) && !defined(__xtensa__)
 #define fprintf __fprintf
 #define printf __printf
 #define sprintf __sprintf

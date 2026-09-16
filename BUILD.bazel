@@ -214,6 +214,8 @@ sh_binary(
         ":davecc",
         ":davecc_bin_scripts",
         ":elfdump",
+        ":esp32",
+        ":esp32_start",
         ":libc_65c02",
         ":libc_aarch64",
         ":libc_arm",
@@ -221,6 +223,7 @@ sh_binary(
         ":libc_pcode",
         ":libc_riscv",
         ":libc_riscv32",
+        ":libc_xtensa",
         ":libc_x86_64",
         ":pcode",
         ":riscv",
@@ -231,6 +234,7 @@ sh_binary(
         ":x86asm",
         ":x86_64",
         ":x86_64dasm",
+        ":xtensadasm",
     ],
 )
 
@@ -279,6 +283,7 @@ COMMON_INCLUDES = [
     "c_compiler/p_code",
     "c_compiler/risc_v",
     "c_compiler/risc_v32",
+    "c_compiler/xtensa",
     "c_compiler/wasm32",
     "c_compiler/x86",
     "c_compiler/x86_64",
@@ -491,6 +496,14 @@ cc_library(
 )
 
 cc_library(
+    name = "xtensa_isa_lib",
+    srcs = ["c_compiler/xtensa/xtensa_isa.c"],
+    hdrs = ["c_compiler/xtensa/xtensa_isa.h"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+)
+
+cc_library(
     name = "disassembler",
     srcs = [
         "c_compiler/disassembler/disassembler.c",
@@ -500,6 +513,7 @@ cc_library(
         "c_compiler/disassembler/disassembler_riscv.c",
         "c_compiler/disassembler/disassembler_tool.c",
         "c_compiler/disassembler/disassembler_x86_64.c",
+        "c_compiler/disassembler/disassembler_xtensa.c",
     ],
     hdrs = glob([
         "c_compiler/disassembler/*.h",
@@ -509,6 +523,7 @@ cc_library(
     deps = [
         ":elf",
         ":utils",
+        ":xtensa_isa_lib",
     ],
 )
 
@@ -667,6 +682,7 @@ cc_library(
         "c_compiler/Loader/Architecture/loader_arch_x86_64.c",
         "c_compiler/Loader/Architecture/loader_arch_pcode.c",
         "c_compiler/Loader/Architecture/loader_arch_riscv.c",
+        "c_compiler/Loader/Architecture/loader_arch_xtensa.c",
         "c_compiler/Loader/loader.c",
         "c_compiler/Loader/loader_dynamic.c",
         "c_compiler/Loader/loader_lifecycle.c",
@@ -699,6 +715,7 @@ cc_library(
         "Linker/Architecture/linker_arch_arm.c",
         "Linker/Architecture/linker_arch_x86.c",
         "Linker/Architecture/linker_arch_x86_64.c",
+        "Linker/Architecture/linker_arch_xtensa.c",
         "Linker/Architecture/linker_arch_pcode.c",
         "Linker/Architecture/linker_arch_riscv.c",
         "Linker/linker.c",
@@ -721,6 +738,7 @@ cc_library(
         "c_compiler/p_code/*.h",
         "c_compiler/risc_v/*.h",
         "c_compiler/risc_v32/*.h",
+        "c_compiler/xtensa/*.h",
         "c_compiler/x86/*.h",
         "c_compiler/x86_64/*.h",
     ]),
@@ -731,6 +749,7 @@ cc_library(
         ":elf",
         ":loader",
         ":utils",
+        ":xtensa_isa_lib",
     ],
 )
 
@@ -740,6 +759,40 @@ cc_test(
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
     deps = [":linker"],
+)
+
+cc_test(
+    name = "xtensa_isa_test",
+    srcs = ["tests/xtensa_isa_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":xtensa_isa_lib"],
+)
+
+sh_test(
+    name = "esp32_smoke_test",
+    srcs = ["tests/esp32_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :esp32)",
+        "$(rootpath :elfdump)",
+        "$(rootpath :xtensadasm)",
+        "$(rootpath :libc_xtensa)",
+        "$(rootpath :esp32_start)",
+        "$(rootpath tests/esp32_exec_cases.c)",
+        "$(rootpath tests/esp32_libc_smoke.c)",
+    ],
+    data = [
+        ":davecc",
+        ":elfdump",
+        ":esp32",
+        ":esp32_start",
+        ":libc_headers",
+        ":libc_xtensa",
+        ":xtensadasm",
+        "tests/esp32_exec_cases.c",
+        "tests/esp32_libc_smoke.c",
+    ],
 )
 
 cc_library(
@@ -838,6 +891,13 @@ cc_library(
         "c_compiler/risc_v32/risc_v32_optimize.c",
         "c_compiler/risc_v32/risc_v32_reg_alloc.c",
         "c_compiler/risc_v32/risc_v32_target.c",
+        "c_compiler/xtensa/xtensa_assembler.c",
+        "c_compiler/xtensa/xtensa_codegen.c",
+        "c_compiler/xtensa/xtensa_emitter.c",
+        "c_compiler/xtensa/xtensa_optimize.c",
+        "c_compiler/xtensa/xtensa_profile.c",
+        "c_compiler/xtensa/xtensa_reg_alloc.c",
+        "c_compiler/xtensa/xtensa_target.c",
         "c_compiler/wasm32/wasm32_codegen.c",
         "c_compiler/wasm32/wasm32_data.c",
         "c_compiler/wasm32/wasm32_emitter.c",
@@ -903,6 +963,7 @@ cc_library(
         ":elf",
         ":utils",
         ":wasm32_object",
+        ":xtensa_isa_lib",
     ],
 )
 
@@ -983,6 +1044,27 @@ cc_library(
         ":linker",
         ":loader",
         ":utils",
+    ],
+)
+
+cc_library(
+    name = "xtensa_lib",
+    srcs = [
+        "xtensa_interpreter/xtensa_interpreter.c",
+    ],
+    hdrs = glob([
+        "c_compiler/Loader/*.h",
+        "c_compiler/Loader/Architecture/*.h",
+        "c_compiler/xtensa/*.h",
+        "xtensa_interpreter/*.h",
+    ]) + ["libc/include/davecc_guest_syscalls.h"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [
+        ":elf",
+        ":loader",
+        ":utils",
+        ":xtensa_isa_lib",
     ],
 )
 
@@ -1229,6 +1311,17 @@ cc_binary(
 )
 
 cc_binary(
+    name = "xtensadasm",
+    srcs = ["xtensadasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":disassembler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
     name = "archivist",
     srcs = ["archivist/main.c"],
     copts = COMMON_COPTS,
@@ -1269,6 +1362,7 @@ cc_binary(
         ":arm",
         ":pcode",
         ":riscv",
+        ":esp32",
         ":support_rom_65c02",
         ":x86_64",
     ],
@@ -1357,6 +1451,18 @@ cc_binary(
         ":loader",
         ":risc_v_lib",
         ":utils",
+    ],
+)
+
+cc_binary(
+    name = "esp32",
+    srcs = ["xtensa_interpreter/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":elf",
+        ":loader",
+        ":utils",
+        ":xtensa_lib",
     ],
 )
 
@@ -2413,6 +2519,80 @@ for src in libc/*.cc; do
 done
 
 "$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}" "$${cxx_objs[@]}"
+""",
+)
+
+genrule(
+    name = "esp32_start",
+    srcs = [
+        "xtensa_support/start.s",
+        ":davecc",
+    ],
+    outs = ["libc/esp32_start.o"],
+    cmd = """
+set -euo pipefail
+"$(execpath :davecc)" -target esp32 -nostdinc -c \
+  "$(location xtensa_support/start.s)" -o "$@"
+""",
+)
+
+genrule(
+    name = "libc_xtensa",
+    srcs = LIBC_SRCS + [":libc_headers"] + glob([
+        "libc/include/**/*.h",
+        "xtensa_support/*.c",
+        "xtensa_support/*.s",
+    ]) + [
+        "libc/guest_heap.c",
+        ":davecc",
+        ":archivist",
+    ],
+    outs = ["libc/libcxtensa.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libcxtensa.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$$(pwd)/$(execpath :davecc)"
+archivist="$$(pwd)/$(execpath :archivist)"
+cflags=(-target esp32 -O1 -nostdinc -D__DAVECC_HAS_HEAP_LOCK__=1 \
+  -c -isystem libc/include -Ilibc)
+
+"$$davecc" "$${cflags[@]}" xtensa_support/syscall.s \
+  -o "$$work/syscall_asm.o"
+
+for src in libc/*.c; do
+  case "$$src" in
+    libc/cxx_tls.c|libc/cxx_tls_stubs.c|libc/dynamic_*|libc/eh_*|\
+    libc/gxx_personality.c|libc/linux_*|\
+    libc/guest_heap.c|libc/lsda.c|libc/unwind_api.c|libc/wasi_*|\
+    libc/acos.c|libc/asin.c|libc/atan.c|libc/atan2.c|libc/ceil.c|libc/ckdint.c|\
+    libc/complex_*.c|libc/exp.c|libc/fabs.c|libc/fenv.c|libc/floor.c|\
+    libc/fpfuncs.c|libc/frexp.c|libc/ftoa.c|libc/ldexp.c|libc/log.c|\
+    libc/math_extra.c|libc/modf.c|libc/pow.c|libc/scanf.c|libc/sincos.c|\
+    libc/sqrt.c|libc/stdlib_extra.c|libc/strtod.c|libc/strtoll.c|\
+    libc/strtoull.c|libc/tan.c|libc/threads.c|libc/time.c|libc/wchar.c) \
+      continue ;;
+  esac
+  obj="$$work/$$(basename "$${src%.c}").o"
+  source_cflags=()
+  if [[ "$$src" == "libc/printf.c" ]]; then
+    source_cflags+=(-DPRINTF_DISABLE_FLOAT=1)
+  fi
+  "$$davecc" "$${cflags[@]}" "$${source_cflags[@]}" "$$src" -o "$$obj"
+done
+
+"$$davecc" "$${cflags[@]}" xtensa_support/heap.c -o "$$work/heap.o"
+
+case "$$out" in
+  /*) ;;
+  *) out="$$(pwd)/$$out" ;;
+esac
+cd "$$work"
+"$$archivist" r "$$out" *.o
 """,
 )
 

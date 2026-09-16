@@ -45,5 +45,7 @@ bool DAsmDisassembleARM(const void* bytes, size_t length, uint64_t address,
                         DAsmInstruction* inst);
 bool DAsmDisassembleX86_64(const void* bytes, size_t length, uint64_t address,
                            DAsmInstruction* inst);
+bool DAsmDisassembleXtensa(const void* bytes, size_t length, uint64_t address,
+                           DAsmInstruction* inst);
 
 #endif /* disassembler_internal_h */

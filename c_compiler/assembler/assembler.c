@@ -1195,6 +1195,8 @@ static void HandleDirective_section(Assembler* assembler) {
             } else if (strcmp(assembler->lex.spelling.value,
                               "@preinit_array") == 0) {
               type = SHT(preinit_array);
+            } else if (strcmp(assembler->lex.spelling.value, "@note") == 0) {
+              type = SHT(note);
             } else if (strcmp(assembler->lex.spelling.value, "@unwind") == 0) {
               type = SHT(ARM_EXIDX);
             }
