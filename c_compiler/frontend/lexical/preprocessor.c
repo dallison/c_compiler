@@ -568,6 +568,21 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__WORDSIZE", "64");
     PreprocessorDefineMacro(p, "__LP64__", "1");
     PreprocessorDefineMacro(p, "_LP64", "1");
+  } else if (StringEqual(compiler->target_name, "x86") ||
+             StringEqual(compiler->target_name, "i386") ||
+             StringEqual(compiler->target_name, "i486") ||
+             StringEqual(compiler->target_name, "i586") ||
+             StringEqual(compiler->target_name, "i686") ||
+             StringEqual(compiler->target_name, "x86-32")) {
+    PreprocessorDefineMacro(p, "__i386__", "1");
+    PreprocessorDefineMacro(p, "i386", "1");
+    PreprocessorDefineMacro(p, "__SSE__", "1");
+    PreprocessorDefineMacro(p, "__SSE2__", "1");
+    PreprocessorDefineMacro(p, "__SSE_MATH__", "1");
+    PreprocessorDefineMacro(p, "__SSE2_MATH__", "1");
+    PreprocessorDefineMacro(p, "__WORDSIZE", "32");
+    PreprocessorDefineMacro(p, "__ILP32__", "1");
+    PreprocessorDefineMacro(p, "_ILP32", "1");
   } else if (StringEqual(compiler->target_name, "aarch64")) {
     PreprocessorDefineMacro(p, "__aarch64__", "1");
     PreprocessorDefineMacro(p, "__ARM_NEON", "1");

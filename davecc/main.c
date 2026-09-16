@@ -1825,6 +1825,18 @@ int main(int argc, char * argv[]) {
         assembler = (Assembler*)NewX86_64Assembler(asm_filename, &output_filename);
         asm_run = AssembleX86_64Instruction;
         destructor = (AssemblerDestructor)X86_64AssemblerDestruct;
+      } else if (StringEqual(&target, "x86") ||
+                 StringEqual(&target, "i386") ||
+                 StringEqual(&target, "i486") ||
+                 StringEqual(&target, "i586") ||
+                 StringEqual(&target, "i686") ||
+                 StringEqual(&target, "x86-32")) {
+        X86Assembler* x86_assembler = malloc(sizeof(*x86_assembler));
+        X86AssemblerInitWithProfile(x86_assembler, asm_filename,
+                                    &output_filename, &kX86ProfileI386);
+        assembler = (Assembler*)x86_assembler;
+        asm_run = AssembleX86Instruction;
+        destructor = (AssemblerDestructor)X86AssemblerDestruct;
       } else if (StringEqual(&target, "pcode")) {
         assembler = (Assembler*)NewPCodeAssembler(asm_filename, &output_filename);
         asm_run = AssemblePCodeInstruction;

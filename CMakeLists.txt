@@ -35,6 +35,7 @@ set(DAVECC_COMMON_INCLUDES
   c_compiler/arm
   c_compiler/p_code
   c_compiler/risc_v
+  c_compiler/x86
   c_compiler/x86_64
   c_compiler/AR
   c_compiler/ELF
@@ -125,6 +126,7 @@ davecc_library(davecc_linker
   Linker/Architecture/linker_arch_6502.c
   Linker/Architecture/linker_arch_aarch64.c
   Linker/Architecture/linker_arch_arm.c
+  Linker/Architecture/linker_arch_x86.c
   Linker/Architecture/linker_arch_x86_64.c
   Linker/Architecture/linker_arch_pcode.c
   Linker/Architecture/linker_arch_riscv.c
@@ -224,12 +226,14 @@ davecc_library(davecc_compiler
   c_compiler/risc_v/risc_v_optimize.c
   c_compiler/risc_v/risc_v_reg_alloc.c
   c_compiler/risc_v/risc_v_target.c
-  c_compiler/x86_64/x86_64_assembler.c
-  c_compiler/x86_64/x86_64_codegen.c
-  c_compiler/x86_64/x86_64_emitter.c
-  c_compiler/x86_64/x86_64_optimize.c
-  c_compiler/x86_64/x86_64_reg_alloc.c
-  c_compiler/x86_64/x86_64_target.c
+  c_compiler/x86/x86_assembler.c
+  c_compiler/x86/x86_codegen.c
+  c_compiler/x86/x86_i386_wide.c
+  c_compiler/x86/x86_emitter.c
+  c_compiler/x86/x86_optimize.c
+  c_compiler/x86/x86_profile.c
+  c_compiler/x86/x86_reg_alloc.c
+  c_compiler/x86/x86_target.c
 )
 target_compile_definitions(davecc_compiler PUBLIC DAVECC_SYSROOT_HDRS=libc/include)
 target_link_libraries(davecc_compiler PUBLIC davecc_elf davecc_utils)

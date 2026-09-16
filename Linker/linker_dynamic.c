@@ -29,7 +29,8 @@ static int DynamicPointerSize(const Linker* linker) {
 }
 
 static bool DynamicUsesRel(const Linker* linker) {
-  return linker->elf_machine_type == ELF_MACHINE_TYPE_ARM;
+  return linker->elf_machine_type == ELF_MACHINE_TYPE_ARM ||
+         linker->elf_machine_type == ELF_MACHINE_TYPE_X86;
 }
 
 static size_t DynamicRelocationSize(const Linker* linker) {
@@ -856,11 +857,25 @@ static void CreateDynamicSectionContents(Linker* linker, Buffer* buffer) {
   }
 
   ELF_Xword dynamic_flags = 0;
-  // DaveCC unwind metadata currently carries base-relative fixups in an
-  // otherwise read-only load segment. Tell the native loader to make that
-  // segment writable only while applying relocations.
-  WriteDynamicSectionEntryWithValue(linker, buffer, DT(textrel), 0);
-  dynamic_flags |= DF_TEXTREL;
+  bool needs_textrel = linker->elf_machine_type != ELF_MACHINE_TYPE_X86;
+  if (!needs_textrel) {
+    for (size_t i = 0;
+         i < linker->dynamic_linker->data_relocations.length; i++) {
+      Relocation* reloc =
+          linker->dynamic_linker->data_relocations.value.p[i];
+      if (reloc->section != NULL &&
+          (reloc->section->header->flags & SHF(write)) == 0) {
+        needs_textrel = true;
+        break;
+      }
+    }
+  }
+  // Some targets still carry base-relative unwind fixups in a read-only load
+  // segment. i386's GOT-based PIC path normally has no such relocation.
+  if (needs_textrel) {
+    WriteDynamicSectionEntryWithValue(linker, buffer, DT(textrel), 0);
+    dynamic_flags |= DF_TEXTREL;
+  }
   if (linker->bind_now) {
     WriteDynamicSectionEntryWithValue(linker, buffer, DT(bind_now), 0);
     dynamic_flags |= DF_BIND_NOW;
@@ -1001,9 +1016,9 @@ void DynamicLinkerFixupDynamicSectionContents(ELFWriterFile* elf) {
   FixupDynamicSectionEntryValue(elf->ops, buffer, DT(symtab),
                                 symtab->header.addr);
 
-  // Relocations. ARM EABI uses REL; the other current dynamic targets use
-  // RELA.
-  bool uses_rel = elf->header.machine == ELF_MACHINE_TYPE_ARM;
+  // ARM EABI and i386 use REL; their addends live in the relocated words.
+  bool uses_rel = elf->header.machine == ELF_MACHINE_TYPE_ARM ||
+                  elf->header.machine == ELF_MACHINE_TYPE_X86;
   ELFWriterSection* dynamic_relocations =
       ELFWriterFindSection(elf, uses_rel ? ".rel.dyn" : ".rela.dyn");
   assert(dynamic_relocations != NULL);
@@ -1153,9 +1168,9 @@ static size_t SortDynamicSymbolTable(Vector* fixups) {
   }
   
   if (def_index == -1) {
-    // No defined symbols so all are undefined.  Return the
-    // index of the last symbol.
-    return num_symbols - 1;
+    // No defined symbols are searchable through GNU hash.  symoffset points
+    // one past the final dynamic symbol and the hash has no chains.
+    return num_symbols;
   }
   
   // Now def_index contains the index of the first symbol in the
@@ -1262,7 +1277,10 @@ static DynamicLoaderGNUHashTableHeader WriteHeader(
   
   int64_t num_bits = (num_symbols - first_def_index) * 12;
   int word_bits = linker->ops->is_64_bit ? 64 : 32;
-  header.bloom_size = (int32_t)NextPowerOf2(num_bits / word_bits);
+  uint64_t bloom_words =
+      (uint64_t)(num_bits + word_bits - 1) / (uint64_t)word_bits;
+  header.bloom_size =
+      bloom_words == 0 ? 1 : (int32_t)NextPowerOf2(bloom_words - 1);
   header.bloom_shift = 26;
   
   // Write header.
@@ -1324,9 +1342,10 @@ static void WriteHashTable(Vector* fixups,
   // adding anything to it now.
   uint32_t* buckets = (uint32_t*)&hashtable->value[bucket_index];
   uint32_t* chains = (uint32_t*)&hashtable->value[chain_index];
+  memset(buckets, 0,
+         (header->num_buckets + num_chains) * sizeof(uint32_t));
   
-  int curr_bucket = 0;
-  buckets[0] = (int32_t)first_def_index;
+  int curr_bucket = -1;
   int last_chain = -1;
   
   for (size_t i = first_def_index; i < num_symbols; i++) {
@@ -1392,7 +1411,6 @@ static void CreateGNUHashTable(Linker* linker,
 // ELFSymbols held therein.
 void DynamicLinkerFixupDynamicSymbolTable(Linker* linker, Buffer* dynsym,
                                           int32_t bss_section_index) {
-  (void)bss_section_index;
   Vector* fixups = &linker->dynamic_linker->dynamic_symbol_fixups;
   memset(dynsym->value, 0, dynsym->length);
   for (size_t index = 1; index < fixups->length; index++) {
@@ -1401,8 +1419,19 @@ void DynamicLinkerFixupDynamicSymbolTable(Linker* linker, Buffer* dynsym,
     ELFSymbol elfsym;
     int32_t type = ELF_ST_TYPE(sym->header->info);
     int32_t binding = ELF_ST_BIND(sym->header->info);
+    int32_t section_index;
+    if (!sym->defined || sym->from_dynamic_library) {
+      section_index = 0;
+    } else if (sym->section != NULL) {
+      section_index = sym->section->output_section_index;
+    } else if (sym->header->shndx == SHN_ABS ||
+               (sym->invented && sym->header->shndx != SHN_COM)) {
+      section_index = sym->header->shndx;
+    } else {
+      section_index = bss_section_index;
+    }
     ELFSymbolInit(&elfsym, fixup->name_offset,
-                  sym->header->shndx,
+                  section_index,
                   type, binding, sym->header->size,
                   sym->address);
     char* destination =
@@ -1515,6 +1544,8 @@ static void AddDynamicSymbolTable(Linker* linker) {
                                            DynamicPointerSize(linker),
                                            symtab_contents);
   symtab->header.entsize = linker->ops->symbol_size;
+  // The null symbol is the only local dynamic symbol.
+  symtab->header.info = 1;
   
   NewDynamicLinkerGroup(linker, symtab,
                         &linker->code_segment);

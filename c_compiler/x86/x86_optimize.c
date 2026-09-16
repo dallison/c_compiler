@@ -1,14 +1,14 @@
 //
-//  x86_64_optimize.c
+//  x86_optimize.c
 //  c_compiler_library
 //
 //  Created by David Allison on 4/18/18.
 //  Copyright © 2018 David Allison. All rights reserved.
 //
 
-#include "x86_64_optimize.h"
+#include "x86_optimize.h"
 #include <assert.h>
-#include "x86_64_codegen.h"
+#include "x86_codegen.h"
 #include "compiler.h"
 #include "map.h"
 
@@ -54,7 +54,7 @@ static void TrapPoolConstant(TargetInstruction* inst) {
 
 
 struct OptimizerData {
-  X86_64Generator* rv;
+  X86Generator* rv;
 };
 
 // An atomic read-modify-write updates memory as well as producing a value, so
@@ -64,25 +64,25 @@ struct OptimizerData {
 // lowers to a plain load and so cannot be distinguished here; unlike the other
 // backends, where the load pseudo carries its own barrier, x86-64 needs no
 // barrier around it.
-static bool X86_64HasImplicitEffect(TargetInstruction* inst) {
-  switch ((X86_64Opcode)inst->opcode) {
-    case X86_64_OP(atomic_fetch_add_sub):
-    case X86_64_OP(atomic_compare_exchange_bool):
-    case X86_64_OP(atomic_compare_exchange_val):
-    case X86_64_OP(atomic_compare_exchange_n):
+static bool X86HasImplicitEffect(TargetInstruction* inst) {
+  switch ((X86Opcode)inst->opcode) {
+    case X86_OP(atomic_fetch_add_sub):
+    case X86_OP(atomic_compare_exchange_bool):
+    case X86_OP(atomic_compare_exchange_val):
+    case X86_OP(atomic_compare_exchange_n):
       return true;
-    case X86_64_OP(nop):
-      return (inst->flags & X86_64_MFENCE) != 0;
+    case X86_OP(nop):
+      return (inst->flags & X86_MFENCE) != 0;
 
     // A comparison's result is the condition flags, which no operand names, so
     // the branch that reads them is not a user and the instruction looks dead.
     // Most branches here carry their two comparison operands and expand to the
     // comparison and the jump together, so nothing usually reaches this, but
     // one that branches on flags set separately must keep them.
-    case X86_64_OP(cmp):
-    case X86_64_OP(test):
-    case X86_64_OP(ucomiss):
-    case X86_64_OP(ucomisd):
+    case X86_OP(cmp):
+    case X86_OP(test):
+    case X86_OP(ucomiss):
+    case X86_OP(ucomisd):
       return true;
     default:
       return false;
@@ -94,7 +94,7 @@ static TargetInstruction* InstructionResult(TargetInstruction* inst) {
   if (inst->dest != NULL) {
     return inst->dest;
   }
-  if (inst->operand[0] != NULL && X86_64IsVarRegister(inst->operand[0])) {
+  if (inst->operand[0] != NULL && X86IsVarRegister(inst->operand[0])) {
     return inst->operand[0];
   }
   return inst;
@@ -112,10 +112,10 @@ static TargetInstruction* InstructionResult(TargetInstruction* inst) {
 // filter.
 static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
-  X86_64Generator* rv = opt_data->rv;
+  X86Generator* rv = opt_data->rv;
   BitSet filter = {0};
   BitSetCopy(&filter, &block->output_ids);
-  
+
   TrapRemoveInstructionBlock(block);
 
   TargetInstruction* prev = NULL;
@@ -124,31 +124,31 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
        inst = prev) {
     prev = TargetPrev(inst);
 
-    X86_64Opcode opcode = (X86_64Opcode)inst->opcode;
-    if (!inst->observable_checkpoint && !X86_64HasImplicitEffect(inst) &&
-        X86_64IsExpression(inst) &&
-        !X86_64IsSymbol(inst) && !X86_64IsConst(inst) && opcode != X86_64_OP(tmp) &&
-        opcode != X86_64_OP(sp)) {
+    X86Opcode opcode = (X86Opcode)inst->opcode;
+    if (!inst->observable_checkpoint && !X86HasImplicitEffect(inst) &&
+        X86IsExpression(inst) &&
+        !X86IsSymbol(inst) && !X86IsConst(inst) && opcode != X86_OP(tmp) &&
+        opcode != X86_OP(sp)) {
       // Instruction is an expression.  If its result (maybe in dest)
       // is not in the filter, remove it.
       TargetInstruction* dest = InstructionResult(inst);
       bool is_candidate = true;
-      
+
       // Check if destination is not in the output filter.
-      if (dest != NULL && (((int)dest->opcode == (int)X86_64_OP(tmp)) ||
-          X86_64IsFixedRegister(dest) ||
-          (X86_64Opcode)dest->opcode == X86_64_OP(sp) ||
-          (X86_64Opcode)dest->opcode == X86_64_OP(fp) ||
-          (X86_64Opcode)dest->opcode == X86_64_OP(tp) ||
+      if (dest != NULL && (((int)dest->opcode == (int)X86_OP(tmp)) ||
+          X86IsFixedRegister(dest) ||
+          (X86Opcode)dest->opcode == X86_OP(sp) ||
+          (X86Opcode)dest->opcode == X86_OP(fp) ||
+          (X86Opcode)dest->opcode == X86_OP(tp) ||
           BitSetContains(&filter, dest->id) ||
-          X86_64IsResult(dest))) {
+          X86IsResult(dest))) {
         is_candidate = false;
       }
 
       // If destination is not in the output filter then if the
       // expression is not used in this block it can be removed.
-      if (is_candidate && ((int)inst->opcode != (int)X86_64_OP(tmp)) &&
-          !X86_64IsFixedRegister(inst) &&
+      if (is_candidate && ((int)inst->opcode != (int)X86_OP(tmp)) &&
+          !X86IsFixedRegister(inst) &&
           !BitSetContains(&filter, inst->id)) {
         TrapRemoveInstruction(inst);
         TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
@@ -166,7 +166,7 @@ static void RemoveBlockUnusedExpressions(TargetBasicBlock* block, void* data) {
 }
 
 // Remove any expressions that have no references.
-static void RemoveUnusedExpressions(X86_64Generator* rv) {
+static void RemoveUnusedExpressions(X86Generator* rv) {
   struct OptimizerData data = {rv};
   TargetTraverseDominatorTree(&rv->base, RemoveBlockUnusedExpressions, kTraversePostOrder, &data);
 }
@@ -177,29 +177,29 @@ static void RemoveUnusedExpressions(X86_64Generator* rv) {
 
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
-  X86_64Generator* rv = opt_data->rv;
+  X86Generator* rv = opt_data->rv;
   TargetInstruction* prev = NULL;
   for (TargetInstruction* inst = TargetBasicBlockRBegin(block);
       !TargetBasicBlockIsEmpty(block) && inst != TargetBasicBlockREnd(block);
        inst = prev) {
     prev = TargetPrev(inst);
     TrapCombineLoadStore(inst);
-    
-    if (X86_64IsLoad(inst)) {
+
+    if (X86IsLoad(inst)) {
       TargetInstruction* base = inst->operand[0];
-      if (base->opcode == (TargetOpcode)X86_64_OP(lea) &&
+      if (base->opcode == (TargetOpcode)X86_OP(lea) &&
           !compiler->pic) {
         // Insert label for lea_rip relocation.
         TargetInstruction* label =
-            TargetNewInstruction((TargetOpcode)X86_64_OP(label));
-        label->flags = X86_64_EXPORTED_LABEL;
+            TargetNewInstruction((TargetOpcode)X86_OP(label));
+        label->flags = X86_EXPORTED_LABEL;
         TargetBasicBlockEmitBefore(&rv->base, block, label, base);
-        base->opcode = (TargetOpcode)X86_64_OP(lea_rip);
-        base->flags |= X86_64_PCREL_HI_RELOC;
+        base->opcode = (TargetOpcode)X86_OP(lea_rip);
+        base->flags |= X86_PCREL_HI_RELOC;
         TargetReplaceOperand(inst, 1, label);
-        inst->flags |= X86_64_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)X86_64_OP(add) &&
-                 X86_64IsIntConst(base->operand[1])) {
+        inst->flags |= X86_PCREL_LO_RELOC;
+      } else if (base->opcode == (TargetOpcode)X86_OP(add) &&
+                 X86IsIntConst(base->operand[1])) {
         // Load from an address calculated using an addi instruction.  See if we
         // can combine them.  Folding makes the load address the add's input
         // rather than its result, which is the same address only while the
@@ -210,10 +210,10 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         // input the folded load wanted is already overwritten.  `*--p = ...`
         // in a loop is the shape that reaches this: the decrement feeds both
         // the store and the next iteration.
-        int offset = X86_64IntValue(inst->operand[1]);
-        int immed = X86_64IntValue(base->operand[1]);
+        int offset = X86IntValue(inst->operand[1]);
+        int immed = X86IntValue(base->operand[1]);
         if (base->users.length == 1 && base->dest == NULL &&
-            X86_64IsPossibleImmediate(offset + immed)) {
+            X86IsPossibleImmediate(offset + immed)) {
           TargetReplaceOperand(inst, 0, base->operand[0]);
           TargetReplaceOperand(inst, 1, TargetGetIntConstant(
                                                              &rv->base,
@@ -224,28 +224,28 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
           TargetBasicBlockRemoveInstruction(&rv->base, base->block, base);
          }
       }
-    } else if (X86_64IsStore(inst)) {
+    } else if (X86IsStore(inst)) {
       TargetInstruction* base = inst->operand[1];
       // TODO: rip-relative store folding needs emitter support before enabling.
-      if (false && base->opcode == (TargetOpcode)X86_64_OP(lea) && !compiler->pic) {
+      if (false && base->opcode == (TargetOpcode)X86_OP(lea) && !compiler->pic) {
         // Insert label for lea_rip relocation.
         TargetInstruction* label =
-            TargetNewInstruction((TargetOpcode)X86_64_OP(label));
-        label->flags = X86_64_EXPORTED_LABEL;
+            TargetNewInstruction((TargetOpcode)X86_OP(label));
+        label->flags = X86_EXPORTED_LABEL;
         TargetEmitBefore(&rv->base, label, base);
-        base->opcode = (TargetOpcode)X86_64_OP(lea_rip);
-        base->flags |= X86_64_PCREL_HI_RELOC;
+        base->opcode = (TargetOpcode)X86_OP(lea_rip);
+        base->flags |= X86_PCREL_HI_RELOC;
         TargetReplaceOperand(inst, 2, label);
-        inst->flags |= X86_64_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)X86_64_OP(add) &&
-                 X86_64IsIntConst(base->operand[1])) {
+        inst->flags |= X86_PCREL_LO_RELOC;
+      } else if (base->opcode == (TargetOpcode)X86_OP(add) &&
+                 X86IsIntConst(base->operand[1])) {
         // Store to an address calculated using an addi instruction.  See if we
         // can combine them.  Only when this store is the add's one user and
         // the add goes with it; see the load above for why.
-        int offset = X86_64IntValue(inst->operand[2]);
-        int immed = X86_64IntValue(base->operand[1]);
+        int offset = X86IntValue(inst->operand[2]);
+        int immed = X86IntValue(base->operand[1]);
         if (base->users.length == 1 && base->dest == NULL &&
-            X86_64IsPossibleImmediate(offset + immed)) {
+            X86IsPossibleImmediate(offset + immed)) {
           TargetReplaceOperand(inst, 1, base->operand[0]);
           TargetReplaceOperand(inst, 2, TargetGetIntConstant(
                                                              &rv->base,
@@ -260,7 +260,7 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   }
 }
 
-static void CombineLoadOrStores(X86_64Generator* rv) {
+static void CombineLoadOrStores(X86Generator* rv) {
   struct OptimizerData data = {rv};
   TargetTraverseDominatorTree(&rv->base, CombineLoadOrStoresInBlock, kTraversePreOrder, &data);
 }
@@ -278,7 +278,7 @@ static void CombineLoadOrStores(X86_64Generator* rv) {
 
 static void PropagateZeroesInBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
-  X86_64Generator* rv = opt_data->rv;
+  X86Generator* rv = opt_data->rv;
   TargetInstruction* prev = NULL;
   for (TargetInstruction* inst = TargetBasicBlockRBegin(block);
       !TargetBasicBlockIsEmpty(block) && inst != TargetBasicBlockREnd(block);
@@ -288,17 +288,17 @@ static void PropagateZeroesInBlock(TargetBasicBlock* block, void* data) {
     for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
       TargetInstruction* operand = inst->operand[i];
       if (operand != NULL) {
-        if (((int)operand->opcode == (int)X86_64_OP(mv)) &&
+        if (((int)operand->opcode == (int)X86_OP(mv)) &&
             operand->users.length == 1 && operand->dest == NULL) {
           TargetInstruction* mv = operand;
           // A move with a destination writes a named register -- an outgoing
           // argument register, say.  Its user reads the register rather than
           // this instruction's value, so folding the source into the user and
           // dropping the move leaves that register never written.
-          if (mv->operand[0]->opcode == (TargetOpcode)X86_64_OP(x0)) {
+          if (mv->operand[0]->opcode == (TargetOpcode)X86_OP(x0)) {
             // Found mv xx, x0.  Replace instruction operand with x0.
             TargetReplaceOperand(inst, i,  mv->operand[0]);
-            
+
             // We can now eliminate the mv instruction.
             TrapRemoveInstruction(mv);
             TargetBasicBlockRemoveInstruction(&rv->base, block, mv);
@@ -309,19 +309,19 @@ static void PropagateZeroesInBlock(TargetBasicBlock* block, void* data) {
   }
 }
 
-static void PropagateZeroes(X86_64Generator* rv) {
+static void PropagateZeroes(X86Generator* rv) {
   struct OptimizerData data = {rv};
   TargetTraverseDominatorTree(&rv->base, PropagateZeroesInBlock, kTraversePostOrder, &data);
 }
 
 typedef struct {
-  X86_64Generator* rv;
+  X86Generator* rv;
   Map pool;       // Key: int64_t constant, value: instruction.
 } ConstantPooler;
 
 static void PoolConstantsInBlock(TargetBasicBlock* block, void* data) {
   ConstantPooler* pooler = data;
-  X86_64Generator* rv = pooler->rv;
+  X86Generator* rv = pooler->rv;
   TargetInstruction* next;
   for (TargetInstruction* inst = TargetBasicBlockBegin(block);
        !TargetBasicBlockIsEmpty(block) && inst != TargetBasicBlockEnd(block);
@@ -329,9 +329,9 @@ static void PoolConstantsInBlock(TargetBasicBlock* block, void* data) {
     next = TargetNext(inst);
     TrapPoolConstant(inst);
 
-    if (inst->opcode == (TargetOpcode)X86_64_OP(mov) && inst->dest == NULL) {
+    if (inst->opcode == (TargetOpcode)X86_OP(mov) && inst->dest == NULL) {
       // Possible instruction to pool.
-      int64_t value = X86_64IntValue(inst->operand[0]);
+      int64_t value = X86IntValue(inst->operand[0]);
       MapKeyType key = {.w = value};
       TargetInstruction* pooled = MapFind(&pooler->pool, key);
       if (pooled != NULL) {
@@ -351,7 +351,7 @@ static void PoolConstantsInBlock(TargetBasicBlock* block, void* data) {
       MapInsert(&pooler->pool, kv);
     }
   }
-  
+
   // Now look in all blocks dominated by this one.  We copy the
   // pool for each one so they only see constants in their
   // own dominator tree (dominating blocks can contain pooled
@@ -366,7 +366,7 @@ static void PoolConstantsInBlock(TargetBasicBlock* block, void* data) {
   }
 }
 
-static void PoolConstants(X86_64Generator* rv) {
+static void PoolConstants(X86Generator* rv) {
   ConstantPooler pooler = {rv};
   MapInitForInt64Keys(&pooler.pool);
   PoolConstantsInBlock(rv->base.entry_block, &pooler);
@@ -374,13 +374,13 @@ static void PoolConstants(X86_64Generator* rv) {
 }
 
 static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
-  X86_64Generator* rv = data;
+  X86Generator* rv = data;
   TargetInstruction* next;
   for (TargetInstruction* inst = TargetBasicBlockBegin(block);
       !TargetBasicBlockIsEmpty(block) && inst != TargetBasicBlockEnd(block);
        inst = next) {
     next = TargetNext(inst);
-    if (inst->opcode == (TargetOpcode)X86_64_OP(mv)) {
+    if (inst->opcode == (TargetOpcode)X86_OP(mv)) {
        TargetInstruction* inst_dest = inst->dest;
       if (inst_dest == NULL) {
         continue;
@@ -395,15 +395,15 @@ static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
           // src or dest haveu been assigned to, not candidate.
           continue;
         }
-        if (!X86_64IsVarRegister(inst_dest) &&
-            X86_64IsExpression(prev) && prev->users.length == 1) {
+        if (!X86IsVarRegister(inst_dest) &&
+            X86IsExpression(prev) && prev->users.length == 1) {
            // rmov an expression to a register, just retarget the
           // expression to the register.  We use rmov to assign to a
           // register variable so we don't eliminate that.
           prev->dest = inst_dest;
           TrapRemoveInstruction(inst);
           TargetBasicBlockRemoveInstruction(&rv->base, block, inst);
-        } else if (prev->opcode == (TargetOpcode)X86_64_OP(mv)) {
+        } else if (prev->opcode == (TargetOpcode)X86_OP(mv)) {
           TargetInstruction* prev_dest = prev->dest;
           TargetInstruction* prev_src = prev->operand[0];
           if (inst_dest == prev_src && inst_src == prev_dest) {
@@ -422,11 +422,11 @@ static void EliminateMovesInBlock(TargetBasicBlock* block, void* data) {
   }
 }
 
-static void EliminateMoves(X86_64Generator* rv) {
+static void EliminateMoves(X86Generator* rv) {
   TargetTraverseDominatorTree(&rv->base, EliminateMovesInBlock, kTraversePostOrder, rv);
 }
 
-void X86_64Optimize(X86_64Generator* rv) {  
+void X86Optimize(X86Generator* rv) {
   // Eliminate moves if we can.
   EliminateMoves(rv);
 

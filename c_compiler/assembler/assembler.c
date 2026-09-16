@@ -706,6 +706,8 @@ static int EhTableWordRelocType(Assembler* assembler) {
   switch (assembler->object.elf_machine_type) {
     case ELF_MACHINE_TYPE_X86_64:
       return R_X86_64_PC32;
+    case ELF_MACHINE_TYPE_X86:
+      return R_386_PC32;
     case ELF_MACHINE_TYPE_AARCH64:
       return R_AARCH64_PREL32;
     default:
@@ -874,6 +876,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
                       sub_reloc->symbol->name.value[1] == '\0';
     bool direct_pcrel32 =
         assembler->object.elf_machine_type == ELF_MACHINE_TYPE_X86_64 ||
+        assembler->object.elf_machine_type == ELF_MACHINE_TYPE_X86 ||
         assembler->object.elf_machine_type == ELF_MACHINE_TYPE_AARCH64 ||
         assembler->object.elf_machine_type == ELF_MACHINE_TYPE_ARM;
     if (direct_pcrel32 &&

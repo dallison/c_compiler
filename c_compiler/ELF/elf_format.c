@@ -143,14 +143,13 @@ static void ELF32WriteSymbol(const ELFSymbol* sym, FILE* fp) {
 }
 
 static void ELF32WriteRelocation(const ELFRelocation* rel, FILE* fp) {
-  ELF32Relocation out;
+  ELF32Rel out;
   memset(&out, 0, sizeof(out));
   out.offset = (ELF32_Addr)rel->offset;
   // The in-memory 'info' uses the ELF64 encoding; re-encode for ELF32.
   uint32_t sym = ELF64_R_SYM(rel->info);
   uint32_t type = ELF64_R_TYPE(rel->info);
   out.info = ELF32_R_INFO(sym, type);
-  out.addend = (ELF32_Sword)rel->addend;
   fwrite(&out, sizeof(out), 1, fp);
 }
 
@@ -278,7 +277,7 @@ static const ELFFormatOps kELF32FormatOps = {
     .section_header_size = sizeof(ELF32SectionHeader),
     .program_header_size = sizeof(ELF32ProgramHeader),
     .symbol_size = sizeof(ELF32Symbol),
-    .relocation_size = sizeof(ELF32Relocation),
+    .relocation_size = sizeof(ELF32Rel),
     .dynamic_entry_size = sizeof(ELF32DynamicSectionEntry),
     .WriteHeader = ELF32WriteHeader,
     .WriteSectionHeader = ELF32WriteSectionHeader,
@@ -298,4 +297,25 @@ static const ELFFormatOps kELF32FormatOps = {
 
 const ELFFormatOps* ELFFormatOpsFor(bool is_64_bit) {
   return is_64_bit ? &kELF64FormatOps : &kELF32FormatOps;
+}
+
+void ELFFormatReadRelocation(const ELFFormatOps* ops, bool is_rela,
+                             ELFRelocation* dst, const void* src) {
+  if (is_rela) {
+    ops->ReadRelocation(dst, src);
+    return;
+  }
+  if (ops->is_64_bit) {
+    ELF_Xword in[2];
+    memcpy(in, src, sizeof(in));
+    memset(dst, 0, sizeof(*dst));
+    dst->offset = in[0];
+    dst->info = in[1];
+    return;
+  }
+  const ELF32Rel* in = src;
+  memset(dst, 0, sizeof(*dst));
+  dst->offset = in->offset;
+  dst->info =
+      ELF64_R_INFO(ELF32_R_SYM(in->info), ELF32_R_TYPE(in->info));
 }

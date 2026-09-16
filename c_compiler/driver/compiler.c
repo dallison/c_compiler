@@ -45,6 +45,7 @@
 #include "arm_target.h"
 #include "common_emitter.h"
 #include "x86_64_target.h"
+#include "x86_target.h"
 #include "wasm32_target.h"
 
 void EmitInitFiniArrayEntries(Vector* functions, bool is_fini, FILE* fp);
@@ -210,7 +211,7 @@ bool CompilerHasModuleImportHandler(void) {
 }
 
 // Add new targets here.
-#define kMaxTargetNames 4
+#define kMaxTargetNames 6
 
 enum {
   kTargetSupportsThreads = 1u << 0,
@@ -243,6 +244,8 @@ static struct CompilerTargetDefinition{
   {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupportsC11Atomics | kTargetSupports8ByteAtomics},
+  {"x86", {"x86", "i386", "i486", "i586", "i686", "x86-32"}, NewX86Target,
+   false, 0, kTargetSupportsThreads | kTargetSupportsAtomics},
   {"6502", {"6502"}, New6502Target, true, 2, 0},
   {"65c02", {"65c02", "65C02"}, New65c02Target, true, 2, 0},
   {"wasm32", {"wasm32", "wasm"}, NewWasm32Target, true, 0,
@@ -2233,14 +2236,16 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
     GeneratorDestruct(&codegen);
   } else {
     void* code = GenerateFunction(&codegen);
-    VectorAppend(&compiler->functions, code);
-    const char* emit_name = FunctionEmitName(decl->symbol);
-    VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));
-    CompilerStringIndexInsert(compiler->emitted_function_name_index, emit_name,
-                              decl->symbol);
+    if (code != NULL) {
+      VectorAppend(&compiler->functions, code);
+      const char* emit_name = FunctionEmitName(decl->symbol);
+      VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));
+      CompilerStringIndexInsert(compiler->emitted_function_name_index, emit_name,
+                                decl->symbol);
 
-    if (compiler->debug_output) {
-      BuildDebugInfoAfterCodegen(&compiler->debug_builder, decl->symbol);
+      if (compiler->debug_output) {
+        BuildDebugInfoAfterCodegen(&compiler->debug_builder, decl->symbol);
+      }
     }
     AddLocalStatics(syntax, decl->base.type);
     GeneratorDestruct(&codegen);

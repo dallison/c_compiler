@@ -65,4 +65,8 @@ typedef struct ELFFormatOps {
 // instance and must not be freed.
 const ELFFormatOps* ELFFormatOpsFor(bool is_64_bit);
 
+// Decode either SHT_REL or SHT_RELA without reading beyond the on-disk entry.
+void ELFFormatReadRelocation(const ELFFormatOps* ops, bool is_rela,
+                             ELFRelocation* dst, const void* src);
+
 #endif /* elf_format_h */

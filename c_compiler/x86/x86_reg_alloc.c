@@ -1,22 +1,24 @@
 //
-//  x86_64_reg_alloc.c
+//  x86_reg_alloc.c
 //  c_compiler_library
 //
 //  Created by David Allison on 2/21/18.
 //  Copyright © 2018 David Allison. All rights reserved.
 //
 
-#include "x86_64_reg_alloc.h"
+#include "x86_reg_alloc.h"
 #include <assert.h>
+#include <string.h>
+#include "x86_profile.h"
 #include <limits.h>
 #include "map.h"
-#include "x86_64_codegen.h"
-#include "x86_64_machine.h"
+#include "x86_codegen.h"
+#include "x86_machine.h"
 #include "target_basic_block.h"
 #include "compiler.h"
 
 
-static void AllocateRegister(X86_64RegisterAllocator* allocator,
+static void AllocateRegister(X86RegisterAllocator* allocator,
                              TargetInstruction* inst);
 
 static void Trap() {}
@@ -45,44 +47,53 @@ static void TrapBlock(TargetBasicBlock* block) {
   }
 }
 
-static void InitializeRegister(X86_64Register* reg, int num, X86_64RegisterType type) {
+static void InitializeRegister(X86Register* reg, int num, X86RegisterType type) {
   TargetRegisterInit(&reg->base, num);
   reg->type = type;
 }
 
-void X86_64RegisterAllocatorInit(X86_64RegisterAllocator* allocator, X86_64Generator* rv) {
+void X86RegisterAllocatorInit(X86RegisterAllocator* allocator, X86Generator* rv) {
   allocator->rv = rv;
 
-  for (int i = 0; i < X86_64_NUM_INT_REGS; i++) {
-    InitializeRegister(&allocator->int_regs[i], i, kX86_64RegTypeInt);
+  for (int i = 0; i < X86_MAX_INT_REGS; i++) {
+    InitializeRegister(&allocator->int_regs[i], i, kX86RegTypeInt);
   }
 
-  for (int i = 0; i < X86_64_NUM_FLOAT_REGS; i++) {
-    InitializeRegister(&allocator->float_regs[i], i, kX86_64RegTypeFloat);
+  for (int i = 0; i < X86_MAX_FLOAT_REGS; i++) {
+    InitializeRegister(&allocator->float_regs[i], i, kX86RegTypeFloat);
   }
 
-  // Reserve some registers.
-  allocator->int_regs[X86_64_INT_ZERO_REG].base.reserved = true;
-  allocator->int_regs[X86_64_FP_REG].base.reserved = true;
-  allocator->int_regs[X86_64_SP_REG].base.reserved = true;
-  allocator->int_regs[X86_64_SPILL_ADDR].base.reserved = true;
+  const X86Profile* profile = X86_P(allocator->rv);
 
-  // The 32-slot logical register file aliases x86-64's 16 physical registers,
-  // and some slots place a register in the wrong ABI class.  Reserve those so
-  // the allocator never uses a physical register inconsistently:
-  //
-  //  * Slot 7 is r12 living in the temp range.  r12 is callee-saved and is not
-  //    recognised by IsSavedReg() at this slot, so it would never be preserved
-  //    in the prologue and a leaf function would clobber the caller's r12.  Use
-  //    r12 only through its saved-range slot (18).
-  //  * Slots 22-25 are duplicate r12/r13/r14/r15 entries that alias slots
-  //    18-21, and slots 26-27 place caller-saved r10/r11 in the saved range
-  //    (they would be clobbered by any callee, so they cannot hold values that
-  //    must survive a call).
-  allocator->int_regs[7].base.reserved = true;
-  for (int i = 22; i <= 27; i++) {
-    allocator->int_regs[i].base.reserved = true;
+  if (profile->is_64bit) {
+    allocator->int_regs[profile->int_zero_reg].base.reserved = true;
   }
+  allocator->int_regs[profile->fp_reg].base.reserved = true;
+  allocator->int_regs[profile->sp_reg].base.reserved = true;
+  allocator->int_regs[profile->spill_addr].base.reserved = true;
+
+  if (profile->is_64bit) {
+    allocator->int_regs[7].base.reserved = true;
+    for (int i = 22; i <= 27; i++) {
+      allocator->int_regs[i].base.reserved = true;
+    }
+  }
+
+  allocator->num_register_ranges = X86_NUM_REGISTER_RANGES;
+  X86RegisterRange ranges[X86_NUM_REGISTER_RANGES] = {
+      {kX86RegTypeInt, profile->int_temp_start_1, profile->int_temp_end_1, "t", 0, true},
+      {kX86RegTypeInt, profile->int_temp_start_2, profile->int_temp_end_2, "t", 3, true},
+      {kX86RegTypeInt, profile->int_arg_start, profile->int_arg_end, "a", 0, true},
+      {kX86RegTypeInt, profile->ret_reg, profile->ret_reg, "ra", 0, true},
+      {kX86RegTypeInt, profile->int_saved_start_1, profile->int_saved_end_1, "s", 0, false},
+      {kX86RegTypeInt, profile->int_saved_start_2, profile->int_saved_end_2, "s", 2, false},
+      {kX86RegTypeFloat, profile->fp_temp_start_1, profile->fp_temp_end_1, "ft", 0, true},
+      {kX86RegTypeFloat, profile->fp_temp_start_2, profile->fp_temp_end_2, "ft", 2, true},
+      {kX86RegTypeFloat, profile->fp_arg_start, profile->fp_arg_end, "fa", 0, true},
+      {kX86RegTypeFloat, profile->fp_saved_start_1, profile->fp_saved_end_1, "fs", 0, false},
+      {kX86RegTypeFloat, profile->fp_saved_start_2, profile->fp_saved_end_2, "fs", 2, false},
+  };
+  memcpy(allocator->register_ranges, ranges, sizeof(ranges));
 
   BitSetInit(&allocator->used_int_regs);
   BitSetInit(&allocator->used_float_regs);
@@ -97,63 +108,39 @@ void X86_64RegisterAllocatorInit(X86_64RegisterAllocator* allocator, X86_64Gener
   allocator->allocating_depth = 0;
 }
 
-X86_64RegisterAllocator* NewX86_64RegisterAllocator(X86_64Generator* pcode) {
-  X86_64RegisterAllocator* reg_alloc = malloc(sizeof(X86_64RegisterAllocator));
-  X86_64RegisterAllocatorInit(reg_alloc, pcode);
+X86RegisterAllocator* NewX86RegisterAllocator(X86Generator* pcode) {
+  X86RegisterAllocator* reg_alloc = malloc(sizeof(X86RegisterAllocator));
+  X86RegisterAllocatorInit(reg_alloc, pcode);
   return reg_alloc;
 }
 
-void X86_64RegisterAllocatorDestruct(X86_64RegisterAllocator* allocator) {
+void X86RegisterAllocatorDestruct(X86RegisterAllocator* allocator) {
   BitSetDestruct(&allocator->used_int_regs);
   BitSetDestruct(&allocator->used_float_regs);
   BitSetDestruct(&allocator->preserved_instructions);
 }
 
-void X86_64RegisterAllocatorDelete(X86_64RegisterAllocator* alloc) {
-  X86_64RegisterAllocatorDestruct(alloc);
+void X86RegisterAllocatorDelete(X86RegisterAllocator* alloc) {
+  X86RegisterAllocatorDestruct(alloc);
   free(alloc);
 }
 
-// x86-64's ABI divides registers into various ranges, some of which are
-// temporary and some preserved across calls.  We use this array to
-// search for registers.
-static struct {
-  X86_64RegisterType type;  // Register type.
-  int start;            // Start of range.
-  int end;              // End of range.
-  const char* prefix;   // Register name prefix.
-  int base;
-  bool temp;
-} register_ranges[] = {
-    {kX86_64RegTypeInt, X86_64_INT_TEMP_START_1, X86_64_INT_TEMP_END_1, "t", 0, true},
-    {kX86_64RegTypeInt, X86_64_INT_TEMP_START_2, X86_64_INT_TEMP_END_2, "t", 3, true},
-    {kX86_64RegTypeInt, X86_64_INT_ARG_START, X86_64_INT_ARG_END, "a", 0, true},
-    {kX86_64RegTypeInt, X86_64_RET_REG, X86_64_RET_REG, "ra", 0, true},
-    {kX86_64RegTypeInt, X86_64_INT_SAVED_START_1, X86_64_INT_SAVED_END_1, "s", 0, false},
-    {kX86_64RegTypeInt, X86_64_INT_SAVED_START_2, X86_64_INT_SAVED_END_2, "s", 2, false},
-    {kX86_64RegTypeFloat, X86_64_FP_TEMP_START_1, X86_64_FP_TEMP_END_1, "ft", 0, true},
-    {kX86_64RegTypeFloat, X86_64_FP_TEMP_START_2, X86_64_FP_TEMP_END_2, "ft", 2, true},
-    {kX86_64RegTypeFloat, X86_64_FP_ARG_START, X86_64_FP_ARG_END, "fa", 0, true},
-    {kX86_64RegTypeFloat, X86_64_FP_SAVED_START_1, X86_64_FP_SAVED_END_1, "fs", 0, false},
-    {kX86_64RegTypeFloat, X86_64_FP_SAVED_START_2, X86_64_FP_SAVED_END_2, "fs", 2, false},
-};
+#define NUM_REG_RANGES(allocator) ((size_t)(allocator)->num_register_ranges)
 
-#define NUM_REG_RANGES (sizeof(register_ranges) / sizeof(register_ranges[0]))
-
-static void DumpRegisters(X86_64RegisterAllocator* allocator) {
+static void DumpRegisters(X86RegisterAllocator* allocator) {
   char buf[32];
-  for (X86_64RegisterType type = kX86_64RegTypeInt; type <= kX86_64RegTypeFloat; type++) {
-    X86_64Register* regs =
-        type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
-    for (int i = 0; i < NUM_REG_RANGES; i++) {
-      if (register_ranges[i].type == type) {
-        for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
+  for (X86RegisterType type = kX86RegTypeInt; type <= kX86RegTypeFloat; type++) {
+    X86Register* regs =
+        type == kX86RegTypeInt ? allocator->int_regs : allocator->float_regs;
+    for (int i = 0; i < NUM_REG_RANGES(allocator); i++) {
+      if (allocator->register_ranges[i].type == type) {
+        for (int j = allocator->register_ranges[i].start; j <= allocator->register_ranges[i].end; j++) {
           if (regs[j].base.owner == NULL) {
-            printf("%s(x%d): free\n", X86_64RegisterName(&regs[j], buf, sizeof(buf)), regs[j].base.num);
+            printf("%s(x%d): free\n", X86RegisterName(&regs[j], buf, sizeof(buf)), regs[j].base.num);
           } else {
             TargetInstruction* owner = regs[j].base.owner;
-            printf("%s(x%d): owner: @%d %s\n", X86_64RegisterName(&regs[j], buf, sizeof(buf)), regs[j].base.num, owner->id,
-                   X86_64OpcodeName(owner->opcode));
+            printf("%s(x%d): owner: @%d %s\n", X86RegisterName(&regs[j], buf, sizeof(buf)), regs[j].base.num, owner->id,
+                   X86OpcodeName(owner->opcode));
           }
         }
       }
@@ -161,7 +148,7 @@ static void DumpRegisters(X86_64RegisterAllocator* allocator) {
   }
 }
 
-static void AssignRegister(X86_64Register* reg, TargetInstruction* inst) {
+static void AssignRegister(X86Register* reg, TargetInstruction* inst) {
   assert(inst->reg == NULL);
   inst->reg = &reg->base;
   reg->base.owner = inst;
@@ -174,18 +161,24 @@ static void AssignRegister(X86_64Register* reg, TargetInstruction* inst) {
 // (e.g. logical slots 7, 18 and 22 all denote r12).  Map a logical slot to its
 // canonical physical register number so the allocator can avoid handing the
 // same physical register to two simultaneously-live values.
-static int X86_64IntPhysical(int slot) {
+static int X86IntPhysical(X86RegisterAllocator* allocator, int slot) {
+  if (!allocator->rv->profile->is_64bit) {
+    return (slot >= 0 && slot < allocator->rv->profile->num_int_regs) ? slot : -1;
+  }
   // Canonical x86-64 numbering: rax=0 rcx=1 rdx=2 rbx=3 rsp=4 rbp=5 rsi=6 rdi=7
   // r8=8 r9=9 r10=10 r11=11 r12=12 r13=13 r14=14 r15=15.  This mirrors the
   // kIntRegNames table used for printing.
-  static const int kPhys[X86_64_NUM_INT_REGS] = {
+  static const int kPhys[X86_MAX_INT_REGS] = {
       0,  0,  4,  11, 10, 10, 11, 12, 5,  3,  7,  6,  2,  1,  8,  9,
       10, 11, 12, 13, 14, 15, 12, 13, 14, 15, 10, 11, 8,  9,  10, 11,
   };
-  return (slot >= 0 && slot < X86_64_NUM_INT_REGS) ? kPhys[slot] : -1;
+  return (slot >= 0 && slot < X86_MAX_INT_REGS) ? kPhys[slot] : -1;
 }
 
-static int X86_64FloatPhysical(int slot) {
+static int X86FloatPhysical(X86RegisterAllocator* allocator, int slot) {
+  if (!allocator->rv->profile->is_64bit) {
+    return slot & 7;
+  }
   // The xmm name table is xmm0..xmm15 repeated, so the physical register is the
   // slot modulo 16.
   return slot & 15;
@@ -195,8 +188,15 @@ static int X86_64FloatPhysical(int slot) {
 // must never hold an allocator-managed value: r11 (spill-address / general
 // scratch in several emit paths) and xmm15 (used to shuttle integer values into
 // the SSE unit for ucomiss etc.).
-static bool X86_64PhysicalReserved(X86_64RegisterType type, int phys) {
-  if (type == kX86_64RegTypeInt) {
+static bool X86PhysicalReserved(X86RegisterAllocator* allocator,
+                                    X86RegisterType type, int phys) {
+  if (!allocator->rv->profile->is_64bit) {
+    if (type == kX86RegTypeFloat) {
+      return phys == 7;
+    }
+    return false;
+  }
+  if (type == kX86RegTypeInt) {
     // r11: spill-address register and general scratch in several emit paths.
     return phys == 11;
   }
@@ -205,18 +205,18 @@ static bool X86_64PhysicalReserved(X86_64RegisterType type, int phys) {
 
 // Is the physical register denoted by logical slot |slot| available, i.e. not
 // implicitly reserved and not already owned by a value in any aliasing slot?
-static bool X86_64PhysicalAvailable(X86_64RegisterAllocator* allocator,
-                                    X86_64RegisterType type, int slot) {
-  X86_64Register* regs =
-      type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
+static bool X86PhysicalAvailable(X86RegisterAllocator* allocator,
+                                    X86RegisterType type, int slot) {
+  X86Register* regs =
+      type == kX86RegTypeInt ? allocator->int_regs : allocator->float_regs;
   int num_regs =
-      type == kX86_64RegTypeInt ? X86_64_NUM_INT_REGS : X86_64_NUM_FLOAT_REGS;
-  int phys = type == kX86_64RegTypeInt ? X86_64IntPhysical(slot)
-                                       : X86_64FloatPhysical(slot);
-  if (X86_64PhysicalReserved(type, phys)) {
+      type == kX86RegTypeInt ? X86_MAX_INT_REGS : X86_MAX_FLOAT_REGS;
+  int phys = type == kX86RegTypeInt ? X86IntPhysical(allocator, slot)
+                                       : X86FloatPhysical(allocator, slot);
+  if (X86PhysicalReserved(allocator, type, phys)) {
     return false;
   }
-  unsigned pinned = type == kX86_64RegTypeInt ? allocator->pinned_int_phys
+  unsigned pinned = type == kX86RegTypeInt ? allocator->pinned_int_phys
                                               : allocator->pinned_float_phys;
   if ((pinned & (1u << phys)) != 0 && !regs[slot].base.reserved) {
     // A register variable holds this physical register for the whole function
@@ -230,8 +230,8 @@ static bool X86_64PhysicalAvailable(X86_64RegisterAllocator* allocator,
     if (k == slot) {
       continue;
     }
-    int other = type == kX86_64RegTypeInt ? X86_64IntPhysical(k)
-                                          : X86_64FloatPhysical(k);
+    int other = type == kX86RegTypeInt ? X86IntPhysical(allocator, k)
+                                          : X86FloatPhysical(allocator, k);
     if (other == phys && regs[k].base.owner != NULL) {
       return false;
     }
@@ -239,23 +239,23 @@ static bool X86_64PhysicalAvailable(X86_64RegisterAllocator* allocator,
   return true;
 }
 
-static X86_64Register* FindFreeRegister(X86_64RegisterAllocator* allocator,
-                                    X86_64RegisterType type, bool can_use_temp) {
-  X86_64Register* regs =
-      type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
-  for (size_t i = 0; i < NUM_REG_RANGES; i++) {
-    if (register_ranges[i].type == type) {
+static X86Register* FindFreeRegister(X86RegisterAllocator* allocator,
+                                    X86RegisterType type, bool can_use_temp) {
+  X86Register* regs =
+      type == kX86RegTypeInt ? allocator->int_regs : allocator->float_regs;
+  for (size_t i = 0; i < NUM_REG_RANGES(allocator); i++) {
+    if (allocator->register_ranges[i].type == type) {
       // If we are told not to use a temp register, ignore any that are
       // marked as temp.
-      if (!can_use_temp && register_ranges[i].temp) {
+      if (!can_use_temp && allocator->register_ranges[i].temp) {
         continue;
       }
-      for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
+      for (int j = allocator->register_ranges[i].start; j <= allocator->register_ranges[i].end; j++) {
         if (!regs[j].base.reserved && regs[j].base.owner == NULL &&
-            X86_64PhysicalAvailable(allocator, type, j)) {
+            X86PhysicalAvailable(allocator, type, j)) {
           // If we use the return address register, we must save it and
           // therefore we are not a leaf procedure.
-          if (regs[j].base.num == X86_64_RET_REG) {
+          if (regs[j].base.num == (X86_P(allocator->rv)->ret_reg)) {
             allocator->rv->not_leaf = true;
           }
           return &regs[j];
@@ -268,18 +268,18 @@ static X86_64Register* FindFreeRegister(X86_64RegisterAllocator* allocator,
   return NULL;
 }
 
-static void FreeRegister(X86_64RegisterAllocator* allocator, X86_64Register* reg) {
+static void FreeRegister(X86RegisterAllocator* allocator, X86Register* reg) {
   reg->base.owner = NULL;
 }
 
 // Free up any registers that are no longer needed by the instruction.  This
 // frees up all now-unused operands and destination.
-static void FreeRegisters(X86_64RegisterAllocator* allocator,
+static void FreeRegisters(X86RegisterAllocator* allocator,
                           TargetInstruction* inst) {
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
-      if (X86_64IsFixedRegister(op)) {
+      if (X86IsFixedRegister(op)) {
         continue;
       }
       TargetRegister* reg = op->reg;
@@ -294,7 +294,7 @@ static void FreeRegisters(X86_64RegisterAllocator* allocator,
         if (op->uses == 0 &&
             !TargetBasicBlockOutputs(inst->block, op)) {
           if (reg->owner == op) {
-            FreeRegister(allocator, (X86_64Register*)reg);
+            FreeRegister(allocator, (X86Register*)reg);
           }
         }
       }
@@ -304,19 +304,20 @@ static void FreeRegisters(X86_64RegisterAllocator* allocator,
 }
 
 // Is the register meant to be saved by the callee?
-static bool IsSavedReg(X86_64Register* reg) {
+static bool IsSavedReg(X86RegisterAllocator* allocator, X86Register* reg) {
+  const X86Profile* profile = X86_P(allocator->rv);
   int num = reg->base.num;
   switch (reg->type) {
-    case kX86_64RegTypeInt:
-      return (num >= X86_64_INT_SAVED_START_1 &&
-              num <= X86_64_INT_SAVED_END_1) ||
-             (num >= X86_64_INT_SAVED_START_2 &&
-              num <= X86_64_INT_SAVED_END_2);
-    case kX86_64RegTypeFloat:
-      return (num >= X86_64_FP_SAVED_START_1 &&
-              num <= X86_64_FP_SAVED_END_1) ||
-             (num >= X86_64_FP_SAVED_START_2 &&
-              num <= X86_64_FP_SAVED_END_2);
+    case kX86RegTypeInt:
+      return (num >= profile->int_saved_start_1 &&
+              num <= profile->int_saved_end_1) ||
+             (num >= profile->int_saved_start_2 &&
+              num <= profile->int_saved_end_2);
+    case kX86RegTypeFloat:
+      return (num >= profile->fp_saved_start_1 &&
+              num <= profile->fp_saved_end_1) ||
+             (num >= profile->fp_saved_start_2 &&
+              num <= profile->fp_saved_end_2);
   }
   return false;
 }
@@ -362,10 +363,10 @@ static int SpillCost(TargetInstruction* inst) {
 // back to is a read of whatever the new owner left there.  |reentered| holds
 // those blocks.
 static bool IsUnsafeSpillVictim(TargetInstruction* owner, BitSet* reentered) {
-  if (X86_64IsVarRegister(owner)) {
+  if (X86IsVarRegister(owner)) {
     return true;
   }
-  if (owner->dest != NULL && X86_64IsVarRegister(owner->dest)) {
+  if (owner->dest != NULL && X86IsVarRegister(owner->dest)) {
     return true;
   }
   for (size_t i = 0; i < owner->users.length; i++) {
@@ -382,7 +383,7 @@ static bool IsUnsafeSpillVictim(TargetInstruction* owner, BitSet* reentered) {
 // being allocated for.  An operand has to keep its register until that
 // instruction has read it; a destination has to keep it because the instruction
 // is about to write it.
-static bool IsBeingAllocated(X86_64RegisterAllocator* allocator,
+static bool IsBeingAllocated(X86RegisterAllocator* allocator,
                              TargetInstruction* value) {
   for (size_t d = 0; d < allocator->allocating_depth; d++) {
     TargetInstruction* user = allocator->allocating[d];
@@ -406,13 +407,13 @@ static bool IsBeingAllocated(X86_64RegisterAllocator* allocator,
 // |unsafe|, when not NULL, receives the cheapest value that could be taken if
 // there were no such reads, for a caller that has no way to proceed without
 // taking a register from something.
-static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
-                                           X86_64RegisterType type,
+static TargetInstruction* FindSpillVictim(X86RegisterAllocator* allocator,
+                                           X86RegisterType type,
                                            bool can_use_temp,
                                            TargetBasicBlock* block,
                                            TargetInstruction** unsafe) {
-  X86_64Register* regs =
-      type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
+  X86Register* regs =
+      type == kX86RegTypeInt ? allocator->int_regs : allocator->float_regs;
   BitSet reentered;
   BitSetInit(&reentered);
   TargetBasicBlockReachableAfter(&allocator->rv->base, block, &reentered);
@@ -423,12 +424,12 @@ static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
   // Find the instruction with the lowest spill cost.  Prefer values that are
   // safe to spill (not reassignable register variables); only fall back to an
   // unsafe victim if no safe register is available.
-  for (size_t i = 0; i < NUM_REG_RANGES; i++) {
-    if (register_ranges[i].type == type) {
-      if (!can_use_temp && register_ranges[i].temp) {
+  for (size_t i = 0; i < NUM_REG_RANGES(allocator); i++) {
+    if (allocator->register_ranges[i].type == type) {
+      if (!can_use_temp && allocator->register_ranges[i].temp) {
         continue;
       }
-      for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
+      for (int j = allocator->register_ranges[i].start; j <= allocator->register_ranges[i].end; j++) {
         if (!regs[j].base.reserved && regs[j].base.owner != NULL) {
           TargetInstruction* owner = regs[j].base.owner;
           assert((owner->flags & TARGET_INST_SPILLED) == 0);
@@ -438,7 +439,7 @@ static TargetInstruction* FindSpillVictim(X86_64RegisterAllocator* allocator,
           // The spill model stores the value and reloads it into some *other*
           // temporary, so spilling a fixed register silently delivers the
           // argument/result in the wrong place.  Never choose one as a victim.
-          if (X86_64IsFixedRegister(owner)) {
+          if (X86IsFixedRegister(owner)) {
             continue;
           }
           // The instruction being allocated reads all of its operands at once,
@@ -497,8 +498,8 @@ static bool IsVarRegDef(TargetInstruction* inst, TargetInstruction* varreg) {
   if (inst->dest == varreg) {
     return true;
   }
-  X86_64Opcode op = (X86_64Opcode)inst->opcode;
-  if ((op == X86_64_OP(mv) || op == X86_64_OP(fmv_s) || op == X86_64_OP(fmv_d)) &&
+  X86Opcode op = (X86Opcode)inst->opcode;
+  if ((op == X86_OP(mv) || op == X86_OP(fmv_s) || op == X86_OP(fmv_d)) &&
       inst->dest == NULL && inst->operand[0] == varreg &&
       inst->operand[1] != NULL) {
     return true;
@@ -512,7 +513,7 @@ static bool IsVarRegDef(TargetInstruction* inst, TargetInstruction* varreg) {
 // register, so earlier redefinitions only updated that register).  Insert a
 // store after every already-processed redefinition so the slot stays current;
 // future redefinitions are handled by SyncSpilledVarReg.
-static void InsertVarRegStoreBacks(X86_64RegisterAllocator* allocator,
+static void InsertVarRegStoreBacks(X86RegisterAllocator* allocator,
                                    TargetInstruction* varreg,
                                    TargetInstruction* spill,
                                    TargetInstruction* first_use) {
@@ -532,15 +533,15 @@ static void InsertVarRegStoreBacks(X86_64RegisterAllocator* allocator,
       if ((inst->flags & TARGET_INST_PROCESSED) == 0 || inst->reg == NULL) {
         continue;
       }
-      if ((int)inst->opcode == (int)X86_64_OP(spill) ||
-          (int)inst->opcode == (int)X86_64_OP(reload)) {
+      if ((int)inst->opcode == (int)X86_OP(spill) ||
+          (int)inst->opcode == (int)X86_OP(reload)) {
         continue;
       }
       if (!IsVarRegDef(inst, varreg)) {
         continue;
       }
       TargetInstruction* store = TargetNewInstruction2(
-          (TargetOpcode)X86_64_OP(spill), varreg, spill->operand[1]);
+          (TargetOpcode)X86_OP(spill), varreg, spill->operand[1]);
       store->reg = inst->reg;
       store->flags |= TARGET_INST_PROCESSED;
       TargetBasicBlockEmitAfter(gen, block, store, inst);
@@ -559,7 +560,7 @@ static void InsertVarRegStoreBacks(X86_64RegisterAllocator* allocator,
 // (store once, right after the `tmp` node itself) captures the register's
 // undefined value at the declaration point and never observes the real
 // per-branch definitions, so every reload reads garbage.
-static bool InstructionHasExternalDefs(X86_64RegisterAllocator* allocator,
+static bool InstructionHasExternalDefs(X86RegisterAllocator* allocator,
                                        TargetInstruction* target) {
   TargetGenerator* gen = &allocator->rv->base;
   for (size_t b = 0; b < gen->basic_blocks.length; b++) {
@@ -573,8 +574,8 @@ static bool InstructionHasExternalDefs(X86_64RegisterAllocator* allocator,
       if (inst == target) {
         continue;
       }
-      if ((int)inst->opcode == (int)X86_64_OP(spill) ||
-          (int)inst->opcode == (int)X86_64_OP(reload)) {
+      if ((int)inst->opcode == (int)X86_OP(spill) ||
+          (int)inst->opcode == (int)X86_OP(reload)) {
         continue;
       }
       if (IsVarRegDef(inst, target)) {
@@ -587,13 +588,13 @@ static bool InstructionHasExternalDefs(X86_64RegisterAllocator* allocator,
 
 static bool IsVectorValue(TargetInstruction* inst) {
   return inst != NULL &&
-         (((inst->flags & X86_64_VECTOR_VALUE) != 0) ||
-          (int)inst->opcode == (int)X86_64_OP(loadv) ||
-          (int)inst->opcode == (int)X86_64_OP(resultv));
+         (((inst->flags & X86_VECTOR_VALUE) != 0) ||
+          (int)inst->opcode == (int)X86_OP(loadv) ||
+          (int)inst->opcode == (int)X86_OP(resultv));
 }
 
-static X86_64Register* SpillInstruction(X86_64RegisterAllocator* allocator, TargetInstruction* inst) {
-  X86_64Register* reg = (X86_64Register*)inst->reg;    // Current register.
+static X86Register* SpillInstruction(X86RegisterAllocator* allocator, TargetInstruction* inst) {
+  X86Register* reg = (X86Register*)inst->reg;    // Current register.
   bool is_vector = IsVectorValue(inst);
 
   // Spilled values are addressed relative to the frame pointer (rbp).  A leaf
@@ -613,19 +614,19 @@ static X86_64Register* SpillInstruction(X86_64RegisterAllocator* allocator, Targ
     allocator->current_spilled_region_size =
         (allocator->current_spilled_region_size + 15) & ~15;
   }
-  TargetInstruction* spill = TargetNewInstruction2((TargetOpcode)X86_64_OP(spill), NULL,
+  TargetInstruction* spill = TargetNewInstruction2((TargetOpcode)X86_OP(spill), NULL,
                                                    TargetGetIntConstant(&allocator->rv->base,
                                                                         NULL,
                                                                         kTargetType32Bit,
                                                                         allocator->current_spilled_region_size));
   if (is_vector) {
-    spill->flags |= X86_64_VECTOR_VALUE;
+    spill->flags |= X86_VECTOR_VALUE;
   }
   allocator->current_spilled_region_size += is_vector ? 16 : 8;
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
-  if (X86_64IsVarRegister(inst)) {
+  if (X86IsVarRegister(inst)) {
     // Spilling a varreg.  This instruction is in the entry block but
     // it can't be spilled there.  It needs to be spilled at its first
     // use (the assignment to it).  This is going to be the first user
@@ -685,18 +686,18 @@ static X86_64Register* SpillInstruction(X86_64RegisterAllocator* allocator, Targ
 // overwritten by the register-argument move before its store executes).  The
 // spilled value's pending uses are reloaded on demand, mirroring
 // ReserveIdivRegisters which evicts rax/rdx the same way.
-static void EvictPhysicalRegister(X86_64RegisterAllocator* allocator,
-                                  X86_64RegisterType type, int slot,
+static void EvictPhysicalRegister(X86RegisterAllocator* allocator,
+                                  X86RegisterType type, int slot,
                                   TargetInstruction* keep) {
-  X86_64Register* regs =
-      type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
+  X86Register* regs =
+      type == kX86RegTypeInt ? allocator->int_regs : allocator->float_regs;
   int num_regs =
-      type == kX86_64RegTypeInt ? X86_64_NUM_INT_REGS : X86_64_NUM_FLOAT_REGS;
-  int phys = type == kX86_64RegTypeInt ? X86_64IntPhysical(slot)
-                                       : X86_64FloatPhysical(slot);
+      type == kX86RegTypeInt ? X86_MAX_INT_REGS : X86_MAX_FLOAT_REGS;
+  int phys = type == kX86RegTypeInt ? X86IntPhysical(allocator, slot)
+                                       : X86FloatPhysical(allocator, slot);
   for (int k = 0; k < num_regs; k++) {
-    int other = type == kX86_64RegTypeInt ? X86_64IntPhysical(k)
-                                          : X86_64FloatPhysical(k);
+    int other = type == kX86RegTypeInt ? X86IntPhysical(allocator, k)
+                                          : X86FloatPhysical(allocator, k);
     if (other != phys) {
       continue;
     }
@@ -725,7 +726,7 @@ static void EvictPhysicalRegister(X86_64RegisterAllocator* allocator,
 // the variable) would observe a stale value.  def_inst is the instruction that
 // just produced the new value (in def_inst->reg); varreg is the variable
 // register it assigns.
-static void SyncSpilledVarReg(X86_64RegisterAllocator* allocator,
+static void SyncSpilledVarReg(X86RegisterAllocator* allocator,
                               TargetInstruction* def_inst,
                               TargetInstruction* varreg) {
   if (varreg == NULL) {
@@ -747,7 +748,7 @@ static void SyncSpilledVarReg(X86_64RegisterAllocator* allocator,
   // Reuse the original slot's offset operand so the store and all reloads
   // reference the same stack location.
   TargetInstruction* store = TargetNewInstruction2(
-      (TargetOpcode)X86_64_OP(spill), varreg, orig_spill->operand[1]);
+      (TargetOpcode)X86_OP(spill), varreg, orig_spill->operand[1]);
   store->reg = def_inst->reg;
   store->flags |= TARGET_INST_PROCESSED;
   TargetBasicBlockEmitAfter(&allocator->rv->base, def_inst->block, store,
@@ -760,9 +761,9 @@ static void SyncSpilledVarReg(X86_64RegisterAllocator* allocator,
 // There is no counterpart in the xmm file: xmm15 is the emitter's scratch there
 // but it is not marked reserved, so handing it out would put it in reach of the
 // spill victim search.
-static X86_64Register* ScratchRegister(X86_64RegisterAllocator* allocator,
-                                       X86_64RegisterType type) {
-  return type == kX86_64RegTypeInt ? &allocator->int_regs[X86_64_SPILL_ADDR]
+static X86Register* ScratchRegister(X86RegisterAllocator* allocator,
+                                       X86RegisterType type) {
+  return type == kX86RegTypeInt ? &allocator->int_regs[(X86_P(allocator->rv)->spill_addr)]
                                    : NULL;
 }
 
@@ -783,19 +784,19 @@ static X86_64Register* ScratchRegister(X86_64RegisterAllocator* allocator,
 // consumer reads by name.
 static bool CanSpillAfterDefinition(TargetInstruction* inst) {
   return inst != NULL && inst->users.length > 0 && inst->block != NULL &&
-         !X86_64IsVarRegister(inst) && !X86_64IsFixedRegister(inst) &&
-         (inst->dest == NULL || !X86_64IsVarRegister(inst->dest));
+         !X86IsVarRegister(inst) && !X86IsFixedRegister(inst) &&
+         (inst->dest == NULL || !X86IsVarRegister(inst->dest));
 }
 
-static X86_64Register* AllocateRegisterWithType(X86_64RegisterAllocator* allocator,
+static X86Register* AllocateRegisterWithType(X86RegisterAllocator* allocator,
                                             TargetBasicBlock* block,
                                             TargetInstruction* inst,
-                                            X86_64RegisterType type,
+                                            X86RegisterType type,
                                             bool can_use_temp) {
-  X86_64Register* reg = FindFreeRegister(allocator, type, can_use_temp);
+  X86Register* reg = FindFreeRegister(allocator, type, can_use_temp);
 
   if (reg == NULL) {
-    X86_64Register* scratch = ScratchRegister(allocator, type);
+    X86Register* scratch = ScratchRegister(allocator, type);
     TargetInstruction* unsafe = NULL;
     TargetInstruction* victim = FindSpillVictim(
         allocator, type, can_use_temp, block,
@@ -811,14 +812,14 @@ static X86_64Register* AllocateRegisterWithType(X86_64RegisterAllocator* allocat
   if (reg->base.reserved) {
     return reg;
   }
-  if (!IsSavedReg(reg)) {
+  if (!IsSavedReg(allocator, reg)) {
     return reg;
   }
   switch (type) {
-    case kX86_64RegTypeInt:
+    case kX86RegTypeInt:
       BitSetInsert(&allocator->used_int_regs, reg->base.num);
       break;
-    case kX86_64RegTypeFloat:
+    case kX86RegTypeFloat:
       BitSetInsert(&allocator->used_float_regs, reg->base.num);
       break;
   }
@@ -829,7 +830,7 @@ static X86_64Register* AllocateRegisterWithType(X86_64RegisterAllocator* allocat
 // have already been emitted in blocks control can come back to.  Such a read
 // names the physical register and there is no way to point it at a stack slot
 // now, so the value has to stay where it is for the rest of the function.
-static bool MustKeepRegister(X86_64RegisterAllocator* allocator,
+static bool MustKeepRegister(X86RegisterAllocator* allocator,
                              TargetInstruction* owner,
                              TargetBasicBlock* block) {
   BitSet reentered;
@@ -847,7 +848,7 @@ static bool MustKeepRegister(X86_64RegisterAllocator* allocator,
 // clobbered for the length of its own expansion, and every read of |owner| --
 // the ones already emitted as much as the ones still to come -- still finds the
 // value in the register it was allocated.
-static void BorrowRegisterAround(X86_64RegisterAllocator* allocator,
+static void BorrowRegisterAround(X86RegisterAllocator* allocator,
                                  TargetInstruction* owner,
                                  TargetInstruction* inst) {
   allocator->rv->not_leaf = true;
@@ -865,16 +866,16 @@ static void BorrowRegisterAround(X86_64RegisterAllocator* allocator,
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }
   TargetInstruction* store = TargetNewInstruction2(
-      (TargetOpcode)X86_64_OP(spill), owner, offset);
+      (TargetOpcode)X86_OP(spill), owner, offset);
   store->reg = owner->reg;
   store->flags |= TARGET_INST_PROCESSED;
   if (is_vector) {
-    store->flags |= X86_64_VECTOR_VALUE;
+    store->flags |= X86_VECTOR_VALUE;
   }
   TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, store, inst);
 
   TargetInstruction* restore =
-      TargetNewInstruction1((TargetOpcode)X86_64_OP(reload), store);
+      TargetNewInstruction1((TargetOpcode)X86_OP(reload), store);
   restore->reg = owner->reg;
   restore->flags |= TARGET_INST_PROCESSED;
   TargetBasicBlockEmitAfter(&allocator->rv->base, inst->block, restore, inst);
@@ -886,11 +887,12 @@ static void BorrowRegisterAround(X86_64RegisterAllocator* allocator,
 // a call result, an outgoing argument, or a variable register.  Such a value is
 // normally spilled; one that cannot be is saved and restored around the
 // division instead.
-static void ReserveIdivRegisters(X86_64RegisterAllocator* allocator,
+static void ReserveIdivRegisters(X86RegisterAllocator* allocator,
                                  TargetInstruction* inst) {
-  static const int kIdivRegs[] = {X86_64_RET_REG, X86_64_INT_ARG_START + 2};
+  const X86Profile* profile = X86_P(allocator->rv);
+  int kIdivRegs[] = {profile->ret_reg, profile->int_arg_start + 2};
   for (size_t i = 0; i < sizeof(kIdivRegs) / sizeof(kIdivRegs[0]); i++) {
-    X86_64Register* reg = &allocator->int_regs[kIdivRegs[i]];
+    X86Register* reg = &allocator->int_regs[kIdivRegs[i]];
     TargetInstruction* owner = reg->base.owner;
     if (owner == NULL) {
       continue;
@@ -901,8 +903,8 @@ static void ReserveIdivRegisters(X86_64RegisterAllocator* allocator,
     // Spilling one marks it permanently resident in memory, so every later
     // write to it goes to the stack slot and never reaches the register the ABI
     // reads.  The division only needs rax for its own length, so borrow it.
-    if (X86_64IsVarRegister(owner) || X86_64IsFixedRegister(owner) ||
-        X86_64IsResult(owner) ||
+    if (X86IsVarRegister(owner) || X86IsFixedRegister(owner) ||
+        X86IsResult(owner) ||
         MustKeepRegister(allocator, owner, inst->block)) {
       BorrowRegisterAround(allocator, owner, inst);
       continue;
@@ -911,94 +913,94 @@ static void ReserveIdivRegisters(X86_64RegisterAllocator* allocator,
   }
 }
 
-static X86_64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
-  switch ((X86_64Opcode)inst->opcode) {
-    case X86_64_OP(constf):
-    case X86_64_OP(constd):
-    case X86_64_OP(fmv_s):
-    case X86_64_OP(fmv_d):
-    case X86_64_OP(fa0):
-    case X86_64_OP(fa1):
-    case X86_64_OP(fa2):
-    case X86_64_OP(fa3):
-    case X86_64_OP(fa4):
-    case X86_64_OP(fa5):
-    case X86_64_OP(fa6):
-    case X86_64_OP(fa7):
-    case X86_64_OP(fvarreg):
-    case X86_64_OP(loadss):
-    case X86_64_OP(loadsd):
-    case X86_64_OP(loadv):
-    case X86_64_OP(storess):
-    case X86_64_OP(storesd):
-    case X86_64_OP(storev):
-    case X86_64_OP(paddb):
-    case X86_64_OP(paddw):
-    case X86_64_OP(paddd):
-    case X86_64_OP(paddq):
-    case X86_64_OP(psubb):
-    case X86_64_OP(psubw):
-    case X86_64_OP(psubd):
-    case X86_64_OP(psubq):
-    case X86_64_OP(pand):
-    case X86_64_OP(por):
-    case X86_64_OP(pxor):
-    case X86_64_OP(pcmpeqb):
-    case X86_64_OP(pcmpeqw):
-    case X86_64_OP(pcmpeqd):
-    case X86_64_OP(pcmpgtb):
-    case X86_64_OP(pcmpgtw):
-    case X86_64_OP(pcmpgtd):
-    case X86_64_OP(addps):
-    case X86_64_OP(addpd):
-    case X86_64_OP(subps):
-    case X86_64_OP(subpd):
-    case X86_64_OP(mulps):
-    case X86_64_OP(mulpd):
-    case X86_64_OP(divps):
-    case X86_64_OP(divpd):
-    case X86_64_OP(addss):
-    case X86_64_OP(addsd):
-    case X86_64_OP(subss):
-    case X86_64_OP(subsd):
-    case X86_64_OP(mulss):
-    case X86_64_OP(mulsd):
-    case X86_64_OP(divss):
-    case X86_64_OP(divsd):
-    case X86_64_OP(sqrtss):
-    case X86_64_OP(sqrtsd):
-    case X86_64_OP(ucomiss):
-    case X86_64_OP(ucomisd):
-    case X86_64_OP(cvtsi2ss):
-    case X86_64_OP(cvtsi2sd):
-    case X86_64_OP(cvtss2sd):
-    case X86_64_OP(cvtsd2ss):
-    case X86_64_OP(movss):
-    case X86_64_OP(movsd):
-    case X86_64_OP(movd):
-    case X86_64_OP(fneg_ss):
-    case X86_64_OP(fneg_sd):
-    case X86_64_OP(callf):
-    case X86_64_OP(rcallf):
-    case X86_64_OP(resultf):
-    case X86_64_OP(resultd):
-    case X86_64_OP(resultv):
-      return kX86_64RegTypeFloat;
+static X86RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
+  switch ((X86Opcode)inst->opcode) {
+    case X86_OP(constf):
+    case X86_OP(constd):
+    case X86_OP(fmv_s):
+    case X86_OP(fmv_d):
+    case X86_OP(fa0):
+    case X86_OP(fa1):
+    case X86_OP(fa2):
+    case X86_OP(fa3):
+    case X86_OP(fa4):
+    case X86_OP(fa5):
+    case X86_OP(fa6):
+    case X86_OP(fa7):
+    case X86_OP(fvarreg):
+    case X86_OP(loadss):
+    case X86_OP(loadsd):
+    case X86_OP(loadv):
+    case X86_OP(storess):
+    case X86_OP(storesd):
+    case X86_OP(storev):
+    case X86_OP(paddb):
+    case X86_OP(paddw):
+    case X86_OP(paddd):
+    case X86_OP(paddq):
+    case X86_OP(psubb):
+    case X86_OP(psubw):
+    case X86_OP(psubd):
+    case X86_OP(psubq):
+    case X86_OP(pand):
+    case X86_OP(por):
+    case X86_OP(pxor):
+    case X86_OP(pcmpeqb):
+    case X86_OP(pcmpeqw):
+    case X86_OP(pcmpeqd):
+    case X86_OP(pcmpgtb):
+    case X86_OP(pcmpgtw):
+    case X86_OP(pcmpgtd):
+    case X86_OP(addps):
+    case X86_OP(addpd):
+    case X86_OP(subps):
+    case X86_OP(subpd):
+    case X86_OP(mulps):
+    case X86_OP(mulpd):
+    case X86_OP(divps):
+    case X86_OP(divpd):
+    case X86_OP(addss):
+    case X86_OP(addsd):
+    case X86_OP(subss):
+    case X86_OP(subsd):
+    case X86_OP(mulss):
+    case X86_OP(mulsd):
+    case X86_OP(divss):
+    case X86_OP(divsd):
+    case X86_OP(sqrtss):
+    case X86_OP(sqrtsd):
+    case X86_OP(ucomiss):
+    case X86_OP(ucomisd):
+    case X86_OP(cvtsi2ss):
+    case X86_OP(cvtsi2sd):
+    case X86_OP(cvtss2sd):
+    case X86_OP(cvtsd2ss):
+    case X86_OP(movss):
+    case X86_OP(movsd):
+    case X86_OP(movd):
+    case X86_OP(fneg_ss):
+    case X86_OP(fneg_sd):
+    case X86_OP(callf):
+    case X86_OP(rcallf):
+    case X86_OP(resultf):
+    case X86_OP(resultd):
+    case X86_OP(resultv):
+      return kX86RegTypeFloat;
 
-    case X86_64_OP(cvttsd2si):
-    case X86_64_OP(cvttss2si):
-    case X86_64_OP(movq_xmm):
-      return kX86_64RegTypeInt;
+    case X86_OP(cvttsd2si):
+    case X86_OP(cvttss2si):
+    case X86_OP(movq_xmm):
+      return kX86RegTypeInt;
 
     default:
-      return kX86_64RegTypeInt;
+      return kX86RegTypeInt;
   }
 }
 
 // Can we use a temp register?  If not we will have to use a saved one and
 // those are more expensive since they need to be saved on entry and reloaded
 // on exit.
-static bool CanUseTemp(X86_64RegisterAllocator* allocator, TargetInstruction* inst) {
+static bool CanUseTemp(X86RegisterAllocator* allocator, TargetInstruction* inst) {
   return !BitSetContains(&allocator->preserved_instructions, inst->id);
 }
 
@@ -1012,24 +1014,29 @@ static bool CanUseTemp(X86_64RegisterAllocator* allocator, TargetInstruction* in
 // physical registers and some slots are reserved (scratch / wrong ABI class),
 // so a slot that is reserved or maps to a reserved physical register cannot be
 // used; such variables fall back to the dynamic allocator.
-// Logical int slots that X86_64RegisterAllocatorInit() reserves because they
+// Logical int slots that X86RegisterAllocatorInit() reserves because they
 // alias another slot or place a register in the wrong ABI class.  Replicated
 // here as a pure predicate so it is independent of the runtime `.reserved`
 // flag, which ReserveVariableRegisters() also sets on register-variable slots.
-static bool X86_64IntSlotStructurallyReserved(int slot) {
-  if (slot == X86_64_INT_ZERO_REG || slot == X86_64_FP_REG ||
-      slot == X86_64_SP_REG || slot == X86_64_SPILL_ADDR || slot == 7) {
+static bool X86IntSlotStructurallyReserved(X86RegisterAllocator* allocator,
+                                           int slot) {
+  const X86Profile* profile = X86_P(allocator->rv);
+  if (slot == profile->int_zero_reg || slot == profile->fp_reg ||
+      slot == profile->sp_reg || slot == profile->spill_addr) {
     return true;
   }
-  // Slots 22-25 duplicate r12-r15 (slots 18-21) and 26-27 place caller-saved
-  // r10/r11 in the saved range, so they cannot hold call-surviving values.
-  if (slot >= 22 && slot <= 27) {
-    return true;
+  if (profile->is_64bit) {
+    if (slot == 7) {
+      return true;
+    }
+    if (slot >= 22 && slot <= 27) {
+      return true;
+    }
   }
   return false;
 }
 
-static int X86_64VarRegSlot(X86_64RegisterAllocator* allocator,
+static int X86VarRegSlot(X86RegisterAllocator* allocator,
                             bool is_fp, bool is_leaf, int varnum) {
   (void)allocator;
   // Only integer register variables use fixed slots.  Floating-point variables
@@ -1038,22 +1045,22 @@ static int X86_64VarRegSlot(X86_64RegisterAllocator* allocator,
   if (is_fp) {
     return -1;
   }
-  int first = is_leaf ? X86_64_FIRST_LEAF_INT_REG_VAR : X86_64_FIRST_INT_REG_VAR;
-  int last = is_leaf ? X86_64_LAST_LEAF_INT_REG_VAR : X86_64_LAST_INT_REG_VAR;
+  int first = is_leaf ? (X86_P(allocator->rv)->first_leaf_int_reg_var) : (X86_P(allocator->rv)->first_int_reg_var);
+  int last = is_leaf ? (X86_P(allocator->rv)->last_leaf_int_reg_var) : (X86_P(allocator->rv)->last_int_reg_var);
   int slot = first + varnum;
   if (varnum < 0 || slot > last) {
     return -1;
   }
-  if (X86_64PhysicalReserved(kX86_64RegTypeInt, X86_64IntPhysical(slot))) {
+  if (X86PhysicalReserved(allocator, kX86RegTypeInt, X86IntPhysical(allocator, slot))) {
     return -1;
   }
-  if (X86_64IntSlotStructurallyReserved(slot)) {
+  if (X86IntSlotStructurallyReserved(allocator, slot)) {
     return -1;
   }
   return slot;
 }
 
-static void AllocateVariableRegister(X86_64RegisterAllocator* allocator,
+static void AllocateVariableRegister(X86RegisterAllocator* allocator,
                                      TargetInstruction* inst) {
   bool is_leaf = allocator->rv->base.num_calls == 0 && compiler->optimize;
 
@@ -1062,15 +1069,15 @@ static void AllocateVariableRegister(X86_64RegisterAllocator* allocator,
     if (var->inst != inst) {
       continue;
     }
-    int slot = X86_64VarRegSlot(allocator, var->is_fp, is_leaf, var->varnum);
+    int slot = X86VarRegSlot(allocator, var->is_fp, is_leaf, var->varnum);
     if (slot < 0) {
       break;  // Fall back to dynamic allocation.
     }
-    X86_64Register* regs =
+    X86Register* regs =
         var->is_fp ? allocator->float_regs : allocator->int_regs;
-    X86_64Register* reg = &regs[slot];
+    X86Register* reg = &regs[slot];
     AssignRegister(reg, inst);
-    if (IsSavedReg(reg)) {
+    if (IsSavedReg(allocator, reg)) {
       if (var->is_fp) {
         BitSetInsert(&allocator->used_float_regs, reg->base.num);
       } else {
@@ -1081,12 +1088,12 @@ static void AllocateVariableRegister(X86_64RegisterAllocator* allocator,
   }
 
   // No fixed slot was available; allocate dynamically.
-  X86_64RegisterType reg_type = RegisterTypeFromInstruction(inst);
-  X86_64Register* reg = AllocateRegisterWithType(allocator, inst->block, inst,
+  X86RegisterType reg_type = RegisterTypeFromInstruction(inst);
+  X86Register* reg = AllocateRegisterWithType(allocator, inst->block, inst,
                                  reg_type, CanUseTemp(allocator, inst));
   AssignRegister(reg, inst);
-  if (IsSavedReg(reg)) {
-    if (reg_type == kX86_64RegTypeFloat) {
+  if (IsSavedReg(allocator, reg)) {
+    if (reg_type == kX86RegTypeFloat) {
       BitSetInsert(&allocator->used_float_regs, reg->base.num);
     } else {
       BitSetInsert(&allocator->used_int_regs, reg->base.num);
@@ -1094,31 +1101,31 @@ static void AllocateVariableRegister(X86_64RegisterAllocator* allocator,
   }
 }
 
-static COMPILER_UNUSED void AllocateForRmov(X86_64RegisterAllocator* allocator,
+static COMPILER_UNUSED void AllocateForRmov(X86RegisterAllocator* allocator,
                             TargetInstruction* inst) {
-  assert(((int)inst->opcode == (int)X86_64_OP(mv)) ||
-         ((int)inst->opcode == (int)X86_64_OP(fmv_s)) ||
-         ((int)inst->opcode == (int)X86_64_OP(fmv_d)));
+  assert(((int)inst->opcode == (int)X86_OP(mv)) ||
+         ((int)inst->opcode == (int)X86_OP(fmv_s)) ||
+         ((int)inst->opcode == (int)X86_OP(fmv_d)));
   TargetInstruction* dest = inst->operand[0];
   TargetInstruction* src = inst->operand[1];
 
-  if (X86_64IsVarRegister(dest) && dest->reg == NULL) {
+  if (X86IsVarRegister(dest) && dest->reg == NULL) {
     // Delayed allocation of variable register.
     AllocateVariableRegister(allocator, dest);
   }
-  X86_64Register* reg = (X86_64Register*)dest->reg;
+  X86Register* reg = (X86Register*)dest->reg;
   assert(reg != NULL);
   
-  if (((int)src->opcode == (int)X86_64_OP(spill))) {
+  if (((int)src->opcode == (int)X86_OP(spill))) {
     // If we are rmoving a spill we can just load it directly into the
     // destination register.  To do this, we convert the rmov
     // into a reload instruction
-    inst->opcode = (TargetOpcode)X86_64_OP(reload);
+    inst->opcode = (TargetOpcode)X86_OP(reload);
     inst->operand[0] = src;
     inst->operand[1] = NULL;
     TrapReload(inst);
   } else {
-    if (X86_64IsVarRegister(src) && src->reg == NULL) {
+    if (X86IsVarRegister(src) && src->reg == NULL) {
       // Delayed allocation of variable register.
       AllocateVariableRegister(allocator, src);
     }
@@ -1135,7 +1142,7 @@ static COMPILER_UNUSED void AllocateForRmov(X86_64RegisterAllocator* allocator,
 }
 
 
-static void ReloadSpills(X86_64RegisterAllocator* allocator,
+static void ReloadSpills(X86RegisterAllocator* allocator,
                          TargetInstruction* inst) {
   // Every operand of |inst| has to be in a register at the same time, so while
   // finding registers for the spilled ones none of them may be chosen as the
@@ -1144,7 +1151,7 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
   // different values.  Redirecting the loser to its spill slot is not an
   // option either, because the spill model rewrites a read only as it is
   // processed and these have been processed already.
-  bool pushed = allocator->allocating_depth < X86_64_MAX_ALLOCATION_DEPTH;
+  bool pushed = allocator->allocating_depth < X86_MAX_ALLOCATION_DEPTH;
   if (pushed) {
     allocator->allocating[allocator->allocating_depth++] = inst;
   }
@@ -1156,25 +1163,25 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
     TargetInstruction* spill = NULL;
-    if (op != NULL && (int)op->opcode == (int)X86_64_OP(spill)) {
+    if (op != NULL && (int)op->opcode == (int)X86_OP(spill)) {
       spill = op;
     } else if (op != NULL && (op->flags & TARGET_INST_SPILLED) != 0) {
       spill = MapFindPointerKey(&allocator->varreg_spills, op);
     }
     if (spill != NULL) {
-      TargetInstruction* reload = TargetNewInstruction1((TargetOpcode)X86_64_OP(reload),
+      TargetInstruction* reload = TargetNewInstruction1((TargetOpcode)X86_OP(reload),
                                                         spill);
       TrapReload(reload);
       TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, reload, inst);
       inst->operand[i] = reload;
       TargetInstruction* spilled_value =
           spill->operand[0] != NULL ? spill->operand[0] : op;
-      X86_64RegisterType reg_type =
+      X86RegisterType reg_type =
           RegisterTypeFromInstruction(spilled_value);
-      X86_64Register* reg = FindFreeRegister(
+      X86Register* reg = FindFreeRegister(
           allocator, reg_type, CanUseTemp(allocator, reload));
-      if (reg == NULL && !scratch_taken && X86_64IsStore(inst) && i == 1 &&
-          reg_type == kX86_64RegTypeInt) {
+      if (reg == NULL && !scratch_taken && X86IsStore(inst) && i == 1 &&
+          reg_type == kX86RegTypeInt) {
         // A store needs its value and address simultaneously.  Under high
         // pressure, allocating the address reload can otherwise spill the
         // value reload that operand[0] already references; the address then
@@ -1186,7 +1193,7 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
         scratch_taken = true;
       }
       if (reg == NULL) {
-        X86_64Register* scratch =
+        X86Register* scratch =
             scratch_taken ? NULL : ScratchRegister(allocator, reg_type);
         TargetInstruction* unsafe = NULL;
         TargetInstruction* victim = FindSpillVictim(
@@ -1206,8 +1213,8 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
       // ReloadSpills bypasses AllocateRegisterWithType, so record a saved
       // register here as well. Otherwise the generated function may use (for
       // example) rbx without preserving the caller's value.
-      if (IsSavedReg(reg)) {
-        if (reg_type == kX86_64RegTypeFloat) {
+      if (IsSavedReg(allocator, reg)) {
+        if (reg_type == kX86RegTypeFloat) {
           BitSetInsert(&allocator->used_float_regs, reg->base.num);
         } else {
           BitSetInsert(&allocator->used_int_regs, reg->base.num);
@@ -1227,28 +1234,28 @@ static void ReloadSpills(X86_64RegisterAllocator* allocator,
 // shared across all calls in a function, so binding a value to one must first
 // evict any unrelated value occupying the physical register (see the call site
 // in AllocateUsingDest).  Sets *type to the register file the destination uses.
-static bool X86_64FixedArgDestType(TargetInstruction* inst,
-                                   X86_64RegisterType* type) {
-  switch ((X86_64Opcode)inst->opcode) {
-    case X86_64_OP(a0):
-    case X86_64_OP(a1):
-    case X86_64_OP(a2):
-    case X86_64_OP(a3):
-    case X86_64_OP(a4):
-    case X86_64_OP(a5):
-    case X86_64_OP(a6):
-    case X86_64_OP(a7):
-      *type = kX86_64RegTypeInt;
+static bool X86FixedArgDestType(TargetInstruction* inst,
+                                   X86RegisterType* type) {
+  switch ((X86Opcode)inst->opcode) {
+    case X86_OP(a0):
+    case X86_OP(a1):
+    case X86_OP(a2):
+    case X86_OP(a3):
+    case X86_OP(a4):
+    case X86_OP(a5):
+    case X86_OP(a6):
+    case X86_OP(a7):
+      *type = kX86RegTypeInt;
       return true;
-    case X86_64_OP(fa0):
-    case X86_64_OP(fa1):
-    case X86_64_OP(fa2):
-    case X86_64_OP(fa3):
-    case X86_64_OP(fa4):
-    case X86_64_OP(fa5):
-    case X86_64_OP(fa6):
-    case X86_64_OP(fa7):
-      *type = kX86_64RegTypeFloat;
+    case X86_OP(fa0):
+    case X86_OP(fa1):
+    case X86_OP(fa2):
+    case X86_OP(fa3):
+    case X86_OP(fa4):
+    case X86_OP(fa5):
+    case X86_OP(fa6):
+    case X86_OP(fa7):
+      *type = kX86RegTypeFloat;
       return true;
     default:
       return false;
@@ -1262,12 +1269,12 @@ static bool X86_64FixedArgDestType(TargetInstruction* inst,
 // stay inside a block need to do so explicitly or all argument registers
 // gradually appear occupied by stale fixed-register values.
 static void ReleaseCallArgumentRegisters(
-    X86_64RegisterAllocator* allocator, TargetInstruction* call) {
-  for (int i = 0; i < X86_64_NUM_INT_REGS; i++) {
-    int phys = X86_64IntPhysical(i);
+    X86RegisterAllocator* allocator, TargetInstruction* call) {
+  for (int i = 0; i < X86_MAX_INT_REGS; i++) {
+    int phys = X86IntPhysical(allocator, i);
     bool is_argument = false;
-    for (int arg = 0; arg < X86_64_NUM_INT_ARGS; arg++) {
-      if (phys == X86_64IntPhysical(X86_64_INT_ARG_START + arg)) {
+    for (int arg = 0; arg < (X86_P(allocator->rv)->num_int_args); arg++) {
+      if (phys == X86IntPhysical(allocator, X86_P(allocator->rv)->int_arg_start + arg)) {
         is_argument = true;
         break;
       }
@@ -1277,11 +1284,11 @@ static void ReleaseCallArgumentRegisters(
       allocator->int_regs[i].base.owner = NULL;
     }
   }
-  for (int i = 0; i < X86_64_NUM_FLOAT_REGS; i++) {
-    int phys = X86_64FloatPhysical(i);
+  for (int i = 0; i < X86_MAX_FLOAT_REGS; i++) {
+    int phys = X86FloatPhysical(allocator, i);
     bool is_argument = false;
-    for (int arg = 0; arg < X86_64_NUM_FP_ARGS; arg++) {
-      if (phys == X86_64FloatPhysical(X86_64_FP_ARG_START + arg)) {
+    for (int arg = 0; arg < (X86_P(allocator->rv)->num_fp_args); arg++) {
+      if (phys == X86FloatPhysical(allocator, X86_P(allocator->rv)->fp_arg_start + arg)) {
         is_argument = true;
         break;
       }
@@ -1293,13 +1300,13 @@ static void ReleaseCallArgumentRegisters(
   }
 }
 
-static bool AllocateUsingDest(X86_64RegisterAllocator* allocator,
+static bool AllocateUsingDest(X86RegisterAllocator* allocator,
                               TargetInstruction* inst) {
   if (inst->dest == NULL) {
     return false;
   }
   if (inst->dest->reg == NULL) {
-    if (X86_64IsVarRegister(inst->dest)) {
+    if (X86IsVarRegister(inst->dest)) {
       AllocateVariableRegister(allocator, inst->dest);
     } else {
       AllocateRegister(allocator, inst->dest);
@@ -1316,8 +1323,8 @@ static bool AllocateUsingDest(X86_64RegisterAllocator* allocator,
   // (e.g. a stack-passed argument address parked in rdi/r8/r9 and overwritten
   // by the register-argument move before its store executes).  Spill any such
   // occupant first; its pending reads reload on demand.
-  X86_64RegisterType fixed_dest_type;
-  if (X86_64FixedArgDestType(inst->dest, &fixed_dest_type)) {
+  X86RegisterType fixed_dest_type;
+  if (X86FixedArgDestType(inst->dest, &fixed_dest_type)) {
     EvictPhysicalRegister(allocator, fixed_dest_type, inst->dest->reg->num,
                           inst->dest);
     // The argument-register pseudo-instruction is shared, so an earlier call's
@@ -1337,7 +1344,7 @@ static bool AllocateUsingDest(X86_64RegisterAllocator* allocator,
     // since been handed to another value, so writing it here would clobber that
     // value.  Route this assignment through the scratch register; the store-back
     // below writes the slot from there.
-    X86_64Register* scratch = ScratchRegister(
+    X86Register* scratch = ScratchRegister(
         allocator, RegisterTypeFromInstruction(inst->dest));
     if (scratch != NULL) {
       inst->reg = &scratch->base;
@@ -1365,13 +1372,13 @@ static bool AllocateUsingDest(X86_64RegisterAllocator* allocator,
   return true;
 }
 
-static void AllocateRegisterOnce(X86_64RegisterAllocator* allocator,
+static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
                                  TargetInstruction* inst);
 
-static void AllocateRegister(X86_64RegisterAllocator* allocator,
+static void AllocateRegister(X86RegisterAllocator* allocator,
                              TargetInstruction* inst) {
   bool pushed =
-      allocator->allocating_depth < X86_64_MAX_ALLOCATION_DEPTH;
+      allocator->allocating_depth < X86_MAX_ALLOCATION_DEPTH;
   if (pushed) {
     allocator->allocating[allocator->allocating_depth++] = inst;
   }
@@ -1381,12 +1388,12 @@ static void AllocateRegister(X86_64RegisterAllocator* allocator,
   }
 }
 
-static void AllocateRegisterOnce(X86_64RegisterAllocator* allocator,
+static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
                                  TargetInstruction* inst) {
    bool is_leaf = allocator->rv->base.num_calls == 0 &&
       compiler->optimize;
 
-  X86_64Opcode opcode = (X86_64Opcode)inst->opcode;
+  X86Opcode opcode = (X86Opcode)inst->opcode;
   
   TrapInstruction(inst);
 
@@ -1399,14 +1406,14 @@ static void AllocateRegisterOnce(X86_64RegisterAllocator* allocator,
 
   // rmov instructions use the register allocated to their first
   // operand as their own register.
-  if ((opcode == X86_64_OP(mv) || opcode == X86_64_OP(fmv_s) ||
-      opcode == X86_64_OP(fmv_d)) && inst->dest == NULL &&
+  if ((opcode == X86_OP(mv) || opcode == X86_OP(fmv_s) ||
+      opcode == X86_OP(fmv_d)) && inst->dest == NULL &&
       inst->operand[1] != NULL) {
     AllocateForRmov(allocator, inst);
     return;
   }
 
-  if (X86_64IsVarRegister(inst)) {
+  if (X86IsVarRegister(inst)) {
     // Variable regsiter.  Delay allocation until it's assigned to.
     // It will be assigned to by an rmov or from a destination
     // assignemnt.
@@ -1421,35 +1428,35 @@ static void AllocateRegisterOnce(X86_64RegisterAllocator* allocator,
     return;
   }
 
-  X86_64Register* reg;
+  X86Register* reg;
 
   // Free up any registers we can.
   FreeRegisters(allocator, inst);
 
-  switch ((X86_64Opcode)inst->opcode) {
-    case X86_64_OP(const8):
-    case X86_64_OP(const16):
-    case X86_64_OP(const32):
-    case X86_64_OP(const64):
-    case X86_64_OP(constf):
-    case X86_64_OP(constd):
-    case X86_64_OP(symbol):
-    case X86_64_OP(cmp):
-    case X86_64_OP(test):
-    case X86_64_OP(je):
-    case X86_64_OP(jne):
-    case X86_64_OP(jl):
-    case X86_64_OP(jb):
-    case X86_64_OP(jge):
-    case X86_64_OP(jae):
-    case X86_64_OP(jmp):
-    case X86_64_OP(label):
-    case X86_64_OP(ret):
-    case X86_64_OP(save):
-    case X86_64_OP(restore):
-    case X86_64_OP(literal):
-    case X86_64_OP(asm):
-    case X86_64_OP(loc):
+  switch ((X86Opcode)inst->opcode) {
+    case X86_OP(const8):
+    case X86_OP(const16):
+    case X86_OP(const32):
+    case X86_OP(const64):
+    case X86_OP(constf):
+    case X86_OP(constd):
+    case X86_OP(symbol):
+    case X86_OP(cmp):
+    case X86_OP(test):
+    case X86_OP(je):
+    case X86_OP(jne):
+    case X86_OP(jl):
+    case X86_OP(jb):
+    case X86_OP(jge):
+    case X86_OP(jae):
+    case X86_OP(jmp):
+    case X86_OP(label):
+    case X86_OP(ret):
+    case X86_OP(save):
+    case X86_OP(restore):
+    case X86_OP(literal):
+    case X86_OP(asm):
+    case X86_OP(loc):
       // These instructions do not have registers allocated to them.  They are
       // finished all the same: ReloadSpills above has already given them their
       // final operands, so a later spill must not treat them as a read it can
@@ -1459,110 +1466,114 @@ static void AllocateRegisterOnce(X86_64RegisterAllocator* allocator,
       inst->flags |= TARGET_INST_PROCESSED;
       return;
 
-    case X86_64_OP(regarg):
+    case X86_OP(regarg):
       // Always refers to fixed register so no allocation necessry.
       return;
       
-    case X86_64_OP(x0):
-      reg = &allocator->int_regs[X86_64_INT_ZERO_REG];
+    case X86_OP(x0):
+      reg = &allocator->int_regs[(X86_P(allocator->rv)->int_zero_reg)];
       break;
 
-    case X86_64_OP(fp):
-      reg = &allocator->int_regs[X86_64_FP_REG];
+    case X86_OP(fp):
+      reg = &allocator->int_regs[(X86_P(allocator->rv)->fp_reg)];
       break;
 
-    case X86_64_OP(sp):
-      reg = &allocator->int_regs[X86_64_SP_REG];
+    case X86_OP(sp):
+      reg = &allocator->int_regs[(X86_P(allocator->rv)->sp_reg)];
       break;
 
-    case X86_64_OP(t0):
-      reg = &allocator->int_regs[X86_64_INT_TEMP_START_1];
+    case X86_OP(t0):
+      reg = &allocator->int_regs[(X86_P(allocator->rv)->int_temp_start_1)];
       break;
 
-    case X86_64_OP(a0):
-    case X86_64_OP(a1):
-    case X86_64_OP(a2):
-    case X86_64_OP(a3):
-    case X86_64_OP(a4):
-    case X86_64_OP(a5):
-    case X86_64_OP(a6):
-    case X86_64_OP(a7):
-      reg = &allocator->int_regs[(int)inst->opcode - X86_64_OP(a0) + X86_64_INT_ARG_START];
+    case X86_OP(a0):
+    case X86_OP(a1):
+    case X86_OP(a2):
+    case X86_OP(a3):
+    case X86_OP(a4):
+    case X86_OP(a5):
+    case X86_OP(a6):
+    case X86_OP(a7):
+      reg = &allocator->int_regs[(int)inst->opcode - X86_OP(a0) + (X86_P(allocator->rv)->int_arg_start)];
       if (InstructionHasExternalDefs(allocator, inst)) {
         inst->reg = &reg->base;
         inst->uses = (int)inst->users.length;
         inst->flags |= TARGET_INST_PROCESSED;
         return;
       }
-      EvictPhysicalRegister(allocator, kX86_64RegTypeInt, reg->base.num, inst);
+      EvictPhysicalRegister(allocator, kX86RegTypeInt, reg->base.num, inst);
       break;
 
-    case X86_64_OP(ivarreg):
-    case X86_64_OP(fvarreg):
+    case X86_OP(ivarreg):
+    case X86_OP(fvarreg):
       assert(false);
       COMPILER_UNREACHABLE();
       
-    case X86_64_OP(fa0):
-    case X86_64_OP(fa1):
-    case X86_64_OP(fa2):
-    case X86_64_OP(fa3):
-    case X86_64_OP(fa4):
-    case X86_64_OP(fa5):
-    case X86_64_OP(fa6):
-    case X86_64_OP(fa7):
+    case X86_OP(fa0):
+    case X86_OP(fa1):
+    case X86_OP(fa2):
+    case X86_OP(fa3):
+    case X86_OP(fa4):
+    case X86_OP(fa5):
+    case X86_OP(fa6):
+    case X86_OP(fa7):
       reg = &allocator
-                 ->float_regs[(int)inst->opcode - X86_64_OP(fa0) + X86_64_FP_ARG_START];
+                 ->float_regs[(int)inst->opcode - X86_OP(fa0) + (X86_P(allocator->rv)->fp_arg_start)];
       if (InstructionHasExternalDefs(allocator, inst)) {
         inst->reg = &reg->base;
         inst->uses = (int)inst->users.length;
         inst->flags |= TARGET_INST_PROCESSED;
         return;
       }
-      EvictPhysicalRegister(allocator, kX86_64RegTypeFloat, reg->base.num, inst);
+      EvictPhysicalRegister(allocator, kX86RegTypeFloat, reg->base.num, inst);
       break;
 
-    case X86_64_OP(structreturn):
-      reg = &allocator->int_regs[(is_leaf ? X86_64_FIRST_LEAF_INT_REG_VAR
-                                          : X86_64_FIRST_INT_REG_VAR) +
+    case X86_OP(structreturn):
+      reg = &allocator->int_regs[(is_leaf ? (X86_P(allocator->rv)->first_leaf_int_reg_var)
+                                          : (X86_P(allocator->rv)->first_int_reg_var)) +
                                  allocator->rv->struct_return_reg];
       BitSetInsert(&allocator->used_int_regs, reg->base.num);
       break;
 
-    case X86_64_OP(resulti):
-      reg = &allocator->int_regs[X86_64_INT_RETURN_REG];
+    case X86_OP(resulti):
+      reg = &allocator->int_regs[(X86_P(allocator->rv)->ret_reg)];
       break;
 
-    case X86_64_OP(resultf):
-    case X86_64_OP(resultd):
-    case X86_64_OP(resultv):
-      reg = &allocator->float_regs[X86_64_FLOAT_RETURN_REG];
+    case X86_OP(resulth):
+      reg = &allocator->int_regs[(X86_P(allocator->rv)->int_return_value_1)];
       break;
 
-    case X86_64_OP(call):
-    case X86_64_OP(rcall):
-      reg = &allocator->int_regs[X86_64_INT_RETURN_REG];
+    case X86_OP(resultf):
+    case X86_OP(resultd):
+    case X86_OP(resultv):
+      reg = &allocator->float_regs[X86_P(allocator->rv)->fp_return_value_0];
       break;
-    case X86_64_OP(callf):
-    case X86_64_OP(rcallf):
-      reg = &allocator->float_regs[X86_64_FLOAT_RETURN_REG];
+
+    case X86_OP(call):
+    case X86_OP(rcall):
+      reg = &allocator->int_regs[(X86_P(allocator->rv)->ret_reg)];
+      break;
+    case X86_OP(callf):
+    case X86_OP(rcallf):
+      reg = &allocator->float_regs[X86_P(allocator->rv)->fp_return_value_0];
       break;
       
-    case X86_64_OP(ucomiss):
-    case X86_64_OP(ucomisd):
+    case X86_OP(ucomiss):
+    case X86_OP(ucomisd):
       reg = AllocateRegisterWithType(allocator, inst->block, inst,
-                                     kX86_64RegTypeInt, CanUseTemp(allocator, inst));
+                                     kX86RegTypeInt, CanUseTemp(allocator, inst));
       break;
 
-    case X86_64_OP(idiv):
-    case X86_64_OP(div):
-    case X86_64_OP(mod):
+    case X86_OP(idiv):
+    case X86_OP(div):
+    case X86_OP(mod):
       ReserveIdivRegisters(allocator, inst);
       reg = AllocateRegisterWithType(allocator, inst->block, inst,
-                                     kX86_64RegTypeInt, CanUseTemp(allocator, inst));
+                                     kX86RegTypeInt, CanUseTemp(allocator, inst));
       break;
 
     default: {
-      X86_64RegisterType reg_type = RegisterTypeFromInstruction(inst);
+      X86RegisterType reg_type = RegisterTypeFromInstruction(inst);
       reg = AllocateRegisterWithType(allocator, inst->block, inst,
                                      reg_type, CanUseTemp(allocator, inst));
     }
@@ -1570,8 +1581,8 @@ static void AllocateRegisterOnce(X86_64RegisterAllocator* allocator,
 
   AssignRegister(reg, inst);
 
-  if (opcode == X86_64_OP(call) || opcode == X86_64_OP(rcall) ||
-      opcode == X86_64_OP(callf) || opcode == X86_64_OP(rcallf)) {
+  if (opcode == X86_OP(call) || opcode == X86_OP(rcall) ||
+      opcode == X86_OP(callf) || opcode == X86_OP(rcallf)) {
     ReleaseCallArgumentRegisters(allocator, inst);
   }
 
@@ -1630,19 +1641,19 @@ static bool BetterInputClaim(TargetInstruction* candidate,
 // The value holding the physical register denoted by logical slot |slot|, which
 // may have been allocated through any of the logical slots aliasing it.  Returns
 // NULL when the register is free; *holder is the slot recording the ownership.
-static TargetInstruction* X86_64PhysicalOwner(X86_64RegisterAllocator* allocator,
-                                              X86_64RegisterType type, int slot,
-                                              X86_64Register** holder) {
-  X86_64Register* regs =
-      type == kX86_64RegTypeInt ? allocator->int_regs : allocator->float_regs;
+static TargetInstruction* X86PhysicalOwner(X86RegisterAllocator* allocator,
+                                              X86RegisterType type, int slot,
+                                              X86Register** holder) {
+  X86Register* regs =
+      type == kX86RegTypeInt ? allocator->int_regs : allocator->float_regs;
   int num_regs =
-      type == kX86_64RegTypeInt ? X86_64_NUM_INT_REGS : X86_64_NUM_FLOAT_REGS;
-  int phys = type == kX86_64RegTypeInt ? X86_64IntPhysical(slot)
-                                       : X86_64FloatPhysical(slot);
+      type == kX86RegTypeInt ? X86_MAX_INT_REGS : X86_MAX_FLOAT_REGS;
+  int phys = type == kX86RegTypeInt ? X86IntPhysical(allocator, slot)
+                                       : X86FloatPhysical(allocator, slot);
   *holder = NULL;
   for (int k = 0; k < num_regs; k++) {
-    int other = type == kX86_64RegTypeInt ? X86_64IntPhysical(k)
-                                          : X86_64FloatPhysical(k);
+    int other = type == kX86RegTypeInt ? X86IntPhysical(allocator, k)
+                                          : X86FloatPhysical(allocator, k);
     if (other != phys || regs[k].base.owner == NULL) {
       continue;
     }
@@ -1652,23 +1663,23 @@ static TargetInstruction* X86_64PhysicalOwner(X86_64RegisterAllocator* allocator
   return NULL;
 }
 
-static void ClaimInputRegister(X86_64RegisterAllocator* allocator,
+static void ClaimInputRegister(X86RegisterAllocator* allocator,
                                TargetBasicBlock* block,
                                TargetInstruction* inst) {
   if (inst->reg == NULL) {
     return;
   }
-  if (((int)inst->opcode == (int)X86_64_OP(spill)) ||
+  if (((int)inst->opcode == (int)X86_OP(spill)) ||
       (inst->flags & TARGET_INST_SPILLED) != 0) {
     return;
   }
   if (inst->uses == 0 && !TargetBasicBlockOutputs(block, inst)) {
     return;
   }
-  X86_64RegisterType type = ((X86_64Register*)inst->reg)->type;
-  X86_64Register* holder = NULL;
+  X86RegisterType type = ((X86Register*)inst->reg)->type;
+  X86Register* holder = NULL;
   TargetInstruction* owner =
-      X86_64PhysicalOwner(allocator, type, inst->reg->num, &holder);
+      X86PhysicalOwner(allocator, type, inst->reg->num, &holder);
   if (owner == inst) {
     return;
   }
@@ -1687,17 +1698,17 @@ static void ClaimInputRegister(X86_64RegisterAllocator* allocator,
   inst->reg->owner = inst;
 }
 
-static void InitializeBasicBlockRegisters(X86_64RegisterAllocator* allocator,
+static void InitializeBasicBlockRegisters(X86RegisterAllocator* allocator,
                                           TargetBasicBlock* block) {
-  for (int i = 0; i < X86_64_NUM_INT_REGS; i++) {
-    X86_64Register* reg = &allocator->int_regs[i];
+  for (int i = 0; i < X86_MAX_INT_REGS; i++) {
+    X86Register* reg = &allocator->int_regs[i];
     if (reg->base.reserved) {
       continue;
     }
     reg->base.owner = NULL;
   }
-  for (int i = 0; i < X86_64_NUM_FLOAT_REGS; i++) {
-     X86_64Register* reg = &allocator->float_regs[i];
+  for (int i = 0; i < X86_MAX_FLOAT_REGS; i++) {
+     X86Register* reg = &allocator->float_regs[i];
      if (reg->base.reserved) {
        continue;
      }
@@ -1714,7 +1725,7 @@ static void ProcessBlock(TargetBasicBlock* block, void* data) {
   TrapBlock(block);
   
   // printf("Allocating registers for block %zd\n", block->block_id);
-  X86_64RegisterAllocator* allocator = data;
+  X86RegisterAllocator* allocator = data;
 
   // For a basic block, the inputs specify what instructions are alive
   // on entry.  An alive instruction has a register allocated to it.  All
@@ -1731,7 +1742,7 @@ static void ProcessBlock(TargetBasicBlock* block, void* data) {
   }
 }
 
-static void ProcessBasicBlock(X86_64RegisterAllocator* allocator,
+static void ProcessBasicBlock(X86RegisterAllocator* allocator,
                               TargetBasicBlock* block) {
   TargetBasicBlockTraverseDominatorTree(&allocator->rv->base, block,
                                         ProcessBlock, kTraversePreOrder,
@@ -1746,20 +1757,20 @@ static void ProcessBasicBlock(X86_64RegisterAllocator* allocator,
 // unrelated value (e.g. a pooled loop-bound constant) before the variable is
 // allocated, and the variable's later assignment would then clobber that
 // still-live value.  Reserve them up front.
-static void ReserveVariableRegisters(X86_64RegisterAllocator* allocator) {
+static void ReserveVariableRegisters(X86RegisterAllocator* allocator) {
   bool is_leaf = allocator->rv->base.num_calls == 0 && compiler->optimize;
   for (size_t i = 0; i < allocator->rv->var_regs.length; i++) {
     RegisterVariable* var = allocator->rv->var_regs.value.p[i];
-    int slot = X86_64VarRegSlot(allocator, var->is_fp, is_leaf, var->varnum);
+    int slot = X86VarRegSlot(allocator, var->is_fp, is_leaf, var->varnum);
     if (slot < 0) {
       continue;
     }
     if (var->is_fp) {
       allocator->float_regs[slot].base.reserved = true;
-      allocator->pinned_float_phys |= 1u << X86_64FloatPhysical(slot);
+      allocator->pinned_float_phys |= 1u << X86FloatPhysical(allocator, slot);
     } else {
       allocator->int_regs[slot].base.reserved = true;
-      allocator->pinned_int_phys |= 1u << X86_64IntPhysical(slot);
+      allocator->pinned_int_phys |= 1u << X86IntPhysical(allocator, slot);
     }
   }
   // The struct-return pointer is a register variable in all but name: it is
@@ -1771,11 +1782,11 @@ static void ReserveVariableRegisters(X86_64RegisterAllocator* allocator) {
   // is placed at the declaration point, saving whatever the register happened
   // to hold on entry to the function, and later reads then reload that.
   if (allocator->rv->struct_return_reg >= 0) {
-    int slot = (is_leaf ? X86_64_FIRST_LEAF_INT_REG_VAR
-                        : X86_64_FIRST_INT_REG_VAR) +
+    int slot = (is_leaf ? (X86_P(allocator->rv)->first_leaf_int_reg_var)
+                        : (X86_P(allocator->rv)->first_int_reg_var)) +
                allocator->rv->struct_return_reg;
     allocator->int_regs[slot].base.reserved = true;
-    allocator->pinned_int_phys |= 1u << X86_64IntPhysical(slot);
+    allocator->pinned_int_phys |= 1u << X86IntPhysical(allocator, slot);
   }
 }
 
@@ -1786,7 +1797,7 @@ static void ReserveVariableRegisters(X86_64RegisterAllocator* allocator) {
 // the time the division is reached the reads it invalidates may already have
 // been emitted naming the register.  Pre-colour instead: in a function that
 // divides at all, rax and rdx belong to the divisions and nothing else.
-static void ReserveDivisionRegisters(X86_64RegisterAllocator* allocator) {
+static void ReserveDivisionRegisters(X86RegisterAllocator* allocator) {
   TargetGenerator* gen = &allocator->rv->base;
   for (size_t b = 0; b < gen->basic_blocks.length; b++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[b];
@@ -1795,12 +1806,12 @@ static void ReserveDivisionRegisters(X86_64RegisterAllocator* allocator) {
     // would leave rax and rdx in the allocator's hands.
     for (TargetInstruction* inst = block->code; inst != NULL;
          inst = inst == block->end_code ? NULL : TargetNext(inst)) {
-      switch ((X86_64Opcode)inst->opcode) {
-        case X86_64_OP(idiv):
-        case X86_64_OP(div):
-        case X86_64_OP(mod):
-          allocator->int_regs[X86_64_RET_REG].base.reserved = true;
-          allocator->int_regs[X86_64_INT_ARG_START + 2].base.reserved = true;
+      switch ((X86Opcode)inst->opcode) {
+        case X86_OP(idiv):
+        case X86_OP(div):
+        case X86_OP(mod):
+          allocator->int_regs[(X86_P(allocator->rv)->ret_reg)].base.reserved = true;
+          allocator->int_regs[(X86_P(allocator->rv)->int_arg_start) + 2].base.reserved = true;
           return;
         default:
           break;
@@ -1810,15 +1821,16 @@ static void ReserveDivisionRegisters(X86_64RegisterAllocator* allocator) {
 }
 
 static TargetInstruction* CreateCallResultCopy(TargetInstruction* call) {
-  X86_64Opcode call_opcode = (X86_64Opcode)call->opcode;
+  X86Opcode call_opcode = (X86Opcode)call->opcode;
   TargetOpcode move_opcode =
-      call_opcode == X86_64_OP(callf) || call_opcode == X86_64_OP(rcallf)
-          ? (TargetOpcode)X86_64_OP(fmv_d)
-          : (TargetOpcode)X86_64_OP(mv);
+      call_opcode == X86_OP(callf) || call_opcode == X86_OP(rcallf)
+          ? (TargetOpcode)X86_OP(fmv_d)
+          : (TargetOpcode)X86_OP(mv);
   return TargetNewInstruction1(move_opcode, call);
 }
 
-void X86_64AllocateRegisters(X86_64RegisterAllocator* allocator) {
+void X86AllocateRegisters(X86RegisterAllocator* allocator) {
+  X86SetRegisterNameProfile(X86_P(allocator->rv));
   ReserveDivisionRegisters(allocator);
   TargetMarkCallPreservedInstructions(&allocator->rv->base,
                                       &allocator->preserved_instructions);
@@ -1846,36 +1858,67 @@ void X86_64AllocateRegisters(X86_64RegisterAllocator* allocator) {
   }
 }
 
-const char* X86_64RegisterName(X86_64Register* reg, char* buf, size_t len) {
-  return X86_64RegisterNameFromNum(reg->base.num, reg->type, buf, len);
+static const X86Profile* g_x86_reg_name_profile;
+
+void X86SetRegisterNameProfile(const X86Profile* profile) {
+  g_x86_reg_name_profile = profile;
 }
 
-const char* X86_64RegisterNameFromNum(int num, X86_64RegisterType type, char* buf,
-                                  size_t len) {
-  static const char* kIntRegNames[X86_64_NUM_INT_REGS] = {
+const X86Profile* X86CurrentRegisterNameProfile(void) {
+  return g_x86_reg_name_profile != NULL ? g_x86_reg_name_profile
+                                        : &kX86ProfileAMD64;
+}
+
+const char* X86RegisterName(X86Register* reg, char* buf, size_t len) {
+  const X86Profile* profile = g_x86_reg_name_profile != NULL ? g_x86_reg_name_profile
+                                                             : &kX86ProfileAMD64;
+  return X86RegisterNameFromNumImpl(reg->base.num, reg->type, buf, len, profile);
+}
+
+const char* X86RegisterNameFromNumImpl(int num, X86RegisterType type, char* buf,
+                                       size_t len, const X86Profile* profile) {
+  if (profile == NULL) {
+    profile = g_x86_reg_name_profile != NULL ? g_x86_reg_name_profile
+                                             : &kX86ProfileAMD64;
+  }
+
+  static const char* kAmd64IntRegNames[X86_MAX_INT_REGS] = {
       "rax",  "rax",  "rsp",  "r11",  "r10",  "r10",  "r11",  "r12",
       "rbp",  "rbx",  "rdi",  "rsi",  "rdx",  "rcx",  "r8",   "r9",
       "r10",  "r11",  "r12",  "r13",  "r14",  "r15",  "r12",  "r13",
       "r14",  "r15",  "r10",  "r11",  "r8",   "r9",   "r10",  "r11",
   };
-  static const char* kFloatRegNames[X86_64_NUM_FLOAT_REGS] = {
+  static const char* kAmd64FloatRegNames[X86_MAX_FLOAT_REGS] = {
       "xmm0",  "xmm1",  "xmm2",  "xmm3",  "xmm4",  "xmm5",  "xmm6",  "xmm7",
       "xmm8",  "xmm9",  "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
       "xmm0",  "xmm1",  "xmm2",  "xmm3",  "xmm4",  "xmm5",  "xmm6",  "xmm7",
       "xmm8",  "xmm9",  "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
   };
+  static const char* kI386IntRegNames[8] = {
+      "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi",
+  };
+  static const char* kI386FloatRegNames[8] = {
+      "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+  };
 
-  if (type == kX86_64RegTypeInt) {
-    if (num >= 0 && num < X86_64_NUM_INT_REGS) {
-      snprintf(buf, len, "%s", kIntRegNames[num]);
+  const char* const* int_names =
+      profile->is_64bit ? kAmd64IntRegNames : kI386IntRegNames;
+  const char* const* float_names =
+      profile->is_64bit ? kAmd64FloatRegNames : kI386FloatRegNames;
+  int num_int_regs = profile->num_int_regs;
+  int num_float_regs = profile->num_float_regs;
+
+  if (type == kX86RegTypeInt) {
+    if (num >= 0 && num < num_int_regs) {
+      snprintf(buf, len, "%s", int_names[num]);
       return buf;
     }
-    snprintf(buf, len, "r%d", num);
+    snprintf(buf, len, profile->is_64bit ? "r%d" : "eax", num);
     return buf;
   }
 
-  if (num >= 0 && num < X86_64_NUM_FLOAT_REGS) {
-    snprintf(buf, len, "%s", kFloatRegNames[num]);
+  if (num >= 0 && num < num_float_regs) {
+    snprintf(buf, len, "%s", float_names[num]);
     return buf;
   }
   snprintf(buf, len, "xmm%d", num);

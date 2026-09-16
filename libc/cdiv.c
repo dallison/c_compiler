@@ -51,7 +51,7 @@ lldiv_t lldiv(long long int numer, long long int denom) {
 #endif
 }
 
-#if defined(__arm__)
+#if defined(__arm__) || defined(__i386__)
 // 32-bit ARM has no hardware 64-bit multiply, divide or modulo.  The code
 // generator lowers those operations into calls to the libgcc-style runtime
 // helpers below.  These implementations deliberately use only 64-bit add,
@@ -71,6 +71,30 @@ unsigned long long __muldi3(unsigned long long a, unsigned long long b) {
     b >>= 1;
   }
   return result;
+}
+
+unsigned long long __ashldi3(unsigned long long value, int count) {
+  count &= 63;
+  while (count-- != 0) {
+    value <<= 1;
+  }
+  return value;
+}
+
+unsigned long long __lshrdi3(unsigned long long value, int count) {
+  count &= 63;
+  while (count-- != 0) {
+    value >>= 1;
+  }
+  return value;
+}
+
+long long __ashrdi3(long long value, int count) {
+  count &= 63;
+  while (count-- != 0) {
+    value >>= 1;
+  }
+  return value;
 }
 
 // Unsigned 64-bit division returning the quotient and, optionally, the
@@ -140,5 +164,5 @@ long long __moddi3(long long a, long long b) {
   __udivmoddi4(ua, ub, &r);
   return negate ? -(long long)r : (long long)r;
 }
-#endif  // __arm__
+#endif  // __arm__ || __i386__
 

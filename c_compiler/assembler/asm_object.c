@@ -171,6 +171,7 @@ void AsmObjectInit(AsmObject* object, int16_t elf_machine_type,
   object->elf_flags = elf_flags;
   switch (elf_machine_type) {
     case ELF_MACHINE_TYPE_ARM:
+    case ELF_MACHINE_TYPE_X86:
       object->is_64_bit = false;
       break;
     default:
@@ -185,7 +186,8 @@ void AsmObjectInit(AsmObject* object, int16_t elf_machine_type,
   StringInit(&object->filename, "");
   DwarfInit(&object->dwarf);
   if (elf_machine_type == ELF_MACHINE_TYPEW65C02 ||
-      elf_machine_type == ELF_MACHINE_TYPE_X86_64) {
+      elf_machine_type == ELF_MACHINE_TYPE_X86_64 ||
+      elf_machine_type == ELF_MACHINE_TYPE_X86) {
     object->dwarf.min_instruction_length = 1;
   }
 }
@@ -652,7 +654,8 @@ void AsmObjectWriteELF(AsmObject* object, FILE* out) {
   AddSections(object, &elf);
 
   HashTableTraverse(&object->symbol_table, AddLocalSymbolToELFFile, &elf);
-  elf.last_local_symbol_index = (int32_t)elf.symbol_table.length;
+  // sh_info is one greater than the index of the last local symbol.
+  elf.last_local_symbol_index = (int32_t)elf.symbol_table.length - 1;
 
   HashTableTraverse(&object->symbol_table, AddGlobalSymbolToELFFile, &elf);
 
