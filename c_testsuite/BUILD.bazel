@@ -131,6 +131,24 @@ ctestsuite_sh_test(
     interp_args = ["-i"],
 )
 
+ctestsuite_sh_test(
+    name = "wasm32",
+    test_data = CTESTSUITE_TEST_DATA,
+    davecc_target = "//:davecc",
+    compiler_target = "wasm32",
+    libc_label = "//:libc_wasm32",
+    interpreter_label = "//:wasm32run",
+    skip_file = "skip/davecc-wasm32.skip",
+    compile_args = [
+        "-target",
+        "wasm32",
+        "-static",
+        "-isystem",
+        "libc/include",
+    ],
+    extra_tags = ["local"],
+)
+
 test_suite(
     name = "all_single_exec",
     tests = [
@@ -139,6 +157,7 @@ test_suite(
         ":single_exec_x86_64",
         ":single_exec_aarch64",
         ":single_exec_arm",
+        ":single_exec_wasm32",
     ],
     tags = ["manual"],
 )

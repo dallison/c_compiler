@@ -12,7 +12,8 @@ def ctestsuite_sh_test(
         compile_args,
         test_data,
         interp_args = [],
-        rom_label = None):
+        rom_label = None,
+        extra_tags = []):
     """Run every single-exec test in sequence for one DaveCC target."""
     data = test_data + [
         skip_file,
@@ -59,6 +60,6 @@ def ctestsuite_sh_test(
         tags = [
             "ctestsuite",
             "manual",
-        ],
+        ] + extra_tags,
         timeout = "eternal",
     )

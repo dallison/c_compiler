@@ -49,17 +49,17 @@ static bool Assemble(String* asm_filename, String* object_filename) {
 static void Wasm32EmitDataStart(FILE* fp) { fprintf(fp, ";; data\n"); }
 
 static void Wasm32EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
-  fprintf(fp, ";; TODO static variable %s\n", var->symbol->name.value);
+  fprintf(fp, ";; .data %s %zu bytes\n", var->symbol->name.value, var->size);
 }
 
 static void Wasm32EmitBSSVariable(UninitializedStaticVariable* var, FILE* fp) {
-  fprintf(fp, ";; TODO bss variable %s\n", var->symbol->name.value);
+  fprintf(fp, ";; .bss %s %zu bytes\n", var->symbol->name.value, var->size);
 }
 
 static void Wasm32EmitLiteralsStart(FILE* fp) { fprintf(fp, ";; literals\n"); }
 
 static void Wasm32EmitLiteral(Literal* literal, FILE* fp) {
-  fprintf(fp, ";; TODO literal %d\n", literal->id);
+  fprintf(fp, ";; .rodata literal %d\n", literal->id);
 }
 
 static void Wasm32EmitTlsDataStart(FILE* fp) {}

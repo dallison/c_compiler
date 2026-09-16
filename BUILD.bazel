@@ -3314,6 +3314,61 @@ sh_test(
     ],
 )
 
+sh_binary(
+    name = "wasm32run",
+    srcs = ["tools/wasm32run.sh"],
+)
+
+sh_test(
+    name = "wasm32_runtime_smoke_test",
+    srcs = ["tests/wasm32_runtime_smoke_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_wasm32)",
+        "$(rootpath :wasm32run)",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+        ":libc_wasm32",
+        ":wasm32run",
+        "tools/wasm32run.sh",
+    ],
+    tags = ["local"],
+)
+
+sh_test(
+    name = "wasm32_exec_test",
+    srcs = ["tests/wasm32_exec_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :archivist)",
+        "$(rootpath :libc_wasm32)",
+    ],
+    data = glob(["wasm32_testsuite/**"]) + [
+        ":archivist",
+        ":davecc",
+        ":libc_headers",
+        ":libc_wasm32",
+        "tools/wasm32run.sh",
+    ],
+    tags = ["local"],
+    timeout = "long",
+)
+
+sh_test(
+    name = "libc_wasm32_compile_test",
+    srcs = ["libc/tests/run_bazel_test.sh"],
+    args = [
+        "compile-all",
+        "$(rootpath :davecc)",
+        "wasm32",
+    ],
+    data = LIBC_TEST_DATA + [
+        ":davecc",
+    ],
+    tags = ["manual"],
+)
+
 sh_test(
     name = "filesystem_syscall_pcode_test",
     srcs = ["tests/filesystem_syscall_backend_test.sh"],

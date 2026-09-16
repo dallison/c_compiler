@@ -2238,12 +2238,36 @@ static TargetInstruction* LowerVaArg(Wasm32Generator* wasm, IRNode* node) {
   if (!GetAddressAndOffset(wasm, node->inputs.value.p[0], &base, &offset)) {
     return NULL;
   }
-  if (TypeIsStructOrUnion(node->type)) {
-    Fail(wasm, "va_arg of a struct");
-    return NULL;
-  }
   TargetInstruction* cursor =
       EmitLoad(wasm, W_OP(i32_load), base, offset, kWasmTypeI32);
+
+  TargetInstruction* next =
+      EmitBinary(wasm, W_OP(i32_add), kWasmTypeI32, cursor,
+                 EmitI32Constant(wasm, WASM32_VARARG_SLOT));
+  EmitStore(wasm, W_OP(i32_store), base, next, offset);
+
+  // A struct travels as a pointer to the caller's copy, the same way a named
+  // struct parameter does.  Copying it onto the shadow stack is what makes
+  // va_arg pass by value.
+  if (TypeIsStructOrUnion(node->type)) {
+    int32_t size = node->type->size;
+    TargetInstruction* source =
+        EmitLoad(wasm, W_OP(i32_load), cursor, 0, kWasmTypeI32);
+    TargetInstruction* stack_pointer =
+        EmitGlobalGet(wasm, WASM32_STACK_POINTER_GLOBAL);
+    int32_t reserve = size < 16 ? 16 : size;
+    TargetInstruction* lowered =
+        EmitBinary(wasm, W_OP(i32_sub), kWasmTypeI32, stack_pointer,
+                   EmitI32Constant(wasm, reserve));
+    TargetInstruction* dest =
+        EmitBinary(wasm, W_OP(i32_and), kWasmTypeI32, lowered,
+                   EmitI32Constant(wasm, -16));
+    EmitGlobalSet(wasm, WASM32_STACK_POINTER_GLOBAL, dest);
+    if (size > 0) {
+      EmitMemoryCopy(wasm, dest, source, EmitI32Constant(wasm, size));
+    }
+    return SetLoweredNode(node, dest);
+  }
 
   // Arguments reach the buffer already promoted, so a slot always holds a
   // whole value of the wasm type and never a narrower one.
@@ -2253,11 +2277,6 @@ static TargetInstruction* LowerVaArg(Wasm32Generator* wasm, IRNode* node) {
                       : type == kWasmTypeF32 ? W_OP(f32_load)
                                              : W_OP(i32_load);
   TargetInstruction* value = EmitLoad(wasm, load, cursor, 0, type);
-
-  TargetInstruction* next =
-      EmitBinary(wasm, W_OP(i32_add), kWasmTypeI32, cursor,
-                 EmitI32Constant(wasm, WASM32_VARARG_SLOT));
-  EmitStore(wasm, W_OP(i32_store), base, next, offset);
   return SetLoweredNode(node, value);
 }
 
@@ -3111,7 +3130,9 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
   bool moves_stack_pointer = false;
   for (IRNode* call = GeneratorFirstInstruction(gen); call != NULL;
        call = IRNext(call)) {
-    if (call->opcode == IR_OP(decsp)) {
+    if (call->opcode == IR_OP(decsp) ||
+        (call->opcode == IR_OP(builtin_va_arg) && call->type != NULL &&
+         TypeIsStructOrUnion(call->type))) {
       moves_stack_pointer = true;
       continue;
     }

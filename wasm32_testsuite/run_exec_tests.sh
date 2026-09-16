@@ -70,7 +70,8 @@ for source in "$@"; do
         fail=$((fail + 1))
         continue
       fi
-      got_output=$(wasmtime run "$work/$name.wasm" 2>/dev/null)
+      got_output=$(wasmtime run --dir "${PWD}::/" --dir /tmp::/tmp \
+                     "$work/$name.wasm" 2>/dev/null)
       got=$?
       if [ "$got" != "$want" ]; then
         echo "FAIL $name $opt: exit want $want, got $got"

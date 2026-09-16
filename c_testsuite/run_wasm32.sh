@@ -2,11 +2,8 @@
 #
 # Run the c_testsuite single-exec tests against the wasm32 backend.
 #
-# The other targets in this suite reach their programs through an interpreter
-# built here in the tree, so Bazel can hand one to the test.  Wasm has no such
-# interpreter of ours: the runtime is wasmtime, installed on the host, which
-# is why this target is a script to be run by hand rather than a Bazel test
-# alongside the others.
+# The c_testsuite single-exec tests for wasm32.  Also available as
+# `bazel test //c_testsuite:single_exec_wasm32` (needs host wasmtime).
 #
 # Each test is linked as a WASI command and run at both optimization levels,
 # because at -O1 a variable nothing points at moves from the shadow frame into
@@ -27,8 +24,9 @@ done
 
 davecc="$root/bazel-bin/davecc"
 libc="$root/bazel-bin/libc/libcwasm32.a"
-for artifact in "$davecc" "$libc"; do
-  if [ ! -f "$artifact" ]; then
+runner="$root/tools/wasm32run.sh"
+for artifact in "$davecc" "$libc" "$runner"; do
+  if [ ! -e "$artifact" ]; then
     echo "run_wasm32.sh: $artifact is missing; run" >&2
     echo "  bazel build //:davecc //:libc_wasm32" >&2
     exit 2
@@ -42,8 +40,7 @@ for opt in -O0 -O1; do
     --davecc "$davecc" \
     --target wasm32 \
     --libc "$libc" \
-    --interpreter "$(command -v wasmtime)" \
-    --interp-arg run \
+    --interpreter "$runner" \
     --suite-root "$root/c_testsuite" \
     --skip "$root/c_testsuite/skip/davecc-wasm32.skip" \
     --compile-arg -target --compile-arg wasm32 \

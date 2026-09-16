@@ -3503,12 +3503,15 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   }
 
   // Exception metadata and unwind support are too large for the 6502 address
-  // space, so those targets default to -fno-exceptions.  An explicit option
-  // still overrides the target default with last-one-wins semantics.
+  // space, and wasm32 has no landing pads until the exception-handling
+  // proposal is wired up, so those targets default to -fno-exceptions.  An
+  // explicit option still overrides the target default with last-one-wins
+  // semantics.
   compiler->exceptions_enabled =
       strcmp(target->canonical_name, "6502") != 0 &&
       strcmp(target->canonical_name, "65c02") != 0 &&
-      strcmp(target->canonical_name, "bpf") != 0;
+      strcmp(target->canonical_name, "bpf") != 0 &&
+      strcmp(target->canonical_name, "wasm32") != 0;
   for (size_t i = 0; i < options->length; i++) {
     CompilerOptionValue* opt = options->value.p[i];
     if (opt->opt == kOptionExceptions) {
