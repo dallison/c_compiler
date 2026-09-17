@@ -43,9 +43,9 @@ static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
                 {'f', W65C02_NUM_F_REGS, 4}
   };
 
-  // Get start address for registers from target options.
-  int start_addr = ((W65C02Target*)compiler->target)->regs_start;
-  int addr = start_addr;
+  // The registers are at the bottom of the zero page.  Their addresses are
+  // fixed because the runtime library is assembled against these same names.
+  int addr = 0;
   for (int i = 0; i < 5; i++) {
     for (int j = 0; j < registers[i].num; j++) {
       fprintf(fp, "\t.set __%c%d 0x%x\n", registers[i].prefix, j, addr);
@@ -53,16 +53,16 @@ static FILE* CreateAssemblyFile(String* src_file, String* asm_file) {
     }
   }
   
-  fprintf(fp, "\t.set __sp 0x%x\n", W65C02_SP_REG + start_addr);
-  fprintf(fp, "\t.set __fp 0x%x\n", W65C02_FP_REG + start_addr);
-  fprintf(fp, "\t.set __result 0x%x\n", W65C02_RESULT_REG + start_addr);
-  fprintf(fp, "\t.set __t0 0x%x\n", W65C02_T0_REG + start_addr);
-  fprintf(fp, "\t.set __t1 0x%x\n", W65C02_T1_REG + start_addr);
-  fprintf(fp, "\t.set __t2 0x%x\n", W65C02_T2_REG + start_addr);
-  fprintf(fp, "\t.set __t3 0x%x\n", W65C02_T3_REG + start_addr);
-  fprintf(fp, "\t.set __mem_src 0x%x\n", W65C02_MSRC_REG + start_addr);
-  fprintf(fp, "\t.set __mem_dest 0x%x\n", W65C02_MDST_REG + start_addr);
-  fprintf(fp, "\t.set __mem_size 0x%x\n", W65C02_MSZ_REG + start_addr);
+  fprintf(fp, "\t.set __sp 0x%x\n", W65C02_SP_REG);
+  fprintf(fp, "\t.set __fp 0x%x\n", W65C02_FP_REG);
+  fprintf(fp, "\t.set __result 0x%x\n", W65C02_RESULT_REG);
+  fprintf(fp, "\t.set __t0 0x%x\n", W65C02_T0_REG);
+  fprintf(fp, "\t.set __t1 0x%x\n", W65C02_T1_REG);
+  fprintf(fp, "\t.set __t2 0x%x\n", W65C02_T2_REG);
+  fprintf(fp, "\t.set __t3 0x%x\n", W65C02_T3_REG);
+  fprintf(fp, "\t.set __mem_src 0x%x\n", W65C02_MSRC_REG);
+  fprintf(fp, "\t.set __mem_dest 0x%x\n", W65C02_MDST_REG);
+  fprintf(fp, "\t.set __mem_size 0x%x\n", W65C02_MSZ_REG);
 
   fprintf(fp, "\n.PCbegin:\n");
   return fp;
@@ -81,21 +81,12 @@ static bool Assemble(String* asm_filename, String* object_filename) {
 
 static void Cleanup(void* code) { W65C02GeneratorDelete(code); }
 
-static CompilerOptionDefinition options[] = {
-  {"-freg-start", kCompilerOptionInt, k6502OptionRegStart, false, "Specify start address for zero-page registers"},
-  {NULL}
-};
-
-static void HandleOptions(Vector* options) {
-  W65C02Target* target = (W65C02Target*)compiler->target;
-  target->regs_start = OptionIntValue(k6502OptionRegStart, options, 0);
-}
+static void HandleOptions(Vector* options) { (void)options; }
 
 // Create a new W65C02 target.  The functions are called by the
 // compiler.
 CompilerTarget* New6502Target() {
-  W65C02Target* t = malloc(sizeof(W65C02Target));
-  CompilerTarget* target = &t->base;
+  CompilerTarget* target = malloc(sizeof(CompilerTarget));
   StringInit(&target->name, "6502");
   target->pointer_size = 2;
   target->int_size = 2;
@@ -112,7 +103,7 @@ CompilerTarget* New6502Target() {
   target->keep_ssa = false;
   target->plain_char_is_signed = false;
 
-  target->options = options;
+  target->options = NULL;
   
   target->ir_optimizations.gvn = false;      // Makes 6502 worse.
   target->ir_optimizations.sccp = true;
@@ -150,9 +141,6 @@ CompilerTarget* New6502Target() {
   target->emit_tls_variable = EmitTlsVariable;
   target->emit_tbss_space = EmitTlsBSSVariable;
   target->handle_options = HandleOptions;
-  
-  // Targer specific options.
-  t->regs_start = 0;
   return target;
 }
 
