@@ -66,81 +66,141 @@ static bool CompilerStringIndexInsert(struct CompilerStringIndex* index,
                                       const char* key, void* value);
 
 static CompilerOptionDefinition compiler_options[] = {
-    {"-g", kCompilerOptionBool, kOptionDebug, false, "Generate debug info"},
-    {"-O", kCompilerOptionString, kOptionOptimize, true,
-     "Optimize with level (-O0, -O1, -O2, -O3, -Os)"},
-    {"-target", kCompilerOptionString, kOptionTarget, false, "Specify one target architecture"},
-    {"-c", kCompilerOptionBool, kOptionCompileOnly, false, "Compile only to object file"},
-    {"-S", kCompilerOptionBool, kOptionAssemblyOutput, false, "Generate assembly language"},
+    {"-c", kCompilerOptionBool, kOptionCompileOnly, false,
+     "Compile only to object file", kOptionGroupOverall},
+    {"-S", kCompilerOptionBool, kOptionAssemblyOutput, false,
+     "Generate assembly language", kOptionGroupOverall},
     {"-fsyntax-only", kCompilerOptionBool, kOptionSyntaxOnly, false,
-     "Parse and semantically analyze only; do not generate code"},
-    {"-o", kCompilerOptionString, kOptionOutputFile, false, "Output filename"},
-    {"-isystem", kCompilerOptionString, kOptionSystemIncludePath, false, "Add system include path"},
-    {"-I", kCompilerOptionString, kOptionIncludePath, true, "Add a user include path -Ipath"},
+     "Parse and semantically analyze only; do not generate code",
+     kOptionGroupOverall},
+    {"-o", kCompilerOptionString, kOptionOutputFile, false,
+     "Write the output to <file>", kOptionGroupOverall, "file"},
+    {"-target", kCompilerOptionString, kOptionTarget, false,
+     "Compile for target architecture <name>, listed below",
+     kOptionGroupOverall, "name"},
+    {"-chdir", kCompilerOptionString, kOptionChdir, false,
+     "Change to <dir> before compiling", kOptionGroupOverall, "dir"},
+
+    {"-std", kCompilerOptionString, kOptionStandard, false,
+     "Select language standard: c89, c99, c11, c17, c23, c++11, c++17, c++20, c++23, c++26, c++29",
+     kOptionGroupLanguage, "standard"},
+    {"-fexceptions", kCompilerOptionBool, kOptionExceptions, false,
+     "Enable C++ exception handling (default)", kOptionGroupLanguage},
+    {"-fno-exceptions", kCompilerOptionBool, kOptionNoExceptions, false,
+     "Disable C++ exception handling", kOptionGroupLanguage},
+    {"-fconstexpr-eval", kCompilerOptionString, kOptionConstexprEval, false,
+     "Select constexpr evaluator: auto, pcode, ast, or audit",
+     kOptionGroupLanguage, "mode"},
+    {"-fcontracts", kCompilerOptionString, kOptionContracts, false,
+     "Select contract semantic: ignore, observe, enforce, or quick-enforce",
+     kOptionGroupLanguage, "semantic"},
+
+    {"-I", kCompilerOptionString, kOptionIncludePath, true,
+     "Add <dir> to the user include search path", kOptionGroupPreprocessor,
+     "dir"},
+    {"-isystem", kCompilerOptionString, kOptionSystemIncludePath, false,
+     "Add <dir> to the system include search path", kOptionGroupPreprocessor,
+     "dir"},
     {"-nostdinc", kCompilerOptionBool, kOptionNoStandardIncludes, false,
-     "Do not use built-in system include paths"},
-    {"-nostdlib", kCompilerOptionBool, kOptionNoStandardLibraries, false,
-     "Do not link the target system library"},
-    {"-D", kCompilerOptionString, kOptionDefineMacro, true, "Define a macro -Dmacro[=value]"},
-    {"-U", kCompilerOptionString, kOptionUndefineMacro, true, "Undefine a macro"},
-    {"-fPIC", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
-    {"-fpic", kCompilerOptionBool, kOptionPic, false, "Generate position independent code"},
-    {"-fexceptions", kCompilerOptionBool, kOptionExceptions, false, "Enable C++ exception handling (default)"},
-    {"-fno-exceptions", kCompilerOptionBool, kOptionNoExceptions, false, "Disable C++ exception handling"},
-    {"-fprintf-specialize", kCompilerOptionBool, kOptionPrintfSpecialize, false,
-     "Select smaller printf-family implementations for constant formats"},
-    {"-fno-printf-specialize", kCompilerOptionBool,
-     kOptionNoPrintfSpecialize, false,
-     "Disable constant printf-family format specialization"},
+     "Do not use built-in system include paths", kOptionGroupPreprocessor},
+    {"-D", kCompilerOptionString, kOptionDefineMacro, true,
+     "Define <macro>, optionally as -Dmacro=value", kOptionGroupPreprocessor,
+     "macro"},
+    {"-U", kCompilerOptionString, kOptionUndefineMacro, true,
+     "Undefine <macro>", kOptionGroupPreprocessor, "macro"},
+
     // All -W* flags are matched by this single prefix entry and interpreted in
     // InitComplexOptions: -W<name>/-Wno-<name> enable/disable, -Wall, -Werror,
     // -Wno-error, and the per-warning -Werror=<name>/-Wno-error=<name>.
     {"-W", kCompilerOptionString, kOptionWarning, true,
-     "Control warnings: -W<name>, -Wno-<name>, -Wall, -Werror, -Werror=<name>, -Wno-error[=<name>]"},
-    {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false, "Specify max number of errors"},
-    {"-std", kCompilerOptionString, kOptionStandard, false,
-     "Select language standard: c89, c99, c11, c17, c23, c++11, c++17, c++20, c++23, c++26, c++29"},
-    {"-fconstexpr-eval", kCompilerOptionString, kOptionConstexprEval, false,
-     "Select constexpr evaluator: auto, pcode, ast, or audit"},
-    {"-fcontracts", kCompilerOptionString, kOptionContracts, false,
-     "Select contract semantic: ignore, observe, enforce, or quick-enforce"},
-    {"-ftls-model", kCompilerOptionString, kOptionTlsModel, false, "Use given Thread Local storage model"},
-    {"-chdir", kCompilerOptionString, kOptionChdir, false, "Change to dir before compiling"},
-    {"-Xfe-print", kCompilerOptionBool, kOptionPrintFrontend, false, "Print fron end dump"},
-    {"-Xbe-print", kCompilerOptionBool, kOptionPrintBackend, false, "Print back end dump"},
-    {"-Xpp-print", kCompilerOptionBool, kOptionPrintPreprocessor, false, "Print preprocessor dump"},
-    {"-Xkeep-asm", kCompilerOptionBool, kOptionKeepAsmFile, false, "Keep assembly file"},
-    {"-Xsave-ir", kCompilerOptionBool, kOptionSaveIR, false, "Save IR to .ir file"},
-    {"-Xsave-ast", kCompilerOptionBool, kOptionSaveAST, false, "Save AST to .ast file"},
-    // Hidden C++20-module hooks: emit/load a post-semantic module (.dcm) file.
-    {"-Xemit-module", kCompilerOptionString, kOptionEmitModule, false, "(hidden) Emit a module (.dcm) file"},
-    {"-Xload-module", kCompilerOptionString, kOptionLoadModule, false, "(hidden) Load and verify a module (.dcm) file"},
-    {"-fprebuilt-module-path", kCompilerOptionString, kOptionPrebuiltModulePath, false, "Search dir for prebuilt .dcm modules"},
-    {"-fmodule-file", kCompilerOptionString, kOptionModuleFile, false, "Map module-name=path to a prebuilt .dcm module"},
-    {"-fmodule-header", kCompilerOptionBool, kOptionModuleHeader, false, "Compile input as a C++20 header unit"},
-    {"-fmodule-name", kCompilerOptionString, kOptionModuleName, false, "Set the logical module or header-unit name"},
-    {"-fmodule-output", kCompilerOptionString, kOptionModuleOutput, false, "Emit a .dcm module artifact alongside normal output"},
-    {"-fdeps-file", kCompilerOptionString, kOptionDepsFile, false, "Write P1689R5 module dependency information"},
-    {"-fdeps-format", kCompilerOptionString, kOptionDepsFormat, false, "Module dependency format (p1689r5)"},
-    {"-fdeps-scan-only", kCompilerOptionBool, kOptionDepsScanOnly, false, "Scan module dependencies without compiling"},
+     "Control warnings: -W<name>, -Wno-<name>, -Wall, -Werror, -Werror=<name>, -Wno-error[=<name>]",
+     kOptionGroupDiagnostics, "warning"},
+    {"-error-limit", kCompilerOptionInt, kOptionErrorLimit, false,
+     "Stop after <n> errors", kOptionGroupDiagnostics},
+
+    {"-g", kCompilerOptionBool, kOptionDebug, false, "Generate debug info",
+     kOptionGroupCodegen},
+    {"-O", kCompilerOptionString, kOptionOptimize, true,
+     "Optimize with level (-O0, -O1, -O2, -O3, -Os)", kOptionGroupCodegen,
+     "level"},
+    {"-fPIC", kCompilerOptionBool, kOptionPic, false,
+     "Generate position independent code", kOptionGroupCodegen},
+    {"-fpic", kCompilerOptionBool, kOptionPic, false,
+     "Generate position independent code", kOptionGroupCodegen},
+    {"-ftls-model", kCompilerOptionString, kOptionTlsModel, false,
+     "Use thread-local storage model <model>", kOptionGroupCodegen, "model"},
+    {"-fprintf-specialize", kCompilerOptionBool, kOptionPrintfSpecialize, false,
+     "Select smaller printf-family implementations for constant formats",
+     kOptionGroupCodegen},
+    {"-fno-printf-specialize", kCompilerOptionBool, kOptionNoPrintfSpecialize,
+     false, "Disable constant printf-family format specialization",
+     kOptionGroupCodegen},
     {"-flto", kCompilerOptionBool, kOptionLTO, false,
-     "Link-time optimization: compile all sources together for cross-TU inlining"},
+     "Link-time optimization: compile all sources together for cross-TU inlining",
+     kOptionGroupCodegen},
     {"-ffunction-sections", kCompilerOptionBool, kOptionFunctionSections, false,
-     "Place each function in its own ELF section for unused-section GC"},
+     "Place each function in its own ELF section for unused-section GC",
+     kOptionGroupCodegen},
     {"-fno-function-sections", kCompilerOptionBool, kOptionNoFunctionSections,
-     false, "Emit all functions in a shared .text section"},
+     false, "Emit all functions in a shared .text section", kOptionGroupCodegen},
+
+    {"-nostdlib", kCompilerOptionBool, kOptionNoStandardLibraries, false,
+     "Do not link the target system library", kOptionGroupLinking},
+
+    {"-fprebuilt-module-path", kCompilerOptionString, kOptionPrebuiltModulePath,
+     false, "Search <dir> for prebuilt .dcm modules", kOptionGroupModules,
+     "dir"},
+    {"-fmodule-file", kCompilerOptionString, kOptionModuleFile, false,
+     "Map a module name to a prebuilt .dcm module", kOptionGroupModules,
+     "name=path"},
+    {"-fmodule-header", kCompilerOptionBool, kOptionModuleHeader, false,
+     "Compile input as a C++20 header unit", kOptionGroupModules},
+    {"-fmodule-name", kCompilerOptionString, kOptionModuleName, false,
+     "Set the logical module or header-unit name", kOptionGroupModules, "name"},
+    {"-fmodule-output", kCompilerOptionString, kOptionModuleOutput, false,
+     "Emit a .dcm module artifact alongside normal output", kOptionGroupModules,
+     "file"},
+    {"-fdeps-file", kCompilerOptionString, kOptionDepsFile, false,
+     "Write P1689R5 module dependency information", kOptionGroupModules, "file"},
+    {"-fdeps-format", kCompilerOptionString, kOptionDepsFormat, false,
+     "Module dependency format (p1689r5)", kOptionGroupModules, "format"},
+    {"-fdeps-scan-only", kCompilerOptionBool, kOptionDepsScanOnly, false,
+     "Scan module dependencies without compiling", kOptionGroupModules},
+    // Hidden C++20-module hooks: emit/load a post-semantic module (.dcm) file.
+    {"-Xemit-module", kCompilerOptionString, kOptionEmitModule, false,
+     "(hidden) Emit a module (.dcm) file", kOptionGroupModules},
+    {"-Xload-module", kCompilerOptionString, kOptionLoadModule, false,
+     "(hidden) Load and verify a module (.dcm) file", kOptionGroupModules},
+
     {"-flisting", kCompilerOptionBool, kOptionListing, false,
-     "Write an interleaved source listing (.lst); includes assembly by default"},
+     "Write an interleaved source listing (.lst); includes assembly by default",
+     kOptionGroupListing},
     {"-flisting-ast", kCompilerOptionBool, kOptionListingAST, false,
-     "Include the function AST in the listing"},
+     "Include the function AST in the listing", kOptionGroupListing},
     {"-flisting-ir", kCompilerOptionBool, kOptionListingIR, false,
-     "Include IR on each basic block in the listing"},
+     "Include IR on each basic block in the listing", kOptionGroupListing},
     {"-flisting-lowered", kCompilerOptionBool, kOptionListingLowered, false,
-     "Include lowered target IR on each basic block in the listing"},
+     "Include lowered target IR on each basic block in the listing",
+     kOptionGroupListing},
     {"-flisting-asm", kCompilerOptionBool, kOptionListingAsm, false,
-     "Include assembly in the listing (implied by -flisting)"},
+     "Include assembly in the listing (implied by -flisting)",
+     kOptionGroupListing},
     {"-flisting-file", kCompilerOptionString, kOptionListingFile, false,
-     "Listing output path (default: replace source suffix with .lst; - is stdout)"},
+     "Listing output path (default: replace source suffix with .lst; - is stdout)",
+     kOptionGroupListing, "file"},
+
+    {"-Xfe-print", kCompilerOptionBool, kOptionPrintFrontend, false,
+     "Print front end dump", kOptionGroupDeveloper},
+    {"-Xbe-print", kCompilerOptionBool, kOptionPrintBackend, false,
+     "Print back end dump", kOptionGroupDeveloper},
+    {"-Xpp-print", kCompilerOptionBool, kOptionPrintPreprocessor, false,
+     "Print preprocessor dump", kOptionGroupDeveloper},
+    {"-Xkeep-asm", kCompilerOptionBool, kOptionKeepAsmFile, false,
+     "Keep assembly file", kOptionGroupDeveloper},
+    {"-Xsave-ir", kCompilerOptionBool, kOptionSaveIR, false,
+     "Save IR to .ir file", kOptionGroupDeveloper},
+    {"-Xsave-ast", kCompilerOptionBool, kOptionSaveAST, false,
+     "Save AST to .ast file", kOptionGroupDeveloper},
     {NULL, 0, 0, false, NULL},
 };
 
@@ -409,18 +469,48 @@ void DeleteCompilerTarget(CompilerTarget* t){
   free(t);
 }
 
-void PrintCompilerHelp(void) {
-  printf("DaveCC compiler options\n");
-  PrintAllOptions(compiler_options);
-  
-  // Print help from all targets.
+// Every name a target answers to, as "canonical (alias, alias)".
+static void AppendTargetNames(String* out,
+                              struct CompilerTargetDefinition* target) {
+  StringAppend(out, target->canonical_name);
+  bool first_alias = true;
+  for (size_t i = 0; i < kMaxTargetNames; i++) {
+    const char* alias = target->names[i];
+    if (alias == NULL || strcmp(alias, target->canonical_name) == 0) {
+      continue;
+    }
+    StringAppend(out, first_alias ? " (" : ", ");
+    StringAppend(out, alias);
+    first_alias = false;
+  }
+  if (!first_alias) {
+    StringAppend(out, ")");
+  }
+}
+
+void PrintCompilerHelp(CompilerOptionDefinition* driver_options) {
+  CompilerOptionDefinition* tables[] = {compiler_options, driver_options};
+  PrintOptionTables(tables, driver_options == NULL ? 1 : 2);
+
+  String targets;
+  StringInit(&targets, NULL);
+  for (size_t i = 0; i < kNumTargets; i++) {
+    if (i != 0) {
+      StringAppend(&targets, ", ");
+    }
+    AppendTargetNames(&targets, &compiler_targets[i]);
+  }
+  printf("\nTargets for -target:\n");
+  PrintHelpParagraph(targets.value, 2);
+  StringDestruct(&targets);
+
   for (size_t i = 0; i < kNumTargets; i++) {
     CompilerTarget* t = compiler_targets[i].factory();
     if (t->options != NULL) {
-      printf("\nOptions for target '%s'\n", t->name.value);
-      PrintAllOptions(t->options);
+      printf("\nOptions for target '%s':\n", t->name.value);
+      PrintOptionList(t->options);
     }
-     DeleteCompilerTarget(t);
+    DeleteCompilerTarget(t);
   }
 }
 

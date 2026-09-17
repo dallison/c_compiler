@@ -597,6 +597,13 @@ sh_test(
     data = [":davecc"],
 )
 
+sh_test(
+    name = "help_test",
+    srcs = ["tests/help_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [":davecc"],
+)
+
 cc_library(
     name = "serialize",
     srcs = [

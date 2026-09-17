@@ -698,7 +698,10 @@ int BoolSize(void);
 int LongSize(void);
 int LongLongSize(void);
 
-void PrintCompilerHelp(void);
+// Print the compiler and target options.  `driver_options` is an optional
+// table of flags the driver handles itself, listed alongside the compiler's
+// own under the same group headings.
+void PrintCompilerHelp(CompilerOptionDefinition* driver_options);
 
 bool CompilerInjectionFrameActive(void);
 void CompilerRecordSynthesizedEnum(Enum* enumeration, TypeRecord* enum_type,

@@ -10,6 +10,7 @@
 #define options_h
 
 #include <stdbool.h>
+#include <stddef.h>
 #include "dstring.h"
 #include "vector.h"
 
@@ -67,7 +68,23 @@ typedef enum {
   kOptionListingLowered,     // Include lowered target IR in the listing.
   kOptionListingAsm,         // Include assembly in the listing.
   kOptionListingFile,        // Listing output path (`-` is stdout).
+  kOptionDriver,             // Handled by the driver; listed in help only.
 } CompilerOption;
+
+// Section an option is listed under by -help.  Options are printed in this
+// order, and within a section in the order they appear in their table.
+typedef enum {
+  kOptionGroupOverall,
+  kOptionGroupLanguage,
+  kOptionGroupPreprocessor,
+  kOptionGroupDiagnostics,
+  kOptionGroupCodegen,
+  kOptionGroupLinking,
+  kOptionGroupModules,
+  kOptionGroupListing,
+  kOptionGroupDeveloper,
+  kNumOptionGroups,
+} CompilerOptionGroup;
 
 // This holds the strings from the command line, split into two
 // at an equals sign if present.
@@ -97,6 +114,8 @@ typedef struct {
   CompilerOption opt;
   bool is_prefix;
   const char* help;
+  CompilerOptionGroup group;  // Section -help lists the option under.
+  const char* value_name;     // Value shown by -help; NULL derives one.
 } CompilerOptionDefinition;
 
 CompilerOptionString* NewOptionString(const char* name);
@@ -110,6 +129,12 @@ String* OptionStringValue(CompilerOption option, Vector* options);
 int OptionIntValue(CompilerOption option, Vector* options, int def);
 bool OptionBoolValue(CompilerOption option, Vector* options, bool def);
 
-void PrintAllOptions(CompilerOptionDefinition* options);
+// Print `text` wrapped to the help width, every line indented by `indent`.
+void PrintHelpParagraph(const char* text, int indent);
+// Print the options from every table under their group headings.  Options
+// whose help begins with "(hidden)" are left out.
+void PrintOptionTables(CompilerOptionDefinition** tables, size_t num_tables);
+// Print one table as a single block, without group headings.
+void PrintOptionList(CompilerOptionDefinition* options);
 
 #endif /* options_h */

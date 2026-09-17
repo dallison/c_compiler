@@ -638,6 +638,64 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
   VectorAppend(linker_args, archive->value);
 }
 
+// Flags the driver consumes itself rather than passing to the compiler.  They
+// are parsed by ParseArg below; this table exists so that -help documents them
+// alongside the compiler's own options.
+static CompilerOptionDefinition driver_options[] = {
+    {"-help", kCompilerOptionBool, kOptionDriver, false,
+     "Print this help and exit; -h and --help do the same", kOptionGroupOverall},
+    {"-", kCompilerOptionBool, kOptionDriver, false,
+     "Read the translation unit from standard input; must be the only input",
+     kOptionGroupOverall},
+    {"@", kCompilerOptionString, kOptionDriver, true,
+     "Read further command line options from <file>, one or more per line",
+     kOptionGroupOverall, "file"},
+    {"-l", kCompilerOptionString, kOptionDriver, true,
+     "Link against library <name>", kOptionGroupLinking, "name"},
+    {"-L", kCompilerOptionString, kOptionDriver, true,
+     "Add <dir> to the library search path", kOptionGroupLinking, "dir"},
+    {"-static", kCompilerOptionBool, kOptionDriver, false, "Link statically",
+     kOptionGroupLinking},
+    {"-dynamic", kCompilerOptionBool, kOptionDriver, false,
+     "Link dynamically; implies -fPIC and -ftls-model=local-exec",
+     kOptionGroupLinking},
+    {"-shared", kCompilerOptionBool, kOptionDriver, false,
+     "Create a shared library; implies -fPIC", kOptionGroupLinking},
+    {"-rpath", kCompilerOptionString, kOptionDriver, false,
+     "Add <dir> to the runtime library search path", kOptionGroupLinking, "dir"},
+    {"-e", kCompilerOptionString, kOptionDriver, false,
+     "Use <symbol> as the entry point", kOptionGroupLinking, "symbol"},
+    {"-origin", kCompilerOptionString, kOptionDriver, false,
+     "Load the output at <address>", kOptionGroupLinking, "address"},
+    {"--gc-sections", kCompilerOptionBool, kOptionDriver, false,
+     "Discard sections no live symbol reaches", kOptionGroupLinking},
+    {"--no-gc-sections", kCompilerOptionBool, kOptionDriver, false,
+     "Keep unreferenced sections (default)", kOptionGroupLinking},
+    {"--print-gc-sections", kCompilerOptionBool, kOptionDriver, false,
+     "Report the sections --gc-sections discards", kOptionGroupLinking},
+    {"-Wl,", kCompilerOptionString, kOptionDriver, true,
+     "Pass <arg> straight through to the linker", kOptionGroupLinking, "arg"},
+    {NULL, 0, 0, false, NULL},
+};
+
+static void PrintDriverHelp(void) {
+  printf("DaveCC: a C and C++ compiler, assembler, linker and interpreter.\n");
+  printf("\nUsage: davecc [options] file...\n\n");
+  PrintHelpParagraph(
+      "Inputs are handled by suffix: .c, .cc, .cpp, .cxx, .cppm, .ixx, .h, "
+      ".hpp and .hxx are compiled, .s is assembled, and .o and everything "
+      "else is given to the linker.  Without -c, -S or -fsyntax-only the "
+      "result is linked into an executable.",
+      0);
+  PrintCompilerHelp(driver_options);
+  printf("\n");
+  PrintHelpParagraph(
+      "An option that takes a value accepts it either as the next argument or "
+      "joined with '=', so -std=c++20 and '-std c++20' are the same.  Prefixed "
+      "options such as -I, -D and -L are written joined: -Ipath.",
+      0);
+}
+
 static int ParseArg(int i, int argc, char** argv,
                     Vector* compiler_args,
                     Vector* linker_args,
@@ -1486,7 +1544,8 @@ int main(int argc, char * argv[]) {
   int i = 1;
   bool help = false;
   while (i < argc) {
-    if (strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "--help") == 0) {
+    if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "-help") == 0 ||
+        strcmp(argv[i], "--help") == 0) {
       help = true;
       break;
     }
@@ -1496,7 +1555,7 @@ int main(int argc, char * argv[]) {
   }
   
   if (help) {
-    PrintCompilerHelp();
+    PrintDriverHelp();
     exit(0);
   }
 

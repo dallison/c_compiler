@@ -11,6 +11,7 @@
 #include "dstring.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 CompilerOptionString* NewOptionString(const char* name) {
   CompilerOptionString* s = malloc(sizeof(CompilerOptionString));
@@ -217,12 +218,162 @@ bool OptionBoolValue(CompilerOption option, Vector* options, bool def) {
   return def;
 }
 
-void PrintAllOptions(CompilerOptionDefinition* options) {
+// Help layout.  Option syntax sits in the left column and its text is wrapped
+// in the right one; a syntax too wide for the left column takes a line of its
+// own so the right column stays straight.
+#define kHelpWidth 80
+#define kHelpMargin 2
+#define kHelpGap 2
+#define kHelpMaxSyntax 26
+#define kHelpMinTextWidth 28
+
+static const char* option_group_names[kNumOptionGroups] = {
+    "Overall options",
+    "Language and standards",
+    "Preprocessor and include paths",
+    "Diagnostics",
+    "Code generation and optimization",
+    "Linking",
+    "C++20 modules",
+    "Source listings",
+    "Compiler developer options",
+};
+
+static bool OptionIsHidden(const CompilerOptionDefinition* option) {
+  return option->help == NULL || option->help[0] == '\0' ||
+         strncmp(option->help, "(hidden)", 8) == 0;
+}
+
+// Render an option the way it is written on the command line, e.g. "-c",
+// "-o <file>" or "-I<dir>".
+static void OptionSyntax(const CompilerOptionDefinition* option, char* buffer,
+                         size_t size) {
+  if (option->type == kCompilerOptionBool) {
+    snprintf(buffer, size, "%s", option->name);
+    return;
+  }
+  const char* value = option->value_name;
+  if (value == NULL) {
+    value = option->type == kCompilerOptionInt ? "n" : "value";
+  }
+  snprintf(buffer, size, option->is_prefix ? "%s<%s>" : "%s <%s>", option->name,
+           value);
+}
+
+// Print `text` wrapped into the column starting at `column`.  `used` is how
+// many columns of the current line are already written; later lines are
+// indented to `column`.
+static void PrintWrappedText(const char* text, int column, int used) {
+  int width = kHelpWidth - column;
+  if (width < kHelpMinTextWidth) {
+    width = kHelpMinTextWidth;
+  }
+  if (text == NULL || text[0] == '\0') {
+    printf("\n");
+    return;
+  }
+  const char* cursor = text;
+  while (*cursor != '\0') {
+    while (*cursor == ' ') {
+      cursor++;
+    }
+    if (*cursor == '\0') {
+      break;
+    }
+    size_t take = strlen(cursor);
+    if (take > (size_t)width) {
+      size_t split = (size_t)width;
+      while (split > 0 && cursor[split] != ' ') {
+        split--;
+      }
+      // A word longer than the column cannot be broken on a space, so let it
+      // run past the right margin rather than splitting it.
+      take = split > 0 ? split : (size_t)width;
+    }
+    printf("%*s%.*s\n", column - used, "", (int)take, cursor);
+    cursor += take;
+    used = 0;
+  }
+}
+
+static void PrintOptionRow(const CompilerOptionDefinition* option, int column) {
+  char syntax[128];
+  OptionSyntax(option, syntax, sizeof(syntax));
+  int used = printf("%*s%s", kHelpMargin, "", syntax);
+  if (used >= column) {
+    printf("\n");
+    used = 0;
+  }
+  PrintWrappedText(option->help, column, used);
+}
+
+// Line up the right column just past the widest syntax that fits in the left
+// one, so narrow tables are not padded out to a fixed width.
+static int HelpTextColumn(CompilerOptionDefinition** tables,
+                          size_t num_tables) {
+  size_t widest = 0;
+  for (size_t t = 0; t < num_tables; t++) {
+    CompilerOptionDefinition* options = tables[t];
+    if (options == NULL) {
+      continue;
+    }
+    for (size_t i = 0; options[i].name != NULL; i++) {
+      if (OptionIsHidden(&options[i])) {
+        continue;
+      }
+      char syntax[128];
+      OptionSyntax(&options[i], syntax, sizeof(syntax));
+      size_t length = strlen(syntax);
+      if (length > widest && length <= kHelpMaxSyntax) {
+        widest = length;
+      }
+    }
+  }
+  return (int)(kHelpMargin + widest + kHelpGap);
+}
+
+void PrintHelpParagraph(const char* text, int indent) {
+  PrintWrappedText(text, indent, 0);
+}
+
+void PrintOptionTables(CompilerOptionDefinition** tables, size_t num_tables) {
+  if (tables == NULL) {
+    return;
+  }
+  int column = HelpTextColumn(tables, num_tables);
+  for (size_t group = 0; group < kNumOptionGroups; group++) {
+    bool heading_printed = false;
+    for (size_t t = 0; t < num_tables; t++) {
+      CompilerOptionDefinition* options = tables[t];
+      if (options == NULL) {
+        continue;
+      }
+      for (size_t i = 0; options[i].name != NULL; i++) {
+        if (OptionIsHidden(&options[i]) ||
+            (size_t)options[i].group != group) {
+          continue;
+        }
+        if (!heading_printed) {
+          const char* heading = option_group_names[group];
+          printf("\n%s:\n", heading != NULL ? heading : "Other options");
+          heading_printed = true;
+        }
+        PrintOptionRow(&options[i], column);
+      }
+    }
+  }
+}
+
+void PrintOptionList(CompilerOptionDefinition* options) {
   if (options == NULL) {
     return;
   }
+  int column = HelpTextColumn(&options, 1);
   for (size_t i = 0; options[i].name != NULL; i++) {
-    printf("  %-20s %s\n", options[i].name, options[i].help);
+    if (OptionIsHidden(&options[i])) {
+      continue;
+    }
+    PrintOptionRow(&options[i], column);
   }
 }
 
