@@ -141,6 +141,65 @@ static bool PopCall(XtensaInterpreter* interpreter) {
   return true;
 }
 
+#define XTENSA_SETJMP_BREAK 0x11
+#define XTENSA_LONGJMP_BREAK 0x12
+#define XTENSA_SETJMP_REGS 256
+
+static bool HandleSetJmp(XtensaInterpreter* interpreter) {
+  uint32_t buf = ReadRegister(interpreter, 2);
+  if (interpreter->call_depth == 0) {
+    fprintf(stderr, "ESP32 setjmp with empty call stack\n");
+    interpreter->running = false;
+    interpreter->exit_code = 1;
+    return false;
+  }
+  XtensaCallFrame* frame = &interpreter->calls[interpreter->call_depth - 1];
+  uint32_t depth = (uint32_t)interpreter->call_depth;
+  uint32_t window_base = frame->window_base;
+  return WriteMemory(interpreter, buf, &depth, sizeof(depth)) &&
+         WriteMemory(interpreter, buf + 4, &frame->return_pc,
+                     sizeof(frame->return_pc)) &&
+         WriteMemory(interpreter, buf + 8, &window_base, sizeof(window_base)) &&
+         WriteMemory(interpreter, buf + 12, frame->registers,
+                     XTENSA_SETJMP_REGS);
+}
+
+static bool HandleLongJmp(XtensaInterpreter* interpreter, uint32_t* next_pc) {
+  uint32_t buf = ReadRegister(interpreter, 2);
+  uint32_t value = ReadRegister(interpreter, 3);
+  if (value == 0) {
+    value = 1;
+  }
+  uint32_t depth = 0;
+  uint32_t return_pc = 0;
+  uint32_t window_base = 0;
+  if (!ReadMemory(interpreter, buf, &depth, sizeof(depth)) ||
+      !ReadMemory(interpreter, buf + 4, &return_pc, sizeof(return_pc)) ||
+      !ReadMemory(interpreter, buf + 8, &window_base, sizeof(window_base))) {
+    return false;
+  }
+  if (depth == 0 || depth > XTENSA_MAX_CALL_DEPTH) {
+    fprintf(stderr, "ESP32 longjmp with invalid setjmp buffer\n");
+    interpreter->running = false;
+    interpreter->exit_code = 1;
+    return false;
+  }
+  XtensaCallFrame* frame = &interpreter->calls[depth - 1];
+  if (!ReadMemory(interpreter, buf + 12, frame->registers,
+                  XTENSA_SETJMP_REGS)) {
+    return false;
+  }
+  frame->return_pc = return_pc;
+  frame->window_base = (uint8_t)window_base;
+  interpreter->call_depth = depth;
+  WriteRegister(interpreter, 2, value);
+  if (!PopCall(interpreter)) {
+    return false;
+  }
+  *next_pc = interpreter->pc;
+  return true;
+}
+
 static void TraceInstruction(const XtensaInterpreter* interpreter,
                              const XtensaInstruction* instruction) {
   if (!interpreter->trace) {
@@ -432,7 +491,13 @@ bool XtensaInterpreterStep(XtensaInterpreter* interpreter) {
       next_pc = interpreter->pc;
       break;
     case kXtensaBreak:
-      HandleHostTrap(interpreter);
+      if (instruction.immediate == XTENSA_SETJMP_BREAK) {
+        if (!HandleSetJmp(interpreter)) return false;
+      } else if (instruction.immediate == XTENSA_LONGJMP_BREAK) {
+        if (!HandleLongJmp(interpreter, &next_pc)) return false;
+      } else {
+        HandleHostTrap(interpreter);
+      }
       break;
     case kXtensaSlli:
       WriteRegister(interpreter, instruction.rd,

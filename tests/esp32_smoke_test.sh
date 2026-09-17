@@ -76,4 +76,51 @@ compile_and_run "$EXEC_CASE" "$WORK/abi.elf"
 output=$(compile_and_run "$LIBC_CASE" "$WORK/libc.elf")
 [[ "$output" = "esp32:42" ]]
 
+cat >"$WORK/setjmp.c" <<'EOF'
+#include <setjmp.h>
+
+static int secondary_completed;
+
+static void jump_through_frames(jmp_buf env, int depth) {
+  volatile int marker = depth + 1;
+  if (depth != 0) {
+    jump_through_frames(env, depth - 1);
+  }
+  if (marker == 1) {
+    longjmp(env, 77);
+  }
+}
+
+int main(void) {
+  jmp_buf primary;
+  jmp_buf secondary;
+  int value = setjmp(primary);
+  if (value == 0) {
+    longjmp(primary, 0);
+  }
+  if (value != 1) return 1;
+
+  value = setjmp(primary);
+  if (value == 0) {
+    jump_through_frames(primary, 4);
+  }
+  if (value != 77) return 2;
+
+  value = setjmp(primary);
+  if (value == 0) {
+    int secondary_value = setjmp(secondary);
+    if (secondary_value == 0) {
+      longjmp(secondary, 19);
+    }
+    if (secondary_value != 19) return 3;
+    secondary_completed = 1;
+    longjmp(primary, -7);
+  }
+  if (value != -7) return 4;
+  if (!secondary_completed) return 5;
+  return 0;
+}
+EOF
+compile_and_run "$WORK/setjmp.c" "$WORK/setjmp.elf"
+
 echo "ESP32 Xtensa smoke test passed"

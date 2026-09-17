@@ -92,6 +92,8 @@
   V(return, 0x0F)                                                             \
   V(call, 0x10)                                                               \
   V(call_indirect, 0x11)                                                      \
+  V(throw, 0x08)                                                              \
+  V(try_table, 0x1F)                                                          \
   V(drop, 0x1A)                                                               \
   V(select, 0x1B)
 
@@ -135,7 +137,8 @@
   V(i32_const, 0x41)                                                          \
   V(i64_const, 0x42)                                                          \
   V(f32_const, 0x43)                                                          \
-  V(f64_const, 0x44)
+  V(f64_const, 0x44)                                                          \
+  V(setjmp_cont, 0x41)
 
 // Values that are only known once the module's layout is fixed.  All three
 // encode as i32.const; the operand names what to look up rather than holding
@@ -424,6 +427,10 @@ typedef enum {
 
 // The stack pointer global holding the shadow stack top.
 #define WASM32_STACK_POINTER_GLOBAL 0
+
+// Reserved linear-memory slot used to pass the jmp_buf pointer from longjmp
+// to the catch handler.  The first kilobyte is otherwise unused.
+#define WASM32_LONGJMP_PENDING 8
 
 // Linear memory layout.  The first kilobyte is left empty so that a null
 // dereference reads obviously wrong data instead of a real object; static

@@ -24,4 +24,4 @@ for var in PATH HOME USER TMPDIR LANG; do
   fi
 done
 
-exec wasmtime run "${env_args[@]}" --dir "${PWD}::/" --dir /tmp::/tmp "$@"
+exec wasmtime run -W exceptions "${env_args[@]}" --dir "${PWD}::/" --dir /tmp::/tmp "$@"

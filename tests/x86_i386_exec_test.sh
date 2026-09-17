@@ -476,4 +476,80 @@ davecc_calls_gcc_ll_exit="$(docker run --rm --platform linux/386 \
   exit 1
 }
 
-echo "x86 i386 exec tests passed (main exit 0, cross-TU exit 7, GCC sret interop 77/88, long long interop 7/5)"
+cat >"$WORK/setjmp_test.c" <<'EOF'
+#include <setjmp.h>
+
+static int secondary_completed;
+
+static void jump_through_frames(jmp_buf env, int depth) {
+  volatile int marker = depth + 1;
+  if (depth != 0) {
+    jump_through_frames(env, depth - 1);
+  }
+  if (marker == 1) {
+    longjmp(env, 77);
+  }
+}
+
+int main(void) {
+  jmp_buf primary;
+  jmp_buf secondary;
+  int value = setjmp(primary);
+  if (value == 0) {
+    longjmp(primary, 0);
+  }
+  if (value != 1) return 1;
+
+  value = setjmp(primary);
+  if (value == 0) {
+    jump_through_frames(primary, 4);
+  }
+  if (value != 77) return 2;
+
+  value = setjmp(primary);
+  if (value == 0) {
+    int secondary_value = setjmp(secondary);
+    if (secondary_value == 0) {
+      longjmp(secondary, 19);
+    }
+    if (secondary_value != 19) return 3;
+    secondary_completed = 1;
+    longjmp(primary, -7);
+  }
+  if (value != -7) return 4;
+  if (!secondary_completed) return 5;
+  return 0;
+}
+EOF
+
+cat >"$WORK/_start_setjmp.s" <<'EOF'
+	.text
+	.global _start
+_start:
+	call main
+	movl %eax, %ebx
+	movl $1, %eax
+	int $0x80
+EOF
+
+"$DAVECC" -target x86 -nostdinc -isystem "${ROOT_DIR}/libc/include" \
+  -c -o "$WORK/setjmp_test.o" "$WORK/setjmp_test.c"
+"$DAVECC" -target x86 -nostdinc -c -o "$WORK/setjmp.o" \
+  "${ROOT_DIR}/x86 support/setjmp.s"
+"$DAVECC" -target x86 -nostdinc -c -o "$WORK/longjmp.o" \
+  "${ROOT_DIR}/x86 support/longjmp.s"
+
+setjmp_exit="$(docker run --rm --platform linux/386 \
+  -v "$WORK:/work" -w /work alpine:3.20 sh -c "
+    apk add --no-cache binutils gcc musl-dev >/dev/null
+    gcc -c _start_setjmp.s -o _start_setjmp.o
+    gcc -nostdlib -static -Wl,-e,_start -o setjmp.elf \
+      _start_setjmp.o setjmp_test.o setjmp.o longjmp.o
+    ./setjmp.elf; echo exit:\$?
+  " | tail -1 | sed 's/exit://')"
+[[ "$setjmp_exit" == "0" ]] || {
+  echo "i386 setjmp/longjmp failed: exit=$setjmp_exit" >&2
+  exit 1
+}
+
+echo "x86 i386 exec tests passed (main exit 0, cross-TU exit 7, GCC sret interop 77/88, long long interop 7/5, setjmp 0)"

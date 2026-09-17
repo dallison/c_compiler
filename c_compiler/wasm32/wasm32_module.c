@@ -307,6 +307,20 @@ static void WriteInstruction(Wasm32Encoder* encoder, Buffer* buf,
     case W_OP(if):
       BufferAppendByte(buf, (char)kWasmTypeVoid);
       break;
+    case W_OP(try_table):
+      encoder->object->has_tag = true;
+      BufferAppendByte(buf, (char)kWasmTypeVoid);
+      WasmWriteULEB128(buf, 1);   // One catch clause.
+      BufferAppendByte(buf, 0x02);  // catch_all: tag payload is in memory.
+      WasmWriteULEB128(buf, (uint64_t)(inst->addr < 0 ? 0 : inst->addr));
+      break;
+    case W_OP(throw):
+      encoder->object->has_tag = true;
+      WasmWriteULEB128(buf, 0);  // Tag 0.
+      break;
+    case W_OP(setjmp_cont):
+      WasmWriteSLEB128(buf, inst->addr);
+      break;
     case W_OP(global_get):
     case W_OP(global_set):
       // The only global is the shadow stack pointer, which the linker

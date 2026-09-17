@@ -95,9 +95,6 @@ in_set() {
 known_profile_omission() {
   local header=$1
   case "$target:$header" in
-    wasm32:setjmp.h|wasm32:csetjmp)
-      return 0
-      ;;
     6502:atomic|65c02:atomic|6502:regex|65c02:regex)
       return 0
       ;;

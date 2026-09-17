@@ -10,11 +10,6 @@ fi
 # so a __thread variable has nowhere to live.
 echo "tests/single-exec/00238.c"
 
-# setjmp/longjmp.  Unwinding to an earlier frame needs either the exception
-# handling proposal or an Asyncify-style transform, and libc/include/setjmp.h
-# has no wasm32 definition of jmp_buf at all.
-echo "tests/single-exec/00247.c"
-
 # Skipped for every target, not just this one.
 echo "tests/single-exec/00216.c"
 echo "tests/single-exec/00219.c"

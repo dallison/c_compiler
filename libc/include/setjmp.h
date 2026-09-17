@@ -51,6 +51,26 @@ struct __jmp_buf {
   long regs[32];
   long retaddr;
 };
+#elif defined(__i386__)
+struct __jmp_buf {
+  // ebx, esi, edi, ebp, caller esp, return address.
+  long regs[8];
+};
+#elif defined(__xtensa__)
+struct __jmp_buf {
+  // Interpreter snapshot: call depth, return PC, window base, and the 64
+  // physical address registers of the setjmp call frame.
+  unsigned long regs[68];
+};
+#elif defined(__wasm32__)
+struct __jmp_buf {
+  // Shadow SP, continuation block, owning frame, longjmp value.
+  unsigned long regs[4];
+};
+#elif defined(__bpf__)
+struct __jmp_buf {
+  long dummy[4];
+};
 #else
 #error "Unknown architecture"
 #endif

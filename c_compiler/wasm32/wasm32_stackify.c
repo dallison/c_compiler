@@ -74,6 +74,8 @@ static bool IsTerminator(TargetInstruction* inst) {
     case W_OP(br):
     case W_OP(br_if):
     case W_OP(return):
+    case W_OP(throw):
+    case W_OP(unreachable):
       return true;
     default:
       return false;
@@ -738,6 +740,15 @@ static void EmitScopes(Wasm32Generator* wasm, Vector* blocks, Vector* markers,
 // The dispatch shape, for a graph the structured one cannot express.
 // ---------------------------------------------------------------------------
 
+static void Place(Wasm32Generator* wasm, TargetInstruction* inst,
+                  TargetInstruction* position) {
+  if (position != NULL) {
+    TargetEmitBefore(&wasm->base, inst, position);
+  } else {
+    TargetEmit(&wasm->base, inst);
+  }
+}
+
 static TargetInstruction* NewConstant(Wasm32Generator* wasm, int32_t value) {
   TargetInstruction* inst = TargetNewInstruction1(
       (TargetOpcode)W_OP(i32_const),
@@ -745,6 +756,117 @@ static TargetInstruction* NewConstant(Wasm32Generator* wasm, int32_t value) {
   Wasm32SetInstructionType(inst, kWasmTypeI32);
   TargetUpdateOperandUsers(inst);
   return inst;
+}
+
+static TargetInstruction* EmitConstAt(Wasm32Generator* wasm, int32_t value,
+                                      TargetInstruction* position) {
+  TargetInstruction* inst = NewConstant(wasm, value);
+  Place(wasm, inst, position);
+  return inst;
+}
+
+static TargetInstruction* EmitLoadAt(Wasm32Generator* wasm,
+                                     TargetInstruction* address, int32_t offset,
+                                     TargetInstruction* position) {
+  TargetInstruction* inst =
+      TargetNewInstruction1((TargetOpcode)W_OP(i32_load), address);
+  inst->operand[1] =
+      TargetGetIntConstant(&wasm->base, NULL, kTargetType32Bit, offset);
+  Wasm32SetInstructionType(inst, kWasmTypeI32);
+  TargetUpdateOperandUsers(inst);
+  Place(wasm, inst, position);
+  return inst;
+}
+
+static void EmitStoreAt(Wasm32Generator* wasm, TargetInstruction* address,
+                        TargetInstruction* value, int32_t offset,
+                        TargetInstruction* position) {
+  TargetInstruction* inst =
+      TargetNewInstruction2((TargetOpcode)W_OP(i32_store), address, value);
+  inst->operand[2] =
+      TargetGetIntConstant(&wasm->base, NULL, kTargetType32Bit, offset);
+  inst->flags |= WASM32_FLAG_NO_RESULT;
+  TargetUpdateOperandUsers(inst);
+  Place(wasm, inst, position);
+}
+
+static void EmitLocalSetAt(Wasm32Generator* wasm, TargetInstruction* dest,
+                           TargetInstruction* value,
+                           TargetInstruction* position) {
+  TargetInstruction* inst =
+      TargetNewInstruction1((TargetOpcode)W_OP(local_set), value);
+  inst->dest = dest;
+  inst->flags |= WASM32_FLAG_NO_RESULT;
+  TargetUpdateOperandUsers(inst);
+  Place(wasm, inst, position);
+}
+
+static void PatchSetjmpContinuations(Vector* blocks) {
+  for (size_t i = 0; i < blocks->length; i++) {
+    StackifyBlock* block = blocks->value.p[i];
+    TargetInstruction* limit =
+        (i + 1 < blocks->length)
+            ? ((StackifyBlock*)blocks->value.p[i + 1])->anchor
+            : NULL;
+    for (TargetInstruction* inst = block->anchor; inst != NULL && inst != limit;
+         inst = TargetNext(inst)) {
+      if (inst->opcode == (TargetOpcode)W_OP(setjmp_cont)) {
+        inst->addr = (int)i;
+      }
+    }
+  }
+}
+
+static void EmitSetjmpHandler(Wasm32Generator* wasm,
+                              TargetInstruction* selector,
+                              TargetInstruction* thrown,
+                              TargetInstruction* position) {
+  TargetInstruction* addr = EmitConstAt(wasm, WASM32_LONGJMP_PENDING, position);
+  TargetInstruction* pending = EmitLoadAt(wasm, addr, 0, position);
+  EmitLocalSetAt(wasm, thrown, pending, position);
+
+  TargetInstruction* if_pending = NewScope(W_OP(if));
+  if_pending->operand[0] = thrown;
+  TargetUpdateOperandUsers(if_pending);
+  Place(wasm, if_pending, position);
+
+  TargetInstruction* saved_owner = EmitLoadAt(wasm, thrown, 8, position);
+  TargetInstruction* ne = TargetNewInstruction2(
+      (TargetOpcode)W_OP(i32_ne), saved_owner, wasm->setjmp_owner);
+  Wasm32SetInstructionType(ne, kWasmTypeI32);
+  TargetUpdateOperandUsers(ne);
+  Place(wasm, ne, position);
+
+  TargetInstruction* if_foreign = NewScope(W_OP(if));
+  if_foreign->operand[0] = ne;
+  TargetUpdateOperandUsers(if_foreign);
+  Place(wasm, if_foreign, position);
+
+  TargetInstruction* rethrow = TargetNewInstruction((TargetOpcode)W_OP(throw));
+  rethrow->flags |= WASM32_FLAG_NO_RESULT;
+  Place(wasm, rethrow, position);
+  Place(wasm, NewScope(W_OP(end)), position);
+
+  TargetInstruction* sp = EmitLoadAt(wasm, thrown, 0, position);
+  TargetInstruction* set_sp =
+      TargetNewInstruction1((TargetOpcode)W_OP(global_set), sp);
+  set_sp->operand[1] = TargetGetIntConstant(&wasm->base, NULL, kTargetType32Bit,
+                                            WASM32_STACK_POINTER_GLOBAL);
+  set_sp->flags |= WASM32_FLAG_NO_RESULT;
+  TargetUpdateOperandUsers(set_sp);
+  Place(wasm, set_sp, position);
+
+  TargetInstruction* value = EmitLoadAt(wasm, thrown, 12, position);
+  EmitLocalSetAt(wasm, wasm->setjmp_result, value, position);
+  TargetInstruction* cont = EmitLoadAt(wasm, thrown, 4, position);
+  EmitLocalSetAt(wasm, selector, cont, position);
+
+  TargetInstruction* zero = EmitConstAt(wasm, 0, position);
+  TargetInstruction* clear_addr =
+      EmitConstAt(wasm, WASM32_LONGJMP_PENDING, position);
+  EmitStoreAt(wasm, clear_addr, zero, 0, position);
+
+  Place(wasm, NewScope(W_OP(end)), position);
 }
 
 // Emit "selector = target; br depth" before 'position'.
@@ -769,11 +891,22 @@ static void EmitJumpToBlock(Wasm32Generator* wasm, TargetInstruction* selector,
 
 static void StackifyByDispatch(Wasm32Generator* wasm, Vector* blocks) {
   size_t num_blocks = blocks->length;
+  bool catch_longjmp = wasm->has_setjmp && wasm->setjmp_result != NULL &&
+                       wasm->setjmp_owner != NULL;
+
+  if (catch_longjmp) {
+    PatchSetjmpContinuations(blocks);
+  }
 
   // The selector local the dispatch reads.  Wasm zero-initializes locals, so
   // the first pass through the dispatch naturally selects block 0.
   TargetInstruction* selector = TargetNewInstruction((TargetOpcode)W_OP(slot));
   Wasm32SetInstructionType(selector, kWasmTypeI32);
+  TargetInstruction* thrown = NULL;
+  if (catch_longjmp) {
+    thrown = TargetNewInstruction((TargetOpcode)W_OP(slot));
+    Wasm32SetInstructionType(thrown, kWasmTypeI32);
+  }
 
   TargetInstruction* first = TargetFirstInstruction(&wasm->base);
 
@@ -781,7 +914,32 @@ static void StackifyByDispatch(Wasm32Generator* wasm, Vector* blocks) {
   // just before it, and the last terminator of a block sits immediately
   // before the next block's first instruction, so if the boundary marker
   // were not already there that code would land in the wrong scope.
+  //
+  // setjmp wraps as:
+  //   block $done
+  //     loop
+  //       block $caught
+  //         try_table catch_all $caught
+  //           ... dispatch ...
+  //         end
+  //         br $done
+  //       end $caught
+  //       handler
+  //       br loop
+  //     end loop
+  //   end $done
+  if (catch_longjmp) {
+    TargetEmitBefore(&wasm->base, NewScope(W_OP(block)), first);
+  }
   TargetEmitBefore(&wasm->base, NewScope(W_OP(loop)), first);
+  TargetInstruction* try_table = NULL;
+  if (catch_longjmp) {
+    TargetEmitBefore(&wasm->base, NewScope(W_OP(block)), first);
+    try_table = NewScope(W_OP(try_table));
+    // Catch indices skip the try_table's own branch label, so 0 is $caught.
+    try_table->addr = 0;
+    TargetEmitBefore(&wasm->base, try_table, first);
+  }
   for (size_t i = 0; i < num_blocks; i++) {
     TargetEmitBefore(&wasm->base, NewScope(W_OP(block)), first);
   }
@@ -801,8 +959,23 @@ static void StackifyByDispatch(Wasm32Generator* wasm, Vector* blocks) {
     TargetEmitBefore(&wasm->base, NewScope(W_OP(end)), block->anchor);
   }
 
-  // Close the loop after the last block.
-  TargetEmit(&wasm->base, NewScope(W_OP(end)));
+  if (catch_longjmp) {
+    TargetEmit(&wasm->base, NewScope(W_OP(end)));  // try_table
+    TargetInstruction* leave = TargetNewInstruction((TargetOpcode)W_OP(br));
+    leave->addr = 2;  // $done: 0=$caught, 1=loop, 2=$done
+    leave->flags |= WASM32_FLAG_NO_RESULT;
+    TargetEmit(&wasm->base, leave);
+    TargetEmit(&wasm->base, NewScope(W_OP(end)));  // $caught
+    EmitSetjmpHandler(wasm, selector, thrown, NULL);
+    TargetInstruction* retry = TargetNewInstruction((TargetOpcode)W_OP(br));
+    retry->addr = 0;  // loop
+    retry->flags |= WASM32_FLAG_NO_RESULT;
+    TargetEmit(&wasm->base, retry);
+  }
+  TargetEmit(&wasm->base, NewScope(W_OP(end)));  // loop
+  if (catch_longjmp) {
+    TargetEmit(&wasm->base, NewScope(W_OP(end)));  // $done
+  }
 
   for (size_t i = 0; i < num_blocks; i++) {
     StackifyBlock* block = blocks->value.p[i];
@@ -812,6 +985,9 @@ static void StackifyByDispatch(Wasm32Generator* wasm, Vector* blocks) {
             : NULL;
     // Distance from inside block i out to the loop.
     int loop_depth = (int)(num_blocks - 1 - i);
+    if (catch_longjmp) {
+      loop_depth += 2;  // try_table and $caught
+    }
 
     for (TargetInstruction* inst = block->anchor; inst != NULL && inst != limit;
          inst = TargetNext(inst)) {
@@ -856,6 +1032,9 @@ static void StackifyByDispatch(Wasm32Generator* wasm, Vector* blocks) {
   // The selector pseudo has to be in the list for the local allocator to
   // find it.  It encodes to nothing.
   TargetEmitBefore(&wasm->base, selector, TargetFirstInstruction(&wasm->base));
+  if (thrown != NULL) {
+    TargetEmitBefore(&wasm->base, thrown, TargetFirstInstruction(&wasm->base));
+  }
 }
 
 // Work out an order the blocks can be laid out in for the structured shape,
@@ -927,7 +1106,7 @@ void Wasm32Stackify(Wasm32Generator* wasm) {
   VectorInit(&blocks);
   CollectBlocks(wasm, &blocks);
 
-  if (blocks.length <= 1) {
+  if (blocks.length <= 1 && !wasm->has_setjmp) {
     // Straight-line code needs no scopes at all.
     DestructBlocks(&blocks);
     return;
@@ -935,7 +1114,7 @@ void Wasm32Stackify(Wasm32Generator* wasm) {
 
   Vector order;
   VectorInit(&order);
-  bool structured = PlanBlockOrder(&blocks, &order);
+  bool structured = !wasm->has_setjmp && PlanBlockOrder(&blocks, &order);
   if (structured) {
     MakeEdgesExplicit(wasm, &blocks);
     ReorderInstructions(wasm, &blocks, &order);
@@ -947,6 +1126,9 @@ void Wasm32Stackify(Wasm32Generator* wasm) {
     structured = ApplyScopes(wasm, &blocks);
   }
   if (!structured) {
+    if (blocks.length == 0) {
+      CollectBlocks(wasm, &blocks);
+    }
     StackifyByDispatch(wasm, &blocks);
   }
   VectorDestruct(&order);

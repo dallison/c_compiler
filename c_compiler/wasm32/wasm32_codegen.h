@@ -92,6 +92,12 @@ typedef struct Wasm32Generator {
   // Set when lowering hit something it cannot yet translate.  The target
   // reports this as a compile error rather than emitting a bad module.
   bool failed;
+
+  // The function contains setjmp, so the stackifier wraps its dispatch loop
+  // in try_table and longjmp throws to it.
+  bool has_setjmp;
+  TargetInstruction* setjmp_result;
+  TargetInstruction* setjmp_owner;
 } Wasm32Generator;
 
 void Wasm32GeneratorInit(Wasm32Generator* wasm, Generator* gen);

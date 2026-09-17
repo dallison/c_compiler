@@ -204,6 +204,7 @@ void Wasm32ObjectFileInit(Wasm32ObjectFile* object, const char* filename) {
   VectorInit(&object->functions);
   VectorInit(&object->imported_functions);
   object->is_live = true;
+  object->has_tag = false;
 }
 
 static void SegmentDelete(Wasm32Segment* segment) {
@@ -301,6 +302,17 @@ int Wasm32ObjectInternType(Wasm32ObjectFile* object, Buffer* encoding) {
   BufferAppend(copy, encoding->value, encoding->length);
   VectorAppend(&object->types, copy);
   return (int)(object->types.length - 1);
+}
+
+int Wasm32ObjectInternEmptyFuncType(Wasm32ObjectFile* object) {
+  Buffer encoding;
+  BufferInit(&encoding);
+  BufferAppendByte(&encoding, (char)WASM_FUNCTYPE);
+  WasmWriteULEB128(&encoding, 0);
+  WasmWriteULEB128(&encoding, 0);
+  int index = Wasm32ObjectInternType(object, &encoding);
+  BufferDestruct(&encoding);
+  return index;
 }
 
 Wasm32Reloc* Wasm32NewReloc(uint8_t type, uint32_t offset, uint32_t index,
@@ -454,6 +466,11 @@ bool Wasm32WriteObjectFile(Wasm32ObjectFile* object, String* filename) {
   // count every one actually emitted.
   uint32_t section_index = 0;
 
+  uint32_t tag_type_index = 0;
+  if (object->has_tag) {
+    tag_type_index = (uint32_t)Wasm32ObjectInternEmptyFuncType(object);
+  }
+
   WasmWriteULEB128(&section, object->types.length);
   for (size_t i = 0; i < object->types.length; i++) {
     Buffer* encoding = object->types.value.p[i];
@@ -529,6 +546,15 @@ bool Wasm32WriteObjectFile(Wasm32ObjectFile* object, String* filename) {
     }
     data_section_index = section_index;
     WasmWriteSection(&module, WASM_SECTION_DATA, &section);
+    section_index++;
+  }
+
+  if (object->has_tag) {
+    BufferClear(&section);
+    WasmWriteULEB128(&section, 1);
+    BufferAppendByte(&section, 0);  // Exception attribute.
+    WasmWriteULEB128(&section, tag_type_index);
+    WasmWriteSection(&module, WASM_SECTION_TAG, &section);
     section_index++;
   }
 
@@ -1035,6 +1061,9 @@ bool Wasm32ReadObjectFile(Wasm32ObjectFile* object, const char* filename,
             "rather than an object the linker can use\n",
             filename);
     file.error = true;
+  }
+  if (ok && FindSection(&sections, WASM_SECTION_TAG, NULL) != NULL) {
+    object->has_tag = true;
   }
   if (ok && (range = FindSection(&sections, WASM_SECTION_CUSTOM,
                                  "reloc.CODE")) != NULL) {

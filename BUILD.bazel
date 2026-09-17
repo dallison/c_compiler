@@ -2606,6 +2606,10 @@ cflags=(-target esp32 -O1 -nostdinc -D__DAVECC_HAS_HEAP_LOCK__=1 \
 
 "$$davecc" "$${cflags[@]}" xtensa_support/syscall.s \
   -o "$$work/syscall_asm.o"
+"$$davecc" "$${cflags[@]}" xtensa_support/setjmp.s \
+  -o "$$work/setjmp.o"
+"$$davecc" "$${cflags[@]}" xtensa_support/longjmp.s \
+  -o "$$work/longjmp.o"
 
 for src in libc/*.c; do
   case "$$src" in
@@ -2625,7 +2629,8 @@ for src in libc/*.c; do
   if [[ "$$src" == "libc/printf.c" ]]; then
     source_cflags+=(-DPRINTF_DISABLE_FLOAT=1)
   fi
-  "$$davecc" "$${cflags[@]}" "$${source_cflags[@]}" "$$src" -o "$$obj"
+  "$$davecc" "$${cflags[@]}" $${source_cflags[@]+"$${source_cflags[@]}"} \
+    "$$src" -o "$$obj"
 done
 
 "$$davecc" "$${cflags[@]}" xtensa_support/heap.c -o "$$work/heap.o"
@@ -5754,7 +5759,10 @@ sh_test(
     args = ["$(rootpath :davecc)"],
     data = [
         ":davecc",
+        ":libc_headers",
         "libc/cdiv.c",
+        "x86 support/setjmp.s",
+        "x86 support/longjmp.s",
     ],
     env_inherit = [
         "COLIMA_HOME",

@@ -51,6 +51,8 @@ static bool BreaksStraightLine(TargetInstruction* inst) {
     case W_OP(return):
     case W_OP(ret):
     case W_OP(unreachable):
+    case W_OP(throw):
+    case W_OP(try_table):
       return true;
     default:
       return false;

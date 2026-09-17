@@ -37,11 +37,13 @@
 #define WASM_SECTION_ELEMENT 9
 #define WASM_SECTION_CODE 10
 #define WASM_SECTION_DATA 11
+#define WASM_SECTION_TAG 13
 
 #define WASM_EXTERN_FUNC 0
 #define WASM_EXTERN_TABLE 1
 #define WASM_EXTERN_MEMORY 2
 #define WASM_EXTERN_GLOBAL 3
+#define WASM_EXTERN_TAG 4
 
 #define WASM_FUNCTYPE 0x60
 
@@ -179,6 +181,7 @@ typedef struct Wasm32ObjectFile {
   Vector imported_functions;  // Wasm32Symbol*
 
   bool is_live;  // Archive members are only linked in once needed.
+  bool has_tag;  // Code throws or catches the longjmp tag.
 } Wasm32ObjectFile;
 
 // One defined function: its signature and its encoded body, minus the size
@@ -220,6 +223,7 @@ int Wasm32ObjectSymbolIndex(Wasm32ObjectFile* object, Wasm32Symbol* symbol);
 // Index of an encoded signature in the object's type vector, adding it if it
 // is not there yet.
 int Wasm32ObjectInternType(Wasm32ObjectFile* object, Buffer* encoding);
+int Wasm32ObjectInternEmptyFuncType(Wasm32ObjectFile* object);
 
 Wasm32Reloc* Wasm32NewReloc(uint8_t type, uint32_t offset, uint32_t index,
                             int32_t addend);

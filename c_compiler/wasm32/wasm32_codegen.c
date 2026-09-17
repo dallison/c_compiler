@@ -176,6 +176,8 @@ bool Wasm32ProducesValue(TargetInstruction* inst) {
     case W_OP(unreachable):
     case W_OP(nop):
     case W_OP(drop):
+    case W_OP(throw):
+    case W_OP(try_table):
     case W_OP(local_set):
     case W_OP(global_set):
     case W_OP(i32_store):
@@ -356,6 +358,9 @@ void Wasm32GeneratorInit(Wasm32Generator* wasm, Generator* gen) {
   VectorInit(&wasm->local_values);
   VectorInit(&wasm->local_variables);
   wasm->failed = false;
+  wasm->has_setjmp = false;
+  wasm->setjmp_result = NULL;
+  wasm->setjmp_owner = NULL;
 }
 
 Wasm32Generator* NewWasm32Generator(Generator* gen) {
@@ -972,6 +977,8 @@ static TargetInstruction* EmitMemoryCopy(Wasm32Generator* wasm,
   return Emit(wasm, copy);
 }
 
+static void EnsureSetjmpSlots(Wasm32Generator* wasm);
+
 static void LowerEnter(Wasm32Generator* wasm) {
   int32_t size = wasm->base.stack_frame_size;
   if (size > 0) {
@@ -984,6 +991,18 @@ static void LowerEnter(Wasm32Generator* wasm) {
     TargetUpdateOperandUsers(base);
     wasm->frame_pointer = Emit(wasm, base);
     EmitGlobalSet(wasm, WASM32_STACK_POINTER_GLOBAL, wasm->frame_pointer);
+  }
+
+  if (wasm->has_setjmp) {
+    EnsureSetjmpSlots(wasm);
+    if (wasm->frame_pointer != NULL) {
+      TargetInstruction* set =
+          NewInstruction1(W_OP(local_set), wasm->frame_pointer);
+      set->dest = wasm->setjmp_owner;
+      set->flags |= WASM32_FLAG_NO_RESULT;
+      TargetUpdateOperandUsers(set);
+      Emit(wasm, set);
+    }
   }
 
   // Parameters arrive in wasm locals but the IR reads them out of memory, so
@@ -1778,7 +1797,131 @@ static bool BuildSignatureForCall(TypeRecord* type, TargetInstruction** values,
   return true;
 }
 
+static const char* DirectCalleeName(IRNode* node) {
+  if (node == NULL || node->inputs.length < 1) {
+    return NULL;
+  }
+  IRNode* callee = node->inputs.value.p[0];
+  if (!IsFunctionReference(callee)) {
+    return NULL;
+  }
+  Symbol* symbol = ((IRVariable*)callee)->symbol;
+  if (symbol == NULL || symbol->name.value == NULL) {
+    return NULL;
+  }
+  return symbol->name.value;
+}
+
+static bool CalleeIs(IRNode* node, const char* name) {
+  const char* callee = DirectCalleeName(node);
+  return callee != NULL && strcmp(callee, name) == 0;
+}
+
+static void EnsureSetjmpSlots(Wasm32Generator* wasm) {
+  if (wasm->setjmp_result != NULL) {
+    return;
+  }
+  wasm->setjmp_result = NewInstruction(W_OP(slot));
+  Wasm32SetInstructionType(wasm->setjmp_result, kWasmTypeI32);
+  wasm->setjmp_owner = NewInstruction(W_OP(slot));
+  Wasm32SetInstructionType(wasm->setjmp_owner, kWasmTypeI32);
+  TargetInstruction* first = TargetFirstInstruction(&wasm->base);
+  if (first != NULL) {
+    TargetEmitBefore(&wasm->base, wasm->setjmp_result, first);
+    TargetEmitBefore(&wasm->base, wasm->setjmp_owner, first);
+  } else {
+    Emit(wasm, wasm->setjmp_result);
+    Emit(wasm, wasm->setjmp_owner);
+  }
+}
+
+static TargetInstruction* LowerSetjmp(Wasm32Generator* wasm, IRNode* node) {
+  if (node->inputs.length < 2) {
+    Fail(wasm, "setjmp needs a jmp_buf");
+    return NULL;
+  }
+  EnsureSetjmpSlots(wasm);
+
+  TargetInstruction* label = NewInstruction(W_OP(label));
+  Emit(wasm, label);
+
+  TargetInstruction* buf = Materialize(wasm, node->inputs.value.p[1]);
+  if (buf == NULL) {
+    return NULL;
+  }
+  buf = Coerce(wasm, buf, kWasmTypeI32, /*is_unsigned=*/true);
+
+  TargetInstruction* sp = EmitGlobalGet(wasm, WASM32_STACK_POINTER_GLOBAL);
+  EmitStore(wasm, W_OP(i32_store), buf, sp, 0);
+
+  TargetInstruction* cont = NewInstruction(W_OP(setjmp_cont));
+  Wasm32SetInstructionType(cont, kWasmTypeI32);
+  Emit(wasm, cont);
+  EmitStore(wasm, W_OP(i32_store), buf, cont, 4);
+  EmitStore(wasm, W_OP(i32_store), buf, wasm->setjmp_owner, 8);
+
+  TargetInstruction* result = NewInstruction1(W_OP(mov), wasm->setjmp_result);
+  Wasm32SetInstructionType(result, kWasmTypeI32);
+  TargetUpdateOperandUsers(result);
+  Emit(wasm, result);
+
+  TargetInstruction* zero = EmitI32Constant(wasm, 0);
+  TargetInstruction* clear = NewInstruction1(W_OP(local_set), zero);
+  clear->dest = wasm->setjmp_result;
+  clear->flags |= WASM32_FLAG_NO_RESULT;
+  TargetUpdateOperandUsers(clear);
+  Emit(wasm, clear);
+
+  return SetLoweredNode(node, result);
+}
+
+static TargetInstruction* LowerLongjmp(Wasm32Generator* wasm, IRNode* node) {
+  if (node->inputs.length < 3) {
+    Fail(wasm, "longjmp needs a jmp_buf and a value");
+    return NULL;
+  }
+  TargetInstruction* buf = Materialize(wasm, node->inputs.value.p[1]);
+  TargetInstruction* value = Materialize(wasm, node->inputs.value.p[2]);
+  if (buf == NULL || value == NULL) {
+    return NULL;
+  }
+  buf = Coerce(wasm, buf, kWasmTypeI32, /*is_unsigned=*/true);
+  value = Coerce(wasm, value, kWasmTypeI32, /*is_unsigned=*/false);
+
+  TargetInstruction* is_zero = NewInstruction1(W_OP(i32_eqz), value);
+  Wasm32SetInstructionType(is_zero, kWasmTypeI32);
+  TargetUpdateOperandUsers(is_zero);
+  Emit(wasm, is_zero);
+  TargetInstruction* one = EmitI32Constant(wasm, 1);
+  TargetInstruction* selected =
+      NewInstruction3(W_OP(select), one, value, is_zero);
+  Wasm32SetInstructionType(selected, kWasmTypeI32);
+  TargetUpdateOperandUsers(selected);
+  Emit(wasm, selected);
+  EmitStore(wasm, W_OP(i32_store), buf, selected, 12);
+
+  TargetInstruction* pending =
+      EmitI32Constant(wasm, WASM32_LONGJMP_PENDING);
+  EmitStore(wasm, W_OP(i32_store), pending, buf, 0);
+
+  TargetInstruction* throw_inst = NewInstruction(W_OP(throw));
+  throw_inst->flags |= WASM32_FLAG_NO_RESULT;
+  Emit(wasm, throw_inst);
+
+  TargetInstruction* unreachable = NewInstruction(W_OP(unreachable));
+  unreachable->flags |= WASM32_FLAG_NO_RESULT;
+  Emit(wasm, unreachable);
+  return SetLoweredNode(node, throw_inst);
+}
+
 static TargetInstruction* LowerCall(Wasm32Generator* wasm, IRNode* node) {
+  if (CalleeIs(node, "setjmp") || CalleeIs(node, "_setjmp")) {
+    return LowerSetjmp(wasm, node);
+  }
+  if (CalleeIs(node, "longjmp") || CalleeIs(node, "_longjmp")) {
+    return LowerLongjmp(wasm, node);
+  }
+
   assert(node->inputs.length >= 1);
   size_t num_arguments = node->inputs.length - 1;
 
@@ -3139,6 +3282,9 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
     if (call->opcode != IR_OP(calla) || call->inputs.length < 1) {
       continue;
     }
+    if (CalleeIs(call, "setjmp") || CalleeIs(call, "_setjmp")) {
+      wasm->has_setjmp = true;
+    }
     TypeRecord* callee = CalleeFunctionType(call);
     if (callee == NULL || !callee->info.function.varargs) {
       continue;
@@ -3164,7 +3310,7 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
   // A function that allocates off the shadow stack must have a frame even if
   // it has nothing else to put in one, because it is the epilogue's restore
   // of the stack pointer that gives the space back on every exit path.
-  if (moves_stack_pointer && var_offset == 0) {
+  if ((moves_stack_pointer || wasm->has_setjmp) && var_offset == 0) {
     var_offset = 16;
   }
 

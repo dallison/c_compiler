@@ -795,6 +795,38 @@ static uint32_t MergedTypeIndex(Wasm32Linker* linker, Vector* type_maps,
 }
 
 static bool WriteModule(Wasm32Linker* linker, Vector* type_maps) {
+  bool needs_tag = false;
+  for (size_t i = 0; i < linker->objects.length; i++) {
+    Wasm32ObjectFile* object = linker->objects.value.p[i];
+    if (object->is_live && object->has_tag) {
+      needs_tag = true;
+      break;
+    }
+  }
+  uint32_t tag_type_index = 0;
+  if (needs_tag) {
+    Buffer encoding;
+    BufferInit(&encoding);
+    BufferAppendByte(&encoding, (char)WASM_FUNCTYPE);
+    WasmWriteULEB128(&encoding, 0);
+    WasmWriteULEB128(&encoding, 0);
+    int index = -1;
+    for (size_t k = 0; k < linker->types.length; k++) {
+      if (BufferCompare(linker->types.value.p[k], &encoding) == 0) {
+        index = (int)k;
+        break;
+      }
+    }
+    if (index < 0) {
+      Buffer* copy = NewBuffer();
+      BufferAppend(copy, encoding.value, encoding.length);
+      VectorAppend(&linker->types, copy);
+      index = (int)(linker->types.length - 1);
+    }
+    tag_type_index = (uint32_t)index;
+    BufferDestruct(&encoding);
+  }
+
   Buffer module;
   BufferInit(&module);
   BufferAppendByte(&module, 0x00);
@@ -864,6 +896,14 @@ static bool WriteModule(Wasm32Linker* linker, Vector* type_maps) {
   BufferAppendByte(&section, 0x00);  // No maximum.
   WasmWriteULEB128(&section, MemoryPages(linker));
   WasmWriteSection(&module, WASM_SECTION_MEMORY, &section);
+
+  if (needs_tag) {
+    BufferClear(&section);
+    WasmWriteULEB128(&section, 1);
+    BufferAppendByte(&section, 0);
+    WasmWriteULEB128(&section, tag_type_index);
+    WasmWriteSection(&module, WASM_SECTION_TAG, &section);
+  }
 
   // Global section: the shadow stack pointer.
   BufferClear(&section);
