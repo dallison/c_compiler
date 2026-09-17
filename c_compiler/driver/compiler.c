@@ -27,6 +27,7 @@
 #include "expr_evaluator.h"
 #include "init_semantics.h"
 #include "lex.h"
+#include "listing.h"
 #include "preprocessor.h"
 #include "semantics.h"
 #include "syntax.h"
@@ -128,6 +129,18 @@ static CompilerOptionDefinition compiler_options[] = {
      "Place each function in its own ELF section for unused-section GC"},
     {"-fno-function-sections", kCompilerOptionBool, kOptionNoFunctionSections,
      false, "Emit all functions in a shared .text section"},
+    {"-flisting", kCompilerOptionBool, kOptionListing, false,
+     "Write an interleaved source listing (.lst); includes assembly by default"},
+    {"-flisting-ast", kCompilerOptionBool, kOptionListingAST, false,
+     "Include the function AST in the listing"},
+    {"-flisting-ir", kCompilerOptionBool, kOptionListingIR, false,
+     "Include IR on each basic block in the listing"},
+    {"-flisting-lowered", kCompilerOptionBool, kOptionListingLowered, false,
+     "Include lowered target IR on each basic block in the listing"},
+    {"-flisting-asm", kCompilerOptionBool, kOptionListingAsm, false,
+     "Include assembly in the listing (implied by -flisting)"},
+    {"-flisting-file", kCompilerOptionString, kOptionListingFile, false,
+     "Listing output path (default: replace source suffix with .lst; - is stdout)"},
     {NULL, 0, 0, false, NULL},
 };
 
@@ -3240,6 +3253,15 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->constexpr_codegen_recover = false;
   compiler->immediate_function_context_depth = 0;
   compiler->constant_evaluation_required_depth = 0;
+  compiler->save_ir = false;
+  compiler->save_ast = false;
+  compiler->listing_enabled = false;
+  compiler->listing_ast = false;
+  compiler->listing_ir = false;
+  compiler->listing_lowered = false;
+  compiler->listing_asm = false;
+  StringInit(&compiler->listing_path, NULL);
+  compiler->listing_file = NULL;
   compiler->next_literal_id = 1;
   compiler->next_symbol_id = 1;
   compiler->current_include_path_index = 0;
@@ -3300,6 +3322,7 @@ static void OpenSaveFiles(Compiler* compiler) {
       compiler->ast_output_file = stdout;
     }
   }
+  ListingOpen(compiler);
 }
 
 static void ParseOptimizationOption(Compiler* compiler, Vector* options,
@@ -3582,6 +3605,7 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
       OptionBoolValue(kOptionSaveIR, options, false);
   compiler->save_ast =
       OptionBoolValue(kOptionSaveAST, options, false);
+  ListingApplyOptions(compiler, options);
   compiler->print_preprocessor =
       OptionBoolValue(kOptionPrintPreprocessor, options, false);
   compiler->keep_asm_file = OptionBoolValue(kOptionKeepAsmFile, options, false);
@@ -3803,6 +3827,8 @@ void CompilerDestruct(Compiler* compiler) {
   if (compiler->ast_output_file != stdout) {
     fclose(compiler->ast_output_file);
   }
+  ListingClose(compiler);
+  StringDestruct(&compiler->listing_path);
   DebugBuilderDestruct(&compiler->debug_builder);
 
   for (size_t i = 0; i < compiler->functions.length; i++) {
@@ -3954,6 +3980,7 @@ bool CompilerInitFromString(Compiler* compiler, const char* filename,
     return false;
   }
   String* code_string = NewString(code);
+  SourceRegisterFileContents(filename, code);
   LexInitFromString(&compiler->lex, filename, code_string,
                     &compiler->preprocessor);
 

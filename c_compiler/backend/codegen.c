@@ -31,6 +31,7 @@
 #include "copyprop.h"
 #include "dce.h"
 #include "induction.h"
+#include "listing.h"
 #include "loop_info.h"
 #include "memopt.h"
 #include "sroa.h"
@@ -2256,5 +2257,7 @@ void GenerateFunctionIR(Generator* gen) {
 
 void* GenerateFunction(Generator* gen) {
   GenerateFunctionIR(gen);
-  return compiler->target->codegen(gen);
+  void* code = compiler->target->codegen(gen);
+  ListingEmitFunction(gen, code);
+  return code;
 }

@@ -61,6 +61,12 @@ typedef enum {
   kOptionLTO,                // -flto: compile all sources in one whole-program unit.
   kOptionFunctionSections,   // -ffunction-sections: one ELF section per function.
   kOptionNoFunctionSections, // -fno-function-sections: share a single .text.
+  kOptionListing,            // -flisting: write an interleaved listing file.
+  kOptionListingAST,         // Include AST in the listing.
+  kOptionListingIR,          // Include IR in the listing.
+  kOptionListingLowered,     // Include lowered target IR in the listing.
+  kOptionListingAsm,         // Include assembly in the listing.
+  kOptionListingFile,        // Listing output path (`-` is stdout).
 } CompilerOption;
 
 // This holds the strings from the command line, split into two

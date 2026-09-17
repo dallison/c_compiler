@@ -16,11 +16,20 @@ static Vector all_files;
 static Map file_map;
 static bool file_map_initialized = false;
 
-uint32_t NewFile(const char* filename) {
-  File* file = malloc(sizeof(File));
+static void FileInit(File* file, const char* filename) {
   StringInit(&file->name, filename);
   VectorInit(&file->lines);
+  VectorInit(&file->text);
+  StringInit(&file->contents, NULL);
   file->is_system_header = false;
+  file->text_loaded = false;
+  file->listing_last_line = 0;
+  BitSetInit(&file->listing_printed);
+}
+
+uint32_t NewFile(const char* filename) {
+  File* file = malloc(sizeof(File));
+  FileInit(file, filename);
   size_t curr_length = all_files.length;
   VectorAppend(&all_files, file);
   return (uint32_t)curr_length;
@@ -55,6 +64,12 @@ static uint32_t FindFile(const char* filename) {
 void FileDestruct(File* file) {
   StringDestruct(&file->name);
   VectorDestruct(&file->lines);
+  for (size_t i = 0; i < file->text.length; i++) {
+    StringDelete((String*)file->text.value.p[i]);
+  }
+  VectorDestruct(&file->text);
+  StringDestruct(&file->contents);
+  BitSetDestruct(&file->listing_printed);
 }
 
 void ClearAllFiles() {
@@ -447,11 +462,97 @@ File* SourceFileAt(size_t index) {
   return (File*)all_files.value.p[index];
 }
 
+static void AppendFileTextLine(File* file, const char* line, size_t length) {
+  String* text = NewStringWithLength(line, length);
+  VectorAppend(&file->text, text);
+}
+
+static void LoadFileTextFromBuffer(File* file, const char* text) {
+  const char* cursor = text != NULL ? text : "";
+  while (*cursor != '\0') {
+    const char* start = cursor;
+    while (*cursor != '\0' && *cursor != '\n' && *cursor != '\r') {
+      cursor++;
+    }
+    AppendFileTextLine(file, start, (size_t)(cursor - start));
+    if (*cursor == '\r') {
+      cursor++;
+    }
+    if (*cursor == '\n') {
+      cursor++;
+    }
+  }
+}
+
+static void LoadFileTextFromDisk(File* file) {
+  FILE* fp = fopen(file->name.value, "r");
+  if (fp == NULL) {
+    return;
+  }
+  String line;
+  StringInit(&line, NULL);
+  int ch;
+  while ((ch = fgetc(fp)) != EOF) {
+    if (ch == '\n') {
+      AppendFileTextLine(file, line.value, line.length);
+      StringSet(&line, "");
+      continue;
+    }
+    if (ch != '\r') {
+      char buf[2] = {(char)ch, '\0'};
+      StringAppend(&line, buf);
+    }
+  }
+  if (line.length > 0) {
+    AppendFileTextLine(file, line.value, line.length);
+  }
+  StringDestruct(&line);
+  fclose(fp);
+}
+
+static void EnsureFileText(File* file) {
+  if (file == NULL || file->text_loaded) {
+    return;
+  }
+  file->text_loaded = true;
+  if (file->contents.length > 0) {
+    LoadFileTextFromBuffer(file, file->contents.value);
+  } else {
+    LoadFileTextFromDisk(file);
+  }
+}
+
+void SourceRegisterFileContents(const char* filename, const char* text) {
+  if (filename == NULL) {
+    return;
+  }
+  uint32_t index = FindFile(filename);
+  File* file = (File*)all_files.value.p[index];
+  StringSet(&file->contents, text != NULL ? text : "");
+  file->text_loaded = false;
+  for (size_t i = 0; i < file->text.length; i++) {
+    StringDelete((String*)file->text.value.p[i]);
+  }
+  VectorClear(&file->text);
+}
+
+const char* SourceFileLineText(File* file, int lineno) {
+  if (file == NULL || lineno <= 0) {
+    return NULL;
+  }
+  EnsureFileText(file);
+  size_t index = (size_t)lineno - 1;
+  if (index >= file->text.length) {
+    return NULL;
+  }
+  String* line = (String*)file->text.value.p[index];
+  return line != NULL ? line->value : NULL;
+}
+
 uint32_t SourceImportFile(const char* filename, bool is_system_header,
                           const int64_t* lines, size_t nlines) {
   File* file = malloc(sizeof(File));
-  StringInit(&file->name, filename != NULL ? filename : "");
-  VectorInit(&file->lines);
+  FileInit(file, filename != NULL ? filename : "");
   file->is_system_header = is_system_header;
   for (size_t i = 0; i < nlines; i++) {
     VectorAppend(&file->lines, (void*)(intptr_t)lines[i]);
