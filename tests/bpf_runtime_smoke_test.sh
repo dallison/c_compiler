@@ -79,3 +79,107 @@ if [ "$rc" -ne 42 ]; then
   echo "expected local exit 42, got $rc" >&2
   exit 1
 fi
+
+cat > "$work/fnptr.c" <<'SRC'
+int forty(void) {
+  return 40;
+}
+
+int two(void) {
+  return 2;
+}
+
+int main(void) {
+  int (*fp)(void) = forty;
+  if (fp() != 40) {
+    return 1;
+  }
+  fp = two;
+  if (fp() != 2) {
+    return 2;
+  }
+  int a = forty();
+  if (a + two() != 42) {
+    return 3;
+  }
+  if (a + fp() != 42) {
+    return 4;
+  }
+  if (forty() + two() != 42) {
+    return 5;
+  }
+  if (a - two() != 38) {
+    return 6;
+  }
+  return 42;
+}
+SRC
+
+"$davecc" -target bpf-unknown-linux-davecc -nostdlib -nostdinc -static -Wl,-e -Wl,main \
+    "$work/fnptr.c" -o "$work/fnptr.exe"
+
+set +e
+"$bpf" "$work/fnptr.exe"
+rc=$?
+set -e
+if [ "$rc" -ne 42 ]; then
+  echo "expected function-pointer exit 42, got $rc" >&2
+  exit 1
+fi
+
+cat > "$work/virtual.cpp" <<'SRC'
+struct Base {
+  virtual int id(void) { return 1; }
+};
+
+struct Derived : public Base {
+  int id(void) { return 2; }
+};
+
+int go(Base* p) { return p->id(); }
+
+int main(void) {
+  Base b;
+  Derived d;
+  if (go(&b) != 1) {
+    return 1;
+  }
+  if (go(&d) != 2) {
+    return 2;
+  }
+  return 42;
+}
+SRC
+
+"$davecc" -target bpf-unknown-linux-davecc -nostdlib -nostdinc -static -std=c++20 \
+    -Wl,-e -Wl,main "$work/virtual.cpp" -o "$work/virtual.exe"
+
+set +e
+"$bpf" "$work/virtual.exe"
+rc=$?
+set -e
+if [ "$rc" -ne 42 ]; then
+  echo "expected virtual-dispatch exit 42, got $rc" >&2
+  exit 1
+fi
+
+rtti_s="bpf support/cxx_rtti_vtables.s"
+if [ ! -f "$rtti_s" ]; then
+  echo "missing $rtti_s" >&2
+  exit 1
+fi
+
+"$davecc" -target bpf-unknown-linux-davecc -nostdlib -nostdinc -c "$rtti_s" \
+    -o "$work/rtti.o"
+
+"$davecc" -target bpf-unknown-linux-davecc -nostdlib -nostdinc -static -std=c++20 \
+    -Wl,-e -Wl,main "$work/virtual.cpp" "$rtti_s" -o "$work/virtual_runtime.exe"
+
+set +e
+"$bpf" "$work/virtual_runtime.exe"
+rc=$?
+set -e
+if [ "$rc" -ne 42 ]; then
+  echo "expected virtual-dispatch with rtti runtime exit 42, got $rc" >&2
+  exit 1
+fi

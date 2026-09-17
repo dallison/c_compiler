@@ -136,7 +136,11 @@ bool DAsmDisassembleBPF(const void* bytes, size_t length, uint64_t address,
   if (class == BPF_JMP || class == BPF_JMP32) {
     uint8_t op = BPF_ALU_OP(insn.code);
     if (op == BPF_CALL) {
-      DAsmFormat(inst, "call %d", insn.imm);
+      if (insn.code & BPF_X) {
+        DAsmFormat(inst, "callx r%d", insn.dst_reg);
+      } else {
+        DAsmFormat(inst, "call %d", insn.imm);
+      }
       return true;
     }
     if (op == BPF_EXIT) {

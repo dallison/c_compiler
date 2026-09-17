@@ -3301,6 +3301,7 @@ sh_test(
     data = [
         ":davecc",
         ":bpf",
+        "bpf support/cxx_rtti_vtables.s",
     ],
 )
 

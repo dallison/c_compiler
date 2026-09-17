@@ -27,6 +27,7 @@ static int RegNum(TargetInstruction* inst) {
   switch ((BPFOpcode)inst->opcode) {
     case BPF_OP(resulti):
     case BPF_OP(r0):
+    case BPF_OP(call):
       return BPF_REG_0;
     case BPF_OP(r1):
       return BPF_REG_1;
@@ -410,7 +411,7 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
       if (callee != NULL && BPFIsSymbol(callee)) {
         fprintf(fp, "\tcall %s\n", SymbolName(callee, buf, sizeof(buf)));
       } else {
-        fprintf(fp, "\tcall r%d\n", RegNum(callee));
+        fprintf(fp, "\tcallx r%d\n", RegNum(callee));
       }
       return;
     }
@@ -449,7 +450,41 @@ void BPFPrintFunction(BPFEmitter* emitter, FILE* fp) {
           func_name);
 }
 
+static void EmitItaniumTypeInfoVtable(FILE* fp, const char* name) {
+  fprintf(fp, "\t.weak %s\n", name);
+  fprintf(fp, "\t.type %s, @object\n", name);
+  fprintf(fp, "%s:\n", name);
+  fprintf(fp, "\t.space 64\n");
+  fprintf(fp, "\t.size %s, 64\n", name);
+}
+
+static void EmitItaniumVptr(FILE* fp, const char* vptr, const char* vtable) {
+  fprintf(fp, "\t.weak %s\n", vptr);
+  fprintf(fp, "\t.type %s, @object\n", vptr);
+  fprintf(fp, "%s:\n", vptr);
+  fprintf(fp, "\t.8byte %s+16\n", vtable);
+  fprintf(fp, "\t.size %s, 8\n", vptr);
+}
+
+static void BPFPrintItaniumTypeInfoVtables(FILE* fp) {
+  fprintf(fp, "\t.data\n");
+  fprintf(fp, "\t.p2align 3\n");
+  EmitItaniumTypeInfoVtable(fp, "_ZTVN10__cxxabiv117__class_type_infoE");
+  EmitItaniumTypeInfoVtable(fp, "_ZTVN10__cxxabiv120__si_class_type_infoE");
+  EmitItaniumTypeInfoVtable(fp, "_ZTVN10__cxxabiv121__vmi_class_type_infoE");
+  EmitItaniumVptr(fp, "__davecc_itanium_vptr_class",
+                  "_ZTVN10__cxxabiv117__class_type_infoE");
+  EmitItaniumVptr(fp, "__davecc_itanium_vptr_si_class",
+                  "_ZTVN10__cxxabiv120__si_class_type_infoE");
+  EmitItaniumVptr(fp, "__davecc_itanium_vptr_vmi_class",
+                  "_ZTVN10__cxxabiv121__vmi_class_type_infoE");
+  fprintf(fp, "\n");
+}
+
 void BPFPrintCXXAdjustorThunks(FILE* fp) {
+  if (CompilerIsCXX()) {
+    BPFPrintItaniumTypeInfoVtables(fp);
+  }
   if (compiler->cxx_this_adjustor_thunks.length == 0) {
     return;
   }

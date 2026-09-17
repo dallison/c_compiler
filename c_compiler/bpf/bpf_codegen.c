@@ -764,7 +764,11 @@ static TargetInstruction* LowerCall(BPFGenerator* bpf, IRNode* node) {
     (void)hidden;
   }
   TargetInstruction* call = Emit(bpf, NewInstruction1(BPF_OP(call), addr));
-  return FinishWithDest(bpf, node, call);
+  // Calls return in r0, which is also the function-result register.  Copy
+  // the value into a virtual immediately so later uses (a + call(), dest in
+  // r0) cannot stomp it.
+  TargetInstruction* value = Emit(bpf, NewInstruction1(BPF_OP(mov), call));
+  return FinishWithDest(bpf, node, value);
 }
 
 static TargetInstruction* LowerResult(BPFGenerator* bpf, IRNode* node) {

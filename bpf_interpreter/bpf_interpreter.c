@@ -251,17 +251,25 @@ int BPFInterpreterRun(BPFInterpreter* interp, Loader* loader, uint64_t entry) {
     if (class == BPF_JMP || class == BPF_JMP32) {
       uint8_t op = BPF_ALU_OP(insn.code);
       if (op == BPF_CALL) {
-        if (insn.src_reg == BPF_PSEUDO_CALL) {
-          uint64_t next = interp->pc + BPF_INSN_SIZE;
-          uint64_t target = next + (int64_t)insn.imm * BPF_INSN_SIZE;
-          if (!PushFrame(interp, next)) {
-            return 1;
-          }
-          interp->pc = target;
-          continue;
+        uint64_t next = interp->pc + BPF_INSN_SIZE;
+        uint64_t target;
+        if (insn.code & BPF_X) {
+          target = interp->r[insn.dst_reg];
+        } else if (insn.src_reg == BPF_PSEUDO_CALL) {
+          target = next + (int64_t)insn.imm * BPF_INSN_SIZE;
+        } else {
+          fprintf(stderr, "unsupported eBPF helper call %d\n", insn.imm);
+          return 1;
         }
-        fprintf(stderr, "unsupported eBPF helper call %d\n", insn.imm);
-        return 1;
+        if (target == 0 || (target % BPF_INSN_SIZE) != 0) {
+          fprintf(stderr, "invalid eBPF call target 0x%" PRIx64 "\n", target);
+          return 1;
+        }
+        if (!PushFrame(interp, next)) {
+          return 1;
+        }
+        interp->pc = target;
+        continue;
       }
       if (op == BPF_EXIT) {
         if (interp->depth == 0) {

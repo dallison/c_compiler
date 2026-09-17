@@ -86,6 +86,7 @@ typedef enum {
   kBpfFormJa,
   kBpfFormJcc,
   kBpfFormCall,
+  kBpfFormCallx,
   kBpfFormExit,
   kBpfFormLddw,
   kBpfFormNop,
@@ -160,6 +161,7 @@ static const BpfMnemonic kMnemonics[] = {
     {"jslt", BPF_JMP | BPF_JSLT, kBpfFormJcc},
     {"jsle", BPF_JMP | BPF_JSLE, kBpfFormJcc},
     {"call", BPF_JMP | BPF_CALL, kBpfFormCall},
+    {"callx", BPF_JMP | BPF_CALL | BPF_X, kBpfFormCallx},
     {"exit", BPF_JMP | BPF_EXIT, kBpfFormExit},
     {"nop", BPF_ALU64 | BPF_MOV, kBpfFormNop},
 };
@@ -271,8 +273,37 @@ static void AssembleJcc(BPFAssembler* assembler, uint8_t base_code) {
           imm);
 }
 
+static bool IdentifierIsRegister(const char* name) {
+  if (strcmp(name, "fp") == 0) {
+    return true;
+  }
+  if (name[0] != 'r' || name[1] < '0' || name[1] > '9') {
+    return false;
+  }
+  int num = 0;
+  for (const char* p = name + 1; *p != '\0'; p++) {
+    if (*p < '0' || *p > '9') {
+      return false;
+    }
+    num = num * 10 + (*p - '0');
+  }
+  return num >= 0 && num < BPF_NUM_REGS;
+}
+
+static void EmitCallx(BPFAssembler* assembler, int dst) {
+  BpfEmit(assembler, BPF_JMP | BPF_CALL | BPF_X, (uint8_t)dst, 0, 0, 0);
+}
+
+static void AssembleCallx(BPFAssembler* assembler) {
+  EmitCallx(assembler, ParseRegister(assembler));
+}
+
 static void AssembleCall(BPFAssembler* assembler) {
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    if (IdentifierIsRegister(ASM.lex.spelling.value)) {
+      AssembleCallx(assembler);
+      return;
+    }
     String name;
     StringInit(&name, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
@@ -341,6 +372,9 @@ void AssembleBPFInstruction(Assembler* base, String* word) {
       break;
     case kBpfFormCall:
       AssembleCall(assembler);
+      break;
+    case kBpfFormCallx:
+      AssembleCallx(assembler);
       break;
     case kBpfFormExit:
       BpfEmit(assembler, BPF_JMP | BPF_EXIT, 0, 0, 0, 0);

@@ -10,6 +10,7 @@ static int FixedRegNum(TargetInstruction* inst) {
   switch ((BPFOpcode)inst->opcode) {
     case BPF_OP(resulti):
     case BPF_OP(r0):
+    case BPF_OP(call):
       return BPF_REG_0;
     case BPF_OP(r1):
       return BPF_REG_1;
@@ -77,7 +78,9 @@ static bool OperandUsesReg(TargetInstruction* inst, int num) {
 }
 
 static BPFRegister* FindFree(BPFRegisterAllocator* alloc, TargetInstruction* inst) {
-  static const int kOrder[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+  // Prefer callee-saved r6-r9 so values survive calls; r1-r5 are also usable
+  // scratch when those four are full.
+  static const int kOrder[] = {6, 7, 8, 9, 1, 2, 3, 4, 5};
   for (size_t i = 0; i < sizeof(kOrder) / sizeof(kOrder[0]); i++) {
     int num = kOrder[i];
     BPFRegister* reg = &alloc->regs[num];
