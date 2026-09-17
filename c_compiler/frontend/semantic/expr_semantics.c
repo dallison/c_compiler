@@ -5682,6 +5682,81 @@ static bool CurrentFunctionIsCXXCtorOrDtor(void) {
           compiler->current_function->info.function.is_destructor);
 }
 
+// True if `receiver` designates the object `this` points at, or one of its base
+// subobjects.  Accepts `this`, `(*this)`, and the fixed base-subobject
+// adjustments that base constructor and destructor calls are synthesized with.
+//
+// The `this` symbol is matched by name rather than by identity with the current
+// function's parameter, because synthesized and template-cloned special member
+// bodies do not always share the symbol.  `this` is a keyword, so no user
+// variable can collide with it.
+static bool ReceiverIsThisObject(ASTNode* receiver) {
+  while (receiver != NULL) {
+    if (receiver->op == AST_OP(contents)) {
+      receiver = ((UnaryASTNode*)receiver)->sub;
+      continue;
+    }
+    // A base subobject call adjusts `this` by the base's byte offset.  Only the
+    // compiler synthesizes these; user pointer arithmetic on `this` lacks the
+    // flag and names a different array element, not a base.
+    if (receiver->op == AST_OP(plus) &&
+        (receiver->flags & kASTForcedTypeAdjustment) != 0) {
+      receiver = ((BinaryASTNode*)receiver)->left;
+      continue;
+    }
+    break;
+  }
+  if (receiver == NULL || receiver->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)receiver)->symbol;
+  return symbol != NULL && StringEqual(&symbol->name, "this");
+}
+
+// True when `expr` names a complete object of its static class type, so a
+// virtual call on it can be bound to that class's overrider.  Pointers,
+// references, and dereferences are excluded: they can designate a more-derived
+// object.  A non-reference class data member is included because that slot is
+// always a complete object of the member's type.
+static bool ExpressionHasExactDynamicClassType(ASTNode* expr) {
+  while (expr != NULL && expr->op == AST_OP(comma)) {
+    expr = ((BinaryASTNode*)expr)->right;
+  }
+  if (expr == NULL) {
+    return false;
+  }
+  if (expr->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
+    return symbol != NULL && symbol->type != NULL &&
+           !TypeIsReference(symbol->type) &&
+           TypeIsStructOrUnion(symbol->type);
+  }
+  if (expr->op == AST_OP(compound_literal)) {
+    return TypeIsStructOrUnion(expr->type);
+  }
+  if ((expr->op == AST_OP(dot) || expr->op == AST_OP(arrow))) {
+    BinaryASTNode* access = (BinaryASTNode*)expr;
+    if (access->right == NULL || access->right->op != AST_OP(structmember)) {
+      return false;
+    }
+    StructMember* field = ((StructMemberASTNode*)access->right)->member;
+    return field != NULL && field->symbol != NULL && field->symbol->type != NULL &&
+           !field->is_static && !field->is_member_function &&
+           !TypeIsReference(field->symbol->type) &&
+           TypeIsStructOrUnion(field->symbol->type);
+  }
+  if (expr->op == AST_OP(subscript)) {
+    BinaryASTNode* sub = (BinaryASTNode*)expr;
+    TypeRecord* base_type = sub->left != NULL ? sub->left->type : NULL;
+    while (base_type != NULL && TypeIsReference(base_type)) {
+      base_type = base_type->next;
+    }
+    return base_type != NULL && TypeIsArray(base_type) &&
+           TypeIsStructOrUnion(base_type->next);
+  }
+  return false;
+}
+
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data) {
   (void)data;
   return node;
@@ -6062,11 +6137,31 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
   ASTNode* discarded_static_receiver = NULL;
   bool explicit_object =
       FunctionHasExplicitObjectParameter(member->symbol->type);
+  // While a constructor or destructor body runs, the vptr of the object it was
+  // called on names that class, so a virtual call on `this` is bound to the
+  // override that class provides.  A call on any other object is an ordinary
+  // virtual call: that object is fully constructed and its dynamic type is
+  // whatever it is.
+  //
+  // A `final` method cannot be overridden further, and a `final` class cannot
+  // have a more-derived dynamic type, so both can be bound statically.  So can
+  // a call whose object expression is a complete object of the static class
+  // (a named variable, a temporary, a non-reference data member, ...).
+  bool bound_by_ctor_or_dtor =
+      CurrentFunctionIsCXXCtorOrDtor() &&
+      ReceiverIsThisObject(member_access->left);
+  bool bound_by_final =
+      member->symbol->type->info.function.is_final ||
+      (concrete_receiver != NULL && concrete_receiver->is_final);
+  bool bound_by_exact_type =
+      ExpressionHasExactDynamicClassType(member_access->left);
   bool use_virtual_dispatch =
       member->symbol->type->info.function.is_virtual &&
       !member->is_static && !explicit_object &&
       !qualified_base_member &&
-      !CurrentFunctionIsCXXCtorOrDtor();
+      !bound_by_ctor_or_dtor &&
+      !bound_by_final &&
+      !bound_by_exact_type;
   if (use_virtual_dispatch &&
       CompilerCXXAtLeast(kLanguageStandardCXX29) &&
       compiler->contract_semantic != kContractSemanticIgnore &&
@@ -8940,7 +9035,15 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   TypeRecord* placeholder_type = NULL;
   TypeRecord* construction_type =
       explicit_type != NULL ? explicit_type : node->left->type;
-  if (explicit_type == NULL &&
+  bool dependent_explicit_args = false;
+  if (explicit_type == NULL && node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* args_id = (IdentifierASTNode*)node->left;
+    dependent_explicit_args =
+        args_id->template_arguments != NULL &&
+        TemplateArgumentVectorContainsTemplateParameter(
+            args_id->template_arguments);
+  }
+  if (explicit_type == NULL && !dependent_explicit_args &&
       !TypeIsClassTemplatePlaceholder(construction_type) &&
       node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
@@ -8961,7 +9064,8 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     }
   }
   TypeRecord* deduced_type = explicit_type;
-  if (explicit_type == NULL && TypeIsClassTemplatePlaceholder(construction_type)) {
+  if (explicit_type == NULL && !dependent_explicit_args &&
+      TypeIsClassTemplatePlaceholder(construction_type)) {
     bool alias_rejected = false;
     Symbol* class_template =
         TypeClassTemplatePlaceholderOrigin(construction_type);

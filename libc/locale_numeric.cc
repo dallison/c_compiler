@@ -17,6 +17,28 @@ extern "C" char* __PrintGeneralFormat(double, int, char*, size_t);
 
 namespace std {
 
+// ftoa writes from the end of `buf` and returns a pointer to the first
+// character of the NUL-terminated result (the same contract printf uses).
+static char* __locale_format_double(char* buf, size_t cap, ios_base& f,
+                                    double v, size_t* len) {
+  char* start = nullptr;
+  ios_base::fmtflags flags = f.flags();
+  int precision = static_cast<int>(f.precision());
+  if ((flags & ios_base::fixed) != 0) {
+    start = __PrintFloatFormat(v, precision, buf, cap);
+  } else if ((flags & ios_base::scientific) != 0) {
+    start = __PrintScientificFormat(v, precision, buf, cap);
+  } else {
+    start = __PrintGeneralFormat(v, precision, buf, cap);
+  }
+  if (start == nullptr) {
+    start = buf;
+    buf[0] = '\0';
+  }
+  *len = strlen(start);
+  return start;
+}
+
 ostreambuf_iterator __write_chars(ostreambuf_iterator out, ios_base& str,
                                   char fill, const char* buf, size_t len) {
   streamsize width = str.width();
@@ -185,17 +207,19 @@ Iter __get_unsigned_integer(Iter in, Iter end, ios_base& str,
   return in;
 }
 
-static size_t __locale_format_ll(char* buf, long long v, int base) {
+static size_t __locale_format_ll(char* buf, long long v, int base,
+                                 bool uppercase) {
   unsigned char flags = 0;
-  if (base == 16) {
+  if (base == 16 && uppercase) {
     flags |= __DAVECC_ITOA_UPPER;
   }
   return __itoa_longlong(buf, v, static_cast<unsigned char>(base), flags);
 }
 
-static size_t __locale_format_ull(char* buf, unsigned long long v, int base) {
+static size_t __locale_format_ull(char* buf, unsigned long long v, int base,
+                                  bool uppercase) {
   unsigned char flags = 0;
-  if (base == 16) {
+  if (base == 16 && uppercase) {
     flags |= __DAVECC_ITOA_UPPER;
   }
   return __utoa_ulonglong(buf, v, static_cast<unsigned char>(base), flags);
@@ -331,17 +355,18 @@ ostreambuf_iterator __davecc_classic_put_llong(ostreambuf_iterator s, ios_base& 
     base = 8;
   }
   size_t len = 0;
+  bool uppercase = (flags & ios_base::uppercase) != 0;
   if ((flags & ios_base::showpos) != 0 && v > 0) {
     buf[0] = '+';
-    len = __locale_format_ll(buf + 1, v, base) + 1;
+    len = __locale_format_ll(buf + 1, v, base, uppercase) + 1;
   } else if ((flags & ios_base::showbase) != 0 && base != 10 && v >= 0) {
     buf[len++] = '0';
     if (base == 16) {
-      buf[len++] = (flags & ios_base::uppercase) ? 'X' : 'x';
+      buf[len++] = uppercase ? 'X' : 'x';
     }
-    len += __locale_format_ll(buf + len, v, base);
+    len += __locale_format_ll(buf + len, v, base, uppercase);
   } else {
-    len = __locale_format_ll(buf, v, base);
+    len = __locale_format_ll(buf, v, base, uppercase);
   }
   len = __apply_numpunct_char(buf, len, sizeof(buf), f, base);
   return __write_c_string(s, f, fill, buf, len);
@@ -357,32 +382,25 @@ ostreambuf_iterator __davecc_classic_put_ullong(ostreambuf_iterator s, ios_base&
     base = 8;
   }
   size_t len = 0;
+  bool uppercase = (flags & ios_base::uppercase) != 0;
   if ((flags & ios_base::showbase) != 0 && base != 10) {
     buf[len++] = '0';
     if (base == 16) {
-      buf[len++] = (flags & ios_base::uppercase) ? 'X' : 'x';
+      buf[len++] = uppercase ? 'X' : 'x';
     }
   }
-  len += __locale_format_ull(buf + len, v, base);
+  len += __locale_format_ull(buf + len, v, base, uppercase);
   len = __apply_numpunct_char(buf, len, sizeof(buf), f, base);
   return __write_c_string(s, f, fill, buf, len);
 }
 
 ostreambuf_iterator __davecc_classic_put_double(ostreambuf_iterator s, ios_base& f, char fill, double v) {
   char buf[96];
-  ios_base::fmtflags flags = f.flags();
-  streamsize prec = f.precision();
-  char* end = nullptr;
-  if ((flags & ios_base::fixed) != 0) {
-    end = __PrintFloatFormat(v, static_cast<int>(prec), buf, sizeof(buf));
-  } else if ((flags & ios_base::scientific) != 0) {
-    end = __PrintScientificFormat(v, static_cast<int>(prec), buf, sizeof(buf));
-  } else {
-    end = __PrintGeneralFormat(v, static_cast<int>(prec), buf, sizeof(buf));
-  }
-  size_t len = end != nullptr ? static_cast<size_t>(end - buf) : strlen(buf);
-  len = __apply_numpunct_char(buf, len, sizeof(buf), f, 10);
-  return __write_c_string(s, f, fill, buf, len);
+  size_t len = 0;
+  char* start = __locale_format_double(buf, sizeof(buf), f, v, &len);
+  size_t cap = static_cast<size_t>(buf + sizeof(buf) - start);
+  len = __apply_numpunct_char(start, len, cap, f, 10);
+  return __write_c_string(s, f, fill, start, len);
 }
 
 ostreambuf_iterator __davecc_classic_put_ldouble(ostreambuf_iterator s, ios_base& f, char fill, long double v) {
@@ -591,17 +609,18 @@ wostreambuf_iterator __davecc_classic_wput_llong(wostreambuf_iterator s,
     base = 8;
   }
   size_t len = 0;
+  bool uppercase = (flags & ios_base::uppercase) != 0;
   if ((flags & ios_base::showpos) != 0 && v > 0) {
     buf[0] = '+';
-    len = __locale_format_ll(buf + 1, v, base) + 1;
+    len = __locale_format_ll(buf + 1, v, base, uppercase) + 1;
   } else if ((flags & ios_base::showbase) != 0 && base != 10 && v >= 0) {
     buf[len++] = '0';
     if (base == 16) {
-      buf[len++] = (flags & ios_base::uppercase) ? 'X' : 'x';
+      buf[len++] = uppercase ? 'X' : 'x';
     }
-    len += __locale_format_ll(buf + len, v, base);
+    len += __locale_format_ll(buf + len, v, base, uppercase);
   } else {
-    len = __locale_format_ll(buf, v, base);
+    len = __locale_format_ll(buf, v, base, uppercase);
   }
   len = __apply_numpunct_wchar(buf, len, sizeof(buf), f, base);
   return __write_wc_string(s, f, fill, buf, len);
@@ -619,13 +638,14 @@ wostreambuf_iterator __davecc_classic_wput_ullong(wostreambuf_iterator s,
     base = 8;
   }
   size_t len = 0;
+  bool uppercase = (flags & ios_base::uppercase) != 0;
   if ((flags & ios_base::showbase) != 0 && base != 10) {
     buf[len++] = '0';
     if (base == 16) {
-      buf[len++] = (flags & ios_base::uppercase) ? 'X' : 'x';
+      buf[len++] = uppercase ? 'X' : 'x';
     }
   }
-  len += __locale_format_ull(buf + len, v, base);
+  len += __locale_format_ull(buf + len, v, base, uppercase);
   len = __apply_numpunct_wchar(buf, len, sizeof(buf), f, base);
   return __write_wc_string(s, f, fill, buf, len);
 }
@@ -634,19 +654,11 @@ wostreambuf_iterator __davecc_classic_wput_double(wostreambuf_iterator s,
                                                 ios_base& f, wchar_t fill,
                                                 double v) {
   char buf[96];
-  ios_base::fmtflags flags = f.flags();
-  streamsize prec = f.precision();
-  char* end = nullptr;
-  if ((flags & ios_base::fixed) != 0) {
-    end = __PrintFloatFormat(v, static_cast<int>(prec), buf, sizeof(buf));
-  } else if ((flags & ios_base::scientific) != 0) {
-    end = __PrintScientificFormat(v, static_cast<int>(prec), buf, sizeof(buf));
-  } else {
-    end = __PrintGeneralFormat(v, static_cast<int>(prec), buf, sizeof(buf));
-  }
-  size_t len = end != nullptr ? static_cast<size_t>(end - buf) : strlen(buf);
-  len = __apply_numpunct_wchar(buf, len, sizeof(buf), f, 10);
-  return __write_wc_string(s, f, fill, buf, len);
+  size_t len = 0;
+  char* start = __locale_format_double(buf, sizeof(buf), f, v, &len);
+  size_t cap = static_cast<size_t>(buf + sizeof(buf) - start);
+  len = __apply_numpunct_wchar(start, len, cap, f, 10);
+  return __write_wc_string(s, f, fill, start, len);
 }
 
 wostreambuf_iterator __davecc_classic_wput_ldouble(wostreambuf_iterator s,

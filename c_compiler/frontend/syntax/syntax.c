@@ -4294,7 +4294,9 @@ static void SyntaxAppendCXXMemberDestructorCalls(Syntax* syntax, TypeRecord* fun
   for (size_t i = owner->members.length; i > 0; i--) {
     StructMember* member = owner->members.value.p[i - 1];
     if (member == NULL || member->symbol == NULL || member->is_static ||
-        member->is_member_function) {
+        member->is_member_function || StructMemberIsNestedType(member)) {
+      // Nested classes and typedefs participate in name lookup but occupy no
+      // storage, so they have nothing to destroy.
       continue;
     }
     TypeRecord* member_type = member->symbol->type;

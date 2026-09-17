@@ -540,8 +540,13 @@ static ASTNode* NewAnalyzedDestructorStatement(TypeRecord* type,
   }
   ASTNode* call =
       NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+  // Analyze the call directly.  AnalyzeStatement would then run full-expression
+  // temporary cleanup on the destructor's receiver and destroy a temporary
+  // twice (range-for lifetime-extended objects, among others).
+  call = AnalyzeExpression(call);
+  call->flags |= kASTTemporaryCleanupCall;
   ASTNode* statement = NewExpressionStatementASTNode(call, location);
-  AnalyzeStatement(statement);
+  statement->flags |= kASTAnalyzed;
   return statement;
 }
 
@@ -3624,6 +3629,16 @@ void SemanticDiagnoseConstexprFunctionBody(ASTNode* node) {
   FunctionInfo* info = &node->type->info.function;
   if ((!info->is_constexpr && !info->is_consteval) || info->is_defaulted ||
       info->is_deleted || info->body == NULL) {
+    return;
+  }
+  // C++17 marks every lambda call operator constexpr if it *could* be.  A body
+  // that is not a valid constexpr function simply cannot be used in a constant
+  // expression; that is diagnosed at the call, not at the definition.
+  if (!info->is_consteval && info->symbol != NULL &&
+      StringEqual(&info->symbol->name, "operator()") &&
+      info->cxx_member_owner != NULL &&
+      info->cxx_member_owner->tag_symbol != NULL &&
+      info->cxx_member_owner->tag_symbol->flags.invented) {
     return;
   }
   if (SourceLocationIsSystemHeader(node->location) ||
