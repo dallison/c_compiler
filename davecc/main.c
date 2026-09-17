@@ -758,6 +758,14 @@ static int ParseArg(int i, int argc, char** argv,
       VectorAppend(compiler_args, argv[i]);
       VectorAppend(compiler_args, argv[i+1]);
       i++;
+    } else if (StringEqual(option, "-flisting-file")) {
+      if (i == argc - 1) {
+        fprintf(stderr, "-flisting-file needs a path\n");
+        exit(1);
+      }
+      VectorAppend(compiler_args, argv[i]);
+      VectorAppend(compiler_args, argv[i + 1]);
+      i++;
     } else if (StringEqual(option, "-chdir")) {
       // -chdir option is followed by an include dir
       if (i == argc-1) {

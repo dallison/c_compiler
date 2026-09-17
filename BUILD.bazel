@@ -590,6 +590,13 @@ cc_test(
     deps = [":compiler"],
 )
 
+sh_test(
+    name = "listing_test",
+    srcs = ["tests/listing_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [":davecc"],
+)
+
 cc_library(
     name = "serialize",
     srcs = [
@@ -845,6 +852,7 @@ cc_library(
         "c_compiler/optimization/copyprop.c",
         "c_compiler/backend/common_emitter.c",
         "c_compiler/driver/compiler.c",
+        "c_compiler/driver/listing.c",
         "c_compiler/lto/lto_module.c",
         "c_compiler/driver/injection.c",
         "c_compiler/frontend/semantic/concepts.c",

@@ -536,6 +536,13 @@ typedef struct Compiler {
   bool keep_asm_file;
   bool save_ir;
   bool save_ast;
+  bool listing_enabled;
+  bool listing_ast;
+  bool listing_ir;
+  bool listing_lowered;
+  bool listing_asm;
+  String listing_path;
+  FILE* listing_file;
   ConstexprEvalMode constexpr_eval_mode;
   FILE* ir_output_file;
   FILE* ast_output_file;

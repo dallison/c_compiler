@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+#include "bitset.h"
 #include "dstring.h"
 #include "vector.h"
 
@@ -26,7 +27,12 @@
 typedef struct {
   String name;   // Name of file
   Vector lines;  // All line numbers with code on them.
+  Vector text;   // Cached source lines (String*), 0-indexed, populated lazily.
+  String contents;  // Optional full text registered for in-memory sources.
   bool is_system_header;  // True if any location was created from -isystem.
+  bool text_loaded;
+  int listing_last_line;  // High-water line printed in a compiler listing.
+  BitSet listing_printed;  // Source lines already emitted to a listing.
 } File;
 
 uint32_t NewFile(const char* filename);
@@ -135,6 +141,10 @@ void SourceTraverseFiles(void* data,
                          void (*func)(int index, File* file, void* data));
 size_t SourceFileCount(void);
 File* SourceFileAt(size_t index);
+// Remember the full text of an in-memory source so listings can reprint it.
+void SourceRegisterFileContents(const char* filename, const char* text);
+// 1-based source line of `file`, or NULL if the line cannot be loaded.
+const char* SourceFileLineText(File* file, int lineno);
 // Append a file table entry used by deserialized LTO debug locations.
 uint32_t SourceImportFile(const char* filename, bool is_system_header,
                           const int64_t* lines, size_t nlines);
