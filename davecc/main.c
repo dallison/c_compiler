@@ -1739,7 +1739,12 @@ int main(int argc, char * argv[]) {
         continue;
       }
       size_t n = strlen(arg);
-      if (n >= 2 && strcmp(arg + n - 2, ".a") == 0) {
+      // Opening every archive member just to look for LTO IR is only useful
+      // when the user asked for LTO.  Doing it before a normal compile has a
+      // side effect on ARM: C++ inline template bodies (iostream, vector
+      // helpers) are omitted from the object and the later link reports them
+      // as undefined.
+      if (lto_flag && n >= 2 && strcmp(arg + n - 2, ".a") == 0) {
         bool has_native = false;
         Vector tmp_blobs = {0};
         Vector tmp_lens = {0};

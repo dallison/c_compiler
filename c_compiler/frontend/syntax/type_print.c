@@ -755,33 +755,32 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
           if (str->tag_name->value[0] != '<') {
             StringAppendString(result, str->tag_name);
           }
-          // The per-struct pointer suffix disambiguates types whose tag *name*
-          // is not by itself a unique identifier: lambda closure types,
-          // unnamed/anonymous structs, and local plain classes. Named nested
-          // classes use the lexical path emitted above (for example,
-          // `set<K>::iterator`), which both disambiguates siblings and remains
-          // stable when a module is deserialized.
+          // The per-struct suffix disambiguates types whose tag *name* is not
+          // by itself a unique identifier: lambda closure types, unnamed
+          // structs, and local plain classes.  Named namespace-scope classes
+          // (`std::ostreambuf_iterator`) and named nested classes
+          // (`set<K>::iterator`) are already unique; a `$S<serial>` here
+          // leaked the process-wide creation counter into mangled template
+          // names, so the same instantiation got a different symbol in libc
+          // than in a user program.
           //
-          // A class template *specialization*, by contrast, carries its
-          // template arguments in the tag name (e.g. `char_traits<char>`),
-          // which already denotes a single canonical C++ type; TypeEqual
-          // deliberately ignores the `$S...` suffix for these (see
-          // CXXStructTagNameEqual).  Emitting it here anyway would make two
-          // materializations of the same specialization produce divergent keys,
-          // splitting one logical type (e.g.
-          // `basic_string_view<char, char_traits<char>>`) into two divergent
-          // instantiations.  So drop the suffix only for specializations, and
-          // keep it everywhere else so the key stays consistent with equality.
+          // A class template specialization carries its arguments in the tag
+          // name (e.g. `char_traits<char>`).  TypeEqual ignores `$S...` for
+          // those (see CXXStructTagNameEqual); emitting the suffix would split
+          // one logical type into two instantiations.
           bool is_invented =
               str->tag_symbol != NULL && str->tag_symbol->flags.invented;
           bool is_anonymous = str->tag_name->value[0] == '<';
+          bool is_local_class =
+              str->tag_symbol != NULL && str->tag_symbol->flags.is_block_scope;
           bool is_template_specialization =
               (str->tag_symbol != NULL && str->tag_symbol->type != NULL &&
                (str->tag_symbol->type->template_origin != NULL ||
                 str->tag_symbol->type->template_arguments != NULL)) ||
               strchr(str->tag_name->value, '<') != NULL;
           if (is_invented || is_anonymous ||
-              (!is_template_specialization && !has_stable_lexical_path)) {
+              (is_local_class && !is_template_specialization &&
+               !has_stable_lexical_path)) {
             StringPrintf(result, "$S%d", str->serial);
           }
         }
