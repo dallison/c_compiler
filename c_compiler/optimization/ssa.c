@@ -220,11 +220,20 @@ static IRNode* FindSSAVar(Generator* gen, BasicBlock* block, Symbol* sym,
   }
   for (size_t i = 0; i < block->in_edges.length; i++) {
     BlockId id = block->in_edges.value.w[i];
+    BasicBlock* input = VectorGet(&gen->basic_blocks, id);
     if (BitSetContains(visited, id)) {
+      // The walk started at a predecessor that does not define |sym| and
+      // reached a cycle.  On a do-while the header is the body, so the
+      // loop-carried definition is in the phi block itself and was stored in
+      // defined_vars by rename.  Skipping that block drops the backedge
+      // operand and freezes the phi at the pre-loop value (00161.c).
+      latest_var = MapFindPointerKey(&input->defined_vars, sym);
+      if (latest_var != NULL) {
+        return latest_var;
+      }
       continue;
     }
     BitSetInsert(visited, id);
-    BasicBlock* input = VectorGet(&gen->basic_blocks, id);
     latest_var = FindSSAVar(gen, input, sym, visited);
     if (latest_var != NULL) {
       return latest_var;

@@ -835,7 +835,12 @@ static AddressingMode GetAddrMode(TargetInstruction* inst) {
 }
 
 static void SetAddrMode(TargetInstruction* inst, AddressingMode mode) {
-  inst->flags &= ~0xffff0000;        // Clear current addressing mode.
+  // Addressing mode occupies bits 16-20.  Other k6502* flags live in the
+  // rest of the upper half (NeedAddress, DontEmit, block markers, ...) and
+  // must survive a mode change: Copy() toggles mode on the source, and
+  // wiping NeedAddress made later loads of addressof(static) take the
+  // symbol's value instead of its address (00163.c tsar->b).
+  inst->flags &= ~(0x1f << 16);
   inst->flags |= (int)mode << 16;
 }
 
@@ -2065,6 +2070,7 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
             TypeIsFunction(node->type) ||
             TypeIsFunction(symbol->symbol->type) ||
             TypeIsStructOrUnion(node->type) ||
+            node->opcode == IR_OP(addressof) ||
             (inst->flags & k6502NeedAddress) != 0) {
           mode = kAddrModeSymbolAddr;
         }

@@ -52,8 +52,8 @@ static AddressingMode GetAddrMode(TargetInstruction* inst) {
 }
 
 static void SetAddrMode(TargetInstruction* inst, AddressingMode mode) {
-  // Clear top bits of flags.
-  inst->flags &= 0xffff;
+  // Bits 16-20 only; see SetAddrMode in 6502_codegen.c.
+  inst->flags &= ~(0x1f << 16);
   inst->flags |= (int)mode << 16;
 }
 
