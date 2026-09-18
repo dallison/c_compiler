@@ -297,6 +297,44 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
     ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return &node->base;
   }
+  // A concept-id used as a value (`C<T>`, `C<T> ? a : b`, `bool v = C<T>`) is a
+  // prvalue of type bool.  Fold it here; leaving the identifier for later
+  // folding emits an undefined symbol for the concept name.
+  if (CompilerIsCXX() && node->symbol != NULL &&
+      node->symbol->flags.is_concept &&
+      node->symbol->concept_definition != NULL &&
+      (node->base.flags & kASTIsDeclaration) == 0 &&
+      !TemplateArgumentVectorContainsTemplateParameter(
+          node->template_arguments)) {
+    int64_t value = 0;
+    if (ConceptsEvaluateInteger(&node->base, &value)) {
+      TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+      ASTNode* const_node =
+          NewIntConstantASTNode(value != 0, bool_type, node->base.location);
+      TypeRecordDelete(bool_type);
+      ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
+                          true);
+      const_node->flags |= kASTAnalyzed;
+      return const_node;
+    }
+    if (DiagnosticsSuppressed()) {
+      TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+      ASTNodeSetType(&node->base, bool_type);
+      TypeRecordDelete(bool_type);
+      node->base.value_category = kValueCategoryPrvalue;
+      return &node->base;
+    }
+    SemanticError(&node->base,
+                  "concept-id is not a constant expression of type bool");
+    TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+    ASTNode* const_node =
+        NewIntConstantASTNode(0, bool_type, node->base.location);
+    TypeRecordDelete(bool_type);
+    ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
+                        true);
+    const_node->flags |= kASTAnalyzed;
+    return const_node;
+  }
   // A variable template-id used as a value (`variant_size_v<T>`): instantiate
   // its initializer with the explicit arguments and fold to a constant.  When
   // the arguments are still dependent (used inside another template), leave the

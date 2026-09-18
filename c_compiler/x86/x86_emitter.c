@@ -1204,27 +1204,47 @@ static void PrintMovToDestIfNeeded(FILE* fp, TargetInstruction* inst,
   }
 }
 
-static void PrepareSseSourceOperand(FILE* fp, TargetInstruction* op, char* buf,
-                                    size_t len) {
+static const char* SseScratch(void) {
+  return X86CurrentRegisterNameProfile()->sse_scratch;
+}
+
+static const char* SseScratch2(void) {
+  return X86CurrentRegisterNameProfile()->sse_scratch2;
+}
+
+static void PrepareSseSourceOperandTo(FILE* fp, TargetInstruction* op,
+                                      const char* xmm, char* buf, size_t len) {
   if (op != NULL && op->reg != NULL &&
       ((X86Register*)op->reg)->type == kX86RegTypeInt) {
     fprintf(fp, "\tmovq_xmm ");
     PrintPercentRegFromInst(fp, op, buf, len);
-    fprintf(fp, ", %%xmm15\n");
+    fprintf(fp, ", ");
+    PrintPercentReg(fp, xmm);
+    fprintf(fp, "\n");
   }
 }
 
-static void PrintSseSourceOperand(FILE* fp, TargetInstruction* op, char* buf,
-                                  size_t len) {
+static void PrintSseSourceOperandFrom(FILE* fp, TargetInstruction* op,
+                                      const char* xmm, char* buf, size_t len) {
   if (op == NULL) {
     return;
   }
   if (op->reg != NULL &&
       ((X86Register*)op->reg)->type == kX86RegTypeInt) {
-    PrintPercentReg(fp, "xmm15");
+    PrintPercentReg(fp, xmm);
     return;
   }
   PrintAttOperand(fp, op, buf, len);
+}
+
+static void PrepareSseSourceOperand(FILE* fp, TargetInstruction* op, char* buf,
+                                    size_t len) {
+  PrepareSseSourceOperandTo(fp, op, SseScratch(), buf, len);
+}
+
+static void PrintSseSourceOperand(FILE* fp, TargetInstruction* op, char* buf,
+                                  size_t len) {
+  PrintSseSourceOperandFrom(fp, op, SseScratch(), buf, len);
 }
 
 static void PrintBinaryRegOp(FILE* fp, const char* mnemonic,
@@ -1349,12 +1369,18 @@ static void PrintCompareAndSet(FILE* fp, const char* set_mnemonic,
     // evaluated as dst <cc> src, so emit "ucomi operand[1], operand[0]".
     const char* cmp_mnemonic =
         (inst->flags & X86_FCMP_SD) != 0 ? "ucomisd" : "ucomiss";
-    PrepareSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
-    PrepareSseSourceOperand(fp, inst->operand[0], buf2, sizeof(buf2));
+    const char* src_scratch = SseScratch();
+    const char* dst_scratch = SseScratch2();
+    PrepareSseSourceOperandTo(fp, inst->operand[1], src_scratch, buf1,
+                              sizeof(buf1));
+    PrepareSseSourceOperandTo(fp, inst->operand[0], dst_scratch, buf2,
+                              sizeof(buf2));
     fprintf(fp, "\t%s ", cmp_mnemonic);
-    PrintSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
+    PrintSseSourceOperandFrom(fp, inst->operand[1], src_scratch, buf1,
+                              sizeof(buf1));
     fprintf(fp, ", ");
-    PrintSseSourceOperand(fp, inst->operand[0], buf2, sizeof(buf2));
+    PrintSseSourceOperandFrom(fp, inst->operand[0], dst_scratch, buf2,
+                              sizeof(buf2));
     fprintf(fp, "\n");
     fprintf(fp, "\t%s ", set_mnemonic);
     PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
@@ -1619,15 +1645,22 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
       return;
 
     case X86_OP(ucomiss):
-    case X86_OP(ucomisd):
-      PrepareSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
-      PrepareSseSourceOperand(fp, inst->operand[0], buf2, sizeof(buf2));
+    case X86_OP(ucomisd): {
+      const char* src_scratch = SseScratch();
+      const char* dst_scratch = SseScratch2();
+      PrepareSseSourceOperandTo(fp, inst->operand[1], src_scratch, buf1,
+                                sizeof(buf1));
+      PrepareSseSourceOperandTo(fp, inst->operand[0], dst_scratch, buf2,
+                                sizeof(buf2));
       fprintf(fp, "\t%s ", AttMnemonic(opcode));
-      PrintSseSourceOperand(fp, inst->operand[1], buf1, sizeof(buf1));
+      PrintSseSourceOperandFrom(fp, inst->operand[1], src_scratch, buf1,
+                                sizeof(buf1));
       fprintf(fp, ", ");
-      PrintSseSourceOperand(fp, inst->operand[0], buf2, sizeof(buf2));
+      PrintSseSourceOperandFrom(fp, inst->operand[0], dst_scratch, buf2,
+                                sizeof(buf2));
       fprintf(fp, "\n");
       return;
+    }
 
     case X86_OP(cvtsi2ss):
     case X86_OP(cvtsi2sd):
@@ -3939,27 +3972,41 @@ static void PrintMovToDestIfNeededI386(FILE* fp, TargetInstruction* inst,
   }
 }
 
-static void PrepareSseSourceOperandI386(FILE* fp, TargetInstruction* op, char* buf,
-                                    size_t len) {
+static void PrepareSseSourceOperandToI386(FILE* fp, TargetInstruction* op,
+                                          const char* xmm, char* buf,
+                                          size_t len) {
   if (op != NULL && op->reg != NULL &&
       ((X86Register*)op->reg)->type == kX86RegTypeInt) {
     fprintf(fp, "\tmovd ");
     PrintPercentRegFromInstI386(fp, op, buf, len);
-    fprintf(fp, ", %%xmm7\n");
+    fprintf(fp, ", ");
+    PrintPercentRegI386(fp, xmm);
+    fprintf(fp, "\n");
   }
 }
 
-static void PrintSseSourceOperandI386(FILE* fp, TargetInstruction* op, char* buf,
-                                  size_t len) {
+static void PrintSseSourceOperandFromI386(FILE* fp, TargetInstruction* op,
+                                          const char* xmm, char* buf,
+                                          size_t len) {
   if (op == NULL) {
     return;
   }
   if (op->reg != NULL &&
       ((X86Register*)op->reg)->type == kX86RegTypeInt) {
-    PrintPercentRegI386(fp, X86CurrentRegisterNameProfile()->sse_scratch);
+    PrintPercentRegI386(fp, xmm);
     return;
   }
   PrintAttOperandI386(fp, op, buf, len);
+}
+
+static void PrepareSseSourceOperandI386(FILE* fp, TargetInstruction* op, char* buf,
+                                    size_t len) {
+  PrepareSseSourceOperandToI386(fp, op, SseScratch(), buf, len);
+}
+
+static void PrintSseSourceOperandI386(FILE* fp, TargetInstruction* op, char* buf,
+                                  size_t len) {
+  PrintSseSourceOperandFromI386(fp, op, SseScratch(), buf, len);
 }
 
 static void PrintBinaryRegOpI386(FILE* fp, const char* mnemonic,
@@ -4111,12 +4158,18 @@ static void PrintCompareAndSetI386(FILE* fp, const char* set_mnemonic,
     // evaluated as dst <cc> src, so emit "ucomi operand[1], operand[0]".
     const char* cmp_mnemonic =
         (inst->flags & X86_FCMP_SD) != 0 ? "ucomisd" : "ucomiss";
-    PrepareSseSourceOperandI386(fp, inst->operand[1], buf1, sizeof(buf1));
-    PrepareSseSourceOperandI386(fp, inst->operand[0], buf2, sizeof(buf2));
+    const char* src_scratch = SseScratch();
+    const char* dst_scratch = SseScratch2();
+    PrepareSseSourceOperandToI386(fp, inst->operand[1], src_scratch, buf1,
+                                  sizeof(buf1));
+    PrepareSseSourceOperandToI386(fp, inst->operand[0], dst_scratch, buf2,
+                                  sizeof(buf2));
     fprintf(fp, "\t%s ", cmp_mnemonic);
-    PrintSseSourceOperandI386(fp, inst->operand[1], buf1, sizeof(buf1));
+    PrintSseSourceOperandFromI386(fp, inst->operand[1], src_scratch, buf1,
+                                  sizeof(buf1));
     fprintf(fp, ", ");
-    PrintSseSourceOperandI386(fp, inst->operand[0], buf2, sizeof(buf2));
+    PrintSseSourceOperandFromI386(fp, inst->operand[0], dst_scratch, buf2,
+                                  sizeof(buf2));
     fprintf(fp, "\n");
     PrintSetccResultI386(fp, set_mnemonic, inst, buf1, buf2);
     return;
@@ -4363,15 +4416,22 @@ static void PrintDefaultInstructionI386(FILE* fp, TargetInstruction* inst,
       return;
 
     case X86_OP(ucomiss):
-    case X86_OP(ucomisd):
-      PrepareSseSourceOperandI386(fp, inst->operand[1], buf1, sizeof(buf1));
-      PrepareSseSourceOperandI386(fp, inst->operand[0], buf2, sizeof(buf2));
+    case X86_OP(ucomisd): {
+      const char* src_scratch = SseScratch();
+      const char* dst_scratch = SseScratch2();
+      PrepareSseSourceOperandToI386(fp, inst->operand[1], src_scratch, buf1,
+                                    sizeof(buf1));
+      PrepareSseSourceOperandToI386(fp, inst->operand[0], dst_scratch, buf2,
+                                    sizeof(buf2));
       fprintf(fp, "\t%s ", AttMnemonicI386(opcode));
-      PrintSseSourceOperandI386(fp, inst->operand[1], buf1, sizeof(buf1));
+      PrintSseSourceOperandFromI386(fp, inst->operand[1], src_scratch, buf1,
+                                    sizeof(buf1));
       fprintf(fp, ", ");
-      PrintSseSourceOperandI386(fp, inst->operand[0], buf2, sizeof(buf2));
+      PrintSseSourceOperandFromI386(fp, inst->operand[0], dst_scratch, buf2,
+                                    sizeof(buf2));
       fprintf(fp, "\n");
       return;
+    }
 
     case X86_OP(cvtsi2ss):
     case X86_OP(cvtsi2sd):

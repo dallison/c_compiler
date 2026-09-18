@@ -100,6 +100,29 @@ static void EmitBinding(FILE* fp, const char* name, bool is_global,
   }
 }
 
+static int CompareInitializerOffset(const void* left, const void* right) {
+  const Initializer* a = *(const Initializer* const*)left;
+  const Initializer* b = *(const Initializer* const*)right;
+  if (a->offset < b->offset) {
+    return -1;
+  }
+  if (a->offset > b->offset) {
+    return 1;
+  }
+  return 0;
+}
+
+/* Designated initializers are flattened in source/INode order, which is not
+ * address order.  Sequential emitters would then skip a later lower-offset
+ * slot once next_offset has moved past it (`{ [2]=2, [0]=0, [1]=1 }`). */
+static void SortStaticInitializersByOffset(Vector* initializers) {
+  if (initializers == NULL || initializers->length < 2) {
+    return;
+  }
+  qsort(initializers->value.p, initializers->length, sizeof(void*),
+        CompareInitializerOffset);
+}
+
 void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
   char buf[256];
   // Pick a data directive that emits exactly pointer_size bytes.  The
@@ -111,6 +134,7 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
       compiler->pointer_size == 2 ? ".short" : ".word";
   const char* long_asm =
       compiler->pointer_size == 8 ? ".8byte" : ".long";
+  SortStaticInitializersByOffset(&var->initializers);
   EmitP2Align(var->alignment, fp);
   fprintf(fp, "%s:\n", VarName(var, buf, sizeof(buf)));
   fprintf(fp, "\t.type   %s,@object\n", VarName(var, buf, sizeof(buf)));
@@ -121,6 +145,9 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
   int next_offset = 0;
   for (size_t i = 0; i < var->initializers.length; i++) {
     Initializer* init = var->initializers.value.p[i];
+    if (init->offset < next_offset) {
+      continue;
+    }
     if (init->offset > next_offset) {
       int diff = init->offset - next_offset;
       fprintf(fp, "\t.space  %d\t\t// offset %d\n", diff, next_offset);
@@ -550,6 +577,7 @@ static AssemblerSymbolBinding ModuleBinding(bool is_global, bool is_weak) {
 static void EmitInitializedVariableToModule(InitializedStaticVariable* var,
                                             AsmModule* module) {
   char buf[256];
+  SortStaticInitializersByOffset(&var->initializers);
   const char* name = VarName(var, buf, sizeof(buf));
   AsmModuleAlign(module, var->alignment);
   AsmModuleSymbol(module, name, var->is_tls ? SYM_TYPE(tls)
@@ -565,6 +593,9 @@ static void EmitInitializedVariableToModule(InitializedStaticVariable* var,
   int next_offset = 0;
   for (size_t i = 0; i < var->initializers.length; i++) {
     Initializer* init = var->initializers.value.p[i];
+    if (init->offset < next_offset) {
+      continue;
+    }
     if (init->offset > next_offset) {
       AsmModuleFill(module, init->offset - next_offset, 0);
       next_offset = init->offset;

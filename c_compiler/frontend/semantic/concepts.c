@@ -593,8 +593,102 @@ static bool EvaluateConceptDefinitionInteger(Symbol* concept_symbol,
                                              Vector* arguments,
                                              SourceLocation location,
                                              int64_t* result);
+static bool ExprIsConceptIdentifier(ASTNode* expr, Symbol** concept_symbol,
+                                    Vector** arguments);
 static void AppendTemplateArgumentDescription(String* out, Concept* concept,
                                               Vector* arguments);
+
+static void DeleteOwnedTemplateArgumentVector(Vector* args) {
+  if (args == NULL) {
+    return;
+  }
+  VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+}
+
+/* Evaluate `(C<Args> && ...)` / `(C<Args> || ...)` when C is a pack of concept
+ * template-template parameters.  AST fold expansion of those packs is not
+ * reliable, so bind each pack element and evaluate the named concept directly. */
+static bool EvaluateConceptTemplatePackFold(ASTNode* expr, Vector* arguments,
+                                            SourceLocation location,
+                                            int64_t* result) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX26) || expr == NULL ||
+      (expr->flags & kASTFoldExpression) == 0 ||
+      (expr->op != AST_OP(logand) && expr->op != AST_OP(logor))) {
+    return false;
+  }
+  BinaryASTNode* fold = (BinaryASTNode*)expr;
+  ASTNode* pattern = (expr->flags & kASTFoldPackOnLeft) != 0 ? fold->left
+                                                             : fold->right;
+  int pack_index = FoldConstraintPackIndex(pattern);
+  if (pack_index < 0 || arguments == NULL ||
+      (size_t)pack_index >= arguments->length) {
+    return false;
+  }
+  TemplateArgument* pack = arguments->value.p[pack_index];
+  Symbol* pattern_concept = NULL;
+  Vector* pattern_args = NULL;
+  if (!ExprIsConceptIdentifier(pattern, &pattern_concept, &pattern_args)) {
+    if (pack != NULL && pack->pack_arguments != NULL &&
+        pack->pack_arguments->length == 0) {
+      if (result != NULL) {
+        *result = expr->op == AST_OP(logand) ? 1 : 0;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  Vector* elements = NULL;
+  size_t start = 0;
+  size_t count = 0;
+  if (pack != NULL && pack->pack_arguments != NULL) {
+    elements = pack->pack_arguments;
+    count = elements->length;
+  } else {
+    start = (size_t)pack_index;
+    count = arguments->length - start;
+  }
+
+  int64_t acc = expr->op == AST_OP(logand) ? 1 : 0;
+  for (size_t i = 0; i < count; i++) {
+    TemplateArgument* element =
+        elements != NULL ? elements->value.p[i]
+                         : arguments->value.p[start + i];
+    Symbol* bound = pattern_concept;
+    if (bound != NULL && bound->flags.is_template_template_parameter &&
+        bound->template_template_parameter_kind ==
+            kTemplateTemplateParameterConcept &&
+        element != NULL && element->kind == kTemplateParameterTemplate &&
+        element->template_symbol != NULL) {
+      bound = element->template_symbol;
+    }
+    Vector* concrete_args = TypeSubstituteTemplateArgumentVector(
+        &compiler->syntax, pattern_args, arguments);
+    int64_t value = 0;
+    bool ok = EvaluateConceptDefinitionInteger(bound, concrete_args, location,
+                                               &value);
+    DeleteOwnedTemplateArgumentVector(concrete_args);
+    if (!ok) {
+      DeleteOwnedTemplateArgumentVector(pattern_args);
+      return false;
+    }
+    if (expr->op == AST_OP(logand)) {
+      if (value == 0) {
+        acc = 0;
+        break;
+      }
+    } else if (value != 0) {
+      acc = 1;
+      break;
+    }
+  }
+  DeleteOwnedTemplateArgumentVector(pattern_args);
+  if (result != NULL) {
+    *result = acc;
+  }
+  return true;
+}
 
 typedef enum {
   kAtomicConstraintOk,
@@ -645,26 +739,9 @@ static AtomicConstraintResult EvaluateAtomicConstraint(ASTNode* expr,
   if (expr == NULL) {
     return kAtomicConstraintSubstitutionFailed;
   }
-  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
-      (expr->flags & kASTFoldExpression) != 0 &&
-      (expr->op == AST_OP(logand) || expr->op == AST_OP(logor))) {
-    BinaryASTNode* fold = (BinaryASTNode*)expr;
-    ASTNode* pattern = (expr->flags & kASTFoldPackOnLeft) != 0
-                           ? fold->left
-                           : fold->right;
-    int pack_index = FoldConstraintPackIndex(pattern);
-    if (pack_index >= 0 && arguments != NULL &&
-        (size_t)pack_index < arguments->length) {
-      TemplateArgument* pack = arguments->value.p[pack_index];
-      if (pack != NULL && pack->pack_arguments != NULL &&
-          pack->pack_arguments->length == 0) {
-        int64_t identity = expr->op == AST_OP(logand) ? 1 : 0;
-        if (result != NULL) {
-          *result = identity;
-        }
-        return identity != 0 ? kAtomicConstraintOk : kAtomicConstraintFalse;
-      }
-    }
+  if (EvaluateConceptTemplatePackFold(expr, arguments, location, result)) {
+    return (result != NULL && *result != 0) ? kAtomicConstraintOk
+                                            : kAtomicConstraintFalse;
   }
   bool saved_trap = DiagnosticErrorTrapBegin();
   ASTNode* evaluated = NULL;

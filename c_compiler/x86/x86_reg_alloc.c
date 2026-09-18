@@ -20,6 +20,11 @@
 
 static void AllocateRegister(X86RegisterAllocator* allocator,
                              TargetInstruction* inst);
+static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
+                                 TargetInstruction* inst);
+static unsigned* X86PinnedMask(X86RegisterAllocator* allocator,
+                               X86RegisterType type);
+static int X86RegisterPhys(X86RegisterAllocator* allocator, X86Register* reg);
 
 static void Trap() {}
 
@@ -186,13 +191,13 @@ static int X86FloatPhysical(X86RegisterAllocator* allocator, int slot) {
 
 // Physical registers the emitter uses implicitly as scratch and which therefore
 // must never hold an allocator-managed value: r11 (spill-address / general
-// scratch in several emit paths) and xmm15 (used to shuttle integer values into
-// the SSE unit for ucomiss etc.).
+// scratch in several emit paths) and xmm15/xmm14 (used to shuttle integer
+// bit-patterns into the SSE unit for ucomiss when both operands need it).
 static bool X86PhysicalReserved(X86RegisterAllocator* allocator,
                                     X86RegisterType type, int phys) {
   if (!allocator->rv->profile->is_64bit) {
     if (type == kX86RegTypeFloat) {
-      return phys == 7;
+      return phys == 7 || phys == 6;
     }
     return false;
   }
@@ -200,7 +205,9 @@ static bool X86PhysicalReserved(X86RegisterAllocator* allocator,
     // r11: spill-address register and general scratch in several emit paths.
     return phys == 11;
   }
-  return phys == 15;  // xmm15: scratch for moving integers into the SSE unit.
+  // xmm15 shuttles integer bit patterns into the SSE unit; xmm14 is the
+  // second scratch used when both ucomi operands need that conversion.
+  return phys == 15 || phys == 14;
 }
 
 // Is the physical register denoted by logical slot |slot| available, i.e. not
@@ -294,7 +301,12 @@ static void FreeRegisters(X86RegisterAllocator* allocator,
         if (op->uses == 0 &&
             !TargetBasicBlockOutputs(inst->block, op)) {
           if (reg->owner == op) {
-            FreeRegister(allocator, (X86Register*)reg);
+            X86Register* xreg = (X86Register*)reg;
+            int phys = X86RegisterPhys(allocator, xreg);
+            unsigned pinned = *X86PinnedMask(allocator, xreg->type);
+            if ((pinned & (1u << phys)) == 0) {
+              FreeRegister(allocator, xreg);
+            }
           }
         }
       }
@@ -1372,9 +1384,6 @@ static bool AllocateUsingDest(X86RegisterAllocator* allocator,
   return true;
 }
 
-static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
-                                 TargetInstruction* inst);
-
 static void AllocateRegister(X86RegisterAllocator* allocator,
                              TargetInstruction* inst) {
   bool pushed =
@@ -1386,6 +1395,61 @@ static void AllocateRegister(X86RegisterAllocator* allocator,
   if (pushed) {
     allocator->allocating_depth--;
   }
+}
+
+static bool X86IsDestructiveTwoAddress(X86Opcode opcode) {
+  switch (opcode) {
+    case X86_OP(addss):
+    case X86_OP(addsd):
+    case X86_OP(subss):
+    case X86_OP(subsd):
+    case X86_OP(mulss):
+    case X86_OP(mulsd):
+    case X86_OP(divss):
+    case X86_OP(divsd):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static unsigned* X86PinnedMask(X86RegisterAllocator* allocator,
+                               X86RegisterType type) {
+  return type == kX86RegTypeInt ? &allocator->pinned_int_phys
+                                : &allocator->pinned_float_phys;
+}
+
+static int X86RegisterPhys(X86RegisterAllocator* allocator, X86Register* reg) {
+  return reg->type == kX86RegTypeInt
+             ? X86IntPhysical(allocator, reg->base.num)
+             : X86FloatPhysical(allocator, reg->base.num);
+}
+
+static bool PinTwoAddressSource(X86RegisterAllocator* allocator,
+                                TargetInstruction* inst) {
+  if (!X86IsDestructiveTwoAddress((X86Opcode)inst->opcode) ||
+      inst->operand[0] == NULL || inst->operand[0]->reg == NULL) {
+    return false;
+  }
+  X86Register* src = (X86Register*)inst->operand[0]->reg;
+  int phys = X86RegisterPhys(allocator, src);
+  unsigned* mask = X86PinnedMask(allocator, src->type);
+  unsigned bit = 1u << phys;
+  if ((*mask & bit) != 0) {
+    return false;
+  }
+  *mask |= bit;
+  return true;
+}
+
+static void UnpinTwoAddressSource(X86RegisterAllocator* allocator,
+                                  TargetInstruction* inst, bool pinned) {
+  if (!pinned || inst->operand[0] == NULL || inst->operand[0]->reg == NULL) {
+    return;
+  }
+  X86Register* src = (X86Register*)inst->operand[0]->reg;
+  int phys = X86RegisterPhys(allocator, src);
+  *X86PinnedMask(allocator, src->type) &= ~(1u << phys);
 }
 
 static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
@@ -1424,7 +1488,14 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
   // their source operands still need to be restored from spill slots first.
   ReloadSpills(allocator, inst);
 
+  // Two-address SSE ops overwrite operand[0]'s register.  The global `uses`
+  // count is not trustworthy (sibling dominator-tree walks decrement it), so
+  // a live source can look dead here and then be clobbered when the result
+  // is given the same xmm (tan()'s `x * 2/pi + 0.5` overwriting `x`).
+  bool pinned_src = PinTwoAddressSource(allocator, inst);
+
   if (AllocateUsingDest(allocator, inst)) {
+    UnpinTwoAddressSource(allocator, inst, pinned_src);
     return;
   }
 
@@ -1464,10 +1535,12 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
       // spilled afterwards is the case that matters -- it keeps reading the
       // register, and only the flag says so.
       inst->flags |= TARGET_INST_PROCESSED;
+      UnpinTwoAddressSource(allocator, inst, pinned_src);
       return;
 
     case X86_OP(regarg):
       // Always refers to fixed register so no allocation necessry.
+      UnpinTwoAddressSource(allocator, inst, pinned_src);
       return;
       
     case X86_OP(x0):
@@ -1499,6 +1572,7 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
         inst->reg = &reg->base;
         inst->uses = (int)inst->users.length;
         inst->flags |= TARGET_INST_PROCESSED;
+        UnpinTwoAddressSource(allocator, inst, pinned_src);
         return;
       }
       EvictPhysicalRegister(allocator, kX86RegTypeInt, reg->base.num, inst);
@@ -1523,6 +1597,7 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
         inst->reg = &reg->base;
         inst->uses = (int)inst->users.length;
         inst->flags |= TARGET_INST_PROCESSED;
+        UnpinTwoAddressSource(allocator, inst, pinned_src);
         return;
       }
       EvictPhysicalRegister(allocator, kX86RegTypeFloat, reg->base.num, inst);
@@ -1591,6 +1666,7 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
     // and has to leave it again before the next instruction.
     allocator->spill_after_definition = false;
     SpillInstruction(allocator, inst);
+    UnpinTwoAddressSource(allocator, inst, pinned_src);
     return;
   }
 
@@ -1599,6 +1675,7 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
   if (inst->uses == 0 && !reg->base.reserved) {
     FreeRegister(allocator, reg);
   }
+  UnpinTwoAddressSource(allocator, inst, pinned_src);
 }
 
 // Give |inst|, a live-in value of |block|, ownership of the register it was
