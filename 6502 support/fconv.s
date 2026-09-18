@@ -87,9 +87,16 @@ ui1tof_loop:
   LSR mt1+0
 
   // All bits shifted out?
-  BEQ tof_done
+  BEQ ui1tof_done
   INC fexp
   BRA ui1tof_loop
+ui1tof_done:
+  // One more shift right
+  ROR fmantissa+3
+  ROR fmantissa+2
+  ROR fmantissa+1
+  PLX
+  JMP __fassemble
 
 .section ".text.__i2tof", "ax", @progbits
 __i2tof:
@@ -134,9 +141,16 @@ i2tof_loop:
   // All bits shifted out?
   LDA mt1+0
   ORA mt1+1
-  BEQ tof_done
+  BEQ i2tof_done
   INC fexp
   BRA i2tof_loop
+i2tof_done:
+  // One more shift right
+  ROR fmantissa+3
+  ROR fmantissa+2
+  ROR fmantissa+1
+  PLX
+  JMP __fassemble
 
 .section ".text.__ui2tof", "ax", @progbits
 __ui2tof:
@@ -241,9 +255,16 @@ i4tof_loop:
   ORA mt1+1
   ORA mt1+2
   ORA mt1+3
-  BEQ tof_done3
+  BEQ i4tof_done
   INC fexp
   BRA i4tof_loop
+i4tof_done:
+  // One more shift right
+  ROR fmantissa+3
+  ROR fmantissa+2
+  ROR fmantissa+1
+  PLX
+  JMP __fassemble
 
 .section ".text.__ui4tof", "ax", @progbits
 __ui4tof:
@@ -389,9 +410,16 @@ i8tof_loop:
   ORA mt1+5
   ORA mt1+6
   ORA mt1+7
-  BEQ tof_done4
+  BEQ i8tof_done
   INC fexp
   BRA i8tof_loop
+i8tof_done:
+  // One more shift right
+  ROR fmantissa+3
+  ROR fmantissa+2
+  ROR fmantissa+1
+  PLX
+  JMP __fassemble
 
 .section ".text.__ui8tof", "ax", @progbits
 __ui8tof:

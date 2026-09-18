@@ -26,7 +26,22 @@ static bool IsDeadExpression(IRNode* inst) {
 
 // Store to a non-escaped local that is never loaded.  SROA and store-to-load
 // forwarding leave these behind; they would otherwise force a stack slot.
-static bool IsDeadLocalStore(IRNode* inst) {
+// Increment/decrement is a read-modify-write of the same object, but SSA
+// gives the RMW a fresh ssavar, so dest->outputs of the store's version may
+// contain only stores.  Deleting that store leaves the increment operating on
+// uninitialized storage (00032.c `p = &arr[0]; *(p++)`).
+static bool SymbolHasIncDec(Generator* gen, Symbol* symbol) {
+  for (IRNode* inst = GeneratorFirstInstruction(gen); inst != NULL;
+       inst = IRNext(inst)) {
+    if (IRIsVarDef(inst) && IRIsStore(inst) && !IRIsStoreOnly(inst) &&
+        inst->var.def == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool IsDeadLocalStore(Generator* gen, IRNode* inst) {
   if (!IRIsStoreOnly(inst) || inst->inputs.length == 0) {
     return false;
   }
@@ -40,6 +55,9 @@ static bool IsDeadLocalStore(IRNode* inst) {
       (!symbol->flags.is_local && !symbol->flags.is_temp) ||
       StorageIs(symbol->storage, STO(static) | STO(extern) | STO(thread)) ||
       TypeIsVolatile(symbol->type)) {
+    return false;
+  }
+  if (SymbolHasIncDec(gen, symbol)) {
     return false;
   }
   for (size_t i = 0; i < dest->outputs.length; i++) {
@@ -66,7 +84,7 @@ void DeadCodeEliminationOptimization(Generator* gen) {
            !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
            inst = next) {
         next = IRNext(inst);
-        if (IsDeadExpression(inst) || IsDeadLocalStore(inst)) {
+        if (IsDeadExpression(inst) || IsDeadLocalStore(gen, inst)) {
           BasicBlockRemoveInstruction(gen, block, inst);
           changed = true;
         }
