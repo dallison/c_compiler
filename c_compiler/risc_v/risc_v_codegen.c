@@ -1590,6 +1590,19 @@ static TargetInstruction* GetTlsVariableAddress(RVGenerator* rv,
   return Emit(rv, NewInstruction1(RV_OP(tprel), symbol));
 }
 
+static bool IsRegisterPairAggregate(TypeRecord* type);
+
+// Aggregates larger than 2*XLEN are copied and passed by hidden reference.
+// 9–16 byte structs (and member pointers) arrive in a register pair or as two
+// stack slots, so the homed slot is the object itself, not a pointer to it.
+static bool ArgumentPassedByHiddenReference(TypeRecord* type) {
+  if (type == NULL || !TypePassedAsMemoryAggregate(type)) {
+    return false;
+  }
+  TypeRecordCalculateSize(type);
+  return type->size > 8 && !IsRegisterPairAggregate(type);
+}
+
 // Materialize a value into a register.  This loads a constant into a register
 // or returns the instruction associated with the node if it's
 // already in a register.
@@ -1671,8 +1684,7 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
     }
   } else if (IRIsArgument(node)) {
     int32_t var_offset = node->data.ivalue;
-    bool by_ref_aggregate =
-        TypePassedAsMemoryAggregate(node->type) && node->type->size > 8;
+    bool by_ref_aggregate = ArgumentPassedByHiddenReference(node->type);
     if (RV_IS_REG_VAR(var_offset)) {
       // Argument is in a register.  A by-reference aggregate's register
       // already holds the pointer to the caller's copy.
@@ -2445,8 +2457,7 @@ static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
     int32_t var_offset = addr_node->data.ivalue;
     IRVariable* var = (IRVariable*)addr_node;
     bool by_ref_aggregate =
-        TypePassedAsMemoryAggregate(addr_node->type) &&
-        addr_node->type->size > 8;
+        ArgumentPassedByHiddenReference(addr_node->type);
     if (RV_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       int var_num = var_offset & ~RV_REG_VAR;
