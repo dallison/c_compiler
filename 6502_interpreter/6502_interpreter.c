@@ -806,6 +806,8 @@ static ssize_t Read(W65C02Interpreter* interpreter, int fd_index, char* buffer, 
 // These come from fcntl.h
 #define W65C02_O_RDONLY 00000000
 #define W65C02_O_WRONLY 00000001
+#define W65C02_O_RDWR 00000002
+#define W65C02_O_ACCMODE 00000003
 #define W65C02_O_CREAT 00000100
 #define W65C02_O_EXCL 00000200
 #define W65C02_O_NOCTTY 00000400
@@ -826,7 +828,11 @@ static ssize_t Read(W65C02Interpreter* interpreter, int fd_index, char* buffer, 
 // Convert the 6502 flags into those for the OS.
 static int ConvertOpenFlags(int in_flags) {
   int out_flags = 0;
-  CVTFLAG(O_WRONLY);
+  if ((in_flags & W65C02_O_ACCMODE) == W65C02_O_RDWR) {
+    out_flags |= O_RDWR;
+  } else {
+    CVTFLAG(O_WRONLY);
+  }
   CVTFLAG(O_CREAT);
   CVTFLAG(O_EXCL);
   CVTFLAG(O_NOCTTY);

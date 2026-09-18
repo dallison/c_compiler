@@ -15,7 +15,8 @@ echo "tests/single-exec/00178.c"
 # Assumes double is IEE754 double precision.
 echo "tests/single-exec/00195.c"
 
-# This one is too big to fit in 6502 memory.
+# These are too big to fit in 6502 memory.
+echo "tests/single-exec/00200.c"
 echo "tests/single-exec/00204.c"
 
 # Needs LP64 or LP32

@@ -119,12 +119,17 @@ static uint32_t AccessSize(IRNode* inst) {
       return 4;
     case IR_OP(load64):
     case IR_OP(store64):
-    case IR_OP(loadd):
-    case IR_OP(stored):
     case IR_OP(inc64):
     case IR_OP(uinc64):
     case IR_OP(dec64):
     case IR_OP(udec64):
+      return 8;
+    case IR_OP(loadd):
+    case IR_OP(stored):
+      if (inst->type != NULL && inst->type->size > 0 &&
+          inst->type->size <= UINT32_MAX) {
+        return (uint32_t)inst->type->size;
+      }
       return 8;
     default:
       break;
@@ -183,6 +188,21 @@ static bool DecodeAddress(IRNode* address, Symbol** base,
   return false;
 }
 
+static bool AddIndexOperands(IRNode* inst, size_t start, int64_t* offset) {
+  for (size_t i = start; i < inst->inputs.length; i++) {
+    IRNode* extra = inst->inputs.value.p[i];
+    if (!IRIsIntConst(extra)) {
+      return false;
+    }
+    int64_t combined;
+    if (Int64AddOverflow(*offset, IRIntConstValue(extra), &combined)) {
+      return false;
+    }
+    *offset = combined;
+  }
+  return true;
+}
+
 bool IRAliasDecode(IRNode* inst, IRMemoryLocation* location) {
   memset(location, 0, sizeof(*location));
   location->offset = IR_MEMORY_OFFSET_UNKNOWN;
@@ -201,6 +221,20 @@ bool IRAliasDecode(IRNode* inst, IRMemoryLocation* location) {
                      &location->kind, &location->offset)) {
     location->offset = IR_MEMORY_OFFSET_UNKNOWN;
     return false;
+  }
+  // Extra integer operands are byte offsets: load [base, off...], store
+  // [base, value, off...].  Ignoring them makes a _Complex imag store look
+  // like a store to the real part.
+  if (IRIsLoadOnly(inst)) {
+    if (!AddIndexOperands(inst, 1, &location->offset)) {
+      location->offset = IR_MEMORY_OFFSET_UNKNOWN;
+      return false;
+    }
+  } else if (IRIsStoreOnly(inst)) {
+    if (!AddIndexOperands(inst, 2, &location->offset)) {
+      location->offset = IR_MEMORY_OFFSET_UNKNOWN;
+      return false;
+    }
   }
   location->size = AccessSize(inst);
   location->atomic_access = IsAtomic(inst);

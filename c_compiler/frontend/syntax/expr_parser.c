@@ -4484,7 +4484,10 @@ static ASTNode* ParseCompoundLiteral(Syntax* syntax, TypeRecord* type) {
   SourceLocation location = syntax->lex->current_token_location;
   type = TypeRecordCalculateSize(type);
   Symbol* sym = SyntaxNewTemporary(syntax, type);
-  ASTNode* initializer = SyntaxParseInitializer(syntax, sym, syntax->init_storage);
+  // The temporary is not the enclosing declarator.  Passing leftover
+  // `typedef` / `extern` storage here rejects `return (T){...}` after a
+  // typedef, which is how CMPLX() is spelled.
+  ASTNode* initializer = SyntaxParseInitializer(syntax, sym, sym->storage);
   return NewCompoundLiteralASTNode(NewIdentifierASTNode(sym, location),
                                    location, initializer);
 }

@@ -929,11 +929,6 @@ static void HandleDirective_p2align(Assembler* assembler) {
 }
 
 static int64_t EvaluateDataDirectiveValue(Assembler* assembler) {
-  if (LexLookingAt(&assembler->lex, TOK(number))) {
-    int64_t value = assembler->lex.number;
-    LexNextToken(&assembler->lex);
-    return value;
-  }
   return AssemblerEvaluateExpression(assembler);
 }
 

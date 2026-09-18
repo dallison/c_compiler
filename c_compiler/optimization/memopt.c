@@ -174,10 +174,6 @@ static void OptimizeBlockMemory(Generator* gen, BasicBlock* block) {
         continue;
       }
       MarkObserved(&available, &location);
-      if (CanReplaceLoad(inst) && !location.volatile_access &&
-          !location.atomic_access) {
-        AvailableAdd(&available, &location, inst, inst, false);
-      }
       continue;
     }
 
