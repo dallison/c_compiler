@@ -12722,9 +12722,12 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           sym->type->qualifiers |= kQualConst;
         }
       }
-      if (!StorageIs(sym->storage, STO(extern))) {
+      if (!StorageIs(sym->storage, STO(extern)) &&
+          !TypeIsFunction(sym->type)) {
         // Local declarators need this before duplicate-name handling so C++26
         // automatic `_` declarations can be recognized as name-independent.
+        // A block-scope function declaration has extern linkage (C 6.2.2/5)
+        // and names a function, not an automatic object (00078.c).
         sym->flags.is_local = true;
       }
       MarkCXX26AutomaticNameIndependent(sym);
