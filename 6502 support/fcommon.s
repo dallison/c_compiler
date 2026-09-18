@@ -194,7 +194,7 @@ fendnorm:
 __fround:
   LDA fmantissa+0
   BIT #0x80     // Lowest byte top bit set?
-  BEQ fendnorm  // No, no rounding needed.
+  BEQ fround_done  // No, no rounding needed.
 
   CMP #0x80     // Exactly half?
   BNE round_up
@@ -202,7 +202,7 @@ __fround:
   // Check if remaining mantissa is even
   LDA fmantissa+1
   BIT #0x1
-  BNE fendnorm      // Number is odd, no rounding.
+  BNE fround_done      // Number is odd, no rounding.
 
 round_up:
   CLC
@@ -215,6 +215,7 @@ round_up:
   LDA fmantissa+3
   ADC #0
   STA fmantissa+3
+fround_done:
   RTS
 
 // X: offset of A in zero page in IEE754 format.
@@ -356,18 +357,18 @@ __fisnanA:
   LDA 3,X
   AND #0x7f
   CMP #0x7f
-  BNE notnaninf
+  BNE fisnanA_no
   LDA 2,X
   AND #0x80
-  BEQ notnaninf
+  BEQ fisnanA_no
   LDA 2,X
   AND #0x7f
   ORA 1,X
   ORA 0,X
-  BEQ notnaninf
+  BEQ fisnanA_no
   SEC
   RTS
-notnaninf:
+fisnanA_no:
   CLC
   RTS
 
@@ -377,18 +378,20 @@ __fisnanB:
   LDA 3,Y
   AND #0x7f
   CMP #0x7f
-  BNE notnaninf
+  BNE fisnanB_no
   LDA 2,Y
   AND #0x80
-  BEQ notnaninf
+  BEQ fisnanB_no
   LDA 2,Y
   AND #0x7f
   ORA 1,Y
   ORA 0,Y
-  BEQ notnaninf
+  BEQ fisnanB_no
   SEC
   RTS
-
+fisnanB_no:
+  CLC
+  RTS
 
 // X: offset into zero page
 .section ".text.__fisinfA", "ax", @progbits
@@ -396,18 +399,20 @@ __fisinfA:
   LDA 3,X
   AND #0x7f
   CMP #0x7f
-  BNE notnaninf
+  BNE fisinfA_no
   LDA 2,X
   AND #0x80
-  BEQ notnaninf
+  BEQ fisinfA_no
   LDA 2,X
   AND #0x7f
   ORA 1,X
   ORA 0,X
-  BNE notnaninf
+  BNE fisinfA_no
   SEC
   RTS
-
+fisinfA_no:
+  CLC
+  RTS
 
 // Y: offset into zero page
 .section ".text.__fisinfB", "ax", @progbits
@@ -415,16 +420,19 @@ __fisinfB:
   LDA 3,Y
   AND #0x7f
   CMP #0x7f
-  BNE notnaninf
+  BNE fisinfB_no
   LDA 2,Y
   AND #0x80
-  BEQ notnaninf
+  BEQ fisinfB_no
   LDA 2,Y
   AND #0x7f
   ORA 1,Y
   ORA 0,Y
-  BNE notnaninf
+  BNE fisinfB_no
   SEC
+  RTS
+fisinfB_no:
+  CLC
   RTS
 
 // Entry:
