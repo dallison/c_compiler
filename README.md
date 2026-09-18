@@ -3,6 +3,9 @@ Full C compiler, assembler, linker and loader
 
 This is my full C compiler.  It includes an assembler, linker, loader and interpreter for 6502 and RISC-V.
 
+How to build the compiler, guest libc, and tools with Bazelisk/Bazel or CMake,
+and how to install them, is in [docs/building.md](docs/building.md).
+
 ## C++ threading target profiles
 
 The hosted x86-64, AArch64, ARM, and RISC-V profiles support the C++20

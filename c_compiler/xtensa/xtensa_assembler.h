@@ -17,7 +17,6 @@ typedef struct {
   Assembler base;
   Map instructions;
   int32_t bss;  // Section id for .bss section.
-  int32_t next_la_label;
 } XTENSAAssembler;
 
 bool XTENSAAssemblerInit(XTENSAAssembler* assembler, String* infile,

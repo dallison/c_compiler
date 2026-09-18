@@ -208,9 +208,11 @@ sh_binary(
         ":aarch64",
         ":aarch64dasm",
         ":aarch64asm",
+        ":archivist",
         ":arm",
         ":armdasm",
         ":armasm",
+        ":bpf",
         ":davecc",
         ":davecc_bin_scripts",
         ":elfdump",
@@ -236,6 +238,12 @@ sh_binary(
         ":x86_64dasm",
         ":xtensadasm",
     ],
+)
+
+# CMake-equivalent install: `bazel run //:install -- --prefix /usr/local`
+alias(
+    name = "install",
+    actual = ":install_davecc_tools",
 )
 
 config_setting(
