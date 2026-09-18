@@ -50,10 +50,21 @@ static bool CanReplaceLoad(IRNode* load) {
          !TypeIsVolatile(load->type);
 }
 
+// Constants and addresses can be rematerialized after a call.  Call results
+// and other computed values live in caller-saved registers, so forwarding a
+// later load to them reuses a clobbered register instead of the stack slot
+// the store was keeping live.
+static bool ValueSurvivesCall(IRNode* value) {
+  return value != NULL &&
+         (IRIsConst(value) || value->opcode == IR_OP(addressof));
+}
+
 static void KillClobbered(Vector* available, IRNode* inst) {
+  bool call = IRIsCall(inst);
   for (size_t i = available->length; i > 0; i--) {
     AvailableAccess* access = available->value.p[i - 1];
-    if (IRAliasInstMayClobber(&access->location, inst)) {
+    if (IRAliasInstMayClobber(&access->location, inst) ||
+        (call && !ValueSurvivesCall(access->value))) {
       AvailableRemoveAt(available, i - 1);
     }
   }
@@ -85,6 +96,21 @@ static AvailableAccess* FindMustAlias(Vector* available,
   return found;
 }
 
+static bool CallBetween(IRNode* earlier, IRNode* later) {
+  if (earlier == NULL || later == NULL || earlier->block == NULL ||
+      earlier->block != later->block) {
+    return false;
+  }
+  for (IRNode* node = IRNext(earlier);
+       node != NULL && node->block == earlier->block && node != later;
+       node = IRNext(node)) {
+    if (IRIsCall(node)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool ForwardLoad(Generator* gen, BasicBlock* block, Vector* available,
                         IRNode* load, const IRMemoryLocation* location) {
   if (!CanReplaceLoad(load) || location->volatile_access ||
@@ -94,7 +120,9 @@ static bool ForwardLoad(Generator* gen, BasicBlock* block, Vector* available,
   AvailableAccess* access = FindMustAlias(available, location, false);
   if (access == NULL || access->value == NULL ||
       !TypesMatchForForward(load, access->value) ||
-      IRCheckpointBetween(access->producer, load)) {
+      IRCheckpointBetween(access->producer, load) ||
+      (CallBetween(access->producer, load) &&
+       !ValueSurvivesCall(access->value))) {
     return false;
   }
   GeneratorReplaceInstruction(gen, load, access->value);
