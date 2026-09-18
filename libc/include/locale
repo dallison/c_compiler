@@ -113,16 +113,21 @@ class locale {
 
   class id {
    public:
-    constexpr id() noexcept : __index_(static_cast<size_t>(-1)) {}
+    enum __classic_tag { __classic };
+    constexpr id() noexcept : __index_(static_cast<size_t>(-1)), __classic_(false) {}
+    constexpr id(__classic_tag) noexcept
+        : __index_(static_cast<size_t>(-1)), __classic_(true) {}
     size_t __index() const {
       if (__index_ == static_cast<size_t>(-1)) {
         __index_ = __locale_detail::__next_facet_index();
       }
       return __index_;
     }
+    bool __provided_by_classic() const { return __classic_; }
 
    private:
     mutable size_t __index_;
+    bool __classic_;
   };
 
   typedef int category;
@@ -163,6 +168,8 @@ class locale {
   facet* __get_facet(id& facet_id) const;
   const facet* __get_facet(const id& facet_id) const;
   bool __has_facet(const id& facet_id) const;
+  bool __is_classic() const;
+  void __install_classic_facet(facet* extra, id& facet_id) const;
 
  private:
   struct __from_impl {};
@@ -190,8 +197,20 @@ locale locale::combine(const locale& other) const {
 }
 
 template <class Facet>
+void __ensure_classic_facet(const locale& loc) {
+  if (loc.__has_facet(Facet::id) || !loc.__is_classic()) {
+    return;
+  }
+  loc.__install_classic_facet(new Facet, Facet::id);
+}
+
+template <class Facet>
 const Facet& use_facet(const locale& loc) {
   const locale::facet* facet = loc.__get_facet(Facet::id);
+  if (facet == nullptr) {
+    __ensure_classic_facet<Facet>(loc);
+    facet = loc.__get_facet(Facet::id);
+  }
   if (facet == nullptr) {
     __locale_detail::__throw_bad_cast();
   }
@@ -200,6 +219,10 @@ const Facet& use_facet(const locale& loc) {
 
 template <class Facet>
 bool has_facet(const locale& loc) {
+  if (loc.__has_facet(Facet::id)) {
+    return true;
+  }
+  __ensure_classic_facet<Facet>(loc);
   return loc.__has_facet(Facet::id);
 }
 

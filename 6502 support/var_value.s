@@ -310,6 +310,7 @@ __var_value1b_b7:
 .section ".text.__var_value1", "ax", @progbits
 __var_value1:
   LDY #0
+  JMP __var_value1b
   
 
   // A = dest offset into zero page.
@@ -407,6 +408,7 @@ __var_value2b_i7:
 .section ".text.__var_value2", "ax", @progbits
 __var_value2:
   LDY #0
+  JMP __var_value2b
   // A = dest offset into zero page.
   // X = var_offset lo
   // Y = var_offset hi
@@ -585,6 +587,7 @@ __var_value4b_l7:
 .section ".text.__var_value4", "ax", @progbits
 __var_value4:
   LDY #0
+  JMP __var_value4b
   // A = dest offset into zero page.
   // X = var_offset lo
   // Y = var_offset hi
@@ -686,6 +689,7 @@ __var_value8b_x3:
 .section ".text.__var_value8", "ax", @progbits
 __var_value8:
   LDY #0
+  JMP __var_value8b
 
   // A = dest offset into zero page.
   // X = var_offset lo
@@ -788,6 +792,7 @@ __arg_value1b_b7:
 .section ".text.__arg_value1", "ax", @progbits
 __arg_value1:
   LDY #0
+  JMP __arg_value1b
   
   // A = dest offset into zero page.
   // X = arg_offset lo
@@ -883,6 +888,7 @@ __arg_value2b_i7:
 .section ".text.__arg_value2", "ax", @progbits
 __arg_value2:
   LDY #0
+  JMP __arg_value2b
   // A = dest offset into zero page.
   // X = arg_offset lo
   // Y = arg_offset hi
@@ -1061,6 +1067,7 @@ __arg_value4b_l7:
 .section ".text.__arg_value4", "ax", @progbits
 __arg_value4:
   LDY #0
+  JMP __arg_value4b
   // A = dest offset into zero page.
   // X = arg_offset lo
   // Y = arg_offset hi
@@ -1162,6 +1169,7 @@ __arg_value8b_x3:
 .section ".text.__arg_value8", "ax", @progbits
 __arg_value8:
   LDY #0
+  JMP __arg_value8b
 
   // A = dest offset into zero page.
   // X = arg_offset lo
@@ -1186,6 +1194,7 @@ av8b:
 .section ".text.__set_var_value1", "ax", @progbits
 __set_var_value1:
   LDY #0
+  JMP __set_var_value1b
 .section ".text.__set_var_value1b", "ax", @progbits
 __set_var_value1b:
   JSR __varaddr
@@ -1198,6 +1207,7 @@ __set_var_value1b:
 .section ".text.__set_var_value2", "ax", @progbits
 __set_var_value2:
   LDY #0
+  JMP __set_var_value2b
 .section ".text.__set_var_value2b", "ax", @progbits
 __set_var_value2b:
   JSR __varaddr
@@ -1212,6 +1222,7 @@ __set_var_value2b:
 .section ".text.__set_var_value4", "ax", @progbits
 __set_var_value4:
   LDY #0
+  JMP __set_var_value4b
 .section ".text.__set_var_value4b", "ax", @progbits
 __set_var_value4b:
   JSR __varaddr
@@ -1229,6 +1240,7 @@ svv4b:
 .section ".text.__set_var_value8", "ax", @progbits
 __set_var_value8:
   LDY #0
+  JMP __set_var_value8b
 .section ".text.__set_var_value8b", "ax", @progbits
 __set_var_value8b:
   JSR __varaddr
@@ -1247,6 +1259,7 @@ svv8b:
 .section ".text.__set_arg_value1", "ax", @progbits
 __set_arg_value1:
   LDY #0
+  JMP __set_arg_value1b
 .section ".text.__set_arg_value1b", "ax", @progbits
 __set_arg_value1b:
   JSR __argaddr
@@ -1259,6 +1272,7 @@ __set_arg_value1b:
 .section ".text.__set_arg_value2", "ax", @progbits
 __set_arg_value2:
   LDY #0
+  JMP __set_arg_value2b
 .section ".text.__set_arg_value2b", "ax", @progbits
 __set_arg_value2b:
   JSR __argaddr
@@ -1273,6 +1287,7 @@ __set_arg_value2b:
 .section ".text.__set_arg_value4", "ax", @progbits
 __set_arg_value4:
   LDY #0
+  JMP __set_arg_value4b
 .section ".text.__set_arg_value4b", "ax", @progbits
 __set_arg_value4b:
   JSR __argaddr
@@ -1290,6 +1305,7 @@ sav4b:
 .section ".text.__set_arg_value8", "ax", @progbits
 __set_arg_value8:
   LDY #0
+  JMP __set_arg_value8b
 .section ".text.__set_arg_value8b", "ax", @progbits
 __set_arg_value8b:
   JSR __argaddr
@@ -1309,6 +1325,7 @@ sav8b:
 .section ".text.__zero_var_value1", "ax", @progbits
 __zero_var_value1:
   LDY #0
+  JMP __zero_var_value1b
 .section ".text.__zero_var_value1b", "ax", @progbits
 __zero_var_value1b:
   JSR __varaddr
@@ -1320,6 +1337,7 @@ __zero_var_value1b:
 .section ".text.__zero_var_value2", "ax", @progbits
 __zero_var_value2:
   LDY #0
+  JMP __zero_var_value2b
 .section ".text.__zero_var_value2b", "ax", @progbits
 __zero_var_value2b:
   JSR __varaddr
@@ -1332,6 +1350,7 @@ __zero_var_value2b:
 .section ".text.__zero_var_value4", "ax", @progbits
 __zero_var_value4:
   LDY #0
+  JMP __zero_var_value4b
 .section ".text.__zero_var_value4b", "ax", @progbits
 __zero_var_value4b:
   JSR __varaddr
@@ -1347,6 +1366,7 @@ zvv4b:
 .section ".text.__zero_var_value8", "ax", @progbits
 __zero_var_value8:
   LDY #0
+  JMP __zero_var_value8b
 .section ".text.__zero_var_value8b", "ax", @progbits
 __zero_var_value8b:
   JSR __varaddr
@@ -1363,6 +1383,7 @@ zvv8b:
 .section ".text.__zero_arg_value1", "ax", @progbits
 __zero_arg_value1:
   LDY #0
+  JMP __zero_arg_value1b
 .section ".text.__zero_arg_value1b", "ax", @progbits
 __zero_arg_value1b:
   JSR __argaddr
@@ -1374,6 +1395,7 @@ __zero_arg_value1b:
 .section ".text.__zero_arg_value2", "ax", @progbits
 __zero_arg_value2:
   LDY #0
+  JMP __zero_arg_value2b
 .section ".text.__zero_arg_value2b", "ax", @progbits
 __zero_arg_value2b:
   JSR __argaddr
@@ -1386,6 +1408,7 @@ __zero_arg_value2b:
 .section ".text.__zero_arg_value4", "ax", @progbits
 __zero_arg_value4:
   LDY #0
+  JMP __zero_arg_value4b
 .section ".text.__zero_arg_value4b", "ax", @progbits
 __zero_arg_value4b:
   JSR __argaddr
@@ -1401,6 +1424,7 @@ zav4b:
 .section ".text.__zero_arg_value8", "ax", @progbits
 __zero_arg_value8:
   LDY #0
+  JMP __zero_arg_value8b
 .section ".text.__zero_arg_value8b", "ax", @progbits
 __zero_arg_value8b:
   JSR __argaddr

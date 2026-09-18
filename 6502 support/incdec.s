@@ -94,6 +94,7 @@ __rinc21:
 .section ".text.__inc2", "ax", @progbits
 __inc2:
   LDY #0
+  JMP __inc2b
 .section ".text.__inc2b", "ax", @progbits
 __inc2b:
   STX __t0
@@ -116,6 +117,7 @@ __inc2b:
 .section ".text.__rinc2", "ax", @progbits
 __rinc2:
   LDY #0
+  JMP __rinc2b
 .section ".text.__rinc2b", "ax", @progbits
 __rinc2b:
   STX __t0
@@ -313,6 +315,7 @@ __rdec21:
 .section ".text.__dec2", "ax", @progbits
 __dec2:
   LDY #0
+  JMP __dec2b
 .section ".text.__dec2b", "ax", @progbits
 __dec2b:
   STX __t0
@@ -335,6 +338,7 @@ __dec2b:
 .section ".text.__rdec2", "ax", @progbits
 __rdec2:
   LDY #0
+  JMP __rdec2b
 .section ".text.__rdec2b", "ax", @progbits
 __rdec2b:
   STX __t0

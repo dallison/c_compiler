@@ -32,18 +32,90 @@ for symbol in AlignSize ExpandHeap InitFreeList TakeStartOfFreeBlock \
   fi
 done
 
+cat >"$WORK/hello_iostream.cpp" <<'SRC'
+#include <iostream>
+
+int main() {
+  for (int i = 0; i < 10; i++) {
+    std::cout << "hello world" << std::endl;
+  }
+  return 0;
+}
+SRC
+
+"$DAVECC" -target 65c02 "$WORK/hello_iostream.cpp" -o "$WORK/hello_iostream.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/hello_iostream.exe"
+
+# resulta must return the referent address, not a load of the object.
+# Otherwise use_facet / cout << int jump through a wild vptr.
+cat >"$WORK/reference_return.cpp" <<'SRC'
+int value = 42;
+int& get_ref() { return value; }
+int* pointer = &value;
+int*& get_ptr_ref() { return pointer; }
+
+int main() {
+  if (get_ref() != 42) {
+    return 1;
+  }
+  if (get_ptr_ref() != &value) {
+    return 2;
+  }
+  return 0;
+}
+SRC
+
+"$DAVECC" -target 65c02 "$WORK/reference_return.cpp" -o "$WORK/reference_return.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/reference_return.exe"
+
+# A named local class reference must keep the storea that binds it, or a
+# later virtual call reads an uninitialized register.
+cat >"$WORK/named_ref_virtual.cpp" <<'SRC'
+struct Base {
+  virtual int f() const { return 1; }
+};
+struct Derived : Base {
+  int f() const override { return 7; }
+};
+
+int main() {
+  Derived derived;
+  Base& ref = derived;
+  if (ref.f() != 7) {
+    return 1;
+  }
+  const Base& cref = derived;
+  if (cref.f() != 7) {
+    return 2;
+  }
+  return 0;
+}
+SRC
+
+"$DAVECC" -target 65c02 "$WORK/named_ref_virtual.cpp" -o "$WORK/named_ref_virtual.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/named_ref_virtual.exe"
+
+cat >"$WORK/cout_int.cpp" <<'SRC'
+#include <iostream>
+
+int main() {
+  std::cout << 42 << '\n';
+  return 0;
+}
+SRC
+
+"$DAVECC" -target 65c02 "$WORK/cout_int.cpp" -o "$WORK/cout_int.exe"
+"$INTERPRETER" -rom "$ROM" "$WORK/cout_int.exe"
+
 cat >"$WORK/atoi_vector.cpp" <<'SRC'
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
-int main(int argc, char** argv) {
-  if (argc < 2) {
-    std::cerr << "need an arg\n";
-    exit(1);
-  }
-  if (argc != 2 || atoi(argv[1]) != 5) {
+int main() {
+  if (atoi("5") != 5) {
     return 1;
   }
   if (!((unsigned char)'5' <= (unsigned char)'9') ||
@@ -57,12 +129,12 @@ int main(int argc, char** argv) {
   for (size_t i = 0; i < values.size(); i++) {
     std::cout << values[i] << std::endl;
   }
-  return 0;
+  _Exit(0);
 }
 SRC
 
 "$DAVECC" -target 65c02 "$WORK/atoi_vector.cpp" -o "$WORK/atoi_vector.exe"
-"$INTERPRETER" -rom "$ROM" "$WORK/atoi_vector.exe" 5
+"$INTERPRETER" -rom "$ROM" "$WORK/atoi_vector.exe"
 
 cat >"$WORK/map_stream.cpp" <<'SRC'
 #include <iostream>

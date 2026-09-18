@@ -1129,11 +1129,32 @@ uint32_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc) {
   for (int i = 4; i >= 0; i--) {
     BitSetIterator it;
     BitSetIteratorStart(&it, reg_sets[i]);
+    // __enter saves the first N callee-saved registers of each class
+    // (after scratch).  Save through the highest used callee-saved
+    // index so holes (i4 and i8) are covered.  Scratch must not count,
+    // or a use of i15 encodes 16 and __enter writes past i15 into l0.
+    static const int temps[] = {W65C02_NUM_TEMP_I_REGS, W65C02_NUM_TEMP_B_REGS,
+                                W65C02_NUM_TEMP_L_REGS, W65C02_NUM_TEMP_X_REGS,
+                                W65C02_NUM_TEMP_F_REGS};
+    static const int preserved[] = {
+        W65C02_NUM_PRESERVED_I_REGS, W65C02_NUM_PRESERVED_B_REGS,
+        W65C02_NUM_PRESERVED_L_REGS, W65C02_NUM_PRESERVED_X_REGS,
+        W65C02_NUM_PRESERVED_F_REGS};
+    int highest = -1;
+    while (!BitSetIteratorDone(&it)) {
+      int n = (int)BitSetIteratorValue(&it);
+      if (n > highest) {
+        highest = n;
+      }
+      BitSetIteratorNext(&it);
+    }
     int num_regs = 0;
-     while (!BitSetIteratorDone(&it)) {
-       num_regs++;
-       BitSetIteratorNext(&it);
-     }
+    if (highest >= temps[i]) {
+      num_regs = highest - temps[i] + 1;
+      if (num_regs > preserved[i]) {
+        num_regs = preserved[i];
+      }
+    }
     result |= num_regs;
     result <<= shifts[i];
   }

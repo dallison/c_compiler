@@ -35,7 +35,7 @@ typedef struct {
   Assembler base;
   Map instructions;
   int32_t bss;  // Section id for .bss section.
-  Map branches;       // Map of SourceLocation to Branch*
+  Map branches;       // Map of (section, address) to Branch*
   Map labels;         // Map of label name vs Label*.
   AssemblerSymbol* (*default_define_label)(struct Assembler*, String*);
 } W65C02Assembler;

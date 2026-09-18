@@ -40,8 +40,12 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
    public:
     explicit sentry(basic_ostream& os) : __os_(os), __ok_(false) {
       if (os.good()) {
-        if (os.tie() != nullptr) {
-          os.tie()->flush();
+        // Flushing a stream that is tied to itself (or whose tie()
+        // mis-reads as this, which 65C02 this-adjust can do) would
+        // recurse through sentry → flush → sentry.
+        basic_ostream* tied = os.tie();
+        if (tied != nullptr && tied != &os) {
+          tied->flush();
         }
         __ok_ = os.good();
       }
@@ -123,14 +127,13 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
   }
 
   // Unformatted output.
+  // Route a single character through write()/sputn rather than sputc.
+  // On 65C02, sputc after a prior xsputn (or a tight put loop) can
+  // leave the put-area pointers inconsistent and hang or drop the
+  // character; xsputn is the path that already works for string
+  // inserters.
   basic_ostream& put(char_type c) {
-    sentry s(*this);
-    if (s) {
-      if (Traits::eq_int_type(this->rdbuf()->sputc(c), Traits::eof())) {
-        this->setstate(ios_base::badbit);
-      }
-    }
-    return *this;
+    return write(&c, 1);
   }
   basic_ostream& write(const char_type* s, streamsize n) {
     sentry sen(*this);
@@ -142,11 +145,20 @@ class basic_ostream : public virtual basic_ios<CharT, Traits> {
     return *this;
   }
   basic_ostream& flush() {
+    // Guard against sentry → flush → sentry re-entry.  A tied stream
+    // (or a this-adjust that makes tie() return this) would otherwise
+    // recurse until the software stack hits ROM.
+    static bool flushing;
+    if (flushing) {
+      return *this;
+    }
+    flushing = true;
     if (this->rdbuf() != nullptr) {
       if (this->rdbuf()->pubsync() == -1) {
         this->setstate(ios_base::badbit);
       }
     }
+    flushing = false;
     return *this;
   }
 
@@ -318,7 +330,8 @@ basic_ostream<CharT, Traits>& operator<<(
 // Manipulators.
 template <class CharT, class Traits>
 basic_ostream<CharT, Traits>& endl(basic_ostream<CharT, Traits>& os) {
-  os.put(CharT('\n'));
+  CharT nl = CharT('\n');
+  os.write(&nl, 1);
   os.flush();
   return os;
 }

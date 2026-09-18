@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <inttypes.h>
 #include "6502_machine.h"
 #include "elf.h"
@@ -341,16 +342,23 @@ static Label* NewLabel(String* label_name, AssemblerSymbol* symbol) {
 
 static void LabelDestruct(Label* label) { VectorDestruct(&label->branches); }
 
+// Function sections each start at address 0.  Keying only by offset
+// makes a later function reuse an earlier function's Branch, so a
+// beq can be emitted as that earlier bne (or the reverse).
+static int64_t BranchMapKey(W65C02Assembler* assembler, int64_t addr) {
+  return ((int64_t)(uint32_t)ASMO.current_section << 32) | (uint32_t)addr;
+}
+
 static void InsertBranch(W65C02Assembler* assembler, int64_t addr,
                          Branch* branch) {
   MapKeyValue kv;
-  kv.key.w = addr;
+  kv.key.w = BranchMapKey(assembler, addr);
   kv.value.p = branch;
   MapInsert(&assembler->branches, kv);
 }
 
 static Branch* FindBranch(W65C02Assembler* assembler, int64_t addr) {
-  return MapFindInt64Key(&assembler->branches, addr);
+  return MapFindInt64Key(&assembler->branches, BranchMapKey(assembler, addr));
 }
 
 static void FixupBranch(MapKeyValue* kv, void* data) {

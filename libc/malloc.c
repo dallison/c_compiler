@@ -27,8 +27,10 @@ extern char _end[];
 
 FreeBlockHeader* __free_list;
 int __initial_heap_size;
+static unsigned char __heap_ready;
 
 static void InitFreeList(void) {
+  __heap_ready = 1;
   __free_list = (FreeBlockHeader*)_end;
   __free_list->length = MEMTOP - (int)_end;
   __free_list->next = NULL;
@@ -44,6 +46,9 @@ void* Malloc(size_t size) {
   }
   size_t full_size = size + sizeof(size_t);
   if (__free_list == NULL) {
+    if (__heap_ready) {
+      return NULL;
+    }
     InitFreeList();
   }
 

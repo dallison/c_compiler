@@ -1630,6 +1630,10 @@ static IRNode* GenerateVariableReference(Generator* gen,
         TypeIsStructOrUnion(node->base.type) ||
         TypeIsMemberPointerAggregate(node->base.type) ||
         TypeIsFunction(node->base.type)) {
+      // The slot holds the object address.  Mark the load as a use so SSA
+      // keeps the storea that bound the reference; without this, a later
+      // `B& b = d; b.virtual()` reads an uninitialized register.
+      IRSetVarUse(ref_addr, node->symbol);
       return ref_addr;
     }
     IRNode* result = EmitObjectLoad(gen, &node->base, ref_addr);
@@ -2083,6 +2087,19 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
           continue;
         }
        }
+      // A reference slot holds a pointer to the referent.  kASTNeedAddress on
+      // an identifier yields the variable node itself, which storea would
+      // materialize as a value (or skip for a class object).  Take the address
+      // unless the initializer is already a pointer -- a dereference, a
+      // reference-returning call, or an explicit address-of.
+      if (TypeIsReference(designated_init->base.type) &&
+          !TypeIsPointer(value->type) && value->opcode != IR_OP(addressof)) {
+        TypeRecord* referent = designated_init->base.type->next;
+        value = IRSetType(
+            GeneratorEmit(gen, NewIR1(IR_OP(addressof), value)),
+            NewPointerTo(kQualPlain, referent != NULL ? referent
+                                                      : designated_init->base.type));
+      }
       IROpcode store = GetStoreOpcode(subinit);
       write = IRSetType(GeneratorEmit(gen, NewIR2(store, destaddr,
                                 RemoveUnnecesaryShortening(gen, value, store))), node->type);
@@ -2153,9 +2170,60 @@ static bool CanElideMemzero(BracedInitializerASTNode* node) {
          TypeIsArray(init->init->type);
 }
 
+static ASTNode* UnwrapInitializerExpression(ASTNode* node) {
+  while (node != NULL) {
+    if (node->op == AST_OP(expr_init)) {
+      node = ((ExpressionInitializerASTNode*)node)->expr;
+    } else if (node->op == AST_OP(braced_init)) {
+      BracedInitializerASTNode* braced = (BracedInitializerASTNode*)node;
+      node = (braced->initializers != NULL && braced->initializers->length == 1)
+                 ? braced->initializers->value.p[0]
+                 : NULL;
+    } else if (node->op == AST_OP(designated_init)) {
+      node = ((DesignatedInitializerASTNode*)node)->init;
+    } else {
+      break;
+    }
+  }
+  return node;
+}
+
+static IRNode* GenerateReferenceBinding(Generator* gen, BinaryASTNode* node,
+                                        Symbol* symbol) {
+  ASTNode* init_expr = UnwrapInitializerExpression(node->right);
+  if (init_expr == NULL) {
+    init_expr = node->right;
+  }
+  int old_flags = init_expr->flags;
+  init_expr->flags |= kASTNeedAddress;
+  IRNode* value = GenerateExpression(gen, init_expr);
+  init_expr->flags = old_flags;
+  if (value != NULL && !TypeIsPointer(value->type) &&
+      value->opcode != IR_OP(addressof)) {
+    TypeRecord* referent = symbol->type != NULL && TypeIsReference(symbol->type)
+                               ? symbol->type->next
+                               : symbol->type;
+    if (IRIsVariable(value) && ((IRVariable*)value)->symbol != NULL) {
+      ((IRVariable*)value)->symbol->flags.address_taken = true;
+    }
+    value = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), value)),
+                      NewPointerTo(kQualPlain, referent));
+  }
+  IRNode* dest = GeneratorGetVariable(gen, symbol);
+  IRNode* store = GeneratorEmit(gen, NewIR2(IR_OP(storea), dest, value));
+  IRSetVarDef(store, symbol);
+  return dest;
+}
+
 // Initialization.  Semantic analysis converts the initializer to a
 // braced initializer containing only designated initalizers.
 static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
+  if (node->left != NULL && node->left->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node->left)->symbol;
+    if (symbol != NULL && TypeIsReference(symbol->type)) {
+      return GenerateReferenceBinding(gen, node, symbol);
+    }
+  }
   if (node->right->op != AST_OP(braced_init)) {
     // During speculative constant evaluation the callee's (e.g. freshly
     // instantiated constexpr template) body may not have been semantically

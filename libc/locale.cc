@@ -25,7 +25,10 @@ struct __locale_impl {
   ~__locale_impl();
 
   locale::facet* __get(size_t index) const {
-    return index < __facets.size() ? __facets[index] : nullptr;
+    if (index >= __facets.size()) {
+      return nullptr;
+    }
+    return __facets[index];
   }
   bool __has(size_t index) const { return __get(index) != nullptr; }
   void __install(locale::facet* facet, size_t index);
@@ -71,16 +74,6 @@ struct __installed_facet {
   locale::facet* facet;
   int category;
 };
-
-template <class Facet>
-inline void __install_facet(__locale_impl* impl, locale::facet* facet) {
-  impl->__install(facet, Facet::id.__index());
-}
-
-template <class Facet>
-inline Facet* __make_facet() {
-  return new Facet;
-}
 
 inline ctype_base::mask __mask_from_c(int c, unsigned char uc) {
   ctype_base::mask m = 0;
@@ -290,48 +283,30 @@ __locale_impl* __locale_impl::__combine_with(const __locale_impl* source,
   return result;
 }
 
-template class collate<char>;
-template class collate<wchar_t>;
-
-locale::id ctype<char>::id;
-locale::id ctype<wchar_t>::id;
-locale::id collate<char>::id;
-locale::id collate<wchar_t>::id;
-locale::id numpunct<char>::id;
-locale::id numpunct<wchar_t>::id;
-locale::id __davecc_num_put_char::id;
-locale::id __davecc_num_put_wchar::id;
-locale::id __davecc_num_get_char::id;
-locale::id __davecc_num_get_wchar::id;
-locale::id moneypunct<char>::id;
-locale::id moneypunct<wchar_t>::id;
-locale::id moneypunct<char, true>::id;
-locale::id moneypunct<wchar_t, true>::id;
-locale::id money_put<char, ostreambuf_iterator>::id;
-locale::id money_put<wchar_t, wostreambuf_iterator>::id;
-locale::id money_get<char, istreambuf_iterator>::id;
-locale::id money_get<wchar_t, wistreambuf_iterator>::id;
-locale::id time_put<char, ostreambuf_iterator>::id;
-locale::id time_put<wchar_t, wostreambuf_iterator>::id;
-locale::id time_get<char, istreambuf_iterator>::id;
-locale::id time_get<wchar_t, wistreambuf_iterator>::id;
-locale::id messages<char>::id;
-locale::id messages<wchar_t>::id;
-
-template class moneypunct<char>;
-template class moneypunct<wchar_t>;
-template class moneypunct<char, true>;
-template class moneypunct<wchar_t, true>;
-template class money_put<char, ostreambuf_iterator>;
-template class money_put<wchar_t, wostreambuf_iterator>;
-template class money_get<char, istreambuf_iterator>;
-template class money_get<wchar_t, wistreambuf_iterator>;
-template class time_put<char, ostreambuf_iterator>;
-template class time_put<wchar_t, wostreambuf_iterator>;
-template class time_get<char, istreambuf_iterator>;
-template class time_get<wchar_t, wistreambuf_iterator>;
-template class messages<char>;
-template class messages<wchar_t>;
+locale::id ctype<char>::id(locale::id::__classic);
+locale::id ctype<wchar_t>::id(locale::id::__classic);
+locale::id collate<char>::id(locale::id::__classic);
+locale::id collate<wchar_t>::id(locale::id::__classic);
+locale::id numpunct<char>::id(locale::id::__classic);
+locale::id numpunct<wchar_t>::id(locale::id::__classic);
+locale::id __davecc_num_put_char::id(locale::id::__classic);
+locale::id __davecc_num_put_wchar::id(locale::id::__classic);
+locale::id __davecc_num_get_char::id(locale::id::__classic);
+locale::id __davecc_num_get_wchar::id(locale::id::__classic);
+locale::id moneypunct<char>::id(locale::id::__classic);
+locale::id moneypunct<wchar_t>::id(locale::id::__classic);
+locale::id moneypunct<char, true>::id(locale::id::__classic);
+locale::id moneypunct<wchar_t, true>::id(locale::id::__classic);
+locale::id money_put<char, ostreambuf_iterator>::id(locale::id::__classic);
+locale::id money_put<wchar_t, wostreambuf_iterator>::id(locale::id::__classic);
+locale::id money_get<char, istreambuf_iterator>::id(locale::id::__classic);
+locale::id money_get<wchar_t, wistreambuf_iterator>::id(locale::id::__classic);
+locale::id time_put<char, ostreambuf_iterator>::id(locale::id::__classic);
+locale::id time_put<wchar_t, wostreambuf_iterator>::id(locale::id::__classic);
+locale::id time_get<char, istreambuf_iterator>::id(locale::id::__classic);
+locale::id time_get<wchar_t, wistreambuf_iterator>::id(locale::id::__classic);
+locale::id messages<char>::id(locale::id::__classic);
+locale::id messages<wchar_t>::id(locale::id::__classic);
 
 const locale::category locale::none = 0;
 const locale::category locale::collate = 1;
@@ -356,6 +331,25 @@ bool locale::__has_facet(const locale::id& facet_id) const {
   return __impl_ != nullptr ? __impl_->__has(facet_id.__index()) : false;
 }
 
+bool locale::__is_classic() const {
+  return __impl_ != nullptr &&
+         __locale_detail::__is_classic_name(__impl_->__name);
+}
+
+void locale::__install_classic_facet(locale::facet* extra,
+                                     locale::id& facet_id) const {
+  if (extra == nullptr) {
+    return;
+  }
+  size_t index = facet_id.__index();
+  if (!__is_classic() || __impl_->__get(index) != nullptr) {
+    extra->__add_ref();
+    extra->__release();
+    return;
+  }
+  __impl_->__install(extra, index);
+}
+
 ctype_base::mask ctype<char>::__classic_mask(unsigned char c) {
   return __mask_from_c(c, c);
 }
@@ -369,53 +363,12 @@ ctype_base::mask ctype<wchar_t>::__classic_wmask(wchar_t c) {
 
 namespace {
 
-class __classic_numpunct_char : public numpunct<char> {
- public:
-  __classic_numpunct_char() : numpunct<char>() {}
-};
-
-class __classic_numpunct_wchar : public numpunct<wchar_t> {
- public:
-  __classic_numpunct_wchar() : numpunct<wchar_t>() {}
-};
-
-void __install_classic_facets(__locale_impl* impl) {
-  __install_facet<collate<char>>(impl, __make_facet<collate<char>>());
-  __install_facet<collate<wchar_t>>(impl, __make_facet<collate<wchar_t>>());
-  __install_facet<ctype<char>>(impl, __make_facet<ctype<char>>());
-  __install_facet<ctype<wchar_t>>(impl, __make_facet<ctype<wchar_t>>());
-  __install_facet<numpunct<char>>(impl, __make_facet<__classic_numpunct_char>());
-  __install_facet<numpunct<wchar_t>>(
-      impl, __make_facet<__classic_numpunct_wchar>());
-  __install_facet<__davecc_num_put_char>(impl, __make_facet<__davecc_num_put_char>());
-  __install_facet<__davecc_num_get_char>(impl, __make_facet<__davecc_num_get_char>());
-  __install_facet<__davecc_num_put_wchar>(impl, __make_facet<__davecc_num_put_wchar>());
-  __install_facet<__davecc_num_get_wchar>(impl, __make_facet<__davecc_num_get_wchar>());
-  __install_facet<moneypunct<char>>(impl, __make_facet<moneypunct<char>>());
-  __install_facet<moneypunct<wchar_t>>(impl, __make_facet<moneypunct<wchar_t>>());
-  __install_facet<moneypunct<char, true> >(
-      impl, __make_facet<moneypunct<char, true> >());
-  __install_facet<moneypunct<wchar_t, true> >(
-      impl, __make_facet<moneypunct<wchar_t, true> >());
-  __install_facet<money_put<char, ostreambuf_iterator>>(
-      impl, __make_facet<money_put<char, ostreambuf_iterator>>());
-  __install_facet<money_put<wchar_t, wostreambuf_iterator>>(
-      impl, __make_facet<money_put<wchar_t, wostreambuf_iterator>>());
-  __install_facet<money_get<char, istreambuf_iterator>>(
-      impl, __make_facet<money_get<char, istreambuf_iterator>>());
-  __install_facet<money_get<wchar_t, wistreambuf_iterator>>(
-      impl, __make_facet<money_get<wchar_t, wistreambuf_iterator>>());
-  __install_facet<time_put<char, ostreambuf_iterator>>(
-      impl, __make_facet<time_put<char, ostreambuf_iterator>>());
-  __install_facet<time_put<wchar_t, wostreambuf_iterator>>(
-      impl, __make_facet<time_put<wchar_t, wostreambuf_iterator>>());
-  __install_facet<time_get<char, istreambuf_iterator>>(
-      impl, __make_facet<time_get<char, istreambuf_iterator>>());
-  __install_facet<time_get<wchar_t, wistreambuf_iterator>>(
-      impl, __make_facet<time_get<wchar_t, wistreambuf_iterator>>());
-  __install_facet<messages<char>>(impl, __make_facet<messages<char>>());
-  __install_facet<messages<wchar_t>>(impl, __make_facet<messages<wchar_t>>());
-}
+// Classic locale used to construct every standard facet here, including
+// wchar, monetary, time, and messages.  Those constructors keep vtables
+// live, so --gc-sections cannot drop them.  On 65C02 that overflowed the
+// 64 KiB address space for a `cout << "hello world"` program.  Facets are
+// installed on first use_facet/has_facet in the calling translation unit.
+void __install_classic_facets(__locale_impl* impl) { (void)impl; }
 
 }  // namespace
 

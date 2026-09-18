@@ -2468,6 +2468,23 @@ static void GenerateReturnStatement(Generator* gen,
           node->stmt != NULL ||
           gen->func->info.function.contract_assertions.length != 0;
       if (returns_reference) {
+        // NeedAddress on an identifier yields the variable node itself, not
+        // addressof.  resulta must receive a pointer; without this wrap the
+        // 6502 backend materializes the object's value and the caller then
+        // loads through that value as if it were an address.
+        if (expr->opcode == IR_OP(localvar) ||
+            expr->opcode == IR_OP(externvar) ||
+            expr->opcode == IR_OP(staticvar) ||
+            expr->opcode == IR_OP(argument)) {
+          if (((IRVariable*)expr)->symbol != NULL) {
+            ((IRVariable*)expr)->symbol->flags.address_taken = true;
+          }
+          TypeRecord* ref_type = gen->func->next;
+          TypeRecord* referent =
+              TypeIsReference(ref_type) ? ref_type->next : ref_type;
+          expr = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), expr)),
+                           NewPointerTo(kQualPlain, referent));
+        }
         if (spill_for_cleanup) {
           TypeRecord* addr_type = NewPointerTo(kQualPlain, gen->func->next);
           deferred_result_value =

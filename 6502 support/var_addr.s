@@ -210,6 +210,7 @@ __var_addrb_i8:
 .section ".text.__var_addr", "ax", @progbits
 __var_addr:
   LDY #0
+  JMP __var_addrb
   
   // A = dest offset into zero page.
   // X = var_offset lo
@@ -392,6 +393,7 @@ __arg_addrb_i8:
 .section ".text.__arg_addr", "ax", @progbits
 __arg_addr:
   LDY #0
+  JMP __arg_addrb
   
   // A = dest offset into zero page.
   // X = var_offset lo
@@ -483,6 +485,7 @@ __arg_addrb_i15:
 .section ".text.__var_addr_xy", "ax", @progbits
 __var_addr_xy:
   LDY #0
+  JMP __var_addrb_xy
   
   // X = var_offset lo
   // Y = var_offset hi
@@ -505,6 +508,7 @@ __var_addrb_xy:
 .section ".text.__arg_addr_xy", "ax", @progbits
 __arg_addr_xy:
   LDY #0
+  JMP __arg_addrb_xy
   
   // X = arg_offset lo
   // Y = arg_offset hi

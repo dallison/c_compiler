@@ -2031,17 +2031,20 @@ void LinkerLinkAllFiles(Linker* linker) {
   // Function addresses are now final, so materialize the stacktrace table.
   LinkerStacktraceFinalize(linker);
   
-  // The .bss (nobits) address is just after all the other sections.
+  // The .bss (nobits) address is just after initialized data.  A
+  // program with no writable .data (typical 65C02 C: text+.rodata only)
+  // leaves the data segment end at 0, because an empty segment never
+  // gets a start address.  Commons still need a home; place them after
+  // the code/rodata image so __free_list and friends are not linked at
+  // zp address 0/1.
   linker->nobits_address = SegmentEndAddress(&linker->data_segment);
-  if (linker->nobits_address != 0) {
-  
-    addr = linker->nobits_address;
-    LinkerAssignCommonSymbolAddresses(linker, &addr);
-    linker->nobit_size = addr - linker->nobits_address;
-    LinkerAssignBSSSymbolAddresses(linker);
-  } else {
-    linker->nobit_size = 0;
+  if (linker->nobits_address == 0) {
+    linker->nobits_address = SegmentEndAddress(&linker->code_segment);
   }
+  addr = linker->nobits_address;
+  LinkerAssignCommonSymbolAddresses(linker, &addr);
+  linker->nobit_size = addr - linker->nobits_address;
+  LinkerAssignBSSSymbolAddresses(linker);
 
   // Define the '_end' symbol for the last assigned address.
   InventSymbol(linker, "_end", 8, addr);

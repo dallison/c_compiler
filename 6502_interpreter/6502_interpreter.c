@@ -1629,9 +1629,15 @@ int W65C02InterpreterRun(W65C02Interpreter* interpreter, Loader* loader,
     Region* region = loader->regions.value.p[i];
     for (size_t section_index = 0; section_index < region->sections.length; section_index++) {
       ELFReaderSection* section = region->sections.value.p[section_index];
+      int top = (int)section->header->addr + (int)section->header->size;
+      if (section->header->type == SHT(nobits)) {
+        if (top > memtop) {
+          memtop = top;
+        }
+        continue;
+      }
       void* section_addr = (char*)region->address + section->header->offset - region->offset;
       memcpy(interpreter->memory+section->header->addr, section_addr, section->header->size);
-      int top = (int)section->header->addr + (int)section->header->size;
       if (top > memtop) {
         memtop = top;
       }
