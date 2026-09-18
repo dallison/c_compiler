@@ -147,6 +147,9 @@ bool SymbolNeedsDynamicStackAllocation(Symbol* symbol);
 // wide for one register and which is already passed by address as an argument.
 bool TypeReturnedThroughHiddenPointer(TypeRecord* type);
 bool TypeUsesNativeVectorABI(TypeRecord* type);
+// Structs, unions, and GNU vectors that are not passed in native SIMD
+// registers.  Callers copy these and pass an address (or a stack slot).
+bool TypePassedAsMemoryAggregate(TypeRecord* type);
 
 void OptimizeFunctionIR(Generator* gen);
 void GenerateFunctionIR(Generator* gen);

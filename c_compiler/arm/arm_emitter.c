@@ -1414,6 +1414,24 @@ static void PrintVfpAddressViaIp(FILE* fp, const char* base, int offset) {
   fprintf(fp, "\t%s ip, %s, ip\n", offset < 0 ? "sub" : "add", base);
 }
 
+static bool ArmMemOffsetInRange(ARMOpcode opcode, int offset) {
+  if (opcode == ARM_OP(fldr) || opcode == ARM_OP(fstr)) {
+    return VfpDispInRange(offset);
+  }
+  return ARMIsPossibleImmediate(offset);
+}
+
+static void PrintRegMemOffset(FILE* fp, ARMOpcode opcode, const char* reg,
+                              const char* base, int offset) {
+  const char* mnemonic = LoadStoreMnemonic(opcode);
+  if (ArmMemOffsetInRange(opcode, offset)) {
+    fprintf(fp, "\t%-12s%s, [%s, #%d]\n", mnemonic, reg, base, offset);
+    return;
+  }
+  PrintVfpAddressViaIp(fp, base, offset);
+  fprintf(fp, "\t%-12s%s, [ip]\n", mnemonic, reg);
+}
+
 static void PrintFpPairMem(FILE* fp, bool load, ARMRegister* reg, int offset) {
   char lo[8];
   char hi[8];
@@ -1958,6 +1976,25 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
     case ARM_OP(cset):
     case ARM_OP(csetm):
     case ARM_OP(adr):
+    case ARM_OP(ldr):
+    case ARM_OP(ldur):
+    case ARM_OP(ldrb):
+    case ARM_OP(ldrh):
+    case ARM_OP(ldurb):
+    case ARM_OP(ldurh):
+    case ARM_OP(ldrsb):
+    case ARM_OP(ldrsh):
+    case ARM_OP(ldursb):
+    case ARM_OP(ldursh):
+    case ARM_OP(ldursw):
+    case ARM_OP(fldr):
+    case ARM_OP(str):
+    case ARM_OP(stur):
+    case ARM_OP(strb):
+    case ARM_OP(strh):
+    case ARM_OP(sturb):
+    case ARM_OP(sturh):
+    case ARM_OP(fstr):
       break;
     case ARM_OP(fadd):
     case ARM_OP(fsub):
@@ -2023,11 +2060,11 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                    IsFramePointerRegister(inst->operand[0])) {
           offset = AdjustFrameOffset(emitter, offset);
         }
-        assert(ARMIsPossibleImmediate(offset));
-        fprintf(fp, "%s, [%s, #%d]\n",
-                GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
-                GetRegisterName(inst->operand[0], kSize32Bit, buf2,
-                               sizeof(buf2)), offset);
+        PrintRegMemOffset(
+            fp, (ARMOpcode)inst->opcode,
+            GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+            GetRegisterName(inst->operand[0], kSize32Bit, buf2, sizeof(buf2)),
+            offset);
       } else if (((int)inst->operand[1]->opcode == (int)ARM_OP(symbol))) {
         PrintSymbolOperand(emitter, inst, inst->operand[1],
                            GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
@@ -2039,10 +2076,11 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                 GetRegisterName(inst->operand[0], kSize32Bit, buf2, sizeof(buf2)),
                 func_name, inst->operand[1]->id);
       } else if (((int)inst->operand[1]->opcode == (int)ARM_OP(zr))) {
-        fprintf(fp, "%s, [%s, #0]\n",
-                GetRegisterName(inst, reg_size,buf1, sizeof(buf1)),
-                GetRegisterName(inst->operand[0], reg_size,buf2,
-                               sizeof(buf2)));
+        PrintRegMemOffset(
+            fp, (ARMOpcode)inst->opcode,
+            GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+            GetRegisterName(inst->operand[0], kSize32Bit, buf2, sizeof(buf2)),
+            0);
       } else {
         assert(false);
       }
@@ -2069,12 +2107,11 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                    IsFramePointerRegister(inst->operand[1])) {
           offset = AdjustFrameOffset(emitter, offset);
         }
-        assert(ARMIsPossibleImmediate(offset));
-        fprintf(fp, "%s, [%s, #%d]\n",
-                GetRegisterName(inst->operand[0], reg_size, buf1,
-                               sizeof(buf1)),
-                GetRegisterName(inst->operand[1], kSize32Bit, buf2,
-                               sizeof(buf2)), offset);
+        PrintRegMemOffset(
+            fp, (ARMOpcode)inst->opcode,
+            GetRegisterName(inst->operand[0], reg_size, buf1, sizeof(buf1)),
+            GetRegisterName(inst->operand[1], kSize32Bit, buf2, sizeof(buf2)),
+            offset);
       } else if (((int)inst->operand[2]->opcode == (int)ARM_OP(symbol))) {
         PrintSymbolOperand(emitter, inst, inst->operand[2],
                            GetRegisterName(inst->operand[0], reg_size, buf1,
@@ -2087,12 +2124,11 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                 GetRegisterName(inst->operand[1], kSize32Bit, buf2, sizeof(buf2)),
                 func_name, inst->operand[2]->id);
       } else if (((int)inst->operand[2]->opcode == (int)ARM_OP(zr))) {
-        fprintf(fp, "%s, [%s, #0]\n",
-                GetRegisterName(inst->operand[0], reg_size,buf1,
-                               sizeof(buf1)),
-                GetRegisterName(inst->operand[1], reg_size,buf2,
-                               sizeof(buf2)));
-
+        PrintRegMemOffset(
+            fp, (ARMOpcode)inst->opcode,
+            GetRegisterName(inst->operand[0], reg_size, buf1, sizeof(buf1)),
+            GetRegisterName(inst->operand[1], kSize32Bit, buf2, sizeof(buf2)),
+            0);
       } else {
         assert(false);
       }

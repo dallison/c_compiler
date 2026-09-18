@@ -611,6 +611,7 @@ static bool ContainsCall(ASTNode* node) {
 
 static bool GenerateIsNullMemberPointerOperand(ASTNode* node, TypeRecord* pm_type);
 static bool ExpressionReturnsReference(ASTNode* node);
+static bool ExpressionConstructsAggregateInPlace(ASTNode* expr);
 static void GenerateConstexprLifetimeMarker(
     Generator* gen, IRNode* address, uint64_t marker_value,
     uint64_t semantic_token, SourceLocation location);
@@ -2043,8 +2044,7 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       // yields a pointer to an existing source object rather than constructing
       // into the destination.
       bool by_value_call =
-          designated_expr->op == AST_OP(call) &&
-          designated_expr->value_category == kValueCategoryPrvalue;
+          ExpressionConstructsAggregateInPlace(designated_expr);
       if (!by_value_call) {
         // A reference-returning call already produces a pointer to the source
         // object; other struct expressions produce the object and need their
@@ -2338,10 +2338,9 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       TypeIsVector(node->left->type) ||
       TypeIsMemberPointerAggregate(node->left->type)) {
     dest = GenerateExpression(gen, node->left);
-    if (node->right->op == AST_OP(call) &&
-        node->right->value_category == kValueCategoryPrvalue) {
-      // Assignment from a by-value-returning call: it constructs its result
-      // directly into the destination address (sret).
+    if (ExpressionConstructsAggregateInPlace(node->right)) {
+      // Assignment from a by-value-returning call or class-type ternary:
+      // the RHS constructs its result directly into the destination.
       IRNode* old_struct_address = gen->current_struct_address;
       IRNode* ref = GeneratorEmit(gen, NewIR1(IR_OP(addressof), dest));
       IRSetType(ref, NewPointerTo(kQualPlain, node->left->type));
@@ -4399,6 +4398,89 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  return value_is_used ? tmp : right;
 }
 
+static bool TypeIsTernaryMemoryAggregate(TypeRecord* type) {
+  return TypeIsStructOrUnion(type) || TypeIsVector(type) ||
+         TypeIsMemberPointerAggregate(type);
+}
+
+static bool ExpressionIsConstructorCall(ASTNode* expr) {
+  if (expr == NULL || expr->op != AST_OP(call)) {
+    return false;
+  }
+  VectorASTNode* call = (VectorASTNode*)expr;
+  TypeRecord* callee_type = call->left != NULL ? call->left->type : NULL;
+  if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+    callee_type = ((IdentifierASTNode*)call->left)->symbol->type;
+  }
+  if (TypeIsPointer(callee_type)) {
+    callee_type = callee_type->next;
+  }
+  return TypeIsFunction(callee_type) &&
+         callee_type->info.function.is_constructor;
+}
+
+// By-value calls, class-type ternaries, converting-constructor commas,
+// compound literals, and spaceship results construct into
+// current_struct_address when it is set.  The caller must not memcpy the
+// result a second time (taking addressof of that pointer clobbered
+// AArch64/RISC-V string/path results).
+static bool ExpressionConstructsAggregateInPlace(ASTNode* expr) {
+  if (expr == NULL || !TypeIsTernaryMemoryAggregate(expr->type)) {
+    return false;
+  }
+  switch (expr->op) {
+    case AST_OP(call):
+    case AST_OP(inline_call):
+      return expr->value_category == kValueCategoryPrvalue ||
+             ExpressionIsConstructorCall(expr);
+    case AST_OP(question):
+    case AST_OP(compound_literal):
+    case AST_OP(spaceship):
+      return true;
+    case AST_OP(comma): {
+      BinaryASTNode* comma = (BinaryASTNode*)expr;
+      return ExpressionIsConstructorCall(comma->left) ||
+             ExpressionConstructsAggregateInPlace(comma->right);
+    }
+    default:
+      return false;
+  }
+}
+
+static IRNode* AggregateValueAddress(Generator* gen, IRNode* value,
+                                     ASTNode* expr, TypeRecord* type) {
+  if (value == NULL) {
+    return NULL;
+  }
+  if (value->opcode == IR_OP(addressof)) {
+    return value;
+  }
+  if (ExpressionReturnsReference(expr) ||
+      (TypeIsPointer(value->type) && value->type->next != NULL &&
+       TypeIsTernaryMemoryAggregate(value->type->next))) {
+    return value;
+  }
+  return IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), value)),
+                   NewPointerTo(kQualPlain, type));
+}
+
+static void CopyAggregateInto(Generator* gen, IRNode* dest_address,
+                              IRNode* dest_object, IRNode* value,
+                              ASTNode* expr, TypeRecord* type) {
+  IRNode* src = AggregateValueAddress(gen, value, expr, type);
+  if (src == NULL || dest_address == NULL) {
+    return;
+  }
+  if (src == dest_address || value == dest_object || value == dest_address ||
+      (src->opcode == IR_OP(addressof) &&
+       src->inputs.value.p[0] == dest_object)) {
+    return;
+  }
+  GeneratorEmit(gen,
+                NewIR3(IR_OP(memcpy), dest_address, src,
+                       GeneratorGetIntConstant(gen, NULL, type->size)));
+}
+
 static IRNode* GenerateConditionalExpression(Generator* gen,
                                              BinaryASTNode* node) {
   BinaryASTNode* colon = (BinaryASTNode*)node->right;
@@ -4415,6 +4497,55 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
       return GenerateExpression(gen, colon->left);
     }
     return GenerateExpression(gen, colon->right);
+  }
+
+  // Class, GNU-vector, and member-pointer results cannot be merged through a
+  // scalar temporary.  Prvalue / converting-constructor arms construct into
+  // the merge slot (current_struct_address).  Glvalue arms are copied in.
+  if (TypeIsTernaryMemoryAggregate(node->base.type)) {
+    IRNode* saved_struct_address = gen->current_struct_address;
+    IRNode* result_address = saved_struct_address;
+    IRNode* result_object = result_address;
+    if (result_address == NULL) {
+      Symbol* temporary = SyntaxNewTemporary(gen->syntax, node->base.type);
+      temporary->flags.address_taken = true;
+      result_object = GeneratorGetVariable(gen, temporary);
+      result_address = IRSetType(
+          GeneratorEmit(gen, NewIR1(IR_OP(addressof), result_object)),
+          NewPointerTo(kQualPlain, node->base.type));
+    } else if (result_address->opcode == IR_OP(addressof)) {
+      result_object = result_address->inputs.value.p[0];
+    }
+    IRNode* false_label = NewIR(IR_OP(label));
+    IRNode* end_label = NewIR(IR_OP(label));
+    IRNode* cond = GenerateExpression(gen, node->left);
+    GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, false_label));
+
+    if (colon->left->op != AST_OP(throw)) {
+      bool left_inplace = ExpressionConstructsAggregateInPlace(colon->left);
+      gen->current_struct_address = left_inplace ? result_address : NULL;
+      IRNode* left = GenerateExpression(gen, colon->left);
+      if (!left_inplace) {
+        CopyAggregateInto(gen, result_address, result_object, left,
+                          colon->left, node->base.type);
+      }
+      GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
+    } else {
+      GenerateExpression(gen, colon->left);
+    }
+
+    GeneratorEmit(gen, false_label);
+    bool right_inplace = ExpressionConstructsAggregateInPlace(colon->right);
+    gen->current_struct_address = right_inplace ? result_address : NULL;
+    IRNode* right = GenerateExpression(gen, colon->right);
+    if (!right_inplace) {
+      CopyAggregateInto(gen, result_address, result_object, right,
+                        colon->right, node->base.type);
+    }
+    GeneratorEmit(gen, end_label);
+
+    gen->current_struct_address = saved_struct_address;
+    return result_object;
   }
 
   if (TypeIsComplex(node->base.type)) {

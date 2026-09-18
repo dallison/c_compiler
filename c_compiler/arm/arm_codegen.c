@@ -3520,6 +3520,11 @@ static TargetInstruction* LowerConditionalBranch(ARMGenerator* g,
                                                  IRNode* node) {
   bool reverse = node->opcode == IR_OP(bfalse);
 
+  // CFG cleanup can detach the target from a branch in an unreachable block
+  // while leaving the dead instruction in the linear IR list.
+  if (node->inputs.length < 2) {
+    return Emit(g, NewInstruction(ARM_OP(nop)));
+  }
   assert(node->inputs.length == 2);
   IRNode* expr = node->inputs.value.p[0];
   IRNode* target_node = node->inputs.value.p[1];
@@ -4473,7 +4478,7 @@ static size_t ArgStackAlignment(TypeRecord* type) {
   if (type == NULL) {
     return 4;
   }
-  if (TypeIsStructOrUnion(type) || TypeIsMemberPointerAggregate(type)) {
+  if (TypePassedAsMemoryAggregate(type) || TypeIsMemberPointerAggregate(type)) {
     // A by-value struct keeps its natural alignment, clamped to the 4/8-byte
     // argument-slot granularity (AAPCS aligns aggregate arguments to at most a
     // double-word).
@@ -4497,7 +4502,7 @@ static size_t ArgStackSize(TypeRecord* type) {
   if (type == NULL) {
     return 4;
   }
-  if (TypeIsStructOrUnion(type) || TypeIsMemberPointerAggregate(type)) {
+  if (TypePassedAsMemoryAggregate(type) || TypeIsMemberPointerAggregate(type)) {
     // A by-value struct occupies its whole size on the stack, rounded up to a
     // whole number of 4-byte words.
     return ((size_t)type->size + 3) & ~(size_t)3;
@@ -4572,7 +4577,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
     }
     TypeRecord* arg_type =
         CalleeArgumentABIType(node, arg_ordinal, arg_node);
-    if (TypeIsStructOrUnion(arg_type)) {
+    if (TypePassedAsMemoryAggregate(arg_type)) {
       bool variadic = callee_varargs && arg_ordinal >= named_count;
       // A one-word named aggregate follows the core-register ABI just like a
       // scalar word.  Larger named aggregates still use the stacked by-value
@@ -4726,10 +4731,10 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
     size_t size = arg_node->type->size;
     switch (arg_location->type) {
       case kArgLocationPushed:
-        if (TypeIsStructOrUnion(arg_node->type)) {
-          // Named struct passed by value on the stack: copy the whole struct
-          // into its stacked slot now, before the argument registers are set
-          // up (the copy may materialize the source address into scratch
+        if (TypePassedAsMemoryAggregate(arg_node->type)) {
+          // Named struct/vector passed by value on the stack: copy the whole
+          // value into its stacked slot now, before the argument registers are
+          // set up (the copy may materialize the source address into scratch
           // registers).  Phase 4 then leaves this argument alone.
           TargetInstruction* arg = Materialize(g, arg_node);
           Memcpy(g, StackPointer(g), arg, (int)size, 0,
@@ -4808,9 +4813,9 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         break;
       }
       case kArgLocationPushed: {
-        if (TypeIsStructOrUnion(arg_node->type)) {
-          // Named struct passed by value on the stack was already copied into
-          // its slot in phase 3.
+        if (TypePassedAsMemoryAggregate(arg_node->type)) {
+          // Named struct/vector passed by value on the stack was already
+          // copied into its slot in phase 3.
           break;
         }
         TargetInstruction* arg = Materialize(g, arg_node);
@@ -4820,7 +4825,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       case kArgLocationRegister: {
         // Argument is in a register.
         TargetInstruction* arg = Materialize(g, arg_node);
-        if (TypeIsStructOrUnion(arg_node->type)) {
+        if (TypePassedAsMemoryAggregate(arg_node->type)) {
           size_t size = arg_node->type->size;
           if (size <= 8) {
             // A struct less than 8 bytes is passed in a register.  The
@@ -6033,7 +6038,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
               (stack_offset + ArgStackAlignment(arg_type) - 1) &
               ~(ArgStackAlignment(arg_type) - 1);
         }
-      } else if (TypeIsStructOrUnion(arg_type)) {
+      } else if (TypePassedAsMemoryAggregate(arg_type)) {
         if (arg_type->size <= 4 && int_reg <= ARM_INT_ARG_END) {
           location.type = kArgLocationRegister;
           location.location.offset = int_reg;
@@ -6092,7 +6097,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
         int_reg = ARM_INT_ARG_END + 1;
         ArgStackSlot(arg_symbol->type, &stack_offset);
       }
-    } else if (TypeIsStructOrUnion(arg_symbol->type)) {
+    } else if (TypePassedAsMemoryAggregate(arg_symbol->type)) {
       if (arg_symbol->type->size <= 4 && int_reg <= ARM_INT_ARG_END) {
         int_reg++;
       } else {
@@ -6377,7 +6382,7 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
       SetDebugStackLocation(entry, *var_offset);
       *var_offset += size;
     }
-  } else if (TypeIsStructOrUnion(entry->pooled->type)) {
+  } else if (TypePassedAsMemoryAggregate(entry->pooled->type)) {
     if (is_arg) {
       ArgLocation location = ArgumentLocation(entry, args);
       if (location.type == kArgLocationRegister) {

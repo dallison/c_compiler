@@ -2945,11 +2945,11 @@ static TargetInstruction* CompareAndBranch(AARCH64Generator* g,
   
   if (constant_compare) {
     if (inverted_comparison) {
-      rhs = GetLoweredNode(lhs_node);
+      rhs = Materialize(g, lhs_node);
       lhs = Materialize(g, rhs_node);
     } else {
       lhs = Materialize(g, lhs_node);
-      rhs = GetLoweredNode(rhs_node);
+      rhs = Materialize(g, rhs_node);
     }
     CompareImmediate(g, lhs, rhs, size);
   } else {
@@ -3025,6 +3025,11 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
                                                  IRNode* node) {
   bool reverse = node->opcode == IR_OP(bfalse);
 
+  // CFG cleanup can detach the target from a branch in an unreachable block
+  // while leaving the dead instruction in the linear IR list.
+  if (node->inputs.length < 2) {
+    return Emit(g, NewInstruction(AARCH64_OP(nop)));
+  }
   assert(node->inputs.length == 2);
   IRNode* expr = node->inputs.value.p[0];
   IRNode* target_node = node->inputs.value.p[1];

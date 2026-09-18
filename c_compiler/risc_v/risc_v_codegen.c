@@ -1670,10 +1670,12 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
       return OffsetFrom(rv, addr, LocalVariableOffset(rv, var_offset));
     }
   } else if (IRIsArgument(node)) {
-    // TODO: structs passed by reference.
     int32_t var_offset = node->data.ivalue;
+    bool by_ref_aggregate =
+        TypePassedAsMemoryAggregate(node->type) && node->type->size > 8;
     if (RV_IS_REG_VAR(var_offset)) {
-      // Argument is in a register.
+      // Argument is in a register.  A by-reference aggregate's register
+      // already holds the pointer to the caller's copy.
       IRVariable* var = (IRVariable*)node;
       int var_num = var_offset & ~RV_REG_VAR;
       if (TypeIsFloatingPoint(node->type)) {
@@ -1681,10 +1683,12 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
       } else {
         return IntVariableRegister(rv, var_num, var->symbol);
       }
+    } else if (by_ref_aggregate) {
+      TargetInstruction* slot = OffsetFrom(rv, FramePointer(rv), var_offset);
+      return Emit(rv, NewInstruction2(RV_OP(ld), slot, Zero(rv)));
     } else {
       // Argument is on the stack.
       TargetInstruction* addr = FramePointer(rv);
-      int32_t var_offset = node->data.ivalue;
       return OffsetFrom(rv, addr, var_offset);
     }
   } else if (IRIsStaticVariable(node)) {
@@ -2440,6 +2444,9 @@ static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
   } else if (IRIsArgument(addr_node)) {
     int32_t var_offset = addr_node->data.ivalue;
     IRVariable* var = (IRVariable*)addr_node;
+    bool by_ref_aggregate =
+        TypePassedAsMemoryAggregate(addr_node->type) &&
+        addr_node->type->size > 8;
     if (RV_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       int var_num = var_offset & ~RV_REG_VAR;
@@ -2448,8 +2455,20 @@ static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
       } else {
         *addr = IntVariableRegister(rv, var_num, var->symbol);
       }
+      if (by_ref_aggregate) {
+        *offset = Zero(rv);
+        return true;
+      }
       *offset = NULL;
       return false;
+    } else if (by_ref_aggregate) {
+      TargetInstruction* slot_addr;
+      TargetInstruction* slot_off;
+      GetAddressAndOffsetFrom(rv, FramePointer(rv), var_offset, &slot_addr,
+                              &slot_off);
+      *addr = Emit(rv, NewInstruction2(RV_OP(ld), slot_addr, slot_off));
+      *offset = Zero(rv);
+      return true;
     } else {
       GetAddressAndOffsetFrom(rv, FramePointer(rv), var_offset,
                               addr, offset);
@@ -2720,6 +2739,11 @@ static struct BranchInfo {
 
 static TargetInstruction* LowerConditionalBranch(RVGenerator* rv,
                                                  IRNode* node) {
+  // CFG cleanup can detach the target from a branch in an unreachable block
+  // while leaving the dead instruction in the linear IR list.
+  if (node->inputs.length < 2) {
+    return Emit(rv, NewInstruction(RV_OP(nop)));
+  }
   assert(node->inputs.length == 2);
   IRNode* expr = node->inputs.value.p[0];
   IRNode* target_node = node->inputs.value.p[1];
@@ -3616,7 +3640,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
                      NewArgLocationPushedPair(next_pushed_arg_offset));
         next_pushed_arg_offset += 16;
       }
-    } else if (TypeIsStructOrUnion(arg_node->type)) {
+    } else if (TypePassedAsMemoryAggregate(arg_node->type)) {
       if (i == 1 && arg_node->opcode == IR_OP(structreturn) &&
           !has_hidden_struct_result) {
         // RVO (Return Value Optimization), passing structreturn as arg.
@@ -3845,7 +3869,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
                        RV_OP(sd), arg, StackPointer(rv),
                        GetIntConstant(rv, arg_node, kTargetType64Bit,
                                       arg_location->location.offset)));
-        } else if (TypeIsStructOrUnion(arg_node->type)) {
+        } else if (TypePassedAsMemoryAggregate(arg_node->type)) {
           size_t size = arg_node->type->size;
           if (size <= 8) {
             // A struct less than 8 bytes is passed directly on stack.  The
@@ -3864,7 +3888,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
       case kArgLocationRegister: {
         // Argument is in a register.
         TargetInstruction* arg = Materialize(rv, arg_node);
-        if (TypeIsStructOrUnion(arg_node->type)) {
+        if (TypePassedAsMemoryAggregate(arg_node->type)) {
           size_t size = arg_node->type->size;
           if (size <= 8) {
             // A struct less than 8 bytes is passed in a register.  The
@@ -5181,7 +5205,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
       SetDebugStackLocation(entry, *var_offset);
       *var_offset += size;
     }
-  } else if (TypeIsStructOrUnion(entry->pooled->type)) {
+  } else if (TypePassedAsMemoryAggregate(entry->pooled->type)) {
     if (is_arg) {
       if (size <= 8) {
         // A struct/union that fits in a single register is passed by value in

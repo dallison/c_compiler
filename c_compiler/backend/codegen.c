@@ -1751,6 +1751,11 @@ bool TypeUsesNativeVectorABI(TypeRecord* type) {
   return StringEqual(compiler->target_name, "aarch64") && type->size <= 8;
 }
 
+bool TypePassedAsMemoryAggregate(TypeRecord* type) {
+  return TypeIsStructOrUnion(type) ||
+         (TypeIsVector(type) && !TypeUsesNativeVectorABI(type));
+}
+
 bool TypeReturnedThroughHiddenPointer(TypeRecord* type) {
   return TypeIsStructOrUnion(type) ||
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type)) ||
@@ -2153,6 +2158,13 @@ void OptimizeFunctionIR(Generator* gen) {
       CopyPropagationOptimization(gen);
     }
     MemoryOptimization(gen);
+    // Memopt can replace loads with constants (e.g. inlined default
+    // arguments forwarded into `value += by * scale`).  Fold the
+    // resulting `addi`/`cmp*` so later lowering does not emit a
+    // compare-and-branch whose operands were never materialized.
+    if (compiler->ir_optimizations.const_prop) {
+      ConstantPropagationOptimization(gen);
+    }
     if (compiler->ir_optimizations.dce) {
       DeadCodeEliminationOptimization(gen);
     }
