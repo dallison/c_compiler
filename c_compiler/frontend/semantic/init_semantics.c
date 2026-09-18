@@ -376,14 +376,32 @@ static void ApplyCXXDefaultMemberInitializers(INode* inode,
   }
 }
 
+static bool StringLiteralMatchesCharacterArray(TypeRecord* array_element,
+                                               TypeRecord* literal_element) {
+  if (array_element == NULL || literal_element == NULL) {
+    return false;
+  }
+  TypeRecordCalculateSize(array_element);
+  TypeRecordCalculateSize(literal_element);
+  if (array_element->size != literal_element->size) {
+    return false;
+  }
+  // Unicode encodings (char8/16/32) must match.  Ordinary and wide string
+  // literals may initialize any character type of the same width: C allows
+  // char / signed char / unsigned char, and wchar_t is often a typedef to
+  // int or unsigned short.
+  if (TypeChar8IdentityDiffers(array_element, literal_element)) {
+    return false;
+  }
+  return TypeIsCharFamily(array_element) || TypeIsInt(array_element);
+}
+
 static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {
   if (expr->op == AST_OP(string) || expr->op == AST_OP(string_wide)) {
     TypeRecord* literal_element =
         TypeIsArray(expr->type) ? expr->type->next : NULL;
-    bool character_array = TypeIsCharFamily(inode->type->next) ||
-                           TypeIsInt(inode->type->next);
-    if (literal_element == NULL || !character_array ||
-        inode->type->next->type != literal_element->type) {
+    if (!StringLiteralMatchesCharacterArray(inode->type->next,
+                                            literal_element)) {
       SemanticError(expr,
                     "String literal encoding does not match character array "
                     "element type");
@@ -676,17 +694,58 @@ static INode* FindDesignator(INode* inode,
         SemanticError(ast_node, "Use of struct designator on a non-struct");
         return NULL;
       }
-      StructMember* member =
-          designator->is_resolved_member
-              ? designator->value.struct_member
-              : FindStructMember(inode->type->info.struct_info,
-                                 designator->value.struct_member_name);
+      Struct* info = inode->type->info.struct_info;
+      String* name = NULL;
+      if (designator->is_resolved_member) {
+        if (designator->value.struct_member != NULL &&
+            designator->value.struct_member->symbol != NULL) {
+          name = &designator->value.struct_member->symbol->name;
+        }
+      } else {
+        name = designator->value.struct_member_name;
+      }
+      StructMember* member = NULL;
+      if (name != NULL) {
+        for (size_t i = 0; i < info->members.length; i++) {
+          StructMember* candidate = info->members.value.p[i];
+          if (!StructMemberIsObjectMember(candidate) || candidate->is_anon) {
+            continue;
+          }
+          if (StringEqualString(&candidate->symbol->name, name)) {
+            member = candidate;
+            break;
+          }
+        }
+        if (member == NULL) {
+          // Injected anonymous-struct names live in this scope's lookup
+          // tables but the layout slot is the anonymous member.  Recurse so
+          // `{.b = 8, .a = 7}` keeps updating that one union member.
+          for (size_t i = 0; i < info->members.length; i++) {
+            StructMember* candidate = info->members.value.p[i];
+            if (candidate == NULL || !candidate->is_anon ||
+                candidate->symbol == NULL ||
+                !TypeIsStructOrUnion(candidate->symbol->type) ||
+                candidate->symbol->type->info.struct_info == NULL) {
+              continue;
+            }
+            if (FindStructMember(candidate->symbol->type->info.struct_info,
+                                 name) != NULL) {
+              INode* child = GetChildAtIndex(inode, candidate->index, false);
+              if (child == NULL) {
+                return NULL;
+              }
+              return FindDesignator(child, ast_node, designator);
+            }
+          }
+        }
+      }
       if (member == NULL) {
-        const char* name = designator->is_resolved_member
-                               ? "<resolved>"
-                               : designator->value.struct_member_name->value;
+        member = name != NULL ? FindStructMember(info, name) : NULL;
+      }
+      if (member == NULL) {
+        const char* shown = name != NULL ? name->value : "<resolved>";
         SemanticError(ast_node, "Unknown struct member %s used in designator",
-                      name);
+                      shown);
         return NULL;
       }
       if (TypeIsArray(member->symbol->type) &&
@@ -1231,8 +1290,15 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
       }
       if (braced_init->initializers->length == 0 && !CompilerIsCXX() &&
           !CompilerCAtLeast(kLanguageStandardC23)) {
-        SemanticError(init_expr,
-                      "empty initializer requires C23");
+        // Empty structs are a GNU extension and `{}` is the only brace list
+        // they can take.  Pre-C23 empty initializers of scalars and non-empty
+        // aggregates remain a constraint violation (see c23_core_mode_test).
+        Struct* info = TypeIsStructOrUnion(inode->type)
+                           ? inode->type->info.struct_info
+                           : NULL;
+        if (info == NULL || info->members.length != 0) {
+          SemanticError(init_expr, "empty initializer requires C23");
+        }
       }
       LazyInitINode(inode);
       CheckCXXDesignatedInitializers(inode, braced_init);

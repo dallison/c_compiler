@@ -10,7 +10,6 @@ fi
 # so a __thread variable has nowhere to live.
 echo "tests/single-exec/00238.c"
 
-# Skipped for every target, not just this one.
-echo "tests/single-exec/00216.c"
+# Still skipped on wasm (and some other targets) for remaining frontend gaps.
 echo "tests/single-exec/00219.c"
 echo "tests/single-exec/00220.c"

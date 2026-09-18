@@ -1134,6 +1134,31 @@ static TargetInstruction* SetDestOrMove(AARCH64Generator* g,
   return to;
 }
 
+// Hold an indirect-call target in a fresh virtual across argument evaluation.
+// Pinning it to x9 here is unsafe: a nested indirect call in an argument
+// (`fprintfptr(..., (*f)(24))`) also uses x9 and would overwrite the outer
+// target.
+static TargetInstruction* HoldCallTarget(AARCH64Generator* g,
+                                         TargetInstruction* from) {
+  TargetInstruction* hold = Emit(g, NewInstruction(AARCH64_OP(tmp)));
+  TargetInstruction* mv =
+      Emit(g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), from), 0));
+  mv->dest = hold;
+  return hold;
+}
+
+// Move a held call target into x9 immediately before blr/br.  x9 is not an
+// argument register, so this cannot collide with x0..x7, and nested calls
+// have already finished using x9.  Always emit a real move so the hold's
+// destination is not redirected onto x9 from the start of its live range.
+static TargetInstruction* PinCallTargetToX9(AARCH64Generator* g,
+                                            TargetInstruction* hold) {
+  TargetInstruction* pin =
+      Emit(g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), hold), 0));
+  pin->dest = Tmp(g);
+  return Tmp(g);
+}
+
 static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node);
 
 // If the IR node writes its result into a destination tmp (the "-> $n"
@@ -4104,41 +4129,15 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   }
 
   // Phase 3.5:
-  // For an indirect call (the target is computed into a register rather than
-  // being a link-time symbol) stage the target into its own register *before*
-  // the argument registers are set up below.  The blr below references this
-  // staged value, so the register allocator keeps it live across the argument
-  // moves and won't reuse its register for an argument (e.g. x0).  Without
-  // this, the call target and the first argument can land in the same
-  // register and the argument move clobbers the target.
+  // For an indirect call, capture the target into a virtual *before* argument
+  // registers are set up.  Pinning to x9 is deferred until just before blr:
+  // nested calls in the arguments also use x9 as a scratch (see 00189.c).
   TargetInstruction* staged_target = NULL;
   {
     IRNode* target_node = node->inputs.value.p[0];
     TargetInstruction* a = GetLoweredNode(target_node);
     if (((int)a->opcode != (int)AARCH64_OP(symbol))) {
-      // Force the target into the dedicated temp register (x9), which is not
-      // an argument register, so the argument moves below cannot clobber it.
-      // Prefer giving the target instruction itself the temp as its
-      // destination (no extra move, and no dependence on the target's old
-      // register surviving argument setup).  Only do this when every use of
-      // the target value is in this block, so we don't redirect a value that
-      // is read after the (register-clobbering) call.
-      bool single_block = true;
-      for (size_t u = 0; u < target_node->outputs.length; u++) {
-        if (((IRNode*)target_node->outputs.value.p[u])->block !=
-            target_node->block) {
-          single_block = false;
-          break;
-        }
-      }
-      if (single_block) {
-        staged_target = SetDestOrMove(g, a, Tmp(g), AARCH64_OP(mov));
-      } else {
-        TargetInstruction* mv =
-            Emit(g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), a), 0));
-        mv->dest = Tmp(g);
-        staged_target = Tmp(g);
-      }
+      staged_target = HoldCallTarget(g, a);
     }
   }
 
@@ -4322,13 +4321,11 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     // address, or even a constant) must be materialized into a temp register
     // and reached with a register branch.
     if (((int)addr->opcode != (int)AARCH64_OP(symbol))) {
-      // Indirect tail call.  The target was staged into the temp register (x9)
-      // in phase 3.5, before the argument registers were set up, so it survives
-      // both the argument moves and the restore.  (The address may itself be a
-      // caller-saved register such as the x0 result of a preceding call, as in
-      // `(*(*p)(...))(...)`; capturing it after the argument moves would read a
-      // clobbered register.)
+      // Indirect tail call.  The target was held in a virtual through argument
+      // setup (including nested calls).  Pin it to x9 before restore: x9 is
+      // caller-saved and restore must not overwrite the branch target.
       assert(staged_target != NULL);
+      staged_target = PinCallTargetToX9(g, staged_target);
       BuildArgList(g, &arg_locations);
       Emit(g, NewInstruction(AARCH64_OP(restore)));
       call = Emit(g, NewInstruction1(AARCH64_OP(br), staged_target));
@@ -4341,9 +4338,8 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   } else {
     TargetInstruction* call_target = addr;
     if (staged_target != NULL) {
-      // Indirect call: target was staged into its own register above.
       opcode = AARCH64_OP(blr);
-      call_target = staged_target;
+      call_target = PinCallTargetToX9(g, staged_target);
     } else if (((int)addr->opcode == (int)AARCH64_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
       opcode = TypeIsFloatingPoint(node->type) ? AARCH64_OP(bl) : AARCH64_OP(bl);

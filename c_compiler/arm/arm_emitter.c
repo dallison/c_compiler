@@ -1399,6 +1399,21 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
   }
 }
 
+// VFP vldr/vstr encode the displacement as ±imm8*4, so the representable
+// range is ±1020.  Larger frame slots (00252.c's main) must go through ip.
+static bool VfpDispInRange(int offset) {
+  return offset <= 0x3fc && offset >= -0x3fc && (offset & 3) == 0;
+}
+
+static void PrintVfpAddressViaIp(FILE* fp, const char* base, int offset) {
+  int abs_off = offset < 0 ? -offset : offset;
+  fprintf(fp, "\tmovw ip, #%d\n", abs_off & 0xffff);
+  if (abs_off > 0xffff) {
+    fprintf(fp, "\tmovt ip, #%d\n", (abs_off >> 16) & 0xffff);
+  }
+  fprintf(fp, "\t%s ip, %s, ip\n", offset < 0 ? "sub" : "add", base);
+}
+
 static void PrintFpPairMem(FILE* fp, bool load, ARMRegister* reg, int offset) {
   char lo[8];
   char hi[8];
@@ -1599,6 +1614,32 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       reg_size == kSize128Bit) {
     PrintNeonMemOp(emitter, inst, (ARMOpcode)inst->opcode == ARM_OP(fldr), fp);
     return;
+  }
+  if ((ARMOpcode)inst->opcode == ARM_OP(fldr) ||
+      (ARMOpcode)inst->opcode == ARM_OP(fstr)) {
+    bool load = (ARMOpcode)inst->opcode == ARM_OP(fldr);
+    TargetInstruction* addr = load ? inst->operand[0] : inst->operand[1];
+    TargetInstruction* off_inst = load ? inst->operand[1] : inst->operand[2];
+    if (addr != NULL && off_inst != NULL && TargetIsConst(off_inst)) {
+      int offset = (int)TargetIntValue(off_inst);
+      if ((inst->flags &
+           (kARMFrameStorageOffset | kARMIncomingFrameOffset)) != 0) {
+        offset = AdjustInstructionFrameOffset(emitter, inst, offset);
+      } else if (offset < 0 && IsFramePointerRegister(addr)) {
+        offset = AdjustFrameOffset(emitter, offset);
+      }
+      if (!VfpDispInRange(offset)) {
+        const char* base =
+            GetRegisterName(addr, kSize32Bit, buf2, sizeof(buf2));
+        const char* fpreg =
+            load ? GetRegisterName(inst, reg_size, buf1, sizeof(buf1))
+                 : GetRegisterName(inst->operand[0], reg_size, buf1,
+                                   sizeof(buf1));
+        PrintVfpAddressViaIp(fp, base, offset);
+        fprintf(fp, "\t%s %s, [ip]\n", load ? "vldr" : "vstr", fpreg);
+        return;
+      }
+    }
   }
   if ((ARMOpcode)inst->opcode == ARM_OP(fmov) && reg_size == kSize128Bit) {
     char buf3[8], buf4[8];
