@@ -398,8 +398,8 @@ typedef enum {
 #define AARCH64_TPREL_HI_RELOC (1 << 25)
 #define AARCH64_TPREL_LO_RELOC (1 << 26)
 // Value that must survive outgoing argument-register writes (x0..x7 / d0..d7).
-// Used for the indirect-call hold and that call's staged register arguments.
-// The allocator treats it as call-preserved so it is kept in a callee-saved
+// Used for the indirect-call hold and for staged register arguments.  The
+// allocator treats it as call-preserved so it is kept in a callee-saved
 // register rather than an argument register.
 #define AARCH64_INST_AVOID_ARG_REGS (1 << 27)
 

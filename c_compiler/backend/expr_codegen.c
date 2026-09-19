@@ -4501,8 +4501,12 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
 
   // Class, GNU-vector, and member-pointer results cannot be merged through a
   // scalar temporary.  Prvalue / converting-constructor arms construct into
-  // the merge slot (current_struct_address).  Glvalue arms are copied in.
-  if (TypeIsTernaryMemoryAggregate(node->base.type)) {
+  // the merge slot (current_struct_address).  A glvalue result is one of the
+  // two objects ([expr.cond]): copying them into a temporary and returning
+  // that slot makes `return cond ? typeid(T) : typeid(U)` bind a reference
+  // to the copy, so `any::type()` is not `typeid(void)`.
+  if (TypeIsTernaryMemoryAggregate(node->base.type) &&
+      node->base.value_category == kValueCategoryPrvalue) {
     IRNode* saved_struct_address = gen->current_struct_address;
     IRNode* result_address = saved_struct_address;
     IRNode* result_object = result_address;
@@ -4583,7 +4587,9 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
       gen->current_struct_address != NULL &&
       TypeIsStructOrUnion(node->base.type);
   bool need_address = (node->base.flags & kASTNeedAddress) != 0 ||
-                      direct_struct_destination;
+                      direct_struct_destination ||
+                      (TypeIsTernaryMemoryAggregate(node->base.type) &&
+                       node->base.value_category != kValueCategoryPrvalue);
 
   // Non-constant condition, emit comparison and assignments to tmp.
   IRNode* false_label = NewIR(IR_OP(label));
