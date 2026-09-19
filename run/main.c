@@ -26,6 +26,7 @@ static const RunTarget run_targets[] = {
      false},
     {ELF_MACHINE_TYPE_ARM, "arm", "ARM", "arm", true, false},
     {ELF_MACHINE_TYPE_X86_64, "x86_64", "X86_64", "x86_64", true, false},
+    {ELF_MACHINE_TYPE_X86, "x86", "X86", "x86_64", true, false},
 };
 
 static void Usage(FILE* fp, const char* program) {

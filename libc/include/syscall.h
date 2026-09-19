@@ -145,7 +145,7 @@ extern long syscall(int n, ...);
 #ifdef __cplusplus
 }
 #endif
-#elif defined(__x86_64__)
+#elif defined(__x86_64__) || defined(__i386__)
 #ifdef __cplusplus
 extern "C" long syscall(int n, ...);
 #else

@@ -54,13 +54,17 @@ const X86Profile kX86ProfileI386 = {
 
     .fp_return_value_0 = 0,
     .fp_return_value_1 = 1,
-    .fp_saved_start_1 = 8,
-    .fp_saved_end_1 = 7,
+    // xmm6/xmm7 are emitter scratch and are not allocatable.  The remaining
+    // xmm0-xmm5 are all caller-saved; list them as both temps and saved so a
+    // can_use_temp=false allocation still has somewhere to go.  An empty
+    // saved range (start > end) made FindSpillVictim abort on FP-heavy code.
+    .fp_saved_start_1 = 0,
+    .fp_saved_end_1 = 5,
     .fp_saved_start_2 = 8,
     .fp_saved_end_2 = 7,
     .fp_temp_start_1 = 0,
-    .fp_temp_end_1 = 7,
-    .fp_temp_start_2 = 0,
+    .fp_temp_end_1 = 5,
+    .fp_temp_start_2 = 8,
     .fp_temp_end_2 = 7,
 
     .sp_reg = 4,

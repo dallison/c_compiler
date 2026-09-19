@@ -297,6 +297,7 @@ static const TargetRuntime target_runtimes[] = {
     {"aarch64", kTargetOSNone, "libcaarch64.a", "//:libc_aarch64", NULL, NULL, true, false},
     {"arm", kTargetOSNone, "libcarm.a", "//:libc_arm", NULL, NULL, true, false},
     {"x86_64", kTargetOSNone, "libcx86_64.a", "//:libc_x86_64", NULL, NULL, true, false},
+    {"x86", kTargetOSNone, "libcx86.a", "//:libc_x86", NULL, NULL, true, false},
     {"6502", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL, false, true},
     {"65c02", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL, false, true},
     // A wasm module is linked whole every time, and its startup lives in the
@@ -344,6 +345,11 @@ static bool TargetNameMatches(const char* target, const char* canonical) {
   }
   if (strcmp(canonical, "x86_64") == 0) {
     return strcmp(target, "x86-64") == 0;
+  }
+  if (strcmp(canonical, "x86") == 0) {
+    return strcmp(target, "i386") == 0 || strcmp(target, "i486") == 0 ||
+           strcmp(target, "i586") == 0 || strcmp(target, "i686") == 0 ||
+           strcmp(target, "x86-32") == 0;
   }
   if (strcmp(canonical, "65c02") == 0) {
     return strcmp(target, "65C02") == 0;

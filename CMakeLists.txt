@@ -673,6 +673,16 @@ davecc_guest_libc(libcx86_64.a x86_64
     "x86_64 support/syscall.s"
     "x86_64 support/abs.s"
 )
+davecc_guest_libc(libcx86.a x86
+  CFLAGS -O0
+  EXTRA_C libc/guest_heap.c
+  RUNTIME
+    "x86 support/cxx_guard.s"
+    "x86 support/setjmp.s"
+    "x86 support/longjmp.s"
+    "x86 support/stdio_aliases.s"
+    "x86 support/syscall.s"
+)
 davecc_guest_libc(libcriscv.a riscv
   CFLAGS -O1
   EXTRA_C libc/guest_heap.c
@@ -806,6 +816,7 @@ add_custom_command(
 add_custom_target(davecc_libc
   DEPENDS
     davecc_libc65c02.a
+    davecc_libcx86.a
     davecc_libcx86_64.a
     davecc_libcriscv.a
     davecc_libcaarch64.a
@@ -872,6 +883,7 @@ install(PROGRAMS
   bin/davecc-arm
   bin/davecc-riscv
   bin/davecc-riscv32
+  bin/davecc-x86
   bin/davecc-x86_64
   bin/run-65c02
   bin/run-aarch64
@@ -879,6 +891,7 @@ install(PROGRAMS
   bin/run-riscv
   bin/run-riscv32
   bin/run-esp32
+  bin/run-x86
   bin/run-x86_64
   DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
@@ -897,6 +910,7 @@ foreach(archive
     libcriscv.a
     libcriscv32.a
     libcxtensa.a
+    libcx86.a
     libcx86_64.a)
   install(FILES "${CMAKE_BINARY_DIR}/libc/${archive}"
           DESTINATION "${DAVECC_INSTALL_LIBDIR}"

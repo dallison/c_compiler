@@ -445,7 +445,7 @@ static bool ParseBareSymbolImmediate(X86Assembler* assembler, X86Op* op) {
     op->imm = 3;
   } else if (StringEqual(&suffix, "TPOFF")) {
     op->reloc_type =
-        assembler->profile->is_64bit ? R_X86_64_TPOFF64 : R_386_32;
+        assembler->profile->is_64bit ? R_X86_64_TPOFF64 : R_386_TLS_LE;
   } else if (!assembler->profile->is_64bit &&
              StringEqual(&suffix, "GOTPC")) {
     op->reloc_type = R_386_GOTPC;
@@ -529,7 +529,8 @@ static bool ParseMemory(X86Assembler* assembler, X86Op* op) {
         op->sym->defined && op->sym->section == ASMO.current_section;
     op->sym_value = op->sym->value;
     if (StringEqual(&suffix, "TPOFF")) {
-      op->reloc_type = R_X86_64_TPOFF32;
+      op->reloc_type = assembler->profile->is_64bit ? R_X86_64_TPOFF32
+                                                    : R_386_TLS_LE;
     } else if (!assembler->profile->is_64bit &&
                StringEqual(&suffix, "GOT")) {
       op->reloc_type = R_386_GOT32;
@@ -711,6 +712,7 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
   if (mem->sym != NULL &&
       (mem->reloc_type == R_X86_64_TPOFF64 ||
        mem->reloc_type == R_X86_64_TPOFF32 ||
+       mem->reloc_type == R_386_TLS_LE ||
        mem->reloc_type == R_386_GOT32)) {
     if (base_reg < 0) {
       AssemblerError(&enc->assembler->base,
@@ -740,6 +742,28 @@ static void EncodeMemOperand(X86Encode* enc, int reg_field, const X86Op* mem) {
   }
   if (mem->sym != NULL) {
     if (!mem->sym_known) {
+      if (base_reg >= 0 && !enc->assembler->profile->is_64bit) {
+        bool need_sib = (base_reg & 7) == (X86_REG_RSP & 7) || index >= 0;
+        if (need_sib) {
+          EncodeModRM(enc, 2, reg_field, 4);
+          EncodeSIB(enc, mem->scale, index < 0 ? 4 : index, base_reg);
+        } else {
+          EncodeModRM(enc, 2, reg_field, base_reg);
+        }
+        enc->disp_pos = enc->len;
+        enc->disp_size = 4;
+        EncodeDisp(enc, 4, (int32_t)mem->disp);
+        int64_t next_ip = AssemblerCurrentAddress(base) + enc->num_prefixes +
+                          (enc->rex >= 0 ? 1 : 0) + enc->len + enc->tail_bytes;
+        int32_t disp_offset = (int32_t)(next_ip - 4);
+        int reloc_type =
+            mem->reloc_type != 0 ? mem->reloc_type : R_386_32;
+        AssemblerRelocation* reloc = NewAssemblerRelocation(
+            mem->sym, reloc_type, base->object.current_section, disp_offset,
+            0);
+        AssemblerAddRelocation(base, reloc);
+        return;
+      }
       AssemblerError(&enc->assembler->base,
                      "Undefined symbol in memory operand");
       return;
@@ -850,7 +874,7 @@ static void EmitALURegImm(X86Assembler* assembler, int op_ext, X86Size size,
     EncodeRegOperand(&enc, op_ext, dst);
     EncodeImm(&enc, 1, imm);
   } else if ((size == kX86Size64 || size == kX86Size32) &&
-             imm >= INT32_MIN && imm <= INT32_MAX) {
+             imm >= INT32_MIN && imm <= (int64_t)UINT32_MAX) {
     EncodeByte(&enc, 0x81);
     EncodeRegOperand(&enc, op_ext, dst);
     EncodeImm(&enc, 4, imm);
