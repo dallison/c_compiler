@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Build a DaveCC guest libc archive the same way the Bazel genrules do:
-# assemble the target runtime, compile libc C/C++ sources with davecc, archive
-# with archivist.
+# Build a DaveCC guest libc archive or shared object the same way the Bazel
+# genrules do: assemble the target runtime, compile libc C/C++ sources with
+# davecc, then either archive with archivist or link -shared.
 set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: build_guest_libc.sh --davecc PATH --archivist PATH --output PATH
-                           --target TRIPLE [--cflags FLAG ...]
-                           [--runtime FILE ...] [--source FILE ...]
-                           [--cxx-source FILE ...] [--exclude GLOB ...]
-                           [--no-cxx]
+usage: build_guest_libc.sh --davecc PATH --output PATH
+                           --target TRIPLE [--archivist PATH]
+                           [--cflags FLAG ...] [--runtime FILE ...]
+                           [--source FILE ...] [--cxx-source FILE ...]
+                           [--exclude GLOB ...] [--no-cxx] [--shared]
 EOF
   exit 2
 }
@@ -20,6 +20,7 @@ archivist=
 output=
 target=
 no_cxx=0
+shared=0
 cflags=()
 runtime_srcs=()
 c_srcs=()
@@ -38,12 +39,16 @@ while [ "$#" -gt 0 ]; do
     --cxx-source) cxx_srcs+=("$2"); shift 2 ;;
     --exclude) excludes+=("$2"); shift 2 ;;
     --no-cxx) no_cxx=1; shift ;;
+    --shared) shared=1; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
 done
 
-[ -n "$davecc" ] && [ -n "$archivist" ] && [ -n "$output" ] && [ -n "$target" ] || usage
+[ -n "$davecc" ] && [ -n "$output" ] && [ -n "$target" ] || usage
+if [ "$shared" -eq 0 ]; then
+  [ -n "$archivist" ] || usage
+fi
 
 workspace=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)
 cd "$workspace"
@@ -52,6 +57,9 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/davecc-libc.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 compile_flags=(-target "$target" -c -isystem libc/include -Ilibc "${cflags[@]+"${cflags[@]}"}")
+if [ "$shared" -eq 1 ]; then
+  compile_flags+=(-fPIC)
+fi
 
 excluded() {
   local src=$1
@@ -78,6 +86,10 @@ fi
 
 for src in "${c_srcs[@]}"; do
   excluded "$src" && continue
+  case "$src" in
+    *.c) ;;
+    *) continue ;;
+  esac
   case "$(basename "$src")" in
     libc_test.c) continue ;;
   esac
@@ -97,6 +109,10 @@ if [ "$no_cxx" -eq 0 ]; then
   fi
   for src in "${cxx_srcs[@]+"${cxx_srcs[@]}"}"; do
     excluded "$src" && continue
+    case "$src" in
+      *.cc) ;;
+      *) continue ;;
+    esac
     obj="$work/cxx_$(basename "${src%.cc}").o"
     "$davecc" "${compile_flags[@]}" -std=c++20 "$src" -o "$obj"
   done
@@ -107,7 +123,15 @@ case "$output" in
   /*) out=$output ;;
   *) out=$workspace/$output ;;
 esac
-(
-  cd "$work"
-  "$archivist" r "$out" *.o
-)
+
+if [ "$shared" -eq 1 ]; then
+  (
+    cd "$work"
+    "$davecc" -target "$target" -nostdlib -shared *.o -o "$out"
+  )
+else
+  (
+    cd "$work"
+    "$archivist" r "$out" *.o
+  )
+fi

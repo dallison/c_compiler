@@ -3391,9 +3391,9 @@ static TargetInstruction* LowerLiteralReference(X86Generator* rv, Generator* gen
 
   TargetInstruction* result =
       Emit(rv, NewInstruction1(X86_OP(lea_rip), literal));
-  if (compiler->pic) {
-    result->flags |= X86_GOTPCREL_RELOC;
-  }
+  // Local string literals live in this image's .rodata.  RIP-relative lea is
+  // the PIC address.  GOTPCREL would emit `mov .str.N(%rip)`, which loads the
+  // string bytes instead of materializing their address.
 
   // Route the result into a destination tmp when this literalref is a ?: / && /
   // || branch (the "-> $n" annotation); otherwise the merge tmp is never

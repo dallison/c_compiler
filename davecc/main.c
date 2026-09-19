@@ -284,39 +284,51 @@ typedef struct {
   const char* bazel_target;
   const char* startup_name;
   const char* startup_target;
+  const char* shared_bazel_target;
   bool use_main_entry;
   bool static_only;
 } TargetRuntime;
 
 static const TargetRuntime target_runtimes[] = {
-    {"pcode", kTargetOSNone, "libcpcode.a", "//:libc_pcode", NULL, NULL, true, false},
-    {"riscv", kTargetOSNone, "libcriscv.a", "//:libc_riscv", NULL, NULL, false, false},
-    {"riscv32", kTargetOSNone, "libcriscv32.a", "//:libc_riscv32", NULL, NULL, false, false},
+    {"pcode", kTargetOSNone, "libcpcode.a", "//:libc_pcode", NULL, NULL,
+     "//:libc_pcode_shared", true, false},
+    {"riscv", kTargetOSNone, "libcriscv.a", "//:libc_riscv", NULL, NULL,
+     "//:libc_riscv_shared", false, false},
+    {"riscv32", kTargetOSNone, "libcriscv32.a", "//:libc_riscv32", NULL, NULL,
+     "//:libc_riscv32_shared", false, false},
     {"esp32", kTargetOSNone, "libcxtensa.a", "//:libc_xtensa",
-     "esp32_start.o", "//:esp32_start", false, true},
-    {"aarch64", kTargetOSNone, "libcaarch64.a", "//:libc_aarch64", NULL, NULL, true, false},
-    {"arm", kTargetOSNone, "libcarm.a", "//:libc_arm", NULL, NULL, true, false},
-    {"x86_64", kTargetOSNone, "libcx86_64.a", "//:libc_x86_64", NULL, NULL, true, false},
-    {"x86", kTargetOSNone, "libcx86.a", "//:libc_x86", NULL, NULL, true, false},
-    {"6502", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL, false, true},
-    {"65c02", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL, false, true},
+     "esp32_start.o", "//:esp32_start", NULL, false, true},
+    {"aarch64", kTargetOSNone, "libcaarch64.a", "//:libc_aarch64", NULL, NULL,
+     "//:libc_aarch64_shared", true, false},
+    {"arm", kTargetOSNone, "libcarm.a", "//:libc_arm", NULL, NULL,
+     "//:libc_arm_shared", true, false},
+    {"x86_64", kTargetOSNone, "libcx86_64.a", "//:libc_x86_64", NULL, NULL,
+     "//:libc_x86_64_shared", true, false},
+    {"x86", kTargetOSNone, "libcx86.a", "//:libc_x86", NULL, NULL,
+     "//:libc_x86_shared", true, false},
+    {"6502", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL,
+     NULL, false, true},
+    {"65c02", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL,
+     NULL, false, true},
     // A wasm module is linked whole every time, and its startup lives in the
     // archive rather than in an object of its own, so there is nothing to
     // name here beyond the library itself.
     {"wasm32", kTargetOSNone, "libcwasm32.a", "//:libc_wasm32", NULL, NULL,
-     false, true},
+     NULL, false, true},
     {"aarch64", kTargetOSLinux, "libcaarch64_linux.a",
      "//:libc_aarch64_linux", "aarch64_linux_start.o",
-     "//:aarch64_linux_start", false, true},
+     "//:aarch64_linux_start", NULL, false, true},
     {"x86_64", kTargetOSLinux, "libcx86_64_linux.a",
      "//:libc_x86_64_linux", "x86_64_linux_start.o",
-     "//:x86_64_linux_start", false, true},
+     "//:x86_64_linux_start", "//:x86_64_linux_dynamic_runtime", false, true},
     {"arm", kTargetOSLinux, "libcarm_linux.a", "//:libc_arm_linux",
-     "arm_linux_start.o", "//:arm_linux_start", false, true},
+     "arm_linux_start.o", "//:arm_linux_start",
+     "//:arm_linux_dynamic_runtime", false, true},
     {"riscv", kTargetOSLinux, "libcriscv_linux.a", "//:libc_riscv_linux",
-     "riscv_linux_start.o", "//:riscv_linux_start", false, true},
+     "riscv_linux_start.o", "//:riscv_linux_start",
+     "//:riscv_linux_dynamic_runtime", false, true},
     {"riscv32", kTargetOSLinux, "libcriscv32_linux.a", "//:libc_riscv32_linux",
-     "riscv32_linux_start.o", "//:riscv32_linux_start", false, true},
+     "riscv32_linux_start.o", "//:riscv32_linux_start", NULL, false, true},
 };
 
 static bool TargetNameMatches(const char* target, const char* canonical) {
@@ -478,6 +490,26 @@ static void AddDefaultStandardModulePath(Vector* compiler_args,
   VectorAppend(compiler_args, resources->module_dir.value);
 }
 
+static bool SharedLibraryName(const char* archive, char* out, size_t out_size) {
+  size_t n = strlen(archive);
+  if (n < 2 || strcmp(archive + n - 2, ".a") != 0 || n + 2 > out_size) {
+    return false;
+  }
+  memcpy(out, archive, n - 2);
+  memcpy(out + n - 2, ".so", 4);
+  return true;
+}
+
+static bool SharedCrtName(const char* archive, char* out, size_t out_size) {
+  size_t n = strlen(archive);
+  if (n < 2 || strcmp(archive + n - 2, ".a") != 0 || n + 6 > out_size) {
+    return false;
+  }
+  memcpy(out, archive, n - 2);
+  memcpy(out + n - 2, "_crt.a", 7);
+  return true;
+}
+
 static void AddRuntimeFileFromDirectory(Vector* linker_args,
                                         Vector* owned_paths,
                                         const char* directory,
@@ -518,14 +550,56 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
       fprintf(stderr, "-dynamic and -static cannot be used together\n");
       exit(1);
     }
+    if (runtime->os == kTargetOSNone) {
+      if (runtime->shared_bazel_target == NULL || runtime->static_only) {
+        fprintf(stderr, "-dynamic is not supported on this target\n");
+        exit(1);
+      }
+      if (resources->lib_dir.length == 0) {
+        fprintf(stderr,
+                "unable to find DaveCC shared libc; set DAVECC_LIB_DIR "
+                "or use -nostdlib\n");
+        exit(1);
+      }
+      char shared_name[64];
+      char crt_name[64];
+      if (!SharedLibraryName(runtime->archive_name, shared_name,
+                             sizeof(shared_name)) ||
+          !SharedCrtName(runtime->archive_name, crt_name, sizeof(crt_name))) {
+        fprintf(stderr, "unable to derive shared libc name from '%s'\n",
+                runtime->archive_name);
+        exit(1);
+      }
+      if (runtime->use_main_entry &&
+          !VectorContainsCString(linker_args, "-e")) {
+        VectorAppend(linker_args, "-e");
+        VectorAppend(linker_args, "main");
+      } else if (!VectorContainsCString(linker_args, "-e")) {
+        VectorAppend(linker_args, "-e");
+        VectorAppend(linker_args, "_start");
+      }
+      if (!VectorContainsCString(linker_args, "-rpath")) {
+        VectorAppend(linker_args, "-rpath");
+        VectorAppend(linker_args, "$ORIGIN");
+      }
+      VectorAppend(linker_args, "-whole-archive");
+      AddRuntimeFileFromDirectory(linker_args, owned_paths,
+                                  resources->lib_dir.value, crt_name,
+                                  runtime->shared_bazel_target);
+      VectorAppend(linker_args, "-no-whole-archive");
+      AddRuntimeFileFromDirectory(linker_args, owned_paths,
+                                  resources->lib_dir.value, shared_name,
+                                  runtime->shared_bazel_target);
+      return;
+    }
     bool is_x86_64 = strcmp(runtime->canonical_name, "x86_64") == 0;
     bool is_arm = strcmp(runtime->canonical_name, "arm") == 0;
     bool is_riscv = strcmp(runtime->canonical_name, "riscv") == 0;
     if (runtime->os != kTargetOSLinux ||
         (!is_x86_64 && !is_arm && !is_riscv)) {
       fprintf(stderr,
-              "-dynamic is currently supported only for x86_64, ARM, and "
-              "RISC-V Linux targets\n");
+              "-dynamic is currently supported only for x86_64, ARM, "
+              "and RISC-V Linux targets\n");
       exit(1);
     }
     if (resources->lib_dir.length == 0) {

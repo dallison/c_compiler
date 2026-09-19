@@ -48,20 +48,22 @@ binaries after install.
 
 ### Guest libraries
 
-Each hosted target has a static libc archive compiled **by davecc**, not by the
-host compiler:
+Each hosted target has a libc compiled **by davecc**, not by the host
+compiler. Every target gets a static archive. Targets that support
+`-fPIC` / `-shared` also get a shared object (`davecc -target … -dynamic`
+links against it):
 
-| Archive | Target triple / `-target` |
-| --- | --- |
-| `libc/libcx86_64.a` | `x86_64` |
-| `libc/libcx86.a` | `x86` / `i386` |
-| `libc/libcaarch64.a` | `aarch64` |
-| `libc/libcarm.a` | `arm` |
-| `libc/libcriscv.a` | `riscv` |
-| `libc/libcriscv32.a` | `riscv32` |
-| `libc/libc65c02.a` | `65c02` |
-| `libc/libcpcode.a` | `pcode` |
-| `libc/libcxtensa.a` | `esp32` |
+| Archive | Shared object | CRT (`-dynamic`) | Target |
+| --- | --- | --- | --- |
+| `libc/libcx86_64.a` | `libc/libcx86_64.so` | `libc/libcx86_64_crt.a` | `x86_64` |
+| `libc/libcx86.a` | `libc/libcx86.so` | `libc/libcx86_crt.a` | `x86` / `i386` |
+| `libc/libcaarch64.a` | `libc/libcaarch64.so` | `libc/libcaarch64_crt.a` | `aarch64` |
+| `libc/libcarm.a` | `libc/libcarm.so` | `libc/libcarm_crt.a` | `arm` |
+| `libc/libcriscv.a` | `libc/libcriscv.so` | `libc/libcriscv_crt.a` | `riscv` |
+| `libc/libcriscv32.a` | `libc/libcriscv32.so` | `libc/libcriscv32_crt.a` | `riscv32` |
+| `libc/libcpcode.a` | `libc/libcpcode.so` | `libc/libcpcode_crt.a` | `pcode` |
+| `libc/libc65c02.a` | — | `65c02` |
+| `libc/libcxtensa.a` | — | `esp32` |
 
 Also built with the guest libraries:
 

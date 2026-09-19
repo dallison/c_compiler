@@ -147,8 +147,19 @@ list(REMOVE_ITEM DAVECC_GUEST_LIBC_65C02_C
 
 file(GLOB DAVECC_GUEST_LIBC_CXX CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/libc/*.cc")
 
+set(DAVECC_GUEST_LIBC_DYNAMIC_CRT
+  libc/cxx_tls.c
+  libc/errno.c
+  libc/fenv.c
+  libc/guest_heap.c
+  libc/strerror.c
+  libc/threads.c
+  libc/time.c
+)
+set(DAVECC_GUEST_LIBC_DYNAMIC_CRT_CXX)
+
 function(davecc_guest_libc archive target_triple)
-  cmake_parse_arguments(ARG "NO_CXX" "" "CFLAGS;RUNTIME;SOURCES;EXTRA_C;EXCLUDE" ${ARGN})
+  cmake_parse_arguments(ARG "NO_CXX;SHARED" "" "CFLAGS;RUNTIME;SHARED_RUNTIME;SOURCES;EXTRA_C;EXCLUDE;SHARED_EXCLUDE" ${ARGN})
 
   if(NOT ARG_SOURCES)
     set(ARG_SOURCES ${DAVECC_GUEST_LIBC_COMMON_C})
@@ -197,4 +208,85 @@ function(davecc_guest_libc archive target_triple)
     VERBATIM
   )
   add_custom_target(davecc_${archive} DEPENDS "${output}")
+
+  if(ARG_SHARED)
+    string(REGEX REPLACE "\\.a$" ".so" shared_name "${archive}")
+    set(shared_output "${CMAKE_BINARY_DIR}/libc/${shared_name}")
+    set(shared_cmd
+      "${CMAKE_SOURCE_DIR}/tools/build_guest_libc.sh"
+      --davecc "$<TARGET_FILE:davecc_bin>"
+      --output "${shared_output}"
+      --target "${target_triple}"
+      --shared
+      --cflags "-ftls-model=local-exec"
+    )
+    foreach(flag IN LISTS ARG_CFLAGS)
+      list(APPEND shared_cmd --cflags "${flag}")
+    endforeach()
+    if(ARG_SHARED_RUNTIME)
+      set(_shared_runtime ${ARG_SHARED_RUNTIME})
+    else()
+      set(_shared_runtime ${ARG_RUNTIME})
+    endif()
+    foreach(src IN LISTS _shared_runtime)
+      list(APPEND shared_cmd --runtime "${src}")
+    endforeach()
+    foreach(src IN LISTS ARG_SOURCES)
+      list(APPEND shared_cmd --source "${src}")
+    endforeach()
+    foreach(src IN LISTS ARG_EXCLUDE ARG_SHARED_EXCLUDE)
+      list(APPEND shared_cmd --exclude "${src}")
+    endforeach()
+    # Assembly runtimes supply these; a DSO cannot carry both copies.
+    list(APPEND shared_cmd --exclude "libc/cxx_guard.c")
+    foreach(src IN LISTS DAVECC_GUEST_LIBC_DYNAMIC_CRT DAVECC_GUEST_LIBC_DYNAMIC_CRT_CXX)
+      list(APPEND shared_cmd --exclude "${src}")
+    endforeach()
+    if(ARG_NO_CXX)
+      list(APPEND shared_cmd --no-cxx)
+    endif()
+    add_custom_command(
+      OUTPUT "${shared_output}"
+      COMMAND ${shared_cmd}
+      DEPENDS ${depends}
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      COMMENT "Building guest libc ${shared_name} (${target_triple})"
+      VERBATIM
+    )
+    add_custom_target(davecc_${shared_name} DEPENDS "${shared_output}")
+
+    string(REGEX REPLACE "\\.a$" "_crt.a" crt_name "${archive}")
+    set(crt_output "${CMAKE_BINARY_DIR}/libc/${crt_name}")
+    set(crt_cmd
+      "${CMAKE_SOURCE_DIR}/tools/build_guest_libc.sh"
+      --davecc "$<TARGET_FILE:davecc_bin>"
+      --archivist "$<TARGET_FILE:archivist_bin>"
+      --output "${crt_output}"
+      --target "${target_triple}"
+      --cflags "-fPIC"
+      --cflags "-ftls-model=local-exec"
+    )
+    foreach(flag IN LISTS ARG_CFLAGS)
+      list(APPEND crt_cmd --cflags "${flag}")
+    endforeach()
+    foreach(src IN LISTS DAVECC_GUEST_LIBC_DYNAMIC_CRT)
+      list(APPEND crt_cmd --source "${src}")
+    endforeach()
+    if(DAVECC_GUEST_LIBC_DYNAMIC_CRT_CXX)
+      foreach(src IN LISTS DAVECC_GUEST_LIBC_DYNAMIC_CRT_CXX)
+        list(APPEND crt_cmd --cxx-source "${src}")
+      endforeach()
+    else()
+      list(APPEND crt_cmd --no-cxx)
+    endif()
+    add_custom_command(
+      OUTPUT "${crt_output}"
+      COMMAND ${crt_cmd}
+      DEPENDS ${depends} ${DAVECC_GUEST_LIBC_DYNAMIC_CRT} ${DAVECC_GUEST_LIBC_DYNAMIC_CRT_CXX}
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      COMMENT "Building guest libc CRT ${crt_name} (${target_triple})"
+      VERBATIM
+    )
+    add_custom_target(davecc_${crt_name} DEPENDS "${crt_output}")
+  endif()
 endfunction()

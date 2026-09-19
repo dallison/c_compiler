@@ -4,6 +4,7 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//:davecc/modules.bzl", "davecc_module")
+load("//:tools/guest_libc.bzl", "guest_libc_shared")
 load("//:tools/linux_libc.bzl", "linux_dynamic_runtime", "linux_libc_archive", "linux_start_object")
 
 package(default_visibility = ["//visibility:public"])
@@ -228,6 +229,7 @@ sh_binary(
         ":libc_xtensa",
         ":libc_x86",
         ":libc_x86_64",
+        ":libc_shared",
         ":pcode",
         ":riscv",
         ":run",
@@ -3307,6 +3309,172 @@ done
 """,
 )
 
+INTERPRETER_LIBC_SHARED_EXCLUDE = [
+    "libc/wasi_*.c",
+    "libc/linux_*.c",
+    "libc/dynamic_*.c",
+    # Assembly runtimes supply these; a DSO cannot carry both copies.
+    "libc/cxx_guard.c",
+    "libc/eh_arm.c",
+    "libc/eh_frame_pointer.c",
+]
+
+# __thread objects cannot live in the DSO: the interpreter loader does not
+# apply DTPMOD64/DTPOFF64.  They go in a PIC local-exec CRT archive instead.
+INTERPRETER_DYNAMIC_CRT_SRCS = [
+    "libc/cxx_tls.c",
+    "libc/errno.c",
+    "libc/fenv.c",
+    "libc/guest_heap.c",
+    "libc/strerror.c",
+    "libc/threads.c",
+    "libc/time.c",
+]
+
+guest_libc_shared(
+    name = "libc_x86_64_shared",
+    target = "x86_64",
+    output = "libc/libcx86_64.so",
+    cflags = ["-O1"],
+    runtime_srcs = [
+        "x86_64 support/cxx_guard.s",
+        "x86_64 support/setjmp.s",
+        "x86_64 support/longjmp.s",
+        "x86_64 support/eh_transfer.s",
+        "x86_64 support/syscall.s",
+        "x86_64 support/abs.s",
+    ],
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE + ["libc/abs.c"],
+    crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
+)
+
+guest_libc_shared(
+    name = "libc_x86_shared",
+    target = "x86",
+    output = "libc/libcx86.so",
+    cflags = ["-O0"],
+    runtime_srcs = [
+        "x86 support/cxx_guard.s",
+        "x86 support/setjmp.s",
+        "x86 support/longjmp.s",
+        "x86 support/syscall.s",
+    ],
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE,
+    crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
+)
+
+guest_libc_shared(
+    name = "libc_aarch64_shared",
+    target = "aarch64",
+    output = "libc/libcaarch64.so",
+    cflags = ["-O0"],
+    runtime_srcs = [
+        "aarch64 support/cxx_guard.s",
+        "aarch64 support/eh_transfer.s",
+        "aarch64 support/longjmp.s",
+        "aarch64 support/setjmp.s",
+        "aarch64 support/syscall.s",
+    ],
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE,
+    crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
+)
+
+guest_libc_shared(
+    name = "libc_arm_shared",
+    target = "arm",
+    output = "libc/libcarm.so",
+    cflags = ["-O0"],
+    runtime_srcs = [
+        "arm support/cxx_guard.s",
+        "arm support/cxx_rtti_vtables.s",
+        "arm support/eh_personality.s",
+        "arm support/eh_unwind.s",
+        "arm support/eh_transfer.s",
+        "arm support/longjmp.s",
+        "arm support/setjmp.s",
+        "arm support/syscall.s",
+    ],
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE,
+    crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
+)
+
+guest_libc_shared(
+    name = "libc_riscv_shared",
+    target = "riscv",
+    output = "libc/libcriscv.so",
+    cflags = ["-O1"],
+    runtime_srcs = [
+        "RISCV_support/cxx_guard.s",
+        "RISCV_support/eh_transfer.s",
+        "RISCV_support/longjmp.s",
+        "RISCV_support/setjmp.s",
+    ],
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE,
+    crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
+    crt_runtime_srcs = ["RISCV_support/start.s"],
+)
+
+guest_libc_shared(
+    name = "libc_riscv32_shared",
+    target = "riscv32",
+    output = "libc/libcriscv32.so",
+    cflags = ["-O1"],
+    runtime_srcs = [
+        "RISCV32_support/cxx_guard.s",
+        "RISCV32_support/cxx_rtti_vtables.s",
+        "RISCV32_support/eh_transfer.s",
+        "RISCV32_support/longjmp.s",
+        "RISCV32_support/setjmp.s",
+    ],
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE,
+    crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
+    crt_runtime_srcs = ["RISCV32_support/start.s"],
+)
+
+guest_libc_shared(
+    name = "libc_pcode_shared",
+    target = "pcode",
+    output = "libc/libcpcode.so",
+    cflags = ["-O1"],
+    runtime_srcs = glob(["pcode support/*.s"]),
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE + ["libc/eh_frame.c"],
+    crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
+)
+
+filegroup(
+    name = "libc_shared",
+    srcs = [
+        ":libc_aarch64_shared",
+        ":libc_aarch64_shared_crt",
+        ":libc_arm_shared",
+        ":libc_arm_shared_crt",
+        ":libc_pcode_shared",
+        ":libc_pcode_shared_crt",
+        ":libc_riscv_shared",
+        ":libc_riscv_shared_crt",
+        ":libc_riscv32_shared",
+        ":libc_riscv32_shared_crt",
+        ":libc_x86_shared",
+        ":libc_x86_shared_crt",
+        ":libc_x86_64_shared",
+        ":libc_x86_64_shared_crt",
+    ],
+)
+
 genrule(
     name = "libc_wasm32",
     srcs = LIBC_SRCS + [
@@ -5331,6 +5499,31 @@ sh_test(
         ":x86_64",
         "hello_aarch64/libfunc.c",
         "hello_aarch64/main_dynamic.c",
+    ],
+)
+
+sh_test(
+    name = "interpreter_shared_libc_test",
+    srcs = ["tests/interpreter_shared_libc_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :aarch64)",
+        "$(rootpath :arm)",
+        "$(rootpath :riscv)",
+        "$(rootpath :x86_64)",
+        "$(rootpath :pcode)",
+        "$(rootpath :libc_x86_64_shared)",
+    ],
+    data = [
+        ":aarch64",
+        ":arm",
+        ":davecc",
+        ":libc_headers",
+        ":libc_shared",
+        ":libc_x86_64_shared",
+        ":pcode",
+        ":riscv",
+        ":x86_64",
     ],
 )
 

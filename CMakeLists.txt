@@ -663,8 +663,10 @@ davecc_guest_libc(libc65c02.a 65c02
     "6502 support/stacktrace.s"
 )
 davecc_guest_libc(libcx86_64.a x86_64
+  SHARED
   CFLAGS -O1
   EXTRA_C libc/guest_heap.c
+  SHARED_EXCLUDE libc/abs.c
   RUNTIME
     "x86_64 support/cxx_guard.s"
     "x86_64 support/setjmp.s"
@@ -674,6 +676,7 @@ davecc_guest_libc(libcx86_64.a x86_64
     "x86_64 support/abs.s"
 )
 davecc_guest_libc(libcx86.a x86
+  SHARED
   CFLAGS -O0
   EXTRA_C libc/guest_heap.c
   RUNTIME
@@ -682,8 +685,14 @@ davecc_guest_libc(libcx86.a x86
     "x86 support/longjmp.s"
     "x86 support/stdio_aliases.s"
     "x86 support/syscall.s"
+  SHARED_RUNTIME
+    "x86 support/cxx_guard.s"
+    "x86 support/setjmp.s"
+    "x86 support/longjmp.s"
+    "x86 support/syscall.s"
 )
 davecc_guest_libc(libcriscv.a riscv
+  SHARED
   CFLAGS -O1
   EXTRA_C libc/guest_heap.c
   RUNTIME
@@ -694,6 +703,7 @@ davecc_guest_libc(libcriscv.a riscv
     "RISCV_support/setjmp.s"
 )
 davecc_guest_libc(libcaarch64.a aarch64
+  SHARED
   CFLAGS -O0
   EXTRA_C libc/guest_heap.c
   RUNTIME
@@ -704,6 +714,7 @@ davecc_guest_libc(libcaarch64.a aarch64
     "aarch64 support/syscall.s"
 )
 davecc_guest_libc(libcriscv32.a riscv32
+  SHARED
   CFLAGS -O1
   EXTRA_C libc/guest_heap.c
   RUNTIME
@@ -715,6 +726,7 @@ davecc_guest_libc(libcriscv32.a riscv32
     "RISCV32_support/setjmp.s"
 )
 davecc_guest_libc(libcarm.a arm
+  SHARED
   CFLAGS -O0
   EXTRA_C libc/guest_heap.c
   RUNTIME
@@ -728,6 +740,7 @@ davecc_guest_libc(libcarm.a arm
     "arm support/syscall.s"
 )
 davecc_guest_libc(libcpcode.a pcode
+  SHARED
   CFLAGS -O1
   RUNTIME ${DAVECC_PCODE_RUNTIME}
   EXCLUDE libc/eh_frame.c
@@ -817,12 +830,26 @@ add_custom_target(davecc_libc
   DEPENDS
     davecc_libc65c02.a
     davecc_libcx86.a
+    davecc_libcx86.so
+    davecc_libcx86_crt.a
     davecc_libcx86_64.a
+    davecc_libcx86_64.so
+    davecc_libcx86_64_crt.a
     davecc_libcriscv.a
+    davecc_libcriscv.so
+    davecc_libcriscv_crt.a
     davecc_libcaarch64.a
+    davecc_libcaarch64.so
+    davecc_libcaarch64_crt.a
     davecc_libcriscv32.a
+    davecc_libcriscv32.so
+    davecc_libcriscv32_crt.a
     davecc_libcarm.a
+    davecc_libcarm.so
+    davecc_libcarm_crt.a
     davecc_libcpcode.a
+    davecc_libcpcode.so
+    davecc_libcpcode_crt.a
     davecc_libcxtensa.a
     "${CMAKE_BINARY_DIR}/libc/esp32_start.o"
     "${CMAKE_BINARY_DIR}/6502_support/6502rom.exe"
@@ -905,13 +932,27 @@ install(CODE "
 foreach(archive
     libc65c02.a
     libcaarch64.a
+    libcaarch64.so
+    libcaarch64_crt.a
     libcarm.a
+    libcarm.so
+    libcarm_crt.a
     libcpcode.a
+    libcpcode.so
+    libcpcode_crt.a
     libcriscv.a
+    libcriscv.so
+    libcriscv_crt.a
     libcriscv32.a
+    libcriscv32.so
+    libcriscv32_crt.a
     libcxtensa.a
     libcx86.a
-    libcx86_64.a)
+    libcx86.so
+    libcx86_crt.a
+    libcx86_64.a
+    libcx86_64.so
+    libcx86_64_crt.a)
   install(FILES "${CMAKE_BINARY_DIR}/libc/${archive}"
           DESTINATION "${DAVECC_INSTALL_LIBDIR}"
           OPTIONAL)

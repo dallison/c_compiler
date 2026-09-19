@@ -433,7 +433,16 @@ DAVECC_LIB_DIR="$PWD/bazel-bin/libc/riscv" \
 cp bazel-bin/libc/riscv/libdavecc.so.1 .
 ```
 
-`-dynamic` is rejected for AArch64 Linux and for every non-Linux target.
+Interpreter-profile targets that support DSOs (`x86_64`, `x86`, `aarch64`,
+`arm`, `riscv`, `riscv32`, `pcode`) also have a shared guest libc
+(`libcx86_64.so`, …). `davecc -target x86_64 -dynamic program.c` links
+against that `.so` plus a small TLS CRT archive and records `$ORIGIN` in
+the rpath; copy the library next to the executable (or point the loader
+at `DAVECC_LIB_DIR`).
+
+`-dynamic` is rejected for AArch64 Linux (the backend only implements
+local-exec TLS for static executables), RISC-V 32-bit Linux, and
+static-only targets (6502, 65C02, wasm32, ESP32, eBPF).
 
 #### Cross-testing Linux binaries with Colima
 

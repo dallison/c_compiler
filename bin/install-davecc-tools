@@ -173,8 +173,15 @@ for tool in \
   install_required_executable "$tool" "$actual_bindir/$tool"
 done
 
-for archive in libc65c02.a libcaarch64.a libcarm.a libcpcode.a libcriscv.a \
-               libcriscv32.a libcxtensa.a libcx86.a libcx86_64.a; do
+for archive in libc65c02.a \
+               libcaarch64.a libcaarch64.so libcaarch64_crt.a \
+               libcarm.a libcarm.so libcarm_crt.a \
+               libcpcode.a libcpcode.so libcpcode_crt.a \
+               libcriscv.a libcriscv.so libcriscv_crt.a \
+               libcriscv32.a libcriscv32.so libcriscv32_crt.a \
+               libcxtensa.a \
+               libcx86.a libcx86.so libcx86_crt.a \
+               libcx86_64.a libcx86_64.so libcx86_64_crt.a; do
   install_required_file 0644 "libc/$archive" "$actual_libdir/$archive"
 done
 install_required_file 0644 "6502_support/6502rom.exe" "$actual_libdir/6502rom.exe"

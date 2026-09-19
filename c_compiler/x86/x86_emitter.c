@@ -2880,7 +2880,8 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
           inst->operand[1] == NULL) {
         break;
       }
-      fprintf(fp, (inst->flags & X86_GOTPCREL_RELOC) != 0
+      fprintf(fp, ((inst->flags & X86_GOTPCREL_RELOC) != 0 &&
+                   (int)inst->operand[0]->opcode != (int)X86_OP(literal))
                       ? "\tmov "
                       : "\tlea ");
       if (((int)inst->operand[0]->opcode == (int)X86_OP(symbol))) {
