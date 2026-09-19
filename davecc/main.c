@@ -533,7 +533,9 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
                               Vector* compiler_options,
                               DriverResources* resources) {
   if (OptionBoolValue(kOptionNoStandardLibraries, compiler_options, false) ||
-      VectorContainsCString(linker_args, "-shared")) {
+      VectorContainsCString(linker_args, "-shared") ||
+      VectorContainsCString(linker_args, "-r") ||
+      VectorContainsCString(linker_args, "--relocatable")) {
     return;
   }
 
@@ -741,6 +743,9 @@ static CompilerOptionDefinition driver_options[] = {
      kOptionGroupLinking},
     {"-shared", kCompilerOptionBool, kOptionDriver, false,
      "Create a shared library; implies -fPIC", kOptionGroupLinking},
+    {"-r", kCompilerOptionBool, kOptionDriver, false,
+     "Link a relocatable object (daveld -r); do not add CRT or libc",
+     kOptionGroupLinking},
     {"-rpath", kCompilerOptionString, kOptionDriver, false,
      "Add <dir> to the runtime library search path", kOptionGroupLinking, "dir"},
     {"-e", kCompilerOptionString, kOptionDriver, false,
@@ -764,8 +769,8 @@ static void PrintDriverHelp(void) {
   PrintHelpParagraph(
       "Inputs are handled by suffix: .c, .cc, .cpp, .cxx, .cppm, .ixx, .h, "
       ".hpp and .hxx are compiled, .s is assembled, and .o and everything "
-      "else is given to the linker.  Without -c, -S or -fsyntax-only the "
-      "result is linked into an executable.",
+      "else is given to the linker.  Without -c, -S, -fsyntax-only or -r the "
+      "result is linked into an executable.  -r writes a relocatable object.",
       0);
   PrintCompilerHelp(driver_options);
   printf("\n");
@@ -950,6 +955,9 @@ static int ParseArg(int i, int argc, char** argv,
     } else if (StringEqual(option, "-shared")) {
       VectorAppend(linker_args, argv[i]);
       VectorAppend(compiler_args, "-fPIC");
+    } else if (StringEqual(option, "-r") ||
+               StringEqual(option, "--relocatable")) {
+      VectorAppend(linker_args, argv[i]);
     } else if (StringStartsWith(option, "-l")) {
       VectorAppend(linker_args, argv[i]);
     } else if (StringStartsWith(option, "-L")) {

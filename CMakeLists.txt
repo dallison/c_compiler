@@ -513,6 +513,9 @@ target_link_libraries(archivist_bin PRIVATE
 davecc_executable(elfdump_bin elfdump elfdump/main.c)
 target_link_libraries(elfdump_bin PRIVATE davecc_disassembler davecc_elf davecc_linker davecc_loader davecc_utils)
 
+davecc_executable(daveld_bin daveld daveld/main.c)
+target_link_libraries(daveld_bin PRIVATE davecc_linker davecc_utils)
+
 davecc_executable(davecc_6502_bin 6502 6502_interpreter/main.c)
 target_link_libraries(davecc_6502_bin PRIVATE davecc_6502_lib davecc_elf davecc_linker davecc_loader davecc_utils)
 
@@ -594,6 +597,7 @@ add_custom_target(davecc_tools
   DEPENDS
     davecc_bin
     archivist_bin
+    daveld_bin
     elfdump_bin
     davecc_6502_bin
     davecc_6502asm_bin
@@ -871,6 +875,7 @@ install(TARGETS
 
 install(TARGETS
   elfdump_bin
+  daveld_bin
   davecc_6502asm_bin
   davecc_6502dasm_bin
   davecc_riscvdasm_bin
@@ -887,6 +892,7 @@ install(TARGETS
 
 install(TARGETS
   elfdump_bin
+  daveld_bin
   davecc_6502asm_bin
   davecc_6502dasm_bin
   davecc_riscvdasm_bin

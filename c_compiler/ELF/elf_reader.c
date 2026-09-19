@@ -21,6 +21,7 @@ ELFReaderSection* NewELFReaderSection() {
   section->address = 0;
   section->offset = 0;
   section->output_section_index = 0;
+  section->section_symbol_index = -1;
   section->discarded = false;
   VectorInit(&section->gc_refs);
   return section;

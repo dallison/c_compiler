@@ -42,6 +42,11 @@ String* Link(int argc, char** argv) {
       if (strcmp(argv[i], "-shared") == 0) {
         linker.building_dso = true;
         option_ok = true;
+      } else if (strcmp(argv[i], "-r") == 0 ||
+                 strcmp(argv[i], "--relocatable") == 0) {
+        linker.relocatable = true;
+        linker.fully_static = true;
+        option_ok = true;
       } else if (strcmp(argv[i], "-bind-now") == 0) {
         linker.bind_now = true;
         option_ok = true;
@@ -199,7 +204,9 @@ String* Link(int argc, char** argv) {
   }
   
   if (!output_set) {
-    if (linker.building_dso) {
+    if (linker.relocatable) {
+      StringSet(&linker.output_filename, "a.o");
+    } else if (linker.building_dso) {
       // If we are building a shared object find the
       // first .o file and set the output to the same
       // name with the extension .so
@@ -296,7 +303,7 @@ String* Link(int argc, char** argv) {
   }
   int ok = LinkerWriteOutput(&linker, fp);
   fclose(fp);
-  if (ok && !linker.building_dso &&
+  if (ok && !linker.building_dso && !linker.relocatable &&
       chmod(linker.output_filename.value, 0755) != 0) {
     fprintf(stderr, "Can't make output file executable %s: %s\n",
             linker.output_filename.value, strerror(errno));
