@@ -327,15 +327,32 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
       return InterpreterTerminate(interpreter, a0);
     case X86_64_SYSCALL_EXIT_CLEAN:
       return InterpreterRequestNormalExit(interpreter, a0);
-    case X86_64_SYSCALL_OPEN:
-      return open((const char*)(uintptr_t)a0,
-                  TranslateGuestOpenFlags((int)a1), (mode_t)a2);
+    case X86_64_SYSCALL_OPEN: {
+      const char* path = (const char*)X86_64InterpreterGuestPtr(
+          interpreter, (uint64_t)(uint32_t)a0, 1);
+      if (path == NULL) {
+        path = (const char*)(uintptr_t)a0;
+      }
+      return open(path, TranslateGuestOpenFlags((int)a1), (mode_t)a2);
+    }
     case X86_64_SYSCALL_CLOSE:
       return close((int)a0);
-    case X86_64_SYSCALL_READ:
-      return read((int)a0, (void*)(uintptr_t)a1, (size_t)a2);
-    case X86_64_SYSCALL_WRITE:
-      return write((int)a0, (const void*)(uintptr_t)a1, (size_t)a2);
+    case X86_64_SYSCALL_READ: {
+      void* buf = X86_64InterpreterGuestPtr(interpreter, (uint64_t)a1,
+                                            (size_t)a2);
+      if (buf == NULL) {
+        buf = (void*)(uintptr_t)a1;
+      }
+      return read((int)a0, buf, (size_t)a2);
+    }
+    case X86_64_SYSCALL_WRITE: {
+      const void* buf = X86_64InterpreterGuestPtr(interpreter, (uint64_t)a1,
+                                                  (size_t)a2);
+      if (buf == NULL) {
+        buf = (const void*)(uintptr_t)a1;
+      }
+      return write((int)a0, buf, (size_t)a2);
+    }
     case X86_64_SYSCALL_LSEEK:
       return lseek((int)a0, (off_t)a1, (int)a2);
     case X86_64_SYSCALL_MALLOC:
@@ -373,6 +390,9 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
     case X86_64_SYSCALL_THREAD_SELF:
       return X86_64SyscallThreadSelf(interpreter->guest_thread);
     case X86_64_SYSCALL_GET_TP:
+      if (interpreter->ia32 && interpreter->tls_guest_base != 0) {
+        return (int64_t)interpreter->tls_guest_base;
+      }
       return X86_64SyscallGetTp(interpreter->guest_thread);
     case X86_64_SYSCALL_THREAD_EXIT:
       InterpreterTerminate(interpreter, a0);

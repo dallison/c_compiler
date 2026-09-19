@@ -94,6 +94,8 @@ long syscall(int n, ...) {
 }
 #elif defined(__x86_64__)
 // Implemented in x86_64 support/syscall.s
+#elif defined(__i386__)
+// Implemented in x86 support/syscall.s
 #elif defined(__aarch64__)
 // Implemented in aarch64 support/syscall.s
 #elif defined(__arm__)

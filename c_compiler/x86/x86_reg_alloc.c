@@ -810,10 +810,16 @@ static X86Register* AllocateRegisterWithType(X86RegisterAllocator* allocator,
   if (reg == NULL) {
     X86Register* scratch = ScratchRegister(allocator, type);
     TargetInstruction* unsafe = NULL;
+    // i386 has only five allocatable GPRs.  When every one holds a fixed or
+    // already-emitted value, still compute into the spill-address scratch
+    // rather than aborting.
+    bool allow_scratch =
+        scratch != NULL &&
+        (CanSpillAfterDefinition(inst) || !X86_IS_64BIT(allocator->rv));
     TargetInstruction* victim = FindSpillVictim(
         allocator, type, can_use_temp, block,
-        scratch != NULL && CanSpillAfterDefinition(inst) ? &unsafe : NULL);
-    if (victim == NULL && scratch != NULL && CanSpillAfterDefinition(inst)) {
+        allow_scratch ? &unsafe : NULL);
+    if (victim == NULL && allow_scratch) {
       allocator->spill_after_definition = true;
       return scratch;
     }
@@ -1544,6 +1550,13 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
       return;
       
     case X86_OP(x0):
+      // i386 has no spare logical slot for a zero register: slot 0 is EAX.
+      // The emitter already prints x0 as `$0`, so do not occupy EAX.
+      if (!X86_P(allocator->rv)->is_64bit) {
+        inst->flags |= TARGET_INST_PROCESSED;
+        UnpinTwoAddressSource(allocator, inst, pinned_src);
+        return;
+      }
       reg = &allocator->int_regs[(X86_P(allocator->rv)->int_zero_reg)];
       break;
 

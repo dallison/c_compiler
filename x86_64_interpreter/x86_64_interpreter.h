@@ -17,6 +17,8 @@ struct X86_64ProcessRuntime;
 struct X86_64GuestThread;
 
 #define X86_64_STACK_SIZE (8 * 1024 * 1024)
+#define X86_IA32_STACK_BASE 0x70000000u
+#define X86_IA32_TLS_BASE 0x6F000000u
 
 typedef struct X86_64Interpreter {
   Loader* loader;
@@ -32,6 +34,9 @@ typedef struct X86_64Interpreter {
   uint64_t rip;
   char* stack;
   bool owns_stack;
+  // ELF32 i386: 32-bit addressing, cdecl, int $0x80, linked VAs in rip/rsp.
+  bool ia32;
+  uint32_t stack_guest_base;
   bool trace_instructions;
   bool trace_registers;
   uint64_t old_iregs[X86_NUM_INT_REGS];
@@ -47,6 +52,7 @@ typedef struct X86_64Interpreter {
   bool rip_updated;
   int exit_code;
   uint64_t fs_base;
+  uint32_t tls_guest_base;
   size_t tls_block_size;
   uint8_t current_seg_prefix;
   SymbolScope symbol_cache;
@@ -86,5 +92,10 @@ SymbolScope* X86_64InterpreterFindSymbol(X86_64Interpreter* interpreter,
                                          uint64_t address);
 
 void X86_64InterpreterFail(X86_64Interpreter* interpreter, int status);
+
+// Translate a guest address to a host pointer.  On ELF32 i386 this maps
+// linked VAs, the guest stack window, and the guest TLS window.
+void* X86_64InterpreterGuestPtr(X86_64Interpreter* interpreter, uint64_t addr,
+                                size_t size);
 
 #endif /* x86_64_interpreter_h */

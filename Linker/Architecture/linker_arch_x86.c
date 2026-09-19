@@ -164,6 +164,14 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_386_COPY:
       return;
 
+    case R_386_TLS_LE:
+      *((int32_t*)target_address) =
+          (int32_t)(S + A + I386_TLS_TP_SLOT_SIZE +
+                    (reloc->addend_in_place
+                         ? *(const int32_t*)target_address
+                         : 0));
+      return;
+
     default:
       LinkerError(file, "unsupported i386 relocation type %d", reloc->type);
       return;

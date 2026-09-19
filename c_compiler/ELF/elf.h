@@ -469,7 +469,9 @@ typedef struct  {
 #define R_386_GOTOFF 9
 #define R_386_GOTPC 10
 #define R_386_32PLT 11
+#define R_386_TLS_LE 17
 #define R_386_GOT32X 43
+#define I386_TLS_TP_SLOT_SIZE 8
 
 // x86-64 relocation types.
 #define R_X86_64_NONE 0

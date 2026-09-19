@@ -8,7 +8,9 @@
 #include "x86_64_native.h"
 #include "x86_64_process.h"
 #include "x86_64_syscalls.h"
+#include "elf.h"
 #include "loader_arch_x86_64.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -53,6 +55,26 @@ bool X86_64RuntimeInit(X86_64Runtime* runtime, const char* filename,
 
   LoaderArchitecture* arch = &runtime->arch;
   X86_64LoaderArchitectureInit(arch);
+  FILE* peek = fopen(filename, "rb");
+  if (peek != NULL) {
+    unsigned char ident[16];
+    uint16_t machine = 0;
+    if (fread(ident, 1, 16, peek) == 16 && ident[0] == 0x7f &&
+        ident[1] == 'E' && ident[2] == 'L' && ident[3] == 'F' &&
+        ident[EI_CLASS] == ELFCLASS32 && fseek(peek, 18, SEEK_SET) == 0 &&
+        fread(&machine, 1, 2, peek) == 2 &&
+        machine == ELF_MACHINE_TYPE_X86) {
+      arch->machine_type = ELF_MACHINE_TYPE_X86;
+      arch->platform = "x86";
+      // ELF32 i386 linked addresses sit below 4 GiB. MAP_FIXED there fails
+      // on macOS, so translate linked VAs the same way ARM ELF32 does.
+      arch->ignore_vaddr = true;
+      if (mode == kX86_64ModeNative) {
+        runtime->mode = kX86_64ModeInterpret;
+      }
+    }
+    fclose(peek);
+  }
   InitSymbolResolverCode(runtime->symbol_resolver_code);
   if (!LoaderInitFromFile(&runtime->loader, &path, loader_flags, arch,
                           runtime->symbol_resolver_code, ".")) {

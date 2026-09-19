@@ -5,6 +5,7 @@
 
 #include "x86_64_native.h"
 #include "x86_64_process.h"
+#include "elf.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -96,6 +97,11 @@ static int CallGuestEntry(Loader* loader, uint64_t entry, int argc,
 #endif
 
 bool X86_64NativeNeedsInterpreter(const Loader* loader) {
+  if (loader != NULL && loader->elf_file != NULL &&
+      loader->elf_file->header != NULL &&
+      loader->elf_file->header->machine == ELF_MACHINE_TYPE_X86) {
+    return true;
+  }
   if (loader != NULL && loader->tls.present) {
     return true;
   }

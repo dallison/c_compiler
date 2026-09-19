@@ -226,6 +226,7 @@ sh_binary(
         ":libc_riscv",
         ":libc_riscv32",
         ":libc_xtensa",
+        ":libc_x86",
         ":libc_x86_64",
         ":pcode",
         ":riscv",
@@ -1854,6 +1855,200 @@ runtime_srcs=(
   "x86_64 support/eh_transfer.s"
   "x86_64 support/syscall.s"
   "x86_64 support/abs.s"
+)
+
+runtime_objs=()
+for src in "$${runtime_srcs[@]}"; do
+  # Prefix the object name so it can't collide with a same-named libc object
+  # (e.g. syscall.s vs the empty syscall.c).
+  obj="$$work/rt_$$(basename "$${src%.s}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  runtime_objs+=("$$obj")
+done
+
+libc_srcs=(
+  "libc/assert_fail.c"
+  "libc/atoi.c"
+  "libc/atol.c"
+  "libc/bsearch.c"
+  "libc/calloc.c"
+  "libc/cdiv.c"
+  "libc/ckdint.c"
+  "libc/complex_core.c"
+  "libc/complex_exp.c"
+  "libc/complex_hyperbolic.c"
+  "libc/complex_inverse.c"
+  "libc/complex_sqrt.c"
+  "libc/complex_trig.c"
+  "libc/ctype.c"
+  "libc/cxx_guard.c"
+  "libc/cxx_new.c"
+  "libc/cxx_rtti.c"
+  "libc/cxx_tls.c"
+  "libc/cxx_tls_stubs.c"
+  "libc/davecc_lifecycle.c"
+  "libc/eh_frame.c"
+  "libc/eh_cxa.c"
+  "libc/eh_terminate.c"
+  "libc/eh_personality.c"
+  "libc/eh_throw.c"
+  "libc/gxx_personality.c"
+  "libc/lsda.c"
+  "libc/unwind_api.c"
+  "libc/exit.c"
+  "libc/fclose.c"
+  "libc/fflush.c"
+  "libc/fgetc.c"
+  "libc/fgets.c"
+  "libc/fopen.c"
+  "libc/fpfuncs.c"
+  "libc/fputc.c"
+  "libc/fputs.c"
+  "libc/fread.c"
+  "libc/free.c"
+  "libc/free_sized.c"
+  "libc/fseek.c"
+  "libc/ftoa.c"
+  "libc/fwrite.c"
+  "libc/getenv.c"
+  "libc/itoa_int.c"
+  "libc/itoa_long.c"
+  "libc/itoa_longlong.c"
+  "libc/itoa_ptr.c"
+  "libc/gets.c"
+  "libc/ldexp.c"
+  "libc/malloc.c"
+  "libc/memccpy.c"
+  "libc/memchr.c"
+  "libc/memcmp.c"
+  "libc/memcpy.c"
+  "libc/memmove.c"
+  "libc/memset.c"
+  "libc/memset_explicit.c"
+  "libc/modf.c"
+  "libc/perror.c"
+  "libc/errno.c"
+  "libc/posix.c"
+  "libc/posix_close.c"
+  "libc/posix_fs.c"
+  "libc/posix_linux.c"
+  "libc/posix_lseek.c"
+  "libc/posix_open.c"
+  "libc/posix_read.c"
+  "libc/printf.c"
+  "libc/printf_common.c"
+  "libc/printf_literal.c"
+  "libc/printf_long.c"
+  "libc/qsort.c"
+  "libc/rand.c"
+  "libc/realloc.c"
+  "libc/scanf.c"
+  "libc/signal.c"
+  "libc/sincos.c"
+  "libc/stdio.c"
+  "libc/stdio_flags.c"
+  "libc/stdio_setvbuf.c"
+  "libc/strcat.c"
+  "libc/strchr.c"
+  "libc/strcmp.c"
+  "libc/strcpy.c"
+  "libc/strcspn.c"
+  "libc/strerror.c"
+  "libc/strings.c"
+  "libc/strlen.c"
+  "libc/strdup.c"
+  "libc/strncat.c"
+  "libc/strncmp.c"
+  "libc/strncpy.c"
+  "libc/strpbrk.c"
+  "libc/strrchr.c"
+  "libc/strspn.c"
+  "libc/strstr.c"
+  "libc/strtod.c"
+  "libc/strtok.c"
+  "libc/strtol.c"
+  "libc/strtoll.c"
+  "libc/strtoul.c"
+  "libc/strtoull.c"
+  "libc/stdlib_extra.c"
+  "libc/stacktrace.c"
+  "libc/syscall.c"
+  "libc/tmpfile.c"
+  "libc/time.c"
+  "libc/threads.c"
+  "libc/ungetc.c"
+  "libc/guest_heap.c"
+  "libc/acos.c"
+  "libc/asin.c"
+  "libc/atan.c"
+  "libc/atan2.c"
+  "libc/ceil.c"
+  "libc/exp.c"
+  "libc/fabs.c"
+  "libc/fenv.c"
+  "libc/floor.c"
+  "libc/frexp.c"
+  "libc/log.c"
+  "libc/math_extra.c"
+  "libc/locale_c.c"
+  "libc/inttypes.c"
+  "libc/uchar.c"
+  "libc/wchar.c"
+  "libc/wctype.c"
+  "libc/pow.c"
+  "libc/sqrt.c"
+  "libc/tan.c"
+)
+
+libc_objs=()
+for src in "$${libc_srcs[@]}"; do
+  obj="$$work/$$(basename "$${src%.c}").o"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
+  libc_objs+=("$$obj")
+done
+cxx_objs=()
+for src in libc/*.cc; do
+  obj="$$work/cxx_$$(basename "$${src%.cc}").o"
+  "$$davecc" "$${cflags[@]}" -std=c++20 "$$src" -o "$$obj"
+  cxx_objs+=("$$obj")
+done
+
+"$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}" "$${cxx_objs[@]}"
+""",
+    tools = [
+        ":archivist",
+        ":davecc",
+    ],
+)
+
+genrule(
+    name = "libc_x86",
+    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [
+        ":libc_headers",
+        "libc/guest_heap.c",
+    ] + glob([
+        "libc/include/**/*.h",
+        "x86 support/*.s",
+    ]),
+    outs = ["libc/libcx86.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libcx86.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$(location :davecc)"
+archivist="$(location :archivist)"
+cflags=(-target x86 -O0 -c -isystem libc/include -Ilibc)
+
+runtime_srcs=(
+  "x86 support/cxx_guard.s"
+  "x86 support/setjmp.s"
+  "x86 support/longjmp.s"
+  "x86 support/stdio_aliases.s"
+  "x86 support/syscall.s"
 )
 
 runtime_objs=()
@@ -5808,6 +6003,22 @@ sh_test(
     srcs = ["tests/x86_i386_smoke_test.sh"],
     args = ["$(rootpath :davecc)"],
     data = [":davecc"],
+)
+
+sh_test(
+    name = "x86_i386_interpreter_test",
+    srcs = ["tests/x86_i386_interpreter_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_x86)",
+        "$(rootpath :x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86",
+        ":x86_64",
+    ],
 )
 
 sh_test(

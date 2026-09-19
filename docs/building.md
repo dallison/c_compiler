@@ -54,6 +54,7 @@ host compiler:
 | Archive | Target triple / `-target` |
 | --- | --- |
 | `libc/libcx86_64.a` | `x86_64` |
+| `libc/libcx86.a` | `x86` / `i386` |
 | `libc/libcaarch64.a` | `aarch64` |
 | `libc/libcarm.a` | `arm` |
 | `libc/libcriscv.a` | `riscv` |

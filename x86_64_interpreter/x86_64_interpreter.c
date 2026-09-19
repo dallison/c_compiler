@@ -6,6 +6,7 @@
 #include "x86_64_interpreter.h"
 #include "x86_64_process.h"
 #include "x86_64_syscalls.h"
+#include "elf.h"
 #include "map.h"
 #include <inttypes.h>
 #include <math.h>
@@ -94,104 +95,177 @@ static bool ProcessMemoryOk(X86_64Interpreter* interpreter, uint64_t addr,
   return X86_64ProcessGuestMemoryOk(interpreter->process, addr, size);
 }
 
-static bool InterpreterAddressOk(X86_64Interpreter* interpreter, uint64_t addr,
-                                 size_t size) {
-  if ((uint64_t)size > UINT64_MAX - addr) {
+static bool LoaderIsIA32(const Loader* loader) {
+  if (loader == NULL || loader->elf_file == NULL ||
+      loader->elf_file->header == NULL) {
     return false;
+  }
+  return loader->elf_file->header->machine == ELF_MACHINE_TYPE_X86;
+}
+
+static void* ResolveIA32HostPtr(X86_64Interpreter* interpreter, uint64_t addr,
+                                size_t size) {
+  Loader* loader = interpreter->loader;
+  if (interpreter->stack != NULL) {
+    uint64_t start = interpreter->stack_guest_base;
+    uint64_t end = start + X86_64_STACK_SIZE;
+    if (addr >= start && addr + size <= end) {
+      return interpreter->stack + (addr - start);
+    }
+  }
+  if (interpreter->tls_guest_base != 0 && interpreter->tls_block_size > 0 &&
+      interpreter->fs_base != 0) {
+    uint64_t tls_start = interpreter->tls_guest_base;
+    uint64_t tls_end = tls_start + (uint64_t)interpreter->tls_block_size;
+    if (addr >= tls_start && addr + size <= tls_end) {
+      return (char*)(uintptr_t)interpreter->fs_base + (addr - tls_start);
+    }
+  }
+  if (ProcessMemoryOk(interpreter, addr, size)) {
+    return (void*)(uintptr_t)addr;
+  }
+  if (GuestAddressOk(loader, addr, size)) {
+    return (void*)(uintptr_t)addr;
+  }
+  uint64_t host = 0;
+  if (LoaderLinkedAddressToRuntime(loader, NULL, addr, &host) &&
+      GuestAddressOk(loader, host, size)) {
+    return (void*)(uintptr_t)host;
+  }
+  if ((addr >> 32) != 0) {
+    return ResolveIA32HostPtr(interpreter, addr & 0xffffffffu, size);
+  }
+  return NULL;
+}
+
+static void* HostPtr(X86_64Interpreter* interpreter, uint64_t addr,
+                     size_t size) {
+  if ((uint64_t)size > UINT64_MAX - addr) {
+    return NULL;
+  }
+  if (interpreter->ia32) {
+    return ResolveIA32HostPtr(interpreter, addr, size);
   }
   if (interpreter->fs_base != 0 && interpreter->tls_block_size > 0) {
     uint64_t tls_start = interpreter->fs_base;
     uint64_t tls_end = tls_start + (uint64_t)interpreter->tls_block_size;
     if (addr >= tls_start && addr + size <= tls_end) {
-      return true;
+      return (void*)(uintptr_t)addr;
     }
   }
   if (interpreter->stack != NULL) {
     uint64_t start = (uint64_t)(uintptr_t)interpreter->stack;
     uint64_t end = start + X86_64_STACK_SIZE;
     if (addr >= start && addr + size <= end) {
-      return true;
+      return (void*)(uintptr_t)addr;
     }
   }
-  if (ProcessMemoryOk(interpreter, addr, size)) {
-    return true;
+  if (ProcessMemoryOk(interpreter, addr, size) ||
+      GuestAddressOk(interpreter->loader, addr, size)) {
+    return (void*)(uintptr_t)addr;
   }
-  return GuestAddressOk(interpreter->loader, addr, size);
+  return NULL;
+}
+
+static bool InterpreterAddressOk(X86_64Interpreter* interpreter, uint64_t addr,
+                                 size_t size) {
+  return HostPtr(interpreter, addr, size) != NULL;
+}
+
+void* X86_64InterpreterGuestPtr(X86_64Interpreter* interpreter, uint64_t addr,
+                                size_t size) {
+  return HostPtr(interpreter, addr, size);
 }
 
 static void Store64(X86_64Interpreter* interpreter, uint64_t addr,
                     uint64_t value) {
-  if (!InterpreterAddressOk(interpreter, addr, 8)) {
+  void* p = HostPtr(interpreter, addr, 8);
+  if (p == NULL) {
     fprintf(stderr, "Store64 outside mapped memory at 0x%" PRIx64 "\n", addr);
     X86_64InterpreterFail(interpreter, 1);
     return;
   }
-  *(uint64_t*)(uintptr_t)addr = value;
+  memcpy(p, &value, 8);
 }
 
 static void Store32(X86_64Interpreter* interpreter, uint64_t addr,
                     uint32_t value) {
-  if (!InterpreterAddressOk(interpreter, addr, 4)) {
+  void* p = HostPtr(interpreter, addr, 4);
+  if (p == NULL) {
     fprintf(stderr, "Store32 outside mapped memory at 0x%" PRIx64 "\n", addr);
     X86_64InterpreterFail(interpreter, 1);
     return;
   }
-  *(uint32_t*)(uintptr_t)addr = value;
+  memcpy(p, &value, 4);
 }
 
 static COMPILER_UNUSED void Store16(X86_64Interpreter* interpreter, uint64_t addr,
                     uint16_t value) {
-  if (!InterpreterAddressOk(interpreter, addr, 2)) {
+  void* p = HostPtr(interpreter, addr, 2);
+  if (p == NULL) {
     fprintf(stderr, "Store16 outside mapped memory at 0x%" PRIx64 "\n", addr);
     X86_64InterpreterFail(interpreter, 1);
     return;
   }
-  *(uint16_t*)(uintptr_t)addr = value;
+  memcpy(p, &value, 2);
 }
 
 static void Store8(X86_64Interpreter* interpreter, uint64_t addr, uint8_t value) {
-  if (!InterpreterAddressOk(interpreter, addr, 1)) {
+  void* p = HostPtr(interpreter, addr, 1);
+  if (p == NULL) {
     fprintf(stderr, "Store8 outside mapped memory at 0x%" PRIx64 "\n", addr);
     X86_64InterpreterFail(interpreter, 1);
     return;
   }
-  *(uint8_t*)(uintptr_t)addr = value;
+  memcpy(p, &value, 1);
 }
 
 static uint64_t Load64(X86_64Interpreter* interpreter, uint64_t addr) {
-  if (!InterpreterAddressOk(interpreter, addr, 8)) {
+  void* p = HostPtr(interpreter, addr, 8);
+  uint64_t value = 0;
+  if (p == NULL) {
     fprintf(stderr, "Load64 outside mapped memory at 0x%" PRIx64 "\n", addr);
     X86_64InterpreterFail(interpreter, 1);
     return 0;
   }
-  return *(uint64_t*)(uintptr_t)addr;
+  memcpy(&value, p, 8);
+  return value;
 }
 
 static uint32_t Load32(X86_64Interpreter* interpreter, uint64_t addr) {
-  if (!InterpreterAddressOk(interpreter, addr, 4)) {
+  void* p = HostPtr(interpreter, addr, 4);
+  uint32_t value = 0;
+  if (p == NULL) {
     fprintf(stderr, "Load32 outside mapped memory at 0x%" PRIx64 "\n", addr);
     X86_64InterpreterFail(interpreter, 1);
     return 0;
   }
-  return *(uint32_t*)(uintptr_t)addr;
+  memcpy(&value, p, 4);
+  return value;
 }
 
 static COMPILER_UNUSED uint16_t Load16(X86_64Interpreter* interpreter, uint64_t addr) {
-  if (!InterpreterAddressOk(interpreter, addr, 2)) {
+  void* p = HostPtr(interpreter, addr, 2);
+  uint16_t value = 0;
+  if (p == NULL) {
     fprintf(stderr, "Load16 outside mapped memory at 0x%" PRIx64 "\n", addr);
     X86_64InterpreterFail(interpreter, 1);
     return 0;
   }
-  return *(uint16_t*)(uintptr_t)addr;
+  memcpy(&value, p, 2);
+  return value;
 }
 
 static uint8_t Load8(X86_64Interpreter* interpreter, uint64_t addr) {
-  if (!InterpreterAddressOk(interpreter, addr, 1)) {
+  void* p = HostPtr(interpreter, addr, 1);
+  uint8_t value = 0;
+  if (p == NULL) {
     fprintf(stderr, "Load8 outside mapped memory at 0x%" PRIx64 "\n", addr);
     X86_64InterpreterFail(interpreter, 1);
     return 0;
   }
-  return *(uint8_t*)(uintptr_t)addr;
+  memcpy(&value, p, 1);
+  return value;
 }
 
 static COMPILER_UNUSED int64_t SignExtend64(uint64_t value, int bits) {
@@ -200,13 +274,15 @@ static COMPILER_UNUSED int64_t SignExtend64(uint64_t value, int bits) {
 }
 
 static uint8_t Fetch8At(X86_64Interpreter* interpreter, uint64_t addr) {
-  if (!GuestAddressOk(interpreter->loader, addr, 1) &&
-      !InterpreterAddressOk(interpreter, addr, 1)) {
+  void* p = HostPtr(interpreter, addr, 1);
+  uint8_t value = 0;
+  if (p == NULL) {
     fprintf(stderr, "Fetch outside mapped memory at 0x%" PRIx64 "\n", addr);
     X86_64InterpreterFail(interpreter, 1);
     return 0;
   }
-  return *(uint8_t*)(uintptr_t)addr;
+  memcpy(&value, p, 1);
+  return value;
 }
 
 static uint8_t Fetch8(X86_64Interpreter* interpreter, size_t* pos) {
@@ -248,6 +324,9 @@ static REX ParseRex(X86_64Interpreter* interpreter, size_t* pos, uint8_t first) 
 
 static bool DecodeModRM(X86_64Interpreter* interpreter, size_t* pos, REX rex,
                         bool addr_size_64, ModRM* out) {
+  if (interpreter->ia32) {
+    addr_size_64 = false;
+  }
   uint8_t modrm = Fetch8(interpreter, pos);
   out->mod = (modrm >> 6) & 3;
   out->reg = ((modrm >> 3) & 7) | (rex.r ? 8 : 0);
@@ -260,10 +339,6 @@ static bool DecodeModRM(X86_64Interpreter* interpreter, size_t* pos, REX rex,
   out->disp = 0;
   out->has_sib = false;
   out->rip_relative = false;
-
-  if (!addr_size_64) {
-    return false;
-  }
 
   if (out->mod == 3) {
     return true;
@@ -284,7 +359,8 @@ static bool DecodeModRM(X86_64Interpreter* interpreter, size_t* pos, REX rex,
   } else if (out->mod == 0 && raw_rm == 5) {
     out->disp = (int32_t)Fetch32(interpreter, pos);
     out->rm = -1;
-    out->rip_relative = true;
+    // i386: disp32 absolute. x86-64: RIP-relative.
+    out->rip_relative = addr_size_64;
     return true;
   }
 
@@ -317,8 +393,15 @@ static uint64_t EffectiveAddress(X86_64Interpreter* interpreter, const ModRM* mo
     }
     addr = (uint64_t)((int64_t)addr + modrm->disp);
   }
-  if (interpreter->current_seg_prefix == 0x64 && interpreter->fs_base != 0) {
-    addr = interpreter->fs_base + addr;
+  if (interpreter->ia32) {
+    addr = (uint32_t)addr;
+  }
+  if (interpreter->current_seg_prefix == 0x64) {
+    if (interpreter->ia32 && interpreter->tls_guest_base != 0) {
+      addr = (uint32_t)(interpreter->tls_guest_base + (uint32_t)addr);
+    } else if (interpreter->fs_base != 0) {
+      addr = interpreter->fs_base + addr;
+    }
   }
   return addr;
 }
@@ -376,6 +459,37 @@ static uint64_t Pop64(X86_64Interpreter* interpreter) {
   uint64_t value = Load64(interpreter, interpreter->rsp);
   interpreter->rsp += 8;
   return value;
+}
+
+static void PushValue(X86_64Interpreter* interpreter, uint64_t value) {
+  if (interpreter->ia32) {
+    interpreter->rsp -= 4;
+    Store32(interpreter, interpreter->rsp, (uint32_t)value);
+    return;
+  }
+  Push64(interpreter, value);
+}
+
+static uint64_t PopValue(X86_64Interpreter* interpreter) {
+  if (interpreter->ia32) {
+    uint64_t value = Load32(interpreter, interpreter->rsp);
+    interpreter->rsp += 4;
+    return value;
+  }
+  return Pop64(interpreter);
+}
+
+static bool ExecuteInt80(X86_64Interpreter* interpreter) {
+  int64_t result = X86_64HandleSyscall(
+      interpreter, (int64_t)(uint32_t)ReadReg(interpreter, X86_REG_EAX),
+      (int64_t)(uint32_t)ReadReg(interpreter, X86_REG_EBX),
+      (int64_t)(uint32_t)ReadReg(interpreter, X86_REG_ECX),
+      (int64_t)(uint32_t)ReadReg(interpreter, X86_REG_EDX),
+      (int64_t)(uint32_t)ReadReg(interpreter, X86_REG_ESI),
+      (int64_t)(uint32_t)ReadReg(interpreter, X86_REG_EDI),
+      (int64_t)(uint32_t)ReadReg(interpreter, X86_REG_EBP));
+  WriteReg(interpreter, X86_REG_EAX, (uint32_t)result);
+  return true;
 }
 
 static bool ExecuteMovImm(X86_64Interpreter* interpreter, size_t* pos, REX rex,
@@ -1434,7 +1548,20 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
   }
 
   REX rex = {0};
-  if (b0 >= 0x40 && b0 <= 0x4F) {
+  if (interpreter->ia32 && b0 >= 0x40 && b0 <= 0x4F) {
+    int reg = b0 & 7;
+    uint32_t value = (uint32_t)ReadReg(interpreter, reg);
+    if (b0 < 0x48) {
+      value += 1;
+    } else {
+      value -= 1;
+    }
+    WriteReg(interpreter, reg, value);
+    UpdateFlags(interpreter, value, false);
+    *insn_len = pos;
+    return true;
+  }
+  if (!interpreter->ia32 && b0 >= 0x40 && b0 <= 0x4F) {
     rex = ParseRex(interpreter, &pos, b0);
     b0 = Fetch8(interpreter, &pos);
   }
@@ -1465,6 +1592,9 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       bool take = ConditionHolds(interpreter, cc);
       if (take) {
         interpreter->rip += pos + (uint64_t)(int64_t)disp;
+        if (interpreter->ia32) {
+          interpreter->rip = (uint32_t)interpreter->rip;
+        }
         *rip_updated = true;
       }
       *insn_len = pos;
@@ -1687,6 +1817,9 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
     int8_t disp = (int8_t)Fetch8(interpreter, &pos);
     if (ConditionHolds(interpreter, b0 & 0x0f)) {
       interpreter->rip += pos + (uint64_t)(int64_t)disp;
+      if (interpreter->ia32) {
+        interpreter->rip = (uint32_t)interpreter->rip;
+      }
       *rip_updated = true;
     }
     *insn_len = pos;
@@ -1703,29 +1836,48 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
 
   if (b0 >= 0x50 && b0 <= 0x57) {
     int reg = (b0 - 0x50) | (rex.b ? 8 : 0);
-    Push64(interpreter, ReadReg(interpreter, reg));
+    PushValue(interpreter, ReadReg(interpreter, reg));
     *insn_len = pos;
     return true;
   }
 
   if (b0 >= 0x58 && b0 <= 0x5F) {
     int reg = (b0 - 0x58) | (rex.b ? 8 : 0);
-    WriteReg(interpreter, reg, Pop64(interpreter));
+    WriteReg(interpreter, reg, PopValue(interpreter));
     *insn_len = pos;
     return true;
   }
 
   if (b0 == 0x68) {
     int32_t immediate = (int32_t)Fetch32(interpreter, &pos);
-    Push64(interpreter, (uint64_t)(int64_t)immediate);
+    PushValue(interpreter, (uint64_t)(int64_t)immediate);
     *insn_len = pos;
     return true;
   }
 
+  if (b0 == 0x6A) {
+    int8_t immediate = (int8_t)Fetch8(interpreter, &pos);
+    PushValue(interpreter, (uint64_t)(int64_t)immediate);
+    *insn_len = pos;
+    return true;
+  }
+
+  if (b0 == 0xCD) {
+    uint8_t vector = Fetch8(interpreter, &pos);
+    *insn_len = pos;
+    if (vector == 0x80) {
+      return ExecuteInt80(interpreter);
+    }
+    return false;
+  }
+
   if (b0 == 0xE8) {
     int32_t disp = (int32_t)Fetch32(interpreter, &pos);
-    Push64(interpreter, interpreter->rip + pos);
+    PushValue(interpreter, interpreter->rip + pos);
     interpreter->rip = (uint64_t)((int64_t)interpreter->rip + pos + disp);
+    if (interpreter->ia32) {
+      interpreter->rip = (uint32_t)interpreter->rip;
+    }
     *rip_updated = true;
     *insn_len = pos;
     return true;
@@ -1734,6 +1886,9 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
   if (b0 == 0xE9) {
     int32_t disp = (int32_t)Fetch32(interpreter, &pos);
     interpreter->rip = (uint64_t)((int64_t)interpreter->rip + pos + disp);
+    if (interpreter->ia32) {
+      interpreter->rip = (uint32_t)interpreter->rip;
+    }
     *rip_updated = true;
     *insn_len = pos;
     return true;
@@ -1742,13 +1897,26 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
   if (b0 == 0xEB) {
     int8_t disp = (int8_t)Fetch8(interpreter, &pos);
     interpreter->rip = (uint64_t)((int64_t)interpreter->rip + pos + disp);
+    if (interpreter->ia32) {
+      interpreter->rip = (uint32_t)interpreter->rip;
+    }
     *rip_updated = true;
     *insn_len = pos;
     return true;
   }
 
   if (b0 == 0xC3) {
-    interpreter->rip = Pop64(interpreter);
+    interpreter->rip = PopValue(interpreter);
+    *rip_updated = true;
+    *insn_len = pos;
+    return true;
+  }
+
+  if (b0 == 0xC2) {
+    uint16_t pop_bytes = (uint16_t)Fetch8(interpreter, &pos);
+    pop_bytes |= (uint16_t)Fetch8(interpreter, &pos) << 8;
+    interpreter->rip = PopValue(interpreter);
+    interpreter->rsp += pop_bytes;
     *rip_updated = true;
     *insn_len = pos;
     return true;
@@ -1756,7 +1924,7 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
 
   if (b0 == 0xC9) {
     interpreter->rsp = interpreter->rbp;
-    interpreter->rbp = Pop64(interpreter);
+    interpreter->rbp = PopValue(interpreter);
     *insn_len = pos;
     return true;
   }
@@ -1777,6 +1945,10 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
     }
     *insn_len = pos;
     return true;
+  }
+
+  if (b0 == 0x63 && interpreter->ia32) {
+    return false;
   }
 
   if (b0 == 0x63) {  // MOVSXD: sign-extend r/m32 into a 64-bit register
@@ -2034,22 +2206,43 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       return false;
     }
     int op = modrm.reg & 7;
+    if (op == 0 || op == 1) {
+      uint32_t value;
+      uint64_t addr = 0;
+      if (modrm.mod == 3) {
+        value = (uint32_t)ReadReg(interpreter, modrm.rm);
+      } else {
+        addr = EffectiveAddress(interpreter, &modrm, pos);
+        value = Load32(interpreter, addr);
+      }
+      value = op == 0 ? value + 1 : value - 1;
+      if (modrm.mod == 3) {
+        WriteReg(interpreter, modrm.rm, value);
+      } else {
+        Store32(interpreter, addr, value);
+      }
+      UpdateFlags(interpreter, value, false);
+      *insn_len = pos;
+      return true;
+    }
     if (op == 2 || op == 4 || op == 6) {
       uint64_t target = 0;
       if (modrm.mod == 3) {
         target = ReadReg(interpreter, modrm.rm);
+      } else if (interpreter->ia32) {
+        target = Load32(interpreter, EffectiveAddress(interpreter, &modrm, pos));
       } else {
         target = Load64(interpreter, EffectiveAddress(interpreter, &modrm, pos));
       }
       if (op == 6) {
-        Push64(interpreter, target);
+        PushValue(interpreter, target);
         *insn_len = pos;
         return true;
       }
       if (op == 2) {
-        Push64(interpreter, interpreter->rip + pos);
+        PushValue(interpreter, interpreter->rip + pos);
       }
-      interpreter->rip = target;
+      interpreter->rip = interpreter->ia32 ? (uint32_t)target : target;
       *rip_updated = true;
       *insn_len = pos;
       return true;
@@ -2088,9 +2281,59 @@ void X86_64InterpreterDumpRegisters(X86_64Interpreter* interpreter) {
   printf("rip 0x%016" PRIx64 "\n", interpreter->rip);
 }
 
+static uint64_t SetupGuestMainArgsIA32(X86_64Interpreter* interpreter, int argc,
+                                       char** argv) {
+  uint64_t stack_top =
+      ((uint64_t)interpreter->stack_guest_base + X86_64_STACK_SIZE) & ~0xFULL;
+  if (argc <= 0 || argv == NULL) {
+    interpreter->rsp = stack_top;
+    PushValue(interpreter, 0);
+    PushValue(interpreter, 0);
+    PushValue(interpreter, 0);
+    return interpreter->rsp;
+  }
+
+  size_t string_bytes = 0;
+  for (int i = 0; i < argc; i++) {
+    string_bytes += strlen(argv[i]) + 1;
+  }
+  size_t vector_bytes = (size_t)(argc + 1) * sizeof(uint32_t);
+  if (string_bytes + vector_bytes + 32 > X86_64_STACK_SIZE) {
+    interpreter->rsp = stack_top;
+    PushValue(interpreter, 0);
+    PushValue(interpreter, 0);
+    PushValue(interpreter, 0);
+    return interpreter->rsp;
+  }
+
+  uint64_t string_address = stack_top - string_bytes;
+  uint64_t guest_argv = (string_address - vector_bytes) & ~0x3ULL;
+  char* string_out =
+      interpreter->stack + (string_address - interpreter->stack_guest_base);
+  uint32_t* pointer_out = (uint32_t*)(interpreter->stack +
+                                      (guest_argv - interpreter->stack_guest_base));
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    memcpy(string_out, argv[i], len);
+    pointer_out[i] = (uint32_t)(uintptr_t)(
+        interpreter->stack_guest_base +
+        (size_t)(string_out - interpreter->stack));
+    string_out += len;
+  }
+  pointer_out[argc] = 0;
+  interpreter->rsp = guest_argv;
+  PushValue(interpreter, guest_argv);
+  PushValue(interpreter, (uint32_t)argc);
+  PushValue(interpreter, 0);
+  return interpreter->rsp;
+}
+
 static uint64_t SetupGuestMainArgs(X86_64Interpreter* interpreter, int argc,
                                    char** argv, uint64_t entry_address,
                                    bool is_static_link) {
+  if (interpreter->ia32) {
+    return SetupGuestMainArgsIA32(interpreter, argc, argv);
+  }
   uint64_t stack_base = (uint64_t)(uintptr_t)interpreter->stack;
   uint64_t stack_top = (stack_base + X86_64_STACK_SIZE) & ~0xFULL;
   (void)entry_address;
@@ -2144,6 +2387,8 @@ void X86_64InterpreterInitForThread(
     bool trace_registers, bool trace_instructions) {
   memset(interpreter, 0, sizeof(*interpreter));
   interpreter->loader = loader;
+  interpreter->ia32 = LoaderIsIA32(loader);
+  interpreter->stack_guest_base = X86_IA32_STACK_BASE;
   interpreter->process = process;
   interpreter->guest_thread = guest_thread;
   if (guest_thread != NULL) {
@@ -2165,12 +2410,27 @@ void X86_64InterpreterInitForThread(
     interpreter->fs_base = loader->tls.fs_base;
     interpreter->tls_block_size = loader->tls.block_size;
   }
+  if (interpreter->ia32 && interpreter->fs_base != 0 &&
+      interpreter->tls_block_size > 0) {
+    interpreter->tls_guest_base = X86_IA32_TLS_BASE;
+  }
   uint64_t argument_bottom =
       SetupGuestMainArgs(interpreter, argc, argv, entry_address,
                          loader->is_static);
-  interpreter->rsp = argument_bottom & ~0xFULL;
-  Push64(interpreter, 0);
-  interpreter->rip = entry_address;
+  if (interpreter->ia32) {
+    uint64_t linked = entry_address;
+    if (LoaderRuntimeAddressToLinked(loader, entry_address, &linked)) {
+      entry_address = (uint32_t)linked;
+    } else {
+      entry_address = (uint32_t)entry_address;
+    }
+    interpreter->rsp = argument_bottom;
+    interpreter->rip = entry_address;
+  } else {
+    interpreter->rsp = argument_bottom & ~0xFULL;
+    Push64(interpreter, 0);
+    interpreter->rip = entry_address;
+  }
   interpreter->running = true;
 }
 
@@ -2180,9 +2440,22 @@ void X86_64InterpreterPrepareMain(X86_64Interpreter* interpreter,
   uint64_t argument_bottom =
       SetupGuestMainArgs(interpreter, argc, argv, entry_address,
                          is_static_link);
-  interpreter->rsp = argument_bottom & ~0xFULL;
-  Push64(interpreter, 0);
-  interpreter->rip = entry_address;
+  if (interpreter->ia32) {
+    uint64_t linked = entry_address;
+    if (interpreter->loader != NULL &&
+        LoaderRuntimeAddressToLinked(interpreter->loader, entry_address,
+                                     &linked)) {
+      entry_address = (uint32_t)linked;
+    } else {
+      entry_address = (uint32_t)entry_address;
+    }
+    interpreter->rsp = argument_bottom;
+    interpreter->rip = entry_address;
+  } else {
+    interpreter->rsp = argument_bottom & ~0xFULL;
+    Push64(interpreter, 0);
+    interpreter->rip = entry_address;
+  }
   interpreter->running = true;
   interpreter->rip_updated = false;
 }
@@ -2265,6 +2538,24 @@ static int X86_64InterpreterRunLoop(X86_64Interpreter* interpreter) {
 
 void X86_64InterpreterPrepareCall(X86_64Interpreter* interpreter, uint64_t fn,
                                   uint64_t arg) {
+  if (interpreter->ia32) {
+    interpreter->rsp =
+        ((uint64_t)interpreter->stack_guest_base + X86_64_STACK_SIZE) &
+        ~0xFULL;
+    PushValue(interpreter, (uint32_t)arg);
+    PushValue(interpreter, 0);
+    uint64_t linked = fn;
+    if (interpreter->loader != NULL &&
+        LoaderRuntimeAddressToLinked(interpreter->loader, fn, &linked)) {
+      fn = (uint32_t)linked;
+    } else {
+      fn = (uint32_t)fn;
+    }
+    interpreter->rip = fn;
+    interpreter->running = true;
+    interpreter->rip_updated = false;
+    return;
+  }
   interpreter->rsp =
       (uint64_t)(uintptr_t)(interpreter->stack + X86_64_STACK_SIZE);
   interpreter->rsp &= ~0xFULL;
