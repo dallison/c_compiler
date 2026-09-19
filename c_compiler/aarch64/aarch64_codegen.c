@@ -1225,17 +1225,17 @@ static TargetInstruction* SetDestOrMoveToArgReg(AARCH64Generator* g,
   if (candidate && TargetNext(from) == NULL) {
     return SetDestOrMove(g, from, to, rmov_opcode);
   }
-  if (rmov_opcode == AARCH64_OP(fmov)) {
-    // fmov has no register-move (rmov) form in the emitter, so the two-operand
-    // encoding would be mis-assembled (it picks up only the first two
-    // registers, reversing the move).  Emit it as a destination-move into the
-    // argument register, copying its size from the source value.
-    TargetInstruction* move =
-        Emit(g, CopyInstructionSize(NewInstruction1(rmov_opcode, from), 0));
-    move->dest = to;
-    return to;
-  }
-  Emit(g, NewInstruction2(rmov_opcode, to, from));
+  // Always write the argument register as a destination rather than as
+  // operand[0] of a two-operand `mov rN, src`.  The two-operand form does not
+  // go through the dest-assignment path, so the allocator never re-claims
+  // ownership of rN after the pre-pass (owners are cleared at each block).
+  // The next argument's reload then sees xN as free and steals it --
+  // `string::operator[](this, i)` got the string pointer in both x0 and x1
+  // (`__pattern_[current]` in regex __validate of `{n,m}`, and `$N` in
+  // __format).
+  TargetInstruction* move =
+      Emit(g, CopyInstructionSize(NewInstruction1(rmov_opcode, from), 0));
+  move->dest = to;
   return to;
 }
 

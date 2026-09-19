@@ -1494,9 +1494,13 @@ bool TargetMaterializePreservedCallResults(TargetGenerator* gen,
   bool changed = false;
   for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;) {
     TargetInstruction* next = TargetNext(inst);
+    // A call result that is live across a later call must leave x0/d0
+    // (or the equivalent return register) before that later call runs.
+    // Exception edges force each call into its own block, so a single
+    // user in a later block is the common case (mark_count() used after
+    // constructing a local), not a reason to skip the copy.
     if (gen->virtuals->is_call(inst) &&
-        BitSetContains(preserved, inst->id) &&
-        (gen->exception_edges.length == 0 || inst->users.length > 1)) {
+        BitSetContains(preserved, inst->id)) {
       TargetInstruction* copy = create_copy(inst);
       assert(copy != NULL);
       if (inst == inst->block->end_code && next != NULL &&

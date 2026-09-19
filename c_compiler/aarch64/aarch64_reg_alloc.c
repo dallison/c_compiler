@@ -931,6 +931,28 @@ static COMPILER_UNUSED void AllocateForRmov(
 
 static void ReloadSpills(AARCH64RegisterAllocator* allocator,
                          TargetInstruction* inst) {
+  // All operands of `inst` are simultaneously live when `inst` executes, so a
+  // register allocated for reloading one operand must not be reused for another
+  // operand's reload (nor stolen as a spill victim).  Temporarily reserve each
+  // operand's register -- both those already holding a value and those we
+  // allocate here for reloads -- so FindFreeRegister/FindSpillVictim skip them,
+  // then release the reservations once every operand has its register.  Without
+  // this, reloading a second spilled operand could spill the first operand and
+  // reuse its register, leaving the first operand reading the wrong value
+  // (e.g. `cmp w23, w23` where a class bound and `'\\'` collapsed onto the
+  // same register in regex __class_match at -O2).
+  AARCH64Register* protect[TARGET_MAX_OPERANDS];
+  int num_protect = 0;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op != NULL && op->reg != NULL) {
+      AARCH64Register* r = (AARCH64Register*)op->reg;
+      if (!r->base.reserved) {
+        r->base.reserved = true;
+        protect[num_protect++] = r;
+      }
+    }
+  }
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
     if (op != NULL && ((int)op->opcode == (int)AARCH64_OP(spill))) {
@@ -951,7 +973,14 @@ static void ReloadSpills(AARCH64RegisterAllocator* allocator,
       AssignRegister(reg, reload);
       // This reload is for a single instruction.
       reload->uses = 1;
+      if (!reg->base.reserved) {
+        reg->base.reserved = true;
+        protect[num_protect++] = reg;
+      }
     }
+  }
+  for (int i = 0; i < num_protect; i++) {
+    protect[i]->base.reserved = false;
   }
 }
 
@@ -959,6 +988,18 @@ static void ReloadSpills(AARCH64RegisterAllocator* allocator,
 // that are not reached by the linear block scan.
 static void EnsureOperandsAllocated(AARCH64RegisterAllocator* allocator,
                                     TargetInstruction* inst) {
+  // Operands of one instruction are live together.  Reserve each operand's
+  // register as it is assigned so a later operand cannot steal it (the same
+  // collapse ReloadSpills guards against when inserting reloads).
+  AARCH64Register* protect[TARGET_MAX_OPERANDS];
+  int num_protect = 0;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op != NULL && op->reg != NULL && !op->reg->reserved) {
+      op->reg->reserved = true;
+      protect[num_protect++] = (AARCH64Register*)op->reg;
+    }
+  }
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
     if (op == NULL || op->reg != NULL || op->block == NULL ||
@@ -967,17 +1008,20 @@ static void EnsureOperandsAllocated(AARCH64RegisterAllocator* allocator,
     }
     if (AARCH64IsFixedRegister(op)) {
       AllocateRegister(allocator, op);
-      continue;
-    }
-    if (AARCH64IsVarRegister(op)) {
+    } else if (AARCH64IsVarRegister(op)) {
       if (op->reg == NULL) {
         AllocateVariableRegister(allocator, op);
       }
-      continue;
-    }
-    if ((op->flags & TARGET_INST_PROCESSED) == 0) {
+    } else if ((op->flags & TARGET_INST_PROCESSED) == 0) {
       AllocateRegister(allocator, op);
     }
+    if (op->reg != NULL && !op->reg->reserved) {
+      op->reg->reserved = true;
+      protect[num_protect++] = (AARCH64Register*)op->reg;
+    }
+  }
+  for (int i = 0; i < num_protect; i++) {
+    protect[i]->base.reserved = false;
   }
 }
 
@@ -1029,6 +1073,18 @@ static void AllocateRegisterOnce(AARCH64RegisterAllocator* allocator,
   AARCH64Opcode opcode = (AARCH64Opcode)inst->opcode;
 
   EnsureOperandsAllocated(allocator, inst);
+
+  // Two-operand `mov rN, src` writes an outgoing argument register without
+  // going through dest-assignment, so the pre-pass register has no owner after
+  // InitializeBasicBlockRegisters.  Claim it before allocating a result or
+  // reloading another value so the next argument cannot steal rN.
+  if (inst->dest == NULL &&
+      (opcode == AARCH64_OP(mov) || opcode == AARCH64_OP(fmov)) &&
+      inst->operand[0] != NULL &&
+      IsUnspillableFixedReg(inst->operand[0]) &&
+      inst->operand[0]->reg != NULL) {
+    inst->operand[0]->reg->owner = inst->operand[0];
+  }
 
   AARCH64Register* reg;
 
@@ -1124,8 +1180,10 @@ static void AllocateRegisterOnce(AARCH64RegisterAllocator* allocator,
     // already has a register, the allocation above is skipped and ownership is
     // never re-established, so inside a loop body the argument register looks
     // free and an intervening temporary can steal it, clobbering an argument.
-    // Re-claim ownership here for the value we are routing into it.
-    if (IsUnspillableFixedReg(inst->dest) && reg->base.owner == NULL) {
+    // Always re-claim here: a stale owner (a previous unused mov result) still
+    // leaves the register looking spillable, and the next outgoing argument's
+    // reload then overwrites it.
+    if (IsUnspillableFixedReg(inst->dest)) {
       reg->base.owner = inst->dest;
     }
     FreeRegisters(allocator, inst);
