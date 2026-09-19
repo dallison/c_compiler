@@ -7,6 +7,7 @@
 
 #include "elf.h"
 #include "guest_addr_wait.h"
+#include "loader_arch.h"
 #include "loader_lifecycle.h"
 #include <errno.h>
 #include <sched.h>
@@ -538,22 +539,30 @@ bool X86_64GuestRunProgramShutdown(Loader* loader, X86_64Interpreter* cpu) {
 static bool X86_64LifecycleCallback(void* context, LoadedDynamicLibrary* image,
                                       uint64_t function,
                                       LoaderLifecyclePhase phase) {
-  (void)image;
   (void)phase;
   typedef struct {
     Loader* loader;
     X86_64Interpreter* cpu;
   } X86_64LifecycleContext;
   X86_64LifecycleContext* ctx = context;
-  if (!X86_64GuestAddressExecutable(ctx->loader, function)) {
+  uint64_t call_addr = function;
+  if (ctx->loader->arch->ignore_vaddr) {
+    if (!LoaderLinkedAddressToRuntime(ctx->loader, image, function,
+                                      &call_addr)) {
+      LoaderError("Cannot translate function array entry 0x%llx\n",
+                  (unsigned long long)function);
+      return false;
+    }
+  }
+  if (!X86_64GuestAddressExecutable(ctx->loader, call_addr)) {
     LoaderError("Function array entry 0x%llx is not executable\n",
-                (unsigned long long)function);
+                (unsigned long long)call_addr);
     return false;
   }
   if (ctx->cpu != NULL) {
-    X86_64GuestCallVoidFunction(ctx->cpu, function);
+    X86_64GuestCallVoidFunction(ctx->cpu, call_addr);
   } else {
-    X86_64NativeCallVoidFunction(ctx->loader, function);
+    X86_64NativeCallVoidFunction(ctx->loader, call_addr);
   }
   return true;
 }

@@ -80,6 +80,10 @@ typedef struct {
 #define DAVE_EH_DREG_PC 15
 #define DAVE_EH_DREG_SP 13
 #define DAVE_EH_DREG_FP 11
+#elif defined(__i386__)
+#define DAVE_EH_DREG_PC 8
+#define DAVE_EH_DREG_SP 4
+#define DAVE_EH_DREG_FP 5
 #else
 #define DAVE_EH_DREG_PC 0
 #define DAVE_EH_DREG_SP 0

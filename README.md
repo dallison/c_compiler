@@ -169,6 +169,7 @@ interpreter:
 | Triple | `PT_INTERP` | Shared libc |
 | --- | --- | --- |
 | `x86_64-unknown-linux-davecc` | `/lib64/ld-linux-x86-64.so.2` | `libdavecc.so.1` |
+| `aarch64-unknown-linux-davecc` | `/lib/ld-linux-aarch64.so.1` | `libdavecc.so.1` |
 | `arm-unknown-linux-davecc` | `/lib/ld-linux-armhf.so.3` | `libdavecc.so.1` |
 | `riscv-unknown-linux-davecc` | `/lib/ld-linux-riscv64-lp64d.so.1` | `libdavecc.so.1` |
 
@@ -440,9 +441,12 @@ against that `.so` plus a small TLS CRT archive and records `$ORIGIN` in
 the rpath; copy the library next to the executable (or point the loader
 at `DAVECC_LIB_DIR`).
 
-`-dynamic` is rejected for AArch64 Linux (the backend only implements
-local-exec TLS for static executables), RISC-V 32-bit Linux, and
-static-only targets (6502, 65C02, wasm32, ESP32, eBPF).
+`-dynamic` is rejected for RISC-V 32-bit Linux and for static-only
+targets (6502, 65C02, wasm32, ESP32, eBPF). AArch64 Linux uses the
+global-dynamic TLS model (`TLSGD` / `__tls_get_addr`). Interpreter
+`-dynamic` currently runs on AArch64, RISC-V 64-bit, x86-64, and
+p-code; ARM ELF32 and i386 still fail at load or during DSO
+constructors.
 
 #### Cross-testing Linux binaries with Colima
 

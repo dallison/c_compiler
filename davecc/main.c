@@ -317,7 +317,7 @@ static const TargetRuntime target_runtimes[] = {
      NULL, false, true},
     {"aarch64", kTargetOSLinux, "libcaarch64_linux.a",
      "//:libc_aarch64_linux", "aarch64_linux_start.o",
-     "//:aarch64_linux_start", NULL, false, true},
+     "//:aarch64_linux_start", "//:aarch64_linux_dynamic_runtime", false, true},
     {"x86_64", kTargetOSLinux, "libcx86_64_linux.a",
      "//:libc_x86_64_linux", "x86_64_linux_start.o",
      "//:x86_64_linux_start", "//:x86_64_linux_dynamic_runtime", false, true},
@@ -570,13 +570,12 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
                 runtime->archive_name);
         exit(1);
       }
-      if (runtime->use_main_entry &&
-          !VectorContainsCString(linker_args, "-e")) {
+      if (!VectorContainsCString(linker_args, "-e")) {
+        // Interpreter-profile images enter at main.  RISC-V's static CRT
+        // _start wrapper is not part of the dynamic CRT, and a second
+        // _start from a leftover DSO object would fail the link.
         VectorAppend(linker_args, "-e");
         VectorAppend(linker_args, "main");
-      } else if (!VectorContainsCString(linker_args, "-e")) {
-        VectorAppend(linker_args, "-e");
-        VectorAppend(linker_args, "_start");
       }
       if (!VectorContainsCString(linker_args, "-rpath")) {
         VectorAppend(linker_args, "-rpath");
@@ -595,11 +594,12 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
     bool is_x86_64 = strcmp(runtime->canonical_name, "x86_64") == 0;
     bool is_arm = strcmp(runtime->canonical_name, "arm") == 0;
     bool is_riscv = strcmp(runtime->canonical_name, "riscv") == 0;
+    bool is_aarch64 = strcmp(runtime->canonical_name, "aarch64") == 0;
     if (runtime->os != kTargetOSLinux ||
-        (!is_x86_64 && !is_arm && !is_riscv)) {
+        (!is_x86_64 && !is_arm && !is_riscv && !is_aarch64)) {
       fprintf(stderr,
               "-dynamic is currently supported only for x86_64, ARM, "
-              "and RISC-V Linux targets\n");
+              "AArch64, and RISC-V Linux targets\n");
       exit(1);
     }
     if (resources->lib_dir.length == 0) {
@@ -611,19 +611,22 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
     const char* interpreter =
         is_arm ? "-I/lib/ld-linux-armhf.so.3"
                : is_riscv ? "-I/lib/ld-linux-riscv64-lp64d.so.1"
+               : is_aarch64 ? "-I/lib/ld-linux-aarch64.so.1"
                           : "-I/lib64/ld-linux-x86-64.so.2";
     const char* startup =
         is_arm ? "arm_linux_dynamic_start.o"
                : is_riscv ? "riscv_linux_dynamic_start.o"
+               : is_aarch64 ? "aarch64_linux_dynamic_start.o"
                           : "x86_64_linux_dynamic_start.o";
     const char* runtime_target =
         is_arm ? "//:arm_linux_dynamic_runtime"
                : is_riscv ? "//:riscv_linux_dynamic_runtime"
+               : is_aarch64 ? "//:aarch64_linux_dynamic_runtime"
                           : "//:x86_64_linux_dynamic_runtime";
     String runtime_dir = {0};
     StringInit(&runtime_dir, resources->lib_dir.value);
     const char* architecture_dir =
-        is_arm ? "arm" : is_riscv ? "riscv" : NULL;
+        is_arm ? "arm" : is_riscv ? "riscv" : is_aarch64 ? "aarch64" : NULL;
     if (architecture_dir != NULL) {
       String startup_path = {0};
       StringPrintf(&startup_path, "%s/%s", runtime_dir.value, startup);

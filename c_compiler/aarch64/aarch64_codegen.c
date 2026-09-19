@@ -87,6 +87,7 @@ const char* AARCH64OpcodeName(int op) {
   case AARCH64_OP(adr): return "adr";
   case AARCH64_OP(adrp): return "adrp";
   case AARCH64_OP(gotaddr): return "gotaddr";
+  case AARCH64_OP(tlsgd): return "tlsgd";
   case AARCH64_OP(cmn): return "cmn";
   case AARCH64_OP(cmp): return "cmp";
   case AARCH64_OP(madd): return "madd";
@@ -1651,13 +1652,26 @@ static TargetInstruction* MoveImmediate(AARCH64Generator* g, TargetInstruction* 
                                                      kTargetType64Bit, value));
 }
 
+static TargetInstruction* TlsGetAddrCall(AARCH64Generator* g, IRNode* node) {
+  IRVariable* variable = (IRVariable*)node;
+  TargetInstruction* symbol = GetSymbol(g, node, variable->symbol);
+  TargetInstruction* index = Emit(
+      g, SetInstructionSize(NewInstruction1(AARCH64_OP(tlsgd), symbol),
+                            kSize64Bit));
+  g->not_leaf = true;
+  g->base.num_calls++;
+  TargetInstruction* arg0 =
+      SetDestOrMove(g, index, IntArgumentRegister(g, 0), AARCH64_OP(mov));
+  TargetInstruction* regarg =
+      Emit(g, NewInstruction2(AARCH64_OP(regarg), NULL, arg0));
+  TargetInstruction* fn = GetSymbol(g, NULL, g->base.__tls_get_addr);
+  return Emit(g, NewInstruction2(AARCH64_OP(bl), fn, regarg));
+}
+
 static TargetInstruction* GetTlsVariableAddress(AARCH64Generator* g,
                                                 IRNode* node) {
   if (compiler->tls_model != TLS(local_exec)) {
-    fprintf(stderr,
-            "error: AArch64 only supports the local-exec TLS model for static "
-            "executables\n");
-    abort();
+    return TlsGetAddrCall(g, node);
   }
 
   IRVariable* variable = (IRVariable*)node;

@@ -2047,6 +2047,7 @@ cflags=(-target x86 -O0 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
   "x86 support/cxx_guard.s"
+  "x86 support/eh_transfer.s"
   "x86 support/setjmp.s"
   "x86 support/longjmp.s"
   "x86 support/stdio_aliases.s"
@@ -2894,6 +2895,29 @@ linux_libc_archive(
     libc_cxx_srcs = LIBC_CXX_SRCS,
 )
 
+linux_dynamic_runtime(
+    name = "aarch64_linux_dynamic_runtime",
+    architecture = "aarch64",
+    syscall_source = "aarch64 support/linux_syscall.s",
+    clone_source = "aarch64 support/linux_clone.s",
+    startup_source = "aarch64 support/linux_start.s",
+    support_sources = [
+        "aarch64 support/cxx_guard.s",
+        "aarch64 support/eh_transfer.s",
+        "aarch64 support/longjmp.s",
+        "aarch64 support/setjmp.s",
+    ],
+    dso_sources = [
+        src
+        for src in LIBC_SRCS
+        if src not in LINUX_DYNAMIC_CRT_SRCS and
+           src not in ["libc/cxx_guard.c", "libc/eh_arm.c"]
+    ] + ["libc/dynamic_libc_lifecycle.c"],
+    crt_sources = LINUX_DYNAMIC_CRT_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    output_dir = "libc/aarch64",
+)
+
 linux_start_object(
     name = "x86_64_linux_start",
     architecture = "x86_64",
@@ -3316,6 +3340,11 @@ INTERPRETER_LIBC_SHARED_EXCLUDE = [
     # Assembly runtimes supply these; a DSO cannot carry both copies.
     "libc/cxx_guard.c",
     "libc/eh_arm.c",
+]
+
+# WalkFrame lives in eh_frame.c on these targets; the frame-pointer fallback
+# copy would be a second definition.
+INTERPRETER_LIBC_SHARED_EXCLUDE_CFI = INTERPRETER_LIBC_SHARED_EXCLUDE + [
     "libc/eh_frame_pointer.c",
 ]
 
@@ -3346,7 +3375,7 @@ guest_libc_shared(
     ],
     libc_srcs = LIBC_SRCS,
     libc_cxx_srcs = LIBC_CXX_SRCS,
-    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE + ["libc/abs.c"],
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE_CFI + ["libc/abs.c"],
     crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
 )
 
@@ -3357,8 +3386,10 @@ guest_libc_shared(
     cflags = ["-O0"],
     runtime_srcs = [
         "x86 support/cxx_guard.s",
+        "x86 support/eh_transfer.s",
         "x86 support/setjmp.s",
         "x86 support/longjmp.s",
+        "x86 support/stdio_aliases.s",
         "x86 support/syscall.s",
     ],
     libc_srcs = LIBC_SRCS,
@@ -3381,7 +3412,7 @@ guest_libc_shared(
     ],
     libc_srcs = LIBC_SRCS,
     libc_cxx_srcs = LIBC_CXX_SRCS,
-    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE_CFI,
     crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
 )
 
@@ -3402,7 +3433,11 @@ guest_libc_shared(
     ],
     libc_srcs = LIBC_SRCS,
     libc_cxx_srcs = LIBC_CXX_SRCS,
-    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE,
+    exclude = [
+        src
+        for src in INTERPRETER_LIBC_SHARED_EXCLUDE
+        if src != "libc/eh_arm.c"
+    ],
     crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
 )
 
@@ -3419,9 +3454,8 @@ guest_libc_shared(
     ],
     libc_srcs = LIBC_SRCS,
     libc_cxx_srcs = LIBC_CXX_SRCS,
-    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE_CFI,
     crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
-    crt_runtime_srcs = ["RISCV_support/start.s"],
 )
 
 guest_libc_shared(
@@ -3438,9 +3472,8 @@ guest_libc_shared(
     ],
     libc_srcs = LIBC_SRCS,
     libc_cxx_srcs = LIBC_CXX_SRCS,
-    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE,
+    exclude = INTERPRETER_LIBC_SHARED_EXCLUDE_CFI,
     crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
-    crt_runtime_srcs = ["RISCV32_support/start.s"],
 )
 
 guest_libc_shared(

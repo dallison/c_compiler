@@ -225,8 +225,10 @@ static void Store32(ARMInterpreter* interpreter, uint64_t addr, uint32_t value) 
   void* p = ResolveHostPtr(interpreter, addr, 4);
   if (p == NULL) {
     fprintf(stderr, "Store32 outside mapped memory at 0x%08" PRIx64
-                    " pc 0x%016" PRIx64 " sp=0x%08x fp=0x%08x\n",
-            addr, interpreter->pc, (uint32_t)interpreter->regs[13],
+                    " pc 0x%016" PRIx64 " linked_pc 0x%08" PRIx64
+                    " sp=0x%08x fp=0x%08x\n",
+            addr, interpreter->pc, RuntimeToLinked(interpreter, interpreter->pc),
+            (uint32_t)interpreter->regs[13],
             (uint32_t)interpreter->regs[11]);
     ARMInterpreterDumpRegisters(interpreter);
     exit(1);

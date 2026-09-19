@@ -487,7 +487,10 @@ static int InitializeHeap(void) {
 
 #if defined(__DAVECC_NATIVE_LINUX__)
   return ExpandHeap(DAVE_MIN_BLOCK_SIZE);
-#elif defined(__DAVECC_HAS_HEAP_LOCK__)
+#elif defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
+  // Interpreter-profile DSOs cannot grow a heap above their own `_end`: the
+  // loader only reserves that space for the executable.  p-code has no heap
+  // lock, but the CRT still provides this array.
   extern unsigned long long
       __davecc_guest_heap_storage[((1024 * 1024) + 15) /
                                   sizeof(unsigned long long)];

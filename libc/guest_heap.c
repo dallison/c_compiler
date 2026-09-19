@@ -11,7 +11,13 @@
 
 #include <davecc/malloc_internal.h>
 
-#if defined(__DAVECC_HAS_HEAP_LOCK__)
+#if defined(__p_code__)
+// p-code's allocator is the public malloc; this array only gives it a
+// mapped region in the executable instead of growing past the DSO `_end`.
+unsigned long long
+    __davecc_guest_heap_storage[((1024 * 1024) + 15) /
+                                sizeof(unsigned long long)];
+#elif defined(__DAVECC_HAS_HEAP_LOCK__)
 
 #if defined(__DAVECC_NATIVE_LINUX__)
 static unsigned int native_heap_lock;

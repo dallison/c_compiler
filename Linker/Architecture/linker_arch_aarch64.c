@@ -139,6 +139,12 @@ static void HandlePICRelocation(
       }
       break;
 
+    case R_AARCH64_TLSGD_ADR_PAGE21:
+    case R_AARCH64_TLSGD_ADD_LO12_NC:
+    case R_AARCH64_TLSGD_ADR_PREL21:
+      DynamicLinkerNoteTLSGD(dynamic, symbol);
+      break;
+
     case R_AARCH64_CALL_PLT:
       if (symbol != NULL) {
         symbol->got_index = append_func_to_got(dynamic, symbol);
@@ -519,11 +525,38 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_AARCH64_TLSGD_ADR_PREL21:
       break;
 
-    case R_AARCH64_TLSGD_ADR_PAGE21:
-      break;
+    case R_AARCH64_TLSGD_ADR_PAGE21: {
+      if (linker->dynamic_linker == NULL ||
+          linker->dynamic_linker->got_group == NULL) {
+        LinkerError(file, "TLSGD relocation in a link with no GOT");
+        return;
+      }
+      uint64_t got_address = linker->dynamic_linker->got_group->address;
+      uint64_t addr =
+          got_address + (uint64_t)symbol->got_index * 8 + (uint64_t)A;
+      uint32_t instruction = EncodeAdrp(0, P, addr);
+      instruction =
+          (instruction & ~0x1fu) | (*(uint32_t*)target_address & 0x1fu);
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
-    case R_AARCH64_TLSGD_ADD_LO12_NC:
-      break;
+    case R_AARCH64_TLSGD_ADD_LO12_NC: {
+      if (linker->dynamic_linker == NULL ||
+          linker->dynamic_linker->got_group == NULL) {
+        LinkerError(file, "TLSGD relocation in a link with no GOT");
+        return;
+      }
+      uint64_t got_address = linker->dynamic_linker->got_group->address;
+      uint64_t addr =
+          got_address + (uint64_t)symbol->got_index * 8 + (uint64_t)A;
+      uint32_t imm12 = (uint32_t)(addr & 0xfff);
+      uint32_t instruction = *(uint32_t*)target_address;
+      instruction &= ~(0xfffu << 10);
+      instruction |= imm12 << 10;
+      *(uint32_t*)target_address = instruction;
+      return;
+    }
 
     case R_AARCH64_TLSGD_MOVW_G1:
       break;

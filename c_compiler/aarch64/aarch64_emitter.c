@@ -1147,6 +1147,15 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\tmrs %s, tpidr_el0\n",
               GetRegisterName(inst, kSize64Bit, buf1, sizeof(buf1)));
       return;
+    case AARCH64_OP(tlsgd): {
+      assert(inst->operand[0] != NULL &&
+             inst->operand[0]->opcode == (TargetOpcode)AARCH64_OP(symbol));
+      TargetSymbol* symbol = (TargetSymbol*)inst->operand[0];
+      fprintf(fp, "\ttlsgd %s, %s\n",
+              GetRegisterName(inst, kSize64Bit, buf1, sizeof(buf1)),
+              TargetSymbolName(symbol->symbol, symbuf, sizeof(symbuf)));
+      return;
+    }
     case AARCH64_OP(fmv_s):
     case AARCH64_OP(fmv_d): {
       assert(inst->dest != NULL);
@@ -3234,6 +3243,32 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
         StringDestruct(&text);
         StringDestruct(&name);
       }
+      return;
+    }
+    case AARCH64_OP(tlsgd): {
+      String name = {0};
+      ProgramLabelName(&name, function, inst->operand[0]);
+      char prefix[64];
+      snprintf(prefix, sizeof(prefix), "adrp x%d, :tlsgd:", dest);
+      String text = {0};
+      StringAppend(&text, prefix);
+      StringAppend(&text, name.value);
+      AARCH64ProgramEmitFixup(
+          module, (1u << 31) | (0x10u << 24) | (uint32_t)dest,
+          kAARCH64FixupRelocationOnly, R_AARCH64_TLSGD_ADR_PAGE21, name.value, 0,
+          true, text.value);
+      StringClear(&text);
+      snprintf(prefix, sizeof(prefix), "add x%d, x%d, :tlsgd_lo12:", dest,
+               dest);
+      StringAppend(&text, prefix);
+      StringAppend(&text, name.value);
+      AARCH64AsmRegister rd = {.num = dest, .kind = AARCH64_ASM_REG_X};
+      AARCH64ProgramEmitFixup(
+          module, AARCH64EncodeAddSubImmediate(&rd, &rd, 0, false, false, 0),
+          kAARCH64FixupRelocationOnly, R_AARCH64_TLSGD_ADD_LO12_NC, name.value,
+          0, true, text.value);
+      StringDestruct(&text);
+      StringDestruct(&name);
       return;
     }
     case AARCH64_OP(gotaddr): {

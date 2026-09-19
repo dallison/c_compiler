@@ -85,7 +85,7 @@ int DaveEHFrameWalkFrame(const DaveEHFrameRegisters* regs,
   if (regs == 0 || out == 0 || regs->rbp == 0) {
     return 0;
   }
-#if defined(__arm__)
+#if defined(__arm__) || defined(__i386__)
   {
     uintptr_t* frame = (uintptr_t*)regs->rbp;
     out->caller = *regs;

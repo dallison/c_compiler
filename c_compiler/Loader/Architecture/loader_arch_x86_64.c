@@ -113,9 +113,15 @@ static void InitGOTPLT(LoadedDynamicLibrary* lib, void* data) {
   if (pltgot == NULL) {
     return;
   }
-  uint64_t* resolver_data = (uint64_t*)pltgot;
-  resolver_data[1] = (uint64_t)(uintptr_t)lib;
-  resolver_data[2] = (uint64_t)(uintptr_t)data;
+  if (lib->loader != NULL && lib->loader->arch->ignore_vaddr) {
+    uint32_t* resolver_data = (uint32_t*)pltgot;
+    resolver_data[1] = (uint32_t)(uintptr_t)lib;
+    resolver_data[2] = (uint32_t)(uintptr_t)data;
+  } else {
+    uint64_t* resolver_data = (uint64_t*)pltgot;
+    resolver_data[1] = (uint64_t)(uintptr_t)lib;
+    resolver_data[2] = (uint64_t)(uintptr_t)data;
+  }
 }
 
 static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
@@ -125,10 +131,18 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
                                    char* target_address,
                                    bool lazy) {
   (void)lazy;
+  bool elf32 = lib->loader != NULL && lib->loader->arch->ignore_vaddr;
   switch (ELF_R_TYPE(reloc->info)) {
     case R_X86_64_64:
       if (symbol == NULL) {
         LoaderError("Relocation refers on undefined symbol '%s'\n", sym_name);
+      } else if (elf32) {
+        // R_386_32 / R_386_GLOB_DAT share this type number.  i386 GOT and
+        // data words are 32 bits and the interpreter translates linked
+        // addresses on access, so store the linked value.
+        uint32_t linked = *(uint32_t*)target_address +
+                          (uint32_t)reloc->addend + (uint32_t)symbol->value;
+        *(uint32_t*)target_address = linked;
       } else {
         *(uint64_t*)target_address = RuntimeAddress(
             lib, *(uint64_t*)target_address + symbol->value + reloc->addend);
@@ -138,6 +152,9 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
     case R_X86_64_GLOB_DAT:
       if (symbol == NULL) {
         LoaderError("Relocation refers on undefined symbol '%s'\n", sym_name);
+      } else if (elf32) {
+        *(uint32_t*)target_address =
+            (uint32_t)(symbol->value + reloc->addend);
       } else {
         *(uint64_t*)target_address =
             RuntimeAddress(lib, symbol->value + reloc->addend);
@@ -145,11 +162,17 @@ static void ApplyGOTDataRelocation(LoadedDynamicLibrary* lib,
       break;
 
     case R_X86_64_RELATIVE:
-      // These come from SHT_RELA, where the addend alone is the link-time
-      // value; the place contributes nothing.  The linker also leaves that
-      // value in the place so a native ld.so and this loader agree, so adding
-      // the two would double the address.
-      *(uint64_t*)target_address = RuntimeAddress(lib, reloc->addend);
+      if (elf32) {
+        uint32_t linked =
+            *(uint32_t*)target_address + (uint32_t)reloc->addend;
+        *(uint32_t*)target_address = linked;
+      } else {
+        // These come from SHT_RELA, where the addend alone is the link-time
+        // value; the place contributes nothing.  The linker also leaves that
+        // value in the place so a native ld.so and this loader agree, so adding
+        // the two would double the address.
+        *(uint64_t*)target_address = RuntimeAddress(lib, reloc->addend);
+      }
       break;
 
     default:
@@ -166,14 +189,16 @@ static void ApplyGOTPLTRelocation(LoadedDynamicLibrary* lib,
   switch (ELF_R_TYPE(reloc->info)) {
     case R_X86_64_JUMP_SLOT:
       if (lazy) {
-        *(uint64_t*)target_address =
-            RuntimeAddress(lib, *(uint64_t*)target_address);
-      } else {
-        if (symbol == NULL) {
-          LoaderError("Relocation refers on undefined symbol '%s'\n", sym_name);
-        } else {
-          *(uint64_t*)target_address = RuntimeAddress(lib, symbol->value);
+        if (lib->loader == NULL || !lib->loader->arch->ignore_vaddr) {
+          *(uint64_t*)target_address =
+              RuntimeAddress(lib, *(uint64_t*)target_address);
         }
+      } else if (symbol == NULL) {
+        LoaderError("Relocation refers on undefined symbol '%s'\n", sym_name);
+      } else if (lib->loader != NULL && lib->loader->arch->ignore_vaddr) {
+        *(uint32_t*)target_address = (uint32_t)symbol->value;
+      } else {
+        *(uint64_t*)target_address = RuntimeAddress(lib, symbol->value);
       }
       break;
 

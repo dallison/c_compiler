@@ -57,14 +57,8 @@ int main(int argc, char * argv[]) {
   
   int32_t loader_flags = trace_instructions ? LOADER_MAP_SYMTAB : 0;
 
-  // The environment variable LD_BIND_NOW tells the dynamic loader to
-  // replace the GOT entries for functions with the function address
-  // at load time rather than delaying the resolution to the first
-  // call.  It needs to be set to a non-empty string.
-  char* bind_now = getenv("LD_BIND_NOW");
-  if (bind_now == NULL || bind_now[0] == '\0') {
-    loader_flags |= LOADER_LAZY_RESOLVE;
-  }
+  // Lazy PLT binding leaves cross-DSO calls unresolved on the RISC-V
+  // interpreter.  Bind eagerly, matching x86_64 and AArch64.
   // The LD_TRACE_LOADED_OBJECTS variable shows the loaded objects
   // and doesn't run the program.
   char* ld_trace = getenv("LD_TRACE_LOADED_OBJECTS");

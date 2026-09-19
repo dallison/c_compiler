@@ -681,14 +681,17 @@ davecc_guest_libc(libcx86.a x86
   EXTRA_C libc/guest_heap.c
   RUNTIME
     "x86 support/cxx_guard.s"
+    "x86 support/eh_transfer.s"
     "x86 support/setjmp.s"
     "x86 support/longjmp.s"
     "x86 support/stdio_aliases.s"
     "x86 support/syscall.s"
   SHARED_RUNTIME
     "x86 support/cxx_guard.s"
+    "x86 support/eh_transfer.s"
     "x86 support/setjmp.s"
     "x86 support/longjmp.s"
+    "x86 support/stdio_aliases.s"
     "x86 support/syscall.s"
 )
 davecc_guest_libc(libcriscv.a riscv
@@ -742,6 +745,7 @@ davecc_guest_libc(libcarm.a arm
 davecc_guest_libc(libcpcode.a pcode
   SHARED
   CFLAGS -O1
+  EXTRA_C libc/guest_heap.c
   RUNTIME ${DAVECC_PCODE_RUNTIME}
   EXCLUDE libc/eh_frame.c
 )

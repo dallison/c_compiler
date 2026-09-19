@@ -92,11 +92,8 @@ bool AARCH64RuntimeInit(AARCH64Runtime* runtime, const char* filename,
   StringInit(&path, filename);
 
   int32_t loader_flags = trace_instructions ? LOADER_MAP_SYMTAB : 0;
-  char* bind_now = getenv("LD_BIND_NOW");
-  if (mode == kAARCH64ModeInterpret &&
-      (bind_now == NULL || bind_now[0] == '\0')) {
-    loader_flags |= LOADER_LAZY_RESOLVE;
-  }
+  // Lazy PLT binding leaves cross-DSO calls unresolved on the interpreter
+  // (and on macOS under PAC/BTI).  Bind eagerly, matching x86_64.
   char* ld_trace = getenv("LD_TRACE_LOADED_OBJECTS");
   if (ld_trace != NULL && ld_trace[0] != '\0') {
     print_libraries_only = true;

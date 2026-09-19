@@ -49,15 +49,9 @@ int main(int argc, char *argv[]) {
   PCodeInterpreterInit(&interpreter);
   PCodeInterpreterSetDisassemble(trace_instructions);
   
-  // The environment variable LD_BIND_NOW tells the dynamic loader to
-  // replace the GOT entries for functions with the function address
-  // at load time rather than delaying the resolution to the first
-  // call.  It needs to be set to a non-empty string.
-  char* bind_now = getenv("LD_BIND_NOW");
+  // Lazy PLT binding leaves cross-DSO calls unresolved.  Bind eagerly,
+  // matching x86_64 and AArch64.
   int32_t loader_flags = 0;
-  if (bind_now == NULL || bind_now[0] == '\0') {
-    loader_flags |= LOADER_LAZY_RESOLVE;
-  }
   
   // The LD_TRACE_LOADED_OBJECTS variable shows the loaded objects
   // and doesn't run the program.

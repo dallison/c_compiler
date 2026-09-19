@@ -29,6 +29,7 @@ DECLARE_INST_FUNC(adds);
 DECLARE_INST_FUNC(adr);
 DECLARE_INST_FUNC(adrp);
 DECLARE_INST_FUNC(gotaddr);
+DECLARE_INST_FUNC(tlsgd);
 DECLARE_INST_FUNC(cmn);
 DECLARE_INST_FUNC(cmp);
 DECLARE_INST_FUNC(madd);
@@ -262,6 +263,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(adr);
   INST(adrp);
   INST(gotaddr);
+  INST(tlsgd);
   INST(cmn);
   INST(cmp);
   INST(madd);
@@ -823,6 +825,8 @@ static void AssembleAddSub(AARCH64Assembler* assembler, int opcode, int s, bool 
       shifted = true;
     } else if (StringEqualCaseBlind(&ASM.lex.spelling, "tprel_lo12_nc")) {
       reloc_type = R_AARCH64_TLSLE_ADD_TPREL_LO12_NC;
+    } else if (StringEqualCaseBlind(&ASM.lex.spelling, "tlsgd_lo12")) {
+      reloc_type = R_AARCH64_TLSGD_ADD_LO12_NC;
     } else {
       AssemblerError(&ASM, "Unsupported ADD relocation modifier");
       return;
@@ -1055,6 +1059,33 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
     return;
   }
   int32_t instruction_offset = (int32_t)AssemblerCurrentAddress(&ASM);
+  if (LexLookingAt(&ASM.lex, TOK(colon))) {
+    LexNextToken(&ASM.lex);
+    if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+      AssemblerError(&ASM, "Expected relocation modifier");
+      return;
+    }
+    int reloc_type;
+    if (op == 1 && StringEqualCaseBlind(&ASM.lex.spelling, "tlsgd")) {
+      reloc_type = R_AARCH64_TLSGD_ADR_PAGE21;
+    } else if (op == 1 && StringEqualCaseBlind(&ASM.lex.spelling, "got")) {
+      reloc_type = R_AARCH64_ADR_GOT_PAGE;
+    } else {
+      AssemblerError(&ASM, "Unsupported ADRP relocation modifier");
+      return;
+    }
+    LexNextToken(&ASM.lex);
+    LexMatch(&ASM.lex, TOK(colon));
+    AssemblerSymbol* modifier_sym =
+        GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+    LexNextToken(&ASM.lex);
+    AssemblerAddRelocationForSymbol(&ASM, modifier_sym, reloc_type,
+                                    ASMO.current_section, instruction_offset,
+                                    0);
+    AssemblerEmitWord(&ASM, ASMO.current_section,
+                      (1u << 31) | (0x10u << 24) | (uint32_t)rd.num);
+    return;
+  }
   bool known = false;
   int64_t addr = 0;
   AssemblerSymbol* sym = NULL;
@@ -1149,6 +1180,37 @@ static void Assemble_gotaddr(AARCH64Assembler* assembler) {
       (int32_t)AssemblerCurrentAddress(&ASM), 0);
   AssembleLoadStoreUnsignedImmediate(assembler, &rd, &rd, /*size=*/3, /*fp=*/0,
                                      /*opc=*/1, /*v=*/0, /*offset=*/0);
+}
+
+// tlsgd xd, symbol -- address of the symbol's TLSGD GOT pair.  This is the
+// adrp/add pair the AArch64 ABI uses, written as one instruction because the
+// add needs a :tlsgd_lo12: operand.
+static void Assemble_tlsgd(AARCH64Assembler* assembler) {
+  Register rd = GetRegister(assembler);
+  if (!NeedComma(assembler)) {
+    return;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected symbol for tlsgd");
+    return;
+  }
+  if (rd.kind != kX) {
+    AssemblerError(&ASM, "tlsgd needs a 64 bit register");
+    return;
+  }
+  AssemblerSymbol* sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
+  LexNextToken(&ASM.lex);
+
+  AssemblerAddRelocationForSymbol(
+      &ASM, sym, R_AARCH64_TLSGD_ADR_PAGE21, ASMO.current_section,
+      (int32_t)AssemblerCurrentAddress(&ASM), 0);
+  AssemblerEmitWord(&ASM, ASMO.current_section,
+                    (1u << 31) | (0x10u << 24) | (uint32_t)rd.num);
+
+  AssemblerAddRelocationForSymbol(
+      &ASM, sym, R_AARCH64_TLSGD_ADD_LO12_NC, ASMO.current_section,
+      (int32_t)AssemblerCurrentAddress(&ASM), 0);
+  AssembleAddSubImmediate(assembler, &rd, &rd, 0, rd.kind == kX, 0, 0, 0);
 }
 
 static void AssembleDataProcessing3Source(AARCH64Assembler* assembler,
