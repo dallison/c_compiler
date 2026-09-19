@@ -292,13 +292,11 @@ static void FreeRegisters(ARMRegisterAllocator* allocator,
       if (ARMIsVarRegister(op)) {
         continue;
       }
-      // Inside a loop, a value that is live-out of the block is read again on a
-      // later iteration through the back edge, so its linear "last use" in this
-      // block is not really its last use.  Freeing its register here would let a
-      // subsequent temp reuse it and clobber the still-live value.  Restrict
-      // this to loop blocks so straight-line code keeps freeing registers
-      // promptly (avoiding needless register pressure).
-      if (inst->block != NULL && inst->block->loop_nesting > 0 &&
+      // A live-out value is read in a successor (including a loop back edge).
+      // The static use count hits zero after the last read in this block,
+      // which is not its last read.  Freeing the register here lets a later
+      // temp clobber the successor's incoming copy.
+      if (inst->block != NULL &&
           BitSetContains(&inst->block->output_ids, op->id)) {
         continue;
       }

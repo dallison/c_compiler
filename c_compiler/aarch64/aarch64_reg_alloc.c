@@ -239,13 +239,13 @@ static void FreeRegisters(AARCH64RegisterAllocator* allocator,
       if (SharesRegisterWithVariable(allocator, op)) {
         continue;
       }
-      // Inside a loop, a value that is live-out of the block is read again on a
-      // later iteration through the back edge, so its linear "last use" in this
-      // block is not really its last use.  Freeing its register here would let a
-      // subsequent temp reuse it and clobber the still-live value (LICM-hoisted
-      // invariants are the usual case).  Restrict this to loop blocks so
-      // straight-line code keeps freeing registers promptly.
-      if (inst->block != NULL && inst->block->loop_nesting > 0 &&
+      // A live-out value is read in a successor (including a loop back edge).
+      // The static use count hits zero after the last read in *this* block,
+      // which is not its last read.  Freeing the register here lets a later
+      // temp in the same block reuse it and clobber the successor's incoming
+      // copy (path::lexically_normal at -O2 reused the `this` pointer's
+      // register for a local string and then loaded size from that string).
+      if (inst->block != NULL &&
           BitSetContains(&inst->block->output_ids, op->id)) {
         continue;
       }
@@ -354,6 +354,41 @@ static bool IsUnsafeSpillVictim(TargetInstruction* owner, BitSet* reentered) {
   return false;
 }
 
+static TargetInstruction* InstructionRegisterHolder(TargetInstruction* inst);
+static bool BlockIsLoopHeader(TargetGenerator* gen, TargetBasicBlock* block);
+
+// Copies of the same pointer can share one physical register while only one
+// of them is the owner.  A processed read in a block we can reenter may name
+// the other copy, so spilling the owner still leaves that read pointing at
+// whatever overwrites the register (path::lexically_normal at -O2).
+static bool RegisterNamedByProcessedRead(TargetGenerator* gen,
+                                         TargetRegister* reg,
+                                         BitSet* reentered) {
+  if (reg == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    if (block == NULL || !BitSetContains(reentered, block->block_id) ||
+        TargetBasicBlockIsEmpty(block) || !BlockIsLoopHeader(gen, block)) {
+      continue;
+    }
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = inst == block->end_code ? NULL : TargetNext(inst)) {
+      if ((inst->flags & TARGET_INST_PROCESSED) == 0) {
+        continue;
+      }
+      for (size_t op = 0; op < TARGET_MAX_OPERANDS; op++) {
+        TargetInstruction* holder = InstructionRegisterHolder(inst->operand[op]);
+        if (holder != NULL && holder->reg == reg) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 // Returns the cheapest value whose register can be taken without breaking a
 // read that has already been handed that register, or NULL when there is none.
 // |unsafe|, when not NULL, receives the cheapest value that could be taken if
@@ -394,8 +429,14 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
             continue;
           }
           if (AARCH64IsVarRegister(owner) && owner->users.length == 0) {
-            // A write-only variable has no valid first-use spill site and no
-            // future read that requires its physical register.
+            // Reads of a dest-shared value are recorded on the defining add
+            // rather than the variable, so users.length == 0 does not mean
+            // write-only.  Releasing a non-short-lived varreg here is what
+            // handed `this`, `&part`, and a local bool slot the same
+            // physical register in path::lexically_normal.
+            if (!IsShortLivedVarReg(allocator, owner)) {
+              continue;
+            }
             regs[j].base.owner = NULL;
             continue;
           }
@@ -408,6 +449,8 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
           bool shares_register_with_a_value =
               BitSetContains(&allocator->shared_varregs, owner->id);
           if (IsUnsafeSpillVictim(owner, &reentered) ||
+              RegisterNamedByProcessedRead(&allocator->g->base, owner->reg,
+                                           &reentered) ||
               shares_register_with_a_value) {
             if (cost < unsafe_cost) {
               unsafe_cost = cost;
@@ -1023,6 +1066,31 @@ static void AllocateRegisterOnce(AARCH64RegisterAllocator* allocator,
         AllocateRegister(allocator, inst->dest);
       }
     }
+    if (inst->dest->reg != NULL && inst->block != NULL &&
+        AARCH64IsVarRegister(inst->dest) &&
+        (opcode == AARCH64_OP(add) || opcode == AARCH64_OP(sub)) &&
+        inst->operand[0] != NULL &&
+        ((int)inst->operand[0]->opcode == (int)AARCH64_OP(fp) ||
+         (inst->operand[0]->reg != NULL &&
+          inst->operand[0]->reg->num == AARCH64_FP_REG))) {
+      // Variable registers are pre-assigned a physical register.  Several
+      // unrelated locals can share one (the pre-pass sees each as unused).
+      // Writing `&part` (fp-relative) into a varreg that still holds the
+      // `this` copy a processed inner-loop header will reread is what made
+      // path::lexically_normal keep only the first component at -O2.
+      BitSet reentered;
+      BitSetInit(&reentered);
+      TargetBasicBlockReachableAfter(&allocator->g->base, inst->block,
+                                     &reentered);
+      if (RegisterNamedByProcessedRead(&allocator->g->base, inst->dest->reg,
+                                       &reentered)) {
+        // Leave the physical register owned so the replacement allocation
+        // cannot pick it again.  The dest instruction is detached from it.
+        inst->dest->reg = NULL;
+        AllocateVariableRegister(allocator, inst->dest);
+      }
+      BitSetDestruct(&reentered);
+    }
     if (inst->dest->reg == NULL) {
       return;
     }
@@ -1233,8 +1301,75 @@ static void AllocateRegisterOnce(AARCH64RegisterAllocator* allocator,
   // If nobody is using this register free it up immediately.
   // TODO: argument registers are not used explicitly but can't be freed here.
   if (inst->uses == 0 && !reg->base.reserved &&
-      !SharesRegisterWithVariable(allocator, inst)) {
+      !SharesRegisterWithVariable(allocator, inst) &&
+      !(AARCH64IsVarRegister(inst) && !IsShortLivedVarReg(allocator, inst))) {
     FreeRegister(allocator, reg);
+  }
+}
+
+static bool BlockIsLoopHeader(TargetGenerator* gen, TargetBasicBlock* block) {
+  for (size_t i = 0; i < block->in_edges.length; i++) {
+    TargetBasicBlock* predecessor =
+        VectorGet(&gen->basic_blocks, block->in_edges.value.w[i]);
+    if (predecessor != NULL &&
+        BitSetContains(&predecessor->dominators, block->block_id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static TargetInstruction* InstructionRegisterHolder(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return NULL;
+  }
+  if (inst->reg != NULL) {
+    return inst;
+  }
+  if (inst->dest != NULL && inst->dest->reg != NULL) {
+    return inst->dest;
+  }
+  return NULL;
+}
+
+static void ClaimOperandRegister(AARCH64RegisterAllocator* allocator,
+                                 TargetInstruction* operand) {
+  TargetInstruction* holder = InstructionRegisterHolder(operand);
+  if (holder == NULL || holder->reg == NULL ||
+      IsShortLivedVarReg(allocator, holder) ||
+      ((int)holder->opcode == (int)AARCH64_OP(spill)) ||
+      (holder->flags & TARGET_INST_SPILLED) != 0) {
+    return;
+  }
+  // The header operand must be the owner even when another copy that shares
+  // the register still has a positive use count.  Otherwise FindSpillVictim
+  // sees the other copy, decides it is safe to evict, and the header reload
+  // still names the stolen register.
+  holder->reg->owner = holder;
+}
+
+// A processed header read already names a physical register.  An inner
+// loop header that does not dominate the outer latch still rereads that
+// register on the next outer iteration, so pin every processed natural-loop
+// header's operands, not only headers that dominate the current block.
+static void ClaimRegistersNamedByProcessedHeaders(
+    AARCH64RegisterAllocator* allocator) {
+  TargetGenerator* gen = &allocator->g->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* header = gen->basic_blocks.value.p[i];
+    if (header == NULL || TargetBasicBlockIsEmpty(header) ||
+        !BlockIsLoopHeader(gen, header)) {
+      continue;
+    }
+    for (TargetInstruction* inst = header->code; inst != NULL;
+         inst = inst == header->end_code ? NULL : TargetNext(inst)) {
+      if ((inst->flags & TARGET_INST_PROCESSED) == 0) {
+        continue;
+      }
+      for (size_t op = 0; op < TARGET_MAX_OPERANDS; op++) {
+        ClaimOperandRegister(allocator, inst->operand[op]);
+      }
+    }
   }
 }
 
@@ -1312,6 +1447,7 @@ static void InitializeBasicBlockRegisters(AARCH64RegisterAllocator* allocator,
       inst->reg->owner = inst;
     }
   }
+  ClaimRegistersNamedByProcessedHeaders(allocator);
 }
 
 static void ProcessBlock(TargetBasicBlock* block, void* data) {
@@ -1533,6 +1669,19 @@ static TargetInstruction* CreateCallResultCopy(TargetInstruction* call) {
   return TargetNewInstruction1(opcode, call);
 }
 
+static void MarkAvoidArgRegInstructions(AARCH64RegisterAllocator* allocator) {
+  TargetGenerator* gen = &allocator->g->base;
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = inst == block->end_code ? NULL : TargetNext(inst)) {
+      if ((inst->flags & AARCH64_INST_AVOID_ARG_REGS) != 0) {
+        BitSetInsert(&allocator->preserved_instructions, inst->id);
+      }
+    }
+  }
+}
+
 void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
   // The hidden aggregate-result pointer has an ABI-selected dedicated
   // register. Reserve that physical register before allocating ordinary
@@ -1547,6 +1696,7 @@ void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
   }
   TargetMarkCallPreservedInstructions(&allocator->g->base,
                                       &allocator->preserved_instructions);
+  MarkAvoidArgRegInstructions(allocator);
   if (TargetMaterializePreservedCallResults(
           &allocator->g->base, &allocator->preserved_instructions,
           CreateCallResultCopy)) {
@@ -1554,6 +1704,7 @@ void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
     BitSetClear(&allocator->preserved_instructions);
     TargetMarkCallPreservedInstructions(&allocator->g->base,
                                         &allocator->preserved_instructions);
+    MarkAvoidArgRegInstructions(allocator);
   }
   BuildShortLivedVarRegSet(allocator);
 

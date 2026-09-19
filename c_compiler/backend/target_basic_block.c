@@ -1409,8 +1409,14 @@ void TargetBuildBasicBlockInputsAndOutputs(TargetGenerator* gen) {
   bool has_non_dominator_tree_edge = HasNonDominatorTreeEdge(gen);
   ResetAllBlockLiveness(gen);
   ResetAllInstructionUses(gen);
-  if (gen->virtuals->calls_may_stay_in_block &&
-      gen->exception_edges.length == 0) {
+  // Dataflow liveness is the only walk that models loop-carried values
+  // through back edges.  The uses-count walk under-counts a value that is
+  // read once in a loop header, so the allocator reuses its register in the
+  // body and the next iteration loads through a stale pointer (observed in
+  // path::lexically_normal at -O2).  Exception edges are already linked into
+  // out_edges by AddExceptionHandlerEdges, so they do not need a separate
+  // fallback.
+  if (gen->virtuals->calls_may_stay_in_block) {
     TargetBuildDataflowLiveness(gen);
   } else {
     BuildInputsAndOutputs(gen, gen->entry_block,

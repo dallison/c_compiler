@@ -114,6 +114,35 @@ static bool WritesFixedValue(TargetInstruction* inst,
          (WritesRegisterOperand(inst) && inst->operand[0] == value);
 }
 
+static bool InstructionWritesOpcode(TargetInstruction* inst,
+                                    AARCH64Opcode opcode) {
+  if (inst->dest != NULL && inst->dest->opcode == (TargetOpcode)opcode) {
+    return true;
+  }
+  return WritesRegisterOperand(inst) && inst->operand[0] != NULL &&
+         inst->operand[0]->opcode == (TargetOpcode)opcode;
+}
+
+// Incoming x0 is the AAPCS64 integer/pointer result register; incoming v0
+// is the FP result register.  The peephole treats those as distinct
+// TargetInstructions from resulti/resultf/resultd, so a later store of the
+// return value looks like a different write and would otherwise clobber a
+// still-live arg0 (`this` in ios_base::setf, for example).
+static bool WritesAliasedReturnRegister(TargetInstruction* incoming,
+                                        TargetInstruction* inst) {
+  if (incoming == NULL) {
+    return false;
+  }
+  if (incoming->opcode == (TargetOpcode)AARCH64_OP(r0)) {
+    return InstructionWritesOpcode(inst, AARCH64_OP(resulti));
+  }
+  if (incoming->opcode == (TargetOpcode)AARCH64_OP(d0)) {
+    return InstructionWritesOpcode(inst, AARCH64_OP(resultf)) ||
+           InstructionWritesOpcode(inst, AARCH64_OP(resultd));
+  }
+  return false;
+}
+
 static bool IsCoalescibleIncomingVariable(TargetInstruction* inst) {
   if (!AARCH64IsVarRegister(inst)) {
     return false;
@@ -197,7 +226,8 @@ static bool EliminateLeafIncomingMove(AARCH64Generator* generator,
       }
     }
     if (WritesFixedValue(inst, source) ||
-        inst->opcode == (TargetOpcode)AARCH64_OP(asm)) {
+        inst->opcode == (TargetOpcode)AARCH64_OP(asm) ||
+        WritesAliasedReturnRegister(source, inst)) {
       return false;
     }
   }

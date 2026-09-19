@@ -1141,6 +1141,11 @@ static TargetInstruction* SetDestOrMove(AARCH64Generator* g,
 static TargetInstruction* HoldCallTarget(AARCH64Generator* g,
                                          TargetInstruction* from) {
   TargetInstruction* hold = Emit(g, NewInstruction(AARCH64_OP(tmp)));
+  // Keep the hold out of x0..x7: those are written while it is still live.
+  // Without this, register pressure in e.g. std::format puts the callback
+  // in x3 and the fourth argument overwrites it, so blr jumps to a stack
+  // address.
+  hold->flags |= AARCH64_INST_AVOID_ARG_REGS;
   TargetInstruction* mv =
       Emit(g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), from), 0));
   mv->dest = hold;
@@ -4170,6 +4175,9 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
                      AARCH64_OP(fldr), arg,
                      GetIntConstant(g, NULL, kTargetType32Bit, 0)),
                  kSize64Bit));
+      if (staged_target != NULL) {
+        staged->flags |= AARCH64_INST_AVOID_ARG_REGS;
+      }
       VectorSet(&staged_register_args, i - 1, staged);
       continue;
     }
@@ -4184,6 +4192,13 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
                                     ? AARCH64_OP(fmov)
                                     : AARCH64_OP(mov);
     TargetInstruction* staged = Emit(g, NewInstruction(AARCH64_OP(tmp)));
+    // On an indirect call the hold and the staged args are live together
+    // across reverse-order writes into x0..x7.  Keep those tmps out of the
+    // argument registers so a later `mov xn, ...` cannot clobber a value
+    // still needed for `blr` or for another argument.
+    if (staged_target != NULL) {
+      staged->flags |= AARCH64_INST_AVOID_ARG_REGS;
+    }
     TargetInstruction* move =
         Emit(g, CopyInstructionSize(NewInstruction1(move_opcode, arg), 0));
     move->dest = staged;
