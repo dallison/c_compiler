@@ -7,6 +7,38 @@ matching hardware, as native code those interpreters can jump to).
 
 Build and install instructions live in [docs/building.md](docs/building.md).
 
+## Features
+
+`davecc` is a complete toolchain, not a frontend bolted onto someone else's
+assembler and libc. One driver compiles, assembles, and links for every
+supported architecture; one guest library and one interpreter go with each
+target. Cross compilation is the normal path: any host can produce a binary
+for any listed target.
+
+Every architecture also has an in-tree interpreter, so you can run the
+result on the machine that built it. Interpretation is slower than native
+code, but you do not need the matching CPU, a board, or a VM to test an
+AArch64, RISC-V, ARM, 65C02, or wasm32 program.
+
+**65C02 is a fully supported target.** It has a code generator, assembler,
+linker ABI, guest libc, C++ standard library, and a support ROM. You can
+compile real C++ (default C++20) and run it on a 6502-class computer — or
+under the `6502` interpreter while you develop. That combination is rare:
+most C++ toolchains stopped caring about the 6502 decades ago. The ABI,
+zero-page registers, heap and stack, and syscalls are in
+[docs/6502.md](docs/6502.md).
+
+Other things the tree includes:
+
+- C89 through C23, and C++98 through the C++29 draft, with a C++20 guest
+  standard library
+- Hosted Linux images (static, and dynamic on x86_64 / ARM / RV64) plus
+  freestanding interpreter-profile ELF (and wasm32 / WASI)
+- In-tree assemblers, linker, loader, archiver, disassemblers, and
+  `elfdump`
+- Native execution on a matching x86_64 or AArch64 host (`-n`), still
+  using DaveCC's loader and guest libc rather than the Linux ABI
+
 ## What the toolchain is
 
 `davecc` is a GCC/Clang-style driver. Suffix decides the stage:
@@ -100,8 +132,14 @@ only supported environment is `davecc`.
 All objects are little-endian. 6502/65C02 default to `-O2` and optimize for
 size. eBPF, ESP32, wasm32, and 6502/65C02 are static-only.
 
+6502 and 65C02 share one ABI, guest archive, and interpreter. Zero-page
+registers, the software stack and heap, the support ROM, IEEE-754 single
+precision (there is no binary64), and the syscall surface are documented in
+[docs/6502.md](docs/6502.md).
+
 The `x86` interpreter profile is loaded by the `x86_64` interpreter, which
 accepts ELF32 i386 and decodes IA-32 (cdecl, 32-bit stack slots, `int $0x80`).
+
 
 ## Object and executable files
 
@@ -124,8 +162,8 @@ with `elfdump` (`-H` header, `-S` sections, `-s` symbols, `-l` segments,
 `-r` relocs, `-c` disassemble).
 
 Linux static executables use DaveCC's CRT (`*_linux_start.o`) and enter at
-`_start`. Interpreter-profile x86_64 / AArch64 / ARM / p-code images enter at
-`main` unless you pass `-e`. Dynamic Linux images request the native
+`_start`. Interpreter-profile x86 / x86_64 / AArch64 / ARM / p-code images
+enter at `main` unless you pass `-e`. Dynamic Linux images request the native
 interpreter:
 
 | Triple | `PT_INTERP` | Shared libc |
@@ -273,6 +311,7 @@ bazel-bin/arm -i program          # -i is accepted; ARM is interpret-only
 bazelisk build //:davecc //:libc_x86 //:x86_64
 bazel-bin/davecc -target x86 program.c -o program
 bazel-bin/x86_64 -i program
+
 
 # RISC-V 64 (the `riscv` interpreter also loads RV32 ELF)
 bazelisk build //:davecc //:libc_riscv //:riscv
