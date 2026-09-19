@@ -216,6 +216,7 @@ sh_binary(
         ":bpf",
         ":davecc",
         ":davecc_bin_scripts",
+        ":daveld",
         ":elfdump",
         ":esp32",
         ":esp32_start",
@@ -1360,6 +1361,16 @@ cc_binary(
     deps = [
         ":disassembler",
         ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "daveld",
+    srcs = ["daveld/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":linker",
         ":utils",
     ],
 )
@@ -5681,6 +5692,23 @@ sh_test(
     srcs = ["tests/6502_indirect_copy_test.sh"],
     args = ["$(rootpath :davecc)"],
     data = [":davecc"],
+)
+
+sh_test(
+    name = "daveld_relocatable_test",
+    srcs = ["tests/daveld_relocatable_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :daveld)",
+        "$(rootpath :elfdump)",
+        "$(rootpath :x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":daveld",
+        ":elfdump",
+        ":x86_64",
+    ],
 )
 
 sh_test(

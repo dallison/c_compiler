@@ -37,6 +37,7 @@ These land in `bazel-bin/` (Bazel) or the CMake build directory:
 | Binary | Role |
 | --- | --- |
 | `davecc` | Compiler, assembler driver, and linker |
+| `daveld` | Standalone linker (`-r` writes a relocatable object) |
 | `archivist` | Archive (`ar`) tool used to pack guest libc |
 | `run` | Multi-target program launcher |
 | `6502`, `riscv`, `aarch64`, `arm`, `x86_64`, `esp32`, `pcode`, `bpf` | Target interpreters |

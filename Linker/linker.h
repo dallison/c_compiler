@@ -206,6 +206,7 @@ typedef struct Linker {
   // object files.  Taken from the first object file read.
   const ELFFormatOps* ops;
   bool building_dso;          // True if building a shared object.
+  bool relocatable;           // True if producing a relocatable object (ld -r).
   bool fully_static;          // Generating fully static executable.
   bool bind_now;              // Resolve all dynamic symbols before entry.
   bool defer_program_init;    // Let the program entry run executable arrays.

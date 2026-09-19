@@ -147,6 +147,7 @@ chmod 0644 "$actual_bindir/davecc-env.sh"
 
 install_required_executable davecc "$actual_libexecdir/davecc"
 install_required_executable archivist "$actual_libexecdir/archivist"
+install_required_executable daveld "$actual_bindir/daveld"
 install_required_executable 6502 "$actual_libexecdir/6502"
 install_required_executable 6502asm "$actual_libexecdir/6502asm"
 install_required_executable aarch64asm "$actual_libexecdir/aarch64asm"

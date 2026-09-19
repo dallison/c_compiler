@@ -34,8 +34,8 @@ Other things the tree includes:
   standard library
 - Hosted Linux images (static, and dynamic on x86_64 / ARM / RV64) plus
   freestanding interpreter-profile ELF (and wasm32 / WASI)
-- In-tree assemblers, linker, loader, archiver, disassemblers, and
-  `elfdump`
+- In-tree assemblers, linker (`daveld`, including `daveld -r`), loader,
+  archiver, disassemblers, and `elfdump`
 - Native execution on a matching x86_64 or AArch64 host (`-n`), still
   using DaveCC's loader and guest libc rather than the Linux ABI
 
@@ -147,6 +147,8 @@ accepts ELF32 i386 and decodes IA-32 (cdecl, 32-bit stack slots, `int $0x80`).
 
 `davecc -c` writes a relocatable **`ET_REL`** object. The linker writes an
 **`ET_EXEC`** executable, or **`ET_DYN`** for `-shared` / `-dynamic`.
+`daveld -r` (or `davecc -r`) concatenates objects back into one **`ET_REL`**
+file, keeping relocations so a later link can finish the job.
 
 Typical contents:
 
@@ -233,6 +235,7 @@ Same code as the integrated assemblers; they read `.s` and write ELF objects.
 
 | Binary | Role |
 | --- | --- |
+| `daveld` | Standalone linker; `daveld -r` combines objects into one `.o` |
 | `archivist` | `ar`-like archiver for ELF objects and wasm32 objects |
 | `run` | Peek at an ELF `e_machine` and exec the matching interpreter |
 | `moduledump` | Pretty-print C++20 `.dcm` module files |

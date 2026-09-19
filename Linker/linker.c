@@ -135,6 +135,7 @@ void LinkerInit(Linker* linker) {
   // Default to ELF64; overridden from the first object file read.
   linker->ops = ELFFormatOpsFor(true);
   linker->building_dso = false;
+  linker->relocatable = false;
   linker->so_name = -1;
   linker->fully_static = false;
   linker->bind_now = false;
@@ -1826,10 +1827,70 @@ static void ClearSegmentFixedAddresses(Segment* segment) {
   }
 }
 
-// Link all files passed to the linker together.  This gathers the sections
+// Place each input section at its offset inside the concatenated output
+// section.  The output section itself stays at address 0 so symbol values
+// remain section-relative, which is what a later link of the -r object
+// expects.
+static void AssignRelocatableSectionAddresses(Linker* linker) {
+  for (size_t i = 0; i < linker->section_groups.length; i++) {
+    SectionGroup* group = linker->section_groups.value.p[i];
+    uint64_t offset = 0;
+    for (size_t j = 0; j < group->components.length; j++) {
+      GroupedSection* gsect = group->components.value.p[j];
+      switch (gsect->source) {
+        case kGroupedSectionExisting: {
+          ELFReaderSection* section = gsect->section.existing;
+          section->address = offset;
+          section->offset = offset;
+          offset += section->header->size;
+          break;
+        }
+        case kGroupedSectionNew: {
+          ELFWriterSection* section = gsect->section.new;
+          section->address = offset;
+          offset += ELFWriterSectionContentsGetLength(section->contents);
+          break;
+        }
+        case kGroupedSectionPadding:
+          offset += gsect->section.padding->size;
+          break;
+      }
+    }
+    group->address = 0;
+  }
+}
+
+// Relocatable (-r) link: merge same-named sections and keep relocations.
+// Commons stay COMMON.  Undefined symbols stay undefined.
+static void LinkerLinkRelocatable(Linker* linker) {
+  linker->fully_static = true;
+  ResolveUndefinedSymbols(linker);
+  LinkerGarbageCollectSections(linker);
+
+  GroupSections(linker, SHT(progbits), 0);
+  GroupSections(linker, SHT(nobits), 0);
+  GroupSections(linker, SHT(note), 0);
+  if (linker->elf_machine_type == ELF_MACHINE_TYPE_ARM) {
+    GroupSections(linker, SHT(ARM_EXIDX), 0);
+  }
+  LinkerGroupArraySections(linker);
+
+  AssignRelocatableSectionAddresses(linker);
+  LinkerAssignSymbolAddresses(linker);
+  LinkerAssignSectionSymbolAddresses(linker);
+
+  if (linker->print_symbol_tables) {
+    LinkerPrintSymbolTables(linker);
+  }
+}
+
 // with the same names into the same place and assigns addresses to the
 // sections and symbols.
 void LinkerLinkAllFiles(Linker* linker) {
+  if (linker->relocatable) {
+    LinkerLinkRelocatable(linker);
+    return;
+  }
   // Create the segments from the config.
   bool code_init_done = false;
   bool data_init_done = false;
@@ -2419,8 +2480,234 @@ static bool SetEntryAddress(Linker* linker, ELFWriterFile* elf) {
   return true;
 }
 
+static void BuildRelocatableOutputSection(Linker* linker, ELFWriterFile* elf,
+                                          SectionGroup* group) {
+  ELFWriterSectionContents* contents =
+      NewELFWriterSectionContents(kSectionContentsMulti);
+  ELFWriterSection* section = ELFWriterAddSection(elf, &group->name,
+                                                  group->type,
+                                                  group->flags,
+                                                  group->alignment,
+                                                  contents, 0);
+  if (LinkerIsArrayOutputType(group->type)) {
+    section->header.entsize = LinkerPointerSize(linker);
+  }
+  for (size_t i = 0; i < group->components.length; i++) {
+    GroupedSection* gsect = group->components.value.p[i];
+    ELFWriterSectionContents* part_contents;
+    switch (gsect->source) {
+      case kGroupedSectionExisting: {
+        ELFReaderSection* part = gsect->section.existing;
+        if (part->header->type != SHT(nobits)) {
+          part_contents = NewELFWriterSectionContents(kSectionContentsRaw);
+          part_contents->size = part->header->size;
+          part_contents->data.raw = part->contents;
+        } else {
+          part_contents = NewELFWriterSectionContents(kSectionContentsNobits);
+          part_contents->size = part->header->size;
+        }
+        part->output_section_index = section->index;
+        break;
+      }
+      case kGroupedSectionNew: {
+        part_contents = gsect->section.new->contents;
+        gsect->section.new->index = section->index;
+        break;
+      }
+      case kGroupedSectionPadding:
+        part_contents = gsect->section.padding;
+        break;
+    }
+    VectorAppend(&contents->data.multi, part_contents);
+  }
+}
+
+static int32_t RelocatableSymbolSectionIndex(const LinkerSymbol* sym) {
+  if (sym->header != NULL && sym->header->shndx == SHN_ABS) {
+    return SHN_ABS;
+  }
+  if (sym->header != NULL && sym->header->shndx == SHN_COM) {
+    return SHN_COM;
+  }
+  if (!sym->defined) {
+    return 0;
+  }
+  if (sym->section == NULL) {
+    return SHN_COM;
+  }
+  if (sym->section->discarded) {
+    return -1;
+  }
+  return sym->section->output_section_index;
+}
+
+static uint64_t RelocatableSymbolValue(const LinkerSymbol* sym,
+                                       int32_t section_index) {
+  if (section_index == SHN_COM && sym->header != NULL) {
+    return sym->header->value;
+  }
+  if (section_index == 0) {
+    return 0;
+  }
+  return sym->address;
+}
+
+static void AddRelocatableSymbol(ELFWriterFile* elf, LinkerSymbol* sym) {
+  if (sym->header != NULL && ELF_ST_TYPE(sym->header->info) == STT(section)) {
+    return;
+  }
+  if (sym->section != NULL && sym->section->discarded) {
+    return;
+  }
+  int32_t section_index = RelocatableSymbolSectionIndex(sym);
+  if (section_index < 0) {
+    return;
+  }
+  bool is_local = sym->header != NULL &&
+                  ELF_ST_BIND(sym->header->info) == STB(local);
+  if (is_local && section_index == 0 && sym->header != NULL &&
+      sym->header->shndx != 0 && sym->header->shndx < SHN_LORESERVE) {
+    return;
+  }
+  int32_t type = STT(notype);
+  int32_t binding = is_local ? STB(local) : STB(global);
+  if (sym->header != NULL) {
+    type = ELF_ST_TYPE(sym->header->info);
+    binding = ELF_ST_BIND(sym->header->info);
+  }
+  ELFWriterAddSymbol(elf, &sym->name, section_index, type, binding, sym->size,
+                     RelocatableSymbolValue(sym, section_index), &sym->index);
+}
+
+static void AddRelocatableSymbolList(void* entry, void* data) {
+  Vector* bucket = entry;
+  ELFWriterFile* elf = data;
+  for (size_t i = 0; i < bucket->length; i++) {
+    AddRelocatableSymbol(elf, bucket->value.p[i]);
+  }
+}
+
+static void AddRelocatableSectionSymbols(Linker* linker, ELFWriterFile* elf) {
+  int synthetic = 0;
+  for (size_t i = 0; i < linker->section_groups.length; i++) {
+    SectionGroup* group = linker->section_groups.value.p[i];
+    if (group->components.length == 0) {
+      continue;
+    }
+    int32_t output_index = -1;
+    for (size_t j = 0; j < group->components.length; j++) {
+      GroupedSection* gsect = group->components.value.p[j];
+      if (gsect->source == kGroupedSectionExisting) {
+        output_index = gsect->section.existing->output_section_index;
+        break;
+      }
+      if (gsect->source == kGroupedSectionNew) {
+        output_index = gsect->section.new->index;
+        break;
+      }
+    }
+    if (output_index <= 0) {
+      continue;
+    }
+    int32_t unused_index;
+    ELFWriterAddSymbol(elf, &group->name, output_index, STT(section),
+                       STB(local), 0, 0, &unused_index);
+    for (size_t j = 0; j < group->components.length; j++) {
+      GroupedSection* gsect = group->components.value.p[j];
+      if (gsect->source != kGroupedSectionExisting) {
+        continue;
+      }
+      ELFReaderSection* section = gsect->section.existing;
+      String name = {0};
+      StringPrintf(&name, ".Lsec.%d", synthetic++);
+      ELFWriterAddSymbol(elf, &name, output_index, STT(notype), STB(local), 0,
+                         section->address, &section->section_symbol_index);
+      StringDestruct(&name);
+    }
+  }
+}
+
+static void EmitRelocatableRelocations(Linker* linker, ELFWriterFile* elf) {
+  for (size_t i = 0; i < linker->files.length; i++) {
+    ObjectFile* file = linker->files.value.p[i];
+    for (size_t j = 0; j < file->relocations.length; j++) {
+      Relocation* reloc = file->relocations.value.p[j];
+      if (reloc->section == NULL || reloc->section->discarded ||
+          reloc->section->output_section_index <= 0) {
+        continue;
+      }
+      int32_t symbol_index = -1;
+      int64_t addend = reloc->addend;
+      if (reloc->symbol_section != NULL) {
+        if (reloc->symbol_section->discarded) {
+          continue;
+        }
+        symbol_index = reloc->symbol_section->section_symbol_index;
+        addend += (int64_t)reloc->symbol_value;
+      } else {
+        LinkerSymbol* symbol =
+            ObjectFileFindSymbol(file, reloc->symbol_name.value);
+        if (symbol == NULL || symbol->index < 0) {
+          LinkerError(file, "Undefined symbol %s used in relocation",
+                      reloc->symbol_name.value);
+          continue;
+        }
+        symbol_index = symbol->index;
+      }
+      if (symbol_index < 0) {
+        LinkerError(file, "Cannot emit relocation for %s",
+                    reloc->symbol_name.value);
+        continue;
+      }
+      ELFWriterAddRelocationWithAddend(
+          elf, reloc->section->output_section_index,
+          reloc->offset + (int64_t)reloc->section->address, symbol_index,
+          addend, reloc->type);
+    }
+  }
+}
+
+static bool WriteRelocatableOutput(Linker* linker, FILE* output) {
+  ELFWriterFile elf;
+  ELFWriterFileInit(&elf, ET(rel), linker->elf_machine_type, linker->elf_flags,
+                    NULL, linker->ops->is_64_bit, true);
+  elf.header.entry = 0;
+
+  ELFWriterSectionContents* null_contents =
+      NewELFWriterSectionContents(kSectionContentsRaw);
+  ELFWriterAddSection(&elf, NULL, SHT(null), 0, 8, null_contents, 0);
+
+  for (size_t i = 0; i < linker->section_groups.length; i++) {
+    SectionGroup* group = linker->section_groups.value.p[i];
+    if (group->components.length == 0) {
+      continue;
+    }
+    BuildRelocatableOutputSection(linker, &elf, group);
+  }
+
+  AddRelocatableSectionSymbols(linker, &elf);
+  for (size_t i = 0; i < linker->files.length; i++) {
+    ObjectFile* file = linker->files.value.p[i];
+    HashTableTraverse(&file->local_symbol_table, AddRelocatableSymbolList,
+                       &elf);
+  }
+  elf.last_local_symbol_index = (int32_t)elf.symbol_table.length - 1;
+  HashTableTraverse(&linker->global_symbol_table, AddRelocatableSymbolList,
+                     &elf);
+
+  EmitRelocatableRelocations(linker, &elf);
+
+  ELFWriterFileWrite(&elf, output);
+  ELFWriterFileDestruct(&elf);
+  return linker->num_errors == 0;
+}
+
 // Write the output file.
 bool LinkerWriteOutput(Linker* linker, FILE* output) {
+  if (linker->relocatable) {
+    return WriteRelocatableOutput(linker, output);
+  }
+
   ELFWriterFile elf;
 
   ELFWriterFileInit(&elf,

@@ -95,7 +95,8 @@ already **5–8×** the DaveCC binary, for one ISA and no linker.
 
 ### Linker
 
-DaveCC has no standalone `ld`; the linker is built into `davecc`.
+The linker is built into `davecc` and also shipped as standalone `daveld`.
+`daveld -r` writes a relocatable object (GNU `ld -r`).
 
 | Piece | `.c` | `.h` | Total |
 |---|---:|---:|---:|
