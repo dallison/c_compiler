@@ -5135,6 +5135,14 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
     // inliner can snapshot their bodies into the caller before IR is stored.
     bool analyze_now = func->is_constructor || func->is_destructor ||
                        compiler->lto;
+    // Instantiated function templates have to be analyzed under their own
+    // substitution.  Doing it here, while the caller is still being analyzed,
+    // reuses the caller's template arguments: `any(in_place_type<T>, Args&&...)`
+    // compiled from `make_any<FromList>({4, 5}, 6)` saw make_any's `Args` (`int`)
+    // and tried to construct `FromList` from that int at -O2.
+    if (func->template_origin != NULL) {
+      analyze_now = false;
+    }
     if (!analyze_now) {
       return false;
     }
@@ -5218,6 +5226,24 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
       func->symbol == compiler->current_function->info.function.symbol ||
       func->unknown_args || func->varargs) {
     return false;
+  }
+  for (size_t i = 0; i < func->prototype.length; i++) {
+    Symbol* formal = func->prototype.value.p[i];
+    if (formal == NULL) {
+      continue;
+    }
+    if (formal->flags.is_parameter_pack) {
+      return false;
+    }
+    // initializer_list is a {pointer, size} view of a caller temporary array.
+    // Inlining copies that view into a local and re-analyzes the body; at -O2
+    // any::emplace<FromList>({1,2,3}, 4) then constructed FromList from a
+    // stale/empty list (total 84 instead of 10).
+    if (TypeIsCXXInitializerList(formal->type) ||
+        (formal->type != NULL && TypeIsReference(formal->type) &&
+         TypeIsCXXInitializerList(formal->type->next))) {
+      return false;
+    }
   }
   const int kMaxInlineNodeCount = OptLevel3() ? 250 : 100;
   const int kMaxUnmarkedInlineNodeCount = 40;
@@ -10390,7 +10416,25 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       CalleeNamesItsFunction(node->left)) {
     FunctionInfo* func =
         FunctionInfoForCallInlining(&node->left->type->info.function);
-    if (!TypeIsStructOrUnion(return_type) && FunctionCanBeInlined(func)) {
+    bool has_initializer_list_actual = false;
+    if (node->children != NULL) {
+      for (size_t i = 0; i < node->children->length; i++) {
+        ASTNode* actual = node->children->value.p[i];
+        if (actual == NULL) {
+          continue;
+        }
+        if (actual->op == AST_OP(braced_init) ||
+            (actual->flags & kASTCXXBracedTemporary) != 0 ||
+            TypeIsCXXInitializerList(actual->type) ||
+            (actual->type != NULL && TypeIsReference(actual->type) &&
+             TypeIsCXXInitializerList(actual->type->next))) {
+          has_initializer_list_actual = true;
+          break;
+        }
+      }
+    }
+    if (!TypeIsStructOrUnion(return_type) && !has_initializer_list_actual &&
+        FunctionCanBeInlined(func)) {
       // Clone the function's body and replace the call by
       // an inline_call node.
       ASTNode* inline_call = InlineFunctionCall(func, node);

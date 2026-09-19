@@ -3185,15 +3185,18 @@ static TargetInstruction* LowerResult(AARCH64Generator* g, IRNode* node) {
       assert(false);
       COMPILER_UNREACHABLE();
   }
-#if 0
-  TargetInstruction* result = Materialize(g, node->inputs.value.p[0]);
-  TargetInstruction* result_reg = Emit(g, NewInstruction(result_reg_opcode));
-  return Emit(g, NewInstruction2(opcode, result_reg, result));
-#else
   TargetInstruction* result = Materialize(g, node->inputs.value.p[0]);
   TargetInstruction* result_reg = EmitSymbol(g, NewInstruction(result_reg_opcode));
-  return SetLoweredNode(node, SetDestOrMove(g, result, result_reg, opcode));
-#endif
+  // Always write the ABI return register here, at the resulti/resulta
+  // instruction.  Redirecting the producer into x0/d0 places that write at the
+  // producer, which may sit before a later call that clobbers the return
+  // register.  any::__initialize's placement-new pointer was dest-shared into
+  // x0, Manager::table() then overwrote it, and emplace returned the ops table
+  // instead of the constructed object.
+  TargetInstruction* move =
+      Emit(g, CopyInstructionSize(NewInstruction1(opcode, result), 0));
+  move->dest = result_reg;
+  return SetLoweredNode(node, result_reg);
 }
 
 static TargetInstruction* LowerCaptureVectorResult(AARCH64Generator* g,

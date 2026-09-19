@@ -3665,7 +3665,13 @@ static TargetInstruction* LowerResult(ARMGenerator* g, IRNode* node) {
   }
   TargetInstruction* result = Materialize(g, node->inputs.value.p[0]);
   TargetInstruction* result_reg = EmitSymbol(g, NewInstruction(result_reg_opcode));
-  return SetLoweredNode(node, SetDestOrMove(g, result, result_reg, opcode));
+  // Write the ABI return register at this IR position.  Dest-sharing the
+  // producer into r0 would place that write before a later call that clobbers
+  // it (the same any::__initialize / table() collision as on AArch64).
+  TargetInstruction* move =
+      Emit(g, CopyInstructionSize(NewInstruction1(opcode, result), 0));
+  move->dest = result_reg;
+  return SetLoweredNode(node, result_reg);
 #endif
 }
 
