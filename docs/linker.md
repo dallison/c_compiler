@@ -13,6 +13,23 @@ davecc -target x86_64 -r a.c b.c -o combined.o      # same, from sources
 
 `davecc -r` forwards `-r` to the linker and does not add CRT or libc.
 
+To use the system ELF linker instead of daveld, pass `-fuse-ld=` on a
+Linux target:
+
+```sh
+davecc -target aarch64-unknown-linux-davecc -fuse-ld=ld program.c -o program
+davecc -target x86_64-unknown-linux-davecc -fuse-ld=/usr/bin/ld.lld foo.c
+```
+
+`-fuse-ld` accepts `ld`, `native`, `bfd`, `gold`, `lld`, or a path. The
+driver still compiles and assembles, still adds the Linux CRT and
+`libc*_linux.a`, then translates its daveld flags (`-I` becomes
+`--dynamic-linker`, `-bind-now` becomes `-z now`, and so on) and execs
+that linker. Apple `ld` is rejected: it links Mach-O, not ELF. This is
+meant for Linux hosts; on macOS, point `-fuse-ld=` at a GNU/`lld` binary
+or a wrapper that runs `ld` inside Colima. `-flto` objects stay with
+daveld.
+
 Inspect the result with `elfdump` (`-H` header, `-S` sections, `-s` symbols,
 `-l` segments, `-r` relocs). Flags for `elfdump` and the other host tools
 are in [tools.md](tools.md).
@@ -64,7 +81,8 @@ them for the loader.
 
 ## Command-line flags
 
-These are the flags `daveld` and the driver both pass to the linker:
+These are the flags `daveld` and the driver both pass to the linker.
+`-fuse-ld=` is a `davecc` driver flag only.
 
 | Flag | Meaning |
 | --- | --- |

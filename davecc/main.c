@@ -726,6 +726,285 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
 // Flags the driver consumes itself rather than passing to the compiler.  They
 // are parsed by ParseArg below; this table exists so that -help documents them
 // alongside the compiler's own options.
+static bool StartsWithCString(const char* text, const char* prefix) {
+  return strncmp(text, prefix, strlen(prefix)) == 0;
+}
+
+static bool FindProgramOnPath(const char* name, char* out, size_t out_size) {
+  const char* path_env = getenv("PATH");
+  if (path_env == NULL) {
+    return false;
+  }
+  char* paths = strdup(path_env);
+  if (paths == NULL) {
+    return false;
+  }
+  bool found = false;
+  char* save = NULL;
+  for (char* directory = strtok_r(paths, ":", &save); directory != NULL;
+       directory = strtok_r(NULL, ":", &save)) {
+    if (directory[0] == '\0') {
+      directory = ".";
+    }
+    char candidate[PATH_MAX];
+    int n = snprintf(candidate, sizeof(candidate), "%s/%s", directory, name);
+    if (n < 0 || (size_t)n >= sizeof(candidate)) {
+      continue;
+    }
+    if (access(candidate, X_OK) == 0) {
+      n = snprintf(out, out_size, "%s", candidate);
+      found = n >= 0 && (size_t)n < out_size;
+      break;
+    }
+  }
+  free(paths);
+  return found;
+}
+
+static const char* NativeLinkerProgramName(const char* spec) {
+  if (strcmp(spec, "native") == 0 || strcmp(spec, "ld") == 0) {
+    return "ld";
+  }
+  if (strcmp(spec, "bfd") == 0) {
+    return "ld.bfd";
+  }
+  if (strcmp(spec, "gold") == 0) {
+    return "ld.gold";
+  }
+  if (strcmp(spec, "lld") == 0) {
+    return "ld.lld";
+  }
+  return spec;
+}
+
+static bool PathLooksLikeAppleLd(const char* path) {
+#if defined(__APPLE__)
+  if (strstr(path, "/Xcode.app/") != NULL ||
+      strstr(path, "/CommandLineTools/") != NULL) {
+    return true;
+  }
+  char resolved[PATH_MAX];
+  const char* real = realpath(path, resolved);
+  const char* check = real != NULL ? real : path;
+  return strcmp(check, "/usr/bin/ld") == 0 ||
+         strcmp(check, "/usr/bin/ld64") == 0;
+#else
+  (void)path;
+  return false;
+#endif
+}
+
+static bool ResolveNativeLinker(const char* spec, char* out, size_t out_size) {
+  const char* name = NativeLinkerProgramName(spec);
+  if (strchr(name, '/') != NULL) {
+    if (access(name, X_OK) != 0) {
+      fprintf(stderr, "unable to execute linker '%s'\n", name);
+      return false;
+    }
+    int n = snprintf(out, out_size, "%s", name);
+    return n >= 0 && (size_t)n < out_size;
+  }
+  if (!FindProgramOnPath(name, out, out_size)) {
+    fprintf(stderr, "unable to find linker '%s' on PATH\n", name);
+    return false;
+  }
+  return true;
+}
+
+static bool NativeLinkerSpecIsPath(const char* spec) {
+  return strchr(NativeLinkerProgramName(spec), '/') != NULL;
+}
+
+static bool ValidateNativeLinkerRequest(const char* spec,
+                                       Vector* compiler_options,
+                                       char* resolved, size_t resolved_size) {
+  if (OptionBoolValue(kOptionLTO, compiler_options, false)) {
+    fprintf(stderr, "-fuse-ld cannot link -flto IR objects; use the "
+                    "built-in linker or compile without -flto\n");
+    return false;
+  }
+  String* target = OptionStringValue(kOptionTarget, compiler_options);
+  const TargetRuntime* runtime =
+      FindTargetRuntime(target == NULL ? NULL : target->value);
+  if (runtime == NULL || runtime->os != kTargetOSLinux) {
+    fprintf(stderr,
+            "-fuse-ld requires a Linux target "
+            "(for example aarch64-unknown-linux-davecc)\n");
+    return false;
+  }
+  if (!ResolveNativeLinker(spec, resolved, resolved_size)) {
+    return false;
+  }
+  if (!NativeLinkerSpecIsPath(spec) && PathLooksLikeAppleLd(resolved)) {
+    fprintf(stderr,
+            "-fuse-ld: '%s' is Apple ld, which cannot link ELF; pass "
+            "-fuse-ld=/path/to/ld.bfd or ld.lld, or run davecc on Linux\n",
+            resolved);
+    return false;
+  }
+  return true;
+}
+
+static bool AppendJoinedLinkerArg(Vector* native_args, Vector* owned,
+                                  const char* flag, const char* value) {
+  String* arg = NewEmptyString();
+  StringPrintf(arg, "%s%s", flag, value);
+  VectorAppend(owned, arg);
+  VectorAppend(native_args, arg->value);
+  return true;
+}
+
+static String* NativeLink(const char* spec, int argc, char** argv,
+                          Vector* compiler_options) {
+  char linker_path[PATH_MAX];
+  if (!ValidateNativeLinkerRequest(spec, compiler_options, linker_path,
+                                   sizeof(linker_path))) {
+    return NULL;
+  }
+
+  Vector native_args = {0};
+  Vector owned = {0};
+  VectorInit(&native_args);
+  VectorInit(&owned);
+  VectorAppend(&native_args, linker_path);
+
+  const char* output = NULL;
+  const char* chdir_dir = NULL;
+  bool ok = true;
+  for (int i = 1; i < argc && ok; i++) {
+    const char* arg = argv[i];
+    if (strcmp(arg, "-o") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "-o needs an output filename\n");
+        ok = false;
+        break;
+      }
+      VectorAppend(&native_args, (void*)"-o");
+      output = argv[++i];
+      VectorAppend(&native_args, (void*)output);
+    } else if (strcmp(arg, "-e") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "-e needs a symbol name\n");
+        ok = false;
+        break;
+      }
+      VectorAppend(&native_args, (void*)"-e");
+      VectorAppend(&native_args, argv[++i]);
+    } else if (strcmp(arg, "-rpath") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "-rpath needs a path\n");
+        ok = false;
+        break;
+      }
+      VectorAppend(&native_args, (void*)"-rpath");
+      VectorAppend(&native_args, argv[++i]);
+    } else if (strcmp(arg, "-origin") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "-origin needs a value\n");
+        ok = false;
+        break;
+      }
+      if (!AppendJoinedLinkerArg(&native_args, &owned, "-Ttext-segment=",
+                                 argv[++i])) {
+        ok = false;
+      }
+    } else if (strcmp(arg, "-chdir") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "-chdir needs a directory\n");
+        ok = false;
+        break;
+      }
+      chdir_dir = argv[++i];
+    } else if (strcmp(arg, "-T") == 0 || strcmp(arg, "--script") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "%s needs a linker script\n", arg);
+        ok = false;
+        break;
+      }
+      VectorAppend(&native_args, (void*)"-T");
+      VectorAppend(&native_args, argv[++i]);
+    } else if (StartsWithCString(arg, "--script=")) {
+      VectorAppend(&native_args, (void*)"-T");
+      VectorAppend(&native_args, (void*)(arg + 9));
+    } else if (StartsWithCString(arg, "-t") ||
+               StartsWithCString(arg, "--layout=")) {
+      fprintf(stderr,
+              "-fuse-ld does not support DaveCC built-in layouts; "
+              "pass -T / -Wl,-T for a GNU ld script\n");
+      ok = false;
+    } else if (strcmp(arg, "-dynamic") == 0 ||
+               strcmp(arg, "-defer-init") == 0 ||
+               StartsWithCString(arg, "-X")) {
+      continue;
+    } else if (strcmp(arg, "-bind-now") == 0) {
+      VectorAppend(&native_args, (void*)"-z");
+      VectorAppend(&native_args, (void*)"now");
+    } else if (strcmp(arg, "-whole-archive") == 0) {
+      VectorAppend(&native_args, (void*)"--whole-archive");
+    } else if (strcmp(arg, "-no-whole-archive") == 0) {
+      VectorAppend(&native_args, (void*)"--no-whole-archive");
+    } else if (StartsWithCString(arg, "-I") && arg[2] != '\0') {
+      VectorAppend(&native_args, (void*)"--dynamic-linker");
+      VectorAppend(&native_args, (void*)(arg + 2));
+    } else if (strcmp(arg, "-static") == 0 || strcmp(arg, "-shared") == 0 ||
+               strcmp(arg, "-r") == 0 || strcmp(arg, "--relocatable") == 0 ||
+               strcmp(arg, "--gc-sections") == 0 ||
+               strcmp(arg, "--no-gc-sections") == 0 ||
+               strcmp(arg, "--print-gc-sections") == 0 ||
+               StartsWithCString(arg, "-l") || StartsWithCString(arg, "-L")) {
+      VectorAppend(&native_args, (void*)arg);
+    } else if (arg[0] == '-') {
+      VectorAppend(&native_args, (void*)arg);
+    } else {
+      VectorAppend(&native_args, (void*)arg);
+    }
+  }
+
+  String* result = NULL;
+  if (ok) {
+    if (output == NULL) {
+      output = "a.out";
+    }
+    VectorAppend(&native_args, NULL);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+      perror("Cannot start native linker");
+      ok = false;
+    } else if (pid == 0) {
+      if (chdir_dir != NULL && chdir(chdir_dir) != 0) {
+        perror(chdir_dir);
+        _exit(1);
+      }
+      execv(linker_path, (char**)native_args.value.p);
+      perror(linker_path);
+      _exit(127);
+    } else {
+      int status;
+      while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+          perror("Cannot wait for native linker");
+          ok = false;
+          break;
+        }
+      }
+      if (ok && !(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+        ok = false;
+      }
+    }
+    if (ok) {
+      result = NewString(output);
+    }
+  }
+
+  for (size_t i = 0; i < owned.length; i++) {
+    StringDelete(owned.value.p[i]);
+  }
+  VectorDestruct(&owned);
+  VectorDestruct(&native_args);
+  return result;
+}
+
 static CompilerOptionDefinition driver_options[] = {
     {"-help", kCompilerOptionBool, kOptionDriver, false,
      "Print this help and exit; -h and --help do the same", kOptionGroupOverall},
@@ -763,6 +1042,10 @@ static CompilerOptionDefinition driver_options[] = {
      "Report the sections --gc-sections discards", kOptionGroupLinking},
     {"-Wl,", kCompilerOptionString, kOptionDriver, true,
      "Pass <arg> straight through to the linker", kOptionGroupLinking, "arg"},
+    {"-fuse-ld", kCompilerOptionString, kOptionDriver, false,
+     "Link with the native ELF linker <name> (ld, lld, bfd, gold, or a path); "
+     "Linux targets only",
+     kOptionGroupLinking, "name"},
     {NULL, 0, 0, false, NULL},
 };
 
@@ -773,7 +1056,9 @@ static void PrintDriverHelp(void) {
       "Inputs are handled by suffix: .c, .cc, .cpp, .cxx, .cppm, .ixx, .h, "
       ".hpp and .hxx are compiled, .s is assembled, and .o and everything "
       "else is given to the linker.  Without -c, -S, -fsyntax-only or -r the "
-      "result is linked into an executable.  -r writes a relocatable object.",
+      "result is linked into an executable.  -r writes a relocatable object.  "
+      "-fuse-ld=ld (or lld, bfd, gold, or a path) calls the native ELF "
+      "linker instead of daveld; Linux targets only.",
       0);
   PrintCompilerHelp(driver_options);
   printf("\n");
@@ -790,7 +1075,8 @@ static int ParseArg(int i, int argc, char** argv,
                     Vector* object_files,
                     Vector* asm_files, Vector* args_from_file,
                     bool* run_compiler, bool* compile_only,
-                    bool* read_stdin, int* num_inputs) {
+                    bool* read_stdin, int* num_inputs,
+                    const char** fuse_ld) {
   if (strcmp(argv[i], "-") == 0) {
     // A lone "-" means: read the translation unit from standard input.  It is
     // only valid as the sole input file (enforced by the caller).
@@ -961,6 +1247,21 @@ static int ParseArg(int i, int argc, char** argv,
     } else if (StringEqual(option, "-r") ||
                StringEqual(option, "--relocatable")) {
       VectorAppend(linker_args, argv[i]);
+    } else if (StringEqual(option, "-fuse-ld") ||
+               StringStartsWith(option, "-fuse-ld=")) {
+      const char* value = NULL;
+      if (argv[i][8] == '=') {
+        value = argv[i] + 9;
+        if (value[0] == '\0') {
+          fprintf(stderr, "-fuse-ld= needs a linker name or path\n");
+          exit(1);
+        }
+      } else if (i + 1 < argc && argv[i + 1][0] != '-') {
+        value = argv[++i];
+      } else {
+        value = "ld";
+      }
+      *fuse_ld = value;
     } else if (StringStartsWith(option, "-l")) {
       VectorAppend(linker_args, argv[i]);
     } else if (StringStartsWith(option, "-L")) {
@@ -1023,7 +1324,7 @@ static int ParseArg(int i, int argc, char** argv,
                      new_argc, new_argv, compiler_args,
                      linker_args, object_files, asm_files,
                      args_from_file, run_compiler, compile_only,
-                     read_stdin, num_inputs);
+                     read_stdin, num_inputs, fuse_ld);
       }
       free(new_argv);
     }
@@ -1631,6 +1932,7 @@ int main(int argc, char * argv[]) {
   bool run_compiler = false;
   bool read_stdin = false;
   int num_inputs = 0;
+  const char* fuse_ld = NULL;
   
   int i = 1;
   bool help = false;
@@ -1642,7 +1944,7 @@ int main(int argc, char * argv[]) {
     }
     i = ParseArg(i, argc, argv, &compiler_args, &linker_args, &object_files,
                  &asm_files, &args_from_file, &run_compiler, &compile_only,
-                 &read_stdin, &num_inputs);
+                 &read_stdin, &num_inputs, &fuse_ld);
   }
   
   if (help) {
@@ -1672,6 +1974,14 @@ int main(int argc, char * argv[]) {
     target_opts = ParseOptions((int)compiler_args.length,
                  (char**)compiler_args.value.p,
                  &compiler_options);
+  }
+
+  if (fuse_ld != NULL && !compile_only) {
+    char unused_linker[PATH_MAX];
+    if (!ValidateNativeLinkerRequest(fuse_ld, &compiler_options, unused_linker,
+                                     sizeof(unused_linker))) {
+      exit(1);
+    }
   }
   
   String* deps_file = OptionStringValue(kOptionDepsFile, &compiler_options);
@@ -2086,11 +2396,17 @@ int main(int argc, char * argv[]) {
     // Wasm objects are modules rather than ELF, so they need their own
     // linker; the argument surface is the same one the driver already built.
     String* target_option = OptionStringValue(kOptionTarget, &compiler_options);
-    String* output =
-        Wasm32IsTargetName(target_option == NULL ? NULL : target_option->value)
-            ? Wasm32Link((int)linker_args.length,
-                         (char**)linker_args.value.p)
-            : Link((int)linker_args.length, (char**)linker_args.value.p);
+    String* output = NULL;
+    if (Wasm32IsTargetName(target_option == NULL ? NULL
+                                                 : target_option->value)) {
+      output = Wasm32Link((int)linker_args.length,
+                          (char**)linker_args.value.p);
+    } else if (fuse_ld != NULL) {
+      output = NativeLink(fuse_ld, (int)linker_args.length,
+                          (char**)linker_args.value.p, &compiler_options);
+    } else {
+      output = Link((int)linker_args.length, (char**)linker_args.value.p);
+    }
     if (output == NULL) {
       status = 1;
     } else {

@@ -7,7 +7,8 @@ matching hardware, as native code those interpreters can jump to).
 
 Build and install instructions live in [docs/building.md](docs/building.md).
 The linker (`daveld`, including scripts and `-r`) is documented in
-[docs/linker.md](docs/linker.md). Assemblers, `elfdump`, `ltodump`,
+[docs/linker.md](docs/linker.md). On Linux, `davecc -fuse-ld=ld` can
+exec the system ELF linker instead of daveld. Assemblers, `elfdump`, `ltodump`,
 disassemblers, interpreters, and the other host tools are in
 [docs/tools.md](docs/tools.md). Compiler builtins and per-architecture
 intrinsics are in [docs/builtins.md](docs/builtins.md).

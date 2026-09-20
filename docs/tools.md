@@ -49,7 +49,9 @@ davecc -target x86_64 foo.s bar.o lib.a -o prog
 
 `-flto` writes DCCLTO03 IR objects instead of machine code; inspect those
 with `ltodump`. Linker flags and scripts are in [linker.md](linker.md).
-Builtins are in [builtins.md](builtins.md).
+On a Linux host (or via Colima), `-fuse-ld=ld` / `-fuse-ld=lld` asks the
+driver to exec the native ELF linker instead of daveld; that is Linux
+targets only. Builtins are in [builtins.md](builtins.md).
 
 After install, `davecc` itself lives in `libexec/davecc`. The `davecc-*`
 wrappers on `PATH` add `-target` and the guest include / libc paths.
