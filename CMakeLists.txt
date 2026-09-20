@@ -28,6 +28,7 @@ set(DAVECC_COMMON_INCLUDES
   c_compiler/optimization
   c_compiler/assembler
   c_compiler/util
+  c_compiler/support
   c_compiler/serialize
   c_compiler/driver
   c_compiler/lto
@@ -233,7 +234,9 @@ davecc_library(davecc_compiler
   c_compiler/backend/eh_metadata.c
   c_compiler/backend/expr_codegen.c
   c_compiler/backend/ir.c
+  c_compiler/backend/long_double_codegen.c
   c_compiler/backend/statement_codegen.c
+  c_compiler/support/fp_extended.c
   c_compiler/backend/target_basic_block.c
   c_compiler/backend/target_generator.c
   c_compiler/driver/compiler.c
@@ -810,6 +813,7 @@ davecc_guest_libc(libcxtensa.a esp32
     libc/ftoa.c
     libc/ldexp.c
     libc/log.c
+    libc/long_double.c
     libc/math_extra.c
     libc/modf.c
     libc/pow.c

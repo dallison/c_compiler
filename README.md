@@ -14,7 +14,8 @@ exec the system ELF linker instead of daveld. On macOS,
 and execs host `cc`. Assemblers, `elfdump`, `ltodump`,
 disassemblers, interpreters, and the other host tools are in
 [docs/tools.md](docs/tools.md). Compiler builtins and per-architecture
-intrinsics are in [docs/builtins.md](docs/builtins.md).
+intrinsics are in [docs/builtins.md](docs/builtins.md). Long double formats
+are in [docs/long_double.md](docs/long_double.md).
 
 ## Features
 
@@ -144,6 +145,11 @@ Darwin is AArch64 only. Omit `-target` to use the host (see above).
 | `esp32` | `xtensa-esp32` | 32 / 32 | ELF32, `EM_XTENSA` (94) | `libcxtensa.a` + `esp32_start.o` | no hosted profile |
 | `wasm32` | `wasm` | 32 / 32 | **not ELF** (WebAssembly) | `libcwasm32.a` | WASI via wasmtime |
 | `bpf` | `bpfel`, `ebpf` | 64 / 64 | ELF64, `EM_BPF` (247) | none (`-nostdlib`) | `bpf-unknown-linux-davecc` |
+
+`long double` is IEEE binary128 on AArch64, RISC-V 64/32, ARM, p-code, and
+wasm32, and the 80-bit Intel format (16-byte slot) on x86_64. Arithmetic is
+software-emulated; see [docs/long_double.md](docs/long_double.md). i386, eBPF,
+Xtensa, and 6502 still use the same encoding as `double` (or `float` on 6502).
 
 All objects are little-endian. 6502/65C02 default to `-O2` and optimize for
 size. eBPF, ESP32, wasm32, and 6502/65C02 are static-only.

@@ -11,6 +11,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "../c_compiler/support/fp_extended.h"
+
 // The algorithm for this is:
 // Build a fixed point binary number with the binary point at the
 // half way point.  For single precision this number is 256 bits long
@@ -196,9 +198,158 @@ float strtof(const char* str, char** endptr) {
   return (float)strtod(str, endptr);
 }
 
+#if defined(__DAVECC_LDBL_FORMAT__) && __DAVECC_LDBL_FORMAT__ >= 2
+static int StrtoldFormat(void) { return __DAVECC_LDBL_FORMAT__; }
+
+static long double BitsToLongDouble(FPBits bits) {
+  long double value;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+static int StartsWithIgnoreCase(const char* text, const char* prefix) {
+  while (*prefix != '\0') {
+    char a = *text++;
+    char b = *prefix++;
+    if (a >= 'A' && a <= 'Z') {
+      a = (char)(a - 'A' + 'a');
+    }
+    if (b >= 'A' && b <= 'Z') {
+      b = (char)(b - 'A' + 'a');
+    }
+    if (a != b) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static FPBits ScaleByPow10(FPBits value, int exponent, int format) {
+  if (exponent == 0) {
+    return value;
+  }
+  int n = exponent < 0 ? -exponent : exponent;
+  FPBits power = FPBitsFromI64(10, format);
+  FPBits scale = FPBitsFromI64(1, format);
+  while (n > 0) {
+    if (n & 1) {
+      scale = FPMul(scale, power, format);
+    }
+    n >>= 1;
+    if (n > 0) {
+      power = FPMul(power, power, format);
+    }
+  }
+  if (exponent < 0) {
+    return FPDiv(value, scale, format);
+  }
+  return FPMul(value, scale, format);
+}
+
+long double strtold(const char* str, char** endptr) {
+  const char* p = str;
+  while (isspace((unsigned char)*p)) {
+    p++;
+  }
+  int negative = 0;
+  if (*p == '-' || *p == '+') {
+    negative = *p == '-';
+    p++;
+  }
+  int format = StrtoldFormat();
+  if (StartsWithIgnoreCase(p, "nan")) {
+    if (endptr != NULL) {
+      *endptr = (char*)(p + 3);
+    }
+    FPBits nan_bits;
+    nan_bits.lo = 0;
+    nan_bits.hi = 0;
+    if (format == kFPExtFormatIntel80) {
+      nan_bits.lo = 0xc000000000000000ULL;
+      nan_bits.hi = (negative ? (1ULL << 15) : 0) | 0x7fffULL;
+    } else {
+      nan_bits.hi = (negative ? (1ULL << 63) : 0) | (0x7fffULL << 48) |
+                    0x0000800000000000ULL;
+    }
+    return BitsToLongDouble(nan_bits);
+  }
+  if (StartsWithIgnoreCase(p, "inf")) {
+    p += 3;
+    if (StartsWithIgnoreCase(p, "inity")) {
+      p += 5;
+    }
+    if (endptr != NULL) {
+      *endptr = (char*)p;
+    }
+    FPBits inf;
+    inf.lo = 0;
+    inf.hi = 0;
+    if (format == kFPExtFormatIntel80) {
+      inf.lo = 0x8000000000000000ULL;
+      inf.hi = (negative ? (1ULL << 15) : 0) | 0x7fffULL;
+    } else {
+      inf.hi = (negative ? (1ULL << 63) : 0) | (0x7fffULL << 48);
+    }
+    return BitsToLongDouble(inf);
+  }
+
+  FPBits ten = FPBitsFromI64(10, format);
+  FPBits value = FPBitsFromI64(0, format);
+  int fraction_digits = 0;
+  int converted = 0;
+  while (isdigit((unsigned char)*p)) {
+    value = FPAdd(FPMul(value, ten, format),
+                  FPBitsFromI64(*p - '0', format), format);
+    p++;
+    converted = 1;
+  }
+  if (*p == '.') {
+    p++;
+    while (isdigit((unsigned char)*p)) {
+      value = FPAdd(FPMul(value, ten, format),
+                    FPBitsFromI64(*p - '0', format), format);
+      p++;
+      fraction_digits++;
+      converted = 1;
+    }
+  }
+  if (!converted) {
+    if (endptr != NULL) {
+      *endptr = (char*)str;
+    }
+    return 0.0L;
+  }
+
+  int exponent = -fraction_digits;
+  if (*p == 'e' || *p == 'E') {
+    const char* exp_start = p + 1;
+    int exp_negative = *exp_start == '-';
+    if (*exp_start == '+' || *exp_start == '-') {
+      exp_start++;
+    }
+    if (isdigit((unsigned char)*exp_start)) {
+      int decimal_exp = 0;
+      do {
+        decimal_exp = decimal_exp * 10 + *exp_start++ - '0';
+      } while (isdigit((unsigned char)*exp_start));
+      p = exp_start;
+      exponent += exp_negative ? -decimal_exp : decimal_exp;
+    }
+  }
+  if (endptr != NULL) {
+    *endptr = (char*)p;
+  }
+  value = ScaleByPow10(value, exponent, format);
+  if (negative) {
+    value = FPNeg(value, format);
+  }
+  return BitsToLongDouble(value);
+}
+#else
 long double strtold(const char* str, char** endptr) {
   return (long double)strtod(str, endptr);
 }
+#endif
 
 double atof(const char* str) {
   return strtod(str, NULL);

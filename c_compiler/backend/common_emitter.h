@@ -21,6 +21,7 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp);
 void EmitBSSVariable(UninitializedStaticVariable* var, FILE* fp);
 void EmitStringLiteralSection(FILE* fp);
 void EmitLiteral(Literal* literal, FILE* fp);
+void LiteralAsmName(int literal_id, char* buf, size_t size);
 void EmitDebug(FILE* fp);
 void EmitP2Align(int alignment, FILE* fp);
 void EmitTlsDataStart(FILE* fp);

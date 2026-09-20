@@ -1709,6 +1709,7 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
     if (TypeIsStructOrUnion(arg_node->type) ||
+        TypeUsesLongDoubleRepresentation(arg_node->type) ||
         TypeIsMemberPointerAggregate(arg_node->type)) {
       PushStructArg(pcode, arg_node, &args_size);
     } else {
@@ -2101,7 +2102,7 @@ static TargetInstruction* LowerInc(PCodeGenerator* pcode, IRNode* node) {
   }
   TargetInstruction* load = Load(pcode, addr_node, ld_opcode);
   TargetInstruction* inc;
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     TargetInstruction* amount = GetLoweredNode(node->inputs.value.p[1]);
     inc = Emit(pcode,
                NewInstruction2(PCodeFpIsDoubleWidth(node->type) ? P_OP(addd)
@@ -2163,7 +2164,7 @@ static TargetInstruction* LowerDec(PCodeGenerator* pcode, IRNode* node) {
   }
   TargetInstruction* load = Load(pcode, addr_node, ld_opcode);
   TargetInstruction* inc;
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     TargetInstruction* amount = GetLoweredNode(node->inputs.value.p[1]);
     inc = Emit(pcode,
                NewInstruction2(PCodeFpIsDoubleWidth(node->type) ? P_OP(subd)
@@ -2218,14 +2219,14 @@ static int64_t CalculateTypeArgumentSize(TypeRecord* type) {
   if (type == NULL) {
     return 0;
   }
-  if (TypeIsFloatingPoint(type)) {
+  if (TypeUsesHardwareFloatRegister(type)) {
     return PCodeFpIsDoubleWidth(type) ? 8 : 4;
   }
   if (TypeIsPointerOrArray(type) || TypeIsReference(type)) {
     return 8;
   }
-  if (TypeIsStructOrUnion(type)) {
-    return type->info.struct_info->size;
+  if (TypeIsStructOrUnion(type) || TypeUsesLongDoubleRepresentation(type)) {
+    return type->size;
   }
   return type->size < 4 ? 4 : type->size;
 }

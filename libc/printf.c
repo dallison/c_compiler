@@ -31,9 +31,17 @@ extern char* __PrintScientificFormat(double f, int precision, char* buf,
                                      size_t size);
 extern char* __PrintGeneralFormat(double f, int precision, char* buf,
                                   size_t size);
+extern char* __PrintFloatFormatL(long double f, int precision, char* buf,
+                                 size_t size);
+extern char* __PrintScientificFormatL(long double f, int precision, char* buf,
+                                      size_t size);
+extern char* __PrintGeneralFormatL(long double f, int precision, char* buf,
+                                   size_t size);
 typedef double PrintfFloat;
+typedef long double PrintfLongDouble;
 #else
 typedef unsigned long long PrintfFloat;
+typedef unsigned long long PrintfLongDouble;
 #endif
 
 // Values for field_width and precision.  Positive numbers
@@ -615,7 +623,8 @@ STATIC unsigned long long GetWidthArgument(ConversionFormat* fmt, va_list* ap,
 
 STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
                             unsigned long long* value_ll, const char** value_s,
-                            char* value_c, PrintfFloat* value_f, void** value_p,
+                            char* value_c, PrintfFloat* value_f,
+                            PrintfLongDouble* value_ld, void** value_p,
                             bool* is_unsigned, bool* negative) {
   switch (cmd) {
     case 'd':
@@ -673,7 +682,7 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
           break;
         case kModLongDouble:
 #ifndef PRINTF_DISABLE_FLOAT
-          *value_f = (int)va_arg(*ap, long double);
+          *value_ld = va_arg(*ap, long double);
 #else
           *value_ll = 0;
 #endif
@@ -697,9 +706,10 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
     case 'g':
     case 'e':
       if (fmt->modifier == kModLongDouble) {
-        *value_f = (double)va_arg(*ap, long double);
+        *value_ld = va_arg(*ap, long double);
       } else {
         *value_f = va_arg(*ap, double);
+        *value_ld = (PrintfLongDouble)*value_f;
       }
       break;
 #endif
@@ -724,6 +734,7 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
   const char* value_s;
   char value_c;
   PrintfFloat value_f;
+  PrintfLongDouble value_ld = 0;
   void* value_p;
 
   while (*p != '\0') {
@@ -746,7 +757,8 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
 
       // Get value from arg list based on conversion.
       GetNextArgument(*p, &fmt, &ap, &value_ll, &value_s, &value_c,
-                           &value_f, &value_p, &is_unsigned, &negative);
+                           &value_f, &value_ld, &value_p, &is_unsigned,
+                           &negative);
 
       // Convert the arg value and write it.
       switch (*p) {
@@ -789,21 +801,33 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
         case 'f':
           FixFloatPrecision(&fmt, sizeof(buf) - 2);
           p++;
-          v = __PrintFloatFormat(value_f, fmt.precision, buf, sizeof(buf));
+          v = fmt.modifier == kModLongDouble
+                  ? __PrintFloatFormatL(value_ld, fmt.precision, buf,
+                                        sizeof(buf))
+                  : __PrintFloatFormat(value_f, fmt.precision, buf,
+                                       sizeof(buf));
           count +=
               WriteFormatted(writer, data, &fmt, v, strlen(v), false, false);
           break;
         case 'e':
           FixFloatPrecision(&fmt, sizeof(buf) - 5);
           p++;
-          v = __PrintScientificFormat(value_f, fmt.precision, buf, sizeof(buf));
+          v = fmt.modifier == kModLongDouble
+                  ? __PrintScientificFormatL(value_ld, fmt.precision, buf,
+                                             sizeof(buf))
+                  : __PrintScientificFormat(value_f, fmt.precision, buf,
+                                            sizeof(buf));
           count +=
               WriteFormatted(writer, data, &fmt, v, strlen(v), false, false);
           break;
         case 'g':
           FixFloatPrecision(&fmt, sizeof(buf) - 5);
           p++;
-          v = __PrintGeneralFormat(value_f, fmt.precision, buf, sizeof(buf));
+          v = fmt.modifier == kModLongDouble
+                  ? __PrintGeneralFormatL(value_ld, fmt.precision, buf,
+                                          sizeof(buf))
+                  : __PrintGeneralFormat(value_f, fmt.precision, buf,
+                                         sizeof(buf));
           count +=
               WriteFormatted(writer, data, &fmt, v, strlen(v), false, false);
           break;

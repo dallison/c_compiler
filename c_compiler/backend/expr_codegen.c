@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "compiler.h"
+#include "long_double_codegen.h"
 #include "constexpr_pcode.h"
 #include "expr_evaluator.h"
 #include "symbol_table.h"
@@ -188,6 +189,8 @@ static struct {
     {TypeUsesFloat32Representation, IR_OP(loadf), IR_OP(loadf),
      IR_OP(storef)},
     {TypeUsesDoubleIROperations, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
+    {TypeUsesLongDoubleRepresentation, IR_OP(loada), IR_OP(loada),
+     IR_OP(storea)},
     {TypeIsPointerOrArray, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsNullPointer, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsMemberPointerScalar, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
@@ -340,6 +343,9 @@ static IRNode* AtomicObjectAddress(Generator* gen, IRNode* address,
 }
 
 static IRNode* EmitObjectLoad(Generator* gen, ASTNode* node, IRNode* address) {
+  if (TypeUsesLongDoubleRepresentation(node->type)) {
+    return LoadLongDoubleFromAddress(gen, address, node->type);
+  }
   if (!TypeIsAtomic(node->type)) {
     return IRSetType(
         GeneratorEmit(gen, NewIR1(GetLoadOpcode(node), address)), node->type);
@@ -377,7 +383,11 @@ IRNode* GeneratorSpillValueToTemp(Generator* gen, IRNode* value,
   IRNode* var = GeneratorGetVariable(gen, tmp);
   IRNode* addr = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), var)),
                            NewPointerTo(kQualPlain, type));
-  GeneratorEmit(gen, NewIR2(GetStoreOpcodeForType(type), addr, value));
+  if (TypeUsesLongDoubleRepresentation(type)) {
+    StoreLongDoubleToAddress(gen, addr, value, type);
+  } else {
+    GeneratorEmit(gen, NewIR2(GetStoreOpcodeForType(type), addr, value));
+  }
   return addr;
 }
 
@@ -388,6 +398,9 @@ IRNode* GeneratorReloadSpilledValue(Generator* gen, IRNode* addr,
       IRSetType(GeneratorEmit(
                     gen, NewIR1(IR_OP(addressof), addr->inputs.value.p[0])),
                 addr->type);
+  if (TypeUsesLongDoubleRepresentation(type)) {
+    return LoadLongDoubleFromAddress(gen, reload_addr, type);
+  }
   return IRSetType(
       GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(type), reload_addr)), type);
 }
@@ -514,6 +527,7 @@ static struct {
     {TypeIsIntegral, IR_OP(movi)},
     {TypeUsesFloat32Representation, IR_OP(movf)},
     {TypeUsesDoubleIROperations, IR_OP(movd)},
+    {TypeUsesLongDoubleRepresentation, IR_OP(mova)},
     {TypeIsStructOrUnion, IR_OP(mova)},
     {TypeIsPointerOrArray, IR_OP(mova)}, {TypeIsMemberPointerScalar, IR_OP(mova)},
     {TypeIsMemberPointerAggregate, IR_OP(mova)},
@@ -655,6 +669,9 @@ static IRNode* LoadComplexComponent(Generator* gen, IRNode* address,
                                     bool imaginary) {
   IRNode* component_address =
       ComplexComponentAddress(gen, address, element_type, imaginary);
+  if (TypeUsesLongDoubleRepresentation(element_type)) {
+    return LoadLongDoubleFromAddress(gen, component_address, element_type);
+  }
   return IRSetType(
       GeneratorEmit(
           gen, NewIR1(GetLoadOpcodeForType(element_type), component_address)),
@@ -713,6 +730,18 @@ static ASTOpcode ComplexScalarConversionOpcode(TypeRecord* from,
 
 static IRNode* ConvertComplexScalar(Generator* gen, IRNode* value,
                                     TypeRecord* from, TypeRecord* to) {
+  if (TypeUsesLongDoubleRepresentation(to) &&
+      !TypeUsesLongDoubleRepresentation(from)) {
+    return ConvertValueToLongDouble(gen, value, from, to);
+  }
+  if (TypeUsesLongDoubleRepresentation(from) &&
+      !TypeUsesLongDoubleRepresentation(to)) {
+    return ConvertValueFromLongDouble(gen, value, from, to);
+  }
+  if (TypeUsesLongDoubleRepresentation(from) &&
+      TypeUsesLongDoubleRepresentation(to)) {
+    return IRSetType(value, to);
+  }
   if ((TypeUsesFloat32Representation(from) &&
        TypeUsesFloat32Representation(to)) ||
       (TypeUsesFloat64Representation(from) &&
@@ -752,11 +781,13 @@ static IRNode* NewComplexResult(Generator* gen, TypeRecord* complex_type,
 static void StoreComplexComponent(Generator* gen, IRNode* address,
                                   TypeRecord* element_type, bool imaginary,
                                   IRNode* value) {
-  GeneratorEmit(
-      gen, NewIR2(GetStoreOpcodeForType(element_type),
-                  ComplexComponentAddress(gen, address, element_type,
-                                          imaginary),
-                  value));
+  IRNode* dest =
+      ComplexComponentAddress(gen, address, element_type, imaginary);
+  if (TypeUsesLongDoubleRepresentation(element_type)) {
+    StoreLongDoubleToAddress(gen, dest, value, element_type);
+    return;
+  }
+  GeneratorEmit(gen, NewIR2(GetStoreOpcodeForType(element_type), dest, value));
 }
 
 static IRNode* StoreComplexResult(Generator* gen, TypeRecord* complex_type,
@@ -894,6 +925,132 @@ static void GenerateStableComplexDivisionBranch(
   StoreComplexComponent(gen, result_address, element_type, true, imaginary);
 }
 
+static IRNode* GenerateComplexLongDoubleBinaryFromAddresses(
+    Generator* gen, BinaryASTNode* node, IRNode* left_address,
+    IRNode* right_address, TypeRecord* element_type, bool comparison) {
+  if (comparison) {
+    IRNode* ar = LoadConvertedComplexComponent(
+        gen, left_address, node->left->type, element_type, false);
+    IRNode* ai = LoadConvertedComplexComponent(
+        gen, left_address, node->left->type, element_type, true);
+    IRNode* br = LoadConvertedComplexComponent(
+        gen, right_address, node->right->type, element_type, false);
+    IRNode* bi = LoadConvertedComplexComponent(
+        gen, right_address, node->right->type, element_type, true);
+    IRNode* real_cmp = LongDoubleCompareValues(gen, ar, br, element_type);
+    IRNode* imag_cmp = LongDoubleCompareValues(gen, ai, bi, element_type);
+    IROpcode pred =
+        node->base.op == AST_OP(equal) ? IR_OP(cmpeqi) : IR_OP(cmpnei);
+    IRNode* zero = GeneratorGetIntConstant(gen, real_cmp->type, 0);
+    IRNode* real_compare = GeneratorEmit(gen, NewIR2(pred, real_cmp, zero));
+    IRNode* imag_compare = GeneratorEmit(gen, NewIR2(pred, imag_cmp, zero));
+    IRNode* result = GeneratorEmit(
+        gen, NewIR2(node->base.op == AST_OP(equal) ? IR_OP(andi)
+                                                   : IR_OP(ori),
+                    real_compare, imag_compare));
+    IRSetType(result, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+    return TypeIsBool(node->base.type)
+               ? result
+               : GenerateZeroExtend(gen, &node->base, result);
+  }
+
+  if (node->base.op == AST_OP(plus) || node->base.op == AST_OP(minus)) {
+    const char* helper =
+        node->base.op == AST_OP(plus) ? "__davecc_ld_add" : "__davecc_ld_sub";
+    IRNode* result_address = NULL;
+    IRNode* result = NewComplexResult(gen, node->base.type, &result_address);
+    IRNode* real = LongDoubleBinaryValues(
+        gen, helper,
+        LoadConvertedComplexComponent(gen, left_address, node->left->type,
+                                      element_type, false),
+        LoadConvertedComplexComponent(gen, right_address, node->right->type,
+                                      element_type, false),
+        element_type);
+    StoreComplexComponent(gen, result_address, element_type, false, real);
+    IRNode* imaginary = LongDoubleBinaryValues(
+        gen, helper,
+        LoadConvertedComplexComponent(gen, left_address, node->left->type,
+                                      element_type, true),
+        LoadConvertedComplexComponent(gen, right_address, node->right->type,
+                                      element_type, true),
+        element_type);
+    StoreComplexComponent(gen, result_address, element_type, true, imaginary);
+    return result;
+  }
+
+  switch (node->base.op) {
+    case AST_OP(mult): {
+      IRNode* result_address = NULL;
+      IRNode* result = NewComplexResult(gen, node->base.type, &result_address);
+      IRNode* ar = LoadConvertedComplexComponent(
+          gen, left_address, node->left->type, element_type, false);
+      IRNode* ai = LoadConvertedComplexComponent(
+          gen, left_address, node->left->type, element_type, true);
+      IRNode* br = LoadConvertedComplexComponent(
+          gen, right_address, node->right->type, element_type, false);
+      IRNode* bi = LoadConvertedComplexComponent(
+          gen, right_address, node->right->type, element_type, true);
+      IRNode* arbr =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", ar, br, element_type);
+      IRNode* aibi =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", ai, bi, element_type);
+      IRNode* real = LongDoubleBinaryValues(gen, "__davecc_ld_sub", arbr, aibi,
+                                            element_type);
+      StoreComplexComponent(gen, result_address, element_type, false, real);
+      IRNode* arbi =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", ar, bi, element_type);
+      IRNode* aibr =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", ai, br, element_type);
+      IRNode* imaginary = LongDoubleBinaryValues(gen, "__davecc_ld_add", arbi,
+                                                 aibr, element_type);
+      StoreComplexComponent(gen, result_address, element_type, true,
+                            imaginary);
+      return result;
+    }
+    case AST_OP(div): {
+      IRNode* result_address = NULL;
+      IRNode* result = NewComplexResult(gen, node->base.type, &result_address);
+      IRNode* ar = LoadConvertedComplexComponent(
+          gen, left_address, node->left->type, element_type, false);
+      IRNode* ai = LoadConvertedComplexComponent(
+          gen, left_address, node->left->type, element_type, true);
+      IRNode* br = LoadConvertedComplexComponent(
+          gen, right_address, node->right->type, element_type, false);
+      IRNode* bi = LoadConvertedComplexComponent(
+          gen, right_address, node->right->type, element_type, true);
+      IRNode* brbr =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", br, br, element_type);
+      IRNode* bibi =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", bi, bi, element_type);
+      IRNode* denom = LongDoubleBinaryValues(gen, "__davecc_ld_add", brbr, bibi,
+                                             element_type);
+      IRNode* arbr =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", ar, br, element_type);
+      IRNode* aibi =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", ai, bi, element_type);
+      IRNode* real_num = LongDoubleBinaryValues(gen, "__davecc_ld_add", arbr,
+                                                aibi, element_type);
+      IRNode* real = LongDoubleBinaryValues(gen, "__davecc_ld_div", real_num,
+                                            denom, element_type);
+      StoreComplexComponent(gen, result_address, element_type, false, real);
+      IRNode* aibr =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", ai, br, element_type);
+      IRNode* arbi =
+          LongDoubleBinaryValues(gen, "__davecc_ld_mul", ar, bi, element_type);
+      IRNode* imag_num = LongDoubleBinaryValues(gen, "__davecc_ld_sub", aibr,
+                                                arbi, element_type);
+      IRNode* imaginary = LongDoubleBinaryValues(gen, "__davecc_ld_div",
+                                                 imag_num, denom, element_type);
+      StoreComplexComponent(gen, result_address, element_type, true,
+                            imaginary);
+      return result;
+    }
+    default:
+      return LoadConvertedComplexComponent(gen, left_address, node->left->type,
+                                           element_type, false);
+  }
+}
+
 static IRNode* GenerateComplexBinaryFromAddresses(
     Generator* gen, BinaryASTNode* node, IRNode* left_address,
     IRNode* right_address) {
@@ -901,6 +1058,10 @@ static IRNode* GenerateComplexBinaryFromAddresses(
                     node->base.op == AST_OP(noteq);
   TypeRecord* element_type = ComplexElementTypeRecord(
       comparison ? node->left->type : node->base.type);
+  if (TypeUsesLongDoubleRepresentation(element_type)) {
+    return GenerateComplexLongDoubleBinaryFromAddresses(
+        gen, node, left_address, right_address, element_type, comparison);
+  }
   bool use_float = TypeUsesFloat32Representation(element_type);
 
   if (comparison) {
@@ -1219,6 +1380,11 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
       TypeIsComplex(node->right->type)) {
     return GenerateComplexBinaryExpression(gen, node);
   }
+  if (TypeUsesLongDoubleRepresentation(node->base.type) ||
+      TypeUsesLongDoubleRepresentation(node->left->type) ||
+      TypeUsesLongDoubleRepresentation(node->right->type)) {
+    return GenerateLongDoubleBinary(gen, node);
+  }
   // Preserve the left result while evaluating a call on the right. Targets
   // with selectable return registers can still use a globally shared
   // temporary register bank that callees clobber (notably the 65C02).
@@ -1376,6 +1542,15 @@ static IRNode* GenerateUnaryExpression(Generator* gen, UnaryASTNode* node) {
     TypeRecord* element_type = ComplexElementTypeRecord(node->sub->type);
     IRNode* address =
         ComplexObjectAddress(gen, sub, node->sub->type);
+    if (TypeUsesLongDoubleRepresentation(element_type)) {
+      IRNode* real = GenerateLongDoubleNegate(
+          gen, LoadComplexComponent(gen, address, element_type, false),
+          element_type);
+      IRNode* imaginary = GenerateLongDoubleNegate(
+          gen, LoadComplexComponent(gen, address, element_type, true),
+          element_type);
+      return StoreComplexResult(gen, node->base.type, real, imaginary);
+    }
     IROpcode negate = TypeUsesFloat32Representation(element_type)
                           ? IR_OP(negf)
                           : IR_OP(negd);
@@ -1391,6 +1566,10 @@ static IRNode* GenerateUnaryExpression(Generator* gen, UnaryASTNode* node) {
   }
   if (node->base.op == AST_OP(uplus)) {
     return sub;
+  }
+  if (TypeUsesLongDoubleRepresentation(node->base.type) &&
+      node->base.op == AST_OP(uminus)) {
+    return GenerateLongDoubleNegate(gen, sub, node->base.type);
   }
   IROpcode opcode = FindIROpcode(&node->base, node->base.op);
   IRNode* result = GeneratorEmit(gen, NewIR1(opcode, sub));
@@ -1611,6 +1790,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
         TypeIsArray(node->base.type) ||
         TypeIsVector(node->base.type) ||
         TypeIsStructOrUnion(node->base.type) ||
+        TypeUsesLongDoubleRepresentation(node->base.type) ||
         TypeIsMemberPointerAggregate(node->base.type)) {
       return address;
     }
@@ -1629,6 +1809,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
     if ((node->base.flags & kASTNeedAddress) != 0 ||
         TypeIsArray(node->base.type) || TypeIsVector(node->base.type) ||
         TypeIsStructOrUnion(node->base.type) ||
+        TypeUsesLongDoubleRepresentation(node->base.type) ||
         TypeIsMemberPointerAggregate(node->base.type) ||
         TypeIsFunction(node->base.type)) {
       // The slot holds the object address.  Mark the load as a use so SSA
@@ -1646,6 +1827,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
       TypeIsFunction(node->base.type) ||
       TypeIsVector(node->base.type) ||
       TypeIsStructOrUnion(node->base.type) ||
+      TypeUsesLongDoubleRepresentation(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type)) {
     // Need the address of the node, not the value.  A whole struct/union is
     // likewise handled by its address: the raw variable/argument node is
@@ -1788,6 +1970,22 @@ static IRNode* GenerateIncDec(Generator* gen, UnaryASTNode* node, bool is_post,
                               bool is_inc) {
   if (TypeIsAtomic(node->sub->type)) {
     return GenerateAtomicIncDec(gen, node, is_post, is_inc);
+  }
+  if (TypeUsesLongDoubleRepresentation(node->sub->type)) {
+    IRNode* addr = GenerateExpression(gen, node->sub);
+    TypeRecord* type = node->sub->type;
+    IRNode* value = LoadLongDoubleFromAddress(gen, addr, type);
+    bool value_is_used = ASTNodeUsesValue(node->base.parent, &node->base);
+    IRNode* old_value = NULL;
+    if (is_post && value_is_used) {
+      old_value = value;
+    }
+    IRNode* one = GenerateLongDoubleConstant(gen, type, 1.0);
+    IRNode* result = LongDoubleBinaryValues(
+        gen, is_inc ? "__davecc_ld_add" : "__davecc_ld_sub", value, one, type);
+    IRNode* store = StoreLongDoubleToAddress(gen, addr, result, type);
+    CheckForVarDef(store, node->sub);
+    return (is_post && value_is_used) ? old_value : result;
   }
   // For a bitfield or VLA, we use a load/add/store operation sequence.
   if (IsBitfieldReference(node->sub) ||
@@ -2100,9 +2298,14 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
             NewPointerTo(kQualPlain, referent != NULL ? referent
                                                       : designated_init->base.type));
       }
-      IROpcode store = GetStoreOpcode(subinit);
-      write = IRSetType(GeneratorEmit(gen, NewIR2(store, destaddr,
-                                RemoveUnnecesaryShortening(gen, value, store))), node->type);
+      if (TypeUsesLongDoubleRepresentation(designated_init->base.type)) {
+        write = StoreLongDoubleToAddress(gen, destaddr, value,
+                                         designated_init->base.type);
+      } else {
+        IROpcode store = GetStoreOpcode(subinit);
+        write = IRSetType(GeneratorEmit(gen, NewIR2(store, destaddr,
+                                  RemoveUnnecesaryShortening(gen, value, store))), node->type);
+      }
     }
     if (write != NULL) {
       CheckForVarDef(write, node);
@@ -2335,6 +2538,7 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
   IRNode* value;
   IRNode* assignment;
   if (TypeIsStructOrUnion(node->left->type) ||
+      TypeUsesLongDoubleRepresentation(node->left->type) ||
       TypeIsVector(node->left->type) ||
       TypeIsMemberPointerAggregate(node->left->type)) {
     dest = GenerateExpression(gen, node->left);
@@ -2354,7 +2558,11 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       // struct expression yields the object and needs its address taken.
       value = GenerateExpression(gen, node->right);
       if (node->right->op != AST_OP(call)) {
-        value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), value));
+        if (TypeUsesLongDoubleRepresentation(node->left->type)) {
+          value = LongDoubleObjectAddress(gen, value, node->left->type);
+        } else {
+          value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), value));
+        }
       }
       CheckForVarUse(value, node->right);
       assignment = GeneratorEmit(
@@ -2411,6 +2619,7 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     CheckForVarDef(assignment, node->left);
   }
   if (TypeIsStructOrUnion(node->left->type) ||
+      TypeUsesLongDoubleRepresentation(node->left->type) ||
       TypeIsVector(node->left->type) ||
       TypeIsMemberPointerAggregate(node->left->type)) {
     GenerateConstexprLifetimeMarker(
@@ -2559,6 +2768,63 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   bool widen = !TypeEqual(store_type, op_type) &&
                TypeIsFloatingPoint(store_type) && TypeIsFloatingPoint(op_type);
 
+  if (TypeUsesLongDoubleRepresentation(store_type) ||
+      TypeUsesLongDoubleRepresentation(op_type)) {
+    IRNode* load = LoadLongDoubleFromAddress(gen, dest, store_type);
+    CheckForVarUse(load, node->left);
+    if (!TypeUsesLongDoubleRepresentation(store_type)) {
+      load = ConvertValueToLongDouble(gen, load, store_type, op_type);
+    } else if (!TypeEqual(store_type, op_type) &&
+               !TypeUsesLongDoubleRepresentation(op_type)) {
+      load = ConvertValueFromLongDouble(gen, load, store_type, op_type);
+    }
+    IRNode* right = value;
+    if (TypeUsesLongDoubleRepresentation(op_type) &&
+        !TypeUsesLongDoubleRepresentation(node->right->type)) {
+      right = ConvertValueToLongDouble(gen, value, node->right->type, op_type);
+    }
+    const char* helper = NULL;
+    switch (alu_op) {
+      case AST_OP(plus):
+        helper = "__davecc_ld_add";
+        break;
+      case AST_OP(minus):
+        helper = "__davecc_ld_sub";
+        break;
+      case AST_OP(mult):
+        helper = "__davecc_ld_mul";
+        break;
+      case AST_OP(div):
+        helper = "__davecc_ld_div";
+        break;
+      default:
+        helper = "__davecc_ld_add";
+        break;
+    }
+    if (TypeUsesLongDoubleRepresentation(op_type)) {
+      value = LongDoubleBinaryValues(gen, helper, load, right, op_type);
+    } else {
+      IROpcode ir_op = FindIROpcodeForType(op_type, alu_op);
+      value = IRSetType(GeneratorEmit(gen, NewIR2(ir_op, load, right)), op_type);
+    }
+    if (TypeUsesLongDoubleRepresentation(op_type) &&
+        !TypeUsesLongDoubleRepresentation(store_type)) {
+      value = ConvertValueFromLongDouble(gen, value, op_type, store_type);
+    } else if (!TypeUsesLongDoubleRepresentation(op_type) &&
+               TypeUsesLongDoubleRepresentation(store_type)) {
+      value = ConvertValueToLongDouble(gen, value, op_type, store_type);
+    }
+    IRNode* store;
+    if (TypeUsesLongDoubleRepresentation(store_type)) {
+      store = StoreLongDoubleToAddress(gen, dest, value, store_type);
+    } else {
+      IROpcode store_op = GetStoreOpcode((ASTNode*)node);
+      store = GeneratorEmit(gen, NewIR2(store_op, dest, value));
+    }
+    CheckForVarDef(store, node->left);
+    return result_address_needed ? dest : value;
+  }
+
   // Load the value (always at the left operand's storage type).
   IROpcode load_op = GetLoadOpcode((ASTNode*)node);
   IRNode* load = IRSetType(GeneratorEmit(gen, NewIR1(load_op, dest)), store_type);
@@ -2647,6 +2913,7 @@ static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
   // address rather than being loaded.
   if (TypeIsArray(node->base.type) || TypeIsStructOrUnion(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type) ||
+      TypeUsesLongDoubleRepresentation(node->base.type) ||
       TypeIsFunction(node->base.type)) {
     return IRSetType(addr, node->base.type);
   }
@@ -3007,6 +3274,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     bool aggregate_actual =
         TypeIsStructOrUnion(arg->type) || TypeIsArray(arg->type) ||
         TypeIsVector(arg->type) ||
+        TypeUsesLongDoubleRepresentation(arg->type) ||
         TypeIsMemberPointerAggregate(arg->type);
     bool stashable_reference_actual =
         reference_formal && !TypeIsStructOrUnion(arg_value->type) &&
@@ -3135,6 +3403,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         formal_type != NULL && !reference_formal &&
         (TypeIsStructOrUnion(formal_type) ||
          TypeIsVector(formal_type) ||
+         TypeUsesLongDoubleRepresentation(formal_type) ||
          TypeIsMemberPointerAggregate(formal_type));
     bool native_vector_value =
         !reference_formal &&
@@ -3146,6 +3415,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       CheckForVarUse(arg_value, arg);
     } else if ((aggregate_value_formal || TypeIsStructOrUnion(arg->type) ||
          TypeIsVector(arg->type) ||
+         TypeUsesLongDoubleRepresentation(arg->type) ||
          TypeIsMemberPointerAggregate(arg->type)) &&
         !reference_formal) {
       // If the argument is the result of another call it may
@@ -3153,6 +3423,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       // a struct type (we want its address, not its value)
       if (aggregate_value_formal || TypeIsStructOrUnion(arg_value->type) ||
           TypeIsVector(arg_value->type) ||
+          TypeUsesLongDoubleRepresentation(arg_value->type) ||
           TypeIsMemberPointerAggregate(arg_value->type)) {
         arg_value = GeneratorEmit(gen,
                                NewIR1(IR_OP(structarg),
@@ -4145,6 +4416,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
     }
     if (TypeIsArray(symbol->type) || TypeIsVector(symbol->type) ||
         TypeIsStructOrUnion(symbol->type) ||
+        TypeUsesLongDoubleRepresentation(symbol->type) ||
         TypeIsMemberPointerAggregate(symbol->type)) {
       IRSetType(var_ref, node->base.type);
       return var_ref;
@@ -4232,6 +4504,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
     if (TypeIsArray(member->member->symbol->type) ||
         TypeIsVector(member->member->symbol->type) ||
         TypeIsStructOrUnion(member->member->symbol->type) ||
+        TypeUsesLongDoubleRepresentation(member->member->symbol->type) ||
         TypeIsMemberPointerAggregate(member->member->symbol->type)) {
       IRSetType(addr, node->base.type);
       return addr;
@@ -4263,6 +4536,15 @@ static IRNode* GenerateBooleanValue(Generator* gen, IRNode* value) {
   }
   IROpcode opcode = IR_OP(cmpnei);
   IRNode* zero = NULL;
+  if (TypeUsesLongDoubleRepresentation(value->type)) {
+    IRNode* ld_zero = GenerateLongDoubleConstant(gen, value->type, 0.0);
+    IRNode* cmp =
+        LongDoubleCompareValues(gen, value, ld_zero, value->type);
+    return IRSetType(
+        GeneratorEmit(gen, NewIR2(IR_OP(cmpnei), cmp,
+                                  GeneratorGetIntConstant(gen, cmp->type, 0))),
+        bool_type);
+  }
   if (TypeUsesFloat32Representation(value->type)) {
     opcode = IR_OP(cmpnef);
     zero = GeneratorGetFloatingPointConstant(gen, value->type, 0.0);
@@ -4400,6 +4682,7 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
 
 static bool TypeIsTernaryMemoryAggregate(TypeRecord* type) {
   return TypeIsStructOrUnion(type) || TypeIsVector(type) ||
+         TypeUsesLongDoubleRepresentation(type) ||
          TypeIsMemberPointerAggregate(type);
 }
 
@@ -4705,7 +4988,21 @@ static IRNode* GenerateBuiltinVaArg(Generator* gen, VectorASTNode* node) {
       gen, NewIntIRConstant(node->base.type, node->base.type->size));
   IRNode* result = GeneratorEmit(gen, NewIR2(IR_OP(builtin_va_arg), ap, size));
   CheckForVarDef(result, &node->base);
-  return IRSetType(result, node->base.type);
+  IRSetType(result, node->base.type);
+  if (TypeUsesLongDoubleRepresentation(node->base.type)) {
+    // Backends lower this to the address of the 16-byte object.  Copy it
+    // into a real temporary so later uses (assignment, helper calls) see
+    // an object rather than a raw pointer value.
+    Symbol* tmp = SyntaxNewTemporary(gen->syntax, node->base.type);
+    tmp->flags.address_taken = true;
+    IRNode* dest = GeneratorGetVariable(gen, tmp);
+    IRNode* dest_addr = LongDoubleObjectAddress(gen, dest, node->base.type);
+    GeneratorEmit(
+        gen, NewIR3(IR_OP(memcpy), dest_addr, result,
+                    GeneratorGetIntConstant(gen, NULL, node->base.type->size)));
+    return dest;
+  }
+  return result;
 }
 
 static IRNode* GenerateBuiltinVaEnd(Generator* gen, VectorASTNode* node) {
@@ -5158,6 +5455,14 @@ static IRNode* LengthenInt(Generator* gen, ASTNode* node, IRNode* sub) {
 
 // Conversion.
 static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
+  if (TypeUsesLongDoubleRepresentation(node->type) &&
+      !TypeUsesLongDoubleRepresentation(sub->type)) {
+    return ConvertValueToLongDouble(gen, sub, sub->type, node->type);
+  }
+  if (TypeUsesLongDoubleRepresentation(sub->type) &&
+      !TypeUsesLongDoubleRepresentation(node->type)) {
+    return ConvertValueFromLongDouble(gen, sub, sub->type, node->type);
+  }
   switch (node->op) {
     case AST_OP(i2s):
     case AST_OP(l2s):
@@ -5291,6 +5596,21 @@ static IRNode* GenerateComplexCast(Generator* gen, CastASTNode* node) {
       return StoreComplexResult(gen, to, real, imaginary);
     }
     if (TypeIsBool(to)) {
+      if (TypeUsesLongDoubleRepresentation(from_element)) {
+        IRNode* zero = GenerateLongDoubleConstant(gen, from_element, 0.0);
+        IRNode* real_cmp =
+            LongDoubleCompareValues(gen, real, zero, from_element);
+        IRNode* imag_cmp =
+            LongDoubleCompareValues(gen, imaginary, zero, from_element);
+        IRNode* z = GeneratorGetIntConstant(gen, real_cmp->type, 0);
+        IRNode* real_nonzero =
+            GeneratorEmit(gen, NewIR2(IR_OP(cmpnei), real_cmp, z));
+        IRNode* imag_nonzero =
+            GeneratorEmit(gen, NewIR2(IR_OP(cmpnei), imag_cmp, z));
+        return IRSetType(
+            GeneratorEmit(gen, NewIR2(IR_OP(ori), real_nonzero, imag_nonzero)),
+            to);
+      }
       bool use_float = TypeUsesFloat32Representation(from_element);
       IROpcode compare = use_float ? IR_OP(cmpnef) : IR_OP(cmpned);
       IRNode* zero =
@@ -5450,9 +5770,14 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       break;
 
     case AST_OP(fnumber):
-      result = GeneratorEmitConstant(
-          gen,
-          NewFloatingPointIRConstant(node->type, const_node->value.fvalue));
+      if (TypeUsesLongDoubleRepresentation(node->type)) {
+        result = GenerateLongDoubleConstant(gen, node->type,
+                                            const_node->value.fvalue);
+      } else {
+        result = GeneratorEmitConstant(
+            gen,
+            NewFloatingPointIRConstant(node->type, const_node->value.fvalue));
+      }
       break;
 
     case AST_OP(string):

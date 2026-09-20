@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "common_emitter.h"
 #include "compiler.h"
 #include "eh_metadata.h"
 #include "p_code_encoding.h"
@@ -686,8 +687,8 @@ static bool EmitInstruction(PCodeObject* object, PCodeGenerator* pcode,
       const char* name = TargetSymbolText(operand, buffer, sizeof(buffer));
       if (name == NULL && operand != NULL &&
           operand->opcode == (TargetOpcode)P_OP(literal)) {
-        snprintf(buffer, sizeof(buffer), ".str.%d",
-                 ((TargetLiteral*)operand)->literal_id);
+        LiteralAsmName(((TargetLiteral*)operand)->literal_id, buffer,
+                       sizeof(buffer));
         name = buffer;
       }
       if (name == NULL) {
@@ -760,8 +761,8 @@ static bool EmitInstruction(PCodeObject* object, PCodeGenerator* pcode,
       const char* name = TargetSymbolText(operand, buffer, sizeof(buffer));
       if (name == NULL && operand != NULL &&
           operand->opcode == (TargetOpcode)P_OP(literal)) {
-        snprintf(buffer, sizeof(buffer), ".str.%d",
-                 ((TargetLiteral*)operand)->literal_id);
+        LiteralAsmName(((TargetLiteral*)operand)->literal_id, buffer,
+                       sizeof(buffer));
         name = buffer;
       }
       if (name == NULL || opcode == P_OP(adrtls)) {

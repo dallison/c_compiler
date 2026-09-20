@@ -4,6 +4,31 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+#include "../c_compiler/support/fp_extended.h"
+
+#if defined(__DAVECC_LDBL_FORMAT__) && __DAVECC_LDBL_FORMAT__ >= 2
+#define DAVECC_DISTINCT_LDOUBLE 1
+#else
+#define DAVECC_DISTINCT_LDOUBLE 0
+#endif
+
+#if DAVECC_DISTINCT_LDOUBLE
+static int LdFormat(void) { return __DAVECC_LDBL_FORMAT__; }
+
+static FPBits LdToBits(long double value) {
+  FPBits bits;
+  memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+static long double BitsToLd(FPBits bits) {
+  long double value;
+  memcpy(&value, &bits, sizeof(bits));
+  return value;
+}
+#endif
 
 int __davecc_fpclassify(double value) {
 #if defined(__6502__)
@@ -48,6 +73,22 @@ int __davecc_signbit(double value) {
   } representation;
   representation.value = value;
   return (representation.bits >> 63) != 0;
+#endif
+}
+
+int __davecc_fpclassifyl(long double value) {
+#if DAVECC_DISTINCT_LDOUBLE
+  return FPClassify(LdToBits(value), LdFormat());
+#else
+  return __davecc_fpclassify((double)value);
+#endif
+}
+
+int __davecc_signbitl(long double value) {
+#if DAVECC_DISTINCT_LDOUBLE
+  return FPSignBit(LdToBits(value), LdFormat());
+#else
+  return __davecc_signbit((double)value);
 #endif
 }
 
@@ -350,13 +391,25 @@ DEFINE_UNARY_VARIANTS(erf)
 DEFINE_UNARY_VARIANTS(erfc)
 DEFINE_UNARY_VARIANTS(tgamma)
 DEFINE_UNARY_VARIANTS(lgamma)
-DEFINE_UNARY_VARIANTS(ceil)
-DEFINE_UNARY_VARIANTS(floor)
-DEFINE_UNARY_VARIANTS(trunc)
 DEFINE_UNARY_VARIANTS(round)
 DEFINE_UNARY_VARIANTS(rint)
 DEFINE_UNARY_VARIANTS(nearbyint)
+
+#if DAVECC_DISTINCT_LDOUBLE
+float ceilf(float x) { return (float)ceil(x); }
+long double ceill(long double x) { return BitsToLd(FPCeil(LdToBits(x), LdFormat())); }
+float floorf(float x) { return (float)floor(x); }
+long double floorl(long double x) { return BitsToLd(FPFloor(LdToBits(x), LdFormat())); }
+float truncf(float x) { return (float)trunc(x); }
+long double truncl(long double x) { return BitsToLd(FPTrunc(LdToBits(x), LdFormat())); }
+float fabsf(float x) { return (float)fabs(x); }
+long double fabsl(long double x) { return BitsToLd(FPAbs(LdToBits(x), LdFormat())); }
+#else
+DEFINE_UNARY_VARIANTS(ceil)
+DEFINE_UNARY_VARIANTS(floor)
+DEFINE_UNARY_VARIANTS(trunc)
 DEFINE_UNARY_VARIANTS(fabs)
+#endif
 
 #undef DEFINE_UNARY_VARIANTS
 
@@ -381,7 +434,11 @@ float copysignf(float magnitude, float sign) {
   return (float)copysign(magnitude, sign);
 }
 long double copysignl(long double magnitude, long double sign) {
+#if DAVECC_DISTINCT_LDOUBLE
+  return BitsToLd(FPCopySign(LdToBits(magnitude), LdToBits(sign), LdFormat()));
+#else
   return (long double)copysign((double)magnitude, (double)sign);
+#endif
 }
 float nanf(const char* tag) { return (float)nan(tag); }
 long double nanl(const char* tag) { return (long double)nan(tag); }
@@ -404,7 +461,11 @@ float nextafterf(float from, float to) {
   return representation.value;
 }
 long double nextafterl(long double from, long double to) {
+#if DAVECC_DISTINCT_LDOUBLE
+  return BitsToLd(FPNextAfter(LdToBits(from), LdToBits(to), LdFormat()));
+#else
   return (long double)nextafter((double)from, (double)to);
+#endif
 }
 float nexttowardf(float from, long double to) {
   return nextafterf(from, (float)to);
@@ -419,7 +480,13 @@ long double fmal(long double x, long double y, long double z) {
 }
 
 int ilogbf(float x) { return ilogb(x); }
-int ilogbl(long double x) { return ilogb((double)x); }
+int ilogbl(long double x) {
+#if DAVECC_DISTINCT_LDOUBLE
+  return FPIlogb(LdToBits(x), LdFormat());
+#else
+  return ilogb((double)x);
+#endif
+}
 long lroundf(float x) { return lround(x); }
 long lroundl(long double x) { return lround((double)x); }
 long long llroundf(float x) { return llround(x); }
@@ -440,11 +507,19 @@ float frexpf(float x, int* exponent) {
   return (float)frexp(x, exponent);
 }
 long double frexpl(long double x, int* exponent) {
+#if DAVECC_DISTINCT_LDOUBLE
+  return BitsToLd(FPFrexp(LdToBits(x), exponent, LdFormat()));
+#else
   return (long double)frexp((double)x, exponent);
+#endif
 }
 float ldexpf(float x, int exponent) { return (float)ldexp(x, exponent); }
 long double ldexpl(long double x, int exponent) {
+#if DAVECC_DISTINCT_LDOUBLE
+  return BitsToLd(FPLdexp(LdToBits(x), exponent, LdFormat()));
+#else
   return (long double)ldexp((double)x, exponent);
+#endif
 }
 float modff(float x, float* integer) {
   double integral;
@@ -453,16 +528,33 @@ float modff(float x, float* integer) {
   return (float)result;
 }
 long double modfl(long double x, long double* integer) {
+#if DAVECC_DISTINCT_LDOUBLE
+  FPBits whole;
+  FPBits frac = FPModf(LdToBits(x), &whole, LdFormat());
+  *integer = BitsToLd(whole);
+  return BitsToLd(frac);
+#else
   double integral;
   double result = modf((double)x, &integral);
   *integer = (long double)integral;
   return (long double)result;
+#endif
 }
 float scalbnf(float x, int exponent) { return (float)scalbn(x, exponent); }
 long double scalbnl(long double x, int exponent) {
+#if DAVECC_DISTINCT_LDOUBLE
+  return ldexpl(x, exponent);
+#else
   return (long double)scalbn((double)x, exponent);
+#endif
 }
 float scalblnf(float x, long exponent) { return (float)scalbln(x, exponent); }
 long double scalblnl(long double x, long exponent) {
+#if DAVECC_DISTINCT_LDOUBLE
+  if (exponent > INT_MAX) exponent = INT_MAX;
+  if (exponent < INT_MIN) exponent = INT_MIN;
+  return ldexpl(x, (int)exponent);
+#else
   return (long double)scalbln((double)x, exponent);
+#endif
 }

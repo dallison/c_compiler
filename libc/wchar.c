@@ -652,7 +652,13 @@ float wcstof(const wchar_t* restrict string, wchar_t** restrict end) {
 }
 
 long double wcstold(const wchar_t* restrict string, wchar_t** restrict end) {
-  return (long double)wcstod(string, end);
+  char buffer[256];
+  char* narrow_end;
+  long double result;
+  narrow_wide_prefix(string, buffer, sizeof(buffer));
+  result = strtold(buffer, &narrow_end);
+  if (end != NULL) *end = (wchar_t*)string + (narrow_end - buffer);
+  return result;
 }
 
 long wcstol(const wchar_t* restrict string, wchar_t** restrict end, int base) {

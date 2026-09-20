@@ -313,10 +313,13 @@ inline bool TypeIsLongDouble(TypeRecord* type) {
 inline bool TypeUsesFloat32Representation(TypeRecord* type) {
   return !TypeIsComplex(type) && (TypeIsFloat(type) || TypeIsFloat32(type));
 }
+bool TypeUsesLongDoubleRepresentation(TypeRecord* type);
 inline bool TypeUsesFloat64Representation(TypeRecord* type) {
   return !TypeIsComplex(type) &&
-         (TypeIsDouble(type) || TypeIsFloat64(type) || TypeIsLongDouble(type));
+         (TypeIsDouble(type) || TypeIsFloat64(type) ||
+          (TypeIsLongDouble(type) && !TypeUsesLongDoubleRepresentation(type)));
 }
+bool TypeUsesHardwareFloatRegister(TypeRecord* type);
 inline bool TypeIsBool(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeBool) != 0;
 }

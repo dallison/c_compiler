@@ -848,7 +848,7 @@ static TargetInstruction* SetLoweredNode(IRNode* node,
 // node->data.lvalue).  Consumers that only need the low 32 bits (truncation to
 // int, etc.) transparently get the low half through the normal lowering path.
 static bool TypeIsWideInt(TypeRecord* t) {
-  return t != NULL && TypeIsIntegral(t) && !TypeIsFloatingPoint(t) &&
+  return t != NULL && TypeIsIntegral(t) && !TypeUsesHardwareFloatRegister(t) &&
          !TypeIsStructOrUnion(t) && !TypeIsArray(t) && !TypeIsPointer(t) &&
          t->size == 8;
 }
@@ -1556,7 +1556,7 @@ static bool UseRegisterForVariable(ARMGenerator* g, IRNode* var_node) {
   if (var->base.outputs.length == 0) {
     return false;
   }
-  if (TypeIsFloatingPoint(var_node->type)) {
+  if (TypeUsesHardwareFloatRegister(var_node->type)) {
     return g->num_fp_reg_vars < 8;
   }
   return g->num_int_reg_vars < 4;
@@ -1745,7 +1745,7 @@ static TargetInstruction* Materialize1(ARMGenerator* g, IRNode* node) {
       if (ARM_IS_REG_VAR(var_offset)) {
         // Variable is in a register.
         int var_num = var_offset & ~ARM_REG_VAR;
-        if (TypeIsFloatingPoint(node->type)) {
+        if (TypeUsesHardwareFloatRegister(node->type)) {
           return FloatingPointVariableRegister(g, var_num, var->symbol);
         } else {
           return IntVariableRegister(g, var_num, var->symbol);
@@ -1766,7 +1766,7 @@ static TargetInstruction* Materialize1(ARMGenerator* g, IRNode* node) {
       // Argument is in a register.
       IRVariable* var = (IRVariable*)node;
       int var_num = var_offset & ~ARM_REG_VAR;
-      if (TypeIsFloatingPoint(node->type)) {
+      if (TypeUsesHardwareFloatRegister(node->type)) {
         return FloatingPointVariableRegister(g, var_num, var->symbol);
       } else {
         return IntVariableRegister(g, var_num, var->symbol);
@@ -2630,7 +2630,7 @@ static TargetInstruction* LowerExpression(ARMGenerator* g, IRNode* node) {
   // floating-point value mark it so the register allocator picks a float
   // register instead.
   if ((ARMOpcode)inst->opcode == ARM_OP(tmp) && node->type != NULL &&
-      TypeIsFloatingPoint(node->type)) {
+      TypeUsesHardwareFloatRegister(node->type)) {
     inst->flags |= kARMFloatValue;
   }
 
@@ -2795,7 +2795,7 @@ static TargetInstruction* LowerComparison(ARMGenerator* g, IRNode* node) {
 #define CMP_SET(cond)                                                       \
   do {                                                                      \
     Emit(g, SetInstructionSize(                                             \
-                NewInstruction2(TypeIsFloatingPoint(op1->type)              \
+                NewInstruction2(TypeUsesHardwareFloatRegister(op1->type)              \
                                     ? ARM_OP(fcmp)                      \
                                     : ARM_OP(cmp),                      \
                                 Materialize(g, lhs), Materialize(g, rhs)),  \
@@ -2987,7 +2987,7 @@ static bool GetRegAndOffset(ARMGenerator* g, IRNode* addr_node,
     if (ARM_IS_REG_VAR(var_offset)) {
       // Variable is in a register.
       int var_num = var_offset & ~ARM_REG_VAR;
-      if (TypeIsFloatingPoint(addr_node->type)) {
+      if (TypeUsesHardwareFloatRegister(addr_node->type)) {
         *addr = FloatingPointVariableRegister(g, var_num, var->symbol);
       } else {
         *addr = IntVariableRegister(g, var_num, var->symbol);
@@ -3006,7 +3006,7 @@ static bool GetRegAndOffset(ARMGenerator* g, IRNode* addr_node,
     if (ARM_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       int var_num = var_offset & ~ARM_REG_VAR;
-      if (TypeIsFloatingPoint(addr_node->type)) {
+      if (TypeUsesHardwareFloatRegister(addr_node->type)) {
         *addr = FloatingPointVariableRegister(g, var_num, var->symbol);
       } else {
         *addr = IntVariableRegister(g, var_num, var->symbol);
@@ -3191,7 +3191,7 @@ static TargetInstruction* Store(ARMGenerator* g, IRNode* addr_node, TargetInstru
 
   // If we are not on the stack, move the src to the dest.
   if (!on_stack) {
-    ARMOpcode opcode = TypeIsFloatingPoint(addr_node->type) ? ARM_OP(fmov) : ARM_OP(mov);
+    ARMOpcode opcode = TypeUsesHardwareFloatRegister(addr_node->type) ? ARM_OP(fmov) : ARM_OP(mov);
     TargetInstruction* result = SetDestOrMove(g, src, addr, opcode);
     return result;
   }
@@ -3491,7 +3491,7 @@ static TargetInstruction* LowerStore(ARMGenerator* g, IRNode* node) {
   }
   TargetInstruction* src = Materialize(g, src_node);
   TargetInstruction* stored = Store(g, addr_node, src, opcode, size);
-  if (node->outputs.length > 0 && !TypeIsFloatingPoint(addr_node->type)) {
+  if (node->outputs.length > 0 && !TypeUsesHardwareFloatRegister(addr_node->type)) {
     // `return value += amount;` reads the assignment's value, which the IR
     // spells as a use of the store.  A store to memory produces no value of its
     // own, so hand on what was stored.  Left as the store instruction this
@@ -3834,7 +3834,7 @@ static void PreserveInPlaceOldValue(ARMGenerator* g, IRNode* node, int size) {
     return;
   }
   ARMOpcode copy_op =
-      TypeIsFloatingPoint(node->type) ? ARM_OP(fmov) : ARM_OP(mov);
+      TypeUsesHardwareFloatRegister(node->type) ? ARM_OP(fmov) : ARM_OP(mov);
   TargetInstruction* saved =
       Emit(g, SetInstructionSize(NewInstruction1(copy_op, old), size));
   // SetLoweredNode is intentionally write-once; the load already has its
@@ -3901,7 +3901,7 @@ static TargetInstruction* LowerInc(ARMGenerator* g, IRNode* node) {
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     amount = Materialize(g, amount_node);
     inc =  Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(fadd), load, amount), size));
   } else  {
@@ -3970,7 +3970,7 @@ static TargetInstruction* LowerDec(ARMGenerator* g, IRNode* node) {
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     amount = Materialize(g, amount_node);
     inc =  Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(fsub), load, amount), size));
   } else  {
@@ -4104,7 +4104,7 @@ static TargetInstruction* PushArg(ARMGenerator* g, IRNode* node,
                         GetIntConstant(g, NULL, kTargetType64Bit, offset)), 0));
   }
   ARMOpcode opcode = ARM_OP(str);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     opcode = ARM_OP(fstr);
   }
   return Emit(g, CopyInstructionSize(NewInstruction3(
@@ -4120,7 +4120,7 @@ static TargetInstruction* PopArg(ARMGenerator* g, IRNode* node, size_t offset) {
                         GetIntConstant(g, NULL, kTargetType64Bit, offset)), 0));
   }
   ARMOpcode opcode = ARM_OP(ldr);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     opcode = ARM_OP(fldr);
   }
   return Emit(g, CopyInstructionSize(NewInstruction2(
@@ -4612,7 +4612,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
         // 8-byte members (HFA doubles / long double) stay aligned.
         struct_area_size += (struct_size + 7) & ~(size_t)7;
       }
-    } else if (TypeIsFloatingPoint(arg_type)) {
+    } else if (TypeUsesHardwareFloatRegister(arg_type)) {
       bool variadic = callee_varargs && arg_ordinal >= named_count;
       if (variadic) {
         // AAPCS: a variadic double is passed like a 64-bit integer -- in a pair
@@ -4832,7 +4832,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
           }
         }
         ARMOpcode mov_opcode = ARM_OP(mov);
-        if (TypeIsFloatingPoint(arg_node->type)) {
+        if (TypeUsesHardwareFloatRegister(arg_node->type)) {
           if (ARMTypeIsDouble(arg_node->type)) {
             mov_opcode = ARM_OP(fmov);
           } else {
@@ -4993,10 +4993,10 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       call_target = staged_target;
     } else if (((int)addr->opcode == (int)ARM_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
-      opcode = TypeIsFloatingPoint(node->type) ? ARM_OP(bl) : ARM_OP(bl);
+      opcode = TypeUsesHardwareFloatRegister(node->type) ? ARM_OP(bl) : ARM_OP(bl);
     } else {
       // Calling through a register, rcall.
-      opcode = TypeIsFloatingPoint(node->type) ? ARM_OP(blr) : ARM_OP(blr);
+      opcode = TypeUsesHardwareFloatRegister(node->type) ? ARM_OP(blr) : ARM_OP(blr);
     }
     call =
         Emit(g, NewInstruction2(opcode, call_target, BuildArgList(g, &arg_locations)));
@@ -5008,7 +5008,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
     // fresh register immediately while it is still live.  The allocator's
     // preserved-instruction logic can then keep that copy across later calls.
     bool result_used = node->outputs.length > 0;
-    if (TypeIsFloatingPoint(node->type)) {
+    if (TypeUsesHardwareFloatRegister(node->type)) {
       // The result comes back in the floating-point return register.
       call->flags |= kARMFpReturn;
       SetInstructionSize(call, ARMTypeIsDouble(node->type) ? kSize64Bit : kSize32Bit);
@@ -5053,7 +5053,7 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
       if (dest != NULL) {
         // A floating-point result returns in the FP return register and must be
         // copied with fmov; using the integer mov here corrupts the value.
-        ARMOpcode mov_opcode = TypeIsFloatingPoint(node->type)
+        ARMOpcode mov_opcode = TypeUsesHardwareFloatRegister(node->type)
                                    ? ARM_OP(fmov)
                                    : ARM_OP(mov);
         call = SetDestOrMove(g, call, dest, mov_opcode);
@@ -5153,7 +5153,9 @@ static TargetInstruction* LowerBuiltinVaArg(ARMGenerator* g, IRNode* node) {
   // slot holds a 4-byte pointer to the caller's copy.  Load that pointer -- it
   // is the struct address va_arg yields -- and advance ap past the one-word
   // pointer slot.
-  if (node->type != NULL && TypeIsStructOrUnion(node->type)) {
+  if (node->type != NULL &&
+      (TypeIsStructOrUnion(node->type) ||
+       TypeUsesLongDoubleRepresentation(node->type))) {
     TargetInstruction* ptr = Emit(
         g, SetInstructionSize(
                NewInstruction2(ARM_OP(ldr), ap_load,
@@ -5186,7 +5188,7 @@ static TargetInstruction* LowerBuiltinVaArg(ARMGenerator* g, IRNode* node) {
 
   int data_size = is_eight ? kSize64Bit : kSize32Bit;
   TargetInstruction* result;
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     result = Emit(g, SetInstructionSize(
                          NewInstruction2(ARM_OP(fldr), ap_load,
                                          GetIntConstant(g, NULL, kTargetType32Bit, 0)),
@@ -5937,7 +5939,7 @@ static int64_t CalculateArgumentSize(IRNode* arg) {
       type = var->symbol->type;
     }
   }
-  if (TypeIsFloatingPoint(type)) {
+  if (TypeUsesHardwareFloatRegister(type)) {
     return 8;
   }
   if (TypeIsPointerOrArray(type)) {
@@ -5992,7 +5994,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   for (size_t i = 0; i < args->length; i++) {
     if (i == arg_num) {
       ArgLocation location;
-      if (TypeIsFloatingPoint(arg_type)) {
+      if (TypeUsesHardwareFloatRegister(arg_type)) {
         // Each floating-point argument (float or double) consumes one full
         // double-precision argument register.  fp_reg counts d-register indices
         // (d0..d3), matching the caller side in LowerCall.
@@ -6066,7 +6068,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
     // r3 and never advance stack_offset, so every stacked argument would be read
     // from the same (first) stack slot.
     Symbol* arg_symbol = args->value.p[i];
-    if (TypeIsFloatingPoint(arg_symbol->type)) {
+    if (TypeUsesHardwareFloatRegister(arg_symbol->type)) {
       if (fp_reg < ARM_NUM_FP_ARGS) {
         fp_reg++;
       } else {
@@ -6199,7 +6201,7 @@ static void NoteNamedArgumentExtent(ARMGenerator* g,
   int stack_end = 0;
   switch (location->type) {
     case kArgLocationRegister:
-      if (!TypeIsFloatingPoint(type)) {
+      if (!TypeUsesHardwareFloatRegister(type)) {
         reg_end = (int)location->location.offset + 1;
       }
       break;
@@ -6287,7 +6289,7 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
   }
 
   // printf("var %s\n", ((IRVariable*)entry->pooled)->symbol->name.value);
-  if (TypeIsFloatingPoint(entry->pooled->type)) {
+  if (TypeUsesHardwareFloatRegister(entry->pooled->type)) {
     // See the integer case below: a stack-passed argument has no entry load that
     // assigns its register, so it must not be promoted to a register variable.
     bool arg_on_stack = false;

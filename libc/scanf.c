@@ -13,6 +13,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include "_fpfuncs.h"
 
@@ -636,15 +637,25 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
   uint64_t fx[FIXED_SIZE_WORDS] = {0};
   uint64_t n[FIXED_SIZE_HALF] = {0};
   double v = 0;
+  char text[512];
+  int text_len = 0;
   
   uint8_t negative = 0;
   bool present = false;
+
+#define SCANF_TAKE(ch)                                                 \
+  do {                                                                 \
+    if (text_len < (int)sizeof(text) - 1) {                            \
+      text[text_len++] = (char)(ch);                                   \
+    }                                                                  \
+  } while (0)
   
   int ch = get(data);
   if (ch == EOF) {
     goto done;
   }
   if (ch == '-') {
+    SCANF_TAKE(ch);
     ch = get(data);
     if (ch == EOF) {
       goto done;
@@ -652,6 +663,7 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
     negative = 0x80;
   }
   if (ch == '+') {
+    SCANF_TAKE(ch);
     ch = get(data);
     if (ch == EOF) {
       goto done;
@@ -662,6 +674,7 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
   // half of the fixed point number - the integral part.
   int fraction_digits = 0;
   while (isdigit(ch) && ch != '.' && ch != 'e' && ch != 'E') {
+    SCANF_TAKE(ch);
     n[0] = ch - '0';
     __MultiplyBy10Half(fx + FIXED_SIZE_HALF);
     __AddHalf(fx + FIXED_SIZE_HALF, n);
@@ -673,6 +686,7 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
   }
   
   if (ch == '.') {
+    SCANF_TAKE(ch);
     ch = get(data);
     if (ch == EOF) {
       goto done;
@@ -680,6 +694,7 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
     // We have a fractional part, continue accumulating and count the
     // number of fractional digits.
     while (isdigit(ch) && ch != 'e' && ch != 'E') {
+      SCANF_TAKE(ch);
       n[0] = ch - '0';
       __MultiplyBy10Half(fx + FIXED_SIZE_HALF);
       __AddHalf(fx + FIXED_SIZE_HALF, n);
@@ -700,12 +715,14 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
   
   // Check for exponent.
   if (ch == 'e' || ch == 'E') {
+    SCANF_TAKE(ch);
     ch = get(data);
     if (ch == EOF) {
       goto done;
     }
     bool negative_exp = ch == '-';
     if (ch == '+' || ch =='-') {
+      SCANF_TAKE(ch);
       ch = get(data);
       if (ch == EOF) {
         goto done;
@@ -713,6 +730,7 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
     }
     int exp = 0;
     while (isdigit(ch)) {
+      SCANF_TAKE(ch);
       exp = exp * 10 + ch - '0';
       ch = get(data);
       if (ch == EOF) {
@@ -776,10 +794,22 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
 #endif
 
   if (!fmt->suppress) {
-    *(double*)ptr = v;
+    if (fmt->modifier == kModLongDouble &&
+        sizeof(long double) > sizeof(double)) {
+      text[text_len] = '\0';
+      // &text[0], not `text`: wasm32 currently materializes a decayed
+      // char[] call argument as a null pointer.  The indexed stores
+      // above write the digits correctly; only the decayed pointer is
+      // wrong.
+      long double ld = strtold(&text[0], NULL);
+      memcpy(ptr, &ld, sizeof(ld));
+    } else {
+      *(double*)ptr = v;
+    }
   }
   
 done:
+#undef SCANF_TAKE
   return present;
 }
 

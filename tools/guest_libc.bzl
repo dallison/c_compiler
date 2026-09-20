@@ -43,6 +43,8 @@ def guest_libc_shared(
         name = name,
         srcs = depset(direct = libc_srcs + libc_cxx_srcs + extra_c + runtime_srcs + [
             ":libc_headers",
+            "c_compiler/support/fp_extended.c",
+            "c_compiler/support/fp_extended.h",
             "tools/build_guest_libc.sh",
         ]).to_list(),
         outs = [output],

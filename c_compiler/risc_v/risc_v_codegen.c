@@ -19,9 +19,8 @@
 #include "risc_v_optimize.h"
 #include "target_basic_block.h"
 
-// RISC-V currently uses the 64-bit double representation for long double.
-// Keep the source-language distinction, but select double-width instructions
-// and floating-point registers for both types.
+// RISC-V LP64D uses IEEE binary128 for long double.  Distinct long double
+// values are 16-byte memory objects; arithmetic goes through software helpers.
 static bool RVFpIsDoubleWidth(TypeRecord* type) {
   return TypeUsesFloat64Representation(type);
 }
@@ -1504,7 +1503,7 @@ static bool UseRegisterForVariable(RVGenerator* rv, IRNode* var_node) {
 
   // Register variables are assigned to a fixed pool of dedicated registers.
   // If we run out, keep the variable on the stack.
-  if (TypeIsFloatingPoint(var_node->type)) {
+  if (TypeUsesHardwareFloatRegister(var_node->type)) {
     return rv->num_fp_reg_vars < MaxFpRegisterVariables(rv);
   }
   return rv->num_int_reg_vars < MaxIntRegisterVariables(rv);
@@ -1670,7 +1669,7 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
       if (RV_IS_REG_VAR(var_offset)) {
         // Variable is in a register.
         int var_num = var_offset & ~RV_REG_VAR;
-        if (TypeIsFloatingPoint(node->type)) {
+        if (TypeUsesHardwareFloatRegister(node->type)) {
           return FloatingPointVariableRegister(rv, var_num, var->symbol);
         } else {
           return IntVariableRegister(rv, var_num, var->symbol);
@@ -1690,7 +1689,7 @@ static TargetInstruction* Materialize(RVGenerator* rv, IRNode* node) {
       // already holds the pointer to the caller's copy.
       IRVariable* var = (IRVariable*)node;
       int var_num = var_offset & ~RV_REG_VAR;
-      if (TypeIsFloatingPoint(node->type)) {
+      if (TypeUsesHardwareFloatRegister(node->type)) {
         return FloatingPointVariableRegister(rv, var_num, var->symbol);
       } else {
         return IntVariableRegister(rv, var_num, var->symbol);
@@ -2113,11 +2112,11 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
   inst = Emit(rv, inst);
   // A bare tmp placeholder carries no type; tag it so the register allocator
   // gives it a float register when it will hold a floating-point value.
-  if ((RVOpcode)inst->opcode == RV_OP(tmp) && TypeIsFloatingPoint(node->type)) {
+  if ((RVOpcode)inst->opcode == RV_OP(tmp) && TypeUsesHardwareFloatRegister(node->type)) {
     inst->flags |= RV_INST_FLOAT_TMP;
   }
   RVOpcode mov_opcode = RV_OP(mv);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     mov_opcode = RVFpIsDoubleWidth(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
   }
   return FinishWithDest(rv, node, inst, mov_opcode);
@@ -2440,7 +2439,7 @@ static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
     if (RV_IS_REG_VAR(var_offset)) {
       // Variable is in a register.
       int var_num = var_offset & ~RV_REG_VAR;
-      if (TypeIsFloatingPoint(addr_node->type)) {
+      if (TypeUsesHardwareFloatRegister(addr_node->type)) {
         *addr = FloatingPointVariableRegister(rv, var_num, var->symbol);
       } else {
         *addr = IntVariableRegister(rv, var_num, var->symbol);
@@ -2461,7 +2460,7 @@ static bool GetRegAndOffset(RVGenerator* rv, IRNode* addr_node,
     if (RV_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       int var_num = var_offset & ~RV_REG_VAR;
-      if (TypeIsFloatingPoint(addr_node->type)) {
+      if (TypeUsesHardwareFloatRegister(addr_node->type)) {
         *addr = FloatingPointVariableRegister(rv, var_num, var->symbol);
       } else {
         *addr = IntVariableRegister(rv, var_num, var->symbol);
@@ -2504,7 +2503,7 @@ static TargetInstruction* Load(RVGenerator* rv, IRNode* addr_node, RVOpcode opco
   bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
 
   if (!on_stack) {
-    if (TypeIsFloatingPoint(addr_node->type)) {
+    if (TypeUsesHardwareFloatRegister(addr_node->type)) {
       return Emit(rv, NewInstruction1(RVFpIsDoubleWidth(addr_node->type) ?
                                       RV_OP(fmv_d) : RV_OP(fmv_s), addr));
     }
@@ -2557,7 +2556,7 @@ static TargetInstruction* LowerLoad(RVGenerator* rv, IRNode* node) {
 
   TargetInstruction* result = Load(rv, addr_node, opcode);
   RVOpcode mov_opcode = RV_OP(mv);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     mov_opcode = RVFpIsDoubleWidth(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
   }
   return FinishWithDest(rv, node, result, mov_opcode);
@@ -2644,7 +2643,7 @@ static TargetInstruction* Store(RVGenerator* rv, IRNode* addr_node, TargetInstru
 
   // If we are not on the stack, move the src to the dest.
   if (!on_stack) {
-    bool is_fp = TypeIsFloatingPoint(addr_node->type);
+    bool is_fp = TypeUsesHardwareFloatRegister(addr_node->type);
     if (!is_fp) {
       src = NarrowToStoreWidth(rv, src, StoredObjectType(addr_node),
                                StoreWidth(opcode));
@@ -2696,7 +2695,7 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
   }
   TargetInstruction* src = Materialize(rv, src_node);
   TargetInstruction* stored = Store(rv, addr_node, src, opcode);
-  if (node->outputs.length > 0 && !TypeIsFloatingPoint(addr_node->type)) {
+  if (node->outputs.length > 0 && !TypeUsesHardwareFloatRegister(addr_node->type)) {
     // `return value += amount;` reads the assignment's value, which the IR
     // spells as a use of the store.  A store to memory produces no value of its
     // own, so hand on what was stored, narrowed the way reading the object back
@@ -3137,7 +3136,7 @@ static TargetInstruction* LowerInc(RVGenerator* rv, IRNode* node) {
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     inc =  Emit(rv, NewInstruction2(RVFpIsDoubleWidth(node->type) ? RV_OP(fadd_d) : RV_OP(fadd_s), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, RVIntValue(amount));
@@ -3197,7 +3196,7 @@ static TargetInstruction* LowerDec(RVGenerator* rv, IRNode* node) {
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     inc =  Emit(rv, NewInstruction2(RVFpIsDoubleWidth(node->type) ? RV_OP(fsub_d) : RV_OP(fsub_s), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, -RVIntValue(amount));
@@ -3296,7 +3295,7 @@ static TargetInstruction* PushArg(RVGenerator* rv, IRNode* node,
                         GetIntConstant(rv, node, kTargetType64Bit, offset)));
   }
   RVOpcode opcode = RV_OP(sd);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     opcode = RV_OP(fsd);
   }
   return Emit(rv, NewInstruction3(
@@ -3312,7 +3311,7 @@ static TargetInstruction* PopArg(RVGenerator* rv, IRNode* node, size_t offset) {
                         GetIntConstant(rv, node, kTargetType64Bit, offset)));
   }
   RVOpcode opcode = RV_OP(ld);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     opcode = RV_OP(fld);
   }
   return Emit(rv, NewInstruction2(
@@ -3695,7 +3694,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
         }
         struct_area_size += struct_size;
       }
-    } else if (TypeIsFloatingPoint(arg_node->type) && !is_variadic_arg) {
+    } else if (TypeUsesHardwareFloatRegister(arg_node->type) && !is_variadic_arg) {
       if (next_fp_arg_reg < RV_NUM_FP_ARGS) {
         // Argument goes in an argument register.
         TargetInstruction* arg_reg =
@@ -3788,7 +3787,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     ArgLocation* arg_location = arg_locations.value.p[i - 1];
     bool is_variadic_arg = is_varargs_call && (i - 1) >= num_fixed_args;
     bool pass_float_as_int =
-        is_variadic_arg && TypeIsFloatingPoint(arg_node->type);
+        is_variadic_arg && TypeUsesHardwareFloatRegister(arg_node->type);
     switch (arg_location->type) {
       case kArgLocationFPRegisterAggregate: {
         RVFloatingAggregate aggregate;
@@ -3921,7 +3920,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
                        NewPendingArgMove(arg, arg_location->location.reg,
                                          RV_OP(mv)));
           break;
-        } else if (TypeIsFloatingPoint(arg_node->type)) {
+        } else if (TypeUsesHardwareFloatRegister(arg_node->type)) {
           if (RVFpIsDoubleWidth(arg_node->type)) {
             mov_opcode = RV_OP(fmv_d);
           } else {
@@ -3993,10 +3992,10 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     }
     if (((int)addr->opcode == (int)RV_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
-      opcode = TypeIsFloatingPoint(node->type) ? RV_OP(callf) : RV_OP(call);
+      opcode = TypeUsesHardwareFloatRegister(node->type) ? RV_OP(callf) : RV_OP(call);
     } else {
       // Calling through a register, rcall.
-      opcode = TypeIsFloatingPoint(node->type) ? RV_OP(rcallf) : RV_OP(rcall);
+      opcode = TypeUsesHardwareFloatRegister(node->type) ? RV_OP(rcallf) : RV_OP(rcall);
     }
     call =
         Emit(rv, NewInstruction2(opcode, addr, BuildArgList(rv, &arg_locations)));
@@ -4012,7 +4011,7 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   TargetInstruction* result = call;
   if (!can_be_tail_call) {
     RVOpcode mov_opcode = RV_OP(mv);
-    if (node->type != NULL && TypeIsFloatingPoint(node->type)) {
+    if (node->type != NULL && TypeUsesHardwareFloatRegister(node->type)) {
       mov_opcode = RVFpIsDoubleWidth(node->type) ? RV_OP(fmv_d) : RV_OP(fmv_s);
     }
     TargetInstruction* dest = GetDestInstruction(rv, node);
@@ -4118,7 +4117,16 @@ static TargetInstruction* LowerBuiltinVaArg(RVGenerator* rv, IRNode* node) {
     }
     result = ap_load;
     arg_size = (struct_size + 7) & ~(size_t)7;
-  } else if (TypeIsFloatingPoint(node->type)) {
+  } else if (TypeUsesLongDoubleRepresentation(node->type) ||
+             (TypeIsStructOrUnion(node->type) &&
+              node->type->info.struct_info->size > 16)) {
+    // Larger aggregates and distinct long double travel as a hidden pointer
+    // in one integer slot.  Load that pointer; GenerateBuiltinVaArg memcpy's
+    // the 16-byte object from it.
+    result = Emit(rv, NewInstruction2(RV_OP(ld), ap_load,
+                               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+    arg_size = 8;
+  } else if (TypeUsesHardwareFloatRegister(node->type)) {
     result = Emit(rv, NewInstruction2(RV_OP(fld), ap_load,
                                GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
   } else {
@@ -4849,7 +4857,7 @@ static int64_t CalculateArgumentSize(IRNode* arg) {
       ((IRVariable*)arg)->symbol != NULL) {
     type = ((IRVariable*)arg)->symbol->type;
   }
-  if (TypeIsFloatingPoint(type)) {
+  if (TypeUsesHardwareFloatRegister(type)) {
     return 8;
   }
   if (TypeIsPointerOrArray(type)) {
@@ -4918,7 +4926,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
           location.location.offset = stack_offset;
           location.second_offset = stack_offset + 8;
         }
-      } else if (TypeIsFloatingPoint(arg_type)) {
+      } else if (TypeUsesHardwareFloatRegister(arg_type)) {
         if (fp_reg <= RV_FP_ARG_END) {
           // Arg is in a floating point register.
           location.type = kArgLocationRegister;
@@ -4953,7 +4961,7 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
       } else {
         stack_offset += 16;
       }
-    } else if (TypeIsFloatingPoint(arg_symbol->type)) {
+    } else if (TypeUsesHardwareFloatRegister(arg_symbol->type)) {
       if (fp_reg <= RV_FP_ARG_END) {
         fp_reg++;
       } else {
@@ -5140,7 +5148,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
   assert(size != 0);
 
   // printf("var %s\n", ((IRVariable*)entry->pooled)->symbol->name.value);
-  if (TypeIsFloatingPoint(entry->pooled->type)) {
+  if (TypeUsesHardwareFloatRegister(entry->pooled->type)) {
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_fp_reg_vars++;
       entry->pooled->data.ivalue = RV_REG_VAR | reg;

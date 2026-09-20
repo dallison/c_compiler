@@ -240,6 +240,16 @@ typedef struct {
   int derived_induction_vars : 1;
 } IROptimizations;
 
+// In-memory representation of `long double`.  Distinct 16-byte formats are
+// IEEE binary128 or Intel 80-bit.  RISC-V 32, wasm32, i386, eBPF, Xtensa,
+// and 6502 stay aliased to `double` or `float`.
+typedef enum {
+  kLongDoubleFormatFloat32 = 0,
+  kLongDoubleFormatFloat64 = 1,
+  kLongDoubleFormatIntel80 = 2,
+  kLongDoubleFormatIEEEf128 = 3,
+} LongDoubleFormat;
+
 // A compiler target back-end.  This contains pointers to
 // functions to generate code for a particlar target.
 typedef struct {
@@ -252,6 +262,8 @@ typedef struct {
   int bool_size;
   int float_size;
   int double_size;
+  int long_double_size;
+  int long_double_format;  // kLongDoubleFormat*
   int wchar_size;
   int stack_alignment;      // Power of 2 stack alignment.
   bool plain_char_is_signed;
@@ -396,6 +408,8 @@ typedef struct Compiler {
   int long_long_size;  // Size of native long long.
   int float_size;  // Size of native float.
   int double_size;  // Size of native double.
+  int long_double_size;
+  int long_double_format;  // kLongDoubleFormat*
   int wchar_size;
   bool plain_char_is_signed;
   

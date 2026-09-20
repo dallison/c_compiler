@@ -143,6 +143,7 @@ Symbol* EnumFindConstant(Enum* e, String* name);
 // What is the size of a given type in bytes?
 int SizeofType(Type type);
 int SizeofPointer(void);
+int SizeofLongDouble(void);
 TypeRecord* NewSizeTypeRecord(void);
 
 #endif /* type_core_h */

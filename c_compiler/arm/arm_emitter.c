@@ -1866,7 +1866,9 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       } else if (inst->operand[0] != NULL &&
                  ((int)inst->operand[0]->opcode == (int)ARM_OP(literal))) {
         TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
-        fprintf(fp, "\tldr %s, =.str.%d\n", dest, literal->literal_id);
+        char litname[64];
+        LiteralAsmName(literal->literal_id, litname, sizeof(litname));
+        fprintf(fp, "\tldr %s, =%s\n", dest, litname);
       }
       return;
     }
@@ -1876,7 +1878,9 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       if (inst->operand[0] != NULL &&
           ((int)inst->operand[0]->opcode == (int)ARM_OP(literal))) {
         TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
-        fprintf(fp, "\tldr %s, =.str.%d\n", dest, literal->literal_id);
+        char litname[64];
+        LiteralAsmName(literal->literal_id, litname, sizeof(litname));
+        fprintf(fp, "\tldr %s, =%s\n", dest, litname);
         return;
       }
       break;
@@ -2199,7 +2203,10 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
         fprintf(fp, "%s\n", TargetSymbolName(((TargetSymbol*)sym)->symbol,
                                              symbuf, sizeof(symbuf)));
       } else if (((int)sym->opcode == (int)ARM_OP(literal))) {
-        fprintf(fp, ".str.%d\n", ((TargetLiteral*)sym)->literal_id);
+        char litname[64];
+        LiteralAsmName(((TargetLiteral*)sym)->literal_id, litname,
+                       sizeof(litname));
+        fprintf(fp, "%s\n", litname);
       } else if (TargetIsConst(sym)) {
         uint64_t value = (uint64_t)TargetIntValue(sym);
         if ((ARMOpcode)inst->opcode == ARM_OP(movt)) {
@@ -2222,8 +2229,8 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                                 sizeof(symbuf));
       } else {
         assert((ARMOpcode)sym->opcode == ARM_OP(literal));
-        snprintf(symbuf, sizeof(symbuf), ".str.%d",
-                 ((TargetLiteral*)sym)->literal_id);
+        LiteralAsmName(((TargetLiteral*)sym)->literal_id, symbuf,
+                       sizeof(symbuf));
         name = symbuf;
       }
       fprintf(fp, "\t%-12s%s, %s\n", ARMOpcodeName(inst->opcode),
@@ -2273,7 +2280,9 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
             }
           } else if (((int)inst->operand[i]->opcode == (int)ARM_OP(literal))) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];
-            fprintf(fp, "%s.str.%d", sep, literal->literal_id);
+            char litname[64];
+            LiteralAsmName(literal->literal_id, litname, sizeof(litname));
+            fprintf(fp, "%s%s", sep, litname);
           } else if (((int)inst->operand[i]->opcode == (int)ARM_OP(oplsl))) {
             fprintf(fp, ", lsl ");
             sep = "";

@@ -14,6 +14,9 @@
 extern "C" char* __PrintFloatFormat(double, int, char*, size_t);
 extern "C" char* __PrintScientificFormat(double, int, char*, size_t);
 extern "C" char* __PrintGeneralFormat(double, int, char*, size_t);
+extern "C" char* __PrintFloatFormatL(long double, int, char*, size_t);
+extern "C" char* __PrintScientificFormatL(long double, int, char*, size_t);
+extern "C" char* __PrintGeneralFormatL(long double, int, char*, size_t);
 
 namespace std {
 
@@ -30,6 +33,26 @@ static char* __locale_format_double(char* buf, size_t cap, ios_base& f,
     start = __PrintScientificFormat(v, precision, buf, cap);
   } else {
     start = __PrintGeneralFormat(v, precision, buf, cap);
+  }
+  if (start == nullptr) {
+    start = buf;
+    buf[0] = '\0';
+  }
+  *len = strlen(start);
+  return start;
+}
+
+static char* __locale_format_ldouble(char* buf, size_t cap, ios_base& f,
+                                     long double v, size_t* len) {
+  char* start = nullptr;
+  ios_base::fmtflags flags = f.flags();
+  int precision = static_cast<int>(f.precision());
+  if ((flags & ios_base::fixed) != 0) {
+    start = __PrintFloatFormatL(v, precision, buf, cap);
+  } else if ((flags & ios_base::scientific) != 0) {
+    start = __PrintScientificFormatL(v, precision, buf, cap);
+  } else {
+    start = __PrintGeneralFormatL(v, precision, buf, cap);
   }
   if (start == nullptr) {
     start = buf;
@@ -404,7 +427,12 @@ ostreambuf_iterator __davecc_classic_put_double(ostreambuf_iterator s, ios_base&
 }
 
 ostreambuf_iterator __davecc_classic_put_ldouble(ostreambuf_iterator s, ios_base& f, char fill, long double v) {
-  return __davecc_classic_put_double(s, f, fill, static_cast<double>(v));
+  char buf[160];
+  size_t len = 0;
+  char* start = __locale_format_ldouble(buf, sizeof(buf), f, v, &len);
+  size_t cap = static_cast<size_t>(buf + sizeof(buf) - start);
+  len = __apply_numpunct_char(start, len, cap, f, 10);
+  return __write_c_string(s, f, fill, start, len);
 }
 
 ostreambuf_iterator __davecc_classic_put_ptr(ostreambuf_iterator s, ios_base& f, char fill, const void* v) {
@@ -540,10 +568,39 @@ istreambuf_iterator __davecc_classic_get_double(
 istreambuf_iterator __davecc_classic_get_ldouble(
     istreambuf_iterator in, istreambuf_iterator end, ios_base& f,
     ios_base::iostate& err, long double& v) {
-  double tmp = 0;
-  in = __davecc_classic_get_double(in, end, f, err, tmp);
-  if ((err & ios_base::failbit) == 0) {
-    v = static_cast<long double>(tmp);
+  const numpunct<char>& np = use_facet<numpunct<char>>(f.getloc());
+  char thousands = np.thousands_sep();
+  char decimal = np.decimal_point();
+  bool grouped = !np.grouping().empty() && np.grouping()[0] != 0;
+  while (in != end && *in == ' ') {
+    ++in;
+  }
+  char buf[256];
+  size_t len = 0;
+  while (in != end && len + 1 < sizeof(buf)) {
+    char c = *in;
+    if (c == ' ' || c == '\t' || c == '\n') {
+      break;
+    }
+    if (grouped && c == thousands) {
+      ++in;
+      continue;
+    }
+    if (c == decimal) {
+      c = '.';
+    }
+    buf[len++] = c;
+    ++in;
+  }
+  buf[len] = 0;
+  if (len == 0) {
+    err = ios_base::failbit;
+    return in;
+  }
+  char* endptr = nullptr;
+  v = strtold(buf, &endptr);
+  if (endptr == buf) {
+    err = ios_base::failbit;
   }
   return in;
 }
@@ -664,7 +721,12 @@ wostreambuf_iterator __davecc_classic_wput_double(wostreambuf_iterator s,
 wostreambuf_iterator __davecc_classic_wput_ldouble(wostreambuf_iterator s,
                                                    ios_base& f, wchar_t fill,
                                                    long double v) {
-  return __davecc_classic_wput_double(s, f, fill, static_cast<double>(v));
+  char buf[160];
+  size_t len = 0;
+  char* start = __locale_format_ldouble(buf, sizeof(buf), f, v, &len);
+  size_t cap = static_cast<size_t>(buf + sizeof(buf) - start);
+  len = __apply_numpunct_wchar(start, len, cap, f, 10);
+  return __write_wc_string(s, f, fill, start, len);
 }
 
 wostreambuf_iterator __davecc_classic_wput_ptr(wostreambuf_iterator s,
@@ -807,10 +869,45 @@ wistreambuf_iterator __davecc_classic_wget_double(
 wistreambuf_iterator __davecc_classic_wget_ldouble(
     wistreambuf_iterator in, wistreambuf_iterator end, ios_base& f,
     ios_base::iostate& err, long double& v) {
-  double tmp = 0;
-  in = __davecc_classic_wget_double(in, end, f, err, tmp);
-  if ((err & ios_base::failbit) == 0) {
-    v = static_cast<long double>(tmp);
+  const numpunct<wchar_t>& np = use_facet<numpunct<wchar_t>>(f.getloc());
+  wchar_t thousands = np.thousands_sep();
+  wchar_t decimal = np.decimal_point();
+  bool grouped = !np.grouping().empty() && np.grouping()[0] != 0;
+  while (in != end && *in == L' ') {
+    ++in;
+  }
+  char buf[256];
+  size_t len = 0;
+  while (in != end && len + 1 < sizeof(buf)) {
+    wchar_t wc = *in;
+    if (wc == L' ' || wc == L'\t' || wc == L'\n') {
+      break;
+    }
+    if (grouped && wc == thousands) {
+      ++in;
+      continue;
+    }
+    if (wc == decimal) {
+      buf[len++] = '.';
+      ++in;
+      continue;
+    }
+    if (wc > 127) {
+      err = ios_base::failbit;
+      return in;
+    }
+    buf[len++] = (char)wc;
+    ++in;
+  }
+  buf[len] = 0;
+  if (len == 0) {
+    err = ios_base::failbit;
+    return in;
+  }
+  char* endptr = nullptr;
+  v = strtold(buf, &endptr);
+  if (endptr == buf) {
+    err = ios_base::failbit;
   }
   return in;
 }

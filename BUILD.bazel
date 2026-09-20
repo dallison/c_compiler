@@ -290,6 +290,7 @@ COMMON_INCLUDES = [
     "c_compiler/optimization",
     "c_compiler/assembler",
     "c_compiler/util",
+    "c_compiler/support",
     "c_compiler/serialize",
     "c_compiler/driver",
     "c_compiler/lto",
@@ -382,6 +383,7 @@ LIBC_SRCS = [
     "libc/ldexp.c",
     "libc/libc_test.c",
     "libc/log.c",
+    "libc/long_double.c",
     "libc/math_extra.c",
     "libc/locale_c.c",
     "libc/uchar.c",
@@ -461,6 +463,11 @@ LIBC_SRCS = [
 ]
 
 LIBC_CXX_SRCS = glob(["libc/*.cc"])
+
+FP_EXTENDED_SRCS = [
+    "c_compiler/support/fp_extended.c",
+    "c_compiler/support/fp_extended.h",
+]
 
 LINUX_DYNAMIC_CRT_SRCS = [
     "libc/cxx_tls.c",
@@ -919,6 +926,8 @@ cc_library(
         "c_compiler/frontend/semantic/init_semantics.c",
         "c_compiler/frontend/semantic/rtti.c",
         "c_compiler/backend/ir.c",
+        "c_compiler/backend/long_double_codegen.c",
+        "c_compiler/support/fp_extended.c",
         "c_compiler/frontend/lexical/lex.c",
         "c_compiler/frontend/lexical/unicode_name.c",
         "c_compiler/frontend/lexical/generated/unicode_name_data.c",
@@ -1682,7 +1691,7 @@ chmod +x $@
 
 genrule(
     name = "libc_65c02",
-    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
         "6502 support/*.h",
         "6502 support/*.s",
         "libc/include/**/*.h",
@@ -1866,6 +1875,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/long_double.c"
   "libc/math_extra.c"
   "libc/locale_c.c"
   "libc/inttypes.c"
@@ -1898,7 +1908,7 @@ cd "$$work"
 
 genrule(
     name = "libc_x86_64",
-    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [
         ":libc_headers",
         "libc/guest_heap.c",
     ] + glob([
@@ -2059,6 +2069,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/long_double.c"
   "libc/math_extra.c"
   "libc/locale_c.c"
   "libc/inttypes.c"
@@ -2093,7 +2104,7 @@ done
 
 genrule(
     name = "libc_x86",
-    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [
         ":libc_headers",
         "libc/guest_heap.c",
     ] + glob([
@@ -2255,6 +2266,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/long_double.c"
   "libc/math_extra.c"
   "libc/locale_c.c"
   "libc/inttypes.c"
@@ -2289,7 +2301,7 @@ done
 
 genrule(
     name = "libc_riscv",
-    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
         "libc/include/**/*.h",
         "RISCV_support/*.s",
     ]) + [
@@ -2448,6 +2460,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/long_double.c"
   "libc/math_extra.c"
   "libc/locale_c.c"
   "libc/inttypes.c"
@@ -2480,7 +2493,7 @@ done
 
 genrule(
     name = "libc_aarch64",
-    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
         "libc/include/**/*.h",
         "aarch64 support/*.s",
     ]) + [
@@ -2641,6 +2654,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/long_double.c"
   "libc/math_extra.c"
   "libc/locale_c.c"
   "libc/inttypes.c"
@@ -2672,7 +2686,7 @@ cd "$$work"
 )
 genrule(
     name = "libc_riscv32",
-    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
         "libc/include/**/*.h",
         "RISCV32_support/*.s",
     ]) + [
@@ -2832,6 +2846,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/long_double.c"
   "libc/math_extra.c"
   "libc/locale_c.c"
   "libc/inttypes.c"
@@ -2878,7 +2893,7 @@ set -euo pipefail
 
 genrule(
     name = "libc_xtensa",
-    srcs = LIBC_SRCS + [":libc_headers"] + glob([
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + [":libc_headers"] + glob([
         "libc/include/**/*.h",
         "xtensa_support/*.c",
         "xtensa_support/*.s",
@@ -2916,7 +2931,7 @@ for src in libc/*.c; do
     libc/acos.c|libc/asin.c|libc/atan.c|libc/atan2.c|libc/ceil.c|libc/ckdint.c|\
     libc/complex_*.c|libc/exp.c|libc/fabs.c|libc/fenv.c|libc/floor.c|\
     libc/fpfuncs.c|libc/frexp.c|libc/ftoa.c|libc/ldexp.c|libc/log.c|\
-    libc/math_extra.c|libc/modf.c|libc/pow.c|libc/scanf.c|libc/sincos.c|\
+    libc/long_double.c|libc/math_extra.c|libc/modf.c|libc/pow.c|libc/scanf.c|libc/sincos.c|\
     libc/sqrt.c|libc/stdlib_extra.c|libc/strtod.c|libc/strtoll.c|\
     libc/strtoull.c|libc/tan.c|libc/threads.c|libc/time.c|libc/wchar.c) \
       continue ;;
@@ -3202,7 +3217,7 @@ linux_libc_archive(
 
 genrule(
     name = "libc_arm",
-    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
         "libc/include/**/*.h",
         "arm support/*.s",
     ]) + [
@@ -3365,6 +3380,7 @@ libc_srcs=(
   "libc/floor.c"
   "libc/frexp.c"
   "libc/log.c"
+  "libc/long_double.c"
   "libc/math_extra.c"
   "libc/locale_c.c"
   "libc/inttypes.c"
@@ -3397,7 +3413,7 @@ cd "$$work"
 
 genrule(
     name = "libc_pcode",
-    srcs = LIBC_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
         "libc/include/**/*.h",
         "pcode support/*.s",
     ]) + [
@@ -3624,7 +3640,7 @@ filegroup(
 
 genrule(
     name = "libc_wasm32",
-    srcs = LIBC_SRCS + [
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + [
         "libc/cxx_new_overloads.cc",
         ":libc_headers",
     ] + glob([
@@ -3676,7 +3692,7 @@ cd "$$work"
 """,
 )
 
-LIBC_TEST_DATA = LIBC_SRCS + LIBC_CXX_SRCS + [
+LIBC_TEST_DATA = LIBC_SRCS + LIBC_CXX_SRCS + FP_EXTENDED_SRCS + [
     ":libc_headers",
     "libc/guest_heap.c",
 ] + glob([
@@ -6117,6 +6133,130 @@ sh_test(
         ":davecc",
         "tests/memory_clobber_optimizer_cases.c",
     ],
+)
+
+sh_test(
+    name = "x86_64_six_arg_leaf_test",
+    srcs = ["tests/x86_64_six_arg_leaf_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :x86_64)",
+        "$(rootpath tests/regression/x86_64_six_arg_leaf_test.c)",
+    ],
+    data = [
+        ":davecc",
+        ":x86_64",
+        "tests/regression/x86_64_six_arg_leaf_test.c",
+    ],
+)
+
+sh_test(
+    name = "x86_64_long_double_lib_test",
+    srcs = ["tests/long_double_lib_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "x86_64",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+        "tests/regression/long_double_lib_test.c",
+    ],
+)
+
+sh_test(
+    name = "aarch64_long_double_lib_test",
+    srcs = ["tests/long_double_lib_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "aarch64",
+        "$(rootpath :aarch64)",
+        "$(rootpath :libc_aarch64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_aarch64",
+        ":aarch64",
+        "tests/regression/long_double_lib_test.c",
+    ],
+)
+
+sh_test(
+    name = "riscv_long_double_lib_test",
+    srcs = ["tests/long_double_lib_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "riscv",
+        "$(rootpath :riscv)",
+        "$(rootpath :libc_riscv)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_riscv",
+        ":riscv",
+        "tests/regression/long_double_lib_test.c",
+    ],
+)
+
+sh_test(
+    name = "riscv32_long_double_lib_test",
+    srcs = ["tests/long_double_lib_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "riscv32",
+        "$(rootpath :riscv)",
+        "$(rootpath :libc_riscv32)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_riscv32",
+        ":riscv",
+        "tests/regression/long_double_lib_test.c",
+    ],
+)
+
+sh_test(
+    name = "arm_long_double_lib_test",
+    srcs = ["tests/long_double_lib_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "arm",
+        "$(rootpath :arm)",
+        "$(rootpath :libc_arm)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_arm",
+        ":arm",
+        "tests/regression/long_double_lib_test.c",
+    ],
+)
+
+sh_test(
+    name = "wasm32_long_double_lib_test",
+    srcs = ["tests/wasm32_long_double_lib_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_wasm32)",
+        "$(rootpath :wasm32run)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_wasm32",
+        ":wasm32run",
+        "tests/regression/long_double_lib_test.c",
+        "tools/wasm32run.sh",
+    ],
+    tags = ["local"],
 )
 
 sh_test(

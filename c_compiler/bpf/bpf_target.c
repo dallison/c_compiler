@@ -53,6 +53,8 @@ CompilerTarget* NewBPFTarget(void) {
   target->long_long_size = 8;
   target->float_size = 4;
   target->double_size = 8;
+  target->long_double_size = 8;
+  target->long_double_format = kLongDoubleFormatFloat64;
   target->wchar_size = 4;
   target->stack_alignment = 8;
   target->code_preference = kCodeForSpeed;
