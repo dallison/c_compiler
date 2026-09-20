@@ -1780,16 +1780,15 @@ static void Assemble_la(RV32Assembler* assembler) {
 
     if (assembler->base.object.pic &&
         (sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak))) {
-      // Position independent, Load the address from the GOT.
-      //   Output relocation R_RISCV_PCREL_LO12_I
-      //     ld reg, 0(reg)
+      // Position independent: load the address from the GOT.  RV32 GOT
+      // slots are 4 bytes, so this is lw, not the RV64 ld.
       AssemblerRelocation* reloc = NewAssemblerRelocation(
           label, R_RISCV_PCREL_LO12_I, ASMO.current_section,
           (int32_t)AssemblerCurrentAddress(&ASM), 0);
       AssemblerAddRelocation(&ASM, reloc);
       AssemblerEmitWord(
           &ASM, ASMO.current_section,
-          ITypeInstruction(RV32_OPCODE(load), reg, reg, RV32_F3(ld), 0));
+          ITypeInstruction(RV32_OPCODE(load), reg, reg, RV32_F3(lw), 0));
     } else {
       //   Output relocation R_RISCV_PCREL_LO12_I
       //     addi reg, reg, 0

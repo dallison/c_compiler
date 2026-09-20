@@ -447,8 +447,8 @@ at `DAVECC_LIB_DIR`).
 `-dynamic` is rejected for RISC-V 32-bit Linux and for static-only
 targets (6502, 65C02, wasm32, ESP32, eBPF). AArch64 Linux uses the
 global-dynamic TLS model (`TLSGD` / `__tls_get_addr`). Interpreter
-`-dynamic` currently runs on AArch64, ARM ELF32, RISC-V 64-bit, x86-64,
-i386, and p-code.
+`-dynamic` currently runs on AArch64, ARM ELF32, RISC-V 64-bit, RISC-V
+32-bit, x86-64, i386, and p-code.
 
 #### Cross-testing Linux binaries with Colima
 

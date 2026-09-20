@@ -34,8 +34,17 @@ static bool DynamicUsesRel(const Linker* linker) {
 }
 
 static size_t DynamicRelocationSize(const Linker* linker) {
-  return DynamicUsesRel(linker) ? 2 * sizeof(ELF32_Word)
-                                : linker->ops->relocation_size;
+  if (DynamicUsesRel(linker)) {
+    return 2 * sizeof(ELF32_Word);
+  }
+  // ELF32 objects use SHT_REL, so ops->relocation_size is 8.  RISC-V
+  // (and other ELF32 RELA targets) emit SHT_RELA, whose entries are 12
+  // bytes.  Sizing the buffer from the REL width packed those stores on
+  // top of each other and dropped every addend.
+  if (!linker->ops->is_64_bit) {
+    return sizeof(ELF32Relocation);
+  }
+  return linker->ops->relocation_size;
 }
 
 void DynamicLinkerInit(DynamicLinker* s, Linker* linker) {

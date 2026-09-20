@@ -357,8 +357,10 @@ static void ApplyRelocation(Linker* linker,
         // Refers to Global offset table relocation.
         uint64_t got_address = linker->dynamic_linker->
             got_group->address;
-        // Each GOT entry is 8 bytes long.
-        uint64_t addr = got_address + symbol->got_index * 8 + A;
+        uint64_t entry_size =
+            linker->dynamic_linker->global_offset_table.entry_size;
+        uint64_t addr = got_address +
+                        (uint64_t)symbol->got_index * entry_size + (uint64_t)A;
         int32_t offset = (int32_t)(addr - P + pcdiff);
         SplitValue(offset, &hi20, &lo12);
       } else {
@@ -410,8 +412,10 @@ static void ApplyRelocation(Linker* linker,
       // PC.
       uint64_t got_address = linker->dynamic_linker->
           got_group->address;
-      // Each GOT entry is 8 bytes long.
-      uint64_t addr = got_address + symbol->got_index * 8 + A;
+      uint64_t entry_size =
+          linker->dynamic_linker->global_offset_table.entry_size;
+      uint64_t addr =
+          got_address + (uint64_t)symbol->got_index * entry_size + (uint64_t)A;
       int32_t offset = (int32_t)(addr - P);
       hi20 = High20(offset);
       SetBitField32(target_address, 12, 20, hi20);
