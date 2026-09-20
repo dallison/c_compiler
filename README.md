@@ -6,6 +6,9 @@ Linux and freestanding programs that run in the in-tree interpreters (or, on
 matching hardware, as native code those interpreters can jump to).
 
 Build and install instructions live in [docs/building.md](docs/building.md).
+The linker (`daveld`, including scripts and `-r`) is documented in
+[docs/linker.md](docs/linker.md). Compiler builtins and per-architecture
+intrinsics are in [docs/builtins.md](docs/builtins.md).
 
 ## Features
 
@@ -204,8 +207,9 @@ davecc -target x86_64 foo.s bar.o lib.a -o prog   # assemble + link
 ```
 
 Useful linker flags: `-static`, `-dynamic`, `-shared`, `-e symbol`,
-`--gc-sections`, `-L`, `-l`, `-rpath`, `-Wl,…`. `-flto` writes DCCLTO03 IR
-objects instead of machine code.
+`--gc-sections`, `-L`, `-l`, `-rpath`, `-T script`, `-Wl,…`. `-flto` writes
+DCCLTO03 IR objects instead of machine code. Flags, built-in layouts, and
+the GNU ld / LLVM lld script subset are in [docs/linker.md](docs/linker.md).
 
 ### Standalone assemblers
 
@@ -235,7 +239,7 @@ Same code as the integrated assemblers; they read `.s` and write ELF objects.
 
 | Binary | Role |
 | --- | --- |
-| `daveld` | Standalone linker; `daveld -r` combines objects into one `.o` |
+| `daveld` | Standalone linker; `daveld -r` combines objects into one `.o` ([docs/linker.md](docs/linker.md)) |
 | `archivist` | `ar`-like archiver for ELF objects and wasm32 objects |
 | `run` | Peek at an ELF `e_machine` and exec the matching interpreter |
 | `moduledump` | Pretty-print C++20 `.dcm` module files |
