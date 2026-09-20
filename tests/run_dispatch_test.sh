@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-if [[ $# -ne 8 ]]; then
-  echo "usage: $0 run davecc libc65 libc-aarch64 libc-arm libc-pcode libc-riscv libc-x86_64" >&2
+if [[ $# -ne 10 ]]; then
+  echo "usage: $0 run davecc libc65 libc-aarch64 libc-arm libc-pcode libc-riscv libc-x86_64 libc-xtensa start-xtensa" >&2
   exit 2
 fi
 
@@ -15,6 +15,8 @@ LIBC_ARM="$ROOT/$5"
 LIBC_PCODE="$ROOT/$6"
 LIBC_RISCV="$ROOT/$7"
 LIBC_X86_64="$ROOT/$8"
+LIBC_XTENSA="$ROOT/$9"
+START_XTENSA="$ROOT/${10}"
 
 WORK="$(mktemp -d "${TEST_TMPDIR:-/tmp}/run-dispatch.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -53,3 +55,10 @@ run_case arm "$LIBC_ARM"
 run_case pcode "$LIBC_PCODE"
 run_case riscv "$LIBC_RISCV"
 run_case x86_64 "$LIBC_X86_64"
+
+cat >"$WORK/esp32.c" <<'SRC'
+int main(void) { return 0; }
+SRC
+"$DAVECC" -target esp32 -O0 -nostdlib -static -isystem "$ROOT/libc/include" \
+  "$START_XTENSA" "$WORK/esp32.c" "$LIBC_XTENSA" -e _start -o "$WORK/esp32.exe"
+"$RUN" "$WORK/esp32.exe"

@@ -3,7 +3,8 @@
 DaveCC is the compiler (`davecc`) plus assemblers, disassemblers, a linker,
 interpreters for each target, and a guest libc for each hosted profile.
 Compiler builtins and per-architecture SIMD / runtime intrinsics are listed
-in [builtins.md](builtins.md).
+in [builtins.md](builtins.md). Assemblers, dumpers, interpreters, and the
+other host programs are in [tools.md](tools.md).
 
 Two build systems produce the same host tools and guest libraries:
 
@@ -43,8 +44,10 @@ These land in `bazel-bin/` (Bazel) or the CMake build directory:
 | `archivist` | Archive (`ar`) tool used to pack guest libc |
 | `run` | Multi-target program launcher |
 | `6502`, `riscv`, `aarch64`, `arm`, `x86_64`, `esp32`, `pcode`, `bpf` | Target interpreters |
-| `6502asm`, `rvasm`, `aarch64asm`, `armasm`, `x86asm` | Standalone assemblers |
-| `6502dasm`, `riscvdasm`, `aarch64dasm`, `armdasm`, `x86_64dasm`, `xtensadasm`, `elfdump` | Disassemblers / ELF dump |
+| `6502asm`, `rvasm`, `aarch64asm`, `armasm`, `x86asm`, `xtensaasm` | Standalone assemblers |
+| `6502dasm`, `riscvdasm`, `aarch64dasm`, `armdasm`, `x86_64dasm`, `xtensadasm`, `bpfdasm`, `pcodedasm`, `wasmdasm`, `elfdump` | Disassemblers / ELF and wasm dump |
+| `ltodump` | Pretty-print `-flto` DCCLTO03 objects (not installed) |
+| `moduledump` | Pretty-print C++20 `.dcm` files (not installed) |
 
 Wrapper scripts in `bin/` (`davecc-x86_64`, `run-riscv`, …) point at those
 binaries after install.

@@ -7,7 +7,9 @@ matching hardware, as native code those interpreters can jump to).
 
 Build and install instructions live in [docs/building.md](docs/building.md).
 The linker (`daveld`, including scripts and `-r`) is documented in
-[docs/linker.md](docs/linker.md). Compiler builtins and per-architecture
+[docs/linker.md](docs/linker.md). Assemblers, `elfdump`, `ltodump`,
+disassemblers, interpreters, and the other host tools are in
+[docs/tools.md](docs/tools.md). Compiler builtins and per-architecture
 intrinsics are in [docs/builtins.md](docs/builtins.md).
 
 ## Features
@@ -193,8 +195,6 @@ wasm members inside `.a` files. Run the result with
 
 ## Assemblers, linker, disassemblers, and tools
 
-### Built into `davecc`
-
 The compiler emits assembly, then the in-tree assembler for that `-target`
 produces the object, then the in-tree linker produces the executable. You can
 stop at any stage:
@@ -206,49 +206,11 @@ davecc -target x86_64 program.c -o program        # link
 davecc -target x86_64 foo.s bar.o lib.a -o prog   # assemble + link
 ```
 
-Useful linker flags: `-static`, `-dynamic`, `-shared`, `-e symbol`,
-`--gc-sections`, `-L`, `-l`, `-rpath`, `-T script`, `-Wl,…`. `-flto` writes
-DCCLTO03 IR objects instead of machine code. Flags, built-in layouts, and
-the GNU ld / LLVM lld script subset are in [docs/linker.md](docs/linker.md).
-
-### Standalone assemblers
-
-Same code as the integrated assemblers; they read `.s` and write ELF objects.
-
-| Binary | Architecture |
-| --- | --- |
-| `6502asm` | 6502 / 65C02 |
-| `rvasm` | RISC-V |
-| `aarch64asm` | AArch64 |
-| `armasm` | ARM |
-| `x86asm` | x86-64 |
-
-### Disassemblers and dumps
-
-| Binary | Role |
-| --- | --- |
-| `elfdump` | ELF header, sections, symbols, relocs, optional disassembly |
-| `6502dasm` | 6502 / 65C02 |
-| `riscvdasm` | RISC-V |
-| `aarch64dasm` | AArch64 |
-| `armdasm` | ARM |
-| `x86_64dasm` | x86-64 |
-| `xtensadasm` | Xtensa / ESP32 |
-
-### Other tools
-
-| Binary | Role |
-| --- | --- |
-| `daveld` | Standalone linker; `daveld -r` combines objects into one `.o` ([docs/linker.md](docs/linker.md)) |
-| `archivist` | `ar`-like archiver for ELF objects and wasm32 objects |
-| `run` | Peek at an ELF `e_machine` and exec the matching interpreter |
-| `moduledump` | Pretty-print C++20 `.dcm` module files |
-| `ltodump` | Pretty-print `-flto` DCCLTO03 IR objects and archives |
-
-After install, `bin/davecc-*` and `bin/run-*` wrap the compiler and
-interpreters with the right `-target` and search paths. Source
-`davecc-env.sh` (written next to those wrappers) so they find
-`libexec/davecc` and `lib/davecc`.
+Flags, built-in layouts, and the GNU ld / LLVM lld script subset are in
+[docs/linker.md](docs/linker.md). Every host tool — standalone assemblers,
+disassemblers, `elfdump`, `archivist`, `ltodump`, `moduledump`, `run`,
+interpreters, and the `davecc-*` / `run-*` wrappers — is in
+[docs/tools.md](docs/tools.md).
 
 ## Building
 

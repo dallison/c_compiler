@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 8 ]]; then
-  echo "usage: $0 davecc esp32 elfdump xtensadasm libc start exec-case libc-case" >&2
+if [[ $# -ne 10 ]]; then
+  echo "usage: $0 davecc esp32 elfdump xtensadasm xtensaasm run libc start exec-case libc-case" >&2
   exit 2
 fi
 
@@ -18,10 +18,12 @@ DAVECC=$(resolve_runfile "$1")
 ESP32=$(resolve_runfile "$2")
 ELFDUMP=$(resolve_runfile "$3")
 XTENSADASM=$(resolve_runfile "$4")
-LIBC=$(resolve_runfile "$5")
-START=$(resolve_runfile "$6")
-EXEC_CASE=$(resolve_runfile "$7")
-LIBC_CASE=$(resolve_runfile "$8")
+XTENSAASM=$(resolve_runfile "$5")
+RUN=$(resolve_runfile "$6")
+LIBC=$(resolve_runfile "$7")
+START=$(resolve_runfile "$8")
+EXEC_CASE=$(resolve_runfile "$9")
+LIBC_CASE=$(resolve_runfile "${10}")
 ROOT="${TEST_SRCDIR}/${TEST_WORKSPACE}"
 WORK="${TEST_TMPDIR}/esp32-smoke"
 mkdir -p "$WORK"
@@ -122,5 +124,22 @@ int main(void) {
 }
 EOF
 compile_and_run "$WORK/setjmp.c" "$WORK/setjmp.elf"
+
+cat >"$WORK/leaf.s" <<'EOF'
+  .text
+  .global leaf
+leaf:
+  entry a1, 32
+  li a2, 7
+  retw
+EOF
+"$XTENSAASM" -o "$WORK/leaf.o" "$WORK/leaf.s"
+"$ELFDUMP" -H "$WORK/leaf.o" >"$WORK/leaf.header"
+grep -q $'Machine:\tXtensa' "$WORK/leaf.header"
+"$XTENSADASM" "$WORK/leaf.o" >"$WORK/leaf.disassembly"
+grep -q 'entry' "$WORK/leaf.disassembly"
+grep -q 'retw' "$WORK/leaf.disassembly"
+
+"$RUN" "$WORK/abi.elf"
 
 echo "ESP32 Xtensa smoke test passed"

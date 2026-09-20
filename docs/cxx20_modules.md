@@ -120,7 +120,8 @@ importing source and links it with those transitive objects.
 
 ## Diagnostics and inspection
 
-`moduledump` prints module metadata and can include serialized symbols:
+`moduledump` prints module metadata and can include serialized symbols
+(flags in [tools.md](tools.md)):
 
 ```sh
 moduledump --symbols math.dcm

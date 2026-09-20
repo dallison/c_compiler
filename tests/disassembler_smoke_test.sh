@@ -8,6 +8,9 @@ aarch64dasm=$3
 armdasm=$4
 x86_64dasm=$5
 elfdump=$6
+bpfdasm=$7
+pcodedasm=$8
+wasmdasm=$9
 
 work=${TEST_TMPDIR:-$(mktemp -d)}
 mkdir -p "$work"
@@ -105,3 +108,56 @@ for symbol in add message main; do
     exit 1
   fi
 done
+
+if [[ -z "${bpfdasm:-}" || -z "${pcodedasm:-}" || -z "${wasmdasm:-}" ]]; then
+  echo "missing bpfdasm/pcodedasm/wasmdasm arguments" >&2
+  exit 1
+fi
+
+check_target bpf "$bpfdasm" '^add:' 'add64|mov64|r0'
+check_target pcode "$pcodedasm" '^add:' 'add|mov|ret'
+
+"$davecc" -target x86 -O0 -c "$work/smoke.c" -o "$work/x86.o"
+"$elfdump" -c "$work/x86.o" >"$work/x86.elfdump"
+for expected in '^add:' 'add|mov|ret'; do
+  if ! grep -E "$expected" "$work/x86.elfdump" >/dev/null; then
+    echo "missing expected elfdump disassembly for x86: $expected" >&2
+    sed -n '1,80p' "$work/x86.elfdump" >&2
+    exit 1
+  fi
+done
+
+"$elfdump" -H "$work/x86_64.o" >"$work/x86_64.header"
+"$elfdump" -H "$work/arm.o" >"$work/arm.header"
+"$elfdump" -H "$work/x86.o" >"$work/x86.header"
+"$elfdump" -H "$work/pcode.o" >"$work/pcode.header"
+for pair in "x86_64.header:x86-64" "arm.header:ARM" "x86.header:i386" "pcode.header:P-code"; do
+  file=${pair%%:*}
+  machine=${pair##*:}
+  if ! grep -q "Machine:	$machine" "$work/$file"; then
+    echo "elfdump -H $file missing Machine: $machine" >&2
+    cat "$work/$file" >&2
+    exit 1
+  fi
+done
+
+wasm_obj="$work/wasm32.o"
+"$davecc" -target wasm32 -O0 -c "$work/smoke.c" -o "$wasm_obj"
+"$wasmdasm" "$wasm_obj" >"$work/wasm32.dis"
+for expected in '^add:' 'i32.add|local.get|local.set'; do
+  if ! grep -E "$expected" "$work/wasm32.dis" >/dev/null; then
+    echo "missing expected wasmdasm output: $expected" >&2
+    sed -n '1,80p' "$work/wasm32.dis" >&2
+    exit 1
+  fi
+done
+if ! "$elfdump" -H "$wasm_obj" >"$work/wasm32.elfdump" 2>"$work/wasm32.elfdump.err"; then
+  if ! grep -q "wasmdasm" "$work/wasm32.elfdump.err"; then
+    echo "elfdump should point wasm modules at wasmdasm" >&2
+    cat "$work/wasm32.elfdump.err" >&2
+    exit 1
+  fi
+else
+  echo "elfdump should reject wasm modules" >&2
+  exit 1
+fi

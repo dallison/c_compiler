@@ -131,7 +131,7 @@ install -d "$actual_bindir" "$actual_includedir" "$actual_libdir" "$actual_libex
 
 for script in \
   davecc-common.sh \
-  davecc-65c02 davecc-aarch64 davecc-arm davecc-riscv davecc-riscv32 davecc-x86 davecc-x86_64 \
+  davecc-65c02 davecc-aarch64 davecc-arm davecc-riscv davecc-riscv32 davecc-x86 davecc-x86_64 davecc-esp32 \
   run-65c02 run-aarch64 run-arm run-riscv run-riscv32 run-esp32 run-x86 run-x86_64; do
   install_required_file 0755 "bin/$script" "$actual_bindir/$script"
 done
@@ -154,6 +154,7 @@ install_required_executable aarch64asm "$actual_libexecdir/aarch64asm"
 install_required_executable armasm "$actual_libexecdir/armasm"
 install_required_executable rvasm "$actual_libexecdir/rvasm"
 install_required_executable x86asm "$actual_libexecdir/x86asm"
+install_required_executable xtensaasm "$actual_libexecdir/xtensaasm"
 install_required_executable aarch64 "$actual_libexecdir/aarch64"
 install_required_executable arm "$actual_libexecdir/arm"
 install_required_executable pcode "$actual_libexecdir/pcode"
@@ -169,7 +170,8 @@ for tool in \
   armasm armdasm \
   elfdump \
   rvasm riscvdasm \
-  xtensadasm \
+  xtensadasm xtensaasm \
+  bpfdasm pcodedasm wasmdasm \
   x86asm x86_64dasm; do
   install_required_executable "$tool" "$actual_bindir/$tool"
 done

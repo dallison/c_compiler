@@ -83,6 +83,15 @@ static void PrintHeader(ELFReaderFile* elf) {
     case ELF_MACHINE_TYPE_AARCH64:
       machine = "AARCH64";
       break;
+    case ELF_MACHINE_TYPE_ARM:
+      machine = "ARM";
+      break;
+    case ELF_MACHINE_TYPE_X86_64:
+      machine = "x86-64";
+      break;
+    case ELF_MACHINE_TYPE_X86:
+      machine = "i386";
+      break;
     case ELF_MACHINE_TYPE_XTENSA:
       machine = "Xtensa";
       break;
@@ -1183,6 +1192,19 @@ int main(int argc, const char * argv[]) {
     fprintf(stderr, "elfdump: missing input file\n\n");
     Usage(stderr, program_name);
     return 1;
+  }
+  FILE* peek = fopen(filename.value, "rb");
+  if (peek != NULL) {
+    unsigned char magic[4] = {0};
+    size_t n = fread(magic, 1, sizeof(magic), peek);
+    fclose(peek);
+    if (n == 4 && DAsmIsWasmModule(magic, sizeof(magic))) {
+      fprintf(stderr,
+              "elfdump: '%s' is a WebAssembly module; use wasmdasm\n",
+              filename.value);
+      StringDestruct(&filename);
+      return 1;
+    }
   }
   ELFReaderFile* elf_file = NewELFReaderFile(&filename);
   bool ok = ELFReaderFileRead(elf_file, 0, 0);

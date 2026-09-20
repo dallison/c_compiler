@@ -2,7 +2,8 @@
 
 This document describes the on-disk format of C++20 module interface files
 (`.dcm`) produced by `ModuleWrite` and consumed by `ModuleLoad`
-(`c_compiler/serialize/module_archive.{c,h}`).
+(`c_compiler/serialize/module_archive.{c,h}`). Inspect a file with
+`moduledump` ([tools.md](tools.md)).
 
 ## 1. Big picture
 

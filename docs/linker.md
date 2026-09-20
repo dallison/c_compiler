@@ -14,7 +14,8 @@ davecc -target x86_64 -r a.c b.c -o combined.o      # same, from sources
 `davecc -r` forwards `-r` to the linker and does not add CRT or libc.
 
 Inspect the result with `elfdump` (`-H` header, `-S` sections, `-s` symbols,
-`-l` segments, `-r` relocs).
+`-l` segments, `-r` relocs). Flags for `elfdump` and the other host tools
+are in [tools.md](tools.md).
 
 ## What it produces
 

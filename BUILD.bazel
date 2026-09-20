@@ -241,6 +241,10 @@ sh_binary(
         ":x86_64",
         ":x86_64dasm",
         ":xtensadasm",
+        ":xtensaasm",
+        ":bpfdasm",
+        ":pcodedasm",
+        ":wasmdasm",
     ],
 )
 
@@ -526,6 +530,8 @@ cc_library(
         "c_compiler/disassembler/disassembler_bpf.c",
         "c_compiler/disassembler/disassembler_riscv.c",
         "c_compiler/disassembler/disassembler_tool.c",
+        "c_compiler/disassembler/disassembler_pcode.c",
+        "c_compiler/disassembler/disassembler_wasm.c",
         "c_compiler/disassembler/disassembler_x86_64.c",
         "c_compiler/disassembler/disassembler_xtensa.c",
     ],
@@ -814,6 +820,8 @@ sh_test(
         "$(rootpath :esp32)",
         "$(rootpath :elfdump)",
         "$(rootpath :xtensadasm)",
+        "$(rootpath :xtensaasm)",
+        "$(rootpath :run)",
         "$(rootpath :libc_xtensa)",
         "$(rootpath :esp32_start)",
         "$(rootpath tests/esp32_exec_cases.c)",
@@ -826,6 +834,8 @@ sh_test(
         ":esp32_start",
         ":libc_headers",
         ":libc_xtensa",
+        ":run",
+        ":xtensaasm",
         ":xtensadasm",
         "tests/esp32_exec_cases.c",
         "tests/esp32_libc_smoke.c",
@@ -1299,6 +1309,17 @@ cc_binary(
 )
 
 cc_binary(
+    name = "xtensaasm",
+    srcs = ["xtensaasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":compiler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
     name = "6502dasm",
     srcs = ["6502dasm/main.c"],
     copts = COMMON_COPTS,
@@ -1357,6 +1378,39 @@ cc_binary(
 cc_binary(
     name = "xtensadasm",
     srcs = ["xtensadasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":disassembler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "bpfdasm",
+    srcs = ["bpfdasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":disassembler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "pcodedasm",
+    srcs = ["pcodedasm/main.c"],
+    copts = COMMON_COPTS,
+    deps = [
+        ":disassembler",
+        ":elf",
+        ":utils",
+    ],
+)
+
+cc_binary(
+    name = "wasmdasm",
+    srcs = ["wasmdasm/main.c"],
     copts = COMMON_COPTS,
     deps = [
         ":disassembler",
@@ -4128,14 +4182,20 @@ sh_test(
         "$(rootpath :armdasm)",
         "$(rootpath :x86_64dasm)",
         "$(rootpath :elfdump)",
+        "$(rootpath :bpfdasm)",
+        "$(rootpath :pcodedasm)",
+        "$(rootpath :wasmdasm)",
     ],
     data = LIBC_TEST_DATA + [
         ":aarch64dasm",
         ":armdasm",
+        ":bpfdasm",
         ":davecc",
         ":elfdump",
         ":libc_aarch64",
+        ":pcodedasm",
         ":riscvdasm",
+        ":wasmdasm",
         ":x86_64dasm",
     ],
 )
@@ -4596,12 +4656,16 @@ sh_test(
         "$(rootpath :libc_pcode)",
         "$(rootpath :libc_riscv)",
         "$(rootpath :libc_x86_64)",
+        "$(rootpath :libc_xtensa)",
+        "$(rootpath :esp32_start)",
     ],
     data = [
         ":6502",
         ":aarch64",
         ":arm",
         ":davecc",
+        ":esp32",
+        ":esp32_start",
         ":libc_65c02",
         ":libc_aarch64",
         ":libc_arm",
@@ -4609,6 +4673,7 @@ sh_test(
         ":libc_pcode",
         ":libc_riscv",
         ":libc_x86_64",
+        ":libc_xtensa",
         ":pcode",
         ":riscv",
         ":run",

@@ -61,11 +61,17 @@ bool DAsmArchitectureFromELFMachine(int machine, DAsmArchitecture* arch) {
     case ELF_MACHINE_TYPE_X86_64:
       *arch = kDAsmX86_64;
       return true;
+    case ELF_MACHINE_TYPE_X86:
+      *arch = kDAsmX86;
+      return true;
     case ELF_MACHINE_TYPE_XTENSA:
       *arch = kDAsmXtensa;
       return true;
     case ELF_MACHINE_TYPE_BPF:
       *arch = kDAsmBPF;
+      return true;
+    case ELF_MACHINE_TYPE_PCODE:
+      *arch = kDAsmPCode;
       return true;
     default:
       *arch = kDAsmUnknown;
@@ -85,10 +91,14 @@ const char* DAsmArchitectureName(DAsmArchitecture arch) {
       return "arm";
     case kDAsmX86_64:
       return "x86_64";
+    case kDAsmX86:
+      return "x86";
     case kDAsmXtensa:
       return "xtensa";
     case kDAsmBPF:
       return "bpf";
+    case kDAsmPCode:
+      return "pcode";
     case kDAsmUnknown:
       return "unknown";
   }
@@ -114,6 +124,11 @@ DAsmArchitecture DAsmArchitectureFromName(const char* name) {
       strcmp(name, "amd64") == 0) {
     return kDAsmX86_64;
   }
+  if (strcmp(name, "x86") == 0 || strcmp(name, "i386") == 0 ||
+      strcmp(name, "i486") == 0 || strcmp(name, "i586") == 0 ||
+      strcmp(name, "i686") == 0 || strcmp(name, "x86-32") == 0) {
+    return kDAsmX86;
+  }
   if (strcmp(name, "xtensa") == 0 || strcmp(name, "esp32") == 0 ||
       strcmp(name, "xtensa-esp32") == 0) {
     return kDAsmXtensa;
@@ -121,6 +136,9 @@ DAsmArchitecture DAsmArchitectureFromName(const char* name) {
   if (strcmp(name, "bpf") == 0 || strcmp(name, "bpfel") == 0 ||
       strcmp(name, "ebpf") == 0) {
     return kDAsmBPF;
+  }
+  if (strcmp(name, "pcode") == 0 || strcmp(name, "p-code") == 0) {
+    return kDAsmPCode;
   }
   return kDAsmUnknown;
 }
@@ -134,11 +152,14 @@ size_t DAsmDefaultInstructionSize(DAsmArchitecture arch) {
     case kDAsmARM:
       return 4;
     case kDAsmX86_64:
+    case kDAsmX86:
       return 1;
     case kDAsmXtensa:
       return 3;
     case kDAsmBPF:
       return 8;
+    case kDAsmPCode:
+      return 4;
     case kDAsmUnknown:
       return 1;
   }
@@ -159,10 +180,14 @@ bool DAsmDisassembleInstruction(DAsmArchitecture arch, const void* bytes,
       return DAsmDisassembleARM(bytes, length, address, inst);
     case kDAsmX86_64:
       return DAsmDisassembleX86_64(bytes, length, address, inst);
+    case kDAsmX86:
+      return DAsmDisassembleX86(bytes, length, address, inst);
     case kDAsmXtensa:
       return DAsmDisassembleXtensa(bytes, length, address, inst);
     case kDAsmBPF:
       return DAsmDisassembleBPF(bytes, length, address, inst);
+    case kDAsmPCode:
+      return DAsmDisassemblePCode(bytes, length, address, inst);
     case kDAsmUnknown:
       return false;
   }

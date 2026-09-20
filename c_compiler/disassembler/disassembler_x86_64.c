@@ -18,6 +18,7 @@ typedef struct {
   unsigned char prefix66;
   unsigned char prefixf2;
   unsigned char prefixf3;
+  bool long_mode;
 } X86Decoder;
 
 static const char* RegName(int reg, int width) {
@@ -100,7 +101,7 @@ static void ParsePrefixes(X86Decoder* d) {
       d->prefixf2 = b;
     } else if (b == 0xf3) {
       d->prefixf3 = b;
-    } else if (b >= 0x40 && b <= 0x4f) {
+    } else if (d->long_mode && b >= 0x40 && b <= 0x4f) {
       d->rex = b;
     } else {
       break;
@@ -139,7 +140,11 @@ static void FormatMem(char* out, size_t out_size, X86Decoder* d, int mod, int rm
       index = -1;
     }
   } else if (mod == 0 && (rm & 7) == 5) {
-    rip = true;
+    if (d->long_mode) {
+      rip = true;
+    } else {
+      has_base = false;
+    }
     disp = (int32_t)Get32(d);
   }
   if (mod == 1) {
@@ -154,13 +159,14 @@ static void FormatMem(char* out, size_t out_size, X86Decoder* d, int mod, int rm
     off += snprintf(out + off, off < out_size ? out_size - off : 0,
                     "rip%s%" PRId32, disp >= 0 ? "+" : "", disp);
   } else {
+    int addr_width = d->long_mode ? 8 : 4;
     if (has_base) {
       off += snprintf(out + off, off < out_size ? out_size - off : 0, "%s",
-                      RegName(base, 8));
+                      RegName(base, addr_width));
     }
     if (index >= 0) {
       off += snprintf(out + off, off < out_size ? out_size - off : 0, "%s%s",
-                      has_base ? "+" : "", RegName(index, 8));
+                      has_base ? "+" : "", RegName(index, addr_width));
       if (scale != 1) {
         off += snprintf(out + off, off < out_size ? out_size - off : 0, "*%d",
                         scale);
@@ -208,8 +214,9 @@ static bool FormatBinaryModRM(X86Decoder* d, DAsmInstruction* out,
   return true;
 }
 
-bool DAsmDisassembleX86_64(const void* bytes, size_t length, uint64_t address,
-                           DAsmInstruction* out) {
+static bool DAsmDisassembleX86Common(const void* bytes, size_t length,
+                                    uint64_t address, DAsmInstruction* out,
+                                    bool long_mode) {
   if (length == 0) {
     return false;
   }
@@ -217,21 +224,35 @@ bool DAsmDisassembleX86_64(const void* bytes, size_t length, uint64_t address,
       .bytes = bytes,
       .length = length,
       .address = address,
+      .long_mode = long_mode,
   };
   ParsePrefixes(&d);
   if (!Need(&d, 1)) return false;
   unsigned char op = Get8(&d);
   const char* text = NULL;
   int width = OperandWidth(&d);
+  int stack_width = long_mode ? 8 : 4;
 
+  if (!long_mode && op >= 0x40 && op <= 0x47) {
+    DAsmInitInstruction(out, bytes, length, address, d.pos);
+    DAsmFormat(out, "inc %s", RegName(op - 0x40, 4));
+    return true;
+  }
+  if (!long_mode && op >= 0x48 && op <= 0x4f) {
+    DAsmInitInstruction(out, bytes, length, address, d.pos);
+    DAsmFormat(out, "dec %s", RegName(op - 0x48, 4));
+    return true;
+  }
   if (op >= 0x50 && op <= 0x57) {
     DAsmInitInstruction(out, bytes, length, address, d.pos);
-    DAsmFormat(out, "push %s", RegName((op - 0x50) | (RexB(&d) << 3), 8));
+    DAsmFormat(out, "push %s",
+               RegName((op - 0x50) | (RexB(&d) << 3), stack_width));
     return true;
   }
   if (op >= 0x58 && op <= 0x5f) {
     DAsmInitInstruction(out, bytes, length, address, d.pos);
-    DAsmFormat(out, "pop %s", RegName((op - 0x58) | (RexB(&d) << 3), 8));
+    DAsmFormat(out, "pop %s",
+               RegName((op - 0x58) | (RexB(&d) << 3), stack_width));
     return true;
   }
   if (op >= 0xb8 && op <= 0xbf) {
@@ -467,7 +488,7 @@ bool DAsmDisassembleX86_64(const void* bytes, size_t length, uint64_t address,
       unsigned char modrm = Get8(&d);
       int group = (modrm >> 3) & 7;
       char rm_text[80];
-      DecodeRM(rm_text, sizeof(rm_text), &d, modrm, 8);
+      DecodeRM(rm_text, sizeof(rm_text), &d, modrm, stack_width);
       const char* names[] = {"inc", "dec", "call", "call", "jmp", "jmp",
                              "push", NULL};
       if (names[group] != NULL) {
@@ -748,4 +769,14 @@ bool DAsmDisassembleX86_64(const void* bytes, size_t length, uint64_t address,
   DAsmInitInstruction(out, bytes, length, address, d.pos == 0 ? 1 : d.pos);
   DAsmUnknownInstruction(out, ".byte 0x%02" PRIx64, op);
   return true;
+}
+
+bool DAsmDisassembleX86_64(const void* bytes, size_t length, uint64_t address,
+                           DAsmInstruction* out) {
+  return DAsmDisassembleX86Common(bytes, length, address, out, true);
+}
+
+bool DAsmDisassembleX86(const void* bytes, size_t length, uint64_t address,
+                        DAsmInstruction* out) {
+  return DAsmDisassembleX86Common(bytes, length, address, out, false);
 }

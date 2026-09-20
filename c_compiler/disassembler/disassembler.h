@@ -23,9 +23,11 @@ typedef enum {
   kDAsmRiscV,
   kDAsmAArch64,
   kDAsmARM,
-  kDAsmX86_64,
-  kDAsmXtensa,
-  kDAsmBPF,
+    kDAsmX86_64,
+    kDAsmX86,
+    kDAsmXtensa,
+    kDAsmBPF,
+    kDAsmPCode,
 } DAsmArchitecture;
 
 typedef struct {
@@ -77,7 +79,14 @@ bool DAsmDisassembleELF(ELFReaderFile* elf, const DAsmOptions* options,
 bool DAsmDisassembleFile(const char* filename, const DAsmOptions* options,
                          FILE* fp);
 
+bool DAsmIsWasmModule(const void* bytes, size_t length);
+bool DAsmDisassembleWasm(const void* bytes, size_t length, uint64_t address,
+                         DAsmInstruction* inst);
+bool DAsmDisassembleWasmFile(const char* filename, const DAsmOptions* options,
+                             FILE* fp);
+
 int DAsmToolMain(int argc, const char** argv, DAsmArchitecture arch,
                  const char* tool_name);
+int DAsmWasmToolMain(int argc, const char** argv, const char* tool_name);
 
 #endif /* disassembler_h */

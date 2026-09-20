@@ -139,6 +139,8 @@ davecc_library(davecc_disassembler
   c_compiler/disassembler/disassembler_bpf.c
   c_compiler/disassembler/disassembler_riscv.c
   c_compiler/disassembler/disassembler_tool.c
+  c_compiler/disassembler/disassembler_pcode.c
+  c_compiler/disassembler/disassembler_wasm.c
   c_compiler/disassembler/disassembler_x86_64.c
   c_compiler/disassembler/disassembler_xtensa.c
 )
@@ -541,6 +543,15 @@ target_link_libraries(davecc_x86_64dasm_bin PRIVATE davecc_disassembler davecc_e
 davecc_executable(davecc_xtensadasm_bin xtensadasm xtensadasm/main.c)
 target_link_libraries(davecc_xtensadasm_bin PRIVATE davecc_disassembler davecc_elf davecc_utils)
 
+davecc_executable(davecc_bpfdasm_bin bpfdasm bpfdasm/main.c)
+target_link_libraries(davecc_bpfdasm_bin PRIVATE davecc_disassembler davecc_elf davecc_utils)
+
+davecc_executable(davecc_pcodedasm_bin pcodedasm pcodedasm/main.c)
+target_link_libraries(davecc_pcodedasm_bin PRIVATE davecc_disassembler davecc_elf davecc_utils)
+
+davecc_executable(davecc_wasmdasm_bin wasmdasm wasmdasm/main.c)
+target_link_libraries(davecc_wasmdasm_bin PRIVATE davecc_disassembler davecc_elf davecc_utils)
+
 davecc_executable(davecc_x86asm_bin x86asm x86asm/main.c)
 target_link_libraries(davecc_x86asm_bin PRIVATE davecc_compiler davecc_elf davecc_utils)
 
@@ -553,6 +564,9 @@ target_link_libraries(davecc_aarch64asm_bin PRIVATE davecc_compiler davecc_elf d
 
 davecc_executable(davecc_armasm_bin armasm armasm/main.c)
 target_link_libraries(davecc_armasm_bin PRIVATE davecc_compiler davecc_elf davecc_utils)
+
+davecc_executable(davecc_xtensaasm_bin xtensaasm xtensaasm/main.c)
+target_link_libraries(davecc_xtensaasm_bin PRIVATE davecc_compiler davecc_elf davecc_utils)
 
 davecc_executable(davecc_riscv_bin riscv risc_v_interpreter/main.c)
 target_link_libraries(davecc_riscv_bin PRIVATE davecc_elf davecc_linker davecc_loader davecc_risc_v_lib davecc_utils)
@@ -607,10 +621,14 @@ add_custom_target(davecc_tools
     davecc_armdasm_bin
     davecc_x86_64dasm_bin
     davecc_xtensadasm_bin
+    davecc_bpfdasm_bin
+    davecc_pcodedasm_bin
+    davecc_wasmdasm_bin
     davecc_x86asm_bin
     davecc_rvasm_bin
     davecc_aarch64asm_bin
     davecc_armasm_bin
+    davecc_xtensaasm_bin
     davecc_riscv_bin
     davecc_aarch64_bin
     davecc_arm_bin
@@ -889,10 +907,14 @@ install(TARGETS
   davecc_armdasm_bin
   davecc_x86_64dasm_bin
   davecc_xtensadasm_bin
+  davecc_bpfdasm_bin
+  davecc_pcodedasm_bin
+  davecc_wasmdasm_bin
   davecc_x86asm_bin
   davecc_rvasm_bin
   davecc_aarch64asm_bin
   davecc_armasm_bin
+  davecc_xtensaasm_bin
   RUNTIME DESTINATION "${DAVECC_INSTALL_LIBEXECDIR}"
 )
 
@@ -906,10 +928,14 @@ install(TARGETS
   davecc_armdasm_bin
   davecc_x86_64dasm_bin
   davecc_xtensadasm_bin
+  davecc_bpfdasm_bin
+  davecc_pcodedasm_bin
+  davecc_wasmdasm_bin
   davecc_x86asm_bin
   davecc_rvasm_bin
   davecc_aarch64asm_bin
   davecc_armasm_bin
+  davecc_xtensaasm_bin
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 
@@ -924,6 +950,7 @@ install(PROGRAMS
   bin/davecc-riscv32
   bin/davecc-x86
   bin/davecc-x86_64
+  bin/davecc-esp32
   bin/run-65c02
   bin/run-aarch64
   bin/run-arm
