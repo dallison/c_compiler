@@ -14,6 +14,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+// i386 local-exec code does `mov %fs:0, %eax` and then adds the TPOFF.
+// The word at the TCB must therefore be the guest thread pointer, not the
+// host allocation address (whose low 32 bits are not a mapped guest VA).
+static void InitTlsTcbIA32(void* tcb, uint64_t thread_pointer) {
+  (void)thread_pointer;
+  uint32_t guest_tp = X86_IA32_TLS_BASE;
+  memcpy(tcb, &guest_tp, sizeof(guest_tp));
+}
+
 static void InitSymbolResolverCode(uint8_t* code) {
   // movabs rax, imm64
   code[0] = 0x48;
@@ -69,6 +78,8 @@ bool X86_64RuntimeInit(X86_64Runtime* runtime, const char* filename,
       // ELF32 i386 linked addresses sit below 4 GiB. MAP_FIXED there fails
       // on macOS, so translate linked VAs the same way ARM ELF32 does.
       arch->ignore_vaddr = true;
+      arch->tls_tcb_size = I386_TLS_TP_SLOT_SIZE;
+      arch->init_tls_tcb = InitTlsTcbIA32;
       if (mode == kX86_64ModeNative) {
         runtime->mode = kX86_64ModeInterpret;
       }

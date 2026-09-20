@@ -1629,24 +1629,24 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
                             : (current & ~mask) | destination);
       } else {
         uint64_t address = EffectiveAddress(interpreter, &modrm, pos);
-        if (!InterpreterAddressOk(interpreter, address, (size_t)width)) {
+        void* host = HostPtr(interpreter, address, (size_t)width);
+        if (host == NULL) {
           fprintf(stderr, "XADD outside mapped memory at 0x%" PRIx64 "\n",
                   address);
           X86_64InterpreterFail(interpreter, 1);
           return false;
         }
         if (width == 1) {
-          old = __atomic_fetch_add((uint8_t*)(uintptr_t)address,
-                                   (uint8_t)source, __ATOMIC_SEQ_CST);
+          old = __atomic_fetch_add((uint8_t*)host, (uint8_t)source,
+                                   __ATOMIC_SEQ_CST);
         } else if (width == 2) {
-          old = __atomic_fetch_add((uint16_t*)(uintptr_t)address,
-                                   (uint16_t)source, __ATOMIC_SEQ_CST);
+          old = __atomic_fetch_add((uint16_t*)host, (uint16_t)source,
+                                   __ATOMIC_SEQ_CST);
         } else if (width == 4) {
-          old = __atomic_fetch_add((uint32_t*)(uintptr_t)address,
-                                   (uint32_t)source, __ATOMIC_SEQ_CST);
+          old = __atomic_fetch_add((uint32_t*)host, (uint32_t)source,
+                                   __ATOMIC_SEQ_CST);
         } else {
-          old = __atomic_fetch_add((uint64_t*)(uintptr_t)address,
-                                   source, __ATOMIC_SEQ_CST);
+          old = __atomic_fetch_add((uint64_t*)host, source, __ATOMIC_SEQ_CST);
         }
       }
       uint64_t current = ReadReg(interpreter, modrm.reg);
@@ -1683,29 +1683,36 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       uint64_t accumulator = rax & mask;
       uint64_t source = ReadReg(interpreter, modrm.reg) & mask;
       if (modrm.mod != 3) {
+        void* host = HostPtr(interpreter, address, (size_t)width);
+        if (host == NULL) {
+          fprintf(stderr, "CMPXCHG outside mapped memory at 0x%" PRIx64 "\n",
+                  address);
+          X86_64InterpreterFail(interpreter, 1);
+          return false;
+        }
         if (width == 1) {
           uint8_t expected = (uint8_t)accumulator;
           interpreter->zf = __atomic_compare_exchange_n(
-              (uint8_t*)(uintptr_t)address, &expected, (uint8_t)source, false,
+              (uint8_t*)host, &expected, (uint8_t)source, false,
               __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
           destination = expected;
         } else if (width == 2) {
           uint16_t expected = (uint16_t)accumulator;
           interpreter->zf = __atomic_compare_exchange_n(
-              (uint16_t*)(uintptr_t)address, &expected, (uint16_t)source, false,
+              (uint16_t*)host, &expected, (uint16_t)source, false,
               __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
           destination = expected;
         } else if (width == 4) {
           uint32_t expected = (uint32_t)accumulator;
           interpreter->zf = __atomic_compare_exchange_n(
-              (uint32_t*)(uintptr_t)address, &expected, (uint32_t)source, false,
+              (uint32_t*)host, &expected, (uint32_t)source, false,
               __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
           destination = expected;
         } else {
           uint64_t expected = accumulator;
           interpreter->zf = __atomic_compare_exchange_n(
-              (uint64_t*)(uintptr_t)address, &expected, source, false,
-              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+              (uint64_t*)host, &expected, source, false, __ATOMIC_SEQ_CST,
+              __ATOMIC_SEQ_CST);
           destination = expected;
         }
       } else {
@@ -1821,6 +1828,25 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
         interpreter->rip = (uint32_t)interpreter->rip;
       }
       *rip_updated = true;
+    }
+    *insn_len = pos;
+    return true;
+  }
+
+  if (b0 >= 0xB0 && b0 <= 0xB7) {
+    uint8_t imm = Fetch8(interpreter, &pos);
+    int low = b0 & 7;
+    if (rex.present) {
+      int reg = low | (rex.b ? 8 : 0);
+      uint64_t cur = ReadReg(interpreter, reg);
+      WriteReg(interpreter, reg, (cur & ~0xffULL) | imm);
+    } else if (low < 4) {
+      uint64_t cur = ReadReg(interpreter, low);
+      WriteReg(interpreter, low, (cur & ~0xffULL) | imm);
+    } else {
+      int reg = low - 4;
+      uint64_t cur = ReadReg(interpreter, reg);
+      WriteReg(interpreter, reg, (cur & ~0xff00ULL) | ((uint64_t)imm << 8));
     }
     *insn_len = pos;
     return true;

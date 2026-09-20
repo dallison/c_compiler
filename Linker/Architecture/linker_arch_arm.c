@@ -273,13 +273,24 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       return;
 
     case R_ARM_MOVW_PREL_NC: {
-      int64_t value = (int64_t)(S + A - P);
+      // adr32 emits movw/movt/add-pc with assembler addends -16/-12 so the
+      // add's PC+8 (two instructions later) cancels to S.  ARM objects are
+      // SHT_REL, so those addends never reach this A; recover them.
+      int64_t addend = A;
+      if (reloc->addend_in_place && addend == 0) {
+        addend = -16;
+      }
+      int64_t value = (int64_t)(S + addend - P);
       SetMovwMovtImm16(target_address, (uint32_t)value & 0xffffu);
       return;
     }
 
     case R_ARM_MOVT_PREL: {
-      int64_t value = (int64_t)(S + A - P);
+      int64_t addend = A;
+      if (reloc->addend_in_place && addend == 0) {
+        addend = -12;
+      }
+      int64_t value = (int64_t)(S + addend - P);
       SetMovwMovtImm16(target_address, (uint32_t)(value >> 16) & 0xffffu);
       return;
     }
@@ -304,8 +315,15 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     case R_ARM_TLS_GD32:
     case R_ARM_TLS_IE32: {
       uint64_t got_entry = GOTEntryAddress(linker, symbol);
+      // gotaddr: literal at here+16, add uses PC+8 at here+4, addend 4.
+      // SHT_REL drops that addend.
+      int64_t addend = A;
+      if (reloc->addend_in_place && addend == 0 &&
+          reloc->type == R_ARM_GOT_PREL) {
+        addend = 4;
+      }
       *(int32_t*)target_address =
-          (int32_t)((int64_t)got_entry + A - (int64_t)P);
+          (int32_t)((int64_t)got_entry + addend - (int64_t)P);
       return;
     }
 

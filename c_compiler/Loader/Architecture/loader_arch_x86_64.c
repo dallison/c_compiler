@@ -76,6 +76,13 @@ static void FixupPLTAfterLoad(Loader* loader, LoadedDynamicLibrary* lib,
                               const ELFRelocation* plt_relocations,
                               int64_t num_relocations, bool lazy) {
   (void)lazy;
+  // i386 PLT trampolines are already PIC (call / pop / jmp *disp(%eax)).
+  // The x86-64 RIP-relative patches below would overwrite those bytes with
+  // host address differences; the interpreter then treats them as guest
+  // displacements and jumps to a truncated host pointer.
+  if (loader->arch->ignore_vaddr) {
+    return;
+  }
   if (plt_relocations == NULL || num_relocations == 0) {
     return;
   }

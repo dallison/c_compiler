@@ -192,11 +192,7 @@ static void GuestMemoryDidWrite(ARMInterpreter* interpreter) {
 static void Store8(ARMInterpreter* interpreter, uint64_t addr, uint8_t value) {
   void* p = ResolveHostPtr(interpreter, addr, 1);
   if (p == NULL) {
-    fprintf(stderr, "Store8 outside mapped memory at 0x%08" PRIx64
-            " pc 0x%016" PRIx64 " sp=0x%08x fp=0x%08x\n",
-            addr, interpreter->pc, (uint32_t)interpreter->regs[13],
-            (uint32_t)interpreter->regs[11]);
-    ARMInterpreterDumpRegisters(interpreter);
+    fprintf(stderr, "Store8 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
   GuestMemoryLock(interpreter);
@@ -208,11 +204,7 @@ static void Store8(ARMInterpreter* interpreter, uint64_t addr, uint8_t value) {
 static void Store16(ARMInterpreter* interpreter, uint64_t addr, uint16_t value) {
   void* p = ResolveHostPtr(interpreter, addr, 2);
   if (p == NULL) {
-    fprintf(stderr, "Store16 outside mapped memory at 0x%08" PRIx64
-                    " pc 0x%016" PRIx64 " sp=0x%08x fp=0x%08x\n",
-            addr, interpreter->pc, (uint32_t)interpreter->regs[13],
-            (uint32_t)interpreter->regs[11]);
-    ARMInterpreterDumpRegisters(interpreter);
+    fprintf(stderr, "Store16 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
   GuestMemoryLock(interpreter);
@@ -224,13 +216,7 @@ static void Store16(ARMInterpreter* interpreter, uint64_t addr, uint16_t value) 
 static void Store32(ARMInterpreter* interpreter, uint64_t addr, uint32_t value) {
   void* p = ResolveHostPtr(interpreter, addr, 4);
   if (p == NULL) {
-    fprintf(stderr, "Store32 outside mapped memory at 0x%08" PRIx64
-                    " pc 0x%016" PRIx64 " linked_pc 0x%08" PRIx64
-                    " sp=0x%08x fp=0x%08x\n",
-            addr, interpreter->pc, RuntimeToLinked(interpreter, interpreter->pc),
-            (uint32_t)interpreter->regs[13],
-            (uint32_t)interpreter->regs[11]);
-    ARMInterpreterDumpRegisters(interpreter);
+    fprintf(stderr, "Store32 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
   GuestMemoryLock(interpreter);
@@ -266,13 +252,7 @@ static uint16_t Load16(ARMInterpreter* interpreter, uint64_t addr) {
 static uint32_t Load32(ARMInterpreter* interpreter, uint64_t addr) {
   void* p = ResolveHostPtr(interpreter, addr, 4);
   if (p == NULL) {
-    fprintf(stderr, "Load32 outside mapped memory at 0x%08" PRIx64
-                    " pc 0x%016" PRIx64 " linked_pc=0x%08" PRIx64
-                    " sp=0x%08x fp=0x%08x\n",
-            addr, interpreter->pc, RuntimeToLinked(interpreter, interpreter->pc),
-            (uint32_t)interpreter->regs[13],
-            (uint32_t)interpreter->regs[11]);
-    ARMInterpreterDumpRegisters(interpreter);
+    fprintf(stderr, "Load32 outside mapped memory at 0x%08" PRIx64 "\n", addr);
     exit(1);
   }
   GuestMemoryLock(interpreter);

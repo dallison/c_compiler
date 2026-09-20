@@ -57,8 +57,10 @@ run_one() {
 }
 
 run_one aarch64 "$AARCH64" libcaarch64.so -i
+run_one arm "$ARM" libcarm.so
 run_one riscv "$RISCV" libcriscv.so
 run_one x86_64 "$X86_64" libcx86_64.so -i
+run_one x86 "$X86_64" libcx86.so
 run_one pcode "$PCODE" libcpcode.so
 
 if [[ -f "$LIBDIR/libcriscv32.so" ]]; then

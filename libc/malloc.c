@@ -162,6 +162,15 @@ typedef struct DaveHeap {
 static DaveHeap heap;
 int __initial_heap_size;
 
+#if defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
+// Lives in the same image as malloc so PIC GOT slots stay RELATIVE to a
+// mapped .bss range.  CRT used to define this instead; a DSO cannot resolve
+// that EXE symbol (no GLOB_DAT), and the loader only heap-reserves the EXE.
+unsigned long long
+    __davecc_guest_heap_storage[((1024 * 1024) + 15) /
+                                sizeof(unsigned long long)];
+#endif
+
 void Free(void* pointer);
 
 static size_t AlignDown(size_t value, size_t alignment) {
@@ -488,12 +497,6 @@ static int InitializeHeap(void) {
 #if defined(__DAVECC_NATIVE_LINUX__)
   return ExpandHeap(DAVE_MIN_BLOCK_SIZE);
 #elif defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
-  // Interpreter-profile DSOs cannot grow a heap above their own `_end`: the
-  // loader only reserves that space for the executable.  p-code has no heap
-  // lock, but the CRT still provides this array.
-  extern unsigned long long
-      __davecc_guest_heap_storage[((1024 * 1024) + 15) /
-                                  sizeof(unsigned long long)];
   return RegisterRegion(__davecc_guest_heap_storage,
                         sizeof(__davecc_guest_heap_storage));
 #elif defined(__wasm32__)

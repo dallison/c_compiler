@@ -6,6 +6,18 @@
 //  followed by gr[] indexed by DWARF register number, 4 bytes each.
 //
 
+.data
+.align 2
+.global __davecc_itanium_vptr_class
+__davecc_itanium_vptr_class:
+	.4byte _ZTVN10__cxxabiv117__class_type_infoE_u2b16
+.global __davecc_itanium_vptr_si_class
+__davecc_itanium_vptr_si_class:
+	.4byte _ZTVN10__cxxabiv120__si_class_type_infoE_u2b16
+.global __davecc_itanium_vptr_vmi_class
+__davecc_itanium_vptr_vmi_class:
+	.4byte _ZTVN10__cxxabiv121__vmi_class_type_infoE_u2b16
+
 .text
 
 .global __davecc_capture_regs

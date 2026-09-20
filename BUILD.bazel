@@ -2058,6 +2058,7 @@ cflags=(-target x86 -O0 -c -isystem libc/include -Ilibc)
 
 runtime_srcs=(
   "x86 support/cxx_guard.s"
+  "x86 support/cxx_rtti_vtables.s"
   "x86 support/eh_transfer.s"
   "x86 support/setjmp.s"
   "x86 support/longjmp.s"
@@ -3397,6 +3398,7 @@ guest_libc_shared(
     cflags = ["-O0"],
     runtime_srcs = [
         "x86 support/cxx_guard.s",
+        "x86 support/cxx_rtti_vtables.s",
         "x86 support/eh_transfer.s",
         "x86 support/setjmp.s",
         "x86 support/longjmp.s",

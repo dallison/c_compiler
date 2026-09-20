@@ -685,6 +685,7 @@ davecc_guest_libc(libcx86.a x86
   EXTRA_C libc/guest_heap.c
   RUNTIME
     "x86 support/cxx_guard.s"
+    "x86 support/cxx_rtti_vtables.s"
     "x86 support/eh_transfer.s"
     "x86 support/setjmp.s"
     "x86 support/longjmp.s"
@@ -692,6 +693,7 @@ davecc_guest_libc(libcx86.a x86
     "x86 support/syscall.s"
   SHARED_RUNTIME
     "x86 support/cxx_guard.s"
+    "x86 support/cxx_rtti_vtables.s"
     "x86 support/eh_transfer.s"
     "x86 support/setjmp.s"
     "x86 support/longjmp.s"
