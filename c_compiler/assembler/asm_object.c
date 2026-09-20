@@ -182,6 +182,7 @@ void AsmObjectInit(AsmObject* object, int16_t elf_machine_type,
   object->is_little_endian = true;
   object->reloc_types = reloc_types;
   object->pic = false;
+  object->write_macho = false;
   object->absolute = false;
   object->current_section = 0;
   StringInit(&object->filename, "");

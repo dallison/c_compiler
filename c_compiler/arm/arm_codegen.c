@@ -1186,23 +1186,12 @@ static TargetInstruction* PagedOffsetFrom(ARMGenerator* g, TargetInstruction* sr
   } else {
     page = offset & ~0x7ff;
   }
-  TargetInstruction* page_inst = NULL;
-  for (size_t i = 0; i < g->offsets.length; i++) {
-    Offset* f = g->offsets.value.p[i];
-    if (f->page_offset == page) {
-      page_inst = f->inst;
-      break;
-    }
-  }
-  if (page_inst == NULL) {
-    // No page offset calculated, need to calculate one.
-    page_inst =
-        AddImmediate(g, src, page);
-    Offset* f = malloc(sizeof(Offset));
-    f->inst = page_inst;
-    f->page_offset = page;
-    VectorAppend(&g->offsets, f);
-  }
+  // Do not cache this calculation globally.  The source is not necessarily the
+  // frame pointer, and a calculation emitted in one control-flow branch may not
+  // dominate a later use (a switch arm that first touches a large local is the
+  // usual case).  Keeping one page value live across a large function also
+  // forces every unrelated block to preserve or spill it.
+  TargetInstruction* page_inst = AddImmediate(g, src, page);
   *page_offset = offset - page;
   return page_inst;
 }

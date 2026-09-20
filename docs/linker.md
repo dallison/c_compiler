@@ -30,6 +30,22 @@ meant for Linux hosts; on macOS, point `-fuse-ld=` at a GNU/`lld` binary
 or a wrapper that runs `ld` inside Colima. `-flto` objects stay with
 daveld.
 
+On macOS, `-target aarch64-apple-darwin-davecc` (OS `darwin` or `macos`;
+vendor `apple` or `unknown`) is the Mach-O counterpart. That is also the
+default on Apple Silicon when `-target` is omitted. `-fnative` with
+`-target aarch64` selects the same profile. The assemblers write
+`MH_OBJECT` files, daveld is not used, and the driver execs host `cc`
+with `libcaarch64_darwin.a` (build `//:libc_aarch64_darwin`). C symbols
+get the Darwin underscore. PIC is forced. There is no LTO on this path:
+DCCLTO03 is not Mach-O or LLVM bitcode. `-fuse-ld` stays Linux/ELF-only
+and cannot be combined with `-fnative`.
+
+```sh
+bazelisk build //:davecc //:libc_aarch64_darwin
+davecc program.cc -o program
+./program
+```
+
 Inspect the result with `elfdump` (`-H` header, `-S` sections, `-s` symbols,
 `-l` segments, `-r` relocs). Flags for `elfdump` and the other host tools
 are in [tools.md](tools.md).

@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 #include "codegen.h"
 #include "constexpr.h"
@@ -76,7 +77,7 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-o", kCompilerOptionString, kOptionOutputFile, false,
      "Write the output to <file>", kOptionGroupOverall, "file"},
     {"-target", kCompilerOptionString, kOptionTarget, false,
-     "Compile for target architecture <name>, listed below",
+     "Compile for <name> (default: this host)",
      kOptionGroupOverall, "name"},
     {"-chdir", kCompilerOptionString, kOptionChdir, false,
      "Change to <dir> before compiling", kOptionGroupOverall, "dir"},
@@ -138,6 +139,11 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-flto", kCompilerOptionBool, kOptionLTO, false,
      "Link-time optimization: compile all sources together for cross-TU inlining",
      kOptionGroupCodegen},
+    {"-fnative", kCompilerOptionBool, kOptionNative, false,
+     "Write Mach-O objects and link with the host tools (macOS AArch64)",
+     kOptionGroupCodegen},
+    {"-fno-native", kCompilerOptionBool, kOptionNoNative, false,
+     "Write ELF objects (default)", kOptionGroupCodegen},
     {"-ffunction-sections", kCompilerOptionBool, kOptionFunctionSections, false,
      "Place each function in its own ELF section for unused-section GC",
      kOptionGroupCodegen},
@@ -435,6 +441,9 @@ bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
   triple->explicit_triple = true;
   if (StringEqual(&triple->os_name, "linux")) {
     triple->os = kTargetOSLinux;
+  } else if (StringEqual(&triple->os_name, "darwin") ||
+             StringEqual(&triple->os_name, "macos")) {
+    triple->os = kTargetOSDarwin;
   } else if (StringEqual(&triple->os_name, "none")) {
     triple->os = kTargetOSNone;
   } else {
@@ -453,6 +462,12 @@ bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
     return SetTargetTripleError(error, error_size,
                                 "Linux is not supported by target '%s'", value);
   }
+  if (triple->os == kTargetOSDarwin &&
+      strcmp(definition->canonical_name, "aarch64") != 0) {
+    return SetTargetTripleError(error, error_size,
+                                "Darwin is only supported by AArch64 in '%s'",
+                                value);
+  }
   StringClear(&triple->canonical);
   StringPrintf(&triple->canonical, "%s-%s-%s-%s",
                definition->canonical_name, triple->vendor.value,
@@ -462,6 +477,114 @@ bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
 
 bool CompilerTargetTripleIsLinux(const CompilerTargetTriple* triple) {
   return triple != NULL && triple->os == kTargetOSLinux;
+}
+
+bool CompilerTargetTripleIsDarwin(const CompilerTargetTriple* triple) {
+  return triple != NULL && triple->os == kTargetOSDarwin;
+}
+
+static const char* MapHostMachineToArch(const char* machine) {
+  if (machine == NULL || machine[0] == '\0') {
+    return NULL;
+  }
+  if (strcmp(machine, "arm64") == 0 || strcmp(machine, "aarch64") == 0) {
+    return "aarch64";
+  }
+  if (strcmp(machine, "x86_64") == 0 || strcmp(machine, "amd64") == 0) {
+    return "x86_64";
+  }
+  if (strcmp(machine, "i386") == 0 || strcmp(machine, "i486") == 0 ||
+      strcmp(machine, "i586") == 0 || strcmp(machine, "i686") == 0) {
+    return "x86";
+  }
+  if (strcmp(machine, "riscv64") == 0) {
+    return "riscv";
+  }
+  if (strcmp(machine, "riscv32") == 0) {
+    return "riscv32";
+  }
+  if (strncmp(machine, "arm", 3) == 0) {
+    return "arm";
+  }
+  return NULL;
+}
+
+static const char* HostDefaultFromNames(const char* sysname,
+                                        const char* machine) {
+  const char* arch = MapHostMachineToArch(machine);
+  if (arch == NULL) {
+    return NULL;
+  }
+  bool darwin = sysname != NULL && strcmp(sysname, "Darwin") == 0;
+  bool linux = sysname != NULL && strcmp(sysname, "Linux") == 0;
+  if (darwin && strcmp(arch, "aarch64") == 0) {
+    return "aarch64-apple-darwin-davecc";
+  }
+  if (linux && (strcmp(arch, "x86_64") == 0 || strcmp(arch, "aarch64") == 0 ||
+                strcmp(arch, "arm") == 0 || strcmp(arch, "riscv") == 0 ||
+                strcmp(arch, "riscv32") == 0)) {
+    if (strcmp(arch, "x86_64") == 0) {
+      return "x86_64-unknown-linux-davecc";
+    }
+    if (strcmp(arch, "aarch64") == 0) {
+      return "aarch64-unknown-linux-davecc";
+    }
+    if (strcmp(arch, "arm") == 0) {
+      return "arm-unknown-linux-davecc";
+    }
+    if (strcmp(arch, "riscv") == 0) {
+      return "riscv-unknown-linux-davecc";
+    }
+    return "riscv32-unknown-linux-davecc";
+  }
+  return arch;
+}
+
+static const char* CompileTimeHostDefaultTarget(void) {
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+  return "aarch64-apple-darwin-davecc";
+#elif defined(__linux__) && defined(__x86_64__)
+  return "x86_64-unknown-linux-davecc";
+#elif defined(__linux__) && defined(__aarch64__)
+  return "aarch64-unknown-linux-davecc";
+#elif defined(__linux__) && defined(__arm__)
+  return "arm-unknown-linux-davecc";
+#elif defined(__linux__) && defined(__riscv) && __riscv_xlen == 64
+  return "riscv-unknown-linux-davecc";
+#elif defined(__linux__) && defined(__riscv) && __riscv_xlen == 32
+  return "riscv32-unknown-linux-davecc";
+#elif defined(__x86_64__)
+  return "x86_64";
+#elif defined(__i386__)
+  return "x86";
+#elif defined(__aarch64__) || defined(__arm64__)
+  return "aarch64";
+#elif defined(__arm__)
+  return "arm";
+#elif defined(__riscv) && defined(__riscv_xlen) && __riscv_xlen == 64
+  return "riscv";
+#elif defined(__riscv) && defined(__riscv_xlen) && __riscv_xlen == 32
+  return "riscv32";
+#else
+  return NULL;
+#endif
+}
+
+const char* CompilerHostDefaultTarget(void) {
+  static const char* cached = NULL;
+  static bool resolved = false;
+  if (resolved) {
+    return cached;
+  }
+  resolved = true;
+  struct utsname host;
+  if (uname(&host) == 0) {
+    cached = HostDefaultFromNames(host.sysname, host.machine);
+  }
+  if (cached == NULL) {
+    cached = CompileTimeHostDefaultTarget();
+  }
+  return cached;
 }
 
 void DeleteCompilerTarget(CompilerTarget* t){
@@ -3545,14 +3668,18 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   }
   DisableDefaultWarnings();
   compiler->target_name = OptionStringValue(kOptionTarget, options);
-  if (compiler->target_name == NULL) {
+  const char* target_text =
+      compiler->target_name != NULL ? compiler->target_name->value : NULL;
+  if (target_text == NULL) {
+    target_text = CompilerHostDefaultTarget();
+  }
+  if (target_text == NULL) {
     fprintf(stderr, "No target specified; please specify -target option\n");
     exit(1);
   }
   char target_error[256];
-  if (!CompilerTargetTripleParse(&compiler->target_triple,
-                                 compiler->target_name->value, target_error,
-                                 sizeof(target_error))) {
+  if (!CompilerTargetTripleParse(&compiler->target_triple, target_text,
+                                 target_error, sizeof(target_error))) {
     fprintf(stderr, "Invalid -target: %s\n", target_error);
     exit(1);
   }
@@ -3609,7 +3736,36 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
     }
   }
   ParseOptimizationOption(compiler, options, target->default_opt_level);
-  compiler->pic = OptionBoolValue(kOptionPic, options, false);
+  compiler->native_object = OptionBoolValue(kOptionNative, options, false) ||
+                            compiler->target_triple.os == kTargetOSDarwin;
+  for (size_t i = 0; i < options->length; i++) {
+    CompilerOptionValue* opt = options->value.p[i];
+    if (opt->opt == kOptionNative) {
+      compiler->native_object = true;
+    } else if (opt->opt == kOptionNoNative) {
+      compiler->native_object = false;
+    }
+  }
+  if (compiler->target_triple.os == kTargetOSDarwin) {
+    compiler->native_object = true;
+  }
+  if (compiler->native_object) {
+    if (compiler->lto) {
+      fprintf(stderr,
+              "-fnative cannot be used with -flto; DCCLTO03 is not Mach-O "
+              "or LLVM bitcode\n");
+      exit(1);
+    }
+    if (strcmp(target->canonical_name, "aarch64") != 0 ||
+        compiler->target_triple.os == kTargetOSLinux) {
+      fprintf(stderr,
+              "Mach-O output currently supports AArch64 Darwin only "
+              "(use -target aarch64-apple-darwin-davecc or -fnative)\n");
+      exit(1);
+    }
+  }
+  compiler->pic = OptionBoolValue(kOptionPic, options, false) ||
+                  compiler->native_object;
   if (target->static_linkage_only && compiler->pic) {
     fprintf(stderr, "-fPIC is not supported on this target");
     exit(1);

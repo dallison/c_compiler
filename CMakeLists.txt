@@ -31,6 +31,7 @@ set(DAVECC_COMMON_INCLUDES
   c_compiler/serialize
   c_compiler/driver
   c_compiler/lto
+  c_compiler/macho
   c_compiler/disassembler
   c_compiler/6502
   c_compiler/aarch64
@@ -223,6 +224,7 @@ davecc_library(davecc_compiler
   c_compiler/assembler/asm_module.c
   c_compiler/assembler/asm_object.c
   c_compiler/assembler/assembler.c
+  c_compiler/macho/macho_object.c
   c_compiler/assembler/dwarf.c
   c_compiler/backend/basic_block.c
   c_compiler/backend/codegen.c

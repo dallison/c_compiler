@@ -153,6 +153,7 @@ typedef struct AsmObject {
   bool is_little_endian;
   int* reloc_types;
   bool pic;
+  bool write_macho;
   bool absolute;
   Dwarf dwarf;
   String filename;
@@ -205,5 +206,6 @@ void AsmObjectRecordOperation(AsmObject* object, const AsmOperation* op);
 void AsmObjectReplayOperations(AsmObject* object, struct Assembler* assembler);
 
 void AsmObjectWriteELF(AsmObject* object, FILE* out);
+bool AsmObjectWriteMachO(AsmObject* object, FILE* out);
 
 #endif /* asm_object_h */

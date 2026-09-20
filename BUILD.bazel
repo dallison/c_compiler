@@ -5,6 +5,7 @@ load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//:davecc/modules.bzl", "davecc_module")
 load("//:tools/guest_libc.bzl", "guest_libc_shared")
+load("//:tools/darwin_libc.bzl", "darwin_libc_archive")
 load("//:tools/linux_libc.bzl", "linux_dynamic_runtime", "linux_libc_archive", "linux_start_object")
 
 package(default_visibility = ["//visibility:public"])
@@ -292,6 +293,7 @@ COMMON_INCLUDES = [
     "c_compiler/serialize",
     "c_compiler/driver",
     "c_compiler/lto",
+    "c_compiler/macho",
     "c_compiler/disassembler",
     "c_compiler/6502",
     "c_compiler/aarch64",
@@ -878,6 +880,7 @@ cc_library(
         "c_compiler/assembler/asm_module.c",
         "c_compiler/assembler/asm_object.c",
         "c_compiler/assembler/assembler.c",
+        "c_compiler/macho/macho_object.c",
         "c_compiler/frontend/syntax/ast.c",
         "c_compiler/backend/basic_block.c",
         "c_compiler/backend/codegen.c",
@@ -2943,6 +2946,50 @@ linux_start_object(
     architecture = "aarch64",
     source = "aarch64 support/linux_start.s",
     output = "aarch64_linux_start.o",
+)
+
+darwin_libc_archive(
+    name = "libc_aarch64_darwin",
+    architecture = "aarch64",
+    support_sources = [
+        "aarch64 support/eh_transfer.s",
+    ],
+    output = "libcaarch64_darwin.a",
+    libc_c_srcs = [
+        "libc/cxx_guard.c",
+        "libc/cxx_new.c",
+        "libc/cxx_rtti.c",
+        "libc/cxx_tls.c",
+        "libc/cxx_tls_stubs.c",
+        "libc/darwin_fs.c",
+        "libc/darwin_support.c",
+        "libc/darwin_syscall.c",
+        "libc/eh_cxa.c",
+        "libc/eh_frame.c",
+        "libc/eh_frame_pointer.c",
+        "libc/eh_personality.c",
+        "libc/eh_throw.c",
+        "libc/fpfuncs.c",
+        "libc/ftoa.c",
+        "libc/gxx_personality.c",
+        "libc/itoa_longlong.c",
+        "libc/itoa_ptr.c",
+        "libc/lsda.c",
+        "libc/unwind_api.c",
+    ],
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    extra_hdrs = [
+        "libc/itoa_impl.h",
+        "libc/posix_fs.h",
+        "libc/string_conversion_helpers.h",
+        "libc/strtox.h",
+        "libc/strtox_long.h",
+        "c_compiler/Loader/chrono_host.h",
+        "c_compiler/Loader/filesystem_host.h",
+    ],
+    host_c_srcs = [
+        "c_compiler/Loader/chrono_host.c",
+    ],
 )
 
 linux_libc_archive(
@@ -5176,6 +5223,27 @@ sh_test(
         ":x86_64",
     ],
     env_inherit = ["PATH"],
+)
+
+sh_test(
+    name = "macos_native_object_test",
+    srcs = ["tests/macos_native_object_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :libc_aarch64_darwin)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_aarch64_darwin",
+        ":libc_headers",
+    ],
+    env_inherit = [
+        "PATH",
+    ],
+    target_compatible_with = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:macos",
+    ],
 )
 
 sh_test(

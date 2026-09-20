@@ -8,7 +8,10 @@ matching hardware, as native code those interpreters can jump to).
 Build and install instructions live in [docs/building.md](docs/building.md).
 The linker (`daveld`, including scripts and `-r`) is documented in
 [docs/linker.md](docs/linker.md). On Linux, `davecc -fuse-ld=ld` can
-exec the system ELF linker instead of daveld. Assemblers, `elfdump`, `ltodump`,
+exec the system ELF linker instead of daveld. On macOS,
+`davecc -target aarch64-apple-darwin-davecc` (or `-fnative` with
+`-target aarch64`) writes Mach-O objects, links `libcaarch64_darwin.a`,
+and execs host `cc`. Assemblers, `elfdump`, `ltodump`,
 disassemblers, interpreters, and the other host tools are in
 [docs/tools.md](docs/tools.md). Compiler builtins and per-architecture
 intrinsics are in [docs/builtins.md](docs/builtins.md).
@@ -38,8 +41,9 @@ Other things the tree includes:
 
 - C89 through C23, and C++98 through the C++29 draft, with a C++20 guest
   standard library
-- Hosted Linux images (static, and dynamic on x86_64 / ARM / RV64) plus
-  freestanding interpreter-profile ELF (and wasm32 / WASI)
+- Hosted Linux images (static, and dynamic on x86_64 / ARM / RV64), hosted
+  AArch64 Darwin / Mach-O on macOS, plus freestanding interpreter-profile
+  ELF (and wasm32 / WASI)
 - In-tree assemblers, linker (`daveld`, including `daveld -r`), loader,
   archiver, disassemblers, and `elfdump`
 - Native execution on a matching x86_64 or AArch64 host (`-n`), still
@@ -56,10 +60,15 @@ Other things the tree includes:
 | `.o`, `.a`, and anything else | Pass to the linker |
 
 Without `-c`, `-S`, or `-fsyntax-only`, the driver compiles, assembles, and
-links an executable. `-target` is required. Bare names such as `x86_64` mean
-the interpreter/freestanding profile (`arch-unknown-none-davecc`). A full
-triple `arch-unknown-linux-davecc` selects the hosted Linux ABI, CRT, and
-syscalls.
+links an executable. If `-target` is omitted, davecc uses the host: Apple
+Silicon becomes `aarch64-apple-darwin-davecc`, Linux becomes
+`arch-unknown-linux-davecc` when that profile exists, and anything else
+falls back to the interpreter architecture name. An explicit `-target`
+always wins. Bare names such as `x86_64` mean the interpreter/freestanding
+profile (`arch-unknown-none-davecc`). A full triple
+`arch-unknown-linux-davecc` selects the hosted Linux ABI, CRT, and
+syscalls. `aarch64-apple-darwin-davecc` (or `-fnative` with `-target aarch64`)
+selects Mach-O objects and the Darwin libc on macOS.
 
 The driver finds `libc/include` and the matching guest archive automatically
 when it can see a Bazel or install tree (`DAVECC_INCLUDE_DIR` /
@@ -116,14 +125,15 @@ compile-time diagnostic.
 
 ## Targets
 
-`-target` takes an architecture name or `arch-vendor-os-env`. The only
-supported OS names are `none` (interpreter / freestanding) and `linux`. The
-only supported environment is `davecc`.
+`-target` takes an architecture name or `arch-vendor-os-env`. The supported
+OS names are `none` (interpreter / freestanding), `linux`, and `darwin`
+(also accepted as `macos`). The only supported environment is `davecc`.
+Darwin is AArch64 only. Omit `-target` to use the host (see above).
 
-| Canonical | Aliases | Pointer / `long` | ELF | Interpreter libc | Linux triple |
+| Canonical | Aliases | Pointer / `long` | ELF | Interpreter libc | Hosted triples |
 | --- | --- | --- | --- | --- | --- |
 | `x86_64` | `x86-64` | 64 / 64 | ELF64, `EM_X86_64` (62) | `libcx86_64.a` | `x86_64-unknown-linux-davecc` |
-| `aarch64` | `armv8` | 64 / 64 | ELF64, `EM_AARCH64` (183) | `libcaarch64.a` | `aarch64-unknown-linux-davecc` |
+| `aarch64` | `armv8` | 64 / 64 | ELF64, `EM_AARCH64` (183) | `libcaarch64.a` | `aarch64-unknown-linux-davecc`, `aarch64-apple-darwin-davecc` |
 | `arm` | `armv7`, `armv7-a`, `arm32` | 32 / 32 | ELF32, `EM_ARM` (40), armhf | `libcarm.a` | `arm-unknown-linux-davecc` |
 | `riscv` | `risc-v` | 64 / 64 | ELF64, `EM_RISCV` (243), LP64D | `libcriscv.a` | `riscv-unknown-linux-davecc` |
 | `riscv32` | `risc-v32` | 32 / 32 | ELF32, `EM_RISCV` (243) | `libcriscv32.a` | `riscv32-unknown-linux-davecc` |
@@ -186,6 +196,22 @@ and relocates; DaveCC then owns TLS, errno, init/fini, and clone/futex
 threads. Lazy PLT binding, `dlopen`/`dlclose`, and DSOs with their own TLS
 are not supported after that hand-off.
 
+### Mach-O (AArch64 Darwin on macOS)
+
+`-target aarch64-apple-darwin-davecc` (vendor `unknown` and OS `macos` are
+accepted too) writes `MH_OBJECT` files instead of ELF. That is the default
+on Apple Silicon when `-target` is omitted. `-fnative` with a bare
+`-target aarch64` selects the same profile. The driver links
+`libcaarch64_darwin.a` and execs host `cc`; daveld and the interpreters stay
+ELF-only. C symbols get the Darwin underscore. PIC is forced. `-flto` is
+rejected: DCCLTO03 is neither Mach-O nor LLVM bitcode.
+
+`libcaarch64_darwin.a` is DaveCC's C++ / EH / RTTI runtime plus hosted
+`<filesystem>`, `<random>`, chrono clocks, and IANA TZDB (via libSystem and
+the same TZif reader the interpreters use). `malloc`, `write`, and the rest
+of the C library come from libSystem. Inspect objects with host `nm` /
+`otool`, not `elfdump`.
+
 ### WebAssembly (wasm32)
 
 `-c` writes a relocatable wasm **object** (a module with a linking section).
@@ -243,6 +269,8 @@ Two different products:
    that the matching in-tree interpreter loads.
 2. **Linux profile** (`-target ARCH-unknown-linux-davecc`) — a Linux ELF the
    kernel (or qemu-user / Colima) can `exec`.
+3. **Darwin profile** (`-target aarch64-apple-darwin-davecc`, or `-fnative`)
+   — a Mach-O binary host `cc` links so it runs on Apple Silicon.
 
 Once `davecc` and the guest archive are built, you do not pass the `.a` by
 hand unless you use `-nostdlib`.
@@ -469,6 +497,29 @@ bazel test //:native_linux_riscv_dynamic_smoke_test
 
 `COLIMA_PROFILE` overrides the profile name (default `x86` for x86_64 tests,
 `default` for ARM and RISC-V).
+
+### Native Darwin (macOS)
+
+On Apple Silicon, the Darwin triple writes Mach-O and links with host `cc`
+so the binary runs without the interpreter. Build the Darwin libc (Bazel
+only; it is not in the CMake `davecc_libc` set), then:
+
+```sh
+bazelisk build //:davecc //:libc_aarch64_darwin
+
+bazel-bin/davecc -target aarch64-apple-darwin-davecc program.cc -o program
+./program
+```
+
+`-fnative` with `-target aarch64` is the same profile. `-fno-native` cannot
+turn a Darwin triple back into ELF. `-fuse-ld` stays Linux/ELF-only and
+cannot be combined with `-fnative`. `-nostdlib` skips `libcaarch64_darwin.a`
+and still links libSystem through `cc`.
+
+If the driver cannot see `bazel-bin/libc`, set `DAVECC_LIB_DIR` to that
+directory (and `DAVECC_INCLUDE_DIR` to `libc/include` if headers are not
+found). `//:macos_native_object_test` covers Mach-O objects, a leaf C
+program, and a `vector` / `iostream` link.
 
 ## Tests
 

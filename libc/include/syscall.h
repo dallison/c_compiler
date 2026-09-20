@@ -11,7 +11,25 @@
 
 #include <davecc_guest_syscalls.h>
 
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_NATIVE_DARWIN__)
+// C library entry points come from libSystem.  <filesystem>, <random>, and
+// chrono TZDB still use the guest numbers below; darwin_fs.c / darwin_syscall.c
+// implement them with POSIX and the host TZif reader.
+#define SYS_MONOTONIC_TIME DAVE_SYS_MONOTONIC_TIME
+#define SYS_REALTIME_TIME DAVE_SYS_REALTIME_TIME
+#define SYS_TZDB_VERSION DAVE_SYS_TZDB_VERSION
+#define SYS_TZDB_GENERATION DAVE_SYS_TZDB_GENERATION
+#define SYS_TZDB_RELOAD DAVE_SYS_TZDB_RELOAD
+#define SYS_TZDB_CURRENT_ZONE DAVE_SYS_TZDB_CURRENT_ZONE
+#define SYS_TZDB_ZONE_COUNT DAVE_SYS_TZDB_ZONE_COUNT
+#define SYS_TZDB_ZONE_NAME DAVE_SYS_TZDB_ZONE_NAME
+#define SYS_TZDB_LOCATE_ZONE DAVE_SYS_TZDB_LOCATE_ZONE
+#define SYS_TZDB_SYS_INFO DAVE_SYS_TZDB_SYS_INFO
+#define SYS_TZDB_LOCAL_INFO DAVE_SYS_TZDB_LOCAL_INFO
+#define SYS_TZDB_LEAP_COUNT DAVE_SYS_TZDB_LEAP_COUNT
+#define SYS_TZDB_LEAP_INFO DAVE_SYS_TZDB_LEAP_INFO
+#define SYS_RANDOM_BYTES DAVE_SYS_RANDOM_BYTES
+#elif defined(__DAVECC_NATIVE_LINUX__)
 #include <sys/syscall.h>
 #if defined(__risc_v__) && defined(__ILP32__)
 // RV32 was introduced after the Linux time64 transition.  Its kernel ABI does

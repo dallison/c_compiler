@@ -76,9 +76,10 @@ Also built with the guest libraries:
 - `6502_support/6502rom.exe` — 65C02 interpreter ROM
 - `libc/esp32_start.o` — ESP32/`xtensa` CRT start object
 
-Bazel additionally builds `//:libc_wasm32` and the native Linux libc/startup
-profiles (`//:libc_x86_64_linux`, `//:libc_aarch64_linux`, …). Those are not
-part of the CMake `davecc_libc` target.
+Bazel additionally builds `//:libc_wasm32`, the native Linux libc/startup
+profiles (`//:libc_x86_64_linux`, `//:libc_aarch64_linux`, …), and the
+Darwin Mach-O libc (`//:libc_aarch64_darwin` → `libc/libcaarch64_darwin.a`).
+Those are not part of the CMake `davecc_libc` target.
 
 Headers live in `libc/include/` and are used with `-isystem libc/include`.
 
@@ -97,6 +98,9 @@ bazelisk build //:x86_64 //:aarch64 //:arm //:riscv //:6502 //:esp32 //:pcode //
 
 # Guest libc for one target
 bazelisk build //:libc_x86_64
+
+# Darwin Mach-O libc (Apple Silicon default when -target is omitted)
+bazelisk build //:libc_aarch64_darwin
 
 # Everything the installer needs: tools, all guest archives, ROM, start object
 bazelisk build //:install

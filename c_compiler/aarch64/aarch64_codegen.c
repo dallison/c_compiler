@@ -711,6 +711,18 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
         TypeIsStructOrUnion(node->type) || TypeIsVector(node->type)) {
       size = kSize64Bit;
     }
+    // A 16-bit narrowing sign-extend is lsl/asr #48 in a 64-bit register.
+    // Later Materialize of a parent that aliases that instruction must not
+    // shrink it to 32-bit: SBFM Wd with immr=48 is not a legal encoding.
+    if (size == kSize32Bit &&
+        ((int)inst->opcode == (int)AARCH64_OP(lsl) ||
+         (int)inst->opcode == (int)AARCH64_OP(lsr) ||
+         (int)inst->opcode == (int)AARCH64_OP(asr) ||
+         (int)inst->opcode == (int)AARCH64_OP(ror)) &&
+        inst->operand[1] != NULL && TargetIsConst(inst->operand[1]) &&
+        AARCH64IntValue(inst->operand[1]) > 31) {
+      size = kSize64Bit;
+    }
     SetInstructionSize(inst, size);
   } else if (node->inputs.length > 0) {
     // No result type to consult; fall back to the first operand's width.
@@ -1271,23 +1283,12 @@ static TargetInstruction* PagedOffsetFrom(AARCH64Generator* g, TargetInstruction
   } else {
     page = offset & ~0x7ff;
   }
-  TargetInstruction* page_inst = NULL;
-  for (size_t i = 0; i < g->offsets.length; i++) {
-    Offset* f = g->offsets.value.p[i];
-    if (f->page_offset == page) {
-      page_inst = f->inst;
-      break;
-    }
-  }
-  if (page_inst == NULL) {
-    // No page offset calculated, need to calculate one.
-    page_inst =
-        AddImmediate(g, src, page);
-    Offset* f = malloc(sizeof(Offset));
-    f->inst = page_inst;
-    f->page_offset = page;
-    VectorAppend(&g->offsets, f);
-  }
+  // Do not cache this calculation globally.  The source is not necessarily the
+  // frame pointer, and a calculation emitted in one control-flow branch may not
+  // dominate a later use (a switch arm that first touches a large local is the
+  // usual case).  Keeping one page value live across a large function also
+  // forces every unrelated block to preserve or spill it.
+  TargetInstruction* page_inst = AddImmediate(g, src, page);
   *page_offset = offset - page;
   return page_inst;
 }
@@ -1846,11 +1847,12 @@ static TargetInstruction* Materialize(AARCH64Generator* g, IRNode* node) {
     // The instruction already carries the correct 64-bit pointer width.
     return inst;
   }
-  if (node->opcode == IR_OP(signextendi)) {
-    // LowerSignExtend has already sized its result (sxtw / shift pair) to the
-    // width required by the operation, which for a narrowing sign-extend is the
-    // *source* width rather than the node's narrower result type.  Resizing it
-    // here would emit an out-of-range shift (e.g. asr w, w, #32).
+  if (node->opcode == IR_OP(signextendi) ||
+      node->opcode == IR_OP(zeroextendi)) {
+    // LowerSignExtend / LowerZeroExtend have already sized the result (sxtw,
+    // UBFX, or a 64-bit shift pair) to the width required by the operation.
+    // A narrowing extend's IR type is the narrow result; resizing here would
+    // emit an out-of-range shift (e.g. asr w, w, #48).
     return inst;
   }
   if (node->opcode == IR_OP(cast)) {
@@ -3414,7 +3416,22 @@ static TargetInstruction* LowerLiteralReference(AARCH64Generator* g, IRNode* nod
   TargetInstruction* literal =
       Emit(g, SetInstructionSize(TargetNewLiteral((int)id_node->value.ivalue), kSize64Bit));
 
-  TargetInstruction* result = Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(adr), literal), kSize64Bit));
+  // Mach-O has no ADR reloc (R_AARCH64_ADR_PREL_LO21).  Use the same
+  // adrp/add pair as static addresses so Apple ld can apply PAGE21+PAGEOFF12.
+  TargetInstruction* result;
+  if (compiler != NULL && compiler->native_object) {
+    TargetInstruction* page = Emit(
+        g, SetInstructionSize(NewInstruction1(AARCH64_OP(adrp), literal),
+                              kSize64Bit));
+    result = Emit(g, SetInstructionSize(
+                         NewInstruction2(AARCH64_OP(add), page, literal),
+                         kSize64Bit));
+    result->flags |= AARCH64_LO_RELOC;
+  } else {
+    result = Emit(
+        g, SetInstructionSize(NewInstruction1(AARCH64_OP(adr), literal),
+                              kSize64Bit));
+  }
 
   // Route the result into a destination tmp when this literalref is a ?: / && /
   // || branch (the "-> $n" annotation); otherwise the merge tmp is never

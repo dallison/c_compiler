@@ -51,7 +51,14 @@ davecc -target x86_64 foo.s bar.o lib.a -o prog
 with `ltodump`. Linker flags and scripts are in [linker.md](linker.md).
 On a Linux host (or via Colima), `-fuse-ld=ld` / `-fuse-ld=lld` asks the
 driver to exec the native ELF linker instead of daveld; that is Linux
-targets only. Builtins are in [builtins.md](builtins.md).
+targets only. On macOS, omitting `-target` (or passing
+`-target aarch64-apple-darwin-davecc`, or `-fnative` with `-target aarch64`)
+writes AArch64 Mach-O objects, links `libcaarch64_darwin.a`
+(`bazelisk build //:libc_aarch64_darwin`), and execs host `cc` so the
+result can run without the interpreter. `-flto` is not available on that
+path: DCCLTO03 is neither Mach-O nor LLVM bitcode. `-fno-native` cannot
+turn a Darwin triple back into ELF.
+Builtins are in [builtins.md](builtins.md).
 
 After install, `davecc` itself lives in `libexec/davecc`. The `davecc-*`
 wrappers on `PATH` add `-target` and the guest include / libc paths.
@@ -70,13 +77,15 @@ daveld -r a.o b.o -o combined.o
 ## Assemblers
 
 Each standalone assembler is the same code `davecc` runs after `-S`. They
-read GNU-style `.s` (C preprocessor included) and write ELF objects.
+read GNU-style `.s` (C preprocessor included) and write ELF objects. On
+macOS, `aarch64asm -fnative` writes a Mach-O `MH_OBJECT` instead so host
+`cc` / `ld` can consume it. Other assemblers stay ELF-only.
 
 | Binary | Target forced | Output |
 | --- | --- | --- |
 | `6502asm` | `6502` | ELF32 6502 / 65C02 |
 | `rvasm` | `risc-v` | ELF RISC-V (64-bit triple) |
-| `aarch64asm` | `aarch64` | ELF64 AArch64 |
+| `aarch64asm` | `aarch64` | ELF64 AArch64, or Mach-O with `-fnative` |
 | `armasm` | `arm` | ELF32 ARM |
 | `x86asm` | (internal) | ELF64 x86-64 |
 

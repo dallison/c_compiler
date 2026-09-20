@@ -2391,11 +2391,11 @@ static void ProgramEmitAddSub(TargetInstruction* inst, AsmModule* module,
   };
   AARCH64AsmRegister rn = rd;
   rn.num = left;
-  if (right_value->opcode == (TargetOpcode)AARCH64_OP(symbol)) {
-    char buffer[256];
-    const char* symbol =
-        TargetSymbolName(((TargetSymbol*)right_value)->symbol, buffer,
-                         sizeof(buffer));
+  if (right_value->opcode == (TargetOpcode)AARCH64_OP(symbol) ||
+      right_value->opcode == (TargetOpcode)AARCH64_OP(literal)) {
+    String symbol_name = {0};
+    ProgramLabelName(&symbol_name, "", right_value);
+    const char* symbol = symbol_name.value;
     int relocation;
     const char* modifier;
     bool shifted = false;
@@ -2423,6 +2423,7 @@ static void ProgramEmitAddSub(TargetInstruction* inst, AsmModule* module,
                                      shifted),
         kAARCH64FixupRelocationOnly, relocation, symbol, 0, true, text.value);
     StringDestruct(&text);
+    StringDestruct(&symbol_name);
     return;
   }
   if (TargetIsConst(right_value)) {
@@ -2974,6 +2975,9 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
     case AARCH64_OP(asr): {
       int source = ProgramRegNum(inst->operand[0]);
       int shift = (int)TargetIntValue(inst->operand[1]);
+      if (shift > 31) {
+        is_64bit = true;
+      }
       int maximum = is_64bit ? 63 : 31;
       int opc = inst->opcode == (TargetOpcode)AARCH64_OP(asr) ? 0 : 2;
       int immr = inst->opcode == (TargetOpcode)AARCH64_OP(lsl)

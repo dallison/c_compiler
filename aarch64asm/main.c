@@ -3,7 +3,8 @@
 //  aarch64asm
 //
 
-// Standalone AArch64 assembler that generates ELF object files.
+// Standalone AArch64 assembler. Writes ELF by default; -fnative on macOS
+// writes a Mach-O MH_OBJECT for the host linker.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

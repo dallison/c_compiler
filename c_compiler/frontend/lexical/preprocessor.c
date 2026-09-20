@@ -661,6 +661,13 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__unix__", "1");
     PreprocessorDefineMacro(p, "__unix", "1");
     PreprocessorDefineMacro(p, "__DAVECC_NATIVE_LINUX__", "1");
+  } else if (CompilerTargetTripleIsDarwin(&compiler->target_triple) ||
+             compiler->native_object) {
+    PreprocessorDefineMacro(p, "__APPLE__", "1");
+    PreprocessorDefineMacro(p, "__MACH__", "1");
+    PreprocessorDefineMacro(p, "__unix__", "1");
+    PreprocessorDefineMacro(p, "__unix", "1");
+    PreprocessorDefineMacro(p, "__DAVECC_NATIVE_DARWIN__", "1");
   } else {
     PreprocessorDefineMacro(p, "__DAVECC_INTERPRETER_ABI__", "1");
   }

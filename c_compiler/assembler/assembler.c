@@ -13,11 +13,23 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include "compiler.h"
 #include "elf_writer.h"
 #include "asm_expr.h"
 #include "errors.h"
+#include "macho_object.h"
 
 #define ASM_OBJECT_FINAL_PASS 3
+
+static void AssemblerWriteObject(Assembler* assembler) {
+  if (assembler->object.write_macho) {
+    if (!AsmObjectWriteMachO(&assembler->object, assembler->out)) {
+      assembler->num_errors++;
+    }
+    return;
+  }
+  AsmObjectWriteELF(&assembler->object, assembler->out);
+}
 
 // Default label defining function.
 static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling);
@@ -180,7 +192,7 @@ static int CompareCharPointer(const void* a, const void* b) {
 static bool AssemblerInitCommon(Assembler* assembler, int16_t elf_machine_type,
                                 uint16_t elf_flags, int* reloc_types,
                                 String* outfile) {
-  assembler->out = fopen(outfile->value, "w");
+  assembler->out = fopen(outfile->value, "wb");
   if (assembler->out == NULL) {
     fprintf(stderr, "Cannot open object file %s\n", outfile->value);
     return false;
@@ -188,6 +200,10 @@ static bool AssemblerInitCommon(Assembler* assembler, int16_t elf_machine_type,
 
   PreprocessorInit(&assembler->preprocessor);
   AsmObjectInit(&assembler->object, elf_machine_type, elf_flags, reloc_types);
+  if (compiler != NULL && compiler->native_object) {
+    assembler->object.write_macho = true;
+    assembler->object.pic = true;
+  }
   MapInit(&assembler->directives, CompareCharPointer);
   InitializeDirectives(&assembler->directives);
   assembler->num_errors = 0;
@@ -437,7 +453,7 @@ void AssemblerRunRecordedOperations(Assembler* assembler, Vector* inputs,
     }
   }
 
-  AsmObjectWriteELF(&assembler->object, assembler->out);
+  AssemblerWriteObject(assembler);
 }
 
 void AssemblerRunModule(Assembler* assembler, AsmModule* module) {
@@ -451,7 +467,7 @@ void AssemblerRunModule(Assembler* assembler, AsmModule* module) {
     }
   }
   if (!module->failed && assembler->num_errors == 0) {
-    AsmObjectWriteELF(&assembler->object, assembler->out);
+    AssemblerWriteObject(assembler);
   }
 }
 
@@ -469,7 +485,7 @@ void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
     }
   }
 
-  AsmObjectWriteELF(&assembler->object, assembler->out);
+  AssemblerWriteObject(assembler);
 }
 
 void AssemblerError(Assembler* assembler, const char* format, ...) {

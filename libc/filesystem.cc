@@ -4,7 +4,8 @@
 #include <cstdlib>
 #include <syscall.h>
 
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_NATIVE_LINUX__) || defined(__DAVECC_NATIVE_DARWIN__)
+#define __DAVECC_HOST_FS_SERVICE__ 1
 extern "C" int64_t __davecc_linux_fs_service(int operation, intptr_t first,
                                                intptr_t second,
                                                intptr_t third);
@@ -60,7 +61,7 @@ struct __wire_space {
 
 static int64_t __status_call(const char* value, bool follow,
                              __wire_status* result) {
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_HOST_FS_SERVICE__)
   return __davecc_linux_fs_service(
       SYS_FS_STATUS, reinterpret_cast<intptr_t>(value), follow ? 1 : 0,
       reinterpret_cast<intptr_t>(result));
@@ -70,7 +71,7 @@ static int64_t __status_call(const char* value, bool follow,
 }
 
 static int64_t __call1(int operation, const void* first) {
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_HOST_FS_SERVICE__)
   return __davecc_linux_fs_service(operation,
                                     reinterpret_cast<intptr_t>(first), 0, 0);
 #else
@@ -79,7 +80,7 @@ static int64_t __call1(int operation, const void* first) {
 }
 
 static int64_t __call2(int operation, const void* first, const void* second) {
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_HOST_FS_SERVICE__)
   return __davecc_linux_fs_service(
       operation, reinterpret_cast<intptr_t>(first),
       reinterpret_cast<intptr_t>(second), 0);
@@ -90,7 +91,7 @@ static int64_t __call2(int operation, const void* first, const void* second) {
 
 static int64_t __call3(int operation, const void* first, const void* second,
                        const void* third) {
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_HOST_FS_SERVICE__)
   return __davecc_linux_fs_service(
       operation, reinterpret_cast<intptr_t>(first),
       reinterpret_cast<intptr_t>(second), reinterpret_cast<intptr_t>(third));
