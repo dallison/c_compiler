@@ -1638,7 +1638,9 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
             }
           } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(literal))) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];
-            fprintf(fp, "%s.str.%d", sep, literal->literal_id);
+            char litname[64];
+            LiteralAsmName(literal->literal_id, litname, sizeof(litname));
+            fprintf(fp, "%s%s", sep, litname);
           } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(oplsl))) {
             fprintf(fp, ", lsl ");
             sep = "";
@@ -1951,10 +1953,9 @@ static void ProgramLabelName(String* result, const char* function,
     return;
   }
   if (label->opcode == (TargetOpcode)AARCH64_OP(literal)) {
-    char id[32];
-    snprintf(id, sizeof(id), "%d", ((TargetLiteral*)label)->literal_id);
-    StringAppend(result, ".str.");
-    StringAppend(result, id);
+    char name[64];
+    LiteralAsmName(((TargetLiteral*)label)->literal_id, name, sizeof(name));
+    StringAppend(result, name);
     return;
   }
   char id[32];

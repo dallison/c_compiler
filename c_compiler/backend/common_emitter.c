@@ -258,6 +258,14 @@ void EmitStringLiteralSection(FILE* fp) {
   fprintf(fp, "\t.section \".rodata\", \"aMS\", @progbits\n");
 }
 
+void LiteralAsmName(int literal_id, char* buf, size_t size) {
+  Literal* literal = CompilerFindLiteral(literal_id);
+  snprintf(buf, size,
+           (literal != NULL && literal->type == kLiteralBuffer) ? ".lit.%d"
+                                                                : ".str.%d",
+           literal_id);
+}
+
 void EmitLiteral(Literal* literal, FILE* fp) {
   // A string literal might be disabled if it's used in an
   // asm statement and has alrady been emitted as assembly

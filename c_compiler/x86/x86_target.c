@@ -83,6 +83,9 @@ static CompilerTarget* NewX86TargetWithProfile(const char* name,
   target->long_long_size = 8;
   target->float_size = 4;
   target->double_size = 8;
+  target->long_double_size = profile->is_64bit ? 16 : 8;
+  target->long_double_format = profile->is_64bit ? kLongDoubleFormatIntel80
+                                                 : kLongDoubleFormatFloat64;
   target->wchar_size = 4;
   target->stack_alignment = profile->stack_alignment;
   target->code_preference = kCodeForSpeed;

@@ -235,6 +235,24 @@ int SizeofDouble(void) {
   return compiler->double_size;
 }
 
+int SizeofLongDouble(void) {
+  return compiler->long_double_size ? compiler->long_double_size
+                                    : compiler->double_size;
+}
+
+bool TypeUsesLongDoubleRepresentation(TypeRecord* type) {
+  if (!TypeIsLongDouble(type) || compiler == NULL) {
+    return false;
+  }
+  return compiler->long_double_format == kLongDoubleFormatIntel80 ||
+         compiler->long_double_format == kLongDoubleFormatIEEEf128;
+}
+
+bool TypeUsesHardwareFloatRegister(TypeRecord* type) {
+  return TypeUsesFloat32Representation(type) ||
+         TypeUsesFloat64Representation(type);
+}
+
 // Mapping of type to its size in bytes.
 static struct {
   Type type;
@@ -253,7 +271,7 @@ static struct {
   {kTypeFloat32, SizeofFloat},
   {kTypeDouble, SizeofDouble},
   {kTypeFloat64, SizeofDouble},
-  {kTypeLongDouble, SizeofDouble},
+  {kTypeLongDouble, SizeofLongDouble},
   {kTypeInt, SizeofInt},
   {kTypeVoid, SizeofVoid},
   {kTypeImplicit, 0},

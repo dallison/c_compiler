@@ -115,11 +115,11 @@ WasmValueType Wasm32TypeForCType(TypeRecord* type) {
   if (type == NULL) {
     return kWasmTypeI32;
   }
-  if (TypeIsFloatingPoint(type)) {
+  if (TypeUsesHardwareFloatRegister(type)) {
     return type->size <= 4 ? kWasmTypeF32 : kWasmTypeF64;
   }
   if (TypeIsPointerOrArray(type) || TypeIsStructOrUnion(type) ||
-      TypeIsVector(type)) {
+      TypeUsesLongDoubleRepresentation(type) || TypeIsVector(type)) {
     return kWasmTypeI32;
   }
   return type->size > 4 ? kWasmTypeI64 : kWasmTypeI32;
@@ -1019,7 +1019,8 @@ static void LowerEnter(Wasm32Generator* wasm) {
       continue;
     }
     TargetInstruction* param = wasm->params.value.p[i + first];
-    if (TypeIsStructOrUnion(arg->type)) {
+    if (TypeIsStructOrUnion(arg->type) ||
+        TypeUsesLongDoubleRepresentation(arg->type)) {
       // The parameter is a pointer to the caller's copy.  Taking our own
       // copy now is what makes the argument pass by value, and it lets the
       // rest of the function treat the parameter like any other local.
@@ -1190,7 +1191,7 @@ static TargetInstruction* NarrowToVariableWidth(Wasm32Generator* wasm,
                                                 TargetInstruction* value,
                                                 TypeRecord* type) {
   WasmValueType have = Wasm32InstructionType(value);
-  if (TypeIsFloatingPoint(type) || type->size >= WasmTypeSize(have)) {
+  if (TypeUsesHardwareFloatRegister(type) || type->size >= WasmTypeSize(have)) {
     return value;
   }
   bool wide = have == kWasmTypeI64;
@@ -1713,6 +1714,18 @@ static TypeRecord* CalleeFunctionType(IRNode* call) {
   return TypeIsFunction(type) ? type : NULL;
 }
 
+static TypeRecord* FormalParameterType(TypeRecord* function, size_t index) {
+  if (function == NULL || !TypeIsFunction(function)) {
+    return NULL;
+  }
+  Vector* prototype = &function->info.function.prototype;
+  if (index >= prototype->length) {
+    return NULL;
+  }
+  Symbol* argument = prototype->value.p[index];
+  return argument != NULL ? argument->type : NULL;
+}
+
 // How many of a call's arguments are ordinary wasm parameters.  Anything
 // past them is variadic and travels in the buffer instead.  The hidden
 // aggregate-result pointer counts, because it is passed like a parameter
@@ -1924,6 +1937,11 @@ static TargetInstruction* LowerCall(Wasm32Generator* wasm, IRNode* node) {
 
   assert(node->inputs.length >= 1);
   size_t num_arguments = node->inputs.length - 1;
+  TypeRecord* callee_type = CalleeFunctionType(node);
+  bool hidden_struct_result =
+      (node->flags & kIRStructReturnCall) != 0 ||
+      (callee_type != NULL && callee_type->next != NULL &&
+       TypeReturnedThroughHiddenPointer(callee_type->next));
 
   // Compute every argument first.  Only once they are all in locals is it
   // safe to start pushing, because anything emitted between two pushes
@@ -1933,12 +1951,29 @@ static TargetInstruction* LowerCall(Wasm32Generator* wasm, IRNode* node) {
     values = malloc(num_arguments * sizeof(TargetInstruction*));
     for (size_t i = 0; i < num_arguments; i++) {
       IRNode* argument = node->inputs.value.p[i + 1];
+      values[i] = Materialize(wasm, argument);
       // A struct argument is passed as a pointer to the caller's copy; the
       // callee takes its own copy on entry, which is where the by-value
-      // semantics come from.
-      values[i] = Materialize(wasm, argument);
-      if (TypeIsStructOrUnion(argument->type)) {
-        values[i] = Coerce(wasm, values[i], kWasmTypeI32, /*is_unsigned=*/true);
+      // semantics come from.  Scalar formals still have to match the wasm
+      // type the definition used: passing an i32 to an i64 parameter is a
+      // validation error.
+      TypeRecord* formal = NULL;
+      if (hidden_struct_result && i == 0) {
+        values[i] =
+            Coerce(wasm, values[i], kWasmTypeI32, /*is_unsigned=*/true);
+      } else {
+        size_t user = hidden_struct_result ? i - 1 : i;
+        formal = FormalParameterType(callee_type, user);
+        TypeRecord* ty = formal != NULL ? formal : argument->type;
+        bool by_reference = TypeIsStructOrUnion(ty) ||
+                            TypeUsesLongDoubleRepresentation(ty) ||
+                            TypeIsStructOrUnion(argument->type) ||
+                            TypeUsesLongDoubleRepresentation(argument->type);
+        WasmValueType want =
+            by_reference ? kWasmTypeI32 : Wasm32TypeForCType(ty);
+        bool is_unsigned =
+            by_reference || (ty != NULL && TypeIsUnsigned(ty));
+        values[i] = Coerce(wasm, values[i], want, is_unsigned);
       }
       if (values[i] == NULL) {
         free(values);
@@ -1988,7 +2023,6 @@ static TargetInstruction* LowerCall(Wasm32Generator* wasm, IRNode* node) {
   // A variadic call passes its fixed arguments as wasm parameters and packs
   // the rest into a frame buffer, whose address becomes the last parameter.
   // That keeps the wasm signature fixed however many arguments there are.
-  TypeRecord* callee_type = CalleeFunctionType(node);
   size_t fixed = num_arguments;
   bool variadic = callee_type != NULL && callee_type->info.function.varargs;
   TargetInstruction* buffer = NULL;
@@ -2035,9 +2069,18 @@ static TargetInstruction* LowerCall(Wasm32Generator* wasm, IRNode* node) {
   TargetInstruction* call =
       NewInstruction1(direct ? W_OP(call) : W_OP(call_indirect), callee);
   call->addr = type_index;
-  bool returns_value = node->type != NULL && !TypeIsVoid(node->type);
+  // The callee's declared return decides whether wasm produces a value.
+  // An unprototyped C call is typed as returning int, but a void definition
+  // pushes nothing; treating that as an i32 result leaves local.set starved.
+  TypeRecord* declared_return = callee_type != NULL ? callee_type->next : node->type;
+  bool hidden_return =
+      declared_return != NULL && TypeReturnedThroughHiddenPointer(declared_return);
+  bool returns_value =
+      declared_return != NULL && !TypeIsVoid(declared_return);
   if (returns_value) {
-    Wasm32SetInstructionType(call, Wasm32TypeForCType(node->type));
+    Wasm32SetInstructionType(call, hidden_return
+                                       ? kWasmTypeI32
+                                       : Wasm32TypeForCType(declared_return));
   } else {
     call->flags |= WASM32_FLAG_NO_RESULT;
   }
@@ -2392,7 +2435,8 @@ static TargetInstruction* LowerVaArg(Wasm32Generator* wasm, IRNode* node) {
   // A struct travels as a pointer to the caller's copy, the same way a named
   // struct parameter does.  Copying it onto the shadow stack is what makes
   // va_arg pass by value.
-  if (TypeIsStructOrUnion(node->type)) {
+  if (TypeIsStructOrUnion(node->type) ||
+      TypeUsesLongDoubleRepresentation(node->type)) {
     int32_t size = node->type->size;
     TargetInstruction* source =
         EmitLoad(wasm, W_OP(i32_load), cursor, 0, kWasmTypeI32);
@@ -3020,7 +3064,7 @@ static bool CanKeepVariableInLocal(IRNode* node) {
   }
   TypeRecord* type = symbol->type;
   if (!TypeIsPointer(type) && !TypeIsIntegral(type) &&
-      !TypeIsFloatingPoint(type)) {
+      !TypeUsesHardwareFloatRegister(type)) {
     return false;
   }
   if (TypeIsVolatile(type) || TypeIsAtomic(type) || TypeIsReference(type)) {
@@ -3148,7 +3192,8 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
     if (arg == NULL || arg->type == NULL) {
       continue;
     }
-    bool by_reference = TypeIsStructOrUnion(arg->type);
+    bool by_reference = TypeIsStructOrUnion(arg->type) ||
+                        TypeUsesLongDoubleRepresentation(arg->type);
     VectorAppend(&wasm->signature.param_types,
                  (void*)(intptr_t)(by_reference ? kWasmTypeI32
                                                 : Wasm32TypeForCType(arg->type)));
@@ -3275,7 +3320,8 @@ void Wasm32Lower(Wasm32Generator* wasm, Generator* gen) {
        call = IRNext(call)) {
     if (call->opcode == IR_OP(decsp) ||
         (call->opcode == IR_OP(builtin_va_arg) && call->type != NULL &&
-         TypeIsStructOrUnion(call->type))) {
+         (TypeIsStructOrUnion(call->type) ||
+          TypeUsesLongDoubleRepresentation(call->type)))) {
       moves_stack_pointer = true;
       continue;
     }

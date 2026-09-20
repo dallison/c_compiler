@@ -1469,7 +1469,9 @@ static void PrintInstruction(RV32Emitter* emitter, TargetInstruction* inst,
             }
           } else if (((int)inst->operand[i]->opcode == (int)RV32_OP(literal))) {
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];
-            fprintf(fp, "%s.str.%d", sep, literal->literal_id);
+            char litname[64];
+            LiteralAsmName(literal->literal_id, litname, sizeof(litname));
+            fprintf(fp, "%s%s", sep, litname);
           } else {
             fprintf(fp, "%s%s", sep,
                     GetRegisterName(inst->operand[i], buf2,

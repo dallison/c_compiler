@@ -97,6 +97,8 @@ CompilerTarget* New6502Target() {
   target->stack_alignment = 1;
   target->float_size = 4;
   target->double_size = 4;
+  target->long_double_size = 4;
+  target->long_double_format = kLongDoubleFormatFloat32;
   target->wchar_size = 2;
   target->code_preference = kCodeForSize;
   target->call_return_fixed_reg = false;

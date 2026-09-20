@@ -799,14 +799,10 @@ static X86Opcode MoveOpcodeForLoad(X86Opcode load_opcode) {
   }
 }
 
-// This backend has no x87 unit: it represents `long double` values with the
-// same 64-bit SSE encoding as `double` (the wider 16-byte object layout only
-// pads the storage; the guest libc reads a long double variadic argument as a
-// `double`).  Every place that selects a double-width SSE operation over a
-// single-precision one must therefore treat `long double` like `double`,
-// otherwise a long double value is silently truncated to 32 bits (e.g. a
-// `movss` where a `movsd` was required).  `TypeIsDouble()` alone does not cover
-// long double, so use this predicate for the double-vs-float choice.
+// On x86_64, `long double` is the 80-bit Intel format in a 16-byte slot.
+// Arithmetic is software-emulated.  i386 still aliases long double to double.
+// Hardware SSE selection must not treat a distinct long double as an 8-byte
+// SSE value.
 static bool X86FpIsDoubleWidth(TypeRecord* type) {
   return TypeUsesFloat64Representation(type);
 }
@@ -1304,13 +1300,14 @@ static X86Opcode IR2X86(IROpcode op) {
 }
 
 // Number of integer variables that can be pinned to a distinct physical
-// register.  Mirrors the usable fixed slots in X86VarRegSlot(): a non-leaf
-// function uses the callee-saved r12-r15 (4 of them); a leaf function makes no
-// calls and may also use the caller-saved temporaries r8-r10 (3 of them).
-// Beyond this, additional variables must live on the stack -- otherwise they
-// would be allocated to caller-saved temporaries and silently clobbered across
-// the calls they span, or alias another register variable.
-#define X86_MAX_LEAF_INT_REG_VARS 3
+// register.  Mirrors the usable fixed slots in X86VarRegSlot(): both leaf and
+// non-leaf functions use callee-saved r12-r15 (4 of them).  Leaf functions
+// cannot pin to r8/r9: those are incoming SysV argument registers, and a
+// five- or six-argument leaf would clobber a still-live parameter.  Beyond
+// this, additional variables must live on the stack -- otherwise they would
+// be allocated to caller-saved temporaries and silently clobbered across the
+// calls they span, or alias another register variable.
+#define X86_MAX_LEAF_INT_REG_VARS 4
 #define X86_MAX_NONLEAF_INT_REG_VARS 4
 
 static bool X86HasFreeIntRegVar(X86Generator* rv) {
@@ -1539,7 +1536,7 @@ static TargetInstruction* Materialize(X86Generator* rv, IRNode* node) {
       if (X86_IS_REG_VAR(var_offset)) {
         // Variable is in a register.
         int var_num = var_offset & ~X86_REG_VAR;
-        if (TypeIsFloatingPoint(node->type)) {
+        if (TypeUsesHardwareFloatRegister(node->type)) {
           return FloatingPointVariableRegister(rv, var_num, var->symbol);
         } else {
           return IntVariableRegister(rv, var_num, var->symbol);
@@ -1558,7 +1555,7 @@ static TargetInstruction* Materialize(X86Generator* rv, IRNode* node) {
       // Argument is in a register.
       IRVariable* var = (IRVariable*)node;
       int var_num = var_offset & ~X86_REG_VAR;
-      if (TypeIsFloatingPoint(node->type)) {
+      if (TypeUsesHardwareFloatRegister(node->type)) {
         return FloatingPointVariableRegister(rv, var_num, var->symbol);
       } else {
         return IntVariableRegister(rv, var_num, var->symbol);
@@ -1999,7 +1996,7 @@ static TargetInstruction* LowerExpression(X86Generator* rv, Generator* gen,
   TargetInstruction* dest = GetDestInstruction(rv, gen, node);
   if (dest != NULL && inst != NULL) {
     X86Opcode mov_opcode = X86_OP(mv);
-    if (TypeIsFloatingPoint(node->type)) {
+    if (TypeUsesHardwareFloatRegister(node->type)) {
       mov_opcode = node->type->size > 4 ? X86_OP(fmv_d) : X86_OP(fmv_s);
     }
     inst = SetDestOrMove(rv, inst, dest, mov_opcode);
@@ -2145,7 +2142,7 @@ static TargetInstruction* LowerLogicalNot(X86Generator* rv, Generator* gen,
   // register, so fall back to the generic lowering for it.  Integer/pointer
   // logical-not is "test op,op ; sete rd" (the single-operand sete form emits
   // the test, and setcc results are zero-extended to a clean 0/1).
-  if (TypeIsFloatingPoint(op->type)) {
+  if (TypeUsesHardwareFloatRegister(op->type)) {
     return LowerExpression(rv, gen, node);
   }
   TargetInstruction* result = Emit(
@@ -2397,7 +2394,7 @@ static bool GetRegAndOffset(X86Generator* rv, IRNode* addr_node,
     if (X86_IS_REG_VAR(var_offset)) {
       // Variable is in a register.
       int var_num = var_offset & ~X86_REG_VAR;
-      if (TypeIsFloatingPoint(addr_node->type)) {
+      if (TypeUsesHardwareFloatRegister(addr_node->type)) {
         *addr = FloatingPointVariableRegister(rv, var_num, var->symbol);
       } else {
         *addr = IntVariableRegister(rv, var_num, var->symbol);
@@ -2416,7 +2413,7 @@ static bool GetRegAndOffset(X86Generator* rv, IRNode* addr_node,
     if (X86_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       int var_num = var_offset & ~X86_REG_VAR;
-      if (TypeIsFloatingPoint(addr_node->type)) {
+      if (TypeUsesHardwareFloatRegister(addr_node->type)) {
         *addr = FloatingPointVariableRegister(rv, var_num, var->symbol);
       } else {
         *addr = IntVariableRegister(rv, var_num, var->symbol);
@@ -2628,7 +2625,7 @@ static TargetInstruction* Store(X86Generator* rv, IRNode* addr_node, TargetInstr
 
   // If we are not on the stack, move the src to the dest.
   if (!on_stack) {
-    bool is_fp = TypeIsFloatingPoint(addr_node->type);
+    bool is_fp = TypeUsesHardwareFloatRegister(addr_node->type);
     if (!is_fp) {
       src = NarrowToStoreWidth(rv, src, StoredObjectType(addr_node),
                                StoreWidth(opcode));
@@ -2687,7 +2684,7 @@ static TargetInstruction* LowerStore(X86Generator* rv, Generator* gen,
   }
   TargetInstruction* src = Materialize(rv, src_node);
   TargetInstruction* stored = Store(rv, addr_node, src, opcode);
-  if (node->outputs.length > 0 && !TypeIsFloatingPoint(addr_node->type)) {
+  if (node->outputs.length > 0 && !TypeUsesHardwareFloatRegister(addr_node->type)) {
     // `return value += amount;` reads the assignment's value, which the IR
     // spells as a use of the store.  A store to memory produces no value of its
     // own, so hand on what was stored, narrowed the way reading the object back
@@ -3482,7 +3479,7 @@ static void SnapshotPostIncOldValue(X86Generator* rv, IRNode* node,
     return;
   }
   X86Opcode mv_opcode =
-      TypeIsFloatingPoint(addr_node->type)
+      TypeUsesHardwareFloatRegister(addr_node->type)
           ? (X86FpIsDoubleWidth(addr_node->type) ? X86_OP(fmv_d)
                                            : X86_OP(fmv_s))
           : X86_OP(mv);
@@ -3553,7 +3550,7 @@ static TargetInstruction* LowerInc(X86Generator* rv, Generator* gen,
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     inc =  Emit(rv, NewInstruction2(X86FpIsDoubleWidth(node->type) ? X86_OP(addsd) : X86_OP(addss), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, X86IntValue(amount));
@@ -3621,7 +3618,7 @@ static TargetInstruction* LowerDec(X86Generator* rv, Generator* gen,
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     inc =  Emit(rv, NewInstruction2(X86FpIsDoubleWidth(node->type) ? X86_OP(subsd) : X86_OP(subss), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, -X86IntValue(amount));
@@ -3788,7 +3785,7 @@ static TypeRecord* CalleeFunctionType(IRNode* node) {
 static TargetInstruction* PushArgI386(X86Generator* rv, IRNode* node,
                                   TargetInstruction* inst, size_t offset) {
   X86Opcode opcode = X86_OP(storel);
-  if (node->type != NULL && TypeIsFloatingPoint(node->type)) {
+  if (node->type != NULL && TypeUsesHardwareFloatRegister(node->type)) {
     opcode = X86FpIsDoubleWidth(node->type) ? X86_OP(storesd) : X86_OP(storess);
   }
   return Emit(rv, NewInstruction3(
@@ -3806,7 +3803,7 @@ static TargetInstruction* PushArgAMD64(X86Generator* rv, IRNode* node,
                         GetIntConstant(rv, node, kTargetType64Bit, offset)));
   }
   X86Opcode opcode = X86_OP(storeq);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     opcode = X86_OP(storesd);
   }
   return Emit(rv, NewInstruction3(
@@ -3826,7 +3823,7 @@ static TargetInstruction* PopArgI386(X86Generator* rv, IRNode* node, size_t offs
   rv->has_incoming_stack_args = true;
   int64_t fp_offset = (int64_t)offset + X86_P(rv)->first_arg_ebp_offset;
   X86Opcode opcode = X86_OP(loadl);
-  if (node->type != NULL && TypeIsFloatingPoint(node->type)) {
+  if (node->type != NULL && TypeUsesHardwareFloatRegister(node->type)) {
     opcode = X86FpIsDoubleWidth(node->type) ? X86_OP(loadsd) : X86_OP(loadss);
   }
   return Emit(rv, NewInstruction2(
@@ -3858,7 +3855,7 @@ static TargetInstruction* PopArgAMD64(X86Generator* rv, IRNode* node, size_t off
                         GetIntConstant(rv, node, kTargetType64Bit, fp_offset)));
   }
   X86Opcode opcode = X86_OP(loadq);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     opcode = X86_OP(loadsd);
   }
   return Emit(rv, NewInstruction2(
@@ -4153,7 +4150,7 @@ static TargetInstruction* LowerCallI386(X86Generator* rv, Generator* gen,
                               GetIntConstant(rv, NULL, kTargetType32Bit, 4)));
       PushArg(rv, arg_node, first, offset);
       PushArg(rv, arg_node, second, offset + 4);
-    } else if (TypeIsFloatingPoint(arg_node->type)) {
+    } else if (TypeUsesHardwareFloatRegister(arg_node->type)) {
       PushArg(rv, arg_node, Materialize(rv, arg_node), offset);
     } else if (X86I386TypeIsWideInt(arg_node->type)) {
       X86I386MaterializeWideArg(rv, arg_node, offset);
@@ -4171,11 +4168,11 @@ static TargetInstruction* LowerCallI386(X86Generator* rv, Generator* gen,
   TargetInstruction* addr = GetLoweredNode(node->inputs.value.p[0]);
   X86Opcode opcode;
   if (((int)addr->opcode == (int)X86_OP(symbol))) {
-    opcode = (TypeIsFloatingPoint(node->type) || TypeIsVector(node->type))
+    opcode = (TypeUsesHardwareFloatRegister(node->type) || TypeIsVector(node->type))
                  ? X86_OP(callf)
                  : X86_OP(call);
   } else {
-    opcode = (TypeIsFloatingPoint(node->type) || TypeIsVector(node->type))
+    opcode = (TypeUsesHardwareFloatRegister(node->type) || TypeIsVector(node->type))
                  ? X86_OP(rcallf)
                  : X86_OP(rcall);
   }
@@ -4202,7 +4199,7 @@ static TargetInstruction* LowerCallI386(X86Generator* rv, Generator* gen,
     TargetInstruction* dest = GetDestInstruction(rv, gen, node);
     if (dest != NULL && dest != call) {
       X86Opcode mov_opcode = X86_OP(mv);
-      if (TypeIsFloatingPoint(node->type)) {
+      if (TypeUsesHardwareFloatRegister(node->type)) {
         mov_opcode =
             X86FpIsDoubleWidth(node->type) ? X86_OP(fmv_d) : X86_OP(fmv_s);
       }
@@ -4226,12 +4223,25 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
   size_t next_pushed_arg_offset = 0;
   Vector arg_locations;
   VectorInit(&arg_locations);
+  IRNode* callee_node = node->inputs.value.p[0];
+  TypeRecord* callee_type = callee_node->type;
+  if (callee_type != NULL && TypeIsPointer(callee_type)) {
+    callee_type = callee_type->next;
+  }
+  bool is_varargs_call = callee_type != NULL && TypeIsFunction(callee_type) &&
+                         callee_type->info.function.varargs;
+  size_t num_fixed_args =
+      is_varargs_call ? callee_type->info.function.prototype.length : 0;
+  bool has_hidden_struct_result = (node->flags & kIRStructReturnCall) != 0;
 
   // Phase 1:
   // Work out the locations for all arguments.  The first 8 go in argument
   // registers, split into integer and floating point sets.
   for (size_t i = 1; i < node->inputs.length; i++) {
     IRNode* arg_node = node->inputs.value.p[i];
+    size_t named_index_base = has_hidden_struct_result ? 2 : 1;
+    bool is_variadic_arg =
+        is_varargs_call && i >= named_index_base + num_fixed_args;
     if (TypeIsMemberPointerAggregate(arg_node->type)) {
       if (next_int_arg_reg + 1 < (X86_P(rv)->num_int_args)) {
         TargetInstruction* first =
@@ -4245,7 +4255,8 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
                      NewArgLocationPushedPair(next_pushed_arg_offset));
         next_pushed_arg_offset += 16;
       }
-    } else if (TypeIsStructOrUnion(arg_node->type)) {
+    } else if (TypeIsStructOrUnion(arg_node->type) ||
+               TypeUsesLongDoubleRepresentation(arg_node->type)) {
       if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
         // RVO (Return Value Optimization), passing structreturn as arg.
         TargetInstruction* arg_reg =
@@ -4274,6 +4285,17 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
               NewArgLocationPushed(kArgLocationPushed, next_pushed_arg_offset));
           next_pushed_arg_offset += 8;
         }
+      } else if (is_variadic_arg) {
+        // SysV MEMORY class (including distinct long double): the object
+        // itself lives in the overflow area.  A hidden pointer in a GP
+        // register would desync va_arg, which always fetches MEMORY from
+        // overflow_arg_area.
+        next_pushed_arg_offset =
+            (next_pushed_arg_offset + 15) & ~(size_t)15;
+        VectorAppend(&arg_locations,
+                     NewArgLocationPushed(kArgLocationPushed,
+                                          next_pushed_arg_offset));
+        next_pushed_arg_offset += (struct_size + 15) & ~(size_t)15;
       } else {
         // The struct needs to be copied onto the stack and then its address
         // passed either in a register or on the stack.
@@ -4303,7 +4325,7 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
                                  next_pushed_arg_offset));
         next_pushed_arg_offset += (size_t)arg_node->type->size;
       }
-    } else if (TypeIsFloatingPoint(arg_node->type)) {
+    } else if (TypeUsesHardwareFloatRegister(arg_node->type)) {
       if (next_fp_arg_reg < (X86_P(rv)->num_fp_args)) {
         // Argument goes in an argument register.
         TargetInstruction* arg_reg =
@@ -4349,6 +4371,12 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
       loc->staging_offset = total_stack_size;
       total_stack_size += 8;
     }
+  }
+  // SysV requires %rsp 16-byte aligned before `call`.  Variadic MEMORY
+  // objects (including distinct long double) also need that alignment so
+  // va_arg's 16-byte round-up does not skip into the next slot.
+  if ((total_stack_size & 15) != 0) {
+    total_stack_size = (total_stack_size + 15) & ~(size_t)15;
   }
   if (total_stack_size > 0) {
     TargetInstruction* newsp =
@@ -4468,18 +4496,22 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
           }
           break;
         }
-        if (TypeIsStructOrUnion(arg_node->type)) {
+        if (TypeIsStructOrUnion(arg_node->type) ||
+            TypeUsesLongDoubleRepresentation(arg_node->type)) {
           size_t size = arg_node->type->size;
-          if (size <= 8) {
-            // A struct less than 8 bytes is passed directly on stack.  The
-            // Materialize call will result in the address of the struct.  We
-            // need to load it.
-            TargetInstruction* addr =
-                IRIsStaticVariable(arg_node) ? GetLoweredNode(arg_node) : arg;
-            arg = Emit(rv, NewInstruction2(
-                               X86_OP(loadq), addr,
-                               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+          if (size > 8) {
+            Memcpy(rv, StackPointer(rv), arg, (int)size, 0,
+                   (int)arg_location->location.offset, false);
+            break;
           }
+          // A struct less than 8 bytes is passed directly on stack.  The
+          // Materialize call will result in the address of the struct.  We
+          // need to load it.
+          TargetInstruction* addr =
+              IRIsStaticVariable(arg_node) ? GetLoweredNode(arg_node) : arg;
+          arg = Emit(rv, NewInstruction2(
+                             X86_OP(loadq), addr,
+                             GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
         }
         PushArg(rv, arg_node, arg, arg_location->location.offset);
         break;
@@ -4540,7 +4572,7 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
           }
         }
         X86Opcode mov_opcode = X86_OP(mv);
-        if (TypeIsFloatingPoint(arg_node->type)) {
+        if (TypeUsesHardwareFloatRegister(arg_node->type)) {
           if (X86FpIsDoubleWidth(arg_node->type)) {
             mov_opcode = X86_OP(fmv_d);
           } else {
@@ -4595,12 +4627,12 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
   } else {
     if (((int)addr->opcode == (int)X86_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
-      opcode = (TypeIsFloatingPoint(node->type) || TypeIsVector(node->type))
+      opcode = (TypeUsesHardwareFloatRegister(node->type) || TypeIsVector(node->type))
                    ? X86_OP(callf)
                    : X86_OP(call);
     } else {
       // Calling through a register, rcall.
-      opcode = (TypeIsFloatingPoint(node->type) || TypeIsVector(node->type))
+      opcode = (TypeUsesHardwareFloatRegister(node->type) || TypeIsVector(node->type))
                    ? X86_OP(rcallf)
                    : X86_OP(rcall);
     }
@@ -4630,7 +4662,7 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
     TargetInstruction* dest = GetDestInstruction(rv, gen, node);
     if (dest != NULL && dest != call) {
       X86Opcode mov_opcode = X86_OP(mv);
-      if (TypeIsFloatingPoint(node->type)) {
+      if (TypeUsesHardwareFloatRegister(node->type)) {
         mov_opcode =
             X86FpIsDoubleWidth(node->type) ? X86_OP(fmv_d) : X86_OP(fmv_s);
       }
@@ -4756,7 +4788,7 @@ static TargetInstruction* LowerBuiltinVaArgI386(X86Generator* rv, IRNode* node) 
   } else if (arg_size == 2) {
     load_opcode =
         TypeIsUnsigned(node->type) ? X86_OP(loadw_z) : X86_OP(loadw);
-  } else if (TypeIsFloatingPoint(node->type)) {
+  } else if (TypeUsesHardwareFloatRegister(node->type)) {
     load_opcode =
         X86FpIsDoubleWidth(node->type) ? X86_OP(loadsd) : X86_OP(loadss);
   } else if (arg_size == 8) {
@@ -4803,7 +4835,7 @@ static TargetInstruction* LowerBuiltinVaStartAMD64(X86Generator* rv, IRNode* nod
     Vector* proto = &compiler->current_function->info.function.prototype;
     for (size_t i = 0; i < proto->length; i++) {
       Symbol* arg_symbol = proto->value.p[i];
-      if (TypeIsFloatingPoint(arg_symbol->type)) {
+      if (TypeUsesHardwareFloatRegister(arg_symbol->type)) {
         if (fp_reg <= (X86_P(rv)->fp_arg_end)) {
           fp_reg++;
         } else {
@@ -4834,12 +4866,29 @@ static TargetInstruction* LowerBuiltinVaArgAMD64(X86Generator* rv, IRNode* node)
   int64_t arg_size = ((IRConstant*)node->inputs.value.p[1])->value.ivalue;
   int64_t aligned_size = (arg_size + 7) & ~7;
 
+  // SysV MEMORY class (aggregates larger than one eightbyte, and distinct
+  // long double) is never fetched from the GP save area.  The caller places
+  // the object in the overflow area, 16-byte aligned; the result *is* that
+  // address so the assignment memcpy's from it.
+  if (TypePassedAsMemoryAggregate(node->type) && arg_size > 8) {
+    int64_t memory_size = (arg_size + 15) & ~15;
+    TargetInstruction* overflow_area =
+        LoadApField(rv, ap_node, 8, X86_OP(loadq));
+    TargetInstruction* aligned = AddImmediate(rv, overflow_area, 15);
+    aligned = Emit(rv, NewInstruction2(
+                           X86_OP(and), aligned,
+                           GetIntConstant(rv, NULL, kTargetType64Bit, -16)));
+    StoreApField(rv, ap_node, 8,
+                 AddImmediate(rv, aligned, memory_size), X86_OP(storeq));
+    return SetLoweredNode(node, aligned);
+  }
+
   // Integer arguments are fetched from the integer portion of the register
   // save area indexed by gp_offset (va_list field 0, capped at 48 == 6*8).
   // Floating-point arguments live in the vector portion indexed by fp_offset
   // (field 4, starting at 48 and stepping 16 bytes per register, capped at the
   // end of the save area).  Select the right field/cap/stride up front.
-  bool va_is_fp = TypeIsFloatingPoint(node->type);
+  bool va_is_fp = TypeUsesHardwareFloatRegister(node->type);
   bool va_is_small_aggregate =
       TypeIsStructOrUnion(node->type) && arg_size <= 8;
   int offset_field = va_is_fp ? 4 : 0;
@@ -4862,7 +4911,7 @@ static TargetInstruction* LowerBuiltinVaArgAMD64(X86Generator* rv, IRNode* node)
   } else if (arg_size == 2) {
     load_opcode = TypeIsUnsigned(node->type) ? X86_OP(loadw_z)
                                              : X86_OP(loadw);
-  } else if (TypeIsFloatingPoint(node->type)) {
+  } else if (TypeUsesHardwareFloatRegister(node->type)) {
     load_opcode =
         X86FpIsDoubleWidth(node->type) ? X86_OP(loadsd) : X86_OP(loadss);
   }
@@ -5373,7 +5422,7 @@ static TargetInstruction* LowerIRNode(X86Generator* rv, Generator* gen,
       TargetInstruction* dest = GetDestInstruction(rv, gen, node);
       if (dest != NULL && inst != NULL) {
         X86Opcode mov_opcode = X86_OP(mv);
-        if (TypeIsFloatingPoint(node->type)) {
+        if (TypeUsesHardwareFloatRegister(node->type)) {
           mov_opcode =
               node->type->size > 4 ? X86_OP(fmv_d) : X86_OP(fmv_s);
         }
@@ -5459,7 +5508,7 @@ static TargetInstruction* LowerIRNode(X86Generator* rv, Generator* gen,
 
 // Calculate the size of an argument based on its type.
 static int64_t CalculateArgumentSize(IRNode* arg) {
-  if (TypeIsFloatingPoint(arg->type)) {
+  if (TypeUsesHardwareFloatRegister(arg->type)) {
     return 8;
   }
   if (TypeIsPointerOrArray(arg->type)) {
@@ -5547,7 +5596,7 @@ static ArgLocation ArgumentLocation(X86Generator* rv, PoolEntry* arg, Vector* ar
           location.location.offset = stack_offset;
           location.second_offset = stack_offset + 8;
         }
-      } else if (TypeIsFloatingPoint(arg->pooled->type) ||
+      } else if (TypeUsesHardwareFloatRegister(arg->pooled->type) ||
                  TypeIsVector(arg->pooled->type)) {
         if (fp_reg <= (X86_P(rv)->fp_arg_end)) {
           // Arg is in a floating point register.
@@ -5582,7 +5631,7 @@ static ArgLocation ArgumentLocation(X86Generator* rv, PoolEntry* arg, Vector* ar
       } else {
         stack_offset += 16;
       }
-    } else if (TypeIsFloatingPoint(arg_symbol->type) ||
+    } else if (TypeUsesHardwareFloatRegister(arg_symbol->type) ||
                TypeIsVector(arg_symbol->type)) {
       if (fp_reg <= (X86_P(rv)->fp_arg_end)) {
         fp_reg++;
@@ -5774,7 +5823,7 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
       SetDebugStackLocation(entry, *var_offset);
       *var_offset += (int)size;
     }
-  } else if (TypeIsFloatingPoint(entry->pooled->type)) {
+  } else if (TypeUsesHardwareFloatRegister(entry->pooled->type)) {
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_fp_reg_vars++;
       entry->pooled->data.ivalue = X86_REG_VAR | reg;
@@ -5851,7 +5900,8 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
       *var_offset += size;
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type) ||
-             TypeIsVector(entry->pooled->type)) {
+             TypeIsVector(entry->pooled->type) ||
+             TypeUsesLongDoubleRepresentation(entry->pooled->type)) {
     if (is_arg) {
       if (size <= 8) {
         // Less than a pointer, passed in reg

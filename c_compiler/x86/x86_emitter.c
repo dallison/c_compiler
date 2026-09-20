@@ -1114,7 +1114,9 @@ static void PrintAttOperand(FILE* fp, TargetInstruction* op, char* buf,
     }
   } else if (((int)op->opcode == (int)X86_OP(literal))) {
     TargetLiteral* literal = (TargetLiteral*)op;
-    fprintf(fp, ".str.%d", literal->literal_id);
+    char litname[64];
+    LiteralAsmName(literal->literal_id, litname, sizeof(litname));
+    fprintf(fp, "%s", litname);
   } else if (((int)op->opcode == (int)X86_OP(x0))) {
     fprintf(fp, "$0");
   } else {
@@ -2907,7 +2909,9 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
         }
       } else if (((int)inst->operand[0]->opcode == (int)X86_OP(literal))) {
         TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
-        fprintf(fp, ".str.%d(%%rip), ", literal->literal_id);
+        char litname[64];
+        LiteralAsmName(literal->literal_id, litname, sizeof(litname));
+        fprintf(fp, "%s(%%rip), ", litname);
       } else if (((int)inst->opcode == (int)X86_OP(lea_rip)) &&
                  ((int)inst->operand[0]->opcode == (int)X86_OP(label))) {
         fprintf(fp, ".%s_label_%d(%%rip), ", func_name, inst->operand[0]->id);
@@ -3933,7 +3937,9 @@ static void PrintAttOperandI386(FILE* fp, TargetInstruction* op, char* buf,
     }
   } else if (((int)op->opcode == (int)X86_OP(literal))) {
     TargetLiteral* literal = (TargetLiteral*)op;
-    fprintf(fp, ".str.%d", literal->literal_id);
+    char litname[64];
+    LiteralAsmName(literal->literal_id, litname, sizeof(litname));
+    fprintf(fp, "%s", litname);
   } else if (((int)op->opcode == (int)X86_OP(x0))) {
     fprintf(fp, "$0");
   } else {
@@ -5748,7 +5754,7 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
           symname = TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
         } else {
           TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
-          snprintf(namebuf, sizeof(namebuf), ".str.%d", literal->literal_id);
+          LiteralAsmName(literal->literal_id, namebuf, sizeof(namebuf));
           symname = namebuf;
         }
         fprintf(fp, "\tcall .L%s_pic_%d\n", func_name, inst->id);
@@ -5790,7 +5796,9 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
         }
       } else if (((int)inst->operand[0]->opcode == (int)X86_OP(literal))) {
         TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
-        fprintf(fp, ".str.%d, ", literal->literal_id);
+        char litname[64];
+        LiteralAsmName(literal->literal_id, litname, sizeof(litname));
+        fprintf(fp, "%s, ", litname);
       } else if (((int)inst->opcode == (int)X86_OP(lea_rip)) &&
                  ((int)inst->operand[0]->opcode == (int)X86_OP(label))) {
         fprintf(fp, ".%s_label_%d, ", func_name, inst->operand[0]->id);

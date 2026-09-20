@@ -703,12 +703,14 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
         node->opcode == IR_OP(mova) || node->opcode == IR_OP(nota);
     // Struct/union-typed nodes denote an aggregate, which in this ABI is
     // referenced by address; size them as 64-bit pointers (e.g. forming
-    // &local to copy a struct argument by value).
+    // &local to copy a struct argument by value).  Distinct long double
+    // is the same: a 16-byte memory object passed by hidden pointer.
     if (address_operation || node->type->size == 8 ||
         TypeIsLong(node->type) || TypeIsLongLong(node->type) ||
         TypeIsPointerOrArray(node->type) || TypeIsFunction(node->type) ||
         TypeUsesFloat64Representation(node->type) ||
-        TypeIsStructOrUnion(node->type) || TypeIsVector(node->type)) {
+        TypeIsStructOrUnion(node->type) || TypeIsVector(node->type) ||
+        TypeUsesLongDoubleRepresentation(node->type)) {
       size = kSize64Bit;
     }
     SetInstructionSize(inst, size);
@@ -1768,7 +1770,7 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
       if (AARCH64_IS_REG_VAR(var_offset)) {
         // Variable is in a register.
         int var_num = var_offset & ~AARCH64_REG_VAR;
-        if (TypeIsFloatingPoint(node->type)) {
+        if (TypeUsesHardwareFloatRegister(node->type)) {
           return FloatingPointVariableRegister(g, var_num, var->symbol);
         } else {
           return IntVariableRegister(g, var_num, var->symbol);
@@ -1791,7 +1793,7 @@ static TargetInstruction* Materialize1(AARCH64Generator* g, IRNode* node) {
       // Argument is in a register.
       IRVariable* var = (IRVariable*)node;
       int var_num = var_offset & ~AARCH64_REG_VAR;
-      if (TypeIsFloatingPoint(node->type)) {
+      if (TypeUsesHardwareFloatRegister(node->type)) {
         return FloatingPointVariableRegister(g, var_num, var->symbol);
       } else {
         // For a by-reference struct the register already holds the pointer.
@@ -2372,7 +2374,7 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
   // A `tmp` merge slot (used for ?: / && / ||) carries no register class in its
   // opcode, so mark it floating-point when its value is, ensuring the allocator
   // routes the producing instruction's result through an FP register.
-  if (opcode == AARCH64_OP(tmp) && TypeIsFloatingPoint(node->type)) {
+  if (opcode == AARCH64_OP(tmp) && TypeUsesHardwareFloatRegister(node->type)) {
     inst->flags |= AARCH64_INST_FP;
   }
 
@@ -2382,7 +2384,7 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
   }
   TargetInstruction* dest = GetDestInstruction(g, node);
   if (dest != NULL && inst != NULL) {
-    AARCH64Opcode mov_opcode = TypeIsFloatingPoint(node->type)
+    AARCH64Opcode mov_opcode = TypeUsesHardwareFloatRegister(node->type)
                                    ? (node->type->size > 4 ? AARCH64_OP(fmv_d)
                                                            : AARCH64_OP(fmv_s))
                                    : AARCH64_OP(mov);
@@ -2426,7 +2428,7 @@ static TargetInstruction* LowerComparison(AARCH64Generator* g, IRNode* node) {
 #define CMP_SET(cond)                                                       \
   do {                                                                      \
     Emit(g, SetInstructionSize(                                             \
-                NewInstruction2(TypeIsFloatingPoint(op1->type)              \
+                NewInstruction2(TypeUsesHardwareFloatRegister(op1->type)              \
                                     ? AARCH64_OP(fcmp)                      \
                                     : AARCH64_OP(cmp),                      \
                                 Materialize(g, lhs), Materialize(g, rhs)),  \
@@ -2609,7 +2611,7 @@ static bool GetRegAndOffset(AARCH64Generator* g, IRNode* addr_node,
     if (AARCH64_IS_REG_VAR(var_offset)) {
       // Variable is in a register.
       int var_num = var_offset & ~AARCH64_REG_VAR;
-      if (TypeIsFloatingPoint(addr_node->type)) {
+      if (TypeUsesHardwareFloatRegister(addr_node->type)) {
         *addr = FloatingPointVariableRegister(g, var_num, var->symbol);
       } else {
         *addr = IntVariableRegister(g, var_num, var->symbol);
@@ -2633,7 +2635,7 @@ static bool GetRegAndOffset(AARCH64Generator* g, IRNode* addr_node,
     if (AARCH64_IS_REG_VAR(var_offset)) {
       // Argument is in a register.
       int var_num = var_offset & ~AARCH64_REG_VAR;
-      if (TypeIsFloatingPoint(addr_node->type)) {
+      if (TypeUsesHardwareFloatRegister(addr_node->type)) {
         *addr = FloatingPointVariableRegister(g, var_num, var->symbol);
       } else {
         *addr = IntVariableRegister(g, var_num, var->symbol);
@@ -2755,7 +2757,7 @@ static TargetInstruction* LowerLoad(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* result = Load(g, addr_node, opcode, size);
   TargetInstruction* dest = GetDestInstruction(g, node);
   if (dest != NULL) {
-    AARCH64Opcode mov_opcode = TypeIsFloatingPoint(node->type)
+    AARCH64Opcode mov_opcode = TypeUsesHardwareFloatRegister(node->type)
                                    ? (node->type->size > 4 ? AARCH64_OP(fmv_d)
                                                            : AARCH64_OP(fmv_s))
                                    : AARCH64_OP(mov);
@@ -2775,7 +2777,7 @@ static TargetInstruction* Store(AARCH64Generator* g, IRNode* addr_node, TargetIn
 
   // If we are not on the stack, move the src to the dest.
   if (!on_stack) {
-    AARCH64Opcode opcode = TypeIsFloatingPoint(addr_node->type) ? AARCH64_OP(fmov) : AARCH64_OP(mov);
+    AARCH64Opcode opcode = TypeUsesHardwareFloatRegister(addr_node->type) ? AARCH64_OP(fmov) : AARCH64_OP(mov);
     TargetInstruction* result = SetDestOrMove(g, src, addr, opcode);
     return result;
   }
@@ -3026,7 +3028,7 @@ static TargetInstruction* LowerStore(AARCH64Generator* g, IRNode* node) {
   }
   TargetInstruction* src = Materialize(g, src_node);
   TargetInstruction* stored = Store(g, addr_node, src, opcode, size);
-  if (node->outputs.length > 0 && !TypeIsFloatingPoint(addr_node->type)) {
+  if (node->outputs.length > 0 && !TypeUsesHardwareFloatRegister(addr_node->type)) {
     // `return value += amount;` reads the assignment's value, which the IR
     // spells as a use of the store.  A store to memory produces no value of its
     // own, so hand on what was stored.  Left as the store instruction this
@@ -3484,7 +3486,7 @@ static void PreserveInPlaceOldValue(AARCH64Generator* g, IRNode* node, int size)
     return;
   }
   AARCH64Opcode copy_op =
-      TypeIsFloatingPoint(node->type) ? AARCH64_OP(fmov) : AARCH64_OP(mov);
+      TypeUsesHardwareFloatRegister(node->type) ? AARCH64_OP(fmov) : AARCH64_OP(mov);
   TargetInstruction* saved =
       Emit(g, SetInstructionSize(NewInstruction1(copy_op, old), size));
   // SetLoweredNode is intentionally write-once; the load already has its
@@ -3548,7 +3550,7 @@ static TargetInstruction* LowerInc(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     amount = Materialize(g, amount_node);
     inc =  Emit(g, SetInstructionSize(NewInstruction2(AARCH64_OP(fadd), load, amount), size));
   } else  {
@@ -3614,7 +3616,7 @@ static TargetInstruction* LowerDec(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     amount = Materialize(g, amount_node);
     inc =  Emit(g, SetInstructionSize(NewInstruction2(AARCH64_OP(fsub), load, amount), size));
   } else  {
@@ -3756,7 +3758,7 @@ static TargetInstruction* PushArg(AARCH64Generator* g, IRNode* node,
                         GetIntConstant(g, NULL, kTargetType64Bit, offset)), 0));
   }
   AARCH64Opcode opcode = AARCH64_OP(str);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     opcode = AARCH64_OP(fstr);
   }
   return Emit(g, CopyInstructionSize(NewInstruction3(
@@ -3780,7 +3782,7 @@ static TargetInstruction* PopArg(AARCH64Generator* g, IRNode* node, size_t offse
                         GetIntConstant(g, NULL, kTargetType64Bit, fp_offset)), 0));
   }
   AARCH64Opcode opcode = AARCH64_OP(ldr);
-  if (TypeIsFloatingPoint(node->type)) {
+  if (TypeUsesHardwareFloatRegister(node->type)) {
     opcode = AARCH64_OP(fldr);
   }
   return Emit(g, CopyInstructionSize(NewInstruction2(
@@ -3911,12 +3913,13 @@ typedef struct {
 } ArgLocation;
 
 static bool TypeUsesAArch64FpArgReg(TypeRecord* type) {
-  return TypeIsFloatingPoint(type) ||
+  return TypeUsesHardwareFloatRegister(type) ||
          (TypeIsVector(type) && TypeUsesNativeVectorABI(type));
 }
 
 static bool TypePassedAsAArch64Aggregate(TypeRecord* type) {
   return TypeIsStructOrUnion(type) ||
+         TypeUsesLongDoubleRepresentation(type) ||
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type));
 }
 
@@ -4203,7 +4206,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
                             GetIntConstant(g, NULL, kTargetType32Bit, 0)),
                         0));
     }
-    AARCH64Opcode move_opcode = TypeIsFloatingPoint(arg_node->type)
+    AARCH64Opcode move_opcode = TypeUsesHardwareFloatRegister(arg_node->type)
                                     ? AARCH64_OP(fmov)
                                     : AARCH64_OP(mov);
     TargetInstruction* staged = Emit(g, NewInstruction(AARCH64_OP(tmp)));
@@ -4374,10 +4377,10 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       call_target = PinCallTargetToX9(g, staged_target);
     } else if (((int)addr->opcode == (int)AARCH64_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
-      opcode = TypeIsFloatingPoint(node->type) ? AARCH64_OP(bl) : AARCH64_OP(bl);
+      opcode = TypeUsesHardwareFloatRegister(node->type) ? AARCH64_OP(bl) : AARCH64_OP(bl);
     } else {
       // Calling through a register, rcall.
-      opcode = TypeIsFloatingPoint(node->type) ? AARCH64_OP(blr) : AARCH64_OP(blr);
+      opcode = TypeUsesHardwareFloatRegister(node->type) ? AARCH64_OP(blr) : AARCH64_OP(blr);
     }
     call =
         Emit(g, NewInstruction2(opcode, call_target, BuildArgList(g, &arg_locations)));
@@ -4405,7 +4408,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     if (dest != NULL) {
       // A floating-point result returns in d0 and must be copied with fmov;
       // using the integer mov here corrupts the value.
-      AARCH64Opcode mov_opcode = TypeIsFloatingPoint(node->type)
+      AARCH64Opcode mov_opcode = TypeUsesHardwareFloatRegister(node->type)
                                      ? AARCH64_OP(fmov)
                                      : AARCH64_OP(mov);
       call = SetDestOrMove(g, call, dest, mov_opcode);
@@ -4531,7 +4534,7 @@ static TargetInstruction* LowerBuiltinVaStart(AARCH64Generator* g, IRNode* node)
 //   result   = *addr
 static TargetInstruction* LowerBuiltinVaArg(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* ap = VaListAddress(g, node->inputs.value.p[0]);
-  bool is_fp = TypeIsFloatingPoint(node->type);
+  bool is_fp = TypeUsesHardwareFloatRegister(node->type);
   int top_field = is_fp ? AARCH64_VA_VR_TOP : AARCH64_VA_GR_TOP;
   int offs_field = is_fp ? AARCH64_VA_VR_OFFS : AARCH64_VA_GR_OFFS;
   int step = is_fp ? 16 : 8;  // VR slots are 16 bytes, GP slots 8.
@@ -4568,7 +4571,8 @@ static TargetInstruction* LowerBuiltinVaArg(AARCH64Generator* g, IRNode* node) {
              kSize64Bit));
   VaStore(g, final_stack, ap, AARCH64_VA_STACK, kSize64Bit);
 
-  if (TypeIsStructOrUnion(node->type)) {
+  if (TypeIsStructOrUnion(node->type) ||
+      TypeUsesLongDoubleRepresentation(node->type)) {
     // Aggregates are referenced by address.  A struct/union that fits in a
     // single 8-byte general slot is passed by value, so the save-area slot
     // *is* the struct: its address is the slot address.  A larger aggregate is
@@ -4580,7 +4584,7 @@ static TargetInstruction* LowerBuiltinVaArg(AARCH64Generator* g, IRNode* node) {
     TargetInstruction* ptr = Emit(
         g, SetInstructionSize(
                NewInstruction2(AARCH64_OP(ldr), addr,
-                               GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                               GetIntConstant(g, NULL, kTargetType64Bit, 0)),
                kSize64Bit));
     return SetLoweredNode(node, ptr);
   }
@@ -5461,7 +5465,7 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
       SetDebugStackLocation(entry, *var_offset);
       *var_offset += size;
     }
-  } else if (TypeIsFloatingPoint(entry->pooled->type)) {
+  } else if (TypeUsesHardwareFloatRegister(entry->pooled->type)) {
     if (UseRegisterForVariable(g, entry->pooled)) {
       int reg = g->num_fp_reg_vars++;
       entry->pooled->data.ivalue = AARCH64_REG_VAR | reg;

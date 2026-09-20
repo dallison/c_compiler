@@ -3670,6 +3670,11 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   compiler->long_long_size = compiler->target->long_long_size;
   compiler->float_size = compiler->target->float_size;
   compiler->double_size = compiler->target->double_size;
+  compiler->long_double_size = compiler->target->long_double_size;
+  compiler->long_double_format = compiler->target->long_double_format;
+  if (compiler->long_double_size == 0) {
+    compiler->long_double_size = compiler->double_size;
+  }
   compiler->wchar_size = compiler->target->wchar_size;
   compiler->code_preference = compiler->target->code_preference;
   compiler->call_return_fixed_reg = compiler->target->call_return_fixed_reg;

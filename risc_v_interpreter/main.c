@@ -34,6 +34,10 @@ int main(int argc, char * argv[]) {
         case 'r':
           trace_regs = true;
           break;
+        case 'i':
+          // Software interpreter only; accept -i (and --interpret) for
+          // parity with the AArch64 / x86_64 / ARM drivers.
+          break;
         default:
           fprintf(stderr, "unsupported flag -%d\n", argv[i][1]);
           exit(2);
@@ -46,7 +50,7 @@ int main(int argc, char * argv[]) {
     }
   }
   if (program_index < 0) {
-    fprintf(stderr, "usage: %s [-d] [-g] [-r] program [args...]\n", argv[0]);
+    fprintf(stderr, "usage: %s [-i] [-d] [-g] [-r] program [args...]\n", argv[0]);
     exit(2);
   }
   int program_argc = argc - program_index;

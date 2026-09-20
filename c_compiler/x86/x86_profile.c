@@ -168,8 +168,13 @@ const X86Profile kX86ProfileAMD64 = {
 
     .first_int_reg_var = 18,
     .last_int_reg_var = 27,
-    .first_leaf_int_reg_var = 28,
-    .last_leaf_int_reg_var = 31,
+    // Leaf functions used to pin variables to slots 28-31 (r8-r11).  r8 and r9
+    // are the 5th and 6th incoming SysV argument registers, so a leaf with
+    // five or six integer arguments would clobber a live parameter (Add128's
+    // result pointer was overwritten by the 4th argument, then stored through
+    // NULL).  Use the same callee-saved r12-r15 range as non-leaf functions.
+    .first_leaf_int_reg_var = 18,
+    .last_leaf_int_reg_var = 27,
     .first_fp_reg_var = 18,
     .last_fp_reg_var = 27,
     .first_leaf_fp_reg_var = 28,

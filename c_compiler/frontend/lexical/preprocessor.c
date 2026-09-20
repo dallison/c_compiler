@@ -215,6 +215,8 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
   int wchar_size = TargetSizeOr(compiler->wchar_size, 4);
   int float_size = TargetSizeOr(compiler->float_size, 4);
   int double_size = TargetSizeOr(compiler->double_size, 8);
+  int long_double_size = TargetSizeOr(compiler->long_double_size, double_size);
+  int long_double_format = compiler->long_double_format;
 
   PreprocessorDefineMacro(p, "__CHAR_BIT__", "8");
   DefineMaxMacro(p, "__SCHAR_MAX__", 1, false, "");
@@ -247,9 +249,50 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
   DefineSizeofMacro(p, "__SIZEOF_POINTER__", pointer_size);
   DefineSizeofMacro(p, "__SIZEOF_FLOAT__", float_size);
   DefineSizeofMacro(p, "__SIZEOF_DOUBLE__", double_size);
+  DefineSizeofMacro(p, "__SIZEOF_LONG_DOUBLE__", long_double_size);
   DefineSizeofMacro(p, "__SIZEOF_SIZE_T__", pointer_size);
   DefineSizeofMacro(p, "__SIZEOF_PTRDIFF_T__", pointer_size);
   DefineSizeofMacro(p, "__SIZEOF_WCHAR_T__", wchar_size);
+
+  {
+    String fmt = {0};
+    StringPrintf(&fmt, "%d", long_double_format);
+    PreprocessorDefineMacro(p, "__DAVECC_LDBL_FORMAT__", fmt.value);
+    StringDestruct(&fmt);
+  }
+  if (long_double_format == kLongDoubleFormatIEEEf128) {
+    PreprocessorDefineMacro(p, "__LDBL_MANT_DIG__", "113");
+    PreprocessorDefineMacro(p, "__LDBL_DIG__", "33");
+    PreprocessorDefineMacro(p, "__LDBL_MIN_EXP__", "(-16381)");
+    PreprocessorDefineMacro(p, "__LDBL_MIN_10_EXP__", "(-4931)");
+    PreprocessorDefineMacro(p, "__LDBL_MAX_EXP__", "16384");
+    PreprocessorDefineMacro(p, "__LDBL_MAX_10_EXP__", "4932");
+    PreprocessorDefineMacro(p, "__LDBL_DECIMAL_DIG__", "36");
+  } else if (long_double_format == kLongDoubleFormatIntel80) {
+    PreprocessorDefineMacro(p, "__LDBL_MANT_DIG__", "64");
+    PreprocessorDefineMacro(p, "__LDBL_DIG__", "18");
+    PreprocessorDefineMacro(p, "__LDBL_MIN_EXP__", "(-16381)");
+    PreprocessorDefineMacro(p, "__LDBL_MIN_10_EXP__", "(-4931)");
+    PreprocessorDefineMacro(p, "__LDBL_MAX_EXP__", "16384");
+    PreprocessorDefineMacro(p, "__LDBL_MAX_10_EXP__", "4932");
+    PreprocessorDefineMacro(p, "__LDBL_DECIMAL_DIG__", "21");
+  } else if (long_double_format == kLongDoubleFormatFloat32) {
+    PreprocessorDefineMacro(p, "__LDBL_MANT_DIG__", "24");
+    PreprocessorDefineMacro(p, "__LDBL_DIG__", "6");
+    PreprocessorDefineMacro(p, "__LDBL_MIN_EXP__", "(-125)");
+    PreprocessorDefineMacro(p, "__LDBL_MIN_10_EXP__", "(-37)");
+    PreprocessorDefineMacro(p, "__LDBL_MAX_EXP__", "128");
+    PreprocessorDefineMacro(p, "__LDBL_MAX_10_EXP__", "38");
+    PreprocessorDefineMacro(p, "__LDBL_DECIMAL_DIG__", "9");
+  } else {
+    PreprocessorDefineMacro(p, "__LDBL_MANT_DIG__", "53");
+    PreprocessorDefineMacro(p, "__LDBL_DIG__", "15");
+    PreprocessorDefineMacro(p, "__LDBL_MIN_EXP__", "(-1021)");
+    PreprocessorDefineMacro(p, "__LDBL_MIN_10_EXP__", "(-307)");
+    PreprocessorDefineMacro(p, "__LDBL_MAX_EXP__", "1024");
+    PreprocessorDefineMacro(p, "__LDBL_MAX_10_EXP__", "308");
+    PreprocessorDefineMacro(p, "__LDBL_DECIMAL_DIG__", "17");
+  }
 
   PreprocessorDefineMacro(p, "__ORDER_LITTLE_ENDIAN__", "1234");
   PreprocessorDefineMacro(p, "__ORDER_BIG_ENDIAN__", "4321");

@@ -889,6 +889,8 @@ bool TypeIsFloat64(TypeRecord* type);
 bool TypeIsLongDouble(TypeRecord* type);
 bool TypeUsesFloat32Representation(TypeRecord* type);
 bool TypeUsesFloat64Representation(TypeRecord* type);
+bool TypeUsesLongDoubleRepresentation(TypeRecord* type);
+bool TypeUsesHardwareFloatRegister(TypeRecord* type);
 bool TypeIsBool(TypeRecord* type);
 bool TypeIsVoid(TypeRecord* type);
 bool TypeIsNullPointer(TypeRecord* type);

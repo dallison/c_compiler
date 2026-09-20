@@ -353,9 +353,63 @@ STATIC char* PrintFixedPointGeneral(struct FloatPrinter* printer, int precision,
 }
 
 
+STATIC void FixLongDouble(struct FloatPrinter* printer, long double f) {
+#if defined(__DAVECC_LDBL_FORMAT__) && __DAVECC_LDBL_FORMAT__ >= 2
+  uint64_t words[2];
+  memcpy(words, &f, sizeof(words));
+  uint64_t lo = words[0];
+  uint64_t hi = words[1];
+  const int bias = 16383;
+#if __DAVECC_LDBL_FORMAT__ == 2
+  printer->sign = (uint8_t)((hi >> 15) & 1);
+  printer->exp = (Exponent)(hi & 0x7fff);
+  printer->mantissa = lo;
+  if (printer->exp == 0x7fff) {
+    printer->naninf = (lo & 0x7fffffffffffffffULL) ? 1 : 2;
+    return;
+  }
+#else
+  printer->sign = (uint8_t)(hi >> 63);
+  printer->exp = (Exponent)((hi >> 48) & 0x7fff);
+  printer->mantissa = ((hi & 0x0000ffffffffffffULL) << 15) | (lo >> 49);
+  if (printer->exp != 0) {
+    printer->mantissa |= 1ULL << 63;
+  }
+  if (printer->exp == 0x7fff) {
+    printer->naninf = ((hi & 0x0000ffffffffffffULL) | lo) ? 1 : 2;
+    return;
+  }
+#endif
+  printer->naninf = 0;
+  if (printer->exp == 0) {
+    return;
+  }
+  printer->fx[FIXED_SIZE_HALF - 1] = printer->mantissa;
+  if (printer->exp < bias) {
+    while (printer->exp < bias - 1) {
+      __RShift(printer->fx);
+      ++printer->exp;
+    }
+  } else {
+    while (printer->exp >= bias) {
+      __LShift(printer->fx);
+      --printer->exp;
+    }
+  }
+#else
+  FixFloat(printer, (double)f);
+#endif
+}
+
 char* __PrintFloatFormat(double f, int precision, char* buf, size_t size) {
   struct FloatPrinter printer = {0};
   FixFloat(&printer, f);
+  return PrintFixedPoint(&printer, precision, buf, size);
+}
+
+char* __PrintFloatFormatL(long double f, int precision, char* buf, size_t size) {
+  struct FloatPrinter printer = {0};
+  FixLongDouble(&printer, f);
   return PrintFixedPoint(&printer, precision, buf, size);
 }
 
@@ -368,9 +422,24 @@ char* __PrintScientificFormat(double f, int precision, char* buf, size_t size) {
   return PrintFixedPointScientific(&printer, precision, exp, buf, size);
 }
 
+char* __PrintScientificFormatL(long double f, int precision, char* buf,
+                               size_t size) {
+  struct FloatPrinter printer = {0};
+  FixLongDouble(&printer, f);
+  int exp = CalculateExponent(printer.fx);
+  return PrintFixedPointScientific(&printer, precision, exp, buf, size);
+}
+
 // %g format.
 char* __PrintGeneralFormat(double f,  int precision, char* buf, size_t size) {
   struct FloatPrinter printer = {0};
   FixFloat(&printer, f);
+  return PrintFixedPointGeneral(&printer, precision, buf, size);
+}
+
+char* __PrintGeneralFormatL(long double f, int precision, char* buf,
+                            size_t size) {
+  struct FloatPrinter printer = {0};
+  FixLongDouble(&printer, f);
   return PrintFixedPointGeneral(&printer, precision, buf, size);
 }

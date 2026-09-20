@@ -33,14 +33,26 @@ typedef double double_t;
 #define NAN (0.0F / 0.0F)
 
 int __davecc_fpclassify(double value);
+int __davecc_fpclassifyl(long double value);
 int __davecc_signbit(double value);
+int __davecc_signbitl(long double value);
 
-#define fpclassify(value) __davecc_fpclassify((double)(value))
+#define fpclassify(value)                                              \
+  ((sizeof(value) == sizeof(long double) &&                            \
+    sizeof(long double) > sizeof(double))                              \
+       ? __davecc_fpclassifyl((value))                                 \
+       : __davecc_fpclassify((double)(value)))
 #define isfinite(value) (fpclassify(value) > FP_INFINITE)
 #define isinf(value) (fpclassify(value) == FP_INFINITE)
 #define isnan(value) (fpclassify(value) == FP_NAN)
 #define isnormal(value) (fpclassify(value) == FP_NORMAL)
-#define signbit(value) __davecc_signbit((double)(value))
+#define signbit(value)                                                 \
+  ((sizeof(value) == sizeof(long double) &&                            \
+    sizeof(long double) > sizeof(double))                              \
+       ? __davecc_signbitl((value))                                    \
+       : __davecc_signbit((double)(value)))
+#define FP_ILOGB0 ((int)(((unsigned)1) << (sizeof(int) * 8 - 1)))
+#define FP_ILOGBNAN ((int)((((unsigned)1) << (sizeof(int) * 8 - 1)) - 1))
 
 // Generally useful contants.
 #define M_E        2.7182818284590452354   // e

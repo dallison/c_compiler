@@ -12,6 +12,8 @@
 #include "compiler.h"
 #include "concepts.h"
 #include "constexpr.h"
+#include "constexpr_pcode.h"
+#include "fp_extended.h"
 #include "reflection.h"
 #include "syntax.h"
 #include "type.h"
@@ -183,6 +185,49 @@ static bool BinaryOperandsUseFloatingPoint(BinaryASTNode* binary_node) {
           TypeIsFloatingPoint(binary_node->left->type)) ||
          (binary_node->right != NULL &&
           TypeIsFloatingPoint(binary_node->right->type));
+}
+
+static int LongDoubleEvalFormat(void) {
+  return compiler != NULL ? compiler->long_double_format
+                          : kFPExtFormatIEEEf128;
+}
+
+static bool EvaluateLongDoubleBits(ConstEvalContext* ctx, ASTNode* node,
+                                   FPBits* bits);
+
+static bool BinaryOperandsUseLongDouble(BinaryASTNode* binary_node) {
+  return (binary_node->left != NULL &&
+          TypeUsesLongDoubleRepresentation(binary_node->left->type)) ||
+         (binary_node->right != NULL &&
+          TypeUsesLongDoubleRepresentation(binary_node->right->type));
+}
+
+static bool CompareLongDoubleOperands(ConstEvalContext* ctx,
+                                      BinaryASTNode* binary_node, int op,
+                                      int64_t* result) {
+  FPBits left;
+  FPBits right;
+  if (!EvaluateLongDoubleBits(ctx, binary_node->left, &left) ||
+      !EvaluateLongDoubleBits(ctx, binary_node->right, &right)) {
+    return false;
+  }
+  int cmp = FPCompare(left, right, LongDoubleEvalFormat());
+  if (op == AST_OP(equal)) {
+    *result = cmp == 0;
+  } else if (op == AST_OP(noteq)) {
+    *result = cmp != 0;
+  } else if (op == AST_OP(less)) {
+    *result = cmp < 0;
+  } else if (op == AST_OP(lesseq)) {
+    *result = cmp <= 0;
+  } else if (op == AST_OP(greater)) {
+    *result = cmp > 0;
+  } else if (op == AST_OP(greatereq)) {
+    *result = cmp >= 0;
+  } else {
+    return false;
+  }
+  return true;
 }
 
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
@@ -518,6 +563,10 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       if (ConstexprEvaluatePointerComparison(ctx, node, result)) {
         return true;
       }
+      if (BinaryOperandsUseLongDouble(binary_node) &&
+          CompareLongDoubleOperands(ctx, binary_node, node->op, result)) {
+        return true;
+      }
       if (BinaryOperandsUseFloatingPoint(binary_node)) {
         double fleft;
         double fright;
@@ -589,6 +638,10 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
         }
       }
       if (ConstexprEvaluatePointerComparison(ctx, node, result)) {
+        return true;
+      }
+      if (BinaryOperandsUseLongDouble(binary_node) &&
+          CompareLongDoubleOperands(ctx, binary_node, node->op, result)) {
         return true;
       }
       if (BinaryOperandsUseFloatingPoint(binary_node)) {
@@ -924,6 +977,113 @@ bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
   return false;
 }
 
+static bool EvaluateLongDoubleBits(ConstEvalContext* ctx, ASTNode* node,
+                                   FPBits* bits) {
+  if (node == NULL || bits == NULL) {
+    return false;
+  }
+  if (!ConstEvalStep(ctx)) {
+    return false;
+  }
+  int format = LongDoubleEvalFormat();
+  if (node->op == AST_OP(fnumber)) {
+    *bits = FPBitsFromF64(((ConstantASTNode*)node)->value.fvalue, format);
+    return true;
+  }
+  if (node->op == AST_OP(call)) {
+    double value;
+    if (!ConstexprEvaluateCallAsFloating(ctx, node, &value)) {
+      return false;
+    }
+    *bits = FPBitsFromF64(value, format);
+    return true;
+  }
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol == NULL || !id->symbol->flags.value_set) {
+      return false;
+    }
+    *bits = FPBitsFromF64(id->symbol->value.fvalue, format);
+    return true;
+  }
+  if (node->op == AST_OP(plus) || node->op == AST_OP(minus) ||
+      node->op == AST_OP(mult) || node->op == AST_OP(div)) {
+    BinaryASTNode* binary = (BinaryASTNode*)node;
+    FPBits left;
+    FPBits right;
+    if (!EvaluateLongDoubleBits(ctx, binary->left, &left) ||
+        !EvaluateLongDoubleBits(ctx, binary->right, &right)) {
+      return false;
+    }
+    if (node->op == AST_OP(plus)) {
+      *bits = FPAdd(left, right, format);
+    } else if (node->op == AST_OP(minus)) {
+      *bits = FPSub(left, right, format);
+    } else if (node->op == AST_OP(mult)) {
+      *bits = FPMul(left, right, format);
+    } else {
+      *bits = FPDiv(left, right, format);
+    }
+    return true;
+  }
+  if (node->op == AST_OP(uminus) || node->op == AST_OP(uplus)) {
+    UnaryASTNode* unary = (UnaryASTNode*)node;
+    if (!EvaluateLongDoubleBits(ctx, unary->sub, bits)) {
+      return false;
+    }
+    if (node->op == AST_OP(uminus)) {
+      *bits = FPNeg(*bits, format);
+    }
+    return true;
+  }
+  if (node->op == AST_OP(cast)) {
+    CastASTNode* cast = (CastASTNode*)node;
+    ASTNode* expr = cast->expr;
+    if (expr != NULL && TypeUsesLongDoubleRepresentation(expr->type)) {
+      return EvaluateLongDoubleBits(ctx, expr, bits);
+    }
+    if (expr != NULL && TypeIsIntegral(expr->type)) {
+      int64_t ivalue = 0;
+      if (!EvaluateIntegerExpressionInContext(ctx, expr, &ivalue)) {
+        return false;
+      }
+      *bits = FPBitsFromI64(ivalue, format);
+      return true;
+    }
+    double value = 0;
+    if (!EvaluateFloatingPointExpressionInContext(ctx, expr, &value)) {
+      return false;
+    }
+    *bits = FPBitsFromF64(value, format);
+    return true;
+  }
+  if (node->op == AST_OP(expr_init)) {
+    return EvaluateLongDoubleBits(
+        ctx, ((ExpressionInitializerASTNode*)node)->expr, bits);
+  }
+  if (node->op == AST_OP(i2ld) || node->op == AST_OP(ll2ld) ||
+      node->op == AST_OP(l2ld) || node->op == AST_OP(s2ld) ||
+      node->op == AST_OP(b2ld)) {
+    int64_t ivalue = 0;
+    if (!EvaluateIntegerExpressionInContext(ctx, ((UnaryASTNode*)node)->sub,
+                                            &ivalue)) {
+      return false;
+    }
+    *bits = FPBitsFromI64(ivalue, format);
+    return true;
+  }
+  if (node->op == AST_OP(f2ld) || node->op == AST_OP(d2ld)) {
+    double value = 0;
+    if (!EvaluateFloatingPointExpressionInContext(
+            ctx, ((UnaryASTNode*)node)->sub, &value)) {
+      return false;
+    }
+    *bits = FPBitsFromF64(value, format);
+    return true;
+  }
+  return false;
+}
+
 bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* node, double* result) {
   if (node == NULL) {
     return false;
@@ -939,6 +1099,13 @@ bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* no
     return false;
   }
   if (!TypeIsIntegral(node->type) && !TypeIsFloatingPoint(node->type)) {
+    return false;
+  }
+  if (TypeUsesLongDoubleRepresentation(node->type) &&
+      node->op != AST_OP(fnumber)) {
+    // Do not fold distinct long double through host double.  Semantic
+    // analysis would replace 1.0L + tiny with 1.0 and destroy the extra
+    // bits that constexpr p-code is supposed to keep.
     return false;
   }
   ConstantASTNode* const_node = (ConstantASTNode*)node;

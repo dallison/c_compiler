@@ -16,6 +16,8 @@ def linux_libc_archive(
         srcs = libc_srcs + libc_cxx_srcs + [":libc_headers"] + [
             syscall_source,
             clone_source,
+            "c_compiler/support/fp_extended.c",
+            "c_compiler/support/fp_extended.h",
             "libc/linux_syscall.c",
             "libc/linux_syscall_result.c",
             "libc/linux_fs.c",
@@ -110,6 +112,8 @@ def linux_dynamic_runtime(
         srcs = depset(direct =
             dso_sources + crt_sources + libc_cxx_srcs +
             [":libc_headers", syscall_source, clone_source, startup_source,
+             "c_compiler/support/fp_extended.c",
+             "c_compiler/support/fp_extended.h",
              "libc/linux_syscall.c", "libc/linux_syscall_result.c",
              "libc/linux_fs.c", ":davecc", ":archivist"] +
             support_sources

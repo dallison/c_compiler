@@ -71,6 +71,8 @@ CompilerTarget* NewPCodeTarget() {
   target->long_long_size = 8;
   target->float_size = 4;
   target->double_size = 8;
+  target->long_double_size = 16;
+  target->long_double_format = kLongDoubleFormatIEEEf128;
   target->wchar_size = 4;
   target->code_preference = kCodeForSpeed;
   target->call_return_fixed_reg = true;

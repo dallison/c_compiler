@@ -154,7 +154,7 @@ struct __format_arg {
   char char_value;
   long long signed_value;
   unsigned long long unsigned_value;
-  double floating_value;
+  long double floating_value;
   const char* string_data;
   size_t string_size;
 
@@ -247,7 +247,7 @@ void __unsigned_integer_to(unsigned long long value, char type, bool alternate,
 void __signed_integer_to(long long value, const __spec& spec, string* output);
 void __unsigned_integer_with_sign_to(unsigned long long value,
                                      const __spec& spec, string* output);
-void __floating_to(double value, const __spec& spec, string* output);
+void __floating_to(long double value, const __spec& spec, string* output);
 void __format_chrono_duration(string_view count, long double total_seconds,
                               intmax_t period_num, intmax_t period_den,
                               const char* specification_data,
@@ -260,7 +260,7 @@ string __unsigned_integer(unsigned long long value, char type, bool alternate);
 string __signed_integer(long long value, const __spec& spec);
 string __unsigned_integer_with_sign(unsigned long long value,
                                     const __spec& spec);
-string __floating(double value, const __spec& spec);
+string __floating(long double value, const __spec& spec);
 
 template <class T>
 inline bool __integer_argument(const void* pointer, long long* output) {
@@ -315,7 +315,7 @@ inline void __format_builtin(const T& value, const __spec& spec,
                                     spec, &converted);
     numeric = true;
   } else if constexpr (is_floating_point<U>::value) {
-    __floating_to(static_cast<double>(value), spec, &converted);
+    __floating_to(static_cast<long double>(value), spec, &converted);
     numeric = true;
   } else if constexpr (is_same<U, string>::value) {
     if (spec.type != 0 && spec.type != 's' && spec.type != '?') {
@@ -695,7 +695,7 @@ class __format_arg_store {
       slot->unsigned_value = static_cast<unsigned long long>(value);
     } else if constexpr (is_floating_point<U>::value) {
       slot->kind = __format_arg_kind::floating;
-      slot->floating_value = static_cast<double>(value);
+      slot->floating_value = static_cast<long double>(value);
     } else if constexpr (is_same<U, string>::value ||
                          is_same<U, string_view>::value) {
       slot->kind = __format_arg_kind::string;

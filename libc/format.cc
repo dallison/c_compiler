@@ -1,5 +1,12 @@
 #include <format>
 
+extern "C" char* __PrintFloatFormat(double, int, char*, size_t);
+extern "C" char* __PrintScientificFormat(double, int, char*, size_t);
+extern "C" char* __PrintGeneralFormat(double, int, char*, size_t);
+extern "C" char* __PrintFloatFormatL(long double, int, char*, size_t);
+extern "C" char* __PrintScientificFormatL(long double, int, char*, size_t);
+extern "C" char* __PrintGeneralFormatL(long double, int, char*, size_t);
+
 namespace std {
 namespace __format_detail {
 
@@ -471,7 +478,7 @@ static string __unsigned_integer_with_sign_impl(unsigned long long value,
   return result;
 }
 
-static string __floating_impl(double value, const __spec& spec) {
+static string __floating_impl(long double value, const __spec& spec) {
   char type = spec.type == 0 ? 'g' : spec.type;
   bool upper = type >= 'A' && type <= 'Z';
   char lower = upper ? static_cast<char>(type + ('a' - 'A')) : type;
@@ -479,15 +486,15 @@ static string __floating_impl(double value, const __spec& spec) {
     __fail("invalid floating-point presentation type");
   }
   int precision = spec.precision >= 0 ? spec.precision : 6;
-  char buffer[96];
+  char buffer[160];
   char* converted = lower == 'f'
-                        ? __PrintFloatFormat(value, precision, buffer,
-                                             sizeof(buffer))
+                        ? __PrintFloatFormatL(value, precision, buffer,
+                                              sizeof(buffer))
                         : lower == 'e'
-                              ? __PrintScientificFormat(value, precision, buffer,
-                                                        sizeof(buffer))
-                              : __PrintGeneralFormat(value, precision, buffer,
-                                                     sizeof(buffer));
+                              ? __PrintScientificFormatL(value, precision,
+                                                         buffer, sizeof(buffer))
+                              : __PrintGeneralFormatL(value, precision, buffer,
+                                                      sizeof(buffer));
   string result(converted);
   if (spec.sign == '+' && (result.empty() || result[0] != '-')) {
     string prefixed(1, '+');
@@ -544,7 +551,7 @@ void __unsigned_integer_with_sign_to(unsigned long long value,
   *output = __unsigned_integer_with_sign_impl(value, spec);
 }
 
-void __floating_to(double value, const __spec& spec, string* output) {
+void __floating_to(long double value, const __spec& spec, string* output) {
   *output = __floating_impl(value, spec);
 }
 
@@ -567,7 +574,7 @@ string __unsigned_integer_with_sign(unsigned long long value,
   return output;
 }
 
-string __floating(double value, const __spec& spec) {
+string __floating(long double value, const __spec& spec) {
   string output;
   __floating_to(value, spec, &output);
   return output;

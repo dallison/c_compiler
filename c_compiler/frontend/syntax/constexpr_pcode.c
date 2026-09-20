@@ -12,6 +12,7 @@
 #include "codegen.h"
 #include "compiler.h"
 #include "errors.h"
+#include "fp_extended.h"
 #include "member_pointer.h"
 #include "p_code_object.h"
 #include "p_code_reg_alloc.h"
@@ -324,6 +325,18 @@ enum {
   kConstexprPCodeEscapeExceptionPtrRethrow = 122,
   kConstexprPCodeEscapeUncaughtExceptions = 123,
   kConstexprPCodeEscapeStartLifetime = 124,
+  kConstexprPCodeEscapeLdAdd = 125,
+  kConstexprPCodeEscapeLdSub = 126,
+  kConstexprPCodeEscapeLdMul = 127,
+  kConstexprPCodeEscapeLdDiv = 128,
+  kConstexprPCodeEscapeLdNeg = 129,
+  kConstexprPCodeEscapeLdCmp = 130,
+  kConstexprPCodeEscapeLdFromF32 = 131,
+  kConstexprPCodeEscapeLdFromF64 = 132,
+  kConstexprPCodeEscapeLdFromI64 = 133,
+  kConstexprPCodeEscapeLdToF32 = 134,
+  kConstexprPCodeEscapeLdToF64 = 135,
+  kConstexprPCodeEscapeLdToI64 = 136,
 };
 
 static const uint32_t constexpr_pcode_malloc_stub[] = {
@@ -441,6 +454,55 @@ static const uint32_t constexpr_pcode_uncaught_exceptions_stub[] = {
 
 static const uint32_t constexpr_pcode_memcpy_stub[] = {
     (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeMemcpy,
+    (PCODE_OP(ret) << 24),
+};
+
+static const uint32_t constexpr_pcode_ld_add_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdAdd,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_sub_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdSub,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_mul_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdMul,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_div_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdDiv,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_neg_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdNeg,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_cmp_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdCmp,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_from_f32_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdFromF32,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_from_f64_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdFromF64,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_from_i64_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdFromI64,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_to_f32_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdToF32,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_to_f64_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdToF64,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_to_i64_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdToI64,
     (PCODE_OP(ret) << 24),
 };
 
@@ -993,6 +1055,18 @@ static const ConstexprPCodeRuntimeSymbol constexpr_pcode_runtime_symbols[] = {
      constexpr_pcode_exception_ptr_retain_stub},
     {"__davecc_exception_ptr_rethrow",
      constexpr_pcode_exception_ptr_rethrow_stub},
+    {"__davecc_ld_add", constexpr_pcode_ld_add_stub},
+    {"__davecc_ld_cmp", constexpr_pcode_ld_cmp_stub},
+    {"__davecc_ld_div", constexpr_pcode_ld_div_stub},
+    {"__davecc_ld_from_f32", constexpr_pcode_ld_from_f32_stub},
+    {"__davecc_ld_from_f64", constexpr_pcode_ld_from_f64_stub},
+    {"__davecc_ld_from_i64", constexpr_pcode_ld_from_i64_stub},
+    {"__davecc_ld_mul", constexpr_pcode_ld_mul_stub},
+    {"__davecc_ld_neg", constexpr_pcode_ld_neg_stub},
+    {"__davecc_ld_sub", constexpr_pcode_ld_sub_stub},
+    {"__davecc_ld_to_f32", constexpr_pcode_ld_to_f32_stub},
+    {"__davecc_ld_to_f64", constexpr_pcode_ld_to_f64_stub},
+    {"__davecc_ld_to_i64", constexpr_pcode_ld_to_i64_stub},
     {"__davecc_resume", constexpr_pcode_resume_stub},
     {"__davecc_start_lifetime", constexpr_pcode_start_lifetime_stub},
     {"__davecc_throw", constexpr_pcode_throw_stub},
@@ -1554,6 +1628,12 @@ static bool StoreConstexprScalarBytes(TypeRecord* type, ConstexprValue* value,
       memcpy(dest, &fvalue, sizeof(fvalue));
       return true;
     }
+    if (TypeUsesLongDoubleRepresentation(type)) {
+      double dvalue = value->is_floating ? value->fvalue : (double)value->ivalue;
+      FPBits bits = FPBitsFromF64(dvalue, compiler->long_double_format);
+      memcpy(dest, &bits, sizeof(bits));
+      return true;
+    }
     double dvalue = value->is_floating ? value->fvalue : (double)value->ivalue;
     memcpy(dest, &dvalue, sizeof(dvalue));
     return true;
@@ -1646,24 +1726,47 @@ static ConstexprPCodeStaticData* FindConstexprPCodeStaticData(
 }
 
 static bool RegisterConstexprPCodeLiteral(const char* name) {
-  if (name == NULL || strncmp(name, ".str.", 5) != 0) {
+  if (name == NULL) {
+    return false;
+  }
+  const char* id_text = NULL;
+  if (strncmp(name, ".str.", 5) == 0) {
+    id_text = name + 5;
+  } else if (strncmp(name, ".lit.", 5) == 0) {
+    id_text = name + 5;
+  } else {
     return false;
   }
   char* end = NULL;
-  long id = strtol(name + 5, &end, 10);
-  if (end == name + 5 || *end != '\0' || id < 0) {
+  long id = strtol(id_text, &end, 10);
+  if (end == id_text || *end != '\0' || id < 0) {
     return false;
   }
-  StringLiteral* literal = CompilerFindStringLiteral((int)id);
+  Literal* literal = CompilerFindLiteral((int)id);
   if (literal == NULL) {
     return false;
   }
-  size_t size = literal->value.length + (size_t)literal->element_size;
+  size_t size = 0;
+  size_t copy = 0;
+  const void* bytes = NULL;
+  if (literal->type == kLiteralBuffer) {
+    BufferLiteral* buffer = (BufferLiteral*)literal;
+    size = buffer->value.length;
+    copy = buffer->value.length;
+    bytes = buffer->value.value;
+  } else {
+    StringLiteral* string = (StringLiteral*)literal;
+    size = string->value.length + (size_t)string->element_size;
+    copy = string->value.length;
+    bytes = string->value.value;
+  }
   unsigned char* memory = calloc(1, size == 0 ? 1 : size);
   if (memory == NULL) {
     return false;
   }
-  memcpy(memory, literal->value.value, literal->value.length);
+  if (bytes != NULL && copy != 0) {
+    memcpy(memory, bytes, copy);
+  }
   if (!pcode_static_data_initialized) {
     VectorInit(&pcode_static_data);
     pcode_static_data_initialized = true;
@@ -1761,6 +1864,14 @@ static bool LoadConstexprScalarBytes(TypeRecord* type, unsigned char* src,
       value->is_floating = true;
       value->fvalue = fvalue;
       value->ivalue = (int64_t)fvalue;
+      return true;
+    }
+    if (TypeUsesLongDoubleRepresentation(type)) {
+      FPBits bits;
+      memcpy(&bits, src, sizeof(bits));
+      value->is_floating = true;
+      value->fvalue = FPBitsToF64(bits, compiler->long_double_format);
+      value->ivalue = (int64_t)value->fvalue;
       return true;
     }
     double dvalue;
@@ -2261,6 +2372,16 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
     }
     return true;
   }
+  if (TypeUsesLongDoubleRepresentation(type)) {
+    double value;
+    if (!EvaluateFloatingPointExpressionInContext(ctx, arg, &value)) {
+      *reason = "could not evaluate long double constexpr argument";
+      return false;
+    }
+    FPBits bits = FPBitsFromF64(value, compiler->long_double_format);
+    memcpy(*sp, &bits, sizeof(bits));
+    return true;
+  }
   if (TypeIsFloatingPoint(type)) {
     double value;
     if (!EvaluateFloatingPointExpressionInContext(ctx, arg, &value)) {
@@ -2552,6 +2673,42 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
           vm, (void*)constexpr_pcode_memcpy_stub,
           sizeof(constexpr_pcode_memcpy_stub), false) ||
       !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_add_stub,
+          sizeof(constexpr_pcode_ld_add_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_sub_stub,
+          sizeof(constexpr_pcode_ld_sub_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_mul_stub,
+          sizeof(constexpr_pcode_ld_mul_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_div_stub,
+          sizeof(constexpr_pcode_ld_div_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_neg_stub,
+          sizeof(constexpr_pcode_ld_neg_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_cmp_stub,
+          sizeof(constexpr_pcode_ld_cmp_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_from_f32_stub,
+          sizeof(constexpr_pcode_ld_from_f32_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_from_f64_stub,
+          sizeof(constexpr_pcode_ld_from_f64_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_from_i64_stub,
+          sizeof(constexpr_pcode_ld_from_i64_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_to_f32_stub,
+          sizeof(constexpr_pcode_ld_to_f32_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_to_f64_stub,
+          sizeof(constexpr_pcode_ld_to_f64_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_to_i64_stub,
+          sizeof(constexpr_pcode_ld_to_i64_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
           vm, (void*)constexpr_pcode_invalid_operation_stub,
           sizeof(constexpr_pcode_invalid_operation_stub), false)) {
     *reason = "could not enable checked constexpr pcode memory";
@@ -2629,15 +2786,17 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
   Vector allocations;
   VectorInit(&allocations);
   unsigned char* struct_return = NULL;
-  if (object_result != NULL) {
-    if (func->next == NULL || !TypeIsStructOrUnion(func->next)) {
-      *reason = "constexpr pcode object result requires aggregate return type";
-      VectorDestruct(&allocations);
-      ConstexprPCodeRuntimeDestruct(&runtime);
-      PCodeVMDestruct(&vm);
-      ConstexprPCodeImageDestruct(&image);
-      return false;
-    }
+  bool hidden_return =
+      func->next != NULL && TypeReturnedThroughHiddenPointer(func->next);
+  if (object_result != NULL && !hidden_return) {
+    *reason = "constexpr pcode object result requires aggregate return type";
+    VectorDestruct(&allocations);
+    ConstexprPCodeRuntimeDestruct(&runtime);
+    PCodeVMDestruct(&vm);
+    ConstexprPCodeImageDestruct(&image);
+    return false;
+  }
+  if (hidden_return) {
     struct_return =
         calloc(1, ConstexprPCodeHostBufferSize(func->next->size));
     if (struct_return == NULL) {
@@ -2690,9 +2849,16 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
       *int_result = vm.iregs[PCODE_INT_RETURN_REG];
     }
     if (double_result != NULL) {
-      *double_result = TypeUsesFloat32Representation(func->next)
-                           ? (double)vm.fregs[PCODE_FLOAT_RETURN_REG]
-                           : vm.dregs[PCODE_DOUBLE_RETURN_REG];
+      if (TypeUsesLongDoubleRepresentation(func->next) &&
+          struct_return != NULL) {
+        FPBits bits;
+        memcpy(&bits, struct_return, sizeof(bits));
+        *double_result = FPBitsToF64(bits, compiler->long_double_format);
+      } else {
+        *double_result = TypeUsesFloat32Representation(func->next)
+                             ? (double)vm.fregs[PCODE_FLOAT_RETURN_REG]
+                             : vm.dregs[PCODE_DOUBLE_RETURN_REG];
+      }
     }
     if (address_result != NULL) {
       uint64_t address = (uint64_t)vm.iregs[PCODE_INT_RETURN_REG];
@@ -4077,6 +4243,179 @@ static PCodeVMStatus ConstexprPCodeEscapeMemcpy(
   return kPCodeVMStatusRunning;
 }
 
+static int ConstexprPCodeLongDoubleFormat(void) {
+  return compiler != NULL ? compiler->long_double_format
+                          : kFPExtFormatIEEEf128;
+}
+
+static bool ConstexprPCodeMarkValid(PCodeVM* vm, uint64_t address,
+                                    size_t size) {
+  for (size_t i = vm->memory_region_count; i > 0; --i) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i - 1];
+    if (region->states == NULL) {
+      continue;
+    }
+    if (!ConstexprPCodeRegionContains(region->start, region->size, address,
+                                      size)) {
+      continue;
+    }
+    memset(region->states + (size_t)(address - region->start),
+           kValueStateValid, size);
+    return true;
+  }
+  return true;
+}
+
+static bool ConstexprPCodeReadFPBits(PCodeVM* vm, uint64_t raw, FPBits* bits) {
+  uint64_t address = 0;
+  if (!ConstexprPCodeNormalizeAddress(vm, raw, sizeof(*bits), false,
+                                      &address)) {
+    return false;
+  }
+  memcpy(bits, (void*)(uintptr_t)address, sizeof(*bits));
+  return true;
+}
+
+static bool ConstexprPCodeWriteFPBits(PCodeVM* vm, uint64_t raw, FPBits bits) {
+  uint64_t address = 0;
+  if (!ConstexprPCodeNormalizeAddress(vm, raw, sizeof(bits), true, &address)) {
+    return false;
+  }
+  memcpy((void*)(uintptr_t)address, &bits, sizeof(bits));
+  return ConstexprPCodeMarkValid(vm, address, sizeof(bits));
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdBinary(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime,
+    FPBits (*op)(FPBits, FPBits, int)) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t dest = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint64_t left_raw = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint64_t right_raw = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  FPBits left;
+  FPBits right;
+  if (!ConstexprPCodeReadFPBits(vm, left_raw, &left) ||
+      !ConstexprPCodeReadFPBits(vm, right_raw, &right)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  if (!ConstexprPCodeWriteFPBits(
+          vm, dest, op(left, right, ConstexprPCodeLongDoubleFormat()))) {
+    return kPCodeVMStatusInvalidWrite;
+  }
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdNeg(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t dest = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint64_t src = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  FPBits value;
+  if (!ConstexprPCodeReadFPBits(vm, src, &value)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  if (!ConstexprPCodeWriteFPBits(
+          vm, dest, FPNeg(value, ConstexprPCodeLongDoubleFormat()))) {
+    return kPCodeVMStatusInvalidWrite;
+  }
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdCmp(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t left_raw = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint64_t right_raw = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  FPBits left;
+  FPBits right;
+  if (!ConstexprPCodeReadFPBits(vm, left_raw, &left) ||
+      !ConstexprPCodeReadFPBits(vm, right_raw, &right)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  vm->iregs[PCODE_INT_RETURN_REG] =
+      FPCompare(left, right, ConstexprPCodeLongDoubleFormat());
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdFromF32(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t dest = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint32_t bits = (uint32_t)ConstexprPCodeNextArgument(&args, sizeof(float));
+  float value;
+  memcpy(&value, &bits, sizeof(value));
+  if (!ConstexprPCodeWriteFPBits(
+          vm, dest, FPBitsFromF32(value, ConstexprPCodeLongDoubleFormat()))) {
+    return kPCodeVMStatusInvalidWrite;
+  }
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdFromF64(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t dest = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint64_t bits = ConstexprPCodeNextArgument(&args, sizeof(double));
+  double value;
+  memcpy(&value, &bits, sizeof(value));
+  if (!ConstexprPCodeWriteFPBits(
+          vm, dest, FPBitsFromF64(value, ConstexprPCodeLongDoubleFormat()))) {
+    return kPCodeVMStatusInvalidWrite;
+  }
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdFromI64(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t dest = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  int64_t value = (int64_t)ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  if (!ConstexprPCodeWriteFPBits(
+          vm, dest, FPBitsFromI64(value, ConstexprPCodeLongDoubleFormat()))) {
+    return kPCodeVMStatusInvalidWrite;
+  }
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdToF32(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t src = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  FPBits value;
+  if (!ConstexprPCodeReadFPBits(vm, src, &value)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  vm->fregs[PCODE_FLOAT_RETURN_REG] =
+      FPBitsToF32(value, ConstexprPCodeLongDoubleFormat());
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdToF64(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t src = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  FPBits value;
+  if (!ConstexprPCodeReadFPBits(vm, src, &value)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  vm->dregs[PCODE_DOUBLE_RETURN_REG] =
+      FPBitsToF64(value, ConstexprPCodeLongDoubleFormat());
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdToI64(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t src = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  FPBits value;
+  if (!ConstexprPCodeReadFPBits(vm, src, &value)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  vm->iregs[PCODE_INT_RETURN_REG] =
+      FPBitsToI64(value, ConstexprPCodeLongDoubleFormat());
+  return kPCodeVMStatusRunning;
+}
+
 static bool ConstexprPCodeExceptionStringEqual(const char* left,
                                                const char* right) {
   return left == right ||
@@ -4833,6 +5172,46 @@ static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
                  : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapeMemcpy:
       return runtime != NULL ? ConstexprPCodeEscapeMemcpy(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdAdd:
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeLdBinary(vm, runtime, FPAdd)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdSub:
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeLdBinary(vm, runtime, FPSub)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdMul:
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeLdBinary(vm, runtime, FPMul)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdDiv:
+      return runtime != NULL
+                 ? ConstexprPCodeEscapeLdBinary(vm, runtime, FPDiv)
+                 : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdNeg:
+      return runtime != NULL ? ConstexprPCodeEscapeLdNeg(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdCmp:
+      return runtime != NULL ? ConstexprPCodeEscapeLdCmp(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdFromF32:
+      return runtime != NULL ? ConstexprPCodeEscapeLdFromF32(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdFromF64:
+      return runtime != NULL ? ConstexprPCodeEscapeLdFromF64(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdFromI64:
+      return runtime != NULL ? ConstexprPCodeEscapeLdFromI64(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdToF32:
+      return runtime != NULL ? ConstexprPCodeEscapeLdToF32(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdToF64:
+      return runtime != NULL ? ConstexprPCodeEscapeLdToF64(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdToI64:
+      return runtime != NULL ? ConstexprPCodeEscapeLdToI64(vm, runtime)
                              : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapeInvalidConstantOperation:
       return kPCodeVMStatusInvalidConstantOperation;

@@ -17,6 +17,7 @@
 #include "compiler.h"
 #include "errors.h"
 #include "expr_codegen.h"
+#include "long_double_codegen.h"
 #include "gvn.h"
 #include "list.h"
 #include "member_pointer.h"
@@ -650,6 +651,9 @@ IRNode* GeneratorGetIntConstant(Generator* gen, TypeRecord* type,
 
 IRNode* GeneratorGetFloatingPointConstant(Generator* gen, TypeRecord* type,
                                           double value) {
+  if (TypeUsesLongDoubleRepresentation(type)) {
+    return GenerateLongDoubleConstant(gen, type, value);
+  }
   PoolEntry* entry;
   Type type_spec = kTypeDouble;
   if (type != NULL) {
@@ -1753,11 +1757,13 @@ bool TypeUsesNativeVectorABI(TypeRecord* type) {
 
 bool TypePassedAsMemoryAggregate(TypeRecord* type) {
   return TypeIsStructOrUnion(type) ||
+         TypeUsesLongDoubleRepresentation(type) ||
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type));
 }
 
 bool TypeReturnedThroughHiddenPointer(TypeRecord* type) {
   return TypeIsStructOrUnion(type) ||
+         TypeUsesLongDoubleRepresentation(type) ||
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type)) ||
          TypeIsMemberPointerAggregate(type);
 }

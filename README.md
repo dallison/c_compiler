@@ -8,7 +8,8 @@ matching hardware, as native code those interpreters can jump to).
 Build and install instructions live in [docs/building.md](docs/building.md).
 The linker (`daveld`, including scripts and `-r`) is documented in
 [docs/linker.md](docs/linker.md). Compiler builtins and per-architecture
-intrinsics are in [docs/builtins.md](docs/builtins.md).
+intrinsics are in [docs/builtins.md](docs/builtins.md). Long double formats
+are in [docs/long_double.md](docs/long_double.md).
 
 ## Features
 
@@ -131,6 +132,11 @@ only supported environment is `davecc`.
 | `esp32` | `xtensa-esp32` | 32 / 32 | ELF32, `EM_XTENSA` (94) | `libcxtensa.a` + `esp32_start.o` | no hosted profile |
 | `wasm32` | `wasm` | 32 / 32 | **not ELF** (WebAssembly) | `libcwasm32.a` | WASI via wasmtime |
 | `bpf` | `bpfel`, `ebpf` | 64 / 64 | ELF64, `EM_BPF` (247) | none (`-nostdlib`) | `bpf-unknown-linux-davecc` |
+
+`long double` is IEEE binary128 on AArch64, RISC-V 64/32, ARM, p-code, and
+wasm32, and the 80-bit Intel format (16-byte slot) on x86_64. Arithmetic is
+software-emulated; see [docs/long_double.md](docs/long_double.md). i386, eBPF,
+Xtensa, and 6502 still use the same encoding as `double` (or `float` on 6502).
 
 All objects are little-endian. 6502/65C02 default to `-O2` and optimize for
 size. eBPF, ESP32, wasm32, and 6502/65C02 are static-only.
