@@ -929,6 +929,8 @@ cc_library(
         "c_compiler/backend/ir.c",
         "c_compiler/backend/long_double_codegen.c",
         "c_compiler/support/fp_extended.c",
+        "c_compiler/support/version.c",
+        "c_compiler/support/version.h",
         "c_compiler/frontend/lexical/lex.c",
         "c_compiler/frontend/lexical/unicode_name.c",
         "c_compiler/frontend/lexical/generated/unicode_name_data.c",

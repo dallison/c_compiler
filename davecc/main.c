@@ -40,6 +40,7 @@
 #include "source.h"
 #include "symbol_table.h"
 #include "wasm32_link.h"
+#include "version.h"
 
 Assembler* NewAARCH64Assembler(String* infile, String* outfile);
 void AARCH64AssemblerDestruct(Assembler* assembler);
@@ -1210,6 +1211,9 @@ static String* NativeLink(const char* spec, int argc, char** argv,
 static CompilerOptionDefinition driver_options[] = {
     {"-help", kCompilerOptionBool, kOptionDriver, false,
      "Print this help and exit; -h and --help do the same", kOptionGroupOverall},
+    {"--version", kCompilerOptionBool, kOptionDriver, false,
+     "Print the DaveCC version and exit; -version does the same",
+     kOptionGroupOverall},
     {"-", kCompilerOptionBool, kOptionDriver, false,
      "Read the translation unit from standard input; must be the only input",
      kOptionGroupOverall},
@@ -2139,10 +2143,16 @@ int main(int argc, char * argv[]) {
   
   int i = 1;
   bool help = false;
+  bool version = false;
   while (i < argc) {
     if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "-help") == 0 ||
         strcmp(argv[i], "--help") == 0) {
       help = true;
+      break;
+    }
+    if (strcmp(argv[i], "-version") == 0 ||
+        strcmp(argv[i], "--version") == 0) {
+      version = true;
       break;
     }
     i = ParseArg(i, argc, argv, &compiler_args, &linker_args, &object_files,
@@ -2152,6 +2162,10 @@ int main(int argc, char * argv[]) {
   
   if (help) {
     PrintDriverHelp();
+    exit(0);
+  }
+  if (version) {
+    printf("davecc %s\n", DaveCCVersion());
     exit(0);
   }
 

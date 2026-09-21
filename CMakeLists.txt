@@ -237,6 +237,7 @@ davecc_library(davecc_compiler
   c_compiler/backend/long_double_codegen.c
   c_compiler/backend/statement_codegen.c
   c_compiler/support/fp_extended.c
+  c_compiler/support/version.c
   c_compiler/backend/target_basic_block.c
   c_compiler/backend/target_generator.c
   c_compiler/driver/compiler.c
