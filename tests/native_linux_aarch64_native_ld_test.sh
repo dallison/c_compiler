@@ -75,7 +75,15 @@ if [[ -z "\$out" ]]; then
   echo "colima-ld: missing -o" >&2
   exit 1
 fi
-"\$COLIMA" ssh -- ld "\${remote_args[@]}"
+if ! "\$COLIMA" ssh -- ld "\${remote_args[@]}" 2>"$WORK/ld.err"; then
+  cat "$WORK/ld.err" >&2
+  exit 1
+fi
+if grep -F "no .eh_frame_hdr table will be created" "$WORK/ld.err" >/dev/null; then
+  cat "$WORK/ld.err" >&2
+  echo "colima-ld: GNU ld rejected .eh_frame" >&2
+  exit 1
+fi
 "\$COLIMA" ssh -- sh -lc "base64 < '\$REMOTE/out'" | base64 -d > "\$out"
 chmod +x "\$out"
 EOF

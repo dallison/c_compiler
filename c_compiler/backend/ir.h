@@ -427,6 +427,9 @@ bool IRIsConst(IRNode* node);
 bool IRIsIntConst(IRNode* node);
 int64_t IRIntConstValue(IRNode* node);
 bool IRIsVariable(IRNode* node);
+// Symbol for an IRVariable-sized node. tmp/structreturn are IRIsVariable
+// but allocated as IRNode, so their "symbol" field is not present.
+Symbol* IRGetVariableSymbol(IRNode* node);
 bool IRIsAutoVariable(IRNode* node);
 bool IRIsArgument(IRNode* node);
 bool IRIsStaticVariable(IRNode* node);

@@ -140,10 +140,13 @@ static CompilerOptionDefinition compiler_options[] = {
      "Link-time optimization: compile all sources together for cross-TU inlining",
      kOptionGroupCodegen},
     {"-fnative", kCompilerOptionBool, kOptionNative, false,
-     "Write Mach-O objects and link with the host tools (macOS AArch64)",
+     "Use the hosted host profile: Mach-O + cc on macOS, Linux libc + ld "
+     "on Linux",
      kOptionGroupCodegen},
     {"-fno-native", kCompilerOptionBool, kOptionNoNative, false,
-     "Write ELF objects (default)", kOptionGroupCodegen},
+     "Do not select the hosted host profile (bare -target stays the "
+     "interpreter)",
+     kOptionGroupCodegen},
     {"-ffunction-sections", kCompilerOptionBool, kOptionFunctionSections, false,
      "Place each function in its own ELF section for unused-section GC",
      kOptionGroupCodegen},
@@ -3736,28 +3739,33 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
     }
   }
   ParseOptimizationOption(compiler, options, target->default_opt_level);
-  compiler->native_object = OptionBoolValue(kOptionNative, options, false) ||
-                            compiler->target_triple.os == kTargetOSDarwin;
+  bool darwin = compiler->target_triple.os == kTargetOSDarwin;
+  bool linux = compiler->target_triple.os == kTargetOSLinux;
+  bool native_requested = OptionBoolValue(kOptionNative, options, false);
+  compiler->native_object = native_requested || darwin;
   for (size_t i = 0; i < options->length; i++) {
     CompilerOptionValue* opt = options->value.p[i];
     if (opt->opt == kOptionNative) {
-      compiler->native_object = true;
+      native_requested = true;
+      // Linux hosted objects stay ELF; Mach-O is Darwin-only.
+      compiler->native_object = !linux;
     } else if (opt->opt == kOptionNoNative) {
+      native_requested = false;
       compiler->native_object = false;
     }
   }
-  if (compiler->target_triple.os == kTargetOSDarwin) {
+  if (darwin) {
     compiler->native_object = true;
+    native_requested = true;
+  }
+  if (native_requested && compiler->lto) {
+    fprintf(stderr,
+            "-fnative cannot be used with -flto; DCCLTO03 is not a native "
+            "object format or LLVM bitcode\n");
+    exit(1);
   }
   if (compiler->native_object) {
-    if (compiler->lto) {
-      fprintf(stderr,
-              "-fnative cannot be used with -flto; DCCLTO03 is not Mach-O "
-              "or LLVM bitcode\n");
-      exit(1);
-    }
-    if (strcmp(target->canonical_name, "aarch64") != 0 ||
-        compiler->target_triple.os == kTargetOSLinux) {
+    if (strcmp(target->canonical_name, "aarch64") != 0 || linux) {
       fprintf(stderr,
               "Mach-O output currently supports AArch64 Darwin only "
               "(use -target aarch64-apple-darwin-davecc or -fnative)\n");

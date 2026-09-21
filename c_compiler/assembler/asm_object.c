@@ -344,12 +344,46 @@ void AsmObjectAlignCurrentSection(AsmObject* object, int alignment) {
   sect->address = next_address;
 }
 
+static bool ElfRelocationIsTls(uint16_t machine, int32_t type) {
+  switch (machine) {
+    case ELF_MACHINE_TYPE_AARCH64:
+      return (type >= R_AARCH64_P32_TLS_DTPREL &&
+              type <= R_AARCH64_P32_TLSDESC) ||
+             (type >= R_AARCH64_TLSGD_ADR_PREL21 &&
+              type <= R_AARCH64_TLSLD_LDST128_DTPREL_LO12_NC) ||
+             (type >= R_AARCH64_TLS_DTPMOD && type <= R_AARCH64_TLSDESC);
+    case ELF_MACHINE_TYPE_ARM:
+      return type == R_ARM_TLS_DTPMOD32 || type == R_ARM_TLS_DTPREL32 ||
+             type == R_ARM_TLS_TPOFF32 ||
+             (type >= R_ARM_TLS_GD32 && type <= R_ARM_TLS_LE32);
+    case ELF_MACHINE_TYPE_X86_64:
+      return type == R_X86_64_DTPMOD64 || type == R_X86_64_DTPOFF64 ||
+             type == R_X86_64_TPOFF64 || type == R_X86_64_TLSGD ||
+             type == R_X86_64_TLSLD || type == R_X86_64_DTPOFF32 ||
+             type == R_X86_64_GOTTPOFF || type == R_X86_64_TPOFF32;
+    case ELF_MACHINE_TYPE_X86:
+      return type == R_386_TLS_LE;
+    case ELF_MACHINE_TYPE_RISC_V:
+      return (type >= R_RISCV_TLS_DTPMOD32 && type <= R_RISCV_TLS_TPREL64) ||
+             type == R_RISCV_TLS_GOT_HI20 || type == R_RISCV_TLS_GD_HI20 ||
+             (type >= R_RISCV_TPREL_HI20 && type <= R_RISCV_TPREL_ADD) ||
+             type == R_RISCV_TPREL_I || type == R_RISCV_TPREL_S;
+    default:
+      return false;
+  }
+}
+
 void AsmObjectAddRelocation(AsmObject* object, AssemblerRelocation* reloc) {
   if (object->pass != ASM_OBJECT_FINAL_PASS) {
     AssemblerRelocationDelete(reloc);
     return;
   }
   reloc->symbol->exported = true;
+  // GNU ld requires an undefined TLS symbol to be STT_TLS.  daveld is
+  // lenient; host ld is not.
+  if (ElfRelocationIsTls(object->elf_machine_type, reloc->type)) {
+    reloc->symbol->type = SYM_TYPE(tls);
+  }
   VectorAppend(&object->relocations, reloc);
 }
 
@@ -542,20 +576,23 @@ static int64_t SymbolELFValue(AssemblerSymbol* sym) {
   return sym->value;
 }
 
+static bool SymbolIsELFGlobal(const AssemblerSymbol* sym) {
+  return sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak) ||
+         !sym->defined;
+}
+
 static void AddLocalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
   (void)depth;
   ELFWriterFile* elf = data;
   AssemblerSymbol* sym = (AssemblerSymbol*)node;
-  if (sym->exported && sym->binding == SYM_BIND(local)) {
-    int section_index = sym->section;
-    AssemblerSymbolBinding binding = sym->binding;
-    if (!sym->defined) {
-      section_index = 0;
-      binding = SYM_BIND(global);
-    }
-    ELFWriterAddSymbol(elf, &sym->name, section_index,
-                       SymbolTypeToELFType(sym->type),
-                       SymbolBindingToELFBinding(binding), sym->size,
+  // ELF requires every local to precede sh_info. Implicit undefined
+  // names (`bl foo` without `.global`) are emitted as global UNDEF, so
+  // they must not be written in this pass or GNU ld treats them as local
+  // and leaves references unresolved.
+  if (sym->exported && sym->binding == SYM_BIND(local) &&
+      !SymbolIsELFGlobal(sym)) {
+    ELFWriterAddSymbol(elf, &sym->name, sym->section,
+                       SymbolTypeToELFType(sym->type), STB(local), sym->size,
                        SymbolELFValue(sym), &sym->index);
   }
 }
@@ -568,11 +605,14 @@ static void AddGlobalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
   (void)depth;
   ELFWriterFile* elf = data;
   AssemblerSymbol* sym = (AssemblerSymbol*)node;
-  if (sym->exported &&
-      (sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak))) {
+  if (sym->exported && SymbolIsELFGlobal(sym)) {
+    AssemblerSymbolBinding binding = sym->binding;
+    if (binding == SYM_BIND(local)) {
+      binding = SYM_BIND(global);
+    }
     ELFWriterAddSymbol(elf, &sym->name, sym->defined ? sym->section : 0,
                        SymbolTypeToELFType(sym->type),
-                       SymbolBindingToELFBinding(sym->binding), sym->size,
+                       SymbolBindingToELFBinding(binding), sym->size,
                        SymbolELFValue(sym), &sym->index);
   }
 }

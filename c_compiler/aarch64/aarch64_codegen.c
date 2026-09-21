@@ -3878,7 +3878,6 @@ static TargetInstruction* LowerMemzero(AARCH64Generator* g, IRNode* node) {
   // we can do it more efficiently.
   assert(node->inputs.length == 1);
   IRNode* addr_node = node->inputs.value.p[0];
-  IRVariable* var = (IRVariable*)addr_node;
 
   // Dest ddress.
   IRNode* dest_node = node->inputs.value.p[0];
@@ -3899,8 +3898,9 @@ static TargetInstruction* LowerMemzero(AARCH64Generator* g, IRNode* node) {
   dest_node->data.ptr = dest_addr;
   // Prefer the backing symbol's size, but fall back to the memzero node's type
   // when the destination is a symbol-less slot (e.g. an sret return location).
-  int64_t zero_size = (IRIsVariable(addr_node) && var->symbol != NULL)
-                          ? var->symbol->type->size
+  Symbol* symbol = IRGetVariableSymbol(addr_node);
+  int64_t zero_size = (symbol != NULL && symbol->type != NULL)
+                          ? symbol->type->size
                           : (node->type != NULL ? node->type->size : 0);
   TargetInstruction* result =
       Memzero(g, dest_addr, zero_size, offset_value);
@@ -4146,8 +4146,13 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   }
 
   // Phase 2:
-  // Decrement the stack pointer to make space for the stack args
+  // Decrement the stack pointer to make space for the stack args.
+  // AAPCS64 requires SP 16-byte aligned at every call; a single 8-byte
+  // outgoing slot (`sub sp, #8`) faults on `str`/`stp` through SP (SIGBUS).
   size_t total_stack_size = struct_area_size + next_pushed_arg_offset;
+  if ((total_stack_size & 15) != 0) {
+    total_stack_size = (total_stack_size + 15) & ~(size_t)15;
+  }
   if (total_stack_size > 0) {
     TargetInstruction* newsp =
         AddImmediate(g, StackPointer(g), -total_stack_size);

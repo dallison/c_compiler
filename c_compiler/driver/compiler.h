@@ -542,7 +542,7 @@ typedef struct Compiler {
   bool optimize;
   bool optimize_for_size;
   bool pic;
-  bool native_object;  // -fnative: write Mach-O objects for the host linker.
+  bool native_object;  // Mach-O objects for the Darwin host linker.
   bool syntax_only;  // -fsyntax-only: frontend only, no code generation.
   bool lto;  // -flto: emit or consume IR modules instead of per-TU native objects.
   bool lto_ir_only;  // Generate IR and skip target lowering (write a DCCLTO03 object).

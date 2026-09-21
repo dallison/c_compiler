@@ -40,6 +40,8 @@
 #define __DAVECC_HAS_NATIVE_THREADS__ 1
 #define __DAVECC_HAS_TLS_THREAD_ERRNO__ 1
 #define __DAVECC_HAS_HEAP_LOCK__ 1
+#define __DAVECC_HAS_ATEXIT_LOCK__ 1
+#define __DAVECC_HAS_THREAD_SAFE_GUARDS__ 1
 #define SYS_CLOSE SYS_close
 #define SYS_WRITE SYS_write
 #define SYS_READ SYS_read

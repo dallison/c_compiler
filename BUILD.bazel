@@ -223,7 +223,6 @@ sh_binary(
         ":esp32_start",
         ":libc_65c02",
         ":libc_aarch64",
-        ":libc_aarch64_darwin",
         ":libc_arm",
         ":libc_headers",
         ":libc_pcode",
@@ -247,7 +246,26 @@ sh_binary(
         ":bpfdasm",
         ":pcodedasm",
         ":wasmdasm",
-    ],
+    ] + select({
+        "@platforms//os:macos": [
+            ":libc_aarch64_darwin",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "@platforms//os:linux": [
+            ":aarch64_linux_start",
+            ":arm_linux_start",
+            ":libc_aarch64_linux",
+            ":libc_arm_linux",
+            ":libc_riscv_linux",
+            ":libc_riscv32_linux",
+            ":libc_x86_64_linux",
+            ":riscv_linux_start",
+            ":riscv32_linux_start",
+            ":x86_64_linux_start",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # CMake-equivalent install: `bazel run //:install -- --prefix /usr/local`

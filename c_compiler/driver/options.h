@@ -60,7 +60,7 @@ typedef enum {
   kOptionConstexprEval,      // Constant evaluator: auto, pcode, ast, or audit.
   kOptionContracts,          // Contract semantic: ignore/observe/enforce/quick-enforce.
   kOptionLTO,                // -flto: compile all sources in one whole-program unit.
-  kOptionNative,             // -fnative: write Mach-O objects on macOS.
+  kOptionNative,             // -fnative: hosted host profile (Darwin or Linux).
   kOptionNoNative,           // -fno-native: write ELF objects (default).
   kOptionFunctionSections,   // -ffunction-sections: one ELF section per function.
   kOptionNoFunctionSections, // -fno-function-sections: share a single .text.

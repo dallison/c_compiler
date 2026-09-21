@@ -367,6 +367,8 @@ void IRInit(IRNode* inst, IROpcode opcode) {
   inst->block = NULL;
   inst->flags = 0;
   inst->data.ptr = NULL;
+  inst->data.ivalue = 0;
+  inst->data.lvalue = 0;
   inst->var.def = NULL;
   inst->type = NULL;
   inst->value_state = kValueStateValid;
@@ -884,6 +886,14 @@ bool IRIsVariable(IRNode* node) {
     default:
       return false;
   }
+}
+
+Symbol* IRGetVariableSymbol(IRNode* node) {
+  if (node == NULL || !IRIsVariable(node) || node->opcode == IR_OP(tmp) ||
+      node->opcode == IR_OP(structreturn)) {
+    return NULL;
+  }
+  return ((IRVariable*)node)->symbol;
 }
 
 bool IRIsAutoVariable(IRNode* node) {

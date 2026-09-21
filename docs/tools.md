@@ -50,9 +50,10 @@ davecc -target x86_64 foo.s bar.o lib.a -o prog
 
 `-flto` writes DCCLTO03 IR objects instead of machine code; inspect those
 with `ltodump`. Linker flags and scripts are in [linker.md](linker.md).
-On a Linux host (or via Colima), `-fuse-ld=ld` / `-fuse-ld=lld` asks the
-driver to exec the native ELF linker instead of daveld; that is Linux
-targets only. On macOS, omitting `-target` (or passing
+On a Linux host, omitting `-target` or passing `-fnative` selects the
+hosted host triple, links `libc*_linux.a`, and execs host `ld`.
+`-fuse-ld=ld` / `-fuse-ld=lld` does the same for an explicit Linux triple
+instead of daveld. On macOS, omitting `-target` (or passing
 `-target aarch64-apple-darwin-davecc`, or `-fnative` with `-target aarch64`)
 writes AArch64 Mach-O objects, links `libcaarch64_darwin.a`
 (`bazelisk build //:libc_aarch64_darwin`), and execs host `cc` so the

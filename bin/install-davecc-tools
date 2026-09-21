@@ -122,6 +122,14 @@ install_required_executable() {
   install_file 0755 "$src" "$dest"
 }
 
+install_optional_file() {
+  local mode=$1 rel=$2 dest=$3
+  local src
+  if src=$(find_file "$rel" 2>/dev/null); then
+    install_file "$mode" "$src" "$dest"
+  fi
+}
+
 actual_bindir=$(dest_path "$BINDIR")
 actual_includedir=$(dest_path "$INCLUDEDIR")
 actual_libdir=$(dest_path "$LIBDIR")
@@ -178,7 +186,6 @@ done
 
 for archive in libc65c02.a \
                libcaarch64.a libcaarch64.so libcaarch64_crt.a \
-               libcaarch64_darwin.a \
                libcarm.a libcarm.so libcarm_crt.a \
                libcpcode.a libcpcode.so libcpcode_crt.a \
                libcriscv.a libcriscv.so libcriscv_crt.a \
@@ -187,6 +194,14 @@ for archive in libc65c02.a \
                libcx86.a libcx86.so libcx86_crt.a \
                libcx86_64.a libcx86_64.so libcx86_64_crt.a; do
   install_required_file 0644 "libc/$archive" "$actual_libdir/$archive"
+done
+for archive in libcaarch64_darwin.a \
+               libcaarch64_linux.a aarch64_linux_start.o \
+               libcarm_linux.a arm_linux_start.o \
+               libcriscv_linux.a riscv_linux_start.o \
+               libcriscv32_linux.a riscv32_linux_start.o \
+               libcx86_64_linux.a x86_64_linux_start.o; do
+  install_optional_file 0644 "libc/$archive" "$actual_libdir/$archive"
 done
 install_required_file 0644 "6502_support/6502rom.exe" "$actual_libdir/6502rom.exe"
 install_required_file 0644 "libc/esp32_start.o" "$actual_libdir/esp32_start.o"

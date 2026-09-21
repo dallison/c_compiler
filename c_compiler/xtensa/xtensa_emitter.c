@@ -1487,6 +1487,7 @@ void XTENSAPrintFunction(XTENSAEmitter* emitter, FILE* fp) {
   }
   fprintf(fp, "\t.type %s, @function\n\n", func_name);
   fprintf(fp, "%s:\n", func_name);
+  DaveEHPrintFuncTextLabel(fp, func_name);
   TargetInstruction* inst = TargetFirstInstruction(&emitter->rv->base);
   while (inst != NULL) {
     PrintInstruction(emitter, inst, func_name, fp);

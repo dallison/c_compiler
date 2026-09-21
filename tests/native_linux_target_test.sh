@@ -84,3 +84,52 @@ if [[ "$(<"$WORK/invalid-environment.out")" != \
   echo "invalid target environment did not produce the expected diagnostic" >&2
   exit 1
 fi
+
+# On a Linux host, omitting -target and passing -fnative must select the
+# hosted Linux profile (same macros as ARCH-unknown-linux-davecc).
+if [[ "$(uname -s)" == "Linux" ]]; then
+  cat >"$WORK/linux_host.c" <<'SRC'
+#ifndef __linux__
+#error Linux host default must define __linux__
+#endif
+#ifndef __DAVECC_NATIVE_LINUX__
+#error Linux host default must define __DAVECC_NATIVE_LINUX__
+#endif
+#ifdef __DAVECC_INTERPRETER_ABI__
+#error Linux host default must not define the interpreter ABI
+#endif
+int linux_host_profile_is_valid(void) { return 1; }
+SRC
+  "$DAVECC" -std=c11 -S "$WORK/linux_host.c" -o "$WORK/linux_omitted.s"
+  "$DAVECC" -fnative -std=c11 -S "$WORK/linux_host.c" -o "$WORK/linux_fnative.s"
+  host_arch=$(uname -m)
+  case "$host_arch" in
+    x86_64|amd64) host_bare=x86_64 ;;
+    aarch64|arm64) host_bare=aarch64 ;;
+    armv7*|armv6*|arm) host_bare=arm ;;
+    riscv64) host_bare=riscv ;;
+    riscv32) host_bare=riscv32 ;;
+    *) host_bare= ;;
+  esac
+  if [[ -n "$host_bare" ]]; then
+    "$DAVECC" -fnative -target "$host_bare" -std=c11 -S \
+      "$WORK/linux_host.c" -o "$WORK/linux_fnative_bare.s"
+  fi
+
+  cat >"$WORK/wrong_arch.c" <<'SRC'
+int wrong_arch(void) { return 0; }
+SRC
+  if [[ "$host_bare" == "x86_64" ]]; then
+    if "$DAVECC" -fnative -target aarch64 -nostdinc -nostdlib -c \
+        "$WORK/wrong_arch.c" -o "$WORK/wrong_arch.o" \
+        >"$WORK/wrong_arch.out" 2>&1; then
+      echo "-fnative accepted a non-host architecture" >&2
+      exit 1
+    fi
+    if [[ "$(<"$WORK/wrong_arch.out")" != *"host Linux architecture"* ]]; then
+      echo "-fnative wrong-arch diagnostic was missing" >&2
+      cat "$WORK/wrong_arch.out" >&2
+      exit 1
+    fi
+  fi
+fi

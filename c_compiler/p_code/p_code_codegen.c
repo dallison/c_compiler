@@ -1915,7 +1915,6 @@ static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
   // of relying on an external memset implementation.
   assert(node->inputs.length == 1);
   IRNode* addr_node = node->inputs.value.p[0];
-  IRVariable* var = (IRVariable*)addr_node;
 
   TargetInstruction* addr;
   TargetInstruction* offset;
@@ -1930,8 +1929,9 @@ static TargetInstruction* LowerMemzero(PCodeGenerator* pcode, IRNode* node) {
   TargetInstruction* last = zero;
   // Prefer the backing symbol's size, but fall back to the memzero node's type
   // when the destination is a symbol-less slot (e.g. an sret return location).
-  int64_t size = (IRIsVariable(addr_node) && var->symbol != NULL)
-                     ? var->symbol->type->size
+  Symbol* symbol = IRGetVariableSymbol(addr_node);
+  int64_t size = (symbol != NULL && symbol->type != NULL)
+                     ? symbol->type->size
                      : (node->type != NULL ? node->type->size : 0);
   for (int64_t i = 0; i < size; i++) {
     last = Emit(pcode, NewInstruction3(P_OP(stb), zero, addr,

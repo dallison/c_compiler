@@ -7,8 +7,10 @@ matching hardware, as native code those interpreters can jump to).
 
 Build and install instructions live in [docs/building.md](docs/building.md).
 The linker (`daveld`, including scripts and `-r`) is documented in
-[docs/linker.md](docs/linker.md). On Linux, `davecc -fuse-ld=ld` can
-exec the system ELF linker instead of daveld. On macOS,
+[docs/linker.md](docs/linker.md). On Linux, omitting `-target` or passing
+`-fnative` selects the hosted host triple, links the matching
+`libc*_linux.a`, and execs host `ld` (or pass `-fuse-ld=` on an explicit
+Linux triple). On macOS,
 `davecc -target aarch64-apple-darwin-davecc` (or `-fnative` with
 `-target aarch64`) writes Mach-O objects, links `libcaarch64_darwin.a`,
 and execs host `cc`. Assemblers, `elfdump`, `ltodump`,
@@ -68,7 +70,9 @@ falls back to the interpreter architecture name. An explicit `-target`
 always wins. Bare names such as `x86_64` mean the interpreter/freestanding
 profile (`arch-unknown-none-davecc`). A full triple
 `arch-unknown-linux-davecc` selects the hosted Linux ABI, CRT, and
-syscalls. `aarch64-apple-darwin-davecc` (or `-fnative` with `-target aarch64`)
+syscalls. On Linux, omitting `-target` or passing `-fnative` (optionally
+with a bare host architecture) is that hosted Linux profile plus host `ld`.
+`aarch64-apple-darwin-davecc` (or `-fnative` with `-target aarch64`)
 selects Mach-O objects and the Darwin libc on macOS.
 
 The driver finds `libc/include` and the matching guest archive automatically
@@ -273,8 +277,11 @@ Two different products:
 
 1. **Interpreter profile** (`-target ARCH`) — DaveCC ELF (or a wasm module)
    that the matching in-tree interpreter loads.
-2. **Linux profile** (`-target ARCH-unknown-linux-davecc`) — a Linux ELF the
-   kernel (or qemu-user / Colima) can `exec`.
+2. **Linux profile** (`-target ARCH-unknown-linux-davecc`, or omit `-target` /
+   `-fnative` on a Linux host) — a Linux ELF the kernel (or qemu-user /
+   Colima) can `exec`. Omitting `-target` or `-fnative` uses host `ld`;
+   an explicit Linux triple still defaults to daveld unless `-fuse-ld` is
+   set.
 3. **Darwin profile** (`-target aarch64-apple-darwin-davecc`, or `-fnative`)
    — a Mach-O binary host `cc` links so it runs on Apple Silicon.
 
@@ -394,7 +401,11 @@ the RISC-V, ARM, and p-code loaders for DaveCC-dynamic images.
 ### Native Linux
 
 Hosted triples emit a Linux ELF that the kernel can run. Static is the
-default. Build the Linux libc and CRT for that arch (or `//:install`), then:
+default. On a Linux host, omitting `-target` or passing `-fnative` (with a
+bare host architecture or none) selects this profile and links with host
+`ld`. An explicit Linux triple still uses daveld unless you pass
+`-fuse-ld`. Build the Linux libc and CRT for that arch (or `//:install`),
+then:
 
 ```sh
 bazelisk build //:davecc //:libc_aarch64_linux //:aarch64_linux_start

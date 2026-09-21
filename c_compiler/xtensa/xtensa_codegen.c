@@ -2969,7 +2969,13 @@ static TargetInstruction* LowerWideStore(XTENSAGenerator* rv, IRNode* node) {
   TargetInstruction* addr;
   TargetInstruction* offset;
   bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
-  (void)on_stack;
+  if (!on_stack) {
+    TargetInstruction* result =
+        SetDestOrMove(rv, src_lo, addr, XTENSA_OP(mv));
+    SetLoweredHi(addr_node, src_hi);
+    PairWideHalves(result, src_hi);
+    return SetLoweredNode(node, result);
+  }
   int off = TargetIsConst(offset) ? (int)TargetIntValue(offset) : 0;
   TargetInstruction* low_store =
       Emit(rv, NewInstruction3(XTENSA_OP(sw), src_lo, addr, offset));
@@ -3930,7 +3936,6 @@ static TargetInstruction* LowerMemzero(XTENSAGenerator* rv, IRNode* node) {
   // we can do it more efficiently.
   assert(node->inputs.length == 1);
   IRNode* addr_node = node->inputs.value.p[0];
-  IRVariable* var = (IRVariable*)addr_node;
 
   // Dest ddress.
   IRNode* dest_node = node->inputs.value.p[0];
@@ -3949,8 +3954,9 @@ static TargetInstruction* LowerMemzero(XTENSAGenerator* rv, IRNode* node) {
   }
   // Prefer the backing symbol's size, but fall back to the memzero node's type
   // when the destination is a symbol-less slot (e.g. an sret return location).
-  int64_t zero_size = (IRIsVariable(addr_node) && var->symbol != NULL)
-                          ? var->symbol->type->size
+  Symbol* symbol = IRGetVariableSymbol(addr_node);
+  int64_t zero_size = (symbol != NULL && symbol->type != NULL)
+                          ? symbol->type->size
                           : (node->type != NULL ? node->type->size : 0);
   TargetInstruction* result = Memzero(rv, dest_addr, zero_size, offset_value);
 

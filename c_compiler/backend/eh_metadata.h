@@ -45,6 +45,11 @@ typedef struct {
 
 void DaveEHPrintUleb128(FILE* fp, unsigned long long value);
 void DaveEHPrintSleb128(FILE* fp, long long value);
+// Local label at the function's .text start. FDE PC must relocate against
+// this, not the exported name: GNU ld rejects FDEs whose PC reloc binds to
+// another object's winning weak definition.
+void DaveEHPrintFuncTextLabel(FILE* fp, const char* func_name);
+void DaveEHEmitFuncTextLabel(AsmModule* module, const char* func_name);
 
 void DaveEHPrintGCCExceptTable(FILE* fp, const DaveEHFrameEmitInfo* info);
 void DaveEHPrintARMExtabLSDA(FILE* fp, const DaveEHFrameEmitInfo* info);

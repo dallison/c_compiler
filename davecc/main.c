@@ -334,46 +334,40 @@ static const TargetRuntime target_runtimes[] = {
      "//:libc_aarch64_darwin", NULL, NULL, NULL, true, true},
 };
 
+static const struct {
+  const char* alias;
+  const char* canonical;
+} target_name_aliases[] = {
+    {"p-code", "pcode"},
+    {"risc-v", "riscv"},
+    {"risc-v32", "riscv32"},
+    {"xtensa-esp32", "esp32"},
+    {"armv8", "aarch64"},
+    {"armv7", "arm"},
+    {"armv7-a", "arm"},
+    {"arm32", "arm"},
+    {"x86-64", "x86_64"},
+    {"i386", "x86"},
+    {"i486", "x86"},
+    {"i586", "x86"},
+    {"i686", "x86"},
+    {"x86-32", "x86"},
+    {"65C02", "65c02"},
+    {"wasm", "wasm32"},
+    {"bpfel", "bpf"},
+    {"ebpf", "bpf"},
+};
+
 static bool TargetNameMatches(const char* target, const char* canonical) {
   if (strcmp(target, canonical) == 0) {
     return true;
   }
-  if (strcmp(canonical, "pcode") == 0) {
-    return strcmp(target, "p-code") == 0;
-  }
-  if (strcmp(canonical, "riscv") == 0) {
-    return strcmp(target, "risc-v") == 0;
-  }
-  if (strcmp(canonical, "riscv32") == 0) {
-    return strcmp(target, "risc-v32") == 0;
-  }
-  if (strcmp(canonical, "esp32") == 0) {
-    return strcmp(target, "xtensa-esp32") == 0;
-  }
-  if (strcmp(canonical, "aarch64") == 0) {
-    return strcmp(target, "armv8") == 0;
-  }
-  if (strcmp(canonical, "arm") == 0) {
-    return strcmp(target, "armv7") == 0 ||
-           strcmp(target, "armv7-a") == 0 ||
-           strcmp(target, "arm32") == 0;
-  }
-  if (strcmp(canonical, "x86_64") == 0) {
-    return strcmp(target, "x86-64") == 0;
-  }
-  if (strcmp(canonical, "x86") == 0) {
-    return strcmp(target, "i386") == 0 || strcmp(target, "i486") == 0 ||
-           strcmp(target, "i586") == 0 || strcmp(target, "i686") == 0 ||
-           strcmp(target, "x86-32") == 0;
-  }
-  if (strcmp(canonical, "65c02") == 0) {
-    return strcmp(target, "65C02") == 0;
-  }
-  if (strcmp(canonical, "wasm32") == 0) {
-    return strcmp(target, "wasm") == 0;
-  }
-  if (strcmp(canonical, "bpf") == 0) {
-    return strcmp(target, "bpfel") == 0 || strcmp(target, "ebpf") == 0;
+  for (size_t i = 0;
+       i < sizeof(target_name_aliases) / sizeof(target_name_aliases[0]); i++) {
+    if (strcmp(target, target_name_aliases[i].alias) == 0 &&
+        strcmp(canonical, target_name_aliases[i].canonical) == 0) {
+      return true;
+    }
   }
   return false;
 }
@@ -558,6 +552,92 @@ static void AddRuntimeFileFromDirectory(Vector* linker_args,
 static bool StartsWithCString(const char* text, const char* prefix);
 static bool FindProgramOnPath(const char* name, char* out, size_t out_size);
 
+// True when the user did not pass -target; AddDefaultHostTarget then injects
+// the hosted host triple, and that path is treated as -fnative.
+static bool driver_target_was_omitted;
+
+static const TargetRuntime* HostNativeRuntime(void) {
+  return FindTargetRuntime(CompilerHostDefaultTarget());
+}
+
+static bool RuntimeIsHostNative(const TargetRuntime* runtime) {
+  const TargetRuntime* host = HostNativeRuntime();
+  return runtime != NULL && host != NULL && runtime->os == host->os &&
+         strcmp(runtime->canonical_name, host->canonical_name) == 0;
+}
+
+static bool HostRuntimeIsNativeCapable(const TargetRuntime* host) {
+  return host != NULL &&
+         (host->os == kTargetOSDarwin || host->os == kTargetOSLinux);
+}
+
+static bool CompilerArgsWantNative(Vector* compiler_args) {
+  bool native = false;
+  bool seen = false;
+  for (size_t i = 1; i < compiler_args->length; i++) {
+    const char* arg = (const char*)VectorGet(compiler_args, i);
+    if (strcmp(arg, "-fnative") == 0) {
+      native = true;
+      seen = true;
+    } else if (strcmp(arg, "-fno-native") == 0) {
+      native = false;
+      seen = true;
+    }
+  }
+  return seen && native;
+}
+
+static void ReplaceCompilerArgTarget(Vector* compiler_args,
+                                     const char* target) {
+  static char joined[128];
+  for (size_t i = 1; i < compiler_args->length; i++) {
+    const char* arg = (const char*)VectorGet(compiler_args, i);
+    if (strcmp(arg, "-target") == 0 && i + 1 < compiler_args->length) {
+      compiler_args->value.p[i + 1] = (void*)target;
+      return;
+    }
+    if (strncmp(arg, "-target=", 8) == 0) {
+      int n = snprintf(joined, sizeof(joined), "-target=%s", target);
+      if (n >= 0 && (size_t)n < sizeof(joined)) {
+        compiler_args->value.p[i] = joined;
+      }
+      return;
+    }
+  }
+  VectorAppend(compiler_args, (void*)"-target");
+  VectorAppend(compiler_args, (void*)target);
+}
+
+// -fnative with a bare host architecture selects the hosted host triple, the
+// same way -fnative -target aarch64 becomes AArch64 Darwin on macOS.
+static void RewriteNativeBareTarget(Vector* compiler_args) {
+  if (!CompilerArgsWantNative(compiler_args)) {
+    return;
+  }
+  const char* host = CompilerHostDefaultTarget();
+  const TargetRuntime* host_runtime = FindTargetRuntime(host);
+  if (!HostRuntimeIsNativeCapable(host_runtime)) {
+    return;
+  }
+  const char* target = NULL;
+  for (size_t i = 1; i < compiler_args->length; i++) {
+    const char* arg = (const char*)VectorGet(compiler_args, i);
+    if (strcmp(arg, "-target") == 0 && i + 1 < compiler_args->length) {
+      target = (const char*)VectorGet(compiler_args, i + 1);
+    } else if (strncmp(arg, "-target=", 8) == 0) {
+      target = arg + 8;
+    }
+  }
+  if (target == NULL) {
+    return;
+  }
+  const TargetRuntime* runtime = FindTargetRuntime(target);
+  if (runtime != NULL && runtime->os == kTargetOSNone &&
+      strcmp(runtime->canonical_name, host_runtime->canonical_name) == 0) {
+    ReplaceCompilerArgTarget(compiler_args, host);
+  }
+}
+
 static bool DriverWantsNative(Vector* compiler_options) {
   bool native = false;
   bool seen = false;
@@ -578,7 +658,10 @@ static bool DriverWantsNative(Vector* compiler_options) {
   const char* name = target == NULL ? CompilerHostDefaultTarget()
                                     : target->value;
   const TargetRuntime* runtime = FindTargetRuntime(name);
-  return runtime != NULL && runtime->os == kTargetOSDarwin;
+  if (runtime != NULL && runtime->os == kTargetOSDarwin) {
+    return true;
+  }
+  return driver_target_was_omitted && RuntimeIsHostNative(runtime);
 }
 
 static const TargetRuntime* FindDriverRuntime(Vector* compiler_options) {
@@ -586,35 +669,47 @@ static const TargetRuntime* FindDriverRuntime(Vector* compiler_options) {
   const char* name = target == NULL ? CompilerHostDefaultTarget()
                                     : target->value;
   const TargetRuntime* runtime = FindTargetRuntime(name);
-  if (DriverWantsNative(compiler_options) &&
-      (runtime == NULL || runtime->os != kTargetOSDarwin)) {
-    return FindTargetRuntime("aarch64-apple-darwin-davecc");
+  if (!DriverWantsNative(compiler_options)) {
+    return runtime;
+  }
+  const TargetRuntime* host = HostNativeRuntime();
+  if (RuntimeIsHostNative(runtime)) {
+    return runtime;
+  }
+  if (runtime != NULL && host != NULL && runtime->os == kTargetOSNone &&
+      strcmp(runtime->canonical_name, host->canonical_name) == 0) {
+    return host;
   }
   return runtime;
 }
 
 static bool ValidateNativeObjectRequest(Vector* compiler_options) {
-#if !defined(__APPLE__)
-  (void)compiler_options;
-  fprintf(stderr, "-fnative is only supported on macOS\n");
-  return false;
-#else
   if (OptionBoolValue(kOptionLTO, compiler_options, false)) {
     fprintf(stderr,
-            "-fnative cannot be used with -flto; DCCLTO03 is not Mach-O "
-            "or LLVM bitcode\n");
+            "-fnative cannot be used with -flto; DCCLTO03 is not a native "
+            "object format or LLVM bitcode\n");
+    return false;
+  }
+  const TargetRuntime* host = HostNativeRuntime();
+  if (!HostRuntimeIsNativeCapable(host)) {
+    fprintf(stderr, "-fnative is only supported on macOS and Linux\n");
     return false;
   }
   const TargetRuntime* runtime = FindDriverRuntime(compiler_options);
-  if (runtime == NULL || strcmp(runtime->canonical_name, "aarch64") != 0 ||
-      (runtime->os != kTargetOSDarwin && runtime->os != kTargetOSNone)) {
-    fprintf(stderr,
-            "Mach-O output currently supports AArch64 Darwin only "
-            "(use -target aarch64-apple-darwin-davecc or -fnative)\n");
+  if (!RuntimeIsHostNative(runtime)) {
+    if (host->os == kTargetOSDarwin) {
+      fprintf(stderr,
+              "Mach-O output currently supports AArch64 Darwin only "
+              "(use -target aarch64-apple-darwin-davecc or -fnative)\n");
+    } else {
+      fprintf(stderr,
+              "-fnative requires the host Linux architecture "
+              "(use -target %s or omit -target)\n",
+              CompilerHostDefaultTarget());
+    }
     return false;
   }
   return true;
-#endif
 }
 
 static String* NativeDarwinLink(int argc, char** argv) {
@@ -709,14 +804,12 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
     return;
   }
 
-  if (DriverWantsNative(compiler_options)) {
-    const TargetRuntime* runtime = FindDriverRuntime(compiler_options);
-    if (runtime == NULL || runtime->os != kTargetOSDarwin) {
-      fprintf(stderr,
-              "unable to find a Darwin libc for this target; use "
-              "-target aarch64-apple-darwin-davecc\n");
-      exit(1);
-    }
+  const TargetRuntime* runtime = FindDriverRuntime(compiler_options);
+  if (runtime == NULL) {
+    return;
+  }
+
+  if (DriverWantsNative(compiler_options) && runtime->os == kTargetOSDarwin) {
     if (resources->lib_dir.length == 0) {
       fprintf(stderr,
               "unable to find DaveCC system libraries; set DAVECC_LIB_DIR "
@@ -739,13 +832,6 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
     }
     VectorAppend(owned_paths, archive);
     VectorAppend(linker_args, archive->value);
-    return;
-  }
-
-  String* target = OptionStringValue(kOptionTarget, compiler_options);
-  const TargetRuntime* runtime =
-      FindTargetRuntime(target == NULL ? NULL : target->value);
-  if (runtime == NULL) {
     return;
   }
 
@@ -1026,9 +1112,7 @@ static bool ValidateNativeLinkerRequest(const char* spec,
                     "built-in linker or compile without -flto\n");
     return false;
   }
-  String* target = OptionStringValue(kOptionTarget, compiler_options);
-  const TargetRuntime* runtime =
-      FindTargetRuntime(target == NULL ? NULL : target->value);
+  const TargetRuntime* runtime = FindDriverRuntime(compiler_options);
   if (runtime == NULL || runtime->os != kTargetOSLinux) {
     fprintf(stderr,
             "-fuse-ld requires a Linux target "
@@ -1057,6 +1141,40 @@ static bool AppendJoinedLinkerArg(Vector* native_args, Vector* owned,
   return true;
 }
 
+// GNU ld does not invent daveld's __eh_frame_{start,end} sentinels. A
+// supplementary script defines them from the output .eh_frame so libc's
+// unwinder can find CIE/FDE records after -fuse-ld / Linux -fnative.
+static bool WriteLinuxHostBoundsScript(char* path, size_t path_size) {
+  char template[] = "/tmp/davecc-host-bounds-XXXXXX";
+  int fd = mkstemp(template);
+  if (fd < 0) {
+    perror("Cannot create host linker script");
+    return false;
+  }
+  static const char kScript[] =
+      "SECTIONS {\n"
+      "  __eh_frame_start = ADDR(.eh_frame);\n"
+      "  __eh_frame_end = ADDR(.eh_frame) + SIZEOF(.eh_frame);\n"
+      "}\n"
+      "INSERT AFTER .bss;\n";
+  ssize_t n = (ssize_t)(sizeof(kScript) - 1);
+  if (write(fd, kScript, (size_t)n) != n) {
+    perror("Cannot write host linker script");
+    close(fd);
+    unlink(template);
+    return false;
+  }
+  if (close(fd) != 0) {
+    unlink(template);
+    return false;
+  }
+  if (snprintf(path, path_size, "%s", template) >= (int)path_size) {
+    unlink(template);
+    return false;
+  }
+  return true;
+}
+
 static String* NativeLink(const char* spec, int argc, char** argv,
                           Vector* compiler_options) {
   char linker_path[PATH_MAX];
@@ -1070,10 +1188,18 @@ static String* NativeLink(const char* spec, int argc, char** argv,
   VectorInit(&native_args);
   VectorInit(&owned);
   VectorAppend(&native_args, linker_path);
+  // GNU ld searches each archive once. DaveCC libc members refer to each
+  // other (cxx_guard -> thrd_current / abort / __cxa_finalize), so group
+  // them and keep rescanning until the closure is complete.
+  VectorAppend(&native_args, (void*)"--start-group");
 
   const char* output = NULL;
   const char* chdir_dir = NULL;
   bool ok = true;
+  bool user_script = false;
+  bool relocatable = false;
+  char bounds_script[PATH_MAX];
+  bounds_script[0] = '\0';
   for (int i = 1; i < argc && ok; i++) {
     const char* arg = argv[i];
     if (strcmp(arg, "-o") == 0) {
@@ -1124,9 +1250,11 @@ static String* NativeLink(const char* spec, int argc, char** argv,
         ok = false;
         break;
       }
+      user_script = true;
       VectorAppend(&native_args, (void*)"-T");
       VectorAppend(&native_args, argv[++i]);
     } else if (StartsWithCString(arg, "--script=")) {
+      user_script = true;
       VectorAppend(&native_args, (void*)"-T");
       VectorAppend(&native_args, (void*)(arg + 9));
     } else if (StartsWithCString(arg, "-t") ||
@@ -1149,8 +1277,10 @@ static String* NativeLink(const char* spec, int argc, char** argv,
     } else if (StartsWithCString(arg, "-I") && arg[2] != '\0') {
       VectorAppend(&native_args, (void*)"--dynamic-linker");
       VectorAppend(&native_args, (void*)(arg + 2));
+    } else if (strcmp(arg, "-r") == 0 || strcmp(arg, "--relocatable") == 0) {
+      relocatable = true;
+      VectorAppend(&native_args, (void*)arg);
     } else if (strcmp(arg, "-static") == 0 || strcmp(arg, "-shared") == 0 ||
-               strcmp(arg, "-r") == 0 || strcmp(arg, "--relocatable") == 0 ||
                strcmp(arg, "--gc-sections") == 0 ||
                strcmp(arg, "--no-gc-sections") == 0 ||
                strcmp(arg, "--print-gc-sections") == 0 ||
@@ -1164,6 +1294,16 @@ static String* NativeLink(const char* spec, int argc, char** argv,
   }
 
   String* result = NULL;
+  VectorAppend(&native_args, (void*)"--end-group");
+  if (ok && !user_script && !relocatable) {
+    if (!WriteLinuxHostBoundsScript(bounds_script, sizeof(bounds_script))) {
+      ok = false;
+    } else {
+      VectorAppend(&native_args, (void*)"-T");
+      VectorAppend(&native_args, bounds_script);
+      VectorAppend(&native_args, (void*)"--eh-frame-hdr");
+    }
+  }
   if (ok) {
     if (output == NULL) {
       output = "a.out";
@@ -1200,6 +1340,9 @@ static String* NativeLink(const char* spec, int argc, char** argv,
     }
   }
 
+  if (bounds_script[0] != '\0') {
+    unlink(bounds_script);
+  }
   for (size_t i = 0; i < owned.length; i++) {
     StringDelete(owned.value.p[i]);
   }
@@ -1264,7 +1407,8 @@ static void PrintDriverHelp(void) {
       ".hpp and .hxx are compiled, .s is assembled, and .o and everything "
       "else is given to the linker.  Without -c, -S, -fsyntax-only or -r the "
       "result is linked into an executable.  If -target is omitted, the host "
-      "architecture and OS are used.  -r writes a relocatable object.  "
+      "architecture and OS are used (the Darwin or Linux hosted profile, "
+      "matching -fnative).  -r writes a relocatable object.  "
       "-fuse-ld=ld (or lld, bfd, gold, or a path) calls the native ELF "
       "linker instead of daveld; Linux targets only.",
       0);
@@ -2170,7 +2314,9 @@ int main(int argc, char * argv[]) {
     exit(0);
   }
 
+  driver_target_was_omitted = !CompilerArgsHaveTarget(&compiler_args);
   AddDefaultHostTarget(&compiler_args);
+  RewriteNativeBareTarget(&compiler_args);
 
   if (read_stdin && num_inputs > 1) {
     fprintf(stderr,
@@ -2211,7 +2357,10 @@ int main(int argc, char * argv[]) {
     if (!ValidateNativeObjectRequest(&compiler_options)) {
       exit(1);
     }
-    if (!VectorContainsCString(&compiler_args, "-fPIC") &&
+    const TargetRuntime* native_runtime =
+        FindDriverRuntime(&compiler_options);
+    if (native_runtime != NULL && native_runtime->os == kTargetOSDarwin &&
+        !VectorContainsCString(&compiler_args, "-fPIC") &&
         !VectorContainsCString(&compiler_args, "-fpic")) {
       VectorAppend(&compiler_args, "-fPIC");
     }
@@ -2638,8 +2787,15 @@ int main(int argc, char * argv[]) {
       output = NativeLink(fuse_ld, (int)linker_args.length,
                           (char**)linker_args.value.p, &compiler_options);
     } else if (DriverWantsNative(&compiler_options)) {
-      output = NativeDarwinLink((int)linker_args.length,
-                                (char**)linker_args.value.p);
+      const TargetRuntime* native_runtime =
+          FindDriverRuntime(&compiler_options);
+      if (native_runtime != NULL && native_runtime->os == kTargetOSLinux) {
+        output = NativeLink("ld", (int)linker_args.length,
+                            (char**)linker_args.value.p, &compiler_options);
+      } else {
+        output = NativeDarwinLink((int)linker_args.length,
+                                  (char**)linker_args.value.p);
+      }
     } else {
       output = Link((int)linker_args.length, (char**)linker_args.value.p);
     }

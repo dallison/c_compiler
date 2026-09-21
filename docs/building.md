@@ -79,9 +79,11 @@ Also built with the guest libraries:
 Bazel additionally builds `//:libc_wasm32`, the native Linux libc/startup
 profiles (`//:libc_x86_64_linux`, `//:libc_aarch64_linux`, …), and the
 Darwin Mach-O libc (`//:libc_aarch64_darwin` → `libc/libcaarch64_darwin.a`).
-`bazel run //:install` copies the Darwin archive (the default when `davecc`
-is invoked on Apple Silicon with no `-target`). Those extras are not part
-of the CMake `davecc_libc` target.
+`bazel run //:install` copies the host native archive for that OS: the Darwin
+archive on macOS (the default when `davecc` is invoked on Apple Silicon with
+no `-target`) and the Linux hosted archives on Linux (the default when
+`davecc` is invoked on Linux with no `-target` or with `-fnative`). Those
+extras are not part of the CMake `davecc_libc` target.
 
 Headers live in `libc/include/` and are used with `-isystem libc/include`.
 

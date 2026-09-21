@@ -30,6 +30,12 @@ meant for Linux hosts; on macOS, point `-fuse-ld=` at a GNU/`lld` binary
 or a wrapper that runs `ld` inside Colima. `-flto` objects stay with
 daveld.
 
+On Linux, omitting `-target` or passing `-fnative` (with or without a
+bare host architecture such as `-target x86_64`) selects
+`ARCH-unknown-linux-davecc`, links that profile's CRT and `libc*_linux.a`,
+and execs host `ld`. An explicit Linux triple still uses daveld unless
+you pass `-fuse-ld`. `-fnative` and `-fuse-ld` cannot be combined.
+
 On macOS, `-target aarch64-apple-darwin-davecc` (OS `darwin` or `macos`;
 vendor `apple` or `unknown`) is the Mach-O counterpart. That is also the
 default on Apple Silicon when `-target` is omitted. `-fnative` with

@@ -100,6 +100,10 @@ void DaveEHPrintSleb128(FILE* fp, long long value) {
   PrintByteDirective(fp, bytes, count);
 }
 
+void DaveEHPrintFuncTextLabel(FILE* fp, const char* func_name) {
+  fprintf(fp, ".Leh_%s_text:\n", func_name);
+}
+
 static void PrintInsnLabel(FILE* fp, const char* func_name, long long label_id) {
   fprintf(fp, ".%s_label_%lld", func_name, label_id);
 }
@@ -337,7 +341,11 @@ void DaveEHPrintARMExtabLSDA(FILE* fp, const DaveEHFrameEmitInfo* info) {
   DaveEHPrintExceptTable(fp, info, ".ARM.extab");
 }
 
-static size_t EHFrameCIELength(const DaveEHFrameEmitInfo* info) {
+static size_t EHFrameAlignedLength(size_t length) {
+  return (length + 3u) & ~(size_t)3u;
+}
+
+static size_t EHFrameCIEContentLength(const DaveEHFrameEmitInfo* info) {
   bool with_eh = info->range_count > 0;
   size_t initial_cfi_size =
       1 + Uleb128Size(info->cie_cfa_reg) +
@@ -352,6 +360,58 @@ static size_t EHFrameCIELength(const DaveEHFrameEmitInfo* info) {
          (with_eh ? 7 : 1) + initial_cfi_size;
 }
 
+static size_t EHFrameCIELength(const DaveEHFrameEmitInfo* info) {
+  return EHFrameAlignedLength(EHFrameCIEContentLength(info));
+}
+
+static size_t EHFrameFDEContentLength(const DaveEHFrameEmitInfo* info) {
+  bool with_eh = info->range_count > 0;
+  size_t fde_length = 12 + Uleb128Size(with_eh ? 4 : 0) +
+                      (with_eh ? 4 : 0);
+  if (!info->has_frame) {
+    return fde_length;
+  }
+  fde_length += 5;
+  fde_length += 1 + Uleb128Size(info->frame_cfa_offset);
+  fde_length +=
+      1 + Uleb128Size((unsigned long long)(-info->saved_fp_offset / 8));
+  if (info->saved_ra_offset != 0 &&
+      info->saved_ra_offset != -info->entry_cfa_offset) {
+    fde_length +=
+        1 + Uleb128Size((unsigned long long)(-info->saved_ra_offset / 8));
+  }
+  fde_length += 5;
+  fde_length += 1 + Uleb128Size(info->cie_fp_reg) +
+                Uleb128Size(info->fp_cfa_offset);
+  for (size_t i = 0; i < info->saved_reg_count; i++) {
+    const DaveEHFrameSavedReg* saved = &info->saved_regs[i];
+    if (saved->dwarf_reg >= 0 && saved->dwarf_reg < 64 &&
+        saved->cfa_offset < 0 && saved->cfa_offset % 8 == 0) {
+      fde_length +=
+          1 + Uleb128Size((unsigned long long)(-saved->cfa_offset / 8));
+    }
+  }
+  return fde_length;
+}
+
+static size_t EHFrameFDELength(const DaveEHFrameEmitInfo* info) {
+  return EHFrameAlignedLength(EHFrameFDEContentLength(info));
+}
+
+static void ModuleInteger(AsmModule* module, int width, int64_t value);
+
+static void PrintEHFrameNops(FILE* fp, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    fprintf(fp, "\t.byte 0\n");
+  }
+}
+
+static void EmitEHFrameNops(AsmModule* module, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    ModuleInteger(module, 1, 0);
+  }
+}
+
 void DaveEHPrintEHFrameCIE(FILE* fp, const DaveEHFrameEmitInfo* info,
                            const char* cie_label_suffix) {
   const char* func = info->func_name;
@@ -359,7 +419,7 @@ void DaveEHPrintEHFrameCIE(FILE* fp, const DaveEHFrameEmitInfo* info,
   size_t cie_length = EHFrameCIELength(info);
 
   fprintf(fp, "\t.section \".eh_frame\", \"a\", @progbits\n");
-  fprintf(fp, "\t.align 3\n");
+  fprintf(fp, "\t.align 2\n");
   if (with_eh) {
     fprintf(fp, "\t.weak %s\n", DAVECC_EH_PERSONALITY);
   }
@@ -397,6 +457,7 @@ void DaveEHPrintEHFrameCIE(FILE* fp, const DaveEHFrameEmitInfo* info,
     AppendUleb128(bytes, &byte_count, -info->saved_ra_offset / 8);
   }
   PrintByteDirective(fp, bytes, byte_count);
+  PrintEHFrameNops(fp, cie_length - EHFrameCIEContentLength(info));
   fprintf(fp, ".Leh_%s_cie_end%s:\n", func, cie_label_suffix);
 }
 
@@ -406,38 +467,15 @@ void DaveEHPrintEHFrameFDE(FILE* fp, const DaveEHFrameEmitInfo* info,
   (void)cie_label_suffix;
   bool with_eh = info->range_count > 0;
   bool has_frame = info->has_frame;
-  size_t fde_length = 12 + Uleb128Size(with_eh ? 4 : 0) +
-                      (with_eh ? 4 : 0);
-  if (has_frame) {
-    fde_length += 5;
-    fde_length += 1 + Uleb128Size(info->frame_cfa_offset);
-    fde_length +=
-        1 + Uleb128Size((unsigned long long)(-info->saved_fp_offset / 8));
-    if (info->saved_ra_offset != 0 &&
-        info->saved_ra_offset != -info->entry_cfa_offset) {
-      fde_length +=
-          1 + Uleb128Size((unsigned long long)(-info->saved_ra_offset / 8));
-    }
-    fde_length += 5;
-    fde_length += 1 + Uleb128Size(info->cie_fp_reg) +
-                  Uleb128Size(info->fp_cfa_offset);
-    for (size_t i = 0; i < info->saved_reg_count; i++) {
-      const DaveEHFrameSavedReg* saved = &info->saved_regs[i];
-      if (saved->dwarf_reg >= 0 && saved->dwarf_reg < 64 &&
-          saved->cfa_offset < 0 && saved->cfa_offset % 8 == 0) {
-        fde_length +=
-            1 + Uleb128Size((unsigned long long)(-saved->cfa_offset / 8));
-      }
-    }
-  }
+  size_t fde_length = EHFrameFDELength(info);
 
   fprintf(fp, ".Leh_%s_fde:\n", func);
   fprintf(fp, "\t.4byte %zu\n", fde_length);
   fprintf(fp, ".Leh_%s_fde_start:\n", func);
   fprintf(fp, "\t.4byte %zu\n", EHFrameCIELength(info) + 8);
   fprintf(fp, ".Leh_%s_fde_pc:\n", func);
-  fprintf(fp, "\t.4byte %s-.Leh_%s_fde_pc\n", func, func);
-  fprintf(fp, "\t.4byte (.func_end_%s-%s)\n", func, func);
+  fprintf(fp, "\t.4byte .Leh_%s_text-.Leh_%s_fde_pc\n", func, func);
+  fprintf(fp, "\t.4byte (.func_end_%s-.Leh_%s_text)\n", func, func);
   if (with_eh) {
     DaveEHPrintUleb128(fp, 4);
     fprintf(fp, ".Leh_%s_fde_lsda_ref:\n", func);
@@ -447,7 +485,7 @@ void DaveEHPrintEHFrameFDE(FILE* fp, const DaveEHFrameEmitInfo* info,
   }
   if (has_frame) {
     fprintf(fp, "\t.byte 4\n");
-    fprintf(fp, "\t.4byte (.Leh_%s_after_push-%s)\n", func, func);
+    fprintf(fp, "\t.4byte (.Leh_%s_after_push-.Leh_%s_text)\n", func, func);
     fprintf(fp, "\t.byte 14\n");
     DaveEHPrintUleb128(fp, info->frame_cfa_offset);
     fprintf(fp, "\t.byte 0x%x\n", 0x80 | info->cie_fp_reg);
@@ -472,8 +510,8 @@ void DaveEHPrintEHFrameFDE(FILE* fp, const DaveEHFrameEmitInfo* info,
       }
     }
   }
+  PrintEHFrameNops(fp, fde_length - EHFrameFDEContentLength(info));
   fprintf(fp, ".Leh_%s_fde_end:\n", func);
-  fprintf(fp, "\t.align 3\n");
   fprintf(fp, "\t.text\n\n");
 }
 
@@ -526,6 +564,13 @@ static void EHLabelName(String* result, const char* function,
   StringAppend(result, ".Leh_");
   StringAppend(result, function);
   StringAppend(result, suffix);
+}
+
+void DaveEHEmitFuncTextLabel(AsmModule* module, const char* func_name) {
+  String label = {0};
+  EHLabelName(&label, func_name, "_text");
+  AsmModuleLabel(module, label.value);
+  StringDestruct(&label);
 }
 
 static void EHLabelNameWithSuffix(String* result, const char* function,
@@ -713,8 +758,8 @@ void DaveEHEmitEHFrameCIE(AsmModule* module,
                           const char* suffix) {
   const char* function = info->func_name;
   bool with_eh = info->range_count > 0;
-  AsmModuleSection(module, ".eh_frame", SHT(progbits), SHF(alloc), 8);
-  AsmModuleAlign(module, 8);
+  AsmModuleSection(module, ".eh_frame", SHT(progbits), SHF(alloc), 4);
+  AsmModuleAlign(module, 4);
   if (with_eh) {
     AsmModuleSymbol(module, DAVECC_EH_PERSONALITY, SYM_TYPE(none),
                     SYM_BIND(weak), 0, 1, false, true, false);
@@ -758,6 +803,8 @@ void DaveEHEmitEHFrameCIE(AsmModule* module,
     AppendUleb128(bytes, &count, -info->saved_ra_offset / 8);
   }
   AsmModuleBytes(module, bytes, count);
+  EmitEHFrameNops(module,
+                  EHFrameCIELength(info) - EHFrameCIEContentLength(info));
   EHLabelNameWithSuffix(&label, function, "_cie_end", suffix);
   AsmModuleLabel(module, label.value);
   StringDestruct(&label);
@@ -770,25 +817,7 @@ void DaveEHEmitEHFrameFDE(AsmModule* module,
   const char* function = info->func_name;
   bool with_eh = info->range_count > 0;
   bool has_frame = info->has_frame;
-  size_t length = 12 + Uleb128Size(with_eh ? 4 : 0) +
-                  (with_eh ? 4 : 0);
-  if (has_frame) {
-    length += 5 + 1 + Uleb128Size(info->frame_cfa_offset);
-    length += 1 + Uleb128Size(-info->saved_fp_offset / 8);
-    if (info->saved_ra_offset != 0 &&
-        info->saved_ra_offset != -info->entry_cfa_offset) {
-      length += 1 + Uleb128Size(-info->saved_ra_offset / 8);
-    }
-    length += 5 + 1 + Uleb128Size(info->cie_fp_reg) +
-              Uleb128Size(info->fp_cfa_offset);
-    for (size_t i = 0; i < info->saved_reg_count; i++) {
-      const DaveEHFrameSavedReg* saved = &info->saved_regs[i];
-      if (saved->dwarf_reg >= 0 && saved->dwarf_reg < 64 &&
-          saved->cfa_offset < 0 && saved->cfa_offset % 8 == 0) {
-        length += 1 + Uleb128Size(-saved->cfa_offset / 8);
-      }
-    }
-  }
+  size_t length = EHFrameFDELength(info);
   String label = {0};
   String left = {0};
   String right = {0};
@@ -800,10 +829,12 @@ void DaveEHEmitEHFrameFDE(AsmModule* module,
   ModuleInteger(module, 4, EHFrameCIELength(info) + 8);
   EHLabelName(&right, function, "_fde_pc");
   AsmModuleLabel(module, right.value);
-  ModuleRelocDifference(module, 4, function, right.value);
+  EHLabelName(&left, function, "_text");
+  ModuleRelocDifference(module, 4, left.value, right.value);
   StringSet(&left, ".func_end_");
   StringAppend(&left, function);
-  ModuleDifference(module, 4, left.value, function);
+  EHLabelName(&right, function, "_text");
+  ModuleDifference(module, 4, left.value, right.value);
   if (with_eh) {
     ModuleLeb128(module, false, 4);
     EHLabelName(&right, function, "_fde_lsda_ref");
@@ -816,7 +847,8 @@ void DaveEHEmitEHFrameFDE(AsmModule* module,
   if (has_frame) {
     ModuleInteger(module, 1, 4);
     EHLabelName(&left, function, "_after_push");
-    ModuleDifference(module, 4, left.value, function);
+    EHLabelName(&right, function, "_text");
+    ModuleDifference(module, 4, left.value, right.value);
     ModuleInteger(module, 1, 14);
     ModuleLeb128(module, false, info->frame_cfa_offset);
     ModuleInteger(module, 1, 0x80 | info->cie_fp_reg);
@@ -842,12 +874,12 @@ void DaveEHEmitEHFrameFDE(AsmModule* module,
       }
     }
   }
+  EmitEHFrameNops(module, length - EHFrameFDEContentLength(info));
   EHLabelName(&label, function, "_fde_end");
   AsmModuleLabel(module, label.value);
   StringDestruct(&label);
   StringDestruct(&left);
   StringDestruct(&right);
-  AsmModuleAlign(module, 8);
   AsmModuleSection(module, ".text", SHT(progbits),
                    SHF(alloc) | SHF(execinstr), compiler->alignment);
   (void)suffix;

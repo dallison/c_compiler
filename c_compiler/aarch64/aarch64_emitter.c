@@ -3693,6 +3693,7 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   }
   fprintf(fp, "\t.type %s, @function\n\n", func_name);
   fprintf(fp, "%s:\n", func_name);
+  DaveEHPrintFuncTextLabel(fp, func_name);
   if (compiler->pic && emitter->g->base.is_global &&
       strcmp(func_name, "main") != 0) {
     fprintf(fp, "\t.word 0xD503241F  // bti c\n");
@@ -3718,6 +3719,7 @@ void AARCH64EmitFunctionToModule(AARCH64Emitter* emitter, AsmModule* module) {
                                                    : SYM_BIND(local),
                   0, 4, false, true, false);
   AsmModuleLabel(module, function);
+  DaveEHEmitFuncTextLabel(module, function);
   if (compiler->pic && emitter->g->base.is_global &&
       strcmp(function, "main") != 0) {
     AsmModuleComment(module, "bti c");

@@ -49,7 +49,7 @@ static bool IsDeadLocalStore(Generator* gen, IRNode* inst) {
   if (dest == NULL || !IRIsVariable(dest)) {
     return false;
   }
-  Symbol* symbol = ((IRVariable*)dest)->symbol;
+  Symbol* symbol = IRGetVariableSymbol(dest);
   if (symbol == NULL || symbol->flags.address_taken ||
       symbol->flags.is_argument ||
       (!symbol->flags.is_local && !symbol->flags.is_temp) ||

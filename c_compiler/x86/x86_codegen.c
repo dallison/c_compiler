@@ -3922,7 +3922,6 @@ static TargetInstruction* LowerMemzero(X86Generator* rv, IRNode* node) {
   // we can do it more efficiently.
   assert(node->inputs.length == 1);
   IRNode* addr_node = node->inputs.value.p[0];
-  IRVariable* var = (IRVariable*)addr_node;
 
   // Dest ddress.
   IRNode* dest_node = node->inputs.value.p[0];
@@ -3941,8 +3940,9 @@ static TargetInstruction* LowerMemzero(X86Generator* rv, IRNode* node) {
   }
   // Prefer the backing symbol's size, but fall back to the memzero node's type
   // when the destination is a symbol-less slot (e.g. an sret return location).
-  int64_t zero_size = (IRIsVariable(addr_node) && var->symbol != NULL)
-                          ? var->symbol->type->size
+  Symbol* symbol = IRGetVariableSymbol(addr_node);
+  int64_t zero_size = (symbol != NULL && symbol->type != NULL)
+                          ? symbol->type->size
                           : (node->type != NULL ? node->type->size : 0);
   TargetInstruction* result =
       Memzero(rv, dest_addr, zero_size, offset_value);

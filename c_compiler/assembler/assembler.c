@@ -645,6 +645,9 @@ static void HandleDirective_type(Assembler* assembler) {
         StringInit(&type, assembler->lex.spelling.value);
         if (StringEqual(&type, "function") || StringEqual(&type, "@function")) {
           sym->type = SYM_TYPE(func);
+        } else if (StringEqual(&type, "tls_object") ||
+                   StringEqual(&type, "@tls_object")) {
+          sym->type = SYM_TYPE(tls);
         } else if (StringEqual(&type, "object") ||
                    StringEqual(&type, "@object")) {
           // An object is TLS if the section it's in has the TLS flag.
