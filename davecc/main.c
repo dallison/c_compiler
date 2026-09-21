@@ -1257,6 +1257,7 @@ static CompilerOptionDefinition driver_options[] = {
 
 static void PrintDriverHelp(void) {
   printf("DaveCC: a C and C++ compiler, assembler, linker and interpreter.\n");
+  printf("%s\n", DaveCCCopyright());
   printf("\nUsage: davecc [options] file...\n\n");
   PrintHelpParagraph(
       "Inputs are handled by suffix: .c, .cc, .cpp, .cxx, .cppm, .ixx, .h, "
@@ -2165,7 +2166,7 @@ int main(int argc, char * argv[]) {
     exit(0);
   }
   if (version) {
-    printf("davecc %s\n", DaveCCVersion());
+    printf("davecc %s\n%s\n", DaveCCVersion(), DaveCCCopyright());
     exit(0);
   }
 
