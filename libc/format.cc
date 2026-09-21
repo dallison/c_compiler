@@ -6,6 +6,7 @@ extern "C" char* __PrintGeneralFormat(double, int, char*, size_t);
 extern "C" char* __PrintFloatFormatL(long double, int, char*, size_t);
 extern "C" char* __PrintScientificFormatL(long double, int, char*, size_t);
 extern "C" char* __PrintGeneralFormatL(long double, int, char*, size_t);
+extern "C" char* __PrintHexFormatL(long double, int, int, int, char*, size_t);
 
 namespace std {
 namespace __format_detail {
@@ -482,10 +483,10 @@ static string __floating_impl(long double value, const __spec& spec) {
   char type = spec.type == 0 ? 'g' : spec.type;
   bool upper = type >= 'A' && type <= 'Z';
   char lower = upper ? static_cast<char>(type + ('a' - 'A')) : type;
-  if (lower != 'f' && lower != 'e' && lower != 'g') {
+  if (lower != 'f' && lower != 'e' && lower != 'g' && lower != 'a') {
     __fail("invalid floating-point presentation type");
   }
-  int precision = spec.precision >= 0 ? spec.precision : 6;
+  int precision = spec.precision >= 0 ? spec.precision : (lower == 'a' ? -1 : 6);
   char buffer[160];
   char* converted = lower == 'f'
                         ? __PrintFloatFormatL(value, precision, buffer,
@@ -493,8 +494,13 @@ static string __floating_impl(long double value, const __spec& spec) {
                         : lower == 'e'
                               ? __PrintScientificFormatL(value, precision,
                                                          buffer, sizeof(buffer))
-                              : __PrintGeneralFormatL(value, precision, buffer,
-                                                      sizeof(buffer));
+                              : lower == 'a'
+                                    ? __PrintHexFormatL(value, precision, upper,
+                                                        spec.alternate, buffer,
+                                                        sizeof(buffer))
+                                    : __PrintGeneralFormatL(
+                                          value, precision, buffer,
+                                          sizeof(buffer));
   string result(converted);
   if (spec.sign == '+' && (result.empty() || result[0] != '-')) {
     string prefixed(1, '+');

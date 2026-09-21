@@ -42,6 +42,11 @@ static void TestF128(void) {
                             FPBitsFromF64(3.0, fmt), fmt),
                       fmt) == 3.0,
          "9/3 f128");
+  FPBits ln2 = FPBitsFromF128(0x3ffe62e42fefa39eULL, 0xf35793c7673007e6ULL, fmt);
+  double ln2d = FPBitsToF64(ln2, fmt);
+  Expect(ln2d > 0.69314718055 && ln2d < 0.69314718057, "ln2 f128 words");
+  FPBits eps = FPLdexp(one, -112, fmt);
+  Expect(FPCompare(eps, FPBitsFromF64(0.0, fmt), fmt) > 0, "2^-112 > 0");
 }
 
 static void TestF80(void) {

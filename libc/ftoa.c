@@ -325,12 +325,15 @@ STATIC char* PrintFixedPointGeneral(struct FloatPrinter* printer, int precision,
       *s = '\0';
     }
   } else {
-    char* e = buf + size - 5;     // e+[X]XX
-    if (*e != 'e') {
-      e--;
+    // The exponent is written against the end of the buffer as e±XX.
+    // Find it from the NUL rather than assuming a 4-character exponent;
+    // a two-digit value is `e-16`, a three-digit one is `e+100`.
+    char* e = buf + size - 2;
+    while (e > p && *e != 'e') {
+      --e;
     }
     char* s = e - 1;              // Last digit in fraction.
-    
+
     // Remove trailing zeroes.
     while (*s == '0') {
       *s = '\0';
@@ -341,13 +344,15 @@ STATIC char* PrintFixedPointGeneral(struct FloatPrinter* printer, int precision,
       *s = '\0';
     }
     s++;
-    // Copy the exponent down.
-    if (s < e - 1) {
+    // Slide the exponent down over any hole left by stripped digits.
+    // If nothing was stripped, s already points at 'e' and the string
+    // is finished — do not write a NUL on top of the exponent.
+    if (s < e) {
       while (*e != '\0') {
         *s++ = *e++;
       }
+      *s = '\0';
     }
-    *s = '\0';
   }
   return p;
 }
@@ -442,4 +447,180 @@ char* __PrintGeneralFormatL(long double f, int precision, char* buf,
   struct FloatPrinter printer = {0};
   FixLongDouble(&printer, f);
   return PrintFixedPointGeneral(&printer, precision, buf, size);
+}
+
+static char HexDigit(unsigned value, bool upper) {
+  if (value < 10) {
+    return (char)('0' + value);
+  }
+  return (char)((upper ? 'A' : 'a') + (value - 10));
+}
+
+static char* WriteHexBinaryExponent(int exponent, bool upper, char* end) {
+  char* p = end;
+  int value = exponent < 0 ? -exponent : exponent;
+  if (value == 0) {
+    *p-- = '0';
+  } else {
+    while (value != 0) {
+      *p-- = (char)('0' + (value % 10));
+      value /= 10;
+    }
+  }
+  *p-- = exponent < 0 ? '-' : '+';
+  *p-- = upper ? 'P' : 'p';
+  return p;
+}
+
+static char* FinishHexFloat(int sign, int leading, const char* digits, int used,
+                            int exponent, int precision, bool upper,
+                            bool alternate, char* buf, size_t size) {
+  char* end = buf + size - 1;
+  *end = '\0';
+  char* p = WriteHexBinaryExponent(exponent, upper, end - 1);
+  if (used > 0 || alternate || precision == 0) {
+    int i;
+    for (i = used - 1; i >= 0; i--) {
+      *p-- = digits[i];
+    }
+    if (used > 0 || alternate) {
+      *p-- = '.';
+    }
+  }
+  *p-- = HexDigit((unsigned)leading, upper);
+  *p-- = upper ? 'X' : 'x';
+  *p-- = '0';
+  if (sign) {
+    *p-- = '-';
+  }
+  return p + 1;
+}
+
+static char* PrintHexParts(int sign, int naninf, int leading, int exponent,
+                           uint64_t frac_hi, uint64_t frac_lo, int frac_bits,
+                           int precision, bool upper, bool alternate,
+                           char* buf, size_t size) {
+  if (naninf != 0) {
+    return WriteNanInf((int8_t)sign, naninf, buf, size);
+  }
+  char digits[40];
+  int available = (frac_bits + 3) / 4;
+  if (available > 40) {
+    available = 40;
+  }
+  int want = precision < 0 ? available : precision;
+  if (want > 40) {
+    want = 40;
+  }
+  int i;
+  for (i = 0; i < want; i++) {
+    digits[i] = HexDigit((unsigned)((frac_hi >> 60) & 0xf), upper);
+    frac_hi = (frac_hi << 4) | (frac_lo >> 60);
+    frac_lo <<= 4;
+  }
+  int used = want;
+  if (precision < 0) {
+    while (used > 0 && digits[used - 1] == '0') {
+      used--;
+    }
+  }
+  return FinishHexFloat(sign, leading, digits, used, exponent, precision, upper,
+                        alternate, buf, size);
+}
+
+static void LeftJustify128(uint64_t* hi, uint64_t* lo, int bits) {
+  int shift = 128 - bits;
+  if (shift <= 0 || bits <= 0) {
+    return;
+  }
+  if (shift >= 64) {
+    *hi = *lo << (shift - 64);
+    *lo = 0;
+    return;
+  }
+  *hi = (*hi << shift) | (*lo >> (64 - shift));
+  *lo <<= shift;
+}
+
+char* __PrintHexFormat(double f, int precision, int upper, int alternate,
+                       char* buf, size_t size) {
+#if defined(__6502__) || DOUBLE_IS_SINGLE
+  uint32_t bits = 0;
+  memcpy(&bits, &f, sizeof(bits));
+  int sign = (int)(bits >> 31);
+  int exp_field = (int)((bits >> 23) & 0xff);
+  uint32_t frac = bits & 0x7fffffu;
+  if (exp_field == 0xff) {
+    return WriteNanInf((int8_t)sign, frac ? 1 : 2, buf, size);
+  }
+  int leading = 1;
+  int exponent = exp_field - 127;
+  if (exp_field == 0) {
+    leading = 0;
+    exponent = -126;
+  }
+  uint64_t hi = (uint64_t)frac << 41;
+  uint64_t lo = 0;
+  return PrintHexParts(sign, 0, leading, exponent, hi, lo, 23, precision,
+                       upper != 0, alternate != 0, buf, size);
+#else
+  uint64_t bits = 0;
+  memcpy(&bits, &f, sizeof(bits));
+  int sign = (int)(bits >> 63);
+  int exp_field = (int)((bits >> 52) & 0x7ff);
+  uint64_t frac = bits & 0xfffffffffffffULL;
+  if (exp_field == 0x7ff) {
+    return WriteNanInf((int8_t)sign, frac ? 1 : 2, buf, size);
+  }
+  int leading = 1;
+  int exponent = exp_field - 1023;
+  if (exp_field == 0) {
+    leading = 0;
+    exponent = -1022;
+  }
+  uint64_t hi = frac << 12;
+  uint64_t lo = 0;
+  return PrintHexParts(sign, 0, leading, exponent, hi, lo, 52, precision,
+                       upper != 0, alternate != 0, buf, size);
+#endif
+}
+
+char* __PrintHexFormatL(long double f, int precision, int upper, int alternate,
+                        char* buf, size_t size) {
+#if defined(__DAVECC_LDBL_FORMAT__) && __DAVECC_LDBL_FORMAT__ >= 2
+  uint64_t words[2];
+  memcpy(words, &f, sizeof(words));
+  uint64_t lo = words[0];
+  uint64_t hi = words[1];
+#if __DAVECC_LDBL_FORMAT__ == 2
+  int sign = (int)((hi >> 15) & 1);
+  int exp_field = (int)(hi & 0x7fff);
+  uint64_t sig = lo;
+  if (exp_field == 0x7fff) {
+    return WriteNanInf((int8_t)sign, (sig & 0x7fffffffffffffffULL) ? 1 : 2, buf,
+                       size);
+  }
+  int leading = (int)((sig >> 63) & 1);
+  int exponent = exp_field == 0 ? -16382 : exp_field - 16383;
+  uint64_t frac_hi = sig << 1;
+  uint64_t frac_lo = 0;
+  return PrintHexParts(sign, 0, leading, exponent, frac_hi, frac_lo, 63,
+                       precision, upper != 0, alternate != 0, buf, size);
+#else
+  int sign = (int)(hi >> 63);
+  int exp_field = (int)((hi >> 48) & 0x7fff);
+  uint64_t frac_hi = hi & 0x0000ffffffffffffULL;
+  uint64_t frac_lo = lo;
+  if (exp_field == 0x7fff) {
+    return WriteNanInf((int8_t)sign, (frac_hi | frac_lo) ? 1 : 2, buf, size);
+  }
+  int leading = exp_field == 0 ? 0 : 1;
+  int exponent = exp_field == 0 ? -16382 : exp_field - 16383;
+  LeftJustify128(&frac_hi, &frac_lo, 112);
+  return PrintHexParts(sign, 0, leading, exponent, frac_hi, frac_lo, 112,
+                       precision, upper != 0, alternate != 0, buf, size);
+#endif
+#else
+  return __PrintHexFormat((double)f, precision, upper, alternate, buf, size);
+#endif
 }

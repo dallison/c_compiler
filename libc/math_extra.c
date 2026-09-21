@@ -359,15 +359,260 @@ double scalbln(double x, long exponent) {
   return ldexp(x, (int)exponent);
 }
 
+#if DAVECC_DISTINCT_LDOUBLE
+static FPBits LdC(uint64_t hi, uint64_t lo) {
+  return FPBitsFromF128(hi, lo, LdFormat());
+}
+
+static FPBits LdExpBits(FPBits x) {
+  int format = LdFormat();
+  if (FPIsNaN(x, format)) {
+    return x;
+  }
+  if (FPIsZero(x, format)) {
+    return FPBitsFromF64(1.0, format);
+  }
+  if (FPIsInf(x, format)) {
+    if (FPSignBit(x, format)) {
+      return FPBitsFromF64(0.0, format);
+    }
+    return x;
+  }
+  if (FPCompare(x, FPBitsFromF64(11356.5, format), format) > 0) {
+    return FPDiv(x, FPBitsFromF64(0.0, format), format);
+  }
+  if (FPCompare(x, FPBitsFromF64(-11433.0, format), format) < 0) {
+    return FPBitsFromF64(0.0, format);
+  }
+
+  FPBits inv_ln2 = LdC(0x3fff71547652b82fULL, 0xe1777d0ffda0d23aULL);
+  FPBits ln2 = LdC(0x3ffe62e42fefa39eULL, 0xf35793c7673007e6ULL);
+  FPBits scaled = FPMul(x, inv_ln2, format);
+  int64_t n = FPBitsToI64(scaled, format);
+  FPBits n_bits = FPBitsFromI64(n, format);
+  if (FPSignBit(scaled, format) && FPCompare(n_bits, scaled, format) != 0) {
+    n -= 1;
+    n_bits = FPBitsFromI64(n, format);
+  }
+  FPBits remainder = FPSub(x, FPMul(n_bits, ln2, format), format);
+  FPBits term = FPBitsFromF64(1.0, format);
+  FPBits sum = term;
+  int i;
+  for (i = 1; i <= 48; i++) {
+    term = FPDiv(FPMul(term, remainder, format), FPBitsFromI64(i, format),
+                 format);
+    FPBits next = FPAdd(sum, term, format);
+    if (FPCompare(next, sum, format) == 0) {
+      break;
+    }
+    sum = next;
+  }
+  if (n > 200000) {
+    n = 200000;
+  }
+  if (n < -200000) {
+    n = -200000;
+  }
+  return FPLdexp(sum, (int)n, format);
+}
+
+static FPBits LdLog1pBits(FPBits f, int format) {
+  FPBits two = FPBitsFromF64(2.0, format);
+  FPBits z = FPDiv(f, FPAdd(two, f, format), format);
+  FPBits z2 = FPMul(z, z, format);
+  FPBits term = z;
+  FPBits sum = z;
+  int n;
+  for (n = 3; n <= 81; n += 2) {
+    term = FPMul(term, z2, format);
+    FPBits next = FPAdd(sum, FPDiv(term, FPBitsFromI64(n, format), format),
+                        format);
+    if (FPCompare(next, sum, format) == 0) {
+      break;
+    }
+    sum = next;
+  }
+  return FPMul(two, sum, format);
+}
+
+static FPBits LdLogBits(FPBits x) {
+  int format = LdFormat();
+  if (FPIsNaN(x, format)) {
+    return x;
+  }
+  if (FPSignBit(x, format) && !FPIsZero(x, format)) {
+    return FPDiv(FPSub(x, x, format), FPSub(x, x, format), format);
+  }
+  if (FPIsZero(x, format)) {
+    return FPNeg(FPDiv(FPBitsFromF64(1.0, format), FPBitsFromF64(0.0, format),
+                       format),
+                 format);
+  }
+  if (FPIsInf(x, format)) {
+    return x;
+  }
+  FPBits one = FPBitsFromF64(1.0, format);
+  if (FPCompare(x, one, format) == 0) {
+    return FPBitsFromF64(0.0, format);
+  }
+
+  // Values near 1 would cancel e*ln2 against log(mantissa).  Use log1p
+  // on x-1 so LDBL_EPSILON stays visible.
+  if (FPCompare(x, FPBitsFromF64(0.75, format), format) > 0 &&
+      FPCompare(x, FPBitsFromF64(1.5, format), format) < 0) {
+    return LdLog1pBits(FPSub(x, one, format), format);
+  }
+
+  int exponent = 0;
+  FPBits mantissa = FPFrexp(x, &exponent, format);
+  FPBits ln2 = LdC(0x3ffe62e42fefa39eULL, 0xf35793c7673007e6ULL);
+  return FPAdd(FPMul(FPBitsFromI64(exponent, format), ln2, format),
+               LdLog1pBits(FPSub(mantissa, one, format), format), format);
+}
+
+static FPBits LdSinBits(FPBits x, int quadrant) {
+  int format = LdFormat();
+  if (FPIsNaN(x, format)) {
+    return x;
+  }
+  if (FPIsZero(x, format)) {
+    if (quadrant & 1) {
+      return FPBitsFromF64(1.0, format);
+    }
+    return x;
+  }
+  if (FPIsInf(x, format)) {
+    return FPDiv(FPSub(x, x, format), FPSub(x, x, format), format);
+  }
+  if (FPSignBit(x, format)) {
+    x = FPAbs(x, format);
+    quadrant += 2;
+  }
+  FPBits two_over_pi = LdC(0x3ffe45f306dc9c88ULL, 0x2a53f84eafa3ea6aULL);
+  FPBits half_pi = LdC(0x3fff921fb54442d1ULL, 0x8469898cc51701b8ULL);
+  FPBits scaled = FPMul(x, two_over_pi, format);
+  FPBits integer;
+  FPBits fraction = FPModf(scaled, &integer, format);
+  int64_t n = FPBitsToI64(integer, format);
+  if (n < 0) {
+    n = -n;
+  }
+  quadrant = (quadrant + (int)(n & 3)) & 3;
+  if ((quadrant & 1) != 0) {
+    fraction = FPSub(FPBitsFromF64(1.0, format), fraction, format);
+  }
+  FPBits angle = FPMul(fraction, half_pi, format);
+  FPBits angle2 = FPMul(angle, angle, format);
+  int use_cos = quadrant & 1;
+  FPBits term;
+  if (use_cos) {
+    term = FPBitsFromF64(1.0, format);
+  } else {
+    term = angle;
+  }
+  FPBits sum = term;
+  int k;
+  int limit = use_cos ? 40 : 41;
+  for (k = use_cos ? 2 : 3; k <= limit; k += 2) {
+    term = FPNeg(FPDiv(FPMul(term, angle2, format),
+                       FPMul(FPBitsFromI64(k - 1, format),
+                             FPBitsFromI64(k, format), format),
+                       format),
+                 format);
+    FPBits next = FPAdd(sum, term, format);
+    if (FPCompare(next, sum, format) == 0) {
+      break;
+    }
+    sum = next;
+  }
+  if (quadrant > 1) {
+    sum = FPNeg(sum, format);
+  }
+  return sum;
+}
+
+static FPBits LdSqrtBits(FPBits x) {
+  int format = LdFormat();
+  if (FPIsNaN(x, format) || FPIsZero(x, format) ||
+      (FPIsInf(x, format) && !FPSignBit(x, format))) {
+    return x;
+  }
+  if (FPSignBit(x, format)) {
+    return FPDiv(FPSub(x, x, format), FPSub(x, x, format), format);
+  }
+  int exponent = 0;
+  FPBits mantissa = FPFrexp(x, &exponent, format);
+  if ((exponent & 1) != 0) {
+    mantissa = FPMul(mantissa, FPBitsFromF64(2.0, format), format);
+    exponent -= 1;
+  }
+  FPBits y = FPBitsFromF64(sqrt(FPBitsToF64(mantissa, format)), format);
+  FPBits half = FPBitsFromF64(0.5, format);
+  int i;
+  for (i = 0; i < 8; i++) {
+    y = FPMul(FPAdd(y, FPDiv(mantissa, y, format), format), half, format);
+  }
+  return FPLdexp(y, exponent / 2, format);
+}
+#endif
+
 #define DEFINE_UNARY_VARIANTS(name)                 \
   float name##f(float x) { return (float)name(x); } \
   long double name##l(long double x) {              \
     return (long double)name((double)x);             \
   }
 
+#if DAVECC_DISTINCT_LDOUBLE
+float sinf(float x) { return (float)sin(x); }
+long double sinl(long double x) { return BitsToLd(LdSinBits(LdToBits(x), 0)); }
+float cosf(float x) { return (float)cos(x); }
+long double cosl(long double x) {
+  return BitsToLd(LdSinBits(FPAbs(LdToBits(x), LdFormat()), 1));
+}
+float tanf(float x) { return (float)tan(x); }
+long double tanl(long double x) { return sinl(x) / cosl(x); }
+float expf(float x) { return (float)exp(x); }
+long double expl(long double x) { return BitsToLd(LdExpBits(LdToBits(x))); }
+float exp2f(float x) { return (float)exp2(x); }
+long double exp2l(long double x) {
+  return BitsToLd(LdExpBits(FPMul(
+      LdToBits(x), LdC(0x3ffe62e42fefa39eULL, 0xf35793c7673007e6ULL),
+      LdFormat())));
+}
+float expm1f(float x) { return (float)expm1(x); }
+long double expm1l(long double x) { return expl(x) - 1.0L; }
+float logf(float x) { return (float)log(x); }
+long double logl(long double x) { return BitsToLd(LdLogBits(LdToBits(x))); }
+float log10f(float x) { return (float)log10(x); }
+long double log10l(long double x) {
+  return BitsToLd(FPMul(LdLogBits(LdToBits(x)),
+                        LdC(0x3ffdbcb7b1526e50ULL, 0xe32a6ab7555f5a68ULL),
+                        LdFormat()));
+}
+float log1pf(float x) { return (float)log1p(x); }
+long double log1pl(long double x) { return logl(1.0L + x); }
+float log2f(float x) { return (float)log2(x); }
+long double log2l(long double x) {
+  return BitsToLd(FPMul(LdLogBits(LdToBits(x)),
+                        LdC(0x3fff71547652b82fULL, 0xe1777d0ffda0d23aULL),
+                        LdFormat()));
+}
+float sqrtf(float x) { return (float)sqrt(x); }
+long double sqrtl(long double x) { return BitsToLd(LdSqrtBits(LdToBits(x))); }
+#else
 DEFINE_UNARY_VARIANTS(sin)
 DEFINE_UNARY_VARIANTS(cos)
 DEFINE_UNARY_VARIANTS(tan)
+DEFINE_UNARY_VARIANTS(exp)
+DEFINE_UNARY_VARIANTS(exp2)
+DEFINE_UNARY_VARIANTS(expm1)
+DEFINE_UNARY_VARIANTS(log)
+DEFINE_UNARY_VARIANTS(log10)
+DEFINE_UNARY_VARIANTS(log1p)
+DEFINE_UNARY_VARIANTS(log2)
+DEFINE_UNARY_VARIANTS(sqrt)
+#endif
+
 DEFINE_UNARY_VARIANTS(asin)
 DEFINE_UNARY_VARIANTS(acos)
 DEFINE_UNARY_VARIANTS(atan)
@@ -377,15 +622,7 @@ DEFINE_UNARY_VARIANTS(tanh)
 DEFINE_UNARY_VARIANTS(asinh)
 DEFINE_UNARY_VARIANTS(acosh)
 DEFINE_UNARY_VARIANTS(atanh)
-DEFINE_UNARY_VARIANTS(exp)
-DEFINE_UNARY_VARIANTS(exp2)
-DEFINE_UNARY_VARIANTS(expm1)
-DEFINE_UNARY_VARIANTS(log)
-DEFINE_UNARY_VARIANTS(log10)
-DEFINE_UNARY_VARIANTS(log1p)
-DEFINE_UNARY_VARIANTS(log2)
 DEFINE_UNARY_VARIANTS(logb)
-DEFINE_UNARY_VARIANTS(sqrt)
 DEFINE_UNARY_VARIANTS(cbrt)
 DEFINE_UNARY_VARIANTS(erf)
 DEFINE_UNARY_VARIANTS(erfc)
@@ -426,7 +663,29 @@ DEFINE_BINARY_VARIANTS(remainder)
 DEFINE_BINARY_VARIANTS(fdim)
 DEFINE_BINARY_VARIANTS(fmax)
 DEFINE_BINARY_VARIANTS(fmin)
+#if DAVECC_DISTINCT_LDOUBLE
+float powf(float x, float y) { return (float)pow(x, y); }
+long double powl(long double x, long double y) {
+  if (x == 1.0L || y == 0.0L) {
+    return 1.0L;
+  }
+  if (x == 0.0L) {
+    return y > 0.0L ? 0.0L : expl(y * logl(0.0L));
+  }
+  if (x < 0.0L) {
+    long double integer;
+    long double fraction = modfl(y, &integer);
+    if (fraction != 0.0L) {
+      return (long double)(0.0L / 0.0L);
+    }
+    long double magnitude = expl(y * logl(-x));
+    return ((int)integer & 1) ? -magnitude : magnitude;
+  }
+  return expl(y * logl(x));
+}
+#else
 DEFINE_BINARY_VARIANTS(pow)
+#endif
 
 #undef DEFINE_BINARY_VARIANTS
 

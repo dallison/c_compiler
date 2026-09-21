@@ -31,6 +31,9 @@ FPBits FPBitsFromF32(float value, int format);
 FPBits FPBitsFromF64(double value, int format);
 FPBits FPBitsFromI64(int64_t value, int format);
 FPBits FPBitsFromU64(uint64_t value, int format);
+// `hi`/`lo` are the IEEE binary128 memory words (same layout as FPBits
+// for kFPExtFormatIEEEf128).  Converted to `format` if needed.
+FPBits FPBitsFromF128(uint64_t hi, uint64_t lo, int format);
 
 float FPBitsToF32(FPBits bits, int format);
 double FPBitsToF64(FPBits bits, int format);

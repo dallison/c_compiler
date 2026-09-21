@@ -706,6 +706,13 @@ FPBits FPBitsFromF64(double value, int format) {
   return Pack(UnpackF64Bits(bits), format);
 }
 
+FPBits FPBitsFromF128(uint64_t hi, uint64_t lo, int format) {
+  FPBits bits;
+  bits.hi = hi;
+  bits.lo = lo;
+  return Pack(UnpackF128(bits), format);
+}
+
 FPBits FPBitsFromU64(uint64_t value, int format) {
   if (value == 0) {
     return Pack(UnpZero(0), format);
@@ -803,6 +810,12 @@ int FPCompare(FPBits a, FPBits b, int format) {
   }
   if (ua.cls == kClsZero && ub.cls == kClsZero) {
     return 0;
+  }
+  if (ua.cls == kClsZero) {
+    return ub.sign ? 1 : -1;
+  }
+  if (ub.cls == kClsZero) {
+    return ua.sign ? -1 : 1;
   }
   if (ua.sign != ub.sign) {
     return ua.sign ? -1 : 1;

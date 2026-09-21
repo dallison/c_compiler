@@ -60,10 +60,14 @@ for:
 - `strtold` / `wcstold` (software decimal accumulate)
 - `scanf` `%Lf` (stores 16 bytes; parses through `strtold`)
 - `printf` `%Lf` / `%Le` / `%Lg` (64-bit significand decimal conversion)
-- `std::format` floating arguments and `num_put` / `num_get` `long double`
+- `printf` `%a` / `%A` / `%La` (hexadecimal floating)
+- `std::format` floating arguments (`a` / `A` included) and `num_put` /
+  `num_get` `long double`
 - exact `*l` helpers: `fabsl`, `copysignl`, `ceill`, `floorl`, `truncl`,
   `frexpl`, `ldexpl`, `scalbnl`, `scalblnl`, `modfl`, `ilogbl`, `nextafterl`,
-  plus `fpclassify` / `signbit` on `long double`
+  `expl`, `exp2l`, `logl`, `log2l`, `log10l`, `sinl`, `cosl`, `tanl`, `sqrtl`,
+  `powl`, plus `fpclassify` / `signbit` on `long double`
 
-Trigonometric and exponential `*l` wrappers still compute in `double`.
-Complex `long double` arithmetic uses the same helpers per component.
+Other trigonometric and special `*l` wrappers (`asinl`, `erfl`, …) still
+compute in `double`. Complex `long double` arithmetic uses the same helpers
+per component.

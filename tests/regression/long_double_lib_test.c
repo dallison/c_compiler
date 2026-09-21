@@ -78,6 +78,40 @@ int main(void) {
   if (!(extra > 1.0L)) {
     return 16;
   }
+
+  if (expl(0.0L) != 1.0L) {
+    return 17;
+  }
+  if (fabsl(logl(expl(0.5L)) - 0.5L) > 0x1p-40L) {
+    return 18;
+  }
+  {
+    long double log_eps = logl(1.0L + LDBL_EPSILON);
+    if (!(log_eps > 0.0L) ||
+        fabsl(log_eps / LDBL_EPSILON - 1.0L) > 0x1p-20L) {
+      return 19;
+    }
+  }
+  if (sinl(0.0L) != 0.0L ||
+      fabsl(sinl(LDBL_EPSILON) / LDBL_EPSILON - 1.0L) > 0x1p-20L) {
+    return 20;
+  }
+  if (fabsl(sqrtl(4.0L) - 2.0L) > LDBL_EPSILON) {
+    return 21;
+  }
+
+  snprintf(printed, sizeof(printed), "%a", 1.0);
+  if (strcmp(printed, "0x1p+0") != 0 && strcmp(printed, "0x1.0p+0") != 0) {
+    return 22;
+  }
+  snprintf(printed, sizeof(printed), "%La", 1.0L);
+  if (strcmp(printed, "0x1p+0") != 0 && strcmp(printed, "0x1.0p+0") != 0) {
+    return 23;
+  }
+  snprintf(printed, sizeof(printed), "%La", 2.5L);
+  if (strcmp(printed, "0x1.4p+1") != 0 && strcmp(printed, "0x1.40p+1") != 0) {
+    return 24;
+  }
 #else
   if (strtold("2.5", NULL) != 2.5L) {
     return 1;

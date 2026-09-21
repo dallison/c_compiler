@@ -37,6 +37,10 @@ extern char* __PrintScientificFormatL(long double f, int precision, char* buf,
                                       size_t size);
 extern char* __PrintGeneralFormatL(long double f, int precision, char* buf,
                                    size_t size);
+extern char* __PrintHexFormat(double f, int precision, int upper, int alternate,
+                              char* buf, size_t size);
+extern char* __PrintHexFormatL(long double f, int precision, int upper,
+                               int alternate, char* buf, size_t size);
 typedef double PrintfFloat;
 typedef long double PrintfLongDouble;
 #else
@@ -705,6 +709,8 @@ STATIC void GetNextArgument(char cmd, ConversionFormat* fmt, va_list* ap,
     case 'f':
     case 'g':
     case 'e':
+    case 'a':
+    case 'A':
       if (fmt->modifier == kModLongDouble) {
         *value_ld = va_arg(*ap, long double);
       } else {
@@ -796,8 +802,20 @@ STATIC int Printf(Writer writer, void* data, const char* format, va_list ap) {
           v = ConvertHexPointer(value_p, buf, sizeof(buf));
           count += WriteFormatted(writer, data, &fmt, v, end - v, false, true);
           break;
-        // TODO: support %a
 #ifndef PRINTF_DISABLE_FLOAT
+        case 'a':
+        case 'A': {
+          bool upper = *p == 'A';
+          p++;
+          v = fmt.modifier == kModLongDouble
+                  ? __PrintHexFormatL(value_ld, fmt.precision, upper,
+                                      fmt.alternate_form, buf, sizeof(buf))
+                  : __PrintHexFormat(value_f, fmt.precision, upper,
+                                     fmt.alternate_form, buf, sizeof(buf));
+          count +=
+              WriteFormatted(writer, data, &fmt, v, strlen(v), false, false);
+          break;
+        }
         case 'f':
           FixFloatPrecision(&fmt, sizeof(buf) - 2);
           p++;
