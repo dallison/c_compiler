@@ -6169,6 +6169,24 @@ sh_test(
 )
 
 sh_test(
+    name = "x86_64_printf_g_exponent_test",
+    srcs = ["tests/printf_g_exponent_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "x86_64",
+        "$(rootpath :x86_64)",
+        "$(rootpath :libc_x86_64)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+        ":libc_x86_64",
+        ":x86_64",
+        "tests/regression/printf_g_exponent_test.c",
+    ],
+)
+
+sh_test(
     name = "aarch64_long_double_lib_test",
     srcs = ["tests/long_double_lib_test.sh"],
     args = [
