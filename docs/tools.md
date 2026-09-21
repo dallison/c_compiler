@@ -10,9 +10,10 @@ davecc -target x86_64 -c program.c -o program.o
 elfdump -a program.o
 ```
 
-Install (`bazelisk run //:install` or `cmake --install`) puts drivers and
-dumpers on `PREFIX/bin` and the compiler / interpreters in
-`PREFIX/libexec/davecc`. `ltodump` and `moduledump` are Bazel targets (`//:ltodump`, `//:moduledump`);
+Install (`bazelisk run //:install` or `cmake --install`) puts `davecc`, the
+per-target wrappers, and dumpers on `PREFIX/bin`, and the compiler binary /
+interpreters in `PREFIX/libexec/davecc`. `ltodump` and `moduledump` are Bazel
+targets (`//:ltodump`, `//:moduledump`);
 they are **not** in the CMake `davecc_tools` set and are not copied by the
 install script.
 
@@ -60,8 +61,9 @@ path: DCCLTO03 is neither Mach-O nor LLVM bitcode. `-fno-native` cannot
 turn a Darwin triple back into ELF.
 Builtins are in [builtins.md](builtins.md).
 
-After install, `davecc` itself lives in `libexec/davecc`. The `davecc-*`
-wrappers on `PATH` add `-target` and the guest include / libc paths.
+After install, `PREFIX/bin/davecc` is on `PATH` and execs the compiler in
+`libexec/davecc`. The `davecc-*` wrappers also add `-target` and the guest
+include / libc paths.
 
 ## `daveld`
 
@@ -340,19 +342,23 @@ There is no `davecc-pcode`, `davecc-bpf`, or `davecc-wasm32`. Call
 ## Install layout
 
 ```
-PREFIX/bin/davecc-x86_64          # wrappers + daveld + run + asm/dasm + elfdump
+PREFIX/bin/davecc                 # PATH driver → libexec/davecc/davecc
+PREFIX/bin/davecc-x86_64          # per-target wrappers + daveld + run + asm/dasm
 PREFIX/bin/davecc-env.sh
-PREFIX/libexec/davecc/davecc      # real compiler and interpreters
+PREFIX/libexec/davecc/davecc      # compiler binary and interpreters
 PREFIX/libexec/davecc/archivist
 PREFIX/include/davecc/            # guest headers
-PREFIX/lib/davecc/libc*.a         # guest archives, 6502rom.exe, esp32_start.o
+PREFIX/lib/davecc/libc*.a         # guest archives, including libcaarch64_darwin.a
+PREFIX/lib/davecc/6502rom.exe
+PREFIX/lib/davecc/esp32_start.o
 ```
 
-Source `davecc-env.sh` (or set the same variables) so the wrappers find
-`libexec` and `lib`.
+`davecc` and the other wrappers source `davecc-env.sh` so they find
+`libexec` and `lib`. You can also source it yourself if you invoke the
+compiler binary directly.
 
 ```sh
-source /usr/local/bin/davecc-env.sh
+davecc program.c -o program
 davecc-x86_64 program.c -o program
 run-x86_64 program
 ```

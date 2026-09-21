@@ -223,6 +223,7 @@ sh_binary(
         ":esp32_start",
         ":libc_65c02",
         ":libc_aarch64",
+        ":libc_aarch64_darwin",
         ":libc_arm",
         ":libc_headers",
         ":libc_pcode",

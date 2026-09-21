@@ -27,13 +27,21 @@ davecc_find_executable() {
   local candidate
   for candidate in "$@"; do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      # bin/davecc is the PATH wrapper, not the compiler binary.
+      if [ "$name" = "davecc" ] && [ "$candidate" = "$DAVECC_BIN_DIR/davecc" ]; then
+        continue
+      fi
       echo "$candidate"
       return 0
     fi
   done
   if command -v "$name" >/dev/null 2>&1; then
-    command -v "$name"
-    return 0
+    local found
+    found=$(command -v "$name")
+    if [ "$name" != "davecc" ] || [ "$found" != "$DAVECC_BIN_DIR/davecc" ]; then
+      echo "$found"
+      return 0
+    fi
   fi
   echo "unable to find executable '$name'" >&2
   return 1
@@ -43,7 +51,6 @@ davecc_driver() {
   davecc_find_executable davecc \
     "${DAVECC:-}" \
     "$DAVECC_LIBEXEC_DIR/davecc" \
-    "$DAVECC_BIN_DIR/davecc" \
     "$DAVECC_ROOT/bazel-bin/davecc"
 }
 

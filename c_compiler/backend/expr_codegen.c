@@ -1824,6 +1824,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
   }
   IRNode* result;
   if ((node->base.flags & kASTNeedAddress) != 0 ||
+      TypeIsArray(node->base.type) ||
       TypeIsFunction(node->base.type) ||
       TypeIsVector(node->base.type) ||
       TypeIsStructOrUnion(node->base.type) ||
@@ -5453,15 +5454,38 @@ static IRNode* LengthenInt(Generator* gen, ASTNode* node, IRNode* sub) {
   }
 }
 
+// The IR node for a local long double is often the address of a
+// dynamically-allocated 16-byte slot (targets whose stack alignment is
+// narrower than 16).  That node's type is a pointer, so conversions must
+// read the AST operand type rather than sub->type.
+static TypeRecord* ConversionSourceType(ASTNode* node, IRNode* sub) {
+  if (node != NULL) {
+    if (node->op == AST_OP(cast)) {
+      CastASTNode* cast = (CastASTNode*)node;
+      if (cast->expr != NULL && cast->expr->type != NULL) {
+        return cast->expr->type;
+      }
+    } else {
+      UnaryASTNode* unary = (UnaryASTNode*)node;
+      if (unary->sub != NULL && unary->sub->type != NULL) {
+        return unary->sub->type;
+      }
+    }
+  }
+  return sub != NULL ? sub->type : NULL;
+}
+
 // Conversion.
 static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
+  TypeRecord* from = ConversionSourceType(node, sub);
   if (TypeUsesLongDoubleRepresentation(node->type) &&
-      !TypeUsesLongDoubleRepresentation(sub->type)) {
-    return ConvertValueToLongDouble(gen, sub, sub->type, node->type);
+      !TypeUsesLongDoubleRepresentation(from)) {
+    return ConvertValueToLongDouble(gen, sub, from != NULL ? from : sub->type,
+                                    node->type);
   }
-  if (TypeUsesLongDoubleRepresentation(sub->type) &&
+  if (TypeUsesLongDoubleRepresentation(from) &&
       !TypeUsesLongDoubleRepresentation(node->type)) {
-    return ConvertValueFromLongDouble(gen, sub, sub->type, node->type);
+    return ConvertValueFromLongDouble(gen, sub, from, node->type);
   }
   switch (node->op) {
     case AST_OP(i2s):

@@ -130,7 +130,7 @@ actual_libexecdir=$(dest_path "$LIBEXECDIR")
 install -d "$actual_bindir" "$actual_includedir" "$actual_libdir" "$actual_libexecdir"
 
 for script in \
-  davecc-common.sh \
+  davecc davecc-common.sh \
   davecc-65c02 davecc-aarch64 davecc-arm davecc-riscv davecc-riscv32 davecc-x86 davecc-x86_64 davecc-esp32 \
   run-65c02 run-aarch64 run-arm run-riscv run-riscv32 run-esp32 run-x86 run-x86_64; do
   install_required_file 0755 "bin/$script" "$actual_bindir/$script"
@@ -178,6 +178,7 @@ done
 
 for archive in libc65c02.a \
                libcaarch64.a libcaarch64.so libcaarch64_crt.a \
+               libcaarch64_darwin.a \
                libcarm.a libcarm.so libcarm_crt.a \
                libcpcode.a libcpcode.so libcpcode_crt.a \
                libcriscv.a libcriscv.so libcriscv_crt.a \

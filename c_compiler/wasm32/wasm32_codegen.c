@@ -499,15 +499,19 @@ static TargetInstruction* MaterializeStaticAddress(Wasm32Generator* wasm,
                                                    IRNode* node);
 
 static TargetInstruction* Materialize(Wasm32Generator* wasm, IRNode* node) {
+  // A frame variable's slot lives in data.ivalue.  Always go through
+  // MaterializeVariableAddress so a decayed array is the frame address
+  // and never a leftover data.ptr from an earlier lowering of the same
+  // node.
+  if (IRIsAutoVariable(node) || IRIsArgument(node)) {
+    return MaterializeVariableAddress(wasm, node);
+  }
   TargetInstruction* existing = node->data.ptr;
   if (existing != NULL) {
     return existing;
   }
   if (IRIsConstant(node)) {
     return MaterializeConstant(wasm, node);
-  }
-  if (IRIsAutoVariable(node) || IRIsArgument(node)) {
-    return MaterializeVariableAddress(wasm, node);
   }
   if (IRIsStaticVariable(node)) {
     return MaterializeStaticAddress(wasm, node);
@@ -1330,10 +1334,10 @@ static TargetInstruction* MaterializeVariableAddress(Wasm32Generator* wasm,
     Fail(wasm, "the address of a variable in a function with no frame");
     return NULL;
   }
-  TargetInstruction* result =
-      EmitFrameAddress(wasm, (int32_t)node->data.ivalue);
-  SetLoweredNode(node, result);
-  return result;
+  // Leave data.ptr unset.  The slot offset in data.ivalue has to stay
+  // visible to GetAddressAndOffset, and each use needs a fresh
+  // FP+offset rather than a previously lowered instruction.
+  return EmitFrameAddress(wasm, (int32_t)node->data.ivalue);
 }
 
 static TargetInstruction* LowerLoad(Wasm32Generator* wasm, IRNode* node) {

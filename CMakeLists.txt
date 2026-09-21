@@ -948,6 +948,7 @@ install(TARGETS
 install(TARGETS davecc_run_bin RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
 install(PROGRAMS
+  bin/davecc
   bin/davecc-common.sh
   bin/davecc-65c02
   bin/davecc-aarch64
@@ -979,6 +980,7 @@ foreach(archive
     libcaarch64.a
     libcaarch64.so
     libcaarch64_crt.a
+    libcaarch64_darwin.a
     libcarm.a
     libcarm.so
     libcarm_crt.a

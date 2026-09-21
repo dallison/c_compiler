@@ -797,11 +797,7 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
     if (fmt->modifier == kModLongDouble &&
         sizeof(long double) > sizeof(double)) {
       text[text_len] = '\0';
-      // &text[0], not `text`: wasm32 currently materializes a decayed
-      // char[] call argument as a null pointer.  The indexed stores
-      // above write the digits correctly; only the decayed pointer is
-      // wrong.
-      long double ld = strtold(&text[0], NULL);
+      long double ld = strtold(text, NULL);
       memcpy(ptr, &ld, sizeof(ld));
     } else {
       *(double*)ptr = v;

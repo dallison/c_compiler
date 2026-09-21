@@ -79,7 +79,9 @@ Also built with the guest libraries:
 Bazel additionally builds `//:libc_wasm32`, the native Linux libc/startup
 profiles (`//:libc_x86_64_linux`, `//:libc_aarch64_linux`, …), and the
 Darwin Mach-O libc (`//:libc_aarch64_darwin` → `libc/libcaarch64_darwin.a`).
-Those are not part of the CMake `davecc_libc` target.
+`bazel run //:install` copies the Darwin archive (the default when `davecc`
+is invoked on Apple Silicon with no `-target`). Those extras are not part
+of the CMake `davecc_libc` target.
 
 Headers live in `libc/include/` and are used with `-isystem libc/include`.
 
@@ -154,9 +156,9 @@ Other flags: `--bindir`, `--includedir`, `--libdir`, `--libexecdir`.
 Defaults match CMake: `PREFIX/bin`, `PREFIX/include/davecc`, `PREFIX/lib/davecc`,
 `PREFIX/libexec/davecc`.
 
-The installer writes `davecc-env.sh` next to the wrapper scripts. Source it, or
-keep those `DAVECC_*` variables in the environment, so `davecc-*` / `run-*`
-find the libexec tools and guest archives.
+The installer writes `davecc` and `davecc-env.sh` next to the per-target
+wrappers. `davecc` sources that env file and execs the compiler in
+`libexec/davecc`. The `davecc-*` / `run-*` scripts do the same.
 
 ---
 
@@ -203,8 +205,8 @@ cmake --install build --prefix /usr/local
 `cmake --install` builds `davecc_libc` first so the guest archives exist, then
 installs the same layout as `bazel run //:install`:
 
-- `bin/` — wrapper scripts, `run`, assemblers/disassemblers, `davecc-env.sh`
-- `libexec/davecc/` — `davecc`, interpreters, assemblers
+- `bin/` — `davecc` driver, per-target wrappers, `run`, assemblers/disassemblers, `davecc-env.sh`
+- `libexec/davecc/` — compiler binary, interpreters, assemblers
 - `include/davecc/` — libc headers
 - `lib/davecc/` — `libc*.a`, `6502rom.exe`, `esp32_start.o`
 
@@ -219,15 +221,15 @@ DESTDIR="$PWD/stage" cmake --install build --prefix /usr/local
 ## After install
 
 ```sh
-# If the wrappers are on PATH:
-source /usr/local/bin/davecc-env.sh   # or PREFIX/bin/davecc-env.sh
-
+# If PREFIX/bin is on PATH:
+davecc program.c -o program
 davecc-x86_64 program.c -o program
 run-x86_64 program
 ```
 
-The `davecc-*` scripts invoke the installed compiler with the matching
-`-target` and the installed include/lib directories.
+`davecc` is a PATH wrapper that execs `libexec/davecc/davecc` with the
+installed include/lib directories. The `davecc-*` scripts also pin `-target`
+and the matching guest archive.
 
 ## Cleaning
 
