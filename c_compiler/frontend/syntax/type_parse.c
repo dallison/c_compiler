@@ -332,9 +332,59 @@ static TypeRecord* ParseDaveCommonTypeType(TypeParser* parser) {
   return result;
 }
 
+static bool TypeHasNonTypeMember(TypeRecord* type, String* name) {
+  if (type == NULL || name == NULL) {
+    return false;
+  }
+  Struct* str = NULL;
+  if (type->template_origin != NULL && type->template_origin->type != NULL &&
+      TypeIsStructOrUnion(type->template_origin->type) &&
+      type->template_origin->type->info.struct_info != NULL) {
+    str = type->template_origin->type->info.struct_info;
+  } else if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
+    str = type->info.struct_info;
+  }
+  if (str == NULL) {
+    return false;
+  }
+  StructMember* member = FindStructMember(str, name);
+  if (member == NULL || member->symbol == NULL) {
+    return false;
+  }
+  if (StorageIs(member->symbol->storage, STO(typedef))) {
+    return false;
+  }
+  if (member->symbol->type != NULL &&
+      TypeIsStructOrUnion(member->symbol->type) &&
+      !TypeIsFunction(member->symbol->type)) {
+    return false;
+  }
+  return true;
+}
+
 static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
                                             TypeRecord* result) {
-  if (result == NULL || !LexMatch(parser->lex, TOK(coloncolon))) {
+  if (result == NULL || !LexLookingAt(parser->lex, TOK(coloncolon))) {
+    return result;
+  }
+  // `(std::numeric_limits<T>::max)()` is a parenthesized id-expression, not
+  // a cast to a nested type.  When T is still dependent the suffix would
+  // otherwise be swallowed as `dependent_member_name`.
+  if (result->dependent_decltype_expr != NULL ||
+      TypeContainsTemplateParameter(result)) {
+    LexCheckpoint peek;
+    LexCheckpointSave(parser->lex, &peek);
+    LexMatch(parser->lex, TOK(coloncolon));
+    LexMatch(parser->lex, TOK(template));
+    bool non_type = LexLookingAt(parser->lex, TOK(identifier)) &&
+                    TypeHasNonTypeMember(result, &parser->lex->spelling);
+    LexCheckpointRestore(parser->lex, &peek);
+    LexCheckpointDestruct(&peek);
+    if (non_type) {
+      return result;
+    }
+  }
+  if (!LexMatch(parser->lex, TOK(coloncolon))) {
     return result;
   }
   FullyQualifiedIdentifier member;
@@ -445,7 +495,9 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
       !parenthesized_expression &&
       (LexLookingAt(parser->lex, TOK(identifier)) ||
        LexLookingAt(parser->lex, TOK(coloncolon)));
-  ASTNode* expr = SyntaxParseSingleExpression(parser->syntax, TC(closebra));
+  // `decltype` takes a full expression, including the comma operator
+  // (`decltype(probe(), T{})`).
+  ASTNode* expr = SyntaxParseExpression(parser->syntax, TC(closebra));
   Symbol* declared_symbol = NULL;
   if (unparenthesized_identifier && expr != NULL &&
       expr->op == AST_OP(identifier)) {

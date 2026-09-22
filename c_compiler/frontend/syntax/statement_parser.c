@@ -2008,7 +2008,7 @@ static void DiagnoseLabelAtEndOfCompoundStatement(Syntax* syntax) {
 
 static ASTNode* ParseStatementAfterLabel(Syntax* syntax,
                                          TokenClass followers) {
-  if (CompilerCAtLeast(kLanguageStandardC23) &&
+  if ((CompilerCAtLeast(kLanguageStandardC23) || CompilerIsCXX()) &&
       SyntaxLookingAtDeclaration(syntax)) {
     return SyntaxParseLocalDeclaration(syntax);
   }

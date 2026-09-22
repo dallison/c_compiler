@@ -928,8 +928,14 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
         EnsureCXXClassHeadTagForBaseClause(parser, &tag_name, is_union, is_class);
     if (class_head_tag != NULL && class_head_tag->type != NULL &&
         TypeIsStructOrUnion(class_head_tag->type)) {
-      parser->cxx_member_owner = class_head_tag->type->info.struct_info;
-      parser->syntax->cxx_class_head = class_head_tag->type->info.struct_info;
+      Struct* head = class_head_tag->type->info.struct_info;
+      // Base-clause lookup of sibling members (`Inner<T>::value` in
+      // `struct Outer : Trait<Inner<T>::value>`) walks `lexical_parent`.
+      if (head->lexical_parent == NULL && saved_base_member_owner != NULL) {
+        head->lexical_parent = saved_base_member_owner;
+      }
+      parser->cxx_member_owner = head;
+      parser->syntax->cxx_class_head = head;
     }
   }
   ParseCXXBaseSpecifiers(parser, &bases, is_union, is_class);

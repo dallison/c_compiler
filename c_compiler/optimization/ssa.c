@@ -139,12 +139,11 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
         }
       }
     } else if (IRIsVarRef(inst)) {
-      // Node references a variable.  This will be one of the 'load' IR
-      // instructions.  The first input is replaced by the IRNode at the top of
-      // the var stack for the symbol.  Only do this if the operand being loaded
-      // is a variable node.  The load instructions can also refer to
-      // expressions that refer to a variable indirectly.
-      assert(IRIsLoad(inst));
+      // Node references a variable.  Usually a load; `adda` is also marked
+      // when the use is the address of a member of a reference parameter
+      // (`__other.field`).  The first input is replaced by the IRNode at the
+      // top of the var stack for the symbol.
+      assert(IRIsLoad(inst) || inst->opcode == IR_OP(adda));
       IRNode* ref = FindVariableReference(inst, inst->var.def);
       assert(ref != NULL);
       IRNode* var = GetTopVariable(var_stacks, inst->var.use);

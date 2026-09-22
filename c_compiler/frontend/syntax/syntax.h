@@ -51,6 +51,7 @@ typedef struct Syntax {
   bool parsing_template_specialization;  // Parsing declaration after template<>.
   bool parsing_template_argument;  // Parsing expression inside template args.
   bool parsing_friend_type_specifier;  // Friend type names are type-only contexts.
+  bool parsing_default_member_initializer;  // NSDMI; later members are in scope.
   int parsing_lambda_body_depth;
   int parsing_consteval_block_depth;
   // Nesting depth of enum-specifiers whose enumerator-list is being parsed.
@@ -230,6 +231,10 @@ void SyntaxWarning(Syntax* syntax, const char* warn, const char* format, ...);
 Storage SyntaxParseStorage(Syntax* syntax);
 
 ASTNode* SyntaxParseExternalDeclaration(Syntax* syntax);
+// `extern template` / `template` explicit instantiation of a function or
+// variable.  `template` has already been consumed.
+ASTNode* SyntaxParseExplicitInstantiationDeclaration(Syntax* syntax,
+                                                     SourceLocation location);
 ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax);
 ASTNode* SyntaxParseConditionDeclaration(Syntax* syntax);
 void SyntaxPrepareCXXLocalStatics(Syntax* syntax, TypeRecord* function);

@@ -303,6 +303,7 @@ bool binary_search(ForwardIt first, ForwardIt last, const T& value) {
 #include <stddef.h>
 #include <type_traits>
 #include <utility>
+#include <__minmax>
 
 #if __cplusplus >= 201703L
 #define __cpp_lib_sample 201603L
@@ -393,25 +394,6 @@ SampleIt __sample_impl(PopulationIt first, PopulationIt last, SampleIt output,
 // ------------------------------------------------------------------
 // min / max / minmax / clamp
 // ------------------------------------------------------------------
-template <class T>
-constexpr const T& min(const T& a, const T& b) {
-  return b < a ? b : a;
-}
-
-template <class T, class Compare>
-constexpr const T& min(const T& a, const T& b, Compare comp) {
-  return comp(b, a) ? b : a;
-}
-
-template <class T>
-constexpr const T& max(const T& a, const T& b) {
-  return a < b ? b : a;
-}
-
-template <class T, class Compare>
-constexpr const T& max(const T& a, const T& b, Compare comp) {
-  return comp(a, b) ? b : a;
-}
 
 template <class T, class Compare>
 constexpr T min(initializer_list<T> values, Compare comp) {
