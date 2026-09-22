@@ -951,6 +951,7 @@ cc_library(
         "c_compiler/support/version.c",
         "c_compiler/support/version.h",
         "c_compiler/frontend/lexical/lex.c",
+        "c_compiler/frontend/lexical/macro_expansion.c",
         "c_compiler/frontend/lexical/unicode_name.c",
         "c_compiler/frontend/lexical/generated/unicode_name_data.c",
         "c_compiler/optimization/optimizer.c",

@@ -247,6 +247,7 @@ davecc_library(davecc_compiler
   c_compiler/driver/options.c
   c_compiler/lto/lto_module.c
   c_compiler/frontend/lexical/lex.c
+  c_compiler/frontend/lexical/macro_expansion.c
   c_compiler/frontend/lexical/preprocessor.c
   c_compiler/frontend/lexical/source.c
   c_compiler/frontend/lexical/tokens.c

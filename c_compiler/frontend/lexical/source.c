@@ -10,6 +10,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include "macro_expansion.h"
 #include "map.h"
 
 static Vector all_files;
@@ -73,6 +74,7 @@ void FileDestruct(File* file) {
 }
 
 void ClearAllFiles() {
+  MacroExpansionClear();
   for (size_t i = 0; i < all_files.length; i++) {
     FileDestruct((File*)all_files.value.p[i]);
     free(all_files.value.p[i]);
@@ -87,6 +89,7 @@ void ClearAllFiles() {
 }
 
 static void ResetFiles() {
+  MacroExpansionClear();
   for (size_t i = 0; i < all_files.length; i++) {
     FileDestruct((File*)all_files.value.p[i]);
     free(all_files.value.p[i]);

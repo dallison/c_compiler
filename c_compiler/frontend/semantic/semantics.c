@@ -13,6 +13,7 @@
 #include "coro_semantics.h"
 #include "errors.h"
 #include "expr_evaluator.h"
+#include "macro_expansion.h"
 #include "expr_semantics.h"
 #include "init_semantics.h"
 #include "member_pointer.h"
@@ -103,7 +104,9 @@ void VSemanticError(ASTNode* node, const char* format, va_list ap) {
   int lineno;
   int start, end;
   DecodeSourceLocation(node->location, &filename, &lineno, &start, &end);
-  VReportError(filename, lineno, format, ap);
+  if (VReportError(filename, lineno, format, ap)) {
+    ReportMacroExpansionNotes(node->location);
+  }
 }
 
 void SemanticWarning(ASTNode* node, const char* warn, const char* format, ...) {
@@ -236,7 +239,9 @@ void VSemanticWarning(ASTNode* node, const char* warn, const char* format,
   int lineno;
   int start, end;
   DecodeSourceLocation(node->location, &filename, &lineno, &start, &end);
-  VReportWarning(filename, lineno, warn, format, ap);
+  if (VReportWarning(filename, lineno, warn, format, ap)) {
+    ReportMacroExpansionNotes(node->location);
+  }
 }
 
 // True for the declared type `auto&&`, which is a forwarding reference rather

@@ -27,7 +27,8 @@ typedef struct Macro {
   bool undefined;           // If the user says #undef, this is true.
   bool varargs;             // Variable args.
   bool enabled;             // Macro is enabled.
-  SourceLocation location;  // Where the macro was defined.
+  SourceLocation location;  // Where the macro name was defined.
+  SourceLocation replacement_location;  // Replacement list in the #define.
 } Macro;
 
 Macro* NewMacro(const char* name, bool is_function_like, bool varargs,

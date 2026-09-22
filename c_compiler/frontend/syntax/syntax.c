@@ -22,6 +22,7 @@
 #include "statement_parser.h"
 #include "symbol_table.h"
 #include "syntax.h"
+#include "macro_expansion.h"
 #include "typo_correction.h"
 #include "type.h"
 #include "type_class_internal.h"
@@ -2188,7 +2189,9 @@ void SyntaxErrorAtLocation(Syntax* syntax, SourceLocation location,
   DecodeSourceLocation(location, &filename, &lineno, &start, &end);
   va_list ap;
   va_start(ap, format);
-  VReportError(filename, lineno, format, ap);
+  if (VReportError(filename, lineno, format, ap)) {
+    ReportMacroExpansionNotes(location);
+  }
   va_end(ap);
 }
 

@@ -50,6 +50,7 @@
 #include <limits.h>
 
 #include "errors.h"
+#include "macro_expansion.h"
 #include "reflection.h"
 #include "unicode_name.h"
 #include "vector.h"
@@ -2519,6 +2520,8 @@ record_token_location:
   // Record the token location now that we know the start and end indexes.
   lex->current_token_location =
       NewSourceLocation(lex->source, lineno, token_start, lex->pos);
+  MacroExpansionRemember(lex->current_token_location,
+                         MacroExpansionAtLineOffset(token_start));
 }
 
 bool LexMatch(Lex* lex, Token token) {
@@ -2806,6 +2809,7 @@ void LexError(Lex* lex, const char* error, ...) {
                               lex->source->lineno, error, ap);
   va_end(ap);
   if (emitted) {
+    ReportMacroExpansionNotes(lex->current_token_location);
     ReportSourceStack(lex);
   }
 }
@@ -2813,6 +2817,7 @@ void LexError(Lex* lex, const char* error, ...) {
 void VLexError(Lex* lex, const char* error, va_list ap) {
   if (VReportError(lex->source->filename.value, lex->source->lineno, error,
                    ap)) {
+    ReportMacroExpansionNotes(lex->current_token_location);
     ReportSourceStack(lex);
   }
 }
@@ -2825,6 +2830,7 @@ void LexWarning(Lex* lex, const char* warn, const char* error, ...) {
                      error, ap);
   va_end(ap);
   if (emitted) {
+    ReportMacroExpansionNotes(lex->current_token_location);
     ReportSourceStack(lex);
   }
 }
@@ -2832,6 +2838,7 @@ void LexWarning(Lex* lex, const char* warn, const char* error, ...) {
 void VLexWarning(Lex* lex, const char* warn, const char* error, va_list ap) {
   if (VReportWarning(lex->source->filename.value, lex->source->lineno, warn,
                      error, ap)) {
+    ReportMacroExpansionNotes(lex->current_token_location);
     ReportSourceStack(lex);
   }
 }

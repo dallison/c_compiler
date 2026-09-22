@@ -28,6 +28,7 @@
 #include "expr_parser.h"
 #include "expr_semantics.h"
 #include "lex.h"
+#include "macro_expansion.h"
 #include "type_compare.h"
 
 // Forward declarations.
@@ -37,7 +38,9 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
 
 
 static void ReplaceMacrosInTokenizedLine(Preprocessor* p, String* line,
-                                         bool whole_input);
+                                         Vector* expansions, bool whole_input);
+static MacroExpansion* ExpansionWithAncestor(MacroExpansion* child,
+                                             MacroExpansion* ancestor);
 
 
 Macro* NewMacro(const char* name, bool is_function_like, bool varargs,
@@ -54,6 +57,7 @@ Macro* NewMacro(const char* name, bool is_function_like, bool varargs,
   macro->varargs = varargs;
   macro->enabled = true;
   macro->location = location;
+  macro->replacement_location = location;
   return macro;
 }
 
@@ -876,10 +880,12 @@ static void CopyMacro(BinaryTreeNode* node, int depth, void* data) {
   // into the new macro, so the temporary vector and string are freed here.
   // The arg element strings are now owned by the new macro's args vector.
   String* replacement = NewString(macro->replacement_text.value);
-  HashTableInsert(to_table, NewMacro(macro->name.value,
+  Macro* copy = NewMacro(macro->name.value,
                   macro->is_function_like, macro->varargs, &args,
                   replacement,
-                  macro->location));
+                  macro->location);
+  copy->replacement_location = macro->replacement_location;
+  HashTableInsert(to_table, copy);
   VectorDestruct(&args);
   StringDelete(replacement);
 }
@@ -1308,6 +1314,75 @@ static void MoveToNextToken(TokenIterator* t) {
   }
   t->curr = t->next;
   t->next = FindNextTokenIndex(t);
+}
+
+// Parallel MacroExpansion* entries, one per preprocessing token in the
+// stream currently being rewritten.  Nested replacement scans swap this
+// pointer so splices update the matching map.
+static Vector* active_token_expansions = NULL;
+
+static Vector* SwapActiveTokenExpansions(Vector* map) {
+  Vector* previous = active_token_expansions;
+  active_token_expansions = map;
+  return previous;
+}
+
+static size_t CountPreprocessingTokens(String* tokens) {
+  TokenIterator ti;
+  TokenIteratorInit(&ti, NULL, tokens);
+  size_t count = 0;
+  while (CurrentToken(&ti) != PPTOK(end)) {
+    count++;
+    MoveToNextToken(&ti);
+  }
+  return count;
+}
+
+static size_t TokenOrdinalAt(String* tokens, size_t byte_index) {
+  TokenIterator ti;
+  TokenIteratorInit(&ti, NULL, tokens);
+  size_t ordinal = 0;
+  while (CurrentToken(&ti) != PPTOK(end) && ti.curr < byte_index) {
+    ordinal++;
+    MoveToNextToken(&ti);
+  }
+  return ordinal;
+}
+
+static void InitTokenExpansions(Vector* map, String* tokens,
+                                MacroExpansion* fill) {
+  VectorInit(map);
+  size_t count = CountPreprocessingTokens(tokens);
+  for (size_t i = 0; i < count; i++) {
+    VectorAppend(map, fill);
+  }
+}
+
+static void SpliceTokenExpansions(String* tokens, size_t byte_start,
+                                  size_t byte_end, String* new_tokens,
+                                  Vector* new_map, MacroExpansion* fill) {
+  if (active_token_expansions == NULL) {
+    return;
+  }
+  size_t first = TokenOrdinalAt(tokens, byte_start);
+  size_t last = TokenOrdinalAt(tokens, byte_end);
+  size_t old_count = last - first;
+  size_t new_count =
+      new_map != NULL ? new_map->length : CountPreprocessingTokens(new_tokens);
+  for (size_t i = 0; i < old_count; i++) {
+    VectorDeleteElement(active_token_expansions, first);
+  }
+  for (size_t i = 0; i < new_count; i++) {
+    void* expansion = fill;
+    if (new_map != NULL && i < new_map->length) {
+      expansion = VectorGet(new_map, i);
+    }
+    if (first + i >= active_token_expansions->length) {
+      VectorAppend(active_token_expansions, expansion);
+    } else {
+      VectorInsertBefore(active_token_expansions, first + i, expansion);
+    }
+  }
 }
 
 
@@ -2114,11 +2189,28 @@ static COMPILER_UNUSED void PrintTokenizedLine(String* line) {
 // Replace the current token with the set of tokens specified.  Modifies
 // the current string being iterated over.
 static void ReplaceCurrentToken(TokenIterator* t, String* tokens) {
+  MacroExpansion* fill = NULL;
+  if (active_token_expansions != NULL) {
+    size_t ordinal = TokenOrdinalAt(t->input, t->curr);
+    if (ordinal < active_token_expansions->length) {
+      fill = VectorGet(active_token_expansions, ordinal);
+    }
+  }
+  SpliceTokenExpansions(t->input, t->curr, t->next, tokens, NULL, fill);
+  StringReplaceString(t->input, t->curr, t->next - t->curr, tokens);
+  t->next = t->curr + tokens->length;
+}
+
+static void ReplaceCurrentTokenWithExpansions(TokenIterator* t, String* tokens,
+                                              Vector* expansions) {
+  SpliceTokenExpansions(t->input, t->curr, t->next, tokens, expansions, NULL);
   StringReplaceString(t->input, t->curr, t->next - t->curr, tokens);
   t->next = t->curr + tokens->length;
 }
 
 static void EraseCurrentToken(TokenIterator* t) {
+  String empty = {0};
+  SpliceTokenExpansions(t->input, t->curr, t->next, &empty, NULL, NULL);
   StringErase(t->input, t->curr, t->next - t->curr);
   t->next = FindNextTokenIndex(t);
 }
@@ -2226,23 +2318,34 @@ static void DetokenizeEx(Preprocessor* p, String* tokens, String* text,
   TokenIterator ti;
   TokenIteratorInit(&ti, p, tokens);
   bool prev_was_separable = false;  // Previous emitted token can paste.
+  size_t token_ordinal = 0;
   while (CurrentToken(&ti) != PPTOK(end)) {
     PreprocessingToken tok = CurrentToken(&ti);
     // Comments carry their own "/* */" delimiters and spaces and must never
     // have a separator spliced against them, or the delimiters break.
     bool separable = tok != PPTOK(space) && tok != PPTOK(comment);
+    size_t span_start = text->length;
     if (avoid_paste && text->length > 0 && prev_was_separable && separable) {
       String piece = {0};
       DetokenizeToken(ti.input, ti.curr, &piece);
       if (piece.length > 0 &&
           NeedsSeparator(text->value[text->length - 1], piece.value[0])) {
         StringAppendChar(text, ' ');
+        span_start = text->length;
       }
       StringAppendString(text, &piece);
       StringDestruct(&piece);
     } else {
       DetokenizeToken(ti.input, ti.curr, text);
     }
+    if (active_token_expansions != NULL &&
+        token_ordinal < active_token_expansions->length &&
+        tok != PPTOK(space) && tok != PPTOK(comment)) {
+      MacroExpansionAddLineSpan(
+          span_start, text->length,
+          VectorGet(active_token_expansions, token_ordinal));
+    }
+    token_ordinal++;
     if (tok != PPTOK(space)) {
       prev_was_separable = separable;
     }
@@ -2597,6 +2700,13 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
                      &replacement_text,
                      NewSourceLocation(p->lex->source, p->lex->source->lineno,
                                        name_start, name_end));
+    size_t replacement_end = line->length;
+    if (replacement_end < pos) {
+      replacement_end = pos;
+    }
+    macro->replacement_location =
+        NewSourceLocation(p->lex->source, p->lex->source->lineno, pos,
+                          replacement_end > pos ? replacement_end : name_end);
     bool macro_inserted = HashTableInsert(&p->macros, macro);
     assert(macro_inserted);
     (void)macro_inserted;
@@ -2619,6 +2729,15 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
     // If macro was undefined it will have its original value.  Give it the
     // new one.
     StringSet(&macro->replacement_text, replacement_text.value);
+    size_t replacement_end = line->length;
+    if (replacement_end < pos) {
+      replacement_end = pos;
+    }
+    macro->location = NewSourceLocation(p->lex->source, p->lex->source->lineno,
+                                        name_start, name_end);
+    macro->replacement_location =
+        NewSourceLocation(p->lex->source, p->lex->source->lineno, pos,
+                          replacement_end > pos ? replacement_end : name_end);
     // This is a redefinition: the freshly parsed args were not handed to any
     // macro, so free the strings and the vector backing here.
     VectorDestructWithContents(&args, (VectorElementDestructor)StringDestruct,
@@ -2764,7 +2883,7 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   String tokenized_line;
   // Tokenize, allowing header names.
   Tokenize(p, line, &tokenized_line, pos,  true, false, true);
-  ReplaceMacrosInTokenizedLine(p, &tokenized_line, true);
+  ReplaceMacrosInTokenizedLine(p, &tokenized_line, NULL, true);
 
   TokenIterator ti;
   TokenIteratorInit(&ti, p, &tokenized_line);
@@ -3257,7 +3376,7 @@ static bool ParseEmbedRequest(Preprocessor* p, String* tokens,
 static void PrepareEmbedTokens(Preprocessor* p, String* text, size_t start,
                                String* tokens) {
   Tokenize(p, text, tokens, start, true, p->lex->assembler_mode, true);
-  ReplaceMacrosInTokenizedLine(p, tokens, true);
+  ReplaceMacrosInTokenizedLine(p, tokens, NULL, true);
   String expanded = {0};
   Detokenize(p, tokens, &expanded);
   StringDestruct(tokens);
@@ -3689,7 +3808,7 @@ static void Line(Preprocessor* p, String* line, size_t pos) {
   }
   String tokenized_line;
   Tokenize(p, line, &tokenized_line, pos, true, false, false);
-  ReplaceMacrosInTokenizedLine(p, &tokenized_line, true);
+  ReplaceMacrosInTokenizedLine(p, &tokenized_line, NULL, true);
   
   TokenIterator ti;
   TokenIteratorInit(&ti, p, &tokenized_line);
@@ -3820,6 +3939,9 @@ static Macro* SnapshotMacro(Macro* m, const char* name) {
     loc = m->location;
   }
   Macro* c = NewMacro(name, fn, va, args, rep, loc);
+  if (m != NULL) {
+    c->replacement_location = m->replacement_location;
+  }
   c->undefined = (m == NULL) ? true : m->undefined;
   StringDestruct(&empty);
   // NewMacro copied the element pointers into c->args; free our temp vector.
@@ -4516,6 +4638,15 @@ static void Paste(TokenIterator* ti) {
     StringAppendString(&tokenized_paste, &pasted);
   }
   StringDestruct(&pasted);
+  MacroExpansion* left_expansion = NULL;
+  if (active_token_expansions != NULL) {
+    size_t ordinal = TokenOrdinalAt(ti->input, prev_index);
+    if (ordinal < active_token_expansions->length) {
+      left_expansion = VectorGet(active_token_expansions, ordinal);
+    }
+  }
+  SpliceTokenExpansions(ti->input, prev_index, end_index, &tokenized_paste,
+                        NULL, left_expansion);
   StringReplaceString(ti->input,
                       prev_index,
                       end_index - prev_index,
@@ -4554,7 +4685,9 @@ static void RemovePlacemarkers(Preprocessor* p, String* tokens) {
 
 static void ReplaceFunctionLikeMacroText(TokenIterator* ti,
                                      size_t macro_name_token_index,
-                                     String* tokens) {
+                                     String* tokens, Vector* expansions) {
+  SpliceTokenExpansions(ti->input, macro_name_token_index, ti->curr, tokens,
+                        expansions, NULL);
   StringReplaceString(ti->input,
                       macro_name_token_index,
                       ti->curr - macro_name_token_index,
@@ -4631,6 +4764,8 @@ static void ExpandVaOpt(Preprocessor* p, String* rep, bool has_va_args) {
       // placemarker so a neighboring ## still has a well-defined operand.
       StringAppendChar(&replacement, PPTOK(placemarker));
     }
+    SpliceTokenExpansions(rep, va_opt_start, va_opt_end, &replacement, NULL,
+                          NULL);
     StringReplaceString(rep, va_opt_start, va_opt_end - va_opt_start,
                         &replacement);
     StringDestruct(&replacement);
@@ -4655,6 +4790,28 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
   // Copy replacement text tokens.
   String rep;
   StringInit(&rep, macro->replacement_text.value);
+  MacroExpansion* parent = NULL;
+  if (active_token_expansions != NULL) {
+    size_t ordinal = TokenOrdinalAt(ti->input, macro_name_token_index);
+    if (ordinal < active_token_expansions->length) {
+      parent = VectorGet(active_token_expansions, ordinal);
+    }
+  }
+  SourceLocation invocation = SOURCE_LOCATION_MISSING;
+  if (p->lex != NULL && p->lex->source != NULL) {
+    invocation =
+        NewSourceLocation(p->lex->source, p->lex->source->lineno, 0, 1);
+  }
+  SourceLocation definition = macro->replacement_location;
+  if (definition == SOURCE_LOCATION_MISSING ||
+      definition == SOURCE_LOCATION_COMMAND_LINE) {
+    definition = macro->location;
+  }
+  MacroExpansion* expansion =
+      NewMacroExpansion(macro->name.value, definition, invocation, parent);
+  Vector rep_map;
+  InitTokenExpansions(&rep_map, &rep, expansion);
+  Vector* saved_map = SwapActiveTokenExpansions(&rep_map);
 
   // __VA_OPT__ controls preprocessing tokens before parameter replacement,
   // stringification, token pasting, and the final rescan.
@@ -4711,8 +4868,18 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
                 // Expand any macros in the actual value.
                 String expanded_actual;
                 StringInit(&expanded_actual, actual->value);
-                ReplaceMacrosInTokenizedLine(p, &expanded_actual, true);
-                ReplaceCurrentToken(&rep_ti, &expanded_actual);
+                Vector actual_map;
+                InitTokenExpansions(&actual_map, &expanded_actual, NULL);
+                ReplaceMacrosInTokenizedLine(p, &expanded_actual, &actual_map,
+                                             true);
+                for (size_t i = 0; i < actual_map.length; i++) {
+                  VectorSet(&actual_map, i,
+                            ExpansionWithAncestor(VectorGet(&actual_map, i),
+                                                  expansion));
+                }
+                ReplaceCurrentTokenWithExpansions(&rep_ti, &expanded_actual,
+                                                  &actual_map);
+                VectorDestruct(&actual_map);
                 StringDestruct(&expanded_actual);
               }
             }
@@ -4780,11 +4947,13 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
   // Remove placemarker tokens.
   RemovePlacemarkers(p, &rep);
   
+  SwapActiveTokenExpansions(saved_map);
   // Rescan replacement text for more macros to replace.
-  ReplaceMacrosInTokenizedLine(p, &rep, true);
+  ReplaceMacrosInTokenizedLine(p, &rep, &rep_map, true);
   
   // Replace macro name and args with replacement text.
-  ReplaceFunctionLikeMacroText(ti, macro_name_token_index, &rep);
+  ReplaceFunctionLikeMacroText(ti, macro_name_token_index, &rep, &rep_map);
+  VectorDestruct(&rep_map);
   StringDestruct(&rep);
 }
 
@@ -4883,6 +5052,8 @@ static void ProcessPragmaOperator(Preprocessor* p, TokenIterator* ti) {
   // Remove the entire _Pragma(...) span, leaving an empty replacement so the
   // caller's MoveToNextToken lands on the following token (cf.
   // ReplaceCurrentToken with empty text).
+  String empty = {0};
+  SpliceTokenExpansions(ti->input, start, end, &empty, NULL, NULL);
   StringErase(ti->input, start, end - start);
   ti->prev = orig_prev;
   ti->curr = start;
@@ -4966,6 +5137,42 @@ bail:
   ti->next = original_next;
 }
 
+static MacroExpansion* ExpansionWithAncestor(MacroExpansion* child,
+                                             MacroExpansion* ancestor) {
+  if (child == NULL) {
+    return ancestor;
+  }
+  if (ancestor == NULL || child == ancestor) {
+    return child;
+  }
+  return NewMacroExpansion(child->name, child->definition, child->invocation,
+                           child->parent != NULL
+                               ? ExpansionWithAncestor(child->parent, ancestor)
+                               : ancestor);
+}
+
+static MacroExpansion* ExpansionForCurrentToken(TokenIterator* ti, Macro* macro,
+                                                Preprocessor* p) {
+  MacroExpansion* parent = NULL;
+  if (active_token_expansions != NULL) {
+    size_t ordinal = TokenOrdinalAt(ti->input, ti->curr);
+    if (ordinal < active_token_expansions->length) {
+      parent = VectorGet(active_token_expansions, ordinal);
+    }
+  }
+  SourceLocation invocation = SOURCE_LOCATION_MISSING;
+  if (p->lex != NULL && p->lex->source != NULL) {
+    invocation =
+        NewSourceLocation(p->lex->source, p->lex->source->lineno, 0, 1);
+  }
+  SourceLocation definition = macro->replacement_location;
+  if (definition == SOURCE_LOCATION_MISSING ||
+      definition == SOURCE_LOCATION_COMMAND_LINE) {
+    definition = macro->location;
+  }
+  return NewMacroExpansion(macro->name.value, definition, invocation, parent);
+}
+
 // We have a possible macro name.  See if it's a macro or other special
 // name and if so, replace it by the replacement text.
 static void ProcessPossibleMacro(Preprocessor* p,
@@ -5005,16 +5212,22 @@ static void ProcessPossibleMacro(Preprocessor* p,
       } else {
         // Object-like macro.  Handle ## by pasting adjacent tokens.
         StringSet(&replacement, macro->replacement_text.value);
+        MacroExpansion* expansion = ExpansionForCurrentToken(ti, macro, p);
+        Vector replacement_map;
+        InitTokenExpansions(&replacement_map, &replacement, expansion);
+        Vector* saved_map = SwapActiveTokenExpansions(&replacement_map);
         PasteTokens(p, &replacement);
         // Remove placemarker tokens.
         RemovePlacemarkers(p, &replacement);
+        SwapActiveTokenExpansions(saved_map);
         
         // Rescan the replacement text for more macros.  This macro is
         // disabled so it won't be replaced.
-        ReplaceMacrosInTokenizedLine(p, &replacement, true);
+        ReplaceMacrosInTokenizedLine(p, &replacement, &replacement_map, true);
         
         // Replace the current token with the new replacement text.
-        ReplaceCurrentToken(ti, &replacement);
+        ReplaceCurrentTokenWithExpansions(ti, &replacement, &replacement_map);
+        VectorDestruct(&replacement_map);
       }
       MacroEnable(macro);
     }
@@ -5024,7 +5237,15 @@ static void ProcessPossibleMacro(Preprocessor* p,
 
 static void ReplaceMacrosInTokenizedLine(Preprocessor* p,
                                          String* tokenized_line,
+                                         Vector* expansions,
                                          bool whole_input) {
+  Vector local_map;
+  Vector* map = expansions;
+  if (map == NULL) {
+    InitTokenExpansions(&local_map, tokenized_line, NULL);
+    map = &local_map;
+  }
+  Vector* saved_map = SwapActiveTokenExpansions(map);
   TokenIterator ti;
   TokenIteratorInit(&ti, p, tokenized_line);
   while (CurrentToken(&ti) != PPTOK(end)) {
@@ -5040,6 +5261,10 @@ static void ReplaceMacrosInTokenizedLine(Preprocessor* p,
       StringDestruct(&possible_macro_name);
     }
     MoveToNextToken(&ti);
+  }
+  SwapActiveTokenExpansions(saved_map);
+  if (expansions == NULL) {
+    VectorDestruct(&local_map);
   }
 }
 
@@ -5057,18 +5282,26 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
   }
   Tokenize(p, line, &tokenized_line, start, true, p->lex->assembler_mode, false);
   bool source_module_line = PrepareModuleTokens(p, &tokenized_line);
+  Vector token_expansions;
+  InitTokenExpansions(&token_expansions, &tokenized_line, NULL);
   int limit = 20;
   while (--limit > 0) {
     String copy;
     StringInit(&copy, tokenized_line.value);
-    ReplaceMacrosInTokenizedLine(p, &copy, false);
+    Vector copy_expansions;
+    VectorInit(&copy_expansions);
+    VectorCopy(&copy_expansions, &token_expansions);
+    ReplaceMacrosInTokenizedLine(p, &copy, &copy_expansions, false);
     if (StringEqualString(&tokenized_line, &copy)) {
       StringDestruct(&copy);
+      VectorDestruct(&copy_expansions);
       break;
     }
     StringDestruct(&tokenized_line);
+    VectorDestruct(&token_expansions);
     StringInit(&tokenized_line, copy.value);
     StringDestruct(&copy);
+    token_expansions = copy_expansions;
   }
   if (limit == 0) {
     PreprocessorError(p, "Infinite macro expansion detected");
@@ -5087,7 +5320,11 @@ void PreprocessorReplaceMacros(Preprocessor* p, String* line) {
   // not in assembler mode where lines are machine-generated and have their own
   // lexical rules (e.g. "*/" comment terminators and "#-32" immediates that
   // must not have spaces inserted).
+  MacroExpansionBeginLine();
+  Vector* saved_map = SwapActiveTokenExpansions(&token_expansions);
   DetokenizeEx(p, &tokenized_line, line, !p->lex->assembler_mode);
+  SwapActiveTokenExpansions(saved_map);
+  VectorDestruct(&token_expansions);
   StringDestruct(&tokenized_line);
 }
 
