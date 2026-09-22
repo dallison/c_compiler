@@ -42,6 +42,12 @@ typedef struct {
   int declarator_ellipsis_count;
   enum ParserContext context;
   Struct* cxx_member_owner;
+  // Out-of-line `C::f(...)` must see C's nested types in the parameter list
+  // (`void Storage<T>::SwapN(ElementwiseSwapPolicy, ...)`).  Ordinary lookup
+  // only consults cxx_class_head, so the qualified declarator temporarily
+  // installs the owner there and restores it when this parser is reset.
+  Struct* saved_cxx_class_head;
+  bool replaced_cxx_class_head;
   Struct* template_substitution_source;
   Struct* template_substitution_target;
   Struct* enclosing_template_substitution_source;

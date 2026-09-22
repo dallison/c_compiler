@@ -611,6 +611,37 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
         }
         return inode->current != NULL && AdvanceCurrent(inode->current);
       }
+      // A non-aggregate class is copy-initialized through a constructor, not
+      // by initializing members positionally.  `T arr[] = { src }` with a
+      // converting constructor `T(U)` must call that constructor.
+      if (CompilerIsCXX() && inode->type->info.struct_info != NULL &&
+          !inode->type->info.struct_info->is_aggregate) {
+        SourceLocation location = expr->location;
+        Vector* elements = NewVector();
+        VectorAppend(elements,
+                     NewExpressionInitializerASTNode(ASTNodeMove(expr),
+                                                     location));
+        ASTNode* braced =
+            NewBracedInitializerASTNode(elements, inode->type, location);
+        ASTNode* constructed =
+            LowerCXXBracedClassInitToConstructor(braced, inode->type);
+        if (constructed == NULL) {
+          SemanticError(braced, "no matching constructor for initialization");
+          return true;
+        }
+        if (constants_only && !dependent_initializer) {
+          ASTNode* constant = ConstexprObjectInitializerForExpression(
+              inode->type, constructed);
+          if (constant == NULL) {
+            SemanticError(constructed,
+                          "Expression is not a compile-time constant");
+            return true;
+          }
+          return InitializeINode(inode, constant, true);
+        }
+        inode->expr = ASTNodeMove(constructed);
+        return AdvanceCurrent(inode->parent);
+      }
       // Lazy append of all struct members.
       AppendStructMembers(inode);
       return InitCurrentAndAdvance(inode->current, expr, constants_only);

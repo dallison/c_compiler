@@ -54,6 +54,8 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->declarator_ellipsis_count = 0;
   parser->context = context;
   parser->cxx_member_owner = NULL;
+  parser->saved_cxx_class_head = NULL;
+  parser->replaced_cxx_class_head = false;
   parser->template_substitution_source = NULL;
   parser->template_substitution_target = NULL;
   parser->enclosing_template_substitution_source = NULL;
@@ -70,7 +72,30 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->deferred_noexcept_specifiers = NULL;
 }
 
+static void TypeParserRestoreClassScope(TypeParser* parser) {
+  if (parser == NULL || !parser->replaced_cxx_class_head) {
+    return;
+  }
+  if (parser->syntax != NULL) {
+    parser->syntax->cxx_class_head = parser->saved_cxx_class_head;
+  }
+  parser->replaced_cxx_class_head = false;
+  parser->saved_cxx_class_head = NULL;
+}
+
+static void TypeParserInstallClassScope(TypeParser* parser, Struct* owner) {
+  if (parser == NULL || parser->syntax == NULL || owner == NULL) {
+    return;
+  }
+  if (!parser->replaced_cxx_class_head) {
+    parser->saved_cxx_class_head = parser->syntax->cxx_class_head;
+    parser->replaced_cxx_class_head = true;
+  }
+  parser->syntax->cxx_class_head = owner;
+}
+
 void TypeParserReset(TypeParser* parser) {
+  TypeParserRestoreClassScope(parser);
   parser->symbol = NULL;
   parser->storage = STO(implicit);
   parser->found_void = false;
@@ -102,6 +127,7 @@ void TypeParserReset(TypeParser* parser) {
 }
 
 void TypeParserDestruct(TypeParser* parser) {
+  TypeParserRestoreClassScope(parser);
   // Only frees the stack's backing array.  Any TypeRecords still referenced by
   // the stack are owned elsewhere (the combined result type) and must not be
   // freed here.
@@ -641,6 +667,29 @@ Struct* CurrentClassBeingParsed(TypeParser* parser) {
   if (parser != NULL && parser->syntax != NULL &&
       parser->syntax->cxx_class_head != NULL) {
     return parser->syntax->cxx_class_head;
+  }
+  return NULL;
+}
+
+// Nested types of the class currently being declared or whose out-of-line
+// member is being defined (`ElementwiseSwapPolicy` in
+// `void Storage<T>::SwapN(ElementwiseSwapPolicy, ...)`).  Ordinary lookup
+// does not see those members once the class body is closed.
+static Symbol* FindCurrentClassNestedType(TypeParser* parser, String* name) {
+  if (!CompilerIsCXX() || parser == NULL || name == NULL) {
+    return NULL;
+  }
+  for (Struct* owner = CurrentClassBeingParsed(parser); owner != NULL;
+       owner = owner->lexical_parent) {
+    StructMember* member = FindStructMember(owner, name);
+    if (member == NULL || member->symbol == NULL ||
+        member->symbol->type == NULL) {
+      continue;
+    }
+    if (StorageIs(member->symbol->storage, STO(typedef)) ||
+        SymbolIsTagSymbol(member->symbol)) {
+      return member->symbol;
+    }
   }
   return NULL;
 }
@@ -1614,7 +1663,22 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
           parser->syntax, &typedef_name, TC(decl));
       Symbol* symbol = SyntaxFindQualifiedSymbol(parser->syntax, &typedef_name);
-      if (symbol != NULL && StorageIs(symbol->storage, STO(typedef))) {
+      // `absl::InlinedVector<T, N, A>` written inside `InlinedVector` itself
+      // (a friend parameter, a return type) names the class being defined.
+      // Namespace lookup misses that tag until the class-head is published.
+      if (symbol == NULL && CompilerIsCXX() &&
+          typedef_name.components.length > 0) {
+        Struct* owner = CurrentClassBeingParsed(parser);
+        String* last = typedef_name.components.value.p[
+            typedef_name.components.length - 1];
+        if (owner != NULL && owner->tag_symbol != NULL &&
+            CurrentClassNameMatchesTypeName(owner, last)) {
+          symbol = owner->tag_symbol;
+        }
+      }
+      if (symbol != NULL &&
+          (StorageIs(symbol->storage, STO(typedef)) ||
+           SymbolIsTagSymbol(symbol))) {
         symbol->flags.used = true;
         Vector* args = NULL;
         if (symbol->flags.is_template) {
@@ -1754,6 +1818,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           symbol = tag_symbol;
         }
       }
+      if (symbol == NULL) {
+        symbol = FindCurrentClassNestedType(parser, &typedef_name);
+      }
       TypeRecord* current_class_type =
           ParseCurrentClassTemplateType(parser, &typedef_name);
       if (current_class_type != NULL) {
@@ -1855,6 +1922,11 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                                        (VectorElementDestructor)TemplateArgumentDelete,
                                        /*free_element=*/false);
           }
+        } else if (CompilerIsCXX() && SymbolIsTagSymbol(symbol)) {
+          symbol->flags.used = true;
+          LexNextToken(lex);
+          type_record = TypeRecordCopy(symbol->type);
+          type |= type_record->type;
         } else if (symbol->flags.is_template && symbol->type != NULL &&
                    TypeIsStructOrUnion(symbol->type)) {
           symbol->flags.used = true;
@@ -3524,6 +3596,7 @@ static void ResolveQualifiedMemberDeclarator(TypeParser* parser,
   }
 
   parser->cxx_member_owner = owner->type->info.struct_info;
+  TypeParserInstallClassScope(parser, parser->cxx_member_owner);
   String member_name;
   StringInit(&member_name, FullyQualifiedIdentifierLast(name));
   parser->cxx_member_definition =

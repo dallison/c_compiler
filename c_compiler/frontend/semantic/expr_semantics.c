@@ -11765,7 +11765,13 @@ static ASTNode* AnalyzeCastExpression(CastASTNode* node) {
   }
   if (TypeIsReference(node->cast_type)) {
     if (!TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type->next)) {
-      if (!TryCastReferenceRelatedClass(node)) {
+      // [expr.reinterpret.cast]/11: a glvalue of any object type can be
+      // cast to a reference to another object type.  C-style casts may
+      // perform that conversion.  Do not run a value conversion: the
+      // result refers to the same object (`std::addressof`).
+      bool reinterpret_reference =
+          node->kind == kCastReinterpret || node->kind == kCastCStyle;
+      if (!reinterpret_reference && !TryCastReferenceRelatedClass(node)) {
         SemanticConvertType(node->expr, node->cast_type->next, kConvertCast);
       }
     }

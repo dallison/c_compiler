@@ -814,14 +814,17 @@ __DAVECC_UNSIGNED(unsigned __int128);
 
 namespace __type_traits_detail {
 
-template <class... Args>
+// Head the pack with T so instantiation is `Helper<T, Args...>` rather than a
+// pack-only `Helper<Args...>`.  A class template whose only parameters are a
+// pack does not currently expose members inherited from `bool_constant<f(Args...)>`.
+template <class T, class... Args>
 struct __is_constructible
-    : bool_constant<__davecc_is_constructible(Args...) != 0> {
+    : bool_constant<__davecc_is_constructible(T, Args...) != 0> {
 };
 
-template <class... Args>
+template <class T, class... Args>
 struct __is_nothrow_constructible
-    : bool_constant<__davecc_is_nothrow_constructible(Args...) != 0> {
+    : bool_constant<__davecc_is_nothrow_constructible(T, Args...) != 0> {
 };
 
 template <class From, class To>
@@ -912,6 +915,11 @@ struct is_final : bool_constant<__davecc_is_final(T) != 0> {
 };
 
 template <class T>
+struct is_standard_layout
+    : bool_constant<__davecc_is_standard_layout(T) != 0> {
+};
+
+template <class T>
 struct is_trivially_copyable
     : bool_constant<__davecc_is_trivially_copyable(T) != 0> {
 };
@@ -939,7 +947,7 @@ struct is_compound
 
 template <class T, class... Args>
 struct is_constructible
-    : __type_traits_detail::__is_constructible<T, Args...> {
+    : bool_constant<__davecc_is_constructible(T, Args...) != 0> {
 };
 
 template <class T>
@@ -1030,7 +1038,7 @@ struct is_base_of : __type_traits_detail::__is_base_of<Base, Derived> {
 
 template <class T, class... Args>
 struct is_nothrow_constructible
-    : __type_traits_detail::__is_nothrow_constructible<T, Args...> {
+    : bool_constant<__davecc_is_nothrow_constructible(T, Args...) != 0> {
 };
 
 template <class T>
@@ -1044,7 +1052,8 @@ struct is_nothrow_copy_constructible
 
 template <class T>
 struct is_nothrow_move_constructible
-    : is_nothrow_constructible<T, add_rvalue_reference_t<T>> {
+    : bool_constant<__davecc_is_nothrow_constructible(
+          T, add_rvalue_reference_t<T>) != 0> {
 };
 
 template <class T, class U>
@@ -1273,6 +1282,9 @@ inline constexpr bool is_empty_v = is_empty<T>::value;
 
 template <class T>
 inline constexpr bool is_final_v = is_final<T>::value;
+
+template <class T>
+inline constexpr bool is_standard_layout_v = is_standard_layout<T>::value;
 
 template <class T>
 inline constexpr bool is_function_v = is_function<T>::value;

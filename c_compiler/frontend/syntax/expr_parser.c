@@ -178,6 +178,7 @@ static const TypeTraitName kTypeTraitNames[] = {
     {"__davecc_is_nothrow_destructible", kCXXTypeTraitIsNothrowDestructible},
     {"__davecc_is_nothrow_invocable", kCXXTypeTraitIsNothrowInvocable},
     {"__davecc_is_polymorphic", kCXXTypeTraitIsPolymorphic},
+    {"__davecc_is_standard_layout", kCXXTypeTraitIsStandardLayout},
     {"__davecc_is_swappable", kCXXTypeTraitIsSwappable},
     {"__davecc_is_swappable_with", kCXXTypeTraitIsSwappableWith},
     {"__davecc_is_trivially_assignable", kCXXTypeTraitIsTriviallyAssignable},
@@ -1468,8 +1469,11 @@ static ASTNode* BuildDependentMemberTemplateValueName(
 // NULL when `name` is not such a dependent template-scope value name.
 static ASTNode* BuildDependentTemplateScopeValueName(
     Syntax* syntax, FullyQualifiedIdentifier* name, SourceLocation location) {
+  // Class-template member functions are not themselves function templates, so
+  // a deferred `noexcept(Trait<allocator_type>::value)` may be replayed with
+  // `current_template_parameter_count == 0`.  Dependent arguments on the
+  // scope template-id are enough to keep `::member` unresolved.
   if (!CompilerIsCXX() || !name->is_qualified ||
-      syntax->current_template_parameter_count <= 0 ||
       name->components.length < 2 ||
       name->template_arguments.length != name->components.length) {
     return NULL;
@@ -1640,7 +1644,15 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           member->symbol->type != NULL &&
           TypeIsFunction(member->symbol->type) &&
           member->symbol->type->info.function.is_constructor;
-      if (member != NULL && !member->is_static && !member_is_constructor) {
+      // Nested type aliases and tags are class members, but they name types
+      // (`using Policy = Tag; Policy{}`).  Rewriting them through `this`
+      // turns a functional cast into leftover `{` after a member access.
+      bool member_is_type_name =
+          member != NULL && member->symbol != NULL &&
+          (StorageIs(member->symbol->storage, STO(typedef)) ||
+           SymbolIsTagSymbol(member->symbol));
+      if (member != NULL && !member->is_static && !member_is_constructor &&
+          !member_is_type_name) {
         ASTNode* member_access = NewMemberAccessFromThis(
             syntax, &name, /*allow_unresolved_member=*/false);
         if (member_access != NULL) {

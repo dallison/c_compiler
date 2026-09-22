@@ -31,33 +31,6 @@ extern "C" char* __PrintGeneralFormat(double, int, char*, size_t);
 
 namespace std {
 
-template <class Container>
-class back_insert_iterator {
- protected:
-  Container* container;
-
- public:
-  using iterator_category = output_iterator_tag;
-  using value_type = void;
-  using difference_type = ptrdiff_t;
-  using pointer = void;
-  using reference = void;
-
-  explicit back_insert_iterator(Container& value) : container(&value) {}
-  back_insert_iterator& operator=(const typename Container::value_type& value) {
-    container->push_back(value);
-    return *this;
-  }
-  back_insert_iterator& operator*() { return *this; }
-  back_insert_iterator& operator++() { return *this; }
-  back_insert_iterator operator++(int) { return *this; }
-};
-
-template <class Container>
-back_insert_iterator<Container> back_inserter(Container& container) {
-  return back_insert_iterator<Container>(container);
-}
-
 class format_error : public runtime_error {
  public:
   constexpr explicit format_error(const char* message)
