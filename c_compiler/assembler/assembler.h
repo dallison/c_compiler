@@ -38,6 +38,9 @@ typedef struct Assembler {
   int num_errors;
   bool parsing_layout_expression;
   AssemblerSymbol* (*define_label)(struct Assembler*, String*);
+  // GNU `N:` / `Nb` / `Nf` local labels.  Counts reset each assembly pass.
+  int* local_label_count;
+  size_t local_label_cap;
 } Assembler;
 
 struct AsmModule;
@@ -114,5 +117,9 @@ void AssemblerWarning(Assembler* assembler, const char* warn,
 
 int64_t AssemblerCurrentAddress(Assembler* assembler);
 void AssemblerExtractSymbolSuffix(String* symbol, String* name, String* suffix);
+
+void AssemblerNoteNumericLocalLabel(Assembler* assembler, int number);
+AssemblerSymbol* AssemblerLookupNumericLocalLabel(Assembler* assembler,
+                                                 int number, bool backward);
 
 #endif /* assembler_h */

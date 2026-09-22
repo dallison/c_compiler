@@ -50,6 +50,7 @@ struct ConstexprValue {
   bool lifetime_ended;
   ValueState state;
   int64_t ivalue;
+  int64_t ihi;
   double fvalue;
   ConstexprObject* object;
   ConstexprBinding* address_binding;
@@ -66,6 +67,7 @@ struct ConstexprBinding {
   bool is_floating;
   ValueState state;
   int64_t ivalue;
+  int64_t ihi;
   double fvalue;
   ConstexprObject* object;
   ConstexprBinding* address_binding;
@@ -135,6 +137,7 @@ static void PopConstexprBindings(ConstEvalContext* ctx, size_t mark);
 bool ConstexprValueAsInteger(ConstexprValue value, int64_t* result);
 static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
                                    TypeRecord* type, ConstexprValue* result);
+static unsigned __int128 ConstexprPackU128(int64_t lo, int64_t hi);
 static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
                                             ASTNode* expr);
 static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
@@ -991,6 +994,7 @@ static void PushConstexprBinding(ConstEvalContext* ctx, Symbol* symbol,
   binding->is_floating = value.is_floating;
   binding->state = value.state;
   binding->ivalue = value.ivalue;
+  binding->ihi = value.ihi;
   binding->fvalue = value.fvalue;
   binding->object = value.object;
   binding->address_binding = value.address_binding;
@@ -1940,6 +1944,7 @@ static bool StoreConstexprBinding(ConstEvalContext* ctx,
     binding->object = NULL;
     binding->is_floating = false;
     binding->ivalue = 0;
+    binding->ihi = 0;
     binding->fvalue = 0;
     return true;
   }
@@ -1956,6 +1961,7 @@ static bool StoreConstexprBinding(ConstEvalContext* ctx,
     binding->object = CloneConstexprObject(ctx, value.object);
     binding->is_floating = false;
     binding->ivalue = 0;
+    binding->ihi = 0;
     binding->fvalue = 0;
     return binding->object != NULL;
   }
@@ -1966,12 +1972,14 @@ static bool StoreConstexprBinding(ConstEvalContext* ctx,
     binding->is_floating = true;
     binding->fvalue = fvalue;
     binding->ivalue = (int64_t)fvalue;
+    binding->ihi = 0;
   } else {
     int64_t ivalue;
     ConstexprValueAsInteger(value, &ivalue);
     binding->object = NULL;
     binding->is_floating = false;
     binding->ivalue = ivalue;
+    binding->ihi = value.ihi;
     binding->fvalue = (double)ivalue;
   }
   return true;
@@ -2012,6 +2020,7 @@ static bool StoreConstexprSlot(ConstEvalContext* ctx, ConstexprValue* slot,
     slot->is_address = false;
     slot->is_floating = false;
     slot->ivalue = 0;
+    slot->ihi = 0;
     slot->fvalue = 0;
     slot->object = CloneConstexprObject(ctx, value.object);
     return slot->object != NULL;
@@ -2024,11 +2033,13 @@ static bool StoreConstexprSlot(ConstEvalContext* ctx, ConstexprValue* slot,
     slot->is_floating = true;
     slot->fvalue = fvalue;
     slot->ivalue = (int64_t)fvalue;
+    slot->ihi = 0;
   } else {
     int64_t ivalue;
     ConstexprValueAsInteger(value, &ivalue);
     slot->is_floating = false;
     slot->ivalue = ivalue;
+    slot->ihi = value.ihi;
     slot->fvalue = (double)ivalue;
   }
   return true;
@@ -2062,6 +2073,15 @@ static bool StoreConstexprHeapAddress(ConstexprValue address, TypeRecord* type,
       return false;
     }
     memcpy(memory, &fvalue, size);
+    memset(address.heap_block->states + address.heap_index, value.state, size);
+    return true;
+  }
+  if (TypeIsInt128(type)) {
+    unsigned __int128 wide = ConstexprPackU128(value.ivalue, value.ihi);
+    if (size > sizeof(wide)) {
+      return false;
+    }
+    memcpy(memory, &wide, size);
     memset(address.heap_block->states + address.heap_index, value.state, size);
     return true;
   }
@@ -2623,8 +2643,11 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
     expr = NewRealConstantASTNode(value->fvalue, TypeRecordCopy(type),
                                   location);
   } else {
-    expr = NewIntConstantASTNode(value->ivalue, TypeRecordCopy(type),
-                                 location);
+    expr = TypeIsInt128(type)
+               ? NewInt128ConstantASTNode(value->ivalue, value->ihi,
+                                          TypeRecordCopy(type), location)
+               : NewIntConstantASTNode(value->ivalue, TypeRecordCopy(type),
+                                       location);
   }
   return NewExpressionInitializerASTNode(expr, location);
 }
@@ -2671,6 +2694,185 @@ static bool EvaluateConstexprInlineCall(ConstEvalContext* ctx,
   }
   PopConstexprBindings(ctx, mark);
   return ok;
+}
+
+static unsigned __int128 ConstexprPackU128(int64_t lo, int64_t hi) {
+  return ((unsigned __int128)(uint64_t)hi << 64) | (uint64_t)lo;
+}
+
+static void ConstexprUnpackU128(unsigned __int128 value, ConstexprValue* result) {
+  result->is_object = false;
+  result->is_address = false;
+  result->object = NULL;
+  result->address_binding = NULL;
+  result->address_slot = NULL;
+  result->is_floating = false;
+  result->ivalue = (int64_t)(uint64_t)value;
+  result->ihi = (int64_t)(uint64_t)(value >> 64);
+  result->fvalue = 0;
+  result->state = kValueStateValid;
+}
+
+static bool EvaluateInt128Expression(ConstEvalContext* ctx, ASTNode* node,
+                                     unsigned __int128* result) {
+  if (node == NULL || result == NULL) {
+    return false;
+  }
+  if (node->op == AST_OP(number) || node->op == AST_OP(charconst) ||
+      node->op == AST_OP(charwide)) {
+    ConstantASTNode* constant = (ConstantASTNode*)node;
+    *result = ConstexprPackU128(constant->value.ivalue, constant->ihi);
+    return true;
+  }
+  if (node->op == AST_OP(identifier)) {
+    ConstexprBinding* binding =
+        FindConstexprBinding(ctx, ((IdentifierASTNode*)node)->symbol);
+    if (binding == NULL || binding->object != NULL) {
+      return false;
+    }
+    *result = ConstexprPackU128(binding->ivalue, binding->ihi);
+    return true;
+  }
+  if (node->op == AST_OP(cast) ||
+      (node->op >= AST_OP(i2s) && node->op <= AST_OP(b2ld))) {
+    ASTNode* sub = node->op == AST_OP(cast) ? ((CastASTNode*)node)->expr
+                                            : ((UnaryASTNode*)node)->sub;
+    if (sub != NULL && sub->type != NULL && TypeIsInt128(sub->type)) {
+      return EvaluateInt128Expression(ctx, sub, result);
+    }
+    int64_t value = 0;
+    if (!EvaluateIntegerExpressionInContext(ctx, sub, &value)) {
+      return false;
+    }
+    int64_t hi = 0;
+    if (sub->type != NULL && !TypeIsUnsigned(sub->type) && value < 0) {
+      hi = (int64_t)-1;
+    }
+    *result = ConstexprPackU128(value, hi);
+    return true;
+  }
+  if (node->op == AST_OP(uminus) || node->op == AST_OP(onescomp) ||
+      node->op == AST_OP(uplus)) {
+    unsigned __int128 value = 0;
+    if (!EvaluateInt128Expression(ctx, ((UnaryASTNode*)node)->sub, &value)) {
+      return false;
+    }
+    if (node->op == AST_OP(uminus)) {
+      value = (unsigned __int128)(-( __int128)value);
+    } else if (node->op == AST_OP(onescomp)) {
+      value = ~value;
+    }
+    *result = value;
+    return true;
+  }
+  switch (node->op) {
+    case AST_OP(plus):
+    case AST_OP(minus):
+    case AST_OP(mult):
+    case AST_OP(div):
+    case AST_OP(mod):
+    case AST_OP(and):
+    case AST_OP(bitor):
+    case AST_OP(exor):
+    case AST_OP(lshift):
+    case AST_OP(rshiftl):
+    case AST_OP(rshifta): {
+      BinaryASTNode* binary = (BinaryASTNode*)node;
+      unsigned __int128 left = 0;
+      unsigned __int128 right = 0;
+      if (!EvaluateInt128Expression(ctx, binary->left, &left) ||
+          !EvaluateInt128Expression(ctx, binary->right, &right)) {
+        return false;
+      }
+      bool is_unsigned =
+          node->type != NULL && TypeIsUnsigned(node->type);
+      switch (node->op) {
+        case AST_OP(plus):
+          *result = left + right;
+          break;
+        case AST_OP(minus):
+          *result = left - right;
+          break;
+        case AST_OP(mult):
+          *result = left * right;
+          break;
+        case AST_OP(div):
+          if (right == 0) {
+            return false;
+          }
+          *result = is_unsigned ? left / right
+                                : (unsigned __int128)((__int128)left /
+                                                      (__int128)right);
+          break;
+        case AST_OP(mod):
+          if (right == 0) {
+            return false;
+          }
+          *result = is_unsigned ? left % right
+                                : (unsigned __int128)((__int128)left %
+                                                      (__int128)right);
+          break;
+        case AST_OP(and):
+          *result = left & right;
+          break;
+        case AST_OP(bitor):
+          *result = left | right;
+          break;
+        case AST_OP(exor):
+          *result = left ^ right;
+          break;
+        case AST_OP(lshift):
+          *result = left << (uint64_t)right;
+          break;
+        case AST_OP(rshiftl):
+          *result = left >> (uint64_t)right;
+          break;
+        case AST_OP(rshifta):
+          *result = (unsigned __int128)((__int128)left >> (uint64_t)right);
+          break;
+        default:
+          return false;
+      }
+      return true;
+    }
+    default:
+      break;
+  }
+  if (node->op == AST_OP(call) || node->op == AST_OP(inline_call)) {
+    ConstexprValue value = {0};
+    if (!EvaluateConstexprCall(ctx, node, &value)) {
+      return false;
+    }
+    *result = ConstexprPackU128(value.ivalue, value.ihi);
+    return true;
+  }
+  int64_t value = 0;
+  if (!EvaluateIntegerExpressionInContext(ctx, node, &value)) {
+    return false;
+  }
+  int64_t hi = 0;
+  if (node->type != NULL && !TypeIsUnsigned(node->type) && value < 0) {
+    hi = (int64_t)-1;
+  }
+  *result = ConstexprPackU128(value, hi);
+  return true;
+}
+
+bool EvaluateInt128Constant(ASTNode* node, int64_t* lo, int64_t* hi) {
+  if (node == NULL || lo == NULL || hi == NULL) {
+    return false;
+  }
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  unsigned __int128 wide = 0;
+  bool ok = EvaluateInt128Expression(&ctx, node, &wide);
+  ConstEvalContextDestruct(&ctx);
+  if (!ok) {
+    return false;
+  }
+  *lo = (int64_t)(uint64_t)wide;
+  *hi = (int64_t)(uint64_t)(wide >> 64);
+  return true;
 }
 
 static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
@@ -2769,6 +2971,14 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
       }
     }
     return EvaluateConstexprInitializer(ctx, type, node, result);
+  }
+  if (type != NULL && TypeIsInt128(type)) {
+    unsigned __int128 wide = 0;
+    if (!EvaluateInt128Expression(ctx, node, &wide)) {
+      return false;
+    }
+    ConstexprUnpackU128(wide, result);
+    return true;
   }
   if (type != NULL && TypeIsFloatingPoint(type)) {
     double value;
@@ -8144,6 +8354,7 @@ static ConstexprValue ConstexprValueFromBinding(ConstexprBinding* binding) {
       .is_floating = binding->is_floating,
       .state = binding->state,
       .ivalue = binding->ivalue,
+      .ihi = binding->ihi,
       .fvalue = binding->fvalue,
       .object = binding->object,
       .address_binding = binding->address_binding,

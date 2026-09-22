@@ -66,6 +66,7 @@
 #define DAVE_SYS_RANDOM_BYTES 60
 #define DAVE_SYS_FS_DESCRIPTOR_STATUS 61
 #define DAVE_SYS_ENVIRONMENT_VALUE 62
+#define DAVE_SYS_POLL 63
 
 #define DAVE_SYS_6502_EXIT 1
 #define DAVE_SYS_6502_ABORT 8
@@ -131,6 +132,7 @@
   X(TZDB_LEAP_INFO)                 \
   X(RANDOM_BYTES)                   \
   X(FS_DESCRIPTOR_STATUS)           \
-  X(ENVIRONMENT_VALUE)
+  X(ENVIRONMENT_VALUE)              \
+  X(POLL)
 
 #endif

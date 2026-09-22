@@ -711,7 +711,17 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
   }
 
   // Try to fold integer and floating point constant expressions.
-  if (TypeIsIntegral(node->type)) {
+  if (TypeIsInt128(node->type)) {
+    int64_t lo = 0;
+    int64_t hi = 0;
+    if (EvaluateInt128Constant((ASTNode*)node, &lo, &hi)) {
+      ASTNode* const_node =
+          NewInt128ConstantASTNode(lo, hi, node->type, node->location);
+      ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
+      const_node->flags |= kASTAnalyzed;
+      return const_node;
+    }
+  } else if (TypeIsIntegral(node->type)) {
     int64_t value;
     bool ok = EvaluateIntegerExpression((ASTNode*)node, &value);
     if (ok) {
@@ -959,7 +969,8 @@ static bool TypeHasDoubleConversionRank(TypeRecord* type) {
 
 bool (*type_ranks[])(TypeRecord*) = {
     TypeIsBool,       TypeIsCharFamily, TypeIsShort, TypeIsInt,
-    TypeIsLong,       TypeIsLongLong, TypeUsesFloat32Representation,
+    TypeIsLong,       TypeIsLongLong, TypeIsInt128,
+    TypeUsesFloat32Representation,
     TypeHasDoubleConversionRank, TypeIsLongDouble, TypeIsVoid, NULL,
 };
 
@@ -969,6 +980,14 @@ bool (*type_ranks[])(TypeRecord*) = {
 static int GetRank(TypeRecord* type) {
   if (TypeIsBitInt(type)) {
     return type->bit_width * 16;
+  }
+  if (TypeIsWchar(type)) {
+    TypeRecord as_int = {
+        .type = kTypeInt,
+        .declarator = kDeclPrimitive,
+        .size = type->size,
+    };
+    return GetRank(&as_int);
   }
   for (int i = 0; type_ranks[i] != NULL; i++) {
     if (type_ranks[i](type)) {
@@ -3387,21 +3406,29 @@ static ASTNode* LowerCXXInitializerListBracedInit(TypeRecord* target_type,
 
 static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target);
 
-static bool CXXInitializerListBracedInitIsViable(ASTNode* actual,
-                                                 TypeRecord* formal_type) {
+// Rank for list-initializing `std::initializer_list<X>` from a braced-init
+// list.  Returns the worst element conversion rank ([over.ics.list]/4), or
+// -1 if any element cannot convert to X.  User-defined conversions such as
+// `true_type::operator bool()` must be considered so Abseil's
+// `Or({integral_constant<bool, V>{}...})` SFINAE (identity
+// `initializer_list<false_type>` vs converting `initializer_list<bool>`)
+// can distinguish an all-false pack from a pack that contains a true.
+static int CXXInitializerListBracedInitRank(ASTNode* actual,
+                                            TypeRecord* formal_type) {
   if (actual == NULL || actual->op != AST_OP(braced_init) ||
       !TypeIsCXXInitializerList(formal_type)) {
-    return false;
+    return -1;
   }
   TypeRecord* element_type = TypeCXXInitializerListElement(formal_type);
   if (element_type == NULL) {
-    return false;
+    return -1;
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)actual;
+  int worst = 0;
   for (size_t i = 0; i < braced->initializers->length; i++) {
     ASTNode* initializer = braced->initializers->value.p[i];
     if (initializer == NULL) {
-      return false;
+      return -1;
     }
     // Unwrap an `expr_init` wrapper to inspect the element itself, which may be
     // a nested braced-init-list (e.g. `{{1, 1}, {2, 2}}` initializing an
@@ -3415,23 +3442,33 @@ static bool CXXInitializerListBracedInitIsViable(ASTNode* actual,
       // element type (via a constructor / aggregate init, or as a further
       // initializer_list).  The array-backed lowering handles the actual
       // construction element-by-element, so only viability matters here.
-      if (CXXBracedInitTargetRank(element, element_type) < 0 &&
-          !CXXInitializerListBracedInitIsViable(element, element_type)) {
-        return false;
+      int nested = CXXBracedInitTargetRank(element, element_type);
+      if (nested < 0) {
+        nested = CXXInitializerListBracedInitRank(element, element_type);
+      }
+      if (nested < 0) {
+        return -1;
+      }
+      if (nested > worst) {
+        worst = nested;
       }
       continue;
     }
     if (initializer->op != AST_OP(expr_init)) {
-      return false;
+      return -1;
     }
     ExpressionInitializerASTNode* expr_init =
         (ExpressionInitializerASTNode*)initializer;
     expr_init->expr = AnalyzeExpression(expr_init->expr);
-    if (OverloadBaseConversionRank(expr_init->expr->type, element_type) < 0) {
-      return false;
+    int rank = OverloadConversionRank(expr_init->expr, element_type);
+    if (rank < 0) {
+      return -1;
+    }
+    if (rank > worst) {
+      worst = rank;
     }
   }
-  return true;
+  return worst;
 }
 
 static ASTNode* ConvertCXXInitializerListArgument(ASTNode* actual,
@@ -6985,8 +7022,9 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   if (reference) {
     target = formal_type->next;
     if (actual != NULL && actual->op == AST_OP(braced_init)) {
-      if (CXXInitializerListBracedInitIsViable(actual, target)) {
-        return 0;
+      int il_rank = CXXInitializerListBracedInitRank(actual, target);
+      if (il_rank >= 0) {
+        return il_rank;
       }
       int base = CXXBracedInitTargetRank(actual, target);
       if (base < 0) {
@@ -7035,8 +7073,9 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   }
 
   if (actual != NULL && actual->op == AST_OP(braced_init)) {
-    if (CXXInitializerListBracedInitIsViable(actual, target)) {
-      return 0;
+    int il_rank = CXXInitializerListBracedInitRank(actual, target);
+    if (il_rank >= 0) {
+      return il_rank;
     }
     int base = CXXBracedInitTargetRank(actual, target);
     return base < 0 ? -1 : base * 10;
@@ -7077,7 +7116,8 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     // Exact function-to-pointer conversion (an lvalue transformation).
     return 5;
   }
-  if (IsZeroIntegerConstant(actual) && TypeIsPointer(target)) {
+  if (IsZeroIntegerConstant(actual) &&
+      (TypeIsPointer(target) || TypeIsMemberPointer(target))) {
     return 25;
   }
   // As a last resort consider a user-defined conversion through a converting
@@ -9157,6 +9197,19 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   }
 
   TypeRecord* type = TypeRecordCopy(construction_type);
+  // A template-id with dependent arguments (`integral_constant<bool, C<T>>`)
+  // cannot be instantiated yet.  Keep the written arguments on the result
+  // type so later overload resolution still sees a dependent class type
+  // instead of the primary template (which would match every specialization).
+  if (dependent_explicit_args && node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* args_id = (IdentifierASTNode*)node->left;
+    if (type->template_arguments == NULL && args_id->symbol != NULL) {
+      type->template_origin = args_id->symbol;
+      type->template_arguments =
+          TemplateArgumentVectorCopy(args_id->template_arguments);
+      type->template_parameter_summary = kTypeTemplateParameterSummaryUnknown;
+    }
+  }
   if (placeholder_type != NULL) {
     TypeRecordDelete(placeholder_type);
   }
@@ -9538,7 +9591,11 @@ static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args) {
 static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
   for (size_t i = 0; call != NULL && i < call->children->length; i++) {
     ASTNode* actual = call->children->value.p[i];
-    if (actual != NULL && TypeContainsTemplateParameter(actual->type)) {
+    if (actual == NULL) {
+      continue;
+    }
+    if (TypeContainsTemplateParameter(actual->type) ||
+        ExpressionIsTemplateDependent(actual)) {
       return true;
     }
   }
@@ -10803,6 +10860,19 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
       return;
     }
     if (qualified_base_lookup) {
+      // `expr.StorageT<I>::get` stores the alias template-id as owner_type.
+      // Until that id materializes to a class, do not resolve `get` against
+      // the primary pattern (that would bind the `&` overload and reject an
+      // xvalue return of `T&&`).
+      if (member_node->owner_type != NULL &&
+          !TypeIsStructOrUnion(member_node->owner_type) &&
+          (TypeContainsTemplateParameter(member_node->owner_type) ||
+           member_node->owner_type->template_origin != NULL)) {
+        TypeRecord* placeholder =
+            NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+        ASTNodeSetType((ASTNode*)node, placeholder);
+        return;
+      }
       Struct* qualified_owner =
           member_node->owner_type != NULL &&
                   member_node->owner_type->info.struct_info != NULL
@@ -12120,11 +12190,14 @@ static void AnalyzeBuiltinBitOperation(VectorASTNode* node) {
     return;
   }
   ASTNode* value = node->children->value.p[0];
-  if (!TypeIsIntegral(value->type) || !TypeIsUnsigned(value->type)) {
+  bool allow_signed = node->base.op == AST_OP(builtin_bswap);
+  if (!TypeIsIntegral(value->type) ||
+      (!allow_signed && !TypeIsUnsigned(value->type))) {
     SemanticError(value, "bit builtin requires an unsigned integer operand");
   }
   bool rotate = node->base.op == AST_OP(builtin_rotl) ||
-                node->base.op == AST_OP(builtin_rotr);
+                node->base.op == AST_OP(builtin_rotr) ||
+                node->base.op == AST_OP(builtin_bswap);
   if (node->children->length == 2 &&
       !TypeIsIntegral(((ASTNode*)node->children->value.p[1])->type)) {
     SemanticError(node->children->value.p[1],
@@ -12615,6 +12688,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(builtin_popcount):
     case AST_OP(builtin_rotl):
     case AST_OP(builtin_rotr):
+    case AST_OP(builtin_bswap):
       AnalyzeBuiltinBitOperation(vector_node);
       break;
 

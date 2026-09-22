@@ -190,12 +190,16 @@ inline bool TypeIsVLA(TypeRecord* type) {
 // than a constraint violation.
 bool TypeArrayBoundsEqual(ArrayInfo* a, ArrayInfo* b);
 
+bool TypeIsInt128(TypeRecord* type);
+bool TypeIsWchar(TypeRecord* type);
+
 inline bool TypeIsIntegral(TypeRecord* type) {
   return TypeIsPrimitive(type) &&
          (type->type & (kTypeInt | kTypeShort | kTypeChar | kTypeChar8 |
                         kTypeChar16 | kTypeChar32 | kTypeLong |
                         kTypeLongLong | kTypeBool | kTypeEnum | kTypeUnsigned |
-                        kTypeSigned | kTypeBitInt)) != 0;
+                        kTypeSigned | kTypeBitInt | kTypeInt128 |
+                        kTypeWchar)) != 0;
 }
 
 inline bool TypeIsFloatingPoint(TypeRecord* type) {
@@ -274,6 +278,7 @@ inline bool TypeIsLong(TypeRecord* type) {
 inline bool TypeIsLongLong(TypeRecord* type) {
   return TypeIsPrimitive(type) && (type->type & kTypeLongLong) != 0;
 }
+bool TypeIsUnsignedInt128(TypeRecord* type);
 
 inline bool TypeIsUnsignedInt(TypeRecord* type) {
   return TypeIsUnsigned(type) && TypeIsInt(type);

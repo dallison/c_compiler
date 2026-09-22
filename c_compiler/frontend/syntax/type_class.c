@@ -76,6 +76,48 @@ bool CurrentTemplateParameterIsPack(Syntax* syntax, int index) {
   return false;
 }
 
+static bool TemplateArgumentContainsParameterPack(Syntax* syntax,
+                                                 TemplateArgument* arg);
+
+bool TypeContainsParameterPack(Syntax* syntax, TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    int parameter_index = -1;
+    if (TypeIsTemplateParameterPlaceholder(current, &parameter_index) &&
+        CurrentTemplateParameterIsPack(syntax, parameter_index)) {
+      return true;
+    }
+    if (current->template_parameter_index >= 0 &&
+        CurrentTemplateParameterIsPack(syntax,
+                                       current->template_parameter_index)) {
+      return true;
+    }
+    if (current->template_arguments != NULL) {
+      for (size_t i = 0; i < current->template_arguments->length; i++) {
+        if (TemplateArgumentContainsParameterPack(
+                syntax, current->template_arguments->value.p[i])) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+static bool TemplateArgumentContainsParameterPack(Syntax* syntax,
+                                                 TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->is_pack_expansion || arg->references_parameter_pack) {
+    return true;
+  }
+  if (arg->template_parameter_index >= 0 &&
+      CurrentTemplateParameterIsPack(syntax, arg->template_parameter_index)) {
+    return true;
+  }
+  return arg->type != NULL && TypeContainsParameterPack(syntax, arg->type);
+}
+
 static TemplateArgument* NewTemplateParameterPatternArgument(
     TemplateParameter* param) {
   if (param == NULL) {
@@ -862,10 +904,16 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
         saved_specialization_tag_stack = parser->syntax->local_tag_stack;
         saved_specialization_namespace = parser->syntax->current_namespace;
         parser->syntax->local_tag_stack = NULL;
-        parser->syntax->current_namespace =
-            specialization_template->namespace_ != NULL
-                ? specialization_template->namespace_
-                : compiler->global_namespace;
+        // Nested class templates are not namespace members, so their
+        // `namespace_` is NULL.  Falling back to the global namespace would
+        // hide enclosing-namespace names from the specialization body (e.g.
+        // Abseil's `(IsCompatibleConversion)(...)` inside
+        // `CoreImpl::IsCompatibleAnyInvocable<AnyInvocable<Sig>>`).  Keep the
+        // current namespace when the template does not record one.
+        if (specialization_template->namespace_ != NULL) {
+          parser->syntax->current_namespace =
+              specialization_template->namespace_;
+        }
         using_specialization_namespace = true;
       }
     }

@@ -18,6 +18,7 @@ namespace std {
 
 using ::size_t;
 using ::ptrdiff_t;
+using ::max_align_t;
 // std::nullptr_t is already provided directly by <stddef.h> in namespace std.
 
 #if __cplusplus >= 201703L

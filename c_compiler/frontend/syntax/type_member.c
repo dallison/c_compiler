@@ -1377,8 +1377,12 @@ static void AddFunctionTemplateParameterScopeSymbols(Syntax* syntax,
     } else {
       continue;
     }
-    Symbol* symbol =
-        NewSymbol(parameter->name.value, parameter_type, STO(typedef));
+    // NTTPs must not be typedefs: `StorageT<I>` would then parse `I` as the
+    // parameter's *type* (`int`) rather than as a dependent value, and the
+    // template-id would look concrete.
+    Storage storage = parameter->kind == kTemplateParameterType ? STO(typedef)
+                                                                : STO(implicit);
+    Symbol* symbol = NewSymbol(parameter->name.value, parameter_type, storage);
     symbol->flags.invented = true;
     symbol->flags.is_template_parameter = true;
     symbol->flags.is_template_type_parameter =
@@ -1631,10 +1635,10 @@ static void FinishInlineMemberFunctionBody(
 // Decide whether an inline member function body should be parsed later, once
 // the whole class is defined, rather than at the point it textually appears.
 // Deferring gives the body a complete-class context so unqualified names bind
-// to members declared later in the class (e.g. `front()` calling `begin()`),
-// matching [class.mem]/7.  Member templates carry their own template-parameter
-// scope that is opened and closed around this call, so their bodies must be
-// parsed eagerly while that scope is live.
+// to members declared later in the class (e.g. `front()` calling `begin()`,
+// or a constructor template calling a later-declared `InitializeStorage`),
+// matching [class.mem]/7.  Member templates restore their template-parameter
+// scope in FlushDeferredInlineMemberBodies before the body is re-parsed.
 static bool ShouldDeferInlineMemberBody(TypeParser* parser,
                                         Symbol* member_symbol) {
   if (!CompilerIsCXX()) {
@@ -1645,10 +1649,6 @@ static bool ShouldDeferInlineMemberBody(TypeParser* parser,
   }
   if (member_symbol == NULL || member_symbol->type == NULL ||
       !TypeIsFunction(member_symbol->type)) {
-    return false;
-  }
-  if (member_symbol->flags.is_template ||
-      member_symbol->type->info.function.template_parameter_count > 0) {
     return false;
   }
   return true;
@@ -1762,11 +1762,33 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
     lex->pos = 0;
     LexNextToken(lex);  // Prime the first token (the opening '{').
 
+    Vector* old_template_parameters = syntax->current_template_parameters;
+    int old_template_parameter_count = syntax->current_template_parameter_count;
+    bool old_parsing_template = syntax->parsing_template_declaration;
+    TypeRecord* func = entry->member_symbol->type;
+    if (func != NULL && TypeIsFunction(func) &&
+        func->info.function.template_parameter_count > 0) {
+      syntax->current_template_parameters =
+          &func->info.function.template_parameters;
+      syntax->current_template_parameter_count =
+          func->info.function.template_parameter_base +
+          func->info.function.template_parameter_count;
+      syntax->parsing_template_declaration = true;
+    }
+
     syntax->context = kParsingBlockScope;
     SyntaxOpenScope(syntax);
+    if (func != NULL && TypeIsFunction(func) &&
+        func->info.function.template_parameter_count > 0) {
+      AddFunctionTemplateParameterScopeSymbols(syntax, func);
+    }
     AddInlineFunctionScopeSymbols(syntax, entry->member_symbol->type);
     FinishInlineMemberFunctionBody(parser, entry->member_symbol,
                                    &entry->initializers, entry->old_context);
+
+    syntax->current_template_parameters = old_template_parameters;
+    syntax->current_template_parameter_count = old_template_parameter_count;
+    syntax->parsing_template_declaration = old_parsing_template;
 
     lex->suppress_preprocessing = false;
     lex->source = NULL;  // Real source is reinstated by end_checkpoint below.
@@ -2983,16 +3005,29 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         // static method) can reference it without the Class:: qualifier, as
         // C++ class-scope lookup requires.  Only the first overload needs to be
         // injected: overload resolution recovers the full set from the owning
-        // struct via the function's cxx_member_owner.  Non-static members are
-        // intentionally excluded so unqualified uses still route through the
-        // implicit `this->` member access.
-        if (member != NULL && member->is_static && member->is_member_function &&
-            member->symbol != NULL) {
+        // struct via the function's cxx_member_owner.  Non-static *non-template*
+        // members stay out of this table so unqualified uses still route
+        // through implicit `this->`.  Member function templates must be
+        // visible though: `InitializeStorage<T>(args)` has to see a template
+        // before `<` is parsed as less-than.
+        if (member != NULL && member->is_member_function &&
+            member->symbol != NULL &&
+            (member->is_static || member->symbol->flags.is_template)) {
           Symbol* scope_fn = SymbolClone(member->symbol);
           scope_fn->overload_next = NULL;
+          // Member templates parse inside an extra parameter scope that is
+          // closed at the end of the member.  Inject into the class body
+          // scope so the name survives that pop and later deferred bodies
+          // can see `foo<T>(...)` as a function template.
+          LocalSymbolTable* saved_scope = parser->syntax->local_symbol_stack;
+          if (is_member_template && saved_scope != NULL &&
+              saved_scope->prev != NULL) {
+            parser->syntax->local_symbol_stack = saved_scope->prev;
+          }
           if (!SyntaxAddSymbol(parser->syntax, scope_fn)) {
             SymbolDelete(scope_fn);
           }
+          parser->syntax->local_symbol_stack = saved_scope;
         }
 
         // Check for bitfield.

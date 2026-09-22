@@ -14,6 +14,7 @@
 #include "loader_arch.h"
 #include "loader_dynamic.h"
 #include <fcntl.h>
+#include <poll.h>
 #include <inttypes.h>
 #include <math.h>
 #include <sched.h>
@@ -923,6 +924,12 @@ static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
           a1, (DaveHostFilesystemStat*)ResolveHostPtr(
                   interpreter, (uint32_t)a2,
                   sizeof(DaveHostFilesystemStat)));
+    case ARM_SYSCALL_POLL: {
+      nfds_t n = (nfds_t)a2;
+      void* fds = ResolveHostPtr(interpreter, (uint32_t)a1,
+                                 n * sizeof(struct pollfd));
+      return (int32_t)poll((struct pollfd*)fds, n, a3);
+    }
     case ARM_SYSCALL_ENVIRONMENT_VALUE: {
       const char* name =
           (const char*)ResolveHostPtr(interpreter, (uint32_t)a1, 1);

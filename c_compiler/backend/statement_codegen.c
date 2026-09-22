@@ -1385,7 +1385,8 @@ static void GenerateVariableDeclaration(Generator* gen,
     if (!TypeIsArray(node->symbol->type) &&
         !TypeIsVector(node->symbol->type) &&
         !TypeIsStructOrUnion(node->symbol->type) &&
-        !TypeUsesLongDoubleRepresentation(node->symbol->type)) {
+        !TypeUsesLongDoubleRepresentation(node->symbol->type) &&
+        !TypeIsInt128(node->symbol->type)) {
       IRNode* zero =
           TypeIsFloatingPoint(node->symbol->type)
               ? NewFloatingPointIRConstant(node->symbol->type, 0.0)

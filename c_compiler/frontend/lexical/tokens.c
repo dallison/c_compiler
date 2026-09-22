@@ -118,6 +118,8 @@ const char* TokenName(Token tok) {
       return "inline";
     case TOK(int):
       return "int";
+    case TOK(int128):
+      return "__int128";
     case TOK(lbrace):
       return "{";
     case TOK(less):

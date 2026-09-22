@@ -35,6 +35,9 @@ typedef enum {
   kCXXTypeTraitIsMemberObjectPointer,
   kCXXTypeTraitIsMemberFunctionPointer,
   kCXXTypeTraitMemberPointerDirectObject,
+  kCXXTypeTraitIsPolymorphic,
+  kCXXTypeTraitIsEmpty,
+  kCXXTypeTraitIsFinal,
 } CXXTypeTraitKind;
 
 bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,

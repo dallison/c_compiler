@@ -88,6 +88,7 @@ static ReservedWord reserved_words[] = {
   {"__declspec", TOK(declspec)},
   {"__inline", TOK(inline)},
   {"__inline__", TOK(inline)},
+  {"__int128", TOK(int128)},
   {"__signed", TOK(signed)},
   {"__signed__", TOK(signed)},
   {"__thread", TOK(thread)},
@@ -170,6 +171,7 @@ static CXXReservedWord cxx_reserved_words[] = {
   {"__declspec", TOK(declspec), kLanguageStandardCXX98},
   {"__inline", TOK(inline), kLanguageStandardCXX98},
   {"__inline__", TOK(inline), kLanguageStandardCXX98},
+  {"__int128", TOK(int128), kLanguageStandardCXX98},
   {"__restrict", TOK(restrict), kLanguageStandardCXX98},
   {"__restrict__", TOK(restrict), kLanguageStandardCXX98},
   {"__signed", TOK(signed), kLanguageStandardCXX98},
@@ -2226,7 +2228,10 @@ static void CollectNumber(Lex* lex, char ch) {
     // Now we can determine the type.  If we've seen a dot
     // or exponent then we are a floating point number.
     // A suffix of ‘F’ or ‘f’ is also floating point.
-    bool isfp = seendot || seenexp || toupper(CurrentChar(lex)) == 'F';
+    // GNU as local labels use `2f` / `1b`.  Do not treat a trailing F as a
+    // float suffix in assembler mode.
+    bool isfp = seendot || seenexp ||
+                (!lex->assembler_mode && toupper(CurrentChar(lex)) == 'F');
     
     // Collect the appropriate type of suffix.
     if (isfp) {

@@ -209,6 +209,8 @@ static bool AssemblerInitCommon(Assembler* assembler, int16_t elf_machine_type,
   assembler->num_errors = 0;
   assembler->parsing_layout_expression = false;
   assembler->define_label = DefineLabel;
+  assembler->local_label_count = NULL;
+  assembler->local_label_cap = 0;
   return true;
 }
 
@@ -274,6 +276,9 @@ void AssemblerDestruct(Assembler* assembler) {
   PreprocessorDestruct(&assembler->preprocessor);
   MapDestruct(&assembler->directives);
   AsmObjectDestruct(&assembler->object);
+  free(assembler->local_label_count);
+  assembler->local_label_count = NULL;
+  assembler->local_label_cap = 0;
 }
 
 AssemblerSymbol* AssemblerFindSymbol(Assembler* assembler, const char* name) {
@@ -351,6 +356,82 @@ static AssemblerSymbol* DefineLabel(Assembler* assembler, String* spelling) {
   return AsmObjectDefineLabel(&assembler->object, assembler, spelling);
 }
 
+static void LocalLabelName(char* buf, size_t buflen, int number, int instance) {
+  snprintf(buf, buflen, ".Lnl_%d_%d", number, instance);
+}
+
+static void EnsureLocalLabelCap(Assembler* assembler, int number) {
+  if (number < 0) {
+    return;
+  }
+  size_t need = (size_t)number + 1;
+  if (need <= assembler->local_label_cap) {
+    return;
+  }
+  size_t new_cap = assembler->local_label_cap == 0 ? 16 : assembler->local_label_cap;
+  while (new_cap < need) {
+    new_cap *= 2;
+  }
+  int* grown = realloc(assembler->local_label_count, new_cap * sizeof(int));
+  if (grown == NULL) {
+    AssemblerError(assembler, "Out of memory for local labels");
+    return;
+  }
+  memset(grown + assembler->local_label_cap, 0,
+         (new_cap - assembler->local_label_cap) * sizeof(int));
+  assembler->local_label_count = grown;
+  assembler->local_label_cap = new_cap;
+}
+
+void AssemblerNoteNumericLocalLabel(Assembler* assembler, int number) {
+  EnsureLocalLabelCap(assembler, number);
+  if (number < 0 || assembler->local_label_count == NULL) {
+    AssemblerError(assembler, "Invalid local label %d", number);
+    return;
+  }
+  assembler->local_label_count[number]++;
+  char name[64];
+  LocalLabelName(name, sizeof(name), number, assembler->local_label_count[number]);
+  String spelling;
+  StringInit(&spelling, name);
+  if (assembler->object.pass == 1) {
+    assembler->define_label(assembler, &spelling);
+  } else {
+    AssemblerSymbol* symbol = AssemblerFindSymbol(assembler, spelling.value);
+    if (symbol != NULL) {
+      symbol->section = assembler->object.current_section;
+      symbol->value = AssemblerCurrentAddress(assembler);
+    }
+  }
+  StringDestruct(&spelling);
+}
+
+AssemblerSymbol* AssemblerLookupNumericLocalLabel(Assembler* assembler,
+                                                 int number, bool backward) {
+  EnsureLocalLabelCap(assembler, number);
+  if (number < 0 || assembler->local_label_count == NULL) {
+    AssemblerError(assembler, "Invalid local label %d", number);
+    return NULL;
+  }
+  int instance = backward ? assembler->local_label_count[number]
+                          : assembler->local_label_count[number] + 1;
+  if (instance <= 0) {
+    AssemblerError(assembler, "No previous local label %d", number);
+    return NULL;
+  }
+  char name[64];
+  LocalLabelName(name, sizeof(name), number, instance);
+  AssemblerSymbol* symbol = AssemblerFindSymbol(assembler, name);
+  if (symbol == NULL) {
+    symbol = NewAssemblerSymbol(name, assembler->object.current_section,
+                                SYM_TYPE(none), SYM_BIND(local),
+                                AssemblerCurrentAddress(assembler));
+    symbol->is_forward_declared = true;
+    AssemblerInsertSymbol(assembler, symbol);
+  }
+  return symbol;
+}
+
 static void Assemble(Assembler* assembler,
                      void (*run_func)(Assembler*, String*)) {
   String word = {0};
@@ -387,6 +468,14 @@ static void Assemble(Assembler* assembler,
           run_func(assembler, &word);  // Run the assembly pass.
         }
       }
+    } else if (LexLookingAt(&assembler->lex, TOK(number))) {
+      int number = (int)assembler->lex.number;
+      LexNextToken(&assembler->lex);
+      if (LexMatch(&assembler->lex, TOK(colon))) {
+        AssemblerNoteNumericLocalLabel(assembler, number);
+      } else {
+        AssemblerError(assembler, "Unexpected numeric token");
+      }
     }
     // In assembler mode the lexical analyzer doesn't read past the
     // end of line.  Read another line now.
@@ -398,9 +487,13 @@ static void Assemble(Assembler* assembler,
 
 void AssemblerReset(Assembler* assembler, bool clear_symbols) {
   AsmObjectReset(&assembler->object, clear_symbols);
+  PreprocessorReset(&assembler->preprocessor);
+  if (assembler->local_label_count != NULL && assembler->local_label_cap > 0) {
+    memset(assembler->local_label_count, 0,
+           assembler->local_label_cap * sizeof(int));
+  }
   LexRewind(&assembler->lex);
   LexNextToken(&assembler->lex);
-  PreprocessorReset(&assembler->preprocessor);
 }
 
 static void AssemblerAdvancePass(Assembler* assembler) {
@@ -1155,6 +1248,35 @@ static int DefaultSectionAlignment(const Assembler* assembler) {
   return assembler->object.elf_machine_type == ELF_MACHINE_TYPEW65C02 ? 1 : 8;
 }
 
+static bool IsMachOSectionName(const char* name) {
+  return name != NULL && name[0] == '_' && name[1] == '_';
+}
+
+static void MapMachOSectionName(String* name, const char* section,
+                                int32_t* flags, int32_t* type) {
+  const char* mapped = name->value;
+  *flags = SHF(alloc);
+  *type = SHT(progbits);
+  if (strcmp(name->value, "__TEXT") == 0 &&
+      (section == NULL || strcmp(section, "__text") == 0)) {
+    mapped = ".text";
+    *flags = SHF(alloc) | SHF(execinstr);
+  } else if (strcmp(name->value, "__DATA") == 0 && section != NULL &&
+             strcmp(section, "__bss") == 0) {
+    mapped = ".bss";
+    *flags = SHF(alloc) | SHF(write);
+    *type = SHT(nobits);
+  } else if (strcmp(name->value, "__DATA") == 0) {
+    mapped = ".data";
+    *flags = SHF(alloc) | SHF(write);
+  } else if (section != NULL && strcmp(section, "__const") == 0) {
+    mapped = ".rodata";
+  }
+  if (mapped != name->value) {
+    StringSet(name, mapped);
+  }
+}
+
 static void HandleDirective_section(Assembler* assembler) {
   if (LexLookingAt(&assembler->lex, TOK(identifier)) ||
       LexLookingAt(&assembler->lex, TOK(string))) {
@@ -1164,7 +1286,24 @@ static void HandleDirective_section(Assembler* assembler) {
     int32_t flags = 0;
     int32_t type = SHT(null);
     int alignment = DefaultSectionAlignment(assembler);
-    if (LexMatch(&assembler->lex, TOK(comma))) {
+    if (IsMachOSectionName(name->value) &&
+        LexMatch(&assembler->lex, TOK(comma)) &&
+        (LexLookingAt(&assembler->lex, TOK(identifier)) ||
+         LexLookingAt(&assembler->lex, TOK(string)))) {
+      String section;
+      StringInit(&section, assembler->lex.spelling.value);
+      LexNextToken(&assembler->lex);
+      MapMachOSectionName(name, section.value, &flags, &type);
+      StringDestruct(&section);
+      while (LexMatch(&assembler->lex, TOK(comma))) {
+        if (LexLookingAt(&assembler->lex, TOK(identifier)) ||
+            LexLookingAt(&assembler->lex, TOK(string))) {
+          LexNextToken(&assembler->lex);
+        } else {
+          break;
+        }
+      }
+    } else if (LexMatch(&assembler->lex, TOK(comma))) {
       if (LexLookingAt(&assembler->lex, TOK(identifier)) ||
           LexLookingAt(&assembler->lex, TOK(string))) {
         for (size_t i = 0; assembler->lex.spelling.value[i] != '\0'; i++) {

@@ -619,6 +619,12 @@ static IROpcode IntConstOpcode(TypeRecord* type) {
     size = compiler->long_size;
   } else if (TypeIsLongLong(type)) {
     size = compiler->long_long_size;
+  } else if (TypeIsInt128(type)) {
+    // 128-bit constants are lowered as two 64-bit words elsewhere. The
+    // low-word opcode is only used when a caller still emits a scalar 0.
+    size = 8;
+  } else if (TypeIsWchar(type)) {
+    size = compiler->wchar_size ? compiler->wchar_size : 4;
   } else if (TypeIsInt(type)) {
     size = compiler->int_size;
   }

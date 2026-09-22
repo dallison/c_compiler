@@ -150,8 +150,45 @@ static void SkipLookaheadTemplateId(Lex* lex, size_t* pos) {
   }
 }
 
+static bool LookingAtCXXSpecialMemberDeclSpecifier(Lex* lex) {
+  return LexLookingAt(lex, TOK(constexpr)) ||
+         LexLookingAt(lex, TOK(consteval)) ||
+         LexLookingAt(lex, TOK(inline)) ||
+         LexLookingAt(lex, TOK(explicit));
+}
+
+static void ApplyCXXSpecialMemberDeclSpecifiers(TypeParser* parser) {
+  while (true) {
+    if (LexMatch(parser->lex, TOK(constexpr))) {
+      parser->is_constexpr = true;
+      continue;
+    }
+    if (LexMatch(parser->lex, TOK(consteval))) {
+      parser->is_consteval = true;
+      continue;
+    }
+    if (LexMatch(parser->lex, TOK(inline))) {
+      parser->is_inline = true;
+      continue;
+    }
+    if (LexMatch(parser->lex, TOK(explicit))) {
+      continue;
+    }
+    break;
+  }
+}
+
 static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
   Lex* lex = syntax->lex;
+  LexCheckpoint specifier_checkpoint;
+  bool skipped_specifiers = false;
+  if (CompilerIsCXX() && LookingAtCXXSpecialMemberDeclSpecifier(lex)) {
+    LexCheckpointSave(lex, &specifier_checkpoint);
+    while (LookingAtCXXSpecialMemberDeclSpecifier(lex)) {
+      LexNextToken(lex);
+    }
+    skipped_specifiers = true;
+  }
   String previous;
   StringInit(&previous, NULL);
   String current;
@@ -231,6 +268,10 @@ static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
 done:
   StringDestruct(&current);
   StringDestruct(&previous);
+  if (skipped_specifiers) {
+    LexCheckpointRestore(lex, &specifier_checkpoint);
+    LexCheckpointDestruct(&specifier_checkpoint);
+  }
   return result;
 }
 
@@ -475,6 +516,71 @@ static bool RedeclarationTypesEqual(TypeRecord* left, TypeRecord* right) {
     return OverloadFunctionTypesEqual(left, right);
   }
   return TypeEqual(left, right);
+}
+
+// Out-of-line member definitions of a class template often name a dependent
+// typedef (`typename Class<T>::size_type`) whose in-class counterpart was
+// recorded as a plain integer while the alias was still dependent.  Those
+// declarations designate the same function.
+static bool OutOfLineMemberParameterTypesEqual(TypeRecord* left,
+                                               TypeRecord* right) {
+  if (OverloadParameterTypesEqual(left, right)) {
+    return true;
+  }
+  return TypeIsIntegral(left) && TypeIsIntegral(right);
+}
+
+static bool OutOfLineMemberFunctionTypesEqual(TypeRecord* left,
+                                              TypeRecord* right) {
+  if (!TypeIsFunction(left) || !TypeIsFunction(right)) {
+    return false;
+  }
+  if (!OverloadTypesEqual(left->next, right->next) &&
+      !(TypeIsIntegral(left->next) && TypeIsIntegral(right->next))) {
+    return false;
+  }
+  FunctionInfo* left_fn = &left->info.function;
+  FunctionInfo* right_fn = &right->info.function;
+  if (left_fn->prototype.length != right_fn->prototype.length ||
+      left_fn->varargs != right_fn->varargs ||
+      left_fn->is_const_member != right_fn->is_const_member ||
+      left_fn->is_volatile_member != right_fn->is_volatile_member ||
+      left_fn->ref_qualifier != right_fn->ref_qualifier) {
+    return false;
+  }
+  size_t first_parameter = 0;
+  if (left_fn->prototype.length != 0) {
+    Symbol* left_first = left_fn->prototype.value.p[0];
+    Symbol* right_first = right_fn->prototype.value.p[0];
+    bool left_has_this =
+        left_first != NULL && StringEqual(&left_first->name, "this");
+    bool right_has_this =
+        right_first != NULL && StringEqual(&right_first->name, "this");
+    if (left_has_this != right_has_this) {
+      return false;
+    }
+    if (left_has_this) {
+      first_parameter = 1;
+    }
+  }
+  for (size_t i = first_parameter; i < left_fn->prototype.length; i++) {
+    Symbol* left_arg = left_fn->prototype.value.p[i];
+    Symbol* right_arg = right_fn->prototype.value.p[i];
+    if (left_arg == NULL || right_arg == NULL ||
+        !OutOfLineMemberParameterTypesEqual(left_arg->type, right_arg->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool MemberDefinitionTypesEqual(TypeParser* parser, TypeRecord* left,
+                                       TypeRecord* right) {
+  if (RedeclarationTypesEqual(left, right)) {
+    return true;
+  }
+  return parser != NULL && parser->cxx_member_definition != NULL &&
+         OutOfLineMemberFunctionTypesEqual(left, right);
 }
 
 static bool SameSignatureTemplateConstraintsAreEquivalent(Symbol* overload,
@@ -1366,6 +1472,9 @@ static bool TemplateArgumentIsDependent(TemplateArgument* arg) {
   if (arg == NULL) {
     return false;
   }
+  if (arg->dependent_expr != NULL) {
+    return true;
+  }
   if (arg->kind == kTemplateParameterNonType ||
       arg->kind == kTemplateParameterTemplate) {
     return arg->template_parameter_index >= 0;
@@ -1401,6 +1510,30 @@ static bool TypeContainsTemplateParameterReference(TypeRecord* type) {
     }
   }
   return false;
+}
+
+static Symbol* FindInjectedClassNameSymbol(Struct* owner, String* name) {
+  if (owner == NULL || name == NULL) {
+    return NULL;
+  }
+  if (CurrentClassNameMatchesTypeName(owner, name) &&
+      owner->tag_symbol != NULL) {
+    return owner->tag_symbol;
+  }
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Symbol* found =
+        FindInjectedClassNameSymbol(base->type->info.struct_info, name);
+    if (found != NULL) {
+      return found;
+    }
+  }
+  return NULL;
 }
 
 static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
@@ -1445,13 +1578,15 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
       }
     }
     if (template_args != NULL &&
-        (allow_dependent_template_args ||
-         !TemplateArgumentVectorIsDependent(template_args)) &&
+        !TemplateArgumentVectorIsDependent(template_args) &&
         symbol != NULL && symbol->flags.is_template &&
-        symbol->type != NULL && TypeIsStructOrUnion(symbol->type)) {
+        symbol->type != NULL &&
+        (TypeIsStructOrUnion(symbol->type) ||
+         StorageIs(symbol->storage, STO(typedef)))) {
       TypeRecord* type = TypeInstantiateClassTemplate(syntax, symbol,
                                                       template_args);
-      Symbol* tag = type != NULL && type->info.struct_info != NULL
+      Symbol* tag = type != NULL && TypeIsStructOrUnion(type) &&
+                            type->info.struct_info != NULL
           ? type->info.struct_info->tag_symbol
           : NULL;
       TypeRecordDelete(type);
@@ -1507,6 +1642,14 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
       }
       return FollowAlias(member->symbol);
     }
+    // `Derived::Base` names the injected-class-name of an inherited base
+    // (`using State::HashStateBase::combine_contiguous`).
+    Symbol* injected =
+        FindInjectedClassNameSymbol(parent->type->info.struct_info,
+                                    member_name);
+    if (injected != NULL) {
+      return FollowAlias(injected);
+    }
   }
 
   size_t namespace_components = component_count - 1;
@@ -1544,13 +1687,15 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
   }
   symbol = FollowAlias(symbol);
   if (template_args != NULL &&
-      (allow_dependent_template_args ||
-       !TemplateArgumentVectorIsDependent(template_args)) &&
+      !TemplateArgumentVectorIsDependent(template_args) &&
       symbol != NULL && symbol->flags.is_template &&
-      symbol->type != NULL && TypeIsStructOrUnion(symbol->type)) {
+      symbol->type != NULL &&
+      (TypeIsStructOrUnion(symbol->type) ||
+       StorageIs(symbol->storage, STO(typedef)))) {
     TypeRecord* type = TypeInstantiateClassTemplate(syntax, symbol,
                                                     template_args);
-    Symbol* tag = type != NULL && type->info.struct_info != NULL
+    Symbol* tag = type != NULL && TypeIsStructOrUnion(type) &&
+                          type->info.struct_info != NULL
         ? type->info.struct_info->tag_symbol
         : NULL;
     TypeRecordDelete(type);
@@ -1562,9 +1707,13 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
 Symbol* SyntaxFindQualifiedPrefixSymbol(Syntax* syntax,
                                         FullyQualifiedIdentifier* name,
                                         size_t component_count) {
+  // Dependent template-ids (`FixedArray<T, N, A>::Nested::method`) still
+  // need the primary class as the prefix so nested types resolve.  The
+  // implementation does not instantiate a dependent argument list; it
+  // walks members of the primary template instead.
   return SyntaxFindQualifiedPrefixSymbolImpl(
       syntax, name, component_count,
-      /*allow_dependent_template_args=*/false);
+      /*allow_dependent_template_args=*/true);
 }
 
 Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
@@ -1651,6 +1800,10 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->pending_explicit_condition = NULL;
   syntax->pending_placeholder_variable_constraint = NULL;
   syntax->cxx_class_head = NULL;
+  syntax->template_substitution_source = NULL;
+  syntax->template_substitution_target = NULL;
+  syntax->enclosing_template_substitution_source = NULL;
+  syntax->enclosing_template_substitution_target = NULL;
   syntax->context = kParsingFileScope;
   syntax->c_linkage = false;
   syntax->explicit_cxx_linkage = false;
@@ -1718,6 +1871,10 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   syntax->pending_explicit_condition = NULL;
   ConstraintExprDelete(syntax->pending_placeholder_variable_constraint);
   syntax->pending_placeholder_variable_constraint = NULL;
+  syntax->template_substitution_source = NULL;
+  syntax->template_substitution_target = NULL;
+  syntax->enclosing_template_substitution_source = NULL;
+  syntax->enclosing_template_substitution_target = NULL;
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
   VectorInit(&syntax->inline_static_member_definitions);
@@ -1766,13 +1923,18 @@ static Symbol* FindInheritedClassMember(Syntax* syntax, String* name) {
   if (owner == NULL) {
     return NULL;
   }
-  StructMember* member = FindStructMember(owner, name);
-  if (member != NULL &&
-      (member->is_static ||
-       (member->symbol != NULL &&
-        (StorageIs(member->symbol->storage, STO(typedef)) ||
-         member->symbol->flags.value_set)))) {
-    return member->symbol;
+  // A nested class is in the scope of its enclosing class, so names such as
+  // `size_type` written inside `Outer<T>::Nested` resolve to `Outer<T>`'s
+  // members (including through further enclosing classes).
+  for (Struct* scope = owner; scope != NULL; scope = scope->lexical_parent) {
+    StructMember* member = FindStructMember(scope, name);
+    if (member != NULL &&
+        (member->is_static ||
+         (member->symbol != NULL &&
+          (StorageIs(member->symbol->storage, STO(typedef)) ||
+           member->symbol->flags.value_set)))) {
+      return member->symbol;
+    }
   }
   return NULL;
 }
@@ -1886,7 +2048,11 @@ static Symbol* FindCurrentClassMemberTag(Syntax* syntax, String* name) {
   if (owner == NULL) {
     return NULL;
   }
-  StructMember* member = FindStructMember(owner, name);
+  StructMember* member = NULL;
+  for (Struct* scope = owner; scope != NULL && member == NULL;
+       scope = scope->lexical_parent) {
+    member = FindStructMember(scope, name);
+  }
   if (member == NULL || member->symbol == NULL ||
       !StorageIs(member->symbol->storage, STO(typedef)) ||
       member->symbol->type == NULL) {
@@ -2371,6 +2537,12 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
                                    /*allow_user_defined_suffix=*/false);
       StringSetString(&message, &syntax->lex->spelling);
       LexNextToken(syntax->lex);
+      while (LexLookingAtStringLiteral(syntax->lex)) {
+        LexValidateUnevaluatedString(syntax->lex, "static_assert",
+                                     /*allow_user_defined_suffix=*/false);
+        StringAppend(&message, syntax->lex->spelling.value);
+        LexNextToken(syntax->lex);
+      }
     } else if (CompilerCXXAtLeast(kLanguageStandardCXX26)) {
       message_expr =
           SyntaxParseSingleExpression(syntax, TC(closebra));
@@ -3154,6 +3326,11 @@ ASTNode* SyntaxParseCXXDefaultMemberInitializer(Syntax* syntax) {
   }
   if (!LexMatch(syntax->lex, TOK(equal))) {
     return NULL;
+  }
+  // Copy-list-initialization (`T x = {}`) is a braced-init-list after `=`,
+  // not an expression.  SyntaxParseSingleExpression would reject `{`.
+  if (LexMatch(syntax->lex, TOK(lbrace))) {
+    return ParseBracedInitializer(syntax);
   }
   SourceLocation location = syntax->lex->current_token_location;
   return NewExpressionInitializerASTNode(
@@ -5700,6 +5877,14 @@ void SyntaxParseCXXConstructorInitializerList(
       SyntaxError(syntax, "Expected constructor initializer argument list");
       actuals = NewVector();
     }
+    if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(ellipsis))) {
+      if (actuals != NULL && actuals->length > 0) {
+        ASTNode* last = actuals->value.p[actuals->length - 1];
+        if (last != NULL) {
+          last->flags |= kASTPackExpansion;
+        }
+      }
+    }
 
     VectorAppend(&init_list->raw_initializers,
                  NewCXXDeferredConstructorInitializer(
@@ -7410,6 +7595,7 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
 }
 
 static bool TypeContainsClassTemplate(TypeRecord* type);
+static bool TypeIsClassTemplateObject(TypeRecord* type);
 static void MaterializeDeferredClassTemplateType(Syntax* syntax, Symbol* sym);
 static int CurrentTemplateParameterListLength(Syntax* syntax);
 static int CurrentTemplateParameterBase(Syntax* syntax);
@@ -8115,7 +8301,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             old_sym->flags.is_tentative_decl = true;
           }
         }
-        if (!RedeclarationTypesEqual(sym->type, old_sym->type)) {
+        if (!MemberDefinitionTypesEqual(parser, sym->type, old_sym->type)) {
           String suffix;
           StringInit(&suffix, NULL);
           SymbolFunctionDiagnosticSuffix(sym, &suffix);
@@ -8318,8 +8504,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                       : "<anonymous>");
     }
     if (!syntax->parsing_template_declaration &&
-        TypeContainsClassTemplate(sym->type) &&
-        !TypeIsClassTemplatePlaceholder(sym->type)) {
+        TypeIsClassTemplateObject(sym->type)) {
       SyntaxError(syntax, "Class template instantiation is not supported yet");
     }
     
@@ -8684,6 +8869,7 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
   Vector* declarations = NewVector();
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), kParsingFileScope);
+  ApplyCXXSpecialMemberDeclSpecifiers(&parser);
 
   Symbol* sym = TypeParserParseCXXSpecialMemberDeclarator(&parser);
   Symbol* old_sym = parser.cxx_member_definition != NULL
@@ -8713,7 +8899,7 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
     SyntaxError(syntax, "Duplicate definition of symbol %s",
                 symbol_name.value);
     StringDestruct(&symbol_name);
-  } else if (!RedeclarationTypesEqual(sym->type, old_sym->type)) {
+  } else if (!MemberDefinitionTypesEqual(&parser, sym->type, old_sym->type)) {
     String suffix;
     StringInit(&suffix, NULL);
     SymbolFunctionDiagnosticSuffix(sym, &suffix);
@@ -10157,6 +10343,22 @@ static bool TypeContainsClassTemplate(TypeRecord* type) {
     }
   }
   return false;
+}
+
+// True when a declaration names an object of class-template type that still
+// needs a concrete specialization.  Function types and pointer/reference
+// wrappers do not: C++ allows incomplete class types there, including the
+// deferred `using ostream = basic_ostream<char>` alias from <iosfwd>.
+static bool TypeIsClassTemplateObject(TypeRecord* type) {
+  if (type == NULL || TypeIsFunction(type) || TypeIsPointer(type) ||
+      TypeIsReference(type)) {
+    return false;
+  }
+  if (TypeIsArray(type)) {
+    return TypeIsClassTemplateObject(type->next);
+  }
+  return TypeContainsClassTemplate(type) &&
+         !TypeIsClassTemplatePlaceholder(type);
 }
 
 // A type alias formed while its class template was only forward-declared carries
@@ -12904,8 +13106,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                         : "<anonymous>");
       }
       if (!syntax->parsing_template_declaration &&
-          TypeContainsClassTemplate(sym->type) &&
-          !TypeIsClassTemplatePlaceholder(sym->type)) {
+          TypeIsClassTemplateObject(sym->type)) {
         SyntaxError(syntax, "Class template instantiation is not supported yet");
       }
       // Any initializer?
@@ -13284,6 +13485,7 @@ bool SyntaxLookingAtType(Syntax* syntax) {
     case TOK(char16_t):
     case TOK(char32_t):
     case TOK(int):
+    case TOK(int128):
     case TOK(short):
     case TOK(long):
     case TOK(float):
@@ -13545,6 +13747,82 @@ static bool CXXTypeStartsTemporaryMemberAccess(Syntax* syntax) {
   return is_member_access && SyntaxLookingAtType(syntax);
 }
 
+// `foo<Args>(...)` is a function-template call, not a declaration.  Without
+// this, a block-scope statement such as `InitializeStorage<T>(args...)` is
+// sent to the declaration parser because the name is unknown or only visible
+// as a later class member, and the pack expansion then fails to parse.
+static bool CXXTemplateIdLooksLikeCallExpression(Syntax* syntax) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  Symbol* symbol = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
+  bool is_function = false;
+  if (symbol != NULL && symbol->type != NULL &&
+      (TypeIsFunction(symbol->type) || symbol->flags.is_template)) {
+    is_function = TypeIsFunction(symbol->type) || symbol->flags.is_template;
+    if (StorageIs(symbol->storage, STO(typedef)) &&
+        !TypeIsFunction(symbol->type)) {
+      is_function = false;
+    }
+  }
+  if (!is_function) {
+    Struct* owner = syntax->cxx_class_head;
+    if (owner == NULL && syntax->context == kParsingBlockScope &&
+        compiler->current_function != NULL &&
+        TypeIsFunction(compiler->current_function)) {
+      owner = compiler->current_function->info.function.cxx_member_owner;
+    }
+    if (owner != NULL) {
+      StructMember* member = FindStructMember(owner, &syntax->lex->spelling);
+      is_function = member != NULL && member->is_member_function;
+    }
+  }
+  if (!is_function) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool result = false;
+  if (LexLookingAt(syntax->lex, TOK(less))) {
+    int angle_depth = 0;
+    int paren_depth = 0;
+    int square_depth = 0;
+    int brace_depth = 0;
+    do {
+      Token token = syntax->lex->current_token;
+      if (token == TOK(semicolon) || token == TOK(lbrace) ||
+          token == TOK(rbrace)) {
+        break;
+      }
+      if (token == TOK(lparen)) {
+        paren_depth++;
+      } else if (token == TOK(rparen)) {
+        paren_depth--;
+      } else if (token == TOK(lsquare)) {
+        square_depth++;
+      } else if (token == TOK(rsquare)) {
+        square_depth--;
+      } else if (token == TOK(lbrace)) {
+        brace_depth++;
+      } else if (token == TOK(rbrace)) {
+        brace_depth--;
+      } else if (paren_depth == 0 && square_depth == 0 && brace_depth == 0) {
+        if (token == TOK(less)) {
+          angle_depth++;
+        } else {
+          angle_depth -= LexClosingAngleCount(token);
+        }
+      }
+      LexNextToken(syntax->lex);
+    } while (!LexEof(syntax->lex) && angle_depth > 0);
+    result = angle_depth == 0 && LexLookingAt(syntax->lex, TOK(lparen));
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
 static bool CXXQualifiedNameLooksLikeCallExpression(Syntax* syntax) {
   // Recognize any qualified-name start: a leading `::`, a name that a
   // namespace/template prefix makes look qualified, or a plain `ident::`
@@ -13598,6 +13876,9 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     return result;
   }
   if (CXXQualifiedNameLooksLikeCallExpression(syntax)) {
+    return false;
+  }
+  if (CXXTemplateIdLooksLikeCallExpression(syntax)) {
     return false;
   }
   if (CXXTypeStartsTemporaryMemberAccess(syntax)) {
@@ -13780,6 +14061,7 @@ TokenClass ClassifyToken(Token tok) {
     case TOK(enum):
     case TOK(imaginary):
     case TOK(int):
+    case TOK(int128):
     case TOK(long):
     case TOK(restrict):
     case TOK(short):

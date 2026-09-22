@@ -110,6 +110,7 @@ typedef enum {
   TOK(imaginary),
   TOK(inline),
   TOK(int),
+  TOK(int128),
   TOK(long),
   TOK(noreturn),
   TOK(register),

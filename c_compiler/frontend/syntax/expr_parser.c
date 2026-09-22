@@ -47,11 +47,20 @@ static struct Intrinsic {
     {"__builtin_FUNCTION", AST_OP(builtin_source_function), 0},
     {"__builtin_LINE", AST_OP(builtin_source_line), 0},
     {"__builtin_PRETTY_FUNCTION", AST_OP(builtin_source_pretty_function), 0},
+    {"__builtin_bswap16", AST_OP(builtin_bswap), 1},
+    {"__builtin_bswap32", AST_OP(builtin_bswap), 1},
+    {"__builtin_bswap64", AST_OP(builtin_bswap), 1},
+    {"__builtin_clz", AST_OP(builtin_clz), 1},
+    {"__builtin_clzll", AST_OP(builtin_clz), 1},
+    {"__builtin_ctz", AST_OP(builtin_ctz), 1},
+    {"__builtin_ctzll", AST_OP(builtin_ctz), 1},
     {"__builtin_expect", AST_OP(builtin_expect), 2},
     {"__builtin_is_constant_evaluated",
      AST_OP(builtin_is_constant_evaluated), 0},
     {"__builtin_observable_checkpoint",
      AST_OP(builtin_observable_checkpoint), 0},
+    {"__builtin_popcount", AST_OP(builtin_popcount), 1},
+    {"__builtin_popcountll", AST_OP(builtin_popcount), 1},
     {"__builtin_prefetch", AST_OP(builtin_prefetch), 3},
     {"__builtin_start_lifetime", AST_OP(builtin_start_lifetime), 1},
     {"__builtin_trap", AST_OP(builtin_trap), 0},
@@ -153,7 +162,9 @@ static const TypeTraitName kTypeTraitNames[] = {
     {"__davecc_is_constructible", kCXXTypeTraitIsConstructible},
     {"__davecc_is_convertible", kCXXTypeTraitIsConvertible},
     {"__davecc_is_destructible", kCXXTypeTraitIsDestructible},
+    {"__davecc_is_empty", kCXXTypeTraitIsEmpty},
     {"__davecc_is_enum", kCXXTypeTraitIsEnum},
+    {"__davecc_is_final", kCXXTypeTraitIsFinal},
     {"__davecc_is_invocable", kCXXTypeTraitIsInvocable},
     {"__davecc_is_member_function_pointer",
      kCXXTypeTraitIsMemberFunctionPointer},
@@ -166,6 +177,7 @@ static const TypeTraitName kTypeTraitNames[] = {
      kCXXTypeTraitIsNothrowConstructible},
     {"__davecc_is_nothrow_destructible", kCXXTypeTraitIsNothrowDestructible},
     {"__davecc_is_nothrow_invocable", kCXXTypeTraitIsNothrowInvocable},
+    {"__davecc_is_polymorphic", kCXXTypeTraitIsPolymorphic},
     {"__davecc_is_swappable", kCXXTypeTraitIsSwappable},
     {"__davecc_is_swappable_with", kCXXTypeTraitIsSwappableWith},
     {"__davecc_is_trivially_assignable", kCXXTypeTraitIsTriviallyAssignable},
@@ -1255,6 +1267,94 @@ static bool TemplateArgumentListIsDependent(Vector* args) {
   return false;
 }
 
+// `Impl<Sig>::template CallIsValid<F>::value`: a dependent class-template
+// specialization, then a member alias/class template, then a value member.
+// The two-component helper below treats the second-to-last component as the
+// scope template and would try to resolve `Impl::CallIsValid` against the
+// (often empty) primary.  Keep the whole path dependent, rooted at the
+// leftmost class/alias template.
+static ASTNode* BuildDependentMemberTemplateValueName(
+    Syntax* syntax, FullyQualifiedIdentifier* name, SourceLocation location) {
+  if (!CompilerIsCXX() || !name->is_qualified ||
+      syntax->current_template_parameter_count <= 0 ||
+      name->components.length < 3 ||
+      name->template_arguments.length != name->components.length) {
+    return NULL;
+  }
+  size_t last = name->components.length - 1;
+  if (name->template_arguments.value.p[last] != NULL) {
+    return NULL;
+  }
+  for (size_t origin_index = 0; origin_index + 2 < name->components.length;
+       origin_index++) {
+    Vector* origin_args = name->template_arguments.value.p[origin_index];
+    if (origin_args == NULL ||
+        (!TemplateArgumentVectorContainsTemplateParameter(origin_args) &&
+         !TemplateArgumentListIsDependent(origin_args))) {
+      continue;
+    }
+    Symbol* base = NULL;
+    if (origin_index == 0 && !name->absolute) {
+      String* origin_name = name->components.value.p[0];
+      base = SyntaxFindSymbol(syntax, origin_name);
+      if (base == NULL) {
+        base = SyntaxFindTag(syntax, origin_name);
+      }
+    } else {
+      FullyQualifiedIdentifier prefix;
+      FullyQualifiedIdentifierInit(&prefix);
+      prefix.absolute = name->absolute;
+      prefix.is_qualified = true;
+      for (size_t i = 0; i <= origin_index; i++) {
+        String* component = name->components.value.p[i];
+        if (prefix.spelling.length != 0 || prefix.absolute) {
+          StringAppend(&prefix.spelling, "::");
+        }
+        StringAppendString(&prefix.spelling, component);
+        VectorAppend(&prefix.components, NewString(component->value));
+        VectorAppend(&prefix.template_arguments, NULL);
+      }
+      base = SyntaxFindQualifiedSymbol(syntax, &prefix);
+      if (base == NULL) {
+        base = SyntaxFindQualifiedTag(syntax, &prefix);
+      }
+      FullyQualifiedIdentifierDestruct(&prefix);
+    }
+    if (base == NULL || !base->flags.is_template || base->type == NULL ||
+        (!TypeIsStructOrUnion(base->type) &&
+         !StorageIs(base->storage, STO(typedef)))) {
+      continue;
+    }
+    String path;
+    StringInit(&path, NULL);
+    Vector* path_args = NewVector();
+    for (size_t i = origin_index + 1; i < name->components.length; i++) {
+      if (path.length != 0) {
+        StringAppend(&path, "::");
+      }
+      StringAppendString(&path, name->components.value.p[i]);
+      VectorAppend(path_args, TemplateArgumentVectorCopy(
+                                  name->template_arguments.value.p[i]));
+    }
+    TypeRecord* dependent_type =
+        NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+    dependent_type->template_origin = base;
+    dependent_type->template_arguments =
+        TemplateArgumentVectorCopy(origin_args);
+    dependent_type->dependent_member_name = NewString(path.value);
+    dependent_type->dependent_member_template_arguments = path_args;
+    StringDestruct(&path);
+    String* member = name->components.value.p[last];
+    Symbol* placeholder =
+        NewSymbol(member->value, dependent_type, STO(implicit));
+    placeholder->flags.invented = true;
+    ASTNode* node = NewIdentifierASTNode(placeholder, location);
+    node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
+    return node;
+  }
+  return NULL;
+}
+
 // A qualified value name like `Trait<Deps...>::member` whose nested-name-specifier
 // is a *dependent* class template specialization (its template arguments mention a
 // template parameter) is a value-dependent name: the specialization chosen (primary
@@ -1280,10 +1380,15 @@ static ASTNode* BuildDependentTemplateScopeValueName(
     return NULL;
   }
   Vector* scope_args = name->template_arguments.value.p[base_index];
-  if (!TemplateArgumentListIsDependent(scope_args)) {
+  if (!TemplateArgumentVectorContainsTemplateParameter(scope_args) &&
+      !TemplateArgumentListIsDependent(scope_args)) {
     return NULL;
   }
-  // Resolve the class template that names the scope (components[0..base_index]).
+  // Resolve the class or alias template that names the scope
+  // (components[0..base_index]).  Alias templates such as
+  // `conditional_t<B, T, F>` must stay dependent too: instantiating the
+  // primary now would drop the arguments and look up `::member` on the
+  // alias itself.
   FullyQualifiedIdentifier prefix;
   FullyQualifiedIdentifierInit(&prefix);
   prefix.absolute = name->absolute;
@@ -1301,7 +1406,8 @@ static ASTNode* BuildDependentTemplateScopeValueName(
   Symbol* base = SyntaxFindQualifiedSymbol(syntax, &prefix);
   FullyQualifiedIdentifierDestruct(&prefix);
   if (base == NULL || !base->flags.is_template || base->type == NULL ||
-      !TypeIsStructOrUnion(base->type)) {
+      (!TypeIsStructOrUnion(base->type) &&
+       !StorageIs(base->storage, STO(typedef)))) {
     return NULL;
   }
   String* member = name->components.value.p[member_index];
@@ -1354,7 +1460,13 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
   // select the primary template and fold the wrong value.  Detect and defer it
   // before the ordinary lookup, which would otherwise instantiate the primary.
   if (name.is_qualified) {
-    ASTNode* dependent_scope = BuildDependentTemplateScopeValueName(
+    ASTNode* dependent_scope = BuildDependentMemberTemplateValueName(
+        syntax, &name, lex->current_token_location);
+    if (dependent_scope != NULL) {
+      FullyQualifiedIdentifierDestruct(&name);
+      return dependent_scope;
+    }
+    dependent_scope = BuildDependentTemplateScopeValueName(
         syntax, &name, lex->current_token_location);
     if (dependent_scope != NULL) {
       FullyQualifiedIdentifierDestruct(&name);
@@ -3622,6 +3734,7 @@ static bool TokenStartsFundamentalTypeSpecifier(Token token) {
     case TOK(char32_t):
     case TOK(short):
     case TOK(int):
+    case TOK(int128):
     case TOK(long):
     case TOK(float):
     case TOK(double):
@@ -3847,6 +3960,118 @@ static ASTNode* ParseNestedPrimaryExpression(Syntax* syntax,
       LexLookingAt(lex, TOK(identifier)) &&
       StringEqual(&lex->spelling, "_Generic")) {
     return ParseGenericSelection(syntax, followers);
+  }
+
+  // C++ `typename T::member{}` / `typename T::member(...)` is a functional
+  // cast whose type-id is a typename-specifier.  `typename` is a keyword, so
+  // it never reaches ParseIdentifier; parse the type here and return a
+  // typedef-named identifier so postfix `()` / `{}` reuse the ordinary
+  // construction paths.
+  if (CompilerIsCXX() && LexLookingAt(lex, TOK(typename))) {
+    SourceLocation location = lex->current_token_location;
+    TypeParser type_parser;
+    TypeParserInit(&type_parser, lex, syntax, STO(implicit), syntax->context);
+    TypeRecord* type = TypeParserParseType(&type_parser, true);
+    TypeParserDestruct(&type_parser);
+    if (type == NULL) {
+      type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    }
+    if (!LexLookingAt(lex, TOK(lparen)) && !LexLookingAt(lex, TOK(lbrace))) {
+      SyntaxError(syntax,
+                  "expected '(' or '{' after typename-specifier in expression");
+      SyntaxRecover(syntax, followers);
+      return NewIntConstantASTNode(0, type, location);
+    }
+    Symbol* tag = NewSymbol("<typename>", type, STO(typedef));
+    tag->flags.invented = true;
+    return NewIdentifierASTNode(tag, location);
+  }
+
+  // `decltype(expr){}` / `decltype(expr)()` is a functional-style cast whose
+  // type-id is a decltype-specifier.  `decltype` is a keyword, so it never
+  // reaches ParseIdentifier; parse the type here and return a typedef-named
+  // identifier so postfix `()` / `{}` reuse the ordinary construction paths
+  // (Abseil's `return decltype(Or({...})){};`).
+  if (CompilerIsCXX() && LexLookingAt(lex, TOK(decltype))) {
+    SourceLocation location = lex->current_token_location;
+    TypeParser type_parser;
+    TypeParserInit(&type_parser, lex, syntax, STO(implicit), syntax->context);
+    TypeRecord* type = TypeParserParseType(&type_parser, true);
+    TypeParserDestruct(&type_parser);
+    if (type == NULL) {
+      type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    }
+    // TypeParserParseType also accepts `decltype(expr)::member` as a nested
+    // type suffix.  In expression context that names a value (often still
+    // dependent), so turn the already-consumed suffix into a qualified-id.
+    if (type->dependent_member_name != NULL) {
+      Symbol* placeholder = NewSymbol(type->dependent_member_name->value,
+                                      TypeRecordCopy(type), STO(implicit));
+      placeholder->flags.invented = true;
+      ASTNode* node = NewIdentifierASTNode(placeholder, location);
+      node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
+      return node;
+    }
+    // `decltype(expr)::member` is a qualified-id whose nested-name-specifier
+    // is a decltype-specifier (Abseil `decltype(Test<Hash>(0))::value`).
+    if (LexMatch(lex, TOK(coloncolon))) {
+      if (!LexLookingAt(lex, TOK(identifier))) {
+        SyntaxError(syntax, "Expected identifier after '::'");
+        SyntaxRecover(syntax, followers);
+        return NewIntConstantASTNode(0, type, location);
+      }
+      String member_name;
+      StringInit(&member_name, lex->spelling.value);
+      LexNextToken(lex);
+      TypeRecord* scope = type;
+      if (TypeIsReference(scope)) {
+        scope = scope->next;
+      }
+      if (scope != NULL && TypeIsStructOrUnion(scope) &&
+          scope->info.struct_info != NULL &&
+          !TypeContainsTemplateParameter(scope)) {
+        StructMember* member =
+            FindStructMember(scope->info.struct_info, &member_name);
+        if (member != NULL && member->symbol != NULL &&
+            (member->is_static || member->symbol->flags.value_set ||
+             StorageIs(member->symbol->storage, STO(typedef)))) {
+          StringDestruct(&member_name);
+          ASTNode* id = NewIdentifierASTNode(member->symbol, location);
+          id->flags |= kASTQualifiedName;
+          return id;
+        }
+      }
+      TypeRecord* dependent =
+          TypeRecordCopy(scope != NULL ? scope : type);
+      if (dependent->dependent_member_name == NULL) {
+        dependent->dependent_member_name = NewString(member_name.value);
+      } else {
+        StringAppend(dependent->dependent_member_name, "::");
+        StringAppend(dependent->dependent_member_name, member_name.value);
+      }
+      Symbol* placeholder =
+          NewSymbol(member_name.value, dependent, STO(implicit));
+      placeholder->flags.invented = true;
+      StringDestruct(&member_name);
+      ASTNode* node = NewIdentifierASTNode(placeholder, location);
+      node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
+      return node;
+    }
+    if (!LexLookingAt(lex, TOK(lparen)) && !LexLookingAt(lex, TOK(lbrace))) {
+      SyntaxError(syntax,
+                  "expected '(' or '{' after decltype-specifier in expression");
+      SyntaxRecover(syntax, followers);
+      return NewIntConstantASTNode(0, type, location);
+    }
+    Symbol* tag = NewSymbol("<decltype>", type, STO(typedef));
+    tag->flags.invented = true;
+    ASTNode* node = NewIdentifierASTNode(tag, location);
+    // Mark the invented typedef as functional construction so `decltype(T)()`
+    // and `decltype(T){}` skip value-analysis of the typedef name itself and
+    // go through AnalyzeCXXFunctionalClassConstruction (scalar -> cast-from-0,
+    // class -> constructor).
+    node->flags |= kASTCXXFunctionalConstruction;
+    return node;
   }
 
   // C++ explicit type conversion in functional notation with a fundamental
@@ -4320,6 +4545,91 @@ static bool MemberAccessObjectIsDependent(ASTNode* object) {
   }
 }
 
+// `expr.StorageT<I>::get()`: the first identifier is a nested-name-specifier
+// naming a member alias (or base), not the accessed member.  Build a qualified
+// member access whose owner is the alias template-id so instantiation resolves
+// `get` on `Storage<T, I>` rather than looking up `::get` in the derived class.
+static ASTNode* ParseQualifiedNestedStructMember(
+    ASTNode* left, ASTOpcode op, Syntax* syntax, String* scope_name,
+    Vector* scope_args) {
+  SourceLocation location = syntax->lex->current_token_location;
+  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+    SyntaxError(syntax, "Expected member name after '::'");
+    StringDelete(scope_name);
+    if (scope_args != NULL) {
+      VectorDeleteWithContents(scope_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    return NewBinaryASTNode(
+        op, NULL, location, left,
+        NewStringConstantASTNode(NewString(SyntaxFakeName(syntax)), NULL,
+                                 location));
+  }
+  String* member_name = NewString(syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+
+  Symbol* scope_symbol = SyntaxFindSymbol(syntax, scope_name);
+  if (scope_symbol == NULL && left != NULL && left->type != NULL) {
+    TypeRecord* receiver = left->type;
+    if (TypeIsReference(receiver)) {
+      receiver = receiver->next;
+    }
+    if (op == AST_OP(arrow) && receiver != NULL && TypeIsPointer(receiver)) {
+      receiver = receiver->next;
+    }
+    if (receiver != NULL && TypeIsStructOrUnion(receiver) &&
+        receiver->info.struct_info != NULL) {
+      StructMember* scope_member =
+          FindStructMember(receiver->info.struct_info, scope_name);
+      if (scope_member != NULL) {
+        scope_symbol = scope_member->symbol;
+      }
+    }
+  }
+
+  TypeRecord* owner_type = NULL;
+  StructMember* member = NULL;
+  if (scope_symbol != NULL && scope_symbol->flags.is_template) {
+    owner_type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+    owner_type->template_origin = scope_symbol;
+    owner_type->template_arguments = scope_args;
+    scope_args = NULL;
+    if (scope_symbol->type != NULL && TypeIsStructOrUnion(scope_symbol->type) &&
+        scope_symbol->type->info.struct_info != NULL) {
+      member = FindStructMember(scope_symbol->type->info.struct_info,
+                                member_name);
+    }
+  } else if (scope_symbol != NULL && scope_symbol->type != NULL &&
+             TypeIsStructOrUnion(scope_symbol->type) &&
+             scope_symbol->type->info.struct_info != NULL) {
+    owner_type = TypeRecordCopy(scope_symbol->type);
+    member = FindStructMember(scope_symbol->type->info.struct_info, member_name);
+  }
+
+  ASTNode* right;
+  if (member != NULL && member->symbol != NULL) {
+    right = NewStructMemberASTNode(member, location);
+    right->flags |= kASTQualifiedName;
+    ((StructMemberASTNode*)right)->owner_type = owner_type;
+    owner_type = NULL;
+  } else {
+    right = NewStringConstantASTNode(member_name, NULL, location);
+    member_name = NULL;
+    TypeRecordDelete(owner_type);
+  }
+  StringDelete(scope_name);
+  if (member_name != NULL) {
+    StringDelete(member_name);
+  }
+  if (scope_args != NULL) {
+    VectorDeleteWithContents(scope_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+  return NewBinaryASTNode(op, NULL, location, left, right);
+}
+
 static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
                                   TokenClass followers) {
   if (LexLookingAt(syntax->lex, TOK(splice_open))) {
@@ -4434,8 +4744,10 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
       }
       LexNextToken(syntax->lex);
     } while (depth > 0 && !LexEof(syntax->lex));
-    has_template_arguments = !not_a_template_id && depth == 0 &&
-                             LexLookingAt(syntax->lex, TOK(lparen));
+    has_template_arguments =
+        !not_a_template_id && depth == 0 &&
+        (LexLookingAt(syntax->lex, TOK(lparen)) ||
+         LexLookingAt(syntax->lex, TOK(coloncolon)));
     LexCheckpointRestore(syntax->lex, &checkpoint);
     LexCheckpointDestruct(&checkpoint);
     // We resolved the `<` as a template-argument list on a type-dependent
@@ -4454,6 +4766,11 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
       has_template_arguments
           ? SyntaxParseTemplateArgumentList(syntax, followers)
           : NULL;
+  if (CompilerIsCXX() && template_arguments != NULL &&
+      LexMatch(syntax->lex, TOK(coloncolon))) {
+    return ParseQualifiedNestedStructMember(left, op, syntax, member_name,
+                                           template_arguments);
+  }
   ASTNode* member_node = NewStringConstantASTNode(member_name,
                                           NULL,
                                           syntax->lex->current_token_location);
@@ -4563,6 +4880,17 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
     type_expr->flags |= kASTCXXFunctionalConstruction;
     Vector* actuals =
         ParseCXXBracedTemporaryActuals(syntax, type, followers);
+    return NewVectorASTNode(AST_OP(call), NULL, location, type_expr, actuals);
+  }
+  // C++ `Typedef{}` of a non-class type (including invented
+  // `decltype(0){}` and `using I = int; I{}`) is a functional-style
+  // cast, not a C compound literal.  Compound literals of scalars
+  // generate unusable addresses at runtime.
+  if (CompilerIsCXX() && StorageIs(id->symbol->storage, STO(typedef)) &&
+      !TypeIsStructOrUnion(type)) {
+    type_expr->flags |= kASTCXXFunctionalConstruction;
+    Vector* actuals =
+        ParseCXXNewInitializerArguments(syntax, TOK(lbrace), followers);
     return NewVectorASTNode(AST_OP(call), NULL, location, type_expr, actuals);
   }
   return ParseCompoundLiteral(syntax, TypeRecordCopy(type));

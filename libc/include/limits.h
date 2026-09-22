@@ -85,6 +85,14 @@
 #define PATH_MAX 4096
 #endif
 
+#if defined(__6502__) || defined(__W65C02__)
+#define WCHAR_MIN (-32767 - 1)
+#define WCHAR_MAX 32767
+#else
+#define WCHAR_MIN (-2147483647 - 1)
+#define WCHAR_MAX 2147483647
+#endif
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
 #  define BOOL_WIDTH 1
 #  define CHAR_WIDTH CHAR_BIT

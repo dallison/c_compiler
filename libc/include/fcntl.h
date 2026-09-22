@@ -136,6 +136,7 @@ extern "C" {
 #endif
 int open(const char* filename, int mode, ...);
 int close(int fd);
+int fcntl(int fd, int cmd, ...);
 
 #ifdef __cplusplus
 }

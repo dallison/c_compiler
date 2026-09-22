@@ -64,6 +64,16 @@ class bad_array_new_length : public bad_alloc {
 };
 #endif
 
+#if __cplusplus >= 201703L
+#ifndef __cpp_lib_launder
+#define __cpp_lib_launder 201606L
+#endif
+template <class T>
+constexpr T* launder(T* p) noexcept {
+  return p;
+}
+#endif
+
 }  // namespace std
 
 // Single-object and array allocation / deallocation.  The throwing forms are

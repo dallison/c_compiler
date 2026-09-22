@@ -71,6 +71,7 @@
 #define X86_64_SYSCALL_RANDOM_BYTES 60
 #define X86_64_SYSCALL_FS_DESCRIPTOR_STATUS 61
 #define X86_64_SYSCALL_ENVIRONMENT_VALUE 62
+#define X86_64_SYSCALL_POLL 63
 
 #define X86_64_VALIDATE_DAVE_SYSCALL(name)                               \
   typedef char x86_64_dave_syscall_##name[                              \

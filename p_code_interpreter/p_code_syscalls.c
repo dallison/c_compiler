@@ -1,6 +1,7 @@
 #include "p_code_syscalls.h"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sched.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -160,6 +161,8 @@ int64_t PCodeHandleSyscall(PCodeInterpreter* interpreter, int64_t number,
     case P_CODE_SYSCALL_ENVIRONMENT_VALUE:
       return DaveHostEnvironmentValue(
           (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
+    case P_CODE_SYSCALL_POLL:
+      return poll((struct pollfd*)(uintptr_t)a0, (nfds_t)a1, (int)a2);
     case P_CODE_SYSCALL_TZDB_VERSION:
       return DaveHostChronoTzdbVersion((char*)(uintptr_t)a0, (size_t)a1);
     case P_CODE_SYSCALL_TZDB_GENERATION:
@@ -296,6 +299,7 @@ int64_t PCodeHandlePackedSyscall(PCodeInterpreter* interpreter,
     case P_CODE_SYSCALL_FS_READ_SYMLINK:
     case P_CODE_SYSCALL_FS_CANONICAL:
     case P_CODE_SYSCALL_ENVIRONMENT_VALUE:
+    case P_CODE_SYSCALL_POLL:
       a0 = ReadPackedLong(&cursor);
       a1 = ReadPackedLong(&cursor);
       a2 = ReadPackedLong(&cursor);

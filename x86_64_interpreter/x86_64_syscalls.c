@@ -16,6 +16,7 @@
 #include "x86_64_machine.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdbool.h>
@@ -497,6 +498,8 @@ int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
     case X86_64_SYSCALL_ENVIRONMENT_VALUE:
       return DaveHostEnvironmentValue(
           (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
+    case X86_64_SYSCALL_POLL:
+      return poll((struct pollfd*)(uintptr_t)a0, (nfds_t)a1, (int)a2);
     case X86_64_SYSCALL_TZDB_VERSION:
       return DaveHostChronoTzdbVersion((char*)(uintptr_t)a0, (size_t)a1);
     case X86_64_SYSCALL_TZDB_GENERATION:

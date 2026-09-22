@@ -12,11 +12,13 @@ There are three layers:
 | C++ type traits | Compile-time type queries | `__davecc_is_* (Type, …)` |
 | Target headers / runtime | Inline wrappers or assembly helpers | `_mm_*`, `vaddq_*`, 6502 `__builtin_isalnum`, … |
 
-GCC names that are **not** recognized include `__builtin_clz` /
-`__builtin_ctz` / `__builtin_popcount` (use `__davecc_*`),
-`__builtin_memcpy` as a compiler builtin, `__builtin_bswap*`,
+GCC names that are **not** recognized include
+`__builtin_memcpy` as a compiler builtin,
 `__builtin_ia32_*`, and `__builtin_neon_*`. SIMD is the header API, not
-those GCC machine builtins.
+those GCC machine builtins. `__builtin_bswap16` / `__builtin_bswap32` /
+`__builtin_bswap64`, `__builtin_clz` / `__builtin_clzll`,
+`__builtin_ctz` / `__builtin_ctzll`, and `__builtin_popcount` /
+`__builtin_popcountll` are recognized (width comes from the operand type).
 
 The frontend table lives in `c_compiler/frontend/syntax/expr_parser.c`.
 
@@ -32,6 +34,7 @@ These parse on every target. Optional arguments are noted.
 | `__builtin_FUNCTION()` | `const char*` | Enclosing function name |
 | `__builtin_PRETTY_FUNCTION()` | `const char*` | Decorated function name |
 | `__builtin_expect(value, expected)` | both converted to `long`; result is `long` | Branch hint; both operands are evaluated |
+| `__builtin_bswap16(x)` / `__builtin_bswap32(x)` / `__builtin_bswap64(x)` | unsigned integer of that width; result is the operand type | Byte-swap. Folds as a constant when the operand is constant |
 | `__builtin_prefetch(addr [, rw [, locality]])` | `void` | Evaluates the arguments, then emits nothing. `rw` is 0 (read) or 1 (write); `locality` is 0–3 |
 | `__builtin_trap()` | `void` | Calls `abort` |
 | `__builtin_unreachable()` | `void` | Calls `abort` |
@@ -141,6 +144,7 @@ on every target when compiling C++.
 Unary (`__davecc_is_class(T)` and the like):
 
 `__davecc_is_class`, `__davecc_is_enum`, `__davecc_is_union`,
+`__davecc_is_polymorphic`, `__davecc_is_empty`, `__davecc_is_final`,
 `__davecc_is_destructible`, `__davecc_is_nothrow_destructible`,
 `__davecc_is_trivially_destructible`, `__davecc_is_trivially_copyable`,
 `__davecc_is_swappable`, `__davecc_is_member_pointer`,
@@ -243,6 +247,15 @@ names. Both `-target 6502` and `-target 65c02` share this list.
 Varargs lowering also uses `__builtin_va_arg`, `__builtin_va_arg2`,
 `__builtin_va_arg4`, and `__builtin_va_arg8` from that file. Those are
 not user-facing builtins; write `va_arg` as usual.
+
+## GNU 128-bit integers
+
+On targets with 64-bit pointers DaveCC defines `__SIZEOF_INT128__` as 16
+and accepts the same spellings GCC and Clang do: `__int128`,
+`unsigned __int128`, `signed __int128`, plus the typedefs `__int128_t`
+and `__uint128_t`. These are distinct 16-byte integer types (alignment
+16). C++ `wchar_t` is a distinct fundamental type, not an alias for
+`int`.
 
 ## Other architectures
 

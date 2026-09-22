@@ -427,6 +427,7 @@ LIBC_SRCS = [
     "libc/posix_lseek.c",
     "libc/posix_open.c",
     "libc/posix_read.c",
+    "libc/posix_poll.c",
     "libc/pow.c",
     "libc/printf.c",
     "libc/printf_common.c",
@@ -1843,6 +1844,7 @@ libc_srcs=(
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
+  "libc/posix_poll.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -2036,6 +2038,7 @@ libc_srcs=(
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
+  "libc/posix_poll.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -2233,6 +2236,7 @@ libc_srcs=(
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
+  "libc/posix_poll.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -2429,6 +2433,7 @@ libc_srcs=(
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
+  "libc/posix_poll.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -2621,6 +2626,7 @@ libc_srcs=(
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
+  "libc/posix_poll.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -2815,6 +2821,7 @@ libc_srcs=(
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
+  "libc/posix_poll.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -3347,6 +3354,7 @@ libc_srcs=(
   "libc/posix_lseek.c"
   "libc/posix_open.c"
   "libc/posix_read.c"
+  "libc/posix_poll.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -5967,6 +5975,15 @@ sh_test(
     data = [
         ":davecc",
         ":elfdump",
+    ],
+)
+
+sh_test(
+    name = "s_file_assemble_test",
+    srcs = ["tests/s_file_assemble_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [
+        ":davecc",
     ],
 )
 

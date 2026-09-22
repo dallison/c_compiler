@@ -347,7 +347,7 @@ static Symbol* ConditionDeclaredSymbol(ASTNode* decl) {
 static bool ConditionStartsWithType(Syntax* syntax) {
   switch (syntax->lex->current_token) {
     case TOK(char): case TOK(char8_t): case TOK(char16_t): case TOK(char32_t):
-    case TOK(int): case TOK(short):
+    case TOK(int): case TOK(int128): case TOK(short):
     case TOK(long):
     case TOK(float): case TOK(double): case TOK(bool): case TOK(signed):
     case TOK(unsigned): case TOK(void): case TOK(wchar_t):

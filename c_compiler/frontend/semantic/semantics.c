@@ -730,6 +730,24 @@ struct {
     {TypeIsBool, TypeHasDoubleRepresentationAndRank, AST_OP(b2d)},
     {TypeIsBool, TypeIsLongDouble, AST_OP(b2ld)},
     {TypeIsBool, TypeUsesFloat32Representation, AST_OP(b2f)},
+
+    {TypeIsInt128, TypeUsesFloat32Representation, AST_OP(ll2f)},
+    {TypeIsInt128, TypeHasDoubleRepresentationAndRank, AST_OP(ll2d)},
+    {TypeIsInt128, TypeIsLongDouble, AST_OP(ll2ld)},
+    {TypeIsInt128, TypeIsBool, AST_OP(ll2b)},
+    {TypeUsesFloat32Representation, TypeIsInt128, AST_OP(f2ll)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsInt128, AST_OP(d2ll)},
+    {TypeIsLongDouble, TypeIsInt128, AST_OP(ld2ll)},
+    {TypeIsBool, TypeIsInt128, AST_OP(b2ll)},
+
+    {TypeIsWchar, TypeUsesFloat32Representation, AST_OP(i2f)},
+    {TypeIsWchar, TypeHasDoubleRepresentationAndRank, AST_OP(i2d)},
+    {TypeIsWchar, TypeIsLongDouble, AST_OP(i2ld)},
+    {TypeIsWchar, TypeIsBool, AST_OP(i2b)},
+    {TypeUsesFloat32Representation, TypeIsWchar, AST_OP(f2i)},
+    {TypeHasDoubleRepresentationAndRank, TypeIsWchar, AST_OP(d2i)},
+    {TypeIsLongDouble, TypeIsWchar, AST_OP(ld2i)},
+    {TypeIsBool, TypeIsWchar, AST_OP(b2i)},
 };
 
 #define NUM_TYPE_CONVERSIONS (sizeof(type_conversions) / sizeof(type_conversions[0]))
@@ -1130,11 +1148,15 @@ static int ConversionOperatorTrailingRank(TypeRecord* result, TypeRecord* to) {
   // Integral and floating-point promotions rank above ordinary conversions.
   if (TypeIsInt(to) &&
       (TypeIsCharFamily(result) || TypeIsShort(result) || TypeIsBool(result) ||
+       TypeIsWchar(result) ||
        (TypeIsEnum(result) && !TypeIsScopedEnum(result)))) {
     return 2;
   }
   if (TypeIsDouble(to) && TypeIsFloat(result)) {
     return 2;
+  }
+  if (TypeIsIntegral(result) && TypeIsIntegral(to)) {
+    return 3;
   }
   // Any other standard scalar conversion the codegen table supports (integral
   // conversions, floating-integral conversions, contextual bool, etc.).
@@ -1475,7 +1497,23 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
   }
 
   if (TypeIsIntegral(from->type) && TypeIsIntegral(to) &&
-      (TypeIsBitInt(from->type) || TypeIsBitInt(to))) {
+      (TypeIsBitInt(from->type) || TypeIsBitInt(to) ||
+       TypeIsInt128(from->type) || TypeIsInt128(to) ||
+       TypeIsWchar(from->type) || TypeIsWchar(to))) {
+    // Same extended integer, differing only in top-level cv: a qualification
+    // adjustment.  Inserting a conversion node would make the operand a
+    // prvalue and reject `const wchar_t& f() { return member; }`.
+    bool same_extended =
+        (TypeIsWchar(from->type) && TypeIsWchar(to)) ||
+        (TypeIsInt128(from->type) && TypeIsInt128(to)) ||
+        (TypeIsBitInt(from->type) && TypeIsBitInt(to) &&
+         from->type->bit_width == to->bit_width);
+    if (same_extended &&
+        TypeIsUnsigned(from->type) == TypeIsUnsigned(to) &&
+        from->type->size == to->size) {
+      ASTNodeSetType(from, to);
+      return;
+    }
     if (from->op == AST_OP(number)) {
       ConvertIntConstantToType((ConstantASTNode*)from, to);
       ASTNodeSetType(from, to);

@@ -70,6 +70,7 @@ set(DAVECC_GUEST_LIBC_COMMON_C
   libc/posix_lseek.c
   libc/posix_open.c
   libc/posix_read.c
+  libc/posix_poll.c
   libc/printf.c
   libc/printf_common.c
   libc/printf_literal.c

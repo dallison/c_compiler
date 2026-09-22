@@ -2370,6 +2370,11 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
             return_value,
             "returned reference cannot be initialized with a temporary "
             "expression");
+      } else if (return_value->type != NULL &&
+                 (TypeIsUnknown(return_value->type) ||
+                  TypeContainsTemplateParameter(return_value->type))) {
+        // Dependent return in a template body: the value category is not
+        // known until instantiation (e.g. `expr.StorageT<I>::get()`).
       } else if (reference_type->declarator == kDeclRValueReference) {
         if (return_value->value_category == kValueCategoryLvalue) {
           SemanticError(return_value,

@@ -29,6 +29,20 @@ int ffs(int n) {
   return MultiplyDeBruijnBitPosition2[(uint32_t)(n * 0x077CB531U) >> 27] + 1;
 }
 
+int ffsll(long long n) {
+  if (n == 0) {
+    return 0;
+  }
+  int bit = 1;
+  while ((n & 1LL) == 0) {
+    n >>= 1;
+    bit++;
+  }
+  return bit;
+}
+
+int ffsl(long n) { return ffsll((long long)n); }
+
 char *index(const char *s, int c) { return strchr(s, c); }
 
 char *rindex(const char *s, int c) { return strrchr(s, c); }

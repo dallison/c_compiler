@@ -176,23 +176,34 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
     int placeholder_index = -1;
     bool is_template_parameter_base =
         TypeIsTemplateParameterPlaceholder(base_type, &placeholder_index);
-    if (is_pack_expansion &&
-        !CurrentTemplateParameterIsPack(parser->syntax, placeholder_index)) {
+    bool pack_expansion_names_pack =
+        CurrentTemplateParameterIsPack(parser->syntax, placeholder_index) ||
+        TypeContainsParameterPack(parser->syntax, base_type);
+    if (is_pack_expansion && !pack_expansion_names_pack) {
       SyntaxError(parser->syntax,
                   "base class pack expansion requires a template parameter pack");
       TypeRecordDelete(base_type);
       continue;
     }
+    bool allow_dependent_pack_base =
+        is_pack_expansion && pack_expansion_names_pack;
+    bool is_dependent_named_base =
+        base_type != NULL &&
+        (TypeContainsTemplateParameter(base_type) ||
+         (base_type->template_origin != NULL &&
+          base_type->template_arguments != NULL));
     if (base_type == NULL ||
-        (!is_template_parameter_base &&
+        (!is_template_parameter_base && !allow_dependent_pack_base &&
+         !is_dependent_named_base &&
          (!TypeIsStructOrUnion(base_type) ||
           base_type->info.struct_info == NULL))) {
       SyntaxError(parser->syntax, "base class must be a class or struct type");
       TypeRecordDelete(base_type);
       continue;
     }
-    Struct* base_struct = base_type->info.struct_info;
-    if (!is_template_parameter_base &&
+    Struct* base_struct =
+        TypeIsStructOrUnion(base_type) ? base_type->info.struct_info : NULL;
+    if (!is_template_parameter_base && !allow_dependent_pack_base &&
         !TypeContainsTemplateParameter(base_type) &&
         (base_struct == parser->syntax->cxx_class_head ||
          base_struct == parser->cxx_member_owner)) {
@@ -200,15 +211,17 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
       TypeRecordDelete(base_type);
       continue;
     }
-    if (!is_template_parameter_base && base_type->info.struct_info->is_final) {
+    if (!is_template_parameter_base && base_struct != NULL &&
+        base_struct->is_final) {
       const char* base_name =
-          base_type->info.struct_info->tag_name != NULL
-              ? base_type->info.struct_info->tag_name->value
+          base_struct->tag_name != NULL
+              ? base_struct->tag_name->value
               : "<anonymous>";
       SyntaxError(parser->syntax, "cannot derive from final base class %s",
                   base_name);
     }
-    if (!is_template_parameter_base) {
+    if (!is_template_parameter_base && !allow_dependent_pack_base &&
+        TypeIsStructOrUnion(base_type)) {
       TypeRecordCalculateSize(base_type);
     }
     CXXBaseSpecifier* base =

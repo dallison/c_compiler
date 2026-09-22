@@ -40,6 +40,7 @@ static struct {
     {kTypeChar16, "char16_t"},    {kTypeChar32, "char32_t"},
     {kTypeShort, "short"},
     {kTypeLong, "long"},          {kTypeLongLong, "long long"},
+    {kTypeInt128, "__int128"},    {kTypeWchar, "wchar_t"},
     {kTypeInt, "int"},            {kTypeFloat, "float"},
     {kTypeFloat32, "std::float32_t"},
     {kTypeDouble, "double"},      {kTypeFloat64, "std::float64_t"},

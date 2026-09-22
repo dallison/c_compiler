@@ -198,6 +198,14 @@ struct __make_index_sequence<0, Ints...> {
 template <size_t N>
 using make_index_sequence = typename __make_index_sequence<N>::type;
 
+template <class T, size_t... Idx>
+integer_sequence<T, static_cast<T>(Idx)...>
+__to_integer_sequence(index_sequence<Idx...>);
+
+template <class T, T N>
+using make_integer_sequence =
+    decltype(__to_integer_sequence<T>(make_index_sequence<static_cast<size_t>(N)>{}));
+
 template <class... Types>
 using index_sequence_for = make_index_sequence<sizeof...(Types)>;
 

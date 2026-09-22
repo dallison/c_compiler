@@ -145,6 +145,30 @@ class auto_ptr {
 
 namespace std {
 
+template <class T>
+constexpr T* addressof(T& value) noexcept {
+  return reinterpret_cast<T*>(
+      &const_cast<char&>(reinterpret_cast<const volatile char&>(value)));
+}
+
+template <class Ptr>
+struct pointer_traits {
+  using pointer = Ptr;
+  using difference_type = ptrdiff_t;
+};
+
+template <class T>
+struct pointer_traits<T*> {
+  using pointer = T*;
+  using element_type = T;
+  using difference_type = ptrdiff_t;
+  template <class U>
+  using rebind = U*;
+  static constexpr pointer pointer_to(T& r) noexcept {
+    return addressof(r);
+  }
+};
+
 #if __cplusplus >= 202600L
 template <class T>
 constexpr void start_lifetime(T& object) noexcept {

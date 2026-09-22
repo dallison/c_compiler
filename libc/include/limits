@@ -146,14 +146,12 @@ class numeric_limits<char32_t>
                                       true> {};
 #endif
 
-#if !defined(__DAVECC__)
 template <>
 class numeric_limits<wchar_t>
     : public __numeric_limits_integer<
           wchar_t, static_cast<wchar_t>(WCHAR_MIN),
           static_cast<wchar_t>(WCHAR_MAX), sizeof(wchar_t) * CHAR_BIT - 1,
           sizeof(wchar_t) == 2 ? 4 : 9, true, false> {};
-#endif
 
 template <>
 class numeric_limits<short>
@@ -214,6 +212,31 @@ template <>
 class numeric_limits<unsigned long long>
     : public __numeric_limits_integer<unsigned long long, 0ULL, ULLONG_MAX, 64,
                                       19, false, true> {};
+
+#if defined(__SIZEOF_INT128__)
+namespace __limits_detail {
+constexpr unsigned __int128 __uint128_max() {
+  return ~static_cast<unsigned __int128>(0);
+}
+constexpr __int128 __int128_max() {
+  return static_cast<__int128>(__uint128_max() >> 1);
+}
+constexpr __int128 __int128_min() { return -__int128_max() - 1; }
+}  // namespace __limits_detail
+
+template <>
+class numeric_limits<__int128>
+    : public __numeric_limits_integer<__int128,
+                                      __limits_detail::__int128_min(),
+                                      __limits_detail::__int128_max(), 127, 38,
+                                      true, false> {};
+
+template <>
+class numeric_limits<unsigned __int128>
+    : public __numeric_limits_integer<
+          unsigned __int128, static_cast<unsigned __int128>(0),
+          __limits_detail::__uint128_max(), 128, 38, false, true> {};
+#endif
 
 namespace __limits_detail {
 

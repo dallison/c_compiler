@@ -8,6 +8,7 @@
 
 #include "risc_v_interpreter.h"
 #include <fcntl.h>
+#include <poll.h>
 #include <math.h>
 #include <sched.h>
 #include <stdio.h>
@@ -671,6 +672,15 @@ static void HandleEcall(RISCVInterpreter* interpreter) {
       interpreter->iregs[REG(a0)] =
           (uint64_t)DaveHostFilesystemGetDescriptorStatus(
               (int)interpreter->iregs[REG(a1)], result);
+      break;
+    }
+    case RISC_V_ECALL_POLL: {
+      nfds_t n = (nfds_t)interpreter->iregs[REG(a2)];
+      void* fds = EcallGuestPtr(
+          interpreter, interpreter->iregs[REG(a1)],
+          n * sizeof(struct pollfd));
+      interpreter->iregs[REG(a0)] =
+          poll((struct pollfd*)fds, n, (int)interpreter->iregs[REG(a3)]);
       break;
     }
     case RISC_V_ECALL_ENVIRONMENT_VALUE: {

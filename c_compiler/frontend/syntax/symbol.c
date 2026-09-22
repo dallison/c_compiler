@@ -1045,6 +1045,10 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
     StringAppendChar(out, TypeIsUnsigned(type) ? 'h' : 'c');
   } else if (TypeIsShort(type)) {
     StringAppendChar(out, TypeIsUnsigned(type) ? 't' : 's');
+  } else if (TypeIsInt128(type)) {
+    StringAppendChar(out, TypeIsUnsigned(type) ? 'o' : 'n');
+  } else if (TypeIsWchar(type)) {
+    StringAppendChar(out, 'w');
   } else if (TypeIsLongLong(type)) {
     StringAppend(out, TypeIsUnsigned(type) ? "y" : "x");
   } else if (TypeIsLong(type)) {

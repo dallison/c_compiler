@@ -115,6 +115,20 @@ void TypeParserDestruct(TypeParser* parser) {
   AttributeListDestruct(&parser->pending_declaration_attributes);
 }
 
+static void TypeParserPublishSubstitutionToSyntax(TypeParser* parser) {
+  if (parser == NULL || parser->syntax == NULL) {
+    return;
+  }
+  parser->syntax->template_substitution_source =
+      parser->template_substitution_source;
+  parser->syntax->template_substitution_target =
+      parser->template_substitution_target;
+  parser->syntax->enclosing_template_substitution_source =
+      parser->enclosing_template_substitution_source;
+  parser->syntax->enclosing_template_substitution_target =
+      parser->enclosing_template_substitution_target;
+}
+
 TypeSubstitutionScope TypeParserPushTemplateSubstitution(
     TypeParser* parser, Struct* source, Struct* target) {
   TypeSubstitutionScope scope = {
@@ -125,6 +139,7 @@ TypeSubstitutionScope TypeParserPushTemplateSubstitution(
   if (parser != NULL) {
     parser->template_substitution_source = source;
     parser->template_substitution_target = target;
+    TypeParserPublishSubstitutionToSyntax(parser);
   }
   return scope;
 }
@@ -135,6 +150,7 @@ void TypeParserPopTemplateSubstitution(TypeSubstitutionScope* scope) {
   }
   scope->parser->template_substitution_source = scope->source;
   scope->parser->template_substitution_target = scope->target;
+  TypeParserPublishSubstitutionToSyntax(scope->parser);
   scope->parser = NULL;
 }
 
@@ -145,7 +161,7 @@ static struct {
 } type_map[] = {
     {TOK(char), kTypeChar},         {TOK(char8_t), kTypeChar8},
     {TOK(char16_t), kTypeChar16},   {TOK(char32_t), kTypeChar32},
-    {TOK(int), kTypeInt},
+    {TOK(int), kTypeInt},           {TOK(int128), kTypeInt128},
     {TOK(short), kTypeShort},       {TOK(long), kTypeLong},
     {TOK(float), kTypeFloat},       {TOK(double), kTypeDouble},
     {TOK(class), kTypeStruct},      {TOK(struct), kTypeStruct},
@@ -153,10 +169,8 @@ static struct {
     {TOK(enum), kTypeEnum},         {TOK(void), kTypeVoid},
     {TOK(bool), kTypeBool},         {TOK(signed), kTypeSigned},
     {TOK(unsigned), kTypeUnsigned}, {TOK(auto), kTypeAuto},
-    // In C++ `wchar_t` is a distinct keyword, but this implementation defines
-    // it to its underlying integer type (matching `__WCHAR_TYPE__` and the C
-    // `typedef int wchar_t`), so a `wchar_t` type-specifier behaves like `int`.
-    {TOK(wchar_t), kTypeInt},
+    // C++ `wchar_t` is a distinct fundamental type (C keeps the stddef typedef).
+    {TOK(wchar_t), kTypeWchar},
     {TOK(bad), kTypeImplicit},
 };
 
@@ -462,8 +476,22 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   TypeRecord* result = NULL;
   if (declared_symbol != NULL) {
     result = TypeRecordCopy(declared_symbol->type);
+  } else if (parser->syntax->current_template_parameters != NULL &&
+             expr != NULL &&
+             DependentExpressionContainsTemplateParameter(expr)) {
+    // A pack expansion such as `decltype(Or({Trait<Ts>()()...}))` cannot be
+    // overload-resolved until the pack is expanded against concrete
+    // arguments.  Analyzing it now diagnoses a false "no matching overload"
+    // and mutates the operand so later substitution cannot recover.
+    result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    result->dependent_decltype_expr = expr;
+    expr = NULL;
   } else {
+    // decltype's operand is unevaluated: declaration-only function templates
+    // such as std::declval / SFINAE probes must not require a function body.
+    compiler->speculative_template_instantiation_depth++;
     expr = AnalyzeExpression(expr);
+    compiler->speculative_template_instantiation_depth--;
     if (expr == NULL || expr->type == NULL) {
       SyntaxError(parser->syntax, "Invalid expression in decltype");
       result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
@@ -538,7 +566,20 @@ Struct* CurrentClassBeingParsed(TypeParser* parser) {
   if (parser != NULL && parser->context == kParsingBlockScope &&
       compiler->current_function != NULL &&
       TypeIsFunction(compiler->current_function)) {
-    return compiler->current_function->info.function.cxx_member_owner;
+    Struct* owner =
+        compiler->current_function->info.function.cxx_member_owner;
+    // A lambda call operator is a member of the invented closure class.
+    // Names such as `Impl` in `const_cast<Impl*>(this)` inside `[this]()
+    // {...}` must resolve to the enclosing class, which is still recorded
+    // on cxx_class_head while that class's inline member body is parsed.
+    if (owner != NULL && owner->tag_symbol != NULL &&
+        owner->tag_symbol->flags.invented && parser->syntax != NULL &&
+        parser->syntax->cxx_class_head != NULL) {
+      return parser->syntax->cxx_class_head;
+    }
+    if (owner != NULL) {
+      return owner;
+    }
   }
   // Fall back to the class whose base-clause/body is currently being parsed.
   // Nested template-argument parsing (e.g. a self-template-id inside a base
@@ -788,6 +829,58 @@ static TypeRecord* BuildDependentMemberTemplateTypename(
   }
   type->dependent_member_template_arguments = component_args;
   StringDestruct(&encoded_name);
+  return type;
+}
+
+/* `ClassTemplate<Args>::member` used as a type (a base-specifier, alias, or
+ * other type-id) without a leading `typename`.  C++ treats a base-specifier as
+ * a type context, so Abseil's
+ * `struct is_detected : is_detected_impl<void, Op, Args...>::type` is valid.
+ * Represent it as a deferred `origin + arguments + member` type so instantiation
+ * can look up `::member` once the arguments are concrete. */
+static TypeRecord* TryBuildDependentTemplateIdMemberType(
+    TypeParser* parser, FullyQualifiedIdentifier* name) {
+  if (parser == NULL || name == NULL || !CompilerIsCXX() ||
+      name->components.length < 2 ||
+      name->template_arguments.length != name->components.length) {
+    return NULL;
+  }
+  size_t base_index = name->components.length - 2;
+  Vector* parsed_args = name->template_arguments.value.p[base_index];
+  if (parsed_args == NULL) {
+    return NULL;
+  }
+  FullyQualifiedIdentifier prefix;
+  FullyQualifiedIdentifierInit(&prefix);
+  prefix.absolute = name->absolute;
+  prefix.is_qualified = prefix.absolute || base_index > 0;
+  for (size_t i = 0; i <= base_index; i++) {
+    String* component = name->components.value.p[i];
+    if (prefix.spelling.length != 0 || prefix.absolute) {
+      StringAppend(&prefix.spelling, "::");
+    }
+    StringAppendString(&prefix.spelling, component);
+    VectorAppend(&prefix.components, NewString(component->value));
+    VectorAppend(&prefix.template_arguments,
+                 TemplateArgumentVectorCopy(
+                     name->template_arguments.value.p[i]));
+  }
+  Symbol* base = SyntaxFindQualifiedSymbol(parser->syntax, &prefix);
+  FullyQualifiedIdentifierDestruct(&prefix);
+  if (base == NULL || !base->flags.is_template) {
+    return NULL;
+  }
+  String* member_name = name->components.value.p[name->components.length - 1];
+  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+  type->template_origin = base;
+  type->template_arguments = TemplateArgumentVectorCopy(parsed_args);
+  type->dependent_member_name = NewString(member_name->value);
+  type->dependent_member_template_arguments = NewVector();
+  for (size_t i = base_index + 1; i < name->template_arguments.length; i++) {
+    VectorAppend(type->dependent_member_template_arguments,
+                 TemplateArgumentVectorCopy(
+                     name->template_arguments.value.p[i]));
+  }
   return type;
 }
 
@@ -1567,6 +1660,10 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         type_record = BuildDependentMemberTemplateTypename(
             parser, &typedef_name,
             /*require_member_template_id=*/false);
+        if (type_record == NULL) {
+          type_record =
+              TryBuildDependentTemplateIdMemberType(parser, &typedef_name);
+        }
         if (type_record != NULL) {
           type |= type_record->type;
         } else {
@@ -1574,8 +1671,14 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                       typedef_name.spelling.value);
         }
       } else {
-        SyntaxError(parser->syntax, "Unknown type name %s",
-                    typedef_name.spelling.value);
+        type_record =
+            TryBuildDependentTemplateIdMemberType(parser, &typedef_name);
+        if (type_record != NULL) {
+          type |= type_record->type;
+        } else {
+          SyntaxError(parser->syntax, "Unknown type name %s",
+                      typedef_name.spelling.value);
+        }
       }
       FullyQualifiedIdentifierDestruct(&typedef_name);
     } else if (allow_typedef && tok == TOK(identifier)) {
@@ -1824,6 +1927,12 @@ static Type valid_types[] = {
   kTypeLongLong | kTypeSigned | kTypeInt,
   kTypeLongLong | kTypeUnsigned,
   kTypeLongLong | kTypeUnsigned | kTypeInt,
+
+  kTypeInt128,
+  kTypeInt128 | kTypeSigned,
+  kTypeInt128 | kTypeUnsigned,
+
+  kTypeWchar,
   
   kTypeFloat,
   kTypeFloat | kTypeComplex,

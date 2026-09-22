@@ -63,7 +63,8 @@ class duration {
 
   template <class Rep2, class Period2>
   constexpr duration(const duration<Rep2, Period2>& other)
-      : __rep_(duration_cast<duration<Rep, Period>>(other).count()) {}
+      : __rep_(static_cast<rep>((other.count() * Period2::num * period::den) /
+                                (Period2::den * period::num))) {}
 
   constexpr rep count() const { return __rep_; }
 

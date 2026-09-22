@@ -700,17 +700,20 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
     int size = kSize32Bit;
     bool address_operation =
         node->opcode == IR_OP(adda) || node->opcode == IR_OP(suba) ||
-        node->opcode == IR_OP(mova) || node->opcode == IR_OP(nota);
+        node->opcode == IR_OP(mova) || node->opcode == IR_OP(nota) ||
+        node->opcode == IR_OP(addressof);
     // Struct/union-typed nodes denote an aggregate, which in this ABI is
     // referenced by address; size them as 64-bit pointers (e.g. forming
     // &local to copy a struct argument by value).  Distinct long double
-    // is the same: a 16-byte memory object passed by hidden pointer.
+    // and GNU __int128 are the same: 16-byte memory objects passed by
+    // hidden pointer.
     if (address_operation || node->type->size == 8 ||
         TypeIsLong(node->type) || TypeIsLongLong(node->type) ||
         TypeIsPointerOrArray(node->type) || TypeIsFunction(node->type) ||
         TypeUsesFloat64Representation(node->type) ||
         TypeIsStructOrUnion(node->type) || TypeIsVector(node->type) ||
-        TypeUsesLongDoubleRepresentation(node->type)) {
+        TypeUsesLongDoubleRepresentation(node->type) ||
+        TypeIsInt128(node->type)) {
       size = kSize64Bit;
     }
     // A 16-bit narrowing sign-extend is lsl/asr #48 in a 64-bit register.
@@ -3937,6 +3940,7 @@ static bool TypeUsesAArch64FpArgReg(TypeRecord* type) {
 static bool TypePassedAsAArch64Aggregate(TypeRecord* type) {
   return TypeIsStructOrUnion(type) ||
          TypeUsesLongDoubleRepresentation(type) ||
+         TypeIsInt128(type) ||
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type));
 }
 
@@ -4594,7 +4598,8 @@ static TargetInstruction* LowerBuiltinVaArg(AARCH64Generator* g, IRNode* node) {
   VaStore(g, final_stack, ap, AARCH64_VA_STACK, kSize64Bit);
 
   if (TypeIsStructOrUnion(node->type) ||
-      TypeUsesLongDoubleRepresentation(node->type)) {
+      TypeUsesLongDoubleRepresentation(node->type) ||
+      TypeIsInt128(node->type)) {
     // Aggregates are referenced by address.  A struct/union that fits in a
     // single 8-byte general slot is passed by value, so the save-area slot
     // *is* the struct: its address is the slot address.  A larger aggregate is

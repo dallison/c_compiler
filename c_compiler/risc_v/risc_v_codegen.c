@@ -4118,6 +4118,7 @@ static TargetInstruction* LowerBuiltinVaArg(RVGenerator* rv, IRNode* node) {
     result = ap_load;
     arg_size = (struct_size + 7) & ~(size_t)7;
   } else if (TypeUsesLongDoubleRepresentation(node->type) ||
+             TypeIsInt128(node->type) ||
              (TypeIsStructOrUnion(node->type) &&
               node->type->info.struct_info->size > 16)) {
     // Larger aggregates and distinct long double travel as a hidden pointer

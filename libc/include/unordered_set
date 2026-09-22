@@ -19,6 +19,7 @@
 #include <memory_resource>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace std {
 
@@ -174,6 +175,43 @@ class unordered_set {
   void max_load_factor(float factor) { __table_.max_load_factor(factor); }
   void rehash(size_type count) { __table_.rehash(count); }
   void reserve(size_type count) { __table_.reserve(count); }
+};
+
+template <class Key, class Hash = hash<Key>, class KeyEqual = equal_to<Key>,
+          class Allocator = allocator<Key>>
+class unordered_multiset {
+  typedef vector<Key> storage_type;
+
+ public:
+  using key_type = Key;
+  using value_type = Key;
+  using hasher = Hash;
+  using key_equal = KeyEqual;
+  using allocator_type = Allocator;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = const value_type&;
+  using const_reference = const value_type&;
+  using const_iterator = typename storage_type::const_iterator;
+  using iterator = const_iterator;
+
+  unordered_multiset() {}
+
+  iterator begin() const { return values_.begin(); }
+  iterator end() const { return values_.end(); }
+  bool empty() const { return values_.empty(); }
+  size_type size() const { return values_.size(); }
+
+  iterator insert(const value_type& value) {
+    values_.push_back(value);
+    return values_.end() - 1;
+  }
+
+  void clear() { values_.clear(); }
+  void swap(unordered_multiset& other) { values_.swap(other.values_); }
+
+ private:
+  mutable storage_type values_;
 };
 
 template <class Key, class Hash, class KeyEqual, class Allocator>

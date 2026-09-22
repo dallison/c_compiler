@@ -227,6 +227,14 @@ int SizeofLongLong(void) {
   return compiler->long_long_size;
 }
 
+static int SizeofInt128(void) {
+  return 16;
+}
+
+static int SizeofWchar(void) {
+  return compiler->wchar_size ? compiler->wchar_size : 4;
+}
+
 int SizeofFloat(void) {
   return compiler->float_size;
 }
@@ -267,6 +275,8 @@ static struct {
   {kTypeShort, SizeofShort},
   {kTypeLong, SizeofLong},
   {kTypeLongLong, SizeofLongLong},
+  {kTypeInt128, SizeofInt128},
+  {kTypeWchar, SizeofWchar},
   {kTypeFloat, SizeofFloat},
   {kTypeFloat32, SizeofFloat},
   {kTypeDouble, SizeofDouble},

@@ -75,7 +75,15 @@ typedef struct Syntax {
                                   // lets self-template-ids resolve inside nested
                                   // template-argument parsing that spins up fresh
                                   // TypeParsers lacking cxx_member_owner.
-  
+  // Active class-template substitution, mirrored from TypeParserPush so
+  // TypeInstantiateClassTemplate (which builds a fresh TypeParser) can still
+  // prepend enclosing-class arguments onto a member alias such as
+  // `StorageT<I>` → `Storage<T, I>`.
+  struct Struct* template_substitution_source;
+  struct Struct* template_substitution_target;
+  struct Struct* enclosing_template_substitution_source;
+  struct Struct* enclosing_template_substitution_target;
+
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.
   bool c_linkage;            // Effective linkage is from `extern "C"`.

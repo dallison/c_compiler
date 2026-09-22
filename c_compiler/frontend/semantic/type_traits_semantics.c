@@ -1238,6 +1238,69 @@ static bool TypeTraitIsClass(TypeRecord* type) {
          (type->type & kTypeUnion) == 0 && type->info.struct_info != NULL;
 }
 
+static bool TypeTraitMemberFunctionIsVirtual(StructMember* member) {
+  if (member == NULL || !member->is_member_function || member->symbol == NULL ||
+      member->symbol->type == NULL) {
+    return false;
+  }
+  TypeRecord* fn = member->symbol->type;
+  while (fn != NULL && !TypeIsFunction(fn)) {
+    fn = fn->next;
+  }
+  return fn != NULL && fn->info.function.is_virtual;
+}
+
+static bool TypeTraitIsPolymorphic(TypeRecord* type) {
+  if (!TypeTraitIsClass(type)) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  if (str->vptr_member != NULL || str->vtable_symbol != NULL ||
+      str->virtual_members.length > 0) {
+    return true;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = (StructMember*)str->members.value.p[i];
+    for (StructMember* cur = member; cur != NULL; cur = cur->overload_next) {
+      if (TypeTraitMemberFunctionIsVirtual(cur)) {
+        return true;
+      }
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = (CXXBaseSpecifier*)str->bases.value.p[i];
+    if (base != NULL && TypeTraitIsPolymorphic(base->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TypeTraitIsEmpty(TypeRecord* type) {
+  if (!TypeTraitIsClass(type) || TypeTraitIsPolymorphic(type)) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = (StructMember*)str->members.value.p[i];
+    if (member != NULL && !member->is_static && !member->is_member_function &&
+        !member->is_anon) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = (CXXBaseSpecifier*)str->bases.value.p[i];
+    if (base != NULL && !TypeTraitIsEmpty(base->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool TypeTraitIsFinal(TypeRecord* type) {
+  return TypeTraitIsClass(type) && type->info.struct_info->is_final;
+}
+
 static TypeRecord* TypeTraitStripQualifiers(TypeRecord* type) {
   type = TypeRecordCopy(type);
   while (type != NULL && (type->qualifiers & kQualConst) != 0) {
@@ -1618,6 +1681,18 @@ bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,
       break;
     case kCXXTypeTraitMemberPointerDirectObject:
       result = TypeTraitMemberPointerUsesDirectObject(syntax, type_args);
+      break;
+    case kCXXTypeTraitIsPolymorphic:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsPolymorphic((TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitIsEmpty:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsEmpty((TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitIsFinal:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsFinal((TypeRecord*)type_args->value.p[0]);
       break;
   }
   SyntaxCloseScope(syntax);

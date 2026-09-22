@@ -310,7 +310,8 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
     case AST_OP(builtin_ctz):
     case AST_OP(builtin_popcount):
     case AST_OP(builtin_rotl):
-    case AST_OP(builtin_rotr): {
+    case AST_OP(builtin_rotr):
+    case AST_OP(builtin_bswap): {
       if (vector_node->children->length == 0 ||
           !EvaluateIntegerExpressionInContext(
               ctx, vector_node->children->value.p[0], &left)) {
@@ -328,6 +329,7 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
                       : 64;
       if (node->op != AST_OP(builtin_rotl) &&
           node->op != AST_OP(builtin_rotr) &&
+          node->op != AST_OP(builtin_bswap) &&
           vector_node->children->length == 2) {
         if (!EvaluateIntegerExpressionInContext(
                 ctx, vector_node->children->value.p[1], &right) ||
@@ -338,6 +340,28 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       }
       uint64_t mask = width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
       uint64_t value = (uint64_t)left & mask;
+      if (node->op == AST_OP(builtin_bswap)) {
+        uint64_t swapped = value;
+        if (width == 16) {
+          swapped = ((value & 0x00FFu) << 8) | ((value & 0xFF00u) >> 8);
+        } else if (width == 32) {
+          swapped = ((value & 0x000000FFu) << 24) |
+                    ((value & 0x0000FF00u) << 8) |
+                    ((value & 0x00FF0000u) >> 8) |
+                    ((value & 0xFF000000u) >> 24);
+        } else if (width == 64) {
+          swapped = ((value & UINT64_C(0x00000000000000FF)) << 56) |
+                    ((value & UINT64_C(0x000000000000FF00)) << 40) |
+                    ((value & UINT64_C(0x0000000000FF0000)) << 24) |
+                    ((value & UINT64_C(0x00000000FF000000)) << 8) |
+                    ((value & UINT64_C(0x000000FF00000000)) >> 8) |
+                    ((value & UINT64_C(0x0000FF0000000000)) >> 24) |
+                    ((value & UINT64_C(0x00FF000000000000)) >> 40) |
+                    ((value & UINT64_C(0xFF00000000000000)) >> 56);
+        }
+        *result = (int64_t)swapped;
+        return true;
+      }
       if (node->op == AST_OP(builtin_popcount)) {
         int count = 0;
         for (; value != 0; value &= value - 1) {

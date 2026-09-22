@@ -920,6 +920,18 @@ bool TypeIsVolatile(TypeRecord* type);
 bool TypeIsAtomic(TypeRecord* type);
 bool TypeIsEnum(TypeRecord* type);
 
+bool TypeIsInt128(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeInt128) != 0;
+}
+
+bool TypeIsWchar(TypeRecord* type) {
+  return TypeIsPrimitive(type) && (type->type & kTypeWchar) != 0;
+}
+
+bool TypeIsUnsignedInt128(TypeRecord* type) {
+  return TypeIsUnsigned(type) && TypeIsInt128(type);
+}
+
 bool TypeIsUnsigned(TypeRecord* type) {
   if (TypeIsChar8(type) || TypeIsChar16(type) || TypeIsChar32(type)) {
     return true;
@@ -1102,6 +1114,12 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
 // integer type specifiers.  The parser preserves the spelling in Type bits, so
 // canonicalize those equivalent spellings before comparing types.
 static Type CanonicalPrimitiveType(Type type) {
+  if ((type & kTypeInt128) != 0) {
+    return type & ~kTypeSigned;
+  }
+  if ((type & kTypeWchar) != 0) {
+    return type & ~kTypeSigned;
+  }
   const Type integer_specifiers =
       kTypeInt | kTypeShort | kTypeLong | kTypeLongLong |
       kTypeSigned | kTypeUnsigned;

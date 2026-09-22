@@ -3,13 +3,22 @@
 //  c_compiler
 //
 //  C++ wrapper for <math.h>: brings the C math names into namespace std
-//  for DaveCC.
+//  for DaveCC.  Classification macros from <math.h> are undefined so
+//  `std::fpclassify(x)` is a function call, not `std::` plus a macro body.
 //
 
 #ifndef cmath_h
 #define cmath_h
 
 #include <math.h>
+#include <type_traits>
+
+#undef fpclassify
+#undef signbit
+#undef isfinite
+#undef isinf
+#undef isnan
+#undef isnormal
 
 namespace std {
 
@@ -27,7 +36,6 @@ using ::sqrt;
 using ::fabs;
 using ::floor;
 using ::ceil;
-using ::frexp;
 using ::exp;
 using ::log;
 using ::pow;
@@ -73,6 +81,68 @@ using ::llrint;
 using ::nearbyint;
 using ::scalbn;
 using ::scalbln;
+
+inline float frexp(float x, int* exp) { return ::frexpf(x, exp); }
+inline double frexp(double x, int* exp) { return ::frexp(x, exp); }
+inline long double frexp(long double x, int* exp) { return ::frexpl(x, exp); }
+
+inline int fpclassify(float x) {
+  return ::__davecc_fpclassify((double)x);
+}
+inline int fpclassify(double x) { return ::__davecc_fpclassify(x); }
+inline int fpclassify(long double x) { return ::__davecc_fpclassifyl(x); }
+
+template <class T>
+inline typename enable_if<is_integral<T>::value, int>::type fpclassify(T x) {
+  return x == T(0) ? FP_ZERO : FP_NORMAL;
+}
+
+inline bool signbit(float x) {
+  return ::__davecc_signbit((double)x) != 0;
+}
+inline bool signbit(double x) { return ::__davecc_signbit(x) != 0; }
+inline bool signbit(long double x) { return ::__davecc_signbitl(x) != 0; }
+
+template <class T>
+inline typename enable_if<is_integral<T>::value, bool>::type signbit(T x) {
+  return x < T(0);
+}
+
+inline bool isfinite(float x) { return fpclassify(x) > FP_INFINITE; }
+inline bool isfinite(double x) { return fpclassify(x) > FP_INFINITE; }
+inline bool isfinite(long double x) { return fpclassify(x) > FP_INFINITE; }
+
+template <class T>
+inline typename enable_if<is_integral<T>::value, bool>::type isfinite(T) {
+  return true;
+}
+
+inline bool isinf(float x) { return fpclassify(x) == FP_INFINITE; }
+inline bool isinf(double x) { return fpclassify(x) == FP_INFINITE; }
+inline bool isinf(long double x) { return fpclassify(x) == FP_INFINITE; }
+
+template <class T>
+inline typename enable_if<is_integral<T>::value, bool>::type isinf(T) {
+  return false;
+}
+
+inline bool isnan(float x) { return fpclassify(x) == FP_NAN; }
+inline bool isnan(double x) { return fpclassify(x) == FP_NAN; }
+inline bool isnan(long double x) { return fpclassify(x) == FP_NAN; }
+
+template <class T>
+inline typename enable_if<is_integral<T>::value, bool>::type isnan(T) {
+  return false;
+}
+
+inline bool isnormal(float x) { return fpclassify(x) == FP_NORMAL; }
+inline bool isnormal(double x) { return fpclassify(x) == FP_NORMAL; }
+inline bool isnormal(long double x) { return fpclassify(x) == FP_NORMAL; }
+
+template <class T>
+inline typename enable_if<is_integral<T>::value, bool>::type isnormal(T x) {
+  return x != T(0);
+}
 
 }  // namespace std
 

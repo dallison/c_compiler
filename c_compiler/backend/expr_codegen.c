@@ -150,12 +150,17 @@ static int Char32Size(void) {
   return 4;
 }
 
+static int WcharSize(void) {
+  return compiler->wchar_size ? compiler->wchar_size : 4;
+}
+
 static struct {
   bool (*type_func)(TypeRecord*);
   int (*size_func)(void);
 } int_type_sizes[] = {
   {TypeIsChar32, Char32Size},
   {TypeIsChar16, Char16Size},
+  {TypeIsWchar, WcharSize},
   {TypeIsShort, ShortSize},
   {TypeIsLong, LongSize},
   {TypeIsLongLong, LongLongSize},
@@ -191,6 +196,7 @@ static struct {
     {TypeUsesDoubleIROperations, IR_OP(loadd), IR_OP(loadd), IR_OP(stored)},
     {TypeUsesLongDoubleRepresentation, IR_OP(loada), IR_OP(loada),
      IR_OP(storea)},
+    {TypeIsInt128, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsPointerOrArray, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsNullPointer, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsMemberPointerScalar, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
@@ -343,6 +349,9 @@ static IRNode* AtomicObjectAddress(Generator* gen, IRNode* address,
 }
 
 static IRNode* EmitObjectLoad(Generator* gen, ASTNode* node, IRNode* address) {
+  if (TypeIsInt128(node->type)) {
+    return IRSetType(address, node->type);
+  }
   if (TypeUsesLongDoubleRepresentation(node->type)) {
     return LoadLongDoubleFromAddress(gen, address, node->type);
   }
@@ -369,6 +378,9 @@ static IRNode* EmitObjectStore(Generator* gen, ASTNode* node, IRNode* address,
   return IRSetType(store, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
 
+static IRNode* Int128ObjectAddress(Generator* gen, IRNode* value,
+                                   TypeRecord* type);
+
 // Spills a scalar/pointer `value` of `type` into a fresh stack temporary and
 // returns the temporary's address.  Used so a return value survives calls
 // emitted between its computation and the return (the scope-exit destructors),
@@ -385,6 +397,10 @@ IRNode* GeneratorSpillValueToTemp(Generator* gen, IRNode* value,
                            NewPointerTo(kQualPlain, type));
   if (TypeUsesLongDoubleRepresentation(type)) {
     StoreLongDoubleToAddress(gen, addr, value, type);
+  } else if (TypeIsInt128(type)) {
+    GeneratorEmit(gen, NewIR3(IR_OP(memcpy), addr,
+                              Int128ObjectAddress(gen, value, type),
+                              GeneratorGetIntConstant(gen, NULL, type->size)));
   } else {
     GeneratorEmit(gen, NewIR2(GetStoreOpcodeForType(type), addr, value));
   }
@@ -400,6 +416,9 @@ IRNode* GeneratorReloadSpilledValue(Generator* gen, IRNode* addr,
                 addr->type);
   if (TypeUsesLongDoubleRepresentation(type)) {
     return LoadLongDoubleFromAddress(gen, reload_addr, type);
+  }
+  if (TypeIsInt128(type)) {
+    return IRSetType(addr->inputs.value.p[0], type);
   }
   return IRSetType(
       GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(type), reload_addr)), type);
@@ -635,6 +654,372 @@ static IRNode* GenerateMemberPointerComparison(Generator* gen,
 static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node,
                                   IRNode* input);
 static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub);
+
+static TypeRecord* Int128WordType(void) {
+  return NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned, kQualPlain);
+}
+
+static IRNode* Int128ObjectAddress(Generator* gen, IRNode* value,
+                                   TypeRecord* type) {
+  if (value == NULL) {
+    return NULL;
+  }
+  if (value->opcode == IR_OP(literalref) || value->opcode == IR_OP(addressof) ||
+      value->opcode == IR_OP(adda) || value->opcode == IR_OP(suba) ||
+      value->opcode == IR_OP(loada) || TypeIsPointer(value->type)) {
+    return IRSetType(value, NewPointerTo(kQualPlain, type));
+  }
+  return IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(addressof), value)),
+                   NewPointerTo(kQualPlain, type));
+}
+
+static IRNode* NewInt128Object(Generator* gen, TypeRecord* type) {
+  Symbol* temporary = SyntaxNewTemporary(gen->syntax, type);
+  temporary->flags.address_taken = true;
+  return GeneratorGetVariable(gen, temporary);
+}
+
+static IRNode* Int128WordPointer(Generator* gen, IRNode* address, bool high) {
+  TypeRecord* word = Int128WordType();
+  if (!high) {
+    return IRSetType(address, NewPointerTo(kQualPlain, word));
+  }
+  IRNode* offset = GeneratorGetIntConstant(gen, word, 8);
+  return IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(adda), address, offset)),
+                   NewPointerTo(kQualPlain, word));
+}
+
+static IRNode* LoadInt128Word(Generator* gen, IRNode* address, bool high) {
+  TypeRecord* word = Int128WordType();
+  IRNode* word_addr = Int128WordPointer(gen, address, high);
+  return IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(load64), word_addr)), word);
+}
+
+static void StoreInt128Word(Generator* gen, IRNode* address, bool high,
+                            IRNode* value) {
+  IRNode* word_addr = Int128WordPointer(gen, address, high);
+  GeneratorEmit(gen, NewIR2(IR_OP(store64), word_addr, value));
+}
+
+static IRNode* Int128UnsignedLess(Generator* gen, IRNode* left, IRNode* right) {
+  TypeRecord* word = Int128WordType();
+  IRNode* lhs = IRSetType(left, word);
+  IRNode* rhs = IRSetType(right, word);
+  return GeneratorEmit(gen, NewIR2(IR_OP(cmplti), lhs, rhs));
+}
+
+static IRNode* Int128Select(Generator* gen, IRNode* cond, IRNode* if_true,
+                            IRNode* if_false, TypeRecord* word) {
+  IRNode* diff =
+      IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(subi), if_true, if_false)),
+                word);
+  IRNode* scaled =
+      IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), cond, diff)), word);
+  return IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), if_false, scaled)),
+                   word);
+}
+
+static IRNode* GenerateInt128FromWords(Generator* gen, TypeRecord* type,
+                                       IRNode* lo, IRNode* hi) {
+  IRNode* object = NewInt128Object(gen, type);
+  IRNode* address = Int128ObjectAddress(gen, object, type);
+  StoreInt128Word(gen, address, false, lo);
+  StoreInt128Word(gen, address, true, hi);
+  return IRSetType(object, type);
+}
+
+static IRNode* GenerateInt128Constant(Generator* gen, TypeRecord* type,
+                                      int64_t lo, int64_t hi) {
+  TypeRecord* word = Int128WordType();
+  return GenerateInt128FromWords(
+      gen, type, GeneratorGetIntConstant(gen, word, lo),
+      GeneratorGetIntConstant(gen, word, hi));
+}
+
+static IRNode* WidenIntegerToInt128(Generator* gen, IRNode* value,
+                                    TypeRecord* from, TypeRecord* to) {
+  TypeRecord* word = Int128WordType();
+  IRNode* lo = IRSetType(value, word);
+  if (from != NULL && from->size > 0 && from->size < 8) {
+    IROpcode extend = (!TypeIsUnsigned(from) && !TypeIsBool(from))
+                          ? IR_OP(signextendi)
+                          : IR_OP(zeroextendi);
+    IRNode* bits = GeneratorGetIntConstant(gen, word, from->size * 8);
+    lo = IRSetType(GeneratorEmit(gen, NewIR2(extend, value, bits)), word);
+  }
+  IRNode* hi;
+  if (TypeIsUnsigned(from) || TypeIsBool(from)) {
+    hi = GeneratorGetIntConstant(gen, word, 0);
+  } else {
+    IRNode* zero = GeneratorGetIntConstant(gen, word, 0);
+    IRNode* minus_one = GeneratorGetIntConstant(gen, word, (int64_t)-1);
+    IRNode* negative = GeneratorEmit(gen, NewIR2(IR_OP(cmplti), lo, zero));
+    IRNode* diff =
+        IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(subi), minus_one, zero)),
+                  word);
+    IRNode* scaled =
+        IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), negative, diff)),
+                  word);
+    hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), zero, scaled)), word);
+  }
+  return GenerateInt128FromWords(gen, to, lo, hi);
+}
+
+static IRNode* NarrowInt128ToInteger(Generator* gen, IRNode* value,
+                                     TypeRecord* from, TypeRecord* to) {
+  IRNode* address = Int128ObjectAddress(gen, value, from);
+  IRNode* lo = LoadInt128Word(gen, address, false);
+  if (to != NULL && TypeIsBool(to)) {
+    IRNode* hi = LoadInt128Word(gen, address, true);
+    IRNode* zero = GeneratorGetIntConstant(gen, Int128WordType(), 0);
+    IRNode* lo_nz = GeneratorEmit(gen, NewIR2(IR_OP(cmpnei), lo, zero));
+    IRNode* hi_nz = GeneratorEmit(gen, NewIR2(IR_OP(cmpnei), hi, zero));
+    return IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(ori), lo_nz, hi_nz)), to);
+  }
+  return IRSetType(lo, to);
+}
+
+static IRNode* GenerateInt128Unary(Generator* gen, UnaryASTNode* node) {
+  TypeRecord* type = node->base.type;
+  TypeRecord* word = Int128WordType();
+  IRNode* value = GenerateExpression(gen, node->sub);
+  IRNode* address = Int128ObjectAddress(gen, value, node->sub->type);
+  IRNode* lo = LoadInt128Word(gen, address, false);
+  IRNode* hi = LoadInt128Word(gen, address, true);
+  switch (node->base.op) {
+    case AST_OP(uminus): {
+      IRNode* not_lo = GeneratorEmit(gen, NewIR1(IR_OP(onescomp), lo));
+      IRNode* not_hi = GeneratorEmit(gen, NewIR1(IR_OP(onescomp), hi));
+      IRNode* one = GeneratorGetIntConstant(gen, word, 1);
+      IRNode* sum_lo = IRSetType(
+          GeneratorEmit(gen, NewIR2(IR_OP(addi), not_lo, one)), word);
+      IRNode* carry = Int128UnsignedLess(gen, sum_lo, one);
+      IRNode* sum_hi = IRSetType(
+          GeneratorEmit(gen, NewIR2(IR_OP(addi), not_hi, carry)), word);
+      return GenerateInt128FromWords(gen, type, sum_lo, sum_hi);
+    }
+    case AST_OP(onescomp): {
+      IRNode* not_lo = GeneratorEmit(gen, NewIR1(IR_OP(onescomp), lo));
+      IRNode* not_hi = GeneratorEmit(gen, NewIR1(IR_OP(onescomp), hi));
+      return GenerateInt128FromWords(gen, type, not_lo, not_hi);
+    }
+    default:
+      return IRSetType(value, type);
+  }
+}
+
+static IRNode* GenerateInt128Shift(Generator* gen, IRNode* lo, IRNode* hi,
+                                   IRNode* amount, TypeRecord* type,
+                                   bool left, bool arithmetic) {
+  TypeRecord* word = Int128WordType();
+  IRNode* object = NewInt128Object(gen, type);
+  IRNode* result = Int128ObjectAddress(gen, object, type);
+  IRNode* amt = IRSetType(amount, word);
+  IRNode* c0 = GeneratorGetIntConstant(gen, word, 0);
+  IRNode* c64 = GeneratorGetIntConstant(gen, word, 64);
+  IRNode* c127 = GeneratorGetIntConstant(gen, word, 127);
+  IRNode* masked = IRSetType(
+      GeneratorEmit(gen, NewIR2(IR_OP(andi), amt, c127)), word);
+  IRNode* lt64 = Int128UnsignedLess(gen, masked, c64);
+  IRNode* ge64 = GeneratorEmit(gen, NewIR1(IR_OP(noti), lt64));
+  IRNode* amt64 = IRSetType(
+      GeneratorEmit(gen, NewIR2(IR_OP(subi), masked, c64)), word);
+  IRNode* out_lo;
+  IRNode* out_hi;
+  if (left) {
+    IRNode* lo_lt = IRSetType(
+        GeneratorEmit(gen, NewIR2(IR_OP(lsli), lo, masked)), word);
+    IRNode* hi_lt = IRSetType(
+        GeneratorEmit(gen, NewIR2(IR_OP(lsli), hi, masked)), word);
+    IRNode* inv = IRSetType(
+        GeneratorEmit(gen, NewIR2(IR_OP(subi), c64, masked)), word);
+    IRNode* is_zero = GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), masked, c0));
+    IRNode* lo_to_hi = Int128Select(
+        gen, is_zero, c0,
+        IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(lsri), lo, inv)), word),
+        word);
+    hi_lt = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(ori), hi_lt, lo_to_hi)),
+                      word);
+    IRNode* lo_ge = c0;
+    IRNode* hi_ge = IRSetType(
+        GeneratorEmit(gen, NewIR2(IR_OP(lsli), lo, amt64)), word);
+    out_lo = Int128Select(gen, ge64, lo_ge, lo_lt, word);
+    out_hi = Int128Select(gen, ge64, hi_ge, hi_lt, word);
+  } else {
+    IROpcode shift = arithmetic ? IR_OP(asri) : IR_OP(lsri);
+    IRNode* lo_lt = IRSetType(
+        GeneratorEmit(gen, NewIR2(IR_OP(lsri), lo, masked)), word);
+    IRNode* hi_lt = IRSetType(
+        GeneratorEmit(gen, NewIR2(shift, hi, masked)), word);
+    IRNode* inv = IRSetType(
+        GeneratorEmit(gen, NewIR2(IR_OP(subi), c64, masked)), word);
+    IRNode* is_zero = GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), masked, c0));
+    IRNode* hi_to_lo = Int128Select(
+        gen, is_zero, c0,
+        IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(lsli), hi, inv)), word),
+        word);
+    lo_lt = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(ori), lo_lt, hi_to_lo)),
+                      word);
+    IRNode* sign = arithmetic
+                       ? IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(asri), hi,
+                                                             c127)),
+                                   word)
+                       : c0;
+    IRNode* lo_ge = IRSetType(
+        GeneratorEmit(gen, NewIR2(shift, hi, amt64)), word);
+    out_lo = Int128Select(gen, ge64, lo_ge, lo_lt, word);
+    out_hi = Int128Select(gen, ge64, sign, hi_lt, word);
+  }
+  StoreInt128Word(gen, result, false, out_lo);
+  StoreInt128Word(gen, result, true, out_hi);
+  return IRSetType(object, type);
+}
+
+static IRNode* GenerateInt128Mul(Generator* gen, IRNode* a_lo, IRNode* a_hi,
+                                 IRNode* b_lo, IRNode* b_hi, TypeRecord* type) {
+  TypeRecord* word = Int128WordType();
+  IRNode* mask = GeneratorGetIntConstant(gen, word, 0xffffffffu);
+  IRNode* c32 = GeneratorGetIntConstant(gen, word, 32);
+  IRNode* al = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(andi), a_lo, mask)),
+                         word);
+  IRNode* ah = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(lsri), a_lo, c32)),
+                         word);
+  IRNode* bl = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(andi), b_lo, mask)),
+                         word);
+  IRNode* bh = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(lsri), b_lo, c32)),
+                         word);
+  IRNode* p0 = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), al, bl)), word);
+  IRNode* p1 = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), al, bh)), word);
+  IRNode* p2 = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), ah, bl)), word);
+  IRNode* p3 = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), ah, bh)), word);
+  IRNode* mid = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), p1, p2)), word);
+  IRNode* mid_hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(lsri), mid, c32)),
+                             word);
+  IRNode* mid_lo = IRSetType(
+      GeneratorEmit(gen, NewIR2(IR_OP(lsli),
+                                GeneratorEmit(gen, NewIR2(IR_OP(andi), mid,
+                                                          mask)),
+                                c32)),
+      word);
+  IRNode* lo = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), p0, mid_lo)),
+                         word);
+  IRNode* carry = Int128UnsignedLess(gen, lo, p0);
+  IRNode* hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), p3, mid_hi)),
+                         word);
+  hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), hi, carry)), word);
+  IRNode* cross_a = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), a_lo, b_hi)),
+                              word);
+  IRNode* cross_b = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), a_hi, b_lo)),
+                              word);
+  hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), hi, cross_a)), word);
+  hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), hi, cross_b)), word);
+  return GenerateInt128FromWords(gen, type, lo, hi);
+}
+
+static IRNode* GenerateInt128Binary(Generator* gen, BinaryASTNode* node) {
+  TypeRecord* type = node->base.type;
+  TypeRecord* word = Int128WordType();
+  TypeRecord* left_type =
+      TypeIsInt128(node->left->type) ? node->left->type : type;
+  TypeRecord* right_type =
+      TypeIsInt128(node->right->type) ? node->right->type : type;
+  IRNode* left = GenerateExpression(gen, node->left);
+  IRNode* right = GenerateExpression(gen, node->right);
+  if (!TypeIsInt128(node->left->type)) {
+    left = WidenIntegerToInt128(gen, left, node->left->type, left_type);
+  }
+  if (!TypeIsInt128(node->right->type)) {
+    right = WidenIntegerToInt128(gen, right, node->right->type, right_type);
+  }
+  IRNode* left_addr = Int128ObjectAddress(gen, left, left_type);
+  IRNode* right_addr = Int128ObjectAddress(gen, right, right_type);
+  IRNode* a_lo = LoadInt128Word(gen, left_addr, false);
+  IRNode* a_hi = LoadInt128Word(gen, left_addr, true);
+  IRNode* b_lo = LoadInt128Word(gen, right_addr, false);
+  IRNode* b_hi = LoadInt128Word(gen, right_addr, true);
+  switch (node->base.op) {
+    case AST_OP(plus): {
+      IRNode* lo = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), a_lo, b_lo)),
+                             word);
+      IRNode* carry = Int128UnsignedLess(gen, lo, a_lo);
+      IRNode* hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), a_hi, b_hi)),
+                             word);
+      hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), hi, carry)), word);
+      return GenerateInt128FromWords(gen, type, lo, hi);
+    }
+    case AST_OP(minus): {
+      IRNode* lo = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(subi), a_lo, b_lo)),
+                             word);
+      IRNode* borrow = Int128UnsignedLess(gen, a_lo, b_lo);
+      IRNode* hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(subi), a_hi, b_hi)),
+                             word);
+      hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(subi), hi, borrow)), word);
+      return GenerateInt128FromWords(gen, type, lo, hi);
+    }
+    case AST_OP(and): {
+      IRNode* lo = GeneratorEmit(gen, NewIR2(IR_OP(andi), a_lo, b_lo));
+      IRNode* hi = GeneratorEmit(gen, NewIR2(IR_OP(andi), a_hi, b_hi));
+      return GenerateInt128FromWords(gen, type, lo, hi);
+    }
+    case AST_OP(bitor): {
+      IRNode* lo = GeneratorEmit(gen, NewIR2(IR_OP(ori), a_lo, b_lo));
+      IRNode* hi = GeneratorEmit(gen, NewIR2(IR_OP(ori), a_hi, b_hi));
+      return GenerateInt128FromWords(gen, type, lo, hi);
+    }
+    case AST_OP(exor): {
+      IRNode* lo = GeneratorEmit(gen, NewIR2(IR_OP(xori), a_lo, b_lo));
+      IRNode* hi = GeneratorEmit(gen, NewIR2(IR_OP(xori), a_hi, b_hi));
+      return GenerateInt128FromWords(gen, type, lo, hi);
+    }
+    case AST_OP(mult):
+      return GenerateInt128Mul(gen, a_lo, a_hi, b_lo, b_hi, type);
+    case AST_OP(lshift):
+      return GenerateInt128Shift(gen, a_lo, a_hi, b_lo, type, true, false);
+    case AST_OP(rshiftl):
+      return GenerateInt128Shift(gen, a_lo, a_hi, b_lo, type, false,
+                                 !TypeIsUnsigned(type));
+    case AST_OP(rshifta):
+      return GenerateInt128Shift(gen, a_lo, a_hi, b_lo, type, false, true);
+    case AST_OP(equal):
+    case AST_OP(noteq):
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq): {
+      bool is_unsigned = TypeIsUnsigned(node->left->type) ||
+                         TypeIsUnsigned(node->right->type);
+      IRNode* hi_eq = GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), a_hi, b_hi));
+      IRNode* lo_eq = GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), a_lo, b_lo));
+      IRNode* eq = GeneratorEmit(gen, NewIR2(IR_OP(andi), hi_eq, lo_eq));
+      if (node->base.op == AST_OP(equal)) {
+        return IRSetType(eq, type);
+      }
+      if (node->base.op == AST_OP(noteq)) {
+        return IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(noti), eq)), type);
+      }
+      IRNode* hi_lt = is_unsigned
+                          ? Int128UnsignedLess(gen, a_hi, b_hi)
+                          : GeneratorEmit(gen, NewIR2(IR_OP(cmplti), a_hi, b_hi));
+      IRNode* lo_lt = Int128UnsignedLess(gen, a_lo, b_lo);
+      IRNode* lt = GeneratorEmit(
+          gen, NewIR2(IR_OP(ori), hi_lt,
+                      GeneratorEmit(gen, NewIR2(IR_OP(andi), hi_eq, lo_lt))));
+      IRNode* result = lt;
+      if (node->base.op == AST_OP(greater)) {
+        result = GeneratorEmit(gen, NewIR1(IR_OP(noti),
+                                           GeneratorEmit(gen, NewIR2(
+                                               IR_OP(ori), lt, eq))));
+      } else if (node->base.op == AST_OP(lesseq)) {
+        result = GeneratorEmit(gen, NewIR2(IR_OP(ori), lt, eq));
+      } else if (node->base.op == AST_OP(greatereq)) {
+        result = GeneratorEmit(gen, NewIR1(IR_OP(noti), lt));
+      }
+      return IRSetType(result, type);
+    }
+    default:
+      return GenerateInt128FromWords(gen, type, a_lo, a_hi);
+  }
+}
 
 static TypeRecord* ComplexElementTypeRecord(TypeRecord* complex_type) {
   return NewTypeRecordWithSize(TypeComplexElementType(complex_type),
@@ -1376,6 +1761,10 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
     operation->aux = node->left->type;
     return destination;
   }
+  if (TypeIsInt128(node->base.type) || TypeIsInt128(node->left->type) ||
+      TypeIsInt128(node->right->type)) {
+    return GenerateInt128Binary(gen, node);
+  }
   if (TypeIsComplex(node->left->type) ||
       TypeIsComplex(node->right->type)) {
     return GenerateComplexBinaryExpression(gen, node);
@@ -1519,6 +1908,9 @@ static IRNode* GenerateThreeWayComparison(Generator* gen, BinaryASTNode* node) {
 }
 
 static IRNode* GenerateUnaryExpression(Generator* gen, UnaryASTNode* node) {
+  if (TypeIsInt128(node->base.type) || TypeIsInt128(node->sub->type)) {
+    return GenerateInt128Unary(gen, node);
+  }
   IRNode* sub = GenerateExpression(gen, node->sub);
   if (TypeIsVector(node->sub->type)) {
     if (node->base.op == AST_OP(uplus)) {
@@ -1791,6 +2183,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
         TypeIsVector(node->base.type) ||
         TypeIsStructOrUnion(node->base.type) ||
         TypeUsesLongDoubleRepresentation(node->base.type) ||
+        TypeIsInt128(node->base.type) ||
         TypeIsMemberPointerAggregate(node->base.type)) {
       return address;
     }
@@ -1810,6 +2203,7 @@ static IRNode* GenerateVariableReference(Generator* gen,
         TypeIsArray(node->base.type) || TypeIsVector(node->base.type) ||
         TypeIsStructOrUnion(node->base.type) ||
         TypeUsesLongDoubleRepresentation(node->base.type) ||
+        TypeIsInt128(node->base.type) ||
         TypeIsMemberPointerAggregate(node->base.type) ||
         TypeIsFunction(node->base.type)) {
       // The slot holds the object address.  Mark the load as a use so SSA
@@ -1829,7 +2223,11 @@ static IRNode* GenerateVariableReference(Generator* gen,
       TypeIsVector(node->base.type) ||
       TypeIsStructOrUnion(node->base.type) ||
       TypeUsesLongDoubleRepresentation(node->base.type) ||
+      TypeIsInt128(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type)) {
+    if (TypeIsInt128(node->base.type) && node->symbol != NULL) {
+      node->symbol->flags.address_taken = true;
+    }
     // Need the address of the node, not the value.  A whole struct/union is
     // likewise handled by its address: the raw variable/argument node is
     // returned directly and never loaded here.  Do NOT mark it as a var-use --
@@ -2302,6 +2700,13 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       if (TypeUsesLongDoubleRepresentation(designated_init->base.type)) {
         write = StoreLongDoubleToAddress(gen, destaddr, value,
                                          designated_init->base.type);
+      } else if (TypeIsInt128(designated_init->base.type)) {
+        write = GeneratorEmit(
+            gen,
+            NewIR3(IR_OP(memcpy), destaddr,
+                   Int128ObjectAddress(gen, value, designated_init->base.type),
+                   GeneratorGetIntConstant(gen, NULL,
+                                           designated_init->base.type->size)));
       } else {
         IROpcode store = GetStoreOpcode(subinit);
         write = IRSetType(GeneratorEmit(gen, NewIR2(store, destaddr,
@@ -2540,6 +2945,7 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
   IRNode* assignment;
   if (TypeIsStructOrUnion(node->left->type) ||
       TypeUsesLongDoubleRepresentation(node->left->type) ||
+      TypeIsInt128(node->left->type) ||
       TypeIsVector(node->left->type) ||
       TypeIsMemberPointerAggregate(node->left->type)) {
     dest = GenerateExpression(gen, node->left);
@@ -2561,6 +2967,8 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       if (node->right->op != AST_OP(call)) {
         if (TypeUsesLongDoubleRepresentation(node->left->type)) {
           value = LongDoubleObjectAddress(gen, value, node->left->type);
+        } else if (TypeIsInt128(node->left->type)) {
+          value = Int128ObjectAddress(gen, value, node->left->type);
         } else {
           value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), value));
         }
@@ -2621,6 +3029,7 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
   }
   if (TypeIsStructOrUnion(node->left->type) ||
       TypeUsesLongDoubleRepresentation(node->left->type) ||
+      TypeIsInt128(node->left->type) ||
       TypeIsVector(node->left->type) ||
       TypeIsMemberPointerAggregate(node->left->type)) {
     GenerateConstexprLifetimeMarker(
@@ -2915,6 +3324,7 @@ static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
   if (TypeIsArray(node->base.type) || TypeIsStructOrUnion(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type) ||
       TypeUsesLongDoubleRepresentation(node->base.type) ||
+      TypeIsInt128(node->base.type) ||
       TypeIsFunction(node->base.type)) {
     return IRSetType(addr, node->base.type);
   }
@@ -3276,6 +3686,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         TypeIsStructOrUnion(arg->type) || TypeIsArray(arg->type) ||
         TypeIsVector(arg->type) ||
         TypeUsesLongDoubleRepresentation(arg->type) ||
+        TypeIsInt128(arg->type) ||
         TypeIsMemberPointerAggregate(arg->type);
     bool stashable_reference_actual =
         reference_formal && !TypeIsStructOrUnion(arg_value->type) &&
@@ -3405,6 +3816,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         (TypeIsStructOrUnion(formal_type) ||
          TypeIsVector(formal_type) ||
          TypeUsesLongDoubleRepresentation(formal_type) ||
+         TypeIsInt128(formal_type) ||
          TypeIsMemberPointerAggregate(formal_type));
     bool native_vector_value =
         !reference_formal &&
@@ -3417,6 +3829,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     } else if ((aggregate_value_formal || TypeIsStructOrUnion(arg->type) ||
          TypeIsVector(arg->type) ||
          TypeUsesLongDoubleRepresentation(arg->type) ||
+         TypeIsInt128(arg->type) ||
          TypeIsMemberPointerAggregate(arg->type)) &&
         !reference_formal) {
       // If the argument is the result of another call it may
@@ -3425,6 +3838,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       if (aggregate_value_formal || TypeIsStructOrUnion(arg_value->type) ||
           TypeIsVector(arg_value->type) ||
           TypeUsesLongDoubleRepresentation(arg_value->type) ||
+          TypeIsInt128(arg_value->type) ||
           TypeIsMemberPointerAggregate(arg_value->type)) {
         arg_value = GeneratorEmit(gen,
                                NewIR1(IR_OP(structarg),
@@ -4418,6 +4832,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
     if (TypeIsArray(symbol->type) || TypeIsVector(symbol->type) ||
         TypeIsStructOrUnion(symbol->type) ||
         TypeUsesLongDoubleRepresentation(symbol->type) ||
+        TypeIsInt128(symbol->type) ||
         TypeIsMemberPointerAggregate(symbol->type)) {
       IRSetType(var_ref, node->base.type);
       return var_ref;
@@ -4506,6 +4921,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
         TypeIsVector(member->member->symbol->type) ||
         TypeIsStructOrUnion(member->member->symbol->type) ||
         TypeUsesLongDoubleRepresentation(member->member->symbol->type) ||
+        TypeIsInt128(member->member->symbol->type) ||
         TypeIsMemberPointerAggregate(member->member->symbol->type)) {
       IRSetType(addr, node->base.type);
       return addr;
@@ -4683,7 +5099,7 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
 
 static bool TypeIsTernaryMemoryAggregate(TypeRecord* type) {
   return TypeIsStructOrUnion(type) || TypeIsVector(type) ||
-         TypeUsesLongDoubleRepresentation(type) ||
+         TypeUsesLongDoubleRepresentation(type) || TypeIsInt128(type) ||
          TypeIsMemberPointerAggregate(type);
 }
 
@@ -5207,6 +5623,7 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
   }
   bool native = !gen->for_constant_evaluation &&
                 width == value_type->size * 8 &&
+                op != AST_OP(builtin_bswap) &&
                 TargetHasNativeBitOperation(op, value_type->size);
   if (native) {
     IROpcode ir_op = IR_OP(popcounti);
@@ -5274,6 +5691,27 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
     }
     return GenerateSoftwarePopcount(gen, below, value_type, node->base.type,
                                     width);
+  }
+  if (op == AST_OP(builtin_bswap)) {
+    IRNode* result = BitConstant(gen, node->base.type, 0);
+    int bytes = width / 8;
+    if (bytes < 2) {
+      return IRSetType(value, node->base.type);
+    }
+    for (int i = 0; i < bytes; i++) {
+      uint64_t byte_mask = UINT64_C(0xFF) << (8 * i);
+      IRNode* part = EmitBitIR2(gen, IR_OP(andi), value,
+                                BitConstant(gen, value_type, byte_mask),
+                                value_type);
+      int shift = 8 * (bytes - 1 - 2 * i);
+      IROpcode shift_op = shift >= 0 ? IR_OP(lsli) : IR_OP(lsri);
+      int amount = shift >= 0 ? shift : -shift;
+      part = EmitBitIR2(gen, shift_op, part,
+                        BitConstant(gen, value_type, (uint64_t)amount),
+                        value_type);
+      result = EmitBitIR2(gen, IR_OP(ori), result, part, node->base.type);
+    }
+    return result;
   }
   if (width < 64) {
     value = EmitBitIR2(
@@ -5478,6 +5916,40 @@ static TypeRecord* ConversionSourceType(ASTNode* node, IRNode* sub) {
 // Conversion.
 static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
   TypeRecord* from = ConversionSourceType(node, sub);
+  if (TypeIsInt128(node->type) && !TypeIsInt128(from)) {
+    if (TypeIsFloatingPoint(from)) {
+      IRNode* as_ll = IRSetType(
+          GeneratorEmit(gen, NewIR1(TypeUsesFloat32Representation(from)
+                                        ? IR_OP(f2i)
+                                        : IR_OP(d2i),
+                                    sub)),
+          Int128WordType());
+      return WidenIntegerToInt128(gen, as_ll, Int128WordType(), node->type);
+    }
+    return WidenIntegerToInt128(gen, sub, from, node->type);
+  }
+  if (TypeIsInt128(from) && !TypeIsInt128(node->type)) {
+    if (TypeIsFloatingPoint(node->type)) {
+      IRNode* lo = LoadInt128Word(
+          gen, Int128ObjectAddress(gen, sub, from), false);
+      return IRSetType(
+          GeneratorEmit(gen, NewIR1(TypeUsesFloat32Representation(node->type)
+                                        ? IR_OP(i2f)
+                                        : IR_OP(i2d),
+                                    lo)),
+          node->type);
+    }
+    return NarrowInt128ToInteger(gen, sub, from, node->type);
+  }
+  if (TypeIsInt128(from) && TypeIsInt128(node->type)) {
+    IRNode* address = Int128ObjectAddress(gen, sub, from);
+    IRNode* object = NewInt128Object(gen, node->type);
+    IRNode* result = Int128ObjectAddress(gen, object, node->type);
+    GeneratorEmit(
+        gen, NewIR3(IR_OP(memcpy), result, address,
+                    GeneratorGetIntConstant(gen, NULL, 16)));
+    return IRSetType(object, node->type);
+  }
   if (TypeUsesLongDoubleRepresentation(node->type) &&
       !TypeUsesLongDoubleRepresentation(from)) {
     return ConvertValueToLongDouble(gen, sub, from != NULL ? from : sub->type,
@@ -5789,8 +6261,13 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     case AST_OP(number):
     case AST_OP(charconst):
     case AST_OP(charwide):
-      result =
-          GeneratorGetIntConstant(gen, node->type, const_node->value.ivalue);
+      if (TypeIsInt128(node->type)) {
+        result = GenerateInt128Constant(gen, node->type, const_node->value.ivalue,
+                                        const_node->ihi);
+      } else {
+        result =
+            GeneratorGetIntConstant(gen, node->type, const_node->value.ivalue);
+      }
       break;
 
     case AST_OP(fnumber):
@@ -6217,6 +6694,7 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     case AST_OP(builtin_popcount):
     case AST_OP(builtin_rotl):
     case AST_OP(builtin_rotr):
+    case AST_OP(builtin_bswap):
       result = GenerateBuiltinBitOperation(gen, vector_node);
       break;
 

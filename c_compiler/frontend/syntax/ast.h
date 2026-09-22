@@ -145,6 +145,7 @@ typedef enum {
   AST_OP(builtin_popcount),
   AST_OP(builtin_rotl),
   AST_OP(builtin_rotr),
+  AST_OP(builtin_bswap),
   AST_OP(builtin_expect),
   AST_OP(builtin_prefetch),
   AST_OP(builtin_start_lifetime),
@@ -630,11 +631,14 @@ typedef struct {
     double fvalue;             // @wire 17 (fnumber)
     String* string;            // @wire 18 (string, string_wide)
   } value;
+  int64_t ihi;                 // @wire 20 high word of __int128 constants
   Vector* template_arguments;  // @wire 19
 } ConstantASTNode;
 
 ASTNode* NewIntConstantASTNode(int64_t value, TypeRecord* type,
                                SourceLocation location);
+ASTNode* NewInt128ConstantASTNode(int64_t lo, int64_t hi, TypeRecord* type,
+                                  SourceLocation location);
 ASTNode* NewRealConstantASTNode(double value, TypeRecord* type,
                                 SourceLocation location);
 ASTNode* NewStringConstantASTNode(String* value, TypeRecord* type,

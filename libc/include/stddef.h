@@ -39,6 +39,14 @@ typedef long ptrdiff_t;
 #define __PTRDIFF_T
 #endif
 
+#ifndef __MAX_ALIGN_T
+typedef struct {
+  long long __max_align_ll;
+  long double __max_align_ld;
+} max_align_t;
+#define __MAX_ALIGN_T
+#endif
+
 #define NULL ((void*)0)
 
 #if !defined(__WCHAR_T) && !defined(__cplusplus)

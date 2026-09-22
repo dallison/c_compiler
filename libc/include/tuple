@@ -193,6 +193,40 @@ constexpr tuple<decay_t<Types>...> make_tuple(Types&&... args) {
   return tuple<decay_t<Types>...>(static_cast<Types&&>(args)...);
 }
 
+template <class... Types>
+constexpr tuple<Types&...> tie(Types&... args) noexcept {
+  return tuple<Types&...>(args...);
+}
+
+template <class... Types>
+constexpr tuple<Types&&...> forward_as_tuple(Types&&... args) noexcept {
+  return tuple<Types&&...>(static_cast<Types&&>(args)...);
+}
+
+template <class F, class Tuple, size_t... I>
+constexpr decltype(auto) __apply_impl(F&& f, Tuple&& t, index_sequence<I...>) {
+  return static_cast<F&&>(f)(std::get<I>(static_cast<Tuple&&>(t))...);
+}
+
+template <class F, class Tuple>
+constexpr decltype(auto) apply(F&& f, Tuple&& t) {
+  return __apply_impl(
+      static_cast<F&&>(f), static_cast<Tuple&&>(t),
+      make_index_sequence<tuple_size<remove_reference_t<Tuple>>::value>{});
+}
+
+template <class T, class Tuple, size_t... I>
+constexpr T __make_from_tuple_impl(Tuple&& t, index_sequence<I...>) {
+  return T(std::get<I>(static_cast<Tuple&&>(t))...);
+}
+
+template <class T, class Tuple>
+constexpr T make_from_tuple(Tuple&& t) {
+  return __make_from_tuple_impl<T>(
+      static_cast<Tuple&&>(t),
+      make_index_sequence<tuple_size<remove_reference_t<Tuple>>::value>{});
+}
+
 }  // namespace std
 
 #endif /* tuple_h */

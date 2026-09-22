@@ -4256,7 +4256,8 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
         next_pushed_arg_offset += 16;
       }
     } else if (TypeIsStructOrUnion(arg_node->type) ||
-               TypeUsesLongDoubleRepresentation(arg_node->type)) {
+               TypeUsesLongDoubleRepresentation(arg_node->type) ||
+               TypeIsInt128(arg_node->type)) {
       if (i == 1 && arg_node->opcode == IR_OP(structreturn)) {
         // RVO (Return Value Optimization), passing structreturn as arg.
         TargetInstruction* arg_reg =
@@ -4497,7 +4498,8 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
           break;
         }
         if (TypeIsStructOrUnion(arg_node->type) ||
-            TypeUsesLongDoubleRepresentation(arg_node->type)) {
+            TypeUsesLongDoubleRepresentation(arg_node->type) ||
+            TypeIsInt128(arg_node->type)) {
           size_t size = arg_node->type->size;
           if (size > 8) {
             Memcpy(rv, StackPointer(rv), arg, (int)size, 0,
@@ -5901,7 +5903,8 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
     }
   } else if (TypeIsStructOrUnion(entry->pooled->type) ||
              TypeIsVector(entry->pooled->type) ||
-             TypeUsesLongDoubleRepresentation(entry->pooled->type)) {
+             TypeUsesLongDoubleRepresentation(entry->pooled->type) ||
+             TypeIsInt128(entry->pooled->type)) {
     if (is_arg) {
       if (size <= 8) {
         // Less than a pointer, passed in reg

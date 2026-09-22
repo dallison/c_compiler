@@ -1404,7 +1404,8 @@ static void PrintDriverHelp(void) {
   printf("\nUsage: davecc [options] file...\n\n");
   PrintHelpParagraph(
       "Inputs are handled by suffix: .c, .cc, .cpp, .cxx, .cppm, .ixx, .h, "
-      ".hpp and .hxx are compiled, .s is assembled, and .o and everything "
+      ".hpp and .hxx are compiled, .s and .S are assembled (.S is "
+      "preprocessed), and .o and everything "
       "else is given to the linker.  Without -c, -S, -fsyntax-only or -r the "
       "result is linked into an executable.  If -target is omitted, the host "
       "architecture and OS are used (the Darwin or Linux hosted profile, "
@@ -1695,7 +1696,7 @@ static int ParseArg(int i, int argc, char** argv,
       VectorAppend(compiler_args, argv[i]);
       *run_compiler = true;
       (*num_inputs)++;
-    } else if (StringEndsWith(&arg, ".s")) {
+    } else if (StringEndsWith(&arg, ".s") || StringEndsWith(&arg, ".S")) {
       VectorAppend(asm_files, NewString(argv[i]));
       (*num_inputs)++;
     } else if (StringEndsWith(&arg, ".o")) {
@@ -2667,13 +2668,17 @@ int main(int argc, char * argv[]) {
       if (object_filename.length == 0) {
         StringSet(&output_filename, asm_filename->value);
         // No output file specified (no -o) so work it out.
-        // If the file ends in ".s", make it ".o", otherwise append ".o".
+        // If the file ends in ".s" or ".S", make it ".o", otherwise append ".o".
         char* suffix = strstr(output_filename.value, ".s");
+        if (suffix == NULL) {
+          suffix = strstr(output_filename.value, ".S");
+        }
         if (suffix == NULL) {
           StringAppend(&output_filename, ".o");
         } else {
-          // Overwrite 's' with 'o'.
+          suffix[0] = '.';
           suffix[1] = 'o';
+          suffix[2] = '\0';
         }
       }
       

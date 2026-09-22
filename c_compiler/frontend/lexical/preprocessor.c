@@ -246,6 +246,9 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
   DefineSizeofMacro(p, "__SIZEOF_INT__", int_size);
   DefineSizeofMacro(p, "__SIZEOF_LONG__", long_size);
   DefineSizeofMacro(p, "__SIZEOF_LONG_LONG__", long_long_size);
+  if (pointer_size >= 8) {
+    DefineSizeofMacro(p, "__SIZEOF_INT128__", 16);
+  }
   DefineSizeofMacro(p, "__SIZEOF_POINTER__", pointer_size);
   DefineSizeofMacro(p, "__SIZEOF_FLOAT__", float_size);
   DefineSizeofMacro(p, "__SIZEOF_DOUBLE__", double_size);
@@ -495,9 +498,11 @@ static void PredefineMacros(Preprocessor* p) {
 
   // Define additional practical macros provided by some compilers and
   // need for include files in the OS.
-  PreprocessorDefineMacro(p, "__GNUC__", "4");
-  PreprocessorDefineMacro(p, "__GNUC_MINOR__", "2");
-  PreprocessorDefineMacro(p, "__GNUC_PATCHLEVEL__", "1");
+  // Libraries such as Abseil reject GCC < 7.  DaveCC implements the C++17
+  // surface those checks are gating on, so advertise a modern GCC compat level.
+  PreprocessorDefineMacro(p, "__GNUC__", "12");
+  PreprocessorDefineMacro(p, "__GNUC_MINOR__", "0");
+  PreprocessorDefineMacro(p, "__GNUC_PATCHLEVEL__", "0");
 
   // Pretend to be llvm to get compatibility with code in standard header files.
   PreprocessorDefineMacro(p, "__llvm__", "1");
@@ -628,6 +633,8 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "_ILP32", "1");
   } else if (StringEqual(compiler->target_name, "aarch64")) {
     PreprocessorDefineMacro(p, "__aarch64__", "1");
+    PreprocessorDefineMacro(p, "__arm64__", "1");
+    PreprocessorDefineMacro(p, "__ARM_ARCH", "8");
     PreprocessorDefineMacro(p, "__ARM_NEON", "1");
     PreprocessorDefineMacro(p, "__ARM_NEON__", "1");
     PreprocessorDefineMacro(p, "__WORDSIZE", "64");
@@ -4715,6 +4722,11 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
         break;
       }
       case PPTOK(hash): {
+        // In assembler mode `#` is an immediate prefix (`#imm` / `#(expr)`),
+        // not C stringification.
+        if (p->lex != NULL && p->lex->assembler_mode) {
+          break;
+        }
         EraseCurrentToken(&rep_ti);      // Remove # token.
         SkipSpaceTokens(&rep_ti);
         String possible_arg;

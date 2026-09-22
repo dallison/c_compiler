@@ -420,6 +420,9 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
         WireWriteDouble(buf, 17, c->value.fvalue);
       } else {
         WireWriteInt64(buf, 16, c->value.ivalue);
+        if (c->ihi != 0) {
+          WireWriteInt64(buf, 20, c->ihi);
+        }
       }
       if (c->template_arguments != NULL) {
         SerialWriteTemplateArgumentVector(ctx, buf, 19,
@@ -828,6 +831,10 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       if (field == 19) {
         c->template_arguments =
             SerialReadTemplateArgumentVector(ctx, buf);
+        return;
+      }
+      if (field == 20) {
+        WireReadInt64(buf, &c->ihi);
         return;
       }
       break;

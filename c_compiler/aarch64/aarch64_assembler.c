@@ -207,6 +207,7 @@ DECLARE_INST_FUNC(stlrh);
 DECLARE_INST_FUNC(dmb);
 DECLARE_INST_FUNC(clrex);
 DECLARE_INST_FUNC(mrs);
+DECLARE_INST_FUNC(msr);
 
 DECLARE_INST_FUNC(fldr);
 DECLARE_INST_FUNC(fstr);
@@ -446,6 +447,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(dmb);
   INST(clrex);
   INST(mrs);
+  INST(msr);
 
   INST(fldr);
   INST(fstr);
@@ -635,8 +637,9 @@ static Register ZeroReg(RegisterWidth width) {
 static Operand GetOperand(AARCH64Assembler* assembler) {
   Operand op = {.type = kUnknown};
   bool negative_immed = false;
-  // # is optional but encouraged.
-  if (LexLookingAt(&ASM.lex, TOK(number))) {
+  // # is optional but encouraged.  GNU as also accepts #(expr).
+  if (LexLookingAt(&ASM.lex, TOK(number)) ||
+      LexLookingAt(&ASM.lex, TOK(lparen))) {
     op.type = kIntImmediate;
   } else if (LexLookingAt(&ASM.lex, TOK(fnumber))) {
     op.type = kFloatImmediate;
@@ -646,18 +649,20 @@ static Operand GetOperand(AARCH64Assembler* assembler) {
     if (LexMatch(&ASM.lex, TOK(minus))) {
       negative_immed = true;
     }
-    if (LexLookingAt(&ASM.lex, TOK(number))) {
+    if (LexLookingAt(&ASM.lex, TOK(number)) ||
+        LexLookingAt(&ASM.lex, TOK(lparen))) {
       op.type = kIntImmediate;
     } else if (LexLookingAt(&ASM.lex, TOK(fnumber))) {
       op.type = kFloatImmediate;
    } else {
      AssemblerError(&ASM, "Expected immediate value after #");
+     op.type = kIntImmediate;
+     op.i = 0;
+     return op;
     }
   } else {
     op.type = kRegister;
   }
-  
-  assert(op.type != kUnknown);
   switch (op.type) {
     case kRegister: {
       op.reg = GetRegister(assembler);
@@ -988,10 +993,13 @@ static void AssembleLogical(AARCH64Assembler* assembler, int opcode, int n, bool
       AssembleLogicalShiftedRegister(assembler, &rd, &rn, &src2, rd.kind == kX, opcode, n);
       break;
     case kIntImmediate:
-      if (!immed_ok) {
+      if (!immed_ok && n == 0) {
         AssemblerError(&ASM, "Immediate operand not valid for this instruction");
+        return;
       }
-      AssembleLogicalImmediate(assembler, &rd, &rn, src2.i, rd.kind == kX, opcode);
+      // bic/orn/eon/bics Rd, Rn, #imm is AND/ORR/EOR/ANDS with the mask inverted.
+      AssembleLogicalImmediate(assembler, &rd, &rn, n ? ~src2.i : src2.i,
+                               rd.kind == kX, opcode);
       break;
    case kFloatImmediate:
       AssemblerError(&ASM, "Unexpected floating point immediate");
@@ -1938,16 +1946,20 @@ static Condition InvertCondition(Condition cond) {
 static void AssembleConditionalBranch(AARCH64Assembler* assembler,
                                       int cond, int consistent) {
   (void)assembler;
-  int64_t addr = AssemblerEvaluateExpression(&ASM);
-  int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
-  int32_t off = offset < 0 ? -offset : offset;
-  if (off > (1 << 21)) {
-    AssemblerError(&ASM, "Branch offset out of range");
-    return;
-  }
-  if ((off & 3) != 0) {
-    AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
-    return;
+  bool known = false;
+  int64_t addr = AssemblerEvaluateKnownExpression(&ASM, &known);
+  int32_t offset =
+      known ? (int32_t)(addr - AssemblerCurrentAddress(&ASM)) : 0;
+  if (known) {
+    int32_t off = offset < 0 ? -offset : offset;
+    if (off > (1 << 21)) {
+      AssemblerError(&ASM, "Branch offset out of range");
+      return;
+    }
+    if ((off & 3) != 0) {
+      AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
+      return;
+    }
   }
   AARCH64EmitConditionalBranch(&ASMO, offset, (AARCH64AsmCondition)cond,
                                consistent != 0);
@@ -2055,20 +2067,24 @@ static void Assemble_svc(AARCH64Assembler* assembler) {
 static void AssembleCompareAndBranch(AARCH64Assembler* assembler, int op) {
   Register rt = GetRegister(assembler);
   NeedComma(assembler);
-  
-  int64_t addr = AssemblerEvaluateExpression(&ASM);
-  int32_t offset = (int32_t)(addr - AssemblerCurrentAddress(&ASM));
+
+  bool known = false;
+  int64_t addr = AssemblerEvaluateKnownExpression(&ASM, &known);
+  int32_t offset =
+      known ? (int32_t)(addr - AssemblerCurrentAddress(&ASM)) : 0;
 
   // We have a 19 bit immediate which is a multiple of 4, so this give us
   // 21 bits of range.
-  int32_t off = offset < 0 ? -offset : offset;
-  if (off > (1 << 21)) {
-    AssemblerError(&ASM, "Branch offset out of range");
-    return;
-  }
-  if ((off & 3) != 0) {
-    AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
-    return;
+  if (known) {
+    int32_t off = offset < 0 ? -offset : offset;
+    if (off > (1 << 21)) {
+      AssemblerError(&ASM, "Branch offset out of range");
+      return;
+    }
+    if ((off & 3) != 0) {
+      AssemblerError(&ASM, "Branch offset needs to be mutliple of 4");
+      return;
+    }
   }
   int sf = rt.kind == kX;
   int imm19 = (offset >> 2) & 0x7ffff;
@@ -2374,11 +2390,11 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
   Register rt = GetRegister(assembler);
   NeedComma(assembler);
   Register rt2;
-  if (is_pair) {
+    if (is_pair) {
     rt2 = GetRegister(assembler);
     NeedComma(assembler);
-    if (rt.fp_or_simd || rt2.fp_or_simd) {
-      AssemblerError(&ASM, "LDP/STP require non FP/SIMD registers");
+    if (rt.kind != rt2.kind || rt.fp_or_simd != rt2.fp_or_simd) {
+      AssemblerError(&ASM, "LDP/STP registers must match");
       return;
     }
   }
@@ -2427,7 +2443,28 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
         AssemblerError(&ASM, "LDP/STP require an immediate offset");
         return;
       }
-      int scale = rt.kind == kX ? 8 : 4;
+      int scale = 4;
+      int opc = 0;
+      int v = 0;
+      if (rt.fp_or_simd) {
+        v = 1;
+        if (rt.kind == kQ) {
+          scale = 16;
+          opc = 2;
+        } else if (rt.kind == kD) {
+          scale = 8;
+          opc = 1;
+        } else if (rt.kind == kS) {
+          scale = 4;
+          opc = 0;
+        } else {
+          AssemblerError(&ASM, "LDP/STP SIMD register must be S, D, or Q");
+          return;
+        }
+      } else {
+        scale = rt.kind == kX ? 8 : 4;
+        opc = rt.kind == kX ? 2 : 0;
+      }
       if ((offset.i % scale) != 0) {
         AssemblerError(&ASM, "LDP/STP offset must be naturally aligned");
         return;
@@ -2439,8 +2476,8 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
       }
       // bits[24:23]: 1 = post-index, 2 = signed offset, 3 = pre-index.
       int mode = post_indexed ? 1 : (writeback ? 3 : 2);
-      AssembleLoadStorePair(assembler, &rt, &rt2, &rn,
-                            rt.kind == kX ? 2 : 0, 0, is_load, mode, imm7);
+      AssembleLoadStorePair(assembler, &rt, &rt2, &rn, opc, v, is_load, mode,
+                            imm7);
     } else {
       if (offset.type == kRegister) {
         // Register offset.
@@ -2741,6 +2778,27 @@ static void Assemble_clrex(AARCH64Assembler* assembler) {
   AssemblerEmitWord(&ASM, ASMO.current_section, 0xd5033f5fu);
 }
 
+static bool SystemRegisterMrsEncoding(AARCH64Assembler* assembler,
+                                      uint32_t* encoding) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected system register name");
+    return false;
+  }
+  if (StringEqualCaseBlind(&ASM.lex.spelling, "tpidr_el0")) {
+    *encoding = 0xd53bd040u;
+  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "fpsr")) {
+    *encoding = 0xd53b4420u;
+  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "fpcr")) {
+    *encoding = 0xd53b4400u;
+  } else {
+    AssemblerError(&ASM, "Unsupported system register %s",
+                   ASM.lex.spelling.value);
+    return false;
+  }
+  LexNextToken(&ASM.lex);
+  return true;
+}
+
 static void Assemble_mrs(AARCH64Assembler* assembler) {
   Register rt = GetRegister(assembler);
   if (rt.kind != kX || rt.is_sp) {
@@ -2750,14 +2808,28 @@ static void Assemble_mrs(AARCH64Assembler* assembler) {
   if (!NeedComma(assembler)) {
     return;
   }
-  if (!LexLookingAt(&ASM.lex, TOK(identifier)) ||
-      !StringEqualCaseBlind(&ASM.lex.spelling, "tpidr_el0")) {
-    AssemblerError(&ASM, "Only TPIDR_EL0 is supported by MRS");
+  uint32_t encoding;
+  if (!SystemRegisterMrsEncoding(assembler, &encoding)) {
     return;
   }
-  LexNextToken(&ASM.lex);
+  AssemblerEmitWord(&ASM, ASMO.current_section, encoding | (uint32_t)rt.num);
+}
+
+static void Assemble_msr(AARCH64Assembler* assembler) {
+  uint32_t encoding;
+  if (!SystemRegisterMrsEncoding(assembler, &encoding)) {
+    return;
+  }
+  if (!NeedComma(assembler)) {
+    return;
+  }
+  Register rt = GetRegister(assembler);
+  if (rt.kind != kX || rt.is_sp) {
+    AssemblerError(&ASM, "MSR source must be an X register");
+    return;
+  }
   AssemblerEmitWord(&ASM, ASMO.current_section,
-                    0xd53bd040u | (uint32_t)rt.num);
+                    (encoding & ~0x00200000u) | (uint32_t)rt.num);
 }
 
 static void Assemble_ldp(AARCH64Assembler* assembler) {

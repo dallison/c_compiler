@@ -41,16 +41,6 @@ static ASTNode* ParseIdentifier(Assembler* assembler) {
   return NewRawIdentifierASTNode(symbol, lex->current_token_location);
 }
 
-static ASTNode* ParseIntegerConstant(Assembler* assembler) {
-  Lex* lex = assembler->syntax.lex;
-  int64_t value = lex->number;
-  LexNextToken(lex);
-
-  TypeRecord* type = NewTypeRecord(kTypeLong | kTypeUnsigned, kQualPlain);
-  return NewIntConstantASTNode(value, type,
-                               assembler->syntax.lex->current_token_location);
-}
-
 static ASTNode* ParseStringLiteral(Assembler* assembler) {
   Lex* lex = assembler->syntax.lex;
   String* contents = NewString(lex->spelling.value);
@@ -128,9 +118,29 @@ static ASTNode* ParsePrimaryExpression(Assembler* assembler) {
     return ParseIdentifier(assembler);
   }
 
-  // Check for integer constant.
+  // Integer constant, or GNU `Nb` / `Nf` local-label reference.
   if (LexLookingAt(lex, TOK(number))) {
-    return ParseIntegerConstant(assembler);
+    int64_t value = lex->number;
+    SourceLocation location = lex->current_token_location;
+    LexNextToken(lex);
+    if (LexLookingAt(lex, TOK(identifier)) && lex->spelling.value[0] != '\0' &&
+        lex->spelling.value[1] == '\0') {
+      char direction = lex->spelling.value[0];
+      if (direction == 'b' || direction == 'B' || direction == 'f' ||
+          direction == 'F') {
+        bool backward = direction == 'b' || direction == 'B';
+        LexNextToken(lex);
+        AssemblerSymbol* symbol =
+            AssemblerLookupNumericLocalLabel(assembler, (int)value, backward);
+        if (symbol == NULL) {
+          TypeRecord* type = NewTypeRecord(kTypeLong | kTypeUnsigned, kQualPlain);
+          return NewIntConstantASTNode(0, type, location);
+        }
+        return NewRawIdentifierASTNode(symbol, location);
+      }
+    }
+    TypeRecord* type = NewTypeRecord(kTypeLong | kTypeUnsigned, kQualPlain);
+    return NewIntConstantASTNode(value, type, location);
   }
 
   // Check for string literal.

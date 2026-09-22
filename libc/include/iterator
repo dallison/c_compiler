@@ -400,6 +400,61 @@ constexpr reverse_iterator<Iter> make_reverse_iterator(Iter it) {
   return reverse_iterator<Iter>(it);
 }
 
+template <class Iter>
+class move_iterator {
+  Iter current;
+
+ public:
+  using iterator_type = Iter;
+  using difference_type = typename iterator_traits<Iter>::difference_type;
+  using value_type = typename iterator_traits<Iter>::value_type;
+  using pointer = Iter;
+  using reference = value_type&&;
+  using iterator_category = typename iterator_traits<Iter>::iterator_category;
+
+  constexpr move_iterator() : current() {}
+  constexpr explicit move_iterator(Iter i) : current(i) {}
+  constexpr Iter base() const { return current; }
+  constexpr reference operator*() const {
+    return static_cast<reference>(*current);
+  }
+  constexpr move_iterator& operator++() {
+    ++current;
+    return *this;
+  }
+  constexpr move_iterator operator++(int) {
+    move_iterator tmp(*this);
+    ++current;
+    return tmp;
+  }
+  constexpr move_iterator& operator--() {
+    --current;
+    return *this;
+  }
+  constexpr move_iterator operator--(int) {
+    move_iterator tmp(*this);
+    --current;
+    return tmp;
+  }
+};
+
+template <class Iter>
+constexpr bool operator==(const move_iterator<Iter>& a,
+                          const move_iterator<Iter>& b) {
+  return a.base() == b.base();
+}
+
+template <class Iter>
+constexpr bool operator!=(const move_iterator<Iter>& a,
+                          const move_iterator<Iter>& b) {
+  return a.base() != b.base();
+}
+
+template <class Iter>
+constexpr move_iterator<Iter> make_move_iterator(Iter it) {
+  return move_iterator<Iter>(it);
+}
+
 #if __cplusplus >= 202002L
 
 // ------------------------------------------------------------------

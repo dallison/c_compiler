@@ -1758,12 +1758,14 @@ bool TypeUsesNativeVectorABI(TypeRecord* type) {
 bool TypePassedAsMemoryAggregate(TypeRecord* type) {
   return TypeIsStructOrUnion(type) ||
          TypeUsesLongDoubleRepresentation(type) ||
+         TypeIsInt128(type) ||
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type));
 }
 
 bool TypeReturnedThroughHiddenPointer(TypeRecord* type) {
   return TypeIsStructOrUnion(type) ||
          TypeUsesLongDoubleRepresentation(type) ||
+         TypeIsInt128(type) ||
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type)) ||
          TypeIsMemberPointerAggregate(type);
 }

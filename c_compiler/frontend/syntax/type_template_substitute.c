@@ -708,6 +708,11 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
       }
       return;
     }
+    if (pack != NULL && pack->pack_arguments == NULL &&
+        !pack->is_pack_expansion) {
+      VectorAppend(out, TemplateArgumentCopy(pack));
+      return;
+    }
     if (pack != NULL && pack->is_pack_expansion) {
       VectorAppend(out, TemplateArgumentCopy(pack));
       return;
@@ -1944,7 +1949,9 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       // (e.g. decltype(declval<int>() + declval<long>()) would keep the stale
       // type instead of resolving to long).
       ASTNodeVisit(expr, ClearDependentExpressionAnalysis, 0, NULL);
+      compiler->speculative_template_instantiation_depth++;
       expr = AnalyzeExpression(expr);
+      compiler->speculative_template_instantiation_depth--;
       if (expr != NULL && expr->type != NULL) {
         // If the substituted operand is still type-dependent, the `decltype` is
         // not yet evaluable: only some enclosing template arguments were
@@ -2265,12 +2272,18 @@ TypeRecord* SubstituteTemplateParametersForPackElement(
       element_index >= pack->pack_arguments->length) {
     return SubstituteTemplateParameters(parser, type, args);
   }
+  size_t pack_length = pack->pack_arguments->length;
   Vector element_args;
   VectorInit(&element_args);
   for (size_t i = 0; i < args->length; i++) {
-    VectorAppend(&element_args,
-                 i == (size_t)pack_index ? pack->pack_arguments->value.p[element_index]
-                                          : args->value.p[i]);
+    TemplateArgument* arg = args->value.p[i];
+    if (arg != NULL && arg->pack_arguments != NULL &&
+        arg->pack_arguments->length == pack_length &&
+        element_index < arg->pack_arguments->length) {
+      VectorAppend(&element_args, arg->pack_arguments->value.p[element_index]);
+    } else {
+      VectorAppend(&element_args, arg);
+    }
   }
   TypeRecord* result = SubstituteTemplateParameters(parser, type,
                                                     &element_args);
@@ -2830,12 +2843,16 @@ Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals) {
   Vector* extended = AliasActualsWithDefaults(alias, actuals);
   Vector* effective = extended != NULL ? extended : actuals;
   Vector* result = NULL;
-  if (alias->type != NULL && alias->type->template_arguments != NULL) {
-    result = CompleteAliasTemplateArgumentsFromPattern(alias, effective);
-  } else if (alias->alias_template != NULL &&
-             alias->alias_template->parameters.length != 0) {
+  // A member alias such as `template<int I> using StorageT = Storage<T, I>`
+  // mentions enclosing-class parameters in its pattern.  Completing from those
+  // pattern indices would demand `[T, I]` while the name is written `StorageT<I>`.
+  // Prefer the alias's own parameter list when it is known.
+  if (alias->alias_template != NULL &&
+      alias->alias_template->parameters.length != 0) {
     result = CompleteAliasTemplateArgumentsFromParameters(
         &alias->alias_template->parameters, effective);
+  } else if (alias->type != NULL && alias->type->template_arguments != NULL) {
+    result = CompleteAliasTemplateArgumentsFromPattern(alias, effective);
   }
   if (extended != NULL) {
     VectorDeleteWithContents(extended,

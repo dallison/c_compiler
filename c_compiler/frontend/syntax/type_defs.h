@@ -68,12 +68,16 @@ typedef enum {
   // aggregate representation while remaining scalar arithmetic types in the
   // language.
   kTypeComplex = 1 << 26,
+  // GNU/Clang 128-bit integer extension (`__int128` / `unsigned __int128`).
+  kTypeInt128 = 1 << 27,
+  // C++ `wchar_t` is a distinct fundamental type, not an alias for `int`.
+  kTypeWchar = 1 << 28,
 } Type;
 
 // The last bit position in the type specifier that corresponds to a
 // unique type (not including signed and unsigned).
 //  This is used to test for a invalid combination of types.
-#define TYPE_LAST_BIT 26
+#define TYPE_LAST_BIT 28
 
 // DaveCC's IR and constant evaluator currently use 64-bit integer lanes.
 #define DAVECC_BITINT_MAXWIDTH 64

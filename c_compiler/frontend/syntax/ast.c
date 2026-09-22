@@ -348,6 +348,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "builtin_rotl";
     case AST_OP(builtin_rotr):
       return "builtin_rotr";
+    case AST_OP(builtin_bswap):
+      return "builtin_bswap";
     case AST_OP(builtin_trap):
       return "builtin_trap";
     case AST_OP(builtin_unreachable):
@@ -1299,6 +1301,7 @@ static ASTNode* ConstantASTNodeClone(const ASTNode* node,
   ConstantASTNode* to = ASTArenaAlloc(sizeof(ConstantASTNode));
   ASTNodeBaseCopy(&to->base, node);
   memcpy(&to->value, &from->value, sizeof(to->value));
+  to->ihi = from->ihi;
   // The clone needs its own copy of the owned string so each node can free it.
   if (ConstantOwnsString(node) && from->value.string != NULL) {
     to->value.string = NewString(from->value.string->value);
@@ -1316,6 +1319,7 @@ void IntConstantASTNodeInit(ConstantASTNode* node, int64_t value,
                             TypeRecord* type, SourceLocation location) {
   ASTNodeInit(&node->base, AST_OP(number), type, location, &constant_vtbl);
   node->value.ivalue = value;
+  node->ihi = 0;
   node->template_arguments = NULL;
 }
 
@@ -1323,6 +1327,14 @@ ASTNode* NewIntConstantASTNode(int64_t value, TypeRecord* type,
                                SourceLocation location) {
   ConstantASTNode* node = ASTArenaAlloc(sizeof(ConstantASTNode));
   IntConstantASTNodeInit(node, value, type, location);
+  return (ASTNode*)node;
+}
+
+ASTNode* NewInt128ConstantASTNode(int64_t lo, int64_t hi, TypeRecord* type,
+                                  SourceLocation location) {
+  ConstantASTNode* node = (ConstantASTNode*)NewIntConstantASTNode(
+      lo, type, location);
+  node->ihi = hi;
   return (ASTNode*)node;
 }
 

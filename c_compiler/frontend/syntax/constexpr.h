@@ -53,6 +53,7 @@ bool ConstexprObjectInitializerTemplateKey(TypeRecord* type, ASTNode* expression
 
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
+bool EvaluateInt128Constant(ASTNode* node, int64_t* lo, int64_t* hi);
 bool ConstexprBindVariableDeclaration(ConstEvalContext* ctx,
                                       VariableDeclarationASTNode* decl);
 bool ConstexprBindExpansionRangeHidden(ConstEvalContext* ctx,

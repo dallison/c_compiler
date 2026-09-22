@@ -3132,6 +3132,9 @@ static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
   }
   String* code = NewString(va_list_typedef);
   StringAppend(code,
+      "typedef __int128 __int128_t;\n"
+      "typedef unsigned __int128 __uint128_t;\n");
+  StringAppend(code,
       "#define __asm asm\n"
       "#define __asm__ asm\n"
       "#define __volatile__ volatile\n"
@@ -3646,6 +3649,8 @@ static void ParseStandardOption(Compiler* compiler, Vector* options) {
   }
 }
 
+static void AddDarwinSDKSystemIncludes(Compiler* compiler);
+
 static void InitBasicOptionsOrDie(Compiler* compiler,
                                   Vector* options, Vector* target_opts) {
   int max_errors = OptionIntValue(kOptionErrorLimit, options, 20);
@@ -3912,6 +3917,8 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   PreprocessorInit(&compiler->preprocessor);
   if (OptionBoolValue(kOptionNoStandardIncludes, options, false)) {
     PreprocessorClearSystemIncludePaths(&compiler->preprocessor);
+  } else {
+    AddDarwinSDKSystemIncludes(compiler);
   }
   SyntaxInit(&compiler->syntax, &compiler->lex);
 }
@@ -3962,10 +3969,45 @@ static void ApplyPreprocessorCommandLineOptions(Compiler* compiler,
   }
 }
 
+// Darwin-native programs include Apple SDK headers (Availability.h,
+// TargetConditionals.h, and the rest of libSystem's C API).  Search the SDK
+// after DaveCC's own libc so our headers still win.
+static void AddDarwinSDKSystemIncludes(Compiler* compiler) {
+  if (!compiler->native_object ||
+      compiler->target_triple.os != kTargetOSDarwin) {
+    return;
+  }
+  const char* sdkroot = getenv("SDKROOT");
+  char sdkroot_include[4096];
+  const char* candidates[4];
+  int n = 0;
+  if (sdkroot != NULL && sdkroot[0] != '\0') {
+    snprintf(sdkroot_include, sizeof(sdkroot_include), "%s/usr/include",
+             sdkroot);
+    candidates[n++] = sdkroot_include;
+  }
+  candidates[n++] =
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/"
+      "Developer/SDKs/MacOSX.sdk/usr/include";
+  candidates[n++] =
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include";
+  for (int i = 0; i < n; i++) {
+    char header[4096];
+    snprintf(header, sizeof(header), "%s/Availability.h", candidates[i]);
+    if (access(header, R_OK) == 0) {
+      PreprocessorAddSystemIncludePath(&compiler->preprocessor, candidates[i]);
+      return;
+    }
+  }
+}
+
 // Process macro definition and include path options and process warning
 // options
 static void InitComplexOptions(Compiler* compiler, Vector* options) {
   ApplyPreprocessorCommandLineOptions(compiler, options);
+  if (!OptionBoolValue(kOptionNoStandardIncludes, options, false)) {
+    AddDarwinSDKSystemIncludes(compiler);
+  }
   for (size_t i = 0; i < options->length; i++) {
     CompilerOptionValue* option_value = options->value.p[i];
     switch (option_value->opt) {
@@ -4720,3 +4762,4 @@ int FloatSize(void) {
 int DoubleSize(void) {
   return compiler->double_size;
 }
+

@@ -151,6 +151,10 @@ static bool DebugTypeIsSignedLongLong(TypeRecord* type) {
   return TypeIsLongLong(type) && !TypeIsUnsigned(type);
 }
 
+static bool DebugTypeIsSignedInt128(TypeRecord* type) {
+  return TypeIsInt128(type) && !TypeIsUnsigned(type);
+}
+
 static bool DebugTypeIsAuto(TypeRecord* type) {
   return type != NULL && type->declarator == kDeclPrimitive &&
          (type->type & kTypeAuto) != 0;
@@ -253,6 +257,21 @@ static BaseTypeDIE base_types[] = {
      "unsigned long long",
      DW_ATE(unsigned),
      8},
+    {{23, DW_TAG(base_type), &base_type_virtuals},
+     DebugTypeIsSignedInt128,
+     "__int128",
+     DW_ATE(signed),
+     16},
+    {{24, DW_TAG(base_type), &base_type_virtuals},
+     TypeIsUnsignedInt128,
+     "unsigned __int128",
+     DW_ATE(unsigned),
+     16},
+    {{25, DW_TAG(base_type), &base_type_virtuals},
+     TypeIsWchar,
+     "wchar_t",
+     DW_ATE(signed),
+     4},
     {{20, DW_TAG(base_type), &base_type_virtuals},
      TypeIsLongDouble,
      "long double",

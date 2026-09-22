@@ -18,6 +18,7 @@ bool StructMemberIsNestedType(StructMember* member);
 bool StructHasMemberFunction(Struct* str);
 bool TypeIsTemplateParameterPlaceholder(TypeRecord* type, int* index);
 bool CurrentTemplateParameterIsPack(struct Syntax* syntax, int index);
+bool TypeContainsParameterPack(struct Syntax* syntax, TypeRecord* type);
 
 void AlignNextOffset(Struct* str, TypeRecord* type);
 void AlignNextOffsetForSymbol(Struct* str, Symbol* symbol);

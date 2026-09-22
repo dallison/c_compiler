@@ -15,6 +15,7 @@
 #include "random_host.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdbool.h>
@@ -463,6 +464,8 @@ int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
     case AARCH64_SYSCALL_ENVIRONMENT_VALUE:
       return DaveHostEnvironmentValue(
           (const char*)(uintptr_t)a0, (char*)(uintptr_t)a1, (size_t)a2);
+    case AARCH64_SYSCALL_POLL:
+      return poll((struct pollfd*)(uintptr_t)a0, (nfds_t)a1, (int)a2);
     case AARCH64_SYSCALL_TZDB_VERSION:
       return DaveHostChronoTzdbVersion((char*)(uintptr_t)a0, (size_t)a1);
     case AARCH64_SYSCALL_TZDB_GENERATION:

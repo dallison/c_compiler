@@ -37,6 +37,7 @@ int __davecc_fpclassifyl(long double value);
 int __davecc_signbit(double value);
 int __davecc_signbitl(long double value);
 
+#ifndef __cplusplus
 #define fpclassify(value)                                              \
   ((sizeof(value) == sizeof(long double) &&                            \
     sizeof(long double) > sizeof(double))                              \
@@ -51,6 +52,7 @@ int __davecc_signbitl(long double value);
     sizeof(long double) > sizeof(double))                              \
        ? __davecc_signbitl((value))                                    \
        : __davecc_signbit((double)(value)))
+#endif
 #define FP_ILOGB0 ((int)(((unsigned)1) << (sizeof(int) * 8 - 1)))
 #define FP_ILOGBNAN ((int)((((unsigned)1) << (sizeof(int) * 8 - 1)) - 1))
 

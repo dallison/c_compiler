@@ -1693,6 +1693,35 @@ constexpr void partial_sort(It first, It middle, It last) {
   std::partial_sort(first, middle, last, __algorithm_detail::__less());
 }
 
+template <class InIt, class OutIt, class Compare>
+constexpr OutIt partial_sort_copy(InIt first, InIt last, OutIt result_first,
+                                  OutIt result_last, Compare comp) {
+  OutIt result_middle = result_first;
+  for (; first != last && result_middle != result_last;
+       ++first, ++result_middle) {
+    *result_middle = *first;
+  }
+  std::make_heap(result_first, result_middle, comp);
+  for (; first != last; ++first) {
+    if (comp(*first, *result_first)) {
+      *result_first = *first;
+      __algorithm_detail::__sift_down(
+          result_first,
+          static_cast<typename iterator_traits<OutIt>::difference_type>(0),
+          result_middle - result_first, comp);
+    }
+  }
+  std::sort_heap(result_first, result_middle, comp);
+  return result_middle;
+}
+
+template <class InIt, class OutIt>
+constexpr OutIt partial_sort_copy(InIt first, InIt last, OutIt result_first,
+                                  OutIt result_last) {
+  return std::partial_sort_copy(first, last, result_first, result_last,
+                                __algorithm_detail::__less());
+}
+
 template <class It, class Compare>
 constexpr void nth_element(It first, It nth, It last, Compare comp) {
   if (nth == last) {

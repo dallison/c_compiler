@@ -2388,6 +2388,9 @@ static bool CXXImplicitSpecialMemberIsNoexcept(Struct* str,
   return true;
 }
 
+static bool CXXImplicitSpecialMemberIsTrivial(Struct* str,
+                                              CXXSpecialMemberKind kind);
+
 bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type,
                                    CXXSpecialMemberKind kind) {
   if (type == NULL) {
@@ -2408,7 +2411,14 @@ bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type,
     func = CXXFindSpecialMemberFunction(type->info.struct_info,
                                         kCXXSpecialMemberCopyAssignment);
   }
-  return func != NULL && !func->info.function.is_deleted &&
+  if (func == NULL) {
+    // Unnamed / invented class types skip special-member synthesis, so there
+    // is no function to consult.  A struct of trivial members (e.g. the
+    // anonymous `struct { void*; size_t; }` inside Abseil's TypeErasedState)
+    // is still trivially copyable and assignable.
+    return CXXImplicitSpecialMemberIsTrivial(type->info.struct_info, kind);
+  }
+  return !func->info.function.is_deleted &&
          func->info.function.is_trivial_special_member;
 }
 

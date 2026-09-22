@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdio.h>
@@ -255,6 +256,15 @@ static void HandleHostTrap(XtensaInterpreter* interpreter) {
     case DAVE_SYS_CLOSE:
       WriteRegister(interpreter, 2, (uint32_t)close((int)a2));
       return;
+    case DAVE_SYS_POLL: {
+      nfds_t n = (nfds_t)a3;
+      void* fds = GuestPointer(interpreter, a2, n * sizeof(struct pollfd));
+      WriteRegister(interpreter, 2,
+                    fds == NULL ? (uint32_t)-EFAULT
+                                : (uint32_t)poll((struct pollfd*)fds, n,
+                                                 (int)a4));
+      return;
+    }
     case DAVE_SYS_LSEEK:
       WriteRegister(interpreter, 2,
                     (uint32_t)lseek((int)a2, (off_t)(int32_t)a3, (int)a4));
