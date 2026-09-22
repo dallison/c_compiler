@@ -15,6 +15,7 @@
 #include "statement_parser.h"
 #include "compiler.h"
 #include "errors.h"
+#include "std_header_suggestion.h"
 #include "type.h"
 #include "type_inheritance.h"
 #include "type_template.h"
@@ -1375,6 +1376,7 @@ static bool TryParseRangeForBinding(Syntax* syntax,
   if (unknown_type) {
     SyntaxError(syntax, "Unknown type name %s",
                 syntax->lex->spelling.value);
+    ReportStdHeaderSuggestionForName(syntax, syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
     type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   } else {

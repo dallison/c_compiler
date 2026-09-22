@@ -23,6 +23,7 @@
 #include "statement_parser.h"
 #include "symbol_table.h"
 #include "syntax.h"
+#include "std_header_suggestion.h"
 #include "typo_correction.h"
 #include "semantics.h"
 #include "errors.h"
@@ -1543,10 +1544,12 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           } else {
             SyntaxError(parser->syntax, "Unknown type name %s",
                         typename_name.spelling.value);
+            ReportStdHeaderSuggestion(parser->syntax, &typename_name);
           }
         } else {
           SyntaxError(parser->syntax, "Unknown type name %s",
                       typename_name.spelling.value);
+          ReportStdHeaderSuggestion(parser->syntax, &typename_name);
         }
         }
       }
@@ -1669,6 +1672,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         } else {
           SyntaxError(parser->syntax, "Unknown type name %s",
                       typedef_name.spelling.value);
+          ReportStdHeaderSuggestion(parser->syntax, &typedef_name);
         }
       } else {
         type_record =
@@ -1678,6 +1682,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         } else {
           SyntaxError(parser->syntax, "Unknown type name %s",
                       typedef_name.spelling.value);
+          ReportStdHeaderSuggestion(parser->syntax, &typedef_name);
         }
       }
       FullyQualifiedIdentifierDestruct(&typedef_name);

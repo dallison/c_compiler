@@ -21,6 +21,7 @@
 #include "reflection.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
+#include "std_header_suggestion.h"
 #include "typo_correction.h"
 #include "type.h"
 #include "type_class_internal.h"
@@ -1622,6 +1623,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
             SyntaxWarning(syntax, "implicit-function-declaration",
                           "Calling undeclared function %s", callee);
           }
+          ReportStdHeaderSuggestionForName(syntax, callee);
         }
 
         // Declare the function so we don't get more warnings for the same

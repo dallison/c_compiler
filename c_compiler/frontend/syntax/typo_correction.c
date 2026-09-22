@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "compiler.h"
+#include "std_header_suggestion.h"
 #include "type.h"
 
 enum { kTypoMaxIdentifier = 256 };
@@ -362,4 +363,5 @@ void TypoCorrectionErrorUnknownSymbol(Syntax* syntax,
   } else {
     SyntaxError(syntax, "No such symbol \"%s\"", name->spelling.value);
   }
+  ReportStdHeaderSuggestion(syntax, name);
 }
