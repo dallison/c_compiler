@@ -1626,8 +1626,17 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           : NULL;
   bool hiding_has_explicit_template_args =
       hiding_last_args != NULL && hiding_last_args->length > 0;
+  // Member function templates found while parsing an inline definition
+  // may be marked block-scope.  `return put(v)` must still become
+  // `this->put(v)` so deduction sees a member call.  A true local or
+  // parameter continues to hide.
+  bool block_hides_member =
+      symbol != NULL && symbol->flags.is_block_scope &&
+      !(symbol->flags.is_template && symbol->type != NULL &&
+        TypeIsFunction(symbol->type) &&
+        symbol->type->info.function.cxx_member_owner != NULL);
   if (CompilerIsCXX() && !name.is_qualified && symbol != NULL &&
-      !symbol->flags.is_block_scope && !hiding_has_explicit_template_args) {
+      !block_hides_member && !hiding_has_explicit_template_args) {
     Symbol* this_symbol = ThisSymbolForUnqualifiedMember(
         syntax, &name, /*allow_unresolved_member=*/false);
     if (this_symbol != NULL && this_symbol->type != NULL &&
@@ -1651,10 +1660,18 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           member != NULL && member->symbol != NULL &&
           (StorageIs(member->symbol->storage, STO(typedef)) ||
            SymbolIsTagSymbol(member->symbol));
-      if (member != NULL && !member->is_static && !member_is_constructor &&
-          !member_is_type_name) {
+      bool symbol_is_this_member_function =
+          symbol->type != NULL && TypeIsFunction(symbol->type) &&
+          symbol->type->info.function.cxx_member_owner != NULL &&
+          symbol->type->info.function.cxx_member_owner ==
+              this_symbol->type->next->info.struct_info &&
+          !symbol->type->info.function.is_constructor;
+      if ((member != NULL && !member->is_static && !member_is_constructor &&
+           !member_is_type_name) ||
+          (member == NULL && symbol_is_this_member_function)) {
         ASTNode* member_access = NewMemberAccessFromThis(
-            syntax, &name, /*allow_unresolved_member=*/false);
+            syntax, &name,
+            /*allow_unresolved_member=*/member == NULL);
         if (member_access != NULL) {
           FullyQualifiedIdentifierDestruct(&name);
           return member_access;

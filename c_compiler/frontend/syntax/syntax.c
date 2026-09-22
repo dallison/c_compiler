@@ -4531,12 +4531,14 @@ static void SyntaxAppendCXXMemberDestructorCalls(Syntax* syntax, TypeRecord* fun
 }
 
 static CXXDeferredConstructorInitializer* NewCXXDeferredConstructorInitializer(
-    const char* name, Vector* actuals, SourceLocation location) {
+    const char* name, Vector* actuals, SourceLocation location,
+    bool is_pack_expansion) {
   CXXDeferredConstructorInitializer* init =
       malloc(sizeof(CXXDeferredConstructorInitializer));
   StringInit(&init->name, name);
   init->actuals = actuals;
   init->location = location;
+  init->is_pack_expansion = is_pack_expansion;
   return init;
 }
 
@@ -4559,7 +4561,7 @@ static CXXDeferredConstructorInitializer* CloneCXXDeferredConstructorInitializer
   }
   return NewCXXDeferredConstructorInitializer(
       init->name.value, CloneCXXConstructorInitializerActuals(init->actuals),
-      init->location);
+      init->location, init->is_pack_expansion);
 }
 
 static void CXXDeferredConstructorInitializerDelete(
@@ -4807,8 +4809,16 @@ static String* CXXPrimaryTemplateName(TypeRecord* type) {
   return origin != NULL ? &origin->name : NULL;
 }
 
+static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
+    Struct* owner, const char* name, Vector* already_used);
+
 static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
                                                  const char* name) {
+  return FindCXXDirectBaseByNameSkipping(owner, name, NULL);
+}
+
+static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
+    Struct* owner, const char* name, Vector* already_used) {
   if (owner == NULL || name == NULL) {
     return NULL;
   }
@@ -4822,6 +4832,9 @@ static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
         base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (already_used != NULL && VectorContainsPointer(already_used, base)) {
       continue;
     }
     if (alias_type != NULL && TypeEqual(alias_type, base->type)) {
@@ -5850,6 +5863,69 @@ static Vector* ResolveCXXBracedConstructorInitializerActuals(
   return expanded;
 }
 
+static void MarkCXXConstructorInitPackExpansion(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return;
+  }
+  stmt->flags |= kASTPackExpansion;
+  if (ASTNodeGetShape(stmt) == kASTShapeExprStmt) {
+    ASTNode* expr = ((ExpressionStatementASTNode*)stmt)->expr;
+    if (expr != NULL) {
+      expr->flags |= kASTPackExpansion;
+    }
+  }
+}
+
+/* Bind `name(actuals)` to unused direct bases of that name.  A pack-expansion
+ * mem-initializer (`Storage<Ts, I>(args)...`) produces one call per matching
+ * base.  Returns true if the initializer was consumed: one or more bases were
+ * bound, or an empty pack expansion matched no remaining base. */
+static bool BindCXXBaseConstructorInitializers(
+    Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list,
+    Struct* owner, const char* init_name, Vector* actuals,
+    SourceLocation location, bool is_pack_expansion) {
+  CXXBaseSpecifier* base =
+      FindCXXDirectBaseByNameSkipping(owner, init_name, &init_list->base_specs);
+  if (base != NULL && base->is_virtual) {
+    return false;
+  }
+  if (base == NULL) {
+    if (is_pack_expansion) {
+      if (actuals != NULL) {
+        VectorDelete(actuals);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  Vector* pattern = actuals;
+  while (base != NULL && !base->is_virtual) {
+    CheckCXXConstructorInitializerOrder(
+        syntax, init_list, init_name, CXXDirectBaseOrder(owner, base));
+    Vector* call_actuals = CloneCXXConstructorInitializerActuals(pattern);
+    ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
+                                                /*complete_object=*/false,
+                                                call_actuals, location);
+    if (call != NULL) {
+      if (is_pack_expansion) {
+        MarkCXXConstructorInitPackExpansion(call);
+      }
+      VectorAppend(&init_list->base_specs, base);
+      VectorAppend(&init_list->base_statements, call);
+    }
+    if (!is_pack_expansion) {
+      break;
+    }
+    base = FindCXXDirectBaseByNameSkipping(owner, init_name,
+                                           &init_list->base_specs);
+  }
+  if (pattern != NULL) {
+    VectorDelete(pattern);
+  }
+  return true;
+}
+
 void SyntaxParseCXXConstructorInitializerList(
     Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list) {
   if (!CompilerIsCXX() || func == NULL || !func->info.function.is_constructor ||
@@ -5900,19 +5976,15 @@ void SyntaxParseCXXConstructorInitializerList(
       SyntaxError(syntax, "Expected constructor initializer argument list");
       actuals = NewVector();
     }
+    bool init_is_pack_expansion = false;
     if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(ellipsis))) {
-      if (actuals != NULL && actuals->length > 0) {
-        ASTNode* last = actuals->value.p[actuals->length - 1];
-        if (last != NULL) {
-          last->flags |= kASTPackExpansion;
-        }
-      }
+      init_is_pack_expansion = true;
     }
 
     VectorAppend(&init_list->raw_initializers,
                  NewCXXDeferredConstructorInitializer(
                      init_name, CloneCXXConstructorInitializerActuals(actuals),
-                     location));
+                     location, init_is_pack_expansion));
     if (CXXConstructorInitializerNamesOwner(owner, init_name)) {
       if (init_list->delegating_statement != NULL ||
           init_list->base_specs.length != 0 ||
@@ -5941,35 +6013,18 @@ void SyntaxParseCXXConstructorInitializerList(
       }
       continue;
     }
-    CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
-    CXXVirtualBaseInfo* virtual_base = NULL;
-    if (base != NULL && base->is_virtual) {
-      virtual_base = FindCXXVirtualBaseByName(owner, init_name);
-      base = NULL;
+    if (BindCXXBaseConstructorInitializers(
+            syntax, func, init_list, owner, init_name, actuals, location,
+            init_is_pack_expansion)) {
+      FullyQualifiedIdentifierDestruct(&name);
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+      continue;
     }
-    if (base != NULL) {
-      if (VectorContainsPointer(&init_list->base_specs, base)) {
-        SyntaxError(syntax, "Duplicate initializer for base %s", init_name);
-        VectorDelete(actuals);
-        FullyQualifiedIdentifierDestruct(&name);
-        if (!LexMatch(syntax->lex, TOK(comma))) {
-          break;
-        }
-        continue;
-      }
-      CheckCXXConstructorInitializerOrder(
-          syntax, init_list, init_name, CXXDirectBaseOrder(owner, base));
-      ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
-                                                  /*complete_object=*/false,
-                                                  actuals, location);
-      if (call != NULL) {
-        VectorAppend(&init_list->base_specs, base);
-        VectorAppend(&init_list->base_statements, call);
-      }
-    } else if ((virtual_base = virtual_base != NULL
-                                   ? virtual_base
-                                   : FindCXXVirtualBaseByName(owner,
-                                                              init_name)) != NULL) {
+    CXXVirtualBaseInfo* virtual_base =
+        FindCXXVirtualBaseByName(owner, init_name);
+    if (virtual_base != NULL) {
       if (VectorContainsPointer(&init_list->virtual_base_specs, virtual_base)) {
         SyntaxError(syntax, "Duplicate initializer for virtual base %s",
                     init_name);
@@ -5993,8 +6048,9 @@ void SyntaxParseCXXConstructorInitializerList(
       StructMember* member = FindCXXDirectDataMemberByName(owner, init_name);
       if (member == NULL) {
         VectorAppend(&init_list->deferred_initializers,
-                     NewCXXDeferredConstructorInitializer(init_name, actuals,
-                                                          location));
+                     NewCXXDeferredConstructorInitializer(
+                         init_name, actuals, location,
+                         init_is_pack_expansion));
       } else if (VectorContainsPointer(&init_list->member_specs, member)) {
         SyntaxError(syntax, "Duplicate initializer for member %s", init_name);
         VectorDelete(actuals);
@@ -6057,32 +6113,13 @@ void SyntaxResolveCXXConstructorInitializerList(
       VectorDelete(actuals);
       continue;
     }
-    CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
-    CXXVirtualBaseInfo* virtual_base = NULL;
-    if (base != NULL && base->is_virtual) {
-      virtual_base = FindCXXVirtualBaseByName(owner, init_name);
-      base = NULL;
-    }
-    if (base != NULL) {
-      if (VectorContainsPointer(&init_list->base_specs, base)) {
-        SyntaxError(syntax, "Duplicate initializer for base %s", init_name);
-        VectorDelete(actuals);
-        continue;
-      }
-      CheckCXXConstructorInitializerOrder(
-          syntax, init_list, init_name, CXXDirectBaseOrder(owner, base));
-      ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
-                                                  /*complete_object=*/false,
-                                                  actuals, location);
-      if (call != NULL) {
-        VectorAppend(&init_list->base_specs, base);
-        VectorAppend(&init_list->base_statements, call);
-      }
+    if (BindCXXBaseConstructorInitializers(
+            syntax, func, init_list, owner, init_name, actuals, location,
+            deferred->is_pack_expansion)) {
       continue;
     }
-    virtual_base = virtual_base != NULL
-                       ? virtual_base
-                       : FindCXXVirtualBaseByName(owner, init_name);
+    CXXVirtualBaseInfo* virtual_base =
+        FindCXXVirtualBaseByName(owner, init_name);
     if (virtual_base != NULL) {
       if (VectorContainsPointer(&init_list->virtual_base_specs, virtual_base)) {
         SyntaxError(syntax, "Duplicate initializer for virtual base %s",

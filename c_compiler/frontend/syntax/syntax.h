@@ -110,6 +110,7 @@ typedef struct CXXDeferredConstructorInitializer {
   String name;
   Vector* actuals;
   SourceLocation location;
+  bool is_pack_expansion;
 } CXXDeferredConstructorInitializer;
 
 typedef struct CXXConstructorInitList {
