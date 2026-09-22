@@ -89,6 +89,16 @@ static ASTNode* NewVirtualCalleeFromFunction(ASTNode* receiver,
 // the user-defined-conversion search in OverloadConversionRank.
 static bool g_suppress_user_defined_conversion_rank = false;
 
+bool SemanticSuspendUserDefinedConversionRank(void) {
+  bool saved = g_suppress_user_defined_conversion_rank;
+  g_suppress_user_defined_conversion_rank = false;
+  return saved;
+}
+
+void SemanticResumeUserDefinedConversionRank(bool saved) {
+  g_suppress_user_defined_conversion_rank = saved;
+}
+
 // Finds the unique non-explicit (unless allow_explicit) converting constructor
 // of class type `to` that can be invoked with the single argument `from` using
 // only standard conversions, or NULL if there is none or the choice is
@@ -5195,7 +5205,9 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
     if (func_type != NULL) {
       VectorAppend(&compiler->functions_being_analyzed, func_type);
     }
+    bool saved_udc = SemanticSuspendUserDefinedConversionRank();
     AnalyzeStatement(func->body);
+    SemanticResumeUserDefinedConversionRank(saved_udc);
     if (func_type != NULL) {
       for (size_t i = compiler->functions_being_analyzed.length; i-- > 0;) {
         if (compiler->functions_being_analyzed.value.p[i] == func_type) {
@@ -6358,10 +6370,29 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
   node->left = virtual_callee != NULL
                    ? virtual_callee
                    : NewIdentifierASTNode(member->symbol, old_left->location);
+  // A later pass resets an instantiated callee back to its primary template
+  // and deduces again.  Explicit arguments live on the member-access node
+  // (`InitializeStorage<QualTRef>(args...)`); without them on the identifier,
+  // that second deduction cannot recover a parameter that does not appear in
+  // the function signature.
+  if (node->left->op == AST_OP(identifier) &&
+      member_node->template_arguments != NULL) {
+    ((IdentifierASTNode*)node->left)->template_arguments =
+        TemplateArgumentVectorCopy(member_node->template_arguments);
+  }
   node->left->parent = &node->base;
   node->left->child_id = 0;
   if (virtual_callee == NULL) {
-    node->left = AnalyzeExpression(node->left);
+    ASTNode* analyzed_left = AnalyzeExpression(node->left);
+    if (analyzed_left != node->left && analyzed_left != NULL &&
+        analyzed_left->op == AST_OP(identifier) &&
+        ((IdentifierASTNode*)analyzed_left)->template_arguments == NULL &&
+        node->left->op == AST_OP(identifier)) {
+      ((IdentifierASTNode*)analyzed_left)->template_arguments =
+          ((IdentifierASTNode*)node->left)->template_arguments;
+      ((IdentifierASTNode*)node->left)->template_arguments = NULL;
+    }
+    node->left = analyzed_left;
   }
   ASTNodeDelete(old_left);
 
@@ -6797,6 +6828,45 @@ static int ReferenceBindingRank(ASTNode* actual, TypeRecord* reference_type) {
   return 2;
 }
 
+/* [class.access.base]: a member of `D` may convert `D*` to a private or
+ * protected base.  TypeIsDerivedFrom is public-only, which is correct for
+ * implicit conversions in general but rejects `return StorageT<I>::get()`
+ * when `Storage` is a private base and `get` is overloaded (ranking uses
+ * this helper; a single candidate later converts via TryConvertDerivedPointer). */
+static bool TypeIsDerivedFromInCurrentClass(TypeRecord* from, TypeRecord* to) {
+  if (TypeIsDerivedFrom(from, to)) {
+    return true;
+  }
+  if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||
+      !TypeIsStructOrUnion(to) || from->info.struct_info == NULL ||
+      to->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* current = compiler->current_class_access_context;
+  if (current == NULL && compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    current = compiler->current_function->info.function.cxx_member_owner;
+  }
+  if (current == NULL) {
+    return false;
+  }
+  Struct* from_struct = from->info.struct_info;
+  if (current != from_struct) {
+    bool nested = false;
+    for (Struct* enclosing = current->lexical_parent; enclosing != NULL;
+         enclosing = enclosing->lexical_parent) {
+      if (enclosing == from_struct) {
+        nested = true;
+        break;
+      }
+    }
+    if (!nested) {
+      return false;
+    }
+  }
+  return TypeBaseOffset(from, to, /*public_only=*/false, NULL);
+}
+
 static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
   if (TypeIsPointer(actual) && TypeIsPointer(target) &&
       actual->next != NULL && target->next != NULL) {
@@ -6815,7 +6885,7 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
     // TypeEqual above handles separately materialized records for the same
     // template specialization by comparing their origins and arguments.
     if (TypeIsStructOrUnion(actual) && TypeIsStructOrUnion(target)) {
-      if (TypeIsDerivedFrom(actual, target)) {
+      if (TypeIsDerivedFromInCurrentClass(actual, target)) {
         return 2;
       }
     }
@@ -6865,7 +6935,7 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
         !TypeEqualIgnoringQualifiers(actual->next, target->next) &&
         !(TypeIsStructOrUnion(actual->next) &&
           TypeIsStructOrUnion(target->next) &&
-          TypeIsDerivedFrom(actual->next, target->next))) {
+          TypeIsDerivedFromInCurrentClass(actual->next, target->next))) {
       return -1;
     }
     if (TypeIsVoidPointer(actual) || TypeIsVoidPointer(target)) {
@@ -6921,6 +6991,13 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
   if (!TypeIsStructOrUnion(target) || target->info.struct_info == NULL) {
     return -1;
   }
+  // `std::initializer_list<E>` is ranked by CXXInitializerListBracedInitRank.
+  // Falling through here would treat its copy constructor (first parameter is
+  // `const initializer_list<E>&`) as an initializer-list constructor and
+  // recurse through FunctionCallScore forever.
+  if (TypeIsCXXInitializerList(target)) {
+    return -1;
+  }
   Struct* str = target->info.struct_info;
   // Analyze the element expressions once; any non-expression element (nested
   // braces, designated initializers) is left to call-time lowering.
@@ -6938,17 +7015,66 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
     VectorAppend(&elements, ei->expr);
   }
   int best = -1;
-  if (simple_elements) {
-    VectorASTNode call = {0};
-    call.children = &elements;
-    StructMember* ctor =
-        str->tag_name != NULL ? FindStructMember(str, str->tag_name) : NULL;
+  StructMember* ctor =
+      str->tag_name != NULL ? FindStructMember(str, str->tag_name) : NULL;
+  // [over.match.list] first tries initializer-list constructors, which take
+  // the entire braced-init-list as one `std::initializer_list<E>` argument.
+  // Those constructors are often member templates (Abseil `Span<const T>`'s
+  // `EnableIfValueIsConst` overload); skipping templates here rejected every
+  // candidate for `Streamable(fmt, {FormatArgImpl(args)...})`.
+  if (ctor != NULL) {
+    Vector one_actual;
+    VectorInit(&one_actual);
+    VectorAppend(&one_actual, actual);
+    VectorASTNode il_call = {0};
+    il_call.children = &one_actual;
     for (StructMember* c = ctor; c != NULL; c = c->overload_next) {
       if (!c->is_member_function || c->symbol == NULL ||
           c->symbol->type == NULL || !TypeIsFunction(c->symbol->type) ||
           !c->symbol->type->info.function.is_constructor ||
           c->symbol->type->info.function.is_deleted ||
-          c->symbol->flags.is_template) {
+          !CXXConstructorIsInitializerListConstructor(
+              &c->symbol->type->info.function)) {
+        continue;
+      }
+      int s = -1;
+      if (c->symbol->flags.is_template) {
+        DiagnosticSuppressBegin();
+        Symbol* temporary = TypeCreateFunctionTemplateCandidate(
+            &compiler->syntax, c->symbol, NULL, &one_actual,
+            /*first_formal_arg=*/1);
+        DiagnosticSuppressEnd();
+        if (temporary == NULL || temporary->type == NULL ||
+            !TypeIsFunction(temporary->type)) {
+          if (temporary != NULL) {
+            SymbolDelete(temporary);
+          }
+          continue;
+        }
+        s = FunctionCallScore(temporary->type, &il_call,
+                              /*first_formal_arg=*/1);
+        SymbolDelete(temporary);
+      } else {
+        s = FunctionCallScore(c->symbol->type, &il_call,
+                              /*first_formal_arg=*/1);
+      }
+      if (s >= 0 && (best < 0 || s < best)) {
+        best = s;
+      }
+    }
+    VectorDestruct(&one_actual);
+  }
+  if (best < 0 && simple_elements) {
+    VectorASTNode call = {0};
+    call.children = &elements;
+    for (StructMember* c = ctor; c != NULL; c = c->overload_next) {
+      if (!c->is_member_function || c->symbol == NULL ||
+          c->symbol->type == NULL || !TypeIsFunction(c->symbol->type) ||
+          !c->symbol->type->info.function.is_constructor ||
+          c->symbol->type->info.function.is_deleted ||
+          c->symbol->flags.is_template ||
+          CXXConstructorIsInitializerListConstructor(
+              &c->symbol->type->info.function)) {
         continue;
       }
       int s = FunctionCallScore(c->symbol->type, &call, /*first_formal_arg=*/1);
@@ -7450,6 +7576,24 @@ static size_t FunctionRequiredArgumentCount(TypeRecord* func,
   return required;
 }
 
+/* Constructor `this` may name a private/protected base subobject of the
+ * class currently being constructed (`class D : private B { D() : B(args) {} }`).
+ * OverloadConversionRank uses public-only derived-to-base and would reject it. */
+static bool ConstructorThisPointerMatches(TypeRecord* actual,
+                                          TypeRecord* formal) {
+  if (TypeEqualIgnoringQualifiers(actual, formal)) {
+    return true;
+  }
+  if (actual == NULL || formal == NULL || !TypeIsPointer(actual) ||
+      !TypeIsPointer(formal) || actual->next == NULL || formal->next == NULL ||
+      !TypeIsStructOrUnion(actual->next) ||
+      !TypeIsStructOrUnion(formal->next)) {
+    return false;
+  }
+  return TypeBaseOffset(actual->next, formal->next, /*public_only=*/false,
+                        NULL);
+}
+
 static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
                              size_t first_formal_arg) {
   if (!TypeIsFunction(func) || func->info.function.unknown_args) {
@@ -7488,7 +7632,7 @@ static int FunctionCallScore(TypeRecord* func, VectorASTNode* node,
         formal != NULL && strcmp(formal->name.value, "this") == 0;
     int rank =
         constructor_this &&
-                TypeEqualIgnoringQualifiers(actual->type, formal->type)
+                ConstructorThisPointerMatches(actual->type, formal->type)
             ? 0
             : OverloadConversionRank(actual, formal->type);
     if (rank < 0) {
@@ -9197,6 +9341,10 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   }
 
   TypeRecord* type = TypeRecordCopy(construction_type);
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    TypeRecordDelete(type);
+    return NULL;
+  }
   // A template-id with dependent arguments (`integral_constant<bool, C<T>>`)
   // cannot be instantiated yet.  Keep the written arguments on the result
   // type so later overload resolution still sees a dependent class type
@@ -9294,6 +9442,8 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     return analyzed;
   }
   if (constructor == NULL || !constructor->is_member_function ||
+      constructor->symbol == NULL || constructor->symbol->type == NULL ||
+      !TypeIsFunction(constructor->symbol->type) ||
       !constructor->symbol->type->info.function.is_constructor) {
     // The target class has no constructor (e.g. it is an aggregate).  Per
     // [expr.type.conv], a functional cast with a single parenthesized argument
@@ -10068,7 +10218,20 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (node->left != NULL && node->left->op == AST_OP(identifier) &&
       CallActualsContainTemplateParameter(node)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
-    if (id->symbol != NULL &&
+    // `ExpressionIsTemplateDependent` is true for `declval<unsigned>()` because
+    // the callee *symbol* is still a function template.  The call's result type
+    // is concrete; only type-dependent actuals must defer overload resolution.
+    bool actuals_type_dependent = false;
+    for (size_t i = 0; i < node->children->length; i++) {
+      ASTNode* actual = node->children->value.p[i];
+      if (actual != NULL && actual->type != NULL &&
+          (TypeContainsTemplateParameter(actual->type) ||
+           TypeIsUnknown(actual->type))) {
+        actuals_type_dependent = true;
+        break;
+      }
+    }
+    if (actuals_type_dependent && id->symbol != NULL &&
         (id->symbol->flags.is_overloaded ||
          id->symbol->flags.is_template ||
          id->symbol->overload_next != NULL)) {
@@ -10127,8 +10290,39 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   // functor or lambda received as a template parameter) cannot be resolved
   // until instantiation.  Flag it and give it a placeholder type so it is
   // re-analyzed once the template arguments are known.
+  //
+  // An overload set that merely *includes* a function template is not a
+  // dependent callee: the first candidate's type mentions template parameters,
+  // but a concrete call must still be ranked now (e.g. Abseil
+  // `FormatConvertImpl`, whose SFINAE templates sit beside a non-template
+  // `unsigned` overload).  Skipping resolution here leaves `decltype` as
+  // unknown and `ArgumentToConv<unsigned>()` is not a constant.
+  bool concrete_overload_set = false;
+  if (node->left != NULL && node->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    if (id->symbol != NULL &&
+        (id->symbol->flags.is_overloaded ||
+         id->symbol->overload_next != NULL) &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            id->template_arguments) &&
+        !CallActualsContainDependentFunctorCall(node)) {
+      bool actuals_type_dependent = false;
+      for (size_t i = 0; i < node->children->length; i++) {
+        ASTNode* actual = node->children->value.p[i];
+        if (actual != NULL && actual->type != NULL &&
+            (TypeContainsTemplateParameter(actual->type) ||
+             TypeIsUnknown(actual->type))) {
+          actuals_type_dependent = true;
+          break;
+        }
+      }
+      if (!actuals_type_dependent) {
+        concrete_overload_set = true;
+      }
+    }
+  }
   if (CompilerIsCXX() && node->left != NULL && node->left->type != NULL &&
-      !is_concrete_ctad_construction &&
+      !is_concrete_ctad_construction && !concrete_overload_set &&
       (TypeContainsTemplateParameter(node->left->type) ||
        TypeIsUnknown(node->left->type))) {
     if (node->left->op == AST_OP(identifier)) {

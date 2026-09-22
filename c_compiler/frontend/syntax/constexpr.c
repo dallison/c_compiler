@@ -6675,6 +6675,39 @@ static bool ConstexprParameterTypeSupported(TypeRecord* type) {
          TypeIsReflection(type);
 }
 
+// A constexpr member call whose receiver is a function parameter has no object
+// when the body is instantiated rather than invoked -- Abseil's
+// `static_assert(SpecifierCount(i) == ParametersPassed(j))` with
+// `ErrorMaker<B> SpecifierCount = {}`.  Value-initialize a temporary of the
+// parameter's class type so stateless constexpr wrappers still fold.
+static ConstexprObject* ConstexprValueInitParameterObject(
+    ConstEvalContext* ctx, ASTNode* actual) {
+  if (ctx == NULL || actual == NULL) {
+    return NULL;
+  }
+  while (actual->op == AST_OP(address) || actual->op == AST_OP(contents)) {
+    actual = ((UnaryASTNode*)actual)->sub;
+    if (actual == NULL) {
+      return NULL;
+    }
+  }
+  if (actual->op != AST_OP(identifier)) {
+    return NULL;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)actual)->symbol;
+  if (symbol == NULL || symbol->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* type = symbol->type;
+  if (TypeIsPointer(type) || TypeIsReference(type)) {
+    type = type->next;
+  }
+  if (type == NULL || !TypeIsStructOrUnion(type)) {
+    return NULL;
+  }
+  return NewConstexprObject(ctx, type, ConstexprObjectSlotCount(type));
+}
+
 static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
                                  Vector* actuals) {
   TypeRecord* func = function->type;
@@ -6735,8 +6768,11 @@ static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
       }
       if (object == NULL &&
           !EvaluateConstexprObjectAddress(ctx, actual, &object)) {
-        ok = false;
-        break;
+        object = ConstexprValueInitParameterObject(ctx, actual);
+        if (object == NULL) {
+          ok = false;
+          break;
+        }
       }
       value.is_object = true;
       value.object = object;

@@ -1184,6 +1184,33 @@ static bool SymbolHasFunctionTemplateOverload(Symbol* symbol) {
   return false;
 }
 
+// Unqualified `InitializeStorage<QualTRef>(args...)` is rewritten to
+// `this->InitializeStorage` before `<` is seen.  The arrow form does not
+// otherwise keep explicit template arguments, so `<` is parsed as less-than
+// and the call's closing `)` is lost.  Attach a pending `<...>` to the
+// member-name node; member analysis copies it onto the struct-member node.
+static void AttachPendingMemberTemplateArguments(Syntax* syntax,
+                                                 ASTNode* member_access,
+                                                 TokenClass followers) {
+  if (!CompilerIsCXX() || member_access == NULL ||
+      member_access->op != AST_OP(arrow) ||
+      !LexLookingAt(syntax->lex, TOK(less))) {
+    return;
+  }
+  Vector* args = SyntaxParseTemplateArgumentList(syntax, followers);
+  if (args == NULL) {
+    return;
+  }
+  ASTNode* member_name = ((BinaryASTNode*)member_access)->right;
+  if (member_name == NULL) {
+    VectorDestructWithContents(args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    return;
+  }
+  ((ConstantASTNode*)member_name)->template_arguments = args;
+}
+
 static bool ExpressionIdentifierNeedsTemplateIdParser(Syntax* syntax) {
   if (!CompilerIsCXX()) {
     return false;
@@ -1670,10 +1697,18 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       if ((member != NULL && !member->is_static && !member_is_constructor &&
            !member_is_type_name) ||
           (member == NULL && symbol_is_this_member_function)) {
+        bool member_fn_template =
+            (member != NULL && member->symbol != NULL &&
+             SymbolHasFunctionTemplateOverload(member->symbol)) ||
+            SymbolHasFunctionTemplateOverload(symbol);
         ASTNode* member_access = NewMemberAccessFromThis(
             syntax, &name,
             /*allow_unresolved_member=*/member == NULL);
         if (member_access != NULL) {
+          if (member_fn_template) {
+            AttachPendingMemberTemplateArguments(syntax, member_access,
+                                                 followers);
+          }
           FullyQualifiedIdentifierDestruct(&name);
           return member_access;
         }

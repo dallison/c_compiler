@@ -821,6 +821,35 @@ static bool FunctionTypeHasParameterPack(TypeRecord* type) {
   return false;
 }
 
+/* True when `str` is the class being instantiated: the substitution source,
+ * the current specialization, or that specialization's primary template.
+ * Member-function instantiation often sets source == target == the
+ * specialization, so the primary's injected-class-name (`ElemT<Tuple, I>`)
+ * would otherwise never match. */
+static bool StructIsCurrentTemplateSelf(Struct* str, Struct* source,
+                                        Struct* target) {
+  if (str == NULL) {
+    return false;
+  }
+  if (source != NULL && str == source) {
+    return true;
+  }
+  if (target == NULL) {
+    return false;
+  }
+  if (str == target) {
+    return true;
+  }
+  if (target->tag_symbol == NULL || target->tag_symbol->type == NULL ||
+      target->tag_symbol->type->template_origin == NULL ||
+      target->tag_symbol->type->template_origin->type == NULL ||
+      !TypeIsStructOrUnion(target->tag_symbol->type->template_origin->type)) {
+    return false;
+  }
+  return target->tag_symbol->type->template_origin->type->info.struct_info ==
+         str;
+}
+
 /* Replace a self-reference to a template definition with the concrete struct
  * currently being instantiated. This keeps injected-class-name uses (`map`,
  * `iterator`, etc.) tied to the active instantiation instead of the primary
@@ -828,9 +857,9 @@ static bool FunctionTypeHasParameterPack(TypeRecord* type) {
 static TypeRecord* SubstituteTemplateSelfReference(TypeRecord* type,
                                                    Struct* source,
                                                    Struct* target) {
-  if (source == NULL || target == NULL || type->declarator != kDeclPrimitive ||
-      !TypeIsStructOrUnion(type) || type->info.struct_info != source ||
-      type->template_arguments != NULL) {
+  if (target == NULL || type->declarator != kDeclPrimitive ||
+      !TypeIsStructOrUnion(type) || type->template_arguments != NULL ||
+      !StructIsCurrentTemplateSelf(type->info.struct_info, source, target)) {
     return NULL;
   }
   TypeRecord* subst = TypeRecordCopy(type);
@@ -1294,7 +1323,10 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     // sees a single pack argument.
     Vector* grouped_args =
         CompleteAliasTemplateArguments(info.origin, concrete_args);
-    Vector* pattern_args = grouped_args != NULL ? grouped_args : concrete_args;
+    Vector* completed = grouped_args != NULL ? grouped_args : concrete_args;
+    Vector* prefixed =
+        MemberAliasPatternArguments(parser, info.origin, completed);
+    Vector* pattern_args = prefixed != NULL ? prefixed : completed;
     TypeRecord* subst =
         SubstituteTemplateParameters(parser, info.origin->type, pattern_args);
     subst->qualifiers |= type->qualifiers;
@@ -1317,6 +1349,11 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
             /*free_element=*/false);
       }
       subst->template_arguments = NULL;
+    }
+    if (prefixed != NULL) {
+      VectorDeleteWithContents(prefixed,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
     }
     if (grouped_args != NULL) {
       VectorDeleteWithContents(grouped_args,

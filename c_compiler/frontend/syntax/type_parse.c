@@ -944,10 +944,13 @@ static TypeRecord* TryBuildDependentTemplateIdMemberType(
     TypeParser* parser, FullyQualifiedIdentifier* name) {
   if (parser == NULL || name == NULL || !CompilerIsCXX() ||
       name->components.length < 2 ||
-      name->template_arguments.length != name->components.length) {
+      name->template_arguments.length < name->components.length - 1) {
     return NULL;
   }
   size_t base_index = name->components.length - 2;
+  if (base_index >= name->template_arguments.length) {
+    return NULL;
+  }
   Vector* parsed_args = name->template_arguments.value.p[base_index];
   if (parsed_args == NULL) {
     return NULL;
@@ -1563,6 +1566,16 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         }
         if (symbol != NULL && StorageIs(symbol->storage, STO(typedef)) &&
             !base_is_dependent_alias) {
+          TypeRecord* deferred_typename = NULL;
+          if (symbol->type != NULL &&
+              TypeContainsTemplateParameter(symbol->type)) {
+            deferred_typename =
+                TryBuildDependentTemplateIdMemberType(parser, &typename_name);
+          }
+          if (deferred_typename != NULL) {
+            type_record = deferred_typename;
+            type |= type_record->type;
+          } else {
           symbol->flags.used = true;
           Vector* args = NULL;
           if (symbol->flags.is_template &&
@@ -1597,6 +1610,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                 /*free_element=*/false);
           }
           type |= type_record->type;
+          }
         } else if (typename_name.components.length == 2) {
           String* base_name = typename_name.components.value.p[0];
           Symbol* base = SyntaxFindSymbol(parser->syntax, base_name);
@@ -1682,6 +1696,21 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       if (symbol != NULL &&
           (StorageIs(symbol->storage, STO(typedef)) ||
            SymbolIsTagSymbol(symbol))) {
+        // `ClassTemplate<Args>::nested_typedef` whose typedef still names a
+        // parameter of ClassTemplate (`using type = T`) must stay deferred.
+        // Copying the primary's typedef makes T collide with the enclosing
+        // template's parameter 0 (`Spec<int... Xs> : MD<Base, Xs...>::type`).
+        TypeRecord* deferred_member = NULL;
+        if (StorageIs(symbol->storage, STO(typedef)) &&
+            symbol->type != NULL &&
+            TypeContainsTemplateParameter(symbol->type)) {
+          deferred_member =
+              TryBuildDependentTemplateIdMemberType(parser, &typedef_name);
+        }
+        if (deferred_member != NULL) {
+          type_record = deferred_member;
+          type |= type_record->type;
+        } else {
         symbol->flags.used = true;
         Vector* args = NULL;
         if (symbol->flags.is_template) {
@@ -1774,6 +1803,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           VectorDestructWithContents(args,
                                      (VectorElementDestructor)TemplateArgumentDelete,
                                      /*free_element=*/false);
+        }
         }
       } else if (parser->syntax->parsing_friend_type_specifier) {
         type_record = BuildDependentMemberTemplateTypename(
@@ -3506,6 +3536,14 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
       parser->stack.length != 0 ||
       !LexLookingAt(parser->lex, TOK(lparen))) {
     return false;
+  }
+  // `T Class<U>::member(expr);` for an already-declared static data member
+  // is a parenthesized initializer, even when `expr` begins with a type
+  // name (`Str::value` after a type parameter `Str`).
+  if (parser->cxx_member_definition != NULL &&
+      parser->cxx_member_definition->is_static &&
+      !parser->cxx_member_definition->is_member_function) {
+    return true;
   }
   LexCheckpoint checkpoint;
   LexCheckpointSave(parser->lex, &checkpoint);

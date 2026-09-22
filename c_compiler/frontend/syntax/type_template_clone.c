@@ -3878,6 +3878,37 @@ static void RebindClonedLocalIdentifierVisitor(ASTNode* node, void* data,
   }
 }
 
+/* True when a cloned `this->Base::member` names a member of some other
+ * class (typically a base).  Index-based rebinding would map
+ * `Storage::get` at slot 0 onto the derived class's user constructor at
+ * slot 0, and name lookup on the derived class would pick `Tuple::get`
+ * instead of the already-resolved base member. */
+static bool ClonedMemberAccessBelongsToForeignOwner(
+    TemplateFunctionBodyClone* clone, StructMemberASTNode* member_node) {
+  if (clone == NULL || member_node == NULL || member_node->member == NULL) {
+    return false;
+  }
+  if (member_node->owner_type != NULL &&
+      TypeIsStructOrUnion(member_node->owner_type) &&
+      member_node->owner_type->info.struct_info != NULL) {
+    Struct* owner = member_node->owner_type->info.struct_info;
+    if (owner != clone->from_owner && owner != clone->to_owner) {
+      return true;
+    }
+  }
+  if (member_node->member->symbol != NULL &&
+      member_node->member->symbol->type != NULL &&
+      TypeIsFunction(member_node->member->symbol->type)) {
+    Struct* fn_owner =
+        member_node->member->symbol->type->info.function.cxx_member_owner;
+    if (fn_owner != NULL && fn_owner != clone->from_owner &&
+        fn_owner != clone->to_owner) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void RebindClonedConcreteMemberAccess(
     TemplateFunctionBodyClone* clone, ASTNode* node) {
   if (node == NULL ||
@@ -3891,6 +3922,15 @@ static void RebindClonedConcreteMemberAccess(
   }
   StructMemberASTNode* member_node =
       (StructMemberASTNode*)access->right;
+  if (ClonedMemberAccessBelongsToForeignOwner(clone, member_node)) {
+    if (member_node->member->symbol != NULL) {
+      ASTNodeSetType(node, member_node->member->symbol->type);
+      if (!member_node->member->is_member_function) {
+        node->value_category = kValueCategoryLvalue;
+      }
+    }
+    return;
+  }
   TypeRecord* receiver_type =
       access->left != NULL ? access->left->type : NULL;
   if (receiver_type != NULL && node->op == AST_OP(arrow) &&
@@ -7722,62 +7762,6 @@ bool PendingTemplateInstantiationHasAsmName(const char* asm_name) {
   return CompilerPendingTemplateInstantiationHasAsmName(asm_name);
 }
 
-// True if a function template has a template parameter pack among its own
-// parameters (e.g. `template <class... Args>`).  Such member constructor
-// templates must defer member-initializer preamble insertion until per-call
-// instantiation, when the pack length is known (see the caller).
-static bool FunctionTemplateHasOwnParameterPack(TypeRecord* func) {
-  if (func == NULL || !TypeIsFunction(func)) {
-    return false;
-  }
-  for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
-    TemplateParameter* param =
-        func->info.function.template_parameters.value.p[i];
-    if (param != NULL && param->is_parameter_pack) {
-      return true;
-    }
-  }
-  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
-    Symbol* formal = func->info.function.prototype.value.p[i];
-    if (formal != NULL && formal->flags.is_parameter_pack) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Defer class-typed member initializers in a member constructor template until
-// the constructor's own arguments are known.  Their constructor overload set
-// can depend on those arguments even when the outer initializer node's cached
-// type no longer appears dependent after the enclosing class was substituted.
-static bool ConstructorHasClassMemberInitializer(
-    Symbol* template_definition, Symbol* symbol) {
-  if (template_definition == NULL || symbol == NULL || symbol->type == NULL ||
-      symbol->type->info.function.cxx_member_owner == NULL) {
-    return false;
-  }
-  CXXConstructorInitList* initializers =
-      FindTemplateConstructorInitializers(template_definition);
-  if (initializers == NULL) {
-    return false;
-  }
-  Struct* owner = symbol->type->info.function.cxx_member_owner;
-  for (size_t i = 0; i < initializers->deferred_initializers.length; i++) {
-    CXXDeferredConstructorInitializer* initializer =
-        initializers->deferred_initializers.value.p[i];
-    if (initializer == NULL || initializer->actuals == NULL) {
-      continue;
-    }
-    StructMember* member = FindStructMember(owner, &initializer->name);
-    if (member == NULL || member->symbol == NULL ||
-        !TypeIsStructOrUnion(member->symbol->type)) {
-      continue;
-    }
-    return true;
-  }
-  return false;
-}
-
 void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
                                                     Symbol* template_definition,
                                                     Symbol* symbol,
@@ -7886,23 +7870,17 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, args);
     PopFunctionInstantiationInProgress(&in_progress);
-    // A member function TEMPLATE constructor with a *parameter pack* must not
-    // have its member-initializer list inserted and analyzed now: with its own
-    // parameters still unbound, a member pack such as an in-place variadic
-    // constructor `v(static_cast<Args&&>(args)...)` mis-expands to a
-    // value-initialization `v()` that then fails for a type (e.g. a lambda)
-    // whose value-init is not viable here.  For those, the preamble is deferred
-    // to per-call instantiation (its init-list is re-keyed onto this class-level
-    // symbol so the per-call clone can rediscover it).  A non-pack member
-    // template constructor is inserted now, but any still-dependent initializer
-    // is left unanalyzed until the per-call body clone binds its parameters.
-    bool defer_constructor_preamble =
-        symbol->type->info.function.is_constructor &&
-        (FunctionTemplateHasOwnParameterPack(symbol->type) ||
-         ConstructorHasClassMemberInitializer(template_definition, symbol));
+    // A member function TEMPLATE constructor must not have its initializer
+    // list inserted and analyzed now: its own parameters are still unbound.
+    // Analyzing a delegating init such as `Span(v.begin(), v.size())` would
+    // pick the wrong overload and emit errors for a specialization that
+    // SFINAE (e.g. `EnableIfValueIsConst<LazyT>`) would exclude.  Pack
+    // member-inits (`v(static_cast<Args&&>(args)...)`) similarly mis-expand
+    // to `v()`.  Defer the preamble to per-call instantiation; re-key the
+    // init-list onto this class-level symbol so the per-call clone can find
+    // it.
     if (symbol->type->info.function.is_constructor &&
-        (symbol->type->info.function.template_parameter_count == 0 ||
-         !defer_constructor_preamble)) {
+        symbol->type->info.function.template_parameter_count == 0) {
       SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
                                                     symbol, args);
     } else if (symbol->type->info.function.is_constructor) {
@@ -7939,6 +7917,62 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
   }
   CompilerQueuePendingFunctionDefinition(symbol);
   VectorAppend(&compiler->declaration_asts, symbol->type->info.function.body);
+}
+
+// Members of a nested class template (`Outer<X>::ErrorMaker<res>::operator()`)
+// still number enclosing parameters first.  The specialization's own
+// `template_arguments` are only `[res]`; prepend `Outer`'s arguments so
+// `return res` substitutes instead of staying a placeholder.
+static Vector* PrefixEnclosingClassTemplateArguments(Struct* owner,
+                                                     Vector* own_args) {
+  if (owner == NULL || owner->lexical_parent == NULL) {
+    return NULL;
+  }
+  Vector* prefix = NewVector();
+  Vector parents;
+  VectorInit(&parents);
+  for (Struct* parent = owner->lexical_parent; parent != NULL;
+       parent = parent->lexical_parent) {
+    VectorAppend(&parents, parent);
+  }
+  for (size_t i = parents.length; i > 0; i--) {
+    Struct* parent = parents.value.p[i - 1];
+    if (parent == NULL || parent->tag_symbol == NULL ||
+        parent->tag_symbol->type == NULL ||
+        parent->tag_symbol->type->template_arguments == NULL) {
+      continue;
+    }
+    Vector* parent_args = parent->tag_symbol->type->template_arguments;
+    for (size_t j = 0; j < parent_args->length; j++) {
+      VectorAppend(prefix, TemplateArgumentCopy(parent_args->value.p[j]));
+    }
+  }
+  VectorDestruct(&parents);
+  if (prefix->length == 0) {
+    VectorDelete(prefix);
+    return NULL;
+  }
+  bool already_prefixed = own_args != NULL && own_args->length >= prefix->length;
+  if (already_prefixed) {
+    for (size_t i = 0; i < prefix->length; i++) {
+      if (!TemplateArgumentEqual(own_args->value.p[i], prefix->value.p[i])) {
+        already_prefixed = false;
+        break;
+      }
+    }
+  }
+  if (already_prefixed) {
+    VectorDeleteWithContents(prefix,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  if (own_args != NULL) {
+    for (size_t i = 0; i < own_args->length; i++) {
+      VectorAppend(prefix, TemplateArgumentCopy(own_args->value.p[i]));
+    }
+  }
+  return prefix;
 }
 
 void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) {
@@ -8010,6 +8044,11 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
   if (template_arguments == NULL) {
     return;
   }
+  Vector* combined_args =
+      PrefixEnclosingClassTemplateArguments(owner, template_arguments);
+  if (combined_args != NULL) {
+    template_arguments = combined_args;
+  }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Symbol* template_definition = symbol->value.func_defn;
@@ -8032,6 +8071,11 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
       /*allow_lazy=*/false);
   TypeParserPopTemplateSubstitution(&substitution);
   TypeParserDestruct(&parser);
+  if (combined_args != NULL) {
+    VectorDeleteWithContents(combined_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
 }
 
 /* Build the concrete function type for a function-template instantiation:
@@ -8146,6 +8190,12 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
     compiler->current_class_access_context = clone.to_owner;
   }
   AddOwnerMemberSymbolMappings(&clone);
+  // Mem-initializers are analyzed here, sometimes while the caller is still
+  // ranking an implicit conversion into this constructor.  That rank forbids a
+  // second user-defined conversion; the mem-initializer is a separate
+  // full-expression and must be allowed its own (`const char*` to
+  // `string_view` for `UntypedFormatSpec`).
+  bool saved_udc = SemanticSuspendUserDefinedConversionRank();
   if (inserted_count > body->length) {
     inserted_count = body->length;
   }
@@ -8173,6 +8223,7 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
         stmt, ReanalyzeClonedConcreteMemberCall, NULL);
     body->value.p[i] = stmt;
   }
+  SemanticResumeUserDefinedConversionRank(saved_udc);
   compiler->current_function = saved_function;
   TypeParserPopTemplateSubstitution(&substitution);
   compiler->current_class_access_context = saved_access_context;

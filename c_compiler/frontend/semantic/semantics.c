@@ -1058,6 +1058,51 @@ static ASTNode* NewRawPointerAdjustment(ASTNode* from, TypeRecord* to,
   return converted_node;
 }
 
+static Struct* CurrentConversionAccessClass(void) {
+  if (compiler->current_class_access_context != NULL) {
+    return compiler->current_class_access_context;
+  }
+  TypeRecord* current = compiler->current_function;
+  if (current == NULL || !TypeIsFunction(current)) {
+    return NULL;
+  }
+  if (current->info.function.cxx_member_owner != NULL) {
+    return current->info.function.cxx_member_owner;
+  }
+  if (current->info.function.prototype.length == 0) {
+    return NULL;
+  }
+  Symbol* this_sym = current->info.function.prototype.value.p[0];
+  if (this_sym == NULL || this_sym->type == NULL ||
+      !StringEqual(&this_sym->name, "this") || this_sym->type->next == NULL ||
+      !TypeIsStructOrUnion(this_sym->type->next)) {
+    return NULL;
+  }
+  return this_sym->type->next->info.struct_info;
+}
+
+static bool CurrentClassCanConvertToInaccessibleBase(TypeRecord* from_class) {
+  if (from_class == NULL || !TypeIsStructOrUnion(from_class) ||
+      from_class->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* current = CurrentConversionAccessClass();
+  if (current == NULL) {
+    return false;
+  }
+  Struct* from_struct = from_class->info.struct_info;
+  if (current == from_struct) {
+    return true;
+  }
+  for (Struct* enclosing = current->lexical_parent; enclosing != NULL;
+       enclosing = enclosing->lexical_parent) {
+    if (enclosing == from_struct) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool TryConvertDerivedPointer(ASTNode* from, TypeRecord* to) {
   if (from == NULL || to == NULL || !TypeIsPointer(from->type) || !TypeIsPointer(to) ||
       from->type->next == NULL || to->next == NULL) {
@@ -1067,7 +1112,15 @@ static bool TryConvertDerivedPointer(ASTNode* from, TypeRecord* to) {
   CXXBaseAdjustment adjustment;
   if (!TypeBaseAdjustment(from->type->next, to->next, /*public_only=*/true,
                           &adjustment)) {
-    return false;
+    // A member of `from` (or a nested class of `from`) may convert `from*` to
+    // a private or protected base.  Constructor mem-inits of
+    // `class D : private B` rely on this after template-body re-analysis
+    // re-types the receiver as `D*`.
+    if (!CurrentClassCanConvertToInaccessibleBase(from->type->next) ||
+        !TypeBaseAdjustment(from->type->next, to->next, /*public_only=*/false,
+                            &adjustment)) {
+      return false;
+    }
   }
   if (from->type->next->info.struct_info == to->next->info.struct_info) {
     return false;

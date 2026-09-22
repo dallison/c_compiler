@@ -4254,8 +4254,11 @@ static ASTNode* NewCXXBaseSpecialMemberCall(Syntax* syntax,
     // Member lookup must start from the base subobject even when no address
     // adjustment is required. Virtual-base special-member calls retain the
     // complete-object receiver used by their hidden construction/destruction
-    // protocol.
-    receiver->flags |= kASTAnalyzed;
+    // protocol.  Keep the forced type through template-body clone: clearing
+    // kASTAnalyzed would re-type `this` as the derived class, and a
+    // `class D : private B` mem-init would then fail to convert `D*` to `B*`
+    // (public-only derived-to-base) and select only `B()` ("need 1, got N").
+    receiver->flags |= kASTAnalyzed | kASTForcedTypeAdjustment;
     ASTNodeSetType(receiver, base_pointer);
   } else if (base->byte_offset != 0) {
     ASTNode* offset =
@@ -4951,12 +4954,15 @@ static StructMember* FindCXXDirectDataMemberByName(Struct* owner,
   if (owner == NULL || name == NULL) {
     return NULL;
   }
-  for (size_t i = 0; i < owner->members.length; i++) {
-    StructMember* member = owner->members.value.p[i];
-    if (member->symbol != NULL && StringEqual(&member->symbol->name, name) &&
-        !member->is_static && !member->is_member_function) {
-      return member;
-    }
+  // Anonymous union/struct members are injected into the lookup tables, not
+  // the layout `members` vector.  Mem-inits such as `Rep() : data{...}` and
+  // `Rep(p) : as_tree(p)` name those injected members.
+  String name_str;
+  StringInit(&name_str, name);
+  StructMember* member = FindStructMember(owner, &name_str);
+  StringDestruct(&name_str);
+  if (member != NULL && !member->is_static && !member->is_member_function) {
+    return member;
   }
   return NULL;
 }

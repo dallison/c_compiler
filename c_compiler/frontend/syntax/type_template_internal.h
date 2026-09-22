@@ -111,6 +111,8 @@ TypeRecord* InstantiateAliasClassTemplate(TypeParser* parser, Symbol* alias,
                                           Vector* args);
 bool CXXAliasTemplatePatternNamesClassTemplate(Symbol* alias);
 Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals);
+Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
+                                    Vector* alias_args);
 void SetCXXAliasTemplatePlaceholderOrigin(Symbol* alias, TypeRecord* type);
 
 TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,

@@ -37,6 +37,21 @@ static void InjectInstantiatedAnonymousMembers(TypeParser* parser,
                                                Struct* str);
 static bool StructHasBitFieldMembers(Struct* str);
 
+static void CopySymbolAliasTemplate(Symbol* dest, Symbol* source) {
+  if (dest == NULL || source == NULL || source->alias_template == NULL) {
+    return;
+  }
+  dest->alias_template = malloc(sizeof(AliasTemplate));
+  VectorInit(&dest->alias_template->parameters);
+  dest->alias_template->ctad_names_template_template_parameter =
+      source->alias_template->ctad_names_template_template_parameter;
+  for (size_t p = 0; p < source->alias_template->parameters.length; p++) {
+    VectorAppend(&dest->alias_template->parameters,
+                 TemplateParameterCopy(
+                     source->alias_template->parameters.value.p[p]));
+  }
+}
+
 // When set, a parameter appearing only in a bare `T::member` non-deduced
 // context is left unbound during argument deduction (so a default template
 // argument can supply it) rather than deduced from the argument via this
@@ -433,6 +448,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         NewSymbol(member->symbol->name.value, member_type, member->symbol->storage);
     member_symbol->location = member->symbol->location;
     member_symbol->flags = member->symbol->flags;
+    CopySymbolAliasTemplate(member_symbol, member->symbol);
     member_symbol->value = member->symbol->value;
     member_symbol->dependent_value_template_parameter_index =
         member->symbol->dependent_value_template_parameter_index;
@@ -1384,6 +1400,32 @@ ASTNode* TypeInstantiateVariableTemplateInitializer(Syntax* syntax,
   return concrete;
 }
 
+static void ParserApplyMemberOwnerSubstitution(TypeParser* parser,
+                                               TypeRecord* func,
+                                               Struct** saved_source,
+                                               Struct** saved_target) {
+  if (parser == NULL || saved_source == NULL || saved_target == NULL) {
+    return;
+  }
+  *saved_source = parser->template_substitution_source;
+  *saved_target = parser->template_substitution_target;
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL) {
+    return;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  parser->template_substitution_target = owner;
+  if (owner->tag_symbol != NULL && owner->tag_symbol->type != NULL &&
+      owner->tag_symbol->type->template_origin != NULL &&
+      owner->tag_symbol->type->template_origin->type != NULL &&
+      TypeIsStructOrUnion(owner->tag_symbol->type->template_origin->type)) {
+    parser->template_substitution_source =
+        owner->tag_symbol->type->template_origin->type->info.struct_info;
+  } else {
+    parser->template_substitution_source = owner;
+  }
+}
+
 static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
                                                    TypeRecord* from,
                                                    Vector* args) {
@@ -1476,6 +1518,10 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
       from->info.function.coroutine_suspend_count;
   func->info.function.virtual_index = from->info.function.virtual_index;
   func->info.function.cxx_member_owner = from->info.function.cxx_member_owner;
+  Struct* saved_subst_source = NULL;
+  Struct* saved_subst_target = NULL;
+  ParserApplyMemberOwnerSubstitution(parser, from, &saved_subst_source,
+                                     &saved_subst_target);
   TypeRecord* return_type = SubstituteTemplateParameters(parser, from->next, args);
   TypeRecordChain(func, return_type);
 
@@ -1499,6 +1545,10 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   for (size_t i = 0; i < func->info.function.prototype.length; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
     formal->value.arg_number = (int32_t)i;
+  }
+  if (parser != NULL) {
+    parser->template_substitution_source = saved_subst_source;
+    parser->template_substitution_target = saved_subst_target;
   }
   TypeCacheTemplateParameterSummary(func);
   return func;
@@ -1588,6 +1638,30 @@ static Vector* FunctionTemplateBodyArguments(Symbol* template_definition,
       template_definition->type->info.function.template_parameter_base;
   size_t own_count =
       template_definition->type->info.function.template_parameters.length;
+  // The body lives on the primary member template, whose parameters are still
+  // numbered after the enclosing class.  Instantiating `get<0>` supplies only
+  // `[0]`; without the class arguments (`[long, 0]`) `StorageT<I>` keeps `I`
+  // unbound (`Storage<long, I0, StorageTag, I0>`) and `this` cannot convert
+  // to that incomplete Storage base.
+  if (enclosing_count > 0 && member_args != NULL &&
+      member_args->length == own_count && symbol->type != NULL &&
+      TypeIsFunction(symbol->type) &&
+      symbol->type->info.function.cxx_member_owner != NULL) {
+    Struct* owner = symbol->type->info.function.cxx_member_owner;
+    if (owner->tag_symbol != NULL && owner->tag_symbol->type != NULL &&
+        owner->tag_symbol->type->template_arguments != NULL &&
+        owner->tag_symbol->type->template_arguments->length > 0) {
+      Vector* class_args = owner->tag_symbol->type->template_arguments;
+      Vector* combined = NewVector();
+      for (size_t i = 0; i < class_args->length; i++) {
+        VectorAppend(combined, TemplateArgumentCopy(class_args->value.p[i]));
+      }
+      for (size_t i = 0; i < member_args->length; i++) {
+        VectorAppend(combined, TemplateArgumentCopy(member_args->value.p[i]));
+      }
+      return combined;
+    }
+  }
   for (size_t i = 0;
        enclosing_count > 0 &&
        i < template_definition->type->info.function.prototype.length;
@@ -3050,6 +3124,45 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
   return false;
 }
 
+static TypeRecord* TypeSkipReferencesForDeduction(TypeRecord* type) {
+  while (type != NULL && TypeIsReference(type)) {
+    type = type->next;
+  }
+  return type;
+}
+
+// [temp.deduct.call]: when P is a class-template-id (possibly behind
+// references) and A is not a specialization of that template — nor derived
+// from one — parameters mentioned only in P are a non-deduced context.
+// `Format(const Spec<Args...>&, const Args&...)` called as `Format("%08x", 1u)`
+// must take Args from the later pack, then convert the literal via Spec's ctor.
+// A failed match against the *same* template is a real deduction failure
+// (conflicting bindings) and is not treated as non-deduced.
+static bool FormalClassTemplateIdIsNonDeducedAgainst(TypeRecord* formal,
+                                                     TypeRecord* actual) {
+  formal = TypeSkipReferencesForDeduction(formal);
+  actual = TypeSkipReferencesForDeduction(actual);
+  if (formal == NULL || actual == NULL) {
+    return false;
+  }
+  Symbol* origin = ClassTemplateOriginOf(formal);
+  if (origin == NULL && TypeSpecializationTemplateArguments(formal) == NULL) {
+    return false;
+  }
+  if (origin != NULL) {
+    if (ClassTemplateOriginMatches(origin, ClassTemplateOriginOf(actual))) {
+      return false;
+    }
+    if (FindTemplateBaseForDeduction(actual, origin) != NULL) {
+      return false;
+    }
+    if (CXXExplicitSpecializationMatchesPrimary(actual, origin)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /* Deduce template arguments for one (non-pack) call argument expression against
  * formal parameter type `formal`, applying the forwarding-reference rule: a
  * `T&&` parameter binding an lvalue deduces `T&` (reference collapsing). */
@@ -3172,11 +3285,13 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
     bool ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
                                                  formal, decayed);
     TypeRecordDelete(decayed);
-    return ok || non_deduced_member;
+    return ok || non_deduced_member ||
+           FormalClassTemplateIdIsNonDeducedAgainst(formal, actual->type);
   }
   bool ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, formal,
                                                actual->type);
-  return ok || non_deduced_member;
+  return ok || non_deduced_member ||
+         FormalClassTemplateIdIsNonDeducedAgainst(formal, actual->type);
 }
 
 /* True for the members that contribute to structural template-argument
@@ -7090,6 +7205,43 @@ static bool ClassTemplateArgumentsAreStillDependent(Vector* args) {
   return false;
 }
 
+// `Outer<X>::ErrorMaker<res>` members number enclosing parameters first.
+// The nested specialization only carries `[res]`; prepend `Outer`'s arguments
+// so `return res` substitutes.  Returns a new vector the caller must delete,
+// or NULL when `own_args` is already complete.
+static Vector* PrefixEnclosingClassTemplateArguments(Struct* enclosing,
+                                                     Vector* own_args) {
+  if (enclosing == NULL || enclosing->tag_symbol == NULL ||
+      enclosing->tag_symbol->type == NULL ||
+      enclosing->tag_symbol->type->template_arguments == NULL ||
+      enclosing->tag_symbol->type->template_arguments->length == 0) {
+    return NULL;
+  }
+  Vector* parent_args = enclosing->tag_symbol->type->template_arguments;
+  bool already_prefixed = own_args != NULL && own_args->length >= parent_args->length;
+  if (already_prefixed) {
+    for (size_t i = 0; i < parent_args->length; i++) {
+      if (!TemplateArgumentEqual(own_args->value.p[i], parent_args->value.p[i])) {
+        already_prefixed = false;
+        break;
+      }
+    }
+  }
+  if (already_prefixed) {
+    return NULL;
+  }
+  Vector* combined = NewVector();
+  for (size_t i = 0; i < parent_args->length; i++) {
+    VectorAppend(combined, TemplateArgumentCopy(parent_args->value.p[i]));
+  }
+  if (own_args != NULL) {
+    for (size_t i = 0; i < own_args->length; i++) {
+      VectorAppend(combined, TemplateArgumentCopy(own_args->value.p[i]));
+    }
+  }
+  return combined;
+}
+
 /* A substituted base that is not yet a class because it is still an alias-id
  * or a deferred `Trait<Args>::member` type.  Instantiating the enclosing
  * class would diagnose "base class must be a class" for dependent input. */
@@ -7321,6 +7473,17 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   Struct* str = NewStruct(source_struct->is_union);
   str->is_class = source_struct->is_class;
   str->lexical_parent = source_struct->lexical_parent;
+  // Only remap the parent when this specialization is a nested class of the
+  // class template currently being instantiated.  Applying the enclosing
+  // target to every class materialized during that instantiation would make
+  // `InlinedVector` (and other unrelated templates) look nested in
+  // `FormatSpecTemplate` and prefix the wrong arguments onto their members.
+  if (parser->enclosing_template_substitution_target != NULL &&
+      source_struct->lexical_parent != NULL &&
+      source_struct->lexical_parent ==
+          parser->enclosing_template_substitution_source) {
+    str->lexical_parent = parser->enclosing_template_substitution_target;
+  }
   str->packed = source_struct->packed;
   str->explicit_alignment = source_struct->explicit_alignment;
   str->pack = source_struct->pack;
@@ -7524,6 +7687,12 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
           NewSymbol(member->symbol->name.value, nested_type, STO(typedef));
       nested_symbol->flags = member->symbol->flags;
       nested_symbol->location = member->symbol->location;
+      // A member alias template (`template<int I> using StorageT = ...`)
+      // keeps its own parameter list after the enclosing class is
+      // instantiated.  Dropping it makes `StorageT<0>` complete against the
+      // pattern (`Storage<ElemT<I>, I, Tag>`) and instantiate Storage with
+      // `I` in the element-type slot.
+      CopySymbolAliasTemplate(nested_symbol, member->symbol);
       StructMember* nested_member = NewStructMember(nested_symbol);
       nested_member->access = member->access;
       AddStructMember(parser, str, nested_member);
@@ -7549,6 +7718,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
         NewSymbol(member->symbol->name.value, member_type, member->symbol->storage);
     member_symbol->location = member->symbol->location;
     member_symbol->flags = member->symbol->flags;
+    CopySymbolAliasTemplate(member_symbol, member->symbol);
     member_symbol->value = member->symbol->value;
     member_symbol->dependent_value_template_parameter_index =
         member->symbol->dependent_value_template_parameter_index;
@@ -7644,12 +7814,32 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   // Second pass: with the class fully formed (all members, layout, and implicit
   // special members in place), clone the deferred member function bodies so a
   // body may reference any other member regardless of declaration order.
+  Vector* member_body_args = source_args;
+  Struct* enclosing_for_args = NULL;
+  if (parser->enclosing_template_substitution_target != NULL &&
+      source_struct->lexical_parent ==
+          parser->enclosing_template_substitution_source) {
+    enclosing_for_args = parser->enclosing_template_substitution_target;
+  } else if (str->lexical_parent != NULL && !str->lexical_parent->is_template) {
+    enclosing_for_args = str->lexical_parent;
+  }
+  Vector* prefixed_member_body_args =
+      PrefixEnclosingClassTemplateArguments(enclosing_for_args, source_args);
+  if (prefixed_member_body_args != NULL) {
+    member_body_args = prefixed_member_body_args;
+  }
   for (size_t i = 0; i < pending_member_bodies.length; i++) {
     PendingMemberBody* pmb = pending_member_bodies.value.p[i];
     CloneInstantiatedMemberFunctionBody(parser, str, pmb->symbol,
                                         pmb->template_definition,
-                                        pmb->substitution_source, source_args);
+                                        pmb->substitution_source,
+                                        member_body_args);
     free(pmb);
+  }
+  if (prefixed_member_body_args != NULL) {
+    VectorDeleteWithContents(prefixed_member_body_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
   }
   VectorDestruct(&pending_member_bodies);
   InstantiateTemplateFriendFunctions(parser, str, source_struct, source_args);
@@ -8046,6 +8236,27 @@ Symbol* TypeInstantiateFunctionTemplateWithCompletedArguments(
   return symbol;
 }
 
+/* True if a pattern argument is a bare template parameter (`T`, `I`,
+ * `Ts...`) rather than a computed type (`ElemT<I>`, `Tag<Ts...>`).  A
+ * forwarding alias (`using Vec = vector<T>`) uses only bare parameters;
+ * `using StorageT = Storage<ElemT<I>, I, Tag>` does not. */
+static bool AliasPatternArgumentIsBareParameter(TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->kind == kTemplateParameterNonType) {
+    return arg->template_parameter_index >= 0 && arg->dependent_expr == NULL &&
+           (arg->type == NULL || arg->type->template_origin == NULL);
+  }
+  if (arg->kind == kTemplateParameterTemplate) {
+    return arg->template_parameter_index >= 0;
+  }
+  if (arg->kind != kTemplateParameterType || arg->type == NULL) {
+    return false;
+  }
+  return TypeIsTemplateParameterPlaceholder(arg->type, NULL);
+}
+
 /* True if `alias` is an alias template whose right-hand side is itself a class
  * template specialization (e.g. `using X = vector<T>;`), as opposed to a plain
  * type alias. Such aliases participate in class-template instantiation/CTAD. */
@@ -8076,6 +8287,17 @@ bool CXXAliasTemplatePatternNamesClassTemplate(Symbol* alias) {
           ->template_parameter_count;
   if (alias->type->template_arguments->length != expected) {
     return false;
+  }
+  // `using StorageT = Storage<ElemT<I>, I, Tag<Ts...>>` has the same arity
+  // as Storage, but the arguments are computed.  Treating it as a
+  // forwarding alias instantiates Storage with only `I` (`StorageT<0>` →
+  // `Storage<0, …>`).  That accidentally works when the element type is
+  // `int` (I binds as the first type argument) and fails for `long`.
+  for (size_t i = 0; i < alias->type->template_arguments->length; i++) {
+    if (!AliasPatternArgumentIsBareParameter(
+            alias->type->template_arguments->value.p[i])) {
+      return false;
+    }
   }
   return TemplateArgumentVectorContainsTemplateParameter(
       alias->type->template_arguments);
@@ -8161,8 +8383,8 @@ TypeRecord* InstantiateAliasClassTemplate(TypeParser* parser,
  * concrete enclosing-class arguments so the pattern sees `[T, I]`.  Returns a
  * new vector the caller must delete, or NULL when `alias_args` is already the
  * full list (or `alias` is not a member of the active instantiation). */
-static Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
-                                           Vector* alias_args) {
+Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
+                                    Vector* alias_args) {
   if (parser == NULL || alias == NULL || alias_args == NULL ||
       !StorageIs(alias->storage, STO(typedef))) {
     return NULL;
@@ -8192,22 +8414,51 @@ static Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
       }
     }
   }
-  bool is_member =
-      (source != NULL && FindStructMember(source, &alias->name) != NULL) ||
-      (target != NULL && FindStructMember(target, &alias->name) != NULL);
-  if (!is_member && target != NULL && alias->type != NULL &&
-      alias->type->template_arguments != NULL &&
-      alias->alias_template != NULL) {
-    // Pattern `Storage<T, I>` names class parameter 0 plus alias parameter 1.
-    // Treat that as a member alias even if the instantiated class has not
-    // cloned the typedef into its member list yet.
-    size_t alias_params = alias->alias_template->parameters.length;
-    if (alias->type->template_arguments->length > alias_params) {
-      is_member = true;
-    }
+  // A namespace-scope alias (`internal_compressed_tuple::ElemT`) can share
+  // a name with a member alias.  FindStructMember is name-only, so it would
+  // treat the namespace alias as a member and prefix the class arguments
+  // (`ElemT<CompressedTuple, I>` → `Elem<long, …>`).
+  bool is_member = alias->namespace_ == NULL &&
+      ((source != NULL && FindStructMember(source, &alias->name) != NULL) ||
+       (target != NULL && FindStructMember(target, &alias->name) != NULL));
+  // Do not infer membership from pattern arity.  `std::bool_constant<B>` is
+  // `integral_constant<bool, B>` (two pattern arguments, one alias parameter)
+  // and is a namespace-scope alias.  Treating it as a member of the class
+  // currently being instantiated prefixes that class's arguments and drops
+  // inherited `::value` (`is_convertible<A,B> : __is_convertible<A,B>`).
+  if (!is_member && alias->namespace_ != NULL) {
+    return NULL;
   }
   if (!is_member) {
-    return NULL;
+    // Class-body scope aliases are not struct members, so name lookup on
+    // `source`/`target` fails.  Member alias parameters are numbered after
+    // the enclosing class parameters; that index offset is enough to prefix.
+    if (target == NULL) {
+      target = parser->template_substitution_target;
+      if (target == NULL) {
+        target = parser->enclosing_template_substitution_target;
+      }
+      if (target == NULL && compiler != NULL &&
+          compiler->current_function != NULL &&
+          TypeIsFunction(compiler->current_function)) {
+        target = compiler->current_function->info.function.cxx_member_owner;
+      }
+    }
+    if (target != NULL && alias->alias_template != NULL &&
+        alias->alias_template->parameters.length > 0 &&
+        target->tag_symbol != NULL && target->tag_symbol->type != NULL &&
+        target->tag_symbol->type->template_arguments != NULL &&
+        target->tag_symbol->type->template_arguments->length > 0) {
+      TemplateParameter* first =
+          alias->alias_template->parameters.value.p[0];
+      size_t class_n = target->tag_symbol->type->template_arguments->length;
+      if (first != NULL && first->index == (int)class_n) {
+        is_member = true;
+      }
+    }
+    if (!is_member) {
+      return NULL;
+    }
   }
   if (target == NULL || target->tag_symbol == NULL ||
       target->tag_symbol->type == NULL ||
@@ -8219,6 +8470,30 @@ static Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
   size_t alias_param_count =
       alias->alias_template != NULL ? alias->alias_template->parameters.length
                                     : 0;
+  // After the enclosing class is instantiated, a member alias pattern may
+  // already have had class parameters substituted and its own parameters
+  // rebased to zero (`Storage<ElemT<I0>, I0, StorageTag<long>>`).  Prefixing
+  // class arguments then rebinds `I` to the class pack.
+  if (alias_args->length == alias_param_count && alias->type != NULL) {
+    int max_index = -1;
+    if (alias->type->template_arguments != NULL) {
+      for (size_t i = 0; i < alias->type->template_arguments->length; i++) {
+        MaxTemplateParameterIndexInArgument(
+            alias->type->template_arguments->value.p[i], &max_index);
+      }
+    }
+    if (max_index >= 0 && (size_t)max_index < alias_args->length) {
+      return NULL;
+    }
+    if (alias->alias_template != NULL &&
+        alias->alias_template->parameters.length > 0) {
+      TemplateParameter* first =
+          alias->alias_template->parameters.value.p[0];
+      if (first != NULL && first->index == 0) {
+        return NULL;
+      }
+    }
+  }
   if (alias_param_count > 0 &&
       alias_args->length == class_args->length + alias_param_count) {
     return NULL;

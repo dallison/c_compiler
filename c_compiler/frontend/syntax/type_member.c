@@ -349,6 +349,26 @@ static void ParseCXXMemberUsingEnumDeclaration(TypeParser* parser,
   FullyQualifiedIdentifierDestruct(&name);
 }
 
+static void AttachMemberAliasTemplate(TypeParser* parser, Symbol* alias) {
+  if (parser == NULL || parser->syntax == NULL || alias == NULL) {
+    return;
+  }
+  Syntax* syntax = parser->syntax;
+  if (alias->alias_template == NULL) {
+    alias->alias_template = malloc(sizeof(AliasTemplate));
+    VectorInit(&alias->alias_template->parameters);
+    alias->alias_template->ctad_names_template_template_parameter = false;
+  }
+  if (syntax->current_template_parameters == NULL) {
+    return;
+  }
+  for (size_t p = 0; p < syntax->current_template_parameters->length; p++) {
+    VectorAppend(&alias->alias_template->parameters,
+                 TemplateParameterCopy(
+                     syntax->current_template_parameters->value.p[p]));
+  }
+}
+
 static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
                                     const char* name, TypeRecord* type,
                                     CXXAccess access,
@@ -368,6 +388,9 @@ static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
   Symbol* alias = NewSymbol(name, type, STO(typedef));
   alias->location = location;
   alias->flags.is_template = is_template_alias;
+  if (is_template_alias) {
+    AttachMemberAliasTemplate(parser, alias);
+  }
   StructMember* member = NewStructMember(alias);
   member->access = access;
   AddStructMember(parser, owner, member);
@@ -380,6 +403,9 @@ static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
   Symbol* scope_alias = NewSymbol(name, type, STO(typedef));
   scope_alias->location = location;
   scope_alias->flags.is_template = is_template_alias;
+  if (is_template_alias) {
+    AttachMemberAliasTemplate(parser, scope_alias);
+  }
   LocalSymbolTable* saved_scope = parser->syntax->local_symbol_stack;
   if (is_template_alias && saved_scope != NULL && saved_scope->prev != NULL) {
     parser->syntax->local_symbol_stack = saved_scope->prev;

@@ -23,6 +23,14 @@ int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right);
 // Call before a use that bakes the function's signature into another type.
 void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func);
 
+// A function definition is its own full-expression context.  Implicit
+// conversion ranking sets a flag that allows only one user-defined conversion;
+// analyzing a constructor body under that flag rejects a mem-initializer such
+// as `Base(s)` when `Base` takes `string_view` and `s` is `const char*`.
+// Suspend the flag for the definition, then resume the caller's rank.
+bool SemanticSuspendUserDefinedConversionRank(void);
+void SemanticResumeUserDefinedConversionRank(bool saved);
+
 // Resolve a call whose callee names an overloaded function template, once its
 // arguments are concrete (used when instantiating a cloned template body).
 // Returns the best concrete instantiation, or NULL if none is viable.

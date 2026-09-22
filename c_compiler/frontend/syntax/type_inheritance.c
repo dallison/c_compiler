@@ -162,8 +162,10 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
       base_type = TypeParserParseType(parser, true);
     }
     if (!parser->syntax->parsing_template_declaration &&
-        parser->syntax->current_template_parameter_count == 0 &&
-        !TypeContainsTemplateParameter(base_type)) {
+        parser->syntax->current_template_parameter_count == 0) {
+      // `Owner<Args>::type` still reports as template-dependent because of
+      // `dependent_member_name`, even when Args are concrete.  Materialize
+      // so a base such as `MakeDependent<Base, Ns...>::type` becomes Base.
       TypeRecord* materialized_base =
           TypeMaterializeClassTemplateSpecialization(parser->syntax, base_type);
       if (materialized_base != base_type) {

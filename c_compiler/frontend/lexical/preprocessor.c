@@ -1358,6 +1358,16 @@ static void InitTokenExpansions(Vector* map, String* tokens,
   }
 }
 
+static void AppendTokenExpansionSlots(String* tokens, size_t old_token_count) {
+  if (active_token_expansions == NULL || tokens == NULL) {
+    return;
+  }
+  size_t new_token_count = CountPreprocessingTokens(tokens);
+  for (size_t i = old_token_count; i < new_token_count; i++) {
+    VectorAppend(active_token_expansions, NULL);
+  }
+}
+
 static void SpliceTokenExpansions(String* tokens, size_t byte_start,
                                   size_t byte_end, String* new_tokens,
                                   Vector* new_map, MacroExpansion* fill) {
@@ -1366,7 +1376,16 @@ static void SpliceTokenExpansions(String* tokens, size_t byte_start,
   }
   size_t first = TokenOrdinalAt(tokens, byte_start);
   size_t last = TokenOrdinalAt(tokens, byte_end);
+  if (last < first) {
+    last = first;
+  }
+  if (first > active_token_expansions->length) {
+    first = active_token_expansions->length;
+  }
   size_t old_count = last - first;
+  if (old_count > active_token_expansions->length - first) {
+    old_count = active_token_expansions->length - first;
+  }
   size_t new_count =
       new_map != NULL ? new_map->length : CountPreprocessingTokens(new_tokens);
   for (size_t i = 0; i < old_count; i++) {
@@ -4450,9 +4469,14 @@ static void CollectActualArguments(Preprocessor* p,
         // another line when we encounter the end of line.
         String newline = {0};
         SourceReadLine(p->lex->source, &newline);
-        // Append newly read chars to the current tokens.
+        // Append newly read chars to the current tokens.  The expansion
+        // map must grow with those tokens or a later splice of the
+        // invocation (common for multi-line Abseil macros) indexes past
+        // the map and aborts in VectorDeleteElement.
         size_t old_length = tokens->length;
+        size_t old_token_count = CountPreprocessingTokens(tokens);
         Tokenize(p, &newline, tokens, 0, false, p->lex->assembler_mode, false);
+        AppendTokenExpansionSlots(tokens, old_token_count);
         ti->next = FindNextTokenIndex(ti);
         StringDestruct(&newline);
         // A comment-only or blank continuation produces no tokens.  That is
@@ -5154,6 +5178,8 @@ static void ProcessHasEmbedOperator(Preprocessor* p, TokenIterator* ti) {
   Tokenize(p, &replacement_text, &replacement_tokens, 0, true,
            p->lex->assembler_mode, false);
   StringDestruct(&replacement_text);
+  SpliceTokenExpansions(ti->input, start, end, &replacement_tokens, NULL,
+                        NULL);
   StringReplaceString(ti->input, start, end - start, &replacement_tokens);
   ti->prev = original_prev;
   ti->curr = start;
