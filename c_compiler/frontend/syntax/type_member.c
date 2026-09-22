@@ -1081,6 +1081,46 @@ StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
   return NULL;
 }
 
+// SFINAE overloads that share a call signature still differ when their
+// template-parameter lists do: `typename = enable_if_t<!C>` vs
+// `enable_if_t<C, int> = 0` (Abseil Span view vs non-view constructors).
+static bool MemberFunctionTemplateParameterListsDiffer(Symbol* left,
+                                                       Symbol* right) {
+  if (left == NULL || right == NULL || left->type == NULL ||
+      right->type == NULL || !TypeIsFunction(left->type) ||
+      !TypeIsFunction(right->type)) {
+    return false;
+  }
+  Vector* left_params = &left->type->info.function.template_parameters;
+  Vector* right_params = &right->type->info.function.template_parameters;
+  if (left_params->length != right_params->length) {
+    return left_params->length != 0 && right_params->length != 0;
+  }
+  for (size_t i = 0; i < left_params->length; i++) {
+    TemplateParameter* left_param = left_params->value.p[i];
+    TemplateParameter* right_param = right_params->value.p[i];
+    if (left_param == NULL || right_param == NULL) {
+      continue;
+    }
+    if (left_param->kind != right_param->kind ||
+        left_param->is_parameter_pack != right_param->is_parameter_pack) {
+      return true;
+    }
+    if (left_param->kind == kTemplateParameterNonType &&
+        !TypeEqual(left_param->type, right_param->type)) {
+      return true;
+    }
+    if (left_param->kind == kTemplateParameterType &&
+        ((left_param->default_type != NULL) !=
+             (right_param->default_type != NULL) ||
+         (left_param->default_type != NULL &&
+          !TypeEqual(left_param->default_type, right_param->default_type)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Like FindStructMemberOverload, but for functions that share the same
 // signature it additionally requires their associated constraints
 // (requires-clauses / constrained template parameters) to be equivalent before
@@ -1105,6 +1145,10 @@ static StructMember* FindConstrainedMemberOverload(StructMember* first,
       continue;
     }
     if (!TypeEqual(overload->symbol->type, candidate->type)) {
+      continue;
+    }
+    if (MemberFunctionTemplateParameterListsDiffer(overload->symbol,
+                                                   candidate)) {
       continue;
     }
     if (!ConceptsFunctionTemplateConstraintsEquivalent(overload->symbol,
@@ -1355,6 +1399,54 @@ static bool SkipInlineMemberFunctionBody(TypeParser* parser) {
     LexNextToken(parser->lex);
   }
   return true;
+}
+
+static void SkipBalanced(TypeParser* parser, Token open, Token close) {
+  if (!LexMatch(parser->lex, open)) {
+    return;
+  }
+  int depth = 1;
+  while (depth > 0 && !LexEof(parser->lex)) {
+    if (LexLookingAt(parser->lex, open)) {
+      depth++;
+    } else if (LexLookingAt(parser->lex, close)) {
+      depth--;
+    }
+    LexNextToken(parser->lex);
+  }
+}
+
+// Skip a constructor mem-initializer list (`: a(x), b{y}`) so the following
+// function body can be captured with it and re-parsed in complete-class
+// context.  Brace initializers are consumed here; the function body's `{` is
+// left unconsumed.
+static void SkipCXXConstructorInitializerList(TypeParser* parser) {
+  if (!LexMatch(parser->lex, TOK(colon))) {
+    return;
+  }
+  while (!LexEof(parser->lex) && !LexLookingAt(parser->lex, TOK(lbrace))) {
+    while (!LexEof(parser->lex) &&
+           !LexLookingAt(parser->lex, TOK(lparen)) &&
+           !LexLookingAt(parser->lex, TOK(lbrace))) {
+      LexNextToken(parser->lex);
+    }
+    if (LexLookingAt(parser->lex, TOK(lparen))) {
+      SkipBalanced(parser, TOK(lparen), TOK(rparen));
+    } else if (LexLookingAt(parser->lex, TOK(lbrace))) {
+      SkipBalanced(parser, TOK(lbrace), TOK(rbrace));
+    } else {
+      break;
+    }
+    LexMatch(parser->lex, TOK(ellipsis));
+    if (!LexMatch(parser->lex, TOK(comma))) {
+      break;
+    }
+  }
+}
+
+static bool SkipConstructorInitializersAndBody(TypeParser* parser) {
+  SkipCXXConstructorInitializerList(parser);
+  return SkipInlineMemberFunctionBody(parser);
 }
 
 static void AddFunctionTemplateParameterScopeSymbols(Syntax* syntax,
@@ -1664,8 +1756,14 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
 
   CXXConstructorInitList cxx_initializers;
   SyntaxCXXConstructorInitListInit(&cxx_initializers);
-  SyntaxParseCXXConstructorInitializerList(syntax, member_symbol->type,
-                                           &cxx_initializers);
+  bool defer_mem_initializers =
+      ShouldDeferInlineMemberBody(parser, member_symbol) &&
+      LexLookingAt(parser->lex, TOK(colon)) &&
+      !CompilerCXXAtLeast(kLanguageStandardCXX20);
+  if (!defer_mem_initializers) {
+    SyntaxParseCXXConstructorInitializerList(syntax, member_symbol->type,
+                                             &cxx_initializers);
+  }
   if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
       LexLookingAt(parser->lex, TOK(requires))) {
     ConstraintExpr* constraint = ConceptsParseRequiresClause(syntax);
@@ -1677,7 +1775,7 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
       ConstraintExprDelete(constraint);
     }
   }
-  if (!LexLookingAt(parser->lex, TOK(lbrace))) {
+  if (!defer_mem_initializers && !LexLookingAt(parser->lex, TOK(lbrace))) {
     SyntaxCloseScope(syntax);
     syntax->context = old_context;
     SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
@@ -1710,7 +1808,11 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
     LexBeginCapture(lex, &deferred->body_text);
     deferred->initializers = cxx_initializers;  // ownership moved
     deferred->old_context = old_context;
-    SkipInlineMemberFunctionBody(parser);
+    if (defer_mem_initializers) {
+      SkipConstructorInitializersAndBody(parser);
+    } else {
+      SkipInlineMemberFunctionBody(parser);
+    }
     LexEndCapture(lex);
     LexMatch(lex, TOK(semicolon));
     SyntaxCloseScope(syntax);
@@ -1760,7 +1862,7 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
     lex->suppress_preprocessing = true;
     StringClear(&lex->line);
     lex->pos = 0;
-    LexNextToken(lex);  // Prime the first token (the opening '{').
+    LexNextToken(lex);  // Prime the first token (':' or '{').
 
     Vector* old_template_parameters = syntax->current_template_parameters;
     int old_template_parameter_count = syntax->current_template_parameter_count;
@@ -1783,6 +1885,13 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
       AddFunctionTemplateParameterScopeSymbols(syntax, func);
     }
     AddInlineFunctionScopeSymbols(syntax, entry->member_symbol->type);
+    // Mem-initializer lists captured with the body are parsed here so
+    // names such as `&Class::LaterMember<T>` resolve in complete-class context.
+    TypeRecord* saved_fn = compiler->current_function;
+    compiler->current_function = entry->member_symbol->type;
+    SyntaxParseCXXConstructorInitializerList(syntax, entry->member_symbol->type,
+                                             &entry->initializers);
+    compiler->current_function = saved_fn;
     FinishInlineMemberFunctionBody(parser, entry->member_symbol,
                                    &entry->initializers, entry->old_context);
 
@@ -1922,6 +2031,15 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
       LexCheckpointDestruct(&checkpoint);
       return true;
     }
+    LexCheckpointRestore(parser->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return false;
+  }
+  // `T (*name)(args)` is a pointer-to-function data member, not a constructor.
+  if (!is_destructor &&
+      (LexLookingAt(parser->lex, TOK(star)) ||
+       LexLookingAt(parser->lex, TOK(amp)) ||
+       LexLookingAt(parser->lex, TOK(ampamp)))) {
     LexCheckpointRestore(parser->lex, &checkpoint);
     LexCheckpointDestruct(&checkpoint);
     return false;
@@ -2335,6 +2453,22 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     Token token_before = parser->lex->current_token;
     SourceLocation location_before = parser->lex->current_token_location;
     int errors_before = NumErrors();
+    if (CompilerIsCXX() && LexLookingAt(parser->lex, TOK(extern))) {
+      LexCheckpoint extern_checkpoint;
+      LexCheckpointSave(parser->lex, &extern_checkpoint);
+      SourceLocation extern_location = parser->lex->current_token_location;
+      LexNextToken(parser->lex);
+      if (LexLookingAt(parser->lex, TOK(template))) {
+        LexCheckpointDestruct(&extern_checkpoint);
+        LexNextToken(parser->lex);
+        ASTNode* inst = SyntaxParseExplicitInstantiationDeclaration(
+            parser->syntax, extern_location);
+        ASTNodeDelete(inst);
+        continue;
+      }
+      LexCheckpointRestore(parser->lex, &extern_checkpoint);
+      LexCheckpointDestruct(&extern_checkpoint);
+    }
     if ((CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC11)) &&
         LexLookingAt(parser->lex, TOK(static_assert))) {
       ASTNode* node = SyntaxParseStaticAssert(parser->syntax);

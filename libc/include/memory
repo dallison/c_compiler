@@ -725,9 +725,19 @@ bool operator!=(decltype(nullptr), const unique_ptr<T, Deleter>& ptr) noexcept {
 }
 
 template <class T, class... Args>
-static inline unique_ptr<T> make_unique(Args&&... args) {
+static inline enable_if_t<!is_array<T>::value, unique_ptr<T>>
+make_unique(Args&&... args) {
   unique_ptr<T> result;
   result.reset(new T(std::forward<Args>(args)...));
+  return result;
+}
+
+template <class T>
+static inline enable_if_t<is_array<T>::value && extent<T>::value == 0,
+                          unique_ptr<T>>
+make_unique(size_t n) {
+  unique_ptr<T> result;
+  result.reset(new remove_extent_t<T>[n]());
   return result;
 }
 

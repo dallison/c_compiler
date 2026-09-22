@@ -120,6 +120,12 @@ typedef struct {
   Vector* replay_tokens;
   size_t replay_index;
   struct ASTNode* replay_injected_value;
+
+  // Preprocessor conditional state.  Speculative parses rewind the file, so
+  // #if/#endif that were consumed after the checkpoint must be replayed
+  // against the same stack they saw the first time.
+  Vector if_stack;
+  bool is_compiled_in;
 } LexCheckpoint;
 
 // Initializes a lexical analyzer from a file.

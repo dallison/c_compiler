@@ -22,6 +22,7 @@
 #include "type_member.h"
 #include "type_special_member.h"
 #include "type_template_internal.h"
+#include "type_class_internal.h"
 #include "syntax.h"
 
 extern bool (*type_ranks[])(TypeRecord*);
@@ -1301,6 +1302,77 @@ static bool TypeTraitIsFinal(TypeRecord* type) {
   return TypeTraitIsClass(type) && type->info.struct_info->is_final;
 }
 
+static bool TypeTraitStructHasNonStaticDataMembers(Struct* str) {
+  if (str == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member != NULL && !member->is_static && !member->is_member_function &&
+        !StructMemberIsNestedType(member)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TypeTraitIsStandardLayout(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  if (TypeIsFixedArray(type)) {
+    return TypeTraitIsStandardLayout(type->next);
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return true;
+  }
+  Struct* str = type->info.struct_info;
+  if (str->vptr_member != NULL || str->virtual_members.length > 0 ||
+      str->virtual_bases.length > 0) {
+    return false;
+  }
+  bool seen_data_member = false;
+  CXXAccess member_access = kAccessPublic;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->is_static || member->is_member_function ||
+        StructMemberIsNestedType(member)) {
+      continue;
+    }
+    if (member->symbol == NULL || member->symbol->type == NULL) {
+      return false;
+    }
+    if (!TypeTraitIsStandardLayout(member->symbol->type)) {
+      return false;
+    }
+    if (!seen_data_member) {
+      member_access = member->access;
+      seen_data_member = true;
+    } else if (member->access != member_access) {
+      return false;
+    }
+  }
+  size_t bases_with_members = 0;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      return false;
+    }
+    if (base->is_virtual) {
+      return false;
+    }
+    if (!TypeTraitIsStandardLayout(base->type)) {
+      return false;
+    }
+    if (TypeTraitStructHasNonStaticDataMembers(base->type->info.struct_info)) {
+      bases_with_members++;
+    }
+  }
+  return bases_with_members <= 1;
+}
+
 static TypeRecord* TypeTraitStripQualifiers(TypeRecord* type) {
   type = TypeRecordCopy(type);
   while (type != NULL && (type->qualifiers & kQualConst) != 0) {
@@ -1693,6 +1765,10 @@ bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,
     case kCXXTypeTraitIsFinal:
       result = type_args != NULL && type_args->length == 1 &&
                TypeTraitIsFinal((TypeRecord*)type_args->value.p[0]);
+      break;
+    case kCXXTypeTraitIsStandardLayout:
+      result = type_args != NULL && type_args->length == 1 &&
+               TypeTraitIsStandardLayout((TypeRecord*)type_args->value.p[0]);
       break;
   }
   SyntaxCloseScope(syntax);

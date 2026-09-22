@@ -677,6 +677,14 @@ static bool TemplateParameterListsDiffer(Vector* left, Vector* right) {
         !TypeEqual(left_param->type, right_param->type)) {
       return true;
     }
+    // Defaulted type parameters encode SFINAE (`typename = enable_if_t<C>`).
+    if (left_param->kind == kTemplateParameterType &&
+        ((left_param->default_type != NULL) !=
+             (right_param->default_type != NULL) ||
+         (left_param->default_type != NULL &&
+          !TypeEqual(left_param->default_type, right_param->default_type)))) {
+      return true;
+    }
   }
   return false;
 }
@@ -1764,6 +1772,10 @@ Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
           symbol = nested->info.enum_info->tag_symbol;
         }
       }
+      if (symbol == NULL) {
+        symbol = FindInjectedClassNameSymbol(owner->type->info.struct_info,
+                                             &last);
+      }
     }
   }
   StringDestruct(&last);
@@ -1790,6 +1802,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->parsing_template_specialization = false;
   syntax->parsing_template_argument = false;
   syntax->parsing_friend_type_specifier = false;
+  syntax->parsing_default_member_initializer = false;
   syntax->expression_nesting_depth = 0;
   syntax->struct_definition_depth = 0;
   syntax->parsing_lambda_body_depth = 0;
@@ -1929,11 +1942,18 @@ static Symbol* FindInheritedClassMember(Syntax* syntax, String* name) {
   // members (including through further enclosing classes).
   for (Struct* scope = owner; scope != NULL; scope = scope->lexical_parent) {
     StructMember* member = FindStructMember(scope, name);
-    if (member != NULL &&
-        (member->is_static ||
-         (member->symbol != NULL &&
-          (StorageIs(member->symbol->storage, STO(typedef)) ||
-           member->symbol->flags.value_set)))) {
+    if (member == NULL || member->symbol == NULL) {
+      continue;
+    }
+    // Nested class / enum names are also usable without an object
+    // (`store_by_value<T>::value` written in a sibling nested class).
+    bool nested_type =
+        member->symbol->type != NULL &&
+        (TypeIsStructOrUnion(member->symbol->type) ||
+         TypeIsEnum(member->symbol->type));
+    if (member->is_static || nested_type ||
+        StorageIs(member->symbol->storage, STO(typedef)) ||
+        member->symbol->flags.value_set) {
       return member->symbol;
     }
   }
@@ -3336,9 +3356,12 @@ ASTNode* SyntaxParseCXXDefaultMemberInitializer(Syntax* syntax) {
     return ParseBracedInitializer(syntax);
   }
   SourceLocation location = syntax->lex->current_token_location;
-  return NewExpressionInitializerASTNode(
-      SyntaxParseSingleExpression(syntax, TC(semicolon) | TC(exprsep)),
-      location);
+  bool saved = syntax->parsing_default_member_initializer;
+  syntax->parsing_default_member_initializer = true;
+  ASTNode* expr =
+      SyntaxParseSingleExpression(syntax, TC(semicolon) | TC(exprsep));
+  syntax->parsing_default_member_initializer = saved;
+  return NewExpressionInitializerASTNode(expr, location);
 }
 
 // Appends the [start,end) text (trimmed of surrounding whitespace) to the
@@ -4511,12 +4534,14 @@ static void SyntaxAppendCXXMemberDestructorCalls(Syntax* syntax, TypeRecord* fun
 }
 
 static CXXDeferredConstructorInitializer* NewCXXDeferredConstructorInitializer(
-    const char* name, Vector* actuals, SourceLocation location) {
+    const char* name, Vector* actuals, SourceLocation location,
+    bool is_pack_expansion) {
   CXXDeferredConstructorInitializer* init =
       malloc(sizeof(CXXDeferredConstructorInitializer));
   StringInit(&init->name, name);
   init->actuals = actuals;
   init->location = location;
+  init->is_pack_expansion = is_pack_expansion;
   return init;
 }
 
@@ -4539,7 +4564,7 @@ static CXXDeferredConstructorInitializer* CloneCXXDeferredConstructorInitializer
   }
   return NewCXXDeferredConstructorInitializer(
       init->name.value, CloneCXXConstructorInitializerActuals(init->actuals),
-      init->location);
+      init->location, init->is_pack_expansion);
 }
 
 static void CXXDeferredConstructorInitializerDelete(
@@ -4787,8 +4812,16 @@ static String* CXXPrimaryTemplateName(TypeRecord* type) {
   return origin != NULL ? &origin->name : NULL;
 }
 
+static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
+    Struct* owner, const char* name, Vector* already_used);
+
 static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
                                                  const char* name) {
+  return FindCXXDirectBaseByNameSkipping(owner, name, NULL);
+}
+
+static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
+    Struct* owner, const char* name, Vector* already_used) {
   if (owner == NULL || name == NULL) {
     return NULL;
   }
@@ -4802,6 +4835,9 @@ static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
         base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (already_used != NULL && VectorContainsPointer(already_used, base)) {
       continue;
     }
     if (alias_type != NULL && TypeEqual(alias_type, base->type)) {
@@ -5830,6 +5866,69 @@ static Vector* ResolveCXXBracedConstructorInitializerActuals(
   return expanded;
 }
 
+static void MarkCXXConstructorInitPackExpansion(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return;
+  }
+  stmt->flags |= kASTPackExpansion;
+  if (ASTNodeGetShape(stmt) == kASTShapeExprStmt) {
+    ASTNode* expr = ((ExpressionStatementASTNode*)stmt)->expr;
+    if (expr != NULL) {
+      expr->flags |= kASTPackExpansion;
+    }
+  }
+}
+
+/* Bind `name(actuals)` to unused direct bases of that name.  A pack-expansion
+ * mem-initializer (`Storage<Ts, I>(args)...`) produces one call per matching
+ * base.  Returns true if the initializer was consumed: one or more bases were
+ * bound, or an empty pack expansion matched no remaining base. */
+static bool BindCXXBaseConstructorInitializers(
+    Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list,
+    Struct* owner, const char* init_name, Vector* actuals,
+    SourceLocation location, bool is_pack_expansion) {
+  CXXBaseSpecifier* base =
+      FindCXXDirectBaseByNameSkipping(owner, init_name, &init_list->base_specs);
+  if (base != NULL && base->is_virtual) {
+    return false;
+  }
+  if (base == NULL) {
+    if (is_pack_expansion) {
+      if (actuals != NULL) {
+        VectorDelete(actuals);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  Vector* pattern = actuals;
+  while (base != NULL && !base->is_virtual) {
+    CheckCXXConstructorInitializerOrder(
+        syntax, init_list, init_name, CXXDirectBaseOrder(owner, base));
+    Vector* call_actuals = CloneCXXConstructorInitializerActuals(pattern);
+    ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
+                                                /*complete_object=*/false,
+                                                call_actuals, location);
+    if (call != NULL) {
+      if (is_pack_expansion) {
+        MarkCXXConstructorInitPackExpansion(call);
+      }
+      VectorAppend(&init_list->base_specs, base);
+      VectorAppend(&init_list->base_statements, call);
+    }
+    if (!is_pack_expansion) {
+      break;
+    }
+    base = FindCXXDirectBaseByNameSkipping(owner, init_name,
+                                           &init_list->base_specs);
+  }
+  if (pattern != NULL) {
+    VectorDelete(pattern);
+  }
+  return true;
+}
+
 void SyntaxParseCXXConstructorInitializerList(
     Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list) {
   if (!CompilerIsCXX() || func == NULL || !func->info.function.is_constructor ||
@@ -5880,19 +5979,15 @@ void SyntaxParseCXXConstructorInitializerList(
       SyntaxError(syntax, "Expected constructor initializer argument list");
       actuals = NewVector();
     }
+    bool init_is_pack_expansion = false;
     if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(ellipsis))) {
-      if (actuals != NULL && actuals->length > 0) {
-        ASTNode* last = actuals->value.p[actuals->length - 1];
-        if (last != NULL) {
-          last->flags |= kASTPackExpansion;
-        }
-      }
+      init_is_pack_expansion = true;
     }
 
     VectorAppend(&init_list->raw_initializers,
                  NewCXXDeferredConstructorInitializer(
                      init_name, CloneCXXConstructorInitializerActuals(actuals),
-                     location));
+                     location, init_is_pack_expansion));
     if (CXXConstructorInitializerNamesOwner(owner, init_name)) {
       if (init_list->delegating_statement != NULL ||
           init_list->base_specs.length != 0 ||
@@ -5921,35 +6016,18 @@ void SyntaxParseCXXConstructorInitializerList(
       }
       continue;
     }
-    CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
-    CXXVirtualBaseInfo* virtual_base = NULL;
-    if (base != NULL && base->is_virtual) {
-      virtual_base = FindCXXVirtualBaseByName(owner, init_name);
-      base = NULL;
+    if (BindCXXBaseConstructorInitializers(
+            syntax, func, init_list, owner, init_name, actuals, location,
+            init_is_pack_expansion)) {
+      FullyQualifiedIdentifierDestruct(&name);
+      if (!LexMatch(syntax->lex, TOK(comma))) {
+        break;
+      }
+      continue;
     }
-    if (base != NULL) {
-      if (VectorContainsPointer(&init_list->base_specs, base)) {
-        SyntaxError(syntax, "Duplicate initializer for base %s", init_name);
-        VectorDelete(actuals);
-        FullyQualifiedIdentifierDestruct(&name);
-        if (!LexMatch(syntax->lex, TOK(comma))) {
-          break;
-        }
-        continue;
-      }
-      CheckCXXConstructorInitializerOrder(
-          syntax, init_list, init_name, CXXDirectBaseOrder(owner, base));
-      ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
-                                                  /*complete_object=*/false,
-                                                  actuals, location);
-      if (call != NULL) {
-        VectorAppend(&init_list->base_specs, base);
-        VectorAppend(&init_list->base_statements, call);
-      }
-    } else if ((virtual_base = virtual_base != NULL
-                                   ? virtual_base
-                                   : FindCXXVirtualBaseByName(owner,
-                                                              init_name)) != NULL) {
+    CXXVirtualBaseInfo* virtual_base =
+        FindCXXVirtualBaseByName(owner, init_name);
+    if (virtual_base != NULL) {
       if (VectorContainsPointer(&init_list->virtual_base_specs, virtual_base)) {
         SyntaxError(syntax, "Duplicate initializer for virtual base %s",
                     init_name);
@@ -5973,8 +6051,9 @@ void SyntaxParseCXXConstructorInitializerList(
       StructMember* member = FindCXXDirectDataMemberByName(owner, init_name);
       if (member == NULL) {
         VectorAppend(&init_list->deferred_initializers,
-                     NewCXXDeferredConstructorInitializer(init_name, actuals,
-                                                          location));
+                     NewCXXDeferredConstructorInitializer(
+                         init_name, actuals, location,
+                         init_is_pack_expansion));
       } else if (VectorContainsPointer(&init_list->member_specs, member)) {
         SyntaxError(syntax, "Duplicate initializer for member %s", init_name);
         VectorDelete(actuals);
@@ -6037,32 +6116,13 @@ void SyntaxResolveCXXConstructorInitializerList(
       VectorDelete(actuals);
       continue;
     }
-    CXXBaseSpecifier* base = FindCXXDirectBaseByName(owner, init_name);
-    CXXVirtualBaseInfo* virtual_base = NULL;
-    if (base != NULL && base->is_virtual) {
-      virtual_base = FindCXXVirtualBaseByName(owner, init_name);
-      base = NULL;
-    }
-    if (base != NULL) {
-      if (VectorContainsPointer(&init_list->base_specs, base)) {
-        SyntaxError(syntax, "Duplicate initializer for base %s", init_name);
-        VectorDelete(actuals);
-        continue;
-      }
-      CheckCXXConstructorInitializerOrder(
-          syntax, init_list, init_name, CXXDirectBaseOrder(owner, base));
-      ASTNode* call = NewCXXBaseSpecialMemberCall(syntax, func, base, false,
-                                                  /*complete_object=*/false,
-                                                  actuals, location);
-      if (call != NULL) {
-        VectorAppend(&init_list->base_specs, base);
-        VectorAppend(&init_list->base_statements, call);
-      }
+    if (BindCXXBaseConstructorInitializers(
+            syntax, func, init_list, owner, init_name, actuals, location,
+            deferred->is_pack_expansion)) {
       continue;
     }
-    virtual_base = virtual_base != NULL
-                       ? virtual_base
-                       : FindCXXVirtualBaseByName(owner, init_name);
+    CXXVirtualBaseInfo* virtual_base =
+        FindCXXVirtualBaseByName(owner, init_name);
     if (virtual_base != NULL) {
       if (VectorContainsPointer(&init_list->virtual_base_specs, virtual_base)) {
         SyntaxError(syntax, "Duplicate initializer for virtual base %s",
@@ -7139,6 +7199,14 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
     Symbol* friend_function =
         FindMatchingOverload(parser.cxx_qualified_friend_function, sym->type,
                              /*incoming=*/NULL);
+    if (friend_function == NULL) {
+      // A qualified friend names an existing function; it does not declare
+      // a new one.  Dependent friend templates such as
+      // `template <class H> friend H ns::f(H, T)` often fail a strict
+      // signature match against the existing template, but lookup already
+      // identified the intended function (or function template).
+      friend_function = parser.cxx_qualified_friend_function;
+    }
     if (friend_function == NULL) {
       SyntaxError(syntax,
                   "Qualified friend declaration does not match an existing "
@@ -8304,7 +8372,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             old_sym->flags.is_tentative_decl = true;
           }
         }
-        if (!MemberDefinitionTypesEqual(parser, sym->type, old_sym->type)) {
+        if (!redundant_static_member_redefinition &&
+            !MemberDefinitionTypesEqual(parser, sym->type, old_sym->type)) {
           String suffix;
           StringInit(&suffix, NULL);
           SymbolFunctionDiagnosticSuffix(sym, &suffix);
@@ -8982,9 +9051,17 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
     syntax->local_symbol_stack = template_parameter_scope;
   }
   if (!added) {
-    SyntaxError(syntax, "Duplicate symbol from using declaration: %s",
-                alias->name.value);
-    SymbolDelete(alias);
+    Symbol* existing = SyntaxFindSymbol(syntax, &alias->name);
+    if (existing != NULL && existing->flags.is_template &&
+        alias->flags.is_template) {
+      // Identical alias-template redefinition: Abseil repeats
+      // `using SizeType = typename AllocatorTraits<A>::size_type`.
+      SymbolDelete(alias);
+    } else {
+      SyntaxError(syntax, "Duplicate symbol from using declaration: %s",
+                  alias->name.value);
+      SymbolDelete(alias);
+    }
   }
   if (added && !block_scope_alias && syntax->parsing_template_declaration) {
     MoveTemplateParameterConstraints(syntax->current_template_parameters,
@@ -10665,16 +10742,62 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
   }
 }
 
+ASTNode* SyntaxParseExplicitInstantiationDeclaration(Syntax* syntax,
+                                                     SourceLocation location) {
+  // Function/variable explicit instantiation, including qualified members:
+  // `extern template bool C::Dispatch<int>(Data, ...);`
+  // Consume the declaration; `extern template` does not instantiate.
+  int paren = 0;
+  int brace = 0;
+  int square = 0;
+  for (;;) {
+    if (paren == 0 && brace == 0 && square == 0 &&
+        LexLookingAt(syntax->lex, TOK(semicolon))) {
+      break;
+    }
+    if (LexLookingAt(syntax->lex, TOK(lparen))) {
+      paren++;
+    } else if (LexLookingAt(syntax->lex, TOK(rparen)) && paren > 0) {
+      paren--;
+    } else if (LexLookingAt(syntax->lex, TOK(lbrace))) {
+      brace++;
+    } else if (LexLookingAt(syntax->lex, TOK(rbrace)) && brace > 0) {
+      brace--;
+    } else if (LexLookingAt(syntax->lex, TOK(lsquare))) {
+      square++;
+    } else if (LexLookingAt(syntax->lex, TOK(rsquare)) && square > 0) {
+      square--;
+    }
+    Token before = syntax->lex->current_token;
+    SourceLocation before_loc = syntax->lex->current_token_location;
+    LexNextToken(syntax->lex);
+    if (syntax->lex->current_token == before &&
+        syntax->lex->current_token_location == before_loc) {
+      // A finished token-replay looks like EOF/no-progress.  Drop back to
+      // the enclosing source so `)` / `;` after a macro replacement are seen.
+      if (LexIsTokenReplaying(syntax->lex)) {
+        LexEndTokenReplay(syntax->lex);
+        LexNextToken(syntax->lex);
+        if (syntax->lex->current_token != before ||
+            syntax->lex->current_token_location != before_loc) {
+          continue;
+        }
+      }
+      break;
+    }
+  }
+  SyntaxNeedSemicolon(syntax, TC(decl));
+  return EmptyDeclarationList(location);
+}
+
 static ASTNode* ParseExplicitTemplateInstantiation(Syntax* syntax,
                                                    SourceLocation location) {
-  if (!(LexMatch(syntax->lex, TOK(struct)) ||
-        LexMatch(syntax->lex, TOK(class)) ||
-        LexMatch(syntax->lex, TOK(union)))) {
-    SyntaxError(syntax, "Expected class template name after template");
-    SyntaxRecover(syntax, TC(semicolon));
-    SyntaxNeedSemicolon(syntax, TC(decl));
-    return EmptyDeclarationList(location);
+  if (!(LexLookingAt(syntax->lex, TOK(struct)) ||
+        LexLookingAt(syntax->lex, TOK(class)) ||
+        LexLookingAt(syntax->lex, TOK(union)))) {
+    return SyntaxParseExplicitInstantiationDeclaration(syntax, location);
   }
+  LexNextToken(syntax->lex);
 
   FullyQualifiedIdentifier name;
   FullyQualifiedIdentifierInit(&name);
@@ -11026,6 +11149,17 @@ static ASTNode* ParseExternalDeclarationBody(Syntax* syntax) {
     return ParseUsingDeclaration(syntax);
   }
   if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(extern))) {
+    LexCheckpoint extern_checkpoint;
+    LexCheckpointSave(syntax->lex, &extern_checkpoint);
+    SourceLocation extern_location = syntax->lex->current_token_location;
+    LexNextToken(syntax->lex);
+    if (LexLookingAt(syntax->lex, TOK(template))) {
+      LexCheckpointDestruct(&extern_checkpoint);
+      LexNextToken(syntax->lex);
+      return ParseExplicitTemplateInstantiation(syntax, extern_location);
+    }
+    LexCheckpointRestore(syntax->lex, &extern_checkpoint);
+    LexCheckpointDestruct(&extern_checkpoint);
     ASTNode* linkage = ParseCXXLinkageSpecification(syntax);
     if (linkage != NULL) {
       return linkage;

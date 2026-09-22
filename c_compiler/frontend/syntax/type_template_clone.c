@@ -73,6 +73,7 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
 static void ExpandClonedLocalDirectInitializerPack(
     TemplateFunctionBodyClone* clone, VariableDeclarationASTNode* decl,
     Symbol* replacement);
+static void RewriteDeferredConstructorMemberName(VectorASTNode* call);
 static void InstantiateClonedFunctionTemplateCallVisitor(ASTNode* node,
                                                            void* data,
                                                            int child_id,
@@ -2142,12 +2143,204 @@ static bool ExpandClonedPackIndexActual(TemplateFunctionBodyClone* clone,
   return true;
 }
 
+static TypeRecord* ConstructorCallReceiverType(ASTNode* call) {
+  if (call == NULL || call->op != AST_OP(call)) {
+    return NULL;
+  }
+  VectorASTNode* vnode = (VectorASTNode*)call;
+  if (vnode->left == NULL) {
+    return NULL;
+  }
+  ASTNode* access = vnode->left;
+  ASTNode* receiver = NULL;
+  if (access->op == AST_OP(arrow) || access->op == AST_OP(dot)) {
+    receiver = ((BinaryASTNode*)access)->left;
+  }
+  if (receiver == NULL || receiver->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* type = receiver->type;
+  if (TypeIsPointer(type) || TypeIsStructOrUnionPointer(type)) {
+    type = type->next;
+  }
+  return type;
+}
+
+static String* ClonedCallPrimaryTemplateName(TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type)) {
+    return NULL;
+  }
+  Symbol* origin = type->template_origin;
+  if (origin == NULL && type->info.struct_info != NULL &&
+      type->info.struct_info->tag_symbol != NULL &&
+      type->info.struct_info->tag_symbol->type != NULL) {
+    origin = type->info.struct_info->tag_symbol->type->template_origin;
+  }
+  return origin != NULL ? &origin->name : NULL;
+}
+
+static size_t ConstructorInitPackElementIndex(TemplateFunctionBodyClone* clone,
+                                             ASTNode* call) {
+  TypeRecord* recv = ConstructorCallReceiverType(call);
+  Struct* owner = clone->to_owner;
+  if (owner == NULL && clone->to_func != NULL &&
+      TypeIsFunction(clone->to_func)) {
+    owner = clone->to_func->info.function.cxx_member_owner;
+  }
+  if (owner == NULL || recv == NULL || !TypeIsStructOrUnion(recv) ||
+      recv->info.struct_info == NULL) {
+    return 0;
+  }
+  String* primary = ClonedCallPrimaryTemplateName(recv);
+  const char* tag = recv->info.struct_info->tag_name != NULL
+                        ? recv->info.struct_info->tag_name->value
+                        : NULL;
+  size_t index = 0;
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base == NULL || base->is_virtual || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (TypeEqual(base->type, recv)) {
+      return index;
+    }
+    if (tag != NULL && base->type->info.struct_info->tag_name != NULL &&
+        StringEqual(base->type->info.struct_info->tag_name, tag)) {
+      return index;
+    }
+    String* base_primary = ClonedCallPrimaryTemplateName(base->type);
+    if (primary != NULL && base_primary != NULL &&
+        StringEqual(base_primary, primary->value)) {
+      index++;
+    }
+  }
+  return 0;
+}
+
+static bool CallIsConstructorInitPackExpansion(ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(call)) {
+    return false;
+  }
+  if ((node->flags & kASTPackExpansion) != 0) {
+    return true;
+  }
+  return node->parent != NULL &&
+         (node->parent->flags & kASTPackExpansion) != 0 &&
+         ASTNodeGetShape(node->parent) == kASTShapeExprStmt;
+}
+
+/* A mem-initializer pack expansion (`Storage<Ts, I>(args)...`) is one call
+ * per concrete base.  Slice each pack-dependent actual to that base's pack
+ * index instead of expanding every element into a single call. */
+static bool ExpandClonedConstructorInitPackCall(
+    TemplateFunctionBodyClone* clone, ASTNode* node) {
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->children == NULL) {
+    node->flags &= ~kASTPackExpansion;
+    return false;
+  }
+  size_t pack_length = 0;
+  bool multiple_packs = false;
+  for (size_t i = 0; i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    if (actual == NULL) {
+      continue;
+    }
+    bool actual_multiple = false;
+    Symbol* pack =
+        PackExpansionExpressionSymbol(clone, actual, &actual_multiple);
+    multiple_packs = multiple_packs || actual_multiple;
+    if (pack != NULL) {
+      Vector* replacements = MapFindPointerKey(&clone->pack_symbol_map, pack);
+      if (replacements != NULL && replacements->length > pack_length) {
+        pack_length = replacements->length;
+      }
+    }
+    size_t template_length = 0;
+    bool template_multiple = false;
+    if (PackExpansionTemplateArgumentInfo(clone, actual, &template_length,
+                                          &template_multiple)) {
+      multiple_packs = multiple_packs || template_multiple;
+      if (template_length > pack_length) {
+        pack_length = template_length;
+      }
+    }
+  }
+  if (multiple_packs) {
+    SyntaxError(clone->parser->syntax,
+                "pack expansion argument packs have different lengths");
+    node->flags &= ~kASTPackExpansion;
+    return false;
+  }
+  if (pack_length == 0) {
+    node->flags &= ~kASTPackExpansion;
+    if (node->parent != NULL) {
+      node->parent->flags &= ~kASTPackExpansion;
+    }
+    return false;
+  }
+  size_t index = ConstructorInitPackElementIndex(clone, node);
+  if (index >= pack_length) {
+    SyntaxError(clone->parser->syntax,
+                "pack expansion initializer count mismatch");
+    node->flags &= ~kASTPackExpansion;
+    return false;
+  }
+
+  Vector* expanded = NewVector();
+  bool changed = false;
+  for (size_t i = 0; i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    if (actual == NULL) {
+      continue;
+    }
+    Symbol* pack = PackExpansionExpressionSymbol(clone, actual, NULL);
+    size_t template_length = 0;
+    bool has_template = PackExpansionTemplateArgumentInfo(
+        clone, actual, &template_length, NULL);
+    if (pack != NULL || has_template ||
+        (actual->flags & kASTPackExpansion) != 0) {
+      Symbol* to = NULL;
+      if (pack != NULL) {
+        Vector* replacements = MapFindPointerKey(&clone->pack_symbol_map, pack);
+        if (replacements != NULL && index < replacements->length) {
+          to = replacements->value.p[index];
+        }
+      }
+      ASTNode* sliced =
+          ClonePackExpansionPattern(clone, actual, pack, to, index);
+      sliced->flags &= ~kASTPackExpansion;
+      sliced->parent = node;
+      sliced->child_id = (int)expanded->length;
+      VectorAppend(expanded, sliced);
+      ASTNodeDelete(actual);
+      changed = true;
+    } else {
+      actual->parent = node;
+      actual->child_id = (int)expanded->length;
+      VectorAppend(expanded, actual);
+    }
+  }
+  VectorDelete(call->children);
+  call->children = expanded;
+  node->flags &= ~kASTPackExpansion;
+  if (node->parent != NULL) {
+    node->parent->flags &= ~kASTPackExpansion;
+  }
+  return changed;
+}
+
 static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
                                         ASTNode* node) {
   if (node->op != AST_OP(call) &&
       !(node->op == AST_OP(subscript) &&
         ASTNodeGetShape(node) == kASTShapeVector)) {
     return false;
+  }
+  if (CallIsConstructorInitPackExpansion(node)) {
+    return ExpandClonedConstructorInitPackCall(clone, node);
   }
   VectorASTNode* call = (VectorASTNode*)node;
   Vector* expanded = NewVector();
@@ -5709,6 +5902,24 @@ static ASTNode* ReanalyzeExpandedClonedCall(
       call->left != NULL && (call->left->op == AST_OP(dot) ||
                              call->left->op == AST_OP(arrow));
   if (is_member_access_call) {
+    BinaryASTNode* access = (BinaryASTNode*)call->left;
+    TypeRecord* receiver_type =
+        access->left != NULL ? access->left->type : NULL;
+    if (receiver_type != NULL && TypeIsPointer(receiver_type)) {
+      receiver_type = receiver_type->next;
+    }
+    /* A pack-expanded base mem-initializer is cloned after the enclosing
+     * class is already instantiated, so the receiver is a concrete base
+     * subobject.  Analyze it now: deferring leaves the call bound to
+     * Storage() and later re-analysis reports "need 1, got N". */
+    if (receiver_type != NULL && TypeIsStructOrUnion(receiver_type) &&
+        receiver_type->info.struct_info != NULL &&
+        !receiver_type->info.struct_info->is_template) {
+      RewriteDeferredConstructorMemberName(call);
+      node->parent = NULL;
+      ASTNode* analyzed = AnalyzeExpression(node);
+      return analyzed != NULL ? analyzed : node;
+    }
     node->flags |= kASTDependentFunctorCall;
     return node;
   }

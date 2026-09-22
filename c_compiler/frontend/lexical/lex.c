@@ -2002,6 +2002,12 @@ void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
   checkpoint->replay_tokens = lex->replay_tokens;
   checkpoint->replay_index = lex->replay_index;
   checkpoint->replay_injected_value = lex->replay_injected_value;
+  VectorInit(&checkpoint->if_stack);
+  checkpoint->is_compiled_in = true;
+  if (lex->preprocessor != NULL) {
+    VectorCopy(&checkpoint->if_stack, &lex->preprocessor->if_stack);
+    checkpoint->is_compiled_in = lex->preprocessor->is_compiled_in;
+  }
 }
 
 void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
@@ -2039,6 +2045,10 @@ void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
   lex->replay_tokens = checkpoint->replay_tokens;
   lex->replay_index = checkpoint->replay_index;
   lex->replay_injected_value = checkpoint->replay_injected_value;
+  if (lex->preprocessor != NULL) {
+    VectorCopy(&lex->preprocessor->if_stack, &checkpoint->if_stack);
+    lex->preprocessor->is_compiled_in = checkpoint->is_compiled_in;
+  }
 }
 
 void LexCheckpointDestruct(LexCheckpoint* checkpoint) {
@@ -2047,6 +2057,7 @@ void LexCheckpointDestruct(LexCheckpoint* checkpoint) {
   StringDestruct(&checkpoint->literal_spelling);
   StringDestruct(&checkpoint->suffix);
   StringDestruct(&checkpoint->ud_suffix);
+  VectorDestruct(&checkpoint->if_stack);
 }
 
 void LexBeginCapture(Lex* lex, String* out) {

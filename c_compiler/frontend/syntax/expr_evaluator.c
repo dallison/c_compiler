@@ -230,6 +230,58 @@ static bool CompareLongDoubleOperands(ConstEvalContext* ctx,
   return true;
 }
 
+// Fold `&((T*)0)->member` (and nested `.` / `->` designators) to the
+// member's byte offset.  This is what `offsetof` expands to.
+static bool EvaluateOffsetofStyleAddress(ASTNode* node, int64_t* result) {
+  while (node != NULL && node->op == AST_OP(cast)) {
+    node = ((CastASTNode*)node)->expr;
+  }
+  if (node == NULL) {
+    return false;
+  }
+  if (node->op == AST_OP(number) || node->op == AST_OP(charconst)) {
+    *result = ((ConstantASTNode*)node)->value.ivalue;
+    return true;
+  }
+  if (node->op != AST_OP(address)) {
+    return false;
+  }
+  ASTNode* sub = ((UnaryASTNode*)node)->sub;
+  if (sub == NULL || (sub->op != AST_OP(arrow) && sub->op != AST_OP(dot))) {
+    return false;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)sub;
+  if (access->right == NULL || access->right->op != AST_OP(structmember)) {
+    return false;
+  }
+  StructMember* member = ((StructMemberASTNode*)access->right)->member;
+  if (member == NULL) {
+    return false;
+  }
+  int64_t base = 0;
+  if (sub->op == AST_OP(arrow)) {
+    if (!EvaluateOffsetofStyleAddress(access->left, &base)) {
+      return false;
+    }
+  } else if (access->left != NULL &&
+             (access->left->op == AST_OP(dot) ||
+              access->left->op == AST_OP(arrow))) {
+    ASTNode* synthetic = NewUnaryASTNode(AST_OP(address), NULL,
+                                         access->left->location, access->left);
+    bool ok = EvaluateOffsetofStyleAddress(synthetic, &base);
+    // The synthetic node borrowed `access->left`; detach before delete.
+    ((UnaryASTNode*)synthetic)->sub = NULL;
+    ASTNodeDelete(synthetic);
+    if (!ok) {
+      return false;
+    }
+  } else {
+    return false;
+  }
+  *result = base + member->byte_offset;
+  return true;
+}
+
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
                                                ASTNode* node,
                                                int64_t* result) {
@@ -833,6 +885,14 @@ case AST_OP(ast_op): \
     case AST_OP(cast): {
       CastASTNode* c = (CastASTNode*)node;
       if (EvaluateIntegerExpressionInContext(ctx, c->expr, &left)) {
+        *result = NormalizeIntegerValueForType(left, c->cast_type);
+        return true;
+      }
+      // `offsetof` expands to `(size_t)(&((T*)0)->member)`.  The address
+      // operand is a pointer, so the recursive integer walk rejects it;
+      // fold the null-base member offset here instead.
+      if (TypeIsIntegral(c->cast_type) &&
+          EvaluateOffsetofStyleAddress(c->expr, &left)) {
         *result = NormalizeIntegerValueForType(left, c->cast_type);
         return true;
       }

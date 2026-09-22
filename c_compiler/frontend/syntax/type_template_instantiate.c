@@ -4099,6 +4099,16 @@ static bool CXXTemplateOriginIsAliasTemplatePlaceholderOrigin(Symbol* origin) {
          origin->type != NULL && origin->type->template_origin != NULL;
 }
 
+// Bare `Alias x = ...` copies the alias pattern onto the type.  An explicit
+// `Alias<UserArgs> x` carries those arguments and is a specialization, not
+// CTAD, even when the arguments are still dependent.
+static bool TypeCarriesAliasTemplatePatternArguments(TypeRecord* type) {
+  Symbol* origin = type != NULL ? type->template_origin : NULL;
+  return CXXTemplateOriginIsAliasTemplatePlaceholderOrigin(origin) &&
+         TemplateArgumentVectorEqual(type->template_arguments,
+                                     origin->type->template_arguments);
+}
+
 /* True if `type` is a class-template name used without arguments (a CTAD
  * placeholder), i.e. `Foo x = ...;` where Foo is a class template, including
  * the alias-template form. */
@@ -4107,8 +4117,7 @@ bool TypeIsClassTemplatePlaceholder(TypeRecord* type) {
     if (TypeIsStructOrUnion(t) && t->template_origin != NULL &&
         t->info.struct_info != NULL && t->info.struct_info->is_template &&
         (t->template_arguments == NULL ||
-         (CXXTemplateOriginIsAliasTemplatePlaceholderOrigin(t->template_origin) &&
-          TemplateArgumentVectorContainsTemplateParameter(t->template_arguments)))) {
+         TypeCarriesAliasTemplatePatternArguments(t))) {
       return true;
     }
   }
@@ -4122,8 +4131,7 @@ Symbol* TypeClassTemplatePlaceholderOrigin(TypeRecord* type) {
     if (TypeIsStructOrUnion(t) && t->template_origin != NULL &&
         t->info.struct_info != NULL && t->info.struct_info->is_template &&
         (t->template_arguments == NULL ||
-         (CXXTemplateOriginIsAliasTemplatePlaceholderOrigin(t->template_origin) &&
-          TemplateArgumentVectorContainsTemplateParameter(t->template_arguments)))) {
+         TypeCarriesAliasTemplatePatternArguments(t))) {
       if (CXXTemplateOriginIsAliasTemplatePlaceholderOrigin(t->template_origin)) {
         return t->template_origin->type->template_origin;
       }
@@ -4139,8 +4147,7 @@ static TypeRecord* TypeClassTemplatePlaceholderBase(TypeRecord* type) {
     if (TypeIsStructOrUnion(t) && t->template_origin != NULL &&
         t->info.struct_info != NULL && t->info.struct_info->is_template &&
         (t->template_arguments == NULL ||
-         (CXXTemplateOriginIsAliasTemplatePlaceholderOrigin(t->template_origin) &&
-          TemplateArgumentVectorContainsTemplateParameter(t->template_arguments)))) {
+         TypeCarriesAliasTemplatePatternArguments(t))) {
       return t;
     }
   }

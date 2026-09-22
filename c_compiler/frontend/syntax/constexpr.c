@@ -4124,6 +4124,28 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
                                                   result)) {
     return true;
   }
+  // Copy-list-initialization of a non-aggregate class from a single
+  // expression (`ConvTag arr[] = { kFSign }`) must invoke a converting
+  // constructor.  The brace walker would otherwise treat the source as a
+  // first-member initializer, which is only valid for aggregates.
+  if (CompilerIsCXX() && TypeIsStructOrUnion(type) &&
+      type->info.struct_info != NULL &&
+      !type->info.struct_info->is_aggregate &&
+      initializer->op != AST_OP(braced_init)) {
+    ASTNode* source = initializer;
+    if (source->type == NULL || (source->flags & kASTAnalyzed) == 0) {
+      source = AnalyzeExpression(source);
+    }
+    if (source != NULL) {
+      TypeRecord* plain_type = ConstexprPlainObjectType(type);
+      bool converted = EvaluateConstexprConvertingConstruction(
+          ctx, source, plain_type, /*allow_explicit=*/false, result);
+      ConstexprReleasePlainObjectType(type, plain_type);
+      if (converted) {
+        return true;
+      }
+    }
+  }
   size_t slot_count = ConstexprObjectSlotCount(type);
   if (TypeIsArray(type) && type->info.array.is_flexible &&
       initializer->op == AST_OP(braced_init)) {

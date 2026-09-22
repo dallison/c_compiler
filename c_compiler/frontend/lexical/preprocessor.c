@@ -1666,10 +1666,19 @@ static size_t HandleSpacesAndComments(Preprocessor* p, String* line, String* out
           }
           prev = ch;
         }
-        
+        // Include the closing '/' in the comment spelling and advance past it.
+        // Leaving pos on that slash used to emit a leftover '/' token after a
+        // comment whose spelling was `/* ... *`, so `F(x, /* c */ y)` collected
+        // `/ y` as the second argument (Abseil `/* NOLINT */` between args).
+        bool closed = prev == '*' && ch == '/';
+        size_t length = pos - start;
+        if (closed && pos < line->length) {
+          length++;
+          pos++;
+        }
+
         // Append comment token with comment as spelling.
         StringAppendChar(output, PPTOK(comment));
-        size_t length = pos - start;
         EncodeLength(output, length);
         StringAppendSegment(output, &line->value[start], length);
 
@@ -2726,8 +2735,11 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
                           macro_name.value, filename, lineno);
     }
     macro->undefined = false;
-    // If macro was undefined it will have its original value.  Give it the
-    // new one.
+    macro->is_function_like = function_like_macro;
+    macro->varargs = varargs;
+    // #undef + #define must replace formals too: Abseil redefines
+    // ABSL_INTERNAL_X_VAL(id) as ABSL_INTERNAL_X_VAL(e) with a different
+    // replacement that stringifies `#e`.
     StringSet(&macro->replacement_text, replacement_text.value);
     size_t replacement_end = line->length;
     if (replacement_end < pos) {
@@ -2738,10 +2750,15 @@ static void Define(Preprocessor* p, String* line, size_t pos) {
     macro->replacement_location =
         NewSourceLocation(p->lex->source, p->lex->source->lineno, pos,
                           replacement_end > pos ? replacement_end : name_end);
-    // This is a redefinition: the freshly parsed args were not handed to any
-    // macro, so free the strings and the vector backing here.
-    VectorDestructWithContents(&args, (VectorElementDestructor)StringDestruct,
+    // #undef + #define must replace formals too: Abseil redefines
+    // ABSL_INTERNAL_X_VAL(id) as ABSL_INTERNAL_X_VAL(e) with a different
+    // replacement that stringifies `#e`.
+    VectorDestructWithContents(&macro->args,
+                               (VectorElementDestructor)StringDestruct,
                                /*free_element=*/true);
+    VectorInit(&macro->args);
+    VectorCopy(&macro->args, &args);
+    VectorDestruct(&args);
   }
 
   // We're done with these strings, clean up.
@@ -4434,10 +4451,14 @@ static void CollectActualArguments(Preprocessor* p,
         String newline = {0};
         SourceReadLine(p->lex->source, &newline);
         // Append newly read chars to the current tokens.
+        size_t old_length = tokens->length;
         Tokenize(p, &newline, tokens, 0, false, p->lex->assembler_mode, false);
         ti->next = FindNextTokenIndex(ti);
         StringDestruct(&newline);
-        if (CurrentToken(ti) == PPTOK(end)) {
+        // A comment-only or blank continuation produces no tokens.  That is
+        // not end-of-file; keep reading so `F(1 + // c \n 2)` sees `2`.
+        if (CurrentToken(ti) == PPTOK(end) && tokens->length == old_length &&
+            SourceEof(p->lex->source)) {
           end = true;
         }
         continue;
@@ -4461,6 +4482,10 @@ static void CollectActualArguments(Preprocessor* p,
         }
       }
       
+      if (tok == PPTOK(comment)) {
+        MoveToNextToken(ti);
+        continue;
+      }
       AppendCurrentToken(ti, actual);
       MoveToNextToken(ti);
     }
@@ -4853,6 +4878,9 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
             // argument’s preprocessing tokens are completely macro replaced
             // as if they formed the rest of the preprocessing file;
             // no other preprocessing tokens are available.
+            if (PrevToken(&rep_ti) == PPTOK(hash)) {
+              break;
+            }
             if (actual->length == 0) {
               String p = {0};
               StringAppendChar(&p, PPTOK(placemarker));
@@ -4904,8 +4932,10 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
                 ? va_args
                 : FindMacroArg(args, &possible_arg);
         if (actual == NULL) {
-          // Not an argument, error.
-          PreprocessorError(p, "# is not followed by a macro argument name");
+          PreprocessorError(p,
+                            "# is not followed by a macro argument name (got '%s')",
+                            possible_arg.value != NULL ? possible_arg.value
+                                                       : "");
         } else {
           // Detokenize the actual value.
           String detokenized = {0};

@@ -1497,6 +1497,26 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       return TemplateArgumentVectorEqual(t1->template_arguments,
                                          t2->template_arguments);
     }
+    // `auto f(...) -> decltype(probe(T))` vs `auto f(...) -> enable_if_t<C, R>`
+    // must stay distinct overloads.  A failed/poison-pill decltype collapses
+    // to an unmarked unknown (or even a concrete `void`), and the lenient
+    // "unknown matches anything" rule would otherwise merge them.
+    if ((t1->template_origin != NULL) != (t2->template_origin != NULL)) {
+      return false;
+    }
+    if ((t1->dependent_decltype_expr != NULL) !=
+        (t2->dependent_decltype_expr != NULL)) {
+      return false;
+    }
+    if (t1->dependent_decltype_expr != NULL &&
+        t2->dependent_decltype_expr != NULL &&
+        t1->dependent_decltype_expr != t2->dependent_decltype_expr) {
+      return false;
+    }
+    if (((t1->type & kTypeUnknown) != 0) !=
+        ((t2->type & kTypeUnknown) != 0)) {
+      return false;
+    }
     return true;
   }
   switch (t1->declarator) {

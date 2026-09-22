@@ -1,0 +1,37 @@
+//
+//  __minmax
+//  c_compiler
+//
+//  The two-argument std::min / std::max overloads.  Kept in a tiny header so
+//  <string_view> can provide them the way libc++ does, without pulling all of
+//  <algorithm> (and its <ranges> dependency) into every string_view user.
+//
+
+#ifndef __davecc_minmax__
+#define __davecc_minmax__
+
+namespace std {
+
+template <class T>
+constexpr const T& min(const T& a, const T& b) {
+  return b < a ? b : a;
+}
+
+template <class T, class Compare>
+constexpr const T& min(const T& a, const T& b, Compare comp) {
+  return comp(b, a) ? b : a;
+}
+
+template <class T>
+constexpr const T& max(const T& a, const T& b) {
+  return a < b ? b : a;
+}
+
+template <class T, class Compare>
+constexpr const T& max(const T& a, const T& b, Compare comp) {
+  return comp(a, b) ? b : a;
+}
+
+}  // namespace std
+
+#endif /* __davecc_minmax__ */

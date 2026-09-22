@@ -179,6 +179,7 @@ static const TypeTraitName kTypeTraitNames[] = {
     {"__davecc_is_nothrow_destructible", kCXXTypeTraitIsNothrowDestructible},
     {"__davecc_is_nothrow_invocable", kCXXTypeTraitIsNothrowInvocable},
     {"__davecc_is_polymorphic", kCXXTypeTraitIsPolymorphic},
+    {"__davecc_is_standard_layout", kCXXTypeTraitIsStandardLayout},
     {"__davecc_is_swappable", kCXXTypeTraitIsSwappable},
     {"__davecc_is_swappable_with", kCXXTypeTraitIsSwappableWith},
     {"__davecc_is_trivially_assignable", kCXXTypeTraitIsTriviallyAssignable},
@@ -272,17 +273,71 @@ static Symbol* FindThisSymbol(Syntax* syntax) {
   return symbol;
 }
 
+// While a lambda body is parsed, an explicit `this` expression denotes the
+// enclosing member function's object rather than the closure's synthesized
+// `this` parameter. Nested lambda parsing saves and restores this override.
+static Symbol* lambda_enclosing_this;
+
+static Struct* StructFromThisSymbol(Symbol* this_symbol) {
+  if (this_symbol == NULL || this_symbol->type == NULL ||
+      !TypeIsStructOrUnionPointer(this_symbol->type) ||
+      this_symbol->type->next == NULL) {
+    return NULL;
+  }
+  return this_symbol->type->next->info.struct_info;
+}
+
+static StructMember* FindMemberOnThis(Symbol* this_symbol, const char* name) {
+  Struct* owner = StructFromThisSymbol(this_symbol);
+  if (owner == NULL || name == NULL) {
+    return NULL;
+  }
+  String member_name;
+  StringInit(&member_name, name);
+  StructMember* member = FindStructMember(owner, &member_name);
+  StringDestruct(&member_name);
+  return member;
+}
+
+// Inside a lambda, `this` is the closure.  Unqualified names that name
+// members of the enclosing class must go through that class's `this`
+// ([expr.prim.lambda.capture]): `[&]{ pos_ = buf_; }` is `this->pos_`.
+static Symbol* ThisSymbolForUnqualifiedMember(
+    Syntax* syntax, FullyQualifiedIdentifier* name,
+    bool allow_unresolved_member) {
+  Symbol* closure_this = FindThisSymbol(syntax);
+  if (name == NULL || name->is_qualified) {
+    return closure_this;
+  }
+  const char* member_name = FullyQualifiedIdentifierLast(name);
+  StructMember* closure_member = FindMemberOnThis(closure_this, member_name);
+  if (lambda_enclosing_this == NULL) {
+    return closure_this;
+  }
+  StructMember* enclosing_member =
+      FindMemberOnThis(lambda_enclosing_this, member_name);
+  if (closure_member != NULL && !closure_member->is_static) {
+    return closure_this;
+  }
+  if (enclosing_member != NULL && !enclosing_member->is_static) {
+    return lambda_enclosing_this;
+  }
+  if (allow_unresolved_member &&
+      StructFromThisSymbol(lambda_enclosing_this) != NULL) {
+    return lambda_enclosing_this;
+  }
+  return closure_this;
+}
+
 static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
                                         FullyQualifiedIdentifier* name,
                                         bool allow_unresolved_member) {
   if (name->is_qualified) {
     return NULL;
   }
-  Symbol* this_symbol = FindThisSymbol(syntax);
-  if (this_symbol == NULL || this_symbol->type == NULL ||
-      !TypeIsStructOrUnionPointer(this_symbol->type) ||
-      this_symbol->type->next == NULL ||
-      this_symbol->type->next->info.struct_info == NULL) {
+  Symbol* this_symbol = ThisSymbolForUnqualifiedMember(
+      syntax, name, allow_unresolved_member);
+  if (StructFromThisSymbol(this_symbol) == NULL) {
     return NULL;
   }
 
@@ -308,6 +363,36 @@ static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
     right->flags |= kASTNameIndependentLookupAmbiguous;
   }
   StringDestruct(&member_name);
+  return NewBinaryASTNode(AST_OP(arrow), NULL,
+                          syntax->lex->current_token_location, left, right);
+}
+
+// Default member initializers are parsed while the class is still incomplete,
+// so a later data member (`char* pos_ = buf_; char buf_[N];`) is not yet in
+// the symbol table.  Build `this->name` against the class being defined; member
+// analysis runs after the class is complete and resolves the name then.
+static ASTNode* NewMemberAccessFromEnclosingClass(
+    Syntax* syntax, FullyQualifiedIdentifier* name) {
+  if (!CompilerIsCXX() || name == NULL || name->is_qualified ||
+      !syntax->parsing_default_member_initializer ||
+      syntax->cxx_class_head == NULL ||
+      syntax->cxx_class_head->tag_symbol == NULL ||
+      syntax->cxx_class_head->tag_symbol->type == NULL) {
+    return NULL;
+  }
+  if (FindThisSymbol(syntax) != NULL) {
+    return NULL;
+  }
+  TypeRecord* class_type =
+      TypeRecordCopy(syntax->cxx_class_head->tag_symbol->type);
+  Symbol* this_symbol =
+      NewSymbol("this", NewPointerTo(kQualPlain, class_type), STO(implicit));
+  this_symbol->flags.invented = true;
+  ASTNode* left =
+      NewIdentifierASTNode(this_symbol, syntax->lex->current_token_location);
+  ASTNode* right = NewStringConstantASTNode(
+      NewString(FullyQualifiedIdentifierLast(name)), NULL,
+      syntax->lex->current_token_location);
   return NewBinaryASTNode(AST_OP(arrow), NULL,
                           syntax->lex->current_token_location, left, right);
 }
@@ -448,11 +533,6 @@ static Symbol* CurrentClassSelfTagSymbol(Syntax* syntax,
   }
   return NULL;
 }
-
-// While a lambda body is parsed, an explicit `this` expression denotes the
-// enclosing member function's object rather than the closure's synthesized
-// `this` parameter. Nested lambda parsing saves and restores this override.
-static Symbol* lambda_enclosing_this;
 
 static ASTNode* ParseThisExpression(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
@@ -1111,9 +1191,12 @@ static bool ExpressionIdentifierNeedsTemplateIdParser(Syntax* syntax) {
   LexCheckpoint checkpoint;
   LexCheckpointSave(syntax->lex, &checkpoint);
   bool needs_template_ids = false;
-  if (LexMatch(syntax->lex, TOK(coloncolon)) &&
-      !LexLookingAt(syntax->lex, TOK(identifier))) {
-    goto done;
+  bool saw_coloncolon = false;
+  if (LexMatch(syntax->lex, TOK(coloncolon))) {
+    saw_coloncolon = true;
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      goto done;
+    }
   }
   while (LexLookingAt(syntax->lex, TOK(identifier))) {
     LexNextToken(syntax->lex);
@@ -1156,13 +1239,33 @@ static bool ExpressionIdentifierNeedsTemplateIdParser(Syntax* syntax) {
         }
         LexNextToken(syntax->lex);
       } while (!LexEof(syntax->lex) && depth > 0);
-      if (depth == 0 && LexLookingAt(syntax->lex, TOK(coloncolon))) {
-        needs_template_ids = true;
-        goto done;
+      if (depth == 0) {
+        if (LexLookingAt(syntax->lex, TOK(coloncolon))) {
+          needs_template_ids = true;
+          goto done;
+        }
+        // `X::Flush<T>` as a complete id-expression (`&X::Flush<T>`, an
+        // argument, a mem-initializer).  A comparison such as
+        // `X::kMax < a && b > c` continues with another identifier after `>`.
+        if (saw_coloncolon &&
+            (LexLookingAt(syntax->lex, TOK(rparen)) ||
+             LexLookingAt(syntax->lex, TOK(comma)) ||
+             LexLookingAt(syntax->lex, TOK(semicolon)) ||
+             LexLookingAt(syntax->lex, TOK(colon)) ||
+             LexLookingAt(syntax->lex, TOK(rbrace)))) {
+          needs_template_ids = true;
+          goto done;
+        }
       }
     }
     if (!LexMatch(syntax->lex, TOK(coloncolon))) {
       break;
+    }
+    saw_coloncolon = true;
+    // `X::template Apply<T>::value` is a template-id even when the first
+    // component (`X`) is not itself followed by `<`.
+    if (LexMatch(syntax->lex, TOK(template))) {
+      needs_template_ids = true;
     }
   }
 
@@ -1367,8 +1470,11 @@ static ASTNode* BuildDependentMemberTemplateValueName(
 // NULL when `name` is not such a dependent template-scope value name.
 static ASTNode* BuildDependentTemplateScopeValueName(
     Syntax* syntax, FullyQualifiedIdentifier* name, SourceLocation location) {
+  // Class-template member functions are not themselves function templates, so
+  // a deferred `noexcept(Trait<allocator_type>::value)` may be replayed with
+  // `current_template_parameter_count == 0`.  Dependent arguments on the
+  // scope template-id are enough to keep `::member` unresolved.
   if (!CompilerIsCXX() || !name->is_qualified ||
-      syntax->current_template_parameter_count <= 0 ||
       name->components.length < 2 ||
       name->template_arguments.length != name->components.length) {
     return NULL;
@@ -1521,9 +1627,19 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           : NULL;
   bool hiding_has_explicit_template_args =
       hiding_last_args != NULL && hiding_last_args->length > 0;
+  // Member function templates found while parsing an inline definition
+  // may be marked block-scope.  `return put(v)` must still become
+  // `this->put(v)` so deduction sees a member call.  A true local or
+  // parameter continues to hide.
+  bool block_hides_member =
+      symbol != NULL && symbol->flags.is_block_scope &&
+      !(symbol->flags.is_template && symbol->type != NULL &&
+        TypeIsFunction(symbol->type) &&
+        symbol->type->info.function.cxx_member_owner != NULL);
   if (CompilerIsCXX() && !name.is_qualified && symbol != NULL &&
-      !symbol->flags.is_block_scope && !hiding_has_explicit_template_args) {
-    Symbol* this_symbol = FindThisSymbol(syntax);
+      !block_hides_member && !hiding_has_explicit_template_args) {
+    Symbol* this_symbol = ThisSymbolForUnqualifiedMember(
+        syntax, &name, /*allow_unresolved_member=*/false);
     if (this_symbol != NULL && this_symbol->type != NULL &&
         TypeIsStructOrUnionPointer(this_symbol->type) &&
         this_symbol->type->next != NULL &&
@@ -1538,13 +1654,54 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           member->symbol->type != NULL &&
           TypeIsFunction(member->symbol->type) &&
           member->symbol->type->info.function.is_constructor;
-      if (member != NULL && !member->is_static && !member_is_constructor) {
+      // Nested type aliases and tags are class members, but they name types
+      // (`using Policy = Tag; Policy{}`).  Rewriting them through `this`
+      // turns a functional cast into leftover `{` after a member access.
+      bool member_is_type_name =
+          member != NULL && member->symbol != NULL &&
+          (StorageIs(member->symbol->storage, STO(typedef)) ||
+           SymbolIsTagSymbol(member->symbol));
+      bool symbol_is_this_member_function =
+          symbol->type != NULL && TypeIsFunction(symbol->type) &&
+          symbol->type->info.function.cxx_member_owner != NULL &&
+          symbol->type->info.function.cxx_member_owner ==
+              this_symbol->type->next->info.struct_info &&
+          !symbol->type->info.function.is_constructor;
+      if ((member != NULL && !member->is_static && !member_is_constructor &&
+           !member_is_type_name) ||
+          (member == NULL && symbol_is_this_member_function)) {
         ASTNode* member_access = NewMemberAccessFromThis(
-            syntax, &name, /*allow_unresolved_member=*/false);
+            syntax, &name,
+            /*allow_unresolved_member=*/member == NULL);
         if (member_access != NULL) {
           FullyQualifiedIdentifierDestruct(&name);
           return member_access;
         }
+      }
+    }
+  }
+  if (symbol == NULL && CompilerIsCXX() && !name.is_qualified) {
+    // Nested type aliases (`using Policy = Tag;`) are class members, not
+    // namespace symbols.  Unqualified `Policy{}` in an out-of-line member
+    // must resolve to that typedef so it is a functional cast, not a
+    // missing-')' parse of `name` + `{`.
+    Struct* owner = NULL;
+    if (compiler->current_function != NULL &&
+        TypeIsFunction(compiler->current_function)) {
+      owner = compiler->current_function->info.function.cxx_member_owner;
+    }
+    if (owner != NULL) {
+      String member_name;
+      StringInit(&member_name, FullyQualifiedIdentifierLast(&name));
+      StructMember* member = FindStructMember(owner, &member_name);
+      StringDestruct(&member_name);
+      if (member == NULL) {
+        member = FindStructMemberByName(owner,
+                                        FullyQualifiedIdentifierLast(&name));
+      }
+      if (member != NULL && member->symbol != NULL &&
+          StorageIs(member->symbol->storage, STO(typedef))) {
+        symbol = member->symbol;
       }
     }
   }
@@ -1591,6 +1748,12 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         if (static_member != NULL) {
           FullyQualifiedIdentifierDestruct(&name);
           return static_member;
+        }
+        ASTNode* class_member =
+            NewMemberAccessFromEnclosingClass(syntax, &name);
+        if (class_member != NULL) {
+          FullyQualifiedIdentifierDestruct(&name);
+          return class_member;
         }
       }
       if (LexLookingAt(lex, TOK(lparen))) {
@@ -2606,10 +2769,20 @@ static bool LambdaFunctionOwnsSymbol(TypeRecord* func, Symbol* symbol) {
 // True when `symbol` is eligible for implicit capture: a local automatic
 // variable of the enclosing scope.  Lambda parameters, invented temporaries,
 // functions, statics/externs/typedefs and globals are all excluded.
+static bool SymbolIsCXXThis(Symbol* symbol) {
+  return symbol != NULL && symbol->flags.is_argument &&
+         symbol->name.value != NULL && strcmp(symbol->name.value, "this") == 0;
+}
+
 static bool CanCaptureSymbol(Symbol* symbol, TypeRecord* lambda_func) {
   if (symbol == NULL || LambdaFunctionOwnsSymbol(lambda_func, symbol) ||
-      symbol->flags.invented || TypeIsFunction(symbol->type) ||
+      TypeIsFunction(symbol->type) ||
       StorageIs(symbol->storage, STO(static) | STO(extern) | STO(typedef))) {
+    return false;
+  }
+  // `this` is an invented parameter, but `[&]` / `[=]` must still capture it
+  // when a lambda names an enclosing-class member.
+  if (symbol->flags.invented && !SymbolIsCXXThis(symbol)) {
     return false;
   }
   // Enumerators are constants, not objects.  Default capture must not treat
@@ -3108,6 +3281,18 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
 // register it as a tag.  Capture fields are added later; for now it carries a
 // single private placeholder member so it has non-zero size before captures are
 // known.  Returns the tag symbol and outputs its struct type in `closure_type`.
+static Struct* EnclosingClassForLambda(Syntax* syntax) {
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function) &&
+      compiler->current_function->info.function.cxx_member_owner != NULL) {
+    return compiler->current_function->info.function.cxx_member_owner;
+  }
+  if (syntax != NULL) {
+    return syntax->cxx_class_head;
+  }
+  return NULL;
+}
+
 static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
                                    TypeRecord** closure_type) {
   String tag_name;
@@ -3116,6 +3301,10 @@ static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
 
   Struct* closure = NewStruct(false);
   closure->is_class = true;
+  // A lambda in a member function is a nested class of the enclosing class
+  // for access purposes ([expr.prim.lambda], [class.access.nest]): its body
+  // may name private members and invoke private constructors.
+  closure->lexical_parent = EnclosingClassForLambda(syntax);
   TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
   TypeRecordSetStructInfo(type, closure);
   Symbol* tag = NewSymbol(tag_name.value, type, STO(implicit));
@@ -3314,6 +3503,10 @@ static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
   }
   bool by_reference =
       scan->capture_default == kLambdaCaptureDefaultReference;
+  // `this` is always captured as a pointer copy, even under `[&]`.
+  if (SymbolIsCXXThis(id->symbol)) {
+    by_reference = false;
+  }
   // A default capture of a parameter pack is a pack capture: the closure field
   // must be marked as a pack so instantiation expands it to per-element fields
   // and so uses like `xs...` keep their pack-expansion marker after rewrite.
@@ -7227,6 +7420,20 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
           is_type_name = LexLookingAt(syntax->lex, TOK(rparen)) &&
                          sym != NULL && sym->flags.invented &&
                          !TypeIsFunction(type);
+          // `(std::numeric_limits<T>::max)()` is a parenthesized call, not a
+          // cast to a dependent nested type followed by `()`.
+          if (is_type_name && type != NULL &&
+              type->dependent_member_name != NULL) {
+            LexCheckpoint peek;
+            LexCheckpointSave(syntax->lex, &peek);
+            LexMatch(syntax->lex, TOK(rparen));
+            bool followed_by_call = LexLookingAt(syntax->lex, TOK(lparen));
+            LexCheckpointRestore(syntax->lex, &peek);
+            LexCheckpointDestruct(&peek);
+            if (followed_by_call) {
+              is_type_name = false;
+            }
+          }
         }
         parse_completed = true;
       }

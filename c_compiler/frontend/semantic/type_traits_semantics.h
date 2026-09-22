@@ -38,6 +38,7 @@ typedef enum {
   kCXXTypeTraitIsPolymorphic,
   kCXXTypeTraitIsEmpty,
   kCXXTypeTraitIsFinal,
+  kCXXTypeTraitIsStandardLayout,
 } CXXTypeTraitKind;
 
 bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,
