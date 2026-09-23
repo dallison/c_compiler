@@ -1534,10 +1534,50 @@ static ASTNode* BuildDependentTemplateScopeValueName(
     }
     StringAppendString(&prefix.spelling, component);
     VectorAppend(&prefix.components, NewString(component->value));
-    VectorAppend(&prefix.template_arguments,
-                 TemplateArgumentVectorCopy(name->template_arguments.value.p[i]));
+    // Look up the template itself.  Carrying the (still dependent) argument
+    // list makes qualified lookup try to instantiate it and miss the primary,
+    // so `Trait<T>::value` never stays dependent.
+    VectorAppend(&prefix.template_arguments, NULL);
   }
   Symbol* base = SyntaxFindQualifiedSymbol(syntax, &prefix);
+  if (base == NULL) {
+    base = SyntaxFindQualifiedTag(syntax, &prefix);
+  }
+  // `std::is_invocable_r` is a namespace tag.  Qualified tag lookup can miss
+  // it when the prefix was built only to name the template; resolve the
+  // leading namespace and the final component directly.
+  if (base == NULL && base_index >= 1) {
+    FullyQualifiedIdentifier ns_name;
+    FullyQualifiedIdentifierInit(&ns_name);
+    ns_name.absolute = name->absolute;
+    ns_name.is_qualified = name->absolute || base_index > 1;
+    for (size_t i = 0; i < base_index; i++) {
+      String* component = name->components.value.p[i];
+      if (ns_name.spelling.length != 0 || ns_name.absolute) {
+        StringAppend(&ns_name.spelling, "::");
+      }
+      StringAppendString(&ns_name.spelling, component);
+      VectorAppend(&ns_name.components, NewString(component->value));
+      VectorAppend(&ns_name.template_arguments, NULL);
+    }
+    Namespace* ns = SyntaxFindQualifiedNamespace(syntax, &ns_name);
+    FullyQualifiedIdentifierDestruct(&ns_name);
+    if (ns != NULL) {
+      String* trait_name = name->components.value.p[base_index];
+      NamespaceInlineTagLookup found =
+          NamespaceResolveTagInInlineSet(ns, trait_name);
+      if (found.status == kInlineLookupUnique) {
+        base = found.tag;
+      } else {
+        NamespaceInlineSymbolLookup symfound =
+            NamespaceResolveSymbolInInlineSet(ns, trait_name);
+        if (symfound.status == kInlineLookupUnique &&
+            symfound.symbol != NULL && symfound.symbol->flags.is_template) {
+          base = symfound.symbol;
+        }
+      }
+    }
+  }
   FullyQualifiedIdentifierDestruct(&prefix);
   if (base == NULL || !base->flags.is_template || base->type == NULL ||
       (!TypeIsStructOrUnion(base->type) &&

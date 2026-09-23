@@ -2794,7 +2794,22 @@ static void InstantiateClonedFunctionTemplateCall(
       // itself, producing a specialization whose parameters are unusable -- and
       // that bogus specialization is cached, so the later, concrete
       // instantiation never gets a chance to replace it.
-      if (actual->type != NULL && TypeContainsTemplateParameter(actual->type)) {
+      //
+      // An unknown type is the same kind of placeholder.  Dependent member
+      // access and by-reference lambda captures (`*this->hash_state` while
+      // `hash_state` is still `H`) are typed as unknown int until a later
+      // pass substitutes the real type.  Deduce against that unknown type and
+      // `std::move` is cached as `move<int>`, which then rejects the concrete
+      // lvalue.  A missing type means the expression has not been analyzed
+      // yet (the capture rewrite is untyped until semantic analysis); braced
+      // initializers legitimately have no type of their own.
+      if (actual->type != NULL &&
+          (TypeContainsTemplateParameter(actual->type) ||
+           TypeIsUnknown(actual->type))) {
+        return;
+      }
+      if (actual->type == NULL && actual->op != AST_OP(braced_init) &&
+          actual->op != AST_OP(designated_init)) {
         return;
       }
       if ((actual->flags & kASTLambdaExpression) != 0) {
@@ -5339,6 +5354,17 @@ static ASTNode* ResolveDependentQualifiedValueName(
   if (concrete == NULL) {
     concrete = SubstituteQualifiedNameScope(clone, scope);
   }
+  // `Trait<R, F, A>::value` inside a member template: enclosing arguments may
+  // be concrete while `F` is still one of this member template's parameters.
+  // Instantiating the trait now would bind `::value` on the primary and the
+  // later deduction of `F` could not revisit it.
+  if (concrete != NULL &&
+      (TypeContainsTemplateParameter(concrete) ||
+       TemplateArgumentVectorContainsTemplateParameter(
+           concrete->template_arguments))) {
+    TypeRecordDelete(scope);
+    return BakePartialDependentQualifiedName(id, node, concrete);
+  }
   concrete = TypeMaterializeClassTemplateSpecialization(
       clone->parser->syntax, concrete);
   TypeRecordDelete(scope);
@@ -6879,6 +6905,34 @@ static ASTNode* ReanalyzeClonedResolvedCall(
   if (CallActualsContainUndeducedAuto(call)) {
     return node;
   }
+  // Member-function-template bodies are cloned when the enclosing class is
+  // instantiated, before the member template's own parameters exist as
+  // concrete types.  `string_view(src)` in `Cord::operator=(T&& src)` is
+  // still a use of that `T`.  Resolving it here is a hard error, and the
+  // error is observed by whatever instantiation triggered the clone
+  // (`std::move` of a `Cord`), which then drops a viable candidate.
+  if (call->children != NULL) {
+    for (size_t i = 0; i < call->children->length; i++) {
+      ASTNode* actual = call->children->value.p[i];
+      if (actual == NULL || actual->op == AST_OP(braced_init) ||
+          actual->op == AST_OP(designated_init)) {
+        continue;
+      }
+      TypeRecord* actual_type = actual->type;
+      if (actual_type == NULL && actual->op == AST_OP(identifier)) {
+        Symbol* symbol = ((IdentifierASTNode*)actual)->symbol;
+        if (symbol != NULL) {
+          actual_type = symbol->type;
+        }
+      }
+      if (actual_type != NULL &&
+          (TypeIsUnknown(actual_type) ||
+           TypeContainsTemplateParameter(actual_type) ||
+           FirstTemplateParameterIndexInType(actual_type) >= 0)) {
+        return node;
+      }
+    }
+  }
   IdentifierASTNode* id = (IdentifierASTNode*)call->left;
   if (clone != NULL && clone->to_func != NULL &&
       TypeIsFunction(clone->to_func) && id->symbol != NULL &&
@@ -7248,6 +7302,15 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
       if (spelled != NULL && spelled->length > 0 && spelled->value[0] == '~') {
         receiver_is_concrete = false;
       }
+    }
+    // A callee (`this->InitializeStorage<QualTRef>(args...)`) is resolved
+    // together with its call, which holds the explicit template arguments and
+    // the argument list; reanalyzing the access alone loses both.
+    if (receiver_is_concrete && node->parent != NULL &&
+        node->parent->op == AST_OP(call) &&
+        ASTNodeGetShape(node->parent) == kASTShapeVector &&
+        ((VectorASTNode*)node->parent)->left == node) {
+      receiver_is_concrete = false;
     }
   }
   if (node == NULL ||
@@ -7959,9 +8022,20 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
   if (allow_lazy && symbol->flags.is_template && args != NULL) {
     FunctionInstantiationInProgress in_progress;
     PushFunctionInstantiationInProgress(&in_progress, symbol);
+    // This clone only rebases the body onto the enclosing class arguments.
+    // The member template's own parameters are still unbound, so a failure
+    // while substituting that body (for example a pointer collapsing to a
+    // reference) is not a substitution failure of the template whose
+    // signature is currently being instantiated.  Leaving the flag set
+    // discards an unrelated candidate such as std::move.
+    bool saved_substitution_failed =
+        parser != NULL && parser->template_substitution_failed;
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, args);
+    if (parser != NULL) {
+      parser->template_substitution_failed = saved_substitution_failed;
+    }
     PopFunctionInstantiationInProgress(&in_progress);
     // A member function TEMPLATE constructor must not have its initializer
     // list inserted and analyzed now: its own parameters are still unbound.
@@ -8046,6 +8120,21 @@ static Vector* PrefixEnclosingClassTemplateArguments(Struct* owner,
     return NULL;
   }
   bool already_prefixed = own_args != NULL && own_args->length >= prefix->length;
+  // Comparing values cannot tell `Outer<1>::ErrorMaker<true>` apart from an
+  // already-prefixed `[1, …]`.  An argument list no longer than the nested
+  // template's own parameter list carries no enclosing prefix.
+  Symbol* origin = owner->tag_symbol != NULL && owner->tag_symbol->type != NULL
+                       ? owner->tag_symbol->type->template_origin
+                       : NULL;
+  if (already_prefixed && origin != NULL && origin->type != NULL &&
+      TypeIsStructOrUnion(origin->type) &&
+      origin->type->info.struct_info != NULL) {
+    size_t own_count =
+        origin->type->info.struct_info->template_parameters.length;
+    if (own_count > 0 && own_args->length <= own_count) {
+      already_prefixed = false;
+    }
+  }
   if (already_prefixed) {
     for (size_t i = 0; i < prefix->length; i++) {
       if (!TemplateArgumentEqual(own_args->value.p[i], prefix->value.p[i])) {

@@ -7438,6 +7438,7 @@ static bool ClassTemplateArgumentsAreStillDependent(Vector* args) {
 // so `return res` substitutes.  Returns a new vector the caller must delete,
 // or NULL when `own_args` is already complete.
 static Vector* PrefixEnclosingClassTemplateArguments(Struct* enclosing,
+                                                     Vector* own_parameters,
                                                      Vector* own_args) {
   if (enclosing == NULL || enclosing->tag_symbol == NULL ||
       enclosing->tag_symbol->type == NULL ||
@@ -7447,6 +7448,14 @@ static Vector* PrefixEnclosingClassTemplateArguments(Struct* enclosing,
   }
   Vector* parent_args = enclosing->tag_symbol->type->template_arguments;
   bool already_prefixed = own_args != NULL && own_args->length >= parent_args->length;
+  // Comparing values cannot tell `Outer<1>::ErrorMaker<true>` apart from an
+  // already-prefixed `[1, …]`.  `own_parameters` lists only the nested
+  // template's own parameters, so an argument list no longer than it carries
+  // no enclosing prefix.
+  if (already_prefixed && own_parameters != NULL &&
+      own_parameters->length > 0 && own_args->length <= own_parameters->length) {
+    already_prefixed = false;
+  }
   if (already_prefixed) {
     for (size_t i = 0; i < parent_args->length; i++) {
       if (!TemplateArgumentEqual(own_args->value.p[i], parent_args->value.p[i])) {
@@ -8051,8 +8060,10 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   } else if (str->lexical_parent != NULL && !str->lexical_parent->is_template) {
     enclosing_for_args = str->lexical_parent;
   }
-  Vector* prefixed_member_body_args =
-      PrefixEnclosingClassTemplateArguments(enclosing_for_args, source_args);
+  Vector* prefixed_member_body_args = PrefixEnclosingClassTemplateArguments(
+      enclosing_for_args,
+      partial != NULL ? NULL : &template_struct->template_parameters,
+      source_args);
   if (prefixed_member_body_args != NULL) {
     member_body_args = prefixed_member_body_args;
   }
@@ -8605,6 +8616,32 @@ TypeRecord* InstantiateAliasClassTemplate(TypeParser* parser,
                                            /*emit_constraint_error=*/true);
 }
 
+/* Members of a partial specialization (`template <class R, class X>
+ * struct A<R(X)>`) are numbered against the partial's own parameters `[R, X]`,
+ * not the primary's argument list `[R(X)]` recorded on the instantiated type.
+ * Returns the partial's bindings for `owner` (caller deletes), or NULL when
+ * `owner` was instantiated from the primary template. */
+static Vector* PartialSpecializationMemberPatternArguments(TypeParser* parser,
+                                                           Struct* owner) {
+  TypeRecord* type = owner->tag_symbol->type;
+  if (type->template_origin == NULL || type->template_arguments == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(
+          type->template_arguments)) {
+    return NULL;
+  }
+  Vector* bindings = NULL;
+  if (SelectClassTemplatePartialSpecialization(parser, type->template_origin,
+                                               type->template_arguments,
+                                               &bindings) == NULL) {
+    return NULL;
+  }
+  return bindings;
+}
+
+static Vector* PrefixMemberAliasPatternArguments(Symbol* alias,
+                                                 Vector* alias_args,
+                                                 Vector* class_args);
+
 /* A member alias template such as
  * `template<int I> using StorageT = Storage<T, I>` is parameterized by both
  * the enclosing class's arguments (`T`) and its own (`I`).  Named as
@@ -8682,6 +8719,14 @@ Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
       TemplateParameter* first =
           alias->alias_template->parameters.value.p[0];
       size_t class_n = target->tag_symbol->type->template_arguments->length;
+      Vector* partial_args =
+          PartialSpecializationMemberPatternArguments(parser, target);
+      if (partial_args != NULL) {
+        class_n = partial_args->length;
+        VectorDeleteWithContents(partial_args,
+                                 (VectorElementDestructor)TemplateArgumentDelete,
+                                 /*free_element=*/false);
+      }
       if (first != NULL && first->index == (int)class_n) {
         is_member = true;
       }
@@ -8696,7 +8741,23 @@ Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
       target->tag_symbol->type->template_arguments->length == 0) {
     return NULL;
   }
-  Vector* class_args = target->tag_symbol->type->template_arguments;
+  Vector* partial_args =
+      PartialSpecializationMemberPatternArguments(parser, target);
+  Vector* combined = PrefixMemberAliasPatternArguments(
+      alias, alias_args,
+      partial_args != NULL ? partial_args
+                           : target->tag_symbol->type->template_arguments);
+  if (partial_args != NULL) {
+    VectorDeleteWithContents(partial_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+  return combined;
+}
+
+static Vector* PrefixMemberAliasPatternArguments(Symbol* alias,
+                                                 Vector* alias_args,
+                                                 Vector* class_args) {
   size_t alias_param_count =
       alias->alias_template != NULL ? alias->alias_template->parameters.length
                                     : 0;

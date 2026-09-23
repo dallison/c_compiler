@@ -2127,6 +2127,21 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         template_id.origin == NULL && template_id.args == NULL) {
       return TypeRecordCopy(type);
     }
+    // A complete class such as Cord can still contain a template parameter in
+    // some member type.  Rebuilding it while substituting an unrelated
+    // function template (std::move) instantiates those members with the wrong
+    // arguments: enable_if<false, int>::type fails, and that shared failure
+    // flag discards a candidate whose own signature substituted successfully.
+    // Copy the class instead.  Nested classes of the template being
+    // substituted, local classes, and lambda closures still need a rebuild.
+    Symbol* tag_symbol = type->info.struct_info->tag_symbol;
+    bool unrelated_complete_class =
+        !nested_in_active_instantiation &&
+        (tag_symbol == NULL ||
+         (!tag_symbol->flags.invented && !tag_symbol->flags.is_block_scope));
+    if (unrelated_complete_class) {
+      return SubstituteCopiedTypeRecord(parser, type, args);
+    }
     return SubstituteNestedStructTemplateParameters(parser, type, args);
   }
 
@@ -2505,6 +2520,21 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
                      TemplateArgumentVectorContainsTemplateParameter(
                          id->template_arguments));
   if (!needs_copy) {
+    return;
+  }
+  // A variable template-id (`is_invocable_r_v<R, F, A>`) is folded by looking
+  // up `symbol->variable_template`.  Copying the symbol drops that pointer, so
+  // a later substitution of the member template's own arguments sees a plain
+  // identifier and cannot turn the condition into a constant.  The template
+  // arguments live on the identifier and are rebased below; the symbol itself
+  // is the shared variable-template definition and must stay.
+  if (old->variable_template != NULL) {
+    if (id->template_arguments != NULL) {
+      for (size_t i = 0; i < id->template_arguments->length; i++) {
+        RebaseTemplateArgumentParameterIndices(id->template_arguments->value.p[i],
+                                               rebase->base);
+      }
+    }
     return;
   }
   TypeRecord* type =
@@ -2904,12 +2934,14 @@ static Vector* CompleteAliasTemplateArgumentsFromParameters(Vector* parameters,
   if (parameters == NULL || parameters->length == 0) {
     return NULL;
   }
+  // Position within the alias's own parameter list: a member alias's
+  // `param->index` is offset by the enclosing class parameters.
   int pack_index = -1;
   TemplateParameterKind pack_kind = kTemplateParameterType;
   for (size_t i = 0; i < parameters->length; i++) {
     TemplateParameter* param = parameters->value.p[i];
     if (param != NULL && param->is_parameter_pack) {
-      pack_index = param->index;
+      pack_index = (int)i;
       pack_kind = param->kind;
       break;
     }

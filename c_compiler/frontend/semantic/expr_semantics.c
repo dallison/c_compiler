@@ -9795,7 +9795,12 @@ static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
     if (actual == NULL) {
       continue;
     }
+    // Unknown is the placeholder given to a dependent operand (for example
+    // `*this->field` while the capture's type is still a template parameter).
+    // Instantiating a function template against it caches a specialization on
+    // that placeholder, and the later concrete argument no longer matches.
     if (TypeContainsTemplateParameter(actual->type) ||
+        (actual->type != NULL && TypeIsUnknown(actual->type)) ||
         ExpressionIsTemplateDependent(actual)) {
       return true;
     }

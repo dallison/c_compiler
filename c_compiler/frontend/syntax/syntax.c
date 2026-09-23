@@ -10426,13 +10426,26 @@ static Symbol* SyntaxBareTemplateArgumentSymbol(Syntax* syntax) {
   return symbol;
 }
 
-static void NormalizeTemplateNameArgument(TemplateArgument* arg,
+static void NormalizeTemplateNameArgument(Syntax* syntax, TemplateArgument* arg,
                                           Symbol* bare_template) {
   if (arg == NULL || arg->kind != kTemplateParameterType || arg->type == NULL) {
     return;
   }
   if (!SymbolNamesTemplateArgument(bare_template)) {
     return;
+  }
+  // Inside a partial or explicit specialization's body the bare template name
+  // is that specialization's injected-class-name (`is_same_v<I1, F>` within
+  // `struct I1<R(A)>`).  The type parser has already resolved it to the
+  // specialization being defined, which is not the primary's struct.
+  if (TypeIsStructOrUnion(arg->type) && bare_template->type != NULL &&
+      TypeIsStructOrUnion(bare_template->type) &&
+      arg->type->info.struct_info != bare_template->type->info.struct_info) {
+    for (Struct* s = syntax->cxx_class_head; s != NULL; s = s->lexical_parent) {
+      if (s == arg->type->info.struct_info) {
+        return;
+      }
+    }
   }
   Symbol* origin = bare_template;
   ASTNode* pack_index_expr =
@@ -10541,7 +10554,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       }
       arg->references_parameter_pack =
           CXXTypeContainsParameterPack(syntax, arg->type);
-      NormalizeTemplateNameArgument(arg, bare_template);
+      NormalizeTemplateNameArgument(syntax, arg, bare_template);
     } else {
       bool old_parsing_template_argument = syntax->parsing_template_argument;
       syntax->parsing_template_argument = true;

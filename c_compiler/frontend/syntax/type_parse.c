@@ -1234,6 +1234,75 @@ static TypeRecord* ParseCTypeofSpecifier(TypeParser* parser, bool unqualified) {
   return result;
 }
 
+static bool StructIsWithinClassTemplatePattern(Struct* str) {
+  for (Struct* s = str; s != NULL; s = s->lexical_parent) {
+    if (s->is_template || s->defining_template_scope_count > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TemplateArgumentsNameClassTemplatePattern(Vector* args);
+
+// The injected-class-name of a class template being defined
+// (`__flat_map_iterator<__flat_map_base, false>` in `__flat_map_base`'s body)
+// is a struct type with no template-parameter placeholder, yet it stands for
+// the dependent `__flat_map_base<Key, …>`.
+static bool TypeNamesClassTemplatePattern(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsStructOrUnion(t) &&
+        StructIsWithinClassTemplatePattern(t->info.struct_info)) {
+      return true;
+    }
+    if (TemplateArgumentsNameClassTemplatePattern(t->template_arguments)) {
+      return true;
+    }
+    if (TypeIsFunction(t)) {
+      for (size_t i = 0; i < t->info.function.prototype.length; i++) {
+        Symbol* param = t->info.function.prototype.value.p[i];
+        if (param != NULL && TypeNamesClassTemplatePattern(param->type)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+static bool TemplateArgumentsNameClassTemplatePattern(Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg != NULL && arg->kind == kTemplateParameterType &&
+        TypeNamesClassTemplatePattern(arg->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// True when class template-id `symbol<args>` names a concrete specialization
+// that can be instantiated now.  Non-dependent arguments (`W<void(int)>` inside
+// `template <class H> void f(H)`) qualify even while another template is being
+// parsed, but a template nested in a class template still being defined
+// (`Outer<X>::ErrorMaker<true>`) depends on the enclosing parameters.
+static bool ClassTemplateIdIsConcrete(TypeParser* parser, Symbol* symbol,
+                                      Vector* args) {
+  if (args == NULL || TemplateArgumentVectorContainsTemplateParameter(args)) {
+    return false;
+  }
+  if (!parser->syntax->parsing_template_declaration) {
+    return true;
+  }
+  Struct* str = symbol->type != NULL && TypeIsStructOrUnion(symbol->type)
+                    ? symbol->type->info.struct_info
+                    : NULL;
+  if (str != NULL && StructIsWithinClassTemplatePattern(str->lexical_parent)) {
+    return false;
+  }
+  return !TemplateArgumentsNameClassTemplatePattern(args);
+}
+
 // Parse a type-specifier.  This might also be a typedef reference which
 // contains a full TypeRecord.
 static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
@@ -1588,10 +1657,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                     typename_name.template_arguments.length - 1];
             args = TemplateArgumentVectorCopy(parsed_args);
           }
-          if (symbol->flags.is_template && args != NULL &&
-              !parser->syntax->parsing_template_declaration &&
-              !TemplateArgumentVectorContainsTemplateParameter(args) &&
-              TypeIsStructOrUnion(symbol->type)) {
+          if (symbol->flags.is_template &&
+              TypeIsStructOrUnion(symbol->type) &&
+              ClassTemplateIdIsConcrete(parser, symbol, args)) {
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
           } else {
             type_record = TypeRecordCopy(symbol->type);
@@ -1756,8 +1824,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             type_record = TypeRecordCopy(symbol->type);
           }
         } else if (symbol->flags.is_template && args != NULL &&
-            !parser->syntax->parsing_template_declaration &&
-            TypeIsStructOrUnion(symbol->type)) {
+            TypeIsStructOrUnion(symbol->type) &&
+            (!parser->syntax->parsing_template_declaration ||
+             ClassTemplateIdIsConcrete(parser, symbol, args))) {
           type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
         } else {
           type_record = TypeRecordCopy(symbol->type);
@@ -1907,8 +1976,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               type_record = TypeRecordCopy(symbol->type);
             }
           } else if (symbol->flags.is_template && args != NULL &&
-              !parser->syntax->parsing_template_declaration &&
-              TypeIsStructOrUnion(symbol->type)) {
+              TypeIsStructOrUnion(symbol->type) &&
+              (!parser->syntax->parsing_template_declaration ||
+               ClassTemplateIdIsConcrete(parser, symbol, args))) {
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
           } else {
             type_record = TypeRecordCopy(symbol->type);
@@ -1973,8 +2043,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           if (LexLookingAt(lex, TOK(less))) {
             args = SyntaxParseTemplateArgumentList(parser->syntax, TC(decl));
           }
-          if (args != NULL && !parser->syntax->parsing_template_declaration &&
-              !TemplateArgumentVectorContainsTemplateParameter(args)) {
+          if (ClassTemplateIdIsConcrete(parser, symbol, args)) {
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
           } else {
             type_record = TypeRecordCopy(symbol->type);
