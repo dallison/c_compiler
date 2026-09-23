@@ -2462,6 +2462,30 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
              id->template_arguments))) {
       return true;
     }
+    // `static constexpr auto value = T{}()` is value-dependent even though
+    // `value`'s type is not.  Uses inside the class (a later static_assert)
+    // must wait until the enclosing class template is instantiated.
+    if (id->symbol != NULL && compiler->syntax.cxx_class_head != NULL) {
+      Struct* cls = compiler->syntax.cxx_class_head;
+      StructMember* member = FindStructMember(cls, &id->symbol->name);
+      for (StructMember* candidate = member; candidate != NULL;
+           candidate = candidate->overload_next) {
+        if (candidate->symbol == NULL) {
+          continue;
+        }
+        bool same_symbol = candidate->symbol == id->symbol;
+        bool same_entity =
+            candidate->symbol->type == id->symbol->type &&
+            StringEqualString(&candidate->symbol->name, &id->symbol->name);
+        if (!same_symbol && !same_entity) {
+          continue;
+        }
+        if (DependentExpressionContainsTemplateParameter(
+                candidate->default_initializer)) {
+          return true;
+        }
+      }
+    }
   }
   return false;
 }
@@ -2506,6 +2530,51 @@ static void ClearStaticAssertExprAnalysis(ASTNode* node, void* data, int child_i
   if (mode == kVisitPreChildren && node != NULL) {
     node->flags &= ~kASTAnalyzed;
   }
+}
+
+static Symbol* StaticAssertCallCallee(ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(call) ||
+      ASTNodeGetShape(node) != kASTShapeVector) {
+    return NULL;
+  }
+  ASTNode* callee = ((VectorASTNode*)node)->left;
+  if (callee == NULL) {
+    return NULL;
+  }
+  if (callee->op == AST_OP(identifier) &&
+      ASTNodeGetShape(callee) == kASTShapeIdentifier) {
+    return ((IdentifierASTNode*)callee)->symbol;
+  }
+  if ((callee->op == AST_OP(dot) || callee->op == AST_OP(arrow)) &&
+      ASTNodeGetShape(callee) == kASTShapeBinary) {
+    ASTNode* member = ((BinaryASTNode*)callee)->right;
+    if (member != NULL && member->op == AST_OP(identifier) &&
+        ASTNodeGetShape(member) == kASTShapeIdentifier) {
+      return ((IdentifierASTNode*)member)->symbol;
+    }
+  }
+  return NULL;
+}
+
+// Inline member bodies are captured and re-parsed only after the class is
+// complete.  A static_assert earlier in the class can already name those
+// functions; constant-evaluation has to wait until the body exists.
+static bool ExpressionReferencesDeferredConstexprFunction(ASTNode* node,
+                                                         void* data) {
+  (void)data;
+  Symbol* symbol = StaticAssertCallCallee(node);
+  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
+    return false;
+  }
+  Symbol* canonical = symbol->type->info.function.symbol;
+  if (canonical != NULL && canonical != symbol && canonical->type == symbol->type) {
+    symbol = canonical;
+  }
+  if (!symbol->type->info.function.is_constexpr && !symbol->flags.is_constexpr) {
+    return false;
+  }
+  return symbol->type->info.function.body == NULL && symbol->flags.is_defined &&
+         symbol->flags.is_inline_defn;
 }
 
 static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
@@ -2679,7 +2748,11 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
 
   int64_t value = 0;
   if (!EvaluateIntegerExpression(evaluated, &value)) {
-    if (ExpressionIsTemplateDependent(evaluated)) {
+    bool defer =
+        ExpressionIsTemplateDependent(evaluated) ||
+        ASTNodeAny(evaluated, ExpressionReferencesDeferredConstexprFunction,
+                   NULL);
+    if (defer) {
       ASTNode* node =
           NewStaticAssertASTNode(evaluated, &message, message_expr, location);
       StringDestruct(&message);
@@ -2702,6 +2775,50 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   StringDestruct(&message);
   ASTNodeDelete(evaluated);
   return NULL;
+}
+
+int SyntaxEvaluateDeferredStaticAssert(ASTNode* node, bool* dependent) {
+  if (dependent != NULL) {
+    *dependent = false;
+  }
+  if (node == NULL || ASTNodeGetShape(node) != kASTShapeStaticAssert) {
+    return -1;
+  }
+  StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
+  ASTNode* cloned =
+      ASTNodeClone(assert_node->expr, IdentityCloneNode, NULL, NULL);
+  if (cloned == NULL) {
+    return -1;
+  }
+  ASTNodeVisit(cloned, ClearStaticAssertExprAnalysis, 0, NULL);
+  compiler->constant_evaluation_required_depth++;
+  cloned = AnalyzeExpression(cloned);
+  compiler->constant_evaluation_required_depth--;
+  if (cloned == NULL) {
+    return -1;
+  }
+  int64_t value = 0;
+  if (!EvaluateIntegerExpression(cloned, &value)) {
+    if (dependent != NULL) {
+      *dependent = ExpressionIsTemplateDependent(cloned);
+    }
+    ASTNodeDelete(cloned);
+    return -1;
+  }
+  ASTNodeDelete(cloned);
+  if (value == 0) {
+    String message;
+    StringInit(&message, assert_node->message.value);
+    if (assert_node->message_expr == NULL ||
+        SyntaxEvaluateStaticAssertMessage(assert_node->message_expr,
+                                          &message)) {
+      SyntaxErrorAtLocation(&compiler->syntax, node->location, "%s",
+                            message.value);
+    }
+    StringDestruct(&message);
+    return 0;
+  }
+  return 1;
 }
 
 static bool LookingAtContractSpecifier(Syntax* syntax,
@@ -9039,6 +9156,24 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
   ApplyCXXSpecialMemberDeclSpecifiers(&parser);
 
   Symbol* sym = TypeParserParseCXXSpecialMemberDeclarator(&parser);
+  // `template <typename T> inline Condition::Condition(...)` is parsed here,
+  // not on the ordinary declarator path that records template_parameter_count.
+  // Without that count the definition is not recognized as a member template
+  // and is compared against the first constructor overload.
+  if (sym != NULL && TypeIsFunction(sym->type) &&
+      syntax->parsing_template_declaration &&
+      sym->type->info.function.template_parameter_count <= 0) {
+    int listed = CurrentTemplateParameterListLength(syntax);
+    int moved = (int)sym->type->info.function.template_parameters.length;
+    int count = listed > 0 ? listed : moved;
+    if (count > 0) {
+      sym->flags.is_template = true;
+      sym->type->info.function.template_parameter_count = count;
+      sym->type->info.function.template_parameter_base =
+          listed > 0 ? CurrentTemplateParameterBase(syntax)
+                     : syntax->current_template_parameter_count - count;
+    }
+  }
   Symbol* old_sym = parser.cxx_member_definition != NULL
       ? parser.cxx_member_definition->symbol
       : NULL;

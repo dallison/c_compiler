@@ -290,6 +290,10 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   TypeParserInit(&proto_parser, parser->lex, parser->syntax, STO(auto),
                  kParsingPrototype);
   proto_parser.cxx_member_owner = parser->cxx_member_owner;
+  // `Cord::InlineRep::InlineRep(CordRep*)` names a typedef of the enclosing
+  // class.  Ordinary out-of-line members install that scope before their
+  // parameter list; constructors are parsed here and otherwise would not.
+  TypeParserInstallClassScope(&proto_parser, parser->cxx_member_owner);
   TypeRecord* func = NewFunctionTypeRecord();
   func->info.function.is_constexpr = parser->is_constexpr;
   func->info.function.is_consteval = parser->is_consteval;

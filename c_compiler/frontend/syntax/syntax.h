@@ -178,6 +178,11 @@ bool SyntaxIsCXXNumericLiteralOperatorTemplate(Symbol* symbol);
 bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name);
 ASTNode* SyntaxParseStaticAssert(Syntax* syntax);
 bool SyntaxEvaluateStaticAssertMessage(ASTNode* message_expr, String* message);
+// Re-evaluate a static_assert once its class is complete.  Returns 1 if the
+// assertion holds, 0 if it fails (the message is diagnosed), and -1 if the
+// operand is not a constant.  *dependent is set when -1 is because the operand
+// still depends on a template parameter.
+int SyntaxEvaluateDeferredStaticAssert(ASTNode* node, bool* dependent);
 // Parses a C++ 'friend' declaration appearing inside the body of class
 // 'befriending'.  Handles friend class declarations ('friend class X;' and
 // 'friend X;') as well as friend function declarations and inline friend

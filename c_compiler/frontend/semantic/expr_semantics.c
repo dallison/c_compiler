@@ -819,6 +819,14 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
   if (expression->op == AST_OP(cast)) {
     expression = AnalyzeExpression(((CastASTNode*)expression)->expr);
   }
+  if (expression->op == AST_OP(string) ||
+      expression->op == AST_OP(string_wide)) {
+    ASTNodeDelete(symbol->constexpr_initializer);
+    symbol->constexpr_initializer =
+        ASTNodeClone(expression, IdentityCloneNode, NULL, NULL);
+    symbol->flags.value_set = symbol->constexpr_initializer != NULL;
+    return symbol->flags.value_set;
+  }
   Symbol* target = StaticAddressTargetFromExpression(expression);
   if (target != NULL) {
     if (CompilerSymbolIsMetaPromotedStatic(target)) {
@@ -840,6 +848,23 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
       return true;
     }
   }
+  ASTNode* folded = ConstexprFoldPointerExpression(expression);
+  if (folded != NULL &&
+      (folded->op == AST_OP(string) || folded->op == AST_OP(string_wide) ||
+       folded->op == AST_OP(address) || folded->op == AST_OP(identifier))) {
+    ASTNodeDelete(symbol->constexpr_initializer);
+    symbol->constexpr_initializer =
+        ASTNodeClone(folded, IdentityCloneNode, NULL, NULL);
+    symbol->flags.value_set = symbol->constexpr_initializer != NULL;
+    if (expression->parent != NULL) {
+      ASTNodeReplaceChild(expression->parent, expression->child_id, folded,
+                          true);
+    } else {
+      ASTNodeDelete(folded);
+    }
+    return symbol->flags.value_set;
+  }
+  ASTNodeDelete(folded);
   return false;
 }
 
@@ -6513,13 +6538,17 @@ static bool CurrentFunctionIsFriendOf(Struct* owner) {
   if (current == NULL || !TypeIsFunction(current)) {
     return false;
   }
-  // 'friend class C;': any member function of C is a friend.
+  // 'friend class C;': any member function of C is a friend.  A nested
+  // class is a member of its enclosing class and therefore has that class's
+  // access, including friendships ([class.access.nest]).  `Cord::ChunkIterator`
+  // may call `InlineRep::inline_size` because `Cord` is a friend of `InlineRep`.
   Struct* current_owner = CurrentFunctionMemberOwner();
-  if (current_owner != NULL) {
+  for (Struct* accessor = current_owner; accessor != NULL;
+       accessor = accessor->lexical_parent) {
     for (size_t i = 0; i < owner->friend_classes.length; i++) {
       Struct* friend_class = owner->friend_classes.value.p[i];
-      if (friend_class == current_owner ||
-          CXXSameAccessClass(friend_class, current_owner)) {
+      if (friend_class == accessor ||
+          CXXSameAccessClass(friend_class, accessor)) {
         return true;
       }
     }
@@ -9774,6 +9803,19 @@ static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
   return false;
 }
 
+// `const auto p = dependent(); duration_cast<D>(p.second)` is parsed while
+// `p` is still an auto placeholder.  Deduction against that placeholder
+// fails; the call has to wait until instantiation replaces `auto`.
+static bool CallActualsContainUndeducedAuto(VectorASTNode* call) {
+  for (size_t i = 0; call != NULL && i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    if (actual != NULL && TypeContainsAuto(actual->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool CallActualsContainDependentFunctorCall(VectorASTNode* call) {
   for (size_t i = 0; call != NULL && i < call->children->length; i++) {
     ASTNode* actual = call->children->value.p[i];
@@ -10200,6 +10242,12 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (!has_pack_expansion_actual && IsDependentMemberTemplateCall(node)) {
     node->base.flags |= kASTDependentFunctorCall;
     SetDependentMemberTemplateCallType(node);
+    return (ASTNode*)node;
+  }
+  if (CallActualsContainUndeducedAuto(node)) {
+    node->base.flags |= kASTDependentFunctorCall;
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
     return (ASTNode*)node;
   }
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {

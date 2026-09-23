@@ -142,6 +142,8 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
                                             ASTNode* expr);
 static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                           ConstexprValue* result);
+static bool EvaluateConstexprCondition(ConstEvalContext* ctx, ASTNode* cond,
+                                       bool* result);
 static Symbol* ConstexprCallSymbol(ASTNode* node);
 static TypeRecord* ConstexprPlainObjectType(TypeRecord* type);
 static void ConstexprReleasePlainObjectType(TypeRecord* requested,
@@ -2694,6 +2696,33 @@ static bool EvaluateConstexprInlineCall(ConstEvalContext* ctx,
   }
   PopConstexprBindings(ctx, mark);
   return ok;
+}
+
+ASTNode* ConstexprFoldPointerExpression(ASTNode* expr) {
+  if (expr == NULL || expr->type == NULL || !TypeIsPointer(expr->type)) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(string) || expr->op == AST_OP(string_wide) ||
+      expr->op == AST_OP(address)) {
+    return ASTNodeClone(expr, IdentityCloneNode, NULL, NULL);
+  }
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  ConstexprValue value = {0};
+  bool ok = EvaluateConstexprValue(&ctx, expr, expr->type, &value);
+  ASTNode* folded = NULL;
+  if (ok) {
+    ASTNode* materialized = ConstexprValueInitializer(
+        &value, expr->type, expr->location,
+        /*preserve_external_addresses=*/true);
+    ASTNode* inner = ConstexprInitializerExpression(materialized);
+    if (inner != NULL) {
+      folded = ASTNodeClone(inner, IdentityCloneNode, NULL, NULL);
+    }
+    ASTNodeDelete(materialized);
+  }
+  ConstEvalContextDestruct(&ctx);
+  return folded;
 }
 
 static unsigned __int128 ConstexprPackU128(int64_t lo, int64_t hi) {
@@ -5517,6 +5546,20 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   if (node == NULL) {
     return false;
   }
+  if (node->op == AST_OP(question) &&
+      ASTNodeGetShape(node) == kASTShapeBinary) {
+    BinaryASTNode* question = (BinaryASTNode*)node;
+    if (question->right != NULL && question->right->op == AST_OP(colon) &&
+        ASTNodeGetShape(question->right) == kASTShapeBinary) {
+      bool condition = false;
+      if (!EvaluateConstexprCondition(ctx, question->left, &condition)) {
+        return false;
+      }
+      BinaryASTNode* colon = (BinaryASTNode*)question->right;
+      return EvaluateConstexprAddressValue(
+          ctx, condition ? colon->left : colon->right, result);
+    }
+  }
   if (node->op == AST_OP(preinc) || node->op == AST_OP(predec) ||
       node->op == AST_OP(postinc) || node->op == AST_OP(postdec)) {
     // Pointer increments are mutations whose result is still an address.
@@ -5805,6 +5848,16 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                  .address_object = binding->object,
                                  .address_index = 0};
       return true;
+    }
+    if (id->symbol != NULL && id->symbol->flags.is_constexpr &&
+        id->symbol->constexpr_initializer != NULL &&
+        !id->symbol->is_constexpr_representable &&
+        (TypeIsPointer(id->symbol->type) ||
+         TypeIsReference(id->symbol->type))) {
+      return EvaluateConstexprAddressValue(
+          ctx,
+          ConstexprInitializerExpression(id->symbol->constexpr_initializer),
+          result);
     }
     if (id->symbol != NULL && CompilerSymbolIsMetaPromotedStatic(id->symbol)) {
       if (ConstexprEnsureMetaPromotedStaticObject(id->symbol) &&

@@ -1735,6 +1735,7 @@ Struct* NewStruct(bool is_union) {
   s->explicit_alignment = 0;
   s->pack = 0;
   s->next_bit_pos = 65;
+  VectorInit(&s->static_asserts);
   // Track every struct so it can be freed in bulk at end of compilation; see
   // StructRegistryRelease (struct infos can form reference cycles).
   if (!struct_registry_initialized) {
@@ -1815,6 +1816,9 @@ static void StructTeardownMembers(Struct* s) {
                              (VectorElementDestructor)SymbolDestruct,
                              /*free_element=*/true);
   VectorDestruct(&s->type_records);
+  VectorDestructWithContents(&s->static_asserts,
+                             (VectorElementDestructor)ASTNodeDelete,
+                             /*free_element=*/false);
   MapDestruct(&s->symbol_table);
   MapDestruct(&s->symbol_name_table);
 }

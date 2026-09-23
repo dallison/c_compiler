@@ -2485,6 +2485,31 @@ static void QueueCXXInlineStaticDataMemberDefinition(TypeParser* parser,
   compiler->current_class_access_context = saved_access;
 }
 
+static void FinishDeferredClassStaticAsserts(TypeParser* parser, Struct* str,
+                                             Vector* deferred) {
+  if (parser == NULL || deferred == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < deferred->length; i++) {
+    ASTNode* node = deferred->value.p[i];
+    if (node == NULL) {
+      continue;
+    }
+    bool dependent = false;
+    int result = SyntaxEvaluateDeferredStaticAssert(node, &dependent);
+    if (result < 0 && dependent && str != NULL) {
+      VectorAppend(&str->static_asserts, node);
+      deferred->value.p[i] = NULL;
+      continue;
+    }
+    if (result < 0) {
+      SyntaxErrorAtLocation(
+          parser->syntax, node->location,
+          "static_assert expression is not an integer constant expression");
+    }
+  }
+}
+
 void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                String* tag_name) {
   CXXAccess current_access = str->is_class ? kAccessPrivate : kAccessPublic;
@@ -2500,6 +2525,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   Vector* saved_deferred_noexcept_specifiers =
       parser->deferred_noexcept_specifiers;
   parser->deferred_noexcept_specifiers = &deferred_noexcept_specifiers;
+  Vector deferred_static_asserts;
+  VectorInit(&deferred_static_asserts);
+  Vector* saved_deferred_static_asserts = parser->deferred_static_asserts;
+  parser->deferred_static_asserts = &deferred_static_asserts;
   while (!LexLookingAt(parser->lex, TOK(rbrace)) && !LexEof(parser->lex)) {
     Token token_before = parser->lex->current_token;
     SourceLocation location_before = parser->lex->current_token_location;
@@ -2523,7 +2552,9 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     if ((CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC11)) &&
         LexLookingAt(parser->lex, TOK(static_assert))) {
       ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
-      ASTNodeDelete(node);
+      if (node != NULL) {
+        VectorAppend(&deferred_static_asserts, node);
+      }
       continue;
     }
     if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
@@ -3356,11 +3387,16 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   // restore this frame's collection pointer.
   FlushDeferredNoexceptSpecifiers(parser, &deferred_noexcept_specifiers);
   FlushDeferredInlineMemberBodies(parser, &deferred_inline_bodies);
+  FinishDeferredClassStaticAsserts(parser, str, &deferred_static_asserts);
   parser->deferred_inline_bodies = saved_deferred_inline_bodies;
   parser->deferred_noexcept_specifiers =
       saved_deferred_noexcept_specifiers;
+  parser->deferred_static_asserts = saved_deferred_static_asserts;
   VectorDestruct(&deferred_inline_bodies);
   VectorDestruct(&deferred_noexcept_specifiers);
+  VectorDestructWithContents(&deferred_static_asserts,
+                             (VectorElementDestructor)ASTNodeDelete,
+                             /*free_element=*/false);
 }
 
 bool ParseInjectedClassMember(TypeParser* parser, Struct* str, CXXAccess access,
@@ -3371,7 +3407,11 @@ bool ParseInjectedClassMember(TypeParser* parser, Struct* str, CXXAccess access,
   if ((CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC11)) &&
       LexLookingAt(parser->lex, TOK(static_assert))) {
     ASTNode* node = SyntaxParseStaticAssert(parser->syntax);
-    ASTNodeDelete(node);
+    if (node != NULL && parser->deferred_static_asserts != NULL) {
+      VectorAppend(parser->deferred_static_asserts, node);
+    } else {
+      ASTNodeDelete(node);
+    }
     return true;
   }
   if (LexLookingAt(parser->lex, TOK(using)) ||

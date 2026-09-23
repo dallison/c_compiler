@@ -85,6 +85,10 @@ typedef struct {
   // context as inline member bodies. Entries are replayed after all members
   // have been declared so names of later members resolve correctly.
   Vector* deferred_noexcept_specifiers;
+  // static_assert operands that mention a constexpr member whose body is still
+  // deferred, or that are template-dependent.  Owned by the active
+  // ParseStructMembers frame and checked after inline bodies are re-parsed.
+  Vector* deferred_static_asserts;
 } TypeParser;
 
 typedef struct {
@@ -112,6 +116,11 @@ void TypeParserReset(TypeParser* parser);
 // the TypeRecords the stack referenced; those are owned by the parsed type or
 // already consumed.
 void TypeParserDestruct(TypeParser* parser);
+// Unqualified lookup of a parameter type consults cxx_class_head.  Out-of-line
+// constructors parse their prototype on a fresh TypeParser, so install the
+// member's class (and, through lexical_parent, its enclosing classes) for the
+// duration of that parse.  TypeParserDestruct restores the previous head.
+void TypeParserInstallClassScope(TypeParser* parser, struct Struct* owner);
 TypeSubstitutionScope TypeParserPushTemplateSubstitution(
     TypeParser* parser, Struct* source, Struct* target);
 void TypeParserPopTemplateSubstitution(TypeSubstitutionScope* scope);

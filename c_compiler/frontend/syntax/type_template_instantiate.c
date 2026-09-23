@@ -207,10 +207,236 @@ void AddClassTemplatePartialSpecialization(TypeParser* parser, Symbol* primary,
                                            Symbol* partial_tag,
                                            Vector* pattern_args);
 
+static Symbol* InstantiatedMemberForSymbol(Struct* source, Struct* target,
+                                           Symbol* symbol) {
+  if (source == NULL || target == NULL || symbol == NULL ||
+      symbol->name.value == NULL) {
+    return NULL;
+  }
+  StructMember* found = NULL;
+  for (size_t i = 0; i < source->members.length && found == NULL; i++) {
+    for (StructMember* candidate = source->members.value.p[i];
+         candidate != NULL; candidate = candidate->overload_next) {
+      if (candidate->symbol == NULL) {
+        continue;
+      }
+      bool same_symbol = candidate->symbol == symbol;
+      bool same_entity = candidate->symbol->type == symbol->type &&
+                         strcmp(candidate->symbol->name.value,
+                                symbol->name.value) == 0;
+      if (same_symbol || same_entity) {
+        found = candidate;
+        break;
+      }
+    }
+  }
+  if (found == NULL || found->symbol == NULL) {
+    return NULL;
+  }
+  StructMember* head = FindStructMember(target, &found->symbol->name);
+  for (StructMember* candidate = head; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->symbol == NULL ||
+        candidate->is_member_function != found->is_member_function ||
+        candidate->is_static != found->is_static) {
+      continue;
+    }
+    if (!candidate->is_member_function) {
+      return candidate->symbol;
+    }
+    TypeRecord* found_type = found->symbol->type;
+    TypeRecord* candidate_type = candidate->symbol->type;
+    if (found_type != NULL && candidate_type != NULL &&
+        TypeIsFunction(found_type) && TypeIsFunction(candidate_type) &&
+        found_type->info.function.prototype.length ==
+            candidate_type->info.function.prototype.length) {
+      return candidate->symbol;
+    }
+  }
+  return NULL;
+}
+
+static void RebindInstantiatedMemberIdentifier(ASTNode* node, void* data,
+                                               int child_id,
+                                               VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier) ||
+      ASTNodeGetShape(node) != kASTShapeIdentifier) {
+    return;
+  }
+  Struct** owners = data;
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  Symbol* replacement =
+      InstantiatedMemberForSymbol(owners[0], owners[1], id->symbol);
+  if (replacement != NULL) {
+    id->symbol = replacement;
+  }
+}
+
+static void FoldInstantiatedConstexprStaticMembers(Struct* source,
+                                                   Struct* target) {
+  if (target == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < target->members.length; i++) {
+    StructMember* member = target->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || !member->is_static ||
+        member->is_member_function || member->default_initializer == NULL) {
+      continue;
+    }
+    Symbol* symbol = member->symbol;
+    if (!symbol->flags.is_constexpr || symbol->flags.value_set ||
+        symbol->type == NULL || TypeContainsTemplateParameter(symbol->type)) {
+      continue;
+    }
+    if (!TypeIsStructOrUnion(symbol->type) && !TypeIsFixedArray(symbol->type)) {
+      continue;
+    }
+    if (DependentExpressionContainsTemplateParameter(
+            member->default_initializer)) {
+      continue;
+    }
+    ASTNode* initializer = ASTNodeClone(member->default_initializer,
+                                        IdentityCloneNode, NULL, NULL);
+    if (initializer == NULL) {
+      continue;
+    }
+    if (source != NULL) {
+      Struct* owners[2] = {source, target};
+      ASTNodeVisit(initializer, RebindInstantiatedMemberIdentifier, 0, owners);
+    }
+    DiagnosticSuppressBegin();
+    compiler->constant_evaluation_required_depth++;
+    initializer = AnalyzeExpression(initializer);
+    compiler->constant_evaluation_required_depth--;
+    if (initializer != NULL) {
+      ConstexprEvaluateObjectConstantForSymbol(symbol, initializer);
+    }
+    DiagnosticSuppressEnd();
+    ASTNodeDelete(initializer);
+  }
+}
+
+static void EvaluateInstantiatedStaticAsserts(TypeParser* parser,
+                                              Struct* source, Struct* target,
+                                              Vector* args) {
+  if (parser == NULL || source == NULL || target == NULL ||
+      source->static_asserts.length == 0) {
+    return;
+  }
+  FoldInstantiatedConstexprStaticMembers(source, target);
+  for (size_t i = 0; i < source->static_asserts.length; i++) {
+    ASTNode* node = source->static_asserts.value.p[i];
+    if (node == NULL || ASTNodeGetShape(node) != kASTShapeStaticAssert) {
+      continue;
+    }
+    StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
+    ASTNode* substituted = CloneDependentExpressionWithArgs(
+        parser, assert_node->expr, args);
+    if (substituted == NULL) {
+      substituted =
+          ASTNodeClone(assert_node->expr, IdentityCloneNode, NULL, NULL);
+    }
+    if (substituted == NULL) {
+      continue;
+    }
+    Struct* owners[2] = {source, target};
+    ASTNodeVisit(substituted, RebindInstantiatedMemberIdentifier, 0, owners);
+    ASTNode* saved = assert_node->expr;
+    assert_node->expr = substituted;
+    bool dependent = false;
+    int result = SyntaxEvaluateDeferredStaticAssert(node, &dependent);
+    assert_node->expr = saved;
+    if (result < 0 && dependent) {
+      ASTNode* kept_expr =
+          ASTNodeClone(substituted, IdentityCloneNode, NULL, NULL);
+      ASTNodeDelete(substituted);
+      if (kept_expr != NULL) {
+        String message;
+        StringInit(&message, assert_node->message.value);
+        ASTNode* kept = NewStaticAssertASTNode(
+            kept_expr, &message,
+            ASTNodeClone(assert_node->message_expr, IdentityCloneNode, NULL,
+                         NULL),
+            node->location);
+        StringDestruct(&message);
+        VectorAppend(&target->static_asserts, kept);
+      }
+      continue;
+    }
+    ASTNodeDelete(substituted);
+    if (result < 0) {
+      SyntaxErrorAtLocation(
+          parser->syntax, node->location,
+          "static_assert expression is not an integer constant expression");
+    }
+  }
+}
+
+typedef struct {
+  Struct* source;
+  Vector* args;
+  TypeRecord* type;
+} NestedSubstitutionInProgress;
+
+static Vector nested_substitution_stack;
+static bool nested_substitution_stack_ready = false;
+
+static TypeRecord* NestedSubstitutionAlreadyInProgress(Struct* source,
+                                                      Vector* args) {
+  if (!nested_substitution_stack_ready || source == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < nested_substitution_stack.length; i++) {
+    NestedSubstitutionInProgress* entry = nested_substitution_stack.value.p[i];
+    if (entry->source == source && entry->args == args) {
+      return entry->type;
+    }
+  }
+  return NULL;
+}
+
+static void PushNestedSubstitution(Struct* source, Vector* args,
+                                   TypeRecord* type) {
+  if (!nested_substitution_stack_ready) {
+    VectorInit(&nested_substitution_stack);
+    nested_substitution_stack_ready = true;
+  }
+  NestedSubstitutionInProgress* entry =
+      malloc(sizeof(NestedSubstitutionInProgress));
+  entry->source = source;
+  entry->args = args;
+  entry->type = type;
+  VectorAppend(&nested_substitution_stack, entry);
+}
+
+static void PopNestedSubstitution(Struct* source) {
+  if (!nested_substitution_stack_ready) {
+    return;
+  }
+  for (size_t i = nested_substitution_stack.length; i-- > 0;) {
+    NestedSubstitutionInProgress* entry = nested_substitution_stack.value.p[i];
+    if (entry->source == source) {
+      VectorDeleteElement(&nested_substitution_stack, i);
+      free(entry);
+      return;
+    }
+  }
+}
+
 TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
                                                             TypeRecord* type,
                                                             Vector* args) {
   Struct* from = type->info.struct_info;
+  // Cord's ChunkIterator member signatures name CharIterator, whose signatures
+  // name Cord again.  Re-entering the substitution that is already building
+  // that class would recurse until the stack overflows.  Share the in-progress
+  // type; its struct is completed by the outer call.
+  TypeRecord* in_progress = NestedSubstitutionAlreadyInProgress(from, args);
+  if (in_progress != NULL) {
+    return TypeRecordCopy(in_progress);
+  }
   TypeRecord* copy = TypeRecordCopy(type);
   Struct* str = NewStruct(from->is_union);
   if (parser != NULL && parser->template_substitution_target != NULL &&
@@ -302,6 +528,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   }
   TypeRecordSetStructInfo(copy, str);
   copy->size = 0;
+  PushNestedSubstitution(from, args, copy);
 
   Struct* saved_substitution_source = parser->template_substitution_source;
   Struct* saved_substitution_target = parser->template_substitution_target;
@@ -528,6 +755,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     free(pmb);
   }
   VectorDestruct(&pending_member_bodies);
+  EvaluateInstantiatedStaticAsserts(parser, from, str, args);
   parser->template_substitution_source = saved_substitution_source;
   parser->template_substitution_target = saved_substitution_target;
   parser->enclosing_template_substitution_source =
@@ -543,6 +771,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   str->cxx_special_members_complete = false;
   AddImplicitCXXSpecialMembers(parser, str, str->tag_symbol);
   AddImplicitCXXDestructorIfNeeded(parser, str, str->tag_symbol);
+  PopNestedSubstitution(from);
   return TypeRecordCalculateSize(copy);
 }
 
@@ -7835,6 +8064,8 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
                                         member_body_args);
     free(pmb);
   }
+  EvaluateInstantiatedStaticAsserts(parser, source_struct, str,
+                                    member_body_args);
   if (prefixed_member_body_args != NULL) {
     VectorDeleteWithContents(prefixed_member_body_args,
                              (VectorElementDestructor)TemplateArgumentDelete,

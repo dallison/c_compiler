@@ -440,6 +440,11 @@ struct Struct {
   int next_bit_pos;  // Next bit position for bit fields.         // @wire 21
   int current_offset;  // @wire 22
   bool meta_aggregate_complete;  // define_aggregate finalized layout. // @wire 36
+  // In-class static_asserts that could not be checked while the class was
+  // incomplete: the callee's inline body was still deferred, or the operand
+  // depends on a template argument.  Re-checked after inline bodies are parsed,
+  // and again for each class-template instantiation.  Not serialized.
+  Vector static_asserts;  // ASTNode* (static_assert), owned.       // @wire -
 };
 
 // An enum type.  Module-serialization field numbers (see type_serialize.c);

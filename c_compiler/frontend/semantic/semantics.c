@@ -342,6 +342,12 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
     if (concrete_init_type == NULL || TypeIsUnknown(concrete_init_type) ||
         TypeContainsAuto(concrete_init_type) ||
         TypeContainsTemplateParameter(concrete_init_type)) {
+      // The placeholder must itself look dependent.  Otherwise `const auto p =
+      // dependent_call(); p.second` type-checks `p` as a concrete `auto` and
+      // rejects the member access before instantiation deduces `p`.
+      if (sym->type != NULL && !TypeIsUnknown(sym->type)) {
+        sym->type->type |= kTypeUnknown;
+      }
       return true;
     }
   }

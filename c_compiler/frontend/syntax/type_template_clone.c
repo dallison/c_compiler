@@ -7189,6 +7189,8 @@ static bool IsReanalyzableClonedExpressionOpcode(ASTOpcode op) {
     case AST_OP(logor):
     case AST_OP(dotstar):
     case AST_OP(arrowstar):
+    case AST_OP(dot):
+    case AST_OP(arrow):
       return true;
     default:
       return false;
@@ -7223,10 +7225,35 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
          TypeIsFloatingPoint(binary->right->type)) &&
         (node->type == NULL || !TypeIsFloatingPoint(node->type));
   }
+  // `const auto p = ...; p.second` is dependent only while `p` is still auto.
+  // Once the receiver is a concrete class, resolve the member even if the
+  // access node itself was left untyped.
+  bool receiver_is_concrete = false;
+  if (node != NULL &&
+      (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) &&
+      ASTNodeGetShape(node) == kASTShapeBinary) {
+    BinaryASTNode* access = (BinaryASTNode*)node;
+    TypeRecord* receiver = access->left != NULL ? access->left->type : NULL;
+    receiver_is_concrete =
+        receiver != NULL && !TypeContainsTemplateParameter(receiver) &&
+        !TypeContainsAuto(receiver) && !TypeIsUnknown(receiver) &&
+        (node->op == AST_OP(arrow) ? TypeIsStructOrUnionPointer(receiver)
+                                   : TypeIsStructOrUnion(receiver));
+    // `ptr->~U()` is an explicit destructor call.  The spelled name is not a
+    // member; TryAnalyzeCXXExplicitDestructorCall rewrites it once the call
+    // is analyzed.
+    if (receiver_is_concrete && access->right != NULL &&
+        access->right->op == AST_OP(string)) {
+      String* spelled = ((ConstantASTNode*)access->right)->value.string;
+      if (spelled != NULL && spelled->length > 0 && spelled->value[0] == '~') {
+        receiver_is_concrete = false;
+      }
+    }
+  }
   if (node == NULL ||
-      ExpressionIsTemplateDependent(node) ||
-      (!stale_floating_arithmetic && node->type != NULL &&
-       !TypeContainsAuto(node->type)) ||
+      (ExpressionIsTemplateDependent(node) && !receiver_is_concrete) ||
+      (!stale_floating_arithmetic && !receiver_is_concrete &&
+       node->type != NULL && !TypeContainsAuto(node->type)) ||
       !IsReanalyzableClonedExpressionOpcode(node->op)) {
     return node;
   }
@@ -7239,10 +7266,14 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
     }
   } else if (shape == kASTShapeBinary) {
     BinaryASTNode* binary = (BinaryASTNode*)node;
-    if (binary->left == NULL || binary->right == NULL ||
-        binary->left->type == NULL || binary->right->type == NULL ||
-        TypeContainsTemplateParameter(binary->left->type) ||
-        TypeContainsTemplateParameter(binary->right->type)) {
+    if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
+      if (!receiver_is_concrete) {
+        return node;
+      }
+    } else if (binary->left == NULL || binary->right == NULL ||
+               binary->left->type == NULL || binary->right->type == NULL ||
+               TypeContainsTemplateParameter(binary->left->type) ||
+               TypeContainsTemplateParameter(binary->right->type)) {
       return node;
     }
   } else {
@@ -7250,7 +7281,10 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
   }
   *action = kASTTransformSkipChildren;
   node->flags &= ~kASTAnalyzed;
-  if (stale_floating_arithmetic) {
+  if (stale_floating_arithmetic || receiver_is_concrete) {
+    // A placeholder type (undeduced `auto`, or unknown) makes member lookup
+    // return immediately.  Drop it so `.second` is resolved against the
+    // concrete receiver.
     ASTNodeClearType(node);
   }
   ASTNode* parent = node->parent;
@@ -7761,6 +7795,17 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
                                   NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedResolvedCall, &clone);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedUntypedExpression, NULL);
+  // Member access on a just-deduced `auto` (`p.second`) is concrete only after
+  // the untyped-expression pass.  Calls that used that access (`duration_cast`)
+  // were left dependent and can resolve now.
+  body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
+                                  NULL);
+  body = ASTNodeVisitAndTransform(body, ReanalyzeClonedResolvedCall, &clone);
+  // `const auto n = duration_cast<D>(p.second)` could not be deduced until
+  // `p.second` and the call were concrete.  Re-run deduction so the class
+  // initializer is lowered to a braced constructor call.
+  ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
+  ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
   DeferredStructuredBindingContext deferred_binding = {
       .clone = &clone, .materialized = false};
   VectorInit(&deferred_binding.condition_symbols);

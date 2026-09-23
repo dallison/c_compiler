@@ -42,6 +42,11 @@ bool ConstEvalStep(ConstEvalContext* ctx);
 bool ConstexprEvaluateThrowExpression(ConstEvalContext* ctx, ASTNode* node);
 
 ASTNode* ConstexprInitializerExpression(ASTNode* initializer);
+// Fold a core constant expression of pointer type to an address the static
+// initializer can encode (a string literal, or the address of a symbol).
+// `constexpr const char* p = "hi"` and `Basename(__FILE__, n)` need this:
+// the characters are a constant, but the pointer is not an integer.
+ASTNode* ConstexprFoldPointerExpression(ASTNode* expr);
 ASTNode* ConstexprObjectInitializerForExpression(TypeRecord* type,
                                                  ASTNode* expression);
 ASTNode* ConstexprTemplateArgumentObjectInitializerForExpression(

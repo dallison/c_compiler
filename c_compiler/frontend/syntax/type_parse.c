@@ -72,6 +72,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->typename_allows_unqualified = false;
   parser->deferred_inline_bodies = NULL;
   parser->deferred_noexcept_specifiers = NULL;
+  parser->deferred_static_asserts = NULL;
 }
 
 static void TypeParserRestoreClassScope(TypeParser* parser) {
@@ -85,7 +86,7 @@ static void TypeParserRestoreClassScope(TypeParser* parser) {
   parser->saved_cxx_class_head = NULL;
 }
 
-static void TypeParserInstallClassScope(TypeParser* parser, Struct* owner) {
+void TypeParserInstallClassScope(TypeParser* parser, Struct* owner) {
   if (parser == NULL || parser->syntax == NULL || owner == NULL) {
     return;
   }

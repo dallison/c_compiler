@@ -360,6 +360,79 @@ struct __alloc_select_on_copy<
   }
 };
 
+// allocator_traits::construct / destroy call Alloc::construct / Alloc::destroy
+// when that expression is valid, and otherwise placement-new / the destructor.
+// The argument types are one type-list so the SFINAE parameter stays last.
+// Placement new lives on a helper whose only type parameter is the object
+// type: a new-expression in a class with another type parameter is rewritten
+// as that other type.  The member call is a separate specialization so it is
+// not instantiated when Alloc has no such member.
+template <class... Ts>
+struct __alloc_type_list {};
+
+template <class Alloc, class T, class List, class = void>
+struct __alloc_has_construct : false_type {};
+
+template <class Alloc, class T, class... Args>
+struct __alloc_has_construct<
+    Alloc, T, __alloc_type_list<Args...>,
+    __void_t<decltype(declval<Alloc&>().construct(declval<T*>(),
+                                                  declval<Args>()...))>>
+    : true_type {};
+
+template <class T, class... Args>
+struct __alloc_placement_construct {
+  static constexpr void call(T* ptr, Args&&... args) {
+    new (ptr) T(static_cast<Args&&>(args)...);
+  }
+};
+
+template <bool Has>
+struct __alloc_construct_dispatch;
+
+template <>
+struct __alloc_construct_dispatch<false> {
+  template <class Alloc, class T, class... Args>
+  static constexpr void call(Alloc&, T* ptr, Args&&... args) {
+    __alloc_placement_construct<T, Args...>::call(
+        ptr, static_cast<Args&&>(args)...);
+  }
+};
+
+template <>
+struct __alloc_construct_dispatch<true> {
+  template <class Alloc, class T, class... Args>
+  static constexpr void call(Alloc& alloc, T* ptr, Args&&... args) {
+    alloc.construct(ptr, static_cast<Args&&>(args)...);
+  }
+};
+
+template <class Alloc, class T, class = void>
+struct __alloc_has_destroy : false_type {};
+
+template <class Alloc, class T>
+struct __alloc_has_destroy<
+    Alloc, T, __void_t<decltype(declval<Alloc&>().destroy(declval<T*>()))>>
+    : true_type {};
+
+template <bool Has>
+struct __alloc_destroy_dispatch;
+
+template <>
+struct __alloc_destroy_dispatch<false> {
+  template <class Alloc, class T>
+  static void call(Alloc&, T* ptr) {
+    __allocator_destroy_impl<T, !is_trivially_destructible<T>::value>::apply(
+        ptr);
+  }
+};
+
+template <>
+struct __alloc_destroy_dispatch<true> {
+  template <class Alloc, class T>
+  static void call(Alloc& alloc, T* ptr) { alloc.destroy(ptr); }
+};
+
 template <class Alloc>
 struct allocator_traits {
   using allocator_type = Alloc;
@@ -410,27 +483,38 @@ struct allocator_traits {
   }
 
   static constexpr void construct(Alloc& alloc, pointer ptr) {
-    alloc.construct(ptr);
+    __alloc_construct_dispatch<
+        __alloc_has_construct<Alloc, value_type, __alloc_type_list<>>::value>::
+        call(alloc, ptr);
   }
 
   static constexpr void construct(Alloc& alloc, pointer ptr,
                                   const value_type& value) {
-    alloc.construct(ptr, value);
+    __alloc_construct_dispatch<
+        __alloc_has_construct<Alloc, value_type,
+                              __alloc_type_list<const value_type&>>::value>::
+        call(alloc, ptr, value);
   }
 
   static constexpr void construct(Alloc& alloc, pointer ptr,
                                   value_type&& value) {
-    alloc.construct(ptr, static_cast<value_type&&>(value));
+    __alloc_construct_dispatch<
+        __alloc_has_construct<
+            Alloc, value_type, __alloc_type_list<value_type&&>>::value>::
+        call(alloc, ptr, static_cast<value_type&&>(value));
   }
 
   template <class T, class... Args>
   static constexpr void construct(Alloc& alloc, T* ptr, Args&&... args) {
-    alloc.construct(ptr, std::forward<Args>(args)...);
+    __alloc_construct_dispatch<
+        __alloc_has_construct<Alloc, T, __alloc_type_list<Args...>>::value>::
+        call(alloc, ptr, static_cast<Args&&>(args)...);
   }
 
   template <class T>
-  static constexpr void destroy(Alloc& alloc, T* ptr) {
-    alloc.destroy(ptr);
+  static void destroy(Alloc& alloc, T* ptr) {
+    __alloc_destroy_dispatch<__alloc_has_destroy<Alloc, T>::value>::call(
+        alloc, ptr);
   }
 
   static size_type max_size(const Alloc& alloc) noexcept {
