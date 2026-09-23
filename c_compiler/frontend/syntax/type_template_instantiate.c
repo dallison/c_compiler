@@ -1845,19 +1845,9 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
       templ->value.func_defn->type->info.function.body != NULL) {
     template_definition = templ->value.func_defn;
   }
-  if (template_definition->type->info.function.body == NULL) {
-    // Declaration-only templates such as `std::declval` may be specialized for
-    // their signature in unevaluated / speculative probes.  An evaluated
-    // instantiation still requires a definition.
-    if (compiler->speculative_template_instantiation_depth == 0) {
-      SyntaxError(parser->syntax,
-                  "Function template definition is required for instantiation");
-      if (owns_completed_args) {
-        TemplateArgumentVectorDelete(completed_args);
-      }
-      return templ;
-    }
-  }
+  // A declaration-only function template (`extern template` specializations,
+  // `std::declval`) still gets a concrete signature so a call can be type-checked.
+  // There is no body to clone; the symbol stays undefined for the linker.
   bool saved_substitution_failed = parser->template_substitution_failed;
   parser->template_substitution_failed = false;
   TypeRecord* func =
@@ -2975,8 +2965,17 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
     // [temp.deduct.call] A is used as-is when P is a reference.  Stripping
     // cv from `const int` against `T&` would deduce `T = int` and then reject
     // the call for binding `int&` to a const lvalue (`std::addressof`).
+    // `const T&` is different: the cv belongs to the parameter pattern, not
+    // to T.  Ignoring it on both sides lets `min(size_t, const size_t)`
+    // deduce one T ([temp.deduct.type]).
     int ref_placeholder = -1;
     if (TypeIsTemplateParameterPlaceholder(formal->next, &ref_placeholder)) {
+      Qualifiers pattern_cv =
+          formal->next->qualifiers & (kQualConst | kQualVolatile);
+      if (pattern_cv != 0) {
+        return SetDeducedFunctionTemplateTypeArgument(
+            args, explicit_arg_count, ref_placeholder, actual_referent);
+      }
       return SetDeducedFunctionTemplateTypeArgumentPreserveQualifiers(
           args, explicit_arg_count, ref_placeholder, actual_referent);
     }
@@ -8498,7 +8497,14 @@ Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
       alias_args->length == class_args->length + alias_param_count) {
     return NULL;
   }
-  if (alias_args->length >= class_args->length) {
+  // A leading argument that merely equals the enclosing class argument is
+  // not a prefix.  `preserves_data<T, U>` is written with the class parameter
+  // as its first alias argument, so after `T` is substituted the vector starts
+  // with the class argument while still having exactly the alias's own arity.
+  // Only a longer vector (class arguments already prepended) is already
+  // aligned with the member alias's offset parameter indices.
+  if (alias_args->length >= class_args->length &&
+      (alias_param_count == 0 || alias_args->length > alias_param_count)) {
     bool already_prefixed = true;
     for (size_t i = 0; i < class_args->length; i++) {
       if (!TemplateArgumentEqual(alias_args->value.p[i],

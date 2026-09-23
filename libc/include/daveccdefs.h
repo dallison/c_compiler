@@ -122,11 +122,17 @@ extern FILE* stderr;
 extern FILE* __all_files;
 extern FILE* __last_file;
 
+#ifndef __mode_t
+#define __mode_t
 #if defined(__6502__)
 typedef char mode_t;
-typedef char char_t;
 #else
 typedef int mode_t;
+#endif
+#endif
+#if defined(__6502__)
+typedef char char_t;
+#else
 typedef int char_t;
 #endif
 

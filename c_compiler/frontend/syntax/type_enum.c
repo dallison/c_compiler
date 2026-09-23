@@ -420,7 +420,10 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
           break;
       }
 
-      Symbol* ec = e->is_scoped
+      // C enumerators have type int.  C++ enumerators have the enumeration
+      // type ([dcl.enum]), so `E(k)` is an exact match and beats a
+      // conversion of the value 0 to a pointer.
+      Symbol* ec = (e->is_scoped || CompilerIsCXX())
           ? NewScopedEnumConstant(const_name.value, assigned_value, enum_type)
           : NewEnumConstant(const_name.value, assigned_value);
       if (!CompilerIsCXX() && e->has_fixed_underlying) {
@@ -570,7 +573,7 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
   }
   tag->type->type |= t;
   tag->type->size = SizeofType(t);
-  if (e->is_scoped) {
+  if (e->is_scoped || CompilerIsCXX()) {
     for (size_t i = 0; i < e->constants.length; i++) {
       Symbol* constant = e->constants.value.p[i];
       constant->type->type |= t;

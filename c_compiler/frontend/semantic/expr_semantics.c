@@ -3538,6 +3538,10 @@ static bool CXXConstructorSetTakesInitializerList(StructMember* ctor) {
 static ASTNode* LowerCXXBracedInitToConstructorCall(
     BracedInitializerASTNode* braced, TypeRecord* target,
     SourceLocation location) {
+  static int brace_ctor_depth = 0;
+  if (brace_ctor_depth > 8) {
+    return NULL;
+  }
   if (!CompilerIsCXX() || !TypeIsStructOrUnion(target) ||
       target->info.struct_info == NULL ||
       target->info.struct_info->tag_name == NULL ||
@@ -3628,7 +3632,9 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
   ASTNode* comma =
       NewBinaryASTNode(AST_OP(comma), TypeRecordCopy(type), location,
                        constructor_call, NewIdentifierASTNode(temp, location));
+  brace_ctor_depth++;
   ASTNode* analyzed = AnalyzeExpression(comma);
+  brace_ctor_depth--;
   if (analyzed != NULL) {
     analyzed->value_category = kValueCategoryPrvalue;
   }
@@ -6898,9 +6904,22 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
     return actual->info.enum_info == target->info.enum_info ? 0 : -1;
   }
   if (TypeIsIntegral(actual) && TypeIsEnum(target)) {
-    return 2;
+    // C++ does not implicitly convert an integer to an enumeration.  Allowing
+    // it makes `Edge(uint8_t)` ambiguous between `Edge(size_t)` and
+    // `Edge(EdgeType)`.  C still treats enumerations as integers.
+    return CompilerIsCXX() ? -1 : 2;
   }
   if (TypeIsEnum(actual) && TypeIsIntegral(target)) {
+    // Integral promotion of an unscoped enumeration to int ([conv.prom])
+    // outranks a conversion to a wider integer.  Scoped enumerations do not
+    // promote.
+    if (!TypeIsEnum(target) && CompilerIsCXX() &&
+        actual->info.enum_info != NULL && !actual->info.enum_info->is_scoped &&
+        TypeIsInt(target) && !TypeIsUnsigned(target) && !TypeIsLong(target) &&
+        !TypeIsLongLong(target) && !TypeIsShort(target) &&
+        !TypeIsCharFamily(target)) {
+      return 1;
+    }
     return 2;
   }
   if (TypeIsInt(target) && !TypeIsUnsigned(target) &&
@@ -6971,6 +6990,14 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
   if (actual == NULL || actual->op != AST_OP(braced_init) || target == NULL) {
     return -1;
   }
+  // Ranking an initializer-list constructor re-enters conversion ranking on
+  // the same braced list.  A constructor whose parameter is not recognized as
+  // `initializer_list` (or whose element initialization constructs the same
+  // class) would recurse without bound.
+  static int brace_rank_depth = 0;
+  if (brace_rank_depth > 4) {
+    return -1;
+  }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)actual;
   if (TypeIsScalar(target)) {
     if (braced->initializers->length == 0) {
@@ -7028,6 +7055,7 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
     VectorAppend(&one_actual, actual);
     VectorASTNode il_call = {0};
     il_call.children = &one_actual;
+    brace_rank_depth++;
     for (StructMember* c = ctor; c != NULL; c = c->overload_next) {
       if (!c->is_member_function || c->symbol == NULL ||
           c->symbol->type == NULL || !TypeIsFunction(c->symbol->type) ||
@@ -7062,6 +7090,7 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
         best = s;
       }
     }
+    brace_rank_depth--;
     VectorDestruct(&one_actual);
   }
   if (best < 0 && simple_elements) {
@@ -7242,8 +7271,12 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     // Exact function-to-pointer conversion (an lvalue transformation).
     return 5;
   }
+  // A null pointer constant is an integer literal with value zero
+  // ([conv.ptr]).  An enumerator is not an integer literal, even when its
+  // value is zero and it has been folded to a constant node.
   if (IsZeroIntegerConstant(actual) &&
-      (TypeIsPointer(target) || TypeIsMemberPointer(target))) {
+      (TypeIsPointer(target) || TypeIsMemberPointer(target)) &&
+      !(CompilerIsCXX() && actual->type != NULL && TypeIsEnum(actual->type))) {
     return 25;
   }
   // As a last resort consider a user-defined conversion through a converting
@@ -9665,17 +9698,6 @@ static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
   return ReplaceVectorWithCall(node, call);
 }
 
-static bool FunctionTemplateHasDefinition(Symbol* symbol) {
-  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
-    return false;
-  }
-  Symbol* definition =
-      symbol->value.func_defn != NULL ? symbol->value.func_defn : symbol;
-  return definition != NULL && definition->type != NULL &&
-         TypeIsFunction(definition->type) &&
-         definition->type->info.function.body != NULL;
-}
-
 // Visitor that flags when an expression references a template parameter, either
 // directly (a bare parameter identifier) or through a parameter-dependent type
 // or template argument.  Used to detect value-dependent non-type template
@@ -10189,15 +10211,16 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         !has_pack_expansion_actual &&
         !TemplateArgumentVectorContainsTemplateParameter(id->template_arguments) &&
         !CallActualsContainTemplateParameter(node)) {
-      if (FunctionTemplateHasDefinition(id->symbol)) {
-        Symbol* instantiated =
-            TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
-                &compiler->syntax, id->symbol, id->template_arguments,
-                node->children);
-        if (instantiated != id->symbol) {
-          id->symbol = instantiated;
-          ASTNodeSetInstantiatedCalleeType(node->left, instantiated->type);
-        }
+      // Instantiate even when the template is only declared (`extern template`,
+      // a member defined in another translation unit).  The specialization is
+      // an undefined symbol with a substituted signature.
+      Symbol* instantiated =
+          TypeDeduceFunctionTemplateFromCallWithExplicitArgs(
+              &compiler->syntax, id->symbol, id->template_arguments,
+              node->children);
+      if (instantiated != NULL && instantiated != id->symbol) {
+        id->symbol = instantiated;
+        ASTNodeSetInstantiatedCalleeType(node->left, instantiated->type);
       }
       if (id->symbol->flags.is_template &&
           !TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(

@@ -1,13 +1,11 @@
-//
-//  time.h
-//  c_compiler
-//
-//  Created by David Allison on 5/11/20.
-//  Copyright © 2020 David Allison. All rights reserved.
-//
+#ifndef sys_time_h
+#define sys_time_h
 
-#ifndef time_h
-#define time_h
+#include <time.h>
 
+struct timeval {
+  time_t tv_sec;
+  long tv_usec;
+};
 
-#endif /* time_h */
+#endif

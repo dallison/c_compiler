@@ -267,8 +267,8 @@ static void AddCXXUnscopedEnumConstantMembers(TypeParser* parser,
       continue;
     }
     if (FindStructMember(owner, &constant->name) != NULL) {
-      SyntaxError(parser->syntax, "Duplicate enum constant %s",
-                  constant->name.value);
+      // The same class body can be parsed again when a class template is
+      // instantiated.  The enumerators are already members.
       continue;
     }
     StructMember* member = NewStructMember(SymbolClone(constant));
@@ -887,12 +887,37 @@ void CollectConversionOperators(Struct* str, Vector* out) {
   }
 }
 
+// Anonymous aggregates are layout members under a compiler-invented name.
+// That name is not inserted into the lookup tables (a user cannot spell it),
+// but defaulted special members still copy the aggregate as one object and
+// name it internally.  Resolve only that invented spelling.
+static StructMember* FindInventedLayoutMemberByName(Struct* str,
+                                                    const char* name) {
+  if (str == NULL || name == NULL || strncmp(name, "__invented__", 12) != 0) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || !member->is_anon) {
+      continue;
+    }
+    if (strcmp(member->symbol->name.value, name) == 0) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
 static StructMember* FindDirectStructMemberByName(Struct* str,
                                                   const char* name) {
   if (str == NULL || name == NULL) {
     return NULL;
   }
-  return MapFindPointerKey(&str->symbol_name_table, (void*)name);
+  StructMember* member = MapFindPointerKey(&str->symbol_name_table, (void*)name);
+  if (member != NULL) {
+    return member;
+  }
+  return FindInventedLayoutMemberByName(str, name);
 }
 
 static StructMember* FindStructMemberByNameRec(Struct* str, const char* name,
@@ -2861,6 +2886,14 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         !LexLookingAt(parser->lex, TOK(enum));
     TypeRecord* member_type = TypeParserParseType(parser, true);
     parser->parsing_direct_class_template = saved_direct_class_template;
+    // Unscoped enumerators are members of the enclosing class even when the
+    // enum declares an object (`enum civil_kind { SKIPPED } kind;`), so
+    // `civil_lookup::SKIPPED` is valid.  A bare `enum E { A };` hits this
+    // once here; do not inject again on the semicolon.
+    if (TypeIsEnum(member_type)) {
+      AddCXXUnscopedEnumConstantMembers(parser, str, member_type,
+                                        current_access);
+    }
     bool member_decl_had_inline_body = false;
     while (!LexEof(parser->lex)) {
       bool has_inline_body = false;
@@ -2875,8 +2908,6 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           }
         }
         if (TypeIsEnum(member_type)) {
-          AddCXXUnscopedEnumConstantMembers(parser, str, member_type,
-                                            current_access);
           break;
         }
         if (member_type == NULL || !TypeIsStructOrUnion(member_type) ||
@@ -3311,8 +3342,18 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     }
   }
 
-  // Every member is now declared; re-parse the deferred inline bodies in
-  // complete-class context, then restore this frame's collection pointer.
+  // Every member is now declared.  Implicit special members must exist before
+  // inline bodies are re-parsed: `new (p) T()` is lowered to a constructor
+  // call only when T's constructor is already declared, otherwise it assigns
+  // a compound literal and rejects a class whose copy assignment is deleted
+  // (CordRepFlat, because of std::atomic).
+  ComputeCXXAggregateStatus(str);
+  if (str->tag_symbol != NULL) {
+    AddImplicitCXXSpecialMembers(parser, str, str->tag_symbol);
+    AddImplicitCXXDestructorIfNeeded(parser, str, str->tag_symbol);
+  }
+  // Re-parse the deferred inline bodies in complete-class context, then
+  // restore this frame's collection pointer.
   FlushDeferredNoexceptSpecifiers(parser, &deferred_noexcept_specifiers);
   FlushDeferredInlineMemberBodies(parser, &deferred_inline_bodies);
   parser->deferred_inline_bodies = saved_deferred_inline_bodies;

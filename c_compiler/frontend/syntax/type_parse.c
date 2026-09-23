@@ -63,6 +63,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->enclosing_template_substitution_target = NULL;
   parser->cxx_member_definition = NULL;
   parser->cxx_qualified_friend_function = NULL;
+  parser->cxx_qualified_definition_namespace = NULL;
   parser->parsing_friend_declaration = false;
   parser->declarator_template_arguments = NULL;
   parser->parsing_direct_class_template = false;
@@ -112,6 +113,7 @@ void TypeParserReset(TypeParser* parser) {
   parser->enclosing_template_substitution_target = NULL;
   parser->cxx_member_definition = NULL;
   parser->cxx_qualified_friend_function = NULL;
+  parser->cxx_qualified_definition_namespace = NULL;
   parser->parsing_friend_declaration = false;
   parser->parsing_direct_class_template = false;
   parser->placeholder_variable_constraint = NULL;
@@ -3633,6 +3635,26 @@ static void ResolveQualifiedMemberDeclarator(TypeParser* parser,
   if (owner == NULL || owner->type == NULL ||
       !TypeIsStructOrUnion(owner->type) ||
       owner->type->info.struct_info == NULL) {
+    // `void ns::f() { ... }` defines a function previously declared in that
+    // namespace (including its inline namespaces), not a class member.
+    Namespace* ns = name->absolute || parser->syntax->current_namespace == NULL
+                        ? compiler->global_namespace
+                        : parser->syntax->current_namespace;
+    for (size_t i = 0; i + 1 < name->components.length && ns != NULL; i++) {
+      ns = NamespaceFindChildForQualifiedLookup(
+          ns, name->components.value.p[i]);
+    }
+    if (ns != NULL) {
+      String member_name;
+      StringInit(&member_name, FullyQualifiedIdentifierLast(name));
+      NamespaceInlineSymbolLookup found =
+          NamespaceResolveSymbolInInlineSet(ns, &member_name);
+      StringDestruct(&member_name);
+      if (found.status == kInlineLookupUnique && found.symbol != NULL) {
+        parser->cxx_qualified_definition_namespace = ns;
+        return;
+      }
+    }
     SyntaxError(parser->syntax, "Qualified declarator %s does not name a class member",
                 name->spelling.value);
     return;
@@ -3712,13 +3734,37 @@ static bool ParseMemberPointerDeclarator(TypeParser* parser) {
   if (!LookingAtMemberPointerDeclaratorSuffix(parser)) {
     return false;
   }
-  String class_name;
-  StringInit(&class_name, parser->lex->spelling.value);
-  LexNextToken(parser->lex);
-  LexMatch(parser->lex, TOK(coloncolon));
-  LexMatch(parser->lex, TOK(star));
-  TypeRecord* mptr = MemberPointerTypeForClassName(parser, &class_name);
-  StringDestruct(&class_name);
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+          parser->syntax, &name, TC(decl))) {
+    FullyQualifiedIdentifierDestruct(&name);
+    return true;
+  }
+  if (!LexMatch(parser->lex, TOK(coloncolon)) ||
+      !LexMatch(parser->lex, TOK(star))) {
+    SyntaxError(parser->syntax, "Pointer-to-member requires a class type");
+    FullyQualifiedIdentifierDestruct(&name);
+    return true;
+  }
+  Symbol* class_sym = SyntaxFindQualifiedSymbol(parser->syntax, &name);
+  TypeRecord* class_type = class_sym != NULL ? class_sym->type : NULL;
+  int placeholder_index = -1;
+  TypeRecord* mptr = NULL;
+  if (class_type != NULL &&
+      TypeIsTemplateParameterPlaceholder(class_type, &placeholder_index)) {
+    mptr = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+    mptr->declarator = kDeclMemberPointer;
+    mptr->template_parameter_index = placeholder_index;
+    mptr->size = 0;
+  } else if (class_type != NULL && TypeIsStructOrUnion(class_type) &&
+             class_type->info.struct_info != NULL) {
+    mptr = NewMemberPointerTypeRecord(class_type->info.struct_info, kQualPlain);
+  } else if (name.components.length == 1) {
+    mptr = MemberPointerTypeForClassName(
+        parser, name.components.value.p[0]);
+  }
+  FullyQualifiedIdentifierDestruct(&name);
   if (mptr == NULL) {
     SyntaxError(parser->syntax, "Pointer-to-member requires a class type");
     return true;
@@ -3776,22 +3822,27 @@ void TypeParserParseBase(TypeParser* parser) {
       }
       if (CompilerIsCXX() && LexMatch(parser->lex, TOK(coloncolon)) &&
           LexMatch(parser->lex, TOK(star))) {
-        String class_name;
-        StringInit(&class_name, FullyQualifiedIdentifierLast(&name));
-        Symbol* class_sym = SyntaxFindSymbol(parser->syntax, &class_name);
-        Struct* class_info = NULL;
-        if (class_sym != NULL && class_sym->type != NULL &&
-            TypeIsStructOrUnion(class_sym->type) &&
-            class_sym->type->info.struct_info != NULL) {
-          class_info = class_sym->type->info.struct_info;
+        Symbol* class_sym = SyntaxFindQualifiedSymbol(parser->syntax, &name);
+        TypeRecord* class_type =
+            class_sym != NULL ? class_sym->type : NULL;
+        int placeholder_index = -1;
+        TypeRecord* mptr = NULL;
+        if (class_type != NULL &&
+            TypeIsTemplateParameterPlaceholder(class_type,
+                                               &placeholder_index)) {
+          mptr = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+          mptr->declarator = kDeclMemberPointer;
+          mptr->template_parameter_index = placeholder_index;
+          mptr->size = 0;
+        } else if (class_type != NULL && TypeIsStructOrUnion(class_type) &&
+                   class_type->info.struct_info != NULL) {
+          mptr = NewMemberPointerTypeRecord(class_type->info.struct_info,
+                                            kQualPlain);
         }
-        StringDestruct(&class_name);
-        if (class_info == NULL) {
+        if (mptr == NULL) {
           SyntaxError(parser->syntax,
                       "Pointer-to-member requires a class type");
         } else {
-          TypeRecord* mptr =
-              NewMemberPointerTypeRecord(class_info, kQualPlain);
           VectorAppend(&parser->stack, mptr);
           if (LexLookingAt(parser->lex, TOK(identifier))) {
             SourceLocation location = parser->lex->current_token_location;

@@ -2522,6 +2522,38 @@ static bool MacroEqual(Macro* macro, bool is_function_like, Vector* args,
 // Given a path (vector of strings) and a filename, search the path for the file
 // and open it in `mode` if found.  If it is found, sets the filename string to
 // the pathname.  Returns NULL if the file couldn't be found or opened.
+// #include "..." searches the directory of the file that contains the
+// directive before the -I paths ([cpp.include]).
+static FILE* OpenIncludeBesideCurrentFile(Preprocessor* p, String* filename) {
+  if (p == NULL || p->lex == NULL || p->lex->source == NULL ||
+      p->lex->source->filename.value == NULL ||
+      p->lex->source->filename.length == 0 || filename == NULL ||
+      filename->value == NULL) {
+    return NULL;
+  }
+  const char* current = p->lex->source->filename.value;
+  const char* slash = strrchr(current, '/');
+  size_t dir_len = slash == NULL ? 0 : (size_t)(slash - current);
+  size_t path_len = dir_len + (slash == NULL ? 0 : 1) + filename->length;
+  char* path = malloc(path_len + 1);
+  if (path == NULL) {
+    return NULL;
+  }
+  if (slash == NULL) {
+    memcpy(path, filename->value, filename->length + 1);
+  } else {
+    memcpy(path, current, dir_len);
+    path[dir_len] = '/';
+    memcpy(path + dir_len + 1, filename->value, filename->length + 1);
+  }
+  FILE* fp = fopen(path, "r");
+  if (fp != NULL) {
+    StringSet(filename, path);
+  }
+  free(path);
+  return fp;
+}
+
 static FILE* FindFileInPath(Vector* path, String* filename, size_t* start,
                             const char* mode) {
   for (size_t i = *start; i < path->length; i++) {
@@ -2941,9 +2973,14 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   size_t path_index = start_index;
   bool found_in_system_path = false;
   if (!system_include) {
-    // Not a system include (#include "...") so search user include
-    // paths.
-    fp = FindFileInPath(&p->user_include_paths, &filename, &path_index, "r");
+    // Not a system include (#include "...") so search the including file's
+    // directory, then the user include paths.
+    if (start_index == 0) {
+      fp = OpenIncludeBesideCurrentFile(p, &filename);
+    }
+    if (fp == NULL) {
+      fp = FindFileInPath(&p->user_include_paths, &filename, &path_index, "r");
+    }
   }
   if (fp == NULL) {
     // Not found in user include paths or this was a system include
@@ -4385,9 +4422,10 @@ bool PreprocessorHasInclude(Preprocessor* p, String* filename,
   FILE* fp = NULL;
   size_t path_index = 0;
   if (!system_include) {
-    // Not a system include (#include "...") so search user include
-    // paths.
-    fp = FindFileInPath(&p->user_include_paths, filename, &path_index, "r");
+    fp = OpenIncludeBesideCurrentFile(p, filename);
+    if (fp == NULL) {
+      fp = FindFileInPath(&p->user_include_paths, filename, &path_index, "r");
+    }
   }
   if (fp == NULL) {
     // Not found in user include paths or this was a system include

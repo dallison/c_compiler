@@ -347,6 +347,44 @@ class basic_string {
     return *this;
   }
 
+  basic_string& assign(const CharT* s, size_type n) {
+    __size = 0;
+    __data[0] = CharT();
+    return append(s, n);
+  }
+
+  basic_string& assign(const CharT* s) {
+    return assign(s, traits_type::length(s));
+  }
+
+  basic_string& assign(const basic_string& s) {
+    return assign(s.__data, s.__size);
+  }
+
+  basic_string& assign(size_type n, CharT c) {
+    __size = 0;
+    __data[0] = CharT();
+    return append(n, c);
+  }
+
+  // Erases `count` characters starting at `index`.  A count of `npos` erases
+  // through the end, which is what `erase(index)` means.
+  basic_string& erase(size_type index = 0, size_type count = npos) {
+    if (index > __size) {
+      return *this;
+    }
+    if (count > __size - index) {
+      count = __size - index;
+    }
+    size_type tail = __size - index - count;
+    if (tail != 0 && count != 0) {
+      traits_type::move(__data + index, __data + index + count, tail);
+    }
+    __size = index + tail;
+    __data[__size] = CharT();
+    return *this;
+  }
+
   void push_back(CharT c) {
     __reserve_for(__size + 1);
     __data[__size] = c;

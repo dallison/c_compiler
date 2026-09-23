@@ -99,10 +99,47 @@ bool SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(Syntax* syntax) {
   }
   LexCheckpoint checkpoint;
   LexCheckpointSave(lex, &checkpoint);
-  LexNextToken(lex);
   bool result = false;
-  if (LexMatch(lex, TOK(coloncolon))) {
-    result = LexLookingAt(lex, TOK(star));
+  // `type_identity<T>::type::*` and `ns::Class::*` are member-pointer
+  // declarators.  Walk nested-name components, including template-ids, and
+  // stop at `::*`.  Stay on the current line: LexNextToken past EOL runs
+  // preprocessor directives, and restoring the checkpoint cannot undo an
+  // include that was pushed and popped.
+  while (lex->pos < lex->line.length && LexLookingAt(lex, TOK(identifier))) {
+    LexNextToken(lex);
+    if (lex->pos >= lex->line.length) {
+      break;
+    }
+    if (LexLookingAt(lex, TOK(less))) {
+      LexNextToken(lex);
+      int depth = 1;
+      while (lex->pos < lex->line.length && depth > 0) {
+        if (LexLookingAt(lex, TOK(less))) {
+          depth++;
+        } else if (LexLookingAt(lex, TOK(greater))) {
+          depth--;
+        }
+        if (lex->pos >= lex->line.length) {
+          depth = 0;
+          break;
+        }
+        LexNextToken(lex);
+      }
+      if (lex->pos >= lex->line.length) {
+        break;
+      }
+    }
+    if (!LexLookingAt(lex, TOK(coloncolon))) {
+      break;
+    }
+    if (lex->pos >= lex->line.length) {
+      break;
+    }
+    LexNextToken(lex);
+    if (LexLookingAt(lex, TOK(star))) {
+      result = true;
+      break;
+    }
   }
   LexCheckpointRestore(lex, &checkpoint);
   LexCheckpointDestruct(&checkpoint);
@@ -339,7 +376,13 @@ static StructMember* FindMemberFunctionTemplateSpecialization(
         overload->symbol->type->info.function.template_origin == NULL) {
       continue;
     }
-    if (TypeEqual(overload->symbol->type, type)) {
+    // Explicit specializations of one function template share a signature
+    // (`Add<kBack>(CordRep*)` and `Add<kFront>(CordRep*)`).  They are
+    // different functions when their template arguments differ.
+    if (TypeEqual(overload->symbol->type, type) &&
+        TemplateArgumentVectorEqual(
+            overload->symbol->type->template_arguments,
+            type->template_arguments)) {
       return overload;
     }
   }
@@ -979,6 +1022,21 @@ bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name) {
   return true;
 }
 
+// `Class::*` is a pointer-to-member declarator, not another nested-name
+// component.  The qualified-id parser must leave the `::` in place.
+static bool QualifiedNameContinuesWithMemberPointer(Lex* lex) {
+  if (!CompilerIsCXX() || !LexLookingAt(lex, TOK(coloncolon))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  LexNextToken(lex);
+  bool member_pointer = LexLookingAt(lex, TOK(star));
+  LexCheckpointRestore(lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return member_pointer;
+}
+
 static bool ParseQualifiedIdentifierComponent(Syntax* syntax, String* component) {
   if (LexLookingAt(syntax->lex, TOK(identifier))) {
     StringInit(component, syntax->lex->spelling.value);
@@ -1003,7 +1061,9 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
 
   FullyQualifiedIdentifierAppend(name, &component);
   StringDestruct(&component);
-  while (LexMatch(lex, TOK(coloncolon))) {
+  while (LexLookingAt(lex, TOK(coloncolon)) &&
+         !QualifiedNameContinuesWithMemberPointer(lex)) {
+    LexMatch(lex, TOK(coloncolon));
     name->is_qualified = true;
     bool is_destructor = LexMatch(lex, TOK(tilde));
     if (!is_destructor && CompilerIsCXX()) {
@@ -1068,7 +1128,9 @@ bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
   FullyQualifiedIdentifierSetLastTemplateArguments(
       name, SyntaxConsumeOptionalTemplateId(syntax, followers));
 
-  while (LexMatch(lex, TOK(coloncolon))) {
+  while (LexLookingAt(lex, TOK(coloncolon)) &&
+         !QualifiedNameContinuesWithMemberPointer(lex)) {
+    LexMatch(lex, TOK(coloncolon));
     name->is_qualified = true;
     bool is_destructor = LexMatch(lex, TOK(tilde));
     if (!is_destructor && CompilerIsCXX()) {
@@ -1449,7 +1511,10 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
       FullyQualifiedIdentifierAppend(&prefix, name->components.value.p[i]);
     }
     Symbol* tag = SyntaxFindQualifiedTag(syntax, &prefix);
-    if (tag != NULL && tag->type != NULL && TypeIsScopedEnum(tag->type)) {
+    // C++ allows `Enum::enumerator` for unscoped enumerations as well as
+    // scoped ones ([dcl.enum]).  C only has the scoped-enum form.
+    if (tag != NULL && tag->type != NULL && TypeIsEnum(tag->type) &&
+        (CompilerIsCXX() || TypeIsScopedEnum(tag->type))) {
       symbol = EnumFindConstant(tag->type->info.enum_info, &last);
     }
     FullyQualifiedIdentifierDestruct(&prefix);
@@ -1459,7 +1524,14 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
         SyntaxFindQualifiedPrefixSymbolImpl(
             syntax, name, name->components.length - 1,
             /*allow_dependent_template_args=*/true);
-    if (owner != NULL && owner->type != NULL &&
+    if (owner != NULL && owner->type != NULL && TypeIsEnum(owner->type) &&
+        owner->type->info.enum_info != NULL &&
+        (CompilerIsCXX() || owner->type->info.enum_info->is_scoped)) {
+      // `using MethodIdentifier = Tracker::Method;` then
+      // `MethodIdentifier::kUnknown`.  The prefix is a typedef, not a tag.
+      symbol = EnumFindConstant(owner->type->info.enum_info, &last);
+    }
+    if (symbol == NULL && owner != NULL && owner->type != NULL &&
         TypeIsStructOrUnion(owner->type) &&
         owner->type->info.struct_info != NULL) {
       StructMember* member =
@@ -6743,7 +6815,14 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     VectorAppend(&compiler->declaration_asts, sym->type->info.function.body);
     SyntaxCXXConstructorInitListDestruct(&cxx_initializers);
     SyntaxNeedSemicolon(syntax, TC(decl));
-    return NewVariableDeclarationASTNode(sym, NULL, sym->location);
+    // An out-of-line `= default` is a definition.  The caller treats a
+    // non-null result whose declaration vector is empty as a mix of a
+    // definition and a declaration, and the diagnostic lands on the next
+    // token (the function after the semicolon).  Record the definition the
+    // same way a braced body does.
+    VectorAppend(declarations,
+                 NewVariableDeclarationASTNode(sym, NULL, sym->location));
+    return NewDeclarationListASTNode(declarations, sym->location);
   }
 
   if (sym->type->info.function.is_deleted) {
@@ -8248,7 +8327,17 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           ? parser->cxx_member_definition->symbol
           : NULL;
       if (parser->cxx_member_definition == NULL) {
-        Symbol* raw_old = FindFileScopeSymbol(syntax, &sym->name);
+        Symbol* raw_old = NULL;
+        if (parser->cxx_qualified_definition_namespace != NULL) {
+          NamespaceInlineSymbolLookup found = NamespaceResolveSymbolInInlineSet(
+              parser->cxx_qualified_definition_namespace, &sym->name);
+          if (found.status == kInlineLookupUnique) {
+            raw_old = found.symbol;
+          }
+        }
+        if (raw_old == NULL) {
+          raw_old = FindFileScopeSymbol(syntax, &sym->name);
+        }
         old_sym = SymbolFindModuleCompatibleOverload(raw_old, sym);
         if (raw_old != NULL && old_sym == NULL) {
           SyntaxError(syntax,

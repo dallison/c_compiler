@@ -1663,8 +1663,13 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       !(symbol->flags.is_template && symbol->type != NULL &&
         TypeIsFunction(symbol->type) &&
         symbol->type->info.function.cxx_member_owner != NULL);
-  if (CompilerIsCXX() && !name.is_qualified && symbol != NULL &&
-      !block_hides_member && !hiding_has_explicit_template_args) {
+  // `symbol == NULL` still counts: out-of-line member bodies do not put
+  // class members in the ordinary symbol table, so `Init<kFront>` would
+  // otherwise be parsed as a comparison.
+  if (CompilerIsCXX() && !name.is_qualified && !block_hides_member &&
+      !hiding_has_explicit_template_args &&
+      (symbol != NULL || LexLookingAt(syntax->lex, TOK(less)) ||
+       LexLookingAt(syntax->lex, TOK(lparen)))) {
     Symbol* this_symbol = ThisSymbolForUnqualifiedMember(
         syntax, &name, /*allow_unresolved_member=*/false);
     if (this_symbol != NULL && this_symbol->type != NULL &&
@@ -1689,7 +1694,8 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           (StorageIs(member->symbol->storage, STO(typedef)) ||
            SymbolIsTagSymbol(member->symbol));
       bool symbol_is_this_member_function =
-          symbol->type != NULL && TypeIsFunction(symbol->type) &&
+          symbol != NULL && symbol->type != NULL &&
+          TypeIsFunction(symbol->type) &&
           symbol->type->info.function.cxx_member_owner != NULL &&
           symbol->type->info.function.cxx_member_owner ==
               this_symbol->type->next->info.struct_info &&

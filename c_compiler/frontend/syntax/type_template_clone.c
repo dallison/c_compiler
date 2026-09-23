@@ -6191,6 +6191,35 @@ static void RewriteDeferredConstructorMemberName(VectorASTNode* call) {
   StringSet(member_name->value.string, constructor_name);
 }
 
+static bool ExpressionContainsUndeducedAuto(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  if (node->type != NULL && TypeContainsAuto(node->type)) {
+    return true;
+  }
+  if (node->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+    if (symbol != NULL && symbol->type != NULL &&
+        TypeContainsAuto(symbol->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CallActualsContainUndeducedAuto(VectorASTNode* call) {
+  if (call == NULL || call->children == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < call->children->length; i++) {
+    if (ExpressionContainsUndeducedAuto(call->children->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static ASTNode* ReanalyzeClonedDependentFunctorCall(
     ASTNode* node, void* data, ASTNodeTransformAction* action) {
   (void)data;
@@ -6209,6 +6238,12 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
     return node;
   }
   VectorASTNode* call = (VectorASTNode*)node;
+  // `auto* rep = ...; Buf(rep)` is cloned before `rep` is deduced.  Resolving
+  // the constructor now diagnoses a conversion from `auto*` and sticks.  Leave
+  // the call until DeduceClonedAutoLocalVisitor has replaced the placeholder.
+  if (CallActualsContainUndeducedAuto(call)) {
+    return node;
+  }
   if (call->children != NULL) {
     for (size_t i = 0; i < call->children->length; i++) {
       ASTNode* actual = call->children->value.p[i];
@@ -6841,6 +6876,9 @@ static ASTNode* ReanalyzeClonedResolvedCall(
       ASTNodeSubtreeContainsPackExpansion((ASTNode*)call)) {
     return node;
   }
+  if (CallActualsContainUndeducedAuto(call)) {
+    return node;
+  }
   IdentifierASTNode* id = (IdentifierASTNode*)call->left;
   if (clone != NULL && clone->to_func != NULL &&
       TypeIsFunction(clone->to_func) && id->symbol != NULL &&
@@ -7239,6 +7277,11 @@ static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
       decl->initializer == NULL) {
     return;
   }
+  // Earlier clone passes re-analyze the initializer (for example a call whose
+  // pack has just been expanded) and mark it analyzed while the variable is
+  // still `auto`.  AnalyzeStatement would then keep the placeholder, so a later
+  // use such as `Buf(rep)` still has type `auto*` (printed as `*`).
+  ASTNodeVisit(decl->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
   node->flags &= ~kASTAnalyzed;
   AnalyzeStatement(node);
 }
@@ -7712,6 +7755,11 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   ASTNodeVisit(body, MarkClonedCastForReanalysis, 0, NULL);
   ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
   ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
+  // Constructor calls whose arguments were still `auto` were left unresolved
+  // above.  The placeholders are concrete now.
+  body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
+                                  NULL);
+  body = ASTNodeVisitAndTransform(body, ReanalyzeClonedResolvedCall, &clone);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedUntypedExpression, NULL);
   DeferredStructuredBindingContext deferred_binding = {
       .clone = &clone, .materialized = false};

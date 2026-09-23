@@ -54,6 +54,8 @@ typedef struct {
   Struct* enclosing_template_substitution_target;
   StructMember* cxx_member_definition;
   Symbol* cxx_qualified_friend_function;
+  // `void ns::f()` defines a namespace function, not a class member.
+  struct Namespace* cxx_qualified_definition_namespace;
   bool parsing_friend_declaration;
   Vector* declarator_template_arguments;
   bool parsing_direct_class_template;
