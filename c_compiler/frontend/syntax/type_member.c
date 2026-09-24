@@ -1500,9 +1500,11 @@ static bool SkipConstructorInitializersAndBody(TypeParser* parser) {
   return SkipInlineMemberFunctionBody(parser);
 }
 
-static void AddFunctionTemplateParameterScopeSymbols(Syntax* syntax,
-                                                     TypeRecord* func) {
-  Vector* template_parameters = &func->info.function.template_parameters;
+static void AddTemplateParameterScopeSymbols(Syntax* syntax,
+                                               Vector* template_parameters) {
+  if (template_parameters == NULL) {
+    return;
+  }
   for (size_t i = 0; i < template_parameters->length; i++) {
     TemplateParameter* parameter = template_parameters->value.p[i];
     if (parameter == NULL || parameter->name.length == 0) {
@@ -1534,6 +1536,42 @@ static void AddFunctionTemplateParameterScopeSymbols(Syntax* syntax,
     symbol->template_parameter_index = parameter->index;
     SyntaxAddSymbol(syntax, symbol);
   }
+}
+
+static void AddFunctionTemplateParameterScopeSymbols(Syntax* syntax,
+                                                     TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  AddTemplateParameterScopeSymbols(syntax,
+                                   &func->info.function.template_parameters);
+}
+
+// Inline bodies of a nested class are replayed when the enclosing class is
+// finished, after the nested class template's parameter scope has been closed.
+// `open_class` is the class whose scope is still active; every class between
+// the member's owner and that class must have its template parameters
+// reinstalled or names such as `T` in `Manager<T>::Value` are not found.
+static void AddClosedClassTemplateParameterSymbols(Syntax* syntax,
+                                                   Struct* owner,
+                                                   Struct* open_class) {
+  if (owner == NULL || owner == open_class) {
+    return;
+  }
+  AddClosedClassTemplateParameterSymbols(syntax, owner->lexical_parent,
+                                         open_class);
+  AddTemplateParameterScopeSymbols(syntax, &owner->template_parameters);
+}
+
+static Vector* InnermostClosedClassTemplateParameters(Struct* owner,
+                                                      Struct* open_class) {
+  for (Struct* scope = owner; scope != NULL && scope != open_class;
+       scope = scope->lexical_parent) {
+    if (scope->template_parameters.length > 0) {
+      return &scope->template_parameters;
+    }
+  }
+  return NULL;
 }
 
 static void AddInlineFunctionScopeSymbols(Syntax* syntax, TypeRecord* func) {
@@ -1919,20 +1957,45 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
     int old_template_parameter_count = syntax->current_template_parameter_count;
     bool old_parsing_template = syntax->parsing_template_declaration;
     TypeRecord* func = entry->member_symbol->type;
-    if (func != NULL && TypeIsFunction(func) &&
-        func->info.function.template_parameter_count > 0) {
+    bool func_is_template = func != NULL && TypeIsFunction(func) &&
+                            func->info.function.template_parameter_count > 0;
+    Struct* member_owner =
+        func != NULL && TypeIsFunction(func)
+            ? func->info.function.cxx_member_owner
+            : NULL;
+    if (func_is_template) {
       syntax->current_template_parameters =
           &func->info.function.template_parameters;
       syntax->current_template_parameter_count =
           func->info.function.template_parameter_base +
           func->info.function.template_parameter_count;
       syntax->parsing_template_declaration = true;
+    } else {
+      Vector* class_parameters = InnermostClosedClassTemplateParameters(
+          member_owner, parser->cxx_member_owner);
+      if (class_parameters != NULL &&
+          (syntax->current_template_parameters == NULL ||
+           syntax->current_template_parameters->length == 0)) {
+        syntax->current_template_parameters = class_parameters;
+        int count = syntax->current_template_parameter_count;
+        for (size_t p = 0; p < class_parameters->length; p++) {
+          TemplateParameter* parameter = class_parameters->value.p[p];
+          if (parameter != NULL && parameter->index + 1 > count) {
+            count = parameter->index + 1;
+          }
+        }
+        syntax->current_template_parameter_count = count;
+        syntax->parsing_template_declaration = true;
+      } else if (class_parameters != NULL) {
+        syntax->parsing_template_declaration = true;
+      }
     }
 
     syntax->context = kParsingBlockScope;
     SyntaxOpenScope(syntax);
-    if (func != NULL && TypeIsFunction(func) &&
-        func->info.function.template_parameter_count > 0) {
+    AddClosedClassTemplateParameterSymbols(syntax, member_owner,
+                                           parser->cxx_member_owner);
+    if (func_is_template) {
       AddFunctionTemplateParameterScopeSymbols(syntax, func);
     }
     AddInlineFunctionScopeSymbols(syntax, entry->member_symbol->type);
@@ -3384,9 +3447,20 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     AddImplicitCXXDestructorIfNeeded(parser, str, str->tag_symbol);
   }
   // Re-parse the deferred inline bodies in complete-class context, then
-  // restore this frame's collection pointer.
+  // restore this frame's collection pointer.  Bodies of a nested class stay
+  // deferred until the enclosing class is complete: their potential scope
+  // includes members of that enclosing class declared after the nested class
+  // (`HashEq<T*>::Hash` calling `HashEq::ToPtr`).
   FlushDeferredNoexceptSpecifiers(parser, &deferred_noexcept_specifiers);
-  FlushDeferredInlineMemberBodies(parser, &deferred_inline_bodies);
+  if (saved_deferred_inline_bodies != NULL) {
+    for (size_t i = 0; i < deferred_inline_bodies.length; i++) {
+      VectorAppend(saved_deferred_inline_bodies,
+                   deferred_inline_bodies.value.p[i]);
+    }
+    VectorClear(&deferred_inline_bodies);
+  } else {
+    FlushDeferredInlineMemberBodies(parser, &deferred_inline_bodies);
+  }
   FinishDeferredClassStaticAsserts(parser, str, &deferred_static_asserts);
   parser->deferred_inline_bodies = saved_deferred_inline_bodies;
   parser->deferred_noexcept_specifiers =

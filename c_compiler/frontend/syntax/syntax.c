@@ -1536,6 +1536,29 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
         owner->type->info.struct_info != NULL) {
       StructMember* member =
           FindStructMember(owner->type->info.struct_info, &last);
+      // `HashEq::ToPtr` inside `HashEq<T*>` names the specialization being
+      // defined.  Ordinary lookup finds the primary template, which does not
+      // have the member; the enclosing class with the same name does.
+      if (member == NULL && owner->name.value != NULL) {
+        String prefix_name;
+        StringInit(&prefix_name, owner->name.value);
+        Struct* scope = syntax->cxx_class_head;
+        if (scope == NULL && compiler->current_function != NULL &&
+            TypeIsFunction(compiler->current_function)) {
+          scope = compiler->current_function->info.function.cxx_member_owner;
+        }
+        for (; scope != NULL && member == NULL;
+             scope = scope->lexical_parent) {
+          if (!CurrentClassNameMatchesTypeName(scope, &prefix_name)) {
+            continue;
+          }
+          member = FindStructMember(scope, &last);
+          if (member != NULL) {
+            owner = scope->tag_symbol != NULL ? scope->tag_symbol : owner;
+          }
+        }
+        StringDestruct(&prefix_name);
+      }
       if (member != NULL &&
           (member->is_static ||
            (member->symbol != NULL &&

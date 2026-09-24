@@ -1233,31 +1233,39 @@ static bool ExpressionIdentifierNeedsTemplateIdParser(Syntax* syntax) {
       int square_depth = 0;
       int brace_depth = 0;
       do {
-        // A `;` or brace can never appear at the top level of a
-        // template-argument list, so this `<` is a less-than operator rather
-        // than a template-id.  Stopping here also keeps the lookahead from
-        // running to the end of an #include'd file, which on EOF frees the
-        // current source out from under the checkpoint we restore below.
-        if (LexLookingAt(syntax->lex, TOK(semicolon)) ||
-            LexLookingAt(syntax->lex, TOK(lbrace)) ||
-            LexLookingAt(syntax->lex, TOK(rbrace))) {
+        // A `;` or brace at the top level of this `<...>` cannot belong to a
+        // template-argument list (`a < b;`, `a < b {`).  Braces nested inside
+        // parentheses are part of the argument (`is_same<decltype(T{}), U>`),
+        // so they must not abort the lookahead.  Stopping at a real top-level
+        // terminator also keeps the scan from running to EOF, which frees the
+        // current source out from under the checkpoint restored below.
+        Token token = syntax->lex->current_token;
+        bool at_top = paren_depth == 0 && square_depth == 0 &&
+                      brace_depth == 0;
+        if (at_top &&
+            (token == TOK(semicolon) || token == TOK(lbrace) ||
+             token == TOK(rbrace))) {
           break;
         }
-        Token token = syntax->lex->current_token;
         if (token == TOK(lparen)) {
           paren_depth++;
         } else if (token == TOK(rparen)) {
-          paren_depth--;
+          if (paren_depth > 0) {
+            paren_depth--;
+          }
         } else if (token == TOK(lsquare)) {
           square_depth++;
         } else if (token == TOK(rsquare)) {
-          square_depth--;
+          if (square_depth > 0) {
+            square_depth--;
+          }
         } else if (token == TOK(lbrace)) {
           brace_depth++;
         } else if (token == TOK(rbrace)) {
-          brace_depth--;
-        } else if (paren_depth == 0 && square_depth == 0 &&
-                   brace_depth == 0) {
+          if (brace_depth > 0) {
+            brace_depth--;
+          }
+        } else if (at_top) {
           if (token == TOK(less)) {
             depth++;
           } else {

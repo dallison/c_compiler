@@ -2084,6 +2084,13 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
     composite_parser.cxx_member_owner = parser->cxx_member_owner;
     composite_parser.parsing_direct_class_template =
         parser->parsing_direct_class_template;
+    // A nested class is parsed by a fresh TypeParser.  Share the enclosing
+    // class's deferred-body list so the nested class's inline bodies stay
+    // deferred until the enclosing class is complete.
+    composite_parser.deferred_inline_bodies = parser->deferred_inline_bodies;
+    composite_parser.deferred_noexcept_specifiers =
+        parser->deferred_noexcept_specifiers;
+    composite_parser.deferred_static_asserts = parser->deferred_static_asserts;
     
     if ((type & (kTypeStruct | kTypeUnion)) != 0) {
       bool is_union = (type & kTypeUnion) != 0;
