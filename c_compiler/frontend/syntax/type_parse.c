@@ -392,6 +392,57 @@ static bool TypeHasNonTypeMember(TypeRecord* type, String* name) {
   return true;
 }
 
+// `struct D : P::type` names a type even without `typename` ([temp.res]).
+// A template type parameter is a typedef of an unknown type, so the ordinary
+// identifier path would consume only `P` and leave `::type` as a declarator.
+static bool TryParseTemplateParameterQualifiedType(TypeParser* parser,
+                                                   Symbol* symbol,
+                                                   TypeRecord** out) {
+  if (!CompilerIsCXX() || parser == NULL || symbol == NULL || out == NULL ||
+      !symbol->flags.is_template_type_parameter ||
+      symbol->template_parameter_index < 0 ||
+      !LexLookingAt(parser->lex, TOK(identifier))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  LexNextToken(parser->lex);
+  bool nested = LexLookingAt(parser->lex, TOK(coloncolon));
+  LexCheckpointRestore(parser->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  if (!nested) {
+    return false;
+  }
+  symbol->flags.used = true;
+  LexNextToken(parser->lex);
+  LexMatch(parser->lex, TOK(coloncolon));
+  LexMatch(parser->lex, TOK(template));
+  FullyQualifiedIdentifier member;
+  FullyQualifiedIdentifierInit(&member);
+  if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+          parser->syntax, &member, TC(decl)) ||
+      member.components.length == 0) {
+    SyntaxError(parser->syntax, "Expected nested type name");
+    FullyQualifiedIdentifierDestruct(&member);
+    *out = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    return true;
+  }
+  TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+  type->template_parameter_index = symbol->template_parameter_index;
+  type->dependent_member_name = NewString(member.spelling.value);
+  if (member.template_arguments.length > 0) {
+    type->dependent_member_template_arguments = NewVector();
+    for (size_t i = 0; i < member.template_arguments.length; i++) {
+      VectorAppend(type->dependent_member_template_arguments,
+                   TemplateArgumentVectorCopy(
+                       member.template_arguments.value.p[i]));
+    }
+  }
+  FullyQualifiedIdentifierDestruct(&member);
+  *out = type;
+  return true;
+}
+
 static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
                                             TypeRecord* result) {
   if (result == NULL || !LexLookingAt(parser->lex, TOK(coloncolon))) {
@@ -935,6 +986,61 @@ static TypeRecord* BuildDependentMemberTemplateTypename(
   type->dependent_member_template_arguments = component_args;
   StringDestruct(&encoded_name);
   return type;
+}
+
+// `typename Class<T>::member` in an out-of-line member of `Class` names the
+// current instantiation.  The arguments are the class's own parameters, so the
+// member typedef can be copied from the class template instead of left as an
+// unknown type that will not match the in-class declaration.
+static bool TemplateArgumentIsIdentityParameter(TemplateArgument* arg,
+                                               TemplateParameter* param) {
+  if (arg == NULL || param == NULL || arg->kind != param->kind) {
+    return false;
+  }
+  if (param->kind == kTemplateParameterType) {
+    return arg->type != NULL &&
+           arg->type->template_parameter_index == param->index &&
+           arg->type->dependent_member_name == NULL;
+  }
+  return arg->template_parameter_index == param->index &&
+         arg->dependent_expr == NULL;
+}
+
+static bool TemplateArgumentsAreIdentity(Vector* args, Symbol* templ) {
+  if (args == NULL || templ == NULL || templ->type == NULL ||
+      !TypeIsStructOrUnion(templ->type) ||
+      templ->type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = templ->type->info.struct_info;
+  if (str->template_parameters.length != args->length) {
+    return false;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    if (!TemplateArgumentIsIdentityParameter(
+            args->value.p[i], str->template_parameters.value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static TypeRecord* CurrentInstantiationMemberType(Symbol* origin, Vector* args,
+                                                  String* member_name) {
+  if (!TemplateArgumentsAreIdentity(args, origin) || member_name == NULL) {
+    return NULL;
+  }
+  StructMember* member =
+      FindStructMember(origin->type->info.struct_info, member_name);
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL) {
+    return NULL;
+  }
+  if (!StorageIs(member->symbol->storage, STO(typedef)) &&
+      !SymbolIsTagSymbol(member->symbol)) {
+    return NULL;
+  }
+  return TypeRecordCopy(member->symbol->type);
 }
 
 /* `ClassTemplate<Args>::member` used as a type (a base-specifier, alias, or
@@ -1587,19 +1693,23 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               String* member_name =
                   typename_name.components.value.p[
                       typename_name.components.length - 1];
-            type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
-            type_record->template_origin = dependent_member_origin;
-            type_record->template_arguments =
-                TemplateArgumentVectorCopy(parsed_args);
-            type_record->dependent_member_name =
-                NewString(member_name->value);
-            type_record->dependent_member_template_arguments = NewVector();
-            for (size_t i = base_index + 1;
-                 i < typename_name.template_arguments.length; i++) {
-              VectorAppend(
-                  type_record->dependent_member_template_arguments,
-                  TemplateArgumentVectorCopy(
-                      typename_name.template_arguments.value.p[i]));
+            type_record = CurrentInstantiationMemberType(
+                dependent_member_origin, parsed_args, member_name);
+            if (type_record == NULL) {
+              type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+              type_record->template_origin = dependent_member_origin;
+              type_record->template_arguments =
+                  TemplateArgumentVectorCopy(parsed_args);
+              type_record->dependent_member_name =
+                  NewString(member_name->value);
+              type_record->dependent_member_template_arguments = NewVector();
+              for (size_t i = base_index + 1;
+                   i < typename_name.template_arguments.length; i++) {
+                VectorAppend(
+                    type_record->dependent_member_template_arguments,
+                    TemplateArgumentVectorCopy(
+                        typename_name.template_arguments.value.p[i]));
+              }
             }
             type |= type_record->type;
             handled_dependent_template_member = true;
@@ -1928,6 +2038,13 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       if (symbol == NULL) {
         symbol = FindCurrentClassNestedType(parser, &typedef_name);
       }
+      TypeRecord* dependent_qualified = NULL;
+      if (TryParseTemplateParameterQualifiedType(parser, symbol,
+                                                 &dependent_qualified)) {
+        type_record = dependent_qualified;
+        type |= type_record->type;
+        goto simple_typedef_done;
+      }
       TypeRecord* current_class_type =
           ParseCurrentClassTemplateType(parser, &typedef_name);
       if (current_class_type != NULL) {
@@ -2069,6 +2186,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           type |= type_record->type;
         }
       }
+    simple_typedef_done:
       StringDestruct(&typedef_name);
     }
   }

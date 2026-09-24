@@ -10182,6 +10182,21 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     analyzed_callee->parent = &node->base;
     analyzed_callee->child_id = 0;
   }
+  // `Class::member(args)` where `member` is only visible through a dependent
+  // base stays unresolved until the class template is instantiated.
+  if (analyzed_callee != NULL &&
+      (analyzed_callee->flags & kASTDependentQualifiedName) != 0 &&
+      analyzed_callee->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)analyzed_callee;
+    if (id->symbol != NULL && id->symbol->type != NULL &&
+        id->symbol->type->dependent_member_name != NULL &&
+        TypeContainsTemplateParameter(id->symbol->type)) {
+      node->base.flags |= kASTDependentFunctorCall;
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+      return (ASTNode*)node;
+    }
+  }
   // A dependent pseudo-destructor can become scalar only while the member
   // access above is being instantiated.  Re-run the explicit-destructor path
   // after that access has acquired its concrete receiver type.

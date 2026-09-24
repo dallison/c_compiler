@@ -5326,6 +5326,89 @@ static ASTNode* ApplyResolvedDependentMember(
  * class, walk any intermediate member-alias path, then look up the named
  * static / enum / member.  If the scope is only partially substituted,
  * bake that result back so a later instantiation can finish the lookup. */
+/* `Class::member` parsed inside `Class` when `member` is only in a dependent
+ * base.  The placeholder's origin is the class template and it has no
+ * template arguments of its own; resolve it on the concrete instantiation. */
+static bool StructIsConcreteInstantiationOf(Struct* candidate, Symbol* origin) {
+  if (candidate == NULL || origin == NULL || origin->type == NULL ||
+      !TypeIsStructOrUnion(origin->type) ||
+      origin->type->info.struct_info == NULL ||
+      candidate->tag_symbol == NULL || candidate->tag_symbol->type == NULL) {
+    return false;
+  }
+  TypeRecord* type = candidate->tag_symbol->type;
+  Symbol* inst_origin = type->template_origin;
+  if (inst_origin == NULL || inst_origin->type == NULL ||
+      !TypeIsStructOrUnion(inst_origin->type) ||
+      inst_origin->type->info.struct_info != origin->type->info.struct_info) {
+    return false;
+  }
+  if (type->template_arguments == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(type->template_arguments) ||
+      TypeContainsTemplateParameter(type)) {
+    return false;
+  }
+  return true;
+}
+
+static Struct* ConcreteCurrentInstantiation(TemplateFunctionBodyClone* clone,
+                                            Symbol* origin) {
+  if (clone == NULL) {
+    return NULL;
+  }
+  Struct* candidates[4];
+  candidates[0] = clone->to_owner;
+  candidates[1] = clone->substitution_target;
+  candidates[2] = clone->parser != NULL
+                      ? clone->parser->template_substitution_target
+                      : NULL;
+  candidates[3] = clone->parser != NULL
+                      ? clone->parser->enclosing_template_substitution_target
+                      : NULL;
+  for (int i = 0; i < 4; i++) {
+    if (StructIsConcreteInstantiationOf(candidates[i], origin)) {
+      return candidates[i];
+    }
+  }
+  return NULL;
+}
+
+static bool TypeIsCurrentInstantiationMember(TypeRecord* type) {
+  return type != NULL && type->template_arguments == NULL &&
+         type->template_origin != NULL &&
+         type->dependent_member_name != NULL &&
+         type->template_origin->type != NULL &&
+         TypeIsStructOrUnion(type->template_origin->type);
+}
+
+static ASTNode* ResolveCurrentInstantiationMember(
+    TemplateFunctionBodyClone* clone, IdentifierASTNode* id, ASTNode* node) {
+  if (!TypeIsCurrentInstantiationMember(id->symbol->type)) {
+    return NULL;
+  }
+  Struct* lookup =
+      ConcreteCurrentInstantiation(clone, id->symbol->type->template_origin);
+  if (lookup == NULL || lookup->tag_symbol == NULL ||
+      lookup->tag_symbol->type == NULL) {
+    return node;
+  }
+  const char* effective_member_name =
+      id->symbol->type->dependent_member_name->value;
+  for (const char* c = effective_member_name; c != NULL && *c != '\0'; c++) {
+    if (c[0] == ':' && c[1] == ':') {
+      effective_member_name = c + 2;
+    }
+  }
+  TypeRecord* concrete = TypeRecordCopy(lookup->tag_symbol->type);
+  ASTNode* resolved = ApplyResolvedDependentMember(
+      clone, id, node, concrete, effective_member_name);
+  if (resolved != NULL) {
+    return resolved;
+  }
+  TypeRecordDelete(concrete);
+  return node;
+}
+
 static ASTNode* ResolveDependentQualifiedValueName(
     TemplateFunctionBodyClone* clone, IdentifierASTNode* id,
     ASTNode* node) {
@@ -5336,6 +5419,9 @@ static ASTNode* ResolveDependentQualifiedValueName(
        id->symbol->type->template_origin == NULL &&
        !TypeContainsTemplateParameter(id->symbol->type))) {
     return NULL;
+  }
+  if (TypeIsCurrentInstantiationMember(id->symbol->type)) {
+    return ResolveCurrentInstantiationMember(clone, id, node);
   }
   TypeRecord* scope = TypeRecordCopy(id->symbol->type);
   StringDelete(scope->dependent_member_name);
@@ -5653,6 +5739,16 @@ static ASTNode* CloneIdentifierInTemplateBody(
   RemapIdentifierToInstantiatedClassMember(clone, id, node);
   ASTNode* rewritten = ResolveDependentQualifiedValueName(clone, id, node);
   if (rewritten != NULL) {
+    // Resolution used to return before explicit template arguments
+    // (`T::template f<U>`) were substituted, so the call stayed a template.
+    if (rewritten->op == AST_OP(identifier)) {
+      IdentifierASTNode* resolved = (IdentifierASTNode*)rewritten;
+      ASTNode* folded = SubstituteIdentifierExplicitTemplateArguments(
+          clone, resolved, rewritten);
+      if (folded != NULL) {
+        return folded;
+      }
+    }
     return rewritten;
   }
   BindTemplateTemplateParameterIdentifier(clone, id);

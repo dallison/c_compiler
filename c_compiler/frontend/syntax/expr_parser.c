@@ -1325,12 +1325,19 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
       name->components.length < 2) {
     return NULL;
   }
-  // No component may carry template arguments (e.g. `T::tmpl<...>`); that needs
-  // the richer dependent-template-id handling, which this does not cover.
+  // A template-id on an earlier component (`Trait<T>::member`) is handled by
+  // the scope builders.  Arguments on the final component
+  // (`T::template f<U>`) belong to the member function template.
+  Vector* member_template_arguments = NULL;
   for (size_t i = 0; i < name->template_arguments.length; i++) {
-    if (name->template_arguments.value.p[i] != NULL) {
+    Vector* args = name->template_arguments.value.p[i];
+    if (args == NULL) {
+      continue;
+    }
+    if (i + 1 != name->components.length) {
       return NULL;
     }
+    member_template_arguments = args;
   }
   String* scope = name->components.value.p[0];
   Symbol* scope_symbol = SyntaxFindSymbol(syntax, scope);
@@ -1377,6 +1384,87 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
   placeholder->flags.invented = true;
   ASTNode* node = NewIdentifierASTNode(placeholder, location);
   node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
+  if (member_template_arguments != NULL) {
+    ((IdentifierASTNode*)node)->template_arguments =
+        TemplateArgumentVectorCopy(member_template_arguments);
+  }
+  return node;
+}
+
+// `Derived::member` inside a class template names a member of the current
+// instantiation.  If it is not declared in the class itself, it may still
+// come from a dependent base and must not be diagnosed until instantiation
+// ([temp.dep]).
+static bool StructHasDependentBase(Struct* str) {
+  if (str == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL) {
+      continue;
+    }
+    if (TypeContainsTemplateParameter(base->type) ||
+        base->type->dependent_member_name != NULL ||
+        base->type->template_parameter_index >= 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static Struct* FindEnclosingClassByName(Syntax* syntax, String* name) {
+  Struct* scope = syntax != NULL ? syntax->cxx_class_head : NULL;
+  if (scope == NULL && compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    scope = compiler->current_function->info.function.cxx_member_owner;
+  }
+  for (; scope != NULL; scope = scope->lexical_parent) {
+    if (CurrentClassNameMatchesTypeName(scope, name)) {
+      return scope;
+    }
+  }
+  return NULL;
+}
+
+static ASTNode* BuildDependentCurrentInstantiationMember(
+    Syntax* syntax, FullyQualifiedIdentifier* name, SourceLocation location) {
+  if (!CompilerIsCXX() || syntax == NULL || name == NULL ||
+      !name->is_qualified || name->components.length != 2) {
+    return NULL;
+  }
+  Struct* owner =
+      FindEnclosingClassByName(syntax, name->components.value.p[0]);
+  if (owner == NULL || owner->tag_symbol == NULL ||
+      !StructHasDependentBase(owner)) {
+    return NULL;
+  }
+  String member_name;
+  StringInit(&member_name, FullyQualifiedIdentifierLast(name));
+  StructMember* member = FindStructMember(owner, &member_name);
+  StringDestruct(&member_name);
+  if (member != NULL) {
+    return NULL;
+  }
+  String* member_spelling =
+      name->components.value.p[name->components.length - 1];
+  TypeRecord* dependent_type =
+      NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+  dependent_type->template_origin = owner->tag_symbol;
+  dependent_type->dependent_member_name = NewString(member_spelling->value);
+  Symbol* placeholder =
+      NewSymbol(member_spelling->value, dependent_type, STO(implicit));
+  placeholder->flags.invented = true;
+  ASTNode* node = NewIdentifierASTNode(placeholder, location);
+  node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
+  if (name->template_arguments.length == name->components.length) {
+    Vector* member_args =
+        name->template_arguments.value.p[name->components.length - 1];
+    if (member_args != NULL) {
+      ((IdentifierASTNode*)node)->template_arguments =
+          TemplateArgumentVectorCopy(member_args);
+    }
+  }
   return node;
 }
 
@@ -1803,6 +1891,10 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       }
       ASTNode* dependent = BuildDependentQualifiedValueName(
           syntax, &name, lex->current_token_location);
+      if (dependent == NULL) {
+        dependent = BuildDependentCurrentInstantiationMember(
+            syntax, &name, lex->current_token_location);
+      }
       if (dependent != NULL) {
         FullyQualifiedIdentifierDestruct(&name);
         return dependent;
