@@ -11812,9 +11812,11 @@ static void ValidateCXXConstCast(CastASTNode* node) {
   TypeRecord* to = node->cast_type;
   TypeRecord* from = node->expr->type;
   bool valid = false;
-  if (TypeIsPointer(to) && TypeIsPointer(from) &&
-      to->next != NULL && from->next != NULL &&
-      !TypeIsFunction(to->next) && !TypeIsFunction(from->next)) {
+  if (TypeIsPointer(to) && to->next != NULL && !TypeIsFunction(to->next) &&
+      from != NULL && from->next != NULL && !TypeIsFunction(from->next) &&
+      (TypeIsPointer(from) || TypeIsArray(from))) {
+    // An array operand decays to a pointer to its first element
+    // (`const_cast<T*>(array)`).
     valid = TypeEqualIgnoringQualifiers(to->next, from->next);
   } else if (TypeIsReference(to) && to->next != NULL &&
              !TypeIsFunction(to->next)) {

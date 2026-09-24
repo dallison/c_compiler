@@ -2087,9 +2087,20 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     }
   }
 
-  TypeRecord* subst = SubstituteDependentMemberType(parser, type, args);
-  if (subst != NULL) {
-    return subst;
+  // `SizeType<A>::size_type` stores the alias pattern's parameter index (0)
+  // alongside the use-site arguments (`A`, which may be a later parameter of
+  // the enclosing class).  Substituting that index against the enclosing
+  // argument list binds `size_type` to the wrong parameter.  The template-id
+  // path below applies the recorded arguments first.
+  bool alias_member_template_id =
+      type->template_origin != NULL && type->template_arguments != NULL &&
+      type->dependent_member_name != NULL;
+  TypeRecord* subst = NULL;
+  if (!alias_member_template_id) {
+    subst = SubstituteDependentMemberType(parser, type, args);
+    if (subst != NULL) {
+      return subst;
+    }
   }
 
   subst = SubstituteTypePackIndex(parser, type, args);

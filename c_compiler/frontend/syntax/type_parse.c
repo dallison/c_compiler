@@ -1030,6 +1030,15 @@ static TypeRecord* CurrentInstantiationMemberType(Symbol* origin, Vector* args,
   if (!TemplateArgumentsAreIdentity(args, origin) || member_name == NULL) {
     return NULL;
   }
+  // Identity arguments name the primary, but a class with partial
+  // specializations can define this member differently
+  // (`remove_reference<T&>::type` is not the primary's `T`).  Leave those as
+  // dependent members so instantiation selects the partial.  A class with no
+  // partials has one definition, so the primary member is the one named by an
+  // out-of-line `Class<T>::member` (SampleRecorder<T>::DisposeCallback).
+  if (origin->type->info.struct_info->partial_specializations.length != 0) {
+    return NULL;
+  }
   StructMember* member =
       FindStructMember(origin->type->info.struct_info, member_name);
   if (member == NULL || member->symbol == NULL ||

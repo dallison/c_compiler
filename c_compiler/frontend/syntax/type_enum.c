@@ -156,11 +156,15 @@ bool EnumFixedValueIsRepresentable(const Enum* e, int64_t value) {
                  ? e->fixed_underlying_bit_width
                  : e->fixed_underlying_size * 8;
   if ((e->fixed_underlying_type & kTypeUnsigned) != 0) {
+    // A 64-bit unsigned value is stored in int64_t.  The high bit makes the
+    // bit pattern look negative (`~size_t{} - 100` is UINT64_MAX - 100).
+    if (bits >= 64) {
+      return true;
+    }
     if (value < 0) {
       return false;
     }
-    return bits >= 63 ||
-           (uint64_t)value <= (UINT64_C(1) << bits) - UINT64_C(1);
+    return (uint64_t)value <= (UINT64_C(1) << bits) - UINT64_C(1);
   }
   if (bits >= 64) {
     return true;
