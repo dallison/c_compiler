@@ -2592,6 +2592,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   VectorInit(&deferred_static_asserts);
   Vector* saved_deferred_static_asserts = parser->deferred_static_asserts;
   parser->deferred_static_asserts = &deferred_static_asserts;
+  Vector deferred_friend_bodies;
+  VectorInit(&deferred_friend_bodies);
+  Vector* saved_deferred_friend_bodies = parser->syntax->deferred_friend_bodies;
+  parser->syntax->deferred_friend_bodies = &deferred_friend_bodies;
   while (!LexLookingAt(parser->lex, TOK(rbrace)) && !LexEof(parser->lex)) {
     Token token_before = parser->lex->current_token;
     SourceLocation location_before = parser->lex->current_token_location;
@@ -3452,6 +3456,13 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   // includes members of that enclosing class declared after the nested class
   // (`HashEq<T*>::Hash` calling `HashEq::ToPtr`).
   FlushDeferredNoexceptSpecifiers(parser, &deferred_noexcept_specifiers);
+  // Friend bodies name members of this class, including ones declared later
+  // (`FindElement`).  Replay them while this class is still the class head.
+  // Do not bubble them to an enclosing class: lookup uses cxx_class_head,
+  // which is this class only until ParseStructMemberList returns.
+  SyntaxFlushDeferredFriendBodies(parser->syntax);
+  parser->syntax->deferred_friend_bodies = saved_deferred_friend_bodies;
+  VectorDestruct(&deferred_friend_bodies);
   if (saved_deferred_inline_bodies != NULL) {
     for (size_t i = 0; i < deferred_inline_bodies.length; i++) {
       VectorAppend(saved_deferred_inline_bodies,

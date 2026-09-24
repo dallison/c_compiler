@@ -1913,6 +1913,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->template_substitution_target = NULL;
   syntax->enclosing_template_substitution_source = NULL;
   syntax->enclosing_template_substitution_target = NULL;
+  syntax->deferred_friend_bodies = NULL;
   syntax->context = kParsingFileScope;
   syntax->c_linkage = false;
   syntax->explicit_cxx_linkage = false;
@@ -7139,21 +7140,147 @@ static Struct* ResolveFriendClassFromEnclosingClasses(Struct* befriending,
 // can substitute the signature/body and register a concrete friend; we do NOT
 // inject the dependent declaration into the enclosing namespace (which would
 // otherwise create a spurious overload) nor emit any body now.
+typedef struct {
+  Symbol* symbol;
+  String body_text;
+  int body_lineno;
+  uint32_t body_file_index;
+  size_t body_path_index;
+  bool body_is_system_header;
+} DeferredFriendBody;
+
+static void AddDeferredFriendTemplateParameters(Syntax* syntax,
+                                                TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  Vector* parameters = &func->info.function.template_parameters;
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* parameter = parameters->value.p[i];
+    if (parameter == NULL || parameter->name.length == 0) {
+      continue;
+    }
+    TypeRecord* parameter_type = NULL;
+    if (parameter->kind == kTemplateParameterType) {
+      parameter_type =
+          NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      parameter_type->template_parameter_index = parameter->index;
+      parameter_type->template_parameter_name = NewString(parameter->name.value);
+    } else if (parameter->type != NULL) {
+      parameter_type = TypeRecordCopy(parameter->type);
+    } else {
+      continue;
+    }
+    Storage storage = parameter->kind == kTemplateParameterType ? STO(typedef)
+                                                                : STO(implicit);
+    Symbol* symbol = NewSymbol(parameter->name.value, parameter_type, storage);
+    symbol->flags.invented = true;
+    symbol->flags.is_template_parameter = true;
+    symbol->flags.is_template_type_parameter =
+        parameter->kind == kTemplateParameterType;
+    symbol->flags.is_parameter_pack = parameter->is_parameter_pack;
+    symbol->template_parameter_index = parameter->index;
+    SyntaxAddSymbol(syntax, symbol);
+  }
+}
+
+static void SkipFriendFunctionBody(Lex* lex) {
+  if (!LexMatch(lex, TOK(lbrace))) {
+    return;
+  }
+  int brace_count = 1;
+  while (brace_count > 0 && !LexEof(lex)) {
+    if (LexLookingAt(lex, TOK(lbrace))) {
+      brace_count++;
+    } else if (LexLookingAt(lex, TOK(rbrace))) {
+      brace_count--;
+    }
+    LexNextToken(lex);
+  }
+}
+
+// An inline friend defined inside a class is in complete-class scope
+// ([class.mem]).  Capture the body and parse it after every member of this
+// class is declared, so a later nested type (`FindElement`) is visible.
+static void DeferFriendFunctionBody(Syntax* syntax, Symbol* sym) {
+  Lex* lex = syntax->lex;
+  DeferredFriendBody* deferred = malloc(sizeof(DeferredFriendBody));
+  deferred->symbol = sym;
+  deferred->body_lineno = lex->source->lineno;
+  deferred->body_file_index = lex->source->file_index;
+  deferred->body_path_index = lex->source->path_index;
+  deferred->body_is_system_header = lex->source->is_system_header;
+  StringInit(&deferred->body_text, NULL);
+  LexBeginCapture(lex, &deferred->body_text);
+  SkipFriendFunctionBody(lex);
+  LexEndCapture(lex);
+  VectorAppend(syntax->deferred_friend_bodies, deferred);
+}
+
+void SyntaxFlushDeferredFriendBodies(Syntax* syntax) {
+  Vector* deferred = syntax->deferred_friend_bodies;
+  if (deferred == NULL || deferred->length == 0) {
+    return;
+  }
+  Lex* lex = syntax->lex;
+  LexCheckpoint end_checkpoint;
+  LexCheckpointSave(lex, &end_checkpoint);
+  for (size_t i = 0; i < deferred->length; i++) {
+    DeferredFriendBody* entry = deferred->value.p[i];
+    String* text = NewString(NULL);
+    StringSetString(text, &entry->body_text);
+    Source* replay = NewSourceFromString("<deferred-friend-body>", text);
+    replay->file_index = entry->body_file_index;
+    replay->lineno = entry->body_lineno - 1;
+    replay->path_index = entry->body_path_index;
+    replay->is_system_header = entry->body_is_system_header;
+    lex->source = replay;
+    lex->suppress_preprocessing = true;
+    StringClear(&lex->line);
+    lex->pos = 0;
+    LexNextToken(lex);
+    SyntaxOpenScope(syntax);
+    AddDeferredFriendTemplateParameters(syntax, entry->symbol->type);
+    Vector* friend_decls = NewVector();
+    ASTNode* definition =
+        DeclareOrDefineFunction(syntax, friend_decls, entry->symbol, NULL);
+    SyntaxCloseScope(syntax);
+    if (definition == NULL) {
+      VectorDelete(friend_decls);
+    } else {
+      VectorAppend(&compiler->declaration_asts, definition);
+    }
+    lex->suppress_preprocessing = false;
+    lex->source = NULL;
+    SourceDelete(replay);
+    StringDestruct(&entry->body_text);
+    free(entry);
+  }
+  LexCheckpointRestore(lex, &end_checkpoint);
+  LexCheckpointDestruct(&end_checkpoint);
+  VectorClear(deferred);
+}
+
 static void SyntaxDeferTemplateFriendFunction(Syntax* syntax,
                                               Struct* befriending, Symbol* sym) {
   sym->namespace_ = syntax->current_namespace;
   ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type, true);
   if (LexLookingAt(syntax->lex, TOK(lbrace))) {
-    // Parse and retain the inline body on sym->type; intentionally do not queue
-    // the returned definition for emission - that happens per instantiation.
-    Vector* friend_decls = NewVector();
-    ASTNode* definition =
-        DeclareOrDefineFunction(syntax, friend_decls, sym, NULL);
-    if (definition == NULL) {
-      VectorDelete(friend_decls);
+    if (syntax->deferred_friend_bodies != NULL) {
+      DeferFriendFunctionBody(syntax, sym);
     } else {
-      // Retain as a teardown root so the template body outlives parsing.
-      VectorAppend(&compiler->declaration_asts, definition);
+      // Parse and retain the inline body on sym->type; intentionally do not
+      // queue the returned definition for emission - that happens per
+      // instantiation.
+      Vector* friend_decls = NewVector();
+      ASTNode* definition =
+          DeclareOrDefineFunction(syntax, friend_decls, sym, NULL);
+      if (definition == NULL) {
+        VectorDelete(friend_decls);
+      } else {
+        // Retain as a teardown root so the template body outlives parsing.
+        VectorAppend(&compiler->declaration_asts, definition);
+      }
     }
   } else {
     SyntaxNeedSemicolon(syntax, TC(decl));

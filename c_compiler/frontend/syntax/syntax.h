@@ -84,6 +84,9 @@ typedef struct Syntax {
   struct Struct* template_substitution_target;
   struct Struct* enclosing_template_substitution_source;
   struct Struct* enclosing_template_substitution_target;
+  // Inline friend bodies captured while a class body is parsed, replayed once
+  // that class is complete so later nested types are visible.
+  Vector* deferred_friend_bodies;
 
   ParserContext context;     // Parser context.
   Storage init_storage;      // Current storage for symbol being initialized.
@@ -188,6 +191,7 @@ int SyntaxEvaluateDeferredStaticAssert(ASTNode* node, bool* dependent);
 // 'friend X;') as well as friend function declarations and inline friend
 // function definitions, recording the granted friendships on 'befriending'.
 void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending);
+void SyntaxFlushDeferredFriendBodies(Syntax* syntax);
 // Parses the optional C++26 reason following an already-consumed `delete`
 // function-body token.
 void SyntaxParseCXXDeletedFunctionReason(Syntax* syntax, TypeRecord* func);
