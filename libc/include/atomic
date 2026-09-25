@@ -133,6 +133,10 @@ struct atomic {
     return __atomic_load_n(&__value, order);
   }
 
+  operator T() const noexcept {
+    return load();
+  }
+
   void store(T value, memory_order order = memory_order_seq_cst) noexcept {
     __atomic_store_n(&__value, value, order);
   }
@@ -297,6 +301,10 @@ struct atomic {
 
   T load(memory_order order = memory_order_seq_cst) const volatile noexcept {
     return __atomic_load_n(&__value, order);
+  }
+
+  operator T() const volatile noexcept {
+    return load();
   }
 
   void store(T value,

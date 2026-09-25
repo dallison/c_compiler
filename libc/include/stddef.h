@@ -47,7 +47,11 @@ typedef struct {
 #define __MAX_ALIGN_T
 #endif
 
+#ifdef __cplusplus
+#define NULL 0
+#else
 #define NULL ((void*)0)
+#endif
 
 #if !defined(__WCHAR_T) && !defined(__cplusplus)
 typedef int wchar_t;

@@ -15,7 +15,19 @@
 extern "C" {
 #endif
 
+#ifdef __cplusplus
+#define NULL 0
+#else
 #define NULL ((void*)0)
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+void* __builtin_return_address(unsigned int __level);
+#ifdef __cplusplus
+}
+#endif
 
 #ifndef __SIZE_T
 #if defined(__6502__)

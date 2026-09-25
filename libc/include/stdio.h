@@ -17,7 +17,11 @@ extern "C" {
 #endif
 
 #define EOF (-1)
+#ifdef __cplusplus
+#define NULL 0
+#else
 #define NULL ((void*)0)
+#endif
 
 #ifndef __FPOS_T
 #if defined(__6502__)

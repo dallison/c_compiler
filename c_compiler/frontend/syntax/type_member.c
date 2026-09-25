@@ -132,6 +132,8 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
                                             bool qualifier_names_constructor);
 static bool CanOverloadStructMember(StructMember* existing,
                                     StructMember* member);
+static StructMember* FindConstrainedMemberOverload(StructMember* first,
+                                                   Symbol* candidate);
 
 bool StructMemberIsNestedType(StructMember* member) {
   return member != NULL && member->symbol != NULL &&
@@ -645,7 +647,9 @@ static void AddCXXMemberUsingFunction(TypeParser* parser, Struct* owner,
       StructMemberDelete(member);
       return;
     }
-    if (FindStructMemberOverload(existing, member->symbol->type) != NULL) {
+    // SFINAE pairs such as `insert(T&&)` with `int = enable_if<C>` versus
+    // `int&...` share a call signature.  They are still distinct overloads.
+    if (FindConstrainedMemberOverload(existing, member->symbol) != NULL) {
       String member_name;
       StringInit(&member_name, NULL);
       SymbolFunctionDiagnosticName(member->symbol, &member_name);

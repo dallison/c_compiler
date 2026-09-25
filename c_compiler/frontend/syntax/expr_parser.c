@@ -1325,19 +1325,25 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
       name->components.length < 2) {
     return NULL;
   }
-  // A template-id on an earlier component (`Trait<T>::member`) is handled by
-  // the scope builders.  Arguments on the final component
-  // (`T::template f<U>`) belong to the member function template.
+  // A template-id on the scope itself (`Trait<T>::member`) is handled by the
+  // scope builders.  Arguments on the final component (`T::template f<U>`)
+  // belong to the member function template.  Arguments on a middle component
+  // (`H::template is_hashable<T>::value`) stay on the dependent member path.
   Vector* member_template_arguments = NULL;
+  bool intermediate_member_template_id = false;
   for (size_t i = 0; i < name->template_arguments.length; i++) {
     Vector* args = name->template_arguments.value.p[i];
     if (args == NULL) {
       continue;
     }
-    if (i + 1 != name->components.length) {
+    if (i == 0) {
       return NULL;
     }
-    member_template_arguments = args;
+    if (i + 1 == name->components.length) {
+      member_template_arguments = args;
+    } else {
+      intermediate_member_template_id = true;
+    }
   }
   String* scope = name->components.value.p[0];
   Symbol* scope_symbol = SyntaxFindSymbol(syntax, scope);
@@ -1380,11 +1386,22 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
     StringAppendString(dependent_type->dependent_member_name,
                        name->components.value.p[i]);
   }
+  if (intermediate_member_template_id &&
+      dependent_type->dependent_member_template_arguments == NULL) {
+    Vector* path_args = NewVector();
+    for (size_t i = 1; i < name->components.length; i++) {
+      Vector* args = i < name->template_arguments.length
+                         ? name->template_arguments.value.p[i]
+                         : NULL;
+      VectorAppend(path_args, TemplateArgumentVectorCopy(args));
+    }
+    dependent_type->dependent_member_template_arguments = path_args;
+  }
   Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
   placeholder->flags.invented = true;
   ASTNode* node = NewIdentifierASTNode(placeholder, location);
   node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
-  if (member_template_arguments != NULL) {
+  if (member_template_arguments != NULL && !intermediate_member_template_id) {
     ((IdentifierASTNode*)node)->template_arguments =
         TemplateArgumentVectorCopy(member_template_arguments);
   }
@@ -1794,11 +1811,26 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
   // may be marked block-scope.  `return put(v)` must still become
   // `this->put(v)` so deduction sees a member call.  A true local or
   // parameter continues to hide.
+  //
+  // A block-scope using-declaration (`using std::swap;`) nominates a
+  // namespace entity.  Ordinary lookup follows the alias, so `symbol`
+  // above is that entity and is not itself marked block-scope.  The
+  // using still hides class members of the same name.
+  bool block_scope_using_hides_member = false;
+  if (!name.is_qualified && name.components.length == 1 &&
+      syntax->local_symbol_stack != NULL) {
+    Symbol* local = FindLocalSymbol(syntax->local_symbol_stack,
+                                    name.components.value.p[0]);
+    block_scope_using_hides_member =
+        local != NULL && local->flags.is_using_alias &&
+        local->flags.is_block_scope;
+  }
   bool block_hides_member =
-      symbol != NULL && symbol->flags.is_block_scope &&
-      !(symbol->flags.is_template && symbol->type != NULL &&
-        TypeIsFunction(symbol->type) &&
-        symbol->type->info.function.cxx_member_owner != NULL);
+      block_scope_using_hides_member ||
+      (symbol != NULL && symbol->flags.is_block_scope &&
+       !(symbol->flags.is_template && symbol->type != NULL &&
+         TypeIsFunction(symbol->type) &&
+         symbol->type->info.function.cxx_member_owner != NULL));
   // `symbol == NULL` still counts: out-of-line member bodies do not put
   // class members in the ordinary symbol table, so `Init<kFront>` would
   // otherwise be parsed as a comparison.
@@ -3389,6 +3421,7 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
                                                       bool* is_consteval,
                                                       bool* is_noexcept,
                                                       TypeRecord* default_type,
+                                                      Vector* attributes,
                                                       TokenClass followers) {
   *is_mutable = false;
   *is_static = false;
@@ -3427,6 +3460,9 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
       *is_constexpr = true;
     } else if (LexLookingAt(syntax->lex, TOK(noexcept))) {
       *is_noexcept = SkipNoexceptSpecifier(syntax, followers);
+    } else if (attributes != NULL &&
+               SyntaxParseAnyAttribute(syntax, attributes)) {
+      // `[&]() __attribute__((always_inline)) { ... }` (and `[[...]]`).
     } else {
       keep_parsing = false;
     }
@@ -3455,6 +3491,11 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
   }
   ParseLambdaTrailingRequiresClause(syntax, func);
   SyntaxParseFunctionContracts(syntax, func, NULL, false);
+  // Attributes may also follow the trailing return type: `[]() -> T attr {}`.
+  if (attributes != NULL) {
+    while (SyntaxParseAnyAttribute(syntax, attributes)) {
+    }
+  }
   return return_type;
 }
 
@@ -3542,9 +3583,11 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   bool is_constexpr = false;
   bool is_consteval = false;
   bool is_noexcept = false;
+  Vector attributes;
+  VectorInit(&attributes);
   return_type = ParseLambdaSpecifiersAndReturnType(
       syntax, func, &is_mutable, &is_static, &is_constexpr, &is_consteval,
-      &is_noexcept, return_type, TC(closebra));
+      &is_noexcept, return_type, &attributes, TC(closebra));
   func->info.function.is_const_member =
       !func->info.function.has_explicit_object_parameter && !is_mutable &&
       !is_static;
@@ -3588,6 +3631,10 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   func->info.function.symbol = op;
   func->info.function.is_inline = true;
   func->info.function.definition = true;
+  VectorAppendVector(&op->attributes, &attributes);
+  VectorClear(&attributes);
+  VectorDestruct(&attributes);
+  SyntaxApplyDeclarationAttributes(syntax, op);
 
   StructMember* member = NewStructMember(op);
   member->is_member_function = true;

@@ -75,6 +75,11 @@ Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals);
 void SetCXXAliasTemplatePlaceholderOrigin(Symbol* alias, TypeRecord* type);
 TypeRecord* ParseCurrentClassTemplateType(TypeParser* parser, String* name);
 bool CurrentClassNameMatchesTypeName(Struct* owner, String* name);
+// Injected-class-name of `owner` or one of its bases (`Derived::Base`).
+Symbol* FindInheritedInjectedClassName(Struct* owner, String* name);
+// The type of that injected-class-name.  A base match returns the base
+// specifier's type, which is the specialization actually inherited.
+TypeRecord* FindInheritedInjectedClassType(Struct* owner, String* name);
 
 void CheckTagType(TypeParser* parser, Symbol* old, bool is_union, bool is_enum);
 void AddInjectedEnumName(TypeParser* parser, Symbol* tag);

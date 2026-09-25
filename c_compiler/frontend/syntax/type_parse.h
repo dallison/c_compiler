@@ -66,6 +66,11 @@ typedef struct {
   // and, if it becomes set, discard the (ill-formed) instantiation instead of
   // emitting a diagnostic.
   bool template_substitution_failed;
+  // The body of a member function template is first cloned with only the
+  // enclosing class arguments.  Its own parameters still use the class's
+  // absolute indices and must not be rebased into that argument vector
+  // before substitution, or `Allocator` (index 1) becomes the class's `T`.
+  bool substituting_enclosing_template_arguments_only;
   // C++20 `Concept auto x`: constraint to attach to the declared symbol after
   // auto deduction.  Alias templates reuse Symbol::associated_constraint at
   // template definition time instead.

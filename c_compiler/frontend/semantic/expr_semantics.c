@@ -300,6 +300,11 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
       node->symbol != NULL && node->symbol->type != NULL &&
       node->symbol->type->dependent_member_name != NULL) {
     if (TypeContainsTemplateParameter(node->symbol->type)) {
+      // The placeholder type is the dependent scope (`allocator_traits<A>`),
+      // not the member (`::value`).  A constexpr bool cannot convert from that
+      // class; keep an unknown value type until instantiation resolves it.
+      ASTNodeSetType(&node->base,
+                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
       return &node->base;
     }
     SemanticError(&node->base, "no member named '%s' in the dependent scope",
@@ -2720,6 +2725,15 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   ASTNode* overloaded = TryAnalyzeOverloadedBinaryOperator(node);
   if (overloaded != NULL) {
     return overloaded;
+  }
+  // `for (auto it = src.begin(), e = src.end(); it != e;)` inside a member
+  // function template keeps undeduced `auto` until the member template's own
+  // parameters are bound.  Comparing those placeholders is not a numeric
+  // operation.
+  if (ExpressionIsTemplateDependent((ASTNode*)node->left) ||
+      ExpressionIsTemplateDependent((ASTNode*)node->right)) {
+    ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+    return (ASTNode*)node;
   }
   if ((TypeIsComplex(node->left->type) ||
        TypeIsComplex(node->right->type)) &&
@@ -7169,6 +7183,56 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
       }
     }
   }
+  // Designated-initializer aggregate initialization (`f({.a = 1, .b = 2})`).
+  // Positional ranking above only accepts expression elements.
+  if (best < 0 && str->is_aggregate && !simple_elements &&
+      braced->initializers != NULL) {
+    bool ok = braced->initializers->length > 0;
+    for (size_t i = 0; ok && i < braced->initializers->length; i++) {
+      ASTNode* init = braced->initializers->value.p[i];
+      if (init == NULL || init->op != AST_OP(designated_init)) {
+        ok = false;
+        break;
+      }
+      DesignatedInitializerASTNode* designated =
+          (DesignatedInitializerASTNode*)init;
+      if (designated->designators == NULL ||
+          designated->designators->length != 1) {
+        ok = false;
+        break;
+      }
+      Designator* designator = designated->designators->value.p[0];
+      if (designator == NULL ||
+          designator->designator_type != kDesignatorStruct) {
+        ok = false;
+        break;
+      }
+      StructMember* member = designator->is_resolved_member
+                                 ? designator->value.struct_member
+                                 : NULL;
+      if (member == NULL && designator->value.struct_member_name != NULL) {
+        member = FindStructMember(str, designator->value.struct_member_name);
+      }
+      if (member == NULL || member->symbol == NULL ||
+          member->symbol->type == NULL) {
+        ok = false;
+        break;
+      }
+      ASTNode* expr = designated->init;
+      if (expr != NULL && expr->op == AST_OP(expr_init)) {
+        expr = ((ExpressionInitializerASTNode*)expr)->expr;
+      }
+      expr = AnalyzeExpression(expr);
+      if (expr == NULL ||
+          OverloadBaseConversionRank(expr->type, member->symbol->type) < 0) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) {
+      best = 0;
+    }
+  }
   VectorDestruct(&elements);
   return best;
 }
@@ -8908,6 +8972,51 @@ static StructMember* InstantiateSelectedMemberTemplateCandidate(
   return member;
 }
 
+/* A derived-class constructor hides an inherited constructor with the same
+ * parameter list (`flat_hash_set() {}` plus `using Base::Base`). */
+static bool MemberExplicitParametersEqual(StructMember* left,
+                                          StructMember* right) {
+  if (left == NULL || right == NULL || left->symbol == NULL ||
+      right->symbol == NULL || left->symbol->type == NULL ||
+      right->symbol->type == NULL || !TypeIsFunction(left->symbol->type) ||
+      !TypeIsFunction(right->symbol->type)) {
+    return false;
+  }
+  Vector* left_params = &left->symbol->type->info.function.prototype;
+  Vector* right_params = &right->symbol->type->info.function.prototype;
+  size_t left_start = left->is_static ? 0 : 1;
+  size_t right_start = right->is_static ? 0 : 1;
+  if (left_params->length < left_start || right_params->length < right_start ||
+      left_params->length - left_start !=
+          right_params->length - right_start) {
+    return false;
+  }
+  for (size_t i = 0; i < left_params->length - left_start; i++) {
+    Symbol* left_param = left_params->value.p[left_start + i];
+    Symbol* right_param = right_params->value.p[right_start + i];
+    if (left_param == NULL || right_param == NULL ||
+        !TypeEqual(left_param->type, right_param->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool DerivedConstructorHidesInherited(StructMember* derived,
+                                             StructMember* inherited) {
+  if (derived == NULL || inherited == NULL || derived->is_using_declaration ||
+      !inherited->is_using_declaration || derived->symbol == NULL ||
+      inherited->symbol == NULL || derived->symbol->type == NULL ||
+      inherited->symbol->type == NULL ||
+      !TypeIsFunction(derived->symbol->type) ||
+      !TypeIsFunction(inherited->symbol->type) ||
+      !derived->symbol->type->info.function.is_constructor ||
+      !inherited->symbol->type->info.function.is_constructor) {
+    return false;
+  }
+  return MemberExplicitParametersEqual(derived, inherited);
+}
+
 static StructMember* ResolveMemberFunctionOverload(StructMember* first,
                                                    VectorASTNode* node,
                                                    BinaryASTNode* member_access) {
@@ -8948,7 +9057,14 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
         best_score = score;
         ambiguous = false;
       } else if (score == best_score) {
-        ambiguous = true;
+        if (DerivedConstructorHidesInherited(best, candidate)) {
+          // The derived constructor hides this inherited one.
+        } else if (DerivedConstructorHidesInherited(candidate, best)) {
+          best = candidate;
+          ambiguous = false;
+        } else {
+          ambiguous = true;
+        }
       }
     }
   }
@@ -8974,6 +9090,13 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
       if (best == NULL || score < best_score) {
         best = effective;
         best_score = score;
+        ambiguous = false;
+      } else if (score == best_score &&
+                 DerivedConstructorHidesInherited(best, effective)) {
+        // The derived constructor hides this inherited one.
+      } else if (score == best_score &&
+                 DerivedConstructorHidesInherited(effective, best)) {
+        best = effective;
         ambiguous = false;
       } else if (score == best_score) {
         bool best_is_template =
@@ -9199,7 +9322,10 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
       TypeIsFunction(id->symbol->type) &&
       id->symbol->type->info.function.unknown_args;
   if (!gathered_inline_overloads && !id->symbol->flags.is_overloaded &&
-      !has_adl_candidates && !ordinary_unknown) {
+      !has_adl_candidates && !ordinary_unknown &&
+      !(id->symbol->flags.is_template && id->symbol->type != NULL &&
+        TypeIsFunction(id->symbol->type) &&
+        id->symbol->type->info.function.template_origin == NULL)) {
     VectorDestruct(&candidates);
     return;
   }
@@ -10350,7 +10476,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       receiver_type = receiver_type->next;
     }
     if (receiver_type != NULL &&
-        TypeContainsTemplateParameter(receiver_type)) {
+        (TypeContainsTemplateParameter(receiver_type) ||
+         TypeContainsAuto(receiver_type))) {
       node->base.flags |= kASTDependentFunctorCall;
       ASTNodeSetType((ASTNode*)node,
                      NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
@@ -10481,6 +10608,31 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     CheckDeletedFunctionUse(id->symbol, (ASTNode*)node);
     if (id->symbol != NULL && id->symbol->flags.is_template &&
         !has_pack_expansion_actual) {
+      // `f<T>()` inside a class template: T is not concrete yet.  Keep the
+      // call dependent so the enclosing constexpr initializer waits for
+      // instantiation instead of rejecting the primary template.
+      if (TypeIsFunction(id->symbol->type) &&
+          TemplateArgumentVectorContainsTemplateParameter(
+              id->template_arguments)) {
+        node->base.flags |= kASTDependentFunctorCall;
+        TypeRecord* return_type = TypeSubstituteFunctionTemplateReturnType(
+            &compiler->syntax, id->symbol, id->template_arguments);
+        if (return_type == NULL) {
+          ASTNodeSetType((ASTNode*)node,
+                         NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                               kQualPlain));
+        } else if (TypeIsReference(return_type)) {
+          ASTNodeSetType((ASTNode*)node, return_type->next);
+          node->base.value_category =
+              return_type->declarator == kDeclRValueReference
+                  ? kValueCategoryXvalue
+                  : kValueCategoryLvalue;
+          TypeRecordDelete(return_type);
+        } else {
+          ASTNodeSetType((ASTNode*)node, return_type);
+        }
+        return (ASTNode*)node;
+      }
       if (TypeIsFunction(id->symbol->type) &&
           !TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
               id->symbol, id->template_arguments, node->children, 0)) {
@@ -11282,8 +11434,10 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     ASTNodeSetType((ASTNode*)node, placeholder);
     return;
   }
-  if (CompilerIsCXX() && receiver_type != NULL && TypeIsUnknown(receiver_type)) {
+  if (CompilerIsCXX() && receiver_type != NULL &&
+      (TypeIsUnknown(receiver_type) || TypeContainsAuto(receiver_type))) {
     TypeRecord* placeholder = TypeRecordCopy(receiver_type);
+    placeholder->type |= kTypeUnknown;
     ASTNodeSetType((ASTNode*)node, placeholder);
     return;
   }
@@ -12626,6 +12780,15 @@ static ASTNode* AnalyzeTypeTraitBuiltin(VectorASTNode* node) {
 // Perform semantic analysis on a expression AST node.  This propagates type
 // information from the node's children to the node and also performs checks to
 // make sure the types follow the rules of the language.
+static void ClearDeferredAutoInitAnalysis(ASTNode* node, void* data,
+                                          int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL) {
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 ASTNode* AnalyzeExpression(ASTNode* node) {
   if (node == NULL || (node->flags & kASTAnalyzed) != 0) {
     return node;
@@ -13062,6 +13225,21 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
           : NULL;
   if (folded != NULL) {
     return folded;
+  }
+
+  // Eager analysis of `auto state = c->GetState()` can run before `c` (itself
+  // an undeduced range-for variable) has a type.  Deduction then leaves `auto`
+  // in place.  Do not freeze that initializer: the later statement pass must
+  // be able to deduce it and lower it to a braced initializer.
+  if (node->op == AST_OP(init)) {
+    BinaryASTNode* init_node = (BinaryASTNode*)node;
+    if (init_node->left != NULL && init_node->left->op == AST_OP(identifier)) {
+      Symbol* init_symbol = ((IdentifierASTNode*)init_node->left)->symbol;
+      if (init_symbol != NULL && TypeContainsAuto(init_symbol->type)) {
+        ASTNodeVisit(node, ClearDeferredAutoInitAnalysis, 0, NULL);
+        return node;
+      }
+    }
   }
 
   // Set flag to prevent double analysis.

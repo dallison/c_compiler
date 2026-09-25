@@ -1722,6 +1722,8 @@ Struct* NewStruct(bool is_union) {
   s->is_aggregate = CompilerIsCXX();
   s->cxx_special_members_complete = false;
   s->vtables_registered = false;
+  s->instantiation_in_progress = false;
+  s->resolving_in_progress_member = false;
   s->template_parameter_count = 0;
   s->defining_template_scope_count = 0;
   s->next_offset = 0;

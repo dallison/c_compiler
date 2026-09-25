@@ -2220,15 +2220,17 @@ static size_t ConstructorInitPackElementIndex(TemplateFunctionBodyClone* clone,
 }
 
 static bool CallIsConstructorInitPackExpansion(ASTNode* node) {
-  if (node == NULL || node->op != AST_OP(call)) {
+  if (node == NULL || node->op != AST_OP(call) || node->parent == NULL ||
+      ASTNodeGetShape(node->parent) != kASTShapeExprStmt) {
     return false;
   }
+  // A mem-initializer pack (`Storage<Ts, I>(args)...`) is one call per base.
+  // An argument pack such as `std::forward<Args>(args)...` inside a call or
+  // a new-expression is a single pattern; its parent expands it.
   if ((node->flags & kASTPackExpansion) != 0) {
     return true;
   }
-  return node->parent != NULL &&
-         (node->parent->flags & kASTPackExpansion) != 0 &&
-         ASTNodeGetShape(node->parent) == kASTShapeExprStmt;
+  return (node->parent->flags & kASTPackExpansion) != 0;
 }
 
 /* A mem-initializer pack expansion (`Storage<Ts, I>(args)...`) is one call
@@ -2337,6 +2339,15 @@ static bool ExpandClonedCallPackActuals(TemplateFunctionBodyClone* clone,
   if (node->op != AST_OP(call) &&
       !(node->op == AST_OP(subscript) &&
         ASTNodeGetShape(node) == kASTShapeVector)) {
+    return false;
+  }
+  // `std::forward<Vs>(rest)...` is one argument of the enclosing call.  The
+  // pattern is cloned while its parent is still that call, before the parent
+  // expands it into one argument per element.  Treating it as a
+  // mem-initializer pack (`Storage<Ts, I>(args)...`) slices it to a single
+  // element and leaves `forward`'s explicit argument bound to the whole pack.
+  if ((node->flags & kASTPackExpansion) != 0 && node->parent != NULL &&
+      node->parent->op == AST_OP(call)) {
     return false;
   }
   if (CallIsConstructorInitPackExpansion(node)) {
@@ -5432,13 +5443,25 @@ static ASTNode* ResolveDependentQualifiedValueName(
   // before substituting so `StorageT<I>` binds `I` rather than leaving it
   // unbound and then instantiating the alias with a fresh parser that has no
   // enclosing-class arguments.
-  if (clone->rebase_template_parameter_base > 0) {
+  // The first clone of that body, while the class is instantiated, has only
+  // the enclosing arguments.  Rebasing first would number the member's own
+  // parameter into that vector (`Allocator` becomes `T`).  Substitute the
+  // enclosing parameters, then rebase whatever is still dependent.
+  bool enclosing_only =
+      clone->parser != NULL &&
+      clone->parser->substituting_enclosing_template_arguments_only;
+  if (!enclosing_only && clone->rebase_template_parameter_base > 0) {
     RebaseTemplateParameterIndices(scope,
                                    clone->rebase_template_parameter_base);
   }
   TypeRecord* concrete = FindInstantiatedOwnerAliasType(clone, scope);
   if (concrete == NULL) {
     concrete = SubstituteQualifiedNameScope(clone, scope);
+  }
+  if (enclosing_only && concrete != NULL &&
+      clone->rebase_template_parameter_base > 0) {
+    RebaseTemplateParameterIndices(concrete,
+                                   clone->rebase_template_parameter_base);
   }
   // `Trait<R, F, A>::value` inside a member template: enclosing arguments may
   // be concrete while `F` is still one of this member template's parameters.
@@ -5473,6 +5496,25 @@ static ASTNode* ResolveDependentQualifiedValueName(
       clone, id, node, concrete, effective_member_name);
   if (resolved != NULL) {
     return resolved;
+  }
+  // A complete class with no such member must stay unresolved.  Baking the
+  // scope type under the member's name makes `P::soo_enabled()` a use of `P`,
+  // so `decltype(P::soo_enabled())` is well-formed and the SFINAE overload is
+  // selected.
+  if (concrete != NULL && !TypeContainsTemplateParameter(concrete) &&
+      TypeIsStructOrUnion(concrete) && concrete->info.struct_info != NULL &&
+      FindStructMemberByName(concrete->info.struct_info,
+                             effective_member_name) == NULL) {
+    concrete->dependent_member_name =
+        NewString(id->symbol->type->dependent_member_name->value);
+    Symbol* copy = NewSymbol(id->symbol->name.value, concrete,
+                             id->symbol->storage);
+    copy->flags = id->symbol->flags;
+    id->symbol = copy;
+    node->flags |= kASTDependentQualifiedName;
+    node->flags &= ~kASTAnalyzed;
+    ASTNodeClearType(node);
+    return node;
   }
   if (concrete != NULL && TypeContainsTemplateParameter(concrete)) {
     return BakePartialDependentQualifiedName(id, node, concrete);
@@ -8048,6 +8090,91 @@ void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
   free(initializers);
 }
 
+static void NoteTemplateParameterIndex(int index, int* max_index) {
+  if (max_index != NULL && index > *max_index) {
+    *max_index = index;
+  }
+}
+
+static void NoteTypeTemplateParameterIndices(TypeRecord* type, int* max_index,
+                                             int depth) {
+  if (type == NULL || max_index == NULL || depth > 32) {
+    return;
+  }
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    NoteTemplateParameterIndex(current->template_parameter_index, max_index);
+    if (current->declarator == kDeclArray) {
+      NoteTemplateParameterIndex(current->info.array.template_parameter_index,
+                                 max_index);
+    }
+    if (current->template_arguments == NULL) {
+      continue;
+    }
+    for (size_t i = 0; i < current->template_arguments->length; i++) {
+      TemplateArgument* arg = current->template_arguments->value.p[i];
+      if (arg == NULL) {
+        continue;
+      }
+      NoteTemplateParameterIndex(arg->template_parameter_index, max_index);
+      NoteTypeTemplateParameterIndices(arg->type, max_index, depth + 1);
+    }
+  }
+}
+
+/* Highest template-parameter index named by a function body, or -1.  A lambda
+ * inside a member function template is numbered after the enclosing class
+ * (`T` at 0, the member's `K` at 1).  Cloning it with only the class arguments
+ * leaves `K` unsubstituted. */
+static void NoteBodyTemplateParameterIndex(ASTNode* node, void* data,
+                                           int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  int* max_index = data;
+  NoteTypeTemplateParameterIndices(node->type, max_index, 0);
+  if (node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol != NULL) {
+    if (id->symbol->flags.is_template_parameter) {
+      NoteTemplateParameterIndex(id->symbol->template_parameter_index,
+                                 max_index);
+    }
+    NoteTemplateParameterIndex(
+        id->symbol->dependent_value_template_parameter_index, max_index);
+    NoteTypeTemplateParameterIndices(id->symbol->type, max_index, 0);
+  }
+  if (id->template_arguments == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < id->template_arguments->length; i++) {
+    TemplateArgument* arg = id->template_arguments->value.p[i];
+    if (arg == NULL) {
+      continue;
+    }
+    NoteTemplateParameterIndex(arg->template_parameter_index, max_index);
+    NoteTypeTemplateParameterIndices(arg->type, max_index, 0);
+  }
+}
+
+static int MaxTemplateParameterIndexInFunctionBody(ASTNode* body) {
+  int max_index = -1;
+  ASTNodeVisit(body, NoteBodyTemplateParameterIndex, 0, &max_index);
+  return max_index;
+}
+
+static bool IsLambdaCallOperator(Symbol* symbol) {
+  return symbol != NULL && symbol->name.value != NULL &&
+         strcmp(symbol->name.value, "operator()") == 0 &&
+         symbol->type != NULL && TypeIsFunction(symbol->type) &&
+         symbol->type->info.function.cxx_member_owner != NULL &&
+         symbol->type->info.function.cxx_member_owner->tag_symbol != NULL &&
+         symbol->type->info.function.cxx_member_owner->tag_symbol->flags
+             .invented;
+}
+
 /* Instantiate the body of a member function template into `symbol` by cloning
  * `template_definition`'s body with `args`, mark it defined, set inline/weak
  * linkage as appropriate, and queue the instantiation for code emission (unless
@@ -8069,13 +8196,21 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     // types and dependent functor calls (e.g. `vis(x)` on a captured template
     // parameter) are only concrete after this substitution.  The plain lazy
     // path would keep the template-level body and mis-lower those calls.
-    bool nested_lambda_operator =
-        symbol->name.value != NULL &&
-        strcmp(symbol->name.value, "operator()") == 0 &&
-        symbol->type->info.function.cxx_member_owner != NULL &&
-        symbol->type->info.function.cxx_member_owner->tag_symbol != NULL &&
-        symbol->type->info.function.cxx_member_owner->tag_symbol->flags.invented;
-    if (!nested_lambda_operator) {
+    bool nested_lambda_operator = IsLambdaCallOperator(symbol);
+    // The closure is rebuilt while the enclosing member function template is
+    // only rebased onto the class arguments.  Parameters of that member
+    // function are not in `args` yet; cloning the body now freezes calls such
+    // as `HashKey<hasher, K>` against the primary template.  Leave the body
+    // for the member-function instantiation, which has those arguments.
+    bool lambda_awaits_enclosing_function = false;
+    if (nested_lambda_operator &&
+        template_definition->type->info.function.body != NULL &&
+        args != NULL) {
+      int max_index = MaxTemplateParameterIndexInFunctionBody(
+          template_definition->type->info.function.body);
+      lambda_awaits_enclosing_function = max_index >= (int)args->length;
+    }
+    if (!nested_lambda_operator || lambda_awaits_enclosing_function) {
       symbol->value.func_defn = template_definition;
       if (symbol->type->template_arguments == NULL) {
         // The arguments recorded here are the ones the deferred body clone will
@@ -8126,11 +8261,19 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     // discards an unrelated candidate such as std::move.
     bool saved_substitution_failed =
         parser != NULL && parser->template_substitution_failed;
+    bool saved_enclosing_only =
+        parser != NULL &&
+        parser->substituting_enclosing_template_arguments_only;
+    if (parser != NULL) {
+      parser->substituting_enclosing_template_arguments_only = true;
+    }
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, args);
     if (parser != NULL) {
       parser->template_substitution_failed = saved_substitution_failed;
+      parser->substituting_enclosing_template_arguments_only =
+          saved_enclosing_only;
     }
     PopFunctionInstantiationInProgress(&in_progress);
     // A member function TEMPLATE constructor must not have its initializer
@@ -8327,8 +8470,79 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
   if (combined_args != NULL) {
     template_arguments = combined_args;
   }
+  // A non-generic lambda inside a member function template still names that
+  // function's parameters.  The closure was rebuilt with the class arguments
+  // only; append the enclosing specialization's own arguments when this ensure
+  // runs from that specialization.
+  Vector* extended_args = NULL;
+  Symbol* pattern = symbol->value.func_defn;
+  if (IsLambdaCallOperator(symbol) && pattern != NULL && pattern->type != NULL &&
+      pattern->type->info.function.body != NULL &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function) &&
+      compiler->current_function->template_arguments != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(
+          compiler->current_function->template_arguments) &&
+      compiler->current_function->info.function.symbol != NULL &&
+      !compiler->current_function->info.function.symbol->flags.is_template &&
+      compiler->current_function->info.function.cxx_member_owner ==
+          owner->lexical_parent) {
+    int max_index = MaxTemplateParameterIndexInFunctionBody(
+        pattern->type->info.function.body);
+    size_t need = max_index >= 0 ? (size_t)max_index + 1 : 0;
+    Vector* fn_args = compiler->current_function->template_arguments;
+    if (need > template_arguments->length && fn_args->length > 0 &&
+        template_arguments->length + fn_args->length == need) {
+      extended_args = NewVector();
+      for (size_t i = 0; i < template_arguments->length; i++) {
+        VectorAppend(extended_args,
+                     TemplateArgumentCopy(template_arguments->value.p[i]));
+      }
+      for (size_t i = 0; i < fn_args->length; i++) {
+        VectorAppend(extended_args, TemplateArgumentCopy(fn_args->value.p[i]));
+      }
+      template_arguments = extended_args;
+    }
+  }
+  if (IsLambdaCallOperator(symbol) && pattern != NULL &&
+      pattern->type != NULL && pattern->type->info.function.body != NULL) {
+    int max_index = MaxTemplateParameterIndexInFunctionBody(
+        pattern->type->info.function.body);
+    if (max_index >= (int)template_arguments->length) {
+      if (extended_args != NULL) {
+        VectorDeleteWithContents(extended_args,
+                                 (VectorElementDestructor)TemplateArgumentDelete,
+                                 /*free_element=*/false);
+      }
+      if (combined_args != NULL) {
+        VectorDeleteWithContents(combined_args,
+                                 (VectorElementDestructor)TemplateArgumentDelete,
+                                 /*free_element=*/false);
+      }
+      return;
+    }
+  }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  if (IsLambdaCallOperator(symbol) && owner != NULL) {
+    for (size_t i = 0; i < owner->members.length; i++) {
+      StructMember* member = owner->members.value.p[i];
+      if (member == NULL || member->symbol == NULL || member->is_member_function ||
+          member->is_static || member->symbol->type == NULL ||
+          !TypeContainsTemplateParameter(member->symbol->type)) {
+        continue;
+      }
+      TypeRecord* substituted = SubstituteTemplateParameters(
+          &parser, member->symbol->type, template_arguments);
+      if (substituted != NULL &&
+          !TypeContainsTemplateParameter(substituted)) {
+        TypeRecordDelete(member->symbol->type);
+        member->symbol->type = substituted;
+      } else {
+        TypeRecordDelete(substituted);
+      }
+    }
+  }
   Symbol* template_definition = symbol->value.func_defn;
   TypeRecord* source_owner =
       template_definition->type != NULL &&
@@ -8349,6 +8563,11 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
       /*allow_lazy=*/false);
   TypeParserPopTemplateSubstitution(&substitution);
   TypeParserDestruct(&parser);
+  if (extended_args != NULL) {
+    VectorDeleteWithContents(extended_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
   if (combined_args != NULL) {
     VectorDeleteWithContents(combined_args,
                              (VectorElementDestructor)TemplateArgumentDelete,

@@ -2824,6 +2824,8 @@ static IRNode* GenerateReferenceBinding(Generator* gen, BinaryASTNode* node,
   return dest;
 }
 
+static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node);
+
 // Initialization.  Semantic analysis converts the initializer to a
 // braced initializer containing only designated initalizers.
 static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
@@ -2843,8 +2845,10 @@ static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
     if (compiler->constexpr_codegen_recover) {
       longjmp(compiler->constexpr_codegen_abort, 1);
     }
+    // A copy initialization that stayed an expression (`auto state = call()`)
+    // is stored like an assignment.
+    return GenerateAssignment(gen, node);
   }
-  assert(node->right->op == AST_OP(braced_init));
 
   // Get destination address.
   IRNode* dest = GenerateExpression(gen, node->left);
@@ -6769,7 +6773,11 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
   // conditional operator is still mid-analysis, so its common type has not been
   // computed.  Recover gracefully instead of aborting; see
   // Compiler::constexpr_codegen_recover.
-  if (result->type == NULL && compiler->constexpr_codegen_recover) {
+  // `braced_init` and other nodes that produce no value leave `result` NULL.
+  // Speculative constant evaluation must fail the fold instead of dereferencing
+  // that pointer (a `return { ... }` inside a constexpr function).
+  if ((result == NULL || result->type == NULL) &&
+      compiler->constexpr_codegen_recover) {
     longjmp(compiler->constexpr_codegen_abort, 1);
   }
   if (TypeIsBitInt(node->type) && (node->flags & kASTNeedAddress) == 0) {

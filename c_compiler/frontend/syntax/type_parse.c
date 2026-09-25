@@ -68,6 +68,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->declarator_template_arguments = NULL;
   parser->parsing_direct_class_template = false;
   parser->template_substitution_failed = false;
+  parser->substituting_enclosing_template_arguments_only = false;
   parser->placeholder_variable_constraint = NULL;
   parser->typename_allows_unqualified = false;
   parser->deferred_inline_bodies = NULL;
@@ -665,6 +666,43 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   return ParseCXXNestedTypeSuffix(parser, result);
 }
 
+TypeRecord* FindInheritedInjectedClassType(Struct* owner, String* name) {
+  if (owner == NULL || name == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (CurrentClassNameMatchesTypeName(base->type->info.struct_info, name)) {
+      return base->type;
+    }
+    TypeRecord* found =
+        FindInheritedInjectedClassType(base->type->info.struct_info, name);
+    if (found != NULL) {
+      return found;
+    }
+  }
+  if (CurrentClassNameMatchesTypeName(owner, name) &&
+      owner->tag_symbol != NULL) {
+    return owner->tag_symbol->type;
+  }
+  return NULL;
+}
+
+Symbol* FindInheritedInjectedClassName(Struct* owner, String* name) {
+  TypeRecord* type = FindInheritedInjectedClassType(owner, name);
+  if (type != NULL && TypeIsStructOrUnion(type) &&
+      type->info.struct_info != NULL &&
+      type->info.struct_info->tag_symbol != NULL) {
+    return type->info.struct_info->tag_symbol;
+  }
+  return NULL;
+}
+
 bool CurrentClassNameMatchesTypeName(Struct* owner, String* name) {
   if (!CompilerIsCXX() || owner == NULL || owner->tag_name == NULL ||
       name == NULL) {
@@ -1023,6 +1061,56 @@ static bool TemplateArgumentsAreIdentity(Vector* args, Symbol* templ) {
     }
   }
   return true;
+}
+
+/* `Class<Args>::template alias<More>::member` looks up `alias` as a primary
+ * alias template.  That alias's pattern is a class (`allocator_traits<...>`),
+ * so identity-checking `More` against the pattern class's parameters can
+ * succeed by index and return the pattern's `member` (`Alloc::pointer`)
+ * instead of `alias<More>::member`.  Rewind to the real class template and
+ * keep the alias tail (`rebind_traits::pointer`). */
+static bool QualifiedNameClassBeforeAlias(Syntax* syntax,
+                                          FullyQualifiedIdentifier* name,
+                                          size_t alias_index,
+                                          size_t* class_index,
+                                          Symbol** class_symbol) {
+  if (syntax == NULL || name == NULL || alias_index == 0 ||
+      class_index == NULL || class_symbol == NULL) {
+    return false;
+  }
+  for (size_t i = alias_index; i > 0;) {
+    i--;
+    FullyQualifiedIdentifier prefix;
+    FullyQualifiedIdentifierInit(&prefix);
+    prefix.absolute = name->absolute;
+    prefix.is_qualified = name->absolute || i > 0;
+    for (size_t j = 0; j <= i; j++) {
+      String* component = name->components.value.p[j];
+      if (prefix.spelling.length != 0 || prefix.absolute) {
+        StringAppend(&prefix.spelling, "::");
+      }
+      StringAppendString(&prefix.spelling, component);
+      VectorAppend(&prefix.components, NewString(component->value));
+      if (j < name->template_arguments.length) {
+        VectorAppend(&prefix.template_arguments,
+                     TemplateArgumentVectorCopy(
+                         name->template_arguments.value.p[j]));
+      } else {
+        VectorAppend(&prefix.template_arguments, NULL);
+      }
+    }
+    Symbol* found = SyntaxFindQualifiedSymbol(syntax, &prefix);
+    FullyQualifiedIdentifierDestruct(&prefix);
+    // Class templates are stored as typedef symbols.  An alias template also
+    // has alias_template set; stop on the class that owns the alias.
+    if (found != NULL && found->flags.is_template &&
+        found->alias_template == NULL) {
+      *class_index = i;
+      *class_symbol = found;
+      return true;
+    }
+  }
+  return false;
 }
 
 static TypeRecord* CurrentInstantiationMemberType(Symbol* origin, Vector* args,
@@ -1699,11 +1787,42 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               }
             }
             if (dependent_member_origin != NULL) {
+              String tail_name;
+              StringInit(&tail_name, NULL);
+              bool rewound_alias = false;
+              if (dependent_member_origin->alias_template != NULL) {
+                size_t class_index = 0;
+                Symbol* class_symbol = NULL;
+                if (QualifiedNameClassBeforeAlias(
+                        parser->syntax, &typename_name, base_index,
+                        &class_index, &class_symbol)) {
+                  dependent_member_origin = class_symbol;
+                  parsed_args =
+                      typename_name.template_arguments.value.p[class_index];
+                  for (size_t i = class_index + 1;
+                       i < typename_name.components.length; i++) {
+                    if (tail_name.length != 0) {
+                      StringAppend(&tail_name, "::");
+                    }
+                    StringAppendString(&tail_name,
+                                       typename_name.components.value.p[i]);
+                  }
+                  base_index = class_index;
+                  rewound_alias = true;
+                }
+              }
               String* member_name =
-                  typename_name.components.value.p[
-                      typename_name.components.length - 1];
-            type_record = CurrentInstantiationMemberType(
-                dependent_member_origin, parsed_args, member_name);
+                  rewound_alias
+                      ? &tail_name
+                      : typename_name.components.value.p[
+                            typename_name.components.length - 1];
+            bool origin_is_alias =
+                dependent_member_origin->alias_template != NULL;
+            type_record =
+                rewound_alias || origin_is_alias
+                    ? NULL
+                    : CurrentInstantiationMemberType(
+                          dependent_member_origin, parsed_args, member_name);
             if (type_record == NULL) {
               type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
               type_record->template_origin = dependent_member_origin;
@@ -1722,6 +1841,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             }
             type |= type_record->type;
             handled_dependent_template_member = true;
+            StringDestruct(&tail_name);
             }
             FullyQualifiedIdentifierDestruct(&prefix);
             }
@@ -1847,9 +1967,55 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             }
             type |= type_record->type;
           } else {
-            SyntaxError(parser->syntax, "Unknown type name %s",
-                        typename_name.spelling.value);
-            ReportStdHeaderSuggestion(parser->syntax, &typename_name);
+            // `typename Derived::Base` where Base is the injected-class-name
+            // of a base.  A dependent base is not visible yet; record it as a
+            // member of the current instantiation and resolve it once the
+            // class is instantiated.
+            Struct* current = CurrentClassBeingParsed(parser);
+            String* member_name = typename_name.components.value.p[1];
+            bool names_current_class =
+                current != NULL && current->tag_name != NULL &&
+                StringEqualString(current->tag_name, base_name);
+            Symbol* injected =
+                names_current_class
+                    ? FindInheritedInjectedClassName(current, member_name)
+                    : NULL;
+            if (injected != NULL && injected->type != NULL &&
+                !TypeContainsTemplateParameter(injected->type)) {
+              type_record = TypeRecordCopy(injected->type);
+              type |= type_record->type;
+            } else if (names_current_class && current->tag_symbol != NULL &&
+                       parser->syntax->current_template_parameters != NULL) {
+              Vector* identity = NewVector();
+              Vector* params = parser->syntax->current_template_parameters;
+              for (size_t i = 0; i < params->length; i++) {
+                TemplateParameter* param = params->value.p[i];
+                if (param->kind == kTemplateParameterType) {
+                  TypeRecord* param_type =
+                      NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+                  param_type->template_parameter_index = param->index;
+                  VectorAppend(identity, NewTypeTemplateArgument(param_type));
+                  TypeRecordDelete(param_type);
+                } else if (param->kind == kTemplateParameterTemplate) {
+                  VectorAppend(identity, NewTemplateTemplateArgument(
+                                             NULL, param->index));
+                } else {
+                  TemplateArgument* arg = NewIntegralTemplateArgument(0);
+                  arg->kind = param->kind;
+                  arg->template_parameter_index = param->index;
+                  VectorAppend(identity, arg);
+                }
+              }
+              type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+              type_record->template_origin = current->tag_symbol;
+              type_record->template_arguments = identity;
+              type_record->dependent_member_name = NewString(member_name->value);
+              type |= type_record->type;
+            } else {
+              SyntaxError(parser->syntax, "Unknown type name %s",
+                          typename_name.spelling.value);
+              ReportStdHeaderSuggestion(parser->syntax, &typename_name);
+            }
           }
         } else {
           SyntaxError(parser->syntax, "Unknown type name %s",

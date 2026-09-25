@@ -344,6 +344,38 @@ static bool CanOverloadFunctions(Symbol* a, Symbol* b) {
          TypeIsFunction(a->type) && TypeIsFunction(b->type);
 }
 
+// The ordinary name of a C++ class or enumeration is a typedef alias of the
+// tag.  A later function or object with that name hides the class
+// ([basic.scope.hiding]); elaborated lookup still finds the tag.
+static bool SymbolIsHideableClassOrEnumName(Symbol* sym) {
+  if (!CompilerIsCXX() || sym == NULL || sym->type == NULL ||
+      !StorageIs(sym->storage, STO(typedef))) {
+    return false;
+  }
+  if (TypeIsStructOrUnion(sym->type) &&
+      sym->type->info.struct_info != NULL &&
+      sym->type->info.struct_info->tag_name != NULL) {
+    return StringEqual(sym->type->info.struct_info->tag_name,
+                       sym->name.value);
+  }
+  if (TypeIsEnum(sym->type) && sym->type->info.enum_info != NULL &&
+      sym->type->info.enum_info->tag_name != NULL) {
+    return StringEqual(sym->type->info.enum_info->tag_name, sym->name.value);
+  }
+  return false;
+}
+
+static void HideClassOrEnumName(Syntax* syntax, Symbol* injected) {
+  if (syntax->local_symbol_stack != NULL) {
+    UninstallLocalSymbol(syntax->local_symbol_stack, injected);
+  }
+  if (InNamedNamespace(syntax)) {
+    UninstallNamespaceSymbol(syntax->current_namespace, injected, false);
+  } else {
+    UninstallGlobalSymbol(injected, false);
+  }
+}
+
 static Symbol* FindFunctionTemplateOverload(Symbol* first) {
   for (Symbol* overload = first; overload != NULL;
        overload = overload->overload_next) {
@@ -1744,7 +1776,29 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
         StringClear(&member->symbol->asm_name);
         SymbolSetCXXMangledAsmName(member->symbol);
       }
-      return FollowAlias(member->symbol);
+      Symbol* found = FollowAlias(member->symbol);
+      // `Base<C>::Alias<U>::value` must instantiate the member alias before
+      // looking up `value`.  Returning the alias template itself looks the
+      // member up on the unsubstituted pattern (the primary template).
+      if (template_args != NULL &&
+          !TemplateArgumentVectorIsDependent(template_args) &&
+          found != NULL && found->flags.is_template &&
+          found->type != NULL &&
+          (TypeIsStructOrUnion(found->type) ||
+           StorageIs(found->storage, STO(typedef)))) {
+        TypeRecord* instantiated =
+            TypeInstantiateClassTemplate(syntax, found, template_args);
+        Symbol* tag =
+            instantiated != NULL && TypeIsStructOrUnion(instantiated) &&
+                    instantiated->info.struct_info != NULL
+                ? instantiated->info.struct_info->tag_symbol
+                : NULL;
+        TypeRecordDelete(instantiated);
+        if (tag != NULL) {
+          return tag;
+        }
+      }
+      return found;
     }
     // `Derived::Base` names the injected-class-name of an inherited base
     // (`using State::HashStateBase::combine_contiguous`).
@@ -2448,12 +2502,64 @@ static bool StaticAssertTemplateArgumentVectorContainsTemplateParameter(
   return false;
 }
 
+// A call to a constexpr member of a class template is value-dependent when
+// the callee's body still mentions a template parameter, even though the
+// function's declared return type does not.  `DefaultCapacity()` is `size_t`,
+// but its body calls `SooEnabled()`, which calls `Traits<Policy>::soo_enabled()`.
+// The call must not be folded (or rejected) until the class is instantiated.
+// Free functions and members of ordinary classes are left alone: their bodies
+// are not patterns, and treating every constexpr call as dependent would skip
+// real constant folding.
+#define kConstexprBodyDependenceLimit 64
+static Symbol* g_constexpr_body_dependence_stack[kConstexprBodyDependenceLimit];
+static int g_constexpr_body_dependence_depth;
+
+static bool ConstexprMemberBodyIsTemplateDependent(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
+    return false;
+  }
+  FunctionInfo* func = &symbol->type->info.function;
+  if (!func->is_constexpr && !func->is_consteval) {
+    return false;
+  }
+  Struct* owner = func->cxx_member_owner;
+  if (owner == NULL ||
+      (!owner->is_template && owner->defining_template_scope_count <= 0)) {
+    return false;
+  }
+  // An instantiation's body is cloned before it is evaluated.  A null body
+  // still names the pattern via func_defn; walking that would keep every
+  // specialization dependent and block constant folding.
+  ASTNode* body = func->body;
+  if (body == NULL) {
+    return false;
+  }
+  for (int i = 0; i < g_constexpr_body_dependence_depth; i++) {
+    if (g_constexpr_body_dependence_stack[i] == symbol) {
+      return false;
+    }
+  }
+  if (g_constexpr_body_dependence_depth >= kConstexprBodyDependenceLimit) {
+    return false;
+  }
+  g_constexpr_body_dependence_stack[g_constexpr_body_dependence_depth++] =
+      symbol;
+  bool dependent = ExpressionIsTemplateDependent(body);
+  g_constexpr_body_dependence_depth--;
+  return dependent;
+}
+
 static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
   (void)data;
-  if (TypeContainsTemplateParameter(node->type)) {
+  if (node == NULL) {
+    return false;
+  }
+  if (TypeContainsTemplateParameter(node->type) ||
+      TypeContainsAuto(node->type)) {
     return true;
   }
   if ((node->flags & kASTDependentQualifiedName) != 0 ||
+      (node->flags & kASTDependentFunctorCall) != 0 ||
       node->op == AST_OP(requires_expr)) {
     return true;
   }
@@ -2509,6 +2615,16 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
           return true;
         }
       }
+    }
+    if (ConstexprMemberBodyIsTemplateDependent(id->symbol)) {
+      return true;
+    }
+  }
+  if (node->op == AST_OP(structmember)) {
+    StructMemberASTNode* member_node = (StructMemberASTNode*)node;
+    if (member_node->member != NULL &&
+        ConstexprMemberBodyIsTemplateDependent(member_node->member->symbol)) {
+      return true;
     }
   }
   return false;
@@ -5031,6 +5147,43 @@ static String* CXXPrimaryTemplateName(TypeRecord* type) {
 static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
     Struct* owner, const char* name, Vector* already_used);
 
+/* A mem-initializer may name a direct base through a typedef that is not a
+ * member of the class (`using HashSetIteratorGenerationInfo = ...Disabled;`
+ * then `iterator() : HashSetIteratorGenerationInfo(...)`).  The typedef is
+ * visible from the class, its enclosing classes, or their namespaces. */
+static TypeRecord* CXXTypedefTypeVisibleFromClass(Struct* owner,
+                                                  const char* name) {
+  if (owner == NULL || name == NULL) {
+    return NULL;
+  }
+  String lookup;
+  StringInit(&lookup, name);
+  TypeRecord* found = NULL;
+  for (Struct* current = owner; current != NULL && found == NULL;
+       current = current->lexical_parent) {
+    StructMember* member = FindStructMemberByName(current, name);
+    if (member != NULL && member->symbol != NULL &&
+        StorageIs(member->symbol->storage, STO(typedef)) &&
+        member->symbol->type != NULL) {
+      found = member->symbol->type;
+      break;
+    }
+    Symbol* tag = current->tag_symbol;
+    Namespace* ns = tag != NULL ? tag->namespace_ : NULL;
+    while (ns != NULL && found == NULL) {
+      Symbol* symbol = NamespaceFindSymbol(ns, &lookup);
+      if (symbol != NULL && StorageIs(symbol->storage, STO(typedef)) &&
+          symbol->type != NULL) {
+        found = symbol->type;
+        break;
+      }
+      ns = ns->parent;
+    }
+  }
+  StringDestruct(&lookup);
+  return found;
+}
+
 static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
                                                  const char* name) {
   return FindCXXDirectBaseByNameSkipping(owner, name, NULL);
@@ -5041,12 +5194,7 @@ static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
   if (owner == NULL || name == NULL) {
     return NULL;
   }
-  StructMember* alias_member = FindStructMemberByName(owner, name);
-  TypeRecord* alias_type =
-      alias_member != NULL && alias_member->symbol != NULL &&
-              StorageIs(alias_member->symbol->storage, STO(typedef))
-          ? alias_member->symbol->type
-          : NULL;
+  TypeRecord* alias_type = CXXTypedefTypeVisibleFromClass(owner, name);
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
@@ -5076,12 +5224,7 @@ static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
   if (owner == NULL || name == NULL) {
     return NULL;
   }
-  StructMember* alias_member = FindStructMemberByName(owner, name);
-  TypeRecord* alias_type =
-      alias_member != NULL && alias_member->symbol != NULL &&
-              StorageIs(alias_member->symbol->storage, STO(typedef))
-          ? alias_member->symbol->type
-          : NULL;
+  TypeRecord* alias_type = CXXTypedefTypeVisibleFromClass(owner, name);
   for (size_t i = 0; i < owner->virtual_bases.length; i++) {
     CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
@@ -8641,6 +8784,12 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         }
       } else {
         MarkFunctionTemplateSpecialization(syntax, sym, old_sym);
+      }
+      if (CompilerIsCXX() && parser->cxx_member_definition == NULL &&
+          old_sym != NULL && !StorageIs(sym->storage, STO(typedef)) &&
+          SymbolIsHideableClassOrEnumName(old_sym)) {
+        HideClassOrEnumName(syntax, old_sym);
+        old_sym = NULL;
       }
       if (parser->cxx_member_definition == NULL &&
           CanOverloadFunctions(old_sym, sym)) {
@@ -13424,6 +13573,18 @@ static void CheckLocalVariableShadow(Syntax* syntax, Symbol* sym) {
   ReportNote(prev_filename, prev_lineno, "shadowed declaration is here");
 }
 
+static bool InitializerNamesUndeducedAuto(ASTNode* node, void* data) {
+  Symbol* self = data;
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* named = ((IdentifierASTNode*)node)->symbol;
+  if (named == NULL || named == self || named->type == NULL) {
+    return false;
+  }
+  return TypeContainsAuto(named->type);
+}
+
 static void ParseLocalDeclarationList(TypeParser* parser,
                                       TypeRecord* type, Storage storage,
                                       Vector* attributes, Vector* declarations) {
@@ -13434,6 +13595,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       break;
     }
     Symbol* sym = TypeParserParseDeclarator(parser, type);
+    bool defer_auto_insert = false;
     ValidateC23AutoDeclarator(syntax, sym);
     if (sym != NULL) {
       if (TypeIsFunction(sym->type)) {
@@ -13465,6 +13627,12 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       MarkCXX26AutomaticNameIndependent(sym);
       Symbol* old_sym =
           FindTopLocalSymbol(syntax->local_symbol_stack, &sym->name);
+      if (CompilerIsCXX() && old_sym != NULL &&
+          !StorageIs(sym->storage, STO(typedef)) &&
+          SymbolIsHideableClassOrEnumName(old_sym)) {
+        HideClassOrEnumName(syntax, old_sym);
+        old_sym = NULL;
+      }
       if (IsC23InferredAutoType(sym->type) && old_sym != NULL) {
         SyntaxError(syntax,
                     "C23 inferred auto declaration cannot redeclare '%s'",
@@ -13567,13 +13735,18 @@ static void ParseLocalDeclarationList(TypeParser* parser,
             }
           }
         } else {
-          // This is the first declaration of this symbol, add to the symbol
-          // table.
-          CheckLocalVariableShadow(syntax, sym);
-          bool added = SyntaxAddSymbol(syntax, sym);
-          if (!added) {
-            SyntaxError(syntax, "Duplicate symbol %s",
-                        sym->name.value);
+          // A placeholder-typed variable is not visible in its own initializer
+          // (`auto co = std::make_unique<co::Coroutine>(...)` still names the
+          // namespace).  Insert it after the initializer is parsed.
+          defer_auto_insert = CompilerIsCXX() && !TypeIsFunction(sym->type) &&
+                              TypeContainsAuto(sym->type);
+          if (!defer_auto_insert) {
+            CheckLocalVariableShadow(syntax, sym);
+            bool added = SyntaxAddSymbol(syntax, sym);
+            if (!added) {
+              SyntaxError(syntax, "Duplicate symbol %s",
+                          sym->name.value);
+            }
           }
         }
       }
@@ -13691,6 +13864,12 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                       "Class template argument deduction requires an initializer");
         }
       }
+      if (defer_auto_insert) {
+        CheckLocalVariableShadow(syntax, sym);
+        if (!SyntaxAddSymbol(syntax, sym)) {
+          SyntaxError(syntax, "Duplicate symbol %s", sym->name.value);
+        }
+      }
       ValidateC23AutoInitializer(syntax, sym, initializer);
       ValidateC23ConstexprObject(syntax, sym, initializer);
 
@@ -13716,7 +13895,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           ((TypeContainsAuto(sym->type) ||
             (CompilerIsCXX() && sym->type->declarator == kDeclArray &&
              sym->type->info.array.is_flexible && initializer != NULL)) &&
-           syntax->current_template_parameters == NULL)) {
+           syntax->current_template_parameters == NULL &&
+           (initializer == NULL ||
+            !ASTNodeAny(initializer, InitializerNamesUndeducedAuto, sym)))) {
         SemanticAnalyzeVariableDefinition(syntax,
                                         (VariableDeclarationASTNode*)decl);
       }

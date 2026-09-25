@@ -6226,6 +6226,27 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
   }
   TypeRecord* plain_type = ConstexprPlainObjectType(formal_object_type);
   bool ok = EvaluateConstexprValue(ctx, binding_expr, plain_type, value);
+  // A reference parameter bound to a scalar prvalue (`const T&` of a literal)
+  // has to be an addressable temporary.  The body may return that reference
+  // (`return b < a ? b : a` in `std::min`), which needs the parameter's
+  // address, while a later integer read still uses the stored value.
+  if (ok && value != NULL && !value->is_address && !value->is_object &&
+      (TypeIsIntegral(plain_type) || TypeIsFloatingPoint(plain_type))) {
+    ConstexprObject* object = NewConstexprObject(ctx, plain_type, 1);
+    ConstexprValue* slot =
+        object != NULL ? ConstexprObjectSlot(object, 0) : NULL;
+    if (slot == NULL) {
+      ConstexprReleasePlainObjectType(formal_object_type, plain_type);
+      return false;
+    }
+    *slot = *value;
+    slot->is_object = false;
+    slot->is_address = false;
+    value->is_address = true;
+    value->address_object = object;
+    value->address_index = 0;
+    value->address_slot = slot;
+  }
   ConstexprReleasePlainObjectType(formal_object_type, plain_type);
   return ok;
 }

@@ -107,12 +107,23 @@ bool PendingTemplateInstantiationHasAsmName(const char* asm_name);
 
 TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser, Symbol* templ,
                                            Vector* args);
+/* `str` is a class-template specialization whose members are not substituted
+ * yet.  Return the type of typedef `name` by substituting the pattern (or, if
+ * the pattern only inherits that typedef, its base) with this specialization's
+ * arguments.  Returns NULL when the pattern does not provide `name`. */
+TypeRecord* ResolveInProgressClassMemberType(TypeParser* parser, Struct* str,
+                                             String* name);
 TypeRecord* InstantiateAliasClassTemplate(TypeParser* parser, Symbol* alias,
                                           Vector* args);
 bool CXXAliasTemplatePatternNamesClassTemplate(Symbol* alias);
 Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals);
 Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
                                     Vector* alias_args);
+/* Fold an expanded pack (`Box<char, int>` stored as `[char, int]`) back into
+ * the class template's declared shape (`[pack{char, int}]`).  Returns a new
+ * vector, or NULL when `expanded` is already in that shape. */
+Vector* RegroupExpandedClassTemplateArguments(Symbol* class_template,
+                                              Vector* expanded);
 void SetCXXAliasTemplatePlaceholderOrigin(Symbol* alias, TypeRecord* type);
 
 TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
