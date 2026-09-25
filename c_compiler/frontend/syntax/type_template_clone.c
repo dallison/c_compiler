@@ -5018,6 +5018,30 @@ static void RemapIdentifierToInstantiatedClassMember(
         }
       }
     }
+    // `Box::id` inside a nested class of a partial specialization names a
+    // member of the pattern (`Box<$T0*>#0`), not of this instantiation.
+    // Overload resolution otherwise sees the unsubstituted `const T*`.
+    Struct* source_parent =
+        clone->from_owner != NULL ? clone->from_owner->lexical_parent : NULL;
+    Struct* target_parent =
+        clone->to_owner != NULL ? clone->to_owner->lexical_parent : NULL;
+    if (source_parent != NULL && target_parent != NULL &&
+        source_parent != target_parent && id->symbol != NULL &&
+        id->symbol->type != NULL && TypeIsFunction(id->symbol->type) &&
+        id->symbol->type->info.function.cxx_member_owner == source_parent) {
+      StructMember* to_member =
+          FindStructMember(target_parent, &id->symbol->name);
+      if (to_member != NULL && to_member->symbol != NULL &&
+          TypeIsFunction(to_member->symbol->type)) {
+        id->symbol = to_member->symbol;
+        ASTNodeSetType(node, to_member->symbol->type);
+        if ((node->flags & kASTNeedAddress) != 0 ||
+            to_member->symbol->flags.address_taken) {
+          TypeEnsureTemplateMemberFunctionDefinition(
+              clone->parser->syntax, to_member->symbol);
+        }
+      }
+    }
     if (clone->from_owner != NULL && clone->to_owner != NULL &&
         clone->from_owner != clone->to_owner && id->symbol != NULL &&
         StorageIs(id->symbol->storage, STO(typedef))) {
@@ -5049,7 +5073,12 @@ static void RemapIdentifierToInstantiatedClassMember(
         }
       }
     }
-    if (id->symbol != NULL && StorageIs(id->symbol->storage, STO(typedef)) &&
+    // An alias template-id (`HashAlias<const T*>`) must keep the alias
+    // template and its written arguments.  Substituting the pattern
+    // `Hash<X>` with the enclosing class's arguments binds `X` to that
+    // class's parameter and drops the written argument.
+    if (id->template_arguments == NULL && id->symbol != NULL &&
+        StorageIs(id->symbol->storage, STO(typedef)) &&
         id->symbol->type != NULL &&
         TypeContainsTemplateParameter(id->symbol->type)) {
       TypeRecord* concrete_type = SubstituteTemplateParameters(

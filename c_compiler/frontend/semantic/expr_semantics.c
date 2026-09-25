@@ -9539,7 +9539,23 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   // instead of the primary template (which would match every specialization).
   if (dependent_explicit_args && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* args_id = (IdentifierASTNode*)node->left;
-    if (type->template_arguments == NULL && args_id->symbol != NULL) {
+    // An alias template's pattern type already carries the pattern's own
+    // arguments (`using HashAlias = Hash<X>` stores `Hash<X>`).  A use
+    // `HashAlias<const T*>{}` must keep those written arguments.  Leaving the
+    // pattern arguments in place substitutes `X` from the enclosing template
+    // (index 0), so `Hash<const T*>` collapses to `Hash<T>`.
+    bool alias_template =
+        args_id->symbol != NULL && args_id->symbol->flags.is_template &&
+        StorageIs(args_id->symbol->storage, STO(typedef));
+    if (args_id->symbol != NULL &&
+        (type->template_arguments == NULL || alias_template)) {
+      if (type->template_arguments != NULL) {
+        VectorDeleteWithContents(
+            type->template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        type->template_arguments = NULL;
+      }
       type->template_origin = args_id->symbol;
       type->template_arguments =
           TemplateArgumentVectorCopy(args_id->template_arguments);

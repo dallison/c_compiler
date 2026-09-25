@@ -1265,7 +1265,11 @@ static bool ClassTemplateInstantiationMembersSupported(TypeParser* parser,
         (member->symbol == NULL || member->symbol->type == NULL ||
          !TypeIsFunction(member->symbol->type))) {
       SyntaxError(parser->syntax,
-                  "Class template instantiation is not supported yet");
+                  "Cannot instantiate class template; member '%s' has no "
+                  "function type",
+                  member->symbol != NULL && member->symbol->name.value != NULL
+                      ? member->symbol->name.value
+                      : "<unknown>");
       return false;
     }
   }
@@ -3629,6 +3633,75 @@ static bool FormalClassTemplateIdIsNonDeducedAgainst(TypeRecord* formal,
   return true;
 }
 
+/* `KeyArg<true>::type<K, key_type>` is the alias `using type = K`.  The
+ * parameter type keeps that dependent member (`const key_arg<K>&`) so a later
+ * deduction pass can recover K from the call argument.  The pattern's
+ * parameter is numbered after the class template; the written `<K, key_type>`
+ * arguments are the member-template argument list. */
+static TypeRecord* AliasMemberPatternType(TypeRecord* type) {
+  if (type == NULL || type->dependent_member_name == NULL ||
+      !TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->dependent_member_template_arguments == NULL ||
+      type->dependent_member_template_arguments->length == 0) {
+    return NULL;
+  }
+  Vector* member_args = type->dependent_member_template_arguments->value.p[0];
+  if (member_args == NULL || member_args->length == 0) {
+    return NULL;
+  }
+  StructMember* member =
+      FindStructMember(type->info.struct_info, type->dependent_member_name);
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL ||
+      !StorageIs(member->symbol->storage, STO(typedef))) {
+    return NULL;
+  }
+  int pattern_index = -1;
+  if (!TypeIsTemplateParameterPlaceholder(member->symbol->type,
+                                          &pattern_index) ||
+      pattern_index < 0) {
+    return NULL;
+  }
+  int class_count = (int)type->info.struct_info->template_parameters.length;
+  int member_index = pattern_index - class_count;
+  if (member_index < 0 || (size_t)member_index >= member_args->length) {
+    if ((size_t)pattern_index < member_args->length) {
+      member_index = pattern_index;
+    } else {
+      return NULL;
+    }
+  }
+  TemplateArgument* arg = member_args->value.p[member_index];
+  if (arg == NULL || arg->type == NULL ||
+      !TypeContainsTemplateParameter(arg->type)) {
+    return NULL;
+  }
+  TypeRecord* pattern = TypeRecordCopy(arg->type);
+  pattern->qualifiers |= type->qualifiers;
+  return pattern;
+}
+
+/* Replace a dependent member-alias parameter type with the alias pattern so
+ * deduction sees `const K&` rather than the non-deduced `KeyArg::type`. */
+static TypeRecord* FormalWithAliasPattern(TypeRecord* formal) {
+  if (formal == NULL) {
+    return NULL;
+  }
+  if (formal->declarator == kDeclReference ||
+      formal->declarator == kDeclRValueReference) {
+    TypeRecord* inner = FormalWithAliasPattern(formal->next);
+    if (inner == NULL) {
+      return NULL;
+    }
+    TypeRecord* ref = NewReferenceTypeRecord(
+        formal->qualifiers, formal->declarator == kDeclRValueReference);
+    TypeRecordChain(ref, inner);
+    ref->type = inner->type;
+    return TypeRecordCalculateSize(ref);
+  }
+  return AliasMemberPatternType(formal);
+}
+
 /* Deduce template arguments for one (non-pack) call argument expression against
  * formal parameter type `formal`, applying the forwarding-reference rule: a
  * `T&&` parameter binding an lvalue deduces `T&` (reference collapsing). */
@@ -3638,6 +3711,13 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
                                                ASTNode* actual) {
   if (formal == NULL || actual == NULL || actual->type == NULL) {
     return false;
+  }
+  TypeRecord* alias_pattern = FormalWithAliasPattern(formal);
+  if (alias_pattern != NULL) {
+    bool ok = DeduceFunctionTemplateCallArgument(args, explicit_arg_count,
+                                                 alias_pattern, actual);
+    TypeRecordDelete(alias_pattern);
+    return ok;
   }
   TypeRecord* target = TypeIsReference(formal) ? formal->next : formal;
   /* An `initializer_list<U>` parameter deduces `U` either from a braced-init
@@ -7394,7 +7474,7 @@ Vector* CompleteClassTemplateArguments(TypeParser* parser,
                                               Vector* args) {
   return CompleteTemplateArguments(parser, &template_struct->template_parameters,
                                    args,
-                                   "Class template instantiation is not supported yet",
+                                   "Too few template arguments for class template",
                                    /*emit_error=*/true,
                                    kTemplateArgumentsBorrow);
 }

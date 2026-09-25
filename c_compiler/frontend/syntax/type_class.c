@@ -1040,6 +1040,11 @@ done:
   }
   if (tag != NULL && !is_partial_specialization) {
     parser->syntax->last_parsed_tag = tag;
+  } else if (is_partial_specialization) {
+    // The partial already copied this template head.  A nested class inside
+    // the body is otherwise the last tag parsed, and the head would be
+    // attached to that nested class (`struct Hash` becomes a class template).
+    parser->syntax->last_parsed_tag = NULL;
   }
   FullyQualifiedIdentifierDestruct(&qualified_tag);
   StringDestruct(&tag_name);

@@ -8162,6 +8162,7 @@ static void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
 
 static bool TypeContainsClassTemplate(TypeRecord* type);
 static bool TypeIsClassTemplateObject(TypeRecord* type);
+static const char* ClassTemplateObjectName(TypeRecord* type);
 static void MaterializeDeferredClassTemplateType(Syntax* syntax, Symbol* sym);
 static int CurrentTemplateParameterListLength(Syntax* syntax);
 static int CurrentTemplateParameterBase(Syntax* syntax);
@@ -9088,7 +9089,10 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     }
     if (!syntax->parsing_template_declaration &&
         TypeIsClassTemplateObject(sym->type)) {
-      SyntaxError(syntax, "Class template instantiation is not supported yet");
+      SyntaxError(syntax,
+                  "Cannot declare an object of class template '%s'; no "
+                  "specialization was instantiated",
+                  ClassTemplateObjectName(sym->type));
     }
     
     if (old_sym != NULL) {
@@ -10981,6 +10985,18 @@ static bool TypeIsClassTemplateObject(TypeRecord* type) {
   }
   return TypeContainsClassTemplate(type) &&
          !TypeIsClassTemplatePlaceholder(type);
+}
+
+static const char* ClassTemplateObjectName(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsStructOrUnion(t) && t->info.struct_info != NULL &&
+        t->info.struct_info->is_template &&
+        t->info.struct_info->tag_name != NULL &&
+        t->info.struct_info->tag_name->value != NULL) {
+      return t->info.struct_info->tag_name->value;
+    }
+  }
+  return "<anonymous>";
 }
 
 // A type alias formed while its class template was only forward-declared carries
@@ -13810,7 +13826,10 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       }
       if (!syntax->parsing_template_declaration &&
           TypeIsClassTemplateObject(sym->type)) {
-        SyntaxError(syntax, "Class template instantiation is not supported yet");
+        SyntaxError(syntax,
+                    "Cannot declare an object of class template '%s'; no "
+                    "specialization was instantiated",
+                    ClassTemplateObjectName(sym->type));
       }
       // Any initializer?
       ASTNode* initializer = NULL;

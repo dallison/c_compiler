@@ -2742,6 +2742,19 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
                                                base);
       }
     }
+    if (t->dependent_member_template_arguments != NULL) {
+      for (size_t i = 0; i < t->dependent_member_template_arguments->length;
+           i++) {
+        Vector* component =
+            t->dependent_member_template_arguments->value.p[i];
+        if (component == NULL) {
+          continue;
+        }
+        for (size_t j = 0; j < component->length; j++) {
+          RebaseTemplateArgumentParameterIndices(component->value.p[j], base);
+        }
+      }
+    }
     // A deferred `decltype` operand (e.g. `iterator_t<R> =
     // decltype(ranges::begin(declval<R&>()))`) references template parameters
     // inside its expression AST, not the type spine.  Those must be rebased too
@@ -2790,6 +2803,19 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
       for (size_t i = 0; i < t->template_arguments->length; i++) {
         RebaseTemplateArgumentParameterIndices(t->template_arguments->value.p[i],
                                                base);
+      }
+    }
+    if (t->dependent_member_template_arguments != NULL) {
+      for (size_t i = 0; i < t->dependent_member_template_arguments->length;
+           i++) {
+        Vector* component =
+            t->dependent_member_template_arguments->value.p[i];
+        if (component == NULL) {
+          continue;
+        }
+        for (size_t j = 0; j < component->length; j++) {
+          RebaseTemplateArgumentParameterIndices(component->value.p[j], base);
+        }
       }
     }
     if (t->dependent_decltype_expr != NULL) {

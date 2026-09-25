@@ -1095,6 +1095,22 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
     if (other == NULL || other->tag_symbol == NULL) {
       return false;
     }
+    // A nested class can share the primary template's name (`HashEq<T*>::Hash`
+    // versus `absl::Hash<T>`) without being that specialization.  Only treat a
+    // missing template-origin as dropped metadata when the other struct is
+    // nested in the same class, or is not nested at all.
+    if (other->lexical_parent != NULL) {
+      Struct* origin_parent = NULL;
+      if (origin->type != NULL && TypeIsStructOrUnion(origin->type) &&
+          origin->type->info.struct_info != NULL) {
+        origin_parent = origin->type->info.struct_info->lexical_parent;
+      }
+      if (origin_parent == NULL ||
+          !CXXStructSameTemplateFamilyForTypeEquality(other->lexical_parent,
+                                                      origin_parent)) {
+        return false;
+      }
+    }
     size_t other_name_len = strcspn(other->tag_symbol->name.value, "<$");
     return origin->name.length == other_name_len &&
            strncmp(origin->name.value, other->tag_symbol->name.value,
