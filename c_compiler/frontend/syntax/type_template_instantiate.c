@@ -471,6 +471,55 @@ static void DeferNestedMemberBody(Struct* owner, PendingMemberBody* pending,
   free(pending);
 }
 
+/* A lambda closure inside a function template is substituted once per mention
+ * (the `auto` variable, the compound literal, each capture).  Each call built
+ * a new struct, so `const auto f = [&]{ ... }` tried to initialize one closure
+ * from a different copy of the same lambda.  Reuse the first result. */
+typedef struct {
+  Struct* source;
+  Vector* args;
+  TypeRecord* type;
+} CachedLambdaSubstitution;
+
+static Vector cached_lambda_substitutions;
+static bool cached_lambda_substitutions_ready;
+
+static TypeRecord* FindCachedLambdaSubstitution(Struct* source, Vector* args) {
+  if (!cached_lambda_substitutions_ready || source == NULL ||
+      source->tag_symbol == NULL || !source->tag_symbol->flags.invented) {
+    return NULL;
+  }
+  for (size_t i = 0; i < cached_lambda_substitutions.length; i++) {
+    CachedLambdaSubstitution* entry = cached_lambda_substitutions.value.p[i];
+    if (entry->source == source &&
+        TemplateArgumentVectorEqual(entry->args, args)) {
+      return entry->type;
+    }
+  }
+  return NULL;
+}
+
+static void RememberLambdaSubstitution(Struct* source, Vector* args,
+                                      TypeRecord* type) {
+  if (source == NULL || source->tag_symbol == NULL ||
+      !source->tag_symbol->flags.invented || type == NULL) {
+    return;
+  }
+  if (FindCachedLambdaSubstitution(source, args) != NULL) {
+    return;
+  }
+  if (!cached_lambda_substitutions_ready) {
+    VectorInit(&cached_lambda_substitutions);
+    cached_lambda_substitutions_ready = true;
+  }
+  CachedLambdaSubstitution* entry = malloc(sizeof(*entry));
+  entry->source = source;
+  entry->args = TemplateArgumentVectorCopy(args);
+  TypeRecordIncRef(type);
+  entry->type = type;
+  VectorAppend(&cached_lambda_substitutions, entry);
+}
+
 static TypeRecord* NestedSubstitutionAlreadyInProgress(Struct* source,
                                                       Vector* args) {
   if (!nested_substitution_stack_ready || source == NULL) {
@@ -524,6 +573,10 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   TypeRecord* in_progress = NestedSubstitutionAlreadyInProgress(from, args);
   if (in_progress != NULL) {
     return TypeRecordCopy(in_progress);
+  }
+  TypeRecord* cached_lambda = FindCachedLambdaSubstitution(from, args);
+  if (cached_lambda != NULL) {
+    return TypeRecordCopy(cached_lambda);
   }
   // An enclosing class template is still collecting members.  Keep this
   // nested class's function bodies until that class is complete so they can
@@ -868,6 +921,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   str->cxx_special_members_complete = false;
   AddImplicitCXXSpecialMembers(parser, str, str->tag_symbol);
   AddImplicitCXXDestructorIfNeeded(parser, str, str->tag_symbol);
+  RememberLambdaSubstitution(from, args, copy);
   PopNestedSubstitution(from);
   return TypeRecordCalculateSize(copy);
 }

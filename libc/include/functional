@@ -1175,6 +1175,16 @@ bool operator==(nullptr_t, const function<R(Args...)>& value) noexcept {
 }
 
 template <class R, class... Args>
+bool operator!=(const function<R(Args...)>& value, nullptr_t) noexcept {
+  return (bool)value;
+}
+
+template <class R, class... Args>
+bool operator!=(nullptr_t, const function<R(Args...)>& value) noexcept {
+  return (bool)value;
+}
+
+template <class R, class... Args>
 void swap(function<R(Args...)>& left,
           function<R(Args...)>& right) noexcept {
   left.swap(right);
