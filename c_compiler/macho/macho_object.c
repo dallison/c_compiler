@@ -36,6 +36,7 @@ typedef struct {
   uint32_t nreloc;
   uint8_t* data;
   bool zerofill;
+  bool owns_data;
 } MachOSection;
 
 typedef struct {
@@ -142,6 +143,16 @@ static bool MapSectionNames(const AssemblerSection* section, MachOSection* out) 
   } else if (strcmp(name, ".eh_frame") == 0) {
     SetPaddedName(out->sectname, "__eh_frame");
     SetPaddedName(out->segname, "__TEXT");
+  } else if (strcmp(name, ".tdata") == 0) {
+    SetPaddedName(out->sectname, "__thread_data");
+    SetPaddedName(out->segname, "__DATA");
+    out->flags = MACHO_S_THREAD_LOCAL_REGULAR;
+    out->zerofill = false;
+  } else if (strcmp(name, ".tbss") == 0) {
+    SetPaddedName(out->sectname, "__thread_bss");
+    SetPaddedName(out->segname, "__DATA");
+    out->flags = MACHO_S_THREAD_LOCAL_ZEROFILL;
+    out->zerofill = true;
   } else if (strncmp(name, ".debug_", 7) == 0) {
     char dwarf[MACHO_SECTION_NAME_LEN];
     snprintf(dwarf, sizeof(dwarf), "__%s", name + 1);
@@ -162,7 +173,8 @@ static bool MapSectionNames(const AssemblerSection* section, MachOSection* out) 
       SetPaddedName(out->segname, "__TEXT");
     }
   }
-  if (out->zerofill) {
+  if (out->zerofill &&
+      (out->flags & MACHO_SECTION_TYPE) != MACHO_S_THREAD_LOCAL_ZEROFILL) {
     out->flags = MACHO_S_ZEROFILL;
   }
   return true;
@@ -630,6 +642,170 @@ static uint32_t AppendCString(Buffer* strings, const char* text) {
   return offset;
 }
 
+static MachOSection* FindMachOSectionByIndex(MachOObject* macho,
+                                            uint32_t index) {
+  for (size_t i = 0; i < macho->sections.length; i++) {
+    MachOSection* section = macho->sections.value.p[i];
+    if (section->macho_index == index) {
+      return section;
+    }
+  }
+  return NULL;
+}
+
+static bool SectionIsThreadLocalStorage(const MachOSection* section) {
+  uint32_t type = section->flags & MACHO_SECTION_TYPE;
+  return type == MACHO_S_THREAD_LOCAL_REGULAR ||
+         type == MACHO_S_THREAD_LOCAL_ZEROFILL;
+}
+
+static int MachOSymbolIndex(const MachOObject* macho, const MachOSymbol* sym) {
+  for (size_t i = 0; i < macho->symbols.length; i++) {
+    if (macho->symbols.value.p[i] == sym) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+static bool AppendExternalReloc(MachOObject* macho, MachOSection* section,
+                                uint32_t address, uint32_t symbol,
+                                uint32_t length, uint32_t type) {
+  MachOReloc* reloc = malloc(sizeof(*reloc));
+  if (reloc == NULL) {
+    return false;
+  }
+  reloc->address = address;
+  reloc->section = section->macho_index;
+  reloc->packed = PackReloc(symbol, 0, length, 1, type);
+  VectorAppend(&macho->relocs, reloc);
+  section->nreloc++;
+  return true;
+}
+
+/* Darwin looks up a thread-local by a descriptor in __thread_vars:
+ *   { __tlv_bootstrap, 0, &storage }.
+ * The storage stays in __thread_data / __thread_bss under a local
+ * name$tlv$init symbol.  The original symbol moves onto the descriptor so
+ * the TLVP relocation keeps using it. */
+static bool PrepareThreadLocalDescriptors(MachOObject* macho) {
+  size_t count = 0;
+  for (size_t i = 0; i < macho->symbols.length; i++) {
+    MachOSymbol* sym = macho->symbols.value.p[i];
+    if (sym->is_undefined || sym->sect == 0) {
+      continue;
+    }
+    MachOSection* section = FindMachOSectionByIndex(macho, sym->sect);
+    if (section != NULL && SectionIsThreadLocalStorage(section)) {
+      count++;
+    }
+  }
+  if (count == 0) {
+    return true;
+  }
+
+  MachOSymbol** originals = malloc(count * sizeof(*originals));
+  if (originals == NULL) {
+    return false;
+  }
+  size_t n = 0;
+  for (size_t i = 0; i < macho->symbols.length; i++) {
+    MachOSymbol* sym = macho->symbols.value.p[i];
+    if (sym->is_undefined || sym->sect == 0) {
+      continue;
+    }
+    MachOSection* section = FindMachOSectionByIndex(macho, sym->sect);
+    if (section != NULL && SectionIsThreadLocalStorage(section)) {
+      originals[n++] = sym;
+    }
+  }
+
+  MachOSymbol** inits = calloc(n, sizeof(*inits));
+  if (inits == NULL) {
+    free(originals);
+    return false;
+  }
+  for (size_t i = 0; i < n; i++) {
+    MachOSymbol* init = calloc(1, sizeof(*init));
+    if (init == NULL) {
+      free(originals);
+      free(inits);
+      return false;
+    }
+    StringInit(&init->name, originals[i]->name.value);
+    StringAppend(&init->name, "$tlv$init");
+    init->type = MACHO_N_SECT;
+    init->sect = originals[i]->sect;
+    init->value = originals[i]->value;
+    uint32_t index = macho->nlocals;
+    VectorInsertBefore(&macho->symbols, index, init);
+    macho->nlocals++;
+    BumpPackedSymbolIndices(macho, index);
+    inits[i] = init;
+  }
+
+  MachOSymbol* bootstrap = calloc(1, sizeof(*bootstrap));
+  if (bootstrap == NULL) {
+    free(originals);
+    free(inits);
+    return false;
+  }
+  StringInit(&bootstrap->name, "__tlv_bootstrap");
+  bootstrap->type = MACHO_N_UNDF | MACHO_N_EXT;
+  bootstrap->is_undefined = true;
+  VectorAppend(&macho->symbols, bootstrap);
+  macho->nundef++;
+
+  uint64_t addr = 0;
+  if (macho->sections.length > 0) {
+    MachOSection* last = macho->sections.value.p[macho->sections.length - 1];
+    addr = (last->addr + last->size + 7ull) & ~7ull;
+  }
+  MachOSection* vars = calloc(1, sizeof(*vars));
+  if (vars == NULL) {
+    free(originals);
+    free(inits);
+    return false;
+  }
+  SetPaddedName(vars->sectname, "__thread_vars");
+  SetPaddedName(vars->segname, "__DATA");
+  vars->flags = MACHO_S_THREAD_LOCAL_VARIABLES;
+  vars->asm_index = -1;
+  vars->align_log2 = 3;
+  vars->addr = addr;
+  vars->size = n * 24;
+  vars->data = calloc(1, (size_t)vars->size);
+  vars->owns_data = true;
+  if (vars->data == NULL) {
+    free(vars);
+    free(originals);
+    free(inits);
+    return false;
+  }
+  vars->macho_index = (uint32_t)macho->sections.length + 1;
+  VectorAppend(&macho->sections, vars);
+
+  int bootstrap_index = MachOSymbolIndex(macho, bootstrap);
+  for (size_t i = 0; i < n; i++) {
+    originals[i]->sect = (uint8_t)vars->macho_index;
+    originals[i]->value = vars->addr + i * 24;
+    int init_index = MachOSymbolIndex(macho, inits[i]);
+    uint32_t base = (uint32_t)(i * 24);
+    if (bootstrap_index < 0 || init_index < 0 ||
+        !AppendExternalReloc(macho, vars, base, (uint32_t)bootstrap_index, 3,
+                             MACHO_ARM64_RELOC_UNSIGNED) ||
+        !AppendExternalReloc(macho, vars, base + 16, (uint32_t)init_index, 3,
+                             MACHO_ARM64_RELOC_UNSIGNED)) {
+      free(originals);
+      free(inits);
+      return false;
+    }
+  }
+  free(originals);
+  free(inits);
+  return true;
+}
+
 bool AsmObjectWriteMachO(AsmObject* object, FILE* out) {
   if (object->elf_machine_type != ELF_MACHINE_TYPE_AARCH64) {
     fprintf(stderr, "-fnative currently writes Mach-O only for AArch64\n");
@@ -644,6 +820,7 @@ bool AsmObjectWriteMachO(AsmObject* object, FILE* out) {
   BufferAppend(&macho.strings, "\0", 1);
 
   bool ok = PrepareSections(object, &macho) && PrepareSymbols(object, &macho) &&
+            PrepareThreadLocalDescriptors(&macho) &&
             PrepareRelocs(object, &macho);
   if (!ok) {
     goto done;
@@ -703,17 +880,27 @@ bool AsmObjectWriteMachO(AsmObject* object, FILE* out) {
   WriteU32(out, MACHO_MH_SUBSECTIONS_VIA_SYMBOLS);
   WriteU32(out, 0);
 
+  uint64_t file_span = data_off > header_size + sizeofcmds
+                           ? data_off - (header_size + sizeofcmds)
+                           : 0;
+  /* Zerofill sections occupy VM but not the file.  vmsize has to cover the
+   * last section, or tools reject the object. */
+  uint64_t vm_size = file_span;
+  for (size_t i = 0; i < macho.sections.length; i++) {
+    MachOSection* section = macho.sections.value.p[i];
+    uint64_t end = section->addr + section->size;
+    if (end > vm_size) {
+      vm_size = end;
+    }
+  }
+
   WriteU32(out, MACHO_LC_SEGMENT_64);
   WriteU32(out, cmd_segment);
   WritePaddedName(out, "");
   WriteU64(out, 0);
-  WriteU64(out, data_off > header_size + sizeofcmds
-                    ? data_off - (header_size + sizeofcmds)
-                    : 0);
+  WriteU64(out, vm_size);
   WriteU64(out, header_size + sizeofcmds);
-  WriteU64(out, data_off > header_size + sizeofcmds
-                    ? data_off - (header_size + sizeofcmds)
-                    : 0);
+  WriteU64(out, file_span);
   WriteU32(out, 7);
   WriteU32(out, 7);
   WriteU32(out, nsects);
@@ -816,7 +1003,11 @@ bool AsmObjectWriteMachO(AsmObject* object, FILE* out) {
 
 done:
   for (size_t i = 0; i < macho.sections.length; i++) {
-    free(macho.sections.value.p[i]);
+    MachOSection* section = macho.sections.value.p[i];
+    if (section->owns_data) {
+      free(section->data);
+    }
+    free(section);
   }
   for (size_t i = 0; i < macho.symbols.length; i++) {
     MachOSymbol* sym = macho.symbols.value.p[i];
