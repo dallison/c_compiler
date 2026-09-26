@@ -732,8 +732,24 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
     ((CXXPackExpressionSearch*)data)->found = true;
     return;
   }
+  // `static_cast<T (*)()>(nullptr)...` names the pack in the cast type, not
+  // in a subexpression.
+  if (node->type != NULL &&
+      TypeContainsParameterPack(((CXXPackExpressionSearch*)data)->syntax,
+                                node->type)) {
+    ((CXXPackExpressionSearch*)data)->found = true;
+    return;
+  }
   Vector* template_arguments = NULL;
   ASTNodeShape shape = ASTNodeGetShape(node);
+  if (shape == kASTShapeCast) {
+    CastASTNode* cast = (CastASTNode*)node;
+    if (TypeContainsParameterPack(((CXXPackExpressionSearch*)data)->syntax,
+                                  cast->cast_type)) {
+      ((CXXPackExpressionSearch*)data)->found = true;
+    }
+    return;
+  }
   if (shape == kASTShapeIdentifier) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
@@ -7568,6 +7584,47 @@ static bool LookingAtDefiningTagSpecifier(Syntax* syntax) {
   return found_brace;
 }
 
+// A cast or compound literal is `( type-name )` followed by an operand or a
+// brace initializer.  `(TypeIdHelper<T>::dummy_)` is a parenthesized value;
+// the `)` is followed by `;` or another closer, not by an expression.
+static bool CastOrCompoundLiteralFollows(Lex* lex) {
+  switch (lex->current_token) {
+    case TOK(identifier):
+    case TOK(coloncolon):
+    case TOK(operator):
+    case TOK(number):
+    case TOK(fnumber):
+    case TOK(string):
+    case TOK(string_wide):
+    case TOK(charconst):
+    case TOK(charconst_wide):
+    case TOK(lparen):
+    case TOK(lbrace):
+    case TOK(plus):
+    case TOK(minus):
+    case TOK(star):
+    case TOK(amp):
+    case TOK(plusplus):
+    case TOK(minusminus):
+    case TOK(bang):
+    case TOK(tilde):
+    case TOK(sizeof):
+    case TOK(alignof):
+    case TOK(new):
+    case TOK(delete):
+    case TOK(this):
+    case TOK(nullptr):
+    case TOK(true):
+    case TOK(false):
+    case TOK(throw):
+    case TOK(requires):
+    case TOK(lsquare):
+      return true;
+    default:
+      return false;
+  }
+}
+
 static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
   if (CompilerIsCXX() && TokenIsCXXNamedCast(syntax->lex->current_token)) {
     return ParseCXXNamedCastExpression(syntax, followers);
@@ -7650,15 +7707,17 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
                          !TypeIsFunction(type);
           // `(std::numeric_limits<T>::max)()` is a parenthesized call, not a
           // cast to a dependent nested type followed by `()`.
-          if (is_type_name && type != NULL &&
-              type->dependent_member_name != NULL) {
+          if (is_type_name) {
             LexCheckpoint peek;
             LexCheckpointSave(syntax->lex, &peek);
             LexMatch(syntax->lex, TOK(rparen));
-            bool followed_by_call = LexLookingAt(syntax->lex, TOK(lparen));
+            bool followed_by_call =
+                type != NULL && type->dependent_member_name != NULL &&
+                LexLookingAt(syntax->lex, TOK(lparen));
+            bool operand = CastOrCompoundLiteralFollows(syntax->lex);
             LexCheckpointRestore(syntax->lex, &peek);
             LexCheckpointDestruct(&peek);
-            if (followed_by_call) {
+            if (followed_by_call || !operand) {
               is_type_name = false;
             }
           }
