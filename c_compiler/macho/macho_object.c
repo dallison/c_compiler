@@ -228,6 +228,13 @@ static bool MapAArch64Reloc(int32_t elf_type, uint32_t* macho_type,
     case R_AARCH64_LD64_GOT_LO12_NC:
       *macho_type = MACHO_ARM64_RELOC_GOT_LOAD_PAGEOFF12;
       return true;
+    case R_AARCH64_TLSGD_ADR_PAGE21:
+      *macho_type = MACHO_ARM64_RELOC_TLVP_LOAD_PAGE21;
+      *pcrel = 1;
+      return true;
+    case R_AARCH64_TLSDESC_LD64_LO12:
+      *macho_type = MACHO_ARM64_RELOC_TLVP_LOAD_PAGEOFF12;
+      return true;
     default:
       return false;
   }
@@ -447,7 +454,9 @@ static bool RelocUsesAddendPair(uint32_t macho_type) {
          macho_type == MACHO_ARM64_RELOC_PAGEOFF12 ||
          macho_type == MACHO_ARM64_RELOC_BRANCH26 ||
          macho_type == MACHO_ARM64_RELOC_GOT_LOAD_PAGE21 ||
-         macho_type == MACHO_ARM64_RELOC_GOT_LOAD_PAGEOFF12;
+         macho_type == MACHO_ARM64_RELOC_GOT_LOAD_PAGEOFF12 ||
+         macho_type == MACHO_ARM64_RELOC_TLVP_LOAD_PAGE21 ||
+         macho_type == MACHO_ARM64_RELOC_TLVP_LOAD_PAGEOFF12;
 }
 
 static bool WriteIntegerIntoSection(MachOSection* section, uint32_t offset,
@@ -464,12 +473,108 @@ static bool WriteIntegerIntoSection(MachOSection* section, uint32_t offset,
   return true;
 }
 
+/* A local symbol inserted among the locals shifts every later symbol.
+ * Relocations already packed have to follow that shift.  ADDEND pairs store
+ * a constant in the symbol field, not a symbol index. */
+static void BumpPackedSymbolIndices(MachOObject* macho, uint32_t inserted) {
+  for (size_t i = 0; i < macho->symbols.length; i++) {
+    MachOSymbol* sym = macho->symbols.value.p[i];
+    if (sym->source != NULL && sym->source->index >= (int32_t)inserted) {
+      sym->source->index++;
+    }
+  }
+  for (size_t i = 0; i < macho->relocs.length; i++) {
+    MachOReloc* reloc = macho->relocs.value.p[i];
+    uint32_t packed = reloc->packed;
+    if (((packed >> 27) & 1u) == 0) {
+      continue;
+    }
+    uint32_t symnum = packed & 0xffffffu;
+    if (symnum < inserted) {
+      continue;
+    }
+    reloc->packed = PackReloc(symnum + 1, (packed >> 24) & 1u,
+                               (packed >> 25) & 3u, 1, (packed >> 28) & 0xfu);
+  }
+}
+
+/* arm64 Mach-O has no PC-relative data relocation.  A SUBTRACTOR/UNSIGNED
+ * pair at the same address computes target - pc, which is what the LSDA's
+ * DW_EH_PE_pcrel sdata4 slots need.  N_ALT_ENTRY keeps the temporary from
+ * splitting the exception table into subsections. */
+static int AddPcRelSubtractor(MachOObject* macho, MachOSection* section,
+                              uint32_t offset) {
+  uint32_t index = macho->nlocals;
+  MachOSymbol* sym = calloc(1, sizeof(*sym));
+  char name[64];
+  snprintf(name, sizeof(name), "ltmp_pcrel_%u_%u", section->macho_index,
+           offset);
+  StringInit(&sym->name, name);
+  sym->type = MACHO_N_SECT;
+  sym->sect = (uint8_t)section->macho_index;
+  sym->desc = MACHO_N_ALT_ENTRY;
+  sym->value = section->addr + offset;
+  VectorInsertBefore(&macho->symbols, index, sym);
+  macho->nlocals++;
+  BumpPackedSymbolIndices(macho, index);
+  return (int)index;
+}
+
+static bool SetIntegerInSection(MachOSection* section, uint32_t offset,
+                                int64_t value, uint32_t nbytes) {
+  if (section->data == NULL || offset + nbytes > section->size) {
+    fprintf(stderr, "Mach-O: cannot write a %u-byte relocation at %#x\n",
+            nbytes, offset);
+    return false;
+  }
+  uint64_t bits = (uint64_t)value;
+  memcpy(section->data + offset, &bits, nbytes);
+  return true;
+}
+
+static bool EmitPcRelData(MachOObject* macho, MachOSection* section,
+                          AssemblerRelocation* reloc, uint32_t nbytes) {
+  int pc = AddPcRelSubtractor(macho, section, (uint32_t)reloc->offset);
+  int target = reloc->symbol != NULL ? reloc->symbol->index : -1;
+  if (target < 0) {
+    fprintf(stderr, "Mach-O: relocation has no symbol\n");
+    return false;
+  }
+  if (!SetIntegerInSection(section, (uint32_t)reloc->offset, reloc->addend,
+                           nbytes)) {
+    return false;
+  }
+  uint32_t length = nbytes == 8 ? 3u : 2u;
+  MachOReloc* sub = malloc(sizeof(*sub));
+  sub->address = (uint32_t)reloc->offset;
+  sub->section = section->macho_index;
+  sub->packed =
+      PackReloc((uint32_t)pc, 0, length, 1, MACHO_ARM64_RELOC_SUBTRACTOR);
+  VectorAppend(&macho->relocs, sub);
+  section->nreloc++;
+  MachOReloc* uns = malloc(sizeof(*uns));
+  uns->address = (uint32_t)reloc->offset;
+  uns->section = section->macho_index;
+  uns->packed =
+      PackReloc((uint32_t)target, 0, length, 1, MACHO_ARM64_RELOC_UNSIGNED);
+  VectorAppend(&macho->relocs, uns);
+  section->nreloc++;
+  return true;
+}
+
 static bool PrepareRelocs(AsmObject* object, MachOObject* macho) {
   for (size_t i = 0; i < object->relocations.length; i++) {
     AssemblerRelocation* reloc = object->relocations.value.p[i];
     MachOSection* section =
         FindMachOSection(&macho->sections, reloc->section);
     if (section == NULL) {
+      continue;
+    }
+    if (reloc->type == R_AARCH64_PREL32 || reloc->type == R_AARCH64_PREL64) {
+      if (!EmitPcRelData(macho, section, reloc,
+                         reloc->type == R_AARCH64_PREL64 ? 8 : 4)) {
+        return false;
+      }
       continue;
     }
     uint32_t type = 0;

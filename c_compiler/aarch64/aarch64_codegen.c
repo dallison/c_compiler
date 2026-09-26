@@ -1666,6 +1666,15 @@ static TargetInstruction* TlsGetAddrCall(AARCH64Generator* g, IRNode* node) {
                             kSize64Bit));
   g->not_leaf = true;
   g->base.num_calls++;
+  /* Mach-O tlsgd materializes the TLV descriptor.  Its first word is the
+   * thunk, and calling the thunk returns the thread's address in x0. */
+  if (compiler != NULL && compiler->native_object) {
+    TargetInstruction* thunk = Emit(
+        g, SetInstructionSize(NewInstruction2(AARCH64_OP(ldr), index, ZeroImm(g)),
+                              kSize64Bit));
+    TargetInstruction* pinned = PinCallTargetToX9(g, thunk);
+    return Emit(g, NewInstruction1(AARCH64_OP(blr), pinned));
+  }
   TargetInstruction* arg0 =
       SetDestOrMove(g, index, IntArgumentRegister(g, 0), AARCH64_OP(mov));
   TargetInstruction* regarg =

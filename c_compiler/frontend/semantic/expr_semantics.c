@@ -8795,17 +8795,30 @@ static int MemberOverloadCallScore(StructMember* candidate,
       !MemberFunctionConstraintsSatisfied(candidate, member_access)) {
     return -1;
   }
-  if (score >= 0 && !candidate->is_static &&
-      candidate->symbol->type->info.function.is_const_member &&
-      !MemberReceiverIsConst(member_access)) {
-    score++;
-  }
-  if (score >= 0 && !candidate->is_static &&
-      candidate->symbol->type->info.function.is_volatile_member &&
-      !MemberReceiverIsVolatile(member_access)) {
-    score++;
-  }
   return score;
+}
+
+/* Calling a const member on a non-const object is a worse implicit-object
+ * binding than the non-const overload.  This is a tie-break only: folding it
+ * into the conversion score made an exact `slot_type*` match look worse than
+ * 5 and let `hash_of(const K&)` steal a call that passes the slot pointer. */
+static int MemberCvTiePenalty(StructMember* candidate,
+                              BinaryASTNode* member_access) {
+  if (candidate == NULL || candidate->is_static || candidate->symbol == NULL ||
+      candidate->symbol->type == NULL ||
+      !TypeIsFunction(candidate->symbol->type)) {
+    return 0;
+  }
+  int penalty = 0;
+  if (candidate->symbol->type->info.function.is_const_member &&
+      !MemberReceiverIsConst(member_access)) {
+    penalty++;
+  }
+  if (candidate->symbol->type->info.function.is_volatile_member &&
+      !MemberReceiverIsVolatile(member_access)) {
+    penalty++;
+  }
+  return penalty;
 }
 
 // Emits one note per member-function overload after a failed member-call /
@@ -9057,7 +9070,14 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
         best_score = score;
         ambiguous = false;
       } else if (score == best_score) {
-        if (DerivedConstructorHidesInherited(best, candidate)) {
+        int best_penalty = MemberCvTiePenalty(best, member_access);
+        int penalty = MemberCvTiePenalty(candidate, member_access);
+        if (penalty < best_penalty) {
+          best = candidate;
+          ambiguous = false;
+        } else if (penalty > best_penalty) {
+          // The non-const (or less cv-qualified) overload stays preferred.
+        } else if (DerivedConstructorHidesInherited(best, candidate)) {
           // The derived constructor hides this inherited one.
         } else if (DerivedConstructorHidesInherited(candidate, best)) {
           best = candidate;
@@ -9091,6 +9111,15 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
         best = effective;
         best_score = score;
         ambiguous = false;
+      } else if (score == best_score &&
+                 MemberCvTiePenalty(effective, member_access) <
+                     MemberCvTiePenalty(best, member_access)) {
+        best = effective;
+        ambiguous = false;
+      } else if (score == best_score &&
+                 MemberCvTiePenalty(effective, member_access) >
+                     MemberCvTiePenalty(best, member_access)) {
+        // The less cv-qualified overload stays preferred.
       } else if (score == best_score &&
                  DerivedConstructorHidesInherited(best, effective)) {
         // The derived constructor hides this inherited one.

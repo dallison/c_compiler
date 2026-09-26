@@ -3253,7 +3253,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
     case AARCH64_OP(tlsgd): {
       String name = {0};
       ProgramLabelName(&name, function, inst->operand[0]);
-      char prefix[64];
+      char prefix[80];
       snprintf(prefix, sizeof(prefix), "adrp x%d, :tlsgd:", dest);
       String text = {0};
       StringAppend(&text, prefix);
@@ -3263,15 +3263,30 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
           kAARCH64FixupRelocationOnly, R_AARCH64_TLSGD_ADR_PAGE21, name.value, 0,
           true, text.value);
       StringClear(&text);
-      snprintf(prefix, sizeof(prefix), "add x%d, x%d, :tlsgd_lo12:", dest,
-               dest);
-      StringAppend(&text, prefix);
-      StringAppend(&text, name.value);
-      AARCH64AsmRegister rd = {.num = dest, .kind = AARCH64_ASM_REG_X};
-      AARCH64ProgramEmitFixup(
-          module, AARCH64EncodeAddSubImmediate(&rd, &rd, 0, false, false, 0),
-          kAARCH64FixupRelocationOnly, R_AARCH64_TLSGD_ADD_LO12_NC, name.value,
-          0, true, text.value);
+      if (compiler != NULL && compiler->native_object) {
+        /* Darwin TLV: the page-offset instruction is a load of the
+         * descriptor, not the ELF add of a TLSGD GOT slot. */
+        snprintf(prefix, sizeof(prefix), "ldr x%d, [x%d, :tlvp_lo12:", dest,
+                 dest);
+        StringAppend(&text, prefix);
+        StringAppend(&text, name.value);
+        StringAppendChar(&text, ']');
+        AARCH64ProgramEmitFixup(
+            module,
+            AARCH64EncodeLoadStoreUnsigned(3, false, 1, dest, dest, 0),
+            kAARCH64FixupRelocationOnly, R_AARCH64_TLSDESC_LD64_LO12,
+            name.value, 0, true, text.value);
+      } else {
+        snprintf(prefix, sizeof(prefix), "add x%d, x%d, :tlsgd_lo12:", dest,
+                 dest);
+        StringAppend(&text, prefix);
+        StringAppend(&text, name.value);
+        AARCH64AsmRegister rd = {.num = dest, .kind = AARCH64_ASM_REG_X};
+        AARCH64ProgramEmitFixup(
+            module, AARCH64EncodeAddSubImmediate(&rd, &rd, 0, false, false, 0),
+            kAARCH64FixupRelocationOnly, R_AARCH64_TLSGD_ADD_LO12_NC,
+            name.value, 0, true, text.value);
+      }
       StringDestruct(&text);
       StringDestruct(&name);
       return;

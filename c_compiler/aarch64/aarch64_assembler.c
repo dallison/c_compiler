@@ -1209,6 +1209,24 @@ static void Assemble_tlsgd(AARCH64Assembler* assembler) {
   AssemblerSymbol* sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
   LexNextToken(&ASM.lex);
 
+  /* Darwin has no TLSGD GOT pair.  adrp/ldr against the TLV descriptor
+   * yields a pointer to the thunk; the caller loads that thunk and branches
+   * to it.  ELF keeps the adrp/add pair that __tls_get_addr consumes. */
+  if (ASMO.write_macho) {
+    AssemblerAddRelocationForSymbol(
+        &ASM, sym, R_AARCH64_TLSGD_ADR_PAGE21, ASMO.current_section,
+        (int32_t)AssemblerCurrentAddress(&ASM), 0);
+    AssemblerEmitWord(&ASM, ASMO.current_section,
+                      (1u << 31) | (0x10u << 24) | (uint32_t)rd.num);
+    AssemblerAddRelocationForSymbol(
+        &ASM, sym, R_AARCH64_TLSDESC_LD64_LO12, ASMO.current_section,
+        (int32_t)AssemblerCurrentAddress(&ASM), 0);
+    AssembleLoadStoreUnsignedImmediate(assembler, &rd, &rd, /*size=*/3,
+                                       /*fp=*/0, /*opc=*/1, /*v=*/0,
+                                       /*offset=*/0);
+    return;
+  }
+
   AssemblerAddRelocationForSymbol(
       &ASM, sym, R_AARCH64_TLSGD_ADR_PAGE21, ASMO.current_section,
       (int32_t)AssemblerCurrentAddress(&ASM), 0);
