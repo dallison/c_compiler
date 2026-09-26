@@ -516,7 +516,34 @@ static void ParseCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
     base_args = TemplateArgumentVectorCopy(
         name.template_arguments.value.p[base_component]);
   }
-  if (base_symbol->flags.is_template && base_args != NULL &&
+  // `using Derived::Base::member` with no argument list names the base
+  // specialization already declared on Derived (`FlatTuple::FlatTupleBase`),
+  // not the primary class template.
+  if (base_symbol->flags.is_template && base_args == NULL && owner != NULL) {
+    TypeRecord* inherited = NULL;
+    int matches = 0;
+    for (size_t i = 0; i < owner->bases.length; i++) {
+      CXXBaseSpecifier* base = owner->bases.value.p[i];
+      if (base == NULL || base->type == NULL) {
+        continue;
+      }
+      Symbol* origin = base->type->template_origin;
+      bool same_template =
+          origin == base_symbol ||
+          (origin == NULL && TypeIsStructOrUnion(base->type) &&
+           base->type->info.struct_info != NULL &&
+           base->type->info.struct_info->tag_symbol == base_symbol);
+      if (!same_template) {
+        continue;
+      }
+      inherited = base->type;
+      matches++;
+    }
+    if (matches == 1) {
+      base_type = TypeRecordCopy(inherited);
+    }
+  }
+  if (base_type == NULL && base_symbol->flags.is_template && base_args != NULL &&
       !parser->syntax->parsing_template_declaration &&
       TypeIsStructOrUnion(base_symbol->type)) {
     base_type = InstantiateSimpleClassTemplate(parser, base_symbol, base_args);
@@ -797,6 +824,48 @@ static void ApplyCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
   TypeRecord* base_type =
       args != NULL ? SubstituteTemplateParameters(parser, decl->base_type, args)
                    : TypeRecordCopy(decl->base_type);
+  // A using-declaration written as `Derived::Base::member` stores the primary
+  // template when the qualifier has no argument list.  After instantiation,
+  // bind it to the unique base that specializes that template.
+  if (owner != NULL && base_type != NULL && TypeIsStructOrUnion(base_type) &&
+      base_type->info.struct_info != NULL) {
+    Symbol* origin = base_type->template_origin;
+    if (origin == NULL) {
+      origin = base_type->info.struct_info->tag_symbol;
+    }
+    const char* origin_name =
+        origin != NULL ? origin->name.value
+                       : (base_type->info.struct_info->tag_name != NULL
+                              ? base_type->info.struct_info->tag_name->value
+                              : NULL);
+    if (origin != NULL || origin_name != NULL) {
+      TypeRecord* inherited = NULL;
+      int matches = 0;
+      for (size_t i = 0; i < owner->bases.length; i++) {
+        CXXBaseSpecifier* base = owner->bases.value.p[i];
+        if (base == NULL || base->type == NULL ||
+            base->type->template_origin == NULL) {
+          continue;
+        }
+        bool same = base->type->template_origin == origin;
+        if (!same && origin_name != NULL &&
+            base->type->template_origin->name.value != NULL &&
+            strcmp(base->type->template_origin->name.value, origin_name) ==
+                0) {
+          same = true;
+        }
+        if (!same) {
+          continue;
+        }
+        inherited = base->type;
+        matches++;
+      }
+      if (matches == 1 && inherited != base_type) {
+        TypeRecordDelete(base_type);
+        base_type = TypeRecordCopy(inherited);
+      }
+    }
+  }
   ImportCXXMemberUsingDeclaration(parser, owner, base_type,
                                   decl->member_name.value, decl->access,
                                   decl->location,

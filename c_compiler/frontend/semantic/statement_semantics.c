@@ -1077,6 +1077,9 @@ static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
 }
 
 static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
+  if (ExpressionIsTemplateDependent(node->expr)) {
+    return;
+  }
   ASTNode* expr = ASTNodeClone(node->expr, StaticAssertIdentityClone, NULL, NULL);
   if (expr == NULL) {
     SemanticError((ASTNode*)node, "Invalid static_assert expression");
@@ -1343,6 +1346,11 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
   if (node->is_constexpr) {
     int64_t value;
     if (!EvaluateIntegerExpression(node->cond, &value)) {
+      if (ExpressionIsTemplateDependent(node->cond)) {
+        AnalyzeStatement(node->if_part);
+        AnalyzeStatement(node->else_part);
+        return;
+      }
       SemanticError(node->cond,
                     "if constexpr condition is not a constant expression");
       return;

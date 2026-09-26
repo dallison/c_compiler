@@ -1808,6 +1808,13 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
             SubstituteTemplateParameters(parser, member->symbol->type,
                                          concrete_args);
       }
+      if (member_type == NULL) {
+        if (parser != NULL) {
+          parser->template_substitution_failed = true;
+        }
+        member_type =
+            NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      }
       member_type->qualifiers |= type->qualifiers;
       TypeRecordDelete(subst);
       VectorDeleteWithContents(concrete_args,
@@ -2345,6 +2352,28 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       bool analysis_failed = DiagnosticErrorTrapped();
       DiagnosticErrorTrapEnd(analysis_trap);
       if (analysis_failed) {
+        // A still-dependent operand (ElemFromList<I, T...>::type while I is
+        // not yet a constant) can fail overload resolution.  That is not
+        // ill-formed; keep the decltype opaque for a later substitution.
+        bool still_dependent =
+            expr != NULL &&
+            (ExpressionIsTemplateDependent(expr) ||
+             DependentExpressionContainsTemplateParameter(expr));
+        if (still_dependent) {
+          TypeRecord* opaque = TypeRecordCopy(type);
+          opaque->qualifiers |= type->qualifiers;
+          ASTNode* deferred = CloneDependentExpressionWithArgs(
+              parser, type->dependent_decltype_expr, args);
+          if (deferred != NULL) {
+            opaque->dependent_decltype_expr = deferred;
+            ASTNodeDelete(expr);
+          } else {
+            opaque->dependent_decltype_expr = expr;
+          }
+          DiagnosticSuppressEnd();
+          VectorPop(&g_dependent_decltype_stack);
+          return TypeRecordCalculateSize(opaque);
+        }
         if (parser != NULL) {
           parser->template_substitution_failed = true;
         }

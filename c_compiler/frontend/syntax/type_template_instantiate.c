@@ -696,6 +696,12 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     CXXBaseSpecifier* template_base = from->bases.value.p[i];
     TypeRecord* base_type =
         SubstituteTemplateParameters(parser, template_base->type, args);
+    // The nested class's own parameters were renumbered above to drop the
+    // enclosing prefix.  A base such as `Base<T>` still names T at the old
+    // index, so `Mono<const int&>` later instantiates `Base` instead of
+    // `Base<const int&>` and virtual overrides do not match.
+    RebaseTemplateParameterIndices(base_type,
+                                   enclosing_template_parameter_count);
     base_type = MaterializeClassBaseType(parser, base_type);
     if (!TypeIsStructOrUnion(base_type)) {
       if (TypeIsStillDependentClassBase(base_type)) {
@@ -707,10 +713,11 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       continue;
     }
     TypeRecordCalculateSize(base_type);
+    // The specifier takes the only reference of a fresh substitution.  Releasing
+    // it would clear `Base<T>`'s arguments while the specifier still uses them.
     VectorAppend(&str->bases,
                  NewCXXBaseSpecifier(base_type, template_base->access,
                                      template_base->is_virtual));
-    TypeRecordDelete(base_type);
   }
   CollectCXXVirtualBases(str);
   CopyCXXBaseVirtualMembers(str);
@@ -3547,10 +3554,24 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
     return false;
   }
   switch (formal->declarator) {
-    case kDeclPointer:
+    case kDeclPointer: {
+      // [temp.deduct.call] strips top-level cv from a by-value parameter, not
+      // from the pointee.  `template <class U> void f(U*)` called with
+      // `const T*` deduces `U = const T`.  A cv-qualified pattern pointee
+      // (`const U*`) still ignores that cv, which the stripping deduction does.
+      int pointee_index = -1;
+      if (formal->next != NULL && actual->next != NULL &&
+          TypeIsTemplateParameterPlaceholder(formal->next, &pointee_index)) {
+        Qualifiers pattern_cv =
+            formal->next->qualifiers & (kQualConst | kQualVolatile);
+        if (pattern_cv == 0) {
+          return SetDeducedFunctionTemplateTypeArgumentPreserveQualifiers(
+              args, explicit_arg_count, pointee_index, actual->next);
+        }
+      }
       return DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
-                                                formal->next,
-                                                actual->next);
+                                                formal->next, actual->next);
+    }
     case kDeclArray: {
       // This type model can store cv-qualification written on an array object
       // on the array node itself, while a parameter such as
@@ -8544,7 +8565,6 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
           VectorAppend(&str->bases,
                        NewCXXBaseSpecifier(base_type, template_base->access,
                                            template_base->is_virtual));
-          TypeRecordDelete(base_type);
         }
         continue;
       }
@@ -8571,13 +8591,21 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
         VectorAppend(&str->bases,
                      NewCXXBaseSpecifier(base_type, template_base->access,
                                          template_base->is_virtual));
-        TypeRecordDelete(base_type);
       }
       continue;
     }
+    TypeRecord* base_pattern = TypeRecordCopy(template_base->type);
+    int nested_parameter_base = 0;
+    if (source_struct->template_parameters.length > 0) {
+      TemplateParameter* first = source_struct->template_parameters.value.p[0];
+      if (first != NULL && first->index > 0) {
+        nested_parameter_base = first->index;
+      }
+    }
+    RebaseTemplateParameterIndices(base_pattern, nested_parameter_base);
     TypeRecord* base_type =
-        SubstituteTemplateParameters(parser, template_base->type,
-                                     source_args);
+        SubstituteTemplateParameters(parser, base_pattern, source_args);
+    TypeRecordDelete(base_pattern);
     base_type = MaterializeClassBaseType(parser, base_type);
     if (!TypeIsStructOrUnion(base_type)) {
       if (TypeIsStillDependentClassBase(base_type)) {
@@ -8592,7 +8620,6 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     VectorAppend(&str->bases,
                  NewCXXBaseSpecifier(base_type, template_base->access,
                                      template_base->is_virtual));
-    TypeRecordDelete(base_type);
   }
   CollectCXXVirtualBases(str);
   CopyCXXBaseVirtualMembers(str);

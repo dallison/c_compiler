@@ -45,13 +45,23 @@ bool CXXClassNameMatchesUnqualifiedTemplateName(String* class_name,
   if (StringEqualString(spelling, class_name)) {
     return true;
   }
-  const char* template_args = strchr(class_name->value, '<');
+  // A nested class-template specialization is tagged
+  // `$nested<id>$Name<args>#index`.  Constructors inside that body are still
+  // spelled with the unqualified class name.
+  const char* value = class_name->value;
+  if (strncmp(value, "$nested", 7) == 0) {
+    const char* nested_name = strchr(value + 7, '$');
+    if (nested_name != NULL) {
+      value = nested_name + 1;
+    }
+  }
+  const char* template_args = strchr(value, '<');
   if (template_args == NULL) {
     return false;
   }
-  size_t base_length = (size_t)(template_args - class_name->value);
+  size_t base_length = (size_t)(template_args - value);
   return spelling->length == base_length &&
-         strncmp(spelling->value, class_name->value, base_length) == 0;
+         strncmp(spelling->value, value, base_length) == 0;
 }
 
 static bool QualifiedNameIsSpecialMember(Symbol* owner,
@@ -221,6 +231,76 @@ static Symbol* TryParseCXXQualifiedConversionOperatorDeclarator(
   return sym;
 }
 
+static bool TemplateArgumentReferencesIndexInRange(TemplateArgument* arg,
+                                                   int base, int end);
+
+static bool TypeReferencesTemplateIndexInRange(TypeRecord* type, int base,
+                                              int end) {
+  if (type == NULL || base >= end) {
+    return false;
+  }
+  if (type->template_parameter_index >= base &&
+      type->template_parameter_index < end) {
+    return true;
+  }
+  if (type->template_arguments != NULL) {
+    for (size_t i = 0; i < type->template_arguments->length; i++) {
+      if (TemplateArgumentReferencesIndexInRange(
+              type->template_arguments->value.p[i], base, end)) {
+        return true;
+      }
+    }
+  }
+  return TypeReferencesTemplateIndexInRange(type->next, base, end);
+}
+
+static bool TemplateArgumentReferencesIndexInRange(TemplateArgument* arg,
+                                                   int base, int end) {
+  if (arg == NULL || base >= end) {
+    return false;
+  }
+  if (arg->template_parameter_index >= base &&
+      arg->template_parameter_index < end) {
+    return true;
+  }
+  if (arg->pack_arguments != NULL) {
+    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
+      if (TemplateArgumentReferencesIndexInRange(arg->pack_arguments->value.p[i],
+                                                base, end)) {
+        return true;
+      }
+    }
+  }
+  return TypeReferencesTemplateIndexInRange(arg->type, base, end);
+}
+
+// The class component of `Matcher<T>::Matcher` is components[length - 2].
+// When its template arguments name a parameter from the current template
+// head, that head belongs to the class, not to the constructor.
+static void NoteQualifierConsumedTemplateParameters(
+    TypeParser* parser, FullyQualifiedIdentifier* name) {
+  Syntax* syntax = parser->syntax;
+  int listed = syntax->current_template_parameters != NULL
+                   ? (int)syntax->current_template_parameters->length
+                   : syntax->current_template_parameter_count;
+  int base = syntax->current_template_parameter_count - listed;
+  int end = base + listed;
+  size_t class_index = name->components.length - 2;
+  if (class_index >= name->template_arguments.length) {
+    return;
+  }
+  Vector* args = name->template_arguments.value.p[class_index];
+  if (args == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    if (TemplateArgumentReferencesIndexInRange(args->value.p[i], base, end)) {
+      parser->qualifier_consumed_template_parameters = true;
+      return;
+    }
+  }
+}
+
 Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   Symbol* conversion = TryParseCXXQualifiedConversionOperatorDeclarator(parser);
   if (conversion != NULL) {
@@ -324,6 +404,7 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   func->info.function.symbol = sym;
   CXXFinalizeSpecialMemberMetadata(sym, parser->cxx_member_owner, true);
   SymbolSetCXXMangledAsmName(sym);
+  NoteQualifierConsumedTemplateParameters(parser, &name);
   StringDestruct(&member_name);
   FullyQualifiedIdentifierDestruct(&name);
   return sym;

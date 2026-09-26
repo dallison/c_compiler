@@ -9178,6 +9178,20 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
         if (best_is_template && !effective_is_template) {
           best = effective;
           ambiguous = false;
+        } else if (best_is_template && effective_is_template &&
+                   best != effective) {
+          // [temp.func.order]: `operator<<(T* const&)` is more specialized
+          // than `operator<<(const T&)` for a pointer argument.
+          int template_order = CompareFunctionTemplateSpecificity(
+              effective->symbol, best->symbol);
+          if (template_order > 0) {
+            best = effective;
+            ambiguous = false;
+          } else if (template_order < 0) {
+            ambiguous = false;
+          } else {
+            ambiguous = true;
+          }
         } else if (best != effective &&
                    best_is_template == effective_is_template) {
           ambiguous = true;

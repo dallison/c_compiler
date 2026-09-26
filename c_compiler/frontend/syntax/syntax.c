@@ -2592,6 +2592,21 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
              id->template_arguments))) {
       return true;
     }
+    // `constexpr bool b = Trait<T>::value; static_assert(b);` inside a
+    // function template: `b` is not a template parameter, but its value is
+    // not known until the function is instantiated.
+    if (id->symbol != NULL && id->symbol->flags.is_constexpr &&
+        !id->symbol->flags.value_set) {
+      bool in_template =
+          compiler->syntax.current_template_parameter_count > 0 ||
+          (compiler->current_function != NULL &&
+           TypeIsFunction(compiler->current_function) &&
+           compiler->current_function->info.function.template_parameter_count >
+               0);
+      if (in_template) {
+        return true;
+      }
+    }
     // `static constexpr auto value = T{}()` is value-dependent even though
     // `value`'s type is not.  Uses inside the class (a later static_assert)
     // must wait until the enclosing class template is instantiated.
@@ -9469,9 +9484,13 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
   // `template <typename T> inline Condition::Condition(...)` is parsed here,
   // not on the ordinary declarator path that records template_parameter_count.
   // Without that count the definition is not recognized as a member template
-  // and is compared against the first constructor overload.
+  // and is compared against the first constructor overload.  A class-template
+  // constructor (`template <class T> Matcher<T>::Matcher(T)`) already consumed
+  // that head in the qualifier; copying it on would hide the matching
+  // declaration.
   if (sym != NULL && TypeIsFunction(sym->type) &&
       syntax->parsing_template_declaration &&
+      !parser.qualifier_consumed_template_parameters &&
       sym->type->info.function.template_parameter_count <= 0) {
     int listed = CurrentTemplateParameterListLength(syntax);
     int moved = (int)sym->type->info.function.template_parameters.length;
@@ -10644,11 +10663,68 @@ static bool SyntaxIdentifierStartsDaveCCTypeTraitBuiltin(Syntax* syntax) {
          strcmp(name, "__davecc_common_type_t") == 0;
 }
 
+static bool SyntaxBuiltinTypeSpecifierToken(Token tok) {
+  switch (tok) {
+    case TOK(bool):
+    case TOK(char):
+    case TOK(const):
+    case TOK(double):
+    case TOK(float):
+    case TOK(int):
+    case TOK(long):
+    case TOK(short):
+    case TOK(signed):
+    case TOK(unsigned):
+    case TOK(void):
+    case TOK(volatile):
+      return true;
+    default:
+      return false;
+  }
+}
+
+// `integral_constant<bool, bool(!P::value)>`: a type-name followed by `(expr)`
+// or `{expr}` is a functional cast, not a type-id.  `bool(int)` and `bool(*)()`
+// stay type-ids.
+static bool SyntaxTemplateArgumentIsFunctionalCast(Syntax* syntax) {
+  if (!CompilerIsCXX()) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  bool saw_type = false;
+  while (SyntaxBuiltinTypeSpecifierToken(syntax->lex->current_token)) {
+    saw_type = true;
+    LexNextToken(syntax->lex);
+  }
+  bool cast = false;
+  if (saw_type && LexLookingAt(syntax->lex, TOK(lbrace))) {
+    cast = true;
+  } else if (saw_type && LexLookingAt(syntax->lex, TOK(lparen))) {
+    LexNextToken(syntax->lex);
+    Token inner = syntax->lex->current_token;
+    if (inner == TOK(bang) || inner == TOK(minus) || inner == TOK(plus) ||
+        inner == TOK(tilde) || inner == TOK(number) || inner == TOK(sizeof) ||
+        inner == TOK(alignof) || inner == TOK(true) || inner == TOK(false) ||
+        inner == TOK(nullptr) ||
+        ((inner == TOK(identifier) || inner == TOK(coloncolon)) &&
+         !SyntaxLookingAtType(syntax))) {
+      cast = true;
+    }
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return cast;
+}
+
 static bool SyntaxTemplateArgumentLooksLikeType(Syntax* syntax) {
   if (!SyntaxLookingAtType(syntax)) {
     return false;
   }
   if (SyntaxIdentifierStartsDaveCCTypeTraitBuiltin(syntax)) {
+    return false;
+  }
+  if (SyntaxTemplateArgumentIsFunctionalCast(syntax)) {
     return false;
   }
   Token tok = syntax->lex->current_token;

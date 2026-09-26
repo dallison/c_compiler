@@ -53,6 +53,10 @@ typedef struct {
   Struct* enclosing_template_substitution_source;
   Struct* enclosing_template_substitution_target;
   StructMember* cxx_member_definition;
+  // `template <class T> Matcher<T>::Matcher(T)` uses its template head for the
+  // class. That head must not be copied onto the constructor, or overload
+  // matching treats it as a member template and misses the declaration.
+  bool qualifier_consumed_template_parameters;
   Symbol* cxx_qualified_friend_function;
   // `void ns::f()` defines a namespace function, not a class member.
   struct Namespace* cxx_qualified_definition_namespace;
