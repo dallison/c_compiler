@@ -2017,6 +2017,70 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               ReportStdHeaderSuggestion(parser->syntax, &typename_name);
             }
           }
+        } else if (typename_name.components.length >= 2) {
+          // `typename std::remove_reference<M>::type::is_gtest_matcher`: the
+          // nested name is a member of a still-dependent specialization, so
+          // it cannot be looked up until M is known.  Keep the template-id
+          // and the member path (`type::is_gtest_matcher`).
+          size_t template_index = 0;
+          Vector* parsed_args = NULL;
+          for (size_t i = 0; i < typename_name.template_arguments.length &&
+                             i < typename_name.components.length; i++) {
+            Vector* component_args =
+                typename_name.template_arguments.value.p[i];
+            if (component_args != NULL) {
+              template_index = i;
+              parsed_args = component_args;
+            }
+          }
+          Symbol* base = NULL;
+          if (parsed_args != NULL &&
+              TemplateArgumentVectorContainsTemplateParameter(parsed_args)) {
+            base = template_index == 0
+                       ? SyntaxFindSymbol(
+                             parser->syntax,
+                             typename_name.components.value.p[0])
+                       : SyntaxFindQualifiedPrefixSymbol(
+                             parser->syntax, &typename_name,
+                             template_index + 1);
+            if (base != NULL && !base->flags.is_template) {
+              base = NULL;
+            }
+          }
+          if (base != NULL &&
+              template_index + 1 < typename_name.components.length) {
+            String tail;
+            StringInit(&tail, "");
+            for (size_t i = template_index + 1;
+                 i < typename_name.components.length; i++) {
+              if (tail.length != 0) {
+                StringAppend(&tail, "::");
+              }
+              StringAppendString(&tail,
+                                 typename_name.components.value.p[i]);
+            }
+            type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+            type_record->template_origin = base;
+            type_record->template_arguments =
+                TemplateArgumentVectorCopy(parsed_args);
+            type_record->dependent_member_name = NewString(tail.value);
+            type_record->dependent_member_template_arguments = NewVector();
+            for (size_t i = template_index + 1;
+                 i < typename_name.template_arguments.length; i++) {
+              Vector* component_args =
+                  typename_name.template_arguments.value.p[i];
+              VectorAppend(type_record->dependent_member_template_arguments,
+                           component_args != NULL
+                               ? TemplateArgumentVectorCopy(component_args)
+                               : NULL);
+            }
+            type |= type_record->type;
+            StringDestruct(&tail);
+          } else {
+            SyntaxError(parser->syntax, "Unknown type name %s",
+                        typename_name.spelling.value);
+            ReportStdHeaderSuggestion(parser->syntax, &typename_name);
+          }
         } else {
           SyntaxError(parser->syntax, "Unknown type name %s",
                       typename_name.spelling.value);
