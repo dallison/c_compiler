@@ -1112,6 +1112,18 @@ static void CollectUserDefinedLiteralSuffix(Lex* lex) {
   if (!CompilerCXXAtLeast(kLanguageStandardCXX11)) {
     return;
   }
+  /* GNU as local labels are `1b` / `2f`.  A lone direction letter is the
+   * next token, not a user-defined suffix on the number. */
+  if (lex->assembler_mode && lex->pos < lex->line.length) {
+    char direction = lex->line.value[lex->pos];
+    char next = lex->pos + 1 < lex->line.length ? lex->line.value[lex->pos + 1]
+                                                : '\0';
+    if ((direction == 'b' || direction == 'B' || direction == 'f' ||
+         direction == 'F') &&
+        !isalnum((unsigned char)next) && next != '_') {
+      return;
+    }
+  }
   size_t bytes = LexIdentifierSourceCharByteCount(
       lex->line.value, lex->pos, lex->line.length, true);
   if (bytes == 0) {
@@ -1630,6 +1642,19 @@ static void CollectIdentifierOrWide(Lex* lex) {
 
   // In preprocessor and assembler modes we have no reserved words.
   if (lex->preprocessor_mode || lex->assembler_mode) {
+    // Apple assembly writes Mach-O symbol names with the leading underscore
+    // already included (`_abort`).  The object writer adds that underscore
+    // for compiler-generated names, so a single leading underscore in
+    // hand-written Darwin assembly is stripped here.  Names that already
+    // start with `__` are ELF C names and keep both underscores.
+    if (lex->assembler_mode && !lex->preprocessor_mode &&
+        compiler != NULL && compiler->native_object &&
+        lex->spelling.length >= 2 && lex->spelling.value[0] == '_' &&
+        lex->spelling.value[1] != '_') {
+      memmove(lex->spelling.value, lex->spelling.value + 1,
+              lex->spelling.length);
+      lex->spelling.length--;
+    }
     lex->current_token = TOK(identifier);
     return;
   }

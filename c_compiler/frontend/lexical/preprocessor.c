@@ -718,6 +718,8 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   } else if (CompilerTargetTripleIsDarwin(&compiler->target_triple) ||
              compiler->native_object) {
     PreprocessorDefineMacro(p, "__APPLE__", "1");
+    PreprocessorDefineMacro(p, "__APPLE_CC__", "6000");
+    PreprocessorDefineMacro(p, "__APPLE_CPP__", "1");
     PreprocessorDefineMacro(p, "__MACH__", "1");
     PreprocessorDefineMacro(p, "__unix__", "1");
     PreprocessorDefineMacro(p, "__unix", "1");
@@ -822,6 +824,8 @@ static void PreprocessorResetMacros(Preprocessor* p, bool clear_pragma_once) {
 
 void PreprocessorReset(Preprocessor* p) {
   PreprocessorResetMacros(p, true);
+  VectorClear(&p->if_stack);
+  p->is_compiled_in = true;
 }
 
 void PreprocessorAddUserIncludePath(Preprocessor* p, const char* path) {
@@ -880,6 +884,18 @@ static void CopyMacro(BinaryTreeNode* node, int depth, void* data) {
   // into the new macro, so the temporary vector and string are freed here.
   // The arg element strings are now owned by the new macro's args vector.
   String* replacement = NewString(macro->replacement_text.value);
+  Macro* existing = HashTableSearch(to_table, macro->name.value);
+  if (existing != NULL) {
+    if (!macro->is_function_like && !existing->is_function_like) {
+      StringSetString(&existing->replacement_text, replacement);
+      existing->undefined = macro->undefined;
+      existing->enabled = macro->enabled;
+    }
+    VectorDestructWithContents(&args, (VectorElementDestructor)StringDestruct,
+                               true);
+    StringDelete(replacement);
+    return;
+  }
   Macro* copy = NewMacro(macro->name.value,
                   macro->is_function_like, macro->varargs, &args,
                   replacement,
@@ -892,7 +908,11 @@ static void CopyMacro(BinaryTreeNode* node, int depth, void* data) {
 
 static void CopyMacroTree(void* m, void* data) {
   BinaryTreeTraverse(m, CopyMacro, data);
- }
+}
+
+void PreprocessorCopyMacros(Preprocessor* to, Preprocessor* from) {
+  HashTableTraverse(&from->macros, CopyMacroTree, &to->macros);
+}
 
 void PreprocessorCopyOptions(Preprocessor* to, Preprocessor* from) {
   for (size_t i = 0; i < from->system_include_paths.length; i++) {
@@ -903,8 +923,7 @@ void PreprocessorCopyOptions(Preprocessor* to, Preprocessor* from) {
     String* path = from->user_include_paths.value.p[i];
     VectorAppend(&to->user_include_paths, NewString(path->value));
   }
-  // Copy the macros.
-  HashTableTraverse(&from->macros, CopyMacroTree, &to->macros);
+  PreprocessorCopyMacros(to, from);
 }
 
 void PreprocessorDefineMacro(Preprocessor* p, const char* macro_name,

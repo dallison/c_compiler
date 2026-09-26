@@ -6276,14 +6276,21 @@ static bool BindCXXBaseConstructorInitializers(
       if (is_pack_expansion) {
         MarkCXXConstructorInitPackExpansion(call);
       }
-      VectorAppend(&init_list->base_specs, base);
       VectorAppend(&init_list->base_statements, call);
     }
+    // Record the base even when the call cannot be built.  A pack expansion
+    // searches again for the same name, and an unrecorded base would be
+    // returned forever.
+    VectorAppend(&init_list->base_specs, base);
     if (!is_pack_expansion) {
       break;
     }
+    CXXBaseSpecifier* previous = base;
     base = FindCXXDirectBaseByNameSkipping(owner, init_name,
                                            &init_list->base_specs);
+    if (base == previous) {
+      break;
+    }
   }
   if (pattern != NULL) {
     VectorDelete(pattern);

@@ -866,6 +866,25 @@ static ASTNode* ParseSwitchStatement(Syntax* syntax, TokenClass followers,
   location = syntax->lex->current_token_location;
   syntax->switch_count++;
   ASTNode* stmt = SyntaxParseStatement(syntax, followers);
+  // `switch (0) case 0: default: stmt;` is an unbraced body.  A case label
+  // leaves a following case/default for the enclosing compound-statement
+  // loop, which this form does not have, so collect them here while the
+  // switch is still open.
+  if (LexLookingAt(syntax->lex, TOK(case)) ||
+      LexLookingAt(syntax->lex, TOK(default))) {
+    Vector* statements = NewVector();
+    if (stmt != NULL) {
+      VectorAppend(statements, stmt);
+    }
+    while (LexLookingAt(syntax->lex, TOK(case)) ||
+           LexLookingAt(syntax->lex, TOK(default))) {
+      ASTNode* next = SyntaxParseStatement(syntax, followers);
+      if (next != NULL) {
+        VectorAppend(statements, next);
+      }
+    }
+    stmt = NewCompoundStatementASTNode(statements, location);
+  }
   syntax->switch_count--;
   ASTNode* switch_stmt = NewSwitchStatementASTNode(expr, stmt, location);
   ASTNode* inner = FinishConditionScope(syntax, decl, switch_stmt, location);

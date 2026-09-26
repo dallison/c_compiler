@@ -104,5 +104,6 @@ bool PreprocessorHasIncludeNext(Preprocessor* p, String* filename,
                                 bool system_include);
 
 void PreprocessorCopyOptions(Preprocessor* to, Preprocessor* from);
+void PreprocessorCopyMacros(Preprocessor* to, Preprocessor* from);
 
 #endif /* preprocessor_h */

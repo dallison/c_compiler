@@ -126,6 +126,9 @@ int fflush(FILE *stream);
 FILE *fopen(const char * restrict filename,
      const char * restrict mode);
 FILE *fdopen(int fd, const char *mode);
+static inline int fileno(FILE* file) {
+  return file == NULL ? -1 : file->fd;
+}
 FILE *freopen(const char * restrict filename,
      const char * restrict mode,
      FILE * restrict stream);

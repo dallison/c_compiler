@@ -385,6 +385,39 @@ class basic_string {
     return *this;
   }
 
+  iterator erase(const_iterator first, const_iterator last) {
+    size_type index = static_cast<size_type>(first - __data);
+    size_type count = static_cast<size_type>(last - first);
+    erase(index, count);
+    return __data + index;
+  }
+
+  iterator erase(const_iterator position) {
+    return erase(position, position + 1);
+  }
+
+  basic_string& replace(size_type pos, size_type count, size_type n, CharT c) {
+    if (pos > __size) {
+      pos = __size;
+    }
+    if (count > __size - pos) {
+      count = __size - pos;
+    }
+    if (n > count) {
+      __reserve_for(__size + (n - count));
+    }
+    size_type tail = __size - pos - count;
+    if (n != count && tail != 0) {
+      traits_type::move(__data + pos + n, __data + pos + count, tail);
+    }
+    if (n != 0) {
+      traits_type::assign(__data + pos, n, c);
+    }
+    __size = __size - count + n;
+    __data[__size] = CharT();
+    return *this;
+  }
+
   void push_back(CharT c) {
     __reserve_for(__size + 1);
     __data[__size] = c;
@@ -430,6 +463,36 @@ class basic_string {
       return 1;
     }
     return 0;
+  }
+
+  int compare(size_type pos, size_type count, const CharT* s,
+              size_type n) const {
+    if (pos > __size) {
+      pos = __size;
+    }
+    if (count > __size - pos) {
+      count = __size - pos;
+    }
+    size_type len = count < n ? count : n;
+    int r = traits_type::compare(__data + pos, s, len);
+    if (r != 0) {
+      return r;
+    }
+    if (count < n) {
+      return -1;
+    }
+    if (count > n) {
+      return 1;
+    }
+    return 0;
+  }
+
+  int compare(size_type pos, size_type count, const CharT* s) const {
+    return compare(pos, count, s, traits_type::length(s));
+  }
+
+  int compare(size_type pos, size_type count, const basic_string& other) const {
+    return compare(pos, count, other.__data, other.__size);
   }
 
   int compare(const CharT* s) const {

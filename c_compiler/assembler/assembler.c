@@ -488,6 +488,13 @@ static void Assemble(Assembler* assembler,
 void AssemblerReset(Assembler* assembler, bool clear_symbols) {
   AsmObjectReset(&assembler->object, clear_symbols);
   PreprocessorReset(&assembler->preprocessor);
+  // Reset restores only the standard predefined macros.  Command-line -D
+  // macros and the target architecture macros live on the compiler
+  // preprocessor and have to be put back, or a later pass treats
+  // `#if defined(__aarch64__)` as false and drops the whole file.
+  if (compiler != NULL) {
+    PreprocessorCopyMacros(&assembler->preprocessor, &compiler->preprocessor);
+  }
   if (assembler->local_label_count != NULL && assembler->local_label_cap > 0) {
     memset(assembler->local_label_count, 0,
            assembler->local_label_cap * sizeof(int));
