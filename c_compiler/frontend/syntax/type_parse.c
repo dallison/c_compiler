@@ -3720,6 +3720,33 @@ static void ParseFunctionDecl(TypeParser* parser) {
   ParseCXXExceptionSpecifier(parser, func);
   if (CompilerIsCXX() && TypeContainsAuto(parser->base_type) &&
       LexMatch(parser->lex, TOK(arrow))) {
+    // [expr.prim.this]: `this` is in scope in the trailing return type of a
+    // non-static member function, even though the parameter is not installed
+    // on the member until the declarator is finished.  A nested function type
+    // (a parameter, or `auto (*p)() -> T`) has either prototype context or a
+    // pointer/reference already on the declarator stack.
+    bool member_trailing_this =
+        parser->context != kParsingPrototype &&
+        parser->cxx_member_owner != NULL &&
+        !parser->parsing_friend_declaration &&
+        !StorageIs(parser->storage, STO(static)) &&
+        !StorageIs(parser->storage, STO(typedef)) &&
+        parser->stack.length == 0 &&
+        !func->info.function.has_explicit_object_parameter &&
+        (parser->cxx_member_definition == NULL ||
+         !parser->cxx_member_definition->is_static);
+    if (member_trailing_this && !FunctionHasImplicitThisParameter(func)) {
+      SourceLocation this_location =
+          parser->symbol != NULL ? parser->symbol->location
+                                 : parser->lex->current_token_location;
+      TypeRecordAddCXXThisParameter(func, parser->cxx_member_owner,
+                                   this_location);
+    }
+    if (member_trailing_this && FunctionHasImplicitThisParameter(func) &&
+        parser->syntax->local_symbol_stack != NULL) {
+      Symbol* this_symbol = func->info.function.prototype.value.p[0];
+      InsertLocalSymbol(parser->syntax->local_symbol_stack, this_symbol);
+    }
     TypeRecord* trailing_return = ParseCXXTrailingReturnType(parser);
     TypeRecordChain(func, trailing_return);
   }

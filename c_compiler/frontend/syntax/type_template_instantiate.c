@@ -5153,6 +5153,11 @@ static bool SetDeducedClassTemplateFunctionTypePackArgument(
 
 static bool TemplateArgumentIsTypeParameterPackPattern(TemplateArgument* arg,
                                                        int* index) {
+  if (arg != NULL && arg->pack_arguments != NULL &&
+      arg->pack_arguments->length == 1) {
+    return TemplateArgumentIsTypeParameterPackPattern(
+        arg->pack_arguments->value.p[0], index);
+  }
   if (index != NULL) {
     *index = -1;
   }
@@ -5228,11 +5233,99 @@ static bool PartialSpecializationBindingsContainNull(Vector* bindings) {
 
 /* Match one partial-specialization pattern argument against an actual class
  * template argument, binding the specialization's parameters into `bindings`. */
+typedef struct {
+  bool referenced[64];
+} TemplateParameterReferenceSet;
+
+static void NoteTemplateParameterReference(TemplateParameterReferenceSet* set,
+                                          int index) {
+  if (set != NULL && index >= 0 && index < 64) {
+    set->referenced[index] = true;
+  }
+}
+
+static void CollectTemplateParameterReferenceVisitor(ASTNode* node, void* data,
+                                                    int child_id,
+                                                    VisitorMode mode) {
+  (void)child_id;
+  (void)mode;
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return;
+  }
+  TemplateParameterReferenceSet* set = data;
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol != NULL) {
+    if (id->symbol->flags.is_template_parameter) {
+      NoteTemplateParameterReference(set, id->symbol->template_parameter_index);
+    }
+    NoteTemplateParameterReference(
+        set, id->symbol->dependent_value_template_parameter_index);
+  }
+  if (id->template_arguments != NULL) {
+    for (size_t i = 0; i < id->template_arguments->length; i++) {
+      TemplateArgument* arg = id->template_arguments->value.p[i];
+      if (arg != NULL && arg->type != NULL) {
+        int index = -1;
+        if (TypeIsTemplateParameterPlaceholder(arg->type, &index)) {
+          NoteTemplateParameterReference(set, index);
+        }
+      }
+      if (arg != NULL && arg->dependent_expr != NULL) {
+        ASTNodeVisit(arg->dependent_expr,
+                     CollectTemplateParameterReferenceVisitor, 0, set);
+      }
+    }
+  }
+}
+
+/* A decltype pattern can be checked once every parameter it names is bound.
+ * A pack that the expression does not use may still be unbound; requiring
+ * every binding to be filled first skips the substitution
+ * (`FindFirstPrinter`'s decltype names Printer, not the trailing printer
+ * pack). */
+static bool BindingsReadyForPatternType(Vector* bindings, TypeRecord* type) {
+  if (!PartialSpecializationBindingsContainNull(bindings)) {
+    return true;
+  }
+  if (type == NULL || type->dependent_decltype_expr == NULL ||
+      bindings == NULL) {
+    return false;
+  }
+  TemplateParameterReferenceSet referenced;
+  memset(&referenced, 0, sizeof(referenced));
+  ASTNodeVisit(type->dependent_decltype_expr,
+               CollectTemplateParameterReferenceVisitor, 0, &referenced);
+  for (size_t i = 0; i < bindings->length && i < 64; i++) {
+    if (referenced.referenced[i] && bindings->value.p[i] == NULL) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static bool ClassTemplateArgumentPatternMatches(Vector* bindings,
                                                 TemplateArgument* pattern,
                                                 TemplateArgument* actual) {
   if (pattern == NULL || actual == NULL || pattern->kind != actual->kind) {
     return false;
+  }
+  if (pattern->pack_arguments != NULL && actual->pack_arguments == NULL &&
+      pattern->pack_arguments->length == 1) {
+    TemplateArgument* inner = pattern->pack_arguments->value.p[0];
+    int pack_index = -1;
+    if (TemplateArgumentIsParameterPackPattern(inner, &pack_index)) {
+      Vector one;
+      VectorInit(&one);
+      VectorAppend(&one, actual);
+      bool ok =
+          inner->kind == kTemplateParameterType
+              ? SetDeducedClassTemplateTypePackArgument(
+                    bindings, pack_index, &one, 0, 1)
+              : SetDeducedClassTemplateValuePackArgument(
+                    bindings, pack_index, inner->kind, &one, 0, 1);
+      VectorDestruct(&one);
+      return ok;
+    }
   }
   if (pattern->pack_arguments != NULL || actual->pack_arguments != NULL) {
     return pattern->pack_arguments != NULL && actual->pack_arguments != NULL &&
@@ -5243,7 +5336,7 @@ static bool ClassTemplateArgumentPatternMatches(Vector* bindings,
   int placeholder_index = -1;
   if (pattern->kind == kTemplateParameterType && pattern->type != NULL &&
       !TypeIsTemplateParameterPlaceholder(pattern->type, &placeholder_index) &&
-      !PartialSpecializationBindingsContainNull(bindings)) {
+      BindingsReadyForPatternType(bindings, pattern->type)) {
     TypeParser parser;
     TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
                    STO(implicit), compiler->syntax.context);
@@ -5292,6 +5385,10 @@ static bool ClassTemplateArgumentPatternMatches(Vector* bindings,
   return ClassTemplateTypePatternMatches(bindings, pattern->type, actual->type);
 }
 
+static bool MatchPatternArgumentListTwoPass(Vector* bindings, Vector* patterns,
+                                            Vector* actuals, size_t pattern_begin,
+                                            size_t actual_begin, size_t count);
+
 static bool ClassTemplateArgumentVectorPatternMatchesExpanded(
     Vector* bindings, Vector* pattern_args, Vector* actual_args) {
   // A template-parameter pack in the pattern (e.g. `box<T...>`) absorbs a
@@ -5311,31 +5408,22 @@ static bool ClassTemplateArgumentVectorPatternMatchesExpanded(
     if (pattern_args->length != actual_args->length) {
       return false;
     }
-    for (size_t i = 0; i < pattern_args->length; i++) {
-      if (!ClassTemplateArgumentPatternMatches(
-              bindings, pattern_args->value.p[i], actual_args->value.p[i])) {
-        return false;
-      }
-    }
-    return true;
+    return MatchPatternArgumentListTwoPass(bindings, pattern_args, actual_args,
+                                           0, 0, pattern_args->length);
   }
   size_t leading = (size_t)pack_pattern_pos;
   size_t trailing = pattern_args->length - leading - 1;
   if (actual_args->length < leading + trailing) {
     return false;
   }
-  for (size_t i = 0; i < leading; i++) {
-    if (!ClassTemplateArgumentPatternMatches(bindings, pattern_args->value.p[i],
-                                             actual_args->value.p[i])) {
-      return false;
-    }
+  if (!MatchPatternArgumentListTwoPass(bindings, pattern_args, actual_args, 0, 0,
+                                      leading)) {
+    return false;
   }
-  for (size_t i = 0; i < trailing; i++) {
-    if (!ClassTemplateArgumentPatternMatches(
-            bindings, pattern_args->value.p[leading + 1 + i],
-            actual_args->value.p[actual_args->length - trailing + i])) {
-      return false;
-    }
+  if (!MatchPatternArgumentListTwoPass(
+          bindings, pattern_args, actual_args, leading + 1,
+          actual_args->length - trailing, trailing)) {
+    return false;
   }
   int pack_index = -1;
   TemplateArgument* pack_pattern =
@@ -5377,13 +5465,8 @@ static bool ClassTemplateArgumentVectorPatternMatches(Vector* bindings,
         (actual->pack_arguments != NULL);
   }
   if (corresponding_storage) {
-    for (size_t i = 0; i < pattern_args->length; i++) {
-      if (!ClassTemplateArgumentPatternMatches(
-              bindings, pattern_args->value.p[i], actual_args->value.p[i])) {
-        return false;
-      }
-    }
-    return true;
+    return MatchPatternArgumentListTwoPass(bindings, pattern_args, actual_args,
+                                           0, 0, pattern_args->length);
   }
   Vector expanded_actuals;
   VectorInit(&expanded_actuals);
@@ -6008,6 +6091,61 @@ static int TemplateArgumentVectorPatternSpecificity(Vector* args) {
   return score;
 }
 
+/* A bare parameter (including a pack written as its own argument) can be
+ * bound before later arguments are checked.  A decltype or other computed
+ * pattern cannot: `FindFirstPrinter<T, decltype(Printer::PrintValue(...)),
+ * Printer, Printers...>` must bind Printer before the decltype is substituted
+ * and compared with the actual argument. */
+static bool PatternArgumentIsImmediateDeduction(TemplateArgument* pattern) {
+  if (pattern == NULL) {
+    return false;
+  }
+  if (pattern->pack_arguments != NULL) {
+    for (size_t i = 0; i < pattern->pack_arguments->length; i++) {
+      if (!PatternArgumentIsImmediateDeduction(
+              pattern->pack_arguments->value.p[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  int index = -1;
+  if (pattern->kind == kTemplateParameterType && pattern->type != NULL &&
+      TypeIsTemplateParameterPlaceholder(pattern->type, &index) &&
+      !pattern->type->is_pack_index) {
+    return true;
+  }
+  if (pattern->kind == kTemplateParameterNonType &&
+      pattern->template_parameter_index >= 0 &&
+      pattern->dependent_expr == NULL) {
+    return true;
+  }
+  if (pattern->kind == kTemplateParameterTemplate &&
+      pattern->template_parameter_index >= 0) {
+    return true;
+  }
+  return false;
+}
+
+static bool MatchPatternArgumentListTwoPass(Vector* bindings, Vector* patterns,
+                                            Vector* actuals, size_t pattern_begin,
+                                            size_t actual_begin, size_t count) {
+  for (int pass = 0; pass < 2; pass++) {
+    for (size_t i = 0; i < count; i++) {
+      TemplateArgument* pattern = patterns->value.p[pattern_begin + i];
+      bool immediate = PatternArgumentIsImmediateDeduction(pattern);
+      if ((pass == 0) != immediate) {
+        continue;
+      }
+      if (!ClassTemplateArgumentPatternMatches(
+              bindings, pattern, actuals->value.p[actual_begin + i])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 /* Try to match a single partial specialization against the actual class
  * template arguments. On success, returns its parameter bindings and a
  * specificity score (for choosing the most specialized one). */
@@ -6020,11 +6158,9 @@ static bool MatchClassTemplatePartialSpecialization(
   Vector* bindings = NewPartialSpecializationBindings(partial);
   bool ok = true;
   if (partial->pattern_arguments.length == actual_args->length) {
-    for (size_t i = 0; ok && i < partial->pattern_arguments.length; i++) {
-      ok = ClassTemplateArgumentPatternMatches(
-          bindings, partial->pattern_arguments.value.p[i],
-          actual_args->value.p[i]);
-    }
+    ok = MatchPatternArgumentListTwoPass(bindings, &partial->pattern_arguments,
+                                        actual_args, 0, 0,
+                                        partial->pattern_arguments.length);
   } else {
     ok = ClassTemplateArgumentVectorPatternMatches(
         bindings, &partial->pattern_arguments, actual_args);

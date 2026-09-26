@@ -337,6 +337,11 @@ inline bool TypeChar8IdentityDiffers(TypeRecord* left, TypeRecord* right) {
   if (left == NULL || right == NULL) {
     return false;
   }
+  // char16_t* / char32_t* / char8_t* still convert to void*.  A character-type
+  // identity mismatch is only between two character types.
+  if (TypeIsVoid(left) || TypeIsVoid(right)) {
+    return false;
+  }
   Type unicode_mask = kTypeChar8 | kTypeChar16 | kTypeChar32;
   Type left_unicode = TypeIsPrimitive(left) && !TypeIsEnum(left)
                           ? left->type & unicode_mask

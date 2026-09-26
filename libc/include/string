@@ -665,6 +665,84 @@ bool operator==(const basic_string<CharT, Traits, Allocator>& a,
   return a.compare(b) == 0;
 }
 
+template <class CharT, class Traits, class Allocator>
+bool operator==(const CharT* a,
+                const basic_string<CharT, Traits, Allocator>& b) {
+  return b.compare(a) == 0;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<(const basic_string<CharT, Traits, Allocator>& a,
+               const basic_string<CharT, Traits, Allocator>& b) {
+  return a.compare(b) < 0;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<(const basic_string<CharT, Traits, Allocator>& a,
+               const CharT* b) {
+  return a.compare(b) < 0;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<(const CharT* a,
+               const basic_string<CharT, Traits, Allocator>& b) {
+  return b.compare(a) > 0;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>(const basic_string<CharT, Traits, Allocator>& a,
+               const basic_string<CharT, Traits, Allocator>& b) {
+  return b < a;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>(const basic_string<CharT, Traits, Allocator>& a,
+               const CharT* b) {
+  return b < a;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>(const CharT* a,
+               const basic_string<CharT, Traits, Allocator>& b) {
+  return b < a;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<=(const basic_string<CharT, Traits, Allocator>& a,
+                const basic_string<CharT, Traits, Allocator>& b) {
+  return !(b < a);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<=(const basic_string<CharT, Traits, Allocator>& a,
+                const CharT* b) {
+  return !(b < a);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<=(const CharT* a,
+                const basic_string<CharT, Traits, Allocator>& b) {
+  return !(b < a);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>=(const basic_string<CharT, Traits, Allocator>& a,
+                const basic_string<CharT, Traits, Allocator>& b) {
+  return !(a < b);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>=(const basic_string<CharT, Traits, Allocator>& a,
+                const CharT* b) {
+  return !(a < b);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>=(const CharT* a,
+                const basic_string<CharT, Traits, Allocator>& b) {
+  return !(a < b);
+}
+
 #if __cplusplus >= 202002L
 template <class CharT, class Traits, class Allocator>
 std::strong_ordering operator<=>(

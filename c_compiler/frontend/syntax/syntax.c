@@ -10559,6 +10559,15 @@ static void DependentTemplateExpressionVisitor(ASTNode* node, void* data,
     *(bool*)data = true;
     return;
   }
+  if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
+    // `sizeof(T)` is value-dependent.  The node's own type is size_t; the
+    // operand type lives on the sizeof node, not in a child expression.
+    SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
+    if (TypeContainsTemplateParameter(sizeof_node->type_operand)) {
+      *(bool*)data = true;
+      return;
+    }
+  }
   if (node->op != AST_OP(identifier)) {
     return;
   }

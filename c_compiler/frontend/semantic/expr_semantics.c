@@ -3132,6 +3132,45 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   if (TryAnalyzeCConditionalObjectPointers(node, colon)) {
     return;
   }
+  // [expr.cond]: when the arms differ and at least one has class type, convert
+  // the other arm to that class if exactly one direction has a converting
+  // constructor.  `p ? str : std::string(str, comma)` is the gtest form.
+  if (CompilerIsCXX() &&
+      !TypeEqualIgnoringQualifiers(colon->left->type, colon->right->type) &&
+      (TypeIsStructOrUnion(colon->left->type) ||
+       TypeIsStructOrUnion(colon->right->type))) {
+    bool left_to_right =
+        colon->right->value_category == kValueCategoryPrvalue &&
+        FindConvertingConstructorCandidate(
+            colon->right->type, colon->left, /*allow_explicit=*/false,
+            /*allow_same_class=*/false) != NULL;
+    bool right_to_left =
+        colon->left->value_category == kValueCategoryPrvalue &&
+        FindConvertingConstructorCandidate(
+            colon->left->type, colon->right, /*allow_explicit=*/false,
+            /*allow_same_class=*/false) != NULL;
+    ASTNode* source = NULL;
+    TypeRecord* target = NULL;
+    if (left_to_right && !right_to_left) {
+      source = colon->left;
+      target = colon->right->type;
+    } else if (right_to_left && !left_to_right) {
+      source = colon->right;
+      target = colon->left->type;
+    }
+    if (source != NULL &&
+        TryConvertWithConvertingConstructorImpl(
+            source, target, kConvertNormal, /*allow_same_class=*/false)) {
+      TypeRecord* result_type = TypeRecordCopy(target);
+      result_type->qualifiers = kQualPlain;
+      ASTNodeSetType((ASTNode*)colon, result_type);
+      ASTNodeSetType((ASTNode*)node, colon->base.type);
+      colon->base.value_category = kValueCategoryPrvalue;
+      node->base.value_category = kValueCategoryPrvalue;
+      TypeRecordDelete(result_type);
+      return;
+    }
+  }
   if (CompilerIsCXX() &&
       colon->left->value_category == colon->right->value_category &&
       colon->left->value_category != kValueCategoryPrvalue &&
