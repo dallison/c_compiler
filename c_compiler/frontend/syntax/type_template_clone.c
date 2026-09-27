@@ -6158,6 +6158,8 @@ static ASTNode* RewriteDependentNewAllocation(
   return NULL;
 }
 
+static bool CallActualsContainUndeducedAuto(VectorASTNode* call);
+
 /* After pack-expanding a cloned call's actuals, either re-analyze the call
  * now or mark a member-access call dependent so the post-clone pass (which
  * runs after declaration types are substituted) can resolve it. */
@@ -6206,6 +6208,13 @@ static ASTNode* ReanalyzeExpandedClonedCall(
   // source template. AnalyzeExpression may replace the call in its parent;
   // detach it first so expanding one specialization cannot mutate the
   // template body used by later specializations.
+  // A constructor argument can mention a range-for variable that is still
+  // `auto` (`string_view((base + item.text_end) - end)`).  Resolving it now
+  // type-checks that member as auto.  Retry after deduction.
+  if (CallActualsContainUndeducedAuto((VectorASTNode*)node)) {
+    node->flags |= kASTDependentFunctorCall;
+    return node;
+  }
   node->parent = NULL;
   return AnalyzeExpression(node);
 }
@@ -6429,21 +6438,30 @@ static void RewriteDeferredConstructorMemberName(VectorASTNode* call) {
   StringSet(member_name->value.string, constructor_name);
 }
 
-static bool ExpressionContainsUndeducedAuto(ASTNode* node) {
-  if (node == NULL) {
-    return false;
+static void UndeducedAutoVisitor(ASTNode* node, void* data, int child_id,
+                                 VisitorMode mode) {
+  bool* found = data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL || found == NULL || *found) {
+    return;
   }
   if (node->type != NULL && TypeContainsAuto(node->type)) {
-    return true;
+    *found = true;
+    return;
   }
   if (node->op == AST_OP(identifier)) {
     Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
     if (symbol != NULL && symbol->type != NULL &&
         TypeContainsAuto(symbol->type)) {
-      return true;
+      *found = true;
     }
   }
-  return false;
+}
+
+static bool ExpressionContainsUndeducedAuto(ASTNode* node) {
+  bool found = false;
+  ASTNodeVisit(node, UndeducedAutoVisitor, 0, &found);
+  return found;
 }
 
 static bool CallActualsContainUndeducedAuto(VectorASTNode* call) {
@@ -6476,6 +6494,17 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
     return node;
   }
   VectorASTNode* call = (VectorASTNode*)node;
+  // `NumBits<URBG>()` inside a member function template is cloned while only
+  // the enclosing class arguments exist.  The explicit argument is still that
+  // member parameter.  Resolving the call now decays the placeholder to int
+  // and instantiates `NumBits<int>`.
+  if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)call->left;
+    if (TemplateArgumentVectorContainsTemplateParameter(
+            id->template_arguments)) {
+      return node;
+    }
+  }
   // `auto* rep = ...; Buf(rep)` is cloned before `rep` is deduced.  Resolving
   // the constructor now diagnoses a conversion from `auto*` and sticks.  Leave
   // the call until DeduceClonedAutoLocalVisitor has replaced the placeholder.
@@ -7155,6 +7184,17 @@ static ASTNode* ReanalyzeClonedResolvedCall(
     }
   }
   IdentifierASTNode* id = (IdentifierASTNode*)call->left;
+  // Class instantiation clones a member function template with only the
+  // enclosing arguments, then rebases the member's own parameters to 0.
+  // A local alias such as `using tag = conditional_t<RangeSize<URBG>()>` is
+  // already substituted and rebased.  Resolving `tag{}` again folds `URBG`
+  // (now index 0) onto the class argument.
+  if (clone != NULL && clone->parser != NULL &&
+      clone->parser->substituting_enclosing_template_arguments_only &&
+      id->symbol != NULL &&
+      StorageIs(id->symbol->storage, STO(typedef))) {
+    return node;
+  }
   if (clone != NULL && clone->to_func != NULL &&
       TypeIsFunction(clone->to_func) && id->symbol != NULL &&
       StorageIs(id->symbol->storage, STO(typedef)) &&

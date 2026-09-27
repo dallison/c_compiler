@@ -385,6 +385,30 @@ static bool ConditionStartsWithType(Syntax* syntax) {
   }
 }
 
+// `if (Trait<T>::value && std::is_same<A, B>::value)` parses a type through
+// `::value`, then `&&` looks like an rvalue-reference declarator.  A condition
+// variable cannot be a qualified name, so `&& ns::member` is logical-and.
+static bool ConditionOperatorStartsQualifiedName(Syntax* syntax) {
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  while (LexLookingAt(syntax->lex, TOK(amp)) ||
+         LexLookingAt(syntax->lex, TOK(ampamp)) ||
+         LexLookingAt(syntax->lex, TOK(star)) ||
+         LexLookingAt(syntax->lex, TOK(const)) ||
+         LexLookingAt(syntax->lex, TOK(volatile)) ||
+         LexLookingAt(syntax->lex, TOK(restrict))) {
+    LexNextToken(syntax->lex);
+  }
+  bool qualified = LexLookingAt(syntax->lex, TOK(coloncolon));
+  if (!qualified && LexLookingAt(syntax->lex, TOK(identifier))) {
+    LexNextToken(syntax->lex);
+    qualified = LexLookingAt(syntax->lex, TOK(coloncolon));
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return qualified;
+}
+
 // Decides whether the controlling condition at the current position is a
 // declaration rather than an expression.  A condition-declaration must have a
 // brace-or-equal-initializer, which distinguishes "if (T x = v)" (a
@@ -414,8 +438,13 @@ static bool LooksLikeConditionDeclaration(Syntax* syntax,
     // parser synthesizes names for abstract declarators, so we must gate on the
     // lookahead token rather than trust the parsed name.
     Token after_type = syntax->lex->current_token;
-    if (after_type == TOK(identifier) || after_type == TOK(star) ||
-        after_type == TOK(amp) || after_type == TOK(ampamp)) {
+    bool qualified_after_operator =
+        (after_type == TOK(amp) || after_type == TOK(ampamp) ||
+         after_type == TOK(star)) &&
+        ConditionOperatorStartsQualifiedName(syntax);
+    if (!qualified_after_operator &&
+        (after_type == TOK(identifier) || after_type == TOK(star) ||
+         after_type == TOK(amp) || after_type == TOK(ampamp))) {
       Symbol* sym = TypeParserParseDeclarator(&parser, type);
       if (sym != NULL && sym->name.length > 0) {
         if (LexLookingAt(syntax->lex, TOK(equal)) ||
