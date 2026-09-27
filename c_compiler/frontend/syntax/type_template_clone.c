@@ -6803,6 +6803,39 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
       ASTNodeSetType(call->left, id->symbol->type);
       return true;
     }
+    if (!provisional_function_template) {
+      // Overload resolution already selected this constructor.  Keep it when
+      // the mismatch is only a receiver whose type was cleared for
+      // re-analysis, or a parameter that still names the class template's own
+      // type parameter.  A concrete argument that does not convert still falls
+      // through so a different same-arity constructor can be chosen.  Replacing
+      // the symbol with the overload head unconditionally binds the default
+      // constructor and then rejects the original arguments
+      // (`uniform_int_distribution<T>(0, n)` where `n` is size_t).
+      bool only_untyped_or_dependent = true;
+      for (size_t i = 0; i < call->children->length; i++) {
+        ASTNode* actual = call->children->value.p[i];
+        Symbol* formal =
+            id->symbol->type->info.function.prototype.value.p[i];
+        if (actual == NULL || formal == NULL || formal->type == NULL) {
+          only_untyped_or_dependent = false;
+          break;
+        }
+        if (actual->type == NULL ||
+            TypeContainsTemplateParameter(formal->type) ||
+            TypeContainsTemplateParameter(actual->type)) {
+          continue;
+        }
+        if (!TypeAssignmentCompatible(actual->type, formal->type)) {
+          only_untyped_or_dependent = false;
+          break;
+        }
+      }
+      if (only_untyped_or_dependent) {
+        ASTNodeSetType(call->left, id->symbol->type);
+        return true;
+      }
+    }
   }
   StructMember* member = FindStructMemberOverloadHead(ctor_owner, ctor_name);
   if (member == NULL || member->symbol == NULL) {

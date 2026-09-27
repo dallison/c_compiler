@@ -9604,6 +9604,66 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
     }
     return;
   }
+  // A lowered constructor call already includes the implicit object argument.
+  // Free-function overload resolution counts that argument as a user parameter
+  // and only sees the one constructor symbol the callee was bound to, so a
+  // later pass can replace the selected constructor with the overload head
+  // (the default constructor) and then reject the original arguments.
+  if (id->symbol != NULL && id->symbol->type != NULL &&
+      TypeIsFunction(id->symbol->type) &&
+      id->symbol->type->info.function.is_constructor) {
+    size_t num_actual =
+        node->children != NULL ? node->children->length : 0;
+    if (id->symbol->type->info.function.prototype.length != num_actual) {
+      Struct* owner = id->symbol->type->info.function.cxx_member_owner;
+      StructMember* head =
+          owner != NULL && owner->tag_name != NULL
+              ? FindCXXMemberOverloadHead(owner, owner->tag_name)
+              : NULL;
+      StructMember* match = NULL;
+      int best_score = -1;
+      for (StructMember* candidate = head; candidate != NULL;
+           candidate = candidate->overload_next) {
+        if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
+            !TypeIsFunction(candidate->symbol->type) ||
+            candidate->symbol->flags.is_template ||
+            candidate->symbol->type->info.function.prototype.length !=
+                num_actual) {
+          continue;
+        }
+        bool compatible = true;
+        int score = 0;
+        for (size_t i = 1; i < num_actual; i++) {
+          ASTNode* actual = node->children->value.p[i];
+          Symbol* formal =
+              candidate->symbol->type->info.function.prototype.value.p[i];
+          if (actual == NULL || formal == NULL || formal->type == NULL) {
+            compatible = false;
+            break;
+          }
+          if (actual->type == NULL ||
+              TypeContainsTemplateParameter(formal->type)) {
+            continue;
+          }
+          int rank = OverloadConversionRank(actual, formal->type);
+          if (rank < 0) {
+            compatible = false;
+            break;
+          }
+          score += rank;
+        }
+        if (compatible && (match == NULL || score < best_score)) {
+          match = candidate;
+          best_score = score;
+        }
+      }
+      if (match != NULL) {
+        id->symbol = match->symbol;
+        ASTNodeSetType(node->left, match->symbol->type);
+      }
+    }
+    return;
+  }
   if (!CompilerIsCXX() && !id->symbol->flags.is_overloaded) {
     return;
   }
