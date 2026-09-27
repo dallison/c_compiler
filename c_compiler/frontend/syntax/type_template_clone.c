@@ -6481,6 +6481,15 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
             actual->value_category != kValueCategoryPrvalue) {
           continue;
         }
+        // A folded literal already carries its type (an unscoped enumerator is
+        // the enumeration, not a plain int).  Re-analysis of a number node
+        // does not recover that type: a missing type is filled in as int,
+        // so compare_exchange_strong rejects memory_order_acq_rel.
+        if (actual->op == AST_OP(number) || actual->op == AST_OP(charconst) ||
+            actual->op == AST_OP(charwide) || actual->op == AST_OP(fnumber) ||
+            actual->op == AST_OP(string) || actual->op == AST_OP(string_wide)) {
+          continue;
+        }
         actual->flags &= ~kASTAnalyzed;
         ASTNodeClearType(actual);
       }

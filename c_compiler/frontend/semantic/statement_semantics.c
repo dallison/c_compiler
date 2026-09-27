@@ -2366,11 +2366,22 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
                     "Must return a value from a non-void function");
     } else if (TypeIsReference(compiler->current_function->next)) {
       TypeRecord* reference_type = compiler->current_function->next;
-      NormalConversion(return_value, reference_type->next);
-      // A conversion can replace the operand node, so classify and generate
-      // from the converted expression retained by the return statement.
-      return_value = node->cond;
+      // A still-dependent call (`StorageT<I>::get()`) is an unknown int.
+      // Converting it to the referent now inserts a concrete integer
+      // conversion and the reference check then rejects that prvalue.
+      // Leave it for instantiation, which re-analyzes the call as an lvalue.
+      bool dependent_return =
+          return_value->type == NULL || TypeIsUnknown(return_value->type) ||
+          TypeContainsTemplateParameter(return_value->type) ||
+          (return_value->flags & kASTDependentFunctorCall) != 0;
+      if (!dependent_return) {
+        NormalConversion(return_value, reference_type->next);
+        // A conversion can replace the operand node, so classify and generate
+        // from the converted expression retained by the return statement.
+        return_value = node->cond;
+      }
       bool temporary_return =
+          !dependent_return &&
           CompilerCXXAtLeast(kLanguageStandardCXX26) &&
           CXXExpressionDesignatesTemporary(return_value);
       if (temporary_return) {
@@ -2378,11 +2389,8 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
             return_value,
             "returned reference cannot be initialized with a temporary "
             "expression");
-      } else if (return_value->type != NULL &&
-                 (TypeIsUnknown(return_value->type) ||
-                  TypeContainsTemplateParameter(return_value->type))) {
-        // Dependent return in a template body: the value category is not
-        // known until instantiation (e.g. `expr.StorageT<I>::get()`).
+      } else if (dependent_return) {
+        // Value category is not known until instantiation.
       } else if (reference_type->declarator == kDeclRValueReference) {
         if (return_value->value_category == kValueCategoryLvalue) {
           SemanticError(return_value,
@@ -2392,7 +2400,8 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
         SemanticError(return_value, "Reference return value must be an lvalue");
       }
       return_value->flags |= kASTNeedAddress;
-    } else if (!cxx_return_elision) {
+    } else if (!cxx_return_elision &&
+               !TypeFunctionReturnContainsAuto(compiler->current_function)) {
       NormalConversion(return_value, compiler->current_function->next);
     }
   }
@@ -3084,7 +3093,14 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
       TypeEqual(initializer_expr->type, node->symbol->type);
   if (node->initializer != NULL && !constructor_call &&
       !side_effect_initializer && !cxx_return_elision_initializer) {
-    if (!TypeIsReflection(node->symbol->type)) {
+    if (TypeIsReference(node->symbol->type) &&
+        node->initializer->op != AST_OP(init) &&
+        node->initializer->op != AST_OP(expr_init)) {
+      // `const T& x(expr)` stores the bare expression.  An `=` initializer is
+      // an init node, and AnalyzeInitialization already bound that reference.
+      node->initializer = SemanticBindReferenceInitializer(
+          node->initializer, node->symbol->type);
+    } else if (!TypeIsReflection(node->symbol->type)) {
       NormalConversion(node->initializer, node->symbol->type);
     }
   }

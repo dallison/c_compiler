@@ -693,6 +693,15 @@ static Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type,
     }
     if (OverloadFunctionTypesEqual(overload->type, type) &&
         SameSignatureTemplateConstraintsAreEquivalent(overload, type)) {
+      // `template <> bool IsDigit<10>(char)` and `IsDigit<16>` share a
+      // function type.  They are different explicit specializations.
+      if (TypeIsFunction(overload->type) && TypeIsFunction(type) &&
+          (overload->type->template_arguments != NULL ||
+           type->template_arguments != NULL) &&
+          !TemplateArgumentVectorEqual(overload->type->template_arguments,
+                                      type->template_arguments)) {
+        continue;
+      }
       return overload;
     }
   }
@@ -1119,9 +1128,164 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
   return true;
 }
 
+// True when the `<` at the current token introduces a template-argument list
+// rather than a comparison.  Used for names that are not already known to be
+// templates: `tuple_size<T>::value < 2` must leave the second `<` as an
+// operator, while `Unknown<T>::type` is still a template-id.
+static bool AngleBracketsLookLikeTemplateId(Syntax* syntax) {
+  if (!LexLookingAt(syntax->lex, TOK(less))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  int depth = 0;
+  int paren_depth = 0;
+  int square_depth = 0;
+  int brace_depth = 0;
+  bool balanced = false;
+  bool closed_by_nested_angle = false;
+  do {
+    Token token = syntax->lex->current_token;
+    bool at_top = paren_depth == 0 && square_depth == 0 && brace_depth == 0;
+    if (at_top &&
+        (token == TOK(semicolon) || token == TOK(lbrace) ||
+         token == TOK(rbrace))) {
+      break;
+    }
+    if (token == TOK(lparen)) {
+      paren_depth++;
+    } else if (token == TOK(rparen)) {
+      if (paren_depth > 0) {
+        paren_depth--;
+      }
+    } else if (token == TOK(lsquare)) {
+      square_depth++;
+    } else if (token == TOK(rsquare)) {
+      if (square_depth > 0) {
+        square_depth--;
+      }
+    } else if (token == TOK(lbrace)) {
+      brace_depth++;
+    } else if (token == TOK(rbrace)) {
+      if (brace_depth > 0) {
+        brace_depth--;
+      }
+    } else if (at_top) {
+      if (token == TOK(less)) {
+        depth++;
+      } else {
+        int closes = LexClosingAngleCount(token);
+        if (closes > 0) {
+          if (closes > depth) {
+            balanced = true;
+            closed_by_nested_angle = true;
+            break;
+          }
+          depth -= closes;
+          if (depth == 0) {
+            balanced = true;
+            LexNextToken(syntax->lex);
+            break;
+          }
+        }
+      }
+    }
+    LexNextToken(syntax->lex);
+  } while (!LexEof(syntax->lex) && depth > 0);
+
+  bool result = false;
+  if (balanced) {
+    if (closed_by_nested_angle) {
+      result = true;
+    } else {
+      Token next = syntax->lex->current_token;
+      result = next == TOK(coloncolon) || next == TOK(lparen) ||
+               next == TOK(rparen) || next == TOK(comma) ||
+               next == TOK(semicolon) || next == TOK(lbrace) ||
+               next == TOK(rbrace) || next == TOK(colon) ||
+               next == TOK(eof) || next == TOK(ellipsis) ||
+               next == TOK(amp) || next == TOK(ampamp) ||
+               next == TOK(star) || next == TOK(lsquare) ||
+               LexLookingAtClosingAngle(syntax->lex);
+    }
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
+// A '<' after this name opens a template-argument list only when the name can
+// actually be a template.  An NTTP (`k < sizeof...(Args)`) is a comparison;
+// consuming the '<' as a template-id steals the closing '>' of the enclosing
+// argument list (`enable_if<(k < sizeof...(Args))>`).
+static bool NameMayBeTemplateId(Syntax* syntax, String* component) {
+  if (component == NULL) {
+    return true;
+  }
+  Symbol* symbol = SyntaxFindSymbol(syntax, component);
+  if (symbol != NULL) {
+    if (symbol->flags.is_template ||
+        symbol->flags.is_template_template_parameter ||
+        symbol->alias_template != NULL || symbol->variable_template != NULL) {
+      return true;
+    }
+    // The injected-class-name of a class template is not flagged is_template
+    // until the class body finishes, but `Class<Args>` is still a template-id.
+    if (StorageIs(symbol->storage, STO(typedef)) && symbol->type != NULL &&
+        TypeIsStructOrUnion(symbol->type) &&
+        symbol->type->info.struct_info != NULL &&
+        (symbol->type->info.struct_info->is_template ||
+         symbol->type->info.struct_info->template_parameter_count > 0 ||
+         symbol->type->info.struct_info->defining_template_scope_count > 0)) {
+      return true;
+    }
+    return false;
+  }
+  Symbol* tag = SyntaxFindTag(syntax, component);
+  if (tag != NULL) {
+    return tag->flags.is_template;
+  }
+  return AngleBracketsLookLikeTemplateId(syntax);
+}
+
+static bool QualifiedNameIsTemplate(Syntax* syntax,
+                                   FullyQualifiedIdentifier* name) {
+  if (name == NULL || (!name->is_qualified && !name->absolute)) {
+    return false;
+  }
+  Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, name);
+  if (symbol == NULL) {
+    symbol = SyntaxFindQualifiedTag(syntax, name);
+  }
+  if (symbol == NULL) {
+    return false;
+  }
+  if (symbol->flags.is_template ||
+      symbol->flags.is_template_template_parameter ||
+      symbol->alias_template != NULL || symbol->variable_template != NULL) {
+    return true;
+  }
+  if (symbol->type != NULL && TypeIsStructOrUnion(symbol->type) &&
+      symbol->type->info.struct_info != NULL &&
+      (symbol->type->info.struct_info->is_template ||
+       symbol->type->info.struct_info->template_parameter_count > 0)) {
+    return true;
+  }
+  return false;
+}
+
 static Vector* SyntaxConsumeOptionalTemplateId(Syntax* syntax,
-                                               TokenClass followers) {
+                                               TokenClass followers,
+                                               FullyQualifiedIdentifier* name,
+                                               String* component) {
   if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(less))) {
+    return NULL;
+  }
+  // A qualified component can be hidden by an unqualified non-template of the
+  // same name (`template <class FieldMatcher> ... internal::FieldMatcher<T>`).
+  // The qualifier decides.
+  if (!NameMayBeTemplateId(syntax, component) &&
+      !QualifiedNameIsTemplate(syntax, name)) {
     return NULL;
   }
   return SyntaxParseTemplateArgumentList(syntax, followers);
@@ -1156,9 +1320,10 @@ bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
     return false;
   }
   FullyQualifiedIdentifierAppend(name, &component);
-  StringDestruct(&component);
   FullyQualifiedIdentifierSetLastTemplateArguments(
-      name, SyntaxConsumeOptionalTemplateId(syntax, followers));
+      name, SyntaxConsumeOptionalTemplateId(syntax, followers, name,
+                                            &component));
+  StringDestruct(&component);
 
   while (LexLookingAt(lex, TOK(coloncolon)) &&
          !QualifiedNameContinuesWithMemberPointer(lex)) {
@@ -1181,9 +1346,10 @@ bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
     } else {
       FullyQualifiedIdentifierAppend(name, &component);
     }
-    StringDestruct(&component);
     FullyQualifiedIdentifierSetLastTemplateArguments(
-        name, SyntaxConsumeOptionalTemplateId(syntax, followers));
+        name, SyntaxConsumeOptionalTemplateId(syntax, followers, name,
+                                              &component));
+    StringDestruct(&component);
   }
   return true;
 }
@@ -1511,6 +1677,30 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
     Syntax* syntax, FullyQualifiedIdentifier* name, size_t component_count,
     bool allow_dependent_template_args);
 
+// `using streambuf = basic_streambuf<char>` can still name the forward
+// declaration.  Nested lookup (`streambuf::traits_type::eq_int_type`) has to
+// see the completed specialization, which is where the members are declared.
+static Symbol* QualifiedClassAfterMaterialize(Syntax* syntax, Symbol* symbol) {
+  if (syntax == NULL || symbol == NULL || symbol->type == NULL) {
+    return symbol;
+  }
+  TypeRecord* materialized =
+      TypeMaterializeClassTemplateSpecialization(syntax, symbol->type);
+  if (materialized == NULL || materialized == symbol->type) {
+    return symbol;
+  }
+  Symbol* tag = NULL;
+  if (TypeIsStructOrUnion(materialized) &&
+      materialized->info.struct_info != NULL) {
+    tag = materialized->info.struct_info->tag_symbol;
+  }
+  TypeRecordDelete(materialized);
+  if (tag == NULL || tag->type == NULL) {
+    return symbol;
+  }
+  return tag;
+}
+
 Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
                                   FullyQualifiedIdentifier* name) {
   if (!name->is_qualified && name->components.length == 1) {
@@ -1556,6 +1746,7 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
         SyntaxFindQualifiedPrefixSymbolImpl(
             syntax, name, name->components.length - 1,
             /*allow_dependent_template_args=*/true);
+    owner = QualifiedClassAfterMaterialize(syntax, owner);
     if (owner != NULL && owner->type != NULL && TypeIsEnum(owner->type) &&
         owner->type->info.enum_info != NULL &&
         (CompilerIsCXX() || owner->type->info.enum_info->is_scoped)) {
@@ -1591,11 +1782,15 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
         }
         StringDestruct(&prefix_name);
       }
-      if (member != NULL &&
+      if (member != NULL && member->symbol != NULL &&
           (member->is_static ||
-           (member->symbol != NULL &&
-            (StorageIs(member->symbol->storage, STO(typedef)) ||
-             member->symbol->flags.value_set)))) {
+           StorageIs(member->symbol->storage, STO(typedef)) ||
+           member->symbol->flags.value_set ||
+           (member->symbol->type != NULL &&
+            TypeIsStructOrUnion(member->symbol->type) &&
+            member->symbol->type->info.struct_info != NULL &&
+            member->symbol->type->info.struct_info->lexical_parent ==
+                owner->type->info.struct_info))) {
         symbol = member->symbol;
       }
     }
@@ -1672,6 +1867,35 @@ static Symbol* FindInjectedClassNameSymbol(Struct* owner, String* name) {
   return NULL;
 }
 
+// `DefaultValue<T&>::address_` names the partial specialization, not the
+// primary template.  A dependent argument list that matches exactly one
+// partial-specialization pattern selects that specialization.
+static Symbol* ClassTemplatePartialSpecializationTag(Symbol* primary,
+                                                    Vector* template_args) {
+  if (primary == NULL || template_args == NULL || primary->type == NULL ||
+      !TypeIsStructOrUnion(primary->type) ||
+      primary->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* str = primary->type->info.struct_info;
+  Symbol* found = NULL;
+  int matches = 0;
+  for (size_t i = 0; i < str->partial_specializations.length; i++) {
+    ClassTemplatePartialSpecialization* partial =
+        str->partial_specializations.value.p[i];
+    if (partial == NULL || partial->tag_symbol == NULL) {
+      continue;
+    }
+    if (!TemplateArgumentPatternVectorEqual(template_args,
+                                           &partial->pattern_arguments)) {
+      continue;
+    }
+    found = partial->tag_symbol;
+    matches++;
+  }
+  return matches == 1 ? found : NULL;
+}
+
 static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
     Syntax* syntax, FullyQualifiedIdentifier* name, size_t component_count,
     bool allow_dependent_template_args) {
@@ -1728,6 +1952,11 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
       TypeRecordDelete(type);
       return tag;
     }
+    Symbol* partial =
+        ClassTemplatePartialSpecializationTag(symbol, template_args);
+    if (partial != NULL) {
+      return partial;
+    }
     return symbol;
   }
 
@@ -1735,6 +1964,7 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
       ? SyntaxFindQualifiedPrefixSymbolImpl(
             syntax, name, component_count - 1, allow_dependent_template_args)
       : NULL;
+  parent = QualifiedClassAfterMaterialize(syntax, parent);
   if (allow_dependent_template_args && parent != NULL &&
       StorageIs(parent->storage, STO(typedef)) && parent->type != NULL &&
       parent->type->template_origin != NULL &&
@@ -1764,11 +1994,15 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
     String* member_name = name->components.value.p[component_count - 1];
     StructMember* member =
         FindStructMember(parent->type->info.struct_info, member_name);
-    if (member != NULL &&
+    if (member != NULL && member->symbol != NULL &&
         (member->is_static ||
-         (member->symbol != NULL &&
-          (StorageIs(member->symbol->storage, STO(typedef)) ||
-           member->symbol->flags.value_set)))) {
+         StorageIs(member->symbol->storage, STO(typedef)) ||
+         member->symbol->flags.value_set ||
+         (member->symbol->type != NULL &&
+          TypeIsStructOrUnion(member->symbol->type) &&
+          member->symbol->type->info.struct_info != NULL &&
+          member->symbol->type->info.struct_info->lexical_parent ==
+              parent->type->info.struct_info))) {
       if (member->symbol != NULL && member->symbol->type != NULL &&
           TypeIsFunction(member->symbol->type)) {
         member->symbol->type->info.function.cxx_member_owner =
@@ -1858,6 +2092,10 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
         : NULL;
     TypeRecordDelete(type);
     return tag;
+  }
+  Symbol* partial = ClassTemplatePartialSpecializationTag(symbol, template_args);
+  if (partial != NULL) {
+    return partial;
   }
   return FollowAlias(symbol);
 }
@@ -5276,11 +5514,22 @@ static bool CXXConstructorInitializerNamesOwner(Struct* owner,
     }
   }
   StructMember* alias = FindStructMemberByName(owner, name);
-  return alias != NULL && alias->symbol != NULL &&
-         StorageIs(alias->symbol->storage, STO(typedef)) &&
-         alias->symbol->type != NULL && owner->tag_symbol != NULL &&
-         owner->tag_symbol->type != NULL &&
-         TypeEqual(alias->symbol->type, owner->tag_symbol->type);
+  if (alias == NULL || alias->symbol == NULL ||
+      !StorageIs(alias->symbol->storage, STO(typedef)) ||
+      alias->symbol->type == NULL || owner->tag_symbol == NULL ||
+      owner->tag_symbol->type == NULL ||
+      !TypeEqual(alias->symbol->type, owner->tag_symbol->type)) {
+    return false;
+  }
+  // `using Base = DoAllAction<Other...>` inside `DoAllAction<Initial, Other...>`
+  // still shares the injected-class-name Struct, so TypeEqual against this
+  // class succeeds.  The same typedef matches the direct base by template
+  // arguments; that initializer is a base initializer, not a delegating one.
+  if (FindCXXDirectBaseByName(owner, name) != NULL ||
+      FindCXXVirtualBaseByName(owner, name) != NULL) {
+    return false;
+  }
+  return true;
 }
 
 static ASTNode* NewCXXDelegatingConstructorCall(
@@ -6256,6 +6505,86 @@ static void MarkCXXConstructorInitPackExpansion(ASTNode* stmt) {
   }
 }
 
+/* A qualified mem-initializer such as `std::ostream(...)` names a typedef of
+ * a class template.  The last component ("ostream") is not the base's tag
+ * (`basic_ostream`).  Match the resolved, materialized class instead. */
+static bool CXXMemInitializerTypesMatch(TypeRecord* left, TypeRecord* right) {
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  if (TypeIsStructOrUnion(left) && TypeIsStructOrUnion(right) &&
+      left->info.struct_info != NULL &&
+      left->info.struct_info == right->info.struct_info) {
+    return true;
+  }
+  return TypeEqual(left, right);
+}
+
+static CXXBaseSpecifier* FindCXXDirectBaseByResolvedType(
+    Syntax* syntax, Struct* owner, TypeRecord* type, Vector* already_used) {
+  if (owner == NULL || type == NULL) {
+    return NULL;
+  }
+  TypeRecord* want =
+      TypeMaterializeClassTemplateSpecialization(syntax, type);
+  CXXBaseSpecifier* found = NULL;
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base == NULL || base->type == NULL || base->is_virtual) {
+      continue;
+    }
+    if (already_used != NULL && VectorContainsPointer(already_used, base)) {
+      continue;
+    }
+    TypeRecord* have =
+        TypeMaterializeClassTemplateSpecialization(syntax, base->type);
+    if (CXXMemInitializerTypesMatch(want, have)) {
+      found = base;
+    }
+    if (have != base->type) {
+      TypeRecordDelete(have);
+    }
+    if (found != NULL) {
+      break;
+    }
+  }
+  if (want != type) {
+    TypeRecordDelete(want);
+  }
+  return found;
+}
+
+static CXXVirtualBaseInfo* FindCXXVirtualBaseByResolvedType(
+    Syntax* syntax, Struct* owner, TypeRecord* type) {
+  if (owner == NULL || type == NULL) {
+    return NULL;
+  }
+  TypeRecord* want =
+      TypeMaterializeClassTemplateSpecialization(syntax, type);
+  CXXVirtualBaseInfo* found = NULL;
+  for (size_t i = 0; i < owner->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
+    if (base == NULL || base->type == NULL) {
+      continue;
+    }
+    TypeRecord* have =
+        TypeMaterializeClassTemplateSpecialization(syntax, base->type);
+    if (CXXMemInitializerTypesMatch(want, have)) {
+      found = base;
+    }
+    if (have != base->type) {
+      TypeRecordDelete(have);
+    }
+    if (found != NULL) {
+      break;
+    }
+  }
+  if (want != type) {
+    TypeRecordDelete(want);
+  }
+  return found;
+}
+
 /* Bind `name(actuals)` to unused direct bases of that name.  A pack-expansion
  * mem-initializer (`Storage<Ts, I>(args)...`) produces one call per matching
  * base.  Returns true if the initializer was consumed: one or more bases were
@@ -6399,6 +6728,53 @@ void SyntaxParseCXXConstructorInitializerList(
         break;
       }
       continue;
+    }
+    if (name.is_qualified && !init_is_pack_expansion) {
+      Symbol* named = SyntaxFindQualifiedSymbol(syntax, &name);
+      if (named == NULL || named->type == NULL) {
+        named = SyntaxFindQualifiedTag(syntax, &name);
+      }
+      if (named != NULL && named->type != NULL) {
+        CXXBaseSpecifier* typed_base = FindCXXDirectBaseByResolvedType(
+            syntax, owner, named->type, &init_list->base_specs);
+        if (typed_base != NULL) {
+          CheckCXXConstructorInitializerOrder(
+              syntax, init_list, init_name,
+              CXXDirectBaseOrder(owner, typed_base));
+          ASTNode* call = NewCXXBaseSpecialMemberCall(
+              syntax, func, typed_base, false, /*complete_object=*/false,
+              actuals, location);
+          if (call != NULL) {
+            VectorAppend(&init_list->base_statements, call);
+          }
+          VectorAppend(&init_list->base_specs, typed_base);
+          FullyQualifiedIdentifierDestruct(&name);
+          if (!LexMatch(syntax->lex, TOK(comma))) {
+            break;
+          }
+          continue;
+        }
+        CXXVirtualBaseInfo* typed_virtual = FindCXXVirtualBaseByResolvedType(
+            syntax, owner, named->type);
+        if (typed_virtual != NULL &&
+            !VectorContainsPointer(&init_list->virtual_base_specs,
+                                   typed_virtual)) {
+          CheckCXXConstructorInitializerOrder(
+              syntax, init_list, init_name,
+              CXXVirtualBaseOrder(owner, typed_virtual));
+          ASTNode* call = NewCXXVirtualBaseSpecialMemberCall(
+              syntax, func, typed_virtual, false, actuals, location);
+          if (call != NULL) {
+            VectorAppend(&init_list->virtual_base_specs, typed_virtual);
+            VectorAppend(&init_list->virtual_base_statements, call);
+          }
+          FullyQualifiedIdentifierDestruct(&name);
+          if (!LexMatch(syntax->lex, TOK(comma))) {
+            break;
+          }
+          continue;
+        }
+      }
     }
     if (BindCXXBaseConstructorInitializers(
             syntax, func, init_list, owner, init_name, actuals, location,

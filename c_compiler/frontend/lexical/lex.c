@@ -2682,6 +2682,13 @@ void LexReadLine(Lex* lex) {
   if (lex->suppress_preprocessing) {
     if (!SourceEof(lex->source)) {
       ReadUTF8SourceLine(lex);
+      // A nested member defined inside an already-replayed body is captured
+      // from this same lexer.  The normal path records each line as it is
+      // read; this path must too, or the nested body keeps only its '{'.
+      if (lex->capture != NULL) {
+        StringAppendSegment(lex->capture, lex->line.value, lex->line.length);
+        StringAppendChar(lex->capture, '\n');
+      }
     }
     return;
   }

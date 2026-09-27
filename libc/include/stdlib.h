@@ -125,6 +125,8 @@ void _Exit(int status);
 int at_quick_exit(void (*func)(void));
 void quick_exit(int status);
 char *getenv(const char *name);
+int setenv(const char *name, const char *value, int overwrite);
+int unsetenv(const char *name);
 char *realpath(const char * restrict path, char * restrict resolved_path);
 extern char **environ;
 int system(const char *string);

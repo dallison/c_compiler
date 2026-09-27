@@ -76,6 +76,9 @@ char *strtok_r(char * restrict s, const char * restrict delimiters,
 void *memset(void *s, int c, size_t n);
 void *memset_explicit(void *s, int c, size_t n);
 char *strerror(int errnum);
+#if defined(__APPLE__)
+int strerror_r(int errnum, char *buf, size_t buflen);
+#endif
 size_t strlen(const char *s);
 char *strdup(const char *s);
 char *strndup(const char *s, size_t n);

@@ -11,8 +11,27 @@
 #include <syscall.h>
 
 #if !defined(__DAVECC_HAS_GUEST_THREADS__)
-#error "<thread> is unavailable in this single-threaded target profile"
+// Hosted targets such as Darwin have pthreads but not DaveCC's guest thread
+// syscalls.  Abseil's library sources only need a CPU count and yield.
+#include <unistd.h>
+#ifdef __cplusplus
+extern "C" {
+int sched_yield(void);
+}
+namespace std {
+class thread {
+ public:
+  static unsigned hardware_concurrency() noexcept {
+    long count = sysconf(_SC_NPROCESSORS_ONLN);
+    return count > 0 ? static_cast<unsigned>(count) : 0u;
+  }
+};
+namespace this_thread {
+inline void yield() noexcept { sched_yield(); }
+}
+}  // namespace std
 #endif
+#else
 
 #include <chrono>
 #if __cplusplus >= 202002L
@@ -540,5 +559,7 @@ void sleep_until(const chrono::time_point<Clock, Duration>& absolute_time) {
 }  // namespace this_thread
 
 }  // namespace std
+
+#endif  // __DAVECC_HAS_GUEST_THREADS__
 
 #endif /* __davecc_thread__ */

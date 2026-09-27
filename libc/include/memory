@@ -618,6 +618,13 @@ struct unique_ptr {
     __deleter = std::move(other.__deleter);
   }
 
+  // unique_ptr<Derived> converts to unique_ptr<Base>. The non-template
+  // move constructor is a better match for the same type, so this only
+  // fires for a different element type. default_delete is stateless.
+  template <class U, class E>
+  unique_ptr(unique_ptr<U, E>&& other) noexcept : __ptr(other.release()) {
+  }
+
   ~unique_ptr(void) {
     if (__ptr != 0) {
       __deleter(__ptr);
@@ -658,6 +665,10 @@ struct unique_ptr {
 
   T* get(void) const noexcept {
     return __ptr;
+  }
+
+  explicit operator bool() const noexcept {
+    return __ptr != 0;
   }
 
   Deleter& get_deleter(void) noexcept {

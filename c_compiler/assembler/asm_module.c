@@ -458,7 +458,13 @@ static void EmitInteger(Assembler* assembler, int width, const AsmExpr* expr) {
     }
   }
   if (!known && object->pass == ASM_OBJECT_FINAL_PASS) {
-    AssemblerError(assembler, "Unable to resolve assembly expression");
+    AssemblerError(assembler,
+                   "Unable to resolve assembly expression (kind=%d width=%d %s - %s)",
+                   (int)expr->kind, width,
+                   expr->symbol.value != NULL ? expr->symbol.value : "?",
+                   expr->subtract_symbol.value != NULL
+                       ? expr->subtract_symbol.value
+                       : "?");
   }
   switch (width) {
     case 1:

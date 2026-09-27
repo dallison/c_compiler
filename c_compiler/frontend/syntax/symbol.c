@@ -1029,7 +1029,15 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
       break;
   }
 
-  if (TypeIsVoid(type)) {
+  // Enumerations carry the underlying integer's type bits, so this check has
+  // to precede TypeIsInt / TypeIsLong / the other integer encodings.
+  // Otherwise `forward<Enum&>` and `forward<int&>` share one mangled name
+  // and the later call is wired to the earlier specialization.
+  if (TypeIsEnum(type) && type->info.enum_info != NULL &&
+      type->info.enum_info->tag_name != NULL) {
+    AppendCXXTaggedTypeName(out, type->info.enum_info->tag_symbol,
+                            type->info.enum_info->tag_name, NULL);
+  } else if (TypeIsVoid(type)) {
     StringAppendChar(out, 'v');
   } else if (TypeIsBool(type)) {
     StringAppendChar(out, 'b');
@@ -1070,10 +1078,6 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
     AppendCXXTaggedTypeName(out, type->info.struct_info->tag_symbol,
                             type->info.struct_info->tag_name,
                             type->info.struct_info);
-  } else if (TypeIsEnum(type) && type->info.enum_info != NULL &&
-             type->info.enum_info->tag_name != NULL) {
-    AppendCXXTaggedTypeName(out, type->info.enum_info->tag_symbol,
-                            type->info.enum_info->tag_name, NULL);
   } else {
     StringAppendChar(out, 'v');
   }

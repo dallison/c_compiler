@@ -380,6 +380,7 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   func->info.function.is_constructor = !is_destructor;
   func->info.function.is_destructor = is_destructor;
   TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  SyntaxOpenScope(parser->syntax);
   ParseFunctionPrototype(&proto_parser, func);
   if (func->info.function.has_explicit_object_parameter) {
     SyntaxError(
@@ -392,6 +393,7 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   }
   ParseCXXExceptionSpecifier(parser, func);
   ParseCXXPureSpecifier(parser, func);
+  SyntaxCloseScope(parser->syntax);
   TypeParserDestruct(&proto_parser);
   if (func->info.function.has_explicit_object_parameter) {
     func->info.function.cxx_member_owner = parser->cxx_member_owner;
@@ -2621,11 +2623,22 @@ bool CXXTypeIsTriviallyCopyable(TypeRecord* type) {
   return has_eligible_copy_or_move;
 }
 
-static bool CXXImplicitSpecialMemberIsTrivial(Struct* str,
-                                              CXXSpecialMemberKind kind) {
-  if (str == NULL || str->virtual_bases.length != 0) {
-    return false;
-  }
+// Classes currently being asked whether an implicit special member is trivial.
+// A nested class of a class template, and the class whose special member is
+// being synthesized, have no function to consult yet. Walking their members
+// can reach the same class again (Inner's member is Outer, Outer's member is
+// Inner). That edge does not add non-triviality; the outer call still checks
+// every other subobject.
+typedef struct CXXTrivialityCheck {
+  Struct* str;
+  CXXSpecialMemberKind kind;
+  struct CXXTrivialityCheck* next;
+} CXXTrivialityCheck;
+
+static CXXTrivialityCheck* g_cxx_triviality_checks = NULL;
+
+static bool CXXImplicitSpecialMemberIsTrivialUnchecked(
+    Struct* str, CXXSpecialMemberKind kind) {
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
     if (base != NULL &&
@@ -2659,6 +2672,24 @@ static bool CXXImplicitSpecialMemberIsTrivial(Struct* str,
     }
   }
   return true;
+}
+
+static bool CXXImplicitSpecialMemberIsTrivial(Struct* str,
+                                              CXXSpecialMemberKind kind) {
+  if (str == NULL || str->virtual_bases.length != 0) {
+    return false;
+  }
+  for (CXXTrivialityCheck* check = g_cxx_triviality_checks; check != NULL;
+       check = check->next) {
+    if (check->str == str && check->kind == kind) {
+      return true;
+    }
+  }
+  CXXTrivialityCheck check = {str, kind, g_cxx_triviality_checks};
+  g_cxx_triviality_checks = &check;
+  bool trivial = CXXImplicitSpecialMemberIsTrivialUnchecked(str, kind);
+  g_cxx_triviality_checks = check.next;
+  return trivial;
 }
 
 static bool CXXStructHasNonTrivialMemberSpecialMemberKind(
@@ -2877,9 +2908,17 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
       str->tag_name == NULL || str->cxx_special_members_complete ||
       tag->flags.invented ||
       strcmp(tag->name.value, "__va_list_tag") == 0 ||
+      // A class template's own pattern stays unspecialized until instantiation.
+      // A nested class of that template (set<T>::const_iterator) is a real
+      // class and needs its implicit copy constructor even while the enclosing
+      // template is still being parsed; otherwise optional<const_iterator>
+      // cannot copy it.  Namespace-scope instantiations have a null lexical
+      // parent but a template origin, and are covered by
+      // synthesize_instantiated_special_members.
       (parser->syntax->parsing_template_declaration &&
+       !parser->synthesize_instantiated_special_members &&
        (str->is_template || str->lexical_parent == NULL ||
-        tag->type == NULL || tag->type->template_origin == NULL))) {
+        tag->type == NULL))) {
     return;
   }
   bool user_declared_move =

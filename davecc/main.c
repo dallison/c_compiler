@@ -2282,6 +2282,16 @@ int main(int argc, char * argv[]) {
   Vector args_from_file = {0};
   
   bool compile_only = false;
+  // GCC and Clang accept `-o file.o -c file.cc`.  `-o` is a compiler output
+  // whenever `-c`, `-S`, or `-fsyntax-only` appears anywhere on the line, not
+  // only when it appears first.
+  for (int argi = 1; argi < argc; argi++) {
+    if (strcmp(argv[argi], "-c") == 0 || strcmp(argv[argi], "-S") == 0 ||
+        strcmp(argv[argi], "-fsyntax-only") == 0) {
+      compile_only = true;
+      break;
+    }
+  }
   bool run_compiler = false;
   bool read_stdin = false;
   int num_inputs = 0;

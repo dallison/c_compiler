@@ -2715,6 +2715,39 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   RegisterCXXGlobalObject(decl->symbol);
                   continue;
                 }
+                // C++ namespace-scope objects may be dynamically initialized.
+                // A non-constant initializer (gtest's TEST registration call,
+                // for example) runs from the process init function instead of
+                // being forced into a relocation.
+                if (CompilerIsCXX() && !decl->symbol->flags.is_constexpr &&
+                    !decl->symbol->flags.is_constinit &&
+                    CXXThreadLocalInitializerIsDynamic(decl->initializer)) {
+                  if (!VariableDefinitionIsODRDiscardable(decl->symbol)) {
+                    MarkReferencesInAST(decl->initializer);
+                  }
+                  UninitializedStaticVariable* var =
+                      malloc(sizeof(UninitializedStaticVariable));
+                  var->symbol = decl->symbol;
+                  var->is_global =
+                      !StorageIs(decl->symbol->storage, STO(static));
+                  var->is_weak = SymbolHasWeakBinding(decl->symbol);
+                  var->size = decl->symbol->type->size;
+                  var->alignment = SymbolEffectiveAlignment(decl->symbol);
+                  var->is_tls = false;
+                  var->is_local = decl->symbol->flags.is_local;
+                  VectorAppend(&compiler->uninitialized_static_variables, var);
+
+                  ASTNode* dynamic_init =
+                      CXXThreadLocalDynamicInitStatement(decl->symbol,
+                                                         decl->initializer);
+                  decl->initializer = NULL;
+                  VectorAppend(&compiler->cxx_global_constructor_calls,
+                               dynamic_init);
+                  VectorAppend(&compiler->cxx_global_constructor_objects,
+                               decl->symbol);
+                  RegisterCXXGlobalDestructor(decl->symbol);
+                  continue;
+                }
                 if (!VariableDefinitionIsODRDiscardable(decl->symbol)) {
                   MarkReferencesInAST(decl->initializer);
                 }
@@ -3590,7 +3623,10 @@ static void ParseOptimizationOption(Compiler* compiler, Vector* options,
 static void ParseStandardOption(Compiler* compiler, Vector* options) {
   compiler->language_standard =
       StringEndsWith(&compiler->infile, ".cc") ||
-              StringEndsWith(&compiler->infile, ".cpp")
+              StringEndsWith(&compiler->infile, ".cpp") ||
+              StringEndsWith(&compiler->infile, ".cxx") ||
+              StringEndsWith(&compiler->infile, ".cppm") ||
+              StringEndsWith(&compiler->infile, ".ixx")
           ? kLanguageStandardCXX20
           : kLanguageStandardC99;
   String* value = OptionStringValue(kOptionStandard, options);
@@ -4005,9 +4041,13 @@ static void AddDarwinSDKSystemIncludes(Compiler* compiler) {
 // options
 static void InitComplexOptions(Compiler* compiler, Vector* options) {
   ApplyPreprocessorCommandLineOptions(compiler, options);
-  if (!OptionBoolValue(kOptionNoStandardIncludes, options, false)) {
-    AddDarwinSDKSystemIncludes(compiler);
-  }
+  // The driver passes -nostdinc so the compiled-in header fallback is not
+  // searched, then adds DaveCC's libc with -isystem.  That flag also used to
+  // skip the SDK, so Darwin headers such as <sched.h> were invisible.  Append
+  // the SDK after every -isystem path; AddDarwinSDKSystemIncludes is a no-op
+  // when the path is already present, so libc and explicit -isystem paths stay
+  // ahead of it.
+  AddDarwinSDKSystemIncludes(compiler);
   for (size_t i = 0; i < options->length; i++) {
     CompilerOptionValue* option_value = options->value.p[i];
     switch (option_value->opt) {

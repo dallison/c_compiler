@@ -351,7 +351,8 @@ static void ParseCXXMemberUsingEnumDeclaration(TypeParser* parser,
   FullyQualifiedIdentifierDestruct(&name);
 }
 
-static void AttachMemberAliasTemplate(TypeParser* parser, Symbol* alias) {
+static void AttachMemberAliasTemplate(TypeParser* parser, Symbol* alias,
+                                     Vector* own_parameters) {
   if (parser == NULL || parser->syntax == NULL || alias == NULL) {
     return;
   }
@@ -361,13 +362,19 @@ static void AttachMemberAliasTemplate(TypeParser* parser, Symbol* alias) {
     VectorInit(&alias->alias_template->parameters);
     alias->alias_template->ctad_names_template_template_parameter = false;
   }
-  if (syntax->current_template_parameters == NULL) {
+  // A member alias is parsed while the enclosing class parameters are still
+  // on `current_template_parameters`.  Those belong to the class.  Recording
+  // them here makes the alias's first pack the class pack, so
+  // `EnableIfCompatible<F>` swallows `F` into `Args...` and the alias no
+  // longer denotes `is_invocable_r<R, F, Args...>`.
+  Vector* parameters = own_parameters != NULL ? own_parameters
+                                              : syntax->current_template_parameters;
+  if (parameters == NULL) {
     return;
   }
-  for (size_t p = 0; p < syntax->current_template_parameters->length; p++) {
+  for (size_t p = 0; p < parameters->length; p++) {
     VectorAppend(&alias->alias_template->parameters,
-                 TemplateParameterCopy(
-                     syntax->current_template_parameters->value.p[p]));
+                 TemplateParameterCopy(parameters->value.p[p]));
   }
 }
 
@@ -375,7 +382,8 @@ static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
                                     const char* name, TypeRecord* type,
                                     CXXAccess access,
                                     SourceLocation location,
-                                    bool is_template_alias) {
+                                    bool is_template_alias,
+                                    Vector* alias_parameters) {
   if (!CompilerIsCXX() || owner == NULL || name == NULL || type == NULL) {
     return;
   }
@@ -391,7 +399,7 @@ static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
   alias->location = location;
   alias->flags.is_template = is_template_alias;
   if (is_template_alias) {
-    AttachMemberAliasTemplate(parser, alias);
+    AttachMemberAliasTemplate(parser, alias, alias_parameters);
   }
   StructMember* member = NewStructMember(alias);
   member->access = access;
@@ -406,7 +414,7 @@ static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
   scope_alias->location = location;
   scope_alias->flags.is_template = is_template_alias;
   if (is_template_alias) {
-    AttachMemberAliasTemplate(parser, scope_alias);
+    AttachMemberAliasTemplate(parser, scope_alias, alias_parameters);
   }
   LocalSymbolTable* saved_scope = parser->syntax->local_symbol_stack;
   if (is_template_alias && saved_scope != NULL && saved_scope->prev != NULL) {
@@ -421,7 +429,8 @@ static void AddCXXNestedAliasMember(TypeParser* parser, Struct* owner,
 static void ParseCXXMemberUsingAlias(TypeParser* parser, Struct* owner,
                                      CXXAccess access,
                                      SourceLocation location,
-                                     bool is_template_alias) {
+                                     bool is_template_alias,
+                                     Vector* alias_parameters) {
   if (!LexLookingAt(parser->lex, TOK(identifier))) {
     SyntaxError(parser->syntax, "Expected alias name after using");
     SyntaxRecover(parser->syntax, TC(semicolon));
@@ -443,7 +452,7 @@ static void ParseCXXMemberUsingAlias(TypeParser* parser, Struct* owner,
   }
   TypeRecord* alias_type = parsed != NULL ? parsed->type : type;
   AddCXXNestedAliasMember(parser, owner, alias_name.value, alias_type, access,
-                          location, is_template_alias);
+                          location, is_template_alias, alias_parameters);
   if (parsed != NULL) {
     SymbolDelete(parsed);
   }
@@ -468,7 +477,7 @@ static void ParseCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
                                            SourceLocation location) {
   if (CXXMemberUsingLooksLikeAlias(parser)) {
     ParseCXXMemberUsingAlias(parser, owner, access, location,
-                             /*is_template_alias=*/false);
+                             /*is_template_alias=*/false, NULL);
     return;
   }
 
@@ -611,7 +620,7 @@ static void ParseCXXMemberTypedef(TypeParser* parser, Struct* owner,
     AddCXXNestedAliasMember(parser, owner, alias->name.value, alias->type,
                             access, alias->location != 0 ? alias->location
                                                          : location,
-                            /*is_template_alias=*/false);
+                            /*is_template_alias=*/false, NULL);
     SymbolDelete(alias);
     if (!LexMatch(parser->lex, TOK(comma))) {
       break;
@@ -2066,6 +2075,15 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
 
     syntax->context = kParsingBlockScope;
     SyntaxOpenScope(syntax);
+    // The enclosing class is still cxx_class_head when a nested class's body
+    // was deferred until that class finished.  Unqualified lookup starts there
+    // and would miss this function's own class (`Pointee` inside
+    // `PointeeMatcher::Impl`).  Point the head at the function's class; the
+    // lookup walks lexical_parent, so enclosing members stay visible.
+    Struct* saved_class_head = syntax->cxx_class_head;
+    if (member_owner != NULL) {
+      syntax->cxx_class_head = member_owner;
+    }
     AddClosedClassTemplateParameterSymbols(syntax, member_owner,
                                            parser->cxx_member_owner);
     if (func_is_template) {
@@ -2081,6 +2099,7 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
     compiler->current_function = saved_fn;
     FinishInlineMemberFunctionBody(parser, entry->member_symbol,
                                    &entry->initializers, entry->old_context);
+    syntax->cxx_class_head = saved_class_head;
 
     syntax->current_template_parameters = old_template_parameters;
     syntax->current_template_parameter_count = old_template_parameter_count;
@@ -2267,6 +2286,11 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   }
   func->info.function.is_virtual = is_virtual && is_destructor;
   TypeRecordChain(func, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  // Parameter names have function-prototype scope.  A dedicated scope keeps
+  // them visible to default arguments, noexcept, and requires-clauses, then
+  // drops them so a later member cannot see `TestInfo(string test_suite_name)`
+  // as an unqualified `test_suite_name`.
+  SyntaxOpenScope(parser->syntax);
   ParseFunctionPrototype(&proto_parser, func);
   if (func->info.function.has_explicit_object_parameter) {
     SyntaxError(
@@ -2283,6 +2307,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   SyntaxParseFunctionContracts(parser->syntax, func, str, true);
   ParseCXXPureSpecifier(parser, func);
   SyntaxDiagnoseInvalidFunctionContracts(parser->syntax, func);
+  SyntaxCloseScope(parser->syntax);
   TypeParserDestruct(&proto_parser);
   if (func->info.function.has_explicit_object_parameter) {
     func->info.function.cxx_member_owner = str;
@@ -2450,7 +2475,9 @@ static bool ParseCXXConversionOperatorMember(
       StringDestruct(&member_name);
       return true;
     }
-    if (FindStructMemberOverload(existing, member_symbol->type) != NULL) {
+    // Two conversion-operator templates can share a target type and still be
+    // distinct SFINAE overloads (`enable_if<C>` vs `enable_if<!C>`).
+    if (FindConstrainedMemberOverload(existing, member_symbol) != NULL) {
       SyntaxError(parser->syntax, "Duplicate struct/union member %s",
                   member_name.value);
       StructMemberDelete(member);
@@ -2786,6 +2813,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     ConstraintExpr* old_requires_clause =
         parser->syntax->current_template_requires_clause;
     Vector* member_template_parameters = NULL;
+    // Class parameters plus this member template's parameters.  A member
+    // template does not hide the enclosing pack: `MatcherBaseImpl(Ts... params)`
+    // expands the class parameter pack, not a pack of the member template.
+    Vector enclosing_and_member_parameters = {0};
     ConstraintExpr* member_template_requires_clause = NULL;
     int member_template_parameter_base = old_template_parameter_count;
     if (str->template_parameter_count > member_template_parameter_base) {
@@ -2797,7 +2828,21 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           SyntaxParseTemplateParameterListWithBase(
               parser->syntax, member_template_parameter_base);
       parser->syntax->parsing_template_declaration = true;
-      parser->syntax->current_template_parameters = member_template_parameters;
+      VectorInit(&enclosing_and_member_parameters);
+      if (old_template_parameters != NULL) {
+        for (size_t i = 0; i < old_template_parameters->length; i++) {
+          VectorAppend(&enclosing_and_member_parameters,
+                       old_template_parameters->value.p[i]);
+        }
+      }
+      if (member_template_parameters != NULL) {
+        for (size_t i = 0; i < member_template_parameters->length; i++) {
+          VectorAppend(&enclosing_and_member_parameters,
+                       member_template_parameters->value.p[i]);
+        }
+      }
+      parser->syntax->current_template_parameters =
+          &enclosing_and_member_parameters;
       parser->syntax->current_template_parameter_count =
           member_template_parameter_base +
           (int)member_template_parameters->length;
@@ -2810,6 +2855,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       SyntaxParseFriendDeclaration(parser->syntax, str);
       AttributeListDestruct(&member_attributes);
       SyntaxCloseScope(parser->syntax);
+      VectorDestruct(&enclosing_and_member_parameters);
       VectorDestructWithContents(member_template_parameters,
                                  (VectorElementDestructor)TemplateParameterDelete,
                                  /*free_element=*/false);
@@ -2828,7 +2874,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       if (CXXMemberUsingLooksLikeAlias(parser)) {
         ParseCXXMemberUsingAlias(parser, str, current_access,
                                  parser->lex->current_token_location,
-                                 /*is_template_alias=*/true);
+                                 /*is_template_alias=*/true,
+                                 member_template_parameters);
       } else {
         SyntaxError(parser->syntax,
                     "Member using declaration cannot be a template");
@@ -2839,6 +2886,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         SyntaxNeedSemicolon(parser->syntax, TC(type));
       }
       SyntaxCloseScope(parser->syntax);
+      VectorDestruct(&enclosing_and_member_parameters);
       VectorDestructWithContents(member_template_parameters,
                                  (VectorElementDestructor)TemplateParameterDelete,
                                  /*free_element=*/false);
@@ -2930,7 +2978,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         // entries still present.  Either way the scope, parsing flags, and the
         // (now possibly empty) parameter vector are torn down here.
         SyntaxCloseScope(parser->syntax);
-        VectorDestructWithContents(member_template_parameters,
+        VectorDestruct(&enclosing_and_member_parameters);
+      VectorDestructWithContents(member_template_parameters,
                                    (VectorElementDestructor)TemplateParameterDelete,
                                    /*free_element=*/false);
         parser->syntax->parsing_template_declaration = old_parsing_template;
@@ -3027,6 +3076,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         // down the template scope and parsing flags, freeing only the (now
         // empty) parameter vector container.
         SyntaxCloseScope(parser->syntax);
+        VectorDestruct(&enclosing_and_member_parameters);
         VectorDestructWithContents(
             member_template_parameters,
             (VectorElementDestructor)TemplateParameterDelete,
@@ -3055,7 +3105,16 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     parser->parsing_direct_class_template =
         is_member_template && possible_anon &&
         !LexLookingAt(parser->lex, TOK(enum));
+    // A trailing return type injects `this` unless the declarator is static.
+    // `is_static_member` is tracked separately from `parser->storage`, so
+    // `static auto element(...) -> decltype(...)` was given an implicit object
+    // parameter and every call looked one argument short.
+    Storage saved_member_storage = parser->storage;
+    if (is_static_member) {
+      parser->storage |= STO(static);
+    }
     TypeRecord* member_type = TypeParserParseType(parser, true);
+    parser->storage = saved_member_storage;
     parser->parsing_direct_class_template = saved_direct_class_template;
     // Unscoped enumerators are members of the enclosing class even when the
     // enum declares an object (`enum civil_kind { SKIPPED } kind;`), so
@@ -3064,6 +3123,16 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     if (TypeIsEnum(member_type)) {
       AddCXXUnscopedEnumConstantMembers(parser, str, member_type,
                                         current_access);
+    }
+    // `struct Header { ... } header;` defines a nested type and a member in
+    // one declaration.  The semicolon-only path below never sees it, so
+    // `AllocList::Header` and `OStringStream::Streambuf` stay unknown.
+    if (possible_anon && !LexLookingAt(parser->lex, TOK(semicolon)) &&
+        TypeIsNamedCXXNestedType(member_type) &&
+        TypeIsStructOrUnion(member_type) &&
+        member_type->info.struct_info != NULL &&
+        member_type->info.struct_info->lexical_parent == str) {
+      AddCXXNestedTypeMember(parser, str, member_type, current_access);
     }
     bool member_decl_had_inline_body = false;
     while (!LexEof(parser->lex)) {
@@ -3262,6 +3331,11 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           }
         } else if (member->is_member_function) {
           member_symbol->type->info.function.cxx_member_owner = str;
+          // The trailing-return parser injects `this` before it knows the
+          // member is static.  A static member has no implicit object
+          // parameter; leaving it makes `element(slot)` look like a
+          // two-argument call.
+          TypeRecordRemoveImplicitThisParameter(member_symbol->type);
         }
         if (is_member_template) {
           if (member->is_member_function) {
@@ -3500,6 +3574,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     AttributeListDestruct(&member_attributes);
     if (is_member_template) {
       SyntaxCloseScope(parser->syntax);
+      VectorDestruct(&enclosing_and_member_parameters);
       VectorDestructWithContents(member_template_parameters,
                                  (VectorElementDestructor)TemplateParameterDelete,
                                  /*free_element=*/false);

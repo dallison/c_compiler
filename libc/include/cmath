@@ -11,6 +11,7 @@
 #define cmath_h
 
 #include <math.h>
+#include <cstdlib>
 #include <type_traits>
 
 #undef fpclassify
@@ -81,6 +82,10 @@ using ::llrint;
 using ::nearbyint;
 using ::scalbn;
 using ::scalbln;
+
+inline float abs(float x) { return ::fabsf(x); }
+inline double abs(double x) { return ::fabs(x); }
+inline long double abs(long double x) { return ::fabsl(x); }
 
 inline float frexp(float x, int* exp) { return ::frexpf(x, exp); }
 inline double frexp(double x, int* exp) { return ::frexp(x, exp); }

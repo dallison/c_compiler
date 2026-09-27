@@ -70,6 +70,10 @@ typedef struct {
   // and, if it becomes set, discard the (ill-formed) instantiation instead of
   // emitting a diagnostic.
   bool template_substitution_failed;
+  // Set while synthesizing special members of a class that was instantiated
+  // during parsing of an enclosing template.  The parse-time bailout must not
+  // apply to that concrete specialization.
+  bool synthesize_instantiated_special_members;
   // The body of a member function template is first cloned with only the
   // enclosing class arguments.  Its own parameters still use the class's
   // absolute indices and must not be rebased into that argument vector

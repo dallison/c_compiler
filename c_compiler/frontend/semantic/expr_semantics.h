@@ -68,6 +68,13 @@ StructMember* CXXFindConvertingConstructorCandidate(TypeRecord* to, ASTNode* fro
 // constructor that must remain viable when NRVO later elides the call.
 void CXXValidateReturnInitialization(TypeRecord* to, ASTNode* from);
 
+// Bind `expr` to a reference of type `reference_type` (a variable's
+// parenthesized initializer, not a function parameter).  Returns the
+// expression that should be stored as the initializer; it may be a
+// materialized temporary.
+ASTNode* SemanticBindReferenceInitializer(ASTNode* expr,
+                                         TypeRecord* reference_type);
+
 // Lower a bare braced-init-list used as an expression (function argument,
 // return value or assignment right-hand side) into a temporary of `target`
 // type initialized by the braces.  Returns the analyzed compound-literal

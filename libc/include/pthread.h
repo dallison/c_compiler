@@ -69,6 +69,8 @@ void* pthread_getspecific(pthread_key_t);
 int pthread_setspecific(pthread_key_t, const void*);
 
 int pthread_once(pthread_once_t*, void (*)(void));
+// Apple's pthread_t is a pointer; NULL names the calling thread.
+int pthread_threadid_np(const void* thread, unsigned long long* thread_id);
 pthread_t pthread_self(void);
 int pthread_equal(pthread_t, pthread_t);
 int pthread_create(pthread_t*, const pthread_attr_t*, void* (*)(void*), void*);

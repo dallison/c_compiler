@@ -111,6 +111,7 @@ Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
                          bool is_volatile_member, SourceLocation location);
 bool FunctionHasImplicitThisParameter(TypeRecord* func);
 bool FunctionHasExplicitObjectParameter(TypeRecord* func);
+void TypeRecordRemoveImplicitThisParameter(TypeRecord* func);
 void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
                                    SourceLocation location);
 

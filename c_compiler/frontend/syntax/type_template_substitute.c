@@ -318,9 +318,21 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
   // argument becomes an ordinary integer; otherwise keep the expression so a
   // later, more-concrete substitution can complete it.
   if (arg->kind == kTemplateParameterNonType && arg->dependent_expr != NULL) {
+    bool saved_failed =
+        parser != NULL && parser->template_substitution_failed;
+    if (parser != NULL) {
+      parser->template_substitution_failed = false;
+    }
     int64_t folded = 0;
-    if (TryFoldDependentTemplateArgument(parser, arg->dependent_expr, args,
-                                         &folded)) {
+    bool folded_ok =
+        TryFoldDependentTemplateArgument(parser, arg->dependent_expr, args,
+                                         &folded);
+    bool subst_failed =
+        parser != NULL && parser->template_substitution_failed;
+    if (parser != NULL) {
+      parser->template_substitution_failed = saved_failed || subst_failed;
+    }
+    if (folded_ok && !subst_failed) {
       concrete->int_value = folded;
       concrete->value_kind = kTemplateValueIntegral;
       concrete->template_parameter_index = -1;
@@ -346,6 +358,10 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
           concrete->template_parameter_index = -1;
           ASTNodeDelete(partial);
           return concrete;
+        }
+        if (parser != NULL && partial != NULL && partial->type != NULL &&
+            TypeIsUnknown(partial->type)) {
+          parser->template_substitution_failed = true;
         }
       }
       concrete->dependent_expr = partial != NULL ? partial : arg->dependent_expr;
@@ -2965,12 +2981,15 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
     return;
   }
   // A variable template-id (`is_invocable_r_v<R, F, A>`) is folded by looking
-  // up `symbol->variable_template`.  Copying the symbol drops that pointer, so
-  // a later substitution of the member template's own arguments sees a plain
-  // identifier and cannot turn the condition into a constant.  The template
-  // arguments live on the identifier and are rebased below; the symbol itself
-  // is the shared variable-template definition and must stay.
-  if (old->variable_template != NULL) {
+  // up `symbol->variable_template`.  An alias template (`enable_if_t<B, T>`)
+  // is folded from the primary's pattern.  Copying either symbol and rebasing
+  // that pattern slides the alias's own parameters (`T` at index 1) into the
+  // enclosing class's argument (`T` becomes index 0, the same slot as `B`),
+  // so `enable_if_t<false, int>` never forms `enable_if<false, int>::type`.
+  // The template arguments live on the identifier and are rebased below; the
+  // symbol itself is the shared definition and must stay.
+  if (old->variable_template != NULL ||
+      (old->flags.is_template && StorageIs(old->storage, STO(typedef)))) {
     if (id->template_arguments != NULL) {
       for (size_t i = 0; i < id->template_arguments->length; i++) {
         RebaseTemplateArgumentParameterIndices(id->template_arguments->value.p[i],

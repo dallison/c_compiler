@@ -1722,6 +1722,21 @@ bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,
     case kCXXTypeTraitIsInvocable:
       result = TypeTraitIsInvocable(syntax, type_args, false);
       break;
+    case kCXXTypeTraitIsInvocableR: {
+      Vector rest;
+      VectorInit(&rest);
+      if (type_args != NULL) {
+        for (size_t i = 1; i < type_args->length; i++) {
+          VectorAppend(&rest, type_args->value.p[i]);
+        }
+      }
+      result = type_args != NULL && type_args->length >= 2 &&
+               CXXTypeTraitIsInvocableR(syntax,
+                                        (TypeRecord*)type_args->value.p[0],
+                                        &rest, false);
+      VectorDestruct(&rest);
+      break;
+    }
     case kCXXTypeTraitIsNothrowInvocable:
       result = TypeTraitIsInvocable(syntax, type_args, true);
       break;

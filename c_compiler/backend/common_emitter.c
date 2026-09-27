@@ -503,6 +503,7 @@ bool EmitTranslationUnitRemainder(struct Compiler* compiler, FILE* asm_file) {
         compiler->uninitialized_static_variables.value.p[i];
     if (!var->is_tls &&
         (var->symbol->flags.is_tentative_decl || var->is_local ||
+         var->symbol->flags.is_defined ||
          (CompilerIsCXX() && TypeIsStructOrUnion(var->symbol->type)))) {
       compiler->target->emit_bss_space(var, asm_file);
     }
@@ -817,6 +818,7 @@ bool EmitTranslationUnitRemainderToModule(struct Compiler* compiler,
         compiler->uninitialized_static_variables.value.p[i];
     if (!var->is_tls &&
         (var->symbol->flags.is_tentative_decl || var->is_local ||
+         var->symbol->flags.is_defined ||
          (CompilerIsCXX() && TypeIsStructOrUnion(var->symbol->type)))) {
       EmitBSSVariableToModule(var, module);
     }

@@ -31,6 +31,7 @@
 #include "statement_parser.h"
 #include "type_parse.h"
 #include "type_special_member.h"
+#include "type_template.h"
 
 void SynthesizeDefaultedMemberFunctionBody(TypeParser* parser, Symbol* symbol);
 static ASTNode* IdentityCloneNode(ASTNode* node, void* data);
@@ -2544,6 +2545,25 @@ static bool IsZeroIntegerConstant(ASTNode* node) {
          ((ConstantASTNode*)node)->value.ivalue == 0;
 }
 
+// [conv.ptr]: in C++ a null pointer constant is an integer literal with value
+// zero, not a folded const variable.  `const CharT nul = 0; s.find(nul)` must
+// select `find(CharT)` rather than tying `find(const CharT*)`.
+static bool IsNullPointerConstant(ASTNode* node) {
+  if (!IsZeroIntegerConstant(node)) {
+    return false;
+  }
+  if (!CompilerIsCXX()) {
+    return true;
+  }
+  if (node->op == AST_OP(charconst)) {
+    return false;
+  }
+  if (node->type != NULL && (node->type->qualifiers & kQualConst) != 0) {
+    return false;
+  }
+  return true;
+}
+
 // Returns true if `op_name` is a viable binary operator for the ordered operand
 // pair `(left, right)`: either a member operator on `left`'s class callable with
 // `right`, or a free operator found by ordinary lookup / ADL over `(left,
@@ -3055,6 +3075,8 @@ static bool TryAnalyzeCConditionalObjectPointers(BinaryASTNode* node,
   return true;
 }
 
+static bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target);
+
 static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   if (node->left == NULL) {
@@ -3162,6 +3184,24 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
         TryConvertWithConvertingConstructorImpl(
             source, target, kConvertNormal, /*allow_same_class=*/false)) {
       TypeRecord* result_type = TypeRecordCopy(target);
+      result_type->qualifiers = kQualPlain;
+      ASTNodeSetType((ASTNode*)colon, result_type);
+      ASTNodeSetType((ASTNode*)node, colon->base.type);
+      colon->base.value_category = kValueCategoryPrvalue;
+      node->base.value_category = kValueCategoryPrvalue;
+      TypeRecordDelete(result_type);
+      return;
+    }
+    // Conversion functions, not only converting constructors:
+    // `cond ? string : string_view()` uses basic_string::operator string_view.
+    bool left_op = ClassHasConversionOperatorTo(colon->left, colon->right->type);
+    bool right_op = ClassHasConversionOperatorTo(colon->right, colon->left->type);
+    if (left_op != right_op) {
+      ASTNode* conv_source = left_op ? colon->left : colon->right;
+      TypeRecord* conv_target =
+          left_op ? colon->right->type : colon->left->type;
+      SemanticConvertType(conv_source, conv_target, kConvertNormal);
+      TypeRecord* result_type = TypeRecordCopy(conv_target);
       result_type->qualifiers = kQualPlain;
       ASTNodeSetType((ASTNode*)colon, result_type);
       ASTNodeSetType((ASTNode*)node, colon->base.type);
@@ -3976,6 +4016,15 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
           e->expr = materialized;
         }
         e->expr->flags |= kASTNeedAddress;
+      } else if (e->expr != NULL && e->expr->op == AST_OP(braced_init) &&
+                 TypeIsCXXInitializerList(target->type) &&
+                 !TypeIsCXXInitializerList(e->expr->type)) {
+        // `auto range = { a, b }` is parsed as an expression-initializer
+        // around the braces (range-for's hidden variable).  List-initialize
+        // the initializer_list from its backing array, same as a bare brace.
+        init = LowerCXXInitializerListBracedInit(
+            target->type, (BracedInitializerASTNode*)e->expr,
+            e->expr->location);
       } else {
         bool constructor_call = false;
         if (e->expr->op == AST_OP(call)) {
@@ -4201,8 +4250,36 @@ static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
   if (CompilerIsCXX() && node->base.op == AST_OP(assign) &&
       node->right != NULL && node->right->op == AST_OP(braced_init) &&
       node->left->type != NULL) {
+    // A dependent `new T(args...)` is stored as `*temp = {args...}` and the
+    // template body is analyzed before instantiation.  The left-hand pointee
+    // collapses to an unknown int, so list-initializing it reports "too many
+    // initializers".  Leave the braced list for
+    // RewriteClonedDependentNewInitializer once T is concrete.
+    bool dependent_new =
+        (node->base.flags & kASTDependentNewInitializer) != 0 &&
+        node->base.type != NULL &&
+        (TypeContainsTemplateParameter(node->base.type) ||
+         node->base.type->dependent_member_name != NULL);
+    if (dependent_new) {
+      return (ASTNode*)node;
+    }
+    TypeRecord* braced_target = node->left->type;
+    // Symbol substitution can collapse the pointee to an unknown int and drop
+    // the template-id.  Recover a now-concrete class from the assignment's own
+    // type before list-initialization.
+    if ((node->base.flags & kASTDependentNewInitializer) != 0 &&
+        node->base.type != NULL &&
+        node->base.type->template_origin != NULL) {
+      TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+          &compiler->syntax, node->base.type);
+      if (materialized != NULL && TypeIsStructOrUnion(materialized) &&
+          (materialized->type & kTypeUnknown) == 0 &&
+          !TypeContainsTemplateParameter(materialized)) {
+        braced_target = materialized;
+      }
+    }
     ASTNode* lowered =
-        LowerCXXBracedInitToTarget(node->right, node->left->type);
+        LowerCXXBracedInitToTarget(node->right, braced_target);
     if (lowered != node->right) {
       ASTNodeReplaceChild((ASTNode*)node, 1, lowered, false);
       node->right = lowered;
@@ -6885,6 +6962,58 @@ static bool TypeIsEffectivelyConst(TypeRecord* type) {
   return false;
 }
 
+ASTNode* SemanticBindReferenceInitializer(ASTNode* expr,
+                                         TypeRecord* reference_type) {
+  if (expr == NULL || reference_type == NULL ||
+      !TypeIsReference(reference_type) || reference_type->next == NULL ||
+      expr->type == NULL) {
+    return expr;
+  }
+  bool rvalue_ref = reference_type->declarator == kDeclRValueReference;
+  bool discards_qualifiers =
+      TypeIsEffectivelyConst(expr->type) &&
+      !TypeIsEffectivelyConst(reference_type->next);
+  ASTNode* parent = expr->parent;
+  int child_id = expr->child_id;
+  if (!TypeEqualIgnoringQualifiers(expr->type, reference_type->next)) {
+    ASTNode* base_bound =
+        TryBindReferenceToBaseSubobject(expr, reference_type->next);
+    if (base_bound != NULL) {
+      if (parent != NULL) {
+        ASTNodeReplaceChild(parent, child_id, base_bound, false);
+      }
+      expr = base_bound;
+    } else {
+      NormalConversion(expr, ReferenceConversionTarget(expr, reference_type));
+      if (parent != NULL && parent->op == AST_OP(vardecl)) {
+        expr = ((VariableDeclarationASTNode*)parent)->initializer;
+      }
+    }
+  }
+  if (discards_qualifiers) {
+    SemanticError(expr, "Reference initializer discards qualifiers");
+  } else if (!ReferenceCanBind(expr, reference_type)) {
+    if (rvalue_ref) {
+      SemanticError(expr, "Rvalue reference initializer must not be an lvalue");
+    } else if (TypeIsConst(reference_type->next)) {
+      SemanticError(expr, "Const reference initializer has incompatible type");
+    } else {
+      SemanticError(expr, "Reference initializer must be an lvalue");
+    }
+  }
+  if (ReferenceCanBind(expr, reference_type) && !HasAddress(expr)) {
+    ASTNode* materialized = MaterializeTemporary(expr, reference_type->next);
+    if (parent != NULL) {
+      ASTNodeReplaceChild(parent, child_id, materialized, false);
+    }
+    expr = materialized;
+  }
+  if (expr != NULL) {
+    expr->flags |= kASTNeedAddress;
+  }
+  return expr;
+}
+
 static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type) {
   if (!TypeIsReference(reference_type)) {
     return false;
@@ -6955,7 +7084,29 @@ static bool TypeIsDerivedFromInCurrentClass(TypeRecord* from, TypeRecord* to) {
   return TypeBaseOffset(from, to, /*public_only=*/false, NULL);
 }
 
+static TypeRecord* MaterializeConversionClass(TypeRecord* type);
+static int OverloadBaseConversionRankMaterialized(TypeRecord* actual,
+                                                  TypeRecord* target);
+
 static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
+  TypeRecord* actual_m = MaterializeConversionClass(actual);
+  TypeRecord* target_m = MaterializeConversionClass(target);
+  bool drop_actual = actual_m != actual;
+  bool drop_target = target_m != target;
+  actual = actual_m;
+  target = target_m;
+  int rank = OverloadBaseConversionRankMaterialized(actual, target);
+  if (drop_actual) {
+    TypeRecordDelete(actual_m);
+  }
+  if (drop_target) {
+    TypeRecordDelete(target_m);
+  }
+  return rank;
+}
+
+static int OverloadBaseConversionRankMaterialized(TypeRecord* actual,
+                                                  TypeRecord* target) {
   if (TypeIsPointer(actual) && TypeIsPointer(target) &&
       actual->next != NULL && target->next != NULL) {
     Qualifiers discarded =
@@ -7030,6 +7181,29 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
     if (CompilerIsCXX() && TypeIsVoidPointer(actual) &&
         TypeIsPointer(target) && !TypeIsVoidPointer(target)) {
       return -1;
+    }
+    if (CompilerIsCXX() && actual->next != NULL && target->next != NULL) {
+      // A parameter typed as `std::ostream*` may still be the primary
+      // `basic_ostream` plus concrete arguments (the typedef was formed while
+      // the class template was only forward-declared).  Materialize both
+      // pointees so a `stringstream*` argument converts to that base.
+      TypeRecord* actual_pointee = TypeMaterializeClassTemplateSpecialization(
+          &compiler->syntax, actual->next);
+      TypeRecord* target_pointee = TypeMaterializeClassTemplateSpecialization(
+          &compiler->syntax, target->next);
+      bool derived = actual_pointee != NULL && target_pointee != NULL &&
+                     TypeIsStructOrUnion(actual_pointee) &&
+                     TypeIsStructOrUnion(target_pointee) &&
+                     TypeIsDerivedFrom(actual_pointee, target_pointee);
+      if (actual_pointee != actual->next) {
+        TypeRecordDelete(actual_pointee);
+      }
+      if (target_pointee != target->next) {
+        TypeRecordDelete(target_pointee);
+      }
+      if (derived) {
+        return 2;
+      }
     }
     if (CompilerIsCXX() && actual->next != NULL && target->next != NULL &&
         !TypeIsVoid(actual->next) && !TypeIsVoid(target->next) &&
@@ -7212,7 +7386,7 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
         StructMember* m = str->members.value.p[member_index++];
         ASTNode* element = elements.value.p[i];
         if (element == NULL || m->symbol == NULL ||
-            OverloadBaseConversionRank(element->type, m->symbol->type) < 0) {
+            OverloadConversionRank(element, m->symbol->type) < 0) {
           ok = false;
           break;
         }
@@ -7263,7 +7437,7 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
       }
       expr = AnalyzeExpression(expr);
       if (expr == NULL ||
-          OverloadBaseConversionRank(expr->type, member->symbol->type) < 0) {
+          OverloadConversionRank(expr, member->symbol->type) < 0) {
         ok = false;
         break;
       }
@@ -7406,10 +7580,13 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   // A null pointer constant is an integer literal with value zero
   // ([conv.ptr]).  An enumerator is not an integer literal, even when its
   // value is zero and it has been folded to a constant node.
-  if (IsZeroIntegerConstant(actual) &&
+  if (IsNullPointerConstant(actual) &&
       (TypeIsPointer(target) || TypeIsMemberPointer(target)) &&
       !(CompilerIsCXX() && actual->type != NULL && TypeIsEnum(actual->type))) {
-    return 25;
+    // Worse than an integral conversion (rank 25).  A zero integer that is
+    // also a character or a promoted literal then prefers `find(CharT)` over
+    // `find(const CharT*)`.
+    return 30;
   }
   // As a last resort consider a user-defined conversion through a converting
   // constructor of a class target or a conversion operator on the source.
@@ -8325,11 +8502,46 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
   return resolved;
 }
 
+// Unqualified lookup for a free operator stops at the first enclosing
+// namespace that declares the name ([basic.lookup.unqual]).  Global scope is
+// collected separately by the caller.  Without this walk, an operator declared
+// in the function's own namespace is invisible unless ADL happens to associate
+// that namespace.
+static void AddOrdinaryUnqualifiedFunctionCandidates(String* name,
+                                                     Namespace* start,
+                                                     Vector* candidates) {
+  for (int depth = 0; start != NULL && depth < 64; depth++, start = start->parent) {
+    if (start == compiler->global_namespace) {
+      return;
+    }
+    Vector functions;
+    VectorInit(&functions);
+    NamespaceCollectFunctionSymbolsInInlineSet(start, name, &functions);
+    bool found = functions.length > 0;
+    VectorDestruct(&functions);
+    if (found) {
+      AddNamedFunctionCandidates(name, start, candidates);
+      return;
+    }
+  }
+}
+
 static Symbol* ResolveFreeFunctionWithADL(String* name, Vector* actuals,
                                           bool diagnose_ambiguous) {
   Vector candidates;
   VectorInit(&candidates);
   AddNamedFunctionCandidates(name, compiler->global_namespace, &candidates);
+  if (CompilerIsCXX()) {
+    Namespace* from_function = NULL;
+    if (compiler->current_function != NULL &&
+        compiler->current_function->info.function.symbol != NULL) {
+      from_function =
+          compiler->current_function->info.function.symbol->namespace_;
+    }
+    AddOrdinaryUnqualifiedFunctionCandidates(name, from_function, &candidates);
+    AddOrdinaryUnqualifiedFunctionCandidates(
+        name, compiler->syntax.current_namespace, &candidates);
+  }
   AddADLFunctionCandidates(name, actuals, &candidates);
   ASTNode* diagnostic_node =
       actuals != NULL && actuals->length > 0 ? actuals->value.p[0] : NULL;
@@ -9489,9 +9701,15 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
             id->template_arguments)) {
       TypeRecord* alias_type = TypeInstantiateClassTemplate(
           &compiler->syntax, id->symbol, id->template_arguments);
-      if (alias_type != NULL) {
-        ASTNodeSetType(node->left, alias_type);
+      if (alias_type == NULL) {
+        // `enable_if_t<false, int>()` is ill-formed.  Value-initializing the
+        // unresolved alias as `int` made every SFINAE overload viable.
+        ASTNodeSetType((ASTNode*)node,
+                       NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                             kQualPlain));
+        return (ASTNode*)node;
       }
+      ASTNodeSetType(node->left, alias_type);
     }
   }
   if (!TypeIsStructOrUnion(node->left->type)) {
@@ -11647,6 +11865,33 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
           &member_offset);
     }
   }
+  if (member == NULL && CompilerIsCXX() && member_name->length > 1 &&
+      member_name->value[0] == '~' && struct_info->tag_name != NULL) {
+    // A generated cleanup spells the primary template (`~basic_stringstream`).
+    // The instantiation registers `~basic_stringstream<char, ...>`.
+    const char* spelled = member_name->value + 1;
+    const char* tag = struct_info->tag_name->value;
+    size_t spelled_len = strlen(spelled);
+    Symbol* origin = struct_info->tag_symbol != NULL &&
+                             struct_info->tag_symbol->type != NULL
+                         ? struct_info->tag_symbol->type->template_origin
+                         : NULL;
+    bool names_this_specialization =
+        (strncmp(tag, spelled, spelled_len) == 0 && tag[spelled_len] == '<') ||
+        (origin != NULL && strcmp(origin->name.value, spelled) == 0);
+    if (names_this_specialization) {
+      String concrete_name;
+      StringInit(&concrete_name, "~");
+      StringAppendString(&concrete_name, struct_info->tag_name);
+      member = FindStructMemberWithAccessAndOffsetByName(
+          struct_info, concrete_name.value, &access, &member_owner,
+          &member_offset);
+      if (member != NULL) {
+        StringSet(member_name, concrete_name.value);
+      }
+      StringDestruct(&concrete_name);
+    }
+  }
   if (member == NULL) {
     const char* suggestion =
         TypoCorrectionFindMemberName(struct_info, member_name->value);
@@ -11793,8 +12038,7 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
   // result dependent rather than diagnosing it here.
   if (CompilerIsCXX() && node->sub->type != NULL &&
       (TypeIsUnknown(node->sub->type) ||
-       ((((ASTNode*)node)->flags & kASTDeferredRangeContents) != 0 &&
-        TypeContainsAuto(node->sub->type)) ||
+       TypeContainsAuto(node->sub->type) ||
        TypeContainsTemplateParameter(node->sub->type))) {
     ASTNodeSetType((ASTNode*)node,
                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
@@ -12152,23 +12396,61 @@ static void AnalyzeDynamicCast(CastASTNode* node) {
 // pointer up/down-cast path (which applies any base-class offset adjustment)
 // handles it, leaving an lvalue of the target class type.  Returns true when the
 // rewrite was applied (i.e. the classes are base/derived related).
+static TypeRecord* MaterializeConversionClass(TypeRecord* type);
+
 static bool TryCastReferenceRelatedClass(CastASTNode* node) {
   if (!CompilerIsCXX() || node->expr == NULL || node->expr->type == NULL) {
     return false;
   }
   TypeRecord* target = node->cast_type->next;
-  if (target == NULL || !TypeIsStructOrUnion(node->expr->type) ||
-      !TypeIsStructOrUnion(target)) {
+  if (target == NULL || node->expr->type == NULL) {
+    return false;
+  }
+  // `static_cast<std::ostream&>(derived)` names the typedef, which may still
+  // be the forward-declared primary of basic_ostream (not yet a class type).
+  // The base subobject is the completed specialization.  Compare those.
+  TypeRecord* from_type = MaterializeConversionClass(node->expr->type);
+  TypeRecord* to_type = MaterializeConversionClass(target);
+  bool own_from = from_type != node->expr->type;
+  bool own_to = to_type != target;
+  if (!TypeIsStructOrUnion(from_type) || !TypeIsStructOrUnion(to_type) ||
+      from_type->info.struct_info == NULL ||
+      to_type->info.struct_info == NULL) {
+    if (own_from) {
+      TypeRecordDelete(from_type);
+    }
+    if (own_to) {
+      TypeRecordDelete(to_type);
+    }
     return false;
   }
   CXXBaseAdjustment adjustment;
   bool related =
-      TypeBaseAdjustment(node->expr->type, target, /*public_only=*/false,
+      TypeBaseAdjustment(from_type, to_type, /*public_only=*/false,
                          &adjustment) ||
-      TypeBaseAdjustment(target, node->expr->type, /*public_only=*/false,
+      TypeBaseAdjustment(to_type, from_type, /*public_only=*/false,
                          &adjustment);
   if (!related) {
+    if (own_from) {
+      TypeRecordDelete(from_type);
+    }
+    if (own_to) {
+      TypeRecordDelete(to_type);
+    }
     return false;
+  }
+  if (own_to) {
+    TypeRecord* stored = TypeRecordCopy(to_type);
+    TypeRecordIncRef(stored);
+    TypeRecordDelete(node->cast_type->next);
+    node->cast_type->next = stored;
+    target = stored;
+  }
+  if (own_from) {
+    TypeRecordDelete(from_type);
+  }
+  if (own_to) {
+    TypeRecordDelete(to_type);
   }
   SourceLocation loc = node->expr->location;
   ASTNode* addr = NewAnalyzedBuiltinAddressOf(node->expr, loc);
@@ -12192,28 +12474,82 @@ static bool TryCastReferenceRelatedClass(CastASTNode* node) {
 // already emits the correct static/virtual adjustment.  Returns the new lvalue
 // node (detached from any parent) when the rewrite applies, or NULL when `expr`
 // is not a base-class subobject reference (leaving `expr` untouched).
+// A typedef such as `using ostream = basic_ostream<char>` can be formed while
+// the class template is still only forward-declared.  That stores a deferred
+// template-id (the primary, flagged is_template, carrying the concrete
+// arguments) rather than the specialization created once the definition is
+// parsed.  Derived-to-base then fails because the base subobject uses the
+// completed specialization.  Re-instantiate before comparing.
+static TypeRecord* MaterializeConversionClass(TypeRecord* type) {
+  static int depth = 0;
+  if (depth > 0 || !CompilerIsCXX() || type == NULL || compiler == NULL) {
+    return type;
+  }
+  depth++;
+  TypeRecord* materialized =
+      TypeMaterializeClassTemplateSpecialization(&compiler->syntax, type);
+  depth--;
+  return materialized != NULL ? materialized : type;
+}
+
 static ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
                                                 TypeRecord* referent) {
   if (!CompilerIsCXX() || expr == NULL || expr->type == NULL ||
-      referent == NULL || !TypeIsStructOrUnion(expr->type) ||
-      !TypeIsStructOrUnion(referent) ||
-      TypeEqualIgnoringQualifiers(expr->type, referent)) {
+      referent == NULL) {
+    return NULL;
+  }
+  TypeRecord* from_type = MaterializeConversionClass(expr->type);
+  TypeRecord* to_type = MaterializeConversionClass(referent);
+  bool materialized_from = from_type != expr->type;
+  bool materialized_to = to_type != referent;
+  if (!TypeIsStructOrUnion(from_type) || !TypeIsStructOrUnion(to_type) ||
+      TypeEqualIgnoringQualifiers(from_type, to_type)) {
+    if (materialized_from) {
+      TypeRecordDelete(from_type);
+    }
+    if (materialized_to) {
+      TypeRecordDelete(to_type);
+    }
     return NULL;
   }
   // Only meaningful for an object that already has an address; a materialized
   // temporary (no address) is handled separately by the caller.
   if (!HasAddress(expr)) {
+    if (materialized_from) {
+      TypeRecordDelete(from_type);
+    }
+    if (materialized_to) {
+      TypeRecordDelete(to_type);
+    }
     return NULL;
   }
   CXXBaseAdjustment adjustment;
-  if (!TypeBaseAdjustment(expr->type, referent, /*public_only=*/true,
+  if (!TypeBaseAdjustment(from_type, to_type, /*public_only=*/true,
                           &adjustment)) {
+    if (materialized_from) {
+      TypeRecordDelete(from_type);
+    }
+    if (materialized_to) {
+      TypeRecordDelete(to_type);
+    }
     return NULL;
+  }
+  if (materialized_from) {
+    TypeRecordDelete(from_type);
+  }
+  // Keep the completed specialization as the pointer target.  The deferred
+  // referent names the primary template and has no layout.  The pointer type
+  // copies it, so the temporary can be released afterwards.
+  if (materialized_to) {
+    referent = to_type;
   }
   SourceLocation loc = expr->location;
   ASTNode* moved = ASTNodeMove(expr);
   ASTNode* addr = NewAnalyzedBuiltinAddressOf(moved, loc);
   TypeRecord* base_ptr = NewPointerTo(kQualPlain, TypeRecordCopy(referent));
+  if (materialized_to) {
+    TypeRecordDelete(to_type);
+  }
   ASTNode* ptr_cast = NewCastASTNode(base_ptr, loc, addr);
   ((CastASTNode*)ptr_cast)->kind = kCastStatic;
   ptr_cast = AnalyzeExpression(ptr_cast);
@@ -12346,7 +12682,36 @@ static ASTNode* AnalyzeCastExpression(CastASTNode* node) {
   return (ASTNode*)node;
 }
 
+static void MaterializeBracedClassTemplateTemporary(
+    CompoundLiteralASTNode* node) {
+  TypeRecord* type = node->base.type;
+  if (type == NULL || type->template_origin == NULL ||
+      type->template_arguments == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL ||
+      !type->info.struct_info->is_template) {
+    return;
+  }
+  TypeRecord* specialized = TypeInstantiateClassTemplate(
+      &compiler->syntax, type->template_origin, type->template_arguments);
+  if (specialized == NULL || !TypeIsStructOrUnion(specialized) ||
+      specialized->info.struct_info == NULL ||
+      specialized->info.struct_info->is_template) {
+    TypeRecordDelete(specialized);
+    return;
+  }
+  if (node->sym != NULL && node->sym->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node->sym;
+    if (id->symbol != NULL) {
+      id->symbol->type = TypeRecordCopy(specialized);
+      ASTNodeSetType(node->sym, id->symbol->type);
+    }
+  }
+  ASTNodeSetType((ASTNode*)node, TypeRecordCopy(specialized));
+  TypeRecordDelete(specialized);
+}
+
 static void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
+  MaterializeBracedClassTemplateTemporary(node);
   node->initializer =
       AnalyzeInitialization(&node->base, node->sym,
                             node->initializer);

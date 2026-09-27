@@ -58,6 +58,9 @@ struct timespec {
 
 extern int timespec_get(struct timespec *ts, int base);
 extern int timespec_getres(struct timespec *ts, int base);
+#if defined(__APPLE__)
+extern int nanosleep(const struct timespec *requested, struct timespec *remaining);
+#endif
 extern time_t   time(time_t *);
 
 struct tm {
@@ -75,6 +78,12 @@ struct tm {
    const char *tm_zone;    /* Timezone abbreviation.  */
 
 };
+
+/* glibc-style feature tests.  The macros expand to the field names, so
+ * `tm.tm_gmtoff` still names the member, and `#if defined(tm_gmtoff)` is
+ * true on targets that have the extension. */
+#define tm_gmtoff tm_gmtoff
+#define tm_zone tm_zone
 
 /* defining TM_ZONE indicates that we have a "timezone abbreviation" field in
  * struct tm, the value should be the field name

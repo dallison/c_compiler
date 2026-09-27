@@ -358,6 +358,17 @@ static bool ConditionStartsWithType(Syntax* syntax) {
     case TOK(auto): case TOK(decltype): case TOK(typename):
       return CompilerIsCXX();
     case TOK(identifier): {
+      // `if (std::size_t len = ...)` starts with a qualified type.  A
+      // comparison such as `a < b` has no `::`, so it stays an expression.
+      LexCheckpoint qual_checkpoint;
+      LexCheckpointSave(syntax->lex, &qual_checkpoint);
+      LexNextToken(syntax->lex);
+      bool qualified = LexLookingAt(syntax->lex, TOK(coloncolon));
+      LexCheckpointRestore(syntax->lex, &qual_checkpoint);
+      LexCheckpointDestruct(&qual_checkpoint);
+      if (qualified) {
+        return true;
+      }
       Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
       if (sym != NULL) {
         if (sym->flags.is_template_type_parameter) {
@@ -1500,7 +1511,11 @@ static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
   } else {
     AddRangeForStructuredBindingVariables(syntax, &binding, location);
   }
-  ASTNode* range = SyntaxParseExpression(syntax, followers | TC(closebra));
+  // `for (T x : { a, b })` — the range is a braced-init-list, not an
+  // expression.  The opening brace is consumed here; the parser expects that.
+  ASTNode* range = LexMatch(syntax->lex, TOK(lbrace))
+                       ? SyntaxParseBracedInitializer(syntax)
+                       : SyntaxParseExpression(syntax, followers | TC(closebra));
   SyntaxNeedBracket(syntax, TOK(rparen), followers);
 
   TypeRecord* range_type = range != NULL ? range->type : NULL;
@@ -1514,17 +1529,28 @@ static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
   }
   bool reuse_named_range =
       range != NULL && range->op == AST_OP(identifier);
-  if (!reuse_named_range && range != NULL) {
+  // A braced range is an initializer, not an expression.  Auto deduction of
+  // the hidden `auto&& __range` turns it into an initializer_list later.
+  if (!reuse_named_range && range != NULL &&
+      range->op != AST_OP(braced_init)) {
     range = AnalyzeExpression(range);
   }
   bool range_is_lvalue =
       range != NULL && range->value_category == kValueCategoryLvalue;
-  Symbol* range_sym =
-      reuse_named_range ? ((IdentifierASTNode*)range)->symbol
-                        : NewRangeForRangeSymbol(syntax, location,
-                                                 !range_is_lvalue,
-                                                 range != NULL ? range->type
-                                                               : NULL);
+  // A braced range is `initializer_list<T>`, deduced by value.  An rvalue
+  // reference would skip the backing-array lowering that list-initialization
+  // of initializer_list depends on.
+  bool range_is_braced = range != NULL && range->op == AST_OP(braced_init);
+  Symbol* range_sym;
+  if (reuse_named_range) {
+    range_sym = ((IdentifierASTNode*)range)->symbol;
+  } else if (range_is_braced) {
+    range_sym = NewRangeForAutoSymbol(syntax, NULL, location);
+    SyntaxAddSymbol(syntax, range_sym);
+  } else {
+    range_sym = NewRangeForRangeSymbol(syntax, location, !range_is_lvalue,
+                                       range != NULL ? range->type : NULL);
+  }
 
   location = syntax->lex->current_token_location;
   syntax->loop_count++;
@@ -1981,8 +2007,17 @@ static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
       return FinishInitScope(syntax, c1, true, range_for, location);
     }
   }
+  ASTNode* cond_decl = NULL;
   if (!LexLookingAt(lex, TOK(semicolon))) {
-    c2 = SyntaxParseExpression(syntax, followers);
+    // `for (; T x = init; step)` — the condition may be a declaration, same as
+    // if/while.  The name is in scope for the increment and the body, and the
+    // variable is created and destroyed on every iteration.
+    bool missing_initializer = false;
+    if (LooksLikeConditionDeclaration(syntax, &missing_initializer)) {
+      c2 = ParseControllingCondition(syntax, followers, &cond_decl);
+    } else {
+      c2 = SyntaxParseExpression(syntax, followers);
+    }
   }
   SyntaxNeedSemicolon(syntax, followers | TC(closebra));
   if (!LexLookingAt(lex, TOK(rparen))) {
@@ -1994,6 +2029,25 @@ static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
   syntax->loop_count++;
   ASTNode* stmt = SyntaxParseStatement(syntax, followers);
   syntax->loop_count--;
+  if (cond_decl != NULL) {
+    // Lower `for (init; T x = e; step) body` to
+    // `for (init; ; step) { T x = e; if (x) {} else break; body; }`.
+    // The condition scope stays open through the increment parse above, so
+    // `step` can name `x`.  A trivial `x` needs no destructor before `step`.
+    Vector* loop_body = NewVector();
+    VectorAppend(loop_body, cond_decl);
+    ASTNode* guard = NewIfStatementASTNode(
+        c2, NewCompoundStatementASTNode(NewVector(), location),
+        NewASTNode(AST_OP(break), NULL, location), false, location);
+    VectorAppend(loop_body, guard);
+    if (stmt != NULL) {
+      VectorAppend(loop_body, stmt);
+    }
+    SyntaxAppendCXXBlockScopeDestructors(loop_body);
+    SyntaxCloseScope(syntax);
+    stmt = NewCompoundStatementASTNode(loop_body, location);
+    c2 = NULL;
+  }
   SyntaxCloseScope(syntax);
   return NewForStatementASTNode(c1, c2, c3, stmt, location);
 }

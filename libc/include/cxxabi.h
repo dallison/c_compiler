@@ -62,6 +62,21 @@ struct __cxa_eh_globals* __cxa_get_globals_fast(void);
 
 #ifdef __cplusplus
 }
+
+namespace abi {
+// Itanium demangler.  DaveCC does not implement demangling; callers such as
+// Abseil fall back to the mangled name when status is non-zero.
+inline char* __cxa_demangle(const char* mangled_name, char* output_buffer,
+                            size_t* length, int* status) {
+  (void)mangled_name;
+  (void)output_buffer;
+  (void)length;
+  if (status != 0) {
+    *status = -1;
+  }
+  return 0;
+}
+}
 #endif
 
 #endif /* __DAVECC_CXXABI_H */

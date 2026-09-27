@@ -2519,7 +2519,7 @@ static void GenerateReturnStatement(Generator* gen,
                                         gen, NULL, node->cond->type->size)));
           CheckForVarDef(result, &node->base);
         }
-      } else {
+      } else if (!TypeIsVoid(node->cond->type)) {
         IROpcode result;
         if (TypeIsIntegral(node->cond->type)) {
           result = IR_OP(resulti);

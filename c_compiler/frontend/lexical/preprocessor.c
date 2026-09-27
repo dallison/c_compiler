@@ -2913,15 +2913,16 @@ bool PreprocessorParseIncludeFilename(Preprocessor* p, String* line,
 }
 
 static void PrintSearchDetails(Preprocessor* p, const char* file, bool system_include) {
+  (void)system_include;
   ReportNote(NULL, 0, "Looked in the following locations:");
-  if (!system_include) {
-    for (size_t i = 0; i < p->user_include_paths.length; i++) {
-      String pathname = {0};
-      StringPrintf(&pathname, "%s/%s",
-                   ((String*)p->user_include_paths.value.p[i])->value,
-                   file);
-      ReportNote(NULL, 0, "  %s", pathname.value);
-    }
+  // `#include <file>` searches `-I` before the system directories, matching
+  // the usual implementation search order.
+  for (size_t i = 0; i < p->user_include_paths.length; i++) {
+    String pathname = {0};
+    StringPrintf(&pathname, "%s/%s",
+                 ((String*)p->user_include_paths.value.p[i])->value,
+                 file);
+    ReportNote(NULL, 0, "  %s", pathname.value);
   }
   for (size_t i = 0; i < p->system_include_paths.length; i++) {
     String pathname = {0};
@@ -2959,6 +2960,44 @@ static void PragmaOnceAdd(Preprocessor* p, const char* path) {
     return;
   }
   SetInsert(&p->pragma_once_files, canonical);
+}
+
+// Map `#include <Framework/Header.h>` onto
+// `<sdk>/System/Library/Frameworks/Framework.framework/Headers/Header.h`.
+static FILE* OpenDarwinFrameworkInclude(const char* filename) {
+  if (filename == NULL) {
+    return NULL;
+  }
+  const char* slash = strchr(filename, '/');
+  if (slash == NULL || slash == filename || slash[1] == '\0') {
+    return NULL;
+  }
+  size_t framework_len = (size_t)(slash - filename);
+  const char* rest = slash + 1;
+  const char* candidates[3];
+  int n = 0;
+  const char* sdkroot = getenv("SDKROOT");
+  if (sdkroot != NULL && sdkroot[0] != '\0') {
+    candidates[n++] = sdkroot;
+  }
+  candidates[n++] =
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/"
+      "Developer/SDKs/MacOSX.sdk";
+  candidates[n++] = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk";
+  for (int i = 0; i < n; i++) {
+    char path[4096];
+    int written = snprintf(path, sizeof(path),
+                           "%s/System/Library/Frameworks/%.*s.framework/Headers/%s",
+                           candidates[i], (int)framework_len, filename, rest);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+      continue;
+    }
+    FILE* fp = fopen(path, "r");
+    if (fp != NULL) {
+      return fp;
+    }
+  }
+  return NULL;
 }
 
 static void DoInclude(Preprocessor* p, String* line, size_t pos,
@@ -3000,12 +3039,23 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
     if (fp == NULL) {
       fp = FindFileInPath(&p->user_include_paths, &filename, &path_index, "r");
     }
+  } else {
+    // `#include <file>` searches `-I` directories before the system paths.
+    fp = FindFileInPath(&p->user_include_paths, &filename, &path_index, "r");
   }
   if (fp == NULL) {
     // Not found in user include paths or this was a system include
     // (#include <...>).  Search system include paths.
     fp =
         FindFileInPath(&p->system_include_paths, &filename, &path_index, "r");
+    found_in_system_path = fp != NULL;
+  }
+  if (fp == NULL && start_index == 0) {
+    // `#include <CoreFoundation/CFTimeZone.h>` is a framework header.  Clang
+    // finds it via -iframework as CoreFoundation.framework/Headers/CFTimeZone.h
+    // under the SDK.  DaveCC does not model framework search paths, so try
+    // that layout after the ordinary system directories.
+    fp = OpenDarwinFrameworkInclude(filename.value);
     found_in_system_path = fp != NULL;
   }
   if (fp == NULL) {
@@ -4445,6 +4495,8 @@ bool PreprocessorHasInclude(Preprocessor* p, String* filename,
     if (fp == NULL) {
       fp = FindFileInPath(&p->user_include_paths, filename, &path_index, "r");
     }
+  } else {
+    fp = FindFileInPath(&p->user_include_paths, filename, &path_index, "r");
   }
   if (fp == NULL) {
     // Not found in user include paths or this was a system include

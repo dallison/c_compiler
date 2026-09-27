@@ -20,6 +20,7 @@
 #include <compare>
 #endif
 #include <cstddef>
+#include <iterator>
 #include <memory>
 #if __cplusplus >= 201703L
 #include <memory_resource>
@@ -54,6 +55,8 @@ class basic_string {
   using const_pointer = const CharT*;
   using iterator = CharT*;
   using const_iterator = const CharT*;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
   static const size_type npos = static_cast<size_type>(-1);
 
@@ -286,6 +289,20 @@ class basic_string {
   iterator end() noexcept { return __data + __size; }
   const_iterator end() const noexcept { return __data + __size; }
   const_iterator cend() const noexcept { return __data + __size; }
+  reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+  const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  const_reverse_iterator crbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+  const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+  const_reverse_iterator crend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
 
   // Capacity.
   size_type size() const noexcept { return __size; }
@@ -335,6 +352,34 @@ class basic_string {
 
   basic_string& append(const basic_string& s) {
     return append(s.__data, s.__size);
+  }
+
+  basic_string& append(const basic_string& s, size_type pos,
+                       size_type n = npos) {
+    if (pos > s.__size) {
+      return *this;
+    }
+    if (n > s.__size - pos) {
+      n = s.__size - pos;
+    }
+    return append(s.__data + pos, n);
+  }
+
+  basic_string& insert(size_type pos, size_type n, CharT c) {
+    if (pos > __size) {
+      return *this;
+    }
+    __reserve_for(__size + n);
+    size_type tail = __size - pos;
+    if (tail != 0 && n != 0) {
+      traits_type::move(__data + pos + n, __data + pos, tail);
+    }
+    if (n != 0) {
+      traits_type::assign(__data + pos, n, c);
+    }
+    __size += n;
+    __data[__size] = CharT();
+    return *this;
   }
 
   basic_string& append(size_type n, CharT c) {
@@ -542,6 +587,32 @@ class basic_string {
       }
     }
     return npos;
+  }
+
+  size_type find_first_of(const CharT* s, size_type pos, size_type n) const {
+    if (n == 0) {
+      return npos;
+    }
+    for (size_type i = pos; i < __size; i++) {
+      for (size_type j = 0; j < n; j++) {
+        if (traits_type::eq(__data[i], s[j])) {
+          return i;
+        }
+      }
+    }
+    return npos;
+  }
+
+  size_type find_first_of(const basic_string& s, size_type pos = 0) const {
+    return find_first_of(s.__data, pos, s.__size);
+  }
+
+  size_type find_first_of(const CharT* s, size_type pos = 0) const {
+    return find_first_of(s, pos, traits_type::length(s));
+  }
+
+  size_type find_first_of(CharT c, size_type pos = 0) const {
+    return find(c, pos);
   }
 
   size_type rfind(CharT c, size_type pos = npos) const {

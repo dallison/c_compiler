@@ -69,6 +69,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->declarator_template_arguments = NULL;
   parser->parsing_direct_class_template = false;
   parser->template_substitution_failed = false;
+  parser->synthesize_instantiated_special_members = false;
   parser->substituting_enclosing_template_arguments_only = false;
   parser->placeholder_variable_constraint = NULL;
   parser->typename_allows_unqualified = false;
@@ -451,11 +452,11 @@ static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
   if (result == NULL || !LexLookingAt(parser->lex, TOK(coloncolon))) {
     return result;
   }
-  // `(std::numeric_limits<T>::max)()` is a parenthesized id-expression, not
-  // a cast to a nested type.  When T is still dependent the suffix would
-  // otherwise be swallowed as `dependent_member_name`.
-  if (result->dependent_decltype_expr != NULL ||
-      TypeContainsTemplateParameter(result)) {
+  // `(std::numeric_limits<T>::max)()` and `decltype(f())::value` name a
+  // static data member, not a nested type.  Leave the `::` for the
+  // expression parser.  Dependent types used to be the only case that
+  // reached this check; a concrete decltype result needs it too.
+  {
     LexCheckpoint peek;
     LexCheckpointSave(parser->lex, &peek);
     LexMatch(parser->lex, TOK(coloncolon));
@@ -631,6 +632,26 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
     if (expr == NULL || expr->type == NULL) {
       SyntaxError(parser->syntax, "Invalid expression in decltype");
       result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    } else if (!parenthesized_expression &&
+               (expr->op == AST_OP(dot) || expr->op == AST_OP(arrow)) &&
+               ((BinaryASTNode*)expr)->right != NULL &&
+               ((BinaryASTNode*)expr)->right->op == AST_OP(structmember)) {
+      // [dcl.type.decltype]: an unparenthesized class member access names the
+      // member's declared type, not an lvalue reference and not the cv the
+      // object expression added.  `decltype(tm.tm_gmtoff)` is `long` even when
+      // `tm` is `const tm&`.
+      StructMember* member =
+          ((StructMemberASTNode*)((BinaryASTNode*)expr)->right)->member;
+      if (member != NULL && member->symbol != NULL &&
+          member->symbol->type != NULL) {
+        result = TypeRecordCopy(member->symbol->type);
+      } else if (expr->value_category == kValueCategoryLvalue) {
+        result = NewDecltypeReference(expr->type, false);
+      } else if (expr->value_category == kValueCategoryXvalue) {
+        result = NewDecltypeReference(expr->type, true);
+      } else {
+        result = TypeRecordCopy(expr->type);
+      }
     } else if (expr->value_category == kValueCategoryLvalue) {
       result = NewDecltypeReference(expr->type, false);
     } else if (expr->value_category == kValueCategoryXvalue) {
@@ -1120,23 +1141,23 @@ static TypeRecord* CurrentInstantiationMemberType(Symbol* origin, Vector* args,
   if (!TemplateArgumentsAreIdentity(args, origin) || member_name == NULL) {
     return NULL;
   }
-  // Identity arguments name the primary, but a class with partial
-  // specializations can define this member differently
-  // (`remove_reference<T&>::type` is not the primary's `T`).  Leave those as
-  // dependent members so instantiation selects the partial.  A class with no
-  // partials has one definition, so the primary member is the one named by an
-  // out-of-line `Class<T>::member` (SampleRecorder<T>::DisposeCallback).
-  if (origin->type->info.struct_info->partial_specializations.length != 0) {
-    return NULL;
-  }
-  StructMember* member =
-      FindStructMember(origin->type->info.struct_info, member_name);
+  // Identity arguments name the primary (`DefaultValue<T>::ValueProducer`).
+  // A partial specialization can still redefine a dependent member
+  // (`iterator_traits<T*>::value_type`), so only a member whose type does not
+  // mention a template parameter is safe to copy here.  Dependent members stay
+  // as `Class<Args>::member` and are selected when the arguments are concrete.
+  Struct* primary = origin->type->info.struct_info;
+  StructMember* member = FindStructMember(primary, member_name);
   if (member == NULL || member->symbol == NULL ||
       member->symbol->type == NULL) {
     return NULL;
   }
   if (!StorageIs(member->symbol->storage, STO(typedef)) &&
       !SymbolIsTagSymbol(member->symbol)) {
+    return NULL;
+  }
+  if (primary->partial_specializations.length != 0 &&
+      TypeContainsTemplateParameter(member->symbol->type)) {
     return NULL;
   }
   return TypeRecordCopy(member->symbol->type);
@@ -2020,6 +2041,48 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             }
           }
         } else if (typename_name.components.length >= 2) {
+          // `typename ContainerView::type::const_iterator` where ContainerView
+          // is a typedef for a still-dependent specialization.  There is no
+          // template-id in the name itself; the arguments live on the typedef.
+          String* alias_name = typename_name.components.value.p[0];
+          Symbol* alias = SyntaxFindSymbol(parser->syntax, alias_name);
+          bool built_alias_member = false;
+          if (alias != NULL && StorageIs(alias->storage, STO(typedef)) &&
+              alias->type != NULL &&
+              TypeContainsTemplateParameter(alias->type)) {
+            String tail;
+            StringInit(&tail, "");
+            for (size_t i = 1; i < typename_name.components.length; i++) {
+              if (tail.length != 0) {
+                StringAppend(&tail, "::");
+              }
+              StringAppendString(&tail,
+                                 typename_name.components.value.p[i]);
+            }
+            if (alias->type->template_origin != NULL &&
+                alias->type->template_arguments != NULL) {
+              type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+              type_record->template_origin = alias->type->template_origin;
+              type_record->template_arguments =
+                  TemplateArgumentVectorCopy(alias->type->template_arguments);
+              type_record->dependent_member_name = NewString(tail.value);
+            } else {
+              type_record = TypeRecordCopy(alias->type);
+              if (type_record->dependent_member_name != NULL) {
+                StringAppend(type_record->dependent_member_name, "::");
+                StringAppendString(type_record->dependent_member_name,
+                                   &tail);
+              } else {
+                type_record->dependent_member_name = NewString(tail.value);
+              }
+            }
+            type |= type_record->type;
+            StringDestruct(&tail);
+            built_alias_member = true;
+          }
+          if (built_alias_member) {
+            // Member path is recorded on the dependent typedef.
+          } else {
           // `typename std::remove_reference<M>::type::is_gtest_matcher`: the
           // nested name is a member of a still-dependent specialization, so
           // it cannot be looked up until M is known.  Keep the template-id
@@ -2082,6 +2145,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             SyntaxError(parser->syntax, "Unknown type name %s",
                         typename_name.spelling.value);
             ReportStdHeaderSuggestion(parser->syntax, &typename_name);
+          }
           }
         } else {
           SyntaxError(parser->syntax, "Unknown type name %s",
@@ -4041,6 +4105,8 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
       SyntaxLookingAtCXXAttribute(parser->syntax);
   bool direct_initializer =
       !LexLookingAt(parser->lex, TOK(rparen)) &&
+      !LexLookingAt(parser->lex, TOK(ellipsis)) &&
+      !LexLookingAt(parser->lex, TOK(this)) &&
       !SyntaxLookingAtType(parser->syntax) && !parameter_attribute;
   LexCheckpointRestore(parser->lex, &file_checkpoint);
   LexCheckpointDestruct(&file_checkpoint);

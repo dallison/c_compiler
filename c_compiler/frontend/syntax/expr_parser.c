@@ -167,6 +167,7 @@ static const TypeTraitName kTypeTraitNames[] = {
     {"__davecc_is_enum", kCXXTypeTraitIsEnum},
     {"__davecc_is_final", kCXXTypeTraitIsFinal},
     {"__davecc_is_invocable", kCXXTypeTraitIsInvocable},
+    {"__davecc_is_invocable_r", kCXXTypeTraitIsInvocableR},
     {"__davecc_is_member_function_pointer",
      kCXXTypeTraitIsMemberFunctionPointer},
     {"__davecc_is_member_object_pointer", kCXXTypeTraitIsMemberObjectPointer},
@@ -410,35 +411,70 @@ static ASTNode* NewQualifiedBaseMemberAccessFromThis(
       this_symbol->type->next->info.struct_info == NULL) {
     return NULL;
   }
-  // Inside a template definition, any qualified base member access must stay
-  // dependent until the template is instantiated; binding it while parsing the
-  // primary template (especially once complete bases like basic_ostream are
-  // visible) leaves owner/member metadata tied to the primary and the derived
-  // class's hidden overloads win later.
-  if (syntax->current_template_parameter_count > 0) {
-    return NULL;
-  }
   Symbol* owner = SyntaxFindQualifiedPrefixSymbol(
       syntax, name, name->components.length - 1);
-  if (owner == NULL || owner->type == NULL ||
-      !TypeIsStructOrUnion(owner->type) ||
-      owner->type->info.struct_info == NULL) {
+  if (owner == NULL || owner->type == NULL) {
     return NULL;
   }
-  if (TypeContainsTemplateParameter(owner->type)) {
+  // `using ostream = basic_ostream<char>` is formed while the class template
+  // is only forward-declared.  The alias still names that incomplete primary;
+  // the derived class's base is the completed specialization.  Materialize
+  // before the derived-to-base check and the member lookup.
+  TypeRecord* owner_type = owner->type;
+  TypeRecord* materialized =
+      TypeMaterializeClassTemplateSpecialization(syntax, owner_type);
+  bool own_materialized = materialized != NULL && materialized != owner_type;
+  if (own_materialized && TypeIsStructOrUnion(materialized) &&
+      materialized->info.struct_info != NULL) {
+    owner_type = materialized;
+  } else if (own_materialized) {
+    TypeRecordDelete(materialized);
+    own_materialized = false;
+  }
+  if (!TypeIsStructOrUnion(owner_type) ||
+      owner_type->info.struct_info == NULL) {
+    if (own_materialized) {
+      TypeRecordDelete(materialized);
+    }
+    return NULL;
+  }
+  if (TypeContainsTemplateParameter(owner_type)) {
+    if (own_materialized) {
+      TypeRecordDelete(materialized);
+    }
+    return NULL;
+  }
+  // A qualified-id is dependent only when its nested-name-specifier depends on
+  // a template parameter.  Class-template bases stay unresolved inside a
+  // template definition so a later instantiation can still see the derived
+  // class's hidden overloads (basic_ostream).  A non-template base is not
+  // dependent: `UnorderedElementsAreMatcherImplBase::DescribeToImpl` must bind
+  // while the member body is parsed.
+  Struct* owner_struct = owner_type->info.struct_info;
+  if (syntax->current_template_parameter_count > 0 &&
+      (owner_struct->is_template || owner_type->template_origin != NULL ||
+       owner_struct->template_parameter_count > 0)) {
+    if (own_materialized) {
+      TypeRecordDelete(materialized);
+    }
     return NULL;
   }
   TypeRecord* receiver_type = this_symbol->type->next;
-  if (receiver_type->info.struct_info != owner->type->info.struct_info &&
-      !TypeIsDerivedFrom(receiver_type, owner->type)) {
+  if (receiver_type->info.struct_info != owner_struct &&
+      !TypeIsDerivedFrom(receiver_type, owner_type)) {
+    if (own_materialized) {
+      TypeRecordDelete(materialized);
+    }
     return NULL;
   }
   String member_name;
   StringInit(&member_name, FullyQualifiedIdentifierLast(name));
-  StructMember* member = FindStructMember(owner->type->info.struct_info,
-                                          &member_name);
+  StructMember* member = FindStructMember(owner_struct, &member_name);
   if (member == NULL || member->is_static) {
     StringDestruct(&member_name);
+    if (own_materialized) {
+      TypeRecordDelete(materialized);
+    }
     return NULL;
   }
   ASTNode* left =
@@ -452,7 +488,7 @@ static ASTNode* NewQualifiedBaseMemberAccessFromThis(
   StringDestruct(&member_name);
   right->flags |= kASTQualifiedName;
   StructMemberASTNode* member_node = (StructMemberASTNode*)right;
-  member_node->owner_type = owner->type;
+  member_node->owner_type = owner_type;
   TypeRecordIncRef(member_node->owner_type);
   return NewBinaryASTNode(AST_OP(arrow), NULL,
                           syntax->lex->current_token_location, left, right);
@@ -1841,12 +1877,29 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         local != NULL && local->flags.is_using_alias &&
         local->flags.is_block_scope;
   }
+  // A local class member function does not see the enclosing function's
+  // automatic variables.  `Sort`'s parameter `nodes` must not hide
+  // `ByRank::nodes` inside `ByRank::operator()`.
+  bool enclosing_automatic = false;
+  if (symbol != NULL && symbol->flags.is_block_scope &&
+      symbol->flags.is_argument && compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    enclosing_automatic = true;
+    Vector* proto = &compiler->current_function->info.function.prototype;
+    for (size_t i = 0; i < proto->length; i++) {
+      if (proto->value.p[i] == symbol) {
+        enclosing_automatic = false;
+        break;
+      }
+    }
+  }
   bool block_hides_member =
-      block_scope_using_hides_member ||
-      (symbol != NULL && symbol->flags.is_block_scope &&
-       !(symbol->flags.is_template && symbol->type != NULL &&
-         TypeIsFunction(symbol->type) &&
-         symbol->type->info.function.cxx_member_owner != NULL));
+      !enclosing_automatic &&
+      (block_scope_using_hides_member ||
+       (symbol != NULL && symbol->flags.is_block_scope &&
+        !(symbol->flags.is_template && symbol->type != NULL &&
+          TypeIsFunction(symbol->type) &&
+          symbol->type->info.function.cxx_member_owner != NULL)));
   // `symbol == NULL` still counts: out-of-line member bodies do not put
   // class members in the ordinary symbol table, so `Init<kFront>` would
   // otherwise be parsed as a comparison.
@@ -3931,7 +3984,9 @@ static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
     ASTNode* old = vector->children->value.p[child_id - 1];
     VectorSet(vector->children, (size_t)child_id - 1, replacement);
     replacement->parent = parent;
-    replacement->child_id = child_id;
+    // Stored child ids index `children` directly.  The visitor id reserves 0
+    // for the callee, so argument N arrives here as N+1.
+    replacement->child_id = child_id - 1;
     ASTNodeDelete(old);
     return;
   }
@@ -5132,6 +5187,27 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
                             : "Expected struct or union member name");
     member_name = NewString(SyntaxFakeName(syntax));
   }
+  // `node->Node::~Node()` and `rep_->Rep::~Rep()`.  The nested-name-specifier
+  // names the type being destroyed; explicit-destructor analysis matches the
+  // `~Name` spelling.
+  if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(coloncolon))) {
+    while (LexMatch(syntax->lex, TOK(coloncolon))) {
+      if (LexMatch(syntax->lex, TOK(tilde)) &&
+          LexLookingAt(syntax->lex, TOK(identifier))) {
+        String* dtor = NewString("~");
+        StringAppend(dtor, syntax->lex->spelling.value);
+        LexNextToken(syntax->lex);
+        StringDelete(member_name);
+        member_name = dtor;
+        break;
+      }
+      if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+        SyntaxError(syntax, "Expected destructor name");
+        break;
+      }
+      LexNextToken(syntax->lex);
+    }
+  }
   bool has_template_arguments = false;
   if (saw_template_keyword) {
     // The 'template' keyword guarantees a template-id, so a following '<'
@@ -5313,9 +5389,16 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
         ParseCXXNewInitializerArguments(syntax, TOK(lbrace), followers);
     return NewVectorASTNode(AST_OP(call), NULL, location, type_expr, actuals);
   }
-  if (id->template_arguments != NULL ||
-      TypeIsClassTemplatePlaceholder(type) ||
-      FindCXXConstructorForType(type) != NULL) {
+  // [dcl.init.list]: an aggregate is initialized memberwise, even when an
+  // implicit (possibly deleted) default constructor exists.  `FindElement{set}`
+  // binds the reference member; calling the deleted default constructor is
+  // ill-formed.
+  bool aggregate = TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
+                   type->info.struct_info->is_aggregate;
+  if (!aggregate &&
+      (id->template_arguments != NULL ||
+       TypeIsClassTemplatePlaceholder(type) ||
+       FindCXXConstructorForType(type) != NULL)) {
     type_expr->flags |= kASTCXXFunctionalConstruction;
     Vector* actuals =
         ParseCXXBracedTemporaryActuals(syntax, type, followers);
@@ -5332,7 +5415,26 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
         ParseCXXNewInitializerArguments(syntax, TOK(lbrace), followers);
     return NewVectorASTNode(AST_OP(call), NULL, location, type_expr, actuals);
   }
-  return ParseCompoundLiteral(syntax, TypeRecordCopy(type));
+  // The identifier's symbol type is the primary template.  Instantiating here
+  // re-enters class completion while the surrounding declaration is still
+  // being parsed and overflows in triviality checks.  Record the arguments on
+  // the temporary and instantiate when the expression is analyzed.
+  TypeRecord* literal_type = TypeRecordCopy(type);
+  if (id->template_arguments != NULL && id->symbol->flags.is_template &&
+      TypeIsStructOrUnion(literal_type) &&
+      literal_type->info.struct_info != NULL &&
+      literal_type->info.struct_info->is_template) {
+    if (literal_type->template_arguments != NULL) {
+      VectorDeleteWithContents(
+          literal_type->template_arguments,
+          (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+    literal_type->template_origin = id->symbol;
+    literal_type->template_arguments =
+        TemplateArgumentVectorCopy(id->template_arguments);
+  }
+  return ParseCompoundLiteral(syntax, literal_type);
 }
 
 // Parse a postfix-expression.  This is a primary expression with a postfixed
@@ -7052,6 +7154,16 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   return result;
 }
 
+// `delete` of `const T*` is valid.  The deallocation function takes `void*`,
+// and a const object pointer does not convert to that implicitly.
+static ASTNode* NewDeallocationPointer(ASTNode* expr, SourceLocation location) {
+  TypeRecord* void_ptr =
+      NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  ASTNode* result = NewCastASTNode(void_ptr, location, expr);
+  ((CastASTNode*)result)->kind = kCastCStyle;
+  return result;
+}
+
 ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                                           bool is_array_delete,
                                           SourceLocation location,
@@ -7061,7 +7173,7 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
       (syntax->parsing_template_declaration &&
        (pointer_type == NULL || !TypeIsPointerOrArray(pointer_type)))) {
     Vector* actuals = NewVector();
-    VectorAppend(actuals, expr);
+    VectorAppend(actuals, NewDeallocationPointer(expr, location));
     ASTNode* node = NewCallASTNode(
         is_array_delete ? GetImplicitCXXOperatorDeleteArray(location)
                         : GetImplicitCXXOperatorDelete(location),
@@ -7151,7 +7263,7 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
   if (pointer_type == NULL || !TypeIsStructOrUnionPointer(pointer_type) ||
       FindCXXDestructorForType(pointer_type->next) == NULL) {
     Vector* actuals = NewVector();
-    VectorAppend(actuals, expr);
+    VectorAppend(actuals, NewDeallocationPointer(expr, location));
     TypeRecord* object_type =
         TypeIsPointerOrArray(pointer_type) ? pointer_type->next : NULL;
     return NewCallASTNode(GetCXXOperatorDeleteForType(object_type, false,
@@ -7166,7 +7278,8 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
   ASTNode* destructor =
       NewCXXDestructorCallForPointer(pointer_type->next, temp, location);
   Vector* actuals = NewVector();
-  VectorAppend(actuals, NewIdentifierASTNode(temp, location));
+  VectorAppend(actuals, NewDeallocationPointer(NewIdentifierASTNode(temp, location),
+                                               location));
   ASTNode* deallocate =
       NewCallASTNode(GetCXXOperatorDeleteForType(pointer_type->next, false,
                                                  location, global_scope),

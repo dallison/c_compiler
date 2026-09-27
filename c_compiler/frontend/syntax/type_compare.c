@@ -1073,6 +1073,17 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
       if (!CXXTemplateOriginsSameFamily(left_origin, right_origin)) {
         return false;
       }
+      // The tag name is the instantiation key (`integral_constant<int,I4>` vs
+      // `<int,I8>`, `ratio<I60,I1>` vs `ratio<I3600,I1>`).  The argument
+      // vectors hanging off the tag symbol can be the primary template's
+      // identity arguments, which compare equal for every specialization.
+      // Differing keys are different types even when those vectors match.
+      if (left->tag_name != NULL && right->tag_name != NULL &&
+          strchr(left->tag_name->value, '<') != NULL &&
+          strchr(right->tag_name->value, '<') != NULL &&
+          !CXXStructTagNameEqual(left, right)) {
+        return false;
+      }
       TypeRecord* left_tag_type =
           left->tag_symbol != NULL ? left->tag_symbol->type : NULL;
       TypeRecord* right_tag_type =

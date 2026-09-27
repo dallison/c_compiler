@@ -224,18 +224,49 @@ constexpr __int128 __int128_max() {
 constexpr __int128 __int128_min() { return -__int128_max() - 1; }
 }  // namespace __limits_detail
 
+// 128-bit bounds do not fit in the integer constant expressions accepted as
+// non-type template arguments, so these specializations spell min()/max()
+// directly instead of going through __numeric_limits_integer.
 template <>
-class numeric_limits<__int128>
-    : public __numeric_limits_integer<__int128,
-                                      __limits_detail::__int128_min(),
-                                      __limits_detail::__int128_max(), 127, 38,
-                                      true, false> {};
+class numeric_limits<__int128> : public __numeric_limits_base<__int128> {
+ public:
+  static constexpr bool is_specialized = true;
+  static constexpr __int128 min() noexcept {
+    return __limits_detail::__int128_min();
+  }
+  static constexpr __int128 max() noexcept {
+    return __limits_detail::__int128_max();
+  }
+  static constexpr __int128 lowest() noexcept { return min(); }
+  static constexpr int digits = 127;
+  static constexpr int digits10 = 38;
+  static constexpr int radix = 2;
+  static constexpr bool is_signed = true;
+  static constexpr bool is_integer = true;
+  static constexpr bool is_exact = true;
+  static constexpr bool is_bounded = true;
+  static constexpr bool is_modulo = false;
+};
 
 template <>
 class numeric_limits<unsigned __int128>
-    : public __numeric_limits_integer<
-          unsigned __int128, static_cast<unsigned __int128>(0),
-          __limits_detail::__uint128_max(), 128, 38, false, true> {};
+    : public __numeric_limits_base<unsigned __int128> {
+ public:
+  static constexpr bool is_specialized = true;
+  static constexpr unsigned __int128 min() noexcept { return 0; }
+  static constexpr unsigned __int128 max() noexcept {
+    return __limits_detail::__uint128_max();
+  }
+  static constexpr unsigned __int128 lowest() noexcept { return min(); }
+  static constexpr int digits = 128;
+  static constexpr int digits10 = 38;
+  static constexpr int radix = 2;
+  static constexpr bool is_signed = false;
+  static constexpr bool is_integer = true;
+  static constexpr bool is_exact = true;
+  static constexpr bool is_bounded = true;
+  static constexpr bool is_modulo = true;
+};
 #endif
 
 namespace __limits_detail {

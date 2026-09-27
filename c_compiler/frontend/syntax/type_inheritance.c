@@ -29,7 +29,8 @@
 #include "set.h"
 
 static bool CXXMemberFunctionSignaturesMatch(Syntax* syntax, TypeRecord* a,
-                                             TypeRecord* b);
+                                             TypeRecord* b,
+                                             bool allow_dependent);
 
 bool StructHasBaseStruct(Struct* str, Struct* target, int* offset) {
   if (str == NULL || target == NULL) {
@@ -578,8 +579,12 @@ static StructMember* FindCXXOverriderInHierarchy(Syntax* syntax, Struct* str,
         !CXXVirtualNamesCompatible(candidate, base_member)) {
       continue;
     }
+    bool allow_dependent =
+        candidate->symbol->type->info.function.is_override ||
+        candidate->symbol->type->info.function.is_final;
     if (CXXMemberFunctionSignaturesMatch(syntax, candidate->symbol->type,
-                                         base_member->symbol->type)) {
+                                         base_member->symbol->type,
+                                         allow_dependent)) {
       return candidate;
     }
   }
@@ -970,10 +975,25 @@ Symbol* StructFindVTableSymbol(Struct* complete, Struct* source,
   return NULL;
 }
 
+/* A signature position that still names a template parameter cannot be
+ * rejected at the template definition.  `void f() override` matches
+ * `virtual T f()` once T is void, and is ill-formed only for instantiations
+ * where it does not.  Positions with no template parameter stay strict, so
+ * `void f(int) override` against `void f(double)` is diagnosed immediately. */
+static bool CXXOverrideTypesCompatible(Syntax* syntax, TypeRecord* a,
+                                      TypeRecord* b, bool allow_dependent) {
+  if (TypeEqualForCXXOverride(syntax, a, b)) {
+    return true;
+  }
+  return allow_dependent && (TypeContainsTemplateParameter(a) ||
+                             TypeContainsTemplateParameter(b));
+}
+
 static bool CXXMemberFunctionSignaturesMatch(Syntax* syntax, TypeRecord* a,
-                                             TypeRecord* b) {
+                                             TypeRecord* b,
+                                             bool allow_dependent) {
   if (!TypeIsFunction(a) || !TypeIsFunction(b) ||
-      !TypeEqualForCXXOverride(syntax, a->next, b->next) ||
+      !CXXOverrideTypesCompatible(syntax, a->next, b->next, allow_dependent) ||
       a->info.function.is_const_member != b->info.function.is_const_member ||
       a->info.function.is_volatile_member !=
           b->info.function.is_volatile_member ||
@@ -989,7 +1009,8 @@ static bool CXXMemberFunctionSignaturesMatch(Syntax* syntax, TypeRecord* a,
   for (size_t i = 0; i < a->info.function.prototype.length - a_first; i++) {
     Symbol* a_arg = a->info.function.prototype.value.p[i + a_first];
     Symbol* b_arg = b->info.function.prototype.value.p[i + b_first];
-    if (!TypeEqualForCXXOverride(syntax, a_arg->type, b_arg->type)) {
+    if (!CXXOverrideTypesCompatible(syntax, a_arg->type, b_arg->type,
+                                    allow_dependent)) {
       return false;
     }
   }
@@ -1009,7 +1030,14 @@ static bool CXXBaseMemberFunctionMatches(Syntax* syntax, TypeRecord* derived,
       compared = subst;
     }
   }
-  bool match = CXXMemberFunctionSignaturesMatch(syntax, derived, compared);
+  /* `override` on a class template is checked again when the class is
+   * instantiated.  Until then a dependent base signature (Result vs void)
+   * is a possible match, not a diagnostic. */
+  bool allow_dependent =
+      derived != NULL && TypeIsFunction(derived) &&
+      (derived->info.function.is_override || derived->info.function.is_final);
+  bool match = CXXMemberFunctionSignaturesMatch(syntax, derived, compared,
+                                                allow_dependent);
   if (subst != NULL) {
     TypeRecordDelete(subst);
   }

@@ -1377,6 +1377,27 @@ static Symbol* NewCXXCompleteObjectSymbol(SourceLocation location) {
   return symbol;
 }
 
+void TypeRecordRemoveImplicitThisParameter(TypeRecord* func) {
+  if (!FunctionHasImplicitThisParameter(func)) {
+    return;
+  }
+  Symbol* this_symbol = func->info.function.prototype.value.p[0];
+  Vector new_prototype;
+  VectorInit(&new_prototype);
+  for (size_t i = 1; i < func->info.function.prototype.length; i++) {
+    VectorAppend(&new_prototype, func->info.function.prototype.value.p[i]);
+  }
+  SymbolDelete(this_symbol);
+  VectorDestruct(&func->info.function.prototype);
+  func->info.function.prototype = new_prototype;
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal != NULL) {
+      formal->value.arg_number = (int32_t)i;
+    }
+  }
+}
+
 void TypeRecordAddCXXThisParameter(TypeRecord* func, Struct* owner,
                                    SourceLocation location) {
   if (func == NULL || !TypeIsFunction(func) || owner == NULL ||

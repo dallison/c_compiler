@@ -926,8 +926,15 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   FinalizeStructAlignment(str);
   ComputeCXXAggregateStatus(str);
   str->cxx_special_members_complete = false;
+  // Nested classes of a class template are instantiated while the enclosing
+  // template is still being parsed.  Special-member synthesis bails out in
+  // that mode, which drops the implicit copy constructor (optional<set<T>::
+  // const_iterator>).  The struct here is already a concrete instantiation.
+  bool saved_synthesize = parser->synthesize_instantiated_special_members;
+  parser->synthesize_instantiated_special_members = true;
   AddImplicitCXXSpecialMembers(parser, str, str->tag_symbol);
   AddImplicitCXXDestructorIfNeeded(parser, str, str->tag_symbol);
+  parser->synthesize_instantiated_special_members = saved_synthesize;
   RememberLambdaSubstitution(from, args, copy);
   PopNestedSubstitution(from);
   return TypeRecordCalculateSize(copy);
@@ -951,8 +958,32 @@ static bool ExprReferencesParameterAtOrAbove(ASTNode* node, void* data) {
   if (id->symbol->dependent_value_template_parameter_index >= rebase_base) {
     return true;
   }
-  return id->symbol->type != NULL &&
-         TypeReferencesParameterAtOrAbove(id->symbol->type, rebase_base);
+  if (id->symbol->type != NULL &&
+      TypeReferencesParameterAtOrAbove(id->symbol->type, rebase_base)) {
+    return true;
+  }
+  // `Trait<const T&>::value` stores `T` on the identifier's template
+  // arguments, not as a child node.  Missing it let enclosing-argument
+  // substitution replace the member template's own parameter.
+  if (id->template_arguments == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < id->template_arguments->length; i++) {
+    TemplateArgument* arg = id->template_arguments->value.p[i];
+    if (arg == NULL) {
+      continue;
+    }
+    if (arg->template_parameter_index >= rebase_base ||
+        TypeReferencesParameterAtOrAbove(arg->type, rebase_base)) {
+      return true;
+    }
+    if (arg->dependent_expr != NULL &&
+        ASTNodeAny(arg->dependent_expr, ExprReferencesParameterAtOrAbove,
+                   data)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /* True when `type` still names one of a member template's own parameters
@@ -969,6 +1000,35 @@ static bool TypeReferencesParameterAtOrAbove(TypeRecord* type,
     if (current->declarator == kDeclArray &&
         current->info.array.template_parameter_index >= rebase_base) {
       return true;
+    }
+    if (current->dependent_decltype_expr != NULL &&
+        ASTNodeAny(current->dependent_decltype_expr,
+                   ExprReferencesParameterAtOrAbove, &rebase_base)) {
+      return true;
+    }
+    if (current->dependent_member_template_arguments != NULL) {
+      for (size_t i = 0;
+           i < current->dependent_member_template_arguments->length; i++) {
+        Vector* args = current->dependent_member_template_arguments->value.p[i];
+        if (args == NULL) {
+          continue;
+        }
+        for (size_t j = 0; j < args->length; j++) {
+          TemplateArgument* arg = args->value.p[j];
+          if (arg == NULL) {
+            continue;
+          }
+          if (arg->template_parameter_index >= rebase_base ||
+              TypeReferencesParameterAtOrAbove(arg->type, rebase_base)) {
+            return true;
+          }
+          if (arg->dependent_expr != NULL &&
+              ASTNodeAny(arg->dependent_expr, ExprReferencesParameterAtOrAbove,
+                         &rebase_base)) {
+            return true;
+          }
+        }
+      }
     }
     if (current->template_arguments == NULL) {
       continue;
@@ -1022,9 +1082,18 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
     if (param->type != NULL && subst_args != NULL && parser != NULL &&
         TypeContainsTemplateParameter(param->type)) {
       bool saved_failed = parser->template_substitution_failed;
+      bool saved_enclosing_only =
+          parser->substituting_enclosing_template_arguments_only;
       parser->template_substitution_failed = false;
+      // `enable_if_t<Trait<T>::value, int>` still names this member template's
+      // own parameter.  Resolving the trait against only the enclosing class
+      // arguments binds `::value` on the primary, after which both SFINAE
+      // overloads accept every call.
+      parser->substituting_enclosing_template_arguments_only = true;
       TypeRecord* substituted =
           SubstituteTemplateParameters(parser, param->type, subst_args);
+      parser->substituting_enclosing_template_arguments_only =
+          saved_enclosing_only;
       bool failed = parser->template_substitution_failed;
       parser->template_substitution_failed = saved_failed;
       // A nested lookup can set the failure flag while still returning the
@@ -1036,10 +1105,17 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
       // parameter whose index collides with an expanded class pack
       // (`enable_if_t<IsNotBitField<T>::value, int>` becomes `int`).  Keep
       // the original type so the call can SFINAE on `T`.
-      bool own_parameter_erased =
-          substituted != NULL &&
-          !TypeContainsTemplateParameter(substituted) &&
+      // Substitution may replace the member parameter with another dependent
+      // type (an expanded class pack) rather than with a concrete `int`.
+      // Either way the member's own parameter is gone and the original type
+      // has to stay so the call can still SFINAE on it.
+      bool original_has_own =
           TypeReferencesParameterAtOrAbove(param->type, rebase_base);
+      bool substituted_has_own =
+          substituted != NULL &&
+          TypeReferencesParameterAtOrAbove(substituted, rebase_base);
+      bool own_parameter_erased =
+          substituted != NULL && original_has_own && !substituted_has_own;
       if (substituted != NULL && !own_parameter_erased &&
           (!failed || TypeContainsTemplateParameter(substituted))) {
         TypeRecordDelete(param->type);
@@ -3550,6 +3626,18 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
         actual->declarator == kDeclFunction) {
       return DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
                                                 formal->next, actual);
+    }
+    // `HidePtr<void>(nullptr)`: T is explicit, so T* is not deduced from the
+    // argument.  nullptr converts to that pointer; deduction must not reject
+    // it for not already being a pointer.
+    if (formal->declarator == kDeclPointer && TypeIsNullPointer(actual) &&
+        formal->next != NULL) {
+      int pointee_index = -1;
+      if (TypeIsTemplateParameterPlaceholder(formal->next, &pointee_index) &&
+          pointee_index >= 0 &&
+          (size_t)pointee_index < explicit_arg_count) {
+        return true;
+      }
     }
     return false;
   }
@@ -8298,10 +8386,20 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   if (templ == NULL || templ->type == NULL) {
     return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   }
+  bool saved_alias_failed = parser->template_substitution_failed;
+  parser->template_substitution_failed = false;
   alias_type = InstantiateGenericAliasTemplate(parser, templ, args,
                                                emit_constraint_error);
+  bool alias_failed = parser->template_substitution_failed;
+  parser->template_substitution_failed = saved_alias_failed || alias_failed;
   if (alias_type != NULL) {
     return alias_type;
+  }
+  // `enable_if_t<false, int>` has no `::type`.  Returning the unresolved
+  // pattern here made `enable_if_t<false, int>()` value-initialize as 0, so
+  // every expression-form SFINAE overload stayed viable.
+  if (alias_failed) {
+    return NULL;
   }
   // A non-forwarding alias whose pattern is a class-template specialization
   // (`using CanConvert = TrueAlias<enable_if_t<...>>`, `using AlwaysTrue =
@@ -8792,8 +8890,14 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   FinalizeStructAlignment(str);
   TypeRecordCalculateSize(type);
   ComputeCXXAggregateStatus(str);
+  // Same as the nested-struct path: a class template can be instantiated
+  // while an enclosing template is still being parsed.  Synthesize special
+  // members for this concrete specialization anyway.
+  bool saved_synthesize = parser->synthesize_instantiated_special_members;
+  parser->synthesize_instantiated_special_members = true;
   AddImplicitCXXSpecialMembers(parser, str, tag);
   AddImplicitCXXDestructorIfNeeded(parser, str, tag);
+  parser->synthesize_instantiated_special_members = saved_synthesize;
   AddImplicitCXXDeductionGuides(str, tag);
   // Complete the polymorphic layout of the instantiation exactly as a normal
   // class definition does (type_class.c): insert the hidden vptr/vbptr, lay out
@@ -9815,8 +9919,13 @@ static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
   Vector* pattern_args =
       MemberAliasPatternArguments(parser, alias, completed_args);
   Vector* subst_args = pattern_args != NULL ? pattern_args : completed_args;
+  bool saved_failed = parser->template_substitution_failed;
+  parser->template_substitution_failed = false;
   TypeRecord* subst =
       SubstituteTemplateParameters(parser, alias->type, subst_args);
+  bool substitution_failed =
+      parser->template_substitution_failed || subst == NULL;
+  parser->template_substitution_failed = saved_failed || substitution_failed;
   if (pattern_args != NULL) {
     VectorDeleteWithContents(pattern_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
@@ -9825,7 +9934,10 @@ static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
   VectorDeleteWithContents(completed_args,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
-  if (subst == NULL) {
+  if (subst == NULL || substitution_failed) {
+    // `enable_if<false, int>::type` has no member.  Substitution sets the
+    // failure flag and returns the class itself; that is not the alias result.
+    TypeRecordDelete(subst);
     return NULL;
   }
   // Alias patterns such as `typename __make_index_sequence<N>::type` stay a

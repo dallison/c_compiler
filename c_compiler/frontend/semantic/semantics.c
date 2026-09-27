@@ -49,8 +49,13 @@ bool SemanticInCatchHandler(void) {
 
 static TypeRecord* DeduceCXXInitializerListAuto(ASTNode* initializer,
                                                 ASTNode* diagnostic_node) {
-  if (!CompilerIsCXX() || initializer == NULL ||
-      initializer->op != AST_OP(braced_init)) {
+  if (!CompilerIsCXX() || initializer == NULL) {
+    return NULL;
+  }
+  if (initializer->op == AST_OP(expr_init)) {
+    initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  if (initializer == NULL || initializer->op != AST_OP(braced_init)) {
     return NULL;
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
@@ -60,10 +65,14 @@ static TypeRecord* DeduceCXXInitializerListAuto(ASTNode* initializer,
     return NULL;
   }
 
+  // [temp.deduct.call]: each element is deduced as P, with array-to-pointer
+  // and function-to-pointer decay, so string literals of different lengths
+  // deduce `initializer_list<const char*>`.
   TypeRecord* element_type = NULL;
   for (size_t i = 0; i < braced->initializers->length; i++) {
     ASTNode* element = braced->initializers->value.p[i];
     if (element == NULL || element->op != AST_OP(expr_init)) {
+      TypeRecordDelete(element_type);
       SemanticError(diagnostic_node,
                     "Cannot deduce auto type from braced initializer");
       return NULL;
@@ -71,17 +80,32 @@ static TypeRecord* DeduceCXXInitializerListAuto(ASTNode* initializer,
     ExpressionInitializerASTNode* expr_init =
         (ExpressionInitializerASTNode*)element;
     expr_init->expr = AnalyzeExpression(expr_init->expr);
+    TypeRecord* decayed =
+        expr_init->expr != NULL
+            ? TypeDecayForByValueDeduction(expr_init->expr->type)
+            : NULL;
+    if (decayed == NULL) {
+      TypeRecordDelete(element_type);
+      SemanticError(diagnostic_node,
+                    "Cannot deduce auto type from braced initializer");
+      return NULL;
+    }
     if (element_type == NULL) {
-      element_type = expr_init->expr->type;
-    } else if (!TypeEqual(element_type, expr_init->expr->type)) {
+      element_type = decayed;
+    } else if (!TypeEqual(element_type, decayed)) {
+      TypeRecordDelete(decayed);
+      TypeRecordDelete(element_type);
       SemanticError(diagnostic_node,
                     "Cannot deduce auto type from mixed braced initializer types");
       return NULL;
+    } else {
+      TypeRecordDelete(decayed);
     }
   }
 
   TypeRecord* deduced =
       TypeInstantiateCXXInitializerList(&compiler->syntax, element_type);
+  TypeRecordDelete(element_type);
   if (deduced == NULL) {
     SemanticError(diagnostic_node,
                   "std::initializer_list must be declared before auto braced deduction");
