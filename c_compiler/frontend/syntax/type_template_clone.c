@@ -2868,6 +2868,14 @@ static bool ExpressionInitializerIsIdentifierPackExpansion(ASTNode* node,
   return true;
 }
 
+/* `{f(indexes)...}` names a non-type template parameter pack, not a function
+ * parameter pack. Defined below, next to the fold-expression expander that
+ * already knows how to slice that pack. */
+static bool ExpandBracedInitFromTemplatePack(TemplateFunctionBodyClone* clone,
+                                             ASTNode* pattern, Vector* expanded,
+                                             SourceLocation location,
+                                             ASTNode* parent);
+
 /* Expand pack expansions appearing as elements of a braced initializer
  * (`{xs...}`), including designated-initializer member packs, into the concrete
  * per-element initializers. */
@@ -3051,6 +3059,12 @@ static void ExpandClonedBracedInitializerPackElements(
             expanded_init->child_id = (int)expanded->length;
             VectorAppend(expanded, expanded_init);
           }
+          ASTNodeDelete(initializer);
+          changed = true;
+          continue;
+        }
+        if (ExpandBracedInitFromTemplatePack(clone, expr_init_node->expr,
+                                             expanded, location, node)) {
           ASTNodeDelete(initializer);
           changed = true;
           continue;
@@ -3394,6 +3408,37 @@ static ASTNode* CloneFoldPackElement(TemplateFunctionBodyClone* clone,
                clone);
   return ASTNodeVisitAndTransform(
       pattern_clone, ReanalyzeClonedDependentFunctorCall, NULL);
+}
+
+static bool ExpandBracedInitFromTemplatePack(TemplateFunctionBodyClone* clone,
+                                             ASTNode* pattern, Vector* expanded,
+                                             SourceLocation location,
+                                             ASTNode* parent) {
+  FoldPackSearch packs;
+  CollectFoldPacks(clone, pattern, &packs);
+  if (packs.bindings.length == 0 || packs.unresolved_pack) {
+    DeleteFoldPackBindings(&packs);
+    return false;
+  }
+  if (packs.mismatched_lengths) {
+    SyntaxError(clone->parser->syntax,
+                "pack expansion argument packs have different lengths");
+    DeleteFoldPackBindings(&packs);
+    return false;
+  }
+  for (size_t j = 0; j < packs.length; j++) {
+    ASTNode* replacement = CloneFoldPackElement(clone, pattern, &packs, j);
+    if (replacement != NULL) {
+      replacement->flags &= ~kASTPackExpansion;
+    }
+    ASTNode* expanded_init =
+        NewExpressionInitializerASTNode(replacement, location);
+    expanded_init->parent = parent;
+    expanded_init->child_id = (int)expanded->length;
+    VectorAppend(expanded, expanded_init);
+  }
+  DeleteFoldPackBindings(&packs);
+  return true;
 }
 
 /* Expand a fold expression (`(... op pack)` / `(pack op ...)` / binary folds)

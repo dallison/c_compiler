@@ -291,6 +291,27 @@ constexpr bool operator!=(const pair<T1, T2>& left,
   return !(left == right);
 }
 
+template <class T1, class T2>
+constexpr bool operator<(const pair<T1, T2>& left, const pair<T1, T2>& right) {
+  return left.first < right.first ||
+         (!(right.first < left.first) && left.second < right.second);
+}
+
+template <class T1, class T2>
+constexpr bool operator>(const pair<T1, T2>& left, const pair<T1, T2>& right) {
+  return right < left;
+}
+
+template <class T1, class T2>
+constexpr bool operator<=(const pair<T1, T2>& left, const pair<T1, T2>& right) {
+  return !(right < left);
+}
+
+template <class T1, class T2>
+constexpr bool operator>=(const pair<T1, T2>& left, const pair<T1, T2>& right) {
+  return !(left < right);
+}
+
 template <class T1, class T2, class U1, class U2>
 constexpr auto operator<=>(const pair<T1, T2>& left,
                            const pair<U1, U2>& right) {

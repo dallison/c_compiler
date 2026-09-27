@@ -12723,6 +12723,15 @@ static ASTNode* LambdaCaptureInitializerExpr(ASTNode* init) {
   return init;
 }
 
+static void ClearCaptureInitializerAnalyzed(ASTNode* node, void* data,
+                                            int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL) {
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node) {
   if (node == NULL || (node->base.flags & kASTLambdaExpression) == 0 ||
       node->base.type == NULL || !TypeIsStructOrUnion(node->base.type) ||
@@ -12772,16 +12781,37 @@ static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node) {
     if (value != NULL && value->op == AST_OP(cast)) {
       value = ((CastASTNode*)value)->expr;
     }
-    if (value == NULL || value->op != AST_OP(identifier)) {
+    if (value == NULL) {
       continue;
     }
-    Symbol* source = ((IdentifierASTNode*)value)->symbol;
-    TypeRecord* concrete =
-        source != NULL ? source->type : NULL;
+    TypeRecord* concrete = NULL;
+    if (value->op == AST_OP(identifier)) {
+      Symbol* source = ((IdentifierASTNode*)value)->symbol;
+      concrete = source != NULL ? source->type : NULL;
+    } else {
+      // Init-capture `[f = std::move(op)]`: the expression was analyzed while
+      // `op` was still dependent, so re-analyze it now that the enclosing
+      // instantiation is concrete.
+      ASTNode* saved_parent = value->parent;
+      int saved_child = value->child_id;
+      ASTNodeVisit(value, ClearCaptureInitializerAnalyzed, 0, NULL);
+      value->parent = NULL;
+      ASTNode* analyzed = AnalyzeExpression(value);
+      if (analyzed != NULL) {
+        analyzed->parent = saved_parent;
+        analyzed->child_id = saved_child;
+        if (saved_parent != NULL && analyzed != value) {
+          ASTNodeReplaceChild(saved_parent, saved_child, analyzed, false);
+        }
+        value = analyzed;
+      }
+      concrete = value != NULL ? value->type : NULL;
+    }
     if (TypeIsReference(concrete)) {
       concrete = concrete->next;
     }
-    if (concrete == NULL || TypeContainsAuto(concrete) ||
+    if (concrete == NULL || TypeIsUnknown(concrete) ||
+        TypeContainsAuto(concrete) ||
         TypeContainsTemplateParameter(concrete)) {
       continue;
     }

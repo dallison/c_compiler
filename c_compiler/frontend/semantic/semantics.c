@@ -1863,6 +1863,21 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
         ((ExpressionInitializerASTNode*)node->initializer)->expr != NULL &&
         ((ExpressionInitializerASTNode*)node->initializer)->expr->op ==
             AST_OP(call)));
+  if (object_initializer && must_be_constant && node->initializer != NULL &&
+      (node->initializer->op == AST_OP(call) ||
+       (node->initializer->op == AST_OP(expr_init) &&
+        ((ExpressionInitializerASTNode*)node->initializer)->expr != NULL &&
+        ((ExpressionInitializerASTNode*)node->initializer)->expr->op ==
+            AST_OP(call)))) {
+    // A class or array initialized from a call is left as a call so the
+    // constant interpreter can evaluate it.  The call still has to be
+    // semantically analyzed (template instantiation, functional casts such as
+    // `make_index_sequence<N>()`).  Hold inlining off so that analysis does
+    // not replace the call with a body the interpreter rejects.
+    compiler->constant_evaluation_required_depth++;
+    node->initializer = AnalyzeExpression(node->initializer);
+    compiler->constant_evaluation_required_depth--;
+  }
   if (!object_initializer) {
     // A constexpr or constinit variable's initializer is interpreted from its
     // semantic AST, and inlining a call replaces the call with a body the

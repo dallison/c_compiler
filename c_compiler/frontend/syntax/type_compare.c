@@ -40,10 +40,16 @@ static bool DependentExpressionNodeContainsParameter(ASTNode* node,
   if (id->symbol == NULL) {
     return false;
   }
+  // See ExpressionNodeIsTemplateDependent: a function template's signature
+  // is not a dependent operand by itself.
+  bool function_template = id->symbol->flags.is_template &&
+                           id->symbol->type != NULL &&
+                           TypeIsFunction(id->symbol->type);
   return (id->symbol->flags.is_template_parameter &&
           id->symbol->template_parameter_index >= 0) ||
          id->symbol->dependent_value_template_parameter_index >= 0 ||
-         TypeContainsTemplateParameter(id->symbol->type) ||
+         (!function_template &&
+          TypeContainsTemplateParameter(id->symbol->type)) ||
          TemplateArgumentVectorContainsTemplateParameter(
              id->template_arguments);
 }

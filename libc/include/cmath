@@ -66,6 +66,7 @@ using ::remainder;
 using ::remquo;
 using ::copysign;
 using ::nan;
+using ::nanf;
 using ::nextafter;
 using ::nexttoward;
 using ::fdim;

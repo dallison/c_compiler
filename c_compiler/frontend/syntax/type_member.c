@@ -897,7 +897,10 @@ void ApplyCXXMemberUsingDeclarations(TypeParser* parser, Struct* owner,
 }
 
 static StructMember* FindStructMemberRec(Struct* str, String* name, int depth) {
-  if (str == NULL || name == NULL || depth > 64) {
+  // Linear hierarchies such as std::make_index_sequence<N> are N bases deep.
+  // 64 is too shallow for that; 1024 matches a typical template-depth limit
+  // and still stops a cyclic base walk.
+  if (str == NULL || name == NULL || depth > 1024) {
     return NULL;
   }
   StructMember* member = MapFindPointerKey(&str->symbol_table, name);
@@ -1004,7 +1007,7 @@ static StructMember* FindDirectStructMemberByName(Struct* str,
 
 static StructMember* FindStructMemberByNameRec(Struct* str, const char* name,
                                                int depth) {
-  if (str == NULL || name == NULL || depth > 64) {
+  if (str == NULL || name == NULL || depth > 1024) {
     return NULL;
   }
   StructMember* member = FindDirectStructMemberByName(str, name);

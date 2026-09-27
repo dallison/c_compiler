@@ -611,6 +611,13 @@ static bool IncompleteArrayRedeclarationMatches(TypeRecord* left,
   if (!TypeEqual(incomplete->next, complete->next)) {
     return false;
   }
+  // `static const T a[];` stores an unknown bound as a non-flexible size of 0.
+  // The out-of-line `const T C::a[] = {...}` is the flexible definition that
+  // the initializer completes. Copying 0 onto it rejects every element.
+  if (complete->info.array.size.fixed <= 0) {
+    complete->info.array.is_flexible = true;
+    return true;
+  }
   incomplete->info.array.is_flexible = false;
   incomplete->info.array.size.fixed = complete->info.array.size.fixed;
   TypeRecordCalculateSize(incomplete);
@@ -627,6 +634,60 @@ static bool RedeclarationTypesEqual(TypeRecord* left, TypeRecord* right) {
   return TypeEqual(left, right);
 }
 
+// `Big` inside the class template and `Big<N>` on the out-of-line definition
+// are the same type when each argument is that template's own parameter.
+static bool TemplateArgumentIsOwnParameter(TemplateArgument* arg,
+                                          TemplateParameter* param) {
+  if (arg == NULL || param == NULL || arg->kind != param->kind) {
+    return false;
+  }
+  if (param->kind == kTemplateParameterType) {
+    return arg->type != NULL &&
+           arg->type->template_parameter_index == param->index &&
+           arg->type->dependent_member_name == NULL;
+  }
+  return arg->template_parameter_index == param->index &&
+         arg->dependent_expr == NULL;
+}
+
+static bool TemplateArgumentsDenoteClassTemplate(TypeRecord* type,
+                                                Struct* str) {
+  if (type == NULL || str == NULL || !str->is_template) {
+    return false;
+  }
+  Vector* args = type->template_arguments;
+  if (args == NULL || args->length == 0) {
+    return true;
+  }
+  if (args->length != str->template_parameters.length) {
+    return false;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    if (!TemplateArgumentIsOwnParameter(args->value.p[i],
+                                       str->template_parameters.value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool ClassTemplateIdentityTypesEqual(TypeRecord* left,
+                                            TypeRecord* right) {
+  if (left == NULL || right == NULL ||
+      !TypeIsStructOrUnion(left) || !TypeIsStructOrUnion(right) ||
+      left->type != right->type ||
+      (left->qualifiers & ~kQualRestrict) !=
+          (right->qualifiers & ~kQualRestrict)) {
+    return false;
+  }
+  Struct* str = left->info.struct_info;
+  if (str == NULL || str != right->info.struct_info) {
+    return false;
+  }
+  return TemplateArgumentsDenoteClassTemplate(left, str) &&
+         TemplateArgumentsDenoteClassTemplate(right, str);
+}
+
 // Out-of-line member definitions of a class template often name a dependent
 // typedef (`typename Class<T>::size_type`) whose in-class counterpart was
 // recorded as a plain integer while the alias was still dependent.  Those
@@ -634,6 +695,9 @@ static bool RedeclarationTypesEqual(TypeRecord* left, TypeRecord* right) {
 static bool OutOfLineMemberParameterTypesEqual(TypeRecord* left,
                                                TypeRecord* right) {
   if (OverloadParameterTypesEqual(left, right)) {
+    return true;
+  }
+  if (ClassTemplateIdentityTypesEqual(left, right)) {
     return true;
   }
   return TypeIsIntegral(left) && TypeIsIntegral(right);
@@ -645,6 +709,7 @@ static bool OutOfLineMemberFunctionTypesEqual(TypeRecord* left,
     return false;
   }
   if (!OverloadTypesEqual(left->next, right->next) &&
+      !ClassTemplateIdentityTypesEqual(left->next, right->next) &&
       !(TypeIsIntegral(left->next) && TypeIsIntegral(right->next))) {
     return false;
   }
@@ -2855,10 +2920,20 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
         ((SizeofASTNode*)node->parent)->is_pack_size) {
       structured_binding_dependent = false;
     }
+    // A function template's own signature always mentions its parameters
+    // (`declval`, `GetData`).  Naming that template is not what makes an
+    // expression dependent; the explicit arguments and the call's actuals are.
+    // Treating the signature as dependent left `decltype(GetData(declval<T>()))`
+    // unresolved after `T` was concrete, so `Span`'s converting constructor
+    // never became viable.
+    bool function_template =
+        id->symbol != NULL && id->symbol->flags.is_template &&
+        id->symbol->type != NULL && TypeIsFunction(id->symbol->type);
     if (id->symbol != NULL &&
         (structured_binding_dependent ||
          id->symbol->template_parameter_index >= 0 ||
-         TypeContainsTemplateParameter(id->symbol->type) ||
+         (!function_template &&
+          TypeContainsTemplateParameter(id->symbol->type)) ||
          StaticAssertTemplateArgumentVectorContainsTemplateParameter(
              id->template_arguments))) {
       return true;
@@ -6185,6 +6260,15 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
 
   TypeRecord* member_type = member->symbol->type;
   if (TypeIsFixedArray(member_type) && member_type->next != NULL) {
+    // `uint32_t words_[max_words]` still has a placeholder bound while the
+    // class template is parsed.  The mem-initializer is kept in the raw list
+    // and lowered once the specialization's bound is known.
+    if (member_type->info.array.template_parameter_index >= 0 ||
+        member_type->info.array.is_dependent_bound) {
+      VectorDeleteWithContents(actuals, (VectorElementDestructor)ASTNodeDelete,
+                               /*free_element=*/false);
+      return NULL;
+    }
     size_t element_count = member_type->info.array.size.fixed;
     if (actuals->length > element_count) {
       SyntaxError(syntax, "too many initializers for array member %s",
@@ -7565,6 +7649,12 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     ParserContext old_context = syntax->context;
     syntax->context = kParsingBlockScope;
+    // `void ns::f() { ... }` is lexically outside `ns`, but unqualified lookup
+    // in the body still starts in `ns` (the namespace of the declaration).
+    Namespace* saved_namespace = syntax->current_namespace;
+    if (old_sym != NULL && old_sym->namespace_ != NULL) {
+      syntax->current_namespace = old_sym->namespace_;
+    }
     SyntaxOpenScope(syntax);
     AddFunctionScopeSymbols(syntax, sym->type);
     
@@ -7628,6 +7718,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     SyntaxAppendCXXMemberDestructorCalls(syntax, sym->type, body, sym->location);
     AppendCXXBaseDestructorCalls(syntax, sym->type, body, sym->location);
     SyntaxCloseScope(syntax);
+    syntax->current_namespace = saved_namespace;
     syntax->context = old_context;
     compiler->current_function = old_current_function;
     
@@ -9718,6 +9809,13 @@ static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag,
       SymbolDelete(alias);
       return true;
     }
+    // A using-directive does not declare a new name.  An already-visible
+    // declaration hides the imported one (`using namespace std` inside
+    // namespace absl, which already has `using std::weak_ordering`).
+    if (!current_scope_only) {
+      SymbolDelete(alias);
+      return true;
+    }
     if (!is_tag && CanOverloadFunctions(existing, alias)) {
       if (FindMatchingOverload(existing, alias->type, alias) != NULL) {
         SymbolDelete(alias);
@@ -9733,6 +9831,10 @@ static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag,
   }
   bool added = is_tag ? SyntaxAddTag(syntax, alias) : SyntaxAddSymbol(syntax, alias);
   if (!added) {
+    if (!current_scope_only) {
+      SymbolDelete(alias);
+      return true;
+    }
     SyntaxError(syntax, "Duplicate symbol from using declaration: %s",
                 alias->name.value);
     SymbolDelete(alias);
@@ -14978,6 +15080,75 @@ static bool CXXTypeStartsTemporaryMemberAccess(Syntax* syntax) {
   return is_member_access && SyntaxLookingAtType(syntax);
 }
 
+// `JoinTupleLoop<0, sizeof...(T)>()` constructs a temporary.  There is no
+// declarator name, so it is an expression even though the name is a class
+// template.  The following `(...)` is the call of that temporary.
+static bool CXXClassTemplateTemporaryLooksLikeExpression(Syntax* syntax) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(identifier))) {
+    return false;
+  }
+  Symbol* symbol = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
+  if (symbol == NULL || !symbol->flags.is_template || symbol->type == NULL ||
+      !TypeIsStructOrUnion(symbol->type)) {
+    symbol = SyntaxFindTag(syntax, &syntax->lex->spelling);
+  }
+  if (symbol == NULL || !symbol->flags.is_template || symbol->type == NULL ||
+      !TypeIsStructOrUnion(symbol->type)) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool result = false;
+  if (LexLookingAt(syntax->lex, TOK(less))) {
+    int angle_depth = 0;
+    int paren_depth = 0;
+    int square_depth = 0;
+    do {
+      Token token = syntax->lex->current_token;
+      if (token == TOK(semicolon) || token == TOK(lbrace) ||
+          token == TOK(rbrace)) {
+        break;
+      }
+      if (token == TOK(lparen)) {
+        paren_depth++;
+      } else if (token == TOK(rparen)) {
+        paren_depth--;
+      } else if (token == TOK(lsquare)) {
+        square_depth++;
+      } else if (token == TOK(rsquare)) {
+        square_depth--;
+      } else if (paren_depth == 0 && square_depth == 0) {
+        if (token == TOK(less)) {
+          angle_depth++;
+        } else {
+          angle_depth -= LexClosingAngleCount(token);
+        }
+      }
+      LexNextToken(syntax->lex);
+    } while (!LexEof(syntax->lex) && angle_depth > 0);
+    if (angle_depth == 0 && LexLookingAt(syntax->lex, TOK(lparen))) {
+      int depth = 0;
+      do {
+        if (LexLookingAt(syntax->lex, TOK(lparen))) {
+          depth++;
+        } else if (LexLookingAt(syntax->lex, TOK(rparen))) {
+          depth--;
+        }
+        LexNextToken(syntax->lex);
+      } while (!LexEof(syntax->lex) && depth > 0);
+      result = depth == 0 &&
+               (LexLookingAt(syntax->lex, TOK(lparen)) ||
+                LexLookingAt(syntax->lex, TOK(semicolon)) ||
+                LexLookingAt(syntax->lex, TOK(dot)) ||
+                LexLookingAt(syntax->lex, TOK(arrow)));
+    }
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
 // `foo<Args>(...)` is a function-template call, not a declaration.  Without
 // this, a block-scope statement such as `InitializeStorage<T>(args...)` is
 // sent to the declaration parser because the name is unknown or only visible
@@ -15110,6 +15281,9 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     return false;
   }
   if (CXXTemplateIdLooksLikeCallExpression(syntax)) {
+    return false;
+  }
+  if (CXXClassTemplateTemporaryLooksLikeExpression(syntax)) {
     return false;
   }
   if (CXXTypeStartsTemporaryMemberAccess(syntax)) {

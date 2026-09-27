@@ -482,6 +482,37 @@ back_insert_iterator<Container> back_inserter(Container& container) {
   return back_insert_iterator<Container>(container);
 }
 
+template <class Container>
+class insert_iterator {
+ protected:
+  Container* container;
+  typename Container::iterator iter;
+
+ public:
+  using iterator_category = output_iterator_tag;
+  using value_type = void;
+  using difference_type = ptrdiff_t;
+  using pointer = void;
+  using reference = void;
+
+  insert_iterator(Container& value, typename Container::iterator position)
+      : container(&value), iter(position) {}
+  insert_iterator& operator=(const typename Container::value_type& value) {
+    iter = container->insert(iter, value);
+    ++iter;
+    return *this;
+  }
+  insert_iterator& operator*() { return *this; }
+  insert_iterator& operator++() { return *this; }
+  insert_iterator operator++(int) { return *this; }
+};
+
+template <class Container>
+insert_iterator<Container> inserter(Container& container,
+                                    typename Container::iterator position) {
+  return insert_iterator<Container>(container, position);
+}
+
 #if __cplusplus >= 202002L
 
 // ------------------------------------------------------------------

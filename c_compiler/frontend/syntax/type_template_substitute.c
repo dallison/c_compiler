@@ -2255,6 +2255,47 @@ static void ClearDependentExpressionAnalysis(ASTNode* node, void* data,
   }
 }
 
+typedef struct {
+  TypeParser* parser;
+  Vector* args;
+} DecltypeParameterRemap;
+
+/* `decltype(c.data())` names the function parameter `c`.  The return type is
+ * substituted before the instantiated parameter symbols exist, so `c` still
+ * has the primary template's dependent type.  Give the cloned identifier a
+ * parameter symbol whose type has already been substituted; otherwise the
+ * decltype stays unknown and the function template is never instantiated
+ * (`GetData` inside `absl::Span`'s converting constructor). */
+static void RemapDecltypeFunctionParameter(ASTNode* node, void* data,
+                                           int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  Symbol* symbol = id->symbol;
+  if (symbol == NULL || !symbol->flags.is_argument || symbol->type == NULL ||
+      !TypeContainsTemplateParameter(symbol->type)) {
+    return;
+  }
+  DecltypeParameterRemap* remap = data;
+  TypeRecord* subst =
+      SubstituteTemplateParameters(remap->parser, symbol->type, remap->args);
+  if (subst == NULL || TypeContainsTemplateParameter(subst) ||
+      TypeIsUnknown(subst)) {
+    TypeRecordDelete(subst);
+    return;
+  }
+  Symbol* copy = NewSymbol(symbol->name.value, subst, symbol->storage);
+  copy->flags = symbol->flags;
+  copy->location = symbol->location;
+  copy->value.arg_number = symbol->value.arg_number;
+  id->symbol = copy;
+  node->flags &= ~kASTAnalyzed;
+  ASTNodeClearType(node);
+}
+
 TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
                                          TypeRecord* type,
                                          Vector* args) {
@@ -2361,6 +2402,9 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       // (e.g. decltype(declval<int>() + declval<long>()) would keep the stale
       // type instead of resolving to long).
       ASTNodeVisit(expr, ClearDependentExpressionAnalysis, 0, NULL);
+      DecltypeParameterRemap parameter_remap = {parser, args};
+      ASTNodeVisit(expr, RemapDecltypeFunctionParameter, 0,
+                   &parameter_remap);
       bool analysis_trap = DiagnosticErrorTrapBegin();
       compiler->speculative_template_instantiation_depth++;
       expr = AnalyzeExpression(expr);

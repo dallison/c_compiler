@@ -2037,13 +2037,13 @@ static IRNode* LoadBitfield(Generator* gen, IRNode* load, BinaryASTNode* node) {
     return load;
   }
   
+  // The word load is a use of the variable that contains the field. Callers
+  // must not mark that load again.
+  CheckForVarUse(load, (ASTNode*)node);
   if (bitfield->bit_size == bitfield->symbol->type->size * 8) {
     // Bitfield that is the whole word, just use the load.
     return load;
   }
-
-  // Check for variable use.
-  CheckForVarUse(load, (ASTNode*)node);
   IRNode* bitload =  GeneratorEmit(gen, NewIR3(IR_OP(getbit),
                                                load,
                                                GeneratorGetIntConstant(
@@ -2294,10 +2294,11 @@ static IRNode* IncDecComplex(Generator* gen, UnaryASTNode* node, bool is_post,
   // 'value'.
   IRNode* value = load;
   if (IsBitfieldReference(node->sub)) {
+    // LoadBitfield records the variable use on this load.
     value = LoadBitfield(gen, load, (BinaryASTNode*)node->sub);
+  } else {
+    CheckForVarUse(load, node->sub);
   }
-
-  CheckForVarUse(load, node->sub);
 
   bool value_is_used = ASTNodeUsesValue(node->base.parent, &node->base);
   
@@ -3243,12 +3244,12 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   IROpcode load_op = GetLoadOpcode((ASTNode*)node);
   IRNode* load = IRSetType(GeneratorEmit(gen, NewIR1(load_op, dest)), store_type);
 
-  // If we are operating on a variable we have a reference to it.
-  CheckForVarUse(load, node->left);
-
   // For a bitfield we need to load the bits from the word loaded.
+  // LoadBitfield records the variable use; a plain load records it here.
   if (IsBitfieldReference(node->left)) {
     load = LoadBitfield(gen, load, (BinaryASTNode*)node->left);
+  } else {
+    CheckForVarUse(load, node->left);
   }
 
   if (widen) {
@@ -4812,6 +4813,31 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
       StructMemberASTNodeSetMember(member, rebound);
       ASTNodeSetType(&member->base, rebound->symbol->type);
       ASTNodeSetType(&node->base, rebound->symbol->type);
+    }
+  }
+  if (member != NULL && member->base.op == AST_OP(structmember) &&
+      member->member != NULL && member->member->symbol != NULL &&
+      node->base.type == NULL) {
+    // A by-value lambda capture rewritten to `this->field` can reach code
+    // generation before semantic analysis has copied the captured type onto
+    // the field.  The captured variable still has it.
+    Symbol* field = member->member->symbol;
+    TypeRecord* recovered = field->type;
+    if (recovered == NULL && field->lambda_capture_source != NULL) {
+      recovered = field->lambda_capture_source->type;
+      if (recovered != NULL && TypeIsReference(recovered)) {
+        recovered = recovered->next;
+      }
+      if (recovered != NULL && field->lambda_capture_by_reference) {
+        recovered = NewPointerTo(kQualPlain, TypeRecordCopy(recovered));
+      }
+    }
+    if (recovered != NULL) {
+      if (field->type == NULL) {
+        field->type = TypeRecordCopy(recovered);
+      }
+      ASTNodeSetType(&node->base, recovered);
+      ASTNodeSetType(&member->base, recovered);
     }
   }
   if (member == NULL || member->base.op != AST_OP(structmember) ||

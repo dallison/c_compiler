@@ -3848,7 +3848,16 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
         deduced = TypeMaterializeClassTemplateSpecialization(&compiler->syntax,
                                                              deduced);
         TypeRecordDelete(capture->captured->type);
-        capture->captured->type = TypeRecordCopy(deduced);
+        // A dependent initializer (`[f = std::move(op)]` inside a function
+        // template) is only a placeholder here, often plain `int`.  Record
+        // `auto` so each instantiation rebuilds the closure and deduces the
+        // field from the concrete initializer.
+        bool placeholder = deduced == NULL || TypeIsUnknown(deduced) ||
+                           TypeContainsAuto(deduced) ||
+                           TypeContainsTemplateParameter(deduced);
+        capture->captured->type =
+            placeholder ? NewTypeRecord(kTypeAuto, kQualPlain)
+                        : TypeRecordCopy(deduced);
       }
     }
     String field_name;

@@ -4091,6 +4091,37 @@ static bool ApplyConstexprDesignatedBaseDefaultInitializers(
   return true;
 }
 
+// Positional aggregate initialization names data members only.  Typedefs
+// and member functions sit in the member vector ahead of `T __elems[N]`
+// in `std::array`, and must not consume initializer clauses.
+static bool ConstexprPositionalDataMember(StructMember* member) {
+  return member != NULL && member->symbol != NULL &&
+         !member->is_member_function && !member->is_static &&
+         !member->is_using_declaration &&
+         !StorageIs(member->symbol->storage, STO(typedef));
+}
+
+static size_t ConstexprNextPositionalSlot(TypeRecord* type, size_t slot_index) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->is_union) {
+    return slot_index;
+  }
+  Struct* str = type->info.struct_info;
+  size_t base_count =
+      ConstexprNonVirtualBaseCount(str) + str->virtual_bases.length;
+  while (slot_index >= base_count) {
+    size_t member_index = slot_index - base_count;
+    if (member_index >= str->members.length) {
+      break;
+    }
+    if (ConstexprPositionalDataMember(str->members.value.p[member_index])) {
+      break;
+    }
+    slot_index++;
+  }
+  return slot_index;
+}
+
 static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
                                          TypeRecord* type,
                                          ASTNode* initializer,
@@ -4253,6 +4284,9 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
       }
       entry_init = designated->init;
     }
+    if (!is_designated_entry) {
+      slot_index = ConstexprNextPositionalSlot(type, slot_index);
+    }
     ConstexprValue* slot = ConstexprObjectSlot(object, slot_index);
     if (slot == NULL) {
       ok = false;
@@ -4303,6 +4337,47 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
           expression_initializer->expr->child_id = 0;
         }
       }
+    }
+    // Brace elision: `struct { T e[N]; } x = {a, b, c}` initializes the
+    // array elements, not N separate members.  A braced element list
+    // (`e{...}`) is left for the recursive initializer.
+    if (!is_designated_entry && TypeIsFixedArray(slot_type) &&
+        slot_type->next != NULL && !TypeIsFixedArray(slot_type->next) &&
+        !TypeIsStructOrUnion(slot_type->next) && entry != NULL &&
+        entry->op != AST_OP(braced_init) &&
+        entry->op != AST_OP(designated_init)) {
+      size_t elem_count = (size_t)slot_type->info.array.size.fixed;
+      size_t available = braced->initializers->length - i;
+      size_t take = available < elem_count ? available : elem_count;
+      slot->is_object = true;
+      slot->is_address = false;
+      slot->is_floating = false;
+      slot->ivalue = 0;
+      slot->fvalue = 0;
+      slot->object = NewConstexprObject(ctx, slot_type, elem_count);
+      if (slot->object == NULL) {
+        ok = false;
+        break;
+      }
+      for (size_t elem = 0; elem < take; elem++) {
+        ConstexprValue* elem_slot = ConstexprObjectSlot(slot->object, elem);
+        if (elem_slot == NULL ||
+            !EvaluateConstexprInitializer(
+                ctx, slot_type->next,
+                braced->initializers->value.p[i + elem], elem_slot)) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) {
+        break;
+      }
+      if (slot_index < slot_count) {
+        initialized[slot_index] = true;
+      }
+      next_index = slot_index + 1;
+      i += take - 1;
+      continue;
     }
     if (!EvaluateConstexprInitializer(ctx, slot_type, entry_init, slot)) {
       if (!is_designated_entry && TypeIsStructOrUnion(slot_type) &&
@@ -7671,11 +7746,32 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
     }
     if (TypeIsVoid(operand->type) || operand->op == AST_OP(call) ||
         operand->op == AST_OP(comma) || operand->op == AST_OP(cast) ||
-        operand->op == AST_OP(throw)) {
+        operand->op == AST_OP(question) || operand->op == AST_OP(throw)) {
       return EvaluateConstexprVoidExpression(ctx, operand);
     }
     ConstexprValue ignored = {0};
     return EvaluateConstexprValue(ctx, operand, operand->type, &ignored);
+  }
+  if (expr->op == AST_OP(question) &&
+      ASTNodeGetShape(expr) == kASTShapeBinary) {
+    BinaryASTNode* question = (BinaryASTNode*)expr;
+    if (question->right == NULL || question->right->op != AST_OP(colon) ||
+        ASTNodeGetShape(question->right) != kASTShapeBinary) {
+      return false;
+    }
+    bool condition = false;
+    if (!EvaluateConstexprCondition(ctx, question->left, &condition)) {
+      return false;
+    }
+    BinaryASTNode* colon = (BinaryASTNode*)question->right;
+    ASTNode* arm = condition ? colon->left : colon->right;
+    if (arm == NULL || TypeIsVoid(arm->type) || arm->op == AST_OP(call) ||
+        arm->op == AST_OP(comma) || arm->op == AST_OP(question) ||
+        arm->op == AST_OP(throw)) {
+      return EvaluateConstexprVoidExpression(ctx, arm);
+    }
+    ConstexprValue ignored = {0};
+    return EvaluateConstexprValue(ctx, arm, arm->type, &ignored);
   }
   if (expr->op != AST_OP(call)) {
     return true;
@@ -8320,13 +8416,17 @@ static ConstexprStatementResult EvaluateConstexprStatement(
         return kConstexprStmtThrow;
       }
       if (TypeIsVoid(expr->expr->type)) {
-        if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
-          if (ConstexprVoidExpressionThrows(expr->expr)) {
-            return kConstexprStmtInvalid;
-          }
-          return kConstexprStmtNormal;
+        // A reached throw-expression is not a core constant expression before
+        // C++26. Other void expressions, including a conditional operator whose
+        // arms are calls, still have to run so their side effects are visible.
+        if (!CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+            ConstexprVoidExpressionThrows(expr->expr)) {
+          return kConstexprStmtInvalid;
         }
         if (!EvaluateConstexprVoidExpression(ctx, expr->expr)) {
+          if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+            return kConstexprStmtInvalid;
+          }
           return ConstexprFailureStatementResult(ctx);
         }
         return kConstexprStmtNormal;
