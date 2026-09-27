@@ -1708,8 +1708,11 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
   size_t args_size = 0;
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
+    // __int128 does not fit in a pcode register, so copy the 16-byte object
+    // the same way as a struct argument.
     if (TypeIsStructOrUnion(arg_node->type) ||
         TypeUsesLongDoubleRepresentation(arg_node->type) ||
+        TypeIsInt128(arg_node->type) ||
         TypeIsMemberPointerAggregate(arg_node->type)) {
       PushStructArg(pcode, arg_node, &args_size);
     } else {

@@ -2948,6 +2948,14 @@ static bool DeduceFunctionTemplateInitializerListArgument(
   if (element_type == NULL) {
     return false;
   }
+  /* [temp.deduct.call]: an element pattern that names no template parameter
+   * deduces nothing.  Whether each element converts to that concrete type is
+   * decided later, during overload resolution.  An exact match here rejects
+   * `initializer_list<E>` for a `const E` element, as in
+   * `Span<const E>({e})` where `value_type` is `remove_cv_t<T>`. */
+  if (!TypeContainsTemplateParameter(element_type)) {
+    return true;
+  }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)actual;
   for (size_t i = 0; i < braced->initializers->length; i++) {
     ASTNode* element =
@@ -4499,6 +4507,9 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithOffset(Syntax* syntax,
       syntax, templ, NULL, actuals, first_formal_arg);
 }
 
+static void SetMemberTemplateSubstitutionContext(TypeParser* parser,
+                                                 TypeRecord* func_type);
+
 /* Public: deduce template arguments from a call (with explicit args and formal
  * offset) and instantiate the template. Returns `templ` unchanged if deduction
  * fails. */
@@ -4523,6 +4534,7 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
       templ->value.func_defn->type->info.function.template_parameters.length > 0) {
     func_type = templ->value.func_defn->type;
   }
+  SetMemberTemplateSubstitutionContext(&parser, func_type);
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func_type, args,
                                         /*emit_error=*/true,
@@ -4548,6 +4560,29 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   return symbol;
 }
 
+/* Member-alias defaults (`EnableIfValueIsConst<LazyT>`,
+ * `IsLifetimeBoundAssignmentFrom<U>`) mention the enclosing class parameters.
+ * Overload resolution builds a parser with no active instantiation, so without
+ * the member's class the alias binds its own argument into the class slot and
+ * SFINAE rejects a valid constructor. */
+static void SetMemberTemplateSubstitutionContext(TypeParser* parser,
+                                                 TypeRecord* func_type) {
+  if (parser == NULL || func_type == NULL || !TypeIsFunction(func_type) ||
+      func_type->info.function.cxx_member_owner == NULL) {
+    return;
+  }
+  parser->template_substitution_target =
+      func_type->info.function.cxx_member_owner;
+  Struct* owner = parser->template_substitution_target;
+  if (owner->tag_symbol != NULL && owner->tag_symbol->type != NULL &&
+      owner->tag_symbol->type->template_origin != NULL &&
+      owner->tag_symbol->type->template_origin->type != NULL &&
+      TypeIsStructOrUnion(owner->tag_symbol->type->template_origin->type)) {
+    parser->template_substitution_source =
+        owner->tag_symbol->type->template_origin->type->info.struct_info;
+  }
+}
+
 /* Public: test whether a function template's arguments can be deduced from a
  * call (used for overload viability) without instantiating it. */
 bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
@@ -4571,6 +4606,7 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
       templ->value.func_defn->type->info.function.template_parameters.length > 0) {
     func_type = templ->value.func_defn->type;
   }
+  SetMemberTemplateSubstitutionContext(&parser, func_type);
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func_type, args,
                                         /*emit_error=*/false,
@@ -4613,6 +4649,7 @@ FunctionTemplateCandidateStatus TypeClassifyFunctionTemplateCandidate(
       templ->value.func_defn->type->info.function.template_parameters.length > 0) {
     func_type = templ->value.func_defn->type;
   }
+  SetMemberTemplateSubstitutionContext(&parser, func_type);
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func_type, args,
                                         /*emit_error=*/false,
@@ -4663,23 +4700,6 @@ Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                  syntax->context);
   TypeRecord* func_type = templ->type;
-  // Member-alias defaults (`IsLifetimeBoundAssignmentFrom<U>`) need the
-  // enclosing class arguments.  Overload resolution builds this parser with
-  // no active instantiation, so a member alias would otherwise bind its
-  // parameter into the class parameter's slot.
-  if (func_type != NULL && TypeIsFunction(func_type) &&
-      func_type->info.function.cxx_member_owner != NULL) {
-    parser.template_substitution_target =
-        func_type->info.function.cxx_member_owner;
-    Struct* owner = parser.template_substitution_target;
-    if (owner->tag_symbol != NULL && owner->tag_symbol->type != NULL &&
-        owner->tag_symbol->type->template_origin != NULL &&
-        owner->tag_symbol->type->template_origin->type != NULL &&
-        TypeIsStructOrUnion(owner->tag_symbol->type->template_origin->type)) {
-      parser.template_substitution_source =
-          owner->tag_symbol->type->template_origin->type->info.struct_info;
-    }
-  }
   if (templ->is_imported_module_symbol && func_type != NULL &&
       TypeIsFunction(func_type) &&
       func_type->info.function.template_parameters.length == 0 &&
@@ -4688,6 +4708,7 @@ Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
       templ->value.func_defn->type->info.function.template_parameters.length > 0) {
     func_type = templ->value.func_defn->type;
   }
+  SetMemberTemplateSubstitutionContext(&parser, func_type);
   Vector* completed_args =
       CompleteFunctionTemplateArguments(&parser, func_type, args,
                                         /*emit_error=*/false,

@@ -6387,6 +6387,9 @@ static bool LowerMemberFunctionCall(VectorASTNode* node) {
     }
     CheckDeletedFunctionUse(member->symbol, (ASTNode*)node);
   }
+  if (member == NULL) {
+    return false;
+  }
 
   Struct* owner = member->symbol->type->info.function.cxx_member_owner;
   CXXAccess access = member->access;
@@ -8436,6 +8439,25 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
       diagnostic_node != NULL &&
       (diagnostic_node->flags & kASTOverloadDiagnosed) != 0;
   if (best == NULL) {
+    // A use can be type-checked before `const auto&` deduction of a local in
+    // the same function template (`Bern(q.first)` while `q` is still `auto`).
+    // The call is analyzed again once the variable's type is known. Diagnosing
+    // the early attempt rejects a call that the later attempt accepts.
+    bool argument_not_ready = false;
+    if (actuals != NULL) {
+      for (size_t i = 0; i < actuals->length; i++) {
+        ASTNode* actual = actuals->value.p[i];
+        if (actual != NULL && actual->type != NULL &&
+            (TypeContainsAuto(actual->type) || TypeIsUnknown(actual->type))) {
+          argument_not_ready = true;
+          break;
+        }
+      }
+    }
+    if (argument_not_ready) {
+      DeleteTemporaryFunctionTemplateCandidates(&temporary_candidates, NULL);
+      return NULL;
+    }
     if (diagnose_no_match && !already_diagnosed) {
       Symbol* constraint_rejected = NULL;
       for (size_t i = 0; i < candidates->length; i++) {
@@ -9416,6 +9438,24 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
   bool already_diagnosed =
       ((ASTNode*)node)->flags & kASTOverloadDiagnosed;
   if (best == NULL) {
+    // See ResolveFunctionCandidateVector: a constructor argument may still be
+    // `const auto` because this call is type-checked before that local is
+    // deduced. Keep the overload unresolved so the later attempt can match.
+    bool argument_not_ready = false;
+    if (node->children != NULL) {
+      for (size_t i = 0; i < node->children->length; i++) {
+        ASTNode* actual = node->children->value.p[i];
+        if (actual != NULL && actual->type != NULL &&
+            (TypeContainsAuto(actual->type) || TypeIsUnknown(actual->type))) {
+          argument_not_ready = true;
+          break;
+        }
+      }
+    }
+    if (argument_not_ready) {
+      DeleteTemporaryMemberTemplateCandidates(&temporary_members, NULL);
+      return NULL;
+    }
     if (already_diagnosed) {
       DeleteTemporaryMemberTemplateCandidates(&temporary_members, NULL);
       return first;
@@ -10760,6 +10800,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       ASTNode* actual = node->children->value.p[i];
       if (actual != NULL && actual->type != NULL &&
           (TypeContainsTemplateParameter(actual->type) ||
+           TypeContainsAuto(actual->type) ||
            TypeIsUnknown(actual->type))) {
         actuals_type_dependent = true;
         break;
