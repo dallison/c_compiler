@@ -3482,6 +3482,15 @@ bool StructContainsTemplateParameter(Struct* str) {
     if (TypeContainsTemplateParameter(member->symbol->type)) {
       return true;
     }
+    // A by-value capture of an undeduced `auto` local (`auto old_size =
+    // str.size()` inside a function template) is not a template parameter,
+    // but the field type is only known once that local is deduced in each
+    // instantiation.  Rebuild the closure so those instantiations do not
+    // share one `auto` field.
+    if (is_lambda_closure && !member->is_member_function &&
+        TypeContainsAuto(member->symbol->type)) {
+      return true;
+    }
   }
   return false;
 }

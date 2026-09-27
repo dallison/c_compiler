@@ -8248,7 +8248,31 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
           template_definition->type->info.function.body);
       lambda_awaits_enclosing_function = max_index >= (int)args->length;
     }
-    if (!nested_lambda_operator || lambda_awaits_enclosing_function) {
+    // Capture fields of undeduced `auto` locals are still `auto` while the
+    // enclosing function template is being cloned.  Cloning operator() now
+    // type-checks `data_ptr + old_size` against that placeholder.  Leave the
+    // body until the call, which is after those locals have been deduced and
+    // the capture fields rewritten.
+    bool lambda_capture_still_auto = false;
+    if (nested_lambda_operator && symbol->type != NULL &&
+        TypeIsFunction(symbol->type)) {
+      Struct* closure = symbol->type->info.function.cxx_member_owner;
+      if (closure != NULL) {
+        for (size_t i = 0; i < closure->members.length; i++) {
+          StructMember* member = closure->members.value.p[i];
+          if (member == NULL || member->symbol == NULL ||
+              member->is_member_function || member->is_static) {
+            continue;
+          }
+          if (TypeContainsAuto(member->symbol->type)) {
+            lambda_capture_still_auto = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!nested_lambda_operator || lambda_awaits_enclosing_function ||
+        lambda_capture_still_auto) {
       symbol->value.func_defn = template_definition;
       if (symbol->type->template_arguments == NULL) {
         // The arguments recorded here are the ones the deferred body clone will
@@ -8500,8 +8524,19 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
       owner->tag_symbol != NULL && owner->tag_symbol->type != NULL) {
     template_arguments = owner->tag_symbol->type->template_arguments;
   }
+  // A captureless lambda (`[] { assert(...); }()` inside a function template)
+  // is rebuilt with the surrounding instantiation but has no template
+  // argument list of its own.  Its operator() still needs the parsed body so
+  // `auto` return deduction can see that the body does not return a value.
+  Vector empty_template_arguments;
+  bool own_empty_template_arguments = false;
   if (template_arguments == NULL) {
-    return;
+    if (!IsLambdaCallOperator(symbol)) {
+      return;
+    }
+    VectorInit(&empty_template_arguments);
+    template_arguments = &empty_template_arguments;
+    own_empty_template_arguments = true;
   }
   Vector* combined_args =
       PrefixEnclosingClassTemplateArguments(owner, template_arguments);
@@ -8557,6 +8592,9 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
                                  (VectorElementDestructor)TemplateArgumentDelete,
                                  /*free_element=*/false);
       }
+      if (own_empty_template_arguments) {
+        VectorDestruct(&empty_template_arguments);
+      }
       return;
     }
   }
@@ -8610,6 +8648,9 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
     VectorDeleteWithContents(combined_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
+  }
+  if (own_empty_template_arguments) {
+    VectorDestruct(&empty_template_arguments);
   }
 }
 

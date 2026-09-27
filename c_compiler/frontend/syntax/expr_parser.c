@@ -4186,7 +4186,8 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
       if (capture->is_pack_expansion) {
         continue;
       }
-      if (TypeContainsTemplateParameter(capture->captured->type)) {
+      if (TypeContainsTemplateParameter(capture->captured->type) ||
+          TypeContainsAuto(capture->captured->type)) {
         defer_dependent_capture = true;
         break;
       }

@@ -587,9 +587,42 @@ static bool OverloadFunctionTypesEqual(TypeRecord* left, TypeRecord* right) {
          OverloadTypesEqual(left, right);
 }
 
+// `extern const char name[17]; const char name[] = "...";` completes the
+// unknown bound.  The definition is still an incomplete array at the
+// redeclaration check (the string length is applied later), so compare element
+// types and copy the known bound onto the incomplete array.
+static bool IncompleteArrayRedeclarationMatches(TypeRecord* left,
+                                               TypeRecord* right) {
+  if (left == NULL || right == NULL || left->declarator != kDeclArray ||
+      right->declarator != kDeclArray) {
+    return false;
+  }
+  TypeRecord* incomplete = NULL;
+  TypeRecord* complete = NULL;
+  if (left->info.array.is_flexible && !right->info.array.is_flexible) {
+    incomplete = left;
+    complete = right;
+  } else if (right->info.array.is_flexible && !left->info.array.is_flexible) {
+    incomplete = right;
+    complete = left;
+  } else {
+    return false;
+  }
+  if (!TypeEqual(incomplete->next, complete->next)) {
+    return false;
+  }
+  incomplete->info.array.is_flexible = false;
+  incomplete->info.array.size.fixed = complete->info.array.size.fixed;
+  TypeRecordCalculateSize(incomplete);
+  return true;
+}
+
 static bool RedeclarationTypesEqual(TypeRecord* left, TypeRecord* right) {
   if (TypeIsFunction(left) || TypeIsFunction(right)) {
     return OverloadFunctionTypesEqual(left, right);
+  }
+  if (IncompleteArrayRedeclarationMatches(left, right)) {
+    return true;
   }
   return TypeEqual(left, right);
 }

@@ -3191,7 +3191,12 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         // list.
         break;
       }
+      // An omitted array bound on a static member is an incomplete type, not
+      // a flexible array.  The flag is not storage class: the out-of-line
+      // definition does not repeat `static`.
+      parser->parsing_static_member = is_static_member;
       Symbol* member_symbol = TypeParserParseDeclarator(parser, member_type);
+      parser->parsing_static_member = false;
       if (member_symbol == NULL) {
         SyntaxError(parser->syntax, "Invalid type for struct member");
       } else {

@@ -42,6 +42,12 @@ typedef struct {
   int declarator_ellipsis_count;
   enum ParserContext context;
   Struct* cxx_member_owner;
+  // True while parsing the declarator of a static class member, so an omitted
+  // array bound (`static const T name[]`) is an incomplete type rather than a
+  // flexible array member.  Not folded into `storage`: out-of-line definitions
+  // of static members do not repeat `static`, and a storage mismatch is a
+  // linkage error.
+  bool parsing_static_member;
   // Out-of-line `C::f(...)` must see C's nested types in the parameter list
   // (`void Storage<T>::SwapN(ElementwiseSwapPolicy, ...)`).  Ordinary lookup
   // only consults cxx_class_head, so the qualified declarator temporarily

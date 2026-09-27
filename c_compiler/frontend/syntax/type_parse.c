@@ -55,6 +55,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->declarator_ellipsis_count = 0;
   parser->context = context;
   parser->cxx_member_owner = NULL;
+  parser->parsing_static_member = false;
   parser->saved_cxx_class_head = NULL;
   parser->replaced_cxx_class_head = false;
   parser->template_substitution_source = NULL;
@@ -111,6 +112,7 @@ void TypeParserReset(TypeParser* parser) {
   parser->declarator_is_parameter_pack = false;
   parser->declarator_ellipsis_count = 0;
   parser->cxx_member_owner = NULL;
+  parser->parsing_static_member = false;
   parser->template_substitution_source = NULL;
   parser->template_substitution_target = NULL;
   parser->enclosing_template_substitution_source = NULL;
@@ -2999,6 +3001,10 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   VectorClear(&parser->stack);
   parser->symbol = NULL;
   parser->base_type = base_type;
+  // Each declarator starts its own array-bound count.  A later static member
+  // (`static const T a[]; static const T b[];`) must not inherit the previous
+  // declarator's dimension.
+  parser->dimension_count = 0;
   parser->declarator_is_parameter_pack = false;
   parser->declarator_ellipsis_count = 0;
   if (LookingAtCXXTypePackIndex(parser)) {
@@ -3951,7 +3957,10 @@ static void ParseArrayDecl(TypeParser* parser) {
              "Array dimension required after first dimension");
     }
     // No size expression present.
-    if (parser->context != kParsingPrototype) {
+    // A static data member may be declared with an unknown bound
+    // (`static const IntType kVmaxOverBase[]`).  That is an incomplete array
+    // type completed by the out-of-line definition, not a flexible array member.
+    if (parser->context != kParsingPrototype && !parser->parsing_static_member) {
       p->info.array.is_flexible = true;
     }
     return;

@@ -30,6 +30,7 @@
 #include "member_pointer.h"
 #include "statement_parser.h"
 #include "type_parse.h"
+#include "type_class_internal.h"
 #include "type_special_member.h"
 #include "type_template.h"
 
@@ -12710,7 +12711,99 @@ static void MaterializeBracedClassTemplateTemporary(
   TypeRecordDelete(specialized);
 }
 
+// A lambda parsed inside a function template captures `auto` locals before
+// those locals are deduced, so the closure field is still `auto`.  By the
+// time this prvalue is analyzed the local has a concrete type; copy it onto
+// the field (this closure was rebuilt per instantiation) and lay the closure
+// out again.
+static ASTNode* LambdaCaptureInitializerExpr(ASTNode* init) {
+  if (init != NULL && init->op == AST_OP(expr_init)) {
+    init = ((ExpressionInitializerASTNode*)init)->expr;
+  }
+  return init;
+}
+
+static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node) {
+  if (node == NULL || (node->base.flags & kASTLambdaExpression) == 0 ||
+      node->base.type == NULL || !TypeIsStructOrUnion(node->base.type) ||
+      node->base.type->info.struct_info == NULL || node->initializer == NULL ||
+      node->initializer->op != AST_OP(braced_init)) {
+    return;
+  }
+  Struct* closure = node->base.type->info.struct_info;
+  BracedInitializerASTNode* braced =
+      (BracedInitializerASTNode*)node->initializer;
+  bool changed = false;
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_member_function ||
+        member->is_static || member->is_using_declaration ||
+        !TypeContainsAuto(member->symbol->type)) {
+      continue;
+    }
+    ASTNode* value = NULL;
+    for (size_t j = 0; j < braced->initializers->length; j++) {
+      ASTNode* initializer = braced->initializers->value.p[j];
+      if (initializer == NULL || initializer->op != AST_OP(designated_init)) {
+        continue;
+      }
+      DesignatedInitializerASTNode* designated =
+          (DesignatedInitializerASTNode*)initializer;
+      if (designated->designators == NULL ||
+          designated->designators->length == 0) {
+        continue;
+      }
+      Designator* designator = designated->designators->value.p[0];
+      if (designator == NULL ||
+          designator->designator_type != kDesignatorStruct ||
+          designator->value.struct_member_name == NULL ||
+          !StringEqualString(designator->value.struct_member_name,
+                             &member->symbol->name)) {
+        continue;
+      }
+      value = LambdaCaptureInitializerExpr(designated->init);
+      break;
+    }
+    bool by_reference = false;
+    if (value != NULL && value->op == AST_OP(address)) {
+      by_reference = true;
+      value = ((UnaryASTNode*)value)->sub;
+    }
+    if (value != NULL && value->op == AST_OP(cast)) {
+      value = ((CastASTNode*)value)->expr;
+    }
+    if (value == NULL || value->op != AST_OP(identifier)) {
+      continue;
+    }
+    Symbol* source = ((IdentifierASTNode*)value)->symbol;
+    TypeRecord* concrete =
+        source != NULL ? source->type : NULL;
+    if (TypeIsReference(concrete)) {
+      concrete = concrete->next;
+    }
+    if (concrete == NULL || TypeContainsAuto(concrete) ||
+        TypeContainsTemplateParameter(concrete)) {
+      continue;
+    }
+    TypeRecord* field_type = by_reference
+                                 ? NewPointerTo(kQualPlain,
+                                                TypeRecordCopy(concrete))
+                                 : TypeRecordCopy(concrete);
+    TypeRecordCalculateSize(field_type);
+    TypeRecordDelete(member->symbol->type);
+    member->symbol->type = field_type;
+    changed = true;
+  }
+  if (!changed) {
+    return;
+  }
+  RelayoutStruct(closure);
+  node->base.type->size = closure->size;
+  TypeRecordCalculateSize(node->base.type);
+}
+
 static void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
+  FinishAutoLambdaCaptureFields(node);
   MaterializeBracedClassTemplateTemporary(node);
   node->initializer =
       AnalyzeInitialization(&node->base, node->sym,
