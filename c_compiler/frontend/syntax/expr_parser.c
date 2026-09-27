@@ -7595,42 +7595,94 @@ static ASTNode* ParseCXXNamedCastExpression(Syntax* syntax,
   return ParsePostfixOperators(syntax, result, followers);
 }
 
+// True when the lexer is at `A::B` or `ns::A::B` (at least one `::`), and the
+// name does not end on a dangling `::`.  Used so a speculative qualified-name
+// parse does not diagnose `Expected identifier after '::'`.
+static bool LookingAtCompleteQualifiedName(Lex* lex) {
+  if (!LexLookingAt(lex, TOK(identifier))) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  LexNextToken(lex);
+  int parts = 1;
+  bool dangling = false;
+  while (LexLookingAt(lex, TOK(coloncolon))) {
+    LexNextToken(lex);
+    if (!LexLookingAt(lex, TOK(identifier))) {
+      dangling = true;
+      break;
+    }
+    LexNextToken(lex);
+    parts++;
+  }
+  LexCheckpointRestore(lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return !dangling && parts >= 2;
+}
+
+// `&ns::Class::method` names one member of an overload set.  The non-template
+// function is the one whose type can be a pointer-to-member without a
+// template argument list (`&time_zone::next_transition`).
+static StructMember* PointerToMemberOverload(StructMember* member) {
+  StructMember* templ = NULL;
+  for (StructMember* cand = member; cand != NULL; cand = cand->overload_next) {
+    if (cand->symbol == NULL || cand->symbol->type == NULL || cand->is_static) {
+      continue;
+    }
+    if (!cand->is_member_function && !TypeIsFunction(cand->symbol->type)) {
+      return cand;
+    }
+    if (!cand->symbol->flags.is_template) {
+      return cand;
+    }
+    if (templ == NULL) {
+      templ = cand;
+    }
+  }
+  return templ != NULL ? templ : member;
+}
+
 static ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
   LexCheckpoint checkpoint;
   LexCheckpointSave(syntax->lex, &checkpoint);
-  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+  if (!LookingAtCompleteQualifiedName(syntax->lex)) {
+    LexCheckpointDestruct(&checkpoint);
     return NULL;
   }
-  String class_name;
-  StringInit(&class_name, syntax->lex->spelling.value);
-  LexNextToken(syntax->lex);
-  if (!LexMatch(syntax->lex, TOK(coloncolon)) ||
-      !LexLookingAt(syntax->lex, TOK(identifier))) {
-    StringDestruct(&class_name);
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  if (!SyntaxParseFullyQualifiedIdentifier(syntax, &name) ||
+      !name.is_qualified || name.components.length < 2) {
+    FullyQualifiedIdentifierDestruct(&name);
     LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
     return NULL;
   }
-  String member_name;
-  StringInit(&member_name, syntax->lex->spelling.value);
-  LexNextToken(syntax->lex);
-  Symbol* class_sym = SyntaxFindSymbol(syntax, &class_name);
+  Symbol* class_sym = SyntaxFindQualifiedPrefixSymbol(
+      syntax, &name, name.components.length - 1);
   Struct* class_info = NULL;
   if (class_sym != NULL && class_sym->type != NULL &&
       TypeIsStructOrUnion(class_sym->type) &&
       class_sym->type->info.struct_info != NULL) {
     class_info = class_sym->type->info.struct_info;
   }
-  StringDestruct(&class_name);
+  String member_name;
+  StringInit(&member_name, FullyQualifiedIdentifierLast(&name));
+  FullyQualifiedIdentifierDestruct(&name);
   if (class_info == NULL) {
     StringDestruct(&member_name);
     LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
     return NULL;
   }
   StructMember* member = FindStructMember(class_info, &member_name);
   StringDestruct(&member_name);
+  member = PointerToMemberOverload(member);
   if (member == NULL || member->symbol == NULL || member->symbol->type == NULL ||
       member->is_static) {
     LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
     return NULL;
   }
   // Forming a pointer-to-member (&Class::field) counts as a use of the data
@@ -7641,6 +7693,7 @@ static ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
     member->symbol->flags.address_taken = true;
     SourceLocation location = syntax->lex->current_token_location;
     ASTNode* function = NewIdentifierASTNode(member->symbol, location);
+    LexCheckpointDestruct(&checkpoint);
     return NewUnaryASTNode(AST_OP(address), NULL, location, function);
   }
   TypeRecord* member_type = TypeMemberPointerPointeeFromMember(member);
@@ -7657,6 +7710,7 @@ static ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
       NewUnaryASTNode(AST_OP(member_ptr), NULL, location, (ASTNode*)member_node);
   ASTNodeSetType(result, mptr);
   (void)followers;
+  LexCheckpointDestruct(&checkpoint);
   return result;
 }
 

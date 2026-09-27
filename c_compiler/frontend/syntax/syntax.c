@@ -5649,9 +5649,19 @@ static ASTNode* NewCXXDelegatingConstructorCall(
     return NULL;
   }
   Struct* owner = func->info.function.cxx_member_owner;
-  Symbol* this_symbol = FindThisSymbol(syntax);
-  if (this_symbol == NULL && func->info.function.prototype.length > 0) {
-    this_symbol = func->info.function.prototype.value.p[0];
+  // The constructor may be instantiated while another member function is the
+  // current scope (`Time::In` constructing a `civil_time`).  The `this` in
+  // that scope is the other class.  The delegating call has to use this
+  // constructor's own object parameter.
+  Symbol* this_symbol = NULL;
+  if (func->info.function.prototype.length > 0) {
+    Symbol* param = func->info.function.prototype.value.p[0];
+    if (param != NULL && StringEqual(&param->name, "this")) {
+      this_symbol = param;
+    }
+  }
+  if (this_symbol == NULL) {
+    this_symbol = FindThisSymbol(syntax);
   }
   if (this_symbol == NULL || owner->tag_name == NULL) {
     VectorDelete(actuals);

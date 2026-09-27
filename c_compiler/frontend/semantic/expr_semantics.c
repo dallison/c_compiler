@@ -9813,6 +9813,34 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
       ASTNodeSetType(node->left, alias_type);
     }
   }
+  // `using Period = typename T::period` can stay a placeholder
+  // (`kTypeInt|kTypeUnknown` plus `ratio<1, 1000000>` arguments) after the
+  // function template is instantiated.  `const auto v = Period{}` then
+  // value-initializes that placeholder as a scalar.  Instantiate the class
+  // once the arguments are concrete.
+  if (node->left->type != NULL && !TypeIsStructOrUnion(node->left->type) &&
+      node->left->type->template_origin != NULL &&
+      node->left->type->template_arguments != NULL &&
+      node->left->type->template_arguments->length > 0 &&
+      !TemplateArgumentVectorContainsTemplateParameter(
+          node->left->type->template_arguments)) {
+    TypeRecord* concrete = TypeInstantiateClassTemplate(
+        &compiler->syntax, node->left->type->template_origin,
+        node->left->type->template_arguments);
+    bool concrete_class =
+        concrete != NULL && TypeIsStructOrUnion(concrete) &&
+        concrete->info.struct_info != NULL &&
+        !concrete->info.struct_info->is_template;
+    bool concrete_scalar =
+        concrete != NULL && !TypeIsStructOrUnion(concrete) &&
+        (concrete->type & kTypeUnknown) == 0 &&
+        !TypeContainsTemplateParameter(concrete);
+    if (concrete_class || concrete_scalar) {
+      ASTNodeSetType(node->left, concrete);
+    } else {
+      TypeRecordDelete(concrete);
+    }
+  }
   if (!TypeIsStructOrUnion(node->left->type)) {
     if (node->left->op != AST_OP(identifier)) {
       return NULL;
@@ -9822,6 +9850,15 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
         !StorageIs(id->symbol->storage, STO(typedef)) ||
         node->children->length > 1) {
       return NULL;
+    }
+    // A typedef that is still an unresolved placeholder (`typename T::period`
+    // before the member alias is a concrete class) must not be value-initialized
+    // as a scalar.  Casting 0 to that placeholder becomes a cast to the class
+    // once the alias is completed (`const auto v = Period{}`).
+    if ((node->left->type->type & kTypeUnknown) != 0) {
+      node->base.flags |= kASTDependentFunctorCall;
+      ASTNodeSetType((ASTNode*)node, TypeRecordCopy(node->left->type));
+      return (ASTNode*)node;
     }
     SourceLocation location = node->base.location;
     ASTNode* initializer =
