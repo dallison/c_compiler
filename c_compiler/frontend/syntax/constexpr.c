@@ -2939,6 +2939,23 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
     return EvaluateConstexprInlineCall(
         ctx, (InlineCallASTNode*)node, type, result);
   }
+  // A class-typed conditional (`ticks < 0 ? Make(a) : Make(b)`) is a prvalue
+  // of the selected arm.  Evaluating the whole operator as an integer, or as
+  // an aggregate initializer, drops that arm.
+  if (node != NULL && node->op == AST_OP(question) &&
+      ASTNodeGetShape(node) == kASTShapeBinary) {
+    BinaryASTNode* question = (BinaryASTNode*)node;
+    if (question->right != NULL && question->right->op == AST_OP(colon) &&
+        ASTNodeGetShape(question->right) == kASTShapeBinary) {
+      bool condition = false;
+      if (!EvaluateConstexprCondition(ctx, question->left, &condition)) {
+        return false;
+      }
+      BinaryASTNode* colon = (BinaryASTNode*)question->right;
+      return EvaluateConstexprValue(ctx, condition ? colon->left : colon->right,
+                                    type, result);
+    }
+  }
   if (node != NULL) {
     switch (node->op) {
       case AST_OP(assign):
@@ -3780,6 +3797,30 @@ static bool EvaluateConstexprDesignatedInitializer(ConstEvalContext* ctx,
       initializer);
 }
 
+// A string literal is a character array.  Copying that array object into a
+// class (a constexpr aggregate member constructed from `"ns"`) would later
+// be replayed as `[0] = 'n'` designators on the class.
+static bool ConstexprCopiedObjectMatchesTarget(TypeRecord* target,
+                                               TypeRecord* object_type) {
+  if (target == NULL || object_type == NULL) {
+    return false;
+  }
+  if (TypeEqual(target, object_type)) {
+    return true;
+  }
+  if (TypeIsStructOrUnion(target) && TypeIsStructOrUnion(object_type) &&
+      target->info.struct_info != NULL &&
+      object_type->info.struct_info != NULL &&
+      (target->info.struct_info == object_type->info.struct_info ||
+       (target->info.struct_info->tag_name != NULL &&
+        object_type->info.struct_info->tag_name != NULL &&
+        StringEqual(target->info.struct_info->tag_name,
+                    object_type->info.struct_info->tag_name->value)))) {
+    return true;
+  }
+  return false;
+}
+
 static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
                                                         TypeRecord* type,
                                                         ASTNode* initializer,
@@ -3901,7 +3942,8 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
 
   ConstexprValue value;
   if (EvaluateConstexprObjectAccess(ctx, initializer, &value) &&
-      value.is_object && value.object != NULL) {
+      value.is_object && value.object != NULL &&
+      ConstexprCopiedObjectMatchesTarget(type, value.object->type)) {
     result->is_object = true;
     result->is_address = false;
     result->is_floating = false;
@@ -4141,6 +4183,12 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   }
   if (initializer == NULL || type == NULL) {
     return false;
+  }
+  // `constexpr S s = cond ? S(0) : S(1)` is the selected arm, not an aggregate
+  // initializer.  EvaluateConstexprValue chooses the arm.
+  if (initializer->op == AST_OP(question) &&
+      ASTNodeGetShape(initializer) == kASTShapeBinary) {
+    return EvaluateConstexprValue(ctx, initializer, type, result);
   }
   if (TypeIsIntegral(type) || TypeIsFloatingPoint(type) ||
       TypeIsPointer(type) || TypeIsReference(type) ||
@@ -7603,7 +7651,17 @@ static bool EvaluateConstexprDeclarationList(ConstEvalContext* ctx,
                                              DeclarationListASTNode* node) {
   for (size_t i = 0; i < node->declarations->length; i++) {
     ASTNode* decl = node->declarations->value.p[i];
-    if (decl == NULL || decl->op != AST_OP(vardecl) ||
+    if (decl == NULL) {
+      return false;
+    }
+    // A function-scope static_assert was already diagnosed when the function
+    // was instantiated.  It is not a runtime declaration, and rejecting it
+    // here makes `FromInt64` (and any other constexpr function that opens with
+    // static_assert) not a constant expression.
+    if (decl->op == AST_OP(static_assert)) {
+      continue;
+    }
+    if (decl->op != AST_OP(vardecl) ||
         !EvaluateConstexprVariableDeclaration(
             ctx, (VariableDeclarationASTNode*)decl)) {
       return false;
@@ -8367,6 +8425,8 @@ static ConstexprStatementResult EvaluateConstexprStatement(
     return kConstexprStmtInvalid;
   }
   switch (stmt->op) {
+    case AST_OP(static_assert):
+      return kConstexprStmtNormal;
     case AST_OP(decl_list):
       return EvaluateConstexprDeclarationList(
                  ctx, (DeclarationListASTNode*)stmt)
