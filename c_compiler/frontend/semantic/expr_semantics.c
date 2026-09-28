@@ -13035,6 +13035,15 @@ static void ValidateCXXConstCast(CastASTNode* node) {
             TypeEqualIgnoringQualifiers(to->next, from_object);
   }
   if (!valid) {
+    // A member function template is cloned once when its class is instantiated,
+    // while its own parameters are still placeholders.  The operand can be a
+    // call whose result type collapsed to a concrete fallback even though the
+    // argument still names that placeholder (`addressof(forward<Key>(k))`).
+    // Checking const_cast then would reject a cast that is well-formed once
+    // the member template is instantiated for a call.
+    if (node->expr != NULL && ExpressionIsTemplateDependent(node->expr)) {
+      return;
+    }
     SemanticError((ASTNode*)node,
                   "const_cast requires pointer or reference to the same type");
   }
@@ -13313,7 +13322,8 @@ static ASTNode* AnalyzeCastExpression(CastASTNode* node) {
   if (CompilerIsCXX() &&
       (TypeContainsTemplateParameter(node->cast_type) ||
        (node->expr != NULL && node->expr->type != NULL &&
-        TypeContainsTemplateParameter(node->expr->type)))) {
+        TypeContainsTemplateParameter(node->expr->type)) ||
+       (node->expr != NULL && ExpressionIsTemplateDependent(node->expr)))) {
     if (TypeIsReference(node->cast_type)) {
       ASTNodeSetType((ASTNode*)node, node->cast_type->next);
       node->base.value_category =

@@ -5226,10 +5226,11 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
   if (LexLookingAt(syntax->lex, TOK(identifier))) {
     member_name = NewString(syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
-  } else if (!saw_template_keyword && CompilerIsCXX() &&
+  } else if (CompilerIsCXX() &&
              LexLookingAt(syntax->lex, TOK(operator))) {
     // Explicit operator / conversion call, e.g. `x.operator+(y)`,
-    // `x.operator()(y)`, `p->operator int()`.  Build the same member name the
+    // `x.operator()(y)`, `p->operator int()`,
+    // `this->template operator[]<K>(k)`.  Build the same member name the
     // operator/conversion function was registered under so the access resolves
     // to it.
     String op_name;

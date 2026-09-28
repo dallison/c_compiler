@@ -164,9 +164,12 @@ static void MarkClonedCastForReanalysis(ASTNode* node, void* data,
   // A dependent cast was initially analyzed without converting its operand.
   // Once both sides are concrete, every target category (not just class types)
   // must be re-analyzed so arithmetic conversions such as int-to-double are
-  // materialized in the cloned tree.
+  // materialized in the cloned tree.  The operand expression can still name a
+  // member template's own parameter after its result type was given a concrete
+  // fallback, so dependence is not only a property of that result type.
   if (TypeContainsTemplateParameter(target) ||
-      TypeContainsTemplateParameter(cast->expr->type)) {
+      TypeContainsTemplateParameter(cast->expr->type) ||
+      ExpressionIsTemplateDependent(cast->expr)) {
     return;
   }
   // Cast lowering depends on its now-concrete target type. Clear the cast and
@@ -6045,6 +6048,13 @@ static bool CloneCastInTemplateBody(
   bool node_type_substituted = false;
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
+    // `const_cast<key_type*>(addressof(k))` has a concrete target once the
+    // enclosing class is instantiated, but `k` is still the member template's
+    // own parameter.  Mark the cast so the per-call instantiation rechecks it
+    // instead of trusting a fallback operand type.
+    if (cast->expr != NULL && ExpressionIsTemplateDependent(cast->expr)) {
+      node->flags |= kASTDependentCast;
+    }
     if (cast->expr != NULL && cast->expr->op == AST_OP(identifier) &&
         clone->from_func != NULL) {
       IdentifierASTNode* operand = (IdentifierASTNode*)cast->expr;
@@ -7795,6 +7805,18 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
     unary_operand_concrete =
         sub_type != NULL && !TypeContainsTemplateParameter(sub_type) &&
         !TypeContainsAuto(sub_type) && !TypeIsUnknown(sub_type);
+    // `*(this->field)` in a nested closure is dependent only because `this`
+    // still names the enclosing class template; the operand type is a concrete
+    // pointer and must be reanalyzed.  A cast or call wrapped around a member
+    // template's own parameter (`*const_cast<T*>(addressof(k))`) is a different
+    // kind of dependence: the operand is not instantiable yet, and forcing
+    // analysis rejects the cast.
+    if (unary_operand_concrete && unary->sub != NULL &&
+        unary->sub->op != AST_OP(arrow) && unary->sub->op != AST_OP(dot) &&
+        unary->sub->op != AST_OP(contents) &&
+        ExpressionIsTemplateDependent(unary->sub)) {
+      unary_operand_concrete = false;
+    }
   }
   if (node == NULL ||
       (ExpressionIsTemplateDependent(node) && !receiver_is_concrete &&
@@ -7809,7 +7831,10 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
   if (shape == kASTShapeUnary) {
     ASTNode* sub = ((UnaryASTNode*)node)->sub;
     if (sub == NULL || sub->type == NULL ||
-        TypeContainsTemplateParameter(sub->type)) {
+        TypeContainsTemplateParameter(sub->type) ||
+        (sub->op != AST_OP(arrow) && sub->op != AST_OP(dot) &&
+         sub->op != AST_OP(contents) &&
+         ExpressionIsTemplateDependent(sub))) {
       return node;
     }
   } else if (shape == kASTShapeBinary) {
