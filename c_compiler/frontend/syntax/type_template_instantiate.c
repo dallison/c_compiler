@@ -10449,6 +10449,17 @@ static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
       SubstituteTemplateParameters(parser, alias->type, subst_args);
   bool substitution_failed =
       parser->template_substitution_failed || subst == NULL;
+  // Building the class named by the alias walks that class's members.  A
+  // nested SFINAE miss (`enable_if<false>::type`) sets the failure flag even
+  // though the class itself was instantiated.  The flag belongs to that
+  // nested lookup.  A dependent-member pattern (`enable_if<B, T>::type`)
+  // still fails: there the flag is the alias's own result.
+  if (substitution_failed && subst != NULL &&
+      alias->type->dependent_member_name == NULL &&
+      TypeIsStructOrUnion(subst) && !TypeIsUnknown(subst) &&
+      !TypeContainsTemplateParameter(subst)) {
+    substitution_failed = false;
+  }
   parser->template_substitution_failed = saved_failed || substitution_failed;
   if (pattern_args != NULL) {
     VectorDeleteWithContents(pattern_args,

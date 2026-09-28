@@ -1055,7 +1055,17 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
             concrete_arg->type = resolved_arg;
           }
         }
-        if (TemplateArgumentVectorContainsTemplateParameter(concrete_args)) {
+        // A member alias (`ElementType<N> = tuple_element<N, ElementTypes>::type`)
+        // numbers `N` after the enclosing class.  Copying the pattern while the
+        // use-site argument is still the member function's own parameter leaves
+        // that class-relative index in the return type.  Substitute the pattern
+        // instead, so the use-site parameter replaces the alias parameter.
+        bool substitutable_alias =
+            member->symbol->flags.is_template &&
+            StorageIs(member->symbol->storage, STO(typedef)) &&
+            !TypeIsStructOrUnion(member->symbol->type);
+        if (TemplateArgumentVectorContainsTemplateParameter(concrete_args) &&
+            !substitutable_alias) {
           if (i + 1 == components->length) {
             resolved = TypeRecordCopy(member->symbol->type);
             if (resolved->template_arguments != NULL) {
@@ -1376,6 +1386,36 @@ static bool TypeReferencesIndexAtLeast(TypeRecord* type, int min_index) {
     }
   }
   return false;
+}
+
+/* The struct whose member list directly contains `symbol`, searching bases.
+ * Inherited alias templates (`Layout::ElementType` declared on LayoutImpl)
+ * keep their parameter indices in that base's parameter space. */
+static Struct* StructDeclaringSymbol(Struct* str, Symbol* symbol, int depth) {
+  if (str == NULL || symbol == NULL || depth > 1024) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member != NULL && member->symbol == symbol) {
+      return str;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL ||
+        base->type->info.struct_info == str) {
+      continue;
+    }
+    Struct* found =
+        StructDeclaringSymbol(base->type->info.struct_info, symbol, depth + 1);
+    if (found != NULL) {
+      return found;
+    }
+  }
+  return NULL;
 }
 
 TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
@@ -1755,7 +1795,14 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
             SubstituteTemplateArgumentVectorForTypes(parser, member_template_args,
                                                     args);
         Vector* combined_args = NULL;
+        // A member alias template can name a class (`using WithStaticSizes =
+        // LayoutWithStaticSizes<...>`).  That is not a nested class template:
+        // its pattern still mentions the enclosing class's parameters, so it
+        // must be substituted with those arguments prefixed.  Instantiating it
+        // with only the member arguments binds the enclosing pack to whatever
+        // shares index 0.
         if (member->symbol->flags.is_template &&
+            member->symbol->alias_template == NULL &&
             TypeIsStructOrUnion(member->symbol->type)) {
           member_type = InstantiateSimpleClassTemplate(
               parser, member->symbol, concrete_member_args);
@@ -1768,8 +1815,36 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
           // otherwise bind to `int`.  Fold the pack back into one argument
           // before appending the member arguments.
           Vector* class_args = concrete_args;
+          Symbol* class_template = info.origin;
+          Struct* alias_class = subst->info.struct_info;
+          // `Layout<Ts...>::ElementType<N>` is declared on the LayoutImpl base,
+          // whose parameters are a different list from Layout's.  Prefix that
+          // base specialization's arguments so the alias parameter (numbered
+          // after those parameters) lines up with the use-site argument.
+          int alias_index = -1;
+          if (member->symbol->alias_template != NULL &&
+              member->symbol->alias_template->parameters.length > 0) {
+            TemplateParameter* alias_param =
+                member->symbol->alias_template->parameters.value.p[0];
+            if (alias_param != NULL) {
+              alias_index = alias_param->index;
+            }
+          }
+          if (alias_index > 0 && subst->info.struct_info != NULL) {
+            Struct* declaring = StructDeclaringSymbol(
+                subst->info.struct_info, member->symbol, 0);
+            if (declaring != NULL && declaring->tag_symbol != NULL &&
+                declaring->tag_symbol->type != NULL &&
+                declaring->tag_symbol->type->template_arguments != NULL) {
+              alias_class = declaring;
+              class_args = declaring->tag_symbol->type->template_arguments;
+              if (declaring->tag_symbol->type->template_origin != NULL) {
+                class_template = declaring->tag_symbol->type->template_origin;
+              }
+            }
+          }
           Vector* grouped_class_args =
-              RegroupExpandedClassTemplateArguments(info.origin, concrete_args);
+              RegroupExpandedClassTemplateArguments(class_template, class_args);
           if (grouped_class_args != NULL) {
             class_args = grouped_class_args;
           }
@@ -1780,12 +1855,59 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
                 (VectorElementDestructor)TemplateArgumentDelete,
                 /*free_element=*/false);
           }
-          for (size_t i = 0; i < concrete_member_args->length; i++) {
-            VectorAppend(combined_args,
-                         TemplateArgumentCopy(concrete_member_args->value.p[i]));
+          // `<1, 0, 4>` supplied to `template <size_t... StaticSizes>` is three
+          // arguments.  The alias pattern names that pack as one parameter
+          // (numbered after the enclosing class).  Fold the member arguments
+          // into the alias's parameter list before appending them, or the pack
+          // binds only the first size.
+          Vector* completed_member_args = CompleteAliasTemplateArguments(
+              member->symbol, concrete_member_args);
+          Vector* member_args_for_pattern = completed_member_args != NULL
+                                                ? completed_member_args
+                                                : concrete_member_args;
+          for (size_t i = 0;
+               member_args_for_pattern != NULL &&
+               i < member_args_for_pattern->length;
+               i++) {
+            VectorAppend(combined_args, TemplateArgumentCopy(
+                                            member_args_for_pattern->value.p[i]));
+          }
+          if (completed_member_args != NULL) {
+            VectorDeleteWithContents(
+                completed_member_args,
+                (VectorElementDestructor)TemplateArgumentDelete,
+                /*free_element=*/false);
+          }
+          // A nested member alias (`WithStaticSizes` → `WithStaticSizeSequence`)
+          // is expanded while the active class is still the caller (`Node<T>`).
+          // Its parameters are numbered after its declaring class (`Layout`),
+          // which can have the same arity, so the expansion would prefix
+          // `Node`'s arguments.  Expand it against the declaring class.
+          Struct* saved_alias_source = NULL;
+          Struct* saved_alias_target = NULL;
+          bool switched_alias_class = false;
+          if (parser != NULL && alias_class != NULL) {
+            saved_alias_source = parser->template_substitution_source;
+            saved_alias_target = parser->template_substitution_target;
+            parser->template_substitution_target = alias_class;
+            if (alias_class->tag_symbol != NULL &&
+                alias_class->tag_symbol->type != NULL &&
+                alias_class->tag_symbol->type->template_origin != NULL &&
+                alias_class->tag_symbol->type->template_origin->type != NULL &&
+                TypeIsStructOrUnion(
+                    alias_class->tag_symbol->type->template_origin->type)) {
+              parser->template_substitution_source =
+                  alias_class->tag_symbol->type->template_origin->type
+                      ->info.struct_info;
+            }
+            switched_alias_class = true;
           }
           member_type = SubstituteTemplateParameters(
               parser, member->symbol->type, combined_args);
+          if (switched_alias_class) {
+            parser->template_substitution_source = saved_alias_source;
+            parser->template_substitution_target = saved_alias_target;
+          }
         }
         // Expanding a member alias template can expose another deferred
         // template-id whose local parameter indices were not visible on the

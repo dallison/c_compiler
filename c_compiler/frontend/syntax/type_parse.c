@@ -2000,21 +2000,29 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             type |= type_record->type;
           } else {
             // `typename Derived::Base` where Base is the injected-class-name
-            // of a base.  A dependent base is not visible yet; record it as a
-            // member of the current instantiation and resolve it once the
-            // class is instantiated.
+            // of a base.  Copy that base (including a dependent template-id).
+            // If the base is not a class type yet, record the name as a member
+            // of the current instantiation and resolve it once the class is
+            // instantiated.
             Struct* current = CurrentClassBeingParsed(parser);
             String* member_name = typename_name.components.value.p[1];
             bool names_current_class =
                 current != NULL && current->tag_name != NULL &&
                 StringEqualString(current->tag_name, base_name);
-            Symbol* injected =
+            // Name the current instantiation's base, not the primary template.
+            // `FindInheritedInjectedClassName` returns the base's tag symbol,
+            // whose type is the primary and therefore carries no template
+            // arguments.  Copying that drops a dependent base such as
+            // `common_params<Key, ..., map_slot_policy<Key, Data>>`, so
+            // `using super_type = typename Derived::common_params` becomes the
+            // primary and `super_type::slot_type` copies `SlotPolicy::slot_type`
+            // at the primary's parameter index.
+            TypeRecord* inherited_base =
                 names_current_class
-                    ? FindInheritedInjectedClassName(current, member_name)
+                    ? FindInheritedInjectedClassType(current, member_name)
                     : NULL;
-            if (injected != NULL && injected->type != NULL &&
-                !TypeContainsTemplateParameter(injected->type)) {
-              type_record = TypeRecordCopy(injected->type);
+            if (inherited_base != NULL) {
+              type_record = TypeRecordCopy(inherited_base);
               type |= type_record->type;
             } else if (names_current_class && current->tag_symbol != NULL &&
                        parser->syntax->current_template_parameters != NULL) {
