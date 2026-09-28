@@ -7450,6 +7450,62 @@ static int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
       best = 0;
     }
   }
+  // Positional aggregate initialization with a nested brace (`{false, n, {}}`).
+  // The expression-only path above rejects the list as soon as one element is
+  // itself a braced-init, so the call argument stays `<unknown>`.
+  if (best < 0 && str->is_aggregate && !simple_elements &&
+      braced->initializers != NULL && braced->initializers->length > 0) {
+    bool positional = true;
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      ASTNode* init = braced->initializers->value.p[i];
+      if (init != NULL && init->op == AST_OP(designated_init)) {
+        positional = false;
+        break;
+      }
+    }
+    if (positional) {
+      size_t member_index = 0;
+      bool ok = true;
+      for (size_t i = 0; ok && i < braced->initializers->length; i++) {
+        while (member_index < str->members.length) {
+          StructMember* m = str->members.value.p[member_index];
+          if (m != NULL && !m->is_member_function && m->symbol != NULL) {
+            break;
+          }
+          member_index++;
+        }
+        if (member_index >= str->members.length) {
+          ok = false;
+          break;
+        }
+        StructMember* m = str->members.value.p[member_index++];
+        ASTNode* init = braced->initializers->value.p[i];
+        if (init == NULL || m->symbol == NULL || m->symbol->type == NULL) {
+          ok = false;
+          break;
+        }
+        int rank = -1;
+        if (init->op == AST_OP(braced_init)) {
+          rank = CXXBracedInitTargetRank(init, m->symbol->type);
+        } else if (init->op == AST_OP(expr_init)) {
+          ExpressionInitializerASTNode* ei =
+              (ExpressionInitializerASTNode*)init;
+          ei->expr = AnalyzeExpression(ei->expr);
+          if (ei->expr != NULL && ei->expr->op == AST_OP(braced_init)) {
+            rank = CXXBracedInitTargetRank(ei->expr, m->symbol->type);
+          } else {
+            rank = OverloadConversionRank(ei->expr, m->symbol->type);
+          }
+        }
+        if (rank < 0) {
+          ok = false;
+        }
+      }
+      if (ok) {
+        best = 0;
+      }
+    }
+  }
   VectorDestruct(&elements);
   return best;
 }
@@ -9657,7 +9713,75 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
           best_score = score;
         }
       }
-      if (match != NULL) {
+      if (match == NULL) {
+        // The surviving callee is the default constructor (or the primary
+        // constructor template, whose pack is still one parameter).  A
+        // constructor template such as `Storage(in_place_t, V&&)` or
+        // `Impl(in_place_t, Vs&&...)` is the viable candidate; deduce it
+        // against the user arguments (children[0] is the inserted receiver).
+        Symbol* best_inst = NULL;
+        int best_inst_score = -1;
+        // Deduction pairs actuals[i] with formals[i + offset].  The call's
+        // children already include the receiver at [0], so pass only the
+        // user arguments.
+        Vector user_actuals;
+        VectorInit(&user_actuals);
+        for (size_t i = 1; node->children != NULL &&
+                           i < node->children->length; i++) {
+          VectorAppend(&user_actuals, node->children->value.p[i]);
+        }
+        for (StructMember* candidate = head; candidate != NULL;
+             candidate = candidate->overload_next) {
+          if (candidate->symbol == NULL ||
+              !candidate->symbol->flags.is_template ||
+              candidate->symbol->type == NULL ||
+              !TypeIsFunction(candidate->symbol->type) ||
+              !candidate->symbol->type->info.function.is_constructor) {
+            continue;
+          }
+          DiagnosticSuppressBegin();
+          Symbol* inst = TypeDeduceFunctionTemplateFromCallWithOffset(
+              &compiler->syntax, candidate->symbol, &user_actuals,
+              /*first_formal_arg=*/1);
+          DiagnosticSuppressEnd();
+          if (inst == NULL || inst == candidate->symbol ||
+              inst->type == NULL || !TypeIsFunction(inst->type) ||
+              inst->type->info.function.prototype.length != num_actual) {
+            continue;
+          }
+          bool compatible = true;
+          int score = 0;
+          for (size_t i = 1; i < num_actual; i++) {
+            ASTNode* actual = node->children->value.p[i];
+            Symbol* formal =
+                inst->type->info.function.prototype.value.p[i];
+            if (actual == NULL || formal == NULL || formal->type == NULL) {
+              compatible = false;
+              break;
+            }
+            if (actual->type == NULL ||
+                TypeContainsTemplateParameter(formal->type)) {
+              continue;
+            }
+            int rank = OverloadConversionRank(actual, formal->type);
+            if (rank < 0) {
+              compatible = false;
+              break;
+            }
+            score += rank;
+          }
+          if (compatible &&
+              (best_inst == NULL || score < best_inst_score)) {
+            best_inst = inst;
+            best_inst_score = score;
+          }
+        }
+        VectorDestruct(&user_actuals);
+        if (best_inst != NULL) {
+          id->symbol = best_inst;
+          ASTNodeSetInstantiatedCalleeType(node->left, best_inst->type);
+        }
+      } else {
         id->symbol = match->symbol;
         ASTNodeSetType(node->left, match->symbol->type);
       }
