@@ -11434,6 +11434,31 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   if (node->left == NULL) {
     return &node->base;
   }
+  // A constructor call whose argument is still the unknown placeholder for a
+  // template parameter (`Span<uint32_t>(&*begin, n)` while `begin`'s type is
+  // the member template's own parameter) must not be type-checked against the
+  // first constructor.  That constructor is the wrong arity, and the diagnostic
+  // is observed by whatever instantiation cloned the member template.
+  if (CompilerIsCXX() && node->children != NULL) {
+    bool argument_not_ready = false;
+    for (size_t i = 0; i < node->children->length; i++) {
+      ASTNode* actual = node->children->value.p[i];
+      if (actual != NULL && actual->type != NULL &&
+          (TypeIsUnknown(actual->type) ||
+           TypeContainsTemplateParameter(actual->type) ||
+           TypeContainsAuto(actual->type))) {
+        argument_not_ready = true;
+        break;
+      }
+    }
+    if (argument_not_ready) {
+      node->base.flags |= kASTDependentFunctorCall;
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                           kQualPlain));
+      return (ASTNode*)node;
+    }
+  }
   // Reaching here means every deferral path above was skipped: this call is
   // resolved to a concrete function (or function pointer).  A cloned template
   // body may have left a stale `kASTDependentFunctorCall` marker on the node
@@ -12470,6 +12495,13 @@ static void AnalyzeAddressOperator(UnaryASTNode* node) {
     return;
   }
   TypeRecordChain(ptr, node->sub->type);
+  // `*begin` of a still-unbound template parameter is an unknown type.  The
+  // pointer formed by `&*begin` has to stay unknown too; otherwise overload
+  // resolution sees a plain `int*` and rejects `Span<uint32_t>(&*begin, n)`
+  // while the member function template is only being rebased onto its class.
+  if (TypeIsUnknown(node->sub->type)) {
+    ptr->type |= kTypeUnknown;
+  }
   ASTNodeSetType((ASTNode*)node, ptr);
 
   // Tell downstream that we need the address of this node, not its

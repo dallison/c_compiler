@@ -5349,14 +5349,20 @@ typedef struct {
   TypeRecord* from_func;
   TypeRecord* to_func;
   int rebase_base;
+  // Class-template arguments that correspond to indices below `rebase_base`.
+  // Borrowed.  NULL keeps the rebase-only behavior.
+  Vector* enclosing_args;
 } ConstructorInitFormalRemap;
 
 /* Visitor: within a cloned member-initializer actual, (1) rewrite an identifier
  * that names one of `from_func`'s parameters to the parameter at the same
- * position in `to_func`, and (2) renumber template-parameter indices in any
- * explicit template arguments / cast types down by `rebase_base` so the
- * member's own parameters become zero-based (matching the class-level
- * constructor whose template_parameter_base was reset to 0). */
+ * position in `to_func`, and (2) bind explicit template arguments that name
+ * the enclosing class (`make_unique<S>` inside `Box<S>::Box<It>`) to
+ * `enclosing_args`, then renumber the member template's own parameters down
+ * by `rebase_base`.  Rebase alone leaves the class parameter at index 0, which
+ * is the same slot the member's first parameter occupies after renumbering, so
+ * the later per-call clone would substitute the class parameter with the
+ * member argument. */
 static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
                                               int child_id, VisitorMode mode) {
   (void)child_id;
@@ -5378,7 +5384,19 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
         break;
       }
     }
-    if (remap->rebase_base > 0 && id->template_arguments != NULL) {
+    if (remap->enclosing_args != NULL && remap->enclosing_args->length > 0 &&
+        remap->rebase_base > 0 && id->template_arguments != NULL) {
+      Vector* concrete = TypeSubstituteTemplateArgumentVectorAndRebase(
+          &compiler->syntax, id->template_arguments, remap->enclosing_args,
+          remap->rebase_base);
+      if (concrete != NULL) {
+        VectorDeleteWithContents(
+            id->template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        id->template_arguments = concrete;
+      }
+    } else if (remap->rebase_base > 0 && id->template_arguments != NULL) {
       for (size_t i = 0; i < id->template_arguments->length; i++) {
         RebaseTemplateArgumentParameterIndices(
             id->template_arguments->value.p[i], remap->rebase_base);
@@ -5392,25 +5410,30 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
 
 /* Rewrite every reference to one of `from_func`'s parameters inside the deferred
  * member-initializer actuals of `init_list` to the correspondingly-positioned
- * parameter of `to_func`, and rebase the member template's own template-
- * parameter indices by `rebase_base`.  Used when a class-template instantiation
- * clones a member function template constructor: the deferred init-list is
- * shared from the primary and still names the primary's parameters and numbers
- * the member's own template parameters relative to the enclosing class, but the
- * per-call preamble insertion keys its clone maps off the cloned (class-level)
- * prototype (whose parameters are fresh and whose template_parameter_base is 0).
- * Aligning both lets pack initializers such as
+ * parameter of `to_func`.  `enclosing_args` (indices below `rebase_base`) are
+ * substituted into explicit template arguments, then the member template's own
+ * parameters are rebased by `rebase_base`.  Used when a class-template
+ * instantiation clones a member function template constructor: the deferred
+ * init-list is shared from the primary and still names the primary's parameters
+ * and numbers the member's own template parameters relative to the enclosing
+ * class, but the per-call preamble insertion keys its clone maps off the cloned
+ * (class-level) prototype (whose parameters are fresh and whose
+ * template_parameter_base is 0).  Aligning both lets pack initializers such as
  * `value(std::forward<Args>(args)...)` expand against the concrete arguments
- * instead of dropping `forward`'s explicit template argument. */
+ * instead of dropping `forward`'s explicit template argument, and lets
+ * `make_unique<S>` keep the class argument rather than the member's first
+ * parameter. */
 void SyntaxCXXConstructorInitListRemapFormals(CXXConstructorInitList* init_list,
                                               TypeRecord* from_func,
                                               TypeRecord* to_func,
-                                              int rebase_base) {
+                                              int rebase_base,
+                                              Vector* enclosing_args) {
   if (init_list == NULL || from_func == NULL || to_func == NULL ||
       !TypeIsFunction(from_func) || !TypeIsFunction(to_func)) {
     return;
   }
-  ConstructorInitFormalRemap remap = {from_func, to_func, rebase_base};
+  ConstructorInitFormalRemap remap = {from_func, to_func, rebase_base,
+                                      enclosing_args};
   for (size_t i = 0; i < init_list->deferred_initializers.length; i++) {
     CXXDeferredConstructorInitializer* init =
         init_list->deferred_initializers.value.p[i];

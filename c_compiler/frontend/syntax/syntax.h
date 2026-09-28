@@ -309,7 +309,8 @@ CXXConstructorInitList* SyntaxCXXConstructorInitListCloneDeferred(
 void SyntaxCXXConstructorInitListRemapFormals(CXXConstructorInitList* init_list,
                                               TypeRecord* from_func,
                                               TypeRecord* to_func,
-                                              int rebase_base);
+                                              int rebase_base,
+                                              Vector* enclosing_args);
 void SyntaxParseCXXConstructorInitializerList(
     Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list);
 void SyntaxResolveCXXConstructorInitializerList(

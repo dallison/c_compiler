@@ -5,6 +5,8 @@
 
 #include "type_template_internal.h"
 #include "type_internal.h"
+#include "type_class_internal.h"
+#include "type_special_member.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -119,7 +121,12 @@ static void ClearAnalyzedFlagVisitor(ASTNode* node, void* data,
     // receiver's own (element-scaled) pointer type and bind subobject members to
     // the wrong offset.  AnalyzeExpression short-circuits on the still-analyzed
     // node, so its (now-cleared) children are never re-analyzed either.
-    if ((node->flags & kASTForcedTypeAdjustment) != 0) {
+    // kASTValueInitMemzero marks a placement-new zero-init that must stay an
+    // empty braced init.  Re-analysis would fill in default member
+    // initializers and then the following default constructor would build
+    // those members a second time.
+    if ((node->flags & (kASTForcedTypeAdjustment | kASTValueInitMemzero)) !=
+        0) {
       return;
     }
     node->flags &= ~kASTAnalyzed;
@@ -330,6 +337,44 @@ static bool CXXRecordHasDefaultConstructorMember(TypeRecord* type) {
         !TypeIsFunction(overload->symbol->type) ||
         !overload->symbol->type->info.function.is_constructor ||
         overload->symbol->type->info.function.is_deleted) {
+      continue;
+    }
+    size_t required_parameters = 0;
+    for (size_t i = 0;
+         i < overload->symbol->type->info.function.prototype.length; i++) {
+      Symbol* formal =
+          overload->symbol->type->info.function.prototype.value.p[i];
+      if (formal == NULL || StringEqual(&formal->name, "this") ||
+          StringEqual(&formal->name, "__complete_object") ||
+          formal->default_argument != NULL || formal->flags.is_parameter_pack) {
+        continue;
+      }
+      required_parameters++;
+    }
+    if (required_parameters == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Like CXXRecordHasDefaultConstructorMember, but aggregates and deleted
+ * default constructors count.  Placement new of an aggregate still has to
+ * call that constructor; a deleted one is the diagnostic, not a reason to
+ * assign into raw storage. */
+static bool CXXRecordHasDefaultConstructor(TypeRecord* type) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL) {
+    return false;
+  }
+  StructMember* ctor = FindStructMember(type->info.struct_info,
+                                        type->info.struct_info->tag_name);
+  for (StructMember* overload = ctor; overload != NULL;
+       overload = overload->overload_next) {
+    if (!overload->is_member_function || overload->symbol == NULL ||
+        overload->symbol->type == NULL ||
+        !TypeIsFunction(overload->symbol->type) ||
+        !overload->symbol->type->info.function.is_constructor) {
       continue;
     }
     size_t required_parameters = 0;
@@ -3610,6 +3655,50 @@ static ASTNode* NewClonedDependentConstructorCall(TypeRecord* record,
   return NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
 }
 
+/* `*receiver = (T){}` copy-assigns into storage that placement new has not
+ * constructed.  That is a byte copy when assignment is trivial, and ill-formed
+ * when it is deleted (`std::atomic` deletes `RefcountedRep::operator=`).
+ * Value-initialization instead zero-fills the storage and default-constructs
+ * in place.  The zero-fill is an empty braced init marked analyzed so later
+ * passes do not also apply default member initializers; the constructor does
+ * that. */
+static ASTNode* NewClonedInPlaceAggregateValueInit(
+    TypeRecord* type, ASTNode* receiver, SourceLocation location) {
+  TypeRecordCalculateSize(type);
+  ASTNode* zero_target = ASTNodeClone(receiver, IdentityCloneNode, NULL, NULL);
+  ASTNode* zero = NewBinaryASTNode(
+      AST_OP(init), type, location, zero_target,
+      NewBracedInitializerASTNode(NewVector(), NULL, location));
+  zero->flags |= kASTAnalyzed | kASTValueInitMemzero;
+  ASTNode* ctor =
+      NewClonedDependentConstructorCall(type, receiver, NewVector(), location);
+  Vector* statements = NewVector();
+  VectorAppend(statements, NewExpressionStatementASTNode(zero, location));
+  VectorAppend(statements, NewExpressionStatementASTNode(ctor, location));
+  return NewUnaryASTNode(
+      AST_OP(stmt_expr), NewTypeRecordWithSize(kTypeVoid, kQualPlain), location,
+      NewCompoundStatementASTNode(statements, location));
+}
+
+static ASTNode* NewClonedAggregateValueInitialization(
+    TemplateFunctionBodyClone* clone, TypeRecord* type, ASTNode* receiver,
+    SourceLocation location) {
+  Struct* str = type->info.struct_info;
+  if (str != NULL && !str->cxx_special_members_complete &&
+      clone->parser != NULL && str->tag_symbol != NULL) {
+    AddImplicitCXXSpecialMembers(clone->parser, str, str->tag_symbol);
+  }
+  if (CXXTypeSpecialMemberIsDeleted(type, kCXXSpecialMemberMoveAssignment) &&
+      CXXRecordHasDefaultConstructor(type)) {
+    return NewClonedInPlaceAggregateValueInit(type, receiver, location);
+  }
+  Symbol* storage = SyntaxNewTemporary(clone->parser->syntax, type);
+  ASTNode* literal = NewCompoundLiteralASTNode(
+      NewIdentifierASTNode(storage, location), location,
+      NewBracedInitializerASTNode(NewVector(), NULL, location));
+  return NewBinaryASTNode(AST_OP(assign), type, location, receiver, literal);
+}
+
 /* Rewrite a deferred `new` initializer (parsed as an assignment while T was
  * dependent) now that T has resolved to a concrete type.
  *
@@ -3618,9 +3707,9 @@ static ASTNode* NewClonedDependentConstructorCall(TypeRecord* record,
  *     otherwise.
  *   * `new T()` value-init (flagged kASTDependentNewValueInit) becomes a
  *     default constructor call `receiver.T()` when T is a class with a
- *     constructor, an empty-compound-literal zero-init `*receiver = (T){}` when
- *     T is an aggregate class, and keeps its `*receiver = 0` scalar zero-init
- *     otherwise. */
+ *     constructor.  An aggregate is zero-initialized in place and then
+ *     default-constructed when its copy/move assignment is deleted; otherwise
+ *     it stays `*receiver = (T){}`.  A scalar keeps `*receiver = 0`. */
 static ASTNode* RewriteClonedDependentNewInitializer(
     TemplateFunctionBodyClone* clone, ASTNode* node) {
   if (node == NULL || node->op != AST_OP(assign) ||
@@ -3654,16 +3743,8 @@ static ASTNode* RewriteClonedDependentNewInitializer(
                                                NewVector(), node->location);
     }
     if (is_class) {
-      // Aggregate class with no constructor: zero-initialize the object with an
-      // empty compound literal `*receiver = (T){}`.
-      ASTNode* receiver = ASTNodeMove(assign->left);
-      Symbol* storage =
-          SyntaxNewTemporary(clone->parser->syntax, node->type);
-      ASTNode* literal = NewCompoundLiteralASTNode(
-          NewIdentifierASTNode(storage, node->location), node->location,
-          NewBracedInitializerASTNode(NewVector(), NULL, node->location));
-      return NewBinaryASTNode(AST_OP(assign), node->type, node->location,
-                              receiver, literal);
+      return NewClonedAggregateValueInitialization(
+          clone, node->type, ASTNodeMove(assign->left), node->location);
     }
     // Scalar: the placeholder `*receiver = 0` already zero-initializes it.
     node->flags &= ~(kASTDependentNewInitializer | kASTDependentNewValueInit);
@@ -3792,15 +3873,11 @@ static ASTNode* RewriteClonedDependentNewInitializer(
   ASTNode* receiver = ASTNodeMove(assign->left);
   if (actuals->length == 0 &&
       !CXXRecordHasDefaultConstructorMember(node->type)) {
-    // Value-initialize an aggregate class with no constructor by zero-init'ing
-    // the object with an empty compound literal `*receiver = (T){}`.
+    // Empty pack: `new (p) T(forward<Args>(args)...)` with no arguments
+    // value-initializes T.
     VectorDelete(actuals);
-    Symbol* storage = SyntaxNewTemporary(clone->parser->syntax, node->type);
-    ASTNode* literal = NewCompoundLiteralASTNode(
-        NewIdentifierASTNode(storage, node->location), node->location,
-        NewBracedInitializerASTNode(NewVector(), NULL, node->location));
-    return NewBinaryASTNode(AST_OP(assign), node->type, node->location,
-                            receiver, literal);
+    return NewClonedAggregateValueInitialization(clone, node->type, receiver,
+                                                node->location);
   }
   return NewClonedDependentConstructorCall(node->type, receiver, actuals,
                                            node->location);
@@ -8542,7 +8619,7 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
       SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
                                                     symbol, args);
     } else if (symbol->type->info.function.is_constructor) {
-      CopyTemplateConstructorInitializersKey(template_definition, symbol);
+      CopyTemplateConstructorInitializersKey(template_definition, symbol, args);
     }
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;

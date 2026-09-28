@@ -44,6 +44,7 @@ static bool ExpressionHasSideEffects(ASTNode* node) {
   }
   switch (node->op) {
     case AST_OP(assign):
+    case AST_OP(init):
     case AST_OP(pluseq):
     case AST_OP(minuseq):
     case AST_OP(multeq):

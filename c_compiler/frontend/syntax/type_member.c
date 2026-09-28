@@ -1764,7 +1764,8 @@ void RegisterTemplateConstructorInitializers(
 // initializer such as `value(std::forward<Args>(args)...)` would fail to expand
 // (its `args` pack would never be found), reintroducing the parameter's
 // dependent type into `std::forward`'s explicit argument.
-void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to) {
+void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to,
+                                            Vector* enclosing_args) {
   if (from == NULL || to == NULL || from == to) {
     return;
   }
@@ -1774,13 +1775,30 @@ void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to) {
         SyntaxCXXConstructorInitListCloneDeferred(inits);
     // `from` (the primary constructor) numbers its own template parameters after
     // the enclosing class's; `to` (the class-level clone) resets its base to 0.
-    // Rebase the init-list expressions by the primary's base so the member's own
-    // parameters become zero-based, matching `to` and the per-call arguments.
+    // Substitute the class arguments first, then rebase, so a use of the class
+    // parameter (`make_unique<S>`) is bound before the member's own parameters
+    // slide down onto index 0.  Only the enclosing prefix is applied: a longer
+    // vector would bind the member's parameters during this class-level clone.
     int rebase_base = TypeIsFunction(from->type)
                           ? from->type->info.function.template_parameter_base
                           : 0;
+    Vector enclosing_prefix;
+    Vector* subst_args = enclosing_args;
+    bool own_prefix = false;
+    if (enclosing_args != NULL && rebase_base > 0 &&
+        (int)enclosing_args->length > rebase_base) {
+      VectorInit(&enclosing_prefix);
+      for (int i = 0; i < rebase_base; i++) {
+        VectorAppend(&enclosing_prefix, enclosing_args->value.p[i]);
+      }
+      subst_args = &enclosing_prefix;
+      own_prefix = true;
+    }
     SyntaxCXXConstructorInitListRemapFormals(cloned, from->type, to->type,
-                                             rebase_base);
+                                             rebase_base, subst_args);
+    if (own_prefix) {
+      VectorDestruct(&enclosing_prefix);
+    }
     QueueTemplateConstructorInitializers(to, cloned);
   }
 }
