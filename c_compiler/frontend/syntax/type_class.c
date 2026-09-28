@@ -62,15 +62,54 @@ bool TypeIsTemplateParameterPlaceholder(TypeRecord* type, int* index) {
   return true;
 }
 
-bool CurrentTemplateParameterIsPack(Syntax* syntax, int index) {
-  if (syntax == NULL || syntax->current_template_parameters == NULL ||
-      index < 0) {
+static bool TemplateParameterVectorHasIndex(Vector* parameters, int index,
+                                            bool* is_pack) {
+  if (parameters == NULL || index < 0) {
     return false;
   }
-  for (size_t i = 0; i < syntax->current_template_parameters->length; i++) {
-    TemplateParameter* param = syntax->current_template_parameters->value.p[i];
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* param = parameters->value.p[i];
     if (param != NULL && param->index == index) {
-      return param->is_parameter_pack;
+      *is_pack = param->is_parameter_pack;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool CurrentTemplateParameterIsPack(Syntax* syntax, int index) {
+  bool is_pack = false;
+  if (index < 0) {
+    return false;
+  }
+  // A member function template's parameter list does not include the
+  // enclosing class packs (`Elements...` used from `ElementIndex<T>()`).
+  if (syntax != NULL &&
+      TemplateParameterVectorHasIndex(syntax->current_template_parameters,
+                                      index, &is_pack)) {
+    return is_pack;
+  }
+  TypeRecord* function = compiler->current_function;
+  if (function != NULL && TypeIsFunction(function)) {
+    if (TemplateParameterVectorHasIndex(
+            &function->info.function.template_parameters, index, &is_pack)) {
+      return is_pack;
+    }
+    for (Struct* scope = function->info.function.cxx_member_owner;
+         scope != NULL; scope = scope->lexical_parent) {
+      if (TemplateParameterVectorHasIndex(&scope->template_parameters, index,
+                                          &is_pack)) {
+        return is_pack;
+      }
+    }
+  }
+  if (syntax != NULL) {
+    for (Struct* scope = syntax->cxx_class_head; scope != NULL;
+         scope = scope->lexical_parent) {
+      if (TemplateParameterVectorHasIndex(&scope->template_parameters, index,
+                                          &is_pack)) {
+        return is_pack;
+      }
     }
   }
   return false;

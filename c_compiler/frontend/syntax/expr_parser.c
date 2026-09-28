@@ -604,25 +604,7 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode);
 
 static bool CXXTemplateParameterIndexIsPack(Syntax* syntax, int index) {
-  Vector* parameters = syntax != NULL ? syntax->current_template_parameters
-                                      : NULL;
-  for (size_t i = 0; parameters != NULL && i < parameters->length; i++) {
-    TemplateParameter* parameter = parameters->value.p[i];
-    if (parameter != NULL && parameter->index == index) {
-      return parameter->is_parameter_pack;
-    }
-  }
-  TypeRecord* function = compiler->current_function;
-  if (function != NULL && TypeIsFunction(function)) {
-    parameters = &function->info.function.template_parameters;
-    for (size_t i = 0; i < parameters->length; i++) {
-      TemplateParameter* parameter = parameters->value.p[i];
-      if (parameter != NULL && parameter->index == index) {
-        return parameter->is_parameter_pack;
-      }
-    }
-  }
-  return false;
+  return CurrentTemplateParameterIsPack(syntax, index);
 }
 
 static TemplateParameter* CXXTemplateParameterForIndex(Syntax* syntax,
@@ -769,6 +751,12 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
     ((CXXPackExpressionSearch*)data)->found = true;
     return;
   }
+  if ((node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) &&
+      TypeContainsParameterPack(((CXXPackExpressionSearch*)data)->syntax,
+                                ((SizeofASTNode*)node)->type_operand)) {
+    ((CXXPackExpressionSearch*)data)->found = true;
+    return;
+  }
   // `static_cast<T (*)()>(nullptr)...` names the pack in the cast type, not
   // in a subexpression.
   if (node->type != NULL &&
@@ -790,6 +778,12 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
   if (shape == kASTShapeIdentifier) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+      ((CXXPackExpressionSearch*)data)->found = true;
+      return;
+    }
+    if (id->symbol != NULL &&
+        TypeContainsParameterPack(((CXXPackExpressionSearch*)data)->syntax,
+                                  id->symbol->type)) {
       ((CXXPackExpressionSearch*)data)->found = true;
       return;
     }

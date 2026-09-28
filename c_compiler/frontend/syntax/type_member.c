@@ -2072,9 +2072,34 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
         func != NULL && TypeIsFunction(func)
             ? func->info.function.cxx_member_owner
             : NULL;
+    // The function's own parameters replace the class list for the body, but
+    // pack expansions in the body still name the class packs
+    // (`Type<Elements>::type()...` inside `ElementIndex<T>`).  Those packs
+    // are still on the surrounding parameter list: they are moved onto the
+    // class only after the body has been parsed.
+    Vector visible_parameters;
+    VectorInit(&visible_parameters);
+    bool using_visible_parameters = false;
     if (func_is_template) {
-      syntax->current_template_parameters =
-          &func->info.function.template_parameters;
+      if (old_template_parameters != NULL) {
+        for (size_t p = 0; p < old_template_parameters->length; p++) {
+          VectorAppend(&visible_parameters,
+                       old_template_parameters->value.p[p]);
+        }
+      }
+      for (Struct* scope = member_owner; scope != NULL;
+           scope = scope->lexical_parent) {
+        for (size_t p = 0; p < scope->template_parameters.length; p++) {
+          VectorAppend(&visible_parameters,
+                       scope->template_parameters.value.p[p]);
+        }
+      }
+      Vector* function_parameters = &func->info.function.template_parameters;
+      for (size_t p = 0; p < function_parameters->length; p++) {
+        VectorAppend(&visible_parameters, function_parameters->value.p[p]);
+      }
+      syntax->current_template_parameters = &visible_parameters;
+      using_visible_parameters = true;
       syntax->current_template_parameter_count =
           func->info.function.template_parameter_base +
           func->info.function.template_parameter_count;
@@ -2131,6 +2156,9 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
     syntax->current_template_parameters = old_template_parameters;
     syntax->current_template_parameter_count = old_template_parameter_count;
     syntax->parsing_template_declaration = old_parsing_template;
+    if (using_visible_parameters) {
+      VectorDestruct(&visible_parameters);
+    }
 
     lex->suppress_preprocessing = false;
     lex->source = NULL;  // Real source is reinstated by end_checkpoint below.

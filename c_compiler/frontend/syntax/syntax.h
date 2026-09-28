@@ -152,6 +152,8 @@ TokenClass ClassifyToken(Token tok);
 // True when an analyzed expression is value-dependent on a template parameter
 // (e.g. `sizeof(T) > 4`), i.e. it cannot be constant-folded until instantiation.
 bool ExpressionIsTemplateDependent(struct ASTNode* expr);
+bool ExpressionReferencesDeferredConstexprFunction(struct ASTNode* node,
+                                                   void* data);
 
 void SyntaxInit(Syntax* syntax, Lex* lex);
 void SyntaxDestruct(Syntax* syntax);

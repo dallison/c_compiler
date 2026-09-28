@@ -927,6 +927,12 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           SubstituteDependentSymbolAlignment(parser, member_symbol, args);
           SubstituteStaticMemberInitializerValue(
               parser, member_symbol, member->default_initializer, args);
+          if (!member_symbol->flags.value_set &&
+              member->symbol->constexpr_initializer != NULL) {
+            SubstituteStaticMemberInitializerValue(
+                parser, member_symbol, member->symbol->constexpr_initializer,
+                args);
+          }
 
           StructMember* instantiated = NewStructMember(member_symbol);
           instantiated->access = member->access;
@@ -996,6 +1002,11 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     SubstituteDependentSymbolAlignment(parser, member_symbol, args);
     SubstituteStaticMemberInitializerValue(parser, member_symbol,
                                            member->default_initializer, args);
+    if (!member_symbol->flags.value_set &&
+        member->symbol->constexpr_initializer != NULL) {
+      SubstituteStaticMemberInitializerValue(
+          parser, member_symbol, member->symbol->constexpr_initializer, args);
+    }
 
     StructMember* instantiated = NewStructMember(member_symbol);
     // Substitute template parameters in a non-static default member initializer
@@ -9340,6 +9351,12 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     SubstituteStaticMemberInitializerValue(parser, member_symbol,
                                            member->default_initializer,
                                            source_args);
+    if (!member_symbol->flags.value_set &&
+        member->symbol->constexpr_initializer != NULL) {
+      SubstituteStaticMemberInitializerValue(
+          parser, member_symbol, member->symbol->constexpr_initializer,
+          source_args);
+    }
     StructMember* instantiated = NewStructMember(member_symbol);
     // Substitute template parameters in every member initializer. For a static
     // member the instantiated initializer is retained until an odr-use queues

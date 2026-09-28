@@ -879,6 +879,34 @@ static bool RewriteClonedConcreteLocalDirectInitializer(
   return true;
 }
 
+static void FinishClonedConstexprDefaultInitializer(
+    TemplateFunctionBodyClone* clone, ASTNode* node, Symbol* symbol) {
+  VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
+  if (decl->initializer != NULL || symbol == NULL) {
+    return;
+  }
+  decl->initializer = SyntaxNewCXXDefaultConstructorCallIfNeeded(
+      clone->parser->syntax, symbol);
+  if (decl->initializer != NULL) {
+    decl->initializer->parent = node;
+    decl->initializer->child_id = 0;
+    node->flags &= ~kASTAnalyzed;
+    return;
+  }
+  if (!symbol->flags.is_constexpr && !symbol->flags.is_constinit) {
+    return;
+  }
+  if (symbol->type != NULL &&
+      (TypeIsUnknown(symbol->type) ||
+       TypeContainsTemplateParameter(symbol->type))) {
+    return;
+  }
+  SyntaxError(clone->parser->syntax,
+              symbol->flags.is_constinit
+                  ? "constinit variable requires an initializer"
+                  : "constexpr variable requires an initializer");
+}
+
 static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone,
                                                 ASTNode* node) {
   if (node->op != AST_OP(vardecl)) {
@@ -909,15 +937,7 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
       }
       node->flags &= ~kASTAnalyzed;
     }
-    if (decl->initializer == NULL) {
-      decl->initializer = SyntaxNewCXXDefaultConstructorCallIfNeeded(
-          clone->parser->syntax, existing);
-      if (decl->initializer != NULL) {
-        decl->initializer->parent = node;
-        decl->initializer->child_id = 0;
-        node->flags &= ~kASTAnalyzed;
-      }
-    }
+    FinishClonedConstexprDefaultInitializer(clone, node, existing);
     if (TypeContainsAuto(existing->type) && decl->initializer != NULL) {
       ASTNodeVisit(decl->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
       node->flags &= ~kASTAnalyzed;
@@ -988,15 +1008,7 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
     }
     node->flags &= ~kASTAnalyzed;
   }
-  if (decl->initializer == NULL) {
-    decl->initializer = SyntaxNewCXXDefaultConstructorCallIfNeeded(
-        clone->parser->syntax, replacement);
-    if (decl->initializer != NULL) {
-      decl->initializer->parent = node;
-      decl->initializer->child_id = 0;
-      node->flags &= ~kASTAnalyzed;
-    }
-  }
+  FinishClonedConstexprDefaultInitializer(clone, node, replacement);
   if (TypeContainsAuto(replacement->type) && decl->initializer != NULL) {
     // The primary template could not deduce this local while its initializer
     // was dependent. Re-analyze the concrete cloned initializer so ordinary
@@ -6513,6 +6525,10 @@ static void RewriteDeferredConstructorMemberName(VectorASTNode* call) {
   }
   if (FindStructMember(receiver_type->info.struct_info,
                        member_name->value.string) != NULL) {
+    return;
+  }
+  if ((call->base.flags & kASTCXXMemberInitializer) != 0) {
+    StringSet(member_name->value.string, constructor_name);
     return;
   }
   const char* source_name = member_name->value.string->value;

@@ -692,15 +692,34 @@ static bool ClassTemplateIdentityTypesEqual(TypeRecord* left,
 // typedef (`typename Class<T>::size_type`) whose in-class counterpart was
 // recorded as a plain integer while the alias was still dependent.  Those
 // declarations designate the same function.
-static bool OutOfLineMemberParameterTypesEqual(TypeRecord* left,
-                                               TypeRecord* right) {
-  if (OverloadParameterTypesEqual(left, right)) {
+static bool OutOfLineMemberTypeEqual(TypeRecord* left, TypeRecord* right,
+                                     bool parameter, bool allow_integral) {
+  if (parameter ? OverloadParameterTypesEqual(left, right)
+                : OverloadTypesEqual(left, right)) {
     return true;
   }
   if (ClassTemplateIdentityTypesEqual(left, right)) {
     return true;
   }
-  return TypeIsIntegral(left) && TypeIsIntegral(right);
+  // `Iter&` in the class and `Iter<T>&` on the out-of-line definition name
+  // the same object.  Compare the pointee; do not treat two different
+  // integer pointees as the same type.
+  if (left != NULL && right != NULL &&
+      left->declarator == right->declarator &&
+      (TypeIsReference(left) ||
+       (TypeIsPointer(left) &&
+        (left->qualifiers & ~kQualRestrict) ==
+            (right->qualifiers & ~kQualRestrict)))) {
+    return OutOfLineMemberTypeEqual(left->next, right->next, parameter,
+                                    /*allow_integral=*/false);
+  }
+  return allow_integral && TypeIsIntegral(left) && TypeIsIntegral(right);
+}
+
+static bool OutOfLineMemberParameterTypesEqual(TypeRecord* left,
+                                               TypeRecord* right) {
+  return OutOfLineMemberTypeEqual(left, right, /*parameter=*/true,
+                                  /*allow_integral=*/true);
 }
 
 static bool OutOfLineMemberFunctionTypesEqual(TypeRecord* left,
@@ -708,9 +727,8 @@ static bool OutOfLineMemberFunctionTypesEqual(TypeRecord* left,
   if (!TypeIsFunction(left) || !TypeIsFunction(right)) {
     return false;
   }
-  if (!OverloadTypesEqual(left->next, right->next) &&
-      !ClassTemplateIdentityTypesEqual(left->next, right->next) &&
-      !(TypeIsIntegral(left->next) && TypeIsIntegral(right->next))) {
+  if (!OutOfLineMemberTypeEqual(left->next, right->next, /*parameter=*/false,
+                                /*allow_integral=*/true)) {
     return false;
   }
   FunctionInfo* left_fn = &left->info.function;
@@ -3038,6 +3056,14 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
         return true;
       }
     }
+    // `enum { N = sizeof...(Ts) }; static_assert(N > 0)` — the enumerator is
+    // not itself constexpr, but its value is still the dependent initializer.
+    if (id->symbol != NULL && id->symbol->constexpr_initializer != NULL &&
+        !id->symbol->flags.value_set &&
+        (compiler->syntax.current_template_parameter_count > 0 ||
+         ExpressionIsTemplateDependent(id->symbol->constexpr_initializer))) {
+      return true;
+    }
     // `static constexpr auto value = T{}()` is value-dependent even though
     // `value`'s type is not.  Uses inside the class (a later static_assert)
     // must wait until the enclosing class template is instantiated.
@@ -3144,9 +3170,11 @@ static Symbol* StaticAssertCallCallee(ASTNode* node) {
 
 // Inline member bodies are captured and re-parsed only after the class is
 // complete.  A static_assert earlier in the class can already name those
-// functions; constant-evaluation has to wait until the body exists.
-static bool ExpressionReferencesDeferredConstexprFunction(ASTNode* node,
-                                                         void* data) {
+// functions; constant-evaluation has to wait until the body exists.  A
+// constexpr member of a class template may be defined out of line after the
+// class, so a static_assert in another member is checked at instantiation.
+bool ExpressionReferencesDeferredConstexprFunction(ASTNode* node,
+                                                  void* data) {
   (void)data;
   Symbol* symbol = StaticAssertCallCallee(node);
   if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
@@ -3156,11 +3184,23 @@ static bool ExpressionReferencesDeferredConstexprFunction(ASTNode* node,
   if (canonical != NULL && canonical != symbol && canonical->type == symbol->type) {
     symbol = canonical;
   }
+  if (symbol->type->info.function.body == NULL &&
+      symbol->value.func_defn != NULL &&
+      symbol->value.func_defn->type != NULL &&
+      TypeIsFunction(symbol->value.func_defn->type) &&
+      symbol->value.func_defn->type->info.function.body != NULL) {
+    symbol = symbol->value.func_defn;
+  }
   if (!symbol->type->info.function.is_constexpr && !symbol->flags.is_constexpr) {
     return false;
   }
-  return symbol->type->info.function.body == NULL && symbol->flags.is_defined &&
-         symbol->flags.is_inline_defn;
+  if (symbol->type->info.function.body != NULL) {
+    return false;
+  }
+  if (symbol->flags.is_defined && symbol->flags.is_inline_defn) {
+    return true;
+  }
+  return compiler->syntax.current_template_parameter_count > 0;
 }
 
 static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
@@ -3943,12 +3983,19 @@ typedef struct {
   bool found;
 } CXXPackExpressionSearch;
 
+static bool CXXTypeContainsParameterPack(Syntax* syntax, TypeRecord* type);
+
 static bool CXXTemplateArgumentReferencesParameterPack(
     TemplateArgument* argument) {
   if (argument == NULL) {
     return false;
   }
   if (argument->references_parameter_pack) {
+    return true;
+  }
+  if (argument->template_parameter_index >= 0 &&
+      CurrentTemplateParameterIsPack(&compiler->syntax,
+                                    argument->template_parameter_index)) {
     return true;
   }
   for (size_t i = 0;
@@ -3958,6 +4005,10 @@ static bool CXXTemplateArgumentReferencesParameterPack(
             argument->pack_arguments->value.p[i])) {
       return true;
     }
+  }
+  if (argument->type != NULL &&
+      CXXTypeContainsParameterPack(&compiler->syntax, argument->type)) {
+    return true;
   }
   return false;
 }
@@ -3972,11 +4023,22 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
     ((CXXPackExpressionSearch*)data)->found = true;
     return;
   }
+  if ((node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) &&
+      CXXTypeContainsParameterPack(
+          &compiler->syntax, ((SizeofASTNode*)node)->type_operand)) {
+    ((CXXPackExpressionSearch*)data)->found = true;
+    return;
+  }
   Vector* template_arguments = NULL;
   ASTNodeShape shape = ASTNodeGetShape(node);
   if (shape == kASTShapeIdentifier) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+      ((CXXPackExpressionSearch*)data)->found = true;
+      return;
+    }
+    if (id->symbol != NULL &&
+        CXXTypeContainsParameterPack(&compiler->syntax, id->symbol->type)) {
       ((CXXPackExpressionSearch*)data)->found = true;
       return;
     }
@@ -4011,30 +4073,15 @@ static bool CXXTypeContainsParameterPack(Syntax* syntax, TypeRecord* type) {
     if (parameter_index < 0 && current->dependent_member_name != NULL) {
       parameter_index = current->template_parameter_index;
     }
-    for (size_t i = 0;
-         parameter_index >= 0 &&
-         syntax->current_template_parameters != NULL &&
-         i < syntax->current_template_parameters->length; i++) {
-      TemplateParameter* parameter =
-          syntax->current_template_parameters->value.p[i];
-      if (parameter != NULL && parameter->index == parameter_index &&
-          parameter->is_parameter_pack) {
-        return true;
-      }
+    if (parameter_index >= 0 &&
+        CurrentTemplateParameterIsPack(syntax, parameter_index)) {
+      return true;
     }
-    Vector* function_parameters =
-        compiler->current_function != NULL &&
-                TypeIsFunction(compiler->current_function)
-            ? &compiler->current_function->info.function.template_parameters
-            : NULL;
-    for (size_t i = 0;
-         parameter_index >= 0 && function_parameters != NULL &&
-         i < function_parameters->length; i++) {
-      TemplateParameter* parameter = function_parameters->value.p[i];
-      if (parameter != NULL && parameter->index == parameter_index &&
-          parameter->is_parameter_pack) {
-        return true;
-      }
+    if (current->template_parameter_index >= 0 &&
+        current->template_parameter_index != parameter_index &&
+        CurrentTemplateParameterIsPack(syntax,
+                                       current->template_parameter_index)) {
+      return true;
     }
     if (current->dependent_decltype_expr != NULL &&
         CXXExpressionContainsParameterPack(
@@ -6544,6 +6591,33 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
         NewBinaryASTNode(AST_OP(assign), member_type, location, target, value);
     assign->flags |= kASTCXXMemberInitializer;
     return NewExpressionStatementASTNode(assign, location);
+  }
+
+  if (actuals->length != 1 && member_type != NULL &&
+      TypeContainsTemplateParameter(member_type)) {
+    // `tree_(key_compare(), allocator_type())` names a constructor of a
+    // template parameter.  The concrete constructor is chosen when the class
+    // is instantiated; keep the arguments as a call until then.
+    const char* constructor_name = CXXConstructorNameForType(member_type);
+    if (constructor_name == NULL && member->symbol != NULL) {
+      constructor_name = member->symbol->name.value;
+    }
+    ASTNode* receiver =
+        NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+    if (receiver == NULL || constructor_name == NULL) {
+      VectorDelete(actuals);
+      return NULL;
+    }
+    CXXPrependCompleteObjectArgument(member_type, actuals,
+                                     /*complete_object=*/true, location);
+    ASTNode* member_name =
+        NewStringConstantASTNode(NewString(constructor_name), NULL, location);
+    ASTNode* member_access =
+        NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member_name);
+    ASTNode* call =
+        NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+    call->flags |= kASTCXXMemberInitializer;
+    return NewExpressionStatementASTNode(call, location);
   }
 
   if (actuals->length != 1) {
@@ -14362,6 +14436,24 @@ static void CheckLocalVariableShadow(Syntax* syntax, Symbol* sym) {
   ReportNote(prev_filename, prev_lineno, "shadowed declaration is here");
 }
 
+/* A class object declared constexpr may be default-initialized; that
+ * constructor call is the initializer.  Inside a template the concrete
+ * constructor is filled in when the declaration is cloned.  A dependent type
+ * is deferred too: it may be a class, and a scalar is diagnosed at
+ * instantiation once the type is known. */
+static bool CXXDeferConstexprDefaultInitialization(Syntax* syntax,
+                                                   TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  if (TypeIsUnknown(type) || TypeContainsTemplateParameter(type)) {
+    return true;
+  }
+  bool in_template = syntax->parsing_template_declaration ||
+                     syntax->current_template_parameter_count > 0;
+  return in_template && (TypeIsStructOrUnion(type) || TypeIsArray(type));
+}
+
 static bool InitializerNamesUndeducedAuto(ASTNode* node, void* data) {
   Symbol* self = data;
   if (node == NULL || node->op != AST_OP(identifier)) {
@@ -14634,9 +14726,15 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           if (TypeContainsAuto(sym->type)) {
             SyntaxError(syntax, "auto variable requires an initializer");
           } else if (sym->flags.is_constexpr || sym->flags.is_constinit) {
-            SyntaxError(syntax, sym->flags.is_constinit
-                                    ? "constinit variable requires an initializer"
-                                    : "constexpr variable requires an initializer");
+            if (!CXXDeferConstexprDefaultInitialization(syntax, sym->type)) {
+              initializer =
+                  SyntaxNewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+              if (initializer == NULL) {
+                SyntaxError(syntax, sym->flags.is_constinit
+                                        ? "constinit variable requires an initializer"
+                                        : "constexpr variable requires an initializer");
+              }
+            }
           } else if (!StorageIs(storage, STO(extern)) &&
                      StorageIs(storage, STO(thread))) {
             initializer = NewCXXThreadLocalGuardedConstructor(syntax, sym);

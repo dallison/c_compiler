@@ -357,6 +357,8 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
       int dependent_value_template_parameter_index = -1;
       int64_t assigned_value = e->next_value;
       EnumValueAssignStatus assign_status = kEnumValueAssignOk;
+      bool dependent_enumerator = false;
+      ASTNode* dependent_value_expr = NULL;
       if (LexMatch(parser->lex, TOK(equal))) {
         // Followers must include ',' / '}' / ')' so recovery from a nested
         // type definition in the initializer does not skip the enumerator
@@ -367,8 +369,16 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
         value = AnalyzeExpression(value);
         int64_t next_value = e->next_value;
         if (!EvaluateIntegerExpression(value, &next_value)) {
-          if (!CXXExpressionNamesNonTypeTemplateParameter(
+          if (CXXExpressionNamesNonTypeTemplateParameter(
                   value, &dependent_value_template_parameter_index)) {
+            // A non-type parameter is substituted into the enumerator later.
+          } else if (CompilerIsCXX() &&
+                     ExpressionIsTemplateDependent(value)) {
+            // `sizeof...(Elements)` inside a class template is not a constant
+            // until the pack is known.  Keep the expression and fold it when
+            // the class is instantiated.
+            dependent_enumerator = true;
+          } else {
             SyntaxError(parser->syntax,
                         "Constant integer expression required for value of "
                         "enum constant %s",
@@ -380,7 +390,11 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
           assign_status = EnumAssignEnumeratorValue(
               e, true, next_value, &next_value_overflow, &assigned_value);
         }
-        ASTNodeDelete(value);
+        if (dependent_enumerator) {
+          dependent_value_expr = value;
+        } else {
+          ASTNodeDelete(value);
+        }
       } else {
         assign_status = EnumAssignEnumeratorValue(
             e, false, 0, &next_value_overflow, &assigned_value);
@@ -438,6 +452,10 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
       ec->dependent_value_template_parameter_index =
           dependent_value_template_parameter_index;
       if (dependent_value_template_parameter_index >= 0) {
+        ec->flags.value_set = false;
+      }
+      if (dependent_value_expr != NULL) {
+        ec->constexpr_initializer = dependent_value_expr;
         ec->flags.value_set = false;
       }
       StringDestruct(&const_name);

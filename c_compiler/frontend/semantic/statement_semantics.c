@@ -1158,9 +1158,17 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
   }
   int64_t value = 0;
   if (!EvaluateIntegerExpression(expr, &value)) {
+    bool defer =
+        ExpressionIsTemplateDependent(node->expr) ||
+        ExpressionIsTemplateDependent(expr) ||
+        ASTNodeAny(node->expr, ExpressionReferencesDeferredConstexprFunction,
+                   NULL) ||
+        ASTNodeAny(expr, ExpressionReferencesDeferredConstexprFunction, NULL);
     ASTNodeDelete(expr);
-    SemanticError((ASTNode*)node,
-                  "static_assert expression is not an integer constant expression");
+    if (!defer) {
+      SemanticError((ASTNode*)node,
+                    "static_assert expression is not an integer constant expression");
+    }
     return;
   }
   ASTNodeDelete(expr);
@@ -3083,6 +3091,23 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
               ? ConstexprObjectInitializerForSymbol(
                     node->symbol, node->initializer->location)
               : NULL;
+      // `static constexpr T obj;` is initialized by a constructor call
+      // (`obj.T()`), which is not an identifier call.  Fold that call when
+      // it is a constant expression so the local is constant-initialized.
+      if (constant_init == NULL && node->symbol != NULL &&
+          (node->symbol->flags.is_constexpr ||
+           node->symbol->flags.is_constinit) &&
+          node->symbol->type != NULL &&
+          (TypeIsStructOrUnion(node->symbol->type) ||
+           TypeIsFixedArray(node->symbol->type))) {
+        if (!node->symbol->flags.value_set ||
+            node->symbol->value.other == NULL) {
+          ConstexprEvaluateObjectConstantForSymbol(node->symbol,
+                                                   node->initializer);
+        }
+        constant_init = ConstexprObjectInitializerForSymbol(
+            node->symbol, node->initializer->location);
+      }
       if (constant_init != NULL) {
         ASTNode* simplified =
             AnalyzeInitializer(node->symbol->type, constant_init, true);
