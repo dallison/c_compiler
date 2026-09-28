@@ -2832,7 +2832,20 @@ static void InstantiateClonedFunctionTemplateCall(
   }
   RestoreClonedInlineReferenceActualTypes(call);
   Symbol* instantiated = NULL;
-  if (id->symbol->overload_next != NULL) {
+  // Static member function templates keep sibling overloads on the
+  // StructMember chain.  The symbol's own overload_next stays null, so a
+  // call cloned from a non-template class (`ToInt<T>(..., is_integral<T>(),
+  // is_enum<T>())`) would otherwise deduce only the overload the identifier
+  // was first bound to.
+  bool static_member_overloads = false;
+  if (id->symbol->overload_next == NULL && id->symbol->type != NULL &&
+      TypeIsFunction(id->symbol->type) &&
+      id->symbol->type->info.function.cxx_member_owner != NULL) {
+    StructMember* head = FindStructMember(
+        id->symbol->type->info.function.cxx_member_owner, &id->symbol->name);
+    static_member_overloads = head != NULL && head->overload_next != NULL;
+  }
+  if (id->symbol->overload_next != NULL || static_member_overloads) {
     instantiated = CXXResolveOverloadedFunctionTemplateCall(
         id->symbol, id->template_arguments, call->children);
   }

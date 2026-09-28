@@ -3570,6 +3570,11 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
 
   TypeRecord* return_type = default_type;
   if (LexMatch(syntax->lex, TOK(arrow))) {
+    // The trailing return type is in the scope of the lambda parameters
+    // ([expr.prim.lambda.closure]).  `decltype(x << y)` must see `x` and `y`,
+    // not an implicit member access through the enclosing class.
+    SyntaxOpenScope(syntax);
+    AddLambdaFunctionScopeSymbols(syntax, func);
     TypeParser parser;
     TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
     return_type = TypeParserParseType(&parser, true);
@@ -3581,6 +3586,7 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
       return_type = parsed_type;
     }
     TypeParserDestruct(&parser);
+    SyntaxCloseScope(syntax);
   }
   ParseLambdaTrailingRequiresClause(syntax, func);
   SyntaxParseFunctionContracts(syntax, func, NULL, false);

@@ -5,7 +5,6 @@
 #include "type_class_internal.h"
 #include "type_internal.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -1333,6 +1332,7 @@ void AddStructMember(TypeParser* parser, Struct* str, StructMember* member) {
     RegisterCXXVirtualMember(parser, str, member);
     SymbolSetCXXMangledAsmName(member->symbol);
   } else if (member->is_static && member->symbol != NULL) {
+    member->symbol->static_data_member_class = str;
     SymbolSetCXXDataAsmName(member->symbol, str);
   }
   VectorAppend(&str->members, member);

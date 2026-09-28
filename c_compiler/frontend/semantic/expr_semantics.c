@@ -9,6 +9,7 @@
 #include "expr_semantics.h"
 #include <assert.h>
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 #include "concepts.h"
 #include "contracts.h"
@@ -1115,11 +1116,160 @@ static TypeRecord* NewVectorComparisonResultType(TypeRecord* vector_type) {
 // Analyze a unary expression by analyzing the sub expression
 // and propagating the type up.  Also checks that the expression
 // is scalar and promotes types smaller than int to int if needed.
+static bool ClosureHasCaptureFields(Struct* closure) {
+  if (closure == NULL) {
+    return true;
+  }
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StringEqual(&member->symbol->name, "__lambda_empty")) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+static StructMember* ClosureCallOperatorMember(Struct* closure) {
+  if (closure == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    if (member == NULL || !member->is_member_function ||
+        member->symbol == NULL || member->symbol->type == NULL ||
+        !TypeIsFunction(member->symbol->type)) {
+      continue;
+    }
+    if (StringEqual(&member->symbol->name, "operator()")) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
+static ASTNode* AddressOfFunctionSymbol(Symbol* function, SourceLocation location) {
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type)) {
+    return NULL;
+  }
+  ASTNode* id = NewIdentifierASTNode(function, location);
+  ASTNodeSetType(id, function->type);
+  id->value_category = kValueCategoryLvalue;
+  TypeRecord* pointer = NewPointerTo(kQualPlain, TypeRecordCopy(function->type));
+  TypeRecordCalculateSize(pointer);
+  ASTNode* address =
+      NewUnaryASTNode(AST_OP(address), pointer, location, id);
+  address->value_category = kValueCategoryPrvalue;
+  return address;
+}
+
+/* Non-capturing lambda `+[](Args) -> R { ... }` converts to `R (*)(Args)`.
+ * The pointer addresses a thunk that default-constructs the closure and
+ * calls its `operator()`. */
+static ASTNode* LambdaToFunctionPointer(ASTNode* lambda) {
+  if (lambda == NULL || (lambda->flags & kASTLambdaExpression) == 0 ||
+      lambda->type == NULL || !TypeIsStructOrUnion(lambda->type) ||
+      lambda->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* closure = lambda->type->info.struct_info;
+  if (ClosureHasCaptureFields(closure)) {
+    return NULL;
+  }
+  StructMember* call_member = ClosureCallOperatorMember(closure);
+  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
+  if (call_op == NULL || call_op->flags.is_template ||
+      call_op->type->info.function.template_parameters.length > 0) {
+    return NULL;
+  }
+  TypeRecord* method = call_op->type;
+  if (TypeFunctionReturnContainsAuto(method)) {
+    StatementFinishAutoReturnDeduction(method, lambda);
+  }
+  if (TypeFunctionReturnContainsAuto(method) || method->next == NULL) {
+    return NULL;
+  }
+  if (call_member->is_static) {
+    return AddressOfFunctionSymbol(call_op, lambda->location);
+  }
+  TypeRecord* func = NewFunctionTypeRecord();
+  size_t start = method->info.function.cxx_member_owner != NULL ? 1 : 0;
+  int arg_number = 0;
+  for (size_t i = start; i < method->info.function.prototype.length; i++) {
+    Symbol* src = method->info.function.prototype.value.p[i];
+    if (src == NULL || src->type == NULL) {
+      continue;
+    }
+    const char* pname =
+        src->name.value != NULL && src->name.length > 0 ? src->name.value
+                                                        : "arg";
+    Symbol* formal = NewSymbol(pname, TypeRecordCopy(src->type), STO(auto));
+    formal->flags.is_argument = true;
+    formal->flags.is_defined = true;
+    formal->location = lambda->location;
+    formal->value.arg_number = arg_number++;
+    VectorAppend(&func->info.function.prototype, formal);
+  }
+  TypeRecord* return_type =
+      method->next != NULL ? TypeRecordCopy(method->next)
+                           : NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecordChain(func, return_type);
+  func->info.function.definition = true;
+
+  Symbol* object =
+      NewSymbol("__closure", TypeRecordCopy(lambda->type), STO(auto));
+  object->flags.is_defined = true;
+  object->flags.is_local = true;
+  object->location = lambda->location;
+  ASTNode* object_decl =
+      NewVariableDeclarationASTNode(object, NULL, lambda->location);
+
+  Vector* actuals = NewVector();
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    VectorAppend(actuals, NewIdentifierASTNode(formal, lambda->location));
+  }
+  ASTNode* call = NewOperatorMemberCall(NewIdentifierASTNode(object, lambda->location),
+                                        "operator()", actuals, lambda->location);
+  ASTNode* invocation =
+      TypeIsVoid(return_type)
+          ? NewExpressionStatementASTNode(call, lambda->location)
+          : NewCombinedStatementASTNode(AST_OP(return), call, NULL,
+                                        lambda->location);
+  Vector* statements = NewVector();
+  VectorAppend(statements, object_decl);
+  VectorAppend(statements, invocation);
+  func->info.function.body =
+      NewCompoundStatementASTNode(statements, lambda->location);
+
+  static int lambda_fn_id = 0;
+  char name[64];
+  snprintf(name, sizeof(name), "__lambda_fn_%d", lambda_fn_id++);
+  Symbol* thunk = NewSymbol(name, func, STO(static));
+  thunk->flags.invented = true;
+  thunk->flags.is_defined = true;
+  thunk->location = lambda->location;
+  thunk->value.func_defn = thunk;
+  func->info.function.symbol = thunk;
+  InsertGlobalSymbol(thunk);
+  CompilerQueuePendingFunctionDefinition(thunk);
+  return AddressOfFunctionSymbol(thunk, lambda->location);
+}
+
 static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   if (node == NULL) {
     return;
   }
   node->sub = AnalyzeExpression(node->sub);
+  if (node->base.op == AST_OP(uplus)) {
+    ASTNode* function_pointer = LambdaToFunctionPointer(node->sub);
+    if (function_pointer != NULL) {
+      ASTNodeReplaceChild((ASTNode*)node, 0, function_pointer, true);
+    }
+  }
   if (node->base.op == AST_OP(not)) {
     SemanticConvertType(node->sub,
                         NewTypeRecordWithSize(kTypeBool, kQualPlain),
@@ -10985,9 +11135,23 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   }
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    // A class-scope injection of a static member function template is a clone
+    // of the first overload only (`is_overloaded` stays false, and overloads
+    // live on the StructMember chain).  Deducing that one template here skips
+    // the later `ToInt` overloads distinguished by true_type/false_type.
+    bool static_member_has_overloads = false;
+    if (id->symbol != NULL && id->symbol->overload_next == NULL &&
+        id->symbol->type != NULL && TypeIsFunction(id->symbol->type) &&
+        id->symbol->type->info.function.cxx_member_owner != NULL) {
+      StructMember* head = FindStructMember(
+          id->symbol->type->info.function.cxx_member_owner, &id->symbol->name);
+      static_member_has_overloads =
+          head != NULL && head->overload_next != NULL;
+    }
     if (id->symbol != NULL && id->symbol->flags.is_template &&
         !id->symbol->flags.is_overloaded &&
         id->symbol->overload_next == NULL &&
+        !static_member_has_overloads &&
         TypeIsFunction(id->symbol->type) &&
         !has_pack_expansion_actual &&
         !TemplateArgumentVectorContainsTemplateParameter(id->template_arguments) &&

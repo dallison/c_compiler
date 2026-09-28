@@ -273,6 +273,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->is_read = false;
   sym->structured_binding_pack_size = -2;
   sym->is_nrvo = false;
+  sym->static_data_member_class = NULL;
   VectorInit(&sym->imported_function_template_parameters_backup);
   sym->cached_target_symbol_name = NULL;
 }
@@ -1249,6 +1250,7 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->structured_binding_pack_size =
       sym->structured_binding_pack_size;
   new_sym->namespace_ = sym->namespace_;
+  new_sym->static_data_member_class = sym->static_data_member_class;
   StringSetString(&new_sym->asm_name, &sym->asm_name);
   // NewSymbol already initialized new_sym->attributes; replace it with a deep
   // copy of the source's attributes.

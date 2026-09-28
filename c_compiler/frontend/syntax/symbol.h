@@ -240,6 +240,10 @@ typedef struct Symbol {
   // analysis sets this before IR generation so every reference to the pooled
   // variable uses the hidden struct-return address.
   bool is_nrvo;                   // @wire - (transient)
+  // Class that owns this static data member. Its out-of-line definition,
+  // including the implicit constructor and destructor calls, is in that
+  // class's scope. Transient: rebuilt when the class member is declared.
+  struct Struct* static_data_member_class;  // @wire - (transient)
   // Compiler-owned copy of a deserialized function template's parameter list.
   // Imported module symbols can have their live parameter vector cleared while
   // pending instantiations are compiled; this backup restores completion.

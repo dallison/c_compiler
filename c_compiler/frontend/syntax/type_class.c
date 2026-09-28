@@ -781,6 +781,26 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   return tag;
 }
 
+// An elaborated class name first seen inside a class, but not as its own
+// declaration (`struct S;` is nested; `typedef struct S* p` is not), is
+// declared in the nearest enclosing namespace or block scope.
+static void AddElaboratedTagInEnclosingScope(TypeParser* parser, Symbol* tag) {
+  Syntax* syntax = parser->syntax;
+  int class_scopes = 0;
+  for (Struct* owner = parser->cxx_member_owner; owner != NULL;
+       owner = owner->lexical_parent) {
+    class_scopes++;
+  }
+  LocalSymbolTable* saved = syntax->local_tag_stack;
+  LocalSymbolTable* scope = saved;
+  for (int i = 0; i < class_scopes && scope != NULL; i++) {
+    scope = scope->prev;
+  }
+  syntax->local_tag_stack = scope;
+  SyntaxAddTag(syntax, tag);
+  syntax->local_tag_stack = saved;
+}
+
 Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) {
   // Parse common __attribute__ syntax (e.g. struct __attribute__((packed)) ...).
   Vector attributes = {0};
@@ -1013,7 +1033,13 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       // New tag.
       Struct* str = NewStruct(is_union);
       str->is_class = is_class;
-      if (CompilerIsCXX() && parser->cxx_member_owner != NULL) {
+      // `struct Inner;` inside a class forward-declares a nested class.
+      // An elaborated-type-specifier that is only part of another declaration
+      // (`typedef const struct MuHowS* MuHow`) introduces the name in the
+      // innermost namespace or block scope, not in the class.
+      bool in_class = CompilerIsCXX() && parser->cxx_member_owner != NULL;
+      bool standalone_forward = LexLookingAt(parser->lex, TOK(semicolon));
+      if (in_class && standalone_forward) {
         str->lexical_parent = parser->cxx_member_owner;
       }
       TypeRecord* type =
@@ -1023,7 +1049,11 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       tag->flags.is_forward_declared = true;
       str->tag_name = &tag->name;
       str->tag_symbol = tag;
-      SyntaxAddTag(parser->syntax, tag);
+      if (in_class && !standalone_forward) {
+        AddElaboratedTagInEnclosingScope(parser, tag);
+      } else {
+        SyntaxAddTag(parser->syntax, tag);
+      }
       AddInjectedClassName(parser, tag);
     } else if (tag->flags.is_using_alias || tag->type == NULL) {
       AttachNewStructToTag(tag, is_union, is_class);
