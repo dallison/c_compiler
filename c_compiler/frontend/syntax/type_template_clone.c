@@ -7754,9 +7754,35 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
     }
   }
   bool class_operator = ClonedOperatorNeedsClassOverload(node);
+  // This walk is pre-order, so a dereference is seen before its operand is
+  // typed.  Type the operand first.  `*(this->field)` inside a closure nested
+  // in a class template still looks dependent (`this`'s type names the
+  // enclosing template) after the operand is a concrete pointer; reanalyze
+  // that dereference anyway, or code generation loads an untyped node.
+  bool unary_operand_concrete = false;
+  if (node != NULL && node->type == NULL &&
+      ASTNodeGetShape(node) == kASTShapeUnary &&
+      IsReanalyzableClonedExpressionOpcode(node->op)) {
+    UnaryASTNode* unary = (UnaryASTNode*)node;
+    if (unary->sub != NULL && unary->sub->type == NULL) {
+      ASTNode* typed = ASTNodeVisitAndTransform(
+          unary->sub, ReanalyzeClonedUntypedExpression, data);
+      if (typed != unary->sub) {
+        unary->sub = typed;
+        if (typed != NULL) {
+          typed->parent = node;
+          typed->child_id = 0;
+        }
+      }
+    }
+    TypeRecord* sub_type = unary->sub != NULL ? unary->sub->type : NULL;
+    unary_operand_concrete =
+        sub_type != NULL && !TypeContainsTemplateParameter(sub_type) &&
+        !TypeContainsAuto(sub_type) && !TypeIsUnknown(sub_type);
+  }
   if (node == NULL ||
       (ExpressionIsTemplateDependent(node) && !receiver_is_concrete &&
-       !class_operator) ||
+       !class_operator && !unary_operand_concrete) ||
       (!stale_floating_arithmetic && !receiver_is_concrete &&
        !class_operator && node->type != NULL &&
        !TypeContainsAuto(node->type)) ||

@@ -3983,11 +3983,20 @@ static ASTNode* NewLambdaCaptureAccess(Symbol* this_symbol,
   ASTNode* this_node = NewIdentifierASTNode(this_symbol, location);
   ASTNode* member = NewStringConstantASTNode(
       NewString(capture->field->name.value), NULL, location);
+  // Leave the arrow untyped so member lookup still resolves the field.
+  // The dereference's type is the captured object: a clone can skip
+  // reanalysis when the expression still looks dependent (`this` of a
+  // closure nested in a class template), and code generation then loads a
+  // node with no type (`(*hasher)(...)`).
   ASTNode* access =
       NewBinaryASTNode(AST_OP(arrow), NULL, location, this_node, member);
   if (capture->by_reference) {
-    ASTNode* contents = NewUnaryASTNode(AST_OP(contents), NULL, location,
-                                        access);
+    TypeRecord* field_type =
+        capture->field != NULL ? capture->field->type : NULL;
+    TypeRecord* captured = field_type != NULL ? field_type->next : NULL;
+    ASTNode* contents =
+        NewUnaryASTNode(AST_OP(contents), captured, location, access);
+    contents->value_category = kValueCategoryLvalue;
     if (capture->is_pack_expansion) {
       contents->flags |= kASTPackExpansion;
       access->flags |= kASTPackExpansion;
@@ -4227,10 +4236,12 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
   }
 
   // Queue operator() for analysis/codegen unless the closure captures a
-  // non-pack value whose type still names an enclosing template parameter.
-  // Those bodies cannot be analyzed against placeholder capture-field types;
-  // SubstituteNestedStructTemplateParameters rebuilds the closure per
-  // instantiation and CloneInstantiatedMemberFunctionBody re-queues the body.
+  // non-pack value whose type still names an enclosing template parameter, or
+  // the body itself names one (`static_cast<Encoder*>(...)` inside a
+  // captureless lambda).  The pattern body would otherwise be emitted with
+  // `auto` still undeduced.  SubstituteNestedStructTemplateParameters rebuilds
+  // the closure per instantiation and CloneInstantiatedMemberFunctionBody
+  // re-queues the substituted body.
   //
   // Pack-only captures are still queued eagerly: fold/pack-expansion lowering
   // (e.g. `[&]{ return (0 + ... + xs); }`) runs against the template-level
@@ -4255,7 +4266,8 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
       }
     }
   }
-  if (!defer_dependent_capture) {
+  if (!defer_dependent_capture &&
+      !LambdaCallOperatorBodyDependsOnEnclosingTemplate(call_operator)) {
     QueueLambdaCallOperatorDefinition(call_operator);
   }
 

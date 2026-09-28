@@ -3623,6 +3623,190 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   return ok;
 }
 
+/* An index belongs to the call operator itself when it falls in
+ * [own_base, own_limit).  Anything else is an enclosing template parameter. */
+static bool TemplateParameterIndexIsEnclosing(int index, int own_base,
+                                              int own_limit) {
+  return index >= 0 && (index < own_base || index >= own_limit);
+}
+
+static void NoteEnclosingTemplateParameterInType(TypeRecord* type,
+                                                 int own_base, int own_limit,
+                                                 bool* found, int depth);
+
+static void NoteEnclosingTemplateParameterInArgument(TemplateArgument* argument,
+                                                     int own_base,
+                                                     int own_limit,
+                                                     bool* found, int depth) {
+  if (argument == NULL || *found || depth > 32) {
+    return;
+  }
+  if (TemplateParameterIndexIsEnclosing(argument->template_parameter_index,
+                                        own_base, own_limit)) {
+    *found = true;
+    return;
+  }
+  NoteEnclosingTemplateParameterInType(argument->type, own_base, own_limit,
+                                       found, depth + 1);
+  if (argument->pack_arguments == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < argument->pack_arguments->length && !*found; i++) {
+    NoteEnclosingTemplateParameterInArgument(argument->pack_arguments->value.p[i],
+                                             own_base, own_limit, found,
+                                             depth + 1);
+  }
+}
+
+static void NoteEnclosingTemplateParameterInType(TypeRecord* type,
+                                                 int own_base, int own_limit,
+                                                 bool* found, int depth) {
+  if (*found || depth > 32) {
+    return;
+  }
+  for (TypeRecord* current = type; current != NULL && !*found;
+       current = current->next) {
+    if (TemplateParameterIndexIsEnclosing(current->template_parameter_index,
+                                          own_base, own_limit)) {
+      *found = true;
+      return;
+    }
+    if (current->declarator == kDeclArray &&
+        TemplateParameterIndexIsEnclosing(
+            current->info.array.template_parameter_index, own_base,
+            own_limit)) {
+      *found = true;
+      return;
+    }
+    if (current->template_arguments == NULL) {
+      continue;
+    }
+    for (size_t i = 0; i < current->template_arguments->length && !*found;
+         i++) {
+      NoteEnclosingTemplateParameterInArgument(
+          current->template_arguments->value.p[i], own_base, own_limit, found,
+          depth + 1);
+    }
+  }
+}
+
+typedef struct {
+  int own_base;
+  int own_limit;
+  bool found;
+  int depth;
+} LambdaBodyEnclosingUse;
+
+static bool ClosureBodyDependsOnEnclosingTemplate(Struct* closure, int depth);
+
+static void NoteLambdaBodyEnclosingTemplate(ASTNode* node, void* data,
+                                            int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  LambdaBodyEnclosingUse* use = data;
+  if (use->found) {
+    return;
+  }
+  NoteEnclosingTemplateParameterInType(node->type, use->own_base, use->own_limit,
+                                       &use->found, 0);
+  if (node->op == AST_OP(cast)) {
+    NoteEnclosingTemplateParameterInType(((CastASTNode*)node)->cast_type,
+                                         use->own_base, use->own_limit,
+                                         &use->found, 0);
+  } else if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
+    NoteEnclosingTemplateParameterInType(((SizeofASTNode*)node)->type_operand,
+                                         use->own_base, use->own_limit,
+                                         &use->found, 0);
+  } else if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL) {
+      if (TemplateParameterIndexIsEnclosing(id->symbol->template_parameter_index,
+                                            use->own_base, use->own_limit)) {
+        use->found = true;
+        return;
+      }
+      NoteEnclosingTemplateParameterInType(id->symbol->type, use->own_base,
+                                           use->own_limit, &use->found, 0);
+    }
+    if (id->template_arguments != NULL) {
+      for (size_t i = 0; i < id->template_arguments->length && !use->found;
+           i++) {
+        NoteEnclosingTemplateParameterInArgument(
+            id->template_arguments->value.p[i], use->own_base, use->own_limit,
+            &use->found, 0);
+      }
+    }
+  } else if (node->op == AST_OP(vardecl)) {
+    VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
+    if (decl->symbol != NULL) {
+      NoteEnclosingTemplateParameterInType(decl->symbol->type, use->own_base,
+                                           use->own_limit, &use->found, 0);
+    }
+  }
+  if (use->found || use->depth >= 8 ||
+      (node->flags & kASTLambdaExpression) == 0 || node->type == NULL ||
+      !TypeIsStructOrUnion(node->type) || node->type->info.struct_info == NULL ||
+      node->type->info.struct_info->tag_symbol == NULL ||
+      !node->type->info.struct_info->tag_symbol->flags.invented) {
+    return;
+  }
+  if (ClosureBodyDependsOnEnclosingTemplate(node->type->info.struct_info,
+                                            use->depth + 1)) {
+    use->found = true;
+  }
+}
+
+static bool FunctionBodyDependsOnEnclosingTemplate(Symbol* function,
+                                                   int depth) {
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type)) {
+    return false;
+  }
+  ASTNode* body = function->type->info.function.body;
+  if (body == NULL && function->value.func_defn != NULL &&
+      function->value.func_defn->type != NULL) {
+    body = function->value.func_defn->type->info.function.body;
+  }
+  if (body == NULL) {
+    return false;
+  }
+  TypeRecord* func = function->type;
+  int own_base = func->info.function.template_parameter_base;
+  int own_count = func->info.function.template_parameter_count;
+  if (own_count <= 0) {
+    own_count = (int)func->info.function.template_parameters.length;
+  }
+  LambdaBodyEnclosingUse use = {.own_base = own_base,
+                                .own_limit = own_base + own_count,
+                                .found = false,
+                                .depth = depth};
+  ASTNodeVisit(body, NoteLambdaBodyEnclosingTemplate, 0, &use);
+  return use.found;
+}
+
+static bool ClosureBodyDependsOnEnclosingTemplate(Struct* closure, int depth) {
+  if (closure == NULL || depth > 8) {
+    return false;
+  }
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    if (member == NULL || !member->is_member_function ||
+        member->symbol == NULL) {
+      continue;
+    }
+    if (FunctionBodyDependsOnEnclosingTemplate(member->symbol, depth)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool LambdaCallOperatorBodyDependsOnEnclosingTemplate(Symbol* call_operator) {
+  return FunctionBodyDependsOnEnclosingTemplate(call_operator, 0);
+}
+
 /* True if any non-static data member of `str` still has a template-dependent
  * type (so the struct itself is dependent). */
 bool StructContainsTemplateParameter(Struct* str) {
@@ -3630,12 +3814,11 @@ bool StructContainsTemplateParameter(Struct* str) {
     return false;
   }
   // A lambda closure with no captures has no data members, so its dependence on
-  // an enclosing template parameter lives entirely in its `operator()`
-  // signature (e.g. `[](const T&){...}`).  Such a closure must still be rebuilt
-  // per instantiation so the call operator is substituted (and emitted) with
-  // concrete types.  Consider a closure's non-template member-function
-  // signatures; a generic lambda's `operator()` is itself a template and
-  // references its own parameters, so it is excluded.
+  // an enclosing template parameter may live only in its `operator()` body
+  // (`auto p = static_cast<T*>(storage)`).  The signature check below misses
+  // that.  Rebuild the closure so the body is substituted and `auto` is
+  // deduced against the concrete parameter.  A generic lambda's own parameters
+  // are not enclosing ones; only an index outside that operator's range counts.
   bool is_lambda_closure =
       str->tag_symbol != NULL && str->tag_symbol->flags.invented;
   for (size_t i = 0; i < str->members.length; i++) {
@@ -3660,6 +3843,9 @@ bool StructContainsTemplateParameter(Struct* str) {
         TypeContainsAuto(member->symbol->type)) {
       return true;
     }
+  }
+  if (is_lambda_closure && ClosureBodyDependsOnEnclosingTemplate(str, 0)) {
+    return true;
   }
   return false;
 }
