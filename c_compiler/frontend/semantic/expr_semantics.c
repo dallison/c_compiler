@@ -3307,33 +3307,41 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   }
   // [expr.cond]: when the arms differ and at least one has class type, convert
   // the other arm to that class if exactly one direction has a converting
-  // constructor.  `p ? str : std::string(str, comma)` is the gtest form.
+  // constructor.  The class arm may already be a prvalue
+  // (`p ? str : std::string(str, comma)`) or a glvalue
+  // (`p ? *name : "UNKNOWN"`).  A glvalue class arm is copy-initialized so
+  // both arms are prvalues; leaving it as an lvalue makes codegen memcpy the
+  // object and return a pointer into the callee's frame.
   if (CompilerIsCXX() &&
       !TypeEqualIgnoringQualifiers(colon->left->type, colon->right->type) &&
       (TypeIsStructOrUnion(colon->left->type) ||
        TypeIsStructOrUnion(colon->right->type))) {
     bool left_to_right =
-        colon->right->value_category == kValueCategoryPrvalue &&
         FindConvertingConstructorCandidate(
             colon->right->type, colon->left, /*allow_explicit=*/false,
             /*allow_same_class=*/false) != NULL;
     bool right_to_left =
-        colon->left->value_category == kValueCategoryPrvalue &&
         FindConvertingConstructorCandidate(
             colon->left->type, colon->right, /*allow_explicit=*/false,
             /*allow_same_class=*/false) != NULL;
-    ASTNode* source = NULL;
-    TypeRecord* target = NULL;
-    if (left_to_right && !right_to_left) {
-      source = colon->left;
-      target = colon->right->type;
-    } else if (right_to_left && !left_to_right) {
-      source = colon->right;
-      target = colon->left->type;
-    }
+    bool convert_left = left_to_right && !right_to_left;
+    bool convert_right = right_to_left && !left_to_right;
+    ASTNode* source = convert_left ? colon->left :
+                      convert_right ? colon->right : NULL;
+    TypeRecord* target = convert_left ? colon->right->type :
+                         convert_right ? colon->left->type : NULL;
+    ASTNode* other = convert_left ? colon->right :
+                     convert_right ? colon->left : NULL;
     if (source != NULL &&
         TryConvertWithConvertingConstructorImpl(
             source, target, kConvertNormal, /*allow_same_class=*/false)) {
+      if (other != NULL && other->type != NULL &&
+          other->value_category != kValueCategoryPrvalue &&
+          TypeIsStructOrUnion(other->type) &&
+          TypeEqualIgnoringQualifiers(other->type, target)) {
+        TryConvertWithConvertingConstructorImpl(
+            other, target, kConvertNormal, /*allow_same_class=*/true);
+      }
       TypeRecord* result_type = TypeRecordCopy(target);
       result_type->qualifiers = kQualPlain;
       ASTNodeSetType((ASTNode*)colon, result_type);
@@ -14192,6 +14200,9 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(expr_init): {
       ExpressionInitializerASTNode* expr_init = (ExpressionInitializerASTNode*)node;
       expr_init->expr = AnalyzeExpression(expr_init->expr);
+      if (expr_init->expr == NULL) {
+        return node;
+      }
       ASTNodeSetType(node, expr_init->expr->type);
       node->value_category = expr_init->expr->value_category;
       break;

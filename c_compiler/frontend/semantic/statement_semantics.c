@@ -337,6 +337,65 @@ static void CollectCXXDestroyedTemporarySymbols(ASTNode* node, void* data,
   }
 }
 
+// A prvalue class conditional constructs each in-place arm directly into the
+// result slot ([class.copy.elision]).  The arm's own temporary is never a
+// live object; destroying it runs a destructor on storage the untaken arm
+// never constructed (`cond ? *name : "UNKNOWN"`).
+static Symbol* CXXInPlaceConstructorReceiver(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(comma)) {
+    return CXXInPlaceConstructorReceiver(((BinaryASTNode*)expr)->left);
+  }
+  if (expr->op == AST_OP(cast)) {
+    return CXXInPlaceConstructorReceiver(((CastASTNode*)expr)->expr);
+  }
+  if (expr->op != AST_OP(call) || !CXXInitializerConstructsInPlace(expr)) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)expr;
+  if (call->children == NULL || call->children->length == 0) {
+    return NULL;
+  }
+  ASTNode* receiver = call->children->value.p[0];
+  if (receiver == NULL || receiver->op != AST_OP(identifier)) {
+    return NULL;
+  }
+  Symbol* sym = ((IdentifierASTNode*)receiver)->symbol;
+  return sym != NULL && sym->flags.is_temp ? sym : NULL;
+}
+
+static void ElidePrvalueConditionalArmTemporaries(
+    ASTNode* node, CXXTemporaryCollection* collection) {
+  if (node == NULL || node->op != AST_OP(question) ||
+      node->value_category != kValueCategoryPrvalue ||
+      node->type == NULL || !TypeIsStructOrUnion(node->type)) {
+    return;
+  }
+  BinaryASTNode* question = (BinaryASTNode*)node;
+  if (question->right == NULL || question->right->op != AST_OP(colon)) {
+    return;
+  }
+  BinaryASTNode* colon = (BinaryASTNode*)question->right;
+  ASTNode* arms[2] = {colon->left, colon->right};
+  for (size_t i = 0; i < 2; i++) {
+    if (!CXXInitializerConstructsInPlace(arms[i])) {
+      continue;
+    }
+    Symbol* syms[2] = {
+        CXXTemporaryConstructionResultSymbol(arms[i]),
+        CXXInPlaceConstructorReceiver(arms[i]),
+    };
+    for (size_t j = 0; j < 2; j++) {
+      Symbol* sym = syms[j];
+      if (sym != NULL && !VectorContainsPointer(&collection->elided, sym)) {
+        VectorAppend(&collection->elided, sym);
+      }
+    }
+  }
+}
+
 static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
@@ -345,6 +404,7 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
     return;
   }
   CXXTemporaryCollection* collection = data;
+  ElidePrvalueConditionalArmTemporaries(node, collection);
   Symbol* sym = NULL;
   if (node->op == AST_OP(identifier)) {
     if (node->parent != NULL && node->parent->op == AST_OP(compound_literal) &&

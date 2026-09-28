@@ -2990,6 +2990,38 @@ static void ValidateCAtomicDeclarator(TypeParser* parser, TypeRecord* type) {
   }
 }
 
+// `typename Class<T>::alias` as the return type of `Class<T>::member` is the
+// current instantiation.  The in-class declaration already used the alias's
+// real type, including when that type still names a template parameter.
+// Leaving the qualified name as an unknown `int` makes the definition look
+// like a different function.  Only the class being defined is resolved here;
+// `typename Other<T>::type` stays dependent so it does not collapse into `T`.
+static void ResolveOutOfLineDependentReturnType(TypeParser* parser) {
+  TypeRecord* type = parser->base_type;
+  if (type == NULL || parser->cxx_member_owner == NULL ||
+      type->dependent_member_name == NULL || type->template_origin == NULL ||
+      type->template_origin->type == NULL ||
+      !TypeIsStructOrUnion(type->template_origin->type)) {
+    return;
+  }
+  Struct* origin = type->template_origin->type->info.struct_info;
+  if (origin != parser->cxx_member_owner ||
+      !TemplateArgumentsAreIdentity(type->template_arguments,
+                                    type->template_origin)) {
+    return;
+  }
+  StructMember* member =
+      FindStructMember(origin, type->dependent_member_name);
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL ||
+      !StorageIs(member->symbol->storage, STO(typedef))) {
+    return;
+  }
+  TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
+  TypeRecordDelete(parser->base_type);
+  parser->base_type = resolved;
+}
+
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   if (base_type == NULL) {
     return NULL;
@@ -3027,6 +3059,7 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   }
 
   // Join all the type records together in reverse order.
+  ResolveOutOfLineDependentReturnType(parser);
   size_t i = parser->stack.length;
   TypeRecord* t = parser->base_type;
   while (i > 0) {

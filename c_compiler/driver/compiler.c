@@ -1616,6 +1616,13 @@ static void RemoveUninitializedStaticForSymbol(Symbol* symbol) {
   }
 }
 
+// ASTNodeClone hands this the newly allocated copy.  Returning it keeps the
+// deep copy instead of aliasing the original tree.
+static ASTNode* KeepClonedNode(ASTNode* node, void* data) {
+  (void)data;
+  return node;
+}
+
 static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
   Vector declarations;
   VectorInit(&declarations);
@@ -1654,8 +1661,33 @@ static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
     }
     if (decl->initializer != NULL &&
         decl->initializer->op == AST_OP(init)) {
-      AddInitializedStaticVariable(
-          decl, ((BinaryASTNode*)decl->initializer)->right);
+      ASTNode* raw = ((BinaryASTNode*)decl->initializer)->right;
+      // Block-scope thread_locals are recorded at parse time and may still be
+      // expression initializers (`static thread_local size_t id = kPoolSize`).
+      // ExpandBracedInitializer only accepts a braced initializer.  Lower a
+      // clone: AnalyzeInitializer moves the expression out of its parent, and
+      // the function body still owns the original tree.
+      if (raw != NULL && raw->op != AST_OP(braced_init) &&
+          decl->symbol != NULL && decl->symbol->type != NULL &&
+          InitializerIsLinkTimeConstant(raw)) {
+        ASTNode* cloned = ASTNodeClone(raw, KeepClonedNode, NULL, NULL);
+        if (cloned != NULL) {
+          bool saved_trap = DiagnosticErrorTrapBegin();
+          ASTNode* simplified =
+              AnalyzeInitializer(decl->symbol->type, cloned, true);
+          bool failed = DiagnosticErrorTrapped();
+          DiagnosticErrorTrapEnd(saved_trap);
+          if (!failed && simplified != NULL &&
+              simplified->op == AST_OP(braced_init)) {
+            raw = simplified;
+          }
+        }
+      }
+      if (raw != NULL && raw->op == AST_OP(braced_init)) {
+        AddInitializedStaticVariable(decl, raw);
+      } else {
+        AddUninitializedLocalStatic(decl->symbol);
+      }
     } else {
       AddUninitializedLocalStatic(decl->symbol);
     }

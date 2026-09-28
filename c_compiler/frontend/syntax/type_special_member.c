@@ -2251,6 +2251,28 @@ static bool CXXStructMoveSpecialMemberInaccessible(Struct* str,
   return false;
 }
 
+static TypeRecord* CXXFindSpecialMemberFunction(Struct* str,
+                                                CXXSpecialMemberKind kind);
+
+// [dcl.fct.def.default]: user-provided means user-declared and not explicitly
+// defaulted or deleted on its first declaration.  `T();` qualifies even when
+// the body is defined out of line.
+static bool CXXClassHasUserProvidedDefaultConstructor(TypeRecord* type) {
+  while (type != NULL && TypeIsFixedArray(type)) {
+    type = type->next;
+  }
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return false;
+  }
+  TypeRecord* ctor = CXXFindSpecialMemberFunction(
+      type->info.struct_info, kCXXSpecialMemberDefaultConstructor);
+  return ctor != NULL && TypeIsFunction(ctor) &&
+         ctor->info.function.is_user_declared &&
+         !ctor->info.function.is_defaulted &&
+         !ctor->info.function.is_deleted;
+}
+
 static bool CXXTypeNeedsDefaultInitializer(TypeRecord* type) {
   if (type == NULL) {
     return false;
@@ -2258,7 +2280,16 @@ static bool CXXTypeNeedsDefaultInitializer(TypeRecord* type) {
   if (TypeIsFixedArray(type)) {
     return CXXTypeNeedsDefaultInitializer(type->next);
   }
-  return TypeIsReference(type) || TypeIsConst(type);
+  if (TypeIsReference(type)) {
+    return true;
+  }
+  if (!TypeIsConst(type)) {
+    return false;
+  }
+  // [class.default.ctor]: a const member with no initializer deletes the
+  // default constructor unless that member's class has a user-provided
+  // default constructor (`const Randen impl_;` with `Randen();`).
+  return !CXXClassHasUserProvidedDefaultConstructor(type);
 }
 
 static bool CXXStructHasMemberWithoutDefaultInitialization(Struct* str) {
