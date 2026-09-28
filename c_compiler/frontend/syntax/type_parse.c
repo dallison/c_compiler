@@ -1144,10 +1144,8 @@ static TypeRecord* CurrentInstantiationMemberType(Symbol* origin, Vector* args,
     return NULL;
   }
   // Identity arguments name the primary (`DefaultValue<T>::ValueProducer`).
-  // A partial specialization can still redefine a dependent member
-  // (`iterator_traits<T*>::value_type`), so only a member whose type does not
-  // mention a template parameter is safe to copy here.  Dependent members stay
-  // as `Class<Args>::member` and are selected when the arguments are concrete.
+  // Only a member whose type does not mention a template parameter is safe
+  // to copy.  Dependent members stay as `Class<Args>::member`.
   Struct* primary = origin->type->info.struct_info;
   StructMember* member = FindStructMember(primary, member_name);
   if (member == NULL || member->symbol == NULL ||
@@ -1158,8 +1156,10 @@ static TypeRecord* CurrentInstantiationMemberType(Symbol* origin, Vector* args,
       !SymbolIsTagSymbol(member->symbol)) {
     return NULL;
   }
-  if (primary->partial_specializations.length != 0 &&
-      TypeContainsTemplateParameter(member->symbol->type)) {
+  // `typedef T type` inside `type_identity<T>` still names a template
+  // parameter.  Copying it turns `type_identity<T>::type*` into `T*` and
+  // makes that constructor indistinguishable from `f(T*, T*)`.
+  if (TypeContainsTemplateParameter(member->symbol->type)) {
     return NULL;
   }
   return TypeRecordCopy(member->symbol->type);

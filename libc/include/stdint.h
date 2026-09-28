@@ -34,6 +34,36 @@ typedef uint8_t uint_least8_t;
 typedef uint16_t uint_least16_t;
 typedef uint32_t uint_least32_t;
 typedef uint64_t uint_least64_t;
+#elif defined(__DAVECC_NATIVE_DARWIN__)
+// Apple types int64_t as long long, distinct from 64-bit long. Match the SDK
+// so a system header that already declared int64_t is not a conflicting
+// redeclaration.
+typedef signed char int8_t;
+typedef short int16_t;
+typedef int int32_t;
+#ifndef _INT64_T
+#define _INT64_T
+typedef long long int64_t;
+#endif
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+#ifndef _UINT64_T
+#define _UINT64_T
+typedef unsigned long long uint64_t;
+#endif
+typedef unsigned long uintptr_t;
+typedef long intptr_t;
+typedef long intmax_t;
+typedef unsigned long uintmax_t;
+typedef int8_t int_least8_t;
+typedef int16_t int_least16_t;
+typedef int32_t int_least32_t;
+typedef int64_t int_least64_t;
+typedef uint8_t uint_least8_t;
+typedef uint16_t uint_least16_t;
+typedef uint32_t uint_least32_t;
+typedef uint64_t uint_least64_t;
 #elif defined(__LP64__)
 // LP64 (e.g. x86-64): long is 64 bits.
 typedef signed char int8_t;
@@ -89,7 +119,14 @@ typedef uint16_t uint_fast16_t;
 typedef uint32_t uint_fast32_t;
 typedef uint64_t uint_fast64_t;
 
-#if defined(__LP64__)
+#if defined(__DAVECC_NATIVE_DARWIN__)
+#define INTPTR_MIN LONG_MIN
+#define INTPTR_MAX LONG_MAX
+#define UINTPTR_MAX ULONG_MAX
+#define INT64_MIN LLONG_MIN
+#define INT64_MAX LLONG_MAX
+#define UINT64_MAX ULLONG_MAX
+#elif defined(__LP64__)
 #define INTPTR_MIN LONG_MIN
 #define INTPTR_MAX LONG_MAX
 #define UINTPTR_MAX ULONG_MAX
@@ -127,7 +164,12 @@ typedef uint64_t uint_fast64_t;
 #define UINT32_MAX UINT_MAX
 #endif
 
-#if defined(__LP64__)
+#if defined(__DAVECC_NATIVE_DARWIN__)
+#define INT64_C(value) value##LL
+#define UINT64_C(value) value##ULL
+#define INTMAX_C(value) value##L
+#define UINTMAX_C(value) value##UL
+#elif defined(__LP64__)
 #define INT64_C(value) value##L
 #define UINT64_C(value) value##UL
 #define INTMAX_C(value) value##L

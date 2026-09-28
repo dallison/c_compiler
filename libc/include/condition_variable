@@ -14,7 +14,8 @@
 #include <syscall.h>
 #include <threads.h>
 
-#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#if !defined(__DAVECC_HAS_GUEST_THREADS__) && \
+    !defined(__DAVECC_NATIVE_DARWIN__)
 #error "<condition_variable> is unavailable in this single-threaded target profile"
 #endif
 

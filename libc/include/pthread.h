@@ -62,6 +62,14 @@ int pthread_cond_signal(pthread_cond_t*);
 int pthread_cond_broadcast(pthread_cond_t*);
 int pthread_cond_timedwait(pthread_cond_t*, pthread_mutex_t*,
                            const struct timespec*);
+#if defined(__APPLE__) || defined(__DAVECC_NATIVE_DARWIN__)
+int pthread_cond_timedwait_relative_np(pthread_cond_t*, pthread_mutex_t*,
+                                       const struct timespec*);
+#endif
+
+struct sched_param;
+int pthread_getschedparam(pthread_t, int*, struct sched_param*);
+int pthread_setschedparam(pthread_t, int, const struct sched_param*);
 
 int pthread_key_create(pthread_key_t*, void (*)(void*));
 int pthread_key_delete(pthread_key_t);

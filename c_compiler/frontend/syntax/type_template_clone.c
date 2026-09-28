@@ -208,6 +208,7 @@ ASTNode* CloneDependentDecltypeNode(ASTNode* node, void* data) {
           : NULL;
   if (deferred != NULL) {
     TypeRecordInvalidateTemplateParameterSummary(node->type);
+    TypeNoteDetachedDependentDecltype(node->type);
     node->type->dependent_decltype_expr = NULL;
   }
   ASTNode* result = CloneTemplateFunctionBodyNode(node, data);
@@ -224,6 +225,7 @@ ASTNode* CloneDependentDecltypeNode(ASTNode* node, void* data) {
     }
   }
   if (deferred != NULL) {
+    TypeForgetDetachedDependentDecltype(node->type);
     node->type->dependent_decltype_expr = deferred;
     TypeRecordInvalidateTemplateParameterSummary(node->type);
   }
@@ -7011,8 +7013,20 @@ static ASTNode* NormalizeClonedPointerDifferenceScale(
       minus->right->type->next == NULL) {
     return node;
   }
-  ASTNode* scale = NewPtrScaleASTNode(
-      minus->right->type->next, AST_OP(div), node, node->location);
+  // The transform installs the returned node and deletes this subtraction.
+  // A scale whose expression is this same node would be freed with it
+  // (`end - begin` inside a cloned function template).
+  TypeRecord* element_type = minus->right->type->next;
+  ASTNode* left = ASTNodeMove(minus->left);
+  ASTNode* right = ASTNodeMove(minus->right);
+  ASTNode* difference =
+      NewBinaryASTNode(AST_OP(minus), NULL, node->location, left, right);
+  if (node->type != NULL) {
+    ASTNodeSetType(difference, node->type);
+  }
+  difference->flags = node->flags & ~kASTDestructed;
+  ASTNode* scale = NewPtrScaleASTNode(element_type, AST_OP(div), difference,
+                                      node->location);
   ASTNodeSetType(scale, NewTypeRecordWithSize(kTypeLong, kQualPlain));
   return scale;
 }
@@ -7545,6 +7559,48 @@ static bool IsReanalyzableClonedExpressionOpcode(ASTOpcode op) {
   }
 }
 
+/* Built-in `~`, `+`, `<<`, and the other overloadable operators are not valid
+ * on a class type.  A function template analyzes them while the operand is
+ * still dependent, then substitution fills in the class and leaves the
+ * original opcode in place (`const Int ones = ~Int{0}`).  Reanalyze so
+ * `operator~` can replace it.  Plain assignment, address-of, comma, and
+ * member access stay as they are: those forms are valid on a class without
+ * an overload. */
+static bool ClonedOperatorOperandIsClass(TypeRecord* type) {
+  while (type != NULL && TypeIsReference(type)) {
+    type = type->next;
+  }
+  return TypeIsStructOrUnion(type);
+}
+
+static bool ClonedOperatorNeedsClassOverload(ASTNode* node) {
+  if (node == NULL || !IsReanalyzableClonedExpressionOpcode(node->op) ||
+      node->op == AST_OP(assign) || node->op == AST_OP(address) ||
+      node->op == AST_OP(comma) || node->op == AST_OP(dot) ||
+      node->op == AST_OP(arrow)) {
+    return false;
+  }
+  ASTNodeShape shape = ASTNodeGetShape(node);
+  if (shape == kASTShapeUnary) {
+    ASTNode* sub = ((UnaryASTNode*)node)->sub;
+    return sub != NULL && sub->type != NULL &&
+           !TypeContainsTemplateParameter(sub->type) &&
+           ClonedOperatorOperandIsClass(sub->type);
+  }
+  if (shape == kASTShapeBinary) {
+    BinaryASTNode* binary = (BinaryASTNode*)node;
+    if (binary->left == NULL || binary->right == NULL ||
+        binary->left->type == NULL || binary->right->type == NULL ||
+        TypeContainsTemplateParameter(binary->left->type) ||
+        TypeContainsTemplateParameter(binary->right->type)) {
+      return false;
+    }
+    return ClonedOperatorOperandIsClass(binary->left->type) ||
+           ClonedOperatorOperandIsClass(binary->right->type);
+  }
+  return false;
+}
+
 /* A class-template body may contain a non-dependent expression nested in an
  * otherwise dependent statement.  The template parse deliberately leaves that
  * expression untyped, but after cloning both operands can be concrete.  Analyze
@@ -7607,10 +7663,13 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
       receiver_is_concrete = false;
     }
   }
+  bool class_operator = ClonedOperatorNeedsClassOverload(node);
   if (node == NULL ||
-      (ExpressionIsTemplateDependent(node) && !receiver_is_concrete) ||
+      (ExpressionIsTemplateDependent(node) && !receiver_is_concrete &&
+       !class_operator) ||
       (!stale_floating_arithmetic && !receiver_is_concrete &&
-       node->type != NULL && !TypeContainsAuto(node->type)) ||
+       !class_operator && node->type != NULL &&
+       !TypeContainsAuto(node->type)) ||
       !IsReanalyzableClonedExpressionOpcode(node->op)) {
     return node;
   }
@@ -7638,7 +7697,7 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
   }
   *action = kASTTransformSkipChildren;
   node->flags &= ~kASTAnalyzed;
-  if (stale_floating_arithmetic || receiver_is_concrete) {
+  if (stale_floating_arithmetic || receiver_is_concrete || class_operator) {
     // A placeholder type (undeduced `auto`, or unknown) makes member lookup
     // return immediately.  Drop it so `.second` is resolved against the
     // concrete receiver.

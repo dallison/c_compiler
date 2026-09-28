@@ -33,6 +33,54 @@
 #include "rtti.h"
 #include "set.h"
 
+/* Types whose dependent_decltype_expr is temporarily detached. See
+ * TypeNoteDetachedDependentDecltype. */
+static Vector g_detached_dependent_decltypes;
+static bool g_detached_dependent_decltypes_ready = false;
+
+void TypeNoteDetachedDependentDecltype(TypeRecord* type) {
+  if (type == NULL) {
+    return;
+  }
+  if (!g_detached_dependent_decltypes_ready) {
+    VectorInit(&g_detached_dependent_decltypes);
+    g_detached_dependent_decltypes_ready = true;
+  }
+  VectorAppend(&g_detached_dependent_decltypes, type);
+}
+
+void TypeForgetDetachedDependentDecltype(TypeRecord* type) {
+  if (!g_detached_dependent_decltypes_ready ||
+      g_detached_dependent_decltypes.length == 0) {
+    return;
+  }
+  size_t last = g_detached_dependent_decltypes.length - 1;
+  if (g_detached_dependent_decltypes.value.p[last] == type) {
+    VectorPop(&g_detached_dependent_decltypes);
+    return;
+  }
+  for (size_t i = 0; i < g_detached_dependent_decltypes.length; i++) {
+    if (g_detached_dependent_decltypes.value.p[i] == type) {
+      g_detached_dependent_decltypes.value.p[i] =
+          g_detached_dependent_decltypes.value.p[last];
+      VectorPop(&g_detached_dependent_decltypes);
+      return;
+    }
+  }
+}
+
+bool TypeIsDetachedDependentDecltype(TypeRecord* type) {
+  if (type == NULL || !g_detached_dependent_decltypes_ready) {
+    return false;
+  }
+  for (size_t i = 0; i < g_detached_dependent_decltypes.length; i++) {
+    if (g_detached_dependent_decltypes.value.p[i] == type) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void InjectInstantiatedAnonymousMembers(TypeParser* parser,
                                                Struct* str);
 static bool StructHasBitFieldMembers(Struct* str);
@@ -2455,10 +2503,13 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
                                       completed_args);
   bool substitution_failed = parser->template_substitution_failed;
   parser->template_substitution_failed = saved_substitution_failed;
+  bool pattern_trailing_decltype =
+      completion_type != NULL && completion_type->next != NULL &&
+      (completion_type->next->dependent_decltype_expr != NULL ||
+       TypeIsDetachedDependentDecltype(completion_type->next));
   bool unresolved_trailing_decltype =
       func != NULL && func->next != NULL && TypeIsUnknown(func->next) &&
-      completion_type != NULL && completion_type->next != NULL &&
-      completion_type->next->dependent_decltype_expr != NULL;
+      pattern_trailing_decltype;
   if (substitution_failed || unresolved_trailing_decltype) {
     // A dependent type in the signature (e.g. an `enable_if` SFINAE guard) had
     // no valid substitution.  Abandon this instantiation quietly so overload
@@ -3890,7 +3941,11 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
                                                TypeRecord* formal,
                                                ASTNode* actual) {
   if (formal == NULL || actual == NULL || actual->type == NULL) {
-    return false;
+    // A braced list may still be untyped while the surrounding call is
+    // deduced.  Against a parameter that names no template parameter it is a
+    // non-deduced context, not a deduction failure.
+    return actual != NULL && actual->op == AST_OP(braced_init) &&
+           formal != NULL && !TypeContainsTemplateParameter(formal);
   }
   TypeRecord* alias_pattern = FormalWithAliasPattern(formal);
   if (alias_pattern != NULL) {
@@ -3913,7 +3968,11 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
   if (actual->op == AST_OP(braced_init) &&
       !TypeIsCXXInitializerList(target) &&
       (target == NULL || target->declarator != kDeclArray)) {
-    return false;
+    // [temp.deduct.call] A braced-init-list is a non-deduced context unless
+    // the parameter is an initializer_list or an array.  Deduction of the
+    // other parameters still proceeds (`FormatF(mantissa, exp, {sign, prec,
+    // conv, sink})` deduces `Int` and later checks the `FormatState` conversion).
+    return true;
   }
   /* A string literal may initialize an array of characters, so a parameter of
    * type `CharT[N]` deduces its bound `N` (and, in aggregate CTAD, its element
@@ -4758,7 +4817,8 @@ Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   bool unresolved_trailing_decltype =
       func != NULL && func->next != NULL && TypeIsUnknown(func->next) &&
       func_type != NULL && func_type->next != NULL &&
-      func_type->next->dependent_decltype_expr != NULL;
+      (func_type->next->dependent_decltype_expr != NULL ||
+       TypeIsDetachedDependentDecltype(func_type->next));
   if (substitution_failed || TypeContainsTemplateParameter(func) ||
       unresolved_trailing_decltype) {
     TypeRecordDelete(func);
@@ -4988,11 +5048,24 @@ static TypeRecord* FunctionTemplatePatternFunctionType(Symbol* symbol) {
   return NULL;
 }
 
+static bool TypeChainHasDependentMemberName(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (t->dependent_member_name != NULL) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* True if `specialized`'s parameter patterns can deduce `general`
  * ([temp.deduct.partial]).  Each of `specialized`'s template parameters acts
  * as a unique type on the argument side, so a repeated parameter (`It, It`)
  * is a tighter pattern than an independent one (`It, Pred`).  Parameter packs
- * are left unordered; a pack on either side is not at least as specialized. */
+ * are left unordered; a pack on either side is not at least as specialized.
+ * A dependent member typedef (`type_identity<T>::type`) is not that parameter,
+ * so it does not satisfy a plain `T` pattern; the reverse is a non-deduced
+ * context and still succeeds.  That orders `f(T*, T*)` ahead of
+ * `f(T*, type_identity<T>::type*)` when both are exact matches. */
 static bool FunctionParametersAtLeastAsSpecialized(Symbol* specialized,
                                                    Symbol* general) {
   TypeRecord* sfunc = FunctionTemplatePatternFunctionType(specialized);
@@ -5024,6 +5097,11 @@ static bool FunctionParametersAtLeastAsSpecialized(Symbol* specialized,
   for (size_t i = 0; ok && i < gfunc->info.function.prototype.length; i++) {
     Symbol* gparam = gfunc->info.function.prototype.value.p[i];
     Symbol* sparam = sfunc->info.function.prototype.value.p[i];
+    if (TypeChainHasDependentMemberName(sparam->type) &&
+        !TypeChainHasDependentMemberName(gparam->type)) {
+      ok = false;
+      break;
+    }
     ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
                                            gparam->type, sparam->type);
   }

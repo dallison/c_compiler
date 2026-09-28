@@ -2607,6 +2607,16 @@ static void QueueCXXInlineStaticDataMemberDefinition(TypeParser* parser,
     return;
   }
 
+  // `static constexpr char kName[] = "PthreadWaiter"` is the definition.
+  // The omitted bound is stored as a non-flexible size of 0 so it is not a
+  // flexible array member; the initializer is what completes it.
+  if (initializer != NULL && TypeIsArray(symbol->type) &&
+      !symbol->type->info.array.is_flexible &&
+      !symbol->type->info.array.is_vla &&
+      !symbol->type->info.array.is_dependent_bound &&
+      symbol->type->info.array.size.fixed <= 0) {
+    symbol->type->info.array.is_flexible = true;
+  }
   TypeRecordCalculateSize(symbol->type);
   symbol->flags.is_defined = true;
   if (!StorageIs(symbol->storage, STO(static))) {

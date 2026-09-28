@@ -136,6 +136,14 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser, Struct* owne
 void MaxTemplateParameterIndexInArgument(TemplateArgument* arg, int* max_index);
 bool AliasTemplateArgumentIsPackExpansion(TemplateArgument* arg, int* pack_index,
                                           TemplateParameterKind* kind);
+/* `CloneDependentDecltypeNode` temporarily clears `dependent_decltype_expr`
+ * on the operand's type so cloning that operand does not recurse into itself.
+ * A nested instantiation of the function whose trailing return type *is* that
+ * type would otherwise treat the missing expression as a plain `auto` return
+ * and instantiate the body (`GetData` for an array). */
+void TypeNoteDetachedDependentDecltype(struct TypeRecord* type);
+void TypeForgetDetachedDependentDecltype(struct TypeRecord* type);
+bool TypeIsDetachedDependentDecltype(struct TypeRecord* type);
 struct ASTNode* CloneDependentDecltypeNode(struct ASTNode* node, void* data);
 struct ASTNode* CloneTemplateFunctionBodyNode(struct ASTNode* node, void* data);
 struct ASTNode* CloneTemplateFunctionBody(TypeParser* parser, TypeRecord* from,

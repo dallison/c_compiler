@@ -87,6 +87,10 @@
 #define ENFILE          31      /* Too many open files in system */
 #define EOVERFLOW       32      /* Value too large for defined data type */
 #define ENOTTY          33      /* Inappropriate ioctl for device */
+#if defined(__DAVECC_NATIVE_DARWIN__)
+/* Darwin's pthread_cond_timedwait returns 60, not the Linux value. */
+#define ETIMEDOUT       60
+#endif
 #endif
 
 #if defined(__6502__)
