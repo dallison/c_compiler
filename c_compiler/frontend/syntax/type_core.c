@@ -1521,6 +1521,7 @@ StructMember* NewStructMember(Symbol* symbol) {
   StructMember* mem = malloc(sizeof(StructMember));
   mem->symbol = symbol;
   mem->default_initializer = NULL;
+  mem->bit_width_expr = NULL;
   mem->byte_offset = 0;
   mem->bit_offset = 0;
   mem->bit_size = 0;
@@ -1691,6 +1692,9 @@ void CXXVTableInfoDelete(CXXVTableInfo* info) {
 void StructMemberDelete(StructMember* member) {
   if (member->default_initializer != NULL) {
     ASTNodeDelete(member->default_initializer);
+  }
+  if (member->bit_width_expr != NULL) {
+    ASTNodeDelete(member->bit_width_expr);
   }
   SymbolDelete(member->symbol);
   free(member);

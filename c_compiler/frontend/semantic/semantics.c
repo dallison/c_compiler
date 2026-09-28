@@ -1532,6 +1532,9 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
       return;
     }
   }
+  if (CXXConvertNonCapturingLambdaToFunctionPointer(from, to)) {
+    return;
+  }
 
   if (TryConvertDerivedPointer(from, to)) {
     return;

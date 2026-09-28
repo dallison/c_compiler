@@ -1259,6 +1259,75 @@ static ASTNode* LambdaToFunctionPointer(ASTNode* lambda) {
   return AddressOfFunctionSymbol(thunk, lambda->location);
 }
 
+static bool LambdaCallMatchesFunctionPointer(ASTNode* lambda,
+                                             TypeRecord* pointer) {
+  if (lambda == NULL || pointer == NULL || !TypeIsPointer(pointer) ||
+      pointer->next == NULL || !TypeIsFunction(pointer->next) ||
+      (lambda->flags & kASTLambdaExpression) == 0 || lambda->type == NULL ||
+      !TypeIsStructOrUnion(lambda->type)) {
+    return false;
+  }
+  Struct* closure = lambda->type->info.struct_info;
+  if (ClosureHasCaptureFields(closure)) {
+    return false;
+  }
+  StructMember* call_member = ClosureCallOperatorMember(closure);
+  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
+  if (call_op == NULL || call_op->flags.is_template || call_op->type == NULL ||
+      !TypeIsFunction(call_op->type) ||
+      call_op->type->info.function.template_parameters.length > 0) {
+    return false;
+  }
+  TypeRecord* method = call_op->type;
+  if (TypeFunctionReturnContainsAuto(method) || method->next == NULL) {
+    StatementFinishAutoReturnDeduction(method, lambda);
+  }
+  if (method->next == NULL) {
+    return false;
+  }
+  TypeRecord* target = pointer->next;
+  if (method->info.function.varargs != target->info.function.varargs) {
+    return false;
+  }
+  size_t start = method->info.function.cxx_member_owner != NULL ? 1 : 0;
+  if (method->info.function.prototype.length < start ||
+      method->info.function.prototype.length - start !=
+          target->info.function.prototype.length) {
+    return false;
+  }
+  for (size_t i = 0; i < target->info.function.prototype.length; i++) {
+    Symbol* src = method->info.function.prototype.value.p[start + i];
+    Symbol* dst = target->info.function.prototype.value.p[i];
+    if (src == NULL || dst == NULL || src->type == NULL || dst->type == NULL ||
+        !TypeEqual(src->type, dst->type)) {
+      return false;
+    }
+  }
+  if (TypeIsVoid(method->next) && TypeIsVoid(target->next)) {
+    return true;
+  }
+  return TypeEqual(method->next, target->next);
+}
+
+bool CXXConvertNonCapturingLambdaToFunctionPointer(ASTNode* from,
+                                                   TypeRecord* to) {
+  if (!LambdaCallMatchesFunctionPointer(from, to)) {
+    return false;
+  }
+  ASTNode* converted = LambdaToFunctionPointer(from);
+  if (converted == NULL) {
+    return false;
+  }
+  ASTNode* parent = from->parent;
+  int child_id = from->child_id;
+  if (parent == NULL) {
+    ASTNodeDelete(converted);
+    return false;
+  }
+  ASTNodeReplaceChild(parent, child_id, converted, true);
+  return true;
+}
+
 static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   if (node == NULL) {
     return;

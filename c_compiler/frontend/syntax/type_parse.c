@@ -3180,8 +3180,12 @@ void TypeParserParsePointer(TypeParser* parser) {
     if (!rvalue) {
       LexMatch(parser->lex, TOK(amp));
     }
+    // GCC allows `__restrict` on a reference parameter
+    // (`const T& __restrict policy`).  The qualifier belongs to the
+    // reference, not to a following declarator.
+    Qualifiers quals = ParseQualifiers(parser);
     TypeParserParsePointer(parser);
-    TypeRecord* p = NewReferenceTypeRecord(kQualPlain, rvalue);
+    TypeRecord* p = NewReferenceTypeRecord(quals, rvalue);
     VectorAppend(&parser->stack, p);
   } else {
     TypeParserParseFuncOrArray(parser);

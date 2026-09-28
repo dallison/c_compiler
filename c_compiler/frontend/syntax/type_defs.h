@@ -359,6 +359,10 @@ typedef struct CXXVTableInfo {
 typedef struct StructMember {
   Symbol* symbol;   // Embedded Symbol.                            // @wire 1
   struct ASTNode* default_initializer;  // C++ default member init. // @wire 2
+  // Width of a bit-field whose expression was dependent at parse time
+  // (`IntType h2 : kH2Bits` inside a class template).  Evaluated when the
+  // class is instantiated.  Not serialized.
+  struct ASTNode* bit_width_expr;  // @wire -
   int byte_offset;  // Byte offset into struct.                    // @wire 3
   int bit_offset;   // Bit offset into word.                       // @wire 4
   int bit_size;     // Bitfield size in bits.                      // @wire 5

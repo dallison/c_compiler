@@ -108,6 +108,17 @@ void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
   }
   int64_t bit_width = 0;
   if (!EvaluateIntegerExpression(width_node, &bit_width)) {
+    // `static constexpr IntType kH2Bits = 7; IntType h2 : kH2Bits;` is not a
+    // constant until the class template is instantiated.  Keep the expression
+    // and pack the field when the concrete width is known.
+    if (ExpressionIsTemplateDependent(width_node)) {
+      member->is_bit_field = true;
+      member->bit_size = 0;
+      member->bit_offset = 0;
+      member->byte_offset = str->current_offset;
+      member->bit_width_expr = width_node;
+      return;
+    }
     ASTNodeDelete(width_node);
     snprintf(error, sizeof(error), "constant expression needed");
     goto error;

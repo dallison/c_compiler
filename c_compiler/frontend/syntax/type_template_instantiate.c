@@ -436,6 +436,114 @@ static void EvaluateInstantiatedStaticAsserts(TypeParser* parser,
   }
 }
 
+static void ClearBitWidthAnalysis(ASTNode* node, void* data, int child_id,
+                                   VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL) {
+    node->flags &= ~kASTAnalyzed;
+    ASTNodeClearType(node);
+  }
+}
+
+/* Pair source bit-fields with the instantiation's bit-fields in declaration
+ * order and fold widths that were dependent at parse time. */
+static void ResolveInstantiatedBitFieldWidths(TypeParser* parser,
+                                              Struct* source, Struct* target,
+                                              Vector* args) {
+  if (parser == NULL || source == NULL || target == NULL) {
+    return;
+  }
+  size_t target_index = 0;
+  for (size_t source_index = 0; source_index < source->members.length;
+       source_index++) {
+    StructMember* from = source->members.value.p[source_index];
+    if (from == NULL || !from->is_bit_field) {
+      continue;
+    }
+    StructMember* to = NULL;
+    for (; target_index < target->members.length; target_index++) {
+      StructMember* candidate = target->members.value.p[target_index];
+      if (candidate != NULL && candidate->is_bit_field) {
+        to = candidate;
+        target_index++;
+        break;
+      }
+    }
+    if (to == NULL || from->bit_width_expr == NULL || to->symbol == NULL ||
+        to->symbol->type == NULL) {
+      continue;
+    }
+    ASTNode* substituted =
+        CloneDependentExpressionWithArgs(parser, from->bit_width_expr, args);
+    if (substituted == NULL) {
+      substituted = ASTNodeClone(from->bit_width_expr, IdentityCloneNode, NULL,
+                                 NULL);
+    }
+    if (substituted == NULL) {
+      continue;
+    }
+    Struct* owners[2] = {source, target};
+    ASTNodeVisit(substituted, RebindInstantiatedMemberIdentifier, 0, owners);
+    // The cloned width still carries the definition-time type, which names
+    // the class template's parameter.  Rebinding the identifier does not
+    // clear that type, so dependence has to be judged after reanalysis.
+    ASTNodeVisit(substituted, ClearBitWidthAnalysis, 0, NULL);
+    int64_t width = 0;
+    DiagnosticSuppressBegin();
+    compiler->constant_evaluation_required_depth++;
+    substituted = AnalyzeExpression(substituted);
+    compiler->constant_evaluation_required_depth--;
+    bool ok = substituted != NULL &&
+              EvaluateIntegerExpression(substituted, &width);
+    DiagnosticSuppressEnd();
+    if (!ok && substituted != NULL &&
+        ExpressionIsTemplateDependent(substituted)) {
+      ASTNodeDelete(to->bit_width_expr);
+      to->bit_width_expr = substituted;
+      continue;
+    }
+    ASTNodeDelete(substituted);
+    SourceLocation location =
+        to->symbol->location != 0 ? to->symbol->location : from->symbol != NULL
+                                                               ? from->symbol->location
+                                                               : 0;
+    if (!ok) {
+      SyntaxErrorAtLocation(parser->syntax, location,
+                            "Invalid bitfield; constant expression needed");
+      continue;
+    }
+    TypeRecordCalculateSize(to->symbol->type);
+    if (!TypeIsIntegral(to->symbol->type)) {
+      SyntaxErrorAtLocation(
+          parser->syntax, location,
+          "Invalid bitfield; only integer types can be used for bitfields");
+      continue;
+    }
+    int word_width = TypeIsBitInt(to->symbol->type)
+                         ? to->symbol->type->bit_width
+                         : to->symbol->type->size * 8;
+    if (width == 0) {
+      if (!to->symbol->flags.invented) {
+        SyntaxErrorAtLocation(parser->syntax, location,
+                              "Invalid bitfield; named bit-field has zero width");
+      }
+      to->bit_size = 0;
+      continue;
+    }
+    if (width < 0 || (word_width > 0 && width > word_width)) {
+      SyntaxErrorAtLocation(
+          parser->syntax, location,
+          "Invalid bitfield; width of %" PRId64
+          " is out of bounds for type of size %d bits",
+          width, word_width);
+      continue;
+    }
+    to->bit_size = (int)width;
+    to->is_bit_field = true;
+  }
+}
+
 typedef struct {
   Struct* source;
   Vector* args;
@@ -969,6 +1077,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   parser->enclosing_template_substitution_target =
       saved_enclosing_substitution_target;
   if (StructHasBitFieldMembers(from)) {
+    ResolveInstantiatedBitFieldWidths(parser, from, str, args);
     RelayoutStruct(str);
   }
   InjectInstantiatedAnonymousMembers(parser, str);
@@ -9094,6 +9203,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     }
   }
   if (StructHasBitFieldMembers(source_struct)) {
+    ResolveInstantiatedBitFieldWidths(parser, source_struct, str, source_args);
     RelayoutStruct(str);
   }
   InjectInstantiatedAnonymousMembers(parser, str);

@@ -15239,12 +15239,20 @@ static bool CXXTypeStartsTemporaryMemberAccess(Syntax* syntax) {
     have_type_name = LexLookingAt(syntax->lex, TOK(identifier));
   }
 
-  if (have_type_name && LexLookingAt(syntax->lex, TOK(lparen))) {
+  if (have_type_name && (LexLookingAt(syntax->lex, TOK(lparen)) ||
+                         LexLookingAt(syntax->lex, TOK(lbrace)))) {
+    // `T{pos}.member()` is the same kind of temporary as `T(pos).member()`.
+    // A declaration would put a name between the type and the braces
+    // (`T var{pos}`), so a brace immediately after the type name is an
+    // expression.
+    bool brace = LexLookingAt(syntax->lex, TOK(lbrace));
+    Token open = brace ? TOK(lbrace) : TOK(lparen);
+    Token close = brace ? TOK(rbrace) : TOK(rparen);
     int depth = 0;
     do {
-      if (LexLookingAt(syntax->lex, TOK(lparen))) {
+      if (LexLookingAt(syntax->lex, open)) {
         depth++;
-      } else if (LexLookingAt(syntax->lex, TOK(rparen))) {
+      } else if (LexLookingAt(syntax->lex, close)) {
         depth--;
       }
       LexNextToken(syntax->lex);
