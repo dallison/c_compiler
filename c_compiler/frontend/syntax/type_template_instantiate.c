@@ -644,6 +644,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   } else {
     str->lexical_parent = from->lexical_parent;
   }
+  str->access_enclosing_function = from->access_enclosing_function;
   if (StructHasMemberFunction(from)) {
     bool invented = from->tag_symbol != NULL && from->tag_symbol->flags.invented;
     String synthetic_name;
@@ -8118,9 +8119,11 @@ void AddVariableTemplatePartialSpecialization(TypeParser* parser,
 }
 
 /* Complete a function template's argument list against its parameters (filling
- * defaults / gathering a trailing pack), then clear the "unknown/placeholder"
- * marking on type arguments that resolved to their own parameter position so
- * they read as concrete deduced types. Returns NULL if completion fails. */
+ * defaults / gathering a trailing pack). A type argument that is still a
+ * template parameter is left dependent; an enclosing parameter can share this
+ * function's parameter index (`WasDeduced<Arg>()` inside `Cleanup<Arg>`), and
+ * erasing that placeholder would instantiate the function as if the argument
+ * were `int`. Returns NULL if completion fails. */
 static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
                                                  TypeRecord* func,
                                                  Vector* args,
@@ -8197,15 +8200,6 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
   }
   if (completed == NULL) {
     return NULL;
-  }
-  for (size_t i = 0; i < completed->length; i++) {
-    TemplateArgument* arg = completed->value.p[i];
-    if (arg != NULL && arg->kind == kTemplateParameterType &&
-        arg->type != NULL && TypeIsUnknown(arg->type) &&
-        arg->type->template_parameter_index == (int)i) {
-      arg->type->type &= ~kTypeUnknown;
-      arg->type->template_parameter_index = -1;
-    }
   }
   return completed;
 }
@@ -8784,6 +8778,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   Struct* str = NewStruct(source_struct->is_union);
   str->is_class = source_struct->is_class;
   str->lexical_parent = source_struct->lexical_parent;
+  str->access_enclosing_function = source_struct->access_enclosing_function;
   // Only remap the parent when this specialization is a nested class of the
   // class template currently being instantiated.  Applying the enclosing
   // target to every class materialized during that instantiation would make

@@ -149,6 +149,11 @@ static bool TypeContainsTemplateParameterImpl(TypeRecord* type,
   if (type == NULL) {
     return false;
   }
+  if (type->template_parameter_summary ==
+          kTypeTemplateParameterSummaryAbsent &&
+      type->template_parameter_index >= 0) {
+    type->template_parameter_summary = kTypeTemplateParameterSummaryUnknown;
+  }
   if (type->template_parameter_summary !=
       kTypeTemplateParameterSummaryUnknown) {
     return type->template_parameter_summary ==

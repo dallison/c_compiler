@@ -7826,6 +7826,176 @@ static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
   AnalyzeStatement(node);
 }
 
+/* `decltype(auto_var)` stays opaque while `auto_var` is undeduced.  After
+ * deduction, point that decltype at the instantiated symbol and substitute
+ * again so `Hash<decltype(auto_var)>` is the concrete class. */
+static bool SeenTypeRecord(Vector* seen, TypeRecord* type) {
+  if (seen == NULL || type == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < seen->length; i++) {
+    if (seen->value.p[i] == type) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TypeContainsDependentDecltype(TypeRecord* type, Vector* seen);
+
+static bool TemplateArgumentContainsDependentDecltype(TemplateArgument* argument,
+                                                      Vector* seen) {
+  if (argument == NULL) {
+    return false;
+  }
+  if (TypeContainsDependentDecltype(argument->type, seen)) {
+    return true;
+  }
+  if (argument->pack_arguments == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < argument->pack_arguments->length; i++) {
+    if (TemplateArgumentContainsDependentDecltype(
+            argument->pack_arguments->value.p[i], seen)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TypeContainsDependentDecltype(TypeRecord* type, Vector* seen) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (SeenTypeRecord(seen, current)) {
+      return false;
+    }
+    VectorAppend(seen, current);
+    if (current->dependent_decltype_expr != NULL) {
+      return true;
+    }
+    if (current->template_arguments == NULL) {
+      continue;
+    }
+    for (size_t i = 0; i < current->template_arguments->length; i++) {
+      if (TemplateArgumentContainsDependentDecltype(
+              current->template_arguments->value.p[i], seen)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static void RemapAutoDecltypeIdentifier(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol == NULL) {
+    return;
+  }
+  Symbol* replacement = MapFindPointerKey((Map*)data, id->symbol);
+  if (replacement == NULL || replacement->type == NULL ||
+      TypeContainsAuto(replacement->type)) {
+    return;
+  }
+  id->symbol = replacement;
+}
+
+static void RemapAutoDecltypeSymbols(TypeRecord* type, Map* symbol_map,
+                                     Vector* seen);
+
+static void RemapAutoDecltypeArgument(TemplateArgument* argument,
+                                      Map* symbol_map, Vector* seen) {
+  if (argument == NULL) {
+    return;
+  }
+  RemapAutoDecltypeSymbols(argument->type, symbol_map, seen);
+  if (argument->pack_arguments == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < argument->pack_arguments->length; i++) {
+    RemapAutoDecltypeArgument(argument->pack_arguments->value.p[i], symbol_map,
+                              seen);
+  }
+}
+
+static void RemapAutoDecltypeSymbols(TypeRecord* type, Map* symbol_map,
+                                     Vector* seen) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (SeenTypeRecord(seen, current)) {
+      return;
+    }
+    VectorAppend(seen, current);
+    if (current->dependent_decltype_expr != NULL) {
+      ASTNodeVisit(current->dependent_decltype_expr, RemapAutoDecltypeIdentifier,
+                   0, symbol_map);
+    }
+    if (current->template_arguments == NULL) {
+      continue;
+    }
+    for (size_t i = 0; i < current->template_arguments->length; i++) {
+      RemapAutoDecltypeArgument(current->template_arguments->value.p[i],
+                                symbol_map, seen);
+    }
+  }
+}
+
+static bool TypeHasDependentDecltype(TypeRecord* type) {
+  Vector seen;
+  VectorInit(&seen);
+  bool found = TypeContainsDependentDecltype(type, &seen);
+  VectorDestruct(&seen);
+  return found;
+}
+
+static void InstallResolvedAutoDecltype(TemplateFunctionBodyClone* clone,
+                                        TypeRecord** type_slot) {
+  if (clone == NULL || type_slot == NULL || *type_slot == NULL ||
+      !TypeHasDependentDecltype(*type_slot)) {
+    return;
+  }
+  Vector seen;
+  VectorInit(&seen);
+  RemapAutoDecltypeSymbols(*type_slot, &clone->symbol_map, &seen);
+  VectorDestruct(&seen);
+  TypeRecord* resolved = SubstituteTemplateBodyType(clone, *type_slot);
+  if (resolved == NULL || TypeContainsAuto(resolved) ||
+      TypeHasDependentDecltype(resolved)) {
+    TypeRecordDelete(resolved);
+    return;
+  }
+  TypeRecordDelete(*type_slot);
+  *type_slot = resolved;
+  TypeRecordIncRef(resolved);
+}
+
+static void ResolveClonedAutoDecltypeVisitor(ASTNode* node, void* data,
+                                             int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  TemplateFunctionBodyClone* clone = data;
+  if (node->op == AST_OP(vardecl)) {
+    VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
+    if (decl->symbol != NULL && decl->symbol->type != NULL &&
+        TypeHasDependentDecltype(decl->symbol->type)) {
+      InstallResolvedAutoDecltype(clone, &decl->symbol->type);
+      if (decl->symbol->type != NULL) {
+        ASTNodeSetType(node, decl->symbol->type);
+      }
+      node->flags &= ~kASTAnalyzed;
+    }
+  }
+  if (node->type != NULL && TypeHasDependentDecltype(node->type)) {
+    InstallResolvedAutoDecltype(clone, &node->type);
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 typedef struct {
   TemplateFunctionBodyClone* clone;
   bool materialized;
@@ -8294,6 +8464,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
                                   NULL);
   ASTNodeVisit(body, MarkClonedCastForReanalysis, 0, NULL);
   ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
+  ASTNodeVisit(body, ResolveClonedAutoDecltypeVisitor, 0, &clone);
   ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
   // Constructor calls whose arguments were still `auto` were left unresolved
   // above.  The placeholders are concrete now.
@@ -8311,6 +8482,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   // `p.second` and the call were concrete.  Re-run deduction so the class
   // initializer is lowered to a braced constructor call.
   ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
+  ASTNodeVisit(body, ResolveClonedAutoDecltypeVisitor, 0, &clone);
   ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
   DeferredStructuredBindingContext deferred_binding = {
       .clone = &clone, .materialized = false};
@@ -8322,6 +8494,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
     body = ASTNodeVisitAndTransform(
         body, ExpandDeferredStructuredBindingPackUse, &deferred_binding);
     ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
+  ASTNodeVisit(body, ResolveClonedAutoDecltypeVisitor, 0, &clone);
     ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
     body =
         ASTNodeVisitAndTransform(body, ReanalyzeClonedUntypedExpression, NULL);
@@ -8335,6 +8508,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   if (deferred_expansion.materialized) {
     ASTNodeVisit(body, ClearAnalyzedFlagVisitor, 0, NULL);
     ASTNodeVisit(body, DeduceClonedAutoLocalVisitor, 0, NULL);
+  ASTNodeVisit(body, ResolveClonedAutoDecltypeVisitor, 0, &clone);
     ASTNodeVisit(body, RefreshClonedIdentifierTypeVisitor, 0, NULL);
     body =
         ASTNodeVisitAndTransform(body, ReanalyzeClonedUntypedExpression, NULL);

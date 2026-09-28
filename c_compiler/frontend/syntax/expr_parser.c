@@ -2121,6 +2121,16 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       }
     }
   }
+  if (symbol != NULL && !symbol->flags.is_template &&
+      !symbol->flags.is_using_alias && symbol->alias_target != NULL &&
+      symbol->alias_target->flags.is_template &&
+      name.template_arguments.length > 0) {
+    Vector* parsed_args =
+        name.template_arguments.value.p[name.template_arguments.length - 1];
+    if (parsed_args != NULL && parsed_args->length > 0) {
+      symbol = symbol->alias_target;
+    }
+  }
   Vector* template_arguments = NULL;
   if (symbol != NULL && name.template_arguments.length > 0 &&
       (TypeIsFunction(symbol->type) ||
@@ -3630,6 +3640,15 @@ static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
   // for access purposes ([expr.prim.lambda], [class.access.nest]): its body
   // may name private members and invoke private constructors.
   closure->lexical_parent = EnclosingClassForLambda(syntax);
+  // A lambda is a local class of the function that contains it, so its body
+  // has that function's access ([class.local]): a lambda in a friend function
+  // may call the befriended class's private members.
+  if (syntax != NULL && syntax->context == kParsingBlockScope &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    closure->access_enclosing_function =
+        compiler->current_function->info.function.symbol;
+  }
   TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
   TypeRecordSetStructInfo(type, closure);
   Symbol* tag = NewSymbol(tag_name.value, type, STO(implicit));

@@ -586,6 +586,7 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   // (`decltype(probe(), T{})`).
   ASTNode* expr = SyntaxParseExpression(parser->syntax, TC(closebra));
   Symbol* declared_symbol = NULL;
+  bool defer_unparenthesized_entity = false;
   if (unparenthesized_identifier && expr != NULL &&
       expr->op == AST_OP(identifier)) {
     declared_symbol = ((IdentifierASTNode*)expr)->symbol;
@@ -594,12 +595,17 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
         (declared_symbol->flags.invented ||
          declared_symbol->type == NULL ||
          TypeIsUnknown(declared_symbol->type) ||
-         TypeContainsTemplateParameter(declared_symbol->type))) {
+         TypeContainsTemplateParameter(declared_symbol->type) ||
+         TypeContainsAuto(declared_symbol->type))) {
       // The declared type of a dependent unparenthesized id-expression cannot
-      // be known until substitution. Retain the operand just like any other
-      // dependent decltype, while recording the entity rule so substitution
-      // returns the member's declared type rather than an lvalue reference.
+      // be known until substitution.  An `auto` local is not deduced while its
+      // initializer is dependent (`auto t = std::tie(a, b)`), so copying that
+      // placeholder here would instantiate `Hash<decltype(t)>` as
+      // `Hash<auto>`.  The name itself may not mention a template parameter,
+      // so retain the operand even when the usual dependent-expression check
+      // does not fire.
       expr->flags |= kASTUnparenthesizedDecltypeEntity;
+      defer_unparenthesized_entity = true;
       declared_symbol = NULL;
     }
   }
@@ -617,7 +623,8 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
     result = TypeRecordCopy(declared_symbol->type);
   } else if (parser->syntax->current_template_parameters != NULL &&
              expr != NULL &&
-             DependentExpressionContainsTemplateParameter(expr)) {
+             (defer_unparenthesized_entity ||
+              DependentExpressionContainsTemplateParameter(expr))) {
     // A pack expansion such as `decltype(Or({Trait<Ts>()()...}))` cannot be
     // overload-resolved until the pack is expanded against concrete
     // arguments.  Analyzing it now diagnoses a false "no matching overload"

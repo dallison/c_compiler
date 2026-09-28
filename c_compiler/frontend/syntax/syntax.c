@@ -1312,6 +1312,34 @@ static bool AngleBracketsLookLikeTemplateId(Syntax* syntax) {
   return result;
 }
 
+// A non-template can share a name with a function template (`operator<<(char)`
+// beside `operator<<(const T&)`).  The first symbol is not enough: `<` after
+// that name is still a template-argument list.
+static bool SymbolOrOverloadIsTemplate(Symbol* symbol) {
+  for (Symbol* candidate = symbol; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->flags.is_template ||
+        candidate->flags.is_template_template_parameter ||
+        candidate->alias_template != NULL ||
+        candidate->variable_template != NULL) {
+      return true;
+    }
+    if (candidate->type == NULL || !TypeIsFunction(candidate->type) ||
+        candidate->type->info.function.cxx_member_owner == NULL) {
+      continue;
+    }
+    StructMember* head = FindStructMember(
+        candidate->type->info.function.cxx_member_owner, &candidate->name);
+    for (StructMember* member = head; member != NULL;
+         member = member->overload_next) {
+      if (member->symbol != NULL && member->symbol->flags.is_template) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // A '<' after this name opens a template-argument list only when the name can
 // actually be a template.  An NTTP (`k < sizeof...(Args)`) is a comparison;
 // consuming the '<' as a template-id steals the closing '>' of the enclosing
@@ -1322,9 +1350,14 @@ static bool NameMayBeTemplateId(Syntax* syntax, String* component) {
   }
   Symbol* symbol = SyntaxFindSymbol(syntax, component);
   if (symbol != NULL) {
-    if (symbol->flags.is_template ||
-        symbol->flags.is_template_template_parameter ||
-        symbol->alias_template != NULL || symbol->variable_template != NULL) {
+    if (SymbolOrOverloadIsTemplate(symbol)) {
+      return true;
+    }
+    // The injected-class-name of an explicit specialization denotes that
+    // specialization, but `numeric_limits<double>` still names the primary.
+    if (symbol->alias_target != NULL &&
+        symbol->alias_target->flags.is_template &&
+        !symbol->flags.is_using_alias) {
       return true;
     }
     // The injected-class-name of a class template is not flagged is_template
@@ -1346,6 +1379,9 @@ static bool NameMayBeTemplateId(Syntax* syntax, String* component) {
   return AngleBracketsLookLikeTemplateId(syntax);
 }
 
+static bool QualifiedNameHasMemberTemplate(Syntax* syntax,
+                                           FullyQualifiedIdentifier* name);
+
 static bool QualifiedNameIsTemplate(Syntax* syntax,
                                    FullyQualifiedIdentifier* name) {
   if (name == NULL || (!name->is_qualified && !name->absolute)) {
@@ -1355,21 +1391,20 @@ static bool QualifiedNameIsTemplate(Syntax* syntax,
   if (symbol == NULL) {
     symbol = SyntaxFindQualifiedTag(syntax, name);
   }
-  if (symbol == NULL) {
-    return false;
+  if (symbol != NULL) {
+    if (SymbolOrOverloadIsTemplate(symbol)) {
+      return true;
+    }
+    if (symbol->type != NULL && TypeIsStructOrUnion(symbol->type) &&
+        symbol->type->info.struct_info != NULL &&
+        (symbol->type->info.struct_info->is_template ||
+         symbol->type->info.struct_info->template_parameter_count > 0)) {
+      return true;
+    }
   }
-  if (symbol->flags.is_template ||
-      symbol->flags.is_template_template_parameter ||
-      symbol->alias_template != NULL || symbol->variable_template != NULL) {
-    return true;
-  }
-  if (symbol->type != NULL && TypeIsStructOrUnion(symbol->type) &&
-      symbol->type->info.struct_info != NULL &&
-      (symbol->type->info.struct_info->is_template ||
-       symbol->type->info.struct_info->template_parameter_count > 0)) {
-    return true;
-  }
-  return false;
+  // Qualified lookup drops non-static members, so `LogMessage::operator<<`
+  // is invisible when the first overload is an ordinary member function.
+  return QualifiedNameHasMemberTemplate(syntax, name);
 }
 
 static Vector* SyntaxConsumeOptionalTemplateId(Syntax* syntax,
@@ -1880,6 +1915,18 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
         }
         StringDestruct(&prefix_name);
       }
+      // `Box::AddData` names the overload set.  The first declaration may be
+      // the non-static member template; a later static overload is still a
+      // valid qualified call (`Box::AddData<kFront>(tree, data)`).
+      if (member != NULL && !member->is_static) {
+        for (StructMember* overload = member->overload_next; overload != NULL;
+             overload = overload->overload_next) {
+          if (overload->is_static && overload->symbol != NULL) {
+            member = overload;
+            break;
+          }
+        }
+      }
       if (member != NULL && member->symbol != NULL &&
           (member->is_static ||
            StorageIs(member->symbol->storage, STO(typedef)) ||
@@ -1895,6 +1942,35 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
   }
   StringDestruct(&last);
   return FollowAlias(symbol);
+}
+
+// Non-static member functions are omitted by SyntaxFindQualifiedSymbol.  The
+// overload set can still contain a function template (`operator<<(char)` next
+// to `template <typename T> operator<<(const T&)`).
+static bool QualifiedNameHasMemberTemplate(Syntax* syntax,
+                                           FullyQualifiedIdentifier* name) {
+  if (syntax == NULL || name == NULL || name->components.length < 2) {
+    return false;
+  }
+  Symbol* owner = SyntaxFindQualifiedPrefixSymbolImpl(
+      syntax, name, name->components.length - 1,
+      /*allow_dependent_template_args=*/true);
+  owner = QualifiedClassAfterMaterialize(syntax, owner);
+  if (owner == NULL || owner->type == NULL ||
+      !TypeIsStructOrUnion(owner->type) ||
+      owner->type->info.struct_info == NULL) {
+    return false;
+  }
+  const char* last_name = FullyQualifiedIdentifierLast(name);
+  String last;
+  StringInit(&last, last_name);
+  StructMember* member =
+      FindStructMember(owner->type->info.struct_info, &last);
+  StringDestruct(&last);
+  if (member == NULL || member->symbol == NULL) {
+    return false;
+  }
+  return SymbolOrOverloadIsTemplate(member->symbol);
 }
 
 static bool TemplateArgumentIsDependent(TemplateArgument* arg) {
@@ -2012,6 +2088,15 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
   if (component_count == 1 && !name->absolute) {
     Symbol* symbol =
         FollowAlias(SyntaxFindSymbol(syntax, name->components.value.p[0]));
+    // The specialization's injected-class-name hides the primary.  A
+    // template-id on that name (`numeric_limits<double>::infinity`) still
+    // instantiates the primary.
+    if (template_args != NULL && symbol != NULL &&
+        !symbol->flags.is_template && !symbol->flags.is_using_alias &&
+        symbol->alias_target != NULL &&
+        symbol->alias_target->flags.is_template) {
+      symbol = symbol->alias_target;
+    }
     if (allow_dependent_template_args && symbol != NULL &&
         StorageIs(symbol->storage, STO(typedef)) && symbol->type != NULL &&
         symbol->type->template_origin != NULL &&
@@ -9390,6 +9475,45 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             }
           }
         }
+        // The qualified-name lookup that decided whether this definition gets
+        // an implicit `this` saw only the first overload.  `AddData` is both a
+        // non-static member template and a static one; a definition of the
+        // static overload was therefore given `this` and matched neither
+        // signature.  Drop or add `this` and search the overload set again.
+        if (matching_member == NULL && TypeIsFunction(sym->type) &&
+            parser->cxx_member_owner != NULL) {
+          bool had_this = FunctionHasImplicitThisParameter(sym->type);
+          if (had_this) {
+            TypeRecordRemoveImplicitThisParameter(sym->type);
+            StructMember* static_match = FindStructMemberOverload(
+                parser->cxx_member_definition, sym->type);
+            if (static_match != NULL && static_match->is_static) {
+              matching_member = static_match;
+            } else {
+              Struct* owner = sym->type->info.function.cxx_member_owner;
+              if (owner == NULL) {
+                owner = parser->cxx_member_owner;
+              }
+              sym->type->info.function.cxx_member_owner = NULL;
+              TypeRecordAddCXXThisParameter(sym->type, owner, sym->location);
+            }
+          } else {
+            Struct* owner = sym->type->info.function.cxx_member_owner;
+            if (owner == NULL) {
+              owner = parser->cxx_member_owner;
+            }
+            sym->type->info.function.cxx_member_owner = NULL;
+            TypeRecordAddCXXThisParameter(sym->type, owner, sym->location);
+            StructMember* instance_match = FindStructMemberOverload(
+                parser->cxx_member_definition, sym->type);
+            if (instance_match != NULL && !instance_match->is_static) {
+              matching_member = instance_match;
+            } else if (FunctionHasImplicitThisParameter(sym->type)) {
+              TypeRecordRemoveImplicitThisParameter(sym->type);
+              sym->type->info.function.cxx_member_owner = owner;
+            }
+          }
+        }
         if (matching_member != NULL) {
           parser->cxx_member_definition = matching_member;
           old_sym = matching_member->symbol;
@@ -9842,10 +9966,21 @@ static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag,
       SymbolDelete(alias);
       return true;
     }
-    // A using-directive does not declare a new name.  An already-visible
-    // declaration hides the imported one (`using namespace std` inside
-    // namespace absl, which already has `using std::weak_ordering`).
+    // A using-directive does not hide an existing class or enumerator
+    // (`using namespace std` inside namespace absl, which already has
+    // `using std::weak_ordering`).  Functions do overload: an anonymous
+    // namespace `template <EdgeType> Consume(...)` must join the
+    // `void Consume(CordRep*, ...)` already declared in the enclosing
+    // namespace, or `Consume<kBack>(...)` is parsed as a comparison.
     if (!current_scope_only) {
+      if (!is_tag && CanOverloadFunctions(existing, alias)) {
+        if (FindMatchingOverload(existing, alias->type, alias) != NULL) {
+          SymbolDelete(alias);
+          return true;
+        }
+        AppendOverload(existing, alias);
+        return true;
+      }
       SymbolDelete(alias);
       return true;
     }
@@ -14539,22 +14674,31 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                             : kLocalStaticInitConstant;
       }
       VectorAppend(declarations, decl);
-      if (sym->flags.is_constexpr || sym->flags.is_constinit ||
-          (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type)) ||
-          // Deduce `auto` eagerly at parse time. Block-scope declarations are
-          // otherwise analyzed only after the whole function body is parsed, so
-          // a later `decltype(var)` in the same block (resolved during parsing)
-          // would still see the undeduced `auto` type. Analyzing here fixes the
-          // symbol's type up front; the definition is idempotent under the
-          // later body-analysis pass. Skip this inside a template, where the
-          // initializer may be dependent and unanalyzable until instantiation
-          // (decltype defers via dependent_decltype_expr there anyway).
-          ((TypeContainsAuto(sym->type) ||
-            (CompilerIsCXX() && sym->type->declarator == kDeclArray &&
-             sym->type->info.array.is_flexible && initializer != NULL)) &&
-           syntax->current_template_parameters == NULL &&
-           (initializer == NULL ||
-            !ASTNodeAny(initializer, InitializerNamesUndeducedAuto, sym)))) {
+      // Fold a const scalar (and constexpr / constinit) at the declaration so
+      // a later constant use in this block can see the value.  Do not do that
+      // when the initializer is still template-dependent: member access such
+      // as `rep.rep->length` is typed against the uninstantiated class, and
+      // that type is kept when the function template is instantiated.
+      bool eager_const_value =
+          (sym->flags.is_constexpr || sym->flags.is_constinit ||
+           (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type))) &&
+          !ExpressionIsTemplateDependent(initializer);
+      // Deduce `auto` eagerly at parse time. Block-scope declarations are
+      // otherwise analyzed only after the whole function body is parsed, so
+      // a later `decltype(var)` in the same block (resolved during parsing)
+      // would still see the undeduced `auto` type. Analyzing here fixes the
+      // symbol's type up front; the definition is idempotent under the
+      // later body-analysis pass. Skip this inside a template, where the
+      // initializer may be dependent and unanalyzable until instantiation
+      // (decltype defers via dependent_decltype_expr there anyway).
+      bool eager_auto =
+          (TypeContainsAuto(sym->type) ||
+           (CompilerIsCXX() && sym->type->declarator == kDeclArray &&
+            sym->type->info.array.is_flexible && initializer != NULL)) &&
+          syntax->current_template_parameters == NULL &&
+          (initializer == NULL ||
+           !ASTNodeAny(initializer, InitializerNamesUndeducedAuto, sym));
+      if (eager_const_value || eager_auto) {
         SemanticAnalyzeVariableDefinition(syntax,
                                         (VariableDeclarationASTNode*)decl);
       }

@@ -244,6 +244,12 @@ typedef struct Symbol {
   // including the implicit constructor and destructor calls, is in that
   // class's scope. Transient: rebuilt when the class member is declared.
   struct Struct* static_data_member_class;  // @wire - (transient)
+  // Class whose member list holds this function's overload set.  Usually the
+  // same as the function type's cxx_member_owner.  A using-declaration clone
+  // keeps the base function's type (and therefore the base as
+  // cxx_member_owner) while the derived class may add further overloads
+  // (`using CordRep::Unref` plus `Unref(Span)`).  Transient.
+  struct Struct* member_lookup_class;  // @wire - (transient)
   // Compiler-owned copy of a deserialized function template's parameter list.
   // Imported module symbols can have their live parameter vector cleared while
   // pending instantiations are compiled; this backup restores completion.

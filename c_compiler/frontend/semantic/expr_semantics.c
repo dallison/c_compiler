@@ -1911,10 +1911,23 @@ static void AddFunctionOverloadCandidates(Vector* candidates, Symbol* first) {
            &((Symbol*)first->type->info.function.prototype.value.p[0])->name,
            "this"));
   if (first_is_static_member && first->overload_next == NULL) {
-    Struct* owner = first->type->info.function.cxx_member_owner;
+    // Prefer the class that published this overload set.  A using-declaration
+    // of a base static function shares the base function type, so
+    // cxx_member_owner is still the base and would hide overloads added by
+    // the derived class.
+    Struct* owner = first->member_lookup_class != NULL
+                        ? first->member_lookup_class
+                        : first->type->info.function.cxx_member_owner;
     StructMember* head = FindStructMember(owner, &first->name);
     if (head != NULL) {
       for (StructMember* m = head; m != NULL; m = m->overload_next) {
+        // This path is the qualified `Class::f(...)` lookup, which can only
+        // call static members.  A non-static overload of the same name has an
+        // implicit `this` and would otherwise compete with the static
+        // signature (`AddData(tree, data)` vs `AddData(this, data)`).
+        if (!m->is_static) {
+          continue;
+        }
         if (m->symbol != NULL && m->symbol->type != NULL &&
             TypeIsFunction(m->symbol->type) &&
             !VectorContainsPointer(candidates, m->symbol)) {
@@ -2886,6 +2899,85 @@ static bool DiagnoseCXX26ArrayComparison(BinaryASTNode* node) {
   }
   SemanticError((ASTNode*)node,
                 "comparison between two arrays is not allowed in C++26");
+  return true;
+}
+
+// Score of the best free `op_name` for `(left, right)`, or -1 if none is
+// viable.  Ambiguous sets still yield the tied score so a rewritten `==` can
+// beat every `!=` candidate without diagnosing the worse tie.
+static int BestFreeBinaryOperatorScore(const char* op_name, ASTNode* left,
+                                       ASTNode* right) {
+  if (left == NULL || right == NULL || op_name == NULL) {
+    return -1;
+  }
+  String name;
+  StringInit(&name, op_name);
+  Vector actuals;
+  VectorInit(&actuals);
+  VectorAppend(&actuals, left);
+  VectorAppend(&actuals, right);
+  Symbol* function = ResolveFreeFunctionWithADL(
+      &name, &actuals, /*diagnose_ambiguous=*/false);
+  VectorDestruct(&actuals);
+  StringDestruct(&name);
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type)) {
+    return -1;
+  }
+  Vector children;
+  VectorInit(&children);
+  VectorAppend(&children, left);
+  VectorAppend(&children, right);
+  VectorASTNode call = {0};
+  call.children = &children;
+  int score = FunctionCallScore(function->type, &call, /*first_formal_arg=*/0);
+  VectorDestruct(&children);
+  return score;
+}
+
+// C++20 [over.match.oper]: `a != b` considers `!(a == b)` in the same set as
+// `operator!=`.  A non-rewritten candidate wins a tie; a strictly better `==`
+// (string_view has `==` and `<=>` but no `!=`) wins over conversion-ranked
+// `operator!=` overloads such as `optional`'s, which would otherwise be an
+// ambiguous tie among themselves.
+static bool RewrittenEqualityBeatsInequality(BinaryASTNode* node) {
+  if (node->base.op != AST_OP(noteq)) {
+    return false;
+  }
+  if (CXXOperatorOperandClassType(node->left->type) == NULL &&
+      CXXOperatorOperandClassType(node->right->type) == NULL) {
+    return false;
+  }
+  int eq_score =
+      BestFreeBinaryOperatorScore("operator==", node->left, node->right);
+  if (eq_score < 0) {
+    eq_score =
+        BestFreeBinaryOperatorScore("operator==", node->right, node->left);
+  }
+  if (eq_score < 0) {
+    return false;
+  }
+  int member_score = -1;
+  bool member_ambiguous = false;
+  bool member_template = false;
+  bool member_viable = BestBinaryMemberOperatorScore(
+      node, "operator!=", &member_score, &member_ambiguous, &member_template);
+  // A template member's conversion cost is not scored here.  Keep it instead
+  // of guessing that a rewritten `==` is better.
+  if (member_template) {
+    return false;
+  }
+  // Member scores cover only the explicit parameter, so an exact member `!=`
+  // ranks at or below a two-argument free `==`.  Prefer that non-rewritten
+  // candidate.
+  if (member_viable && member_score >= 0 && member_score <= eq_score) {
+    return false;
+  }
+  int ne_score = BestFreeBinaryOperatorScore("operator!=", node->left,
+                                             node->right);
+  if (ne_score >= 0 && ne_score <= eq_score) {
+    return false;
+  }
   return true;
 }
 
@@ -6778,8 +6870,7 @@ static const char* CXXAccessName(CXXAccess access) {
   return "unknown";
 }
 
-static Struct* CurrentFunctionMemberOwner(void) {
-  TypeRecord* current = compiler->current_function;
+static Struct* FunctionMemberOwner(TypeRecord* current) {
   if (current == NULL || !TypeIsFunction(current)) {
     return NULL;
   }
@@ -6796,6 +6887,10 @@ static Struct* CurrentFunctionMemberOwner(void) {
     return NULL;
   }
   return this_sym->type->next->info.struct_info;
+}
+
+static Struct* CurrentFunctionMemberOwner(void) {
+  return FunctionMemberOwner(compiler->current_function);
 }
 
 static Symbol* CXXStructTemplateOrigin(Struct* str) {
@@ -6837,11 +6932,10 @@ static bool CXXSameAccessClass(Struct* a, Struct* b) {
 // Returns true when the function currently being analyzed has been granted
 // friendship by class `owner` (via a 'friend class' or 'friend function'
 // declaration), and may therefore access its private and protected members.
-static bool CurrentFunctionIsFriendOf(Struct* owner) {
+static bool FunctionIsFriendOf(TypeRecord* current, Struct* owner) {
   if (owner == NULL) {
     return false;
   }
-  TypeRecord* current = compiler->current_function;
   if (current == NULL || !TypeIsFunction(current)) {
     return false;
   }
@@ -6849,7 +6943,7 @@ static bool CurrentFunctionIsFriendOf(Struct* owner) {
   // class is a member of its enclosing class and therefore has that class's
   // access, including friendships ([class.access.nest]).  `Cord::ChunkIterator`
   // may call `InlineRep::inline_size` because `Cord` is a friend of `InlineRep`.
-  Struct* current_owner = CurrentFunctionMemberOwner();
+  Struct* current_owner = FunctionMemberOwner(current);
   for (Struct* accessor = current_owner; accessor != NULL;
        accessor = accessor->lexical_parent) {
     for (size_t i = 0; i < owner->friend_classes.length; i++) {
@@ -6903,6 +6997,31 @@ static bool CurrentFunctionIsFriendOf(Struct* owner) {
   return false;
 }
 
+static bool CurrentFunctionIsFriendOf(Struct* owner) {
+  return FunctionIsFriendOf(compiler->current_function, owner);
+}
+
+// A local class, including a lambda closure, has the same access as the
+// function it was defined in ([class.local]).  Nested lambdas walk out to
+// that function, so a lambda in a friend can use the friend's private access.
+static bool EnclosingFunctionIsFriendOf(TypeRecord* current, Struct* owner) {
+  for (int depth = 0; depth < 32; depth++) {
+    Struct* member_owner = FunctionMemberOwner(current);
+    Symbol* enclosing = member_owner != NULL
+                            ? member_owner->access_enclosing_function
+                            : NULL;
+    if (enclosing == NULL || enclosing->type == NULL ||
+        !TypeIsFunction(enclosing->type) || enclosing->type == current) {
+      return false;
+    }
+    if (FunctionIsFriendOf(enclosing->type, owner)) {
+      return true;
+    }
+    current = enclosing->type;
+  }
+  return false;
+}
+
 static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
                                            Struct* owner,
                                            CXXAccess original_access,
@@ -6922,7 +7041,11 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
     current_owner = CurrentFunctionMemberOwner();
   }
   if (CurrentFunctionIsFriendOf(owner) ||
-      (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context))) {
+      (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context)) ||
+      EnclosingFunctionIsFriendOf(compiler->current_function, owner) ||
+      (lookup_context != owner &&
+       EnclosingFunctionIsFriendOf(compiler->current_function,
+                                   lookup_context))) {
     return true;
   }
   if (current_owner == NULL) {
@@ -12326,6 +12449,18 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
         (source_name[origin_length] == '\0' ||
          source_name[origin_length] == '<' ||
          source_name[origin_length] == '#');
+    // An explicit specialization is tagged `CordRepRef<I0>` and does not
+    // record template_origin.  A call spelled `CordRepRef(...)` is still that
+    // specialization's constructor.
+    if (!names_injected_constructor && struct_info->tag_name != NULL) {
+      const char* tag = struct_info->tag_name->value;
+      const char* angle = strchr(tag, '<');
+      size_t prefix = angle != NULL ? (size_t)(angle - tag) : 0;
+      if (prefix > 0 && strlen(source_name) == prefix &&
+          strncmp(source_name, tag, prefix) == 0) {
+        names_injected_constructor = true;
+      }
+    }
     if (names_injected_constructor &&
         !StringEqual(member_name, struct_info->tag_name->value)) {
       member = FindStructMemberWithAccessAndOffsetByName(
@@ -12797,7 +12932,15 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
         return TypeIsEnum(left) && TypeIsEnum(right) &&
                left->info.enum_info == right->info.enum_info;
       }
-      return left->type == right->type;
+      // `short` and `signed short` are the same type.  Template substitution
+      // can spell one with the signed bit set and the other without it; a raw
+      // bit compare then ranks that identity as a sign conversion, tying
+      // `operator<<(short)` with `operator<<(int)`.
+      TypeRecord unqualified_left = *left;
+      TypeRecord unqualified_right = *right;
+      unqualified_left.qualifiers = kQualPlain;
+      unqualified_right.qualifiers = kQualPlain;
+      return TypeEqual(&unqualified_left, &unqualified_right);
   }
   return false;
 }
@@ -13966,6 +14109,20 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
   UnaryASTNode* unary_node = (UnaryASTNode*)node;
   VectorASTNode* vector_node = (VectorASTNode*)node;
 
+  // `!=` is rewritten to `!(==)` before ordinary overload resolution.
+  // Doing it later is too late: a tie among worse `operator!=` candidates
+  // (for example `optional`'s) is diagnosed and hides an exact `operator==`.
+  if (node->op == AST_OP(noteq)) {
+    binary_node->left = AnalyzeExpression(binary_node->left);
+    binary_node->right = AnalyzeExpression(binary_node->right);
+    if (binary_node->left != NULL && binary_node->right != NULL &&
+        RewrittenEqualityBeatsInequality(binary_node)) {
+      ASTNode* rewritten = TryRewriteComparisonOperator(binary_node);
+      if (rewritten != NULL) {
+        return rewritten;
+      }
+    }
+  }
   if (BinaryOperatorFunctionName(node->op) != NULL) {
     ASTNode* overloaded =
         TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(binary_node);

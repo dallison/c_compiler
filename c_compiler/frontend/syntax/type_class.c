@@ -580,7 +580,8 @@ static void ParseStructMemberList(TypeParser* parser, Struct* str,
 static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
                                bool is_union, bool is_class,
                                Vector* attributes, Vector* bases,
-                               Symbol* qualified_definition_tag) {
+                               Symbol* qualified_definition_tag,
+                               Symbol* specialization_primary) {
   // We have a struct body.
   // First check that this is not a duplicate definition.
   Struct* str = NULL;
@@ -662,6 +663,15 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   // inside a class template (needed for friend-declaration disambiguation).
   str->defining_template_scope_count =
       parser->syntax->current_template_parameter_count;
+  // A class defined in a function body is a local class and has the enclosing
+  // function's access, including friendship ([class.local]).
+  if (str->access_enclosing_function == NULL &&
+      parser->syntax->context == kParsingBlockScope &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    str->access_enclosing_function =
+        compiler->current_function->info.function.symbol;
+  }
 
   // Now 'tag' will be the struct tag pointer
   // and 'str' will be a pointer to the Struct information.
@@ -707,6 +717,23 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     // member access.  The later AddInjectedClassName call (after the body) still
     // registers the name in the *enclosing* scope for out-of-body uses.
     AddInjectedClassName(parser, tag);
+    // An explicit specialization is tagged with its mangled name
+    // (`CordRepRef<Mode::kFairShare>`).  Inside that body the injected-class-name
+    // is still the primary template's name, and it denotes this specialization
+    // (`return CordRepRef(child, fraction)`).  `alias_target` keeps the primary
+    // so `numeric_limits<double>` is still a template-id.
+    if (specialization_primary != NULL &&
+        specialization_primary->name.value != NULL &&
+        (tag->name.value == NULL ||
+         strcmp(specialization_primary->name.value, tag->name.value) != 0)) {
+      Symbol* alias = NewSymbol(specialization_primary->name.value, tag->type,
+                                STO(typedef));
+      alias->namespace_ = tag->namespace_;
+      alias->alias_target = specialization_primary;
+      if (!SyntaxAddSymbol(parser->syntax, alias)) {
+        SymbolDelete(alias);
+      }
+    }
   }
   Struct* saved_member_owner = parser->cxx_member_owner;
   Struct* saved_class_head = parser->syntax->cxx_class_head;
@@ -982,8 +1009,10 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
         StringSetString(&tag_name, &qualified_definition_tag->name);
       }
     }
-    tag = ParseStructBody(parser, &tag_name, is_union, is_class, &attributes,
-                          &bases, qualified_definition_tag);
+    tag = ParseStructBody(
+        parser, &tag_name, is_union, is_class, &attributes, &bases,
+        qualified_definition_tag,
+        is_full_specialization ? specialization_template : NULL);
     if (is_final && tag != NULL && tag->type != NULL &&
         tag->type->info.struct_info != NULL) {
       tag->type->info.struct_info->is_final = true;

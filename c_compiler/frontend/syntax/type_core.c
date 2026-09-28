@@ -551,8 +551,12 @@ TypeRecord* TypeRecordCalculateSize(TypeRecord* record) {
   // primitive size even after its type changes (for example, `UInt` changing
   // from a pointer-sized placeholder to `unsigned long`). Primitive scalar
   // sizes are target properties, so recompute them from the concrete type.
+  // Do not cache this probe.  Callers such as template-parameter
+  // construction set template_parameter_index after the record is sized, and
+  // a cached "absent" answer would hide that index for the rest of the type's
+  // life.
   if (record->declarator == kDeclPrimitive && !TypeIsStructOrUnion(record) &&
-      !TypeContainsTemplateParameter(record)) {
+      !TypeContainsTemplateParameterSlow(record)) {
     record->size = TypeIsBitInt(record)
                        ? BitIntStorageSize(record->bit_width)
                        : SizeofType(record->type);
@@ -1714,6 +1718,7 @@ Struct* NewStruct(bool is_union) {
   Struct* s = malloc(sizeof(Struct));
   s->refs = 1;
   s->lexical_parent = NULL;
+  s->access_enclosing_function = NULL;
   s->tag_symbol = NULL;
   VectorInit(&s->bases);
   VectorInit(&s->friend_classes);

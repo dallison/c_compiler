@@ -2362,7 +2362,12 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         type->dependent_decltype_expr->op == AST_OP(identifier)) {
       Symbol* entity =
           ((IdentifierASTNode*)type->dependent_decltype_expr)->symbol;
-      if (entity != NULL && entity->type != NULL && entity->type != type) {
+      // An undeduced `auto` entity is not a type yet.  Returning the
+      // placeholder makes `const T&` print as `const ` and rejects the real
+      // initializer type.  Keep the decltype opaque until deduction replaces
+      // the placeholder.
+      if (entity != NULL && entity->type != NULL && entity->type != type &&
+          !TypeContainsAuto(entity->type)) {
         // An unparenthesized id-expression uses the entity's declared type.
         // Resolve that type directly so a parameter-pack element such as
         // `decltype(args)...` is substituted against the selected pack element
@@ -2370,7 +2375,8 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         // function parameter pack.
         TypeRecord* declared =
             SubstituteTemplateParameters(parser, entity->type, args);
-        if (declared != NULL && !TypeContainsTemplateParameter(declared)) {
+        if (declared != NULL && !TypeContainsTemplateParameter(declared) &&
+            !TypeContainsAuto(declared)) {
           declared->qualifiers |= type->qualifiers;
           declared = SubstituteResolvedDependentMemberSuffix(
               parser, type, declared, args);
@@ -2457,7 +2463,9 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         // the deferred expression) so a later substitution with a concrete `R`
         // re-evaluates the whole chain from scratch.
         bool operand_still_dependent =
-            TypeIsUnknown(expr->type) || TypeContainsTemplateParameter(expr->type);
+            TypeIsUnknown(expr->type) ||
+            TypeContainsTemplateParameter(expr->type) ||
+            TypeContainsAuto(expr->type);
         if (operand_still_dependent) {
           TypeRecord* opaque = TypeRecordCopy(type);
           opaque->qualifiers |= type->qualifiers;

@@ -1330,6 +1330,9 @@ void StructRebuildMemberLookupTables(Struct* str) {
 void AddStructMember(TypeParser* parser, Struct* str, StructMember* member) {
   if (member->is_member_function) {
     RegisterCXXVirtualMember(parser, str, member);
+    if (member->symbol != NULL) {
+      member->symbol->member_lookup_class = str;
+    }
     SymbolSetCXXMangledAsmName(member->symbol);
   } else if (member->is_static && member->symbol != NULL) {
     member->symbol->static_data_member_class = str;
@@ -1507,6 +1510,9 @@ static void SetStructMemberOverloadAsmName(Struct* str,
 void AppendStructMemberOverload(TypeParser* parser, Struct* str,
                                        StructMember* first,
                                        StructMember* member) {
+  if (member->is_member_function && member->symbol != NULL) {
+    member->symbol->member_lookup_class = str;
+  }
   VectorAppend(&str->members, member);
   StructMember* tail = first;
   while (tail->overload_next != NULL) {
@@ -2372,6 +2378,17 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   }
   FinalizeMemberFunctionTemplateConstraints(
       func, member_template_parameters, member_template_requires_clause);
+  // Constructors and destructors are not parsed as ordinary declarators, so
+  // a trailing GNU attribute (`LogMessage(...) __attribute__((cold))`) would
+  // otherwise be read as the next member.
+  Vector trailing_attributes = {0};
+  VectorInit(&trailing_attributes);
+  while (SyntaxParseCXXAlignas(parser->syntax, &trailing_attributes) ||
+         SyntaxParseAnyAttribute(parser->syntax, &trailing_attributes)) {
+  }
+  VectorAppendVector(&member_symbol->attributes, &trailing_attributes);
+  VectorDestruct(&trailing_attributes);
+  SyntaxApplyDeclarationAttributes(parser->syntax, member_symbol);
   CXXFinalizeSpecialMemberMetadata(member_symbol, str, true);
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;

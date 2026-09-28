@@ -385,6 +385,10 @@ struct Struct {
   // same source produce different symbols.
   int serial;        // @wire - (assigned on creation)
   struct Struct* lexical_parent;  // Enclosing class for nested C++ types. @wire 31
+  // Function in which this local class or lambda closure was defined.  The
+  // local class has that function's access, including friendship
+  // ([class.local]).  Not serialized.
+  Symbol* access_enclosing_function;  // @wire -
   String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
   Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2
   Vector bases;      // CXXBaseSpecifier* (owns entries).         // @wire 3
