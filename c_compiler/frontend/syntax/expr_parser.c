@@ -53,6 +53,7 @@ static struct Intrinsic {
     {"__builtin_bswap64", AST_OP(builtin_bswap), 1},
     {"__builtin_clz", AST_OP(builtin_clz), 1},
     {"__builtin_clzll", AST_OP(builtin_clz), 1},
+    {"__builtin_constant_p", AST_OP(builtin_constant_p), 1},
     {"__builtin_ctz", AST_OP(builtin_ctz), 1},
     {"__builtin_ctzll", AST_OP(builtin_ctz), 1},
     {"__builtin_expect", AST_OP(builtin_expect), 2},
@@ -3288,9 +3289,12 @@ static void AddLambdaFunctionAssociatedConstraint(TypeRecord* func,
 static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
                                             int arg_number,
                                             TokenClass followers) {
-  if (!CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+  // Unconstrained `auto` parameters make a generic lambda (C++14).
+  // `Concept auto` parameters are an abbreviated function template (C++20).
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX14)) {
     return false;
   }
+  bool allow_constrained_auto = CompilerCXXAtLeast(kLanguageStandardCXX20);
 
   // Leading cv-qualifiers of a `const auto&` / `volatile auto` parameter are
   // consumed speculatively and rewound if no placeholder follows.
@@ -3312,7 +3316,7 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
   Symbol* concept_symbol = NULL;
   SourceLocation constraint_location = syntax->lex->current_token_location;
   Vector* concept_arguments = NULL;
-  if (LexLookingAt(syntax->lex, TOK(identifier))) {
+  if (allow_constrained_auto && LexLookingAt(syntax->lex, TOK(identifier))) {
     String concept_name;
     StringInit(&concept_name, syntax->lex->spelling.value);
     Symbol* found = SyntaxFindSymbol(syntax, &concept_name);

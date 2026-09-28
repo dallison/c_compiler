@@ -13,6 +13,10 @@
 #include "syntax.h"
 
 __attribute__((warn_unused_result)) ASTNode* AnalyzeExpression(ASTNode* node);
+// Member access analyzed while its receiver was still `auto` keeps that
+// placeholder after deduction.  Re-run those accesses once the symbol type
+// is concrete.
+void SemanticReanalyzeAutoMemberAccesses(void);
 bool IsConstantExpression(ASTNode* node);
 bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);

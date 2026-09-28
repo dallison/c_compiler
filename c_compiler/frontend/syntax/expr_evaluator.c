@@ -342,6 +342,19 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       }
       return false;
 
+    case AST_OP(builtin_constant_p): {
+      int64_t ignored = 0;
+      ASTNode* arg =
+          vector_node->children != NULL && vector_node->children->length > 0
+              ? vector_node->children->value.p[0]
+              : NULL;
+      *result = arg != NULL &&
+                        EvaluateIntegerExpressionInContext(ctx, arg, &ignored)
+                    ? 1
+                    : 0;
+      return true;
+    }
+
     case AST_OP(builtin_is_constant_evaluated):
       // Keep the builtin in function bodies so runtime and constant evaluation
       // can disagree.  Fold only in an actual constant-evaluation context.

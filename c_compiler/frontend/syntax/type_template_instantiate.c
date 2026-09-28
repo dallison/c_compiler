@@ -4871,18 +4871,47 @@ Vector* TypeDeduceConversionOperatorTemplateArguments(Syntax* syntax,
   if (func->info.function.template_parameter_count <= 0 || func->next == NULL) {
     return NULL;
   }
+  // [temp.deduct.conv]: deduce against the referred-to type, ignoring
+  // top-level cv-qualifiers.  `const vector&` must deduce `Container` as
+  // `vector`, not as a reference; the prvalue then binds to the reference.
+  TypeRecord* pattern = func->next;
+  TypeRecord* deduction_target = target;
+  if (TypeIsReference(pattern)) {
+    pattern = pattern->next;
+  }
+  if (TypeIsReference(deduction_target)) {
+    deduction_target = deduction_target->next;
+  }
+  TypeRecord* unqualified_target = NULL;
+  if (pattern == NULL || deduction_target == NULL) {
+    return NULL;
+  }
+  if (deduction_target->qualifiers != kQualPlain) {
+    unqualified_target = TypeRecordCopy(deduction_target);
+    unqualified_target->qualifiers = kQualPlain;
+    deduction_target = unqualified_target;
+  }
   size_t explicit_arg_count = 0;
   Vector* args = NewFunctionTemplateDeductionArguments(func, /*explicit_args=*/
                                                        NULL, &explicit_arg_count);
   if (args == NULL) {
+    if (unqualified_target != NULL) {
+      TypeRecordDelete(unqualified_target);
+    }
     return NULL;
   }
-  if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, func->next,
-                                          target)) {
+  if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, pattern,
+                                          deduction_target)) {
+    if (unqualified_target != NULL) {
+      TypeRecordDelete(unqualified_target);
+    }
     VectorDeleteWithContents(args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
     return NULL;
+  }
+  if (unqualified_target != NULL) {
+    TypeRecordDelete(unqualified_target);
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
@@ -9282,8 +9311,9 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(Syntax* syntax,
       TypeRecord* param =
           TypeMaterializeClassTemplateSpecialization(syntax, formal->type);
       if (param != formal->type) {
+        // SymbolSetType retains `param`.  Deleting it frees the type the
+        // parameter now points at.
         SymbolSetType(formal, param);
-        TypeRecordDelete(param);
       }
     }
     return func;

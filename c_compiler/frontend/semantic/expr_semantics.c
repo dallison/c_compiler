@@ -3612,6 +3612,21 @@ static bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target) {
         member->symbol->type->next == NULL) {
       continue;
     }
+    // `operator Container()` is a template: its result type is the parameter,
+    // so it only matches once Container is deduced from the target
+    // ([temp.deduct.conv]).  That is how `vector = StrSplit(...)` binds, via
+    // Splitter's conversion operator.
+    if (member->symbol->flags.is_template) {
+      Vector* args = TypeDeduceConversionOperatorTemplateArguments(
+          &compiler->syntax, member->symbol, unqualified_target);
+      if (args != NULL) {
+        VectorDeleteWithContents(
+            args, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        found = true;
+      }
+      continue;
+    }
     TypeRecord* result = member->symbol->type->next;
     TypeRecord* materialized =
         TypeMaterializeClassTemplateSpecialization(&compiler->syntax, result);
@@ -7738,7 +7753,14 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
                                             /*allow_explicit=*/false,
                                             /*allow_same_class=*/false) != NULL ||
          ClassHasConversionOperatorTo(actual, target))) {
-      return 100;
+      // The conversion produces a temporary. Binding that prvalue to an rvalue
+      // reference is a better second standard conversion than binding it to a
+      // const lvalue reference, so `operator=(vector&&)` beats
+      // `operator=(const vector&)`.
+      if (formal_type->declarator == kDeclRValueReference) {
+        return 100;
+      }
+      return 101;
     }
     return -1;
   }
@@ -13632,6 +13654,20 @@ static void AnalyzeSourceIntegerBuiltin(VectorASTNode* node) {
                  NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualPlain));
 }
 
+static void AnalyzeBuiltinConstantP(VectorASTNode* node) {
+  if (node->children != NULL && node->children->length == 1) {
+    node->children->value.p[0] =
+        AnalyzeExpression(node->children->value.p[0]);
+  } else {
+    SemanticError((ASTNode*)node,
+                  "__builtin_constant_p requires one argument");
+  }
+  // The result is an int constant: 1 when the operand is an integer constant
+  // expression, otherwise 0.  Zero is a correct answer when the compiler
+  // cannot prove the operand is constant.
+  ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+}
+
 static void AnalyzeBuiltinExpect(VectorASTNode* node) {
   TypeRecord* result_type = NewTypeRecordWithSize(kTypeLong, kQualPlain);
   if (node->children->length != 2) {
@@ -13796,6 +13832,77 @@ static ASTNode* AnalyzeTypeTraitBuiltin(VectorASTNode* node) {
     ASTNodeReplaceChild(node->base.parent, node->base.child_id, constant, false);
   }
   return constant;
+}
+
+static bool SymbolTypeIsConcreteClass(TypeRecord* type) {
+  if (type == NULL || TypeContainsAuto(type) || TypeIsUnknown(type)) {
+    return false;
+  }
+  if (TypeIsReference(type)) {
+    type = type->next;
+  }
+  return TypeIsStructOrUnion(type);
+}
+
+// A range-for binding (`const auto& it = *begin`) can be used in the loop
+// body before deduction replaces `auto`.  Those member accesses were typed
+// as the placeholder and then frozen.  Once `it` has a class type, look the
+// members up again.
+static void CollectStaleAutoMemberAccess(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  if (node->op != AST_OP(dot) && node->op != AST_OP(arrow)) {
+    return;
+  }
+  if ((node->flags & kASTAnalyzed) == 0 || node->type == NULL ||
+      !TypeContainsAuto(node->type)) {
+    return;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)node;
+  if (access->left == NULL || access->left->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)access->left)->symbol;
+  if (symbol == NULL || !SymbolTypeIsConcreteClass(symbol->type)) {
+    return;
+  }
+  VectorAppend((Vector*)data, node);
+}
+
+void SemanticReanalyzeAutoMemberAccesses(void) {
+  static int depth = 0;
+  if (depth > 0 || compiler->current_function == NULL ||
+      !TypeIsFunction(compiler->current_function) ||
+      compiler->current_function->info.function.body == NULL) {
+    return;
+  }
+  Vector stale;
+  VectorInit(&stale);
+  ASTNodeVisit(compiler->current_function->info.function.body,
+               CollectStaleAutoMemberAccess, 0, &stale);
+  depth++;
+  for (size_t i = 0; i < stale.length; i++) {
+    ASTNode* node = stale.value.p[i];
+    BinaryASTNode* access = (BinaryASTNode*)node;
+    node->flags &= ~kASTAnalyzed;
+    ASTNodeClearType(node);
+    if (access->left != NULL) {
+      access->left->flags &= ~kASTAnalyzed;
+    }
+    if (access->right != NULL) {
+      access->right->flags &= ~kASTAnalyzed;
+    }
+    ASTNode* analyzed = AnalyzeExpression(node);
+    if (analyzed != node && node->parent != NULL) {
+      ASTNodeReplaceChild(node->parent, node->child_id, analyzed,
+                          /*delete_old_child=*/false);
+    }
+  }
+  depth--;
+  VectorDestruct(&stale);
 }
 
 // Perform semantic analysis on a expression AST node.  This propagates type
@@ -14184,6 +14291,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(builtin_trap):
     case AST_OP(builtin_unreachable):
       AnalyzeBuiltinTerminator(vector_node);
+      break;
+
+    case AST_OP(builtin_constant_p):
+      AnalyzeBuiltinConstantP(vector_node);
       break;
 
     case AST_OP(builtin_is_constant_evaluated):

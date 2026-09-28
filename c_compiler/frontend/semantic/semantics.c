@@ -337,6 +337,7 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
     deduced->qualifiers |= sym->type->qualifiers;
     TypeRecordCalculateSize(deduced);
     SymbolSetType(sym, deduced);
+    SemanticReanalyzeAutoMemberAccesses();
     return true;
   }
   // A dependent initializer only has a placeholder type while its enclosing
@@ -403,6 +404,9 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
                                                    diagnostic_node);
   if (deduced != NULL) {
     SymbolSetType(sym, deduced);
+    if (!TypeContainsAuto(sym->type)) {
+      SemanticReanalyzeAutoMemberAccesses();
+    }
     return true;
   }
   ASTNode* initializer_expr = deduction_initializer;
@@ -440,6 +444,9 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
     TypeRecordCalculateSize(deduced);
   }
   SymbolSetType(sym, deduced);
+  if (!TypeContainsAuto(sym->type)) {
+    SemanticReanalyzeAutoMemberAccesses();
+  }
   return true;
 }
 
@@ -1194,6 +1201,24 @@ static bool ConversionOperatorAllowedInContext(TypeRecord* func,
 // implicit standard conversion exists.  The tiers mirror [over.ics.scs]
 // (exact < promotion < conversion) so the best conversion operator can be
 // selected and genuine ambiguities detected.
+// Adding cv-qualifiers to a pointer target (`T*` -> `const T*`) is a
+// qualification conversion, part of the exact-match rank but worse than an
+// identity conversion so `operator const T*()` beats `operator T*()`.
+static bool PointerQualificationConversion(TypeRecord* from, TypeRecord* to) {
+  if (!TypeIsPointer(from) || !TypeIsPointer(to) || from->next == NULL ||
+      to->next == NULL) {
+    return false;
+  }
+  if ((from->next->qualifiers & ~to->next->qualifiers) != 0) {
+    return false;
+  }
+  TypeRecordQualifierOverlay from_overlay;
+  TypeRecordQualifierOverlay to_overlay;
+  return TypeEqual(
+      TypeRecordOverlayQualifiers(&from_overlay, from->next, kQualPlain),
+      TypeRecordOverlayQualifiers(&to_overlay, to->next, kQualPlain));
+}
+
 static int ConversionOperatorTrailingRank(TypeRecord* result, TypeRecord* to) {
   if (result == NULL || to == NULL) {
     return -1;
@@ -1218,6 +1243,9 @@ static int ConversionOperatorTrailingRank(TypeRecord* result, TypeRecord* to) {
     if (equal) {
       return 0;
     }
+  }
+  if (PointerQualificationConversion(result, to)) {
+    return 1;
   }
   // A trailing standard conversion is only modeled for arithmetic scalars.
   // Class, pointer and reference targets require an exact match: notably, any

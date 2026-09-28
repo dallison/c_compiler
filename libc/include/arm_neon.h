@@ -119,6 +119,24 @@ __NEON_INLINE uint8x16_t vld1q_u8(const uint8_t* source) {
   return result;
 }
 
+__NEON_INLINE int8x16_t vld1q_s8(const int8_t* source) {
+  int8x16_t result;
+  for (int i = 0; i < 16; ++i) result[i] = source[i];
+  return result;
+}
+
+__NEON_INLINE int64x2_t vld1q_s64(const int64_t* source) {
+  int64x2_t result;
+  result[0] = source[0];
+  result[1] = source[1];
+  return result;
+}
+
+__NEON_INLINE void vst1q_s64(int64_t* destination, int64x2_t value) {
+  destination[0] = value[0];
+  destination[1] = value[1];
+}
+
 __NEON_INLINE void vst1q_u8(uint8_t* destination, uint8x16_t value) {
   for (int i = 0; i < 16; ++i) destination[i] = value[i];
 }

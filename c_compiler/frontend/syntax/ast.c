@@ -354,6 +354,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "builtin_trap";
     case AST_OP(builtin_unreachable):
       return "builtin_unreachable";
+    case AST_OP(builtin_constant_p):
+      return "builtin_constant_p";
     case AST_OP(builtin_is_constant_evaluated):
       return "builtin_is_constant_evaluated";
 

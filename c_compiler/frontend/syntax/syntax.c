@@ -11629,8 +11629,10 @@ static void MaterializeDeferredClassTemplateType(Syntax* syntax, Symbol* sym) {
   TypeRecord* materialized =
       TypeMaterializeClassTemplateSpecialization(syntax, sym->type);
   if (materialized != sym->type) {
+    // SymbolSetType retains the record.  Dropping it here frees the function
+    // type the symbol now points at, which clears a just-copied parameter list
+    // (`ostream& operator<<(ostream&, int128)`).
     SymbolSetType(sym, materialized);
-    TypeRecordDelete(materialized);
   }
 }
 

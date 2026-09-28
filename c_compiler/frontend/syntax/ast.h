@@ -152,6 +152,7 @@ typedef enum {
   AST_OP(builtin_observable_checkpoint),
   AST_OP(builtin_trap),
   AST_OP(builtin_unreachable),
+  AST_OP(builtin_constant_p),
   AST_OP(builtin_is_constant_evaluated),
 
   AST_OP(cast),   // Cast AST node token.
