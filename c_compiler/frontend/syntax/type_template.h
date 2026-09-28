@@ -113,6 +113,12 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(struct Syntax* synta
 // i.e. an ambiguous conversion).
 int TypeConversionOperatorTemplateMoreSpecialized(struct Syntax* syntax,
                                                   Symbol* a, Symbol* b);
+// Partial ordering of two function templates by their parameter types
+// ([temp.func.order]).  `a` and `b` may be primary templates or
+// specializations (the pattern is taken from the template origin).  Returns
+// 1 if `a` is more specialized than `b`, -1 if `b` is more specialized than
+// `a`, and 0 if they are equivalent or incomparable.
+int TypeFunctionTemplateMoreSpecialized(Symbol* a, Symbol* b);
 Vector* TypeDeduceFunctionTemplateArgumentsFromCall(Symbol* templ,
                                                     Vector* actuals,
                                                     size_t first_formal_arg);

@@ -8977,7 +8977,10 @@ int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right) {
   if (right_score > left_score) {
     return -1;
   }
-  return 0;
+  // Identical structural scores still leave `equal(It, It, It, It)` tied with
+  // `equal(It, It, It, Pred)`.  Partial ordering distinguishes a repeated
+  // parameter from an independent one.
+  return TypeFunctionTemplateMoreSpecialized(left, right);
 }
 
 static int MemberOverloadCallScore(StructMember* candidate,
@@ -9670,7 +9673,11 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
       id->symbol->type->info.function.is_constructor) {
     size_t num_actual =
         node->children != NULL ? node->children->length : 0;
-    if (id->symbol->type->info.function.prototype.length != num_actual) {
+    // A constructor template's pack is one prototype slot until it is
+    // instantiated, so `Node(Args&&...)` has the same arity as a one-element
+    // call and still must be deduced (`new (p) Node(static_cast<Args&&>(args)...)`).
+    if (id->symbol->type->info.function.prototype.length != num_actual ||
+        id->symbol->flags.is_template) {
       Struct* owner = id->symbol->type->info.function.cxx_member_owner;
       StructMember* head =
           owner != NULL && owner->tag_name != NULL
@@ -9678,6 +9685,7 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
               : NULL;
       StructMember* match = NULL;
       int best_score = -1;
+      if (id->symbol->type->info.function.prototype.length != num_actual) {
       for (StructMember* candidate = head; candidate != NULL;
            candidate = candidate->overload_next) {
         if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
@@ -9712,6 +9720,7 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
           match = candidate;
           best_score = score;
         }
+      }
       }
       if (match == NULL) {
         // The surviving callee is the default constructor (or the primary

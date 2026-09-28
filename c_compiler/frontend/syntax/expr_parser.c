@@ -1482,6 +1482,24 @@ static bool StructHasDependentBase(Struct* str) {
   return false;
 }
 
+// An unqualified name that is not a member of the class being defined is
+// still a member when it comes from a dependent base ([temp.dep]).  A
+// concrete class has already been searched; inventing `this->name` there
+// turns a free function such as `clock_gettime` into a missing member.
+static bool UnresolvedNameMayBeDependentMember(Syntax* syntax) {
+  Struct* owner = NULL;
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  if (StructHasDependentBase(owner) ||
+      StructHasDependentBase(StructFromThisSymbol(lambda_enclosing_this)) ||
+      (syntax != NULL && StructHasDependentBase(syntax->cxx_class_head))) {
+    return true;
+  }
+  return false;
+}
+
 static Struct* FindEnclosingClassByName(Syntax* syntax, String* name) {
   Struct* scope = syntax != NULL ? syntax->cxx_class_head : NULL;
   if (scope == NULL && compiler->current_function != NULL &&
@@ -2018,7 +2036,13 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       bool builtin_call =
           LexLookingAt(lex, TOK(lparen)) &&
           IsBuiltinCallName(FullyQualifiedIdentifierLast(&name));
-      if (!builtin_call) {
+      // A call that is not a member (`clock_gettime(...)` inside a concrete
+      // member function) must stay a free function.  A bare name can still be
+      // a data member that is absent from the ordinary symbol table
+      // (`__len_` in an out-of-line `basic_string` method).
+      if (!builtin_call &&
+          (!LexLookingAt(lex, TOK(lparen)) ||
+           UnresolvedNameMayBeDependentMember(syntax))) {
         ASTNode* member_access =
             NewMemberAccessFromThis(syntax, &name,
                                     /*allow_unresolved_member=*/true);
@@ -2039,7 +2063,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
         }
       }
       if (LexLookingAt(lex, TOK(lparen))) {
-        if (!builtin_call) {
+        if (!builtin_call && UnresolvedNameMayBeDependentMember(syntax)) {
           ASTNode* deferred_member_access =
               NewMemberAccessFromThis(syntax, &name,
                                       /*allow_unresolved_member=*/true);

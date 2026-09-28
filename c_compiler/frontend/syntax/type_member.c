@@ -2850,6 +2850,11 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           member_template_parameter_base +
           (int)member_template_parameters->length;
       member_template_requires_clause = ConceptsParseRequiresClause(parser->syntax);
+      // `template <size_t N> __attribute__((noinline)) static void f()` —
+      // attributes between the template-head and the decl-specifiers.
+      while (SyntaxParseCXXAlignas(parser->syntax, &member_attributes) ||
+             SyntaxParseAnyAttribute(parser->syntax, &member_attributes)) {
+      }
       is_member_template = true;
     }
 

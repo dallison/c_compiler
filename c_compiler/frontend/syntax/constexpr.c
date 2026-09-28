@@ -6349,6 +6349,28 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
   }
   TypeRecord* plain_type = ConstexprPlainObjectType(formal_object_type);
   bool ok = EvaluateConstexprValue(ctx, binding_expr, plain_type, value);
+  // `std::size(arr)` is a constant even when `arr` is not: the reference
+  // parameter is unused and the result is the bound.  Bind the address of a
+  // static array without reading it.  Element slots stay indeterminate, so a
+  // later read of a non-constant element still fails.
+  if (!ok && TypeIsFixedArray(plain_type) && binding_expr != NULL &&
+      binding_expr->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)binding_expr;
+    if (id->symbol != NULL) {
+      ConstexprObject* object = NewConstexprObject(
+          ctx, plain_type, ConstexprObjectSlotCount(plain_type));
+      if (object != NULL) {
+        ConstexprSetObjectValueState(object, kValueStateIndeterminate);
+        *value = (ConstexprValue){
+            .is_address = true,
+            .address_object = object,
+            .state = kValueStateValid,
+        };
+        ConstexprReleasePlainObjectType(formal_object_type, plain_type);
+        return true;
+      }
+    }
+  }
   // A reference parameter bound to a scalar prvalue (`const T&` of a literal)
   // has to be an addressable temporary.  The body may return that reference
   // (`return b < a ? b : a` in `std::min`), which needs the parameter's

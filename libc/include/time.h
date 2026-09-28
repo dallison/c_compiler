@@ -58,6 +58,7 @@ struct timespec {
 
 extern int timespec_get(struct timespec *ts, int base);
 extern int timespec_getres(struct timespec *ts, int base);
+extern int clock_gettime(clockid_t clock_id, struct timespec *tp);
 #if defined(__APPLE__)
 extern int nanosleep(const struct timespec *requested, struct timespec *remaining);
 #endif

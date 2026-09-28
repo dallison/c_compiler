@@ -4974,6 +4974,84 @@ int TypeConversionOperatorTemplateMoreSpecialized(Syntax* syntax, Symbol* a,
   return 0;
 }
 
+static TypeRecord* FunctionTemplatePatternFunctionType(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
+    return NULL;
+  }
+  Symbol* origin = symbol->type->info.function.template_origin;
+  if (origin != NULL && origin->type != NULL && TypeIsFunction(origin->type)) {
+    return origin->type;
+  }
+  if (symbol->flags.is_template) {
+    return symbol->type;
+  }
+  return NULL;
+}
+
+/* True if `specialized`'s parameter patterns can deduce `general`
+ * ([temp.deduct.partial]).  Each of `specialized`'s template parameters acts
+ * as a unique type on the argument side, so a repeated parameter (`It, It`)
+ * is a tighter pattern than an independent one (`It, Pred`).  Parameter packs
+ * are left unordered; a pack on either side is not at least as specialized. */
+static bool FunctionParametersAtLeastAsSpecialized(Symbol* specialized,
+                                                   Symbol* general) {
+  TypeRecord* sfunc = FunctionTemplatePatternFunctionType(specialized);
+  TypeRecord* gfunc = FunctionTemplatePatternFunctionType(general);
+  if (sfunc == NULL || gfunc == NULL) {
+    return false;
+  }
+  if (sfunc->info.function.prototype.length !=
+      gfunc->info.function.prototype.length) {
+    return false;
+  }
+  for (size_t i = 0; i < sfunc->info.function.prototype.length; i++) {
+    Symbol* sparam = sfunc->info.function.prototype.value.p[i];
+    Symbol* gparam = gfunc->info.function.prototype.value.p[i];
+    if (sparam == NULL || gparam == NULL || sparam->flags.is_parameter_pack ||
+        gparam->flags.is_parameter_pack) {
+      return false;
+    }
+  }
+  int saved_base = g_deduce_template_parameter_base;
+  bool saved_defer = g_deduce_defer_bare_member;
+  g_deduce_template_parameter_base =
+      gfunc->info.function.template_parameter_base;
+  g_deduce_defer_bare_member = true;
+  size_t explicit_arg_count = 0;
+  Vector* args =
+      NewFunctionTemplateDeductionArguments(gfunc, NULL, &explicit_arg_count);
+  bool ok = args != NULL;
+  for (size_t i = 0; ok && i < gfunc->info.function.prototype.length; i++) {
+    Symbol* gparam = gfunc->info.function.prototype.value.p[i];
+    Symbol* sparam = sfunc->info.function.prototype.value.p[i];
+    ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
+                                           gparam->type, sparam->type);
+  }
+  if (args != NULL) {
+    VectorDeleteWithContents(args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+  g_deduce_template_parameter_base = saved_base;
+  g_deduce_defer_bare_member = saved_defer;
+  return ok;
+}
+
+int TypeFunctionTemplateMoreSpecialized(Symbol* a, Symbol* b) {
+  if (a == NULL || b == NULL) {
+    return 0;
+  }
+  bool a_at_least = FunctionParametersAtLeastAsSpecialized(a, b);
+  bool b_at_least = FunctionParametersAtLeastAsSpecialized(b, a);
+  if (a_at_least && !b_at_least) {
+    return 1;
+  }
+  if (b_at_least && !a_at_least) {
+    return -1;
+  }
+  return 0;
+}
+
 /* Public: register a user-written CTAD deduction guide for a class template. */
 void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide) {
   if (class_template == NULL || class_template->type == NULL ||
