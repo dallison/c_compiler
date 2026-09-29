@@ -5,7 +5,6 @@
 #include "type_class_internal.h"
 #include "type_internal.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -789,6 +788,14 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
           clone->symbol->type->info.function.is_constructor &&
           inherits_constructor && owner->tag_name != NULL) {
         StringSetString(&clone->symbol->name, owner->tag_name);
+        // The clone shares the base constructor's type, including a copy or
+        // move kind.  An inherited Base(const Base&) is not a copy constructor
+        // of the derived class; leaving that kind set suppresses the implicit
+        // one.  Copy the type so the base constructor is unchanged.
+        TypeRecord* func = TypeRecordCopy(clone->symbol->type);
+        func->info.function.cxx_special_member_kind = kCXXSpecialMemberNone;
+        func->info.function.is_trivial_special_member = false;
+        SymbolSetType(clone->symbol, func);
       }
       AddCXXMemberUsingFunction(parser, owner, clone);
       imported = true;
@@ -1331,8 +1338,12 @@ void StructRebuildMemberLookupTables(Struct* str) {
 void AddStructMember(TypeParser* parser, Struct* str, StructMember* member) {
   if (member->is_member_function) {
     RegisterCXXVirtualMember(parser, str, member);
+    if (member->symbol != NULL) {
+      member->symbol->member_lookup_class = str;
+    }
     SymbolSetCXXMangledAsmName(member->symbol);
   } else if (member->is_static && member->symbol != NULL) {
+    member->symbol->static_data_member_class = str;
     SymbolSetCXXDataAsmName(member->symbol, str);
   }
   VectorAppend(&str->members, member);
@@ -1507,6 +1518,9 @@ static void SetStructMemberOverloadAsmName(Struct* str,
 void AppendStructMemberOverload(TypeParser* parser, Struct* str,
                                        StructMember* first,
                                        StructMember* member) {
+  if (member->is_member_function && member->symbol != NULL) {
+    member->symbol->member_lookup_class = str;
+  }
   VectorAppend(&str->members, member);
   StructMember* tail = first;
   while (tail->overload_next != NULL) {
@@ -1764,7 +1778,8 @@ void RegisterTemplateConstructorInitializers(
 // initializer such as `value(std::forward<Args>(args)...)` would fail to expand
 // (its `args` pack would never be found), reintroducing the parameter's
 // dependent type into `std::forward`'s explicit argument.
-void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to) {
+void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to,
+                                            Vector* enclosing_args) {
   if (from == NULL || to == NULL || from == to) {
     return;
   }
@@ -1774,13 +1789,30 @@ void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to) {
         SyntaxCXXConstructorInitListCloneDeferred(inits);
     // `from` (the primary constructor) numbers its own template parameters after
     // the enclosing class's; `to` (the class-level clone) resets its base to 0.
-    // Rebase the init-list expressions by the primary's base so the member's own
-    // parameters become zero-based, matching `to` and the per-call arguments.
+    // Substitute the class arguments first, then rebase, so a use of the class
+    // parameter (`make_unique<S>`) is bound before the member's own parameters
+    // slide down onto index 0.  Only the enclosing prefix is applied: a longer
+    // vector would bind the member's parameters during this class-level clone.
     int rebase_base = TypeIsFunction(from->type)
                           ? from->type->info.function.template_parameter_base
                           : 0;
+    Vector enclosing_prefix;
+    Vector* subst_args = enclosing_args;
+    bool own_prefix = false;
+    if (enclosing_args != NULL && rebase_base > 0 &&
+        (int)enclosing_args->length > rebase_base) {
+      VectorInit(&enclosing_prefix);
+      for (int i = 0; i < rebase_base; i++) {
+        VectorAppend(&enclosing_prefix, enclosing_args->value.p[i]);
+      }
+      subst_args = &enclosing_prefix;
+      own_prefix = true;
+    }
     SyntaxCXXConstructorInitListRemapFormals(cloned, from->type, to->type,
-                                             rebase_base);
+                                             rebase_base, subst_args);
+    if (own_prefix) {
+      VectorDestruct(&enclosing_prefix);
+    }
     QueueTemplateConstructorInitializers(to, cloned);
   }
 }
@@ -2048,9 +2080,34 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
         func != NULL && TypeIsFunction(func)
             ? func->info.function.cxx_member_owner
             : NULL;
+    // The function's own parameters replace the class list for the body, but
+    // pack expansions in the body still name the class packs
+    // (`Type<Elements>::type()...` inside `ElementIndex<T>`).  Those packs
+    // are still on the surrounding parameter list: they are moved onto the
+    // class only after the body has been parsed.
+    Vector visible_parameters;
+    VectorInit(&visible_parameters);
+    bool using_visible_parameters = false;
     if (func_is_template) {
-      syntax->current_template_parameters =
-          &func->info.function.template_parameters;
+      if (old_template_parameters != NULL) {
+        for (size_t p = 0; p < old_template_parameters->length; p++) {
+          VectorAppend(&visible_parameters,
+                       old_template_parameters->value.p[p]);
+        }
+      }
+      for (Struct* scope = member_owner; scope != NULL;
+           scope = scope->lexical_parent) {
+        for (size_t p = 0; p < scope->template_parameters.length; p++) {
+          VectorAppend(&visible_parameters,
+                       scope->template_parameters.value.p[p]);
+        }
+      }
+      Vector* function_parameters = &func->info.function.template_parameters;
+      for (size_t p = 0; p < function_parameters->length; p++) {
+        VectorAppend(&visible_parameters, function_parameters->value.p[p]);
+      }
+      syntax->current_template_parameters = &visible_parameters;
+      using_visible_parameters = true;
       syntax->current_template_parameter_count =
           func->info.function.template_parameter_base +
           func->info.function.template_parameter_count;
@@ -2107,6 +2164,9 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
     syntax->current_template_parameters = old_template_parameters;
     syntax->current_template_parameter_count = old_template_parameter_count;
     syntax->parsing_template_declaration = old_parsing_template;
+    if (using_visible_parameters) {
+      VectorDestruct(&visible_parameters);
+    }
 
     lex->suppress_preprocessing = false;
     lex->source = NULL;  // Real source is reinstated by end_checkpoint below.
@@ -2354,6 +2414,17 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   }
   FinalizeMemberFunctionTemplateConstraints(
       func, member_template_parameters, member_template_requires_clause);
+  // Constructors and destructors are not parsed as ordinary declarators, so
+  // a trailing GNU attribute (`LogMessage(...) __attribute__((cold))`) would
+  // otherwise be read as the next member.
+  Vector trailing_attributes = {0};
+  VectorInit(&trailing_attributes);
+  while (SyntaxParseCXXAlignas(parser->syntax, &trailing_attributes) ||
+         SyntaxParseAnyAttribute(parser->syntax, &trailing_attributes)) {
+  }
+  VectorAppendVector(&member_symbol->attributes, &trailing_attributes);
+  VectorDestruct(&trailing_attributes);
+  SyntaxApplyDeclarationAttributes(parser->syntax, member_symbol);
   CXXFinalizeSpecialMemberMetadata(member_symbol, str, true);
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;

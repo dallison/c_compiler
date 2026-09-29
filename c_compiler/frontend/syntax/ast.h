@@ -152,6 +152,7 @@ typedef enum {
   AST_OP(builtin_observable_checkpoint),
   AST_OP(builtin_trap),
   AST_OP(builtin_unreachable),
+  AST_OP(builtin_constant_p),
   AST_OP(builtin_is_constant_evaluated),
 
   AST_OP(cast),   // Cast AST node token.
@@ -425,6 +426,7 @@ struct ConstraintExpr;
 #define kASTVirtualCallerContract (1ULL << 59)  // P3097 caller check with a runtime dedup guard.
 #define kASTInlinedConstructor (1ULL << 60)  // inline_call that replaced a constructor call.
 #define kASTInlinedDestructor (1ULL << 61)  // inline_call that replaced a destructor call.
+#define kASTValueInitMemzero (1ULL << 62)  // Empty braced init that only zero-fills placement storage; do not reanalyze.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

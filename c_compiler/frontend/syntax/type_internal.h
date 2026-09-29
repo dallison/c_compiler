@@ -85,6 +85,9 @@ void CheckTagType(TypeParser* parser, Symbol* old, bool is_union, bool is_enum);
 void AddInjectedEnumName(TypeParser* parser, Symbol* tag);
 
 bool StructContainsTemplateParameter(Struct* str);
+// True when a lambda call operator's body names a template parameter of an
+// enclosing template, rather than only the operator's own parameters.
+bool LambdaCallOperatorBodyDependsOnEnclosingTemplate(Symbol* call_operator);
 void AppendTemplateInstantiationName(String* name, Symbol* templ, Vector* args);
 Vector* CompleteClassTemplateArguments(TypeParser* parser, Struct* template_struct,
                                        Vector* args);

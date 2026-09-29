@@ -692,15 +692,34 @@ static bool ClassTemplateIdentityTypesEqual(TypeRecord* left,
 // typedef (`typename Class<T>::size_type`) whose in-class counterpart was
 // recorded as a plain integer while the alias was still dependent.  Those
 // declarations designate the same function.
-static bool OutOfLineMemberParameterTypesEqual(TypeRecord* left,
-                                               TypeRecord* right) {
-  if (OverloadParameterTypesEqual(left, right)) {
+static bool OutOfLineMemberTypeEqual(TypeRecord* left, TypeRecord* right,
+                                     bool parameter, bool allow_integral) {
+  if (parameter ? OverloadParameterTypesEqual(left, right)
+                : OverloadTypesEqual(left, right)) {
     return true;
   }
   if (ClassTemplateIdentityTypesEqual(left, right)) {
     return true;
   }
-  return TypeIsIntegral(left) && TypeIsIntegral(right);
+  // `Iter&` in the class and `Iter<T>&` on the out-of-line definition name
+  // the same object.  Compare the pointee; do not treat two different
+  // integer pointees as the same type.
+  if (left != NULL && right != NULL &&
+      left->declarator == right->declarator &&
+      (TypeIsReference(left) ||
+       (TypeIsPointer(left) &&
+        (left->qualifiers & ~kQualRestrict) ==
+            (right->qualifiers & ~kQualRestrict)))) {
+    return OutOfLineMemberTypeEqual(left->next, right->next, parameter,
+                                    /*allow_integral=*/false);
+  }
+  return allow_integral && TypeIsIntegral(left) && TypeIsIntegral(right);
+}
+
+static bool OutOfLineMemberParameterTypesEqual(TypeRecord* left,
+                                               TypeRecord* right) {
+  return OutOfLineMemberTypeEqual(left, right, /*parameter=*/true,
+                                  /*allow_integral=*/true);
 }
 
 static bool OutOfLineMemberFunctionTypesEqual(TypeRecord* left,
@@ -708,9 +727,8 @@ static bool OutOfLineMemberFunctionTypesEqual(TypeRecord* left,
   if (!TypeIsFunction(left) || !TypeIsFunction(right)) {
     return false;
   }
-  if (!OverloadTypesEqual(left->next, right->next) &&
-      !ClassTemplateIdentityTypesEqual(left->next, right->next) &&
-      !(TypeIsIntegral(left->next) && TypeIsIntegral(right->next))) {
+  if (!OutOfLineMemberTypeEqual(left->next, right->next, /*parameter=*/false,
+                                /*allow_integral=*/true)) {
     return false;
   }
   FunctionInfo* left_fn = &left->info.function;
@@ -1312,6 +1330,34 @@ static bool AngleBracketsLookLikeTemplateId(Syntax* syntax) {
   return result;
 }
 
+// A non-template can share a name with a function template (`operator<<(char)`
+// beside `operator<<(const T&)`).  The first symbol is not enough: `<` after
+// that name is still a template-argument list.
+static bool SymbolOrOverloadIsTemplate(Symbol* symbol) {
+  for (Symbol* candidate = symbol; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->flags.is_template ||
+        candidate->flags.is_template_template_parameter ||
+        candidate->alias_template != NULL ||
+        candidate->variable_template != NULL) {
+      return true;
+    }
+    if (candidate->type == NULL || !TypeIsFunction(candidate->type) ||
+        candidate->type->info.function.cxx_member_owner == NULL) {
+      continue;
+    }
+    StructMember* head = FindStructMember(
+        candidate->type->info.function.cxx_member_owner, &candidate->name);
+    for (StructMember* member = head; member != NULL;
+         member = member->overload_next) {
+      if (member->symbol != NULL && member->symbol->flags.is_template) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // A '<' after this name opens a template-argument list only when the name can
 // actually be a template.  An NTTP (`k < sizeof...(Args)`) is a comparison;
 // consuming the '<' as a template-id steals the closing '>' of the enclosing
@@ -1322,9 +1368,14 @@ static bool NameMayBeTemplateId(Syntax* syntax, String* component) {
   }
   Symbol* symbol = SyntaxFindSymbol(syntax, component);
   if (symbol != NULL) {
-    if (symbol->flags.is_template ||
-        symbol->flags.is_template_template_parameter ||
-        symbol->alias_template != NULL || symbol->variable_template != NULL) {
+    if (SymbolOrOverloadIsTemplate(symbol)) {
+      return true;
+    }
+    // The injected-class-name of an explicit specialization denotes that
+    // specialization, but `numeric_limits<double>` still names the primary.
+    if (symbol->alias_target != NULL &&
+        symbol->alias_target->flags.is_template &&
+        !symbol->flags.is_using_alias) {
       return true;
     }
     // The injected-class-name of a class template is not flagged is_template
@@ -1346,6 +1397,9 @@ static bool NameMayBeTemplateId(Syntax* syntax, String* component) {
   return AngleBracketsLookLikeTemplateId(syntax);
 }
 
+static bool QualifiedNameHasMemberTemplate(Syntax* syntax,
+                                           FullyQualifiedIdentifier* name);
+
 static bool QualifiedNameIsTemplate(Syntax* syntax,
                                    FullyQualifiedIdentifier* name) {
   if (name == NULL || (!name->is_qualified && !name->absolute)) {
@@ -1355,21 +1409,20 @@ static bool QualifiedNameIsTemplate(Syntax* syntax,
   if (symbol == NULL) {
     symbol = SyntaxFindQualifiedTag(syntax, name);
   }
-  if (symbol == NULL) {
-    return false;
+  if (symbol != NULL) {
+    if (SymbolOrOverloadIsTemplate(symbol)) {
+      return true;
+    }
+    if (symbol->type != NULL && TypeIsStructOrUnion(symbol->type) &&
+        symbol->type->info.struct_info != NULL &&
+        (symbol->type->info.struct_info->is_template ||
+         symbol->type->info.struct_info->template_parameter_count > 0)) {
+      return true;
+    }
   }
-  if (symbol->flags.is_template ||
-      symbol->flags.is_template_template_parameter ||
-      symbol->alias_template != NULL || symbol->variable_template != NULL) {
-    return true;
-  }
-  if (symbol->type != NULL && TypeIsStructOrUnion(symbol->type) &&
-      symbol->type->info.struct_info != NULL &&
-      (symbol->type->info.struct_info->is_template ||
-       symbol->type->info.struct_info->template_parameter_count > 0)) {
-    return true;
-  }
-  return false;
+  // Qualified lookup drops non-static members, so `LogMessage::operator<<`
+  // is invisible when the first overload is an ordinary member function.
+  return QualifiedNameHasMemberTemplate(syntax, name);
 }
 
 static Vector* SyntaxConsumeOptionalTemplateId(Syntax* syntax,
@@ -1880,6 +1933,18 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
         }
         StringDestruct(&prefix_name);
       }
+      // `Box::AddData` names the overload set.  The first declaration may be
+      // the non-static member template; a later static overload is still a
+      // valid qualified call (`Box::AddData<kFront>(tree, data)`).
+      if (member != NULL && !member->is_static) {
+        for (StructMember* overload = member->overload_next; overload != NULL;
+             overload = overload->overload_next) {
+          if (overload->is_static && overload->symbol != NULL) {
+            member = overload;
+            break;
+          }
+        }
+      }
       if (member != NULL && member->symbol != NULL &&
           (member->is_static ||
            StorageIs(member->symbol->storage, STO(typedef)) ||
@@ -1895,6 +1960,35 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
   }
   StringDestruct(&last);
   return FollowAlias(symbol);
+}
+
+// Non-static member functions are omitted by SyntaxFindQualifiedSymbol.  The
+// overload set can still contain a function template (`operator<<(char)` next
+// to `template <typename T> operator<<(const T&)`).
+static bool QualifiedNameHasMemberTemplate(Syntax* syntax,
+                                           FullyQualifiedIdentifier* name) {
+  if (syntax == NULL || name == NULL || name->components.length < 2) {
+    return false;
+  }
+  Symbol* owner = SyntaxFindQualifiedPrefixSymbolImpl(
+      syntax, name, name->components.length - 1,
+      /*allow_dependent_template_args=*/true);
+  owner = QualifiedClassAfterMaterialize(syntax, owner);
+  if (owner == NULL || owner->type == NULL ||
+      !TypeIsStructOrUnion(owner->type) ||
+      owner->type->info.struct_info == NULL) {
+    return false;
+  }
+  const char* last_name = FullyQualifiedIdentifierLast(name);
+  String last;
+  StringInit(&last, last_name);
+  StructMember* member =
+      FindStructMember(owner->type->info.struct_info, &last);
+  StringDestruct(&last);
+  if (member == NULL || member->symbol == NULL) {
+    return false;
+  }
+  return SymbolOrOverloadIsTemplate(member->symbol);
 }
 
 static bool TemplateArgumentIsDependent(TemplateArgument* arg) {
@@ -2012,6 +2106,15 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
   if (component_count == 1 && !name->absolute) {
     Symbol* symbol =
         FollowAlias(SyntaxFindSymbol(syntax, name->components.value.p[0]));
+    // The specialization's injected-class-name hides the primary.  A
+    // template-id on that name (`numeric_limits<double>::infinity`) still
+    // instantiates the primary.
+    if (template_args != NULL && symbol != NULL &&
+        !symbol->flags.is_template && !symbol->flags.is_using_alias &&
+        symbol->alias_target != NULL &&
+        symbol->alias_target->flags.is_template) {
+      symbol = symbol->alias_target;
+    }
     if (allow_dependent_template_args && symbol != NULL &&
         StorageIs(symbol->storage, STO(typedef)) && symbol->type != NULL &&
         symbol->type->template_origin != NULL &&
@@ -2953,6 +3056,14 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
         return true;
       }
     }
+    // `enum { N = sizeof...(Ts) }; static_assert(N > 0)` — the enumerator is
+    // not itself constexpr, but its value is still the dependent initializer.
+    if (id->symbol != NULL && id->symbol->constexpr_initializer != NULL &&
+        !id->symbol->flags.value_set &&
+        (compiler->syntax.current_template_parameter_count > 0 ||
+         ExpressionIsTemplateDependent(id->symbol->constexpr_initializer))) {
+      return true;
+    }
     // `static constexpr auto value = T{}()` is value-dependent even though
     // `value`'s type is not.  Uses inside the class (a later static_assert)
     // must wait until the enclosing class template is instantiated.
@@ -3059,9 +3170,11 @@ static Symbol* StaticAssertCallCallee(ASTNode* node) {
 
 // Inline member bodies are captured and re-parsed only after the class is
 // complete.  A static_assert earlier in the class can already name those
-// functions; constant-evaluation has to wait until the body exists.
-static bool ExpressionReferencesDeferredConstexprFunction(ASTNode* node,
-                                                         void* data) {
+// functions; constant-evaluation has to wait until the body exists.  A
+// constexpr member of a class template may be defined out of line after the
+// class, so a static_assert in another member is checked at instantiation.
+bool ExpressionReferencesDeferredConstexprFunction(ASTNode* node,
+                                                  void* data) {
   (void)data;
   Symbol* symbol = StaticAssertCallCallee(node);
   if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
@@ -3071,11 +3184,23 @@ static bool ExpressionReferencesDeferredConstexprFunction(ASTNode* node,
   if (canonical != NULL && canonical != symbol && canonical->type == symbol->type) {
     symbol = canonical;
   }
+  if (symbol->type->info.function.body == NULL &&
+      symbol->value.func_defn != NULL &&
+      symbol->value.func_defn->type != NULL &&
+      TypeIsFunction(symbol->value.func_defn->type) &&
+      symbol->value.func_defn->type->info.function.body != NULL) {
+    symbol = symbol->value.func_defn;
+  }
   if (!symbol->type->info.function.is_constexpr && !symbol->flags.is_constexpr) {
     return false;
   }
-  return symbol->type->info.function.body == NULL && symbol->flags.is_defined &&
-         symbol->flags.is_inline_defn;
+  if (symbol->type->info.function.body != NULL) {
+    return false;
+  }
+  if (symbol->flags.is_defined && symbol->flags.is_inline_defn) {
+    return true;
+  }
+  return compiler->syntax.current_template_parameter_count > 0;
 }
 
 static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
@@ -3858,12 +3983,19 @@ typedef struct {
   bool found;
 } CXXPackExpressionSearch;
 
+static bool CXXTypeContainsParameterPack(Syntax* syntax, TypeRecord* type);
+
 static bool CXXTemplateArgumentReferencesParameterPack(
     TemplateArgument* argument) {
   if (argument == NULL) {
     return false;
   }
   if (argument->references_parameter_pack) {
+    return true;
+  }
+  if (argument->template_parameter_index >= 0 &&
+      CurrentTemplateParameterIsPack(&compiler->syntax,
+                                    argument->template_parameter_index)) {
     return true;
   }
   for (size_t i = 0;
@@ -3873,6 +4005,10 @@ static bool CXXTemplateArgumentReferencesParameterPack(
             argument->pack_arguments->value.p[i])) {
       return true;
     }
+  }
+  if (argument->type != NULL &&
+      CXXTypeContainsParameterPack(&compiler->syntax, argument->type)) {
+    return true;
   }
   return false;
 }
@@ -3887,11 +4023,22 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
     ((CXXPackExpressionSearch*)data)->found = true;
     return;
   }
+  if ((node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) &&
+      CXXTypeContainsParameterPack(
+          &compiler->syntax, ((SizeofASTNode*)node)->type_operand)) {
+    ((CXXPackExpressionSearch*)data)->found = true;
+    return;
+  }
   Vector* template_arguments = NULL;
   ASTNodeShape shape = ASTNodeGetShape(node);
   if (shape == kASTShapeIdentifier) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+      ((CXXPackExpressionSearch*)data)->found = true;
+      return;
+    }
+    if (id->symbol != NULL &&
+        CXXTypeContainsParameterPack(&compiler->syntax, id->symbol->type)) {
       ((CXXPackExpressionSearch*)data)->found = true;
       return;
     }
@@ -3926,30 +4073,15 @@ static bool CXXTypeContainsParameterPack(Syntax* syntax, TypeRecord* type) {
     if (parameter_index < 0 && current->dependent_member_name != NULL) {
       parameter_index = current->template_parameter_index;
     }
-    for (size_t i = 0;
-         parameter_index >= 0 &&
-         syntax->current_template_parameters != NULL &&
-         i < syntax->current_template_parameters->length; i++) {
-      TemplateParameter* parameter =
-          syntax->current_template_parameters->value.p[i];
-      if (parameter != NULL && parameter->index == parameter_index &&
-          parameter->is_parameter_pack) {
-        return true;
-      }
+    if (parameter_index >= 0 &&
+        CurrentTemplateParameterIsPack(syntax, parameter_index)) {
+      return true;
     }
-    Vector* function_parameters =
-        compiler->current_function != NULL &&
-                TypeIsFunction(compiler->current_function)
-            ? &compiler->current_function->info.function.template_parameters
-            : NULL;
-    for (size_t i = 0;
-         parameter_index >= 0 && function_parameters != NULL &&
-         i < function_parameters->length; i++) {
-      TemplateParameter* parameter = function_parameters->value.p[i];
-      if (parameter != NULL && parameter->index == parameter_index &&
-          parameter->is_parameter_pack) {
-        return true;
-      }
+    if (current->template_parameter_index >= 0 &&
+        current->template_parameter_index != parameter_index &&
+        CurrentTemplateParameterIsPack(syntax,
+                                       current->template_parameter_index)) {
+      return true;
     }
     if (current->dependent_decltype_expr != NULL &&
         CXXExpressionContainsParameterPack(
@@ -5349,14 +5481,20 @@ typedef struct {
   TypeRecord* from_func;
   TypeRecord* to_func;
   int rebase_base;
+  // Class-template arguments that correspond to indices below `rebase_base`.
+  // Borrowed.  NULL keeps the rebase-only behavior.
+  Vector* enclosing_args;
 } ConstructorInitFormalRemap;
 
 /* Visitor: within a cloned member-initializer actual, (1) rewrite an identifier
  * that names one of `from_func`'s parameters to the parameter at the same
- * position in `to_func`, and (2) renumber template-parameter indices in any
- * explicit template arguments / cast types down by `rebase_base` so the
- * member's own parameters become zero-based (matching the class-level
- * constructor whose template_parameter_base was reset to 0). */
+ * position in `to_func`, and (2) bind explicit template arguments that name
+ * the enclosing class (`make_unique<S>` inside `Box<S>::Box<It>`) to
+ * `enclosing_args`, then renumber the member template's own parameters down
+ * by `rebase_base`.  Rebase alone leaves the class parameter at index 0, which
+ * is the same slot the member's first parameter occupies after renumbering, so
+ * the later per-call clone would substitute the class parameter with the
+ * member argument. */
 static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
                                               int child_id, VisitorMode mode) {
   (void)child_id;
@@ -5378,7 +5516,19 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
         break;
       }
     }
-    if (remap->rebase_base > 0 && id->template_arguments != NULL) {
+    if (remap->enclosing_args != NULL && remap->enclosing_args->length > 0 &&
+        remap->rebase_base > 0 && id->template_arguments != NULL) {
+      Vector* concrete = TypeSubstituteTemplateArgumentVectorAndRebase(
+          &compiler->syntax, id->template_arguments, remap->enclosing_args,
+          remap->rebase_base);
+      if (concrete != NULL) {
+        VectorDeleteWithContents(
+            id->template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        id->template_arguments = concrete;
+      }
+    } else if (remap->rebase_base > 0 && id->template_arguments != NULL) {
       for (size_t i = 0; i < id->template_arguments->length; i++) {
         RebaseTemplateArgumentParameterIndices(
             id->template_arguments->value.p[i], remap->rebase_base);
@@ -5392,25 +5542,30 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
 
 /* Rewrite every reference to one of `from_func`'s parameters inside the deferred
  * member-initializer actuals of `init_list` to the correspondingly-positioned
- * parameter of `to_func`, and rebase the member template's own template-
- * parameter indices by `rebase_base`.  Used when a class-template instantiation
- * clones a member function template constructor: the deferred init-list is
- * shared from the primary and still names the primary's parameters and numbers
- * the member's own template parameters relative to the enclosing class, but the
- * per-call preamble insertion keys its clone maps off the cloned (class-level)
- * prototype (whose parameters are fresh and whose template_parameter_base is 0).
- * Aligning both lets pack initializers such as
+ * parameter of `to_func`.  `enclosing_args` (indices below `rebase_base`) are
+ * substituted into explicit template arguments, then the member template's own
+ * parameters are rebased by `rebase_base`.  Used when a class-template
+ * instantiation clones a member function template constructor: the deferred
+ * init-list is shared from the primary and still names the primary's parameters
+ * and numbers the member's own template parameters relative to the enclosing
+ * class, but the per-call preamble insertion keys its clone maps off the cloned
+ * (class-level) prototype (whose parameters are fresh and whose
+ * template_parameter_base is 0).  Aligning both lets pack initializers such as
  * `value(std::forward<Args>(args)...)` expand against the concrete arguments
- * instead of dropping `forward`'s explicit template argument. */
+ * instead of dropping `forward`'s explicit template argument, and lets
+ * `make_unique<S>` keep the class argument rather than the member's first
+ * parameter. */
 void SyntaxCXXConstructorInitListRemapFormals(CXXConstructorInitList* init_list,
                                               TypeRecord* from_func,
                                               TypeRecord* to_func,
-                                              int rebase_base) {
+                                              int rebase_base,
+                                              Vector* enclosing_args) {
   if (init_list == NULL || from_func == NULL || to_func == NULL ||
       !TypeIsFunction(from_func) || !TypeIsFunction(to_func)) {
     return;
   }
-  ConstructorInitFormalRemap remap = {from_func, to_func, rebase_base};
+  ConstructorInitFormalRemap remap = {from_func, to_func, rebase_base,
+                                      enclosing_args};
   for (size_t i = 0; i < init_list->deferred_initializers.length; i++) {
     CXXDeferredConstructorInitializer* init =
         init_list->deferred_initializers.value.p[i];
@@ -5550,12 +5705,50 @@ static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
   return FindCXXDirectBaseByNameSkipping(owner, name, NULL);
 }
 
+/* A mem-initializer may name a direct base by the class template's parameter
+ * (`struct Storage<T, I, Tag, true> : T { Storage(...) : T(v) {} }`).  After
+ * instantiation the base's tag is the argument type (`Hash<unsigned long>`),
+ * not the parameter name `T`. */
+static TypeRecord* CXXTemplateParameterBaseType(Struct* owner,
+                                                const char* name) {
+  if (owner == NULL || name == NULL || owner->tag_symbol == NULL ||
+      owner->tag_symbol->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* owner_type = owner->tag_symbol->type;
+  Symbol* origin = owner_type->template_origin;
+  Vector* args = owner_type->template_arguments;
+  if (origin == NULL || origin->type == NULL ||
+      !TypeIsStructOrUnion(origin->type) ||
+      origin->type->info.struct_info == NULL || args == NULL) {
+    return NULL;
+  }
+  Vector* parameters = &origin->type->info.struct_info->template_parameters;
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* param = parameters->value.p[i];
+    if (param == NULL || param->kind != kTemplateParameterType ||
+        param->name.value == NULL || strcmp(param->name.value, name) != 0) {
+      continue;
+    }
+    if (param->index < 0 || (size_t)param->index >= args->length) {
+      return NULL;
+    }
+    TemplateArgument* arg = args->value.p[param->index];
+    if (arg == NULL || arg->kind != kTemplateParameterType) {
+      return NULL;
+    }
+    return arg->type;
+  }
+  return NULL;
+}
+
 static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
     Struct* owner, const char* name, Vector* already_used) {
   if (owner == NULL || name == NULL) {
     return NULL;
   }
   TypeRecord* alias_type = CXXTypedefTypeVisibleFromClass(owner, name);
+  TypeRecord* parameter_type = CXXTemplateParameterBaseType(owner, name);
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
@@ -5566,6 +5759,9 @@ static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
       continue;
     }
     if (alias_type != NULL && TypeEqual(alias_type, base->type)) {
+      return base;
+    }
+    if (parameter_type != NULL && TypeEqual(parameter_type, base->type)) {
       return base;
     }
     if (base->type->info.struct_info->tag_name != NULL &&
@@ -5586,6 +5782,7 @@ static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
     return NULL;
   }
   TypeRecord* alias_type = CXXTypedefTypeVisibleFromClass(owner, name);
+  TypeRecord* parameter_type = CXXTemplateParameterBaseType(owner, name);
   for (size_t i = 0; i < owner->virtual_bases.length; i++) {
     CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
@@ -5593,6 +5790,9 @@ static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
       continue;
     }
     if (alias_type != NULL && TypeEqual(alias_type, base->type)) {
+      return base;
+    }
+    if (parameter_type != NULL && TypeEqual(parameter_type, base->type)) {
       return base;
     }
     if (base->type->info.struct_info->tag_name != NULL &&
@@ -6436,6 +6636,33 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
         NewBinaryASTNode(AST_OP(assign), member_type, location, target, value);
     assign->flags |= kASTCXXMemberInitializer;
     return NewExpressionStatementASTNode(assign, location);
+  }
+
+  if (actuals->length != 1 && member_type != NULL &&
+      TypeContainsTemplateParameter(member_type)) {
+    // `tree_(key_compare(), allocator_type())` names a constructor of a
+    // template parameter.  The concrete constructor is chosen when the class
+    // is instantiated; keep the arguments as a call until then.
+    const char* constructor_name = CXXConstructorNameForType(member_type);
+    if (constructor_name == NULL && member->symbol != NULL) {
+      constructor_name = member->symbol->name.value;
+    }
+    ASTNode* receiver =
+        NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+    if (receiver == NULL || constructor_name == NULL) {
+      VectorDelete(actuals);
+      return NULL;
+    }
+    CXXPrependCompleteObjectArgument(member_type, actuals,
+                                     /*complete_object=*/true, location);
+    ASTNode* member_name =
+        NewStringConstantASTNode(NewString(constructor_name), NULL, location);
+    ASTNode* member_access =
+        NewBinaryASTNode(AST_OP(dot), NULL, location, receiver, member_name);
+    ASTNode* call =
+        NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
+    call->flags |= kASTCXXMemberInitializer;
+    return NewExpressionStatementASTNode(call, location);
   }
 
   if (actuals->length != 1) {
@@ -9367,6 +9594,45 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             }
           }
         }
+        // The qualified-name lookup that decided whether this definition gets
+        // an implicit `this` saw only the first overload.  `AddData` is both a
+        // non-static member template and a static one; a definition of the
+        // static overload was therefore given `this` and matched neither
+        // signature.  Drop or add `this` and search the overload set again.
+        if (matching_member == NULL && TypeIsFunction(sym->type) &&
+            parser->cxx_member_owner != NULL) {
+          bool had_this = FunctionHasImplicitThisParameter(sym->type);
+          if (had_this) {
+            TypeRecordRemoveImplicitThisParameter(sym->type);
+            StructMember* static_match = FindStructMemberOverload(
+                parser->cxx_member_definition, sym->type);
+            if (static_match != NULL && static_match->is_static) {
+              matching_member = static_match;
+            } else {
+              Struct* owner = sym->type->info.function.cxx_member_owner;
+              if (owner == NULL) {
+                owner = parser->cxx_member_owner;
+              }
+              sym->type->info.function.cxx_member_owner = NULL;
+              TypeRecordAddCXXThisParameter(sym->type, owner, sym->location);
+            }
+          } else {
+            Struct* owner = sym->type->info.function.cxx_member_owner;
+            if (owner == NULL) {
+              owner = parser->cxx_member_owner;
+            }
+            sym->type->info.function.cxx_member_owner = NULL;
+            TypeRecordAddCXXThisParameter(sym->type, owner, sym->location);
+            StructMember* instance_match = FindStructMemberOverload(
+                parser->cxx_member_definition, sym->type);
+            if (instance_match != NULL && !instance_match->is_static) {
+              matching_member = instance_match;
+            } else if (FunctionHasImplicitThisParameter(sym->type)) {
+              TypeRecordRemoveImplicitThisParameter(sym->type);
+              sym->type->info.function.cxx_member_owner = owner;
+            }
+          }
+        }
         if (matching_member != NULL) {
           parser->cxx_member_definition = matching_member;
           old_sym = matching_member->symbol;
@@ -9819,10 +10085,21 @@ static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag,
       SymbolDelete(alias);
       return true;
     }
-    // A using-directive does not declare a new name.  An already-visible
-    // declaration hides the imported one (`using namespace std` inside
-    // namespace absl, which already has `using std::weak_ordering`).
+    // A using-directive does not hide an existing class or enumerator
+    // (`using namespace std` inside namespace absl, which already has
+    // `using std::weak_ordering`).  Functions do overload: an anonymous
+    // namespace `template <EdgeType> Consume(...)` must join the
+    // `void Consume(CordRep*, ...)` already declared in the enclosing
+    // namespace, or `Consume<kBack>(...)` is parsed as a comparison.
     if (!current_scope_only) {
+      if (!is_tag && CanOverloadFunctions(existing, alias)) {
+        if (FindMatchingOverload(existing, alias->type, alias) != NULL) {
+          SymbolDelete(alias);
+          return true;
+        }
+        AppendOverload(existing, alias);
+        return true;
+      }
       SymbolDelete(alias);
       return true;
     }
@@ -11629,8 +11906,10 @@ static void MaterializeDeferredClassTemplateType(Syntax* syntax, Symbol* sym) {
   TypeRecord* materialized =
       TypeMaterializeClassTemplateSpecialization(syntax, sym->type);
   if (materialized != sym->type) {
+    // SymbolSetType retains the record.  Dropping it here frees the function
+    // type the symbol now points at, which clears a just-copied parameter list
+    // (`ostream& operator<<(ostream&, int128)`).
     SymbolSetType(sym, materialized);
-    TypeRecordDelete(materialized);
   }
 }
 
@@ -14202,6 +14481,24 @@ static void CheckLocalVariableShadow(Syntax* syntax, Symbol* sym) {
   ReportNote(prev_filename, prev_lineno, "shadowed declaration is here");
 }
 
+/* A class object declared constexpr may be default-initialized; that
+ * constructor call is the initializer.  Inside a template the concrete
+ * constructor is filled in when the declaration is cloned.  A dependent type
+ * is deferred too: it may be a class, and a scalar is diagnosed at
+ * instantiation once the type is known. */
+static bool CXXDeferConstexprDefaultInitialization(Syntax* syntax,
+                                                   TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  if (TypeIsUnknown(type) || TypeContainsTemplateParameter(type)) {
+    return true;
+  }
+  bool in_template = syntax->parsing_template_declaration ||
+                     syntax->current_template_parameter_count > 0;
+  return in_template && (TypeIsStructOrUnion(type) || TypeIsArray(type));
+}
+
 static bool InitializerNamesUndeducedAuto(ASTNode* node, void* data) {
   Symbol* self = data;
   if (node == NULL || node->op != AST_OP(identifier)) {
@@ -14474,9 +14771,15 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           if (TypeContainsAuto(sym->type)) {
             SyntaxError(syntax, "auto variable requires an initializer");
           } else if (sym->flags.is_constexpr || sym->flags.is_constinit) {
-            SyntaxError(syntax, sym->flags.is_constinit
-                                    ? "constinit variable requires an initializer"
-                                    : "constexpr variable requires an initializer");
+            if (!CXXDeferConstexprDefaultInitialization(syntax, sym->type)) {
+              initializer =
+                  SyntaxNewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+              if (initializer == NULL) {
+                SyntaxError(syntax, sym->flags.is_constinit
+                                        ? "constinit variable requires an initializer"
+                                        : "constexpr variable requires an initializer");
+              }
+            }
           } else if (!StorageIs(storage, STO(extern)) &&
                      StorageIs(storage, STO(thread))) {
             initializer = NewCXXThreadLocalGuardedConstructor(syntax, sym);
@@ -14514,22 +14817,31 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                             : kLocalStaticInitConstant;
       }
       VectorAppend(declarations, decl);
-      if (sym->flags.is_constexpr || sym->flags.is_constinit ||
-          (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type)) ||
-          // Deduce `auto` eagerly at parse time. Block-scope declarations are
-          // otherwise analyzed only after the whole function body is parsed, so
-          // a later `decltype(var)` in the same block (resolved during parsing)
-          // would still see the undeduced `auto` type. Analyzing here fixes the
-          // symbol's type up front; the definition is idempotent under the
-          // later body-analysis pass. Skip this inside a template, where the
-          // initializer may be dependent and unanalyzable until instantiation
-          // (decltype defers via dependent_decltype_expr there anyway).
-          ((TypeContainsAuto(sym->type) ||
-            (CompilerIsCXX() && sym->type->declarator == kDeclArray &&
-             sym->type->info.array.is_flexible && initializer != NULL)) &&
-           syntax->current_template_parameters == NULL &&
-           (initializer == NULL ||
-            !ASTNodeAny(initializer, InitializerNamesUndeducedAuto, sym)))) {
+      // Fold a const scalar (and constexpr / constinit) at the declaration so
+      // a later constant use in this block can see the value.  Do not do that
+      // when the initializer is still template-dependent: member access such
+      // as `rep.rep->length` is typed against the uninstantiated class, and
+      // that type is kept when the function template is instantiated.
+      bool eager_const_value =
+          (sym->flags.is_constexpr || sym->flags.is_constinit ||
+           (TypeIsConst(sym->type) && !TypeIsStructOrUnion(sym->type))) &&
+          !ExpressionIsTemplateDependent(initializer);
+      // Deduce `auto` eagerly at parse time. Block-scope declarations are
+      // otherwise analyzed only after the whole function body is parsed, so
+      // a later `decltype(var)` in the same block (resolved during parsing)
+      // would still see the undeduced `auto` type. Analyzing here fixes the
+      // symbol's type up front; the definition is idempotent under the
+      // later body-analysis pass. Skip this inside a template, where the
+      // initializer may be dependent and unanalyzable until instantiation
+      // (decltype defers via dependent_decltype_expr there anyway).
+      bool eager_auto =
+          (TypeContainsAuto(sym->type) ||
+           (CompilerIsCXX() && sym->type->declarator == kDeclArray &&
+            sym->type->info.array.is_flexible && initializer != NULL)) &&
+          syntax->current_template_parameters == NULL &&
+          (initializer == NULL ||
+           !ASTNodeAny(initializer, InitializerNamesUndeducedAuto, sym));
+      if (eager_const_value || eager_auto) {
         SemanticAnalyzeVariableDefinition(syntax,
                                         (VariableDeclarationASTNode*)decl);
       }
@@ -15070,12 +15382,20 @@ static bool CXXTypeStartsTemporaryMemberAccess(Syntax* syntax) {
     have_type_name = LexLookingAt(syntax->lex, TOK(identifier));
   }
 
-  if (have_type_name && LexLookingAt(syntax->lex, TOK(lparen))) {
+  if (have_type_name && (LexLookingAt(syntax->lex, TOK(lparen)) ||
+                         LexLookingAt(syntax->lex, TOK(lbrace)))) {
+    // `T{pos}.member()` is the same kind of temporary as `T(pos).member()`.
+    // A declaration would put a name between the type and the braces
+    // (`T var{pos}`), so a brace immediately after the type name is an
+    // expression.
+    bool brace = LexLookingAt(syntax->lex, TOK(lbrace));
+    Token open = brace ? TOK(lbrace) : TOK(lparen);
+    Token close = brace ? TOK(rbrace) : TOK(rparen);
     int depth = 0;
     do {
-      if (LexLookingAt(syntax->lex, TOK(lparen))) {
+      if (LexLookingAt(syntax->lex, open)) {
         depth++;
-      } else if (LexLookingAt(syntax->lex, TOK(rparen))) {
+      } else if (LexLookingAt(syntax->lex, close)) {
         depth--;
       }
       LexNextToken(syntax->lex);

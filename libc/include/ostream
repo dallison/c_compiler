@@ -25,6 +25,9 @@ template <class CharT, class Traits, class Allocator>
 class basic_string;
 
 template <class CharT, class Traits>
+class basic_string_view;
+
+template <class CharT, class Traits>
 class basic_ostream : public virtual basic_ios<CharT, Traits> {
  public:
   typedef CharT char_type;
@@ -325,6 +328,12 @@ basic_ostream<CharT, Traits>& operator<<(
     basic_ostream<CharT, Traits>& os,
     const basic_string<CharT, Traits, Allocator>& s) {
   return os.__put_bytes(s.data(), s.size(), 0);
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits>& operator<<(basic_ostream<CharT, Traits>& os,
+                                         basic_string_view<CharT, Traits> sv) {
+  return os.__put_bytes(sv.data(), sv.size(), 0);
 }
 
 // Manipulators.

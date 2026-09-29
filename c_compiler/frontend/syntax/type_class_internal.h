@@ -94,7 +94,8 @@ void ApplyCXXMemberUsingDeclarations(TypeParser* parser, Struct* owner,
 struct CXXConstructorInitList* FindTemplateConstructorInitializers(Symbol* symbol);
 void RegisterTemplateConstructorInitializers(
     Symbol* symbol, struct CXXConstructorInitList* initializers);
-void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to);
+void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to,
+                                            Vector* enclosing_args);
 
 // Insert and analyze the constructor member-initializer preamble for a freshly
 // cloned constructor instantiation `symbol` (whose body was cloned from

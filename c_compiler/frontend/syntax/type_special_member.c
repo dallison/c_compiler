@@ -2251,6 +2251,28 @@ static bool CXXStructMoveSpecialMemberInaccessible(Struct* str,
   return false;
 }
 
+static TypeRecord* CXXFindSpecialMemberFunction(Struct* str,
+                                                CXXSpecialMemberKind kind);
+
+// [dcl.fct.def.default]: user-provided means user-declared and not explicitly
+// defaulted or deleted on its first declaration.  `T();` qualifies even when
+// the body is defined out of line.
+static bool CXXClassHasUserProvidedDefaultConstructor(TypeRecord* type) {
+  while (type != NULL && TypeIsFixedArray(type)) {
+    type = type->next;
+  }
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return false;
+  }
+  TypeRecord* ctor = CXXFindSpecialMemberFunction(
+      type->info.struct_info, kCXXSpecialMemberDefaultConstructor);
+  return ctor != NULL && TypeIsFunction(ctor) &&
+         ctor->info.function.is_user_declared &&
+         !ctor->info.function.is_defaulted &&
+         !ctor->info.function.is_deleted;
+}
+
 static bool CXXTypeNeedsDefaultInitializer(TypeRecord* type) {
   if (type == NULL) {
     return false;
@@ -2258,7 +2280,16 @@ static bool CXXTypeNeedsDefaultInitializer(TypeRecord* type) {
   if (TypeIsFixedArray(type)) {
     return CXXTypeNeedsDefaultInitializer(type->next);
   }
-  return TypeIsReference(type) || TypeIsConst(type);
+  if (TypeIsReference(type)) {
+    return true;
+  }
+  if (!TypeIsConst(type)) {
+    return false;
+  }
+  // [class.default.ctor]: a const member with no initializer deletes the
+  // default constructor unless that member's class has a user-provided
+  // default constructor (`const Randen impl_;` with `Randen();`).
+  return !CXXClassHasUserProvidedDefaultConstructor(type);
 }
 
 static bool CXXStructHasMemberWithoutDefaultInitialization(Struct* str) {
@@ -2821,6 +2852,40 @@ static bool CXXUnionDefaultedSpecialMemberIsDeleted(
   return false;
 }
 
+// Implicit special members of a nested class are declared while the enclosing
+// template is still dependent, then cloned into the instantiation.  Their
+// noexcept and triviality were decided against that dependent base, so
+// recompute them once the concrete bases and members are in place.
+static void CXXRefreshImplicitSpecialMembers(Struct* str) {
+  if (str == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* member = str->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      TypeRecord* func = member->is_member_function && member->symbol != NULL
+                             ? member->symbol->type
+                             : NULL;
+      if (func == NULL || !TypeIsFunction(func) ||
+          !func->info.function.is_implicitly_declared ||
+          !func->info.function.is_defaulted ||
+          func->info.function.is_user_provided ||
+          func->info.function.is_explicitly_deleted) {
+        continue;
+      }
+      CXXSpecialMemberKind kind = func->info.function.cxx_special_member_kind;
+      if (kind == kCXXSpecialMemberNone) {
+        continue;
+      }
+      bool deleted = func->info.function.is_deleted;
+      func->info.function.is_noexcept =
+          !deleted && CXXImplicitSpecialMemberIsNoexcept(str, kind);
+      func->info.function.is_trivial_special_member =
+          !deleted && CXXImplicitSpecialMemberIsTrivial(str, kind);
+    }
+  }
+}
+
 static void CXXRefreshUnionDefaultedSpecialMembers(Struct* str) {
   if (str == NULL || !str->is_union) {
     return;
@@ -3057,6 +3122,7 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
     AddCXXSyntheticMemberFunction(parser, str, move_assign);
   }
   CXXRefreshUnionDefaultedSpecialMembers(str);
+  CXXRefreshImplicitSpecialMembers(str);
   str->cxx_special_members_complete = true;
 }
 

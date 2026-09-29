@@ -359,6 +359,10 @@ typedef struct CXXVTableInfo {
 typedef struct StructMember {
   Symbol* symbol;   // Embedded Symbol.                            // @wire 1
   struct ASTNode* default_initializer;  // C++ default member init. // @wire 2
+  // Width of a bit-field whose expression was dependent at parse time
+  // (`IntType h2 : kH2Bits` inside a class template).  Evaluated when the
+  // class is instantiated.  Not serialized.
+  struct ASTNode* bit_width_expr;  // @wire -
   int byte_offset;  // Byte offset into struct.                    // @wire 3
   int bit_offset;   // Bit offset into word.                       // @wire 4
   int bit_size;     // Bitfield size in bits.                      // @wire 5
@@ -385,6 +389,10 @@ struct Struct {
   // same source produce different symbols.
   int serial;        // @wire - (assigned on creation)
   struct Struct* lexical_parent;  // Enclosing class for nested C++ types. @wire 31
+  // Function in which this local class or lambda closure was defined.  The
+  // local class has that function's access, including friendship
+  // ([class.local]).  Not serialized.
+  Symbol* access_enclosing_function;  // @wire -
   String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
   Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2
   Vector bases;      // CXXBaseSpecifier* (owns entries).         // @wire 3

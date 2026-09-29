@@ -2294,7 +2294,46 @@ static TypeRecord* ConstexprObjectSlotType(TypeRecord* type,
   return NULL;
 }
 
-static void ConstexprPersistAddressObjects(ConstexprObject* object) {
+static void ConstexprCollectObjectPairs(ConstexprObject* source,
+                                        ConstexprObject* clone,
+                                        Vector* sources, Vector* clones) {
+  if (source == NULL || clone == NULL || sources == NULL || clones == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < sources->length; i++) {
+    if (sources->value.p[i] == source) {
+      return;
+    }
+  }
+  VectorAppend(sources, source);
+  VectorAppend(clones, clone);
+  size_t count = source->slots.length < clone->slots.length
+                     ? source->slots.length
+                     : clone->slots.length;
+  for (size_t i = 0; i < count; i++) {
+    ConstexprValue* from = source->slots.value.p[i];
+    ConstexprValue* to = clone->slots.value.p[i];
+    if (from != NULL && to != NULL && from->is_object && to->is_object) {
+      ConstexprCollectObjectPairs(from->object, to->object, sources, clones);
+    }
+  }
+}
+
+static ConstexprObject* ConstexprMappedClone(Vector* sources, Vector* clones,
+                                             ConstexprObject* object) {
+  if (object == NULL || sources == NULL || clones == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < sources->length && i < clones->length; i++) {
+    if (sources->value.p[i] == object) {
+      return clones->value.p[i];
+    }
+  }
+  return NULL;
+}
+
+static void ConstexprPersistAddressObjects(ConstexprObject* object,
+                                           Vector* sources, Vector* clones) {
   if (object == NULL) {
     return;
   }
@@ -2305,8 +2344,16 @@ static void ConstexprPersistAddressObjects(ConstexprObject* object) {
     }
     if (slot->is_address) {
       ConstexprCanonicalizeAddressValue(slot);
-      if (slot->address_object != NULL && slot->address_object->type != NULL &&
-          TypeIsFixedArray(slot->address_object->type)) {
+      // `this` stored in a member addresses the object under evaluation.
+      // Canonicalization names that object; keep the pointer on the clone
+      // that outlives the evaluation context.
+      ConstexprObject* mapped =
+          ConstexprMappedClone(sources, clones, slot->address_object);
+      if (mapped != NULL) {
+        slot->address_object = mapped;
+      } else if (slot->address_object != NULL &&
+                 slot->address_object->type != NULL &&
+                 TypeIsFixedArray(slot->address_object->type)) {
         slot->address_object =
             CloneConstexprObject(NULL, slot->address_object);
       }
@@ -2314,13 +2361,13 @@ static void ConstexprPersistAddressObjects(ConstexprObject* object) {
       slot->address_slot = NULL;
     }
     if (slot->is_object && slot->object != NULL) {
-      ConstexprPersistAddressObjects(slot->object);
+      ConstexprPersistAddressObjects(slot->object, sources, clones);
     }
   }
 }
 
 void ConstexprPersistObjectAddresses(ConstexprObject* object) {
-  ConstexprPersistAddressObjects(object);
+  ConstexprPersistAddressObjects(object, NULL, NULL);
 }
 
 static bool ConstexprEvaluateObjectConstantForSymbolAST(Symbol* symbol,
@@ -2366,7 +2413,16 @@ static bool ConstexprEvaluateObjectConstantForSymbolAST(Symbol* symbol,
     ConstexprObject* stored =
         CloneConstexprObject(NULL, object_value.object);
     if (stored != NULL) {
-      ConstexprPersistAddressObjects(stored);
+      Vector address_sources;
+      Vector address_clones;
+      VectorInit(&address_sources);
+      VectorInit(&address_clones);
+      ConstexprCollectObjectPairs(object_value.object, stored,
+                                  &address_sources, &address_clones);
+      ConstexprPersistAddressObjects(stored, &address_sources,
+                                     &address_clones);
+      VectorDestruct(&address_sources);
+      VectorDestruct(&address_clones);
     }
     symbol->value.other = stored;
     symbol->flags.value_set = stored != NULL;
@@ -2457,7 +2513,9 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
 static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
                                           TypeRecord* type,
                                           SourceLocation location,
-                                          bool preserve_external_addresses);
+                                          bool preserve_external_addresses,
+                                          Symbol* self_symbol,
+                                          ConstexprObject* self_root);
 static const char* ConstexprValueRawCString(ConstexprValue* value);
 
 static bool EvaluateConstexprStatementExpression(ConstEvalContext* ctx,
@@ -2501,7 +2559,9 @@ static bool EvaluateConstexprStatementExpression(ConstEvalContext* ctx,
 
 static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
                                            SourceLocation location,
-                                           bool preserve_external_addresses) {
+                                           bool preserve_external_addresses,
+                                           Symbol* self_symbol,
+                                           ConstexprObject* self_root) {
   if (object == NULL || object->type == NULL) {
     return NULL;
   }
@@ -2516,7 +2576,7 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
       }
       ASTNode* init = ConstexprValueInitializer(
           slot, object->type->next, location,
-          preserve_external_addresses);
+          preserve_external_addresses, self_symbol, self_root);
       if (init != NULL) {
         Vector* designators = NewVector();
         VectorAppend(designators,
@@ -2538,7 +2598,8 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
       ASTNode* init =
           slot != NULL && slot->is_object && slot->object != NULL
               ? ConstexprValueInitializer(slot, base->type, location,
-                                          preserve_external_addresses)
+                                          preserve_external_addresses,
+                                          self_symbol, self_root)
               : NewBracedInitializerASTNode(NewVector(), base->type, location);
       if (init != NULL) {
         VectorAppend(initializers, init);
@@ -2555,7 +2616,8 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
       }
       ASTNode* init = ConstexprValueInitializer(
           object->slots.value.p[ConstexprMemberSlotIndex(object, member)],
-          member->symbol->type, location, preserve_external_addresses);
+          member->symbol->type, location, preserve_external_addresses,
+          self_symbol, self_root);
       if (init != NULL) {
         if (str->is_union) {
           Vector* designators = NewVector();
@@ -2580,7 +2642,9 @@ static ASTNode* ConstexprObjectInitializer(ConstexprObject* object,
 static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
                                           TypeRecord* type,
                                           SourceLocation location,
-                                          bool preserve_external_addresses) {
+                                          bool preserve_external_addresses,
+                                          Symbol* self_symbol,
+                                          ConstexprObject* self_root) {
   if (value == NULL || type == NULL) {
     return NULL;
   }
@@ -2589,11 +2653,22 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
   }
   if (value->is_object) {
     return ConstexprObjectInitializer(value->object, location,
-                                      preserve_external_addresses);
+                                      preserve_external_addresses, self_symbol,
+                                      self_root);
   }
   ConstexprValue resolved = ConstexprResolveForwardedAddress(*value);
   ConstexprCanonicalizeAddressValue(&resolved);
   value = &resolved;
+  if (self_symbol != NULL && self_root != NULL && TypeIsPointer(type) &&
+      value->is_address && value->heap_block == NULL &&
+      value->address_index == 0 && value->address_object == self_root) {
+    // A constexpr constructor stored `this` in a member.  The persisted
+    // address is the object being initialized, so emit that object's address.
+    ASTNode* object = NewIdentifierASTNode(self_symbol, location);
+    ASTNode* addr = NewUnaryASTNode(AST_OP(address), NULL, location, object);
+    ASTNodeSetType(addr, TypeRecordCopy(type));
+    return NewExpressionInitializerASTNode(addr, location);
+  }
   ASTNode* expr = NULL;
   if (TypeIsPointer(type) && value->is_address &&
       value->address_object != NULL &&
@@ -2661,9 +2736,10 @@ ASTNode* ConstexprObjectInitializerForSymbol(Symbol* symbol,
       symbol->value.other == NULL) {
     return NULL;
   }
-  return ConstexprObjectInitializer((ConstexprObject*)symbol->value.other,
-                                    location,
-                                    /*preserve_external_addresses=*/false);
+  return ConstexprObjectInitializer(
+      (ConstexprObject*)symbol->value.other, location,
+      /*preserve_external_addresses=*/false, symbol,
+      (ConstexprObject*)symbol->value.other);
 }
 
 static bool EvaluateConstexprInlineCall(ConstEvalContext* ctx,
@@ -2714,7 +2790,7 @@ ASTNode* ConstexprFoldPointerExpression(ASTNode* expr) {
   if (ok) {
     ASTNode* materialized = ConstexprValueInitializer(
         &value, expr->type, expr->location,
-        /*preserve_external_addresses=*/true);
+        /*preserve_external_addresses=*/true, NULL, NULL);
     ASTNode* inner = ConstexprInitializerExpression(materialized);
     if (inner != NULL) {
       folded = ASTNodeClone(inner, IdentityCloneNode, NULL, NULL);
@@ -4568,7 +4644,7 @@ static ASTNode* ConstexprObjectInitializerForExpressionImpl(
   }
   ASTNode* initializer =
       ok ? ConstexprValueInitializer(&value, type, expression->location,
-                                     template_argument)
+                                     template_argument, NULL, NULL)
          : NULL;
   ConstEvalContextDestruct(&ctx);
   return initializer;

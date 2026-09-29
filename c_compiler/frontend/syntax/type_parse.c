@@ -4,6 +4,7 @@
 //
 
 #include "type_internal.h"
+#include "type_template_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -483,8 +484,23 @@ static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
     return result;
   }
 
-  if (result->dependent_decltype_expr != NULL ||
-      TypeContainsTemplateParameter(result)) {
+  // A concrete specialization can still report a template parameter because a
+  // member alias pattern names the primary's parameters.  `Layout<int,
+  // double>::WithStaticSizes<1, 0>` must look the alias up on that
+  // specialization rather than staying a dependent member.
+  Vector* class_args = result->template_arguments;
+  if (class_args == NULL && TypeIsStructOrUnion(result) &&
+      result->info.struct_info != NULL &&
+      result->info.struct_info->tag_symbol != NULL &&
+      result->info.struct_info->tag_symbol->type != NULL) {
+    class_args = result->info.struct_info->tag_symbol->type->template_arguments;
+  }
+  bool concrete_class =
+      TypeIsStructOrUnion(result) && class_args != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(class_args);
+  if (!concrete_class &&
+      (result->dependent_decltype_expr != NULL ||
+       TypeContainsTemplateParameter(result))) {
     if (result->dependent_member_name != NULL) {
       StringDelete(result->dependent_member_name);
     }
@@ -525,6 +541,30 @@ static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
     Vector* template_args = member.template_arguments.value.p[i];
     TypeRecord* next = NULL;
     if (template_args != NULL && nested->symbol->flags.is_template &&
+        nested->symbol->alias_template != NULL &&
+        !TypeIsStructOrUnion(nested->symbol->type)) {
+      // `Layout<Ts...>::WithStaticSizes<1, 0, 4>` names a member alias.
+      // The pattern also mentions the enclosing class parameters.  Instantiate
+      // it against this specialization so those parameters are not left open.
+      Struct* saved_source = parser->template_substitution_source;
+      Struct* saved_target = parser->template_substitution_target;
+      parser->template_substitution_target = current->info.struct_info;
+      parser->template_substitution_source = NULL;
+      if (current->template_origin != NULL &&
+          current->template_origin->type != NULL &&
+          TypeIsStructOrUnion(current->template_origin->type)) {
+        parser->template_substitution_source =
+            current->template_origin->type->info.struct_info;
+      }
+      Vector* copied_args = TemplateArgumentVectorCopy(template_args);
+      next = InstantiateSimpleClassTemplate(parser, nested->symbol,
+                                            copied_args);
+      VectorDeleteWithContents(
+          copied_args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      parser->template_substitution_source = saved_source;
+      parser->template_substitution_target = saved_target;
+    } else if (template_args != NULL && nested->symbol->flags.is_template &&
         TypeIsStructOrUnion(nested->symbol->type)) {
       Vector* copied_args = TemplateArgumentVectorCopy(template_args);
       next = InstantiateSimpleClassTemplate(parser, nested->symbol,
@@ -586,6 +626,7 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   // (`decltype(probe(), T{})`).
   ASTNode* expr = SyntaxParseExpression(parser->syntax, TC(closebra));
   Symbol* declared_symbol = NULL;
+  bool defer_unparenthesized_entity = false;
   if (unparenthesized_identifier && expr != NULL &&
       expr->op == AST_OP(identifier)) {
     declared_symbol = ((IdentifierASTNode*)expr)->symbol;
@@ -594,12 +635,17 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
         (declared_symbol->flags.invented ||
          declared_symbol->type == NULL ||
          TypeIsUnknown(declared_symbol->type) ||
-         TypeContainsTemplateParameter(declared_symbol->type))) {
+         TypeContainsTemplateParameter(declared_symbol->type) ||
+         TypeContainsAuto(declared_symbol->type))) {
       // The declared type of a dependent unparenthesized id-expression cannot
-      // be known until substitution. Retain the operand just like any other
-      // dependent decltype, while recording the entity rule so substitution
-      // returns the member's declared type rather than an lvalue reference.
+      // be known until substitution.  An `auto` local is not deduced while its
+      // initializer is dependent (`auto t = std::tie(a, b)`), so copying that
+      // placeholder here would instantiate `Hash<decltype(t)>` as
+      // `Hash<auto>`.  The name itself may not mention a template parameter,
+      // so retain the operand even when the usual dependent-expression check
+      // does not fire.
       expr->flags |= kASTUnparenthesizedDecltypeEntity;
+      defer_unparenthesized_entity = true;
       declared_symbol = NULL;
     }
   }
@@ -617,7 +663,8 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
     result = TypeRecordCopy(declared_symbol->type);
   } else if (parser->syntax->current_template_parameters != NULL &&
              expr != NULL &&
-             DependentExpressionContainsTemplateParameter(expr)) {
+             (defer_unparenthesized_entity ||
+              DependentExpressionContainsTemplateParameter(expr))) {
     // A pack expansion such as `decltype(Or({Trait<Ts>()()...}))` cannot be
     // overload-resolved until the pack is expanded against concrete
     // arguments.  Analyzing it now diagnoses a false "no matching overload"
@@ -1903,8 +1950,28 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         if (symbol != NULL && StorageIs(symbol->storage, STO(typedef)) &&
             !base_is_dependent_alias) {
           TypeRecord* deferred_typename = NULL;
+          bool member_alias_args_concrete = false;
+          if (symbol->alias_template != NULL &&
+              !parser->syntax->parsing_template_declaration &&
+              typename_name.components.length >= 2 &&
+              typename_name.template_arguments.length >=
+                  typename_name.components.length) {
+            member_alias_args_concrete = true;
+            for (size_t i = 0; i < typename_name.template_arguments.length;
+                 i++) {
+              Vector* component_args =
+                  typename_name.template_arguments.value.p[i];
+              if (component_args != NULL &&
+                  TemplateArgumentVectorContainsTemplateParameter(
+                      component_args)) {
+                member_alias_args_concrete = false;
+                break;
+              }
+            }
+          }
           if (symbol->type != NULL &&
-              TypeContainsTemplateParameter(symbol->type)) {
+              TypeContainsTemplateParameter(symbol->type) &&
+              !member_alias_args_concrete) {
             deferred_typename =
                 TryBuildDependentTemplateIdMemberType(parser, &typename_name);
           }
@@ -1921,7 +1988,57 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                     typename_name.template_arguments.length - 1];
             args = TemplateArgumentVectorCopy(parsed_args);
           }
-          if (symbol->flags.is_template &&
+          if (member_alias_args_concrete && symbol->alias_template != NULL &&
+              args != NULL && typename_name.components.length >= 2) {
+            size_t base_index = typename_name.components.length - 2;
+            FullyQualifiedIdentifier prefix;
+            FullyQualifiedIdentifierInit(&prefix);
+            prefix.absolute = typename_name.absolute;
+            prefix.is_qualified = prefix.absolute || base_index > 0;
+            for (size_t i = 0; i <= base_index; i++) {
+              String* component = typename_name.components.value.p[i];
+              if (prefix.spelling.length != 0 || prefix.absolute) {
+                StringAppend(&prefix.spelling, "::");
+              }
+              StringAppendString(&prefix.spelling, component);
+              VectorAppend(&prefix.components, NewString(component->value));
+              VectorAppend(&prefix.template_arguments,
+                           TemplateArgumentVectorCopy(
+                               typename_name.template_arguments.value.p[i]));
+            }
+            Symbol* base_symbol =
+                SyntaxFindQualifiedSymbol(parser->syntax, &prefix);
+            Vector* base_args =
+                typename_name.template_arguments.value.p[base_index];
+            FullyQualifiedIdentifierDestruct(&prefix);
+            TypeRecord* base_type = NULL;
+            if (base_symbol != NULL && base_symbol->flags.is_template &&
+                base_args != NULL && TypeIsStructOrUnion(base_symbol->type)) {
+              Vector* copied_base = TemplateArgumentVectorCopy(base_args);
+              base_type = InstantiateSimpleClassTemplate(
+                  parser, base_symbol, copied_base);
+              VectorDeleteWithContents(
+                  copied_base, (VectorElementDestructor)TemplateArgumentDelete,
+                  /*free_element=*/false);
+            }
+            Struct* saved_source = parser->template_substitution_source;
+            Struct* saved_target = parser->template_substitution_target;
+            if (base_type != NULL && TypeIsStructOrUnion(base_type) &&
+                base_type->info.struct_info != NULL) {
+              parser->template_substitution_target = base_type->info.struct_info;
+              if (base_type->template_origin != NULL &&
+                  base_type->template_origin->type != NULL &&
+                  TypeIsStructOrUnion(base_type->template_origin->type)) {
+                parser->template_substitution_source =
+                    base_type->template_origin->type->info.struct_info;
+              }
+            }
+            type_record =
+                InstantiateSimpleClassTemplate(parser, symbol, args);
+            parser->template_substitution_source = saved_source;
+            parser->template_substitution_target = saved_target;
+            TypeRecordDelete(base_type);
+          } else if (symbol->flags.is_template &&
               TypeIsStructOrUnion(symbol->type) &&
               ClassTemplateIdIsConcrete(parser, symbol, args)) {
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
@@ -1984,30 +2101,49 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                   TemplateArgumentVectorCopy(base->type->template_arguments);
               type_record->dependent_member_name = NewString(member_name->value);
             } else {
+              // `using mid = typename T::a; typename mid::b` is `T::a::b`.
+              // Replacing the stored member drops `a`, so a later `mid::b::value`
+              // is looked up on `T` and never reaches `a`.
               type_record = TypeRecordCopy(base->type);
-              if (type_record->dependent_member_name != NULL) {
-                StringDelete(type_record->dependent_member_name);
+              if (type_record->dependent_member_name != NULL &&
+                  type_record->dependent_member_name->length > 0) {
+                StringAppend(type_record->dependent_member_name, "::");
+                StringAppendString(type_record->dependent_member_name,
+                                   member_name);
+              } else {
+                if (type_record->dependent_member_name != NULL) {
+                  StringDelete(type_record->dependent_member_name);
+                }
+                type_record->dependent_member_name =
+                    NewString(member_name->value);
               }
-              type_record->dependent_member_name = NewString(member_name->value);
             }
             type |= type_record->type;
           } else {
             // `typename Derived::Base` where Base is the injected-class-name
-            // of a base.  A dependent base is not visible yet; record it as a
-            // member of the current instantiation and resolve it once the
-            // class is instantiated.
+            // of a base.  Copy that base (including a dependent template-id).
+            // If the base is not a class type yet, record the name as a member
+            // of the current instantiation and resolve it once the class is
+            // instantiated.
             Struct* current = CurrentClassBeingParsed(parser);
             String* member_name = typename_name.components.value.p[1];
             bool names_current_class =
                 current != NULL && current->tag_name != NULL &&
                 StringEqualString(current->tag_name, base_name);
-            Symbol* injected =
+            // Name the current instantiation's base, not the primary template.
+            // `FindInheritedInjectedClassName` returns the base's tag symbol,
+            // whose type is the primary and therefore carries no template
+            // arguments.  Copying that drops a dependent base such as
+            // `common_params<Key, ..., map_slot_policy<Key, Data>>`, so
+            // `using super_type = typename Derived::common_params` becomes the
+            // primary and `super_type::slot_type` copies `SlotPolicy::slot_type`
+            // at the primary's parameter index.
+            TypeRecord* inherited_base =
                 names_current_class
-                    ? FindInheritedInjectedClassName(current, member_name)
+                    ? FindInheritedInjectedClassType(current, member_name)
                     : NULL;
-            if (injected != NULL && injected->type != NULL &&
-                !TypeContainsTemplateParameter(injected->type)) {
-              type_record = TypeRecordCopy(injected->type);
+            if (inherited_base != NULL) {
+              type_record = TypeRecordCopy(inherited_base);
               type |= type_record->type;
             } else if (names_current_class && current->tag_symbol != NULL &&
                        parser->syntax->current_template_parameters != NULL) {
@@ -2188,10 +2324,29 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         // parameter of ClassTemplate (`using type = T`) must stay deferred.
         // Copying the primary's typedef makes T collide with the enclosing
         // template's parameter 0 (`Spec<int... Xs> : MD<Base, Xs...>::type`).
+        bool member_alias_args_concrete = false;
+        if (symbol->alias_template != NULL &&
+            !parser->syntax->parsing_template_declaration &&
+            typedef_name.components.length >= 2 &&
+            typedef_name.template_arguments.length >=
+                typedef_name.components.length) {
+          member_alias_args_concrete = true;
+          for (size_t i = 0; i < typedef_name.template_arguments.length; i++) {
+            Vector* component_args =
+                typedef_name.template_arguments.value.p[i];
+            if (component_args != NULL &&
+                TemplateArgumentVectorContainsTemplateParameter(
+                    component_args)) {
+              member_alias_args_concrete = false;
+              break;
+            }
+          }
+        }
         TypeRecord* deferred_member = NULL;
         if (StorageIs(symbol->storage, STO(typedef)) &&
             symbol->type != NULL &&
-            TypeContainsTemplateParameter(symbol->type)) {
+            TypeContainsTemplateParameter(symbol->type) &&
+            !member_alias_args_concrete) {
           deferred_member =
               TryBuildDependentTemplateIdMemberType(parser, &typedef_name);
         }
@@ -2213,9 +2368,12 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         }
         if (symbol->flags.is_template &&
             !symbol->flags.is_template_template_parameter && args != NULL &&
-            !TypeIsStructOrUnion(symbol->type) &&
+            (symbol->alias_template != NULL ||
+             !TypeIsStructOrUnion(symbol->type)) &&
             !CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
-            !TemplateArgumentVectorContainsTemplateParameter(args)) {
+            !TemplateArgumentVectorContainsTemplateParameter(args) &&
+            !(parser->syntax->parsing_template_declaration &&
+              TypeContainsParameterPack(parser->syntax, symbol->type))) {
           Vector* completed_args = CompleteAliasTemplateArguments(symbol, args);
           if (completed_args != NULL) {
             if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
@@ -2228,11 +2386,84 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                   NULL);
               type_record = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
             } else {
+              // A member alias is written with only its own arguments
+              // (`ElementType<1>`), while its pattern also names the enclosing
+              // class parameters (`tuple_element<N, tuple<T, U>>`).  Substituting
+              // the short list would bind `1` to `T`.  Place the alias
+              // arguments at their parameter indices and leave the class
+              // parameters as holes.  A concrete
+              // `Layout<Ts...>::WithStaticSizes<1, 0, 4>` also needs that
+              // specialization as the substitution target so `Ts...` is the
+              // class argument pack, not a hole.
+              Struct* saved_source = parser->template_substitution_source;
+              Struct* saved_target = parser->template_substitution_target;
+              TypeRecord* base_type = NULL;
+              if (member_alias_args_concrete &&
+                  typedef_name.components.length >= 2) {
+                size_t base_index = typedef_name.components.length - 2;
+                FullyQualifiedIdentifier prefix;
+                FullyQualifiedIdentifierInit(&prefix);
+                prefix.absolute = typedef_name.absolute;
+                prefix.is_qualified = prefix.absolute || base_index > 0;
+                for (size_t i = 0; i <= base_index; i++) {
+                  String* component = typedef_name.components.value.p[i];
+                  if (prefix.spelling.length != 0 || prefix.absolute) {
+                    StringAppend(&prefix.spelling, "::");
+                  }
+                  StringAppendString(&prefix.spelling, component);
+                  VectorAppend(&prefix.components,
+                               NewString(component->value));
+                  VectorAppend(
+                      &prefix.template_arguments,
+                      TemplateArgumentVectorCopy(
+                          typedef_name.template_arguments.value.p[i]));
+                }
+                Symbol* base_symbol =
+                    SyntaxFindQualifiedSymbol(parser->syntax, &prefix);
+                Vector* base_args =
+                    typedef_name.template_arguments.value.p[base_index];
+                FullyQualifiedIdentifierDestruct(&prefix);
+                if (base_symbol != NULL && base_symbol->flags.is_template &&
+                    base_args != NULL &&
+                    TypeIsStructOrUnion(base_symbol->type)) {
+                  Vector* copied_base = TemplateArgumentVectorCopy(base_args);
+                  base_type = InstantiateSimpleClassTemplate(
+                      parser, base_symbol, copied_base);
+                  VectorDeleteWithContents(
+                      copied_base,
+                      (VectorElementDestructor)TemplateArgumentDelete,
+                      /*free_element=*/false);
+                }
+                if (base_type != NULL && TypeIsStructOrUnion(base_type) &&
+                    base_type->info.struct_info != NULL) {
+                  parser->template_substitution_target =
+                      base_type->info.struct_info;
+                  if (base_type->template_origin != NULL &&
+                      base_type->template_origin->type != NULL &&
+                      TypeIsStructOrUnion(base_type->template_origin->type)) {
+                    parser->template_substitution_source =
+                        base_type->template_origin->type->info.struct_info;
+                  }
+                }
+              }
+              Vector* pattern_args =
+                  MemberAliasPatternArguments(parser, symbol, completed_args);
+              Vector* subst_args =
+                  pattern_args != NULL ? pattern_args : completed_args;
               type_record =
                   SubstituteTemplateParameters(parser, symbol->type,
-                                               completed_args);
+                                               subst_args);
+              if (pattern_args != NULL) {
+                VectorDeleteWithContents(
+                    pattern_args,
+                    (VectorElementDestructor)TemplateArgumentDelete,
+                    /*free_element=*/false);
+              }
               type_record = TypeMaterializeClassTemplateSpecialization(
                   parser->syntax, type_record);
+              parser->template_substitution_source = saved_source;
+              parser->template_substitution_target = saved_target;
+              TypeRecordDelete(base_type);
             }
             VectorDeleteWithContents(
                 completed_args, (VectorElementDestructor)TemplateArgumentDelete,
@@ -2241,6 +2472,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             type_record = TypeRecordCopy(symbol->type);
           }
         } else if (symbol->flags.is_template && args != NULL &&
+            symbol->alias_template == NULL &&
             TypeIsStructOrUnion(symbol->type) &&
             (!parser->syntax->parsing_template_declaration ||
              ClassTemplateIdIsConcrete(parser, symbol, args))) {
@@ -2372,7 +2604,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               !symbol->flags.is_template_template_parameter && args != NULL &&
               !TypeIsStructOrUnion(symbol->type) &&
               !CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
-              !TemplateArgumentVectorContainsTemplateParameter(args)) {
+              !TemplateArgumentVectorContainsTemplateParameter(args) &&
+              !(parser->syntax->parsing_template_declaration &&
+                TypeContainsParameterPack(parser->syntax, symbol->type))) {
             Vector* completed_args = CompleteAliasTemplateArguments(symbol, args);
             if (completed_args != NULL) {
               if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
@@ -2386,9 +2620,21 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                 type_record =
                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
               } else {
-                type_record =
-                    SubstituteTemplateParameters(parser, symbol->type,
-                                                 completed_args);
+                // Member alias arguments are only the alias's own parameters.
+                // Align them onto those indices so a concrete `ElementType<1>`
+                // does not bind `1` to the enclosing class's first parameter.
+                Vector* pattern_args = MemberAliasPatternArguments(
+                    parser, symbol, completed_args);
+                Vector* subst_args =
+                    pattern_args != NULL ? pattern_args : completed_args;
+                type_record = SubstituteTemplateParameters(
+                    parser, symbol->type, subst_args);
+                if (pattern_args != NULL) {
+                  VectorDeleteWithContents(
+                      pattern_args,
+                      (VectorElementDestructor)TemplateArgumentDelete,
+                      /*free_element=*/false);
+                }
                 type_record = TypeMaterializeClassTemplateSpecialization(
                     parser->syntax, type_record);
               }
@@ -2990,6 +3236,38 @@ static void ValidateCAtomicDeclarator(TypeParser* parser, TypeRecord* type) {
   }
 }
 
+// `typename Class<T>::alias` as the return type of `Class<T>::member` is the
+// current instantiation.  The in-class declaration already used the alias's
+// real type, including when that type still names a template parameter.
+// Leaving the qualified name as an unknown `int` makes the definition look
+// like a different function.  Only the class being defined is resolved here;
+// `typename Other<T>::type` stays dependent so it does not collapse into `T`.
+static void ResolveOutOfLineDependentReturnType(TypeParser* parser) {
+  TypeRecord* type = parser->base_type;
+  if (type == NULL || parser->cxx_member_owner == NULL ||
+      type->dependent_member_name == NULL || type->template_origin == NULL ||
+      type->template_origin->type == NULL ||
+      !TypeIsStructOrUnion(type->template_origin->type)) {
+    return;
+  }
+  Struct* origin = type->template_origin->type->info.struct_info;
+  if (origin != parser->cxx_member_owner ||
+      !TemplateArgumentsAreIdentity(type->template_arguments,
+                                    type->template_origin)) {
+    return;
+  }
+  StructMember* member =
+      FindStructMember(origin, type->dependent_member_name);
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL ||
+      !StorageIs(member->symbol->storage, STO(typedef))) {
+    return;
+  }
+  TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
+  TypeRecordDelete(parser->base_type);
+  parser->base_type = resolved;
+}
+
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   if (base_type == NULL) {
     return NULL;
@@ -3027,6 +3305,7 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   }
 
   // Join all the type records together in reverse order.
+  ResolveOutOfLineDependentReturnType(parser);
   size_t i = parser->stack.length;
   TypeRecord* t = parser->base_type;
   while (i > 0) {
@@ -3140,8 +3419,12 @@ void TypeParserParsePointer(TypeParser* parser) {
     if (!rvalue) {
       LexMatch(parser->lex, TOK(amp));
     }
+    // GCC allows `__restrict` on a reference parameter
+    // (`const T& __restrict policy`).  The qualifier belongs to the
+    // reference, not to a following declarator.
+    Qualifiers quals = ParseQualifiers(parser);
     TypeParserParsePointer(parser);
-    TypeRecord* p = NewReferenceTypeRecord(kQualPlain, rvalue);
+    TypeRecord* p = NewReferenceTypeRecord(quals, rvalue);
     VectorAppend(&parser->stack, p);
   } else {
     TypeParserParseFuncOrArray(parser);

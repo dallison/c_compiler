@@ -9,6 +9,7 @@
 #include "expr_semantics.h"
 #include <assert.h>
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 #include "concepts.h"
 #include "contracts.h"
@@ -1115,11 +1116,229 @@ static TypeRecord* NewVectorComparisonResultType(TypeRecord* vector_type) {
 // Analyze a unary expression by analyzing the sub expression
 // and propagating the type up.  Also checks that the expression
 // is scalar and promotes types smaller than int to int if needed.
+static bool ClosureHasCaptureFields(Struct* closure) {
+  if (closure == NULL) {
+    return true;
+  }
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StringEqual(&member->symbol->name, "__lambda_empty")) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+static StructMember* ClosureCallOperatorMember(Struct* closure) {
+  if (closure == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    if (member == NULL || !member->is_member_function ||
+        member->symbol == NULL || member->symbol->type == NULL ||
+        !TypeIsFunction(member->symbol->type)) {
+      continue;
+    }
+    if (StringEqual(&member->symbol->name, "operator()")) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
+static ASTNode* AddressOfFunctionSymbol(Symbol* function, SourceLocation location) {
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type)) {
+    return NULL;
+  }
+  ASTNode* id = NewIdentifierASTNode(function, location);
+  ASTNodeSetType(id, function->type);
+  id->value_category = kValueCategoryLvalue;
+  TypeRecord* pointer = NewPointerTo(kQualPlain, TypeRecordCopy(function->type));
+  TypeRecordCalculateSize(pointer);
+  ASTNode* address =
+      NewUnaryASTNode(AST_OP(address), pointer, location, id);
+  address->value_category = kValueCategoryPrvalue;
+  return address;
+}
+
+/* Non-capturing lambda `+[](Args) -> R { ... }` converts to `R (*)(Args)`.
+ * The pointer addresses a thunk that default-constructs the closure and
+ * calls its `operator()`. */
+static ASTNode* LambdaToFunctionPointer(ASTNode* lambda) {
+  if (lambda == NULL || (lambda->flags & kASTLambdaExpression) == 0 ||
+      lambda->type == NULL || !TypeIsStructOrUnion(lambda->type) ||
+      lambda->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* closure = lambda->type->info.struct_info;
+  if (ClosureHasCaptureFields(closure)) {
+    return NULL;
+  }
+  StructMember* call_member = ClosureCallOperatorMember(closure);
+  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
+  if (call_op == NULL || call_op->flags.is_template ||
+      call_op->type->info.function.template_parameters.length > 0) {
+    return NULL;
+  }
+  TypeRecord* method = call_op->type;
+  if (TypeFunctionReturnContainsAuto(method)) {
+    StatementFinishAutoReturnDeduction(method, lambda);
+  }
+  if (TypeFunctionReturnContainsAuto(method) || method->next == NULL) {
+    return NULL;
+  }
+  if (call_member->is_static) {
+    return AddressOfFunctionSymbol(call_op, lambda->location);
+  }
+  TypeRecord* func = NewFunctionTypeRecord();
+  size_t start = method->info.function.cxx_member_owner != NULL ? 1 : 0;
+  int arg_number = 0;
+  for (size_t i = start; i < method->info.function.prototype.length; i++) {
+    Symbol* src = method->info.function.prototype.value.p[i];
+    if (src == NULL || src->type == NULL) {
+      continue;
+    }
+    const char* pname =
+        src->name.value != NULL && src->name.length > 0 ? src->name.value
+                                                        : "arg";
+    Symbol* formal = NewSymbol(pname, TypeRecordCopy(src->type), STO(auto));
+    formal->flags.is_argument = true;
+    formal->flags.is_defined = true;
+    formal->location = lambda->location;
+    formal->value.arg_number = arg_number++;
+    VectorAppend(&func->info.function.prototype, formal);
+  }
+  TypeRecord* return_type =
+      method->next != NULL ? TypeRecordCopy(method->next)
+                           : NewTypeRecordWithSize(kTypeVoid, kQualPlain);
+  TypeRecordChain(func, return_type);
+  func->info.function.definition = true;
+
+  Symbol* object =
+      NewSymbol("__closure", TypeRecordCopy(lambda->type), STO(auto));
+  object->flags.is_defined = true;
+  object->flags.is_local = true;
+  object->location = lambda->location;
+  ASTNode* object_decl =
+      NewVariableDeclarationASTNode(object, NULL, lambda->location);
+
+  Vector* actuals = NewVector();
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    VectorAppend(actuals, NewIdentifierASTNode(formal, lambda->location));
+  }
+  ASTNode* call = NewOperatorMemberCall(NewIdentifierASTNode(object, lambda->location),
+                                        "operator()", actuals, lambda->location);
+  ASTNode* invocation =
+      TypeIsVoid(return_type)
+          ? NewExpressionStatementASTNode(call, lambda->location)
+          : NewCombinedStatementASTNode(AST_OP(return), call, NULL,
+                                        lambda->location);
+  Vector* statements = NewVector();
+  VectorAppend(statements, object_decl);
+  VectorAppend(statements, invocation);
+  func->info.function.body =
+      NewCompoundStatementASTNode(statements, lambda->location);
+
+  static int lambda_fn_id = 0;
+  char name[64];
+  snprintf(name, sizeof(name), "__lambda_fn_%d", lambda_fn_id++);
+  Symbol* thunk = NewSymbol(name, func, STO(static));
+  thunk->flags.invented = true;
+  thunk->flags.is_defined = true;
+  thunk->location = lambda->location;
+  thunk->value.func_defn = thunk;
+  func->info.function.symbol = thunk;
+  InsertGlobalSymbol(thunk);
+  CompilerQueuePendingFunctionDefinition(thunk);
+  return AddressOfFunctionSymbol(thunk, lambda->location);
+}
+
+static bool LambdaCallMatchesFunctionPointer(ASTNode* lambda,
+                                             TypeRecord* pointer) {
+  if (lambda == NULL || pointer == NULL || !TypeIsPointer(pointer) ||
+      pointer->next == NULL || !TypeIsFunction(pointer->next) ||
+      (lambda->flags & kASTLambdaExpression) == 0 || lambda->type == NULL ||
+      !TypeIsStructOrUnion(lambda->type)) {
+    return false;
+  }
+  Struct* closure = lambda->type->info.struct_info;
+  if (ClosureHasCaptureFields(closure)) {
+    return false;
+  }
+  StructMember* call_member = ClosureCallOperatorMember(closure);
+  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
+  if (call_op == NULL || call_op->flags.is_template || call_op->type == NULL ||
+      !TypeIsFunction(call_op->type) ||
+      call_op->type->info.function.template_parameters.length > 0) {
+    return false;
+  }
+  TypeRecord* method = call_op->type;
+  if (TypeFunctionReturnContainsAuto(method) || method->next == NULL) {
+    StatementFinishAutoReturnDeduction(method, lambda);
+  }
+  if (method->next == NULL) {
+    return false;
+  }
+  TypeRecord* target = pointer->next;
+  if (method->info.function.varargs != target->info.function.varargs) {
+    return false;
+  }
+  size_t start = method->info.function.cxx_member_owner != NULL ? 1 : 0;
+  if (method->info.function.prototype.length < start ||
+      method->info.function.prototype.length - start !=
+          target->info.function.prototype.length) {
+    return false;
+  }
+  for (size_t i = 0; i < target->info.function.prototype.length; i++) {
+    Symbol* src = method->info.function.prototype.value.p[start + i];
+    Symbol* dst = target->info.function.prototype.value.p[i];
+    if (src == NULL || dst == NULL || src->type == NULL || dst->type == NULL ||
+        !TypeEqual(src->type, dst->type)) {
+      return false;
+    }
+  }
+  if (TypeIsVoid(method->next) && TypeIsVoid(target->next)) {
+    return true;
+  }
+  return TypeEqual(method->next, target->next);
+}
+
+bool CXXConvertNonCapturingLambdaToFunctionPointer(ASTNode* from,
+                                                   TypeRecord* to) {
+  if (!LambdaCallMatchesFunctionPointer(from, to)) {
+    return false;
+  }
+  ASTNode* converted = LambdaToFunctionPointer(from);
+  if (converted == NULL) {
+    return false;
+  }
+  ASTNode* parent = from->parent;
+  int child_id = from->child_id;
+  if (parent == NULL) {
+    ASTNodeDelete(converted);
+    return false;
+  }
+  ASTNodeReplaceChild(parent, child_id, converted, true);
+  return true;
+}
+
 static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   if (node == NULL) {
     return;
   }
   node->sub = AnalyzeExpression(node->sub);
+  if (node->base.op == AST_OP(uplus)) {
+    ASTNode* function_pointer = LambdaToFunctionPointer(node->sub);
+    if (function_pointer != NULL) {
+      ASTNodeReplaceChild((ASTNode*)node, 0, function_pointer, true);
+    }
+  }
   if (node->base.op == AST_OP(not)) {
     SemanticConvertType(node->sub,
                         NewTypeRecordWithSize(kTypeBool, kQualPlain),
@@ -1761,10 +1980,23 @@ static void AddFunctionOverloadCandidates(Vector* candidates, Symbol* first) {
            &((Symbol*)first->type->info.function.prototype.value.p[0])->name,
            "this"));
   if (first_is_static_member && first->overload_next == NULL) {
-    Struct* owner = first->type->info.function.cxx_member_owner;
+    // Prefer the class that published this overload set.  A using-declaration
+    // of a base static function shares the base function type, so
+    // cxx_member_owner is still the base and would hide overloads added by
+    // the derived class.
+    Struct* owner = first->member_lookup_class != NULL
+                        ? first->member_lookup_class
+                        : first->type->info.function.cxx_member_owner;
     StructMember* head = FindStructMember(owner, &first->name);
     if (head != NULL) {
       for (StructMember* m = head; m != NULL; m = m->overload_next) {
+        // This path is the qualified `Class::f(...)` lookup, which can only
+        // call static members.  A non-static overload of the same name has an
+        // implicit `this` and would otherwise compete with the static
+        // signature (`AddData(tree, data)` vs `AddData(this, data)`).
+        if (!m->is_static) {
+          continue;
+        }
         if (m->symbol != NULL && m->symbol->type != NULL &&
             TypeIsFunction(m->symbol->type) &&
             !VectorContainsPointer(candidates, m->symbol)) {
@@ -2739,6 +2971,85 @@ static bool DiagnoseCXX26ArrayComparison(BinaryASTNode* node) {
   return true;
 }
 
+// Score of the best free `op_name` for `(left, right)`, or -1 if none is
+// viable.  Ambiguous sets still yield the tied score so a rewritten `==` can
+// beat every `!=` candidate without diagnosing the worse tie.
+static int BestFreeBinaryOperatorScore(const char* op_name, ASTNode* left,
+                                       ASTNode* right) {
+  if (left == NULL || right == NULL || op_name == NULL) {
+    return -1;
+  }
+  String name;
+  StringInit(&name, op_name);
+  Vector actuals;
+  VectorInit(&actuals);
+  VectorAppend(&actuals, left);
+  VectorAppend(&actuals, right);
+  Symbol* function = ResolveFreeFunctionWithADL(
+      &name, &actuals, /*diagnose_ambiguous=*/false);
+  VectorDestruct(&actuals);
+  StringDestruct(&name);
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type)) {
+    return -1;
+  }
+  Vector children;
+  VectorInit(&children);
+  VectorAppend(&children, left);
+  VectorAppend(&children, right);
+  VectorASTNode call = {0};
+  call.children = &children;
+  int score = FunctionCallScore(function->type, &call, /*first_formal_arg=*/0);
+  VectorDestruct(&children);
+  return score;
+}
+
+// C++20 [over.match.oper]: `a != b` considers `!(a == b)` in the same set as
+// `operator!=`.  A non-rewritten candidate wins a tie; a strictly better `==`
+// (string_view has `==` and `<=>` but no `!=`) wins over conversion-ranked
+// `operator!=` overloads such as `optional`'s, which would otherwise be an
+// ambiguous tie among themselves.
+static bool RewrittenEqualityBeatsInequality(BinaryASTNode* node) {
+  if (node->base.op != AST_OP(noteq)) {
+    return false;
+  }
+  if (CXXOperatorOperandClassType(node->left->type) == NULL &&
+      CXXOperatorOperandClassType(node->right->type) == NULL) {
+    return false;
+  }
+  int eq_score =
+      BestFreeBinaryOperatorScore("operator==", node->left, node->right);
+  if (eq_score < 0) {
+    eq_score =
+        BestFreeBinaryOperatorScore("operator==", node->right, node->left);
+  }
+  if (eq_score < 0) {
+    return false;
+  }
+  int member_score = -1;
+  bool member_ambiguous = false;
+  bool member_template = false;
+  bool member_viable = BestBinaryMemberOperatorScore(
+      node, "operator!=", &member_score, &member_ambiguous, &member_template);
+  // A template member's conversion cost is not scored here.  Keep it instead
+  // of guessing that a rewritten `==` is better.
+  if (member_template) {
+    return false;
+  }
+  // Member scores cover only the explicit parameter, so an exact member `!=`
+  // ranks at or below a two-argument free `==`.  Prefer that non-rewritten
+  // candidate.
+  if (member_viable && member_score >= 0 && member_score <= eq_score) {
+    return false;
+  }
+  int ne_score = BestFreeBinaryOperatorScore("operator!=", node->left,
+                                             node->right);
+  if (ne_score >= 0 && ne_score <= eq_score) {
+    return false;
+  }
+  return true;
+}
+
 static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
@@ -3157,33 +3468,41 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   }
   // [expr.cond]: when the arms differ and at least one has class type, convert
   // the other arm to that class if exactly one direction has a converting
-  // constructor.  `p ? str : std::string(str, comma)` is the gtest form.
+  // constructor.  The class arm may already be a prvalue
+  // (`p ? str : std::string(str, comma)`) or a glvalue
+  // (`p ? *name : "UNKNOWN"`).  A glvalue class arm is copy-initialized so
+  // both arms are prvalues; leaving it as an lvalue makes codegen memcpy the
+  // object and return a pointer into the callee's frame.
   if (CompilerIsCXX() &&
       !TypeEqualIgnoringQualifiers(colon->left->type, colon->right->type) &&
       (TypeIsStructOrUnion(colon->left->type) ||
        TypeIsStructOrUnion(colon->right->type))) {
     bool left_to_right =
-        colon->right->value_category == kValueCategoryPrvalue &&
         FindConvertingConstructorCandidate(
             colon->right->type, colon->left, /*allow_explicit=*/false,
             /*allow_same_class=*/false) != NULL;
     bool right_to_left =
-        colon->left->value_category == kValueCategoryPrvalue &&
         FindConvertingConstructorCandidate(
             colon->left->type, colon->right, /*allow_explicit=*/false,
             /*allow_same_class=*/false) != NULL;
-    ASTNode* source = NULL;
-    TypeRecord* target = NULL;
-    if (left_to_right && !right_to_left) {
-      source = colon->left;
-      target = colon->right->type;
-    } else if (right_to_left && !left_to_right) {
-      source = colon->right;
-      target = colon->left->type;
-    }
+    bool convert_left = left_to_right && !right_to_left;
+    bool convert_right = right_to_left && !left_to_right;
+    ASTNode* source = convert_left ? colon->left :
+                      convert_right ? colon->right : NULL;
+    TypeRecord* target = convert_left ? colon->right->type :
+                         convert_right ? colon->left->type : NULL;
+    ASTNode* other = convert_left ? colon->right :
+                     convert_right ? colon->left : NULL;
     if (source != NULL &&
         TryConvertWithConvertingConstructorImpl(
             source, target, kConvertNormal, /*allow_same_class=*/false)) {
+      if (other != NULL && other->type != NULL &&
+          other->value_category != kValueCategoryPrvalue &&
+          TypeIsStructOrUnion(other->type) &&
+          TypeEqualIgnoringQualifiers(other->type, target)) {
+        TryConvertWithConvertingConstructorImpl(
+            other, target, kConvertNormal, /*allow_same_class=*/true);
+      }
       TypeRecord* result_type = TypeRecordCopy(target);
       result_type->qualifiers = kQualPlain;
       ASTNodeSetType((ASTNode*)colon, result_type);
@@ -3460,6 +3779,21 @@ static bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target) {
     if (member == NULL || member->symbol == NULL ||
         !TypeIsFunction(member->symbol->type) ||
         member->symbol->type->next == NULL) {
+      continue;
+    }
+    // `operator Container()` is a template: its result type is the parameter,
+    // so it only matches once Container is deduced from the target
+    // ([temp.deduct.conv]).  That is how `vector = StrSplit(...)` binds, via
+    // Splitter's conversion operator.
+    if (member->symbol->flags.is_template) {
+      Vector* args = TypeDeduceConversionOperatorTemplateArguments(
+          &compiler->syntax, member->symbol, unqualified_target);
+      if (args != NULL) {
+        VectorDeleteWithContents(
+            args, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        found = true;
+      }
       continue;
     }
     TypeRecord* result = member->symbol->type->next;
@@ -6605,8 +6939,7 @@ static const char* CXXAccessName(CXXAccess access) {
   return "unknown";
 }
 
-static Struct* CurrentFunctionMemberOwner(void) {
-  TypeRecord* current = compiler->current_function;
+static Struct* FunctionMemberOwner(TypeRecord* current) {
   if (current == NULL || !TypeIsFunction(current)) {
     return NULL;
   }
@@ -6623,6 +6956,10 @@ static Struct* CurrentFunctionMemberOwner(void) {
     return NULL;
   }
   return this_sym->type->next->info.struct_info;
+}
+
+static Struct* CurrentFunctionMemberOwner(void) {
+  return FunctionMemberOwner(compiler->current_function);
 }
 
 static Symbol* CXXStructTemplateOrigin(Struct* str) {
@@ -6664,11 +7001,10 @@ static bool CXXSameAccessClass(Struct* a, Struct* b) {
 // Returns true when the function currently being analyzed has been granted
 // friendship by class `owner` (via a 'friend class' or 'friend function'
 // declaration), and may therefore access its private and protected members.
-static bool CurrentFunctionIsFriendOf(Struct* owner) {
+static bool FunctionIsFriendOf(TypeRecord* current, Struct* owner) {
   if (owner == NULL) {
     return false;
   }
-  TypeRecord* current = compiler->current_function;
   if (current == NULL || !TypeIsFunction(current)) {
     return false;
   }
@@ -6676,7 +7012,7 @@ static bool CurrentFunctionIsFriendOf(Struct* owner) {
   // class is a member of its enclosing class and therefore has that class's
   // access, including friendships ([class.access.nest]).  `Cord::ChunkIterator`
   // may call `InlineRep::inline_size` because `Cord` is a friend of `InlineRep`.
-  Struct* current_owner = CurrentFunctionMemberOwner();
+  Struct* current_owner = FunctionMemberOwner(current);
   for (Struct* accessor = current_owner; accessor != NULL;
        accessor = accessor->lexical_parent) {
     for (size_t i = 0; i < owner->friend_classes.length; i++) {
@@ -6730,6 +7066,31 @@ static bool CurrentFunctionIsFriendOf(Struct* owner) {
   return false;
 }
 
+static bool CurrentFunctionIsFriendOf(Struct* owner) {
+  return FunctionIsFriendOf(compiler->current_function, owner);
+}
+
+// A local class, including a lambda closure, has the same access as the
+// function it was defined in ([class.local]).  Nested lambdas walk out to
+// that function, so a lambda in a friend can use the friend's private access.
+static bool EnclosingFunctionIsFriendOf(TypeRecord* current, Struct* owner) {
+  for (int depth = 0; depth < 32; depth++) {
+    Struct* member_owner = FunctionMemberOwner(current);
+    Symbol* enclosing = member_owner != NULL
+                            ? member_owner->access_enclosing_function
+                            : NULL;
+    if (enclosing == NULL || enclosing->type == NULL ||
+        !TypeIsFunction(enclosing->type) || enclosing->type == current) {
+      return false;
+    }
+    if (FunctionIsFriendOf(enclosing->type, owner)) {
+      return true;
+    }
+    current = enclosing->type;
+  }
+  return false;
+}
+
 static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
                                            Struct* owner,
                                            CXXAccess original_access,
@@ -6749,7 +7110,11 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
     current_owner = CurrentFunctionMemberOwner();
   }
   if (CurrentFunctionIsFriendOf(owner) ||
-      (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context))) {
+      (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context)) ||
+      EnclosingFunctionIsFriendOf(compiler->current_function, owner) ||
+      (lookup_context != owner &&
+       EnclosingFunctionIsFriendOf(compiler->current_function,
+                                   lookup_context))) {
     return true;
   }
   if (current_owner == NULL) {
@@ -7081,7 +7446,18 @@ static bool TypeIsDerivedFromInCurrentClass(TypeRecord* from, TypeRecord* to) {
         break;
       }
     }
+    // `friend const_iterator` inside `iterator` lets the other specialization
+    // bind a private base (`btree_iterator_generation_info(other)`).
+    bool friend_of_derived = false;
     if (!nested) {
+      for (size_t i = 0; i < from_struct->friend_classes.length; i++) {
+        if (from_struct->friend_classes.value.p[i] == current) {
+          friend_of_derived = true;
+          break;
+        }
+      }
+    }
+    if (!nested && !friend_of_derived) {
       return false;
     }
   }
@@ -7588,7 +7964,14 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
                                             /*allow_explicit=*/false,
                                             /*allow_same_class=*/false) != NULL ||
          ClassHasConversionOperatorTo(actual, target))) {
-      return 100;
+      // The conversion produces a temporary. Binding that prvalue to an rvalue
+      // reference is a better second standard conversion than binding it to a
+      // const lvalue reference, so `operator=(vector&&)` beats
+      // `operator=(const vector&)`.
+      if (formal_type->declarator == kDeclRValueReference) {
+        return 100;
+      }
+      return 101;
     }
     return -1;
   }
@@ -10263,10 +10646,24 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     if (candidate->is_member_function && candidate->symbol != NULL &&
         candidate->symbol->type != NULL &&
         TypeIsFunction(candidate->symbol->type)) {
-      candidate->symbol->type->info.function.cxx_member_owner =
-          type->info.struct_info;
-      StringClear(&candidate->symbol->asm_name);
-      SymbolSetCXXMangledAsmName(candidate->symbol);
+      // An inherited constructor keeps the base as its owner so its body still
+      // initializes that base.  Retargeting it to the derived class makes the
+      // preamble default-construct the base (no arguments) and reject the
+      // base's real constructor.
+      Struct* recorded_owner =
+          candidate->symbol->type->info.function.cxx_member_owner;
+      int base_offset = 0;
+      bool inherited_base_constructor =
+          recorded_owner != NULL &&
+          recorded_owner != type->info.struct_info &&
+          StructHasBaseStruct(type->info.struct_info, recorded_owner,
+                              &base_offset);
+      if (!inherited_base_constructor) {
+        candidate->symbol->type->info.function.cxx_member_owner =
+            type->info.struct_info;
+        StringClear(&candidate->symbol->asm_name);
+        SymbolSetCXXMangledAsmName(candidate->symbol);
+      }
     }
     if (candidate->is_member_function && candidate->symbol != NULL &&
         !candidate->symbol->flags.invented) {
@@ -10985,9 +11382,23 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   }
   if (node->left != NULL && node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
+    // A class-scope injection of a static member function template is a clone
+    // of the first overload only (`is_overloaded` stays false, and overloads
+    // live on the StructMember chain).  Deducing that one template here skips
+    // the later `ToInt` overloads distinguished by true_type/false_type.
+    bool static_member_has_overloads = false;
+    if (id->symbol != NULL && id->symbol->overload_next == NULL &&
+        id->symbol->type != NULL && TypeIsFunction(id->symbol->type) &&
+        id->symbol->type->info.function.cxx_member_owner != NULL) {
+      StructMember* head = FindStructMember(
+          id->symbol->type->info.function.cxx_member_owner, &id->symbol->name);
+      static_member_has_overloads =
+          head != NULL && head->overload_next != NULL;
+    }
     if (id->symbol != NULL && id->symbol->flags.is_template &&
         !id->symbol->flags.is_overloaded &&
         id->symbol->overload_next == NULL &&
+        !static_member_has_overloads &&
         TypeIsFunction(id->symbol->type) &&
         !has_pack_expansion_actual &&
         !TemplateArgumentVectorContainsTemplateParameter(id->template_arguments) &&
@@ -11239,6 +11650,31 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
   }
   if (node->left == NULL) {
     return &node->base;
+  }
+  // A constructor call whose argument is still the unknown placeholder for a
+  // template parameter (`Span<uint32_t>(&*begin, n)` while `begin`'s type is
+  // the member template's own parameter) must not be type-checked against the
+  // first constructor.  That constructor is the wrong arity, and the diagnostic
+  // is observed by whatever instantiation cloned the member template.
+  if (CompilerIsCXX() && node->children != NULL) {
+    bool argument_not_ready = false;
+    for (size_t i = 0; i < node->children->length; i++) {
+      ASTNode* actual = node->children->value.p[i];
+      if (actual != NULL && actual->type != NULL &&
+          (TypeIsUnknown(actual->type) ||
+           TypeContainsTemplateParameter(actual->type) ||
+           TypeContainsAuto(actual->type))) {
+        argument_not_ready = true;
+        break;
+      }
+    }
+    if (argument_not_ready) {
+      node->base.flags |= kASTDependentFunctorCall;
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                           kQualPlain));
+      return (ASTNode*)node;
+    }
   }
   // Reaching here means every deferral path above was skipped: this call is
   // resolved to a concrete function (or function pointer).  A cloned template
@@ -12107,6 +12543,18 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
         (source_name[origin_length] == '\0' ||
          source_name[origin_length] == '<' ||
          source_name[origin_length] == '#');
+    // An explicit specialization is tagged `CordRepRef<I0>` and does not
+    // record template_origin.  A call spelled `CordRepRef(...)` is still that
+    // specialization's constructor.
+    if (!names_injected_constructor && struct_info->tag_name != NULL) {
+      const char* tag = struct_info->tag_name->value;
+      const char* angle = strchr(tag, '<');
+      size_t prefix = angle != NULL ? (size_t)(angle - tag) : 0;
+      if (prefix > 0 && strlen(source_name) == prefix &&
+          strncmp(source_name, tag, prefix) == 0) {
+        names_injected_constructor = true;
+      }
+    }
     if (names_injected_constructor &&
         !StringEqual(member_name, struct_info->tag_name->value)) {
       member = FindStructMemberWithAccessAndOffsetByName(
@@ -12276,6 +12724,13 @@ static void AnalyzeAddressOperator(UnaryASTNode* node) {
     return;
   }
   TypeRecordChain(ptr, node->sub->type);
+  // `*begin` of a still-unbound template parameter is an unknown type.  The
+  // pointer formed by `&*begin` has to stay unknown too; otherwise overload
+  // resolution sees a plain `int*` and rejects `Span<uint32_t>(&*begin, n)`
+  // while the member function template is only being rebased onto its class.
+  if (TypeIsUnknown(node->sub->type)) {
+    ptr->type |= kTypeUnknown;
+  }
   ASTNodeSetType((ASTNode*)node, ptr);
 
   // Tell downstream that we need the address of this node, not its
@@ -12571,7 +13026,15 @@ static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
         return TypeIsEnum(left) && TypeIsEnum(right) &&
                left->info.enum_info == right->info.enum_info;
       }
-      return left->type == right->type;
+      // `short` and `signed short` are the same type.  Template substitution
+      // can spell one with the signed bit set and the other without it; a raw
+      // bit compare then ranks that identity as a sign conversion, tying
+      // `operator<<(short)` with `operator<<(int)`.
+      TypeRecord unqualified_left = *left;
+      TypeRecord unqualified_right = *right;
+      unqualified_left.qualifiers = kQualPlain;
+      unqualified_right.qualifiers = kQualPlain;
+      return TypeEqual(&unqualified_left, &unqualified_right);
   }
   return false;
 }
@@ -12597,6 +13060,15 @@ static void ValidateCXXConstCast(CastASTNode* node) {
             TypeEqualIgnoringQualifiers(to->next, from_object);
   }
   if (!valid) {
+    // A member function template is cloned once when its class is instantiated,
+    // while its own parameters are still placeholders.  The operand can be a
+    // call whose result type collapsed to a concrete fallback even though the
+    // argument still names that placeholder (`addressof(forward<Key>(k))`).
+    // Checking const_cast then would reject a cast that is well-formed once
+    // the member template is instantiated for a call.
+    if (node->expr != NULL && ExpressionIsTemplateDependent(node->expr)) {
+      return;
+    }
     SemanticError((ASTNode*)node,
                   "const_cast requires pointer or reference to the same type");
   }
@@ -12798,13 +13270,20 @@ static ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
   CXXBaseAdjustment adjustment;
   if (!TypeBaseAdjustment(from_type, to_type, /*public_only=*/true,
                           &adjustment)) {
-    if (materialized_from) {
-      TypeRecordDelete(from_type);
+    // Private and protected bases are accessible to the derived class and to
+    // its friends.  `CIter::CIter(const Iter& other) : Gen(other)` binds the
+    // private base of `Iter` because `CIter` is a friend.
+    if (!TypeIsDerivedFromInCurrentClass(from_type, to_type) ||
+        !TypeBaseAdjustment(from_type, to_type, /*public_only=*/false,
+                            &adjustment)) {
+      if (materialized_from) {
+        TypeRecordDelete(from_type);
+      }
+      if (materialized_to) {
+        TypeRecordDelete(to_type);
+      }
+      return NULL;
     }
-    if (materialized_to) {
-      TypeRecordDelete(to_type);
-    }
-    return NULL;
   }
   if (materialized_from) {
     TypeRecordDelete(from_type);
@@ -12875,7 +13354,8 @@ static ASTNode* AnalyzeCastExpression(CastASTNode* node) {
   if (CompilerIsCXX() &&
       (TypeContainsTemplateParameter(node->cast_type) ||
        (node->expr != NULL && node->expr->type != NULL &&
-        TypeContainsTemplateParameter(node->expr->type)))) {
+        TypeContainsTemplateParameter(node->expr->type)) ||
+       (node->expr != NULL && ExpressionIsTemplateDependent(node->expr)))) {
     if (TypeIsReference(node->cast_type)) {
       ASTNodeSetType((ASTNode*)node, node->cast_type->next);
       node->base.value_category =
@@ -13111,10 +13591,13 @@ static void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
                             node->initializer);
   // A C++ lambda-expression is a prvalue that materializes a temporary closure.
   // Keep that category so forwarding-reference deduction of `F&&` / `T&&` works.
+  // A temporary materialized for reference binding is an xvalue.  Reanalyzing a
+  // cloned template body clears kASTAnalyzed and would otherwise turn that
+  // temporary into a C lvalue, which can no longer bind to an rvalue reference.
   if ((node->base.flags &
        (kASTLambdaExpression | kASTCXXBracedTemporary)) != 0) {
     node->base.value_category = kValueCategoryPrvalue;
-  } else {
+  } else if (node->base.value_category != kValueCategoryXvalue) {
     node->base.value_category = kValueCategoryLvalue;
   }
 }
@@ -13468,6 +13951,20 @@ static void AnalyzeSourceIntegerBuiltin(VectorASTNode* node) {
                  NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualPlain));
 }
 
+static void AnalyzeBuiltinConstantP(VectorASTNode* node) {
+  if (node->children != NULL && node->children->length == 1) {
+    node->children->value.p[0] =
+        AnalyzeExpression(node->children->value.p[0]);
+  } else {
+    SemanticError((ASTNode*)node,
+                  "__builtin_constant_p requires one argument");
+  }
+  // The result is an int constant: 1 when the operand is an integer constant
+  // expression, otherwise 0.  Zero is a correct answer when the compiler
+  // cannot prove the operand is constant.
+  ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+}
+
 static void AnalyzeBuiltinExpect(VectorASTNode* node) {
   TypeRecord* result_type = NewTypeRecordWithSize(kTypeLong, kQualPlain);
   if (node->children->length != 2) {
@@ -13634,6 +14131,77 @@ static ASTNode* AnalyzeTypeTraitBuiltin(VectorASTNode* node) {
   return constant;
 }
 
+static bool SymbolTypeIsConcreteClass(TypeRecord* type) {
+  if (type == NULL || TypeContainsAuto(type) || TypeIsUnknown(type)) {
+    return false;
+  }
+  if (TypeIsReference(type)) {
+    type = type->next;
+  }
+  return TypeIsStructOrUnion(type);
+}
+
+// A range-for binding (`const auto& it = *begin`) can be used in the loop
+// body before deduction replaces `auto`.  Those member accesses were typed
+// as the placeholder and then frozen.  Once `it` has a class type, look the
+// members up again.
+static void CollectStaleAutoMemberAccess(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  if (node->op != AST_OP(dot) && node->op != AST_OP(arrow)) {
+    return;
+  }
+  if ((node->flags & kASTAnalyzed) == 0 || node->type == NULL ||
+      !TypeContainsAuto(node->type)) {
+    return;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)node;
+  if (access->left == NULL || access->left->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)access->left)->symbol;
+  if (symbol == NULL || !SymbolTypeIsConcreteClass(symbol->type)) {
+    return;
+  }
+  VectorAppend((Vector*)data, node);
+}
+
+void SemanticReanalyzeAutoMemberAccesses(void) {
+  static int depth = 0;
+  if (depth > 0 || compiler->current_function == NULL ||
+      !TypeIsFunction(compiler->current_function) ||
+      compiler->current_function->info.function.body == NULL) {
+    return;
+  }
+  Vector stale;
+  VectorInit(&stale);
+  ASTNodeVisit(compiler->current_function->info.function.body,
+               CollectStaleAutoMemberAccess, 0, &stale);
+  depth++;
+  for (size_t i = 0; i < stale.length; i++) {
+    ASTNode* node = stale.value.p[i];
+    BinaryASTNode* access = (BinaryASTNode*)node;
+    node->flags &= ~kASTAnalyzed;
+    ASTNodeClearType(node);
+    if (access->left != NULL) {
+      access->left->flags &= ~kASTAnalyzed;
+    }
+    if (access->right != NULL) {
+      access->right->flags &= ~kASTAnalyzed;
+    }
+    ASTNode* analyzed = AnalyzeExpression(node);
+    if (analyzed != node && node->parent != NULL) {
+      ASTNodeReplaceChild(node->parent, node->child_id, analyzed,
+                          /*delete_old_child=*/false);
+    }
+  }
+  depth--;
+  VectorDestruct(&stale);
+}
+
 // Perform semantic analysis on a expression AST node.  This propagates type
 // information from the node's children to the node and also performs checks to
 // make sure the types follow the rules of the language.
@@ -13655,6 +14223,20 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
   UnaryASTNode* unary_node = (UnaryASTNode*)node;
   VectorASTNode* vector_node = (VectorASTNode*)node;
 
+  // `!=` is rewritten to `!(==)` before ordinary overload resolution.
+  // Doing it later is too late: a tie among worse `operator!=` candidates
+  // (for example `optional`'s) is diagnosed and hides an exact `operator==`.
+  if (node->op == AST_OP(noteq)) {
+    binary_node->left = AnalyzeExpression(binary_node->left);
+    binary_node->right = AnalyzeExpression(binary_node->right);
+    if (binary_node->left != NULL && binary_node->right != NULL &&
+        RewrittenEqualityBeatsInequality(binary_node)) {
+      ASTNode* rewritten = TryRewriteComparisonOperator(binary_node);
+      if (rewritten != NULL) {
+        return rewritten;
+      }
+    }
+  }
   if (BinaryOperatorFunctionName(node->op) != NULL) {
     ASTNode* overloaded =
         TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(binary_node);
@@ -13921,6 +14503,9 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(expr_init): {
       ExpressionInitializerASTNode* expr_init = (ExpressionInitializerASTNode*)node;
       expr_init->expr = AnalyzeExpression(expr_init->expr);
+      if (expr_init->expr == NULL) {
+        return node;
+      }
       ASTNodeSetType(node, expr_init->expr->type);
       node->value_category = expr_init->expr->value_category;
       break;
@@ -14020,6 +14605,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(builtin_trap):
     case AST_OP(builtin_unreachable):
       AnalyzeBuiltinTerminator(vector_node);
+      break;
+
+    case AST_OP(builtin_constant_p):
+      AnalyzeBuiltinConstantP(vector_node);
       break;
 
     case AST_OP(builtin_is_constant_evaluated):

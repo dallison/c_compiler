@@ -6745,6 +6745,18 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       result = GenerateBuiltinTerminator(gen, vector_node);
       break;
 
+    case AST_OP(builtin_constant_p): {
+      int64_t ignored = 0;
+      ASTNode* arg =
+          vector_node->children != NULL && vector_node->children->length > 0
+              ? vector_node->children->value.p[0]
+              : NULL;
+      int value =
+          arg != NULL && EvaluateIntegerExpression(arg, &ignored) ? 1 : 0;
+      result = GeneratorGetIntConstant(gen, vector_node->base.type, value);
+      break;
+    }
+
     case AST_OP(builtin_is_constant_evaluated):
       result = GeneratorGetIntConstant(
           gen, vector_node->base.type, gen->for_constant_evaluation ? 1 : 0);

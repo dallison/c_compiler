@@ -53,6 +53,7 @@ static struct Intrinsic {
     {"__builtin_bswap64", AST_OP(builtin_bswap), 1},
     {"__builtin_clz", AST_OP(builtin_clz), 1},
     {"__builtin_clzll", AST_OP(builtin_clz), 1},
+    {"__builtin_constant_p", AST_OP(builtin_constant_p), 1},
     {"__builtin_ctz", AST_OP(builtin_ctz), 1},
     {"__builtin_ctzll", AST_OP(builtin_ctz), 1},
     {"__builtin_expect", AST_OP(builtin_expect), 2},
@@ -603,25 +604,7 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode);
 
 static bool CXXTemplateParameterIndexIsPack(Syntax* syntax, int index) {
-  Vector* parameters = syntax != NULL ? syntax->current_template_parameters
-                                      : NULL;
-  for (size_t i = 0; parameters != NULL && i < parameters->length; i++) {
-    TemplateParameter* parameter = parameters->value.p[i];
-    if (parameter != NULL && parameter->index == index) {
-      return parameter->is_parameter_pack;
-    }
-  }
-  TypeRecord* function = compiler->current_function;
-  if (function != NULL && TypeIsFunction(function)) {
-    parameters = &function->info.function.template_parameters;
-    for (size_t i = 0; i < parameters->length; i++) {
-      TemplateParameter* parameter = parameters->value.p[i];
-      if (parameter != NULL && parameter->index == index) {
-        return parameter->is_parameter_pack;
-      }
-    }
-  }
-  return false;
+  return CurrentTemplateParameterIsPack(syntax, index);
 }
 
 static TemplateParameter* CXXTemplateParameterForIndex(Syntax* syntax,
@@ -768,6 +751,12 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
     ((CXXPackExpressionSearch*)data)->found = true;
     return;
   }
+  if ((node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) &&
+      TypeContainsParameterPack(((CXXPackExpressionSearch*)data)->syntax,
+                                ((SizeofASTNode*)node)->type_operand)) {
+    ((CXXPackExpressionSearch*)data)->found = true;
+    return;
+  }
   // `static_cast<T (*)()>(nullptr)...` names the pack in the cast type, not
   // in a subexpression.
   if (node->type != NULL &&
@@ -789,6 +778,12 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
   if (shape == kASTShapeIdentifier) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
+      ((CXXPackExpressionSearch*)data)->found = true;
+      return;
+    }
+    if (id->symbol != NULL &&
+        TypeContainsParameterPack(((CXXPackExpressionSearch*)data)->syntax,
+                                  id->symbol->type)) {
       ((CXXPackExpressionSearch*)data)->found = true;
       return;
     }
@@ -2120,6 +2115,16 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       }
     }
   }
+  if (symbol != NULL && !symbol->flags.is_template &&
+      !symbol->flags.is_using_alias && symbol->alias_target != NULL &&
+      symbol->alias_target->flags.is_template &&
+      name.template_arguments.length > 0) {
+    Vector* parsed_args =
+        name.template_arguments.value.p[name.template_arguments.length - 1];
+    if (parsed_args != NULL && parsed_args->length > 0) {
+      symbol = symbol->alias_target;
+    }
+  }
   Vector* template_arguments = NULL;
   if (symbol != NULL && name.template_arguments.length > 0 &&
       (TypeIsFunction(symbol->type) ||
@@ -3288,9 +3293,12 @@ static void AddLambdaFunctionAssociatedConstraint(TypeRecord* func,
 static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
                                             int arg_number,
                                             TokenClass followers) {
-  if (!CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+  // Unconstrained `auto` parameters make a generic lambda (C++14).
+  // `Concept auto` parameters are an abbreviated function template (C++20).
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX14)) {
     return false;
   }
+  bool allow_constrained_auto = CompilerCXXAtLeast(kLanguageStandardCXX20);
 
   // Leading cv-qualifiers of a `const auto&` / `volatile auto` parameter are
   // consumed speculatively and rewound if no placeholder follows.
@@ -3312,7 +3320,7 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
   Symbol* concept_symbol = NULL;
   SourceLocation constraint_location = syntax->lex->current_token_location;
   Vector* concept_arguments = NULL;
-  if (LexLookingAt(syntax->lex, TOK(identifier))) {
+  if (allow_constrained_auto && LexLookingAt(syntax->lex, TOK(identifier))) {
     String concept_name;
     StringInit(&concept_name, syntax->lex->spelling.value);
     Symbol* found = SyntaxFindSymbol(syntax, &concept_name);
@@ -3570,6 +3578,11 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
 
   TypeRecord* return_type = default_type;
   if (LexMatch(syntax->lex, TOK(arrow))) {
+    // The trailing return type is in the scope of the lambda parameters
+    // ([expr.prim.lambda.closure]).  `decltype(x << y)` must see `x` and `y`,
+    // not an implicit member access through the enclosing class.
+    SyntaxOpenScope(syntax);
+    AddLambdaFunctionScopeSymbols(syntax, func);
     TypeParser parser;
     TypeParserInit(&parser, syntax->lex, syntax, STO(auto), kParsingPrototype);
     return_type = TypeParserParseType(&parser, true);
@@ -3581,6 +3594,7 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
       return_type = parsed_type;
     }
     TypeParserDestruct(&parser);
+    SyntaxCloseScope(syntax);
   }
   ParseLambdaTrailingRequiresClause(syntax, func);
   SyntaxParseFunctionContracts(syntax, func, NULL, false);
@@ -3620,6 +3634,15 @@ static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
   // for access purposes ([expr.prim.lambda], [class.access.nest]): its body
   // may name private members and invoke private constructors.
   closure->lexical_parent = EnclosingClassForLambda(syntax);
+  // A lambda is a local class of the function that contains it, so its body
+  // has that function's access ([class.local]): a lambda in a friend function
+  // may call the befriended class's private members.
+  if (syntax != NULL && syntax->context == kParsingBlockScope &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    closure->access_enclosing_function =
+        compiler->current_function->info.function.symbol;
+  }
   TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
   TypeRecordSetStructInfo(type, closure);
   Symbol* tag = NewSymbol(tag_name.value, type, STO(implicit));
@@ -3954,11 +3977,20 @@ static ASTNode* NewLambdaCaptureAccess(Symbol* this_symbol,
   ASTNode* this_node = NewIdentifierASTNode(this_symbol, location);
   ASTNode* member = NewStringConstantASTNode(
       NewString(capture->field->name.value), NULL, location);
+  // Leave the arrow untyped so member lookup still resolves the field.
+  // The dereference's type is the captured object: a clone can skip
+  // reanalysis when the expression still looks dependent (`this` of a
+  // closure nested in a class template), and code generation then loads a
+  // node with no type (`(*hasher)(...)`).
   ASTNode* access =
       NewBinaryASTNode(AST_OP(arrow), NULL, location, this_node, member);
   if (capture->by_reference) {
-    ASTNode* contents = NewUnaryASTNode(AST_OP(contents), NULL, location,
-                                        access);
+    TypeRecord* field_type =
+        capture->field != NULL ? capture->field->type : NULL;
+    TypeRecord* captured = field_type != NULL ? field_type->next : NULL;
+    ASTNode* contents =
+        NewUnaryASTNode(AST_OP(contents), captured, location, access);
+    contents->value_category = kValueCategoryLvalue;
     if (capture->is_pack_expansion) {
       contents->flags |= kASTPackExpansion;
       access->flags |= kASTPackExpansion;
@@ -4198,10 +4230,12 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
   }
 
   // Queue operator() for analysis/codegen unless the closure captures a
-  // non-pack value whose type still names an enclosing template parameter.
-  // Those bodies cannot be analyzed against placeholder capture-field types;
-  // SubstituteNestedStructTemplateParameters rebuilds the closure per
-  // instantiation and CloneInstantiatedMemberFunctionBody re-queues the body.
+  // non-pack value whose type still names an enclosing template parameter, or
+  // the body itself names one (`static_cast<Encoder*>(...)` inside a
+  // captureless lambda).  The pattern body would otherwise be emitted with
+  // `auto` still undeduced.  SubstituteNestedStructTemplateParameters rebuilds
+  // the closure per instantiation and CloneInstantiatedMemberFunctionBody
+  // re-queues the substituted body.
   //
   // Pack-only captures are still queued eagerly: fold/pack-expansion lowering
   // (e.g. `[&]{ return (0 + ... + xs); }`) runs against the template-level
@@ -4226,7 +4260,8 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
       }
     }
   }
-  if (!defer_dependent_capture) {
+  if (!defer_dependent_capture &&
+      !LambdaCallOperatorBodyDependsOnEnclosingTemplate(call_operator)) {
     QueueLambdaCallOperatorDefinition(call_operator);
   }
 
@@ -5191,10 +5226,11 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
   if (LexLookingAt(syntax->lex, TOK(identifier))) {
     member_name = NewString(syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
-  } else if (!saw_template_keyword && CompilerIsCXX() &&
+  } else if (CompilerIsCXX() &&
              LexLookingAt(syntax->lex, TOK(operator))) {
     // Explicit operator / conversion call, e.g. `x.operator+(y)`,
-    // `x.operator()(y)`, `p->operator int()`.  Build the same member name the
+    // `x.operator()(y)`, `p->operator int()`,
+    // `this->template operator[]<K>(k)`.  Build the same member name the
     // operator/conversion function was registered under so the access resolves
     // to it.
     String op_name;

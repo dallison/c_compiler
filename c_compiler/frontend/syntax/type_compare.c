@@ -33,7 +33,18 @@
 static bool DependentExpressionNodeContainsParameter(ASTNode* node,
                                                      void* data) {
   (void)data;
-  if (node == NULL || node->op != AST_OP(identifier)) {
+  if (node == NULL) {
+    return false;
+  }
+  // `sizeof(T)` / `alignof(T)` are value-dependent.  The operand type is not
+  // a child expression, so an identifier walk never sees the parameter.
+  if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
+    SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
+    if (TypeContainsTemplateParameter(sizeof_node->type_operand)) {
+      return true;
+    }
+  }
+  if (node->op != AST_OP(identifier)) {
     return false;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -148,6 +159,11 @@ static bool TypeContainsTemplateParameterImpl(TypeRecord* type,
                                               bool cache_result) {
   if (type == NULL) {
     return false;
+  }
+  if (type->template_parameter_summary ==
+          kTypeTemplateParameterSummaryAbsent &&
+      type->template_parameter_index >= 0) {
+    type->template_parameter_summary = kTypeTemplateParameterSummaryUnknown;
   }
   if (type->template_parameter_summary !=
       kTypeTemplateParameterSummaryUnknown) {

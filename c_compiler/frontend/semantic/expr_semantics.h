@@ -13,6 +13,10 @@
 #include "syntax.h"
 
 __attribute__((warn_unused_result)) ASTNode* AnalyzeExpression(ASTNode* node);
+// Member access analyzed while its receiver was still `auto` keeps that
+// placeholder after deduction.  Re-run those accesses once the symbol type
+// is concrete.
+void SemanticReanalyzeAutoMemberAccesses(void);
 bool IsConstantExpression(ASTNode* node);
 bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);
@@ -53,6 +57,12 @@ Symbol* CXXResolveFunctionAddressForTargetType(Symbol* head,
 // a binding context), rewrite `from` in place to the unique matching concrete
 // function.  Returns true on a successful rewrite, false otherwise.
 bool CXXTryResolveFunctionAddressNode(ASTNode* from, TypeRecord* to);
+
+// A non-capturing lambda converts to a pointer to a function with the same
+// signature as its call operator.  Replaces `from` when `to` is that pointer
+// type.  Returns true when the conversion was applied.
+bool CXXConvertNonCapturingLambdaToFunctionPointer(ASTNode* from,
+                                                   TypeRecord* to);
 
 // Attempts to convert `from` to the class type `to` by constructing a temporary
 // through a viable converting constructor, splicing the result in place of

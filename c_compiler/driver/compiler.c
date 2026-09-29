@@ -31,6 +31,7 @@
 #include "listing.h"
 #include "preprocessor.h"
 #include "semantics.h"
+#include "statement_semantics.h"
 #include "syntax.h"
 #include "debug.h"
 #include "member_pointer.h"
@@ -1000,23 +1001,27 @@ static void InitPointer(ASTNode* expr,
     bool is_nullptr = TypeIsNullPointer(expr->type);
     bool is_zero_literal =
         ((ConstantASTNode*)expr)->value.ivalue == 0;
-    if ((!is_nullptr && !is_zero_literal &&
-         !EvaluateIntegerExpression(expr, &value)) ||
-        value != 0) {
+    // A null pointer constant is the usual case.  An integer constant such as
+    // `reinterpret_cast<T*>(1)` is also a valid absolute address (a sentinel).
+    if (!is_nullptr && !is_zero_literal &&
+        !EvaluateIntegerExpression(expr, &value)) {
       SemanticError(expr,
                     "Invalid static pointer initialization; expected null");
       free(init_out);
       return;
     }
+    if (is_nullptr || is_zero_literal) {
+      value = 0;
+    }
     if (subinit->type->size == 2) {
       init_out->type = kInitTypeHalf;
-      init_out->value.half = 0;
+      init_out->value.half = (uint16_t)value;
     } else if (subinit->type->size == 4) {
       init_out->type = kInitTypeWord;
-      init_out->value.word = 0;
+      init_out->value.word = (uint32_t)value;
     } else {
       init_out->type = kInitTypeLong;
-      init_out->value._long = 0;
+      init_out->value._long = (uint64_t)value;
     }
     init_out->offset = offset;
     VectorAppend(initializers, init_out);
@@ -1611,6 +1616,13 @@ static void RemoveUninitializedStaticForSymbol(Symbol* symbol) {
   }
 }
 
+// ASTNodeClone hands this the newly allocated copy.  Returning it keeps the
+// deep copy instead of aliasing the original tree.
+static ASTNode* KeepClonedNode(ASTNode* node, void* data) {
+  (void)data;
+  return node;
+}
+
 static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
   Vector declarations;
   VectorInit(&declarations);
@@ -1649,8 +1661,33 @@ static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
     }
     if (decl->initializer != NULL &&
         decl->initializer->op == AST_OP(init)) {
-      AddInitializedStaticVariable(
-          decl, ((BinaryASTNode*)decl->initializer)->right);
+      ASTNode* raw = ((BinaryASTNode*)decl->initializer)->right;
+      // Block-scope thread_locals are recorded at parse time and may still be
+      // expression initializers (`static thread_local size_t id = kPoolSize`).
+      // ExpandBracedInitializer only accepts a braced initializer.  Lower a
+      // clone: AnalyzeInitializer moves the expression out of its parent, and
+      // the function body still owns the original tree.
+      if (raw != NULL && raw->op != AST_OP(braced_init) &&
+          decl->symbol != NULL && decl->symbol->type != NULL &&
+          InitializerIsLinkTimeConstant(raw)) {
+        ASTNode* cloned = ASTNodeClone(raw, KeepClonedNode, NULL, NULL);
+        if (cloned != NULL) {
+          bool saved_trap = DiagnosticErrorTrapBegin();
+          ASTNode* simplified =
+              AnalyzeInitializer(decl->symbol->type, cloned, true);
+          bool failed = DiagnosticErrorTrapped();
+          DiagnosticErrorTrapEnd(saved_trap);
+          if (!failed && simplified != NULL &&
+              simplified->op == AST_OP(braced_init)) {
+            raw = simplified;
+          }
+        }
+      }
+      if (raw != NULL && raw->op == AST_OP(braced_init)) {
+        AddInitializedStaticVariable(decl, raw);
+      } else {
+        AddUninitializedLocalStatic(decl->symbol);
+      }
     } else {
       AddUninitializedLocalStatic(decl->symbol);
     }
@@ -1853,6 +1890,21 @@ static ASTNode* NewCXXGlobalSpecialMemberCall(Symbol* sym, bool destructor) {
   return NewExpressionStatementASTNode(call, location);
 }
 
+// The implicit constructor and destructor of a static data member run as part
+// of that member's definition, which is in the scope of its class. Those calls
+// are later moved into a process-wide init function, so analyze them here
+// while the class is still the access context. A namespace-scope object that
+// is not a member keeps a null class and is checked as an ordinary caller.
+static void AnalyzeStaticDataMemberLifetimeCall(Symbol* object, ASTNode* stmt) {
+  if (object == NULL || stmt == NULL ||
+      object->static_data_member_class == NULL) {
+    return;
+  }
+  Struct* saved_access = compiler->current_class_access_context;
+  compiler->current_class_access_context = object->static_data_member_class;
+  AnalyzeStatement(stmt);
+  compiler->current_class_access_context = saved_access;
+}
 
 static void RegisterCXXThreadLocalObject(Symbol* sym) {
   bool statically_constructed =
@@ -1860,12 +1912,14 @@ static void RegisterCXXThreadLocalObject(Symbol* sym) {
       (TypeIsFixedArray(sym->type) || TypeIsStructOrUnion(sym->type));
   if (!statically_constructed &&
       FindCXXSpecialMemberForGlobal(sym, false) != NULL) {
-    VectorAppend(&compiler->cxx_thread_constructor_calls,
-                 NewCXXGlobalSpecialMemberCall(sym, false));
+    ASTNode* call = NewCXXGlobalSpecialMemberCall(sym, false);
+    AnalyzeStaticDataMemberLifetimeCall(sym, call);
+    VectorAppend(&compiler->cxx_thread_constructor_calls, call);
   }
   if (FindCXXSpecialMemberForGlobal(sym, true) != NULL) {
-    VectorAppend(&compiler->cxx_thread_destructor_calls,
-                 NewCXXGlobalSpecialMemberCall(sym, true));
+    ASTNode* call = NewCXXGlobalSpecialMemberCall(sym, true);
+    AnalyzeStaticDataMemberLifetimeCall(sym, call);
+    VectorAppend(&compiler->cxx_thread_destructor_calls, call);
   }
 }
 
@@ -1888,8 +1942,9 @@ static void RegisterCXXGlobalObject(Symbol* sym) {
 static void RegisterCXXGlobalDestructor(Symbol* sym) {
   if (SymbolIsThreadLocal(sym)) {
     if (FindCXXSpecialMemberForGlobal(sym, true) != NULL) {
-      VectorAppend(&compiler->cxx_thread_destructor_calls,
-                   NewCXXGlobalSpecialMemberCall(sym, true));
+      ASTNode* call = NewCXXGlobalSpecialMemberCall(sym, true);
+      AnalyzeStaticDataMemberLifetimeCall(sym, call);
+      VectorAppend(&compiler->cxx_thread_destructor_calls, call);
     }
     return;
   }
@@ -1972,15 +2027,18 @@ static void BuildCXXProcessInitStatements(Vector* statements) {
   }
 
   for (size_t i = 0; i < compiler->cxx_global_constructor_calls.length; i++) {
-    VectorAppend(statements,
-                 compiler->cxx_global_constructor_calls.value.p[i]);
+    ASTNode* call = compiler->cxx_global_constructor_calls.value.p[i];
     Symbol* object = compiler->cxx_global_constructor_objects.value.p[i];
+    AnalyzeStaticDataMemberLifetimeCall(object, call);
+    VectorAppend(statements, call);
     AppendCXXGlobalAtexitRegistration(statements, object, &registered);
   }
 
   for (size_t i = 0; i < compiler->cxx_global_constructors.length; i++) {
     Symbol* object = compiler->cxx_global_constructors.value.p[i];
-    VectorAppend(statements, NewCXXGlobalSpecialMemberCall(object, false));
+    ASTNode* call = NewCXXGlobalSpecialMemberCall(object, false);
+    AnalyzeStaticDataMemberLifetimeCall(object, call);
+    VectorAppend(statements, call);
     AppendCXXGlobalAtexitRegistration(statements, object, &registered);
   }
 

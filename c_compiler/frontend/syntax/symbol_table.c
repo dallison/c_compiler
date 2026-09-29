@@ -455,6 +455,55 @@ void NamespaceCollectFunctionSymbolsInInlineSet(Namespace* ns, String* name,
   VectorDestruct(&heads);
 }
 
+static bool SymbolOverloadChainContains(Symbol* head, Symbol* symbol) {
+  for (Symbol* current = head; current != NULL; current = current->overload_next) {
+    if (current == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool SymbolChainAliases(Symbol* head, Symbol* symbol) {
+  for (Symbol* current = head; current != NULL; current = current->overload_next) {
+    if (current == symbol ||
+        (current->flags.is_using_alias && current->alias_target == symbol)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Unqualified lookup in a namespace also sees its anonymous namespace, as if
+ * by a using-directive.  Those are separate symbol-table heads.  A function
+ * template declared there (`Consume<Edge>`) has to join the enclosing
+ * function of the same name, or the call is parsed as a comparison.
+ * The link is a using-alias clone: the original stays owned by the anonymous
+ * namespace, and the clone is owned by the enclosing overload chain. */
+static void LinkAnonymousFunctionOverload(Symbol* first, Symbol* extra) {
+  if (first == NULL || extra == NULL || first == extra ||
+      SymbolOverloadChainContains(extra, first)) {
+    return;
+  }
+  for (Symbol* current = extra; current != NULL;
+       current = current->overload_next) {
+    if (SymbolChainAliases(first, current)) {
+      continue;
+    }
+    Symbol* clone = SymbolClone(current);
+    clone->flags.is_using_alias = true;
+    clone->alias_target = current;
+    clone->overload_next = NULL;
+    Symbol* tail = first;
+    while (tail->overload_next != NULL) {
+      tail = tail->overload_next;
+    }
+    tail->overload_next = clone;
+    first->flags.is_overloaded = true;
+    clone->flags.is_overloaded = true;
+  }
+}
+
 static NamespaceInlineSymbolLookup
 ResolveCollectedSymbolHeads(Vector* heads) {
   NamespaceInlineSymbolLookup result = {kInlineLookupNotFound, NULL};
@@ -466,6 +515,8 @@ ResolveCollectedSymbolHeads(Vector* heads) {
     if (symbol->type != NULL && TypeIsFunction(symbol->type)) {
       if (first_function == NULL) {
         first_function = symbol;
+      } else {
+        LinkAnonymousFunctionOverload(first_function, symbol);
       }
       continue;
     }

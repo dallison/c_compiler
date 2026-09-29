@@ -342,6 +342,19 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       }
       return false;
 
+    case AST_OP(builtin_constant_p): {
+      int64_t ignored = 0;
+      ASTNode* arg =
+          vector_node->children != NULL && vector_node->children->length > 0
+              ? vector_node->children->value.p[0]
+              : NULL;
+      *result = arg != NULL &&
+                        EvaluateIntegerExpressionInContext(ctx, arg, &ignored)
+                    ? 1
+                    : 0;
+      return true;
+    }
+
     case AST_OP(builtin_is_constant_evaluated):
       // Keep the builtin in function bodies so runtime and constant evaluation
       // can disagree.  Fold only in an actual constant-evaluation context.
@@ -801,6 +814,14 @@ case AST_OP(ast_op): \
           *result = right != 0;
           return true;
         }
+        // `assert(cond && "message")` uses the string as a boolean.  A string
+        // literal is a non-null pointer, so the condition is true whenever
+        // `cond` is.
+        if (binary_node->right != NULL &&
+            binary_node->right->op == AST_OP(string)) {
+          *result = 1;
+          return true;
+        }
       }
       break;
 
@@ -827,6 +848,11 @@ case AST_OP(ast_op): \
           if (EvaluateIntegerExpressionInContext(ctx, binary_node->right,
                                                  &right)) {
             *result = right != 0;
+            return true;
+          }
+          if (binary_node->right != NULL &&
+              binary_node->right->op == AST_OP(string)) {
+            *result = 1;
             return true;
           }
         } else {
@@ -884,6 +910,12 @@ case AST_OP(ast_op): \
 
     case AST_OP(cast): {
       CastASTNode* c = (CastASTNode*)node;
+      // A string literal converted to bool or another integer is non-null.
+      if (c->expr != NULL && c->expr->op == AST_OP(string) &&
+          (c->cast_type == NULL || TypeIsIntegral(c->cast_type))) {
+        *result = 1;
+        return true;
+      }
       if (EvaluateIntegerExpressionInContext(ctx, c->expr, &left)) {
         *result = NormalizeIntegerValueForType(left, c->cast_type);
         return true;

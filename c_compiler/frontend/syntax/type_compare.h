@@ -16,6 +16,13 @@ static inline bool TypeContainsTemplateParameter(TypeRecord* type) {
   if (type == NULL) {
     return false;
   }
+  // Size calculation probes a placeholder before its parameter index is
+  // stored and must not leave a permanent "absent" answer behind.
+  if (type->template_parameter_summary ==
+          kTypeTemplateParameterSummaryAbsent &&
+      type->template_parameter_index >= 0) {
+    type->template_parameter_summary = kTypeTemplateParameterSummaryUnknown;
+  }
   if (type->template_parameter_summary !=
       kTypeTemplateParameterSummaryUnknown) {
     return type->template_parameter_summary ==

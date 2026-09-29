@@ -436,6 +436,114 @@ static void EvaluateInstantiatedStaticAsserts(TypeParser* parser,
   }
 }
 
+static void ClearBitWidthAnalysis(ASTNode* node, void* data, int child_id,
+                                   VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL) {
+    node->flags &= ~kASTAnalyzed;
+    ASTNodeClearType(node);
+  }
+}
+
+/* Pair source bit-fields with the instantiation's bit-fields in declaration
+ * order and fold widths that were dependent at parse time. */
+static void ResolveInstantiatedBitFieldWidths(TypeParser* parser,
+                                              Struct* source, Struct* target,
+                                              Vector* args) {
+  if (parser == NULL || source == NULL || target == NULL) {
+    return;
+  }
+  size_t target_index = 0;
+  for (size_t source_index = 0; source_index < source->members.length;
+       source_index++) {
+    StructMember* from = source->members.value.p[source_index];
+    if (from == NULL || !from->is_bit_field) {
+      continue;
+    }
+    StructMember* to = NULL;
+    for (; target_index < target->members.length; target_index++) {
+      StructMember* candidate = target->members.value.p[target_index];
+      if (candidate != NULL && candidate->is_bit_field) {
+        to = candidate;
+        target_index++;
+        break;
+      }
+    }
+    if (to == NULL || from->bit_width_expr == NULL || to->symbol == NULL ||
+        to->symbol->type == NULL) {
+      continue;
+    }
+    ASTNode* substituted =
+        CloneDependentExpressionWithArgs(parser, from->bit_width_expr, args);
+    if (substituted == NULL) {
+      substituted = ASTNodeClone(from->bit_width_expr, IdentityCloneNode, NULL,
+                                 NULL);
+    }
+    if (substituted == NULL) {
+      continue;
+    }
+    Struct* owners[2] = {source, target};
+    ASTNodeVisit(substituted, RebindInstantiatedMemberIdentifier, 0, owners);
+    // The cloned width still carries the definition-time type, which names
+    // the class template's parameter.  Rebinding the identifier does not
+    // clear that type, so dependence has to be judged after reanalysis.
+    ASTNodeVisit(substituted, ClearBitWidthAnalysis, 0, NULL);
+    int64_t width = 0;
+    DiagnosticSuppressBegin();
+    compiler->constant_evaluation_required_depth++;
+    substituted = AnalyzeExpression(substituted);
+    compiler->constant_evaluation_required_depth--;
+    bool ok = substituted != NULL &&
+              EvaluateIntegerExpression(substituted, &width);
+    DiagnosticSuppressEnd();
+    if (!ok && substituted != NULL &&
+        ExpressionIsTemplateDependent(substituted)) {
+      ASTNodeDelete(to->bit_width_expr);
+      to->bit_width_expr = substituted;
+      continue;
+    }
+    ASTNodeDelete(substituted);
+    SourceLocation location =
+        to->symbol->location != 0 ? to->symbol->location : from->symbol != NULL
+                                                               ? from->symbol->location
+                                                               : 0;
+    if (!ok) {
+      SyntaxErrorAtLocation(parser->syntax, location,
+                            "Invalid bitfield; constant expression needed");
+      continue;
+    }
+    TypeRecordCalculateSize(to->symbol->type);
+    if (!TypeIsIntegral(to->symbol->type)) {
+      SyntaxErrorAtLocation(
+          parser->syntax, location,
+          "Invalid bitfield; only integer types can be used for bitfields");
+      continue;
+    }
+    int word_width = TypeIsBitInt(to->symbol->type)
+                         ? to->symbol->type->bit_width
+                         : to->symbol->type->size * 8;
+    if (width == 0) {
+      if (!to->symbol->flags.invented) {
+        SyntaxErrorAtLocation(parser->syntax, location,
+                              "Invalid bitfield; named bit-field has zero width");
+      }
+      to->bit_size = 0;
+      continue;
+    }
+    if (width < 0 || (word_width > 0 && width > word_width)) {
+      SyntaxErrorAtLocation(
+          parser->syntax, location,
+          "Invalid bitfield; width of %" PRId64
+          " is out of bounds for type of size %d bits",
+          width, word_width);
+      continue;
+    }
+    to->bit_size = (int)width;
+    to->is_bit_field = true;
+  }
+}
+
 typedef struct {
   Struct* source;
   Vector* args;
@@ -575,7 +683,17 @@ static TypeRecord* NestedSubstitutionAlreadyInProgress(Struct* source,
   }
   for (size_t i = 0; i < nested_substitution_stack.length; i++) {
     NestedSubstitutionInProgress* entry = nested_substitution_stack.value.p[i];
-    if (entry->source == source && entry->args == args) {
+    // Argument vectors are copied at each call, so pointer identity misses a
+    // re-entrant substitution of the same lambda (`[&]{ ... }` mentioned from
+    // its own initializer).  Value equality is the instantiation key.
+    if (entry->source == source &&
+        TemplateArgumentVectorEqual(entry->args, args)) {
+      return entry->type;
+    }
+    // Substituting the in-progress copy itself would invent another closure
+    // (`__invented__$S1$S2$...`) and recurse until the stack overflows.
+    if (entry->type != NULL && TypeIsStructOrUnion(entry->type) &&
+        entry->type->info.struct_info == source) {
       return entry->type;
     }
   }
@@ -614,6 +732,15 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
                                                             TypeRecord* type,
                                                             Vector* args) {
   Struct* from = type->info.struct_info;
+  // A closure copied for one instantiation is named `__invented__N$S<serial>`.
+  // Substituting that copy again (its lexical parent is now the instantiation,
+  // which is the source of a nested substitution) invents another closure and
+  // never reaches a fixed point.  The original, without `$S`, is what each
+  // instantiation rebuilds.
+  if (from->tag_symbol != NULL && from->tag_symbol->flags.invented &&
+      from->tag_name != NULL && strstr(from->tag_name->value, "$S") != NULL) {
+    return TypeRecordCopy(type);
+  }
   // Cord's ChunkIterator member signatures name CharIterator, whose signatures
   // name Cord again.  Re-entering the substitution that is already building
   // that class would recurse until the stack overflows.  Share the in-progress
@@ -644,6 +771,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   } else {
     str->lexical_parent = from->lexical_parent;
   }
+  str->access_enclosing_function = from->access_enclosing_function;
   if (StructHasMemberFunction(from)) {
     bool invented = from->tag_symbol != NULL && from->tag_symbol->flags.invented;
     String synthetic_name;
@@ -818,6 +946,12 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           SubstituteDependentSymbolAlignment(parser, member_symbol, args);
           SubstituteStaticMemberInitializerValue(
               parser, member_symbol, member->default_initializer, args);
+          if (!member_symbol->flags.value_set &&
+              member->symbol->constexpr_initializer != NULL) {
+            SubstituteStaticMemberInitializerValue(
+                parser, member_symbol, member->symbol->constexpr_initializer,
+                args);
+          }
 
           StructMember* instantiated = NewStructMember(member_symbol);
           instantiated->access = member->access;
@@ -887,13 +1021,18 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     SubstituteDependentSymbolAlignment(parser, member_symbol, args);
     SubstituteStaticMemberInitializerValue(parser, member_symbol,
                                            member->default_initializer, args);
+    if (!member_symbol->flags.value_set &&
+        member->symbol->constexpr_initializer != NULL) {
+      SubstituteStaticMemberInitializerValue(
+          parser, member_symbol, member->symbol->constexpr_initializer, args);
+    }
 
     StructMember* instantiated = NewStructMember(member_symbol);
     // Substitute template parameters in a non-static default member initializer
     // (e.g. `W value = W();`).  A plain clone would leave the parameter-typed
     // value-initialization `W()` referencing the template parameter, which then
     // lowers to an undefined symbol; substitution rewrites it to e.g. `int()`.
-    if (member->default_initializer != NULL && !member->is_static) {
+    if (member->default_initializer != NULL) {
       ASTNode* substituted = CloneDependentExpressionWithArgs(
           parser, member->default_initializer, args);
       instantiated->default_initializer =
@@ -903,6 +1042,19 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     } else {
       instantiated->default_initializer =
           CloneCXXDefaultMemberInitializer(member->default_initializer);
+    }
+    // A static constexpr aggregate (`static constexpr array<size_t, N> k =
+    // {Ts...}`) is not a scalar, so the value fold above leaves it unset.
+    // Constant evaluation reads symbol->constexpr_initializer, not the
+    // member's default initializer.  Keep the substituted initializer there
+    // once every template parameter in it has been replaced.
+    if (member->is_static && !member_symbol->flags.value_set &&
+        member_symbol->constexpr_initializer == NULL &&
+        instantiated->default_initializer != NULL &&
+        !DependentExpressionContainsTemplateParameter(
+            instantiated->default_initializer)) {
+      member_symbol->constexpr_initializer = ASTNodeClone(
+          instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
     }
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
@@ -968,6 +1120,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   parser->enclosing_template_substitution_target =
       saved_enclosing_substitution_target;
   if (StructHasBitFieldMembers(from)) {
+    ResolveInstantiatedBitFieldWidths(parser, from, str, args);
     RelayoutStruct(str);
   }
   InjectInstantiatedAnonymousMembers(parser, str);
@@ -3513,6 +3666,190 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   return ok;
 }
 
+/* An index belongs to the call operator itself when it falls in
+ * [own_base, own_limit).  Anything else is an enclosing template parameter. */
+static bool TemplateParameterIndexIsEnclosing(int index, int own_base,
+                                              int own_limit) {
+  return index >= 0 && (index < own_base || index >= own_limit);
+}
+
+static void NoteEnclosingTemplateParameterInType(TypeRecord* type,
+                                                 int own_base, int own_limit,
+                                                 bool* found, int depth);
+
+static void NoteEnclosingTemplateParameterInArgument(TemplateArgument* argument,
+                                                     int own_base,
+                                                     int own_limit,
+                                                     bool* found, int depth) {
+  if (argument == NULL || *found || depth > 32) {
+    return;
+  }
+  if (TemplateParameterIndexIsEnclosing(argument->template_parameter_index,
+                                        own_base, own_limit)) {
+    *found = true;
+    return;
+  }
+  NoteEnclosingTemplateParameterInType(argument->type, own_base, own_limit,
+                                       found, depth + 1);
+  if (argument->pack_arguments == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < argument->pack_arguments->length && !*found; i++) {
+    NoteEnclosingTemplateParameterInArgument(argument->pack_arguments->value.p[i],
+                                             own_base, own_limit, found,
+                                             depth + 1);
+  }
+}
+
+static void NoteEnclosingTemplateParameterInType(TypeRecord* type,
+                                                 int own_base, int own_limit,
+                                                 bool* found, int depth) {
+  if (*found || depth > 32) {
+    return;
+  }
+  for (TypeRecord* current = type; current != NULL && !*found;
+       current = current->next) {
+    if (TemplateParameterIndexIsEnclosing(current->template_parameter_index,
+                                          own_base, own_limit)) {
+      *found = true;
+      return;
+    }
+    if (current->declarator == kDeclArray &&
+        TemplateParameterIndexIsEnclosing(
+            current->info.array.template_parameter_index, own_base,
+            own_limit)) {
+      *found = true;
+      return;
+    }
+    if (current->template_arguments == NULL) {
+      continue;
+    }
+    for (size_t i = 0; i < current->template_arguments->length && !*found;
+         i++) {
+      NoteEnclosingTemplateParameterInArgument(
+          current->template_arguments->value.p[i], own_base, own_limit, found,
+          depth + 1);
+    }
+  }
+}
+
+typedef struct {
+  int own_base;
+  int own_limit;
+  bool found;
+  int depth;
+} LambdaBodyEnclosingUse;
+
+static bool ClosureBodyDependsOnEnclosingTemplate(Struct* closure, int depth);
+
+static void NoteLambdaBodyEnclosingTemplate(ASTNode* node, void* data,
+                                            int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  LambdaBodyEnclosingUse* use = data;
+  if (use->found) {
+    return;
+  }
+  NoteEnclosingTemplateParameterInType(node->type, use->own_base, use->own_limit,
+                                       &use->found, 0);
+  if (node->op == AST_OP(cast)) {
+    NoteEnclosingTemplateParameterInType(((CastASTNode*)node)->cast_type,
+                                         use->own_base, use->own_limit,
+                                         &use->found, 0);
+  } else if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
+    NoteEnclosingTemplateParameterInType(((SizeofASTNode*)node)->type_operand,
+                                         use->own_base, use->own_limit,
+                                         &use->found, 0);
+  } else if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL) {
+      if (TemplateParameterIndexIsEnclosing(id->symbol->template_parameter_index,
+                                            use->own_base, use->own_limit)) {
+        use->found = true;
+        return;
+      }
+      NoteEnclosingTemplateParameterInType(id->symbol->type, use->own_base,
+                                           use->own_limit, &use->found, 0);
+    }
+    if (id->template_arguments != NULL) {
+      for (size_t i = 0; i < id->template_arguments->length && !use->found;
+           i++) {
+        NoteEnclosingTemplateParameterInArgument(
+            id->template_arguments->value.p[i], use->own_base, use->own_limit,
+            &use->found, 0);
+      }
+    }
+  } else if (node->op == AST_OP(vardecl)) {
+    VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
+    if (decl->symbol != NULL) {
+      NoteEnclosingTemplateParameterInType(decl->symbol->type, use->own_base,
+                                           use->own_limit, &use->found, 0);
+    }
+  }
+  if (use->found || use->depth >= 8 ||
+      (node->flags & kASTLambdaExpression) == 0 || node->type == NULL ||
+      !TypeIsStructOrUnion(node->type) || node->type->info.struct_info == NULL ||
+      node->type->info.struct_info->tag_symbol == NULL ||
+      !node->type->info.struct_info->tag_symbol->flags.invented) {
+    return;
+  }
+  if (ClosureBodyDependsOnEnclosingTemplate(node->type->info.struct_info,
+                                            use->depth + 1)) {
+    use->found = true;
+  }
+}
+
+static bool FunctionBodyDependsOnEnclosingTemplate(Symbol* function,
+                                                   int depth) {
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type)) {
+    return false;
+  }
+  ASTNode* body = function->type->info.function.body;
+  if (body == NULL && function->value.func_defn != NULL &&
+      function->value.func_defn->type != NULL) {
+    body = function->value.func_defn->type->info.function.body;
+  }
+  if (body == NULL) {
+    return false;
+  }
+  TypeRecord* func = function->type;
+  int own_base = func->info.function.template_parameter_base;
+  int own_count = func->info.function.template_parameter_count;
+  if (own_count <= 0) {
+    own_count = (int)func->info.function.template_parameters.length;
+  }
+  LambdaBodyEnclosingUse use = {.own_base = own_base,
+                                .own_limit = own_base + own_count,
+                                .found = false,
+                                .depth = depth};
+  ASTNodeVisit(body, NoteLambdaBodyEnclosingTemplate, 0, &use);
+  return use.found;
+}
+
+static bool ClosureBodyDependsOnEnclosingTemplate(Struct* closure, int depth) {
+  if (closure == NULL || depth > 8) {
+    return false;
+  }
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    if (member == NULL || !member->is_member_function ||
+        member->symbol == NULL) {
+      continue;
+    }
+    if (FunctionBodyDependsOnEnclosingTemplate(member->symbol, depth)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool LambdaCallOperatorBodyDependsOnEnclosingTemplate(Symbol* call_operator) {
+  return FunctionBodyDependsOnEnclosingTemplate(call_operator, 0);
+}
+
 /* True if any non-static data member of `str` still has a template-dependent
  * type (so the struct itself is dependent). */
 bool StructContainsTemplateParameter(Struct* str) {
@@ -3520,12 +3857,11 @@ bool StructContainsTemplateParameter(Struct* str) {
     return false;
   }
   // A lambda closure with no captures has no data members, so its dependence on
-  // an enclosing template parameter lives entirely in its `operator()`
-  // signature (e.g. `[](const T&){...}`).  Such a closure must still be rebuilt
-  // per instantiation so the call operator is substituted (and emitted) with
-  // concrete types.  Consider a closure's non-template member-function
-  // signatures; a generic lambda's `operator()` is itself a template and
-  // references its own parameters, so it is excluded.
+  // an enclosing template parameter may live only in its `operator()` body
+  // (`auto p = static_cast<T*>(storage)`).  The signature check below misses
+  // that.  Rebuild the closure so the body is substituted and `auto` is
+  // deduced against the concrete parameter.  A generic lambda's own parameters
+  // are not enclosing ones; only an index outside that operator's range counts.
   bool is_lambda_closure =
       str->tag_symbol != NULL && str->tag_symbol->flags.invented;
   for (size_t i = 0; i < str->members.length; i++) {
@@ -3550,6 +3886,9 @@ bool StructContainsTemplateParameter(Struct* str) {
         TypeContainsAuto(member->symbol->type)) {
       return true;
     }
+  }
+  if (is_lambda_closure && ClosureBodyDependsOnEnclosingTemplate(str, 0)) {
+    return true;
   }
   return false;
 }
@@ -4871,18 +5210,47 @@ Vector* TypeDeduceConversionOperatorTemplateArguments(Syntax* syntax,
   if (func->info.function.template_parameter_count <= 0 || func->next == NULL) {
     return NULL;
   }
+  // [temp.deduct.conv]: deduce against the referred-to type, ignoring
+  // top-level cv-qualifiers.  `const vector&` must deduce `Container` as
+  // `vector`, not as a reference; the prvalue then binds to the reference.
+  TypeRecord* pattern = func->next;
+  TypeRecord* deduction_target = target;
+  if (TypeIsReference(pattern)) {
+    pattern = pattern->next;
+  }
+  if (TypeIsReference(deduction_target)) {
+    deduction_target = deduction_target->next;
+  }
+  TypeRecord* unqualified_target = NULL;
+  if (pattern == NULL || deduction_target == NULL) {
+    return NULL;
+  }
+  if (deduction_target->qualifiers != kQualPlain) {
+    unqualified_target = TypeRecordCopy(deduction_target);
+    unqualified_target->qualifiers = kQualPlain;
+    deduction_target = unqualified_target;
+  }
   size_t explicit_arg_count = 0;
   Vector* args = NewFunctionTemplateDeductionArguments(func, /*explicit_args=*/
                                                        NULL, &explicit_arg_count);
   if (args == NULL) {
+    if (unqualified_target != NULL) {
+      TypeRecordDelete(unqualified_target);
+    }
     return NULL;
   }
-  if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, func->next,
-                                          target)) {
+  if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, pattern,
+                                          deduction_target)) {
+    if (unqualified_target != NULL) {
+      TypeRecordDelete(unqualified_target);
+    }
     VectorDeleteWithContents(args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
     return NULL;
+  }
+  if (unqualified_target != NULL) {
+    TypeRecordDelete(unqualified_target);
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
@@ -8089,9 +8457,11 @@ void AddVariableTemplatePartialSpecialization(TypeParser* parser,
 }
 
 /* Complete a function template's argument list against its parameters (filling
- * defaults / gathering a trailing pack), then clear the "unknown/placeholder"
- * marking on type arguments that resolved to their own parameter position so
- * they read as concrete deduced types. Returns NULL if completion fails. */
+ * defaults / gathering a trailing pack). A type argument that is still a
+ * template parameter is left dependent; an enclosing parameter can share this
+ * function's parameter index (`WasDeduced<Arg>()` inside `Cleanup<Arg>`), and
+ * erasing that placeholder would instantiate the function as if the argument
+ * were `int`. Returns NULL if completion fails. */
 static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
                                                  TypeRecord* func,
                                                  Vector* args,
@@ -8168,15 +8538,6 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
   }
   if (completed == NULL) {
     return NULL;
-  }
-  for (size_t i = 0; i < completed->length; i++) {
-    TemplateArgument* arg = completed->value.p[i];
-    if (arg != NULL && arg->kind == kTemplateParameterType &&
-        arg->type != NULL && TypeIsUnknown(arg->type) &&
-        arg->type->template_parameter_index == (int)i) {
-      arg->type->type &= ~kTypeUnknown;
-      arg->type->template_parameter_index = -1;
-    }
   }
   return completed;
 }
@@ -8384,6 +8745,57 @@ static bool ClassTemplateArgumentsAreStillDependent(Vector* args) {
     }
   }
   return false;
+}
+
+/* A non-type argument can be a fully substituted expression that was never
+ * reduced to a value (`sizeof(const T& (*)()) != 0` after `T` is `int`).
+ * Partial specializations such as `enable_if<true, T>` compare integral
+ * values and miss that argument while it still carries the expression, so
+ * the primary template is instantiated instead. */
+static void FoldConcreteNonTypeTemplateArgument(TypeParser* parser,
+                                                TemplateArgument* arg) {
+  if (arg == NULL) {
+    return;
+  }
+  if (arg->pack_arguments != NULL) {
+    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
+      FoldConcreteNonTypeTemplateArgument(parser,
+                                          arg->pack_arguments->value.p[i]);
+    }
+    return;
+  }
+  if (arg->kind != kTemplateParameterNonType || arg->dependent_expr == NULL ||
+      DependentExpressionContainsTemplateParameter(arg->dependent_expr)) {
+    return;
+  }
+  Vector empty_args;
+  VectorInit(&empty_args);
+  bool saved_failed = parser != NULL && parser->template_substitution_failed;
+  if (parser != NULL) {
+    parser->template_substitution_failed = false;
+  }
+  int64_t folded = 0;
+  bool ok = TryFoldDependentTemplateArgument(parser, arg->dependent_expr,
+                                             &empty_args, &folded);
+  if (parser != NULL) {
+    parser->template_substitution_failed = saved_failed;
+  }
+  VectorDestruct(&empty_args);
+  if (!ok) {
+    return;
+  }
+  ASTNodeDelete(arg->dependent_expr);
+  arg->dependent_expr = NULL;
+  arg->int_value = folded;
+  arg->value_kind = kTemplateValueIntegral;
+  arg->template_parameter_index = -1;
+}
+
+static void FoldConcreteNonTypeTemplateArguments(TypeParser* parser,
+                                                 Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    FoldConcreteNonTypeTemplateArgument(parser, args->value.p[i]);
+  }
 }
 
 // `Outer<X>::ErrorMaker<res>` members number enclosing parameters first.
@@ -8619,6 +9031,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   // parameter), keep the template-id deferred rather than instantiating the
   // primary or a partial spec against incomplete input.
   ExpandConcreteAliasTemplateArguments(parser, completed_args);
+  FoldConcreteNonTypeTemplateArguments(parser, completed_args);
   if (ClassTemplateArgumentsAreStillDependent(completed_args)) {
     TypeRecord* deferred =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
@@ -8755,6 +9168,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   Struct* str = NewStruct(source_struct->is_union);
   str->is_class = source_struct->is_class;
   str->lexical_parent = source_struct->lexical_parent;
+  str->access_enclosing_function = source_struct->access_enclosing_function;
   // Only remap the parent when this specialization is a nested class of the
   // class template currently being instantiated.  Applying the enclosing
   // target to every class materialized during that instantiation would make
@@ -9021,6 +9435,12 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     SubstituteStaticMemberInitializerValue(parser, member_symbol,
                                            member->default_initializer,
                                            source_args);
+    if (!member_symbol->flags.value_set &&
+        member->symbol->constexpr_initializer != NULL) {
+      SubstituteStaticMemberInitializerValue(
+          parser, member_symbol, member->symbol->constexpr_initializer,
+          source_args);
+    }
     StructMember* instantiated = NewStructMember(member_symbol);
     // Substitute template parameters in every member initializer. For a static
     // member the instantiated initializer is retained until an odr-use queues
@@ -9040,6 +9460,14 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     } else {
       instantiated->default_initializer =
           CloneCXXDefaultMemberInitializer(member_initializer);
+    }
+    if (member->is_static && !member_symbol->flags.value_set &&
+        member_symbol->constexpr_initializer == NULL &&
+        instantiated->default_initializer != NULL &&
+        !DependentExpressionContainsTemplateParameter(
+            instantiated->default_initializer)) {
+      member_symbol->constexpr_initializer = ASTNodeClone(
+          instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
     }
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
@@ -9070,6 +9498,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     }
   }
   if (StructHasBitFieldMembers(source_struct)) {
+    ResolveInstantiatedBitFieldWidths(parser, source_struct, str, source_args);
     RelayoutStruct(str);
   }
   InjectInstantiatedAnonymousMembers(parser, str);
@@ -9282,8 +9711,9 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(Syntax* syntax,
       TypeRecord* param =
           TypeMaterializeClassTemplateSpecialization(syntax, formal->type);
       if (param != formal->type) {
+        // SymbolSetType retains `param`.  Deleting it frees the type the
+        // parameter now points at.
         SymbolSetType(formal, param);
-        TypeRecordDelete(param);
       }
     }
     return func;
@@ -9934,7 +10364,20 @@ static Vector* PrefixMemberAliasPatternArguments(Symbol* alias,
       }
     }
     if (max_index >= 0 && (size_t)max_index < alias_args->length) {
-      return NULL;
+      TemplateParameter* first_own =
+          alias->alias_template != NULL &&
+                  alias->alias_template->parameters.length > 0
+              ? alias->alias_template->parameters.value.p[0]
+              : NULL;
+      // The pattern's recorded arguments can name an enclosing class
+      // parameter at a low index (`Tree` at 0 in `key_arg<K>`, while `K` is
+      // numbered 1).  That index is below the supplied alias-argument count,
+      // but it is not this alias's own parameter.  Skipping the class prefix
+      // binds `Tree::key_type` to `K`.  Once the alias parameters themselves
+      // occupy that low range, the pattern is already aligned.
+      if (first_own == NULL || first_own->index <= max_index) {
+        return NULL;
+      }
     }
     if (alias->alias_template != NULL &&
         alias->alias_template->parameters.length > 0) {
@@ -10111,6 +10554,17 @@ static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
       SubstituteTemplateParameters(parser, alias->type, subst_args);
   bool substitution_failed =
       parser->template_substitution_failed || subst == NULL;
+  // Building the class named by the alias walks that class's members.  A
+  // nested SFINAE miss (`enable_if<false>::type`) sets the failure flag even
+  // though the class itself was instantiated.  The flag belongs to that
+  // nested lookup.  A dependent-member pattern (`enable_if<B, T>::type`)
+  // still fails: there the flag is the alias's own result.
+  if (substitution_failed && subst != NULL &&
+      alias->type->dependent_member_name == NULL &&
+      TypeIsStructOrUnion(subst) && !TypeIsUnknown(subst) &&
+      !TypeContainsTemplateParameter(subst)) {
+    substitution_failed = false;
+  }
   parser->template_substitution_failed = saved_failed || substitution_failed;
   if (pattern_args != NULL) {
     VectorDeleteWithContents(pattern_args,

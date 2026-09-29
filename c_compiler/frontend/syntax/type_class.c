@@ -62,15 +62,54 @@ bool TypeIsTemplateParameterPlaceholder(TypeRecord* type, int* index) {
   return true;
 }
 
-bool CurrentTemplateParameterIsPack(Syntax* syntax, int index) {
-  if (syntax == NULL || syntax->current_template_parameters == NULL ||
-      index < 0) {
+static bool TemplateParameterVectorHasIndex(Vector* parameters, int index,
+                                            bool* is_pack) {
+  if (parameters == NULL || index < 0) {
     return false;
   }
-  for (size_t i = 0; i < syntax->current_template_parameters->length; i++) {
-    TemplateParameter* param = syntax->current_template_parameters->value.p[i];
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* param = parameters->value.p[i];
     if (param != NULL && param->index == index) {
-      return param->is_parameter_pack;
+      *is_pack = param->is_parameter_pack;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool CurrentTemplateParameterIsPack(Syntax* syntax, int index) {
+  bool is_pack = false;
+  if (index < 0) {
+    return false;
+  }
+  // A member function template's parameter list does not include the
+  // enclosing class packs (`Elements...` used from `ElementIndex<T>()`).
+  if (syntax != NULL &&
+      TemplateParameterVectorHasIndex(syntax->current_template_parameters,
+                                      index, &is_pack)) {
+    return is_pack;
+  }
+  TypeRecord* function = compiler->current_function;
+  if (function != NULL && TypeIsFunction(function)) {
+    if (TemplateParameterVectorHasIndex(
+            &function->info.function.template_parameters, index, &is_pack)) {
+      return is_pack;
+    }
+    for (Struct* scope = function->info.function.cxx_member_owner;
+         scope != NULL; scope = scope->lexical_parent) {
+      if (TemplateParameterVectorHasIndex(&scope->template_parameters, index,
+                                          &is_pack)) {
+        return is_pack;
+      }
+    }
+  }
+  if (syntax != NULL) {
+    for (Struct* scope = syntax->cxx_class_head; scope != NULL;
+         scope = scope->lexical_parent) {
+      if (TemplateParameterVectorHasIndex(&scope->template_parameters, index,
+                                          &is_pack)) {
+        return is_pack;
+      }
     }
   }
   return false;
@@ -580,7 +619,8 @@ static void ParseStructMemberList(TypeParser* parser, Struct* str,
 static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
                                bool is_union, bool is_class,
                                Vector* attributes, Vector* bases,
-                               Symbol* qualified_definition_tag) {
+                               Symbol* qualified_definition_tag,
+                               Symbol* specialization_primary) {
   // We have a struct body.
   // First check that this is not a duplicate definition.
   Struct* str = NULL;
@@ -662,6 +702,15 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   // inside a class template (needed for friend-declaration disambiguation).
   str->defining_template_scope_count =
       parser->syntax->current_template_parameter_count;
+  // A class defined in a function body is a local class and has the enclosing
+  // function's access, including friendship ([class.local]).
+  if (str->access_enclosing_function == NULL &&
+      parser->syntax->context == kParsingBlockScope &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    str->access_enclosing_function =
+        compiler->current_function->info.function.symbol;
+  }
 
   // Now 'tag' will be the struct tag pointer
   // and 'str' will be a pointer to the Struct information.
@@ -707,6 +756,23 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     // member access.  The later AddInjectedClassName call (after the body) still
     // registers the name in the *enclosing* scope for out-of-body uses.
     AddInjectedClassName(parser, tag);
+    // An explicit specialization is tagged with its mangled name
+    // (`CordRepRef<Mode::kFairShare>`).  Inside that body the injected-class-name
+    // is still the primary template's name, and it denotes this specialization
+    // (`return CordRepRef(child, fraction)`).  `alias_target` keeps the primary
+    // so `numeric_limits<double>` is still a template-id.
+    if (specialization_primary != NULL &&
+        specialization_primary->name.value != NULL &&
+        (tag->name.value == NULL ||
+         strcmp(specialization_primary->name.value, tag->name.value) != 0)) {
+      Symbol* alias = NewSymbol(specialization_primary->name.value, tag->type,
+                                STO(typedef));
+      alias->namespace_ = tag->namespace_;
+      alias->alias_target = specialization_primary;
+      if (!SyntaxAddSymbol(parser->syntax, alias)) {
+        SymbolDelete(alias);
+      }
+    }
   }
   Struct* saved_member_owner = parser->cxx_member_owner;
   Struct* saved_class_head = parser->syntax->cxx_class_head;
@@ -779,6 +845,26 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
     VectorAppend(&compiler->cxx_defined_classes, str);
   }
   return tag;
+}
+
+// An elaborated class name first seen inside a class, but not as its own
+// declaration (`struct S;` is nested; `typedef struct S* p` is not), is
+// declared in the nearest enclosing namespace or block scope.
+static void AddElaboratedTagInEnclosingScope(TypeParser* parser, Symbol* tag) {
+  Syntax* syntax = parser->syntax;
+  int class_scopes = 0;
+  for (Struct* owner = parser->cxx_member_owner; owner != NULL;
+       owner = owner->lexical_parent) {
+    class_scopes++;
+  }
+  LocalSymbolTable* saved = syntax->local_tag_stack;
+  LocalSymbolTable* scope = saved;
+  for (int i = 0; i < class_scopes && scope != NULL; i++) {
+    scope = scope->prev;
+  }
+  syntax->local_tag_stack = scope;
+  SyntaxAddTag(syntax, tag);
+  syntax->local_tag_stack = saved;
 }
 
 Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) {
@@ -962,8 +1048,10 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
         StringSetString(&tag_name, &qualified_definition_tag->name);
       }
     }
-    tag = ParseStructBody(parser, &tag_name, is_union, is_class, &attributes,
-                          &bases, qualified_definition_tag);
+    tag = ParseStructBody(
+        parser, &tag_name, is_union, is_class, &attributes, &bases,
+        qualified_definition_tag,
+        is_full_specialization ? specialization_template : NULL);
     if (is_final && tag != NULL && tag->type != NULL &&
         tag->type->info.struct_info != NULL) {
       tag->type->info.struct_info->is_final = true;
@@ -1013,7 +1101,13 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       // New tag.
       Struct* str = NewStruct(is_union);
       str->is_class = is_class;
-      if (CompilerIsCXX() && parser->cxx_member_owner != NULL) {
+      // `struct Inner;` inside a class forward-declares a nested class.
+      // An elaborated-type-specifier that is only part of another declaration
+      // (`typedef const struct MuHowS* MuHow`) introduces the name in the
+      // innermost namespace or block scope, not in the class.
+      bool in_class = CompilerIsCXX() && parser->cxx_member_owner != NULL;
+      bool standalone_forward = LexLookingAt(parser->lex, TOK(semicolon));
+      if (in_class && standalone_forward) {
         str->lexical_parent = parser->cxx_member_owner;
       }
       TypeRecord* type =
@@ -1023,7 +1117,11 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       tag->flags.is_forward_declared = true;
       str->tag_name = &tag->name;
       str->tag_symbol = tag;
-      SyntaxAddTag(parser->syntax, tag);
+      if (in_class && !standalone_forward) {
+        AddElaboratedTagInEnclosingScope(parser, tag);
+      } else {
+        SyntaxAddTag(parser->syntax, tag);
+      }
       AddInjectedClassName(parser, tag);
     } else if (tag->flags.is_using_alias || tag->type == NULL) {
       AttachNewStructToTag(tag, is_union, is_class);

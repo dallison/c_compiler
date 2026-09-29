@@ -8,8 +8,8 @@
 //  placement / nothrow forms plus the standard support types.
 //
 
-#ifndef new_h
-#define new_h
+#ifndef __davecc_new__
+#define __davecc_new__
 
 #include <exception>
 #include <stddef.h>  // size_t
@@ -118,4 +118,4 @@ __DAVECC_CONSTEXPR_PLACEMENT_NEW void operator delete[](void*, void*)
 #undef __DAVECC_NEW_CONSTEXPR
 #undef __DAVECC_NEW_OVERRIDE
 
-#endif /* new_h */
+#endif /* __davecc_new__ */

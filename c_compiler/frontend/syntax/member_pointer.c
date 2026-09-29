@@ -784,8 +784,37 @@ static ASTNode* MemberPointerBuildAdjFieldLoad(ASTNode* member_ptr,
                                 location);
 }
 
-static TypeRecord* MemberPointerCopyFunctionType(TypeRecord* function_type) {
-  return TypeRecordCopy(function_type);
+/* The call passes the object as an explicit first argument.  The callee type
+ * has to include that parameter, matching MemberPointerBuildNonvirtualCallee,
+ * or the virtual and nonvirtual arms of a runtime member-pointer call have
+ * different function types and the conditional is ill-formed. */
+static TypeRecord* MemberPointerCalleeFunctionType(TypeRecord* fn_type,
+                                                   ASTNode* object) {
+  TypeRecord* function_type = TypeRecordCopy(fn_type);
+  TypeRecord* object_type = object != NULL ? object->type : NULL;
+  if (object_type != NULL && TypeIsReference(object_type)) {
+    object_type = object_type->next;
+  }
+  if (object_type == NULL) {
+    return function_type;
+  }
+  TypeRecord* this_type = NewPointerTo(kQualPlain, TypeRecordCopy(object_type));
+  Symbol* this_param = NewSymbol("this", this_type, STO(auto));
+  this_param->flags.is_argument = true;
+  this_param->value.arg_number = 0;
+  if (function_type->info.function.prototype.length == 0) {
+    VectorAppend(&function_type->info.function.prototype, this_param);
+  } else {
+    VectorInsertBefore(&function_type->info.function.prototype, 0, this_param);
+    for (size_t i = 1; i < function_type->info.function.prototype.length; i++) {
+      Symbol* formal =
+          (Symbol*)function_type->info.function.prototype.value.p[i];
+      if (formal != NULL) {
+        formal->value.arg_number = (int)i;
+      }
+    }
+  }
+  return function_type;
 }
 
 static ASTNode* MemberPointerCloneReceiver(ASTNode* receiver) {
@@ -796,6 +825,7 @@ static ASTNode* MemberPointerBuildVirtualCallee(ASTNode* receiver,
                                                 bool receiver_is_pointer,
                                                 ASTNode* ptr_field,
                                                 TypeRecord* fn_type,
+                                                ASTNode* object,
                                                 SourceLocation location) {
   ASTNode* receiver_clone = MemberPointerCloneReceiver(receiver);
   if (!receiver_is_pointer) {
@@ -811,7 +841,7 @@ static ASTNode* MemberPointerBuildVirtualCallee(ASTNode* receiver,
       NewBinaryASTNode(AST_OP(arrow), NULL, location, receiver_clone, vptr_name);
   vptr = AnalyzeExpression(vptr);
 
-  TypeRecord* function_type = MemberPointerCopyFunctionType(fn_type);
+  TypeRecord* function_type = MemberPointerCalleeFunctionType(fn_type, object);
   TypeRecord* function_pointer = NewPointerTo(kQualPlain, function_type);
 
   if (MemberPointerTargetABI() == kMemberPointerABIArmEabi) {
@@ -822,10 +852,19 @@ static ASTNode* MemberPointerBuildVirtualCallee(ASTNode* receiver,
         NewBinaryASTNode(AST_OP(plus), char_vptr->type, location, char_vptr,
                          ptr_field);
     slot_addr = AnalyzeExpression(slot_addr);
+    // A byte address.  Cast before the load so the slot is a function
+    // pointer, not a char.  The callee is that pointer; dereferencing it
+    // would be a call of the function's first instruction.
+    TypeRecord* slot_ptr_type =
+        NewPointerTo(kQualPlain, TypeRecordCopy(function_pointer));
+    ASTNode* slot_ptr = NewCastASTNode(slot_ptr_type, location, slot_addr);
+    slot_ptr = AnalyzeExpression(slot_ptr);
+    ASTNodeSetType(slot_ptr, slot_ptr_type);
     ASTNode* fn_ptr =
-        NewUnaryASTNode(AST_OP(contents), function_pointer, location, slot_addr);
+        NewUnaryASTNode(AST_OP(contents), function_pointer, location, slot_ptr);
     fn_ptr = AnalyzeExpression(fn_ptr);
-    return NewUnaryASTNode(AST_OP(contents), function_type, location, fn_ptr);
+    ASTNodeSetType(fn_ptr, function_pointer);
+    return fn_ptr;
   }
 
   ASTNode* one =
@@ -842,40 +881,21 @@ static ASTNode* MemberPointerBuildVirtualCallee(ASTNode* receiver,
       AST_OP(div), NewTypeRecordWithSize(kTypeInt, kQualPlain), location,
       byte_off, psize);
   index = AnalyzeExpression(index);
+  // `__vptr` is `void**`.  The subscript is a `void*`; analysis would make a
+  // following dereference `void`.  The slot value is already the function
+  // pointer, so retype it and use it as the callee.
   ASTNode* slot =
-      NewBinaryASTNode(AST_OP(subscript), function_pointer, location, vptr,
-                       index);
+      NewBinaryASTNode(AST_OP(subscript), NULL, location, vptr, index);
   slot = AnalyzeExpression(slot);
-  return NewUnaryASTNode(AST_OP(contents), function_type, location, slot);
+  ASTNodeSetType(slot, function_pointer);
+  return slot;
 }
 
 static ASTNode* MemberPointerBuildNonvirtualCallee(ASTNode* ptr_field,
                                                    TypeRecord* fn_type,
                                                    ASTNode* object,
                                                    SourceLocation location) {
-  TypeRecord* function_type = MemberPointerCopyFunctionType(fn_type);
-  TypeRecord* object_type = object != NULL ? object->type : NULL;
-  if (object_type != NULL && TypeIsReference(object_type)) {
-    object_type = object_type->next;
-  }
-  if (object_type != NULL) {
-    TypeRecord* this_type = NewPointerTo(kQualPlain, TypeRecordCopy(object_type));
-    Symbol* this_param = NewSymbol("this", this_type, STO(auto));
-    this_param->flags.is_argument = true;
-    this_param->value.arg_number = 0;
-    if (function_type->info.function.prototype.length == 0) {
-      VectorAppend(&function_type->info.function.prototype, this_param);
-    } else {
-      VectorInsertBefore(&function_type->info.function.prototype, 0, this_param);
-      for (size_t i = 1; i < function_type->info.function.prototype.length; i++) {
-        Symbol* formal =
-            (Symbol*)function_type->info.function.prototype.value.p[i];
-        if (formal != NULL) {
-          formal->value.arg_number = (int)i;
-        }
-      }
-    }
-  }
+  TypeRecord* function_type = MemberPointerCalleeFunctionType(fn_type, object);
   TypeRecord* function_pointer = NewPointerTo(kQualPlain, function_type);
   ASTNode* fn_addr =
       NewCastASTNode(function_pointer, location, ptr_field);
@@ -970,7 +990,8 @@ bool MemberPointerLowerRuntimeFunctionCall(VectorASTNode* call,
   ASTNode* callee = NULL;
   if (have_const && const_is_virtual) {
     callee = MemberPointerBuildVirtualCallee(this_addr, /*receiver_is_pointer=*/true,
-                                             ptr_field, fn_type, location);
+                                             ptr_field, fn_type, object,
+                                             location);
   } else if (have_const && pm_value.fn_symbol != NULL) {
     callee = NewIdentifierASTNode(pm_value.fn_symbol, location);
     callee = AnalyzeExpression(callee);
@@ -980,7 +1001,7 @@ bool MemberPointerLowerRuntimeFunctionCall(VectorASTNode* call,
   } else {
     ASTNode* virtual_callee =
         MemberPointerBuildVirtualCallee(this_addr, /*receiver_is_pointer=*/true,
-                                        ptr_field, fn_type, location);
+                                        ptr_field, fn_type, object, location);
     ASTNode* nonvirtual_callee =
         MemberPointerBuildNonvirtualCallee(ptr_field, fn_type, object, location);
     ASTNode* one =
