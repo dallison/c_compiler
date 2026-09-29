@@ -27,10 +27,10 @@ struct __jmp_buf {
 };
 #elif defined(__6502__)
 struct __jmp_buf {
-  char b[6];
-  int i[12];
-  long l[6];
-  long long x[3];
+  char b[4];
+  int i[4];
+  long l[2];
+  long long x[2];
   float f[3];
   int sp;
   int fp;

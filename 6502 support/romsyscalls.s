@@ -14,15 +14,15 @@
 
 // Zero page locations used by the compiler runtime system.
 // Make sure this is kept in sync with the 6502 runtime system.
-.set __sp 0x78
-.set __fp 0x7a
-.set __result 0x7c
-.set __t0 0x7e
-.set __t1 0x7f
-.set __t2 0x80
-.set __t3 0x81
-.set __i0 0x8
-.set __i1 0xa
+.set __sp 0x4e
+.set __fp 0x50
+.set __result 0x52
+.set __t0 0x54
+.set __t1 0x55
+.set __t2 0x56
+.set __t3 0x57
+.set __i0 0x6
+.set __i1 0x8
 
 
 // File descriptors are at 0x200 and each consists of:

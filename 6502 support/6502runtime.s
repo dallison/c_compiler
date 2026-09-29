@@ -221,73 +221,57 @@
 .global __reload4b
 .global __reload8b
 
-// Zero page locations.
+// Zero page locations.  This file is not assembled by the Bazel runtime;
+// the live map is vars.s.  Keep these addresses identical to that file.
+// The C ABI uses 0x00..0x8f.  double shares the float slots.
 .set __b0 0x0
 .set __b1 0x1
 .set __b2 0x2
 .set __b3 0x3
 .set __b4 0x4
 .set __b5 0x5
-.set __b6 0x6
-.set __b7 0x7
-.set __i0 0x8
-.set __i1 0xa
-.set __i2 0xc
-.set __i3 0xe
-.set __i4 0x10
-.set __i5 0x12
-.set __i6 0x14
-.set __i7 0x16
-.set __i8 0x18
-.set __i9 0x1a
-.set __i10 0x1c
-.set __i11 0x1e
-.set __i12 0x20
-.set __i13 0x22
-.set __i14 0x24
-.set __i15 0x26
-.set __l0 0x28
-.set __l1 0x2c
-.set __l2 0x30
-.set __l3 0x34
-.set __l4 0x38
-.set __l5 0x3c
-.set __l6 0x40
-.set __l7 0x44
-.set __x0 0x48
-.set __x1 0x50
-.set __x2 0x58
-.set __x3 0x60
-.set __f0 0x68
-.set __f1 0x6c
-.set __f2 0x70
-.set __f3 0x74
-.set __d0 0x78
-.set __d1 0x80
-.set __d2 0x88
-.set __d3 0x90
-.set __fp 0x9a
-.set __sp 0x98
-.set __result 0x9c
-.set __t0 0x9e
-.set __t1 0x9f
-.set __t2 0xa0
-.set __t3 0xa1
-.set __mem_dest 0xa4
-.set __mem_src 0xa2
-.set __mem_size 0xa6
-.set __t4 __mem_dest
-.set __t5 __mem_dest+1
+.set __i0 0x6
+.set __i1 0x8
+.set __i2 0xa
+.set __i3 0xc
+.set __i4 0xe
+.set __i5 0x10
+.set __i6 0x12
+.set __i7 0x14
+.set __l0 0x16
+.set __l1 0x1a
+.set __l2 0x1e
+.set __l3 0x22
+.set __x0 0x26
+.set __x1 0x2e
+.set __x2 0x36
+.set __f0 0x3e
+.set __f1 0x42
+.set __f2 0x46
+.set __f3 0x4a
+.set __sp 0x4e
+.set __fp 0x50
+.set __result 0x52
+.set __t0 0x54
+.set __t1 0x55
+.set __t2 0x56
+.set __t3 0x57
+.set __mem_src 0x58
+.set __mem_dest 0x5a
+.set __mem_size 0x5c
 
 .set stack_bottom 0xc000
 .set sys_exit 1
 .set sys_abort 8
 
-// Math scratch space starts at 0xc0 (40 bytes)
-.set mt1 0xc0     // 16 bytes
-.set mt2 0xd0     // 8 bytes
-.set mt3 0xd8     // 8 bytes
-.set mt4 0xe0     // 8 bytes
+// Math scratch starts at 0x58 and overlaps __mem_* (32 bytes).
+.set mt1 0x58     // 16 bytes
+.set mt2 0x68     // 8 bytes
+.set mt3 0x70     // 8 bytes
+
+// Float unpack scratch is 0x78..0x8f (24 bytes, end exclusive).
+.set fscratch_start 0x78
+.set fscratch_end 0x90
 
 
 
@@ -513,20 +497,21 @@ __abort:
 // This is a 24-bit bitmask immediately after the __enter and __enter_leaf
 // calls.  Consists of a number of registers to save for each of the
 // register types in this order:
-// b regs (8)    - 4 bits
-// i regs (16)   - 5 bits
-// l regs (8)    - 4 bits
-// x regs (4)    - 3 bits
-// f regs (4)    - 3 bits
-// d regs (4)    - 3 bits
+// i regs (4 preserved) - 5 bits  0..4
+// b regs (4 preserved) - 4 bits  5..8
+// l regs (2 preserved) - 4 bits  9..12
+// x regs (2 preserved) - 3 bits  13..15
+// f regs (3 preserved) - 3 bits  16..18
 //    total      =========
-//                 22 bits
+//                 19 bits
 //
-//    3       3       3     4      5      4
-// 21 20 19 18 17 16 15 14 13 12 11 10  9 8 7 6 5 4 3  2  1  0
-//  +--------+----------+---------+---------+-------+--------+
-//  | d      |    f     |   x     |    l    |   i   |    b   |
-//  +--------+----------+---------+---------+-------+--------+
+//     3       3     4      5      4
+// 19 18 17 16 15 14 13 12 11 10  9 8 7 6 5 4 3  2  1  0
+//  +----------+---------+---------+-----+----------+
+//  |    f     |   x     |    l    |  b  |    i     |
+//  +----------+---------+---------+-----+----------+
+//
+// There is no double field.  double uses the float registers.
 
 // Entry:
 // Y: start offset for first reg to save
@@ -595,19 +580,25 @@ restore_reg_loop:
 
 // Sizes of each register set in bits, from LSB to MSB
 reg_mask_sizes:
-  .byte 4,5,4,3,3,3
+  .byte 5,4,4,3,3
 
 // Mask to AND with to get number of regs to save.
 reg_mask_masks:
-  .byte 15,31,15,7,7,7
+  .byte 31,15,15,7,7
 
-// Start offset of registers in zero page
+// Start offset of registers in zero page.
+// First n for each reg is not saved:
+// i: 4
+// b: 2
+// l: 2
+// x: 1
+// f: 1
 reg_mask_offsets:
-  .byte __b0, __i0, __l0, __x0, __f0, __d0
+  .byte __i0+8, __b0+2, __l0+8, __x0+8, __f0+4
 
 // Log2 of size of each register (left shift count)
 reg_mask_reg_sizes:
-  .byte 0, 1, 2, 3, 2, 3
+  .byte 1, 0, 2, 3, 2
 
 
 // __t0,t1: current save mask.
@@ -713,12 +704,12 @@ reg_mask_shift_loop1:
   DEY
   BNE reg_mask_shift_loop1
   INX
-  CPX #6
+  CPX #5
   BNE restore_regs_loop
 end_restore_regs:
-  // 6502 stack contains 6 bytes which are the number of bytes to restore
+  // 6502 stack contains 5 bytes which are the number of bytes to restore
   // for each reg type.
-  LDX #5
+  LDX #4
 restore_reg_loop2:
   LDY reg_mask_offsets, X
   PLA

@@ -29,8 +29,8 @@
 .set output_buffer 0x500
 
 // Zero page.  We use some zero page locations for ths ROM.  They
-// start above the C ABI's reserved space, at 0xbb.
-.set zp_start 0xbb
+// start above the C ABI's reserved space, at 0x90.
+.set zp_start 0x90
 
 // Temporary address.
 .set temp_addr zp_start + 0x00 //,1
@@ -80,7 +80,7 @@
 // System call scratch space.
 .set syscall_vector zp_start + 0x36 // and 0x37
 .set syscall_code zp_start + 0x38 // and 0x39
-// End is at 0xf4
+// End is at 0xc9
 
 // IRQ scratch space
 .set irq_accum 0xfd

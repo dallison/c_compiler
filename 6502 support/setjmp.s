@@ -16,10 +16,10 @@
 
 // jmp_buf is defined as follows:
 // struct __jmp_buf {
-//  char b[6];
-//  int i[12];
-//  long l[6];
-//  long long x[3];
+//  char b[4];
+//  int i[4];
+//  long l[2];
+//  long long x[2];
 //  float f[3];
 //  int sp;
 //  int fp;
@@ -65,7 +65,7 @@ reg_offsets:
   .byte __b0+2, __i0+8, __l0+8, __x0+8, __f0+4
 
 reg_sizes:
-  .byte 6*1, 12*2, 6*4, 3*8, 3*4
+  .byte 4*1, 4*2, 2*4, 2*8, 3*4
 
 // Entry:
 // sp,sp+1: address of jmp_buf

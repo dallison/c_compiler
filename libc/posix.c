@@ -26,7 +26,7 @@ static int PCodeWrite(int fd, const char* buffer, size_t len) {
       "esc #2");
 }
 
-int write(int fd, const char* buffer, size_t len) {
+int write(int fd, const void* buffer, size_t len) {
   int result = PCodeWrite(fd, buffer, len);
   if (result > 0) {
     __builtin_observable_checkpoint();
@@ -45,7 +45,7 @@ void _Exit(int status) {
       "esc #12");
 }
 #else
-int write(int fd, const char* buffer, size_t len) {
+int write(int fd, const void* buffer, size_t len) {
   int result = syscall(SYS_WRITE, fd, buffer, len);
   if (result > 0) {
     __builtin_observable_checkpoint();

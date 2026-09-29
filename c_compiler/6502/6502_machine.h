@@ -9,85 +9,37 @@
 #ifndef W65C02_machine_h
 #define W65C02_machine_h
 
-// 6502 Runtime
-// -------------
+// Zero page register file.  The C ABI occupies 0x00..0x8f.  0x90..0xff is
+// ROM and interrupt scratch.
 //
-// THIS IS OUT OF DATE
+//   0x00..0x05  b0..b5     8-bit
+//   0x06..0x15  i0..i7     16-bit int / pointer
+//   0x16..0x25  l0..l3     32-bit long
+//   0x26..0x3d  x0..x2     64-bit long long
+//   0x3e..0x4d  f0..f3     32-bit float (double uses these same slots)
+//   0x4e..0x4f  __sp
+//   0x50..0x51  __fp
+//   0x52..0x53  __result
+//   0x54..0x57  __t0..__t3
+//   0x58..0x77  mt1..mt3 and __mem_* (overlap)
+//   0x78..0x8f  float unpack scratch
 //
-// Zero page is used to hold sets of registers:
-// Single byte registers: 8 bits
-// 0x00: b0
-// 0x01: b1
-// 0x02: b2
-// 0x03: b3
+// There is no separate double register file.  double is binary32.
 
-// Integer/address registers: 16 bits
-// 0x04/0x04: i0
-// 0x06/0x07: i1
-// 0x08/0x09: i2
-// 0x0a/0x0b: i3
-//
-// Long registers: 32 bits
-// 0x0c..0x0f: l0
-// 0x19..0x13: l1
-// 0x14..0x17: l2
-// 0x18..0x1f: l3
-//
-// Long long registers: 64 bits
-// 0x20..0x27: x0
-// 0x28..0x2f: x1
-// 0x30..0x37: x2
-// 0x38..0x3f: x3
-//
-// Single precision float - 32 bits
-// 0x40..0x43: f0
-// 0x44..0x47: f1
-// 0x48..0x4c: f2
-// 0x4c..0x4f: f3
-//
-// Stack pointer: 16 bits - address of top of stack.
-// 0x70/0x71: sp
-//
-// Frame pointer: 16 bits - address of bottom of stack frame.
-// 0x72/0x73: fp
-//
-// Result address register:
-// 0x74/0x75: result
-
-// Temp registers.
-// 0x76: t0
-// 0x77: t1
-//
-// For memory pushes to stack
-// 0x78, 0x79: mem_src
-// 0x7a, 0x7b: mem_dest
-// 0x7c, 0x7d: mem_size;
-
-// Page 1 contains the 6502 processor stack.
-//
-// The program load address is 0x400 (1K) and extends up to the 48K boundary
-// The addresses above 48K are ROM, containing common functions provided
-// by the operating system and addresses via 16-bit vectors
-//
-// The main stack starts at the 48K boundary and grows down.  The heap
-// starts just above the end of the program and extends up to the
-// stack.  When they collide we are out of memory.
-
-// Floating point double registers are the same as single precision regs.
 #define W65C02_NUM_TEMP_B_REGS 2
-#define W65C02_NUM_PRESERVED_B_REGS 6
+#define W65C02_NUM_PRESERVED_B_REGS 4
 #define W65C02_NUM_B_REGS (W65C02_NUM_TEMP_B_REGS + W65C02_NUM_PRESERVED_B_REGS)
 
 #define W65C02_NUM_TEMP_I_REGS 4
-#define W65C02_NUM_PRESERVED_I_REGS 12
+#define W65C02_NUM_PRESERVED_I_REGS 4
 #define W65C02_NUM_I_REGS (W65C02_NUM_TEMP_I_REGS + W65C02_NUM_PRESERVED_I_REGS)
 
 #define W65C02_NUM_TEMP_L_REGS 2
-#define W65C02_NUM_PRESERVED_L_REGS 6
+#define W65C02_NUM_PRESERVED_L_REGS 2
 #define W65C02_NUM_L_REGS (W65C02_NUM_TEMP_L_REGS + W65C02_NUM_PRESERVED_L_REGS)
 
 #define W65C02_NUM_TEMP_X_REGS 1
-#define W65C02_NUM_PRESERVED_X_REGS 3
+#define W65C02_NUM_PRESERVED_X_REGS 2
 #define W65C02_NUM_X_REGS (W65C02_NUM_TEMP_X_REGS + W65C02_NUM_PRESERVED_X_REGS)
 
 #define W65C02_NUM_TEMP_F_REGS 1
@@ -97,7 +49,7 @@
 #define W65C02_B_REG_START 0
 #define W65C02_I_REG_START (W65C02_B_REG_START + W65C02_NUM_B_REGS)
 #define W65C02_L_REG_START (W65C02_I_REG_START + W65C02_NUM_I_REGS*2)
-#define W65C02_X_REG_START (W65C02_I_REG_START + W65C02_NUM_I_REGS*4)
+#define W65C02_X_REG_START (W65C02_L_REG_START + W65C02_NUM_L_REGS*4)
 #define W65C02_F_REG_START (W65C02_X_REG_START + W65C02_NUM_X_REGS*8)
 
 #define W65C02_SP_REG (W65C02_F_REG_START + W65C02_NUM_F_REGS*4)
@@ -110,6 +62,14 @@
 #define W65C02_MSRC_REG (W65C02_T3_REG + 1)
 #define W65C02_MDST_REG (W65C02_MSRC_REG + 2)
 #define W65C02_MSZ_REG (W65C02_MDST_REG + 2)
+
+// Integer mul/div scratch starts at __mem_src.  Float unpack follows it.
+// Together they must finish at or before W65C02_ZP_LIMIT.
+#define W65C02_MATH_SCRATCH_BYTES 32
+#define W65C02_FLOAT_SCRATCH_BYTES 24
+#define W65C02_ZP_LIMIT 0x90
+#define W65C02_ABI_END \
+  (W65C02_MSRC_REG + W65C02_MATH_SCRATCH_BYTES + W65C02_FLOAT_SCRATCH_BYTES)
 
 
 // The opcodes are in the first byte.  Most of them fall into the form

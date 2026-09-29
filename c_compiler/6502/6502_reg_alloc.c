@@ -1131,8 +1131,9 @@ uint32_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc) {
     BitSetIteratorStart(&it, reg_sets[i]);
     // __enter saves the first N callee-saved registers of each class
     // (after scratch).  Save through the highest used callee-saved
-    // index so holes (i4 and i8) are covered.  Scratch must not count,
-    // or a use of i15 encodes 16 and __enter writes past i15 into l0.
+    // index so holes are covered.  Scratch must not count, or a use of
+    // the last register encodes one past the file and __enter writes
+    // into the next class.
     static const int temps[] = {W65C02_NUM_TEMP_I_REGS, W65C02_NUM_TEMP_B_REGS,
                                 W65C02_NUM_TEMP_L_REGS, W65C02_NUM_TEMP_X_REGS,
                                 W65C02_NUM_TEMP_F_REGS};

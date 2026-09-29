@@ -170,8 +170,8 @@ static bool ZeroPageRegisterName(uint8_t address, char* name,
     uint8_t count;
     char prefix;
   } classes[] = {
-      {0x00, 1, 8, 'b'}, {0x08, 2, 16, 'i'}, {0x28, 4, 8, 'l'},
-      {0x48, 8, 4, 'x'}, {0x68, 4, 4, 'f'},
+      {0x00, 1, 6, 'b'}, {0x06, 2, 8, 'i'}, {0x16, 4, 4, 'l'},
+      {0x26, 8, 3, 'x'}, {0x3e, 4, 4, 'f'},
   };
   for (size_t i = 0; i < sizeof(classes) / sizeof(classes[0]); i++) {
     uint8_t end =
@@ -196,11 +196,11 @@ static bool ZeroPageRegisterName(uint8_t address, char* name,
     uint8_t size;
     const char* name;
   } special[] = {
-      {0x78, 2, "__sp"},       {0x7a, 2, "__fp"},
-      {0x7c, 2, "__result"},   {0x7e, 1, "__t0"},
-      {0x7f, 1, "__t1"},       {0x80, 1, "__t2"},
-      {0x81, 1, "__t3"},       {0x82, 2, "__mem_src"},
-      {0x84, 2, "__mem_dest"}, {0x86, 2, "__mem_size"},
+      {0x4e, 2, "__sp"},       {0x50, 2, "__fp"},
+      {0x52, 2, "__result"},   {0x54, 1, "__t0"},
+      {0x55, 1, "__t1"},       {0x56, 1, "__t2"},
+      {0x57, 1, "__t3"},       {0x58, 2, "__mem_src"},
+      {0x5a, 2, "__mem_dest"}, {0x5c, 2, "__mem_size"},
   };
   for (size_t i = 0; i < sizeof(special) / sizeof(special[0]); i++) {
     if (address < special[i].start ||

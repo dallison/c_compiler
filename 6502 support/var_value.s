@@ -31,10 +31,6 @@
 .global __var_value1b_b4
 .global __var_value1_b5
 .global __var_value1b_b5
-.global __var_value1_b6
-.global __var_value1b_b6
-.global __var_value1_b7
-.global __var_value1b_b7
 
 .global __var_value2_i0
 .global __var_value2b_i0
@@ -49,25 +45,9 @@
 .global __var_value2_i5
 .global __var_value2b_i5
 .global __var_value2_i6
-.global __var_value2b_i6
 .global __var_value2_i7
+.global __var_value2b_i6
 .global __var_value2b_i7
-.global __var_value2_i8
-.global __var_value2b_i8
-.global __var_value2_i9
-.global __var_value2b_i9
-.global __var_value2_i10
-.global __var_value2b_i10
-.global __var_value2_i11
-.global __var_value2b_i11
-.global __var_value2_i12
-.global __var_value2b_i12
-.global __var_value2_i13
-.global __var_value2b_i13
-.global __var_value2_i14
-.global __var_value2b_i14
-.global __var_value2_i15
-.global __var_value2b_i15
 
 .global __var_value4_l0
 .global __var_value4b_l0
@@ -77,14 +57,6 @@
 .global __var_value4b_l2
 .global __var_value4_l3
 .global __var_value4b_l3
-.global __var_value4_l4
-.global __var_value4b_l4
-.global __var_value4_l5
-.global __var_value4b_l5
-.global __var_value4_l6
-.global __var_value4b_l6
-.global __var_value4_l7
-.global __var_value4b_l7
 
 .global __var_value4_f0
 .global __var_value4b_f0
@@ -100,10 +72,6 @@
 .global __var_value8b_x0
 .global __var_value8_x1
 .global __var_value8b_x1
-.global __var_value8_x2
-.global __var_value8b_x2
-.global __var_value8_x3
-.global __var_value8b_x3
 
 
 .global __arg_value1_b0
@@ -118,10 +86,6 @@
 .global __arg_value1b_b4
 .global __arg_value1_b5
 .global __arg_value1b_b5
-.global __arg_value1_b6
-.global __arg_value1b_b6
-.global __arg_value1_b7
-.global __arg_value1b_b7
 
 .global __arg_value2_i0
 .global __arg_value2b_i0
@@ -136,25 +100,9 @@
 .global __arg_value2_i5
 .global __arg_value2b_i5
 .global __arg_value2_i6
-.global __arg_value2b_i6
 .global __arg_value2_i7
+.global __arg_value2b_i6
 .global __arg_value2b_i7
-.global __arg_value2_i8
-.global __arg_value2b_i8
-.global __arg_value2_i9
-.global __arg_value2b_i9
-.global __arg_value2_i10
-.global __arg_value2b_i10
-.global __arg_value2_i11
-.global __arg_value2b_i11
-.global __arg_value2_i12
-.global __arg_value2b_i12
-.global __arg_value2_i13
-.global __arg_value2b_i13
-.global __arg_value2_i14
-.global __arg_value2b_i14
-.global __arg_value2_i15
-.global __arg_value2b_i15
 
 .global __arg_value4_l0
 .global __arg_value4b_l0
@@ -164,14 +112,6 @@
 .global __arg_value4b_l2
 .global __arg_value4_l3
 .global __arg_value4b_l3
-.global __arg_value4_l4
-.global __arg_value4b_l4
-.global __arg_value4_l5
-.global __arg_value4b_l5
-.global __arg_value4_l6
-.global __arg_value4b_l6
-.global __arg_value4_l7
-.global __arg_value4b_l7
 
 .global __arg_value4_f0
 .global __arg_value4b_f0
@@ -187,10 +127,6 @@
 .global __arg_value8b_x0
 .global __arg_value8_x1
 .global __arg_value8b_x1
-.global __arg_value8_x2
-.global __arg_value8b_x2
-.global __arg_value8_x3
-.global __arg_value8b_x3
 
 
 .global __set_var_value1
@@ -226,6 +162,10 @@
 .global __zero_arg_value4b
 .global __zero_arg_value8
 .global __zero_arg_value8b
+.global __var_value8_x2
+.global __var_value8b_x2
+.global __arg_value8_x2
+.global __arg_value8b_x2
 
 .section ".text.__var_value1_b0", "ax", @progbits
 __var_value1_b0:
@@ -285,26 +225,6 @@ __var_value1_b5:
 .section ".text.__var_value1b_b5", "ax", @progbits
 __var_value1b_b5:
   LDA #__b5
-  JMP __var_value1b
-
-.section ".text.__var_value1_b6", "ax", @progbits
-__var_value1_b6:
-  LDA #__b6
-  JMP __var_value1
-
-.section ".text.__var_value1b_b6", "ax", @progbits
-__var_value1b_b6:
-  LDA #__b6
-  JMP __var_value1b
-
-.section ".text.__var_value1_b7", "ax", @progbits
-__var_value1_b7:
-  LDA #__b7
-  JMP __var_value1
-
-.section ".text.__var_value1b_b7", "ax", @progbits
-__var_value1b_b7:
-  LDA #__b7
   JMP __var_value1b
 
 .section ".text.__var_value1", "ax", @progbits
@@ -390,15 +310,15 @@ __var_value2_i6:
   LDA #__i6
   JMP __var_value2
 
-.section ".text.__var_value2b_i6", "ax", @progbits
-__var_value2b_i6:
-  LDA #__i6
-  JMP __var_value2b
-
 .section ".text.__var_value2_i7", "ax", @progbits
 __var_value2_i7:
   LDA #__i7
   JMP __var_value2
+
+.section ".text.__var_value2b_i6", "ax", @progbits
+__var_value2b_i6:
+  LDA #__i6
+  JMP __var_value2b
 
 .section ".text.__var_value2b_i7", "ax", @progbits
 __var_value2b_i7:
@@ -422,87 +342,6 @@ __var_value2b:
   LDA (__t0), Y
   STA 1,X
   RTS
-
-.section ".text.__var_value2_i8", "ax", @progbits
-__var_value2_i8:
-  LDA #__i8
-  JMP __var_value2
-
-.section ".text.__var_value2b_i8", "ax", @progbits
-__var_value2b_i8:
-  LDA #__i8
-  JMP __var_value2b
-
-.section ".text.__var_value2_i9", "ax", @progbits
-__var_value2_i9:
-  LDA #__i9
-  JMP __var_value2
-
-.section ".text.__var_value2b_i9", "ax", @progbits
-__var_value2b_i9:
-  LDA #__i9
-  JMP __var_value2b
-
-.section ".text.__var_value2_i10", "ax", @progbits
-__var_value2_i10:
-  LDA #__i10
-  JMP __var_value2
-
-.section ".text.__var_value2b_i10", "ax", @progbits
-__var_value2b_i10:
-  LDA #__i10
-  JMP __var_value2b
-
-.section ".text.__var_value2_i11", "ax", @progbits
-__var_value2_i11:
-  LDA #__i11
-  JMP __var_value2
-
-.section ".text.__var_value2b_i11", "ax", @progbits
-__var_value2b_i11:
-  LDA #__i11
-  JMP __var_value2b
-
-.section ".text.__var_value2_i12", "ax", @progbits
-__var_value2_i12:
-  LDA #__i12
-  JMP __var_value2
-
-.section ".text.__var_value2b_i12", "ax", @progbits
-__var_value2b_i12:
-  LDA #__i12
-  JMP __var_value2b
-
-.section ".text.__var_value2_i13", "ax", @progbits
-__var_value2_i13:
-  LDA #__i13
-  JMP __var_value2
-
-.section ".text.__var_value2b_i13", "ax", @progbits
-__var_value2b_i13:
-  LDA #__i13
-  JMP __var_value2b
-
-.section ".text.__var_value2_i14", "ax", @progbits
-__var_value2_i14:
-  LDA #__i14
-  JMP __var_value2
-
-.section ".text.__var_value2b_i14", "ax", @progbits
-__var_value2b_i14:
-  LDA #__i14
-  JMP __var_value2b
-
-.section ".text.__var_value2_i15", "ax", @progbits
-__var_value2_i15:
-  LDA #__i15
-  JMP __var_value2
-
-.section ".text.__var_value2b_i15", "ax", @progbits
-__var_value2b_i15:
-  LDA #__i15
-  JMP __var_value2b
-
 
 .section ".text.__var_value4_l0", "ax", @progbits
 __var_value4_l0:
@@ -542,46 +381,6 @@ __var_value4_l3:
 .section ".text.__var_value4b_l3", "ax", @progbits
 __var_value4b_l3:
   LDA #__l3
-  JMP __var_value4b
-
-.section ".text.__var_value4_l4", "ax", @progbits
-__var_value4_l4:
-  LDA #__l4
-  JMP __var_value4
-
-.section ".text.__var_value4b_l4", "ax", @progbits
-__var_value4b_l4:
-  LDA #__l4
-  JMP __var_value4b
-
-.section ".text.__var_value4_l5", "ax", @progbits
-__var_value4_l5:
-  LDA #__l5
-  JMP __var_value4
-
-.section ".text.__var_value4b_l5", "ax", @progbits
-__var_value4b_l5:
-  LDA #__l5
-  JMP __var_value4b
-
-.section ".text.__var_value4_l6", "ax", @progbits
-__var_value4_l6:
-  LDA #__l6
-  JMP __var_value4
-
-.section ".text.__var_value4b_l6", "ax", @progbits
-__var_value4b_l6:
-  LDA #__l6
-  JMP __var_value4b
-
-.section ".text.__var_value4_l7", "ax", @progbits
-__var_value4_l7:
-  LDA #__l7
-  JMP __var_value4
-
-.section ".text.__var_value4b_l7", "ax", @progbits
-__var_value4b_l7:
-  LDA #__l7
   JMP __var_value4b
 
 .section ".text.__var_value4", "ax", @progbits
@@ -664,26 +463,6 @@ __var_value8_x1:
 .section ".text.__var_value8b_x1", "ax", @progbits
 __var_value8b_x1:
   LDA #__x1
-  JMP __var_value8b
-
-.section ".text.__var_value8_x2", "ax", @progbits
-__var_value8_x2:
-  LDA #__x2
-  JMP __var_value8
-
-.section ".text.__var_value8b_x2", "ax", @progbits
-__var_value8b_x2:
-  LDA #__x2
-  JMP __var_value8b
-
-.section ".text.__var_value8_x3", "ax", @progbits
-__var_value8_x3:
-  LDA #__x3
-  JMP __var_value8
-
-.section ".text.__var_value8b_x3", "ax", @progbits
-__var_value8b_x3:
-  LDA #__x3
   JMP __var_value8b
 
 .section ".text.__var_value8", "ax", @progbits
@@ -769,26 +548,6 @@ __arg_value1b_b5:
   LDA #__b5
   JMP __arg_value1b
 
-.section ".text.__arg_value1_b6", "ax", @progbits
-__arg_value1_b6:
-  LDA #__b6
-  JMP __arg_value1
-
-.section ".text.__arg_value1b_b6", "ax", @progbits
-__arg_value1b_b6:
-  LDA #__b6
-  JMP __arg_value1b
-
-.section ".text.__arg_value1_b7", "ax", @progbits
-__arg_value1_b7:
-  LDA #__b7
-  JMP __arg_value1
-
-.section ".text.__arg_value1b_b7", "ax", @progbits
-__arg_value1b_b7:
-  LDA #__b7
-  JMP __arg_value1b
-
 .section ".text.__arg_value1", "ax", @progbits
 __arg_value1:
   LDY #0
@@ -870,15 +629,15 @@ __arg_value2_i6:
   LDA #__i6
   JMP __arg_value2
 
-.section ".text.__arg_value2b_i6", "ax", @progbits
-__arg_value2b_i6:
-  LDA #__i6
-  JMP __arg_value2b
-
 .section ".text.__arg_value2_i7", "ax", @progbits
 __arg_value2_i7:
   LDA #__i7
   JMP __arg_value2
+
+.section ".text.__arg_value2b_i6", "ax", @progbits
+__arg_value2b_i6:
+  LDA #__i6
+  JMP __arg_value2b
 
 .section ".text.__arg_value2b_i7", "ax", @progbits
 __arg_value2b_i7:
@@ -902,87 +661,6 @@ __arg_value2b:
   LDA (__t0), Y
   STA 1,X
   RTS
-
-.section ".text.__arg_value2_i8", "ax", @progbits
-__arg_value2_i8:
-  LDA #__i8
-  JMP __arg_value2
-
-.section ".text.__arg_value2b_i8", "ax", @progbits
-__arg_value2b_i8:
-  LDA #__i8
-  JMP __arg_value2b
-
-.section ".text.__arg_value2_i9", "ax", @progbits
-__arg_value2_i9:
-  LDA #__i9
-  JMP __arg_value2
-
-.section ".text.__arg_value2b_i9", "ax", @progbits
-__arg_value2b_i9:
-  LDA #__i9
-  JMP __arg_value2b
-
-.section ".text.__arg_value2_i10", "ax", @progbits
-__arg_value2_i10:
-  LDA #__i10
-  JMP __arg_value2
-
-.section ".text.__arg_value2b_i10", "ax", @progbits
-__arg_value2b_i10:
-  LDA #__i10
-  JMP __arg_value2b
-
-.section ".text.__arg_value2_i11", "ax", @progbits
-__arg_value2_i11:
-  LDA #__i11
-  JMP __arg_value2
-
-.section ".text.__arg_value2b_i11", "ax", @progbits
-__arg_value2b_i11:
-  LDA #__i11
-  JMP __arg_value2b
-
-.section ".text.__arg_value2_i12", "ax", @progbits
-__arg_value2_i12:
-  LDA #__i12
-  JMP __arg_value2
-
-.section ".text.__arg_value2b_i12", "ax", @progbits
-__arg_value2b_i12:
-  LDA #__i12
-  JMP __arg_value2b
-
-.section ".text.__arg_value2_i13", "ax", @progbits
-__arg_value2_i13:
-  LDA #__i13
-  JMP __arg_value2
-
-.section ".text.__arg_value2b_i13", "ax", @progbits
-__arg_value2b_i13:
-  LDA #__i13
-  JMP __arg_value2b
-
-.section ".text.__arg_value2_i14", "ax", @progbits
-__arg_value2_i14:
-  LDA #__i14
-  JMP __arg_value2
-
-.section ".text.__arg_value2b_i14", "ax", @progbits
-__arg_value2b_i14:
-  LDA #__i14
-  JMP __arg_value2b
-
-.section ".text.__arg_value2_i15", "ax", @progbits
-__arg_value2_i15:
-  LDA #__i15
-  JMP __arg_value2
-
-.section ".text.__arg_value2b_i15", "ax", @progbits
-__arg_value2b_i15:
-  LDA #__i15
-  JMP __arg_value2b
-
 
 .section ".text.__arg_value4_l0", "ax", @progbits
 __arg_value4_l0:
@@ -1022,46 +700,6 @@ __arg_value4_l3:
 .section ".text.__arg_value4b_l3", "ax", @progbits
 __arg_value4b_l3:
   LDA #__l3
-  JMP __arg_value4b
-
-.section ".text.__arg_value4_l4", "ax", @progbits
-__arg_value4_l4:
-  LDA #__l4
-  JMP __arg_value4
-
-.section ".text.__arg_value4b_l4", "ax", @progbits
-__arg_value4b_l4:
-  LDA #__l4
-  JMP __arg_value4b
-
-.section ".text.__arg_value4_l5", "ax", @progbits
-__arg_value4_l5:
-  LDA #__l5
-  JMP __arg_value4
-
-.section ".text.__arg_value4b_l5", "ax", @progbits
-__arg_value4b_l5:
-  LDA #__l5
-  JMP __arg_value4b
-
-.section ".text.__arg_value4_l6", "ax", @progbits
-__arg_value4_l6:
-  LDA #__l6
-  JMP __arg_value4
-
-.section ".text.__arg_value4b_l6", "ax", @progbits
-__arg_value4b_l6:
-  LDA #__l6
-  JMP __arg_value4b
-
-.section ".text.__arg_value4_l7", "ax", @progbits
-__arg_value4_l7:
-  LDA #__l7
-  JMP __arg_value4
-
-.section ".text.__arg_value4b_l7", "ax", @progbits
-__arg_value4b_l7:
-  LDA #__l7
   JMP __arg_value4b
 
 .section ".text.__arg_value4", "ax", @progbits
@@ -1144,26 +782,6 @@ __arg_value8_x1:
 .section ".text.__arg_value8b_x1", "ax", @progbits
 __arg_value8b_x1:
   LDA #__x1
-  JMP __arg_value8b
-
-.section ".text.__arg_value8_x2", "ax", @progbits
-__arg_value8_x2:
-  LDA #__x2
-  JMP __arg_value8
-
-.section ".text.__arg_value8b_x2", "ax", @progbits
-__arg_value8b_x2:
-  LDA #__x2
-  JMP __arg_value8b
-
-.section ".text.__arg_value8_x3", "ax", @progbits
-__arg_value8_x3:
-  LDA #__x3
-  JMP __arg_value8
-
-.section ".text.__arg_value8b_x3", "ax", @progbits
-__arg_value8b_x3:
-  LDA #__x3
   JMP __arg_value8b
 
 .section ".text.__arg_value8", "ax", @progbits
@@ -1436,4 +1054,24 @@ zav8b:
   CPY #8
   BNE zav8b
   RTS
+
+.section ".text.__var_value8_x2", "ax", @progbits
+__var_value8_x2:
+  LDA #__x2
+  JMP __var_value8
+
+.section ".text.__var_value8b_x2", "ax", @progbits
+__var_value8b_x2:
+  LDA #__x2
+  JMP __var_value8b
+
+.section ".text.__arg_value8_x2", "ax", @progbits
+__arg_value8_x2:
+  LDA #__x2
+  JMP __arg_value8
+
+.section ".text.__arg_value8b_x2", "ax", @progbits
+__arg_value8b_x2:
+  LDA #__x2
+  JMP __arg_value8b
 

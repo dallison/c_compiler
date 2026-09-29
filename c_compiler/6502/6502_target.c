@@ -14,6 +14,9 @@
 #include "6502_emitter.h"
 #include "common_emitter.h"
 
+_Static_assert(W65C02_ABI_END <= W65C02_ZP_LIMIT,
+               "6502 C ABI exceeds zero page 0x00..0x8f");
+
 static void* GenerateCode(Generator* gen) {
   W65C02Generator* g = New6502Generator(gen);
   W65C02Lower(g, gen);

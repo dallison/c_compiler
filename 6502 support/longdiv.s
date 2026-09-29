@@ -291,10 +291,11 @@ umod4_1:
 __cdivmod4:
   LDX #4              // Minimum frame.
   JSR __enter_leaf
-  // L regs start at bit 9 in save mask.
-  // To save 2 L regs:
-  // 0000 0000 0000 1000 0000 0000 = 0x000800
-  .byte 0,8,0         // Save l1 and l2.
+  // L regs start at bit 9 in the save mask.
+  // l0 and l1 are temporaries.  l2 is the first preserved long and the
+  // only callee-saved register this leaf writes.
+  // bit 9 set => save 1 L reg: 0x000200
+  .byte 0,2,0         // Save l2.
 
   LDA #__l1           // Numerator in i1
   LDX #2
