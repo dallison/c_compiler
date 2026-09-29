@@ -21,7 +21,11 @@
 #define Free free
 #define Realloc realloc
 
+#if defined(DAVECC_BBC)
+#define MEMTOP 0x7c00
+#else
 #define MEMTOP 0xc000
+#endif
 
 extern char _end[];
 

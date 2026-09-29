@@ -13,6 +13,209 @@
 extern "C" void __davecc_raise_bad_cast(void);
 #endif
 
+#if defined(__6502__)
+
+// 6502 has no locale registry. Every locale is the classic "C" locale, and
+// use_facet returns the matching classic facet without an id or a facet table.
+
+namespace std {
+
+namespace __locale_detail {
+
+[[noreturn]] void __throw_runtime(const char* message) {
+  __DAVECC_THROW(runtime_error(message));
+}
+
+[[noreturn]] void __throw_bad_cast() {
+#ifdef __cpp_exceptions
+  throw bad_cast();
+#else
+  __davecc_raise_bad_cast();
+#endif
+}
+
+}  // namespace __locale_detail
+
+inline ctype_base::mask __mask_from_c(int c, unsigned char uc) {
+  ctype_base::mask m = 0;
+  if (isspace(uc)) {
+    m |= ctype_base::space;
+  }
+  if (isprint(uc)) {
+    m |= ctype_base::print;
+  }
+  if (iscntrl(uc)) {
+    m |= ctype_base::cntrl;
+  }
+  if (isupper(uc)) {
+    m |= ctype_base::upper;
+  }
+  if (islower(uc)) {
+    m |= ctype_base::lower;
+  }
+  if (isalpha(uc)) {
+    m |= ctype_base::alpha;
+  }
+  if (isdigit(uc)) {
+    m |= ctype_base::digit;
+  }
+  if (ispunct(uc)) {
+    m |= ctype_base::punct;
+  }
+  if (isxdigit(uc)) {
+    m |= ctype_base::xdigit;
+  }
+  if (uc == ' ' || uc == '\t') {
+    m |= ctype_base::blank;
+  }
+  if ((m & ctype_base::alpha) || (m & ctype_base::digit) ||
+      (m & ctype_base::punct)) {
+    m |= ctype_base::graph;
+  }
+  (void)c;
+  return m;
+}
+
+unsigned short __debug_classic_mask(unsigned char c) {
+  return __mask_from_c(c, c);
+}
+
+ctype_base::mask ctype<char>::__classic_mask(unsigned char c) {
+  return __mask_from_c(c, c);
+}
+
+ctype_base::mask ctype<wchar_t>::__classic_wmask(wchar_t c) {
+  if (c >= 0 && c <= 0x7f) {
+    return __mask_from_c(static_cast<int>(c), static_cast<unsigned char>(c));
+  }
+  return ctype_base::cntrl;
+}
+
+const locale::category locale::none = 0;
+const locale::category locale::collate = 1;
+const locale::category locale::ctype = 2;
+const locale::category locale::monetary = 4;
+const locale::category locale::numeric = 8;
+const locale::category locale::time = 16;
+const locale::category locale::messages = 32;
+const locale::category locale::all =
+    locale::collate | locale::ctype | locale::monetary | locale::numeric |
+    locale::time | locale::messages;
+
+locale::locale() noexcept : __impl_(nullptr) {}
+
+locale::locale(const locale&) noexcept : __impl_(nullptr) {}
+
+locale::locale(const char* std_name) : __impl_(nullptr) {
+  if (!__locale_detail::__is_classic_name(std_name)) {
+    __locale_detail::__throw_runtime("unsupported locale name");
+  }
+}
+
+locale::locale(const locale&, const char* std_name, locale::category)
+    : __impl_(nullptr) {
+  if (!__locale_detail::__is_classic_name(std_name)) {
+    __locale_detail::__throw_runtime("unsupported locale name");
+  }
+}
+
+locale::locale(const locale&, const locale&, locale::category)
+    : __impl_(nullptr) {}
+
+locale::~locale() {}
+
+const locale& locale::operator=(const locale&) noexcept { return *this; }
+
+string locale::name() const { return string("C"); }
+
+bool locale::operator==(const locale&) const { return true; }
+
+locale locale::global(const locale&) { return locale(); }
+
+const locale& locale::classic() {
+  static locale inst;
+  return inst;
+}
+
+locale::facet* locale::__get_facet(locale::id&) const { return nullptr; }
+
+const locale::facet* locale::__get_facet(const locale::id&) const {
+  return nullptr;
+}
+
+bool locale::__has_facet(const locale::id&) const { return true; }
+
+bool locale::__is_classic() const { return true; }
+
+void locale::__install_classic_facet(locale::facet* extra, locale::id&) const {
+  if (extra != nullptr) {
+    extra->__add_ref();
+    extra->__release();
+  }
+}
+
+__locale_impl* locale::__make_classic() { return nullptr; }
+
+__locale_impl* locale::__make_named(const char* name) {
+  if (!__locale_detail::__is_classic_name(name)) {
+    __locale_detail::__throw_runtime("unsupported locale name");
+  }
+  return nullptr;
+}
+
+__locale_impl* locale::__combine_impl(const __locale_impl*, const __locale_impl*,
+                                      locale::category) {
+  return nullptr;
+}
+
+__locale_impl* locale::__replace_facet_impl(const __locale_impl*,
+                                            locale::facet* replacement,
+                                            locale::id&) {
+  delete replacement;
+  return nullptr;
+}
+
+__locale_impl* locale::__combine_facet_impl(const __locale_impl*,
+                                            const __locale_impl*,
+                                            locale::id&) {
+  return nullptr;
+}
+
+locale ios_base::imbue(const locale&) { return locale(); }
+
+locale ios_base::getloc() const { return locale(); }
+
+void ios_base::register_callback(ios_base::event_callback, int) {}
+
+locale basic_streambuf<char, char_traits<char>>::pubimbue(const locale& loc) {
+  return imbue(loc);
+}
+
+locale basic_streambuf<char, char_traits<char>>::getloc() const {
+  return locale();
+}
+
+locale basic_streambuf<char, char_traits<char>>::imbue(const locale&) {
+  return locale();
+}
+
+locale basic_streambuf<wchar_t, char_traits<wchar_t>>::pubimbue(
+    const locale& loc) {
+  return imbue(loc);
+}
+
+locale basic_streambuf<wchar_t, char_traits<wchar_t>>::getloc() const {
+  return locale();
+}
+
+locale basic_streambuf<wchar_t, char_traits<wchar_t>>::imbue(const locale&) {
+  return locale();
+}
+
+}  // namespace std
+
+#else
+
 namespace std {
 
 struct __locale_impl {
@@ -644,3 +847,5 @@ locale basic_streambuf<wchar_t, char_traits<wchar_t>>::imbue(
 }
 
 }  // namespace std
+
+#endif  // !__6502__

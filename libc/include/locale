@@ -198,14 +198,28 @@ locale locale::combine(const locale& other) const {
 
 template <class Facet>
 void __ensure_classic_facet(const locale& loc) {
+#if defined(__6502__)
+  (void)loc;
+#else
   if (loc.__has_facet(Facet::id) || !loc.__is_classic()) {
     return;
   }
   loc.__install_classic_facet(new Facet, Facet::id);
+#endif
 }
 
 template <class Facet>
 const Facet& use_facet(const locale& loc) {
+#if defined(__6502__)
+  // 6502 keeps a single classic "C" locale. Facet ids are not assigned and
+  // streams do not store a locale object.
+  (void)loc;
+  static const Facet* facet = nullptr;
+  if (facet == nullptr) {
+    facet = new Facet;
+  }
+  return *facet;
+#else
   const locale::facet* facet = loc.__get_facet(Facet::id);
   if (facet == nullptr) {
     __ensure_classic_facet<Facet>(loc);
@@ -215,15 +229,21 @@ const Facet& use_facet(const locale& loc) {
     __locale_detail::__throw_bad_cast();
   }
   return static_cast<const Facet&>(*facet);
+#endif
 }
 
 template <class Facet>
 bool has_facet(const locale& loc) {
+#if defined(__6502__)
+  (void)loc;
+  return true;
+#else
   if (loc.__has_facet(Facet::id)) {
     return true;
   }
   __ensure_classic_facet<Facet>(loc);
   return loc.__has_facet(Facet::id);
+#endif
 }
 
 template <class InternT, class ExternT, class StateT>
@@ -578,11 +598,44 @@ class numpunct : public locale::facet {
 
   explicit numpunct(size_t refs = 0) : locale::facet(refs) {}
 
-  char_type decimal_point() const { return do_decimal_point(); }
-  char_type thousands_sep() const { return do_thousands_sep(); }
-  string grouping() const { return do_grouping(); }
-  string_type truename() const { return do_truename(); }
-  string_type falsename() const { return do_falsename(); }
+  char_type decimal_point() const {
+#if defined(__6502__)
+    return CharT('.');
+#else
+    return do_decimal_point();
+#endif
+  }
+  char_type thousands_sep() const {
+#if defined(__6502__)
+    return CharT(',');
+#else
+    return do_thousands_sep();
+#endif
+  }
+  string grouping() const {
+#if defined(__6502__)
+    return string();
+#else
+    return do_grouping();
+#endif
+  }
+  string_type truename() const {
+#if defined(__6502__)
+    const CharT true_name[] = {CharT('t'), CharT('r'), CharT('u'), CharT('e')};
+    return string_type(true_name, 4);
+#else
+    return do_truename();
+#endif
+  }
+  string_type falsename() const {
+#if defined(__6502__)
+    const CharT false_name[] = {CharT('f'), CharT('a'), CharT('l'),
+                                CharT('s'), CharT('e')};
+    return string_type(false_name, 5);
+#else
+    return do_falsename();
+#endif
+  }
 
  protected:
   ~numpunct() override {}
