@@ -57,6 +57,11 @@ class optional {
   union __storage_type {
     char __dummy_;
     T __value_;
+    // T may have a non-trivial destructor.  The implicit union destructor is
+    // then deleted, which deletes optional's destructor.  The contained value
+    // is destroyed explicitly in reset().
+    constexpr __storage_type() noexcept : __dummy_() {}
+    constexpr ~__storage_type() {}
   };
 
   __storage_type __storage_;

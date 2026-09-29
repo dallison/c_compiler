@@ -508,6 +508,11 @@ static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
       folded =
           NewRealConstantASTNode(value, expr->type, expr->location);
     }
+  } else if (expr->type != NULL && TypeIsPointer(expr->type)) {
+    // A pointer constant may be a conditional or a constexpr call
+    // (`cond ? &a : &b`, `get_hash_slot_fn()`).  Those are not integer
+    // constants; fold them to the selected function or object address.
+    folded = ConstexprFoldPointerExpression(expr);
   }
   if (folded == NULL) {
     return expr;

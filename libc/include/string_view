@@ -385,6 +385,36 @@ constexpr bool operator==(const CharT* a,
 }
 
 template <class CharT, class Traits>
+constexpr bool operator!=(basic_string_view<CharT, Traits> a,
+                          basic_string_view<CharT, Traits> b) noexcept {
+  return !(a == b);
+}
+
+template <class CharT, class Traits>
+constexpr bool operator<(basic_string_view<CharT, Traits> a,
+                         basic_string_view<CharT, Traits> b) noexcept {
+  return a.compare(b) < 0;
+}
+
+template <class CharT, class Traits>
+constexpr bool operator>(basic_string_view<CharT, Traits> a,
+                         basic_string_view<CharT, Traits> b) noexcept {
+  return b < a;
+}
+
+template <class CharT, class Traits>
+constexpr bool operator<=(basic_string_view<CharT, Traits> a,
+                          basic_string_view<CharT, Traits> b) noexcept {
+  return !(b < a);
+}
+
+template <class CharT, class Traits>
+constexpr bool operator>=(basic_string_view<CharT, Traits> a,
+                          basic_string_view<CharT, Traits> b) noexcept {
+  return !(a < b);
+}
+
+template <class CharT, class Traits>
 std::strong_ordering operator<=>(basic_string_view<CharT, Traits> a,
                                  basic_string_view<CharT, Traits> b) noexcept {
   int r = a.compare(b);

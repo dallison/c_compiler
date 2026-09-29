@@ -8143,14 +8143,29 @@ void SyntaxFlushDeferredFriendBodies(Syntax* syntax) {
     LexNextToken(lex);
     SyntaxOpenScope(syntax);
     AddDeferredFriendTemplateParameters(syntax, entry->symbol->type);
+    // The friend is a namespace function, but the body is in the scope of the
+    // class that defined it, including private members declared after the
+    // friend.
+    Struct* saved_access = compiler->current_class_access_context;
+    Struct* owner = syntax->cxx_class_head;
+    if (entry->symbol->type != NULL && TypeIsFunction(entry->symbol->type) &&
+        entry->symbol->type->info.function.cxx_member_owner != NULL) {
+      owner = entry->symbol->type->info.function.cxx_member_owner;
+    }
+    compiler->current_class_access_context = owner;
     Vector* friend_decls = NewVector();
     ASTNode* definition =
         DeclareOrDefineFunction(syntax, friend_decls, entry->symbol, NULL);
+    compiler->current_class_access_context = saved_access;
     SyntaxCloseScope(syntax);
     if (definition == NULL) {
       VectorDelete(friend_decls);
-    } else {
+    } else if (entry->symbol->flags.is_template ||
+               TypeContainsTemplateParameter(entry->symbol->type)) {
+      // A class-template friend is emitted when the class is instantiated.
       VectorAppend(&compiler->declaration_asts, definition);
+    } else {
+      CompilerQueuePendingTemplateInstantiation(definition);
     }
     lex->suppress_preprocessing = false;
     lex->source = NULL;
@@ -8531,21 +8546,33 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
 
   // Case (b): give the friend its own template-parameter list and mark it a
   // function template so overload resolution / ADL treat it accordingly.  The
-  // parameters currently live in `current_template_parameters`; copy them onto
-  // the function type (the caller frees its own copy).
+  // parameters currently live in `current_template_parameters`; copy only the
+  // friend's own parameters (indices at or after the enclosing class template).
+  // Including the class parameters makes this a different template from the
+  // later namespace definition, so the specialization is not recognized as a
+  // friend.  Their indices stay enclosing-relative; instantiation rebases them.
   if (friend_has_own_template_head &&
       sym->type->info.function.template_parameters.length == 0) {
     Vector* params = syntax->current_template_parameters;
+    int parameter_base = befriending->defining_template_scope_count;
+    int own_count = 0;
+    TemplateParameter* first_own = NULL;
     for (size_t i = 0; i < params->length; i++) {
+      TemplateParameter* param = params->value.p[i];
+      if (param == NULL || param->index < parameter_base) {
+        continue;
+      }
+      if (first_own == NULL) {
+        first_own = param;
+      }
       VectorAppend(&sym->type->info.function.template_parameters,
-                   TemplateParameterCopy(params->value.p[i]));
+                   TemplateParameterCopy(param));
+      own_count++;
     }
     sym->flags.is_template = true;
-    sym->type->info.function.template_parameter_count = (int)params->length;
-    TemplateParameter* first =
-        params->length > 0 ? params->value.p[0] : NULL;
+    sym->type->info.function.template_parameter_count = own_count;
     sym->type->info.function.template_parameter_base =
-        first != NULL ? first->index : 0;
+        first_own != NULL ? first_own->index : parameter_base;
     // Fold any concept-constrained parameters (e.g. `template <integral I>`) and
     // an explicit trailing requires-clause into the function's constraint.
     MoveTemplateParameterConstraints(
@@ -8601,6 +8628,26 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
 
   ParseCXXDefaultDeleteFunctionSpecifier(syntax, sym->type,
                                          old_sym == NULL);
+  // A non-template class still has to defer an inline friend body until the
+  // class is complete.  `friend operator<<` may name private members that are
+  // declared after the friend (`XMLElement::txt_`).
+  if (has_inline_friend_body && syntax->deferred_friend_bodies != NULL) {
+    Symbol* body_sym = sym;
+    if (body_sym->type->info.function.cxx_member_owner == NULL) {
+      body_sym->type->info.function.cxx_member_owner = befriending;
+    }
+    if (old_sym != NULL && old_sym != sym && TypeIsFunction(old_sym->type)) {
+      old_sym->value.func_defn = sym;
+    }
+    DeferFriendFunctionBody(syntax, body_sym);
+    RecordFriendFunction(syntax, befriending, sym, in_scope_symbol, NULL);
+    SyntaxCloseScope(syntax);
+    TypeParserDestruct(&parser);
+    TypeRecordDelete(type);
+    AttributeListDestruct(&attributes);
+    syntax->local_tag_stack = saved_tag_stack;
+    return;
+  }
   Vector* friend_decls = NewVector();
   Struct* saved_access_context = compiler->current_class_access_context;
   Struct* saved_comparison_owner =
@@ -9648,6 +9695,12 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         redundant_static_member_redefinition = true;
       }
       if (old_sym != NULL) {
+        // `extern Flag<T> name;` is parsed while `Flag` is only
+        // forward-declared, so the symbol keeps a deferred template-id.
+        // A later definition, after the class body, must re-instantiate
+        // both sides or the redeclaration looks like a different type.
+        MaterializeDeferredClassTemplateType(syntax, old_sym);
+        MaterializeDeferredClassTemplateType(syntax, sym);
         // We have this symbol already.  If it's a declaration then it's
         // OK to declare (and define) it now.  If it's a definition then
         // this must be a declaration.
@@ -9885,8 +9938,17 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                       ? sym->type->info.struct_info->tag_name->value
                       : "<anonymous>");
     }
+    // `extern absl::Flag<T> FLAGS_name;` is well-formed while `Flag` is
+    // only forward-declared.  The type stays a deferred template-id until
+    // a later declaration can materialize it.  A definition still needs
+    // a complete specialization.
+    bool extern_incomplete_declaration =
+        StorageIs(sym->storage, STO(extern)) &&
+        !LexLookingAt(syntax->lex, TOK(equal)) &&
+        !LexLookingAt(syntax->lex, TOK(lbrace));
     if (!syntax->parsing_template_declaration &&
-        TypeIsClassTemplateObject(sym->type)) {
+        TypeIsClassTemplateObject(sym->type) &&
+        !extern_incomplete_declaration) {
       SyntaxError(syntax,
                   "Cannot declare an object of class template '%s'; no "
                   "specialization was instantiated",
@@ -14734,8 +14796,13 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                         ? sym->type->info.struct_info->tag_name->value
                         : "<anonymous>");
       }
+      bool extern_incomplete_declaration =
+          StorageIs(sym->storage, STO(extern)) &&
+          !LexLookingAt(syntax->lex, TOK(equal)) &&
+          !LexLookingAt(syntax->lex, TOK(lbrace));
       if (!syntax->parsing_template_declaration &&
-          TypeIsClassTemplateObject(sym->type)) {
+          TypeIsClassTemplateObject(sym->type) &&
+          !extern_incomplete_declaration) {
         SyntaxError(syntax,
                     "Cannot declare an object of class template '%s'; no "
                     "specialization was instantiated",

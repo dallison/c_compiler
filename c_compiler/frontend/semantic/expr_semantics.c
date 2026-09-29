@@ -10580,15 +10580,25 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     temp->location = location;
     ASTNode* temp_id = NewIdentifierASTNode(temp, location);
     temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
-    Vector* elements = NewVector();
-    for (size_t i = 0; i < node->children->length; i++) {
-      ASTNode* child = node->children->value.p[i];
-      if (child != NULL) {
-        VectorAppend(elements, ASTNodeMove(child));
+    // `T({...})` list-initializes T from that braced-init-list.  Wrapping the
+    // list in another set of braces (`(T){{...}}`) adds a level the aggregate
+    // does not have, so `Pair({1, 2})` and `A({{a, b, c}})` report too many
+    // initializers.  Parenthesized aggregate initialization (`T(a, b)`) still
+    // needs one new brace list around the arguments.
+    ASTNode* initializer = NULL;
+    if (node->children->length == 1 && node->children->value.p[0] != NULL &&
+        ((ASTNode*)node->children->value.p[0])->op == AST_OP(braced_init)) {
+      initializer = ASTNodeMove(node->children->value.p[0]);
+    } else {
+      Vector* elements = NewVector();
+      for (size_t i = 0; i < node->children->length; i++) {
+        ASTNode* child = node->children->value.p[i];
+        if (child != NULL) {
+          VectorAppend(elements, ASTNodeMove(child));
+        }
       }
+      initializer = NewBracedInitializerASTNode(elements, NULL, location);
     }
-    ASTNode* initializer =
-        NewBracedInitializerASTNode(elements, NULL, location);
     ASTNode* literal =
         NewCompoundLiteralASTNode(temp_id, location, initializer);
     ASTNode* parent = node->base.parent;

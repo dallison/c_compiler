@@ -2332,6 +2332,37 @@ static ConstexprObject* ConstexprMappedClone(Vector* sources, Vector* clones,
   return NULL;
 }
 
+// One binding per function for the whole compilation.  It is not owned by an
+// evaluation context: PopConstexprBindings would otherwise free the address
+// while a returned pointer still refers to it, and a later comparison must see
+// a single address for each function.
+static Vector durable_function_bindings;
+static bool durable_function_bindings_ready;
+
+static ConstexprBinding* ConstexprDurableFunctionBinding(Symbol* symbol) {
+  if (symbol == NULL) {
+    return NULL;
+  }
+  if (!durable_function_bindings_ready) {
+    VectorInit(&durable_function_bindings);
+    durable_function_bindings_ready = true;
+  }
+  for (size_t i = 0; i < durable_function_bindings.length; i++) {
+    ConstexprBinding* existing = durable_function_bindings.value.p[i];
+    if (existing != NULL && existing->symbol == symbol) {
+      return existing;
+    }
+  }
+  ConstexprBinding* binding = calloc(1, sizeof(ConstexprBinding));
+  if (binding == NULL) {
+    return NULL;
+  }
+  binding->symbol = symbol;
+  binding->state = kValueStateValid;
+  VectorAppend(&durable_function_bindings, binding);
+  return binding;
+}
+
 static void ConstexprPersistAddressObjects(ConstexprObject* object,
                                            Vector* sources, Vector* clones) {
   if (object == NULL) {
@@ -2343,6 +2374,15 @@ static void ConstexprPersistAddressObjects(ConstexprObject* object,
       continue;
     }
     if (slot->is_address) {
+      Symbol* function_symbol = NULL;
+      if (slot->address_binding != NULL &&
+          slot->address_binding->symbol != NULL &&
+          slot->address_binding->symbol->type != NULL &&
+          TypeIsFunction(slot->address_binding->symbol->type) &&
+          slot->address_index == 0 && slot->address_object == NULL &&
+          slot->address_slot == NULL && slot->heap_block == NULL) {
+        function_symbol = slot->address_binding->symbol;
+      }
       ConstexprCanonicalizeAddressValue(slot);
       // `this` stored in a member addresses the object under evaluation.
       // Canonicalization names that object; keep the pointer on the clone
@@ -2357,7 +2397,16 @@ static void ConstexprPersistAddressObjects(ConstexprObject* object,
         slot->address_object =
             CloneConstexprObject(NULL, slot->address_object);
       }
-      slot->address_binding = NULL;
+      if (function_symbol != NULL && slot->address_object == NULL &&
+          slot->heap_block == NULL && slot->address_index == 0) {
+        if (slot->address_binding == NULL ||
+            slot->address_binding->symbol != function_symbol) {
+          slot->address_binding =
+              ConstexprDurableFunctionBinding(function_symbol);
+        }
+      } else {
+        slot->address_binding = NULL;
+      }
       slot->address_slot = NULL;
     }
     if (slot->is_object && slot->object != NULL) {
@@ -2704,9 +2753,18 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
   }
   if (expr != NULL) {
     return NewExpressionInitializerASTNode(expr, location);
-  } else if (preserve_external_addresses &&
+  }
+  bool function_address =
+      (TypeIsPointer(type) || TypeIsReference(type)) &&
+      value->is_address && value->address_binding != NULL &&
+      value->address_index == 0 &&
+      value->address_binding->symbol != NULL &&
+      value->address_binding->symbol->type != NULL &&
+      TypeIsFunction(value->address_binding->symbol->type);
+  if ((preserve_external_addresses || function_address) &&
              (TypeIsPointer(type) || TypeIsReference(type)) &&
              value->is_address && value->address_binding != NULL &&
+             value->address_binding->symbol != NULL &&
              value->address_index == 0) {
     Symbol* symbol = value->address_binding->symbol;
     ASTNode* object =
@@ -5740,6 +5798,25 @@ static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
   return false;
 }
 
+// The address of a function is a constant.  Bind the function symbol so a later
+// comparison sees one address per function, and so the value can be emitted as
+// `&function` in a static initializer.
+static bool ConstexprFunctionAddress(ConstEvalContext* ctx, Symbol* symbol,
+                                     ConstexprValue* result) {
+  if (ctx == NULL || result == NULL || symbol == NULL ||
+      symbol->type == NULL || !TypeIsFunction(symbol->type)) {
+    return false;
+  }
+  // Not a context binding.  The call evaluator frees those before the caller
+  // reads a returned function pointer.
+  ConstexprBinding* binding = ConstexprDurableFunctionBinding(symbol);
+  if (binding == NULL) {
+    return false;
+  }
+  *result = (ConstexprValue){.is_address = true, .address_binding = binding};
+  return true;
+}
+
 static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                           ConstexprValue* result) {
   if (node == NULL) {
@@ -5777,6 +5854,16 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     if (synthesized != NULL) {
       return EvaluateConstexprAddressValue(ctx, synthesized, result);
     }
+    // A constexpr call that returns a pointer (`get_hash_slot_fn()`) is an
+    // address, not an integer.  Evaluating it here is what lets that pointer
+    // initialize a constexpr aggregate.
+    ConstexprValue call_value = {0};
+    if (!EvaluateConstexprCall(ctx, node, &call_value) ||
+        !call_value.is_address) {
+      return false;
+    }
+    *result = call_value;
+    return true;
   }
   if (node->op == AST_OP(expr_init)) {
     ExpressionInitializerASTNode* init = (ExpressionInitializerASTNode*)node;
@@ -5866,6 +5953,9 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     if (address->sub != NULL &&
         address->sub->op == AST_OP(identifier)) {
       Symbol* symbol = ((IdentifierASTNode*)address->sub)->symbol;
+      if (ConstexprFunctionAddress(ctx, symbol, result)) {
+        return true;
+      }
       if (symbol != NULL && TypeIsReference(symbol->type) &&
           EvaluateConstexprAddressValue(ctx, address->sub, result)) {
         return true;
@@ -5949,6 +6039,10 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
+    // A function designator used as a pointer decays to the function's address.
+    if (ConstexprFunctionAddress(ctx, id->symbol, result)) {
+      return true;
+    }
     ConstexprBinding* binding = FindConstexprBinding(ctx, id->symbol);
     if (binding != NULL && binding->is_address) {
       if (binding->heap_block != NULL || binding->address_binding != NULL ||

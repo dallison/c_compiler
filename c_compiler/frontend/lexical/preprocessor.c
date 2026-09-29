@@ -748,6 +748,7 @@ void PreprocessorInit(Preprocessor* p) {
   p->directive_produced_output = false;
   p->module_leading_group_has_other_content = false;
   p->module_file_started = false;
+  p->counter = 0;
 
 #ifndef DAVECC_SYSROOT_HDRS
 #error "Please define DAVECC_SYSROOT_HDRS to tell the compiler where the headers are"
@@ -826,6 +827,7 @@ void PreprocessorReset(Preprocessor* p) {
   PreprocessorResetMacros(p, true);
   VectorClear(&p->if_stack);
   p->is_compiled_in = true;
+  p->counter = 0;
 }
 
 void PreprocessorAddUserIncludePath(Preprocessor* p, const char* path) {
@@ -5357,6 +5359,10 @@ static void ProcessPossibleMacro(Preprocessor* p,
     TokenizeAndReplaceCurrentToken(ti, &replacement, p->lex->assembler_mode);
   } else if (StringEqual(possible_macro_name, "__LINE__")) {
     StringPrintf(&replacement, "%d", p->lex->source->lineno);
+    TokenizeAndReplaceCurrentToken(ti, &replacement, p->lex->assembler_mode);
+  } else if (StringEqual(possible_macro_name, "__COUNTER__")) {
+    StringPrintf(&replacement, "%d", p->counter);
+    p->counter++;
     TokenizeAndReplaceCurrentToken(ti, &replacement, p->lex->assembler_mode);
   } else if (StringEqual(possible_macro_name, "__func__") ||
              StringEqual(possible_macro_name, "__FUNCTION__")) {

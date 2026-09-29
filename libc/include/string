@@ -858,4 +858,82 @@ struct hash<basic_string<char>> {
 
 }  // namespace std
 
+#include <string_view>
+
+namespace std {
+
+template <class CharT, class Traits, class Allocator>
+bool operator==(const basic_string<CharT, Traits, Allocator>& a,
+                basic_string_view<CharT, Traits> b) {
+  return basic_string_view<CharT, Traits>(a.data(), a.size()) == b;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator==(basic_string_view<CharT, Traits> a,
+                const basic_string<CharT, Traits, Allocator>& b) {
+  return a == basic_string_view<CharT, Traits>(b.data(), b.size());
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator!=(const basic_string<CharT, Traits, Allocator>& a,
+                basic_string_view<CharT, Traits> b) {
+  return !(a == b);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator!=(basic_string_view<CharT, Traits> a,
+                const basic_string<CharT, Traits, Allocator>& b) {
+  return !(a == b);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<(const basic_string<CharT, Traits, Allocator>& a,
+               basic_string_view<CharT, Traits> b) {
+  return basic_string_view<CharT, Traits>(a.data(), a.size()) < b;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<(basic_string_view<CharT, Traits> a,
+               const basic_string<CharT, Traits, Allocator>& b) {
+  return a < basic_string_view<CharT, Traits>(b.data(), b.size());
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>(const basic_string<CharT, Traits, Allocator>& a,
+               basic_string_view<CharT, Traits> b) {
+  return b < a;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>(basic_string_view<CharT, Traits> a,
+               const basic_string<CharT, Traits, Allocator>& b) {
+  return b < a;
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<=(const basic_string<CharT, Traits, Allocator>& a,
+                basic_string_view<CharT, Traits> b) {
+  return !(b < a);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator<=(basic_string_view<CharT, Traits> a,
+                const basic_string<CharT, Traits, Allocator>& b) {
+  return !(b < a);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>=(const basic_string<CharT, Traits, Allocator>& a,
+                basic_string_view<CharT, Traits> b) {
+  return !(a < b);
+}
+
+template <class CharT, class Traits, class Allocator>
+bool operator>=(basic_string_view<CharT, Traits> a,
+                const basic_string<CharT, Traits, Allocator>& b) {
+  return !(a < b);
+}
+
+}  // namespace std
+
 #endif /* __davecc_string__ */

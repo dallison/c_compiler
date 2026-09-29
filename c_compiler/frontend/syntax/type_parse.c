@@ -2472,6 +2472,17 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             type_record = TypeRecordCopy(symbol->type);
           }
         } else if (symbol->flags.is_template && args != NULL &&
+                   CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
+                   (!parser->syntax->parsing_template_declaration ||
+                    ClassTemplateIdIsConcrete(parser, symbol, args))) {
+          // `absl::Flag<int>` is a qualified forwarding alias
+          // (`using Flag = flags_internal::Flag<T>`).  The generic alias
+          // path above skips those, and the class-template path requires
+          // `alias_template == NULL`, so the name was copied as the primary
+          // template.  Instantiate it the same way an unqualified `Flag<int>`
+          // is instantiated.
+          type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
+        } else if (symbol->flags.is_template && args != NULL &&
             symbol->alias_template == NULL &&
             TypeIsStructOrUnion(symbol->type) &&
             (!parser->syntax->parsing_template_declaration ||

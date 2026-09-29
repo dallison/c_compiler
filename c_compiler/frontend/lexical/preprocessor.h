@@ -57,6 +57,9 @@ typedef struct {
   // directives (plus whitespace/comments) may occur.
   bool module_leading_group_has_other_content;
   bool module_file_started;
+  // GCC/Clang `__COUNTER__`.  Starts at 0 and increments on each expansion
+  // in this translation unit.
+  int counter;
 } Preprocessor;
 
 void PreprocessorInit(Preprocessor* p);

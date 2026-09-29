@@ -741,6 +741,31 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       from->tag_name != NULL && strstr(from->tag_name->value, "$S") != NULL) {
     return TypeRecordCopy(type);
   }
+  // A concrete lambda used as a template argument (`is_copy_constructible<Lam>`)
+  // is not part of the class being substituted.  Cloning it per mention makes
+  // `T` and `const T&` name different closures, so the copy constructor does
+  // not match.  The body scan treats leftover parameter indexes as dependence,
+  // so a closure that merely calls other templates looks dependent.  Closures
+  // nested in the class being instantiated, and closures in a function
+  // template, still have to be rebuilt.
+  if (from->tag_symbol != NULL && from->tag_symbol->flags.invented) {
+    bool nested_in_substitution =
+        parser != NULL &&
+        ((parser->template_substitution_source != NULL &&
+          from->lexical_parent == parser->template_substitution_source) ||
+         (parser->enclosing_template_substitution_source != NULL &&
+          from->lexical_parent ==
+              parser->enclosing_template_substitution_source));
+    Symbol* enclosing_fn = from->access_enclosing_function;
+    bool inside_function_template =
+        enclosing_fn != NULL &&
+        (enclosing_fn->flags.is_template ||
+         (enclosing_fn->type != NULL && TypeIsFunction(enclosing_fn->type) &&
+          enclosing_fn->type->info.function.template_parameters.length > 0));
+    if (!nested_in_substitution && !inside_function_template) {
+      return TypeRecordCopy(type);
+    }
+  }
   // Cord's ChunkIterator member signatures name CharIterator, whose signatures
   // name Cord again.  Re-entering the substitution that is already building
   // that class would recurse until the stack overflows.  Share the in-progress
