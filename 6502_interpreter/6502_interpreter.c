@@ -689,8 +689,8 @@ static char irq_handler[] = {
 
 
 // NOTE: keep this in step with the actual SP offset in zero page.
-#define REG_SP 0x78
-#define REG_I0 0x08
+#define REG_SP 0x4e
+#define REG_I0 0x06
 
 #define W65C02_INT_EXIT 1
 #define W65C02_INT_EXIT_CLEAN 22

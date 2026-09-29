@@ -1,8 +1,11 @@
 
-// Stack, argument and frame pointers.
-.set sp 0x70
-.set ap 0x72
-.set fp 0x74
+// Stack and frame pointers match the C ABI in vars.s (__sp, __fp).
+// This file is not linked into the runtime.  Its __enter still uses a
+// separate argument pointer, which the current ABI does not have, so ap
+// sits at the start of ROM scratch rather than inside the register file.
+.set sp 0x4e
+.set fp 0x50
+.set ap 0x90
 
 .text
 

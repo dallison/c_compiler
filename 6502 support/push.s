@@ -43,23 +43,11 @@
 .global __pushi5
 .global __pushi6
 .global __pushi7
-.global __pushi8
-.global __pushi9
-.global __pushi10
-.global __pushi11
-.global __pushi12
-.global __pushi13
-.global __pushi14
-.global __pushi15
 
 .global __pushl0
 .global __pushl1
 .global __pushl2
 .global __pushl3
-.global __pushl4
-.global __pushl5
-.global __pushl6
-.global __pushl7
 
 .global __pushf0
 .global __pushf1
@@ -69,7 +57,6 @@
 .global __pushx0
 .global __pushx1
 .global __pushx2
-.global __pushx3
 
 // t0: number of bytes to increment sp by
 .section ".text.__incsp", "ax", @progbits
@@ -268,8 +255,7 @@ JMP __pushreg2
 .section ".text.__pushi7", "ax", @progbits
 __pushi7:
 LDX #__i7
-  JMP __pushreg2
-
+JMP __pushreg2
 .section ".text.__pushreg2", "ax", @progbits
 __pushreg2:
   JSR __decsp2
@@ -279,39 +265,6 @@ __pushreg2:
   LDA 1,X
   STA (__sp),Y
   RTS
-
-.section ".text.__pushi8", "ax", @progbits
-__pushi8:
-LDX #__i8
-JMP __pushreg2
-.section ".text.__pushi9", "ax", @progbits
-__pushi9:
-LDX #__i9
-JMP __pushreg2
-.section ".text.__pushi10", "ax", @progbits
-__pushi10:
-LDX #__i10
-JMP __pushreg2
-.section ".text.__pushi11", "ax", @progbits
-__pushi11:
-LDX #__i11
-JMP __pushreg2
-.section ".text.__pushi12", "ax", @progbits
-__pushi12:
-LDX #__i12
-JMP __pushreg2
-.section ".text.__pushi13", "ax", @progbits
-__pushi13:
-LDX #__i13
-JMP __pushreg2
-.section ".text.__pushi14", "ax", @progbits
-__pushi14:
-LDX #__i14
-JMP __pushreg2
-.section ".text.__pushi15", "ax", @progbits
-__pushi15:
-LDX #__i15
-JMP __pushreg2
 
 .section ".text.__pushl0", "ax", @progbits
 __pushl0:
@@ -328,23 +281,6 @@ JMP __pushreg4
 .section ".text.__pushl3", "ax", @progbits
 __pushl3:
 LDX #__l3
-JMP __pushreg4
-
-.section ".text.__pushl4", "ax", @progbits
-__pushl4:
-LDX #__l4
-JMP __pushreg4
-.section ".text.__pushl5", "ax", @progbits
-__pushl5:
-LDX #__l5
-JMP __pushreg4
-.section ".text.__pushl6", "ax", @progbits
-__pushl6:
-LDX #__l6
-JMP __pushreg4
-.section ".text.__pushl7", "ax", @progbits
-__pushl7:
-LDX #__l7
 JMP __pushreg4
 
 .section ".text.__pushf0", "ax", @progbits
@@ -385,15 +321,6 @@ JMP __pushreg8
 __pushx1:
 LDX #__x1
 JMP __pushreg8
-.section ".text.__pushx2", "ax", @progbits
-__pushx2:
-LDX #__x2
-JMP __pushreg8
-.section ".text.__pushx3", "ax", @progbits
-__pushx3:
-LDX #__x3
-  JMP __pushreg8
-
 .section ".text.__pushreg8", "ax", @progbits
 __pushreg8:
   JSR __decsp8
@@ -504,7 +431,6 @@ pl4l:
   BNE pl4l
   JMP __incsp4
 
-// X,Y: address of int64 to push
 .section ".text.__push8xy", "ax", @progbits
 __push8xy:
   JSR __decsp8
@@ -564,3 +490,7 @@ __restoresp:
 
   
 
+.section ".text.__pushx2", "ax", @progbits
+__pushx2:
+LDX #__x2
+JMP __pushreg8

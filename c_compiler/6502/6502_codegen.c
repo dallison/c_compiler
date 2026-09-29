@@ -5314,6 +5314,7 @@ static struct {
   int pushed_size;
 } push_map[] = {
     {TypeIsInt, 2, 2},      {TypeIsShort, 2, 2},
+    {TypeIsWchar, 2, 2},
     {TypeIsCharFamily, 1, 2},
     {TypeIsLong, 4, 4},
     {TypeIsLongLong, 8, 8},

@@ -347,10 +347,13 @@ typedef enum {
 } W65C02Opcode;
 
 // Number of variable registers for each type.
-#define kNumIVars 4
+// These must stay below the preserved count of each class.  A register
+// variable is locked for its whole live range, and the allocator still
+// needs a preserved register it is allowed to spill.
+#define kNumIVars 1
 #define kNumBVars 2
-#define kNumLVars 2
-#define kNumXVars 1
+#define kNumLVars 1
+#define kNumXVars 0
 #define kNumFVars 1
 
 #define kMaxVars 8

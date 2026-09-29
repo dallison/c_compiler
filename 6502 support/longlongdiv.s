@@ -444,21 +444,20 @@ STA 7,X
 __cdivmod8:
   LDX #4              // Minimum frame.
   JSR __enter_leaf
-  // X regs start at bit 13 in save mask.
-  // To save 2 X regs:
-  //              12
-  // 0000 0000 0100 0000 0000 0000 = 0x002000
+  // X regs start at bit 13 in the save mask.
+  // To save x1 and x2 (the two preserved long longs):
+  // bit 14 set => count 2: 0x004000
   .byte 0,0x40,0         // Save x1 and x2.
 
-  LDA #__x1           // Numerator in i1
+  LDA #__x1           // Numerator in x1.
   LDX #2
   JSR __arg_value8
 
-  LDA #__x2           // Denominator in i2
+  LDA #__x2           // Denominator in x2.
   LDX #10
   JSR __arg_value8
 
-  LDA #__x0     // Not used.
+  LDA #__x0
   LDX #__x1
   LDY #__x2
   JSR __sdiv8

@@ -27,14 +27,6 @@
 .global __jmp_i5
 .global __jmp_i6
 .global __jmp_i7
-.global __jmp_i8
-.global __jmp_i9
-.global __jmp_i10
-.global __jmp_i11
-.global __jmp_i12
-.global __jmp_i13
-.global __jmp_i14
-.global __jmp_i15
 
 .section ".text.__jmp_i0", "ax", @progbits
 __jmp_i0:
@@ -60,27 +52,3 @@ __jmp_i6:
 .section ".text.__jmp_i7", "ax", @progbits
 __jmp_i7:
   JMP (__i7)
-.section ".text.__jmp_i8", "ax", @progbits
-__jmp_i8:
-  JMP (__i8)
-.section ".text.__jmp_i9", "ax", @progbits
-__jmp_i9:
-  JMP (__i9)
-.section ".text.__jmp_i10", "ax", @progbits
-__jmp_i10:
-  JMP (__i10)
-.section ".text.__jmp_i11", "ax", @progbits
-__jmp_i11:
-  JMP (__i11)
-.section ".text.__jmp_i12", "ax", @progbits
-__jmp_i12:
-  JMP (__i12)
-.section ".text.__jmp_i13", "ax", @progbits
-__jmp_i13:
-  JMP (__i13)
-.section ".text.__jmp_i14", "ax", @progbits
-__jmp_i14:
-  JMP (__i14)
-.section ".text.__jmp_i15", "ax", @progbits
-__jmp_i15:
-  JMP (__i15)

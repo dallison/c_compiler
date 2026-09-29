@@ -19,14 +19,6 @@
 .global __var_addr_push_i5
 .global __var_addr_push_i6
 .global __var_addr_push_i7
-.global __var_addr_push_i8
-.global __var_addr_push_i9
-.global __var_addr_push_i10
-.global __var_addr_push_i11
-.global __var_addr_push_i12
-.global __var_addr_push_i13
-.global __var_addr_push_i14
-.global __var_addr_push_i15
 .global __var_addrb_push
 .global __var_addrb_push_i0
 .global __var_addrb_push_i1
@@ -36,14 +28,6 @@
 .global __var_addrb_push_i5
 .global __var_addrb_push_i6
 .global __var_addrb_push_i7
-.global __var_addrb_push_i8
-.global __var_addrb_push_i9
-.global __var_addrb_push_i10
-.global __var_addrb_push_i11
-.global __var_addrb_push_i12
-.global __var_addrb_push_i13
-.global __var_addrb_push_i14
-.global __var_addrb_push_i15
 .global __arg_addr_push
 .global __arg_addrb_push
 .global __varaddr
@@ -57,14 +41,6 @@
 .global __var_addr_i5
 .global __var_addr_i6
 .global __var_addr_i7
-.global __var_addr_i8
-.global __var_addr_i9
-.global __var_addr_i10
-.global __var_addr_i11
-.global __var_addr_i12
-.global __var_addr_i13
-.global __var_addr_i14
-.global __var_addr_i15
 
 .global __var_addrb_i0
 .global __var_addrb_i1
@@ -74,14 +50,6 @@
 .global __var_addrb_i5
 .global __var_addrb_i6
 .global __var_addrb_i7
-.global __var_addrb_i8
-.global __var_addrb_i9
-.global __var_addrb_i10
-.global __var_addrb_i11
-.global __var_addrb_i12
-.global __var_addrb_i13
-.global __var_addrb_i14
-.global __var_addrb_i15
 
 .global __arg_addr_i0
 .global __arg_addr_i1
@@ -91,14 +59,6 @@
 .global __arg_addr_i5
 .global __arg_addr_i6
 .global __arg_addr_i7
-.global __arg_addr_i8
-.global __arg_addr_i9
-.global __arg_addr_i10
-.global __arg_addr_i11
-.global __arg_addr_i12
-.global __arg_addr_i13
-.global __arg_addr_i14
-.global __arg_addr_i15
 
 .global __arg_addrb_i0
 .global __arg_addrb_i1
@@ -108,14 +68,6 @@
 .global __arg_addrb_i5
 .global __arg_addrb_i6
 .global __arg_addrb_i7
-.global __arg_addrb_i8
-.global __arg_addrb_i9
-.global __arg_addrb_i10
-.global __arg_addrb_i11
-.global __arg_addrb_i12
-.global __arg_addrb_i13
-.global __arg_addrb_i14
-.global __arg_addrb_i15
 
 .section ".text.__var_addr_i0", "ax", @progbits
 __var_addr_i0:
@@ -155,11 +107,6 @@ __var_addr_i6:
 .section ".text.__var_addr_i7", "ax", @progbits
 __var_addr_i7:
   LDA #__i7
-  JMP __var_addr
-
-.section ".text.__var_addr_i8", "ax", @progbits
-__var_addr_i8:
-  LDA #__i8
   JMP __var_addr
 
 .section ".text.__var_addrb_i0", "ax", @progbits
@@ -202,11 +149,6 @@ __var_addrb_i7:
   LDA #__i7
   JMP __var_addrb
 
-.section ".text.__var_addrb_i8", "ax", @progbits
-__var_addrb_i8:
-  LDA #__i8
-  JMP __var_addrb
-
 .section ".text.__var_addr", "ax", @progbits
 __var_addr:
   LDY #0
@@ -228,77 +170,6 @@ __var_addrb:
   SBC __t1
   STA 1, Y
   RTS
-
-.section ".text.__var_addr_i9", "ax", @progbits
-__var_addr_i9:
-  LDA #__i9
-  JMP __var_addr
-
-.section ".text.__var_addr_i10", "ax", @progbits
-__var_addr_i10:
-  LDA #__i10
-  JMP __var_addr
-
-.section ".text.__var_addr_i11", "ax", @progbits
-__var_addr_i11:
-  LDA #__i11
-  JMP __var_addr
-
-.section ".text.__var_addr_i12", "ax", @progbits
-__var_addr_i12:
-  LDA #__i12
-  JMP __var_addr
-
-.section ".text.__var_addr_i13", "ax", @progbits
-__var_addr_i13:
-  LDA #__i13
-  JMP __var_addr
-
-.section ".text.__var_addr_i14", "ax", @progbits
-__var_addr_i14:
-  LDA #__i14
-  JMP __var_addr
-
-.section ".text.__var_addr_i15", "ax", @progbits
-__var_addr_i15:
-  LDA #__i15
-  JMP __var_addr
-
-.section ".text.__var_addrb_i9", "ax", @progbits
-__var_addrb_i9:
-  LDA #__i9
-  JMP __var_addrb
-
-.section ".text.__var_addrb_i10", "ax", @progbits
-__var_addrb_i10:
-  LDA #__i10
-  JMP __var_addrb
-
-.section ".text.__var_addrb_i11", "ax", @progbits
-__var_addrb_i11:
-  LDA #__i11
-  JMP __var_addrb
-
-.section ".text.__var_addrb_i12", "ax", @progbits
-__var_addrb_i12:
-  LDA #__i12
-  JMP __var_addrb
-
-.section ".text.__var_addrb_i13", "ax", @progbits
-__var_addrb_i13:
-  LDA #__i13
-  JMP __var_addrb
-
-.section ".text.__var_addrb_i14", "ax", @progbits
-__var_addrb_i14:
-  LDA #__i14
-  JMP __var_addrb
-
-.section ".text.__var_addrb_i15", "ax", @progbits
-__var_addrb_i15:
-  LDA #__i15
-  JMP __var_addrb
-
 
 .section ".text.__arg_addr_i0", "ax", @progbits
 __arg_addr_i0:
@@ -338,11 +209,6 @@ __arg_addr_i6:
 .section ".text.__arg_addr_i7", "ax", @progbits
 __arg_addr_i7:
   LDA #__i7
-  JMP __arg_addr
-
-.section ".text.__arg_addr_i8", "ax", @progbits
-__arg_addr_i8:
-  LDA #__i8
   JMP __arg_addr
 
 .section ".text.__arg_addrb_i0", "ax", @progbits
@@ -385,11 +251,6 @@ __arg_addrb_i7:
   LDA #__i7
   JMP __arg_addrb
 
-.section ".text.__arg_addrb_i8", "ax", @progbits
-__arg_addrb_i8:
-  LDA #__i8
-  JMP __arg_addrb
-
 .section ".text.__arg_addr", "ax", @progbits
 __arg_addr:
   LDY #0
@@ -411,76 +272,6 @@ __arg_addrb:
   ADC __t1
   STA 1, Y
   RTS
-
-.section ".text.__arg_addr_i9", "ax", @progbits
-__arg_addr_i9:
-  LDA #__i9
-  JMP __arg_addr
-
-.section ".text.__arg_addr_i10", "ax", @progbits
-__arg_addr_i10:
-  LDA #__i10
-  JMP __arg_addr
-
-.section ".text.__arg_addr_i11", "ax", @progbits
-__arg_addr_i11:
-  LDA #__i11
-  JMP __arg_addr
-
-.section ".text.__arg_addr_i12", "ax", @progbits
-__arg_addr_i12:
-  LDA #__i12
-  JMP __arg_addr
-
-.section ".text.__arg_addr_i13", "ax", @progbits
-__arg_addr_i13:
-  LDA #__i13
-  JMP __arg_addr
-
-.section ".text.__arg_addr_i14", "ax", @progbits
-__arg_addr_i14:
-  LDA #__i14
-  JMP __arg_addr
-
-.section ".text.__arg_addr_i15", "ax", @progbits
-__arg_addr_i15:
-  LDA #__i15
-  JMP __arg_addr
-
-.section ".text.__arg_addrb_i9", "ax", @progbits
-__arg_addrb_i9:
-  LDA #__i9
-  JMP __arg_addrb
-
-.section ".text.__arg_addrb_i10", "ax", @progbits
-__arg_addrb_i10:
-  LDA #__i10
-  JMP __arg_addrb
-
-.section ".text.__arg_addrb_i11", "ax", @progbits
-__arg_addrb_i11:
-  LDA #__i11
-  JMP __arg_addrb
-
-.section ".text.__arg_addrb_i12", "ax", @progbits
-__arg_addrb_i12:
-  LDA #__i12
-  JMP __arg_addrb
-
-.section ".text.__arg_addrb_i13", "ax", @progbits
-__arg_addrb_i13:
-  LDA #__i13
-  JMP __arg_addrb
-
-.section ".text.__arg_addrb_i14", "ax", @progbits
-__arg_addrb_i14:
-  LDA #__i14
-  JMP __arg_addrb
-
-.section ".text.__arg_addrb_i15", "ax", @progbits
-__arg_addrb_i15:
-  LDA #__i15
-  JMP __arg_addrb
 
 .section ".text.__var_addr_xy", "ax", @progbits
 __var_addr_xy:
@@ -569,46 +360,6 @@ __var_addr_push_i7:
   LDA #__i7
   JMP __var_addr_push
 
-.section ".text.__var_addr_push_i8", "ax", @progbits
-__var_addr_push_i8:
-  LDA #__i8
-  JMP __var_addr_push
-
-.section ".text.__var_addr_push_i9", "ax", @progbits
-__var_addr_push_i9:
-  LDA #__i9
-  JMP __var_addr_push
-
-.section ".text.__var_addr_push_i10", "ax", @progbits
-__var_addr_push_i10:
-  LDA #__i10
-  JMP __var_addr_push
-
-.section ".text.__var_addr_push_i11", "ax", @progbits
-__var_addr_push_i11:
-  LDA #__i11
-  JMP __var_addr_push
-
-.section ".text.__var_addr_push_i12", "ax", @progbits
-__var_addr_push_i12:
-  LDA #__i12
-  JMP __var_addr_push
-
-.section ".text.__var_addr_push_i13", "ax", @progbits
-__var_addr_push_i13:
-  LDA #__i13
-  JMP __var_addr_push
-
-.section ".text.__var_addr_push_i14", "ax", @progbits
-__var_addr_push_i14:
-  LDA #__i14
-  JMP __var_addr_push
-
-.section ".text.__var_addr_push_i15", "ax", @progbits
-__var_addr_push_i15:
-  LDA #__i15
-  JMP __var_addr_push
-
 .section ".text.__var_addr_push", "ax", @progbits
 __var_addr_push:
   JSR __var_addr
@@ -654,46 +405,6 @@ __var_addrb_push_i6:
 .section ".text.__var_addrb_push_i7", "ax", @progbits
 __var_addrb_push_i7:
   LDA #__i7
-  JMP __var_addrb_push
-
-.section ".text.__var_addrb_push_i8", "ax", @progbits
-__var_addrb_push_i8:
-  LDA #__i8
-  JMP __var_addrb_push
-
-.section ".text.__var_addrb_push_i9", "ax", @progbits
-__var_addrb_push_i9:
-  LDA #__i9
-  JMP __var_addrb_push
-
-.section ".text.__var_addrb_push_i10", "ax", @progbits
-__var_addrb_push_i10:
-  LDA #__i10
-  JMP __var_addrb_push
-
-.section ".text.__var_addrb_push_i11", "ax", @progbits
-__var_addrb_push_i11:
-  LDA #__i11
-  JMP __var_addrb_push
-
-.section ".text.__var_addrb_push_i12", "ax", @progbits
-__var_addrb_push_i12:
-  LDA #__i12
-  JMP __var_addrb_push
-
-.section ".text.__var_addrb_push_i13", "ax", @progbits
-__var_addrb_push_i13:
-  LDA #__i13
-  JMP __var_addrb_push
-
-.section ".text.__var_addrb_push_i14", "ax", @progbits
-__var_addrb_push_i14:
-  LDA #__i14
-  JMP __var_addrb_push
-
-.section ".text.__var_addrb_push_i15", "ax", @progbits
-__var_addrb_push_i15:
-  LDA #__i15
   JMP __var_addrb_push
 
 .section ".text.__var_addrb_push", "ax", @progbits
