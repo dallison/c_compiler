@@ -2852,6 +2852,40 @@ static bool CXXUnionDefaultedSpecialMemberIsDeleted(
   return false;
 }
 
+// Implicit special members of a nested class are declared while the enclosing
+// template is still dependent, then cloned into the instantiation.  Their
+// noexcept and triviality were decided against that dependent base, so
+// recompute them once the concrete bases and members are in place.
+static void CXXRefreshImplicitSpecialMembers(Struct* str) {
+  if (str == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* member = str->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      TypeRecord* func = member->is_member_function && member->symbol != NULL
+                             ? member->symbol->type
+                             : NULL;
+      if (func == NULL || !TypeIsFunction(func) ||
+          !func->info.function.is_implicitly_declared ||
+          !func->info.function.is_defaulted ||
+          func->info.function.is_user_provided ||
+          func->info.function.is_explicitly_deleted) {
+        continue;
+      }
+      CXXSpecialMemberKind kind = func->info.function.cxx_special_member_kind;
+      if (kind == kCXXSpecialMemberNone) {
+        continue;
+      }
+      bool deleted = func->info.function.is_deleted;
+      func->info.function.is_noexcept =
+          !deleted && CXXImplicitSpecialMemberIsNoexcept(str, kind);
+      func->info.function.is_trivial_special_member =
+          !deleted && CXXImplicitSpecialMemberIsTrivial(str, kind);
+    }
+  }
+}
+
 static void CXXRefreshUnionDefaultedSpecialMembers(Struct* str) {
   if (str == NULL || !str->is_union) {
     return;
@@ -3088,6 +3122,7 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
     AddCXXSyntheticMemberFunction(parser, str, move_assign);
   }
   CXXRefreshUnionDefaultedSpecialMembers(str);
+  CXXRefreshImplicitSpecialMembers(str);
   str->cxx_special_members_complete = true;
 }
 

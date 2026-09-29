@@ -1137,6 +1137,13 @@ static bool CurrentClassCanConvertToInaccessibleBase(TypeRecord* from_class) {
       return true;
     }
   }
+  // A friend of the derived class may convert to its private base
+  // (`friend const_iterator` initializing `generation_info` from `iterator`).
+  for (size_t i = 0; i < from_struct->friend_classes.length; i++) {
+    if (from_struct->friend_classes.value.p[i] == current) {
+      return true;
+    }
+  }
   return false;
 }
 

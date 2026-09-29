@@ -5705,12 +5705,50 @@ static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
   return FindCXXDirectBaseByNameSkipping(owner, name, NULL);
 }
 
+/* A mem-initializer may name a direct base by the class template's parameter
+ * (`struct Storage<T, I, Tag, true> : T { Storage(...) : T(v) {} }`).  After
+ * instantiation the base's tag is the argument type (`Hash<unsigned long>`),
+ * not the parameter name `T`. */
+static TypeRecord* CXXTemplateParameterBaseType(Struct* owner,
+                                                const char* name) {
+  if (owner == NULL || name == NULL || owner->tag_symbol == NULL ||
+      owner->tag_symbol->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* owner_type = owner->tag_symbol->type;
+  Symbol* origin = owner_type->template_origin;
+  Vector* args = owner_type->template_arguments;
+  if (origin == NULL || origin->type == NULL ||
+      !TypeIsStructOrUnion(origin->type) ||
+      origin->type->info.struct_info == NULL || args == NULL) {
+    return NULL;
+  }
+  Vector* parameters = &origin->type->info.struct_info->template_parameters;
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* param = parameters->value.p[i];
+    if (param == NULL || param->kind != kTemplateParameterType ||
+        param->name.value == NULL || strcmp(param->name.value, name) != 0) {
+      continue;
+    }
+    if (param->index < 0 || (size_t)param->index >= args->length) {
+      return NULL;
+    }
+    TemplateArgument* arg = args->value.p[param->index];
+    if (arg == NULL || arg->kind != kTemplateParameterType) {
+      return NULL;
+    }
+    return arg->type;
+  }
+  return NULL;
+}
+
 static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
     Struct* owner, const char* name, Vector* already_used) {
   if (owner == NULL || name == NULL) {
     return NULL;
   }
   TypeRecord* alias_type = CXXTypedefTypeVisibleFromClass(owner, name);
+  TypeRecord* parameter_type = CXXTemplateParameterBaseType(owner, name);
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
@@ -5721,6 +5759,9 @@ static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
       continue;
     }
     if (alias_type != NULL && TypeEqual(alias_type, base->type)) {
+      return base;
+    }
+    if (parameter_type != NULL && TypeEqual(parameter_type, base->type)) {
       return base;
     }
     if (base->type->info.struct_info->tag_name != NULL &&
@@ -5741,6 +5782,7 @@ static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
     return NULL;
   }
   TypeRecord* alias_type = CXXTypedefTypeVisibleFromClass(owner, name);
+  TypeRecord* parameter_type = CXXTemplateParameterBaseType(owner, name);
   for (size_t i = 0; i < owner->virtual_bases.length; i++) {
     CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
@@ -5748,6 +5790,9 @@ static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
       continue;
     }
     if (alias_type != NULL && TypeEqual(alias_type, base->type)) {
+      return base;
+    }
+    if (parameter_type != NULL && TypeEqual(parameter_type, base->type)) {
       return base;
     }
     if (base->type->info.struct_info->tag_name != NULL &&

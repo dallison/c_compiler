@@ -788,6 +788,14 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
           clone->symbol->type->info.function.is_constructor &&
           inherits_constructor && owner->tag_name != NULL) {
         StringSetString(&clone->symbol->name, owner->tag_name);
+        // The clone shares the base constructor's type, including a copy or
+        // move kind.  An inherited Base(const Base&) is not a copy constructor
+        // of the derived class; leaving that kind set suppresses the implicit
+        // one.  Copy the type so the base constructor is unchanged.
+        TypeRecord* func = TypeRecordCopy(clone->symbol->type);
+        func->info.function.cxx_special_member_kind = kCXXSpecialMemberNone;
+        func->info.function.is_trivial_special_member = false;
+        SymbolSetType(clone->symbol, func);
       }
       AddCXXMemberUsingFunction(parser, owner, clone);
       imported = true;

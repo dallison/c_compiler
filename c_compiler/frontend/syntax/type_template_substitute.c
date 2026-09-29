@@ -171,6 +171,13 @@ static void FindPackExpansionInExpressionNode(ASTNode* node, void* data,
       search->found = true;
     }
   }
+  if ((node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) &&
+      ((SizeofASTNode*)node)->type_operand != NULL &&
+      FindPackExpansionInType(((SizeofASTNode*)node)->type_operand,
+                              search->args, search->pack_index,
+                              search->pack_length)) {
+    search->found = true;
+  }
 }
 
 bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
@@ -1004,11 +1011,40 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
   }
   TemplateArgument* arg = args->value.p[index];
   if (arg == NULL || arg->kind != kTemplateParameterType ||
-      arg->type == NULL || !TypeIsStructOrUnion(arg->type) ||
-      arg->type->info.struct_info == NULL) {
+      arg->type == NULL) {
     return TypeRecordCopy(type);
   }
-  if (type->dependent_member_template_arguments != NULL) {
+  // `typename T::member` when T has been replaced by a concrete non-class
+  // (an integer, a pointer, an array) is ill-formed.  Detection idioms such
+  // as `void_t<typename T::absl_container_hash>` rely on that substitution
+  // failure to reject the partial specialization.  Copying the dependent
+  // member type made the specialization match `uintptr_t`.  A T that is
+  // still dependent or unknown keeps the member type for a later
+  // substitution.
+  if (!TypeIsStructOrUnion(arg->type) || arg->type->info.struct_info == NULL) {
+    if (!TypeContainsTemplateParameter(arg->type) &&
+        !TypeIsUnknown(arg->type)) {
+      if (parser != NULL) {
+        parser->template_substitution_failed = true;
+      }
+    }
+    return TypeRecordCopy(type);
+  }
+  bool multi_component_member = false;
+  if (type->dependent_member_name != NULL &&
+      type->dependent_member_name->value != NULL) {
+    for (const char* c = type->dependent_member_name->value; *c != '\0'; c++) {
+      if (c[0] == ':' && c[1] == ':') {
+        multi_component_member = true;
+        break;
+      }
+    }
+  }
+  // `T::a::b` is stored as one member string.  Looking the whole string up as
+  // a single name misses `a`.  Walk each component, the same way a path that
+  // carries per-component template arguments already does.
+  if (type->dependent_member_template_arguments != NULL ||
+      multi_component_member) {
     Vector* components = SplitDependentMemberPath(type->dependent_member_name);
     TypeRecord* current = TypeRecordCopy(arg->type);
     TypeRecord* resolved = NULL;
@@ -1017,10 +1053,11 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
         break;
       }
       String* component = components->value.p[i];
-      Vector* component_args =
-          i < type->dependent_member_template_arguments->length
-              ? type->dependent_member_template_arguments->value.p[i]
-              : NULL;
+      Vector* component_args = NULL;
+      if (type->dependent_member_template_arguments != NULL &&
+          i < type->dependent_member_template_arguments->length) {
+        component_args = type->dependent_member_template_arguments->value.p[i];
+      }
       TypeRecord* owner = current;
       StructMember* member =
           FindStructMember(owner->info.struct_info, component);

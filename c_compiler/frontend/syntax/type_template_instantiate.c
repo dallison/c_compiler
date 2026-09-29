@@ -683,7 +683,17 @@ static TypeRecord* NestedSubstitutionAlreadyInProgress(Struct* source,
   }
   for (size_t i = 0; i < nested_substitution_stack.length; i++) {
     NestedSubstitutionInProgress* entry = nested_substitution_stack.value.p[i];
-    if (entry->source == source && entry->args == args) {
+    // Argument vectors are copied at each call, so pointer identity misses a
+    // re-entrant substitution of the same lambda (`[&]{ ... }` mentioned from
+    // its own initializer).  Value equality is the instantiation key.
+    if (entry->source == source &&
+        TemplateArgumentVectorEqual(entry->args, args)) {
+      return entry->type;
+    }
+    // Substituting the in-progress copy itself would invent another closure
+    // (`__invented__$S1$S2$...`) and recurse until the stack overflows.
+    if (entry->type != NULL && TypeIsStructOrUnion(entry->type) &&
+        entry->type->info.struct_info == source) {
       return entry->type;
     }
   }
@@ -722,6 +732,15 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
                                                             TypeRecord* type,
                                                             Vector* args) {
   Struct* from = type->info.struct_info;
+  // A closure copied for one instantiation is named `__invented__N$S<serial>`.
+  // Substituting that copy again (its lexical parent is now the instantiation,
+  // which is the source of a nested substitution) invents another closure and
+  // never reaches a fixed point.  The original, without `$S`, is what each
+  // instantiation rebuilds.
+  if (from->tag_symbol != NULL && from->tag_symbol->flags.invented &&
+      from->tag_name != NULL && strstr(from->tag_name->value, "$S") != NULL) {
+    return TypeRecordCopy(type);
+  }
   // Cord's ChunkIterator member signatures name CharIterator, whose signatures
   // name Cord again.  Re-entering the substitution that is already building
   // that class would recurse until the stack overflows.  Share the in-progress
@@ -1013,7 +1032,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     // (e.g. `W value = W();`).  A plain clone would leave the parameter-typed
     // value-initialization `W()` referencing the template parameter, which then
     // lowers to an undefined symbol; substitution rewrites it to e.g. `int()`.
-    if (member->default_initializer != NULL && !member->is_static) {
+    if (member->default_initializer != NULL) {
       ASTNode* substituted = CloneDependentExpressionWithArgs(
           parser, member->default_initializer, args);
       instantiated->default_initializer =
@@ -1023,6 +1042,19 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     } else {
       instantiated->default_initializer =
           CloneCXXDefaultMemberInitializer(member->default_initializer);
+    }
+    // A static constexpr aggregate (`static constexpr array<size_t, N> k =
+    // {Ts...}`) is not a scalar, so the value fold above leaves it unset.
+    // Constant evaluation reads symbol->constexpr_initializer, not the
+    // member's default initializer.  Keep the substituted initializer there
+    // once every template parameter in it has been replaced.
+    if (member->is_static && !member_symbol->flags.value_set &&
+        member_symbol->constexpr_initializer == NULL &&
+        instantiated->default_initializer != NULL &&
+        !DependentExpressionContainsTemplateParameter(
+            instantiated->default_initializer)) {
+      member_symbol->constexpr_initializer = ASTNodeClone(
+          instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
     }
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
@@ -8715,6 +8747,57 @@ static bool ClassTemplateArgumentsAreStillDependent(Vector* args) {
   return false;
 }
 
+/* A non-type argument can be a fully substituted expression that was never
+ * reduced to a value (`sizeof(const T& (*)()) != 0` after `T` is `int`).
+ * Partial specializations such as `enable_if<true, T>` compare integral
+ * values and miss that argument while it still carries the expression, so
+ * the primary template is instantiated instead. */
+static void FoldConcreteNonTypeTemplateArgument(TypeParser* parser,
+                                                TemplateArgument* arg) {
+  if (arg == NULL) {
+    return;
+  }
+  if (arg->pack_arguments != NULL) {
+    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
+      FoldConcreteNonTypeTemplateArgument(parser,
+                                          arg->pack_arguments->value.p[i]);
+    }
+    return;
+  }
+  if (arg->kind != kTemplateParameterNonType || arg->dependent_expr == NULL ||
+      DependentExpressionContainsTemplateParameter(arg->dependent_expr)) {
+    return;
+  }
+  Vector empty_args;
+  VectorInit(&empty_args);
+  bool saved_failed = parser != NULL && parser->template_substitution_failed;
+  if (parser != NULL) {
+    parser->template_substitution_failed = false;
+  }
+  int64_t folded = 0;
+  bool ok = TryFoldDependentTemplateArgument(parser, arg->dependent_expr,
+                                             &empty_args, &folded);
+  if (parser != NULL) {
+    parser->template_substitution_failed = saved_failed;
+  }
+  VectorDestruct(&empty_args);
+  if (!ok) {
+    return;
+  }
+  ASTNodeDelete(arg->dependent_expr);
+  arg->dependent_expr = NULL;
+  arg->int_value = folded;
+  arg->value_kind = kTemplateValueIntegral;
+  arg->template_parameter_index = -1;
+}
+
+static void FoldConcreteNonTypeTemplateArguments(TypeParser* parser,
+                                                 Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    FoldConcreteNonTypeTemplateArgument(parser, args->value.p[i]);
+  }
+}
+
 // `Outer<X>::ErrorMaker<res>` members number enclosing parameters first.
 // The nested specialization only carries `[res]`; prepend `Outer`'s arguments
 // so `return res` substitutes.  Returns a new vector the caller must delete,
@@ -8948,6 +9031,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   // parameter), keep the template-id deferred rather than instantiating the
   // primary or a partial spec against incomplete input.
   ExpandConcreteAliasTemplateArguments(parser, completed_args);
+  FoldConcreteNonTypeTemplateArguments(parser, completed_args);
   if (ClassTemplateArgumentsAreStillDependent(completed_args)) {
     TypeRecord* deferred =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
@@ -9376,6 +9460,14 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     } else {
       instantiated->default_initializer =
           CloneCXXDefaultMemberInitializer(member_initializer);
+    }
+    if (member->is_static && !member_symbol->flags.value_set &&
+        member_symbol->constexpr_initializer == NULL &&
+        instantiated->default_initializer != NULL &&
+        !DependentExpressionContainsTemplateParameter(
+            instantiated->default_initializer)) {
+      member_symbol->constexpr_initializer = ASTNodeClone(
+          instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
     }
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
@@ -10272,7 +10364,20 @@ static Vector* PrefixMemberAliasPatternArguments(Symbol* alias,
       }
     }
     if (max_index >= 0 && (size_t)max_index < alias_args->length) {
-      return NULL;
+      TemplateParameter* first_own =
+          alias->alias_template != NULL &&
+                  alias->alias_template->parameters.length > 0
+              ? alias->alias_template->parameters.value.p[0]
+              : NULL;
+      // The pattern's recorded arguments can name an enclosing class
+      // parameter at a low index (`Tree` at 0 in `key_arg<K>`, while `K` is
+      // numbered 1).  That index is below the supplied alias-argument count,
+      // but it is not this alias's own parameter.  Skipping the class prefix
+      // binds `Tree::key_type` to `K`.  Once the alias parameters themselves
+      // occupy that low range, the pattern is already aligned.
+      if (first_own == NULL || first_own->index <= max_index) {
+        return NULL;
+      }
     }
     if (alias->alias_template != NULL &&
         alias->alias_template->parameters.length > 0) {

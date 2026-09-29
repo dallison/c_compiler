@@ -7446,7 +7446,18 @@ static bool TypeIsDerivedFromInCurrentClass(TypeRecord* from, TypeRecord* to) {
         break;
       }
     }
+    // `friend const_iterator` inside `iterator` lets the other specialization
+    // bind a private base (`btree_iterator_generation_info(other)`).
+    bool friend_of_derived = false;
     if (!nested) {
+      for (size_t i = 0; i < from_struct->friend_classes.length; i++) {
+        if (from_struct->friend_classes.value.p[i] == current) {
+          friend_of_derived = true;
+          break;
+        }
+      }
+    }
+    if (!nested && !friend_of_derived) {
       return false;
     }
   }
@@ -10635,10 +10646,24 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     if (candidate->is_member_function && candidate->symbol != NULL &&
         candidate->symbol->type != NULL &&
         TypeIsFunction(candidate->symbol->type)) {
-      candidate->symbol->type->info.function.cxx_member_owner =
-          type->info.struct_info;
-      StringClear(&candidate->symbol->asm_name);
-      SymbolSetCXXMangledAsmName(candidate->symbol);
+      // An inherited constructor keeps the base as its owner so its body still
+      // initializes that base.  Retargeting it to the derived class makes the
+      // preamble default-construct the base (no arguments) and reject the
+      // base's real constructor.
+      Struct* recorded_owner =
+          candidate->symbol->type->info.function.cxx_member_owner;
+      int base_offset = 0;
+      bool inherited_base_constructor =
+          recorded_owner != NULL &&
+          recorded_owner != type->info.struct_info &&
+          StructHasBaseStruct(type->info.struct_info, recorded_owner,
+                              &base_offset);
+      if (!inherited_base_constructor) {
+        candidate->symbol->type->info.function.cxx_member_owner =
+            type->info.struct_info;
+        StringClear(&candidate->symbol->asm_name);
+        SymbolSetCXXMangledAsmName(candidate->symbol);
+      }
     }
     if (candidate->is_member_function && candidate->symbol != NULL &&
         !candidate->symbol->flags.invented) {
@@ -13245,13 +13270,20 @@ static ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
   CXXBaseAdjustment adjustment;
   if (!TypeBaseAdjustment(from_type, to_type, /*public_only=*/true,
                           &adjustment)) {
-    if (materialized_from) {
-      TypeRecordDelete(from_type);
+    // Private and protected bases are accessible to the derived class and to
+    // its friends.  `CIter::CIter(const Iter& other) : Gen(other)` binds the
+    // private base of `Iter` because `CIter` is a friend.
+    if (!TypeIsDerivedFromInCurrentClass(from_type, to_type) ||
+        !TypeBaseAdjustment(from_type, to_type, /*public_only=*/false,
+                            &adjustment)) {
+      if (materialized_from) {
+        TypeRecordDelete(from_type);
+      }
+      if (materialized_to) {
+        TypeRecordDelete(to_type);
+      }
+      return NULL;
     }
-    if (materialized_to) {
-      TypeRecordDelete(to_type);
-    }
-    return NULL;
   }
   if (materialized_from) {
     TypeRecordDelete(from_type);
@@ -13559,10 +13591,13 @@ static void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
                             node->initializer);
   // A C++ lambda-expression is a prvalue that materializes a temporary closure.
   // Keep that category so forwarding-reference deduction of `F&&` / `T&&` works.
+  // A temporary materialized for reference binding is an xvalue.  Reanalyzing a
+  // cloned template body clears kASTAnalyzed and would otherwise turn that
+  // temporary into a C lvalue, which can no longer bind to an rvalue reference.
   if ((node->base.flags &
        (kASTLambdaExpression | kASTCXXBracedTemporary)) != 0) {
     node->base.value_category = kValueCategoryPrvalue;
-  } else {
+  } else if (node->base.value_category != kValueCategoryXvalue) {
     node->base.value_category = kValueCategoryLvalue;
   }
 }
