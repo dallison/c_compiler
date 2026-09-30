@@ -24,6 +24,7 @@ inline constexpr __tuple_prepend_t __tuple_prepend{};
 
 template <>
 struct tuple<> {
+  constexpr tuple& operator=(const tuple&) { return *this; }
 };
 
 template <class T0, class... Rest>
@@ -33,11 +34,25 @@ struct tuple<T0, Rest...> {
 
   constexpr tuple() {}
   constexpr explicit tuple(T0 v0, Rest... rest)
-      : __0(static_cast<T0&&>(v0)),
-        __rest(static_cast<Rest&&>(rest)...) {}
+      : __0(v0), __rest(rest...) {}
   constexpr tuple(__tuple_prepend_t, T0 v0, tuple<Rest...> rest)
       : __0(static_cast<T0&&>(v0)),
         __rest(static_cast<tuple<Rest...>&&>(rest)) {}
+
+  // Element-wise conversion, so make_tuple("", "", false) can initialize
+  // tuple<string_view, string_view, bool>.
+  template <class U0, class... URest,
+            class = enable_if_t<sizeof...(URest) == sizeof...(Rest)>>
+  constexpr tuple(const tuple<U0, URest...>& other)
+      : __0(other.__0), __rest(other.__rest) {}
+
+  template <class U0, class... URest,
+            class = enable_if_t<sizeof...(URest) == sizeof...(Rest)>>
+  constexpr tuple& operator=(const tuple<U0, URest...>& other) {
+    __0 = other.__0;
+    __rest = other.__rest;
+    return *this;
+  }
 
   // std::tie(a, b) = pair.  Only a 2-element tuple assigns from pair.
   template <class U1, class U2,

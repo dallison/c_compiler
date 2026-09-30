@@ -3854,8 +3854,21 @@ static ASTNode* LowerCXXInitializerListBracedInit(TypeRecord* target_type,
     return (ASTNode*)braced;
   }
 
-  ASTNode* backing_array =
-      NewCXXInitializerListBackingArray(element_type, braced, location);
+  // An empty braced-init-list is an empty initializer_list.  A zero-length
+  // backing array has size 0, which the backend cannot allocate.  A null
+  // pointer and a length of 0 is the empty range.
+  ASTNode* backing_array;
+  if (braced->initializers == NULL || braced->initializers->length == 0) {
+    TypeRecord* pointee = TypeRecordCopy(element_type);
+    pointee->qualifiers |= kQualConst;
+    TypeRecord* pointer = NewPointerTypeRecord(kQualPlain);
+    TypeRecordChain(pointer, pointee);
+    TypeRecordCalculateSize(pointer);
+    backing_array = NewIntConstantASTNode(0, pointer, location);
+  } else {
+    backing_array =
+        NewCXXInitializerListBackingArray(element_type, braced, location);
+  }
   Vector* list_initializers = NewVector();
   VectorAppend(list_initializers,
                NewExpressionInitializerASTNode(backing_array, location));
@@ -4449,7 +4462,11 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       constants_only = IsConstantExpression(init_expr);
     }
   }
-  if (is_cxx_local_static && !symbol->flags.is_constexpr &&
+  // C++ allows dynamic initialization of namespace-scope and function-local
+  // static objects (`std::string flag = ""`).  constexpr and constinit still
+  // require a constant initializer.  thread_local keeps the check above, which
+  // constant-initializes it when the expression allows that.
+  if (CompilerIsCXX() && !is_thread_local && !symbol->flags.is_constexpr &&
       !symbol->flags.is_constinit) {
     constants_only = false;
   }
@@ -7499,6 +7516,12 @@ static int OverloadBaseConversionRankMaterialized(TypeRecord* actual,
   if (TypeEqual(actual, target) || TypeEqualIgnoringQualifiers(actual, target)) {
     return 0;
   }
+  // [conv.ptr]: a prvalue of type std::nullptr_t converts to any pointer or
+  // pointer-to-member type.
+  if (TypeIsNullPointer(actual) &&
+      (TypeIsPointer(target) || TypeIsMemberPointer(target))) {
+    return 2;
+  }
   if (TypeIsStructOrUnion(actual) || TypeIsStructOrUnion(target)) {
     // Two distinct class types convert only via a derived-to-base relationship.
     // TypeEqual above handles separately materialized records for the same
@@ -8811,7 +8834,15 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
     }
   }
 
-  if (best_score < 0 || best_score > 5) {
+  // An exact match scores 5 per argument (`base_rank * 10 + 5`).  A
+  // non-template that matches every argument exactly is better than any
+  // function template ([over.match.best]); do not let a reference-binding
+  // template, which this ranker scores below 5, replace it.  `pred(const
+  // char*, const char*)` must beat `pred(const StringType&, ...)`.
+  size_t scored_actuals = actuals != NULL ? actuals->length : 0;
+  int exact_match_ceiling =
+      scored_actuals == 0 ? 0 : (int)(5 * scored_actuals);
+  if (best_score < 0 || best_score > exact_match_ceiling) {
     for (size_t i = 0; i < candidates->length; i++) {
       Symbol* candidate = candidates->value.p[i];
       Symbol* effective =
@@ -9746,6 +9777,27 @@ static bool DerivedConstructorHidesInherited(StructMember* derived,
   return MemberExplicitParametersEqual(derived, inherited);
 }
 
+static bool CallHasBracedInitActual(VectorASTNode* node) {
+  if (node == NULL || node->children == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < node->children->length; i++) {
+    ASTNode* actual = node->children->value.p[i];
+    if (actual != NULL && actual->op == AST_OP(braced_init)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CandidateIsInitializerListConstructor(StructMember* candidate) {
+  return candidate != NULL && candidate->symbol != NULL &&
+         candidate->symbol->type != NULL &&
+         TypeIsFunction(candidate->symbol->type) &&
+         CXXConstructorIsInitializerListConstructor(
+             &candidate->symbol->type->info.function);
+}
+
 static StructMember* ResolveMemberFunctionOverload(StructMember* first,
                                                    VectorASTNode* node,
                                                    BinaryASTNode* member_access) {
@@ -9763,6 +9815,33 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
         ((StructMemberASTNode*)member_access->right)->template_arguments;
   }
 
+  // [over.match.list]: when the initializer is a braced-init-list and an
+  // initializer-list constructor is viable, other constructors are not
+  // candidates.  Considering them turns `vector<T>{value}` into an attempt to
+  // construct the allocator from that value.
+  bool only_initializer_list_constructors = false;
+  if (explicit_args == NULL && CallHasBracedInitActual(node)) {
+    for (StructMember* candidate = first; candidate != NULL;
+         candidate = candidate->overload_next) {
+      if (candidate->symbol != NULL &&
+          (candidate->symbol->flags.is_template ||
+           (candidate->symbol->type != NULL &&
+            TypeIsFunction(candidate->symbol->type) &&
+            candidate->symbol->type->info.function.template_origin != NULL))) {
+        continue;
+      }
+      if (!CandidateIsInitializerListConstructor(candidate)) {
+        continue;
+      }
+      int il_score =
+          MemberOverloadCallScore(candidate, node, member_access, true);
+      if (il_score >= 0) {
+        only_initializer_list_constructors = true;
+        break;
+      }
+    }
+  }
+
   if (explicit_args == NULL) {
     for (StructMember* candidate = first; candidate != NULL;
          candidate = candidate->overload_next) {
@@ -9771,6 +9850,10 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
            (candidate->symbol->type != NULL &&
             TypeIsFunction(candidate->symbol->type) &&
             candidate->symbol->type->info.function.template_origin != NULL))) {
+        continue;
+      }
+      if (only_initializer_list_constructors &&
+          !CandidateIsInitializerListConstructor(candidate)) {
         continue;
       }
       int score = MemberOverloadCallScore(candidate, node, member_access, true);
@@ -9808,6 +9891,10 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
   if (best_score < 0 || best_score > 5) {
     for (StructMember* candidate = first; candidate != NULL;
          candidate = candidate->overload_next) {
+      if (only_initializer_list_constructors &&
+          !CandidateIsInitializerListConstructor(candidate)) {
+        continue;
+      }
       StructMember* effective =
           MemberTemplateOverloadCandidate(candidate, node, member_access,
                                           explicit_args,
@@ -10069,41 +10156,46 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
       StructMember* match = NULL;
       int best_score = -1;
       if (id->symbol->type->info.function.prototype.length != num_actual) {
-      for (StructMember* candidate = head; candidate != NULL;
-           candidate = candidate->overload_next) {
-        if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
-            !TypeIsFunction(candidate->symbol->type) ||
-            candidate->symbol->flags.is_template ||
-            candidate->symbol->type->info.function.prototype.length !=
-                num_actual) {
-          continue;
-        }
-        bool compatible = true;
-        int score = 0;
-        for (size_t i = 1; i < num_actual; i++) {
-          ASTNode* actual = node->children->value.p[i];
-          Symbol* formal =
-              candidate->symbol->type->info.function.prototype.value.p[i];
-          if (actual == NULL || formal == NULL || formal->type == NULL) {
-            compatible = false;
-            break;
-          }
-          if (actual->type == NULL ||
-              TypeContainsTemplateParameter(formal->type)) {
+        // The callee was already bound, but its prototype is longer than the
+        // arguments supplied so far because a later parameter has a default
+        // (`vector(initializer_list<T>, const Allocator& = Allocator())`
+        // called as `vector{1}`).  An exact-arity search would skip that
+        // constructor and accept a shorter one, treating the still-untyped
+        // braced-init as compatible with every parameter.  Re-score with the
+        // same rules as the first pass, including default arguments and
+        // [over.match.list].
+        bool only_initializer_list = false;
+        for (StructMember* candidate = head; candidate != NULL;
+             candidate = candidate->overload_next) {
+          if (candidate->symbol == NULL || candidate->symbol->flags.is_template ||
+              !CandidateIsInitializerListConstructor(candidate)) {
             continue;
           }
-          int rank = OverloadConversionRank(actual, formal->type);
-          if (rank < 0) {
-            compatible = false;
+          if (FunctionCallScore(candidate->symbol->type, node,
+                                /*first_formal_arg=*/0) >= 0) {
+            only_initializer_list = true;
             break;
           }
-          score += rank;
         }
-        if (compatible && (match == NULL || score < best_score)) {
-          match = candidate;
-          best_score = score;
+        for (StructMember* candidate = head; candidate != NULL;
+             candidate = candidate->overload_next) {
+          if (candidate->symbol == NULL || candidate->symbol->type == NULL ||
+              !TypeIsFunction(candidate->symbol->type) ||
+              candidate->symbol->flags.is_template ||
+              !candidate->symbol->type->info.function.is_constructor) {
+            continue;
+          }
+          if (only_initializer_list &&
+              !CandidateIsInitializerListConstructor(candidate)) {
+            continue;
+          }
+          int score = FunctionCallScore(candidate->symbol->type, node,
+                                        /*first_formal_arg=*/0);
+          if (score >= 0 && (match == NULL || score < best_score)) {
+            match = candidate;
+            best_score = score;
+          }
         }
-      }
       }
       if (match == NULL) {
         // The surviving callee is the default constructor (or the primary
@@ -11674,6 +11766,17 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
           (TypeIsUnknown(actual->type) ||
            TypeContainsTemplateParameter(actual->type) ||
            TypeContainsAuto(actual->type))) {
+        // A bare function-template name (`std::endl`) still contains template
+        // parameters, but a concrete function-pointer parameter resolves it
+        // ([temp.deduct.funcaddr]).  Deferring here types the call as `int`
+        // and breaks `stream << std::endl`.
+        if (actual->op == AST_OP(identifier)) {
+          IdentifierASTNode* id = (IdentifierASTNode*)actual;
+          if (id->symbol != NULL && TypeIsFunction(actual->type) &&
+              SymbolIsTemplateFunction(id->symbol)) {
+            continue;
+          }
+        }
         argument_not_ready = true;
         break;
       }
@@ -14492,6 +14595,19 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       break;
 
     case AST_OP(init):
+      if ((node->flags & kASTValueInitMemzero) != 0) {
+        // Empty braced init that only zero-fills storage.  Leave it for
+        // codegen's memzero; do not run constructor or assignment analysis.
+        binary_node->left = AnalyzeExpression(binary_node->left);
+        if (binary_node->left != NULL) {
+          binary_node->left->flags |= kASTNeedAddress;
+          if (node->type == NULL) {
+            ASTNodeSetType(node, binary_node->left->type);
+          }
+        }
+        node->flags |= kASTAnalyzed;
+        break;
+      }
       {
         ASTNode* analyzed = AnalyzeInitialization(
             node, binary_node->left, binary_node->right);

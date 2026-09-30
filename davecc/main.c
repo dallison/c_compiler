@@ -1524,6 +1524,18 @@ static int ParseArg(int i, int argc, char** argv,
       VectorAppend(compiler_args, argv[i]);
       VectorAppend(compiler_args, argv[i+1]);
       i++;
+    } else if (StringEqual(option, "-framework")) {
+      // NativeDarwinLink forwards "-framework" plus the following name.  Left
+      // unclaimed, the name has no source extension and is treated as an input
+      // file, and a -Wl,-framework,Name form collapses to one dash-token that
+      // the native link drops.
+      if (i == argc - 1) {
+        fprintf(stderr, "-framework needs a name\n");
+        exit(1);
+      }
+      VectorAppend(linker_args, argv[i]);
+      VectorAppend(linker_args, argv[i + 1]);
+      i++;
     } else if (StringEqual(option, "-rpath")) {
       // -rpath option is followed by an include dir
       if (i == argc-1) {

@@ -1648,10 +1648,17 @@ static void CollectIdentifierOrWide(Lex* lex) {
     // for compiler-generated names, so a single leading underscore in
     // hand-written Darwin assembly is stripped here.  Names that already
     // start with `__` are ELF C names and keep both underscores.
+    // Itanium names (`_Z3foo`, `_ZTVN...`) are not Mach-O-prefixed yet: the
+    // compiler emits them as `_Z` and the object writer adds the Darwin
+    // underscore, producing `__Z`.  Stripping that `_` would leave `_Z`.
+    bool itanium_mangled =
+        lex->spelling.length >= 3 && lex->spelling.value[1] == 'Z' &&
+        (isdigit((unsigned char)lex->spelling.value[2]) ||
+         isupper((unsigned char)lex->spelling.value[2]));
     if (lex->assembler_mode && !lex->preprocessor_mode &&
         compiler != NULL && compiler->native_object &&
         lex->spelling.length >= 2 && lex->spelling.value[0] == '_' &&
-        lex->spelling.value[1] != '_') {
+        lex->spelling.value[1] != '_' && !itanium_mangled) {
       memmove(lex->spelling.value, lex->spelling.value + 1,
               lex->spelling.length);
       lex->spelling.length--;

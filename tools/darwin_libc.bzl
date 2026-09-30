@@ -12,7 +12,7 @@ def darwin_libc_archive(
         for index, source in enumerate(support_sources)
     ])
     host_commands = "\n".join([
-        '"$$host_cc" -c -arch arm64 -O2 -std=c11 -Ic_compiler/Loader "%s" -o "$$work/host_%d.o"' % (source, index)
+        '"$$host_cc" -c -arch arm64 -O2 -std=c11 -Ic_compiler/Loader -Ic_compiler/support "%s" -o "$$work/host_%d.o"' % (source, index)
         for index, source in enumerate(host_c_srcs)
     ])
     native.genrule(

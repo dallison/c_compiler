@@ -507,7 +507,13 @@ static void RewriteTemplateBodyIdentifierVisitor(ASTNode* node, void* data,
   Symbol* replacement = MapFindPointerKey(symbol_map, id->symbol);
   if (replacement != NULL) {
     id->symbol = replacement;
-    ASTNodeSetType(node, replacement->type);
+    // A base mem-initializer forces `this` to the base type
+    // (`(Data<int>*)this->Data(...)`).  Remapping the symbol must not put the
+    // derived type back, or the constructor name is looked up on the derived
+    // class.
+    if ((node->flags & kASTForcedTypeAdjustment) == 0) {
+      ASTNodeSetType(node, replacement->type);
+    }
   }
 }
 
@@ -4106,12 +4112,47 @@ static void RebindClonedLocalIdentifierVisitor(ASTNode* node, void* data,
     replacement =
         FindClonedLocalSymbolByDeclarationIdentity(clone, id->symbol);
   }
+  // A friend defined inside a class template can have its prototype rebuilt
+  // after the body is parsed, so the identifier still names the original
+  // parameter object.  The instantiated parameter keeps that declaration's
+  // source location; bind by name and location so `a + n` sees
+  // `civil_time<year_tag>` rather than the unspecialized injected class name.
+  if (replacement == NULL && id->symbol != NULL &&
+      id->symbol->flags.is_argument && clone->to_func != NULL &&
+      TypeIsFunction(clone->to_func)) {
+    Vector* to_formals = &clone->to_func->info.function.prototype;
+    // Expanded parameter-pack elements share the original pack's name and
+    // source location.  An identifier that already names one of those
+    // elements must keep it; the first formal with that name would otherwise
+    // replace every element (`tie(a, b, c)` would pass `a` for each).
+    bool already_formal = false;
+    for (size_t i = 0; i < to_formals->length; i++) {
+      if (to_formals->value.p[i] == id->symbol) {
+        already_formal = true;
+        break;
+      }
+    }
+    if (!already_formal) {
+      for (size_t i = 0; i < to_formals->length; i++) {
+        Symbol* formal = to_formals->value.p[i];
+        if (formal != NULL && formal->location == id->symbol->location &&
+            StringEqualString(&formal->name, &id->symbol->name)) {
+          replacement = formal;
+          break;
+        }
+      }
+    }
+  }
   if (replacement != NULL) {
     id->symbol = replacement;
-    ASTNodeSetType(node, TypeIsReference(replacement->type)
-                             ? replacement->type->next
-                             : replacement->type);
-    node->value_category = kValueCategoryLvalue;
+    // Base mem-initializers force `this` to the base type.  Rebinding the
+    // symbol onto this specialization must not restore the derived type.
+    if ((node->flags & kASTForcedTypeAdjustment) == 0) {
+      ASTNodeSetType(node, TypeIsReference(replacement->type)
+                               ? replacement->type->next
+                               : replacement->type);
+      node->value_category = kValueCategoryLvalue;
+    }
   }
 }
 
@@ -5885,25 +5926,31 @@ static ASTNode* RemapClonedIdentifierSymbol(
     }
     if (replacement != NULL) {
       id->symbol = replacement;
-      ASTNodeSetType(node, TypeIsReference(replacement->type)
-                               ? replacement->type->next
-                               : replacement->type);
-      node->value_category = kValueCategoryLvalue;
+      if ((node->flags & kASTForcedTypeAdjustment) == 0) {
+        ASTNodeSetType(node, TypeIsReference(replacement->type)
+                                 ? replacement->type->next
+                                 : replacement->type);
+        node->value_category = kValueCategoryLvalue;
+      }
       return node;
     }
     replacement = FindClonedOwnerMemberSymbol(clone, id->symbol);
     if (replacement != NULL) {
       id->symbol = replacement;
-      ASTNodeSetType(node, replacement->type);
-      node->value_category = kValueCategoryLvalue;
+      if ((node->flags & kASTForcedTypeAdjustment) == 0) {
+        ASTNodeSetType(node, replacement->type);
+        node->value_category = kValueCategoryLvalue;
+      }
     }
     replacement = CloneTemplateDependentTemporarySymbol(clone, id->symbol);
     if (replacement != NULL) {
       id->symbol = replacement;
-      ASTNodeSetType(node, TypeIsReference(replacement->type)
-                               ? replacement->type->next
-                               : replacement->type);
-      node->value_category = kValueCategoryLvalue;
+      if ((node->flags & kASTForcedTypeAdjustment) == 0) {
+        ASTNodeSetType(node, TypeIsReference(replacement->type)
+                                 ? replacement->type->next
+                                 : replacement->type);
+        node->value_category = kValueCategoryLvalue;
+      }
       return node;
     }
   return NULL;

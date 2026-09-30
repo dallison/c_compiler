@@ -13,9 +13,22 @@
 
 #include <exception>
 #include <new>
-#include <string>
+#include <__char_traits>
+#include <memory>
 
 namespace std {
+
+// <string> includes <string_view>, whose methods throw out_of_range.  If this
+// header is the first to include <string>, those methods are parsed before
+// control returns here.  Declare the exception types first so that lookup
+// sees out_of_range(const char*) instead of an incomplete header.  char_traits
+// and allocator must already be the real types: a constructor parameter typed
+// with a forward-declared char_traits<char> does not match the explicit
+// specialization once <string> is included.
+#ifndef __davecc_string__
+template <class CharT, class Traits, class Allocator>
+class basic_string;
+#endif
 
 namespace __detail {
 
@@ -65,26 +78,23 @@ class __what_holder : public exception {
 
 class logic_error : public __detail::__what_holder {
  public:
-  constexpr explicit logic_error(const string& what_arg)
-      : __what_holder(what_arg.c_str()) {}
+  constexpr explicit logic_error(const basic_string<char, char_traits<char>, allocator<char>>& what_arg);
   constexpr explicit logic_error(const char* what_arg)
       : __what_holder(what_arg) {}
 };
 
 class runtime_error : public __detail::__what_holder {
  public:
-  constexpr explicit runtime_error(const string& what_arg)
-      : __what_holder(what_arg.c_str()) {}
+  constexpr explicit runtime_error(const basic_string<char, char_traits<char>, allocator<char>>& what_arg);
   constexpr explicit runtime_error(const char* what_arg)
       : __what_holder(what_arg) {}
 };
 
 // Leaf exception types simply forward their message to the appropriate root.
-#define __DAVECC_DECLARE_ERROR(NAME, BASE)          \
-  class NAME : public BASE {                        \
-   public:                                          \
-    constexpr explicit NAME(const string& what_arg) \
-        : BASE(what_arg) {}                         \
+#define __DAVECC_DECLARE_ERROR(NAME, BASE)                     \
+  class NAME : public BASE {                                   \
+   public:                                                     \
+    constexpr explicit NAME(const basic_string<char, char_traits<char>, allocator<char>>& what_arg); \
     constexpr explicit NAME(const char* what_arg) : BASE(what_arg) {} \
   }
 
@@ -97,6 +107,30 @@ __DAVECC_DECLARE_ERROR(overflow_error, runtime_error);
 __DAVECC_DECLARE_ERROR(underflow_error, runtime_error);
 
 #undef __DAVECC_DECLARE_ERROR
+
+}  // namespace std
+
+#include <string>
+
+namespace std {
+
+constexpr logic_error::logic_error(const basic_string<char, char_traits<char>, allocator<char>>& what_arg)
+    : __detail::__what_holder(what_arg.c_str()) {}
+constexpr runtime_error::runtime_error(const basic_string<char, char_traits<char>, allocator<char>>& what_arg)
+    : __detail::__what_holder(what_arg.c_str()) {}
+
+#define __DAVECC_DEFINE_ERROR_STRING_CTOR(NAME, BASE) \
+  constexpr NAME::NAME(const basic_string<char, char_traits<char>, allocator<char>>& what_arg) : BASE(what_arg) {}
+
+__DAVECC_DEFINE_ERROR_STRING_CTOR(domain_error, logic_error);
+__DAVECC_DEFINE_ERROR_STRING_CTOR(invalid_argument, logic_error);
+__DAVECC_DEFINE_ERROR_STRING_CTOR(length_error, logic_error);
+__DAVECC_DEFINE_ERROR_STRING_CTOR(out_of_range, logic_error);
+__DAVECC_DEFINE_ERROR_STRING_CTOR(range_error, runtime_error);
+__DAVECC_DEFINE_ERROR_STRING_CTOR(overflow_error, runtime_error);
+__DAVECC_DEFINE_ERROR_STRING_CTOR(underflow_error, runtime_error);
+
+#undef __DAVECC_DEFINE_ERROR_STRING_CTOR
 
 }  // namespace std
 

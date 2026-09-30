@@ -3777,8 +3777,25 @@ static void NoteLambdaBodyEnclosingTemplate(ASTNode* node, void* data,
   if (use->found) {
     return;
   }
-  NoteEnclosingTemplateParameterInType(node->type, use->own_base, use->own_limit,
-                                       &use->found, 0);
+  // A use of another function template (`std::endl`, `operator<<`) carries
+  // that template's own parameter indices.  Those indices overlap the
+  // enclosing template's, so walking the callee's type looks like a
+  // dependent capture and the closure's operator() is never queued.
+  bool names_other_function_template = false;
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* named = (IdentifierASTNode*)node;
+    if (named->symbol != NULL && named->symbol->type != NULL &&
+        TypeIsFunction(named->symbol->type) &&
+        (named->symbol->flags.is_template ||
+         named->symbol->type->info.function.template_origin != NULL ||
+         named->symbol->type->info.function.template_parameter_count > 0)) {
+      names_other_function_template = true;
+    }
+  }
+  if (!names_other_function_template) {
+    NoteEnclosingTemplateParameterInType(node->type, use->own_base,
+                                         use->own_limit, &use->found, 0);
+  }
   if (node->op == AST_OP(cast)) {
     NoteEnclosingTemplateParameterInType(((CastASTNode*)node)->cast_type,
                                          use->own_base, use->own_limit,
@@ -3795,8 +3812,10 @@ static void NoteLambdaBodyEnclosingTemplate(ASTNode* node, void* data,
         use->found = true;
         return;
       }
-      NoteEnclosingTemplateParameterInType(id->symbol->type, use->own_base,
-                                           use->own_limit, &use->found, 0);
+      if (!names_other_function_template) {
+        NoteEnclosingTemplateParameterInType(id->symbol->type, use->own_base,
+                                             use->own_limit, &use->found, 0);
+      }
     }
     if (id->template_arguments != NULL) {
       for (size_t i = 0; i < id->template_arguments->length && !use->found;
@@ -4112,13 +4131,27 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
       return formal->info.array.size.fixed == actual->info.array.size.fixed &&
              DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
                                                 formal->next, actual->next);
-    case kDeclMemberPointer:
-      return TypeMemberPointerClass(formal) ==
-                 TypeMemberPointerClass(actual) &&
-             DeduceFunctionTemplateTypeArgument(
-                 args, explicit_arg_count,
-                 TypeMemberPointerPointeeType(formal),
-                 TypeMemberPointerPointeeType(actual));
+    case kDeclMemberPointer: {
+      // `Result (T::*)()` stores T as a template parameter index on the
+      // member-pointer node, not as a class.  Deduce T from the argument's
+      // class, then deduce Result from the function type.
+      if (formal->template_parameter_index >= 0) {
+        Struct* actual_class = TypeMemberPointerClass(actual);
+        if (actual_class == NULL || actual_class->tag_symbol == NULL ||
+            actual_class->tag_symbol->type == NULL ||
+            !SetDeducedFunctionTemplateTypeArgument(
+                args, explicit_arg_count, formal->template_parameter_index,
+                actual_class->tag_symbol->type)) {
+          return false;
+        }
+      } else if (TypeMemberPointerClass(formal) !=
+                 TypeMemberPointerClass(actual)) {
+        return false;
+      }
+      return DeduceFunctionTemplateTypeArgument(
+          args, explicit_arg_count, TypeMemberPointerPointeeType(formal),
+          TypeMemberPointerPointeeType(actual));
+    }
     case kDeclReference:
     case kDeclRValueReference:
       return false;
@@ -4306,10 +4339,20 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
                                                ASTNode* actual) {
   if (formal == NULL || actual == NULL || actual->type == NULL) {
     // A braced list may still be untyped while the surrounding call is
-    // deduced.  Against a parameter that names no template parameter it is a
-    // non-deduced context, not a deduction failure.
-    return actual != NULL && actual->op == AST_OP(braced_init) &&
-           formal != NULL && !TypeContainsTemplateParameter(formal);
+    // deduced.  [temp.deduct.call]: that argument is a non-deduced context
+    // unless the parameter is std::initializer_list or an array, even when the
+    // parameter type names a template parameter deduced from another argument
+    // (`SetFlag(&FLAGS_fromenv, {})`).
+    if (actual != NULL && actual->op == AST_OP(braced_init) && formal != NULL) {
+      TypeRecord* untyped_target =
+          TypeIsReference(formal) ? formal->next : formal;
+      if (!TypeIsCXXInitializerList(untyped_target) &&
+          (untyped_target == NULL ||
+           untyped_target->declarator != kDeclArray)) {
+        return true;
+      }
+    }
+    return false;
   }
   TypeRecord* alias_pattern = FormalWithAliasPattern(formal);
   if (alias_pattern != NULL) {
@@ -4575,6 +4618,20 @@ static Vector* NewFunctionTemplateDeductionArguments(TypeRecord* func,
         func->info.function.template_parameters.value.p[i];
     if (param != NULL && param->is_parameter_pack) {
       TemplateArgument* pack = NewEmptyPackTemplateArgument(param->kind);
+      // A pack absorbs the tail of an explicit argument list.  `take<Ts...>()`
+      // has already bound the pack; call deduction must not append again.
+      // A list that stops before the pack (`f<T>(a, b)`) leaves it to
+      // deduction.  An empty list whose first parameter is the pack is an
+      // explicit empty pack (`take<>()`).  int_value is not otherwise a value
+      // of the pack itself; deduction reads it and clears it before returning.
+      bool explicitly_specified = false;
+      if (explicit_args != NULL) {
+        size_t remaining = explicit_args->length - explicit_index;
+        if (remaining > 0 || i == 0) {
+          explicitly_specified = true;
+        }
+      }
+      pack->int_value = explicitly_specified ? 1 : 0;
       while (explicit_args != NULL && explicit_index < explicit_args->length) {
         TemplateArgument* explicit_arg = explicit_args->value.p[explicit_index++];
         if (explicit_arg == NULL || explicit_arg->kind != param->kind) {
@@ -4762,6 +4819,26 @@ retry_deduction:
           actual_index += consume;
           continue;
         }
+        if (pack != NULL && pack->int_value != 0) {
+          size_t explicit_len = pack->pack_arguments != NULL
+                                    ? pack->pack_arguments->length
+                                    : 0;
+          size_t provided = actuals->length - actual_index;
+          bool expansion = false;
+          for (size_t j = actual_index; j < actuals->length; j++) {
+            ASTNode* pack_actual = actuals->value.p[j];
+            if (pack_actual != NULL &&
+                (pack_actual->flags & kASTPackExpansion) != 0) {
+              expansion = true;
+              break;
+            }
+          }
+          if (!expansion && provided != explicit_len) {
+            goto deduction_failed;
+          }
+          actual_index = actuals->length;
+          continue;
+        }
         for (size_t j = 0; j < consume; j++) {
           ASTNode* actual = actuals->value.p[actual_index++];
           if (actual == NULL || actual->type == NULL ||
@@ -4802,6 +4879,39 @@ retry_deduction:
       int pack_type_index = -1;
       ASTNode* actual = actuals->value.p[i];
       size_t pack_length = 0;
+      if (formal != NULL &&
+          FindPackExpansionInType(formal->type, args, &pack_type_index,
+                                  &pack_length) &&
+          pack_type_index >= 0 &&
+          (size_t)pack_type_index < args->length) {
+        TemplateArgument* explicit_pack = args->value.p[pack_type_index];
+        if (explicit_pack != NULL && explicit_pack->int_value != 0) {
+          if (i == fixed_formal_count) {
+            size_t explicit_len = explicit_pack->pack_arguments != NULL
+                                      ? explicit_pack->pack_arguments->length
+                                      : 0;
+            size_t provided = actuals->length - fixed_formal_count;
+            bool expansion = false;
+            for (size_t j = fixed_formal_count; j < actuals->length; j++) {
+              ASTNode* pack_actual = actuals->value.p[j];
+              if (pack_actual != NULL &&
+                  (pack_actual->flags & kASTPackExpansion) != 0) {
+                expansion = true;
+                break;
+              }
+            }
+            if (!expansion && provided != explicit_len) {
+              g_deduce_defer_bare_member = false;
+              g_deduce_template_parameter_base = saved_deduce_base;
+              VectorDeleteWithContents(
+                  args, (VectorElementDestructor)TemplateArgumentDelete,
+                  /*free_element=*/false);
+              return NULL;
+            }
+          }
+          continue;
+        }
+      }
       if (formal == NULL || actual == NULL || actual->type == NULL ||
           !FindPackExpansionInType(formal->type, args, &pack_type_index,
                                    &pack_length) ||
@@ -4836,6 +4946,14 @@ retry_deduction:
   }
 deduction_finished:
   g_deduce_defer_bare_member = false;
+  if (args != NULL) {
+    for (size_t i = 0; i < args->length; i++) {
+      TemplateArgument* arg = args->value.p[i];
+      if (arg != NULL && arg->pack_arguments != NULL) {
+        arg->int_value = 0;
+      }
+    }
+  }
   if (formal_pack_index >= 0) {
     Symbol* formal = func->info.function.prototype.value.p[formal_pack_index];
     int pack_type_index = -1;

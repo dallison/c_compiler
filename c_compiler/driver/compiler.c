@@ -2777,9 +2777,25 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                 // A non-constant initializer (gtest's TEST registration call,
                 // for example) runs from the process init function instead of
                 // being forced into a relocation.
+                // A class object whose constructor was not folded
+                // (`std::string flag = ""`) is still dynamic initialization
+                // even when the source expression is a constant.  Constant
+                // initialization stays in place when a constexpr object image
+                // was produced.
+                bool class_needs_dynamic_init = false;
                 if (CompilerIsCXX() && !decl->symbol->flags.is_constexpr &&
                     !decl->symbol->flags.is_constinit &&
-                    CXXThreadLocalInitializerIsDynamic(decl->initializer)) {
+                    TypeIsStructOrUnion(decl->symbol->type) &&
+                    decl->symbol->type->info.struct_info != NULL &&
+                    !decl->symbol->type->info.struct_info->is_aggregate &&
+                    ConstexprObjectInitializerForSymbol(
+                        decl->symbol, decl->initializer->location) == NULL) {
+                  class_needs_dynamic_init = true;
+                }
+                if (CompilerIsCXX() && !decl->symbol->flags.is_constexpr &&
+                    !decl->symbol->flags.is_constinit &&
+                    (CXXThreadLocalInitializerIsDynamic(decl->initializer) ||
+                     class_needs_dynamic_init)) {
                   if (!VariableDefinitionIsODRDiscardable(decl->symbol)) {
                     MarkReferencesInAST(decl->initializer);
                   }

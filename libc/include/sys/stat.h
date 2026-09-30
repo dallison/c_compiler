@@ -75,6 +75,7 @@ extern int stat(const char* path, struct stat* buf);
 extern int fstat(int fd, struct stat* buf);
 extern int lstat(const char* path, struct stat* buf);
 extern int chmod(const char* path, uint32_t mode);
+extern int mkdir(const char* path, unsigned short mode);
 
 #ifdef __cplusplus
 }

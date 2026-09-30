@@ -59,6 +59,7 @@ static Namespace* ResolveNamespaceChildCheckingAmbiguity(Syntax* syntax,
                                                          String* name,
                                                          bool* ambiguous);
 static bool CXXConstructorSetHasInitializerList(StructMember* ctor);
+static bool TypeHasCXXInitializerListConstructor(TypeRecord* type);
 
 bool SyntaxCurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
   Lex* lex = syntax->lex;
@@ -2769,6 +2770,11 @@ bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
       CompilerRecordInjectedSymbol(NULL, syntax->local_tag_stack, symbol,
                                    /*is_tag=*/true, /*is_global=*/false);
     }
+    // A local class (and a lambda closure) is a block-scope tag.  Substituting
+    // an enclosing function template has to rebuild it; an unmarked tag is
+    // copied as an unrelated complete class and keeps the template parameter
+    // (`FactoryImpl(Factory)` never sees the concrete factory type).
+    symbol->flags.is_block_scope = true;
     VectorAppend(&syntax->all_local_symbols, symbol);
   }
   return ok;
@@ -5899,7 +5905,8 @@ static StructMember* FindCXXDirectDataMemberByName(Struct* owner,
   StringInit(&name_str, name);
   StructMember* member = FindStructMember(owner, &name_str);
   StringDestruct(&name_str);
-  if (member != NULL && !member->is_static && !member->is_member_function) {
+  if (member != NULL && !member->is_static && !member->is_member_function &&
+      !StorageIs(member->symbol->storage, STO(typedef))) {
     return member;
   }
   return NULL;
@@ -6440,19 +6447,21 @@ static bool CXXConstructorSetHasUserProvidedDefault(TypeRecord* record_type,
 static ASTNode* NewCXXAggregateMemberZeroInitializer(
     Syntax* syntax, TypeRecord* func, StructMember* member,
     SourceLocation location) {
+  (void)syntax;
   ASTNode* target =
       NewCXXThisMemberAccess(func, member->symbol->name.value, location);
   if (target == NULL) {
     return NULL;
   }
-  Symbol* storage = SyntaxNewTemporary(syntax, member->symbol->type);
-  ASTNode* value = NewCompoundLiteralASTNode(
-      NewIdentifierASTNode(storage, location), location,
+  // Value-initialization zero-fills the object, then runs a non-trivial
+  // default constructor.  Assigning an empty temporary would call operator=,
+  // which value-initialization does not do and which may be deleted.
+  target->flags |= kASTNeedAddress;
+  ASTNode* init = NewBinaryASTNode(
+      AST_OP(init), member->symbol->type, location, target,
       NewBracedInitializerASTNode(NewVector(), NULL, location));
-  ASTNode* assign = NewBinaryASTNode(AST_OP(assign), member->symbol->type,
-                                     location, target, value);
-  assign->flags |= kASTCXXMemberInitializer;
-  return NewExpressionStatementASTNode(assign, location);
+  init->flags |= kASTCXXMemberInitializer | kASTValueInitMemzero;
+  return NewExpressionStatementASTNode(init, location);
 }
 
 static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
@@ -6731,11 +6740,27 @@ static ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
     return NULL;
   }
   if (member->default_initializer != NULL) {
-    Vector* actuals = CXXDefaultMemberInitializerActuals(
-        member->default_initializer);
+    // `member{a, b}` is list-initialization.  When the class has an
+    // initializer-list constructor, the braced list is one argument of that
+    // constructor ([over.match.list]); flattening it into separate arguments
+    // turns `map{{k, v}}` into a two-argument call.  An empty list still
+    // value-initializes.
+    ASTNode* initializer = member->default_initializer;
+    if (initializer->op == AST_OP(braced_init) &&
+        ((BracedInitializerASTNode*)initializer)->initializers != NULL &&
+        ((BracedInitializerASTNode*)initializer)->initializers->length > 0 &&
+        member->symbol->type != NULL &&
+        TypeIsStructOrUnion(member->symbol->type) &&
+        TypeHasCXXInitializerListConstructor(member->symbol->type)) {
+      Vector* actuals = NewVector();
+      VectorAppend(actuals,
+                   ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL));
+      return NewCXXMemberInitializerStatement(
+          syntax, func, member, actuals, true, initializer->location);
+    }
+    Vector* actuals = CXXDefaultMemberInitializerActuals(initializer);
     return NewCXXMemberInitializerStatement(
-        syntax, func, member, actuals, true,
-        member->default_initializer->location);
+        syntax, func, member, actuals, true, initializer->location);
   }
   // No default member initializer and no explicit mem-initializer: a class-type
   // member that has a default constructor must still be default-constructed by
@@ -6744,7 +6769,8 @@ static ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
   // that has a constructor.  This does not apply to the memberwise copy/move
   // special members, whose members are copied/moved from the source object (by
   // AppendCXXMemberwiseAssignments) rather than default-constructed.
-  if (func != NULL && TypeIsFunction(func)) {
+  if (func != NULL && TypeIsFunction(func) &&
+      !func->info.function.is_user_provided) {
     switch (func->info.function.cxx_special_member_kind) {
       case kCXXSpecialMemberCopyConstructor:
       case kCXXSpecialMemberMoveConstructor:
@@ -7713,7 +7739,12 @@ static void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,
     func->info.function.is_defaulted = true;
     func->info.function.is_explicitly_defaulted = true;
     func->info.function.is_constexpr_eligible = true;
-    func->info.function.is_inline = true;
+    // Only a function defaulted on its first declaration is implicitly inline.
+    // An out-of-line `Test::~Test() = default` keeps the linkage of the
+    // declaration; marking it inline here drops the strong definition.
+    if (is_first_declaration) {
+      func->info.function.is_inline = true;
+    }
     if (is_first_declaration &&
         func->info.function.contract_assertions.length != 0) {
       SyntaxError(syntax,
@@ -7835,6 +7866,7 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     SyntaxOpenScope(syntax);
     AddFunctionScopeSymbols(syntax, sym->type);
     sym->flags.is_defined = true;
+    sym->flags.is_inline_defn = true;
     sym->type->info.function.definition = true;
     sym->type->info.function.is_user_provided = true;
     Vector* body = NewVector();
@@ -7897,6 +7929,15 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     
     sym->flags.is_defined = true;
     sym->type->info.function.definition = true;
+    // A function body is user-provided.  An out-of-line copy constructor must
+    // not memberwise-copy every field: members absent from the
+    // mem-initializer-list are default-initialized, and a deleted member copy
+    // (`once_flag`) is not invoked.
+    sym->type->info.function.is_user_provided = true;
+    if (old_sym != NULL && old_sym->type != NULL &&
+        TypeIsFunction(old_sym->type)) {
+      old_sym->type->info.function.is_user_provided = true;
+    }
     if (CompilerIsCXX() && sym->type->info.function.is_inline) {
       sym->flags.is_inline_defn = true;
       if (!StorageIs(sym->storage, STO(static))) {
@@ -8119,6 +8160,54 @@ static void DeferFriendFunctionBody(Syntax* syntax, Symbol* sym) {
   VectorAppend(syntax->deferred_friend_bodies, deferred);
 }
 
+// True when `type` names `str` (the injected-class-name of the class being
+// defined, or a reference/parameter of that type).
+static bool TypeMentionsStruct(TypeRecord* type, Struct* str) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (str != NULL && TypeIsStructOrUnion(current) &&
+        current->info.struct_info == str) {
+      return true;
+    }
+    if (!TypeIsFunction(current)) {
+      continue;
+    }
+    Vector* prototype = &current->info.function.prototype;
+    for (size_t i = 0; i < prototype->length; i++) {
+      Symbol* param = prototype->value.p[i];
+      if (param != NULL && TypeMentionsStruct(param->type, str)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// True when this friend must stay a pattern and be cloned per class
+// instantiation, rather than compiled as one concrete function.
+static bool FriendBodyIsClassTemplatePattern(Symbol* symbol,
+                                             Struct* class_head) {
+  if (symbol == NULL) {
+    return false;
+  }
+  if (symbol->flags.is_template ||
+      TypeContainsTemplateParameter(symbol->type)) {
+    return true;
+  }
+  // is_template is set only after the class body is parsed.  During the
+  // flush, defining_template_scope_count is the signal that this class is a
+  // template, and an injected-class-name parameter (`civil_time a`) names
+  // that pattern even though it carries no template-parameter index.
+  if (class_head != NULL && class_head->defining_template_scope_count > 0 &&
+      TypeMentionsStruct(symbol->type, class_head)) {
+    return true;
+  }
+  if (symbol->type == NULL || !TypeIsFunction(symbol->type)) {
+    return false;
+  }
+  Struct* owner = symbol->type->info.function.cxx_member_owner;
+  return owner != NULL && owner->is_template;
+}
+
 void SyntaxFlushDeferredFriendBodies(Syntax* syntax) {
   Vector* deferred = syntax->deferred_friend_bodies;
   if (deferred == NULL || deferred->length == 0) {
@@ -8158,11 +8247,16 @@ void SyntaxFlushDeferredFriendBodies(Syntax* syntax) {
         DeclareOrDefineFunction(syntax, friend_decls, entry->symbol, NULL);
     compiler->current_class_access_context = saved_access;
     SyntaxCloseScope(syntax);
+    bool defer_friend =
+        FriendBodyIsClassTemplatePattern(entry->symbol, syntax->cxx_class_head);
     if (definition == NULL) {
       VectorDelete(friend_decls);
-    } else if (entry->symbol->flags.is_template ||
-               TypeContainsTemplateParameter(entry->symbol->type)) {
-      // A class-template friend is emitted when the class is instantiated.
+    } else if (defer_friend) {
+      // A friend defined in a class template is emitted with each
+      // instantiation.  The pattern body is not a function of its own: its
+      // injected-class-name parameters name the unspecialized template, and
+      // compiling that body once the specializations exist treats every
+      // specialization as an exact match (`civil_time + n`).
       VectorAppend(&compiler->declaration_asts, definition);
     } else {
       CompilerQueuePendingTemplateInstantiation(definition);
@@ -15622,6 +15716,42 @@ static bool CXXTemplateIdLooksLikeCallExpression(Syntax* syntax) {
   return result;
 }
 
+// `AssertHelper(type, file, line, "") = message` is a constructor call, not a
+// declaration.  A type name followed by a parenthesized list that contains a
+// comma cannot be a declarator (`T(a)` can declare `a`; `T(a, b)` cannot).
+static bool CXXFunctionalCastLooksLikeExpression(Syntax* syntax) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(identifier)) ||
+      !SyntaxLookingAtType(syntax)) {
+    return false;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool result = false;
+  if (LexLookingAt(syntax->lex, TOK(lparen))) {
+    int depth = 0;
+    bool top_level_comma = false;
+    do {
+      if (LexLookingAt(syntax->lex, TOK(lparen))) {
+        depth++;
+      } else if (LexLookingAt(syntax->lex, TOK(rparen))) {
+        depth--;
+      } else if (depth == 1 && LexLookingAt(syntax->lex, TOK(comma))) {
+        top_level_comma = true;
+      } else if (LexLookingAt(syntax->lex, TOK(semicolon)) ||
+                 LexLookingAt(syntax->lex, TOK(lbrace)) ||
+                 LexLookingAt(syntax->lex, TOK(rbrace))) {
+        break;
+      }
+      LexNextToken(syntax->lex);
+    } while (!LexEof(syntax->lex) && depth > 0);
+    result = top_level_comma && depth == 0;
+  }
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
 static bool CXXQualifiedNameLooksLikeCallExpression(Syntax* syntax) {
   // Recognize any qualified-name start: a leading `::`, a name that a
   // namespace/template prefix makes look qualified, or a plain `ident::`
@@ -15675,6 +15805,9 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
     return result;
   }
   if (CXXQualifiedNameLooksLikeCallExpression(syntax)) {
+    return false;
+  }
+  if (CXXFunctionalCastLooksLikeExpression(syntax)) {
     return false;
   }
   if (CXXTemplateIdLooksLikeCallExpression(syntax)) {

@@ -7224,6 +7224,17 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   return result;
 }
 
+// `T* const` is a const pointer.  The delete temporary is assigned, so it
+// cannot keep that top-level const.
+static TypeRecord* CXXMutablePointerType(TypeRecord* pointer_type) {
+  if (pointer_type == NULL || (pointer_type->qualifiers & kQualConst) == 0) {
+    return pointer_type;
+  }
+  TypeRecord* copy = TypeRecordCopy(pointer_type);
+  copy->qualifiers &= ~kQualConst;
+  return copy;
+}
+
 // `delete` of `const T*` is valid.  The deallocation function takes `void*`,
 // and a const object pointer does not convert to that implicitly.
 static ASTNode* NewDeallocationPointer(ASTNode* expr, SourceLocation location) {
@@ -7272,7 +7283,8 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
     }
     TypeRecord* size_type = NewSizeTypeRecord();
     TypeRecord* size_ptr_type = NewPointerTo(kQualPlain, size_type);
-    Symbol* object_ptr = SyntaxNewTemporary(syntax, pointer_type);
+    Symbol* object_ptr =
+        SyntaxNewTemporary(syntax, CXXMutablePointerType(pointer_type));
     Symbol* header = SyntaxNewTemporary(syntax, size_ptr_type);
     Symbol* count = SyntaxNewTemporary(syntax, size_type);
     Vector* statements = NewVector();
@@ -7341,9 +7353,10 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                           location, actuals);
   }
 
-  Symbol* temp = SyntaxNewTemporary(syntax, pointer_type);
+  TypeRecord* mutable_pointer = CXXMutablePointerType(pointer_type);
+  Symbol* temp = SyntaxNewTemporary(syntax, mutable_pointer);
   ASTNode* assign =
-      NewBinaryASTNode(AST_OP(assign), pointer_type, location,
+      NewBinaryASTNode(AST_OP(assign), mutable_pointer, location,
                        NewIdentifierASTNode(temp, location), expr);
   ASTNode* destructor =
       NewCXXDestructorCallForPointer(pointer_type->next, temp, location);

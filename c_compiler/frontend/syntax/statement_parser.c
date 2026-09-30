@@ -1514,6 +1514,19 @@ static void AddRangeForStructuredBindingVariables(Syntax* syntax,
   }
 }
 
+static void NoteRangeExpressionUndeducedAuto(ASTNode* node, void* data,
+                                            int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol != NULL && TypeContainsAuto(symbol->type)) {
+    *(bool*)data = true;
+  }
+}
+
 static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
                                              TokenClass followers,
                                              SourceLocation location) {
@@ -1558,10 +1571,19 @@ static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
   }
   bool reuse_named_range =
       range != NULL && range->op == AST_OP(identifier);
+  // A nested range-for can name the outer loop variable while that variable
+  // is still `auto` (`for (auto line : ...) { for (auto token : Split(line)) }`).
+  // Analyzing the inner range now freezes the call against the placeholder, and
+  // the later deduction pass will not type it again.
+  bool range_mentions_undeduced_auto = false;
+  if (range != NULL) {
+    ASTNodeVisit(range, NoteRangeExpressionUndeducedAuto, 0,
+                 &range_mentions_undeduced_auto);
+  }
   // A braced range is an initializer, not an expression.  Auto deduction of
   // the hidden `auto&& __range` turns it into an initializer_list later.
   if (!reuse_named_range && range != NULL &&
-      range->op != AST_OP(braced_init)) {
+      range->op != AST_OP(braced_init) && !range_mentions_undeduced_auto) {
     range = AnalyzeExpression(range);
   }
   bool range_is_lvalue =

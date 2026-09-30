@@ -3002,11 +3002,13 @@ darwin_libc_archive(
     ],
     output = "libcaarch64_darwin.a",
     libc_c_srcs = [
+        "libc/assert_fail.c",
         "libc/cxx_guard.c",
         "libc/cxx_new.c",
         "libc/cxx_rtti.c",
         "libc/cxx_tls.c",
         "libc/cxx_tls_stubs.c",
+        "libc/darwin_fpclass.c",
         "libc/darwin_fs.c",
         "libc/darwin_support.c",
         "libc/darwin_syscall.c",
@@ -3018,6 +3020,7 @@ darwin_libc_archive(
         "libc/fpfuncs.c",
         "libc/ftoa.c",
         "libc/gxx_personality.c",
+        "libc/itoa_int.c",
         "libc/itoa_longlong.c",
         "libc/itoa_ptr.c",
         "libc/lsda.c",
@@ -3031,10 +3034,14 @@ darwin_libc_archive(
         "libc/strtox.h",
         "libc/strtox_long.h",
         "c_compiler/Loader/chrono_host.h",
+        "c_compiler/support/fp_extended.h",
         "c_compiler/Loader/filesystem_host.h",
     ],
     host_c_srcs = [
         "c_compiler/Loader/chrono_host.c",
+        "c_compiler/support/fp_extended.c",
+        "libc/darwin_stdio_alias.c",
+        "libc/long_double.c",
     ],
 )
 

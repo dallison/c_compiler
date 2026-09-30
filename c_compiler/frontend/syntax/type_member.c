@@ -2240,11 +2240,16 @@ void FinalizePendingInlineConstructorPreambles(TypeParser* parser,
   for (size_t i = 0; i < pending_inline_constructor_preambles.length; i++) {
     PendingInlineConstructorPreamble* pending =
         pending_inline_constructor_preambles.value.p[i];
+    // Nested-class bodies stay deferred until the enclosing class is complete,
+    // so their preambles are queued only when that outer class is finalized.
+    // Matching the owner exactly drops those constructors and leaves
+    // `locale::id`'s member initializers out of the emitted function.
     if (pending == NULL || pending->symbol == NULL ||
         pending->symbol->type == NULL ||
-        pending->symbol->type->info.function.cxx_member_owner != owner) {
+        pending->symbol->type->info.function.cxx_member_owner == NULL) {
       continue;
     }
+    (void)owner;
     TypeRecord* func = pending->symbol->type;
     if (func->info.function.body == NULL ||
         func->info.function.body->op != AST_OP(compound)) {
