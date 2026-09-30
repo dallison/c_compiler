@@ -1317,6 +1317,11 @@ static TargetInstruction* sty(W65C02Generator* g, TargetInstruction* dest, int i
 }
 
 static TargetInstruction* stz(W65C02Generator* g, TargetInstruction* dest, int index) {
+  if (!Is65c02()) {
+    // NMOS has no STZ. A is not live across these stores.
+    ldai(g, 0);
+    return sta(g, dest, index);
+  }
   return Emit(g, NewInstruction2(W65C02_OP(stz), dest,
                           ByteConst(g, index),
                           GetAddrMode(dest)));
@@ -4024,13 +4029,14 @@ static void LowerConditionalBranch(W65C02Generator* g,
       // otherwise, BRA is comparing true.
       int64_t cval = IRIntConstValue(input);
       TargetInstruction* bra = NULL;
+      W65C02Opcode always = Is65c02() ? W65C02_OP(bra) : W65C02_OP(jmp);
       if (cval == 0) {
         if (node->opcode == IR_OP(bfalse)) {
-          bra = EmitBranch(g, W65C02_OP(bra), target_node);
+          bra = EmitBranch(g, always, target_node);
         }
       } else {
         if (node->opcode == IR_OP(btrue)) {
-          bra = EmitBranch(g, W65C02_OP(bra), target_node);
+          bra = EmitBranch(g, always, target_node);
         }
       }
       if (bra != NULL) {

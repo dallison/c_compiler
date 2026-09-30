@@ -46,7 +46,6 @@
 .comm handles, 8
 .comm bbc_name, 16
 .comm clk, 5
-.comm zp_save, 0x90
 
 .section ".text.syscall", "ax", @progbits
 
@@ -63,9 +62,12 @@ syscall:
   LDA (__sp), Y
   STA sysno
   CMP #SYS_EXIT_6502
-  BEQ do_exit
+  BEQ syscall_exit
   CMP #SYS_EXIT_CLEAN
-  BEQ do_exit
+  BNE syscall_not_exit
+syscall_exit:
+  JMP do_exit
+syscall_not_exit:
   CMP #SYS_ABORT_6502
   BNE dispatch_write
   JMP do_abort
@@ -100,16 +102,22 @@ dispatch_clock:
 enosys:
   JMP set_minus_one
 
+.section ".text.do_exit", "ax", @progbits
+.global do_exit
 do_exit:
   LDX bbc_s
   TXS
   RTS
 
+.section ".text.do_abort", "ax", @progbits
+.global do_abort
 do_abort:
   BRK
   .byte 0
   .asciz "abort"
 
+.section ".text.do_write", "ax", @progbits
+.global do_write
 do_write:
   JSR load_write_args
   LDA #0
@@ -150,7 +158,7 @@ write_put:
   STA os_target
   LDA #%hi(OSBPUT)
   STA os_target+1
-  JSR os_call
+  JSR bbc_os_call
   JMP write_advance
 write_console:
   LDA byte
@@ -173,7 +181,7 @@ write_emit:
   LDA #0
   STA os_x
   STA os_y
-  JSR os_call
+  JSR bbc_os_call
 write_advance:
   INC ptr
   BNE write_ptr_ok
@@ -194,6 +202,8 @@ write_done:
 write_bad:
   JMP set_minus_one
 
+.section ".text.do_read", "ax", @progbits
+.global do_read
 do_read:
   JSR load_write_args
   LDA #0
@@ -225,7 +235,7 @@ read_loop:
   STA os_target
   LDA #%hi(OSRDCH)
   STA os_target+1
-  JSR os_call
+  JSR bbc_os_call
   JMP read_got
 read_bget:
   LDA #0
@@ -237,7 +247,7 @@ read_bget:
   STA os_target
   LDA #%hi(OSBGET)
   STA os_target+1
-  JSR os_call
+  JSR bbc_os_call
 read_got:
   LDA os_p
   AND #1
@@ -274,6 +284,8 @@ read_done:
 read_bad:
   JMP set_minus_one
 
+.section ".text.do_open", "ax", @progbits
+.global do_open
 do_open:
   LDY #2
   LDA (__sp), Y
@@ -328,7 +340,7 @@ open_find:
   STA os_target
   LDA #%hi(OSFIND)
   STA os_target+1
-  JSR os_call
+  JSR bbc_os_call
   LDA os_a
   BEQ open_fail
   LDX slot
@@ -345,6 +357,8 @@ open_find:
 open_fail:
   JMP set_minus_one
 
+.section ".text.do_close", "ax", @progbits
+.global do_close
 do_close:
   LDY #2
   LDA (__sp), Y
@@ -371,7 +385,7 @@ close_go:
   STA os_target
   LDA #%hi(OSFIND)
   STA os_target+1
-  JSR os_call
+  JSR bbc_os_call
   LDX slot
   LDA #0
   STA handles, X
@@ -380,6 +394,8 @@ close_ok:
 close_bad:
   JMP set_minus_one
 
+.section ".text.do_lseek", "ax", @progbits
+.global do_lseek
 do_lseek:
   LDY #2
   LDA (__sp), Y
@@ -458,11 +474,15 @@ lseek_copy:
 lseek_bad:
   JMP set_minus_one
 
+.section ".text.do_time", "ax", @progbits
+.global do_time
 do_time:
   JSR read_clock
   JSR div100
   JMP store_result
 
+.section ".text.do_clock", "ax", @progbits
+.global do_clock
 do_clock:
   JSR read_clock
   LDX #0
@@ -474,6 +494,8 @@ clock_copy:
   BNE clock_copy
   JMP store_result
 
+.section ".text.load_write_args", "ax", @progbits
+.global load_write_args
 load_write_args:
   LDY #2
   LDA (__sp), Y
@@ -495,6 +517,8 @@ load_write_args:
   STA len+1
   RTS
 
+.section ".text.load_byte", "ax", @progbits
+.global load_byte
 load_byte:
   LDA ptr
   STA __t2
@@ -510,6 +534,8 @@ load_byte_keep:
   RTS
 
 // fd is an OS handle slot. Carry set if it is not open.
+.section ".text.lookup_handle", "ax", @progbits
+.global lookup_handle
 lookup_handle:
   SEC
   LDA fd
@@ -527,6 +553,8 @@ lookup_bad:
   SEC
   RTS
 
+.section ".text.set_from_count", "ax", @progbits
+.global set_from_count
 set_from_count:
   LDA count
   STA result0
@@ -537,6 +565,8 @@ set_from_count:
   STA result3
   JMP store_result
 
+.section ".text.set_zero", "ax", @progbits
+.global set_zero
 set_zero:
   LDA #0
   STA result0
@@ -545,13 +575,18 @@ set_zero:
   STA result3
   JMP store_result
 
+.section ".text.set_minus_one", "ax", @progbits
+.global set_minus_one
 set_minus_one:
   LDA #0xff
   STA result0
   STA result1
   STA result2
   STA result3
+  JMP store_result
 
+.section ".text.store_result", "ax", @progbits
+.global store_result
 store_result:
   LDA res_ptr
   STA __t2
@@ -571,6 +606,8 @@ store_result:
   STA (__t2), Y
   RTS
 
+.section ".text.read_clock", "ax", @progbits
+.global read_clock
 read_clock:
   LDX #0
   LDA #0
@@ -589,9 +626,11 @@ clock_clear:
   STA os_target
   LDA #%hi(OSWORD)
   STA os_target+1
-  JMP os_call
+  JMP bbc_os_call
 
 // Divide the 4-byte clock by 100 into result0.
+.section ".text.div100", "ax", @progbits
+.global div100
 div100:
   LDA #0
   STA result0
@@ -628,10 +667,11 @@ div_next:
   RTS
 
 // A is the OSARGS reason. Y is the handle. argblk is the 4-byte block,
-// which MOS requires in zero page. Language zero page is restored.
+// which MOS requires in zero page. &70 is math scratch.
+.section ".text.os_args", "ax", @progbits
+.global os_args
 os_args:
   STA byte
-  JSR zp_save_all
   LDX #0
 os_args_put:
   LDA argblk, X
@@ -650,18 +690,24 @@ os_args_get:
   INX
   CPX #4
   BNE os_args_get
-  JMP zp_restore_all
+  RTS
 
-os_call:
-  JSR zp_save_all
+// Mailbox is os_a, os_x, os_y, os_target. bbc_mos.s calls this too.
+// MOS leaves the language zero page alone, so this does not copy it.
+.section ".text.bbc_os_call", "ax", @progbits
+.global bbc_os_call
+.global bbc_os_invoke
+
+bbc_os_call:
+bbc_os_invoke:
   LDA os_target
-  STA os_jsr+1
+  STA bbc_os_jsr+1
   LDA os_target+1
-  STA os_jsr+2
+  STA bbc_os_jsr+2
   LDA os_a
   LDX os_x
   LDY os_y
-os_jsr:
+bbc_os_jsr:
   .byte 0x20, 0x00, 0x00
   STA os_a
   STX os_x
@@ -669,24 +715,4 @@ os_jsr:
   PHP
   PLA
   STA os_p
-  JMP zp_restore_all
-
-zp_save_all:
-  LDX #0
-zp_save_loop:
-  LDA 0, X
-  STA zp_save, X
-  INX
-  CPX #0x90
-  BNE zp_save_loop
-  RTS
-
-zp_restore_all:
-  LDX #0
-zp_restore_loop:
-  LDA zp_save, X
-  STA 0, X
-  INX
-  CPX #0x90
-  BNE zp_restore_loop
   RTS

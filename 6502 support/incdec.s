@@ -291,10 +291,11 @@ __dec21:
   LDA 1,X
   STA __t3
   SEC
-  LDA (__t2)
+  LDY #0
+  LDA (__t2),Y
   SBC #1
-  STA (__t2)
-  LDY #1
+  STA (__t2),Y
+  INY
   LDA (__t2), Y
   SBC #0
   STA (__t2), Y

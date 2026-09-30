@@ -54,6 +54,7 @@ filegroup(
         "libc/include/cstdbool",
         "libc/include/cstddef",
         "libc/include/cstdint",
+        "libc/include/cbbc",
         "libc/include/cstdio",
         "libc/include/cstdlib",
         "libc/include/cstring",

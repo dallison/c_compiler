@@ -1,6 +1,6 @@
 #include "vars.s"
 
-.section ".text.__enter", "ax", @progbits
+.section ".text.__save_reg_set", "ax", @progbits
 
 // Regular enter and leave with register save mask.
 .global __enter
@@ -64,7 +64,8 @@
 // Saves X
 __save_reg_set:
   // Make space on the stack.
-  PHX
+  TXA
+  PHA
   SEC
   LDA __sp
   SBC __t3
@@ -86,15 +87,18 @@ save_reg_loop:
   DEX
   DEY
   BPL save_reg_loop
-  PLX
+  PLA
+  TAX
   RTS
 
+.section ".text.__restore_reg_set", "ax", @progbits
 // Entry:
 // Y: start offset for first reg to restore
 // __t3: number of bytes to restore
 // Saves X
 __restore_reg_set:
-  PHX
+  TXA
+  PHA
 
   // Copy from top down.
   DEC __t3
@@ -133,7 +137,8 @@ restore_reg_void_loop:
   BPL restore_reg_void_loop
 
 restore_reg_done:
-  PLX
+  PLA
+  TAX
 
   // Remove space from stack.  __t3 has been decremented by 1 so we set the carry
   SEC
@@ -145,6 +150,11 @@ restore_reg_done:
   STA __sp+1
   RTS
 
+.section ".text.reg_mask_tables", "ax", @progbits
+.global reg_mask_sizes
+.global reg_mask_masks
+.global reg_mask_offsets
+.global reg_mask_reg_sizes
 // Sizes of each register set in bits, from LSB to MSB
 reg_mask_sizes:
   .byte 5,4,4,3,3
@@ -168,6 +178,7 @@ reg_mask_reg_sizes:
   .byte 1, 0, 2, 3, 2
 
 
+.section ".text.__save_from_mask", "ax", @progbits
 // __t0,t1: current save mask.
 // X: reg type (0 = b,...)
 // Exit:
@@ -201,12 +212,14 @@ end_save_regs:
   RTS
 
 
+.section ".text.__save_regs", "ax", @progbits
 // Entry:
 // __t2, __t3: address of save mask, corrupted on exit.
 __save_regs:
-  LDA (__t2)
+  LDY #0
+  LDA (__t2),Y
   STA __t0
-  LDY #1
+  INY
   LDA (__t2),Y
   STA __t1
   INY
@@ -217,18 +230,22 @@ save_regs_loop:
   LDA __t0
   ORA __t1
   ORA __t2
-  BEQ end_save_regs
+  BEQ save_regs_done
   JSR __save_from_mask
   INX
   BNE save_regs_loop
+save_regs_done:
+  RTS
 
+.section ".text.__restore_regs", "ax", @progbits
 // Entry:
 // __fp-3: address of save mask
 // This is like save_regs except it needs to operate in reverse.
 // It needs to pop the registers off the stack in reverse order.
 // Saves X
 __restore_regs:
-  PHX
+  TXA
+  PHA
   SEC
   LDA __fp
   SBC #3          // 24 bits for save mask
@@ -236,9 +253,10 @@ __restore_regs:
   LDA __fp+1
   SBC #0
   STA __t3
-  LDA (__t2)
+  LDY #0
+  LDA (__t2),Y
   STA __t0
-  LDY #1
+  INY
   LDA (__t2),Y
   STA __t1
   INY
@@ -291,9 +309,12 @@ skip_restore:
   DEX
   BPL restore_reg_loop2
 end_restore:
-  PLX
+  PLA
+  TAX
   RTS
 
+.section ".text.save_mask_space", "ax", @progbits
+.global save_mask_space
 // Makes room for save mask by decrementing sp.
 save_mask_space:
   SEC
@@ -340,11 +361,15 @@ save_mask_space:
 // Variant for value-returning functions with frames < 256 bytes.
 // A = frame size, X,Y = result address (stored into __result here rather
 // than in every function prologue).
+.section ".text.__enter_res", "ax", @progbits
 __enter_res:
   STX __result
   STY __result+1
   TAX
+  JMP __enter
 
+.section ".text.__enter", "ax", @progbits
+.global enter_save_regs
 __enter:
   LDY #0
 
@@ -373,9 +398,10 @@ __enter:
   INC __t3
 enter_skip:
   // Store save mask (24 bits)
-  LDA (__t2)
-  STA (__sp)
-  LDY #1
+  LDY #0
+  LDA (__t2),Y
+  STA (__sp),Y
+  INY
   LDA (__t2),Y
   STA (__sp),Y
   INY
@@ -403,8 +429,9 @@ enter_skip:
   // Store old fp.
   LDA __fp+1
   STA (__sp),Y
+  DEY
   LDA __fp
-  STA (__sp)
+  STA (__sp),Y
 
   // Make new fp (old sp, prior to decrement)
   PLA
@@ -436,11 +463,14 @@ enter_save_regs:
 // Variant for value-returning functions with frames < 256 bytes.
 // A = frame size, X,Y = result address (stored into __result here rather
 // than in every function prologue).
+.section ".text.__enter_leaf_res", "ax", @progbits
 __enter_leaf_res:
   STX __result
   STY __result+1
   TAX
+  JMP __enter_leaf
 
+.section ".text.__enter_leaf", "ax", @progbits
 __enter_leaf:
   LDY #0
 
@@ -468,9 +498,10 @@ __enter_leaf:
   INC __t3
 enter_leaf_skip:
   // Store save mask
-  LDA (__t2)
-  STA (__sp)
-  LDY #1
+  LDY #0
+  LDA (__t2),Y
+  STA (__sp),Y
+  INY
   LDA (__t2),Y
   STA (__sp),Y
   INY
@@ -490,25 +521,29 @@ enter_leaf_skip:
   // Store old fp.
   LDA __fp+1
   STA (__sp),Y
+  DEY
   LDA __fp
-  STA (__sp)
+  STA (__sp),Y
 
   // Make new fp (old sp, prior to decrement)
   PLA
   STA __fp+1
   PLA
   STA __fp
-  BRA enter_save_regs
+  JMP enter_save_regs
 
 // Enter with no savemask.
 // Variant for value-returning functions with frames < 256 bytes.
 // A = frame size, X,Y = result address (stored into __result here rather
 // than in every function prologue).
+.section ".text.__enter_res_nomask", "ax", @progbits
 __enter_res_nomask:
   STX __result
   STY __result+1
   TAX
+  JMP __enter_nomask
 
+.section ".text.__enter_nomask", "ax", @progbits
 __enter_nomask:
   LDY #0
 
@@ -547,8 +582,9 @@ __enter_nomask:
   // Store old fp.
   LDA __fp+1
   STA (__sp),Y
+  DEY
   LDA __fp
-  STA (__sp)
+  STA (__sp),Y
 
   // Make new fp (old sp, prior to decrement)
   PLA
@@ -561,11 +597,14 @@ __enter_nomask:
 // Variant for value-returning functions with frames < 256 bytes.
 // A = frame size, X,Y = result address (stored into __result here rather
 // than in every function prologue).
+.section ".text.__enter_leaf_res_nomask", "ax", @progbits
 __enter_leaf_res_nomask:
   STX __result
   STY __result+1
   TAX
+  JMP __enter_leaf_nomask
 
+.section ".text.__enter_leaf_nomask", "ax", @progbits
 __enter_leaf_nomask:
   LDY #0
 
@@ -596,8 +635,9 @@ __enter_leaf_nomask:
   // Store old fp.
   LDA __fp+1
   STA (__sp),Y
+  DEY
   LDA __fp
-  STA (__sp)
+  STA (__sp),Y
 
   // Make new fp (old sp, prior to decrement)
   PLA
@@ -607,27 +647,31 @@ __enter_leaf_nomask:
   RTS
 
 
+.section ".text.__leave", "ax", @progbits
 // No result, zero out result range for restore_regs.
 __leave_void:
   LDX #0
 
   // Entry point for >256 bytes on stack frame
-  STZ __result
-  STZ __result+1
-  BRA leave_small
+  LDA #0
+  STA __result
+  STA __result+1
+  JMP leave_small
 
 __leave:
   LDX #0
 
   // Entry point for >256 bytes on stack frame
 leave_small:
-  PHY
+  TYA
+  PHA
   JSR __restore_regs
 
   // Load old fp.
-  LDA (__sp)
+  LDY #0
+  LDA (__sp),Y
   STA __fp
-  LDY #1
+  INY
   LDA (__sp),Y    // Y = 1
   STA __fp+1
   INY
@@ -649,27 +693,31 @@ leave_small:
   STA __sp+1
   RTS
 
+.section ".text.__leave_nomask", "ax", @progbits
 // No mask.
 // No result, zero out result range for restore_regs.
 __leave_void_nomask:
   LDX #0
 
   // Entry point for >256 bytes on stack frame
-  STZ __result
-  STZ __result+1
-  BRA leave_nomask_small
+  LDA #0
+  STA __result
+  STA __result+1
+  JMP leave_nomask_small
 
 __leave_nomask:
   LDX #0
 
   // Entry point for >256 bytes on stack frame
 leave_nomask_small:
-  PHY
+  TYA
+  PHA
 
   // Load old fp.
-  LDA (__sp)
+  LDY #0
+  LDA (__sp),Y
   STA __fp
-  LDY #1
+  INY
   LDA (__sp),Y    // Y = 1
   STA __fp+1
   INY
@@ -692,48 +740,57 @@ leave_reload:
   STA __sp+1
   RTS
 
+.section ".text.__leave_leaf", "ax", @progbits
+.global leave_leaf_common
+.global leave_reload
 __leave_leaf_void:
   LDX #0
 
   // Entry point for >256 bytes on stack frame
-  STZ __result
-  STZ __result+1
-  BRA leave_leaf_small
+  LDA #0
+  STA __result
+  STA __result+1
+  JMP leave_leaf_small
 
 __leave_leaf:
   LDX #0
 
 leave_leaf_small:
   // Entry point for >256 bytes on stack frame
-  PHY
+  TYA
+  PHA
   JSR __restore_regs
 
 leave_leaf_common:
   // Load old fp.
-  LDA (__sp)
+  LDY #0
+  LDA (__sp),Y
   STA __fp
-  LDY #1
+  INY
   LDA (__sp),Y
   STA __fp+1
-  BRA leave_reload
+  JMP leave_reload
 
+.section ".text.__leave_leaf_nomask", "ax", @progbits
 // No mask
 // Leave leaf proc
 __leave_leaf_void_nomask:
   LDX #0
 
   // Entry point for >256 bytes on stack frame
-  STZ __result
-  STZ __result+1
-  BRA leave_leaf_nomask_small
+  LDA #0
+  STA __result
+  STA __result+1
+  JMP leave_leaf_nomask_small
 
 __leave_leaf_nomask:
   LDX #0
 
 leave_leaf_nomask_small:
   // Entry point for >256 bytes on stack frame
-  PHY
-  BRA leave_leaf_common
+  TYA
+  PHA
+  JMP leave_leaf_common
  
 
 // Load the __result from the stack frame.
@@ -762,6 +819,8 @@ leave_leaf_nomask_small:
 // |                    |
 // +--------------------+
 
+.section ".text.__load_result", "ax", @progbits
+.global load_resultb
 __load_result:
   LDY #0
 load_resultb:
@@ -774,9 +833,10 @@ load_resultb:
   LDA __fp+1
   SBC __t1
   STA __t1
-  LDA (__t0)
+  LDY #0
+  LDA (__t0),Y
   STA __result
-  LDY #1
+  INY
   LDA (__t0),Y
   STA __result+1
   RTS
@@ -784,24 +844,28 @@ load_resultb:
 // X[,Y]: offset from fp to the saved result address.
 // A: zero-page register containing the value to return.
 // The b variants accept the high offset byte in Y.
+.section ".text.__load_result_value1", "ax", @progbits
 __load_result_value1:
   PHA
   JSR __load_result
   PLA
   JMP __result1
 
+.section ".text.__load_result_value1b", "ax", @progbits
 __load_result_value1b:
   PHA
   JSR load_resultb
   PLA
   JMP __result1
 
+.section ".text.__load_result_value2", "ax", @progbits
 __load_result_value2:
   PHA
   JSR __load_result
   PLA
   JMP __result2
 
+.section ".text.__load_result_value2b", "ax", @progbits
 __load_result_value2b:
   PHA
   JSR load_resultb
@@ -816,6 +880,8 @@ __load_result_value2b:
 // Exit:
 // __result: zero page offset of start of result range
 // __result+1: zero page offset at end of result range.
+.section ".text.set_result_range", "ax", @progbits
+.global set_result_range
 set_result_range:
   LDA __result+1
   BNE no_result_range
@@ -832,28 +898,33 @@ no_result_range:
 
 // A: zero page offset for 2-byte result
 // __result: address for result.
+.section ".text.__result1", "ax", @progbits
 __result1:
   TAX
+  LDY #0
   LDA 0,X
-  STA (__result)
+  STA (__result),Y
   LDA 1,X
   LDY #1
   JMP set_result_range
 
 // A: zero page offset for 2-byte result
 // __result: address for result.
+.section ".text.__result2", "ax", @progbits
 __result2:
   TAX
+  LDY #0
   LDA 0,X
-  STA (__result)
+  STA (__result),Y
   LDA 1,X
-  LDY #1
+  INY
   STA (__result), Y
   INY
   JMP set_result_range
 
 // A: zero page offset for 4-byte result
 // __result: address for result.
+.section ".text.__result4", "ax", @progbits
 __result4:
   TAX
   LDY #0
@@ -869,6 +940,7 @@ __result4loop:
   
 // A: zero page offset for 8-byte result
 // __result: address for result.
+.section ".text.__result8", "ax", @progbits
 __result8:
   TAX
   LDY #0
