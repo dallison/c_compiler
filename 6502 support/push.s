@@ -61,7 +61,8 @@
 // t0: number of bytes to increment sp by
 .section ".text.__incsp", "ax", @progbits
 __incsp:
-  STZ __t1
+  LDA #0
+  STA __t1
 
 // t0,t1: number of bytes to increment sp by
 __incsp0:
@@ -178,18 +179,20 @@ __incsp16:
 // Pushed as 2 bytes with top byte 0.
 .section ".text.__pusha", "ax", @progbits
 __pusha:
-  TAY
+  PHA
   JSR __decsp2
-  TYA
-  STA (__sp)
+  PLA
+  LDY #0
+  STA (__sp),Y
   LDA #0
-  LDY #1
+  INY
   STA (__sp),Y
   RTS
 
 .section ".text.__pulla", "ax", @progbits
 __pulla:
-  LDA (__sp)
+  LDY #0
+  LDA (__sp),Y
   INC __sp
   BNE pla
   INC __sp+1
@@ -208,11 +211,14 @@ __pushxy0:
 .section ".text.__pushxy", "ax", @progbits
 __pushxy:
   JSR __decsp2
-  TXA
-  STA (__sp)
   TYA
-  LDY #1
-  STA (__sp), Y
+  PHA
+  TXA
+  LDY #0
+  STA (__sp),Y
+  PLA
+  INY
+  STA (__sp),Y
   RTS
 
 // Entry:
@@ -221,7 +227,8 @@ __pushxy:
 __pushreg1:
   JSR __decsp1
   LDA 0,X
-  STA (__sp)
+  LDY #0
+  STA (__sp),Y
   RTS
 
 .section ".text.__pushi0", "ax", @progbits
@@ -260,9 +267,10 @@ JMP __pushreg2
 __pushreg2:
   JSR __decsp2
   LDA 0,X
-  STA (__sp)
-  LDY #1
+  LDY #0
+  STA (__sp),Y
   LDA 1,X
+  INY
   STA (__sp),Y
   RTS
 
@@ -364,7 +372,8 @@ __pullreg2:
 .section ".text.__replace_top_reg2", "ax", @progbits
 __replace_top_reg2:
   STA __t0
-  STZ __t1
+  LDA #0
+  STA __t1
   LDY #0
   LDA (__sp),Y
   STA 0,X
@@ -389,7 +398,8 @@ __replace_top_reg2:
 
 .section ".text.__pullxy", "ax", @progbits
 __pullxy:
-  LDA (__sp)
+  LDY #0
+  LDA (__sp),Y
   TAX
   LDY #1
   LDA (__sp),Y

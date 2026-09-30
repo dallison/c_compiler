@@ -50,8 +50,9 @@ init_call:
   INC init_ptr+1
   JMP init_loop
 init_done:
-  STZ __i0
-  STZ __i0+1
+  LDA #0
+  STA __i0
+  STA __i0+1
   LDX #0
   LDY #0
   JSR __pushxy

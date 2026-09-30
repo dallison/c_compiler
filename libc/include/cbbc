@@ -1,0 +1,72 @@
+//
+//  cbbc
+//  c_compiler
+//
+//  Brings the BBC MOS names from namespace bbc into the global namespace.
+//
+
+#ifndef cbbc_h
+#define cbbc_h
+
+#include <bbc.h>
+
+using bbc::os_regs;
+using bbc::osfile_block;
+using bbc::osgbpb_block;
+using bbc::osbyte_command;
+using bbc::osword_command;
+
+using bbc::osbyte;
+using bbc::osfsc;
+using bbc::osevent;
+using bbc::osword;
+using bbc::oswrch;
+using bbc::osasci;
+using bbc::nvwrch;
+using bbc::osnewl;
+using bbc::oswrcr;
+using bbc::osrdch;
+using bbc::nvrdch;
+using bbc::oscli;
+using bbc::osfile;
+using bbc::osargs;
+using bbc::osbget;
+using bbc::osbput;
+using bbc::osgbpb;
+using bbc::osfind;
+using bbc::gsinit;
+using bbc::gsread;
+using bbc::osrdsc;
+
+using bbc::mode;
+using bbc::colour;
+using bbc::color;
+using bbc::gcol;
+using bbc::palette;
+using bbc::plot;
+using bbc::move;
+using bbc::draw;
+using bbc::dot;
+using bbc::triangle;
+using bbc::point;
+using bbc::cls;
+using bbc::clg;
+using bbc::origin;
+using bbc::graphics_window;
+using bbc::text_window;
+using bbc::tab;
+using bbc::home;
+using bbc::pos;
+using bbc::vpos;
+using bbc::cursor;
+using bbc::text_cursor;
+using bbc::graphics_text;
+using bbc::defchar;
+using bbc::vdu;
+using bbc::vdus;
+using bbc::beep;
+using bbc::paged;
+using bbc::colours_reset;
+using bbc::windows_reset;
+
+#endif /* cbbc_h */

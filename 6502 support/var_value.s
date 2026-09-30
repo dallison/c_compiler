@@ -336,9 +336,10 @@ __var_value2:
 __var_value2b:
   JSR __varaddr
   TAX
-  LDA (__t0)
+  LDY #0
+  LDA (__t0),Y
   STA 0, X
-  LDY #1
+  INY
   LDA (__t0), Y
   STA 1,X
   RTS
@@ -655,9 +656,10 @@ __arg_value2:
 __arg_value2b:
   JSR __argaddr
   TAX
-  LDA (__t0)
+  LDY #0
+  LDA (__t0),Y
   STA 0, X
-  LDY #1
+  INY
   LDA (__t0), Y
   STA 1,X
   RTS
@@ -831,9 +833,10 @@ __set_var_value2b:
   JSR __varaddr
   TAX
   LDA 0,X
-  STA (__t0)
-  LDY #1
+  LDY #0
+  STA (__t0),Y
   LDA 1,X
+  INY
   STA (__t0), Y
   RTS
 
