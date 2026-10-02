@@ -642,6 +642,35 @@ static bool ContainsCall(ASTNode* node) {
   return finder.found_call;
 }
 
+static ASTNode* IgnoreExpressionCasts(ASTNode* node) {
+  while (node != NULL && node->op == AST_OP(cast)) {
+    node = ((CastASTNode*)node)->expr;
+  }
+  return node;
+}
+
+// Literals and other side-effect-free expressions that codegen can evaluate
+// again after a call on a sibling subtree, without a stack temporary.
+static bool CanRegenerateExpressionAcrossCall(ASTNode* node) {
+  node = IgnoreExpressionCasts(node);
+  if (node == NULL) {
+    return false;
+  }
+  switch (node->op) {
+    case AST_OP(number):
+    case AST_OP(fnumber):
+    case AST_OP(charconst):
+    case AST_OP(charwide):
+    case AST_OP(sizeof):
+    case AST_OP(alignof):
+      return true;
+    case AST_OP(uminus):
+      return CanRegenerateExpressionAcrossCall(((UnaryASTNode*)node)->sub);
+    default:
+      return false;
+  }
+}
+
 static bool GenerateIsNullMemberPointerOperand(ASTNode* node, TypeRecord* pm_type);
 static bool ExpressionReturnsReference(ASTNode* node);
 static bool ExpressionConstructsAggregateInPlace(ASTNode* expr);
@@ -1797,22 +1826,30 @@ static IRNode* GenerateBinaryExpression(Generator* gen, BinaryASTNode* node) {
   // If the operation is commutative, put a constant on the right side so that
   // it's easier to fold constants.
   if (is_commutative && pm_compare_type == NULL) {
-    if (ASTNodeIsIntConstant(lhs) && !ASTNodeIsIntConstant(rhs)) {
+    if (CanRegenerateExpressionAcrossCall(lhs) &&
+        !CanRegenerateExpressionAcrossCall(rhs)) {
       ASTNode* tmp = lhs;
       lhs = rhs;
       rhs = tmp;
     }
   }
   bool stash_call_results = ContainsCall(rhs);
-  IRNode* left = GenerateExpression(gen, lhs);
+  bool regenerate_left_after_call =
+      stash_call_results && CanRegenerateExpressionAcrossCall(lhs);
+  IRNode* left = NULL;
   IRNode* left_spill = NULL;
   TypeRecord* left_spill_type = NULL;
-  if (stash_call_results) {
-    left_spill_type = left->type;
-    left_spill = GeneratorSpillValueToTemp(gen, left, left_spill_type);
+  if (!regenerate_left_after_call) {
+    left = GenerateExpression(gen, lhs);
+    if (stash_call_results) {
+      left_spill_type = left->type;
+      left_spill = GeneratorSpillValueToTemp(gen, left, left_spill_type);
+    }
   }
   IRNode* right = GenerateExpression(gen, rhs);
-  if (left_spill != NULL) {
+  if (regenerate_left_after_call) {
+    left = GenerateExpression(gen, lhs);
+  } else if (left_spill != NULL) {
     left = GeneratorReloadSpilledValue(gen, left_spill, left_spill_type);
   }
   if (pm_compare_type != NULL) {
@@ -1869,15 +1906,22 @@ static IROpcode ThreeWayIROpcode(TypeRecord* type) {
 // struct-by-value results are materialized.
 static IRNode* GenerateThreeWayComparison(Generator* gen, BinaryASTNode* node) {
   bool stash_left = ContainsCall(node->right);
-  IRNode* left = GenerateExpression(gen, node->left);
+  bool regenerate_left_after_call =
+      stash_left && CanRegenerateExpressionAcrossCall(node->left);
+  IRNode* left = NULL;
   IRNode* left_spill = NULL;
   TypeRecord* left_spill_type = NULL;
-  if (stash_left) {
-    left_spill_type = left->type;
-    left_spill = GeneratorSpillValueToTemp(gen, left, left_spill_type);
+  if (!regenerate_left_after_call) {
+    left = GenerateExpression(gen, node->left);
+    if (stash_left) {
+      left_spill_type = left->type;
+      left_spill = GeneratorSpillValueToTemp(gen, left, left_spill_type);
+    }
   }
   IRNode* right = GenerateExpression(gen, node->right);
-  if (left_spill != NULL) {
+  if (regenerate_left_after_call) {
+    left = GenerateExpression(gen, node->left);
+  } else if (left_spill != NULL) {
     left = GeneratorReloadSpilledValue(gen, left_spill, left_spill_type);
   }
   TypeRecord* operand_type = node->right->type;
@@ -2993,19 +3037,25 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     if (right_returns_reference && !TypeIsReference(node->left->type)) {
       node->right->flags &= ~kASTNeedAddress;
     }
-    value = GenerateExpression(gen, node->right);
-    node->right->flags = right_flags;
-
+    bool regenerate_value_after_lhs =
+        compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+        CanRegenerateExpressionAcrossCall(node->right);
     IRNode* value_tmp_addr = NULL;
     TypeRecord* value_tmp_type = NULL;
-    if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
-        !IRIsVariable(value)) {
-      value_tmp_type = value->type;
-      value_tmp_addr =
-          GeneratorSpillValueToTemp(gen, value, value_tmp_type);
+    if (!regenerate_value_after_lhs) {
+      value = GenerateExpression(gen, node->right);
+      if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+          !IRIsVariable(value)) {
+        value_tmp_type = value->type;
+        value_tmp_addr =
+            GeneratorSpillValueToTemp(gen, value, value_tmp_type);
+      }
     }
+    node->right->flags = right_flags;
     dest = GenerateExpression(gen, node->left);
-    if (value_tmp_addr != NULL) {
+    if (regenerate_value_after_lhs) {
+      value = GenerateExpression(gen, node->right);
+    } else if (value_tmp_addr != NULL) {
       value =
           GeneratorReloadSpilledValue(gen, value_tmp_addr, value_tmp_type);
     }
@@ -3061,17 +3111,25 @@ static struct {
 
 static IRNode* GenerateAtomicCompoundAssignment(Generator* gen,
                                                  BinaryASTNode* node) {
-  IRNode* value = GenerateExpression(gen, node->right);
+  bool regenerate_value_after_lhs =
+      compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+      CanRegenerateExpressionAcrossCall(node->right);
+  IRNode* value = NULL;
   IRNode* value_tmp_addr = NULL;
   TypeRecord* value_tmp_type = NULL;
-  if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
-      !IRIsVariable(value)) {
-    value_tmp_type = value->type;
-    value_tmp_addr =
-        GeneratorSpillValueToTemp(gen, value, value_tmp_type);
+  if (!regenerate_value_after_lhs) {
+    value = GenerateExpression(gen, node->right);
+    if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+        !IRIsVariable(value)) {
+      value_tmp_type = value->type;
+      value_tmp_addr =
+          GeneratorSpillValueToTemp(gen, value, value_tmp_type);
+    }
   }
   IRNode* address = GenerateExpression(gen, node->left);
-  if (value_tmp_addr != NULL) {
+  if (regenerate_value_after_lhs) {
+    value = GenerateExpression(gen, node->right);
+  } else if (value_tmp_addr != NULL) {
     value =
         GeneratorReloadSpilledValue(gen, value_tmp_addr, value_tmp_type);
   }
@@ -3095,26 +3153,33 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   }
   bool result_address_needed =
       AssignmentResultIsOuterAssignmentLHS((ASTNode*)node);
-  // Get value of operation.
-  IRNode* value = GenerateExpression(gen, node->right);
+  bool regenerate_value_after_lhs =
+      compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+      CanRegenerateExpressionAcrossCall(node->right);
+  IRNode* value = NULL;
   IRNode* value_tmp_addr = NULL;
   TypeRecord* value_tmp_type = NULL;
   IRNode* complex_value_tmp_addr = NULL;
-  if (TypeIsComplex(node->left->type) && ContainsCall(node->left)) {
-    IRNode* value_address =
-        ComplexObjectAddress(gen, value, node->right->type);
-    complex_value_tmp_addr = GeneratorSpillObjectToTemp(
-        gen, value_address, node->right->type);
-  } else if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
-      !IRIsVariable(value)) {
-    value_tmp_type = value->type;
-    value_tmp_addr =
-        GeneratorSpillValueToTemp(gen, value, value_tmp_type);
+  if (!regenerate_value_after_lhs) {
+    value = GenerateExpression(gen, node->right);
+    if (TypeIsComplex(node->left->type) && ContainsCall(node->left)) {
+      IRNode* value_address =
+          ComplexObjectAddress(gen, value, node->right->type);
+      complex_value_tmp_addr = GeneratorSpillObjectToTemp(
+          gen, value_address, node->right->type);
+    } else if (compiler->call_return_fixed_reg && ContainsCall(node->left) &&
+               !IRIsVariable(value)) {
+      value_tmp_type = value->type;
+      value_tmp_addr =
+          GeneratorSpillValueToTemp(gen, value, value_tmp_type);
+    }
   }
 
   // Get destination/source.
   IRNode* dest = GenerateExpression(gen, node->left);
-  if (value_tmp_addr != NULL) {
+  if (regenerate_value_after_lhs) {
+    value = GenerateExpression(gen, node->right);
+  } else if (value_tmp_addr != NULL) {
     value =
         GeneratorReloadSpilledValue(gen, value_tmp_addr, value_tmp_type);
   }
