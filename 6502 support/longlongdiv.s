@@ -223,7 +223,12 @@ udiv8_1:
   JSR udiv8
 
   // Store result.
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   LDA quotient
   STA 0,X
   LDA quotient+1
@@ -245,6 +250,7 @@ STA 7,X
 // Main udiv4 routine.  Produces both remainder and quotent
 udiv8:
         // Zero out remainder.
+#ifdef __65c02__
         STZ remainder
         STZ remainder+1
         STZ remainder+2
@@ -253,6 +259,21 @@ STZ remainder+4
 STZ remainder+5
 STZ remainder+6
 STZ remainder+7
+#else
+        PHA
+        LDA #0
+        STA remainder
+        STA remainder+1
+        STA remainder+2
+STA remainder+3
+STA remainder+4
+STA remainder+5
+STA remainder+6
+STA remainder+7
+        STA __nmos_tmp
+        PLA
+        BIT __nmos_tmp
+#endif
 
         LDX #64     // There are 32 bits in NUM1
 udiv8_l1:
@@ -362,7 +383,11 @@ STA divisor+7
 
   // Divisor is negative, negate it.
   JSR negate_divisor
+#ifdef __65c02__
   BRA smod8_l2
+#else
+  JMP smod8_l2
+#endif
 
 smod8_l1:
   // Dividend is negative, negate it.
@@ -417,7 +442,12 @@ umod8_1:
   JSR udiv8
 
   // Store remainder as result.
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   LDA remainder
   STA 0,X
   LDA remainder+1

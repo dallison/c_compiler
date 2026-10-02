@@ -25,6 +25,14 @@ static void ConfigScriptSymbolDestruct(ConfigScriptSymbol* sym) {
   VectorDestructWithContents(&sym->patterns,
                              (VectorElementDestructor)StringDestruct,
                              /*free_element=*/true);
+  VectorDestructWithContents(&sym->start_patterns,
+                             (VectorElementDestructor)StringDestruct,
+                             /*free_element=*/true);
+}
+
+static void ConfigScriptDataDestruct(ConfigScriptData* data) {
+  StringDestruct(&data->name);
+  BufferDestruct(&data->bytes);
 }
 
 static void ConfigSegmentDestruct(ConfigSegment* s) {
@@ -39,6 +47,7 @@ void LinkerConfigInitEmpty(LinkerConfig* config) {
   StringInit(&config->entry_symbol, NULL);
   VectorInit(&config->discard_patterns);
   VectorInit(&config->script_symbols);
+  VectorInit(&config->script_data);
 }
 
 void LinkerConfigDestruct(LinkerConfig* config) {
@@ -51,6 +60,9 @@ void LinkerConfigDestruct(LinkerConfig* config) {
                              /*free_element=*/true);
   VectorDestructWithContents(&config->script_symbols,
                              (VectorElementDestructor)ConfigScriptSymbolDestruct,
+                             /*free_element=*/true);
+  VectorDestructWithContents(&config->script_data,
+                             (VectorElementDestructor)ConfigScriptDataDestruct,
                              /*free_element=*/true);
 }
 

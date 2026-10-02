@@ -51,16 +51,28 @@ ldexp:
   // Assemble into mt1
   LDX #mt1
   JSR __fassemble
+#ifdef __65c02__
   BRA ldexp_ret
+#else
+  JMP ldexp_ret
+#endif
   
 ldexp0:
   LDX #mt1
   JSR __fres0
+#ifdef __65c02__
   BRA ldexp_ret
+#else
+  JMP ldexp_ret
+#endif
 ldexp_res_nan:
   LDX #mt1
   JSR __fnan
+#ifdef __65c02__
   BRA ldexp_ret
+#else
+  JMP ldexp_ret
+#endif
 ldexp_res_inf:
   LDX #mt1
   JSR __finf

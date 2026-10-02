@@ -28,8 +28,9 @@ static int BytesByAddressingMode(AddressingMode addr_mode) {
 }
 
 static int FrameSize(W65C02Generator* g, bool is_leaf) {
+  int spill_tail = 4;
   return g->base.stack_frame_size +
-      g->register_allocator.max_spilled_region_size + 2 +
+      g->register_allocator.max_spilled_region_size + spill_tail + 2 +
       (is_leaf ? 0 : 2);
 }
 

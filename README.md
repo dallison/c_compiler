@@ -144,7 +144,7 @@ Darwin is AArch64 only. Omit `-target` to use the host (see above).
 | `riscv32` | `risc-v32` | 32 / 32 | ELF32, `EM_RISCV` (243) | `libcriscv32.a` | `riscv32-unknown-linux-davecc` |
 | `x86` | `i386`, `i486`, `i586`, `i686`, `x86-32` | 32 / 32 | ELF32, `EM_386` (3) | `libcx86.a` | no hosted Linux profile |
 | `pcode` | `p-code` | 64 / 64 | ELF64, machine **6500** | `libcpcode.a` | not Linux |
-| `6502` | | 16 / 32 | ELF, machine **6502** | `libc65c02.a` | not Linux |
+| `6502` | | 16 / 32 | ELF, machine **6502** | `libc6502.a` | not Linux |
 | `65c02` | `65C02` | 16 / 32 | same as 6502, extra opcodes | `libc65c02.a` | not Linux |
 | `esp32` | `xtensa-esp32` | 32 / 32 | ELF32, `EM_XTENSA` (94) | `libcxtensa.a` + `esp32_start.o` | no hosted profile |
 | `wasm32` | `wasm` | 32 / 32 | **not ELF** (WebAssembly) | `libcwasm32.a` | WASI via wasmtime |

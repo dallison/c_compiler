@@ -247,6 +247,56 @@ static void DumpRegisters(W65C02RegisterAllocator* allocator) {
 
 }
 
+#define W65C02_MAX_REGISTER_SET                                            \
+  (W65C02_NUM_B_REGS + W65C02_NUM_I_REGS + W65C02_NUM_L_REGS +              \
+   W65C02_NUM_X_REGS + W65C02_NUM_F_REGS)
+
+struct RegisterSet {
+  W65C02Register* regs[W65C02_MAX_REGISTER_SET];
+  size_t length;
+};
+
+static bool RegisterSetContains(const struct RegisterSet* set, const W65C02Register* reg) {
+  if (set == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < set->length; i++) {
+    if (set->regs[i] == reg) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void RegisterSetAdd(struct RegisterSet* set, W65C02Register* reg) {
+  if (reg == NULL || RegisterSetContains(set, reg) ||
+      set->length == W65C02_MAX_REGISTER_SET) {
+    return;
+  }
+  set->regs[set->length++] = reg;
+}
+
+// A reload is emitted at its reload point, which can be several instructions
+// before the instruction that needs it (the lda/ldx/ldy that set up a runtime
+// call).  A register those instructions read or write may already be free at
+// the frontier but still holds a live value at the reload point.
+static void CollectWindowRegisters(TargetInstruction* reloadpoint,
+                                   TargetInstruction* frontier,
+                                   struct RegisterSet* set) {
+  for (TargetInstruction* p = TargetNext(reloadpoint); p != NULL && p != frontier;
+       p = TargetNext(p)) {
+    if (!IsSpillOnly(p)) {
+      RegisterSetAdd(set, (W65C02Register*)p->reg);
+    }
+    for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+      TargetInstruction* op = p->operand[i];
+      if (op != NULL && !IsSpillOnly(op)) {
+        RegisterSetAdd(set, (W65C02Register*)op->reg);
+      }
+    }
+  }
+}
+
 // Can we use a temp register?  If not we will have to use a saved one and
 // those are more expensive since they need to be saved on entry and reloaded
 // on exit.
@@ -255,6 +305,12 @@ static bool CanUseTemp(W65C02RegisterAllocator* allocator, TargetInstruction* in
     // A callee writes its result after saving registers.  Keep that result in
     // caller-saved storage so the callee's epilogue cannot restore over it.
     return true;
+  }
+  // Promoted stack locals (ivarreg and friends) can live across runtime
+  // helpers that write fixed zero-page slots (__ftoi2 stores through the
+  // address in A, often __i0).  Keep locals in callee-saved registers.
+  if (IsRegVar(inst)) {
+    return false;
   }
   return !BitSetContains(&allocator->preserved_instructions, inst->id);
 }
@@ -276,8 +332,9 @@ static bool IsOperandOfFrontier(W65C02RegisterAllocator* allocator,
   return false;
 }
 
-static void FindSpillVictim(W65C02RegisterAllocator* allocator,
-                                   W65C02RegisterType type, TargetInstruction** victim, TargetInstruction** spill_point) {
+static void FindSpillVictim(W65C02RegisterAllocator* allocator, W65C02RegisterType type,
+                            const struct RegisterSet* avoid, TargetInstruction** victim,
+                            TargetInstruction** spill_point) {
   W65C02Register* regs;
   int num_regs;
   switch (type) {
@@ -314,7 +371,8 @@ static void FindSpillVictim(W65C02RegisterAllocator* allocator,
       // is never spilled.  Any other occupant is a candidate -- including a
       // reload, which can be evicted essentially for free because its value
       // still lives in the original spill slot (see SpillInstruction).
-      if (IsRegVar(owner) || IsOperandOfFrontier(allocator, owner)) {
+      if (IsRegVar(owner) || IsOperandOfFrontier(allocator, owner) ||
+          RegisterSetContains(avoid, &regs[i])) {
         continue;
       }
       assert(IsSpillInstruction(owner) ||
@@ -464,7 +522,8 @@ static void AssignRegister(W65C02Register* reg, TargetInstruction* inst) {
 }
 
 static W65C02Register* FindFreeRegister(W65C02RegisterAllocator* allocator,
-                                       W65C02RegisterType type, bool can_use_temp) {
+                                       W65C02RegisterType type, bool can_use_temp,
+                                       const struct RegisterSet* avoid) {
   int num_regs;
   W65C02Register* regs;
   switch (type) {
@@ -493,6 +552,9 @@ static W65C02Register* FindFreeRegister(W65C02RegisterAllocator* allocator,
   for (int i = 0; i < num_regs; i++) {
     if (!regs[i].base.reserved && regs[i].base.owner == NULL) {
       if (!can_use_temp && regs[i].temp) {
+        continue;
+      }
+      if (RegisterSetContains(avoid, &regs[i])) {
         continue;
       }
       return &regs[i];
@@ -637,12 +699,13 @@ static void FreeRegisters(W65C02RegisterAllocator* allocator,
   }
 }
 
-static W65C02Register* AllocateRegisterWithType(
-    W65C02RegisterAllocator* allocator, W65C02RegisterType type, bool can_use_temp) {
-  W65C02Register* reg = FindFreeRegister(allocator, type, can_use_temp);
+static W65C02Register* AllocateRegisterAvoiding(
+    W65C02RegisterAllocator* allocator, W65C02RegisterType type, bool can_use_temp,
+    const struct RegisterSet* avoid) {
+  W65C02Register* reg = FindFreeRegister(allocator, type, can_use_temp, avoid);
   if (reg == NULL) {
     TargetInstruction* victim, *spill_point;
-    FindSpillVictim(allocator, type, &victim, &spill_point);
+    FindSpillVictim(allocator, type, avoid, &victim, &spill_point);
     reg = SpillInstruction(allocator, victim, spill_point);
   }
   TrapRegister(allocator, reg);
@@ -670,6 +733,11 @@ static W65C02Register* AllocateRegisterWithType(
       break;
   }
   return reg;
+}
+
+static W65C02Register* AllocateRegisterWithType(
+    W65C02RegisterAllocator* allocator, W65C02RegisterType type, bool can_use_temp) {
+  return AllocateRegisterAvoiding(allocator, type, can_use_temp, NULL);
 }
 
 static void AllocateDeferredOperands(W65C02RegisterAllocator* allocator,
@@ -750,9 +818,11 @@ static void ReloadSpills(W65C02RegisterAllocator* allocator,
                                                         op);
 
       reload->uses = op->uses;
+      struct RegisterSet window = {.length = 0};
+      CollectWindowRegisters(reloadpoint, inst, &window);
       TargetBasicBlockEmitAfter(&allocator->g->base, inst->block, reload, reloadpoint);
-      reg = AllocateRegisterWithType(allocator,
-                                     reg->type, CanUseTemp(allocator, inst));
+      reg = AllocateRegisterAvoiding(allocator, reg->type,
+                                     CanUseTemp(allocator, inst), &window);
       assert(reg != NULL);
       AssignRegister(reg, reload);
       

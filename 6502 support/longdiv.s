@@ -57,7 +57,11 @@ __sdiv4:
   LDA #0
   SBC divisor+3
   STA divisor+3
+#ifdef __65c02__
   BRA sdiv4_l2
+#else
+  JMP sdiv4_l2
+#endif
 
 sdiv4_l1:
   // Dividend is negative, negate it.
@@ -119,7 +123,12 @@ udiv4_1:
   JSR udiv4
 
   // Store result.
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   LDA quotient
   STA 0,X
   LDA quotient+1
@@ -133,10 +142,22 @@ udiv4_1:
 // Main udiv4 routine.  Produces both remainder and quotient
 udiv4:
         // Zero out remainder.
+#ifdef __65c02__
         STZ remainder
         STZ remainder+1
         STZ remainder+2
         STZ remainder+3
+#else
+        PHA
+        LDA #0
+        STA remainder
+        STA remainder+1
+        STA remainder+2
+        STA remainder+3
+        STA __nmos_tmp
+        PLA
+        BIT __nmos_tmp
+#endif
         LDX #32     // There are 32 bits in NUM1
 udiv4_l1:
         ASL dividend    // Shift hi bit of divisor into remainder
@@ -211,7 +232,11 @@ __smod4:
   LDA #0
   SBC divisor+3
   STA divisor+3
+#ifdef __65c02__
   BRA smod4_l2
+#else
+  JMP smod4_l2
+#endif
 
 smod4_l1:
   // Dividend is negative, negate it.
@@ -273,7 +298,12 @@ umod4_1:
   JSR udiv4
 
   // Store remainder as result.
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   LDA remainder
   STA 0,X
   LDA remainder+1
@@ -316,7 +346,16 @@ __cdivmod4:
 
   // Quotient in first 4 bytes of result.
   LDA quotient
+#ifdef __65c02__
   STA (__i0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__i0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA quotient+1
   STA (__i0),Y

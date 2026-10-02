@@ -34,9 +34,36 @@ SRC
 cat >"$WORK/profiles.c" <<'SRC'
 #include <stdio.h>
 void profiles(FILE* f, char* out, long v, double d) {
-  fprintf(f, "%d", 1);
+  fprintf(f, "%5d", 1);
   sprintf(out, "%ld", v);
   snprintf(out, 32, "%f", d);
+}
+SRC
+
+cat >"$WORK/simple_profiles.c" <<'SRC'
+#include <stdio.h>
+void simple_profiles(FILE* f, char* out, unsigned u) {
+  printf("%d %%\n", 1);
+  fprintf(f, "%c", 'x');
+  sprintf(out, "%s", "s");
+  snprintf(out, 8, "%u", u);
+}
+SRC
+
+cat >"$WORK/mixed.c" <<'SRC'
+#include <stdio.h>
+void mixed_fp(double d) { printf("%f %d", d, 1); }
+void mixed_long(long v) { printf("%ld %d", v, 1); }
+SRC
+
+cat >"$WORK/simple.c" <<'SRC'
+#include <stdio.h>
+int main(void) {
+  char buffer[6];
+  int n = snprintf(buffer, sizeof(buffer), "%d-%s", 1234, "abc");
+  printf("d=%d u=%u c=%c s=%s %% n=%d b=%s\n", -32767 - 1, 65535u, 'Z', "ok",
+         n, buffer);
+  return 0;
 }
 SRC
 
@@ -60,6 +87,9 @@ SRC
 "$DAVECC" -target 65c02 -S "$WORK/profiles.c" -o "$WORK/profiles.s"
 "$DAVECC" -target 65c02 -S "$WORK/long.c" -o "$WORK/long.s"
 "$DAVECC" -target 65c02 -S "$WORK/ostream.cc" -o "$WORK/ostream.s"
+"$DAVECC" -target 65c02 -S "$WORK/simple_profiles.c" \
+  -o "$WORK/simple_profiles.s"
+"$DAVECC" -target 65c02 -S "$WORK/mixed.c" -o "$WORK/mixed.s"
 
 grep -q 'jsr[[:space:]]*__printf_literal' "$WORK/literal.s"
 grep -q 'jsr[[:space:]]*__printf_int' "$WORK/integer.s"
@@ -67,7 +97,16 @@ grep -q 'jsr[[:space:]]*__fprintf_int' "$WORK/profiles.s"
 grep -q 'jsr[[:space:]]*__sprintf_long' "$WORK/profiles.s"
 grep -q 'jsr[[:space:]]*__snprintf_fp' "$WORK/profiles.s"
 grep -q 'jsr[[:space:]]*__printf_long' "$WORK/long.s"
-grep -q 'jsr[[:space:]]*__itoa_int' "$WORK/ostream.s"
+grep -q 'jsr[[:space:]]*__printf_simple' "$WORK/simple_profiles.s"
+grep -q 'jsr[[:space:]]*__fprintf_simple' "$WORK/simple_profiles.s"
+grep -q 'jsr[[:space:]]*__sprintf_simple' "$WORK/simple_profiles.s"
+grep -q 'jsr[[:space:]]*__snprintf_simple' "$WORK/simple_profiles.s"
+grep -q 'jsr[[:space:]]*__printf_fp' "$WORK/mixed.s"
+grep -q 'jsr[[:space:]]*__printf_long' "$WORK/mixed.s"
+if grep -q 'jsr[[:space:]]*__printf_int' "$WORK/mixed.s"; then
+  echo "a later %d downgraded a wider printf profile" >&2
+  exit 1
+fi
 if grep -q 'jsr[[:space:]]*__snprintf_int\|jsr[[:space:]]*snprintf' \
     "$WORK/ostream.s"; then
   echo "integer ostream still calls a snprintf helper" >&2
@@ -90,14 +129,28 @@ grep -q '__printf_int' "$WORK/aarch64-enabled.s"
 "$DAVECC" -target 65c02 "$WORK/literal.c" -o "$WORK/literal.exe"
 "$DAVECC" -target 65c02 "$WORK/integer.c" -o "$WORK/integer.exe"
 "$DAVECC" -target 65c02 "$WORK/long.c" -o "$WORK/long.exe"
+"$DAVECC" -target 65c02 "$WORK/simple.c" -o "$WORK/simple.exe"
 "$DAVECC" -target x86_64 -static -fprintf-specialize "$WORK/integer.c" \
   -o "$WORK/integer.x86"
+"$DAVECC" -target x86_64 -static -fprintf-specialize "$WORK/simple.c" \
+  -o "$WORK/simple.x86"
 
 # The interpreter should find the support ROM next to its Bazel runfiles.
 literal_output="$("$INTERPRETER" "$WORK/literal.exe")"
 integer_output="$("$INTERPRETER" -rom "$ROM" "$WORK/integer.exe")"
 long_output="$("$INTERPRETER" -rom "$ROM" "$WORK/long.exe")"
 x86_output="$("$X86_INTERPRETER" -i "$WORK/integer.x86")"
+simple_output="$("$INTERPRETER" -rom "$ROM" "$WORK/simple.exe")"
+simple_x86_output="$("$X86_INTERPRETER" -i "$WORK/simple.x86")"
+simple_expected="d=-32768 u=65535 c=Z s=ok % n=8 b=1234-"
+if [[ "$simple_output" != "$simple_expected" ]]; then
+  echo "unexpected simple printf output: $simple_output" >&2
+  exit 1
+fi
+if [[ "$simple_x86_output" != "$simple_expected" ]]; then
+  echo "unexpected x86 simple printf output: $simple_x86_output" >&2
+  exit 1
+fi
 if [[ "$literal_output" != "literal-output" ]]; then
   echo "unexpected literal printf output: $literal_output" >&2
   exit 1
@@ -119,6 +172,11 @@ fi
 "$ELFDUMP" -s "$WORK/integer.exe" >"$WORK/integer.symbols"
 if grep -q '__PrintFloatFormat' "$WORK/integer.symbols"; then
   echo "integer-only printf unexpectedly linked floating-point formatting" >&2
+  exit 1
+fi
+"$ELFDUMP" -s "$WORK/simple.exe" >"$WORK/simple.symbols"
+if grep -q '__printf_int\|__PrintFloatFormat' "$WORK/simple.symbols"; then
+  echo "simple printf unexpectedly linked a wider printf profile" >&2
   exit 1
 fi
 "$ELFDUMP" -s "$WORK/long.exe" >"$WORK/long.symbols"

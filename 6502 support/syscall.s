@@ -11,10 +11,29 @@
 // (sp): syscon number
 // (sp), 2: first arg
 syscall:
-  LDA (__sp)        // Load low byte of syscall
+#ifdef __65c02__
+  LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA %abs(syscall_code)   // Store in LDA immediate instruction
   TXA
-  STA (__sp)          // Overwrite syscall number on stack with result address
+#ifdef __65c02__
+  STA (__sp)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__sp),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   TYA
   LDY #1
   STA (__sp), Y

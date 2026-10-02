@@ -26,7 +26,11 @@ copymem2_large_loop:
   DEC __mem_size+1
   INC __mem_src+1
   INC __mem_dest+1
+#ifdef __65c02__
   BRA copymem2_large_page_loop
+#else
+  JMP copymem2_large_page_loop
+#endif
 
 copymem2_small:
   LDX __mem_size

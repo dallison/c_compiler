@@ -29,7 +29,16 @@ __i1tof:
   JMP __fzero
 i1tof_nonzero:
   // Not zero, check for negative.
+#ifdef __65c02__
   STZ fsign
+#else
+  PHA
+  LDA #0
+  STA fsign
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   BPL pos_i1tof
   LDA #0x80
   STA fsign      // Sign bit set.
@@ -54,13 +63,22 @@ i1tof_loop:
   // All bits shifted out?
   BEQ tof_done
   INC fexp
+#ifdef __65c02__
   BRA i1tof_loop
+#else
+  JMP i1tof_loop
+#endif
 tof_done:
   // One more shift right
   ROR fmantissa+3
   ROR fmantissa+2
   ROR fmantissa+1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 .section ".text.__ui1tof", "ax", @progbits
@@ -72,7 +90,16 @@ __ui1tof:
   JMP __fzero
 ui1tof_nonzero:
   // Not zero, check for negative.
+#ifdef __65c02__
   STZ fsign
+#else
+  PHA
+  LDA #0
+  STA fsign
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   LDA #127        // Set exponent to bias value.
   STA fexp
   JSR __fzero_mantissa
@@ -89,13 +116,22 @@ ui1tof_loop:
   // All bits shifted out?
   BEQ ui1tof_done
   INC fexp
+#ifdef __65c02__
   BRA ui1tof_loop
+#else
+  JMP ui1tof_loop
+#endif
 ui1tof_done:
   // One more shift right
   ROR fmantissa+3
   ROR fmantissa+2
   ROR fmantissa+1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 .section ".text.__i2tof", "ax", @progbits
@@ -111,7 +147,16 @@ __i2tof:
 i2tof_nonzero:
 
   // Not zero, check for negative.
+#ifdef __65c02__
   STZ fsign
+#else
+  PHA
+  LDA #0
+  STA fsign
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   LDA mt1+1       // Top byte of source
   BPL pos_i2tof
   LDA #0x80
@@ -143,13 +188,22 @@ i2tof_loop:
   ORA mt1+1
   BEQ i2tof_done
   INC fexp
+#ifdef __65c02__
   BRA i2tof_loop
+#else
+  JMP i2tof_loop
+#endif
 i2tof_done:
   // One more shift right
   ROR fmantissa+3
   ROR fmantissa+2
   ROR fmantissa+1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 .section ".text.__ui2tof", "ax", @progbits
@@ -165,7 +219,16 @@ __ui2tof:
 ui2tof_nonzero:
 
   // Not zero, check for negative.
+#ifdef __65c02__
   STZ fsign
+#else
+  PHA
+  LDA #0
+  STA fsign
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   LDA #127        // Set exponent to bias value.
   STA fexp
   JSR __fzero_mantissa
@@ -185,14 +248,23 @@ ui2tof_loop:
   ORA mt1+1
   BEQ tof_done2
   INC fexp
+#ifdef __65c02__
   BRA ui2tof_loop
+#else
+  JMP ui2tof_loop
+#endif
 
 tof_done2:
   // One more shift right
   ROR fmantissa+3
   ROR fmantissa+2
   ROR fmantissa+1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 
@@ -215,7 +287,16 @@ __i4tof:
 i4tof_nonzero:
 
   // Not zero, check for negative.
+#ifdef __65c02__
   STZ fsign
+#else
+  PHA
+  LDA #0
+  STA fsign
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   LDA mt1+3       // Top byte of source
   BPL pos_i4tof
   LDA #0x80
@@ -257,13 +338,22 @@ i4tof_loop:
   ORA mt1+3
   BEQ i4tof_done
   INC fexp
+#ifdef __65c02__
   BRA i4tof_loop
+#else
+  JMP i4tof_loop
+#endif
 i4tof_done:
   // One more shift right
   ROR fmantissa+3
   ROR fmantissa+2
   ROR fmantissa+1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 .section ".text.__ui4tof", "ax", @progbits
@@ -285,7 +375,16 @@ __ui4tof:
 ui4tof_nonzero:
 
   // Not zero, check for negative.
+#ifdef __65c02__
   STZ fsign
+#else
+  PHA
+  LDA #0
+  STA fsign
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   LDA #127        // Set exponent to bias value.
   STA fexp
   JSR __fzero_mantissa
@@ -309,14 +408,23 @@ ui4tof_loop:
   ORA mt1+3
   BEQ tof_done3
   INC fexp
+#ifdef __65c02__
   BRA ui4tof_loop
+#else
+  JMP ui4tof_loop
+#endif
 
 tof_done3:
   // One more shift right
   ROR fmantissa+3
   ROR fmantissa+2
   ROR fmantissa+1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 .section ".text.__i8tof", "ax", @progbits
@@ -350,14 +458,23 @@ __i8tof:
 i8tof_nonzero:
 
   // Not zero, check for negative.
+#ifdef __65c02__
   STZ fsign
-  LDA mt1+6       // Top byte of source
+#else
+  PHA
+  LDA #0
+  STA fsign
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
+  LDA mt1+7       // Top byte of source
   BPL pos_i8tof
   LDA #0x80
   STA fsign      // Sign bit set.
   SEC
   LDA #0        // Negate int value.
-  SBC mt1+1
+  SBC mt1+0
   STA mt1+0
   LDA #0
   SBC mt1+1
@@ -412,13 +529,22 @@ i8tof_loop:
   ORA mt1+7
   BEQ i8tof_done
   INC fexp
+#ifdef __65c02__
   BRA i8tof_loop
+#else
+  JMP i8tof_loop
+#endif
 i8tof_done:
   // One more shift right
   ROR fmantissa+3
   ROR fmantissa+2
   ROR fmantissa+1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 .section ".text.__ui8tof", "ax", @progbits
@@ -453,7 +579,16 @@ __ui8tof:
 ui8tof_nonzero:
 
   // Not zero, check for negative.
+#ifdef __65c02__
   STZ fsign
+#else
+  PHA
+  LDA #0
+  STA fsign
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   LDA #127        // Set exponent to bias value.
   STA fexp
   JSR __fzero_mantissa
@@ -485,14 +620,23 @@ ui8tof_loop:
   ORA mt1+7
   BEQ tof_done4
   INC fexp
+#ifdef __65c02__
   BRA ui8tof_loop
+#else
+  JMP ui8tof_loop
+#endif
 
 tof_done4:
   // One more shift right
   ROR fmantissa+3
   ROR fmantissa+2
   ROR fmantissa+1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 // Convert float to 16-bit int.
@@ -528,8 +672,18 @@ __ftoui2:
   STA fexp       // Exponent without bias + 1.  2^0 is 1
 
   // Put result in mt1,
+#ifdef __65c02__
   STZ mt1+0
   STZ mt1+1
+#else
+  PHA
+  LDA #0
+  STA mt1+0
+  STA mt1+1
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
 
   // Copy 23 bit mantissa plus implicit 1 to fmanA.
   LDA 0,X
@@ -612,7 +766,16 @@ __ftoui1:
   STA fexp       // Exponent without bias + 1.  2^0 is 1
 
   // Put result in mt1,
+#ifdef __65c02__
   STZ mt1+0
+#else
+  PHA
+  LDA #0
+  STA mt1+0
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
 
   // Copy 23 bit mantissa plus implicit 1 to fmanA.
   LDA 0,X
@@ -689,10 +852,22 @@ __ftoui4:
   STA fexp       // Exponent without bias + 1.  2^0 is 1
 
   // Put result in mt1,
+#ifdef __65c02__
   STZ mt1+0
   STZ mt1+1
   STZ mt1+2
   STZ mt1+3
+#else
+  PHA
+  LDA #0
+  STA mt1+0
+  STA mt1+1
+  STA mt1+2
+  STA mt1+3
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
 
   // Copy 23 bit mantissa plus implicit 1 to fmanA.
   LDA 0,X
@@ -782,7 +957,10 @@ __ftoui8:
   ORA 1,X
   ORA 2,X
   ORA 3,X
-  BEQ ftoi8_zero  // Input is zero, result is zero.
+  // ftoi8_zero is out of branch range on both CPUs.
+  BNE ftoi8_nonzero
+  JMP ftoi8_zero
+ftoi8_nonzero:
 
   LDA 3,X         // Load exponent and sign.
   STA fexp
@@ -798,15 +976,37 @@ __ftoui8:
   SEC
   LDA fexp
   SBC #127
-  BCC ftoi8_zero
+  BCS ftoi8_exp_ok
+  JMP ftoi8_zero
+ftoi8_exp_ok:
   ADC #0        // Carry is set to this adds 1
   STA fexp       // Exponent without bias + 1.  2^0 is 1
 
   // Put result in mt1,
+#ifdef __65c02__
   STZ mt1+0
   STZ mt1+1
   STZ mt1+2
   STZ mt1+3
+  STZ mt1+4
+  STZ mt1+5
+  STZ mt1+6
+  STZ mt1+7
+#else
+  PHA
+  LDA #0
+  STA mt1+0
+  STA mt1+1
+  STA mt1+2
+  STA mt1+3
+  STA mt1+4
+  STA mt1+5
+  STA mt1+6
+  STA mt1+7
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
 
   // Copy 23 bit mantissa plus implicit 1 to fmanA.
   LDA 0,X
@@ -884,7 +1084,17 @@ ftoi8_loop2:
 .section ".text.__add128", "ax", @progbits
 __add128:
    // Load a into t0,t1
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y
@@ -917,7 +1127,17 @@ add128_loop:
 .section ".text.__add256", "ax", @progbits
 __add256:
    // Load a into t0,t1
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y
@@ -950,7 +1170,17 @@ add256_loop:
 .section ".text.__lshift128", "ax", @progbits
 __lshift128:
   // Load a into t0,t1
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y
@@ -988,7 +1218,17 @@ lshift128_loop3:
 .section ".text.__lshift256", "ax", @progbits
 __lshift256:
   // Load a into t0,t1
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y
@@ -1026,7 +1266,17 @@ lshift256_loop3:
 .section ".text.__rshift256", "ax", @progbits
 __rshift256:
   // Load a into t0,t1
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y
@@ -1063,7 +1313,17 @@ rshift256_loop3:
 .section ".text.__inc128", "ax", @progbits
 __inc128:
   // Load a into t0,t1
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y
@@ -1088,7 +1348,17 @@ inc128_loop:
 .section ".text.__inc256", "ax", @progbits
 __inc256:
   // Load a into t0,t1
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y

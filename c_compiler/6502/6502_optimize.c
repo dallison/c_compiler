@@ -133,6 +133,9 @@ static void DecrementReg(RegName reg, TargetInstruction* inst) {
   }
 }
 
+static bool RemovingLoadKeepsNZ(TargetBasicBlock* block,
+                                TargetInstruction* load);
+
 static bool OptimizeInstruction(struct OptimizerData* opt_data,
                                           RegTracker* old,
                                            RegTracker* curr,
@@ -144,21 +147,26 @@ static bool OptimizeInstruction(struct OptimizerData* opt_data,
         break;
       case kRegConstant:
         if (curr->value.c == old->value.c) {
+          if (!RemovingLoadKeepsNZ(block, inst)) {
+            break;
+          }
           TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
           opt_data->modified = true;
           return true;
-        } else if (curr->value.c == old->value.c + 1) {
-          // Increment.
+        } else if (curr->value.c == old->value.c + 1 &&
+                   (curr->reg != kRegA || Is65c02())) {
+          // INC A is 65C02. Leave the NMOS sequence as it was.
           IncrementReg(curr->reg, inst);
           return true;
-        } else if (curr->value.c == old->value.c - 1) {
-          // Decrement.
+        } else if (curr->value.c == old->value.c - 1 &&
+                   (curr->reg != kRegA || Is65c02())) {
           DecrementReg(curr->reg, inst);
           return true;
         }
         break;
       case kRegExpression:
-        if (curr->value.expr == old->value.expr && curr->value.c == old->value.c) {
+        if (curr->value.expr == old->value.expr && curr->value.c == old->value.c &&
+            RemovingLoadKeepsNZ(block, inst)) {
           TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
           opt_data->modified = true;
           return true;
@@ -581,6 +589,7 @@ static bool IsTrackingMetadata(TargetInstruction* inst) {
          W65C02IsExpression(inst) || (inst->flags & k6502DontEmit) != 0;
 }
 
+// The byte-load helpers return with the loaded byte in A and N/Z set from it.
 static bool ByteValueLoadLeavesA(TargetInstruction* inst) {
   if (inst == NULL) {
     return false;
@@ -594,6 +603,165 @@ static bool ByteValueLoadLeavesA(TargetInstruction* inst) {
     default:
       return false;
   }
+}
+
+static bool SetsNZ(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(cmp):
+    case W65C02_OP(cpx):
+    case W65C02_OP(cpy):
+    case W65C02_OP(bit):
+    case W65C02_OP(inc):
+    case W65C02_OP(dec):
+    case W65C02_OP(asl):
+    case W65C02_OP(lsr):
+    case W65C02_OP(rol):
+    case W65C02_OP(ror):
+    case W65C02_OP(plp):
+      return true;
+    default:
+      return ModifiesFlags(inst);
+  }
+}
+
+static bool ReadsNZ(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(beq):
+    case W65C02_OP(bne):
+    case W65C02_OP(bmi):
+    case W65C02_OP(bpl):
+    case W65C02_OP(php):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool PreservesNZ(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(sta):
+    case W65C02_OP(stx):
+    case W65C02_OP(sty):
+    case W65C02_OP(stz):
+    case W65C02_OP(pha):
+    case W65C02_OP(phx):
+    case W65C02_OP(phy):
+    case W65C02_OP(php):
+    case W65C02_OP(clc):
+    case W65C02_OP(sec):
+    case W65C02_OP(nop):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool ReturnsFromFunction(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(rts):
+    case W65C02_OP(leave):
+    case W65C02_OP(leave_leaf):
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Control transfers whose destination the flag scan does not follow.
+static bool BranchesElsewhere(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(jmp):
+    case W65C02_OP(bra):
+    case W65C02_OP(fake_bra):
+    case W65C02_OP(bcc):
+    case W65C02_OP(bcs):
+    case W65C02_OP(bvc):
+    case W65C02_OP(bvs):
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Every 6502 instruction that writes A, X or Y also sets N/Z from the result.
+static bool WritesRegisterAndNZ(TargetInstruction* inst, W65C02Opcode load) {
+  if (ByteValueLoadLeavesA(inst)) {
+    return load == W65C02_OP(lda);
+  }
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(lda):
+    case W65C02_OP(adc):
+    case W65C02_OP(sbc):
+    case W65C02_OP(and):
+    case W65C02_OP(ora):
+    case W65C02_OP(eor):
+    case W65C02_OP(pla):
+    case W65C02_OP(txa):
+    case W65C02_OP(tya):
+      return load == W65C02_OP(lda);
+    case W65C02_OP(inc):
+    case W65C02_OP(dec):
+    case W65C02_OP(asl):
+    case W65C02_OP(lsr):
+    case W65C02_OP(rol):
+    case W65C02_OP(ror):
+      return GetAddrMode(inst) == kAddrModeAccumulator &&
+             load == W65C02_OP(lda);
+    case W65C02_OP(ldx):
+    case W65C02_OP(tax):
+    case W65C02_OP(inx):
+    case W65C02_OP(dex):
+    case W65C02_OP(plx):
+      return load == W65C02_OP(ldx);
+    case W65C02_OP(ldy):
+    case W65C02_OP(tay):
+    case W65C02_OP(iny):
+    case W65C02_OP(dey):
+    case W65C02_OP(ply):
+      return load == W65C02_OP(ldy);
+    default:
+      return false;
+  }
+}
+
+// Removing a load whose register already holds the loaded value also removes
+// its N/Z update.  That is safe when the last N/Z update in this block came
+// from writing the same register, or when no branch can read N/Z before they
+// are set again.  On NMOS, for example, an indirect store is expanded to
+// LDY #0 / STA (zp),Y, which changes Z between a load and its branch.
+static bool RemovingLoadKeepsNZ(TargetBasicBlock* block,
+                                TargetInstruction* load) {
+  W65C02Opcode opcode = (W65C02Opcode)load->opcode;
+  for (TargetInstruction* prev = TargetPrev(load);
+       prev != NULL && prev->block == block &&
+       !TargetOpcodeEq(prev->opcode, W65C02_OP(label));
+       prev = TargetPrev(prev)) {
+    if (IsTrackingMetadata(prev) || PreservesNZ(prev)) {
+      continue;
+    }
+    if (WritesRegisterAndNZ(prev, opcode)) {
+      return true;
+    }
+    break;
+  }
+  // Instructions are in emission order, so this follows the fallthrough path
+  // into later blocks.
+  int budget = 64;
+  for (TargetInstruction* next = TargetNext(load); next != NULL && budget > 0;
+       next = TargetNext(next)) {
+    if (IsTrackingMetadata(next) ||
+        TargetOpcodeEq(next->opcode, W65C02_OP(label))) {
+      continue;
+    }
+    budget--;
+    if (ReadsNZ(next) || BranchesElsewhere(next)) {
+      return false;
+    }
+    if (SetsNZ(next) || ReturnsFromFunction(next)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static TargetInstruction* NextEffectiveInstruction(TargetInstruction* inst) {
@@ -804,7 +972,8 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
         }
         if (ByteValueLoadLeavesA(previous) &&
             previous->operand[0] == inst->operand[0] &&
-            GetAddrMode(inst) == kAddrModeZeroPage) {
+            GetAddrMode(inst) == kAddrModeZeroPage &&
+            RemovingLoadKeepsNZ(block, inst)) {
           // The byte-load helpers store the loaded value in their destination
           // and return with that same value still in A. Avoid loading it back
           // from zero page when the next operation consumes the byte.
@@ -832,7 +1001,8 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
           // STA followed by LDA, remove LDA.
           if (prev_modifier->opcode == inst->opcode &&
               prev_modifier->operand[0] == inst->operand[0] && prev_modifier->operand[1] == inst->operand[1] &&
-              GetAddrMode(prev_modifier) == GetAddrMode(inst)) {
+              GetAddrMode(prev_modifier) == GetAddrMode(inst) &&
+              RemovingLoadKeepsNZ(block, inst)) {
             TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
             opt_data->modified = true;
             break;
@@ -855,7 +1025,8 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
           if (!value_modified &&
               prev_user->operand[0] == inst->operand[0] && prev_user->operand[1] == inst->operand[1] &&
               GetAddrMode(prev_user) == GetAddrMode(inst) &&
-              GetAddrMode(inst) != kAddrModeIndirectIndexed && GetAddrMode(inst) != kAddrModeIndirect) {
+              GetAddrMode(inst) != kAddrModeIndirectIndexed && GetAddrMode(inst) != kAddrModeIndirect &&
+              RemovingLoadKeepsNZ(block, inst)) {
             TargetBasicBlockRemoveInstruction(&opt_data->g->base, block, inst);
             opt_data->modified = true;
             break;

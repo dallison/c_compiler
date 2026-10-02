@@ -23,7 +23,6 @@
 .set OSASCI 0xffe3
 .set OSRDCH 0xffe0
 
-.comm bbc_s, 1
 .comm res_ptr, 2
 .comm sysno, 1
 .comm fd, 2
@@ -50,7 +49,6 @@
 .section ".text.syscall", "ax", @progbits
 
 .global syscall
-.global bbc_s
 
 syscall:
   STX res_ptr
@@ -105,9 +103,7 @@ enosys:
 .section ".text.do_exit", "ax", @progbits
 .global do_exit
 do_exit:
-  LDX bbc_s
-  TXS
-  RTS
+  JMP bbc_return
 
 .section ".text.do_abort", "ax", @progbits
 .global do_abort

@@ -1327,6 +1327,17 @@ static TargetInstruction* stz(W65C02Generator* g, TargetInstruction* dest, int i
                           GetAddrMode(dest)));
 }
 
+static void stz_zp(W65C02Generator* g, int address) {
+  if (!Is65c02()) {
+    ldai(g, 0);
+    Emit(g, NewInstruction1(W65C02_OP(sta), ByteConst(g, address),
+                            kAddrModeZeroPageAbsolute));
+    return;
+  }
+  Emit(g, NewInstruction1(W65C02_OP(stz), ByteConst(g, address),
+                          kAddrModeZeroPageAbsolute));
+}
+
 static TargetInstruction* jsr(W65C02Generator* g, Symbol* func) {
   return Emit(g, NewInstruction1(W65C02_OP(jsr), GetSymbol(g, NULL, func),
                                  kAddrModeAbsolute));
@@ -1913,6 +1924,27 @@ static IRNode* IgnoreCasts(IRNode* node) {
     node = node->inputs.value.p[0];
   }
   return node;
+}
+
+// GeneratorSpillValueToTemp reloads through addressof(stack_slot).  Lower that
+// as a fresh frame-relative load, not as a load through a pointer cached in a
+// caller-clobbered zero-page register (which is wrong after a call).
+static IRNode* StackSlotFromAddress(IRNode* addr) {
+  addr = IgnoreCasts(addr);
+  if (addr->opcode != IR_OP(addressof) || addr->inputs.length != 1) {
+    return NULL;
+  }
+  IRNode* slot = IgnoreCasts(addr->inputs.value.p[0]);
+  switch (slot->opcode) {
+    case IR_OP(localvar):
+    case IR_OP(tempvar):
+    case IR_OP(argument):
+    case IR_OP(ssavar):
+    case IR_OP(phi):
+      return slot;
+    default:
+      return NULL;
+  }
 }
 
 static bool IsNRVONode(IRNode* node) {
@@ -2542,7 +2574,13 @@ static TargetInstruction* UnaryNotOp(W65C02Generator* g, IRNode* src_node,
   EmitResolvedBranch(g, W65C02_OP(beq), zero_label);
   ldai(g, 255);
   Emit(g, zero_label);
-  Emit(g, NewInstruction(W65C02_OP(inc), kAddrModeAccumulator));
+  if (Is65c02()) {
+    Emit(g, NewInstruction(W65C02_OP(inc), kAddrModeAccumulator));
+  } else {
+    // A is 0 or 255. Adding one produces 1 or 0 without INC A.
+    Emit(g, NewInstruction(W65C02_OP(clc), kAddrModeImplied));
+    Emit(g, NewInstruction1(W65C02_OP(adc), ByteConst(g, 1), kAddrModeImmediate));
+  }
   
   // Store A in dest.  It's stored in low byte and the upper bytes are zeroed.
   // Dest will be in zero page.
@@ -4441,6 +4479,12 @@ static void LowerLoad(W65C02Generator* g, IRNode* node) {
     LoadIndirect(g, node, src_node, size, start_index);
     return;
   }
+  IRNode* stack_slot = StackSlotFromAddress(src_node);
+  if (stack_slot != NULL) {
+    bool slot_is_arg = stack_slot->opcode == IR_OP(argument);
+    LoadFromVariable(g, node, stack_slot, slot_is_arg, size);
+    return;
+  }
   bool is_arg = true;
   if (src_node->opcode == IR_OP(tempvar)) {
     if (IsLoweredVariableStorage(src_node)) {
@@ -6244,18 +6288,6 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
          GetAddrMode(result), GetAddrMode(result_buf));
     call = TargetLastInstruction(&g->base);
   }
-  if (node->dest == NULL && !TypeIsVoid(node->type) && !IsLeaf(g) &&
-      TypeIsFloatingPoint(node->type)) {
-    int discard_size = Sizeof(node->type);
-    if (discard_size == 1 || discard_size == 2) {
-      call = Emit(g, NewInstruction1(
-          discard_size == 1 ? W65C02_OP(load_result_value1)
-                            : W65C02_OP(load_result_value2),
-          result, kAddrModeImplied));
-    } else {
-      call = Emit(g, NewInstruction(W65C02_OP(load_result), kAddrModeImplied));
-    }
-  }
   call->flags |= k6502InstIsCall | k6502BlockEnd;
   if (result == NULL) {
     result = call;
@@ -6299,6 +6331,14 @@ static void LowerResult(W65C02Generator* g, IRNode* node) {
   IRNode* result = node->inputs.value.p[0];
   if (result->opcode == IR_OP(calla) &&
       CanForwardTailCallArguments(g, result)) {
+    return;
+  }
+  // A direct call with a scalar destination already passed X/Y to the callee;
+  // the callee stores its return value there via __result*.  Reloading the
+  // saved result pointer from the caller frame is redundant and can clobber
+  // __result before later callees run.
+  if (result->opcode == IR_OP(calla) && result->dest != NULL &&
+      !TypeIsStructOrUnion(result->type) && !TypeIsVoid(result->type)) {
     return;
   }
   TargetInstruction* rnode = Materialize(g, result, -1, true);
@@ -6937,25 +6977,14 @@ static void LowerBuiltinVaArg(W65C02Generator* g, IRNode* node) {
          NewInstruction1(W65C02_OP(sta),
                          ByteConst(g, W65C02_MDST_REG),
                          kAddrModeZeroPageAbsolute));
-    Emit(g, NewInstruction1(
-                W65C02_OP(stz),
-                ByteConst(g,  W65C02_MDST_REG + 1),
-                kAddrModeZeroPageAbsolute));
-    
+    stz_zp(g, W65C02_MDST_REG + 1);
   } else {
     SetIndexReg(g, dest, dest, 0);
     lda(g, dest, 0);
-    Emit(g, NewInstruction1(
-              W65C02_OP(stz),
-              ByteConst(g,  W65C02_MDST_REG),
-              kAddrModeZeroPageAbsolute));
+    stz_zp(g, W65C02_MDST_REG);
     SetIndexReg(g, dest, dest, 1);
     lda(g, dest, 1);
-    Emit(g, NewInstruction1(
-              W65C02_OP(stz),
-              ByteConst(g,  W65C02_MDST_REG + 1),
-              kAddrModeZeroPageAbsolute));
-    
+    stz_zp(g, W65C02_MDST_REG + 1);
   }
   
   int size = (int)IRIntConstValue(node->inputs.value.p[1]);

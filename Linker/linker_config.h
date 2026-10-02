@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "buffer.h"
 #include "dstring.h"
 #include "vector.h"
 
@@ -35,7 +36,18 @@ typedef struct {
   uint64_t absolute;
   uint64_t align;
   Vector patterns;      // Section globs whose end address defines `.`.
+  // For `.` before any input of its output section: that section's globs,
+  // whose lowest start address defines `.`.
+  Vector start_patterns;
 } ConfigScriptSymbol;
+
+// Constant bytes from BYTE/SHORT/LONG/QUAD/SQUAD in an output section.  The
+// linker emits them as a section called `name`, which the output section lists
+// among its inputs.
+typedef struct {
+  String name;
+  Buffer bytes;
+} ConfigScriptData;
 
 typedef enum {
   kConfigSegmentTypeUnknown,
@@ -57,6 +69,7 @@ typedef struct {
   String entry_symbol;      // From ENTRY() in a linker script, or empty.
   Vector discard_patterns;  // Section globs from /DISCARD/.
   Vector script_symbols;    // ConfigScriptSymbol*.
+  Vector script_data;       // ConfigScriptData*.
 } LinkerConfig;
 
 void LinkerConfigInitEmpty(LinkerConfig* config);

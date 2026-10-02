@@ -23,6 +23,7 @@ OBJS = \
   printf_common.o \
   printf_literal.o \
   printf_long.o \
+  printf_simple.o \
   strcat.o \
   strchr.o \
   strcmp.o \

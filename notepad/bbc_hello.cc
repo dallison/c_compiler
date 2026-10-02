@@ -1,6 +1,6 @@
 #include <stdio.h>
 
 int main() {
-  fputs("Hello from C++\n", stdout);
+  printf("Hello, BBC (printf)\n");
   return 0;
 }

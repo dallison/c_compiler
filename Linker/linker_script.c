@@ -73,6 +73,9 @@ typedef struct {
   int include_depth;
   Token tok;
   ScriptAst* ast;
+  // Set when an expression uses `.`, ADDR() and friends, or a symbol whose
+  // value is not known while parsing.  Those all evaluate to 0 here.
+  bool expr_relocatable;
 } ScriptParser;
 
 typedef struct {
@@ -107,6 +110,7 @@ typedef struct {
   uint64_t absolute;
   uint64_t align;
   Vector patterns;
+  Vector start_patterns;
 } ScriptSymbol;
 
 struct ScriptAst {
@@ -115,6 +119,7 @@ struct ScriptAst {
   Vector sections;  // ScriptSection*
   Vector discards;  // String*
   Vector symbols;   // ScriptSymbol*
+  Vector data;      // ConfigScriptData*
   String entry;
 };
 
@@ -153,6 +158,14 @@ static void ScriptSymbolDestruct(ScriptSymbol* s) {
   VectorDestructWithContents(&s->patterns,
                              (VectorElementDestructor)StringDestruct,
                              /*free_element=*/true);
+  VectorDestructWithContents(&s->start_patterns,
+                             (VectorElementDestructor)StringDestruct,
+                             /*free_element=*/true);
+}
+
+static void ScriptDataDestruct(ConfigScriptData* data) {
+  StringDestruct(&data->name);
+  BufferDestruct(&data->bytes);
 }
 
 static void ScriptAstInit(ScriptAst* ast) {
@@ -161,6 +174,7 @@ static void ScriptAstInit(ScriptAst* ast) {
   VectorInit(&ast->sections);
   VectorInit(&ast->discards);
   VectorInit(&ast->symbols);
+  VectorInit(&ast->data);
   StringInit(&ast->entry, NULL);
 }
 
@@ -179,6 +193,9 @@ static void ScriptAstDestruct(ScriptAst* ast) {
                              /*free_element=*/true);
   VectorDestructWithContents(&ast->symbols,
                              (VectorElementDestructor)ScriptSymbolDestruct,
+                             /*free_element=*/true);
+  VectorDestructWithContents(&ast->data,
+                             (VectorElementDestructor)ScriptDataDestruct,
                              /*free_element=*/true);
   StringDestruct(&ast->entry);
 }
@@ -552,6 +569,7 @@ static uint64_t ParsePrimary(ScriptParser* p) {
   if (p->tok.kind == kTokIdent) {
     if (TokIsIdent(&p->tok, ".") || TokIsIdent(&p->tok, "DOT")) {
       NextToken(p);
+      p->expr_relocatable = true;
       return 0;
     }
     if (TokIsIdent(&p->tok, "SIZEOF_HEADERS")) {
@@ -567,6 +585,7 @@ static uint64_t ParsePrimary(ScriptParser* p) {
         value = AlignUpExpr(first, ParseExpression(p));
       } else {
         value = AlignUpExpr(0, first);
+        p->expr_relocatable = true;
       }
       Expect(p, kTokRParen, ")");
       return value;
@@ -639,11 +658,16 @@ static uint64_t ParsePrimary(ScriptParser* p) {
         ParseExpression(p);
         Expect(p, kTokRParen, ")");
       }
+      p->expr_relocatable = true;
       return 0;
     }
     ScriptSymbol* symbol = FindScriptSymbol(p->ast, p->tok.text.value);
     NextToken(p);
-    return symbol != NULL && symbol->has_absolute ? symbol->absolute : 0;
+    if (symbol == NULL || !symbol->has_absolute) {
+      p->expr_relocatable = true;
+      return 0;
+    }
+    return symbol->absolute;
   }
   ParserError(p, "Expected expression");
   return 0;
@@ -977,6 +1001,7 @@ static ScriptSymbol* NewScriptSymbol(const char* name, bool provide) {
   ScriptSymbol* sym = calloc(1, sizeof(ScriptSymbol));
   StringInit(&sym->name, name);
   VectorInit(&sym->patterns);
+  VectorInit(&sym->start_patterns);
   sym->provide = provide;
   return sym;
 }
@@ -1054,8 +1079,63 @@ static bool ParseProvideOrAssign(ScriptParser* p, Vector* scope_patterns,
   return false;
 }
 
+// Size in bytes of a BYTE/SHORT/LONG/QUAD/SQUAD data statement, or 0.
+static int DataStatementSize(const Token* tok) {
+  if (TokIsIdent(tok, "BYTE")) {
+    return 1;
+  }
+  if (TokIsIdent(tok, "SHORT")) {
+    return 2;
+  }
+  if (TokIsIdent(tok, "LONG")) {
+    return 4;
+  }
+  if (TokIsIdent(tok, "QUAD") || TokIsIdent(tok, "SQUAD")) {
+    return 8;
+  }
+  return 0;
+}
+
+// Appends a data statement's value to `*open_data`, starting a new data
+// section (and output-section input) when that is NULL.  Every davecc target
+// is little-endian.
+static void ParseDataStatement(ScriptParser* p, ScriptSection* section,
+                               int size, ConfigScriptData** open_data) {
+  NextToken(p);
+  if (!Expect(p, kTokLParen, "(")) {
+    return;
+  }
+  p->expr_relocatable = false;
+  uint64_t value = ParseExpression(p);
+  bool relocatable = p->expr_relocatable;
+  Expect(p, kTokRParen, ")");
+  Accept(p, kTokSemi);
+  if (relocatable) {
+    ParserError(p, "Section data needs a constant expression, not one using "
+                   "'.', ADDR() or a section-relative symbol");
+    return;
+  }
+  ConfigScriptData* data = *open_data;
+  if (data == NULL) {
+    data = calloc(1, sizeof(ConfigScriptData));
+    char name[64];
+    snprintf(name, sizeof(name), ".davecc_script_data.%zu",
+             p->ast->data.length);
+    StringInit(&data->name, name);
+    BufferInit(&data->bytes);
+    VectorAppend(&p->ast->data, data);
+    AddInputPattern(&section->inputs, name);
+  }
+  for (int i = 0; i < size; i++) {
+    BufferAppendByte(&data->bytes, (char)(value >> (8 * i)));
+  }
+  *open_data = data;
+}
+
 static void ParseOutputSection(ScriptParser* p, ScriptAst* ast,
                                const char* output_name) {
+  size_t first_symbol = ast->symbols.length;
+  ConfigScriptData* open_data = NULL;
   ScriptSection* section = calloc(1, sizeof(ScriptSection));
   StringInit(&section->output_name, output_name);
   VectorInit(&section->inputs);
@@ -1098,6 +1178,16 @@ static void ParseOutputSection(ScriptParser* p, ScriptAst* ast,
     return;
   }
   while (p->tok.kind != kTokRBrace && p->tok.kind != kTokEof) {
+    // Consecutive data statements share one data section; anything between
+    // them (a symbol, an input) starts a new one.
+    ConfigScriptData* previous_data = open_data;
+    open_data = NULL;
+    int data_size = DataStatementSize(&p->tok);
+    if (data_size != 0) {
+      open_data = previous_data;
+      ParseDataStatement(p, section, data_size, &open_data);
+      continue;
+    }
     if (p->tok.kind == kTokIdent && StringEqual(&p->tok.text, ".")) {
       NextToken(p);
       if (Accept(p, kTokEq)) {
@@ -1120,10 +1210,7 @@ static void ParseOutputSection(ScriptParser* p, ScriptAst* ast,
       }
     }
     if (AcceptIdent(p, "ASSERT") || AcceptIdent(p, "CONSTRUCTORS") ||
-        AcceptIdent(p, "CREATE_OBJECT_SYMBOLS") || AcceptIdent(p, "FILL") ||
-        AcceptIdent(p, "BYTE") || AcceptIdent(p, "SHORT") ||
-        AcceptIdent(p, "LONG") || AcceptIdent(p, "QUAD") ||
-        AcceptIdent(p, "SQUAD")) {
+        AcceptIdent(p, "CREATE_OBJECT_SYMBOLS") || AcceptIdent(p, "FILL")) {
       if (Accept(p, kTokLParen)) {
         SkipBalanced(p, kTokLParen, kTokRParen);
       }
@@ -1221,6 +1308,12 @@ static void ParseOutputSection(ScriptParser* p, ScriptAst* ast,
     }
   }
   Accept(p, kTokSemi);
+  for (size_t i = first_symbol; i < ast->symbols.length; i++) {
+    ScriptSymbol* sym = ast->symbols.value.p[i];
+    if (!sym->has_absolute && !sym->image_end && sym->patterns.length == 0) {
+      CopyPatterns(&sym->start_patterns, &section->inputs);
+    }
+  }
   if (section->discard) {
     CopyPatterns(&ast->discards, &section->inputs);
     ScriptSectionDestruct(section);
@@ -1699,13 +1792,23 @@ static void ScriptAstToConfig(ScriptAst* ast, LinkerConfig* config) {
     ConfigScriptSymbol* dst = calloc(1, sizeof(ConfigScriptSymbol));
     StringInit(&dst->name, src->name.value);
     VectorInit(&dst->patterns);
+    VectorInit(&dst->start_patterns);
     dst->provide = src->provide;
     dst->image_end = src->image_end;
     dst->has_absolute = src->has_absolute;
     dst->absolute = src->absolute;
     dst->align = src->align;
     CopyPatterns(&dst->patterns, &src->patterns);
+    CopyPatterns(&dst->start_patterns, &src->start_patterns);
     VectorAppend(&config->script_symbols, dst);
+  }
+  for (size_t i = 0; i < ast->data.length; i++) {
+    ConfigScriptData* src = ast->data.value.p[i];
+    ConfigScriptData* dst = calloc(1, sizeof(ConfigScriptData));
+    StringInit(&dst->name, src->name.value);
+    BufferInit(&dst->bytes);
+    BufferAppend(&dst->bytes, src->bytes.value, src->bytes.length);
+    VectorAppend(&config->script_data, dst);
   }
   for (size_t i = 0; i < ast->phdrs.length; i++) {
     ScriptPhdr* phdr = ast->phdrs.value.p[i];

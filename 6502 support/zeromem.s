@@ -40,7 +40,11 @@ zeromem2_large_loop:
 
   DEC __mem_size+1
   INC __mem_dest+1
+#ifdef __65c02__
   BRA zeromem2_large_page_loop
+#else
+  JMP zeromem2_large_page_loop
+#endif
 
 zeromem2_small:
   LDX __mem_size

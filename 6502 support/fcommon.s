@@ -18,7 +18,16 @@ __fassemble:
   STA 3,X     // Store sign and top 7 bits of exponent.
 
   // Put bottom bit of exp (in carry) in top bit of __t1
+#ifdef __65c02__
   STZ __t1
+#else
+  PHA
+  LDA #0
+  STA __t1
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   ROR __t1
 
   // Take bytes 1,2 and 3 from mantissa scratch.
@@ -39,7 +48,17 @@ __fassemble:
 // X: offset into zero page for result
 .section ".text.__packIEEE754", "ax", @progbits
 __packIEEE754:
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA fsign
   LDY #2
   LDA (__sp),Y
@@ -62,7 +81,12 @@ __packIEEE754:
   
 .section ".text.__fzero", "ax", @progbits
 __fzero:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   LDA #0
   STA 0,X
   STA 1,X
@@ -72,11 +96,24 @@ __fzero:
 
 .section ".text.__fzero_mantissa", "ax", @progbits
 __fzero_mantissa:
+#ifdef __65c02__
   STZ fmantissa+0
   STZ fmantissa+1
   STZ fmantissa+2
   STZ fmantissa+3
   STZ fmantissa+4
+#else
+  PHA
+  LDA #0
+  STA fmantissa+0
+  STA fmantissa+1
+  STA fmantissa+2
+  STA fmantissa+3
+  STA fmantissa+4
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   RTS
 
 .section ".text.__fmantissa_is_zero", "ax", @progbits
@@ -103,14 +140,32 @@ __funpackA:
   STA fsignA
 
   // Put 23 bit mantissa in middle bytes of fmanA.
+#ifdef __65c02__
   STZ fmanA+0
+#else
+  PHA
+  LDA #0
+  STA fmanA+0
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   LDA 0,X
   STA fmanA+1
   LDA 1,X
   STA fmanA+2
   LDA 2,X
   STA fmanA+3
+#ifdef __65c02__
   STZ fmanA+4
+#else
+  PHA
+  LDA #0
+  STA fmanA+4
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
 
   // Top bit of mantissa is bottom bit of exponent - shift it in.
   ASL A     // A contains top byte of mantissa.  MSB is LSB of exponent.
@@ -131,14 +186,32 @@ __funpackB:
   STA fsignB
 
   // Put 23 bit mantissa in middle bytes of fmanA.
+#ifdef __65c02__
   STZ fmanB+0
+#else
+  PHA
+  LDA #0
+  STA fmanB+0
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   LDA 0,Y
   STA fmanB+1
   LDA 1,Y
   STA fmanB+2
   LDA 2,Y
   STA fmanB+3
+#ifdef __65c02__
   STZ fmanB+4
+#else
+  PHA
+  LDA #0
+  STA fmanB+4
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
 
   // Top bit of mantissa is bottom bit of exponent - shift it in.
   ASL A     // A contains top byte of mantissa.  MSB is LSB of exponent.
@@ -172,7 +245,11 @@ fnorm_right:             // If top byte is non-zero, shift right until 0.
   ROR fmantissa+1
   // fmantissa+0 is beyond the precision at this point.
   INC fexp             // Increment exponent.
+#ifdef __65c02__
   BRA fnorm_right
+#else
+  JMP fnorm_right
+#endif
   RTS
 fnorm_left:
   // Shift left until bit 31 is set (implicit 1 bit).
@@ -193,7 +270,15 @@ fendnorm:
 .section ".text.__fround", "ax", @progbits
 __fround:
   LDA fmantissa+0
+#ifdef __65c02__
   BIT #0x80     // Lowest byte top bit set?
+#else
+  TAX
+  AND #0x80
+  PHP
+  TXA
+  PLP
+#endif
   BEQ fround_done  // No, no rounding needed.
 
   CMP #0x80     // Exactly half?
@@ -201,7 +286,15 @@ __fround:
 
   // Check if remaining mantissa is even
   LDA fmantissa+1
+#ifdef __65c02__
   BIT #0x1
+#else
+  TAX
+  AND #0x1
+  PHP
+  TXA
+  PLP
+#endif
   BNE fround_done      // Number is odd, no rounding.
 
 round_up:
@@ -445,7 +538,17 @@ fisinfB_no:
 .section ".text.__unpackIEEE754", "ax", @progbits
 __unpackIEEE754:
   // Load fp address into t0,t1
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y
@@ -464,7 +567,16 @@ __unpackIEEE754:
   LDA (__t0), Y
   STA fexpA
   AND #128
-  STA (__t2)        // Store sign in result.
+#ifdef __65c02__
+  STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
 
   // Copy mantissa into fmanA.
   // Mantissa is 24 bits long in IEEE754.  The output we want
@@ -478,7 +590,16 @@ unpack752_man_loop:
   INY
   CPY #3
   BNE unpack752_man_loop
+#ifdef __65c02__
   STZ fmanA+0
+#else
+  PHA
+  LDA #0
+  STA fmanA+0
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
 
   // Top bit of A is the bottom bit of the exponent in fexpA
   ASL A

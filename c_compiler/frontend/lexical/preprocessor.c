@@ -697,6 +697,7 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__DAVECC_LEGACY_RTTI__", "1");
   } else if (StringEqual(compiler->target_name, "65c02")) {
     PreprocessorDefineMacro(p, "__W65C02__", "1");
+    PreprocessorDefineMacro(p, "__65c02__", "1");
     PreprocessorDefineMacro(p, "__6502__", "1");
     PreprocessorDefineMacro(p, "__DAVECC_LEGACY_RTTI__", "1");
   } else if (StringEqual(compiler->target_name, "bpf") ||

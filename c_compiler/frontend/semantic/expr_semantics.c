@@ -4532,10 +4532,21 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   // C++ allows dynamic initialization of namespace-scope and function-local
   // static objects (`std::string flag = ""`).  constexpr and constinit still
   // require a constant initializer.  thread_local keeps the check above, which
-  // constant-initializes it when the expression allows that.
+  // constant-initializes it when the expression allows that.  Plain `static
+  // const` scalars and arrays with constant initializers still belong in
+  // read-only data, not `.comm`.
   if (CompilerIsCXX() && !is_thread_local && !symbol->flags.is_constexpr &&
       !symbol->flags.is_constinit) {
-    constants_only = false;
+    ASTNode* init_expr = init;
+    if (init_expr != NULL && init_expr->op == AST_OP(expr_init)) {
+      init_expr = ((ExpressionInitializerASTNode*)init_expr)->expr;
+    }
+    bool static_const_constant =
+        StorageIs(symbol->storage, STO(static)) && TypeIsConst(symbol->type) &&
+        init_expr != NULL && IsConstantExpression(init_expr);
+    if (!static_const_constant) {
+      constants_only = false;
+    }
   }
   MarkCXX26SymbolicConstexprReference(symbol, init);
 
@@ -6154,6 +6165,7 @@ static void CheckFormatCall(VectorASTNode* node, Symbol* callee) {
 typedef enum {
   kPrintfProfileFull,
   kPrintfProfileLiteral,
+  kPrintfProfileSimple,
   kPrintfProfileInt,
   kPrintfProfileLong,
   kPrintfProfileFP,
@@ -6174,17 +6186,21 @@ static int PrintfFormatArgument(const char* name) {
 
 static PrintfProfile ClassifyPrintfFormat(const char* format) {
   PrintfProfile profile = kPrintfProfileLiteral;
+  // Every conversion is a bare %d, %i, %u, %c, %s or %%.
+  bool simple = true;
   const char* p = format;
   while (*p != '\0') {
     if (*p++ != '%') {
       continue;
     }
+    if (profile == kPrintfProfileLiteral) {
+      profile = kPrintfProfileInt;
+    }
     if (*p == '%') {
       p++;
-      profile = kPrintfProfileInt;
       continue;
     }
-    profile = kPrintfProfileInt;
+    const char* spec = p;
     while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0') {
       p++;
     }
@@ -6226,6 +6242,9 @@ static PrintfProfile ClassifyPrintfFormat(const char* format) {
     if (*p == '\0') {
       return kPrintfProfileFull;
     }
+    if (p != spec || strchr("diucs", *p) == NULL) {
+      simple = false;
+    }
     char conversion = *p++;
     if (strchr("fFeEgGaA", conversion) != NULL) {
       profile = kPrintfProfileFP;
@@ -6234,6 +6253,9 @@ static PrintfProfile ClassifyPrintfFormat(const char* format) {
     } else if (strchr("diuoxXpcsn", conversion) == NULL) {
       return kPrintfProfileFull;
     }
+  }
+  if (profile == kPrintfProfileInt && simple) {
+    return kPrintfProfileSimple;
   }
   return profile;
 }
@@ -6277,6 +6299,9 @@ static void SpecializePrintfCall(VectorASTNode* node, Symbol* callee) {
   switch (profile) {
     case kPrintfProfileLiteral:
       suffix = "literal";
+      break;
+    case kPrintfProfileSimple:
+      suffix = "simple";
       break;
     case kPrintfProfileInt:
       suffix = "int";
@@ -15186,7 +15211,12 @@ bool IsConstantExpression(ASTNode* node) {
       CastASTNode* c = (CastASTNode*)node;
       return IsConstantExpression(c->expr);
     }
-  
+    case AST_OP(expr_init): {
+      ExpressionInitializerASTNode* expr_init =
+          (ExpressionInitializerASTNode*)node;
+      return expr_init->expr != NULL && IsConstantExpression(expr_init->expr);
+    }
+
       case AST_OP(compound_literal): {
         CompoundLiteralASTNode* lit = (CompoundLiteralASTNode*)node;
         return IsConstantExpression(lit->initializer);

@@ -79,7 +79,17 @@ setjmp:
   STA __b0    // Register set index.
 
   // Get jmp_buf from stack and store in __t0,__t1,
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y
@@ -88,7 +98,14 @@ setjmploop:
   LDX __b0
   LDA reg_offsets,X
   LDY reg_sizes,X
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   TAX
   JSR saveregs
 
@@ -147,7 +164,16 @@ setjmploop:
 
   // Return 0.
   LDA #0
+#ifdef __65c02__
   STA (__result)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__result),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   STA (__result),Y
   JMP __incsp2
@@ -164,7 +190,17 @@ longjmp:
   STA __b0    // Register set index.
 
   // Get jmp_buf from stack and store in __t0,__t1,
+#ifdef __65c02__
   LDA (__sp)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__sp),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t0
   LDY #1
   LDA (__sp),Y
@@ -173,7 +209,14 @@ longjmploop:
   LDX __b0
   LDA reg_offsets,X
   LDY reg_sizes,X
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   TAX
   JSR restoreregs
 
@@ -204,7 +247,16 @@ longjmploop:
   // Copy return value to result.
   LDY #2
   LDA (__sp),Y
+#ifdef __65c02__
   STA (__result)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__result),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   INY
   LDA (__sp), Y
   LDY #1

@@ -33,7 +33,13 @@ __smul4:
   LDA 3,Y
   STA multiplier+3
   EOR multiplicand+3
+#ifdef __65c02__
   BPL umul4c
+#else
+  BMI smul4_neg
+  JMP umul4c
+smul4_neg:
+#endif
 
   // One of multiplier or multiplicand is negative.  Result will be negative.
   LDA multiplier+3
@@ -53,7 +59,11 @@ __smul4:
   LDA #0
   SBC multiplier+3
   STA multiplier+3
+#ifdef __65c02__
   BRA smul4b
+#else
+  JMP smul4b
+#endif
 smul4a:
   // Multiplicand is negative, negate it.
   SEC
@@ -109,7 +119,11 @@ __umul4:
   STA multiplier+2
   LDA 3,Y
   STA multiplier+3
+#ifdef __65c02__
   BRA umul4c
+#else
+  JMP umul4c
+#endif
 
 umul4b:
   PLA
@@ -150,7 +164,12 @@ umul4_l2:
   DEX
   BNE umul4_l1
   STA product+7
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   LDA product
   STA 0,X
   LDA product+1

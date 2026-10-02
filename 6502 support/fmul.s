@@ -61,15 +61,30 @@ manmul_l2:
 // Algorithm:
 // Add exponents, multiply mantissas, normalize.
 fmul_res_0:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fres0
 
 fmul_res_nan:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fnan
 
 fmul_res_inf:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __finf
 
 __fmul:
@@ -116,7 +131,12 @@ __fmul:
   // Normalize result and assemble into destination.
   JSR __fnormalize
   JSR __fround
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 

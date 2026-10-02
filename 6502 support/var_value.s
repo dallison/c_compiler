@@ -240,7 +240,17 @@ __var_value1:
 __var_value1b:
   JSR __varaddr
   TAX
+#ifdef __65c02__
   LDA (__t0)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t0),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA 0, X
   RTS
 
@@ -561,7 +571,17 @@ __arg_value1:
 __arg_value1b:
   JSR __argaddr
   TAX
+#ifdef __65c02__
   LDA (__t0)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t0),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA 0, X
   RTS
 
@@ -820,7 +840,16 @@ __set_var_value1b:
   JSR __varaddr
   TAX
   LDA 0,X
+#ifdef __65c02__
   STA (__t0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   RTS
 
 
@@ -886,7 +915,16 @@ __set_arg_value1b:
   JSR __argaddr
   TAX
   LDA 0,X
+#ifdef __65c02__
   STA (__t0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   RTS
 
 
@@ -899,7 +937,16 @@ __set_arg_value2b:
   JSR __argaddr
   TAX
   LDA 0,X
+#ifdef __65c02__
   STA (__t0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA 1,X
   STA (__t0), Y
@@ -951,7 +998,16 @@ __zero_var_value1:
 __zero_var_value1b:
   JSR __varaddr
   LDA #0
+#ifdef __65c02__
   STA (__t0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   RTS
 
 
@@ -963,7 +1019,16 @@ __zero_var_value2:
 __zero_var_value2b:
   JSR __varaddr
   LDA #0
+#ifdef __65c02__
   STA (__t0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   STA (__t0), Y
   RTS
@@ -1009,7 +1074,16 @@ __zero_arg_value1:
 __zero_arg_value1b:
   JSR __argaddr
   LDA #0
+#ifdef __65c02__
   STA (__t0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   RTS
 
 
@@ -1021,7 +1095,16 @@ __zero_arg_value2:
 __zero_arg_value2b:
   JSR __argaddr
   LDA #0
+#ifdef __65c02__
   STA (__t0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   STA (__t0), Y
   RTS

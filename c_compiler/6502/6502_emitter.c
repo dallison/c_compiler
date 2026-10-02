@@ -52,8 +52,9 @@ static int SpillRegion(W65C02Emitter* emitter) {
 }
 
 static int FrameSize(W65C02Emitter* emitter, bool is_leaf) {
+  // Spill offsets index into the spill area; reserve space for the last slot.
   return emitter->g->base.stack_frame_size +
-      emitter->regs->max_spilled_region_size + 2 +
+      emitter->regs->max_spilled_region_size + 4 + 2 +
       (is_leaf ? 0 : 2);
 }
 

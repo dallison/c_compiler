@@ -5,19 +5,39 @@
 .section ".text.__fadd", "ax", @progbits
 
 fadd_res_B:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fresB
 
 fadd_res_A:
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
   JMP __fresA
 
 fadd_res_nan:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fnan
 
 fadd_res_inf:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __finf
 
 // Add two 32-bit floats
@@ -50,7 +70,16 @@ add_common:
   // negative-result path below, but __fassemble always ORs it into the result.
   // fsign aliases __t0, which __argaddr clobbers whenever a function reads a
   // parameter, so it must be initialized here rather than relied upon to be 0.
+#ifdef __65c02__
   STZ fsign
+#else
+  PHA
+  LDA #0
+  STA fsign
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   SEC
   LDA fexpB
   STA fexp
@@ -69,7 +98,11 @@ add_common:
 
   // Shift fmanB right by diff bits.
   JSR __frshiftB
+#ifdef __65c02__
   BRA fadd_same_exp
+#else
+  JMP fadd_same_exp
+#endif
 
 fadd_A_smaller:
   LDA fexpB
@@ -152,13 +185,23 @@ fadd_pos_result:
 
   JSR __fnormalize
   JSR __fround
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble
 
 
 // Result is zero.
 fadd_res_0:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   LDA #0
   STA 0,X
   STA 1,X
@@ -175,15 +218,30 @@ fsub_res_B:
 
 // B is zero, result is in A.
 fsub_res_A:
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
   JMP __fresA
 
 fsub_res_nan:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fnan
 
 fsub_res_inf:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __finf
 
 

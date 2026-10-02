@@ -75,6 +75,7 @@ set(DAVECC_GUEST_LIBC_COMMON_C
   libc/printf_common.c
   libc/printf_literal.c
   libc/printf_long.c
+  libc/printf_simple.c
   libc/qsort.c
   libc/rand.c
   libc/realloc.c

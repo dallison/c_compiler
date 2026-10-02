@@ -92,7 +92,11 @@ smul8_1:
   LDA #0
   SBC multiplier+7
   STA multiplier+7
+#ifdef __65c02__
   BRA smul8b
+#else
+  JMP smul8b
+#endif
 smul8a:
   // Multiplicand is negative, negate it.
   SEC
@@ -188,7 +192,11 @@ __umul8:
   STA multiplier+6
   LDA 7,Y
   STA multiplier+7
+#ifdef __65c02__
   BRA umul8c
+#else
+  JMP umul8c
+#endif
 
 umul8b:
   PLA
@@ -257,7 +265,12 @@ umul8_l2:
   DEX
   BNE umul8_l1
   STA product+15
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   LDA product
   STA 0,X
   LDA product+1

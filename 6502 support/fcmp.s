@@ -26,7 +26,11 @@ __cmpeqf:
   LDA 3,X
   CMP 3,Y
   BNE cmpeq_false
+#ifdef __65c02__
   BRA cmpeq_true
+#else
+  JMP cmpeq_true
+#endif
 cmpeq_false:
   PLA
   TAX
@@ -59,7 +63,11 @@ __cmpnef:
   LDA 3,X
   CMP 3,Y
   BNE cmpne_true
+#ifdef __65c02__
   BRA cmpne_false
+#else
+  JMP cmpne_false
+#endif
 cmpne_false:
   PLA
   TAX
@@ -101,7 +109,11 @@ cmpltf:
   EOR #0x80
 lt1:
   BMI cmpltf_true
+#ifdef __65c02__
   BRA cmpltf_false
+#else
+  JMP cmpltf_false
+#endif
 
 // A is negative.
 cmpltf_a_neg:
@@ -121,7 +133,11 @@ cmpltf_a_neg:
   EOR #0x80
 lt2:
   BMI cmpltf_true
+#ifdef __65c02__
   BRA cmpltf_false
+#else
+  JMP cmpltf_false
+#endif
 
 cmpltf_false:
   PLA

@@ -3,7 +3,8 @@
 //  BBC Micro Machine Operating System entry points and VDU graphics.
 //
 //  Link this with the BBC runtime (bbc_start.s, bbc_syscall.s, bbc_mos.s),
-//  not the interpreter support ROM. MOS leaves the language zero page alone.
+//  not the interpreter support ROM. MOS calls leave the language zero page
+//  alone; on exit, bbc_return re-enters the current language (OSBYTE &8E).
 //
 //  MOS strings are terminated by CR (0x0d), not by a C NUL.
 //
@@ -200,6 +201,10 @@ os_regs osrdsc(unsigned char x, unsigned char y);
 #define BBC_GCOL_INVERT 4
 #define BBC_GCOL_LEAVE 5
 
+/* Selects a screen mode, moves the software stack top to the new HIMEM, and
+   clears the graphics viewport (CLG). Frames already on the stack stay where
+   they are, so a program that switches to a larger screen must start its
+   stack below that screen (bbc_mode4.ld does this for mode 4). */
 void mode(unsigned char mode);
 void colour(unsigned char colour);
 void color(unsigned char colour);
@@ -440,6 +445,13 @@ enum class osword_command : unsigned char {
 
 inline os_regs osbyte(osbyte_command cmd, unsigned char x, unsigned char y) {
   return osbyte(static_cast<unsigned char>(cmd), x, y);
+}
+
+/* MOS HIMEM (OSBYTE &84): .x = low, .y = high. On a Model B this is &5800
+   in mode 4 and &7C00 in mode 7. */
+inline unsigned mos_himem() {
+  os_regs r = osbyte(osbyte_command::himem, 0, 0);
+  return static_cast<unsigned>(r.x) | (static_cast<unsigned>(r.y) << 8);
 }
 
 inline void osword(osword_command cmd, void* block) {

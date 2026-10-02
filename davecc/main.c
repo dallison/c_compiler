@@ -307,7 +307,7 @@ static const TargetRuntime target_runtimes[] = {
      "//:libc_x86_64_shared", true, false},
     {"x86", kTargetOSNone, "libcx86.a", "//:libc_x86", NULL, NULL,
      "//:libc_x86_shared", true, false},
-    {"6502", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL,
+    {"6502", kTargetOSNone, "libc6502.a", "//:libc_6502", NULL, NULL,
      NULL, false, true},
     {"65c02", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL,
      NULL, false, true},
