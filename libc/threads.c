@@ -16,6 +16,12 @@
 #define __DAVECC_HAS_GUEST_THREADS__ 1
 #endif
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+#include <pthread.h>
+#define __DAVECC_HAS_DARWIN_THREADS__ 1
+#define __DAVECC_HAS_GUEST_THREADS__ 1
+#endif
+
 #define DAVECC_TSS_KEYS_MAX 64
 
 typedef struct DaveCCTssKey {
@@ -239,6 +245,91 @@ void thrd_exit(int res) {
   for (;;) {}
 }
 
+#elif defined(__DAVECC_HAS_DARWIN_THREADS__)
+typedef struct DaveCCConditionAtExit {
+  cnd_t* condition;
+  mtx_t* mutex;
+  struct DaveCCConditionAtExit* next;
+} DaveCCConditionAtExit;
+
+static __thread DaveCCConditionAtExit* condition_at_exit;
+
+int sched_yield(void);
+void __davecc_thread_exit_callbacks(void);
+
+typedef struct DarwinThreadStart {
+  thrd_start_t function;
+  void* argument;
+} DarwinThreadStart;
+
+static void* DarwinThreadEntry(void* value) {
+  DarwinThreadStart start = *(DarwinThreadStart*)value;
+  free(value);
+  int result = start.function(start.argument);
+  __davecc_thread_exit_callbacks();
+  return (void*)(intptr_t)result;
+}
+
+int thrd_create(thrd_t* thr, thrd_start_t func, void* arg) {
+  if (thr == NULL || func == NULL) return thrd_error;
+  DarwinThreadStart* start = malloc(sizeof(*start));
+  if (start == NULL) return thrd_nomem;
+  start->function = func;
+  start->argument = arg;
+  pthread_t thread;
+  int result = pthread_create(&thread, NULL, DarwinThreadEntry, start);
+  if (result != 0) {
+    free(start);
+    return result == EAGAIN || result == ENOMEM ? thrd_nomem : thrd_error;
+  }
+  *thr = (thrd_t)thread;
+  return thrd_success;
+}
+
+int thrd_detach(thrd_t thr) {
+  return pthread_detach((pthread_t)thr) == 0 ? thrd_success : thrd_error;
+}
+
+int thrd_join(thrd_t thr, int* res) {
+  void* value = NULL;
+  if (pthread_join((pthread_t)thr, &value) != 0) return thrd_error;
+  if (res != NULL) *res = (int)(intptr_t)value;
+  return thrd_success;
+}
+
+int thrd_sleep(const struct timespec* duration, struct timespec* remaining) {
+  if (duration == NULL || duration->tv_sec < 0 || duration->tv_nsec < 0 ||
+      duration->tv_nsec >= 1000000000)
+    return -1;
+  if (nanosleep(duration, remaining) == 0) return 0;
+  return errno == EINTR ? -2 : -1;
+}
+
+thrd_t thrd_current(void) {
+  return (thrd_t)pthread_self();
+}
+
+int thrd_equal(thrd_t a, thrd_t b) {
+  return a == b;
+}
+
+void thrd_exit(int res) {
+  __davecc_thread_exit_callbacks();
+  pthread_exit((void*)(intptr_t)res);
+}
+
+// libSystem's public futex-style API (macOS 14.4+).
+enum { kDarwinClockMachAbsoluteTime = 32 };
+int os_sync_wait_on_address(void* address, uint64_t value, size_t size,
+                            uint32_t flags);
+int os_sync_wait_on_address_with_timeout(void* address, uint64_t value,
+                                         size_t size, uint32_t flags,
+                                         uint32_t clock, uint64_t timeout_ns);
+int os_sync_wake_by_address_any(void* address, size_t size, uint32_t flags);
+int os_sync_wake_by_address_all(void* address, size_t size, uint32_t flags);
+int sysctlbyname(const char* name, void* old_value, size_t* old_size,
+                 void* new_value, size_t new_size);
+
 #elif defined(__DAVECC_HAS_GUEST_THREADS__)
 void __davecc_tls_thread_init(void);
 void __davecc_tls_thread_fini(void);
@@ -365,6 +456,20 @@ int __davecc_addr_wait(const volatile void* address, const void* expected,
       syscall(SYS_futex, address, 0, expected_value, timeout_pointer, 0, 0);
   if (result == 0 || errno == EAGAIN) return thrd_success;
   return errno == ETIMEDOUT ? thrd_timedout : thrd_error;
+#elif defined(__DAVECC_HAS_DARWIN_THREADS__)
+  if (size != sizeof(unsigned int)) return thrd_error;
+  uint64_t expected_value = *(const unsigned int*)expected;
+  if (timeout_us < 0) {
+    (void)os_sync_wait_on_address((void*)address, expected_value, size, 0);
+    return thrd_success;
+  }
+  if (timeout_us > LLONG_MAX / 1000) timeout_us = LLONG_MAX / 1000;
+  if (os_sync_wait_on_address_with_timeout(
+          (void*)address, expected_value, size, 0,
+          kDarwinClockMachAbsoluteTime, (uint64_t)timeout_us * 1000) >= 0) {
+    return thrd_success;
+  }
+  return errno == ETIMEDOUT ? thrd_timedout : thrd_success;
 #elif defined(__DAVECC_HAS_GUEST_THREADS__)
   long result = syscall(SYS_ADDR_WAIT, address, expected, size, timeout_us);
   if (result == 0) {
@@ -385,6 +490,15 @@ int __davecc_addr_wake(const volatile void* address, int wake_all) {
   return syscall(SYS_futex, address, 1, wake_all ? INT_MAX : 1, 0, 0, 0) >= 0
              ? thrd_success
              : thrd_error;
+#elif defined(__DAVECC_HAS_DARWIN_THREADS__)
+  // Every waiter goes through __davecc_addr_wait, which only accepts 4 bytes.
+  // Waking with no waiters fails with ENOENT, which is not an error here.
+  if (wake_all) {
+    (void)os_sync_wake_by_address_all((void*)address, sizeof(unsigned int), 0);
+  } else {
+    (void)os_sync_wake_by_address_any((void*)address, sizeof(unsigned int), 0);
+  }
+  return thrd_success;
 #elif defined(__DAVECC_HAS_GUEST_THREADS__)
   return syscall(SYS_ADDR_WAKE, address, wake_all) >= 0 ? thrd_success
                                                         : thrd_error;
@@ -409,6 +523,13 @@ unsigned int __davecc_hardware_concurrency(void) {
     }
   }
   return count;
+#elif defined(__DAVECC_HAS_DARWIN_THREADS__)
+  int count = 0;
+  size_t count_size = sizeof(count);
+  if (sysctlbyname("hw.logicalcpu", &count, &count_size, NULL, 0) != 0) {
+    return 0;
+  }
+  return count > 0 ? (unsigned int)count : 0;
 #elif defined(__DAVECC_HAS_GUEST_THREADS__)
   long result = syscall(SYS_HARDWARE_CONCURRENCY);
   return result > 0 ? (unsigned int)result : 0;
@@ -417,6 +538,8 @@ unsigned int __davecc_hardware_concurrency(void) {
 #endif
 }
 
+// darwin_support.c supplies the clocks on Darwin.
+#if !defined(__DAVECC_HAS_DARWIN_THREADS__)
 long long __davecc_monotonic_time_us(void) {
 #if defined(__DAVECC_HAS_NATIVE_THREADS__)
 #if defined(__risc_v__) && defined(__ILP32__)
@@ -460,10 +583,13 @@ long long __davecc_realtime_time_us(void) {
 #endif
   return (long long)time(NULL) * 1000000;
 }
+#endif
 
 void thrd_yield(void) {
 #if defined(__DAVECC_HAS_NATIVE_THREADS__)
   (void)syscall(SYS_sched_yield);
+#elif defined(__DAVECC_HAS_DARWIN_THREADS__)
+  (void)sched_yield();
 #elif defined(__DAVECC_HAS_GUEST_THREADS__)
   (void)syscall(SYS_THREAD_YIELD);
 #endif

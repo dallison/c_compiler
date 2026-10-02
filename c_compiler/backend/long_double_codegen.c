@@ -289,9 +289,15 @@ IRNode* ConvertValueToLongDouble(Generator* gen, IRNode* value,
     GeneratorEmit(gen, call);
     return dest;
   }
-  TypeRecord* ll = NewTypeRecordWithSize(kTypeLongLong, kQualPlain);
+  TypeRecord* int_type = from != NULL ? from : value->type;
+  bool is_u64 = int_type != NULL && int_type->size >= 8 &&
+                TypeIsUnsigned(int_type);
+  TypeRecord* ll = NewTypeRecordWithSize(
+      is_u64 ? (kTypeLongLong | kTypeUnsigned) : kTypeLongLong, kQualPlain);
   TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
-  Symbol* fn = GetLongDoubleHelper("__davecc_ld_from_i64", void_type, 1, ll);
+  Symbol* fn = GetLongDoubleHelper(
+      is_u64 ? "__davecc_ld_from_u64" : "__davecc_ld_from_i64", void_type, 1,
+      ll);
   TypeRecordDelete(void_type);
   if (value->type != NULL && value->type->size < 8) {
     int diff_bits = (8 - (int)value->type->size) * 8;
@@ -336,8 +342,11 @@ IRNode* ConvertValueFromLongDouble(Generator* gen, IRNode* value,
     GeneratorEmit(gen, call);
     return IRSetType(call, to);
   }
-  TypeRecord* ll = NewTypeRecordWithSize(kTypeLongLong, kQualPlain);
-  Symbol* fn = GetLongDoubleHelper("__davecc_ld_to_i64", ll, 1, NULL);
+  bool is_u64 = to != NULL && to->size >= 8 && TypeIsUnsigned(to);
+  TypeRecord* ll = NewTypeRecordWithSize(
+      is_u64 ? (kTypeLongLong | kTypeUnsigned) : kTypeLongLong, kQualPlain);
+  Symbol* fn = GetLongDoubleHelper(
+      is_u64 ? "__davecc_ld_to_u64" : "__davecc_ld_to_i64", ll, 1, NULL);
   IRNode* call = NewIR1(IR_OP(calla), GeneratorGetVariable(gen, fn));
   IRAddInput(call, src, false);
   GeneratorEmit(gen, call);

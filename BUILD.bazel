@@ -3025,6 +3025,7 @@ darwin_libc_archive(
         "libc/itoa_longlong.c",
         "libc/itoa_ptr.c",
         "libc/lsda.c",
+        "libc/threads.c",
         "libc/unwind_api.c",
     ],
     libc_cxx_srcs = LIBC_CXX_SRCS,

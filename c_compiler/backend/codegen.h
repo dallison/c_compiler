@@ -81,6 +81,11 @@ typedef struct Generator {
   // Destination object for an inlined constructor whose `this` should be the
   // enclosing initializer slot rather than the original temporary actual.
   IRNode* inlined_constructor_this;
+  // A virtual callee reads its receiver through its own copy of the `this`
+  // argument.  While the callee is generated, that copy reloads the receiver
+  // already evaluated and spilled here, so side effects happen once.
+  ASTNode* virtual_receiver_copy;
+  IRNode* virtual_receiver_spill;
 
   IRNode* return_label;  // All returns branch to the same label.
 

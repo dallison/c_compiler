@@ -508,11 +508,23 @@ static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
       folded =
           NewRealConstantASTNode(value, expr->type, expr->location);
     }
-  } else if (expr->type != NULL && TypeIsPointer(expr->type)) {
-    // A pointer constant may be a conditional or a constexpr call
-    // (`cond ? &a : &b`, `get_hash_slot_fn()`).  Those are not integer
-    // constants; fold them to the selected function or object address.
-    folded = ConstexprFoldPointerExpression(expr);
+  } else if (expr->type != NULL &&
+             (TypeIsPointer(expr->type) || TypeIsNullPointer(expr->type))) {
+    // Every `std::nullptr_t` value is the null pointer, so a named one
+    // (`P::shared_destroy` declared `static constexpr auto ... = nullptr`)
+    // converts to a null pointer constant.
+    ASTNode* operand = expr;
+    while (operand->op == AST_OP(cast) && ((CastASTNode*)operand)->expr != NULL) {
+      operand = ((CastASTNode*)operand)->expr;
+    }
+    if (operand->op == AST_OP(identifier) && TypeIsNullPointer(operand->type)) {
+      folded = NewIntConstantASTNode(0, expr->type, expr->location);
+    } else if (TypeIsPointer(expr->type)) {
+      // A pointer constant may be a conditional or a constexpr call
+      // (`cond ? &a : &b`, `get_hash_slot_fn()`).  Those are not integer
+      // constants; fold them to the selected function or object address.
+      folded = ConstexprFoldPointerExpression(expr);
+    }
   }
   if (folded == NULL) {
     return expr;

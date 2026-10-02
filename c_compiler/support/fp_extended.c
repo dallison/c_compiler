@@ -411,22 +411,31 @@ static FPBits PackF64(Unp u) {
     memcpy(&out.lo, &bits, sizeof(bits));
     return out;
   }
-  // Binary64: integer bit at 52.  Our integer is at 112.  Shift right 60.
+  // Binary64: integer bit at 52.  Our integer is at 112.  Shift right 59 to
+  // keep a round bit below the significand.
   uint64_t hi = u.hi;
   uint64_t lo = u.lo;
   int sticky = 0;
-  Shr128Sticky(&hi, &lo, 60, &sticky);
+  Shr128Sticky(&hi, &lo, 59, &sticky);
   int exp = u.exp + 1023;
   if (exp <= 0) {
     Shr128Sticky(&hi, &lo, 1 - exp, &sticky);
     exp = 0;
   }
+  uint64_t round = lo & 1;
+  uint64_t sig = lo >> 1;
+  if (round && (sticky || (sig & 1))) {
+    sig++;
+    if (sig == (1ULL << 53)) {
+      sig >>= 1;
+      exp++;
+    } else if (exp == 0 && (sig & (1ULL << 52))) {
+      exp = 1;
+    }
+  }
   if (exp >= 0x7ff) {
     return PackF64(UnpInf(u.sign));
   }
-  uint64_t sig = lo & 0x001fffffffffffffULL;
-  uint64_t guard = 0;
-  (void)guard;
   uint64_t bits = ((uint64_t)u.sign << 63) | ((uint64_t)(exp & 0x7ff) << 52) |
                   (sig & 0x000fffffffffffffULL);
   memcpy(&out.lo, &bits, sizeof(bits));
@@ -778,6 +787,21 @@ int64_t FPBitsToI64(FPBits bits, int format) {
   }
   int64_t result = (int64_t)mag;
   return u.sign ? -result : result;
+}
+
+uint64_t FPBitsToU64(FPBits bits, int format) {
+  Unp u = Unpack(bits, format);
+  if (u.sign && u.cls != kClsZero) {
+    return (uint64_t)FPBitsToI64(bits, format);
+  }
+  if (u.cls == kClsNaN || u.cls == kClsZero || u.exp < 0) {
+    return 0;
+  }
+  if (u.cls == kClsInf || u.exp >= 64) {
+    return UINT64_MAX;
+  }
+  // Integer bit at 112; exp <= 63 keeps the shift at 49 or more.
+  return Shr128Lo(u.hi, u.lo, 112 - u.exp);
 }
 
 FPBits FPAdd(FPBits a, FPBits b, int format) {

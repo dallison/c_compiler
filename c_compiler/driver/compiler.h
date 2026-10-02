@@ -469,6 +469,10 @@ typedef struct Compiler {
   // including its constructors' inline bodies -- is complete.  Elements are
   // VariableDeclarationASTNode* owned by the declaration ASTs.
   Vector cxx_deferred_static_member_definitions;
+  // Odr-used static data members of class template specializations whose
+  // template has no definition yet (Symbol*, not owned); a later out-of-class
+  // `template <class T> T C<T>::m = ...;` instantiates them.
+  Vector cxx_undefined_template_static_members;
 
   // Namespace-scope C++ objects that need dynamic construction/destruction.
   // Elements are Symbol* owned by the normal symbol tables.

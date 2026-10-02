@@ -244,6 +244,15 @@ typedef struct Symbol {
   // including the implicit constructor and destructor calls, is in that
   // class's scope. Transient: rebuilt when the class member is declared.
   struct Struct* static_data_member_class;  // @wire - (transient)
+  // Static data member of a class template specialization: the template's
+  // member it was instantiated from and the (owned) arguments used, so its
+  // definition can be instantiated when it is first odr-used.  Transient.
+  struct Symbol* static_data_member_pattern;  // @wire - (transient)
+  Vector* static_data_member_template_arguments;  // @wire - (transient)
+  // A class template's static data member: its out-of-class definition
+  // (`template <class T> const T C<T>::k[] = {...};`), owned by the
+  // translation unit's declaration list.  Transient.
+  struct ASTNode* static_data_member_template_definition;  // @wire - (transient)
   // Class whose member list holds this function's overload set.  Usually the
   // same as the function type's cxx_member_owner.  A using-declaration clone
   // keeps the base function's type (and therefore the base as

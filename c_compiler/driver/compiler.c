@@ -1114,9 +1114,9 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
     } else {
       SemanticError(subinit, "Invalid use of function in initialization");
     }
-  } else if (TypeIsPointer(type)) {
+  } else if (TypeIsPointer(type) || TypeIsNullPointer(type)) {
     // Pointers can be initialized to the address of an existing static
-    // variable of the same type.
+    // variable of the same type.  A `std::nullptr_t` object is a null pointer.
     InitPointer(expr, subinit, init_out, offset, initializers);
   } else if (TypeIsMemberPointer(subinit->type)) {
     MemberPointerValue pm_value;
@@ -1521,6 +1521,12 @@ static ASTNode* CXXThreadLocalInitializerExpression(ASTNode* initializer) {
 
 static bool CXXThreadLocalInitializerIsDynamic(ASTNode* initializer) {
   ASTNode* expr = CXXThreadLocalInitializerExpression(initializer);
+  // A braced list of constants (`static int a[] = {1, 2}`) is static data.
+  // Initializer analysis marks it so, and code generation then emits no
+  // dynamic store for it.
+  if (expr != NULL && expr->op == AST_OP(braced_init)) {
+    return !InitializerIsLinkTimeConstant(expr);
+  }
   return expr != NULL && !IsConstantExpression(expr);
 }
 
@@ -2235,6 +2241,7 @@ void CompilerMarkVariableReferenced(Symbol* symbol) {
       symbol->flags.is_temp || symbol->flags.is_argument) {
     return;
   }
+  TypeEnsureStaticDataMemberDefinition(&compiler->syntax, symbol);
   const char* asm_name = symbol->asm_name.length != 0
                              ? symbol->asm_name.value
                              : symbol->name.value;
@@ -2937,6 +2944,8 @@ static VariableDeclarationASTNode* DeclarationRootAt(ASTNode* root,
 // Code generation itself records every function address it materializes.  Walk
 // the retained inline definitions until that reference set reaches a fixed
 // point: emitting one inline body can make further inline callees reachable.
+static bool CompileDeferredCXXStaticMembers(Syntax* syntax);
+
 static void CompileReferencedInlineFunctions(Syntax* syntax) {
   bool emitted;
   do {
@@ -2981,8 +2990,12 @@ static void CompileReferencedInlineFunctions(Syntax* syntax) {
     if (NumErrors() != 0) {
       return;
     }
+    emitted = CompileDeferredCXXStaticMembers(syntax);
+    if (NumErrors() != 0) {
+      return;
+    }
 
-    emitted = false;
+
     size_t num_roots = compiler->declaration_asts.length;
     for (size_t i = 0; i < num_roots; i++) {
       ASTNode* root = compiler->declaration_asts.value.p[i];
@@ -3001,6 +3014,22 @@ static void CompileReferencedInlineFunctions(Syntax* syntax) {
       }
     }
   } while (emitted);
+}
+
+// A specialization's member referenced before the template's out-of-class
+// definition of it was parsed could not be defined at that reference.
+static void DefineLateTemplateMembers(Syntax* syntax) {
+  Vector defined;
+  VectorInit(&defined);
+  TypeInstantiateLateMemberBodies(syntax, &defined);
+  TypeReleaseLateMemberBodies();
+  for (size_t i = 0; i < defined.length; i++) {
+    Symbol* symbol = defined.value.p[i];
+    if (FunctionSymbolIsReferenced(symbol)) {
+      TypeEnsureTemplateMemberFunctionDefinition(syntax, symbol);
+    }
+  }
+  VectorDestruct(&defined);
 }
 
 static void PruneUnreferencedCXXMetadata(void) {
@@ -3059,17 +3088,23 @@ static void PruneUnreferencedInlineVariables(void) {
 // CompilePendingTemplateInstantiations, so constant-evaluating the member's
 // constructor succeeds.  The initializer is in the scope of the member's class,
 // so access control treats it as if written inside that class (the value
-// constructor may be private).
-static void CompileDeferredCXXStaticMembers(Syntax* syntax) {
+// constructor may be private).  Definitions of odr-used static data members of
+// class template specializations are queued here too.  Returns true if any
+// definition was compiled.
+static bool CompileDeferredCXXStaticMembers(Syntax* syntax) {
   Vector* deferred = &compiler->cxx_deferred_static_member_definitions;
+  bool compiled = false;
   while (deferred->length != 0) {
     VariableDeclarationASTNode* decl = deferred->value.p[0];
     VectorDeleteElement(deferred, 0);
     if (decl == NULL || decl->symbol == NULL) {
       continue;
     }
+    compiled = true;
     struct Struct* owner =
-        TypeIsStructOrUnion(decl->symbol->type)
+        decl->symbol->static_data_member_class != NULL
+            ? decl->symbol->static_data_member_class
+        : TypeIsStructOrUnion(decl->symbol->type)
             ? decl->symbol->type->info.struct_info
             : NULL;
     struct Struct* saved_access = compiler->current_class_access_context;
@@ -3083,6 +3118,7 @@ static void CompileDeferredCXXStaticMembers(Syntax* syntax) {
         syntax, NewDeclarationListASTNode(declarations, decl->base.location));
     compiler->current_class_access_context = saved_access;
   }
+  return compiled;
 }
 
 static Symbol* CompileCXXThreadLifetimeFunction(Syntax* syntax, const char* name,
@@ -3236,6 +3272,11 @@ static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
         " int __gr_offs;"
         " int __vr_offs;"
         " } __builtin_va_list;\n";
+    if (compiler->native_object) {
+      // Apple arm64 passes every unnamed argument on the stack, so its
+      // va_list is just a pointer to the next one.
+      va_list_typedef = "typedef char* __builtin_va_list;\n";
+    }
   }
   String* code = NewString(va_list_typedef);
   StringAppend(code,
@@ -3532,6 +3573,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
   VectorInit(&compiler->cxx_deferred_static_member_definitions);
+  VectorInit(&compiler->cxx_undefined_template_static_members);
   VectorInit(&compiler->cxx_global_constructors);
   VectorInit(&compiler->cxx_global_destructors);
   VectorInit(&compiler->cxx_no_op_initialized_variables);
@@ -4322,6 +4364,7 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestruct(&compiler->uninitialized_static_variables);
 
   VectorDestruct(&compiler->cxx_deferred_static_member_definitions);
+  VectorDestruct(&compiler->cxx_undefined_template_static_members);
   VectorDestruct(&compiler->cxx_global_constructors);
   VectorDestruct(&compiler->cxx_global_destructors);
   VectorDestruct(&compiler->cxx_no_op_initialized_variables);
@@ -4336,6 +4379,7 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestructWithContents(&compiler->cxx_this_adjustor_thunks, NULL,
                              /*free_element=*/true);
   VectorDestruct(&compiler->cxx_lazy_static_variables);
+  TypeReleaseLateMemberBodies();
   MapDestructWithContents(&compiler->rtti_typeinfo_map, FreeRttiTypeInfoKey);
 
   for (size_t i = 0; i < compiler->literals.length; i++) {
@@ -4673,6 +4717,16 @@ static String* CompileAfterParse(Compiler* compiler, Vector* options) {
   }
 
   // Abort if there are any errors.
+  if (NumErrors() != 0) {
+    return NULL;
+  }
+
+  DefineLateTemplateMembers(&compiler->syntax);
+  // Emitting the referenced inline functions can odr-use a static data member
+  // of a class template specialization, whose instantiated definition may
+  // need dynamic initialization.  Do so before the init functions are built.
+  CompilePendingTemplateInstantiations(&compiler->syntax);
+  CompileReferencedInlineFunctions(&compiler->syntax);
   if (NumErrors() != 0) {
     return NULL;
   }

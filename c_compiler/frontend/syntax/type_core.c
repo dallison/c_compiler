@@ -610,6 +610,29 @@ void TypeRecordSyncStructSizes(Struct* str) {
   str->synced_type_record_size = str->size;
 }
 
+void AppendCXXVTableClassName(String* out, Struct* str) {
+  TypeRecord* type = str->tag_symbol != NULL ? str->tag_symbol->type : NULL;
+  // A nested or local class shares its tag name with every other class of that
+  // name (`A::F` and `B::F`, `O<int>::F` and `O<long>::F`), so it is qualified
+  // by its mangled name.
+  if ((str->lexical_parent == NULL && str->access_enclosing_function == NULL) ||
+      type == NULL ||
+      !TypeIsStructOrUnion(type) || type->info.struct_info != str) {
+    StringAppendString(out, str->tag_name);
+    return;
+  }
+  String mangled;
+  StringInit(&mangled, "");
+  AppendCXXMangledTypeName(&mangled, type);
+  for (size_t i = 0; i < mangled.length; i++) {
+    char ch = mangled.value[i];
+    bool valid = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                 (ch >= '0' && ch <= '9') || ch == '_';
+    StringAppendChar(out, valid ? ch : '_');
+  }
+  StringDestruct(&mangled);
+}
+
 static uint64_t TypeIdentityHashBytes(uint64_t hash, const char* value) {
   if (value == NULL) {
     return hash;
@@ -1723,6 +1746,7 @@ Struct* NewStruct(bool is_union) {
   s->refs = 1;
   s->lexical_parent = NULL;
   s->access_enclosing_function = NULL;
+  s->local_class_arguments = NULL;
   s->tag_symbol = NULL;
   VectorInit(&s->bases);
   VectorInit(&s->friend_classes);
@@ -1857,6 +1881,7 @@ static void StructTeardownMembers(Struct* s) {
 
 void StructDelete(Struct* s) {
   StructTeardownMembers(s);
+  TemplateArgumentVectorDelete(s->local_class_arguments);
   free(s);
 }
 

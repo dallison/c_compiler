@@ -1425,6 +1425,10 @@ static bool TypeReferencesIndexAtLeast(TypeRecord* type, int min_index) {
   return false;
 }
 
+bool TypeNamesTemplateParameterAtOrAbove(TypeRecord* type, int min_index) {
+  return TypeReferencesIndexAtLeast(type, min_index);
+}
+
 /* The struct whose member list directly contains `symbol`, searching bases.
  * Inherited alias templates (`Layout::ElementType` declared on LayoutImpl)
  * keep their parameter indices in that base's parameter space. */
@@ -1477,23 +1481,30 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     info.origin = actual->template_symbol;
   }
   bool remapped_enclosing_nested_template = false;
-  if (parser != NULL && type->info.struct_info != NULL &&
-      type->info.struct_info->tag_name != NULL &&
+  // A deferred template-id (`VP<M>` in a member function template of the
+  // enclosing class) has no struct of its own yet; the origin's struct says
+  // which class template it is nested in.
+  Struct* nested_struct = type->info.struct_info;
+  if ((nested_struct == NULL || nested_struct->tag_name == NULL) &&
+      info.origin->type != NULL && TypeIsStructOrUnion(info.origin->type)) {
+    nested_struct = info.origin->type->info.struct_info;
+  }
+  if (parser != NULL && nested_struct != NULL &&
+      nested_struct->tag_name != NULL &&
       ((parser->template_substitution_source != NULL &&
         parser->template_substitution_target != NULL &&
-        type->info.struct_info->lexical_parent ==
+        nested_struct->lexical_parent ==
             parser->template_substitution_source) ||
        (parser->enclosing_template_substitution_source != NULL &&
         parser->enclosing_template_substitution_target != NULL &&
-        type->info.struct_info->lexical_parent ==
+        nested_struct->lexical_parent ==
             parser->enclosing_template_substitution_source))) {
     Struct* concrete_parent =
-        type->info.struct_info->lexical_parent ==
-                parser->template_substitution_source
+        nested_struct->lexical_parent == parser->template_substitution_source
             ? parser->template_substitution_target
             : parser->enclosing_template_substitution_target;
-    StructMember* concrete_nested = FindStructMember(
-        concrete_parent, type->info.struct_info->tag_name);
+    StructMember* concrete_nested =
+        FindStructMember(concrete_parent, nested_struct->tag_name);
     if (concrete_nested != NULL && concrete_nested->symbol != NULL &&
         concrete_nested->symbol->flags.is_template) {
       info.origin = concrete_nested->symbol;
@@ -2549,14 +2560,24 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     // function such as std::declval must not require a function body.
     DiagnosticSuppressBegin();
     // Cloning the operand substitutes template arguments and may speculatively
-    // instantiate declaration-only helpers (e.g. std::declval), which can
-    // record recovered diagnostics in the enclosing error trap even though the
-    // clone itself succeeds.  Isolate that noise so a SFINAE-sensitive caller
-    // (e.g. a `requires { typename decltype(...); }` type-requirement) only
-    // observes errors from the actual re-analysis below, not from cloning.
+    // instantiate declaration-only helpers (e.g. std::declval).  That clone
+    // is unevaluated: a friend function template named by the operand must
+    // not have its body instantiated here (`AbslHashValue` for `Cord` is
+    // only needed for its declared return type).  Isolate clone diagnostics
+    // so a SFINAE-sensitive caller observes errors from the re-analysis
+    // below, not from cloning.  The same holds for the substitution-failure
+    // flag: the definition-time callee can be an overload that the
+    // re-analysis rejects (`enable_if_t<is_same_v<B, bool>, H>
+    // AbslHashValue(H, B)` while a hidden friend is the real match).
+    compiler->speculative_template_instantiation_depth++;
     bool clone_trap = DiagnosticErrorTrapBegin();
+    bool saved_substitution_failed =
+        parser != NULL && parser->template_substitution_failed;
     ASTNode* expr = CloneDependentExpressionWithArgs(
         parser, type->dependent_decltype_expr, args);
+    if (parser != NULL) {
+      parser->template_substitution_failed = saved_substitution_failed;
+    }
     DiagnosticErrorTrapEnd(clone_trap);
     if (expr != NULL) {
       // The definition-time expression was analyzed while its operands were
@@ -2571,9 +2592,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       ASTNodeVisit(expr, RemapDecltypeFunctionParameter, 0,
                    &parameter_remap);
       bool analysis_trap = DiagnosticErrorTrapBegin();
-      compiler->speculative_template_instantiation_depth++;
       expr = AnalyzeExpression(expr);
-      compiler->speculative_template_instantiation_depth--;
       bool analysis_failed = DiagnosticErrorTrapped();
       DiagnosticErrorTrapEnd(analysis_trap);
       if (analysis_failed) {
@@ -2595,6 +2614,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           } else {
             opaque->dependent_decltype_expr = expr;
           }
+          compiler->speculative_template_instantiation_depth--;
           DiagnosticSuppressEnd();
           VectorPop(&g_dependent_decltype_stack);
           return TypeRecordCalculateSize(opaque);
@@ -2603,6 +2623,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           parser->template_substitution_failed = true;
         }
         ASTNodeDelete(expr);
+        compiler->speculative_template_instantiation_depth--;
         DiagnosticSuppressEnd();
         VectorPop(&g_dependent_decltype_stack);
         return NULL;
@@ -2647,6 +2668,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           } else {
             opaque->dependent_decltype_expr = expr;
           }
+          compiler->speculative_template_instantiation_depth--;
           DiagnosticSuppressEnd();
           VectorPop(&g_dependent_decltype_stack);
           return TypeRecordCalculateSize(opaque);
@@ -2666,6 +2688,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           result = SubstituteResolvedDependentMemberSuffix(
               parser, type, result, args);
           ASTNodeDelete(expr);
+          compiler->speculative_template_instantiation_depth--;
           DiagnosticSuppressEnd();
           VectorPop(&g_dependent_decltype_stack);
           return TypeRecordCalculateSize(result);
@@ -2673,6 +2696,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       }
       ASTNodeDelete(expr);
     }
+    compiler->speculative_template_instantiation_depth--;
     DiagnosticSuppressEnd();
     VectorPop(&g_dependent_decltype_stack);
   }
@@ -2751,6 +2775,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
             parser->enclosing_template_substitution_source));
   if (CompilerIsCXX() && TypeIsStructOrUnion(type) &&
       (StructContainsTemplateParameter(type->info.struct_info) ||
+       StructIsFunctionTemplateLocalClass(type->info.struct_info) ||
        (nested_in_active_instantiation &&
         StructHasMemberFunction(type->info.struct_info)))) {
     if (type->info.struct_info != NULL &&
@@ -3172,6 +3197,19 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
                                              int child_id, VisitorMode mode) {
   (void)child_id;
   (void)mode;
+  if (node != NULL &&
+      (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof))) {
+    SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
+    if (TypeContainsTemplateParameter(sizeof_node->type_operand)) {
+      // The clone shares the operand with the original expression.
+      TypeRecord* rebased = TypeRecordCopy(sizeof_node->type_operand);
+      RebaseTemplateParameterIndices(
+          rebased, ((RebaseDependentExpressionData*)data)->base);
+      TypeRecordDelete(sizeof_node->type_operand);
+      sizeof_node->type_operand = rebased;
+    }
+    return;
+  }
   if (node == NULL || node->op != AST_OP(identifier)) {
     return;
   }
@@ -3258,6 +3296,59 @@ static ASTNode* CloneAndRebaseDependentExpression(ASTNode* expr, int base) {
   return clone;
 }
 
+static bool FunctionParameterPackIsConcrete(Symbol* formal, Vector* args) {
+  int pack_index = -1;
+  size_t pack_length = 0;
+  if (!TypeIsTemplateParameterPlaceholder(formal->type, &pack_index) &&
+      !FindPackExpansionInType(formal->type, args, &pack_index,
+                               &pack_length)) {
+    return false;
+  }
+  if (pack_index < 0 || (size_t)pack_index >= args->length) {
+    return false;
+  }
+  TemplateArgument* pack = args->value.p[pack_index];
+  return pack != NULL && pack->pack_arguments != NULL;
+}
+
+/* A dependent expression outside a function body (a trailing `decltype`,
+ * a `noexcept` operand) can name a function parameter pack:
+ * `decltype(P::apply(std::forward<Ts>(ts)...))`.  There is no instantiated
+ * prototype to take the elements from, so substitute one parameter per pack
+ * element.  Without them `ts` keeps its dependent pack type and the expanded
+ * call cannot be resolved. */
+static void MapExpressionFunctionParameterPack(ASTNode* node, void* data,
+                                               int child_id,
+                                               VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  TemplateFunctionBodyClone* clone = data;
+  Symbol* formal = ((IdentifierASTNode*)node)->symbol;
+  if (formal == NULL || formal->type == NULL || !formal->flags.is_argument ||
+      !formal->flags.is_parameter_pack ||
+      MapFindPointerKey(&clone->pack_symbol_map, formal) != NULL ||
+      !FunctionParameterPackIsConcrete(formal, clone->args)) {
+    return;
+  }
+  Vector* elements = NewVector();
+  AppendSubstitutedFormalParameter(clone->parser, elements, formal,
+                                   clone->args, /*rebase_base=*/0);
+  for (size_t i = 0; i < elements->length; i++) {
+    Symbol* element = elements->value.p[i];
+    if (element == NULL || element->flags.is_parameter_pack) {
+      VectorDelete(elements);
+      return;
+    }
+  }
+  MapKeyValue kv;
+  kv.key.p = formal;
+  kv.value.p = elements;
+  MapInsert(&clone->pack_symbol_map, kv);
+}
+
 /* Copy `from`'s function template-parameter list onto `to`, rebasing all
  * indices by `rebase_base` (used when cloning a member function template whose
  * parameters trail the enclosing class template's parameters). */
@@ -3269,7 +3360,11 @@ ASTNode* CloneDependentExpressionWithArgs(TypeParser* parser,
   TemplateFunctionBodyClone clone;
   MapInitForPointerKeys(&clone.symbol_map);
   MapInitForPointerKeys(&clone.pack_symbol_map);
+  clone.args = args;
   clone.parser = parser;
+  if (parser != NULL) {
+    ASTNodeVisit(expr, MapExpressionFunctionParameterPack, 0, &clone);
+  }
   clone.args = args;
   clone.from_func = NULL;
   clone.to_func = NULL;

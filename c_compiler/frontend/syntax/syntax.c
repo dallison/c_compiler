@@ -486,6 +486,119 @@ static void MarkMemberFunctionTemplateSpecialization(
   sym->flags.is_explicit_specialization = true;
 }
 
+// The function template an explicit instantiation names.  Overloaded
+// templates are told apart only by parameter count; anything still ambiguous
+// is left uninstantiated.
+static Symbol* ExplicitInstantiationTemplate(Symbol* first,
+                                             StructMember* first_member,
+                                             TypeRecord* declared) {
+  Symbol* found = NULL;
+  size_t declared_parameters = declared->info.function.prototype.length;
+  for (;;) {
+    Symbol* candidate = NULL;
+    if (first_member != NULL) {
+      candidate = first_member->symbol;
+      first_member = first_member->overload_next;
+    } else if (first != NULL) {
+      candidate = first;
+      first = first->overload_next;
+    } else {
+      break;
+    }
+    if (candidate == NULL || !candidate->flags.is_template ||
+        candidate->type == NULL || !TypeIsFunction(candidate->type) ||
+        candidate->type->info.function.prototype.length !=
+            declared_parameters) {
+      continue;
+    }
+    if (found != NULL) {
+      return NULL;
+    }
+    found = candidate;
+  }
+  return found;
+}
+
+static bool MemberDefinitionTypesEqual(TypeParser* parser, TypeRecord* left,
+                                       TypeRecord* right);
+
+// `template C::C(std::string&&);`: the member function template
+// specialization deduced from the declared signature, if exactly one matches.
+static Symbol* DeduceExplicitMemberInstantiation(Syntax* syntax,
+                                                 TypeParser* parser,
+                                                 StructMember* member,
+                                                 TypeRecord* declared) {
+  Symbol* found = NULL;
+  for (; member != NULL; member = member->overload_next) {
+    Symbol* candidate = member->symbol;
+    if (candidate == NULL || !candidate->flags.is_template ||
+        candidate->type == NULL || !TypeIsFunction(candidate->type)) {
+      continue;
+    }
+    Vector* args = TypeDeduceFunctionTemplateArgumentsFromFunctionType(
+        syntax, candidate, NULL, declared);    if (args == NULL) {
+      continue;
+    }
+    Symbol* instance = TypeInstantiateFunctionTemplateWithCompletedArguments(
+        syntax, candidate, args);
+    VectorDeleteWithContents(args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    if (instance == NULL || instance == candidate || instance->type == NULL ||
+        !MemberDefinitionTypesEqual(parser, instance->type, declared)) {
+      continue;
+    }
+    if (found != NULL && found != instance) {
+      return NULL;
+    }
+    found = instance;
+  }
+  return found;
+}
+
+// `template R f<A>(P);` / `template R C<A>::m(P);`: emit the named
+// specialization.  `sym` is the parsed declarator, which declares nothing.
+static void DefineExplicitFunctionInstantiation(Syntax* syntax,
+                                                TypeParser* parser,
+                                                Symbol* sym) {
+  Vector* args = sym->type->template_arguments;
+  StructMember* member = parser->cxx_member_definition;
+  Symbol* instance = NULL;  if (member != NULL && args == NULL) {
+    StructMember* match = FindStructMemberOverload(member, sym->type);
+    instance = match != NULL ? match->symbol : NULL;
+    if (instance == NULL || instance->flags.is_template) {
+      instance =
+          DeduceExplicitMemberInstantiation(syntax, parser, member, sym->type);
+    }
+  } else if (args != NULL) {
+    Symbol* first = NULL;
+    if (member == NULL) {
+      if (parser->cxx_qualified_definition_namespace != NULL) {
+        NamespaceInlineSymbolLookup found = NamespaceResolveSymbolInInlineSet(
+            parser->cxx_qualified_definition_namespace, &sym->name);
+        if (found.status == kInlineLookupUnique) {
+          first = found.symbol;
+        }
+      }
+      if (first == NULL) {
+        first = FindFileScopeSymbol(syntax, &sym->name);
+      }
+    }
+    Symbol* templ = ExplicitInstantiationTemplate(first, member, sym->type);
+    if (templ != NULL) {
+      instance = TypeInstantiateFunctionTemplate(syntax, templ, args);
+      if (instance == templ) {
+        instance = NULL;
+      }
+    }
+  }
+  if (instance != NULL && !instance->flags.is_template &&
+      instance->type != NULL && TypeIsFunction(instance->type) &&
+      !instance->type->info.function.is_deleted) {
+    CompilerMarkFunctionReferenced(instance);
+  }
+}
+
 static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right);
 
 static bool OverloadParameterTypesEqual(TypeRecord* left, TypeRecord* right) {
@@ -2206,7 +2319,10 @@ static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
           member->symbol->type->info.struct_info->lexical_parent ==
               parent->type->info.struct_info))) {
       if (member->symbol != NULL && member->symbol->type != NULL &&
-          TypeIsFunction(member->symbol->type)) {
+          TypeIsFunction(member->symbol->type) &&
+          !CXXRetargetDropsDeclaringTemplateArguments(
+              member->symbol->type->info.function.cxx_member_owner,
+              parent->type->info.struct_info)) {
         member->symbol->type->info.function.cxx_member_owner =
             parent->type->info.struct_info;
         StringClear(&member->symbol->asm_name);
@@ -2389,6 +2505,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->last_parsed_tag = NULL;
   syntax->parsing_template_declaration = false;
   syntax->parsing_template_specialization = false;
+  syntax->parsing_explicit_instantiation = false;
   syntax->parsing_template_argument = false;
   syntax->parsing_friend_type_specifier = false;
   syntax->parsing_default_member_initializer = false;
@@ -2462,6 +2579,7 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   syntax->last_parsed_tag = NULL;
   syntax->parsing_template_declaration = false;
   syntax->parsing_template_specialization = false;
+  syntax->parsing_explicit_instantiation = false;
   syntax->parsing_template_argument = false;
   syntax->parsing_consteval_block_depth = 0;
   syntax->parsing_enum_specifier_depth = 0;
@@ -4172,24 +4290,28 @@ ASTNode* SyntaxParseCXXDefaultMemberInitializer(Syntax* syntax) {
   if (!CompilerIsCXX()) {
     return NULL;
   }
-  if (LexMatch(syntax->lex, TOK(lbrace))) {
-    return ParseBracedInitializer(syntax);
-  }
-  if (!LexMatch(syntax->lex, TOK(equal))) {
+  bool braced = LexMatch(syntax->lex, TOK(lbrace));
+  if (!braced && !LexMatch(syntax->lex, TOK(equal))) {
     return NULL;
   }
   // Copy-list-initialization (`T x = {}`) is a braced-init-list after `=`,
   // not an expression.  SyntaxParseSingleExpression would reject `{`.
-  if (LexMatch(syntax->lex, TOK(lbrace))) {
-    return ParseBracedInitializer(syntax);
+  if (!braced) {
+    braced = LexMatch(syntax->lex, TOK(lbrace));
   }
   SourceLocation location = syntax->lex->current_token_location;
   bool saved = syntax->parsing_default_member_initializer;
   syntax->parsing_default_member_initializer = true;
-  ASTNode* expr =
-      SyntaxParseSingleExpression(syntax, TC(semicolon) | TC(exprsep));
+  ASTNode* result;
+  if (braced) {
+    result = ParseBracedInitializer(syntax);
+  } else {
+    ASTNode* expr =
+        SyntaxParseSingleExpression(syntax, TC(semicolon) | TC(exprsep));
+    result = NewExpressionInitializerASTNode(expr, location);
+  }
   syntax->parsing_default_member_initializer = saved;
-  return NewExpressionInitializerASTNode(expr, location);
+  return result;
 }
 
 // Appends the [start,end) text (trimmed of surrounding whitespace) to the
@@ -5501,6 +5623,24 @@ typedef struct {
  * is the same slot the member's first parameter occupies after renumbering, so
  * the later per-call clone would substitute the class parameter with the
  * member argument. */
+// A fresh copy of `type` with the enclosing class arguments bound and the
+// member template's own parameters renumbered from 0.  A type that also names
+// the member's own parameters is only renumbered: the class arguments alone
+// cannot substitute it.
+static TypeRecord* RemapEnclosingTemplateType(ConstructorInitFormalRemap* remap,
+                                              TypeRecord* type) {
+  TypeRecord* result =
+      remap->enclosing_args != NULL && remap->enclosing_args->length > 0 &&
+              !TypeNamesTemplateParameterAtOrAbove(type, remap->rebase_base)
+          ? TypeSubstituteTemplateType(&compiler->syntax, type,
+                                       remap->enclosing_args)
+          : TypeRecordCopy(type);
+  if (result != NULL) {
+    RebaseTemplateParameterIndices(result, remap->rebase_base);
+  }
+  return result;
+}
+
 static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
                                               int child_id, VisitorMode mode) {
   (void)child_id;
@@ -5538,6 +5678,44 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
       for (size_t i = 0; i < id->template_arguments->length; i++) {
         RebaseTemplateArgumentParameterIndices(
             id->template_arguments->value.p[i], remap->rebase_base);
+      }
+    }
+    // `Period::den` names its scope by the class parameter's absolute index.
+    // Once rebased, index 0 is the member template's first parameter.
+    if ((node->flags & kASTDependentQualifiedName) != 0 &&
+        remap->rebase_base > 0 && id->symbol != NULL &&
+        id->symbol->type != NULL &&
+        id->symbol->type->dependent_member_name != NULL &&
+        TypeContainsTemplateParameter(id->symbol->type)) {
+      TypeRecord* scope = TypeRecordCopy(id->symbol->type);
+      StringDelete(scope->dependent_member_name);
+      scope->dependent_member_name = NULL;
+      TypeRecord* concrete = RemapEnclosingTemplateType(remap, scope);
+      TypeRecordDelete(scope);
+      if (concrete != NULL) {
+        concrete->dependent_member_name =
+            NewString(id->symbol->type->dependent_member_name->value);
+        Symbol* copy =
+            NewSymbol(id->symbol->name.value, concrete, id->symbol->storage);
+        copy->flags = id->symbol->flags;
+        id->symbol = copy;
+        ASTNodeClearType(node);
+      }
+    } else if (remap->rebase_base > 0 && id->symbol != NULL &&
+               StorageIs(id->symbol->storage, STO(typedef)) &&
+               !id->symbol->flags.is_template &&
+               id->template_arguments == NULL && id->symbol->type != NULL &&
+               TypeContainsTemplateParameter(id->symbol->type)) {
+      // A class parameter used as a value, as in `Allocator()`.  An alias
+      // template-id (`index_sequence_for<Args...>{}`) keeps its arguments on
+      // the identifier; its symbol's type is the alias pattern.
+      TypeRecord* concrete = RemapEnclosingTemplateType(remap, id->symbol->type);
+      if (concrete != NULL) {
+        Symbol* copy =
+            NewSymbol(id->symbol->name.value, concrete, id->symbol->storage);
+        copy->flags = id->symbol->flags;
+        id->symbol = copy;
+        ASTNodeClearType(node);
       }
     }
   } else if (node->op == AST_OP(cast) && remap->rebase_base > 0) {
@@ -5626,12 +5804,34 @@ static int CXXVirtualBaseOrder(Struct* owner, CXXVirtualBaseInfo* base) {
   return -1;
 }
 
+/* True if `member` is one of the members an anonymous struct or union member
+ * `anon` injects into its enclosing class. */
+static bool CXXAnonymousAggregateDeclaresMember(StructMember* anon,
+                                                StructMember* member) {
+  return anon != NULL && anon != member && anon->is_anon &&
+         anon->symbol != NULL && anon->symbol->type != NULL &&
+         TypeIsStructOrUnion(anon->symbol->type) && member != NULL &&
+         member->symbol != NULL &&
+         FindStructMember(anon->symbol->type->info.struct_info,
+                          &member->symbol->name) != NULL;
+}
+
 static int CXXDirectMemberOrder(Struct* owner, StructMember* member) {
   if (owner == NULL || member == NULL) {
     return -1;
   }
+  // A member injected by an anonymous aggregate has that aggregate's position;
+  // its own index counts within the aggregate.
+  size_t index = member->index;
+  for (size_t i = 0; i < owner->members.length; i++) {
+    if (CXXAnonymousAggregateDeclaresMember(owner->members.value.p[i],
+                                            member)) {
+      index = i;
+      break;
+    }
+  }
   return (int)owner->virtual_bases.length + (int)owner->bases.length +
-         (int)member->index;
+         (int)index;
 }
 
 static void CheckCXXConstructorInitializerOrder(
@@ -6701,7 +6901,32 @@ ASTNode* SyntaxNewCXXMemberInitializerStatement(
                                           location);
 }
 
-static Vector* CXXDefaultMemberInitializerActuals(ASTNode* initializer) {
+// A default member initializer is parsed before any constructor exists, so its
+// implicit member accesses go through an invented `this`
+// (NewMemberAccessFromEnclosingClass).  Bind them to the `this` parameter of
+// the constructor the initializer is being inserted into.
+static ASTNode* BindDefaultMemberInitializerThis(ASTNode* node, void* data) {
+  Symbol* this_formal = data;
+  if (this_formal != NULL && node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL && id->symbol != this_formal &&
+        id->symbol->flags.invented && !id->symbol->flags.is_argument &&
+        id->symbol->storage == STO(implicit) &&
+        StringEqual(&id->symbol->name, "this")) {
+      id->symbol = this_formal;
+    }
+  }
+  return node;
+}
+
+static ASTNode* CloneDefaultMemberInitializerFor(TypeRecord* func,
+                                                 ASTNode* node) {
+  return ASTNodeClone(node, BindDefaultMemberInitializerThis,
+                      CXXThisSymbolFromFunction(func), NULL);
+}
+
+static Vector* CXXDefaultMemberInitializerActuals(TypeRecord* func,
+                                                  ASTNode* initializer) {
   if (initializer == NULL) {
     return NULL;
   }
@@ -6710,7 +6935,7 @@ static Vector* CXXDefaultMemberInitializerActuals(ASTNode* initializer) {
     ExpressionInitializerASTNode* expr_init =
         (ExpressionInitializerASTNode*)initializer;
     VectorAppend(actuals,
-                 ASTNodeClone(expr_init->expr, IdentityCloneNode, NULL, NULL));
+                 CloneDefaultMemberInitializerFor(func, expr_init->expr));
     return actuals;
   }
   if (initializer->op == AST_OP(braced_init)) {
@@ -6721,15 +6946,14 @@ static Vector* CXXDefaultMemberInitializerActuals(ASTNode* initializer) {
         ExpressionInitializerASTNode* expr_init =
             (ExpressionInitializerASTNode*)init;
         VectorAppend(actuals,
-                     ASTNodeClone(expr_init->expr, IdentityCloneNode, NULL,
-                                  NULL));
+                     CloneDefaultMemberInitializerFor(func, expr_init->expr));
       } else {
-        VectorAppend(actuals, CloneInitializer(init));
+        VectorAppend(actuals, CloneDefaultMemberInitializerFor(func, init));
       }
     }
     return actuals;
   }
-  VectorAppend(actuals, ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL));
+  VectorAppend(actuals, CloneDefaultMemberInitializerFor(func, initializer));
   return actuals;
 }
 
@@ -6753,12 +6977,11 @@ static ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
         TypeIsStructOrUnion(member->symbol->type) &&
         TypeHasCXXInitializerListConstructor(member->symbol->type)) {
       Vector* actuals = NewVector();
-      VectorAppend(actuals,
-                   ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL));
+      VectorAppend(actuals, CloneDefaultMemberInitializerFor(func, initializer));
       return NewCXXMemberInitializerStatement(
           syntax, func, member, actuals, true, initializer->location);
     }
-    Vector* actuals = CXXDefaultMemberInitializerActuals(initializer);
+    Vector* actuals = CXXDefaultMemberInitializerActuals(func, initializer);
     return NewCXXMemberInitializerStatement(
         syntax, func, member, actuals, true, initializer->location);
   }
@@ -6797,6 +7020,64 @@ static ASTNode* FindCXXExplicitMemberInitializer(CXXConstructorInitList* init_li
     }
   }
   return NULL;
+}
+
+/* Mem-initializers name the members an anonymous aggregate injects
+ * (`union { slot_type* slot_; }` initialized by `slot_(slot)`), not the
+ * aggregate itself.  Insert them at the aggregate's declaration position; the
+ * other members of an anonymous struct keep their default member initializers,
+ * while an anonymous union activates only the named member.  Returns false,
+ * inserting nothing, if no mem-initializer names a member of `anon`. */
+static bool InsertCXXAnonymousAggregateInitializers(
+    Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list,
+    StructMember* anon, Vector* body, size_t* insert_at) {
+  bool named = false;
+  for (size_t i = 0; i < init_list->member_specs.length && !named; i++) {
+    named = CXXAnonymousAggregateDeclaresMember(
+        anon, init_list->member_specs.value.p[i]);
+  }
+  if (!named) {
+    return false;
+  }
+  Struct* aggregate = anon->symbol->type->info.struct_info;
+  for (size_t i = 0; i < aggregate->members.length; i++) {
+    StructMember* member = aggregate->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    if (member->is_anon) {
+      if (!InsertCXXAnonymousAggregateInitializers(
+              syntax, func, init_list, member, body, insert_at) &&
+          !aggregate->is_union) {
+        ASTNode* stmt =
+            NewCXXDefaultMemberInitializerStatement(syntax, func, member);
+        if (stmt != NULL) {
+          VectorInsertOrAppend(body, *insert_at, stmt);
+          (*insert_at)++;
+        }
+      }
+      continue;
+    }
+    ASTNode* stmt = NULL;
+    for (size_t j = 0; j < init_list->member_specs.length; j++) {
+      StructMember* injected = init_list->member_specs.value.p[j];
+      if (injected != NULL && injected->symbol != NULL &&
+          StringEqualString(&injected->symbol->name, &member->symbol->name)) {
+        stmt = init_list->member_statements.value.p[j];
+        break;
+      }
+    }
+    if (stmt == NULL && !aggregate->is_union) {
+      stmt = NewCXXDefaultMemberInitializerStatement(syntax, func, member);
+    }
+    if (stmt != NULL) {
+      VectorInsertOrAppend(body, *insert_at, stmt);
+      (*insert_at)++;
+    }
+  }
+  return true;
 }
 
 static ASTNode* FindCXXExplicitVirtualBaseInitializer(
@@ -7561,6 +7842,11 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
       continue;
     }
     ASTNode* stmt = FindCXXExplicitMemberInitializer(init_list, member);
+    if (stmt == NULL &&
+        InsertCXXAnonymousAggregateInitializers(syntax, func, init_list,
+                                                member, body, &insert_at)) {
+      continue;
+    }
     if (stmt == NULL && member_copy_source != NULL &&
         !TypeIsFixedArray(member->symbol->type)) {
       ASTNode* source_member =
@@ -7867,6 +8153,12 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     AddFunctionScopeSymbols(syntax, sym->type);
     sym->flags.is_defined = true;
     sym->flags.is_inline_defn = true;
+    // `inline Test::~Test() = default;` in a header is defined in every
+    // includer.
+    if (CompilerIsCXX() && sym->type->info.function.is_inline &&
+        !StorageIs(sym->storage, STO(static))) {
+      sym->flags.is_weak = true;
+    }
     sym->type->info.function.definition = true;
     sym->type->info.function.is_user_provided = true;
     Vector* body = NewVector();
@@ -9532,6 +9824,41 @@ static void ValidateCXX26DeletedMain(Syntax* syntax, Symbol* sym) {
   }
 }
 
+// [basic.link]/3.2: the first declaration of a namespace-scope variable of
+// const-qualified type that is neither extern, inline, exported, nor a template
+// has internal linkage.
+static bool CXXConstVariableHasInternalLinkage(Syntax* syntax,
+                                               TypeParser* parser, Symbol* sym,
+                                               Symbol* old_sym) {
+  if (!CompilerIsCXX() || old_sym != NULL || TypeIsFunction(sym->type) ||
+      sym->storage != STO(implicit) || parser->is_inline ||
+      parser->cxx_member_definition != NULL ||
+      parser->cxx_qualified_definition_namespace != NULL ||
+      sym->flags.is_exported || sym->flags.is_c_linkage ||
+      sym->flags.is_template || syntax->parsing_template_declaration ||
+      syntax->parsing_template_specialization) {
+    return false;
+  }
+  TypeRecord* object = sym->type;
+  while (TypeIsArray(object) && object->next != NULL) {
+    object = object->next;
+  }
+  return TypeIsConst(object) && !TypeIsVolatile(object);
+}
+
+// Apple SDK headers spell asm labels as Mach-O symbols, so
+// __DARWIN_ALIAS(regcomp) is asm("_regcomp"); the Mach-O writer adds that
+// underscore itself.  DaveCC's own headers and runtime use the ELF name.
+static bool AsmLabelIsMachOSymbolName(Syntax* syntax) {
+  if (compiler == NULL || !compiler->native_object) {
+    return false;
+  }
+  Source* source = syntax->lex->source;
+  return source != NULL && source->is_system_header &&
+         source->filename.value != NULL &&
+         strstr(source->filename.value, ".sdk/") != NULL;
+}
+
 static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                                          TypeRecord* type,
                                          Storage storage,
@@ -9547,6 +9874,17 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
 
     Symbol* sym = TypeParserParseDeclarator(parser, type);
     ValidateC23AutoDeclarator(syntax, sym);
+    if (syntax->parsing_explicit_instantiation) {
+      if (sym != NULL && TypeIsFunction(sym->type)) {
+        DefineExplicitFunctionInstantiation(syntax, parser, sym);
+      }
+      SymbolDelete(sym);
+      TypeParserReset(parser);
+      if (LexMatch(syntax->lex, TOK(comma))) {
+        continue;
+      }
+      break;
+    }
     // A variable-template specialization: `template<...> T name<pattern> = ...`.
     // The declarator carried a template-argument list and an existing variable
     // template of the same name is in scope.  Register it as a partial/explicit
@@ -9661,6 +9999,9 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         SyntaxError(syntax,
                     "C23 inferred auto declaration cannot redeclare '%s'",
                     sym->name.value);
+      }
+      if (CXXConstVariableHasInternalLinkage(syntax, parser, sym, old_sym)) {
+        sym->storage = STO(static);
       }
       if (parser->cxx_member_definition != NULL &&
           syntax->parsing_template_specialization) {
@@ -9927,7 +10268,14 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         LexNextToken(syntax->lex);
       }
       SyntaxNeedBracket(syntax, TOK(rparen), TC(exprsep) | TC(decl));
-      StringSetString(&sym->asm_name, &asm_name);
+      if (AsmLabelIsMachOSymbolName(syntax) && asm_name.value[0] == '_') {
+        String stripped;
+        StringInit(&stripped, asm_name.value + 1);
+        StringSetString(&sym->asm_name, &stripped);
+        StringDestruct(&stripped);
+      } else {
+        StringSetString(&sym->asm_name, &asm_name);
+      }
       StringDestruct(&asm_name);
     }
 
@@ -10151,6 +10499,14 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       ASTNode* decl = NewVariableDeclarationASTNode(
           sym, initializer, syntax->lex->current_token_location);
       VectorAppend(declarations, decl);
+      if (CompilerIsCXX() && parser->cxx_member_definition != NULL &&
+          old_sym != NULL && old_sym->type != NULL &&
+          !TypeIsFunction(old_sym->type)) {
+        TypeRecordStaticDataMemberDefinition(
+            syntax, old_sym, decl,
+            syntax->parsing_template_declaration &&
+                !syntax->parsing_template_specialization);
+      }
       // A variable template's initializer is value-dependent on its template
       // parameters; it is analyzed and folded per use (see
       // MarkTemplateDeclaration / TypeInstantiateVariableTemplateConstant),
@@ -10474,6 +10830,15 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
     }
     VectorDelete(declarations);
     TypeParserDestruct(&parser);
+    return EmptyDeclarationList(location);
+  }
+
+  if (syntax->parsing_explicit_instantiation) {
+    DefineExplicitFunctionInstantiation(syntax, &parser, sym);
+    SymbolDelete(sym);
+    VectorDelete(declarations);
+    TypeParserDestruct(&parser);
+    SyntaxNeedSemicolon(syntax, TC(decl));
     return EmptyDeclarationList(location);
   }
 
@@ -11761,7 +12126,13 @@ static Symbol* SyntaxBareTemplateArgumentSymbol(Syntax* syntax) {
     }
     if (symbol == NULL) {
       symbol = SyntaxFindQualifiedSymbol(syntax, &name);
-      if (!SymbolNamesTemplateArgument(symbol)) {
+      // A member alias (`using M = const I<U>;`) names its type, not the tag
+      // of the class template that type is a specialization of.
+      bool names_alias = symbol != NULL &&
+                         StorageIs(symbol->storage, STO(typedef)) &&
+                         symbol->alias_template == NULL &&
+                         !symbol->flags.is_template;
+      if (!SymbolNamesTemplateArgument(symbol) && !names_alias) {
         symbol = SyntaxFindQualifiedTag(syntax, &name);
       }
     }
@@ -12396,12 +12767,43 @@ ASTNode* SyntaxParseExplicitInstantiationDeclaration(Syntax* syntax,
   return EmptyDeclarationList(location);
 }
 
+// An explicit instantiation definition of a class template specialization
+// defines every member function it has a definition for.
+static void DefineExplicitClassInstantiationMembers(TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->is_template) {
+    return;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* member = str->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      Symbol* function = member->symbol;
+      if (function == NULL || function->flags.is_template ||
+          function->type == NULL || !TypeIsFunction(function->type) ||
+          function->type->info.function.is_deleted ||
+          function->type->info.function.is_implicitly_declared) {
+        continue;
+      }
+      CompilerMarkFunctionReferenced(function);
+    }
+  }
+}
+
 static ASTNode* ParseExplicitTemplateInstantiation(Syntax* syntax,
-                                                   SourceLocation location) {
+                                                   SourceLocation location,
+                                                   bool is_extern) {
   if (!(LexLookingAt(syntax->lex, TOK(struct)) ||
         LexLookingAt(syntax->lex, TOK(class)) ||
         LexLookingAt(syntax->lex, TOK(union)))) {
-    return SyntaxParseExplicitInstantiationDeclaration(syntax, location);
+    if (is_extern) {
+      return SyntaxParseExplicitInstantiationDeclaration(syntax, location);
+    }
+    bool saved = syntax->parsing_explicit_instantiation;
+    syntax->parsing_explicit_instantiation = true;
+    ASTNode* declaration = SyntaxParseExternalDeclaration(syntax);
+    syntax->parsing_explicit_instantiation = saved;
+    return declaration != NULL ? declaration : EmptyDeclarationList(location);
   }
   LexNextToken(syntax->lex);
 
@@ -12430,6 +12832,9 @@ static ASTNode* ParseExplicitTemplateInstantiation(Syntax* syntax,
     SyntaxError(syntax, "Expected template argument list");
   } else {
     TypeRecord* type = TypeInstantiateClassTemplate(syntax, templ, args);
+    if (!is_extern) {
+      DefineExplicitClassInstantiationMembers(type);
+    }
     TypeRecordDelete(type);
     VectorDestructWithContents(args,
                                (VectorElementDestructor)TemplateArgumentDelete,
@@ -12571,7 +12976,8 @@ static ASTNode* ParseTemplateDeclaration(Syntax* syntax) {
   }
 
   if (!LexLookingAt(syntax->lex, TOK(less))) {
-    return ParseExplicitTemplateInstantiation(syntax, location);
+    return ParseExplicitTemplateInstantiation(syntax, location,
+                                              /*is_extern=*/false);
   }
 
   SyntaxOpenScope(syntax);
@@ -12762,7 +13168,8 @@ static ASTNode* ParseExternalDeclarationBody(Syntax* syntax) {
     if (LexLookingAt(syntax->lex, TOK(template))) {
       LexCheckpointDestruct(&extern_checkpoint);
       LexNextToken(syntax->lex);
-      return ParseExplicitTemplateInstantiation(syntax, extern_location);
+      return ParseExplicitTemplateInstantiation(syntax, extern_location,
+                                                /*is_extern=*/true);
     }
     LexCheckpointRestore(syntax->lex, &extern_checkpoint);
     LexCheckpointDestruct(&extern_checkpoint);

@@ -860,23 +860,39 @@ static ASTNode* ConvertIntConstantToType(ConstantASTNode* c, TypeRecord* to) {
 }
 
 static ASTNode* ConvertIntToDouble(ConstantASTNode* c, int bits) {
+  uint64_t v = (uint64_t)c->value.ivalue;
+  double d;
   if (TypeIsUnsigned(c->base.type)) {
-    int64_t mask = (1LL << bits) - 1LL;
-    c->value.ivalue &= mask;
+    if (bits < 64) {
+      v &= (1ULL << bits) - 1ULL;
+    }
+    d = (double)v;
   } else {
-    c->value.ivalue <<= 64 - bits;
-    c->value.ivalue >>= 64 - bits;
+    d = (double)((int64_t)(v << (64 - bits)) >> (64 - bits));
   }
-  double v = (double)c->value.ivalue;
-  c->value.fvalue = v;
+  c->value.fvalue = d;
   c->base.op = AST_OP(fnumber);
   return (ASTNode*)c;
 }
 
-static ASTNode* ConvertDoubleToInt(ConstantASTNode* c, int bits) {
-  c->value.ivalue = (int64_t)c->value.fvalue;
-  c->value.ivalue <<= 64 - bits;
-  c->value.ivalue >>= 64 - bits;
+static ASTNode* ConvertDoubleToInt(ConstantASTNode* c, TypeRecord* to,
+                                   int bits) {
+  double f = c->value.fvalue;
+  bool is_unsigned = TypeIsUnsigned(to);
+  uint64_t v;
+  if (is_unsigned && f >= 9223372036854775808.0) {
+    v = f < 18446744073709551616.0 ? (uint64_t)f : UINT64_MAX;
+  } else {
+    v = (uint64_t)(int64_t)f;
+  }
+  if (bits < 64) {
+    uint64_t mask = (1ULL << bits) - 1ULL;
+    v &= mask;
+    if (!is_unsigned && (v & (1ULL << (bits - 1))) != 0) {
+      v |= ~mask;
+    }
+  }
+  c->value.ivalue = (int64_t)v;
   c->base.op = AST_OP(number);
   return (ASTNode*)c;
 }
@@ -960,22 +976,22 @@ static ASTNode* ConvertPotentialConstant(ASTNode* from, TypeRecord* to,
         case AST_OP(f2i):
         case AST_OP(d2i):
         case AST_OP(ld2i):
-          return ConvertDoubleToInt(c, 32);
+          return ConvertDoubleToInt(c, to, 32);
         case AST_OP(f2c):
         case AST_OP(d2c):
         case AST_OP(ld2c):
-          return ConvertDoubleToInt(c, 8);
+          return ConvertDoubleToInt(c, to, 8);
         case AST_OP(f2s):
         case AST_OP(d2s):
         case AST_OP(ld2s):
-          return ConvertDoubleToInt(c, 16);
+          return ConvertDoubleToInt(c, to, 16);
         case AST_OP(f2l):
         case AST_OP(f2ll):
         case AST_OP(d2l):
         case AST_OP(d2ll):
         case AST_OP(ld2l):
         case AST_OP(ld2ll):
-          return ConvertDoubleToInt(c, 64);
+          return ConvertDoubleToInt(c, to, 64);
         case AST_OP(f2d):
         case AST_OP(f2ld):
         case AST_OP(d2f):

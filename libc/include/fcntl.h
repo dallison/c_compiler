@@ -37,6 +37,53 @@ typedef long fpos_t;
 #define O_RDONLY 00000000
 #define O_WRONLY 00000001
 #define O_RDWR 00000002
+#if defined(__DAVECC_NATIVE_DARWIN__)
+/* Values match Darwin's <sys/fcntl.h>; native code calls libSystem. */
+#define O_NONBLOCK 0x00000004
+#define O_APPEND 0x00000008
+#define O_SHLOCK 0x00000010
+#define O_EXLOCK 0x00000020
+#define O_ASYNC 0x00000040
+#define FASYNC O_ASYNC
+#define O_SYNC 0x00000080
+#define O_FSYNC O_SYNC
+#define O_NOFOLLOW 0x00000100
+#define O_CREAT 0x00000200
+#define O_TRUNC 0x00000400
+#define O_EXCL 0x00000800
+#define O_NOCTTY 0x00020000
+#define O_DIRECTORY 0x00100000
+#define O_SYMLINK 0x00200000
+#define O_DSYNC 0x00400000
+#define O_CLOEXEC 0x01000000
+#define O_NDELAY O_NONBLOCK
+
+#define F_DUPFD 0
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_GETFL 3
+#define F_SETFL 4
+#define F_GETOWN 5
+#define F_SETOWN 6
+#define F_GETLK 7
+#define F_SETLK 8
+#define F_SETLKW 9
+#define F_GETPATH 50
+#define F_FULLFSYNC 51
+#define F_DUPFD_CLOEXEC 67
+
+#define FD_CLOEXEC 1
+
+#define F_RDLCK 1
+#define F_UNLCK 2
+#define F_WRLCK 3
+
+#define AT_FDCWD -2
+#define AT_EACCESS 0x0010
+#define AT_SYMLINK_NOFOLLOW 0x0020
+#define AT_SYMLINK_FOLLOW 0x0040
+#define AT_REMOVEDIR 0x0080
+#else
 #ifndef O_CREAT
 #define O_CREAT 00000100
 #endif
@@ -115,6 +162,7 @@ typedef long fpos_t;
 #ifndef F_INPROGRESS
 #define F_INPROGRESS 16
 #endif
+#endif /* __DAVECC_NATIVE_DARWIN__ */
 
 #define LOCK_SH 1
 #define LOCK_EX 2

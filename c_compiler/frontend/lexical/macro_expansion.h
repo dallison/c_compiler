@@ -11,6 +11,9 @@ typedef struct MacroExpansion {
   SourceLocation definition;
   SourceLocation invocation;
   struct MacroExpansion* parent;
+  // The file and line last recorded for this expansion's tokens.
+  int remembered_fileno;
+  int remembered_lineno;
 } MacroExpansion;
 
 void MacroExpansionClear(void);

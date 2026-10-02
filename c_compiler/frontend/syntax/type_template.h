@@ -24,6 +24,9 @@ struct ASTNode* TypeSubstituteMemberTemplateExpressionAndRebase(
 TypeRecord* TypeSubstituteTemplateType(struct Syntax* syntax,
                                        TypeRecord* type,
                                        Vector* args);
+// True when `type` names a template parameter at index `min_index` or above,
+// including through template arguments and dependent expressions.
+bool TypeNamesTemplateParameterAtOrAbove(TypeRecord* type, int min_index);
 TypeRecord* TypeSubstituteTemplateTypeAndRebase(struct Syntax* syntax,
                                                 TypeRecord* type,
                                                 Vector* args,
@@ -51,6 +54,21 @@ Symbol* TypeInstantiateFunctionTemplateWithCompletedArguments(
     struct Syntax* syntax, Symbol* templ, Vector* completed_args);
 void TypeEnsureTemplateMemberFunctionDefinition(struct Syntax* syntax,
                                                 Symbol* symbol);
+// Members of class template specializations instantiated before the
+// template's out-of-class definition of them was parsed: prepare the ones
+// whose definition is now available and append them to `defined`.
+void TypeInstantiateLateMemberBodies(struct Syntax* syntax, Vector* defined);
+void TypeReleaseLateMemberBodies(void);
+// Queues the definition of an odr-used static data member of a class template
+// specialization, instantiated from its template's definition.
+void TypeEnsureStaticDataMemberDefinition(struct Syntax* syntax,
+                                          Symbol* symbol);
+// Records the definition of class member `member`: a template's out-of-class
+// static data member definition, or an explicit specialization's own.
+void TypeRecordStaticDataMemberDefinition(struct Syntax* syntax,
+                                          Symbol* member,
+                                          struct ASTNode* definition,
+                                          bool is_template_definition);
 Symbol* TypeDeduceFunctionTemplateFromCall(struct Syntax* syntax, Symbol* templ,
                                            Vector* actuals);
 Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgs(

@@ -35,8 +35,9 @@ conversions call the guest helpers in `libc/long_double.c`:
 
 `__davecc_ld_add`, `__davecc_ld_sub`, `__davecc_ld_mul`, `__davecc_ld_div`,
 `__davecc_ld_neg`, `__davecc_ld_cmp`, `__davecc_ld_from_f32`,
-`__davecc_ld_from_f64`, `__davecc_ld_from_i64`, `__davecc_ld_to_f32`,
-`__davecc_ld_to_f64`, `__davecc_ld_to_i64`.
+`__davecc_ld_from_f64`, `__davecc_ld_from_i64`, `__davecc_ld_from_u64`,
+`__davecc_ld_to_f32`, `__davecc_ld_to_f64`, `__davecc_ld_to_i64`,
+`__davecc_ld_to_u64`.
 
 The helpers are implemented with the portable software IEEE in
 `c_compiler/support/fp_extended.c`. The same code is used to convert

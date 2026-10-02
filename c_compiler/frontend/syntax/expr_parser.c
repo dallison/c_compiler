@@ -1686,11 +1686,10 @@ static ASTNode* BuildDependentTemplateScopeValueName(
   }
   size_t member_index = name->components.length - 1;
   size_t base_index = name->components.length - 2;
-  // The member component itself must not carry template arguments (`x::f<...>`
-  // needs the richer dependent-template-id handling, which this does not cover).
-  if (name->template_arguments.value.p[member_index] != NULL) {
-    return NULL;
-  }
+  // A member template-id (`Traits<Policy<K>>::template get<H, B>`) keeps its
+  // arguments on the placeholder.  Looking the member up now would find the
+  // primary's member template and lose the scope arguments.
+  Vector* member_args = name->template_arguments.value.p[member_index];
   Vector* scope_args = name->template_arguments.value.p[base_index];
   if (!TemplateArgumentVectorContainsTemplateParameter(scope_args) &&
       !TemplateArgumentListIsDependent(scope_args)) {
@@ -1771,6 +1770,10 @@ static ASTNode* BuildDependentTemplateScopeValueName(
   placeholder->flags.invented = true;
   ASTNode* node = NewIdentifierASTNode(placeholder, location);
   node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
+  if (member_args != NULL) {
+    ((IdentifierASTNode*)node)->template_arguments =
+        TemplateArgumentVectorCopy(member_args);
+  }
   return node;
 }
 
@@ -3729,7 +3732,10 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
     func->info.function.cxx_member_owner = closure;
   }
 
-  Symbol* op = NewSymbol("operator()", func, STO(implicit));
+  // The closure is named by a per-translation-unit counter (`__invented__N`),
+  // so the same name can denote different lambdas in different objects.  Keep
+  // the call operator local to its object.
+  Symbol* op = NewSymbol("operator()", func, STO(static));
   op->location = location;
   op->flags.is_defined = true;
   op->flags.is_inline_defn = true;
@@ -7869,6 +7875,28 @@ static bool CastOrCompoundLiteralFollows(Lex* lex) {
     case TOK(throw):
     case TOK(requires):
     case TOK(lsquare):
+    case TOK(static_cast):
+    case TOK(reinterpret_cast):
+    case TOK(const_cast):
+    case TOK(dynamic_cast):
+    case TOK(typeid):
+    case TOK(noexcept):
+    case TOK(co_await):
+    case TOK(decltype):
+    case TOK(typename):
+    case TOK(bool):
+    case TOK(char):
+    case TOK(char8_t):
+    case TOK(char16_t):
+    case TOK(char32_t):
+    case TOK(wchar_t):
+    case TOK(short):
+    case TOK(int):
+    case TOK(long):
+    case TOK(signed):
+    case TOK(unsigned):
+    case TOK(float):
+    case TOK(double):
       return true;
     default:
       return false;

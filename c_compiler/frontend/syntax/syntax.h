@@ -49,6 +49,7 @@ typedef struct Syntax {
   Symbol* last_parsed_tag;   // Most recent struct/union tag parsed as a type.
   bool parsing_template_declaration;  // Parsing declaration after template<...>.
   bool parsing_template_specialization;  // Parsing declaration after template<>.
+  bool parsing_explicit_instantiation;  // Parsing `template R f<A>(...);`.
   bool parsing_template_argument;  // Parsing expression inside template args.
   bool parsing_friend_type_specifier;  // Friend type names are type-only contexts.
   bool parsing_default_member_initializer;  // NSDMI; later members are in scope.

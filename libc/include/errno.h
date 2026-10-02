@@ -207,6 +207,15 @@ int* __davecc_errno_location(void);
 }
 #endif
 #define errno (*__davecc_errno_location())
+#elif defined(__DAVECC_NATIVE_DARWIN__)
+#ifdef __cplusplus
+extern "C" {
+#endif
+int* __error(void);
+#ifdef __cplusplus
+}
+#endif
+#define errno (*__error())
 #elif defined(__DAVECC_HAS_TLS_THREAD_ERRNO__)
 extern __thread int errno;
 #else

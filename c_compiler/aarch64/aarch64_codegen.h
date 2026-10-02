@@ -489,6 +489,10 @@ AARCH64Generator* NewAARCH64Generator(Generator* gen);
 void AARCH64GeneratorDestruct(AARCH64Generator* pcode);
 void AARCH64GeneratorDelete(AARCH64Generator* pcode);
 
+// Apple arm64 passes unnamed arguments in 8-byte stack slots and its va_list
+// points at them; AAPCS64 uses registers and a register save area instead.
+bool AARCH64UsesDarwinVariadicABI(void);
+
 // Lower the IR to AARCH64.
 void AARCH64Lower(AARCH64Generator* pcode, Generator* gen);
 void AARCH64Print(AARCH64Generator* pcode, FILE* fp);

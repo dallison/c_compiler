@@ -274,6 +274,9 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->structured_binding_pack_size = -2;
   sym->is_nrvo = false;
   sym->static_data_member_class = NULL;
+  sym->static_data_member_pattern = NULL;
+  sym->static_data_member_template_arguments = NULL;
+  sym->static_data_member_template_definition = NULL;
   sym->member_lookup_class = NULL;
   VectorInit(&sym->imported_function_template_parameters_backup);
   sym->cached_target_symbol_name = NULL;
@@ -381,6 +384,12 @@ void SymbolDestruct(Symbol* symbol) {
       /*free_element=*/false);
   free(symbol->cached_target_symbol_name);
   symbol->cached_target_symbol_name = NULL;
+  if (symbol->static_data_member_template_arguments != NULL) {
+    VectorDeleteWithContents(symbol->static_data_member_template_arguments,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    symbol->static_data_member_template_arguments = NULL;
+  }
   if (symbol->overload_next != NULL) {
     SymbolDelete(symbol->overload_next);
   }
@@ -705,6 +714,19 @@ Symbol* GetCXXTemplateParameterObject(TemplateArgument* argument) {
   return symbol;
 }
 
+// A non-type argument's type is mangled without top-level cv-qualifiers:
+// `Add<kFront>` with `static constexpr EdgeType kFront` names the same
+// specialization as `Add<edge_type>`.
+static void AppendCXXUnqualifiedTypeEncoding(String* out, TypeRecord* type) {
+  if (type == NULL) {
+    AppendCXXTypeEncoding(out, type);
+    return;
+  }
+  TypeRecord unqualified = *type;
+  unqualified.qualifiers &= ~(kQualConst | kQualVolatile);
+  AppendCXXTypeEncoding(out, &unqualified);
+}
+
 static void AppendCXXTemplateNonTypeArgument(String* out,
                                              TemplateArgument* arg) {
   TemplateValueKind kind = TemplateArgumentConcreteValueKind(arg);
@@ -712,7 +734,7 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
     int64_t int_value = arg->int_value;
     StringAppendChar(out, 'L');
     if (arg->type != NULL) {
-      AppendCXXTypeEncoding(out, arg->type);
+      AppendCXXUnqualifiedTypeEncoding(out, arg->type);
     } else {
       StringAppendChar(out, 'i');
     }
@@ -730,7 +752,7 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
       StringAppend(out, "LDnE");
     } else {
       StringAppendChar(out, 'L');
-      AppendCXXTypeEncoding(out, arg->type);
+      AppendCXXUnqualifiedTypeEncoding(out, arg->type);
       StringAppend(out, "0E");
     }
     return;
@@ -849,12 +871,41 @@ static Namespace* CXXStructNamespace(Struct* str) {
   return str->tag_symbol != NULL ? str->tag_symbol->namespace_ : NULL;
 }
 
+static bool CXXStructIsLocalClass(Struct* str) {
+  return str->lexical_parent == NULL && str->access_enclosing_function != NULL &&
+         (str->tag_symbol == NULL || !str->tag_symbol->flags.invented);
+}
+
+// Two functions may each define a local class of the same name, and every
+// instantiation of a function template has its own, so a local class is
+// qualified by its function and the arguments it was rebuilt for.
+static void AppendCXXLocalClassScope(String* out, Struct* str) {
+  Symbol* function = str->access_enclosing_function;
+  const char* name = function->asm_name.length != 0 ? function->asm_name.value
+                                                    : function->name.value;
+  String scope;
+  StringInit(&scope, NULL);
+  for (const char* p = name; *p != '\0'; p++) {
+    char ch = *p;
+    bool valid = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                 (ch >= '0' && ch <= '9') || ch == '_';
+    StringAppendChar(&scope, valid ? ch : '_');
+  }
+  AppendCXXNameComponent(out, scope.value);
+  StringDestruct(&scope);
+  if (str->local_class_arguments != NULL) {
+    AppendCXXTemplateArgumentVector(out, str->local_class_arguments);
+  }
+}
+
 static void AppendCXXStructNameComponents(String* out, Struct* str) {
   if (str == NULL) {
     return;
   }
   if (str->lexical_parent != NULL) {
     AppendCXXStructNameComponents(out, str->lexical_parent);
+  } else if (CXXStructIsLocalClass(str)) {
+    AppendCXXLocalClassScope(out, str);
   }
   if (str->tag_name != NULL) {
     TypeRecord* tag_type =
@@ -953,12 +1004,50 @@ static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
       AppendCXXNameComponent(out, tag_name->value);
     }
     StringAppendChar(out, 'E');
-  } else if (str != NULL && str->lexical_parent != NULL) {
+  } else if (str != NULL &&
+             (str->lexical_parent != NULL || CXXStructIsLocalClass(str))) {
     StringAppendChar(out, 'N');
     AppendCXXStructNameComponents(out, str);
     StringAppendChar(out, 'E');
   } else {
     AppendCXXNameComponent(out, tag_name->value);
+  }
+}
+
+// `basic_string<char, ...>` named while basic_string is only forward-declared
+// is a copy of the primary template's type carrying the arguments (see
+// InstantiateSimpleClassTemplateImpl).  Its struct is the primary pattern, so
+// the arguments live only on the type record.
+static bool CXXTypeIsDeferredTemplateId(TypeRecord* type) {
+  Struct* str = type->info.struct_info;
+  Symbol* origin = type->template_origin;
+  return origin != NULL && type->template_arguments != NULL &&
+         str->is_template && origin->type != NULL &&
+         TypeIsStructOrUnion(origin->type) &&
+         origin->type->info.struct_info == str &&
+         strcmp(origin->name.value, str->tag_name->value) == 0;
+}
+
+static void AppendCXXDeferredTemplateIdName(String* out, TypeRecord* type) {
+  Struct* str = type->info.struct_info;
+  Namespace* ns = CXXStructNamespace(str);
+  bool nested =
+      ns != NULL || str->lexical_parent != NULL || CXXStructIsLocalClass(str);
+  if (nested) {
+    StringAppendChar(out, 'N');
+  }
+  if (ns != NULL) {
+    AppendCXXNestedNamespaceComponents(out, ns);
+  }
+  if (str->lexical_parent != NULL) {
+    AppendCXXStructNameComponents(out, str->lexical_parent);
+  } else if (CXXStructIsLocalClass(str)) {
+    AppendCXXLocalClassScope(out, str);
+  }
+  AppendCXXNameComponent(out, type->template_origin->name.value);
+  AppendCXXTemplateArgumentVector(out, type->template_arguments);
+  if (nested) {
+    StringAppendChar(out, 'E');
   }
 }
 
@@ -1077,6 +1166,10 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
     StringAppendChar(out, 'e');
   } else if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
              type->info.struct_info->tag_name != NULL) {
+    if (CXXTypeIsDeferredTemplateId(type)) {
+      AppendCXXDeferredTemplateIdName(out, type);
+      return;
+    }
     AppendCXXTaggedTypeName(out, type->info.struct_info->tag_symbol,
                             type->info.struct_info->tag_name,
                             type->info.struct_info);
@@ -1252,6 +1345,11 @@ Symbol* SymbolClone(Symbol* sym) {
       sym->structured_binding_pack_size;
   new_sym->namespace_ = sym->namespace_;
   new_sym->static_data_member_class = sym->static_data_member_class;
+  new_sym->static_data_member_pattern = sym->static_data_member_pattern;
+  new_sym->static_data_member_template_arguments =
+      TemplateArgumentVectorCopy(sym->static_data_member_template_arguments);
+  new_sym->static_data_member_template_definition =
+      sym->static_data_member_template_definition;
   new_sym->member_lookup_class = sym->member_lookup_class;
   StringSetString(&new_sym->asm_name, &sym->asm_name);
   // NewSymbol already initialized new_sym->attributes; replace it with a deep

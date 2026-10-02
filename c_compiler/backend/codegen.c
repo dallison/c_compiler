@@ -240,6 +240,8 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   gen->struct_return_value = NULL;
   gen->current_struct_address = NULL;
   gen->inlined_constructor_this = NULL;
+  gen->virtual_receiver_copy = NULL;
+  gen->virtual_receiver_spill = NULL;
   gen->return_label = NULL;
   VectorInit(&gen->int_constant_pool);
   VectorInit(&gen->fp_constant_pool);

@@ -15,6 +15,7 @@
 #include "compiler.h"
 #include "debug.h"
 #include "member_pointer.h"
+#include "type_special_member.h"
 
 #include "target_basic_block.h"
 
@@ -1350,6 +1351,21 @@ static TargetInstruction* StoreImmediate(AARCH64Generator* g, AARCH64Opcode opco
                      size));
 }
 
+// Like SetDestOrMove for a fixed argument register of a helper call.  An
+// address computed earlier (e.g. a call argument's temporary) may be followed
+// by other calls before this one; writing the argument register at the
+// producer would leave it clobbered by those calls.
+static TargetInstruction* SetDestOrMoveToHelperArg(AARCH64Generator* g,
+                                                   TargetInstruction* from,
+                                                   TargetInstruction* to) {
+  if (TargetNext(from) == NULL) {
+    return SetDestOrMove(g, from, to, AARCH64_OP(mov));
+  }
+  TargetInstruction* move = Emit(g, NewInstruction1(AARCH64_OP(mov), from));
+  move->dest = to;
+  return to;
+}
+
 static TargetInstruction* Memcpy(AARCH64Generator* g, TargetInstruction* dest_addr,
                                  TargetInstruction* src_addr, int length,
                                  int src_offset, int dest_offset, bool count_as_call) {
@@ -1383,15 +1399,15 @@ static TargetInstruction* Memcpy(AARCH64Generator* g, TargetInstruction* dest_ad
   if (src_offset != 0) {
     src_addr = OffsetFrom(g, src_addr, src_offset);
   }
-  TargetInstruction* arg1 = SetDestOrMove(g, src_addr, IntArgumentRegister(g, 1),
-                                           AARCH64_OP(mov));
+  TargetInstruction* arg1 =
+      SetDestOrMoveToHelperArg(g, src_addr, IntArgumentRegister(g, 1));
 
   // Dest in a0.
   if (dest_offset != 0) {
     dest_addr = OffsetFrom(g, dest_addr, dest_offset);
   }
-  TargetInstruction* arg0 = SetDestOrMove(g, dest_addr, IntArgumentRegister(g, 0),
-                                          AARCH64_OP(mov));
+  TargetInstruction* arg0 =
+      SetDestOrMoveToHelperArg(g, dest_addr, IntArgumentRegister(g, 0));
 
   // We need to keep the arguments alive until the point of the call.  This
   // is done using a AARCH64_OP(regarg) instruction sequence.  See BuildArgList for
@@ -1441,7 +1457,8 @@ static TargetInstruction* Memzero(AARCH64Generator* g, TargetInstruction* dest_a
   if (offset != 0) {
     dest_addr = OffsetFrom(g, dest_addr, offset);
   }
-  TargetInstruction* arg0 = SetDestOrMove(g, dest_addr, IntArgumentRegister(g, 0), AARCH64_OP(mov));
+  TargetInstruction* arg0 =
+      SetDestOrMoveToHelperArg(g, dest_addr, IntArgumentRegister(g, 0));
 
   // We need to keep the arguments alive until the point of the call.  This
   // is done using a AARCH64_OP(regarg) instruction sequence.  See BuildArgList for
@@ -2071,6 +2088,12 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
   }
 
   AARCH64Opcode opcode = IR2RV(node->opcode, TypeIsUnsigned(node->type));
+  if (node->opcode == IR_OP(i2f) || node->opcode == IR_OP(i2d)) {
+    TypeRecord* from = ((IRNode*)node->inputs.value.p[0])->type;
+    if (from != NULL && TypeIsUnsigned(from)) {
+      opcode = AARCH64_OP(ucvtf);
+    }
+  }
   assert(node->inputs.length <= 2);
   TargetInstruction* inst = NULL;
   bool ref_counts_ok =
@@ -3716,10 +3739,18 @@ static TargetInstruction* LowerSignExtend(AARCH64Generator* g, IRNode* node) {
   // sign-extend must actually emit code here.
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
-  if (AARCH64IsSignedLoad(value) || diff == 0) {
+  // A signed byte or halfword load into a W register sign-extends only to 32
+  // bits; widening it to 64 bits still needs SXTW.
+  bool load_extends_to_64 =
+      GetRegisterSize(value) == kSize64Bit ||
+      value->opcode == (TargetOpcode)AARCH64_OP(ldursw) ||
+      value->opcode == (TargetOpcode)AARCH64_OP(ldpsw);
+  bool widens_to_64 = node->type != NULL && node->type->size > 4 && diff > 0;
+  if (diff == 0 || (AARCH64IsSignedLoad(value) &&
+                    (load_extends_to_64 || !widens_to_64))) {
     // Already sign-extended by the load, or no width change at all.
     result = value;
-  } else if (diff == 32) {
+  } else if (diff == 32 || AARCH64IsSignedLoad(value)) {
     // 32-bit value widened to 64 bits: a plain mov would zero-extend (writing a
     // w-register clears the upper 32 bits), turning negative ints into large
     // positives; sxtw performs the arithmetic widening.
@@ -3944,6 +3975,9 @@ typedef struct {
   size_t reference_offset;
   TargetInstruction* second_reg;
   size_t second_offset;
+  // A by-reference argument that passes the argument object itself instead
+  // of a copy in the outgoing struct area.
+  bool object_address;
 } ArgLocation;
 
 static bool TypeUsesAArch64FpArgReg(TypeRecord* type) {
@@ -3958,6 +3992,31 @@ static bool TypePassedAsAArch64Aggregate(TypeRecord* type) {
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type));
 }
 
+// A class whose usable copy and move constructors are all non-trivial is
+// passed by the address of the temporary the caller constructed for the
+// parameter, as in the Itanium C++ ABI.  A bitwise copy of that temporary
+// breaks objects that point into themselves (a small std::string's data
+// pointer) once the callee moves from it.  Classes with a trivial copy or move
+// constructor keep the copy: their argument may be the caller's own lvalue.
+static bool ArgPassedByObjectAddress(TypeRecord* type) {
+  if (!CompilerIsCXX() || !TypeIsStructOrUnion(type)) {
+    return false;
+  }
+  static const CXXSpecialMemberKind kinds[] = {
+      kCXXSpecialMemberCopyConstructor, kCXXSpecialMemberMoveConstructor};
+  bool has_nontrivial = false;
+  for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+    if (CXXTypeSpecialMemberIsDeleted(type, kinds[i])) {
+      continue;
+    }
+    if (CXXTypeSpecialMemberIsTrivial(type, kinds[i])) {
+      return false;
+    }
+    has_nontrivial = true;
+  }
+  return has_nontrivial;
+}
+
 static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
   ArgLocation* loc = malloc(sizeof(ArgLocation));
   loc->type = kArgLocationRegister;
@@ -3965,6 +4024,7 @@ static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {
   loc->reference_offset = 0;
   loc->second_reg = NULL;
   loc->second_offset = 0;
+  loc->object_address = false;
   return loc;
 }
 
@@ -3975,6 +4035,7 @@ static ArgLocation* NewArgLocationPushed(ArgLocationType type, size_t offset) {
   loc->reference_offset = 0;
   loc->second_reg = NULL;
   loc->second_offset = 0;
+  loc->object_address = false;
   return loc;
 }
 
@@ -4001,6 +4062,7 @@ static ArgLocation* NewArgLocationReferenceInRegister(TargetInstruction* reg,
   loc->reference_offset = reference_offset;
   loc->second_reg = NULL;
   loc->second_offset = 0;
+  loc->object_address = false;
   return loc;
 }
 
@@ -4012,6 +4074,7 @@ static ArgLocation* NewArgLocationReferenceOnStack(size_t offset,
   loc->reference_offset = reference_offset;
   loc->second_reg = NULL;
   loc->second_offset = 0;
+  loc->object_address = false;
   return loc;
 }
 
@@ -4058,10 +4121,15 @@ static TargetInstruction* BuildArgList(AARCH64Generator* g, Vector* arg_location
 // register pairs and HFA/HVA classification require extending ArgLocation and
 // the corresponding callee argument reconstruction together.
 //
+bool AARCH64UsesDarwinVariadicABI(void) {
+  return compiler != NULL && compiler->native_object;
+}
+
 // Variadic arguments follow the normal AAPCS64 rules: integer/pointer
 // arguments in x0-x7, floating-point arguments in d0-d7, and the remainder on
 // the stack.  The callee's prologue saves the unnamed argument registers into
 // the GP and VR save areas that va_arg walks (see LowerBuiltinVaStart).
+// On Darwin every unnamed argument takes 8-byte stack slots instead.
 static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   assert(node->inputs.length >= 1);
   size_t struct_area_size = 0;
@@ -4071,6 +4139,17 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   Vector arg_locations;
   VectorInit(&arg_locations);
   bool has_hidden_struct_result = (node->flags & kIRStructReturnCall) != 0;
+  TypeRecord* callee_type = ((IRNode*)node->inputs.value.p[0])->type;
+  if (callee_type != NULL && TypeIsPointer(callee_type)) {
+    callee_type = callee_type->next;
+  }
+  bool is_darwin_varargs_call =
+      AARCH64UsesDarwinVariadicABI() && callee_type != NULL &&
+      TypeIsFunction(callee_type) && callee_type->info.function.varargs;
+  size_t first_variadic_input =
+      (has_hidden_struct_result ? 2 : 1) +
+      (is_darwin_varargs_call ? callee_type->info.function.prototype.length
+                              : 0);
 
   // Phase 1:
   // Work out the locations for all arguments.  The first 8 go in argument
@@ -4084,6 +4163,27 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       // source expression used for that address.
       VectorAppend(&arg_locations,
                    NewArgLocationRegister(StructReturnArgumentRegister(g)));
+    } else if (is_darwin_varargs_call && i >= first_variadic_input) {
+      // Same slots LowerBuiltinVaArg reads: a member pointer takes two, an
+      // aggregate wider than 8 bytes is passed by reference, anything else
+      // takes one.
+      if (TypeIsMemberPointerAggregate(arg_node->type)) {
+        VectorAppend(&arg_locations,
+                     NewArgLocationPushedPair(next_pushed_arg_offset));
+        next_pushed_arg_offset += 16;
+      } else if (TypePassedAsAArch64Aggregate(arg_node->type) &&
+                 arg_node->type->size > 8) {
+        VectorAppend(&arg_locations,
+                     NewArgLocationReferenceOnStack(next_pushed_arg_offset,
+                                                    struct_area_size));
+        next_pushed_arg_offset += 8;
+        struct_area_size += arg_node->type->size;
+      } else {
+        VectorAppend(
+            &arg_locations,
+            NewArgLocationPushed(kArgLocationPushed, next_pushed_arg_offset));
+        next_pushed_arg_offset += 8;
+      }
     } else if (TypeIsMemberPointerAggregate(arg_node->type)) {
       if (next_int_arg_reg + 1 < AARCH64_NUM_INT_ARGS) {
         TargetInstruction* first =
@@ -4118,19 +4218,22 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       } else {
         // The struct needs to be copied onto the stack and then its address
         // passed either in a register or on the stack.
+        ArgLocation* loc;
         if (next_int_arg_reg < AARCH64_NUM_INT_ARGS) {
           // Argument goes in an argument register.
           TargetInstruction* arg_reg =
               FreshIntArgumentRegister(g, next_int_arg_reg++);
-          VectorAppend(&arg_locations, NewArgLocationReferenceInRegister(
-                                           arg_reg, struct_area_size));
+          loc = NewArgLocationReferenceInRegister(arg_reg, struct_area_size);
         } else {
-          VectorAppend(&arg_locations,
-                       NewArgLocationReferenceOnStack(next_pushed_arg_offset,
-                                                      struct_area_size));
+          loc = NewArgLocationReferenceOnStack(next_pushed_arg_offset,
+                                               struct_area_size);
           next_pushed_arg_offset += 8;
         }
-        struct_area_size += struct_size;
+        loc->object_address = ArgPassedByObjectAddress(arg_node->type);
+        VectorAppend(&arg_locations, loc);
+        if (!loc->object_address) {
+          struct_area_size += struct_size;
+        }
       }
     } else if (TypeUsesAArch64FpArgReg(arg_node->type)) {
       if (next_fp_arg_reg < AARCH64_NUM_FP_ARGS) {
@@ -4188,6 +4291,9 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     switch (arg_location->type) {
       case kArgLocationPassedByReferenceInRegister:
       case kArgLocationPassedByReferenceOnStack: {
+        if (arg_location->object_address) {
+          break;
+        }
         TargetInstruction* arg = Materialize(g, arg_node);
         Memcpy(g, StackPointer(g), arg, (int)size, 0,
                (int)(arg_location->reference_offset + next_pushed_arg_offset), false);
@@ -4223,11 +4329,24 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   }
   for (size_t i = 1; i < node->inputs.length; i++) {
     ArgLocation* arg_location = arg_locations.value.p[i - 1];
-    if (arg_location->type != kArgLocationRegister) {
+    bool object_address_in_register =
+        arg_location->type == kArgLocationPassedByReferenceInRegister &&
+        arg_location->object_address;
+    if (arg_location->type != kArgLocationRegister &&
+        !object_address_in_register) {
       continue;
     }
     IRNode* arg_node = node->inputs.value.p[i];
     TargetInstruction* arg = Materialize(g, arg_node);
+    if (object_address_in_register) {
+      TargetInstruction* staged = Emit(g, NewInstruction(AARCH64_OP(tmp)));
+      staged->flags |= AARCH64_INST_AVOID_ARG_REGS;
+      TargetInstruction* move =
+          Emit(g, NewInstruction1(AARCH64_OP(mov), arg));
+      move->dest = staged;
+      VectorSet(&staged_register_args, i - 1, staged);
+      continue;
+    }
     if (TypeIsVector(arg_node->type) && TypeUsesNativeVectorABI(arg_node->type)) {
       TargetInstruction* staged = Emit(
           g, SetInstructionSize(
@@ -4316,17 +4435,26 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
         // Struct passed by reference in a register.  The reference_offset
         // contains the offset from the to of the pushed args to the copied
         // struct.
-        TargetInstruction* arg = AddImmediate(
-            g, StackPointer(g),
-            arg_location->reference_offset + next_pushed_arg_offset);
+        TargetInstruction* arg;
+        if (arg_location->object_address) {
+          arg = VectorGet(&staged_register_args, i - 1);
+          assert(arg != NULL);
+        } else {
+          arg = AddImmediate(
+              g, StackPointer(g),
+              arg_location->reference_offset + next_pushed_arg_offset);
+        }
         SetDestOrMoveToArgReg(g, arg_node, arg, arg_location->location.reg, AARCH64_OP(mov));
         break;
       }
       case kArgLocationPassedByReferenceOnStack: {
         // Struct passed by reference on the stack.
-        TargetInstruction* arg = AddImmediate(
-            g, StackPointer(g),
-            arg_location->reference_offset + next_pushed_arg_offset);
+        TargetInstruction* arg =
+            arg_location->object_address
+                ? Materialize(g, arg_node)
+                : AddImmediate(
+                      g, StackPointer(g),
+                      arg_location->reference_offset + next_pushed_arg_offset);
         PushArg(g, arg_node, arg, arg_location->location.offset);
         break;
       }
@@ -4531,11 +4659,62 @@ static void VaStore(AARCH64Generator* g, TargetInstruction* value,
               size));
 }
 
+static int NamedArgumentStackBytes(Vector* args);
+
+// Darwin va_start: the unnamed arguments follow the named stack arguments
+// above the saved x29/x30 pair.
+static TargetInstruction* LowerDarwinVaStart(AARCH64Generator* g,
+                                             IRNode* node) {
+  g->not_leaf = true;
+  TargetInstruction* ap = VaListAddress(g, node->inputs.value.p[0]);
+  TargetInstruction* x29 =
+      Emit(g, SetInstructionSize(NewInstruction(AARCH64_OP(fp)), kSize64Bit));
+  int named_bytes = NamedArgumentStackBytes(
+      &compiler->current_function->info.function.prototype);
+  VaStore(g, AddImmediate(g, x29, 16 + named_bytes), ap, 0, kSize64Bit);
+  return SetLoweredNode(node, x29);
+}
+
+// Darwin va_arg reads the slots LowerCall writes for an unnamed argument.
+static TargetInstruction* LowerDarwinVaArg(AARCH64Generator* g, IRNode* node) {
+  TargetInstruction* ap = VaListAddress(g, node->inputs.value.p[0]);
+  TargetInstruction* addr = VaLoad(g, ap, 0, kSize64Bit);
+  bool is_aggregate = TypePassedAsAArch64Aggregate(node->type);
+  int step = TypeIsMemberPointerAggregate(node->type) ? 16 : 8;
+  VaStore(g, AddImmediate(g, addr, step), ap, 0, kSize64Bit);
+
+  if (TypeIsMemberPointerAggregate(node->type) ||
+      (is_aggregate && node->type->size <= 8)) {
+    return SetLoweredNode(node, addr);
+  }
+  if (is_aggregate) {
+    TargetInstruction* ptr = Emit(
+        g, SetInstructionSize(
+               NewInstruction2(AARCH64_OP(ldr), addr,
+                               GetIntConstant(g, NULL, kTargetType64Bit, 0)),
+               kSize64Bit));
+    return SetLoweredNode(node, ptr);
+  }
+  AARCH64Opcode load_op = TypeUsesHardwareFloatRegister(node->type)
+                              ? AARCH64_OP(fldr)
+                              : AARCH64_OP(ldr);
+  int load_size = (node->type->size > 4) ? kSize64Bit : kSize32Bit;
+  TargetInstruction* result = Emit(
+      g, SetInstructionSize(
+             NewInstruction2(load_op, addr,
+                             GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+             load_size));
+  return SetLoweredNode(node, result);
+}
+
 // va_start initialises the AAPCS64 va_list.  The prologue (see
 // aarch64_emitter.c) lowered x29 so the GP and VR register save areas sit
 // immediately above it; the caller's on-stack overflow arguments sit above
 // those plus the saved x29/x30 pair (16 bytes).
 static TargetInstruction* LowerBuiltinVaStart(AARCH64Generator* g, IRNode* node) {
+  if (AARCH64UsesDarwinVariadicABI()) {
+    return LowerDarwinVaStart(g, node);
+  }
   TargetInstruction* ap = VaListAddress(g, node->inputs.value.p[0]);
 
   int gp_size = (AARCH64_NUM_INT_ARGS - g->num_int_arg_regs) * 8;
@@ -4573,6 +4752,9 @@ static TargetInstruction* LowerBuiltinVaStart(AARCH64Generator* g, IRNode* node)
 //   ap->__stack        += (reg_offs >= 0) ? 8 : 0
 //   result   = *addr
 static TargetInstruction* LowerBuiltinVaArg(AARCH64Generator* g, IRNode* node) {
+  if (AARCH64UsesDarwinVariadicABI()) {
+    return LowerDarwinVaArg(g, node);
+  }
   TargetInstruction* ap = VaListAddress(g, node->inputs.value.p[0]);
   bool is_fp = TypeUsesHardwareFloatRegister(node->type);
   int top_field = is_fp ? AARCH64_VA_VR_TOP : AARCH64_VA_GR_TOP;
@@ -4649,7 +4831,8 @@ static TargetInstruction* LowerBuiltinVaCopy(AARCH64Generator* g, IRNode* node) 
   // Copy the 32-byte va_list structure from src (input 1) to dst (input 0).
   TargetInstruction* dst = VaListAddress(g, node->inputs.value.p[0]);
   TargetInstruction* src = VaListAddress(g, node->inputs.value.p[1]);
-  for (int o = 0; o < 32; o += 8) {
+  int va_list_size = AARCH64UsesDarwinVariadicABI() ? 8 : 32;
+  for (int o = 0; o < va_list_size; o += 8) {
     VaStore(g, VaLoad(g, src, o, kSize64Bit), dst, o, kSize64Bit);
   }
   return NULL;
@@ -5345,6 +5528,35 @@ static ArgLocation ArgumentLocation(PoolEntry* arg, Vector* args) {
   assert(false);
   ArgLocation error = {0};
   return error;
+}
+
+// Bytes of the caller-pushed argument area taken by the named arguments, using
+// the same slot assignment as ArgumentLocation.
+static int NamedArgumentStackBytes(Vector* args) {
+  int int_reg = AARCH64_INT_ARG_START;
+  int fp_reg = AARCH64_FP_ARG_START;
+  int stack_offset = 0;
+  for (size_t i = 0; i < args->length; i++) {
+    Symbol* arg_symbol = args->value.p[i];
+    if (TypeIsMemberPointerAggregate(arg_symbol->type)) {
+      if (int_reg + 1 <= AARCH64_INT_ARG_END) {
+        int_reg += 2;
+      } else {
+        stack_offset += 16;
+      }
+    } else if (TypeUsesAArch64FpArgReg(arg_symbol->type)) {
+      if (fp_reg <= AARCH64_FP_ARG_END) {
+        fp_reg++;
+      } else {
+        stack_offset += 8;
+      }
+    } else if (int_reg <= AARCH64_INT_ARG_END) {
+      int_reg++;
+    } else {
+      stack_offset += 8;
+    }
+  }
+  return stack_offset;
 }
 
 static void AlignOffset(PoolEntry* entry, int* offset) {

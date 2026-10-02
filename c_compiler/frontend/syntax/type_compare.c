@@ -1936,6 +1936,11 @@ bool TypeIsAbstractClass(TypeRecord* type) {
 
 bool TypeContainsAuto(TypeRecord* type) {
   for (TypeRecord* t = type; t != NULL; t = t->next) {
+    // A function record keeps the base type bits of its declaration, so an
+    // `auto f()` stays marked after its return type (`next`) is deduced.
+    if (t->declarator == kDeclFunction) {
+      continue;
+    }
     if ((t->type & kTypeAuto) != 0) {
       return true;
     }

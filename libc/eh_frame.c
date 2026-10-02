@@ -4,8 +4,12 @@
 #include <unwind.h>
 #endif
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+void __davecc_darwin_eh_frame_range(const uint8_t** start, const uint8_t** end);
+#else
 extern char __eh_frame_start[];
 extern char __eh_frame_end[];
+#endif
 
 #define DAVECC_EH_MAX_MODULES 32
 #define DAVECC_EH_MAX_FOREIGN 32
@@ -626,8 +630,12 @@ int DaveEHFrameGetRange(DaveEHFrameRange* range) {
   if (range == 0) {
     return 0;
   }
+#if defined(__DAVECC_NATIVE_DARWIN__)
+  __davecc_darwin_eh_frame_range(&range->start, &range->end);
+#else
   range->start = (const uint8_t*)__eh_frame_start;
   range->end = (const uint8_t*)__eh_frame_end;
+#endif
   return range->start < range->end;
 }
 

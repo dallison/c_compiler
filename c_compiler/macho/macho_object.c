@@ -37,6 +37,7 @@ typedef struct {
   uint8_t* data;
   bool zerofill;
   bool owns_data;
+  bool has_start_symbol;
 } MachOSection;
 
 typedef struct {
@@ -96,8 +97,7 @@ static uint32_t AlignUp(uint32_t value, uint32_t align) {
 
 static bool ShouldEmitMachOSection(const AssemblerSection* section) {
   const char* name = section->name != NULL ? section->name->value : "";
-  if (strcmp(name, ".eh_frame") == 0 ||
-      strncmp(name, ".rela.", 6) == 0 ||
+  if (strncmp(name, ".rela.", 6) == 0 ||
       strncmp(name, ".debug_", 7) == 0 ||
       strcmp(name, ".comment") == 0 ||
       strncmp(name, ".note", 5) == 0) {
@@ -141,7 +141,10 @@ static bool MapSectionNames(const AssemblerSection* section, MachOSection* out) 
     SetPaddedName(out->segname, "__DATA");
     out->flags = MACHO_S_MOD_TERM_FUNC_POINTERS;
   } else if (strcmp(name, ".eh_frame") == 0) {
-    SetPaddedName(out->sectname, "__eh_frame");
+    // ld64 rewrites __TEXT,__eh_frame into compact unwind and expects its own
+    // CIE conventions.  davecc's unwinder reads these records itself, so keep
+    // them opaque to the linker; libc finds the section with getsectiondata.
+    SetPaddedName(out->sectname, "__dcc_eh_frame");
     SetPaddedName(out->segname, "__TEXT");
   } else if (strcmp(name, ".tdata") == 0) {
     SetPaddedName(out->sectname, "__thread_data");
@@ -471,20 +474,6 @@ static bool RelocUsesAddendPair(uint32_t macho_type) {
          macho_type == MACHO_ARM64_RELOC_TLVP_LOAD_PAGEOFF12;
 }
 
-static bool WriteIntegerIntoSection(MachOSection* section, uint32_t offset,
-                                    int64_t addend, uint32_t nbytes) {
-  if (section->data == NULL || offset + nbytes > section->size) {
-    fprintf(stderr, "Mach-O: cannot write a %u-byte addend at %#x\n", nbytes,
-            offset);
-    return false;
-  }
-  uint64_t value = 0;
-  memcpy(&value, section->data + offset, nbytes);
-  value += (uint64_t)addend;
-  memcpy(section->data + offset, &value, nbytes);
-  return true;
-}
-
 /* A local symbol inserted among the locals shifts every later symbol.
  * Relocations already packed have to follow that shift.  ADDEND pairs store
  * a constant in the symbol field, not a symbol index. */
@@ -510,12 +499,43 @@ static void BumpPackedSymbolIndices(MachOObject* macho, uint32_t inserted) {
   }
 }
 
+/* ld64 rejects a section whose first atom is N_ALT_ENTRY.  Sections whose own
+ * labels are all resolved by the assembler (.eh_frame) have no symbol at
+ * offset 0, so give them a plain local there, as clang's ltmpN symbols do. */
+static void EnsureSectionStartSymbol(MachOObject* macho,
+                                     MachOSection* section) {
+  if (section->has_start_symbol) {
+    return;
+  }
+  section->has_start_symbol = true;
+  for (size_t i = 0; i < macho->symbols.length; i++) {
+    MachOSymbol* sym = macho->symbols.value.p[i];
+    if (!sym->is_undefined && (sym->type & MACHO_N_SECT) == MACHO_N_SECT &&
+        sym->sect == section->macho_index && sym->value == section->addr &&
+        (sym->desc & MACHO_N_ALT_ENTRY) == 0) {
+      return;
+    }
+  }
+  uint32_t index = macho->nlocals;
+  MachOSymbol* sym = calloc(1, sizeof(*sym));
+  char name[32];
+  snprintf(name, sizeof(name), "ltmp%u", section->macho_index);
+  StringInit(&sym->name, name);
+  sym->type = MACHO_N_SECT;
+  sym->sect = (uint8_t)section->macho_index;
+  sym->value = section->addr;
+  VectorInsertBefore(&macho->symbols, index, sym);
+  macho->nlocals++;
+  BumpPackedSymbolIndices(macho, index);
+}
+
 /* arm64 Mach-O has no PC-relative data relocation.  A SUBTRACTOR/UNSIGNED
  * pair at the same address computes target - pc, which is what the LSDA's
  * DW_EH_PE_pcrel sdata4 slots need.  N_ALT_ENTRY keeps the temporary from
  * splitting the exception table into subsections. */
 static int AddPcRelSubtractor(MachOObject* macho, MachOSection* section,
                               uint32_t offset) {
+  EnsureSectionStartSymbol(macho, section);
   uint32_t index = macho->nlocals;
   MachOSymbol* sym = calloc(1, sizeof(*sym));
   char name[64];
@@ -604,8 +624,8 @@ static bool PrepareRelocs(AsmObject* object, MachOObject* macho) {
       fprintf(stderr, "Mach-O: relocation has no symbol\n");
       return false;
     }
-    if (reloc->addend != 0) {
-      if (RelocUsesAddendPair(type)) {
+    if (RelocUsesAddendPair(type)) {
+      if (reloc->addend != 0) {
         if (reloc->addend < -0x800000 || reloc->addend > 0x7fffff) {
           fprintf(stderr, "Mach-O: relocation addend %#x does not fit\n",
                   reloc->addend);
@@ -619,9 +639,12 @@ static bool PrepareRelocs(AsmObject* object, MachOObject* macho) {
                       MACHO_ARM64_RELOC_ADDEND);
         VectorAppend(&macho->relocs, addend);
         section->nreloc++;
-      } else if (!WriteIntegerIntoSection(section, (uint32_t)reloc->offset,
-                                          reloc->addend,
-                                          length == 3 ? 8 : 4)) {
+      }
+    } else {
+      /* The assembler's relocations carry explicit addends and may already
+       * have stored one in the field; Mach-O wants exactly the addend. */
+      if (!SetIntegerInSection(section, (uint32_t)reloc->offset,
+                               reloc->addend, length == 3 ? 8 : 4)) {
         return false;
       }
     }

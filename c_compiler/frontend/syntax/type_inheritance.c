@@ -704,10 +704,10 @@ static Symbol* RegisterCXXVTableForSubobject(TypeParser* parser,
 
   String name;
   StringInit(&name, "__davecc_vtbl_");
-  StringAppendString(&name, complete->tag_name);
+  AppendCXXVTableClassName(&name, complete);
   if (!(complete == source && source_offset == 0)) {
     StringAppend(&name, "_");
-    StringAppendString(&name, source->tag_name);
+    AppendCXXVTableClassName(&name, source);
     StringAppend(&name, "_");
     char offset_suffix[32];
     snprintf(offset_suffix, sizeof(offset_suffix), "%d", source_offset);
@@ -863,9 +863,9 @@ static Symbol* RegisterCXXVBTableForSubobject(TypeParser* parser,
   }
   String name;
   StringInit(&name, "__davecc_vbtbl_");
-  StringAppendString(&name, complete->tag_name);
+  AppendCXXVTableClassName(&name, complete);
   StringAppend(&name, "_");
-  StringAppendString(&name, source->tag_name);
+  AppendCXXVTableClassName(&name, source);
   StringAppend(&name, "_");
   char offset_suffix[32];
   snprintf(offset_suffix, sizeof(offset_suffix), "%d", source_offset);

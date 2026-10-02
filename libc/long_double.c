@@ -74,6 +74,12 @@ void __davecc_ld_from_i64(__davecc_ld_bits* result, long long value) {
   result->hi = r.hi;
 }
 
+void __davecc_ld_from_u64(__davecc_ld_bits* result, unsigned long long value) {
+  FPBits r = FPBitsFromU64(value, LdFormat());
+  result->lo = r.lo;
+  result->hi = r.hi;
+}
+
 double __davecc_ld_to_f64(const __davecc_ld_bits* value) {
   return FPBitsToF64((FPBits){value->lo, value->hi}, LdFormat());
 }
@@ -84,6 +90,10 @@ float __davecc_ld_to_f32(const __davecc_ld_bits* value) {
 
 long long __davecc_ld_to_i64(const __davecc_ld_bits* value) {
   return FPBitsToI64((FPBits){value->lo, value->hi}, LdFormat());
+}
+
+unsigned long long __davecc_ld_to_u64(const __davecc_ld_bits* value) {
+  return FPBitsToU64((FPBits){value->lo, value->hi}, LdFormat());
 }
 
 #include "../c_compiler/support/fp_extended.c"

@@ -726,10 +726,22 @@ struct __is_nothrow_invocable
     : __is_nothrow_invocable_impl<F, Args...> {
 };
 
+// [func.invoke.result]: `type` exists only when the call is well-formed, so
+// `typename = invoke_result_t<F, Args...>` removes a candidate by SFINAE.
+template <bool Invocable, class F, class... Args>
+struct __invoke_result_if_invocable {};
+
+template <class F, class... Args>
+struct __invoke_result_if_invocable<true, F, Args...>
+    : __invoke_result<F, Args...> {
+};
+
 }  // namespace __invoke_detail
 
 template <class F, class... Args>
-struct invoke_result : __invoke_detail::__invoke_result<F, Args...> {
+struct invoke_result
+    : __invoke_detail::__invoke_result_if_invocable<
+          __invoke_detail::__is_invocable<F, Args...>::value, F, Args...> {
 };
 
 template <class F, class... Args>

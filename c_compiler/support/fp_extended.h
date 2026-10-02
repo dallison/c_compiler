@@ -38,6 +38,7 @@ FPBits FPBitsFromF128(uint64_t hi, uint64_t lo, int format);
 float FPBitsToF32(FPBits bits, int format);
 double FPBitsToF64(FPBits bits, int format);
 int64_t FPBitsToI64(FPBits bits, int format);
+uint64_t FPBitsToU64(FPBits bits, int format);
 
 FPBits FPAdd(FPBits a, FPBits b, int format);
 FPBits FPSub(FPBits a, FPBits b, int format);

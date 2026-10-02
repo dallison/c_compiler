@@ -799,6 +799,24 @@ struct unique_ptr<T[], Deleter> {
 
 };
 
+template <class T1, class D1, class T2, class D2>
+bool operator==(const unique_ptr<T1, D1>& left,
+                const unique_ptr<T2, D2>& right) {
+  return left.get() == right.get();
+}
+
+template <class T1, class D1, class T2, class D2>
+bool operator!=(const unique_ptr<T1, D1>& left,
+                const unique_ptr<T2, D2>& right) {
+  return left.get() != right.get();
+}
+
+template <class T1, class D1, class T2, class D2>
+bool operator<(const unique_ptr<T1, D1>& left,
+               const unique_ptr<T2, D2>& right) {
+  return left.get() < right.get();
+}
+
 template <class T, class Deleter>
 bool operator==(const unique_ptr<T, Deleter>& ptr, decltype(nullptr)) noexcept {
   return ptr.get() == 0;

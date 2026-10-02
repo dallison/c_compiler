@@ -131,6 +131,9 @@ struct piecewise_construct_t {
 
 inline constexpr piecewise_construct_t piecewise_construct{};
 
+template <class... Types>
+struct tuple;
+
 struct identity {
   using is_transparent = void;
 
@@ -270,6 +273,20 @@ struct pair {
   constexpr pair(pair<U1, U2>&& other)
       : first(static_cast<U1&&>(other.first)),
         second(static_cast<U2&&>(other.second)) {}
+
+  // get comes from <tuple>, which every caller holding a tuple includes.
+  template <class... Args1, class... Args2>
+  constexpr pair(piecewise_construct_t, tuple<Args1...> first_args,
+                 tuple<Args2...> second_args)
+      : pair(first_args, second_args, index_sequence_for<Args1...>{},
+             index_sequence_for<Args2...>{}) {}
+
+ private:
+  template <class... Args1, class... Args2, size_t... I1, size_t... I2>
+  constexpr pair(tuple<Args1...>& first_args, tuple<Args2...>& second_args,
+                 index_sequence<I1...>, index_sequence<I2...>)
+      : first(static_cast<Args1&&>(get<I1>(first_args))...),
+        second(static_cast<Args2&&>(get<I2>(second_args))...) {}
 };
 
 template <class T1, class T2>

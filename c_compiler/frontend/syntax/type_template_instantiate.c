@@ -627,10 +627,99 @@ static void DeferNestedMemberBody(Struct* owner, PendingMemberBody* pending,
   free(pending);
 }
 
+static Vector g_late_member_bodies;
+static bool g_late_member_bodies_inited;
+
+static void LateMemberBodyDelete(LateMemberBody* late) {
+  if (late->args != NULL) {
+    VectorDeleteWithContents(late->args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+  free(late);
+}
+
+static Symbol* LateMemberBodyDefinition(LateMemberBody* late) {
+  Symbol* definition = late->pattern->value.func_defn;
+  if (definition == NULL) {
+    definition = late->pattern;
+  }
+  return definition->type != NULL &&
+                 TypeIsFunction(definition->type) &&
+                 definition->type->info.function.body != NULL
+             ? definition
+             : NULL;
+}
+
+static void RecordLateMemberBody(Struct* owner, PendingMemberBody* pending,
+                                 Vector* args) {
+  Symbol* symbol = pending->symbol;
+  if (pending->pattern == NULL || symbol == NULL || symbol->type == NULL ||
+      !TypeIsFunction(symbol->type) || symbol->flags.is_template ||
+      symbol->type->info.function.is_deleted ||
+      symbol->type->info.function.is_defaulted ||
+      symbol->type->info.function.is_pure_virtual ||
+      StructContainsTemplateParameter(owner)) {
+    return;
+  }
+  if (!g_late_member_bodies_inited) {
+    VectorInit(&g_late_member_bodies);
+    g_late_member_bodies_inited = true;
+  }
+  LateMemberBody* late = calloc(1, sizeof(*late));
+  late->symbol = symbol;
+  late->pattern = pending->pattern;
+  late->owner = owner;
+  late->substitution_source = pending->substitution_source;
+  late->args = args != NULL ? TemplateArgumentVectorCopy(args) : NULL;
+  VectorAppend(&g_late_member_bodies, late);
+}
+
+void TypeInstantiateLateMemberBodies(Syntax* syntax, Vector* defined) {
+  if (!g_late_member_bodies_inited) {
+    return;
+  }
+  for (size_t i = 0; i < g_late_member_bodies.length;) {
+    LateMemberBody* late = g_late_member_bodies.value.p[i];
+    Symbol* definition = LateMemberBodyDefinition(late);
+    if (definition == NULL) {
+      i++;
+      continue;
+    }
+    VectorDeleteElement(&g_late_member_bodies, i);
+    if (late->symbol->type->info.function.body == NULL &&
+        late->symbol->value.func_defn == NULL) {
+      TypeParser parser;
+      TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                     syntax->context);
+      parser.template_substitution_source = late->substitution_source;
+      parser.template_substitution_target = late->owner;
+      CloneInstantiatedMemberFunctionBody(&parser, late->owner, late->symbol,
+                                          definition, late->substitution_source,
+                                          late->args);
+      TypeParserDestruct(&parser);
+      VectorAppend(defined, late->symbol);
+    }
+    LateMemberBodyDelete(late);
+  }
+}
+
+void TypeReleaseLateMemberBodies(void) {
+  if (!g_late_member_bodies_inited) {
+    return;
+  }
+  VectorDestructWithContents(&g_late_member_bodies,
+                             (VectorElementDestructor)LateMemberBodyDelete,
+                             /*free_element=*/false);
+  g_late_member_bodies_inited = false;
+}
+
 /* A lambda closure inside a function template is substituted once per mention
  * (the `auto` variable, the compound literal, each capture).  Each call built
  * a new struct, so `const auto f = [&]{ ... }` tried to initialize one closure
- * from a different copy of the same lambda.  Reuse the first result. */
+ * from a different copy of the same lambda.  Reuse the first result.  A named
+ * local class is mentioned the same way (`new FactoryImpl{...}`), and each copy
+ * would register its own vtable. */
 typedef struct {
   Struct* source;
   Vector* args;
@@ -640,9 +729,15 @@ typedef struct {
 static Vector cached_lambda_substitutions;
 static bool cached_lambda_substitutions_ready;
 
+static bool CachesLocalClassSubstitution(Struct* source) {
+  return source != NULL && source->tag_symbol != NULL &&
+         (source->tag_symbol->flags.invented ||
+          (source->tag_symbol->flags.is_block_scope && !source->is_template));
+}
+
 static TypeRecord* FindCachedLambdaSubstitution(Struct* source, Vector* args) {
-  if (!cached_lambda_substitutions_ready || source == NULL ||
-      source->tag_symbol == NULL || !source->tag_symbol->flags.invented) {
+  if (!cached_lambda_substitutions_ready ||
+      !CachesLocalClassSubstitution(source)) {
     return NULL;
   }
   for (size_t i = 0; i < cached_lambda_substitutions.length; i++) {
@@ -657,8 +752,7 @@ static TypeRecord* FindCachedLambdaSubstitution(Struct* source, Vector* args) {
 
 static void RememberLambdaSubstitution(Struct* source, Vector* args,
                                       TypeRecord* type) {
-  if (source == NULL || source->tag_symbol == NULL ||
-      !source->tag_symbol->flags.invented || type == NULL) {
+  if (!CachesLocalClassSubstitution(source) || type == NULL) {
     return;
   }
   if (FindCachedLambdaSubstitution(source, args) != NULL) {
@@ -714,6 +808,30 @@ static void PushNestedSubstitution(Struct* source, Vector* args,
   VectorAppend(&nested_substitution_stack, entry);
 }
 
+static Vector* NestedSubstitutionArgumentsForOwner(Struct* owner,
+                                                int member_base) {
+  if (!nested_substitution_stack_ready || owner == NULL || member_base <= 0) {
+    return NULL;
+  }
+  for (size_t i = nested_substitution_stack.length; i-- > 0;) {
+    NestedSubstitutionInProgress* entry = nested_substitution_stack.value.p[i];
+    if (entry == NULL || entry->args == NULL) {
+      continue;
+    }
+    bool matches = entry->source == owner;
+    if (!matches && entry->type != NULL && TypeIsStructOrUnion(entry->type) &&
+        entry->type->info.struct_info == owner) {
+      matches = true;
+    }
+    if (!matches || (int)entry->args->length < member_base ||
+        TemplateArgumentVectorContainsTemplateParameter(entry->args)) {
+      continue;
+    }
+    return entry->args;
+  }
+  return NULL;
+}
+
 static void PopNestedSubstitution(Struct* source) {
   if (!nested_substitution_stack_ready) {
     return;
@@ -728,6 +846,275 @@ static void PopNestedSubstitution(Struct* source) {
   }
 }
 
+static bool StructHasDependentDataMember(Struct* str) {
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member != NULL && member->symbol != NULL && !member->is_static &&
+        !member->is_member_function &&
+        TypeContainsTemplateParameter(member->symbol->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Copy a parameter of a template nested in the class being instantiated:
+ * enclosing class parameters are bound to `args` and the nested template's own
+ * parameters are renumbered from 0.  `from_owner` is the enclosing class
+ * template and `to_owner` its instantiation. */
+static TemplateParameter* CloneNestedTemplateParameter(TypeParser* parser,
+                                                       TemplateParameter* from,
+                                                       Vector* args,
+                                                       Struct* from_owner,
+                                                       Struct* to_owner) {
+  int base = args != NULL ? (int)args->length : 0;
+  TemplateParameter* param = TemplateParameterCopy(from);
+  if (param->type != NULL) {
+    TypeRecord* substituted =
+        SubstituteTemplateParameters(parser, param->type, args);
+    TypeRecordDelete(param->type);
+    param->type = substituted;
+    RebaseTemplateParameterIndices(param->type, base);
+  }
+  if (param->default_type != NULL) {
+    TypeRecord* substituted =
+        SubstituteTemplateParameters(parser, param->default_type, args);
+    TypeRecordDelete(param->default_type);
+    param->default_type = substituted;
+    RebaseTemplateParameterIndices(param->default_type, base);
+  }
+  if (param->default_template_parameter_index >= base) {
+    param->default_template_parameter_index -= base;
+  }
+  if (param->index >= base) {
+    param->index -= base;
+  }
+  // `bool = (sizeof(M) <= 8)` still numbers `M` after the enclosing class's
+  // parameters, but the nested template is completed with its own arguments.
+  if (param->default_argument != NULL && base > 0) {
+    TemplateArgument* default_argument = param->default_argument;
+    if (default_argument->template_parameter_index >= base) {
+      default_argument->template_parameter_index -= base;
+    }
+    if (default_argument->dependent_expr != NULL && parser != NULL &&
+        parser->syntax != NULL) {
+      // Bind the enclosing class's arguments too: after rebasing alone,
+      // `MatcherBase::IsInlined<M>()` would name the class parameter and `M`
+      // by the same index.  The owners send `IsInlined` to the instantiation's
+      // member, whose own parameters are the ones renumbered here.
+      bool remap_owner =
+          from_owner != NULL && to_owner != NULL && from_owner != to_owner;
+      ASTNode* rebased = TypeSubstituteMemberTemplateExpressionAndRebase(
+          parser->syntax, default_argument->dependent_expr, args, base,
+          default_argument->dependent_expr->location,
+          remap_owner ? from_owner : NULL, remap_owner ? to_owner : NULL);
+      if (rebased != NULL) {
+        default_argument->dependent_expr = rebased;
+      }
+    }
+  }
+  return param;
+}
+
+/* Insert the hidden vptr/vbptr, lay out virtual bases and register the
+ * vtables of a concrete instantiation, as a class definition does
+ * (type_class.c).  The instantiation does not copy the template's own hidden
+ * fields: its concrete bases decide which class owns them. */
+static void CompleteInstantiatedPolymorphicLayout(TypeParser* parser,
+                                                  Struct* str) {
+  UpdateCXXAbstractStatus(str);
+  AddCXXVPtrMember(parser, str);
+  AddCXXVBPtrMember(parser, str);
+  str->non_virtual_size = str->next_offset;
+  LayoutCXXVirtualBaseSpecifiers(str);
+  RegisterCXXVTable(parser, str);
+  RegisterCXXVBTables(parser, str);
+  CXXFixupSpecialMemberTrivialityAfterLayout(str);
+  str->vtables_registered = true;
+  SyntaxFlushPendingVPtrInitializers(str);
+  // The vptr/vbptr insertion shifts member offsets and grows the object.
+  FinalizeStructAlignment(str);
+}
+
+/* The partial specializations of a nested class template (`ValuePolicy<M,
+ * false>` in `MatcherBase<T>`) belong to each instantiation of the enclosing
+ * class, renumbered like the primary `to` cloned from `from`. */
+static void CloneNestedTemplatePartialSpecializations(TypeParser* parser,
+                                                      Struct* from, Struct* to,
+                                                      Vector* args) {
+  int base = args != NULL ? (int)args->length : 0;
+  if (!from->is_template || base == 0) {
+    return;
+  }
+  for (size_t i = 0; i < from->partial_specializations.length; i++) {
+    ClassTemplatePartialSpecialization* partial =
+        from->partial_specializations.value.p[i];
+    // A constraint would need the same renumbering; such a specialization is
+    // left out rather than checked against the wrong parameters.
+    if (partial == NULL || partial->tag_symbol == NULL ||
+        partial->tag_symbol->type == NULL ||
+        !TypeIsStructOrUnion(partial->tag_symbol->type) ||
+        partial->associated_constraint != NULL) {
+      continue;
+    }
+    TypeRecord* body = SubstituteNestedStructTemplateParameters(
+        parser, partial->tag_symbol->type, args);
+    if (body == NULL || !TypeIsStructOrUnion(body) ||
+        body->info.struct_info == NULL) {
+      TypeRecordDelete(body);
+      continue;
+    }
+    Symbol* tag = NewSymbol(partial->tag_symbol->name.value, body,
+                            STO(implicit));
+    tag->flags.is_defined = partial->tag_symbol->flags.is_defined;
+    tag->flags.is_template = true;
+    Vector* pattern = SubstituteTemplateArgumentVector(
+        parser, &partial->pattern_arguments, args, base);
+    ClassTemplatePartialSpecialization* clone =
+        NewClassTemplatePartialSpecialization(tag, NULL, pattern);
+    VectorDeleteWithContents(pattern,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    // The partial was registered with the enclosing class's parameters in
+    // front of its own (`[T, U]` for `VP<U*, false>` in `MB<T>`); those are
+    // bound by `args` now.
+    for (size_t j = 0; j < partial->template_parameters.length; j++) {
+      TemplateParameter* param = partial->template_parameters.value.p[j];
+      if (param == NULL || param->index < base) {
+        continue;
+      }
+      VectorAppend(&clone->template_parameters,
+                   CloneNestedTemplateParameter(parser, param, args,
+                                                from->lexical_parent,
+                                                to->lexical_parent));
+    }
+    VectorAppend(&to->partial_specializations, clone);
+  }
+}
+
+/* Remember which template member a specialization's static data member was
+ * instantiated from, so TypeEnsureStaticDataMemberDefinition can instantiate
+ * its definition when the member is first odr-used. */
+static void RecordStaticDataMemberPattern(StructMember* member,
+                                          Symbol* instantiated, Vector* args) {
+  if (member == NULL || member->symbol == NULL || instantiated == NULL ||
+      !member->is_static || member->is_member_function ||
+      member->is_using_declaration || StructMemberIsNestedType(member) ||
+      StorageIs(member->symbol->storage, STO(typedef)) ||
+      TypeIsFunction(instantiated->type) || args == NULL) {
+    return;
+  }
+  instantiated->static_data_member_pattern = member->symbol;
+  instantiated->static_data_member_template_arguments =
+      TemplateArgumentVectorCopy(args);
+}
+
+void TypeEnsureStaticDataMemberDefinition(Syntax* syntax, Symbol* symbol) {
+  if (syntax == NULL || symbol == NULL || symbol->type == NULL ||
+      symbol->static_data_member_pattern == NULL ||
+      symbol->static_data_member_class == NULL ||
+      TypeContainsTemplateParameter(symbol->type) ||
+      TemplateArgumentVectorContainsTemplateParameter(
+          symbol->static_data_member_template_arguments)) {
+    return;
+  }
+  Symbol* pattern = symbol->static_data_member_pattern;
+  Struct* owner = symbol->static_data_member_class;
+  StructMember* member = MapFindPointerKey(&owner->symbol_table, &symbol->name);
+  if (member == NULL || member->symbol != symbol) {
+    return;
+  }
+  VariableDeclarationASTNode* definition =
+      (VariableDeclarationASTNode*)pattern->static_data_member_template_definition;
+  // A member variable template (`template <class U> static constexpr bool
+  // v = ...;`) is instantiated per use, not here.
+  if (definition == NULL && pattern->variable_template != NULL) {
+    return;
+  }
+  // [temp.inst]: the definition is the out-of-class one
+  // (`template <class T> const T C<T>::k[] = ...;`), or else the in-class
+  // initializer of an inline / constexpr member.  A member that has neither
+  // yet may still be defined later in this translation unit.  Once the
+  // out-of-class definition is marked as a template, its initializer has
+  // moved to the member's variable_template.
+  ASTNode* pattern_initializer =
+      definition != NULL ? definition->initializer : NULL;
+  if (definition != NULL && pattern_initializer == NULL &&
+      pattern->variable_template != NULL) {
+    pattern_initializer = pattern->variable_template->initializer;
+  }
+  ASTNode* initializer = NULL;
+  if (pattern_initializer != NULL) {
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                   syntax->context);
+    parser.template_substitution_source = pattern->static_data_member_class;
+    parser.template_substitution_target = owner;
+    initializer = CloneDependentExpressionWithArgs(
+        &parser, pattern_initializer,
+        symbol->static_data_member_template_arguments);
+    TypeParserDestruct(&parser);
+    if (initializer == NULL) {
+      initializer = CloneCXXDefaultMemberInitializer(pattern_initializer);
+    }
+  } else if (member->default_initializer != NULL) {
+    initializer = CloneCXXDefaultMemberInitializer(member->default_initializer);
+  } else if (definition == NULL) {
+    Vector* undefined = &compiler->cxx_undefined_template_static_members;
+    for (size_t i = 0; i < undefined->length; i++) {
+      if (undefined->value.p[i] == symbol) {
+        return;
+      }
+    }
+    VectorAppend(undefined, symbol);
+    return;
+  }
+  symbol->static_data_member_pattern = NULL;
+  if (initializer != NULL && TypeIsArray(symbol->type) &&
+      !symbol->type->info.array.is_flexible &&
+      !symbol->type->info.array.is_vla &&
+      !symbol->type->info.array.is_dependent_bound &&
+      symbol->type->info.array.size.fixed <= 0) {
+    symbol->type->info.array.is_flexible = true;
+    TypeRecordCalculateSize(symbol->type);
+  }
+  // The specialization's member copied the pattern's flags, including the
+  // template mark that its out-of-class definition received.
+  symbol->flags.is_template = false;
+  symbol->flags.is_defined = true;
+  if (!StorageIs(symbol->storage, STO(static))) {
+    symbol->flags.is_weak = true;
+  }
+  ASTNode* decl = NewVariableDeclarationASTNode(symbol, initializer,
+                                                symbol->location);
+  VectorAppend(&compiler->cxx_deferred_static_member_definitions, decl);
+}
+
+void TypeRecordStaticDataMemberDefinition(Syntax* syntax, Symbol* member,
+                                          ASTNode* definition,
+                                          bool is_template_definition) {
+  if (member == NULL) {
+    return;
+  }
+  if (!is_template_definition) {
+    // An explicit specialization (`template <> const T C<X>::k[] = ...;`) is
+    // this specialization's own definition.
+    member->static_data_member_pattern = NULL;
+    return;
+  }
+  member->static_data_member_template_definition = definition;
+  Vector* undefined = &compiler->cxx_undefined_template_static_members;
+  for (size_t i = 0; i < undefined->length;) {
+    Symbol* symbol = undefined->value.p[i];
+    if (symbol->static_data_member_pattern != member) {
+      i++;
+      continue;
+    }
+    VectorDeleteElement(undefined, i);
+    TypeEnsureStaticDataMemberDefinition(syntax, symbol);
+  }
+}
+
 TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
                                                             TypeRecord* type,
                                                             Vector* args) {
@@ -736,11 +1123,17 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   // Substituting that copy again (its lexical parent is now the instantiation,
   // which is the source of a nested substitution) invents another closure and
   // never reaches a fixed point.  The original, without `$S`, is what each
-  // instantiation rebuilds.
+  // instantiation rebuilds.  A copy made for a class template still has the
+  // capture fields of its member function template's pack (`Args&&... args`)
+  // and is rebuilt once more when that member is instantiated.
   if (from->tag_symbol != NULL && from->tag_symbol->flags.invented &&
-      from->tag_name != NULL && strstr(from->tag_name->value, "$S") != NULL) {
+      from->tag_name != NULL && strstr(from->tag_name->value, "$S") != NULL &&
+      !StructHasDependentDataMember(from)) {
     return TypeRecordCopy(type);
   }
+  bool member_closure_resubstitution =
+      from->tag_symbol != NULL && from->tag_symbol->flags.invented &&
+      from->tag_name != NULL && strstr(from->tag_name->value, "$S") != NULL;
   // A concrete lambda used as a template argument (`is_copy_constructible<Lam>`)
   // is not part of the class being substituted.  Cloning it per mention makes
   // `T` and `const T&` name different closures, so the copy constructor does
@@ -784,6 +1177,12 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   bool defer_nested_bodies =
       parser != NULL && parser->template_substitution_target != NULL;
   TypeRecord* copy = TypeRecordCopy(type);
+  // The copy's operator() has no body of its own.  Ensuring it clones the
+  // lambda's pattern, which needs these member arguments after the class's.
+  if (member_closure_resubstitution && copy->template_arguments == NULL &&
+      args != NULL) {
+    copy->template_arguments = TemplateArgumentVectorCopy(args);
+  }
   Struct* str = NewStruct(from->is_union);
   if (parser != NULL && parser->template_substitution_target != NULL &&
       from->lexical_parent == parser->template_substitution_source) {
@@ -797,6 +1196,10 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     str->lexical_parent = from->lexical_parent;
   }
   str->access_enclosing_function = from->access_enclosing_function;
+  if (from->tag_symbol != NULL && from->tag_symbol->flags.is_block_scope &&
+      !from->tag_symbol->flags.invented && args != NULL) {
+    str->local_class_arguments = TemplateArgumentVectorCopy(args);
+  }
   if (StructHasMemberFunction(from)) {
     bool invented = from->tag_symbol != NULL && from->tag_symbol->flags.invented;
     String synthetic_name;
@@ -834,33 +1237,10 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   int enclosing_template_parameter_count =
       args != NULL ? (int)args->length : 0;
   for (size_t i = 0; i < from->template_parameters.length; i++) {
-    TemplateParameter* param =
-        TemplateParameterCopy(from->template_parameters.value.p[i]);
-    if (param->type != NULL) {
-      TypeRecord* substituted =
-          SubstituteTemplateParameters(parser, param->type, args);
-      TypeRecordDelete(param->type);
-      param->type = substituted;
-      RebaseTemplateParameterIndices(
-          param->type, enclosing_template_parameter_count);
-    }
-    if (param->default_type != NULL) {
-      TypeRecord* substituted =
-          SubstituteTemplateParameters(parser, param->default_type, args);
-      TypeRecordDelete(param->default_type);
-      param->default_type = substituted;
-      RebaseTemplateParameterIndices(
-          param->default_type, enclosing_template_parameter_count);
-    }
-    if (param->default_template_parameter_index >=
-        enclosing_template_parameter_count) {
-      param->default_template_parameter_index -=
-          enclosing_template_parameter_count;
-    }
-    if (param->index >= enclosing_template_parameter_count) {
-      param->index -= enclosing_template_parameter_count;
-    }
-    VectorAppend(&str->template_parameters, param);
+    VectorAppend(&str->template_parameters,
+                 CloneNestedTemplateParameter(
+                     parser, from->template_parameters.value.p[i], args,
+                     from->lexical_parent, str->lexical_parent));
   }
   str->is_aggregate = from->is_aggregate;
   str->cxx_special_members_complete = from->cxx_special_members_complete;
@@ -906,6 +1286,16 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     base_type = MaterializeClassBaseType(parser, base_type);
     if (!TypeIsStructOrUnion(base_type)) {
       if (TypeIsStillDependentClassBase(base_type)) {
+        // A nested class template's base can depend on its own parameters
+        // (`ConstantIteratorsImpl<P, ...> : P::constant_iterators`).  Its
+        // instantiations substitute the bases of this copy.
+        if (str->is_template) {
+          CXXBaseSpecifier* dependent_base = NewCXXBaseSpecifier(
+              base_type, template_base->access, template_base->is_virtual);
+          dependent_base->is_pack_expansion = template_base->is_pack_expansion;
+          VectorAppend(&str->bases, dependent_base);
+          continue;
+        }
         TypeRecordDelete(base_type);
         continue;
       }
@@ -950,6 +1340,17 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         for (size_t j = 0; j < pack->pack_arguments->length; j++) {
           TypeRecord* member_type = SubstituteTemplateParametersForPackElement(
               parser, member->symbol->type, args, pack_index, j);
+          // A by-reference capture of `Args&&... args` is stored as `Args*`.
+          // With `Args = T&` the element is a pointer to `T`, not to `T&`.
+          if (member_type != NULL && TypeIsPointer(member_type) &&
+              member_type->next != NULL &&
+              TypeIsReference(member_type->next) &&
+              member_type->next->next != NULL) {
+            TypeRecord* pointer = NewPointerTypeRecord(member_type->qualifiers);
+            TypeRecordChain(pointer, member_type->next->next);
+            TypeRecordDelete(member_type);
+            member_type = pointer;
+          }
           TypeRecordCalculateSize(member_type);
           String field_name;
           StringInit(&field_name, NULL);
@@ -1058,8 +1459,21 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     // value-initialization `W()` referencing the template parameter, which then
     // lowers to an undefined symbol; substitution rewrites it to e.g. `int()`.
     if (member->default_initializer != NULL) {
-      ASTNode* substituted = CloneDependentExpressionWithArgs(
-          parser, member->default_initializer, args);
+      ASTNode* substituted = NULL;
+      // A nested class template's initializer (`static constexpr auto d =
+      // &Payload<M>::Destroy;`) names its own parameters, renumbered from 0
+      // like its member types.
+      if (str->is_template && enclosing_template_parameter_count > 0 &&
+          str->tag_symbol != NULL && !str->tag_symbol->flags.invented) {
+        substituted = TypeSubstituteMemberTemplateExpressionAndRebase(
+            parser->syntax, member->default_initializer, args,
+            enclosing_template_parameter_count,
+            member->default_initializer->location, NULL, NULL);
+      }
+      if (substituted == NULL) {
+        substituted = CloneDependentExpressionWithArgs(
+            parser, member->default_initializer, args);
+      }
       instantiated->default_initializer =
           substituted != NULL
               ? substituted
@@ -1081,6 +1495,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       member_symbol->constexpr_initializer = ASTNodeClone(
           instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
     }
+    RecordStaticDataMemberPattern(member, member_symbol, args);
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
     instantiated->is_static = member->is_static;
@@ -1161,8 +1576,13 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   AddImplicitCXXSpecialMembers(parser, str, str->tag_symbol);
   AddImplicitCXXDestructorIfNeeded(parser, str, str->tag_symbol);
   parser->synthesize_instantiated_special_members = saved_synthesize;
+  // A nested class template is completed when it is instantiated.
+  if (!str->is_template) {
+    CompleteInstantiatedPolymorphicLayout(parser, str);
+  }
   RememberLambdaSubstitution(from, args, copy);
   PopNestedSubstitution(from);
+  CloneNestedTemplatePartialSpecializations(parser, from, str, args);
   return TypeRecordCalculateSize(copy);
 }
 
@@ -1355,9 +1775,15 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
     // below `rebase_base`), e.g. `template <class R = D>` for a member of a
     // class template with parameter `D`.  Substitute the enclosing arguments so
     // the default becomes concrete, then rebase the member's own placeholders.
+    // A default that fails (`class = enable_if_t<sizeof...(Rest) == 1>` once
+    // `Rest` is empty) only matters to a call that uses it.  It must not fail
+    // whatever is instantiating the class, such as an overload candidate whose
+    // return type names the class.
     if (param->default_type != NULL && subst_args != NULL && parser != NULL) {
+      bool saved_failed = parser->template_substitution_failed;
       TypeRecord* substituted =
           SubstituteTemplateParameters(parser, param->default_type, subst_args);
+      parser->template_substitution_failed = saved_failed;
       TypeRecordDelete(param->default_type);
       param->default_type = substituted;
     }
@@ -2451,6 +2877,81 @@ void PopFunctionInstantiationInProgress(
   g_function_instantiations_in_progress = node->next;
 }
 
+static Vector* StructConcreteTemplateArguments(Struct* owner) {
+  if (owner == NULL || owner->tag_symbol == NULL ||
+      owner->tag_symbol->type == NULL) {
+    return NULL;
+  }
+  Vector* args = owner->tag_symbol->type->template_arguments;
+  if (args == NULL || args->length == 0 ||
+      TemplateArgumentVectorContainsTemplateParameter(args)) {
+    return NULL;
+  }
+  return args;
+}
+
+static bool StructDeclaresMemberNamed(Struct* str, String* name) {
+  if (str == NULL || name == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member != NULL && member->symbol != NULL &&
+        StringEqualString(&member->symbol->name, name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static Vector* BaseDeclaringConcreteTemplateArguments(Struct* str, String* name,
+                                                     int depth) {
+  if (str == NULL || name == NULL || depth > 64) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    if (base_struct == str) {
+      continue;
+    }
+    Vector* args = StructConcreteTemplateArguments(base_struct);
+    if (args != NULL && StructDeclaresMemberNamed(base_struct, name)) {
+      return args;
+    }
+    Vector* nested =
+        BaseDeclaringConcreteTemplateArguments(base_struct, name, depth + 1);
+    if (nested != NULL) {
+      return nested;
+    }
+  }
+  return NULL;
+}
+
+Vector* MemberFunctionEnclosingClassArguments(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL ||
+      !TypeIsFunction(symbol->type)) {
+    return NULL;
+  }
+  Struct* owner = symbol->type->info.function.cxx_member_owner;
+  Vector* direct = StructConcreteTemplateArguments(owner);
+  if (direct != NULL) {
+    return direct;
+  }
+  return BaseDeclaringConcreteTemplateArguments(owner, &symbol->name, 0);
+}
+
+bool CXXRetargetDropsDeclaringTemplateArguments(Struct* existing,
+                                                Struct* named) {
+  return existing != NULL && existing != named &&
+         StructConcreteTemplateArguments(existing) != NULL &&
+         StructConcreteTemplateArguments(named) == NULL;
+}
+
 static Vector* FunctionTemplateBodyArguments(Symbol* template_definition,
                                              Symbol* symbol,
                                              Vector* member_args) {
@@ -2473,11 +2974,8 @@ static Vector* FunctionTemplateBodyArguments(Symbol* template_definition,
       member_args->length == own_count && symbol->type != NULL &&
       TypeIsFunction(symbol->type) &&
       symbol->type->info.function.cxx_member_owner != NULL) {
-    Struct* owner = symbol->type->info.function.cxx_member_owner;
-    if (owner->tag_symbol != NULL && owner->tag_symbol->type != NULL &&
-        owner->tag_symbol->type->template_arguments != NULL &&
-        owner->tag_symbol->type->template_arguments->length > 0) {
-      Vector* class_args = owner->tag_symbol->type->template_arguments;
+    Vector* class_args = MemberFunctionEnclosingClassArguments(symbol);
+    if (class_args != NULL && class_args->length > 0) {
       Vector* combined = NewVector();
       for (size_t i = 0; i < class_args->length; i++) {
         VectorAppend(combined, TemplateArgumentCopy(class_args->value.p[i]));
@@ -2497,23 +2995,35 @@ static Vector* FunctionTemplateBodyArguments(Symbol* template_definition,
     int parameter_index =
         formal != NULL ? FirstTemplateParameterIndexInType(formal->type) : -1;
     if (parameter_index >= 0 && parameter_index < enclosing_count) {
-      // This body belongs to the member as cloned into an already-instantiated
-      // class.  Its own parameters have been rebased to zero, so its argument
-      // vector must stay member-local.  Argument completion may nevertheless
-      // have retained the enclosing arguments in front of the member arguments;
-      // strip that prefix or parameter zero binds to the class argument instead
-      // of the member specialization's first argument.
-      if (member_args == NULL || own_count == 0 ||
-          member_args->length <= own_count) {
+      // The formal still names an enclosing parameter (`H state`), so this
+      // body has not been rebased.  A pack can make `member_args` longer or
+      // shorter than the template's own parameter list; prepend the class
+      // arguments unless they are already in front.  Leaving them off binds
+      // `H` to the first function argument (`H::combine` looks up `combine`
+      // on `Cord` or `const Coroutine*`).
+      Vector* class_args = MemberFunctionEnclosingClassArguments(symbol);
+      if (class_args == NULL || class_args->length == 0 ||
+          member_args == NULL) {
         return member_args;
       }
-      Vector* local_args = NewVector();
-      size_t first = member_args->length - own_count;
-      for (size_t j = first; j < member_args->length; j++) {
-        VectorAppend(local_args,
-                     TemplateArgumentCopy(member_args->value.p[j]));
+      bool already_prefixed = member_args->length >= class_args->length;
+      for (size_t j = 0; already_prefixed && j < class_args->length; j++) {
+        if (!TemplateArgumentEqual(member_args->value.p[j],
+                                  class_args->value.p[j])) {
+          already_prefixed = false;
+        }
       }
-      return local_args;
+      if (already_prefixed) {
+        return member_args;
+      }
+      Vector* combined = NewVector();
+      for (size_t j = 0; j < class_args->length; j++) {
+        VectorAppend(combined, TemplateArgumentCopy(class_args->value.p[j]));
+      }
+      for (size_t j = 0; j < member_args->length; j++) {
+        VectorAppend(combined, TemplateArgumentCopy(member_args->value.p[j]));
+      }
+      return combined;
     }
   }
   Symbol* member_template = symbol->type->info.function.template_origin;
@@ -2544,11 +3054,16 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
       template_definition->type == NULL || symbol == NULL ||
       symbol->type == NULL ||
       template_definition->type->info.function.body == NULL ||
-      symbol->type->info.function.body != NULL ||
+      (symbol->type->info.function.body != NULL &&
+       symbol->type->info.function.definition) ||
       FunctionTemplateInstantiationInProgress(symbol) ||
       PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
     return;
   }
+  // A body cloned only to deduce the return type was analyzed speculatively,
+  // so the calls in it never queued their callees.  Clone it again.  The old
+  // body is left alone: deduction may still refer to its nodes.
+  symbol->type->info.function.body = NULL;
   FunctionInstantiationInProgress in_progress;
   PushFunctionInstantiationInProgress(&in_progress, symbol);
   Vector* body_args =
@@ -2607,6 +3122,59 @@ static bool TemplateArgumentVectorContainsTemplateParameterForInstantiation(
     }
   }
   return false;
+}
+
+/* An out-of-line member template (`HashStateBase<H>::combine`) may be defined
+ * after a specialization of the class has already been built.  That
+ * specialization copied the member while `func_defn` was still null.  The
+ * primary's `func_defn` is filled in when the definition is parsed; use it. */
+static Symbol* OutOfLineMemberTemplateDefinition(Symbol* templ) {
+  if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type)) {
+    return NULL;
+  }
+  Symbol* direct = templ->value.func_defn;
+  if (direct != NULL && direct->type != NULL && TypeIsFunction(direct->type) &&
+      direct->type->info.function.body != NULL) {
+    return direct;
+  }
+  if (templ->type->info.function.body != NULL) {
+    return templ;
+  }
+  Struct* owner = templ->type->info.function.cxx_member_owner;
+  if (owner == NULL || owner->tag_symbol == NULL ||
+      owner->tag_symbol->type == NULL ||
+      owner->tag_symbol->type->template_origin == NULL ||
+      owner->tag_symbol->type->template_origin->type == NULL ||
+      !TypeIsStructOrUnion(owner->tag_symbol->type->template_origin->type) ||
+      owner->tag_symbol->type->template_origin->type->info.struct_info ==
+          NULL) {
+    return NULL;
+  }
+  Struct* primary =
+      owner->tag_symbol->type->template_origin->type->info.struct_info;
+  for (size_t i = 0; i < primary->members.length; i++) {
+    StructMember* member = primary->members.value.p[i];
+    if (member == NULL || member->symbol == NULL ||
+        member->symbol->type == NULL ||
+        !TypeIsFunction(member->symbol->type) ||
+        !StringEqualString(&member->symbol->name, &templ->name) ||
+        member->symbol->flags.is_template != templ->flags.is_template ||
+        member->symbol->type->info.function.template_parameter_count !=
+            templ->type->info.function.template_parameter_count ||
+        member->symbol->type->info.function.prototype.length !=
+            templ->type->info.function.prototype.length) {
+      continue;
+    }
+    Symbol* defn = member->symbol->value.func_defn;
+    if (defn != NULL && defn->type != NULL && TypeIsFunction(defn->type) &&
+        defn->type->info.function.body != NULL) {
+      return defn;
+    }
+    if (member->symbol->type->info.function.body != NULL) {
+      return member->symbol;
+    }
+  }
+  return NULL;
 }
 
 /* Re-analyze one assignment whose operand conversion was deferred because an
@@ -2670,6 +3238,18 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
       templ->value.func_defn->type != NULL &&
       templ->value.func_defn->type->info.function.body != NULL) {
     template_definition = templ->value.func_defn;
+  }
+  if (template_definition->type == NULL ||
+      template_definition->type->info.function.body == NULL) {
+    Symbol* out_of_line = OutOfLineMemberTemplateDefinition(templ);
+    if (out_of_line != NULL) {
+      template_definition = out_of_line;
+      if (templ->value.func_defn == NULL ||
+          templ->value.func_defn->type == NULL ||
+          templ->value.func_defn->type->info.function.body == NULL) {
+        templ->value.func_defn = out_of_line;
+      }
+    }
   }
   // A declaration-only function template (`extern template` specializations,
   // `std::declval`) still gets a concrete signature so a call can be type-checked.
@@ -2752,8 +3332,19 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   // until the stack overflows.  Recording it first lets the recursive call
   // resolve to this in-progress symbol and terminate.
   AppendFunctionTemplateInstantiation(templ, symbol);
+  // A signature probe (`decltype(IsTrivial<A>())`) of a function with a
+  // placeholder return type still needs the body to deduce that type, and a
+  // constexpr function still needs it for a constant inside the probe
+  // (`decltype(Or({integral_constant<bool, Should<T>()>()}))`).  Such a body
+  // is not a definition; a later real use clones it again.
+  bool deduction_only_body =
+      compiler->speculative_template_instantiation_depth > 0 &&
+      (TypeFunctionReturnContainsAuto(symbol->type) ||
+       symbol->type->info.function.is_constexpr ||
+       symbol->type->info.function.is_consteval);
   if (template_definition->type->info.function.body != NULL &&
-      compiler->speculative_template_instantiation_depth == 0) {
+      (compiler->speculative_template_instantiation_depth == 0 ||
+       deduction_only_body)) {
     FunctionInstantiationInProgress in_progress;
     PushFunctionInstantiationInProgress(&in_progress, symbol);
     Vector* body_args =
@@ -2776,6 +3367,9 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
                                /*free_element=*/false);
     }
     ReanalyzeDeferredDependentAssignments(parser, symbol->type);
+    if (deduction_only_body) {
+      return symbol;
+    }
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;
     if (symbol->type->info.function.is_inline) {
@@ -2964,6 +3558,34 @@ static TypeRecord* DecayCallArgumentTypeForDeduction(TypeRecord* formal,
   return decayed;
 }
 
+/* An id-expression naming a function parameter is an lvalue.  Trailing
+ * decltype substitution deduces calls such as `std::move(state)` before that
+ * identifier is analyzed, while its value category is still the default
+ * prvalue.  Treating the parameter as an rvalue deduces `T` rather than `T&`,
+ * and the resulting `T&&` then rejects the same argument once it is
+ * categorized as an lvalue.
+ *
+ * A braced temporary (`Find{key}`) is lowered to a compound literal, which
+ * keeps C's lvalue category, but in C++ it is a prvalue and deduces `T`. */
+static bool ForwardingArgumentIsLvalue(ASTNode* actual) {
+  if (actual == NULL) {
+    return false;
+  }
+  if (CompilerIsCXX() && actual->op == AST_OP(compound_literal)) {
+    return false;
+  }
+  if (actual->value_category == kValueCategoryLvalue) {
+    return true;
+  }
+  if (actual->value_category != kValueCategoryPrvalue ||
+      (actual->flags & kASTAnalyzed) != 0 ||
+      actual->op != AST_OP(identifier)) {
+    return false;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)actual;
+  return id->symbol != NULL && id->symbol->flags.is_argument;
+}
+
 /* Deduce a pack element from a call argument expression, applying forwarding-
  * reference rules: a `T&&` pack parameter binding an lvalue deduces `T&`
  * (reference collapsing); otherwise deduce from the argument's type. */
@@ -2988,7 +3610,7 @@ static bool DeduceFunctionTemplatePackCallArgument(
   int placeholder_index = -1;
   if (formal->declarator == kDeclRValueReference &&
       TypeIsTemplateParameterPlaceholder(formal->next, &placeholder_index) &&
-      actual->value_category == kValueCategoryLvalue) {
+      ForwardingArgumentIsLvalue(actual)) {
     TypeRecord* lvalue_ref = NewReferenceTypeRecord(kQualPlain, false);
     TypeRecordChain(lvalue_ref, actual->type);
     lvalue_ref->type = actual->type->type;
@@ -3937,6 +4559,24 @@ bool StructContainsTemplateParameter(Struct* str) {
   return false;
 }
 
+// A named local class of a function template.  Its member function bodies may
+// use the function's parameters, so every instantiation of the function
+// rebuilds it.  A rebuilt copy has its own tag symbol, which is not a
+// block-scope tag.
+bool StructIsFunctionTemplateLocalClass(Struct* str) {
+  if (str == NULL || str->lexical_parent != NULL || str->is_template ||
+      str->local_class_arguments != NULL || str->tag_symbol == NULL ||
+      !str->tag_symbol->flags.is_block_scope ||
+      str->tag_symbol->flags.invented || !StructHasMemberFunction(str)) {
+    return false;
+  }
+  Symbol* function = str->access_enclosing_function;
+  return function != NULL &&
+         (function->flags.is_template ||
+          (function->type != NULL && TypeIsFunction(function->type) &&
+           function->type->info.function.template_parameters.length > 0));
+}
+
 /* Core type-against-type deduction: match a (possibly dependent) parameter type
  * `formal` against a concrete argument type `actual`, recording deduced
  * arguments into `args`. Handles dependent member typedefs, bare parameters
@@ -4235,7 +4875,10 @@ static TypeRecord* TypeSkipReferencesForDeduction(TypeRecord* type) {
 // `Format(const Spec<Args...>&, const Args&...)` called as `Format("%08x", 1u)`
 // must take Args from the later pack, then convert the literal via Spec's ctor.
 // A failed match against the *same* template is a real deduction failure
-// (conflicting bindings) and is not treated as non-deduced.
+// (conflicting bindings) and is not treated as non-deduced.  Only an alias
+// template's expansion can hide its parameters in non-deduced arguments; a
+// class template's own `const variant<Types...>&` is a deduced context, and a
+// mismatch fails rather than deducing an empty pack.
 static bool FormalClassTemplateIdIsNonDeducedAgainst(TypeRecord* formal,
                                                      TypeRecord* actual) {
   formal = TypeSkipReferencesForDeduction(formal);
@@ -4245,6 +4888,13 @@ static bool FormalClassTemplateIdIsNonDeducedAgainst(TypeRecord* formal,
   }
   Symbol* origin = ClassTemplateOriginOf(formal);
   if (origin == NULL && TypeSpecializationTemplateArguments(formal) == NULL) {
+    return false;
+  }
+  bool class_template_origin =
+      origin != NULL && origin->type != NULL &&
+      TypeIsStructOrUnion(origin->type) &&
+      origin->type->template_origin == NULL;
+  if (class_template_origin) {
     return false;
   }
   if (origin != NULL) {
@@ -4451,7 +5101,7 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
   int placeholder_index = -1;
   if (formal->declarator == kDeclRValueReference &&
       TypeIsTemplateParameterPlaceholder(formal->next, &placeholder_index) &&
-      actual->value_category == kValueCategoryLvalue) {
+      ForwardingArgumentIsLvalue(actual)) {
     TypeRecord* lvalue_ref = NewReferenceTypeRecord(kQualPlain, false);
     TypeRecordChain(lvalue_ref, actual->type);
     lvalue_ref->type = actual->type->type;
@@ -5461,10 +6111,15 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(Syntax* syntax,
                              /*free_element=*/false);
     return NULL;
   }
+  // Default template arguments are written on the declaration, not on an
+  // out-of-class definition (`template <class T, EnableIf<T>> C::C(T&&)`).
+  TypeRecord* completion_func =
+      templ->type->info.function.template_parameters.length > 0 ? templ->type
+                                                                : func;
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args =
-      CompleteFunctionTemplateArguments(&parser, func, args,
+      CompleteFunctionTemplateArguments(&parser, completion_func, args,
                                         /*emit_error=*/false,
                                         kTemplateArgumentsConsume);
   TypeParserDestruct(&parser);
@@ -7789,6 +8444,7 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
   pmb->symbol = symbol;
   pmb->template_definition = template_definition;
   pmb->substitution_source = substitution_source;
+  pmb->pattern = member->symbol;
   VectorAppend(pending, pmb);
   StructMember* instantiated = NewStructMember(symbol);
   instantiated->is_member_function = true;
@@ -8639,10 +9295,94 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
   int member_base = func->info.function.template_parameter_base;
   if (member_base > 0) {
     rebased_parameters = TemplateParameterVectorCopy(parameters);
+    // The primary still numbers parameters after the enclosing class
+    // (`Hash` at 0, `T` at 1, this template's `H` at 2).  Call completion
+    // only has this template's own arguments.  Fill the enclosing indices
+    // from the class being instantiated before rebasing `H` down to 0, or
+    // `decltype(H::Invoke(declval<State>(), declval<const T&>()))` keeps `T`
+    // and the SFINAE candidate is discarded.
+    Vector* enclosing = NULL;
+    Struct* owner =
+        func->info.function.cxx_member_owner;
+    Struct* target =
+        parser != NULL ? parser->template_substitution_target : NULL;
+    if (owner != NULL && target != NULL && target->tag_symbol != NULL &&
+        target->tag_symbol->type != NULL &&
+        (owner == target ||
+         target->tag_symbol->type->template_origin == owner->tag_symbol)) {
+      enclosing = StructConcreteTemplateArguments(target);
+    }
+    if ((enclosing == NULL || (int)enclosing->length < member_base) &&
+        func->info.function.symbol != NULL) {
+      Vector* owner_args = MemberFunctionEnclosingClassArguments(
+          func->info.function.symbol);
+      if (owner_args != NULL && (int)owner_args->length >= member_base) {
+        enclosing = owner_args;
+      }
+    }
+    if (enclosing == NULL || (int)enclosing->length < member_base) {
+      Vector* stacked =
+          NestedSubstitutionArgumentsForOwner(owner, member_base);
+      if (stacked == NULL) {
+        stacked = NestedSubstitutionArgumentsForOwner(target, member_base);
+      }
+      if (stacked != NULL) {
+        enclosing = stacked;
+      }
+    }
+    if (enclosing != NULL && (int)enclosing->length < member_base) {
+      enclosing = NULL;
+    }
     for (size_t i = 0; i < rebased_parameters->length; i++) {
       TemplateParameter* param = rebased_parameters->value.p[i];
       if (param == NULL) {
         continue;
+      }
+      if (enclosing != NULL && parser != NULL) {
+        bool saved_failed = parser->template_substitution_failed;
+        bool saved_only =
+            parser->substituting_enclosing_template_arguments_only;
+        parser->template_substitution_failed = false;
+        parser->substituting_enclosing_template_arguments_only = true;
+        if (param->type != NULL &&
+            TypeContainsTemplateParameter(param->type)) {
+          TypeRecord* substituted =
+              SubstituteTemplateParameters(parser, param->type, enclosing);
+          bool failed = parser->template_substitution_failed;
+          bool original_has_own =
+              TypeReferencesParameterAtOrAbove(param->type, member_base);
+          bool substituted_has_own =
+              substituted != NULL &&
+              TypeReferencesParameterAtOrAbove(substituted, member_base);
+          if (substituted != NULL && !failed &&
+              (!original_has_own || substituted_has_own)) {
+            TypeRecordDelete(param->type);
+            param->type = substituted;
+          } else {
+            TypeRecordDelete(substituted);
+          }
+          parser->template_substitution_failed = false;
+        }
+        if (param->default_type != NULL &&
+            TypeContainsTemplateParameter(param->default_type)) {
+          TypeRecord* substituted = SubstituteTemplateParameters(
+              parser, param->default_type, enclosing);
+          bool failed = parser->template_substitution_failed;
+          bool original_has_own = TypeReferencesParameterAtOrAbove(
+              param->default_type, member_base);
+          bool substituted_has_own =
+              substituted != NULL &&
+              TypeReferencesParameterAtOrAbove(substituted, member_base);
+          if (substituted != NULL && !failed &&
+              (!original_has_own || substituted_has_own)) {
+            TypeRecordDelete(param->default_type);
+            param->default_type = substituted;
+          } else {
+            TypeRecordDelete(substituted);
+          }
+        }
+        parser->substituting_enclosing_template_arguments_only = saved_only;
+        parser->template_substitution_failed = saved_failed;
       }
       RebaseTemplateParameterIndices(param->type, member_base);
       RebaseTemplateParameterIndices(param->default_type, member_base);
@@ -9375,6 +10115,18 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
       parser->enclosing_template_substitution_source;
   Struct* saved_enclosing_substitution_target =
       parser->enclosing_template_substitution_target;
+  // Member push/pop scopes below publish this class's substitution to the
+  // syntax.  Put the caller's back afterwards: a later alias expansion in the
+  // caller (`IteratorValueAdapter<A, I>(it)` in a member of InlinedVector)
+  // would otherwise resolve members against this class.
+  Struct* saved_syntax_substitution_source =
+      parser->syntax->template_substitution_source;
+  Struct* saved_syntax_substitution_target =
+      parser->syntax->template_substitution_target;
+  Struct* saved_syntax_enclosing_substitution_source =
+      parser->syntax->enclosing_template_substitution_source;
+  Struct* saved_syntax_enclosing_substitution_target =
+      parser->syntax->enclosing_template_substitution_target;
   if (saved_substitution_source != NULL && saved_substitution_target != NULL) {
     parser->enclosing_template_substitution_source =
         saved_substitution_source;
@@ -9383,6 +10135,10 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   }
   parser->template_substitution_source = source_struct;
   parser->template_substitution_target = str;
+  // Member-template default arguments are completed against the primary,
+  // whose parameter indices still include this class.  Remember the concrete
+  // arguments so that completion can fill those indices.
+  PushNestedSubstitution(source_struct, source_args, type);
 
   for (size_t i = 0; i < source_struct->bases.length; i++) {
     CXXBaseSpecifier* template_base = source_struct->bases.value.p[i];
@@ -9612,6 +10368,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
       member_symbol->constexpr_initializer = ASTNodeClone(
           instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
     }
+    RecordStaticDataMemberPattern(member, member_symbol, source_args);
     instantiated->access = member->access;
     instantiated->is_anon = member->is_anon;
     instantiated->is_static = member->is_static;
@@ -9666,19 +10423,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   // garbage.  This runs before the member-body clone pass below so that the
   // cloned constructor preambles observe vtables_registered and emit their vptr
   // initializers directly.
-  UpdateCXXAbstractStatus(str);
-  AddCXXVPtrMember(parser, str);
-  AddCXXVBPtrMember(parser, str);
-  str->non_virtual_size = str->next_offset;
-  LayoutCXXVirtualBaseSpecifiers(str);
-  RegisterCXXVTable(parser, str);
-  RegisterCXXVBTables(parser, str);
-  CXXFixupSpecialMemberTrivialityAfterLayout(str);
-  str->vtables_registered = true;
-  SyntaxFlushPendingVPtrInitializers(str);
-  // The vptr/vbptr insertion above shifts member offsets and grows the object,
-  // so re-finalize the alignment and recompute the cached type size.
-  FinalizeStructAlignment(str);
+  CompleteInstantiatedPolymorphicLayout(parser, str);
   TypeRecordCalculateSize(type);
   // Nested hidden friends (iterator/const_iterator operator==) must exist
   // before the enclosing class's own friend bodies are cloned: those bodies
@@ -9714,10 +10459,27 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   }
   for (size_t i = 0; i < pending_member_bodies.length; i++) {
     PendingMemberBody* pmb = pending_member_bodies.value.p[i];
+    // A member template of a nested template cloned for the enclosing
+    // instantiation (`Init<Arg>` in `MB<int>::VP`) already has the enclosing
+    // arguments bound and numbers `Arg` after the nested template's own
+    // parameters alone, so the enclosing prefix would shift every index.
+    Vector* body_args = member_body_args;
+    TypeRecord* definition_type = pmb->template_definition != NULL
+                                      ? pmb->template_definition->type
+                                      : NULL;
+    if (prefixed_member_body_args != NULL && source_args != NULL &&
+        definition_type != NULL && TypeIsFunction(definition_type) &&
+        definition_type->info.function.template_parameters.length > 0 &&
+        definition_type->info.function.template_parameter_base ==
+            (int)source_args->length) {
+      body_args = source_args;
+    }
+    if (pmb->template_definition == NULL) {
+      RecordLateMemberBody(str, pmb, body_args);
+    }
     CloneInstantiatedMemberFunctionBody(parser, str, pmb->symbol,
                                         pmb->template_definition,
-                                        pmb->substitution_source,
-                                        member_body_args);
+                                        pmb->substitution_source, body_args);
     free(pmb);
   }
   FlushDeferredNestedMemberBodies(parser, deferred_nested_body_mark);
@@ -9730,12 +10492,21 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   }
   VectorDestruct(&pending_member_bodies);
   str->instantiation_in_progress = false;
+  PopNestedSubstitution(source_struct);
   parser->template_substitution_source = saved_substitution_source;
   parser->template_substitution_target = saved_substitution_target;
   parser->enclosing_template_substitution_source =
       saved_enclosing_substitution_source;
   parser->enclosing_template_substitution_target =
       saved_enclosing_substitution_target;
+  parser->syntax->template_substitution_source =
+      saved_syntax_substitution_source;
+  parser->syntax->template_substitution_target =
+      saved_syntax_substitution_target;
+  parser->syntax->enclosing_template_substitution_source =
+      saved_syntax_enclosing_substitution_source;
+  parser->syntax->enclosing_template_substitution_target =
+      saved_syntax_enclosing_substitution_target;
   StringDestruct(&instantiated_name);
   if (partial_args != NULL) {
     VectorDeleteWithContents(partial_args,
@@ -10272,6 +11043,32 @@ static Vector* PartialSpecializationMemberPatternArguments(TypeParser* parser,
     return NULL;
   }
   return bindings;
+}
+
+int StructPartialSpecializationParameterCount(Syntax* syntax, Struct* owner) {
+  if (syntax == NULL || owner == NULL || owner->tag_symbol == NULL ||
+      owner->tag_symbol->type == NULL) {
+    return -1;
+  }
+  Symbol* origin = owner->tag_symbol->type->template_origin;
+  if (origin == NULL || origin->type == NULL ||
+      !TypeIsStructOrUnion(origin->type) ||
+      origin->type->info.struct_info == NULL ||
+      origin->type->info.struct_info->partial_specializations.length == 0) {
+    return -1;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  Vector* bindings = PartialSpecializationMemberPatternArguments(&parser, owner);
+  TypeParserDestruct(&parser);
+  if (bindings == NULL) {
+    return -1;
+  }
+  int count = (int)bindings->length;
+  VectorDeleteWithContents(bindings,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return count;
 }
 
 static Vector* PrefixMemberAliasPatternArguments(Symbol* alias,

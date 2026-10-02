@@ -91,6 +91,8 @@ Symbol* NewCXXConversionOperatorSymbol(TypeParser* parser,
                                               SourceLocation location,
                                               bool is_virtual) {
   TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_inline =
+      parser->is_inline || parser->is_constexpr || parser->is_consteval;
   func->info.function.is_constexpr = parser->is_constexpr;
   func->info.function.is_consteval = parser->is_consteval;
   func->info.function.is_virtual = is_virtual;
@@ -375,6 +377,8 @@ Symbol* TypeParserParseCXXSpecialMemberDeclarator(TypeParser* parser) {
   // parameter list; constructors are parsed here and otherwise would not.
   TypeParserInstallClassScope(&proto_parser, parser->cxx_member_owner);
   TypeRecord* func = NewFunctionTypeRecord();
+  func->info.function.is_inline =
+      parser->is_inline || parser->is_constexpr || parser->is_consteval;
   func->info.function.is_constexpr = parser->is_constexpr;
   func->info.function.is_consteval = parser->is_consteval;
   func->info.function.is_constructor = !is_destructor;
@@ -595,8 +599,14 @@ static ASTNode* ApplyConstantSubscripts(ASTNode* base, const size_t* indices,
 
 static ASTNode* CXXMoveMemberwiseSource(ASTNode* source, TypeRecord* type,
                                         SourceLocation location) {
+  // `static_cast<M&&>` collapses for a reference member: `T& &&` is `T&`, so
+  // the source member binds as is; `T&& &&` is `T&&`.
+  if (TypeIsReference(type) && type->declarator != kDeclRValueReference) {
+    return source;
+  }
   TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, true);
-  TypeRecordChain(reference, TypeRecordCopy(type));
+  TypeRecordChain(reference, TypeRecordCopy(TypeIsReference(type) ? type->next
+                                                                  : type));
   ASTNode* cast = NewCastASTNode(reference, location, source);
   ((CastASTNode*)cast)->kind = kCastStatic;
   return cast;

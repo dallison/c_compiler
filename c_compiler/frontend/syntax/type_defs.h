@@ -393,6 +393,9 @@ struct Struct {
   // local class has that function's access, including friendship
   // ([class.local]).  Not serialized.
   Symbol* access_enclosing_function;  // @wire -
+  // Arguments of the enclosing function template a local class was rebuilt
+  // for; they tell its instantiations apart in mangled names.
+  Vector* local_class_arguments;  // TemplateArgument*. @wire -
   String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
   Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2
   Vector bases;      // CXXBaseSpecifier* (owns entries).         // @wire 3

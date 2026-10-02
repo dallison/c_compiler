@@ -46,6 +46,8 @@ uint64_t TypeRecordSemanticIdentityHash(TypeRecord* record);
 // This does not alter Struct reference counts.
 void TypeRecordSetStructInfo(TypeRecord* record, Struct* str);
 void TypeRecordSyncStructSizes(Struct* str);
+// The class name in `__davecc_vtbl_` / `__davecc_vbtbl_` symbols.
+void AppendCXXVTableClassName(String* out, Struct* str);
 void TypeRecordChain(TypeRecord* from, TypeRecord* to);
 void TypeRecordInvalidateTemplateParameterSummary(TypeRecord* record);
 void TypeRecordIncRef(TypeRecord* record);

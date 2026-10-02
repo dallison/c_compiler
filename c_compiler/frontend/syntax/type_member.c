@@ -947,6 +947,11 @@ static bool MemberIsConversionOperator(StructMember* member) {
       member->symbol->type->next == NULL) {
     return false;
   }
+  // Every conversion name starts this way; skip formatting the result type of
+  // the other members.
+  if (strncmp(member->symbol->name.value, "operator ", 9) != 0) {
+    return false;
+  }
   String expected;
   ConversionOperatorName(member->symbol->type->next, &expected);
   bool matches = strcmp(expected.value, member->symbol->name.value) == 0;
@@ -3300,6 +3305,20 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         VectorAppendVector(&member_symbol->attributes, &member_attributes);
         VectorClear(&member_attributes);
         SyntaxApplyDeclarationAttributes(parser->syntax, member_symbol);
+        // `std::ostringstream stream_;` names an alias formed while the class
+        // template was only forward-declared (<iosfwd>).  A non-static data
+        // member needs the complete specialization for its layout and bases,
+        // and a member function's `std::ostream&` result must name the same
+        // specialization as the out-of-line definition does.
+        if (CompilerIsCXX() &&
+            !parser->syntax->parsing_template_declaration &&
+            (!is_static_member || TypeIsFunction(member_symbol->type))) {
+          TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+              parser->syntax, member_symbol->type);
+          if (materialized != member_symbol->type) {
+            SymbolSetType(member_symbol, materialized);
+          }
+        }
         StructMember* member = NewStructMember(member_symbol);
         member_symbol->flags.is_constexpr = is_constexpr_member &&
                                             !TypeIsFunction(member_symbol->type);

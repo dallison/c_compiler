@@ -19,7 +19,6 @@
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
 #include "init_semantics.h"
-#include "bitset.h"
 #include "errors.h"
 #include "source.h"
 #include "type_inheritance.h"
@@ -1635,22 +1634,41 @@ static Type DetermineControlType(SwitchStatementASTNode* node) {
 }
 
 
+static int CompareEnumSwitchValues(const void* a, const void* b) {
+  int64_t x = *(const int64_t*)a;
+  int64_t y = *(const int64_t*)b;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+// Index of value in the sorted enum_values, or -1.
+static ptrdiff_t FindEnumSwitchValue(const int64_t* enum_values,
+                                     size_t num_values, int64_t value) {
+  const int64_t* found = bsearch(&value, enum_values, num_values,
+                                 sizeof(int64_t), CompareEnumSwitchValues);
+  return found == NULL ? -1 : found - enum_values;
+}
+
 static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
-  BitSet enum_constants = {0};
-  BitSet found_constants = {0};
   Enum* info = node->expr->type->info.enum_info;
   assert(info != NULL);
-  for (size_t i = 0; i < info->constants.length; i++) {
+  // Enumerators may be negative or sparse (kNegativeInfinity = -1000), so
+  // they are looked up by value rather than used as bit indices.
+  size_t num_values = info->constants.length;
+  int64_t* enum_values = calloc(num_values + 1, sizeof(int64_t));
+  bool* found_values = calloc(num_values + 1, sizeof(bool));
+  for (size_t i = 0; i < num_values; i++) {
     Symbol* ec = info->constants.value.p[i];
-    BitSetInsert(&enum_constants, ec->value.ivalue);
+    enum_values[i] = ec->value.ivalue;
   }
-  
+  qsort(enum_values, num_values, sizeof(int64_t), CompareEnumSwitchValues);
+
   // Go through all the cases and make sure they are in the enum_constants.
   size_t num_cases = node->cases.length;
   for (size_t i = 0; i < num_cases; i++) {
     int64_t case_value = ((CaseLabelASTNode*)(node->cases.value.p[i]))->value;
-     if (BitSetContains(&enum_constants, case_value)) {
-       BitSetInsert(&found_constants, case_value);
+    ptrdiff_t index = FindEnumSwitchValue(enum_values, num_values, case_value);
+     if (index >= 0) {
+       found_values[index] = true;
      } else {
        SemanticWarning(&node->base, "switch",
                        "Case value %" PRId64 " is not valid for enumeration %s",
@@ -1662,7 +1680,9 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
   Vector missing_constants = {0};
   for (size_t i = 0; i < info->constants.length; i++) {
     Symbol* ec = info->constants.value.p[i];
-    if (!BitSetContains(&found_constants,  ec->value.ivalue)) {
+    ptrdiff_t index =
+        FindEnumSwitchValue(enum_values, num_values, ec->value.ivalue);
+    if (index < 0 || !found_values[index]) {
       VectorAppend(&missing_constants, ec);
     }
   }
@@ -1689,18 +1709,19 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
     }
   }
 
-  // Convert expr to int.  The conversion is to signed or unsigned
+  // Convert expr to int.  The conversion is to signed or unsigned.  A scoped
+  // enum has no implicit conversion to an integer, so convert as a cast.
   if (node->all_cases_positive) {
     SemanticConvertType(node->expr,
-                        NewTypeRecordWithSize(control_type | kTypeUnsigned, kQualPlain), kConvertNormal);
+                        NewTypeRecordWithSize(control_type | kTypeUnsigned, kQualPlain), kConvertCast);
   } else {
     SemanticConvertType(node->expr,
-                        NewTypeRecordWithSize(control_type, kQualPlain), kConvertNormal);
+                        NewTypeRecordWithSize(control_type, kQualPlain), kConvertCast);
   }
   
   VectorDestruct(&missing_constants);
-  BitSetDestruct(&enum_constants);
-  BitSetDestruct(&found_constants);
+  free(enum_values);
+  free(found_values);
 }
   
 static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {

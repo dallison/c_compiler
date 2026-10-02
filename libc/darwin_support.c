@@ -1,5 +1,5 @@
 // Host-libSystem shims for the Darwin Mach-O libc.  Static destructors
-// go through __cxa_atexit; .eh_frame is omitted from MH_OBJECT files.
+// go through __cxa_atexit; .eh_frame is found through the Mach-O header.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -64,8 +64,22 @@ void __davecc_atexit_unlock(unsigned int* lock) {
   (void)lock;
 }
 
-char __eh_frame_start[1];
-char __eh_frame_end[1];
+extern char _mh_execute_header[];
+unsigned char* getsectiondata(const void* header, const char* segment,
+                              const char* section, unsigned long* size);
+
+// The Mach-O writer stores davecc's .eh_frame records as __TEXT,__dcc_eh_frame
+// in the executable; getsectiondata returns them at the slid address.  It only
+// walks the load commands, so no cache is kept that racing throwers would need
+// to synchronize on.
+void __davecc_darwin_eh_frame_range(const uint8_t** start,
+                                    const uint8_t** end) {
+  unsigned long size = 0;
+  const uint8_t* data = getsectiondata(_mh_execute_header, "__TEXT",
+                                       "__dcc_eh_frame", &size);
+  *start = data;
+  *end = data != NULL ? data + size : NULL;
+}
 
 long long __davecc_monotonic_time_us(void) {
   struct timespec value;

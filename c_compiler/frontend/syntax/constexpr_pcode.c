@@ -12,6 +12,7 @@
 #include "codegen.h"
 #include "compiler.h"
 #include "errors.h"
+#include "expr_semantics.h"
 #include "fp_extended.h"
 #include "member_pointer.h"
 #include "p_code_object.h"
@@ -337,6 +338,8 @@ enum {
   kConstexprPCodeEscapeLdToF32 = 134,
   kConstexprPCodeEscapeLdToF64 = 135,
   kConstexprPCodeEscapeLdToI64 = 136,
+  kConstexprPCodeEscapeLdFromU64 = 137,
+  kConstexprPCodeEscapeLdToU64 = 138,
 };
 
 static const uint32_t constexpr_pcode_malloc_stub[] = {
@@ -505,11 +508,21 @@ static const uint32_t constexpr_pcode_ld_to_i64_stub[] = {
     (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdToI64,
     (PCODE_OP(ret) << 24),
 };
+static const uint32_t constexpr_pcode_ld_from_u64_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdFromU64,
+    (PCODE_OP(ret) << 24),
+};
+static const uint32_t constexpr_pcode_ld_to_u64_stub[] = {
+    (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeLdToU64,
+    (PCODE_OP(ret) << 24),
+};
 
 static const uint32_t constexpr_pcode_invalid_operation_stub[] = {
     (PCODE_OP(esc) << 24) | kConstexprPCodeEscapeInvalidConstantOperation,
 };
 
+// Must match the definition in constexpr.c field for field; both translation
+// units allocate and read the same values.
 struct ConstexprValue {
   bool is_object;
   bool is_address;
@@ -517,6 +530,7 @@ struct ConstexprValue {
   bool lifetime_ended;
   ValueState state;
   int64_t ivalue;
+  int64_t ihi;
   double fvalue;
   ConstexprObject* object;
   void* address_binding;
@@ -1061,12 +1075,14 @@ static const ConstexprPCodeRuntimeSymbol constexpr_pcode_runtime_symbols[] = {
     {"__davecc_ld_from_f32", constexpr_pcode_ld_from_f32_stub},
     {"__davecc_ld_from_f64", constexpr_pcode_ld_from_f64_stub},
     {"__davecc_ld_from_i64", constexpr_pcode_ld_from_i64_stub},
+    {"__davecc_ld_from_u64", constexpr_pcode_ld_from_u64_stub},
     {"__davecc_ld_mul", constexpr_pcode_ld_mul_stub},
     {"__davecc_ld_neg", constexpr_pcode_ld_neg_stub},
     {"__davecc_ld_sub", constexpr_pcode_ld_sub_stub},
     {"__davecc_ld_to_f32", constexpr_pcode_ld_to_f32_stub},
     {"__davecc_ld_to_f64", constexpr_pcode_ld_to_f64_stub},
     {"__davecc_ld_to_i64", constexpr_pcode_ld_to_i64_stub},
+    {"__davecc_ld_to_u64", constexpr_pcode_ld_to_u64_stub},
     {"__davecc_resume", constexpr_pcode_resume_stub},
     {"__davecc_start_lifetime", constexpr_pcode_start_lifetime_stub},
     {"__davecc_throw", constexpr_pcode_throw_stub},
@@ -2708,6 +2724,12 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
       !PCodeVMRegisterMemoryRegion(
           vm, (void*)constexpr_pcode_ld_to_i64_stub,
           sizeof(constexpr_pcode_ld_to_i64_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_from_u64_stub,
+          sizeof(constexpr_pcode_ld_from_u64_stub), false) ||
+      !PCodeVMRegisterMemoryRegion(
+          vm, (void*)constexpr_pcode_ld_to_u64_stub,
+          sizeof(constexpr_pcode_ld_to_u64_stub), false) ||
       !PCodeVMRegisterMemoryRegion(
           vm, (void*)constexpr_pcode_invalid_operation_stub,
           sizeof(constexpr_pcode_invalid_operation_stub), false)) {
@@ -4416,6 +4438,31 @@ static PCodeVMStatus ConstexprPCodeEscapeLdToI64(
   return kPCodeVMStatusRunning;
 }
 
+static PCodeVMStatus ConstexprPCodeEscapeLdFromU64(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t dest = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint64_t value = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  if (!ConstexprPCodeWriteFPBits(
+          vm, dest, FPBitsFromU64(value, ConstexprPCodeLongDoubleFormat()))) {
+    return kPCodeVMStatusInvalidWrite;
+  }
+  return kPCodeVMStatusRunning;
+}
+
+static PCodeVMStatus ConstexprPCodeEscapeLdToU64(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
+  uint64_t src = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  FPBits value;
+  if (!ConstexprPCodeReadFPBits(vm, src, &value)) {
+    return kPCodeVMStatusInvalidRead;
+  }
+  vm->iregs[PCODE_INT_RETURN_REG] =
+      FPBitsToU64(value, ConstexprPCodeLongDoubleFormat());
+  return kPCodeVMStatusRunning;
+}
+
 static bool ConstexprPCodeExceptionStringEqual(const char* left,
                                                const char* right) {
   return left == right ||
@@ -5213,6 +5260,12 @@ static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data) {
     case kConstexprPCodeEscapeLdToI64:
       return runtime != NULL ? ConstexprPCodeEscapeLdToI64(vm, runtime)
                              : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdFromU64:
+      return runtime != NULL ? ConstexprPCodeEscapeLdFromU64(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
+    case kConstexprPCodeEscapeLdToU64:
+      return runtime != NULL ? ConstexprPCodeEscapeLdToU64(vm, runtime)
+                             : kPCodeVMStatusUndefinedEscape;
     case kConstexprPCodeEscapeInvalidConstantOperation:
       return kPCodeVMStatusInvalidConstantOperation;
     default:
@@ -5856,9 +5909,14 @@ static bool PCodeEvaluateScalarInitializer(ConstEvalContext* ctx,
     };
     return true;
   }
-  if (TypeIsPointer(type) &&
-      ConstexprEvaluateAddressValue(ctx, expr, result)) {
-    return true;
+  if (TypeIsPointer(type)) {
+    // A brace element is evaluated before the initializer is analyzed, so
+    // `{&Get<8, int>}` still names the primary template rather than the
+    // specialization the member's function-pointer type selects.
+    CXXTryResolveFunctionAddressNode(expr, type);
+    if (ConstexprEvaluateAddressValue(ctx, expr, result)) {
+      return true;
+    }
   }
   if (TypeIsIntegral(type) || TypeIsPointer(type)) {
     int64_t ivalue;

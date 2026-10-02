@@ -3582,13 +3582,105 @@ static bool ExpressionReturnsReference(ASTNode* node) {
   return false;
 }
 
+static void FindSideEffect(ASTNode* node, void* data, int child_id,
+                           VisitorMode mode) {
+  bool* found = data;
+  switch (node->op) {
+    case AST_OP(call):
+    case AST_OP(inline_call):
+    case AST_OP(assign):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa):
+    case AST_OP(postinc):
+    case AST_OP(postdec):
+    case AST_OP(preinc):
+    case AST_OP(predec):
+    case AST_OP(stmt_expr):
+    case AST_OP(compound_literal):
+    case AST_OP(builtin_va_arg):
+      *found = true;
+      break;
+    default:
+      break;
+  }
+}
+
+static bool ContainsSideEffect(ASTNode* node) {
+  bool found = false;
+  ASTNodeVisit(node, FindSideEffect, 0, &found);
+  return found;
+}
+
+// A virtual call `make()->f()` is lowered with the callee
+// `make()->__vptr[index]`, which repeats the `this` argument.  Returns that
+// repeated receiver inside the callee.
+static ASTNode* VirtualCalleeReceiverCopy(VectorASTNode* node) {
+  if (node->left == NULL || node->left->op != AST_OP(subscript) ||
+      node->children == NULL || node->children->length == 0) {
+    return NULL;
+  }
+  BinaryASTNode* slot = (BinaryASTNode*)node->left;
+  if (slot->left == NULL || slot->left->op != AST_OP(arrow) ||
+      slot->right == NULL || slot->right->op != AST_OP(number)) {
+    return NULL;
+  }
+  BinaryASTNode* vptr = (BinaryASTNode*)slot->left;
+  if (vptr->right == NULL || vptr->right->op != AST_OP(structmember)) {
+    return NULL;
+  }
+  StructMember* member = ((StructMemberASTNode*)vptr->right)->member;
+  if (member == NULL || member->symbol == NULL ||
+      !StringStartsWith(&member->symbol->name, "__vptr")) {
+    return NULL;
+  }
+  ASTNode* receiver = node->children->value.p[0];
+  ASTNode* copy = vptr->left;
+  while (copy != NULL && copy->op != receiver->op &&
+         copy->op == AST_OP(cast)) {
+    copy = ((CastASTNode*)copy)->expr;
+  }
+  return copy != NULL && receiver != NULL && copy->op == receiver->op &&
+                 TypeIsPointer(receiver->type)
+             ? copy
+             : NULL;
+}
+
 static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
   if (node->left != NULL &&
       (node->left->op == AST_OP(dotstar) || node->left->op == AST_OP(arrowstar))) {
     return GenerateMemberPointerCall(gen, node);
   }
+  // The object expression of a virtual call is evaluated once, before the
+  // callee is read from its vtable and before the other arguments.
+  IRNode* receiver_spill = NULL;
+  ASTNode* receiver_copy = VirtualCalleeReceiverCopy(node);
+  if (receiver_copy != NULL &&
+      ContainsSideEffect(node->children->value.p[0])) {
+    ASTNode* receiver = node->children->value.p[0];
+    IRNode* receiver_value = GenerateExpression(gen, receiver);
+    receiver_spill =
+        GeneratorSpillValueToTemp(gen, receiver_value, receiver->type);
+  }
+  ASTNode* saved_receiver_copy = gen->virtual_receiver_copy;
+  IRNode* saved_receiver_spill = gen->virtual_receiver_spill;
+  if (receiver_spill != NULL) {
+    gen->virtual_receiver_copy = receiver_copy;
+    gen->virtual_receiver_spill = receiver_spill;
+  }
   // Address to call.
   IRNode* func = GenerateExpression(gen, node->left);
+  gen->virtual_receiver_copy = saved_receiver_copy;
+  gen->virtual_receiver_spill = saved_receiver_spill;
 
   // Call instruction (not yet emitted).
   IRNode* call = NewIR1(IR_OP(calla), func);
@@ -3658,7 +3750,10 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         // an inner lvalue turn the converted value itself into pointer bits.
         arg->flags &= ~kASTNeedAddress;
       }
-      arg_value = GenerateExpression(gen, arg);
+      arg_value = i == 0 && receiver_spill != NULL
+                      ? GeneratorReloadSpilledValue(gen, receiver_spill,
+                                                    arg->type)
+                      : GenerateExpression(gen, arg);
       arg->flags = old_arg_flags;
       gen->current_struct_address = old_struct_address;
     }
@@ -6285,6 +6380,11 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
   SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
 
   IRSetLocation(node->location);
+
+  if (node == gen->virtual_receiver_copy) {
+    return GeneratorReloadSpilledValue(gen, gen->virtual_receiver_spill,
+                                       node->type);
+  }
 
   IRNode* result = NULL;
   switch (node->op) {

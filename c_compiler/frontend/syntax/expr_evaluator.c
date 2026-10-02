@@ -531,6 +531,23 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
           return true;
         }
       }
+      // A static constexpr member can still be unevaluated when a template
+      // argument names it (`Apply<T>::value` inside `integral_constant`).
+      // Fold the initializer now that its operands are concrete.
+      if (id_node->symbol != NULL && !id_node->symbol->flags.value_set &&
+          id_node->symbol->flags.is_constexpr &&
+          id_node->symbol->constexpr_initializer != NULL &&
+          id_node->symbol->type != NULL &&
+          TypeIsIntegral(id_node->symbol->type)) {
+        ASTNode* initializer = ConstexprInitializerExpression(
+            id_node->symbol->constexpr_initializer);
+        if (initializer != NULL && initializer != node &&
+            EvaluateIntegerExpressionInContext(ctx, initializer, result)) {
+          id_node->symbol->value.ivalue = *result;
+          id_node->symbol->flags.value_set = true;
+          return true;
+        }
+      }
       if (StorageIs(id_node->symbol->storage, STO(assembler))) {
         // Assembler symbol, extract the value from the 'other'
         // value field.
@@ -1006,6 +1023,10 @@ case AST_OP(ast_op): \
             operand_type = id->symbol->type;
           }
         }
+        // An operand that has not been analyzed yet has no size to report.
+        if (operand_type == NULL) {
+          return false;
+        }
         if (CompilerIsCXX() && TypeIsReference(operand_type)) {
           operand_type = operand_type->next;
         }
@@ -1084,11 +1105,27 @@ bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
         EvaluateFloatingPointExpression(initializer, &symbol->value.fvalue);
     return symbol->flags.value_set;
   }
-  if (TypeIsPointer(symbol->type) && initializer->op == AST_OP(number) &&
-      ((ConstantASTNode*)initializer)->value.ivalue == 0) {
-    symbol->value.ivalue = 0;
-    symbol->flags.value_set = true;
-    return true;
+  if (TypeIsPointer(symbol->type) || TypeIsNullPointer(symbol->type)) {
+    // `constexpr auto p = (int*)nullptr;` keeps the cast the declarator
+    // would otherwise have applied.
+    while (initializer->op == AST_OP(cast) &&
+           ((CastASTNode*)initializer)->expr != NULL &&
+           (TypeIsPointer(((CastASTNode*)initializer)->cast_type) ||
+            TypeIsNullPointer(((CastASTNode*)initializer)->cast_type))) {
+      initializer = ((CastASTNode*)initializer)->expr;
+    }
+    // Every `std::nullptr_t` value is the null pointer (`= S::shared_destroy`
+    // where that member is `static constexpr auto shared_destroy = nullptr`).
+    bool null_constant =
+        (initializer->op == AST_OP(number) &&
+         ((ConstantASTNode*)initializer)->value.ivalue == 0) ||
+        (initializer->op == AST_OP(identifier) &&
+         TypeIsNullPointer(initializer->type));
+    if (null_constant) {
+      symbol->value.ivalue = 0;
+      symbol->flags.value_set = true;
+      return true;
+    }
   }
   return false;
 }
@@ -1163,7 +1200,9 @@ static bool EvaluateLongDoubleBits(ConstEvalContext* ctx, ASTNode* node,
       if (!EvaluateIntegerExpressionInContext(ctx, expr, &ivalue)) {
         return false;
       }
-      *bits = FPBitsFromI64(ivalue, format);
+      *bits = TypeIsUnsigned(expr->type)
+                  ? FPBitsFromU64((uint64_t)ivalue, format)
+                  : FPBitsFromI64(ivalue, format);
       return true;
     }
     double value = 0;
@@ -1181,11 +1220,13 @@ static bool EvaluateLongDoubleBits(ConstEvalContext* ctx, ASTNode* node,
       node->op == AST_OP(l2ld) || node->op == AST_OP(s2ld) ||
       node->op == AST_OP(b2ld)) {
     int64_t ivalue = 0;
-    if (!EvaluateIntegerExpressionInContext(ctx, ((UnaryASTNode*)node)->sub,
-                                            &ivalue)) {
+    ASTNode* sub = ((UnaryASTNode*)node)->sub;
+    if (!EvaluateIntegerExpressionInContext(ctx, sub, &ivalue)) {
       return false;
     }
-    *bits = FPBitsFromI64(ivalue, format);
+    *bits = sub->type != NULL && TypeIsUnsigned(sub->type)
+                ? FPBitsFromU64((uint64_t)ivalue, format)
+                : FPBitsFromI64(ivalue, format);
     return true;
   }
   if (node->op == AST_OP(f2ld) || node->op == AST_OP(d2ld)) {
@@ -1255,7 +1296,9 @@ bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* no
     }
     case AST_OP(number):
     case AST_OP(charconst):
-      *result = const_node->value.ivalue;
+      *result = TypeIsUnsigned(node->type)
+                    ? (double)(uint64_t)const_node->value.ivalue
+                    : (double)const_node->value.ivalue;
       return true;
     case AST_OP(fnumber):
       *result = const_node->value.fvalue;
@@ -1282,7 +1325,9 @@ bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* no
         return false;
       }
       if (TypeIsIntegral(type)) {
-        *result = id_node->symbol->value.ivalue;
+        *result = TypeIsUnsigned(type)
+                      ? (double)(uint64_t)id_node->symbol->value.ivalue
+                      : (double)id_node->symbol->value.ivalue;
       } else if (TypeIsFloatingPoint(type)) {
         *result = id_node->symbol->value.fvalue;
       } else {

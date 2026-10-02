@@ -23,7 +23,18 @@ typedef struct {
   Symbol* symbol;
   Symbol* template_definition;
   Struct* substitution_source;
+  Symbol* pattern;  // The class template's member declaration.
 } PendingMemberBody;
+
+// A member of a class template specialization instantiated before the
+// template's out-of-class definition of it was parsed.
+typedef struct {
+  Symbol* symbol;
+  Symbol* pattern;
+  Struct* owner;
+  Struct* substitution_source;
+  Vector* args;  // Owned.
+} LateMemberBody;
 
 typedef struct {
   Map symbol_map;
@@ -102,6 +113,7 @@ const char* CXXConstructorNameForRecord(TypeRecord* type);
 void DeleteStringVector(Vector* strings);
 Vector* SplitDependentMemberPath(String* path);
 bool StructContainsTemplateParameter(Struct* str);
+bool StructIsFunctionTemplateLocalClass(Struct* str);
 bool CallActualsStillContainPackExpansion(struct ASTNode* call);
 bool PendingTemplateInstantiationHasAsmName(const char* asm_name);
 
@@ -152,6 +164,12 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
                                              Symbol* template_definition,
                                              TypeParser* parser, Vector* args,
                                              bool allow_lazy);
+// When `owner` is an instantiation of one of its template's partial
+// specializations, the number of that partial's own parameters; its members
+// are numbered by those rather than by the arguments recorded on `owner`'s
+// type.  -1 for an instantiation of the primary template.
+int StructPartialSpecializationParameterCount(struct Syntax* syntax,
+                                              Struct* owner);
 void CloneInstantiatedMemberFunctionBody(TypeParser* parser, Struct* owner,
                                          Symbol* symbol,
                                          Symbol* template_definition,

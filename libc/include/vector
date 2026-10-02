@@ -372,7 +372,7 @@ class vector {
     size_type i = 0;
     __DAVECC_TRY {
       for (; first != last; ++first, ++i) {
-        __construct_copy_one(dst + i, *first);
+        __construct_one(dst + i, *first);
       }
     } __DAVECC_CATCH_ALL {
       __destroy_range(dst, dst + i);
@@ -470,11 +470,13 @@ class vector {
     other.__cap_ = cap;
   }
 
+  // [sequence.reqmts]: range construction requires only that T be
+  // EmplaceConstructible from `*first` (`vector<string>` from string_views).
   template <class It>
   void __append_range(It first, It last) {
     for (; first != last; ++first) {
       __grow_for(__size_ + 1);
-      __construct_copy_one(__data_ + __size_, *first);
+      __construct_one(__data_ + __size_, *first);
       __size_++;
     }
   }
@@ -498,12 +500,13 @@ class vector {
     *cap = new_cap;
   }
 
+  template <class V>
   void __append_temp_buffer(pointer* data, size_type* size, size_type* cap,
-                            const T& value) {
+                            V&& value) {
     if (*size == *cap) {
       __grow_temp_buffer(data, *size, cap);
     }
-    __construct_copy_one(*data + *size, value);
+    __construct_one(*data + *size, std::forward<V>(value));
     *size = *size + 1;
   }
 

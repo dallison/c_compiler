@@ -102,8 +102,13 @@ static void EmitInstruction(Assembler* assembler, const void* value) {
     AssemblerSymbol* symbol =
         GetOrCreateSymbol(assembler, instruction->symbol.value);
     int32_t address = (int32_t)AssemblerCurrentAddress(assembler);
+    // A Mach-O object is split into atoms at every symbol-table entry
+    // (MH_SUBSECTIONS_VIA_SYMBOLS); the linker may drop or move the atom
+    // holding the target, so a reference to one needs a relocation.
+    bool target_is_atom =
+        assembler->object.write_macho && symbol != NULL && symbol->exported;
     bool known =
-        symbol != NULL && symbol->defined &&
+        symbol != NULL && symbol->defined && !target_is_atom &&
         symbol->section == assembler->object.current_section &&
         symbol->binding != SYM_BIND(weak) &&
         !instruction->force_relocation &&

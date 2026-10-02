@@ -250,7 +250,7 @@ static int VarargsVrSaveSize(AARCH64Emitter* emitter) {
 }
 
 static int VarargsSaveAreaSize(AARCH64Emitter* emitter) {
-  if (!emitter->g->base.varargs) {
+  if (!emitter->g->base.varargs || AARCH64UsesDarwinVariadicABI()) {
     return 0;
   }
   return VarargsGpSaveSize(emitter) + VarargsVrSaveSize(emitter);

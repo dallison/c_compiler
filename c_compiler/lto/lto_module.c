@@ -1495,12 +1495,11 @@ static Symbol* PrimaryVTableSymbol(LTOModule* module, Struct* str) {
   if (module == NULL || str->tag_name == NULL || str->tag_name->value == NULL) {
     return NULL;
   }
-  char name[256];
-  if (snprintf(name, sizeof(name), "__davecc_vtbl_%s", str->tag_name->value) >=
-      (int)sizeof(name)) {
-    return NULL;
-  }
-  InitializedStaticVariable* var = FindInitializedByName(module, name);
+  String name;
+  StringInit(&name, "__davecc_vtbl_");
+  AppendCXXVTableClassName(&name, str);
+  InitializedStaticVariable* var = FindInitializedByName(module, name.value);
+  StringDestruct(&name);
   return var != NULL ? var->symbol : NULL;
 }
 

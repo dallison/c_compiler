@@ -106,4 +106,14 @@ void AddVariableTemplatePartialSpecialization(TypeParser* parser,
 
 struct ASTNode* CloneCXXDefaultMemberInitializer(struct ASTNode* initializer);
 
+/* Concrete enclosing-class template arguments for a member function.  An
+ * inherited static member found through a non-template derived class
+ * (`MixingHashState::combine`) still takes its arguments from the base
+ * specialization that declares it (`HashStateBase<MixingHashState>`). */
+Vector* MemberFunctionEnclosingClassArguments(Symbol* symbol);
+/* True when pointing `existing`'s member at `named` would replace a class
+ * template specialization with a class that has no template arguments. */
+bool CXXRetargetDropsDeclaringTemplateArguments(Struct* existing,
+                                                Struct* named);
+
 #endif /* type_internal_h */

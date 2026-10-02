@@ -4327,6 +4327,12 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   if (TypeIsIntegral(type) || TypeIsFloatingPoint(type) ||
       TypeIsPointer(type) || TypeIsReference(type) ||
       TypeIsReflection(type)) {
+    // A brace element is evaluated before the initializer is analyzed, so
+    // `{&Get<8, int>}` still names the primary template rather than the
+    // specialization the member's function-pointer type selects.
+    if (TypeIsPointer(type) || TypeIsReference(type)) {
+      CXXTryResolveFunctionAddressNode(initializer, type);
+    }
     return EvaluateConstexprValue(ctx, initializer, type, result);
   }
   if (!TypeIsFixedArray(type) && !TypeIsStructOrUnion(type)) {
@@ -6039,6 +6045,12 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
+    // An unanalyzed `?:` arm such as `TransferN<sizeof(T)>` still names the
+    // primary template.
+    if (id->template_arguments != NULL && node->type != NULL &&
+        TypeIsFunction(node->type)) {
+      CXXTryResolveFunctionAddressNode(node, node->type);
+    }
     // A function designator used as a pointer decays to the function's address.
     if (ConstexprFunctionAddress(ctx, id->symbol, result)) {
       return true;

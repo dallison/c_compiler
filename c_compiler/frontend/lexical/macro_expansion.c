@@ -23,6 +23,7 @@ typedef struct FileLineExpansion {
 static Vector expansions;
 static Map location_map;
 static Vector line_spans;
+static bool line_spans_ordered = true;
 static Vector file_line_expansions;
 static SourceLocation last_noted_location;
 static bool initialized = false;
@@ -55,6 +56,7 @@ void MacroExpansionClear(void) {
   VectorClearWithContents(&expansions, FreeExpansion, true);
   MapClear(&location_map);
   VectorClearWithContents(&line_spans, FreeSpan, true);
+  line_spans_ordered = true;
   VectorClearWithContents(&file_line_expansions, FreeSpan, true);
   last_noted_location = SOURCE_LOCATION_MISSING;
 }
@@ -68,6 +70,8 @@ MacroExpansion* NewMacroExpansion(const char* name, SourceLocation definition,
   expansion->definition = definition;
   expansion->invocation = invocation;
   expansion->parent = parent;
+  expansion->remembered_fileno = -1;
+  expansion->remembered_lineno = -1;
   VectorAppend(&expansions, expansion);
   return expansion;
 }
@@ -89,13 +93,14 @@ void MacroExpansionRemember(SourceLocation location,
   int colno = 0;
   SourceLocationNumbers(location, &fileno, &lineno, &colno);
   if (lineno > 0) {
-    for (size_t i = 0; i < file_line_expansions.length; i++) {
-      FileLineExpansion* existing = file_line_expansions.value.p[i];
-      if (existing->fileno == fileno && existing->lineno == lineno &&
-          existing->expansion == expansion) {
-        return;
-      }
+    // An expansion's tokens arrive together on one line.  A repeat that this
+    // misses only duplicates an entry; the notes skip repeated expansions.
+    if (expansion->remembered_fileno == fileno &&
+        expansion->remembered_lineno == lineno) {
+      return;
     }
+    expansion->remembered_fileno = fileno;
+    expansion->remembered_lineno = lineno;
     FileLineExpansion* entry = malloc(sizeof(FileLineExpansion));
     entry->fileno = fileno;
     entry->lineno = lineno;
@@ -115,6 +120,7 @@ MacroExpansion* MacroExpansionForLocation(SourceLocation location) {
 void MacroExpansionBeginLine(void) {
   EnsureInitialized();
   VectorClearWithContents(&line_spans, FreeSpan, true);
+  line_spans_ordered = true;
 }
 
 void MacroExpansionAddLineSpan(size_t start, size_t end,
@@ -123,6 +129,12 @@ void MacroExpansionAddLineSpan(size_t start, size_t end,
     return;
   }
   EnsureInitialized();
+  if (line_spans.length > 0) {
+    LineExpansionSpan* last = line_spans.value.p[line_spans.length - 1];
+    if (start < last->end) {
+      line_spans_ordered = false;
+    }
+  }
   LineExpansionSpan* span = malloc(sizeof(LineExpansionSpan));
   span->start = start;
   span->end = end;
@@ -132,6 +144,24 @@ void MacroExpansionAddLineSpan(size_t start, size_t end,
 
 MacroExpansion* MacroExpansionAtLineOffset(size_t offset) {
   if (!initialized) {
+    return NULL;
+  }
+  // Detokenizing appends one span per token, so the spans are disjoint and
+  // ascending; at most one contains `offset`.
+  if (line_spans_ordered) {
+    size_t low = 0;
+    size_t high = line_spans.length;
+    while (low < high) {
+      size_t mid = low + (high - low) / 2;
+      LineExpansionSpan* span = line_spans.value.p[mid];
+      if (offset < span->start) {
+        high = mid;
+      } else if (offset >= span->end) {
+        low = mid + 1;
+      } else {
+        return span->expansion;
+      }
+    }
     return NULL;
   }
   for (size_t i = 0; i < line_spans.length; i++) {

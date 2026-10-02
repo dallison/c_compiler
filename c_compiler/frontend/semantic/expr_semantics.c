@@ -140,6 +140,27 @@ void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func) {
     return;
   }
   if (func->info.function.body == NULL) {
+    // `auto Mask() const;` in a class and `auto G::Mask() const {...}` later:
+    // the call resolves to the bodiless declaration, so deduce through the
+    // definition and give the declaration the same return type.
+    Symbol* symbol = func->info.function.symbol;
+    Symbol* definition = symbol != NULL ? symbol->value.func_defn : NULL;
+    TypeRecord* defn = definition != NULL ? definition->type : NULL;
+    if (defn == NULL || defn == func || !TypeIsFunction(defn) ||
+        defn->info.function.body == NULL) {
+      return;
+    }
+    SemanticEnsureAutoReturnTypeDeduced(defn);
+    if (TypeFunctionReturnContainsAuto(defn) || defn->next == NULL) {
+      return;
+    }
+    TypeRecord* old_return = func->next;
+    TypeRecordIncRef(defn->next);
+    func->next = defn->next;
+    func->info.function.is_auto_return_deduced = true;
+    func->info.function.is_decltype_auto_return_deduced =
+        defn->info.function.is_decltype_auto_return_deduced;
+    TypeRecordDelete(old_return);
     return;
   }
   TypeRecord* saved_function = compiler->current_function;
@@ -154,13 +175,13 @@ void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func) {
     compiler->current_class_access_context =
         func->info.function.cxx_member_owner;
   }
-  // Deduction happens once and its result is permanent, so the body analysis is
-  // a real instantiation even when the caller is a signature-only probe such as
-  // a type trait.  Templates the body needs must therefore be queued for
-  // emission; leaving the speculative flag set would drop them for good.
+  // A top-level deduction is permanent, so the body analysis is a real
+  // instantiation and templates the body needs are queued.  A signature-only
+  // probe (decltype, a type trait) already set a speculative depth; clearing
+  // it here instantiated friend bodies such as Cord's AbslHashValue just to
+  // form a return type.
   int saved_speculative_depth =
       compiler->speculative_template_instantiation_depth;
-  compiler->speculative_template_instantiation_depth = 0;
   AnalyzeStatement(func->info.function.body);
   compiler->current_function = saved_function;
   compiler->current_class_access_context = saved_class_access_context;
@@ -274,6 +295,17 @@ static void CXXAnalyzeImmediateEscalationCandidate(Symbol* symbol) {
   compiler->constant_evaluation_required_depth = saved_constant_depth;
   compiler->current_function = saved_function;
   compiler->current_class_access_context = saved_access_context;
+}
+
+// A member template's body is cloned as a pattern while its class is
+// instantiated (`this->releaser_invoker = &Release;` in a constructor
+// template).  Naming a function there is not an odr-use until the member
+// template itself is instantiated.
+static bool AnalyzingTemplatePatternBody(void) {
+  TypeRecord* enclosing = compiler->current_function;
+  return enclosing != NULL && TypeIsFunction(enclosing) &&
+         enclosing->info.function.symbol != NULL &&
+         enclosing->info.function.symbol->flags.is_template;
 }
 
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
@@ -439,22 +471,56 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   }
 
   if (CompilerIsCXX() && node->symbol != NULL &&
-      node->symbol->flags.is_template && !node->symbol->flags.is_overloaded &&
+      (node->symbol->flags.is_template || node->symbol->flags.is_overloaded) &&
       !DiagnosticsSuppressed() &&
       TypeIsFunction(node->symbol->type) &&
       (compiler->current_function == NULL ||
        compiler->current_function->info.function.symbol == NULL ||
        !compiler->current_function->info.function.symbol->flags.is_template) &&
       node->base.parent != NULL &&
-      node->base.parent->op == AST_OP(address) &&
+      !(node->base.parent->op == AST_OP(call) &&
+        ((VectorASTNode*)node->base.parent)->left == &node->base) &&
       node->template_arguments != NULL &&
       !TemplateArgumentVectorContainsTemplateParameter(
           node->template_arguments)) {
-    Symbol* instantiated = TypeInstantiateFunctionTemplate(
-        &compiler->syntax, node->symbol, node->template_arguments);
-    if (instantiated != NULL) {
-      node->symbol = instantiated;
-      CXXAnalyzeImmediateEscalationCandidate(instantiated);
+    // A template-id naming a single specialization is that function, with or
+    // without `&`: `ForEach(list, Delete<T>)` deduces a pointer to Delete<T>.
+    // A direct call's callee is left to overload resolution with its actuals.
+    // An overloaded set (`InvokeObject` has an object form and a nontype
+    // form) cannot be instantiated from the head alone.  Explicit arguments
+    // select at most one primary; a later conversion still checks the
+    // destination function type when this is ambiguous.
+    Symbol* winner = NULL;
+    int matches = 0;
+    for (Symbol* cand = node->symbol; cand != NULL; cand = cand->overload_next) {
+      if (!cand->flags.is_template || cand->type == NULL ||
+          !TypeIsFunction(cand->type)) {
+        continue;
+      }
+      // Probe under suppression so a non-matching overload (a type argument
+      // in a non-type parameter slot) does not diagnose.  Speculative depth
+      // skips cloning the body; the unique winner is instantiated again below
+      // so its definition is queued with diagnostics enabled.
+      compiler->speculative_template_instantiation_depth++;
+      DiagnosticSuppressBegin();
+      Symbol* inst = TypeInstantiateFunctionTemplate(
+          &compiler->syntax, cand, node->template_arguments);
+      DiagnosticSuppressEnd();
+      compiler->speculative_template_instantiation_depth--;
+      if (inst == NULL || inst == cand || inst->flags.is_template) {
+        continue;
+      }
+      winner = cand;
+      matches++;
+    }
+    if (matches == 1 && winner != NULL) {
+      Symbol* instantiated = TypeInstantiateFunctionTemplate(
+          &compiler->syntax, winner, node->template_arguments);
+      if (instantiated != NULL && instantiated != winner &&
+          !instantiated->flags.is_template) {
+        node->symbol = instantiated;
+        CXXAnalyzeImmediateEscalationCandidate(instantiated);
+      }
     }
   }
 
@@ -534,7 +600,8 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
       // arbitrary (e.g. first) overload can materialize an unused member of
       // a class template and trigger spurious errors (e.g. default-
       // constructing a non-default-constructible type).
-      if (!has_implicit_this && !node->symbol->flags.is_overloaded) {
+      if (!has_implicit_this && !node->symbol->flags.is_overloaded &&
+          !AnalyzingTemplatePatternBody()) {
         TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax,
                                                    node->symbol);
       }
@@ -4486,8 +4553,9 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   if (object_init != NULL) {
     init = object_init;
   }
+  // The folded object lists field values, not constructor arguments.
   bool requires_constant_initializer =
-      constants_only ||
+      constants_only || object_init != NULL ||
       ((symbol->flags.is_constexpr || symbol->flags.is_constinit) &&
        !symbol->is_constexpr_representable);
   if (TypeIsMemberPointer(symbol->type)) {
@@ -7206,11 +7274,20 @@ static bool MemberReceiverIsVolatile(BinaryASTNode* node) {
   return TypeIsVolatile(node->left->type);
 }
 
+// A braced temporary (`Find{key}`) is lowered to a compound literal, which
+// keeps C's lvalue category.  In C++ it is a prvalue: it binds to `T&&`.
+static bool ASTNodeIsCXXBracedTemporary(ASTNode* node) {
+  return CompilerIsCXX() && node != NULL &&
+         node->op == AST_OP(compound_literal);
+}
+
 static bool MemberReceiverIsLValue(BinaryASTNode* node) {
   if (node->base.op == AST_OP(arrow)) {
     return true;
   }
-  return node->left != NULL && node->left->value_category == kValueCategoryLvalue;
+  return node->left != NULL &&
+         node->left->value_category == kValueCategoryLvalue &&
+         !ASTNodeIsCXXBracedTemporary(node->left);
 }
 
 static bool MemberReceiverMatchesRefQualifier(TypeRecord* func,
@@ -7409,7 +7486,7 @@ static bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type) {
     return false;
   }
   if (reference_type->declarator == kDeclRValueReference) {
-    return !ASTNodeIsLValue(actual);
+    return !ASTNodeIsLValue(actual) || ASTNodeIsCXXBracedTemporary(actual);
   }
   if (ASTNodeIsLValue(actual)) {
     return true;
@@ -7424,6 +7501,11 @@ static int ReferenceBindingRank(ASTNode* actual, TypeRecord* reference_type) {
   bool target_const = TypeIsEffectivelyConst(reference_type->next);
   if (reference_type->declarator == kDeclRValueReference) {
     return target_const && !TypeIsConst(actual->type) ? 1 : 0;
+  }
+  if (ASTNodeIsCXXBracedTemporary(actual)) {
+    // Still accepted for a non-const `T&`, but never preferred over `T&&` or
+    // `const T&`.
+    return target_const ? 2 : 3;
   }
   if (ASTNodeIsLValue(actual)) {
     return target_const ? 1 : 0;
@@ -9243,14 +9325,25 @@ bool CXXTryResolveFunctionAddressNode(ASTNode* from, TypeRecord* to) {
   } else {
     return false;
   }
-  if (from->type == NULL || !TypeIsFunction(from->type) ||
-      from->op != AST_OP(identifier)) {
+  // `&InvokeObject<F&, R, Args...>` is an address node whose operand names the
+  // overload set.  The operand is analyzed before the destination type is
+  // known, so an overloaded function template is still the primary.  Resolve
+  // it now that the target signature is available.
+  ASTNode* function_node = from;
+  if (from->op == AST_OP(address)) {
+    ASTNode* sub = ((UnaryASTNode*)from)->sub;
+    if (sub != NULL && sub->op == AST_OP(identifier)) {
+      function_node = sub;
+    }
+  }
+  if (function_node->type == NULL || !TypeIsFunction(function_node->type) ||
+      function_node->op != AST_OP(identifier)) {
     return false;
   }
   // Only the un-substituted template pattern (or an unresolved overload set)
   // needs help here; a concrete function whose type already matches is handled
   // by the ordinary function-to-pointer conversion.
-  IdentifierASTNode* id = (IdentifierASTNode*)from;
+  IdentifierASTNode* id = (IdentifierASTNode*)function_node;
   if (id->symbol == NULL) {
     return false;
   }
@@ -9261,8 +9354,16 @@ bool CXXTryResolveFunctionAddressNode(ASTNode* from, TypeRecord* to) {
   }
   id->symbol = resolved;
   resolved->flags.used = true;
-  ASTNodeSetType(from, resolved->type);
-  from->flags |= kASTNeedAddress;
+  // An unanalyzed identifier (a constexpr brace element) still shares the
+  // primary template's declaration type.
+  ASTNodeSetInstantiatedCalleeType(function_node, resolved->type);
+  function_node->flags |= kASTNeedAddress;
+  TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, resolved);
+  if (function_node != from) {
+    TypeRecord* ptr = NewPointerTypeRecord(kQualPlain);
+    TypeRecordChain(ptr, function_node->type);
+    ASTNodeSetType(from, ptr);
+  }
   return true;
 }
 
@@ -10125,13 +10226,34 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   if (id->symbol != NULL && id->symbol->type != NULL &&
       TypeIsFunction(id->symbol->type) &&
       id->symbol->type->info.function.template_origin != NULL) {
-    Symbol* instantiated = InstantiateSelectedFunctionTemplateCandidate(id->symbol);
-    if (instantiated != NULL) {
-      id->symbol = instantiated;
-      ASTNodeSetInstantiatedCalleeType(node->left, instantiated->type);
-      CheckDeletedFunctionUse(instantiated, (ASTNode*)node);
+    Symbol* origin = id->symbol->type->info.function.template_origin;
+    // A previous substitution can bind the callee to one specialization and
+    // drop the rest of the overload set, including friends found only by
+    // ADL.  If that specialization cannot be called with these arguments,
+    // resolve again from the primary.  A non-static member call is not looked
+    // up by ADL, and its lowered object argument (`&s` for a reference member
+    // `S& s`) can be typed `S&*`, which the score rejects.
+    Vector* prototype = &id->symbol->type->info.function.prototype;
+    Symbol* first_formal =
+        prototype->length > 0 ? prototype->value.p[0] : NULL;
+    bool implicit_object_call =
+        id->symbol->type->info.function.cxx_member_owner != NULL &&
+        first_formal != NULL && first_formal->name.value != NULL &&
+        strcmp(first_formal->name.value, "this") == 0;
+    bool selected_matches =
+        implicit_object_call ||
+        FunctionCallScore(id->symbol->type, node, /*first_formal_arg=*/0) >= 0;
+    if (selected_matches) {
+      Symbol* instantiated =
+          InstantiateSelectedFunctionTemplateCandidate(id->symbol);
+      if (instantiated != NULL) {
+        id->symbol = instantiated;
+        ASTNodeSetInstantiatedCalleeType(node->left, instantiated->type);
+        CheckDeletedFunctionUse(instantiated, (ASTNode*)node);
+      }
+      return;
     }
-    return;
+    id->symbol = origin;
   }
   // A lowered constructor call already includes the implicit object argument.
   // Free-function overload resolution counts that argument as a user parameter
@@ -10308,8 +10430,23 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   Symbol* ordinary = FollowUsingAliasForADL(id->symbol);
   bool ordinary_is_function = ordinary != NULL && ordinary->type != NULL &&
                               TypeIsFunction(ordinary->type);
+  // A lowered non-static member call (`size(&s)` for `s.size()`) found a class
+  // member, which also suppresses ADL; its receiver argument would otherwise
+  // pull in namespace functions such as `std::size`.
+  Vector* ordinary_prototype =
+      ordinary_is_function ? &ordinary->type->info.function.prototype : NULL;
+  Symbol* ordinary_first_formal =
+      ordinary_prototype != NULL && ordinary_prototype->length > 0
+          ? ordinary_prototype->value.p[0]
+          : NULL;
+  bool ordinary_is_member_call =
+      ordinary_is_function &&
+      ordinary->type->info.function.cxx_member_owner != NULL &&
+      ordinary_first_formal != NULL &&
+      ordinary_first_formal->name.value != NULL &&
+      strcmp(ordinary_first_formal->name.value, "this") == 0;
   bool ordinary_suppresses_adl =
-      !ordinary_is_function ||
+      !ordinary_is_function || ordinary_is_member_call ||
       (ordinary->flags.is_block_scope &&
        !ordinary->type->info.function.unknown_args);
   bool allow_adl = CompilerIsCXX() &&
@@ -10636,8 +10773,12 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
     Struct* current_owner =
         compiler->current_function->info.function.cxx_member_owner;
     StructMember* nested = FindStructMember(current_owner, constructor_name);
+    // A member alias template that shares the class's name
+    // (`template <class A, class I> using IteratorValueAdapter =
+    // internal::IteratorValueAdapter<A, I>`) names a namespace-scope class.
     if (nested != NULL && nested->symbol != NULL &&
         StorageIs(nested->symbol->storage, STO(typedef)) &&
+        !nested->symbol->flags.is_template &&
         TypeIsStructOrUnion(nested->symbol->type)) {
       type->info.struct_info->lexical_parent = current_owner;
     }
@@ -11894,6 +12035,15 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
           }
         }
       }
+      // A braced temporary may already have been lowered to a compound literal
+      // before this call is checked.  That node is an lvalue, but it still
+      // denotes the parameter temporary, so it binds to an rvalue reference
+      // (`Traits::apply(Eq{key}, slot)`).
+      if (actual != NULL && actual->op == AST_OP(compound_literal) &&
+          TypeIsReference(formal->type) &&
+          formal->type->declarator == kDeclRValueReference) {
+        actual->value_category = kValueCategoryXvalue;
+      }
       bool polymorphic_special_this =
           i == 0 &&
           (subtype->info.function.is_constructor ||
@@ -12350,6 +12500,31 @@ static ASTValueCategory DataMemberAccessValueCategory(BinaryASTNode* node,
     return kValueCategoryLvalue;
   }
   return kValueCategoryXvalue;
+}
+
+// `haystack.npos` reads the same constant as `std::string_view::npos`, which
+// AnalyzeIdentifier folds; an in-class-initialized static const member has no
+// out-of-class definition to load from.  Only a plain object name is folded
+// away, since any other object expression must still be evaluated.
+static ASTNode* FoldStaticDataMemberReference(BinaryASTNode* node) {
+  if (node->right == NULL || node->right->op != AST_OP(structmember) ||
+      node->left == NULL || node->left->op != AST_OP(identifier) ||
+      node->base.type == NULL ||
+      (node->base.flags & (kASTNeedAddress | kASTIsDeclaration)) != 0 ||
+      node->base.parent == NULL || node->base.parent->op == AST_OP(address)) {
+    return &node->base;
+  }
+  StructMember* member = ((StructMemberASTNode*)node->right)->member;
+  if (member == NULL || !member->is_static || member->is_member_function ||
+      member->symbol == NULL || !member->symbol->flags.value_set ||
+      !TypeIsIntConstant(node->base.type)) {
+    return &node->base;
+  }
+  ASTNode* const_node = NewIntConstantASTNode(
+      member->symbol->value.ivalue, member->symbol->type, node->base.location);
+  ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node, true);
+  const_node->flags |= kASTAnalyzed;
+  return const_node;
 }
 
 static void AnalyzeMemberReference(BinaryASTNode* node) {
@@ -12851,8 +13026,10 @@ static void AnalyzeAddressOperator(UnaryASTNode* node) {
   node->sub->flags |= kASTNeedAddress;
   if (CompilerIsCXX() && node->sub->op == AST_OP(identifier) &&
       TypeIsFunction(node->sub->type)) {
-    TypeEnsureTemplateMemberFunctionDefinition(
-        &compiler->syntax, ((IdentifierASTNode*)node->sub)->symbol);
+    if (!AnalyzingTemplatePatternBody()) {
+      TypeEnsureTemplateMemberFunctionDefinition(
+          &compiler->syntax, ((IdentifierASTNode*)node->sub)->symbol);
+    }
     IdentifierASTNode* identifier = (IdentifierASTNode*)node->sub;
     if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
         identifier->symbol != NULL && identifier->symbol->type != NULL &&
@@ -13696,8 +13873,132 @@ static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node) {
   TypeRecordCalculateSize(node->base.type);
 }
 
+#define kLambdaArrayCaptureMaxRank 16
+
+static ASTNode* NewLambdaArrayCaptureCopy(ASTNode* source, TypeRecord* type,
+                                          int64_t* indices, int rank,
+                                          SourceLocation location) {
+  if (!TypeIsFixedArray(type)) {
+    ASTNode* element = ASTNodeClone(source, IdentityCloneNode, NULL, NULL);
+    for (int i = 0; i < rank; i++) {
+      ASTNode* index = NewIntConstantASTNode(
+          indices[i], NewTypeRecordWithSize(kTypeLong, kQualPlain), location);
+      element = NewBinaryASTNode(AST_OP(subscript), NULL, location, element,
+                                 index);
+    }
+    if (TypeIsStructOrUnion(type)) {
+      element = NewCastASTNode(type, location, element);
+    }
+    return element;
+  }
+  Vector* elements = NewVector();
+  for (int64_t i = 0; i < (int64_t)type->info.array.size.fixed; i++) {
+    indices[rank] = i;
+    VectorAppend(elements, NewLambdaArrayCaptureCopy(source, type->next,
+                                                     indices, rank + 1,
+                                                     location));
+  }
+  return NewBracedInitializerASTNode(elements, NULL, location);
+}
+
+static int LambdaArrayCaptureRank(TypeRecord* type) {
+  int rank = 0;
+  for (; TypeIsFixedArray(type); type = type->next) {
+    rank++;
+  }
+  return TypeIsArray(type) ? -1 : rank;
+}
+
+// The captured entity is named by a side-effect-free lvalue path (the variable,
+// or `this->field` / `*this->field` once an enclosing lambda rewrote it), so it
+// can be repeated once per element.
+static bool LambdaCaptureSourceIsRepeatable(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  switch (node->op) {
+    case AST_OP(identifier):
+      return true;
+    case AST_OP(arrow):
+    case AST_OP(dot): {
+      BinaryASTNode* access = (BinaryASTNode*)node;
+      return LambdaCaptureSourceIsRepeatable(access->left);
+    }
+    case AST_OP(contents):
+      return LambdaCaptureSourceIsRepeatable(((UnaryASTNode*)node)->sub);
+    default:
+      return false;
+  }
+}
+
+// A by-copy array capture copies each element.  The closure initializer's
+// `.field = array` would instead decay the array and brace-elide the pointer
+// into the first element, so spell the copy out as `{array[0], array[1], ...}`,
+// nested per dimension.  Runs per instantiation, once the bound is concrete.
+static void ExpandLambdaArrayCaptureCopies(CompoundLiteralASTNode* node) {
+  if (node == NULL || (node->base.flags & kASTLambdaExpression) == 0 ||
+      node->base.type == NULL || !TypeIsStructOrUnion(node->base.type) ||
+      node->base.type->info.struct_info == NULL || node->initializer == NULL ||
+      node->initializer->op != AST_OP(braced_init)) {
+    return;
+  }
+  Struct* closure = node->base.type->info.struct_info;
+  BracedInitializerASTNode* braced =
+      (BracedInitializerASTNode*)node->initializer;
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* initializer = braced->initializers->value.p[i];
+    if (initializer == NULL || initializer->op != AST_OP(designated_init)) {
+      continue;
+    }
+    DesignatedInitializerASTNode* designated =
+        (DesignatedInitializerASTNode*)initializer;
+    if (designated->designators == NULL ||
+        designated->designators->length != 1 || designated->init == NULL ||
+        designated->init->op != AST_OP(expr_init)) {
+      continue;
+    }
+    Designator* designator = designated->designators->value.p[0];
+    if (designator == NULL ||
+        designator->designator_type != kDesignatorStruct) {
+      continue;
+    }
+    // A resolved designator in a cloned closure can still name the pattern's
+    // member, whose bound is dependent; look the name up in this closure.
+    String* name = NULL;
+    if (designator->is_resolved_member) {
+      StructMember* resolved = designator->value.struct_member;
+      if (resolved != NULL && resolved->symbol != NULL) {
+        name = &resolved->symbol->name;
+      }
+    } else {
+      name = designator->value.struct_member_name;
+    }
+    StructMember* member = name != NULL ? FindStructMember(closure, name) : NULL;
+    Symbol* field = member != NULL ? member->symbol : NULL;
+    // By-reference capture fields are pointers and init-captures decay, so an
+    // array-typed closure field is always a by-copy capture.
+    if (field == NULL || field->lambda_capture_by_reference ||
+        field->flags.is_parameter_pack) {
+      continue;
+    }
+    int rank = LambdaArrayCaptureRank(field->type);
+    if (rank <= 0 || rank > kLambdaArrayCaptureMaxRank) {
+      continue;
+    }
+    ASTNode* value = ((ExpressionInitializerASTNode*)designated->init)->expr;
+    if (!LambdaCaptureSourceIsRepeatable(value)) {
+      continue;
+    }
+    int64_t indices[kLambdaArrayCaptureMaxRank];
+    ASTNode* copy = NewLambdaArrayCaptureCopy(value, field->type, indices, 0,
+                                              value->location);
+    ASTNodeReplaceChild(initializer, 0, copy, true);
+  }
+}
+
 static void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
   FinishAutoLambdaCaptureFields(node);
+  ExpandLambdaArrayCaptureCopies(node);
   MaterializeBracedClassTemplateTemporary(node);
   node->initializer =
       AnalyzeInitialization(&node->base, node->sym,
@@ -14552,6 +14853,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(arrow):
       if (!SemanticLowerMemberSplice(binary_node)) {
         AnalyzeMemberReference(binary_node);
+        node = FoldStaticDataMemberReference(binary_node);
       }
       break;
 
