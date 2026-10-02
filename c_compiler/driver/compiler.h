@@ -49,6 +49,7 @@ typedef enum {
   kTargetOSNone,
   kTargetOSLinux,
   kTargetOSDarwin,
+  kTargetOSBBC,
 } TargetOS;
 
 typedef struct {
@@ -67,6 +68,7 @@ bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
                                char* error, size_t error_size);
 bool CompilerTargetTripleIsLinux(const CompilerTargetTriple* triple);
 bool CompilerTargetTripleIsDarwin(const CompilerTargetTriple* triple);
+bool CompilerTargetTripleIsBBC(const CompilerTargetTriple* triple);
 // Hosted triple for this machine when a profile exists (Darwin AArch64 or
 // Linux), otherwise the interpreter architecture name.  NULL if the host
 // cannot be mapped to a DaveCC target.

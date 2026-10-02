@@ -205,6 +205,10 @@ for archive in libcaarch64_darwin.a \
 done
 install_required_file 0644 "6502_support/6502rom.exe" "$actual_libdir/6502rom.exe"
 install_required_file 0644 "libc/esp32_start.o" "$actual_libdir/esp32_start.o"
+for paged in libc6502_paged_shim.a libc6502_bbc_runtime.a \
+             bbc_start.o bbc.ld libc6502_paged.bin; do
+  install_required_file 0644 "libc/$paged" "$actual_libdir/$paged"
+done
 
 headers=$(find_dir "libc/include")
 (cd "$headers" && tar cf - .) | (cd "$actual_includedir" && tar xf -)

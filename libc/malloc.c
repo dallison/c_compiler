@@ -29,14 +29,33 @@
 
 extern char _end[];
 
+#if defined(DAVECC_PAGED_LIBC)
+// Filled by the sideways ROM init from the user program's mailbox.
+// The blocks themselves stay in main RAM so they remain addressable
+// after the shim pages the libc bank out.
+extern char* __paged_heap_start;
+extern char* __paged_heap_limit;
+#endif
+
 FreeBlockHeader* __free_list;
 int __initial_heap_size;
 static unsigned char __heap_ready;
 
 static void InitFreeList(void) {
   __heap_ready = 1;
+#if defined(DAVECC_PAGED_LIBC)
+  char* start = __paged_heap_start;
+  char* limit = __paged_heap_limit;
+  if (limit <= start) {
+    __free_list = NULL;
+    return;
+  }
+  __free_list = (FreeBlockHeader*)start;
+  __free_list->length = (size_t)(limit - start);
+#else
   __free_list = (FreeBlockHeader*)_end;
   __free_list->length = MEMTOP - (int)_end;
+#endif
   __free_list->next = NULL;
 }
 

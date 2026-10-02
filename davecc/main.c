@@ -288,6 +288,10 @@ typedef struct {
   const char* shared_bazel_target;
   bool use_main_entry;
   bool static_only;
+  // Linked ahead of archive_name. NULL for targets with a single runtime.
+  const char* support_archive_name;
+  // Passed as -T when the user did not name a script. NULL otherwise.
+  const char* linker_script_name;
 } TargetRuntime;
 
 static const TargetRuntime target_runtimes[] = {
@@ -308,9 +312,18 @@ static const TargetRuntime target_runtimes[] = {
     {"x86", kTargetOSNone, "libcx86.a", "//:libc_x86", NULL, NULL,
      "//:libc_x86_shared", true, false},
     {"6502", kTargetOSNone, "libc6502.a", "//:libc_6502", NULL, NULL,
-     NULL, false, true},
+     NULL, false, true, NULL, NULL},
     {"65c02", kTargetOSNone, "libc65c02.a", "//:libc_65c02", NULL, NULL,
-     NULL, false, true},
+     NULL, false, true, NULL, NULL},
+    // BBC Model B and Master. User code stays in main RAM and calls libc
+    // through the sideways shim. 6502 runs on both machines; 65c02 is the
+    // Master. Both link the same NMOS sideways image.
+    {"6502", kTargetOSBBC, "libc6502_paged_shim.a", "//:libc_6502_paged",
+     "bbc_start.o", "//:libc_6502_paged", NULL, false, true,
+     "libc6502_bbc_runtime.a", "bbc.ld"},
+    {"65c02", kTargetOSBBC, "libc6502_paged_shim.a", "//:libc_6502_paged",
+     "bbc_start.o", "//:libc_6502_paged", NULL, false, true,
+     "libc6502_bbc_runtime.a", "bbc.ld"},
     // A wasm module is linked whole every time, and its startup lives in the
     // archive rather than in an object of its own, so there is nothing to
     // name here beyond the library itself.
@@ -400,6 +413,17 @@ static const TargetRuntime* FindTargetRuntime(const char* target) {
 static bool VectorContainsCString(Vector* values, const char* value) {
   for (size_t i = 0; i < values->length; i++) {
     if (strcmp(values->value.p[i], value) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool LinkerArgsHaveScript(Vector* linker_args) {
+  for (size_t i = 1; i < linker_args->length; i++) {
+    const char* arg = linker_args->value.p[i];
+    if (strcmp(arg, "-T") == 0 || strcmp(arg, "--script") == 0 ||
+        strncmp(arg, "--script=", 9) == 0) {
       return true;
     }
   }
@@ -977,6 +1001,24 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
     exit(1);
   }
 
+  if (runtime->linker_script_name != NULL &&
+      !LinkerArgsHaveScript(linker_args)) {
+    String* script = NewEmptyString();
+    StringPrintf(script, "%s/%s", resources->lib_dir.value,
+                 runtime->linker_script_name);
+    if (!PathIsFile(script->value)) {
+      fprintf(stderr,
+              "unable to find DaveCC linker script '%s'; build %s, set "
+              "DAVECC_LIB_DIR, or use -nostdlib\n",
+              script->value, runtime->bazel_target);
+      StringDelete(script);
+      exit(1);
+    }
+    VectorAppend(owned_paths, script);
+    VectorAppend(linker_args, "-T");
+    VectorAppend(linker_args, script->value);
+  }
+
   if (runtime->startup_name != NULL &&
       !LinkerArgsContainArchive(linker_args, runtime->startup_name)) {
     String* startup = NewEmptyString();
@@ -992,6 +1034,14 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
     }
     VectorAppend(owned_paths, startup);
     VectorAppend(linker_args, startup->value);
+  }
+
+  if (runtime->support_archive_name != NULL &&
+      !LinkerArgsContainArchive(linker_args, runtime->support_archive_name)) {
+    AddRuntimeFileFromDirectory(linker_args, owned_paths,
+                                resources->lib_dir.value,
+                                runtime->support_archive_name,
+                                runtime->bazel_target);
   }
 
   if (LinkerArgsContainArchive(linker_args, runtime->archive_name)) {

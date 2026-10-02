@@ -225,6 +225,7 @@ sh_binary(
         ":esp32_start",
         ":libc_6502",
         ":libc_65c02",
+        ":libc_6502_paged",
         ":libc_aarch64",
         ":libc_arm",
         ":libc_headers",
@@ -1748,6 +1749,36 @@ set -euo pipefail
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
 bash "6502 support/build_libc.sh" 65c02 "$@" "$$davecc" "$$archivist"
+""",
+)
+
+genrule(
+    name = "libc_6502_paged",
+    srcs = _LIBC_6502_SRCS + glob(["6502 support/paged/**"]) + [
+        ":elfdump",
+        "6502 support/bbc.ld",
+    ],
+    outs = [
+        "libc/libc6502_paged_shim.a",
+        "libc/libc6502_bbc_runtime.a",
+        "libc/bbc_start.o",
+        "libc/bbc.ld",
+        "libc/libc6502_paged.bin",
+    ],
+    cmd = """
+set -euo pipefail
+davecc="$$(pwd)/$(execpath :davecc)"
+archivist="$$(pwd)/$(execpath :archivist)"
+elfdump="$$(pwd)/$(execpath :elfdump)"
+work="$(@D)/paged.build"
+rm -rf "$$work"
+bash "6502 support/paged/build_paged_libc.sh" \\
+  "$$davecc" "$$archivist" "$$elfdump" "$$work"
+cp "$$work/libc6502_paged_shim.a" "$(location libc/libc6502_paged_shim.a)"
+cp "$$work/libc6502_bbc_runtime.a" "$(location libc/libc6502_bbc_runtime.a)"
+cp "$$work/bbc_start.o" "$(location libc/bbc_start.o)"
+cp "$$work/bbc.ld" "$(location libc/bbc.ld)"
+cp "$$work/libc6502_paged.bin" "$(location libc/libc6502_paged.bin)"
 """,
 )
 
@@ -5802,6 +5833,24 @@ sh_test(
     data = [
         ":davecc",
         ":elfdump",
+    ],
+)
+
+sh_test(
+    name = "6502_paged_libc_test",
+    srcs = ["tests/6502_paged_libc_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :elfdump)",
+        "$(rootpath :archivist)",
+    ],
+    data = glob([
+        "6502 support/**",
+        "libc/**",
+    ]) + [
+        ":davecc",
+        ":elfdump",
+        ":archivist",
     ],
 )
 

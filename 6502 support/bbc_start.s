@@ -33,6 +33,10 @@ stack_cap_done:
   LDX #0xff
   TXS
 
+  ; Paged libc replaces this with a real init. The weak stub below is an
+  ; RTS, so a program that does not link the shim pays one call and returns.
+  JSR __libc_paged_ensure_init
+
   LDA #%lo(__init_array_start)
   STA init_ptr
   LDA #%hi(__init_array_start)
@@ -103,3 +107,8 @@ bbc_return:
   BRK
 
 .comm init_ptr, 2
+
+.section ".text.__libc_paged_ensure_init", "ax", @progbits
+.weak __libc_paged_ensure_init
+__libc_paged_ensure_init:
+  RTS

@@ -725,6 +725,9 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__unix__", "1");
     PreprocessorDefineMacro(p, "__unix", "1");
     PreprocessorDefineMacro(p, "__DAVECC_NATIVE_DARWIN__", "1");
+  } else if (CompilerTargetTripleIsBBC(&compiler->target_triple)) {
+    PreprocessorDefineMacro(p, "__DAVECC_BBC__", "1");
+    PreprocessorDefineMacro(p, "__DAVECC_PAGED_LIBC__", "1");
   } else {
     PreprocessorDefineMacro(p, "__DAVECC_INTERPRETER_ABI__", "1");
   }
