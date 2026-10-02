@@ -4465,10 +4465,21 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
   // C++ allows dynamic initialization of namespace-scope and function-local
   // static objects (`std::string flag = ""`).  constexpr and constinit still
   // require a constant initializer.  thread_local keeps the check above, which
-  // constant-initializes it when the expression allows that.
+  // constant-initializes it when the expression allows that.  Plain `static
+  // const` scalars and arrays with constant initializers still belong in
+  // read-only data, not `.comm`.
   if (CompilerIsCXX() && !is_thread_local && !symbol->flags.is_constexpr &&
       !symbol->flags.is_constinit) {
-    constants_only = false;
+    ASTNode* init_expr = init;
+    if (init_expr != NULL && init_expr->op == AST_OP(expr_init)) {
+      init_expr = ((ExpressionInitializerASTNode*)init_expr)->expr;
+    }
+    bool static_const_constant =
+        StorageIs(symbol->storage, STO(static)) && TypeIsConst(symbol->type) &&
+        init_expr != NULL && IsConstantExpression(init_expr);
+    if (!static_const_constant) {
+      constants_only = false;
+    }
   }
   MarkCXX26SymbolicConstexprReference(symbol, init);
 
@@ -14884,7 +14895,12 @@ bool IsConstantExpression(ASTNode* node) {
       CastASTNode* c = (CastASTNode*)node;
       return IsConstantExpression(c->expr);
     }
-  
+    case AST_OP(expr_init): {
+      ExpressionInitializerASTNode* expr_init =
+          (ExpressionInitializerASTNode*)node;
+      return expr_init->expr != NULL && IsConstantExpression(expr_init->expr);
+    }
+
       case AST_OP(compound_literal): {
         CompoundLiteralASTNode* lit = (CompoundLiteralASTNode*)node;
         return IsConstantExpression(lit->initializer);
