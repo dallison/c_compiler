@@ -571,6 +571,47 @@ static Symbol* CurrentClassSelfTagSymbol(Syntax* syntax,
   return NULL;
 }
 
+// Inside a member body of an explicit or partial specialization
+// (`template <> struct hash<E>`), the injected-class-name followed by `<`
+// names the class template itself (`hash<unsigned long>()`), not the
+// specialization.  Returns the primary class template when `name` is the
+// injected-class-name of the current class `str` and `str` is such a
+// specialization; otherwise NULL.
+static Symbol* CurrentClassSpecializationPrimary(FullyQualifiedIdentifier* name,
+                                                 Struct* str) {
+  if (!CompilerIsCXX() || name->is_qualified || str == NULL ||
+      str->tag_name == NULL || str->tag_symbol == NULL ||
+      str->lexical_parent != NULL) {
+    return NULL;
+  }
+  Struct* owner = NULL;
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  if (owner != str) {
+    return NULL;
+  }
+  const char* last = FullyQualifiedIdentifierLast(name);
+  size_t length = strlen(last);
+  if (strncmp(str->tag_name->value, last, length) != 0 ||
+      str->tag_name->value[length] != '<') {
+    return NULL;
+  }
+  String bare;
+  StringInit(&bare, last);
+  Symbol* primary =
+      NamespaceLookupTagInEnclosingScopes(str->tag_symbol->namespace_, &bare);
+  StringDestruct(&bare);
+  if (primary == NULL || !primary->flags.is_template ||
+      primary->type == NULL || !TypeIsStructOrUnion(primary->type) ||
+      primary->type->info.struct_info == NULL ||
+      !primary->type->info.struct_info->is_template) {
+    return NULL;
+  }
+  return primary;
+}
+
 static ASTNode* ParseThisExpression(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   LexNextToken(syntax->lex);
@@ -2157,6 +2198,12 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       if (args != NULL) {
         template_arguments = args;
         symbol = self_tag;
+      }
+    } else {
+      Symbol* primary =
+          CurrentClassSpecializationPrimary(&name, symbol->type->info.struct_info);
+      if (primary != NULL) {
+        symbol = primary;
       }
     }
   }
@@ -4525,9 +4572,13 @@ static ASTNode* ParseNestedPrimaryExpression(Syntax* syntax,
   }
 
   // _Generic selection (standard in C11, a reserved-name extension earlier).
+  // Before C11 `_Generic` is still an ordinary identifier, so a program that
+  // declares its own `_Generic` keeps that meaning.
   if (!CompilerIsCXX() &&
       LexLookingAt(lex, TOK(identifier)) &&
-      StringEqual(&lex->spelling, "_Generic")) {
+      StringEqual(&lex->spelling, "_Generic") &&
+      (CompilerCAtLeast(kLanguageStandardC11) ||
+       SyntaxFindSymbol(syntax, &lex->spelling) == NULL)) {
     return ParseGenericSelection(syntax, followers);
   }
 
@@ -7897,6 +7948,13 @@ static bool CastOrCompoundLiteralFollows(Lex* lex) {
     case TOK(unsigned):
     case TOK(float):
     case TOK(double):
+    case TOK(auto):
+    case TOK(int128):
+    case TOK(bitint):
+    case TOK(caret):
+    case TOK(reflect):
+    case TOK(splice_open):
+    case TOK(injected_value):
       return true;
     default:
       return false;
@@ -7959,8 +8017,11 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       // A longjmp out of the trial parse skips the bookkeeping of every level
       // it entered, so restore the nesting depths by hand.  A type-name can
       // define a class (`(struct { int x; }){0}`), so both counters are at risk.
+      // The class head is reset the same way: a stale head makes a later
+      // namespace-scope consteval injection target that class.
       int saved_nesting_depth = syntax->expression_nesting_depth;
       int saved_struct_depth = syntax->struct_definition_depth;
+      Struct* volatile saved_class_head = syntax->cxx_class_head;
       abort_on_error = true;
       if (setjmp(error_abort_state) == 0) {
         TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
@@ -8006,6 +8067,9 @@ static ASTNode* ParseCastExpression(Syntax* syntax, TokenClass followers) {
       memcpy(error_abort_state, saved_abort_state, sizeof(error_abort_state));
       syntax->expression_nesting_depth = saved_nesting_depth;
       syntax->struct_definition_depth = saved_struct_depth;
+      if (!parse_completed) {
+        syntax->cxx_class_head = saved_class_head;
+      }
       bool trapped = DiagnosticErrorTrapped();
       DiagnosticErrorTrapEnd(saved_trap);
       if (!parse_completed || trapped || !is_type_name) {

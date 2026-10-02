@@ -1530,6 +1530,89 @@ static bool CXXThreadLocalInitializerIsDynamic(ASTNode* initializer) {
   return expr != NULL && !IsConstantExpression(expr);
 }
 
+static bool CXXSymbolHasConstantAddress(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL || symbol->flags.is_argument ||
+      symbol->flags.is_template_parameter || TypeIsReference(symbol->type) ||
+      StorageIs(symbol->storage, STO(thread))) {
+    return false;
+  }
+  if (TypeIsFunction(symbol->type) ||
+      StorageIs(symbol->storage, STO(static) | STO(extern))) {
+    return true;
+  }
+  return !symbol->flags.is_block_scope;
+}
+
+// An lvalue designating (part of) an object with a link-time address.
+static bool CXXIsConstantAddressLvalue(ASTNode* expr) {
+  if (expr == NULL) {
+    return false;
+  }
+  switch (expr->op) {
+    case AST_OP(identifier):
+      return CXXSymbolHasConstantAddress(((IdentifierASTNode*)expr)->symbol);
+    case AST_OP(dot):
+      return CXXIsConstantAddressLvalue(((BinaryASTNode*)expr)->left);
+    case AST_OP(subscript): {
+      BinaryASTNode* subscript = (BinaryASTNode*)expr;
+      return subscript->left != NULL && TypeIsArray(subscript->left->type) &&
+             CXXIsConstantAddressLvalue(subscript->left) &&
+             IsConstantExpression(subscript->right);
+    }
+    default:
+      return false;
+  }
+}
+
+// An address constant ([expr.const]): the address of a static-storage object
+// or function, possibly converted and offset by a constant.
+static bool CXXIsAddressConstant(ASTNode* expr) {
+  if (expr == NULL) {
+    return false;
+  }
+  switch (expr->op) {
+    case AST_OP(address):
+      return CXXIsConstantAddressLvalue(((UnaryASTNode*)expr)->sub);
+    case AST_OP(identifier):
+      return (TypeIsArray(expr->type) || TypeIsFunction(expr->type)) &&
+             CXXIsConstantAddressLvalue(expr);
+    case AST_OP(cast): {
+      // Initializers are classified before analysis, so use the spelled
+      // target type rather than the node's (unset) type.
+      CastASTNode* cast = (CastASTNode*)expr;
+      return (cast->kind == kCastCStyle || cast->kind == kCastStatic ||
+              cast->kind == kCastReinterpret || cast->kind == kCastConst) &&
+             TypeIsPointer(cast->cast_type) &&
+             CXXIsAddressConstant(cast->expr);
+    }
+    case AST_OP(plus):
+    case AST_OP(minus): {
+      // One side must be an integer constant, so the result is a pointer.
+      if (ASTNodeGetShape(expr) != kASTShapeBinary) {
+        return false;
+      }
+      BinaryASTNode* arithmetic = (BinaryASTNode*)expr;
+      if (CXXIsAddressConstant(arithmetic->left)) {
+        return IsConstantExpression(arithmetic->right);
+      }
+      return expr->op == AST_OP(plus) &&
+             CXXIsAddressConstant(arithmetic->right) &&
+             IsConstantExpression(arithmetic->left);
+    }
+    default:
+      return false;
+  }
+}
+
+static bool CXXNamespaceInitializerIsDynamic(ASTNode* initializer) {
+  ASTNode* expr = CXXThreadLocalInitializerExpression(initializer);
+  if (expr != NULL && expr->op != AST_OP(braced_init) &&
+      CXXIsAddressConstant(expr)) {
+    return false;
+  }
+  return CXXThreadLocalInitializerIsDynamic(initializer);
+}
+
 static ASTNode* CXXThreadLocalDynamicInitStatement(Symbol* sym,
                                                    ASTNode* initializer) {
   SourceLocation location = initializer->location;
@@ -2801,7 +2884,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                 }
                 if (CompilerIsCXX() && !decl->symbol->flags.is_constexpr &&
                     !decl->symbol->flags.is_constinit &&
-                    (CXXThreadLocalInitializerIsDynamic(decl->initializer) ||
+                    (CXXNamespaceInitializerIsDynamic(decl->initializer) ||
                      class_needs_dynamic_init)) {
                   if (!VariableDefinitionIsODRDiscardable(decl->symbol)) {
                     MarkReferencesInAST(decl->initializer);

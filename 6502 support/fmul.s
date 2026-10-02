@@ -107,13 +107,18 @@ __fmul:
 
   // Remove bias from exponents and add them.
   // (eA - 127) + (eB - 127) + 127
-  // = eA + eB - 127 - 127 + 127
   // = eA + eB - 127
+  // The sum can leave the 8-bit exponent range, so keep eA + eB as a 16-bit
+  // value in fexpA/fexpB and let fexp track only the normalization
+  // adjustment relative to 128.
   CLC
   LDA fexpA
   ADC fexpB
-  SEC
-  SBC #127 
+  STA fexpA
+  LDA #0
+  ROL A
+  STA fexpB
+  LDA #128
   STA fexp
 
   // Sign of result is the EOR of the two signs.
@@ -123,6 +128,8 @@ __fmul:
 
   // Multiply mantissas putting result in fmantissa
   JSR manmul
+  LDA #0
+  STA fmantissa+4
 
   // We have 2 bits to the left of the binary point, so move the point to
   // the left by incrementing the exponent.
@@ -131,12 +138,28 @@ __fmul:
   // Normalize result and assemble into destination.
   JSR __fnormalize
   JSR __fround
+
+  // Result exponent = eA + eB - 127 + (fexp - 128) = eA + eB + fexp - 255.
+  CLC
+  LDA fexpA
+  ADC fexp
+  STA fexpA
+  LDA fexpB
+  ADC #0
+  STA fexpB
+  SEC
+  LDA fexpA
+  SBC #255
+  STA fexpA
+  LDA fexpB
+  SBC #0
+  STA fexpB
 #ifdef __65c02__
   PLX
 #else
   PLA
   TAX
 #endif
-  JMP __fassemble
+  JMP __ffinish
 
 

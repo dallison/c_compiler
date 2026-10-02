@@ -379,6 +379,12 @@ static int NoGOTOffset(DynamicLinker* s, LinkerSymbol* symbol) {
 static void ProcessPossibleDynamicRelocation(struct Linker* linker,
                                              struct ObjectFile* file,
                                              Relocation* reloc) {
+  if (reloc->section != NULL &&
+      (reloc->section->header->flags & SHF(alloc)) == 0) {
+    // Debug and other non-loaded sections are never patched at load time, so
+    // they need neither GOT entries nor dynamic relocations.
+    return;
+  }
   LinkerSymbol* symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
   bool no_resolver = linker->fully_static;
   linker->arch->handle_pic_relocation(linker->dynamic_linker,

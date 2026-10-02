@@ -4312,6 +4312,7 @@ static ASTNode* LabelASTNodeClone(const ASTNode* node,
   LabelASTNode* to = ASTArenaAlloc(sizeof(LabelASTNode));
   ASTNodeBaseCopy(&to->base, node);
   StringInit(&to->name, from->name.value);
+  to->named = from->named;
   to->stmt = ASTNodeClone(from->stmt, func, data, &to->base);
   // IR labels belong to one generated function instance. A cloned AST must
   // allocate a fresh IR label when it is emitted; retaining the source label

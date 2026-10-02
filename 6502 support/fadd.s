@@ -86,7 +86,7 @@ add_common:
   SBC fexpA            // A is RHS - LHS.
   STA frshift
   BEQ fadd_same_exp    // Exponents the same.
-  BPL fadd_A_smaller     // A is less than B
+  BCS fadd_A_smaller     // No borrow: A is less than B
 
   // B is smaller than A
   LDA fexpA

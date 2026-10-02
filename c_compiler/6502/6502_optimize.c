@@ -274,6 +274,7 @@ static TargetInstruction* PrevInstruction(TargetInstruction* inst) {
   do {
     prev = TargetPrev(prev);
   } while (prev != NULL && !(TargetOpcodeNe(prev->opcode, W65C02_OP(reloadpoint)) &&
+           TargetOpcodeNe(prev->opcode, TARGET_OP(loc)) &&
            TargetOpcodeNe(prev->opcode, W65C02_OP(expr1)) &&
            TargetOpcodeNe(prev->opcode, W65C02_OP(expr2)) &&
            TargetOpcodeNe(prev->opcode, W65C02_OP(expr4)) &&
@@ -586,6 +587,7 @@ static TargetInstruction* PreviousUserOfA(TargetInstruction* inst) {
 
 static bool IsTrackingMetadata(TargetInstruction* inst) {
   return TargetOpcodeEq(inst->opcode, W65C02_OP(reloadpoint)) ||
+         TargetOpcodeEq(inst->opcode, TARGET_OP(loc)) ||
          W65C02IsExpression(inst) || (inst->flags & k6502DontEmit) != 0;
 }
 
@@ -1394,6 +1396,7 @@ static int OperandByteAddress(TargetInstruction* inst) {
 
 static bool IsPostAllocationMetadata(TargetInstruction* inst) {
   if (TargetIsConst(inst) || W65C02IsExpression(inst) ||
+      TargetOpcodeEq(inst->opcode, TARGET_OP(loc)) ||
       (inst->flags & k6502DontEmit) != 0) {
     return true;
   }

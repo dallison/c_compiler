@@ -81,6 +81,9 @@ typedef struct Generator {
   // Destination object for an inlined constructor whose `this` should be the
   // enclosing initializer slot rather than the original temporary actual.
   IRNode* inlined_constructor_this;
+  // Source location of the most recent loc instruction, or 0 if none has been
+  // emitted in this function.
+  SourceLocation last_emitted_location;
   // A virtual callee reads its receiver through its own copy of the `this`
   // argument.  While the callee is generated, that copy reloads the receiver
   // already evaluated and spilled here, so side effects happen once.

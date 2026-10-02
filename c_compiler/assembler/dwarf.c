@@ -40,7 +40,6 @@ void DwarfInit(Dwarf* dwarf) {
   dwarf->min_instruction_length = 4;
   dwarf->line_base = -5;
   dwarf->line_range = 14;
-  dwarf->address_offset = 0;
 }
 
 // A directory in the directory_table is a mapping of dir name
@@ -254,9 +253,6 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
       fixup->offset = (int32_t)debug_line->length;
       fixup->section = loc->section;
       VectorAppend(&dwarf->address_fixups, fixup);
-      if (dwarf->address_fixups.length == 1) {
-        dwarf->address_offset = fixup->offset;
-      }
       BufferAppendLongLE(debug_line, 0);
       BufferAppendByte(debug_line, DW_LNS(advance_pc));
       WriteULEB128((uint32_t)(loc->address / dwarf->min_instruction_length),
@@ -303,12 +299,4 @@ void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line) {
   *unit_length = (uint32_t)debug_line->length -
                  4;  // Doesn't include unit_length field itself.
   BufferAlignLength(debug_line, 8);
-}
-
-AssemblerRelocation* DwarfDebugLineRelocation(Dwarf* dwarf,
-                                              AssemblerSymbol* symbol,
-                                              int reloc_type,
-                                              int section_index) {
-  return NewAssemblerRelocation(symbol, reloc_type, section_index,
-                                dwarf->address_offset, 0);
 }

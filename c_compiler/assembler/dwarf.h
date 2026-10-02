@@ -56,8 +56,6 @@ typedef struct {
   uint8_t min_instruction_length;
   int8_t line_base;
   uint8_t line_range;
-  int32_t
-      address_offset;  // Offset into debug_line section for initial address.
   Vector address_fixups;  // DwarfAddressFixup* for each set_address.
 } Dwarf;
 
@@ -65,9 +63,6 @@ void DwarfInit(Dwarf* dwarf);
 void DwarfDestruct(Dwarf* dwarf);
 
 void DwarfBuildDebugLineContents(Dwarf* dwarf, Buffer* debug_line);
-struct AssemblerRelocation* DwarfDebugLineRelocation(
-    Dwarf* dwarf, struct AssemblerSymbol* symbol, int reloc_type,
-    int section_index);
 void DwarfAddFile(Dwarf* dwarf, String* filename);
 void DwarfAddLocation(Dwarf* dwarf, int file, int line, int col, int section,
                       uint64_t address);

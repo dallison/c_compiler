@@ -964,12 +964,8 @@ bool TemplateArgumentValuesEqual(const TemplateArgument* left,
   if (left_kind != right_kind) {
     return false;
   }
-  // A dependent template-id stores a literal with the expression's type
-  // (`ratio<1, N>` keeps `1` as int) while the instantiated specialization
-  // has converted that argument to the parameter type (`long`).  The values
-  // are the same converted constant ([temp.arg.nontype]).
-  if (left_kind != kTemplateValueIntegral && left->type != NULL &&
-      right->type != NULL && !TypeEqual(left->type, right->type)) {
+  if (left->type != NULL && right->type != NULL &&
+      !TypeEqual(left->type, right->type)) {
     return false;
   }
   switch (left_kind) {

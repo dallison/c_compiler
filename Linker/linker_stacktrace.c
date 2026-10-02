@@ -7,6 +7,7 @@
 #include "elf.h"
 #include "linker.h"
 #include "linker_file.h"
+#include "linker_reloc.h"
 #include "linker_symbols.h"
 
 typedef struct {
@@ -166,8 +167,8 @@ static void AppendSourceLine(LinkerStacktraceInfo* info,
                              ELFReaderSection* text, uint64_t address,
                              int64_t line, uint64_t file,
                              const Vector* files) {
-  if (line <= 0 || line > UINT32_MAX || file == 0 ||
-      file > files->length) {
+  if (text == NULL || text->discarded || line <= 0 || line > UINT32_MAX ||
+      file == 0 || file > files->length) {
     return;
   }
   LinkerStacktraceLine* entry = calloc(1, sizeof(LinkerStacktraceLine));
@@ -185,13 +186,65 @@ static size_t TargetPointerSize(const Linker* linker) {
   return linker->ops->is_64_bit ? 8 : 4;
 }
 
+static int CompareRelocationsByOffset(const void* left, const void* right) {
+  const Relocation* a = *(const Relocation* const*)left;
+  const Relocation* b = *(const Relocation* const*)right;
+  return a->offset < b->offset ? -1 : a->offset > b->offset ? 1 : 0;
+}
+
+// With one section per function, each line sequence's DW_LNE_set_address is
+// relocated against the function's own section rather than .text.  Returns
+// the section the address operand at 'operand_offset' refers to and rewrites
+// '*address' relative to it.  Without a relocation the address is taken as
+// an offset into 'text'.  'line_relocs' holds the .debug_line relocations
+// sorted by offset.
+static ELFReaderSection* SetAddressSection(ObjectFile* file,
+                                           const Vector* line_relocs,
+                                           int64_t operand_offset,
+                                           ELFReaderSection* text,
+                                           uint64_t* address) {
+  size_t low = 0;
+  size_t high = line_relocs->length;
+  while (low < high) {
+    size_t middle = low + (high - low) / 2;
+    const Relocation* candidate = line_relocs->value.p[middle];
+    if (candidate->offset < operand_offset) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  if (low < line_relocs->length) {
+    Relocation* reloc = line_relocs->value.p[low];
+    if (reloc->offset != operand_offset) {
+      return text;
+    }
+    uint64_t addend =
+        reloc->addend_in_place ? *address : (uint64_t)reloc->addend;
+    if (reloc->symbol_section != NULL) {
+      *address = reloc->symbol_value + addend;
+      return reloc->symbol_section;
+    }
+    LinkerSymbol* symbol = reloc->symbol;
+    if (symbol == NULL) {
+      symbol = ObjectFileFindSymbol(file, reloc->symbol_name.value);
+    }
+    if (symbol != NULL && symbol->section != NULL && symbol->header != NULL) {
+      *address = symbol->header->value + addend;
+      return symbol->section;
+    }
+    return NULL;
+  }
+  return text;
+}
+
 static void ParseObjectDebugLines(LinkerStacktraceInfo* info,
                                   ObjectFile* file) {
   ELFReaderSection* debug_line =
       ELFReaderFileFindSection(file->elf_file, ".debug_line");
   ELFReaderSection* text =
       ELFReaderFileFindSection(file->elf_file, ".text");
-  if (debug_line == NULL || text == NULL || debug_line->contents == NULL ||
+  if (debug_line == NULL || debug_line->contents == NULL ||
       debug_line->header->size < 10) {
     return;
   }
@@ -233,8 +286,17 @@ static void ParseObjectDebugLines(LinkerStacktraceInfo* info,
 
   Vector directories;
   Vector files;
+  Vector line_relocs;
   VectorInit(&directories);
   VectorInit(&files);
+  VectorInit(&line_relocs);
+  for (size_t i = 0; i < file->relocations.length; i++) {
+    Relocation* reloc = file->relocations.value.p[i];
+    if (reloc->section == debug_line) {
+      VectorAppend(&line_relocs, reloc);
+    }
+  }
+  VectorSortPointers(&line_relocs, CompareRelocationsByOffset);
   while (!reader.failed && reader.current < header_end) {
     String* directory = ReadDwarfString(&reader);
     if (directory == NULL) {
@@ -284,6 +346,7 @@ static void ParseObjectDebugLines(LinkerStacktraceInfo* info,
   reader.current = header_end;
 
   uint64_t address = 0;
+  ELFReaderSection* sequence_text = text;
   int64_t line = 1;
   uint64_t source_file = 1;
   bool is_stmt = default_is_stmt != 0;
@@ -301,11 +364,14 @@ static void ParseObjectDebugLines(LinkerStacktraceInfo* info,
       uint8_t extended_opcode = ReadU8(&reader);
       if (extended_opcode == 1) {  // DW_LNE_end_sequence
         address = 0;
+        sequence_text = text;
         line = 1;
         source_file = 1;
         is_stmt = default_is_stmt != 0;
       } else if (extended_opcode == 2) {  // DW_LNE_set_address
         size_t address_size = (size_t)(instruction_end - reader.current);
+        int64_t operand_offset =
+            reader.current - (const unsigned char*)debug_line->contents;
         if (address_size == 8) {
           address = ReadU64(&reader);
         } else if (address_size == 4) {
@@ -313,6 +379,8 @@ static void ParseObjectDebugLines(LinkerStacktraceInfo* info,
         } else if (address_size == 2) {
           address = ReadU16(&reader);
         }
+        sequence_text =
+            SetAddressSection(file, &line_relocs, operand_offset, text, &address);
       }
       reader.current = instruction_end;
       continue;
@@ -321,7 +389,7 @@ static void ParseObjectDebugLines(LinkerStacktraceInfo* info,
     if (opcode < opcode_base) {
       switch (opcode) {
         case 1:  // DW_LNS_copy
-          AppendSourceLine(info, text, address, line, source_file, &files);
+          AppendSourceLine(info, sequence_text, address, line, source_file, &files);
           break;
         case 2:  // DW_LNS_advance_pc
           address += ReadULEB128(&reader) * minimum_instruction_length;
@@ -363,7 +431,7 @@ static void ParseObjectDebugLines(LinkerStacktraceInfo* info,
     address += (adjusted_opcode / line_range) *
                minimum_instruction_length;
     line += line_base + adjusted_opcode % line_range;
-    AppendSourceLine(info, text, address, line, source_file, &files);
+    AppendSourceLine(info, sequence_text, address, line, source_file, &files);
   }
   (void)is_stmt;
 
@@ -371,6 +439,7 @@ cleanup:
   VectorDestructWithContents(&directories, DeleteStringElement,
                              /*free_element=*/false);
   VectorDestruct(&files);
+  VectorDestruct(&line_relocs);
 }
 
 static void CollectSymbolBucket(void* entry, void* data_ptr) {

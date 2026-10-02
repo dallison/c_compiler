@@ -404,9 +404,28 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     if (op == 8) name = "lslv";
     if (op == 9) name = "lsrv";
     if (op == 10) name = "asrv";
+    if (op == 11) name = "rorv";
     if (name != NULL) {
       DAsmFormat(out, "%s %s, %s, %s", name, XReg(rd, sf, false),
                  XReg(rn, sf, false), XReg(rm, sf, false));
+      return true;
+    }
+  }
+  if ((inst & 0x7fff0000u) == 0x5ac00000u) {
+    bool sf = (inst >> 31) != 0;
+    int op = (inst >> 10) & 0x3f;
+    int rn = (inst >> 5) & 0x1f;
+    int rd = inst & 0x1f;
+    const char* name = NULL;
+    if (op == 0) name = "rbit";
+    if (op == 1) name = "rev16";
+    if (op == 2) name = sf ? "rev32" : "rev";
+    if (op == 3 && sf) name = "rev";
+    if (op == 4) name = "clz";
+    if (op == 5) name = "cls";
+    if (name != NULL) {
+      DAsmFormat(out, "%s %s, %s", name, XReg(rd, sf, false),
+                 XReg(rn, sf, false));
       return true;
     }
   }

@@ -42,6 +42,7 @@
 .global __fdiv
 
 .global __fassemble
+.global __ffinish
 .global __fnormalize
 .global __fround
 .global __funpackA

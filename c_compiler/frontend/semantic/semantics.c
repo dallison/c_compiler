@@ -1711,6 +1711,22 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     ASTNodeSetType(from, to);
     return;
   }
+  // A function designator tested for truth (`if (f)`, `!f`) decays to a
+  // function pointer first.
+  if (TypeIsFunction(from->type) && TypeIsBool(to) && from->parent != NULL) {
+    ASTNode* parent = from->parent;
+    int child_id = from->child_id;
+    ASTNodeMove(from);
+    TypeRecord* pointer_type = NewPointerTo(kQualPlain, from->type);
+    ASTNode* address =
+        NewUnaryASTNode(AST_OP(address), pointer_type, from->location, from);
+    ASTNodeSetType(address, pointer_type);
+    from->flags |= kASTNeedAddress;
+    address->flags |= kASTAnalyzed;
+    ASTNodeReplaceChild(parent, child_id, address, false);
+    SemanticConvertType(address, to, ctx);
+    return;
+  }
 
   if (CXXForbidsImplicitVoidPointerConversion(from->type, to, ctx)) {
     SemanticTypeConversionError(
@@ -1818,11 +1834,14 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
         return;
       }
       
-      // Pointers to int or bool is fine.
+      // Pointers to int or bool is fine.  Only the integer conversion loses
+      // information; testing a pointer for truth is ordinary.
       if (TypeIsPointerOrArray(from->type) && (TypeIsInt(to) || TypeIsBool(to))) {
-        SemanticTypeConversionWarning(from, to, "int-conversion",
-                                      "Pointer to integer conversion "
-                                      "from '%s' to '%s'");
+        if (!TypeIsBool(to)) {
+          SemanticTypeConversionWarning(from, to, "int-conversion",
+                                        "Pointer to integer conversion "
+                                        "from '%s' to '%s'");
+        }
         return;
       }
       

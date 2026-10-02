@@ -4723,8 +4723,14 @@ static IRNode* GenerateInlineCall(Generator* gen, InlineCallASTNode* node) {
   }
   IRNode* saved_ctor_this = gen->inlined_constructor_this;
   gen->inlined_constructor_this = ctor_this;
+  SourceLocation caller_location = gen->last_emitted_location;
   GenerateStatement(gen, node->inlined);
   gen->inlined_constructor_this = saved_ctor_this;
+  if (caller_location != 0 && gen->last_emitted_location != caller_location) {
+    // Code following the inlined body belongs to the caller's statement.
+    GeneratorEmit(gen, NewIRLocation(caller_location));
+    gen->last_emitted_location = caller_location;
+  }
   if (ctor_this != NULL) {
     gen->current_struct_address = saved_struct_address;
   }
@@ -5380,7 +5386,15 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
     return GeneratorGetIntConstant(gen, node->base.type, 0);
   }
 
-  if (OptLevel1() && ASTNodeIsIntConstant(node->left)) {
+  // The complex and aggregate paths below write the result into
+  // current_struct_address; the selected arm alone would not.
+  bool fills_struct_address =
+      gen->current_struct_address != NULL &&
+      (TypeIsComplex(node->base.type) ||
+       (TypeIsTernaryMemoryAggregate(node->base.type) &&
+        node->base.value_category == kValueCategoryPrvalue));
+  if (OptLevel1() && ASTNodeIsIntConstant(node->left) &&
+      !fills_struct_address) {
     // Condition is constant  Just return the left or right.
     ConstantASTNode* c = (ConstantASTNode*)node->left;
     if (c->value.ivalue != 0) {
@@ -5492,10 +5506,26 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
                    : node->base.type;
   bool use_ir_tmp =
       gen->for_constant_evaluation || TypeIsVoid(merge_type);
+  // An ordinary integer, real floating or pointer result merges through a
+  // local that is stored and loaded directly, never addressed, so it stays
+  // eligible for a register.  Complex, long double, __int128 and aggregate
+  // values move through memory and keep the addressed spill slot.
+  bool register_mergeable =
+      (TypeIsPointer(merge_type) ||
+       (TypeIsPrimitive(merge_type) && !TypeIsComplex(merge_type) &&
+        !TypeIsStructOrUnion(merge_type))) &&
+      !TypeUsesLongDoubleRepresentation(merge_type) &&
+      !TypeIsInt128(merge_type);
+  Symbol* merge_symbol = NULL;
+  IRNode* merge_var = NULL;
   if (value_is_used && !direct_struct_destination &&
       use_ir_tmp) {
     tmp = GeneratorEmit(gen, NewIR(IR_OP(tmp)));
     IRSetType(tmp, merge_type);
+  } else if (value_is_used && !direct_struct_destination &&
+             register_mergeable) {
+    merge_symbol = SyntaxNewTemporary(gen->syntax, merge_type);
+    merge_var = GeneratorGetVariable(gen, merge_symbol);
   }
 
   // Evaluate condition.
@@ -5521,6 +5551,10 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
                          merge_type);
       }
       left->dest = tmp;
+    } else if (merge_var != NULL) {
+      IRNode* store = GeneratorEmit(
+          gen, NewIR2(GetStoreOpcodeForType(merge_type), merge_var, left));
+      IRSetVarDef(store, merge_symbol);
     } else {
       tmp_addr = GeneratorSpillValueToTemp(gen, left, merge_type);
     }
@@ -5551,6 +5585,10 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
                           merge_type);
       }
       right->dest = tmp;
+    } else if (merge_var != NULL) {
+      IRNode* store = GeneratorEmit(
+          gen, NewIR2(GetStoreOpcodeForType(merge_type), merge_var, right));
+      IRSetVarDef(store, merge_symbol);
     } else {
       if (tmp_addr == NULL) {
         tmp_addr = GeneratorSpillValueToTemp(gen, right, merge_type);
@@ -5573,6 +5611,14 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
   // the value will be ignored so we just return zero.
   if (direct_struct_destination) {
     return gen->current_struct_address;
+  }
+  if (merge_var != NULL) {
+    IRNode* load = IRSetType(
+        GeneratorEmit(gen,
+                      NewIR1(GetLoadOpcodeForType(merge_type), merge_var)),
+        merge_type);
+    IRSetVarUse(load, merge_symbol);
+    return load;
   }
   if (tmp_addr != NULL) {
     return GeneratorReloadSpilledValue(gen, tmp_addr, merge_type);

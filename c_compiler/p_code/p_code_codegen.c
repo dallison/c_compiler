@@ -781,6 +781,19 @@ static TargetInstruction* Materialize(PCodeGenerator* pcode, IRNode* node) {
         assert(false);
     }
   }
+  // Value numbering shares one `addressof` between blocks, but the register
+  // allocator only tracks values within straight-line code: a register live
+  // around a loop back edge is reused.  Recompute the address at each use.
+  if (node->opcode == IR_OP(addressof) && node->dest == NULL) {
+    IRNode* variable = node->inputs.value.p[0];
+    if ((variable->flags & kIRNrvoMarker) == 0 &&
+        !IRIsThreadVariable(variable) &&
+        (IRIsAutoVariable(variable) || IRIsArgument(variable) ||
+         IRIsStaticVariable(variable)) &&
+        !(TypeIsVLA(variable->type) && IRIsAutoVariable(variable))) {
+      return Materialize(pcode, variable);
+    }
+  }
   // Variables are materialized as their address.
   if ((node->flags & kIRNrvoMarker) != 0) {
     return Emit(
@@ -1643,7 +1656,7 @@ static void PushArg(PCodeGenerator* pcode, IRNode* node,
     Emit(pcode, NewInstruction1(wide ? P_OP(pushx) : P_OP(push), inst));
     return;
   }
-  if (TypeIsLong(node->type)) {
+  if (TypeIsLong(node->type) || TypeIsWchar(node->type)) {
     bool wide = node->type->size > 4;
     if (size != NULL) {
       *size += wide ? 8 : 4;

@@ -162,6 +162,16 @@ fdiv_res_inf:
 #endif
   JMP __finf
 
+// Infinity divided by infinity is NaN, by anything finite is infinity.
+fdiv_A_inf:
+  JSR __fisinfB
+  BCS fdiv_res_nan
+#ifdef __65c02__
+  BRA fdiv_res_inf
+#else
+  JMP fdiv_res_inf
+#endif
+
 // Either NaN or infinity.  If both A and B are zero then NaN otherwise
 // infinity.
 fdiv0:
@@ -196,22 +206,27 @@ __fdiv:
   JSR __fisnanB
   BCS fdiv_res_nan
   JSR __fisinfA
-  BCS fdiv_res_inf
+  BCS fdiv_A_inf
   JSR __fisinfB
-  BCS fdiv_res_inf
+  BCS fdiv_res_0      // Finite / infinity is zero.
 
   JSR __funpackA
   JSR __funpackB
 
   // Remove bias from exponents and subtract them.
   // (eA - 127) - (eB - 127) + 127
-  // = eA - eB - 127 + 127 + 127
   // = eA - eB + 127
+  // The difference can leave the 8-bit exponent range, so keep eA - eB as a
+  // 16-bit value in fexpA/fexpB and let fexp track only the normalization
+  // adjustment relative to 128.
   SEC
   LDA fexpA
   SBC fexpB
-  CLC
-  ADC #127
+  STA fexpA
+  LDA #0
+  SBC #0
+  STA fexpB
+  LDA #128
   STA fexp
 
   // Sign of result is the EOR of the two signs.
@@ -255,10 +270,26 @@ fdiv_end:
   // Normalize result and assemble into destination.
   JSR __fnormalize
   JSR __fround
+
+  // Result exponent = eA - eB + 127 + (fexp - 128) = eA - eB + fexp - 1.
+  CLC
+  LDA fexpA
+  ADC fexp
+  STA fexpA
+  LDA fexpB
+  ADC #0
+  STA fexpB
+  SEC
+  LDA fexpA
+  SBC #1
+  STA fexpA
+  LDA fexpB
+  SBC #0
+  STA fexpB
 #ifdef __65c02__
   PLX
 #else
   PLA
   TAX
 #endif
-  JMP __fassemble
+  JMP __ffinish

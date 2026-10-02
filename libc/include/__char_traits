@@ -123,11 +123,14 @@ struct char_traits<char> {
   }
 
   static constexpr size_t length(const char_type* s) {
-    size_t n = 0;
-    while (s[n] != char_type()) {
-      ++n;
+    if (__builtin_is_constant_evaluated()) {
+      size_t n = 0;
+      while (s[n] != char_type()) {
+        ++n;
+      }
+      return n;
     }
-    return n;
+    return strlen(s);
   }
 
   static constexpr int compare(const char_type* a, const char_type* b, size_t n) {

@@ -36,6 +36,6 @@ NAME:
   ret
 SRC
 
-"$DAVECC" -c "$WORK/align.S" -o "$WORK/align.o"
+"$DAVECC" -nostdinc -c "$WORK/align.S" -o "$WORK/align.o"
 test -s "$WORK/align.o"
 echo ok

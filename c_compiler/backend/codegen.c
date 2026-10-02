@@ -240,6 +240,7 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   gen->struct_return_value = NULL;
   gen->current_struct_address = NULL;
   gen->inlined_constructor_this = NULL;
+  gen->last_emitted_location = 0;
   gen->virtual_receiver_copy = NULL;
   gen->virtual_receiver_spill = NULL;
   gen->return_label = NULL;
@@ -1708,7 +1709,9 @@ static void MarkVariablesWhoseAddressEscapes(Generator* gen) {
     if (sym == NULL || sym->flags.address_taken) {
       continue;
     }
-    if (IRVariableAddressEscapes(entry->pooled)) {
+    // An NRVO variable lives in the caller's return slot, so its stores are
+    // observable after the return.
+    if (sym->is_nrvo || IRVariableAddressEscapes(entry->pooled)) {
       sym->flags.address_taken = true;
     }
   }

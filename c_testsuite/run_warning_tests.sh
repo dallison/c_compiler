@@ -33,14 +33,17 @@ run_ok() {
   done
 }
 
-run_ok_o0() {
+run_fail_o0() {
   local name=$1
   local source=$2
   shift 2
   : >"$work/$name.out"
   : >"$work/$name.err"
-  "$DAVECC" -target x86_64 -O0 -S "$@" "$source" -o "$work/$name-O0.s" \
-    >>"$work/$name.out" 2>>"$work/$name.err"
+  if "$DAVECC" -target x86_64 -O0 -S "$@" "$source" -o "$work/$name-O0.s" \
+    >>"$work/$name.out" 2>>"$work/$name.err"; then
+    echo "expected $name to fail to compile" >&2
+    exit 1
+  fi
 }
 
 expect_warn() {
@@ -127,7 +130,7 @@ expect_warn frontend 'unused-function'
 expect_warn frontend 'unused-label'
 expect_warn frontend 'unused-value'
 expect_warn frontend 'declaration-after-statement'
-run_ok_o0 werror_unused_value "$work/frontend.c" -Wunused-value -Werror=unused-value
+run_fail_o0 werror_unused_value "$work/frontend.c" -Wunused-value -Werror=unused-value
 expect_warn werror_unused_value 'error: \[unused-value\]'
 run_ok wno_error_unused_value "$work/frontend.c" -Wunused-value -Werror -Wno-error=unused-value
 expect_warn wno_error_unused_value 'warning\[unused-value\]'

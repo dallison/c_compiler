@@ -1248,11 +1248,17 @@ static void HandleDirective_long(Assembler* assembler) {
   }
 }
 
-static int DefaultSectionAlignment(const Assembler* assembler) {
+static int DefaultSectionAlignment(const Assembler* assembler,
+                                   const char* name) {
   // The 6502 can fetch instructions and data at any byte address.  Requiring
   // eight-byte input-section alignment only inserts unreachable zero padding
   // between linked objects.
-  return assembler->object.elf_machine_type == ELF_MACHINE_TYPEW65C02 ? 1 : 8;
+  if (assembler->object.elf_machine_type == ELF_MACHINE_TYPEW65C02) {
+    return 1;
+  }
+  // GNU ld parses .eh_frame as a packed list of CIEs and FDEs, so padding
+  // between objects' contributions must stay within 4-byte alignment.
+  return strcmp(name, ".eh_frame") == 0 ? 4 : 8;
 }
 
 static bool IsMachOSectionName(const char* name) {
@@ -1292,7 +1298,7 @@ static void HandleDirective_section(Assembler* assembler) {
 
     int32_t flags = 0;
     int32_t type = SHT(null);
-    int alignment = DefaultSectionAlignment(assembler);
+    int alignment = DefaultSectionAlignment(assembler, name->value);
     if (IsMachOSectionName(name->value) &&
         LexMatch(&assembler->lex, TOK(comma)) &&
         (LexLookingAt(&assembler->lex, TOK(identifier)) ||
@@ -1397,9 +1403,9 @@ static void HandleDirective_text(Assembler* assembler) {
   if (assembler->object.pass == 1) {
     section = AssemblerFindSection(assembler, name);
     if (section == -1) {
-      section = AssemblerAddSection(assembler, name, SHT(progbits),
-                                    SHF(alloc) | SHF(execinstr),
-                                    DefaultSectionAlignment(assembler));
+      section = AssemblerAddSection(
+          assembler, name, SHT(progbits), SHF(alloc) | SHF(execinstr),
+          DefaultSectionAlignment(assembler, name->value));
     } else {
       StringDelete(name);
     }
@@ -1419,7 +1425,7 @@ static void HandleDirective_data(Assembler* assembler) {
     if (section == -1) {
       section = AssemblerAddSection(
           assembler, name, SHT(progbits), SHF(write) | SHF(alloc),
-          DefaultSectionAlignment(assembler));
+          DefaultSectionAlignment(assembler, name->value));
     } else {
       StringDelete(name);
     }

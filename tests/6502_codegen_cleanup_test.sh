@@ -72,7 +72,7 @@ for target in 6502 65c02; do
          /^\.func_end__Z17widen_call_resultv:$/{inside=0} \
          inside' "$assembly"
   )
-  if ! awk '/(jsr[[:space:]]+__var_value1_b[0-9]+|sta[[:space:]]+__b[0-9]+)([[:space:]]|$)/ {
+  if ! awk '/(jsr[[:space:]]+__var_value1_b[0-9]+|(sta|lda)[[:space:]]+__b[0-9]+)([[:space:]]|$)/ {
               while (getline) {
                 if ($0 ~ /^[[:space:]]*\.loc[[:space:]]/) continue
                 if ($0 ~ /sta[[:space:]]+__i0([[:space:]]|$)/) found = 1

@@ -5717,11 +5717,73 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
         id->symbol = copy;
         ASTNodeClearType(node);
       }
+    } else if (remap->rebase_base > 0 && id->symbol != NULL &&
+               id->symbol->flags.is_template_parameter &&
+               !id->symbol->flags.is_template_type_parameter &&
+               (id->symbol->template_parameter_index >= remap->rebase_base ||
+                id->symbol->dependent_value_template_parameter_index >=
+                    remap->rebase_base)) {
+      // The member template's own non-type parameter used as a value, as in
+      // `s(N)` for `template <class U, size_t N> S(U (&)[N])`.  Copy the
+      // symbol so the primary's init-list keeps its absolute numbering.
+      Symbol* old = id->symbol;
+      TypeRecord* type = old->type != NULL ? TypeRecordCopy(old->type) : NULL;
+      RebaseTemplateParameterIndices(type, remap->rebase_base);
+      Symbol* copy = NewSymbol(old->name.value, type, old->storage);
+      copy->namespace_ = old->namespace_;
+      copy->flags = old->flags;
+      copy->alignment = old->alignment;
+      copy->template_parameter_index = old->template_parameter_index;
+      if (copy->template_parameter_index >= remap->rebase_base) {
+        copy->template_parameter_index -= remap->rebase_base;
+      }
+      copy->dependent_value_template_parameter_index =
+          old->dependent_value_template_parameter_index;
+      if (copy->dependent_value_template_parameter_index >=
+          remap->rebase_base) {
+        copy->dependent_value_template_parameter_index -= remap->rebase_base;
+      }
+      copy->location = old->location;
+      copy->value = old->value;
+      id->symbol = copy;
+      ASTNodeSetType(node, copy->type);
     }
   } else if (node->op == AST_OP(cast) && remap->rebase_base > 0) {
     CastASTNode* cast = (CastASTNode*)node;
     RebaseTemplateParameterIndices(cast->cast_type, remap->rebase_base);
   }
+}
+
+// The enclosing class's non-type parameter used as a value, as in `e(E)`.
+// Must run before the rebase: once renumbered, the member's own parameters
+// occupy the enclosing parameters' indices.
+static ASTNode* SubstituteEnclosingNonTypeParameter(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  ConstructorInitFormalRemap* remap = data;
+  if (node->op != AST_OP(identifier) || remap->enclosing_args == NULL) {
+    return node;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol == NULL || !symbol->flags.is_template_parameter ||
+      symbol->flags.is_template_type_parameter ||
+      symbol->template_parameter_index < 0 ||
+      symbol->template_parameter_index >= remap->rebase_base ||
+      (size_t)symbol->template_parameter_index >=
+          remap->enclosing_args->length) {
+    return node;
+  }
+  TemplateArgument* arg =
+      remap->enclosing_args->value.p[symbol->template_parameter_index];
+  if (arg == NULL || arg->kind != kTemplateParameterNonType ||
+      arg->pack_arguments != NULL || arg->template_parameter_index >= 0) {
+    return node;
+  }
+  ASTNode* value = TemplateArgumentMaterializeExpression(arg, node->location);
+  if (value == NULL) {
+    return node;
+  }
+  *action = kASTTransformSkipChildren;
+  return value;
 }
 
 /* Rewrite every reference to one of `from_func`'s parameters inside the deferred
@@ -5757,8 +5819,17 @@ void SyntaxCXXConstructorInitListRemapFormals(CXXConstructorInitList* init_list,
       continue;
     }
     for (size_t j = 0; j < init->actuals->length; j++) {
-      ASTNodeVisit(init->actuals->value.p[j],
-                   RemapConstructorInitFormalVisitor, 0, &remap);
+      ASTNode* actual = init->actuals->value.p[j];
+      if (rebase_base > 0) {
+        ASTNode* substituted = ASTNodeVisitAndTransform(
+            actual, SubstituteEnclosingNonTypeParameter, &remap);
+        if (substituted != actual) {
+          ASTNodeDelete(actual);
+          actual = substituted;
+          init->actuals->value.p[j] = actual;
+        }
+      }
+      ASTNodeVisit(actual, RemapConstructorInitFormalVisitor, 0, &remap);
     }
   }
 }
@@ -8725,10 +8796,11 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   bool is_explicit = false;
   TypeRecord* type = NULL;
   bool saved_friend_type_context = syntax->parsing_friend_type_specifier;
-  bool used_friend_type_only_context =
-      CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+  bool starts_with_qualified_name =
       LexLookingAt(syntax->lex, TOK(identifier)) &&
       SyntaxCurrentIdentifierFollowedByScopeOperator(syntax);
+  bool used_friend_type_only_context =
+      CompilerCXXAtLeast(kLanguageStandardCXX26) && starts_with_qualified_name;
   syntax->parsing_friend_type_specifier =
       CompilerCXXAtLeast(kLanguageStandardCXX26);
   ParseDeclarationSpecifier(syntax, &storage, &is_inline, &is_constexpr,
@@ -8748,6 +8820,11 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   if (LexLookingAt(syntax->lex, TOK(semicolon)) ||
       LexLookingAt(syntax->lex, TOK(comma)) ||
       LexLookingAt(syntax->lex, TOK(ellipsis))) {
+    if (starts_with_qualified_name &&
+        !CompilerCXXAtLeast(kLanguageStandardCXX26) && type != NULL &&
+        TypeContainsTemplateParameter(type)) {
+      SyntaxError(syntax, "dependent friend type requires 'typename' before C++26");
+    }
     bool another = true;
     while (another) {
       SourceLocation location = syntax->lex->current_token_location;

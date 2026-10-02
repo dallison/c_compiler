@@ -1746,11 +1746,23 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
   // contains no labels.  A label inside the dead arm is a valid goto/switch
   // target, so that code is reachable and must still be generated (otherwise
   // the label is dropped while branches to it survive, dangling the target).
-  if (ASTNodeIsIntConstant(node->cond) &&
+  // `__builtin_is_constant_evaluated()` is likewise known here, so the arm
+  // reserved for constant evaluation never reaches the emitted code.
+  ASTNode* cond_value = node->cond;
+  while (cond_value != NULL && cond_value->op == AST_OP(cast)) {
+    cond_value = ((CastASTNode*)cond_value)->expr;
+  }
+  bool cond_is_constant_evaluated =
+      cond_value != NULL &&
+      cond_value->op == AST_OP(builtin_is_constant_evaluated);
+  if ((ASTNodeIsIntConstant(node->cond) || cond_is_constant_evaluated) &&
       !StatementContainsLabel(node->if_part) &&
       !StatementContainsLabel(node->else_part)) {
-    ConstantASTNode* c = (ConstantASTNode*)node->cond;
-    if (c->value.ivalue != 0) {
+    bool take_if_part =
+        cond_is_constant_evaluated
+            ? gen->for_constant_evaluation
+            : ((ConstantASTNode*)node->cond)->value.ivalue != 0;
+    if (take_if_part) {
       GenerateStatement(gen, node->if_part);
     } else {
       if (node->else_part != NULL) {
@@ -2746,6 +2758,7 @@ void GenerateStatement(Generator* gen, ASTNode* node) {
 
     if (emit_loc) {
       GeneratorEmit(gen, NewIRLocation(node->location));
+      gen->last_emitted_location = node->location;
     }
   }
 

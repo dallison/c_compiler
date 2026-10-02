@@ -622,6 +622,9 @@ static void AddGlobalSymbolToELFFile(void* entry, void* data) {
 }
 
 static void AddSections(AsmObject* object, ELFWriterFile* elf) {
+  int32_t debug_line_index = -1;
+  int32_t* section_symbol_indexes =
+      malloc(sizeof(int32_t) * (object->sections.length + 1));
   for (size_t i = 0; i < object->sections.length; i++) {
     AssemblerSection* section = object->sections.value.p[i];
 
@@ -660,36 +663,7 @@ static void AddSections(AsmObject* object, ELFWriterFile* elf) {
                             section->alignment, &section->contents, entry_size);
 
     if (is_debug_line_section) {
-      if (object->dwarf.address_fixups.length == 0) {
-        AssemblerSymbol* text = AsmObjectFindSymbol(object, ".text");
-        if (text != NULL) {
-          AssemblerRelocation* addr_reloc = DwarfDebugLineRelocation(
-              &object->dwarf, text, object->reloc_types[kRelocSet64],
-              elf_section->index);
-          AsmObjectAddRelocation(object, addr_reloc);
-        }
-      }
-      for (size_t f = 0; f < object->dwarf.address_fixups.length; f++) {
-        DwarfAddressFixup* fixup = object->dwarf.address_fixups.value.p[f];
-        AssemblerSymbol* sym = NULL;
-        if (fixup->section >= 0 &&
-            (size_t)fixup->section < object->sections.length) {
-          AssemblerSection* src = object->sections.value.p[fixup->section];
-          if (src->name != NULL) {
-            sym = AsmObjectFindSymbol(object, src->name->value);
-          }
-        }
-        if (sym == NULL) {
-          sym = AsmObjectFindSymbol(object, ".text");
-        }
-        if (sym != NULL) {
-          object->dwarf.address_offset = fixup->offset;
-          AssemblerRelocation* addr_reloc = DwarfDebugLineRelocation(
-              &object->dwarf, sym, object->reloc_types[kRelocSet64],
-              elf_section->index);
-          AsmObjectAddRelocation(object, addr_reloc);
-        }
-      }
+      debug_line_index = elf_section->index;
     }
 
     if (section->name != NULL &&
@@ -701,8 +675,25 @@ static void AddSections(AsmObject* object, ELFWriterFile* elf) {
       section_symbol->defined = true;
       AsmObjectInsertSymbol(object, section_symbol);
     }
+    section_symbol_indexes[i] = (int32_t)elf->symbol_table.length;
     ELFWriterAddSectionSymbol(elf, &elf_section->name, elf_section->index);
   }
+
+  // Each line sequence's DW_LNE_set_address is relocated against the section
+  // symbol of the section holding its code.
+  for (size_t f = 0; debug_line_index >= 0 &&
+                     f < object->dwarf.address_fixups.length; f++) {
+    DwarfAddressFixup* fixup = object->dwarf.address_fixups.value.p[f];
+    if (fixup->section < 0 ||
+        (size_t)fixup->section >= object->sections.length) {
+      continue;
+    }
+    ELFWriterAddRelocationWithAddend(
+        elf, debug_line_index, fixup->offset,
+        section_symbol_indexes[fixup->section], 0,
+        object->reloc_types[kRelocSet64]);
+  }
+  free(section_symbol_indexes);
 }
 
 static void AddRelocations(AsmObject* object, ELFWriterFile* elf) {

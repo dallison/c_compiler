@@ -1446,20 +1446,22 @@ static void CopyWithLoopXY(W65C02Generator* g, TargetInstruction* to,
   SetAddrMode(to, to_mode);
   SetAddrMode(from, from_mode);
 
-  ldyi(g, size + from_index - 1);
   if (to_index == 0) {
-    ldxi(g, size + to_index - 1);
+    ldyi(g, size + from_index - 1);
+    ldxi(g, size - 1);
   } else {
+    ldyi(g, from_index);
     ldxi(g, to_index);
   }
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
   lda(g, from, IsAbsoluteSymbolAddressingMode(from_mode) ? 0 : -1);
   sta(g, to, IsAbsoluteSymbolAddressingMode(to_mode) ? 0 : -1);
-  dey(g);
   if (to_index == 0) {
+    dey(g);
     dex(g);
     EmitResolvedBranch(g, W65C02_OP(bpl), loop);
   } else {
+    iny(g);
     inx(g);
     cpxi(g, size+to_index);
     EmitResolvedBranch(g, W65C02_OP(bne), loop);
@@ -1513,13 +1515,25 @@ static void CopyWithLoopX(W65C02Generator* g, TargetInstruction* to,
   AddressingMode old_to = GetAddrMode(to);
   AddressingMode old_from = GetAddrMode(from);
 
+  if (to_mode == kAddrModeAbsoluteSymbolIndexedY) {
+    to_mode = kAddrModeAbsoluteSymbolIndexedX;
+  }
+  if (from_mode == kAddrModeAbsoluteSymbolIndexedY) {
+    from_mode = kAddrModeAbsoluteSymbolIndexedX;
+  }
   SetAddrMode(to, to_mode);
   SetAddrMode(from, from_mode);
 
-  ldxi(g, size + to_index - 1);
+  // X counts down from size-1 to 0; the start indexes are folded into the
+  // operand offsets.  Zero-page operands use -1 for "no offset".
+  int from_offset = IsAbsoluteSymbolAddressingMode(from_mode) || from_index > 0
+                        ? from_index : -1;
+  int to_offset = IsAbsoluteSymbolAddressingMode(to_mode) || to_index > 0
+                      ? to_index : -1;
+  ldxi(g, size - 1);
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-  lda(g, from, from_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
-  sta(g, to, to_mode == kAddrModeAbsoluteSymbol ? 0 : -1);
+  lda(g, from, from_offset);
+  sta(g, to, to_offset);
   dex(g);
   EmitResolvedBranch(g, W65C02_OP(bpl), loop);
   
@@ -1632,24 +1646,21 @@ static void CopyToAbsolute(W65C02Generator* g, TargetInstruction* to,
       // using a loop.  If non-zero, copy from literal for >2 bytes.
       if (TargetIsZero(from)) {
         if (size > 2) {
-          // Store 0 into zero page with an indexed X loop.
-          SetAddrMode(to, loop_to_mode);
-          if (to_start_index == 0) {
-            ldxi(g, size-1);
-            ldai(g, 0);
-            TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-            sta(g, to, -1);     // There is no STZ zp,X
-            dex(g);
-            EmitResolvedBranch(g, W65C02_OP(bpl), loop);
-          } else {
-            ldxi(g, to_start_index);
-            ldai(g, 0);
-            TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
-            sta(g, to, -1);     // There is no STZ zp,X
-            inx(g);
-            cpxi(g, to_start_index+size);
-            EmitResolvedBranch(g, W65C02_OP(bne), loop);
-          }
+          // Store 0 with an indexed X loop.
+          AddressingMode zero_mode = loop_to_mode == kAddrModeAbsoluteSymbolIndexedY
+                                         ? kAddrModeAbsoluteSymbolIndexedX
+                                         : loop_to_mode;
+          AddressingMode old_to = GetAddrMode(to);
+          SetAddrMode(to, zero_mode);
+          int to_offset = IsAbsoluteSymbolAddressingMode(zero_mode) || to_start_index > 0
+                              ? to_start_index : -1;
+          ldxi(g, size-1);
+          ldai(g, 0);
+          TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
+          sta(g, to, to_offset);     // There is no STZ zp,X
+          dex(g);
+          EmitResolvedBranch(g, W65C02_OP(bpl), loop);
+          SetAddrMode(to, old_to);
         } else {
           // Inline store.
           for (int i = 0; i < size; i++) {
@@ -4727,7 +4738,15 @@ static TargetInstruction* StoreIntoVariable(W65C02Generator* g, IRNode* store, I
 static TargetInstruction* StoreIntoStaticVariable(W65C02Generator* g, IRNode* store, IRNode* dest_node, IRNode* src_node, int size) {
   TargetInstruction* src = GetAddress(g,src_node, false);
   TargetInstruction* dest = GetAddress(g,dest_node, false);
-  Copy(g, dest, src, 0, 0, size, GetAddrMode(dest), GetAddrMode(src));
+  AddressingMode src_mode = GetAddrMode(src);
+  IRNode* src_value = IgnoreCasts(src_node);
+  if (TargetOpcodeEq(src->opcode, W65C02_OP(symbol)) &&
+      (src_value->opcode == IR_OP(addressof) ||
+       TypeIsArray(src_value->type) || TypeIsFunction(src_value->type))) {
+    // The symbol's address is the value being stored, not its contents.
+    src_mode = kAddrModeSymbolAddr;
+  }
+  Copy(g, dest, src, 0, 0, size, GetAddrMode(dest), src_mode);
   return SetLoweredNode(store, src);
 }
 
@@ -6061,6 +6080,7 @@ static bool CanElideForwardingTailFrame(W65C02Generator* g) {
       case IR_OP(ret):
       case IR_OP(bra):
       case IR_OP(nop):
+      case IR_OP(loc):
         break;
       case IR_OP(pusharg):
         if (inst->outputs.length != 1 ||

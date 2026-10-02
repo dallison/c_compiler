@@ -139,13 +139,32 @@ void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func) {
       !TypeFunctionReturnContainsAuto(func)) {
     return;
   }
+  Symbol* symbol = func->info.function.symbol;
+  Symbol* definition = symbol != NULL ? symbol->value.func_defn : NULL;
+  TypeRecord* defn = definition != NULL ? definition->type : NULL;
+  if (func->info.function.body == NULL && defn != NULL && defn != func &&
+      TypeIsFunction(defn) && func->info.function.cxx_member_owner != NULL &&
+      defn->info.function.cxx_member_owner !=
+          func->info.function.cxx_member_owner) {
+    // A class template specialization's member whose body was deferred
+    // records the template pattern as its definition.  The pattern's return
+    // statements are still dependent (`if constexpr` cannot discard either
+    // branch), so the specialization's own body has to be cloned to deduce.
+    // A speculative probe would only defer it again.
+    int saved_speculative_depth =
+        compiler->speculative_template_instantiation_depth;
+    compiler->speculative_template_instantiation_depth = 0;
+    TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, symbol);
+    compiler->speculative_template_instantiation_depth =
+        saved_speculative_depth;
+    if (func->info.function.body == NULL) {
+      return;
+    }
+  }
   if (func->info.function.body == NULL) {
     // `auto Mask() const;` in a class and `auto G::Mask() const {...}` later:
     // the call resolves to the bodiless declaration, so deduce through the
     // definition and give the declaration the same return type.
-    Symbol* symbol = func->info.function.symbol;
-    Symbol* definition = symbol != NULL ? symbol->value.func_defn : NULL;
-    TypeRecord* defn = definition != NULL ? definition->type : NULL;
     if (defn == NULL || defn == func || !TypeIsFunction(defn) ||
         defn->info.function.body == NULL) {
       return;
@@ -1023,6 +1042,8 @@ static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
 }
 
 static StructMember* MemberPointerMemberFromExpression(ASTNode* node);
+static ASTNode* NewAnalyzedBuiltinAddressOf(ASTNode* sub,
+                                            SourceLocation location);
 
 static bool IsNullPointer(ASTNode* node) {
   switch (node->op) {
@@ -3270,6 +3291,19 @@ static ASTNode* AnalyzeComparisonOperator(BinaryASTNode* node) {
                      NewVectorComparisonResultType(node->left->type));
     }
     return (ASTNode*)node;
+  }
+  // A function designator compared with a null pointer constant (`f != 0`)
+  // decays to a function pointer.
+  for (int child = 0; child < 2; child++) {
+    ASTNode* operand = child == 0 ? node->left : node->right;
+    ASTNode* other = child == 0 ? node->right : node->left;
+    if (operand != NULL && other != NULL && TypeIsFunction(operand->type) &&
+        IsNullPointer(other)) {
+      SourceLocation location = operand->location;
+      ASTNode* address =
+          NewAnalyzedBuiltinAddressOf(ASTNodeMove(operand), location);
+      ASTNodeReplaceChild((ASTNode*)node, child, address, false);
+    }
   }
   SemanticCheckScalarType(node->left);
   SemanticCheckScalarType(node->right);

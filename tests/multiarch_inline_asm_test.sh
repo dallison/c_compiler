@@ -18,7 +18,7 @@ run_exec_case() {
   local src="$WORK/$name.c"
   local exe="$WORK/$name.exe"
   printf '%s\n' "$@" > "$src"
-  "$ROOT/$DAVECC" -target "$target" -static -Wl,-e -Wl,main "$src" -o "$exe"
+  "$ROOT/$DAVECC" -target "$target" -nostdinc -static -Wl,-e -Wl,main "$src" -o "$exe"
   set +e
   "$ROOT/$runner" "$exe"
   local status=$?
@@ -74,7 +74,7 @@ printf '%s\n' \
   '  __asm__ volatile ("lda #%0" :: "i" (7));' \
   '  return 0;' \
   '}' > "$c02"
-"$ROOT/$DAVECC" -target 6502 -S -O0 "$c02" -o "$c02_s"
+"$ROOT/$DAVECC" -target 6502 -nostdinc -S -O0 "$c02" -o "$c02_s"
 c02_asm="$(<"$c02_s")"
 if [[ "$c02_asm" != *"lda #7"* ]]; then
   echo "6502: immediate operand was not substituted" >&2
@@ -84,7 +84,7 @@ if [[ "$c02_asm" == *"%0"* || "$c02_asm" == *"%1"* || "$c02_asm" != *"sta __"* ]
   echo "6502: register operands were not substituted" >&2
   exit 1
 fi
-"$ROOT/$DAVECC" -target 6502 -c "$c02" -o "$WORK/6502.o"
+"$ROOT/$DAVECC" -target 6502 -nostdinc -c "$c02" -o "$WORK/6502.o"
 
 bad="$WORK/6502_bad.c"
 printf '%s\n' \
@@ -93,7 +93,7 @@ printf '%s\n' \
   '  __asm__ volatile ("nop" : "=q" (x));' \
   '  return x;' \
   '}' > "$bad"
-if "$ROOT/$DAVECC" -target 6502 -c "$bad" -o "$WORK/6502_bad.o" >"$WORK/6502_bad.out" 2>&1; then
+if "$ROOT/$DAVECC" -target 6502 -nostdinc -c "$bad" -o "$WORK/6502_bad.o" >"$WORK/6502_bad.out" 2>&1; then
   echo "6502: expected unsupported output constraint failure" >&2
   exit 1
 fi

@@ -6578,6 +6578,25 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
   return ok;
 }
 
+// The address of an undefined weak symbol is null unless some other object
+// defines it, so it is not known until link time.
+static bool ConstexprIsUndefinedWeakAddress(ASTNode* node) {
+  while (node != NULL) {
+    if (node->op == AST_OP(cast)) {
+      node = ((CastASTNode*)node)->expr;
+    } else if (node->op == AST_OP(address)) {
+      node = ((UnaryASTNode*)node)->sub;
+    } else {
+      break;
+    }
+  }
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  return symbol != NULL && symbol->flags.is_weak && !symbol->flags.is_defined;
+}
+
 bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result) {
   if (node == NULL ||
@@ -6587,6 +6606,10 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
     return false;
   }
   BinaryASTNode* binary = (BinaryASTNode*)node;
+  if (ConstexprIsUndefinedWeakAddress(binary->left) ||
+      ConstexprIsUndefinedWeakAddress(binary->right)) {
+    return false;
+  }
   bool left_is_pointer =
       binary->left != NULL && binary->left->type != NULL &&
       (TypeIsPointer(binary->left->type) ||

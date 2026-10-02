@@ -3072,13 +3072,13 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
       CloneTemplateFunctionBody(parser, template_definition->type,
                                 symbol->type, body_args);
   PopFunctionInstantiationInProgress(&in_progress);
+  SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
+                                                symbol, body_args);
   if (body_args != args) {
     VectorDeleteWithContents(body_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
   }
-  SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
-                                                symbol, args);
   symbol->type->info.function.definition = true;
   symbol->flags.is_defined = true;
   if (symbol->type->info.function.is_inline) {
@@ -3823,6 +3823,25 @@ static bool DeduceFunctionTemplateInitializerListArgument(
   return true;
 }
 
+/* Compare a non-dependent non-type argument written in a template-id pattern
+ * with the corresponding argument of a concrete specialization.  Both were
+ * accepted for the same template parameter, so integral values compare after
+ * that parameter's implicit conversion: the pattern's expression may keep its
+ * literal type (int for `1` in `ratio<1, D>`) while the specialization holds
+ * the parameter type (long).  Instantiation identity still compares types,
+ * since `identity<1>` and `identity<1L>` are distinct for `template <auto>`. */
+static bool TemplatePatternNonTypeArgumentMatches(TemplateArgument* pattern,
+                                                  TemplateArgument* actual) {
+  if (pattern->dependent_expr == NULL && actual->dependent_expr == NULL &&
+      pattern->type != NULL && actual->type != NULL &&
+      TypeIsIntegral(pattern->type) && TypeIsIntegral(actual->type) &&
+      TemplateArgumentConcreteValueKind(pattern) == kTemplateValueIntegral &&
+      TemplateArgumentConcreteValueKind(actual) == kTemplateValueIntegral) {
+    return pattern->int_value == actual->int_value;
+  }
+  return TemplateArgumentEqual(pattern, actual);
+}
+
 /* Deduce template arguments when both formal and actual are instantiations of
  * the same class template (e.g. formal `Wrapper<T>` vs actual `Wrapper<int>`):
  * match them argument-by-argument, recursing into type arguments. */
@@ -3873,7 +3892,7 @@ static bool DeduceFunctionTemplateOneTemplateArgument(Vector* args,
         args, explicit_arg_count, formal_arg->template_parameter_index,
         actual_arg);
   }
-  return TemplateArgumentEqual(formal_arg, actual_arg);
+  return TemplatePatternNonTypeArgumentMatches(formal_arg, actual_arg);
 }
 
 // The template-argument list describing a class-template specialization type.
@@ -6465,7 +6484,7 @@ static bool TemplateArgumentPatternMatchesDeduced(Vector* bindings,
       return SetDeducedTemplateNonTypeArgument(
           bindings, 0, pattern->template_parameter_index, deduced);
     }
-    return TemplateArgumentEqual(pattern, deduced);
+    return TemplatePatternNonTypeArgumentMatches(pattern, deduced);
   }
   if (pattern->kind == kTemplateParameterTemplate) {
     if (pattern->template_parameter_index >= 0) {
@@ -6824,17 +6843,7 @@ static bool ClassTemplateArgumentPatternMatches(Vector* bindings,
       return SetDeducedTemplateNonTypeArgument(
           bindings, 0, pattern->template_parameter_index, actual);
     }
-    // Both arguments have already been accepted for the primary template's
-    // non-type parameter, so compare integral values after that parameter's
-    // implicit conversion. The expression spelling the partial pattern may
-    // retain its original literal type (for example, int for `0`) while the
-    // actual argument has the parameter type (for example, size_t).
-    if (pattern->dependent_expr == NULL && actual->dependent_expr == NULL &&
-        pattern->type != NULL && actual->type != NULL &&
-        TypeIsIntegral(pattern->type) && TypeIsIntegral(actual->type)) {
-      return pattern->int_value == actual->int_value;
-    }
-    return TemplateArgumentEqual(pattern, actual);
+    return TemplatePatternNonTypeArgumentMatches(pattern, actual);
   }
   if (pattern->kind == kTemplateParameterTemplate) {
     if (pattern->template_parameter_index >= 0) {

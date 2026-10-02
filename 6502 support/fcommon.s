@@ -295,7 +295,7 @@ __fround:
   TXA
   PLP
 #endif
-  BNE fround_done      // Number is odd, no rounding.
+  BEQ fround_done      // Number is even, no rounding.
 
 round_up:
   CLC
@@ -308,7 +308,46 @@ round_up:
   LDA fmantissa+3
   ADC #0
   STA fmantissa+3
+  BCC fround_done
+  // Mantissa overflowed to 2.0; the lower bytes are already zero.
+  LDA #0x80
+  STA fmantissa+3
+  INC fexp
 fround_done:
+  RTS
+
+// Assemble a result whose unbiased-plus-127 exponent is the signed 16-bit
+// value in fexpA (low) and fexpB (high), flushing underflow to a signed zero
+// and overflow to a signed infinity.
+// X: offset into zero page for result
+.section ".text.__ffinish", "ax", @progbits
+__ffinish:
+  LDA fexpB
+  BMI ffinish_zero
+  BNE ffinish_inf
+  LDA fexpA
+  BEQ ffinish_zero
+  CMP #0xff
+  BEQ ffinish_inf
+  STA fexp
+  JMP __fassemble
+ffinish_zero:
+  LDA #0
+  STA 0,X
+  STA 1,X
+  STA 2,X
+  LDA fsign
+  STA 3,X
+  RTS
+ffinish_inf:
+  LDA #0
+  STA 0,X
+  STA 1,X
+  LDA #0x80
+  STA 2,X
+  LDA #0x7f
+  ORA fsign
+  STA 3,X
   RTS
 
 // X: offset of A in zero page in IEE754 format.
@@ -435,12 +474,12 @@ __fnan:
 // X: offset into zero page for result.
 .section ".text.__finf", "ax", @progbits
 __finf:
-  LDA #0x7f
-  STA 0,X
-  LDA #0x80
-  STA 1,X
   LDA #0
+  STA 0,X
+  STA 1,X
+  LDA #0x80
   STA 2,X
+  LDA #0x7f
   STA 3,X
   RTS
 
