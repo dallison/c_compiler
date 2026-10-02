@@ -63,7 +63,11 @@ __builtin_islower:
   BCC is_false
   CPX #'z'+1
   BCC is_true
+#ifdef __65c02__
   BRA is_false
+#else
+  JMP is_false
+#endif
 
 .section ".text.__builtin_isupper", "ax", @progbits
 __builtin_isupper:
@@ -73,7 +77,11 @@ __builtin_isupper:
   BCC is_false
   CPX #'Z'+1
   BCC is_true
-  BRA is_false\
+#ifdef __65c02__
+  BRA is_false
+#else
+  JMP is_false
+#endif
   
 .section ".text.__builtin_toupper", "ax", @progbits
 __builtin_toupper:
@@ -225,7 +233,11 @@ memcpy_large_loop:
   DEC __mem_size+1
   INC __t1
   INC __mem_src+1
+#ifdef __65c02__
   BRA memcpy_large_page_loop
+#else
+  JMP memcpy_large_page_loop
+#endif
 
 // Less than one page, use indirect Y for fast copy.
 memcpy_small:
@@ -236,7 +248,11 @@ memcpy_small_loop:
   LDA (__mem_src),Y
   STA (__t0),Y
   INY
+#ifdef __65c02__
   BRA memcpy_small_loop
+#else
+  JMP memcpy_small_loop
+#endif
 end_memcpy:
   RTS
 
@@ -265,7 +281,11 @@ memset_large_loop:
   // Page set, decrement high byte and do another.
   DEC __mem_size+1
   INC __t1
+#ifdef __65c02__
   BRA memset_large_page_loop
+#else
+  JMP memset_large_page_loop
+#endif
 
   // Less than one page, use indirect Y for fast set.
 memset_small:
@@ -275,7 +295,11 @@ memset_small_loop:
   BEQ end_memset
   STA (__t0),Y
   INY
+#ifdef __65c02__
   BRA memset_small_loop
+#else
+  JMP memset_small_loop
+#endif
 end_memset:
   RTS
 
@@ -308,7 +332,11 @@ mcmp2:
   DEC __mem_size
   BPL memcmp_large_loop
   DEC __mem_size+1
+#ifdef __65c02__
   BRA memcmp_large_loop
+#else
+  JMP memcmp_large_loop
+#endif
 
 memcmp_small:
   LDY #0
@@ -320,7 +348,11 @@ memcmp_loop:
   SBC (__mem_src), Y
   BNE memcmp_end
   INY
+#ifdef __65c02__
   BRA memcmp_loop
+#else
+  JMP memcmp_loop
+#endif
 memcmp_end1:
   LDA #0
 memcmp_end:
@@ -344,7 +376,17 @@ __builtin_va_arg:
   STY __mem_size+1
 
   // Load the contents of va_list and push onto stack.
+#ifdef __65c02__
   LDA (__mem_src)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__mem_src),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   PHA
   LDY #1
   LDA (__mem_src), Y
@@ -352,9 +394,28 @@ __builtin_va_arg:
 
   // Increment contents of va_list by mem_size.
   CLC
+#ifdef __65c02__
   LDA (__mem_src)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__mem_src),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   ADC __mem_size
+#ifdef __65c02__
   STA (__mem_src)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__mem_src),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDA (__mem_src),Y
   ADC __mem_size+1
   STA (__mem_src),Y
@@ -372,7 +433,17 @@ __builtin_va_arg:
 .section ".text.__builtin_va_arg2", "ax", @progbits
 __builtin_va_arg2:
   // Load the contents of va_list and push onto stack.
+#ifdef __65c02__
   LDA (__mem_src)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__mem_src),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   PHA
   LDY #1
   LDA (__mem_src), Y
@@ -380,9 +451,28 @@ __builtin_va_arg2:
 
   // Increment contents of va_list by 2.
   CLC
+#ifdef __65c02__
   LDA (__mem_src)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__mem_src),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   ADC #2
+#ifdef __65c02__
   STA (__mem_src)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__mem_src),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDA (__mem_src),Y
   ADC #0
   STA (__mem_src),Y
@@ -392,8 +482,27 @@ __builtin_va_arg2:
   STA __mem_src+1
   PLA
   STA __mem_src
+#ifdef __65c02__
   LDA (__mem_src)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__mem_src),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
+#ifdef __65c02__
   STA (__mem_dest)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__mem_dest),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDA (__mem_src), Y
   STA (__mem_dest), Y
   RTS
@@ -402,7 +511,17 @@ __builtin_va_arg2:
 .section ".text.__builtin_va_arg4", "ax", @progbits
 __builtin_va_arg4:
   // Load the contents of va_list and push onto stack.
+#ifdef __65c02__
   LDA (__mem_src)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__mem_src),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   PHA
   LDY #1
   LDA (__mem_src), Y
@@ -410,9 +529,28 @@ __builtin_va_arg4:
 
   // Increment contents of va_list by 4.
   CLC
+#ifdef __65c02__
   LDA (__mem_src)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__mem_src),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   ADC #4
+#ifdef __65c02__
   STA (__mem_src)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__mem_src),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDA (__mem_src),Y
   ADC #0
   STA (__mem_src),Y
@@ -424,13 +562,32 @@ __builtin_va_arg4:
   STA __mem_src
   LDA #4
   STA __mem_size
+#ifdef __65c02__
   STZ __mem_size+1
+#else
+  PHA
+  LDA #0
+  STA __mem_size+1
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   JMP __builtin_memcpy
 
 .section ".text.__builtin_va_arg8", "ax", @progbits
 __builtin_va_arg8:
   // Load the contents of va_list and push onto stack.
+#ifdef __65c02__
   LDA (__mem_src)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__mem_src),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   PHA
   LDY #1
   LDA (__mem_src), Y
@@ -438,9 +595,28 @@ __builtin_va_arg8:
 
   // Increment contents of va_list by 4.
   CLC
+#ifdef __65c02__
   LDA (__mem_src)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__mem_src),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   ADC #8
+#ifdef __65c02__
   STA (__mem_src)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__mem_src),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDA (__mem_src),Y
   ADC #0
   STA (__mem_src),Y
@@ -452,5 +628,14 @@ __builtin_va_arg8:
   STA __mem_src
   LDA #8
   STA __mem_size
+#ifdef __65c02__
   STZ __mem_size+1
+#else
+  PHA
+  LDA #0
+  STA __mem_size+1
+  STA __nmos_tmp
+  PLA
+  BIT __nmos_tmp
+#endif
   JMP __builtin_memcpy

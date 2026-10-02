@@ -1,23 +1,37 @@
 #include "vars.s"
 
+// *RUN enters with JSR. The C ABI uses the language zero page (&00..&8F);
+// MOS entry points leave that page alone, but compiled code clobbers it during
+// the run. On exit we re-enter the current language ROM (OSBYTE &8E) instead
+// of restoring saved zero page or RTS-ing to the *RUN caller.
+//
+// The linker script defines the absolute symbol __bbc_stack_cap as the initial
+// software stack top (zero means use BASIC HIMEM from &06/&07 as-is).
+
 .section ".text._start", "ax", @progbits
 
 .global _start
 
-// *RUN enters with JSR, so the MOS return address is on the 6502 stack.
-// Page 1 is the hardware stack. The C stack is the software stack and
-// stops at the mode 7 screen.
-.set bbc_stack_top 0x7c00
-
 _start:
-  LDA #bbc_stack_top & 0xff
+  ; Software stack grows down from BASIC HIMEM (&06/&07). Read before the C
+  ; ABI clobbers zero page. mode() will refresh __sp after a mode change.
+  LDA 0x06
   STA __sp
-  STA __fp
-  LDA #bbc_stack_top >> 8
+  LDA 0x07
   STA __sp+1
+  LDA #%hi(__bbc_stack_cap)
+  BEQ stack_cap_done
+  STA __sp+1
+  LDA #%lo(__bbc_stack_cap)
+  STA __sp
+stack_cap_done:
+  LDA __sp
+  STA __fp
+  LDA __sp+1
   STA __fp+1
-  TSX
-  STX bbc_s
+  ; Soft-float and MOS nest deeply on the 6502 hardware stack.
+  LDX #0xff
+  TXS
 
   LDA #%lo(__init_array_start)
   STA init_ptr
@@ -61,17 +75,31 @@ init_done:
   LDX #__i0
   LDY #0
   JSR main
-  LDX #__i0
-  JSR __pushreg2
-  LDX #__i0
-  LDY #0
-  JSR exit
-  LDX bbc_s
-  TXS
-  RTS
+  JMP bbc_return
 
 init_jsr:
   .byte 0x20, 0x00, 0x00
   RTS
+
+// Re-enter the current language (BASIC, etc.). OSBYTE &8E does not return.
+// The C ABI uses __i0 at &06/&07, the same bytes as BASIC HIMEM, so refresh
+// HIMEM from MOS before handing control back.
+.section ".text.bbc_return", "ax", @progbits
+.global bbc_return
+bbc_return:
+  LDA #0x84
+  LDX #0
+  LDY #0
+  JSR 0xfff4
+  STX 0x06
+  STY 0x07
+  ; Read the current language ROM number into X (Y=&FF leaves it unchanged).
+  LDA #0xfc
+  LDX #0
+  LDY #0xff
+  JSR 0xfff4
+  LDA #0x8e
+  JSR 0xfff4
+  BRK
 
 .comm init_ptr, 2

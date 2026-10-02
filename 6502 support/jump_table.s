@@ -53,7 +53,17 @@ jp1_skip:
   TXS
 
   // Jump indirect via jump table entry.
+#ifdef __65c02__
   LDA (__t0)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t0),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t2
   LDY #1
   LDA (__t0),Y
@@ -98,7 +108,17 @@ jp2_skip:
   TXS
 
   // Jump indirect via jump table entry.
+#ifdef __65c02__
   LDA (__t0)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t0),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t2
   LDY #1
   LDA (__t0),Y
@@ -143,7 +163,17 @@ jp4_skip:
   TXS
 
   // Jump indirect via jump table entry.
+#ifdef __65c02__
   LDA (__t0)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t0),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t2
   LDY #1
   LDA (__t0),Y
@@ -188,7 +218,17 @@ jp8_skip:
   TXS
 
   // Jump indirect via jump table entry.
+#ifdef __65c02__
   LDA (__t0)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t0),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA __t2
   LDY #1
   LDA (__t0),Y

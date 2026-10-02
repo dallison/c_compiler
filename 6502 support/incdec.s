@@ -46,9 +46,28 @@ __inc1:
   LDA 1,X
   STA __t3
   CLC
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   ADC #1
+#ifdef __65c02__
   STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   RTS
 
 .section ".text.__rinc1", "ax", @progbits
@@ -68,9 +87,28 @@ __inc21:
   LDA 1,X
   STA __t3
   CLC
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   ADC #1
+#ifdef __65c02__
   STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA (__t2), Y
   ADC #0
@@ -105,9 +143,28 @@ __inc2b:
   LDA 1,X
   STA __t3
   CLC
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   ADC __t0
+#ifdef __65c02__
   STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA (__t2), Y
   ADC __t1
@@ -140,9 +197,28 @@ __inc4:
   LDA 1,X
   STA __t3
   CLC
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   ADC #1
+#ifdef __65c02__
   STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA (__t2), Y
   ADC #0
@@ -184,9 +260,28 @@ __inc8:
   LDA 1,X
   STA __t3
   CLC
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   ADC #1
+#ifdef __65c02__
   STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA (__t2), Y
   ADC #0
@@ -269,9 +364,28 @@ __dec1:
   LDA 1,X
   STA __t3
   SEC
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   SBC #1
+#ifdef __65c02__
   STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   RTS
 
 .section ".text.__rdec1", "ax", @progbits
@@ -327,9 +441,28 @@ __dec2b:
   LDA 1,X
   STA __t3
   SEC
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   SBC __t0
+#ifdef __65c02__
   STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA (__t2), Y
   SBC __t1
@@ -362,9 +495,28 @@ __dec4:
   LDA 1,X
   STA __t3
   SEC
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   SBC #1
+#ifdef __65c02__
   STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA (__t2), Y
   SBC #0
@@ -405,9 +557,28 @@ __dec8:
   LDA 1,X
   STA __t3
   SEC
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   SBC #1
+#ifdef __65c02__
   STA (__t2)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t2),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA (__t2), Y
   SBC #0

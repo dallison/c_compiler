@@ -68,6 +68,7 @@ links against it):
 | `libc/libcriscv.a` | `libc/libcriscv.so` | `libc/libcriscv_crt.a` | `riscv` |
 | `libc/libcriscv32.a` | `libc/libcriscv32.so` | `libc/libcriscv32_crt.a` | `riscv32` |
 | `libc/libcpcode.a` | `libc/libcpcode.so` | `libc/libcpcode_crt.a` | `pcode` |
+| `libc/libc6502.a` | — | `6502` |
 | `libc/libc65c02.a` | — | `65c02` |
 | `libc/libcxtensa.a` | — | `esp32` |
 

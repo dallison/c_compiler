@@ -19,8 +19,22 @@
 __spill1:
   PHP
   PHA
+#ifdef __65c02__
   PHX
+#else
+  STA __nmos_tmp
+  TXA
+  PHA
+  LDA __nmos_tmp
+#endif
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   // 4 extra bytes have been pushed onto the stack.
   TSX
   LDA 0x105,X       // Load LO byte
@@ -37,12 +51,31 @@ sp1_skip:  // t2,t3 contain address of data for spill
   INY
   LDA (__t2), Y
   TAY
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   // X,Y: offset to subtract from __fp (spill offset).
   JSR __varaddr
   TAX
   LDA 0,X
+#ifdef __65c02__
   STA (__t0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
 
   // Return to address after data (__t2 + 3)
   // The data is 3 bytes but we set the return address to
@@ -57,8 +90,18 @@ sp1_skip:  // t2,t3 contain address of data for spill
   ADC #0
   STA 0x106,X
 
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   PLA
   PLP
   RTS
@@ -67,8 +110,22 @@ sp1_skip:  // t2,t3 contain address of data for spill
 __spill2:
   PHP
   PHA
+#ifdef __65c02__
   PHX
+#else
+  STA __nmos_tmp
+  TXA
+  PHA
+  LDA __nmos_tmp
+#endif
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   // 4 extra bytes have been pushed onto the stack.
   TSX
   LDA 0x105,X       // Load LO byte
@@ -85,12 +142,31 @@ sp2_skip:  // t2,t3 contain address of data for spill
   INY
   LDA (__t2), Y
   TAY
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   // X,Y: offset to subtract from __fp (spill offset).
   JSR __varaddr
   TAX
   LDA 0,X
+#ifdef __65c02__
   STA (__t0)
+#else
+  PHP
+  STY __nmos_tmp
+  LDY #0
+  STA (__t0),Y
+  LDY __nmos_tmp
+  PLP
+#endif
   LDY #1
   LDA 1,X
   STA (__t0),Y
@@ -108,8 +184,18 @@ sp2_skip:  // t2,t3 contain address of data for spill
   ADC #0
   STA 0x106,X
 
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   PLA
   PLP
   RTS
@@ -118,8 +204,22 @@ sp2_skip:  // t2,t3 contain address of data for spill
 __spill4:
   PHP
   PHA
+#ifdef __65c02__
   PHX
+#else
+  STA __nmos_tmp
+  TXA
+  PHA
+  LDA __nmos_tmp
+#endif
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   // 4 extra bytes have been pushed onto the stack.
   TSX
   LDA 0x105,X       // Load LO byte
@@ -136,7 +236,17 @@ sp4_skip:  // t2,t3 contain address of data for spill
   INY
   LDA (__t2), Y
   TAY
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   // X,Y: offset to subtract from __fp (spill offset).
   JSR __varaddr
   TAX
@@ -162,8 +272,18 @@ sp4_skip:  // t2,t3 contain address of data for spill
   ADC #0
   STA 0x106,X
 
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   PLA
   PLP
   RTS
@@ -173,8 +293,22 @@ sp4_skip:  // t2,t3 contain address of data for spill
 __spill8:
   PHP
   PHA
+#ifdef __65c02__
   PHX
+#else
+  STA __nmos_tmp
+  TXA
+  PHA
+  LDA __nmos_tmp
+#endif
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   // 4 extra bytes have been pushed onto the stack.
   TSX
   LDA 0x105,X       // Load LO byte
@@ -191,7 +325,17 @@ sp8_skip:  // t2,t3 contain address of data for spill
   INY
   LDA (__t2), Y
   TAY
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   // X,Y: offset to subtract from __fp (spill offset).
   JSR __varaddr
   TAX
@@ -217,8 +361,18 @@ spill8loop:
   ADC #0
   STA 0x106,X
 
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   PLA
   PLP
   RTS
@@ -228,8 +382,22 @@ spill8loop:
 __reload1:
   PHP
   PHA
+#ifdef __65c02__
   PHX
+#else
+  STA __nmos_tmp
+  TXA
+  PHA
+  LDA __nmos_tmp
+#endif
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   // 4 extra bytes have been pushed onto the stack.
   TSX
   LDA 0x105,X       // Load LO byte
@@ -246,12 +414,32 @@ rl1_skip:  // t2,t3 contain address of data for spill
   INY
   LDA (__t2), Y
   TAY
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   // X,Y: offset to subtract from __fp (spill offset).
 
   JSR __varaddr
   TAX
+#ifdef __65c02__
   LDA (__t0)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t0),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA 0,X
 
   // Return to address after data (__t2 + 3)
@@ -267,8 +455,18 @@ rl1_skip:  // t2,t3 contain address of data for spill
   ADC #0
   STA 0x106,X
 
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   PLA
   PLP
   RTS
@@ -277,8 +475,22 @@ rl1_skip:  // t2,t3 contain address of data for spill
 __reload2:
   PHP
   PHA
+#ifdef __65c02__
   PHX
+#else
+  STA __nmos_tmp
+  TXA
+  PHA
+  LDA __nmos_tmp
+#endif
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   // 4 extra bytes have been pushed onto the stack.
   TSX
   LDA 0x105,X       // Load LO byte
@@ -295,12 +507,32 @@ rl2_skip:  // t2,t3 contain address of data for spill
   INY
   LDA (__t2), Y
   TAY
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   // X,Y: offset to subtract from __fp (spill offset).
 
   JSR __varaddr
   TAX
+#ifdef __65c02__
   LDA (__t0)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t0),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   STA 0,X
   LDY #1
   LDA (__t0),Y
@@ -319,8 +551,18 @@ rl2_skip:  // t2,t3 contain address of data for spill
   ADC #0
   STA 0x106,X
 
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   PLA
   PLP
   RTS
@@ -329,8 +571,22 @@ rl2_skip:  // t2,t3 contain address of data for spill
 __reload4:
   PHP
   PHA
+#ifdef __65c02__
   PHX
+#else
+  STA __nmos_tmp
+  TXA
+  PHA
+  LDA __nmos_tmp
+#endif
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   // 4 extra bytes have been pushed onto the stack.
   TSX
   LDA 0x105,X       // Load LO byte
@@ -347,7 +603,17 @@ rl4_skip:  // t2,t3 contain address of data for spill
   INY
   LDA (__t2), Y
   TAY
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   // X,Y: offset to subtract from __fp (spill offset).
 
 
@@ -375,8 +641,18 @@ reload4loop:
   ADC #0
   STA 0x106,X
 
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   PLA
   PLP
   RTS
@@ -385,8 +661,22 @@ reload4loop:
 __reload8:
   PHP
   PHA
+#ifdef __65c02__
   PHX
+#else
+  STA __nmos_tmp
+  TXA
+  PHA
+  LDA __nmos_tmp
+#endif
+#ifdef __65c02__
   PHY
+#else
+  STA __nmos_tmp
+  TYA
+  PHA
+  LDA __nmos_tmp
+#endif
   // 4 extra bytes have been pushed onto the stack.
   TSX
   LDA 0x105,X       // Load LO byte
@@ -403,7 +693,17 @@ rl8_skip:  // t2,t3 contain address of data for spill
   INY
   LDA (__t2), Y
   TAY
+#ifdef __65c02__
   LDA (__t2)
+#else
+  STY __nmos_tmp
+  LDY #0
+  LDA (__t2),Y
+  PHA
+  LDA __nmos_tmp
+  TAY
+  PLA
+#endif
   // X,Y: offset to subtract from __fp (spill offset).
 
   JSR __varaddr
@@ -430,8 +730,18 @@ reload8loop:
   ADC #0
   STA 0x106,X
 
+#ifdef __65c02__
   PLY
+#else
+  PLA
+  TAY
+#endif
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   PLA
   PLP
   RTS

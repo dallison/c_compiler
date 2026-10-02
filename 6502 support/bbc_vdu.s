@@ -67,7 +67,25 @@ mode:
   JSR bbc_vdu
   LDY #0
   LDA (__sp), Y
-  JMP bbc_vdu
+  JSR bbc_vdu
+  ; The new screen may cover the old software stack. OSBYTE &84 returns
+  ; HIMEM in X and Y. The caller still pops this 2-byte argument, so park
+  ; two bytes below HIMEM and that pop lands the stack on HIMEM.
+  LDA #0x84
+  LDX #0
+  LDY #0
+  JSR VDU_OSBYTE
+  TXA
+  SEC
+  SBC #2
+  STA __sp
+  TYA
+  SBC #0
+  STA __sp+1
+  ; Clear graphics after HIMEM is valid and the stack is clear of the frame buffer.
+  LDA #16
+  JSR bbc_vdu
+  RTS
 
 .section ".text.colour", "ax", @progbits
 .global colour

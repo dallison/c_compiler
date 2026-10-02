@@ -42,7 +42,11 @@ __smul1:
   LDA #0
   SBC multiplier
   STA multiplier
+#ifdef __65c02__
   BRA smul1b
+#else
+  JMP smul1b
+#endif
 smul1a:
   // Multiplicand is negative, negate it.
   SEC
@@ -69,7 +73,11 @@ __umul1:
   STA multiplicand
   LDA 0,Y
   STA multiplier
+#ifdef __65c02__
   BRA umul1c
+#else
+  JMP umul1c
+#endif
 
 // These are from:
 // https://llx.com/Neil/a2/mult.html
@@ -89,7 +97,12 @@ umul1_l2:
   DEX
   BNE umul1_l1
   STA product+1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   LDA product
   STA 0,X
   RTS
@@ -120,7 +133,11 @@ __smul2:
   LDA #0
   SBC multiplier+1
   STA multiplier+1
+#ifdef __65c02__
   BRA smul2b
+#else
+  JMP smul2b
+#endif
 smul2a:
   // Multiplicand is negative, negate it.
   SEC
@@ -158,7 +175,11 @@ __umul2:
   STA multiplier
   LDA 1,Y
   STA multiplier+1
+#ifdef __65c02__
   BRA umul2c
+#else
+  JMP umul2c
+#endif
 
 umul2b:
   PHA
@@ -184,7 +205,12 @@ umul2_l2:
   ROR product
   DEX
   BNE umul2_l1
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   STA product+3
   LDA product
   STA 0,X
@@ -221,7 +247,12 @@ umul2_10c:
   ASL __t2
   ROL __t3
 
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   CLC
   LDA __t0
   ADC __t2
@@ -262,5 +293,9 @@ __smul2_10:
   SBC 1,X
   STA __t1
   STA __t3
+#ifdef __65c02__
   BRA umul2_10c
+#else
+  JMP umul2_10c
+#endif
 

@@ -1,9 +1,5 @@
 #include <bbc.h>
 
-/* MODE 4 keeps the screen at &5800. park_stack() moves the software
-   stack to that address so later calls do not write into the picture. */
-extern void park_stack(void);
-
 static void plot8(int cx, int cy, int x, int y) {
   dot(cx + x, cy + y);
   dot(cx - x, cy + y);
@@ -36,7 +32,6 @@ static void circle(int cx, int cy, int r) {
 
 int main(void) {
   mode(4);
-  park_stack();
   gcol(BBC_GCOL_SET, 1);
   circle(640, 512, 400);
   for (;;) {

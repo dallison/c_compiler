@@ -70,4 +70,8 @@
 // Spare zero page for the ROM starts at 0x90.
 .set os_scratch_start 0x90
 
+// Scratch byte for the NMOS expansions of STZ, PHX/PHY, and (zp) indirect.
+// The 65C02 side of those #ifs does not touch it.
+.comm __nmos_tmp, 1
+
 #endif

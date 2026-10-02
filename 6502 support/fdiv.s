@@ -36,7 +36,11 @@
 // be in the upper 24 bits.
 udiv6:
   LDX #24
+#ifdef __65c02__
   BRA udiv61        // First iteration, no shifts.
+#else
+  JMP udiv61        // First iteration, no shifts.
+#endif
 udiv6_l1:
   // Shift remainder left.  This is a 32 bit shift starting at bit 8.
   ASL remainder+1
@@ -78,7 +82,11 @@ udiv6_l2:
 // 40 bit division.
 udiv40:
   LDX #40
+#ifdef __65c02__
   BRA udiv401        // First iteration, no shifts.
+#else
+  JMP udiv401        // First iteration, no shifts.
+#endif
 udiv40_l1:
   // Shift remainder left.  This is a 40 bit shift starting at bit 0.
   ASL remainder+0
@@ -127,16 +135,31 @@ udiv40_l2:
 
 // Zero result
 fdiv_res_0:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fres0
 
 // NaN result.
 fdiv_res_nan:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fnan
 
 fdiv_res_inf:
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __finf
 
 // Either NaN or infinity.  If both A and B are zero then NaN otherwise
@@ -144,7 +167,12 @@ fdiv_res_inf:
 fdiv0:
   JSR __fcheckA0
   BEQ fdiv_res_nan
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __finf
 
 // Entry:
@@ -210,7 +238,11 @@ fdiv_loop:
   ROR fmantissa+1
   ROR fmantissa+0
   INC fexp
+#ifdef __65c02__
   BRA fdiv_loop
+#else
+  JMP fdiv_loop
+#endif
 
 fdiv_end:
   // udiv40 leaves the normalized quotient seven bits farther left than the
@@ -223,5 +255,10 @@ fdiv_end:
   // Normalize result and assemble into destination.
   JSR __fnormalize
   JSR __fround
+#ifdef __65c02__
   PLX
+#else
+  PLA
+  TAX
+#endif
   JMP __fassemble

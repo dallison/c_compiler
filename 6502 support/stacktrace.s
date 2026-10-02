@@ -9,5 +9,14 @@ __davecc_6502_hardware_stack_pointer:
 	sty __i0+1
 	tsx
 	txa
-	sta (__i0)
+#ifdef __65c02__
+	STA (__i0)
+#else
+	PHP
+	STY __nmos_tmp
+	LDY #0
+	STA (__i0),Y
+	LDY __nmos_tmp
+	PLP
+#endif
 	rts

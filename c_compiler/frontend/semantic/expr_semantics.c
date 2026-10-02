@@ -6097,6 +6097,7 @@ static void CheckFormatCall(VectorASTNode* node, Symbol* callee) {
 typedef enum {
   kPrintfProfileFull,
   kPrintfProfileLiteral,
+  kPrintfProfileSimple,
   kPrintfProfileInt,
   kPrintfProfileLong,
   kPrintfProfileFP,
@@ -6117,17 +6118,21 @@ static int PrintfFormatArgument(const char* name) {
 
 static PrintfProfile ClassifyPrintfFormat(const char* format) {
   PrintfProfile profile = kPrintfProfileLiteral;
+  // Every conversion is a bare %d, %i, %u, %c, %s or %%.
+  bool simple = true;
   const char* p = format;
   while (*p != '\0') {
     if (*p++ != '%') {
       continue;
     }
+    if (profile == kPrintfProfileLiteral) {
+      profile = kPrintfProfileInt;
+    }
     if (*p == '%') {
       p++;
-      profile = kPrintfProfileInt;
       continue;
     }
-    profile = kPrintfProfileInt;
+    const char* spec = p;
     while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0') {
       p++;
     }
@@ -6169,6 +6174,9 @@ static PrintfProfile ClassifyPrintfFormat(const char* format) {
     if (*p == '\0') {
       return kPrintfProfileFull;
     }
+    if (p != spec || strchr("diucs", *p) == NULL) {
+      simple = false;
+    }
     char conversion = *p++;
     if (strchr("fFeEgGaA", conversion) != NULL) {
       profile = kPrintfProfileFP;
@@ -6177,6 +6185,9 @@ static PrintfProfile ClassifyPrintfFormat(const char* format) {
     } else if (strchr("diuoxXpcsn", conversion) == NULL) {
       return kPrintfProfileFull;
     }
+  }
+  if (profile == kPrintfProfileInt && simple) {
+    return kPrintfProfileSimple;
   }
   return profile;
 }
@@ -6220,6 +6231,9 @@ static void SpecializePrintfCall(VectorASTNode* node, Symbol* callee) {
   switch (profile) {
     case kPrintfProfileLiteral:
       suffix = "literal";
+      break;
+    case kPrintfProfileSimple:
+      suffix = "simple";
       break;
     case kPrintfProfileInt:
       suffix = "int";
