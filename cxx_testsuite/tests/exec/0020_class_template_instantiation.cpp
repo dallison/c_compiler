@@ -1799,12 +1799,12 @@ int main(void) {
   int dependent_signature_value =
       read_dependent_nested<int>(dependent_signature_nested);
   NestedOwner<int>::Inner deduced_signature_nested = make_dependent_nested(43);
-  int deduced_signature_value = read_dependent_nested(deduced_signature_nested);
+  int deduced_signature_value = read_dependent_nested<int>(deduced_signature_nested);
   PairNestedOwner<int, char>::Inner pair_dependent_nested;
   pair_dependent_nested.first = 73;
   pair_dependent_nested.second = 5;
   int pair_dependent_nested_value =
-      read_pair_dependent_nested(pair_dependent_nested);
+      read_pair_dependent_nested<int, char>(pair_dependent_nested);
   if (pair_dependent_nested_value != 78) {
     return 29;
   }
@@ -1812,7 +1812,7 @@ int main(void) {
   sized_dependent_nested.value = 79;
   sized_dependent_nested.data[2] = 6;
   int sized_dependent_nested_value =
-      read_sized_dependent_nested(sized_dependent_nested);
+      read_sized_dependent_nested<int, 3>(sized_dependent_nested);
   if (sized_dependent_nested_value != 85) {
     return 30;
   }
@@ -1820,50 +1820,50 @@ int main(void) {
   wrapped_sized_dependent_nested.value.value = 83;
   wrapped_sized_dependent_nested.value.data[2] = 8;
   int wrapped_sized_dependent_nested_value =
-      read_wrapped_sized_dependent_nested(wrapped_sized_dependent_nested);
+      read_wrapped_sized_dependent_nested<int, 3>(wrapped_sized_dependent_nested);
   if (wrapped_sized_dependent_nested_value != 91) {
     return 31;
   }
   int sized_dependent_pointer_value =
-      read_sized_dependent_nested_pointer(&sized_dependent_nested);
+      read_sized_dependent_nested_pointer<int, 3>(&sized_dependent_nested);
   if (sized_dependent_pointer_value != 85) {
     return 32;
   }
   int sized_dependent_reference_value =
-      read_sized_dependent_nested_reference(sized_dependent_nested);
+      read_sized_dependent_nested_reference<int, 3>(sized_dependent_nested);
   if (sized_dependent_reference_value != 85) {
     return 33;
   }
   int wrapped_sized_dependent_pointer_value =
-      read_wrapped_sized_dependent_nested_pointer(
+      read_wrapped_sized_dependent_nested_pointer<int, 3>(
           &wrapped_sized_dependent_nested);
   if (wrapped_sized_dependent_pointer_value != 91) {
     return 34;
   }
   int wrapped_sized_dependent_reference_value =
-      read_wrapped_sized_dependent_nested_reference(
+      read_wrapped_sized_dependent_nested_reference<int, 3>(
           wrapped_sized_dependent_nested);
   if (wrapped_sized_dependent_reference_value != 91) {
     return 35;
   }
   int const_sized_dependent_pointer_value =
-      read_const_sized_dependent_nested_pointer(&sized_dependent_nested);
+      read_const_sized_dependent_nested_pointer<int, 3>(&sized_dependent_nested);
   if (const_sized_dependent_pointer_value != 85) {
     return 38;
   }
   int const_sized_dependent_reference_value =
-      read_const_sized_dependent_nested_reference(sized_dependent_nested);
+      read_const_sized_dependent_nested_reference<int, 3>(sized_dependent_nested);
   if (const_sized_dependent_reference_value != 85) {
     return 39;
   }
   int const_wrapped_sized_dependent_pointer_value =
-      read_const_wrapped_sized_dependent_nested_pointer(
+      read_const_wrapped_sized_dependent_nested_pointer<int, 3>(
           &wrapped_sized_dependent_nested);
   if (const_wrapped_sized_dependent_pointer_value != 91) {
     return 40;
   }
   int const_wrapped_sized_dependent_reference_value =
-      read_const_wrapped_sized_dependent_nested_reference(
+      read_const_wrapped_sized_dependent_nested_reference<int, 3>(
           wrapped_sized_dependent_nested);
   if (const_wrapped_sized_dependent_reference_value != 91) {
     return 41;
@@ -1872,7 +1872,7 @@ int main(void) {
   sized_dependent_array[0].value = 89;
   sized_dependent_array[0].data[2] = 10;
   int sized_dependent_array_value =
-      read_sized_dependent_nested_array(sized_dependent_array);
+      read_sized_dependent_nested_array<int, 3>(sized_dependent_array);
   if (sized_dependent_array_value != 99) {
     return 36;
   }
@@ -1880,7 +1880,7 @@ int main(void) {
   wrapped_sized_dependent_array[0].value.value = 97;
   wrapped_sized_dependent_array[0].value.data[2] = 12;
   int wrapped_sized_dependent_array_value =
-      read_wrapped_sized_dependent_nested_array(
+      read_wrapped_sized_dependent_nested_array<int, 3>(
           wrapped_sized_dependent_array);
   if (wrapped_sized_dependent_array_value != 109) {
     return 37;
@@ -1905,7 +1905,7 @@ int main(void) {
   sized_method_nested.value = 193;
   sized_method_nested.data[2] = 42;
   int sized_method_nested_value =
-      read_sized_method_nested(sized_method_nested);
+      read_sized_method_nested<int, 3>(sized_method_nested);
   if (sized_method_nested_value != 235) {
     return 62;
   }
@@ -1913,59 +1913,59 @@ int main(void) {
   wrapped_sized_method_nested.value.value = 199;
   wrapped_sized_method_nested.value.data[2] = 46;
   int wrapped_sized_method_nested_value =
-      read_wrapped_sized_method_nested(wrapped_sized_method_nested);
+      read_wrapped_sized_method_nested<int, 3>(wrapped_sized_method_nested);
   if (wrapped_sized_method_nested_value != 245) {
     return 64;
   }
   int sized_method_nested_pointer_value =
-      read_sized_method_nested_pointer(&sized_method_nested);
+      read_sized_method_nested_pointer<int, 3>(&sized_method_nested);
   if (sized_method_nested_pointer_value != 235) {
     return 66;
   }
   int sized_method_nested_reference_value =
-      read_sized_method_nested_reference(sized_method_nested);
+      read_sized_method_nested_reference<int, 3>(sized_method_nested);
   if (sized_method_nested_reference_value != 235) {
     return 67;
   }
   int const_sized_method_nested_pointer_value =
-      read_const_sized_method_nested_pointer(&sized_method_nested);
+      read_const_sized_method_nested_pointer<int, 3>(&sized_method_nested);
   if (const_sized_method_nested_pointer_value != 235) {
     return 74;
   }
   int const_sized_method_nested_reference_value =
-      read_const_sized_method_nested_reference(sized_method_nested);
+      read_const_sized_method_nested_reference<int, 3>(sized_method_nested);
   if (const_sized_method_nested_reference_value != 235) {
     return 75;
   }
   int const_wrapped_sized_method_nested_pointer_value =
-      read_const_wrapped_sized_method_nested_pointer(
+      read_const_wrapped_sized_method_nested_pointer<int, 3>(
           &wrapped_sized_method_nested);
   if (const_wrapped_sized_method_nested_pointer_value != 245) {
     return 76;
   }
   int const_wrapped_sized_method_nested_reference_value =
-      read_const_wrapped_sized_method_nested_reference(
+      read_const_wrapped_sized_method_nested_reference<int, 3>(
           wrapped_sized_method_nested);
   if (const_wrapped_sized_method_nested_reference_value != 245) {
     return 77;
   }
   int sized_static_method_nested_value =
-      read_sized_static_method_nested(sized_method_nested);
+      read_sized_static_method_nested<int, 3>(sized_method_nested);
   if (sized_static_method_nested_value != 238) {
     return 82;
   }
   int wrapped_sized_static_method_nested_value =
-      read_wrapped_sized_static_method_nested(wrapped_sized_method_nested);
+      read_wrapped_sized_static_method_nested<int, 3>(wrapped_sized_method_nested);
   if (wrapped_sized_static_method_nested_value != 248) {
     return 83;
   }
   int sized_static_method_nested_pointer_value =
-      read_sized_static_method_nested_pointer(&sized_method_nested);
+      read_sized_static_method_nested_pointer<int, 3>(&sized_method_nested);
   if (sized_static_method_nested_pointer_value != 238) {
     return 86;
   }
   int sized_static_method_nested_reference_value =
-      read_sized_static_method_nested_reference(sized_method_nested);
+      read_sized_static_method_nested_reference<int, 3>(sized_method_nested);
   if (sized_static_method_nested_reference_value != 238) {
     return 87;
   }
@@ -1973,7 +1973,7 @@ int main(void) {
   sized_method_nested_array[0].value = 223;
   sized_method_nested_array[0].data[2] = 50;
   int sized_method_nested_array_value =
-      read_sized_method_nested_array(sized_method_nested_array);
+      read_sized_method_nested_array<int, 3>(sized_method_nested_array);
   if (sized_method_nested_array_value != 273) {
     return 70;
   }
@@ -1981,13 +1981,13 @@ int main(void) {
   wrapped_sized_method_nested_array[0].value.value = 227;
   wrapped_sized_method_nested_array[0].value.data[2] = 52;
   int wrapped_sized_method_nested_array_value =
-      read_wrapped_sized_method_nested_array(
+      read_wrapped_sized_method_nested_array<int, 3>(
           wrapped_sized_method_nested_array);
   if (wrapped_sized_method_nested_array_value != 279) {
     return 71;
   }
   int sized_static_method_nested_array_value =
-      read_sized_static_method_nested_array(sized_method_nested_array);
+      read_sized_static_method_nested_array<int, 3>(sized_method_nested_array);
   if (sized_static_method_nested_array_value != 276) {
     return 88;
   }
@@ -1997,261 +1997,261 @@ int main(void) {
     return 92;
   }
   int qualified_sized_static_method_nested_value =
-      read_qualified_sized_static_method_nested(sized_method_nested);
+      read_qualified_sized_static_method_nested<int, 3>(sized_method_nested);
   if (qualified_sized_static_method_nested_value != 238) {
     return 94;
   }
   int qualified_wrapped_sized_static_method_nested_value =
-      read_qualified_wrapped_sized_static_method_nested(
+      read_qualified_wrapped_sized_static_method_nested<int, 3>(
           wrapped_sized_method_nested);
   if (qualified_wrapped_sized_static_method_nested_value != 248) {
     return 96;
   }
   int qualified_sized_static_method_nested_pointer_value =
-      read_qualified_sized_static_method_nested_pointer(&sized_method_nested);
+      read_qualified_sized_static_method_nested_pointer<int, 3>(&sized_method_nested);
   if (qualified_sized_static_method_nested_pointer_value != 238) {
     return 98;
   }
   int qualified_sized_static_method_nested_reference_value =
-      read_qualified_sized_static_method_nested_reference(sized_method_nested);
+      read_qualified_sized_static_method_nested_reference<int, 3>(sized_method_nested);
   if (qualified_sized_static_method_nested_reference_value != 238) {
     return 99;
   }
   int qualified_sized_static_method_nested_array_value =
-      read_qualified_sized_static_method_nested_array(
+      read_qualified_sized_static_method_nested_array<int, 3>(
           sized_method_nested_array);
   if (qualified_sized_static_method_nested_array_value != 276) {
     return 102;
   }
   int qualified_const_sized_static_method_nested_pointer_value =
-      read_qualified_const_sized_static_method_nested_pointer(
+      read_qualified_const_sized_static_method_nested_pointer<int, 3>(
           &sized_method_nested);
   if (qualified_const_sized_static_method_nested_pointer_value != 238) {
     return 104;
   }
   int qualified_const_sized_static_method_nested_reference_value =
-      read_qualified_const_sized_static_method_nested_reference(
+      read_qualified_const_sized_static_method_nested_reference<int, 3>(
           sized_method_nested);
   if (qualified_const_sized_static_method_nested_reference_value != 238) {
     return 105;
   }
   int qualified_wrapped_sized_static_method_nested_pointer_value =
-      read_qualified_wrapped_sized_static_method_nested_pointer(
+      read_qualified_wrapped_sized_static_method_nested_pointer<int, 3>(
           &wrapped_sized_method_nested);
   if (qualified_wrapped_sized_static_method_nested_pointer_value != 248) {
     return 108;
   }
   int qualified_wrapped_sized_static_method_nested_reference_value =
-      read_qualified_wrapped_sized_static_method_nested_reference(
+      read_qualified_wrapped_sized_static_method_nested_reference<int, 3>(
           wrapped_sized_method_nested);
   if (qualified_wrapped_sized_static_method_nested_reference_value != 248) {
     return 109;
   }
   int qualified_const_wrapped_sized_static_method_nested_pointer_value =
-      read_qualified_const_wrapped_sized_static_method_nested_pointer(
+      read_qualified_const_wrapped_sized_static_method_nested_pointer<int, 3>(
           &wrapped_sized_method_nested);
   if (qualified_const_wrapped_sized_static_method_nested_pointer_value != 248) {
     return 112;
   }
   int qualified_const_wrapped_sized_static_method_nested_reference_value =
-      read_qualified_const_wrapped_sized_static_method_nested_reference(
+      read_qualified_const_wrapped_sized_static_method_nested_reference<int, 3>(
           wrapped_sized_method_nested);
   if (qualified_const_wrapped_sized_static_method_nested_reference_value !=
       248) {
     return 113;
   }
   int qualified_wrapped_sized_static_method_nested_array_value =
-      read_qualified_wrapped_sized_static_method_nested_array(
+      read_qualified_wrapped_sized_static_method_nested_array<int, 3>(
           wrapped_sized_method_nested_array);
   if (qualified_wrapped_sized_static_method_nested_array_value != 282) {
     return 116;
   }
   int qualified_const_wrapped_sized_static_method_nested_array_value =
-      read_qualified_const_wrapped_sized_static_method_nested_array(
+      read_qualified_const_wrapped_sized_static_method_nested_array<int, 3>(
           wrapped_sized_method_nested_array);
   if (qualified_const_wrapped_sized_static_method_nested_array_value != 282) {
     return 118;
   }
   int qualified_alias_sized_static_method_nested_value =
-      read_qualified_alias_sized_static_method_nested(sized_method_nested);
+      read_qualified_alias_sized_static_method_nested<int, 3>(sized_method_nested);
   if (qualified_alias_sized_static_method_nested_value != 238) {
     return 120;
   }
   int qualified_sized_static_method_function_pointer_value =
-      read_qualified_sized_static_method_function_pointer(
+      read_qualified_sized_static_method_function_pointer<int, 3>(
           sized_method_nested);
   if (qualified_sized_static_method_function_pointer_value != 238) {
     return 122;
   }
   int qualified_sized_static_method_typedef_function_pointer_value =
-      read_qualified_sized_static_method_typedef_function_pointer(
+      read_qualified_sized_static_method_typedef_function_pointer<int, 3>(
           sized_method_nested);
   if (qualified_sized_static_method_typedef_function_pointer_value != 238) {
     return 124;
   }
   int qualified_sized_static_method_address_function_pointer_value =
-      read_qualified_sized_static_method_address_function_pointer(
+      read_qualified_sized_static_method_address_function_pointer<int, 3>(
           sized_method_nested);
   if (qualified_sized_static_method_address_function_pointer_value != 238) {
     return 126;
   }
   int qualified_sized_static_method_function_pointer_array_value =
-      read_qualified_sized_static_method_function_pointer_array(
+      read_qualified_sized_static_method_function_pointer_array<int, 3>(
           sized_method_nested);
   if (qualified_sized_static_method_function_pointer_array_value != 238) {
     return 128;
   }
   int qualified_sized_static_method_function_pointer_parameter_value =
-      read_qualified_sized_static_method_function_pointer_parameter(
+      read_qualified_sized_static_method_function_pointer_parameter<int, 3>(
           sized_method_nested);
   if (qualified_sized_static_method_function_pointer_parameter_value != 238) {
     return 130;
   }
   int qualified_sized_static_method_address_function_pointer_parameter_value =
-      read_qualified_sized_static_method_address_function_pointer_parameter(
+      read_qualified_sized_static_method_address_function_pointer_parameter<int, 3>(
           sized_method_nested);
   if (qualified_sized_static_method_address_function_pointer_parameter_value !=
       238) {
     return 132;
   }
   int qualified_sized_static_method_function_pointer_assignment_value =
-      read_qualified_sized_static_method_function_pointer_assignment(
+      read_qualified_sized_static_method_function_pointer_assignment<int, 3>(
           sized_method_nested);
   if (qualified_sized_static_method_function_pointer_assignment_value != 238) {
     return 134;
   }
   int qualified_sized_static_method_address_function_pointer_assignment_value =
-      read_qualified_sized_static_method_address_function_pointer_assignment(
+      read_qualified_sized_static_method_address_function_pointer_assignment<int, 3>(
           sized_method_nested);
   if (qualified_sized_static_method_address_function_pointer_assignment_value !=
       238) {
     return 136;
   }
   int qualified_sized_static_method_conditional_function_pointer_value =
-      read_qualified_sized_static_method_conditional_function_pointer(
+      read_qualified_sized_static_method_conditional_function_pointer<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_function_pointer_value != 238) {
     return 138;
   }
   int qualified_sized_static_method_conditional_designator_function_pointer_value =
-      read_qualified_sized_static_method_conditional_designator_function_pointer(
+      read_qualified_sized_static_method_conditional_designator_function_pointer<int, 3>(
           sized_method_nested, 0);
   if (qualified_sized_static_method_conditional_designator_function_pointer_value !=
       238) {
     return 140;
   }
   int qualified_sized_static_method_conditional_function_pointer_parameter_value =
-      read_qualified_sized_static_method_conditional_function_pointer_parameter(
+      read_qualified_sized_static_method_conditional_function_pointer_parameter<int, 3>(
           sized_method_nested, 0);
   if (qualified_sized_static_method_conditional_function_pointer_parameter_value !=
       238) {
     return 142;
   }
   int qualified_sized_static_method_conditional_function_pointer_return_value =
-      read_qualified_sized_static_method_conditional_function_pointer_return(
+      read_qualified_sized_static_method_conditional_function_pointer_return<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_function_pointer_return_value !=
       238) {
     return 144;
   }
   int qualified_sized_static_method_conditional_direct_call_value =
-      read_qualified_sized_static_method_conditional_direct_call(
+      read_qualified_sized_static_method_conditional_direct_call<int, 3>(
           sized_method_nested, 0);
   if (qualified_sized_static_method_conditional_direct_call_value != 238) {
     return 146;
   }
   int qualified_sized_static_method_conditional_null_function_pointer_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer(
+      read_qualified_sized_static_method_conditional_null_function_pointer<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_null_function_pointer_value !=
       238) {
     return 148;
   }
   int qualified_sized_static_method_conditional_function_null_pointer_value =
-      read_qualified_sized_static_method_conditional_function_null_pointer(
+      read_qualified_sized_static_method_conditional_function_null_pointer<int, 3>(
           sized_method_nested, 0);
   if (qualified_sized_static_method_conditional_function_null_pointer_value !=
       238) {
     return 150;
   }
   int qualified_sized_static_method_conditional_null_address_function_pointer_value =
-      read_qualified_sized_static_method_conditional_null_address_function_pointer(
+      read_qualified_sized_static_method_conditional_null_address_function_pointer<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_null_address_function_pointer_value !=
       238) {
     return 152;
   }
   int qualified_sized_static_method_conditional_address_function_null_pointer_value =
-      read_qualified_sized_static_method_conditional_address_function_null_pointer(
+      read_qualified_sized_static_method_conditional_address_function_null_pointer<int, 3>(
           sized_method_nested, 0);
   if (qualified_sized_static_method_conditional_address_function_null_pointer_value !=
       238) {
     return 154;
   }
   int qualified_sized_static_method_conditional_nullptr_function_pointer_value =
-      read_qualified_sized_static_method_conditional_nullptr_function_pointer(
+      read_qualified_sized_static_method_conditional_nullptr_function_pointer<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_nullptr_function_pointer_value !=
       238) {
     return 156;
   }
   int qualified_sized_static_method_conditional_null_function_pointer_assignment_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_assignment(
+      read_qualified_sized_static_method_conditional_null_function_pointer_assignment<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_null_function_pointer_assignment_value !=
       238) {
     return 158;
   }
   int qualified_sized_static_method_conditional_null_function_pointer_parameter_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_parameter(
+      read_qualified_sized_static_method_conditional_null_function_pointer_parameter<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_null_function_pointer_parameter_value !=
       238) {
     return 160;
   }
   int qualified_sized_static_method_conditional_null_direct_call_value =
-      read_qualified_sized_static_method_conditional_null_direct_call(
+      read_qualified_sized_static_method_conditional_null_direct_call<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_null_direct_call_value != 238) {
     return 162;
   }
   int qualified_sized_static_method_auto_conditional_null_function_pointer_value =
-      read_qualified_sized_static_method_auto_conditional_null_function_pointer(
+      read_qualified_sized_static_method_auto_conditional_null_function_pointer<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_auto_conditional_null_function_pointer_value !=
       238) {
     return 164;
   }
   int qualified_sized_static_method_decltype_conditional_null_function_pointer_value =
-      read_qualified_sized_static_method_decltype_conditional_null_function_pointer(
+      read_qualified_sized_static_method_decltype_conditional_null_function_pointer<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_decltype_conditional_null_function_pointer_value !=
       238) {
     return 166;
   }
   int qualified_sized_static_method_conditional_null_function_pointer_compare_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_compare(
+      read_qualified_sized_static_method_conditional_null_function_pointer_compare<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_null_function_pointer_compare_value !=
       238) {
     return 168;
   }
   int qualified_sized_static_method_conditional_null_function_pointer_return_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_return(
+      read_qualified_sized_static_method_conditional_null_function_pointer_return<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_null_function_pointer_return_value !=
       238) {
     return 170;
   }
   int qualified_sized_static_method_conditional_null_function_pointer_array_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_array(
+      read_qualified_sized_static_method_conditional_null_function_pointer_array<int, 3>(
           sized_method_nested, 1);
   if (qualified_sized_static_method_conditional_null_function_pointer_array_value !=
       238) {
     return 172;
   }
   int wrapped_qualified_sized_static_method_conditional_null_function_pointer_value =
-      read_wrapped_qualified_sized_static_method_conditional_null_function_pointer(
+      read_wrapped_qualified_sized_static_method_conditional_null_function_pointer<int, 3>(
           sized_method_nested, 1);
   if (wrapped_qualified_sized_static_method_conditional_null_function_pointer_value !=
       238) {
@@ -2260,14 +2260,14 @@ int main(void) {
   SizedNestedOwner<int, 3>::Inner made_sized_dependent_nested =
       make_sized_dependent_nested<int, 3>(101, 14);
   int made_sized_dependent_nested_value =
-      read_sized_dependent_nested(made_sized_dependent_nested);
+      read_sized_dependent_nested<int, 3>(made_sized_dependent_nested);
   if (made_sized_dependent_nested_value != 115) {
     return 42;
   }
   Holder<SizedNestedOwner<int, 3>::Inner> made_wrapped_sized_dependent_nested =
       make_wrapped_sized_dependent_nested<int, 3>(117, 16);
   int made_wrapped_sized_dependent_nested_value =
-      read_wrapped_sized_dependent_nested(made_wrapped_sized_dependent_nested);
+      read_wrapped_sized_dependent_nested<int, 3>(made_wrapped_sized_dependent_nested);
   if (made_wrapped_sized_dependent_nested_value != 133) {
     return 43;
   }
@@ -2275,7 +2275,7 @@ int main(void) {
   namespaced_sized_dependent_nested.value = 137;
   namespaced_sized_dependent_nested.data[2] = 22;
   int namespaced_sized_dependent_nested_value =
-      read_namespaced_sized_dependent_nested(
+      read_namespaced_sized_dependent_nested<int, 3>(
           namespaced_sized_dependent_nested);
   if (namespaced_sized_dependent_nested_value != 159) {
     return 46;
@@ -2285,55 +2285,55 @@ int main(void) {
   wrapped_namespaced_sized_dependent_nested.value.value = 139;
   wrapped_namespaced_sized_dependent_nested.value.data[2] = 24;
   int wrapped_namespaced_sized_dependent_nested_value =
-      read_wrapped_namespaced_sized_dependent_nested(
+      read_wrapped_namespaced_sized_dependent_nested<int, 3>(
           wrapped_namespaced_sized_dependent_nested);
   if (wrapped_namespaced_sized_dependent_nested_value != 163) {
     return 47;
   }
   int namespaced_sized_dependent_pointer_value =
-      read_namespaced_sized_dependent_nested_pointer(
+      read_namespaced_sized_dependent_nested_pointer<int, 3>(
           &namespaced_sized_dependent_nested);
   if (namespaced_sized_dependent_pointer_value != 159) {
     return 48;
   }
   int namespaced_sized_dependent_reference_value =
-      read_namespaced_sized_dependent_nested_reference(
+      read_namespaced_sized_dependent_nested_reference<int, 3>(
           namespaced_sized_dependent_nested);
   if (namespaced_sized_dependent_reference_value != 159) {
     return 49;
   }
   int wrapped_namespaced_sized_dependent_pointer_value =
-      read_wrapped_namespaced_sized_dependent_nested_pointer(
+      read_wrapped_namespaced_sized_dependent_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_dependent_nested);
   if (wrapped_namespaced_sized_dependent_pointer_value != 163) {
     return 50;
   }
   int wrapped_namespaced_sized_dependent_reference_value =
-      read_wrapped_namespaced_sized_dependent_nested_reference(
+      read_wrapped_namespaced_sized_dependent_nested_reference<int, 3>(
           wrapped_namespaced_sized_dependent_nested);
   if (wrapped_namespaced_sized_dependent_reference_value != 163) {
     return 51;
   }
   int const_namespaced_sized_dependent_pointer_value =
-      read_const_namespaced_sized_dependent_nested_pointer(
+      read_const_namespaced_sized_dependent_nested_pointer<int, 3>(
           &namespaced_sized_dependent_nested);
   if (const_namespaced_sized_dependent_pointer_value != 159) {
     return 54;
   }
   int const_namespaced_sized_dependent_reference_value =
-      read_const_namespaced_sized_dependent_nested_reference(
+      read_const_namespaced_sized_dependent_nested_reference<int, 3>(
           namespaced_sized_dependent_nested);
   if (const_namespaced_sized_dependent_reference_value != 159) {
     return 55;
   }
   int const_wrapped_namespaced_sized_dependent_pointer_value =
-      read_const_wrapped_namespaced_sized_dependent_nested_pointer(
+      read_const_wrapped_namespaced_sized_dependent_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_dependent_nested);
   if (const_wrapped_namespaced_sized_dependent_pointer_value != 163) {
     return 56;
   }
   int const_wrapped_namespaced_sized_dependent_reference_value =
-      read_const_wrapped_namespaced_sized_dependent_nested_reference(
+      read_const_wrapped_namespaced_sized_dependent_nested_reference<int, 3>(
           wrapped_namespaced_sized_dependent_nested);
   if (const_wrapped_namespaced_sized_dependent_reference_value != 163) {
     return 57;
@@ -2342,7 +2342,7 @@ int main(void) {
   namespaced_sized_dependent_array[0].value = 149;
   namespaced_sized_dependent_array[0].data[2] = 26;
   int namespaced_sized_dependent_array_value =
-      read_namespaced_sized_dependent_nested_array(
+      read_namespaced_sized_dependent_nested_array<int, 3>(
           namespaced_sized_dependent_array);
   if (namespaced_sized_dependent_array_value != 175) {
     return 52;
@@ -2352,7 +2352,7 @@ int main(void) {
   wrapped_namespaced_sized_dependent_array[0].value.value = 151;
   wrapped_namespaced_sized_dependent_array[0].value.data[2] = 28;
   int wrapped_namespaced_sized_dependent_array_value =
-      read_wrapped_namespaced_sized_dependent_nested_array(
+      read_wrapped_namespaced_sized_dependent_nested_array<int, 3>(
           wrapped_namespaced_sized_dependent_array);
   if (wrapped_namespaced_sized_dependent_array_value != 179) {
     return 53;
@@ -2380,7 +2380,7 @@ int main(void) {
   namespaced_sized_method_nested.value = 197;
   namespaced_sized_method_nested.data[2] = 44;
   int namespaced_sized_method_nested_value =
-      read_namespaced_sized_method_nested(namespaced_sized_method_nested);
+      read_namespaced_sized_method_nested<int, 3>(namespaced_sized_method_nested);
   if (namespaced_sized_method_nested_value != 241) {
     return 63;
   }
@@ -2389,67 +2389,67 @@ int main(void) {
   wrapped_namespaced_sized_method_nested.value.value = 211;
   wrapped_namespaced_sized_method_nested.value.data[2] = 48;
   int wrapped_namespaced_sized_method_nested_value =
-      read_wrapped_namespaced_sized_method_nested(
+      read_wrapped_namespaced_sized_method_nested<int, 3>(
           wrapped_namespaced_sized_method_nested);
   if (wrapped_namespaced_sized_method_nested_value != 259) {
     return 65;
   }
   int namespaced_sized_method_nested_pointer_value =
-      read_namespaced_sized_method_nested_pointer(
+      read_namespaced_sized_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   if (namespaced_sized_method_nested_pointer_value != 241) {
     return 68;
   }
   int namespaced_sized_method_nested_reference_value =
-      read_namespaced_sized_method_nested_reference(
+      read_namespaced_sized_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   if (namespaced_sized_method_nested_reference_value != 241) {
     return 69;
   }
   int const_namespaced_sized_method_nested_pointer_value =
-      read_const_namespaced_sized_method_nested_pointer(
+      read_const_namespaced_sized_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   if (const_namespaced_sized_method_nested_pointer_value != 241) {
     return 78;
   }
   int const_namespaced_sized_method_nested_reference_value =
-      read_const_namespaced_sized_method_nested_reference(
+      read_const_namespaced_sized_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   if (const_namespaced_sized_method_nested_reference_value != 241) {
     return 79;
   }
   int const_wrapped_namespaced_sized_method_nested_pointer_value =
-      read_const_wrapped_namespaced_sized_method_nested_pointer(
+      read_const_wrapped_namespaced_sized_method_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_method_nested);
   if (const_wrapped_namespaced_sized_method_nested_pointer_value != 259) {
     return 80;
   }
   int const_wrapped_namespaced_sized_method_nested_reference_value =
-      read_const_wrapped_namespaced_sized_method_nested_reference(
+      read_const_wrapped_namespaced_sized_method_nested_reference<int, 3>(
           wrapped_namespaced_sized_method_nested);
   if (const_wrapped_namespaced_sized_method_nested_reference_value != 259) {
     return 81;
   }
   int namespaced_sized_static_method_nested_value =
-      read_namespaced_sized_static_method_nested(
+      read_namespaced_sized_static_method_nested<int, 3>(
           namespaced_sized_method_nested);
   if (namespaced_sized_static_method_nested_value != 244) {
     return 84;
   }
   int wrapped_namespaced_sized_static_method_nested_value =
-      read_wrapped_namespaced_sized_static_method_nested(
+      read_wrapped_namespaced_sized_static_method_nested<int, 3>(
           wrapped_namespaced_sized_method_nested);
   if (wrapped_namespaced_sized_static_method_nested_value != 262) {
     return 85;
   }
   int namespaced_sized_static_method_nested_pointer_value =
-      read_namespaced_sized_static_method_nested_pointer(
+      read_namespaced_sized_static_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   if (namespaced_sized_static_method_nested_pointer_value != 244) {
     return 89;
   }
   int namespaced_sized_static_method_nested_reference_value =
-      read_namespaced_sized_static_method_nested_reference(
+      read_namespaced_sized_static_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   if (namespaced_sized_static_method_nested_reference_value != 244) {
     return 90;
@@ -2459,7 +2459,7 @@ int main(void) {
   namespaced_sized_method_nested_array[0].value = 229;
   namespaced_sized_method_nested_array[0].data[2] = 54;
   int namespaced_sized_method_nested_array_value =
-      read_namespaced_sized_method_nested_array(
+      read_namespaced_sized_method_nested_array<int, 3>(
           namespaced_sized_method_nested_array);
   if (namespaced_sized_method_nested_array_value != 283) {
     return 72;
@@ -2469,13 +2469,13 @@ int main(void) {
   wrapped_namespaced_sized_method_nested_array[0].value.value = 233;
   wrapped_namespaced_sized_method_nested_array[0].value.data[2] = 56;
   int wrapped_namespaced_sized_method_nested_array_value =
-      read_wrapped_namespaced_sized_method_nested_array(
+      read_wrapped_namespaced_sized_method_nested_array<int, 3>(
           wrapped_namespaced_sized_method_nested_array);
   if (wrapped_namespaced_sized_method_nested_array_value != 289) {
     return 73;
   }
   int namespaced_sized_static_method_nested_array_value =
-      read_namespaced_sized_static_method_nested_array(
+      read_namespaced_sized_static_method_nested_array<int, 3>(
           namespaced_sized_method_nested_array);
   if (namespaced_sized_static_method_nested_array_value != 286) {
     return 91;
@@ -2486,280 +2486,280 @@ int main(void) {
     return 93;
   }
   int qualified_namespaced_sized_static_method_nested_value =
-      read_qualified_namespaced_sized_static_method_nested(
+      read_qualified_namespaced_sized_static_method_nested<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_nested_value != 244) {
     return 95;
   }
   int qualified_wrapped_namespaced_sized_static_method_nested_value =
-      read_qualified_wrapped_namespaced_sized_static_method_nested(
+      read_qualified_wrapped_namespaced_sized_static_method_nested<int, 3>(
           wrapped_namespaced_sized_method_nested);
   if (qualified_wrapped_namespaced_sized_static_method_nested_value != 262) {
     return 97;
   }
   int qualified_namespaced_sized_static_method_nested_pointer_value =
-      read_qualified_namespaced_sized_static_method_nested_pointer(
+      read_qualified_namespaced_sized_static_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_nested_pointer_value != 244) {
     return 100;
   }
   int qualified_namespaced_sized_static_method_nested_reference_value =
-      read_qualified_namespaced_sized_static_method_nested_reference(
+      read_qualified_namespaced_sized_static_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_nested_reference_value != 244) {
     return 101;
   }
   int qualified_namespaced_sized_static_method_nested_array_value =
-      read_qualified_namespaced_sized_static_method_nested_array(
+      read_qualified_namespaced_sized_static_method_nested_array<int, 3>(
           namespaced_sized_method_nested_array);
   if (qualified_namespaced_sized_static_method_nested_array_value != 286) {
     return 103;
   }
   int qualified_const_namespaced_sized_static_method_nested_pointer_value =
-      read_qualified_const_namespaced_sized_static_method_nested_pointer(
+      read_qualified_const_namespaced_sized_static_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   if (qualified_const_namespaced_sized_static_method_nested_pointer_value !=
       244) {
     return 106;
   }
   int qualified_const_namespaced_sized_static_method_nested_reference_value =
-      read_qualified_const_namespaced_sized_static_method_nested_reference(
+      read_qualified_const_namespaced_sized_static_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_const_namespaced_sized_static_method_nested_reference_value !=
       244) {
     return 107;
   }
   int qualified_wrapped_namespaced_sized_static_method_nested_pointer_value =
-      read_qualified_wrapped_namespaced_sized_static_method_nested_pointer(
+      read_qualified_wrapped_namespaced_sized_static_method_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_method_nested);
   if (qualified_wrapped_namespaced_sized_static_method_nested_pointer_value !=
       262) {
     return 110;
   }
   int qualified_wrapped_namespaced_sized_static_method_nested_reference_value =
-      read_qualified_wrapped_namespaced_sized_static_method_nested_reference(
+      read_qualified_wrapped_namespaced_sized_static_method_nested_reference<int, 3>(
           wrapped_namespaced_sized_method_nested);
   if (qualified_wrapped_namespaced_sized_static_method_nested_reference_value !=
       262) {
     return 111;
   }
   int qualified_const_wrapped_namespaced_sized_static_method_nested_pointer_value =
-      read_qualified_const_wrapped_namespaced_sized_static_method_nested_pointer(
+      read_qualified_const_wrapped_namespaced_sized_static_method_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_method_nested);
   if (qualified_const_wrapped_namespaced_sized_static_method_nested_pointer_value !=
       262) {
     return 114;
   }
   int qualified_const_wrapped_namespaced_sized_static_method_nested_reference_value =
-      read_qualified_const_wrapped_namespaced_sized_static_method_nested_reference(
+      read_qualified_const_wrapped_namespaced_sized_static_method_nested_reference<int, 3>(
           wrapped_namespaced_sized_method_nested);
   if (qualified_const_wrapped_namespaced_sized_static_method_nested_reference_value !=
       262) {
     return 115;
   }
   int qualified_wrapped_namespaced_sized_static_method_nested_array_value =
-      read_qualified_wrapped_namespaced_sized_static_method_nested_array(
+      read_qualified_wrapped_namespaced_sized_static_method_nested_array<int, 3>(
           wrapped_namespaced_sized_method_nested_array);
   if (qualified_wrapped_namespaced_sized_static_method_nested_array_value !=
       292) {
     return 117;
   }
   int qualified_const_wrapped_namespaced_sized_static_method_nested_array_value =
-      read_qualified_const_wrapped_namespaced_sized_static_method_nested_array(
+      read_qualified_const_wrapped_namespaced_sized_static_method_nested_array<int, 3>(
           wrapped_namespaced_sized_method_nested_array);
   if (qualified_const_wrapped_namespaced_sized_static_method_nested_array_value !=
       292) {
     return 119;
   }
   int qualified_alias_namespaced_sized_static_method_nested_value =
-      read_qualified_alias_namespaced_sized_static_method_nested(
+      read_qualified_alias_namespaced_sized_static_method_nested<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_alias_namespaced_sized_static_method_nested_value != 244) {
     return 121;
   }
   int qualified_namespaced_sized_static_method_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_function_pointer(
+      read_qualified_namespaced_sized_static_method_function_pointer<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_function_pointer_value != 244) {
     return 123;
   }
   int qualified_namespaced_sized_static_method_typedef_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_typedef_function_pointer(
+      read_qualified_namespaced_sized_static_method_typedef_function_pointer<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_typedef_function_pointer_value !=
       244) {
     return 125;
   }
   int qualified_namespaced_sized_static_method_address_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_address_function_pointer(
+      read_qualified_namespaced_sized_static_method_address_function_pointer<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_address_function_pointer_value !=
       244) {
     return 127;
   }
   int qualified_namespaced_sized_static_method_function_pointer_array_value =
-      read_qualified_namespaced_sized_static_method_function_pointer_array(
+      read_qualified_namespaced_sized_static_method_function_pointer_array<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_function_pointer_array_value !=
       244) {
     return 129;
   }
   int qualified_namespaced_sized_static_method_function_pointer_parameter_value =
-      read_qualified_namespaced_sized_static_method_function_pointer_parameter(
+      read_qualified_namespaced_sized_static_method_function_pointer_parameter<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_function_pointer_parameter_value !=
       244) {
     return 131;
   }
   int qualified_namespaced_sized_static_method_address_function_pointer_parameter_value =
-      read_qualified_namespaced_sized_static_method_address_function_pointer_parameter(
+      read_qualified_namespaced_sized_static_method_address_function_pointer_parameter<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_address_function_pointer_parameter_value !=
       244) {
     return 133;
   }
   int qualified_namespaced_sized_static_method_function_pointer_assignment_value =
-      read_qualified_namespaced_sized_static_method_function_pointer_assignment(
+      read_qualified_namespaced_sized_static_method_function_pointer_assignment<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_function_pointer_assignment_value !=
       244) {
     return 135;
   }
   int qualified_namespaced_sized_static_method_address_function_pointer_assignment_value =
-      read_qualified_namespaced_sized_static_method_address_function_pointer_assignment(
+      read_qualified_namespaced_sized_static_method_address_function_pointer_assignment<int, 3>(
           namespaced_sized_method_nested);
   if (qualified_namespaced_sized_static_method_address_function_pointer_assignment_value !=
       244) {
     return 137;
   }
   int qualified_namespaced_sized_static_method_conditional_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_function_pointer<int, 3>(
           namespaced_sized_method_nested, 0);
   if (qualified_namespaced_sized_static_method_conditional_function_pointer_value !=
       244) {
     return 139;
   }
   int qualified_namespaced_sized_static_method_conditional_designator_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_designator_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_designator_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_designator_function_pointer_value !=
       244) {
     return 141;
   }
   int qualified_namespaced_sized_static_method_conditional_function_pointer_parameter_value =
-      read_qualified_namespaced_sized_static_method_conditional_function_pointer_parameter(
+      read_qualified_namespaced_sized_static_method_conditional_function_pointer_parameter<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_function_pointer_parameter_value !=
       244) {
     return 143;
   }
   int qualified_namespaced_sized_static_method_conditional_function_pointer_return_value =
-      read_qualified_namespaced_sized_static_method_conditional_function_pointer_return(
+      read_qualified_namespaced_sized_static_method_conditional_function_pointer_return<int, 3>(
           namespaced_sized_method_nested, 0);
   if (qualified_namespaced_sized_static_method_conditional_function_pointer_return_value !=
       244) {
     return 145;
   }
   int qualified_namespaced_sized_static_method_conditional_direct_call_value =
-      read_qualified_namespaced_sized_static_method_conditional_direct_call(
+      read_qualified_namespaced_sized_static_method_conditional_direct_call<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_direct_call_value !=
       244) {
     return 147;
   }
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_null_function_pointer_value !=
       244) {
     return 149;
   }
   int qualified_namespaced_sized_static_method_conditional_function_null_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_function_null_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_function_null_pointer<int, 3>(
           namespaced_sized_method_nested, 0);
   if (qualified_namespaced_sized_static_method_conditional_function_null_pointer_value !=
       244) {
     return 151;
   }
   int qualified_namespaced_sized_static_method_conditional_null_address_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_address_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_null_address_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_null_address_function_pointer_value !=
       244) {
     return 153;
   }
   int qualified_namespaced_sized_static_method_conditional_address_function_null_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_address_function_null_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_address_function_null_pointer<int, 3>(
           namespaced_sized_method_nested, 0);
   if (qualified_namespaced_sized_static_method_conditional_address_function_null_pointer_value !=
       244) {
     return 155;
   }
   int qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer_value !=
       244) {
     return 157;
   }
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment_value !=
       244) {
     return 159;
   }
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter_value !=
       244) {
     return 161;
   }
   int qualified_namespaced_sized_static_method_conditional_null_direct_call_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_direct_call(
+      read_qualified_namespaced_sized_static_method_conditional_null_direct_call<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_null_direct_call_value !=
       244) {
     return 163;
   }
   int qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer(
+      read_qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer_value !=
       244) {
     return 165;
   }
   int qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer(
+      read_qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer_value !=
       244) {
     return 167;
   }
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare_value !=
       244) {
     return 169;
   }
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_return_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_return(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_return<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_null_function_pointer_return_value !=
       244) {
     return 171;
   }
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_array_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_array(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_array<int, 3>(
           namespaced_sized_method_nested, 1);
   if (qualified_namespaced_sized_static_method_conditional_null_function_pointer_array_value !=
       244) {
     return 173;
   }
   int wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer_value =
-      read_wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer(
+      read_wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   if (wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer_value !=
       244) {
@@ -2768,7 +2768,7 @@ int main(void) {
   nested_ns::SizedOwner<int, 3>::Inner made_namespaced_sized_dependent_nested =
       make_namespaced_sized_dependent_nested<int, 3>(167, 34);
   int made_namespaced_sized_dependent_nested_value =
-      read_namespaced_sized_dependent_nested(
+      read_namespaced_sized_dependent_nested<int, 3>(
           made_namespaced_sized_dependent_nested);
   if (made_namespaced_sized_dependent_nested_value != 201) {
     return 58;
@@ -2777,73 +2777,73 @@ int main(void) {
       made_wrapped_namespaced_sized_dependent_nested =
           make_wrapped_namespaced_sized_dependent_nested<int, 3>(173, 36);
   int made_wrapped_namespaced_sized_dependent_nested_value =
-      read_wrapped_namespaced_sized_dependent_nested(
+      read_wrapped_namespaced_sized_dependent_nested<int, 3>(
           made_wrapped_namespaced_sized_dependent_nested);
   if (made_wrapped_namespaced_sized_dependent_nested_value != 209) {
     return 59;
   }
   int dependent_pointer_value =
-      read_dependent_nested_pointer(&deduced_signature_nested);
+      read_dependent_nested_pointer<int>(&deduced_signature_nested);
   int dependent_reference_value =
-      read_dependent_nested_reference(deduced_signature_nested);
+      read_dependent_nested_reference<int>(deduced_signature_nested);
   int const_dependent_pointer_value =
-      read_const_dependent_nested_pointer(&deduced_signature_nested);
+      read_const_dependent_nested_pointer<int>(&deduced_signature_nested);
   if (const_dependent_pointer_value != 43) {
     return 21;
   }
   int const_dependent_reference_value =
-      read_const_dependent_nested_reference(deduced_signature_nested);
+      read_const_dependent_nested_reference<int>(deduced_signature_nested);
   if (const_dependent_reference_value != 43) {
     return 22;
   }
   NestedOwner<int>::Inner dependent_nested_array[1];
   dependent_nested_array[0].value = 59;
   int dependent_array_value =
-      read_dependent_nested_array(dependent_nested_array);
+      read_dependent_nested_array<int>(dependent_nested_array);
   if (dependent_array_value != 59) {
     return 17;
   }
   int namespaced_dependent_pointer_value =
-      read_namespaced_dependent_nested_pointer(&namespaced_nested_inner);
+      read_namespaced_dependent_nested_pointer<int>(&namespaced_nested_inner);
   int namespaced_dependent_reference_value =
-      read_namespaced_dependent_nested_reference(namespaced_nested_inner);
+      read_namespaced_dependent_nested_reference<int>(namespaced_nested_inner);
   int const_namespaced_dependent_pointer_value =
-      read_const_namespaced_dependent_nested_pointer(&namespaced_nested_inner);
+      read_const_namespaced_dependent_nested_pointer<int>(&namespaced_nested_inner);
   if (const_namespaced_dependent_pointer_value != 17) {
     return 23;
   }
   int const_namespaced_dependent_reference_value =
-      read_const_namespaced_dependent_nested_reference(namespaced_nested_inner);
+      read_const_namespaced_dependent_nested_reference<int>(namespaced_nested_inner);
   if (const_namespaced_dependent_reference_value != 17) {
     return 24;
   }
   nested_ns::Owner<int>::Inner namespaced_dependent_array[1];
   namespaced_dependent_array[0].value = 67;
   int namespaced_dependent_array_value =
-      read_namespaced_dependent_nested_array(namespaced_dependent_array);
+      read_namespaced_dependent_nested_array<int>(namespaced_dependent_array);
   if (namespaced_dependent_array_value != 67) {
     return 19;
   }
   int wrapped_dependent_value =
-      read_wrapped_dependent_nested(wrapped_nested_inner);
+      read_wrapped_dependent_nested<int>(wrapped_nested_inner);
   int wrapped_dependent_pointer_value =
-      read_wrapped_dependent_nested_pointer(&wrapped_nested_inner);
+      read_wrapped_dependent_nested_pointer<int>(&wrapped_nested_inner);
   int wrapped_dependent_reference_value =
-      read_wrapped_dependent_nested_reference(wrapped_nested_inner);
+      read_wrapped_dependent_nested_reference<int>(wrapped_nested_inner);
   int const_wrapped_dependent_pointer_value =
-      read_const_wrapped_dependent_nested_pointer(&wrapped_nested_inner);
+      read_const_wrapped_dependent_nested_pointer<int>(&wrapped_nested_inner);
   if (const_wrapped_dependent_pointer_value != 7) {
     return 25;
   }
   int const_wrapped_dependent_reference_value =
-      read_const_wrapped_dependent_nested_reference(wrapped_nested_inner);
+      read_const_wrapped_dependent_nested_reference<int>(wrapped_nested_inner);
   if (const_wrapped_dependent_reference_value != 7) {
     return 26;
   }
   Holder<NestedOwner<int>::Inner> wrapped_dependent_array[1];
   wrapped_dependent_array[0].value.value = 61;
   int wrapped_dependent_array_value =
-      read_wrapped_dependent_nested_array(wrapped_dependent_array);
+      read_wrapped_dependent_nested_array<int>(wrapped_dependent_array);
   if (wrapped_dependent_array_value != 61) {
     return 18;
   }
@@ -2852,21 +2852,21 @@ int main(void) {
   Holder<nested_ns::Owner<int>::Inner> made_wrapped_namespaced_dependent_nested =
       make_wrapped_namespaced_dependent_nested(53);
   int wrapped_namespaced_dependent_value =
-      read_wrapped_namespaced_dependent_nested(wrapped_namespaced_nested_inner);
+      read_wrapped_namespaced_dependent_nested<int>(wrapped_namespaced_nested_inner);
   int wrapped_namespaced_dependent_pointer_value =
-      read_wrapped_namespaced_dependent_pointer(
+      read_wrapped_namespaced_dependent_pointer<int>(
           &wrapped_namespaced_nested_inner);
   int wrapped_namespaced_dependent_reference_value =
-      read_wrapped_namespaced_dependent_reference(
+      read_wrapped_namespaced_dependent_reference<int>(
           wrapped_namespaced_nested_inner);
   int const_wrapped_namespaced_dependent_pointer_value =
-      read_const_wrapped_namespaced_dependent_pointer(
+      read_const_wrapped_namespaced_dependent_pointer<int>(
           &wrapped_namespaced_nested_inner);
   if (const_wrapped_namespaced_dependent_pointer_value != 23) {
     return 27;
   }
   int const_wrapped_namespaced_dependent_reference_value =
-      read_const_wrapped_namespaced_dependent_reference(
+      read_const_wrapped_namespaced_dependent_reference<int>(
           wrapped_namespaced_nested_inner);
   if (const_wrapped_namespaced_dependent_reference_value != 23) {
     return 28;
@@ -2874,7 +2874,7 @@ int main(void) {
   Holder<nested_ns::Owner<int>::Inner> wrapped_namespaced_dependent_array[1];
   wrapped_namespaced_dependent_array[0].value.value = 71;
   int wrapped_namespaced_dependent_array_value =
-      read_wrapped_namespaced_dependent_array(
+      read_wrapped_namespaced_dependent_array<int>(
           wrapped_namespaced_dependent_array);
   if (wrapped_namespaced_dependent_array_value != 71) {
     return 20;

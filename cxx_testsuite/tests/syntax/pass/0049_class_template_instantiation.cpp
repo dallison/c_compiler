@@ -1827,52 +1827,52 @@ int main(void) {
   int dependent_signature_value =
       read_dependent_nested<int>(dependent_signature_nested);
   NestedOwner<int>::Inner deduced_signature_nested = make_dependent_nested(43);
-  int deduced_signature_value = read_dependent_nested(deduced_signature_nested);
+  int deduced_signature_value = read_dependent_nested<int>(deduced_signature_nested);
   PairNestedOwner<int, char>::Inner pair_dependent_nested;
   pair_dependent_nested.first = 73;
   pair_dependent_nested.second = 5;
   int pair_dependent_nested_value =
-      read_pair_dependent_nested(pair_dependent_nested);
+      read_pair_dependent_nested<int, char>(pair_dependent_nested);
   SizedNestedOwner<int, 3>::Inner sized_dependent_nested;
   sized_dependent_nested.value = 79;
   sized_dependent_nested.data[2] = 6;
   int sized_dependent_nested_value =
-      read_sized_dependent_nested(sized_dependent_nested);
+      read_sized_dependent_nested<int, 3>(sized_dependent_nested);
   Holder<SizedNestedOwner<int, 3>::Inner> wrapped_sized_dependent_nested;
   wrapped_sized_dependent_nested.value.value = 83;
   wrapped_sized_dependent_nested.value.data[2] = 8;
   int wrapped_sized_dependent_nested_value =
-      read_wrapped_sized_dependent_nested(wrapped_sized_dependent_nested);
+      read_wrapped_sized_dependent_nested<int, 3>(wrapped_sized_dependent_nested);
   int sized_dependent_pointer_value =
-      read_sized_dependent_nested_pointer(&sized_dependent_nested);
+      read_sized_dependent_nested_pointer<int, 3>(&sized_dependent_nested);
   int sized_dependent_reference_value =
-      read_sized_dependent_nested_reference(sized_dependent_nested);
+      read_sized_dependent_nested_reference<int, 3>(sized_dependent_nested);
   int wrapped_sized_dependent_pointer_value =
-      read_wrapped_sized_dependent_nested_pointer(
+      read_wrapped_sized_dependent_nested_pointer<int, 3>(
           &wrapped_sized_dependent_nested);
   int wrapped_sized_dependent_reference_value =
-      read_wrapped_sized_dependent_nested_reference(
+      read_wrapped_sized_dependent_nested_reference<int, 3>(
           wrapped_sized_dependent_nested);
   int const_sized_dependent_pointer_value =
-      read_const_sized_dependent_nested_pointer(&sized_dependent_nested);
+      read_const_sized_dependent_nested_pointer<int, 3>(&sized_dependent_nested);
   int const_sized_dependent_reference_value =
-      read_const_sized_dependent_nested_reference(sized_dependent_nested);
+      read_const_sized_dependent_nested_reference<int, 3>(sized_dependent_nested);
   int const_wrapped_sized_dependent_pointer_value =
-      read_const_wrapped_sized_dependent_nested_pointer(
+      read_const_wrapped_sized_dependent_nested_pointer<int, 3>(
           &wrapped_sized_dependent_nested);
   int const_wrapped_sized_dependent_reference_value =
-      read_const_wrapped_sized_dependent_nested_reference(
+      read_const_wrapped_sized_dependent_nested_reference<int, 3>(
           wrapped_sized_dependent_nested);
   SizedNestedOwner<int, 3>::Inner sized_dependent_array[1];
   sized_dependent_array[0].value = 89;
   sized_dependent_array[0].data[2] = 10;
   int sized_dependent_array_value =
-      read_sized_dependent_nested_array(sized_dependent_array);
+      read_sized_dependent_nested_array<int, 3>(sized_dependent_array);
   Holder<SizedNestedOwner<int, 3>::Inner> wrapped_sized_dependent_array[1];
   wrapped_sized_dependent_array[0].value.value = 97;
   wrapped_sized_dependent_array[0].value.data[2] = 12;
   int wrapped_sized_dependent_array_value =
-      read_wrapped_sized_dependent_nested_array(
+      read_wrapped_sized_dependent_nested_array<int, 3>(
           wrapped_sized_dependent_array);
   SizedMemberOwner<int, 3> sized_member_owner_array[1];
   sized_member_owner_array[0].stored.value = 181;
@@ -1888,225 +1888,225 @@ int main(void) {
   sized_method_nested.value = 193;
   sized_method_nested.data[2] = 42;
   int sized_method_nested_value =
-      read_sized_method_nested(sized_method_nested);
+      read_sized_method_nested<int, 3>(sized_method_nested);
   Holder<SizedMethodOwner<int, 3>::Inner> wrapped_sized_method_nested;
   wrapped_sized_method_nested.value.value = 199;
   wrapped_sized_method_nested.value.data[2] = 46;
   int wrapped_sized_method_nested_value =
-      read_wrapped_sized_method_nested(wrapped_sized_method_nested);
+      read_wrapped_sized_method_nested<int, 3>(wrapped_sized_method_nested);
   int sized_method_nested_pointer_value =
-      read_sized_method_nested_pointer(&sized_method_nested);
+      read_sized_method_nested_pointer<int, 3>(&sized_method_nested);
   int sized_method_nested_reference_value =
-      read_sized_method_nested_reference(sized_method_nested);
+      read_sized_method_nested_reference<int, 3>(sized_method_nested);
   int const_sized_method_nested_pointer_value =
-      read_const_sized_method_nested_pointer(&sized_method_nested);
+      read_const_sized_method_nested_pointer<int, 3>(&sized_method_nested);
   int const_sized_method_nested_reference_value =
-      read_const_sized_method_nested_reference(sized_method_nested);
+      read_const_sized_method_nested_reference<int, 3>(sized_method_nested);
   int const_wrapped_sized_method_nested_pointer_value =
-      read_const_wrapped_sized_method_nested_pointer(
+      read_const_wrapped_sized_method_nested_pointer<int, 3>(
           &wrapped_sized_method_nested);
   int const_wrapped_sized_method_nested_reference_value =
-      read_const_wrapped_sized_method_nested_reference(
+      read_const_wrapped_sized_method_nested_reference<int, 3>(
           wrapped_sized_method_nested);
   int sized_static_method_nested_value =
-      read_sized_static_method_nested(sized_method_nested);
+      read_sized_static_method_nested<int, 3>(sized_method_nested);
   int wrapped_sized_static_method_nested_value =
-      read_wrapped_sized_static_method_nested(wrapped_sized_method_nested);
+      read_wrapped_sized_static_method_nested<int, 3>(wrapped_sized_method_nested);
   int sized_static_method_nested_pointer_value =
-      read_sized_static_method_nested_pointer(&sized_method_nested);
+      read_sized_static_method_nested_pointer<int, 3>(&sized_method_nested);
   int sized_static_method_nested_reference_value =
-      read_sized_static_method_nested_reference(sized_method_nested);
+      read_sized_static_method_nested_reference<int, 3>(sized_method_nested);
   SizedMethodOwner<int, 3>::Inner sized_method_nested_array[1];
   sized_method_nested_array[0].value = 223;
   sized_method_nested_array[0].data[2] = 50;
   int sized_method_nested_array_value =
-      read_sized_method_nested_array(sized_method_nested_array);
+      read_sized_method_nested_array<int, 3>(sized_method_nested_array);
   Holder<SizedMethodOwner<int, 3>::Inner> wrapped_sized_method_nested_array[1];
   wrapped_sized_method_nested_array[0].value.value = 227;
   wrapped_sized_method_nested_array[0].value.data[2] = 52;
   int wrapped_sized_method_nested_array_value =
-      read_wrapped_sized_method_nested_array(
+      read_wrapped_sized_method_nested_array<int, 3>(
           wrapped_sized_method_nested_array);
   int sized_static_method_nested_array_value =
-      read_sized_static_method_nested_array(sized_method_nested_array);
+      read_sized_static_method_nested_array<int, 3>(sized_method_nested_array);
   int qualified_sized_static_method_value =
       read_qualified_sized_static_method<int, 3>(239, 58);
   int qualified_sized_static_method_nested_value =
-      read_qualified_sized_static_method_nested(sized_method_nested);
+      read_qualified_sized_static_method_nested<int, 3>(sized_method_nested);
   int qualified_wrapped_sized_static_method_nested_value =
-      read_qualified_wrapped_sized_static_method_nested(
+      read_qualified_wrapped_sized_static_method_nested<int, 3>(
           wrapped_sized_method_nested);
   int qualified_sized_static_method_nested_pointer_value =
-      read_qualified_sized_static_method_nested_pointer(&sized_method_nested);
+      read_qualified_sized_static_method_nested_pointer<int, 3>(&sized_method_nested);
   int qualified_sized_static_method_nested_reference_value =
-      read_qualified_sized_static_method_nested_reference(sized_method_nested);
+      read_qualified_sized_static_method_nested_reference<int, 3>(sized_method_nested);
   int qualified_sized_static_method_nested_array_value =
-      read_qualified_sized_static_method_nested_array(
+      read_qualified_sized_static_method_nested_array<int, 3>(
           sized_method_nested_array);
   int qualified_const_sized_static_method_nested_pointer_value =
-      read_qualified_const_sized_static_method_nested_pointer(
+      read_qualified_const_sized_static_method_nested_pointer<int, 3>(
           &sized_method_nested);
   int qualified_const_sized_static_method_nested_reference_value =
-      read_qualified_const_sized_static_method_nested_reference(
+      read_qualified_const_sized_static_method_nested_reference<int, 3>(
           sized_method_nested);
   int qualified_wrapped_sized_static_method_nested_pointer_value =
-      read_qualified_wrapped_sized_static_method_nested_pointer(
+      read_qualified_wrapped_sized_static_method_nested_pointer<int, 3>(
           &wrapped_sized_method_nested);
   int qualified_wrapped_sized_static_method_nested_reference_value =
-      read_qualified_wrapped_sized_static_method_nested_reference(
+      read_qualified_wrapped_sized_static_method_nested_reference<int, 3>(
           wrapped_sized_method_nested);
   int qualified_const_wrapped_sized_static_method_nested_pointer_value =
-      read_qualified_const_wrapped_sized_static_method_nested_pointer(
+      read_qualified_const_wrapped_sized_static_method_nested_pointer<int, 3>(
           &wrapped_sized_method_nested);
   int qualified_const_wrapped_sized_static_method_nested_reference_value =
-      read_qualified_const_wrapped_sized_static_method_nested_reference(
+      read_qualified_const_wrapped_sized_static_method_nested_reference<int, 3>(
           wrapped_sized_method_nested);
   int qualified_wrapped_sized_static_method_nested_array_value =
-      read_qualified_wrapped_sized_static_method_nested_array(
+      read_qualified_wrapped_sized_static_method_nested_array<int, 3>(
           wrapped_sized_method_nested_array);
   int qualified_const_wrapped_sized_static_method_nested_array_value =
-      read_qualified_const_wrapped_sized_static_method_nested_array(
+      read_qualified_const_wrapped_sized_static_method_nested_array<int, 3>(
           wrapped_sized_method_nested_array);
   int qualified_alias_sized_static_method_nested_value =
-      read_qualified_alias_sized_static_method_nested(sized_method_nested);
+      read_qualified_alias_sized_static_method_nested<int, 3>(sized_method_nested);
   int qualified_sized_static_method_function_pointer_value =
-      read_qualified_sized_static_method_function_pointer(
+      read_qualified_sized_static_method_function_pointer<int, 3>(
           sized_method_nested);
   int qualified_sized_static_method_typedef_function_pointer_value =
-      read_qualified_sized_static_method_typedef_function_pointer(
+      read_qualified_sized_static_method_typedef_function_pointer<int, 3>(
           sized_method_nested);
   int qualified_sized_static_method_address_function_pointer_value =
-      read_qualified_sized_static_method_address_function_pointer(
+      read_qualified_sized_static_method_address_function_pointer<int, 3>(
           sized_method_nested);
   int qualified_sized_static_method_function_pointer_array_value =
-      read_qualified_sized_static_method_function_pointer_array(
+      read_qualified_sized_static_method_function_pointer_array<int, 3>(
           sized_method_nested);
   int qualified_sized_static_method_function_pointer_parameter_value =
-      read_qualified_sized_static_method_function_pointer_parameter(
+      read_qualified_sized_static_method_function_pointer_parameter<int, 3>(
           sized_method_nested);
   int qualified_sized_static_method_address_function_pointer_parameter_value =
-      read_qualified_sized_static_method_address_function_pointer_parameter(
+      read_qualified_sized_static_method_address_function_pointer_parameter<int, 3>(
           sized_method_nested);
   int qualified_sized_static_method_function_pointer_assignment_value =
-      read_qualified_sized_static_method_function_pointer_assignment(
+      read_qualified_sized_static_method_function_pointer_assignment<int, 3>(
           sized_method_nested);
   int qualified_sized_static_method_address_function_pointer_assignment_value =
-      read_qualified_sized_static_method_address_function_pointer_assignment(
+      read_qualified_sized_static_method_address_function_pointer_assignment<int, 3>(
           sized_method_nested);
   int qualified_sized_static_method_conditional_function_pointer_value =
-      read_qualified_sized_static_method_conditional_function_pointer(
+      read_qualified_sized_static_method_conditional_function_pointer<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_designator_function_pointer_value =
-      read_qualified_sized_static_method_conditional_designator_function_pointer(
+      read_qualified_sized_static_method_conditional_designator_function_pointer<int, 3>(
           sized_method_nested, 0);
   int qualified_sized_static_method_conditional_function_pointer_parameter_value =
-      read_qualified_sized_static_method_conditional_function_pointer_parameter(
+      read_qualified_sized_static_method_conditional_function_pointer_parameter<int, 3>(
           sized_method_nested, 0);
   int qualified_sized_static_method_conditional_function_pointer_return_value =
-      read_qualified_sized_static_method_conditional_function_pointer_return(
+      read_qualified_sized_static_method_conditional_function_pointer_return<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_direct_call_value =
-      read_qualified_sized_static_method_conditional_direct_call(
+      read_qualified_sized_static_method_conditional_direct_call<int, 3>(
           sized_method_nested, 0);
   int qualified_sized_static_method_conditional_null_function_pointer_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer(
+      read_qualified_sized_static_method_conditional_null_function_pointer<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_function_null_pointer_value =
-      read_qualified_sized_static_method_conditional_function_null_pointer(
+      read_qualified_sized_static_method_conditional_function_null_pointer<int, 3>(
           sized_method_nested, 0);
   int qualified_sized_static_method_conditional_null_address_function_pointer_value =
-      read_qualified_sized_static_method_conditional_null_address_function_pointer(
+      read_qualified_sized_static_method_conditional_null_address_function_pointer<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_address_function_null_pointer_value =
-      read_qualified_sized_static_method_conditional_address_function_null_pointer(
+      read_qualified_sized_static_method_conditional_address_function_null_pointer<int, 3>(
           sized_method_nested, 0);
   int qualified_sized_static_method_conditional_nullptr_function_pointer_value =
-      read_qualified_sized_static_method_conditional_nullptr_function_pointer(
+      read_qualified_sized_static_method_conditional_nullptr_function_pointer<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_null_function_pointer_assignment_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_assignment(
+      read_qualified_sized_static_method_conditional_null_function_pointer_assignment<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_null_function_pointer_parameter_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_parameter(
+      read_qualified_sized_static_method_conditional_null_function_pointer_parameter<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_null_direct_call_value =
-      read_qualified_sized_static_method_conditional_null_direct_call(
+      read_qualified_sized_static_method_conditional_null_direct_call<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_auto_conditional_null_function_pointer_value =
-      read_qualified_sized_static_method_auto_conditional_null_function_pointer(
+      read_qualified_sized_static_method_auto_conditional_null_function_pointer<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_decltype_conditional_null_function_pointer_value =
-      read_qualified_sized_static_method_decltype_conditional_null_function_pointer(
+      read_qualified_sized_static_method_decltype_conditional_null_function_pointer<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_null_function_pointer_compare_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_compare(
+      read_qualified_sized_static_method_conditional_null_function_pointer_compare<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_null_function_pointer_return_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_return(
+      read_qualified_sized_static_method_conditional_null_function_pointer_return<int, 3>(
           sized_method_nested, 1);
   int qualified_sized_static_method_conditional_null_function_pointer_array_value =
-      read_qualified_sized_static_method_conditional_null_function_pointer_array(
+      read_qualified_sized_static_method_conditional_null_function_pointer_array<int, 3>(
           sized_method_nested, 1);
   int wrapped_qualified_sized_static_method_conditional_null_function_pointer_value =
-      read_wrapped_qualified_sized_static_method_conditional_null_function_pointer(
+      read_wrapped_qualified_sized_static_method_conditional_null_function_pointer<int, 3>(
           sized_method_nested, 1);
   SizedNestedOwner<int, 3>::Inner made_sized_dependent_nested =
       make_sized_dependent_nested<int, 3>(101, 14);
   int made_sized_dependent_nested_value =
-      read_sized_dependent_nested(made_sized_dependent_nested);
+      read_sized_dependent_nested<int, 3>(made_sized_dependent_nested);
   Holder<SizedNestedOwner<int, 3>::Inner> made_wrapped_sized_dependent_nested =
       make_wrapped_sized_dependent_nested<int, 3>(117, 16);
   int made_wrapped_sized_dependent_nested_value =
-      read_wrapped_sized_dependent_nested(made_wrapped_sized_dependent_nested);
+      read_wrapped_sized_dependent_nested<int, 3>(made_wrapped_sized_dependent_nested);
   nested_ns::SizedOwner<int, 3>::Inner namespaced_sized_dependent_nested;
   namespaced_sized_dependent_nested.value = 137;
   namespaced_sized_dependent_nested.data[2] = 22;
   int namespaced_sized_dependent_nested_value =
-      read_namespaced_sized_dependent_nested(
+      read_namespaced_sized_dependent_nested<int, 3>(
           namespaced_sized_dependent_nested);
   Holder<nested_ns::SizedOwner<int, 3>::Inner>
       wrapped_namespaced_sized_dependent_nested;
   wrapped_namespaced_sized_dependent_nested.value.value = 139;
   wrapped_namespaced_sized_dependent_nested.value.data[2] = 24;
   int wrapped_namespaced_sized_dependent_nested_value =
-      read_wrapped_namespaced_sized_dependent_nested(
+      read_wrapped_namespaced_sized_dependent_nested<int, 3>(
           wrapped_namespaced_sized_dependent_nested);
   int namespaced_sized_dependent_pointer_value =
-      read_namespaced_sized_dependent_nested_pointer(
+      read_namespaced_sized_dependent_nested_pointer<int, 3>(
           &namespaced_sized_dependent_nested);
   int namespaced_sized_dependent_reference_value =
-      read_namespaced_sized_dependent_nested_reference(
+      read_namespaced_sized_dependent_nested_reference<int, 3>(
           namespaced_sized_dependent_nested);
   int wrapped_namespaced_sized_dependent_pointer_value =
-      read_wrapped_namespaced_sized_dependent_nested_pointer(
+      read_wrapped_namespaced_sized_dependent_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_dependent_nested);
   int wrapped_namespaced_sized_dependent_reference_value =
-      read_wrapped_namespaced_sized_dependent_nested_reference(
+      read_wrapped_namespaced_sized_dependent_nested_reference<int, 3>(
           wrapped_namespaced_sized_dependent_nested);
   int const_namespaced_sized_dependent_pointer_value =
-      read_const_namespaced_sized_dependent_nested_pointer(
+      read_const_namespaced_sized_dependent_nested_pointer<int, 3>(
           &namespaced_sized_dependent_nested);
   int const_namespaced_sized_dependent_reference_value =
-      read_const_namespaced_sized_dependent_nested_reference(
+      read_const_namespaced_sized_dependent_nested_reference<int, 3>(
           namespaced_sized_dependent_nested);
   int const_wrapped_namespaced_sized_dependent_pointer_value =
-      read_const_wrapped_namespaced_sized_dependent_nested_pointer(
+      read_const_wrapped_namespaced_sized_dependent_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_dependent_nested);
   int const_wrapped_namespaced_sized_dependent_reference_value =
-      read_const_wrapped_namespaced_sized_dependent_nested_reference(
+      read_const_wrapped_namespaced_sized_dependent_nested_reference<int, 3>(
           wrapped_namespaced_sized_dependent_nested);
   nested_ns::SizedOwner<int, 3>::Inner namespaced_sized_dependent_array[1];
   namespaced_sized_dependent_array[0].value = 149;
   namespaced_sized_dependent_array[0].data[2] = 26;
   int namespaced_sized_dependent_array_value =
-      read_namespaced_sized_dependent_nested_array(
+      read_namespaced_sized_dependent_nested_array<int, 3>(
           namespaced_sized_dependent_array);
   Holder<nested_ns::SizedOwner<int, 3>::Inner>
       wrapped_namespaced_sized_dependent_array[1];
   wrapped_namespaced_sized_dependent_array[0].value.value = 151;
   wrapped_namespaced_sized_dependent_array[0].value.data[2] = 28;
   int wrapped_namespaced_sized_dependent_array_value =
-      read_wrapped_namespaced_sized_dependent_nested_array(
+      read_wrapped_namespaced_sized_dependent_nested_array<int, 3>(
           wrapped_namespaced_sized_dependent_array);
   nested_ns::SizedMemberOwner<int, 3>
       namespaced_sized_member_owner_array[1];
@@ -2125,257 +2125,257 @@ int main(void) {
   namespaced_sized_method_nested.value = 197;
   namespaced_sized_method_nested.data[2] = 44;
   int namespaced_sized_method_nested_value =
-      read_namespaced_sized_method_nested(namespaced_sized_method_nested);
+      read_namespaced_sized_method_nested<int, 3>(namespaced_sized_method_nested);
   Holder<nested_ns::SizedMethodOwner<int, 3>::Inner>
       wrapped_namespaced_sized_method_nested;
   wrapped_namespaced_sized_method_nested.value.value = 211;
   wrapped_namespaced_sized_method_nested.value.data[2] = 48;
   int wrapped_namespaced_sized_method_nested_value =
-      read_wrapped_namespaced_sized_method_nested(
+      read_wrapped_namespaced_sized_method_nested<int, 3>(
           wrapped_namespaced_sized_method_nested);
   int namespaced_sized_method_nested_pointer_value =
-      read_namespaced_sized_method_nested_pointer(
+      read_namespaced_sized_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   int namespaced_sized_method_nested_reference_value =
-      read_namespaced_sized_method_nested_reference(
+      read_namespaced_sized_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   int const_namespaced_sized_method_nested_pointer_value =
-      read_const_namespaced_sized_method_nested_pointer(
+      read_const_namespaced_sized_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   int const_namespaced_sized_method_nested_reference_value =
-      read_const_namespaced_sized_method_nested_reference(
+      read_const_namespaced_sized_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   int const_wrapped_namespaced_sized_method_nested_pointer_value =
-      read_const_wrapped_namespaced_sized_method_nested_pointer(
+      read_const_wrapped_namespaced_sized_method_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_method_nested);
   int const_wrapped_namespaced_sized_method_nested_reference_value =
-      read_const_wrapped_namespaced_sized_method_nested_reference(
+      read_const_wrapped_namespaced_sized_method_nested_reference<int, 3>(
           wrapped_namespaced_sized_method_nested);
   int namespaced_sized_static_method_nested_value =
-      read_namespaced_sized_static_method_nested(
+      read_namespaced_sized_static_method_nested<int, 3>(
           namespaced_sized_method_nested);
   int wrapped_namespaced_sized_static_method_nested_value =
-      read_wrapped_namespaced_sized_static_method_nested(
+      read_wrapped_namespaced_sized_static_method_nested<int, 3>(
           wrapped_namespaced_sized_method_nested);
   int namespaced_sized_static_method_nested_pointer_value =
-      read_namespaced_sized_static_method_nested_pointer(
+      read_namespaced_sized_static_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   int namespaced_sized_static_method_nested_reference_value =
-      read_namespaced_sized_static_method_nested_reference(
+      read_namespaced_sized_static_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   nested_ns::SizedMethodOwner<int, 3>::Inner
       namespaced_sized_method_nested_array[1];
   namespaced_sized_method_nested_array[0].value = 229;
   namespaced_sized_method_nested_array[0].data[2] = 54;
   int namespaced_sized_method_nested_array_value =
-      read_namespaced_sized_method_nested_array(
+      read_namespaced_sized_method_nested_array<int, 3>(
           namespaced_sized_method_nested_array);
   Holder<nested_ns::SizedMethodOwner<int, 3>::Inner>
       wrapped_namespaced_sized_method_nested_array[1];
   wrapped_namespaced_sized_method_nested_array[0].value.value = 233;
   wrapped_namespaced_sized_method_nested_array[0].value.data[2] = 56;
   int wrapped_namespaced_sized_method_nested_array_value =
-      read_wrapped_namespaced_sized_method_nested_array(
+      read_wrapped_namespaced_sized_method_nested_array<int, 3>(
           wrapped_namespaced_sized_method_nested_array);
   int namespaced_sized_static_method_nested_array_value =
-      read_namespaced_sized_static_method_nested_array(
+      read_namespaced_sized_static_method_nested_array<int, 3>(
           namespaced_sized_method_nested_array);
   int qualified_namespaced_sized_static_method_value =
       read_qualified_namespaced_sized_static_method<int, 3>(241, 60);
   int qualified_namespaced_sized_static_method_nested_value =
-      read_qualified_namespaced_sized_static_method_nested(
+      read_qualified_namespaced_sized_static_method_nested<int, 3>(
           namespaced_sized_method_nested);
   int qualified_wrapped_namespaced_sized_static_method_nested_value =
-      read_qualified_wrapped_namespaced_sized_static_method_nested(
+      read_qualified_wrapped_namespaced_sized_static_method_nested<int, 3>(
           wrapped_namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_nested_pointer_value =
-      read_qualified_namespaced_sized_static_method_nested_pointer(
+      read_qualified_namespaced_sized_static_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_nested_reference_value =
-      read_qualified_namespaced_sized_static_method_nested_reference(
+      read_qualified_namespaced_sized_static_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_nested_array_value =
-      read_qualified_namespaced_sized_static_method_nested_array(
+      read_qualified_namespaced_sized_static_method_nested_array<int, 3>(
           namespaced_sized_method_nested_array);
   int qualified_const_namespaced_sized_static_method_nested_pointer_value =
-      read_qualified_const_namespaced_sized_static_method_nested_pointer(
+      read_qualified_const_namespaced_sized_static_method_nested_pointer<int, 3>(
           &namespaced_sized_method_nested);
   int qualified_const_namespaced_sized_static_method_nested_reference_value =
-      read_qualified_const_namespaced_sized_static_method_nested_reference(
+      read_qualified_const_namespaced_sized_static_method_nested_reference<int, 3>(
           namespaced_sized_method_nested);
   int qualified_wrapped_namespaced_sized_static_method_nested_pointer_value =
-      read_qualified_wrapped_namespaced_sized_static_method_nested_pointer(
+      read_qualified_wrapped_namespaced_sized_static_method_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_method_nested);
   int qualified_wrapped_namespaced_sized_static_method_nested_reference_value =
-      read_qualified_wrapped_namespaced_sized_static_method_nested_reference(
+      read_qualified_wrapped_namespaced_sized_static_method_nested_reference<int, 3>(
           wrapped_namespaced_sized_method_nested);
   int qualified_const_wrapped_namespaced_sized_static_method_nested_pointer_value =
-      read_qualified_const_wrapped_namespaced_sized_static_method_nested_pointer(
+      read_qualified_const_wrapped_namespaced_sized_static_method_nested_pointer<int, 3>(
           &wrapped_namespaced_sized_method_nested);
   int qualified_const_wrapped_namespaced_sized_static_method_nested_reference_value =
-      read_qualified_const_wrapped_namespaced_sized_static_method_nested_reference(
+      read_qualified_const_wrapped_namespaced_sized_static_method_nested_reference<int, 3>(
           wrapped_namespaced_sized_method_nested);
   int qualified_wrapped_namespaced_sized_static_method_nested_array_value =
-      read_qualified_wrapped_namespaced_sized_static_method_nested_array(
+      read_qualified_wrapped_namespaced_sized_static_method_nested_array<int, 3>(
           wrapped_namespaced_sized_method_nested_array);
   int qualified_const_wrapped_namespaced_sized_static_method_nested_array_value =
-      read_qualified_const_wrapped_namespaced_sized_static_method_nested_array(
+      read_qualified_const_wrapped_namespaced_sized_static_method_nested_array<int, 3>(
           wrapped_namespaced_sized_method_nested_array);
   int qualified_alias_namespaced_sized_static_method_nested_value =
-      read_qualified_alias_namespaced_sized_static_method_nested(
+      read_qualified_alias_namespaced_sized_static_method_nested<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_function_pointer(
+      read_qualified_namespaced_sized_static_method_function_pointer<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_typedef_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_typedef_function_pointer(
+      read_qualified_namespaced_sized_static_method_typedef_function_pointer<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_address_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_address_function_pointer(
+      read_qualified_namespaced_sized_static_method_address_function_pointer<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_function_pointer_array_value =
-      read_qualified_namespaced_sized_static_method_function_pointer_array(
+      read_qualified_namespaced_sized_static_method_function_pointer_array<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_function_pointer_parameter_value =
-      read_qualified_namespaced_sized_static_method_function_pointer_parameter(
+      read_qualified_namespaced_sized_static_method_function_pointer_parameter<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_address_function_pointer_parameter_value =
-      read_qualified_namespaced_sized_static_method_address_function_pointer_parameter(
+      read_qualified_namespaced_sized_static_method_address_function_pointer_parameter<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_function_pointer_assignment_value =
-      read_qualified_namespaced_sized_static_method_function_pointer_assignment(
+      read_qualified_namespaced_sized_static_method_function_pointer_assignment<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_address_function_pointer_assignment_value =
-      read_qualified_namespaced_sized_static_method_address_function_pointer_assignment(
+      read_qualified_namespaced_sized_static_method_address_function_pointer_assignment<int, 3>(
           namespaced_sized_method_nested);
   int qualified_namespaced_sized_static_method_conditional_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_function_pointer<int, 3>(
           namespaced_sized_method_nested, 0);
   int qualified_namespaced_sized_static_method_conditional_designator_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_designator_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_designator_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_function_pointer_parameter_value =
-      read_qualified_namespaced_sized_static_method_conditional_function_pointer_parameter(
+      read_qualified_namespaced_sized_static_method_conditional_function_pointer_parameter<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_function_pointer_return_value =
-      read_qualified_namespaced_sized_static_method_conditional_function_pointer_return(
+      read_qualified_namespaced_sized_static_method_conditional_function_pointer_return<int, 3>(
           namespaced_sized_method_nested, 0);
   int qualified_namespaced_sized_static_method_conditional_direct_call_value =
-      read_qualified_namespaced_sized_static_method_conditional_direct_call(
+      read_qualified_namespaced_sized_static_method_conditional_direct_call<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_function_null_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_function_null_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_function_null_pointer<int, 3>(
           namespaced_sized_method_nested, 0);
   int qualified_namespaced_sized_static_method_conditional_null_address_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_address_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_null_address_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_address_function_null_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_address_function_null_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_address_function_null_pointer<int, 3>(
           namespaced_sized_method_nested, 0);
   int qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer(
+      read_qualified_namespaced_sized_static_method_conditional_nullptr_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_assignment<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_parameter<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_null_direct_call_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_direct_call(
+      read_qualified_namespaced_sized_static_method_conditional_null_direct_call<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer(
+      read_qualified_namespaced_sized_static_method_auto_conditional_null_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer_value =
-      read_qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer(
+      read_qualified_namespaced_sized_static_method_decltype_conditional_null_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_compare<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_return_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_return(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_return<int, 3>(
           namespaced_sized_method_nested, 1);
   int qualified_namespaced_sized_static_method_conditional_null_function_pointer_array_value =
-      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_array(
+      read_qualified_namespaced_sized_static_method_conditional_null_function_pointer_array<int, 3>(
           namespaced_sized_method_nested, 1);
   int wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer_value =
-      read_wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer(
+      read_wrapped_qualified_namespaced_sized_static_method_conditional_null_function_pointer<int, 3>(
           namespaced_sized_method_nested, 1);
   nested_ns::SizedOwner<int, 3>::Inner made_namespaced_sized_dependent_nested =
       make_namespaced_sized_dependent_nested<int, 3>(167, 34);
   int made_namespaced_sized_dependent_nested_value =
-      read_namespaced_sized_dependent_nested(
+      read_namespaced_sized_dependent_nested<int, 3>(
           made_namespaced_sized_dependent_nested);
   Holder<nested_ns::SizedOwner<int, 3>::Inner>
       made_wrapped_namespaced_sized_dependent_nested =
           make_wrapped_namespaced_sized_dependent_nested<int, 3>(173, 36);
   int made_wrapped_namespaced_sized_dependent_nested_value =
-      read_wrapped_namespaced_sized_dependent_nested(
+      read_wrapped_namespaced_sized_dependent_nested<int, 3>(
           made_wrapped_namespaced_sized_dependent_nested);
   int dependent_pointer_value =
-      read_dependent_nested_pointer(&deduced_signature_nested);
+      read_dependent_nested_pointer<int>(&deduced_signature_nested);
   int dependent_reference_value =
-      read_dependent_nested_reference(deduced_signature_nested);
+      read_dependent_nested_reference<int>(deduced_signature_nested);
   int const_dependent_pointer_value =
-      read_const_dependent_nested_pointer(&deduced_signature_nested);
+      read_const_dependent_nested_pointer<int>(&deduced_signature_nested);
   int const_dependent_reference_value =
-      read_const_dependent_nested_reference(deduced_signature_nested);
+      read_const_dependent_nested_reference<int>(deduced_signature_nested);
   NestedOwner<int>::Inner dependent_nested_array[1];
   dependent_nested_array[0].value = 59;
   int dependent_array_value =
-      read_dependent_nested_array(dependent_nested_array);
+      read_dependent_nested_array<int>(dependent_nested_array);
   int namespaced_dependent_pointer_value =
-      read_namespaced_dependent_nested_pointer(&namespaced_nested_inner);
+      read_namespaced_dependent_nested_pointer<int>(&namespaced_nested_inner);
   int namespaced_dependent_reference_value =
-      read_namespaced_dependent_nested_reference(namespaced_nested_inner);
+      read_namespaced_dependent_nested_reference<int>(namespaced_nested_inner);
   int const_namespaced_dependent_pointer_value =
-      read_const_namespaced_dependent_nested_pointer(&namespaced_nested_inner);
+      read_const_namespaced_dependent_nested_pointer<int>(&namespaced_nested_inner);
   int const_namespaced_dependent_reference_value =
-      read_const_namespaced_dependent_nested_reference(namespaced_nested_inner);
+      read_const_namespaced_dependent_nested_reference<int>(namespaced_nested_inner);
   nested_ns::Owner<int>::Inner namespaced_dependent_array[1];
   namespaced_dependent_array[0].value = 67;
   int namespaced_dependent_array_value =
-      read_namespaced_dependent_nested_array(namespaced_dependent_array);
+      read_namespaced_dependent_nested_array<int>(namespaced_dependent_array);
   int wrapped_dependent_value =
-      read_wrapped_dependent_nested(wrapped_nested_inner);
+      read_wrapped_dependent_nested<int>(wrapped_nested_inner);
   int wrapped_dependent_pointer_value =
-      read_wrapped_dependent_nested_pointer(&wrapped_nested_inner);
+      read_wrapped_dependent_nested_pointer<int>(&wrapped_nested_inner);
   int wrapped_dependent_reference_value =
-      read_wrapped_dependent_nested_reference(wrapped_nested_inner);
+      read_wrapped_dependent_nested_reference<int>(wrapped_nested_inner);
   int const_wrapped_dependent_pointer_value =
-      read_const_wrapped_dependent_nested_pointer(&wrapped_nested_inner);
+      read_const_wrapped_dependent_nested_pointer<int>(&wrapped_nested_inner);
   int const_wrapped_dependent_reference_value =
-      read_const_wrapped_dependent_nested_reference(wrapped_nested_inner);
+      read_const_wrapped_dependent_nested_reference<int>(wrapped_nested_inner);
   Holder<NestedOwner<int>::Inner> wrapped_dependent_array[1];
   wrapped_dependent_array[0].value.value = 61;
   int wrapped_dependent_array_value =
-      read_wrapped_dependent_nested_array(wrapped_dependent_array);
+      read_wrapped_dependent_nested_array<int>(wrapped_dependent_array);
   Holder<NestedOwner<int>::Inner> made_wrapped_dependent_nested =
       make_wrapped_dependent_nested(47);
   Holder<nested_ns::Owner<int>::Inner> made_wrapped_namespaced_dependent_nested =
       make_wrapped_namespaced_dependent_nested(53);
   int wrapped_namespaced_dependent_value =
-      read_wrapped_namespaced_dependent_nested(wrapped_namespaced_nested_inner);
+      read_wrapped_namespaced_dependent_nested<int>(wrapped_namespaced_nested_inner);
   int wrapped_namespaced_dependent_pointer_value =
-      read_wrapped_namespaced_dependent_pointer(
+      read_wrapped_namespaced_dependent_pointer<int>(
           &wrapped_namespaced_nested_inner);
   int wrapped_namespaced_dependent_reference_value =
-      read_wrapped_namespaced_dependent_reference(
+      read_wrapped_namespaced_dependent_reference<int>(
           wrapped_namespaced_nested_inner);
   int const_wrapped_namespaced_dependent_pointer_value =
-      read_const_wrapped_namespaced_dependent_pointer(
+      read_const_wrapped_namespaced_dependent_pointer<int>(
           &wrapped_namespaced_nested_inner);
   int const_wrapped_namespaced_dependent_reference_value =
-      read_const_wrapped_namespaced_dependent_reference(
+      read_const_wrapped_namespaced_dependent_reference<int>(
           wrapped_namespaced_nested_inner);
   Holder<nested_ns::Owner<int>::Inner> wrapped_namespaced_dependent_array[1];
   wrapped_namespaced_dependent_array[0].value.value = 71;
   int wrapped_namespaced_dependent_array_value =
-      read_wrapped_namespaced_dependent_array(
+      read_wrapped_namespaced_dependent_array<int>(
           wrapped_namespaced_dependent_array);
   cache::Box<left::Item> left_box;
   cache::Box<right::Item> right_box;
