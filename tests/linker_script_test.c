@@ -347,6 +347,71 @@ static void TestExpressionsAndInclude(void) {
   remove(inc_path);
 }
 
+static void TestDataStatements(void) {
+  static const char kScript[] =
+      "MEMORY { ram (rwx) : ORIGIN = 0x3000, LENGTH = 0 }\n"
+      "cap = 0x58;\n"
+      "SECTIONS {\n"
+      "  .text : { *(.text*) } > ram\n"
+      "  .cap : {\n"
+      "    cap_lo = .;\n"
+      "    BYTE(0)\n"
+      "    cap_hi = .;\n"
+      "    BYTE(cap);\n"
+      "    SHORT(0x1234); LONG(-1); QUAD(0x0102030405060708)\n"
+      "    *(.after)\n"
+      "  } > ram\n"
+      "}\n";
+  LinkerConfig config = {0};
+  CHECK(LinkerScriptParseString("data.ld", kScript, ELF_MACHINE_TYPEW65C02,
+                                &config));
+  CHECK(config.errors == 0);
+  CHECK(config.script_data.length == 2);
+  if (config.script_data.length == 2) {
+    ConfigScriptData* lo = config.script_data.value.p[0];
+    ConfigScriptData* rest = config.script_data.value.p[1];
+    CHECK(lo->bytes.length == 1 && lo->bytes.value[0] == 0);
+    static const unsigned char kRest[] = {
+        0x58, 0x34, 0x12, 0xff, 0xff, 0xff, 0xff,
+        0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01};
+    CHECK(rest->bytes.length == sizeof(kRest) &&
+          memcmp(rest->bytes.value, kRest, sizeof(kRest)) == 0);
+
+    // The data sections are inputs of .cap, in script order.
+    ConfigRegion* ram = NULL;
+    for (size_t i = 0; i < config.segments.length && ram == NULL; i++) {
+      ram = FindRegion(config.segments.value.p[i], "ram");
+    }
+    CHECK(ram != NULL);
+    if (ram != NULL) {
+      CHECK(LinkerConfigPatternIndex(&ram->sections, lo->name.value) <
+            LinkerConfigPatternIndex(&ram->sections, rest->name.value));
+      CHECK(LinkerConfigPatternIndex(&ram->sections, rest->name.value) <
+            LinkerConfigPatternIndex(&ram->sections, ".after"));
+    }
+
+    // `.` before any input is the start of the section's inputs; after the
+    // first byte it is the end of that data.
+    ConfigScriptSymbol* cap_lo = FindSym(&config, "cap_lo");
+    ConfigScriptSymbol* cap_hi = FindSym(&config, "cap_hi");
+    CHECK(cap_lo != NULL && cap_lo->patterns.length == 0 &&
+          cap_lo->start_patterns.length == 3);
+    CHECK(cap_hi != NULL && cap_hi->patterns.length == 1 &&
+          LinkerConfigSectionMatches(&cap_hi->patterns, lo->name.value) &&
+          !LinkerConfigSectionMatches(&cap_hi->patterns, rest->name.value));
+  }
+  LinkerConfigDestruct(&config);
+
+  static const char kRelocatable[] =
+      "MEMORY { ram (rwx) : ORIGIN = 0x3000, LENGTH = 0 }\n"
+      "SECTIONS { .cap : { BYTE(_start) } > ram }\n";
+  LinkerConfig bad = {0};
+  CHECK(!LinkerScriptParseString("bad.ld", kRelocatable,
+                                 ELF_MACHINE_TYPEW65C02, &bad));
+  CHECK(bad.errors != 0);
+  LinkerConfigDestruct(&bad);
+}
+
 int main(void) {
   TestStandardScript();
   Test6502RomBuiltin();
@@ -356,6 +421,7 @@ int main(void) {
   TestMissingBuiltin();
   TestWildcardsDiscardProvide();
   TestExpressionsAndInclude();
+  TestDataStatements();
   if (g_failures != 0) {
     fprintf(stderr, "%d check(s) failed\n", g_failures);
     return 1;

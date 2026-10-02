@@ -1272,6 +1272,81 @@ static bool SegmentContainsSection(Segment* segment, String* section_name) {
   return false;
 }
 
+// Emit the linker script's BYTE()/SHORT()/LONG()/QUAD() data.  The script
+// lists each data section among its output section's inputs, so it is placed
+// like any input section.
+static void CreateScriptDataGroups(Linker* linker) {
+  for (size_t i = 0; i < linker->config.script_data.length; i++) {
+    ConfigScriptData* data = linker->config.script_data.value.p[i];
+    ELFWriterSectionContents* contents =
+        NewELFWriterSectionContents(kSectionContentsBuffered);
+    BufferAppend(&contents->data.buffered, data->bytes.value,
+                 data->bytes.length);
+    contents->size = data->bytes.length;
+    ELFWriterSection* section = calloc(1, sizeof(ELFWriterSection));
+    StringInit(&section->name, data->name.value);
+    section->header.type = SHT(progbits);
+    section->header.flags = SHF(alloc);
+    section->header.addralign = 1;
+    section->contents = contents;
+    section->relocations = NewVector();
+    SectionGroup* group =
+        NewSectionGroup(&data->name, SHT(progbits), SHF(alloc), 1);
+    VectorAppend(&group->components, NewGroupedSection(section));
+    VectorAppend(&linker->section_groups, group);
+  }
+}
+
+static bool IsScriptDataGroup(Linker* linker, const SectionGroup* group) {
+  for (size_t i = 0; i < linker->config.script_data.length; i++) {
+    ConfigScriptData* data = linker->config.script_data.value.p[i];
+    if (StringEqual(&group->name, data->name.value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The writer puts sections without SHF_WRITE in the read-only PT_LOAD and the
+// rest in the writable one, and each PT_LOAD maps one contiguous run of the
+// file.  Script data must therefore share the write flag of the section laid
+// out just before it, or just after it when nothing precedes it.
+static void SetScriptDataFlags(Linker* linker) {
+  for (size_t i = 0; i < linker->section_groups.length; i++) {
+    SectionGroup* group = linker->section_groups.value.p[i];
+    if (group->region == NULL || !IsScriptDataGroup(linker, group)) {
+      continue;
+    }
+    uint64_t start = group->address;
+    uint64_t end = start + LinkerSectionGroupSize(group);
+    SectionGroup* before = NULL;
+    SectionGroup* after = NULL;
+    for (size_t j = 0; j < linker->section_groups.length; j++) {
+      SectionGroup* other = linker->section_groups.value.p[j];
+      uint64_t other_size = LinkerSectionGroupSize(other);
+      if (other == group || other->region == NULL || other_size == 0 ||
+          (other->flags & SHF(alloc)) == 0 ||
+          IsScriptDataGroup(linker, other)) {
+        continue;
+      }
+      if (other->address + other_size <= start) {
+        if (before == NULL || other->address > before->address) {
+          before = other;
+        }
+      } else if (other->address >= end) {
+        if (after == NULL || other->address < after->address) {
+          after = other;
+        }
+      }
+    }
+    SectionGroup* neighbour = before != NULL ? before : after;
+    if (neighbour == NULL) {
+      continue;
+    }
+    group->flags = (group->flags & ~SHF(write)) | (neighbour->flags & SHF(write));
+  }
+}
+
 static SegmentMemoryRegion* SegmentRegionForSection(Segment* segment,
                                                     const char* section_name) {
   for (size_t i = 0; i < segment->regions.length; i++) {
@@ -1386,6 +1461,23 @@ static void ApplyScriptSymbols(Linker* linker, uint64_t image_end) {
       }
       if (found) {
         address = end;
+      }
+    } else if (!spec->image_end && spec->start_patterns.length > 0) {
+      bool found = false;
+      uint64_t start = 0;
+      for (size_t g = 0; g < linker->section_groups.length; g++) {
+        SectionGroup* group = linker->section_groups.value.p[g];
+        if (group->region != NULL &&
+            LinkerConfigSectionMatches(&spec->start_patterns,
+                                       group->name.value)) {
+          if (!found || group->address < start) {
+            start = group->address;
+            found = true;
+          }
+        }
+      }
+      if (found) {
+        address = start;
       }
     }
     address = AlignUpU64(address, spec->align);
@@ -1970,6 +2062,8 @@ void LinkerLinkAllFiles(Linker* linker) {
   // Group the TLS nobits sections.
   GroupSections(linker, SHT(nobits), SHF(tls));
 
+  CreateScriptDataGroups(linker);
+
   // Add compact runtime symbol metadata only when stacktrace support is linked.
   LinkerStacktracePrepare(linker);
 
@@ -2110,6 +2204,7 @@ void LinkerLinkAllFiles(Linker* linker) {
   // Define the '_end' symbol for the last assigned address.
   InventSymbol(linker, "_end", 8, addr);
   ApplyScriptSymbols(linker, addr);
+  SetScriptDataFlags(linker);
 
   // Expose the linked .eh_frame range to the in-process unwind runtime.
   InventEHFrameBounds(linker);
