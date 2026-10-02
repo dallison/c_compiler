@@ -18,6 +18,8 @@
 typedef enum {
   kRISCVGuestThreadIdle,
   kRISCVGuestThreadRunning,
+  // The user function has returned; only TLS teardown is left.
+  kRISCVGuestThreadExiting,
   kRISCVGuestThreadFinished,
 } RISCVGuestThreadState;
 

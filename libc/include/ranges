@@ -1193,13 +1193,13 @@ struct __all_fn : __adaptor_closure_base {
   }
 
   template <class R>
-    requires range<R> && (!view<R>) && (!is_array_v<R>)
+    requires range<R> && (!view<remove_cv_t<R>>) && (!is_array_v<R>)
   constexpr ref_view<R> operator()(R& r) const {
     return ref_view<R>(r);
   }
 
   template <class R>
-    requires range<R> && (!view<R>) && (!is_lvalue_reference_v<R>)
+    requires range<R> && (!view<remove_cv_t<R>>) && (!is_lvalue_reference_v<R>)
   constexpr owning_view<remove_cvref_t<R>> operator()(R&& r) const {
     return owning_view<remove_cvref_t<R>>(static_cast<R&&>(r));
   }
@@ -1209,6 +1209,9 @@ struct __all_fn : __adaptor_closure_base {
 
 namespace views {
 inline constexpr __detail::__all_fn all{};
+
+template <viewable_range R>
+using all_t = decltype(all(declval<R>()));
 }  // namespace views
 
 template <viewable_range R>

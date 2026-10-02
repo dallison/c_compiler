@@ -2945,6 +2945,72 @@ Vector* MemberFunctionEnclosingClassArguments(Symbol* symbol) {
   return BaseDeclaringConcreteTemplateArguments(owner, &symbol->name, 0);
 }
 
+static Vector* PartialSpecializationMemberPatternArguments(TypeParser* parser,
+                                                           Struct* owner);
+
+// The enclosing-class arguments a member function's body numbers its class
+// parameters by (caller deletes): a partial specialization's own bindings
+// (`[F, H, T]` for `ap<F, pack<H, T...>>`) rather than the primary's
+// arguments recorded on the instantiated class (`[F, pack<H, T...>]`).
+static Vector* MemberFunctionEnclosingPatternArguments(Syntax* syntax,
+                                                       Symbol* symbol) {
+  Vector* class_args = MemberFunctionEnclosingClassArguments(symbol);
+  if (class_args == NULL || class_args->length == 0) {
+    return NULL;
+  }
+  Struct* owner = symbol->type->info.function.cxx_member_owner;
+  Symbol* origin = owner != NULL && owner->tag_symbol != NULL &&
+                           owner->tag_symbol->type != NULL
+                       ? owner->tag_symbol->type->template_origin
+                       : NULL;
+  if (syntax != NULL && StructConcreteTemplateArguments(owner) == class_args &&
+      origin != NULL && origin->type != NULL &&
+      TypeIsStructOrUnion(origin->type) &&
+      origin->type->info.struct_info != NULL &&
+      origin->type->info.struct_info->partial_specializations.length > 0) {
+    TypeParser parser;
+    TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                   syntax->context);
+    Vector* bindings =
+        PartialSpecializationMemberPatternArguments(&parser, owner);
+    TypeParserDestruct(&parser);
+    if (bindings != NULL) {
+      return bindings;
+    }
+  }
+  return TemplateArgumentVectorCopy(class_args);
+}
+
+Vector* PrependMemberFunctionEnclosingArguments(Syntax* syntax, Symbol* symbol,
+                                                Vector* member_args,
+                                                bool keep_existing_prefix) {
+  if (member_args == NULL) {
+    return NULL;
+  }
+  Vector* class_args = MemberFunctionEnclosingPatternArguments(syntax, symbol);
+  if (class_args == NULL) {
+    return NULL;
+  }
+  bool already_prefixed =
+      keep_existing_prefix && member_args->length >= class_args->length;
+  for (size_t j = 0; already_prefixed && j < class_args->length; j++) {
+    if (!TemplateArgumentEqual(member_args->value.p[j],
+                               class_args->value.p[j])) {
+      already_prefixed = false;
+    }
+  }
+  if (already_prefixed) {
+    VectorDeleteWithContents(class_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    return NULL;
+  }
+  for (size_t j = 0; j < member_args->length; j++) {
+    VectorAppend(class_args, TemplateArgumentCopy(member_args->value.p[j]));
+  }
+  return class_args;
+}
+
 bool CXXRetargetDropsDeclaringTemplateArguments(Struct* existing,
                                                 Struct* named) {
   return existing != NULL && existing != named &&
@@ -2952,7 +3018,8 @@ bool CXXRetargetDropsDeclaringTemplateArguments(Struct* existing,
          StructConcreteTemplateArguments(named) == NULL;
 }
 
-static Vector* FunctionTemplateBodyArguments(Symbol* template_definition,
+static Vector* FunctionTemplateBodyArguments(Syntax* syntax,
+                                             Symbol* template_definition,
                                              Symbol* symbol,
                                              Vector* member_args) {
   if (template_definition == NULL || template_definition->type == NULL ||
@@ -2974,15 +3041,9 @@ static Vector* FunctionTemplateBodyArguments(Symbol* template_definition,
       member_args->length == own_count && symbol->type != NULL &&
       TypeIsFunction(symbol->type) &&
       symbol->type->info.function.cxx_member_owner != NULL) {
-    Vector* class_args = MemberFunctionEnclosingClassArguments(symbol);
-    if (class_args != NULL && class_args->length > 0) {
-      Vector* combined = NewVector();
-      for (size_t i = 0; i < class_args->length; i++) {
-        VectorAppend(combined, TemplateArgumentCopy(class_args->value.p[i]));
-      }
-      for (size_t i = 0; i < member_args->length; i++) {
-        VectorAppend(combined, TemplateArgumentCopy(member_args->value.p[i]));
-      }
+    Vector* combined = PrependMemberFunctionEnclosingArguments(
+        syntax, symbol, member_args, /*keep_existing_prefix=*/false);
+    if (combined != NULL) {
       return combined;
     }
   }
@@ -3001,29 +3062,9 @@ static Vector* FunctionTemplateBodyArguments(Symbol* template_definition,
       // arguments unless they are already in front.  Leaving them off binds
       // `H` to the first function argument (`H::combine` looks up `combine`
       // on `Cord` or `const Coroutine*`).
-      Vector* class_args = MemberFunctionEnclosingClassArguments(symbol);
-      if (class_args == NULL || class_args->length == 0 ||
-          member_args == NULL) {
-        return member_args;
-      }
-      bool already_prefixed = member_args->length >= class_args->length;
-      for (size_t j = 0; already_prefixed && j < class_args->length; j++) {
-        if (!TemplateArgumentEqual(member_args->value.p[j],
-                                  class_args->value.p[j])) {
-          already_prefixed = false;
-        }
-      }
-      if (already_prefixed) {
-        return member_args;
-      }
-      Vector* combined = NewVector();
-      for (size_t j = 0; j < class_args->length; j++) {
-        VectorAppend(combined, TemplateArgumentCopy(class_args->value.p[j]));
-      }
-      for (size_t j = 0; j < member_args->length; j++) {
-        VectorAppend(combined, TemplateArgumentCopy(member_args->value.p[j]));
-      }
-      return combined;
+      Vector* combined = PrependMemberFunctionEnclosingArguments(
+          syntax, symbol, member_args, /*keep_existing_prefix=*/true);
+      return combined != NULL ? combined : member_args;
     }
   }
   Symbol* member_template = symbol->type->info.function.template_origin;
@@ -3067,7 +3108,8 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
   FunctionInstantiationInProgress in_progress;
   PushFunctionInstantiationInProgress(&in_progress, symbol);
   Vector* body_args =
-      FunctionTemplateBodyArguments(template_definition, symbol, args);
+      FunctionTemplateBodyArguments(parser != NULL ? parser->syntax : NULL,
+                                    template_definition, symbol, args);
   symbol->type->info.function.body =
       CloneTemplateFunctionBody(parser, template_definition->type,
                                 symbol->type, body_args);
@@ -3348,7 +3390,8 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     FunctionInstantiationInProgress in_progress;
     PushFunctionInstantiationInProgress(&in_progress, symbol);
     Vector* body_args =
-        FunctionTemplateBodyArguments(template_definition, symbol,
+        FunctionTemplateBodyArguments(parser != NULL ? parser->syntax : NULL,
+                                      template_definition, symbol,
                                       instantiation_args);
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
@@ -6242,6 +6285,94 @@ static bool TypeChainHasDependentMemberName(TypeRecord* type) {
   return false;
 }
 
+static bool PartialOrderingIsReference(TypeRecord* type) {
+  return type != NULL && (type->declarator == kDeclReference ||
+                          type->declarator == kDeclRValueReference);
+}
+
+/* The type partial ordering deduces from: references and then top-level cv
+ * are removed ([temp.deduct.partial]/5, /7).  Returns a copy the caller
+ * deletes in `*owned` when the qualifiers had to be dropped. */
+static TypeRecord* PartialOrderingDeductionType(TypeRecord* type,
+                                                TypeRecord** owned) {
+  *owned = NULL;
+  if (PartialOrderingIsReference(type)) {
+    type = type->next;
+  }
+  if (type != NULL &&
+      (type->qualifiers & (kQualConst | kQualVolatile)) != 0) {
+    *owned = TypeRecordCopy(type);
+    TypeRecordIncRef(*owned);
+    (*owned)->qualifiers &= ~(kQualConst | kQualVolatile);
+    type = *owned;
+  }
+  return type;
+}
+
+static bool DeducePartialOrderingType(Vector* args, size_t explicit_arg_count,
+                                      TypeRecord* parameter,
+                                      TypeRecord* argument) {
+  TypeRecord* owned_parameter;
+  TypeRecord* owned_argument;
+  TypeRecord* p = PartialOrderingDeductionType(parameter, &owned_parameter);
+  TypeRecord* a = PartialOrderingDeductionType(argument, &owned_argument);
+  bool ok = p != NULL && a != NULL &&
+            DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, p, a);
+  if (owned_parameter != NULL) {
+    TypeRecordDelete(owned_parameter);
+  }
+  if (owned_argument != NULL) {
+    TypeRecordDelete(owned_argument);
+  }
+  return ok;
+}
+
+/* Deduce `func`'s parameter type `parameter` from `argument` alone, for the
+ * [temp.deduct.partial]/9 check that deduction also succeeds the other way. */
+static bool DeducePartialOrderingTypeAlone(TypeRecord* func,
+                                           TypeRecord* parameter,
+                                           TypeRecord* argument) {
+  int saved_base = g_deduce_template_parameter_base;
+  g_deduce_template_parameter_base = func->info.function.template_parameter_base;
+  size_t explicit_arg_count = 0;
+  Vector* args =
+      NewFunctionTemplateDeductionArguments(func, NULL, &explicit_arg_count);
+  bool ok = args != NULL && DeducePartialOrderingType(args, explicit_arg_count,
+                                                      parameter, argument);
+  if (args != NULL) {
+    VectorDeleteWithContents(args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+  g_deduce_template_parameter_base = saved_base;
+  return ok;
+}
+
+/* [temp.deduct.partial]/9: when deduction succeeds both ways and both types
+ * were references, an lvalue reference is more specialized than an rvalue
+ * reference (`f(R&)` over `f(R&&)`), and otherwise the more cv-qualified
+ * referred type is (`f(const T&)` over `f(T&)`).  True when that makes the
+ * specialized template's type not at least as specialized as the general's. */
+static bool PartialOrderingReferenceTieLoses(TypeRecord* specialized_type,
+                                             TypeRecord* general_type) {
+  if (!PartialOrderingIsReference(specialized_type) ||
+      !PartialOrderingIsReference(general_type)) {
+    return false;
+  }
+  bool specialized_lvalue = specialized_type->declarator == kDeclReference;
+  bool general_lvalue = general_type->declarator == kDeclReference;
+  if (specialized_lvalue != general_lvalue) {
+    return general_lvalue;
+  }
+  Qualifiers cv = kQualConst | kQualVolatile;
+  Qualifiers specialized_cv =
+      specialized_type->next != NULL ? specialized_type->next->qualifiers & cv
+                                     : 0;
+  Qualifiers general_cv =
+      general_type->next != NULL ? general_type->next->qualifiers & cv : 0;
+  return (general_cv & ~specialized_cv) != 0;
+}
+
 /* True if `specialized`'s parameter patterns can deduce `general`
  * ([temp.deduct.partial]).  Each of `specialized`'s template parameters acts
  * as a unique type on the argument side, so a repeated parameter (`It, It`)
@@ -6287,8 +6418,12 @@ static bool FunctionParametersAtLeastAsSpecialized(Symbol* specialized,
       ok = false;
       break;
     }
-    ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
-                                           gparam->type, sparam->type);
+    ok = DeducePartialOrderingType(args, explicit_arg_count, gparam->type,
+                                   sparam->type);
+    if (ok && PartialOrderingReferenceTieLoses(sparam->type, gparam->type) &&
+        DeducePartialOrderingTypeAlone(sfunc, sparam->type, gparam->type)) {
+      ok = false;
+    }
   }
   if (args != NULL) {
     VectorDeleteWithContents(args,

@@ -3250,8 +3250,22 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
 
   if (TypeUsesLongDoubleRepresentation(store_type) ||
       TypeUsesLongDoubleRepresentation(op_type)) {
-    IRNode* load = LoadLongDoubleFromAddress(gen, dest, store_type);
-    CheckForVarUse(load, node->left);
+    // A long double operand is copied out of its address into a temporary,
+    // like GenerateIncDec; the temporary is not a load of the variable.  A
+    // narrower operand (`double d; d += 1.0L`) is an ordinary load.
+    IRNode* load;
+    if (TypeUsesLongDoubleRepresentation(store_type)) {
+      load = LoadLongDoubleFromAddress(gen, dest, store_type);
+    } else {
+      load = IRSetType(
+          GeneratorEmit(gen, NewIR1(GetLoadOpcode((ASTNode*)node), dest)),
+          store_type);
+      if (IsBitfieldReference(node->left)) {
+        load = LoadBitfield(gen, load, (BinaryASTNode*)node->left);
+      } else {
+        CheckForVarUse(load, node->left);
+      }
+    }
     if (!TypeUsesLongDoubleRepresentation(store_type)) {
       load = ConvertValueToLongDouble(gen, load, store_type, op_type);
     } else if (!TypeEqual(store_type, op_type) &&

@@ -68,6 +68,10 @@ typedef struct Syntax {
   // being parsed.  Bounded for the same reason as expression_nesting_depth (see
   // ParseStructBody).
   int struct_definition_depth;
+  // Number of enum bodies parsed so far.  A member declaration compares it
+  // before and after its type to tell `enum E { A } e;` (A becomes a class
+  // member) from `static const E a = ns::A;` (it does not).
+  unsigned enum_bodies_parsed;
   int current_template_parameter_count;  // Type params for current template.
   Vector* current_template_parameters;  // TemplateParameter* for current template.
   struct ConstraintExpr* current_template_requires_clause;  // C++20 requires.

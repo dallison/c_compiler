@@ -1684,18 +1684,23 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     Vector* pattern_args = prefixed != NULL ? prefixed : completed;
     TypeRecord* subst =
         SubstituteTemplateParameters(parser, info.origin->type, pattern_args);
-    subst->qualifiers |= type->qualifiers;
-    // The alias pattern may be a dependent-member type such as
-    // `typename ratio<...>::type`.  Now that the arguments are concrete the
-    // result is a real class type; collapse the lazy `Template<Args>::member`
-    // encoding to that concrete specialization so downstream uses (e.g. as a
-    // template argument whose members are later accessed) see a plain class.
-    subst = TypeMaterializeClassTemplateSpecialization(parser->syntax, subst);
+    // A pattern such as `decltype(views::all(declval<R>()))` fails to
+    // substitute when the call is ill-formed for these arguments.
+    if (subst != NULL) {
+      subst->qualifiers |= type->qualifiers;
+      // The alias pattern may be a dependent-member type such as
+      // `typename ratio<...>::type`.  Now that the arguments are concrete the
+      // result is a real class type; collapse the lazy
+      // `Template<Args>::member` encoding to that concrete specialization so
+      // downstream uses (e.g. as a template argument whose members are later
+      // accessed) see a plain class.
+      subst = TypeMaterializeClassTemplateSpecialization(parser->syntax, subst);
+    }
     // Once this alias has expanded to its concrete result, do not retain the
     // alias template-id on that result. Keeping `decay_t<const T>` metadata on
     // the resulting `T` makes later substitutions treat the concrete type as
     // dependent and prevents non-type trait arguments from folding.
-    if (subst->template_origin == info.origin) {
+    if (subst != NULL && subst->template_origin == info.origin) {
       subst->template_origin = NULL;
       if (subst->template_arguments != NULL) {
         VectorDeleteWithContents(
@@ -1718,7 +1723,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     VectorDeleteWithContents(concrete_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
-    return TypeRecordCalculateSize(subst);
+    return subst != NULL ? TypeRecordCalculateSize(subst) : NULL;
   }
 
   TypeRecord* subst =

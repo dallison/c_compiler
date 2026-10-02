@@ -3212,14 +3212,19 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     if (is_static_member) {
       parser->storage |= STO(static);
     }
+    unsigned enum_bodies_before = parser->syntax->enum_bodies_parsed;
     TypeRecord* member_type = TypeParserParseType(parser, true);
     parser->storage = saved_member_storage;
     parser->parsing_direct_class_template = saved_direct_class_template;
     // Unscoped enumerators are members of the enclosing class even when the
     // enum declares an object (`enum civil_kind { SKIPPED } kind;`), so
     // `civil_lookup::SKIPPED` is valid.  A bare `enum E { A };` hits this
-    // once here; do not inject again on the semicolon.
-    if (TypeIsEnum(member_type)) {
+    // once here; do not inject again on the semicolon.  Only an enum defined
+    // by this declaration counts: `static const flag_type icase =
+    // regex_constants::icase;` must not make every regex_constants
+    // enumerator a member.
+    if (TypeIsEnum(member_type) &&
+        parser->syntax->enum_bodies_parsed != enum_bodies_before) {
       AddCXXUnscopedEnumConstantMembers(parser, str, member_type,
                                         current_access);
     }

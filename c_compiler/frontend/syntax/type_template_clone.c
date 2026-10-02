@@ -9096,7 +9096,8 @@ static void RebindClonedDesignatorMemberVisitor(ASTNode* node, void* data,
  * (`H` at 0, `T` at 1).  Some callers pass only the member arguments.  Prepend
  * the specialization's class arguments so `H::combine` resolves on `H` rather
  * than on the first function argument. */
-static Vector* AbsoluteMemberTemplateBodyArguments(TypeRecord* from,
+static Vector* AbsoluteMemberTemplateBodyArguments(TypeParser* parser,
+                                                   TypeRecord* from,
                                                    TypeRecord* to,
                                                    Vector* args) {
   if (from == NULL || to == NULL || args == NULL || !TypeIsFunction(from) ||
@@ -9117,28 +9118,9 @@ static Vector* AbsoluteMemberTemplateBodyArguments(TypeRecord* from,
   if (!names_enclosing) {
     return NULL;
   }
-  Vector* class_args = MemberFunctionEnclosingClassArguments(
-      to->info.function.symbol);
-  if (class_args == NULL || class_args->length == 0) {
-    return NULL;
-  }
-  bool already_prefixed = args->length >= class_args->length;
-  for (size_t j = 0; already_prefixed && j < class_args->length; j++) {
-    if (!TemplateArgumentEqual(args->value.p[j], class_args->value.p[j])) {
-      already_prefixed = false;
-    }
-  }
-  if (already_prefixed) {
-    return NULL;
-  }
-  Vector* combined = NewVector();
-  for (size_t j = 0; j < class_args->length; j++) {
-    VectorAppend(combined, TemplateArgumentCopy(class_args->value.p[j]));
-  }
-  for (size_t j = 0; j < args->length; j++) {
-    VectorAppend(combined, TemplateArgumentCopy(args->value.p[j]));
-  }
-  return combined;
+  return PrependMemberFunctionEnclosingArguments(
+      parser != NULL ? parser->syntax : NULL, to->info.function.symbol, args,
+      /*keep_existing_prefix=*/true);
 }
 
 ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
@@ -9148,7 +9130,8 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   if (from == NULL || to == NULL || from->info.function.body == NULL) {
     return NULL;
   }
-  Vector* owned_args = AbsoluteMemberTemplateBodyArguments(from, to, args);
+  Vector* owned_args =
+      AbsoluteMemberTemplateBodyArguments(parser, from, to, args);
   if (owned_args != NULL) {
     args = owned_args;
   }

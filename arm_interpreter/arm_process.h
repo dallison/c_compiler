@@ -13,6 +13,8 @@
 typedef enum {
   kARMGuestThreadIdle,
   kARMGuestThreadRunning,
+  // The user function has returned; only TLS teardown is left.
+  kARMGuestThreadExiting,
   kARMGuestThreadFinished,
 } ARMGuestThreadState;
 

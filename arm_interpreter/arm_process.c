@@ -183,6 +183,23 @@ static size_t CountActiveWorkersLocked(ARMProcessRuntime* process) {
   return count;
 }
 
+// A detached worker whose slot is about to come free: its user function has
+// returned, or it has finished and is waiting to be reaped.
+static bool HasRetiringDetachedWorkerLocked(ARMProcessRuntime* process,
+                                            ARMGuestThread* caller) {
+  for (size_t i = 0; i < process->threads.length; i++) {
+    ARMGuestThread* thread = process->threads.value.p[i];
+    if (thread != NULL && thread != caller && !thread->is_main &&
+        thread->detached &&
+        (thread->state == kARMGuestThreadExiting ||
+         (thread->state == kARMGuestThreadFinished &&
+          thread->host_thread_valid && !thread->join_in_progress))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void ReapFinishedDetachedThreads(ARMProcessRuntime* process) {
   for (;;) {
     ARMGuestThread* batch[ARM_MAX_GUEST_THREADS];
@@ -417,6 +434,9 @@ static int RunWorker(ARMGuestThread* thread) {
   }
   int result =
       ARMInterpreterCallWithArg(thread->cpu, thread->user_fn, thread->user_arg);
+  pthread_mutex_lock(&thread->process->mutex);
+  thread->state = kARMGuestThreadExiting;
+  pthread_mutex_unlock(&thread->process->mutex);
   if (!thread->tls_fini_done && thread->tls_fini_fn != 0) {
     thread->tls_fini_done = true;
     ARMInterpreterCall(thread->cpu, thread->tls_fini_fn);
@@ -492,6 +512,18 @@ int32_t ARMSyscallThreadCreate(ARMGuestThread* caller, uint32_t fn,
   ReapFinishedDetachedThreads(process);
 
   pthread_mutex_lock(&process->mutex);
+  // Each worker owns a fixed stack and TLS window, so the slots are few.  A
+  // detached worker that has returned frees its slot within moments; wait for
+  // it rather than failing a program that creates one detached thread after
+  // another.
+  while (!process->shutting_down &&
+         CountActiveWorkersLocked(process) >= ARM_MAX_GUEST_THREADS - 1 &&
+         HasRetiringDetachedWorkerLocked(process, caller)) {
+    pthread_mutex_unlock(&process->mutex);
+    sched_yield();
+    ReapFinishedDetachedThreads(process);
+    pthread_mutex_lock(&process->mutex);
+  }
   if (process->shutting_down) {
     pthread_mutex_unlock(&process->mutex);
     DestroyGuestThread(thread);

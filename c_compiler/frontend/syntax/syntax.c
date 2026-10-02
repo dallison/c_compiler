@@ -2511,6 +2511,7 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->parsing_default_member_initializer = false;
   syntax->expression_nesting_depth = 0;
   syntax->struct_definition_depth = 0;
+  syntax->enum_bodies_parsed = 0;
   syntax->parsing_lambda_body_depth = 0;
   syntax->parsing_consteval_block_depth = 0;
   syntax->parsing_enum_specifier_depth = 0;
@@ -12079,9 +12080,40 @@ static bool SyntaxBuiltinTypeSpecifierToken(Token tok) {
   }
 }
 
+// True at `S::*` or `ns::S<T>::*`: a nested-name-specifier ending in `::*`
+// begins a member-pointer declarator.  Leaves the lexer advanced.
+static bool SyntaxSkipToMemberPointerDeclarator(Syntax* syntax) {
+  LexMatch(syntax->lex, TOK(coloncolon));
+  while (LexMatch(syntax->lex, TOK(identifier))) {
+    if (LexLookingAt(syntax->lex, TOK(less))) {
+      int depth = 0;
+      do {
+        if (LexLookingAt(syntax->lex, TOK(less))) {
+          depth++;
+        } else if (LexLookingAt(syntax->lex, TOK(greater))) {
+          depth--;
+        } else if (LexLookingAt(syntax->lex, TOK(greatergreater))) {
+          depth -= 2;
+        } else if (LexLookingAt(syntax->lex, TOK(eof)) ||
+                   LexLookingAt(syntax->lex, TOK(semicolon))) {
+          return false;
+        }
+        LexNextToken(syntax->lex);
+      } while (depth > 0);
+    }
+    if (!LexMatch(syntax->lex, TOK(coloncolon))) {
+      return false;
+    }
+    if (LexLookingAt(syntax->lex, TOK(star))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // `integral_constant<bool, bool(!P::value)>`: a type-name followed by `(expr)`
-// or `{expr}` is a functional cast, not a type-id.  `bool(int)` and `bool(*)()`
-// stay type-ids.
+// or `{expr}` is a functional cast, not a type-id.  `bool(int)`, `bool(*)()`
+// and `int (S::*)` stay type-ids.
 static bool SyntaxTemplateArgumentIsFunctionalCast(Syntax* syntax) {
   if (!CompilerIsCXX()) {
     return false;
@@ -12106,6 +12138,10 @@ static bool SyntaxTemplateArgumentIsFunctionalCast(Syntax* syntax) {
         ((inner == TOK(identifier) || inner == TOK(coloncolon)) &&
          !SyntaxLookingAtType(syntax))) {
       cast = true;
+    }
+    if (cast && (inner == TOK(identifier) || inner == TOK(coloncolon)) &&
+        SyntaxSkipToMemberPointerDeclarator(syntax)) {
+      cast = false;
     }
   }
   LexCheckpointRestore(syntax->lex, &checkpoint);

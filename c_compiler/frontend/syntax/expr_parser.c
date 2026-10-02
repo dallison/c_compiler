@@ -8229,9 +8229,24 @@ static BinaryPrecedence BinaryOperatorPrecedence(Syntax* syntax, Token token,
 // operand takes only the operators that bind more tightly, and the recursion
 // that collects them is bounded by the number of precedence levels rather than
 // by the length or nesting of the expression.
-static ASTNode* ParseBinaryExpression(Syntax* syntax, TokenClass followers,
-                                      BinaryPrecedence min_precedence) {
-  ASTNode* result = ParseCastExpression(syntax, followers);
+// The operands of a requires-clause are primary expressions, so a leading
+// `(` opens a parenthesized expression, never a cast: in
+// `requires (Trait<F>::value) S(F f)` the constructor name `S` is not the
+// operand of a cast to `Trait<F>::value`.
+static ASTNode* ParseBinaryOperand(Syntax* syntax, TokenClass followers,
+                                   bool constraint) {
+  if (constraint && LexMatch(syntax->lex, TOK(lparen))) {
+    syntax->found_open_paren = true;
+    return ParsePostfixExpression(syntax, followers);
+  }
+  return ParseCastExpression(syntax, followers);
+}
+
+static ASTNode* ParseBinaryExpressionOperands(Syntax* syntax,
+                                              TokenClass followers,
+                                              BinaryPrecedence min_precedence,
+                                              bool constraint) {
+  ASTNode* result = ParseBinaryOperand(syntax, followers, constraint);
   for (;;) {
     ASTOpcode op = 0;
     BinaryPrecedence precedence =
@@ -8240,11 +8255,17 @@ static ASTNode* ParseBinaryExpression(Syntax* syntax, TokenClass followers,
       return result;
     }
     LexNextToken(syntax->lex);
-    ASTNode* right =
-        ParseBinaryExpression(syntax, followers, precedence + 1);
+    ASTNode* right = ParseBinaryExpressionOperands(
+        syntax, followers, precedence + 1, constraint);
     result = NewBinaryASTNode(op, NULL, syntax->lex->current_token_location,
                               result, right);
   }
+}
+
+static ASTNode* ParseBinaryExpression(Syntax* syntax, TokenClass followers,
+                                      BinaryPrecedence min_precedence) {
+  return ParseBinaryExpressionOperands(syntax, followers, min_precedence,
+                                       false);
 }
 
 static ASTNode* ParseConditionalExpression(Syntax* syntax,
@@ -8381,5 +8402,6 @@ ASTNode* SyntaxParseConditionalExpression(Syntax* syntax,
 
 ASTNode* SyntaxParseConstraintExpression(Syntax* syntax,
                                          TokenClass followers) {
-  return ParseBinaryExpression(syntax, followers, kBinaryPrecedenceLogicalOr);
+  return ParseBinaryExpressionOperands(syntax, followers,
+                                       kBinaryPrecedenceLogicalOr, true);
 }

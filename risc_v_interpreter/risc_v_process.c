@@ -164,6 +164,23 @@ static size_t CountActiveWorkersLocked(RISCVProcessRuntime* process) {
   return count;
 }
 
+// A detached worker whose slot is about to come free: its user function has
+// returned, or it has finished and is waiting to be reaped.
+static bool HasRetiringDetachedWorkerLocked(RISCVProcessRuntime* process,
+                                            RISCVGuestThread* caller) {
+  for (size_t i = 0; i < process->threads.length; i++) {
+    RISCVGuestThread* thread = process->threads.value.p[i];
+    if (thread != NULL && thread != caller && !thread->is_main &&
+        thread->detached &&
+        (thread->state == kRISCVGuestThreadExiting ||
+         (thread->state == kRISCVGuestThreadFinished &&
+          thread->host_thread_valid && !thread->join_in_progress))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void ReapFinishedDetachedThreads(RISCVProcessRuntime* process) {
   for (;;) {
     RISCVGuestThread* batch[RISC_V_MAX_GUEST_THREADS];
@@ -543,6 +560,9 @@ static int RunWorker(RISCVGuestThread* thread) {
   }
   int result = RISCVInterpreterCallWithArg(thread->cpu, thread->user_fn,
                                            thread->user_arg);
+  pthread_mutex_lock(&thread->process->mutex);
+  thread->state = kRISCVGuestThreadExiting;
+  pthread_mutex_unlock(&thread->process->mutex);
   if (!thread->tls_fini_done && thread->tls_fini_fn != 0) {
     thread->tls_fini_done = true;
     RISCVInterpreterCall(thread->cpu, thread->tls_fini_fn);
@@ -617,6 +637,18 @@ int64_t RISCVSyscallThreadCreate(RISCVGuestThread* caller, uint64_t fn,
   ReapFinishedDetachedThreads(process);
 
   pthread_mutex_lock(&process->mutex);
+  // Each worker owns a fixed stack and TLS window, so the slots are few.  A
+  // detached worker that has returned frees its slot within moments; wait for
+  // it rather than failing a program that creates one detached thread after
+  // another.
+  while (!process->shutting_down &&
+         CountActiveWorkersLocked(process) >= RISC_V_MAX_GUEST_THREADS - 1 &&
+         HasRetiringDetachedWorkerLocked(process, caller)) {
+    pthread_mutex_unlock(&process->mutex);
+    sched_yield();
+    ReapFinishedDetachedThreads(process);
+    pthread_mutex_lock(&process->mutex);
+  }
   if (process->shutting_down) {
     pthread_mutex_unlock(&process->mutex);
     DestroyGuestThread(thread);

@@ -504,6 +504,7 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
                              TypeRecord* explicit_underlying) {
   // We have an enum body.
   // First check that this is not a duplicate definition.
+  parser->syntax->enum_bodies_parsed++;
   Enum* e = NULL;
   bool empty_tag_name = tag_name->length == 0;
   if (empty_tag_name) {

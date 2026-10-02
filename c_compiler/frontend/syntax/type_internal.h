@@ -111,6 +111,14 @@ struct ASTNode* CloneCXXDefaultMemberInitializer(struct ASTNode* initializer);
  * (`MixingHashState::combine`) still takes its arguments from the base
  * specialization that declares it (`HashStateBase<MixingHashState>`). */
 Vector* MemberFunctionEnclosingClassArguments(Symbol* symbol);
+// `member_args` with the enclosing-class arguments of `symbol` in front, in the
+// numbering its body uses (a partial specialization's own parameters).  NULL
+// when there are none, or when `keep_existing_prefix` and `member_args`
+// already starts with them.  The caller deletes the result.
+Vector* PrependMemberFunctionEnclosingArguments(struct Syntax* syntax,
+                                                Symbol* symbol,
+                                                Vector* member_args,
+                                                bool keep_existing_prefix);
 /* True when pointing `existing`'s member at `named` would replace a class
  * template specialization with a class that has no template arguments. */
 bool CXXRetargetDropsDeclaringTemplateArguments(Struct* existing,
