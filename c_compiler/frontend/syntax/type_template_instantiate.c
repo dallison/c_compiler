@@ -2698,6 +2698,12 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_pure_virtual = from->info.function.is_pure_virtual;
   func->info.function.is_defaulted = from->info.function.is_defaulted;
   func->info.function.is_deleted = from->info.function.is_deleted;
+  if (func->info.function.deleted_reason == NULL &&
+      from->info.function.deleted_reason != NULL) {
+    func->info.function.deleted_reason =
+        NewStringWithLength(from->info.function.deleted_reason->value,
+                            from->info.function.deleted_reason->length);
+  }
   func->info.function.cxx_special_member_kind =
       from->info.function.cxx_special_member_kind;
   func->info.function.is_user_declared = from->info.function.is_user_declared;

@@ -1,5 +1,7 @@
 #include "contracts.h"
 
+#include <string.h>
+
 #include "compiler.h"
 #include "errors.h"
 #include "expr_semantics.h"
@@ -83,6 +85,13 @@ TypeRecord* SemanticContractIdentifierViewType(Symbol* symbol,
   if (symbol->flags.is_local && !symbol->flags.is_argument &&
       compiler->contract_assertion_location != 0 &&
       symbol->location >= compiler->contract_assertion_location) {
+    return NULL;
+  }
+  // Temporaries materialized by the predicate itself (`T{}`) are not
+  // entities named from outside the assertion.
+  if (symbol->flags.is_temp || symbol->flags.invented ||
+      (symbol->name.value != NULL &&
+       strncmp(symbol->name.value, "__invented__", 12) == 0)) {
     return NULL;
   }
   TypeRecord* view = TypeRecordCloneSpine(expression_type);

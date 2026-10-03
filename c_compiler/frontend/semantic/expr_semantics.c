@@ -813,6 +813,10 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
     default:
       break;
   }
+  // `&g[1]` designates the element itself, not its value.
+  if (node->parent != NULL && node->parent->op == AST_OP(address)) {
+    return NULL;
+  }
 
   // Try to fold integer and floating point constant expressions.
   if (TypeIsInt128(node->type)) {

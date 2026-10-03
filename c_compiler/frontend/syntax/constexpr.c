@@ -78,6 +78,8 @@ struct ConstexprBinding {
   size_t heap_index;
   TypeRecord* address_type;
   bool address_storage_began;
+  // Owned by the compilation rather than an evaluation context.
+  bool durable;
 };
 
 struct ConstexprObject {
@@ -1009,6 +1011,7 @@ static void PushConstexprBinding(ConstEvalContext* ctx, Symbol* symbol,
       value.is_address ? ConstexprAddressPointeeType(ctx, value) : NULL;
   binding->address_storage_began =
       value.is_address && ConstexprAddressStorageBegan(ctx, value);
+  binding->durable = false;
   VectorAppend(&ctx->bindings, binding);
 }
 
@@ -2359,7 +2362,39 @@ static ConstexprBinding* ConstexprDurableFunctionBinding(Symbol* symbol) {
   }
   binding->symbol = symbol;
   binding->state = kValueStateValid;
+  binding->durable = true;
   VectorAppend(&durable_function_bindings, binding);
+  return binding;
+}
+
+static bool ConstexprIsStaticConstantObject(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL || symbol->flags.is_temp ||
+      symbol->flags.is_argument ||
+      (symbol->flags.is_local && !StorageIs(symbol->storage, STO(static))) ||
+      StorageIs(symbol->storage, STO(thread)) || !symbol->flags.value_set ||
+      !TypeIsConst(symbol->type)) {
+    return false;
+  }
+  if (TypeIsFixedArray(symbol->type) || TypeIsStructOrUnion(symbol->type)) {
+    return symbol->value.other != NULL;
+  }
+  return TypeIsScalar(symbol->type) && !TypeIsPointer(symbol->type);
+}
+
+// A namespace-scope constant object gets the same treatment: `&g` can escape
+// the call frame that took it, and every `&g` must compare equal.
+static ConstexprBinding* ConstexprDurableConstantBinding(Symbol* symbol) {
+  ConstexprBinding* binding = ConstexprDurableFunctionBinding(symbol);
+  if (binding == NULL) {
+    return NULL;
+  }
+  if (TypeIsFixedArray(symbol->type) || TypeIsStructOrUnion(symbol->type)) {
+    binding->object = symbol->value.other;
+  } else {
+    binding->is_floating = TypeIsFloatingPoint(symbol->type);
+    binding->ivalue = symbol->value.ivalue;
+    binding->fvalue = symbol->value.fvalue;
+  }
   return binding;
 }
 
@@ -2404,7 +2439,9 @@ static void ConstexprPersistAddressObjects(ConstexprObject* object,
           slot->address_binding =
               ConstexprDurableFunctionBinding(function_symbol);
         }
-      } else {
+      } else if (slot->address_binding == NULL ||
+                 !slot->address_binding->durable ||
+                 slot->address_object != NULL || slot->heap_block != NULL) {
         slot->address_binding = NULL;
       }
       slot->address_slot = NULL;
@@ -6001,19 +6038,28 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       };
       return true;
     }
-    if ((template_argument_object_evaluation_depth > 0 ||
-         symbolic_constexpr_reference_depth > 0) &&
-        address->sub != NULL &&
-        address->sub->op == AST_OP(identifier)) {
+    if (address->sub != NULL && address->sub->op == AST_OP(identifier)) {
       Symbol* symbol = ((IdentifierASTNode*)address->sub)->symbol;
-      bool template_argument_target =
-          template_argument_object_evaluation_depth > 0 && symbol != NULL &&
-          !symbol->flags.is_temp && !symbol->flags.is_argument &&
+      bool static_storage =
+          symbol != NULL && !symbol->flags.is_temp &&
+          !symbol->flags.is_argument &&
           (!symbol->flags.is_local ||
            StorageIs(symbol->storage, STO(static)));
+      bool template_argument_target =
+          template_argument_object_evaluation_depth > 0 && static_storage;
       bool symbolic_reference_target =
           symbolic_constexpr_reference_depth > 0 && symbol != NULL &&
           !StorageIs(symbol->storage, STO(thread));
+      if (ConstexprIsStaticConstantObject(symbol) &&
+          !template_argument_target &&
+          !symbolic_reference_target) {
+        ConstexprBinding* binding = ConstexprDurableConstantBinding(symbol);
+        *result = (ConstexprValue){
+            .is_address = true,
+            .address_binding = binding,
+        };
+        return binding != NULL;
+      }
       if (template_argument_target || symbolic_reference_target) {
         ConstexprValue initial = {0};
         if (symbol->flags.value_set) {
@@ -6075,7 +6121,15 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                  .address_binding = binding};
       return true;
     }
+    bool static_constant_pointer =
+        id->symbol != NULL && !id->symbol->flags.is_argument &&
+        !id->symbol->flags.is_temp &&
+        (!id->symbol->flags.is_local ||
+         StorageIs(id->symbol->storage, STO(static))) &&
+        !StorageIs(id->symbol->storage, STO(thread)) &&
+        (TypeIsReference(id->symbol->type) || TypeIsConst(id->symbol->type));
     if ((template_argument_object_evaluation_depth > 0 ||
+         static_constant_pointer ||
          ConstexprReferenceUsableInCurrentFunction(id->symbol)) &&
         binding == NULL &&
         id->symbol != NULL &&
@@ -6112,6 +6166,16 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
           .address_binding = binding,
       };
       return true;
+    }
+    if (binding == NULL && static_constant_pointer &&
+        TypeIsPointer(id->symbol->type) &&
+        (id->symbol->flags.value_set || id->symbol->flags.is_constexpr) &&
+        id->symbol->value.other != NULL &&
+        ConstexprIsStaticConstantObject((Symbol*)id->symbol->value.other)) {
+      ConstexprBinding* target =
+          ConstexprDurableConstantBinding((Symbol*)id->symbol->value.other);
+      *result = (ConstexprValue){.is_address = true, .address_binding = target};
+      return target != NULL;
     }
     Symbol* promoted_target = CompilerMetaPromotedPointerTarget(id->symbol);
     if (promoted_target != NULL) {

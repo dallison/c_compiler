@@ -10,7 +10,10 @@
 
 #include <syscall.h>
 
-#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#if !defined(__DAVECC_HAS_GUEST_THREADS__) && \
+    !defined(__DAVECC_NATIVE_DARWIN__)
+#error "<thread> is unavailable in this single-threaded target profile"
+#elif !defined(__DAVECC_HAS_GUEST_THREADS__)
 // Hosted targets such as Darwin have pthreads but not DaveCC's guest thread
 // syscalls.  Abseil's library sources only need a CPU count and yield.
 #include <unistd.h>
