@@ -8129,13 +8129,16 @@ static ASTNode* ReanalyzeClonedResolvedCall(
   IdentifierASTNode* id = (IdentifierASTNode*)call->left;
   // Class instantiation clones a member function template with only the
   // enclosing arguments, then rebases the member's own parameters to 0.
-  // A local alias such as `using tag = conditional_t<RangeSize<URBG>()>` is
-  // already substituted and rebased.  Resolving `tag{}` again folds `URBG`
-  // (now index 0) onto the class argument.
+  // Once a local alias such as `using tag = conditional_t<RangeSize<URBG>()>`
+  // has been substituted and rebased below, resolving `tag{}` again folds
+  // `URBG` (now index 0) onto the class argument.  The pattern's own alias
+  // must still be substituted once, or the per-call clone reads its absolute
+  // indices against the member-only arguments.
   if (clone != NULL && clone->parser != NULL &&
       clone->parser->substituting_enclosing_template_arguments_only &&
       id->symbol != NULL &&
-      StorageIs(id->symbol->storage, STO(typedef))) {
+      StorageIs(id->symbol->storage, STO(typedef)) &&
+      MapFindPointerKey(&clone->symbol_map, id->symbol) == id->symbol) {
     return node;
   }
   if (clone != NULL && clone->to_func != NULL &&
@@ -8220,6 +8223,10 @@ static ASTNode* ReanalyzeClonedResolvedCall(
       concrete->namespace_ = id->symbol->namespace_;
       concrete->value = id->symbol->value;
       concrete->stack_offset = id->symbol->stack_offset;
+      MapKeyValue kv;
+      kv.key.p = concrete;
+      kv.value.p = concrete;
+      MapInsert(&clone->symbol_map, kv);
       id->symbol = concrete;
       ASTNodeSetType(call->left, concrete->type);
       node->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
@@ -8253,6 +8260,10 @@ static ASTNode* ReanalyzeClonedResolvedCall(
       partial->location = id->symbol->location;
       partial->alignment = id->symbol->alignment;
       partial->namespace_ = id->symbol->namespace_;
+      MapKeyValue kv;
+      kv.key.p = partial;
+      kv.value.p = partial;
+      MapInsert(&clone->symbol_map, kv);
       id->symbol = partial;
       ASTNodeSetType(call->left, partial->type);
       return node;

@@ -858,6 +858,7 @@ struct hash<basic_string<char>> {
 
 }  // namespace std
 
+#if __cplusplus >= 201703L
 #include <string_view>
 
 namespace std {
@@ -935,5 +936,6 @@ bool operator>=(basic_string_view<CharT, Traits> a,
 }
 
 }  // namespace std
+#endif
 
 #endif /* __davecc_string__ */

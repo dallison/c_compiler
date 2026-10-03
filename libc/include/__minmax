@@ -10,28 +10,36 @@
 #ifndef __davecc_minmax__
 #define __davecc_minmax__
 
+#if __cplusplus >= 201103L
+#define __DAVECC_MINMAX_CONSTEXPR constexpr
+#else
+#define __DAVECC_MINMAX_CONSTEXPR
+#endif
+
 namespace std {
 
 template <class T>
-constexpr const T& min(const T& a, const T& b) {
+__DAVECC_MINMAX_CONSTEXPR const T& min(const T& a, const T& b) {
   return b < a ? b : a;
 }
 
 template <class T, class Compare>
-constexpr const T& min(const T& a, const T& b, Compare comp) {
+__DAVECC_MINMAX_CONSTEXPR const T& min(const T& a, const T& b, Compare comp) {
   return comp(b, a) ? b : a;
 }
 
 template <class T>
-constexpr const T& max(const T& a, const T& b) {
+__DAVECC_MINMAX_CONSTEXPR const T& max(const T& a, const T& b) {
   return a < b ? b : a;
 }
 
 template <class T, class Compare>
-constexpr const T& max(const T& a, const T& b, Compare comp) {
+__DAVECC_MINMAX_CONSTEXPR const T& max(const T& a, const T& b, Compare comp) {
   return comp(a, b) ? b : a;
 }
 
 }  // namespace std
+
+#undef __DAVECC_MINMAX_CONSTEXPR
 
 #endif /* __davecc_minmax__ */

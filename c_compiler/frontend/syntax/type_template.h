@@ -24,6 +24,10 @@ struct ASTNode* TypeSubstituteMemberTemplateExpressionAndRebase(
 TypeRecord* TypeSubstituteTemplateType(struct Syntax* syntax,
                                        TypeRecord* type,
                                        Vector* args);
+// As TypeSubstituteTemplateType, but returns NULL on a substitution failure.
+TypeRecord* TypeSubstituteTemplateTypeOrFail(struct Syntax* syntax,
+                                             TypeRecord* type,
+                                             Vector* args);
 // True when `type` names a template parameter at index `min_index` or above,
 // including through template arguments and dependent expressions.
 bool TypeNamesTemplateParameterAtOrAbove(TypeRecord* type, int min_index);
@@ -34,6 +38,11 @@ TypeRecord* TypeSubstituteTemplateTypeAndRebase(struct Syntax* syntax,
 Vector* TypeSubstituteTemplateArgumentVector(struct Syntax* syntax,
                                              Vector* template_args,
                                              Vector* args);
+// Also reports whether the substitution failed (an ill-formed argument).
+Vector* TypeSubstituteTemplateArgumentVectorOrFail(struct Syntax* syntax,
+                                                   Vector* template_args,
+                                                   Vector* args,
+                                                   bool* failed);
 Vector* TypeSubstituteTemplateArgumentVectorAndRebase(
     struct Syntax* syntax, Vector* template_args, Vector* args,
     int rebase_base);

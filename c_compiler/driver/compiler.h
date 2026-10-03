@@ -606,6 +606,11 @@ typedef struct Compiler {
   // runtime folding for context-sensitive constructs such as `if consteval`.
   int constant_evaluation_required_depth;
 
+  // Nonzero while semantic analysis speculatively folds an expression whose
+  // value is not required at compile time. A throw reached there means the
+  // expression is not foldable, not that the program is ill-formed.
+  int speculative_constant_fold_depth;
+
   // Nonzero while analyzing the unevaluated operand of a noexcept-expression.
   // Keep calls intact so exception-specification analysis sees the selected
   // callee rather than a folded constant result.

@@ -2490,6 +2490,9 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     if (resolved != NULL) {
       return resolved;
     }
+    if (parser->template_substitution_failed) {
+      return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+    }
   }
   if (!g_dependent_decltype_stack_initialized) {
     VectorInit(&g_dependent_decltype_stack);
@@ -3046,8 +3049,11 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
     // inside its expression AST, not the type spine.  Those must be rebased too
     // or a later substitution with the member's own arguments (numbered from 0)
     // would fail to reach the enclosing-relative parameter still named in the
-    // operand, leaving the decltype permanently unresolved.
-    if (t->dependent_decltype_expr != NULL) {
+    // operand, leaving the decltype permanently unresolved.  An alias-id's
+    // operand is the alias's own pattern, numbered in the alias's parameter
+    // space; its recorded arguments (rebased above) carry the mapping.
+    if (t->dependent_decltype_expr != NULL &&
+        !TypeIsDecltypeAliasTemplateId(t)) {
       t->dependent_decltype_expr =
           CloneAndRebaseDependentExpression(t->dependent_decltype_expr, base);
     }
@@ -3104,7 +3110,9 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
         }
       }
     }
-    if (t->dependent_decltype_expr != NULL) {
+    // See RebaseTemplateParameterIndicesSpine for alias-id operands.
+    if (t->dependent_decltype_expr != NULL &&
+        !TypeIsDecltypeAliasTemplateId(t)) {
       t->dependent_decltype_expr =
           CloneAndRebaseDependentExpression(t->dependent_decltype_expr, base);
     }
@@ -3604,6 +3612,23 @@ TypeRecord* TypeSubstituteTemplateType(Syntax* syntax, TypeRecord* type,
   return result;
 }
 
+TypeRecord* TypeSubstituteTemplateTypeOrFail(Syntax* syntax, TypeRecord* type,
+                                             Vector* args) {
+  if (type == NULL || syntax == NULL || args == NULL) {
+    return TypeSubstituteTemplateType(syntax, type, args);
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  TypeRecord* result = SubstituteTemplateParameters(&parser, type, args);
+  if (parser.template_substitution_failed) {
+    TypeRecordDelete(result);
+    result = NULL;
+  }
+  TypeParserDestruct(&parser);
+  return result;
+}
+
 Vector* TypeSubstituteTemplateArgumentVector(Syntax* syntax,
                                              Vector* template_args,
                                              Vector* args) {
@@ -3630,6 +3655,24 @@ Vector* TypeSubstituteTemplateArgumentVectorAndRebase(
   Vector* result =
       SubstituteTemplateArgumentVector(&parser, template_args, args,
                                        rebase_base);
+  TypeParserDestruct(&parser);
+  return result;
+}
+
+Vector* TypeSubstituteTemplateArgumentVectorOrFail(Syntax* syntax,
+                                                   Vector* template_args,
+                                                   Vector* args,
+                                                   bool* failed) {
+  *failed = false;
+  if (template_args == NULL || args == NULL) {
+    return TypeSubstituteTemplateArgumentVector(syntax, template_args, args);
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  Vector* result =
+      SubstituteTemplateArgumentVector(&parser, template_args, args, 0);
+  *failed = parser.template_substitution_failed;
   TypeParserDestruct(&parser);
   return result;
 }

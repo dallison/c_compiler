@@ -198,9 +198,16 @@ TypeRecord* TypeRecordSubstituteCommonTypePlaceholder(TypeParser* parser,
   if (types == NULL) {
     return NULL;
   }
+  bool concrete = !TypeVectorHasDependentTemplateParameter(types);
   TypeRecord* result = CXXTypeTraitCommonType(parser->syntax, types);
   VectorDelete(types);
   if (result == NULL) {
+    // `common_type<const C&, const S&>::type` with no common type is a
+    // substitution failure, so `requires { typename common_type_t<...>; }`
+    // and the constraints built on it are false.
+    if (concrete) {
+      parser->template_substitution_failed = true;
+    }
     return NULL;
   }
   result->qualifiers |= type->qualifiers;

@@ -473,6 +473,26 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
       const_node->flags |= kASTAnalyzed;
       return const_node;
     }
+    // A constant long double is not folded through host double, so use the
+    // instantiated initializer itself (`std::numbers::pi_v<long double>`).
+    if (concrete != NULL && TypeUsesLongDoubleRepresentation(concrete) &&
+        (concrete->qualifiers & kQualConst) != 0) {
+      ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
+          &compiler->syntax, node->symbol, node->template_arguments);
+      if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+        initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+      }
+      if (initializer != NULL) {
+        TypeRecord* value_type = TypeRecordCopy(concrete);
+        value_type->qualifiers &= ~(kQualConst | kQualVolatile);
+        ASTNode* cast =
+            NewCastASTNode(value_type, node->base.location, initializer);
+        TypeRecordDelete(value_type);
+        TypeRecordDelete(concrete);
+        ASTNodeReplaceChild(node->base.parent, node->base.child_id, cast, true);
+        return AnalyzeExpression(cast);
+      }
+    }
     // A variable template whose instantiation is a class-type tag object (e.g.
     // `std::in_place_index<1>` of type `in_place_index_t<1>`) rather than a
     // folded constant.  Materialize a value-initialized temporary of the
@@ -781,6 +801,8 @@ static bool ExpressionHasUnboundAutomatic(ASTNode* node) {
   return finder.found;
 }
 
+static ASTNode* FoldConstantExpressionValue(ASTNode* node);
+
 // Attempt to fold a constant expression by evaluating it and if
 // successful, replacing it with a constant AST node with the value.
 static ASTNode* FoldConstantExpression(ASTNode* node) {
@@ -837,6 +859,18 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
     return NULL;
   }
 
+  bool speculative = compiler->constant_evaluation_required_depth == 0;
+  if (speculative) {
+    compiler->speculative_constant_fold_depth++;
+  }
+  ASTNode* folded = FoldConstantExpressionValue(node);
+  if (speculative) {
+    compiler->speculative_constant_fold_depth--;
+  }
+  return folded;
+}
+
+static ASTNode* FoldConstantExpressionValue(ASTNode* node) {
   // Try to fold integer and floating point constant expressions.
   if (TypeIsInt128(node->type)) {
     int64_t lo = 0;
@@ -3513,6 +3547,54 @@ static bool TryAnalyzeCConditionalObjectPointers(BinaryASTNode* node,
 
 static bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target);
 
+/* [expr.cond]/4.1-4.2: glvalue arms of the same category where one class is a
+ * base of the other (`c ? derived : base`).  The derived arm binds directly to
+ * a reference to the base when that is at least as cv-qualified, and the
+ * result is a glvalue of the base. */
+static bool TryAnalyzeConditionalDerivedToBaseGlvalue(BinaryASTNode* node,
+                                                      BinaryASTNode* colon) {
+  ASTNode* left = colon->left;
+  ASTNode* right = colon->right;
+  if (!CompilerIsCXX() || left->value_category != right->value_category ||
+      left->value_category == kValueCategoryPrvalue ||
+      !TypeIsStructOrUnion(left->type) || !TypeIsStructOrUnion(right->type) ||
+      TypeEqualIgnoringQualifiers(left->type, right->type)) {
+    return false;
+  }
+  Qualifiers cv_mask = kQualConst | kQualVolatile;
+  int arm = -1;
+  if (TypeIsDerivedFrom(left->type, right->type) &&
+      (left->type->qualifiers & cv_mask & ~right->type->qualifiers) == 0) {
+    arm = 0;
+  } else if (TypeIsDerivedFrom(right->type, left->type) &&
+             (right->type->qualifiers & cv_mask & ~left->type->qualifiers) ==
+                 0) {
+    arm = 1;
+  }
+  if (arm < 0) {
+    return false;
+  }
+  ASTValueCategory category = left->value_category;
+  ASTNode* derived = arm == 0 ? left : right;
+  TypeRecord* base = arm == 0 ? right->type : left->type;
+  int child_id = derived->child_id;
+  ASTNode* bound = TryBindReferenceToBaseSubobject(derived, base);
+  if (bound == NULL) {
+    return false;
+  }
+  ASTNodeReplaceChild((ASTNode*)colon, child_id, bound, false);
+  if (arm == 0) {
+    colon->left = bound;
+  } else {
+    colon->right = bound;
+  }
+  ASTNodeSetType((ASTNode*)colon, base);
+  ASTNodeSetType((ASTNode*)node, base);
+  colon->base.value_category = category;
+  node->base.value_category = category;
+  return true;
+}
+
 static void AnalyzeConditionalExpression(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   if (node->left == NULL) {
@@ -3588,6 +3670,9 @@ static void AnalyzeConditionalExpression(BinaryASTNode* node) {
     return;
   }
   if (TryAnalyzeCConditionalObjectPointers(node, colon)) {
+    return;
+  }
+  if (TryAnalyzeConditionalDerivedToBaseGlvalue(node, colon)) {
     return;
   }
   // [expr.cond]: when the arms differ and at least one has class type, convert

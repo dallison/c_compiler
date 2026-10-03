@@ -3738,6 +3738,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->constexpr_codegen_recover = false;
   compiler->immediate_function_context_depth = 0;
   compiler->constant_evaluation_required_depth = 0;
+  compiler->speculative_constant_fold_depth = 0;
   compiler->save_ir = false;
   compiler->save_ast = false;
   compiler->listing_enabled = false;

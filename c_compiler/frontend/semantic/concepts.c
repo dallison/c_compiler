@@ -1163,8 +1163,8 @@ static bool EvaluateTypeRequirement(Requirement* requirement,
   }
   bool saved_trap = DiagnosticErrorTrapBegin();
   TypeRecord* concrete =
-      TypeSubstituteTemplateType(&compiler->syntax, requirement->type,
-                                 arguments);
+      TypeSubstituteTemplateTypeOrFail(&compiler->syntax, requirement->type,
+                                       arguments);
   bool trapped = DiagnosticErrorTrapped();
   bool failed = concrete == NULL || trapped ||
                 TypeContainsTemplateParameter(concrete);
@@ -1302,11 +1302,19 @@ static bool EvaluateConstraintInteger(ConstraintExpr* constraint,
           concept_symbol = actual->template_symbol;
         }
       }
-      Vector* concrete_args = TypeSubstituteTemplateArgumentVector(
-          &compiler->syntax, constraint->as.concept_id.arguments, arguments);
-      bool ok = EvaluateConceptDefinitionInteger(
-          concept_symbol, concrete_args,
-          constraint->location, result);
+      bool substitution_failed = false;
+      Vector* concrete_args = TypeSubstituteTemplateArgumentVectorOrFail(
+          &compiler->syntax, constraint->as.concept_id.arguments, arguments,
+          &substitution_failed);
+      // An ill-formed argument (`same_as<common_reference_t<A, B>, ...>`
+      // with no common reference) makes the constraint false.
+      bool ok = true;
+      if (substitution_failed) {
+        *result = 0;
+      } else {
+        ok = EvaluateConceptDefinitionInteger(
+            concept_symbol, concrete_args, constraint->location, result);
+      }
       if (concrete_args != NULL) {
         VectorDeleteWithContents(
             concrete_args, (VectorElementDestructor)TemplateArgumentDelete,

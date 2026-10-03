@@ -1185,7 +1185,18 @@ static bool QualifiedNameClassBeforeAlias(Syntax* syntax,
   return false;
 }
 
-static TypeRecord* CurrentInstantiationMemberType(Symbol* origin, Vector* args,
+static bool ParsingWithinClass(TypeParser* parser, Struct* str) {
+  for (Struct* owner = CurrentClassBeingParsed(parser); owner != NULL;
+       owner = owner->lexical_parent) {
+    if (owner == str) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static TypeRecord* CurrentInstantiationMemberType(TypeParser* parser,
+                                                  Symbol* origin, Vector* args,
                                                   String* member_name) {
   if (!TemplateArgumentsAreIdentity(args, origin) || member_name == NULL) {
     return NULL;
@@ -1201,6 +1212,16 @@ static TypeRecord* CurrentInstantiationMemberType(Symbol* origin, Vector* args,
   }
   if (!StorageIs(member->symbol->storage, STO(typedef)) &&
       !SymbolIsTagSymbol(member->symbol)) {
+    return NULL;
+  }
+  // Identity is checked by parameter index, so outside the class template
+  // `Stream<C, T>::sentry` in `template <class C, class T> f()` also matches.
+  // A nested class differs per specialization; copying the primary's would
+  // construct a class that is never instantiated.
+  if (TypeIsStructOrUnion(member->symbol->type) &&
+      member->symbol->type->info.struct_info != NULL &&
+      member->symbol->type->info.struct_info->lexical_parent == primary &&
+      !ParsingWithinClass(parser, primary)) {
     return NULL;
   }
   // `typedef T type` inside `type_identity<T>` still names a template
@@ -1901,7 +1922,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                 rewound_alias || origin_is_alias || member_template_id
                     ? NULL
                     : CurrentInstantiationMemberType(
-                          dependent_member_origin, parsed_args, member_name);
+                          parser, dependent_member_origin, parsed_args,
+                          member_name);
             if (type_record == NULL) {
               type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
               type_record->template_origin = dependent_member_origin;

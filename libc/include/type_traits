@@ -320,6 +320,7 @@ struct negation : bool_constant<!static_cast<bool>(B::value)> {};
 template <class B>
 inline constexpr bool negation_v = negation<B>::value;
 
+#if __cplusplus >= 201103L
 template <class>
 struct result_of;
 
@@ -330,6 +331,7 @@ struct result_of<F(ArgTypes...)> {
 
 template <class T>
 using result_of_t = typename result_of<T>::type;
+#endif
 
 template <class T>
 struct is_function : false_type {
@@ -712,8 +714,10 @@ __DAVECC_INTEGRAL(unsigned long);
 __DAVECC_INTEGRAL(long long);
 __DAVECC_INTEGRAL(unsigned long long);
 __DAVECC_INTEGRAL(wchar_t);
+#if __cplusplus >= 201103L
 __DAVECC_INTEGRAL(char16_t);
 __DAVECC_INTEGRAL(char32_t);
+#endif
 __DAVECC_INTEGRAL(__int128);
 __DAVECC_INTEGRAL(unsigned __int128);
 
@@ -1107,9 +1111,18 @@ struct common_type<T> {
 template <class T, class U>
 using __davecc_common_type = __davecc_common_type_t(T, U);
 
+// Without a common type there is no member `type` ([meta.trans.other]).
+template <class T, class U, class = void>
+struct __common_type2 {
+};
+
 template <class T, class U>
-struct common_type<T, U> {
+struct __common_type2<T, U, void_t<__davecc_common_type<T, U>>> {
   using type = decay_t<__davecc_common_type<T, U>>;
+};
+
+template <class T, class U>
+struct common_type<T, U> : __common_type2<T, U> {
 };
 
 template <class T, class U, class... V>
@@ -1175,36 +1188,83 @@ struct basic_common_reference {
   using type = typename common_reference<T, U>::type;
 };
 
-// COMMON-REF for two reference types: the standard defines this via the
-// conditional (ternary) expression COND-RES(COPY-CV(X,Y)&, COPY-CV(Y,X)&),
-// which is symmetric. A plain cv-merge is *not* symmetric when the referenced
-// types differ (e.g. const int& vs const long&), so we must use the ternary so
-// that arithmetic operands collapse to their common type (long) both ways.
-template <class T, class U>
-struct __common_ref_refs {
-  using __rt = remove_reference_t<T>;
-  using __ru = remove_reference_t<U>;
-  using type = decltype(false ? declval<copy_cv_t<__rt, __ru>&>()
-                              : declval<copy_cv_t<__ru, __rt>&>());
+// [meta.trans.other]: each step applies only when it is well-formed, and with
+// no step left there is no member `type`.
+
+// A prvalue of a non-reference type, as COND-RES's `declval<X(&)()>()()`.
+template <class T>
+T __davecc_cond_res_value() noexcept;
+
+template <class X, class Y>
+using __cond_res_t = decltype(false ? __davecc_cond_res_value<X>()
+                                    : __davecc_cond_res_value<Y>());
+
+// COMMON-REF(A, B).  The lvalue case uses the conditional expression
+// COND-RES(COPY-CV(X,Y)&, COPY-CV(Y,X)&) so that `const int&` and
+// `const long&` collapse to `long` in either order.
+template <class X, class Y>
+using __common_ref_lvalue_t =
+    decltype(false ? declval<copy_cv_t<X, Y>&>() : declval<copy_cv_t<Y, X>&>());
+
+template <class A, class B, class = void>
+struct __common_ref {
+};
+
+template <class X, class Y>
+struct __common_ref<
+    X&, Y&, enable_if_t<is_reference<__common_ref_lvalue_t<X, Y>>::value>> {
+  using type = __common_ref_lvalue_t<X, Y>;
+};
+
+template <class X, class Y>
+using __common_ref_rvalue_t =
+    remove_reference_t<typename __common_ref<X&, Y&>::type>&&;
+
+template <class X, class Y>
+struct __common_ref<
+    X&&, Y&&,
+    enable_if_t<is_convertible<X&&, __common_ref_rvalue_t<X, Y>>::value &&
+                is_convertible<Y&&, __common_ref_rvalue_t<X, Y>>::value>> {
+  using type = __common_ref_rvalue_t<X, Y>;
+};
+
+template <class X, class Y>
+struct __common_ref<
+    X&&, Y&,
+    enable_if_t<is_convertible<
+        X&&, typename __common_ref<const X&, Y&>::type>::value>> {
+  using type = typename __common_ref<const X&, Y&>::type;
+};
+
+template <class X, class Y>
+struct __common_ref<
+    X&, Y&&,
+    enable_if_t<is_convertible<
+        Y&&, typename __common_ref<const Y&, X&>::type>::value>> {
+  using type = typename __common_ref<const Y&, X&>::type;
+};
+
+template <class T, class U, class = void>
+struct __common_reference_cond_res : common_type<T, U> {
 };
 
 template <class T, class U>
-struct common_reference<T, U> {
- private:
-  using __t = remove_reference_t<T>;
-  using __u = remove_reference_t<U>;
+struct __common_reference_cond_res<T, U, void_t<__cond_res_t<T, U>>> {
+  using type = __cond_res_t<T, U>;
+};
 
- public:
-  using type = typename conditional<
-      is_reference<T>::value && is_reference<U>::value,
-      typename __common_ref_refs<T, U>::type,
-      typename conditional<
-          is_reference<T>::value,
-          copy_cv_t<__t, remove_cv_t<__u>>&,
-          typename conditional<
-              is_reference<U>::value,
-              copy_cv_t<__u, remove_cv_t<__t>>&,
-              typename common_type<T, U>::type>::type>::type>::type;
+template <class T, class U, class = void>
+struct __common_reference_refs : __common_reference_cond_res<T, U> {
+};
+
+template <class T, class U>
+struct __common_reference_refs<T, U,
+                               void_t<typename __common_ref<T, U>::type>> {
+  using type = typename __common_ref<T, U>::type;
+};
+
+template <class T, class U>
+struct common_reference<T, U> : __common_reference_refs<T, U> {
 };
 
 template <class T, class U, class... Rest>

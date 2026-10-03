@@ -3285,6 +3285,10 @@ static void ReportUncaughtConstexprException(ConstEvalContext* ctx) {
       ctx->exception->reported) {
     return;
   }
+  if (compiler->speculative_constant_fold_depth > 0 &&
+      compiler->constant_evaluation_required_depth == 0) {
+    return;
+  }
   if (ctx->exception->throw_node != NULL &&
       (ctx->exception->throw_node->flags &
        kASTConstexprExceptionDiagnosed) != 0) {
@@ -7163,11 +7167,37 @@ static bool ConstexprParameterTypeSupported(TypeRecord* type) {
          TypeIsReflection(type);
 }
 
+static bool ConstexprClassHasObjectState(TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return true;
+  }
+  Struct* str = type->info.struct_info;
+  if (str->virtual_bases.length > 0 || str->virtual_members.length > 0) {
+    return true;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member != NULL && !member->is_static && !member->is_member_function &&
+        !member->is_using_declaration && !StructMemberIsNestedType(member)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && ConstexprClassHasObjectState(base->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // A constexpr member call whose receiver is a function parameter has no object
 // when the body is instantiated rather than invoked -- Abseil's
 // `static_assert(SpecifierCount(i) == ParametersPassed(j))` with
 // `ErrorMaker<B> SpecifierCount = {}`.  Value-initialize a temporary of the
-// parameter's class type so stateless constexpr wrappers still fold.
+// parameter's class type so stateless constexpr wrappers still fold.  A class
+// with data members has a runtime value that is not known here.
 static ConstexprObject* ConstexprValueInitParameterObject(
     ConstEvalContext* ctx, ASTNode* actual) {
   if (ctx == NULL || actual == NULL) {
@@ -7190,7 +7220,8 @@ static ConstexprObject* ConstexprValueInitParameterObject(
   if (TypeIsPointer(type) || TypeIsReference(type)) {
     type = type->next;
   }
-  if (type == NULL || !TypeIsStructOrUnion(type)) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      ConstexprClassHasObjectState(type)) {
     return NULL;
   }
   return NewConstexprObject(ctx, type, ConstexprObjectSlotCount(type));

@@ -10289,6 +10289,10 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     return TypeRecordCopy(templ->type);
   }
   str->instantiation_in_progress = true;
+  // A member that does not substitute (`typename Iter::pointer` in
+  // iterator_traits) is outside the immediate context of whatever named this
+  // specialization, so it must not fail that enclosing substitution.
+  bool saved_member_substitution_failed = parser->template_substitution_failed;
 
   Struct* saved_substitution_source = parser->template_substitution_source;
   Struct* saved_substitution_target = parser->template_substitution_target;
@@ -10673,6 +10677,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   }
   VectorDestruct(&pending_member_bodies);
   str->instantiation_in_progress = false;
+  parser->template_substitution_failed = saved_member_substitution_failed;
   PopNestedSubstitution(source_struct);
   parser->template_substitution_source = saved_substitution_source;
   parser->template_substitution_target = saved_substitution_target;

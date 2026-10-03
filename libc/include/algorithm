@@ -26,28 +26,9 @@
 #include <functional>
 #include <iterator>
 #include <utility>
+#include <__minmax>
 
 namespace std {
-
-template <class T>
-const T& min(const T& left, const T& right) {
-  return right < left ? right : left;
-}
-
-template <class T, class Compare>
-const T& min(const T& left, const T& right, Compare compare) {
-  return compare(right, left) ? right : left;
-}
-
-template <class T>
-const T& max(const T& left, const T& right) {
-  return left < right ? right : left;
-}
-
-template <class T, class Compare>
-const T& max(const T& left, const T& right, Compare compare) {
-  return compare(left, right) ? right : left;
-}
 
 template <class Iterator1, class Iterator2>
 void iter_swap(Iterator1 left, Iterator2 right) {

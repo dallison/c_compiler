@@ -10533,7 +10533,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     // specialization now that the definition is available, instead of rejecting
     // the still-"template" type in the guard below.
     MaterializeDeferredClassTemplateType(syntax, sym);
-    if (!TypeIsClassTemplatePlaceholder(sym->type) &&
+    bool declares_object = !StorageIs(sym->storage, STO(typedef));
+    if (declares_object && !TypeIsClassTemplatePlaceholder(sym->type) &&
         TypeIsAbstractClass(sym->type)) {
       SyntaxError(syntax, "Cannot declare object of abstract class %s",
                   sym->type->info.struct_info->tag_name != NULL
@@ -10548,7 +10549,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         StorageIs(sym->storage, STO(extern)) &&
         !LexLookingAt(syntax->lex, TOK(equal)) &&
         !LexLookingAt(syntax->lex, TOK(lbrace));
-    if (!syntax->parsing_template_declaration &&
+    if (declares_object && !syntax->parsing_template_declaration &&
         TypeIsClassTemplateObject(sym->type) &&
         !extern_incomplete_declaration) {
       SyntaxError(syntax,
@@ -15485,7 +15486,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
          SyntaxError(syntax, "inline can only be applied to functions");
       }
       MaterializeDeferredClassTemplateType(syntax, sym);
-      if (!TypeIsClassTemplatePlaceholder(sym->type) &&
+      bool declares_object = !StorageIs(sym->storage, STO(typedef));
+      if (declares_object && !TypeIsClassTemplatePlaceholder(sym->type) &&
           TypeIsAbstractClass(sym->type)) {
         SyntaxError(syntax, "Cannot declare object of abstract class %s",
                     sym->type->info.struct_info->tag_name != NULL
@@ -15496,7 +15498,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           StorageIs(sym->storage, STO(extern)) &&
           !LexLookingAt(syntax->lex, TOK(equal)) &&
           !LexLookingAt(syntax->lex, TOK(lbrace));
-      if (!syntax->parsing_template_declaration &&
+      if (declares_object && !syntax->parsing_template_declaration &&
           TypeIsClassTemplateObject(sym->type) &&
           !extern_incomplete_declaration) {
         SyntaxError(syntax,
