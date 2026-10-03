@@ -556,33 +556,66 @@ static void AddMissingLinks(TargetGenerator* gen) {
 // AddKeptBlockLinks would then hang it off the function entry, and since it
 // falls through to the pad the pad would inherit that entry predecessor too --
 // which is exactly the claim this function exists to avoid.
+//
+// Every later block of the region can throw into the pad as well, and liveness
+// only flows along edges.  Without an edge from each of them, a value the pad
+// reads (such as `this` for a member destructor) looks dead after the region's
+// first block and its register is reused before a throwing call.  Those blocks
+// are all dominated by the region's first block, so their edges leave the
+// pad's dominators unchanged.
+static void LinkExceptionBlock(TargetBasicBlock* from, TargetBasicBlock* to) {
+  if (from == NULL || to == NULL || from == to) {
+    return;
+  }
+  // A try with several handlers, or a handler naming several types, produces
+  // one range per handler over the same region; the edge is wanted once.
+  for (size_t j = 0; j < from->out_edges.length; j++) {
+    if (from->out_edges.value.w[j] == (int64_t)to->block_id) {
+      return;
+    }
+  }
+  TargetBasicBlockAddEdge(from, to);
+}
+
 static void AddExceptionHandlerEdges(TargetGenerator* gen) {
+  Vector inner;
+  VectorInit(&inner);
   for (size_t i = 0; i < gen->exception_edges.length; i++) {
     TargetExceptionEdge* edge = gen->exception_edges.value.p[i];
     TargetBasicBlock* region = edge->try_start->block;
     if (region == NULL) {
       continue;
     }
-    TargetBasicBlock* targets[2] = {
-        edge->catch_label->block,
-        edge->try_end != NULL ? edge->try_end->block : NULL};
-    for (size_t t = 0; t < sizeof(targets) / sizeof(targets[0]); t++) {
-      TargetBasicBlock* to = targets[t];
-      if (to == NULL || to == region) {
-        continue;
+    TargetBasicBlock* pad = edge->catch_label->block;
+    LinkExceptionBlock(region, pad);
+    LinkExceptionBlock(region,
+                       edge->try_end != NULL ? edge->try_end->block : NULL);
+
+    if (edge->try_end == NULL || pad == NULL) {
+      continue;
+    }
+    // Only trust the layout walk if it actually reaches the region's end;
+    // otherwise it would link blocks outside the region.
+    VectorClear(&inner);
+    TargetBasicBlock* last = region;
+    TargetInstruction* inst = TargetNext(edge->try_start);
+    for (; inst != NULL && inst != edge->try_end; inst = TargetNext(inst)) {
+      if (inst->block != NULL && inst->block != last) {
+        last = inst->block;
+        VectorAppend(&inner, last);
       }
-      // A try with several handlers, or a handler naming several types,
-      // produces one range per handler over the same region; the edge is
-      // wanted once.
-      bool linked = false;
-      for (size_t j = 0; j < region->out_edges.length && !linked; j++) {
-        linked = region->out_edges.value.w[j] == (int64_t)to->block_id;
-      }
-      if (!linked) {
-        TargetBasicBlockAddEdge(region, to);
+    }
+    if (inst != edge->try_end) {
+      continue;
+    }
+    for (size_t b = 0; b < inner.length; b++) {
+      TargetBasicBlock* block = inner.value.p[b];
+      if (block != edge->try_end->block) {
+        LinkExceptionBlock(block, pad);
       }
     }
   }
+  VectorDestruct(&inner);
 }
 
 static void AddKeptBlockLinks(TargetGenerator* gen) {
