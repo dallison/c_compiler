@@ -2503,7 +2503,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           if (symbol->flags.is_template && args == NULL &&
               !parser->syntax->parsing_template_declaration &&
               symbol->alias_template != NULL &&
-              !CXXAliasTemplatePatternNamesClassTemplate(symbol)) {
+              !CXXAliasTemplateIsDeducible(symbol)) {
             SyntaxError(parser->syntax,
                         "Alias template %s does not name a deducible class "
                         "template",
@@ -2512,7 +2512,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           if (symbol->flags.is_template && args == NULL &&
               !parser->syntax->parsing_template_declaration &&
               TypeIsStructOrUnion(symbol->type)) {
-            if (CXXAliasTemplatePatternNamesClassTemplate(symbol)) {
+            if (CXXAliasTemplateIsDeducible(symbol)) {
               SetCXXAliasTemplatePlaceholderOrigin(symbol, type_record);
             } else {
               type_record->template_origin = symbol;
@@ -2676,7 +2676,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             if (symbol->flags.is_template && args == NULL &&
                 !parser->syntax->parsing_template_declaration &&
                 symbol->alias_template != NULL &&
-                !CXXAliasTemplatePatternNamesClassTemplate(symbol)) {
+                !CXXAliasTemplateIsDeducible(symbol)) {
               SyntaxError(parser->syntax,
                           "Alias template %s does not name a deducible class "
                           "template",
@@ -2685,7 +2685,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             if (symbol->flags.is_template && args == NULL &&
                 !parser->syntax->parsing_template_declaration &&
                 TypeIsStructOrUnion(symbol->type)) {
-              if (CXXAliasTemplatePatternNamesClassTemplate(symbol)) {
+              if (CXXAliasTemplateIsDeducible(symbol)) {
                 SetCXXAliasTemplatePlaceholderOrigin(symbol, type_record);
               } else {
                 type_record->template_origin = symbol;

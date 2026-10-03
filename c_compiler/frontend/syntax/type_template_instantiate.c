@@ -11086,10 +11086,27 @@ static bool AliasPatternArgumentIsBareParameter(TemplateArgument* arg) {
   return TypeIsTemplateParameterPlaceholder(arg->type, NULL);
 }
 
+static bool AliasTemplatePatternIsClassTemplateId(Symbol* alias,
+                                                  bool forwarding_only);
+
 /* True if `alias` is an alias template whose right-hand side is itself a class
- * template specialization (e.g. `using X = vector<T>;`), as opposed to a plain
- * type alias. Such aliases participate in class-template instantiation/CTAD. */
+ * template specialization with bare parameters as arguments (e.g. `using X =
+ * vector<T>;`), as opposed to a plain type alias. Such aliases forward to
+ * class-template instantiation. */
 bool CXXAliasTemplatePatternNamesClassTemplate(Symbol* alias) {
+  return AliasTemplatePatternIsClassTemplateId(alias, /*forwarding_only=*/true);
+}
+
+/* True if CTAD can deduce through `alias` ([over.match.class.deduct]): its
+ * pattern is any specialization of a class template, such as `Pair<int, U>`
+ * or `Pair<T*, T*>`, not only a forwarding one. */
+bool CXXAliasTemplateIsDeducible(Symbol* alias) {
+  return AliasTemplatePatternIsClassTemplateId(alias,
+                                               /*forwarding_only=*/false);
+}
+
+static bool AliasTemplatePatternIsClassTemplateId(Symbol* alias,
+                                                  bool forwarding_only) {
   if (!CompilerIsCXX() || alias == NULL || !alias->flags.is_template ||
       !StorageIs(alias->storage, STO(typedef)) || alias->type == NULL ||
       (alias->alias_template != NULL &&
@@ -11122,7 +11139,8 @@ bool CXXAliasTemplatePatternNamesClassTemplate(Symbol* alias) {
   // forwarding alias instantiates Storage with only `I` (`StorageT<0>` →
   // `Storage<0, …>`).  That accidentally works when the element type is
   // `int` (I binds as the first type argument) and fails for `long`.
-  for (size_t i = 0; i < alias->type->template_arguments->length; i++) {
+  for (size_t i = 0;
+       forwarding_only && i < alias->type->template_arguments->length; i++) {
     if (!AliasPatternArgumentIsBareParameter(
             alias->type->template_arguments->value.p[i])) {
       return false;
@@ -11137,7 +11155,7 @@ bool CXXAliasTemplatePatternNamesClassTemplate(Symbol* alias) {
  * deduction runs against the alias rather than the underlying template. */
 void SetCXXAliasTemplatePlaceholderOrigin(Symbol* alias,
                                                  TypeRecord* type) {
-  if (!CXXAliasTemplatePatternNamesClassTemplate(alias) || type == NULL) {
+  if (!CXXAliasTemplateIsDeducible(alias) || type == NULL) {
     return;
   }
   if (type->template_arguments != NULL) {
@@ -11718,7 +11736,7 @@ TypeRecord* TypeClassTemplatePlaceholderFromSymbol(Symbol* symbol) {
     return NULL;
   }
   TypeRecord* type = TypeRecordCopy(symbol->type);
-  if (CXXAliasTemplatePatternNamesClassTemplate(symbol)) {
+  if (CXXAliasTemplateIsDeducible(symbol)) {
     SetCXXAliasTemplatePlaceholderOrigin(symbol, type);
   } else if (type->info.struct_info != NULL &&
              type->info.struct_info->is_template) {

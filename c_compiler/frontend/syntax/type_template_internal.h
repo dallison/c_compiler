@@ -128,6 +128,7 @@ TypeRecord* ResolveInProgressClassMemberType(TypeParser* parser, Struct* str,
 TypeRecord* InstantiateAliasClassTemplate(TypeParser* parser, Symbol* alias,
                                           Vector* args);
 bool CXXAliasTemplatePatternNamesClassTemplate(Symbol* alias);
+bool CXXAliasTemplateIsDeducible(Symbol* alias);
 Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals);
 Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
                                     Vector* alias_args);

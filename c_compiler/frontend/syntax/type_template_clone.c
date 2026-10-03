@@ -6048,7 +6048,8 @@ static ASTNode* ApplyResolvedDependentMember(
     }
     if (member != NULL && member->symbol != NULL && !member->is_static &&
         member->is_member_function && member->overload_next == NULL &&
-        (node->flags & kASTNeedAddress) != 0) {
+        ((node->flags & kASTNeedAddress) != 0 ||
+         (node->parent != NULL && node->parent->op == AST_OP(address)))) {
       id->symbol = member->symbol;
       if (!CXXRetargetDropsDeclaringTemplateArguments(
               id->symbol->type->info.function.cxx_member_owner,

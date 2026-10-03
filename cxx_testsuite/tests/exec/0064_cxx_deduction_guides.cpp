@@ -254,7 +254,7 @@ int main(void) {
   if (guided.value != 6) {
     return 13;
   }
-  if (selected.value.value != 7) {
+  if (selected.value.value != 9) {
     return 14;
   }
   long explicit_direct_value = explicit_direct.value.value;

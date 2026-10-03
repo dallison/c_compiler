@@ -618,6 +618,14 @@ int lambda_init_capture_pack_size(Ts... args) {
   return fn();
 }
 
+template <class... Ts>
+int lambda_standard_init_capture_pack_sum(Ts... args) {
+  auto fn = [...xs = args, &...refs = args] {
+    return (0 + ... + xs) + (0 + ... + refs);
+  };
+  return fn();
+}
+
 int main(void) {
   if (count_types() != 0) {
     return 1;
@@ -883,6 +891,9 @@ int main(void) {
   }
   if (lambda_init_capture_pack_size(1, 2L, (char)3) != 3) {
     return 138;
+  }
+  if (lambda_standard_init_capture_pack_sum(1, 2L, (char)3) != 12) {
+    return 145;
   }
   return 0;
 }

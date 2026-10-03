@@ -3187,6 +3187,8 @@ static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
 
   while (!LexLookingAt(syntax->lex, TOK(rsquare)) && !LexEof(syntax->lex)) {
     bool by_reference = LexMatch(syntax->lex, TOK(amp));
+    // `[...xs = init]` / `[&...xs = init]` ([expr.prim.lambda.capture]).
+    bool leading_pack = LexMatch(syntax->lex, TOK(ellipsis));
     if (LexLookingAt(syntax->lex, TOK(this))) {
       Symbol* symbol =
           lambda_enclosing_this != NULL ? lambda_enclosing_this
@@ -3225,7 +3227,15 @@ static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
       ASTNode* initializer =
           ParseAssignmentExpression(syntax, followers | TC(exprsep) |
                                                 TC(closebra));
-      MarkCXXPackExpansionIfPresent(syntax, initializer);
+      if (leading_pack && initializer != NULL) {
+        if (!CXXExpressionContainsParameterPack(syntax, initializer)) {
+          SyntaxError(syntax,
+                      "pack expansion requires a function parameter pack");
+        }
+        initializer->flags |= kASTPackExpansion;
+      } else {
+        MarkCXXPackExpansionIfPresent(syntax, initializer);
+      }
       bool is_pack_expansion =
           initializer != NULL && (initializer->flags & kASTPackExpansion) != 0;
       TypeRecord* capture_type =
@@ -3254,6 +3264,10 @@ static void ParseLambdaCaptureList(Syntax* syntax, Vector* captures,
         break;
       }
       continue;
+    }
+    if (leading_pack) {
+      SyntaxError(syntax, "Expected = after lambda init-capture pack %s",
+                  name.value);
     }
     bool is_pack_expansion = LexMatch(syntax->lex, TOK(ellipsis));
     if (symbol == NULL) {
@@ -3952,12 +3966,22 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
         // template) is only a placeholder here, often plain `int`.  Record
         // `auto` so each instantiation rebuilds the closure and deduces the
         // field from the concrete initializer.
-        bool placeholder = deduced == NULL || TypeIsUnknown(deduced) ||
-                           TypeContainsAuto(deduced) ||
-                           TypeContainsTemplateParameter(deduced);
+        // A pack init-capture (`[...xs = args]`) keeps its pack type instead:
+        // instantiation expands the field into one element per pack argument
+        // only when the field's type names the pack.
+        bool keeps_pack_type = deduced != NULL && capture->is_pack_expansion &&
+                               !TypeContainsAuto(deduced) &&
+                               TypeContainsTemplateParameter(deduced);
+        bool placeholder = !keeps_pack_type &&
+                           (deduced == NULL || TypeIsUnknown(deduced) ||
+                            TypeContainsAuto(deduced) ||
+                            TypeContainsTemplateParameter(deduced));
         capture->captured->type =
             placeholder ? NewTypeRecord(kTypeAuto, kQualPlain)
                         : TypeRecordCopy(deduced);
+        if (!placeholder) {
+          capture->captured->type->qualifiers &= ~(kQualConst | kQualVolatile);
+        }
       }
     }
     String field_name;
@@ -7739,6 +7763,12 @@ static bool LookingAtCompleteQualifiedName(Lex* lex) {
   bool dangling = false;
   while (LexLookingAt(lex, TOK(coloncolon))) {
     LexNextToken(lex);
+    if (LexLookingAt(lex, TOK(operator))) {
+      // `A::operator()` / `A::operator+`: an operator-function-id ends the
+      // name.
+      parts++;
+      break;
+    }
     if (!LexLookingAt(lex, TOK(identifier))) {
       dangling = true;
       break;
