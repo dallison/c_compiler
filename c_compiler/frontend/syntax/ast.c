@@ -4061,6 +4061,14 @@ ASTNode* NewDeclarationListASTNode(Vector* declarations,
   DeclarationListASTNode* node = ASTArenaAlloc(sizeof(DeclarationListASTNode));
   ASTNodeInit(&node->base, AST_OP(decl_list), NULL, location, &decl_list_vtbl);
   node->declarations = declarations;
+  for (size_t i = 0; i < declarations->length; i++) {
+    ASTNode* decl = (ASTNode*)declarations->value.p[i];
+    if (decl == NULL) {
+      continue;
+    }
+    decl->parent = (ASTNode*)node;
+    decl->child_id = (int)i;
+  }
   return (ASTNode*)node;
 }
 

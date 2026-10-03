@@ -5335,6 +5335,69 @@ static Symbol* CallThisReceiverSymbol(VectorASTNode* call) {
   return NULL;
 }
 
+// A constructor mem-initializer call whose argument is a materialized prvalue
+// `(ctor(&tmp, ...), tmp)` must stay a call so that
+// ElideCXXMemberInitializerPrvalue can construct the member in place.
+static bool CXXMemberInitializerMayElidePrvalue(VectorASTNode* call) {
+  if ((call->base.flags & kASTCXXMemberInitializer) == 0 ||
+      call->children == NULL || call->children->length < 2 ||
+      !TypeIsFunction(call->left->type) ||
+      !call->left->type->info.function.is_constructor) {
+    return false;
+  }
+  ASTNode* actual = call->children->value.p[call->children->length - 1];
+  if (actual == NULL || actual->op != AST_OP(comma)) {
+    return false;
+  }
+  ASTNode* inner = ((BinaryASTNode*)actual)->left;
+  if (ASTIsInlinedConstructor(inner)) {
+    return true;
+  }
+  if (inner == NULL || inner->op != AST_OP(call)) {
+    return false;
+  }
+  ASTNode* callee = ((VectorASTNode*)inner)->left;
+  return callee != NULL && callee->type != NULL &&
+         TypeIsFunction(callee->type) &&
+         callee->type->info.function.is_constructor;
+}
+
+// A copy/move constructor whose source is a materialized prvalue of the same
+// class, `T(&dst, (T){prvalue})`, is elided by the backend
+// (CXXElidableStructReturnInitializer), which needs to see the call.
+static bool CXXConstructorCallElidesPrvalueSource(VectorASTNode* call) {
+  if (!CompilerIsCXX() || call->children == NULL ||
+      !TypeIsFunction(call->left->type) ||
+      !call->left->type->info.function.is_constructor) {
+    return false;
+  }
+  for (size_t i = 0; i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    if (actual == NULL || actual->op != AST_OP(compound_literal)) {
+      continue;
+    }
+    ASTNode* init = ((CompoundLiteralASTNode*)actual)->initializer;
+    if (init == NULL || init->op != AST_OP(braced_init) ||
+        ((BracedInitializerASTNode*)init)->initializers->length != 1) {
+      continue;
+    }
+    ASTNode* only = ((BracedInitializerASTNode*)init)->initializers->value.p[0];
+    if (only == NULL || only->op != AST_OP(designated_init)) {
+      continue;
+    }
+    ASTNode* source = ((DesignatedInitializerASTNode*)only)->init;
+    if (source != NULL && source->op == AST_OP(expr_init)) {
+      source = ((ExpressionInitializerASTNode*)source)->expr;
+    }
+    if (source != NULL && source->type != NULL &&
+        TypeIsStructOrUnion(source->type) &&
+        TypeEqual(source->type, actual->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Inline a function call.
 // 1. Create new symbols for all formal args.
 // 2. Assign all actual values to new symbols.
@@ -5805,6 +5868,11 @@ static bool FunctionCanBeInlined(FunctionInfo* func) {
   // before that interpretation loses the call boundary and makes the constant
   // evaluator reject an otherwise valid expression.
   if (compiler->constant_evaluation_required_depth > 0) {
+    return false;
+  }
+  // An immediate invocation is replaced by its constant result, which the
+  // evaluator computes from the original call.
+  if (func->is_consteval) {
     return false;
   }
   // __attribute__((noinline)) blocks inlining outright.
@@ -12326,6 +12394,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       }
     }
     if (!TypeIsStructOrUnion(return_type) && !has_initializer_list_actual &&
+        !CXXMemberInitializerMayElidePrvalue(node) &&
+        !CXXConstructorCallElidesPrvalueSource(node) &&
         FunctionCanBeInlined(func)) {
       // Clone the function's body and replace the call by
       // an inline_call node.

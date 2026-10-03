@@ -2429,6 +2429,9 @@ static IRNode* GenerateIncDec(Generator* gen, UnaryASTNode* node, bool is_post,
         gen, is_inc ? "__davecc_ld_add" : "__davecc_ld_sub", value, one, type);
     IRNode* store = StoreLongDoubleToAddress(gen, addr, result, type);
     CheckForVarDef(store, node->sub);
+    if (!is_post && (node->base.flags & kASTNeedAddress) != 0) {
+      return addr;
+    }
     return (is_post && value_is_used) ? old_value : result;
   }
   // For a bitfield or VLA, we use a load/add/store operation sequence.
@@ -2488,6 +2491,10 @@ static IRNode* GenerateIncDec(Generator* gen, UnaryASTNode* node, bool is_post,
 
   CheckForVarDef(modified_value, node->sub);
 
+  if (!is_post && (node->base.flags & kASTNeedAddress) != 0) {
+    // C++ `++x` is an lvalue; `(++x) += n` needs its address.
+    return addr;
+  }
   if (load == NULL) {
     // This is a pre-increment operation, store the value and return the
     // post-incremented value.

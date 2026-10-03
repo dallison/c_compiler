@@ -392,6 +392,34 @@ void CheckForVarUse(IRNode* read, ASTNode* node) {
       CheckForVarUse(read, b->left);
       break;
     }
+    case AST_OP(assign):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa): {
+      BinaryASTNode* b = (BinaryASTNode*)node;
+      CheckForVarUse(read, b->left);
+      break;
+    }
+    case AST_OP(preinc):
+    case AST_OP(predec): {
+      UnaryASTNode* n = (UnaryASTNode*)node;
+      CheckForVarUse(read, n->sub);
+      break;
+    }
+    case AST_OP(comma): {
+      BinaryASTNode* b = (BinaryASTNode*)node;
+      CheckForVarUse(read, b->right);
+      break;
+    }
 
     default:
       break;
@@ -444,6 +472,36 @@ void CheckForVarDef(IRNode* write, ASTNode* node) {
     case AST_OP(address): {
       UnaryASTNode* n = (UnaryASTNode*)node;
       CheckForVarDef(write, n->sub);
+      break;
+    }
+    // C++ assignments and prefix increments are lvalues designating their
+    // left operand, so `(x = a) = b` writes x again.
+    case AST_OP(assign):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa): {
+      BinaryASTNode* b = (BinaryASTNode*)node;
+      CheckForVarDef(write, b->left);
+      break;
+    }
+    case AST_OP(preinc):
+    case AST_OP(predec): {
+      UnaryASTNode* n = (UnaryASTNode*)node;
+      CheckForVarDef(write, n->sub);
+      break;
+    }
+    case AST_OP(comma): {
+      BinaryASTNode* b = (BinaryASTNode*)node;
+      CheckForVarDef(write, b->right);
       break;
     }
     case AST_OP(builtin_va_end):

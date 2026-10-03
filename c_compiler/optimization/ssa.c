@@ -369,8 +369,14 @@ static void RemovePhiNodes(Generator* gen, BasicBlock* block) {
 // to it are replaced by a reference to the actual (pooled) variable for
 // which it was initially created.
 static void RemoveSSAVariables(Generator* gen, BasicBlock* block) {
+  if (block->code == NULL || block->end_code == NULL) {
+    return;
+  }
+  // Removing the block's last instructions moves end_code (possibly to NULL),
+  // so fix the stopping point before mutating the block.
+  IRNode* stop = IRNext(block->end_code);
   IRNode* inst = block->code;
-  while (inst != NULL && IRPrev(inst) != block->end_code) {
+  while (inst != NULL && inst != stop) {
     IRNode* next = IRNext(inst);
     if (inst->opcode == IR_OP(ssavar)) {
       // This is an SSA variable, remove it.

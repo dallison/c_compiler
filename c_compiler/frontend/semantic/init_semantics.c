@@ -1557,8 +1557,10 @@ static ASTNode* BuildDesignatedInitializer(INode* inode) {
 static void FlattenINode(INode* inode,
                             BracedInitializerASTNode* braced_init) {
   if (inode->expr != NULL) {
-     VectorAppend(braced_init->initializers,
-                  BuildDesignatedInitializer(inode));
+    ASTNode* designated = BuildDesignatedInitializer(inode);
+    designated->parent = &braced_init->base;
+    designated->child_id = (int)braced_init->initializers->length;
+    VectorAppend(braced_init->initializers, designated);
   }
   for (size_t i = 0; i < inode->children.length; i++) {
     FlattenINode(inode->children.value.p[i], braced_init);

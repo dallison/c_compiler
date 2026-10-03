@@ -261,6 +261,9 @@ static bool CXXInitializerConstructsInPlace(ASTNode* init) {
            TypeIsFunction(callee->type) &&
            callee->type->info.function.is_constructor;
   }
+  if (ASTIsInlinedConstructor(init)) {
+    return true;
+  }
   if (init->op == AST_OP(comma)) {
     return CXXInitializerConstructsInPlace(((BinaryASTNode*)init)->left);
   }
@@ -350,6 +353,10 @@ static Symbol* CXXInPlaceConstructorReceiver(ASTNode* expr) {
   }
   if (expr->op == AST_OP(cast)) {
     return CXXInPlaceConstructorReceiver(((CastASTNode*)expr)->expr);
+  }
+  if (ASTIsInlinedConstructor(expr)) {
+    Symbol* sym = ((InlineCallASTNode*)expr)->cxx_receiver;
+    return sym != NULL && sym->flags.is_temp ? sym : NULL;
   }
   if (expr->op != AST_OP(call) || !CXXInitializerConstructsInPlace(expr)) {
     return NULL;
@@ -1047,6 +1054,73 @@ void CXXInsertScopeExitDestructors(TypeRecord* func) {
   VectorDestruct(&jumps);
 }
 
+typedef struct {
+  Symbol* temporary;
+  ASTNode* found;
+} InlinedReceiverSearch;
+
+static void FindInlinedReceiverAddress(ASTNode* node, void* data,
+                                       int child_id, VisitorMode mode) {
+  (void)child_id;
+  InlinedReceiverSearch* search = data;
+  if (mode != kVisitPreChildren || search->found != NULL ||
+      node->op != AST_OP(address)) {
+    return;
+  }
+  ASTNode* sub = ((UnaryASTNode*)node)->sub;
+  if (sub != NULL && sub->op == AST_OP(identifier) &&
+      ((IdentifierASTNode*)sub)->symbol == search->temporary) {
+    search->found = node;
+  }
+}
+
+// `inner` is an inlined constructor of `temporary`; retarget its `this`
+// parameter to the outer copy constructor's target and drop the copy.
+static ASTNode* ElideCXXMemberInitializerInlinedPrvalue(ASTNode* expr,
+                                                       ASTNode* inner,
+                                                       Symbol* temporary) {
+  VectorASTNode* outer = (VectorASTNode*)expr;
+  ASTNode* target = outer->children->value.p[0];
+  InlineCallASTNode* inline_call = (InlineCallASTNode*)inner;
+  if (target == NULL || target->type == NULL || !TypeIsPointer(target->type) ||
+      inline_call->cxx_receiver != temporary ||
+      !CXXSameClassIgnoringQualifiers(target->type->next, temporary->type)) {
+    return expr;
+  }
+  ASTNode* body = inline_call->inlined;
+  if (body == NULL || body->op != AST_OP(compound)) {
+    return expr;
+  }
+  Vector* statements = ((CompoundStatementASTNode*)body)->statements;
+  ASTNode* decls = statements->length > 0 ? statements->value.p[0] : NULL;
+  if (decls == NULL || decls->op != AST_OP(decl_list) ||
+      ((DeclarationListASTNode*)decls)->declarations->length == 0) {
+    return expr;
+  }
+  ASTNode* this_decl =
+      ((DeclarationListASTNode*)decls)->declarations->value.p[0];
+  if (this_decl == NULL || this_decl->op != AST_OP(vardecl) ||
+      ((VariableDeclarationASTNode*)this_decl)->initializer == NULL) {
+    return expr;
+  }
+  InlinedReceiverSearch search = {temporary, NULL};
+  ASTNodeVisit(((VariableDeclarationASTNode*)this_decl)->initializer,
+               FindInlinedReceiverAddress, 0, &search);
+  if (search.found == NULL || search.found->parent == NULL) {
+    return expr;
+  }
+  VectorSet(outer->children, 0, NULL);
+  ASTNodeReplaceChild(search.found->parent, search.found->child_id, target,
+                      true);
+  inline_call->cxx_receiver = NULL;
+  ((BinaryASTNode*)outer->children->value.p[outer->children->length - 1])
+      ->left = NULL;
+  inner->parent = expr->parent;
+  inner->child_id = expr->child_id;
+  ASTNodeDelete(expr);
+  return inner;
+}
+
 static ASTNode* ElideCXXMemberInitializerPrvalue(ASTNode* expr) {
   if (expr == NULL || expr->op != AST_OP(call) ||
       (expr->flags & kASTCXXMemberInitializer) == 0) {
@@ -1070,6 +1144,9 @@ static ASTNode* ElideCXXMemberInitializerPrvalue(ASTNode* expr) {
   ASTNode* inner_node = materialized->left;
   Symbol* temporary =
       CXXTemporaryConstructionResultSymbol(materialized->right);
+  if (ASTIsInlinedConstructor(inner_node) && temporary != NULL) {
+    return ElideCXXMemberInitializerInlinedPrvalue(expr, inner_node, temporary);
+  }
   if (inner_node == NULL || inner_node->op != AST_OP(call) ||
       temporary == NULL) {
     return expr;
