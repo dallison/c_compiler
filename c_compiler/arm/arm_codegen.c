@@ -3190,6 +3190,13 @@ static TargetInstruction* LowerLoad(ARMGenerator* g, IRNode* node) {
   }
 
   TargetInstruction* inst = Load(g, addr_node, opcode, size);
+  if (ARMIsVarRegister(inst) && IRLoadedVariableRedefinedBeforeUse(node)) {
+    ARMOpcode mov_opcode =
+        node->opcode == IR_OP(loadd) || node->opcode == IR_OP(loadf)
+            ? ARM_OP(fmov)
+            : ARM_OP(mov);
+    inst = Emit(g, SetInstructionSize(NewInstruction1(mov_opcode, inst), size));
+  }
   // If this load writes its result into a destination tmp (the "-> $n"
   // annotation used to merge the arms of && / || / ?: into one location),
   // route the loaded value there.  e.g. `a && b` where the right operand `b`

@@ -2822,12 +2822,17 @@ static TargetInstruction* LowerLoad(AARCH64Generator* g, IRNode* node) {
   }
 
   TargetInstruction* result = Load(g, addr_node, opcode, size);
+  AARCH64Opcode mov_opcode = TypeUsesHardwareFloatRegister(node->type)
+                                 ? (node->type->size > 4 ? AARCH64_OP(fmv_d)
+                                                         : AARCH64_OP(fmv_s))
+                                 : AARCH64_OP(mov);
+  if (AARCH64IsVarRegister(result) &&
+      IRLoadedVariableRedefinedBeforeUse(node)) {
+    result = Emit(g, SetInstructionSize(NewInstruction1(mov_opcode, result),
+                                        size));
+  }
   TargetInstruction* dest = GetDestInstruction(g, node);
   if (dest != NULL) {
-    AARCH64Opcode mov_opcode = TypeUsesHardwareFloatRegister(node->type)
-                                   ? (node->type->size > 4 ? AARCH64_OP(fmv_d)
-                                                           : AARCH64_OP(fmv_s))
-                                   : AARCH64_OP(mov);
     result = SetDestOrMove(g, result, dest, mov_opcode);
   }
   return SetLoweredNode(node, result);

@@ -838,6 +838,34 @@ static bool SimplifyBranches(SCCPContext* context, SCCPStats* stats) {
   return changed;
 }
 
+// Leaving SSA maps every phi input to the phi's variable storage, so a phi
+// input must stay a definition of that variable rather than a constant.
+// Replaces the non-phi uses of `inst` and returns true if a phi still uses it.
+static bool ReplaceNonPhiUses(IRNode* inst, IRNode* constant) {
+  bool phi_use = false;
+  size_t i = 0;
+  while (i < inst->outputs.length) {
+    IRNode* user = inst->outputs.value.p[i];
+    if (user->opcode == IR_OP(phi)) {
+      phi_use = true;
+      i++;
+      continue;
+    }
+    bool replaced = false;
+    for (size_t j = 0; j < user->inputs.length; j++) {
+      if (user->inputs.value.p[j] == inst) {
+        IRReplaceInput(user, j, constant);
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      i++;
+    }
+  }
+  return phi_use;
+}
+
 static bool Rewrite(SCCPContext* context, SCCPStats* stats) {
   bool changed = SimplifyBranches(context, stats);
   for (size_t i = 0; i < context->gen->basic_blocks.length; i++) {
@@ -862,9 +890,13 @@ static bool Rewrite(SCCPContext* context, SCCPStats* stats) {
           stats->phis_folded++;
         }
       }
-      GeneratorReplaceInstruction(context->gen, inst, constant);
-      BasicBlockRemoveInstruction(context->gen, block, inst);
-      changed = true;
+      size_t uses_before = inst->outputs.length;
+      if (!ReplaceNonPhiUses(inst, constant)) {
+        BasicBlockRemoveInstruction(context->gen, block, inst);
+        changed = true;
+      } else if (inst->outputs.length != uses_before) {
+        changed = true;
+      }
     }
   }
   return changed;

@@ -358,6 +358,11 @@ void IRRenumberList(List* code);
 // After deserialize or inlining, drop or rebind kIRVarDef/kIRVarUse so SSA
 // rename can find the address operand's IRVariable.
 void IRRepairVarDefUse(List* code);
+// True if `load` reads a variable that is written again before every use of
+// the loaded value (conservatively true when a use is outside the load's
+// block).  A target that lowers such a load to the variable's own register
+// must copy the value instead.
+bool IRLoadedVariableRedefinedBeforeUse(IRNode* load);
 
 IRNode* IRSetType(IRNode* node, TypeRecord* type);
 

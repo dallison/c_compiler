@@ -358,6 +358,40 @@ void IRRepairVarDefUse(List* code) {
   }
 }
 
+static bool IRWritesVariable(IRNode* inst, IRNode* var) {
+  if ((inst->flags & kIRVarDef) != 0 && inst->var.def != NULL &&
+      inst->var.def == ((IRVariable*)var)->symbol) {
+    return true;
+  }
+  return inst->inputs.length > 0 && inst->inputs.value.p[0] == var &&
+         (IRIsStore(inst) || inst->opcode == IR_OP(memcpy) ||
+          inst->opcode == IR_OP(memzero));
+}
+
+bool IRLoadedVariableRedefinedBeforeUse(IRNode* load) {
+  if (load == NULL || load->inputs.length == 0 ||
+      !IRIsVariable(load->inputs.value.p[0])) {
+    return false;
+  }
+  IRNode* var = load->inputs.value.p[0];
+  size_t remaining = load->outputs.length;
+  for (IRNode* inst = IRNext(load); inst != NULL && remaining > 0;
+       inst = IRNext(inst)) {
+    if (inst->block != load->block) {
+      return true;
+    }
+    for (size_t i = 0; i < load->outputs.length; i++) {
+      if (load->outputs.value.p[i] == inst) {
+        remaining--;
+      }
+    }
+    if (remaining > 0 && IRWritesVariable(inst, var)) {
+      return true;
+    }
+  }
+  return remaining > 0;
+}
+
 void IRInit(IRNode* inst, IROpcode opcode) {
   ListElementInit(&inst->header);
   inst->id = next_ir_id++;

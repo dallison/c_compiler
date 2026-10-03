@@ -703,6 +703,11 @@ static X86Register* SpillInstruction(X86RegisterAllocator* allocator, TargetInst
   return reg;
 }
 
+static void RedirectReentrantReads(X86RegisterAllocator* allocator,
+                                   TargetInstruction* victim,
+                                   X86RegisterType type,
+                                   TargetBasicBlock* block);
+
 // Force the physical register denoted by logical slot |slot| (and any aliasing
 // logical slot) to be free, spilling any live value currently occupying it.
 // This is used when an instruction must land in a specific ABI register (an
@@ -744,6 +749,9 @@ static void EvictPhysicalRegister(X86RegisterAllocator* allocator,
       continue;
     }
     SpillInstruction(allocator, owner);
+    if (keep != NULL && keep->block != NULL) {
+      RedirectReentrantReads(allocator, owner, type, keep->block);
+    }
   }
 }
 
@@ -815,6 +823,63 @@ static bool CanSpillAfterDefinition(TargetInstruction* inst) {
          (inst->dest == NULL || !X86IsVarRegister(inst->dest));
 }
 
+// After |victim|, which had reads already emitted in blocks control can come
+// back to, has been spilled anyway: point each of those reads at a reload of
+// its slot placed just before it, in the scratch register.  That register is
+// free across the gap as long as the read does not already get another value
+// from it; a read that does keeps naming the old register.
+static void RedirectReentrantReads(X86RegisterAllocator* allocator,
+                                   TargetInstruction* victim,
+                                   X86RegisterType type,
+                                   TargetBasicBlock* block) {
+  X86Register* scratch = ScratchRegister(allocator, type);
+  if (scratch == NULL || X86IsVarRegister(victim) ||
+      (victim->dest != NULL && X86IsVarRegister(victim->dest))) {
+    return;
+  }
+  TargetInstruction* spill = MapFindPointerKey(&allocator->varreg_spills, victim);
+  if (spill == NULL || spill->operand[0] != victim ||
+      InstructionHasExternalDefs(allocator, victim)) {
+    return;
+  }
+  BitSet reentered;
+  BitSetInit(&reentered);
+  TargetBasicBlockReachableAfter(&allocator->rv->base, block, &reentered);
+  for (size_t u = 0; u < victim->users.length; u++) {
+    TargetInstruction* user = victim->users.value.p[u];
+    if ((user->flags & TARGET_INST_PROCESSED) == 0 || user->block == NULL ||
+        !BitSetContains(&reentered, user->block->block_id) ||
+        user->reg == &scratch->base) {
+      continue;
+    }
+    bool conflict = false;
+    for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+      if (user->operand[i] != NULL && user->operand[i]->reg == &scratch->base) {
+        conflict = true;
+      }
+    }
+    if (conflict) {
+      continue;
+    }
+    TargetInstruction* reload = NULL;
+    for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+      if (user->operand[i] != victim) {
+        continue;
+      }
+      if (reload == NULL) {
+        reload = TargetNewInstruction1((TargetOpcode)X86_OP(reload), spill);
+        TrapReload(reload);
+        TargetBasicBlockEmitBefore(&allocator->rv->base, user->block, reload, user);
+        reload->reg = &scratch->base;
+        reload->uses = 1;
+        reload->flags |= TARGET_INST_PROCESSED;
+      }
+      user->operand[i] = reload;
+    }
+  }
+  BitSetDestruct(&reentered);
+}
+
 static X86Register* AllocateRegisterWithType(X86RegisterAllocator* allocator,
                                             TargetBasicBlock* block,
                                             TargetInstruction* inst,
@@ -833,12 +898,21 @@ static X86Register* AllocateRegisterWithType(X86RegisterAllocator* allocator,
         (CanSpillAfterDefinition(inst) || !X86_IS_64BIT(allocator->rv));
     TargetInstruction* victim = FindSpillVictim(
         allocator, type, can_use_temp, block,
-        allow_scratch ? &unsafe : NULL);
+        scratch != NULL ? &unsafe : NULL);
     if (victim == NULL && allow_scratch) {
       allocator->spill_after_definition = true;
       return scratch;
     }
-    reg = SpillInstruction(allocator, victim);
+    if (victim == NULL && unsafe != NULL) {
+      reg = SpillInstruction(allocator, unsafe);
+      RedirectReentrantReads(allocator, unsafe, type, block);
+    } else {
+      if (victim == NULL) {
+        DumpRegisters(allocator);
+        abort();
+      }
+      reg = SpillInstruction(allocator, victim);
+    }
   }
   assert(reg != NULL);
 
@@ -1235,14 +1309,21 @@ static void ReloadSpills(X86RegisterAllocator* allocator,
         TargetInstruction* unsafe = NULL;
         TargetInstruction* victim = FindSpillVictim(
             allocator, reg_type, CanUseTemp(allocator, reload), inst->block,
-            scratch != NULL ? &unsafe : NULL);
-        if (victim == NULL && unsafe != NULL) {
+            ScratchRegister(allocator, reg_type) != NULL ? &unsafe : NULL);
+        if (victim == NULL && scratch != NULL) {
           // Nothing can give up its register without breaking a read that
           // already has one.  This reload dies at the instruction it feeds, so
           // the scratch register carries it across that one gap.
           reg = scratch;
           scratch_taken = true;
+        } else if (victim == NULL && unsafe != NULL) {
+          reg = SpillInstruction(allocator, unsafe);
+          RedirectReentrantReads(allocator, unsafe, reg_type, inst->block);
         } else {
+          if (victim == NULL) {
+            DumpRegisters(allocator);
+            abort();
+          }
           reg = SpillInstruction(allocator, victim);
         }
       }

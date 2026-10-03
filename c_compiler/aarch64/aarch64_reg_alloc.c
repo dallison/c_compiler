@@ -1416,6 +1416,7 @@ static void ClaimOperandRegister(AARCH64RegisterAllocator* allocator,
   if (holder == NULL || holder->reg == NULL ||
       IsShortLivedVarReg(allocator, holder) ||
       ((int)holder->opcode == (int)AARCH64_OP(spill)) ||
+      ((int)holder->opcode == (int)AARCH64_OP(reload)) ||
       (holder->flags & TARGET_INST_SPILLED) != 0) {
     return;
   }

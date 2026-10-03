@@ -2546,6 +2546,9 @@ static TargetInstruction* LowerLoad(X86Generator* rv, Generator* gen,
   }
 
   TargetInstruction* result = Load(rv, addr_node, opcode);
+  if (X86IsVarRegister(result) && IRLoadedVariableRedefinedBeforeUse(node)) {
+    result = Emit(rv, NewInstruction1(MoveOpcodeForLoad(opcode), result));
+  }
   TargetInstruction* dest = GetDestInstruction(rv, gen, node);
   if (dest != NULL) {
     result = SetDestOrMove(rv, result, dest, MoveOpcodeForLoad(opcode));

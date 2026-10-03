@@ -120,7 +120,7 @@ class basic_stacktrace {
   using __alloc_traits = allocator_traits<allocator_type>;
   vector<value_type, allocator_type> __frames;
 
-  static basic_stacktrace __current(size_type skip, size_type max_depth,
+  [[gnu::noinline]] static basic_stacktrace __current(size_type skip, size_type max_depth,
                                     const allocator_type& alloc) noexcept {
     basic_stacktrace result(alloc);
     if (max_depth == 0) {
@@ -164,18 +164,18 @@ class basic_stacktrace {
   }
 
  public:
-  static basic_stacktrace current(
+  [[gnu::noinline]] static basic_stacktrace current(
       const allocator_type& alloc = allocator_type()) noexcept {
     return __current(0, numeric_limits<size_type>::max(), alloc);
   }
 
-  static basic_stacktrace current(
+  [[gnu::noinline]] static basic_stacktrace current(
       size_type skip,
       const allocator_type& alloc = allocator_type()) noexcept {
     return __current(skip, numeric_limits<size_type>::max(), alloc);
   }
 
-  static basic_stacktrace current(
+  [[gnu::noinline]] static basic_stacktrace current(
       size_type skip, size_type max_depth,
       const allocator_type& alloc = allocator_type()) noexcept {
     return __current(skip, max_depth, alloc);

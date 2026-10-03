@@ -5363,6 +5363,7 @@ static bool ExpressionConstructsAggregateInPlace(ASTNode* expr) {
     case AST_OP(comma): {
       BinaryASTNode* comma = (BinaryASTNode*)expr;
       return ExpressionIsConstructorCall(comma->left) ||
+             ASTIsInlinedConstructor(comma->left) ||
              ExpressionConstructsAggregateInPlace(comma->right);
     }
     default:
