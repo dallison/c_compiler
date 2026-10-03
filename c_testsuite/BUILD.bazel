@@ -31,6 +31,7 @@ sh_test(
     srcs = ["run_warning_tests.sh"],
     data = [
         "//:davecc",
+        "//:libc_headers",
     ],
     args = [
         "--davecc",

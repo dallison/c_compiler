@@ -1,5 +1,6 @@
 #! /usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "$0: line $LINENO: command failed: $BASH_COMMAND" >&2' ERR
 
 usage() {
   echo "usage: $0 --davecc PATH" >&2
@@ -17,6 +18,14 @@ done
 if [ -z "$DAVECC" ]; then
   usage
 fi
+# Bazel passes a runfiles-relative path such as "davecc", which would
+# otherwise be looked up in PATH.
+if [[ "$DAVECC" != /* ]]; then
+  DAVECC="$PWD/$DAVECC"
+fi
+if [ -z "${DAVECC_INCLUDE_DIR:-}" ] && [ -d "$PWD/libc/include" ]; then
+  export DAVECC_INCLUDE_DIR="$PWD/libc/include"
+fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/davecc-warnings.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -28,8 +37,12 @@ run_ok() {
   : >"$work/$name.out"
   : >"$work/$name.err"
   for opt in -O0 -O1; do
-    "$DAVECC" -target x86_64 "$opt" -S "$@" "$source" -o "$work/$name${opt}.s" \
-      >>"$work/$name.out" 2>>"$work/$name.err"
+    if ! "$DAVECC" -target x86_64 "$opt" -S "$@" "$source" \
+      -o "$work/$name${opt}.s" >>"$work/$name.out" 2>>"$work/$name.err"; then
+      echo "$name failed to compile at $opt" >&2
+      sed 's/^/  /' "$work/$name.err" >&2
+      exit 1
+    fi
   done
 }
 
