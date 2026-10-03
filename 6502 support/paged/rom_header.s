@@ -14,10 +14,19 @@
 paged_rom_entry:
   JMP language_entry
   JMP service_entry
+#ifdef PAGED_EXTRA
+  .byte 0x80
+#else
   .byte 0xc0
+#endif
   .byte copyright - paged_rom_entry
   .byte 1
+#ifdef PAGED_EXTRA
+#include "image_title.h"
+  .asciz PAGED_NAME
+#else
   .asciz "DaveCC libc"
+#endif
   .asciz "1.00"
 copyright:
   .asciz "(C)2026 DaveCC"
@@ -30,9 +39,13 @@ header_end:
 .global language_entry
 
 // Entered with JMP when this bank is selected as the current language.
-// Own the machine: enable Master sideways RAM, then offer a *command
-// line so the ROM is a real language rather than a header-only image.
+// The extra image is service-only, so this entry just hands the machine
+// back. The primary image owns the machine: enable Master sideways RAM,
+// then offer a *command line.
 language_entry:
+#ifdef PAGED_EXTRA
+  JMP bbc_return
+#else
   LDX #0xff
   TXS
   JSR enable_master_ram
@@ -51,6 +64,7 @@ language_loop:
   LDY #%hi(line_buf)
   JSR PAGED_OSCLI
   JMP language_loop
+#endif
 
 // OSBYTE 0, X=1 returns the OS version in X. MOS 3.20 and later (Master)
 // read and write sideways RAM only when ROMSEL bit 7 is set. Model B
@@ -114,8 +128,13 @@ banner_cr:
   RTS
 
 banner:
+#ifdef PAGED_EXTRA
+  .asciz PAGED_BANNER
+#else
   .asciz "DaveCC libc 1.00"
+#endif
 
+#ifndef PAGED_EXTRA
 .section ".data.line_block", "aw", @progbits
 
 line_block:
@@ -125,6 +144,7 @@ line_block:
   .byte 0xff
 
 .comm line_buf, 80
+#endif
 
 // exit() in this image is the BBC path: bbc_syscall jumps here instead of
 // returning to a *RUN caller. Same sequence as bbc_start.s.

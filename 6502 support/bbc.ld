@@ -11,7 +11,10 @@ MEMORY
 }
 SECTIONS
 {
-  .text : { *(.text* .rodata* .davecc_stacktrace) } > ram
+  .text : {
+    *(.paged_gate)
+    *(.text* .rodata* .davecc_stacktrace)
+  } > ram
   .data : { *(.data* .preinit_array* .init_array* .fini_array*) } > ram
   .bss : { *(.bss* COMMON) } > ram
 }

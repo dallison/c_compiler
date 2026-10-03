@@ -1,0 +1,32 @@
+# Append-only libc entry points. Vector 0 is __paged_rom_init;
+# the first name here is vector 1 at 0x8103. Do not reorder.
+__fprintf_fp
+__fprintf_int
+__fprintf_long
+__printf_fp
+__printf_int
+__printf_long
+__snprintf_fp
+__snprintf_int
+__snprintf_long
+__sprintf_fp
+__sprintf_int
+__sprintf_long
+fgetc
+fprintf
+fscanf
+getc
+getchar
+printf
+scanf
+snprintf
+sprintf
+sscanf
+ungetc
+vfprintf
+vfscanf
+vprintf
+vscanf
+vsnprintf
+vsprintf
+vsscanf

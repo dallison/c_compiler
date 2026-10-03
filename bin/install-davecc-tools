@@ -206,7 +206,10 @@ done
 install_required_file 0644 "6502_support/6502rom.exe" "$actual_libdir/6502rom.exe"
 install_required_file 0644 "libc/esp32_start.o" "$actual_libdir/esp32_start.o"
 for paged in libc6502_paged_shim.a libc6502_bbc_runtime.a \
-             bbc_start.o bbc.ld libc6502_paged.bin; do
+             bbc_start.o bbc.ld libc6502_paged.bin \
+             libc6502_paged_libm.bin libc6502_paged_math_a.bin \
+             libc6502_paged_math_b.bin libc6502_paged_cxx.bin \
+             libc6502_paged_stdio.bin libc6502_paged_float.bin; do
   install_required_file 0644 "libc/$paged" "$actual_libdir/$paged"
 done
 

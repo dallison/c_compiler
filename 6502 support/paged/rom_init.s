@@ -4,7 +4,7 @@
 // One-time setup for the sideways image. The shim calls vector 0 with
 // __t0 pointing at the main-RAM mailbox. .bss (including this file's
 // commons) is zeroed, the user program's heap bounds are copied in, and
-// stdin/stdout/stderr in the mailbox are set to this image's FILE objects.
+// The primary image builds the standard streams in the cassette buffer.
 //
 // Nested entry is a no-op once __paged_ready is set, so a constructor
 // that calls back through the shim does not zero the image again.
@@ -76,24 +76,9 @@ copy_mailbox:
   LDA #0x7c
   STA __paged_heap_limit+1
 limits_ready:
-  LDA stdin
-  LDY #PAGED_MBOX_STDIN
-  STA (__t0), Y
-  LDA stdin+1
-  INY
-  STA (__t0), Y
-  LDA stdout
-  LDY #PAGED_MBOX_STDOUT
-  STA (__t0), Y
-  LDA stdout+1
-  INY
-  STA (__t0), Y
-  LDA stderr
-  LDY #PAGED_MBOX_STDERR
-  STA (__t0), Y
-  LDA stderr+1
-  INY
-  STA (__t0), Y
+#ifndef PAGED_SKIP_STREAMS
+  JSR __paged_init_stdio
+#endif
   RTS
 
 // Same walk as bbc_start. Empty arrays have equal start and end (both 0
@@ -138,3 +123,20 @@ init_jsr:
 
 // fputc installs __davecc_stdio_fini here on the first buffered write.
 .comm __davecc_stdio_fini_hook, 2
+
+// exit walks these. An image that does not run constructors leaves them
+// empty so the walk is a no-op.
+.section ".data.paged_init_arrays", "aw", @progbits
+.global __preinit_array_start
+.global __preinit_array_end
+.global __init_array_start
+.global __init_array_end
+.global __fini_array_start
+.global __fini_array_end
+__preinit_array_start:
+__preinit_array_end:
+__init_array_start:
+__init_array_end:
+__fini_array_start:
+__fini_array_end:
+  .byte 0

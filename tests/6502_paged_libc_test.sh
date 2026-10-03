@@ -79,6 +79,10 @@ if ! "$ELFDUMP" -s "$WORK/strlen_only.elf" | grep -Eq ' strlen$'; then
   echo "strlen shim was removed" >&2
   exit 1
 fi
+if "$ELFDUMP" -s "$WORK/strlen_only.elf" | grep -Eq ' sin$'; then
+  echo "sin shim survived a strlen-only link" >&2
+  exit 1
+fi
 if ! "$ELFDUMP" -s "$WORK/strlen_only.elf" | grep -q __libc_paged_enter; then
   echo "bank-switch enter was removed" >&2
   exit 1
@@ -93,6 +97,116 @@ if "0xfe30" not in text:
 if "0xf4" not in text:
     raise SystemExit("shim does not update the MOS ROM id at &F4")
 print("bank switch ok")
+PY
+
+for extra in libm math_a math_b cxx stdio float; do
+  python3 - "$WORK/libc6502_paged_$extra.bin" "$extra" <<'PY'
+import sys
+image = open(sys.argv[1], "rb").read()
+label = sys.argv[2]
+if len(image) != 0x4000 or image[0] != 0x4C or image[6] != 0x80:
+    raise SystemExit("%s is not a 16 KiB service ROM" % label)
+if image[0x100] != 0x4C:
+    raise SystemExit("%s vector 0 is not a JMP" % label)
+print("%s service rom ok" % label)
+PY
+done
+
+cat >"$WORK/sin_only.c" <<'EOF'
+#include <math.h>
+int main(void) {
+  return (int)sin(0.0);
+}
+EOF
+"$DAVECC" -target 6502 -c -isystem "$ROOT/libc/include" \
+  "$WORK/sin_only.c" -o "$WORK/sin_only.o"
+"$DAVECC" -target 6502 -static -nostdlib --gc-sections \
+  -Wl,-T -Wl,"$ROOT/6502 support/bbc.ld" \
+  "$WORK/sin_only.o" "${runtime[@]}" \
+  "$WORK/libc6502_paged_shim.a" \
+  -o "$WORK/sin_only.elf"
+if "$ELFDUMP" -s "$WORK/sin_only.elf" | grep -Eq ' malloc$'; then
+  echo "sin link kept malloc" >&2
+  exit 1
+fi
+if ! "$ELFDUMP" -s "$WORK/sin_only.elf" | grep -Eq ' sin$'; then
+  echo "sin link dropped sin" >&2
+  exit 1
+fi
+"$ELFDUMP" -s "$WORK/sin_only.elf" | python3 -c '
+import sys
+ok = False
+for line in sys.stdin:
+    parts = line.split()
+    if len(parts) >= 7 and parts[-1] == "__libc_paged_gate" and parts[1] == "00001f00":
+        ok = True
+if not ok:
+    raise SystemExit("paged gate is not at &1F00")
+print("gate at &1F00")
+'
+"$ELFDUMP" -c "$WORK/sin_only.elf" >"$WORK/sin_only.dis"
+python3 - "$WORK/sin_only.dis" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read().lower()
+if "lda #1" not in text and "lda #0x1" not in text and "lda #0x01" not in text:
+    raise SystemExit("sin stub does not select image 1")
+print("sin selects libm image")
+PY
+
+cat >"$WORK/printf_only.c" <<'EOF'
+#include <stdio.h>
+int main(int argc, char** argv) {
+  return printf(argv[0], argc);
+}
+EOF
+"$DAVECC" -target 6502 -c -isystem "$ROOT/libc/include" -DDAVECC_PAGED_LIBC \
+  "$WORK/printf_only.c" -o "$WORK/printf_only.o"
+"$DAVECC" -target 6502 -static -nostdlib --gc-sections \
+  -Wl,-T -Wl,"$ROOT/6502 support/bbc.ld" \
+  "$WORK/printf_only.o" "${runtime[@]}" \
+  "$WORK/libc6502_paged_shim.a" \
+  -o "$WORK/printf_only.elf"
+if "$ELFDUMP" -s "$WORK/printf_only.elf" | grep -Eq ' sin$'; then
+  echo "printf link kept sin" >&2
+  exit 1
+fi
+if ! "$ELFDUMP" -s "$WORK/printf_only.elf" | grep -Eq ' printf$'; then
+  echo "printf link dropped printf" >&2
+  exit 1
+fi
+"$ELFDUMP" -c "$WORK/printf_only.elf" >"$WORK/printf_only.dis"
+python3 - "$WORK/printf_only.dis" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read().lower()
+if "lda #5" not in text and "lda #0x5" not in text and "lda #0x05" not in text:
+    raise SystemExit("printf stub does not select image 5")
+print("printf selects the stdio image")
+PY
+
+if ! "$ELFDUMP" -s "$WORK/libc6502_paged.elf" | grep -q __paged_init_stdio; then
+  echo "primary ROM does not build the cassette FILE objects" >&2
+  exit 1
+fi
+cat >"$WORK/stdio_main.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+  return fputc('A', stdout);
+}
+EOF
+"$DAVECC" -target 6502 -c -isystem "$ROOT/libc/include" -DDAVECC_PAGED_LIBC \
+  "$WORK/stdio_main.c" -o "$WORK/stdio_main.o"
+"$DAVECC" -target 6502 -static -nostdlib --gc-sections \
+  -Wl,-T -Wl,"$ROOT/6502 support/bbc.ld" \
+  "$WORK/stdio_main.o" "${runtime[@]}" \
+  "$WORK/libc6502_paged_shim.a" \
+  -o "$WORK/stdio_main.elf"
+"$ELFDUMP" -c "$WORK/stdio_main.elf" >"$WORK/stdio_main.dis"
+python3 - "$WORK/stdio_main.dis" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read().lower()
+if "lda #0xe2" not in text or "lda #0x09" not in text:
+    raise SystemExit("stdout is not the cassette pointer at &09E2")
+print("stdout is the cassette pointer")
 PY
 
 echo "paged libc test ok"

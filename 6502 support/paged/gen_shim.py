@@ -84,6 +84,12 @@ def main():
     parser.add_argument("--exports", required=True)
     parser.add_argument("--vectors", required=True)
     parser.add_argument("--shim", required=True)
+    parser.add_argument("--rom-index", type=int, default=0)
+    parser.add_argument("--cross-exports")
+    parser.add_argument("--cross-rom", type=int, default=0)
+    parser.add_argument("--cross", action="append", default=[])
+    parser.add_argument("--cross-out")
+    parser.add_argument("--export-subset", action="store_true")
     parser.add_argument("--update-exports", action="store_true")
     args = parser.parse_args()
 
@@ -94,11 +100,14 @@ def main():
     except FileNotFoundError:
         exports = []
 
-    if not exports and not args.update_exports:
+    if not exports and not args.update_exports and not args.export_subset:
         args.update_exports = True
 
     known = set(exports)
-    missing = [name for name in defined if name not in known]
+    if args.export_subset:
+        missing = []
+    else:
+        missing = [name for name in defined if name not in known]
     if missing:
         if not args.update_exports:
             sys.stderr.write(
@@ -145,9 +154,34 @@ def main():
             out.write(".global %s\n" % name)
             out.write(".type %s, @function\n" % name)
             out.write("%s:\n" % name)
+            out.write("  LDA #%d\n" % args.rom_index)
             out.write("  JSR __libc_paged_enter\n")
             out.write("  JSR 0x%x\n" % address)
             out.write("  JMP __libc_paged_leave\n")
+
+    if args.cross_out:
+        crosses = []
+        if args.cross_exports:
+            crosses.append((args.cross_rom, args.cross_exports))
+        for item in args.cross:
+            rom_text, path = item.split(":", 1)
+            crosses.append((int(rom_text), path))
+        with open(args.cross_out, "w", encoding="utf-8") as out:
+            out.write('#include "layout.h"\n')
+            seen = set()
+            for rom, path in crosses:
+                for index, name in enumerate(read_exports(path)):
+                    if name in defined_set or name in seen:
+                        continue
+                    seen.add(name)
+                    address = VECTOR_BASE + (index + 1) * VECTOR_STRIDE
+                    out.write('.section ".text.cross_%s", "ax", @progbits\n' % name)
+                    out.write(".global %s\n" % name)
+                    out.write("%s:\n" % name)
+                    out.write("  JSR PAGED_GATE\n")
+                    out.write("  .byte %d\n" % rom)
+                    out.write("  .hword 0x%x\n" % address)
+                    out.write("  RTS\n")
     return 0
 
 

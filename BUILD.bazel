@@ -1764,6 +1764,12 @@ genrule(
         "libc/bbc_start.o",
         "libc/bbc.ld",
         "libc/libc6502_paged.bin",
+        "libc/libc6502_paged_libm.bin",
+        "libc/libc6502_paged_math_a.bin",
+        "libc/libc6502_paged_math_b.bin",
+        "libc/libc6502_paged_cxx.bin",
+        "libc/libc6502_paged_stdio.bin",
+        "libc/libc6502_paged_float.bin",
     ],
     cmd = """
 set -euo pipefail
@@ -1779,6 +1785,12 @@ cp "$$work/libc6502_bbc_runtime.a" "$(location libc/libc6502_bbc_runtime.a)"
 cp "$$work/bbc_start.o" "$(location libc/bbc_start.o)"
 cp "$$work/bbc.ld" "$(location libc/bbc.ld)"
 cp "$$work/libc6502_paged.bin" "$(location libc/libc6502_paged.bin)"
+cp "$$work/libc6502_paged_libm.bin" "$(location libc/libc6502_paged_libm.bin)"
+cp "$$work/libc6502_paged_math_a.bin" "$(location libc/libc6502_paged_math_a.bin)"
+cp "$$work/libc6502_paged_math_b.bin" "$(location libc/libc6502_paged_math_b.bin)"
+cp "$$work/libc6502_paged_cxx.bin" "$(location libc/libc6502_paged_cxx.bin)"
+cp "$$work/libc6502_paged_stdio.bin" "$(location libc/libc6502_paged_stdio.bin)"
+cp "$$work/libc6502_paged_float.bin" "$(location libc/libc6502_paged_float.bin)"
 """,
 )
 
