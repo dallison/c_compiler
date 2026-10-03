@@ -1686,6 +1686,20 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
     }
   }
 
+  bool is_result_register =
+      opcode == X86_OP(resulti) || opcode == X86_OP(resulth) ||
+      opcode == X86_OP(resultf) || opcode == X86_OP(resultd) ||
+      opcode == X86_OP(resultv);
+  if (is_result_register && inst->users.length == 0) {
+    // Only written by the moves that return a value.  Taking ownership here
+    // would release the register from its live owner -- xmm0 is also the first
+    // incoming float argument.
+    inst->reg = &reg->base;
+    inst->flags |= TARGET_INST_PROCESSED;
+    UnpinTwoAddressSource(allocator, inst, pinned_src);
+    return;
+  }
+
   AssignRegister(reg, inst);
 
   if (opcode == X86_OP(call) || opcode == X86_OP(rcall) ||

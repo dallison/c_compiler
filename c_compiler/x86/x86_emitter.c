@@ -1700,7 +1700,7 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
           InstResultRegType(inst) == kX86RegTypeFloat) {
         fprintf(fp, "\tmovq ");
         PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
-        fprintf(fp, ", %%r10\n\tmovq_xmm %%r10, ");
+        fprintf(fp, ", %%r11\n\tmovq_xmm %%r11, ");
         PrintResultRegFromInst(fp, inst, buf2, sizeof(buf2));
         fprintf(fp, "\n");
         return;
@@ -1717,7 +1717,7 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
         if (TargetIsConst(inst->operand[0])) {
           fprintf(fp, "\tmovq ");
           PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
-          fprintf(fp, ", %%r10\n\tmovq_xmm %%r10, ");
+          fprintf(fp, ", %%r11\n\tmovq_xmm %%r11, ");
           if (inst->dest != NULL && inst->dest->reg != NULL) {
         PrintPercentReg(fp,
                         X86RegisterName((X86Register*)inst->dest->reg, buf2,
@@ -1733,7 +1733,7 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
           // register. Materialize its bits before moving them into XMM;
           // printing x0 as a register otherwise aliases %rax and returns
           // whatever integer value the preceding call left there.
-          fprintf(fp, "\tmovq $0, %%r10\n\tmovq_xmm %%r10, ");
+          fprintf(fp, "\tmovq $0, %%r11\n\tmovq_xmm %%r11, ");
           if (inst->dest != NULL && inst->dest->reg != NULL) {
         PrintPercentReg(fp,
                         X86RegisterName((X86Register*)inst->dest->reg, buf2,
@@ -1837,7 +1837,7 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
         if (TargetIsConst(inst->operand[0])) {
           fprintf(fp, "\tmovq ");
           PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
-          fprintf(fp, ", %%r10\n\tmovq_xmm %%r10, ");
+          fprintf(fp, ", %%r11\n\tmovq_xmm %%r11, ");
           if (inst->dest != NULL && inst->dest->reg != NULL) {
         PrintPercentReg(fp,
                         X86RegisterName((X86Register*)inst->dest->reg, buf2,

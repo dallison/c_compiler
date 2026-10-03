@@ -152,4 +152,13 @@ inline typename enable_if<is_integral<T>::value, bool>::type isnormal(T x) {
 
 }  // namespace std
 
+// The <math.h> classification macros were undefined above; keep the global
+// names usable as C programs expect.
+using std::fpclassify;
+using std::signbit;
+using std::isfinite;
+using std::isinf;
+using std::isnan;
+using std::isnormal;
+
 #endif /* cmath_h */

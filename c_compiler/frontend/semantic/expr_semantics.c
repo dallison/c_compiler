@@ -3775,8 +3775,19 @@ static bool HasAddress(ASTNode* node) {
       // struct/union member references are ok as long as they are
       // not bitfields
       return !IsBitfieldReference(node);
-    case AST_OP(cast):
+    case AST_OP(cast): {
+      // A scalar conversion such as `double(1)` yields a new value; only a
+      // qualification-only cast still designates its operand.
+      CastASTNode* cast = (CastASTNode*)node;
+      if (cast->cast_type != NULL && cast->expr != NULL &&
+          cast->expr->type != NULL && TypeIsScalar(cast->cast_type) &&
+          !TypeIsReference(cast->cast_type)) {
+        return TypeEqualIgnoringQualifiers(cast->cast_type,
+                                           cast->expr->type) &&
+               HasAddress(cast->expr);
+      }
       return true;
+    }
     case AST_OP(compound_literal):
       return true;
     case AST_OP(comma):
@@ -4444,6 +4455,10 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             ASTNodeReplaceChild((ASTNode*)e, 0, base_bound, false);
             e->expr = base_bound;
           } else {
+            // A converted scalar binds to a temporary holding its value.
+            if (TypeIsScalar(e->expr->type)) {
+              e->expr->flags &= ~kASTNeedAddress;
+            }
             NormalConversion(e->expr,
                              ReferenceConversionTarget(e->expr, reference_type));
           }
@@ -12127,6 +12142,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
             ASTNodeReplaceChild((ASTNode*)node, (int)i, base_bound, false);
             actual = base_bound;
           } else {
+            if (TypeIsScalar(actual->type)) {
+              actual->flags &= ~kASTNeedAddress;
+            }
             NormalConversion(actual,
                              ReferenceConversionTarget(actual, reference_type));
             actual = node->children->value.p[i];

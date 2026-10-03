@@ -1759,9 +1759,9 @@ static void EmitMovqXmmParsed(X86Assembler* assembler, const X86Op* src,
   if (src->kind == kX86OpImm && src->sym == NULL &&
       dst->kind == kX86OpReg && dst->reg.is_xmm) {
     // movq_xmm is a compiler pseudo-instruction. x86 has no immediate-to-XMM
-    // encoding, so materialize the bit pattern in the reserved scratch GPR and
-    // then perform the ordinary GPR-to-XMM move.
-    X86Reg scratch = {10, kX86Size64, false};
+    // encoding, so materialize the bit pattern in the reserved scratch GPR
+    // (r11, never allocated) and then perform the ordinary GPR-to-XMM move.
+    X86Reg scratch = {11, kX86Size64, false};
     X86Encode immediate;
     EncodeInit(&immediate, assembler);
     if (src->imm >= INT32_MIN && src->imm <= INT32_MAX) {

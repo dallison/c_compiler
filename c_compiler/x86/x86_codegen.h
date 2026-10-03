@@ -348,6 +348,10 @@ typedef struct X86Generator {
 
   TargetInstruction* int_argument_registers[X86_MAX_INT_ARGS];
   TargetInstruction* fp_argument_registers[X86_MAX_FP_ARGS];
+  // Incoming xmm arguments bound to register variables, defined before any of
+  // them is copied.  Float register variables may be allocated to xmm0-xmm7,
+  // so each incoming register must stay live from entry until its own copy.
+  TargetInstruction* incoming_fp_argument_registers[X86_MAX_FP_ARGS];
   Vector var_regs;
 
   TargetInstruction* zero;

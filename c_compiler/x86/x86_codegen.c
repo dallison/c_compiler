@@ -5733,12 +5733,12 @@ static TargetInstruction* LoadFpArgumentIntoRegisterVariable(X86Generator* rv,
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = FloatingPointVariableRegister(rv, reg_var, sym->symbol);
       X86Opcode move_op = X86FpIsDoubleWidth(symbol->type) ? X86_OP(fmv_d) : X86_OP(fmv_s);
-      TargetInstruction* mv = Emit(
-          rv, NewInstruction1(
-                  move_op,
-                  IncomingFloatingPointArgumentRegister(
-                      rv,
-                      (int)arg_loc.location.offset - (X86_P(rv)->fp_arg_start))));
+      int argnum = (int)arg_loc.location.offset - (X86_P(rv)->fp_arg_start);
+      TargetInstruction* incoming = rv->incoming_fp_argument_registers[argnum];
+      if (incoming == NULL) {
+        incoming = IncomingFloatingPointArgumentRegister(rv, argnum);
+      }
+      TargetInstruction* mv = Emit(rv, NewInstruction1(move_op, incoming));
       mv->dest = var;
       return var;
     }
@@ -6154,10 +6154,42 @@ static void AssignRegisterVars(X86Generator* rv, Vector* vars, Vector* args,
 
   int32_t var_offset = 0;
 
+  memset(rv->incoming_fp_argument_registers, 0,
+         sizeof(rv->incoming_fp_argument_registers));
+  if (X86_IS_64BIT(rv)) {
+    for (size_t i = 0; i < vars->length; i++) {
+      PoolEntry* entry = vars->value.p[i];
+      if (entry->pooled->opcode != IR_OP(argument)) {
+        continue;
+      }
+      IRVariable* variable = (IRVariable*)entry->pooled;
+      TypeRecord* type = variable->symbol != NULL &&
+                                 variable->symbol->type != NULL
+                             ? variable->symbol->type
+                             : entry->pooled->type;
+      if (type == NULL || TypeIsVLA(type) ||
+          !TypeUsesHardwareFloatRegister(type) ||
+          !UseRegisterForVariable(rv, entry->pooled)) {
+        continue;
+      }
+      ArgLocation location = ArgumentLocation(rv, entry, args, func);
+      if (location.type != kArgLocationRegister) {
+        continue;
+      }
+      int argnum = (int)location.location.offset - (X86_P(rv)->fp_arg_start);
+      if (argnum >= 0 && argnum < X86_MAX_FP_ARGS &&
+          rv->incoming_fp_argument_registers[argnum] == NULL) {
+        rv->incoming_fp_argument_registers[argnum] =
+            IncomingFloatingPointArgumentRegister(rv, argnum);
+      }
+    }
+  }
   for (size_t i = 0; i < vars->length; i++) {
     PoolEntry* entry = vars->value.p[i];
     AssignRegisterOrOffset(rv, entry, args, func, &var_offset);
   }
+  memset(rv->incoming_fp_argument_registers, 0,
+         sizeof(rv->incoming_fp_argument_registers));
   
   // We now know the stack frame size.  This includes the length of the saved
   // registers.
