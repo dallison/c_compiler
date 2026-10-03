@@ -146,6 +146,9 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser, Struct* owne
                                                 Vector* args, Vector* pending);
 
 void MaxTemplateParameterIndexInArgument(TemplateArgument* arg, int* max_index);
+/* A named use of an alias template whose pattern is a dependent decltype; its
+ * operand is in the alias's parameter space. */
+bool TypeIsDecltypeAliasTemplateId(TypeRecord* type);
 bool AliasTemplateArgumentIsPackExpansion(TemplateArgument* arg, int* pack_index,
                                           TemplateParameterKind* kind);
 /* `CloneDependentDecltypeNode` temporarily clears `dependent_decltype_expr`

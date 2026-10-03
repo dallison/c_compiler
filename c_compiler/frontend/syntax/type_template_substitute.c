@@ -2409,7 +2409,7 @@ static bool DependentDecltypeStackContains(ASTNode* expr) {
  * arguments recorded on the use site (`[R]`) are what map the alias's parameter
  * space onto the enclosing one, so the template-id path -- which substitutes
  * those first and only then expands the pattern -- must handle this. */
-static bool TypeIsDecltypeAliasTemplateId(TypeRecord* type) {
+bool TypeIsDecltypeAliasTemplateId(TypeRecord* type) {
   return CompilerIsCXX() && type != NULL &&
          type->dependent_decltype_expr != NULL &&
          type->template_origin != NULL && type->template_arguments != NULL &&

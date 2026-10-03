@@ -5156,7 +5156,10 @@ static void RebindBodyCloneDecltypeExpressions(
       continue;
     }
     VectorAppend(visited_types, current);
-    if (current->dependent_decltype_expr != NULL) {
+    // An alias use site's operand names the alias's parameters, not this
+    // body's; substitution maps it through the recorded alias arguments.
+    if (current->dependent_decltype_expr != NULL &&
+        !TypeIsDecltypeAliasTemplateId(current)) {
       // `decltype` is unevaluated: cloning `*declval<T&>()` must not demand a
       // function body from declaration-only templates such as `std::declval`.
       compiler->speculative_template_instantiation_depth++;

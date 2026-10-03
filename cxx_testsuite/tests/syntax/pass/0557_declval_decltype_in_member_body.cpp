@@ -19,7 +19,7 @@ struct View {
   T* ptr;
 
   auto operator*() const {
-    return Invoker<iter_reference_t<T>>::call(*ptr);
+    return Invoker<iter_reference_t<T*>>::call(*ptr);
   }
 };
 
