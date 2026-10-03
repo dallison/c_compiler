@@ -8776,6 +8776,41 @@ static void RecordFriendTypeSpecifier(Syntax* syntax, Struct* befriending,
   // type is ignored.
 }
 
+// Whether the qualified name at the current token has a nested-name-specifier
+// that can be dependent: it does not start with a namespace, or one of its
+// qualifying components is a template-id (`Outer<T>::Inner`).  A name such as
+// `ns::Template<T>` only uses the template parameter as an argument and does
+// not need `typename`.
+static bool FriendQualifierMayBeDependent(Syntax* syntax) {
+  Lex* lex = syntax->lex;
+  if (FindNamespaceChildInScope(syntax, &lex->spelling) == NULL) {
+    return true;
+  }
+  int depth = 0;
+  for (size_t pos = lex->pos; pos < lex->line.length; pos++) {
+    char c = lex->line.value[pos];
+    if (c == '<') {
+      depth++;
+    } else if (c == '>' && depth > 0) {
+      depth--;
+      if (depth == 0) {
+        size_t next = pos + 1;
+        while (next < lex->line.length &&
+               isspace((unsigned char)lex->line.value[next])) {
+          next++;
+        }
+        if (next + 1 < lex->line.length && lex->line.value[next] == ':' &&
+            lex->line.value[next + 1] == ':') {
+          return true;
+        }
+      }
+    } else if (depth == 0 && (c == ';' || c == ',')) {
+      break;
+    }
+  }
+  return false;
+}
+
 void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   LexMatch(syntax->lex, TOK(friend));
 
@@ -8800,6 +8835,8 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   bool starts_with_qualified_name =
       LexLookingAt(syntax->lex, TOK(identifier)) &&
       SyntaxCurrentIdentifierFollowedByScopeOperator(syntax);
+  bool qualifier_may_be_dependent =
+      starts_with_qualified_name && FriendQualifierMayBeDependent(syntax);
   bool used_friend_type_only_context =
       CompilerCXXAtLeast(kLanguageStandardCXX26) && starts_with_qualified_name;
   syntax->parsing_friend_type_specifier =
@@ -8821,7 +8858,7 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
   if (LexLookingAt(syntax->lex, TOK(semicolon)) ||
       LexLookingAt(syntax->lex, TOK(comma)) ||
       LexLookingAt(syntax->lex, TOK(ellipsis))) {
-    if (starts_with_qualified_name &&
+    if (qualifier_may_be_dependent &&
         !CompilerCXXAtLeast(kLanguageStandardCXX26) && type != NULL &&
         TypeContainsTemplateParameter(type)) {
       SyntaxError(syntax, "dependent friend type requires 'typename' before C++26");
