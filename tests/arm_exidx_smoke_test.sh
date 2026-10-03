@@ -48,7 +48,8 @@ if ! grep -F ".ARM.extab" "$work/obj.sections" >/dev/null; then
   exit 1
 fi
 
-if ! grep -F ".rela.ARM.exidx" "$work/obj.sections" >/dev/null; then
+# ARM EABI objects use SHT_REL.
+if ! grep -E '\.rela?\.ARM\.exidx' "$work/obj.sections" >/dev/null; then
   echo "object is missing .ARM.exidx relocations" >&2
   sed -n '1,160p' "$work/obj.sections" >&2
   exit 1
