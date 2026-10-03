@@ -36,8 +36,8 @@
 #if !__has_attribute(noreturn)
 #error "implemented GNU attributes must be discoverable"
 #endif
-#if __has_attribute(vector_size)
-#error "unsupported vector attributes must not be discoverable"
+#if !__has_attribute(vector_size)
+#error "supported vector attributes must be discoverable"
 #endif
 
 #if __has_cpp_attribute(nodiscard) < 201907L
@@ -60,7 +60,7 @@
 #error "atomic memory-order predefined macros have incorrect values"
 #endif
 
-#if __GNUC__ != 4 || __GNUC_MINOR__ != 2 || __GNUC_PATCHLEVEL__ != 1
+#if __GNUC__ != 12 || __GNUC_MINOR__ != 0 || __GNUC_PATCHLEVEL__ != 0
 #error "GCC compatibility version macros are incomplete"
 #endif
 
