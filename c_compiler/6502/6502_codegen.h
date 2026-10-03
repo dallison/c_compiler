@@ -350,7 +350,7 @@ typedef enum {
 // These must stay below the preserved count of each class.  A register
 // variable is locked for its whole live range, and the allocator still
 // needs a preserved register it is allowed to spill.
-#define kNumIVars 1
+#define kNumIVars 2
 #define kNumBVars 2
 #define kNumLVars 1
 #define kNumXVars 0
