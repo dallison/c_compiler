@@ -4501,8 +4501,8 @@ static Symbol* NewCoroutineResumeFunction(ASTNode* node,
 
 /* Build a null pointer constant (integer 0). */
 static ASTNode* NewNullPointerConstant(SourceLocation location) {
-  return NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
-                               location);
+  return NewIntConstantASTNode(
+      0, NewTypeRecordWithSize(kTypeNullPointer, kQualPlain), location);
 }
 
 /* Build the coroutine destroy function `void destroy(FrameType*)`: mark the

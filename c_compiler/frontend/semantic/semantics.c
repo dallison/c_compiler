@@ -1837,6 +1837,12 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
       // Pointers to int or bool is fine.  Only the integer conversion loses
       // information; testing a pointer for truth is ordinary.
       if (TypeIsPointerOrArray(from->type) && (TypeIsInt(to) || TypeIsBool(to))) {
+        if (CompilerIsCXX() && !TypeIsBool(to) && !TypeIsReference(from->type)) {
+          SemanticTypeConversionError(
+              from, to,
+              "Illegal conversion; cannot convert from '%s' to '%s'");
+          return;
+        }
         if (!TypeIsBool(to)) {
           SemanticTypeConversionWarning(from, to, "int-conversion",
                                         "Pointer to integer conversion "

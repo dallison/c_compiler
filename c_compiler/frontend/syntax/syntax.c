@@ -2669,11 +2669,56 @@ static Symbol* FindInheritedClassMember(Syntax* syntax, String* name) {
   return NULL;
 }
 
+static Struct* SymbolMemberOwner(Symbol* symbol) {
+  if (symbol == NULL || symbol->type == NULL) {
+    return NULL;
+  }
+  if (TypeIsFunction(symbol->type)) {
+    return symbol->type->info.function.cxx_member_owner;
+  }
+  return symbol->static_data_member_class;
+}
+
+// The enclosing class's members stay in an open scope while a nested class's
+// deferred member bodies are parsed, but the nested class's own members
+// hide them.
+static Symbol* FindNearerNestedClassMember(Syntax* syntax, Symbol* found,
+                                           String* name) {
+  Struct* found_owner = SymbolMemberOwner(found);
+  if (!CompilerIsCXX() || found_owner == NULL) {
+    return NULL;
+  }
+  Struct* owner = syntax->cxx_class_head;
+  if (owner == NULL && compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  bool enclosed = false;
+  for (Struct* scope = owner; scope != NULL; scope = scope->lexical_parent) {
+    if (scope == found_owner) {
+      enclosed = true;
+      break;
+    }
+  }
+  if (!enclosed) {
+    return NULL;
+  }
+  for (Struct* scope = owner; scope != found_owner;
+       scope = scope->lexical_parent) {
+    StructMember* member = FindStructMember(scope, name);
+    if (member != NULL && member->symbol != NULL) {
+      return member->symbol;
+    }
+  }
+  return NULL;
+}
+
 Symbol* SyntaxFindSymbol(Syntax* syntax, String* name) {
   LocalSymbolTable* scope = syntax->local_symbol_stack;
   Symbol* symbol = FindLocalSymbol(scope, name);
   if (symbol != NULL) {
-    return FollowAlias(symbol);
+    Symbol* nearer = FindNearerNestedClassMember(syntax, symbol, name);
+    return FollowAlias(nearer != NULL ? nearer : symbol);
   }
   symbol = FindInheritedClassMember(syntax, name);
   if (symbol != NULL) {

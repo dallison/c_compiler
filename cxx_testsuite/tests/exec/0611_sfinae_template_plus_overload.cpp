@@ -20,13 +20,6 @@ struct Result {
 Result convert(unsigned) { return Result{7}; }
 
 template <typename T>
-constexpr int to_conv() {
-  using R = decltype(convert(__declval()));
-  return sizeof(R);
-}
-
-// Avoid declval: use a typed dummy.
-template <typename T>
 T& dummy();
 
 template <typename T>

@@ -327,6 +327,40 @@ static bool AnalyzingTemplatePatternBody(void) {
          enclosing->info.function.symbol->flags.is_template;
 }
 
+// Replaces a read of a scalar constant variable by its value.
+static ASTNode* FoldConstantIdentifier(IdentifierASTNode* node) {
+  if (node->symbol == NULL || !node->symbol->flags.value_set ||
+      (node->base.flags & (kASTNeedAddress | kASTIsDeclaration)) != 0) {
+    return &node->base;
+  }
+  if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&
+      !node->symbol->flags.is_constexpr) {
+    return &node->base;
+  }
+  ASTNode* const_node = NULL;
+  if (TypeIsIntConstant(node->base.type)) {
+    const_node = NewIntConstantASTNode(node->symbol->value.ivalue,
+                                       node->symbol->type, node->base.location);
+  } else if (TypeIsFloatingPointConstant(node->base.type)) {
+    const_node = NewRealConstantASTNode(
+        node->symbol->value.fvalue, node->symbol->type, node->base.location);
+  } else {
+    return &node->base;
+  }
+  ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node, true);
+  const_node->flags |= kASTAnalyzed;
+  return const_node;
+}
+
+static ASTNode* FoldConstantArgument(ASTNode* actual) {
+  if (actual == NULL || actual->op != AST_OP(identifier) ||
+      actual->type == NULL || TypeIsStructOrUnion(actual->type) ||
+      TypeIsArray(actual->type) || TypeIsFunction(actual->type)) {
+    return actual;
+  }
+  return FoldConstantIdentifier((IdentifierASTNode*)actual);
+}
+
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   if (CompilerCXXAtLeast(kLanguageStandardCXX26) && node->symbol != NULL &&
       (node->base.flags & kASTNameIndependentLookupAmbiguous) != 0 &&
@@ -638,29 +672,14 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
         node->base.parent->op == AST_OP(address)) {
       return &node->base;
     }
-    if (!node->symbol->flags.value_set) {
+    // A C++ argument is analyzed before overload resolution, and a reference
+    // parameter must bind to the object itself.  AnalyzeFunctionCall folds
+    // by-value arguments once the parameter types are known.
+    if (CompilerIsCXX() && node->base.parent != NULL &&
+        node->base.parent->op == AST_OP(call)) {
       return &node->base;
     }
-    if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&
-        !node->symbol->flags.is_constexpr) {
-      return &node->base;
-    }
-    // If the identifier is a constant, replace the node with a constant node.
-    if (TypeIsIntConstant(node->base.type)) {
-      ASTNode* const_node = NewIntConstantASTNode(
-          node->symbol->value.ivalue, node->symbol->type, node->base.location);
-      ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
-                          true);
-      const_node->flags |= kASTAnalyzed;
-      return const_node;
-    } else if (TypeIsFloatingPointConstant(node->base.type)) {
-      ASTNode* const_node = NewRealConstantASTNode(
-          node->symbol->value.fvalue, node->symbol->type, node->base.location);
-      ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
-                          true);
-      const_node->flags |= kASTAnalyzed;
-      return const_node;
-    }
+    return FoldConstantIdentifier(node);
   }
   return &node->base;
 }
@@ -12130,6 +12149,15 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
           subtype->info.function.cxx_member_owner->virtual_members.length > 0;
       if (TypeIsReference(formal->type)) {
         TypeRecord* reference_type = formal->type;
+        // An enumerator, or a static member constant without a definition,
+        // has no object; the reference binds to a temporary.
+        if (actual->op == AST_OP(identifier)) {
+          Symbol* named = ((IdentifierASTNode*)actual)->symbol;
+          if (named != NULL && named->flags.value_set &&
+              !named->flags.is_local && !named->flags.is_defined) {
+            actual = FoldConstantArgument(actual);
+          }
+        }
         bool discards_qualifiers =
             TypeIsEffectivelyConst(actual->type) &&
             !TypeIsEffectivelyConst(reference_type->next);
@@ -12176,6 +12204,7 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         }
         SetNeedAddress(actual);
       } else {
+        actual = FoldConstantArgument(actual);
         if (actual->value_category != kValueCategoryPrvalue) {
           ASTNode* materialized =
               MaterializeCXXByValueClassArgument(actual, formal->type);
@@ -12213,7 +12242,8 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     if (unknown || varargs) {
       size_t start = unknown ? 0 : num_formal_args;
       for (size_t i = start; i < num_actual_args; i++) {
-        ASTNode* actual = (ASTNode*)node->children->value.p[i];
+        ASTNode* actual =
+            FoldConstantArgument((ASTNode*)node->children->value.p[i]);
         if (TypeIsFloat(actual->type)) {
           NormalConversion(actual, NewTypeRecordWithSize(kTypeDouble, kQualPlain));
         }

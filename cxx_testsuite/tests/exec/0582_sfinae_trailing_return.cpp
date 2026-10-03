@@ -36,6 +36,7 @@ auto FormatConvertImpl(const T&, SpecImpl, SinkImpl*)
 }
 
 enum E { kE };
+void AbslStringify(Sink&, E);
 
 int main() {
   return FormatConvertImpl(0, SpecImpl{}, nullptr) == 2 &&

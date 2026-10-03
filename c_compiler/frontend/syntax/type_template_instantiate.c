@@ -1009,6 +1009,32 @@ static void RecordStaticDataMemberPattern(StructMember* member,
       TemplateArgumentVectorCopy(args);
 }
 
+typedef struct {
+  Symbol* pattern;
+  Symbol* instance;
+} StaticDataMemberRetarget;
+
+/* A constructor-call initializer (`K C<T>::v(4);`) names the defined member
+ * itself as the object being constructed. */
+static void RetargetStaticDataMemberIdentifier(ASTNode* node, void* data,
+                                               int child_id,
+                                               VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  StaticDataMemberRetarget* retarget = data;
+  IdentifierASTNode* identifier = (IdentifierASTNode*)node;
+  if (identifier->symbol != retarget->pattern) {
+    return;
+  }
+  identifier->symbol = retarget->instance;
+  TypeRecord* type = retarget->instance->type;
+  ASTNodeSetType(node, TypeRecordCopy(TypeIsReference(type) ? type->next
+                                                            : type));
+}
+
 void TypeEnsureStaticDataMemberDefinition(Syntax* syntax, Symbol* symbol) {
   if (syntax == NULL || symbol == NULL || symbol->type == NULL ||
       symbol->static_data_member_pattern == NULL ||
@@ -1056,6 +1082,11 @@ void TypeEnsureStaticDataMemberDefinition(Syntax* syntax, Symbol* symbol) {
     TypeParserDestruct(&parser);
     if (initializer == NULL) {
       initializer = CloneCXXDefaultMemberInitializer(pattern_initializer);
+    }
+    if (initializer != NULL) {
+      StaticDataMemberRetarget retarget = {pattern, symbol};
+      ASTNodeVisit(initializer, RetargetStaticDataMemberIdentifier, 0,
+                   &retarget);
     }
   } else if (member->default_initializer != NULL) {
     initializer = CloneCXXDefaultMemberInitializer(member->default_initializer);

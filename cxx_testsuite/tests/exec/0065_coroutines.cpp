@@ -21,7 +21,7 @@ struct SuspendNever {
   bool await_ready(void) {
     return true;
   }
-  void await_suspend(int handle) {
+  void await_suspend(void* handle) {
     (void)handle;
   }
   void await_resume(void) {
@@ -33,7 +33,7 @@ struct ReadyInt {
   bool await_ready(void) {
     return true;
   }
-  void await_suspend(int handle) {
+  void await_suspend(void* handle) {
     (void)handle;
   }
   int await_resume(void) {

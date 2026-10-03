@@ -32,6 +32,6 @@ int main() {
   if (b.as_tree.rep != &node) {
     return 2;
   }
-  Rep c(7);
+  Rep c(char{7});
   return c.data[0] == 7 ? 0 : 3;
 }

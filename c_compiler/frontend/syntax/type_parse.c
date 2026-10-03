@@ -1890,8 +1890,15 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                             typename_name.components.length - 1];
             bool origin_is_alias =
                 dependent_member_origin->alias_template != NULL;
+            // A member template-id (`outer<T>::template inner<long>`) needs
+            // its own arguments applied, not the member's primary type.
+            bool member_template_id =
+                typename_name.template_arguments.length ==
+                    typename_name.components.length &&
+                typename_name.template_arguments.value.p[
+                    typename_name.components.length - 1] != NULL;
             type_record =
-                rewound_alias || origin_is_alias
+                rewound_alias || origin_is_alias || member_template_id
                     ? NULL
                     : CurrentInstantiationMemberType(
                           dependent_member_origin, parsed_args, member_name);
