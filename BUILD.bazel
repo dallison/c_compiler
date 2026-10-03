@@ -5860,6 +5860,7 @@ sh_test(
         "6502 support/**",
         "libc/**",
     ]) + [
+        "c_compiler/support/fp_extended.h",
         ":davecc",
         ":elfdump",
         ":archivist",

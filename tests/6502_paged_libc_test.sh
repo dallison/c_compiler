@@ -8,7 +8,7 @@ if [[ $# -ne 3 ]]; then
   exit 2
 fi
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="${TEST_SRCDIR:-$(pwd)}/${TEST_WORKSPACE:-}"
 DAVECC="$1"
 ELFDUMP="$2"
 ARCHIVIST="$3"
