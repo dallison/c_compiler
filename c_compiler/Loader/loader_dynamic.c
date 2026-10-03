@@ -1667,7 +1667,10 @@ static uint64_t LoadFixedAddressSections(
 
   for (int i = 0; i < lib->header->shnum; i++) {
     const ELFSectionHeader* section = &lib->section_headers[i];
-    if ((section->flags & SHF(alloc)) == 0 || section->addr == 0 ||
+    // TLS sections are templates read through PT_TLS, not part of the
+    // memory image; their addresses are TLS-block offsets.
+    if ((section->flags & SHF(alloc)) == 0 ||
+        (section->flags & SHF(tls)) != 0 || section->addr == 0 ||
         section->size == 0) {
       continue;
     }
