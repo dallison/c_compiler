@@ -858,17 +858,31 @@ static bool IsEhTableSection(const Assembler* assembler) {
 int AssemblerRelocTypeForWord(Assembler* assembler) {
   if (IsEhTableSection(assembler)) {
     if (assembler->object.elf_machine_type == ELF_MACHINE_TYPE_ARM) {
-      AssemblerSection* section =
-          assembler->object.sections.value.p[assembler->object.current_section];
-      if (strcmp(section->name->value, ".ARM.exidx") == 0 ||
-          strcmp(section->name->value, ".ARM.extab") == 0) {
-        return R_ARM_PREL31;
-      }
+      // EHABI prel31 fields must be written as `sym(prel31)`, as for GNU as.
       return R_ARM_REL32;
     }
     return EhTableWordRelocType(assembler);
   }
   return assembler->object.reloc_types[kRelocSet32];
+}
+
+// Parses an optional ARM `(prel31)` relocation operator after a symbol.
+static bool MatchPrel31Operator(Assembler* assembler) {
+  if (assembler->object.elf_machine_type != ELF_MACHINE_TYPE_ARM ||
+      !LexLookingAt(&assembler->lex, TOK(lparen))) {
+    return false;
+  }
+  LexNextToken(&assembler->lex);
+  if (!LexLookingAt(&assembler->lex, TOK(identifier)) ||
+      strcmp(assembler->lex.spelling.value, "prel31") != 0) {
+    AssemblerError(assembler, "unsupported relocation operator");
+    return false;
+  }
+  LexNextToken(&assembler->lex);
+  if (!LexMatch(&assembler->lex, TOK(rparen))) {
+    AssemblerError(assembler, "expected ')' after relocation operator");
+  }
+  return true;
 }
 
 // We only support simple expressions involving assembler symbols.  These can
@@ -881,8 +895,9 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   if (left == NULL) {
     return 0;
   }
+  bool prel31 = bits == 32 && MatchPrel31Operator(assembler);
   if (assembler->object.pass != ASM_OBJECT_FINAL_PASS) {
-    while (LexLookingAt(&assembler->lex, TOK(plus)) ||
+    while (!prel31 && LexLookingAt(&assembler->lex, TOK(plus)) ||
            LexLookingAt(&assembler->lex, TOK(minus))) {
       LexNextToken(&assembler->lex);
       if (LexLookingAt(&assembler->lex, TOK(number))) {
@@ -891,6 +906,14 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
         break;
       }
     }
+    return 0;
+  }
+  if (prel31) {
+    AssemblerAddRelocation(
+        assembler,
+        NewAssemblerRelocation(left, R_ARM_PREL31,
+                               assembler->object.current_section,
+                               (int32_t)AssemblerCurrentAddress(assembler), 0));
     return 0;
   }
   int reloc_index = kRelocSet32;
@@ -973,9 +996,7 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   }
   ((AssemblerRelocation*)relocations.value.p[0])->addend += constant_addend;
   int64_t value = constant_addend;
-  if (known_values && additive_terms == subtractive_terms &&
-      !(bits == 32 && IsEhTableSection(assembler) &&
-        AssemblerRelocTypeForWord(assembler) == R_ARM_PREL31)) {
+  if (known_values && additive_terms == subtractive_terms) {
     value += left->value;
     for (size_t i = 1; i < relocations.length; i++) {
       AssemblerRelocation* reloc = relocations.value.p[i];

@@ -2389,16 +2389,15 @@ static void ARMPrintExidx(ARMEmitter* emitter, FILE* fp,
 
   fprintf(fp, "\t.section \".ARM.exidx\", \"aL\", @unwind\n");
   fprintf(fp, "\t.align 2\n");
-  fprintf(fp, ".Lexidx_%s:\n", func_name);
-  fprintf(fp, "\t.word %s - .Lexidx_%s\n", func_name, func_name);
+  fprintf(fp, "\t.word %s(prel31)\n", func_name);
   if (kind == kARMUnwindNone) {
     fprintf(fp, "\t.word %d\n", EXIDX_CANTUNWIND);
   } else if (has_exceptions || has_custom_frame) {
-    fprintf(fp, "\t.word .Leh_extab_%s - .\n", func_name);
+    fprintf(fp, "\t.word .Leh_extab_%s(prel31)\n", func_name);
   } else if (kind == kARMUnwindLinkRegister) {
-    fprintf(fp, "\t.word __davecc_arm_unwind_lr - .\n");
+    fprintf(fp, "\t.word __davecc_arm_unwind_lr(prel31)\n");
   } else {
-    fprintf(fp, "\t.word __davecc_arm_unwind_fp - .\n");
+    fprintf(fp, "\t.word __davecc_arm_unwind_fp(prel31)\n");
   }
   fprintf(fp, "\t.text\n\n");
 
@@ -2410,8 +2409,7 @@ static void ARMPrintExidx(ARMEmitter* emitter, FILE* fp,
   fprintf(fp, "\t.align 2\n");
   fprintf(fp, ".Leh_extab_%s:\n", func_name);
   if (has_exceptions) {
-    fprintf(fp, "\t.word __aeabi_unwind_cpp_pr1 - .Leh_extab_%s\n",
-            func_name);
+    fprintf(fp, "\t.word __aeabi_unwind_cpp_pr1(prel31)\n");
   } else {
     fprintf(fp, "\t.word 0\n");
   }
