@@ -880,6 +880,10 @@ static ARMRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
   }
 }
 
+bool ARMHasFloatResult(TargetInstruction* inst) {
+  return RegisterTypeFromInstruction(inst) == kARMRegTypeFloat;
+}
+
 // Can we use a temp register?  If not we will have to use a saved one and
 // those are more expensive since they need to be saved on entry and reloaded
 // on exit.
@@ -959,7 +963,8 @@ static void ReloadSpills(ARMRegisterAllocator* allocator,
   // for the first operand and reuse its register, leaving the first operand
   // reading the wrong value (e.g. `add r8, r8, r8` where the base pointer and
   // index collapsed onto the same register).
-  ARMRegister* protect[TARGET_MAX_OPERANDS];
+  // An operand can contribute both the register it holds and its reload's.
+  ARMRegister* protect[2 * TARGET_MAX_OPERANDS];
   int num_protect = 0;
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];

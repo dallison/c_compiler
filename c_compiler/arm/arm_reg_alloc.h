@@ -73,5 +73,7 @@ void ARMRegisterAllocatorDelete(ARMRegisterAllocator* alloc);
 
 void ARMAllocateRegisters(ARMRegisterAllocator* emitter);
 const char* ARMRegisterName(ARMRegister* reg, int size, char* buf, size_t len);
+// True if the allocator gives |inst|'s result a VFP register.
+bool ARMHasFloatResult(TargetInstruction* inst);
 
 #endif /* arm_reg_alloc_h */

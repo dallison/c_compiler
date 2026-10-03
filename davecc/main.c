@@ -1175,6 +1175,41 @@ static bool WriteLinuxHostBoundsScript(char* path, size_t path_size) {
   return true;
 }
 
+// Objects compiled only to be linked go to private temporary files.  Writing
+// them beside the source would let two concurrent builds of the same file
+// (say -O0 and -O2) link each other's code.  Each object is "<name>.o" next to
+// the reserved mkstemp file "<name>"; both are removed at exit.
+static Vector g_temp_object_files;
+
+static void RemoveTempObjectFiles(void) {
+  for (size_t i = 0; i < g_temp_object_files.length; i++) {
+    String* path = g_temp_object_files.value.p[i];
+    unlink(path->value);
+    StringAppend(path, ".o");
+    unlink(path->value);
+    StringDelete(path);
+  }
+  VectorDestruct(&g_temp_object_files);
+}
+
+static String* NewTempObjectPath(void) {
+  char template[] = "/tmp/davecc-obj-XXXXXX";
+  int fd = mkstemp(template);
+  if (fd < 0) {
+    perror("Cannot create temporary object file");
+    return NULL;
+  }
+  close(fd);
+  if (g_temp_object_files.length == 0) {
+    VectorInit(&g_temp_object_files);
+    atexit(RemoveTempObjectFiles);
+  }
+  VectorAppend(&g_temp_object_files, NewString(template));
+  String* object = NewString(template);
+  StringAppend(object, ".o");
+  return object;
+}
+
 static String* NativeLink(const char* spec, int argc, char** argv,
                           Vector* compiler_options) {
   char linker_path[PATH_MAX];
@@ -2645,9 +2680,30 @@ int main(int argc, char * argv[]) {
                                      TranslationUnitImportStateRelease);
           SetModuleImportHandler(DriverImportModule, import_state);
 
+          // A Darwin debug map refers to the objects by path, so -g keeps
+          // them beside the source.
+          CompilerOptionValue* temp_output = NULL;
+          if (!compile_only &&
+              !OptionBoolValue(kOptionDebug, &compiler_options, false)) {
+            String* temp_path = NewTempObjectPath();
+            if (temp_path == NULL) {
+              exit(1);
+            }
+            temp_output = calloc(1, sizeof(CompilerOptionValue));
+            temp_output->opt = kOptionOutputFile;
+            StringInit(&temp_output->value.svalue, temp_path->value);
+            StringDelete(temp_path);
+            VectorAppend(&compiler_options, temp_output);
+          }
           String* object_file = CompileTranslationUnit(opt->value.svalue.value,
                                                        &compiler_options,
                                                        target_opts);
+          if (temp_output != NULL) {
+            VectorDeleteElement(&compiler_options,
+                                compiler_options.length - 1);
+            StringDestruct(&temp_output->value.svalue);
+            free(temp_output);
+          }
           SetModuleImportHandler(NULL, NULL);
           CompilerSetImportState(NULL, NULL);
           TranslationUnitImportStateDelete(import_state);

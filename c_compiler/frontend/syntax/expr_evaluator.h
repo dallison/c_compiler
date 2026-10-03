@@ -10,9 +10,12 @@
 #define expr_evaluator_h
 
 #include "constexpr.h"
+#include "fp_extended.h"
 
 bool EvaluateIntegerExpression(ASTNode* node, int64_t* result);
 bool EvaluateFloatingPointExpression(ASTNode* node, double* result);
+// The value in the target's long double format.
+bool EvaluateLongDoubleExpression(ASTNode* node, FPBits* result);
 bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer);
 
 #endif /* expr_evaluator_h */

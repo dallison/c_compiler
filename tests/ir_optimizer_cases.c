@@ -123,6 +123,29 @@ __attribute__((noinline)) int sroa_pair(int a, int b) {
   return v[0] + v[1];
 }
 
+volatile long long gvn_volatile_dividend = -17;
+
+// Both divisions take the volatile operand's type; GVN must still tell them
+// apart by their divisors.
+__attribute__((noinline)) int gvn_volatile_divisions(void) {
+  if (gvn_volatile_dividend / 8 != -2) {
+    return 1;
+  }
+  if (gvn_volatile_dividend / -8 != 2) {
+    return 2;
+  }
+  return 0;
+}
+
+// The named return value is built in the caller's slot, so it must stay an
+// aggregate even though this function never loads it.
+__attribute__((noinline)) SroaPoint sroa_named_return(int a) {
+  SroaPoint r;
+  r.x = a + 500;
+  r.y = a;
+  return r;
+}
+
 __attribute__((noinline)) int dense_switch(int selector) {
   switch (selector) {
     case 0:
@@ -350,8 +373,10 @@ int main(void) {
       unroll_sum4(unroll_values) != 10 || vectorize_add8() != 23 ||
       vectorize_add1() != 11 || slp_add4() != 18 || slp_add1() != 7 ||
       sroa_point(3, 4) != 7 ||
-      sroa_pair(5, 6) != 11 || dense_switch(5) != 37 ||
-      dense_switch(0) != 17 || dense_switch(11) != 71) {
+      sroa_pair(5, 6) != 11 || sroa_named_return(7).x != 507 ||
+      sroa_named_return(7).y != 7 || dense_switch(5) != 37 ||
+      dense_switch(0) != 17 || dense_switch(11) != 71 ||
+      gvn_volatile_divisions() != 0) {
     result |= 8;
   } else if (checkpoint_order(&checkpoint_input) != 62) {
     result |= 8;

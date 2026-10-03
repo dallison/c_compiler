@@ -934,6 +934,23 @@ static TargetInstruction* AddImmediate(X86Generator* rv, TargetInstruction* src,
   return Emit(rv, NewInstruction2(X86_OP(add), src, li));
 }
 
+// An instruction that has not been emitted yet will follow everything that has.
+static bool NothingEmittedAfter(X86Generator* rv, TargetInstruction* inst) {
+  TargetInstruction* last = TargetLastInstruction(&rv->base);
+  if (TargetNext(inst) == NULL && TargetPrev(inst) == NULL && last != inst) {
+    return true;
+  }
+  for (; last != NULL; last = TargetPrev(last)) {
+    if (last == inst) {
+      return true;
+    }
+    if ((X86Opcode)last->opcode != X86_OP(loc)) {
+      return false;
+    }
+  }
+  return false;
+}
+
 static TargetInstruction* SetDestOrMove(X86Generator* rv,
                                         TargetInstruction* from,
                                         TargetInstruction* to,
@@ -944,12 +961,18 @@ static TargetInstruction* SetDestOrMove(X86Generator* rv,
   X86Opcode from_opcode = (X86Opcode)from->opcode;
   bool fixed_pointer =
       from_opcode == X86_OP(sp) || from_opcode == X86_OP(fp);
+  // Retargeting an earlier instruction would occupy |to| across everything
+  // emitted since, which the allocator still treats as free to use it.
   bool can_set_dest =
-      !fixed_pointer && from->dest == NULL && X86GeneratesOutput(from);
+      !fixed_pointer && from->dest == NULL && X86GeneratesOutput(from) &&
+      NothingEmittedAfter(rv, from);
 
   if (can_set_dest) {
     TargetSetDest(from, to);
     return from;
+  }
+  if (mov_opcode == X86_OP(mv) && X86HasFloatResult(from)) {
+    mov_opcode = X86_OP(fmv_d);
   }
   TargetInstruction* move = Emit(rv, NewInstruction1(mov_opcode, from));
   move->dest = to;
@@ -2615,7 +2638,10 @@ static TargetInstruction* NarrowToStoreWidth(X86Generator* rv,
                       GetIntConstant(rv, NULL, kTargetType64Bit, mask)));
 }
 
-static TargetInstruction* Store(X86Generator* rv, IRNode* addr_node, TargetInstruction* src, X86Opcode opcode) {
+// |src_shared| says the stored value has users other than this store.
+static TargetInstruction* Store(X86Generator* rv, IRNode* addr_node,
+                                TargetInstruction* src, X86Opcode opcode,
+                                bool src_shared) {
   TargetInstruction* addr;
   TargetInstruction* offset;
   bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
@@ -2627,10 +2653,20 @@ static TargetInstruction* Store(X86Generator* rv, IRNode* addr_node, TargetInstr
   if (!on_stack) {
     bool is_fp = TypeUsesHardwareFloatRegister(addr_node->type);
     if (!is_fp) {
-      src = NarrowToStoreWidth(rv, src, StoredObjectType(addr_node),
-                               StoreWidth(opcode));
+      TargetInstruction* narrowed = NarrowToStoreWidth(
+          rv, src, StoredObjectType(addr_node), StoreWidth(opcode));
+      src_shared = src_shared && narrowed == src;
+      src = narrowed;
     }
     X86Opcode opcode = is_fp ? X86_OP(fmv_d) : X86_OP(mv);
+    // Computing the value straight into the variable's register is only safe
+    // when nothing between that instruction and here reads the variable, and
+    // nothing later reads the value after the variable has changed.
+    if (src != addr && (src_shared || !NothingEmittedAfter(rv, src))) {
+      TargetInstruction* move = Emit(rv, NewInstruction1(opcode, src));
+      move->dest = addr;
+      return addr;
+    }
     TargetInstruction* result = SetDestOrMove(rv, src, addr, opcode);
     return result;
   }
@@ -2683,7 +2719,8 @@ static TargetInstruction* LowerStore(X86Generator* rv, Generator* gen,
       COMPILER_UNREACHABLE();
   }
   TargetInstruction* src = Materialize(rv, src_node);
-  TargetInstruction* stored = Store(rv, addr_node, src, opcode);
+  TargetInstruction* stored = Store(rv, addr_node, src, opcode,
+                                    src_node->outputs.length > 1);
   if (node->outputs.length > 0 && !TypeUsesHardwareFloatRegister(addr_node->type)) {
     // `return value += amount;` reads the assignment's value, which the IR
     // spells as a use of the store.  A store to memory produces no value of its
@@ -2765,7 +2802,7 @@ static TargetInstruction* LowerAtomicStore(X86Generator* rv, IRNode* node) {
   IRNode* src_node = node->inputs.value.p[1];
   TargetInstruction* src = Materialize(rv, src_node);
   TargetInstruction* store =
-      Store(rv, addr_node, src, AtomicStoreOpcode(src_node->type));
+      Store(rv, addr_node, src, AtomicStoreOpcode(src_node->type), false);
   if (AtomicIRConstant(node->inputs.value.p[2]) == 5) {
     EmitAtomicFence(rv);
   }
@@ -3371,7 +3408,8 @@ static TargetInstruction* LowerAsm(X86Generator* rv, IRNode* node) {
     AsmOperand* operand = asm_node->outputs.value.p[i];
     IRNode* addr_node = node->inputs.value.p[1 + i];
     Store(rv, addr_node, output_regs[i],
-          operand->expr->type->size <= 4 ? X86_OP(storel) : X86_OP(storeq));
+          operand->expr->type->size <= 4 ? X86_OP(storel) : X86_OP(storeq),
+          false);
   }
 
   SetLoweredNode(node, result);
@@ -3555,7 +3593,7 @@ static TargetInstruction* LowerInc(X86Generator* rv, Generator* gen,
   } else  {
     inc =  AddImmediate(rv, load, X86IntValue(amount));
   }
-  Store(rv, addr_node, inc, st_opcode);
+  Store(rv, addr_node, inc, st_opcode, false);
   return SetLoweredNode(node, inc);
 }
 
@@ -3623,7 +3661,7 @@ static TargetInstruction* LowerDec(X86Generator* rv, Generator* gen,
   } else  {
     inc =  AddImmediate(rv, load, -X86IntValue(amount));
   }
-  Store(rv, addr_node, inc, st_opcode);
+  Store(rv, addr_node, inc, st_opcode, false);
   return SetLoweredNode(node, inc);}
 
 static TargetInstruction* LowerGetBitField(X86Generator* rv, IRNode* node) {

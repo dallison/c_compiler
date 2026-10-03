@@ -286,6 +286,21 @@ static void FreeRegisters(X86RegisterAllocator* allocator,
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
+      // The use counter is the number of distinct user instructions (the users
+      // list is deduplicated), so an instruction that references the same value
+      // in several operand slots must only decrement it once.  Skip an operand
+      // already seen in an earlier slot; otherwise the count underflows early
+      // and the value's register is freed while still live.
+      bool duplicate = false;
+      for (size_t j = 0; j < i; j++) {
+        if (inst->operand[j] == op) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) {
+        continue;
+      }
       if (X86IsFixedRegister(op)) {
         continue;
       }
@@ -1013,6 +1028,10 @@ static X86RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     default:
       return kX86RegTypeInt;
   }
+}
+
+bool X86HasFloatResult(TargetInstruction* inst) {
+  return RegisterTypeFromInstruction(inst) == kX86RegTypeFloat;
 }
 
 // Can we use a temp register?  If not we will have to use a saved one and

@@ -94,4 +94,7 @@ void AARCH64RegisterAllocatorDelete(AARCH64RegisterAllocator* alloc);
 void AARCH64AllocateRegisters(AARCH64RegisterAllocator* emitter);
 const char* AARCH64RegisterName(AARCH64Register* reg, int size, char* buf, size_t len);
 
+// True if the allocator gives |inst|'s result a floating point register.
+bool AARCH64HasFloatResult(TargetInstruction* inst);
+
 #endif /* arm_reg_alloc_h */

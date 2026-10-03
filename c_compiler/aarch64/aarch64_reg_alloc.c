@@ -225,6 +225,21 @@ static void FreeRegisters(AARCH64RegisterAllocator* allocator,
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     if (inst->operand[i] != NULL) {
       TargetInstruction* op = inst->operand[i];
+      // The use counter is the number of distinct user instructions (the users
+      // list is deduplicated), so an instruction that references the same value
+      // in several operand slots must only decrement it once.  Skip an operand
+      // already seen in an earlier slot; otherwise the count underflows early
+      // and the value's register is freed while still live.
+      bool duplicate = false;
+      for (size_t j = 0; j < i; j++) {
+        if (inst->operand[j] == op) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) {
+        continue;
+      }
       if (AARCH64IsFixedRegister(op)) {
         continue;
       }
@@ -858,6 +873,10 @@ static AARCH64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) 
   }
 }
 
+bool AARCH64HasFloatResult(TargetInstruction* inst) {
+  return RegisterTypeFromInstruction(inst) == kAARCH64RegTypeFloat;
+}
+
 // Can we use a temp register?  If not we will have to use a saved one and
 // those are more expensive since they need to be saved on entry and reloaded
 // on exit.
@@ -940,8 +959,9 @@ static void ReloadSpills(AARCH64RegisterAllocator* allocator,
   // this, reloading a second spilled operand could spill the first operand and
   // reuse its register, leaving the first operand reading the wrong value
   // (e.g. `cmp w23, w23` where a class bound and `'\\'` collapsed onto the
-  // same register in regex __class_match at -O2).
-  AARCH64Register* protect[TARGET_MAX_OPERANDS];
+  // same register in regex __class_match at -O2).  An operand can contribute
+  // both the register it holds and its reload's.
+  AARCH64Register* protect[2 * TARGET_MAX_OPERANDS];
   int num_protect = 0;
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];

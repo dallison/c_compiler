@@ -741,6 +741,27 @@ static void InitFloatingPoint(ASTNode* expr,
                               Initializer* init_out,
                               int offset,
                               Vector* initializers) {
+  if (TypeUsesLongDoubleRepresentation(type)) {
+    FPBits bits;
+    if (!EvaluateLongDoubleExpression(expr, &bits)) {
+      SemanticError(
+          expr, "Invalid static initialization; need a constant expression");
+      free(init_out);
+      return;
+    }
+    init_out->type = kInitTypeMemory;
+    init_out->offset = offset;
+    BufferInit(&init_out->value.memory);
+    // Little-endian: the low word first.  Intel 80-bit uses the low ten bytes
+    // and the rest of its slot is padding.
+    for (size_t i = 0; i < (size_t)type->size; i++) {
+      uint64_t word = i < 8 ? bits.lo : bits.hi;
+      char byte = i < 16 ? (char)(word >> ((i % 8) * 8)) : 0;
+      BufferAppend(&init_out->value.memory, &byte, 1);
+    }
+    VectorAppend(initializers, init_out);
+    return;
+  }
   double value = 0;
   if (EvaluateFloatingPointExpression(expr, &value)) {
     if (TypeUsesFloat32Representation(type)) {
@@ -4861,6 +4882,11 @@ String* CompilerEmitTranslationUnit(Compiler* compiler, Vector* options) {
   String* output_filename = OptionStringValue(kOptionOutputFile, options);
   if (output_asm_only && output_filename != NULL) {
     StringInit(&asm_filename, output_filename->value);
+  } else if (output_filename != NULL && !compiler->keep_asm_file) {
+    // The intermediate assembly follows the object, so concurrent builds of
+    // one source into different objects do not share a .s file.
+    StringInit(&asm_filename, output_filename->value);
+    StringAppend(&asm_filename, ".s");
   } else {
     StringInit(&asm_filename, compiler->infile.value);
     ReplaceSourceExtension(&asm_filename, ".s");

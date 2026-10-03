@@ -886,6 +886,7 @@ void RVGeneratorInit(RVGenerator* rv, Generator* gen) {
   rv->tmp = NULL;
   rv->tmp2 = NULL;
   rv->not_leaf = false;
+  rv->stages_tail_target = false;
   memset(rv->int_argument_registers, 0, sizeof(rv->int_argument_registers));
   memset(rv->fp_argument_registers, 0, sizeof(rv->fp_argument_registers));
   VectorInit(&rv->var_regs);
@@ -1146,6 +1147,23 @@ static TargetInstruction* AddImmediate(RVGenerator* rv, TargetInstruction* src,
   return Emit(rv, NewInstruction2(RV_OP(add), src, li));
 }
 
+// An instruction that has not been emitted yet will follow everything that has.
+static bool NothingEmittedAfter(RVGenerator* rv, TargetInstruction* inst) {
+  TargetInstruction* last = TargetLastInstruction(&rv->base);
+  if (TargetNext(inst) == NULL && TargetPrev(inst) == NULL && last != inst) {
+    return true;
+  }
+  for (; last != NULL; last = TargetPrev(last)) {
+    if (last == inst) {
+      return true;
+    }
+    if ((RVOpcode)last->opcode != RV_OP(loc)) {
+      return false;
+    }
+  }
+  return false;
+}
+
 static TargetInstruction* SetDestOrMove(RVGenerator* rv,
                                         TargetInstruction* from,
                                         TargetInstruction* to,
@@ -1157,8 +1175,11 @@ static TargetInstruction* SetDestOrMove(RVGenerator* rv,
   RVOpcode from_opcode = (RVOpcode)from->opcode;
   bool fixed_pointer =
       from_opcode == RV_OP(sp) || from_opcode == RV_OP(fp);
+  // Retargeting an earlier instruction would occupy |to| across everything
+  // emitted since, which the allocator still treats as free to use it.
   bool can_set_dest =
-      !fixed_pointer && from->dest == NULL && RVGeneratesOutput(from);
+      !fixed_pointer && from->dest == NULL && RVGeneratesOutput(from) &&
+      NothingEmittedAfter(rv, from);
 
   if (can_set_dest) {
     TargetSetDest(from, to);
@@ -1979,22 +2000,21 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
-        RVOpcode opcode =
-            TypeIsUnsigned(node->type) ? RV_OP(srli) : RV_OP(srai);
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         // TODO: can we give an error on division by zero here?
         if (c == 1) {
           // Division by 1 is a mv.
           inst = NewInstruction(RV_OP(mv));
           inst->operand[0] = Materialize(rv, op1);
-        } else {
-          if (IsPowerOf2(c) && c < 64) {
-            c = Log2(c);
-            inst =
-                NewInstruction2(opcode, Materialize(rv, op1),
-                                GetIntConstant(rv, NULL, kTargetType32Bit, c));
-            ref_counts_ok = true;
-          }
+        } else if (TypeIsUnsigned(node->type) && IsPowerOf2(c) && c < 64) {
+          // An arithmetic shift would round a negative dividend toward
+          // negative infinity rather than zero, so only unsigned division
+          // becomes a shift.
+          c = Log2(c);
+          inst =
+              NewInstruction2(RV_OP(srli), Materialize(rv, op1),
+                              GetIntConstant(rv, NULL, kTargetType32Bit, c));
+          ref_counts_ok = true;
         }
       }
 
@@ -2633,7 +2653,9 @@ static TargetInstruction* NarrowToStoreWidth(RVGenerator* rv,
                                   shift));
 }
 
-static TargetInstruction* Store(RVGenerator* rv, IRNode* addr_node, TargetInstruction* src, RVOpcode opcode) {
+// |src_shared| says the stored value has users other than this store.
+static TargetInstruction* Store(RVGenerator* rv, IRNode* addr_node, TargetInstruction* src, RVOpcode opcode,
+                                bool src_shared) {
   TargetInstruction* addr;
   TargetInstruction* offset;
   bool on_stack = GetRegAndOffset(rv, addr_node, &addr, &offset);
@@ -2645,10 +2667,20 @@ static TargetInstruction* Store(RVGenerator* rv, IRNode* addr_node, TargetInstru
   if (!on_stack) {
     bool is_fp = TypeUsesHardwareFloatRegister(addr_node->type);
     if (!is_fp) {
-      src = NarrowToStoreWidth(rv, src, StoredObjectType(addr_node),
-                               StoreWidth(opcode));
+      TargetInstruction* narrowed = NarrowToStoreWidth(
+          rv, src, StoredObjectType(addr_node), StoreWidth(opcode));
+      src_shared = src_shared && narrowed == src;
+      src = narrowed;
     }
     RVOpcode opcode = is_fp ? RV_OP(fmv_d) : RV_OP(mv);
+    // Computing the value straight into the variable's register is only safe
+    // when nothing between that instruction and here reads the variable, and
+    // nothing later reads the value after the variable has changed.
+    if (src != addr && (src_shared || !NothingEmittedAfter(rv, src))) {
+      TargetInstruction* move = Emit(rv, NewInstruction1(opcode, src));
+      move->dest = addr;
+      return addr;
+    }
     TargetInstruction* result = SetDestOrMove(rv, src, addr, opcode);
     return result;
   }
@@ -2694,7 +2726,8 @@ static TargetInstruction* LowerStore(RVGenerator* rv, IRNode* node) {
       COMPILER_UNREACHABLE();
   }
   TargetInstruction* src = Materialize(rv, src_node);
-  TargetInstruction* stored = Store(rv, addr_node, src, opcode);
+  TargetInstruction* stored = Store(rv, addr_node, src, opcode,
+      src_node->outputs.length > 1);
   if (node->outputs.length > 0 && !TypeUsesHardwareFloatRegister(addr_node->type)) {
     // `return value += amount;` reads the assignment's value, which the IR
     // spells as a use of the store.  A store to memory produces no value of its
@@ -3038,7 +3071,7 @@ static TargetInstruction* LowerAsm(RVGenerator* rv, IRNode* node) {
     AsmOperand* operand = asm_node->outputs.value.p[i];
     IRNode* addr_node = node->inputs.value.p[1 + i];
     Store(rv, addr_node, output_regs[i],
-          operand->expr->type->size <= 4 ? RV_OP(sw) : RV_OP(sd));
+          operand->expr->type->size <= 4 ? RV_OP(sw) : RV_OP(sd), false);
   }
 
   SetLoweredNode(node, result);
@@ -3141,7 +3174,7 @@ static TargetInstruction* LowerInc(RVGenerator* rv, IRNode* node) {
   } else  {
     inc =  AddImmediate(rv, load, RVIntValue(amount));
   }
-  Store(rv, addr_node, inc, st_opcode);
+  Store(rv, addr_node, inc, st_opcode, false);
   return SetLoweredNode(node, inc);
 }
 
@@ -3201,7 +3234,7 @@ static TargetInstruction* LowerDec(RVGenerator* rv, IRNode* node) {
   } else  {
     inc =  AddImmediate(rv, load, -RVIntValue(amount));
   }
-  Store(rv, addr_node, inc, st_opcode);
+  Store(rv, addr_node, inc, st_opcode, false);
   return SetLoweredNode(node, inc);}
 
 static TargetInstruction* LowerGetBitField(RVGenerator* rv, IRNode* node) {
@@ -3765,13 +3798,14 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
                         total_stack_size == 0 &&
                         rv->base.stack_frame_size == 0;
   TargetInstruction* staged_target = NULL;
-  if (!will_tail_call &&
-      (int)addr->opcode != (int)RV_OP(symbol)) {
+  if ((int)addr->opcode != (int)RV_OP(symbol)) {
     // t2 is reserved from general allocation and from the argument parallel
     // copy resolver, so it keeps the target intact while argument registers
-    // are populated.
+    // are populated.  A tail call needs this as much as a call does: the
+    // target may otherwise sit in an argument register.
     staged_target =
         Emit(rv, NewInstruction2(RV_OP(mv), Tmp2(rv), addr));
+    rv->stages_tail_target |= will_tail_call;
   }
 
   // Phase 4:
@@ -3959,6 +3993,9 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
   // the current stack frame we can allow tail calls when we have space
   // allocated on the stack.  I don't know how to detect that though.
   bool can_be_tail_call = will_tail_call;
+  if (staged_target != NULL) {
+    addr = staged_target;
+  }
 
   if (can_be_tail_call) {
     // Tail call.
@@ -3987,9 +4024,6 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
     }
     rv->base.num_calls--;
   } else {
-    if (staged_target != NULL) {
-      addr = staged_target;
-    }
     if (((int)addr->opcode == (int)RV_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
       opcode = TypeUsesHardwareFloatRegister(node->type) ? RV_OP(callf) : RV_OP(call);

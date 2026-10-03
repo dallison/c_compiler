@@ -95,7 +95,9 @@ static bool IsEligibleVariable(IRNode* node) {
       return false;
   }
   Symbol* symbol = ((IRVariable*)node)->symbol;
-  if (symbol == NULL || symbol->flags.is_argument ||
+  // A named return value lives in the caller's return slot, and the return
+  // reads it there without any load in this function.
+  if (symbol == NULL || symbol->flags.is_argument || symbol->is_nrvo ||
       StorageIs(symbol->storage, STO(static) | STO(extern) | STO(thread))) {
     return false;
   }

@@ -1138,15 +1138,38 @@ static TargetInstruction* AddImmediate(AARCH64Generator* g, TargetInstruction* s
                      NewInstruction2(AARCH64_OP(add), src, movi), kSize64Bit));
 }
 
+// An instruction that has not been emitted yet will follow everything that has.
+static bool NothingEmittedAfter(AARCH64Generator* g, TargetInstruction* inst) {
+  TargetInstruction* last = TargetLastInstruction(&g->base);
+  if (TargetNext(inst) == NULL && TargetPrev(inst) == NULL && last != inst) {
+    return true;
+  }
+  for (; last != NULL; last = TargetPrev(last)) {
+    if (last == inst) {
+      return true;
+    }
+    if ((AARCH64Opcode)last->opcode != AARCH64_OP(loc)) {
+      return false;
+    }
+  }
+  return false;
+}
+
 static TargetInstruction* SetDestOrMove(AARCH64Generator* g,
                                         TargetInstruction* from,
                                         TargetInstruction* to,
                                         AARCH64Opcode mov_opcode) {
-  bool can_set_dest = from->dest == NULL && AARCH64GeneratesOutput(from);
+  // Retargeting an earlier instruction would occupy |to| across everything
+  // emitted since, which the allocator still treats as free to use it.
+  bool can_set_dest = from->dest == NULL && AARCH64GeneratesOutput(from) &&
+                      NothingEmittedAfter(g, from);
 
   if (can_set_dest) {
     TargetSetDest(from, to);
     return from;
+  }
+  if (mov_opcode == AARCH64_OP(mov) && AARCH64HasFloatResult(from)) {
+    mov_opcode = AARCH64_OP(fmov);
   }
   TargetInstruction* move = Emit(g, NewInstruction1(mov_opcode, from));
   move->dest = to;
@@ -2017,8 +2040,11 @@ static TargetInstruction* LowerModulo(AARCH64Generator* g, IRNode* node,
   TargetInstruction* lhs = Materialize(g, op1);
   TargetInstruction* rhs = Materialize(g, op2);
   TargetInstruction* quotient_tmp = Emit(g, NewInstruction(AARCH64_OP(tmp)));
+  // The divide takes the width of the operation, not of `lhs`: an int
+  // argument arrives in a 64-bit register whose upper half is undefined.
   TargetInstruction* divide = Emit(
-      g, CopyInstructionSize(NewInstruction2(div_opcode, lhs, rhs), 0));
+      g, SetInstructionSize(NewInstruction2(div_opcode, lhs, rhs),
+                            node->type->size > 4 ? kSize64Bit : kSize32Bit));
   divide->dest = quotient_tmp;
   return NewInstruction3(AARCH64_OP(msub), quotient_tmp, rhs, lhs);
 }
@@ -2303,22 +2329,21 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
-        AARCH64Opcode opcode =
-            TypeIsUnsigned(node->type) ? AARCH64_OP(lsr) : AARCH64_OP(asr);
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         // TODO: can we give an error on division by zero here?
         if (c == 1) {
           // Division by 1 is a mv.
           inst = NewInstruction(AARCH64_OP(mov));
           inst->operand[0] = Materialize(g, op1);
-        } else {
-          if (IsPowerOf2(c) && c < 64) {
-            c = Log2(c);
-            inst =
-                NewInstruction2(opcode, Materialize(g, op1),
-                                GetIntConstant(g, NULL, kTargetType32Bit, c));
-            ref_counts_ok = true;
-          }
+        } else if (TypeIsUnsigned(node->type) && IsPowerOf2(c) && c < 64) {
+          // An arithmetic shift would round a negative dividend toward
+          // negative infinity rather than zero, so only unsigned division
+          // becomes a shift.
+          c = Log2(c);
+          inst =
+              NewInstruction2(AARCH64_OP(lsr), Materialize(g, op1),
+                              GetIntConstant(g, NULL, kTargetType32Bit, c));
+          ref_counts_ok = true;
         }
       }
 
@@ -2808,7 +2833,9 @@ static TargetInstruction* LowerLoad(AARCH64Generator* g, IRNode* node) {
   return SetLoweredNode(node, result);
 }
 
-static TargetInstruction* Store(AARCH64Generator* g, IRNode* addr_node, TargetInstruction* src, AARCH64Opcode opcode, int size) {
+// |src_shared| says the stored value has users other than this store.
+static TargetInstruction* Store(AARCH64Generator* g, IRNode* addr_node, TargetInstruction* src, AARCH64Opcode opcode, int size,
+                                bool src_shared) {
   TargetInstruction* addr;
   TargetInstruction* offset;
   TargetInstruction* scale;
@@ -2820,6 +2847,14 @@ static TargetInstruction* Store(AARCH64Generator* g, IRNode* addr_node, TargetIn
   // If we are not on the stack, move the src to the dest.
   if (!on_stack) {
     AARCH64Opcode opcode = TypeUsesHardwareFloatRegister(addr_node->type) ? AARCH64_OP(fmov) : AARCH64_OP(mov);
+    // Computing the value straight into the variable's register is only safe
+    // when nothing between that instruction and here reads the variable, and
+    // nothing later reads the value after the variable has changed.
+    if (src != addr && (src_shared || !NothingEmittedAfter(g, src))) {
+      TargetInstruction* move = Emit(g, NewInstruction1(opcode, src));
+      move->dest = addr;
+      return addr;
+    }
     TargetInstruction* result = SetDestOrMove(g, src, addr, opcode);
     return result;
   }
@@ -3069,7 +3104,8 @@ static TargetInstruction* LowerStore(AARCH64Generator* g, IRNode* node) {
       COMPILER_UNREACHABLE();
   }
   TargetInstruction* src = Materialize(g, src_node);
-  TargetInstruction* stored = Store(g, addr_node, src, opcode, size);
+  TargetInstruction* stored = Store(g, addr_node, src, opcode, size,
+      src_node->outputs.length > 1);
   if (node->outputs.length > 0 && !TypeUsesHardwareFloatRegister(addr_node->type)) {
     // `return value += amount;` reads the assignment's value, which the IR
     // spells as a use of the store.  A store to memory produces no value of its
@@ -3443,7 +3479,7 @@ static TargetInstruction* LowerAsm(AARCH64Generator* g, IRNode* node) {
     AsmOperand* operand = asm_node->outputs.value.p[i];
     IRNode* addr_node = node->inputs.value.p[1 + i];
     Store(g, addr_node, output_regs[i], AARCH64_OP(str),
-          operand->expr->type->size <= 4 ? kSize32Bit : kSize64Bit);
+          operand->expr->type->size <= 4 ? kSize32Bit : kSize64Bit, false);
   }
 
   SetLoweredNode(node, result);
@@ -3613,7 +3649,7 @@ static TargetInstruction* LowerInc(AARCH64Generator* g, IRNode* node) {
   } else  {
     inc =  AddImmediate(g, load, AARCH64IntValue(amount));
   }
-  Store(g, addr_node, inc, st_opcode, size);
+  Store(g, addr_node, inc, st_opcode, size, false);
   return SetLoweredNode(node, inc);
 }
 
@@ -3679,7 +3715,7 @@ static TargetInstruction* LowerDec(AARCH64Generator* g, IRNode* node) {
   } else  {
     inc =  AddImmediate(g, load, -AARCH64IntValue(amount));
   }
-  Store(g, addr_node, inc, st_opcode, size);
+  Store(g, addr_node, inc, st_opcode, size, false);
   return SetLoweredNode(node, inc);
 }
 

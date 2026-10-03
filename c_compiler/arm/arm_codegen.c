@@ -1055,15 +1055,38 @@ static TargetInstruction* AddImmediate(ARMGenerator* g, TargetInstruction* src,
   return Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(add), src, movi), 0));
 }
 
+// An instruction that has not been emitted yet will follow everything that has.
+static bool NothingEmittedAfter(ARMGenerator* g, TargetInstruction* inst) {
+  TargetInstruction* last = TargetLastInstruction(&g->base);
+  if (TargetNext(inst) == NULL && TargetPrev(inst) == NULL && last != inst) {
+    return true;
+  }
+  for (; last != NULL; last = TargetPrev(last)) {
+    if (last == inst) {
+      return true;
+    }
+    if ((ARMOpcode)last->opcode != ARM_OP(loc)) {
+      return false;
+    }
+  }
+  return false;
+}
+
 static TargetInstruction* SetDestOrMove(ARMGenerator* g,
                                         TargetInstruction* from,
                                         TargetInstruction* to,
                                         ARMOpcode mov_opcode) {
-  bool can_set_dest = from->dest == NULL && ARMGeneratesOutput(from);
+  // Retargeting an earlier instruction would occupy |to| across everything
+  // emitted since, which the allocator still treats as free to use it.
+  bool can_set_dest = from->dest == NULL && ARMGeneratesOutput(from) &&
+                      NothingEmittedAfter(g, from);
 
   if (can_set_dest) {
     TargetSetDest(from, to);
     return from;
+  }
+  if (mov_opcode == ARM_OP(mov) && ARMHasFloatResult(from)) {
+    mov_opcode = ARM_OP(fmov);
   }
   TargetInstruction* move = Emit(g, CopyInstructionSize(NewInstruction1(mov_opcode, from), 0));
   move->dest = to;
@@ -2533,22 +2556,21 @@ static TargetInstruction* LowerExpression(ARMGenerator* g, IRNode* node) {
       IRNode* op1 = node->inputs.value.p[0];
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op2)) {
-        ARMOpcode opcode =
-            TypeIsUnsigned(node->type) ? ARM_OP(lsr) : ARM_OP(asr);
         int64_t c = ((IRConstant*)op2)->value.ivalue;
         // TODO: can we give an error on division by zero here?
         if (c == 1) {
           // Division by 1 is a mv.
           inst = NewInstruction(ARM_OP(mov));
           inst->operand[0] = Materialize(g, op1);
-        } else {
-          if (IsPowerOf2(c) && c < 64) {
-            c = Log2(c);
-            inst =
-                NewInstruction2(opcode, Materialize(g, op1),
-                                GetIntConstant(g, NULL, kTargetType32Bit, c));
-            ref_counts_ok = true;
-          }
+        } else if (TypeIsUnsigned(node->type) && IsPowerOf2(c) && c < 64) {
+          // An arithmetic shift would round a negative dividend toward
+          // negative infinity rather than zero, so only unsigned division
+          // becomes a shift.
+          c = Log2(c);
+          inst =
+              NewInstruction2(ARM_OP(lsr), Materialize(g, op1),
+                              GetIntConstant(g, NULL, kTargetType32Bit, c));
+          ref_counts_ok = true;
         }
       }
 
@@ -3180,7 +3202,9 @@ static TargetInstruction* LowerLoad(ARMGenerator* g, IRNode* node) {
   return SetLoweredNode(node, inst);
 }
 
-static TargetInstruction* Store(ARMGenerator* g, IRNode* addr_node, TargetInstruction* src, ARMOpcode opcode, int size) {
+// |src_shared| says the stored value has users other than this store.
+static TargetInstruction* Store(ARMGenerator* g, IRNode* addr_node, TargetInstruction* src, ARMOpcode opcode, int size,
+                                bool src_shared) {
   TargetInstruction* addr;
   TargetInstruction* offset;
   TargetInstruction* scale;
@@ -3192,6 +3216,15 @@ static TargetInstruction* Store(ARMGenerator* g, IRNode* addr_node, TargetInstru
   // If we are not on the stack, move the src to the dest.
   if (!on_stack) {
     ARMOpcode opcode = TypeUsesHardwareFloatRegister(addr_node->type) ? ARM_OP(fmov) : ARM_OP(mov);
+    // Computing the value straight into the variable's register is only safe
+    // when nothing between that instruction and here reads the variable, and
+    // nothing later reads the value after the variable has changed.
+    if (src != addr && (src_shared || !NothingEmittedAfter(g, src))) {
+      TargetInstruction* move =
+          Emit(g, CopyInstructionSize(NewInstruction1(opcode, src), 0));
+      move->dest = addr;
+      return addr;
+    }
     TargetInstruction* result = SetDestOrMove(g, src, addr, opcode);
     return result;
   }
@@ -3490,7 +3523,8 @@ static TargetInstruction* LowerStore(ARMGenerator* g, IRNode* node) {
       COMPILER_UNREACHABLE();
   }
   TargetInstruction* src = Materialize(g, src_node);
-  TargetInstruction* stored = Store(g, addr_node, src, opcode, size);
+  TargetInstruction* stored = Store(g, addr_node, src, opcode, size,
+      src_node->outputs.length > 1);
   if (node->outputs.length > 0 && !TypeUsesHardwareFloatRegister(addr_node->type)) {
     // `return value += amount;` reads the assignment's value, which the IR
     // spells as a use of the store.  A store to memory produces no value of its
@@ -3729,7 +3763,7 @@ static TargetInstruction* LowerAsm(ARMGenerator* g, IRNode* node) {
   TargetInstruction* result = Emit(g, &asm_inst->base);
   for (size_t i = 0; i < asm_node->outputs.length; i++) {
     IRNode* addr_node = node->inputs.value.p[1 + i];
-    Store(g, addr_node, output_regs[i], ARM_OP(str), kSize32Bit);
+    Store(g, addr_node, output_regs[i], ARM_OP(str), kSize32Bit, false);
   }
 
   SetLoweredNode(node, result);
@@ -3907,7 +3941,7 @@ static TargetInstruction* LowerInc(ARMGenerator* g, IRNode* node) {
   } else  {
     inc =  AddImmediate(g, load, ARMIntValue(amount));
   }
-  Store(g, addr_node, inc, st_opcode, size);
+  Store(g, addr_node, inc, st_opcode, size, false);
   return SetLoweredNode(node, inc);
 }
 
@@ -3976,7 +4010,7 @@ static TargetInstruction* LowerDec(ARMGenerator* g, IRNode* node) {
   } else  {
     inc =  AddImmediate(g, load, -ARMIntValue(amount));
   }
-  Store(g, addr_node, inc, st_opcode, size);
+  Store(g, addr_node, inc, st_opcode, size, false);
   return SetLoweredNode(node, inc);
 }
 
@@ -6490,6 +6524,9 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
           entry->pooled->data.ivalue = (int)location.location.offset;
           SetDebugStackLocation(entry, entry->pooled->data.ivalue);
         }
+      } else if (entry->pooled->outputs.length == 0) {
+        // Nothing refers to the variable once its stores have been removed as
+        // dead, and a slot for it alone would cost a leaf its frame.
       } else {
         AlignOffset(entry, var_offset);
         entry->pooled->data.ivalue = *var_offset;

@@ -421,6 +421,7 @@ typedef struct RVGenerator {
   int num_fp_reg_vars;    // Number of floating point regs for vars.
   int struct_return_reg;
   bool not_leaf;          // Not a leaf procedure.
+  bool stages_tail_target;  // An indirect tail call stages its target in t2.
   
   Vector saved_regs;
   

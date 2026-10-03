@@ -238,9 +238,10 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
     return key;
   }
   
-  // Volatile things prevent this optimization.
+  // Volatile things prevent this optimization.  The key so far is only the
+  // opcode for most instructions, so it has to be made unique here too.
   if (TypeIsVolatile(inst->type)) {
-    return key;
+    return (uint64_t)inst->id + last_ir_opcode;
   }
   
   // If we have a destination set, keep unique.  The key computed so far is

@@ -34,10 +34,8 @@ __udiv1:
   RTS
 
 
-// Signed 2-byte divide.
-// TODO: this is wrong for negative numbers according to C99.
-// We need to round the quotient toward zero and the sign of the remainer
-// can be negative.
+// Signed 2-byte divide.  As in C99 the quotient rounds toward zero: divide
+// the magnitudes, then negate when the operand signs differ.
 .section ".text.__sdiv2", "ax", @progbits
 __sdiv2:
   PHA
@@ -50,13 +48,35 @@ __sdiv2:
   LDA 1,Y
   STA divisor+1
   EOR dividend+1
-  BPL udiv2_1
-
-  // One of divisor or dividend is negative.  Result will be negative.
-  LDA divisor+1
+  PHA             // Sign of the quotient.
+  JSR sdiv2_abs
+  JSR udiv2
+  PLA
   BPL sdiv2_l1
+  SEC
+  LDA #0
+  SBC quotient
+  STA quotient
+  LDA #0
+  SBC quotient+1
+  STA quotient+1
+sdiv2_l1:
+#ifdef __65c02__
+  PLX
+#else
+  PLA
+  TAX
+#endif
+  LDA quotient
+  STA 0,X
+  LDA quotient+1
+  STA 1,X
+  RTS
 
-  // Divisor is negative, negate it.
+// Replace dividend and divisor by their magnitudes.
+sdiv2_abs:
+  LDA divisor+1
+  BPL sdiv2_abs_l1
   SEC
   LDA #0
   SBC divisor
@@ -64,14 +84,9 @@ __sdiv2:
   LDA #0
   SBC divisor+1
   STA divisor+1
-#ifdef __65c02__
-  BRA sdiv2_l2
-#else
-  JMP sdiv2_l2
-#endif
-
-sdiv2_l1:
-  // Dividend is negative, negate it.
+sdiv2_abs_l1:
+  LDA dividend+1
+  BPL sdiv2_abs_l2
   SEC
   LDA #0
   SBC dividend
@@ -79,20 +94,7 @@ sdiv2_l1:
   LDA #0
   SBC dividend+1
   STA dividend+1
-
-sdiv2_l2:
-  // Perform unsigned divide
-  PLA
-  JSR udiv2
-
-  // Negate result.
-  SEC
-  LDA #0
-  SBC 0,X
-  STA 0,X
-  LDA #0
-  SBC 1,X
-  STA 1,X
+sdiv2_abs_l2:
   RTS
 
 .section ".text.__sdiv2", "ax", @progbits
@@ -159,6 +161,7 @@ udiv2_l2:
         BNE udiv2_l1
         RTS
 
+// Signed 2-byte remainder.  As in C99 it takes the sign of the dividend.
 .section ".text.__smod2", "ax", @progbits
 __smod2:
   PHA
@@ -170,49 +173,29 @@ __smod2:
   STA divisor
   LDA 1,Y
   STA divisor+1
-  EOR dividend+1
-  BPL umod2_1
-
-  // One of divisor or dividend is negative.  Result will be negative.
-  LDA divisor+1
-  BPL smod2_l1
-
-  // Divisor is negative, negate it.
-  SEC
-  LDA #0
-  SBC divisor
-  STA divisor
-  LDA #0
-  SBC divisor+1
-  STA divisor+1
-#ifdef __65c02__
-  BRA smod2_l2
-#else
-  JMP smod2_l2
-#endif
-
-smod2_l1:
-  // Dividend is negative, negate it.
-  SEC
-  LDA #0
-  SBC dividend
-  STA dividend
-  LDA #0
-  SBC dividend+1
-  STA dividend+1
-
-smod2_l2:
-  // Perform unsigned divide
+  LDA dividend+1
+  PHA             // Sign of the remainder.
+  JSR sdiv2_abs
+  JSR udiv2
   PLA
-  JSR umod2_1
-
-  // Negate result.
+  BPL smod2_l1
   SEC
   LDA #0
-  SBC 0,X
-  STA 0,X
+  SBC remainder
+  STA remainder
   LDA #0
-  SBC 1,X
+  SBC remainder+1
+  STA remainder+1
+smod2_l1:
+#ifdef __65c02__
+  PLX
+#else
+  PLA
+  TAX
+#endif
+  LDA remainder
+  STA 0,X
+  LDA remainder+1
   STA 1,X
   RTS
 
@@ -273,6 +256,19 @@ __cdivmod2:
   LDX #__i1
   LDY #__i2
   JSR __sdiv2
+
+  // __sdiv2 leaves the remainder of the magnitudes; it takes the sign of
+  // the numerator.
+  LDA __i1+1
+  BPL cdivmod2_l1
+  SEC
+  LDA #0
+  SBC remainder
+  STA remainder
+  LDA #0
+  SBC remainder+1
+  STA remainder+1
+cdivmod2_l1:
 
   LDA #__i0           // Result in i0
   LDX #0

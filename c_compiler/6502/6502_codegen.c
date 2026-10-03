@@ -3394,7 +3394,12 @@ static TargetInstruction* ReduceMultiplyOrDivide(W65C02Generator* g, IRNode* nod
             if (is_unsigned) {
                 return SetLoweredNode(node, ConstantShiftOp(g, node, W65C02_OP(lsr), W65C02_OP(ror), size, dest, GetAddress(g, op1, true),
                                 Log2(c)));
-            } else {
+            } else if (size == 1) {
+              // An arithmetic shift rounds a negative dividend toward
+              // negative infinity rather than zero, so wider signed divides
+              // go to the runtime, which rounds as C requires.
+              // TODO: this is wrong for negative 1-byte dividends too, but
+              // __sdiv1 is still an empty stub.
               result = SetLoweredNode(node, ConstantArithmeticRightShiftOp(g, node, size, dest, GetAddress(g, op1, true),
                                              Log2(c)));
               AddSpillPoint(g, dest);

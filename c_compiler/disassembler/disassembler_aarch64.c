@@ -292,19 +292,43 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
                XReg(rn, sf, false), XReg(rm, sf, false));
     return true;
   }
-  if ((inst & 0x1f800000u) == 0x13000000u) {
+  if ((inst & 0x1f800000u) == 0x13000000u && ((inst >> 29) & 3) != 3) {
     bool sf = (inst >> 31) != 0;
     int opc = (inst >> 29) & 3;
     int immr = (inst >> 16) & 0x3f;
     int imms = (inst >> 10) & 0x3f;
     int rn = (inst >> 5) & 0x1f;
     int rd = inst & 0x1f;
-    static const char* names[] = {"sbfm", "bfm", "ubfm", NULL};
-    if (names[opc] != NULL) {
-      DAsmFormat(out, "%s %s, %s, #%d, #%d", names[opc],
-                 XReg(rd, sf, false), XReg(rn, sf, false), immr, imms);
+    // Print the preferred alias, as the architecture manual and objdump do.
+    int width = sf ? 64 : 32;
+    if (opc != 1 && imms == width - 1) {
+      DAsmFormat(out, "%s %s, %s, #%d", opc == 0 ? "asr" : "lsr",
+                 XReg(rd, sf, false), XReg(rn, sf, false), immr);
       return true;
     }
+    if (opc == 2 && imms + 1 == immr) {
+      DAsmFormat(out, "lsl %s, %s, #%d", XReg(rd, sf, false),
+                 XReg(rn, sf, false), width - 1 - imms);
+      return true;
+    }
+    if (imms < immr) {
+      static const char* insert[] = {"sbfiz", "bfi", "ubfiz"};
+      DAsmFormat(out, "%s %s, %s, #%d, #%d", insert[opc], XReg(rd, sf, false),
+                 XReg(rn, sf, false), (width - immr) & (width - 1), imms + 1);
+      return true;
+    }
+    if (opc != 1 && immr == 0 && (imms == 7 || imms == 15 || imms == 31) &&
+        (opc == 0 ? (imms != 31 || sf) : !sf && imms != 31)) {
+      static const char suffix[] = {'b', 'h', 'w'};
+      DAsmFormat(out, "%cxt%c %s, %s", opc == 0 ? 's' : 'u',
+                 suffix[imms == 7 ? 0 : imms == 15 ? 1 : 2],
+                 XReg(rd, sf, false), XReg(rn, false, false));
+      return true;
+    }
+    static const char* extract[] = {"sbfx", "bfxil", "ubfx"};
+    DAsmFormat(out, "%s %s, %s, #%d, #%d", extract[opc], XReg(rd, sf, false),
+               XReg(rn, sf, false), immr, imms - immr + 1);
+    return true;
   }
   if ((inst & 0x1f800000u) == 0x12000000u) {
     bool sf = (inst >> 31) != 0;

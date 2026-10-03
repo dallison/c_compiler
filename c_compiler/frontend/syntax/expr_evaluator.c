@@ -1079,6 +1079,24 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
   return ok;
 }
 
+static bool EvaluateLongDoubleBits(ConstEvalContext* ctx, ASTNode* node,
+                                   FPBits* bits);
+
+bool EvaluateLongDoubleExpression(ASTNode* node, FPBits* result) {
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  bool ok = EvaluateLongDoubleBits(&ctx, node, result);
+  if (!ok) {
+    double value = 0;
+    ok = EvaluateFloatingPointExpressionInContext(&ctx, node, &value);
+    if (ok) {
+      *result = FPBitsFromF64(value, LongDoubleEvalFormat());
+    }
+  }
+  ConstEvalContextDestruct(&ctx);
+  return ok;
+}
+
 bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
   if (symbol == NULL || symbol->type == NULL || initializer == NULL) {
     return false;

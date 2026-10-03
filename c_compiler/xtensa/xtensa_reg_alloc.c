@@ -934,6 +934,19 @@ static bool AllocateUsingDest(XTENSARegisterAllocator* allocator,
 
 static void ReloadSpills(XTENSARegisterAllocator* allocator,
                          TargetInstruction* inst) {
+  // Every operand is live when |inst| executes, so neither the registers they
+  // already hold nor those reloads are given here may be picked for another
+  // operand's reload or taken as its spill victim.  An operand can contribute
+  // both the register it holds and its reload's.
+  XTENSARegister* protect[2 * TARGET_MAX_OPERANDS];
+  int num_protect = 0;
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op != NULL && op->reg != NULL && !op->reg->reserved) {
+      op->reg->reserved = true;
+      protect[num_protect++] = (XTENSARegister*)op->reg;
+    }
+  }
   for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
     TargetInstruction* op = inst->operand[i];
     if (op != NULL && ((int)op->opcode == (int)XTENSA_OP(spill))) {
@@ -950,7 +963,14 @@ static void ReloadSpills(XTENSARegisterAllocator* allocator,
       AssignRegister(reg, reload);
       // This reload is for a single instruction.
       reload->uses = 1;
+      if (!reg->base.reserved) {
+        reg->base.reserved = true;
+        protect[num_protect++] = reg;
+      }
     }
+  }
+  for (int i = 0; i < num_protect; i++) {
+    protect[i]->base.reserved = false;
   }
   NoteReloadsInserted(allocator, inst);
 }
@@ -1716,7 +1736,8 @@ void XTENSAAllocateRegisters(XTENSARegisterAllocator* allocator) {
   if (!has_atomics) {
     allocator->int_regs[XTENSA_INT_TEMP_START_1 + 1].base.reserved = false;
   }
-  if (!has_atomics && allocator->rv->base.num_calls == 0) {
+  if (!has_atomics && allocator->rv->base.num_calls == 0 &&
+      !allocator->rv->stages_tail_target) {
     allocator->int_regs[XTENSA_INT_TEMP_START_1 + 2].base.reserved = false;
   }
 

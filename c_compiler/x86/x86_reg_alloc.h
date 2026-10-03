@@ -74,4 +74,7 @@ void X86RegisterAllocatorDelete(X86RegisterAllocator* alloc);
 void X86AllocateRegisters(X86RegisterAllocator* emitter);
 const char* X86RegisterName(X86Register* reg, char* buf, size_t len);
 
+// True if the allocator gives |inst|'s result a floating point register.
+bool X86HasFloatResult(TargetInstruction* inst);
+
 #endif /* x86_reg_alloc_h */

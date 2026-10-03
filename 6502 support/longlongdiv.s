@@ -340,7 +340,7 @@ udiv8_l2:
         RTS
 
 __smod8:
-  PHA
+  STA __t0
   LDA 0,X
   STA dividend
   LDA 1,X
@@ -374,32 +374,44 @@ LDA 6,Y
 STA divisor+6
 LDA 7,Y
 STA divisor+7
-  EOR dividend+7
-  BPL umod8_1
 
-  // One of divisor or dividend is negative.  Result will be negative.
-  LDA divisor+7
-  BPL smod8_l1
-
-  // Divisor is negative, negate it.
-  JSR negate_divisor
-#ifdef __65c02__
-  BRA smod8_l2
-#else
-  JMP smod8_l2
-#endif
-
-smod8_l1:
-  // Dividend is negative, negate it.
+  // As in C99 the remainder takes the sign of the dividend.  Divide the
+  // magnitudes, keeping the destination and sign in scratch as __sdiv8 does.
+  LDA dividend+7
+  AND #0x80
+  STA __t1
+  LDA dividend+7
+  BPL smod8_dividend_positive
   JSR negate_dividend
+smod8_dividend_positive:
+  LDA divisor+7
+  BPL smod8_divisor_positive
+  JSR negate_divisor
+smod8_divisor_positive:
+  JSR udiv8
 
-smod8_l2:
-  // Perform unsigned divide
-  PLA
-  JSR umod8_1
-
-  // Negate result.
+  LDX __t0
+  LDA remainder
+  STA 0,X
+  LDA remainder+1
+  STA 1,X
+  LDA remainder+2
+  STA 2,X
+  LDA remainder+3
+  STA 3,X
+  LDA remainder+4
+  STA 4,X
+  LDA remainder+5
+  STA 5,X
+  LDA remainder+6
+  STA 6,X
+  LDA remainder+7
+  STA 7,X
+  LDA __t1
+  BPL smod8_done
   JMP negate_result
+smod8_done:
+  RTS
  
 __umod8:
   PHA

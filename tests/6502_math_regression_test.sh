@@ -43,5 +43,7 @@ run_case modf_neg 0 "$REG/modf_neg_6502_test.c" "$ROOT/libc/modf.c"
 run_case frexp_return 0 "$REG/frexp_return_6502_test.c" "$ROOT/libc/frexp.c"
 run_case ldexp_basic 0 "$REG/ldexp_6502_test.c" "$ROOT/libc/ldexp.c"
 run_case nested_fp_return 0 "$REG/nested_fp_return_6502_test.c"
+run_case signed_divmod 0 "$REG/signed_divmod_6502_test.c"
+run_case signed_divmod_O2 0 -O2 "$REG/signed_divmod_6502_test.c"
 
 echo "ok 6502 math regression suite"

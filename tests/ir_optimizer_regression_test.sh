@@ -354,7 +354,7 @@ load_cse_body=$(
        inside && after_ssa' "$IR_FILE"
 )
 load_cse_count=$(
-  grep -c 'load32\(.*REF memopt_global' <<<"$load_cse_body" || true
+  grep -Ec 'load32\(.*REF memopt_global' <<<"$load_cse_body" || true
 )
 if [[ "$load_cse_count" -ne 1 ]]; then
   echo "load CSE did not collapse the two global loads (found $load_cse_count)" >&2
