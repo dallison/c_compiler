@@ -26,7 +26,7 @@ template <class D, size_t I>
 using ElemT = typename Elem<D, I>::type;
 
 template <class... Ts>
-struct Impl : Storage<Ts, 0, Tag<Ts...>> {
+struct Impl : Storage<Ts, 0, Tag<Ts...>>... {
   Impl(const Ts&... a) : Storage<Ts, 0, Tag<Ts...>>(a)... {}
 };
 

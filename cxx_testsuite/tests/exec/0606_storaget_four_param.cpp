@@ -33,7 +33,7 @@ template <class D, size_t I>
 using ElemT = typename Elem<D, I>::type;
 
 template <class... Ts>
-struct Impl : Storage<Ts, 0, StorageTag<Ts...>, false> {
+struct Impl : Storage<Ts, 0, StorageTag<Ts...>, false>... {
   Impl(const Ts&... a) : Storage<Ts, 0, StorageTag<Ts...>, false>(a)... {}
 };
 
