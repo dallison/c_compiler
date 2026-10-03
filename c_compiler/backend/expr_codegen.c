@@ -4720,8 +4720,14 @@ static IRNode* GenerateContentsOf(Generator* gen, UnaryASTNode* node) {
 static IRNode* GenerateInlineCall(Generator* gen, InlineCallASTNode* node) {
   extern void GenerateStatement(Generator* gen, ASTNode* node);
   IRNode* destination = NULL;
+  // Like an out-of-line call (see the capturev path in GenerateFunctionCall), a
+  // vector returned in SIMD registers is constructed into the enclosing
+  // initializer's destination, and ExpressionConstructsAggregateInPlace tells
+  // the initializer not to copy it again.
   if (gen->current_struct_address != NULL &&
-      TypeReturnedThroughHiddenPointer(node->base.type)) {
+      (TypeReturnedThroughHiddenPointer(node->base.type) ||
+       (TypeUsesNativeVectorABI(node->base.type) &&
+        !ExpressionReturnsReference(&node->base)))) {
     destination = gen->current_struct_address;
     // The inlined body owns its own return temporary. Do not let calls or
     // compound literals inside it mistake the enclosing initializer's
