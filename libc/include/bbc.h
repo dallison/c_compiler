@@ -2,8 +2,8 @@
 //  bbc.h
 //  BBC Micro Machine Operating System entry points and VDU graphics.
 //
-//  Link this with the BBC runtime (bbc_start.s, bbc_syscall.s, bbc_mos.s),
-//  not the interpreter support ROM. MOS calls leave the language zero page
+//  -target 6502-acorn-bbc-davecc links the BBC runtime and the paged libc
+//  shim. MOS calls leave the language zero page
 //  alone; on exit, bbc_return re-enters the current language (OSBYTE &8E).
 //
 //  MOS strings are terminated by CR (0x0d), not by a C NUL.

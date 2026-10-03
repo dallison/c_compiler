@@ -109,9 +109,26 @@ typedef struct FILE {
 
 #define TMP_MAX 256
 
+// Paged BBC libc keeps the three standard streams in the cassette output
+// buffer so every sideways bank can dereference them. Each FILE is 32
+// bytes. The pointers themselves sit after the two 64-byte buffers.
+#if defined(__6502__) && (defined(__DAVECC_PAGED_LIBC__) || defined(DAVECC_PAGED_LIBC))
+#define PAGED_STDIN_FILE 0x0900
+#define PAGED_STDOUT_FILE 0x0920
+#define PAGED_STDERR_FILE 0x0940
+#define PAGED_STDIN_BUF 0x0960
+#define PAGED_STDOUT_BUF 0x09A0
+#define PAGED_STDIN_PTR 0x09E0
+#define PAGED_STDOUT_PTR 0x09E2
+#define PAGED_STDERR_PTR 0x09E4
+#define stdin (*(FILE**)PAGED_STDIN_PTR)
+#define stdout (*(FILE**)PAGED_STDOUT_PTR)
+#define stderr (*(FILE**)PAGED_STDERR_PTR)
+#else
 extern FILE* stdout;
 extern FILE* stdin;
 extern FILE* stderr;
+#endif
 
 extern FILE* __all_files;
 extern FILE* __last_file;

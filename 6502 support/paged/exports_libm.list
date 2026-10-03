@@ -1,0 +1,34 @@
+# Append-only libc entry points. Vector 0 is __paged_rom_init;
+# the first name here is vector 1 at 0x8103. Do not reorder.
+acos
+asin
+atan
+atan2
+ceil
+cos
+exp
+fabs
+feclearexcept
+fegetenv
+fegetexceptflag
+fegetmode
+fegetround
+feholdexcept
+feraiseexcept
+fesetenv
+fesetexcept
+fesetexceptflag
+fesetmode
+fesetround
+fetestexcept
+fetestexceptflag
+feupdateenv
+floor
+frexp
+ldexp
+log
+modf
+pow
+sin
+sqrt
+tan

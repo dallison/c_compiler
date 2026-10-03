@@ -32,20 +32,22 @@
 .global __builtin_va_arg
 
 // All the ctype is* functions take the integer to check in X,Y and
-// return 0 or 1 in A.
+// return 0 or 1 in A.  Carry is set for a true result.  Every branch
+// stays inside its own section: the linker splits these sections, so a
+// branch to a label in another function lands a few bytes away and loops.
 .section ".text.__builtin_isdigit", "ax", @progbits
 __builtin_isdigit:
   CPY #0
-  BNE is_false
+  BNE isdigit_no
   CPX #'0'
-  BCC is_false
+  BCC isdigit_no
   CPX #'9'+1
-  BCC is_true
-is_false:
+  BCC isdigit_yes
+isdigit_no:
   LDA #0
   CLC
   RTS
-is_true:
+isdigit_yes:
   LDA #1
   SEC
   RTS
@@ -53,86 +55,112 @@ is_true:
 .section ".text.__builtin_isalpha", "ax", @progbits
 __builtin_isalpha:
   JSR __builtin_isupper
-  BCS is_true
+  BCC isalpha_lower
+  RTS
+isalpha_lower:
+  JMP __builtin_islower
 
 .section ".text.__builtin_islower", "ax", @progbits
 __builtin_islower:
   CPY #0
-  BNE is_false
+  BNE islower_no
   CPX #'a'
-  BCC is_false
+  BCC islower_no
   CPX #'z'+1
-  BCC is_true
-#ifdef __65c02__
-  BRA is_false
-#else
-  JMP is_false
-#endif
+  BCS islower_no
+  LDA #1
+  SEC
+  RTS
+islower_no:
+  LDA #0
+  CLC
+  RTS
 
 .section ".text.__builtin_isupper", "ax", @progbits
 __builtin_isupper:
   CPY #0
-  BNE is_false
+  BNE isupper_no
   CPX #'A'
-  BCC is_false
+  BCC isupper_no
   CPX #'Z'+1
-  BCC is_true
-#ifdef __65c02__
-  BRA is_false
-#else
-  JMP is_false
-#endif
-  
+  BCS isupper_no
+  LDA #1
+  SEC
+  RTS
+isupper_no:
+  LDA #0
+  CLC
+  RTS
+
 .section ".text.__builtin_toupper", "ax", @progbits
 __builtin_toupper:
   JSR __builtin_islower
-  BCC is_false
+  BCC toupper_keep
   TXA
   SBC #'a'-'A'      // Carry is set.
   RTS
-  
+toupper_keep:
+  TXA
+  RTS
+
 .section ".text.__builtin_tolower", "ax", @progbits
 __builtin_tolower:
   JSR __builtin_isupper
-  BCC is_false
+  BCC tolower_keep
   TXA
-  ADC #'a'-'A'-1    // Carry is set.
+  ADC #'a'-'A'-1    // isupper returned with carry set.
   RTS
-  
-// Is A alphanumeric.  Carry set = yes.
+tolower_keep:
+  TXA
+  RTS
+
+// Carry set means the character is alphanumeric.
 .section ".text.__builtin_isalnum", "ax", @progbits
 __builtin_isalnum:
   JSR __builtin_isdigit
-  BCS is_false
+  BCC isalnum_alpha
+  RTS
+isalnum_alpha:
   JMP __builtin_isalpha
 
 .section ".text.__builtin_isspace", "ax", @progbits
 __builtin_isspace:
   CPY #0
-  BNE is_false
+  BNE isspace_no
   CPX #' '
-  BEQ is_true
+  BEQ isspace_yes
   CPX #9
-  BEQ is_true
-  CPX #10
-  BEQ is_true
-  CPX #13
-  BNE is_false
+  BCC isspace_no
+  CPX #14
+  BCS isspace_no
+isspace_yes:
   LDA #1
-  RTS             // Carry is set.
-  
+  SEC
+  RTS
+isspace_no:
+  LDA #0
+  CLC
+  RTS
+
 .section ".text.__builtin_isxdigit", "ax", @progbits
 __builtin_isxdigit:
   JSR __builtin_isdigit
-  BCS is_true
+  BCC isxdigit_letter
+  RTS
+isxdigit_letter:
   CPX #'A'
-  BCC is_false
+  BCC isxdigit_no
   CPX #'G'
-  BCC is_true
+  BCC isxdigit_yes
   CPX #'a'
-  BCC is_false
+  BCC isxdigit_no
   CPX #'g'
-  BCC is_true
+  BCS isxdigit_no
+isxdigit_yes:
+  LDA #1
+  SEC
+  RTS
+isxdigit_no:
   LDA #0
   CLC
   RTS
@@ -140,46 +168,68 @@ __builtin_isxdigit:
 .section ".text.__builtin_isblank", "ax", @progbits
 __builtin_isblank:
   CPY #0
-  BNE is_false
+  BNE isblank_no
   CPX #9
-  BEQ is_true
+  BEQ isblank_yes
   CPX #' '
-  BEQ is_true1
-is_false1:
-  LDA #0
-  CLC
-  RTS
-is_true1:
+  BNE isblank_no
+isblank_yes:
   LDA #1
   SEC
   RTS
-
+isblank_no:
+  LDA #0
+  CLC
+  RTS
 
 .section ".text.__builtin_iscntrl", "ax", @progbits
 __builtin_iscntrl:
   CPY #0
-  BNE is_false1
+  BNE iscntrl_no
   CPX #0x20
-  BCC is_true1
-  BCS is_false1
+  BCC iscntrl_yes
+  CPX #0x7f
+  BNE iscntrl_no
+iscntrl_yes:
+  LDA #1
+  SEC
+  RTS
+iscntrl_no:
+  LDA #0
+  CLC
+  RTS
 
 .section ".text.__builtin_isgraph", "ax", @progbits
 __builtin_isgraph:
   CPY #0
-  BNE is_false1
-  CPX #' '
-  BNE is_true1
-  BEQ is_false1
+  BNE isgraph_no
+  CPX #0x21
+  BCC isgraph_no
+  CPX #0x7f
+  BCS isgraph_no
+  LDA #1
+  SEC
+  RTS
+isgraph_no:
+  LDA #0
+  CLC
+  RTS
 
 .section ".text.__builtin_isprint", "ax", @progbits
 __builtin_isprint:
   CPY #0
-  BNE is_false1
-  CPX #127
-  BCS is_false1
+  BNE isprint_no
   CPX #' '
-  BCS is_true1
-  BCC is_false1
+  BCC isprint_no
+  CPX #0x7f
+  BCS isprint_no
+  LDA #1
+  SEC
+  RTS
+isprint_no:
+  LDA #0
+  CLC
+  RTS
 
 // Punctuation chars:
 // 0x21...0x2f
@@ -189,22 +239,31 @@ __builtin_isprint:
 .section ".text.__builtin_ispunct", "ax", @progbits
 __builtin_ispunct:
   CPY #0
-  BNE is_false1
+  BNE ispunct_no
   CPX #0x21
-  BCC is_false1
+  BCC ispunct_no
   CPX #0x30
-  BCC is_true1
-  CPX #0x40
-  BEQ is_true1
+  BCC ispunct_yes
+  CPX #0x3a
+  BCC ispunct_no
+  CPX #0x41
+  BCC ispunct_yes
   CPX #0x5b
-  BCC is_false1
+  BCC ispunct_no
   CPX #0x61
-  BCC is_true1
+  BCC ispunct_yes
   CPX #0x7b
-  BCC is_true1
+  BCC ispunct_no
   CPX #0x7f
-  BCC is_true1
-  BCS is_false1
+  BCS ispunct_no
+ispunct_yes:
+  LDA #1
+  SEC
+  RTS
+ispunct_no:
+  LDA #0
+  CLC
+  RTS
 
 // __mem_dest
 // __mem_src

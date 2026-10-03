@@ -448,6 +448,8 @@ bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
   } else if (StringEqual(&triple->os_name, "darwin") ||
              StringEqual(&triple->os_name, "macos")) {
     triple->os = kTargetOSDarwin;
+  } else if (StringEqual(&triple->os_name, "bbc")) {
+    triple->os = kTargetOSBBC;
   } else if (StringEqual(&triple->os_name, "none")) {
     triple->os = kTargetOSNone;
   } else {
@@ -472,6 +474,13 @@ bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
                                 "Darwin is only supported by AArch64 in '%s'",
                                 value);
   }
+  if (triple->os == kTargetOSBBC &&
+      strcmp(definition->canonical_name, "6502") != 0 &&
+      strcmp(definition->canonical_name, "65c02") != 0) {
+    return SetTargetTripleError(
+        error, error_size,
+        "BBC paged libc is only supported by 6502 and 65c02 in '%s'", value);
+  }
   StringClear(&triple->canonical);
   StringPrintf(&triple->canonical, "%s-%s-%s-%s",
                definition->canonical_name, triple->vendor.value,
@@ -485,6 +494,10 @@ bool CompilerTargetTripleIsLinux(const CompilerTargetTriple* triple) {
 
 bool CompilerTargetTripleIsDarwin(const CompilerTargetTriple* triple) {
   return triple != NULL && triple->os == kTargetOSDarwin;
+}
+
+bool CompilerTargetTripleIsBBC(const CompilerTargetTriple* triple) {
+  return triple != NULL && triple->os == kTargetOSBBC;
 }
 
 static const char* MapHostMachineToArch(const char* machine) {
