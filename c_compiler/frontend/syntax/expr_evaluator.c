@@ -1067,6 +1067,7 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
   ConstEvalContext ctx;
   ConstEvalContextInit(&ctx);
   bool ok = EvaluateIntegerExpressionInContext(&ctx, node, result);
+  ok = ok && !ConstEvalContextHasLiveAllocation(&ctx);
   ConstEvalContextDestruct(&ctx);
   return ok;
 }
@@ -1075,6 +1076,7 @@ bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
   ConstEvalContext ctx;
   ConstEvalContextInit(&ctx);
   bool ok = EvaluateFloatingPointExpressionInContext(&ctx, node, result);
+  ok = ok && !ConstEvalContextHasLiveAllocation(&ctx);
   ConstEvalContextDestruct(&ctx);
   return ok;
 }
@@ -1093,6 +1095,7 @@ bool EvaluateLongDoubleExpression(ASTNode* node, FPBits* result) {
       *result = FPBitsFromF64(value, LongDoubleEvalFormat());
     }
   }
+  ok = ok && !ConstEvalContextHasLiveAllocation(&ctx);
   ConstEvalContextDestruct(&ctx);
   return ok;
 }

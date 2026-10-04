@@ -4122,7 +4122,7 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
       formal_origin->type != NULL &&
       formal_origin->type->template_origin != NULL && formal_args != NULL) {
     Vector* alias_args =
-        CompleteAliasTemplateArguments(formal_origin, formal_args);
+        CompleteAliasTemplateArguments(NULL, formal_origin, formal_args);
     if (alias_args == NULL) {
       return false;
     }
@@ -7168,7 +7168,7 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
           pattern->template_origin) &&
       pattern->template_arguments != NULL) {
     Vector* alias_args = CompleteAliasTemplateArguments(
-        pattern->template_origin, pattern->template_arguments);
+        NULL, pattern->template_origin, pattern->template_arguments);
     if (alias_args == NULL) {
       return false;
     }
@@ -9736,7 +9736,7 @@ static TypeRecord* ExpandConcreteAliasTemplateId(TypeParser* parser,
   }
   Symbol* alias = type->template_origin;
   Vector* grouped =
-      CompleteAliasTemplateArguments(alias, type->template_arguments);
+      CompleteAliasTemplateArguments(parser, alias, type->template_arguments);
   Vector* pattern_args =
       grouped != NULL ? grouped : type->template_arguments;
   TypeRecord* subst =
@@ -11580,7 +11580,7 @@ static Vector* PrefixMemberAliasPatternArguments(Symbol* alias,
 static Vector* CompleteMemberAliasTemplateArguments(TypeParser* parser,
                                                     Symbol* alias,
                                                     Vector* args) {
-  Vector* completed = CompleteAliasTemplateArguments(alias, args);
+  Vector* completed = CompleteAliasTemplateArguments(parser, alias, args);
   if (completed != NULL) {
     return completed;
   }
@@ -11588,7 +11588,7 @@ static Vector* CompleteMemberAliasTemplateArguments(TypeParser* parser,
   if (prefixed == NULL) {
     return NULL;
   }
-  completed = CompleteAliasTemplateArguments(alias, prefixed);
+  completed = CompleteAliasTemplateArguments(parser, alias, prefixed);
   VectorDeleteWithContents(prefixed,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);

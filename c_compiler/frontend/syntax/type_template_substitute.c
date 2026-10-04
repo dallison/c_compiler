@@ -1677,7 +1677,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     // Arguments folds the trailing arguments back into the pack so the pattern
     // sees a single pack argument.
     Vector* grouped_args =
-        CompleteAliasTemplateArguments(info.origin, concrete_args);
+        CompleteAliasTemplateArguments(parser, info.origin, concrete_args);
     Vector* completed = grouped_args != NULL ? grouped_args : concrete_args;
     Vector* prefixed =
         MemberAliasPatternArguments(parser, info.origin, completed);
@@ -1914,7 +1914,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
           // into the alias's parameter list before appending them, or the pack
           // binds only the first size.
           Vector* completed_member_args = CompleteAliasTemplateArguments(
-              member->symbol, concrete_member_args);
+              parser, member->symbol, concrete_member_args);
           Vector* member_args_for_pattern = completed_member_args != NULL
                                                 ? completed_member_args
                                                 : concrete_member_args;
@@ -3759,7 +3759,8 @@ static TemplateArgument* AliasDefaultTemplateArgument(TemplateParameter* param) 
  * expand to `enable_if<true, void>::type` rather than leaking the alias's own
  * `T` parameter (which would otherwise collide with the enclosing template's
  * parameters during substitution). */
-static Vector* AliasActualsWithDefaults(Symbol* alias, Vector* actuals) {
+static Vector* AliasActualsWithDefaults(TypeParser* parser, Symbol* alias,
+                                        Vector* actuals) {
   if (alias == NULL || alias->alias_template == NULL) {
     return NULL;
   }
@@ -3782,8 +3783,35 @@ static Vector* AliasActualsWithDefaults(Symbol* alias, Vector* actuals) {
     VectorAppend(extended, TemplateArgumentCopy(actuals->value.p[i]));
   }
   for (size_t i = actual_count; i < parameter_count; i++) {
-    TemplateArgument* def =
-        AliasDefaultTemplateArgument(parameters->value.p[i]);
+    TemplateParameter* param = parameters->value.p[i];
+    TemplateArgument* def = AliasDefaultTemplateArgument(param);
+    if (def == NULL && parser != NULL && param != NULL &&
+        param->kind == kTemplateParameterType && param->default_type != NULL &&
+        param->index == (int)i &&
+        !TemplateArgumentVectorContainsTemplateParameter(extended)) {
+      // A default naming an earlier parameter (`class C = less<K>`) is
+      // substituted with the arguments so far; a member alias's indices are
+      // offset by its class's parameters, so only a top-level alias qualifies.
+      bool saved_failed = parser->template_substitution_failed;
+      parser->template_substitution_failed = false;
+      TypeRecord* type =
+          SubstituteTemplateParameters(parser, param->default_type, extended);
+      bool failed = parser->template_substitution_failed;
+      parser->template_substitution_failed = saved_failed;
+      if (type != NULL && !failed && !TypeContainsTemplateParameter(type)) {
+        def = TemplateArgumentAlloc();
+        def->kind = kTemplateParameterType;
+        def->is_pack_expansion = false;
+        def->type = type;
+        def->int_value = 0;
+        def->template_parameter_index = -1;
+        def->pack_arguments = NULL;
+        def->dependent_expr = NULL;
+        def->location = SOURCE_LOCATION_MISSING;
+      } else {
+        TypeRecordDelete(type);
+      }
+    }
     if (def != NULL && def->kind == kTemplateParameterNonType &&
         def->template_parameter_index >= 0 &&
         (size_t)def->template_parameter_index < extended->length) {
@@ -3805,14 +3833,15 @@ static Vector* AliasActualsWithDefaults(Symbol* alias, Vector* actuals) {
   return extended;
 }
 
-Vector* CompleteAliasTemplateArguments(Symbol* alias, Vector* actuals) {
+Vector* CompleteAliasTemplateArguments(TypeParser* parser, Symbol* alias,
+                                       Vector* actuals) {
   if (alias == NULL) {
     return NULL;
   }
   // Fill in trailing default arguments (e.g. the `void` in
   // `enable_if_t<B, class T = void>`) before dispatching so an alias named with
   // fewer arguments than it declares still expands fully.
-  Vector* extended = AliasActualsWithDefaults(alias, actuals);
+  Vector* extended = AliasActualsWithDefaults(parser, alias, actuals);
   Vector* effective = extended != NULL ? extended : actuals;
   Vector* result = NULL;
   // A member alias such as `template<int I> using StorageT = Storage<T, I>`

@@ -87,6 +87,9 @@ struct ConstexprObject {
   Vector slots;  // ConstexprValue*
   StructMember* active_union_member;
   bool lifetime_ended;
+  // A destructor call in the body (a scope's cleanup) has already run, so
+  // unwinding the scope must not destroy the object again.
+  bool destroyed;
   ConstexprObject* complete_object;
   size_t complete_offset;
 };
@@ -101,6 +104,9 @@ struct ConstexprException {
   bool active;
   bool destroyed;
   size_t references;
+  // Handlers currently executing for this exception: a handler that rethrows
+  // and catches it again nests inside the one already handling it.
+  int handlers;
   void* token;
   ConstexprException* previous;
 };
@@ -188,6 +194,16 @@ static ConstexprHeapBlock* ConstexprFindHeapBlock(ConstEvalContext* ctx,
     }
   }
   return NULL;
+}
+
+bool ConstEvalContextHasLiveAllocation(ConstEvalContext* ctx) {
+  for (size_t i = 0; ctx != NULL && i < ctx->heap_blocks.length; i++) {
+    ConstexprHeapBlock* block = ctx->heap_blocks.value.p[i];
+    if (block != NULL && block->live) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static bool ConstexprHasHeapBlock(ConstEvalContext* ctx,
@@ -811,6 +827,7 @@ static bool ConstexprEvaluateAllocationCall(ConstEvalContext* ctx,
           ConstexprAddressTargetObject(ctx, *result);
       if (target_object != NULL) {
         target_object->lifetime_ended = false;
+        target_object->destroyed = false;
       }
       ConstexprValue* target_slot = result->address_slot;
       if (target_slot == NULL && result->address_object != NULL) {
@@ -881,6 +898,7 @@ void ConstEvalContextInit(ConstEvalContext* ctx) {
   VectorInit(&ctx->objects);
   VectorInit(&ctx->heap_blocks);
   VectorInit(&ctx->exception_handles);
+  VectorInit(&ctx->temporaries);
   ctx->exception = NULL;
   ctx->call_depth = 0;
   ctx->steps = 0;
@@ -901,6 +919,10 @@ void ConstEvalContextDestruct(ConstEvalContext* ctx) {
     free(ctx->bindings.value.p[i]);
   }
   VectorDestruct(&ctx->bindings);
+  for (size_t i = 0; i < ctx->temporaries.length; i++) {
+    free(ctx->temporaries.value.p[i]);
+  }
+  VectorDestruct(&ctx->temporaries);
   for (size_t i = 0; i < ctx->objects.length; i++) {
     ConstexprObject* object = ctx->objects.value.p[i];
     for (size_t j = 0; j < object->slots.length; j++) {
@@ -969,6 +991,14 @@ static ConstexprBinding* FindConstexprBinding(ConstEvalContext* ctx,
       return binding;
     }
   }
+  if (symbol->flags.is_temp) {
+    for (size_t i = ctx->temporaries.length; i > 0; i--) {
+      ConstexprBinding* binding = ctx->temporaries.value.p[i - 1];
+      if (binding->symbol == symbol) {
+        return binding;
+      }
+    }
+  }
   // A function-template body can retain the primary template's formal symbols
   // while the instantiated function type owns cloned formals.  They denote the
   // same argument slot even though their Symbol pointers differ.  Resolve that
@@ -984,6 +1014,49 @@ static ConstexprBinding* FindConstexprBinding(ConstEvalContext* ctx,
     }
   }
   return NULL;
+}
+
+static void ConstexprRecordTemporary(ConstEvalContext* ctx, Symbol* symbol,
+                                     ConstexprObject* object) {
+  if (symbol == NULL || !symbol->flags.is_temp || object == NULL) {
+    return;
+  }
+  ConstexprBinding* binding = NULL;
+  for (size_t i = 0; i < ctx->temporaries.length && binding == NULL; i++) {
+    ConstexprBinding* candidate = ctx->temporaries.value.p[i];
+    if (candidate->symbol == symbol) {
+      binding = candidate;
+    }
+  }
+  if (binding == NULL) {
+    binding = malloc(sizeof(ConstexprBinding));
+    VectorAppend(&ctx->temporaries, binding);
+  }
+  *binding = (ConstexprBinding){
+      .symbol = symbol, .state = kValueStateValid, .object = object};
+}
+
+static ConstexprBinding* ConstexprRecordScalarTemporary(ConstEvalContext* ctx,
+                                                        Symbol* symbol) {
+  ConstexprBinding* binding = malloc(sizeof(ConstexprBinding));
+  *binding = (ConstexprBinding){.symbol = symbol,
+                                .state = kValueStateIndeterminate};
+  VectorAppend(&ctx->temporaries, binding);
+  return binding;
+}
+
+static void ConstexprForgetTemporaryObject(ConstEvalContext* ctx,
+                                           ConstexprObject* object) {
+  if (object == NULL) {
+    return;
+  }
+  for (size_t i = ctx->temporaries.length; i > 0; i--) {
+    ConstexprBinding* binding = ctx->temporaries.value.p[i - 1];
+    if (binding->object == object) {
+      free(binding);
+      VectorDeleteElement(&ctx->temporaries, i - 1);
+    }
+  }
 }
 
 bool ConstexprHasBinding(ConstEvalContext* ctx, Symbol* symbol) {
@@ -1141,6 +1214,7 @@ static ConstexprObject* NewConstexprObject(ConstEvalContext* ctx,
   object->type = type;
   object->active_union_member = NULL;
   object->lifetime_ended = false;
+  object->destroyed = false;
   object->complete_object = object;
   object->complete_offset = 0;
   VectorInit(&object->slots);
@@ -1915,6 +1989,12 @@ static bool EvaluateConstexprLValue(ConstEvalContext* ctx, ASTNode* node,
     return false;
   }
   *binding = FindConstexprBinding(ctx, id->symbol);
+  if (*binding == NULL && id->symbol->flags.is_temp &&
+      id->symbol->type != NULL && TypeIsScalar(id->symbol->type)) {
+    // A compiler temporary holding a full-expression's value while its
+    // temporaries are destroyed: `(saved = f(T()), T.~T(), saved)`.
+    *binding = ConstexprRecordScalarTemporary(ctx, id->symbol);
+  }
   if (*binding != NULL && (*binding)->is_address) {
     if (TypeIsReference(id->symbol->type)) {
       if ((*binding)->address_binding != NULL) {
@@ -2111,7 +2191,8 @@ static bool DestroyConstexprBindingsFromMark(ConstEvalContext* ctx,
     ConstexprBinding* binding =
         ctx->bindings.value.p[ctx->bindings.length - 1];
     bool ok = true;
-    if (binding->object != NULL && binding->symbol != NULL) {
+    if (binding->object != NULL && binding->symbol != NULL &&
+        !binding->object->destroyed) {
       ConstexprException* unwinding = ctx->exception;
       bool suppress_pending =
           unwinding != NULL && !unwinding->handling;
@@ -3078,8 +3159,10 @@ bool EvaluateInt128Constant(ASTNode* node, int64_t* lo, int64_t* hi) {
 static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
                                    TypeRecord* type,
                                    ConstexprValue* result) {
+  // Many callers declare the result uninitialized; a path that fills in only
+  // some fields must not leave stale address components behind.
   if (result != NULL) {
-    result->state = kValueStateValid;
+    *result = (ConstexprValue){.state = kValueStateValid};
   }
   if (node != NULL && node->op == AST_OP(identifier) && type != NULL &&
       TypeIsUninitializedFriendly(type)) {
@@ -3252,7 +3335,12 @@ bool ConstexprEvaluateThrowExpression(ConstEvalContext* ctx, ASTNode* node) {
                               &value)) {
     return false;
   }
-  if (value.is_object) {
+  // A prvalue operand initializes the exception object directly; the
+  // exception, not the full-expression, now owns that temporary.
+  if (value.is_object &&
+      throw_node->expr->value_category == kValueCategoryPrvalue) {
+    ConstexprForgetTemporaryObject(ctx, value.object);
+  } else if (value.is_object) {
     TypeRecord* object_type =
         ConstexprExceptionObjectType(throw_node->expr->type);
     ConstexprObject* copied = NULL;
@@ -3273,6 +3361,7 @@ bool ConstexprEvaluateThrowExpression(ConstEvalContext* ctx, ASTNode* node) {
   exception->active = true;
   exception->destroyed = false;
   exception->references = 0;
+  exception->handlers = 0;
   exception->token = NULL;
   exception->previous = ctx->exception;
   VectorAppend(&ctx->exception_handles, exception);
@@ -3427,8 +3516,10 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
     }
     ConstexprValue ignored;
     if (node->left != NULL && node->left->type != NULL &&
-        !TypeIsVoid(node->left->type) &&
-        !EvaluateConstexprValue(ctx, node->left, node->left->type, &ignored)) {
+        (TypeIsVoid(node->left->type)
+             ? !EvaluateConstexprVoidExpression(ctx, node->left)
+             : !EvaluateConstexprValue(ctx, node->left, node->left->type,
+                                       &ignored))) {
       return false;
     }
     return EvaluateConstexprValue(ctx, node->right, type, result);
@@ -4061,6 +4152,7 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
           result->ivalue = 0;
           result->fvalue = 0;
           result->object = CloneConstexprObject(ctx, source_value.object);
+          ConstexprRecordTemporary(ctx, temporary->symbol, result->object);
           return result->object != NULL;
         }
       }
@@ -4076,6 +4168,9 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
     PushConstexprBinding(ctx, temporary->symbol, *result);
     bool ok = EvaluateConstexprConstructorCall(ctx, constructor);
     PopConstexprBindings(ctx, mark);
+    if (ok) {
+      ConstexprRecordTemporary(ctx, temporary->symbol, result->object);
+    }
     return ok;
   }
 
@@ -5866,6 +5961,7 @@ static bool ConstexprFunctionAddress(ConstEvalContext* ctx, Symbol* symbol,
 
 static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                           ConstexprValue* result) {
+  *result = (ConstexprValue){0};
   if (node == NULL) {
     return false;
   }
@@ -7739,8 +7835,9 @@ static ASTNode* ConstexprFindClassResultCall(ASTNode* node) {
   return NULL;
 }
 
-static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
-                                                VariableDeclarationASTNode* decl) {
+static bool EvaluateConstexprVariableDeclarationInitializer(
+    ConstEvalContext* ctx, VariableDeclarationASTNode* decl,
+    ASTNode* decl_initializer) {
   if (decl == NULL || decl->symbol == NULL ||
       TypeIsFunction(decl->symbol->type)) {
     return false;
@@ -7758,7 +7855,7 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
       decl->symbol->type->info.struct_info->is_union;
   if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
       directly_track_uninitialized_state &&
-      decl->initializer == NULL &&
+      decl_initializer == NULL &&
       (decl->symbol->storage == STO(implicit) ||
        StorageIs(decl->symbol->storage, STO(auto)) ||
        StorageIs(decl->symbol->storage, STO(register)))) {
@@ -7783,7 +7880,7 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
   }
   if (TypeIsReflection(decl->symbol->type)) {
     ReflectionValue* reflection =
-        ConstexprEvaluateReflectionExpression(ctx, decl->initializer);
+        ConstexprEvaluateReflectionExpression(ctx, decl_initializer);
     if (reflection == NULL) {
       return false;
     }
@@ -7793,7 +7890,7 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
     return true;
   }
   if (TypeIsPointer(decl->symbol->type) || TypeIsReference(decl->symbol->type)) {
-    ASTNode* initializer = ConstexprInitializerExpression(decl->initializer);
+    ASTNode* initializer = ConstexprInitializerExpression(decl_initializer);
     if (initializer == NULL) {
       if (TypeIsPointer(decl->symbol->type) &&
           StringStartsWith(&decl->symbol->name, "__invented__")) {
@@ -7817,7 +7914,7 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
   }
   if (TypeIsFixedArray(decl->symbol->type) ||
       TypeIsStructOrUnion(decl->symbol->type)) {
-    ASTNode* initializer = ConstexprInitializerExpression(decl->initializer);
+    ASTNode* initializer = ConstexprInitializerExpression(decl_initializer);
     if (initializer == NULL &&
         CompilerCXXAtLeast(kLanguageStandardCXX26) &&
         TypeIsStructOrUnion(decl->symbol->type) &&
@@ -7879,7 +7976,7 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
     }
     ConstexprValue object_value;
     if (!EvaluateConstexprInitializer(ctx, decl->symbol->type,
-                                      decl->initializer, &object_value)) {
+                                      decl_initializer, &object_value)) {
       return false;
     }
     PushConstexprBinding(ctx, decl->symbol, object_value);
@@ -7889,7 +7986,7 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
       !TypeIsFloatingPoint(decl->symbol->type)) {
     return false;
   }
-  ASTNode* expr = ConstexprInitializerExpression(decl->initializer);
+  ASTNode* expr = ConstexprInitializerExpression(decl_initializer);
   if (expr == NULL) {
     return false;
   }
@@ -7899,6 +7996,96 @@ static bool EvaluateConstexprVariableDeclaration(ConstEvalContext* ctx,
   }
   PushConstexprBinding(ctx, decl->symbol, value);
   return true;
+}
+
+static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
+                                            ASTNode* node);
+static bool EvaluateConstexprExceptionCall(ConstEvalContext* ctx,
+                                           ASTNode* node, Symbol* symbol,
+                                           ConstexprValue* result,
+                                           bool* handled);
+
+// Collects the temporary destructor calls trailing a full-expression,
+// `((expr, a.~A()), b.~B())`, outermost first, and returns the expression they
+// follow.
+static ASTNode* ConstexprCollectTemporaryCleanups(ASTNode* expr,
+                                                 Vector* cleanups) {
+  while (expr != NULL && expr->op == AST_OP(comma)) {
+    ASTNode* cleanup = ((BinaryASTNode*)expr)->right;
+    if (cleanup == NULL || cleanup->op != AST_OP(call) ||
+        (cleanup->flags & kASTTemporaryCleanupCall) == 0) {
+      break;
+    }
+    VectorAppend(cleanups, cleanup);
+    expr = ((BinaryASTNode*)expr)->left;
+  }
+  return expr;
+}
+
+// An exception leaving a full-expression destroys the temporaries it had
+// already constructed, most recent first.  A temporary not yet reached has no
+// live object and is skipped.
+static bool ConstexprUnwindTemporaryCleanups(ConstEvalContext* ctx,
+                                             Vector* cleanups) {
+  ConstexprException* unwinding = ctx->exception;
+  if (cleanups->length == 0 || unwinding == NULL || unwinding->handling) {
+    return true;
+  }
+  unwinding->handling = true;
+  ctx->unwinding_exceptions++;
+  bool ok = true;
+  for (size_t i = cleanups->length; ok && i > 0; i--) {
+    ASTNode* cleanup = cleanups->value.p[i - 1];
+    ASTNode* receiver = NULL;
+    (void)ConstexprMemberCallSymbol(cleanup, &receiver);
+    VectorASTNode* call = (VectorASTNode*)cleanup;
+    if (receiver == NULL && call->children != NULL &&
+        call->children->length > 0) {
+      receiver = call->children->value.p[0];
+    }
+    ConstexprObject* object = NULL;
+    if (receiver != NULL &&
+        EvaluateConstexprObjectAddress(ctx, receiver, &object) &&
+        object != NULL && !object->destroyed) {
+      ok = EvaluateConstexprDestructorCall(ctx, cleanup);
+    }
+  }
+  ctx->unwinding_exceptions--;
+  unwinding->handling = false;
+  return ok;
+}
+
+// The temporaries of a declaration's full-expression are destroyed after the
+// variable is initialized: `(init(x, expr), x_tmp.~T(), ...)`.
+static bool EvaluateConstexprVariableDeclaration(
+    ConstEvalContext* ctx, VariableDeclarationASTNode* decl) {
+  ASTNode* initializer = decl != NULL ? decl->initializer : NULL;
+  Vector cleanups;
+  VectorInit(&cleanups);
+  while (initializer != NULL && initializer->op == AST_OP(comma) &&
+         ((BinaryASTNode*)initializer)->right != NULL &&
+         ((BinaryASTNode*)initializer)->right->type != NULL &&
+         TypeIsVoid(((BinaryASTNode*)initializer)->right->type)) {
+    VectorAppend(&cleanups, ((BinaryASTNode*)initializer)->right);
+    initializer = ((BinaryASTNode*)initializer)->left;
+  }
+  ASTNode* initialized =
+      initializer != NULL && initializer->op == AST_OP(init)
+          ? ((BinaryASTNode*)initializer)->left : NULL;
+  if (cleanups.length == 0 || initialized == NULL ||
+      initialized->op != AST_OP(identifier) ||
+      ((IdentifierASTNode*)initialized)->symbol != decl->symbol) {
+    VectorDestruct(&cleanups);
+    return EvaluateConstexprVariableDeclarationInitializer(
+        ctx, decl, decl != NULL ? decl->initializer : NULL);
+  }
+  bool ok = EvaluateConstexprVariableDeclarationInitializer(ctx, decl,
+                                                            initializer);
+  for (size_t i = cleanups.length; ok && i > 0; i--) {
+    ok = EvaluateConstexprVoidExpression(ctx, cleanups.value.p[i - 1]);
+  }
+  VectorDestruct(&cleanups);
+  return ok;
 }
 
 bool ConstexprBindVariableDeclaration(ConstEvalContext* ctx,
@@ -8156,6 +8343,9 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
   if (expr->op != AST_OP(call)) {
     return true;
   }
+  if (ConstexprIsDeallocationFunction(ConstexprCallSymbol(expr))) {
+    return ConstexprEvaluateDeallocationCall(ctx, expr);
+  }
   ASTNode* receiver = NULL;
   Symbol* callee =
       ConstexprFunctionDefinition(ConstexprCallSymbol(expr));
@@ -8167,6 +8357,19 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
     callee =
         ConstexprFunctionDefinition(ConstexprVirtualCallSymbol(ctx, expr,
                                                                &receiver));
+  }
+  Symbol* named = ConstexprCallSymbol(expr);
+  if (callee == NULL && named != NULL &&
+      StringStartsWith(&named->name, "__davecc_exception_ptr_")) {
+    // The exception_ptr runtime hooks have no definition; the evaluator
+    // models them directly.
+    bool handled = false;
+    ConstexprValue ignored = {0};
+    bool ok =
+        EvaluateConstexprExceptionCall(ctx, expr, named, &ignored, &handled);
+    if (handled) {
+      return ok;
+    }
   }
   if (callee == NULL || callee->type == NULL ||
       !TypeIsFunction(callee->type)) {
@@ -8415,7 +8618,9 @@ static bool EvaluateConstexprObjectDestructor(ConstEvalContext* ctx,
   if (destructor_result != kConstexprStmtNormal) {
     return false;
   }
-  return ConstexprDestroyObjectMembersAndBases(ctx, type, object);
+  // The parser appends the member and base destructor calls to every
+  // destructor body, so the body has already destroyed them.
+  return true;
 }
 
 static bool EvaluateConstexprExceptionDestructor(
@@ -8466,10 +8671,14 @@ static ConstexprStatementResult EvaluateConstexprTry(
           FindConstexprBinding(ctx, handler->symbol);
       catch_object = binding != NULL ? binding->object : NULL;
     }
+    exception->handlers++;
     ConstexprStatementResult handler_result = EvaluateConstexprStatement(
         ctx, handler->stmt, return_type, result);
+    exception->handlers--;
+    // An enclosing handler still handling this exception keeps it alive.
+    bool enclosing_handler = exception->handlers > 0;
     if (handler_result != kConstexprStmtThrow &&
-        ctx->exception == exception &&
+        ctx->exception == exception && !enclosing_handler &&
         !EvaluateConstexprExceptionDestructor(ctx, exception)) {
       ConstexprRemoveException(ctx, exception);
       return kConstexprStmtInvalid;
@@ -8487,7 +8696,9 @@ static ConstexprStatementResult EvaluateConstexprTry(
     }
     bool exception_consumed =
         handler_result != kConstexprStmtThrow || ctx->exception != exception;
-    if (exception_consumed) {
+    if (exception_consumed && enclosing_handler) {
+      exception->handling = true;
+    } else if (exception_consumed) {
       ConstexprException* unwinding = ctx->exception;
       bool suppress_pending =
           unwinding != NULL && unwinding != exception && !unwinding->handling;
@@ -8510,17 +8721,62 @@ static ConstexprStatementResult EvaluateConstexprTry(
   return kConstexprStmtThrow;
 }
 
+// Runs the kASTEHCleanupOnly statements among body's first `end` statements
+// for an exception leaving the block: each run of consecutive statements (one
+// subobject) in emitted order, the runs in reverse construction order.
+static bool EvaluateConstexprEHCleanups(ConstEvalContext* ctx,
+                                        CompoundStatementASTNode* body,
+                                        size_t end, TypeRecord* return_type) {
+  ConstexprException* unwinding = ctx->exception;
+  bool suppress_pending = unwinding != NULL && !unwinding->handling;
+  if (suppress_pending) {
+    unwinding->handling = true;
+    ctx->unwinding_exceptions++;
+  }
+  bool ok = true;
+  size_t i = end;
+  while (ok && i > 0) {
+    if (!(((ASTNode*)body->statements->value.p[i - 1])->flags &
+          kASTEHCleanupOnly)) {
+      i--;
+      continue;
+    }
+    size_t run_end = i;
+    while (i > 0 && (((ASTNode*)body->statements->value.p[i - 1])->flags &
+                     kASTEHCleanupOnly)) {
+      i--;
+    }
+    for (size_t j = i; ok && j < run_end; j++) {
+      ConstexprValue ignored = {0};
+      ok = EvaluateConstexprStatement(ctx, body->statements->value.p[j],
+                                      return_type, &ignored) ==
+           kConstexprStmtNormal;
+    }
+  }
+  if (suppress_pending) {
+    ctx->unwinding_exceptions--;
+    unwinding->handling = false;
+  }
+  return ok;
+}
+
 static ConstexprStatementResult EvaluateConstexprCompound(
     ConstEvalContext* ctx, CompoundStatementASTNode* body,
     TypeRecord* return_type, ConstexprValue* result) {
   size_t mark = ctx->bindings.length;
   for (size_t i = 0; i < body->statements->length; i++) {
     ASTNode* stmt = body->statements->value.p[i];
+    if (stmt->flags & kASTEHCleanupOnly) {
+      // A constructor's partial-construction cleanup runs only when an
+      // exception leaves the constructor.
+      continue;
+    }
     ConstexprStatementResult stmt_result =
         EvaluateConstexprStatement(ctx, stmt, return_type, result);
     if (stmt_result != kConstexprStmtNormal) {
       if (stmt_result == kConstexprStmtThrow) {
-        if (!DestroyConstexprBindingsFromMark(ctx, mark)) {
+        if (!DestroyConstexprBindingsFromMark(ctx, mark) ||
+            !EvaluateConstexprEHCleanups(ctx, body, i, return_type)) {
           return kConstexprStmtInvalid;
         }
         return kConstexprStmtThrow;
@@ -8737,7 +8993,45 @@ static ConstexprStatementResult EvaluateConstexprSwitch(
                                            : stmt_result;
 }
 
+static ConstexprStatementResult EvaluateConstexprStatementImpl(
+    ConstEvalContext* ctx, ASTNode* stmt, TypeRecord* return_type,
+    ConstexprValue* result);
+
 static ConstexprStatementResult EvaluateConstexprStatement(
+    ConstEvalContext* ctx, ASTNode* stmt, TypeRecord* return_type,
+    ConstexprValue* result) {
+  ConstexprStatementResult stmt_result =
+      EvaluateConstexprStatementImpl(ctx, stmt, return_type, result);
+  if (stmt_result != kConstexprStmtThrow) {
+    return stmt_result;
+  }
+  Vector cleanups;
+  VectorInit(&cleanups);
+  if (stmt->op == AST_OP(expr)) {
+    (void)ConstexprCollectTemporaryCleanups(
+        ((ExpressionStatementASTNode*)stmt)->expr, &cleanups);
+  } else if (stmt->op == AST_OP(return)) {
+    (void)ConstexprCollectTemporaryCleanups(
+        ((CombinedStatementASTNode*)stmt)->cond, &cleanups);
+  } else if (stmt->op == AST_OP(vardecl)) {
+    (void)ConstexprCollectTemporaryCleanups(
+        ((VariableDeclarationASTNode*)stmt)->initializer, &cleanups);
+  } else if (stmt->op == AST_OP(decl_list)) {
+    Vector* declarations = ((DeclarationListASTNode*)stmt)->declarations;
+    for (size_t i = 0; i < declarations->length; i++) {
+      ASTNode* decl = declarations->value.p[i];
+      if (decl != NULL && decl->op == AST_OP(vardecl)) {
+        (void)ConstexprCollectTemporaryCleanups(
+            ((VariableDeclarationASTNode*)decl)->initializer, &cleanups);
+      }
+    }
+  }
+  bool unwound = ConstexprUnwindTemporaryCleanups(ctx, &cleanups);
+  VectorDestruct(&cleanups);
+  return unwound ? kConstexprStmtThrow : kConstexprStmtInvalid;
+}
+
+static ConstexprStatementResult EvaluateConstexprStatementImpl(
     ConstEvalContext* ctx, ASTNode* stmt, TypeRecord* return_type,
     ConstexprValue* result) {
   if (stmt == NULL) {
@@ -9091,14 +9385,38 @@ static bool ConstexprExceptionFunction(Symbol* symbol, const char* name) {
          strcmp(symbol->name.value, name) == 0;
 }
 
+// exception_ptr's pointer data member holds the token; member functions and
+// nested types also occupy entries in the member list.
+static ConstexprValue* ConstexprExceptionPtrTokenSlot(ConstexprObject* object) {
+  TypeRecord* type = object != NULL ? object->type : NULL;
+  Struct* str = type != NULL && TypeIsStructOrUnion(type)
+                    ? type->info.struct_info : NULL;
+  for (size_t i = 0; str != NULL && i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member != NULL && !member->is_member_function && !member->is_static &&
+        member->symbol != NULL && member->symbol->type != NULL &&
+        TypeIsPointer(member->symbol->type)) {
+      return ConstexprObjectSlot(object,
+                                 ConstexprMemberStorageIndex(str, member));
+    }
+  }
+  return ConstexprObjectSlot(object, 0);
+}
+
 static ConstexprException* ConstexprFindExceptionHandle(
     ConstEvalContext* ctx, ConstexprValue value) {
   if (value.is_object && value.object != NULL) {
-    ConstexprValue* slot = ConstexprObjectSlot(value.object, 0);
+    ConstexprValue* slot = ConstexprExceptionPtrTokenSlot(value.object);
     if (slot == NULL) {
       return NULL;
     }
     value = *slot;
+  }
+  value = ConstexprResolveForwardedAddress(value);
+  if (value.is_address && value.heap_block == NULL &&
+      value.address_slot != NULL && value.address_slot->is_address &&
+      value.address_slot->heap_block != NULL) {
+    value = *value.address_slot;
   }
   void* token = NULL;
   if (value.is_address && value.heap_block != NULL) {
@@ -9146,7 +9464,7 @@ static bool ConstexprMakeExceptionPtrValue(ConstEvalContext* ctx,
   }
   ConstexprObject* object =
       NewConstexprObject(ctx, type, ConstexprObjectSlotCount(type));
-  ConstexprValue* slot = ConstexprObjectSlot(object, 0);
+  ConstexprValue* slot = ConstexprExceptionPtrTokenSlot(object);
   if (slot == NULL) {
     return false;
   }
@@ -10227,6 +10545,10 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
                 ctx, func, kContractPostcondition, &ignored);
   ctx->call_depth--;
   PopConstexprBindings(ctx, mark);
+  if (ok && receiver_object != NULL &&
+      TypeEqual(receiver_object->type, formal_object_type)) {
+    receiver_object->destroyed = true;
+  }
   if (ok && receiver_object != NULL && ctx->destroy_at_depth > 0) {
     receiver_object->lifetime_ended = true;
   }
@@ -10294,8 +10616,14 @@ static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
     return false;
   }
   VectorASTNode* call = (VectorASTNode*)node;
-  Symbol* callee = ConstexprFunctionDefinition(ConstexprCallSymbol(node));
-  if (callee == NULL) {
+  Symbol* named = ConstexprCallSymbol(node);
+  Symbol* callee = ConstexprFunctionDefinition(named);
+  // Only a call naming a constructor (or no function at all) may fall back to
+  // the object type's constructor; `fn()` returning a class by value or by
+  // reference is not a default construction of that class.
+  if (callee == NULL &&
+      (named == NULL || named->type == NULL || !TypeIsFunction(named->type) ||
+       named->type->info.function.is_constructor)) {
     callee = ConstexprFunctionDefinition(
         ConstexprConstructorForObjectType(object->type, call->children->length));
   }

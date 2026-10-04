@@ -4033,29 +4033,8 @@ static bool TypePassedAsAArch64Aggregate(TypeRecord* type) {
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type));
 }
 
-// A class whose usable copy and move constructors are all non-trivial is
-// passed by the address of the temporary the caller constructed for the
-// parameter, as in the Itanium C++ ABI.  A bitwise copy of that temporary
-// breaks objects that point into themselves (a small std::string's data
-// pointer) once the callee moves from it.  Classes with a trivial copy or move
-// constructor keep the copy: their argument may be the caller's own lvalue.
 static bool ArgPassedByObjectAddress(TypeRecord* type) {
-  if (!CompilerIsCXX() || !TypeIsStructOrUnion(type)) {
-    return false;
-  }
-  static const CXXSpecialMemberKind kinds[] = {
-      kCXXSpecialMemberCopyConstructor, kCXXSpecialMemberMoveConstructor};
-  bool has_nontrivial = false;
-  for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
-    if (CXXTypeSpecialMemberIsDeleted(type, kinds[i])) {
-      continue;
-    }
-    if (CXXTypeSpecialMemberIsTrivial(type, kinds[i])) {
-      return false;
-    }
-    has_nontrivial = true;
-  }
-  return has_nontrivial;
+  return TypePassedByObjectAddress(type);
 }
 
 static ArgLocation* NewArgLocationRegister(TargetInstruction* reg) {

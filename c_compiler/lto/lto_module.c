@@ -2159,7 +2159,10 @@ bool LTOCodegenModule(Compiler* compiler, LTOModule* module,
     } else {
       BuildBasicBlocks(&gen);
     }
+    Vector saved_parameter_types;
+    GeneratorBindObjectAddressParameters(fn->type, &saved_parameter_types);
     void* code = compiler->target->codegen(&gen);
+    GeneratorRestoreObjectAddressParameters(&saved_parameter_types);
     VectorAppend(&compiler->functions, code);
     const char* emit_name = LTOSymbolAsmName(fn->symbol);
     VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));

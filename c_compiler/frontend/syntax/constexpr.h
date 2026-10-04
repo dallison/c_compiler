@@ -25,6 +25,10 @@ typedef struct {
   Vector objects;   // ConstexprObject*
   Vector heap_blocks;  // ConstexprHeapBlock*
   Vector exception_handles;  // ConstexprException*
+  // ConstexprBinding* for materialized temporaries (a by-value argument, a
+  // constructed prvalue), which their full-expression cleanup names after the
+  // expression that created them has returned.
+  Vector temporaries;
   int call_depth;
   int steps;
   int max_steps;
@@ -38,6 +42,9 @@ typedef struct {
 
 void ConstEvalContextInit(ConstEvalContext* ctx);
 void ConstEvalContextDestruct(ConstEvalContext* ctx);
+// A constant evaluation must release every allocation it makes
+// ([expr.const]); one still live at the end is not a constant expression.
+bool ConstEvalContextHasLiveAllocation(ConstEvalContext* ctx);
 bool ConstEvalStep(ConstEvalContext* ctx);
 bool ConstexprEvaluateThrowExpression(ConstEvalContext* ctx, ASTNode* node);
 

@@ -2403,7 +2403,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             !TemplateArgumentVectorContainsTemplateParameter(args) &&
             !(parser->syntax->parsing_template_declaration &&
               TypeContainsParameterPack(parser->syntax, symbol->type))) {
-          Vector* completed_args = CompleteAliasTemplateArguments(symbol, args);
+          Vector* completed_args = CompleteAliasTemplateArguments(parser, symbol, args);
           if (completed_args != NULL) {
             if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
                                              completed_args)) {
@@ -2647,7 +2647,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               !TemplateArgumentVectorContainsTemplateParameter(args) &&
               !(parser->syntax->parsing_template_declaration &&
                 TypeContainsParameterPack(parser->syntax, symbol->type))) {
-            Vector* completed_args = CompleteAliasTemplateArguments(symbol, args);
+            Vector* completed_args = CompleteAliasTemplateArguments(parser, symbol, args);
             if (completed_args != NULL) {
               if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
                                                completed_args)) {

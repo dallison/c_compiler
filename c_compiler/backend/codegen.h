@@ -158,6 +158,18 @@ bool TypeUsesNativeVectorABI(TypeRecord* type);
 // Structs, unions, and GNU vectors that are not passed in native SIMD
 // registers.  Callers copy these and pass an address (or a stack slot).
 bool TypePassedAsMemoryAggregate(TypeRecord* type);
+// A class whose usable copy and move constructors are all non-trivial is
+// passed by the address of the temporary the caller constructed for the
+// parameter, as in the Itanium C++ ABI.  A bitwise copy would leave the
+// caller's temporary, which the caller destroys, still owning whatever the
+// callee moved out of its copy.  Classes with a trivial copy or move
+// constructor keep the copy: their argument may be the caller's own lvalue.
+bool TypePassedByObjectAddress(TypeRecord* type);
+// While a function is generated, each by-value parameter passed by object
+// address is typed as a reference to that object.  Bind saves the original
+// parameter types in `saved`; Restore puts them back.
+void GeneratorBindObjectAddressParameters(TypeRecord* func, Vector* saved);
+void GeneratorRestoreObjectAddressParameters(Vector* saved);
 
 void OptimizeFunctionIR(Generator* gen);
 void GenerateFunctionIR(Generator* gen);

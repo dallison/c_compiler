@@ -4505,6 +4505,9 @@ static TypeRecord* CalleeArgumentABIType(IRNode* call, int arg_ordinal,
       if (TypeIsReference(parameter->type)) {
         return parameter->type;
       }
+      if (TypePassedByObjectAddress(parameter->type)) {
+        return represented_value->type;
+      }
       // A member-pointer pair is already represented explicitly in IR.
       // Preserve that representation if a cloned template prototype still has
       // a placeholder/scalar type, or its adjustment word would be dropped.

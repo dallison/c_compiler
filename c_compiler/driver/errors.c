@@ -100,6 +100,7 @@ static const WarningInfo kWarnings[] = {
     {"strict-prototypes", NULL, true, true, false, kWarningGroupExtra},
     {"old-style-definition", NULL, true, true, false, kWarningGroupExtra},
     {"declaration-after-statement", NULL, true, true, false, kWarningGroupPedantic},
+    {"c++17-extensions", NULL, true, false, true, kWarningGroupPedantic},
     {"reorder-ctor-init", NULL, true, true, true, kWarningGroupWall},
     {"unused-parameter", NULL, true, true, false, kWarningGroupExtra},
     // gcc has no equivalent; clang enables -Wunused-private-field.  Grouped with

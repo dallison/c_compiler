@@ -786,8 +786,12 @@ static void FindUnboundAutomatic(ASTNode* node, void* data, int child_id,
     return;
   }
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  // A scalar compiler temporary is equally unbound: folding `tmp = n` to `n`
+  // would drop the store that later reads of `tmp` depend on.
   if (symbol != NULL &&
       (symbol->flags.is_argument ||
+       (symbol->flags.is_temp && symbol->type != NULL &&
+        TypeIsScalar(symbol->type)) ||
        (symbol->flags.is_local &&
         !StorageIs(symbol->storage, STO(static) | STO(thread)) &&
         !symbol->flags.is_constexpr))) {

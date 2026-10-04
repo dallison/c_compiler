@@ -458,11 +458,13 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
     if (VectorContainsPointer(&collection->already_destroyed, sym)) {
       return;
     }
-    if (CXXTemporaryIsFunctionParameterObject(node, sym)) {
-      if (!VectorContainsPointer(&collection->parameter_temps, sym)) {
-        VectorAppend(&collection->parameter_temps, sym);
-      }
-    } else if (!VectorContainsPointer(&collection->temps, sym)) {
+    // A by-value parameter object is destroyed by the caller at the end of
+    // the full-expression, like any other temporary.
+    if (CXXTemporaryIsFunctionParameterObject(node, sym) &&
+        !VectorContainsPointer(&collection->parameter_temps, sym)) {
+      VectorAppend(&collection->parameter_temps, sym);
+    }
+    if (!VectorContainsPointer(&collection->temps, sym)) {
       VectorAppend(&collection->temps, sym);
     }
   }
@@ -719,21 +721,6 @@ static ASTNode* AppendRangeForEndOfInitializerTemporaryDestructors(
     if (CXXRangeForTemporaryIsExtended(&collection, symbol, direct)) {
       continue;
     }
-    ASTNode* destructor =
-        NewCXXTemporaryDestructorCall(symbol, initializer->location);
-    if (destructor != NULL) {
-      initializer = NewBinaryASTNode(AST_OP(comma), destructor->type,
-                                     initializer->location, initializer,
-                                     destructor);
-      initializer->flags |= kASTAnalyzed;
-    }
-  }
-  // Function-parameter temporaries are never lifetime-extended by a range-for
-  // initializer.  They are tracked separately from ordinary temporaries so
-  // they are not also destroyed by the generic full-expression cleanup path;
-  // destroy them explicitly at the end of this initializer.
-  for (size_t i = collection.parameter_temps.length; i > 0; i--) {
-    Symbol* symbol = collection.parameter_temps.value.p[i - 1];
     ASTNode* destructor =
         NewCXXTemporaryDestructorCall(symbol, initializer->location);
     if (destructor != NULL) {

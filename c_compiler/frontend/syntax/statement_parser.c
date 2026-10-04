@@ -775,8 +775,16 @@ static ASTNode* ParseIfStatement(Syntax* syntax, TokenClass followers,
     VectorAppend(&pending, current);
     current->location = location;
 
-    if (CompilerCXXAtLeast(kLanguageStandardCXX17)) {
+    if (CompilerIsCXX()) {
+      // Accepted before C++17 as an extension, as clang does; the library
+      // headers rely on it in their C++11/14 configurations.
       current->is_constexpr = LexMatch(syntax->lex, TOK(constexpr));
+      if (current->is_constexpr &&
+          !CompilerCXXAtLeast(kLanguageStandardCXX17) &&
+          !syntax->lex->source->is_system_header) {
+        SyntaxWarning(syntax, "c++17-extensions",
+                      "'if constexpr' is a C++17 extension");
+      }
       if (current->is_constexpr && compiler->current_function != NULL &&
           TypeIsFunction(compiler->current_function)) {
         compiler->current_function->info.function.has_constexpr_if = true;

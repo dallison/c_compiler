@@ -3822,7 +3822,8 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       if (callee_type != NULL && TypeIsFunction(callee_type) &&
           (size_t)i < callee_type->info.function.prototype.length) {
         Symbol* formal = callee_type->info.function.prototype.value.p[i];
-        reference_formal = TypeIsReference(formal->type);
+        reference_formal = TypeIsReference(formal->type) ||
+                           TypePassedByObjectAddress(formal->type);
       }
       int old_arg_flags = arg->flags;
       if (reference_formal &&
@@ -3855,7 +3856,8 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         (size_t)i < callee_type->info.function.prototype.length) {
       Symbol* formal = callee_type->info.function.prototype.value.p[i];
       formal_type = formal->type;
-      reference_formal = TypeIsReference(formal->type);
+      reference_formal = TypeIsReference(formal->type) ||
+                         TypePassedByObjectAddress(formal->type);
       function_reference_formal =
           reference_formal && formal->type->next != NULL &&
           TypeIsFunction(formal->type->next) &&

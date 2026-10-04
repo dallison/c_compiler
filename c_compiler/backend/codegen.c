@@ -26,6 +26,7 @@
 #include "sccp.h"
 #include "ssa.h"
 #include "statement_codegen.h"
+#include "type_special_member.h"
 #include <assert.h>
 #include "constprop.h"
 #include "codemotion.h"
@@ -1825,6 +1826,54 @@ bool TypePassedAsMemoryAggregate(TypeRecord* type) {
          (TypeIsVector(type) && !TypeUsesNativeVectorABI(type));
 }
 
+bool TypePassedByObjectAddress(TypeRecord* type) {
+  if (!CompilerIsCXX() || type == NULL || !TypeIsStructOrUnion(type)) {
+    return false;
+  }
+  static const CXXSpecialMemberKind kinds[] = {
+      kCXXSpecialMemberCopyConstructor, kCXXSpecialMemberMoveConstructor};
+  bool has_nontrivial = false;
+  for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+    if (CXXTypeSpecialMemberIsDeleted(type, kinds[i])) {
+      continue;
+    }
+    if (CXXTypeSpecialMemberIsTrivial(type, kinds[i])) {
+      return false;
+    }
+    has_nontrivial = true;
+  }
+  return has_nontrivial;
+}
+
+void GeneratorBindObjectAddressParameters(TypeRecord* func, Vector* saved) {
+  VectorInit(saved);
+  if (func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  Vector* prototype = &func->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* formal = prototype->value.p[i];
+    if (formal == NULL || !TypePassedByObjectAddress(formal->type)) {
+      continue;
+    }
+    VectorAppend(saved, formal);
+    VectorAppend(saved, formal->type);
+    TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, false);
+    TypeRecordChain(reference, formal->type);
+    formal->type = reference;
+  }
+}
+
+void GeneratorRestoreObjectAddressParameters(Vector* saved) {
+  // The reference types stay allocated: IR built while they were bound still
+  // points at them.
+  for (size_t i = 0; i + 1 < saved->length; i += 2) {
+    Symbol* formal = saved->value.p[i];
+    formal->type = saved->value.p[i + 1];
+  }
+  VectorDestruct(saved);
+}
+
 bool TypeReturnedThroughHiddenPointer(TypeRecord* type) {
   return TypeIsStructOrUnion(type) ||
          TypeUsesLongDoubleRepresentation(type) ||
@@ -2275,7 +2324,16 @@ void OptimizeFunctionIR(Generator* gen) {
   TrapFunctionAfterCodegen(gen);
 }
 
+static void GenerateFunctionIRImpl(Generator* gen);
+
 void GenerateFunctionIR(Generator* gen) {
+  Vector saved_parameter_types;
+  GeneratorBindObjectAddressParameters(gen->func, &saved_parameter_types);
+  GenerateFunctionIRImpl(gen);
+  GeneratorRestoreObjectAddressParameters(&saved_parameter_types);
+}
+
+static void GenerateFunctionIRImpl(Generator* gen) {
   CompoundStatementASTNode* body = (CompoundStatementASTNode*)gen->func->info.function.body;
   // Template and inline ASTs can be emitted more than once. IR label nodes are
   // owned by one Generator and are destroyed with its IR, so never reuse the
@@ -2339,8 +2397,11 @@ void GenerateFunctionIR(Generator* gen) {
 }
 
 void* GenerateFunction(Generator* gen) {
+  Vector saved_parameter_types;
+  GeneratorBindObjectAddressParameters(gen->func, &saved_parameter_types);
   GenerateFunctionIR(gen);
   void* code = compiler->target->codegen(gen);
+  GeneratorRestoreObjectAddressParameters(&saved_parameter_types);
   ListingEmitFunction(gen, code);
   return code;
 }
