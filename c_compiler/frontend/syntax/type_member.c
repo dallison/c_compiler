@@ -1969,8 +1969,7 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
   SyntaxCXXConstructorInitListInit(&cxx_initializers);
   bool defer_mem_initializers =
       ShouldDeferInlineMemberBody(parser, member_symbol) &&
-      LexLookingAt(parser->lex, TOK(colon)) &&
-      !CompilerCXXAtLeast(kLanguageStandardCXX20);
+      LexLookingAt(parser->lex, TOK(colon));
   if (!defer_mem_initializers) {
     SyntaxParseCXXConstructorInitializerList(syntax, member_symbol->type,
                                              &cxx_initializers);
