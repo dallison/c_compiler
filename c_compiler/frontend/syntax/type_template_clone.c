@@ -5709,6 +5709,23 @@ static void RewriteInjectedClassNameFunctionalCast(
   }
 }
 
+// The overload of `to_head`'s chain at the position `symbol` occupies in
+// `from_head`'s.  Both classes are instantiated from one pattern, so their
+// overloads are declared in the same order; the first overload would turn
+// `operator*() &` into `operator*() const&`.
+static StructMember* CorrespondingMemberOverload(StructMember* from_head,
+                                                 Symbol* symbol,
+                                                 StructMember* to_head) {
+  StructMember* to = to_head;
+  for (StructMember* from = from_head; from != NULL && to != NULL;
+       from = from->overload_next, to = to->overload_next) {
+    if (from->symbol == symbol) {
+      return to;
+    }
+  }
+  return to_head;
+}
+
 /* Remap a cloned identifier that names a member function or typedef of the
  * generic class onto the corresponding member of this specialization.
  * Member functions that are odr-used as addresses are queued for
@@ -5728,8 +5745,9 @@ static void RemapIdentifierToInstantiatedClassMember(
               clone->from_owner ||
           (from_member != NULL && from_member->symbol == id->symbol);
       if (belongs_to_source) {
-        StructMember* to_member =
-            FindStructMember(clone->to_owner, &id->symbol->name);
+        StructMember* to_member = CorrespondingMemberOverload(
+            from_member, id->symbol,
+            FindStructMember(clone->to_owner, &id->symbol->name));
         if (to_member != NULL && to_member->symbol != NULL &&
             TypeIsFunction(to_member->symbol->type)) {
           id->symbol = to_member->symbol;
@@ -5753,8 +5771,9 @@ static void RemapIdentifierToInstantiatedClassMember(
         source_parent != target_parent && id->symbol != NULL &&
         id->symbol->type != NULL && TypeIsFunction(id->symbol->type) &&
         id->symbol->type->info.function.cxx_member_owner == source_parent) {
-      StructMember* to_member =
-          FindStructMember(target_parent, &id->symbol->name);
+      StructMember* to_member = CorrespondingMemberOverload(
+          FindStructMember(source_parent, &id->symbol->name), id->symbol,
+          FindStructMember(target_parent, &id->symbol->name));
       if (to_member != NULL && to_member->symbol != NULL &&
           TypeIsFunction(to_member->symbol->type)) {
         id->symbol = to_member->symbol;
@@ -6702,9 +6721,10 @@ static ASTNode* RemapMemberFunctionOnSubstitutedOwner(
                                        clone->rebase_template_parameter_base);
         if (concrete_owner != NULL && TypeIsStructOrUnion(concrete_owner) &&
             concrete_owner->info.struct_info != NULL) {
-          StructMember* member =
+          StructMember* member = CorrespondingMemberOverload(
+              FindStructMember(owner, &id->symbol->name), id->symbol,
               FindStructMember(concrete_owner->info.struct_info,
-                               &id->symbol->name);
+                               &id->symbol->name));
           if (member != NULL && member->is_member_function &&
               member->symbol != NULL) {
             id->symbol = member->symbol;
@@ -8819,11 +8839,73 @@ static bool TypeHasDependentDecltype(TypeRecord* type) {
   return found;
 }
 
+static bool TypeDecltypeNamesTemplateParameter(TypeRecord* type, Vector* seen);
+
+static bool TemplateArgumentDecltypeNamesTemplateParameter(
+    TemplateArgument* argument, Vector* seen) {
+  if (argument == NULL) {
+    return false;
+  }
+  if (TypeDecltypeNamesTemplateParameter(argument->type, seen)) {
+    return true;
+  }
+  if (argument->pack_arguments == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < argument->pack_arguments->length; i++) {
+    if (TemplateArgumentDecltypeNamesTemplateParameter(
+            argument->pack_arguments->value.p[i], seen)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// An alias-id's operand is the alias's own pattern; its recorded arguments
+// carry the dependence and are checked instead.
+static bool TypeDecltypeNamesTemplateParameter(TypeRecord* type, Vector* seen) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (SeenTypeRecord(seen, current)) {
+      return false;
+    }
+    VectorAppend(seen, current);
+    if (current->dependent_decltype_expr != NULL &&
+        !TypeIsDecltypeAliasTemplateId(current) &&
+        DependentExpressionContainsTemplateParameter(
+            current->dependent_decltype_expr)) {
+      return true;
+    }
+    if (current->template_arguments == NULL) {
+      continue;
+    }
+    for (size_t i = 0; i < current->template_arguments->length; i++) {
+      if (TemplateArgumentDecltypeNamesTemplateParameter(
+              current->template_arguments->value.p[i], seen)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static void InstallResolvedAutoDecltype(TemplateFunctionBodyClone* clone,
                                         TypeRecord** type_slot) {
   if (clone == NULL || type_slot == NULL || *type_slot == NULL ||
       !TypeHasDependentDecltype(*type_slot)) {
     return;
+  }
+  if (clone->rebase_template_parameter_base > 0) {
+    // The cloned body is already in the member template's own parameter
+    // space; substituting the class arguments again would bind the member's
+    // parameters (renumbered from 0) to the class arguments.
+    Vector seen;
+    VectorInit(&seen);
+    bool dependent = TypeContainsTemplateParameter(*type_slot) ||
+                     TypeDecltypeNamesTemplateParameter(*type_slot, &seen);
+    VectorDestruct(&seen);
+    if (dependent) {
+      return;
+    }
   }
   Vector seen;
   VectorInit(&seen);
@@ -10071,11 +10153,15 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
     // decltype probe only has a body cloned for deduction.  Code analyzed in
     // that probe (a lambda's deduced body) never names it again outside the
     // probe, so the reference that reaches codegen must queue the definition.
+    // A member function template specialization (`expected<long, int>(v)`
+    // in a lambda that `and_then` probed) is in the same position.
+    Symbol* origin = symbol->type->info.function.template_origin;
     bool deduction_only_body =
         !symbol->type->info.function.definition &&
         !symbol->flags.is_template &&
-        symbol->type->info.function.cxx_member_owner == NULL &&
-        symbol->type->info.function.template_origin != NULL &&
+        (symbol->type->info.function.cxx_member_owner == NULL ||
+         (origin != NULL && origin->flags.is_template)) &&
+        origin != NULL &&
         symbol->type->template_arguments != NULL &&
         compiler->speculative_template_instantiation_depth == 0;
     if (deduction_only_body) {

@@ -1,5 +1,6 @@
 // RUN: -std=c++17
 // EXPECT_EXIT: 0
+// TARGETS: x86_64 aarch64 riscv
 
 #include <type_traits>
 #include <cstddef>

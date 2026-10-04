@@ -1250,6 +1250,48 @@ static const char* AtomicOperandRegName(TargetInstruction* inst, int operand,
   return GetRegisterName(inst->operand[operand], kSize32Bit, buf, bufsize);
 }
 
+// The read-modify-write expansions need one scratch register beyond their
+// operands.  That is r9, but a spilled operand can itself be staged through r9
+// (RepairProcessedRead), so pick another register then and preserve it around
+// the sequence.
+static const char* AtomicScratchBegin(TargetInstruction* inst, bool* saved,
+                                      FILE* fp) {
+  static const char* const candidates[] = {"r9", "r4", "r5", "r6",
+                                           "r7", "r8", "r10"};
+  char used[TARGET_MAX_OPERANDS + 1][16];
+  int num_used = 0;
+  if (inst->reg != NULL) {
+    AtomicRegName(inst, used[num_used++], sizeof(used[0]));
+  }
+  for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    if (inst->operand[i] != NULL && inst->operand[i]->reg != NULL) {
+      AtomicOperandRegName(inst, (int)i, used[num_used++], sizeof(used[0]));
+    }
+  }
+  for (size_t c = 0; c < sizeof(candidates) / sizeof(candidates[0]); c++) {
+    bool taken = false;
+    for (int u = 0; u < num_used && !taken; u++) {
+      taken = strcmp(used[u], candidates[c]) == 0;
+    }
+    if (!taken) {
+      *saved = c != 0;
+      if (*saved) {
+        fprintf(fp, "\tpush {%s}\n", candidates[c]);
+      }
+      return candidates[c];
+    }
+  }
+  assert(false);
+  *saved = false;
+  return "r9";
+}
+
+static void AtomicScratchEnd(const char* scratch, bool saved, FILE* fp) {
+  if (saved) {
+    fprintf(fp, "\tpop {%s}\n", scratch);
+  }
+}
+
 static void PrintAtomicInstruction(TargetInstruction* inst,
                                    const char* func_name, FILE* fp) {
   int size = AtomicSizeLog2(inst);
@@ -1305,8 +1347,10 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
       const char* addr = AtomicOperandRegName(inst, 0, b1, sizeof(b1));
       const char* value =
           AtomicOperandRegName(inst, 1, b2, sizeof(b2));
-      const char* loaded = return_new ? "r9" : result;
-      const char* updated = return_new ? result : "r9";
+      bool scratch_saved;
+      const char* scratch = AtomicScratchBegin(inst, &scratch_saved, fp);
+      const char* loaded = return_new ? scratch : result;
+      const char* updated = return_new ? result : scratch;
       if (release) {
         fprintf(fp, "\tdmb ish\n");
       }
@@ -1322,6 +1366,7 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
       if (acquire) {
         fprintf(fp, "\tdmb ish\n");
       }
+      AtomicScratchEnd(scratch, scratch_saved, fp);
       return;
     }
     case ARM_OP(atomic_compare_exchange_bool):
@@ -1332,21 +1377,23 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
       bool returns_bool =
           inst->opcode != (TargetOpcode)ARM_OP(atomic_compare_exchange_val);
       const char* addr = AtomicOperandRegName(inst, 0, b1, sizeof(b1));
+      bool scratch_saved;
+      const char* scratch = AtomicScratchBegin(inst, &scratch_saved, fp);
       const char* expected;
       if (expected_is_pointer) {
         const char* expected_addr =
             AtomicOperandRegName(inst, 1, b2, sizeof(b2));
-        expected = "r9";
-        fprintf(fp, "\t%s r9, [%s]\n",
-                AtomicLoadMnemonic(size, false), expected_addr);
+        expected = scratch;
+        fprintf(fp, "\t%s %s, [%s]\n",
+                AtomicLoadMnemonic(size, false), scratch, expected_addr);
       } else {
         expected = AtomicOperandRegName(inst, 1, b2, sizeof(b2));
         if (size == 0) {
-          fprintf(fp, "\tuxtb r9, %s\n", expected);
-          expected = "r9";
+          fprintf(fp, "\tuxtb %s, %s\n", scratch, expected);
+          expected = scratch;
         } else if (size == 1) {
-          fprintf(fp, "\tuxth r9, %s\n", expected);
-          expected = "r9";
+          fprintf(fp, "\tuxth %s, %s\n", scratch, expected);
+          expected = scratch;
         }
       }
       const char* desired =
@@ -1392,6 +1439,7 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
         fprintf(fp, "\tmov %s, #0\n", result);
       }
       fprintf(fp, ".L%s_atomic_done_%d:\n", func_name, inst->id);
+      AtomicScratchEnd(scratch, scratch_saved, fp);
       return;
     }
     default:

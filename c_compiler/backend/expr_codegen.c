@@ -5923,6 +5923,20 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
       return result;
     }
   }
+  // A value narrower than int may carry stray bits above its type (a narrow
+  // argument is not extended by the caller), and a mask typed that narrow
+  // looks redundant to the optimizer.  The shifts below would move those bits
+  // into the result, so work on the zero-extended value as an unsigned int.
+  if (value_type->size < 4 && op != AST_OP(builtin_bswap)) {
+    TypeRecord* wide = NewTypeRecordWithSize(kTypeInt | kTypeUnsigned,
+                                             kQualPlain);
+    value = IRSetType(
+        GeneratorEmit(gen, NewIR2(IR_OP(zeroextendi), value,
+                                  GeneratorGetIntConstant(
+                                      gen, wide, (4 - value_type->size) * 8))),
+        wide);
+    value_type = wide;
+  }
   if (op == AST_OP(builtin_popcount)) {
     return GenerateSoftwarePopcount(gen, value, value_type, node->base.type,
                                     width);
@@ -5998,15 +6012,14 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
   IRNode* right;
   left = EmitBitIR2(gen, IR_OP(lsli), value, normalized, value_type);
   right = EmitBitIR2(gen, IR_OP(lsri), value, opposite, value_type);
-  IRNode* result =
-      EmitBitIR2(gen, IR_OP(ori), left, right, node->base.type);
+  IRNode* result = EmitBitIR2(gen, IR_OP(ori), left, right, value_type);
   if (width < 64) {
     result = EmitBitIR2(
         gen, IR_OP(andi), result,
         BitConstant(gen, value_type, (UINT64_C(1) << width) - 1),
-        node->base.type);
+        value_type);
   }
-  return result;
+  return IRSetType(result, node->base.type);
 }
 
 static IRNode* GenerateBuiltinPrefetch(Generator* gen, VectorASTNode* node) {

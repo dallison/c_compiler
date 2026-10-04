@@ -1742,6 +1742,7 @@ Struct* NewStruct(bool is_union) {
   s->refs = 1;
   s->lexical_parent = NULL;
   s->access_enclosing_function = NULL;
+  s->in_namespace_template = false;
   s->local_class_arguments = NULL;
   s->tag_symbol = NULL;
   VectorInit(&s->bases);

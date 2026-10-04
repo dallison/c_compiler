@@ -1536,8 +1536,11 @@ static bool VariableHasAddressUse(IRNode* var_node) {
       }
       // A scalar variable is the first operand of its ordinary loads and
       // stores. Any other use consumes the variable's address as a value and
-      // therefore requires stable stack storage.
-      if (operand != 0 || (!IRIsLoad(output) && !IRIsStore(output))) {
+      // therefore requires stable stack storage.  IRIsStore also accepts
+      // `addressof` and `cast`, which take the address.
+      if (operand != 0 || output->opcode == IR_OP(addressof) ||
+          output->opcode == IR_OP(cast) ||
+          (!IRIsLoad(output) && !IRIsStore(output))) {
         return true;
       }
     }
@@ -3324,16 +3327,17 @@ static ARMOpcode GetComparison(enum ComparisonOp op, bool is_unsigned, bool reve
   abort();
 }
 
+// The second comparison is for swapped operands (constant moved to the right).
 static struct ToComparisonOp comparison_ops[] = {
-  {IR_OP(cmpeqi), kCompEqual, kCompNotEqual},
-  {IR_OP(cmpeqa), kCompEqual, kCompNotEqual},
-  {IR_OP(cmpeqf), kCompEqual, kCompNotEqual},
-  {IR_OP(cmpeqd), kCompEqual, kCompNotEqual},
+  {IR_OP(cmpeqi), kCompEqual, kCompEqual},
+  {IR_OP(cmpeqa), kCompEqual, kCompEqual},
+  {IR_OP(cmpeqf), kCompEqual, kCompEqual},
+  {IR_OP(cmpeqd), kCompEqual, kCompEqual},
   
-  {IR_OP(cmpnei), kCompNotEqual, kCompEqual},
-  {IR_OP(cmpnea), kCompNotEqual, kCompEqual},
-  {IR_OP(cmpnef), kCompNotEqual, kCompEqual},
-  {IR_OP(cmpned), kCompNotEqual, kCompEqual},
+  {IR_OP(cmpnei), kCompNotEqual, kCompNotEqual},
+  {IR_OP(cmpnea), kCompNotEqual, kCompNotEqual},
+  {IR_OP(cmpnef), kCompNotEqual, kCompNotEqual},
+  {IR_OP(cmpned), kCompNotEqual, kCompNotEqual},
 
   {IR_OP(cmplti), kCompLess, kCompGreater},
   {IR_OP(cmplta), kCompLess, kCompGreater},
@@ -3824,8 +3828,11 @@ static TargetInstruction* LowerZeroExtend(ARMGenerator* g, IRNode* node) {
   int64_t diff = diff_node->value.ivalue;
   if (NodeIsWideInt(node)) {
     TargetInstruction* lo = value;
-    if (diff > 0 && diff < 32) {
-      TargetInstruction* immed = GetIntConstant(g, NULL, kTargetType32Bit, diff);
+    // The low word keeps `64 - diff` source bits (8 for char->long long).
+    int64_t keep_bits = 64 - diff;
+    if (diff > 0 && keep_bits > 0 && keep_bits < 32) {
+      TargetInstruction* immed =
+          GetIntConstant(g, NULL, kTargetType32Bit, 32 - keep_bits);
       TargetInstruction* lsl =
           Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(lsl), value, immed), 0));
       lo = Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(lsr), lsl, immed), 0));
@@ -4101,22 +4108,31 @@ static TargetInstruction* LowerSignExtend(ARMGenerator* g, IRNode* node) {
   } else {
     value = Materialize(g, input);
   }
-  if (ARMIsSignedLoad(value)) {
-    return FinishSignExtend(g, node, value);
-  }
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
   if (diff > 0) {
     return FinishSignExtend(g, node, value);
   }
-  diff = -diff;
-  if (diff == 32 || diff == 0) {
+  // Narrowing keeps the destination's bits, sign-extended across the 32-bit
+  // register; -diff is the width difference, which exceeds 32 for a
+  // long long source.
+  int keep_bits = node->type != NULL ? (int)node->type->size * 8 : 32;
+  bool already_extended =
+      (value->opcode == ARM_OP(ldrsb) && keep_bits >= 8) ||
+      (value->opcode == ARM_OP(ldrsh) && keep_bits >= 16) ||
+      (value->opcode == ARM_OP(ldrb) && keep_bits > 8) ||
+      (value->opcode == ARM_OP(ldrh) && keep_bits > 16);
+  if (already_extended) {
+    return FinishSignExtend(g, node, value);
+  }
+  if (keep_bits >= 32) {
     // The low word already holds the full source value (e.g. int -> long long);
     // only the high word (handled by FinishSignExtend) needs filling.
     return FinishSignExtend(g, node,
                             Emit(g, NewInstruction1(ARM_OP(mov), value)));
   }
-  TargetInstruction* immed = GetIntConstant(g, NULL, kTargetType32Bit, diff);
+  TargetInstruction* immed =
+      GetIntConstant(g, NULL, kTargetType32Bit, 32 - keep_bits);
   TargetInstruction* lsl = Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(lsl), value, immed), 0));
   TargetInstruction* asr = Emit(g, CopyInstructionSize(NewInstruction2(ARM_OP(asr), lsl, immed), 0));
 

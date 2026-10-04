@@ -393,6 +393,10 @@ struct Struct {
   // local class has that function's access, including friendship
   // ([class.local]).  Not serialized.
   Symbol* access_enclosing_function;  // @wire -
+  // A lambda closure defined at namespace scope within a template declaration
+  // (a variable template's initializer).  Like a closure in a function
+  // template, each instantiation rebuilds it.  Not serialized.
+  bool in_namespace_template;  // @wire -
   // Arguments of the enclosing function template a local class was rebuilt
   // for; they tell its instantiations apart in mangled names.
   Vector* local_class_arguments;  // TemplateArgument*. @wire -

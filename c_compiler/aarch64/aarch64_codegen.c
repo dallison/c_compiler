@@ -2951,15 +2951,15 @@ struct ToComparisonOp {
   enum ComparisonOp forward_comparison;
   enum ComparisonOp inverted_comparison;
 } comparison_ops[] = {
-  {IR_OP(cmpeqi), kCompEqual, kCompNotEqual},
-  {IR_OP(cmpeqa), kCompEqual, kCompNotEqual},
-  {IR_OP(cmpeqf), kCompEqual, kCompNotEqual},
-  {IR_OP(cmpeqd), kCompEqual, kCompNotEqual},
+  {IR_OP(cmpeqi), kCompEqual, kCompEqual},
+  {IR_OP(cmpeqa), kCompEqual, kCompEqual},
+  {IR_OP(cmpeqf), kCompEqual, kCompEqual},
+  {IR_OP(cmpeqd), kCompEqual, kCompEqual},
   
-  {IR_OP(cmpnei), kCompNotEqual, kCompEqual},
-  {IR_OP(cmpnea), kCompNotEqual, kCompEqual},
-  {IR_OP(cmpnef), kCompNotEqual, kCompEqual},
-  {IR_OP(cmpned), kCompNotEqual, kCompEqual},
+  {IR_OP(cmpnei), kCompNotEqual, kCompNotEqual},
+  {IR_OP(cmpnea), kCompNotEqual, kCompNotEqual},
+  {IR_OP(cmpnef), kCompNotEqual, kCompNotEqual},
+  {IR_OP(cmpned), kCompNotEqual, kCompNotEqual},
 
   {IR_OP(cmplti), kCompLess, kCompGreater},
   {IR_OP(cmplta), kCompLess, kCompGreater},

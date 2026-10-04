@@ -3715,6 +3715,10 @@ static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
     closure->access_enclosing_function =
         compiler->current_function->info.function.symbol;
   }
+  closure->in_namespace_template =
+      syntax != NULL && syntax->parsing_template_declaration &&
+      closure->lexical_parent == NULL &&
+      closure->access_enclosing_function == NULL;
   TypeRecord* type = NewTypeRecord(kTypeStruct, kQualPlain);
   TypeRecordSetStructInfo(type, closure);
   Symbol* tag = NewSymbol(tag_name.value, type, STO(implicit));

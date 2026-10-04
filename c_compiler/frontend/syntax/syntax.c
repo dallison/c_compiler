@@ -5794,9 +5794,18 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
       id->symbol = copy;
       ASTNodeSetType(node, copy->type);
     }
-  } else if (node->op == AST_OP(cast) && remap->rebase_base > 0) {
+  } else if (node->op == AST_OP(cast) && remap->rebase_base > 0 &&
+             ((CastASTNode*)node)->cast_type != NULL &&
+             TypeContainsTemplateParameter(((CastASTNode*)node)->cast_type)) {
+    // The clone shares `cast_type` with the primary's init-list; renumbering
+    // it in place would renumber the primary for every later instantiation.
     CastASTNode* cast = (CastASTNode*)node;
-    RebaseTemplateParameterIndices(cast->cast_type, remap->rebase_base);
+    TypeRecord* remapped = RemapEnclosingTemplateType(remap, cast->cast_type);
+    if (remapped != NULL) {
+      TypeRecordIncRef(remapped);
+      TypeRecordDelete(cast->cast_type);
+      cast->cast_type = remapped;
+    }
   }
 }
 
@@ -15265,6 +15274,11 @@ static bool InitializerNamesUndeducedAuto(ASTNode* node, void* data) {
   }
   Symbol* named = ((IdentifierASTNode*)node)->symbol;
   if (named == NULL || named == self || named->type == NULL) {
+    return false;
+  }
+  // Analyzing a call instantiates a function template and deduces its
+  // placeholder return type (`auto at = transposed(a);`).
+  if (named->flags.is_template && TypeIsFunction(named->type)) {
     return false;
   }
   return TypeContainsAuto(named->type);

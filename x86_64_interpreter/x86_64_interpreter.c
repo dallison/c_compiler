@@ -2127,6 +2127,44 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
     return ExecuteAluImm(interpreter, rex, b0, modrm, imm);
   }
 
+  if (b0 == 0x69 || b0 == 0x6B) {  // IMUL r, r/m, imm32/imm8
+    if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
+      return false;
+    }
+    bool word = sse_prefix == 0x66 && !rex.w;
+    int64_t imm;
+    if (b0 == 0x6B) {
+      imm = (int8_t)Fetch8(interpreter, &pos);
+    } else if (word) {
+      uint16_t lo = Fetch8(interpreter, &pos);
+      imm = (int16_t)(lo | (uint16_t)(Fetch8(interpreter, &pos) << 8));
+    } else {
+      imm = (int32_t)Fetch32(interpreter, &pos);
+    }
+    uint64_t src;
+    if (modrm.mod == 3) {
+      src = ReadReg(interpreter, modrm.rm);
+    } else {
+      uint64_t addr = EffectiveAddress(interpreter, &modrm, pos);
+      src = rex.w  ? Load64(interpreter, addr)
+            : word ? Load16(interpreter, addr)
+                   : Load32(interpreter, addr);
+    }
+    uint64_t result;
+    if (rex.w) {
+      result = src * (uint64_t)imm;
+    } else if (word) {
+      result = (ReadReg(interpreter, modrm.reg) & ~UINT64_C(0xFFFF)) |
+               (uint16_t)((uint16_t)src * (uint16_t)imm);
+    } else {
+      result = (uint32_t)((uint32_t)src * (uint32_t)imm);
+    }
+    UpdateFlags(interpreter, result, rex.w);
+    WriteReg(interpreter, modrm.reg, result);
+    *insn_len = pos;
+    return true;
+  }
+
   if (b0 == 0xF7) {
     if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
       return false;

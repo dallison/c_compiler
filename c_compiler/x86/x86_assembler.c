@@ -1455,6 +1455,11 @@ static void EmitImul(X86Assembler* assembler, X86Size size) {
   if (three_operand && !ParseOperand(assembler, &op3)) {
     return;
   }
+  // `imul $imm, %reg` is shorthand for `imul $imm, %reg, %reg`.
+  if (!three_operand && op1.kind == kX86OpImm && op2.kind == kX86OpReg) {
+    op3 = op2;
+    three_operand = true;
+  }
 
   X86Encode enc;
   EncodeInit(&enc, assembler);
@@ -1480,7 +1485,7 @@ static void EmitImul(X86Assembler* assembler, X86Size size) {
     } else {
       EncodeByte(&enc, 0x69);
       EncodeRegOperand(&enc, op3.reg.num, &op2.reg);
-      EncodeImm(&enc, 4, op1.imm);
+      EncodeImm(&enc, size == kX86Size16 ? 2 : 4, op1.imm);
     }
   } else {
     EncodeByte(&enc, 0x0f);

@@ -2169,35 +2169,76 @@ static TargetInstruction* FinishWithDest(RVGenerator* rv, IRNode* node,
   return SetLoweredNode(node, result);
 }
 
+// A 32-bit integer is held in a 64-bit register with unspecified upper bits:
+// `lwu` zero-extends an unsigned value while `addw`/`sllw` sign-extend it.
+// Comparisons look at all 64 bits, so bring each 32-bit operand to its
+// sign-extended form first.  That keeps equality and the unsigned order.
+static bool IsInt32ComparisonOperand(IRNode* node) {
+  return node != NULL && node->type != NULL && TypeIsIntegral(node->type) &&
+         node->type->size == 4;
+}
+
+static bool IsInt32Comparison(IRNode* op1, IRNode* op2) {
+  return IsInt32ComparisonOperand(op1) &&
+         (op2 == NULL || IsInt32ComparisonOperand(op2));
+}
+
+static int64_t ComparisonConstant(IRNode* constant, bool int32) {
+  int64_t value = ((IRConstant*)constant)->value.ivalue;
+  return int32 ? (int64_t)(int32_t)value : value;
+}
+
+static TargetInstruction* MaterializeComparisonOperand(RVGenerator* rv,
+                                                       IRNode* node,
+                                                       bool int32) {
+  if (!int32) {
+    return Materialize(rv, node);
+  }
+  if (IRIsConst(node)) {
+    int64_t value = ComparisonConstant(node, true);
+    if (value == 0) {
+      return Zero(rv);
+    }
+    return Emit(rv, NewInstruction1(RV_OP(li),
+                                    GetIntConstant(rv, NULL, kTargetType64Bit,
+                                                   value)));
+  }
+  return Emit(rv, NewInstruction1(RV_OP(sext_w), Materialize(rv, node)));
+}
+
 // There is no compare for equality instruction, it must be synthesized
 // using a subtract and compare against zero.  This function
 // performs the subtraction.  If it returns NULL there is no subtraction
 // and the pseudo-instruction to compare against zero is used directly.
 static TargetInstruction* SubtractForComparison(RVGenerator* rv, IRNode* node,
                                                 IRNode* op1, IRNode* op2) {
+  bool int32 = IsInt32Comparison(op1, op2);
   if (!IRIsConst(op2)) {
     // Second operand isn't constant, compiled as sub.
-    return Emit(rv, NewInstruction2(RV_OP(sub), Materialize(rv, op1),
-                                    Materialize(rv, op2)));
+    return Emit(rv, NewInstruction2(
+                        RV_OP(sub), MaterializeComparisonOperand(rv, op1, int32),
+                        MaterializeComparisonOperand(rv, op2, int32)));
   }
 
   // Second operand is constant.
-  int64_t value = ((IRConstant*)op2)->value.ivalue;
+  int64_t value = ComparisonConstant(op2, int32);
   if (value == 0) {
-    // Common case, compare with zero, no subtract.
-    return NULL;
+    // Common case, compare with zero; the caller tests op1 directly.
+    return int32 ? MaterializeComparisonOperand(rv, op1, int32) : NULL;
   }
 
   if (RVIsPossibleImmediate(value)) {
     // There is no subi instruction, so we have to use an addi
     // with the negative of the immediate.
-    return AddImmediate(rv, Materialize(rv, op1), -value);
+    return AddImmediate(rv, MaterializeComparisonOperand(rv, op1, int32),
+                        -value);
   }
 
   // Constant is too big for an immediate, materialize it into
   // a register and use a sub instruction.
-  return Emit(rv, NewInstruction2(RV_OP(sub), Materialize(rv, op1),
-                                  Materialize(rv, op2)));
+  return Emit(rv, NewInstruction2(
+                      RV_OP(sub), MaterializeComparisonOperand(rv, op1, int32),
+                      MaterializeComparisonOperand(rv, op2, int32)));
 }
 
 // Compare integers for less than.  This uses the slt/slti
@@ -2205,34 +2246,37 @@ static TargetInstruction* SubtractForComparison(RVGenerator* rv, IRNode* node,
 static TargetInstruction* CompareLessThanInt(RVGenerator* rv, IRNode* node,
                                              IRNode* op1, IRNode* op2) {
   bool is_unsigned = IRComparisonIsUnsigned(node);
+  bool int32 = IsInt32Comparison(op1, op2);
   if (!IRIsConst(op2)) {
     // Second operand isn't constant, compile as slt/sltu.
-    TargetInstruction* i1 = Materialize(rv, op1);
-    TargetInstruction* i2 = Materialize(rv, op2);
+    TargetInstruction* i1 = MaterializeComparisonOperand(rv, op1, int32);
+    TargetInstruction* i2 = MaterializeComparisonOperand(rv, op2, int32);
     return Emit(rv, NewInstruction2(is_unsigned ? RV_OP(sltu) : RV_OP(slt), i1,
                                     i2));
   }
 
   // Second operand is constant.
-  int64_t value = ((IRConstant*)op2)->value.ivalue;
+  int64_t value = ComparisonConstant(op2, int32);
   if (!is_unsigned && value == 0) {
     // Common case, compare with zero, use sltz.
-    return Emit(rv, NewInstruction1(RV_OP(sltz), Materialize(rv, op1)));
+    return Emit(rv, NewInstruction1(
+                        RV_OP(sltz),
+                        MaterializeComparisonOperand(rv, op1, int32)));
   }
 
   if (RVIsPossibleImmediate(value)) {
     // Immediate, use slti/sltiu.
     return Emit(
         rv, NewInstruction2(is_unsigned ? RV_OP(sltiu) : RV_OP(slti),
-                            Materialize(rv, op1),
+                            MaterializeComparisonOperand(rv, op1, int32),
                             GetIntConstant(rv, NULL, kTargetType32Bit, value)));
   }
 
   // Constant is too big for an immediate, materialize it into
   // a register and use an slt/sltu instruction.
   return Emit(rv, NewInstruction2(is_unsigned ? RV_OP(sltu) : RV_OP(slt),
-                                  Materialize(rv, op1),
-                                  Materialize(rv, op2)));
+                                  MaterializeComparisonOperand(rv, op1, int32),
+                                  MaterializeComparisonOperand(rv, op2, int32)));
 }
 
 // Comparisons set the result register to 1 or 0.  The result of integer
@@ -2811,6 +2855,7 @@ static TargetInstruction* LowerConditionalBranch(RVGenerator* rv,
     // only used in this branch.
     IRNode* op1 = expr->inputs.value.p[0];
     IRNode* op2 = expr->inputs.value.p[1];
+    bool int32 = IsInt32Comparison(op1, op2);
 
     // There are beqz and bnez pseudo-instructions for comparing against zero.
     // Use them if possible.
@@ -2827,8 +2872,9 @@ static TargetInstruction* LowerConditionalBranch(RVGenerator* rv,
         op1 = op2;
         op2 = tmp;
       }
-      TargetInstruction* inst =
-          Emit(rv, NewInstruction1(branch, Materialize(rv, op1)));
+      TargetInstruction* inst = Emit(
+          rv, NewInstruction1(branch,
+                              MaterializeComparisonOperand(rv, op1, int32)));
 
       TargetInstruction* target = target_node->data.ptr;
       if (target == NULL) {
@@ -2866,9 +2912,10 @@ static TargetInstruction* LowerConditionalBranch(RVGenerator* rv,
       }
     }
 
-    TargetInstruction* inst =
-        Emit(rv, NewInstruction2(branch_opcode, Materialize(rv, op1),
-                                 Materialize(rv, op2)));
+    TargetInstruction* inst = Emit(
+        rv, NewInstruction2(branch_opcode,
+                            MaterializeComparisonOperand(rv, op1, int32),
+                            MaterializeComparisonOperand(rv, op2, int32)));
 
     TargetInstruction* target = target_node->data.ptr;
     if (target == NULL) {
@@ -2917,8 +2964,9 @@ static TargetInstruction* LowerConditionalBranch(RVGenerator* rv,
        target_operand_num = 0;
     }
   } else {
-    inst =
-      Emit(rv, NewInstruction1(opcode, Materialize(rv, expr)));
+    inst = Emit(rv, NewInstruction1(
+                        opcode, MaterializeComparisonOperand(
+                                    rv, expr, IsInt32ComparisonOperand(expr))));
   }
   
   TargetInstruction* target = target_node->data.ptr;
@@ -3103,7 +3151,8 @@ static TargetInstruction* LowerAddressOf(RVGenerator* rv, IRNode* node) {
 }
 
 static TargetInstruction* LowerZeroExtend(RVGenerator* rv, IRNode* node) {
-  TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
+  IRNode* src = node->inputs.value.p[0];
+  TargetInstruction* value = Materialize(rv, src);
   // The second IR operand is the bit-difference between destination and source
   // widths (e.g. 24 for char->int), not an AND mask.
   IRConstant* diff_node = (IRConstant*)node->inputs.value.p[1];
@@ -3111,7 +3160,24 @@ static TargetInstruction* LowerZeroExtend(RVGenerator* rv, IRNode* node) {
   if (diff <= 0 || diff >= 64) {
     return FinishWithDest(rv, node, value, RV_OP(mv));
   }
-  TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetType32Bit, diff);
+  // Registers are 64 bits wide, so shifting by the width difference alone
+  // (24 for char->int) would keep bits 8..39.  Keep only the source's bits.
+  int dest_bits = node->type->size * 8;
+  int keep_bits = src->type != NULL && src->type->size > 0
+                      ? src->type->size * 8
+                      : dest_bits - (int)diff;
+  if (keep_bits > dest_bits) {
+    keep_bits = dest_bits;
+  }
+  // A `cast` operand can carry the wider pre-narrowing type.
+  if (dest_bits - (int)diff > 0 && dest_bits - (int)diff < keep_bits) {
+    keep_bits = dest_bits - (int)diff;
+  }
+  if (keep_bits >= 64) {
+    return FinishWithDest(rv, node, value, RV_OP(mv));
+  }
+  TargetInstruction* immed =
+      GetIntConstant(rv, NULL, kTargetType32Bit, 64 - keep_bits);
   TargetInstruction* lsl =
       Emit(rv, NewInstruction2(RV_OP(slli), value, immed));
   TargetInstruction* lsr =
@@ -3282,24 +3348,44 @@ static TargetInstruction* LowerSetBitField(RVGenerator* rv, IRNode* node) {
   return result;
 }
 
+static int RVSignedLoadBits(TargetInstruction* inst) {
+  switch ((RVOpcode)inst->opcode) {
+    case RV_OP(lb):
+      return 8;
+    case RV_OP(lh):
+      return 16;
+    case RV_OP(lw):
+      return 32;
+    case RV_OP(ld):
+      return 64;
+    default:
+      return 0;
+  }
+}
+
 static TargetInstruction* LowerSignExtend(RVGenerator* rv, IRNode* node) {
   TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
-  if (RVIsSignedLoad(value)) {
-    return FinishWithDest(rv, node, value, RV_OP(mv));
-  }
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
   if (diff > 0) {
     return FinishWithDest(rv, node, value, RV_OP(mv));
   }
-  diff = -diff;
-  if (diff == 32) {
+  // A narrowing extension keeps the destination's bits, sign-extended across
+  // the 64-bit register (the width difference alone is right only for a
+  // 64-bit source).
+  int keep_bits = node->type->size * 8;
+  int load_bits = RVSignedLoadBits(value);
+  if (keep_bits >= 64 || (load_bits > 0 && load_bits <= keep_bits)) {
+    return FinishWithDest(rv, node, value, RV_OP(mv));
+  }
+  if (keep_bits == 32) {
     // There is a word signextension instruction sext.w
     return FinishWithDest(rv, node,
                           Emit(rv, NewInstruction1(RV_OP(sext_w), value)),
                           RV_OP(mv));
   }
-  TargetInstruction* immed = GetIntConstant(rv, NULL, kTargetType32Bit, diff);
+  TargetInstruction* immed =
+      GetIntConstant(rv, NULL, kTargetType32Bit, 64 - keep_bits);
   TargetInstruction* lsl = Emit(rv, NewInstruction2(RV_OP(slli), value, immed));
   TargetInstruction* asr = Emit(rv, NewInstruction2(RV_OP(srai), lsl, immed));
 

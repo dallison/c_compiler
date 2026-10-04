@@ -2244,6 +2244,22 @@ void StatementFinishAutoReturnDeduction(TypeRecord* func,
   VectorDestruct(&returns);
 }
 
+// Whether a returned local can be allocated directly in the caller's return
+// slot.  A variable aligned beyond the stack alignment gets its own
+// dynamically aligned slot (SymbolNeedsDynamicStackAllocation), so it can't.
+static bool SymbolCanLiveInReturnSlot(Symbol* sym) {
+  if (sym == NULL || !sym->flags.is_local || sym->flags.is_argument ||
+      sym->flags.is_temp || StorageIs(sym->storage, STO(static))) {
+    return false;
+  }
+  int alignment = sym->type != NULL ? TypeRecordAlignment(sym->type) : 0;
+  if (sym->alignment > alignment) {
+    alignment = sym->alignment;
+  }
+  return compiler->target == NULL ||
+         alignment <= compiler->target->stack_alignment;
+}
+
 static bool IsEligibleCXXReturnElisionValue(ASTNode* return_value) {
   if (!CompilerIsCXX() || return_value == NULL ||
       !TypeIsStructOrUnion(compiler->current_function->next) ||
@@ -2256,9 +2272,7 @@ static bool IsEligibleCXXReturnElisionValue(ASTNode* return_value) {
   if (return_value->op != AST_OP(identifier)) {
     return false;
   }
-  Symbol* sym = ((IdentifierASTNode*)return_value)->symbol;
-  return sym != NULL && sym->flags.is_local && !sym->flags.is_argument &&
-         !sym->flags.is_temp && !StorageIs(sym->storage, STO(static));
+  return SymbolCanLiveInReturnSlot(((IdentifierASTNode*)return_value)->symbol);
 }
 
 static bool IsCXXMoveEligibleIdentifier(ASTNode* expression) {
@@ -2599,8 +2613,7 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
         // must be copied into the return slot explicitly.  Mirror the
         // localvar test in NewIRVariable.
         Symbol* sym = ((IdentifierASTNode*)return_value)->symbol;
-        if (sym != NULL && sym->flags.is_local && !sym->flags.is_argument &&
-            !sym->flags.is_temp && !StorageIs(sym->storage, STO(static))) {
+        if (SymbolCanLiveInReturnSlot(sym)) {
           return_value->flags |= kASTNrvoMarker;
           sym->is_nrvo = true;
         }

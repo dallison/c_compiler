@@ -287,6 +287,21 @@ bool X86IsSignedLoad(TargetInstruction* inst) {
   }
 }
 
+static int X86SignedLoadBits(TargetInstruction* inst) {
+  switch ((X86Opcode)inst->opcode) {
+    case X86_OP(loadb):
+      return 8;
+    case X86_OP(loadw):
+      return 16;
+    case X86_OP(loadl):
+      return 32;
+    case X86_OP(loadq):
+      return 64;
+    default:
+      return 0;
+  }
+}
+
 bool X86IsStore(TargetInstruction* inst) {
   switch ((X86Opcode)inst->opcode) {
     case X86_OP(storeb):
@@ -3472,6 +3487,13 @@ static TargetInstruction* LowerZeroExtend(X86Generator* rv, Generator* gen,
   // operand directly (e.g. 24 for a char->int extension) produces a wrong mask.
   int src_size = src->type != NULL ? src->type->size : node->type->size;
   int keep_bytes = src_size < node->type->size ? src_size : node->type->size;
+  int64_t diff = ((IRConstant*)node->inputs.value.p[1])->value.ivalue;
+  int diff_keep_bits = node->type->size * 8 - (int)diff;
+  if (diff > 0 && diff_keep_bits > 0 && diff_keep_bits % 8 == 0 &&
+      diff_keep_bits / 8 < keep_bytes) {
+    // A `cast` operand can carry the wider pre-narrowing type.
+    keep_bytes = diff_keep_bits / 8;
+  }
   if (keep_bytes >= 8) {
     // No masking required; the value already occupies the full register.
     TargetInstruction* dest = GetDestInstruction(rv, gen, node);
@@ -3724,14 +3746,19 @@ static TargetInstruction* LowerSignExtend(X86Generator* rv, Generator* gen,
   bool route_stashed_result = (node->flags & kIRStashedCallResult) != 0;
   TargetInstruction* dest =
       route_stashed_result ? GetDestInstruction(rv, gen, node) : NULL;
-  if (X86IsSignedLoad(value)) {
+  IRConstant* diff_value = node->inputs.value.p[1];
+  int64_t diff = diff_value->value.ivalue;
+  // Narrowing passes the register through unchanged, so the value may still
+  // be a load wider than the source being extended here.
+  int dest_bits = node->type != NULL ? (int)node->type->size * 8 : 64;
+  int extended_bits = diff > 0 && diff < dest_bits ? dest_bits - (int)diff : 0;
+  int load_bits = X86SignedLoadBits(value);
+  if (load_bits > 0 && (diff <= 0 || load_bits <= extended_bits)) {
     if (dest != NULL) {
       value = SetDestOrMove(rv, value, dest, X86_OP(mv));
     }
     return SetLoweredNode(node, value);
   }
-  IRConstant* diff_value = node->inputs.value.p[1];
-  int64_t diff = diff_value->value.ivalue;
   if (diff <= 0) {
     // Narrowing is represented by the low destination-width view.  If the
     // narrowed signed value is widened again, that later conversion performs
@@ -3748,6 +3775,9 @@ static TargetInstruction* LowerSignExtend(X86Generator* rv, Generator* gen,
   IRNode* input = node->inputs.value.p[0];
   int source_bits =
       input->type != NULL ? (int)input->type->size * 8 : 32;
+  if (extended_bits > 0 && extended_bits < source_bits) {
+    source_bits = extended_bits;
+  }
   int64_t shift = 64 - source_bits;
   TargetInstruction* immed =
       GetIntConstant(rv, NULL, kTargetType32Bit, shift);

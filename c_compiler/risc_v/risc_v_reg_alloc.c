@@ -990,7 +990,12 @@ static void ReloadSpills(RVRegisterAllocator* allocator,
       TrapReload(reload);
       TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, reload, inst);
       inst->operand[i] = reload;
-      RVRegisterType reg_type = RegisterTypeFromInstruction(inst);
+      // The reload takes the spilled value's register class, which differs
+      // from the user's for an integer address feeding a floating-point load.
+      RVRegisterType reg_type =
+          op->reg != NULL ? ((RVRegister*)op->reg)->type
+          : RegisterTypeFromInstruction(op->operand[0] != NULL ? op->operand[0]
+                                                               : inst);
       RVRegister *reg = AllocateRegisterWithType(allocator, reload->block, reload,
                                      reg_type, CanUseTemp(allocator, reload));
       AssignRegister(reg, reload);
@@ -1562,6 +1567,7 @@ static void RVResolveArgumentMovesInBlock(RVRegisterAllocator* alloc,
                                           TargetBasicBlock* block) {
   TargetInstruction* inst = TargetBasicBlockBegin(block);
   TargetInstruction* end = TargetBasicBlockEnd(block);
+  bool skip_leading_reloads = false;
   while (inst != end && inst != NULL) {
     if ((inst->flags & RV_INST_ARG_MOVE) == 0) {
       inst = TargetNext(inst);
@@ -1572,11 +1578,29 @@ static void RVResolveArgumentMovesInBlock(RVRegisterAllocator* alloc,
     // spilled argument is part of the copy too: it was given the argument's
     // register directly, so it clobbers that register and has to be ordered
     // with the moves rather than splitting the run in two.
+    // Reloads that place spilled arguments straight into their registers can
+    // also come just ahead of the first move; they clobber registers the moves
+    // may still read, so they belong to the same copy.
+    TargetInstruction* first = inst;
+    int leading = 0;
+    if (!skip_leading_reloads) {
+      for (TargetInstruction* p = TargetPrev(inst);
+           p != NULL && p != end && (int)p->opcode == (int)RV_OP(reload) &&
+           p->reg != NULL && p->operand[0] != NULL &&
+           (int)p->operand[0]->opcode == (int)RV_OP(spill) &&
+           p->reg->num >= RV_INT_ARG_START && p->reg->num <= RV_INT_ARG_END &&
+           leading < RV_MAX_ARG_MOVES / 2;
+           p = TargetPrev(p)) {
+        first = p;
+        leading++;
+      }
+    }
+    skip_leading_reloads = false;
     TargetInstruction* run[RV_MAX_ARG_MOVES];
     int run_count = 0;
     int last_move;
     bool well_formed = true;
-    TargetInstruction* scan = inst;
+    TargetInstruction* scan = first;
     while (scan != end && scan != NULL &&
            ((scan->flags & RV_INST_ARG_MOVE) != 0 ||
             (int)scan->opcode == (int)RV_OP(reload))) {
@@ -1626,6 +1650,10 @@ static void RVResolveArgumentMovesInBlock(RVRegisterAllocator* alloc,
         scan = run[r];
         break;
       }
+    }
+    if (leading > 0 && run_count <= leading) {
+      skip_leading_reloads = true;
+      continue;
     }
     // Trailing reloads belong to whatever follows the run, not to the copy.
     last_move = -1;

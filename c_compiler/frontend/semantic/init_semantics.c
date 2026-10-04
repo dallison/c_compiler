@@ -550,10 +550,17 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
   // A compound literal initializing an aggregate is treated as if its
   // brace-enclosed initializer appeared directly here.  Its anonymous object is
   // not separately materialized, which also lets a compound literal serve as a
-  // constant initializer for a static aggregate.
+  // constant initializer for a static aggregate.  A non-aggregate class
+  // literal (`(P){P(5)}`) is initialized by its constructor, not member-wise,
+  // so it initializes the target as an expression of the same type.
   if (expr->op == AST_OP(compound_literal) &&
       (inode->kind == kIStruct || inode->kind == kIArray) &&
-      (TypeIsStructOrUnion(expr->type) || TypeIsArray(expr->type))) {
+      (TypeIsStructOrUnion(expr->type) || TypeIsArray(expr->type)) &&
+      !(CompilerIsCXX() && TypeIsStructOrUnion(expr->type) &&
+        expr->type->info.struct_info != NULL &&
+        !expr->type->info.struct_info->is_aggregate &&
+        (expr->type->info.struct_info->tag_symbol == NULL ||
+         !expr->type->info.struct_info->tag_symbol->flags.invented))) {
     CompoundLiteralASTNode* cl = (CompoundLiteralASTNode*)expr;
     return InitializeINode(inode, cl->initializer, constants_only);
   }

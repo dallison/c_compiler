@@ -311,7 +311,13 @@ static Symbol* InstantiatedMemberForSymbol(Struct* source, Struct* target,
     if (found_type != NULL && candidate_type != NULL &&
         TypeIsFunction(found_type) && TypeIsFunction(candidate_type) &&
         found_type->info.function.prototype.length ==
-            candidate_type->info.function.prototype.length) {
+            candidate_type->info.function.prototype.length &&
+        found_type->info.function.is_const_member ==
+            candidate_type->info.function.is_const_member &&
+        found_type->info.function.is_volatile_member ==
+            candidate_type->info.function.is_volatile_member &&
+        found_type->info.function.ref_qualifier ==
+            candidate_type->info.function.ref_qualifier) {
       return candidate->symbol;
     }
   }
@@ -1186,7 +1192,8 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         (enclosing_fn->flags.is_template ||
          (enclosing_fn->type != NULL && TypeIsFunction(enclosing_fn->type) &&
           enclosing_fn->type->info.function.template_parameters.length > 0));
-    if (!nested_in_substitution && !inside_function_template) {
+    if (!nested_in_substitution && !inside_function_template &&
+        !from->in_namespace_template) {
       return TypeRecordCopy(type);
     }
   }
@@ -1227,6 +1234,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     str->lexical_parent = from->lexical_parent;
   }
   str->access_enclosing_function = from->access_enclosing_function;
+  str->in_namespace_template = from->in_namespace_template;
   if (from->tag_symbol != NULL && from->tag_symbol->flags.is_block_scope &&
       !from->tag_symbol->flags.invented && args != NULL) {
     str->local_class_arguments = TemplateArgumentVectorCopy(args);

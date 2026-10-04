@@ -1430,14 +1430,20 @@ static void ClaimOperandRegister(AARCH64RegisterAllocator* allocator,
 // A processed header read already names a physical register.  An inner
 // loop header that does not dominate the outer latch still rereads that
 // register on the next outer iteration, so pin every processed natural-loop
-// header's operands, not only headers that dominate the current block.
+// header's operands, not only headers that dominate the current block.  A
+// header that cannot be reached again from |block| belongs to a loop that has
+// already finished, and its register may now hold one of |block|'s live-ins.
 static void ClaimRegistersNamedByProcessedHeaders(
-    AARCH64RegisterAllocator* allocator) {
+    AARCH64RegisterAllocator* allocator, TargetBasicBlock* block) {
   TargetGenerator* gen = &allocator->g->base;
+  BitSet reachable;
+  BitSetInit(&reachable);
+  TargetBasicBlockReachableAfter(gen, block, &reachable);
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* header = gen->basic_blocks.value.p[i];
     if (header == NULL || TargetBasicBlockIsEmpty(header) ||
-        !BlockIsLoopHeader(gen, header)) {
+        !BlockIsLoopHeader(gen, header) ||
+        !BitSetContains(&reachable, header->block_id)) {
       continue;
     }
     for (TargetInstruction* inst = header->code; inst != NULL;
@@ -1450,6 +1456,7 @@ static void ClaimRegistersNamedByProcessedHeaders(
       }
     }
   }
+  BitSetDestruct(&reachable);
 }
 
 static void InitializeBasicBlockRegisters(AARCH64RegisterAllocator* allocator,
@@ -1526,7 +1533,7 @@ static void InitializeBasicBlockRegisters(AARCH64RegisterAllocator* allocator,
       inst->reg->owner = inst;
     }
   }
-  ClaimRegistersNamedByProcessedHeaders(allocator);
+  ClaimRegistersNamedByProcessedHeaders(allocator, block);
 }
 
 static void ProcessBlock(TargetBasicBlock* block, void* data) {
