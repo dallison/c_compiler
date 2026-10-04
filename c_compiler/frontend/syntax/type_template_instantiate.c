@@ -11249,22 +11249,28 @@ static Vector* PartialSpecializationMemberPatternArguments(TypeParser* parser,
   return bindings;
 }
 
-int StructPartialSpecializationParameterCount(Syntax* syntax, Struct* owner) {
+Vector* StructPartialSpecializationPatternArguments(Syntax* syntax,
+                                                    Struct* owner) {
   if (syntax == NULL || owner == NULL || owner->tag_symbol == NULL ||
       owner->tag_symbol->type == NULL) {
-    return -1;
+    return NULL;
   }
   Symbol* origin = owner->tag_symbol->type->template_origin;
   if (origin == NULL || origin->type == NULL ||
       !TypeIsStructOrUnion(origin->type) ||
       origin->type->info.struct_info == NULL ||
       origin->type->info.struct_info->partial_specializations.length == 0) {
-    return -1;
+    return NULL;
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* bindings = PartialSpecializationMemberPatternArguments(&parser, owner);
   TypeParserDestruct(&parser);
+  return bindings;
+}
+
+int StructPartialSpecializationParameterCount(Syntax* syntax, Struct* owner) {
+  Vector* bindings = StructPartialSpecializationPatternArguments(syntax, owner);
   if (bindings == NULL) {
     return -1;
   }

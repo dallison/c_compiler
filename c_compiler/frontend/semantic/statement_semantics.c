@@ -2962,6 +2962,7 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
   }
   hidden->flags.is_local = true;
   hidden->flags.is_defined = true;
+  hidden->is_structured_binding_object = true;
   hidden->flags.is_constexpr = is_constexpr;
   hidden->flags.is_constinit = is_constinit;
   hidden->storage = binding->storage;

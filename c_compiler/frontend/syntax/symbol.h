@@ -236,6 +236,8 @@ typedef struct Symbol {
   // -2 means materialized/not a binding, -1 means still dependent, and a
   // nonnegative value is the known pack size.
   int structured_binding_pack_size;  // transient
+  // The hidden object a structured binding declaration decomposes.
+  bool is_structured_binding_object;  // @wire - (transient)
   // Local object selected for named return-value optimization.  Semantic
   // analysis sets this before IR generation so every reference to the pooled
   // variable uses the hidden struct-return address.

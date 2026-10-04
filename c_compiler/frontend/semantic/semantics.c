@@ -424,6 +424,14 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
       return false;
     }
     deduced = TypeDeduceDecltypeAuto(initializer_expr);
+  } else if (sym->type->declarator == kDeclPrimitive &&
+             initializer_type != NULL &&
+             !sym->is_structured_binding_object) {
+    // [dcl.type.auto.deduct]: plain `auto` deduces as a by-value parameter,
+    // dropping top-level cv (`auto r = *this;` in a const member is not const).
+    // [dcl.struct.bind] copies an array initializer instead of decaying it.
+    TypeRecord* decayed = TypeDecayForByValueDeduction(initializer_type);
+    deduced = decayed != NULL ? TypeDeduceAuto(sym->type, decayed) : NULL;
   } else {
     deduced = TypeDeduceAuto(sym->type, initializer_type);
   }

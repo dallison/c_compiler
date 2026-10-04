@@ -174,6 +174,10 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
 // type.  -1 for an instantiation of the primary template.
 int StructPartialSpecializationParameterCount(struct Syntax* syntax,
                                               Struct* owner);
+// The partial specialization's own bindings for `owner` (caller deletes), or
+// NULL for an instantiation of the primary template.
+Vector* StructPartialSpecializationPatternArguments(struct Syntax* syntax,
+                                                    Struct* owner);
 void CloneInstantiatedMemberFunctionBody(TypeParser* parser, Struct* owner,
                                          Symbol* symbol,
                                          Symbol* template_definition,

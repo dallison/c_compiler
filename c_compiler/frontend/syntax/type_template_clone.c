@@ -722,8 +722,19 @@ static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
       clone->from_owner != NULL ? clone->from_owner->lexical_parent : NULL;
   Struct* target =
       clone->to_owner != NULL ? clone->to_owner->lexical_parent : NULL;
+  // The nested class's own injected-class-name (`It r;` inside
+  // `O<T>::It<C>`) maps through the normal source/target to the
+  // specialization; the enclosing mapping would name `O<int>::It`'s pattern.
+  bool names_own_class = false;
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (TypeIsStructOrUnion(t) && t->info.struct_info != NULL &&
+        t->info.struct_info == clone->substitution_source) {
+      names_own_class = true;
+      break;
+    }
+  }
   if (source == NULL || target == NULL || source == target ||
-      !TypeChainReferencesStruct(type, source)) {
+      names_own_class || !TypeChainReferencesStruct(type, source)) {
     TypeSubstitutionScope substitution = TypeParserPushTemplateSubstitution(
         clone->parser, clone->substitution_source,
         clone->substitution_target);
@@ -9931,6 +9942,18 @@ static Vector* PrefixEnclosingClassTemplateArguments(Syntax* syntax,
     if (parent == NULL || parent->tag_symbol == NULL ||
         parent->tag_symbol->type == NULL ||
         parent->tag_symbol->type->template_arguments == NULL) {
+      continue;
+    }
+    // A partial specialization's members (and the closures of lambdas in
+    // them) number its parameters by the partial's own bindings: `C` in
+    // `F<E, C>` is `$T0`, not the primary's `[E, char]`.
+    Vector* bindings =
+        StructPartialSpecializationPatternArguments(syntax, parent);
+    if (bindings != NULL) {
+      for (size_t j = 0; j < bindings->length; j++) {
+        VectorAppend(prefix, bindings->value.p[j]);
+      }
+      VectorDelete(bindings);
       continue;
     }
     Vector* parent_args = parent->tag_symbol->type->template_arguments;

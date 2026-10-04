@@ -4465,6 +4465,63 @@ static void DiagnoseScalarNarrowing(ASTNode* source, TypeRecord* target) {
   StringDestruct(&to_name);
 }
 
+#define kArrayElementwiseCopyMaxRank 16
+
+static ASTNode* NewArrayElementwiseCopy(ASTNode* source, TypeRecord* type,
+                                        int64_t* indices, int rank,
+                                        SourceLocation location) {
+  if (!TypeIsFixedArray(type)) {
+    ASTNode* element = ASTNodeClone(source, IdentityCloneNode, NULL, NULL);
+    for (int i = 0; i < rank; i++) {
+      ASTNode* index = NewIntConstantASTNode(
+          indices[i], NewTypeRecordWithSize(kTypeLong, kQualPlain), location);
+      element = NewBinaryASTNode(AST_OP(subscript), NULL, location, element,
+                                 index);
+    }
+    if (TypeIsStructOrUnion(type)) {
+      element = NewCastASTNode(type, location, element);
+    }
+    return element;
+  }
+  Vector* elements = NewVector();
+  for (int64_t i = 0; i < (int64_t)type->info.array.size.fixed; i++) {
+    indices[rank] = i;
+    VectorAppend(elements, NewArrayElementwiseCopy(source, type->next,
+                                                   indices, rank + 1,
+                                                   location));
+  }
+  return NewBracedInitializerASTNode(elements, NULL, location);
+}
+
+static int FixedArrayRank(TypeRecord* type) {
+  int rank = 0;
+  for (; TypeIsFixedArray(type); type = type->next) {
+    rank++;
+  }
+  return TypeIsArray(type) ? -1 : rank;
+}
+
+// A side-effect-free lvalue path (a variable, `this->field`, `*p`) that can be
+// repeated once per element of an element-wise array copy.
+static bool LvaluePathIsRepeatable(ASTNode* node) {
+  if (node == NULL) {
+    return false;
+  }
+  switch (node->op) {
+    case AST_OP(identifier):
+      return true;
+    case AST_OP(arrow):
+    case AST_OP(dot): {
+      BinaryASTNode* access = (BinaryASTNode*)node;
+      return LvaluePathIsRepeatable(access->left);
+    }
+    case AST_OP(contents):
+      return LvaluePathIsRepeatable(((UnaryASTNode*)node)->sub);
+    default:
+      return false;
+  }
+}
+
 static ASTNode* AnalyzeInitialization(ASTNode* node,
                                       ASTNode* target, ASTNode* init) {
   target = AnalyzeExpression(target);
@@ -4539,6 +4596,22 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       return AnalyzeExpression(rewritten);
     }
     initialization->right = init;
+  }
+  // [dcl.struct.bind]: `auto [a, b] = arr;` copies each element of the array
+  // into the hidden object.
+  if (deduced_auto && symbol->is_structured_binding_object &&
+      init->op == AST_OP(expr_init)) {
+    ASTNode* source = ((ExpressionInitializerASTNode*)init)->expr;
+    int rank = FixedArrayRank(symbol->type);
+    if (source != NULL && TypeIsArray(source->type) && rank > 0 &&
+        rank <= kArrayElementwiseCopyMaxRank &&
+        LvaluePathIsRepeatable(source)) {
+      int64_t indices[kArrayElementwiseCopyMaxRank];
+      ASTNode* copy = NewArrayElementwiseCopy(source, symbol->type, indices, 0,
+                                              source->location);
+      ASTNodeReplaceChild(node, 1, copy, true);
+      init = AnalyzeExpression(copy);
+    }
   }
   bool is_reference_init = TypeIsReference(target->type);
   switch (init->op) {
@@ -14139,64 +14212,6 @@ static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node) {
   TypeRecordCalculateSize(node->base.type);
 }
 
-#define kLambdaArrayCaptureMaxRank 16
-
-static ASTNode* NewLambdaArrayCaptureCopy(ASTNode* source, TypeRecord* type,
-                                          int64_t* indices, int rank,
-                                          SourceLocation location) {
-  if (!TypeIsFixedArray(type)) {
-    ASTNode* element = ASTNodeClone(source, IdentityCloneNode, NULL, NULL);
-    for (int i = 0; i < rank; i++) {
-      ASTNode* index = NewIntConstantASTNode(
-          indices[i], NewTypeRecordWithSize(kTypeLong, kQualPlain), location);
-      element = NewBinaryASTNode(AST_OP(subscript), NULL, location, element,
-                                 index);
-    }
-    if (TypeIsStructOrUnion(type)) {
-      element = NewCastASTNode(type, location, element);
-    }
-    return element;
-  }
-  Vector* elements = NewVector();
-  for (int64_t i = 0; i < (int64_t)type->info.array.size.fixed; i++) {
-    indices[rank] = i;
-    VectorAppend(elements, NewLambdaArrayCaptureCopy(source, type->next,
-                                                     indices, rank + 1,
-                                                     location));
-  }
-  return NewBracedInitializerASTNode(elements, NULL, location);
-}
-
-static int LambdaArrayCaptureRank(TypeRecord* type) {
-  int rank = 0;
-  for (; TypeIsFixedArray(type); type = type->next) {
-    rank++;
-  }
-  return TypeIsArray(type) ? -1 : rank;
-}
-
-// The captured entity is named by a side-effect-free lvalue path (the variable,
-// or `this->field` / `*this->field` once an enclosing lambda rewrote it), so it
-// can be repeated once per element.
-static bool LambdaCaptureSourceIsRepeatable(ASTNode* node) {
-  if (node == NULL) {
-    return false;
-  }
-  switch (node->op) {
-    case AST_OP(identifier):
-      return true;
-    case AST_OP(arrow):
-    case AST_OP(dot): {
-      BinaryASTNode* access = (BinaryASTNode*)node;
-      return LambdaCaptureSourceIsRepeatable(access->left);
-    }
-    case AST_OP(contents):
-      return LambdaCaptureSourceIsRepeatable(((UnaryASTNode*)node)->sub);
-    default:
-      return false;
-  }
-}
-
 // A by-copy array capture copies each element.  The closure initializer's
 // `.field = array` would instead decay the array and brace-elide the pointer
 // into the first element, so spell the copy out as `{array[0], array[1], ...}`,
@@ -14247,17 +14262,17 @@ static void ExpandLambdaArrayCaptureCopies(CompoundLiteralASTNode* node) {
         field->flags.is_parameter_pack) {
       continue;
     }
-    int rank = LambdaArrayCaptureRank(field->type);
-    if (rank <= 0 || rank > kLambdaArrayCaptureMaxRank) {
+    int rank = FixedArrayRank(field->type);
+    if (rank <= 0 || rank > kArrayElementwiseCopyMaxRank) {
       continue;
     }
     ASTNode* value = ((ExpressionInitializerASTNode*)designated->init)->expr;
-    if (!LambdaCaptureSourceIsRepeatable(value)) {
+    if (!LvaluePathIsRepeatable(value)) {
       continue;
     }
-    int64_t indices[kLambdaArrayCaptureMaxRank];
-    ASTNode* copy = NewLambdaArrayCaptureCopy(value, field->type, indices, 0,
-                                              value->location);
+    int64_t indices[kArrayElementwiseCopyMaxRank];
+    ASTNode* copy = NewArrayElementwiseCopy(value, field->type, indices, 0,
+                                            value->location);
     ASTNodeReplaceChild(initializer, 0, copy, true);
   }
 }

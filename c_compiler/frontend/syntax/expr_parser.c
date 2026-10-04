@@ -2433,6 +2433,12 @@ static ASTNode* NewCXXLiteralOperatorIdentifier(Syntax* syntax, String* name,
   return NewIdentifierASTNode(symbol, location);
 }
 
+// C++ `wchar_t` is a distinct type (`L"x"` is `const wchar_t[2]`); C's is an
+// `int` typedef.
+static Type WideLiteralElementType(void) {
+  return CompilerIsCXX() ? kTypeWchar : kTypeInt;
+}
+
 static Type UTF8LiteralElementType(void) {
   if (CompilerCAtLeast(kLanguageStandardC23)) {
     return kTypeChar | kTypeUnsigned;
@@ -2450,7 +2456,7 @@ static ASTNode* NewStringLiteralArgument(String* contents,
   Type element_type = kTypeChar;
   if (encoding == kLiteralEncodingWide) {
     element_size = compiler->wchar_size;
-    element_type = kTypeInt;
+    element_type = WideLiteralElementType();
   } else if (encoding == kLiteralEncodingUTF16) {
     element_size = 2;
     element_type = kTypeChar16;
@@ -2830,7 +2836,7 @@ static ASTNode* ParseWideStringLiteral(Syntax* syntax,
   TypeRecord* array = NewBasicArrayTypeRecord(
       kQualPlain, (int)(contents->length / compiler->wchar_size) + 1, false);
   TypeRecord* type = NewTypeRecordWithSize(
-      kTypeInt, CompilerIsCXX() ? kQualConst : kQualPlain);
+      WideLiteralElementType(), CompilerIsCXX() ? kQualConst : kQualPlain);
   TypeRecordChain(array, type);
   TypeRecordCalculateSize(array);
   return NewWideStringConstantASTNode(contents, array,
@@ -2880,7 +2886,8 @@ static ASTNode* ParseWideCharacterConstant(Syntax* syntax,
     StringSetString(&suffix, &lex->ud_suffix);
     LexNextToken(lex);
     Vector* actuals = NewVector();
-    TypeRecord* type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+    TypeRecord* type =
+        NewTypeRecordWithSize(WideLiteralElementType(), kQualPlain);
     VectorAppend(actuals, NewCharConstantASTNode(value, type, location));
     ASTNode* call =
         NewCXXUserDefinedLiteralCall(syntax, &suffix, actuals, location);
@@ -2888,7 +2895,8 @@ static ASTNode* ParseWideCharacterConstant(Syntax* syntax,
     return call;
   }
   LexNextToken(lex);
-  TypeRecord* type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  TypeRecord* type =
+      NewTypeRecordWithSize(WideLiteralElementType(), kQualPlain);
   return NewCharConstantASTNode(value, type,
                                 syntax->lex->current_token_location);
 }
