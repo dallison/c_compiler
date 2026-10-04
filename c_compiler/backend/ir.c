@@ -1234,6 +1234,7 @@ bool IRComparisonIsUnsigned(IRNode* node) {
     case IR_OP(cmplea):
     case IR_OP(cmpgta):
     case IR_OP(cmpgea):
+    case IR_OP(cmp3wayu):
     case IR_OP(cmp3waya):
       return true;
     case IR_OP(cmplti):
