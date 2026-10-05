@@ -675,6 +675,13 @@ static bool ConstexprIsDeallocationFunction(Symbol* symbol) {
           StringEqual(&symbol->name, "free"));
 }
 
+static bool ConstexprIsReallocationFunction(Symbol* symbol) {
+  return symbol != NULL && StringEqual(&symbol->name, "realloc") &&
+         symbol->type != NULL && TypeIsFunction(symbol->type) &&
+         symbol->type->info.function.cxx_member_owner == NULL &&
+         ConstexprFunctionDefinition(symbol) == NULL;
+}
+
 static CastASTNode* ConstexprAllocationNewCast(ASTNode* allocation) {
   for (ASTNode* parent = allocation != NULL ? allocation->parent : NULL;
        parent != NULL; parent = parent->parent) {
@@ -882,6 +889,61 @@ static bool ConstexprEvaluateDeallocationCall(ConstEvalContext* ctx,
     ConstexprHeapFree(ctx, (void*)(intptr_t)address);
   }
   return true;
+}
+
+static bool ConstexprEvaluateReallocationCall(ConstEvalContext* ctx,
+                                              ASTNode* node,
+                                              ConstexprValue* result) {
+  if (node == NULL || node->op != AST_OP(call) || result == NULL) {
+    return false;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->children == NULL || call->children->length != 2) {
+    return false;
+  }
+  ConstexprValue pointer = {0};
+  ASTNode* pointer_arg = call->children->value.p[0];
+  if (!EvaluateConstexprValue(ctx, pointer_arg, pointer_arg->type, &pointer)) {
+    return false;
+  }
+  ConstexprHeapBlock* old_block = NULL;
+  if (pointer.is_address && pointer.heap_block != NULL) {
+    if (pointer.heap_index != 0 || !pointer.heap_block->live) {
+      return false;
+    }
+    old_block = pointer.heap_block;
+  } else if (pointer.is_address) {
+    if (pointer.ivalue != 0 || pointer.address_binding != NULL ||
+        pointer.address_slot != NULL || pointer.address_object != NULL) {
+      return false;
+    }
+  } else {
+    int64_t address = 0;
+    if (!ConstexprValueAsInteger(pointer, &address) || address != 0) {
+      return false;
+    }
+  }
+  int64_t size = 0;
+  if (!EvaluateIntegerExpressionInContext(ctx, call->children->value.p[1],
+                                          &size) ||
+      size < 0) {
+    return false;
+  }
+  void* memory = ConstexprHeapMalloc(ctx, (size_t)size, NULL);
+  if (memory == NULL) {
+    return false;
+  }
+  if (old_block != NULL) {
+    ConstexprHeapBlock* new_block = ConstexprFindHeapBlock(ctx, memory);
+    size_t count = old_block->size < new_block->size ? old_block->size
+                                                     : new_block->size;
+    memcpy(new_block->memory, old_block->memory, count);
+    memcpy(new_block->states, old_block->states, count);
+    new_block->object_type = old_block->object_type;
+    old_block->live = false;
+  }
+  *result = (ConstexprValue){0};
+  return ConstexprHeapAddress(ctx, memory, 0, result);
 }
 
 static bool ConstexprDereferenceAddress(ConstexprValue address,
@@ -6039,7 +6101,8 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
         (node->flags & kASTCXXNewExpression) != 0 ||
         (result->heap_block != NULL && cast->expr != NULL &&
          cast->expr->op == AST_OP(call) &&
-         ConstexprIsAllocationFunction(ConstexprCallSymbol(cast->expr)));
+         (ConstexprIsAllocationFunction(ConstexprCallSymbol(cast->expr)) ||
+          ConstexprIsReallocationFunction(ConstexprCallSymbol(cast->expr))));
     if (source_pointee != NULL && TypeIsVoid(source_pointee) &&
         target_pointee != NULL && !TypeIsVoid(target_pointee) &&
         !establishes_allocated_type) {
@@ -8381,6 +8444,10 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
   if (ConstexprIsDeallocationFunction(ConstexprCallSymbol(expr))) {
     return ConstexprEvaluateDeallocationCall(ctx, expr);
   }
+  if (ConstexprIsReallocationFunction(ConstexprCallSymbol(expr))) {
+    ConstexprValue ignored = {0};
+    return ConstexprEvaluateReallocationCall(ctx, expr, &ignored);
+  }
   ASTNode* receiver = NULL;
   Symbol* callee =
       ConstexprFunctionDefinition(ConstexprCallSymbol(expr));
@@ -9785,6 +9852,9 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   }
   if (ConstexprIsDeallocationFunction(allocation_symbol)) {
     return ConstexprEvaluateDeallocationCall(ctx, node);
+  }
+  if (ConstexprIsReallocationFunction(allocation_symbol)) {
+    return ConstexprEvaluateReallocationCall(ctx, node, result);
   }
   ASTNode* receiver = NULL;
   bool receiver_is_explicit_actual = false;

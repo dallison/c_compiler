@@ -3952,9 +3952,20 @@ static uint64_t ConstexprPCodeNextArgument(ConstexprPCodeArguments* args,
   return value;
 }
 
-// A void* or size_t argument, in the width the source target gives it.
+// A size_t argument, in the width the source target gives it.
 static uint64_t ConstexprPCodeNextWordArgument(ConstexprPCodeArguments* args) {
   return ConstexprPCodeNextArgument(args, args->pointer_size);
+}
+
+// A pointer argument always occupies a full width slot, but only the target's
+// pointer width of it is the program's value.
+static uint64_t ConstexprPCodeNextPointerArgument(
+    ConstexprPCodeArguments* args) {
+  uint64_t value = ConstexprPCodeNextArgument(args, sizeof(uint64_t));
+  if (args->pointer_size < sizeof(uint64_t)) {
+    value &= (UINT64_C(1) << (8 * args->pointer_size)) - 1;
+  }
+  return value;
 }
 
 // A pointer the program handed over arrives with the high half of the host
@@ -3974,18 +3985,8 @@ static bool ConstexprPCodeAddressOf(ConstexprPCodeArguments* args, uint64_t raw,
 static bool ConstexprPCodeNextAddressArgument(ConstexprPCodeArguments* args,
                                               size_t size, bool write,
                                               uint64_t* address) {
-  return ConstexprPCodeAddressOf(args, ConstexprPCodeNextWordArgument(args),
+  return ConstexprPCodeAddressOf(args, ConstexprPCodeNextPointerArgument(args),
                                  size, write, address);
-}
-
-// The same, for a pointer that generated code passed in a full width slot even
-// though the value in it is the program's own narrow pointer.
-static bool ConstexprPCodeNextWideAddressArgument(ConstexprPCodeArguments* args,
-                                                  size_t size, bool write,
-                                                  uint64_t* address) {
-  return ConstexprPCodeAddressOf(
-      args, ConstexprPCodeNextArgument(args, sizeof(uint64_t)), size, write,
-      address);
 }
 
 static PCodeVMStatus ConstexprPCodeAllocateHeapBlock(
@@ -4143,7 +4144,7 @@ static PCodeVMStatus ConstexprPCodeEscapeStartLifetime(
   // width; only the address it carries came from the program and can be narrow.
   ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
   uint64_t address = 0;
-  if (!ConstexprPCodeNextWideAddressArgument(&args, 0, false, &address)) {
+  if (!ConstexprPCodeNextAddressArgument(&args, 0, false, &address)) {
     return kPCodeVMStatusInvalidRead;
   }
   size_t size = (size_t)ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
@@ -4894,7 +4895,7 @@ static PCodeVMStatus ConstexprPCodeExceptionPtrCurrent(
 static PCodeVMStatus ConstexprPCodeExceptionPtrRetainRelease(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime, bool retain) {
   ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
-  uint64_t address = ConstexprPCodeNextWordArgument(&args);
+  uint64_t address = ConstexprPCodeNextPointerArgument(&args);
   if (address == 0) {
     return kPCodeVMStatusRunning;
   }
@@ -4923,7 +4924,7 @@ static PCodeVMStatus ConstexprPCodeExceptionPtrRetainRelease(
 static PCodeVMStatus ConstexprPCodeExceptionPtrRethrow(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
   ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
-  uint64_t address = ConstexprPCodeNextWordArgument(&args);
+  uint64_t address = ConstexprPCodeNextPointerArgument(&args);
   ConstexprPCodeExceptionHandle* handle =
       ConstexprPCodeFindExceptionHandle(runtime, address, NULL);
   if (handle == NULL || handle->references == 0 ||
