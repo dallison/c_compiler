@@ -38,17 +38,15 @@ header_end:
 
 .global language_entry
 
-// Entered with JMP when this bank is selected as the current language.
-// The extra image is service-only, so this entry just hands the machine
-// back. The primary image owns the machine: enable Master sideways RAM,
-// then offer a *command line.
+// Entered with JMP when image 0 is selected as the current language.
+// The other images are not visible to MOS. The primary image offers a
+// *command line. The title at offset 9 is what the socket scan matches.
 language_entry:
 #ifdef PAGED_EXTRA
   JMP bbc_return
 #else
   LDX #0xff
   TXS
-  JSR enable_master_ram
   JSR print_banner
 language_loop:
   LDA #0x3e
@@ -65,25 +63,6 @@ language_loop:
   JSR PAGED_OSCLI
   JMP language_loop
 #endif
-
-// OSBYTE 0, X=1 returns the OS version in X. MOS 3.20 and later (Master)
-// read and write sideways RAM only when ROMSEL bit 7 is set. Model B
-// sideways RAM is selected by the socket number alone.
-enable_master_ram:
-  LDA #0
-  LDX #1
-  LDY #0
-  JSR PAGED_OSBYTE
-  CPX #PAGED_MASTER_OS
-  BCC master_done
-  SEI
-  LDA PAGED_ROM_ID
-  ORA #0x80
-  STA PAGED_ROM_ID
-  STA PAGED_ROMSEL
-  CLI
-master_done:
-  RTS
 
 .section ".text.service_entry", "ax", @progbits
 

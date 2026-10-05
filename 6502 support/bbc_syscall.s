@@ -1,4 +1,7 @@
 #include "vars.s"
+#ifdef DAVECC_PAGED_LIBC
+#include "layout.h"
+#endif
 
 // DaveCC syscall numbers. On 6502, exit and abort use the 6502-specific
 // values. Arguments are 2-byte ints and pointers; a long is 4 bytes.
@@ -678,7 +681,18 @@ os_args_put:
   LDA byte
   LDX #0x70
   LDY handle
+#ifdef DAVECC_PAGED_LIBC
+  STA os_a
+  STX os_x
+  STY os_y
+  LDA #%lo(OSARGS)
+  STA os_target
+  LDA #%hi(OSARGS)
+  STA os_target+1
+  JSR bbc_os_call
+#else
   JSR OSARGS
+#endif
   LDX #0
 os_args_get:
   LDA 0x70, X
@@ -697,6 +711,17 @@ os_args_get:
 bbc_os_call:
 bbc_os_invoke:
   LDA os_target
+#ifdef DAVECC_PAGED_LIBC
+  // The JSR returns into main RAM. MOS has by then selected image 0,
+  // and the trampoline writes the virtual image back before returning.
+  STA PAGED_MOS_JSR+1
+  LDA os_target+1
+  STA PAGED_MOS_JSR+2
+  LDA os_a
+  LDX os_x
+  LDY os_y
+  JSR PAGED_MOS_CALL
+#else
   STA bbc_os_jsr+1
   LDA os_target+1
   STA bbc_os_jsr+2
@@ -705,6 +730,7 @@ bbc_os_invoke:
   LDY os_y
 bbc_os_jsr:
   .byte 0x20, 0x00, 0x00
+#endif
   STA os_a
   STX os_x
   STY os_y

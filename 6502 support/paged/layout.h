@@ -22,42 +22,35 @@
 #define PAGED_VECTOR_MAX 256
 #define PAGED_ROM_END 0xc000
 
-// MOS copies the currently selected sideways bank here. The hardware
-// latch is at PAGED_ROMSEL. On the Master, bit 7 of the latch selects
-// sideways RAM for reads and writes.
+// MOS copies the socket number (bits 0-3) here. The hardware latch is at
+// PAGED_ROMSEL. Bits 4-6 of the latch choose which of the eight images in
+// that socket is visible. Bit 7 is the Master ANDY overlay and is not
+// part of the image select. Image 0 is the one MOS sees.
 #define PAGED_ROM_ID 0x00f4
 #define PAGED_ROMSEL 0xfe30
 
-// Default sockets. Master 128 sideways RAM is fitted in banks 4-7.
-// The second image holds the functions that do not fit in the first
-// (libm, and the C++ bodies that are not header templates). Override
-// with -DLIBC_ROM_SLOT / -DLIBC_ROM2_SLOT when assembling the shim.
-#ifndef LIBC_ROM_SLOT
-#define LIBC_ROM_SLOT 4
-#endif
-#ifndef LIBC_ROM2_SLOT
-#define LIBC_ROM2_SLOT 5
-#endif
-#ifndef LIBC_ROM3_SLOT
-#define LIBC_ROM3_SLOT 6
-#endif
-#ifndef LIBC_ROM4_SLOT
-#define LIBC_ROM4_SLOT 7
-#endif
-#ifndef LIBC_ROM5_SLOT
-#define LIBC_ROM5_SLOT 8
-#endif
-#ifndef LIBC_ROM6_SLOT
-#define LIBC_ROM6_SLOT 9
-#endif
-#ifndef LIBC_ROM7_SLOT
-#define LIBC_ROM7_SLOT 10
-#endif
-// How many images ensure_init brings up. The build script sets this to
-// the number of images it actually linked.
+// Seven images, one socket, in this order. Image 0 is the language ROM.
+#define PAGED_VIRT_LIBC 0
+#define PAGED_VIRT_LIBM 1
+#define PAGED_VIRT_MATH_A 2
+#define PAGED_VIRT_MATH_B 3
+#define PAGED_VIRT_CXX 4
+#define PAGED_VIRT_STDIO 5
+#define PAGED_VIRT_FLOAT 6
+
+// How many images ensure_init brings up.
 #ifndef PAGED_ROM_COUNT
 #define PAGED_ROM_COUNT 7
 #endif
+
+// Title of image 0. rom_header.s places "DaveCC libc" here; the socket
+// scan compares against it. Do not insert bytes ahead of that string.
+#define PAGED_TITLE 0x8009
+
+// Main RAM at PAGE. The MOS trampoline is first so a ROM can patch its
+// JSR operand at a fixed address. The cross-image gate follows it.
+#define PAGED_MOS_CALL 0x1f00
+#define PAGED_MOS_JSR 0x1f01
 
 // Standard streams live in the MOS cassette/RS423 output buffer
 // (&0900-&09FF), which a disc system leaves idle. The bodies are main
@@ -72,15 +65,11 @@
 #define PAGED_STDOUT_PTR 0x09e2
 #define PAGED_STDERR_PTR 0x09e4
 
-// Main-RAM entry a paged ROM uses to call a function in the other paged
-// ROM. It has to live here: the return address of that call points into
-// the caller's bank, which is switched out for the duration of the call.
-// bbc.ld places this at the start of the user image, which is PAGE &1F00.
-#define PAGED_GATE 0x1f00
-
-// OSBYTE 0 returns this value (in X) for MOS 3.20 and later. Those
-// machines need ROMSEL bit 7 set while the libc bank is selected.
-#define PAGED_MASTER_OS 3
+// Main-RAM entry a paged ROM uses to call a function in another image.
+// The return address of that call points into the caller's bank, which
+// is switched out for the duration of the call. bbc.ld places the MOS
+// trampoline at PAGED_MOS_CALL and this gate directly after it.
+#define PAGED_GATE 0x1f30
 
 #define PAGED_OSBYTE 0xfff4
 #define PAGED_OSWORD 0xfff1

@@ -42,6 +42,8 @@ if b"(C)" not in text:
     raise SystemExit("copyright string at offset %d does not contain (C)" % offset)
 if image[0x100] != 0x4C:
     raise SystemExit("vector 0 at 0x8100 is not a JMP")
+if image[9:20] != b"DaveCC libc":
+    raise SystemExit("socket scan title is missing at offset 9")
 print("header ok, copyright at +0x%02x" % offset)
 PY
 
@@ -135,14 +137,21 @@ if ! "$ELFDUMP" -s "$WORK/sin_only.elf" | grep -Eq ' sin$'; then
 fi
 "$ELFDUMP" -s "$WORK/sin_only.elf" | python3 -c '
 import sys
-ok = False
+mos = False
+gate = False
 for line in sys.stdin:
     parts = line.split()
-    if len(parts) >= 7 and parts[-1] == "__libc_paged_gate" and parts[1] == "00001f00":
-        ok = True
-if not ok:
-    raise SystemExit("paged gate is not at &1F00")
-print("gate at &1F00")
+    if len(parts) < 7:
+        continue
+    if parts[-1] == "__libc_mos_call" and parts[1] == "00001f00":
+        mos = True
+    if parts[-1] == "__libc_paged_gate" and parts[1] == "00001f30":
+        gate = True
+if not mos:
+    raise SystemExit("MOS trampoline is not at &1F00")
+if not gate:
+    raise SystemExit("paged gate is not at &1F30")
+print("gate at &1F30")
 '
 "$ELFDUMP" -c "$WORK/sin_only.elf" >"$WORK/sin_only.dis"
 python3 - "$WORK/sin_only.dis" <<'PY'

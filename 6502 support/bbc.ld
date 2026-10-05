@@ -12,6 +12,7 @@ MEMORY
 SECTIONS
 {
   .text : {
+    *(.paged_mos)
     *(.paged_gate)
     *(.text* .rodata* .davecc_stacktrace)
   } > ram

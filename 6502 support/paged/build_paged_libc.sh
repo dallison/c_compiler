@@ -10,7 +10,8 @@
 # <outdir>/bbc.ld. Each shim is its own section, so --gc-sections drops
 # the ones the program does not call.
 #
-# LIBC_ROM_SLOT (default 4) is the sideways socket the shim selects.
+# The seven images share one socket. Bits 4-6 of the ROM select latch
+# choose the image; startup scans for the socket.
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
@@ -30,26 +31,15 @@ fi
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 sup="$root/6502 support"
 paged="$sup/paged"
-slot="${LIBC_ROM_SLOT:-4}"
-
 rm -rf "$out"
 mkdir -p "$out/runtime" "$out/libc" "$out/extra" "$out/gen"
 
 cflags=(-target 6502 -c -DDAVECC_BBC -DDAVECC_PAGED_LIBC
         -isystem "$root/libc/include" -I"$root/libc")
-slot2="${LIBC_ROM2_SLOT:-5}"
-slot3="${LIBC_ROM3_SLOT:-6}"
-slot4="${LIBC_ROM4_SLOT:-7}"
-slot5="${LIBC_ROM5_SLOT:-8}"
-slot6="${LIBC_ROM6_SLOT:-9}"
-slot7="${LIBC_ROM7_SLOT:-10}"
 # libc, libm, two halves of math_extra, the C++ bodies, printf/scanf,
-# and the float printers those call.
+# and the float printers those call. Virtual image 0 is the language ROM.
 asmflags=(-target 6502 -c -I"$sup" -I"$paged" -I"$out/gen" \
-          -DLIBC_ROM_SLOT="$slot" -DLIBC_ROM2_SLOT="$slot2" \
-          -DLIBC_ROM3_SLOT="$slot3" -DLIBC_ROM4_SLOT="$slot4" \
-          -DLIBC_ROM5_SLOT="$slot5" -DLIBC_ROM6_SLOT="$slot6" \
-          -DLIBC_ROM7_SLOT="$slot7" -DPAGED_ROM_COUNT=7)
+          -DPAGED_ROM_COUNT=7)
 
 runtime_srcs=(
   enter.s var_addr.s var_value.s load_indirect.s load_indirect8.s
