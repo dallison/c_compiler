@@ -5597,7 +5597,12 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
     literal_type->template_arguments =
         TemplateArgumentVectorCopy(id->template_arguments);
   }
-  return ParseCompoundLiteral(syntax, literal_type);
+  // `T{...}` is a prvalue, not the C compound literal it is built from.
+  ASTNode* literal = ParseCompoundLiteral(syntax, literal_type);
+  if (literal != NULL && CompilerIsCXX()) {
+    literal->flags |= kASTCXXBracedTemporary;
+  }
+  return literal;
 }
 
 // Parse a postfix-expression.  This is a primary expression with a postfixed

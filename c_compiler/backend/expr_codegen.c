@@ -4617,7 +4617,8 @@ static void EmitExceptionConstructorCall(Generator* gen, Symbol* constructor,
 static bool CanElideExceptionCopy(ASTNode* expr) {
   return expr != NULL && expr->value_category == kValueCategoryPrvalue &&
          (expr->op == AST_OP(call) || expr->op == AST_OP(inline_call) ||
-          expr->op == AST_OP(compound_literal) || expr->op == AST_OP(comma));
+          expr->op == AST_OP(compound_literal) || expr->op == AST_OP(comma) ||
+          expr->op == AST_OP(question));
 }
 
 static IRNode* GenerateItaniumThrowExpression(Generator* gen,

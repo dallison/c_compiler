@@ -415,6 +415,8 @@ static Symbol* CXXInPlaceConstructorReceiver(ASTNode* expr) {
   return sym != NULL && sym->flags.is_temp ? sym : NULL;
 }
 
+static void CollectCXXResultTemporaries(ASTNode* expr, Vector* out);
+
 static void ElidePrvalueConditionalArmTemporaries(
     ASTNode* node, CXXTemporaryCollection* collection) {
   if (node == NULL || node->op != AST_OP(question) ||
@@ -429,6 +431,11 @@ static void ElidePrvalueConditionalArmTemporaries(
   BinaryASTNode* colon = (BinaryASTNode*)question->right;
   ASTNode* arms[2] = {colon->left, colon->right};
   for (size_t i = 0; i < 2; i++) {
+    if (arms[i] != NULL && arms[i]->op == AST_OP(compound_literal) &&
+        arms[i]->value_category == kValueCategoryPrvalue) {
+      CollectCXXResultTemporaries(arms[i], &collection->elided);
+      continue;
+    }
     if (!CXXInitializerConstructsInPlace(arms[i])) {
       continue;
     }
@@ -444,8 +451,6 @@ static void ElidePrvalueConditionalArmTemporaries(
     }
   }
 }
-
-static void CollectCXXResultTemporaries(ASTNode* expr, Vector* out);
 
 static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
@@ -750,10 +755,13 @@ static void CollectCXXResultTemporaries(ASTNode* expr, Vector* out) {
     if (expr->op == AST_OP(identifier)) {
       sym = ((IdentifierASTNode*)expr)->symbol;
     } else if (expr->op == AST_OP(compound_literal)) {
+      // A compound literal's object is a temporary however it was invented.
       ASTNode* literal_sym = ((CompoundLiteralASTNode*)expr)->sym;
-      if (literal_sym != NULL && literal_sym->op == AST_OP(identifier)) {
-        sym = ((IdentifierASTNode*)literal_sym)->symbol;
+      if (literal_sym != NULL && literal_sym->op == AST_OP(identifier) &&
+          ((IdentifierASTNode*)literal_sym)->symbol != NULL) {
+        VectorAppend(out, ((IdentifierASTNode*)literal_sym)->symbol);
       }
+      return;
     } else if (ASTIsInlinedConstructor(expr)) {
       sym = ((InlineCallASTNode*)expr)->cxx_receiver;
     }
