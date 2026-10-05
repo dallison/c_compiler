@@ -6525,6 +6525,10 @@ static Symbol* GetCXXClassAllocationFunction(TypeRecord* type,
   return FindCXXAllocationFunctionByArgCount(member->symbol, arg_count);
 }
 
+Symbol* CXXClassUsualAllocationFunction(TypeRecord* type, const char* name) {
+  return GetCXXClassAllocationFunction(type, name, 1);
+}
+
 static Symbol* GetCXXOperatorNewForType(TypeRecord* type,
                                         bool is_array,
                                         size_t arg_count,
@@ -6733,7 +6737,14 @@ static ASTNode* NewCXXDestructorCallForPointer(TypeRecord* object_type,
                                                SourceLocation location) {
   String destructor_name;
   StringInit(&destructor_name, "~");
-  StringAppendString(&destructor_name, object_type->info.struct_info->tag_name);
+  // A dependent type's destructor is named once the type is known (or the
+  // call becomes a pseudo-destructor no-op).
+  if (TypeIsStructOrUnion(object_type) &&
+      object_type->info.struct_info != NULL &&
+      object_type->info.struct_info->tag_name != NULL) {
+    StringAppendString(&destructor_name,
+                       object_type->info.struct_info->tag_name);
+  }
   ASTNode* receiver =
       NewUnaryASTNode(AST_OP(contents), object_type, location,
                       NewIdentifierASTNode(ptr, location));
@@ -6875,11 +6886,13 @@ static ASTNode* NewArrayValueInitializationLoop(
                                 NewIdentifierASTNode(index, location),
                                 location));
   Vector* body_statements = NewVector();
-  VectorAppend(body_statements,
-               NewExpressionStatement(
-                   NewCXXNewInitialization(syntax, element_type, element, NULL,
-                                           location),
-                   location));
+  ASTNode* init =
+      NewCXXNewInitialization(syntax, element_type, element, NULL, location);
+  if (TypeContainsTemplateParameter(element_type)) {
+    // Instantiation rewrites this into the element type's value-init.
+    init->flags |= kASTDependentNewInitializer | kASTDependentNewValueInit;
+  }
+  VectorAppend(body_statements, NewExpressionStatement(init, location));
   if (constructed != NULL) {
     VectorAppend(body_statements,
                  NewArrayConstructedCountUpdate(
@@ -7523,6 +7536,7 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   TypeRecord* result_type = NewPointerTo(kQualPlain, allocated_type);
   ASTNode* result = NewCastASTNode(result_type, location, allocation);
   ((CastASTNode*)result)->kind = kCastStatic;
+  ((CastASTNode*)result)->global_scope_new = global_scope;
   result->flags |= kASTCXXNewExpression;
   if (standard_placement) {
     result->flags |= kASTCXXPlacementNew;
@@ -7633,8 +7647,15 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
     // then free the storage.
     bool init_may_throw = constructed_class || value_init ||
                           allocated_type_dependent;
+    bool base_dependent = TypeContainsTemplateParameter(base_type);
+    // A dependent element type with no initializer is initialized at
+    // instantiation, where a class runs its default constructor.
+    bool dependent_default_init =
+        base_dependent && !constructed_class && !value_init &&
+        array_initializers == NULL;
     bool destroy_on_throw = eh_cleanup && init_may_throw &&
-                            FindCXXDestructorForType(base_type) != NULL;
+                            (base_dependent ||
+                             FindCXXDestructorForType(base_type) != NULL);
     bool free_on_throw = deallocate_on_throw && init_may_throw;
     Symbol* constructed = NULL;
     Vector* init_statements = statements;
@@ -7672,7 +7693,7 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                    NewArrayConstructionLoop(syntax, base_type, base_ptr,
                                             base_count, first_unlisted,
                                             constructed, location));
-    } else if (value_init) {
+    } else if (value_init || dependent_default_init) {
       // The elements without an initializer are value-initialized.
       VectorAppend(init_statements,
                    NewArrayValueInitializationLoop(
@@ -7756,18 +7777,10 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
         (scalar_initializer != NULL && scalar_initializer->op != AST_OP(number));
     if (deallocate_on_throw && init_may_throw) {
       // Free the storage if the initialization throws.
-      Vector* deallocate_actuals = NewVector();
-      VectorAppend(deallocate_actuals,
-                   NewDeallocationPointer(NewIdentifierASTNode(temp, location),
-                                          location));
-      ASTNode* deallocate = NewExpressionStatement(
-          NewCallASTNode(GetCXXOperatorDeleteForType(allocated_type, false,
-                                                     location, global_scope),
-                         location, deallocate_actuals),
-          location);
-      deallocate->flags |= kASTEHCleanupOnly;
       Vector* init_statements = NewVector();
-      VectorAppend(init_statements, deallocate);
+      VectorAppend(init_statements,
+                   NewCXXNewDeallocationCleanup(temp, allocated_type,
+                                                global_scope, location));
       VectorAppend(init_statements, NewExpressionStatement(init, location));
       VectorAppend(statements,
                    NewCompoundStatementASTNode(init_statements, location));
@@ -7805,6 +7818,22 @@ static ASTNode* NewDeallocationPointer(ASTNode* expr, SourceLocation location) {
   ASTNode* result = NewCastASTNode(void_ptr, location, expr);
   ((CastASTNode*)result)->kind = kCastCStyle;
   return result;
+}
+
+ASTNode* NewCXXNewDeallocationCleanup(Symbol* temp, TypeRecord* allocated_type,
+                                      bool global_scope,
+                                      SourceLocation location) {
+  Vector* actuals = NewVector();
+  VectorAppend(actuals,
+               NewDeallocationPointer(NewIdentifierASTNode(temp, location),
+                                      location));
+  ASTNode* deallocate = NewExpressionStatement(
+      NewCallASTNode(GetCXXOperatorDeleteForType(allocated_type, false,
+                                                 location, global_scope),
+                     location, actuals),
+      location);
+  deallocate->flags |= kASTEHCleanupOnly;
+  return deallocate;
 }
 
 ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,

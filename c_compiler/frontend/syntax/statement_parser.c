@@ -2289,6 +2289,38 @@ static ASTNode* ParseCatchHandler(Syntax* syntax, TokenClass followers) {
   }
   ASTNode* stmt = SyntaxParseStatement(syntax, followers);
   SyntaxCloseScope(syntax);
+  // A class-type handler parameter is copy-initialized from the exception
+  // object and destroyed when the handler exits ([except.handle]/16): bind the
+  // handler to the exception object by reference and declare the parameter
+  // as the handler's first local.
+  if (CompilerIsCXX() && symbol != NULL && stmt != NULL &&
+      TypeIsStructOrUnion(symbol->type) &&
+      symbol->type->info.struct_info != NULL &&
+      !TypeContainsTemplateParameter(symbol->type)) {
+    TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, false);
+    TypeRecordChain(reference, TypeRecordCopy(symbol->type));
+    reference->type = symbol->type->type;
+    TypeRecordCalculateSize(reference);
+    Symbol* exception_object =
+        NewSymbol("__catch_exception_object", reference, STO(auto));
+    exception_object->flags.is_local = true;
+    exception_object->flags.is_defined = true;
+    exception_object->flags.invented = true;
+    exception_object->location = symbol->location;
+    ASTNode* initializer = SyntaxRewriteCXXCopyInitConstructorIfNeeded(
+        syntax, symbol,
+        NewRangeForInitExpression(
+            symbol, NewIdentifierASTNode(exception_object, location),
+            location));
+    Vector* declarations = NewVector();
+    VectorAppend(declarations,
+                 NewVariableDeclarationASTNode(symbol, initializer, location));
+    Vector* statements = NewVector();
+    VectorAppend(statements, NewDeclarationListASTNode(declarations, location));
+    VectorAppend(statements, stmt);
+    stmt = NewCompoundStatementASTNode(statements, location);
+    symbol = exception_object;
+  }
   return NewCatchASTNode(symbol, is_catch_all, stmt, location);
 }
 

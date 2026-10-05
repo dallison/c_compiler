@@ -436,6 +436,7 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
       SWriteRef(ctx, buf, 17, kSerialKindAST, c->expr);
       WireWriteInt32(buf, 18, (int32_t)c->kind);
       WireWriteBool(buf, 19, c->dynamic_runtime);
+      WireWriteBool(buf, 20, c->global_scope_new);
       break;
     }
     case kASTShapeSizeof: {
@@ -858,6 +859,10 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       }
       if (field == 19) {
         WireReadBool(buf, &c->dynamic_runtime);
+        return;
+      }
+      if (field == 20) {
+        WireReadBool(buf, &c->global_scope_new);
         return;
       }
       break;

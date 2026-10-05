@@ -544,6 +544,11 @@ int64_t ASTNodeConstantValue(ASTNode* node);
 bool ASTIsCallNode(ASTNode* node);
 bool ASTIsInlinedConstructor(ASTNode* node);
 bool ASTIsInlinedDestructor(ASTNode* node);
+// For a copy or move constructor call `T(&dst, (T){prvalue})`, where the
+// prvalue is a call returning T and dst is a complete object, the prvalue:
+// it initializes dst directly, and the compound literal is never
+// materialized ([dcl.init.general]).  NULL for any other node.
+ASTNode* ASTCXXElidedCopyConstructorSource(ASTNode* node);
 
 // A unary AST node with a single child.
 typedef struct {
@@ -675,6 +680,9 @@ typedef struct {
   // dynamic_cast that needs a run-time check (polymorphic downcast/sidecast),
   // lowered to a __davecc_dynamic_cast[_ref] call during codegen.
   bool dynamic_runtime;    // @wire 19
+  // A new-expression written `::new`: template instantiation must not pick
+  // the allocated class's own allocation functions.
+  bool global_scope_new;   // @wire 20
 } CastASTNode;
 
 ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,

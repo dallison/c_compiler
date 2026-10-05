@@ -1101,6 +1101,77 @@ bool ASTIsInlinedDestructor(ASTNode* node) {
          (node->flags & kASTInlinedDestructor) != 0;
 }
 
+static bool ASTSameClass(TypeRecord* left, TypeRecord* right) {
+  return TypeIsStructOrUnion(left) && TypeIsStructOrUnion(right) &&
+         left->info.struct_info != NULL &&
+         left->info.struct_info == right->info.struct_info;
+}
+
+// A base-class subobject may overlap other storage, so only a variable, a
+// member, `*p` or a new-expression's storage pointer is initialized from the
+// prvalue directly.
+static bool ASTIsCompleteObjectAddress(ASTNode* address) {
+  if (address != NULL && address->op == AST_OP(identifier)) {
+    return true;
+  }
+  if (address == NULL || address->op != AST_OP(address)) {
+    return false;
+  }
+  ASTNode* object = ((UnaryASTNode*)address)->sub;
+  return object != NULL &&
+         (object->op == AST_OP(identifier) || object->op == AST_OP(dot) ||
+          object->op == AST_OP(arrow) || object->op == AST_OP(contents));
+}
+
+ASTNode* ASTCXXElidedCopyConstructorSource(ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(call) || !CompilerIsCXX()) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->left == NULL || call->left->op != AST_OP(identifier) ||
+      call->children == NULL || call->children->length != 2) {
+    return NULL;
+  }
+  Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
+  if (callee == NULL || !TypeIsFunction(callee->type) ||
+      !callee->type->info.function.is_constructor ||
+      callee->type->info.function.prototype.length != 2) {
+    return NULL;
+  }
+  Symbol* source_formal = callee->type->info.function.prototype.value.p[1];
+  ASTNode* address = call->children->value.p[0];
+  ASTNode* actual = call->children->value.p[1];
+  if (source_formal == NULL || !TypeIsReference(source_formal->type) ||
+      !ASTIsCompleteObjectAddress(address) || actual == NULL ||
+      actual->op != AST_OP(compound_literal) ||
+      !TypeIsPointer(address->type) ||
+      !ASTSameClass(address->type->next, actual->type) ||
+      !ASTSameClass(source_formal->type->next, actual->type)) {
+    return NULL;
+  }
+  ASTNode* init = ((CompoundLiteralASTNode*)actual)->initializer;
+  if (init == NULL || init->op != AST_OP(braced_init) ||
+      ((BracedInitializerASTNode*)init)->initializers->length != 1) {
+    return NULL;
+  }
+  ASTNode* only = ((BracedInitializerASTNode*)init)->initializers->value.p[0];
+  if (only == NULL || only->op != AST_OP(designated_init)) {
+    return NULL;
+  }
+  ASTNode* source = ((DesignatedInitializerASTNode*)only)->init;
+  if (source != NULL && source->op == AST_OP(expr_init)) {
+    source = ((ExpressionInitializerASTNode*)source)->expr;
+  }
+  if (source == NULL ||
+      (source->op != AST_OP(call) && source->op != AST_OP(inline_call)) ||
+      ASTIsInlinedConstructor(source) ||
+      source->value_category != kValueCategoryPrvalue ||
+      !ASTSameClass(source->type, actual->type)) {
+    return NULL;
+  }
+  return source;
+}
+
 bool ASTIsCallNode(ASTNode* node) {
   if (node == NULL) {
     return false;
@@ -1899,6 +1970,7 @@ static ASTNode* CastASTNodeClone(const ASTNode* node,
   to->expr = ASTNodeClone(from->expr, func, data, &to->base);
   to->kind = from->kind;
   to->dynamic_runtime = from->dynamic_runtime;
+  to->global_scope_new = from->global_scope_new;
   TypeRecordIncRef(to->cast_type);
   return func(&to->base, data);
 }
@@ -1942,6 +2014,7 @@ ASTNode* NewCastASTNode(TypeRecord* type, SourceLocation location,
   node->expr = expr;
   node->kind = kCastCStyle;
   node->dynamic_runtime = false;
+  node->global_scope_new = false;
   expr->parent = (ASTNode*)node;
   return (ASTNode*)node;
 }
@@ -5023,6 +5096,8 @@ ASTNode* ASTNodeAllocForShape(ASTNodeShape shape, ASTOpcode op) {
     case kASTShapeCast: {
       CastASTNode* n = ASTArenaAlloc(sizeof(CastASTNode));
       ASTNodeInit(&n->base, op, NULL, 0, &cast_vtbl);
+      n->dynamic_runtime = false;
+      n->global_scope_new = false;
       return &n->base;
     }
     case kASTShapeSizeof: {

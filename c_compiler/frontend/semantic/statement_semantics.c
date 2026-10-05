@@ -484,6 +484,18 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
     }
   } else if (node->op == AST_OP(compound_literal)) {
     CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)node;
+    // The copy constructor's prvalue source initializes its destination
+    // directly, so this literal is never materialized.
+    if (ASTCXXElidedCopyConstructorSource(node->parent) != NULL) {
+      if (literal->sym != NULL && literal->sym->op == AST_OP(identifier)) {
+        Symbol* elided = ((IdentifierASTNode*)literal->sym)->symbol;
+        if (elided != NULL &&
+            !VectorContainsPointer(&collection->elided, elided)) {
+          VectorAppend(&collection->elided, elided);
+        }
+      }
+      return;
+    }
     // A compound literal that only wraps the construction of an inner temporary
     // does not own storage of its own -- unless the backend elides the
     // constructor directly into the compound literal's own slot, in which case
@@ -525,6 +537,93 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
       }
     }
   }
+}
+
+// The temporary whose construction `node` completes: a compound literal, an
+// inlined constructor, or a constructor call on `&temp`.
+static Symbol* CXXTemporaryConstructedBy(ASTNode* node) {
+  if (node->op == AST_OP(compound_literal)) {
+    ASTNode* sym = ((CompoundLiteralASTNode*)node)->sym;
+    return sym != NULL && sym->op == AST_OP(identifier)
+               ? ((IdentifierASTNode*)sym)->symbol
+               : NULL;
+  }
+  if (ASTIsInlinedConstructor(node)) {
+    return ((InlineCallASTNode*)node)->cxx_receiver;
+  }
+  if (node->op != AST_OP(call)) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->left == NULL || call->left->op != AST_OP(identifier) ||
+      ((IdentifierASTNode*)call->left)->symbol == NULL ||
+      call->children == NULL || call->children->length == 0) {
+    return NULL;
+  }
+  TypeRecord* callee = ((IdentifierASTNode*)call->left)->symbol->type;
+  if (callee == NULL || !TypeIsFunction(callee) ||
+      !callee->info.function.is_constructor) {
+    return NULL;
+  }
+  ASTNode* receiver = call->children->value.p[0];
+  if (receiver != NULL && receiver->op == AST_OP(address)) {
+    receiver = ((UnaryASTNode*)receiver)->sub;
+  }
+  return receiver != NULL && receiver->op == AST_OP(identifier)
+             ? ((IdentifierASTNode*)receiver)->symbol
+             : NULL;
+}
+
+typedef struct {
+  Vector constructed;  // Symbol*, in the order their constructions complete.
+} CXXConstructionOrder;
+
+static void CollectCXXConstructionOrder(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPostChildren || node == NULL ||
+      CXXNodeIsWithinTemporaryCleanup(node)) {
+    return;
+  }
+  CXXConstructionOrder* order = data;
+  Symbol* sym = CXXTemporaryConstructedBy(node);
+  if (sym != NULL && !VectorContainsPointer(&order->constructed, sym)) {
+    VectorAppend(&order->constructed, sym);
+  }
+}
+
+// The pre-order walk that collects temporaries meets an outer temporary
+// before the inner ones its constructor consumes; destruction must reverse
+// the order the constructions complete.  Leaves the order alone if some
+// temporary's construction is not recognized.
+static void SortCXXTemporariesByConstruction(
+    CXXTemporaryCollection* collection) {
+  if (collection->temps.length < 2) {
+    return;
+  }
+  CXXConstructionOrder order;
+  VectorInit(&order.constructed);
+  ASTNodeVisit(collection->root, CollectCXXConstructionOrder, 0, &order);
+  bool all_found = true;
+  for (size_t i = 0; i < collection->temps.length && all_found; i++) {
+    all_found = VectorContainsPointer(&order.constructed,
+                                      collection->temps.value.p[i]);
+  }
+  if (all_found) {
+    Vector sorted;
+    VectorInit(&sorted);
+    for (size_t i = 0; i < order.constructed.length; i++) {
+      Symbol* sym = order.constructed.value.p[i];
+      if (VectorContainsPointer(&collection->temps, sym)) {
+        VectorAppend(&sorted, sym);
+      }
+    }
+    for (size_t i = 0; i < sorted.length; i++) {
+      collection->temps.value.p[i] = sorted.value.p[i];
+    }
+    VectorDestruct(&sorted);
+  }
+  VectorDestruct(&order.constructed);
 }
 
 static ASTNode* NewCXXTemporaryDestructorCall(Symbol* sym,
@@ -570,6 +669,7 @@ ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
   CXXTemporaryCollectionInit(&collection, expr);
   ASTNodeVisit(expr, CollectCXXDestroyedTemporarySymbols, 0, &collection);
   ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
+  SortCXXTemporariesByConstruction(&collection);
   for (size_t i = collection.temps.length; i > 0; i--) {
     Symbol* sym = collection.temps.value.p[i - 1];
     ASTNode* destructor = NewCXXFullExpressionTemporaryDestructorCall(
@@ -597,6 +697,7 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructorsPreservingValue(
   CXXTemporaryCollectionInit(&collection, expr);
   ASTNodeVisit(expr, CollectCXXDestroyedTemporarySymbols, 0, &collection);
   ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
+  SortCXXTemporariesByConstruction(&collection);
   if (collection.temps.length == 0) {
     CXXTemporaryCollectionDestruct(&collection);
     return expr;
@@ -678,6 +779,7 @@ static ASTNode* NewCXXReturnTemporaryCleanups(ASTNode* expr) {
   CXXTemporaryCollectionInit(&collection, expr);
   ASTNodeVisit(expr, CollectCXXDestroyedTemporarySymbols, 0, &collection);
   ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
+  SortCXXTemporariesByConstruction(&collection);
   Vector returned;
   VectorInit(&returned);
   CollectCXXResultTemporaries(expr, &returned);

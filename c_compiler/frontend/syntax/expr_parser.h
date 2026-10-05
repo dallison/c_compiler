@@ -20,5 +20,13 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                                           bool is_array_delete,
                                           SourceLocation location,
                                           bool global_scope);
+// The class's own `name` ("operator new", "operator delete[]", ...) taking a
+// single argument, or NULL when the class does not declare one.
+Symbol* CXXClassUsualAllocationFunction(TypeRecord* type, const char* name);
+// The cleanup-only `operator delete((void*)temp)` statement that frees a
+// single-object new-expression's storage when its initialization throws.
+ASTNode* NewCXXNewDeallocationCleanup(Symbol* temp, TypeRecord* allocated_type,
+                                      bool global_scope,
+                                      SourceLocation location);
 
 #endif /* expr_parser_h */

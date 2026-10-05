@@ -7021,6 +7021,20 @@ static ASTNode* RewriteDependentNewAllocation(
           node->flags |= kASTCXXPlacementNew;
         }
       }
+      // The parser could not see the class's own allocation function while
+      // T was dependent.
+      if ((node->flags & kASTCXXPlacementNew) == 0 &&
+          !cast->global_scope_new && allocation->children != NULL &&
+          allocation->children->length == 1 && allocation->left != NULL &&
+          allocation->left->op == AST_OP(identifier)) {
+        Symbol* member = CXXClassUsualAllocationFunction(
+            allocated_type, (node->flags & kASTCXXArrayNew) != 0
+                                ? "operator new[]"
+                                : "operator new");
+        if (member != NULL) {
+          ((IdentifierASTNode*)allocation->left)->symbol = member;
+        }
+      }
       node->flags &= ~kASTDependentNewAllocation;
       bool already_has_deferred_initializer =
           node->parent != NULL && node->parent->op == AST_OP(assign);
@@ -7046,8 +7060,22 @@ static ASTNode* RewriteDependentNewAllocation(
                      NewVariableDeclarationASTNode(temp, NULL, node->location));
         VectorAppend(statements,
                      NewExpressionStatementASTNode(assign, node->location));
-        VectorAppend(statements,
-                     NewExpressionStatementASTNode(init, node->location));
+        ASTNode* init_statement =
+            NewExpressionStatementASTNode(init, node->location);
+        if (CompilerExceptionsEnabled() &&
+            (node->flags & kASTCXXPlacementNew) == 0) {
+          // Free the storage if the constructor throws, with the
+          // deallocation function matching the allocation function.
+          Vector* init_statements = NewVector();
+          VectorAppend(init_statements,
+                       NewCXXNewDeallocationCleanup(temp, allocated_type,
+                                                    cast->global_scope_new,
+                                                    node->location));
+          VectorAppend(init_statements, init_statement);
+          init_statement =
+              NewCompoundStatementASTNode(init_statements, node->location);
+        }
+        VectorAppend(statements, init_statement);
         VectorAppend(
             statements,
             NewExpressionStatementASTNode(
@@ -9133,6 +9161,105 @@ static void RefreshClonedCXXNewMetadataVisitor(ASTNode* node, void* data,
   }
 }
 
+typedef struct {
+  ASTNode* root;          // The new-expression's stmt_expr.
+  CastASTNode* new_cast;  // Its allocation, once found.
+} ClonedNewDeallocationRebind;
+
+static bool NodeIsDirectlyInStmtExpr(ASTNode* node, ASTNode* root) {
+  for (ASTNode* p = node->parent; p != NULL; p = p->parent) {
+    if (p == root) return true;
+    if (p->op == AST_OP(stmt_expr)) return false;
+  }
+  return false;
+}
+
+static void FindClonedNewCastVisitor(ASTNode* node, void* data, int child_id,
+                                     VisitorMode mode) {
+  (void)child_id;
+  ClonedNewDeallocationRebind* rebind = data;
+  if (mode != kVisitPreChildren || rebind->new_cast != NULL ||
+      node->op != AST_OP(cast) ||
+      (node->flags & kASTCXXNewExpression) == 0 ||
+      !NodeIsDirectlyInStmtExpr(node, rebind->root)) {
+    return;
+  }
+  rebind->new_cast = (CastASTNode*)node;
+}
+
+static bool NodeIsInCleanupOnlyStatement(ASTNode* node, ASTNode* root) {
+  for (ASTNode* p = node; p != NULL && p != root; p = p->parent) {
+    if ((p->flags & kASTEHCleanupOnly) != 0) return true;
+  }
+  return false;
+}
+
+static void RebindClonedCleanupDeallocationVisitor(ASTNode* node, void* data,
+                                                   int child_id,
+                                                   VisitorMode mode) {
+  (void)child_id;
+  ClonedNewDeallocationRebind* rebind = data;
+  if (mode != kVisitPreChildren || node->op != AST_OP(call) ||
+      !NodeIsDirectlyInStmtExpr(node, rebind->root) ||
+      !NodeIsInCleanupOnlyStatement(node, rebind->root)) {
+    return;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->left == NULL || call->left->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* callee = (IdentifierASTNode*)call->left;
+  if (callee->symbol == NULL || callee->symbol->name.value == NULL) {
+    return;
+  }
+  const char* name = callee->symbol->name.value;
+  if (strcmp(name, "operator delete") != 0 &&
+      strcmp(name, "operator delete[]") != 0) {
+    return;
+  }
+  Symbol* member = CXXClassUsualAllocationFunction(
+      rebind->new_cast->cast_type->next, name);
+  if (member != NULL) {
+    callee->symbol = member;
+  }
+}
+
+// A new-expression whose allocated type was dependent frees its storage on
+// throw with a deallocation function chosen before T was known.  Once the
+// allocation resolved to the class's own operator new, use the class's
+// operator delete to match.
+static void RebindClonedNewDeallocationVisitor(ASTNode* node, void* data,
+                                               int child_id,
+                                               VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPostChildren || node->op != AST_OP(stmt_expr)) {
+    return;
+  }
+  ClonedNewDeallocationRebind rebind = {node, NULL};
+  ASTNodeVisit(node, FindClonedNewCastVisitor, 0, &rebind);
+  if (rebind.new_cast == NULL || rebind.new_cast->global_scope_new ||
+      rebind.new_cast->cast_type == NULL ||
+      !TypeIsPointer(rebind.new_cast->cast_type) ||
+      rebind.new_cast->expr == NULL ||
+      rebind.new_cast->expr->op != AST_OP(call)) {
+    return;
+  }
+  VectorASTNode* allocation = (VectorASTNode*)rebind.new_cast->expr;
+  if (allocation->left == NULL || allocation->left->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* allocator = ((IdentifierASTNode*)allocation->left)->symbol;
+  bool is_array = (rebind.new_cast->base.flags & kASTCXXArrayNew) != 0;
+  if (allocator == NULL ||
+      allocator != CXXClassUsualAllocationFunction(
+                       rebind.new_cast->cast_type->next,
+                       is_array ? "operator new[]" : "operator new")) {
+    return;
+  }
+  ASTNodeVisit(node, RebindClonedCleanupDeallocationVisitor, 0, &rebind);
+}
+
 static void RebindClonedDesignatorMemberVisitor(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode) {
@@ -9515,6 +9642,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   body = ASTNodeVisitAndTransform(
       body, NormalizeClonedPointerDifferenceScale, NULL);
   ASTNodeVisit(body, RefreshClonedCXXNewMetadataVisitor, 0, NULL);
+  ASTNodeVisit(body, RebindClonedNewDeallocationVisitor, 0, NULL);
   compiler->current_function = saved_function;
   TypeParserPopTemplateSubstitution(&substitution);
   compiler->current_class_access_context = saved_access_context;
@@ -10444,6 +10572,7 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
     ASTNodeVisit(stmt, InstantiateClonedFunctionTemplateCallVisitor, 0, &clone);
     AnalyzeStatement(stmt);
     ASTNodeVisit(stmt, RefreshClonedCXXNewMetadataVisitor, 0, NULL);
+    ASTNodeVisit(stmt, RebindClonedNewDeallocationVisitor, 0, NULL);
     stmt = ASTNodeVisitAndTransform(
         stmt, ReanalyzeClonedConcreteMemberCall, NULL);
     body->value.p[i] = stmt;

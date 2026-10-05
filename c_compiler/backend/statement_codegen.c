@@ -2070,6 +2070,12 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
       JumpNeedsExitCode(gen, continue_stmt, FindEnclosingLoop(continue_stmt))) {
     continue_stmt = NULL;
   }
+  if (goto_stmt != NULL &&
+      ((GotoStatementASTNode*)goto_stmt)->lca != NULL &&
+      JumpNeedsExitCode(gen, goto_stmt,
+                        ((GotoStatementASTNode*)goto_stmt)->lca)) {
+    goto_stmt = NULL;
+  }
   if (break_stmt != NULL) {
     // if (cond) { break; } -> if(cond) goto break_label;
     // btrue cond, break_label
@@ -2916,6 +2922,7 @@ static void GenerateGotoStatement(Generator* gen,
   if (top_vla != NULL) {
     GenerateRestoreStackPointer(gen, top_vla);
   }
+  EmitCatchExitCleanupsUntil(gen, &node->base, node->lca);
   GeneratorEmit(gen, NewIR1(IR_OP(bra), label_node->label));
 }
 

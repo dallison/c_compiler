@@ -222,6 +222,9 @@ typedef struct {
   int exception_handler_depth;
   bool ending_exception;
   bool halt_after_exception_destructor;
+  // The calling evaluator holds thrown, handled or captured exceptions this
+  // run cannot see, so the run must not report what is currently thrown.
+  bool outer_exception_state;
   ConstexprPCodeExceptionResume resume;
 } ConstexprPCodeRuntime;
 
@@ -251,6 +254,8 @@ static bool ConstexprPCodeCopyLifetimeEvents(
 }
 
 static PCodeVMStatus ConstexprEscape(PCodeVM* vm, int32_t code, void* data);
+static bool ConstexprPCodeTypeIsExceptionPtr(TypeRecord* type);
+static bool ConstexprHasExceptionState(ConstEvalContext* ctx);
 static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime);
 static void ConstexprPCodeRuntimeDestruct(ConstexprPCodeRuntime* runtime);
 static bool ConstexprPCodeRuntimeHasLiveHeap(ConstexprPCodeRuntime* runtime);
@@ -2776,6 +2781,12 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
                              ConstexprPCodeFailureKind* failure_kind,
                              const char** reason) {
   *failure_kind = kConstexprPCodeFailureUnsupported;
+  bool returns_exception_ptr = ConstexprPCodeTypeIsExceptionPtr(func->next);
+  if (returns_exception_ptr && ConstexprHasExceptionState(ctx)) {
+    // The result may hold a handle of the calling evaluator's.
+    *reason = "constexpr pcode cannot return the evaluator's exception_ptr";
+    return false;
+  }
   ConstexprPCodeImage image;
   ConstexprPCodeImageInit(&image);
   DiagnosticSuppressBegin();
@@ -2795,6 +2806,7 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
   ConstexprPCodeRuntime runtime;
   ConstexprPCodeRuntimeInit(&runtime);
   runtime.image = &image;
+  runtime.outer_exception_state = ConstexprHasExceptionState(ctx);
   PCodeVMSetEscapeHandler(&vm, ConstexprEscape, &runtime);
   uint32_t halt_instruction = 0;
   if (!EnableConstexprPCodeCheckedMemory(&vm, &image, &runtime,
@@ -2943,13 +2955,6 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
         }
       }
     }
-    bool returns_exception_ptr =
-        func->next != NULL && TypeIsStructOrUnion(func->next) &&
-        func->next->info.struct_info != NULL &&
-        func->next->info.struct_info->tag_name != NULL &&
-        func->next->info.struct_info->tag_name->value != NULL &&
-        strcmp(func->next->info.struct_info->tag_name->value,
-               "exception_ptr") == 0;
     uint64_t returned_exception_handle = 0;
     if (object_result != NULL && returns_exception_ptr &&
         struct_return != NULL) {
@@ -3092,6 +3097,7 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
   ConstexprPCodeRuntime runtime;
   ConstexprPCodeRuntimeInit(&runtime);
   runtime.image = &image;
+  runtime.outer_exception_state = ConstexprHasExceptionState(ctx);
   PCodeVMSetEscapeHandler(&vm, ConstexprEscape, &runtime);
   uint32_t halt_instruction = 0;
   if (!EnableConstexprPCodeCheckedMemory(&vm, &image, &runtime,
@@ -3698,6 +3704,20 @@ bool ConstexprPCodeFunctionContainsThrow(Symbol* function) {
 bool ConstexprPCodeRequiresASTOverlay(ASTNode* node) {
   return ConstexprPCodeCapabilityForExpression(node) !=
          kConstexprPCodeEligible;
+}
+
+static bool ConstexprPCodeTypeIsExceptionPtr(TypeRecord* type) {
+  return type != NULL && TypeIsStructOrUnion(type) &&
+         type->info.struct_info != NULL &&
+         type->info.struct_info->tag_name != NULL &&
+         type->info.struct_info->tag_name->value != NULL &&
+         strcmp(type->info.struct_info->tag_name->value, "exception_ptr") == 0;
+}
+
+static bool ConstexprHasExceptionState(ConstEvalContext* ctx) {
+  return ctx != NULL &&
+         (ctx->exception != NULL || ctx->exception_handles.length != 0 ||
+          ctx->unwinding_exceptions != 0);
 }
 
 static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime) {
@@ -4811,6 +4831,9 @@ static ConstexprPCodeExceptionHandle* ConstexprPCodeFindExceptionHandle(
 static PCodeVMStatus ConstexprPCodeExceptionPtrCurrent(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
   if (!runtime->has_exception) {
+    if (runtime->outer_exception_state) {
+      return kPCodeVMStatusInvalidConstantOperation;
+    }
     vm->iregs[PCODE_INT_RETURN_REG] = 0;
     return kPCodeVMStatusRunning;
   }
@@ -4961,6 +4984,9 @@ static PCodeVMStatus ConstexprPCodeExceptionPtrRethrow(
 
 static PCodeVMStatus ConstexprPCodeUncaughtExceptions(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  if (runtime->outer_exception_state) {
+    return kPCodeVMStatusInvalidConstantOperation;
+  }
   int64_t count =
       runtime->has_exception && !runtime->handling_exception ? 1 : 0;
   for (size_t i = 0; i < runtime->exception_stack.length; i++) {

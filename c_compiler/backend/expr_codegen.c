@@ -3753,6 +3753,18 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       (node->left->op == AST_OP(dotstar) || node->left->op == AST_OP(arrowstar))) {
     return GenerateMemberPointerCall(gen, node);
   }
+  ASTNode* elided_source = ASTCXXElidedCopyConstructorSource(&node->base);
+  if (elided_source != NULL) {
+    IRNode* old_struct_address = gen->current_struct_address;
+    IRNode* destination = old_struct_address;
+    if (destination == NULL) {
+      destination = GenerateExpression(gen, node->children->value.p[0]);
+    }
+    gen->current_struct_address = destination;
+    IRNode* result = GenerateExpression(gen, elided_source);
+    gen->current_struct_address = old_struct_address;
+    return result;
+  }
   // The object expression of a virtual call is evaluated once, before the
   // callee is read from its vtable and before the other arguments.
   IRNode* receiver_spill = NULL;

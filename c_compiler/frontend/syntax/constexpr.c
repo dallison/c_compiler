@@ -6640,6 +6640,30 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
                                            ASTNode* actual,
                                            TypeRecord* formal_object_type,
                                            ConstexprValue* value) {
+  // A class prvalue materialized into a compound literal binds to that
+  // temporary, the object its end-of-full-expression destructor destroys
+  // (and that a move leaves empty).
+  if (actual != NULL && actual->op == AST_OP(compound_literal) &&
+      actual->type != NULL && TypeIsStructOrUnion(actual->type)) {
+    CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)actual;
+    Symbol* temporary =
+        literal->sym != NULL && literal->sym->op == AST_OP(identifier)
+            ? ((IdentifierASTNode*)literal->sym)->symbol
+            : NULL;
+    ConstexprValue object = {0};
+    if (temporary != NULL && temporary->flags.is_temp) {
+      ConstexprException* handled = ctx->exception;
+      if (EvaluateConstexprInitializer(ctx, actual->type, actual, &object) &&
+          object.is_object && object.object != NULL) {
+        ConstexprRecordTemporary(ctx, temporary, object.object);
+        *value = object;
+        return true;
+      }
+      if (ctx->exception != handled) {
+        return false;
+      }
+    }
+  }
   ASTNode* binding_expr = ConstexprInitializerExpression(actual);
   if (binding_expr == NULL) {
     binding_expr = actual;
@@ -8271,8 +8295,13 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
   if (expr->op == AST_OP(comma)) {
     BinaryASTNode* comma = (BinaryASTNode*)expr;
     ASTNode* result_call = ConstexprFindClassResultCall(expr);
-    if (result_call != NULL && comma->left != NULL &&
-        comma->left->op == AST_OP(call)) {
+    Symbol* left_callee = comma->left != NULL &&
+                                  comma->left->op == AST_OP(call)
+                              ? ConstexprCallSymbol(comma->left)
+                              : NULL;
+    if (result_call != NULL && left_callee != NULL &&
+        left_callee->type != NULL && TypeIsFunction(left_callee->type) &&
+        left_callee->type->info.function.is_constructor) {
       VectorASTNode* constructor = (VectorASTNode*)comma->left;
       if (constructor->children != NULL &&
           constructor->children->length != 0) {
@@ -8291,20 +8320,26 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
         }
       }
     }
+    // Both operands are discarded-value expressions: a call yielding a class
+    // object (such as `a = b` returning `A&`) runs for its effects and is not
+    // read as a value.
     ConstexprValue ignored = {0};
-    bool left_ok =
-        comma->left == NULL || TypeIsVoid(comma->left->type)
-            ? EvaluateConstexprVoidExpression(ctx, comma->left)
-            : EvaluateConstexprValue(ctx, comma->left, comma->left->type,
-                                     &ignored);
-    if (!left_ok) {
-      return false;
+    ASTNode* operands[2] = {comma->left, comma->right};
+    for (size_t i = 0; i < 2; i++) {
+      ASTNode* operand = operands[i];
+      bool ok =
+          operand == NULL || TypeIsVoid(operand->type) ||
+                  (operand->op == AST_OP(call) &&
+                   TypeIsStructOrUnion(operand->type)) ||
+                  operand->op == AST_OP(comma) ||
+                  operand->op == AST_OP(throw)
+              ? EvaluateConstexprVoidExpression(ctx, operand)
+              : EvaluateConstexprValue(ctx, operand, operand->type, &ignored);
+      if (!ok) {
+        return false;
+      }
     }
-    bool right_ok = comma->right == NULL || TypeIsVoid(comma->right->type)
-               ? EvaluateConstexprVoidExpression(ctx, comma->right)
-               : EvaluateConstexprValue(ctx, comma->right, comma->right->type,
-                                        &ignored);
-    return right_ok;
+    return true;
   }
   if (expr->op == AST_OP(cast)) {
     ASTNode* operand = ((CastASTNode*)expr)->expr;
@@ -10570,6 +10605,19 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
                                              ASTNode* node) {
   if (ctx->call_depth > 32) {
     return false;
+  }
+  ASTNode* elided_source = ASTCXXElidedCopyConstructorSource(node);
+  if (elided_source != NULL) {
+    // The prvalue initializes the destination itself; no copy constructor
+    // runs.
+    ConstexprObject* destination = NULL;
+    ConstexprValue value = {0};
+    VectorASTNode* copy = (VectorASTNode*)node;
+    return EvaluateConstexprObjectAddress(ctx, copy->children->value.p[0],
+                                          &destination) &&
+           EvaluateConstexprCall(ctx, elided_source, &value) &&
+           value.is_object &&
+           ConstexprStructCopySlots(ctx, value.object, destination);
   }
   ASTNode* receiver = NULL;
   Symbol* callee = ConstexprFunctionDefinition(ConstexprCallSymbol(node));
