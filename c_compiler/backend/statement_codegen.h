@@ -37,4 +37,11 @@ void GenerateNoexceptGuardTerminate(Generator* gen,
 void GenerateCleanupLandingPads(Generator* gen);
 void FreeCleanupPads(Generator* gen);
 
+// `left, temporary.~T()` from the end of a full-expression: generates both and
+// guards the destructor with a flag recording whether the temporary was
+// constructed.  GenerateNoteTemporaryConstruction sets that flag; call it after
+// generating any expression while gen->temporary_cleanups is non-empty.
+IRNode* GenerateTemporaryCleanupComma(Generator* gen, BinaryASTNode* node);
+void GenerateNoteTemporaryConstruction(Generator* gen, ASTNode* node);
+
 #endif /* statement_codegen_h */

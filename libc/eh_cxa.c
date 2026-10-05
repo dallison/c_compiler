@@ -299,14 +299,17 @@ void* __cxa_begin_catch(void* exceptionObject) {
   header = (struct __cxa_exception*)((char*)exceptionObject -
                                      DAVECC_CXA_UNWIND_OFFSET);
 
-  if (header->handlerCount == 0) {
-    if (globals->uncaughtExceptions > 0) {
-      globals->uncaughtExceptions--;
-    }
+  // A negative count marks a rethrown exception whose handler has not ended.
+  int count = header->handlerCount;
+  count = (count < 0 ? -count : count) + 1;
+  if (globals->uncaughtExceptions > 0) {
+    globals->uncaughtExceptions--;
+  }
+  if (header != globals->caughtExceptions) {
     header->nextException = globals->caughtExceptions;
     globals->caughtExceptions = header;
   }
-  header->handlerCount++;
+  header->handlerCount = count;
   if (header->adjustedPtr == NULL) {
     header->adjustedPtr = __davecc_eh_object_from_header(header);
   }
@@ -321,6 +324,20 @@ void __cxa_end_catch(void) {
   struct __cxa_eh_globals* globals = GetGlobalsSlow();
   struct __cxa_exception* header = globals->caughtExceptions;
   if (header == NULL) {
+    return;
+  }
+
+  if (header->handlerCount < 0) {
+    // Rethrown: the exception is still propagating, so the handler ending
+    // only removes it from the caught stack.
+    header->handlerCount++;
+    if (header->handlerCount == 0) {
+      PopCaughtException(globals);
+      active_adjusted_ptr =
+          globals->caughtExceptions != NULL
+              ? __davecc_eh_object_from_header(globals->caughtExceptions)
+              : NULL;
+    }
     return;
   }
 
@@ -366,9 +383,10 @@ void __cxa_rethrow(void) {
 
   __davecc_capture_regs(&throw_site_regs);
   void* object = __davecc_eh_object_from_header(header);
-  header->handlerCount--;
-  if (header->handlerCount == 0) {
-    PopCaughtException(globals);
+  // The handler stays active until its __cxa_end_catch, which the compiler
+  // runs as the exception leaves the handler.
+  if (header->handlerCount > 0) {
+    header->handlerCount = -header->handlerCount;
   }
 
   __davecc_eh_install_active_exception(header, object);
@@ -402,18 +420,14 @@ void __davecc_exception_ptr_release(void* value) {
 
 void __davecc_exception_ptr_rethrow(void* value) {
   struct __cxa_exception* header = (struct __cxa_exception*)value;
-  struct __cxa_eh_globals* globals = GetGlobalsSlow();
   DaveEHFrameRegisters throw_site_regs;
   _Unwind_Reason_Code reason;
   if (header == NULL) {
     DaveCCTerminateFromThrow();
   }
   __davecc_capture_regs(&throw_site_regs);
-  if (globals->caughtExceptions == header && header->handlerCount > 0) {
-    header->handlerCount--;
-    if (header->handlerCount == 0) {
-      PopCaughtException(globals);
-    }
+  if (header->handlerCount > 0) {
+    header->handlerCount = -header->handlerCount;
   }
   __davecc_eh_install_active_exception(
       header, __davecc_eh_object_from_header(header));

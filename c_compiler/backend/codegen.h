@@ -99,6 +99,9 @@ typedef struct Generator {
   Vector exception_keep_labels;  // IR labels reachable only through EH pads.
   Vector exception_typeinfos; // EHTypeInfo* entries emitted for this function.
   Vector cleanup_pads;       // PendingCleanupPad* entries, emitted at fn end.
+  // TemporaryCleanup* entries for the full-expression temporaries whose
+  // construction is being generated (innermost last).
+  Vector temporary_cleanups;
 
   Vector basic_blocks;      // Basic Blocks (indexed by block id).
   Vector loops;             // LoopInfo* records for natural loops.

@@ -10476,6 +10476,11 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
     (void)EvaluateConstexprObjectLValue(
         ctx, object_actual, &receiver_slot, /*allow_object=*/true);
   }
+  if ((node->flags & kASTConditionalTemporaryCleanup) != 0 &&
+      (receiver_object == NULL || receiver_object->destroyed)) {
+    // The branch that constructs this temporary was not evaluated.
+    return true;
+  }
   if (func->info.function.is_destructor &&
       func->info.function.body == NULL &&
       func->info.function.is_trivial_special_member) {

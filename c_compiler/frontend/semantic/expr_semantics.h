@@ -85,6 +85,12 @@ void CXXValidateReturnInitialization(TypeRecord* to, ASTNode* from);
 ASTNode* SemanticBindReferenceInitializer(ASTNode* expr,
                                          TypeRecord* reference_type);
 
+// A class prvalue whose value is discarded (or passed by value) still creates
+// an object that must be destroyed at the end of the full-expression.
+// Returns `expr` materialized into a temporary when it needs a destructor and
+// has no object yet, otherwise `expr` itself.
+ASTNode* SemanticMaterializeClassPrvalue(ASTNode* expr);
+
 // Lower a bare braced-init-list used as an expression (function argument,
 // return value or assignment right-hand side) into a temporary of `target`
 // type initialized by the braces.  Returns the analyzed compound-literal

@@ -32,6 +32,7 @@
 #include "statement_parser.h"
 #include "type_parse.h"
 #include "type_class_internal.h"
+#include "type_inheritance.h"
 #include "type_special_member.h"
 #include "type_template.h"
 
@@ -3937,6 +3938,30 @@ static ASTNode* MaterializeTemporary(ASTNode* expr, TypeRecord* type) {
   ASTNode* analyzed = AnalyzeExpression(materialized);
   analyzed->value_category = kValueCategoryXvalue;
   return analyzed;
+}
+
+ASTNode* SemanticMaterializeClassPrvalue(ASTNode* expr) {
+  if (!CompilerIsCXX() || expr == NULL || expr->type == NULL) {
+    return expr;
+  }
+  // Only a call's result is a fresh object here; other class prvalues (an
+  // `init`, an inlined constructor) already designate an object with an owner.
+  bool creates_object =
+      expr->op == AST_OP(call) || expr->op == AST_OP(question) ||
+      (expr->op == AST_OP(inline_call) && !ASTIsInlinedConstructor(expr));
+  if (!creates_object || expr->value_category != kValueCategoryPrvalue ||
+      !TypeIsStructOrUnion(expr->type) || HasAddress(expr) ||
+      ExpressionIsTemplateDependent(expr) ||
+      !TypeHasNonTrivialDestructor(expr->type)) {
+    return expr;
+  }
+  ASTNode* parent = expr->parent;
+  int child_id = expr->child_id;
+  ASTNode* materialized = MaterializeTemporary(expr, expr->type);
+  materialized->value_category = kValueCategoryPrvalue;
+  materialized->parent = parent;
+  materialized->child_id = child_id;
+  return materialized;
 }
 
 static ASTNode* MaterializeCXXByValueClassArgument(ASTNode* actual,
@@ -12435,13 +12460,13 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         SetNeedAddress(actual);
       } else {
         actual = FoldConstantArgument(actual);
-        if (actual->value_category != kValueCategoryPrvalue) {
-          ASTNode* materialized =
-              MaterializeCXXByValueClassArgument(actual, formal->type);
-          if (materialized != actual) {
-            ASTNodeReplaceChild((ASTNode*)node, (int)i, materialized, false);
-            actual = materialized;
-          }
+        ASTNode* materialized =
+            actual->value_category != kValueCategoryPrvalue
+                ? MaterializeCXXByValueClassArgument(actual, formal->type)
+                : SemanticMaterializeClassPrvalue(actual);
+        if (materialized != actual) {
+          ASTNodeReplaceChild((ASTNode*)node, (int)i, materialized, false);
+          actual = materialized;
         }
         if (TypeIsStructOrUnion(formal->type) &&
             TypeIsStructOrUnion(actual->type)) {
@@ -14023,6 +14048,9 @@ static ASTNode* AnalyzeCastExpression(CastASTNode* node) {
     }
     return lowered;
   }
+  if (TypeIsVoid(node->cast_type) && node->expr != NULL) {
+    node->expr = SemanticMaterializeClassPrvalue(node->expr);
+  }
   if (TypeIsReference(node->cast_type)) {
     if (!TypeEqualIgnoringQualifiers(node->expr->type, node->cast_type->next)) {
       // [expr.reinterpret.cast]/11: a glvalue of any object type can be
@@ -15170,6 +15198,7 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
           break;
         }
       }
+      binary_node->left = SemanticMaterializeClassPrvalue(binary_node->left);
 
       // Type of comma operator is type of right operand.
       ASTNodeSetType(node, binary_node->right->type);

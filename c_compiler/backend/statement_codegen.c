@@ -607,9 +607,12 @@ static void EmitConstexprCatchDestructor(Generator* gen,
                          call, NewTypeRecordWithSize(kTypeVoid, kQualPlain)));
 }
 
-static void EmitConstexprCatchCleanupsUntil(Generator* gen, ASTNode* node,
+// A jump from `node` out of the catch handlers enclosing it (below `stop`)
+// ends each of them, as falling off the end of a handler does.
+static void EmitCatchExitCleanupsUntil(Generator* gen, ASTNode* node,
                                             ASTNode* stop) {
-  if (!gen->for_constant_evaluation) {
+  bool itanium = UsesItaniumUnwind(gen);
+  if (!gen->for_constant_evaluation && !itanium) {
     return;
   }
   for (ASTNode* parent = node != NULL ? node->parent : NULL;
@@ -618,6 +621,12 @@ static void EmitConstexprCatchCleanupsUntil(Generator* gen, ASTNode* node,
       continue;
     }
     CatchASTNode* handler = (CatchASTNode*)parent;
+    if (itanium) {
+      if (IsSupportedCatchHandler(handler)) {
+        EmitCxaEndCatch(gen, handler->base.location);
+      }
+      continue;
+    }
     EmitConstexprCatchDestructor(gen, handler);
     GenerateNoArgRuntimeCall(
         gen, GetDaveCCConstexprEndCatchFunction(handler->base.location));
@@ -818,27 +827,31 @@ static Symbol* GetDaveCCConstexprEndCatchFunction(SourceLocation location) {
                                     location);
 }
 
+static bool IsDestructorCall(ASTNode* expr);
 static bool IsDestructorStatement(ASTNode* stmt);
 static ASTNode* PeelToDestructorReceiver(ASTNode* receiver);
 static Symbol* InlineCallReceiverSymbol(InlineCallASTNode* call);
 
 // A cleanup landing pad scheduled during body codegen and emitted after the
 // function's return path (so it is only reached via the unwinder).  Running the
-// pad destroys the object(s) `dtor_stmts` and then resumes unwinding.
+// pad destroys the object(s) `dtor_stmts` and then resumes unwinding.  A
+// full-expression temporary's pad instead runs `dtor_expr`, and only if the
+// flag at `guard_address` says the temporary was constructed.  A catch
+// handler's pad ends the handler (`end_catch`) as an exception leaves it.
 typedef struct {
   IRNode* pad_label;
   Vector dtor_stmts;  // ASTNode* destructor statements, run in order.
+  ASTNode* dtor_expr;
+  IRNode* guard_address;
+  bool end_catch;
 } PendingCleanupPad;
 
-// The automatic object a compiler-inserted destructor statement acts on, or
-// NULL if the statement is not of the recognized `receiver.~T()` shape.  Used to
-// pair a block's trailing destructor statements with the declarations above
-// them so each object gets a precise EH cleanup range.
-static Symbol* CleanupReceiverSymbol(ASTNode* dtor_stmt) {
-  if (!IsDestructorStatement(dtor_stmt)) {
+// The object a compiler-inserted destructor call acts on, or NULL if the call
+// is not of the recognized `receiver.~T()` shape.
+static Symbol* DestructorCallReceiverSymbol(ASTNode* expr) {
+  if (!IsDestructorCall(expr)) {
     return NULL;
   }
-  ASTNode* expr = ((ExpressionStatementASTNode*)dtor_stmt)->expr;
   if (ASTIsInlinedDestructor(expr)) {
     InlineCallASTNode* call = (InlineCallASTNode*)expr;
     if (call->cxx_receiver != NULL) {
@@ -861,6 +874,17 @@ static Symbol* CleanupReceiverSymbol(ASTNode* dtor_stmt) {
     return ((IdentifierASTNode*)receiver)->symbol;
   }
   return NULL;
+}
+
+// The automatic object a compiler-inserted destructor statement acts on.  Used
+// to pair a block's trailing destructor statements with the declarations above
+// them so each object gets a precise EH cleanup range.
+static Symbol* CleanupReceiverSymbol(ASTNode* dtor_stmt) {
+  if (!IsDestructorStatement(dtor_stmt)) {
+    return NULL;
+  }
+  return DestructorCallReceiverSymbol(
+      ((ExpressionStatementASTNode*)dtor_stmt)->expr);
 }
 
 // Visitor that flags whether a subtree can raise an exception: only a `throw`
@@ -963,6 +987,17 @@ void GenerateCleanupLandingPads(Generator* gen) {
     for (size_t j = 0; j < pad->dtor_stmts.length; j++) {
       GenerateStatement(gen, pad->dtor_stmts.value.p[j]);
     }
+    if (pad->dtor_expr != NULL) {
+      IRNode* skip = NewIR(IR_OP(label));
+      IRNode* constructed = GeneratorReloadSpilledValue(
+          gen, pad->guard_address, pad->guard_address->type->next);
+      GeneratorEmit(gen, NewIR2(IR_OP(bfalse), constructed, skip));
+      GenerateExpression(gen, pad->dtor_expr);
+      GeneratorEmit(gen, skip);
+    }
+    if (pad->end_catch) {
+      EmitCxaEndCatch(gen, location);
+    }
     if (UsesItaniumUnwind(gen)) {
       EmitUnwindResume(gen, location);
     } else {
@@ -985,21 +1020,17 @@ void FreeCleanupPads(Generator* gen) {
   VectorDestruct(&gen->cleanup_pads);
 }
 
-static bool IsDestructorStatement(ASTNode* stmt) {
-  if (stmt == NULL || stmt->op != AST_OP(expr)) {
+static bool IsDestructorCall(ASTNode* expr) {
+  if (expr == NULL) {
     return false;
   }
-  ExpressionStatementASTNode* expr_stmt = (ExpressionStatementASTNode*)stmt;
-  if (expr_stmt->expr == NULL) {
-    return false;
-  }
-  if (ASTIsInlinedDestructor(expr_stmt->expr)) {
+  if (ASTIsInlinedDestructor(expr)) {
     return true;
   }
-  if (expr_stmt->expr->op != AST_OP(call)) {
+  if (expr->op != AST_OP(call)) {
     return false;
   }
-  VectorASTNode* call = (VectorASTNode*)expr_stmt->expr;
+  VectorASTNode* call = (VectorASTNode*)expr;
   if (call->left == NULL) {
     return false;
   }
@@ -1027,6 +1058,11 @@ static bool IsDestructorStatement(ASTNode* stmt) {
     return name->value.string != NULL && name->value.string->value[0] == '~';
   }
   return false;
+}
+
+static bool IsDestructorStatement(ASTNode* stmt) {
+  return stmt != NULL && stmt->op == AST_OP(expr) &&
+         IsDestructorCall(((ExpressionStatementASTNode*)stmt)->expr);
 }
 
 static ASTNode* PeelToDestructorReceiver(ASTNode* receiver) {
@@ -1428,10 +1464,215 @@ static void ScheduleCleanupPad(Generator* gen, IRNode* region_start,
   PendingCleanupPad* pending = malloc(sizeof(PendingCleanupPad));
   pending->pad_label = pad;
   VectorInit(&pending->dtor_stmts);
-  for (size_t i = 0; i < dtor_stmts->length; i++) {
+  for (size_t i = 0; dtor_stmts != NULL && i < dtor_stmts->length; i++) {
     VectorAppend(&pending->dtor_stmts, dtor_stmts->value.p[i]);
   }
+  pending->dtor_expr = NULL;
+  pending->guard_address = NULL;
+  pending->end_catch = false;
   VectorAppend(&gen->cleanup_pads, pending);
+}
+
+// ---- Full-expression temporary cleanup -----------------------------------
+//
+// The front end destroys a full-expression's temporaries by appending their
+// destructor calls to it (`expr, t2.~T(), t1.~T()`).  Each temporary gets a
+// stack flag that is cleared before the full-expression and set when its
+// construction runs.  The flag guards the destructor of a temporary
+// constructed on only some paths (a ?: arm, the right of && or ||), and guards
+// the cleanup pad that destroys a constructed temporary when an exception
+// leaves the full-expression.
+
+static bool GenerateCompoundExceptionCleanup(Generator* gen);
+
+typedef struct {
+  Symbol* symbol;
+  IRNode* flag_address;  // addressof the flag, for GeneratorReloadSpilledValue.
+  IRNode* region_start;  // EH cleanup range start, or NULL without exceptions.
+  bool conditional;      // Constructed on only some paths.
+  bool constructed;      // A construction of `symbol` was generated.
+} TemporaryCleanup;
+
+// The temporary `node` constructs: a constructor call or inlined constructor
+// whose receiver is the temporary, or a compound literal that is it.
+static Symbol* ConstructedTemporarySymbol(ASTNode* node) {
+  if (ASTIsInlinedConstructor(node)) {
+    InlineCallASTNode* call = (InlineCallASTNode*)node;
+    return call->cxx_receiver != NULL ? call->cxx_receiver
+                                      : InlineCallReceiverSymbol(call);
+  }
+  if (node->op == AST_OP(compound_literal)) {
+    ASTNode* sym = ((CompoundLiteralASTNode*)node)->sym;
+    return sym != NULL && sym->op == AST_OP(identifier)
+               ? ((IdentifierASTNode*)sym)->symbol
+               : NULL;
+  }
+  if (node->op != AST_OP(call)) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->left == NULL || call->left->op != AST_OP(identifier) ||
+      ((IdentifierASTNode*)call->left)->symbol == NULL) {
+    return NULL;
+  }
+  TypeRecord* callee = ((IdentifierASTNode*)call->left)->symbol->type;
+  if (callee == NULL || !TypeIsFunction(callee) ||
+      !callee->info.function.is_constructor ||
+      call->children == NULL || call->children->length == 0) {
+    return NULL;
+  }
+  ASTNode* receiver = PeelToDestructorReceiver(call->children->value.p[0]);
+  return receiver != NULL && receiver->op == AST_OP(identifier)
+             ? ((IdentifierASTNode*)receiver)->symbol
+             : NULL;
+}
+
+void GenerateNoteTemporaryConstruction(Generator* gen, ASTNode* node) {
+  Symbol* symbol = ConstructedTemporarySymbol(node);
+  if (symbol == NULL) {
+    return;
+  }
+  for (size_t i = gen->temporary_cleanups.length; i > 0; i--) {
+    TemporaryCleanup* cleanup = gen->temporary_cleanups.value.p[i - 1];
+    if (cleanup->symbol != symbol) {
+      continue;
+    }
+    TypeRecord* flag_type = cleanup->flag_address->type->next;
+    IRNode* address = IRSetType(
+        GeneratorEmit(gen, NewIR1(IR_OP(addressof),
+                                  cleanup->flag_address->inputs.value.p[0])),
+        cleanup->flag_address->type);
+    GeneratorEmit(gen, NewIR2(GetStoreOpcodeForType(flag_type), address,
+                              GeneratorGetIntConstant(gen, flag_type, 1)));
+    cleanup->constructed = true;
+    return;
+  }
+}
+
+// Starts tracking the temporary `destructor` destroys, before the code that
+// constructs it is generated.  NULL when the destructor needs no guard.
+static TemporaryCleanup* BeginTemporaryCleanup(Generator* gen,
+                                               ASTNode* destructor) {
+  bool conditional =
+      (destructor->flags & kASTConditionalTemporaryCleanup) != 0;
+  bool eh = GenerateCompoundExceptionCleanup(gen);
+  Symbol* symbol = DestructorCallReceiverSymbol(destructor);
+  if (symbol == NULL || !symbol->flags.is_temp || (!conditional && !eh)) {
+    return NULL;
+  }
+  TypeRecord* flag_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+  TemporaryCleanup* cleanup = malloc(sizeof(TemporaryCleanup));
+  cleanup->symbol = symbol;
+  cleanup->conditional = conditional;
+  cleanup->flag_address = GeneratorSpillValueToTemp(
+      gen, GeneratorGetIntConstant(gen, flag_type, 0), flag_type);
+  cleanup->constructed = false;
+  cleanup->region_start = eh ? GeneratorEmit(gen, NewIR(IR_OP(label))) : NULL;
+  VectorAppend(&gen->temporary_cleanups, cleanup);
+  return cleanup;
+}
+
+// Destroys the temporary tracked by `cleanup` (or by nothing, when `cleanup`
+// is NULL) at the end of its full-expression, and frees `cleanup`.
+static IRNode* EndTemporaryCleanup(Generator* gen, TemporaryCleanup* cleanup,
+                                   ASTNode* destructor) {
+  if (cleanup == NULL) {
+    return GenerateExpression(gen, destructor);
+  }
+  for (size_t i = gen->temporary_cleanups.length; i > 0; i--) {
+    if (gen->temporary_cleanups.value.p[i - 1] == cleanup) {
+      VectorDeleteElement(&gen->temporary_cleanups, i - 1);
+      break;
+    }
+  }
+  IRNode* result;
+  if (!cleanup->constructed) {
+    // The construction was not recognized; destroy unconditionally.
+    result = GenerateExpression(gen, destructor);
+  } else {
+    if (cleanup->region_start != NULL) {
+      IRNode* region_end = GeneratorEmit(gen, NewIR(IR_OP(label)));
+      ScheduleCleanupPad(gen, cleanup->region_start, region_end, NULL);
+      PendingCleanupPad* pad =
+          gen->cleanup_pads.value.p[gen->cleanup_pads.length - 1];
+      pad->dtor_expr = destructor;
+      pad->guard_address = cleanup->flag_address;
+    }
+    if (cleanup->conditional) {
+      IRNode* skip = NewIR(IR_OP(label));
+      IRNode* constructed = GeneratorReloadSpilledValue(
+          gen, cleanup->flag_address, cleanup->flag_address->type->next);
+      GeneratorEmit(gen, NewIR2(IR_OP(bfalse), constructed, skip));
+      result = GenerateExpression(gen, destructor);
+      GeneratorEmit(gen, skip);
+    } else {
+      result = GenerateExpression(gen, destructor);
+    }
+  }
+  free(cleanup);
+  return result;
+}
+
+IRNode* GenerateTemporaryCleanupComma(Generator* gen, BinaryASTNode* node) {
+  TemporaryCleanup* cleanup = BeginTemporaryCleanup(gen, node->right);
+  GenerateExpression(gen, node->left);
+  return EndTemporaryCleanup(gen, cleanup, node->right);
+}
+
+// A return statement's `stmt` starts with the destructor statements of its
+// expression's temporaries (see NewCXXReturnTemporaryCleanups), followed by
+// the scope-exit destructors of its locals.
+static bool IsTemporaryCleanupStatement(ASTNode* stmt) {
+  return stmt != NULL && stmt->op == AST_OP(expr) &&
+         ((ExpressionStatementASTNode*)stmt)->expr != NULL &&
+         (((ExpressionStatementASTNode*)stmt)->expr->flags &
+          kASTTemporaryCleanupCall) != 0;
+}
+
+// Starts tracking the temporaries of a return statement's expression; returns
+// the TemporaryCleanup* (or NULL) for each leading cleanup statement in `out`.
+// They are begun last-destroyed first so that their EH ranges nest.
+static void BeginReturnTemporaryCleanups(Generator* gen, ASTNode* stmt,
+                                         Vector* out) {
+  if (stmt == NULL || stmt->op != AST_OP(compound)) {
+    return;
+  }
+  CompoundStatementASTNode* compound = (CompoundStatementASTNode*)stmt;
+  size_t count = 0;
+  while (count < compound->statements->length &&
+         IsTemporaryCleanupStatement(compound->statements->value.p[count])) {
+    VectorAppend(out, NULL);
+    count++;
+  }
+  for (size_t i = count; i > 0; i--) {
+    ASTNode* statement = compound->statements->value.p[i - 1];
+    out->value.p[i - 1] = BeginTemporaryCleanup(
+        gen, ((ExpressionStatementASTNode*)statement)->expr);
+  }
+}
+
+// Runs a return statement's `stmt`: the tracked temporaries' destructors,
+// then the locals' scope-exit destructors.
+static void GenerateReturnCleanups(Generator* gen, ASTNode* stmt,
+                                   Vector* temporaries) {
+  if (stmt == NULL) {
+    return;
+  }
+  if (temporaries->length == 0 || stmt->op != AST_OP(compound)) {
+    GenerateStatement(gen, stmt);
+    return;
+  }
+  CompoundStatementASTNode* compound = (CompoundStatementASTNode*)stmt;
+  for (size_t i = 0; i < compound->statements->length; i++) {
+    ASTNode* statement = compound->statements->value.p[i];
+    if (i < temporaries->length) {
+      IRSetLocation(statement->location);
+      EndTemporaryCleanup(gen, temporaries->value.p[i],
+                          ((ExpressionStatementASTNode*)statement)->expr);
+    } else {
+      GenerateStatement(gen, statement);
+    }
+  }
 }
 
 // The index of the first of the block's trailing destructor statements (the
@@ -1659,6 +1900,24 @@ static void GenerateCompoundStatement(Generator* gen,
 
 // Is the statement just a branch (possibly enclosed in a compound).
 // Return the branch if it is, NULL otherwise;
+// Does the jump `node` to `target` need code before its branch: restoring
+// the stack pointer past a VLA, or ending the catch handlers it leaves?
+static bool JumpNeedsExitCode(Generator* gen, ASTNode* node, ASTNode* target) {
+  if (target == NULL || FindTopVLAForJump(node, target) != NULL) {
+    return true;
+  }
+  if (!gen->for_constant_evaluation && !UsesItaniumUnwind(gen)) {
+    return false;
+  }
+  for (ASTNode* parent = node->parent; parent != NULL && parent != target;
+       parent = parent->parent) {
+    if (parent->op == AST_OP(catch)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static ASTNode* CheckSingleBranch(ASTNode* stmt, ASTOpcode opcode) {
   if (stmt == NULL) {
     return NULL;
@@ -1802,6 +2061,15 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
   ASTNode* break_stmt = CheckSingleBranch(node->if_part, AST_OP(break));
   ASTNode* continue_stmt = CheckSingleBranch(node->if_part, AST_OP(continue));
   ASTNode* goto_stmt = CheckSingleBranch(node->if_part, AST_OP(goto));
+  if (break_stmt != NULL &&
+      JumpNeedsExitCode(gen, break_stmt,
+                        FindEnclosingLoopOrSwitch(break_stmt))) {
+    break_stmt = NULL;
+  }
+  if (continue_stmt != NULL &&
+      JumpNeedsExitCode(gen, continue_stmt, FindEnclosingLoop(continue_stmt))) {
+    continue_stmt = NULL;
+  }
   if (break_stmt != NULL) {
     // if (cond) { break; } -> if(cond) goto break_label;
     // btrue cond, break_label
@@ -1929,13 +2197,23 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
     IRNode* catch_label = catch_labels.value.p[catch_index++];
     GeneratorEmit(gen, catch_label);
     IRNode* caught_object = NULL;
+    IRNode* handler_start = NULL;
     if (UsesItaniumUnwind(gen)) {
       caught_object = EmitCxaBeginCatch(gen, handler->base.location);
       GenerateItaniumCatchBinding(gen, handler, caught_object);
+      handler_start = GeneratorEmit(gen, NewIR(IR_OP(label)));
     } else {
       GenerateCatchBinding(gen, handler);
     }
     GenerateStatement(gen, handler->stmt);
+    if (handler_start != NULL) {
+      // An exception leaving the handler body ends the handler first.
+      IRNode* handler_end = GeneratorEmit(gen, NewIR(IR_OP(label)));
+      ScheduleCleanupPad(gen, handler_start, handler_end, NULL);
+      PendingCleanupPad* pad =
+          gen->cleanup_pads.value.p[gen->cleanup_pads.length - 1];
+      pad->end_catch = true;
+    }
     if (StatementMayFallThrough(handler->stmt)) {
       if (UsesItaniumUnwind(gen)) {
         EmitCxaEndCatch(gen, handler->base.location);
@@ -2451,6 +2729,11 @@ static void GenerateReturnStatement(Generator* gen,
   bool have_deferred_result = false;
   bool deferred_result_needs_reload = false;
   TypeRecord* deferred_reload_type = NULL;
+  Vector temporaries;
+  VectorInit(&temporaries);
+  if (node->cond != NULL && node->cond->op != AST_OP(asm)) {
+    BeginReturnTemporaryCleanups(gen, node->stmt, &temporaries);
+  }
   if (node->cond != NULL) {
     if (node->cond->op == AST_OP(asm)) {
       // Extension: return asm(..)
@@ -2563,11 +2846,11 @@ emit_return_branch:
   // Run the C++ scope-exit destructors for automatic objects going out of
   // scope (attached to the return's `stmt` child by the semantic analyzer).
   // They run after the return value has been materialised but before the
-  // deferred result register write and the branch to the epilogue.
-  if (node->stmt != NULL) {
-    GenerateStatement(gen, node->stmt);
-  }
-  EmitConstexprCatchCleanupsUntil(gen, &node->base, NULL);
+  // deferred result register write and the branch to the epilogue.  The
+  // return expression's temporaries are destroyed first.
+  GenerateReturnCleanups(gen, node->stmt, &temporaries);
+  VectorDestruct(&temporaries);
+  EmitCatchExitCleanupsUntil(gen, &node->base, NULL);
   GenerateFunctionContractAssertions(gen, kContractPostcondition);
   if (have_deferred_result) {
     IRNode* result_value = deferred_result_value;
@@ -2661,7 +2944,7 @@ static void GenerateBreak(Generator* gen, ASTNode* node) {
   if (top_vla != NULL) {
     GenerateRestoreStackPointer(gen, top_vla);
   }
-  EmitConstexprCatchCleanupsUntil(gen, node, loop_or_switch);
+  EmitCatchExitCleanupsUntil(gen, node, loop_or_switch);
   GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->break_label));
 }
 
@@ -2672,7 +2955,7 @@ static void GenerateContinue(Generator* gen, ASTNode* node) {
   if (top_vla != NULL) {
     GenerateRestoreStackPointer(gen, top_vla);
   }
-  EmitConstexprCatchCleanupsUntil(gen, node, loop);
+  EmitCatchExitCleanupsUntil(gen, node, loop);
   GeneratorEmit(gen, NewIR1(IR_OP(bra), gen->continue_label));
 }
 

@@ -16080,8 +16080,9 @@ bool SyntaxLookingAtType(Syntax* syntax) {
 // A functional-style temporary followed by member access is necessarily an
 // expression statement, even when its leading name is also a type.  Without
 // this lookahead, `T(value).member()` is sent to the declaration parser as the
-// parenthesized declarator `T(value)`.
-static bool CXXTypeStartsTemporaryMemberAccess(Syntax* syntax) {
+// parenthesized declarator `T(value)`.  The same holds for a temporary whose
+// parenthesized or braced operand cannot be a declarator (`T{1};`, `T(2);`).
+static bool CXXTypeStartsTemporaryExpression(Syntax* syntax) {
   if (!CompilerIsCXX() ||
       (!LexLookingAt(syntax->lex, TOK(identifier)) &&
        !LexLookingAt(syntax->lex, TOK(coloncolon)))) {
@@ -16170,6 +16171,33 @@ static bool CXXTypeStartsTemporaryMemberAccess(Syntax* syntax) {
     bool brace = LexLookingAt(syntax->lex, TOK(lbrace));
     Token open = brace ? TOK(lbrace) : TOK(lparen);
     Token close = brace ? TOK(rbrace) : TOK(rparen);
+    // At block scope a declarator cannot start with `{`, a literal or
+    // `this`, so `T{1};` and `T(2);` are discarded temporaries rather than
+    // declarations of an unnamed variable.
+    bool block_scope = syntax->context == kParsingBlockScope;
+    bool not_declarator = block_scope && brace;
+    if (block_scope && !brace) {
+      LexCheckpoint open_paren;
+      LexCheckpointSave(syntax->lex, &open_paren);
+      LexNextToken(syntax->lex);
+      switch (syntax->lex->current_token) {
+        case TOK(number):
+        case TOK(string):
+        case TOK(string_wide):
+        case TOK(charconst):
+        case TOK(charconst_wide):
+        case TOK(true):
+        case TOK(false):
+        case TOK(nullptr):
+        case TOK(this):
+          not_declarator = true;
+          break;
+        default:
+          break;
+      }
+      LexCheckpointRestore(syntax->lex, &open_paren);
+      LexCheckpointDestruct(&open_paren);
+    }
     int depth = 0;
     do {
       if (LexLookingAt(syntax->lex, open)) {
@@ -16181,7 +16209,7 @@ static bool CXXTypeStartsTemporaryMemberAccess(Syntax* syntax) {
     } while (!LexEof(syntax->lex) && depth > 0);
     is_member_access =
         depth == 0 &&
-        (LexLookingAt(syntax->lex, TOK(dot)) ||
+        (not_declarator || LexLookingAt(syntax->lex, TOK(dot)) ||
          LexLookingAt(syntax->lex, TOK(arrow)));
   }
   LexCheckpointRestore(syntax->lex, &checkpoint);
@@ -16434,7 +16462,7 @@ bool SyntaxLookingAtDeclaration(Syntax* syntax) {
   if (CXXClassTemplateTemporaryLooksLikeExpression(syntax)) {
     return false;
   }
-  if (CXXTypeStartsTemporaryMemberAccess(syntax)) {
+  if (CXXTypeStartsTemporaryExpression(syntax)) {
     return false;
   }
   switch (syntax->lex->current_token) {

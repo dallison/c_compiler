@@ -427,6 +427,7 @@ struct ConstraintExpr;
 #define kASTInlinedConstructor (1ULL << 60)  // inline_call that replaced a constructor call.
 #define kASTInlinedDestructor (1ULL << 61)  // inline_call that replaced a destructor call.
 #define kASTValueInitMemzero (1ULL << 62)  // Empty braced init that only zero-fills placement storage; do not reanalyze.
+#define kASTConditionalTemporaryCleanup (1ULL << 63)  // kASTTemporaryCleanupCall whose temporary is constructed only on some paths (a ?: arm, the right of && or ||); run it only if the construction ran.
 
 // Initialize an AST node.
 void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,

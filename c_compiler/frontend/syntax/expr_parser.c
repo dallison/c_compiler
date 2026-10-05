@@ -6786,10 +6786,24 @@ static ASTNode* NewPostIncrement(Symbol* sym, SourceLocation location) {
                          NewIdentifierASTNode(sym, location));
 }
 
-// Default-constructs elements [first, count) of the array at `ptr`.
+// `constructed = index + 1`: element `index` of a new-expression's array is
+// now constructed, so a later exception must destroy it.
+static ASTNode* NewArrayConstructedCountUpdate(Symbol* constructed,
+                                               ASTNode* index,
+                                               SourceLocation location) {
+  return NewExpressionStatement(
+      NewAssign(NewIdentifierASTNode(constructed, location),
+                NewBinaryASTNode(AST_OP(plus), NULL, location, index,
+                                 NewIntLiteral(1, location)),
+                constructed->type, location),
+      location);
+}
+
+// Default-constructs elements [first, count) of the array at `ptr`, recording
+// each completed element in `constructed` when it is non-NULL.
 static ASTNode* NewArrayConstructionLoop(Syntax* syntax, TypeRecord* element_type,
                                          Symbol* ptr, Symbol* count,
-                                         int64_t first,
+                                         int64_t first, Symbol* constructed,
                                          SourceLocation location) {
   Symbol* index =
       SyntaxNewTemporary(syntax, NewTypeRecordWithSize(kTypeInt, kQualPlain));
@@ -6817,6 +6831,12 @@ static ASTNode* NewArrayConstructionLoop(Syntax* syntax, TypeRecord* element_typ
                    NewCXXConstructorCallForPointer(element_type, element_ptr,
                                                    NewVector(), location),
                    location));
+  if (constructed != NULL) {
+    VectorAppend(body_statements,
+                 NewArrayConstructedCountUpdate(
+                     constructed, NewIdentifierASTNode(index, location),
+                     location));
+  }
   VectorAppend(body_statements,
                NewExpressionStatement(NewPostIncrement(index, location),
                                       location));
@@ -6835,10 +6855,11 @@ static ASTNode* NewCXXNewInitialization(Syntax* syntax, TypeRecord* type,
                                         ASTNode* target, ASTNode* initializer,
                                         SourceLocation location);
 
-// Value-initializes elements [first, count) of the array at `ptr`.
+// Value-initializes elements [first, count) of the array at `ptr`, recording
+// each completed element in `constructed` when it is non-NULL.
 static ASTNode* NewArrayValueInitializationLoop(
     Syntax* syntax, TypeRecord* element_type, Symbol* ptr, Symbol* count,
-    int64_t first, SourceLocation location) {
+    int64_t first, Symbol* constructed, SourceLocation location) {
   Symbol* index =
       SyntaxNewTemporary(syntax, NewTypeRecordWithSize(kTypeInt, kQualPlain));
   Vector* statements = NewVector();
@@ -6859,6 +6880,12 @@ static ASTNode* NewArrayValueInitializationLoop(
                    NewCXXNewInitialization(syntax, element_type, element, NULL,
                                            location),
                    location));
+  if (constructed != NULL) {
+    VectorAppend(body_statements,
+                 NewArrayConstructedCountUpdate(
+                     constructed, NewIdentifierASTNode(index, location),
+                     location));
+  }
   VectorAppend(body_statements,
                NewExpressionStatement(NewPostIncrement(index, location),
                                       location));
@@ -6874,22 +6901,29 @@ static ASTNode* NewArrayValueInitializationLoop(
   return NewCompoundStatementASTNode(statements, location);
 }
 
+// Destroys elements [0, count) of the array at `ptr`, last element first.
 static ASTNode* NewArrayDestructionLoop(Syntax* syntax, TypeRecord* element_type,
                                         Symbol* ptr, Symbol* count,
                                         SourceLocation location) {
-  Symbol* index =
-      SyntaxNewTemporary(syntax, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+  Symbol* index = SyntaxNewTemporary(syntax, NewSizeTypeRecord());
   Symbol* element_ptr =
       SyntaxNewTemporary(syntax, NewPointerTo(kQualPlain, element_type));
   Vector* statements = NewVector();
   VectorAppend(statements,
                NewExpressionStatement(
                    NewAssign(NewIdentifierASTNode(index, location),
-                             NewIntLiteral(0, location), index->type,
-                             location),
+                             NewIdentifierASTNode(count, location),
+                             index->type, location),
                    location));
 
   Vector* body_statements = NewVector();
+  VectorAppend(body_statements,
+               NewExpressionStatement(
+                   NewAssign(NewIdentifierASTNode(index, location),
+                             NewPtrSub(NewIdentifierASTNode(index, location),
+                                       NewIntLiteral(1, location), location),
+                             index->type, location),
+                   location));
   VectorAppend(body_statements,
                NewExpressionStatement(
                    NewAssign(NewIdentifierASTNode(element_ptr, location),
@@ -6903,14 +6937,11 @@ static ASTNode* NewArrayDestructionLoop(Syntax* syntax, TypeRecord* element_type
                    NewCXXDestructorCallForPointer(element_type, element_ptr,
                                                   location),
                    location));
-  VectorAppend(body_statements,
-               NewExpressionStatement(NewPostIncrement(index, location),
-                                      location));
   ASTNode* body = NewCompoundStatementASTNode(body_statements, location);
   ASTNode* cond =
-      NewBinaryASTNode(AST_OP(less), NULL, location,
+      NewBinaryASTNode(AST_OP(noteq), NULL, location,
                        NewIdentifierASTNode(index, location),
-                       NewIdentifierASTNode(count, location));
+                       NewIntLiteral(0, location));
   VectorAppend(statements,
                NewCombinedStatementASTNode(AST_OP(while), cond, body,
                                            location));
@@ -7119,6 +7150,7 @@ typedef struct {
   Symbol* base_ptr;
   TypeRecord* base_type;
   bool constructed_class;
+  Symbol* constructed;  // Count of completed elements, or NULL.
   SourceLocation location;
 } CXXNewArrayInit;
 
@@ -7180,6 +7212,12 @@ static void AppendCXXNewLeafInit(CXXNewArrayInit* init, int64_t index,
                                         initializer, location);
   }
   VectorAppend(init->statements, NewExpressionStatement(statement, location));
+  if (init->constructed != NULL) {
+    VectorAppend(init->statements,
+                 NewArrayConstructedCountUpdate(
+                     init->constructed, NewIntLiteral(index, location),
+                     location));
+  }
 }
 
 static void InitCXXNewSubobject(CXXNewArrayInit* init,
@@ -7235,6 +7273,8 @@ static size_t InitCXXNewArrayElements(CXXNewArrayInit* init, Vector* items,
   }
   return elements;
 }
+
+static ASTNode* NewDeallocationPointer(ASTNode* expr, SourceLocation location);
 
 static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                                       bool global_scope) {
@@ -7462,6 +7502,11 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
     }
   }
   VectorAppend(actuals, allocation_size);
+  // If initialization throws, the storage is freed by the matching usual
+  // deallocation function; placement forms (whose matching placement delete
+  // would be needed) only destroy what was constructed.
+  bool eh_cleanup = CompilerIsCXX() && CompilerExceptionsEnabled();
+  bool deallocate_on_throw = eh_cleanup && placement_actuals == NULL;
   if (placement_actuals != NULL) {
     for (size_t i = 0; i < placement_actuals->length; i++) {
       VectorAppend(actuals, placement_actuals->value.p[i]);
@@ -7583,14 +7628,38 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
         FindCXXConstructorForType(base_type) != NULL &&
         (array_initializers == NULL || allocated_type_dependent ||
          !CXXNewTypeIsAggregateClass(base_type));
+    // Element initialization goes in its own block, headed by a cleanup that
+    // runs only if it throws: destroy the completed elements, last first,
+    // then free the storage.
+    bool init_may_throw = constructed_class || value_init ||
+                          allocated_type_dependent;
+    bool destroy_on_throw = eh_cleanup && init_may_throw &&
+                            FindCXXDestructorForType(base_type) != NULL;
+    bool free_on_throw = deallocate_on_throw && init_may_throw;
+    Symbol* constructed = NULL;
+    Vector* init_statements = statements;
+    if (destroy_on_throw || free_on_throw) {
+      init_statements = NewVector();
+      VectorAppend(init_statements, NULL);  // The cleanup, built below.
+    }
+    if (destroy_on_throw) {
+      constructed = SyntaxNewTemporary(syntax, NewSizeTypeRecord());
+      VectorAppend(statements,
+                   NewExpressionStatement(
+                       NewAssign(NewIdentifierASTNode(constructed, location),
+                                 NewIntLiteral(0, location),
+                                 constructed->type, location),
+                       location));
+    }
     size_t listed = 0;
     if (array_initializers != NULL) {
       CXXNewArrayInit init = {
           .syntax = syntax,
-          .statements = statements,
+          .statements = init_statements,
           .base_ptr = base_ptr,
           .base_type = base_type,
           .constructed_class = constructed_class,
+          .constructed = constructed,
           .location = location,
       };
       listed = InitCXXNewArrayElements(&init, array_initializers,
@@ -7599,16 +7668,43 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
     }
     int64_t first_unlisted = (int64_t)listed * base_per_element;
     if (constructed_class) {
-      VectorAppend(statements,
+      VectorAppend(init_statements,
                    NewArrayConstructionLoop(syntax, base_type, base_ptr,
                                             base_count, first_unlisted,
-                                            location));
+                                            constructed, location));
     } else if (value_init) {
       // The elements without an initializer are value-initialized.
-      VectorAppend(statements,
+      VectorAppend(init_statements,
                    NewArrayValueInitializationLoop(
                        syntax, base_type, base_ptr, base_count,
-                       first_unlisted, location));
+                       first_unlisted, constructed, location));
+    }
+    if (init_statements != statements) {
+      Vector* cleanup_statements = NewVector();
+      if (destroy_on_throw) {
+        VectorAppend(cleanup_statements,
+                     NewArrayDestructionLoop(syntax, base_type, base_ptr,
+                                             constructed, location));
+      }
+      if (free_on_throw) {
+        Vector* deallocate_actuals = NewVector();
+        VectorAppend(deallocate_actuals,
+                     NewDeallocationPointer(
+                         NewIdentifierASTNode(header, location), location));
+        VectorAppend(cleanup_statements,
+                     NewExpressionStatement(
+                         NewCallASTNode(GetCXXOperatorDeleteForType(
+                                            allocated_type, true, location,
+                                            global_scope),
+                                        location, deallocate_actuals),
+                         location));
+      }
+      ASTNode* cleanup =
+          NewCompoundStatementASTNode(cleanup_statements, location);
+      cleanup->flags |= kASTEHCleanupOnly;
+      init_statements->value.p[0] = cleanup;
+      VectorAppend(statements,
+                   NewCompoundStatementASTNode(init_statements, location));
     }
     VectorAppend(statements,
                  NewExpressionStatement(NewIdentifierASTNode(object_ptr,
@@ -7654,7 +7750,30 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
     VectorAppend(statements,
                  NewVariableDeclarationASTNode(temp, NULL, location));
     VectorAppend(statements, NewExpressionStatement(assign, location));
-    VectorAppend(statements, NewExpressionStatement(init, location));
+    bool init_may_throw =
+        ctor_actuals != NULL || aggregate_initializer != NULL ||
+        allocated_type_dependent || TypeIsStructOrUnion(allocated_type) ||
+        (scalar_initializer != NULL && scalar_initializer->op != AST_OP(number));
+    if (deallocate_on_throw && init_may_throw) {
+      // Free the storage if the initialization throws.
+      Vector* deallocate_actuals = NewVector();
+      VectorAppend(deallocate_actuals,
+                   NewDeallocationPointer(NewIdentifierASTNode(temp, location),
+                                          location));
+      ASTNode* deallocate = NewExpressionStatement(
+          NewCallASTNode(GetCXXOperatorDeleteForType(allocated_type, false,
+                                                     location, global_scope),
+                         location, deallocate_actuals),
+          location);
+      deallocate->flags |= kASTEHCleanupOnly;
+      Vector* init_statements = NewVector();
+      VectorAppend(init_statements, deallocate);
+      VectorAppend(init_statements, NewExpressionStatement(init, location));
+      VectorAppend(statements,
+                   NewCompoundStatementASTNode(init_statements, location));
+    } else {
+      VectorAppend(statements, NewExpressionStatement(init, location));
+    }
     VectorAppend(statements,
                  NewExpressionStatement(NewIdentifierASTNode(temp, location),
                                         location));

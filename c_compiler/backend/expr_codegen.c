@@ -17,6 +17,7 @@
 #include "symbol_table.h"
 #include "rtti.h"
 #include "member_pointer.h"
+#include "statement_codegen.h"
 #include "type_template.h"
 
 static bool TypeUsesDoubleIROperations(TypeRecord* type) {
@@ -4579,6 +4580,24 @@ static IRNode* GenerateItaniumThrowExpression(Generator* gen,
       } else {
         EmitExceptionConstructorCall(gen, constructor, object, source);
       }
+      // A prvalue operand's temporary is not a full-expression temporary
+      // (see CollectCXXTemporarySymbols); it ends here, once moved from.
+      Symbol* destructor = FindExceptionSpecialMember(
+          throw_type, kCXXSpecialMemberDestructor);
+      if (node->expr->value_category == kValueCategoryPrvalue &&
+          !ExceptionSpecialMemberIsTrivial(destructor)) {
+        IRNode* call =
+            NewIR1(IR_OP(calla), GeneratorGetVariable(gen, destructor));
+        IRNode* moved_from = IRSetType(
+            GeneratorEmit(gen, NewIR1(IR_OP(addressof),
+                                      source->inputs.value.p[0])),
+            source->type);
+        Vector args = {0};
+        PushArg(gen, call, moved_from, 0, &args);
+        IRAddInput(call, GeneratorEmit(gen, args.value.p[0]), false);
+        VectorDestruct(&args);
+        IRSetType(GeneratorEmit(gen, call), destructor->type->next);
+      }
     }
   } else {
     IROpcode store_op = GetStoreOpcode((ASTNode*)node->expr);
@@ -4632,6 +4651,37 @@ static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
                                                   exception_object));
       IRSetType(address, NewPointerTo(kQualPlain, node->expr->type));
       exception_object = address;
+    }
+    // The runtime takes the exception object bitwise, so an lvalue or xvalue
+    // operand is first copied (or moved) into a temporary the runtime owns.
+    if (TypeIsStructOrUnion(node->expr->type) &&
+        node->expr->value_category != kValueCategoryPrvalue) {
+      CXXSpecialMemberKind preferred =
+          node->expr->value_category == kValueCategoryLvalue
+              ? kCXXSpecialMemberCopyConstructor
+              : kCXXSpecialMemberMoveConstructor;
+      Symbol* constructor =
+          FindExceptionSpecialMember(node->expr->type, preferred);
+      if (constructor == NULL &&
+          preferred == kCXXSpecialMemberMoveConstructor) {
+        constructor = FindExceptionSpecialMember(
+            node->expr->type, kCXXSpecialMemberCopyConstructor);
+      }
+      if (!ExceptionSpecialMemberIsTrivial(constructor)) {
+        Symbol* copy = SyntaxNewTemporary(gen->syntax, node->expr->type);
+        copy->flags.address_taken = true;
+        TypeRecord* pointer_type = NewPointerTo(kQualPlain, node->expr->type);
+        IRNode* copy_address = IRSetType(
+            GeneratorEmit(gen, NewIR1(IR_OP(addressof),
+                                      GeneratorGetVariable(gen, copy))),
+            pointer_type);
+        EmitExceptionConstructorCall(gen, constructor, copy_address,
+                                     exception_object);
+        exception_object = IRSetType(
+            GeneratorEmit(gen, NewIR1(IR_OP(addressof),
+                                      GeneratorGetVariable(gen, copy))),
+            pointer_type);
+      }
     }
   }
 
@@ -6877,10 +6927,14 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       break;
 
     case AST_OP(comma):
-      GenerateExpression(gen, binary_node->left);
       if ((node->flags & kASTNeedAddress) != 0) {
         binary_node->right->flags |= kASTNeedAddress;
       }
+      if ((binary_node->right->flags & kASTTemporaryCleanupCall) != 0) {
+        result = GenerateTemporaryCleanupComma(gen, binary_node);
+        break;
+      }
+      GenerateExpression(gen, binary_node->left);
       result = GenerateExpression(gen, binary_node->right);
       break;
 
@@ -7084,6 +7138,9 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
   }
   if (TypeIsBitInt(node->type) && (node->flags & kASTNeedAddress) == 0) {
     result = NormalizeBitIntValue(gen, result, node->type);
+  }
+  if (gen->temporary_cleanups.length > 0) {
+    GenerateNoteTemporaryConstruction(gen, node);
   }
   assert(result->type != NULL);
   return result;

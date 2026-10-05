@@ -12,6 +12,7 @@
 #include "type_core.h"
 #include <limits.h>
 #include <stdint.h>
+#include <string.h>
 
 // Is the node an integer constant with the value given?
 static bool IsIntConstantWithValue(IRNode* node, int value) {
@@ -564,6 +565,16 @@ static bool IsTrivialReturnInstruction(IRNode* inst) {
   }
 }
 
+// _Unwind_Resume continues unwinding from the register state saved when the
+// landing pad was installed, so the calling frame's spill slots must still be
+// intact when it runs.
+static bool CallNeedsLiveFrame(IRNode* call) {
+  if (call->inputs.length == 0) return false;
+  Symbol* callee = IRGetVariableSymbol(call->inputs.value.p[0]);
+  return callee != NULL && callee->name.value != NULL &&
+         strcmp(callee->name.value, "_Unwind_Resume") == 0;
+}
+
 // The last IR_OP(calla) in a block whose only out edge goes
 // to a block marked with return_block is a tail call.
 // Also, if the block is a return block the last call is a
@@ -612,7 +623,7 @@ void FindTailCalls(BasicBlock* block, void* data) {
       }
     }
     if (inst->opcode == IR_OP(calla)) {
-      inst->flags |= kIRTailCall;
+      if (!CallNeedsLiveFrame(inst)) inst->flags |= kIRTailCall;
       return;
     }
     // Any other instruction sitting between the call and the return means there

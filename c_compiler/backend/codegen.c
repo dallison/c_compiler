@@ -252,6 +252,7 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   VectorInit(&gen->exception_keep_labels);
   VectorInit(&gen->exception_typeinfos);
   VectorInit(&gen->cleanup_pads);
+  VectorInit(&gen->temporary_cleanups);
   VectorInit(&gen->basic_blocks);
   VectorInit(&gen->loops);
   gen->for_constant_evaluation = false;
@@ -295,6 +296,9 @@ void GeneratorDestruct(Generator* gen) {
   VectorDestructWithContents(&gen->exception_ranges, NULL, /*free_element=*/true);
   VectorDestruct(&gen->exception_keep_labels);
   FreeCleanupPads(gen);
+  // Entries remain only when constant evaluation abandoned codegen midway.
+  VectorDestructWithContents(&gen->temporary_cleanups, NULL,
+                             /*free_element=*/true);
   // Target generators keep pointers to these records until final assembly
   // emission, which can happen after the transient IR generator is destroyed.
   VectorDestruct(&gen->exception_typeinfos);

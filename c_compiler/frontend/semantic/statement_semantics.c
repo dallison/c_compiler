@@ -300,7 +300,49 @@ typedef struct {
   // and destroying it a second time, unconditionally, runs a destructor on
   // storage that the caller's path may never have constructed.
   Vector already_destroyed;
+  // Temporaries constructed only on some evaluation paths of `root`, the full
+  // expression being collected.
+  Vector conditional;
+  ASTNode* root;
 } CXXTemporaryCollection;
+
+static void CXXTemporaryCollectionInit(CXXTemporaryCollection* collection,
+                                       ASTNode* root) {
+  VectorInit(&collection->temps);
+  VectorInit(&collection->elided);
+  VectorInit(&collection->parameter_temps);
+  VectorInit(&collection->already_destroyed);
+  VectorInit(&collection->conditional);
+  collection->root = root;
+}
+
+static void CXXTemporaryCollectionDestruct(CXXTemporaryCollection* collection) {
+  VectorDestruct(&collection->temps);
+  VectorDestruct(&collection->elided);
+  VectorDestruct(&collection->parameter_temps);
+  VectorDestruct(&collection->already_destroyed);
+  VectorDestruct(&collection->conditional);
+}
+
+// Is `node` evaluated only on some paths through `root`: inside an arm of a
+// conditional operator, or the right operand of `&&` or `||`?
+static bool CXXNodeIsConditionallyEvaluated(ASTNode* node, ASTNode* root) {
+  for (ASTNode* child = node; child != NULL && child != root;
+       child = child->parent) {
+    ASTNode* parent = child->parent;
+    if (parent == NULL) {
+      break;
+    }
+    if (parent->op == AST_OP(colon)) {
+      return true;
+    }
+    if ((parent->op == AST_OP(logand) || parent->op == AST_OP(logor)) &&
+        ((BinaryASTNode*)parent)->right == child) {
+      return true;
+    }
+  }
+  return false;
+}
 
 static bool CXXTemporaryIsFunctionParameterObject(ASTNode* node, Symbol* sym) {
   for (ASTNode* current = node; current != NULL; current = current->parent) {
@@ -403,6 +445,8 @@ static void ElidePrvalueConditionalArmTemporaries(
   }
 }
 
+static void CollectCXXResultTemporaries(ASTNode* expr, Vector* out);
+
 static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
@@ -412,6 +456,13 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
   }
   CXXTemporaryCollection* collection = data;
   ElidePrvalueConditionalArmTemporaries(node, collection);
+  // A thrown prvalue is built in, or moved bitwise to, the exception object.
+  if (node->op == AST_OP(throw) && ((ThrowASTNode*)node)->expr != NULL &&
+      ((ThrowASTNode*)node)->expr->value_category == kValueCategoryPrvalue) {
+    CollectCXXResultTemporaries(((ThrowASTNode*)node)->expr,
+                                &collection->elided);
+    return;
+  }
   Symbol* sym = NULL;
   if (node->op == AST_OP(identifier)) {
     if (node->parent != NULL && node->parent->op == AST_OP(compound_literal) &&
@@ -451,6 +502,9 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
     if (literal->sym != NULL && literal->sym->op == AST_OP(identifier)) {
       sym = ((IdentifierASTNode*)literal->sym)->symbol;
     }
+    if (sym != NULL && VectorContainsPointer(&collection->elided, sym)) {
+      return;
+    }
   } else {
     return;
   }
@@ -466,6 +520,9 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
     }
     if (!VectorContainsPointer(&collection->temps, sym)) {
       VectorAppend(&collection->temps, sym);
+      if (CXXNodeIsConditionallyEvaluated(node, collection->root)) {
+        VectorAppend(&collection->conditional, sym);
+      }
     }
   }
 }
@@ -492,6 +549,16 @@ static ASTNode* NewCXXTemporaryDestructorCall(Symbol* sym,
   return call;
 }
 
+// The end-of-full-expression destructor call for one collected temporary.
+static ASTNode* NewCXXFullExpressionTemporaryDestructorCall(
+    CXXTemporaryCollection* collection, Symbol* sym, SourceLocation location) {
+  ASTNode* call = NewCXXTemporaryDestructorCall(sym, location);
+  if (call != NULL && VectorContainsPointer(&collection->conditional, sym)) {
+    call->flags |= kASTConditionalTemporaryCleanup;
+  }
+  return call;
+}
+
 ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
   if (!CompilerIsCXX() || expr == NULL ||
       (compiler->current_function != NULL &&
@@ -500,16 +567,13 @@ ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
     return expr;
   }
   CXXTemporaryCollection collection;
-  VectorInit(&collection.temps);
-  VectorInit(&collection.elided);
-  VectorInit(&collection.parameter_temps);
-  VectorInit(&collection.already_destroyed);
+  CXXTemporaryCollectionInit(&collection, expr);
   ASTNodeVisit(expr, CollectCXXDestroyedTemporarySymbols, 0, &collection);
   ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
   for (size_t i = collection.temps.length; i > 0; i--) {
     Symbol* sym = collection.temps.value.p[i - 1];
-    ASTNode* destructor =
-        NewCXXTemporaryDestructorCall(sym, expr->location);
+    ASTNode* destructor = NewCXXFullExpressionTemporaryDestructorCall(
+        &collection, sym, expr->location);
     if (destructor == NULL) {
       continue;
     }
@@ -517,10 +581,7 @@ ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
                             expr->location, expr, destructor);
     expr->flags |= kASTAnalyzed;
   }
-  VectorDestruct(&collection.temps);
-  VectorDestruct(&collection.elided);
-  VectorDestruct(&collection.parameter_temps);
-  VectorDestruct(&collection.already_destroyed);
+  CXXTemporaryCollectionDestruct(&collection);
   return expr;
 }
 
@@ -533,17 +594,11 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructorsPreservingValue(
     return expr;
   }
   CXXTemporaryCollection collection;
-  VectorInit(&collection.temps);
-  VectorInit(&collection.elided);
-  VectorInit(&collection.parameter_temps);
-  VectorInit(&collection.already_destroyed);
+  CXXTemporaryCollectionInit(&collection, expr);
   ASTNodeVisit(expr, CollectCXXDestroyedTemporarySymbols, 0, &collection);
   ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
   if (collection.temps.length == 0) {
-    VectorDestruct(&collection.temps);
-    VectorDestruct(&collection.elided);
-    VectorDestruct(&collection.parameter_temps);
-    VectorDestruct(&collection.already_destroyed);
+    CXXTemporaryCollectionDestruct(&collection);
     return expr;
   }
 
@@ -554,8 +609,8 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructorsPreservingValue(
   ASTNode* sequence = AnalyzeExpression(assignment);
   for (size_t i = collection.temps.length; i > 0; i--) {
     Symbol* sym = collection.temps.value.p[i - 1];
-    ASTNode* destructor =
-        NewCXXTemporaryDestructorCall(sym, expr->location);
+    ASTNode* destructor = NewCXXFullExpressionTemporaryDestructorCall(
+        &collection, sym, expr->location);
     if (destructor != NULL) {
       sequence = AnalyzeExpression(NewBinaryASTNode(
           AST_OP(comma), NULL, expr->location, sequence, destructor));
@@ -565,11 +620,91 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructorsPreservingValue(
       AnalyzeExpression(NewIdentifierASTNode(saved, expr->location));
   sequence = AnalyzeExpression(NewBinaryASTNode(
       AST_OP(comma), NULL, expr->location, sequence, result));
-  VectorDestruct(&collection.temps);
-  VectorDestruct(&collection.elided);
-  VectorDestruct(&collection.parameter_temps);
-  VectorDestruct(&collection.already_destroyed);
+  CXXTemporaryCollectionDestruct(&collection);
   return sequence;
+}
+
+// The temporary that is the value of `expr` itself (on every arm of a
+// conditional) rather than one used to compute it.
+static void CollectCXXResultTemporaries(ASTNode* expr, Vector* out) {
+  while (expr != NULL) {
+    Symbol* sym = NULL;
+    if (expr->op == AST_OP(cast)) {
+      expr = ((CastASTNode*)expr)->expr;
+      continue;
+    }
+    if (expr->op == AST_OP(comma)) {
+      expr = ((BinaryASTNode*)expr)->right;
+      continue;
+    }
+    if (expr->op == AST_OP(question)) {
+      ASTNode* colon = ((BinaryASTNode*)expr)->right;
+      if (colon == NULL || colon->op != AST_OP(colon)) {
+        return;
+      }
+      CollectCXXResultTemporaries(((BinaryASTNode*)colon)->left, out);
+      expr = ((BinaryASTNode*)colon)->right;
+      continue;
+    }
+    if (expr->op == AST_OP(identifier)) {
+      sym = ((IdentifierASTNode*)expr)->symbol;
+    } else if (expr->op == AST_OP(compound_literal)) {
+      ASTNode* literal_sym = ((CompoundLiteralASTNode*)expr)->sym;
+      if (literal_sym != NULL && literal_sym->op == AST_OP(identifier)) {
+        sym = ((IdentifierASTNode*)literal_sym)->symbol;
+      }
+    } else if (ASTIsInlinedConstructor(expr)) {
+      sym = ((InlineCallASTNode*)expr)->cxx_receiver;
+    }
+    if (sym != NULL && sym->flags.is_temp) {
+      VectorAppend(out, sym);
+    }
+    return;
+  }
+}
+
+// The destructor statements for the temporaries of a return statement's
+// full-expression, or NULL if it has none.  They run after the return value is
+// materialized and before the function's locals are destroyed.  The returned
+// object is built in the return slot or moved there, so it is not destroyed.
+static ASTNode* NewCXXReturnTemporaryCleanups(ASTNode* expr) {
+  if (!CompilerIsCXX() || expr == NULL ||
+      (compiler->current_function != NULL &&
+       (compiler->current_function->info.function.is_coroutine ||
+        compiler->current_function->info.function.coroutine_frame_type != NULL))) {
+    return NULL;
+  }
+  CXXTemporaryCollection collection;
+  CXXTemporaryCollectionInit(&collection, expr);
+  ASTNodeVisit(expr, CollectCXXDestroyedTemporarySymbols, 0, &collection);
+  ASTNodeVisit(expr, CollectCXXTemporarySymbols, 0, &collection);
+  Vector returned;
+  VectorInit(&returned);
+  CollectCXXResultTemporaries(expr, &returned);
+  Vector* statements = NewVector();
+  for (size_t i = collection.temps.length; i > 0; i--) {
+    Symbol* sym = collection.temps.value.p[i - 1];
+    if (VectorContainsPointer(&returned, sym)) {
+      continue;
+    }
+    ASTNode* destructor = NewCXXFullExpressionTemporaryDestructorCall(
+        &collection, sym, expr->location);
+    if (destructor != NULL) {
+      ASTNode* statement =
+          NewExpressionStatementASTNode(destructor, expr->location);
+      statement->flags |= kASTAnalyzed;
+      VectorAppend(statements, statement);
+    }
+  }
+  VectorDestruct(&returned);
+  CXXTemporaryCollectionDestruct(&collection);
+  if (statements->length == 0) {
+    VectorDelete(statements);
+    return NULL;
+  }
+  ASTNode* compound = NewCompoundStatementASTNode(statements, expr->location);
+  compound->flags |= kASTAnalyzed;
+  return compound;
 }
 
 // ---- C++ scope-exit destructor insertion ---------------------------------
@@ -685,10 +820,7 @@ void CXXCollectRangeForInitializerTemporaries(ASTNode* range_decl,
     return;
   }
   CXXTemporaryCollection collection;
-  VectorInit(&collection.temps);
-  VectorInit(&collection.elided);
-  VectorInit(&collection.parameter_temps);
-  VectorInit(&collection.already_destroyed);
+  CXXTemporaryCollectionInit(&collection, initializer);
   ASTNodeVisit(initializer, CollectCXXDestroyedTemporarySymbols, 0,
                &collection);
   ASTNodeVisit(initializer, CollectCXXTemporarySymbols, 0, &collection);
@@ -699,19 +831,13 @@ void CXXCollectRangeForInitializerTemporaries(ASTNode* range_decl,
       VectorAppend(out, symbol);
     }
   }
-  VectorDestruct(&collection.temps);
-  VectorDestruct(&collection.elided);
-  VectorDestruct(&collection.parameter_temps);
-  VectorDestruct(&collection.already_destroyed);
+  CXXTemporaryCollectionDestruct(&collection);
 }
 
 static ASTNode* AppendRangeForEndOfInitializerTemporaryDestructors(
     ASTNode* initializer) {
   CXXTemporaryCollection collection;
-  VectorInit(&collection.temps);
-  VectorInit(&collection.elided);
-  VectorInit(&collection.parameter_temps);
-  VectorInit(&collection.already_destroyed);
+  CXXTemporaryCollectionInit(&collection, initializer);
   ASTNodeVisit(initializer, CollectCXXDestroyedTemporarySymbols, 0,
                &collection);
   ASTNodeVisit(initializer, CollectCXXTemporarySymbols, 0, &collection);
@@ -721,8 +847,8 @@ static ASTNode* AppendRangeForEndOfInitializerTemporaryDestructors(
     if (CXXRangeForTemporaryIsExtended(&collection, symbol, direct)) {
       continue;
     }
-    ASTNode* destructor =
-        NewCXXTemporaryDestructorCall(symbol, initializer->location);
+    ASTNode* destructor = NewCXXFullExpressionTemporaryDestructorCall(
+        &collection, symbol, initializer->location);
     if (destructor != NULL) {
       initializer = NewBinaryASTNode(AST_OP(comma), destructor->type,
                                      initializer->location, initializer,
@@ -730,10 +856,7 @@ static ASTNode* AppendRangeForEndOfInitializerTemporaryDestructors(
       initializer->flags |= kASTAnalyzed;
     }
   }
-  VectorDestruct(&collection.temps);
-  VectorDestruct(&collection.elided);
-  VectorDestruct(&collection.parameter_temps);
-  VectorDestruct(&collection.already_destroyed);
+  CXXTemporaryCollectionDestruct(&collection);
   return initializer;
 }
 
@@ -854,6 +977,18 @@ static void ProcessReturnJump(TypeRecord* func,
   CollectScopeExitDestructors((ASTNode*)ret, func->info.function.body, skip,
                               destructors);
   if (destructors->length == 0) {
+    VectorDelete(destructors);
+    return;
+  }
+  // The return expression's temporaries are destroyed before the locals.
+  if (ret->stmt != NULL && ret->stmt->op == AST_OP(compound)) {
+    CompoundStatementASTNode* temporaries = (CompoundStatementASTNode*)ret->stmt;
+    for (size_t i = 0; i < destructors->length; i++) {
+      ASTNode* destructor = destructors->value.p[i];
+      destructor->parent = ret->stmt;
+      destructor->child_id = (int)temporaries->statements->length;
+      VectorAppend(temporaries->statements, destructor);
+    }
     VectorDelete(destructors);
     return;
   }
@@ -1178,7 +1313,6 @@ static ASTNode* ElideCXXMemberInitializerPrvalue(ASTNode* expr) {
 static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
   node->expr = ElideCXXMemberInitializerPrvalue(node->expr);
-  node->expr = AppendCXXFullExpressionTemporaryDestructors(node->expr);
 
   // warn_unused_result: a discarded call to a function so annotated.
   ASTNode* expr = node->expr;
@@ -1194,6 +1328,9 @@ static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
       }
     }
   }
+  node->expr = SemanticMaterializeClassPrvalue(node->expr);
+  node->expr = AppendCXXFullExpressionTemporaryDestructors(node->expr);
+  expr = node->expr;
   if (expr != NULL && expr->type != NULL && !TypeIsVoid(expr->type) &&
       !ExpressionHasSideEffects(expr)) {
     SemanticWarning(expr, "unused-value", "expression result unused");
@@ -1946,7 +2083,7 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
         }
       }
     } else {
-      node->c1 = AnalyzeExpression(node->c1);
+      node->c1 = SemanticMaterializeClassPrvalue(AnalyzeExpression(node->c1));
       node->c1 =
           AppendCXXFullExpressionTemporaryDestructors(node->c1);
     }
@@ -1964,7 +2101,7 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
   }
 
   // Optional expression 3.
-  node->c3 = AnalyzeExpression(node->c3);
+  node->c3 = SemanticMaterializeClassPrvalue(AnalyzeExpression(node->c3));
   node->c3 = AppendCXXFullExpressionTemporaryDestructors(node->c3);
 
   // Finally the statment.
@@ -2608,9 +2745,17 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     }
   }
   
+  if (return_value != NULL && node->stmt == NULL) {
+    node->stmt = NewCXXReturnTemporaryCleanups(return_value);
+    if (node->stmt != NULL) {
+      node->stmt->parent = (ASTNode*)node;
+      node->stmt->child_id = 1;
+    }
+  }
+
   // Check for tail recursion.  This is a direct call to the current
-  // function.
-  if (OptLevel2() && return_value != NULL &&
+  // function.  Temporaries destroyed after the call make it not a tail call.
+  if (OptLevel2() && return_value != NULL && node->stmt == NULL &&
       return_value->op == AST_OP(call)) {
     VectorASTNode* call = (VectorASTNode*)return_value;
     if (call->left->op == AST_OP(identifier)) {
