@@ -1504,9 +1504,9 @@ static ARMOpcode IR2RV(IROpcode op, bool is_unsigned) {
     case IR_OP(d2f):
       return ARM_OP(fcvtds);
     case IR_OP(f2i):
-      return ARM_OP(fcvtnu);
+      return is_unsigned ? ARM_OP(fcvtnu) : ARM_OP(fcvtns);
     case IR_OP(d2i):
-      return ARM_OP(fcvtnu);
+      return is_unsigned ? ARM_OP(fcvtnu) : ARM_OP(fcvtns);
 
     case IR_OP(movi):
       return ARM_OP(mov);
@@ -2414,6 +2414,12 @@ static TargetInstruction* LowerExpression(ARMGenerator* g, IRNode* node) {
   }
 
   ARMOpcode opcode = IR2RV(node->opcode, TypeIsUnsigned(node->type));
+  if (node->opcode == IR_OP(i2f) || node->opcode == IR_OP(i2d)) {
+    TypeRecord* from = ((IRNode*)node->inputs.value.p[0])->type;
+    if (from != NULL && TypeIsUnsigned(from)) {
+      opcode = ARM_OP(ucvtf);
+    }
+  }
   assert(node->inputs.length <= 2);
   TargetInstruction* inst = NULL;
   bool ref_counts_ok =

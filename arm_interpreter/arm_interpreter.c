@@ -1645,10 +1645,10 @@ static bool ExecuteVfp(ARMInterpreter* interpreter, uint32_t insn) {
   if ((insn & 0x0f000f10u) == 0x0e000b10u) {
     bool is_double = ((insn >> 7) & 1u) != 0;
     if ((insn & (1u << 20)) == 0) {
-      // scvtf sd, rt : signed int (or ucvtf if bit22 set) -> float.
+      // scvtf sd, rt : signed int (or ucvtf if bit21 set) -> float.
       int rt = (int)((insn >> 16) & 0xfu);
       uint32_t bits = (uint32_t)ReadReg(interpreter, rt);
-      bool is_unsigned = (insn & (1u << 22)) != 0;
+      bool is_unsigned = (insn & (1u << 21)) != 0;
       if (is_double) {
         int dd = VfpDd(insn);
         WriteDreg(interpreter, dd,
@@ -1659,11 +1659,18 @@ static bool ExecuteVfp(ARMInterpreter* interpreter, uint32_t insn) {
             is_unsigned ? (float)bits : (float)(int32_t)bits;
       }
     } else {
-      // fcvtnu/fcvtns rt, sm : float -> int (round toward zero).
+      // fcvtns rt, sm : float -> int (round toward zero); fcvtnu if bit21
+      // set, saturating like vcvt.u32.
       int rt = (int)((insn >> 12) & 0xfu);
       double v = is_double ? ReadDreg(interpreter, VfpDm(insn))
                            : (double)interpreter->sregs[VfpSm(insn)];
-      WriteReg(interpreter, rt, (uint32_t)(int32_t)v);
+      uint32_t result;
+      if ((insn & (1u << 21)) != 0) {
+        result = !(v > 0) ? 0u : v >= 4294967296.0 ? 0xffffffffu : (uint32_t)v;
+      } else {
+        result = (uint32_t)(int32_t)v;
+      }
+      WriteReg(interpreter, rt, result);
     }
     return true;
   }

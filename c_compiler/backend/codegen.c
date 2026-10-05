@@ -1464,13 +1464,13 @@ static void RemoveUnreachableBlocks(Generator* gen) {
     ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
     IRNode* metadata[] = {range->try_start, range->try_end,
                           range->catch_label};
+    // A kept block keeps its branches, so everything they reach is kept too;
+    // clearing a target would leave the branch without its label.
     for (size_t j = 0; j < sizeof(metadata) / sizeof(metadata[0]); j++) {
       if (metadata[j] != NULL && metadata[j]->block != NULL) {
         BitSetInsert(&exception_reachable, metadata[j]->block->block_id);
+        VectorAppend(&work, metadata[j]->block);
       }
-    }
-    if (range->catch_label != NULL && range->catch_label->block != NULL) {
-      VectorAppend(&work, range->catch_label->block);
     }
   }
   for (size_t i = 0; i < gen->exception_keep_labels.length; i++) {

@@ -294,7 +294,7 @@ static void InitializeInstructions(Map* instructions) {
   INST2(fdiv_s, fdiv.s);
   INST2(fsqrt_s, fsqrt.s);
   INST2(fsgnj_s, fsgnj.s);
-  INST2(fsgnjn_s, fsgnjs.s);
+  INST2(fsgnjn_s, fsgnjn.s);
   INST2(fsgnjx_s, fsgnjx.s);
   INST2(fmin_s, fmin.s);
   INST2(fmax_s, fmax.s);
@@ -306,7 +306,7 @@ static void InitializeInstructions(Map* instructions) {
   INST2(fle_s, fle.s);
   INST2(fclass_s, fclass.s);
   INST2(fcvt_s_w, fcvt.s.w);
-  INST2(fcvt_s_wu, fcvt.w.su);
+  INST2(fcvt_s_wu, fcvt.s.wu);
   INST2(fmv_w_x, fmv.w.x);
 
   // RV32D instructions.

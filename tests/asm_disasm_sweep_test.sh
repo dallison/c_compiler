@@ -185,7 +185,7 @@ rv_entry:
   fmul.s fa2, fa3, fa4
   fdiv.s fa3, fa4, fa5
   fsgnj.s fa4, fa5, fa6
-  fsgnjs.s fa5, fa6, fa7
+  fsgnjn.s fa5, fa6, fa7
   fsgnjx.s fa6, fa7, fs2
   fmin.s fa7, fs2, fs3
   fmax.s fs2, fs3, fs4
@@ -361,7 +361,7 @@ run_shared_case arm full "$armasm" "$armdasm" "$work/arm.s" \
   'orrs ' 'eor ' 'bic ' 'cmp ' 'cmn ' 'tst ' 'teq ' 'mul ' 'ldr ' \
   'str ' 'ldrb ' 'strb ' 'ldrh ' 'strh ' 'stm' 'ldm' 'movw ' 'movt ' \
   'vmov' 'vldr ' 'vstr ' 'vadd.f32 ' 'vsub.f32 ' 'vmul.f64 ' 'vdiv.f64 ' \
-  'scvtf ' 'ucvtf ' 'fcvtns ' 'bl ' 'b ' 'bx ' 'blx ' 'svc'
+  'scvtf ' 'ucvtf ' 'fcvtns ' 'fcvtnu ' 'bl ' 'b ' 'bx ' 'blx ' 'svc'
 
 cat >"$work/aarch64.s" <<'EOF'
 .text

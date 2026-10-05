@@ -708,6 +708,11 @@ static RV32RegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case RV32_OP(fcvt_d_l):
       return kRV32RegTypeFloat;
 
+    case RV32_OP(fcvt_w_s):
+    case RV32_OP(fcvt_wu_s):
+    case RV32_OP(fmv_x_w):
+    case RV32_OP(fclass_s):
+    case RV32_OP(fclass_d):
     case RV32_OP(fcvt_w_d):
     case RV32_OP(fcvt_wu_d):
     case RV32_OP(fcvt_l_s):
@@ -934,7 +939,12 @@ static void ReloadSpills(RV32RegisterAllocator* allocator,
       TrapReload(reload);
       TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, reload, inst);
       inst->operand[i] = reload;
-      RV32RegisterType reg_type = RegisterTypeFromInstruction(inst);
+      // The reload takes the spilled value's register class, which differs
+      // from the user's for an integer address feeding a floating-point load.
+      RV32RegisterType reg_type =
+          op->reg != NULL ? ((RV32Register*)op->reg)->type
+          : RegisterTypeFromInstruction(op->operand[0] != NULL ? op->operand[0]
+                                                               : inst);
       RV32Register *reg = AllocateRegisterWithType(allocator, reload->block, reload,
                                      reg_type, CanUseTemp(allocator, reload));
       AssignRegister(reg, reload);

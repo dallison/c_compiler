@@ -1634,6 +1634,9 @@ static void EmitSSE(X86Assembler* assembler, uint8_t prefix66, uint8_t prefix_f2
       AssemblerError(&ASM, "SSE convert expects xmm source, integer destination");
       return;
     }
+    if (dst.reg.size == kX86Size64) {
+      SetRexW(&enc);
+    }
     SetRexR(&enc, dst.reg.num);
     SetRexB(&enc, src.reg.num);
     EmitOpcodeBytes(&enc, prefix66, prefix_f2, prefix_f3, opcode, true);

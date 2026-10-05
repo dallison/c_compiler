@@ -762,6 +762,11 @@ static RVRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case RV_OP(vcmleu):
       return kRVRegTypeVector;
 
+    case RV_OP(fcvt_w_s):
+    case RV_OP(fcvt_wu_s):
+    case RV_OP(fmv_x_w):
+    case RV_OP(fclass_s):
+    case RV_OP(fclass_d):
     case RV_OP(fcvt_w_d):
     case RV_OP(fcvt_wu_d):
     case RV_OP(fcvt_l_s):

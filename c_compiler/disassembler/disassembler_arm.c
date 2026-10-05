@@ -229,9 +229,8 @@ bool DAsmDisassembleARM(const void* bytes, size_t length, uint64_t address,
     }
     return true;
   }
-  if ((inst & 0x0ff00f10u) == 0x0e000b10u ||
-      (inst & 0x0ff00f10u) == 0x0e400b10u) {
-    bool unsigned_convert = (inst & 0x00400000u) != 0;
+  if ((inst & 0x0f900f10u) == 0x0e000b10u) {
+    bool unsigned_convert = (inst & 0x00200000u) != 0;
     bool double_reg = (inst & 0x00000080u) != 0;
     int rt = (inst >> 16) & 0xf;
     int sd = double_reg ? DecodeVfpDd(inst) : DecodeVfpSd(inst);
@@ -239,12 +238,13 @@ bool DAsmDisassembleARM(const void* bytes, size_t length, uint64_t address,
                FRegName(sd, double_reg), RegName(rt));
     return true;
   }
-  if ((inst & 0x0ff00f10u) == 0x0e100b10u) {
+  if ((inst & 0x0f900f10u) == 0x0e100b10u) {
+    bool unsigned_convert = (inst & 0x00200000u) != 0;
     bool double_reg = (inst & 0x00000080u) != 0;
     int rt = (inst >> 12) & 0xf;
     int sm = double_reg ? DecodeVfpDm(inst) : DecodeVfpSm(inst);
-    DAsmFormat(out, "fcvtns%s %s, %s", cc, RegName(rt),
-               FRegName(sm, double_reg));
+    DAsmFormat(out, "%s%s %s, %s", unsigned_convert ? "fcvtnu" : "fcvtns", cc,
+               RegName(rt), FRegName(sm, double_reg));
     return true;
   }
   if ((inst & 0x0f000000u) == 0x0d000000u &&

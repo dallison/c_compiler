@@ -1544,7 +1544,8 @@ static void Assemble_scvtf(ARMAssembler* assembler) {
   }
 }
 
-// ucvtf sd, rt  -- convert unsigned int to float (bit20 marks unsigned).
+// ucvtf sd, rt  -- convert unsigned int to float (bit 21 marks unsigned; bit 22
+// is the D bit of sd).
 static void Assemble_ucvtf(ARMAssembler* assembler) {
   ARMReg sd, rt;
   if (!ParseRegister(assembler, &sd) || !ExpectComma(assembler) ||
@@ -1552,28 +1553,33 @@ static void Assemble_ucvtf(ARMAssembler* assembler) {
     return;
   }
   if (IsDoubleReg(&sd)) {
-    EmitInst(assembler, 0xee400b10 | (1u << 7) | EncVfpDd(sd.num) | (rt.num << 16));
+    EmitInst(assembler, 0xee200b10 | (1u << 7) | EncVfpDd(sd.num) | (rt.num << 16));
   } else {
-    EmitInst(assembler, 0xee400b10 | EncVfpSd(sd.num) | (rt.num << 16));
+    EmitInst(assembler, 0xee200b10 | EncVfpSd(sd.num) | (rt.num << 16));
   }
 }
 
-// fcvtnu/fcvtns rt, sm -- convert float in sm to int in GP register rt.
-static void Assemble_fcvtnu(ARMAssembler* assembler) {
+// fcvtnu/fcvtns rt, sm -- convert float in sm to int in GP register rt; bit 21
+// marks the unsigned conversion.
+static void EmitFcvtToInt(ARMAssembler* assembler, uint32_t unsigned_bit) {
   ARMReg rt, sm;
   if (!ParseRegister(assembler, &rt) || !ExpectComma(assembler) ||
       !ParseRegister(assembler, &sm)) {
     return;
   }
   if (IsDoubleReg(&sm)) {
-    EmitInst(assembler, 0xee100b10 | (1u << 7) | (rt.num << 12) | EncVfpDm(sm.num));
+    EmitInst(assembler, 0xee100b10 | (1u << 7) | unsigned_bit | (rt.num << 12) | EncVfpDm(sm.num));
   } else {
-    EmitInst(assembler, 0xee100b10 | (rt.num << 12) | EncVfpSm(sm.num));
+    EmitInst(assembler, 0xee100b10 | unsigned_bit | (rt.num << 12) | EncVfpSm(sm.num));
   }
 }
 
+static void Assemble_fcvtnu(ARMAssembler* assembler) {
+  EmitFcvtToInt(assembler, 1u << 21);
+}
+
 static void Assemble_fcvtns(ARMAssembler* assembler) {
-  Assemble_fcvtnu(assembler);
+  EmitFcvtToInt(assembler, 0);
 }
 
 #define INST(mnemonic) \
