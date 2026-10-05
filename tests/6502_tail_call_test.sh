@@ -161,7 +161,7 @@ for target in 6502 65c02; do
   "$DAVECC" -target "$target" -S -std=c++20 \
     "$CHAR_TRAITS_SOURCE" -o "$assembly"
   length_body=$(
-    function_body _ZN3std17char_traits_char_6lengthEPKh "$assembly"
+    function_body _ZN3std17char_traits_char_6lengthEPKc "$assembly"
   )
   if ! grep -Eq 'jmp[[:space:]]+strlen' <<<"$length_body" ||
      grep -Eq 'jsr|__enter|__leave|__push' <<<"$length_body"; then

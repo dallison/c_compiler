@@ -52,4 +52,4 @@ quick_exit
 tolower
 toupper
 _ZN3std6localeC1Ev
-_ZN3std15basic_streambufIhN3std17char_traits_char_EE5imbueERKN3std6localeE
+_ZN3std15basic_streambufIcN3std17char_traits_char_EE5imbueERKN3std6localeE

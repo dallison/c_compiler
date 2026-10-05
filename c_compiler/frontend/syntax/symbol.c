@@ -1142,7 +1142,11 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
   } else if (TypeIsChar32(type)) {
     StringAppend(out, "Di");
   } else if (TypeIsChar(type)) {
-    StringAppendChar(out, TypeIsUnsigned(type) ? 'h' : 'c');
+    // char, signed char and unsigned char are three distinct types whatever
+    // the signedness of plain char.
+    StringAppendChar(out, (type->type & kTypeUnsigned) != 0 ? 'h'
+                          : (type->type & kTypeSigned) != 0 ? 'a'
+                                                            : 'c');
   } else if (TypeIsShort(type)) {
     StringAppendChar(out, TypeIsUnsigned(type) ? 't' : 's');
   } else if (TypeIsInt128(type)) {
