@@ -191,13 +191,15 @@ EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type) {
   info->lsda_type_filter = gen->exception_typeinfos.length + 1;
   StringInit(&info->type_name, type_name.value);
   StringDestruct(&type_name);
-  if (type != NULL) {
-    TypeRecordCalculateSize(type);
+  // A handler's reference type shares this record with the thrown object's
+  // type, so describe the object rather than the reference.
+  if (rtti_type != NULL) {
+    TypeRecordCalculateSize(rtti_type);
   }
-  info->object_size = type != NULL ? type->size : 0;
-  info->object_is_class = type != NULL && TypeIsStructOrUnion(type);
+  info->object_size = rtti_type != NULL ? rtti_type->size : 0;
+  info->object_is_class = rtti_type != NULL && TypeIsStructOrUnion(rtti_type);
   VectorInit(&info->bases);
-  CollectExceptionBaseTypes(type, 0, &info->bases);
+  CollectExceptionBaseTypes(rtti_type, 0, &info->bases);
   StringInit(&info->symbol_name, "__davecc_typeinfo_");
   if (gen->func != NULL && gen->func->info.function.symbol != NULL) {
     // Use the mangled assembler name (not the source name) so that distinct

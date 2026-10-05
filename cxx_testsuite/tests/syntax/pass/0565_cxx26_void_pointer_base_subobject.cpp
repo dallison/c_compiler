@@ -1,5 +1,8 @@
 // RUN: -std=c++26
-// EXPECT: constexpr conversion from void pointer requires an object of similar type
+
+// A pointer to a base class subobject that round-trips through void* still
+// points to an object of the base type, so the conversion back is a constant
+// expression.
 
 struct base {
   int value;

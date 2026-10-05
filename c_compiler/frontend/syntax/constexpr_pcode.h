@@ -13,6 +13,11 @@
 #define CONSTEXPR_PCODE_UNION_MEMBER_ADDRESS_MARKER UINT64_C(0xffffffff)
 #define CONSTEXPR_PCODE_LIFETIME_END_MARKER UINT64_C(0xfffffffe)
 #define CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER UINT64_C(0xfffffffd)
+// C++26 object typing.  Each carries a ConstexprPCodeTypeToken.
+#define CONSTEXPR_PCODE_OBJECT_MARKER UINT64_C(0xfffffffc)
+#define CONSTEXPR_PCODE_ALLOCATED_OBJECT_MARKER UINT64_C(0xfffffffb)
+#define CONSTEXPR_PCODE_VOID_POINTER_CAST_MARKER UINT64_C(0xfffffffa)
+#define CONSTEXPR_PCODE_PLACEMENT_NEW_MARKER UINT64_C(0xfffffff9)
 
 typedef enum {
   kConstexprPCodeEligible,
@@ -21,6 +26,7 @@ typedef enum {
 } ConstexprPCodeCapability;
 
 bool ConstexprPCodeValidateCall(ASTNode* node, const char** reason);
+uint64_t ConstexprPCodeTypeToken(TypeRecord* type);
 ConstexprPCodeCapability ConstexprPCodeCapabilityForExpression(ASTNode* node);
 ConstexprPCodeCapability ConstexprPCodeCapabilityForFunction(Symbol* function);
 bool ConstexprPCodeFunctionContainsThrow(Symbol* function);

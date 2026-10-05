@@ -6105,7 +6105,7 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
           ConstexprIsReallocationFunction(ConstexprCallSymbol(cast->expr))));
     if (source_pointee != NULL && TypeIsVoid(source_pointee) &&
         target_pointee != NULL && !TypeIsVoid(target_pointee) &&
-        !establishes_allocated_type) {
+        !establishes_allocated_type && !lowers_placement_new) {
       TypeRecord* address_type = ConstexprAddressPointeeType(ctx, *result);
       if (!CompilerCXXAtLeast(kLanguageStandardCXX26) ||
           address_type == NULL ||

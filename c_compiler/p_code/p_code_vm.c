@@ -205,6 +205,8 @@ static void* AccessPointer(PCodeVM* vm, uint64_t address, size_t size,
     }
     for (size_t byte = 0; byte < size; byte++) {
       if (region->states[offset + byte] != kValueStateValid) {
+        vm->read_after_lifetime =
+            region->states[offset + byte] == PCODE_VM_STATE_ENDED_LIFETIME;
         vm->status = kPCodeVMStatusInvalidRead;
         return NULL;
       }
@@ -327,6 +329,7 @@ void PCodeVMInit(PCodeVM* vm) {
   vm->max_steps = -1;
   vm->status = kPCodeVMStatusRunning;
   vm->escape = DefaultEscape;
+  vm->stack_ended_low = UINT64_MAX;
 }
 
 bool PCodeVMInitWithStack(PCodeVM* vm, size_t stack_size) {
@@ -356,6 +359,7 @@ void PCodeVMDestruct(PCodeVM* vm) {
   vm->memory_region_count = 0;
   vm->memory_region_capacity = 0;
   vm->checked_memory = false;
+  vm->stack_ended_low = UINT64_MAX;
 }
 
 void PCodeVMSetStack(PCodeVM* vm, void* stack, size_t stack_size) {
@@ -464,6 +468,58 @@ bool PCodeVMCopyMemoryState(PCodeVM* vm, uint64_t destination,
   memmove(destination_region->states + destination_offset,
           source_region->states + source_offset, size);
   return true;
+}
+
+bool PCodeVMEndLifetime(PCodeVM* vm, uint64_t address, size_t size) {
+  if (size == 0) {
+    return true;
+  }
+  for (size_t i = vm->memory_region_count; i > 0; --i) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i - 1];
+    if (!RegionContains(region, address, size, false)) {
+      continue;
+    }
+    if (region->states == NULL) {
+      _Static_assert(kValueStateValid == 0, "calloc yields valid states");
+      region->states = calloc(region->size, 1);
+      if (region->states == NULL) {
+        return false;
+      }
+    }
+    memset(region->states + (size_t)(address - region->start),
+           PCODE_VM_STATE_ENDED_LIFETIME, size);
+    if (region->start == (uint64_t)(uintptr_t)vm->stack &&
+        address < vm->stack_ended_low) {
+      vm->stack_ended_low = address;
+    }
+    return true;
+  }
+  return true;
+}
+
+// Storage below the stack pointer belongs to no object any more, and the next
+// frame to reuse it must not find the previous frame's ended lifetimes there.
+void PCodeVMForgetEndedStackLifetimes(PCodeVM* vm) {
+  uint64_t stack_start = (uint64_t)(uintptr_t)vm->stack;
+  uint64_t sp = (uint64_t)vm->iregs[PCODE_SP_REG];
+  if (vm->stack_ended_low >= sp) {
+    return;
+  }
+  for (size_t i = 0; i < vm->memory_region_count; i++) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i];
+    if (region->start != stack_start || region->states == NULL) {
+      continue;
+    }
+    uint64_t end = sp < region->start + region->size
+                       ? sp
+                       : region->start + region->size;
+    if (vm->stack_ended_low < end) {
+      memset(region->states + (size_t)(vm->stack_ended_low - region->start),
+             kValueStateValid, (size_t)(end - vm->stack_ended_low));
+    }
+    break;
+  }
+  vm->stack_ended_low = sp;
 }
 
 bool PCodeVMUnregisterMemoryRegion(PCodeVM* vm, void* memory) {
@@ -802,6 +858,9 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
         }
         iregs[PCODE_PC_REG] = return_address;
         iregs[PCODE_SP_REG] += 8;
+        if (vm->stack_ended_low < (uint64_t)iregs[PCODE_SP_REG]) {
+          PCodeVMForgetEndedStackLifetimes(vm);
+        }
         break;
       }
       case PCODE_OP(cbra):
@@ -844,6 +903,9 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
         if (!WriteVMU64(vm, (uint64_t)iregs[PCODE_SP_REG],
                         (uint64_t)iregs[PCODE_PC_REG])) {
           return vm->status;
+        }
+        if (vm->stack_ended_low < (uint64_t)iregs[PCODE_SP_REG]) {
+          PCodeVMForgetEndedStackLifetimes(vm);
         }
         iregs[PCODE_PC_REG] = iregs[DEST(inst)];
         break;
@@ -1136,6 +1198,9 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
       if (!WriteVMU64(vm, (uint64_t)iregs[PCODE_SP_REG],
                       (uint64_t)(iregs[PCODE_PC_REG] + 8))) {
         return vm->status;
+      }
+      if (vm->stack_ended_low < (uint64_t)iregs[PCODE_SP_REG]) {
+        PCodeVMForgetEndedStackLifetimes(vm);
       }
       uint64_t offset;
       if (!ReadVMU64(vm, pc, &offset)) {

@@ -197,11 +197,27 @@ typedef struct {
   ConstexprPCodeLifetimeEventKind kind;
 } ConstexprPCodeLifetimeEvent;
 
+// What C++26 knows to live at an address: one object of `type`, or for an
+// allocation a run of `type` elements filling `size` bytes.
+typedef struct {
+  uint64_t address;
+  size_t size;
+  TypeRecord* type;
+  bool elements;
+  uint64_t serial;
+} ConstexprPCodeObjectFact;
+
 typedef struct {
   Vector heap_blocks;
   Vector exception_stack;
   Vector exception_handles;
   Vector lifetime_events;
+  Vector object_facts;  // ConstexprPCodeObjectFact*
+  uint64_t object_fact_serial;
+  uint64_t placement_address;
+  size_t placement_size;
+  // Why a typing check stopped the evaluation, for the failure report.
+  const char* diagnostic;
   unsigned char* heap;
   size_t heap_size;
   ConstexprPCodeFreeBlock* free_list;
@@ -3071,6 +3087,12 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
       ConstexprPCodeImageDestruct(&image);
       return false;
     }
+  } else if (runtime.diagnostic != NULL) {
+    *failure_kind = kConstexprPCodeFailureInvalid;
+    *reason = runtime.diagnostic;
+  } else if (status == kPCodeVMStatusInvalidRead && vm.read_after_lifetime) {
+    *failure_kind = kConstexprPCodeFailureInvalid;
+    *reason = "read of object outside its lifetime in constant expression";
   } else {
     *failure_kind = ConstexprPCodeVMFailureKind(
         status, runtime.heap_blocks.length != 0);
@@ -3172,7 +3194,13 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
   bool ok = status == kPCodeVMStatusHalted &&
             LoadConstexprObjectBytes(object_type, object_memory, &runtime,
                                      object_result);
-  if (status != kPCodeVMStatusHalted) {
+  if (status != kPCodeVMStatusHalted && runtime.diagnostic != NULL) {
+    *failure_kind = kConstexprPCodeFailureInvalid;
+    *reason = runtime.diagnostic;
+  } else if (status == kPCodeVMStatusInvalidRead && vm.read_after_lifetime) {
+    *failure_kind = kConstexprPCodeFailureInvalid;
+    *reason = "read of object outside its lifetime in constant expression";
+  } else if (status != kPCodeVMStatusHalted) {
     *failure_kind = ConstexprPCodeVMFailureKind(
         status, runtime.heap_blocks.length != 0);
     *reason = PCodeVMStatusName(status);
@@ -3487,6 +3515,33 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
     case AST_OP(subscript): {
       return;
     }
+    case AST_OP(cast): {
+      ASTNode* allocation = ((CastASTNode*)node)->expr;
+      if ((node->flags & kASTCXXNewExpression) == 0 ||
+          !CompilerCXXAtLeast(kLanguageStandardCXX26) ||
+          allocation == NULL || allocation->op != AST_OP(call) ||
+          ((VectorASTNode*)allocation)->children == NULL ||
+          ((VectorASTNode*)allocation)->children->length < 2) {
+        return;
+      }
+      // Of the placement forms only the reserved operator new(size_t, void*)
+      // may run in a constant expression.
+      Symbol* function = PCodeConstexprCallSymbol(allocation);
+      TypeRecord* type = function != NULL ? function->type : NULL;
+      Symbol* placement =
+          type != NULL && TypeIsFunction(type) &&
+                  type->info.function.prototype.length == 2
+              ? type->info.function.prototype.value.p[1]
+              : NULL;
+      if (placement == NULL || !TypeIsPointer(placement->type) ||
+          placement->type->next == NULL ||
+          !TypeIsVoid(placement->type->next)) {
+        ValidationReject(state,
+                         "selected placement allocation function is not "
+                         "permitted in a constant expression");
+      }
+      return;
+    }
     case AST_OP(dot):
     case AST_OP(arrow): {
       BinaryASTNode* access = (BinaryASTNode*)node;
@@ -3582,19 +3637,9 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
   if (mode != kVisitPreChildren || node == NULL || scan->ast_only) {
     return;
   }
-  bool cxx26 = CompilerCXXAtLeast(kLanguageStandardCXX26);
-  if (cxx26 && node->op == AST_OP(throw)) {
+  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      node->op == AST_OP(throw)) {
     scan->has_throw = true;
-  }
-  bool placement_new =
-      (node->flags & kASTCXXPlacementNew) != 0;
-  if (!placement_new && node->op == AST_OP(cast) &&
-      (node->flags & kASTCXXNewExpression) != 0) {
-    ASTNode* allocation = ((CastASTNode*)node)->expr;
-    placement_new =
-        allocation != NULL && allocation->op == AST_OP(call) &&
-        ((VectorASTNode*)allocation)->children != NULL &&
-        ((VectorASTNode*)allocation)->children->length > 1;
   }
   if ((node->flags & kASTRequiresASTConstexpr) != 0 ||
       (node->op == AST_OP(identifier) &&
@@ -3609,20 +3654,6 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
       (node->type != NULL && TypeContainsReflection(node->type))) {
     scan->required = true;
     scan->ast_only = true;
-  } else if (cxx26 && placement_new) {
-    scan->required = true;
-  } else if (node->op == AST_OP(cast)) {
-    CastASTNode* cast = (CastASTNode*)node;
-    TypeRecord* source =
-        cast->expr != NULL && TypeIsPointer(cast->expr->type)
-            ? cast->expr->type->next : NULL;
-    TypeRecord* target =
-        TypeIsPointer(cast->cast_type) ? cast->cast_type->next : NULL;
-    if (cxx26 && source != NULL && TypeIsVoid(source) &&
-        target != NULL && !TypeIsVoid(target) &&
-        (node->flags & kASTCXXNewExpression) == 0) {
-      scan->required = true;
-    }
   } else if (scan->function_depth <= 1 &&
              (node->op == AST_OP(dot) || node->op == AST_OP(arrow))) {
     BinaryASTNode* access = (BinaryASTNode*)node;
@@ -3644,18 +3675,10 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
     }
   } else if (node->op == AST_OP(call)) {
     Symbol* call_symbol = PCodeConstexprCallSymbol(node);
-    VectorASTNode* call = (VectorASTNode*)node;
     if (call_symbol != NULL &&
         SymbolHasAttribute(call_symbol, "meta_intrinsic")) {
       scan->required = true;
       scan->ast_only = true;
-      return;
-    }
-    if (cxx26 && call_symbol != NULL &&
-        (StringEqual(&call_symbol->name, "operator new") ||
-         StringEqual(&call_symbol->name, "operator new[]")) &&
-        call->children != NULL && call->children->length > 1) {
-      scan->required = true;
       return;
     }
     Symbol* callee = PCodeConstexprFunctionDefinition(
@@ -3741,6 +3764,7 @@ static void ConstexprPCodeRuntimeInit(ConstexprPCodeRuntime* runtime) {
   VectorInit(&runtime->exception_stack);
   VectorInit(&runtime->exception_handles);
   VectorInit(&runtime->lifetime_events);
+  VectorInit(&runtime->object_facts);
   runtime->source_size_t_size =
       compiler->target != NULL ? (size_t)compiler->target->pointer_size
                                : sizeof(size_t);
@@ -3773,6 +3797,8 @@ static void ConstexprPCodeRuntimeDestruct(ConstexprPCodeRuntime* runtime) {
   }
   VectorDestruct(&runtime->exception_handles);
   VectorDestructWithContents(&runtime->lifetime_events, NULL,
+                             /*free_element=*/true);
+  VectorDestructWithContents(&runtime->object_facts, NULL,
                              /*free_element=*/true);
   free(runtime->heap);
   free(runtime->exception_storage);
@@ -3989,6 +4015,281 @@ static bool ConstexprPCodeNextAddressArgument(ConstexprPCodeArguments* args,
                                  size, write, address);
 }
 
+// Generated code names a type to the runtime by its index in this table.
+static Vector constexpr_pcode_type_tokens;  // TypeRecord*
+
+uint64_t ConstexprPCodeTypeToken(TypeRecord* type) {
+  if (type == NULL) {
+    return 0;
+  }
+  for (size_t i = 0; i < constexpr_pcode_type_tokens.length; i++) {
+    if (constexpr_pcode_type_tokens.value.p[i] == type) {
+      return i + 1;
+    }
+  }
+  VectorAppend(&constexpr_pcode_type_tokens, type);
+  return constexpr_pcode_type_tokens.length;
+}
+
+static TypeRecord* ConstexprPCodeTypeForToken(uint64_t token) {
+  return token != 0 && token <= constexpr_pcode_type_tokens.length
+             ? constexpr_pcode_type_tokens.value.p[token - 1]
+             : NULL;
+}
+
+static ConstexprPCodeHeapBlock* ConstexprPCodeHeapBlockContaining(
+    ConstexprPCodeRuntime* runtime, uint64_t address) {
+  for (size_t i = 0; i < runtime->heap_blocks.length; i++) {
+    ConstexprPCodeHeapBlock* block = runtime->heap_blocks.value.p[i];
+    uint64_t start = (uint64_t)(uintptr_t)(block != NULL ? block->memory
+                                                         : NULL);
+    if (block != NULL && block->live && address >= start &&
+        address - start < block->size) {
+      return block;
+    }
+  }
+  return NULL;
+}
+
+static bool ConstexprPCodeRecordObject(ConstexprPCodeRuntime* runtime,
+                                       uint64_t address, size_t size,
+                                       TypeRecord* type, bool elements) {
+  ConstexprPCodeObjectFact* fact = NULL;
+  for (size_t i = 0; i < runtime->object_facts.length; i++) {
+    ConstexprPCodeObjectFact* existing = runtime->object_facts.value.p[i];
+    if (existing->address == address) {
+      fact = existing;
+      break;
+    }
+  }
+  if (fact == NULL) {
+    fact = malloc(sizeof(*fact));
+    if (fact == NULL) {
+      return false;
+    }
+    VectorAppend(&runtime->object_facts, fact);
+  }
+  *fact = (ConstexprPCodeObjectFact){
+      .address = address,
+      .size = size,
+      .type = type,
+      .elements = elements,
+      .serial = ++runtime->object_fact_serial,
+  };
+  return true;
+}
+
+static void ConstexprPCodeForgetObjects(ConstexprPCodeRuntime* runtime,
+                                        uint64_t start, size_t size) {
+  size_t kept = 0;
+  for (size_t i = 0; i < runtime->object_facts.length; i++) {
+    ConstexprPCodeObjectFact* fact = runtime->object_facts.value.p[i];
+    if (fact->address >= start && fact->address - start < size) {
+      free(fact);
+    } else {
+      runtime->object_facts.value.p[kept++] = fact;
+    }
+  }
+  runtime->object_facts.length = kept;
+}
+
+typedef enum {
+  kConstexprPCodeObjectUntyped,
+  kConstexprPCodeObjectUnknown,
+  kConstexprPCodeObjectFound,
+  kConstexprPCodeObjectMissing,
+} ConstexprPCodeObjectOutcome;
+
+// Whether an object similar to `wanted` lies `offset` bytes into an object of
+// `type`, and if so how many bytes of storage run on from it.
+static ConstexprPCodeObjectOutcome ConstexprPCodeFindSubobject(
+    TypeRecord* type, uint64_t offset, TypeRecord* wanted, size_t* available) {
+  if (type == NULL || type->size <= 0 || offset >= (uint64_t)type->size) {
+    return kConstexprPCodeObjectUnknown;
+  }
+  if (offset == 0 &&
+      TypeEqualIgnoringTopLevelQualifierMask(
+          wanted, type, kQualConst | kQualVolatile | kQualRestrict)) {
+    *available = (size_t)type->size;
+    return kConstexprPCodeObjectFound;
+  }
+  if (TypeIsFixedArray(type)) {
+    TypeRecord* element = type->next;
+    if (element == NULL || element->size <= 0) {
+      return kConstexprPCodeObjectUnknown;
+    }
+    uint64_t element_size = (uint64_t)element->size;
+    uint64_t index = offset / element_size;
+    ConstexprPCodeObjectOutcome outcome = ConstexprPCodeFindSubobject(
+        element, offset - index * element_size, wanted, available);
+    if (outcome == kConstexprPCodeObjectFound &&
+        offset == index * element_size &&
+        TypeEqualIgnoringTopLevelQualifierMask(
+            wanted, element, kQualConst | kQualVolatile | kQualRestrict)) {
+      *available = (size_t)((uint64_t)type->size - offset);
+    }
+    return outcome;
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return kConstexprPCodeObjectMissing;
+  }
+  Struct* str = type->info.struct_info;
+  if (str->virtual_bases.length != 0) {
+    return kConstexprPCodeObjectUnknown;
+  }
+  ConstexprPCodeObjectOutcome result = kConstexprPCodeObjectMissing;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual || base->type == NULL ||
+        offset < (uint64_t)base->byte_offset) {
+      continue;
+    }
+    ConstexprPCodeObjectOutcome outcome = ConstexprPCodeFindSubobject(
+        base->type, offset - (uint64_t)base->byte_offset, wanted, available);
+    if (outcome == kConstexprPCodeObjectFound) {
+      return outcome;
+    }
+    if (outcome == kConstexprPCodeObjectUnknown &&
+        offset - (uint64_t)base->byte_offset < (uint64_t)base->type->size) {
+      result = kConstexprPCodeObjectUnknown;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function ||
+        StorageIs(member->symbol->storage, STO(typedef)) ||
+        member->symbol->type == NULL ||
+        offset < (uint64_t)member->byte_offset ||
+        offset - (uint64_t)member->byte_offset >=
+            (uint64_t)(member->symbol->type->size > 0
+                           ? member->symbol->type->size : 0)) {
+      continue;
+    }
+    if (member->is_bit_field) {
+      result = kConstexprPCodeObjectUnknown;
+      continue;
+    }
+    ConstexprPCodeObjectOutcome outcome = ConstexprPCodeFindSubobject(
+        member->symbol->type, offset - (uint64_t)member->byte_offset, wanted,
+        available);
+    if (outcome == kConstexprPCodeObjectFound) {
+      return outcome;
+    }
+    if (outcome == kConstexprPCodeObjectUnknown) {
+      result = kConstexprPCodeObjectUnknown;
+    }
+  }
+  return result;
+}
+
+// Looks for an object similar to `wanted` at `address` in the newest fact that
+// covers it.  Storage nothing is known about could hold anything.
+static ConstexprPCodeObjectOutcome ConstexprPCodeObjectAt(
+    ConstexprPCodeRuntime* runtime, uint64_t address, TypeRecord* wanted,
+    size_t* available) {
+  ConstexprPCodeObjectFact* newest = NULL;
+  for (size_t i = 0; i < runtime->object_facts.length; i++) {
+    ConstexprPCodeObjectFact* fact = runtime->object_facts.value.p[i];
+    if (address >= fact->address && address - fact->address < fact->size &&
+        (newest == NULL || fact->serial > newest->serial)) {
+      newest = fact;
+    }
+  }
+  if (newest == NULL) {
+    return kConstexprPCodeObjectUntyped;
+  }
+  uint64_t offset = address - newest->address;
+  if (!newest->elements) {
+    return ConstexprPCodeFindSubobject(newest->type, offset, wanted,
+                                       available);
+  }
+  if (newest->type->size <= 0) {
+    return kConstexprPCodeObjectUnknown;
+  }
+  uint64_t element_size = (uint64_t)newest->type->size;
+  uint64_t index = offset / element_size;
+  ConstexprPCodeObjectOutcome outcome = ConstexprPCodeFindSubobject(
+      newest->type, offset - index * element_size, wanted, available);
+  if (outcome == kConstexprPCodeObjectFound &&
+      offset == index * element_size &&
+      TypeEqualIgnoringTopLevelQualifierMask(
+          wanted, newest->type, kQualConst | kQualVolatile | kQualRestrict)) {
+    *available = newest->size - (size_t)offset;
+  }
+  return outcome;
+}
+
+static PCodeVMStatus ConstexprPCodeTypingFailure(
+    ConstexprPCodeRuntime* runtime, const char* diagnostic) {
+  runtime->diagnostic = diagnostic;
+  return kPCodeVMStatusInvalidConstantOperation;
+}
+
+// An allocation gets its type from the first typed pointer made to it.
+static bool ConstexprPCodeTypeAllocation(ConstexprPCodeRuntime* runtime,
+                                         uint64_t address, TypeRecord* type) {
+  ConstexprPCodeHeapBlock* block =
+      ConstexprPCodeHeapBlockContaining(runtime, address);
+  if (block == NULL) {
+    return true;
+  }
+  uint64_t end = (uint64_t)(uintptr_t)block->memory + block->size;
+  return ConstexprPCodeRecordObject(runtime, address,
+                                    (size_t)(end - address), type, true);
+}
+
+static PCodeVMStatus ConstexprPCodeObjectTyping(
+    ConstexprPCodeRuntime* runtime, uint64_t address, uint64_t marker,
+    TypeRecord* type) {
+  if (address == 0 || type == NULL || type->size <= 0) {
+    return kPCodeVMStatusRunning;
+  }
+  size_t available = 0;
+  ConstexprPCodeObjectOutcome outcome = kConstexprPCodeObjectUntyped;
+  switch (marker) {
+    case CONSTEXPR_PCODE_OBJECT_MARKER:
+      if (!ConstexprPCodeRecordObject(runtime, address, (size_t)type->size,
+                                      type, false)) {
+        return kPCodeVMStatusAllocationFailure;
+      }
+      return kPCodeVMStatusRunning;
+    case CONSTEXPR_PCODE_ALLOCATED_OBJECT_MARKER:
+      return ConstexprPCodeTypeAllocation(runtime, address, type)
+                 ? kPCodeVMStatusRunning
+                 : kPCodeVMStatusAllocationFailure;
+    case CONSTEXPR_PCODE_VOID_POINTER_CAST_MARKER:
+      outcome = ConstexprPCodeObjectAt(runtime, address, type, &available);
+      if (outcome == kConstexprPCodeObjectMissing) {
+        return ConstexprPCodeTypingFailure(
+            runtime, "constexpr conversion from void pointer requires an "
+                     "object of similar type");
+      }
+      break;
+    case CONSTEXPR_PCODE_PLACEMENT_NEW_MARKER:
+      outcome = ConstexprPCodeObjectAt(runtime, address, type, &available);
+      if (outcome == kConstexprPCodeObjectMissing) {
+        return ConstexprPCodeTypingFailure(
+            runtime, "placement new target does not point to an object of "
+                     "the allocated type");
+      }
+      if (outcome == kConstexprPCodeObjectFound &&
+          runtime->placement_address == address &&
+          runtime->placement_size > available) {
+        return ConstexprPCodeTypingFailure(
+            runtime, "placement new exceeds the bounds of its target storage");
+      }
+      break;
+    default:
+      return kPCodeVMStatusRunning;
+  }
+  if (outcome == kConstexprPCodeObjectUntyped &&
+      !ConstexprPCodeTypeAllocation(runtime, address, type)) {
+    return kPCodeVMStatusAllocationFailure;
+  }
+  return kPCodeVMStatusRunning;
+}
+
 static PCodeVMStatus ConstexprPCodeAllocateHeapBlock(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime, size_t size) {
   size_t object_size = size == 0 ? 1 : size;
@@ -4043,6 +4344,7 @@ static PCodeVMStatus ConstexprPCodeEscapeFree(
   if (block == NULL || !block->live) {
     return kPCodeVMStatusInvalidFree;
   }
+  ConstexprPCodeForgetObjects(runtime, address, block->size);
   PCodeVMUnregisterMemoryRegion(vm, memory);
   ConstexprPCodeHeapFree(runtime, memory, block->allocation_size);
   block->live = false;
@@ -4094,6 +4396,7 @@ static PCodeVMStatus ConstexprPCodeEscapeRealloc(
     ConstexprPCodeHeapFree(runtime, new_memory, allocation_size);
     return kPCodeVMStatusInvalidWrite;
   }
+  ConstexprPCodeForgetObjects(runtime, address, block->size);
   PCodeVMUnregisterMemoryRegion(vm, memory);
   ConstexprPCodeHeapFree(runtime, memory, block->allocation_size);
   block->memory = new_memory;
@@ -4134,6 +4437,8 @@ static PCodeVMStatus ConstexprPCodeEscapePlacementNew(
       .kind = kConstexprPCodeLifetimePlacementConstruction,
   };
   VectorAppend(&runtime->lifetime_events, event);
+  runtime->placement_address = address;
+  runtime->placement_size = size;
   vm->iregs[PCODE_INT_RETURN_REG] = (int64_t)address;
   return kPCodeVMStatusRunning;
 }
@@ -4143,12 +4448,22 @@ static PCodeVMStatus ConstexprPCodeEscapeStartLifetime(
   // The marker call is built during code generation, so its arguments are full
   // width; only the address it carries came from the program and can be narrow.
   ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
-  uint64_t address = 0;
-  if (!ConstexprPCodeNextAddressArgument(&args, 0, false, &address)) {
-    return kPCodeVMStatusInvalidRead;
-  }
+  uint64_t raw_address = ConstexprPCodeNextPointerArgument(&args);
   size_t size = (size_t)ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
   uint64_t type_token = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint64_t address = 0;
+  if (size >= CONSTEXPR_PCODE_PLACEMENT_NEW_MARKER &&
+      size <= CONSTEXPR_PCODE_OBJECT_MARKER) {
+    // Typing what cannot be mapped back to memory would only lose a check.
+    if (!ConstexprPCodeAddressOf(&args, raw_address, 0, false, &address)) {
+      return kPCodeVMStatusRunning;
+    }
+    return ConstexprPCodeObjectTyping(runtime, address, size,
+                                      ConstexprPCodeTypeForToken(type_token));
+  }
+  if (!ConstexprPCodeAddressOf(&args, raw_address, 0, false, &address)) {
+    return kPCodeVMStatusInvalidRead;
+  }
   ConstexprPCodeLifetimeEvent* event = malloc(sizeof(*event));
   if (event == NULL) {
     return kPCodeVMStatusAllocationFailure;
@@ -4168,6 +4483,11 @@ static PCodeVMStatus ConstexprPCodeEscapeStartLifetime(
         .kind = kConstexprPCodeLifetimeEnd,
     };
     VectorAppend(&runtime->lifetime_events, event);
+    TypeRecord* destroyed = ConstexprPCodeTypeForToken(type_token);
+    if (destroyed != NULL && destroyed->size > 0 &&
+        !PCodeVMEndLifetime(vm, address, (size_t)destroyed->size)) {
+      return kPCodeVMStatusAllocationFailure;
+    }
     return kPCodeVMStatusRunning;
   }
   if (size == CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER) {
@@ -5085,6 +5405,7 @@ static PCodeVMStatus ConstexprPCodeBeginEndCatch(
       (uint64_t)(uintptr_t)constexpr_pcode_end_catch_complete_stub;
   memcpy((void*)(uintptr_t)normalized_sp, &completion, sizeof(completion));
   vm->iregs[PCODE_SP_REG] = (int64_t)normalized_sp;
+  PCodeVMForgetEndedStackLifetimes(vm);
   vm->iregs[PCODE_PC_REG] = (int64_t)runtime->exception_destructor;
   runtime->handling_exception = false;
   runtime->ending_exception = true;

@@ -7673,6 +7673,7 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                        location));
     }
     size_t listed = 0;
+    bool array_initializers_given = array_initializers != NULL;
     if (array_initializers != NULL) {
       CXXNewArrayInit init = {
           .syntax = syntax,
@@ -7688,11 +7689,20 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
       VectorDelete(array_initializers);
     }
     int64_t first_unlisted = (int64_t)listed * base_per_element;
+    // When the list covers a constant bound no element is left to default
+    // construct, so the class need not have a default constructor.
+    int64_t bound = 0;
+    bool all_listed = array_initializers_given && array_size != NULL &&
+                      array_size->op == AST_OP(number) &&
+                      EvaluateIntegerExpression(array_size, &bound) &&
+                      bound * base_per_element == first_unlisted;
     if (constructed_class) {
-      VectorAppend(init_statements,
-                   NewArrayConstructionLoop(syntax, base_type, base_ptr,
-                                            base_count, first_unlisted,
-                                            constructed, location));
+      if (!all_listed) {
+        VectorAppend(init_statements,
+                     NewArrayConstructionLoop(syntax, base_type, base_ptr,
+                                              base_count, first_unlisted,
+                                              constructed, location));
+      }
     } else if (value_init || dependent_default_init) {
       // The elements without an initializer are value-initialized.
       VectorAppend(init_statements,

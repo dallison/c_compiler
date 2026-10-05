@@ -678,6 +678,9 @@ static bool ExpressionConstructsAggregateInPlace(ASTNode* expr);
 static void GenerateConstexprLifetimeMarker(
     Generator* gen, IRNode* address, uint64_t marker_value,
     uint64_t semantic_token, SourceLocation location);
+static void GenerateConstexprObjectMarker(Generator* gen, Symbol* symbol,
+                                          IRNode* address,
+                                          SourceLocation location);
 
 static IRNode* GenerateMemberPointerComparison(Generator* gen,
                                                BinaryASTNode* node);
@@ -2280,6 +2283,11 @@ static IRNode* GenerateVariableReference(Generator* gen,
     // breaks SSA renaming.  Consumers that copy the whole aggregate (a
     // struct-by-value call argument, a struct return, etc.) attach the var-use
     // to the load-like node (`structarg`, ...) they build around it.
+    if (TypeIsArray(node->symbol->type) ||
+        TypeIsStructOrUnion(node->symbol->type)) {
+      GenerateConstexprObjectMarker(gen, node->symbol, var_ref,
+                                    node->base.location);
+    }
     result = var_ref;
   } else {
     if (TypeIsAtomic(node->base.type) && node->symbol != NULL) {
@@ -4167,8 +4175,13 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
                         : node->base.type;
   call = IRSetType(GeneratorEmit(gen, call), call_result_type);
   if (destructor_object_address != NULL) {
+    TypeRecord* destroyed_type =
+        TypeIsPointer(destructor_object_address->type)
+            ? destructor_object_address->type->next
+            : NULL;
     GenerateConstexprLifetimeMarker(
-        gen, destructor_object_address, CONSTEXPR_PCODE_LIFETIME_END_MARKER, 0,
+        gen, destructor_object_address, CONSTEXPR_PCODE_LIFETIME_END_MARKER,
+        destroyed_type != NULL ? ConstexprPCodeTypeToken(destroyed_type) : 0,
         node->base.location);
   }
   if (returns_struct) {
@@ -4311,6 +4324,84 @@ static void GenerateConstexprLifetimeMarker(
   }
   VectorDestruct(&args);
   GeneratorEmit(gen, call);
+}
+
+// C++26 converts from void* and places objects only where an object of the
+// right type already is, so a constant evaluation is told what each local
+// object and allocation holds.
+static bool GeneratorTypesConstexprObjects(Generator* gen) {
+  return gen->for_constant_evaluation &&
+         CompilerCXXAtLeast(kLanguageStandardCXX26);
+}
+
+static void GenerateConstexprObjectMarker(Generator* gen, Symbol* symbol,
+                                          IRNode* address,
+                                          SourceLocation location) {
+  if (!GeneratorTypesConstexprObjects(gen) || symbol == NULL ||
+      !symbol->flags.is_local ||
+      StorageIs(symbol->storage, STO(static) | STO(thread)) ||
+      symbol->type == NULL || symbol->type->size <= 0 ||
+      TypeIsReference(symbol->type) || TypeIsFunction(symbol->type) ||
+      TypeIsVLA(symbol->type) || SymbolNeedsDynamicStackAllocation(symbol)) {
+    return;
+  }
+  if (IRIsVariable(address)) {
+    address = IRSetType(
+        GeneratorEmit(gen, NewIR1(IR_OP(addressof), address)),
+        NewPointerTo(kQualPlain, symbol->type));
+  }
+  GenerateConstexprLifetimeMarker(gen, address, CONSTEXPR_PCODE_OBJECT_MARKER,
+                                  ConstexprPCodeTypeToken(symbol->type),
+                                  location);
+}
+
+static void GenerateConstexprPointerCastMarker(Generator* gen,
+                                               CastASTNode* cast,
+                                               IRNode* result) {
+  if (!GeneratorTypesConstexprObjects(gen) || cast->expr == NULL) {
+    return;
+  }
+  TypeRecord* source =
+      TypeIsPointer(cast->expr->type) ? cast->expr->type->next : NULL;
+  TypeRecord* target =
+      TypeIsPointer(cast->cast_type) ? cast->cast_type->next : NULL;
+  if (source == NULL || !TypeIsVoid(source) || target == NULL ||
+      TypeIsVoid(target) || TypeIsFunction(target)) {
+    return;
+  }
+  // A cast of what operator new returns lowers a new-expression, whether or
+  // not it still carries the new-expression flag.
+  ASTNode* allocation = cast->expr;
+  Symbol* allocation_function =
+      allocation->op == AST_OP(call) &&
+              ((VectorASTNode*)allocation)->left != NULL &&
+              ((VectorASTNode*)allocation)->left->op == AST_OP(identifier)
+          ? ((IdentifierASTNode*)((VectorASTNode*)allocation)->left)->symbol
+          : NULL;
+  bool new_expression =
+      (cast->base.flags & kASTCXXNewExpression) != 0 ||
+      (allocation_function != NULL &&
+       (StringEqual(&allocation_function->name, "operator new") ||
+        StringEqual(&allocation_function->name, "operator new[]")));
+  bool placement = new_expression && allocation->op == AST_OP(call) &&
+                   ((VectorASTNode*)allocation)->children != NULL &&
+                   ((VectorASTNode*)allocation)->children->length > 1;
+  uint64_t marker = CONSTEXPR_PCODE_VOID_POINTER_CAST_MARKER;
+  if (placement) {
+    marker = CONSTEXPR_PCODE_PLACEMENT_NEW_MARKER;
+  } else if (new_expression) {
+    if ((cast->base.flags & kASTCXXArrayNew) != 0 ||
+        (allocation_function != NULL &&
+         StringEqual(&allocation_function->name, "operator new[]"))) {
+      // The elements start after the count stored ahead of them; the first
+      // typed pointer to one of them types the allocation from there.
+      return;
+    }
+    marker = CONSTEXPR_PCODE_ALLOCATED_OBJECT_MARKER;
+  }
+  GenerateConstexprLifetimeMarker(gen, result, marker,
+                                  ConstexprPCodeTypeToken(target),
+                                  cast->base.location);
 }
 
 static Symbol* GetDaveCCDynamicCastFunction(bool is_reference,
@@ -4899,6 +4990,10 @@ static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
   IRNode* result = GeneratorEmit(gen, NewIR1(IR_OP(addressof), expr));
   CheckForVarDef(result, &node->base);
   IRSetType(result, node->base.type);
+  if (node->sub->op == AST_OP(identifier)) {
+    GenerateConstexprObjectMarker(gen, ((IdentifierASTNode*)node->sub)->symbol,
+                                  result, node->base.location);
+  }
   return result;
 }
 
@@ -6791,6 +6886,7 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       }
       result = GeneratorEmit(gen, NewIR1(IR_OP(cast), result));
       IRSetType(result, node->type);
+      GenerateConstexprPointerCastMarker(gen, cast_node, result);
       break;
 
     case AST_OP(compound_literal):

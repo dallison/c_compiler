@@ -60,7 +60,15 @@ struct PCodeVM {
   PCodeVMMemoryRegion* memory_regions;
   size_t memory_region_count;
   size_t memory_region_capacity;
+  // Lowest stack address holding an ended-lifetime byte, or UINT64_MAX.
+  uint64_t stack_ended_low;
+  // The last failed read touched an object whose lifetime had ended.
+  bool read_after_lifetime;
 };
+
+// A memory-region byte state beyond ValueState: the byte belongs to an object
+// whose lifetime has ended.  Reading it fails; writing it starts a new object.
+#define PCODE_VM_STATE_ENDED_LIFETIME 3
 
 void PCodeVMInit(PCodeVM* vm);
 bool PCodeVMInitWithStack(PCodeVM* vm, size_t stack_size);
@@ -78,6 +86,9 @@ bool PCodeVMRegisterStatefulMemoryRegion(PCodeVM* vm, void* memory, size_t size,
                                          ValueState initial_state);
 bool PCodeVMCopyMemoryState(PCodeVM* vm, uint64_t destination,
                             uint64_t source, size_t size);
+bool PCodeVMEndLifetime(PCodeVM* vm, uint64_t address, size_t size);
+// Called whenever the stack pointer has moved up past ended lifetimes.
+void PCodeVMForgetEndedStackLifetimes(PCodeVM* vm);
 bool PCodeVMUnregisterMemoryRegion(PCodeVM* vm, void* memory);
 PCodeVMStatus PCodeVMStep(PCodeVM* vm);
 PCodeVMStatus PCodeVMRun(PCodeVM* vm);
