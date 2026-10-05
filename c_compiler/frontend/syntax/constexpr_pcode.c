@@ -1187,6 +1187,20 @@ static uint64_t DirectSymbolRuntimeAddress(PCodeObject* object,
                                            ConstexprPCodeImage* image,
                                            const char* name, bool* ok);
 
+// Where an unresolved data symbol points: no memory is mapped there, so only
+// following the pointer fails.
+#define kConstexprPCodeUnresolvedAddress UINT64_C(1)
+
+// An image whose code or data names a symbol this compilation cannot supply
+// still runs when a constant result is required; evaluation fails only if the
+// symbol is actually used.
+static bool ConstexprPCodeMayStubUnresolvedSymbols(void) {
+  return (compiler->constexpr_eval_mode == kConstexprEvalPCode ||
+          compiler->constexpr_eval_mode == kConstexprEvalAudit) &&
+         (compiler->current_function == NULL ||
+          compiler->constant_evaluation_required_depth > 0);
+}
+
 static bool StoreDirectConstexprPCodeInitializer(
     PCodeObject* object, ConstexprPCodeImage* image,
     ConstexprPCodeStaticData* entry, Initializer* init) {
@@ -1221,7 +1235,12 @@ static bool StoreDirectConstexprPCodeInitializer(
       uint64_t address = DirectSymbolRuntimeAddress(
           object, image, target_name, &address_ok);
       if (!address_ok) {
-        return false;
+        // Such as a vtable's type_info pointer, whose own vtable lives in the
+        // C++ runtime: the data stays usable unless the pointer is followed.
+        if (!ConstexprPCodeMayStubUnresolvedSymbols()) {
+          return false;
+        }
+        address = kConstexprPCodeUnresolvedAddress;
       }
       address += (uint64_t)init->symbol_addend;
       size_t pointer_size = (size_t)SizeofPointer();
@@ -1367,18 +1386,14 @@ static bool ApplyDirectPCodeFixup(PCodeObject* object,
   bool ok = true;
   uint64_t symbol = DirectSymbolRuntimeAddress(
       object, image, fixup->symbol_name.value, &ok);
-  if (!ok &&
-      (compiler->constexpr_eval_mode == kConstexprEvalPCode ||
-       compiler->constexpr_eval_mode == kConstexprEvalAudit) &&
-      (compiler->current_function == NULL ||
-       compiler->constant_evaluation_required_depth > 0)) {
+  if (!ok && ConstexprPCodeMayStubUnresolvedSymbols()) {
     if (fixup->kind == kPCodeFixupCall) {
       symbol = (uint64_t)(uintptr_t)constexpr_pcode_invalid_operation_stub;
     } else if (fixup->kind == kPCodeFixupAbsolute ||
                fixup->kind == kPCodeFixupAddress ||
                fixup->kind == kPCodeFixupData64 ||
                fixup->kind == kPCodeFixupData32) {
-      symbol = 1;
+      symbol = kConstexprPCodeUnresolvedAddress;
     } else {
       *reason = "unresolved direct constexpr pcode symbol";
       return false;
@@ -4813,19 +4828,17 @@ static uint64_t ConstexprPCodeCurrentExceptionPointer(
   return pointer + (uint64_t)runtime->exception_base_offset;
 }
 
+// An exception_ptr holds its handle's position in `exception_handles` plus
+// one rather than a host address, so that it fits a 32-bit target's pointer.
 static ConstexprPCodeExceptionHandle* ConstexprPCodeFindExceptionHandle(
-    ConstexprPCodeRuntime* runtime, uint64_t address, size_t* index) {
-  ConstexprPCodeExceptionHandle* requested =
-      (ConstexprPCodeExceptionHandle*)(uintptr_t)address;
-  for (size_t i = 0; i < runtime->exception_handles.length; i++) {
-    if (runtime->exception_handles.value.p[i] == requested) {
-      if (index != NULL) {
-        *index = i;
-      }
-      return requested;
-    }
+    ConstexprPCodeRuntime* runtime, uint64_t token, size_t* index) {
+  if (token == 0 || token > runtime->exception_handles.length) {
+    return NULL;
   }
-  return NULL;
+  if (index != NULL) {
+    *index = (size_t)(token - 1);
+  }
+  return runtime->exception_handles.value.p[token - 1];
 }
 
 static PCodeVMStatus ConstexprPCodeExceptionPtrCurrent(
@@ -4873,14 +4886,15 @@ static PCodeVMStatus ConstexprPCodeExceptionPtrCurrent(
   }
   handle->references = 1;
   VectorAppend(&runtime->exception_handles, handle);
-  vm->iregs[PCODE_INT_RETURN_REG] = (int64_t)(intptr_t)handle;
+  vm->iregs[PCODE_INT_RETURN_REG] =
+      (int64_t)runtime->exception_handles.length;
   return kPCodeVMStatusRunning;
 }
 
 static PCodeVMStatus ConstexprPCodeExceptionPtrRetainRelease(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime, bool retain) {
   ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
-  uint64_t address = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint64_t address = ConstexprPCodeNextWordArgument(&args);
   if (address == 0) {
     return kPCodeVMStatusRunning;
   }
@@ -4909,7 +4923,7 @@ static PCodeVMStatus ConstexprPCodeExceptionPtrRetainRelease(
 static PCodeVMStatus ConstexprPCodeExceptionPtrRethrow(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
   ConstexprPCodeArguments args = ConstexprPCodeArgumentsFor(vm, runtime);
-  uint64_t address = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
+  uint64_t address = ConstexprPCodeNextWordArgument(&args);
   ConstexprPCodeExceptionHandle* handle =
       ConstexprPCodeFindExceptionHandle(runtime, address, NULL);
   if (handle == NULL || handle->references == 0 ||

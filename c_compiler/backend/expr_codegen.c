@@ -3088,9 +3088,12 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
 
     // Simple scalar assignment.
     assignment = EmitObjectStore(gen, node->left, dest, value);
-    GenerateConstexprLifetimeMarker(
-        gen, dest, CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER, 0,
-        node->base.location);
+    // A store to a variable names the variable, not its address.
+    if (!IRIsVariable(dest)) {
+      GenerateConstexprLifetimeMarker(
+          gen, dest, CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER, 0,
+          node->base.location);
+    }
   }
 
   if (!TypeIsAtomic(node->left->type)) {
