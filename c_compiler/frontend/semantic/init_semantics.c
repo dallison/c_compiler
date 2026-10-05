@@ -335,8 +335,88 @@ static ASTNode* CloneInitializer(ASTNode* init) {
   return ASTNodeClone(init, IdentityCloneNodeForInitializer, NULL, NULL);
 }
 
+static bool INodeWasInitialized(INode* inode);
+
+// True for a non-aggregate class subobject, which `{}` initializes by calling
+// its default constructor rather than by zeroing it.
+static bool CXXINodeNeedsConstructor(INode* inode) {
+  if (inode->kind != kIStruct || inode->type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* info = inode->type->info.struct_info;
+  return !info->is_union && !info->is_aggregate &&
+         (info->tag_symbol == NULL || !info->tag_symbol->flags.invented);
+}
+
+// True if `{}` initialization of a `type` object does more than zero it: some
+// subobject has a constructor or a default member initializer.
+static bool CXXTypeNeedsMemberInitialization(TypeRecord* type) {
+  while (TypeIsArray(type)) {
+    if (type->info.array.is_flexible || type->info.array.size.fixed <= 0) {
+      return false;
+    }
+    type = type->next;
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* info = type->info.struct_info;
+  if (info->is_union) {
+    return false;
+  }
+  if (!info->is_aggregate) {
+    return info->tag_symbol == NULL || !info->tag_symbol->flags.invented;
+  }
+  for (size_t i = 0; i < info->bases.length; i++) {
+    CXXBaseSpecifier* base = info->bases.value.p[i];
+    if (base != NULL && CXXTypeNeedsMemberInitialization(base->type)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < info->members.length; i++) {
+    StructMember* member = info->members.value.p[i];
+    if (StructMemberIsObjectMember(member) &&
+        (member->default_initializer != NULL ||
+         CXXTypeNeedsMemberInitialization(member->symbol->type))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Gives every element of a fixed-size array an INode, so the elements no
+// initializer reached can still be value-initialized.
+static void MaterializeArrayINodeChildren(INode* inode) {
+  size_t fixed = (size_t)inode->type->info.array.size.fixed;
+  for (size_t index = 0; index < fixed; index++) {
+    bool present = false;
+    for (size_t i = 0; i < inode->children.length && !present; i++) {
+      present = ((INode*)inode->children.value.p[i])->index == index;
+    }
+    if (!present) {
+      INode* child = BuildINode(inode->type->next, inode);
+      child->index = index;
+      VectorAppend(&inode->children, child);
+    }
+  }
+}
+
+// [dcl.init.aggr]/5: a subobject no initializer reached is copy-initialized
+// from `{}`, which runs a class's default constructor.
+static void ValueInitializeOmittedClass(INode* inode, bool constants_only,
+                                        SourceLocation location) {
+  if (!constants_only && CXXINodeNeedsConstructor(inode) &&
+      !INodeWasInitialized(inode)) {
+    InitializeINode(inode,
+                    NewBracedInitializerASTNode(NewVector(), inode->type,
+                                                location),
+                    constants_only);
+  }
+}
+
 static void ApplyCXXDefaultMemberInitializers(INode* inode,
-                                              bool constants_only) {
+                                              bool constants_only,
+                                              SourceLocation location) {
   if (!CompilerIsCXX() || inode == NULL) {
     return;
   }
@@ -349,9 +429,15 @@ static void ApplyCXXDefaultMemberInitializers(INode* inode,
     return;
   }
   if (inode->kind != kIStruct) {
+    if (inode->kind == kIArray && TypeIsArray(inode->type) &&
+        CXXTypeNeedsMemberInitialization(inode->type)) {
+      MaterializeArrayINodeChildren(inode);
+    }
     for (size_t i = 0; i < inode->children.length; i++) {
+      ValueInitializeOmittedClass(inode->children.value.p[i], constants_only,
+                                  location);
       ApplyCXXDefaultMemberInitializers(inode->children.value.p[i],
-                                        constants_only);
+                                        constants_only, location);
     }
     return;
   }
@@ -371,8 +457,10 @@ static void ApplyCXXDefaultMemberInitializers(INode* inode,
       if (default_init != NULL) {
         InitializeINode(child, default_init, constants_only);
       }
+    } else if (!inode->type->info.struct_info->is_union) {
+      ValueInitializeOmittedClass(child, constants_only, location);
     }
-    ApplyCXXDefaultMemberInitializers(child, constants_only);
+    ApplyCXXDefaultMemberInitializers(child, constants_only, location);
   }
 }
 
@@ -1321,6 +1409,60 @@ static bool INodeWasInitialized(INode* inode) {
   return false;
 }
 
+// [dcl.init.list]/3.2: a braced list holding a single element whose type is the
+// aggregate class itself, or a class derived from it, initializes the object
+// from that element rather than its first member.  Returns the element,
+// converted to the aggregate's type, or NULL when the rule does not apply.
+static ASTNode* CXXSingleSameClassElement(INode* inode,
+                                          BracedInitializerASTNode* braced,
+                                          bool constants_only) {
+  if (!CompilerIsCXX() || inode->kind != kIStruct ||
+      TypeIsComplex(inode->type) || inode->type->info.struct_info == NULL ||
+      braced->initializers->length != 1) {
+    return NULL;
+  }
+  ASTNode* element = braced->initializers->value.p[0];
+  if (element == NULL || element->op != AST_OP(expr_init)) {
+    return NULL;
+  }
+  ExpressionInitializerASTNode* expr_init =
+      (ExpressionInitializerASTNode*)element;
+  if (expr_init->expr == NULL) {
+    return NULL;
+  }
+  if (expr_init->expr->op == AST_OP(compound_literal)) {
+    // InitCurrentAndAdvance initializes the object from the literal's own
+    // braces.
+    ASTNode* literal = expr_init->expr;
+    return literal->type != NULL &&
+                   StructInitializationTypesMatch(literal->type, inode->type)
+               ? literal
+               : NULL;
+  }
+  bool required = constants_only && !ExpressionIsTemplateDependent(
+                                        expr_init->expr);
+  if (required) {
+    compiler->constant_evaluation_required_depth++;
+  }
+  ASTNode* expr = AnalyzeExpression(expr_init->expr);
+  if (required) {
+    compiler->constant_evaluation_required_depth--;
+  }
+  expr_init->expr = expr;
+  if (expr->type == NULL || !TypeIsStructOrUnion(expr->type)) {
+    return NULL;
+  }
+  if (StructInitializationTypesMatch(expr->type, inode->type)) {
+    return expr;
+  }
+  if (!TypeIsDerivedFrom(expr->type, inode->type)) {
+    return NULL;
+  }
+  ASTNode* converted = NewCastASTNode(TypeRecordCopy(inode->type),
+                                      expr->location, ASTNodeMove(expr));
+  return AnalyzeExpression(converted);
+}
+
 static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_only) {
   switch (init_expr->op) {
     case AST_OP(expr_init): {
@@ -1342,6 +1484,13 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
           inode->expr = ASTNodeMove(constructed);
           return AdvanceCurrent(inode->parent);
         }
+      }
+      ASTNode* same_class_element =
+          CXXSingleSameClassElement(inode, braced_init, constants_only);
+      if (same_class_element != NULL) {
+        inode->num_initializers++;
+        return InitCurrentAndAdvance(inode, same_class_element,
+                                     constants_only);
       }
       if (braced_init->initializers->length == 0 && !CompilerIsCXX() &&
           !CompilerCAtLeast(kLanguageStandardC23)) {
@@ -1577,7 +1726,7 @@ static void FlattenINode(INode* inode,
 ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* ast_node, bool constants_only) {
   INode* inode = BuildINode(type, NULL);
   InitializeINode(inode, ast_node, constants_only);
-  ApplyCXXDefaultMemberInitializers(inode, constants_only);
+  ApplyCXXDefaultMemberInitializers(inode, constants_only, ast_node->location);
   // PrintINode(inode, 0);
   ASTNode* braced_init = NewBracedInitializerASTNode(NewVector(), type, ast_node->location);
   FlattenINode(inode, (BracedInitializerASTNode*)braced_init);

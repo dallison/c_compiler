@@ -2825,10 +2825,16 @@ static bool CanElideMemzero(BracedInitializerASTNode* node) {
       }
     }
   }
-  return InitializerCoversWholeObject(type, init) ||
-         TypeIsStructOrUnion(init->init->type) ||
-         TypeIsMemberPointerAggregate(init->init->type) ||
-         TypeIsArray(init->init->type);
+  if (InitializerCoversWholeObject(type, init)) {
+    return true;
+  }
+  // An aggregate value with no designator path is the whole object; one with a
+  // path is a subobject, and the rest of the object still needs zeroing.
+  bool whole_object =
+      init->designators == NULL || init->designators->length == 0;
+  return whole_object && (TypeIsStructOrUnion(init->init->type) ||
+                          TypeIsMemberPointerAggregate(init->init->type) ||
+                          TypeIsArray(init->init->type));
 }
 
 static ASTNode* UnwrapInitializerExpression(ASTNode* node) {

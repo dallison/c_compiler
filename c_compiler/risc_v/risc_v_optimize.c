@@ -365,7 +365,10 @@ static void PropagateZeroesInBlock(TargetBasicBlock* block, void* data) {
     for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
       TargetInstruction* operand = inst->operand[i];
       if (operand != NULL) {
-        if (((int)operand->opcode == (int)RV_OP(mv)) && operand->users.length == 1) {
+        // A mv with a destination writes a fixed register (e.g. a call
+        // argument register held live by a regarg) that must still be set.
+        if (((int)operand->opcode == (int)RV_OP(mv)) &&
+            operand->users.length == 1 && operand->dest == NULL) {
           TargetInstruction* mv = operand;
           if (mv->operand[0]->opcode == (TargetOpcode)RV_OP(x0)) {
             // Found mv xx, x0.  Replace instruction operand with x0.

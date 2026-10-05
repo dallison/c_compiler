@@ -466,14 +466,10 @@ static StructMember* FindCXXDestructorForObjectType(TypeRecord* type) {
 }
 
 static TypeRecord* CXXDestructibleElementType(TypeRecord* type) {
-  if (TypeIsFixedArray(type) && type->next != NULL &&
-      FindCXXDestructorForObjectType(type->next) != NULL) {
-    return type->next;
+  while (TypeIsFixedArray(type) && type->next != NULL) {
+    type = type->next;
   }
-  if (FindCXXDestructorForObjectType(type) != NULL) {
-    return type;
-  }
-  return NULL;
+  return FindCXXDestructorForObjectType(type) != NULL ? type : NULL;
 }
 
 static ASTNode* NewCXXMemberReceiver(TypeRecord* func, StructMember* member,
@@ -518,6 +514,21 @@ static ASTNode* NewCXXMemberDestructorCall(TypeRecord* func,
   return NewExpressionStatementASTNode(call, location);
 }
 
+// Applies `depth` constant subscripts (`indices[0..depth)`) to a freshly-built
+// member receiver so that a multidimensional array member is addressed down to
+// one of its innermost elements (e.g. `dst.g[i][j]`).
+static ASTNode* ApplyConstantSubscripts(ASTNode* base, const size_t* indices,
+                                        size_t depth, SourceLocation location) {
+  ASTNode* node = base;
+  for (size_t d = 0; d < depth; d++) {
+    ASTNode* index = NewIntConstantASTNode(
+        (int64_t)indices[d], NewTypeRecordWithSize(kTypeInt, kQualPlain),
+        location);
+    node = NewBinaryASTNode(AST_OP(subscript), NULL, location, node, index);
+  }
+  return node;
+}
+
 // Appends the destructor call(s) for a single data member to `body`.  A fixed
 // array member yields one call per element in reverse index order (matching the
 // reverse-of-construction destruction order); a scalar/class member yields one
@@ -538,20 +549,34 @@ void AppendCXXSingleMemberDestructorCalls(TypeRecord* func,
     return;
   }
   if (TypeIsFixedArray(member_type)) {
-    for (size_t index = member_type->info.array.size.fixed; index > 0;
-         index--) {
-      ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
-      ASTNode* index_node = NewIntConstantASTNode(
-          (int64_t)index - 1, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+    size_t total = 1;
+    size_t depth = 0;
+    for (TypeRecord* t = member_type; TypeIsFixedArray(t); t = t->next) {
+      total *= (size_t)t->info.array.size.fixed;
+      depth++;
+    }
+    size_t* indices = malloc(depth * sizeof(size_t));
+    for (size_t flat = total; flat > 0; flat--) {
+      size_t rest = flat - 1;
+      TypeRecord* level = member_type;
+      for (size_t d = 0; d < depth; d++, level = level->next) {
+        size_t stride = 1;
+        for (TypeRecord* t = level->next; TypeIsFixedArray(t); t = t->next) {
+          stride *= (size_t)t->info.array.size.fixed;
+        }
+        indices[d] = rest / stride;
+        rest %= stride;
+      }
+      ASTNode* receiver = ApplyConstantSubscripts(
+          NewCXXMemberReceiver(func, member, location), indices, depth,
           location);
-      receiver = NewBinaryASTNode(AST_OP(subscript), NULL, location, receiver,
-                                  index_node);
       ASTNode* call =
           NewCXXMemberDestructorCall(func, object_type, receiver, location);
       if (call != NULL) {
         VectorAppend(body, call);
       }
     }
+    free(indices);
   } else {
     ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
     ASTNode* call =
@@ -580,21 +605,6 @@ void AppendCXXMemberDestructorCalls(TypeRecord* func, Vector* body,
     StructMember* member = owner->members.value.p[i - 1];
     AppendCXXSingleMemberDestructorCalls(func, member, body, location);
   }
-}
-
-// Applies `depth` constant subscripts (`indices[0..depth)`) to a freshly-built
-// member receiver so that a multidimensional array member is addressed down to
-// one of its innermost elements (e.g. `dst.g[i][j]`).
-static ASTNode* ApplyConstantSubscripts(ASTNode* base, const size_t* indices,
-                                        size_t depth, SourceLocation location) {
-  ASTNode* node = base;
-  for (size_t d = 0; d < depth; d++) {
-    ASTNode* index = NewIntConstantASTNode(
-        (int64_t)indices[d], NewTypeRecordWithSize(kTypeInt, kQualPlain),
-        location);
-    node = NewBinaryASTNode(AST_OP(subscript), NULL, location, node, index);
-  }
-  return node;
 }
 
 static ASTNode* CXXMoveMemberwiseSource(ASTNode* source, TypeRecord* type,

@@ -6634,7 +6634,10 @@ static Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
   LexNextToken(syntax->lex);
   Vector* actuals = NewVector();
   while (!LexLookingAt(syntax->lex, close)) {
-    ASTNode* actual = SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
+    ASTNode* actual =
+        LexMatch(syntax->lex, TOK(lbrace))
+            ? SyntaxParseBracedInitializer(syntax)
+            : SyntaxParseSingleExpression(syntax, followers | TC(exprsep));
     MarkCXXPackExpansionIfPresent(syntax, actual);
     VectorAppend(actuals, actual);
     if (!LexMatch(syntax->lex, TOK(comma))) {
@@ -6783,8 +6786,10 @@ static ASTNode* NewPostIncrement(Symbol* sym, SourceLocation location) {
                          NewIdentifierASTNode(sym, location));
 }
 
+// Default-constructs elements [first, count) of the array at `ptr`.
 static ASTNode* NewArrayConstructionLoop(Syntax* syntax, TypeRecord* element_type,
                                          Symbol* ptr, Symbol* count,
+                                         int64_t first,
                                          SourceLocation location) {
   Symbol* index =
       SyntaxNewTemporary(syntax, NewTypeRecordWithSize(kTypeInt, kQualPlain));
@@ -6794,7 +6799,7 @@ static ASTNode* NewArrayConstructionLoop(Syntax* syntax, TypeRecord* element_typ
   VectorAppend(statements,
                NewExpressionStatement(
                    NewAssign(NewIdentifierASTNode(index, location),
-                             NewIntLiteral(0, location), index->type,
+                             NewIntLiteral(first, location), index->type,
                              location),
                    location));
 
@@ -6826,16 +6831,21 @@ static ASTNode* NewArrayConstructionLoop(Syntax* syntax, TypeRecord* element_typ
   return NewCompoundStatementASTNode(statements, location);
 }
 
+static ASTNode* NewCXXNewInitialization(Syntax* syntax, TypeRecord* type,
+                                        ASTNode* target, ASTNode* initializer,
+                                        SourceLocation location);
+
+// Value-initializes elements [first, count) of the array at `ptr`.
 static ASTNode* NewArrayValueInitializationLoop(
     Syntax* syntax, TypeRecord* element_type, Symbol* ptr, Symbol* count,
-    ASTNode* initializer, SourceLocation location) {
+    int64_t first, SourceLocation location) {
   Symbol* index =
       SyntaxNewTemporary(syntax, NewTypeRecordWithSize(kTypeInt, kQualPlain));
   Vector* statements = NewVector();
   VectorAppend(statements,
                NewExpressionStatement(
                    NewAssign(NewIdentifierASTNode(index, location),
-                             NewIntLiteral(0, location), index->type,
+                             NewIntLiteral(first, location), index->type,
                              location),
                    location));
   ASTNode* element =
@@ -6846,7 +6856,8 @@ static ASTNode* NewArrayValueInitializationLoop(
   Vector* body_statements = NewVector();
   VectorAppend(body_statements,
                NewExpressionStatement(
-                   NewAssign(element, initializer, element_type, location),
+                   NewCXXNewInitialization(syntax, element_type, element, NULL,
+                                           location),
                    location));
   VectorAppend(body_statements,
                NewExpressionStatement(NewPostIncrement(index, location),
@@ -6993,14 +7004,236 @@ static ASTNode* NewCXXNewCompoundLiteralInitializer(Syntax* syntax,
   Vector* elements = NewVector();
   if (exprs != NULL) {
     for (size_t i = 0; i < exprs->length; i++) {
-      VectorAppend(elements, NewExpressionInitializerASTNode(
-                                 exprs->value.p[i], location));
+      ASTNode* expr = exprs->value.p[i];
+      VectorAppend(elements,
+                   expr->op == AST_OP(braced_init)
+                       ? expr
+                       : NewExpressionInitializerASTNode(expr, location));
     }
     VectorDelete(exprs);
   }
   ASTNode* braced = NewBracedInitializerASTNode(elements, NULL, location);
   return NewCompoundLiteralASTNode(NewIdentifierASTNode(storage, location),
                                    location, braced);
+}
+
+// A class that `new T{...}` and `new T(...)` aggregate-initialize.  Its
+// implicit constructors do not make it a constructor call.  A class template's
+// primary struct can carry a stale `is_aggregate`, so require that no
+// constructor is user-declared as well.
+static bool CXXNewTypeIsAggregateClass(TypeRecord* type) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      !type->info.struct_info->is_aggregate ||
+      type->info.struct_info->is_template) {
+    return false;
+  }
+  for (StructMember* c = FindCXXConstructorForType(type); c != NULL;
+       c = c->overload_next) {
+    if (c->is_member_function && c->symbol != NULL &&
+        !c->symbol->flags.invented) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// A braced list holding `items` (each an expression or a braced list), which
+// it consumes; NULL makes an empty list.
+static ASTNode* NewCXXNewBracedInitializer(Vector* items,
+                                           SourceLocation location) {
+  Vector* elements = NewVector();
+  for (size_t i = 0; items != NULL && i < items->length; i++) {
+    ASTNode* item = items->value.p[i];
+    VectorAppend(elements,
+                 item->op == AST_OP(braced_init)
+                     ? item
+                     : NewExpressionInitializerASTNode(item, location));
+  }
+  if (items != NULL) {
+    VectorDelete(items);
+  }
+  return NewBracedInitializerASTNode(elements, NULL, location);
+}
+
+// Initializes the new object `target` of non-array `type` from `initializer`
+// (an expression, a braced list, or NULL to value-initialize).  A class is
+// initialized in place from a braced list -- assigning would run its
+// assignment operator on storage that holds no object yet.  A scalar is
+// assigned.
+static ASTNode* NewCXXNewInitialization(Syntax* syntax, TypeRecord* type,
+                                        ASTNode* target, ASTNode* initializer,
+                                        SourceLocation location) {
+  if (TypeIsStructOrUnion(type)) {
+    ASTNode* braced = initializer;
+    if (braced == NULL || braced->op != AST_OP(braced_init)) {
+      Vector* items = NewVector();
+      if (initializer != NULL) {
+        VectorAppend(items, initializer);
+      }
+      braced = NewCXXNewBracedInitializer(items, location);
+    }
+    target->flags |= kASTNeedAddress;
+    return NewBinaryASTNode(AST_OP(init), type, location, target, braced);
+  }
+  ASTNode* value = initializer;
+  if (value == NULL) {
+    value = NewIntLiteral(0, location);
+  } else if (value->op == AST_OP(braced_init)) {
+    // `new int[2]{{1}, {}}`: a braced scalar holds at most one expression.
+    BracedInitializerASTNode* braced = (BracedInitializerASTNode*)value;
+    ASTNode* element = braced->initializers->length == 1
+                           ? braced->initializers->value.p[0]
+                           : NULL;
+    if (braced->initializers->length == 0) {
+      value = NewIntLiteral(0, location);
+    } else if (element == NULL || element->op != AST_OP(expr_init)) {
+      SyntaxError(syntax, "new initializer for non-class type requires one "
+                          "expression");
+      value = NewIntLiteral(0, location);
+    } else {
+      value = ((ExpressionInitializerASTNode*)element)->expr;
+    }
+  }
+  return NewAssign(target, value, type, location);
+}
+
+// The non-array type at the bottom of `type`, and how many of it one `type`
+// holds: int[2][3] is 6 ints.
+static TypeRecord* CXXNewArrayBaseType(TypeRecord* type, int64_t* count) {
+  *count = 1;
+  while (TypeIsArray(type)) {
+    *count *= (int64_t)type->info.array.size.fixed;
+    type = type->next;
+  }
+  return type;
+}
+
+// Walks an array new-initializer the way [dcl.init.aggr] consumes it,
+// including brace elision, and initializes each base-type element of the
+// allocation (viewed as a flat array at `base_ptr`) in place.  With
+// `statements` NULL it only consumes, which counts the elements of an array
+// whose bound is deduced; `syntax` is then NULL too, so it reports nothing.
+typedef struct {
+  Syntax* syntax;
+  Vector* statements;
+  Symbol* base_ptr;
+  TypeRecord* base_type;
+  bool constructed_class;
+  SourceLocation location;
+} CXXNewArrayInit;
+
+typedef struct {
+  Vector* items;  // Each an expression or a braced_init.
+  size_t next;
+} CXXNewInitCursor;
+
+static Vector* CXXNewBracedItems(Syntax* syntax, ASTNode* braced_node) {
+  Vector* elements = ((BracedInitializerASTNode*)braced_node)->initializers;
+  Vector* items = NewVector();
+  for (size_t i = 0; i < elements->length; i++) {
+    ASTNode* element = elements->value.p[i];
+    if (element->op == AST_OP(expr_init)) {
+      element = ((ExpressionInitializerASTNode*)element)->expr;
+    } else if (element->op != AST_OP(braced_init)) {
+      if (syntax != NULL) {
+        SyntaxError(syntax,
+                    "designated initializers cannot initialize an array");
+      }
+      continue;
+    }
+    VectorAppend(items, element);
+  }
+  return items;
+}
+
+static void AppendCXXNewLeafInit(CXXNewArrayInit* init, int64_t index,
+                                 ASTNode* initializer) {
+  SourceLocation location = init->location;
+  TypeRecord* type = init->base_type;
+  ASTNode* element = NewUnaryASTNode(
+      AST_OP(contents), type, location,
+      NewPtrAdd(NewIdentifierASTNode(init->base_ptr, location),
+                NewIntLiteral(index, location), location));
+  ASTNode* statement;
+  if (init->constructed_class) {
+    // Copy-initialize from the initializer; a braced list supplies the
+    // constructor arguments, and no initializer default-constructs.
+    Vector* actuals = NewVector();
+    if (initializer != NULL && initializer->op == AST_OP(braced_init) &&
+        !CXXNewConstructorSetHasInitializerList(
+            FindCXXConstructorForType(type))) {
+      Vector* elements = ((BracedInitializerASTNode*)initializer)->initializers;
+      for (size_t i = 0; i < elements->length; i++) {
+        ASTNode* actual = elements->value.p[i];
+        VectorAppend(actuals,
+                     actual->op == AST_OP(expr_init)
+                         ? ((ExpressionInitializerASTNode*)actual)->expr
+                         : actual);
+      }
+    } else if (initializer != NULL) {
+      VectorAppend(actuals, initializer);
+    }
+    statement =
+        NewCXXConstructorCallForReceiver(type, element, actuals, location);
+  } else {
+    statement = NewCXXNewInitialization(init->syntax, type, element,
+                                        initializer, location);
+  }
+  VectorAppend(init->statements, NewExpressionStatement(statement, location));
+}
+
+static void InitCXXNewSubobject(CXXNewArrayInit* init,
+                                CXXNewInitCursor* cursor, TypeRecord* type,
+                                int64_t index) {
+  if (TypeIsArray(type)) {
+    int64_t stride = 0;
+    CXXNewArrayBaseType(type->next, &stride);
+    size_t bound = (size_t)type->info.array.size.fixed;
+    ASTNode* item = cursor->next < cursor->items->length
+                        ? cursor->items->value.p[cursor->next]
+                        : NULL;
+    if (item != NULL && item->op == AST_OP(braced_init)) {
+      cursor->next++;
+      CXXNewInitCursor inner = {CXXNewBracedItems(init->syntax, item), 0};
+      for (size_t i = 0; i < bound; i++) {
+        InitCXXNewSubobject(init, &inner, type->next,
+                            index + (int64_t)i * stride);
+      }
+      if (inner.next < inner.items->length && init->statements != NULL) {
+        SyntaxError(init->syntax, "Too many initializers");
+      }
+      VectorDelete(inner.items);
+      return;
+    }
+    // Brace elision: the subarray takes its elements from the enclosing list.
+    for (size_t i = 0; i < bound; i++) {
+      InitCXXNewSubobject(init, cursor, type->next,
+                          index + (int64_t)i * stride);
+    }
+    return;
+  }
+  ASTNode* item = cursor->next < cursor->items->length
+                      ? cursor->items->value.p[cursor->next++]
+                      : NULL;
+  if (init->statements != NULL) {
+    AppendCXXNewLeafInit(init, index, item);
+  }
+}
+
+// Initializes the leading elements of the allocation from `items` and returns
+// how many elements of type `element_type` they covered.
+static size_t InitCXXNewArrayElements(CXXNewArrayInit* init, Vector* items,
+                                      TypeRecord* element_type) {
+  int64_t stride = 0;
+  CXXNewArrayBaseType(element_type, &stride);
+  CXXNewInitCursor cursor = {items, 0};
+  size_t elements = 0;
+  while (cursor.next < items->length) {
+    InitCXXNewSubobject(init, &cursor, element_type,
+                        (int64_t)elements * stride);
+    elements++;
+  }
+  return elements;
 }
 
 static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
@@ -7065,29 +7298,82 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   }
 
   ASTNode* scalar_initializer = NULL;
+  // The braced list that initializes a class aggregate in place.
+  ASTNode* aggregate_initializer = NULL;
   bool value_init = false;
+  // The elements of an array new-initializer, each an expression or a braced
+  // list; NULL when the array has no initializer.
+  Vector* array_initializers = NULL;
   if (initializer_open == TOK(lsquare)) {
     LexNextToken(syntax->lex);
-    array_size = SyntaxParseSingleExpression(syntax, TC(closebra));
+    if (!LexLookingAt(syntax->lex, TOK(rsquare))) {
+      array_size = SyntaxParseSingleExpression(syntax, TC(closebra));
+    }
     SyntaxNeedBracket(syntax, TOK(rsquare), followers);
-    if (LexLookingAt(syntax->lex, TOK(lparen)) ||
-        LexLookingAt(syntax->lex, TOK(lbrace))) {
-      Token array_initializer_open = syntax->lex->current_token;
-      Vector* initializers = ParseCXXNewInitializerArguments(
-          syntax, array_initializer_open, followers);
-      if (initializers->length == 0) {
-        value_init = true;
-        scalar_initializer = NewIntLiteral(0, location);
-        VectorDelete(initializers);
-      } else {
-        SyntaxError(syntax,
-                    "non-empty array new initializer is not supported");
-        VectorDeleteWithContents(initializers, NULL, true);
+    // `new T[n][2][3]` allocates n objects of type T[2][3]; only the first
+    // bound may be non-constant.
+    Vector inner_bounds;
+    VectorInit(&inner_bounds);
+    while (LexMatch(syntax->lex, TOK(lsquare))) {
+      ASTNode* bound = AnalyzeExpression(
+          SyntaxParseSingleExpression(syntax, TC(closebra)));
+      SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+      int64_t value = 0;
+      if (!EvaluateIntegerExpression(bound, &value) || value <= 0) {
+        SyntaxError(syntax, "array new bound after the first must be a "
+                            "positive constant");
+        value = 1;
       }
+      VectorAppend(&inner_bounds, (void*)(intptr_t)value);
+    }
+    for (size_t i = inner_bounds.length; i > 0; i--) {
+      TypeRecord* array_type = NewBasicArrayTypeRecord(
+          kQualPlain, (int)(intptr_t)inner_bounds.value.p[i - 1], false);
+      TypeRecordChain(array_type, allocated_type);
+      allocated_type = TypeRecordCalculateSize(array_type);
+    }
+    VectorDestruct(&inner_bounds);
+    if (LexMatch(syntax->lex, TOK(lbrace))) {
+      array_initializers =
+          CXXNewBracedItems(syntax, SyntaxParseBracedInitializer(syntax));
+    } else if (LexLookingAt(syntax->lex, TOK(lparen))) {
+      array_initializers =
+          ParseCXXNewInitializerArguments(syntax, TOK(lparen), followers);
+    }
+    if (array_size == NULL) {
+      size_t deduced = 0;
+      if (array_initializers == NULL) {
+        SyntaxError(syntax, "array new without a bound requires an "
+                            "initializer");
+      } else {
+        CXXNewArrayInit counter = {.syntax = NULL};
+        deduced = InitCXXNewArrayElements(&counter, array_initializers,
+                                          allocated_type);
+      }
+      array_size = NewIntLiteral((int64_t)deduced, location);
+    }
+    if (array_initializers != NULL) {
+      value_init = true;
     }
   } else if (ctor_actuals == NULL &&
              (initializer_open == TOK(lparen) || initializer_open == TOK(lbrace))) {
-    if (FindCXXConstructorForType(allocated_type) == NULL) {
+    if (!allocated_type_dependent &&
+        CXXNewTypeIsAggregateClass(allocated_type)) {
+      // `new T{...}` is aggregate initialization, as is the C++20
+      // parenthesized form `new T(...)`.  A single element of type T copies
+      // it ([dcl.init.list]/3.2); no element value-initializes.
+      if (initializer_open == TOK(lbrace)) {
+        LexNextToken(syntax->lex);
+        aggregate_initializer = SyntaxParseBracedInitializer(syntax);
+      } else {
+        aggregate_initializer = NewCXXNewBracedInitializer(
+            ParseCXXNewInitializerArguments(syntax, initializer_open,
+                                            followers),
+            location);
+      }
+      value_init = ((BracedInitializerASTNode*)aggregate_initializer)
+                       ->initializers->length == 0;
+    } else if (FindCXXConstructorForType(allocated_type) == NULL) {
       Vector* initializers =
           ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
       bool class_direct_init =
@@ -7260,16 +7546,69 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                                  object_ptr->type, location),
                        location));
     }
-    if (TypeIsStructOrUnion(allocated_type) &&
-        FindCXXConstructorForType(allocated_type) != NULL) {
+    // Elements are initialized through a flat view of the allocation as an
+    // array of its non-array base type: `new T[n][2]` holds 2n T objects.
+    int64_t base_per_element = 1;
+    TypeRecord* base_type =
+        CXXNewArrayBaseType(allocated_type, &base_per_element);
+    Symbol* base_ptr = object_ptr;
+    Symbol* base_count = array_count;
+    if (TypeIsArray(allocated_type)) {
+      base_ptr =
+          SyntaxNewTemporary(syntax, NewPointerTo(kQualPlain, base_type));
+      base_count = SyntaxNewTemporary(syntax, NewSizeTypeRecord());
       VectorAppend(statements,
-                   NewArrayConstructionLoop(syntax, allocated_type, object_ptr,
-                                            array_count, location));
-    } else if (scalar_initializer != NULL) {
+                   NewExpressionStatement(
+                       NewAssign(NewIdentifierASTNode(base_ptr, location),
+                                 NewTypedCast(base_ptr->type,
+                                              NewIdentifierASTNode(object_ptr,
+                                                                   location),
+                                              location),
+                                 base_ptr->type, location),
+                       location));
+      VectorAppend(statements,
+                   NewExpressionStatement(
+                       NewAssign(NewIdentifierASTNode(base_count, location),
+                                 NewBinaryASTNode(
+                                     AST_OP(mult), NULL, location,
+                                     NewIdentifierASTNode(array_count,
+                                                          location),
+                                     NewIntLiteral(base_per_element,
+                                                   location)),
+                                 base_count->type, location),
+                       location));
+    }
+    bool constructed_class =
+        TypeIsStructOrUnion(base_type) &&
+        FindCXXConstructorForType(base_type) != NULL &&
+        (array_initializers == NULL || allocated_type_dependent ||
+         !CXXNewTypeIsAggregateClass(base_type));
+    size_t listed = 0;
+    if (array_initializers != NULL) {
+      CXXNewArrayInit init = {
+          .syntax = syntax,
+          .statements = statements,
+          .base_ptr = base_ptr,
+          .base_type = base_type,
+          .constructed_class = constructed_class,
+          .location = location,
+      };
+      listed = InitCXXNewArrayElements(&init, array_initializers,
+                                       allocated_type);
+      VectorDelete(array_initializers);
+    }
+    int64_t first_unlisted = (int64_t)listed * base_per_element;
+    if (constructed_class) {
+      VectorAppend(statements,
+                   NewArrayConstructionLoop(syntax, base_type, base_ptr,
+                                            base_count, first_unlisted,
+                                            location));
+    } else if (value_init) {
+      // The elements without an initializer are value-initialized.
       VectorAppend(statements,
                    NewArrayValueInitializationLoop(
-                       syntax, allocated_type, object_ptr, array_count,
-                       scalar_initializer, location));
+                       syntax, base_type, base_ptr, base_count,
+                       first_unlisted, location));
     }
     VectorAppend(statements,
                  NewExpressionStatement(NewIdentifierASTNode(object_ptr,
@@ -7277,7 +7616,8 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                                         location));
     result = NewUnaryASTNode(AST_OP(stmt_expr), result_type, location,
                              NewCompoundStatementASTNode(statements, location));
-  } else if (ctor_actuals != NULL || scalar_initializer != NULL) {
+  } else if (ctor_actuals != NULL || scalar_initializer != NULL ||
+             aggregate_initializer != NULL) {
     Symbol* temp = SyntaxNewTemporary(syntax, result_type);
     // The lowered comma expression assigns through this temporary and then
     // reuses it as the constructor receiver.  Keep it in addressable storage;
@@ -7288,12 +7628,22 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
     ASTNode* assign =
         NewBinaryASTNode(AST_OP(assign), result_type, location,
                          temp_lhs, result);
-    ASTNode* init = ctor_actuals != NULL
-        ? NewCXXConstructorCallForPointer(allocated_type, temp, ctor_actuals,
-                                          location)
-        : NewAssign(NewUnaryASTNode(AST_OP(contents), allocated_type, location,
-                                    NewIdentifierASTNode(temp, location)),
-                    scalar_initializer, allocated_type, location);
+    ASTNode* init;
+    if (ctor_actuals != NULL) {
+      init = NewCXXConstructorCallForPointer(allocated_type, temp, ctor_actuals,
+                                             location);
+    } else if (aggregate_initializer != NULL) {
+      init = NewCXXNewInitialization(
+          syntax, allocated_type,
+          NewUnaryASTNode(AST_OP(contents), allocated_type, location,
+                          NewIdentifierASTNode(temp, location)),
+          aggregate_initializer, location);
+    } else {
+      init = NewAssign(NewUnaryASTNode(AST_OP(contents), allocated_type,
+                                       location,
+                                       NewIdentifierASTNode(temp, location)),
+                       scalar_initializer, allocated_type, location);
+    }
     if (ctor_actuals == NULL && TypeContainsTemplateParameter(allocated_type)) {
       init->flags |= kASTDependentNewInitializer;
       if (value_init) {
@@ -7407,11 +7757,42 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                                                                      location)),
                                count->type, location),
                      location));
+    int64_t base_per_element = 1;
+    TypeRecord* base_type =
+        CXXNewArrayBaseType(pointer_type->next, &base_per_element);
     if (TypeIsStructOrUnionPointer(pointer_type) &&
         FindCXXDestructorForType(pointer_type->next) != NULL) {
       VectorAppend(guarded_statements,
                    NewArrayDestructionLoop(syntax, pointer_type->next,
                                            object_ptr, count, location));
+    } else if (TypeIsArray(pointer_type->next) &&
+               FindCXXDestructorForType(base_type) != NULL) {
+      // `delete[]` of `new T[n][2]` destroys all 2n T objects.
+      Symbol* base_ptr =
+          SyntaxNewTemporary(syntax, NewPointerTo(kQualPlain, base_type));
+      Symbol* base_count = SyntaxNewTemporary(syntax, NewSizeTypeRecord());
+      VectorAppend(guarded_statements,
+                   NewExpressionStatement(
+                       NewAssign(NewIdentifierASTNode(base_ptr, location),
+                                 NewTypedCast(base_ptr->type,
+                                              NewIdentifierASTNode(object_ptr,
+                                                                   location),
+                                              location),
+                                 base_ptr->type, location),
+                       location));
+      VectorAppend(guarded_statements,
+                   NewExpressionStatement(
+                       NewAssign(NewIdentifierASTNode(base_count, location),
+                                 NewBinaryASTNode(
+                                     AST_OP(mult), NULL, location,
+                                     NewIdentifierASTNode(count, location),
+                                     NewIntLiteral(base_per_element,
+                                                   location)),
+                                 base_count->type, location),
+                       location));
+      VectorAppend(guarded_statements,
+                   NewArrayDestructionLoop(syntax, base_type, base_ptr,
+                                           base_count, location));
     }
     Vector* actuals = NewVector();
     VectorAppend(actuals, NewIdentifierASTNode(header, location));
