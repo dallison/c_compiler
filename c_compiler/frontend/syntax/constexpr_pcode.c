@@ -2201,6 +2201,16 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
       return false;
     }
   } else if (TypeIsReference(type)) {
+    // Binding a reference to a scalar prvalue materializes the temporary as a
+    // compound literal, `(const int){37000000}`.
+    if (arg != NULL && arg->op == AST_OP(compound_literal) &&
+        !TypeIsFixedArray(object_type) && !TypeIsStructOrUnion(object_type)) {
+      ASTNode* value = ConstexprInitializerExpression(
+          ((CompoundLiteralASTNode*)arg)->initializer);
+      if (value != NULL) {
+        arg = value;
+      }
+    }
     if (TypeIsFloatingPoint(object_type)) {
       double value;
       if (!EvaluateFloatingPointExpressionInContext(ctx, arg, &value)) {
@@ -6355,6 +6365,109 @@ static bool PCodeStoreInitializer(ConstEvalContext* ctx, TypeRecord* type,
   return PCodeEvaluateScalarInitializer(ctx, type, initializer, slot);
 }
 
+static StructMember* PCodeDesignatorMember(TypeRecord* type,
+                                           Designator* designator) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || designator == NULL ||
+      designator->designator_type != kDesignatorStruct) {
+    return NULL;
+  }
+  if (designator->is_resolved_member) {
+    return designator->value.struct_member;
+  }
+  if (designator->value.struct_member_name == NULL) {
+    return NULL;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* candidate = str->members.value.p[i];
+    if (candidate != NULL && candidate->symbol != NULL &&
+        StringEqual(designator->value.struct_member_name,
+                    candidate->symbol->name.value)) {
+      return candidate;
+    }
+  }
+  return NULL;
+}
+
+// Stores |initializer| into the subobject named by designators[index...],
+// creating the aggregate objects the chain passes through.
+static bool PCodeStoreDesignatedInitializer(ConstEvalContext* ctx,
+                                            TypeRecord* type,
+                                            ConstexprObject* object,
+                                            Vector* designators, size_t index,
+                                            ASTNode* initializer) {
+  if (type == NULL || object == NULL || designators == NULL ||
+      index >= designators->length) {
+    return false;
+  }
+  Designator* designator = designators->value.p[index];
+  if (designator == NULL) {
+    return false;
+  }
+  size_t first;
+  size_t last;
+  TypeRecord* slot_type;
+  StructMember* union_member = NULL;
+  if (designator->designator_type == kDesignatorArray) {
+    if (!TypeIsFixedArray(type) || designator->value.array_index < 0 ||
+        designator->array_index_end < designator->value.array_index) {
+      return false;
+    }
+    first = (size_t)designator->value.array_index;
+    last = (size_t)designator->array_index_end;
+    slot_type = type->next;
+  } else {
+    StructMember* member = PCodeDesignatorMember(type, designator);
+    if (member == NULL || member->symbol == NULL) {
+      return false;
+    }
+    bool is_union = type->info.struct_info->is_union;
+    first = last = is_union ? 0 : member->index;
+    slot_type = member->symbol->type;
+    union_member = is_union ? member : NULL;
+  }
+  if (slot_type == NULL) {
+    return false;
+  }
+  for (size_t i = first; i <= last; i++) {
+    ConstexprValue* slot = PCodeConstexprObjectSlot(object, i);
+    if (slot == NULL) {
+      return false;
+    }
+    if (union_member != NULL && object->active_union_member != union_member) {
+      if (slot->is_object) {
+        DeletePCodeConstexprObject(slot->object);
+      }
+      *slot = (ConstexprValue){0};
+      object->active_union_member = union_member;
+    }
+    if (index + 1 == designators->length) {
+      if (!PCodeStoreInitializer(ctx, slot_type, initializer, slot)) {
+        return false;
+      }
+    } else {
+      if (!TypeIsFixedArray(slot_type) && !TypeIsStructOrUnion(slot_type)) {
+        return false;
+      }
+      if (!slot->is_object || slot->object == NULL) {
+        ConstexprObject* subobject = NewPCodeConstexprObject(slot_type);
+        if (subobject == NULL) {
+          return false;
+        }
+        *slot = (ConstexprValue){.is_object = true, .object = subobject};
+      }
+      if (!PCodeStoreDesignatedInitializer(ctx, slot_type, slot->object,
+                                           designators, index + 1,
+                                           initializer)) {
+        return false;
+      }
+    }
+    slot->lifetime_ended = false;
+  }
+  return true;
+}
+
 static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
                                   ASTNode* initializer,
                                   ConstexprObject* object) {
@@ -6405,37 +6518,38 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
       }
     }
   }
-  if (braced->initializers->length > object->slots.length) {
-    ConstexprPCodeFailure(
-        ctx, kConstexprPCodeFailureUnsupported,
-        "constexpr pcode array initializer has too many elements");
-    return false;
-  }
   size_t next_index = 0;
   for (size_t i = 0; i < braced->initializers->length; i++) {
     ASTNode* entry = braced->initializers->value.p[i];
-    ASTNode* entry_initializer = entry;
-    size_t slot_index = next_index;
     if (entry != NULL && entry->op == AST_OP(designated_init)) {
+      // Brace elision leaves one entry per scalar, such as `[0].n = 1`.
       DesignatedInitializerASTNode* designated =
           (DesignatedInitializerASTNode*)entry;
-      if (designated->designators == NULL ||
-          designated->designators->length != 1) {
+      Designator* first = designated->designators != NULL &&
+                                  designated->designators->length != 0
+                              ? designated->designators->value.p[0]
+                              : NULL;
+      if (first == NULL || first->designator_type != kDesignatorArray ||
+          !PCodeStoreDesignatedInitializer(ctx, type, object,
+                                           designated->designators, 0,
+                                           designated->init)) {
+        ConstexprPCodeFailure(
+            ctx, kConstexprPCodeFailureUnsupported,
+            "constexpr pcode could not store designated array element");
         return false;
       }
-      Designator* designator = designated->designators->value.p[0];
-      if (designator == NULL ||
-          designator->designator_type != kDesignatorArray ||
-          designator->value.array_index < 0 ||
-          designator->array_index_end != designator->value.array_index) {
-        return false;
-      }
-      slot_index = (size_t)designator->value.array_index;
-      entry_initializer = designated->init;
+      next_index = (size_t)first->array_index_end + 1;
+      continue;
     }
+    size_t slot_index = next_index;
     ConstexprValue* slot = PCodeConstexprObjectSlot(object, slot_index);
-    if (slot == NULL ||
-        !PCodeStoreInitializer(ctx, type->next, entry_initializer, slot)) {
+    if (slot == NULL) {
+      ConstexprPCodeFailure(
+          ctx, kConstexprPCodeFailureUnsupported,
+          "constexpr pcode array initializer has too many elements");
+      return false;
+    }
+    if (!PCodeStoreInitializer(ctx, type->next, entry, slot)) {
       ConstexprPCodeFailure(
           ctx, kConstexprPCodeFailureUnsupported,
           "constexpr pcode could not store array initializer element");
@@ -6466,26 +6580,8 @@ static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
           designated->designators->length != 1) {
         return false;
       }
-      Designator* designator = designated->designators->value.p[0];
       StructMember* selected =
-          designator != NULL &&
-                  designator->designator_type == kDesignatorStruct &&
-                  designator->is_resolved_member
-              ? designator->value.struct_member
-              : NULL;
-      if (selected == NULL && designator != NULL &&
-          designator->designator_type == kDesignatorStruct &&
-          designator->value.struct_member_name != NULL) {
-        for (size_t i = 0; i < str->members.length; i++) {
-          StructMember* candidate = str->members.value.p[i];
-          if (candidate != NULL && candidate->symbol != NULL &&
-              StringEqual(designator->value.struct_member_name,
-                          candidate->symbol->name.value)) {
-            selected = candidate;
-            break;
-          }
-        }
-      }
+          PCodeDesignatorMember(type, designated->designators->value.p[0]);
       if (selected == NULL || selected->symbol == NULL ||
           !PCodeStoreInitializer(
               ctx, selected->symbol->type, designated->init,
