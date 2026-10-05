@@ -5364,8 +5364,12 @@ static bool ExpressionConstructsAggregateInPlace(ASTNode* expr) {
     case AST_OP(inline_call):
       return expr->value_category == kValueCategoryPrvalue ||
              ExpressionIsConstructorCall(expr);
-    case AST_OP(question):
     case AST_OP(compound_literal):
+      // GenerateCompoundLiteral builds only these in the destination; a
+      // vector or array literal lives in its own object and is copied.
+      return TypeIsStructOrUnion(expr->type) ||
+             TypeIsMemberPointerAggregate(expr->type);
+    case AST_OP(question):
     case AST_OP(spaceship):
       return true;
     case AST_OP(comma): {

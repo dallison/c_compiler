@@ -620,6 +620,15 @@ static bool IsVectorValue(TargetInstruction* inst) {
           (int)inst->opcode == (int)X86_OP(resultv));
 }
 
+// The offset operand of a spill at the current end of the spill region.  The
+// slot is addressed at -(first_spill_offset + offset) and extends upward, and
+// an 8-byte slot occupies region bytes [offset - 8, offset).  A 16-byte slot
+// needs [offset - 8, offset + 8), so its offset is 8 further in; otherwise its
+// upper half would overlap the locals or the previous slot.
+static int SpillSlotOffset(X86RegisterAllocator* allocator, bool is_vector) {
+  return allocator->current_spilled_region_size + (is_vector ? 8 : 0);
+}
+
 static X86Register* SpillInstruction(X86RegisterAllocator* allocator, TargetInstruction* inst) {
   X86Register* reg = (X86Register*)inst->reg;    // Current register.
   bool is_vector = IsVectorValue(inst);
@@ -645,9 +654,9 @@ static X86Register* SpillInstruction(X86RegisterAllocator* allocator, TargetInst
                                                    TargetGetIntConstant(&allocator->rv->base,
                                                                         NULL,
                                                                         kTargetType32Bit,
-                                                                        allocator->current_spilled_region_size));
+                                                                        SpillSlotOffset(allocator, is_vector)));
   if (is_vector) {
-    spill->flags |= X86_VECTOR_VALUE;
+    spill->flags |= X86_VECTOR_VALUE | (inst->flags & X86_VECTOR_WIDTH_MASK);
   }
   allocator->current_spilled_region_size += is_vector ? 16 : 8;
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
@@ -966,7 +975,7 @@ static void BorrowRegisterAround(X86RegisterAllocator* allocator,
   }
   TargetInstruction* offset = TargetGetIntConstant(
       &allocator->rv->base, NULL, kTargetType32Bit,
-      allocator->current_spilled_region_size);
+      SpillSlotOffset(allocator, is_vector));
   allocator->current_spilled_region_size += is_vector ? 16 : 8;
   if (allocator->current_spilled_region_size >
       allocator->max_spilled_region_size) {
@@ -977,7 +986,7 @@ static void BorrowRegisterAround(X86RegisterAllocator* allocator,
   store->reg = owner->reg;
   store->flags |= TARGET_INST_PROCESSED;
   if (is_vector) {
-    store->flags |= X86_VECTOR_VALUE;
+    store->flags |= X86_VECTOR_VALUE | (owner->flags & X86_VECTOR_WIDTH_MASK);
   }
   TargetBasicBlockEmitBefore(&allocator->rv->base, inst->block, store, inst);
 

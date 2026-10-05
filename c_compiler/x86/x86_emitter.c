@@ -686,6 +686,20 @@ static bool FitsMemoryDisplacement(int64_t offset) {
   return offset >= INT32_MIN && offset <= INT32_MAX;
 }
 
+// Moves of a vector between an XMM register and memory, sized by the
+// instruction's X86_VECTOR_*BYTE flag.
+static const char* VectorLoadMnemonic(int flags) {
+  return (flags & X86_VECTOR_8BYTE) != 0   ? "movsd"
+         : (flags & X86_VECTOR_4BYTE) != 0 ? "movss"
+                                           : "movdqu";
+}
+
+static const char* VectorStoreMnemonic(int flags) {
+  return (flags & X86_VECTOR_8BYTE) != 0   ? "storesd"
+         : (flags & X86_VECTOR_4BYTE) != 0 ? "storess"
+                                           : "movdqu";
+}
+
 static bool MemoryOffsetFromOperand(TargetInstruction* offset_inst,
                                     int64_t* offset_out) {
   if (offset_inst == NULL) {
@@ -2207,7 +2221,7 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
       X86Register* reg = (X86Register*)inst->reg;
       int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
       const char* mov = (inst->flags & X86_VECTOR_VALUE) != 0
-                            ? "movdqu"
+                            ? VectorStoreMnemonic(inst->flags)
                             : reg->type == kX86RegTypeInt ? "movq" : "storesd";
       if (FitsMemoryDisplacement(-offset)) {
         fprintf(fp, "\t%s ", mov);
@@ -2249,7 +2263,7 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
       TargetInstruction* spill = inst->operand[0];
       int offset = (int)TargetIntValue(spill->operand[1]) + emitter->first_spill_offset;
       const char* mov = (spill->flags & X86_VECTOR_VALUE) != 0
-                            ? "movdqu"
+                            ? VectorLoadMnemonic(spill->flags)
                             : reg->type == kX86RegTypeInt ? "movq" : "movsd";
       if (FitsMemoryDisplacement(-offset)) {
         fprintf(fp, "\t%s -%d(%%rbp), ", mov, offset);
@@ -2318,7 +2332,7 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
           mov = "movsd";
           break;
         case X86_OP(loadv):
-          mov = "movdqu";
+          mov = VectorLoadMnemonic(inst->flags);
           break;
         case X86_OP(loadb):
           // Signed byte load must sign-extend into the full register; a plain
@@ -2429,7 +2443,7 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
           mov = "storesd";
           break;
         case X86_OP(storev):
-          mov = "movdqu";
+          mov = VectorStoreMnemonic(inst->flags);
           break;
         case X86_OP(storeb):
           mov = "movb";
@@ -5058,7 +5072,7 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
       X86Register* reg = (X86Register*)inst->reg;
       int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
       const char* mov = (inst->flags & X86_VECTOR_VALUE) != 0
-                            ? "movdqu"
+                            ? VectorStoreMnemonic(inst->flags)
                             : reg->type == kX86RegTypeInt ? "movl" : "storesd";
       if (FitsMemoryDisplacement(-offset)) {
         fprintf(fp, "\t%s ", mov);
@@ -5100,7 +5114,7 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
       TargetInstruction* spill = inst->operand[0];
       int offset = (int)TargetIntValue(spill->operand[1]) + emitter->first_spill_offset;
       const char* mov = (spill->flags & X86_VECTOR_VALUE) != 0
-                            ? "movdqu"
+                            ? VectorLoadMnemonic(spill->flags)
                             : reg->type == kX86RegTypeInt ? "movl" : "movsd";
       if (FitsMemoryDisplacement(-offset)) {
         fprintf(fp, "\t%s -%d(%%ebp), ", mov, offset);
@@ -5172,7 +5186,7 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
           mov = "movl";
           break;
         case X86_OP(loadv):
-          mov = "movdqu";
+          mov = VectorLoadMnemonic(inst->flags);
           break;
         case X86_OP(loadb):
           // Signed byte load must sign-extend into the full register; a plain
@@ -5283,7 +5297,7 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
           mov = "storesd";
           break;
         case X86_OP(storev):
-          mov = "movdqu";
+          mov = VectorStoreMnemonic(inst->flags);
           break;
         case X86_OP(storeb):
           mov = "movb";

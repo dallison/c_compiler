@@ -257,6 +257,12 @@ typedef enum {
 #define X86_PCREL_HI_RELOC 0x4000
 #define X86_PCREL_LO_RELOC 0x8000
 #define X86_VECTOR_VALUE 0x80
+// A vector value, load or store of an 8- or 4-byte vector: it moves through
+// memory with movsd/storesd or movss/storess, since movdqu would touch the
+// bytes past it.
+#define X86_VECTOR_8BYTE 0x8000000
+#define X86_VECTOR_4BYTE 0x10000000
+#define X86_VECTOR_WIDTH_MASK (X86_VECTOR_8BYTE | X86_VECTOR_4BYTE)
 #define X86_EXPORTED_LABEL 0x10000
 #define X86_UNSIGNED_MOD 0x20000
 #define X86_GOTPCREL_RELOC 0x40000

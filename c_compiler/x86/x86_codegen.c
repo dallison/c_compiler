@@ -3206,6 +3206,20 @@ static TargetInstruction* LowerNamedLabel(X86Generator* rv, IRNode* label) {
   return inst;
 }
 
+// The X86_VECTOR_*BYTE flag for moving a `type` vector (or the vector a `type`
+// pointer addresses) through memory; 0 for a full 16-byte move.
+static int X86VectorWidthFlags(TypeRecord* type) {
+  if (type != NULL && TypeIsPointer(type)) {
+    type = type->next;
+  }
+  if (type == NULL || !TypeIsVector(type)) {
+    return 0;
+  }
+  return type->size == 8 ? X86_VECTOR_8BYTE
+         : type->size == 4 ? X86_VECTOR_4BYTE
+                           : 0;
+}
+
 static TargetInstruction* LowerResult(X86Generator* rv, Generator* gen,
                                       IRNode* node) {
   assert(node->inputs.length == 1);
@@ -3221,9 +3235,12 @@ static TargetInstruction* LowerResult(X86Generator* rv, Generator* gen,
         rv, NewInstruction2(
                 X86_OP(loadv), address,
                 GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+    int width = X86VectorWidthFlags(
+        ((IRNode*)node->inputs.value.p[0])->type);
+    load->flags |= width;
     TargetInstruction* result_reg =
         EmitSymbol(rv, NewInstruction(X86_OP(resultv)));
-    result_reg->flags |= X86_VECTOR_VALUE;
+    result_reg->flags |= X86_VECTOR_VALUE | width;
     load->dest = result_reg;
     return SetLoweredNode(node, load);
   }
@@ -3256,11 +3273,13 @@ static TargetInstruction* LowerCaptureVectorResult(X86Generator* rv,
   assert(node->inputs.length == 2);
   TargetInstruction* destination = Materialize(rv, node->inputs.value.p[0]);
   TargetInstruction* call = Materialize(rv, node->inputs.value.p[1]);
-  call->flags |= X86_VECTOR_VALUE;
+  int width = X86VectorWidthFlags(((IRNode*)node->inputs.value.p[1])->type);
+  call->flags |= X86_VECTOR_VALUE | width;
   TargetInstruction* store = Emit(
       rv, NewInstruction3(
               X86_OP(storev), call, destination,
               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  store->flags |= width;
   return SetLoweredNode(node, store);
 }
 
@@ -3347,13 +3366,17 @@ static TargetInstruction* LowerVectorOperation(X86Generator* rv,
     left = right;
     right = temporary;
   }
+  int width = X86VectorWidthFlags(vector_type);
+  left->flags |= width;
+  right->flags |= width;
   TargetInstruction* operation =
       Emit(rv, NewInstruction2(opcode, left, right));
-  operation->flags |= X86_VECTOR_VALUE;
+  operation->flags |= X86_VECTOR_VALUE | width;
   TargetInstruction* store = Emit(
       rv, NewInstruction3(
               X86_OP(storev), operation, destination,
               GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  store->flags |= width;
   return SetLoweredNode(node, store);
 }
 
@@ -4597,6 +4620,7 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
               rv, NewInstruction2(
                       X86_OP(loadv), address,
                       GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+          load->flags |= X86VectorWidthFlags(arg_node->type);
           load->dest = arg_location->location.reg;
           break;
         }
