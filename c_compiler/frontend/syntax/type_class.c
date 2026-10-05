@@ -157,6 +157,46 @@ static bool TemplateArgumentContainsParameterPack(Syntax* syntax,
   return arg->type != NULL && TypeContainsParameterPack(syntax, arg->type);
 }
 
+// Like TypeContainsParameterPack, but a pack expanded inside one of the type's
+// template arguments (`Base<Ts...>`) does not count: only a pack named with
+// no enclosing `...` does.
+bool TypeContainsUnexpandedParameterPack(Syntax* syntax, TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (current->is_pack_index) {
+      // `Ts...[I]` names one element of the pack.
+      continue;
+    }
+    int parameter_index = -1;
+    if (TypeIsTemplateParameterPlaceholder(current, &parameter_index) &&
+        CurrentTemplateParameterIsPack(syntax, parameter_index)) {
+      return true;
+    }
+    if (current->template_parameter_index >= 0 &&
+        CurrentTemplateParameterIsPack(syntax,
+                                       current->template_parameter_index)) {
+      return true;
+    }
+    for (size_t i = 0; current->template_arguments != NULL &&
+                       i < current->template_arguments->length;
+         i++) {
+      TemplateArgument* arg = current->template_arguments->value.p[i];
+      if (arg == NULL || arg->is_pack_expansion) {
+        continue;
+      }
+      if (arg->template_parameter_index >= 0 &&
+          CurrentTemplateParameterIsPack(syntax,
+                                         arg->template_parameter_index)) {
+        return true;
+      }
+      if (arg->type != NULL &&
+          TypeContainsUnexpandedParameterPack(syntax, arg->type)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static TemplateArgument* NewTemplateParameterPatternArgument(
     TemplateParameter* param) {
   if (param == NULL) {

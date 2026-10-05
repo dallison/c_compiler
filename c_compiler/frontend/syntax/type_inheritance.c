@@ -188,6 +188,14 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
       TypeRecordDelete(base_type);
       continue;
     }
+    if (!is_pack_expansion && base_type != NULL &&
+        TypeContainsUnexpandedParameterPack(parser->syntax, base_type)) {
+      SyntaxError(parser->syntax,
+                  "base specifier contains an unexpanded parameter pack; "
+                  "add '...' to expand it");
+      TypeRecordDelete(base_type);
+      continue;
+    }
     bool allow_dependent_pack_base =
         is_pack_expansion && pack_expansion_names_pack;
     bool is_dependent_named_base =
