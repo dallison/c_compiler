@@ -258,6 +258,7 @@ typedef struct {
   bool is_constexpr_eligible;  // C++ constexpr-suitable.           // @wire 31
   bool is_noexcept_eligible;   // C++ nothrow special member.       // @wire 32
   bool is_noexcept;            // C++ declared non-throwing.        // @wire 33
+  bool has_exception_specifier;  // C++ noexcept/throw() was written. // @wire -
   bool is_auto_return_deduced;  // C++ auto return deduced.         // @wire 34
   bool is_deduction_guide;  // C++ class template deduction guide.  // @wire 35
   bool is_coroutine;  // C++ coroutine function.                    // @wire 36

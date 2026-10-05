@@ -4020,6 +4020,9 @@ void ParseCXXExceptionSpecifier(TypeParser* parser, TypeRecord* func) {
     return;
   }
   if (LexMatch(parser->lex, TOK(noexcept))) {
+    if (func != NULL) {
+      func->info.function.has_exception_specifier = true;
+    }
     bool is_noexcept = true;
     if (LexMatch(parser->lex, TOK(lparen))) {
       if (parser->deferred_noexcept_specifiers != NULL) {
@@ -4073,6 +4076,9 @@ void ParseCXXExceptionSpecifier(TypeParser* parser, TypeRecord* func) {
   }
   if (LexMatch(parser->lex, TOK(throw))) {
     if (LexLookingAt(parser->lex, TOK(lparen))) {
+      if (func != NULL) {
+        func->info.function.has_exception_specifier = true;
+      }
       // `throw()` is the deprecated non-throwing spec; `throw(types)` is a
       // dynamic specification that permits throwing the listed types.
       LexNextToken(parser->lex);  // Consume '('.

@@ -2906,6 +2906,32 @@ static void CXXRefreshImplicitSpecialMembers(Struct* str) {
   }
 }
 
+// A destructor declared without a noexcept-specifier has the exception
+// specification of the implicit destructor ([except.spec]/8), which depends on
+// the bases and members, so it is decided once they are all known.
+static void CXXResolveDestructorExceptionSpecification(Struct* str) {
+  if (str == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* member = str->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      TypeRecord* func = member->is_member_function && member->symbol != NULL
+                             ? member->symbol->type
+                             : NULL;
+      if (func == NULL || !TypeIsFunction(func) ||
+          !func->info.function.is_destructor ||
+          func->info.function.is_implicitly_declared ||
+          func->info.function.has_exception_specifier) {
+        continue;
+      }
+      func->info.function.is_noexcept =
+          !func->info.function.is_deleted &&
+          CXXImplicitSpecialMemberIsNoexcept(str, kCXXSpecialMemberDestructor);
+    }
+  }
+}
+
 static void CXXRefreshUnionDefaultedSpecialMembers(Struct* str) {
   if (str == NULL || !str->is_union) {
     return;
@@ -3143,6 +3169,7 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
   }
   CXXRefreshUnionDefaultedSpecialMembers(str);
   CXXRefreshImplicitSpecialMembers(str);
+  CXXResolveDestructorExceptionSpecification(str);
   str->cxx_special_members_complete = true;
 }
 

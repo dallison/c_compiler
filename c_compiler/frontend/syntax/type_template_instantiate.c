@@ -2199,6 +2199,8 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_noexcept_eligible =
       from->info.function.is_noexcept_eligible;
   func->info.function.is_noexcept = from->info.function.is_noexcept;
+  func->info.function.has_exception_specifier =
+      from->info.function.has_exception_specifier;
   func->info.function.is_auto_return_deduced =
       from->info.function.is_auto_return_deduced;
   func->info.function.is_decltype_auto_return_deduced =
@@ -2762,6 +2764,8 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_noexcept_eligible =
       from->info.function.is_noexcept_eligible;
   func->info.function.is_noexcept = from->info.function.is_noexcept;
+  func->info.function.has_exception_specifier =
+      from->info.function.has_exception_specifier;
   func->info.function.is_auto_return_deduced =
       from->info.function.is_auto_return_deduced;
   func->info.function.is_decltype_auto_return_deduced =
