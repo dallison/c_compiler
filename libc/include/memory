@@ -551,6 +551,27 @@ void destroy_at(T* location) {
   location->~T();
 }
 #endif
+
+template <class ForwardIt>
+#if __cplusplus >= 202002L
+constexpr
+#endif
+void destroy(ForwardIt first, ForwardIt last) {
+  for (; first != last; ++first) {
+    std::destroy_at(std::addressof(*first));
+  }
+}
+
+template <class ForwardIt, class Size>
+#if __cplusplus >= 202002L
+constexpr
+#endif
+ForwardIt destroy_n(ForwardIt first, Size count) {
+  for (; count > 0; (void)++first, --count) {
+    std::destroy_at(std::addressof(*first));
+  }
+  return first;
+}
 #endif
 
 template <class T, class U>

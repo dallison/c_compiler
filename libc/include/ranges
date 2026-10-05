@@ -670,6 +670,38 @@ template <range R>
 using borrowed_iterator_t =
     conditional_t<borrowed_range<R>, iterator_t<R>, dangling>;
 
+// [specialized.destroy] -------------------------------------------------------
+// These belong to <memory>, but <memory> cannot include <ranges>, which
+// includes <memory>.
+template <destructible T>
+constexpr void destroy_at(T* location) noexcept {
+  std::destroy_at(location);
+}
+
+template <input_iterator I, sentinel_for<I> S>
+  requires destructible<iter_value_t<I>>
+constexpr I destroy(I first, S last) noexcept {
+  for (; first != last; ++first) {
+    std::destroy_at(std::addressof(*first));
+  }
+  return first;
+}
+
+template <input_range R>
+  requires destructible<range_value_t<R>>
+constexpr borrowed_iterator_t<R> destroy(R&& r) noexcept {
+  return ranges::destroy(ranges::begin(r), ranges::end(r));
+}
+
+template <input_iterator I>
+  requires destructible<iter_value_t<I>>
+constexpr I destroy_n(I first, iter_difference_t<I> count) noexcept {
+  for (; count > 0; ++first, --count) {
+    std::destroy_at(std::addressof(*first));
+  }
+  return first;
+}
+
 // [range.move.wrap] __movable_box ---------------------------------------------
 // A wrapper that gives a move-constructible object the copy/move assignment a
 // view needs to store predicates and function objects (whose closure types are

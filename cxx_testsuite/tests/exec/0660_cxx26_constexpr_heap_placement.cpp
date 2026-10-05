@@ -34,9 +34,7 @@ constexpr int construct_at_in_allocator_storage() {
   for (int i = 0; i < 3; ++i) {
     result += storage[i].a + storage[i].b;
   }
-  for (int i = 0; i < 3; ++i) {
-    std::destroy_at(storage + i);
-  }
+  std::destroy(storage, storage + 3);
   alloc.deallocate(storage, 3);
   return result;
 }
