@@ -3771,11 +3771,14 @@ static ASTNode* VirtualCalleeReceiverCopy(VectorASTNode* node) {
 }
 
 static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
-  if (gen->for_constant_evaluation &&
-      ConstexprMemoryCopyTypesDiffer(&node->base)) {
+  int memory_function = gen->for_constant_evaluation
+                            ? ConstexprMemoryFunctionCall(&node->base)
+                            : -1;
+  if (memory_function >= 0) {
     GenerateConstexprLifetimeMarker(
         gen, ConstexprMarkerNullAddress(gen),
-        CONSTEXPR_PCODE_MEMCPY_TYPE_MISMATCH_MARKER, 0, node->base.location);
+        CONSTEXPR_PCODE_MEMORY_FUNCTION_MARKER, (uint64_t)memory_function,
+        node->base.location);
   }
   if (node->left != NULL &&
       (node->left->op == AST_OP(dotstar) || node->left->op == AST_OP(arrowstar))) {

@@ -25,8 +25,9 @@
 #define CONSTEXPR_PCODE_ERRONEOUS_OBJECT_MARKER UINT64_C(0xfffffff6)
 // A bit_cast involving a pointer, reference, union or volatile subobject.
 #define CONSTEXPR_PCODE_BIT_CAST_FORBIDDEN_MARKER UINT64_C(0xfffffff5)
-// memcpy/memmove between objects of different types.
-#define CONSTEXPR_PCODE_MEMCPY_TYPE_MISMATCH_MARKER UINT64_C(0xfffffff4)
+// A call to a non-constexpr C memory function.  The type token is its
+// ConstexprMemoryFunctionCall index.
+#define CONSTEXPR_PCODE_MEMORY_FUNCTION_MARKER UINT64_C(0xfffffff4)
 
 typedef enum {
   kConstexprPCodeEligible,

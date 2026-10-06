@@ -94,8 +94,20 @@ bool ConstexprEvaluateBitCastAsInteger(ConstEvalContext* ctx, ASTNode* node,
                                        int64_t* result);
 bool ConstexprEvaluateBitCastAsFloating(ConstEvalContext* ctx, ASTNode* node,
                                         double* result);
-// memcpy/memmove between objects whose static types differ.
-bool ConstexprMemoryCopyTypesDiffer(ASTNode* call);
+// The slots of a ConstexprObject of class type are its non-virtual bases, then
+// its virtual bases, then its members; an array has one slot per element and
+// a union a single slot.
+size_t ConstexprObjectSlotCount(TypeRecord* type);
+size_t ConstexprBaseStorageIndex(Struct* str, size_t base_vector_index);
+size_t ConstexprMemberStorageIndex(Struct* str, StructMember* member);
+// The subobject of `object` (itself or a base) that declares `member`.
+ConstexprObject* ConstexprObjectForMember(ConstexprObject* object,
+                                          StructMember* member);
+// Whether a class has a non-static data member, directly or in a base.
+bool ConstexprClassHasData(TypeRecord* type);
+// A call to the C library memcpy, memmove or memcmp, which are not constexpr:
+// returns 0, 1 or 2 respectively, or -1 for any other call.
+int ConstexprMemoryFunctionCall(ASTNode* call);
 bool ConstexprEvaluateCall(ConstEvalContext* ctx, ASTNode* node);
 bool ConstexprEvaluateConstructorCallForSymbol(ConstEvalContext* ctx,
                                                ASTNode* node,

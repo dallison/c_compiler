@@ -83,6 +83,7 @@ struct ConstexprBinding {
   bool durable;
 };
 
+// Must match the definition in constexpr_pcode.c: objects pass between the two.
 struct ConstexprObject {
   TypeRecord* type;
   Vector slots;  // ConstexprValue*
@@ -137,7 +138,6 @@ static ConstexprValue ConstexprResolveForwardedAddress(ConstexprValue value);
 static ConstexprObject* NewConstexprObject(ConstEvalContext* ctx,
                                            TypeRecord* type,
                                            size_t slot_count);
-static size_t ConstexprObjectSlotCount(TypeRecord* type);
 static ConstexprValue* ConstexprObjectSlot(ConstexprObject* object,
                                            size_t index);
 static void PushConstexprBinding(ConstEvalContext* ctx, Symbol* symbol,
@@ -1485,7 +1485,7 @@ static size_t ConstexprNonVirtualBaseCount(Struct* str) {
   return count;
 }
 
-static size_t ConstexprBaseStorageIndex(Struct* str, size_t base_vector_index) {
+size_t ConstexprBaseStorageIndex(Struct* str, size_t base_vector_index) {
   size_t storage = 0;
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
@@ -1505,7 +1505,7 @@ static size_t ConstexprVirtualBaseStorageIndex(Struct* str,
   return ConstexprNonVirtualBaseCount(str) + virtual_base_index;
 }
 
-static size_t ConstexprMemberStorageIndex(Struct* str, StructMember* member) {
+size_t ConstexprMemberStorageIndex(Struct* str, StructMember* member) {
   if (str == NULL || member == NULL || str->is_union) {
     return member != NULL ? member->index : 0;
   }
@@ -1513,7 +1513,7 @@ static size_t ConstexprMemberStorageIndex(Struct* str, StructMember* member) {
          member->index;
 }
 
-static size_t ConstexprObjectSlotCount(TypeRecord* type) {
+size_t ConstexprObjectSlotCount(TypeRecord* type) {
   if (type != NULL && TypeIsFixedArray(type)) {
     return type->info.array.size.fixed;
   }
@@ -1842,8 +1842,8 @@ static size_t ConstexprMemberSlotIndex(ConstexprObject* object,
   return ConstexprMemberStorageIndex(object->type->info.struct_info, member);
 }
 
-static ConstexprObject* ConstexprObjectForMember(ConstexprObject* object,
-                                                 StructMember* member) {
+ConstexprObject* ConstexprObjectForMember(ConstexprObject* object,
+                                          StructMember* member) {
   if (object == NULL || member == NULL || object->type == NULL ||
       !TypeIsStructOrUnion(object->type) ||
       object->type->info.struct_info == NULL) {
@@ -9769,44 +9769,6 @@ static bool EvaluateConstexprExceptionCall(ConstEvalContext* ctx,
   return false;
 }
 
-static bool ConstexprReadByte(ConstexprValue address, size_t offset,
-                              unsigned char* result) {
-  if (result == NULL || !address.is_address) {
-    return false;
-  }
-  ConstexprCanonicalizeAddressValue(&address);
-  if (address.heap_block != NULL && address.heap_block->live) {
-    if (address.heap_index > address.heap_block->size ||
-        offset > address.heap_block->size - address.heap_index) {
-      return false;
-    }
-    size_t index = address.heap_index + offset;
-    if (index >= address.heap_block->size ||
-        (ValueState)address.heap_block->states[index] != kValueStateValid) {
-      return false;
-    }
-    *result = address.heap_block->memory[index];
-    return true;
-  }
-  ConstexprObject* object = address.address_object;
-  size_t index = address.address_index;
-  if (object == NULL && address.address_slot != NULL &&
-      address.address_slot->is_object) {
-    object = address.address_slot->object;
-    index = 0;
-  }
-  if (object == NULL || offset > SIZE_MAX - index) {
-    return false;
-  }
-  ConstexprValue* slot = ConstexprObjectSlot(object, index + offset);
-  int64_t value = 0;
-  if (slot == NULL || !ConstexprValueAsInteger(*slot, &value)) {
-    return false;
-  }
-  *result = (unsigned char)value;
-  return true;
-}
-
 static bool ConstexprBitCastScalarType(TypeRecord* type) {
   return type != NULL && type->size > 0 && type->size <= 8 &&
          (TypeIsIntegral(type) || TypeIsFloatingPoint(type)) &&
@@ -9855,54 +9817,24 @@ static ConstexprValue ConstexprScalarFromBits(uint64_t bits,
   return (ConstexprValue){.ivalue = integer};
 }
 
-// The type an argument pointed to before its conversion to void*.
-static TypeRecord* ConstexprPointeeTypeBeforeVoidCast(ASTNode* argument) {
-  while (argument != NULL && argument->op == AST_OP(cast) &&
-         TypeIsPointer(argument->type) && argument->type->next != NULL &&
-         TypeIsVoid(argument->type->next)) {
-    argument = ((CastASTNode*)argument)->expr;
-  }
-  return argument != NULL &&
-                 (TypeIsPointer(argument->type) || TypeIsArray(argument->type))
-             ? argument->type->next
-             : NULL;
-}
+static const char* const constexpr_memory_functions[] = {"memcpy", "memmove",
+                                                         "memcmp"};
 
-static bool ConstexprIsMemoryCopyCall(ASTNode* node) {
+int ConstexprMemoryFunctionCall(ASTNode* node) {
   Symbol* symbol = ConstexprCallSymbol(node);
-  return node != NULL && node->op == AST_OP(call) && symbol != NULL &&
-         symbol->name.value != NULL &&
-         (strcmp(symbol->name.value, "memcpy") == 0 ||
-          strcmp(symbol->name.value, "__builtin_memcpy") == 0 ||
-          strcmp(symbol->name.value, "memmove") == 0 ||
-          strcmp(symbol->name.value, "__builtin_memmove") == 0) &&
-         ((VectorASTNode*)node)->children != NULL &&
-         ((VectorASTNode*)node)->children->length == 3;
-}
-
-static TypeRecord* ConstexprCopiedElementType(TypeRecord* type) {
-  while (type != NULL && TypeIsArray(type)) {
-    type = type->next;
+  if (node == NULL || node->op != AST_OP(call) || symbol == NULL ||
+      symbol->name.value == NULL || !TypeIsFunction(symbol->type) ||
+      symbol->type->info.function.is_constexpr) {
+    return -1;
   }
-  return type;
-}
-
-// A constant expression may copy bytes only between objects of one type;
-// reinterpreting them is std::bit_cast's job.  Only the static types are
-// known here, so a copy through a plain void* is not judged.
-bool ConstexprMemoryCopyTypesDiffer(ASTNode* node) {
-  if (!ConstexprIsMemoryCopyCall(node)) {
-    return false;
+  for (size_t i = 0; i < sizeof(constexpr_memory_functions) /
+                             sizeof(constexpr_memory_functions[0]);
+       i++) {
+    if (strcmp(symbol->name.value, constexpr_memory_functions[i]) == 0) {
+      return (int)i;
+    }
   }
-  VectorASTNode* call = (VectorASTNode*)node;
-  TypeRecord* written = ConstexprCopiedElementType(
-      ConstexprPointeeTypeBeforeVoidCast(call->children->value.p[0]));
-  TypeRecord* read = ConstexprCopiedElementType(
-      ConstexprPointeeTypeBeforeVoidCast(call->children->value.p[1]));
-  return written != NULL && read != NULL && !TypeIsVoid(written) &&
-         !TypeIsVoid(read) &&
-         !TypeEqualIgnoringTopLevelQualifierMask(written, read,
-                                                 kQualConst | kQualVolatile);
+  return -1;
 }
 
 static bool ConstexprBitCastStructMember(StructMember* member) {
@@ -9912,7 +9844,7 @@ static bool ConstexprBitCastStructMember(StructMember* member) {
          !TypeIsFunction(member->symbol->type);
 }
 
-static bool ConstexprBitCastTypeHasData(TypeRecord* type) {
+bool ConstexprClassHasData(TypeRecord* type) {
   Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
   if (str == NULL) {
     return true;
@@ -9928,7 +9860,7 @@ static bool ConstexprBitCastTypeHasData(TypeRecord* type) {
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
     if (base == NULL || base->is_virtual ||
-        ConstexprBitCastTypeHasData(base->type)) {
+        ConstexprClassHasData(base->type)) {
       return true;
     }
   }
@@ -9983,7 +9915,7 @@ static bool ConstexprBitCastWrite(TypeRecord* type, ConstexprValue* value,
       return false;
     }
     // An empty base has no bytes of its own.
-    if (!ConstexprBitCastTypeHasData(base->type)) {
+    if (!ConstexprClassHasData(base->type)) {
       continue;
     }
     ConstexprValue* slot =
@@ -10142,116 +10074,14 @@ bool ConstexprEvaluateBitCastAsFloating(ConstEvalContext* ctx, ASTNode* node,
          ConstexprValueAsFloating(value, result);
 }
 
-// A memcpy of one scalar object over another of the same type.
-static bool ConstexprTryEvaluateScalarCopy(ConstEvalContext* ctx,
-                                           ASTNode* node,
-                                           ConstexprValue* result) {
-  if (ctx == NULL || result == NULL || !ConstexprIsMemoryCopyCall(node)) {
-    return false;
-  }
-  VectorASTNode* call = (VectorASTNode*)node;
-  // Decided before evaluating anything, so a call this does not take is not
-  // left with its arguments' side effects applied.
-  TypeRecord* written =
-      ConstexprPointeeTypeBeforeVoidCast(call->children->value.p[0]);
-  TypeRecord* read =
-      ConstexprPointeeTypeBeforeVoidCast(call->children->value.p[1]);
-  if (!ConstexprBitCastScalarType(written) ||
-      !ConstexprBitCastScalarType(read) ||
-      !TypeEqualIgnoringTopLevelQualifierMask(written, read,
-                                              kQualConst | kQualVolatile)) {
-    return false;
-  }
-  ConstexprValue destination = {0};
-  ConstexprValue source = {0};
-  int64_t count = 0;
-  if (!EvaluateConstexprAddressValue(ctx, call->children->value.p[0],
-                                     &destination) ||
-      !EvaluateConstexprAddressValue(ctx, call->children->value.p[1],
-                                     &source) ||
-      !EvaluateIntegerExpressionInContext(ctx, call->children->value.p[2],
-                                          &count)) {
-    return false;
-  }
-  destination = ConstexprResolveForwardedAddress(destination);
-  source = ConstexprResolveForwardedAddress(source);
-  TypeRecord* destination_type = ConstexprAddressPointeeType(ctx, destination);
-  if (destination.address_binding == NULL || destination_type == NULL ||
-      destination_type->size != written->size || count != written->size) {
-    return false;
-  }
-  ConstexprValue value = {0};
-  if (!ConstexprDereferenceAddress(source, &value) || value.is_address ||
-      value.is_object || value.state != kValueStateValid) {
-    return false;
-  }
-  if (!StoreConstexprBinding(
-          ctx, destination.address_binding, written,
-          ConstexprScalarFromBits(ConstexprScalarBits(value, read),
-                                  written))) {
-    return false;
-  }
-  *result = destination;
-  return true;
-}
-
-static bool ConstexprTryEvaluateMemoryComparison(ConstEvalContext* ctx,
-                                                 ASTNode* node,
-                                                 ConstexprValue* result) {
-  Symbol* symbol = ConstexprCallSymbol(node);
-  if (ctx == NULL || node == NULL || node->op != AST_OP(call) ||
-      result == NULL || symbol == NULL || symbol->name.value == NULL ||
-      (strcmp(symbol->name.value, "memcmp") != 0 &&
-       strcmp(symbol->name.value, "__builtin_memcmp") != 0)) {
-    return false;
-  }
-  VectorASTNode* call = (VectorASTNode*)node;
-  if (call->children == NULL || call->children->length != 3) {
-    return false;
-  }
-  ConstexprValue left = {0};
-  ConstexprValue right = {0};
-  int64_t count = 0;
-  if (!EvaluateConstexprAddressValue(ctx, call->children->value.p[0], &left) ||
-      !EvaluateConstexprAddressValue(ctx, call->children->value.p[1], &right) ||
-      !EvaluateIntegerExpressionInContext(ctx, call->children->value.p[2],
-                                          &count) ||
-      count < 0) {
-    return false;
-  }
-  for (int64_t i = 0; i < count; i++) {
-    if (!ConstEvalStep(ctx)) {
-      return false;
-    }
-    unsigned char left_byte = 0;
-    unsigned char right_byte = 0;
-    if (!ConstexprReadByte(left, (size_t)i, &left_byte) ||
-        !ConstexprReadByte(right, (size_t)i, &right_byte)) {
-      return false;
-    }
-    if (left_byte != right_byte) {
-      *result = (ConstexprValue){
-          .ivalue = left_byte < right_byte ? -1 : 1,
-      };
-      return true;
-    }
-  }
-  *result = (ConstexprValue){0};
-  return true;
-}
-
 bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
                                   ConstexprValue* result) {
   if (ctx->call_depth >= CONSTEXPR_MAX_CALL_DEPTH) {
     return false;
   }
   *result = (ConstexprValue){0};
-  if (ConstexprMemoryCopyTypesDiffer(node)) {
+  if (ConstexprMemoryFunctionCall(node) >= 0) {
     return false;
-  }
-  if (ConstexprTryEvaluateMemoryComparison(ctx, node, result) ||
-      ConstexprTryEvaluateScalarCopy(ctx, node, result)) {
-    return true;
   }
   Symbol* allocation_symbol = ConstexprCallSymbol(node);
   bool exception_call = false;

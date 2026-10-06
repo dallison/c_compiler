@@ -301,6 +301,7 @@ static ConstexprValue* PCodeConstexprSlotForOffset(TypeRecord* type,
                                                    size_t offset);
 static void DeletePCodeConstexprObject(ConstexprObject* object);
 static ConstexprObject* NewPCodeConstexprObject(TypeRecord* type);
+static size_t PCodeConstexprMemberSlotIndex(Struct* str, StructMember* member);
 static bool RegisterConstexprPCodeStaticData(Symbol* symbol);
 static bool RegisterConstexprPCodeLiteral(const char* name);
 static ConstexprPCodeStaticData* FindConstexprPCodeStaticData(const char* name);
@@ -577,11 +578,13 @@ struct ConstexprValue {
   size_t heap_index;
 };
 
+// Must match the definition in constexpr.c: objects pass between the two.
 struct ConstexprObject {
   TypeRecord* type;
   Vector slots;
   StructMember* active_union_member;
   bool lifetime_ended;
+  bool destroyed;
   ConstexprObject* complete_object;
   size_t complete_offset;
 };
@@ -592,12 +595,6 @@ struct ConstexprObject {
 // private to these two translation units.
 bool ConstexprValueAsInteger(ConstexprValue value, int64_t* result);
 bool ConstexprValueAsFloating(ConstexprValue value, double* result);
-
-static bool PCodeConstexprObjectIsUnion(ConstexprObject* object) {
-  return object != NULL && TypeIsStructOrUnion(object->type) &&
-         object->type->info.struct_info != NULL &&
-         object->type->info.struct_info->is_union;
-}
 
 static void ConstexprPCodeImageInit(ConstexprPCodeImage* image) {
   image->text = NULL;
@@ -1744,6 +1741,29 @@ static bool StoreConstexprObjectBytes(TypeRecord* type, ConstexprObject* object,
   }
   if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
     Struct* str = type->info.struct_info;
+    if (str->virtual_bases.length != 0) {
+      return false;
+    }
+    for (size_t i = 0; i < str->bases.length; i++) {
+      CXXBaseSpecifier* base = str->bases.value.p[i];
+      if (base == NULL || base->is_virtual) {
+        return false;
+      }
+      if (!ConstexprClassHasData(base->type)) {
+        continue;
+      }
+      ConstexprValue* slot = PCodeConstexprObjectSlot(
+          object, ConstexprBaseStorageIndex(str, i));
+      if (slot == NULL) {
+        return false;
+      }
+      // The AST evaluator creates a base subobject only once it is written.
+      if (slot->is_object &&
+          !StoreConstexprObjectBytes(base->type, slot->object,
+                                     dest + base->byte_offset)) {
+        return false;
+      }
+    }
     for (size_t i = 0; i < str->members.length; i++) {
       StructMember* member = str->members.value.p[i];
       if (member == NULL || member->symbol == NULL || member->is_static ||
@@ -1756,8 +1776,8 @@ static bool StoreConstexprObjectBytes(TypeRecord* type, ConstexprObject* object,
            object->active_union_member != member)) {
         continue;
       }
-      size_t slot_index = str->is_union ? 0 : member->index;
-      ConstexprValue* slot = PCodeConstexprObjectSlot(object, slot_index);
+      ConstexprValue* slot = PCodeConstexprObjectSlot(
+          object, PCodeConstexprMemberSlotIndex(str, member));
       unsigned char* member_dest = dest + member->byte_offset;
       if (slot != NULL && slot->is_object) {
         if (!StoreConstexprObjectBytes(member->symbol->type, slot->object,
@@ -2078,6 +2098,24 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
       *result = object;
       return true;
     }
+    if (str->virtual_bases.length != 0) {
+      DeletePCodeConstexprObject(object);
+      return false;
+    }
+    for (size_t i = 0; i < str->bases.length; i++) {
+      CXXBaseSpecifier* base = str->bases.value.p[i];
+      ConstexprValue* slot =
+          base != NULL && !base->is_virtual
+              ? PCodeConstexprObjectSlot(object,
+                                         ConstexprBaseStorageIndex(str, i))
+              : NULL;
+      if (slot == NULL ||
+          !LoadConstexprValueBytes(base->type, src + base->byte_offset,
+                                   runtime, slot)) {
+        DeletePCodeConstexprObject(object);
+        return false;
+      }
+    }
     for (size_t i = 0; i < str->members.length; i++) {
       StructMember* member = str->members.value.p[i];
       if (member == NULL || member->symbol == NULL || member->is_static ||
@@ -2096,8 +2134,8 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
           continue;
         }
       }
-      size_t slot_index = str->is_union ? 0 : member->index;
-      ConstexprValue* slot = PCodeConstexprObjectSlot(object, slot_index);
+      ConstexprValue* slot = PCodeConstexprObjectSlot(
+          object, PCodeConstexprMemberSlotIndex(str, member));
       if (slot == NULL ||
           !LoadConstexprValueBytes(member->symbol->type,
                                    src + member->byte_offset, runtime, slot)) {
@@ -2159,9 +2197,11 @@ static ConstexprObject* ConstexprObjectArgument(ASTNode* arg) {
         member_access->right->op == AST_OP(structmember)) {
       StructMember* member =
           ((StructMemberASTNode*)member_access->right)->member;
-      if (member != NULL) {
-        size_t slot_index = PCodeConstexprObjectIsUnion(object) ? 0 : member->index;
-        ConstexprValue* slot = PCodeConstexprObjectSlot(object, slot_index);
+      ConstexprObject* owner = ConstexprObjectForMember(object, member);
+      if (owner != NULL) {
+        ConstexprValue* slot = PCodeConstexprObjectSlot(
+            owner, PCodeConstexprMemberSlotIndex(owner->type->info.struct_info,
+                                                 member));
         return slot != NULL && slot->is_object ? slot->object : NULL;
       }
     }
@@ -4493,10 +4533,16 @@ static PCodeVMStatus ConstexprPCodeEscapeStartLifetime(
         runtime, "bit_cast of a pointer, reference, union or volatile "
                  "subobject is not a constant expression");
   }
-  if (size == CONSTEXPR_PCODE_MEMCPY_TYPE_MISMATCH_MARKER) {
+  if (size == CONSTEXPR_PCODE_MEMORY_FUNCTION_MARKER) {
+    static const char* const reasons[] = {
+        "call to non-constexpr function 'memcpy'",
+        "call to non-constexpr function 'memmove'",
+        "call to non-constexpr function 'memcmp'",
+    };
     return ConstexprPCodeTypingFailure(
-        runtime, "memcpy between objects of different types is not a "
-                 "constant expression");
+        runtime, type_token < sizeof(reasons) / sizeof(reasons[0])
+                     ? reasons[type_token]
+                     : "call to a non-constexpr function");
   }
   if (size == CONSTEXPR_PCODE_INDETERMINATE_OBJECT_MARKER ||
       size == CONSTEXPR_PCODE_ERRONEOUS_OBJECT_MARKER) {
@@ -6158,12 +6204,11 @@ static size_t PCodeConstexprObjectSlotCount(TypeRecord* type) {
     }
     return count;
   }
-  if (type != NULL && TypeIsStructOrUnion(type) &&
-      type->info.struct_info != NULL) {
-    return type->info.struct_info->is_union ? 1
-                                            : type->info.struct_info->members.length;
-  }
-  return 0;
+  return ConstexprObjectSlotCount(type);
+}
+
+static size_t PCodeConstexprMemberSlotIndex(Struct* str, StructMember* member) {
+  return str->is_union ? 0 : ConstexprMemberStorageIndex(str, member);
 }
 
 static void DeletePCodeConstexprObject(ConstexprObject* object) {
@@ -6193,6 +6238,7 @@ static ConstexprObject* NewPCodeConstexprObject(TypeRecord* type) {
   object->type = type;
   object->active_union_member = NULL;
   object->lifetime_ended = false;
+  object->destroyed = false;
   object->complete_object = object;
   object->complete_offset = 0;
   VectorInit(&object->slots);
@@ -6254,8 +6300,8 @@ static ConstexprValue* PCodeConstexprSlotForOffset(TypeRecord* type,
           offset >= member->byte_offset + member_size) {
         continue;
       }
-      size_t slot_index = str->is_union ? 0 : member->index;
-      ConstexprValue* slot = PCodeConstexprObjectSlot(object, slot_index);
+      ConstexprValue* slot = PCodeConstexprObjectSlot(
+          object, PCodeConstexprMemberSlotIndex(str, member));
       size_t member_offset = offset - member->byte_offset;
       if (slot == NULL) {
         return NULL;
@@ -6265,6 +6311,23 @@ static ConstexprValue* PCodeConstexprSlotForOffset(TypeRecord* type,
       }
       return PCodeConstexprSlotForOffset(member->symbol->type, slot->object,
                                          member_offset);
+    }
+    for (size_t i = 0; i < str->bases.length; i++) {
+      CXXBaseSpecifier* base = str->bases.value.p[i];
+      if (base == NULL || base->is_virtual || base->type == NULL ||
+          !ConstexprClassHasData(base->type) || offset < base->byte_offset ||
+          offset >= base->byte_offset + base->type->size) {
+        continue;
+      }
+      ConstexprValue* slot = PCodeConstexprObjectSlot(
+          object, ConstexprBaseStorageIndex(str, i));
+      return slot != NULL && slot->is_object
+                 ? PCodeConstexprSlotForOffset(base->type, slot->object,
+                                               offset - base->byte_offset)
+                 : NULL;
+    }
+    if (str->bases.length != 0 || str->virtual_bases.length != 0) {
+      return NULL;
     }
   }
   return offset == 0 ? PCodeConstexprObjectSlot(object, 0) : NULL;
@@ -6473,7 +6536,8 @@ static bool PCodeStoreDesignatedInitializer(ConstEvalContext* ctx,
       return false;
     }
     bool is_union = type->info.struct_info->is_union;
-    first = last = is_union ? 0 : member->index;
+    first = last =
+        PCodeConstexprMemberSlotIndex(type->info.struct_info, member);
     slot_type = member->symbol->type;
     union_member = is_union ? member : NULL;
   }
@@ -6611,6 +6675,27 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
   return true;
 }
 
+static bool PCodeClassHasDefaultMemberInitializer(TypeRecord* type) {
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (str == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member != NULL && !member->is_static &&
+        member->default_initializer != NULL) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && PCodeClassHasDefaultMemberInitializer(base->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
                                    ASTNode* initializer,
                                    ConstexprObject* object) {
@@ -6643,6 +6728,38 @@ static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
     }
   }
   size_t init_index = 0;
+  if (str->virtual_bases.length != 0) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual) {
+      return false;
+    }
+    ConstexprValue* slot =
+        PCodeConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i));
+    if (slot == NULL) {
+      return false;
+    }
+    if (init_index < braced->initializers->length) {
+      ASTNode* entry = braced->initializers->value.p[init_index++];
+      if (entry == NULL || entry->op == AST_OP(designated_init) ||
+          !PCodeStoreInitializer(ctx, base->type, entry, slot)) {
+        return false;
+      }
+      continue;
+    }
+    // An omitted base is initialized from an empty list, which only a base
+    // without default member initializers leaves all zero.
+    if (PCodeClassHasDefaultMemberInitializer(base->type)) {
+      return false;
+    }
+    ConstexprObject* subobject = NewPCodeConstexprObject(base->type);
+    if (subobject == NULL) {
+      return false;
+    }
+    *slot = (ConstexprValue){.is_object = true, .object = subobject};
+  }
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
     if (member == NULL || member->symbol == NULL || member->is_static ||
@@ -6650,6 +6767,8 @@ static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
         StorageIs(member->symbol->storage, STO(typedef))) {
       continue;
     }
+    ConstexprValue* member_slot = PCodeConstexprObjectSlot(
+        object, PCodeConstexprMemberSlotIndex(str, member));
     if (init_index >= braced->initializers->length) {
       if (str->is_union) {
         break;
@@ -6658,17 +6777,15 @@ static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
       // member initializer, or value-initialized when it has none
       // ([dcl.init.aggr]/5); the zeroed slot already models the latter.
       if (member->default_initializer != NULL &&
-          !PCodeStoreInitializer(
-              ctx, member->symbol->type, member->default_initializer,
-              PCodeConstexprObjectSlot(object, member->index))) {
+          !PCodeStoreInitializer(ctx, member->symbol->type,
+                                 member->default_initializer, member_slot)) {
         return false;
       }
       continue;
     }
-    size_t slot_index = str->is_union ? 0 : member->index;
     if (!PCodeStoreInitializer(ctx, member->symbol->type,
                                braced->initializers->value.p[init_index],
-                               PCodeConstexprObjectSlot(object, slot_index))) {
+                               member_slot)) {
       return false;
     }
     if (str->is_union) {
