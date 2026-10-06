@@ -23,9 +23,7 @@ namespace std {
 
 template <class To, class From>
 constexpr To __limits_bit_cast(const From& from) noexcept {
-  To result;
-  ::memcpy(&result, &from, sizeof(To));
-  return result;
+  return __builtin_bit_cast(To, from);
 }
 
 enum float_round_style {

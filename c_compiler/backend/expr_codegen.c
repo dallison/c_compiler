@@ -12,12 +12,14 @@
 #include <string.h>
 #include "compiler.h"
 #include "long_double_codegen.h"
+#include "constexpr.h"
 #include "constexpr_pcode.h"
 #include "expr_evaluator.h"
 #include "symbol_table.h"
 #include "rtti.h"
 #include "member_pointer.h"
 #include "statement_codegen.h"
+#include "type_special_member.h"
 #include "type_template.h"
 
 static bool TypeUsesDoubleIROperations(TypeRecord* type) {
@@ -681,6 +683,15 @@ static void GenerateConstexprLifetimeMarker(
 static void GenerateConstexprObjectMarker(Generator* gen, Symbol* symbol,
                                           IRNode* address,
                                           SourceLocation location);
+
+// The address operand of a marker that names no object.  It must be
+// pointer-typed: the marker's arguments are passed as for a call.
+static IRNode* ConstexprMarkerNullAddress(Generator* gen) {
+  return GeneratorGetIntConstant(
+      gen,
+      NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain)),
+      0);
+}
 
 static IRNode* GenerateMemberPointerComparison(Generator* gen,
                                                BinaryASTNode* node);
@@ -3760,6 +3771,12 @@ static ASTNode* VirtualCalleeReceiverCopy(VectorASTNode* node) {
 }
 
 static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
+  if (gen->for_constant_evaluation &&
+      ConstexprMemoryCopyTypesDiffer(&node->base)) {
+    GenerateConstexprLifetimeMarker(
+        gen, ConstexprMarkerNullAddress(gen),
+        CONSTEXPR_PCODE_MEMCPY_TYPE_MISMATCH_MARKER, 0, node->base.location);
+  }
   if (node->left != NULL &&
       (node->left->op == AST_OP(dotstar) || node->left->op == AST_OP(arrowstar))) {
     return GenerateMemberPointerCall(gen, node);
@@ -5008,47 +5025,74 @@ static IRNode* GenerateInlineCall(Generator* gen, InlineCallASTNode* node) {
   return result;
 }
 
-static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
-  // The sub node has the kASTNeedAddress flag set so generating code for
-  // it will calculate its address.
-  IRNode* expr = GenerateExpression(gen, node->sub);
-  bool sub_returns_reference = ExpressionReturnsReference(node->sub);
-  if (node->sub->op == AST_OP(compound_literal)) {
-    IRSetType(expr, node->base.type);
+// The address of `sub`, which carries kASTNeedAddress, as a `pointer_type`
+// value.  `owner` is the expression the address is computed for.
+static IRNode* GenerateOperandAddress(Generator* gen, ASTNode* owner,
+                                      ASTNode* sub, TypeRecord* pointer_type) {
+  IRNode* expr = GenerateExpression(gen, sub);
+  bool sub_returns_reference = ExpressionReturnsReference(sub);
+  if (sub->op == AST_OP(compound_literal)) {
+    IRSetType(expr, pointer_type);
     return expr;
   }
-  if (node->sub->op == AST_OP(dot) ||
-      node->sub->op == AST_OP(arrow) ||
-      node->sub->op == AST_OP(subscript) ||
-      node->sub->op == AST_OP(contents)) {
-    IRSetType(expr, node->base.type);
+  if (sub->op == AST_OP(dot) ||
+      sub->op == AST_OP(arrow) ||
+      sub->op == AST_OP(subscript) ||
+      sub->op == AST_OP(contents)) {
+    IRSetType(expr, pointer_type);
     return expr;
   }
-  if (sub_returns_reference || TypeIsReference(node->sub->type) ||
-      (node->sub->op == AST_OP(identifier) &&
-       TypeIsReference(((IdentifierASTNode*)node->sub)->symbol->type))) {
-    IRSetType(expr, node->base.type);
+  if (sub_returns_reference || TypeIsReference(sub->type) ||
+      (sub->op == AST_OP(identifier) &&
+       TypeIsReference(((IdentifierASTNode*)sub)->symbol->type))) {
+    IRSetType(expr, pointer_type);
     return expr;
   }
-  if (node->sub->op == AST_OP(identifier) &&
-      (TypeIsVLA(((IdentifierASTNode*)node->sub)->symbol->type) ||
+  if (sub->op == AST_OP(identifier) &&
+      (TypeIsVLA(((IdentifierASTNode*)sub)->symbol->type) ||
        SymbolNeedsDynamicStackAllocation(
-           ((IdentifierASTNode*)node->sub)->symbol))) {
-    IRSetType(expr, node->base.type);
+           ((IdentifierASTNode*)sub)->symbol))) {
+    IRSetType(expr, pointer_type);
     return expr;
   }
-  if (TypeIsFunction(node->sub->type)) {
-    IRSetType(expr, node->base.type);
+  if (TypeIsFunction(sub->type)) {
+    IRSetType(expr, pointer_type);
     return expr;
   }
   IRNode* result = GeneratorEmit(gen, NewIR1(IR_OP(addressof), expr));
-  CheckForVarDef(result, &node->base);
-  IRSetType(result, node->base.type);
-  if (node->sub->op == AST_OP(identifier)) {
-    GenerateConstexprObjectMarker(gen, ((IdentifierASTNode*)node->sub)->symbol,
-                                  result, node->base.location);
+  CheckForVarDef(result, owner);
+  IRSetType(result, pointer_type);
+  if (sub->op == AST_OP(identifier)) {
+    GenerateConstexprObjectMarker(gen, ((IdentifierASTNode*)sub)->symbol,
+                                  result, owner->location);
   }
   return result;
+}
+
+static IRNode* GenerateAddressOf(Generator* gen, UnaryASTNode* node) {
+  // The sub node has the kASTNeedAddress flag set so generating code for
+  // it will calculate its address.
+  return GenerateOperandAddress(gen, &node->base, node->sub, node->base.type);
+}
+
+// The operand's bytes read as the target type.  A class result is, like any
+// class value here, the address of its bytes.
+static IRNode* GenerateBitCast(Generator* gen, CastASTNode* node) {
+  TypeRecord* to = node->base.type;
+  if (gen->for_constant_evaluation &&
+      (!CXXTypeBitCastableInConstantExpression(to) ||
+       !CXXTypeBitCastableInConstantExpression(node->expr->type))) {
+    GenerateConstexprLifetimeMarker(
+        gen, ConstexprMarkerNullAddress(gen),
+        CONSTEXPR_PCODE_BIT_CAST_FORBIDDEN_MARKER, 0, node->base.location);
+  }
+  IRNode* address = GenerateOperandAddress(gen, &node->base, node->expr,
+                                           NewPointerTo(kQualPlain, to));
+  if ((node->base.flags & kASTNeedAddress) != 0 ||
+      TypeIsStructOrUnion(to) || TypeIsMemberPointerAggregate(to)) {
+    return address;
+  }
+  return EmitObjectLoad(gen, &node->base, address);
 }
 
 static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
@@ -6901,6 +6945,10 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
     }
 
     case AST_OP(cast):
+      if (cast_node->kind == kCastBit) {
+        result = GenerateBitCast(gen, cast_node);
+        break;
+      }
       if (TypeIsComplex(cast_node->cast_type) ||
           TypeIsComplex(cast_node->expr->type)) {
         result = GenerateComplexCast(gen, cast_node);

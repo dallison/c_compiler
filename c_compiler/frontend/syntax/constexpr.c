@@ -20,6 +20,7 @@
 #include "type.h"
 #include "type_internal.h"
 #include "type_member.h"
+#include "type_special_member.h"
 #include "type_template.h"
 
 typedef struct ConstexprBinding ConstexprBinding;
@@ -146,6 +147,8 @@ bool ConstexprValueAsInteger(ConstexprValue value, int64_t* result);
 static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
                                    TypeRecord* type, ConstexprValue* result);
 static unsigned __int128 ConstexprPackU128(int64_t lo, int64_t hi);
+static bool ConstexprEvaluateBitCast(ConstEvalContext* ctx, ASTNode* node,
+                                     ConstexprValue* result);
 static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
                                             ASTNode* expr);
 static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
@@ -3079,6 +3082,9 @@ static bool EvaluateInt128Expression(ConstEvalContext* ctx, ASTNode* node,
     *result = ConstexprPackU128(binding->ivalue, binding->ihi);
     return true;
   }
+  if (node->op == AST_OP(cast) && ((CastASTNode*)node)->kind == kCastBit) {
+    return false;
+  }
   if (node->op == AST_OP(cast) ||
       (node->op >= AST_OP(i2s) && node->op <= AST_OP(b2ld))) {
     ASTNode* sub = node->op == AST_OP(cast) ? ((CastASTNode*)node)->expr
@@ -3299,6 +3305,10 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
       default:
         break;
     }
+  }
+  if (node != NULL && node->op == AST_OP(cast) &&
+      ((CastASTNode*)node)->kind == kCastBit) {
+    return ConstexprEvaluateBitCast(ctx, node, result);
   }
   if (type != NULL && TypeIsReference(type) && node != NULL &&
       node->op == AST_OP(contents)) {
@@ -4947,6 +4957,9 @@ static bool EvaluateComplexConstantExpression(TypeRecord* type,
     return EvaluateScalarFloatingConstant(expression, real);
   }
   if (expression->op == AST_OP(cast)) {
+    if (((CastASTNode*)expression)->kind == kCastBit) {
+      return false;
+    }
     return EvaluateComplexConstantExpression(
         type, ((CastASTNode*)expression)->expr, real, imaginary);
   }
@@ -5537,6 +5550,9 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
         (!TypeIsStructOrUnion(node->type) && !TypeIsFixedArray(node->type))) {
       return false;
     }
+    if (((CastASTNode*)node)->kind == kCastBit) {
+      return ConstexprEvaluateBitCast(ctx, node, result);
+    }
     ASTNode* operand = ((CastASTNode*)node)->expr;
     if (EvaluateConstexprObjectAccess(ctx, operand, result)) {
       return true;
@@ -6079,6 +6095,9 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
+    if (cast->kind == kCastBit) {
+      return false;
+    }
     ASTNode* saved_new_expression = ctx->allocation_new_expression;
     bool lowers_placement_new =
         cast->expr != NULL && cast->expr->op == AST_OP(call) &&
@@ -6755,6 +6774,7 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
     }
   }
   if (binding_expr != NULL && binding_expr->op == AST_OP(cast) &&
+      ((CastASTNode*)binding_expr)->kind != kCastBit &&
       TypeIsStructOrUnion(formal_object_type)) {
     ConstexprValue object_value = {0};
     ASTNode* operand = ((CastASTNode*)binding_expr)->expr;
@@ -9842,29 +9862,294 @@ static TypeRecord* ConstexprPointeeTypeBeforeVoidCast(ASTNode* argument) {
          TypeIsVoid(argument->type->next)) {
     argument = ((CastASTNode*)argument)->expr;
   }
-  return argument != NULL && TypeIsPointer(argument->type)
+  return argument != NULL &&
+                 (TypeIsPointer(argument->type) || TypeIsArray(argument->type))
              ? argument->type->next
              : NULL;
 }
 
-// std::bit_cast copies one scalar object's bytes over another of the same
-// size; the copy reinterprets the value.
-static bool ConstexprTryEvaluateScalarBitCopy(ConstEvalContext* ctx,
-                                              ASTNode* node,
-                                              ConstexprValue* result) {
+static bool ConstexprIsMemoryCopyCall(ASTNode* node) {
   Symbol* symbol = ConstexprCallSymbol(node);
-  if (ctx == NULL || node == NULL || node->op != AST_OP(call) ||
-      result == NULL || symbol == NULL || symbol->name.value == NULL ||
-      (strcmp(symbol->name.value, "memcpy") != 0 &&
-       strcmp(symbol->name.value, "__builtin_memcpy") != 0 &&
-       strcmp(symbol->name.value, "memmove") != 0 &&
-       strcmp(symbol->name.value, "__builtin_memmove") != 0)) {
+  return node != NULL && node->op == AST_OP(call) && symbol != NULL &&
+         symbol->name.value != NULL &&
+         (strcmp(symbol->name.value, "memcpy") == 0 ||
+          strcmp(symbol->name.value, "__builtin_memcpy") == 0 ||
+          strcmp(symbol->name.value, "memmove") == 0 ||
+          strcmp(symbol->name.value, "__builtin_memmove") == 0) &&
+         ((VectorASTNode*)node)->children != NULL &&
+         ((VectorASTNode*)node)->children->length == 3;
+}
+
+static TypeRecord* ConstexprCopiedElementType(TypeRecord* type) {
+  while (type != NULL && TypeIsArray(type)) {
+    type = type->next;
+  }
+  return type;
+}
+
+// A constant expression may copy bytes only between objects of one type;
+// reinterpreting them is std::bit_cast's job.  Only the static types are
+// known here, so a copy through a plain void* is not judged.
+bool ConstexprMemoryCopyTypesDiffer(ASTNode* node) {
+  if (!ConstexprIsMemoryCopyCall(node)) {
     return false;
   }
   VectorASTNode* call = (VectorASTNode*)node;
-  if (call->children == NULL || call->children->length != 3) {
+  TypeRecord* written = ConstexprCopiedElementType(
+      ConstexprPointeeTypeBeforeVoidCast(call->children->value.p[0]));
+  TypeRecord* read = ConstexprCopiedElementType(
+      ConstexprPointeeTypeBeforeVoidCast(call->children->value.p[1]));
+  return written != NULL && read != NULL && !TypeIsVoid(written) &&
+         !TypeIsVoid(read) &&
+         !TypeEqualIgnoringTopLevelQualifierMask(written, read,
+                                                 kQualConst | kQualVolatile);
+}
+
+static bool ConstexprBitCastStructMember(StructMember* member) {
+  return member != NULL && !member->is_static && !member->is_member_function &&
+         !member->is_using_declaration && member->symbol != NULL &&
+         member->symbol->type != NULL &&
+         !TypeIsFunction(member->symbol->type);
+}
+
+static bool ConstexprBitCastTypeHasData(TypeRecord* type) {
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (str == NULL) {
+    return true;
+  }
+  if (str->virtual_bases.length != 0) {
+    return true;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    if (ConstexprBitCastStructMember(str->members.value.p[i])) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual ||
+        ConstexprBitCastTypeHasData(base->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Writes `value`'s object representation to `bytes`, marking in `valid` the
+// bytes that hold a value; padding and indeterminate scalars stay unmarked.
+static bool ConstexprBitCastWrite(TypeRecord* type, ConstexprValue* value,
+                                  unsigned char* bytes, bool* valid) {
+  if (type == NULL || value == NULL || type->size <= 0) {
     return false;
   }
+  if (ConstexprBitCastScalarType(type)) {
+    if (value->is_object || value->is_address) {
+      return false;
+    }
+    if (value->state == kValueStateValid) {
+      uint64_t bits = ConstexprScalarBits(*value, type);
+      memcpy(bytes, &bits, (size_t)type->size);
+      memset(valid, true, (size_t)type->size);
+    }
+    return true;
+  }
+  if (!value->is_object || value->object == NULL) {
+    return false;
+  }
+  ConstexprObject* object = value->object;
+  if (TypeIsFixedArray(type)) {
+    TypeRecord* element = type->next;
+    size_t count = type->info.array.size.fixed;
+    if (element == NULL || element->size <= 0) {
+      return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+      size_t offset = i * (size_t)element->size;
+      if (!ConstexprBitCastWrite(element, ConstexprObjectSlot(object, i),
+                                 bytes + offset, valid + offset)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (str == NULL || str->is_union || str->virtual_bases.length != 0) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual || base->type == NULL ||
+        base->type->size <= 0) {
+      return false;
+    }
+    // An empty base has no bytes of its own.
+    if (!ConstexprBitCastTypeHasData(base->type)) {
+      continue;
+    }
+    ConstexprValue* slot =
+        ConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i));
+    if (!ConstexprBitCastWrite(base->type, slot, bytes + base->byte_offset,
+                               valid + base->byte_offset)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (!ConstexprBitCastStructMember(member)) {
+      continue;
+    }
+    if (member->is_bit_field) {
+      return false;
+    }
+    ConstexprValue* slot =
+        ConstexprObjectSlot(object, ConstexprMemberStorageIndex(str, member));
+    if (!ConstexprBitCastWrite(member->symbol->type, slot,
+                               bytes + member->byte_offset,
+                               valid + member->byte_offset)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Builds a value of `type` from an object representation.  Every byte of a
+// scalar must hold a value.
+static bool ConstexprBitCastRead(ConstEvalContext* ctx, TypeRecord* type,
+                                 const unsigned char* bytes,
+                                 const bool* valid, ConstexprValue* result) {
+  if (type == NULL || type->size <= 0) {
+    return false;
+  }
+  if (ConstexprBitCastScalarType(type)) {
+    for (int i = 0; i < type->size; i++) {
+      if (!valid[i]) {
+        return false;
+      }
+    }
+    uint64_t bits = 0;
+    memcpy(&bits, bytes, (size_t)type->size);
+    *result = ConstexprScalarFromBits(bits, type);
+    return true;
+  }
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (!TypeIsFixedArray(type) &&
+      (str == NULL || str->is_union || str->virtual_bases.length != 0)) {
+    return false;
+  }
+  ConstexprObject* object =
+      NewConstexprObject(ctx, type, ConstexprObjectSlotCount(type));
+  if (TypeIsFixedArray(type)) {
+    TypeRecord* element = type->next;
+    size_t count = type->info.array.size.fixed;
+    if (element == NULL || element->size <= 0) {
+      return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+      size_t offset = i * (size_t)element->size;
+      ConstexprValue* slot = ConstexprObjectSlot(object, i);
+      if (slot == NULL || !ConstexprBitCastRead(ctx, element, bytes + offset,
+                                                valid + offset, slot)) {
+        return false;
+      }
+    }
+  } else {
+    for (size_t i = 0; i < str->bases.length; i++) {
+      CXXBaseSpecifier* base = str->bases.value.p[i];
+      if (base == NULL || base->is_virtual || base->type == NULL) {
+        return false;
+      }
+      ConstexprValue* slot =
+          ConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i));
+      if (slot == NULL) {
+        return false;
+      }
+      if (!ConstexprBitCastRead(ctx, base->type, bytes + base->byte_offset,
+                                valid + base->byte_offset, slot)) {
+        return false;
+      }
+    }
+    for (size_t i = 0; i < str->members.length; i++) {
+      StructMember* member = str->members.value.p[i];
+      if (!ConstexprBitCastStructMember(member)) {
+        continue;
+      }
+      ConstexprValue* slot = ConstexprObjectSlot(
+          object, ConstexprMemberStorageIndex(str, member));
+      if (member->is_bit_field || slot == NULL ||
+          !ConstexprBitCastRead(ctx, member->symbol->type,
+                                bytes + member->byte_offset,
+                                valid + member->byte_offset, slot)) {
+        return false;
+      }
+    }
+  }
+  *result = (ConstexprValue){.is_object = true, .object = object};
+  return true;
+}
+
+// The operand's object representation read as the target type.
+static bool ConstexprEvaluateBitCast(ConstEvalContext* ctx, ASTNode* node,
+                                     ConstexprValue* result) {
+  CastASTNode* cast = (CastASTNode*)node;
+  TypeRecord* to = cast->base.type;
+  TypeRecord* from = cast->expr != NULL ? cast->expr->type : NULL;
+  if (to == NULL || from == NULL || to->size <= 0 ||
+      to->size != from->size ||
+      !CXXTypeBitCastableInConstantExpression(to) ||
+      !CXXTypeBitCastableInConstantExpression(from)) {
+    return false;
+  }
+  ASTNode* operand = cast->expr;
+  if (operand->op == AST_OP(compound_literal)) {
+    // A prvalue operand, materialized so that code generation can address it.
+    operand = ((CompoundLiteralASTNode*)operand)->initializer;
+    if (ConstexprBitCastScalarType(from)) {
+      operand = ConstexprInitializerExpression(operand);
+    }
+    if (operand == NULL) {
+      return false;
+    }
+  }
+  ConstexprValue value = {0};
+  bool aggregate = TypeIsFixedArray(from) || TypeIsStructOrUnion(from);
+  if (!(aggregate && EvaluateConstexprObjectAccess(ctx, operand, &value) &&
+        value.is_object) &&
+      !EvaluateConstexprValue(ctx, operand, from, &value)) {
+    return false;
+  }
+  size_t size = (size_t)to->size;
+  unsigned char* bytes = calloc(size, 1);
+  bool* valid = calloc(size, sizeof(bool));
+  bool ok = bytes != NULL && valid != NULL &&
+            ConstexprBitCastWrite(from, &value, bytes, valid) &&
+            ConstexprBitCastRead(ctx, to, bytes, valid, result);
+  free(bytes);
+  free(valid);
+  return ok;
+}
+
+bool ConstexprEvaluateBitCastAsInteger(ConstEvalContext* ctx, ASTNode* node,
+                                       int64_t* result) {
+  ConstexprValue value = {0};
+  return ConstexprEvaluateBitCast(ctx, node, &value) &&
+         ConstexprValueAsInteger(value, result);
+}
+
+bool ConstexprEvaluateBitCastAsFloating(ConstEvalContext* ctx, ASTNode* node,
+                                        double* result) {
+  ConstexprValue value = {0};
+  return ConstexprEvaluateBitCast(ctx, node, &value) &&
+         ConstexprValueAsFloating(value, result);
+}
+
+// A memcpy of one scalar object over another of the same type.
+static bool ConstexprTryEvaluateScalarCopy(ConstEvalContext* ctx,
+                                           ASTNode* node,
+                                           ConstexprValue* result) {
+  if (ctx == NULL || result == NULL || !ConstexprIsMemoryCopyCall(node)) {
+    return false;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
   // Decided before evaluating anything, so a call this does not take is not
   // left with its arguments' side effects applied.
   TypeRecord* written =
@@ -9872,7 +10157,9 @@ static bool ConstexprTryEvaluateScalarBitCopy(ConstEvalContext* ctx,
   TypeRecord* read =
       ConstexprPointeeTypeBeforeVoidCast(call->children->value.p[1]);
   if (!ConstexprBitCastScalarType(written) ||
-      !ConstexprBitCastScalarType(read) || written->size != read->size) {
+      !ConstexprBitCastScalarType(read) ||
+      !TypeEqualIgnoringTopLevelQualifierMask(written, read,
+                                              kQualConst | kQualVolatile)) {
     return false;
   }
   ConstexprValue destination = {0};
@@ -9959,8 +10246,11 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
     return false;
   }
   *result = (ConstexprValue){0};
+  if (ConstexprMemoryCopyTypesDiffer(node)) {
+    return false;
+  }
   if (ConstexprTryEvaluateMemoryComparison(ctx, node, result) ||
-      ConstexprTryEvaluateScalarBitCopy(ctx, node, result)) {
+      ConstexprTryEvaluateScalarCopy(ctx, node, result)) {
     return true;
   }
   Symbol* allocation_symbol = ConstexprCallSymbol(node);

@@ -1941,7 +1941,7 @@ static void CastASTNodeDelete(ASTNode* node) {
 static void CastASTNodePrint(ASTNode* node, int indents, FILE* fp) {
   CastASTNode* cnode = (CastASTNode*)node;
   Indent(indents, fp);
-  fprintf(fp,"cast\n");
+  fprintf(fp, cnode->kind == kCastBit ? "bit-cast\n" : "cast\n");
   Indent(indents, fp);
   TypeRecordPrint(cnode->cast_type, fp);
   if (cnode->expr != NULL) {

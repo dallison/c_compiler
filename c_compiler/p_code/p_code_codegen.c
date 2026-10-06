@@ -1126,7 +1126,8 @@ static TargetInstruction* ReduceExpressionStrength(PCodeGenerator* pcode,
           int64_t c = ((IRConstant*)op2)->value.ivalue;
           if (c == 0) {
             // Multiply by zero is zero.
-            inst = GetIntConstant(pcode, NULL, kTargetType32Bit, 0);
+            inst = (TargetInstruction*)NewInstruction(P_OP(movxc));
+            inst->operand[0] = GetIntConstant(pcode, NULL, kTargetType32Bit, 0);
           } else if (c == 1) {
             // Multiply by 1 is mov.
             inst = (TargetInstruction*)NewInstruction(P_OP(mov));

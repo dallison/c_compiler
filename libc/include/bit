@@ -142,9 +142,7 @@ template <class To, class From>
 requires(sizeof(To) == sizeof(From) && is_trivially_copyable_v<To> &&
          is_trivially_copyable_v<From>)
 constexpr To bit_cast(const From& from) noexcept {
-  To result;
-  ::memcpy(&result, &from, sizeof(To));
-  return result;
+  return __builtin_bit_cast(To, from);
 }
 
 #if __cplusplus >= 202700L

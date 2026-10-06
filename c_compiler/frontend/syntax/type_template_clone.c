@@ -6844,8 +6844,8 @@ static bool CloneCastInTemplateBody(
     if (cast->expr != NULL && ExpressionIsTemplateDependent(cast->expr)) {
       node->flags |= kASTDependentCast;
     }
-    if (cast->expr != NULL && cast->expr->op == AST_OP(identifier) &&
-        clone->from_func != NULL) {
+    if (cast->kind != kCastBit && cast->expr != NULL &&
+        cast->expr->op == AST_OP(identifier) && clone->from_func != NULL) {
       IdentifierASTNode* operand = (IdentifierASTNode*)cast->expr;
       int arg_number =
           operand->symbol != NULL && operand->symbol->flags.is_argument

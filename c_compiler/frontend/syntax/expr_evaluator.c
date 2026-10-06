@@ -927,6 +927,9 @@ case AST_OP(ast_op): \
 
     case AST_OP(cast): {
       CastASTNode* c = (CastASTNode*)node;
+      if (c->kind == kCastBit) {
+        return ConstexprEvaluateBitCastAsInteger(ctx, node, result);
+      }
       // A string literal converted to bool or another integer is non-null.
       if (c->expr != NULL && c->expr->op == AST_OP(string) &&
           (c->cast_type == NULL || TypeIsIntegral(c->cast_type))) {
@@ -1213,6 +1216,9 @@ static bool EvaluateLongDoubleBits(ConstEvalContext* ctx, ASTNode* node,
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
     ASTNode* expr = cast->expr;
+    if (cast->kind == kCastBit) {
+      return false;
+    }
     if (expr != NULL && TypeUsesLongDoubleRepresentation(expr->type)) {
       return EvaluateLongDoubleBits(ctx, expr, bits);
     }
@@ -1473,6 +1479,9 @@ static bool EvaluateFloatingPointValueInContext(ConstEvalContext* ctx,
 
     case AST_OP(cast): {
       CastASTNode* c = (CastASTNode*)node;
+      if (c->kind == kCastBit) {
+        return ConstexprEvaluateBitCastAsFloating(ctx, node, result);
+      }
       if (EvaluateFloatingPointExpressionInContext(ctx, c->expr, &left)) {
         *result = left;
         return true;

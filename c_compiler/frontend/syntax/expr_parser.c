@@ -5102,6 +5102,41 @@ static ASTNode* ParseArraySubscript(ASTNode* left, Syntax* syntax,
                           syntax->lex->current_token_location, left, index);
 }
 
+// __builtin_bit_cast(type, expression), with the opening bracket consumed.
+static ASTNode* BitCastIntrinsic(Syntax* syntax, ASTNode* left,
+                                 TokenClass followers) {
+  if (left->op != AST_OP(identifier) ||
+      ((IdentifierASTNode*)left)->symbol == NULL ||
+      !StringEqual(&((IdentifierASTNode*)left)->symbol->name,
+                   "__builtin_bit_cast")) {
+    return NULL;
+  }
+  SourceLocation location = left->location;
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 kParsingBlockScope);
+  TypeRecord* type = TypeParserParseType(&parser, true);
+  Symbol* sym = NULL;
+  if (type == NULL) {
+    SyntaxError(syntax, "Invalid type name");
+    type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  } else {
+    sym = TypeParserParseDeclarator(&parser, type);
+    type = sym->type;
+  }
+  TypeParserDestruct(&parser);
+  SyntaxNeedBracket(syntax, TOK(comma), followers);
+  ASTNode* expr = SyntaxParseSingleExpression(syntax, TC(closebra));
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+  ASTNode* result = NewCastASTNode(type, location, expr);
+  ((CastASTNode*)result)->kind = kCastBit;
+  if (sym != NULL) {
+    SymbolDelete(sym);
+  }
+  ASTNodeDelete(left);
+  return result;
+}
+
 // Parse a function call or varargs builtin.
 static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
                                   TokenClass followers) {
@@ -5109,6 +5144,11 @@ static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
   ASTNode* varargs = VarargsIntrinsic(syntax, left, followers);
   if (varargs != NULL) {
     return varargs;
+  }
+
+  ASTNode* bit_cast = BitCastIntrinsic(syntax, left, followers);
+  if (bit_cast != NULL) {
+    return bit_cast;
   }
 
   ASTNode* type_trait = TypeTraitIntrinsic(syntax, left, followers);

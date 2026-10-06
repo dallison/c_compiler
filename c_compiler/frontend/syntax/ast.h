@@ -670,6 +670,9 @@ typedef enum {
   // cloning so semantic analysis can re-deduce the decayed target type.
   kCastAutoParen,
   kCastAutoBrace,
+  // __builtin_bit_cast(T, e): T's value is e's object representation.  The
+  // operand is a glvalue whose address is taken; it is never converted.
+  kCastBit,
 } CastKind;
 
 typedef struct {

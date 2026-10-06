@@ -90,6 +90,12 @@ bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
 bool ConstexprEvaluateCallAsFloating(ConstEvalContext* ctx, ASTNode* node,
                                      double* result);
 bool ConstexprEvaluateCallAsObject(ConstEvalContext* ctx, ASTNode* node);
+bool ConstexprEvaluateBitCastAsInteger(ConstEvalContext* ctx, ASTNode* node,
+                                       int64_t* result);
+bool ConstexprEvaluateBitCastAsFloating(ConstEvalContext* ctx, ASTNode* node,
+                                        double* result);
+// memcpy/memmove between objects whose static types differ.
+bool ConstexprMemoryCopyTypesDiffer(ASTNode* call);
 bool ConstexprEvaluateCall(ConstEvalContext* ctx, ASTNode* node);
 bool ConstexprEvaluateConstructorCallForSymbol(ConstEvalContext* ctx,
                                                ASTNode* node,

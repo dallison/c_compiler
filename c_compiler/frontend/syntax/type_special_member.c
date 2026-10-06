@@ -2674,6 +2674,45 @@ bool CXXTypeIsTriviallyCopyable(TypeRecord* type) {
   return has_eligible_copy_or_move;
 }
 
+// [bit.cast]/3: a bit_cast is not a constant expression when either type is
+// or contains a union, pointer, pointer to member, reference or volatile
+// subobject.
+bool CXXTypeBitCastableInConstantExpression(TypeRecord* type) {
+  if (type == NULL || TypeIsVolatile(type) || TypeIsReference(type) ||
+      TypeIsPointer(type) || TypeIsMemberPointer(type)) {
+    return false;
+  }
+  if (TypeIsFixedArray(type)) {
+    return CXXTypeBitCastableInConstantExpression(type->next);
+  }
+  if (!TypeIsStructOrUnion(type)) {
+    return true;
+  }
+  Struct* str = type->info.struct_info;
+  if (str == NULL || str->is_union) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL &&
+        !CXXTypeBitCastableInConstantExpression(base->type)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->is_static || member->is_member_function ||
+        member->is_using_declaration || member->symbol == NULL ||
+        member->symbol->type == NULL || TypeIsFunction(member->symbol->type)) {
+      continue;
+    }
+    if (!CXXTypeBitCastableInConstantExpression(member->symbol->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Classes currently being asked whether an implicit special member is trivial.
 // A nested class of a class template, and the class whose special member is
 // being synthesized, have no function to consult yet. Walking their members

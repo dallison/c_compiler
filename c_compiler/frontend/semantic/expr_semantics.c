@@ -13966,6 +13966,47 @@ static ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
   return AnalyzeExpression(deref);
 }
 
+// [bit.cast]: both types are trivially copyable and of the same size, and the
+// result is a prvalue of the target type holding the operand's bits.  The
+// operand is left unconverted; code generation reads it through its address.
+static ASTNode* AnalyzeBitCast(CastASTNode* node) {
+  TypeRecord* to = node->cast_type;
+  TypeRecord* from = node->expr->type;
+  ASTNodeSetType((ASTNode*)node, to);
+  node->base.value_category = kValueCategoryPrvalue;
+  if (to == NULL || from == NULL) {
+    return (ASTNode*)node;
+  }
+  if (TypeIsReference(to) || TypeIsArray(to) || TypeIsFunction(to) ||
+      TypeIsVoid(to)) {
+    SemanticError((ASTNode*)node,
+                  "__builtin_bit_cast cannot produce this type");
+    return (ASTNode*)node;
+  }
+  TypeRecordCalculateSize(to);
+  TypeRecordCalculateSize(from);
+  if (TypeIsFunction(from) || TypeIsVoid(from) || to->size <= 0 ||
+      to->size != from->size) {
+    SemanticError((ASTNode*)node,
+                  "__builtin_bit_cast requires types of the same size");
+    return (ASTNode*)node;
+  }
+  if (CompilerIsCXX() && (!CXXTypeIsTriviallyCopyable(to) ||
+                          !CXXTypeIsTriviallyCopyable(from))) {
+    SemanticError((ASTNode*)node,
+                  "__builtin_bit_cast requires trivially copyable types");
+    return (ASTNode*)node;
+  }
+  if (!HasAddress(node->expr)) {
+    ASTNode* materialized = MaterializeTemporary(node->expr, from);
+    materialized->parent = (ASTNode*)node;
+    materialized->child_id = 0;
+    node->expr = materialized;
+  }
+  node->expr->flags |= kASTNeedAddress;
+  return (ASTNode*)node;
+}
+
 static ASTNode* AnalyzeCastExpression(CastASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
   bool auto_paren = node->kind == kCastAutoParen;
@@ -14025,6 +14066,9 @@ static ASTNode* AnalyzeCastExpression(CastASTNode* node) {
       node->base.value_category = kValueCategoryPrvalue;
     }
     return (ASTNode*)node;
+  }
+  if (node->kind == kCastBit) {
+    return AnalyzeBitCast(node);
   }
   if (auto_brace && TypeIsVoid(node->cast_type)) {
     SemanticError((ASTNode*)node,

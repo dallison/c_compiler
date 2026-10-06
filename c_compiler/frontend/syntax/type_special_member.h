@@ -9,6 +9,7 @@
 #include "type_core.h"
 
 bool CXXTypeIsTriviallyCopyable(TypeRecord* type);
+bool CXXTypeBitCastableInConstantExpression(TypeRecord* type);
 
 bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type, CXXSpecialMemberKind kind);
 bool CXXTypeSpecialMemberIsDeleted(TypeRecord* type, CXXSpecialMemberKind kind);

@@ -1953,18 +1953,19 @@ static bool LoadConstexprScalarBytes(TypeRecord* type, unsigned char* src,
   }
   int64_t ivalue = 0;
   size_t size = type->size == 0 ? sizeof(int64_t) : type->size;
+  bool zero_extend = TypeIsIntegral(type) && TypeIsUnsigned(type);
   if (size == 1) {
     int8_t v;
     memcpy(&v, src, sizeof(v));
-    ivalue = v;
+    ivalue = zero_extend ? (int64_t)(uint8_t)v : v;
   } else if (size == 2) {
     int16_t v;
     memcpy(&v, src, sizeof(v));
-    ivalue = v;
+    ivalue = zero_extend ? (int64_t)(uint16_t)v : v;
   } else if (size == 4) {
     int32_t v;
     memcpy(&v, src, sizeof(v));
-    ivalue = v;
+    ivalue = zero_extend ? (int64_t)(uint32_t)v : v;
   } else {
     memcpy(&ivalue, src, sizeof(ivalue));
   }
@@ -4486,6 +4487,16 @@ static PCodeVMStatus ConstexprPCodeEscapeStartLifetime(
   if (size == CONSTEXPR_PCODE_PLACEMENT_NEW_FORBIDDEN_MARKER) {
     return ConstexprPCodeTypingFailure(
         runtime, "placement new is not permitted in this constant expression");
+  }
+  if (size == CONSTEXPR_PCODE_BIT_CAST_FORBIDDEN_MARKER) {
+    return ConstexprPCodeTypingFailure(
+        runtime, "bit_cast of a pointer, reference, union or volatile "
+                 "subobject is not a constant expression");
+  }
+  if (size == CONSTEXPR_PCODE_MEMCPY_TYPE_MISMATCH_MARKER) {
+    return ConstexprPCodeTypingFailure(
+        runtime, "memcpy between objects of different types is not a "
+                 "constant expression");
   }
   if (size == CONSTEXPR_PCODE_INDETERMINATE_OBJECT_MARKER ||
       size == CONSTEXPR_PCODE_ERRONEOUS_OBJECT_MARKER) {
