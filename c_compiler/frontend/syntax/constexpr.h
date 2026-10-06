@@ -103,6 +103,9 @@ size_t ConstexprMemberStorageIndex(Struct* str, StructMember* member);
 // The subobject of `object` (itself or a base) that declares `member`.
 ConstexprObject* ConstexprObjectForMember(ConstexprObject* object,
                                           StructMember* member);
+// Whether a class, or an array of them, has a default member initializer,
+// directly or in a base or member subobject.
+bool ConstexprTypeHasDefaultMemberInitializer(TypeRecord* type);
 // Whether a class has a non-static data member, directly or in a base.
 bool ConstexprClassHasData(TypeRecord* type);
 // A call to the C library memcpy, memmove or memcmp, which are not constexpr:

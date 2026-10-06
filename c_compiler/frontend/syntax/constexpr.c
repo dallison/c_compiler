@@ -4301,6 +4301,46 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
   return false;
 }
 
+static bool ConstexprPositionalDataMember(StructMember* member);
+
+static bool ConstexprTypeHasDefaultMemberInitializerAt(TypeRecord* type,
+                                                       int depth) {
+  while (type != NULL && TypeIsFixedArray(type)) {
+    type = type->next;
+  }
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  // Data members and bases nest strictly, so the depth bound only guards
+  // against a malformed class graph.
+  if (str == NULL || depth > 64) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (ConstexprPositionalDataMember(member) &&
+        (member->default_initializer != NULL ||
+         ConstexprTypeHasDefaultMemberInitializerAt(member->symbol->type,
+                                                    depth + 1))) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL &&
+        ConstexprTypeHasDefaultMemberInitializerAt(base->type, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ConstexprTypeHasDefaultMemberInitializer(TypeRecord* type) {
+  return ConstexprTypeHasDefaultMemberInitializerAt(type, 0);
+}
+
+static bool ConstexprValueInitializeAggregateSlot(ConstEvalContext* ctx,
+                                                  TypeRecord* type,
+                                                  ConstexprValue* slot);
+
 // Applies the default member initializers of the members a braced aggregate
 // initializer left out ([dcl.init.aggr]/5).  A member with no default member
 // initializer keeps the zeroed slot the object was created with, which is what
@@ -4315,11 +4355,23 @@ static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
     return true;
   }
   Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual) {
+      continue;
+    }
+    size_t storage_index = ConstexprBaseStorageIndex(str, i);
+    if (storage_index >= slot_count || initialized[storage_index]) {
+      continue;
+    }
+    if (!ConstexprValueInitializeAggregateSlot(
+            ctx, base->type, ConstexprObjectSlot(object, storage_index))) {
+      return false;
+    }
+  }
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
-    if (member == NULL || member->symbol == NULL || member->is_static ||
-        member->is_member_function || member->is_using_declaration ||
-        member->default_initializer == NULL) {
+    if (!ConstexprPositionalDataMember(member)) {
       continue;
     }
     size_t storage_index = ConstexprMemberStorageIndex(str, member);
@@ -4327,6 +4379,13 @@ static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
       continue;
     }
     ConstexprValue* slot = ConstexprObjectSlot(object, storage_index);
+    if (member->default_initializer == NULL) {
+      if (!ConstexprValueInitializeAggregateSlot(ctx, member->symbol->type,
+                                                 slot)) {
+        return false;
+      }
+      continue;
+    }
     if (slot == NULL ||
         !EvaluateConstexprInitializer(ctx, member->symbol->type,
                                       member->default_initializer, slot)) {
@@ -4334,6 +4393,59 @@ static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
     }
   }
   return true;
+}
+
+// Initializes an aggregate subobject from an empty initializer list: its
+// default member initializers apply, recursively through bases and members.
+// Other types, and non-aggregate classes, keep the zeroed slot.
+static bool ConstexprValueInitializeAggregateSlot(ConstEvalContext* ctx,
+                                                  TypeRecord* type,
+                                                  ConstexprValue* slot) {
+  if (slot == NULL) {
+    return false;
+  }
+  if (!ConstexprTypeHasDefaultMemberInitializer(type)) {
+    return true;
+  }
+  if (TypeIsFixedArray(type) && type->next != NULL &&
+      (TypeIsStructOrUnion(type->next) || TypeIsFixedArray(type->next))) {
+    if (!slot->is_object || slot->object == NULL) {
+      *slot = (ConstexprValue){
+          .is_object = true,
+          .object = NewConstexprObject(ctx, type,
+                                       ConstexprObjectSlotCount(type))};
+    }
+    for (size_t i = 0; i < slot->object->slots.length; i++) {
+      if (!ConstexprValueInitializeAggregateSlot(
+              ctx, type->next, ConstexprObjectSlot(slot->object, i))) {
+        return false;
+      }
+    }
+    return true;
+  }
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (str == NULL || str->is_union || !str->is_aggregate) {
+    return true;
+  }
+  if (!slot->is_object || slot->object == NULL) {
+    *slot = (ConstexprValue){
+        .is_object = true,
+        .object = NewConstexprObject(ctx, type,
+                                     ConstexprObjectSlotCount(type))};
+    if (!ConstexprMaterializeBaseSubobjectSlots(ctx, slot->object)) {
+      return false;
+    }
+  }
+  size_t slot_count = slot->object->slots.length;
+  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
+  if (slot_count > 0 && initialized == NULL) {
+    return false;
+  }
+  bool ok = slot_count == 0 ||
+            ApplyConstexprDefaultMemberInitializers(ctx, type, slot->object,
+                                                    initialized, slot_count);
+  free(initialized);
+  return ok;
 }
 
 static bool ConstexprInitializerDesignatesMember(
@@ -9838,8 +9950,7 @@ int ConstexprMemoryFunctionCall(ASTNode* node) {
 }
 
 static bool ConstexprBitCastStructMember(StructMember* member) {
-  return member != NULL && !member->is_static && !member->is_member_function &&
-         !member->is_using_declaration && member->symbol != NULL &&
+  return ConstexprPositionalDataMember(member) &&
          member->symbol->type != NULL &&
          !TypeIsFunction(member->symbol->type);
 }

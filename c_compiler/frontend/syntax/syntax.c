@@ -3538,7 +3538,9 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   if (evaluated == NULL) {
     ASTNodeDelete(message_expr);
     StringDestruct(&message);
-    SyntaxError(syntax, "static_assert expression is not an integer constant expression");
+    SyntaxErrorAtLocation(
+        syntax, location,
+        "static_assert expression is not an integer constant expression");
     return NULL;
   }
 
@@ -3557,14 +3559,16 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
     ASTNodeDelete(evaluated);
     ASTNodeDelete(message_expr);
     StringDestruct(&message);
-    SyntaxError(syntax, "static_assert expression is not an integer constant expression");
+    SyntaxErrorAtLocation(
+        syntax, location,
+        "static_assert expression is not an integer constant expression");
     return NULL;
   }
 
   if (value == 0) {
     if (message_expr == NULL ||
         SyntaxEvaluateStaticAssertMessage(message_expr, &message)) {
-      SyntaxError(syntax, "%s", message.value);
+      SyntaxErrorAtLocation(syntax, location, "%s", message.value);
     }
   }
   ASTNodeDelete(message_expr);

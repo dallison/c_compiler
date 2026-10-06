@@ -6503,6 +6503,54 @@ static StructMember* PCodeDesignatorMember(TypeRecord* type,
   return NULL;
 }
 
+static bool PCodeStructDeclaresMember(Struct* str, StructMember* member) {
+  for (size_t i = 0; i < str->members.length; i++) {
+    if (str->members.value.p[i] == member) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The non-virtual base of |str| through which |member| is inherited.
+static bool PCodeBaseIndexDeclaringMember(Struct* str, StructMember* member,
+                                          size_t* base_index) {
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    Struct* base_str = base != NULL && !base->is_virtual &&
+                               TypeIsStructOrUnion(base->type)
+                           ? base->type->info.struct_info
+                           : NULL;
+    size_t ignored = 0;
+    if (base_str != NULL &&
+        (PCodeStructDeclaresMember(base_str, member) ||
+         PCodeBaseIndexDeclaringMember(base_str, member, &ignored))) {
+      *base_index = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool PCodeDesignatedBaseIndex(TypeRecord* type, Designator* designator,
+                                     size_t* base_index) {
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && !base->is_virtual &&
+        (base == designator->value.base ||
+         (designator->value.base == NULL && designator->type != NULL &&
+          TypeEqual(base->type, designator->type)))) {
+      *base_index = i;
+      return true;
+    }
+  }
+  return false;
+}
+
 // Stores |initializer| into the subobject named by designators[index...],
 // creating the aggregate objects the chain passes through.
 static bool PCodeStoreDesignatedInitializer(ConstEvalContext* ctx,
@@ -6530,16 +6578,46 @@ static bool PCodeStoreDesignatedInitializer(ConstEvalContext* ctx,
     first = (size_t)designator->value.array_index;
     last = (size_t)designator->array_index_end;
     slot_type = type->next;
+  } else if (designator->designator_type == kDesignatorBase) {
+    size_t base_index = 0;
+    if (!PCodeDesignatedBaseIndex(type, designator, &base_index)) {
+      return false;
+    }
+    Struct* str = type->info.struct_info;
+    CXXBaseSpecifier* base = str->bases.value.p[base_index];
+    first = last = ConstexprBaseStorageIndex(str, base_index);
+    slot_type = base->type;
   } else {
     StructMember* member = PCodeDesignatorMember(type, designator);
     if (member == NULL || member->symbol == NULL) {
       return false;
     }
-    bool is_union = type->info.struct_info->is_union;
-    first = last =
-        PCodeConstexprMemberSlotIndex(type->info.struct_info, member);
+    Struct* str = type->info.struct_info;
+    size_t base_index = 0;
+    if (!PCodeStructDeclaresMember(str, member)) {
+      // A member of a base, named without the base: store into that base.
+      if (!PCodeBaseIndexDeclaringMember(str, member, &base_index)) {
+        return false;
+      }
+      CXXBaseSpecifier* base = str->bases.value.p[base_index];
+      ConstexprValue* slot = PCodeConstexprObjectSlot(
+          object, ConstexprBaseStorageIndex(str, base_index));
+      if (slot == NULL) {
+        return false;
+      }
+      if (!slot->is_object || slot->object == NULL) {
+        ConstexprObject* subobject = NewPCodeConstexprObject(base->type);
+        if (subobject == NULL) {
+          return false;
+        }
+        *slot = (ConstexprValue){.is_object = true, .object = subobject};
+      }
+      return PCodeStoreDesignatedInitializer(ctx, base->type, slot->object,
+                                             designators, index, initializer);
+    }
+    first = last = PCodeConstexprMemberSlotIndex(str, member);
     slot_type = member->symbol->type;
-    union_member = is_union ? member : NULL;
+    union_member = str->is_union ? member : NULL;
   }
   if (slot_type == NULL) {
     return false;
@@ -6675,26 +6753,172 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
   return true;
 }
 
-static bool PCodeClassHasDefaultMemberInitializer(TypeRecord* type) {
-  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
-  if (str == NULL) {
-    return false;
-  }
-  for (size_t i = 0; i < str->members.length; i++) {
-    StructMember* member = str->members.value.p[i];
-    if (member != NULL && !member->is_static &&
-        member->default_initializer != NULL) {
+static bool PCodeDataMember(StructMember* member) {
+  return member != NULL && member->symbol != NULL && !member->is_static &&
+         !member->is_member_function && !member->is_using_declaration &&
+         !StorageIs(member->symbol->storage, STO(typedef));
+}
+
+// The k-th element of positional aggregate initialization: the bases, then
+// the data members.
+static bool PCodePositionalElement(Struct* str, size_t k, size_t* slot_index,
+                                   TypeRecord** slot_type) {
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual) {
+      continue;
+    }
+    if (k-- == 0) {
+      *slot_index = ConstexprBaseStorageIndex(str, i);
+      *slot_type = base->type;
       return true;
     }
   }
-  for (size_t i = 0; i < str->bases.length; i++) {
-    CXXBaseSpecifier* base = str->bases.value.p[i];
-    if (base != NULL && PCodeClassHasDefaultMemberInitializer(base->type)) {
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (!PCodeDataMember(member)) {
+      continue;
+    }
+    if (k-- == 0) {
+      *slot_index = PCodeConstexprMemberSlotIndex(str, member);
+      *slot_type = member->symbol->type;
       return true;
     }
   }
   return false;
 }
+
+// The slot of |type| that a designator chain starting with |designator|
+// initializes (part of).
+static bool PCodeDesignatedTopSlot(TypeRecord* type, Designator* designator,
+                                   size_t* slot_index) {
+  Struct* str = type->info.struct_info;
+  size_t base_index = 0;
+  if (designator->designator_type == kDesignatorBase) {
+    if (!PCodeDesignatedBaseIndex(type, designator, &base_index)) {
+      return false;
+    }
+    *slot_index = ConstexprBaseStorageIndex(str, base_index);
+    return true;
+  }
+  StructMember* member = PCodeDesignatorMember(type, designator);
+  if (member == NULL) {
+    return false;
+  }
+  if (PCodeStructDeclaresMember(str, member)) {
+    *slot_index = PCodeConstexprMemberSlotIndex(str, member);
+    return true;
+  }
+  if (!PCodeBaseIndexDeclaringMember(str, member, &base_index)) {
+    return false;
+  }
+  *slot_index = ConstexprBaseStorageIndex(str, base_index);
+  return true;
+}
+
+static bool PCodeInitializeOmittedSubobjects(ConstEvalContext* ctx,
+                                             TypeRecord* type,
+                                             ConstexprObject* object,
+                                             const bool* initialized);
+
+// Initializes |slot| from an empty initializer list.  Only aggregates with
+// default member initializers differ from the zeroed slot.
+static bool PCodeValueInitializeSlot(ConstEvalContext* ctx, TypeRecord* type,
+                                     ConstexprValue* slot) {
+  if (slot == NULL) {
+    return false;
+  }
+  if (!ConstexprTypeHasDefaultMemberInitializer(type)) {
+    return true;
+  }
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (!TypeIsFixedArray(type) &&
+      (str == NULL || str->is_union || !str->is_aggregate)) {
+    return false;
+  }
+  if (!slot->is_object || slot->object == NULL) {
+    ConstexprObject* subobject = NewPCodeConstexprObject(type);
+    if (subobject == NULL) {
+      return false;
+    }
+    *slot = (ConstexprValue){.is_object = true, .object = subobject};
+  }
+  if (TypeIsFixedArray(type)) {
+    for (size_t i = 0; i < slot->object->slots.length; i++) {
+      if (!PCodeValueInitializeSlot(ctx, type->next,
+                                    PCodeConstexprObjectSlot(slot->object, i))) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return PCodeInitializeOmittedSubobjects(ctx, type, slot->object, NULL);
+}
+
+// Initializes the bases and members of |object| that |initialized| (when
+// given) does not mark: from their default member initializers, or from an
+// empty initializer list ([dcl.init.aggr]/5).
+static bool PCodeInitializeOmittedSubobjects(ConstEvalContext* ctx,
+                                             TypeRecord* type,
+                                             ConstexprObject* object,
+                                             const bool* initialized) {
+  Struct* str = type->info.struct_info;
+  if (str->virtual_bases.length != 0) {
+    return false;
+  }
+  size_t slot_count = object->slots.length;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->is_virtual) {
+      return false;
+    }
+    size_t index = ConstexprBaseStorageIndex(str, i);
+    if (index < slot_count && initialized != NULL && initialized[index]) {
+      continue;
+    }
+    ConstexprValue* slot = PCodeConstexprObjectSlot(object, index);
+    if (slot == NULL) {
+      return false;
+    }
+    if (!slot->is_object || slot->object == NULL) {
+      ConstexprObject* subobject = NewPCodeConstexprObject(base->type);
+      if (subobject == NULL) {
+        return false;
+      }
+      *slot = (ConstexprValue){.is_object = true, .object = subobject};
+    }
+    if (ConstexprTypeHasDefaultMemberInitializer(base->type) &&
+        (!base->type->info.struct_info->is_aggregate ||
+         !PCodeInitializeOmittedSubobjects(ctx, base->type, slot->object,
+                                           NULL))) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (!PCodeDataMember(member)) {
+      continue;
+    }
+    size_t index = PCodeConstexprMemberSlotIndex(str, member);
+    if (index < slot_count && initialized != NULL && initialized[index]) {
+      continue;
+    }
+    ConstexprValue* slot = PCodeConstexprObjectSlot(object, index);
+    if (member->default_initializer != NULL) {
+      if (!PCodeStoreInitializer(ctx, member->symbol->type,
+                                 member->default_initializer, slot)) {
+        return false;
+      }
+    } else if (!PCodeValueInitializeSlot(ctx, member->symbol->type, slot)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool PCodeStoreElidedInitializer(ConstEvalContext* ctx,
+                                        TypeRecord* type, Vector* entries,
+                                        size_t* next, ConstexprValue* slot);
 
 static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
                                    ASTNode* initializer,
@@ -6706,95 +6930,158 @@ static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
   }
   BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
   Struct* str = type->info.struct_info;
-  if (str->is_union && braced->initializers->length != 0) {
-    ASTNode* first = braced->initializers->value.p[0];
-    if (first != NULL && first->op == AST_OP(designated_init)) {
+  if (str->is_union) {
+    if (braced->initializers->length == 0) {
+      return true;
+    }
+    if (braced->initializers->length != 1) {
+      return false;
+    }
+    ASTNode* entry = braced->initializers->value.p[0];
+    StructMember* selected = NULL;
+    if (entry != NULL && entry->op == AST_OP(designated_init)) {
       DesignatedInitializerASTNode* designated =
-          (DesignatedInitializerASTNode*)first;
+          (DesignatedInitializerASTNode*)entry;
       if (designated->designators == NULL ||
           designated->designators->length != 1) {
         return false;
       }
-      StructMember* selected =
+      selected =
           PCodeDesignatorMember(type, designated->designators->value.p[0]);
-      if (selected == NULL || selected->symbol == NULL ||
-          !PCodeStoreInitializer(
-              ctx, selected->symbol->type, designated->init,
-              PCodeConstexprObjectSlot(object, 0))) {
-        return false;
+      entry = designated->init;
+    } else {
+      for (size_t i = 0; i < str->members.length && selected == NULL; i++) {
+        if (PCodeDataMember(str->members.value.p[i])) {
+          selected = str->members.value.p[i];
+        }
       }
-      object->active_union_member = selected;
-      return braced->initializers->length == 1;
     }
+    if (selected == NULL || selected->symbol == NULL ||
+        !PCodeStoreInitializer(ctx, selected->symbol->type, entry,
+                               PCodeConstexprObjectSlot(object, 0))) {
+      return false;
+    }
+    object->active_union_member = selected;
+    return true;
   }
-  size_t init_index = 0;
-  if (str->virtual_bases.length != 0) {
+  size_t slot_count = object->slots.length;
+  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
+  if (slot_count > 0 && initialized == NULL) {
     return false;
   }
-  for (size_t i = 0; i < str->bases.length; i++) {
-    CXXBaseSpecifier* base = str->bases.value.p[i];
-    if (base == NULL || base->is_virtual) {
-      return false;
+  bool ok = true;
+  size_t positional = 0;
+  size_t next = 0;
+  while (ok && next < braced->initializers->length) {
+    ASTNode* entry = braced->initializers->value.p[next];
+    size_t slot_index = 0;
+    if (entry != NULL && entry->op == AST_OP(designated_init)) {
+      DesignatedInitializerASTNode* designated =
+          (DesignatedInitializerASTNode*)entry;
+      ok = designated->designators != NULL &&
+           designated->designators->length != 0 &&
+           PCodeDesignatedTopSlot(type, designated->designators->value.p[0],
+                                  &slot_index) &&
+           PCodeStoreDesignatedInitializer(ctx, type, object,
+                                           designated->designators, 0,
+                                           designated->init);
+      next++;
+    } else {
+      TypeRecord* slot_type = NULL;
+      ok = PCodePositionalElement(str, positional++, &slot_index,
+                                  &slot_type) &&
+           PCodeStoreElidedInitializer(
+               ctx, slot_type, braced->initializers, &next,
+               PCodeConstexprObjectSlot(object, slot_index));
     }
-    ConstexprValue* slot =
-        PCodeConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i));
-    if (slot == NULL) {
-      return false;
+    if (ok && slot_index < slot_count) {
+      initialized[slot_index] = true;
     }
-    if (init_index < braced->initializers->length) {
-      ASTNode* entry = braced->initializers->value.p[init_index++];
-      if (entry == NULL || entry->op == AST_OP(designated_init) ||
-          !PCodeStoreInitializer(ctx, base->type, entry, slot)) {
-        return false;
-      }
-      continue;
-    }
-    // An omitted base is initialized from an empty list, which only a base
-    // without default member initializers leaves all zero.
-    if (PCodeClassHasDefaultMemberInitializer(base->type)) {
-      return false;
-    }
-    ConstexprObject* subobject = NewPCodeConstexprObject(base->type);
+  }
+  ok = ok && PCodeInitializeOmittedSubobjects(ctx, type, object, initialized);
+  free(initialized);
+  return ok;
+}
+
+// Stores entries[*next...] into |slot|.  When the entry is not a braced list
+// and does not itself initialize the whole aggregate |type|, its braces were
+// elided: it and the entries after it initialize the aggregate's elements in
+// order ([dcl.init.aggr]/16).
+static bool PCodeStoreElidedInitializer(ConstEvalContext* ctx,
+                                        TypeRecord* type, Vector* entries,
+                                        size_t* next, ConstexprValue* slot) {
+  if (slot == NULL || *next >= entries->length) {
+    return false;
+  }
+  ASTNode* entry = entries->value.p[*next];
+  ASTNode* expr = ConstexprInitializerExpression(entry);
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  bool aggregate = TypeIsFixedArray(type) ||
+                   (str != NULL && !str->is_union && str->is_aggregate);
+  bool elided =
+      aggregate && entry != NULL && entry->op != AST_OP(braced_init) &&
+      entry->op != AST_OP(designated_init) && expr != NULL &&
+      expr->op != AST_OP(string) &&
+      (expr->type == NULL || (!TypeIsFixedArray(expr->type) &&
+                              !TypeIsStructOrUnion(expr->type)));
+  if (!elided) {
+    (*next)++;
+    return PCodeStoreInitializer(ctx, type, entry, slot);
+  }
+  if (!slot->is_object || slot->object == NULL) {
+    ConstexprObject* subobject = NewPCodeConstexprObject(type);
     if (subobject == NULL) {
       return false;
     }
     *slot = (ConstexprValue){.is_object = true, .object = subobject};
   }
-  for (size_t i = 0; i < str->members.length; i++) {
-    StructMember* member = str->members.value.p[i];
-    if (member == NULL || member->symbol == NULL || member->is_static ||
-        member->is_member_function ||
-        StorageIs(member->symbol->storage, STO(typedef))) {
-      continue;
-    }
-    ConstexprValue* member_slot = PCodeConstexprObjectSlot(
-        object, PCodeConstexprMemberSlotIndex(str, member));
-    if (init_index >= braced->initializers->length) {
-      if (str->is_union) {
+  ConstexprObject* object = slot->object;
+  if (TypeIsFixedArray(type)) {
+    for (size_t i = 0; i < object->slots.length && *next < entries->length;
+         i++) {
+      ASTNode* element = entries->value.p[*next];
+      if (element != NULL && element->op == AST_OP(designated_init)) {
         break;
       }
-      // A member the braced list does not reach is initialized from its default
-      // member initializer, or value-initialized when it has none
-      // ([dcl.init.aggr]/5); the zeroed slot already models the latter.
-      if (member->default_initializer != NULL &&
-          !PCodeStoreInitializer(ctx, member->symbol->type,
-                                 member->default_initializer, member_slot)) {
+      if (!PCodeStoreElidedInitializer(ctx, type->next, entries, next,
+                                       PCodeConstexprObjectSlot(object, i))) {
         return false;
       }
-      continue;
     }
-    if (!PCodeStoreInitializer(ctx, member->symbol->type,
-                               braced->initializers->value.p[init_index],
-                               member_slot)) {
-      return false;
+    for (size_t i = 0; i < object->slots.length; i++) {
+      ConstexprValue* element = PCodeConstexprObjectSlot(object, i);
+      if (!element->is_object &&
+          !PCodeValueInitializeSlot(ctx, type->next, element)) {
+        return false;
+      }
     }
-    if (str->is_union) {
-      object->active_union_member = member;
+    return true;
+  }
+  size_t slot_count = object->slots.length;
+  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
+  if (slot_count > 0 && initialized == NULL) {
+    return false;
+  }
+  bool ok = true;
+  size_t slot_index = 0;
+  TypeRecord* slot_type = NULL;
+  for (size_t k = 0; ok && *next < entries->length &&
+                     PCodePositionalElement(str, k, &slot_index, &slot_type);
+       k++) {
+    ASTNode* element = entries->value.p[*next];
+    if (element != NULL && element->op == AST_OP(designated_init)) {
       break;
     }
-    init_index++;
+    ok = PCodeStoreElidedInitializer(
+        ctx, slot_type, entries, next,
+        PCodeConstexprObjectSlot(object, slot_index));
+    if (ok && slot_index < slot_count) {
+      initialized[slot_index] = true;
+    }
   }
-  return init_index == braced->initializers->length || str->is_union;
+  ok = ok && PCodeInitializeOmittedSubobjects(ctx, type, object, initialized);
+  free(initialized);
+  return ok;
 }
 
 static bool BuildPCodeConstexprObject(ConstEvalContext* ctx, TypeRecord* type,
