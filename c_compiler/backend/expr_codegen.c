@@ -4355,6 +4355,29 @@ static void GenerateConstexprObjectMarker(Generator* gen, Symbol* symbol,
                                   location);
 }
 
+void GenerateConstexprUninitializedObjectMarker(Generator* gen,
+                                                Symbol* symbol,
+                                                SourceLocation location) {
+  if (!gen->for_constant_evaluation || symbol == NULL ||
+      !symbol->flags.is_local ||
+      StorageIs(symbol->storage, STO(static) | STO(thread) | STO(extern)) ||
+      symbol->type == NULL || symbol->type->size <= 0 ||
+      TypeIsReference(symbol->type) || TypeIsFunction(symbol->type) ||
+      TypeIsVLA(symbol->type) || SymbolNeedsDynamicStackAllocation(symbol)) {
+    return;
+  }
+  IRNode* address = IRSetType(
+      GeneratorEmit(gen, NewIR1(IR_OP(addressof),
+                                GeneratorGetVariable(gen, symbol))),
+      NewPointerTo(kQualPlain, symbol->type));
+  uint64_t marker = SymbolInitialValueState(symbol) == kValueStateErroneous
+                        ? CONSTEXPR_PCODE_ERRONEOUS_OBJECT_MARKER
+                        : CONSTEXPR_PCODE_INDETERMINATE_OBJECT_MARKER;
+  GenerateConstexprLifetimeMarker(gen, address, marker,
+                                  ConstexprPCodeTypeToken(symbol->type),
+                                  location);
+}
+
 static bool GeneratorIsInStdConstructAt(Generator* gen) {
   Symbol* origin = gen->func != NULL && TypeIsFunction(gen->func)
                        ? gen->func->info.function.template_origin

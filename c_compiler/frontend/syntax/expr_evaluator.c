@@ -1262,7 +1262,24 @@ static bool EvaluateLongDoubleBits(ConstEvalContext* ctx, ASTNode* node,
   return false;
 }
 
-bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx, ASTNode* node, double* result) {
+static bool EvaluateFloatingPointValueInContext(ConstEvalContext* ctx,
+                                                ASTNode* node, double* result);
+
+// A float-typed result is a float even though it is carried in a double.
+bool EvaluateFloatingPointExpressionInContext(ConstEvalContext* ctx,
+                                              ASTNode* node, double* result) {
+  if (!EvaluateFloatingPointValueInContext(ctx, node, result)) {
+    return false;
+  }
+  if (node->type != NULL && TypeIsFloatingPoint(node->type) &&
+      node->type->size == sizeof(float)) {
+    *result = (double)(float)*result;
+  }
+  return true;
+}
+
+static bool EvaluateFloatingPointValueInContext(ConstEvalContext* ctx,
+                                                ASTNode* node, double* result) {
   if (node == NULL) {
     return false;
   }

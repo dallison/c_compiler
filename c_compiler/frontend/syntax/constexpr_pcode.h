@@ -20,6 +20,9 @@
 #define CONSTEXPR_PCODE_PLACEMENT_NEW_MARKER UINT64_C(0xfffffff9)
 // Placement new outside std::construct_at before C++26.
 #define CONSTEXPR_PCODE_PLACEMENT_NEW_FORBIDDEN_MARKER UINT64_C(0xfffffff8)
+// A local declared without an initializer.  Each carries a type token.
+#define CONSTEXPR_PCODE_INDETERMINATE_OBJECT_MARKER UINT64_C(0xfffffff7)
+#define CONSTEXPR_PCODE_ERRONEOUS_OBJECT_MARKER UINT64_C(0xfffffff6)
 
 typedef enum {
   kConstexprPCodeEligible,

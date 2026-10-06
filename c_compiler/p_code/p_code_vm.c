@@ -207,6 +207,7 @@ static void* AccessPointer(PCodeVM* vm, uint64_t address, size_t size,
       if (region->states[offset + byte] != kValueStateValid) {
         vm->read_after_lifetime =
             region->states[offset + byte] == PCODE_VM_STATE_ENDED_LIFETIME;
+        vm->failed_read_state = region->states[offset + byte];
         vm->status = kPCodeVMStatusInvalidRead;
         return NULL;
       }
@@ -471,6 +472,12 @@ bool PCodeVMCopyMemoryState(PCodeVM* vm, uint64_t destination,
 }
 
 bool PCodeVMEndLifetime(PCodeVM* vm, uint64_t address, size_t size) {
+  return PCodeVMSetMemoryState(vm, address, size,
+                               (ValueState)PCODE_VM_STATE_ENDED_LIFETIME);
+}
+
+bool PCodeVMSetMemoryState(PCodeVM* vm, uint64_t address, size_t size,
+                           ValueState state) {
   if (size == 0) {
     return true;
   }
@@ -486,8 +493,7 @@ bool PCodeVMEndLifetime(PCodeVM* vm, uint64_t address, size_t size) {
         return false;
       }
     }
-    memset(region->states + (size_t)(address - region->start),
-           PCODE_VM_STATE_ENDED_LIFETIME, size);
+    memset(region->states + (size_t)(address - region->start), state, size);
     if (region->start == (uint64_t)(uintptr_t)vm->stack &&
         address < vm->stack_ended_low) {
       vm->stack_ended_low = address;

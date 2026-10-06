@@ -9787,6 +9787,127 @@ static bool ConstexprReadByte(ConstexprValue address, size_t offset,
   return true;
 }
 
+static bool ConstexprBitCastScalarType(TypeRecord* type) {
+  return type != NULL && type->size > 0 && type->size <= 8 &&
+         (TypeIsIntegral(type) || TypeIsFloatingPoint(type)) &&
+         !TypeUsesLongDoubleRepresentation(type) && !TypeIsInt128(type);
+}
+
+static uint64_t ConstexprScalarBits(ConstexprValue value, TypeRecord* type) {
+  uint64_t bits = 0;
+  if (TypeIsFloatingPoint(type)) {
+    double wide = 0;
+    ConstexprValueAsFloating(value, &wide);
+    if (type->size == sizeof(float)) {
+      float narrow = (float)wide;
+      memcpy(&bits, &narrow, sizeof(narrow));
+    } else {
+      memcpy(&bits, &wide, sizeof(wide));
+    }
+    return bits;
+  }
+  int64_t integer = 0;
+  ConstexprValueAsInteger(value, &integer);
+  bits = (uint64_t)integer;
+  return type->size < 8 ? bits & ((UINT64_C(1) << (type->size * 8)) - 1)
+                        : bits;
+}
+
+static ConstexprValue ConstexprScalarFromBits(uint64_t bits,
+                                              TypeRecord* type) {
+  if (TypeIsFloatingPoint(type)) {
+    double wide = 0;
+    if (type->size == sizeof(float)) {
+      float narrow = 0;
+      memcpy(&narrow, &bits, sizeof(narrow));
+      wide = narrow;
+    } else {
+      memcpy(&wide, &bits, sizeof(wide));
+    }
+    return (ConstexprValue){
+        .is_floating = true, .fvalue = wide, .ivalue = (int64_t)wide};
+  }
+  int shift = 64 - (int)type->size * 8;
+  int64_t integer = (int64_t)bits;
+  if (shift > 0 && !TypeIsUnsigned(type)) {
+    integer = (int64_t)(bits << shift) >> shift;
+  }
+  return (ConstexprValue){.ivalue = integer};
+}
+
+// The type an argument pointed to before its conversion to void*.
+static TypeRecord* ConstexprPointeeTypeBeforeVoidCast(ASTNode* argument) {
+  while (argument != NULL && argument->op == AST_OP(cast) &&
+         TypeIsPointer(argument->type) && argument->type->next != NULL &&
+         TypeIsVoid(argument->type->next)) {
+    argument = ((CastASTNode*)argument)->expr;
+  }
+  return argument != NULL && TypeIsPointer(argument->type)
+             ? argument->type->next
+             : NULL;
+}
+
+// std::bit_cast copies one scalar object's bytes over another of the same
+// size; the copy reinterprets the value.
+static bool ConstexprTryEvaluateScalarBitCopy(ConstEvalContext* ctx,
+                                              ASTNode* node,
+                                              ConstexprValue* result) {
+  Symbol* symbol = ConstexprCallSymbol(node);
+  if (ctx == NULL || node == NULL || node->op != AST_OP(call) ||
+      result == NULL || symbol == NULL || symbol->name.value == NULL ||
+      (strcmp(symbol->name.value, "memcpy") != 0 &&
+       strcmp(symbol->name.value, "__builtin_memcpy") != 0 &&
+       strcmp(symbol->name.value, "memmove") != 0 &&
+       strcmp(symbol->name.value, "__builtin_memmove") != 0)) {
+    return false;
+  }
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->children == NULL || call->children->length != 3) {
+    return false;
+  }
+  // Decided before evaluating anything, so a call this does not take is not
+  // left with its arguments' side effects applied.
+  TypeRecord* written =
+      ConstexprPointeeTypeBeforeVoidCast(call->children->value.p[0]);
+  TypeRecord* read =
+      ConstexprPointeeTypeBeforeVoidCast(call->children->value.p[1]);
+  if (!ConstexprBitCastScalarType(written) ||
+      !ConstexprBitCastScalarType(read) || written->size != read->size) {
+    return false;
+  }
+  ConstexprValue destination = {0};
+  ConstexprValue source = {0};
+  int64_t count = 0;
+  if (!EvaluateConstexprAddressValue(ctx, call->children->value.p[0],
+                                     &destination) ||
+      !EvaluateConstexprAddressValue(ctx, call->children->value.p[1],
+                                     &source) ||
+      !EvaluateIntegerExpressionInContext(ctx, call->children->value.p[2],
+                                          &count)) {
+    return false;
+  }
+  destination = ConstexprResolveForwardedAddress(destination);
+  source = ConstexprResolveForwardedAddress(source);
+  TypeRecord* destination_type = ConstexprAddressPointeeType(ctx, destination);
+  if (destination.address_binding == NULL || destination_type == NULL ||
+      destination_type->size != written->size || count != written->size) {
+    return false;
+  }
+  ConstexprValue value = {0};
+  if (!ConstexprDereferenceAddress(source, &value) || value.is_address ||
+      value.is_object || value.state != kValueStateValid) {
+    return false;
+  }
+  if (!StoreConstexprBinding(
+          ctx, destination.address_binding, written,
+          ConstexprScalarFromBits(ConstexprScalarBits(value, read),
+                                  written))) {
+    return false;
+  }
+  *result = destination;
+  return true;
+}
+
 static bool ConstexprTryEvaluateMemoryComparison(ConstEvalContext* ctx,
                                                  ASTNode* node,
                                                  ConstexprValue* result) {
@@ -9838,7 +9959,8 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
     return false;
   }
   *result = (ConstexprValue){0};
-  if (ConstexprTryEvaluateMemoryComparison(ctx, node, result)) {
+  if (ConstexprTryEvaluateMemoryComparison(ctx, node, result) ||
+      ConstexprTryEvaluateScalarBitCopy(ctx, node, result)) {
     return true;
   }
   Symbol* allocation_symbol = ConstexprCallSymbol(node);

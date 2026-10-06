@@ -15,6 +15,11 @@
 IRNode* GenerateExpression(Generator* gen, ASTNode* node);
 IROpcode GetLoadOpcodeForType(TypeRecord* type);
 IROpcode GetStoreOpcodeForType(TypeRecord* type);
+// Constant evaluation: the local's bytes are indeterminate (erroneous in
+// C++26) until written.
+void GenerateConstexprUninitializedObjectMarker(Generator* gen,
+                                                Symbol* symbol,
+                                                SourceLocation location);
 
 // Spill a scalar/pointer value into a fresh stack temporary (returns its
 // address) and reload it, so it survives intervening calls.

@@ -1400,7 +1400,30 @@ static void GenerateVariableDeclaration(Generator* gen,
       }
     }
   } else if (!TypeIsVLA(node->symbol->type)) {
-    if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+    // Non-aggregate class declarations are initialized by a separately
+    // synthesized constructor statement, which may already have run.
+    bool constructed_separately =
+        TypeIsStructOrUnion(node->symbol->type) &&
+        node->symbol->type->info.struct_info != NULL &&
+        !node->symbol->type->info.struct_info->is_aggregate;
+    // Writes to part of an object, or through a pointer, are invisible to the
+    // IR value state, so constant evaluation tracks such a local's bytes and
+    // fails only on a read that actually runs.
+    bool tracked_in_memory = TypeIsArray(node->symbol->type) ||
+                             TypeIsStructOrUnion(node->symbol->type) ||
+                             TypeIsVector(node->symbol->type) ||
+                             node->symbol->flags.address_taken;
+    if (gen->for_constant_evaluation && tracked_in_memory) {
+      if (!constructed_separately) {
+        GenerateConstexprUninitializedObjectMarker(gen, node->symbol,
+                                                   node->base.location);
+      }
+      return;
+    }
+    // Constant evaluation rejects reading an indeterminate value in every
+    // standard; only C++26 makes the runtime value erroneous.
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+        !gen->for_constant_evaluation) {
       return;
     }
     ValueState state = SymbolInitialValueState(node->symbol);
@@ -1409,13 +1432,8 @@ static void GenerateVariableDeclaration(Generator* gen,
     if (state != kValueStateErroneous) {
       return;
     }
-    // Non-aggregate class declarations are initialized by a separately
-    // synthesized constructor statement. Zeroing at the declaration node
-    // would run after that statement for some lowered forms and clobber the
-    // constructed object.
-    if (TypeIsStructOrUnion(node->symbol->type) &&
-        node->symbol->type->info.struct_info != NULL &&
-        !node->symbol->type->info.struct_info->is_aggregate) {
+    // Zeroing at the declaration node would clobber the constructed object.
+    if (constructed_separately) {
       return;
     }
     if (!TypeIsArray(node->symbol->type) &&

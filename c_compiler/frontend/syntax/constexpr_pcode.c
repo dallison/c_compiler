@@ -48,6 +48,21 @@ static bool ConstexprPCodeFailure(ConstEvalContext* ctx,
   return false;
 }
 
+static const char* ConstexprPCodeInvalidValueRead(const PCodeVM* vm,
+                                                  PCodeVMStatus status) {
+  if (status != kPCodeVMStatusInvalidRead) {
+    return NULL;
+  }
+  switch (vm->failed_read_state) {
+    case kValueStateIndeterminate:
+      return "indeterminate value read in constexpr pcode";
+    case kValueStateErroneous:
+      return "erroneous value read in constexpr pcode";
+    default:
+      return NULL;
+  }
+}
+
 static ConstexprPCodeFailureKind ConstexprPCodeVMFailureKind(
     PCodeVMStatus status, bool heap_activity) {
   if (!heap_activity) {
@@ -3103,6 +3118,9 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
   } else if (status == kPCodeVMStatusInvalidRead && vm.read_after_lifetime) {
     *failure_kind = kConstexprPCodeFailureInvalid;
     *reason = "read of object outside its lifetime in constant expression";
+  } else if (ConstexprPCodeInvalidValueRead(&vm, status) != NULL) {
+    *failure_kind = kConstexprPCodeFailureInvalid;
+    *reason = ConstexprPCodeInvalidValueRead(&vm, status);
   } else {
     *failure_kind = ConstexprPCodeVMFailureKind(
         status, runtime.heap_blocks.length != 0);
@@ -3210,6 +3228,9 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
   } else if (status == kPCodeVMStatusInvalidRead && vm.read_after_lifetime) {
     *failure_kind = kConstexprPCodeFailureInvalid;
     *reason = "read of object outside its lifetime in constant expression";
+  } else if (ConstexprPCodeInvalidValueRead(&vm, status) != NULL) {
+    *failure_kind = kConstexprPCodeFailureInvalid;
+    *reason = ConstexprPCodeInvalidValueRead(&vm, status);
   } else if (status != kPCodeVMStatusHalted) {
     *failure_kind = ConstexprPCodeVMFailureKind(
         status, runtime.heap_blocks.length != 0);
@@ -4465,6 +4486,20 @@ static PCodeVMStatus ConstexprPCodeEscapeStartLifetime(
   if (size == CONSTEXPR_PCODE_PLACEMENT_NEW_FORBIDDEN_MARKER) {
     return ConstexprPCodeTypingFailure(
         runtime, "placement new is not permitted in this constant expression");
+  }
+  if (size == CONSTEXPR_PCODE_INDETERMINATE_OBJECT_MARKER ||
+      size == CONSTEXPR_PCODE_ERRONEOUS_OBJECT_MARKER) {
+    TypeRecord* type = ConstexprPCodeTypeForToken(type_token);
+    if (type == NULL || type->size <= 0 ||
+        !ConstexprPCodeAddressOf(&args, raw_address, 0, false, &address)) {
+      return kPCodeVMStatusRunning;
+    }
+    ValueState state = size == CONSTEXPR_PCODE_ERRONEOUS_OBJECT_MARKER
+                           ? kValueStateErroneous
+                           : kValueStateIndeterminate;
+    return PCodeVMSetMemoryState(vm, address, (size_t)type->size, state)
+               ? kPCodeVMStatusRunning
+               : kPCodeVMStatusAllocationFailure;
   }
   if (size >= CONSTEXPR_PCODE_PLACEMENT_NEW_MARKER &&
       size <= CONSTEXPR_PCODE_OBJECT_MARKER) {
