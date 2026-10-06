@@ -2651,6 +2651,10 @@ static void AnalyzeCXXStaticDataMemberConstantInitializer(TypeParser* parser,
       symbol, initializer, symbol->location);
   SemanticAnalyzeVariableDefinition(parser->syntax,
                                     (VariableDeclarationASTNode*)decl);
+  // The initializer of a non-inline member gives it a value, not a
+  // definition: an odr-used `static const int b = 3;` is defined by an
+  // out-of-class `const int C::b;`, which must not be dropped as redundant.
+  symbol->flags.is_defined = false;
   if (!symbol->flags.value_set &&
       !TypeContainsTemplateParameter(symbol->type) &&
       !ExpressionIsTemplateDependent(initializer)) {

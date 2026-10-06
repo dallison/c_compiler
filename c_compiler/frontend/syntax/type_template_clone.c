@@ -8196,12 +8196,15 @@ static ASTNode* ReanalyzeClonedResolvedCall(
   // has been substituted and rebased below, resolving `tag{}` again folds
   // `URBG` (now index 0) onto the class argument.  The pattern's own alias
   // must still be substituted once, or the per-call clone reads its absolute
-  // indices against the member-only arguments.
+  // indices against the member-only arguments.  A bare template parameter
+  // (`First(key)` in a member of a nested partial specialization) is not an
+  // alias and is not among the enclosing arguments, so it is left alone too.
   if (clone != NULL && clone->parser != NULL &&
       clone->parser->substituting_enclosing_template_arguments_only &&
       id->symbol != NULL &&
       StorageIs(id->symbol->storage, STO(typedef)) &&
-      MapFindPointerKey(&clone->symbol_map, id->symbol) == id->symbol) {
+      (MapFindPointerKey(&clone->symbol_map, id->symbol) == id->symbol ||
+       TypeIsTemplateParameterPlaceholder(id->symbol->type, NULL))) {
     return node;
   }
   if (clone != NULL && clone->to_func != NULL &&

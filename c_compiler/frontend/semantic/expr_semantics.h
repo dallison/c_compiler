@@ -74,6 +74,10 @@ bool TryConvertWithConvertingConstructor(ASTNode* from, TypeRecord* to,
 StructMember* CXXFindConvertingConstructorCandidate(TypeRecord* to, ASTNode* from,
                                                     bool allow_explicit);
 
+// True when the class type of `from` has a conversion function yielding
+// `to`, deducing a conversion function template's result where needed.
+bool CXXClassHasConversionOperatorTo(ASTNode* from, TypeRecord* to);
+
 // Validate class copy-initialization of a named return operand, including the
 // constructor that must remain viable when NRVO later elides the call.
 void CXXValidateReturnInitialization(TypeRecord* to, ASTNode* from);

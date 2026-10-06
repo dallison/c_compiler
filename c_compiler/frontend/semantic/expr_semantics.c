@@ -4060,6 +4060,10 @@ static bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target) {
   return found;
 }
 
+bool CXXClassHasConversionOperatorTo(ASTNode* from, TypeRecord* to) {
+  return ClassHasConversionOperatorTo(from, to);
+}
+
 static TypeRecord* ReferenceConversionTarget(ASTNode* actual,
                                              TypeRecord* reference_type) {
   if (!CompilerIsCXX() || actual == NULL || actual->type == NULL ||

@@ -10679,6 +10679,22 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     // in-class initializer.  Drop it from code generation.
     bool skip_redundant_static_member_definition =
         redundant_static_member_redefinition && initializer == NULL;
+    // `const int C::b;` defines a member whose value came from its in-class
+    // initializer (`static const int b = 3;`); the definition carries it.
+    if (CompilerIsCXX() && initializer == NULL &&
+        !skip_redundant_static_member_definition &&
+        !syntax->parsing_template_declaration &&
+        parser->cxx_member_definition != NULL && old_sym != NULL &&
+        old_sym->type != NULL &&
+        !TypeIsFunction(old_sym->type) && old_sym->flags.value_set &&
+        TypeIsConst(old_sym->type) &&
+        (TypeIsIntegral(old_sym->type) || TypeIsEnum(old_sym->type))) {
+      SourceLocation location = syntax->lex->current_token_location;
+      initializer = NewExpressionInitializerASTNode(
+          NewIntConstantASTNode(old_sym->value.ivalue,
+                                TypeRecordCopy(sym->type), location),
+          location);
+    }
     if (!skip_cxx_function_redeclaration &&
         !skip_redundant_static_member_definition) {
       ASTNode* decl = NewVariableDeclarationASTNode(
@@ -15172,6 +15188,18 @@ static ASTNode* NewCXXCopyInitConstructorInitializer(Syntax* syntax, Symbol* sym
       TypeIsStructOrUnion(expr->type) &&
       expr->type->info.struct_info == sym->type->info.struct_info;
   if (!same_class && !CXXTypeRequiresCopyConstructorCall(sym->type)) {
+    return initializer;
+  }
+  // [over.match.copy]: from another class, the candidates are the converting
+  // constructors, whose argument may not itself use a user-defined conversion
+  // ([over.best.ics]/4), and the source's conversion functions to `T`.  A
+  // constructor call would wrongly allow `M(initializer_list<int>)` through a
+  // conversion function template, so let the conversion function initialize
+  // the object directly when no constructor takes the source as it is.
+  if (!same_class && expr->type != NULL && TypeIsStructOrUnion(expr->type) &&
+      CXXFindConvertingConstructorCandidate(sym->type, expr,
+                                            /*allow_explicit=*/false) == NULL &&
+      CXXClassHasConversionOperatorTo(expr, sym->type)) {
     return initializer;
   }
   bool known_prvalue =
