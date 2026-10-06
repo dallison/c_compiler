@@ -34,6 +34,9 @@ typedef struct {
   int max_steps;
   int unwinding_exceptions;
   int destroy_at_depth;
+  // call_depth of the running std::construct_at body, or 0.  Only that frame
+  // may use placement new before C++26.
+  int construct_at_call_depth;
   ASTNode* allocation_new_expression;
   const char* pcode_failure_reason;
   ConstexprPCodeFailureKind pcode_failure_kind;

@@ -18,6 +18,8 @@
 #define CONSTEXPR_PCODE_ALLOCATED_OBJECT_MARKER UINT64_C(0xfffffffb)
 #define CONSTEXPR_PCODE_VOID_POINTER_CAST_MARKER UINT64_C(0xfffffffa)
 #define CONSTEXPR_PCODE_PLACEMENT_NEW_MARKER UINT64_C(0xfffffff9)
+// Placement new outside std::construct_at before C++26.
+#define CONSTEXPR_PCODE_PLACEMENT_NEW_FORBIDDEN_MARKER UINT64_C(0xfffffff8)
 
 typedef enum {
   kConstexprPCodeEligible,

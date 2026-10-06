@@ -1,0 +1,39 @@
+//
+//  __construct_at
+//  c_compiler
+//
+//  std::construct_at and the internal std::__construct_at.  Constant
+//  evaluation only permits placement new inside std::construct_at before
+//  C++26, so constexpr library code must construct through it.  Kept in a tiny
+//  header so <variant>, <expected> and <ranges> need not pull in <memory>.
+//
+
+#ifndef __davecc_construct_at__
+#define __davecc_construct_at__
+
+#include <new>
+
+namespace std {
+
+#if __cplusplus >= 202002L
+template <class T, class... Args>
+constexpr T* construct_at(T* location, Args&&... args) {
+  return ::new (static_cast<void*>(location))
+      T(static_cast<Args&&>(args)...);
+}
+
+template <class T, class... Args>
+constexpr T* __construct_at(T* location, Args&&... args) {
+  return std::construct_at(location, static_cast<Args&&>(args)...);
+}
+#else
+template <class T, class... Args>
+constexpr T* __construct_at(T* location, Args&&... args) {
+  return ::new (static_cast<void*>(location))
+      T(static_cast<Args&&>(args)...);
+}
+#endif
+
+}  // namespace std
+
+#endif  // __davecc_construct_at__

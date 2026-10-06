@@ -8,6 +8,7 @@
 #ifndef expected_h
 #define expected_h
 
+#include <__construct_at>
 #include <__exception_support>
 #include <exception>
 #include <functional>
@@ -218,27 +219,27 @@ class expected {
 
   template <class... Args>
   constexpr void __construct_value(Args&&... args) {
-    new (__value_ptr()) T(static_cast<Args&&>(args)...);
+    std::__construct_at(__value_ptr(), static_cast<Args&&>(args)...);
     __has_value_ = true;
   }
 
   template <class U, class... Args>
   constexpr void __construct_value_list(initializer_list<U> init,
                                         Args&&... args) {
-    new (__value_ptr()) T(init, static_cast<Args&&>(args)...);
+    std::__construct_at(__value_ptr(), init, static_cast<Args&&>(args)...);
     __has_value_ = true;
   }
 
   template <class... Args>
   constexpr void __construct_error(Args&&... args) {
-    new (__error_ptr()) E(static_cast<Args&&>(args)...);
+    std::__construct_at(__error_ptr(), static_cast<Args&&>(args)...);
     __has_value_ = false;
   }
 
   template <class U, class... Args>
   constexpr void __construct_error_list(initializer_list<U> init,
                                         Args&&... args) {
-    new (__error_ptr()) E(init, static_cast<Args&&>(args)...);
+    std::__construct_at(__error_ptr(), init, static_cast<Args&&>(args)...);
     __has_value_ = false;
   }
 
@@ -849,14 +850,14 @@ class expected<void, E> {
 
   template <class... Args>
   constexpr void __construct_error(Args&&... args) {
-    new (__error_ptr()) E(static_cast<Args&&>(args)...);
+    std::__construct_at(__error_ptr(), static_cast<Args&&>(args)...);
     __has_value_ = false;
   }
 
   template <class U, class... Args>
   constexpr void __construct_error_list(initializer_list<U> init,
                                         Args&&... args) {
-    new (__error_ptr()) E(init, static_cast<Args&&>(args)...);
+    std::__construct_at(__error_ptr(), init, static_cast<Args&&>(args)...);
     __has_value_ = false;
   }
 

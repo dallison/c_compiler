@@ -14,6 +14,7 @@ filegroup(
     name = "libc_headers",
     srcs = glob(["libc/include/**/*.h"]) + [
         "libc/include/__char_traits",
+        "libc/include/__construct_at",
         "libc/include/__exception_support",
         "libc/include/__minmax",
         "libc/include/__flat_container",

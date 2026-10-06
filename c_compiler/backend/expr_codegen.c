@@ -4355,10 +4355,29 @@ static void GenerateConstexprObjectMarker(Generator* gen, Symbol* symbol,
                                   location);
 }
 
+static bool GeneratorIsInStdConstructAt(Generator* gen) {
+  Symbol* origin = gen->func != NULL && TypeIsFunction(gen->func)
+                       ? gen->func->info.function.template_origin
+                       : NULL;
+  return origin != NULL && StringEqual(&origin->name, "construct_at") &&
+         SymbolIsInStdNamespace(origin);
+}
+
+static bool IsReservedPlacementAllocationFunction(Symbol* function) {
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type) ||
+      function->type->info.function.prototype.length != 2) {
+    return false;
+  }
+  Symbol* pointer_formal = function->type->info.function.prototype.value.p[1];
+  return pointer_formal != NULL && TypeIsPointer(pointer_formal->type) &&
+         TypeIsVoid(pointer_formal->type->next);
+}
+
 static void GenerateConstexprPointerCastMarker(Generator* gen,
                                                CastASTNode* cast,
                                                IRNode* result) {
-  if (!GeneratorTypesConstexprObjects(gen) || cast->expr == NULL) {
+  if (!gen->for_constant_evaluation || cast->expr == NULL) {
     return;
   }
   TypeRecord* source =
@@ -4386,6 +4405,17 @@ static void GenerateConstexprPointerCastMarker(Generator* gen,
   bool placement = new_expression && allocation->op == AST_OP(call) &&
                    ((VectorASTNode*)allocation)->children != NULL &&
                    ((VectorASTNode*)allocation)->children->length > 1;
+  if (!GeneratorTypesConstexprObjects(gen)) {
+    // Before C++26 only std::construct_at may place an object.
+    if (placement &&
+        IsReservedPlacementAllocationFunction(allocation_function) &&
+        !GeneratorIsInStdConstructAt(gen)) {
+      GenerateConstexprLifetimeMarker(
+          gen, result, CONSTEXPR_PCODE_PLACEMENT_NEW_FORBIDDEN_MARKER, 0,
+          cast->base.location);
+    }
+    return;
+  }
   uint64_t marker = CONSTEXPR_PCODE_VOID_POINTER_CAST_MARKER;
   if (placement) {
     marker = CONSTEXPR_PCODE_PLACEMENT_NEW_MARKER;

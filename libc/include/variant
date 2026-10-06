@@ -8,6 +8,7 @@
 #ifndef variant_h
 #define variant_h
 
+#include <__construct_at>
 #include <__exception_support>
 #include <compare>
 #include <exception>
@@ -206,15 +207,14 @@ union __storage<I, T> {
 
   template <size_t Target, class... Args>
   constexpr void __construct(Args&&... args) {
-    new (this->template __ptr<Target>())
-        typename __type_at<Target - I, T>::type(std::forward<Args>(args)...);
+    std::__construct_at(this->template __ptr<Target>(),
+                        std::forward<Args>(args)...);
   }
 
   template <size_t Target, class U, class... Args>
   constexpr void __construct_list(initializer_list<U> init, Args&&... args) {
-    new (this->template __ptr<Target>())
-        typename __type_at<Target - I, T>::type(
-            init, std::forward<Args>(args)...);
+    std::__construct_at(this->template __ptr<Target>(),
+                        init, std::forward<Args>(args)...);
   }
 
   constexpr void __destroy(size_t index) {
@@ -225,13 +225,13 @@ union __storage<I, T> {
 
   constexpr void __copy_construct(const __storage& other, size_t index) {
     if (index == I) {
-      new (&__value_) T(other.__value_);
+      std::__construct_at(&__value_, other.__value_);
     }
   }
 
   constexpr void __move_construct(__storage& other, size_t index) {
     if (index == I) {
-      new (&__value_) T(std::move(other.__value_));
+      std::__construct_at(&__value_, std::move(other.__value_));
     }
   }
 
@@ -320,16 +320,14 @@ union __storage<I, T, Rest...> {
 
   template <size_t Target, class... Args>
   constexpr void __construct(Args&&... args) {
-    new (this->template __ptr<Target>())
-        typename __type_at<Target - I, T, Rest...>::type(
-            std::forward<Args>(args)...);
+    std::__construct_at(this->template __ptr<Target>(),
+                        std::forward<Args>(args)...);
   }
 
   template <size_t Target, class U, class... Args>
   constexpr void __construct_list(initializer_list<U> init, Args&&... args) {
-    new (this->template __ptr<Target>())
-        typename __type_at<Target - I, T, Rest...>::type(
-            init, std::forward<Args>(args)...);
+    std::__construct_at(this->template __ptr<Target>(),
+                        init, std::forward<Args>(args)...);
   }
 
   constexpr void __destroy(size_t index) {
@@ -342,7 +340,7 @@ union __storage<I, T, Rest...> {
 
   constexpr void __copy_construct(const __storage& other, size_t index) {
     if (index == I) {
-      new (&__value_) T(other.__value_);
+      std::__construct_at(&__value_, other.__value_);
     } else {
       __rest_.__copy_construct(other.__rest_, index);
     }
@@ -350,7 +348,7 @@ union __storage<I, T, Rest...> {
 
   constexpr void __move_construct(__storage& other, size_t index) {
     if (index == I) {
-      new (&__value_) T(std::move(other.__value_));
+      std::__construct_at(&__value_, std::move(other.__value_));
     } else {
       __rest_.__move_construct(other.__rest_, index);
     }

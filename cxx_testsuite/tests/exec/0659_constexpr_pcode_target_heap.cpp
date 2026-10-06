@@ -38,8 +38,8 @@ struct P {
 
 constexpr int placement_constructed() {
   P* storage = std::allocator<P>().allocate(2);
-  P* first = ::new (storage) P(1, 2);
-  P* second = ::new (storage + 1) P(30, 40);
+  P* first = std::construct_at(storage, 1, 2);
+  P* second = std::construct_at(storage + 1, 30, 40);
   int result = first->a + first->b + second->a + second->b;
   std::allocator<P>().deallocate(storage, 2);
   return result;

@@ -1,4 +1,4 @@
-// RUN: -std=c++20
+// RUN: -std=c++26
 // EXPECT_EXIT: 0
 
 // Constant evaluation runs the function as p-code, where an address is the
@@ -36,13 +36,14 @@ static constexpr T* construct_in(T* where) {
 
 static constexpr bool placement_new_in_a_callee(void) {
   struct pair {
-    char bytes[8];
+    int value;
     int index;
-    constexpr pair() : bytes{}, index(7) {}
+    constexpr pair() : value(5), index(7) {}
   };
   pair storage;
-  int* constructed = construct_in(reinterpret_cast<int*>(storage.bytes));
-  return constructed != nullptr && storage.index == 7;
+  int* constructed = construct_in(&storage.value);
+  return constructed == &storage.value && storage.value == 0 &&
+         storage.index == 7;
 }
 
 static constexpr bool reconstruct_in_place(void) {

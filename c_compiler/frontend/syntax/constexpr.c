@@ -727,7 +727,9 @@ static bool ConstexprEvaluateAllocationCall(ConstEvalContext* ctx,
           ctx->allocation_new_expression->op == AST_OP(cast)) {
         new_cast = (CastASTNode*)ctx->allocation_new_expression;
       }
-      if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
+      if (!CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+          (ctx->construct_at_call_depth == 0 ||
+           ctx->call_depth != ctx->construct_at_call_depth)) {
         ReportConstexprPlacementFailure(
             node, "placement new is not permitted in this constant expression");
         return false;
@@ -967,6 +969,7 @@ void ConstEvalContextInit(ConstEvalContext* ctx) {
   ctx->max_steps = CONSTEXPR_MAX_STEPS;
   ctx->unwinding_exceptions = 0;
   ctx->destroy_at_depth = 0;
+  ctx->construct_at_call_depth = 0;
   ctx->allocation_new_expression = NULL;
   ctx->pcode_failure_reason = NULL;
   ctx->pcode_failure_kind = kConstexprPCodeFailureUnsupported;
@@ -7940,9 +7943,7 @@ static bool EvaluateConstexprVariableDeclarationInitializer(
       decl->symbol->type->info.struct_info == NULL ||
       decl->symbol->type->info.struct_info->is_aggregate ||
       decl->symbol->type->info.struct_info->is_union;
-  if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
-      directly_track_uninitialized_state &&
-      decl_initializer == NULL &&
+  if (directly_track_uninitialized_state && decl_initializer == NULL &&
       (decl->symbol->storage == STO(implicit) ||
        StorageIs(decl->symbol->storage, STO(auto)) ||
        StorageIs(decl->symbol->storage, STO(register)))) {
@@ -10069,7 +10070,16 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   if (tracks_destroyed_lifetime) {
     ctx->destroy_at_depth++;
   }
+  Symbol* origin = func->info.function.template_origin != NULL
+                       ? func->info.function.template_origin
+                       : callee;
+  int saved_construct_at_call_depth = ctx->construct_at_call_depth;
+  if (StringEqual(&origin->name, "construct_at") &&
+      SymbolIsInStdNamespace(origin)) {
+    ctx->construct_at_call_depth = ctx->call_depth;
+  }
   bool body = pre && EvaluateConstexprFunctionBody(ctx, func, result);
+  ctx->construct_at_call_depth = saved_construct_at_call_depth;
   if (tracks_destroyed_lifetime) {
     ctx->destroy_at_depth--;
   }

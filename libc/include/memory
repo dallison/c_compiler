@@ -129,6 +129,7 @@ class auto_ptr {
 #if !defined(__6502__) && !defined(__W65C02__)
 #include <atomic>
 #endif
+#include <__construct_at>
 #include <__exception_support>
 #include <exception>
 #include <new>
@@ -229,16 +230,16 @@ struct allocator {
   }
 
   constexpr void construct(T* ptr, const T& value) {
-    new (ptr) T(value);
+    std::__construct_at(ptr, value);
   }
 
   constexpr void construct(T* ptr, T&& value) {
-    new (ptr) T(static_cast<T&&>(value));
+    std::__construct_at(ptr, static_cast<T&&>(value));
   }
 
   template <class U, class... Args>
   constexpr void construct(U* ptr, Args&&... args) {
-    new (ptr) U(std::forward<Args>(args)...);
+    std::__construct_at(ptr, std::forward<Args>(args)...);
   }
 
   template <class U>
@@ -383,7 +384,7 @@ struct __alloc_has_construct<
 template <class T, class... Args>
 struct __alloc_placement_construct {
   static constexpr void call(T* ptr, Args&&... args) {
-    new (ptr) T(static_cast<Args&&>(args)...);
+    std::__construct_at(ptr, static_cast<Args&&>(args)...);
   }
 };
 
@@ -525,14 +526,6 @@ struct allocator_traits {
     return __alloc_select_on_copy<Alloc>::call(alloc);
   }
 };
-
-#if __cplusplus >= 202002L
-template <class T, class... Args>
-constexpr T* construct_at(T* location, Args&&... args) {
-  return ::new (static_cast<void*>(location))
-      T(static_cast<Args&&>(args)...);
-}
-#endif
 
 #if __cplusplus >= 201703L
 template <class T>

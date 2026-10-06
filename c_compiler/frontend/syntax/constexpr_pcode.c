@@ -4462,6 +4462,10 @@ static PCodeVMStatus ConstexprPCodeEscapeStartLifetime(
   size_t size = (size_t)ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
   uint64_t type_token = ConstexprPCodeNextArgument(&args, sizeof(uint64_t));
   uint64_t address = 0;
+  if (size == CONSTEXPR_PCODE_PLACEMENT_NEW_FORBIDDEN_MARKER) {
+    return ConstexprPCodeTypingFailure(
+        runtime, "placement new is not permitted in this constant expression");
+  }
   if (size >= CONSTEXPR_PCODE_PLACEMENT_NEW_MARKER &&
       size <= CONSTEXPR_PCODE_OBJECT_MARKER) {
     // Typing what cannot be mapped back to memory would only lose a check.
