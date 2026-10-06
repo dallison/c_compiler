@@ -41,7 +41,7 @@ class basic_string_view {
   using size_type = size_t;
   using difference_type = ptrdiff_t;
 
-  static const size_type npos = static_cast<size_type>(-1);
+  static constexpr size_type npos = static_cast<size_type>(-1);
 
  private:
   const CharT* __data;
@@ -51,7 +51,7 @@ class basic_string_view {
   constexpr basic_string_view() noexcept : __data(nullptr), __size(0) {}
 
   constexpr basic_string_view(const basic_string_view&) noexcept = default;
-  basic_string_view& operator=(const basic_string_view&) noexcept = default;
+  constexpr basic_string_view& operator=(const basic_string_view&) noexcept = default;
 
   constexpr basic_string_view(const CharT* s, size_type count)
       : __data(s), __size(count) {}
@@ -64,16 +64,16 @@ class basic_string_view {
   constexpr const_iterator end() const noexcept { return __data + __size; }
   constexpr const_iterator cbegin() const noexcept { return __data; }
   constexpr const_iterator cend() const noexcept { return __data + __size; }
-  const_reverse_iterator rbegin() const noexcept {
+  constexpr const_reverse_iterator rbegin() const noexcept {
     return const_reverse_iterator(end());
   }
-  const_reverse_iterator rend() const noexcept {
+  constexpr const_reverse_iterator rend() const noexcept {
     return const_reverse_iterator(begin());
   }
-  const_reverse_iterator crbegin() const noexcept {
+  constexpr const_reverse_iterator crbegin() const noexcept {
     return const_reverse_iterator(end());
   }
-  const_reverse_iterator crend() const noexcept {
+  constexpr const_reverse_iterator crend() const noexcept {
     return const_reverse_iterator(begin());
   }
 
@@ -88,7 +88,7 @@ class basic_string_view {
     return __data[pos];
   }
 
-  const_reference at(size_type pos) const {
+  constexpr const_reference at(size_type pos) const {
     if (pos >= __size) {
       __DAVECC_THROW(out_of_range("basic_string_view::at"));
     }
@@ -125,7 +125,7 @@ class basic_string_view {
   }
 
   // Operations.
-  size_type copy(CharT* dest, size_type n, size_type pos = 0) const {
+  constexpr size_type copy(CharT* dest, size_type n, size_type pos = 0) const {
     if (pos > __size) {
       __DAVECC_THROW(out_of_range("basic_string_view::copy"));
     }
@@ -164,48 +164,48 @@ class basic_string_view {
     return 0;
   }
 
-  int compare(size_type pos1, size_type n1, basic_string_view other) const {
+  constexpr int compare(size_type pos1, size_type n1, basic_string_view other) const {
     return substr(pos1, n1).compare(other);
   }
 
-  int compare(const CharT* s) const {
+  constexpr int compare(const CharT* s) const {
     return compare(basic_string_view(s));
   }
 
-  bool starts_with(basic_string_view prefix) const noexcept {
+  constexpr bool starts_with(basic_string_view prefix) const noexcept {
     return __size >= prefix.__size &&
            traits_type::compare(__data, prefix.__data, prefix.__size) == 0;
   }
 
-  bool starts_with(CharT c) const noexcept {
+  constexpr bool starts_with(CharT c) const noexcept {
     return !empty() && traits_type::eq(front(), c);
   }
 
-  bool starts_with(const CharT* s) const {
+  constexpr bool starts_with(const CharT* s) const {
     return starts_with(basic_string_view(s));
   }
 
-  bool ends_with(basic_string_view suffix) const noexcept {
+  constexpr bool ends_with(basic_string_view suffix) const noexcept {
     return __size >= suffix.__size &&
            traits_type::compare(__data + (__size - suffix.__size),
                                 suffix.__data, suffix.__size) == 0;
   }
 
-  bool ends_with(CharT c) const noexcept {
+  constexpr bool ends_with(CharT c) const noexcept {
     return !empty() && traits_type::eq(back(), c);
   }
 
-  bool ends_with(const CharT* s) const {
+  constexpr bool ends_with(const CharT* s) const {
     return ends_with(basic_string_view(s));
   }
 
-  bool contains(basic_string_view sv) const noexcept {
+  constexpr bool contains(basic_string_view sv) const noexcept {
     return find(sv) != npos;
   }
-  bool contains(CharT c) const noexcept { return find(c) != npos; }
-  bool contains(const CharT* s) const { return find(s) != npos; }
+  constexpr bool contains(CharT c) const noexcept { return find(c) != npos; }
+  constexpr bool contains(const CharT* s) const { return find(s) != npos; }
 
-  size_type find(basic_string_view v, size_type pos = 0) const noexcept {
+  constexpr size_type find(basic_string_view v, size_type pos = 0) const noexcept {
     if (v.__size == 0) {
       return pos <= __size ? pos : npos;
     }
@@ -221,7 +221,7 @@ class basic_string_view {
     return npos;
   }
 
-  size_type find(CharT c, size_type pos = 0) const noexcept {
+  constexpr size_type find(CharT c, size_type pos = 0) const noexcept {
     for (size_type i = pos; i < __size; i++) {
       if (traits_type::eq(__data[i], c)) {
         return i;
@@ -230,11 +230,11 @@ class basic_string_view {
     return npos;
   }
 
-  size_type find(const CharT* s, size_type pos = 0) const {
+  constexpr size_type find(const CharT* s, size_type pos = 0) const {
     return find(basic_string_view(s), pos);
   }
 
-  size_type rfind(CharT c, size_type pos = npos) const noexcept {
+  constexpr size_type rfind(CharT c, size_type pos = npos) const noexcept {
     if (__size == 0) {
       return npos;
     }
@@ -250,7 +250,7 @@ class basic_string_view {
     }
   }
 
-  size_type find_first_of(basic_string_view v, size_type pos = 0) const
+  constexpr size_type find_first_of(basic_string_view v, size_type pos = 0) const
       noexcept {
     for (size_type i = pos; i < __size; i++) {
       for (size_type j = 0; j < v.__size; j++) {
@@ -262,15 +262,15 @@ class basic_string_view {
     return npos;
   }
 
-  size_type find_first_of(CharT c, size_type pos = 0) const noexcept {
+  constexpr size_type find_first_of(CharT c, size_type pos = 0) const noexcept {
     return find(c, pos);
   }
 
-  size_type find_last_of(CharT c, size_type pos = npos) const noexcept {
+  constexpr size_type find_last_of(CharT c, size_type pos = npos) const noexcept {
     return rfind(c, pos);
   }
 
-  size_type find_last_of(basic_string_view v, size_type pos = npos) const
+  constexpr size_type find_last_of(basic_string_view v, size_type pos = npos) const
       noexcept {
     if (__size == 0) {
       return npos;
@@ -289,7 +289,7 @@ class basic_string_view {
     }
   }
 
-  size_type find_first_not_of(basic_string_view v, size_type pos = 0) const
+  constexpr size_type find_first_not_of(basic_string_view v, size_type pos = 0) const
       noexcept {
     for (size_type i = pos; i < __size; i++) {
       bool matched = false;
@@ -306,7 +306,7 @@ class basic_string_view {
     return npos;
   }
 
-  size_type find_first_not_of(CharT c, size_type pos = 0) const noexcept {
+  constexpr size_type find_first_not_of(CharT c, size_type pos = 0) const noexcept {
     for (size_type i = pos; i < __size; i++) {
       if (!traits_type::eq(__data[i], c)) {
         return i;
@@ -315,7 +315,7 @@ class basic_string_view {
     return npos;
   }
 
-  size_type find_last_not_of(basic_string_view v, size_type pos = npos) const
+  constexpr size_type find_last_not_of(basic_string_view v, size_type pos = npos) const
       noexcept {
     if (__size == 0) {
       return npos;
@@ -339,7 +339,7 @@ class basic_string_view {
     }
   }
 
-  size_type find_last_not_of(CharT c, size_type pos = npos) const noexcept {
+  constexpr size_type find_last_not_of(CharT c, size_type pos = npos) const noexcept {
     if (__size == 0) {
       return npos;
     }
@@ -415,7 +415,7 @@ constexpr bool operator>=(basic_string_view<CharT, Traits> a,
 }
 
 template <class CharT, class Traits>
-std::strong_ordering operator<=>(basic_string_view<CharT, Traits> a,
+constexpr std::strong_ordering operator<=>(basic_string_view<CharT, Traits> a,
                                  basic_string_view<CharT, Traits> b) noexcept {
   int r = a.compare(b);
   return r < 0 ? std::strong_ordering::less

@@ -3359,6 +3359,11 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
               parser->syntax,
               "static operator() and operator[] require C++23");
         }
+        if (is_constexpr_member && !is_consteval_member &&
+            !member->is_member_function && !member->is_static) {
+          SyntaxError(parser->syntax,
+                      "non-static data member cannot be constexpr");
+        }
         if (is_constinit_member &&
             (member->is_member_function || !member->is_static)) {
           SyntaxError(

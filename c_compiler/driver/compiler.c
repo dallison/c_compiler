@@ -1299,6 +1299,11 @@ static void AssignScalarValueToConst(Symbol* symbol, BracedInitializerASTNode* i
   if ((type->qualifiers & kQualConst) == 0) {
     return;
   }
+  // Semantic analysis may already have recorded a value that integer
+  // evaluation cannot reproduce, such as a pointer's target symbol.
+  if (symbol->flags.value_set) {
+    return;
+  }
   // Take first element of braced initializer and assign it to the value of
   // the symbol.
   if (init->initializers->length != 1) {

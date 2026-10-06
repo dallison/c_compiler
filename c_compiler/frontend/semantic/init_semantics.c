@@ -434,10 +434,16 @@ static void ApplyCXXDefaultMemberInitializers(INode* inode,
       MaterializeArrayINodeChildren(inode);
     }
     for (size_t i = 0; i < inode->children.length; i++) {
-      ValueInitializeOmittedClass(inode->children.value.p[i], constants_only,
-                                  location);
-      ApplyCXXDefaultMemberInitializers(inode->children.value.p[i],
-                                        constants_only, location);
+      INode* child = inode->children.value.p[i];
+      // Lazy child creation can run past the bound an unsized array was
+      // given from its initializers.
+      if (inode->kind == kIArray && TypeIsArray(inode->type) &&
+          !inode->type->info.array.is_flexible &&
+          child->index >= (size_t)inode->type->info.array.size.fixed) {
+        continue;
+      }
+      ValueInitializeOmittedClass(child, constants_only, location);
+      ApplyCXXDefaultMemberInitializers(child, constants_only, location);
     }
     return;
   }

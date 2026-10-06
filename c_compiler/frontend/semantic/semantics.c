@@ -586,6 +586,10 @@ static bool NodeIsZero(ASTNode* node) {
       CastASTNode* c = (CastASTNode*)node;
       return c->expr != NULL && NodeIsZero(c->expr);
     }
+    case AST_OP(expr_init): {
+      ASTNode* expr = ((ExpressionInitializerASTNode*)node)->expr;
+      return expr != NULL && NodeIsZero(expr);
+    }
     default:
     return false;
   }

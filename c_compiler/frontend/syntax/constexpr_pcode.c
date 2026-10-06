@@ -159,6 +159,9 @@ typedef struct {
   size_t size;
   TypeRecord* type;
   ConstexprObject* object;
+  // A copy of an AST-evaluated array an argument points into, rather than an
+  // argument object itself.
+  bool pointee;
 } ConstexprPCodeAddressRegion;
 
 typedef struct {
@@ -302,6 +305,7 @@ static ConstexprValue* PCodeConstexprSlotForOffset(TypeRecord* type,
 static void DeletePCodeConstexprObject(ConstexprObject* object);
 static ConstexprObject* NewPCodeConstexprObject(TypeRecord* type);
 static size_t PCodeConstexprMemberSlotIndex(Struct* str, StructMember* member);
+static bool PCodeDataMember(StructMember* member);
 static bool RegisterConstexprPCodeStaticData(Symbol* symbol);
 static bool RegisterConstexprPCodeLiteral(const char* name);
 static ConstexprPCodeStaticData* FindConstexprPCodeStaticData(const char* name);
@@ -1719,7 +1723,179 @@ static bool StoreConstexprScalarBytes(TypeRecord* type, ConstexprValue* value,
   return true;
 }
 
-static bool StoreConstexprObjectBytes(TypeRecord* type, ConstexprObject* object,
+// Where marshalling an AST-evaluated object for one p-code run puts the
+// objects its pointers designate.
+typedef struct {
+  PCodeVM* vm;
+  Vector* allocations;      // host memory freed after the run
+  Vector* address_regions;  // ConstexprPCodeAddressRegion*
+} ConstexprPCodeMarshal;
+
+// The bytes of a character array the AST evaluator built, or NULL.
+static unsigned char* ConstexprPCodeCharArrayBytes(ConstexprObject* array,
+                                                   size_t* size) {
+  TypeRecord* type = array->type;
+  size_t elem_size = type->next->size;
+  *size = array->slots.length * elem_size;
+  if (*size == 0) {
+    return NULL;
+  }
+  unsigned char* bytes = calloc(1, *size);
+  if (bytes == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < array->slots.length; i++) {
+    ConstexprValue* slot = array->slots.value.p[i];
+    if (slot == NULL || slot->is_object || slot->is_address ||
+        !StoreConstexprScalarBytes(type->next, slot, bytes + i * elem_size)) {
+      free(bytes);
+      return NULL;
+    }
+  }
+  return bytes;
+}
+
+// The host copy, for this run, of a character array the AST evaluator points
+// into.  Its address region maps pointers the run returns back to |array|.
+static unsigned char* ConstexprPCodeCharArrayMemory(
+    ConstexprPCodeMarshal* marshal, ConstexprObject* array) {
+  for (size_t i = 0; i < marshal->address_regions->length; i++) {
+    ConstexprPCodeAddressRegion* region =
+        marshal->address_regions->value.p[i];
+    if (region != NULL && region->pointee && region->object == array) {
+      return region->memory;
+    }
+  }
+  size_t size = 0;
+  unsigned char* bytes = ConstexprPCodeCharArrayBytes(array, &size);
+  if (bytes == NULL) {
+    return NULL;
+  }
+  ConstexprPCodeAddressRegion* region = malloc(sizeof(*region));
+  if (region == NULL) {
+    free(bytes);
+    return NULL;
+  }
+  if (!PCodeVMRegisterMemoryRegion(marshal->vm, bytes, size, false)) {
+    free(region);
+    free(bytes);
+    return NULL;
+  }
+  VectorAppend(marshal->allocations, bytes);
+  *region = (ConstexprPCodeAddressRegion){
+      .memory = bytes,
+      .size = size,
+      .type = array->type,
+      .object = array,
+      .pointee = true,
+  };
+  VectorAppend(marshal->address_regions, region);
+  return bytes;
+}
+
+// The read-only copy, kept with the p-code static data, of a character array
+// that AST-evaluated static data points into.  Pointers into it are host
+// addresses of static data, as in p-code-evaluated objects.
+static unsigned char* ConstexprPCodeStaticCharArrayMemory(
+    ConstexprObject* array) {
+  size_t size = 0;
+  unsigned char* bytes = ConstexprPCodeCharArrayBytes(array, &size);
+  if (bytes == NULL) {
+    return NULL;
+  }
+  if (!pcode_static_data_initialized) {
+    VectorInit(&pcode_static_data);
+    pcode_static_data_initialized = true;
+  }
+  for (size_t i = 0; i < pcode_static_data.length; i++) {
+    ConstexprPCodeStaticData* entry = pcode_static_data.value.p[i];
+    if (entry != NULL && entry->name.value == NULL && entry->size == size &&
+        memcmp(entry->memory, bytes, size) == 0) {
+      free(bytes);
+      return entry->memory;
+    }
+  }
+  ConstexprPCodeStaticData* entry = malloc(sizeof(*entry));
+  if (entry == NULL) {
+    free(bytes);
+    return NULL;
+  }
+  StringInit(&entry->name, NULL);
+  entry->memory = bytes;
+  entry->size = size;
+  VectorAppend(&pcode_static_data, entry);
+  return bytes;
+}
+
+// |marshal| is NULL for static data, which outlives any one run.
+static bool StoreConstexprAddressBytes(ConstexprPCodeMarshal* marshal,
+                                       TypeRecord* type,
+                                       ConstexprValue* value,
+                                       unsigned char* dest) {
+  if (!TypeIsPointer(type)) {
+    return false;
+  }
+  ConstexprValue address = *value;
+  ConstexprCanonicalizeAddressValue(&address);
+  ConstexprValue host = {0};
+  if (address.address_object == NULL && address.address_binding == NULL &&
+      address.address_slot == NULL && address.heap_block == NULL) {
+    host.ivalue = address.ivalue;
+    return StoreConstexprScalarBytes(type, &host, dest);
+  }
+  Symbol* symbol = ConstexprAddressBindingSymbol(&address);
+  if (symbol != NULL && address.address_object == NULL &&
+      address.address_slot == NULL && address.heap_block == NULL &&
+      symbol->type != NULL && TypeIsConst(symbol->type) &&
+      (TypeIsIntegral(symbol->type) || TypeIsFloatingPoint(symbol->type)) &&
+      !symbol->flags.is_temp && !symbol->flags.is_argument &&
+      (!symbol->flags.is_local || StorageIs(symbol->storage, STO(static)))) {
+    char namebuf[1024];
+    ConstexprPCodeStaticData* entry =
+        RegisterConstexprPCodeStaticData(symbol)
+            ? FindConstexprPCodeStaticData(
+                  TargetSymbolName(symbol, namebuf, sizeof(namebuf)))
+            : NULL;
+    if (entry == NULL ||
+        (marshal != NULL &&
+         !PCodeVMRegisterMemoryRegion(marshal->vm, entry->memory, entry->size,
+                                      false))) {
+      return false;
+    }
+    host.ivalue = (int64_t)(uintptr_t)entry->memory;
+    return StoreConstexprScalarBytes(type, &host, dest);
+  }
+  ConstexprObject* array = address.address_object;
+  if ((marshal != NULL && marshal->address_regions == NULL) || array == NULL ||
+      address.address_binding != NULL || address.heap_block != NULL ||
+      array->type == NULL || !TypeIsFixedArray(array->type) ||
+      array->type->next == NULL || !TypeIsCharFamily(array->type->next) ||
+      address.address_index > array->slots.length) {
+    return false;
+  }
+  unsigned char* memory =
+      marshal != NULL ? ConstexprPCodeCharArrayMemory(marshal, array)
+                      : ConstexprPCodeStaticCharArrayMemory(array);
+  if (memory == NULL) {
+    return false;
+  }
+  host.ivalue = (int64_t)(uintptr_t)(memory + address.address_index *
+                                                  array->type->next->size);
+  return StoreConstexprScalarBytes(type, &host, dest);
+}
+
+static bool StoreConstexprSlotBytes(ConstexprPCodeMarshal* marshal,
+                                    TypeRecord* type, ConstexprValue* value,
+                                    unsigned char* dest) {
+  if (value != NULL && value->is_address && !value->is_object) {
+    return StoreConstexprAddressBytes(marshal, type, value, dest);
+  }
+  return StoreConstexprScalarBytes(type, value, dest);
+}
+
+static bool StoreConstexprObjectBytes(ConstexprPCodeMarshal* marshal,
+                                      TypeRecord* type,
+                                      ConstexprObject* object,
                                       unsigned char* dest) {
   if (type == NULL || object == NULL || dest == NULL) {
     return false;
@@ -1730,10 +1906,10 @@ static bool StoreConstexprObjectBytes(TypeRecord* type, ConstexprObject* object,
       ConstexprValue* slot = object->slots.value.p[i];
       unsigned char* elem = dest + i * elem_size;
       if (slot != NULL && slot->is_object) {
-        if (!StoreConstexprObjectBytes(type->next, slot->object, elem)) {
+        if (!StoreConstexprObjectBytes(marshal, type->next, slot->object, elem)) {
           return false;
         }
-      } else if (!StoreConstexprScalarBytes(type->next, slot, elem)) {
+      } else if (!StoreConstexprSlotBytes(marshal, type->next, slot, elem)) {
         return false;
       }
     }
@@ -1759,7 +1935,7 @@ static bool StoreConstexprObjectBytes(TypeRecord* type, ConstexprObject* object,
       }
       // The AST evaluator creates a base subobject only once it is written.
       if (slot->is_object &&
-          !StoreConstexprObjectBytes(base->type, slot->object,
+          !StoreConstexprObjectBytes(marshal, base->type, slot->object,
                                      dest + base->byte_offset)) {
         return false;
       }
@@ -1780,11 +1956,11 @@ static bool StoreConstexprObjectBytes(TypeRecord* type, ConstexprObject* object,
           object, PCodeConstexprMemberSlotIndex(str, member));
       unsigned char* member_dest = dest + member->byte_offset;
       if (slot != NULL && slot->is_object) {
-        if (!StoreConstexprObjectBytes(member->symbol->type, slot->object,
+        if (!StoreConstexprObjectBytes(marshal, member->symbol->type, slot->object,
                                        member_dest)) {
           return false;
         }
-      } else if (!StoreConstexprScalarBytes(member->symbol->type, slot,
+      } else if (!StoreConstexprSlotBytes(marshal, member->symbol->type, slot,
                                            member_dest)) {
         return false;
       }
@@ -1890,7 +2066,7 @@ static bool RegisterConstexprPCodeStaticData(Symbol* symbol) {
   bool ok = false;
   if (TypeIsStructOrUnion(symbol->type) || TypeIsFixedArray(symbol->type)) {
     ok = symbol->value.other != NULL &&
-         StoreConstexprObjectBytes(symbol->type,
+         StoreConstexprObjectBytes(NULL, symbol->type,
                                    (ConstexprObject*)symbol->value.other,
                                    memory);
   } else {
@@ -2242,8 +2418,10 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
     *reason = "could not allocate constexpr object argument";
     return false;
   }
+  ConstexprPCodeMarshal marshal = {
+      .vm = vm, .allocations = allocations, .address_regions = address_regions};
   if (object != NULL) {
-    if (!StoreConstexprObjectBytes(object_type, object, memory)) {
+    if (!StoreConstexprObjectBytes(&marshal, object_type, object, memory)) {
       free(memory);
       return false;
     }
@@ -2460,6 +2638,8 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
     return true;
   }
   *sp -= size;
+  ConstexprPCodeMarshal marshal = {
+      .vm = vm, .allocations = allocations, .address_regions = address_regions};
   if (TypeIsMemberPointer(type)) {
     return StoreConstexprMemberPointerArgument(vm, type, arg, *sp, reason);
   }
@@ -2478,7 +2658,7 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
       memset(*sp, 0, size);
       return true;
     }
-    if (object == NULL || !StoreConstexprObjectBytes(type, object, *sp)) {
+    if (object == NULL || !StoreConstexprObjectBytes(&marshal, type, object, *sp)) {
       if (delete_object) {
         DeletePCodeConstexprObject(object);
       }
@@ -2517,6 +2697,13 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
   if (TypeIsIntegral(type) || TypeIsPointer(type) || TypeIsFunction(type)) {
     int64_t value;
     if (!EvaluateIntegerExpressionInContext(ctx, arg, &value)) {
+      ConstexprValue address = {0};
+      if (TypeIsPointer(type) && ctx != NULL && arg != NULL &&
+          ConstexprEvaluateValue(ctx, arg, type, &address) &&
+          address.is_address &&
+          StoreConstexprAddressBytes(&marshal, type, &address, *sp)) {
+        return true;
+      }
       *reason = "could not evaluate integer constexpr argument";
       return false;
     }
@@ -2533,7 +2720,7 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
       ConstexprEvaluateValue(ctx, arg, type, &evaluated)) {
     if (evaluated.is_object) {
       if (evaluated.object != NULL &&
-          StoreConstexprObjectBytes(type, evaluated.object, *sp)) {
+          StoreConstexprObjectBytes(&marshal, type, evaluated.object, *sp)) {
         return true;
       }
     } else if (StoreConstexprScalarBytes(type, &evaluated, *sp)) {
@@ -2870,6 +3057,98 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
   return true;
 }
 
+static void PCodeMapPointeeAddress(PCodeVM* vm, TypeRecord* type,
+                                   ConstexprValue* slot, Vector* regions,
+                                   bool narrow) {
+  if (slot == NULL || !TypeIsPointer(type) || slot->is_object ||
+      slot->is_address || slot->ivalue == 0) {
+    return;
+  }
+  uint64_t address = (uint64_t)slot->ivalue;
+  if (narrow) {
+    uint64_t normalized = 0;
+    if (!ConstexprPCodeNormalizeAddress(vm, address & UINT64_C(0xffffffff), 0,
+                                        false, &normalized)) {
+      return;
+    }
+    // Keep the full host address: static data is recognized by it after
+    // this run's memory map is gone.
+    address = normalized;
+    slot->ivalue = (int64_t)address;
+    slot->fvalue = (double)slot->ivalue;
+  }
+  for (size_t i = 0; i < regions->length; i++) {
+    ConstexprPCodeAddressRegion* region = regions->value.p[i];
+    if (region == NULL || !region->pointee) {
+      continue;
+    }
+    uint64_t start = (uint64_t)(uintptr_t)region->memory;
+    size_t elem_size = region->type->next->size;
+    // One past the end is a valid pointer value too.
+    if (elem_size == 0 || address < start || address > start + region->size ||
+        (address - start) % elem_size != 0) {
+      continue;
+    }
+    *slot = (ConstexprValue){
+        .is_address = true,
+        .address_object = region->object,
+        .address_index = (size_t)((address - start) / elem_size),
+    };
+    return;
+  }
+}
+
+// Rewrites the pointers a p-code result holds into this run's copies of
+// AST-evaluated arrays as addresses of those arrays, and widens the others
+// back to host addresses on targets with narrower pointers.
+static void PCodeMapPointeeAddresses(PCodeVM* vm, TypeRecord* type,
+                                     ConstexprObject* object, Vector* regions,
+                                     bool narrow) {
+  if (object == NULL || type == NULL) {
+    return;
+  }
+  if (TypeIsFixedArray(type)) {
+    for (size_t i = 0; i < object->slots.length; i++) {
+      ConstexprValue* slot = PCodeConstexprObjectSlot(object, i);
+      if (slot != NULL && slot->is_object) {
+        PCodeMapPointeeAddresses(vm, type->next, slot->object, regions,
+                                 narrow);
+      } else {
+        PCodeMapPointeeAddress(vm, type->next, slot, regions, narrow);
+      }
+    }
+    return;
+  }
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (str == NULL || str->is_union || str->virtual_bases.length != 0) {
+    return;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    ConstexprValue* slot =
+        base != NULL && !base->is_virtual
+            ? PCodeConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i))
+            : NULL;
+    if (slot != NULL && slot->is_object) {
+      PCodeMapPointeeAddresses(vm, base->type, slot->object, regions, narrow);
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (!PCodeDataMember(member)) {
+      continue;
+    }
+    ConstexprValue* slot = PCodeConstexprObjectSlot(
+        object, PCodeConstexprMemberSlotIndex(str, member));
+    if (slot != NULL && slot->is_object) {
+      PCodeMapPointeeAddresses(vm, member->symbol->type, slot->object,
+                               regions, narrow);
+    } else {
+      PCodeMapPointeeAddress(vm, member->symbol->type, slot, regions, narrow);
+    }
+  }
+}
+
 static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
                              TypeRecord* func, int64_t* int_result,
                              double* double_result,
@@ -2978,6 +3257,35 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
   if (status == kPCodeVMStatusHalted) {
     if (int_result != NULL) {
       *int_result = vm.iregs[PCODE_INT_RETURN_REG];
+      // A reference result is the referent's address; read the referent
+      // while the memory it may live in is still mapped.
+      TypeRecord* referent =
+          TypeIsReference(func->next) ? func->next->next : NULL;
+      if (referent != NULL &&
+          (TypeIsIntegral(referent) || TypeIsPointer(referent))) {
+        uint64_t address = 0;
+        ConstexprValue value = {0};
+        if (!ConstexprPCodeNormalizeAddress(&vm, (uint64_t)*int_result,
+                                            referent->size, false,
+                                            &address) ||
+            !LoadConstexprScalarBytes(referent,
+                                      (unsigned char*)(uintptr_t)address,
+                                      &value)) {
+          *failure_kind = kConstexprPCodeFailureInvalid;
+          *reason = "constexpr pcode reference result is not readable";
+          for (size_t i = 0; i < allocations.length; i++) {
+            free(allocations.value.p[i]);
+          }
+          VectorDestruct(&allocations);
+          VectorDestructWithContents(&address_regions, NULL,
+                                     /*free_element=*/true);
+          ConstexprPCodeRuntimeDestruct(&runtime);
+          PCodeVMDestruct(&vm);
+          ConstexprPCodeImageDestruct(&image);
+          return false;
+        }
+        *int_result = value.ivalue;
+      }
     }
     if (double_result != NULL) {
       if (TypeUsesLongDoubleRepresentation(func->next) &&
@@ -3125,8 +3433,12 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
       }
     }
     if (object_result != NULL &&
-        !LoadConstexprObjectBytes(func->next, struct_return, &runtime,
-                                  object_result)) {
+        LoadConstexprObjectBytes(func->next, struct_return, &runtime,
+                                 object_result)) {
+      PCodeMapPointeeAddresses(&vm, func->next, *object_result,
+                               &address_regions,
+                               runtime.source_size_t_size < sizeof(uint64_t));
+    } else if (object_result != NULL) {
       *reason = "could not decode constexpr pcode object result";
       for (size_t i = 0; i < allocations.length; i++) {
         free(allocations.value.p[i]);
@@ -5893,15 +6205,12 @@ bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
   if (callee != NULL && callee->type != NULL && callee->type->next != NULL &&
       TypeIsReference(callee->type->next)) {
     ConstexprValue value = {0};
-    if (!ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value)) {
-      return false;
+    if (ConstexprPCodeEvaluateCallAsAddress(ctx, node, &value) &&
+        ConstexprValueAsInteger(value, result)) {
+      return ConstexprPCodeSuccess(ctx);
     }
-    if (!ConstexprValueAsInteger(value, result)) {
-      return ConstexprPCodeFailure(
-          ctx, kConstexprPCodeFailureUnsupported,
-          "could not decode constexpr pcode reference result");
-    }
-    return ConstexprPCodeSuccess(ctx);
+    // The referent may be p-code static data, which has no AST address;
+    // RunRealPCodeCall reads such a referent itself.
   }
   ConstexprPCodeFailureKind failure_kind =
       kConstexprPCodeFailureUnsupported;
@@ -6660,6 +6969,9 @@ static bool PCodeStoreDesignatedInitializer(ConstEvalContext* ctx,
   return true;
 }
 
+static bool PCodeValueInitializeSlot(ConstEvalContext* ctx, TypeRecord* type,
+                                     ConstexprValue* slot);
+
 static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
                                   ASTNode* initializer,
                                   ConstexprObject* object) {
@@ -6710,8 +7022,14 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
       }
     }
   }
+  size_t slot_count = object->slots.length;
+  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
+  if (slot_count > 0 && initialized == NULL) {
+    return false;
+  }
+  bool ok = true;
   size_t next_index = 0;
-  for (size_t i = 0; i < braced->initializers->length; i++) {
+  for (size_t i = 0; ok && i < braced->initializers->length; i++) {
     ASTNode* entry = braced->initializers->value.p[i];
     if (entry != NULL && entry->op == AST_OP(designated_init)) {
       // Brace elision leaves one entry per scalar, such as `[0].n = 1`.
@@ -6728,7 +7046,12 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
         ConstexprPCodeFailure(
             ctx, kConstexprPCodeFailureUnsupported,
             "constexpr pcode could not store designated array element");
-        return false;
+        ok = false;
+        break;
+      }
+      for (size_t k = (size_t)first->value.array_index;
+           k <= (size_t)first->array_index_end && k < slot_count; k++) {
+        initialized[k] = true;
       }
       next_index = (size_t)first->array_index_end + 1;
       continue;
@@ -6739,18 +7062,44 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
       ConstexprPCodeFailure(
           ctx, kConstexprPCodeFailureUnsupported,
           "constexpr pcode array initializer has too many elements");
-      return false;
+      ok = false;
+      break;
     }
     if (!PCodeStoreInitializer(ctx, type->next, entry, slot)) {
       ConstexprPCodeFailure(
           ctx, kConstexprPCodeFailureUnsupported,
           "constexpr pcode could not store array initializer element");
-      return false;
+      ok = false;
+      break;
     }
     slot->lifetime_ended = false;
+    initialized[slot_index] = true;
     next_index = slot_index + 1;
   }
-  return true;
+  for (size_t i = 0; ok && !sparse_lifetime_initializer && i < slot_count;
+       i++) {
+    if (initialized[i]) {
+      continue;
+    }
+    ConstexprValue* slot = PCodeConstexprObjectSlot(object, i);
+    if (slot != NULL && !slot->is_object &&
+        (TypeIsFixedArray(type->next) || TypeIsStructOrUnion(type->next))) {
+      ConstexprObject* element = NewPCodeConstexprObject(type->next);
+      if (element == NULL) {
+        ok = false;
+        break;
+      }
+      *slot = (ConstexprValue){.is_object = true, .object = element};
+    }
+    if (!PCodeValueInitializeSlot(ctx, type->next, slot)) {
+      ConstexprPCodeFailure(
+          ctx, kConstexprPCodeFailureUnsupported,
+          "constexpr pcode could not value-initialize array element");
+      ok = false;
+    }
+  }
+  free(initialized);
+  return ok;
 }
 
 static bool PCodeDataMember(StructMember* member) {
@@ -6821,19 +7170,56 @@ static bool PCodeInitializeOmittedSubobjects(ConstEvalContext* ctx,
                                              ConstexprObject* object,
                                              const bool* initialized);
 
+// Default-constructs the non-aggregate class in |slot|.
+static bool PCodeDefaultConstructSlot(ConstEvalContext* ctx, TypeRecord* type,
+                                      ConstexprValue* slot) {
+  Symbol* callee = PCodeConstexprFunctionDefinition(
+      ConstexprConstructorForObjectType(type, 0));
+  if (callee == NULL || callee->type == NULL ||
+      !callee->type->info.function.is_constexpr ||
+      !callee->type->info.function.is_constructor ||
+      callee->type->info.function.body == NULL) {
+    return false;
+  }
+  ValidationState state = {.reason = "ok", .ok = true};
+  ASTNodeVisit(callee->type->info.function.body, ValidateASTNode, 0, &state);
+  if (!state.ok) {
+    return false;
+  }
+  ASTNode* call = NewVectorASTNode(AST_OP(call), NULL,
+                                   SOURCE_LOCATION_MISSING, NULL, NewVector());
+  ConstexprObject* object = NULL;
+  ConstexprPCodeFailureKind failure_kind = kConstexprPCodeFailureUnsupported;
+  const char* reason = NULL;
+  bool ok = RunRealPCodeConstructor(ctx, type, call, callee->type, &object,
+                                    &failure_kind, &reason);
+  ASTNodeDelete(call);
+  if (!ok) {
+    return false;
+  }
+  if (slot->is_object) {
+    DeletePCodeConstexprObject(slot->object);
+  }
+  *slot = (ConstexprValue){.is_object = true, .object = object};
+  return true;
+}
+
 // Initializes |slot| from an empty initializer list.  Only aggregates with
-// default member initializers differ from the zeroed slot.
+// default member initializers, and classes with a non-trivial default
+// constructor, differ from the zeroed slot.
 static bool PCodeValueInitializeSlot(ConstEvalContext* ctx, TypeRecord* type,
                                      ConstexprValue* slot) {
   if (slot == NULL) {
     return false;
   }
-  if (!ConstexprTypeHasDefaultMemberInitializer(type)) {
+  if (!ConstexprValueInitializationRunsCode(type)) {
     return true;
   }
   Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
-  if (!TypeIsFixedArray(type) &&
-      (str == NULL || str->is_union || !str->is_aggregate)) {
+  if (str != NULL && !str->is_union && !str->is_aggregate) {
+    return PCodeDefaultConstructSlot(ctx, type, slot);
+  }
+  if (!TypeIsFixedArray(type) && (str == NULL || str->is_union)) {
     return false;
   }
   if (!slot->is_object || slot->object == NULL) {
@@ -6887,10 +7273,7 @@ static bool PCodeInitializeOmittedSubobjects(ConstEvalContext* ctx,
       }
       *slot = (ConstexprValue){.is_object = true, .object = subobject};
     }
-    if (ConstexprTypeHasDefaultMemberInitializer(base->type) &&
-        (!base->type->info.struct_info->is_aggregate ||
-         !PCodeInitializeOmittedSubobjects(ctx, base->type, slot->object,
-                                           NULL))) {
+    if (!PCodeValueInitializeSlot(ctx, base->type, slot)) {
       return false;
     }
   }

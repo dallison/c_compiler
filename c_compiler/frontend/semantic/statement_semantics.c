@@ -1467,7 +1467,7 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
     return;
   }
   int64_t value = 0;
-  if (!EvaluateIntegerExpression(expr, &value)) {
+  if (!EvaluateTruthExpression(expr, &value)) {
     bool defer =
         ExpressionIsTemplateDependent(node->expr) ||
         ExpressionIsTemplateDependent(expr) ||

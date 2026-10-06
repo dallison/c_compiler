@@ -131,7 +131,7 @@ static int symbolic_constexpr_reference_depth;
 
 static ConstexprObject* CloneConstexprObject(ConstEvalContext* ctx,
                                              ConstexprObject* object);
-static void ConstexprCanonicalizeAddressValue(ConstexprValue* value);
+void ConstexprCanonicalizeAddressValue(ConstexprValue* value);
 static ConstexprObject* ConstexprAddressTargetObject(ConstEvalContext* ctx,
                                                      ConstexprValue value);
 static ConstexprValue ConstexprResolveForwardedAddress(ConstexprValue value);
@@ -1319,7 +1319,13 @@ void ConstexprSetSymbolObjectValueState(Symbol* symbol, ValueState state) {
   ConstexprSetObjectValueState((ConstexprObject*)symbol->value.other, state);
 }
 
-static void ConstexprCanonicalizeAddressValue(ConstexprValue* value) {
+Symbol* ConstexprAddressBindingSymbol(const ConstexprValue* value) {
+  return value != NULL && value->is_address && value->address_binding != NULL
+             ? value->address_binding->symbol
+             : NULL;
+}
+
+void ConstexprCanonicalizeAddressValue(ConstexprValue* value) {
   if (value == NULL || !value->is_address) {
     return;
   }
@@ -2616,14 +2622,16 @@ static bool ConstexprEvaluateObjectConstantForSymbolAST(Symbol* symbol,
   ConstexprValue object_value = {0};
   ASTNode* expr = ConstexprInitializerExpression(initializer);
   bool ok = false;
-  if (expr != NULL && expr->op == AST_OP(call)) {
+  if (expr != NULL && expr->op == AST_OP(call) &&
+      TypeIsStructOrUnion(symbol->type)) {
     ok = EvaluateConstexprCall(&ctx, expr, &object_value) &&
          object_value.is_object && object_value.object != NULL;
     if (!ok) {
       object_value.is_object = true;
       object_value.object = NewConstexprObject(
           &ctx, symbol->type, ConstexprObjectSlotCount(symbol->type));
-      if (StructHasVirtualBases(symbol->type->info.struct_info) &&
+      if (TypeIsStructOrUnion(symbol->type) &&
+          StructHasVirtualBases(symbol->type->info.struct_info) &&
           !ConstexprMaterializeBaseSubobjectSlots(&ctx,
                                                   object_value.object)) {
         ConstEvalContextDestruct(&ctx);
@@ -2890,6 +2898,13 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
     return ConstexprObjectInitializer(value->object, location,
                                       preserve_external_addresses, self_symbol,
                                       self_root);
+  }
+  // An aggregate subobject the evaluator never wrote keeps its zeroed scalar
+  // slot; it was value-initialized.  Emitting `{}` for a type whose
+  // value-initialization runs code would apply what the evaluator did not.
+  if ((TypeIsFixedArray(type) || TypeIsStructOrUnion(type)) &&
+      !ConstexprValueInitializationRunsCode(type)) {
+    return NewBracedInitializerASTNode(NewVector(), type, location);
   }
   ConstexprValue resolved = ConstexprResolveForwardedAddress(*value);
   ConstexprCanonicalizeAddressValue(&resolved);
@@ -4337,6 +4352,87 @@ bool ConstexprTypeHasDefaultMemberInitializer(TypeRecord* type) {
   return ConstexprTypeHasDefaultMemberInitializerAt(type, 0);
 }
 
+static bool ConstexprClassHasNontrivialDefaultConstructor(TypeRecord* type) {
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (str == NULL || str->is_union || str->is_aggregate) {
+    return false;
+  }
+  Symbol* ctor = ConstexprConstructorForObjectType(type, 0);
+  return ctor != NULL && ctor->type != NULL && TypeIsFunction(ctor->type) &&
+         !ctor->type->info.function.is_trivial_special_member;
+}
+
+static bool ConstexprValueInitializationRunsCodeAt(TypeRecord* type,
+                                                   int depth) {
+  while (type != NULL && TypeIsFixedArray(type)) {
+    type = type->next;
+  }
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (str == NULL || depth > 64) {
+    return false;
+  }
+  if (ConstexprClassHasNontrivialDefaultConstructor(type)) {
+    return true;
+  }
+  if (!str->is_aggregate) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (ConstexprPositionalDataMember(member) &&
+        (member->default_initializer != NULL ||
+         ConstexprValueInitializationRunsCodeAt(member->symbol->type,
+                                                depth + 1))) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL &&
+        ConstexprValueInitializationRunsCodeAt(base->type, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ConstexprValueInitializationRunsCode(TypeRecord* type) {
+  return ConstexprValueInitializationRunsCodeAt(type, 0);
+}
+
+// Runs the constexpr default constructor of a non-aggregate class on
+// |object|.  A class whose default constructor cannot be evaluated keeps its
+// zeroed slots.
+static bool ConstexprRunDefaultConstructor(ConstEvalContext* ctx,
+                                           TypeRecord* type,
+                                           ConstexprObject* object) {
+  Symbol* ctor = ConstexprFunctionDefinition(
+      ConstexprConstructorForObjectType(type, 0));
+  if (ctor == NULL || ctor->type == NULL || !TypeIsFunction(ctor->type) ||
+      !ctor->type->info.function.is_constructor ||
+      ctor->type->info.function.is_destructor ||
+      ctor->type->info.function.is_virtual ||
+      ctor->type->info.function.varargs ||
+      !ctor->type->info.function.is_constexpr ||
+      ctor->type->info.function.body == NULL) {
+    return true;
+  }
+  Vector actuals;
+  VectorInit(&actuals);
+  size_t mark = ctx->bindings.length;
+  ctx->call_depth++;
+  ConstexprValue ignored = {0};
+  bool ok = BindConstexprConstructorObjectActuals(ctx, ctor, object,
+                                                  &actuals) &&
+            EvaluateConstexprStatement(ctx, ctor->type->info.function.body,
+                                       ctor->type->next, &ignored) ==
+                kConstexprStmtNormal;
+  ctx->call_depth--;
+  PopConstexprBindings(ctx, mark);
+  VectorDestruct(&actuals);
+  return ok;
+}
+
 static bool ConstexprValueInitializeAggregateSlot(ConstEvalContext* ctx,
                                                   TypeRecord* type,
                                                   ConstexprValue* slot);
@@ -4395,17 +4491,28 @@ static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
   return true;
 }
 
-// Initializes an aggregate subobject from an empty initializer list: its
-// default member initializers apply, recursively through bases and members.
-// Other types, and non-aggregate classes, keep the zeroed slot.
+// Initializes a subobject from an empty initializer list: an aggregate's
+// default member initializers apply, recursively through bases and members,
+// and a non-aggregate class runs its default constructor.  Other types keep
+// the zeroed slot.
 static bool ConstexprValueInitializeAggregateSlot(ConstEvalContext* ctx,
                                                   TypeRecord* type,
                                                   ConstexprValue* slot) {
   if (slot == NULL) {
     return false;
   }
-  if (!ConstexprTypeHasDefaultMemberInitializer(type)) {
+  if (!ConstexprValueInitializationRunsCode(type)) {
     return true;
+  }
+  if (ConstexprClassHasNontrivialDefaultConstructor(type)) {
+    if (!slot->is_object || slot->object == NULL) {
+      *slot = (ConstexprValue){
+          .is_object = true,
+          .object = NewConstexprObject(ctx, type,
+                                       ConstexprObjectSlotCount(type))};
+    }
+    return ConstexprMaterializeBaseSubobjectSlots(ctx, slot->object) &&
+           ConstexprRunDefaultConstructor(ctx, type, slot->object);
   }
   if (TypeIsFixedArray(type) && type->next != NULL &&
       (TypeIsStructOrUnion(type->next) || TypeIsFixedArray(type->next))) {
@@ -4619,6 +4726,99 @@ static size_t ConstexprNextPositionalSlot(TypeRecord* type, size_t slot_index) {
     slot_index++;
   }
   return slot_index;
+}
+
+// Whether |entry|, an element of a braced list initializing a subobject of
+// aggregate |type|, had that subobject's braces elided: it is a scalar
+// expression, so it initializes the subobject's first element.
+static bool ConstexprEntryElidesBraces(TypeRecord* type, ASTNode* entry) {
+  if (type == NULL || entry == NULL || entry->op == AST_OP(braced_init) ||
+      entry->op == AST_OP(designated_init)) {
+    return false;
+  }
+  Struct* str = TypeIsStructOrUnion(type) ? type->info.struct_info : NULL;
+  if (!TypeIsFixedArray(type) &&
+      (str == NULL || str->is_union || !str->is_aggregate ||
+       str->virtual_bases.length != 0)) {
+    return false;
+  }
+  ASTNode* expr = ConstexprInitializerExpression(entry);
+  if (expr != NULL && expr->type == NULL && entry->op == AST_OP(expr_init)) {
+    ExpressionInitializerASTNode* expression_initializer =
+        (ExpressionInitializerASTNode*)entry;
+    expression_initializer->expr = AnalyzeExpression(expr);
+    if (expression_initializer->expr != NULL) {
+      expression_initializer->expr->parent = entry;
+      expression_initializer->expr->child_id = 0;
+    }
+    expr = expression_initializer->expr;
+  }
+  return expr != NULL && expr->type != NULL && expr->op != AST_OP(string) &&
+         !TypeIsFixedArray(expr->type) && !TypeIsStructOrUnion(expr->type);
+}
+
+// Initializes |slot| of |type| from entries[*next...], consuming as many
+// entries as brace elision assigns to it ([dcl.init.aggr]/16).
+static bool ConstexprEvaluateElidedInitializer(ConstEvalContext* ctx,
+                                               TypeRecord* type,
+                                               Vector* entries, size_t* next,
+                                               ConstexprValue* slot) {
+  if (slot == NULL || *next >= entries->length) {
+    return false;
+  }
+  ASTNode* entry = entries->value.p[*next];
+  if (!ConstexprEntryElidesBraces(type, entry)) {
+    (*next)++;
+    return EvaluateConstexprInitializer(ctx, type, entry, slot);
+  }
+  ConstexprObject* object =
+      NewConstexprObject(ctx, type, ConstexprObjectSlotCount(type));
+  *slot = (ConstexprValue){.is_object = true, .object = object};
+  if (TypeIsFixedArray(type)) {
+    for (size_t i = 0; i < object->slots.length && *next < entries->length;
+         i++) {
+      ASTNode* element = entries->value.p[*next];
+      if (element != NULL && element->op == AST_OP(designated_init)) {
+        break;
+      }
+      if (!ConstexprEvaluateElidedInitializer(ctx, type->next, entries, next,
+                                              ConstexprObjectSlot(object, i))) {
+        return false;
+      }
+    }
+    for (size_t i = 0; i < object->slots.length; i++) {
+      if (!ConstexprValueInitializeAggregateSlot(
+              ctx, type->next, ConstexprObjectSlot(object, i))) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (!ConstexprMaterializeBaseSubobjectSlots(ctx, object)) {
+    return false;
+  }
+  size_t slot_count = object->slots.length;
+  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
+  if (slot_count > 0 && initialized == NULL) {
+    return false;
+  }
+  bool ok = true;
+  for (size_t index = ConstexprNextPositionalSlot(type, 0);
+       ok && index < slot_count && *next < entries->length;
+       index = ConstexprNextPositionalSlot(type, index + 1)) {
+    ASTNode* element = entries->value.p[*next];
+    if (element != NULL && element->op == AST_OP(designated_init)) {
+      break;
+    }
+    ok = ConstexprEvaluateElidedInitializer(
+        ctx, ConstexprObjectSlotType(type, index), entries, next,
+        ConstexprObjectSlot(object, index));
+    initialized[index] = true;
+  }
+  ok = ok && ApplyConstexprDefaultMemberInitializers(ctx, type, object,
+                                                     initialized, slot_count);
+  free(initialized);
+  return ok;
 }
 
 static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
@@ -4849,45 +5049,23 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
         }
       }
     }
-    // Brace elision: `struct { T e[N]; } x = {a, b, c}` initializes the
-    // array elements, not N separate members.  A braced element list
-    // (`e{...}`) is left for the recursive initializer.
-    if (!is_designated_entry && TypeIsFixedArray(slot_type) &&
-        slot_type->next != NULL && !TypeIsFixedArray(slot_type->next) &&
-        !TypeIsStructOrUnion(slot_type->next) && entry != NULL &&
-        entry->op != AST_OP(braced_init) &&
-        entry->op != AST_OP(designated_init)) {
-      size_t elem_count = (size_t)slot_type->info.array.size.fixed;
-      size_t available = braced->initializers->length - i;
-      size_t take = available < elem_count ? available : elem_count;
-      slot->is_object = true;
-      slot->is_address = false;
-      slot->is_floating = false;
-      slot->ivalue = 0;
-      slot->fvalue = 0;
-      slot->object = NewConstexprObject(ctx, slot_type, elem_count);
-      if (slot->object == NULL) {
+    // Brace elision: `struct { Inner in; T e[N]; } x = {a, b, c}` initializes
+    // the elements of `in` and then of `e`, not separate members.  A braced
+    // element list (`e{...}`) is left for the recursive initializer.
+    if (!is_designated_entry &&
+        ConstexprEntryElidesBraces(slot_type, entry_init)) {
+      size_t next = i;
+      if (!ConstexprEvaluateElidedInitializer(ctx, slot_type,
+                                              braced->initializers, &next,
+                                              slot)) {
         ok = false;
-        break;
-      }
-      for (size_t elem = 0; elem < take; elem++) {
-        ConstexprValue* elem_slot = ConstexprObjectSlot(slot->object, elem);
-        if (elem_slot == NULL ||
-            !EvaluateConstexprInitializer(
-                ctx, slot_type->next,
-                braced->initializers->value.p[i + elem], elem_slot)) {
-          ok = false;
-          break;
-        }
-      }
-      if (!ok) {
         break;
       }
       if (slot_index < slot_count) {
         initialized[slot_index] = true;
       }
       next_index = slot_index + 1;
-      i += take - 1;
+      i = next - 1;
       continue;
     }
     if (!EvaluateConstexprInitializer(ctx, slot_type, entry_init, slot)) {
@@ -4932,6 +5110,24 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     ok = ApplyConstexprDefaultMemberInitializers(ctx, type, object, initialized,
                                                  slot_count);
   }
+  if (ok && TypeIsFixedArray(type) && !sparse_lifetime_initializer) {
+    for (size_t i = 0; ok && i < slot_count; i++) {
+      if (initialized[i]) {
+        continue;
+      }
+      ConstexprValue* slot = ConstexprObjectSlot(object, i);
+      if (slot != NULL && !slot->is_object &&
+          (TypeIsFixedArray(type->next) || TypeIsStructOrUnion(type->next))) {
+        *slot = (ConstexprValue){
+            .is_object = true,
+            .object = NewConstexprObject(ctx, type->next,
+                                         ConstexprObjectSlotCount(type->next))};
+        ok = TypeIsFixedArray(type->next) ||
+             ConstexprMaterializeBaseSubobjectSlots(ctx, slot->object);
+      }
+      ok = ok && ConstexprValueInitializeAggregateSlot(ctx, type->next, slot);
+    }
+  }
   if (ok) {
     ok = ApplyConstexprDesignatedBaseDefaultInitializers(
         ctx, type, object, braced);
@@ -4941,30 +5137,7 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
       !type->info.struct_info->is_union) {
     ok = ConstexprMaterializeBaseSubobjectSlots(ctx, object);
     if (ok && !type->info.struct_info->is_aggregate) {
-      Symbol* ctor_symbol = ConstexprConstructorForObjectType(type, 0);
-      Symbol* ctor = ConstexprFunctionDefinition(ctor_symbol);
-      if (ctor != NULL && ctor->type != NULL &&
-          TypeIsFunction(ctor->type) &&
-          ctor->type->info.function.is_constructor &&
-          !ctor->type->info.function.is_destructor &&
-          !ctor->type->info.function.is_virtual &&
-          !ctor->type->info.function.varargs &&
-          ctor->type->info.function.is_constexpr &&
-          ctor->type->info.function.body != NULL) {
-        Vector actuals;
-        VectorInit(&actuals);
-        size_t mark = ctx->bindings.length;
-        ctx->call_depth++;
-        ConstexprValue ignored = {0};
-        ok = BindConstexprConstructorObjectActuals(ctx, ctor, object,
-                                                   &actuals) &&
-             EvaluateConstexprStatement(ctx, ctor->type->info.function.body,
-                                        ctor->type->next, &ignored) ==
-                 kConstexprStmtNormal;
-        ctx->call_depth--;
-        PopConstexprBindings(ctx, mark);
-        VectorDestruct(&actuals);
-      }
+      ok = ConstexprRunDefaultConstructor(ctx, type, object);
     }
   }
   return ok;
@@ -5328,6 +5501,15 @@ static bool ConstexprValuesTemplateArgumentEquivalent(ConstexprValue* left,
   if (ConstexprStringPointerValuesEquivalent(left, right)) {
     return true;
   }
+  if (left->is_address != right->is_address) {
+    // P-code results hold a null pointer as plain zero.
+    ConstexprValue* address = left->is_address ? left : right;
+    ConstexprValue* scalar = left->is_address ? right : left;
+    return !scalar->is_object && !scalar->is_floating && scalar->ivalue == 0 &&
+           address->ivalue == 0 && address->address_binding == NULL &&
+           address->address_slot == NULL && address->address_object == NULL &&
+           address->heap_block == NULL;
+  }
   if (left->is_address || right->is_address) {
     if (left->is_address != right->is_address ||
         left->address_index != right->address_index ||
@@ -5387,7 +5569,8 @@ static bool ConstexprObjectsTemplateArgumentEquivalent(ConstexprObject* left,
   if (left == NULL || right == NULL) {
     return left == right;
   }
-  if (!TypeEqual(left->type, right->type) ||
+  if (!TypeEqualIgnoringTopLevelQualifierMask(left->type, right->type,
+                                              kQualConst | kQualVolatile) ||
       left->active_union_member != right->active_union_member) {
     return false;
   }
@@ -6525,6 +6708,17 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
           ConstexprInitializerExpression(id->symbol->constexpr_initializer),
           result);
     }
+    // EvaluateScalarConstantForSymbol records a null pointer constant as a
+    // zero value.
+    if (binding == NULL && id->symbol != NULL &&
+        TypeIsPointer(id->symbol->type) &&
+        (static_constant_pointer || id->symbol->flags.is_constexpr) &&
+        id->symbol->flags.value_set &&
+        id->symbol->constexpr_initializer == NULL &&
+        id->symbol->value.ivalue == 0 &&
+        CompilerMetaPromotedPointerTarget(id->symbol) == NULL) {
+      return ConstexprNullAddress(result);
+    }
     if (id->symbol != NULL && CompilerSymbolIsMetaPromotedStatic(id->symbol)) {
       if (ConstexprEnsureMetaPromotedStaticObject(id->symbol) &&
           id->symbol->value.other != NULL &&
@@ -6710,10 +6904,15 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
     if (node->type != NULL && TypeIsPointer(node->type)) {
       ConstexprValue value = {0};
-      if (EvaluateConstexprObjectAccess(ctx, node, &value) &&
-          value.is_address) {
-        *result = value;
-        return true;
+      if (EvaluateConstexprObjectAccess(ctx, node, &value)) {
+        if (value.is_address) {
+          *result = value;
+          return true;
+        }
+        // P-code objects hold a null pointer as zero.
+        if (!value.is_object && !value.is_floating && value.ivalue == 0) {
+          return ConstexprNullAddress(result);
+        }
       }
     }
     ConstexprValue* slot = NULL;
@@ -6983,6 +7182,107 @@ static bool ConstexprIsUndefinedWeakAddress(ASTNode* node) {
   return symbol != NULL && symbol->flags.is_weak && !symbol->flags.is_defined;
 }
 
+bool ConstexprPointerTruthHasSideEffects(ASTNode* node) {
+  return node != NULL &&
+         (node->op == AST_OP(call) || node->op == AST_OP(preinc) ||
+          node->op == AST_OP(predec) || node->op == AST_OP(postinc) ||
+          node->op == AST_OP(postdec) || node->op == AST_OP(assign) ||
+          node->op == AST_OP(pluseq) || node->op == AST_OP(minuseq) ||
+          node->op == AST_OP(comma) || node->op == AST_OP(stmt_expr));
+}
+
+bool ConstexprEvaluatePointerTruth(ConstEvalContext* ctx, ASTNode* node,
+                                   int64_t* result) {
+  if (node == NULL || node->type == NULL ||
+      (!TypeIsPointer(node->type) && !TypeIsNullPointer(node->type)) ||
+      ConstexprIsUndefinedWeakAddress(node)) {
+    return false;
+  }
+  ConstexprValue value;
+  if (ConstexprPointerTruthHasSideEffects(node)) {
+    // Evaluated exactly once.  A p-code result is a host address or zero.
+    if (!EvaluateConstexprValue(ctx, node, node->type, &value) ||
+        value.is_object || value.is_floating) {
+      return false;
+    }
+    if (!value.is_address) {
+      *result = value.ivalue != 0;
+      return true;
+    }
+  } else if (!EvaluateConstexprAddressValue(ctx, node, &value)) {
+    // A constant pointer to a static object that is not itself constant has
+    // no evaluator address, but is still non-null.
+    Symbol* symbol = node->op == AST_OP(identifier)
+                         ? ((IdentifierASTNode*)node)->symbol
+                         : NULL;
+    if (symbol == NULL || !TypeIsPointer(symbol->type) ||
+        FindConstexprBinding(ctx, symbol) != NULL ||
+        (!TypeIsConst(symbol->type) && !symbol->flags.is_constexpr) ||
+        !symbol->flags.value_set) {
+      return false;
+    }
+    Symbol* target = NULL;
+    if (symbol->constexpr_initializer == NULL) {
+      target = (Symbol*)symbol->value.other;
+    } else {
+      ASTNode* initializer =
+          ConstexprInitializerExpression(symbol->constexpr_initializer);
+      while (initializer != NULL && initializer->op == AST_OP(cast)) {
+        initializer = ((CastASTNode*)initializer)->expr;
+      }
+      if (initializer != NULL && (initializer->op == AST_OP(string) ||
+                                  initializer->op == AST_OP(string_wide))) {
+        *result = 1;
+        return true;
+      }
+      if (initializer == NULL || initializer->op != AST_OP(address)) {
+        return false;
+      }
+      ASTNode* object = ((UnaryASTNode*)initializer)->sub;
+      while (object != NULL) {
+        if (object->op == AST_OP(cast)) {
+          object = ((CastASTNode*)object)->expr;
+        } else if (object->op == AST_OP(dot)) {
+          object = ((BinaryASTNode*)object)->left;
+        } else if (object->op == AST_OP(subscript)) {
+          // Only an array element of a static object is known to be
+          // non-null; a pointer operand may itself be null.
+          object = ((BinaryASTNode*)object)->left;
+          if (object == NULL || object->type == NULL ||
+              !TypeIsArray(object->type)) {
+            return false;
+          }
+        } else {
+          break;
+        }
+      }
+      if (object == NULL || object->op != AST_OP(identifier)) {
+        return false;
+      }
+      target = ((IdentifierASTNode*)object)->symbol;
+      if (target == NULL || target->flags.is_temp ||
+          target->flags.is_argument ||
+          (target->flags.is_local &&
+           !StorageIs(target->storage, STO(static)))) {
+        return false;
+      }
+    }
+    if (target == NULL || (target->flags.is_weak && !target->flags.is_defined)) {
+      return false;
+    }
+    *result = 1;
+    return true;
+  }
+  value = ConstexprResolveForwardedAddress(value);
+  if (value.is_object) {
+    return false;
+  }
+  *result = value.address_binding != NULL || value.address_slot != NULL ||
+            value.address_object != NULL || value.heap_block != NULL ||
+            value.ivalue != 0;
+  return true;
+}
+
 bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result) {
   if (node == NULL ||
@@ -7015,6 +7315,35 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
   }
   left = ConstexprResolveForwardedAddress(left);
   right = ConstexprResolveForwardedAddress(right);
+  // P-code objects hold pointers as host addresses, and null as plain zero.
+  ConstexprValue* sides[] = {&left, &right};
+  for (size_t i = 0; i < 2; i++) {
+    if (!sides[i]->is_address && !sides[i]->is_object &&
+        !sides[i]->is_floating && sides[i]->ivalue == 0) {
+      *sides[i] = (ConstexprValue){.is_address = true};
+    }
+  }
+  if (!left.is_address || !right.is_address) {
+    if (left.is_object || right.is_object ||
+        (node->op != AST_OP(equal) && node->op != AST_OP(noteq))) {
+      return false;
+    }
+    bool same;
+    if (!left.is_address && !right.is_address) {
+      same = left.ivalue == right.ivalue;
+    } else {
+      // A host address is never null; it cannot be ordered against an
+      // AST-evaluated address.
+      ConstexprValue* address = left.is_address ? &left : &right;
+      if (address->address_binding != NULL || address->address_slot != NULL ||
+          address->address_object != NULL || address->heap_block != NULL) {
+        return false;
+      }
+      same = false;
+    }
+    *result = node->op == AST_OP(equal) ? same : !same;
+    return true;
+  }
   bool equal = ConstexprAddressEqual(left, right);
   if (node->op == AST_OP(equal) || node->op == AST_OP(noteq)) {
     *result = node->op == AST_OP(equal) ? equal : !equal;
@@ -8402,7 +8731,7 @@ static bool EvaluateConstexprDeclarationList(ConstEvalContext* ctx,
 static bool EvaluateConstexprCondition(ConstEvalContext* ctx, ASTNode* cond,
                                        bool* result) {
   int64_t value;
-  if (!EvaluateIntegerExpressionInContext(ctx, cond, &value)) {
+  if (!EvaluateTruthInContext(ctx, cond, &value)) {
     return false;
   }
   *result = value != 0;

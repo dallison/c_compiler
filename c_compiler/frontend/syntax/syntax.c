@@ -60,6 +60,8 @@ static Namespace* ResolveNamespaceChildCheckingAmbiguity(Syntax* syntax,
                                                          bool* ambiguous);
 static bool CXXConstructorSetHasInitializerList(StructMember* ctor);
 static bool TypeHasCXXInitializerListConstructor(TypeRecord* type);
+static bool CXXDeferConstexprDefaultInitialization(Syntax* syntax,
+                                                   TypeRecord* type);
 
 bool SyntaxCurrentIdentifierFollowedByScopeOperator(Syntax* syntax) {
   Lex* lex = syntax->lex;
@@ -3545,7 +3547,7 @@ ASTNode* SyntaxParseStaticAssert(Syntax* syntax) {
   }
 
   int64_t value = 0;
-  if (!EvaluateIntegerExpression(evaluated, &value)) {
+  if (!EvaluateTruthExpression(evaluated, &value)) {
     bool defer =
         ExpressionIsTemplateDependent(evaluated) ||
         ASTNodeAny(evaluated, ExpressionReferencesDeferredConstexprFunction,
@@ -3598,7 +3600,7 @@ int SyntaxEvaluateDeferredStaticAssert(ASTNode* node, bool* dependent) {
     return -1;
   }
   int64_t value = 0;
-  if (!EvaluateIntegerExpression(cloned, &value)) {
+  if (!EvaluateTruthExpression(cloned, &value)) {
     if (dependent != NULL) {
       *dependent = ExpressionIsTemplateDependent(cloned);
     }
@@ -10649,13 +10651,22 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
     }
     if ((sym->flags.is_constexpr || sym->flags.is_constinit) &&
-        initializer == NULL && parser->cxx_member_definition == NULL) {
+        initializer == NULL && parser->cxx_member_definition == NULL &&
+        !CXXDeferConstexprDefaultInitialization(syntax, sym->type)) {
       // An out-of-class definition of a static data member
       // (`constexpr T C::x;`) needs no initializer: the required initializer is
       // supplied by the in-class `static constexpr` declaration.
-      SyntaxError(syntax, sym->flags.is_constinit
-                              ? "constinit variable requires an initializer"
-                              : "constexpr variable requires an initializer");
+      initializer = CompilerIsCXX() && !StorageIs(storage, STO(extern))
+                        ? SyntaxNewCXXConstexprDefaultInitializer(
+                              syntax, sym, /*local=*/false)
+                        : NULL;
+      if (initializer != NULL) {
+        sym->flags.is_defined = true;
+      } else {
+        SyntaxError(syntax, sym->flags.is_constinit
+                                ? "constinit variable requires an initializer"
+                                : "constexpr variable requires an initializer");
+      }
     }
     if (CompilerCXXAtLeast(kLanguageStandardCXX17) &&
         !syntax->parsing_template_declaration &&
@@ -14000,6 +14011,20 @@ ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
   return SyntaxNewCXXConstructorCall(syntax, sym, NewVector(), sym->location);
 }
 
+ASTNode* SyntaxNewCXXConstexprDefaultInitializer(Syntax* syntax, Symbol* sym,
+                                                 bool local) {
+  ASTNode* initializer = SyntaxNewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+  if (initializer == NULL || !TypeIsFixedArray(sym->type)) {
+    return initializer;
+  }
+  // Default-initializing an array of classes default-constructs each element,
+  // which is what value-initializing from `{}` does; unlike the per-element
+  // constructor sequence, that is an initializer constant evaluation accepts.
+  ASTNode* braced =
+      NewBracedInitializerASTNode(NewVector(), NULL, sym->location);
+  return local ? NewVariableInitExpression(syntax, sym, braced) : braced;
+}
+
 static ASTNode* NewCXXDestructorCallOnReceiver(ASTNode* receiver,
                                                TypeRecord* type,
                                                SourceLocation location) {
@@ -15555,8 +15580,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
             SyntaxError(syntax, "auto variable requires an initializer");
           } else if (sym->flags.is_constexpr || sym->flags.is_constinit) {
             if (!CXXDeferConstexprDefaultInitialization(syntax, sym->type)) {
-              initializer =
-                  SyntaxNewCXXDefaultConstructorCallIfNeeded(syntax, sym);
+              initializer = SyntaxNewCXXConstexprDefaultInitializer(
+                  syntax, sym, /*local=*/true);
               if (initializer == NULL) {
                 SyntaxError(syntax, sym->flags.is_constinit
                                         ? "constinit variable requires an initializer"

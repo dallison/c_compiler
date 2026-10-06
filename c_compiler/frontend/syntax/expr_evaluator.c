@@ -282,6 +282,22 @@ static bool EvaluateOffsetofStyleAddress(ASTNode* node, int64_t* result) {
   return true;
 }
 
+bool EvaluateTruthInContext(ConstEvalContext* ctx, ASTNode* node,
+                            int64_t* result) {
+  // Integer evaluation of a pointer binding reads its pointee, so try the
+  // pointer first.
+  if (node != NULL && node->type != NULL &&
+      (TypeIsPointer(node->type) || TypeIsNullPointer(node->type))) {
+    if (ConstexprEvaluatePointerTruth(ctx, node, result)) {
+      return true;
+    }
+    if (ConstexprPointerTruthHasSideEffects(node)) {
+      return false;
+    }
+  }
+  return EvaluateIntegerExpressionInContext(ctx, node, result);
+}
+
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
                                                ASTNode* node,
                                                int64_t* result) {
@@ -794,7 +810,6 @@ case AST_OP(ast_op): \
       
       EVAL_UNARY_OP(uminus, -)
       EVAL_UNARY_OP(uplus, +)
-      EVAL_UNARY_OP(not, !)
       EVAL_UNARY_OP(onescomp, ~)
       EVAL_UNARY_OP(b2c, (char))
       EVAL_UNARY_OP(i2c, (char))
@@ -802,6 +817,13 @@ case AST_OP(ast_op): \
       EVAL_UNARY_OP(l2c, (char))
       EVAL_UNARY_OP(ll2c, (char))
       EVAL_UNARY_OP(c2b, (_Bool))
+
+    case AST_OP(not):
+      if (EvaluateTruthInContext(ctx, unary_node->sub, &left)) {
+        *result = NormalizeIntegerValueForNode(!left, node);
+        return true;
+      }
+      break;
 
     case AST_OP(logand):
       if (BinaryOperandsUseFloatingPoint(binary_node)) {
@@ -821,13 +843,12 @@ case AST_OP(ast_op): \
         }
         break;
       }
-      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
+      if (EvaluateTruthInContext(ctx, binary_node->left, &left)) {
         if (left == 0) {
           *result = 0;
           return true;
         }
-        if (EvaluateIntegerExpressionInContext(ctx, binary_node->right,
-                                               &right)) {
+        if (EvaluateTruthInContext(ctx, binary_node->right, &right)) {
           *result = right != 0;
           return true;
         }
@@ -860,10 +881,9 @@ case AST_OP(ast_op): \
         }
         break;
       }
-      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
+      if (EvaluateTruthInContext(ctx, binary_node->left, &left)) {
         if (left == 0) {
-          if (EvaluateIntegerExpressionInContext(ctx, binary_node->right,
-                                                 &right)) {
+          if (EvaluateTruthInContext(ctx, binary_node->right, &right)) {
             *result = right != 0;
             return true;
           }
@@ -884,7 +904,7 @@ case AST_OP(ast_op): \
           binary_node->right->op != AST_OP(colon)) {
         break;
       }
-      if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left)) {
+      if (EvaluateTruthInContext(ctx, binary_node->left, &left)) {
         // Depending on the value of left (the left for the ? operator) we
         // either evaluate the left or right of the colon operator (right right
         // node of the ? operator).
@@ -938,6 +958,11 @@ case AST_OP(ast_op): \
       }
       if (EvaluateIntegerExpressionInContext(ctx, c->expr, &left)) {
         *result = NormalizeIntegerValueForType(left, c->cast_type);
+        return true;
+      }
+      if (c->cast_type != NULL && TypeIsBool(c->cast_type) &&
+          ConstexprEvaluatePointerTruth(ctx, c->expr, &left)) {
+        *result = left;
         return true;
       }
       // `offsetof` expands to `(size_t)(&((T*)0)->member)`.  The address
@@ -1075,6 +1100,15 @@ bool EvaluateIntegerExpression(ASTNode* node, int64_t* result) {
   return ok;
 }
 
+bool EvaluateTruthExpression(ASTNode* node, int64_t* result) {
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  bool ok = EvaluateTruthInContext(&ctx, node, result);
+  ok = ok && !ConstEvalContextHasLiveAllocation(&ctx);
+  ConstEvalContextDestruct(&ctx);
+  return ok;
+}
+
 bool EvaluateFloatingPointExpression(ASTNode* node, double* result) {
   ConstEvalContext ctx;
   ConstEvalContextInit(&ctx);
@@ -1110,6 +1144,20 @@ bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
   initializer = ConstexprInitializerExpression(initializer);
   if (initializer == NULL) {
     return false;
+  }
+  // `T x{}` value-initializes a scalar to zero.
+  if (initializer->op == AST_OP(braced_init) &&
+      (((BracedInitializerASTNode*)initializer)->initializers == NULL ||
+       ((BracedInitializerASTNode*)initializer)->initializers->length == 0) &&
+      (TypeIsIntegral(symbol->type) || TypeIsFloatingPoint(symbol->type) ||
+       TypeIsPointer(symbol->type) || TypeIsNullPointer(symbol->type))) {
+    if (TypeIsFloatingPoint(symbol->type)) {
+      symbol->value.fvalue = 0;
+    } else {
+      symbol->value.ivalue = 0;
+    }
+    symbol->flags.value_set = true;
+    return true;
   }
   // A non-dependent result type does not make a dependent initializer safe to
   // cache.  For example, `constexpr size_t n = sizeof(T)` must be evaluated
@@ -1460,7 +1508,19 @@ static bool EvaluateFloatingPointValueInContext(ConstEvalContext* ctx,
           binary_node->right->op != AST_OP(colon)) {
         break;
       }
-      if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left, &left)) {
+      bool condition_ok;
+      if (binary_node->left != NULL && binary_node->left->type != NULL &&
+          (TypeIsPointer(binary_node->left->type) ||
+           TypeIsNullPointer(binary_node->left->type))) {
+        int64_t condition = 0;
+        condition_ok =
+            EvaluateTruthInContext(ctx, binary_node->left, &condition);
+        left = condition;
+      } else {
+        condition_ok = EvaluateFloatingPointExpressionInContext(
+            ctx, binary_node->left, &left);
+      }
+      if (condition_ok) {
         // Depending on the value of left (the left for the ? operator) we
         // either evaluate the left or right of the colon operator (right right
         // node of the ? operator).

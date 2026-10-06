@@ -936,8 +936,12 @@ static void FinishClonedConstexprDefaultInitializer(
   if (decl->initializer != NULL || symbol == NULL) {
     return;
   }
-  decl->initializer = SyntaxNewCXXDefaultConstructorCallIfNeeded(
-      clone->parser->syntax, symbol);
+  decl->initializer =
+      symbol->flags.is_constexpr || symbol->flags.is_constinit
+          ? SyntaxNewCXXConstexprDefaultInitializer(clone->parser->syntax,
+                                                    symbol, /*local=*/true)
+          : SyntaxNewCXXDefaultConstructorCallIfNeeded(clone->parser->syntax,
+                                                       symbol);
   if (decl->initializer != NULL) {
     decl->initializer->parent = node;
     decl->initializer->child_id = 0;

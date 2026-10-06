@@ -68,6 +68,9 @@ bool ConstexprObjectInitializerTemplateKey(TypeRecord* type, ASTNode* expression
 
 bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
+// Whether scalar or pointer expression |node| converts to true.
+bool EvaluateTruthInContext(ConstEvalContext* ctx, ASTNode* node,
+                            int64_t* result);
 bool EvaluateInt128Constant(ASTNode* node, int64_t* lo, int64_t* hi);
 bool ConstexprBindVariableDeclaration(ConstEvalContext* ctx,
                                       VariableDeclarationASTNode* decl);
@@ -103,9 +106,18 @@ size_t ConstexprMemberStorageIndex(Struct* str, StructMember* member);
 // The subobject of `object` (itself or a base) that declares `member`.
 ConstexprObject* ConstexprObjectForMember(ConstexprObject* object,
                                           StructMember* member);
+// Rewrites an address value to name the object (or heap block) it designates
+// rather than a binding that forwards to it.
+void ConstexprCanonicalizeAddressValue(ConstexprValue* value);
+// The variable whose binding address value |value| designates, or NULL.
+Symbol* ConstexprAddressBindingSymbol(const ConstexprValue* value);
 // Whether a class, or an array of them, has a default member initializer,
 // directly or in a base or member subobject.
 bool ConstexprTypeHasDefaultMemberInitializer(TypeRecord* type);
+// Whether value-initializing `type` from `{}` does more than zero it: a default
+// member initializer applies, or a non-aggregate class (or array of them, or
+// aggregate containing one) runs a non-trivial default constructor.
+bool ConstexprValueInitializationRunsCode(TypeRecord* type);
 // Whether a class has a non-static data member, directly or in a base.
 bool ConstexprClassHasData(TypeRecord* type);
 // A call to the C library memcpy, memmove or memcmp, which are not constexpr:
@@ -131,6 +143,12 @@ bool ConstexprEvaluatePointerDereferenceAsFloating(ConstEvalContext* ctx,
                                                    double* result);
 struct ReflectionValue* ConstexprEvaluatePointerDereferenceAsReflection(
     ConstEvalContext* ctx, ASTNode* node);
+// Whether pointer expression |node| is non-null.
+bool ConstexprEvaluatePointerTruth(ConstEvalContext* ctx, ASTNode* node,
+                                   int64_t* result);
+// Whether ConstexprEvaluatePointerTruth evaluates |node| for its side effects,
+// so that a failure must not be retried another way.
+bool ConstexprPointerTruthHasSideEffects(ASTNode* node);
 bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
 bool ConstexprEvaluatePointerDifference(ConstEvalContext* ctx, ASTNode* node,

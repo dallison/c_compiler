@@ -288,6 +288,11 @@ ASTNode* SyntaxNewCXXConstructorCall(Syntax* syntax, Symbol* sym,
                                      SourceLocation location);
 ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
                                                     Symbol* sym);
+// The initializer default-initializing a constexpr/constinit `sym`, or NULL if
+// default initialization runs no constructor.  `local` selects the
+// block-scope form.
+ASTNode* SyntaxNewCXXConstexprDefaultInitializer(Syntax* syntax, Symbol* sym,
+                                                 bool local);
 ASTNode* SyntaxRewriteCXXCopyInitConstructorIfNeeded(Syntax* syntax,
                                                      Symbol* sym,
                                                      ASTNode* initializer);
