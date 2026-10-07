@@ -4573,6 +4573,9 @@ sh_test(
     data = [
         ":arm",
         ":davecc",
+        ":libc_arm",
+        ":libc_riscv",
+        ":libc_x86_64",
         ":riscv",
         ":x86_64",
     ],
