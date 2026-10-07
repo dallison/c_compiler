@@ -875,27 +875,42 @@ static bool CXXLocalNeedsScopeExitDestructor(Symbol* sym) {
   return TypeHasNonTrivialDestructor(sym->type);
 }
 
+// Appends the destructors of the elements of `sym` below the subscripts
+// `indices[0..depth)`, whose type is `type`, last element first.
+static void AppendLocalElementDestructorStatements(Symbol* sym,
+                                                   TypeRecord* type,
+                                                   int64_t* indices,
+                                                   size_t depth, Vector* out) {
+  SourceLocation location = sym->location;
+  if (!TypeIsFixedArray(type)) {
+    ASTNode* receiver = NewIdentifierASTNode(sym, location);
+    for (size_t d = 0; d < depth; d++) {
+      receiver = NewBinaryASTNode(
+          AST_OP(subscript), NULL, location, receiver,
+          NewIntConstantASTNode(indices[d],
+                                NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                location));
+    }
+    VectorAppend(out, NewAnalyzedDestructorStatement(type, receiver, location));
+    return;
+  }
+  for (int64_t k = type->info.array.size.fixed; k > 0; k--) {
+    indices[depth] = k - 1;
+    AppendLocalElementDestructorStatements(sym, type->next, indices, depth + 1,
+                                           out);
+  }
+}
+
 // Append destructor statement(s) for `sym` (a single object, or a fixed array
 // of objects destroyed in reverse index order) to `out`.
 static void AppendLocalDestructorStatements(Symbol* sym, Vector* out) {
-  SourceLocation location = sym->location;
-  if (TypeIsFixedArray(sym->type)) {
-    int64_t length = sym->type->info.array.size.fixed;
-    for (int64_t k = length; k > 0; k--) {
-      ASTNode* array = NewIdentifierASTNode(sym, location);
-      ASTNode* subscript = NewBinaryASTNode(
-          AST_OP(subscript), NULL, location, array,
-          NewIntConstantASTNode(k - 1,
-                                NewTypeRecordWithSize(kTypeInt, kQualPlain),
-                                location));
-      VectorAppend(out, NewAnalyzedDestructorStatement(sym->type->next,
-                                                       subscript, location));
-    }
-    return;
+  size_t rank = 0;
+  for (TypeRecord* t = sym->type; TypeIsFixedArray(t); t = t->next) {
+    rank++;
   }
-  VectorAppend(out, NewAnalyzedDestructorStatement(
-                        sym->type, NewIdentifierASTNode(sym, location),
-                        location));
+  int64_t* indices = rank != 0 ? malloc(rank * sizeof(int64_t)) : NULL;
+  AppendLocalElementDestructorStatements(sym, sym->type, indices, 0, out);
+  free(indices);
 }
 
 static ASTNode* CXXRangeForDeclarationInitializer(ASTNode* range_decl) {

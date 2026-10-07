@@ -491,6 +491,20 @@ static bool StringLiteralMatchesCharacterArray(TypeRecord* array_element,
 }
 
 static bool InitArrayAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {
+  // A string literal initializes an array of characters as a whole.  Any other
+  // array (`std::string s[][2] = {"a", "b"}`, `const char* p[] = {"a"}`, or an
+  // array of character arrays) is brace-elided, and the literal initializes its
+  // first element.
+  TypeRecord* array_element = inode->type->next;
+  bool elements_take_literal =
+      array_element != NULL && !TypeIsArray(array_element) &&
+      !TypeIsStructOrUnion(array_element) && !TypeIsPointer(array_element) &&
+      !TypeIsMemberPointer(array_element);
+  if ((expr->op == AST_OP(string) || expr->op == AST_OP(string_wide)) &&
+      !elements_take_literal) {
+    AppendArrayINodeChildren(inode, 0);
+    return InitCurrentAndAdvance(inode->current, expr, constants_only);
+  }
   if (expr->op == AST_OP(string) || expr->op == AST_OP(string_wide)) {
     TypeRecord* literal_element =
         TypeIsArray(expr->type) ? expr->type->next : NULL;

@@ -256,6 +256,9 @@ ASTNode* SyntaxParseLocalDeclaration(Syntax* syntax);
 ASTNode* SyntaxParseConditionDeclaration(Syntax* syntax);
 void SyntaxPrepareCXXLocalStatics(Syntax* syntax, TypeRecord* function);
 ASTNode* SyntaxNewCXXGlobalAtexitStatement(Symbol* sym, SourceLocation location);
+// Destructor calls for every element of a fixed array of class type, last
+// element first.  NULL when the element type has no non-trivial destructor.
+ASTNode* SyntaxNewCXXArrayDestructorCalls(Symbol* sym);
 void SyntaxRegisterFunctionInitFiniAttributes(Syntax* syntax, Symbol* sym);
 
 void SyntaxNeedSemicolon(Syntax* syntax, TokenClass followers);

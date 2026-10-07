@@ -478,11 +478,12 @@ typedef struct Compiler {
 
   // Namespace-scope C++ objects that need dynamic construction/destruction.
   // Elements are Symbol* owned by the normal symbol tables.
-  Vector cxx_global_constructors;
   Vector cxx_global_destructors;
   // Symbols whose empty defaulted constructor performs no runtime work.
   Vector cxx_no_op_initialized_variables;
-  Vector cxx_global_constructor_calls;  // ASTNode*, owned by init function body.
+  // ASTNode*, owned by init function body, in declaration order.  NULL when
+  // the object needs only its destructor registered at that point.
+  Vector cxx_global_constructor_calls;
   Vector cxx_global_constructor_objects;  // Symbol* parallel to constructor_calls.
   // Per-thread C++ thread_local construction/destruction (not process-global).
   Vector cxx_thread_constructor_calls;  // ASTNode*, owned by synthetic init body.

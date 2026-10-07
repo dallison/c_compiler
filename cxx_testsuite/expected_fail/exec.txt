@@ -7,7 +7,3 @@
 # keep that marker rare.
 #
 # Nothing here is expected to stay: each entry is a compiler bug to fix.
-
-# Namespace-scope arrays of class type with an initializer-list bound.
-0670_namespace_class_array_size.cpp
-0671_namespace_class_array_converting_ctor.cpp

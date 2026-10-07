@@ -6796,6 +6796,80 @@ static ASTNode* NewCXXAggregateMemberZeroInitializer(
   return NewExpressionStatementASTNode(init, location);
 }
 
+// An array with more base elements than this is constructed or destroyed by a
+// loop instead of one call per element, which would make the expression as
+// deep as the array is long.
+enum { kCXXUnrolledArrayElementLimit = 16 };
+
+static ASTNode* NewCXXElementSpecialMemberCall(ASTNode* element,
+                                               TypeRecord* element_type,
+                                               const char* name,
+                                               SourceLocation location) {
+  ASTNode* member = NewStringConstantASTNode(NewString(name), NULL, location);
+  ASTNode* member_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, element, member);
+  Vector* actuals = NewVector();
+  CXXPrependCompleteObjectArgument(element_type, actuals,
+                                   /*complete_object=*/true, location);
+  return NewVectorASTNode(AST_OP(call), NULL, location, member_access,
+                          actuals);
+}
+
+// Calls special member `name` on `count` consecutive elements starting at the
+// element `first` designates, counting up, or down from the last when
+// `reverse` is set:
+//   index = 0; while (index < count) { (&first)[index].name(); ++index; }
+static ASTNode* NewCXXArrayElementLoop(Syntax* syntax, ASTNode* first,
+                                       TypeRecord* element_type,
+                                       unsigned long count, const char* name,
+                                       bool reverse, SourceLocation location) {
+  TypeRecord* index_type =
+      NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain);
+  Symbol* index = SyntaxNewTemporary(syntax, index_type);
+  ASTNode* start = NewIntConstantASTNode(reverse ? count : 0,
+                                         TypeRecordCopy(index_type), location);
+  ASTNode* end = NewIntConstantASTNode(reverse ? 0 : count,
+                                       TypeRecordCopy(index_type), location);
+  ASTNode* step = NewBinaryASTNode(
+      AST_OP(assign), NULL, location, NewIdentifierASTNode(index, location),
+      NewBinaryASTNode(reverse ? AST_OP(minus) : AST_OP(plus), NULL, location,
+                       NewIdentifierASTNode(index, location),
+                       NewIntConstantASTNode(1, TypeRecordCopy(index_type),
+                                             location)));
+  ASTNode* base = NewUnaryASTNode(
+      AST_OP(address), NewPointerTo(kQualPlain, TypeRecordCopy(element_type)),
+      location, first);
+  ASTNode* element = NewBinaryASTNode(AST_OP(subscript),
+                                      TypeRecordCopy(element_type), location,
+                                      base, NewIdentifierASTNode(index, location));
+  ASTNode* call =
+      NewCXXElementSpecialMemberCall(element, element_type, name, location);
+
+  Vector* body = NewVector();
+  if (reverse) {
+    VectorAppend(body, NewExpressionStatementASTNode(step, location));
+    VectorAppend(body, NewExpressionStatementASTNode(call, location));
+  } else {
+    VectorAppend(body, NewExpressionStatementASTNode(call, location));
+    VectorAppend(body, NewExpressionStatementASTNode(step, location));
+  }
+  ASTNode* condition = NewBinaryASTNode(
+      reverse ? AST_OP(greater) : AST_OP(less), NULL, location,
+      NewIdentifierASTNode(index, location), end);
+  Vector* statements = NewVector();
+  VectorAppend(statements,
+               NewExpressionStatementASTNode(
+                   NewBinaryASTNode(AST_OP(assign), NULL, location,
+                                    NewIdentifierASTNode(index, location),
+                                    start),
+                   location));
+  VectorAppend(statements,
+               NewCombinedStatementASTNode(
+                   AST_OP(while), condition,
+                   NewCompoundStatementASTNode(body, location), location));
+  return NewCompoundStatementASTNode(statements, location);
+}
+
 static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
                                                 TypeRecord* func,
                                                 StructMember* member,
@@ -6833,6 +6907,22 @@ static ASTNode* NewCXXMemberInitializerStatement(Syntax* syntax,
     StructMember* element_constructor =
         TypeIsStructOrUnion(element_type) ? FindCXXConstructor(element_type)
                                          : NULL;
+    if (element_constructor != NULL && actuals->length == 0 &&
+        element_count > kCXXUnrolledArrayElementLimit) {
+      VectorDelete(actuals);
+      ASTNode* receiver =
+          NewCXXThisMemberAccess(func, member->symbol->name.value, location);
+      if (receiver == NULL) {
+        return NULL;
+      }
+      ASTNode* first = NewBinaryASTNode(
+          AST_OP(subscript), NULL, location, receiver,
+          NewIntConstantASTNode(0, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                location));
+      return NewCXXArrayElementLoop(syntax, first, element_type, element_count,
+                                    CXXConstructorNameForType(element_type),
+                                    /*reverse=*/false, location);
+    }
     Vector* statements = NewVector();
     for (size_t i = 0; i < element_count; i++) {
       ASTNode* receiver =
@@ -7137,6 +7227,22 @@ static ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
     }
   }
   TypeRecord* member_type = member->symbol->type;
+  if (TypeIsFixedArray(member_type)) {
+    // Each element of a class array member is default-constructed.  Skip the
+    // calls when that constructor is the trivial implicit one.
+    TypeRecord* element_type = member_type->next;
+    if (!CXXTypeHasDefaultConstructor(element_type)) {
+      return NULL;
+    }
+    StructMember* ctor = FindCXXConstructor(element_type);
+    if (ctor != NULL && ctor->overload_next == NULL &&
+        ctor->symbol->flags.invented &&
+        ctor->symbol->type->info.function.is_trivial_special_member) {
+      return NULL;
+    }
+    return NewCXXMemberInitializerStatement(
+        syntax, func, member, NewVector(), false, member->symbol->location);
+  }
   if (!CXXTypeHasDefaultConstructor(member_type)) {
     return NULL;
   }
@@ -8012,9 +8118,16 @@ void SyntaxInsertCXXConstructorPreamble(Syntax* syntax, TypeRecord* func,
     // consecutive kASTEHCleanupOnly statements into a single cleanup pad.  This
     // covers a throw after the member is fully constructed; a throw *during*
     // element construction of an array is not yet covered (it needs a runtime
-    // element counter) and leaks the elements built so far.
+    // element counter) and leaks the elements built so far.  Neither is an
+    // array member long enough to be constructed by a loop, whose per-element
+    // cleanup would be as long as the array.
     TypeRecord* member_type = member->symbol->type;
+    unsigned long member_elements = 1;
+    for (TypeRecord* t = member_type; TypeIsFixedArray(t); t = t->next) {
+      member_elements *= (unsigned long)t->info.array.size.fixed;
+    }
     if (CompilerExceptionsEnabled() &&
+        member_elements <= kCXXUnrolledArrayElementLimit &&
         TypeHasNonTrivialDestructor(member_type)) {
       Vector member_dtors;
       VectorInit(&member_dtors);
@@ -13960,8 +14073,7 @@ ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
         CXXArrayBaseElementType(sym->type, &element_count);
     const char* constructor_name =
         CXXConstructorNameForType(element_type);
-    if (constructor_name == NULL || element_type->info.struct_info == NULL ||
-        element_type->info.struct_info->is_aggregate) {
+    if (constructor_name == NULL || element_type->info.struct_info == NULL) {
       return NULL;
     }
     StructMember* ctor = FindStructMemberByName(
@@ -13970,20 +14082,28 @@ ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
         !ctor->symbol->type->info.function.is_constructor) {
       return NULL;
     }
+    if (element_type->info.struct_info->is_aggregate &&
+        ctor->symbol->flags.invented &&
+        (ctor->symbol->type->info.function.is_deleted ||
+         ctor->symbol->type->info.function.is_trivial_special_member)) {
+      return NULL;
+    }
+    if (element_count > kCXXUnrolledArrayElementLimit) {
+      return NewUnaryASTNode(
+          AST_OP(stmt_expr), NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+          sym->location,
+          NewCXXArrayElementLoop(
+              syntax, NewCXXArrayElementExpression(sym, 0, sym->location),
+              element_type, element_count, constructor_name,
+              /*reverse=*/false, sym->location));
+    }
     ASTNode* sequence = NULL;
     for (unsigned long i = 0; i < element_count; i++) {
       SourceLocation location = sym->location;
       ASTNode* element =
           NewCXXArrayElementExpression(sym, i, location);
-      ASTNode* member = NewStringConstantASTNode(
-          NewString(constructor_name), NULL, location);
-      ASTNode* member_access = NewBinaryASTNode(
-          AST_OP(dot), NULL, location, element, member);
-      Vector* actuals = NewVector();
-      CXXPrependCompleteObjectArgument(element_type, actuals,
-                                       /*complete_object=*/true, location);
-      ASTNode* call = NewVectorASTNode(
-          AST_OP(call), NULL, location, member_access, actuals);
+      ASTNode* call = NewCXXElementSpecialMemberCall(
+          element, element_type, constructor_name, location);
       if (sequence == NULL) {
         sequence = call;
       } else {
@@ -14490,6 +14610,46 @@ ASTNode* SyntaxNewCXXGlobalAtexitStatement(Symbol* sym,
     return NULL;
   }
   return NewExpressionStatementASTNode(registration, location);
+}
+
+ASTNode* SyntaxNewCXXArrayDestructorCalls(Symbol* sym) {
+  if (sym == NULL || !TypeIsFixedArray(sym->type)) {
+    return NULL;
+  }
+  unsigned long element_count = 0;
+  TypeRecord* element_type = CXXArrayBaseElementType(sym->type, &element_count);
+  Symbol* destructor = FindCXXDestructorForType(element_type);
+  if (destructor == NULL || element_count == 0) {
+    return NULL;
+  }
+  SourceLocation location = sym->location;
+  String destructor_name;
+  StringInit(&destructor_name, "~");
+  StringAppendString(&destructor_name, element_type->info.struct_info->tag_name);
+  // Elements are destroyed in the reverse order of their construction.
+  if (element_count > kCXXUnrolledArrayElementLimit) {
+    ASTNode* loop = NewCXXArrayElementLoop(
+        &compiler->syntax, NewCXXArrayElementExpression(sym, 0, location),
+        element_type, element_count, destructor_name.value,
+        /*reverse=*/true, location);
+    StringDestruct(&destructor_name);
+    return loop;
+  }
+  ASTNode* sequence = NULL;
+  for (unsigned long i = element_count; i > 0; i--) {
+    ASTNode* element = NewCXXArrayElementExpression(sym, i - 1, location);
+    ASTNode* call = NewCXXElementSpecialMemberCall(
+        element, element_type, destructor_name.value, location);
+    if (sequence == NULL) {
+      sequence = call;
+    } else {
+      sequence = NewBinaryASTNode(
+          AST_OP(comma), NewTypeRecordWithSize(kTypeVoid, kQualPlain),
+          location, sequence, call);
+    }
+  }
+  StringDestruct(&destructor_name);
+  return NewExpressionStatementASTNode(sequence, location);
 }
 
 static bool FunctionTypeIsVoidVoid(TypeRecord* type) {

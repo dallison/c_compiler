@@ -1652,6 +1652,79 @@ static bool CXXNamespaceInitializerIsDynamic(ASTNode* initializer) {
   return CXXThreadLocalInitializerIsDynamic(initializer);
 }
 
+// A dynamic initializer is analyzed only when the init function is built, but
+// the bound of `T a[] = {...}` is needed now for the storage and by later
+// declarations (`sizeof(a)`).  Count the elements the braced list initializes,
+// following brace elision into array elements.  Lists whose count depends on
+// the analyzed element types (designators, elision into an aggregate class)
+// are reported rather than given storage of the wrong size.
+static void CompleteCXXDynamicArrayBound(Symbol* sym, ASTNode* initializer) {
+  TypeRecord* type = sym->type;
+  if (!TypeIsArray(type) || !type->info.array.is_flexible) {
+    return;
+  }
+  ASTNode* expr = CXXThreadLocalInitializerExpression(initializer);
+  if (expr == NULL || expr->op != AST_OP(braced_init)) {
+    return;
+  }
+  unsigned long leaves = 1;
+  unsigned long innermost = 1;
+  TypeRecord* leaf = type->next;
+  while (TypeIsFixedArray(leaf)) {
+    innermost = (unsigned long)leaf->info.array.size.fixed;
+    leaves *= innermost;
+    leaf = leaf->next;
+  }
+  bool leaf_is_aggregate = TypeIsStructOrUnion(leaf) &&
+                           leaf->info.struct_info != NULL &&
+                           leaf->info.struct_info->is_aggregate;
+  // A string literal initializes a whole array of characters.
+  bool strings_fill_arrays =
+      TypeIsFixedArray(type->next) && !TypeIsStructOrUnion(leaf) &&
+      !TypeIsPointer(leaf) && !TypeIsMemberPointer(leaf);
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)expr;
+  unsigned long position = 0;
+  for (size_t i = 0;
+       braced->initializers != NULL && leaves != 0 &&
+       i < braced->initializers->length;
+       i++) {
+    ASTNode* item = braced->initializers->value.p[i];
+    bool string = strings_fill_arrays && item->op == AST_OP(expr_init) &&
+                  ((ExpressionInitializerASTNode*)item)->expr != NULL &&
+                  ((ExpressionInitializerASTNode*)item)->expr->op ==
+                      AST_OP(string);
+    if (item->op == AST_OP(designated_init) ||
+        (leaf_is_aggregate && item->op != AST_OP(braced_init))) {
+      SemanticError(initializer,
+                    "unsupported dynamic initializer for an array of unknown "
+                    "bound");
+      return;
+    }
+    if (string) {
+      position += innermost - position % innermost;
+      continue;
+    }
+    if (item->op != AST_OP(braced_init)) {
+      position++;
+      continue;
+    }
+    // A braced list initializes the largest subarray that starts here.
+    unsigned long span = leaves;
+    TypeRecord* level = type->next;
+    while (position % span != 0 && TypeIsFixedArray(level)) {
+      span /= (unsigned long)level->info.array.size.fixed;
+      level = level->next;
+    }
+    position += span;
+  }
+  if (leaves == 0 || position == 0) {
+    return;
+  }
+  type->info.array.size.fixed = (int)((position + leaves - 1) / leaves);
+  type->info.array.is_flexible = false;
+  TypeRecordCalculateSize(type);
+}
+
 static ASTNode* CXXThreadLocalDynamicInitStatement(Symbol* sym,
                                                    ASTNode* initializer) {
   SourceLocation location = initializer->location;
@@ -1906,21 +1979,13 @@ static void RecordCXXNoOpInitializedVariable(Symbol* symbol) {
 }
 
 static void PruneCXXNoOpGlobalConstructorCalls(void) {
-  for (size_t i = 0; i < compiler->cxx_global_constructors.length;) {
-    Symbol* object = compiler->cxx_global_constructors.value.p[i];
-    if (object != NULL &&
-        CXXTypeHasNoOpDefaultConstructor(object->type)) {
-      RecordCXXNoOpInitializedVariable(object);
-    }
-    if (SymbolPointerInVector(&compiler->cxx_no_op_initialized_variables,
-                              object)) {
-      VectorDeleteElement(&compiler->cxx_global_constructors, i);
-    } else {
-      i++;
-    }
-  }
   for (size_t i = 0; i < compiler->cxx_global_constructor_objects.length;) {
     Symbol* object = compiler->cxx_global_constructor_objects.value.p[i];
+    // An entry without a call only orders the destructor registration.
+    if (compiler->cxx_global_constructor_calls.value.p[i] == NULL) {
+      i++;
+      continue;
+    }
     if (object != NULL &&
         CXXTypeHasNoOpDefaultConstructor(object->type)) {
       RecordCXXNoOpInitializedVariable(object);
@@ -1936,23 +2001,36 @@ static void PruneCXXNoOpGlobalConstructorCalls(void) {
   }
 }
 
+// The elements of a global array are constructed and destroyed by the special
+// members of its base element type.
+static TypeRecord* CXXGlobalObjectClassType(Symbol* sym) {
+  TypeRecord* type = sym->type;
+  while (TypeIsFixedArray(type)) {
+    type = type->next;
+  }
+  return type;
+}
+
 static StructMember* FindCXXSpecialMemberForGlobal(Symbol* sym,
                                                    bool destructor) {
-  if (!CompilerIsCXX() || sym == NULL || !TypeIsStructOrUnion(sym->type) ||
-      sym->type->info.struct_info == NULL ||
-      sym->type->info.struct_info->tag_name == NULL) {
+  if (!CompilerIsCXX() || sym == NULL || sym->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* type = CXXGlobalObjectClassType(sym);
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL) {
     return NULL;
   }
   StructMember* member = NULL;
   if (destructor) {
     String name;
     StringInit(&name, "~");
-    StringAppendString(&name, sym->type->info.struct_info->tag_name);
-    member = FindStructMember(sym->type->info.struct_info, &name);
+    StringAppendString(&name, type->info.struct_info->tag_name);
+    member = FindStructMember(type->info.struct_info, &name);
     StringDestruct(&name);
   } else {
-    member = FindStructMember(sym->type->info.struct_info,
-                              sym->type->info.struct_info->tag_name);
+    member = FindStructMember(type->info.struct_info,
+                              type->info.struct_info->tag_name);
   }
   if (member == NULL || !member->is_member_function) {
     return NULL;
@@ -1976,7 +2054,7 @@ static StructMember* FindCXXSpecialMemberForGlobal(Symbol* sym,
       func->info.function.is_trivial_special_member) {
     return NULL;
   }
-  if (!destructor && CXXTypeHasNoOpDefaultConstructor(sym->type)) {
+  if (!destructor && CXXTypeHasNoOpDefaultConstructor(type)) {
     RecordCXXNoOpInitializedVariable(sym);
     return NULL;
   }
@@ -1987,6 +2065,16 @@ static StructMember* FindCXXSpecialMemberForGlobal(Symbol* sym,
 
 static ASTNode* NewCXXGlobalSpecialMemberCall(Symbol* sym, bool destructor) {
   SourceLocation location = sym->location;
+  if (TypeIsFixedArray(sym->type)) {
+    if (destructor) {
+      return SyntaxNewCXXArrayDestructorCalls(sym);
+    }
+    ASTNode* construct =
+        SyntaxNewCXXDefaultConstructorCallIfNeeded(&compiler->syntax, sym);
+    return construct != NULL
+               ? NewExpressionStatementASTNode(construct, location)
+               : NULL;
+  }
   ASTNode* receiver = NewIdentifierASTNode(sym, location);
   String member_name;
   if (destructor) {
@@ -2034,35 +2122,58 @@ static void AnalyzeStaticDataMemberLifetimeCall(Symbol* object, ASTNode* stmt) {
   compiler->current_class_access_context = saved_access;
 }
 
-static void RegisterCXXThreadLocalObject(Symbol* sym) {
+static void AppendCXXThreadLifetimeCall(Vector* calls, Symbol* sym,
+                                        bool destructor) {
+  ASTNode* call = NewCXXGlobalSpecialMemberCall(sym, destructor);
+  if (call == NULL) {
+    return;
+  }
+  AnalyzeStaticDataMemberLifetimeCall(sym, call);
+  VectorAppend(calls, call);
+}
+
+// An initialized array's elements were constructed by its initializer, so only
+// an array without one is default-constructed here.
+static bool CXXGlobalObjectNeedsDefaultConstruction(Symbol* sym,
+                                                    bool initialized) {
   bool statically_constructed =
       sym != NULL && sym->flags.value_set && sym->value.other != NULL &&
       (TypeIsFixedArray(sym->type) || TypeIsStructOrUnion(sym->type));
-  if (!statically_constructed &&
-      FindCXXSpecialMemberForGlobal(sym, false) != NULL) {
-    ASTNode* call = NewCXXGlobalSpecialMemberCall(sym, false);
-    AnalyzeStaticDataMemberLifetimeCall(sym, call);
-    VectorAppend(&compiler->cxx_thread_constructor_calls, call);
+  if (statically_constructed ||
+      (initialized && TypeIsFixedArray(sym->type))) {
+    return false;
+  }
+  return FindCXXSpecialMemberForGlobal(sym, false) != NULL;
+}
+
+static void RegisterCXXThreadLocalObject(Symbol* sym, bool initialized) {
+  if (CXXGlobalObjectNeedsDefaultConstruction(sym, initialized)) {
+    AppendCXXThreadLifetimeCall(&compiler->cxx_thread_constructor_calls, sym,
+                                false);
   }
   if (FindCXXSpecialMemberForGlobal(sym, true) != NULL) {
-    ASTNode* call = NewCXXGlobalSpecialMemberCall(sym, true);
-    AnalyzeStaticDataMemberLifetimeCall(sym, call);
-    VectorAppend(&compiler->cxx_thread_destructor_calls, call);
+    AppendCXXThreadLifetimeCall(&compiler->cxx_thread_destructor_calls, sym,
+                                true);
   }
 }
 
-static void RegisterCXXGlobalObject(Symbol* sym) {
+static void RegisterCXXGlobalObject(Symbol* sym, bool initialized) {
   if (SymbolIsThreadLocal(sym)) {
-    RegisterCXXThreadLocalObject(sym);
+    RegisterCXXThreadLocalObject(sym, initialized);
     return;
   }
-  bool statically_constructed =
-      sym != NULL && sym->flags.value_set && sym->value.other != NULL &&
-      (TypeIsFixedArray(sym->type) || TypeIsStructOrUnion(sym->type));
-  if (!statically_constructed && FindCXXSpecialMemberForGlobal(sym, false) != NULL) {
-    VectorAppend(&compiler->cxx_global_constructors, sym);
+  ASTNode* call = NULL;
+  if (CXXGlobalObjectNeedsDefaultConstruction(sym, initialized)) {
+    call = NewCXXGlobalSpecialMemberCall(sym, false);
   }
-  if (FindCXXSpecialMemberForGlobal(sym, true) != NULL) {
+  bool has_destructor = FindCXXSpecialMemberForGlobal(sym, true) != NULL;
+  // Objects are constructed, and their destructors registered, in declaration
+  // order together with the dynamically initialized ones.
+  if (call != NULL || has_destructor) {
+    VectorAppend(&compiler->cxx_global_constructor_calls, call);
+    VectorAppend(&compiler->cxx_global_constructor_objects, sym);
+  }
+  if (has_destructor) {
     VectorAppend(&compiler->cxx_global_destructors, sym);
   }
 }
@@ -2070,9 +2181,8 @@ static void RegisterCXXGlobalObject(Symbol* sym) {
 static void RegisterCXXGlobalDestructor(Symbol* sym) {
   if (SymbolIsThreadLocal(sym)) {
     if (FindCXXSpecialMemberForGlobal(sym, true) != NULL) {
-      ASTNode* call = NewCXXGlobalSpecialMemberCall(sym, true);
-      AnalyzeStaticDataMemberLifetimeCall(sym, call);
-      VectorAppend(&compiler->cxx_thread_destructor_calls, call);
+      AppendCXXThreadLifetimeCall(&compiler->cxx_thread_destructor_calls, sym,
+                                  true);
     }
     return;
   }
@@ -2100,7 +2210,6 @@ static bool CXXProcessNeedsMainThreadTlsInit(void) {
 
 static bool CXXProcessNeedsGlobalInitFunction(void) {
   return compiler->cxx_global_constructor_calls.length != 0 ||
-         compiler->cxx_global_constructors.length != 0 ||
          compiler->cxx_global_destructors.length != 0 ||
          CXXProcessNeedsMainThreadTlsInit();
 }
@@ -2157,16 +2266,10 @@ static void BuildCXXProcessInitStatements(Vector* statements) {
   for (size_t i = 0; i < compiler->cxx_global_constructor_calls.length; i++) {
     ASTNode* call = compiler->cxx_global_constructor_calls.value.p[i];
     Symbol* object = compiler->cxx_global_constructor_objects.value.p[i];
-    AnalyzeStaticDataMemberLifetimeCall(object, call);
-    VectorAppend(statements, call);
-    AppendCXXGlobalAtexitRegistration(statements, object, &registered);
-  }
-
-  for (size_t i = 0; i < compiler->cxx_global_constructors.length; i++) {
-    Symbol* object = compiler->cxx_global_constructors.value.p[i];
-    ASTNode* call = NewCXXGlobalSpecialMemberCall(object, false);
-    AnalyzeStaticDataMemberLifetimeCall(object, call);
-    VectorAppend(statements, call);
+    if (call != NULL) {
+      AnalyzeStaticDataMemberLifetimeCall(object, call);
+      VectorAppend(statements, call);
+    }
     AppendCXXGlobalAtexitRegistration(statements, object, &registered);
   }
 
@@ -2797,7 +2900,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
                   var->is_local = decl->symbol->flags.is_local;
                   VectorAppend(&compiler->uninitialized_static_variables, var);
-                  RegisterCXXGlobalObject(decl->symbol);
+                  RegisterCXXGlobalObject(decl->symbol, false);
                 }
               } else {
                 decl->symbol->flags.is_tentative_decl = false;
@@ -2881,6 +2984,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                 }
                 if (SymbolIsThreadLocal(decl->symbol) &&
                     CXXThreadLocalInitializerIsDynamic(decl->initializer)) {
+                  CompleteCXXDynamicArrayBound(decl->symbol, decl->initializer);
                   UninitializedStaticVariable* var =
                       malloc(sizeof(UninitializedStaticVariable));
                   var->symbol = decl->symbol;
@@ -2899,7 +3003,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   decl->initializer = NULL;
                   VectorAppend(&compiler->cxx_thread_constructor_calls,
                                dynamic_init);
-                  RegisterCXXGlobalObject(decl->symbol);
+                  RegisterCXXGlobalObject(decl->symbol, true);
                   continue;
                 }
                 // C++ namespace-scope objects may be dynamically initialized.
@@ -2910,13 +3014,15 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                 // (`std::string flag = ""`) is still dynamic initialization
                 // even when the source expression is a constant.  Constant
                 // initialization stays in place when a constexpr object image
-                // was produced.
+                // was produced.  The same holds for an array of such objects.
                 bool class_needs_dynamic_init = false;
+                TypeRecord* object_class =
+                    CXXGlobalObjectClassType(decl->symbol);
                 if (CompilerIsCXX() && !decl->symbol->flags.is_constexpr &&
                     !decl->symbol->flags.is_constinit &&
-                    TypeIsStructOrUnion(decl->symbol->type) &&
-                    decl->symbol->type->info.struct_info != NULL &&
-                    !decl->symbol->type->info.struct_info->is_aggregate &&
+                    TypeIsStructOrUnion(object_class) &&
+                    object_class->info.struct_info != NULL &&
+                    !object_class->info.struct_info->is_aggregate &&
                     ConstexprObjectInitializerForSymbol(
                         decl->symbol, decl->initializer->location) == NULL) {
                   class_needs_dynamic_init = true;
@@ -2928,6 +3034,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   if (!VariableDefinitionIsODRDiscardable(decl->symbol)) {
                     MarkReferencesInAST(decl->initializer);
                   }
+                  CompleteCXXDynamicArrayBound(decl->symbol, decl->initializer);
                   UninitializedStaticVariable* var =
                       malloc(sizeof(UninitializedStaticVariable));
                   var->symbol = decl->symbol;
@@ -2972,7 +3079,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                 if (!InitializedStaticAlreadyRegistered(decl->symbol)) {
                   AddInitializedStaticVariable(decl, simplified_init);
                 }
-                RegisterCXXGlobalObject(decl->symbol);
+                RegisterCXXGlobalObject(decl->symbol, true);
               }
             }
             if (compiler->debug_output) {
@@ -3696,7 +3803,6 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->uninitialized_static_variables);
   VectorInit(&compiler->cxx_deferred_static_member_definitions);
   VectorInit(&compiler->cxx_undefined_template_static_members);
-  VectorInit(&compiler->cxx_global_constructors);
   VectorInit(&compiler->cxx_global_destructors);
   VectorInit(&compiler->cxx_no_op_initialized_variables);
   VectorInit(&compiler->cxx_global_constructor_calls);
@@ -4488,7 +4594,6 @@ void CompilerDestruct(Compiler* compiler) {
 
   VectorDestruct(&compiler->cxx_deferred_static_member_definitions);
   VectorDestruct(&compiler->cxx_undefined_template_static_members);
-  VectorDestruct(&compiler->cxx_global_constructors);
   VectorDestruct(&compiler->cxx_global_destructors);
   VectorDestruct(&compiler->cxx_no_op_initialized_variables);
   VectorDestruct(&compiler->cxx_global_constructor_calls);
