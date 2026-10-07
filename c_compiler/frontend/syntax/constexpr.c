@@ -2679,6 +2679,120 @@ static ConstexprBinding* ConstexprDurableConstantBinding(Symbol* symbol) {
   return binding;
 }
 
+// The data member slots of |object|, recursively: scalar slots are given
+// |state| when |set| is true, otherwise checked for it.  Marking materializes
+// class and array subobjects (owned by |owner|) so that their scalars are
+// marked too.  Unions are skipped, as only their active member holds a value.
+static bool ConstexprWalkDataMembers(ConstEvalContext* owner,
+                                     ConstexprObject* object, ValueState state,
+                                     bool set, size_t depth);
+
+static bool ConstexprWalkDataSubobject(ConstEvalContext* owner,
+                                       ConstexprValue* slot, TypeRecord* type,
+                                       ValueState state, bool set,
+                                       size_t depth) {
+  if (slot == NULL || type == NULL || TypeIsReference(type)) {
+    return true;
+  }
+  bool aggregate = TypeIsFixedArray(type) || TypeIsStructOrUnion(type);
+  if (aggregate && !slot->is_object) {
+    if (!set || (TypeIsStructOrUnion(type) &&
+                 (type->info.struct_info == NULL ||
+                  type->info.struct_info->is_union))) {
+      return true;
+    }
+    slot->is_object = true;
+    slot->is_address = false;
+    slot->object =
+        NewConstexprObject(owner, type, ConstexprObjectSlotCount(type));
+  }
+  if (slot->is_object) {
+    return ConstexprWalkDataMembers(owner, slot->object, state, set, depth + 1);
+  }
+  if (set) {
+    if (state == kValueStateValid) {
+      // Zero-initialization.
+      *slot = (ConstexprValue){.state = kValueStateValid};
+    }
+    slot->state = state;
+    return true;
+  }
+  return slot->state != state;
+}
+
+static bool ConstexprWalkDataMembers(ConstEvalContext* owner,
+                                     ConstexprObject* object, ValueState state,
+                                     bool set, size_t depth) {
+  if (object == NULL || object->type == NULL || depth > 64) {
+    return true;
+  }
+  TypeRecord* type = object->type;
+  if (TypeIsFixedArray(type)) {
+    for (size_t i = 0; i < object->slots.length; i++) {
+      if (!ConstexprWalkDataSubobject(owner, object->slots.value.p[i],
+                                      type->next, state, set, depth)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->is_union) {
+    return true;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && !base->is_virtual &&
+        !ConstexprWalkDataSubobject(
+            owner, ConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i)),
+            base->type, state, set, depth)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+    if (base != NULL &&
+        !ConstexprWalkDataSubobject(
+            owner,
+            ConstexprObjectSlot(object, ConstexprVirtualBaseStorageIndex(str, i)),
+            base->type, state, set, depth)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_bit_field ||
+        member->symbol->type == NULL ||
+        TypeIsFunction(member->symbol->type) ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    if (!ConstexprWalkDataSubobject(
+            owner,
+            ConstexprObjectSlot(object, ConstexprMemberStorageIndex(str, member)),
+            member->symbol->type, state, set, depth)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void ConstexprMarkDataMembers(ConstEvalContext* ctx,
+                                     ConstexprObject* object,
+                                     ValueState state) {
+  ConstexprWalkDataMembers(ConstexprSubobjectOwner(ctx, object), object, state,
+                           /*set=*/true, 0);
+}
+
+// Whether no scalar subobject of |object| is indeterminate: a constexpr
+// object must be fully initialized ([expr.const]/13).
+static bool ConstexprObjectFullyInitialized(ConstexprObject* object) {
+  return ConstexprWalkDataMembers(NULL, object, kValueStateIndeterminate,
+                                  /*set=*/false, 0);
+}
+
 // A static object that is not a usable constant (`int g;`) still has a
 // constant address.  `&g`, `&h[1]` and `&s.b` may be formed, compared and
 // stored, but not read or written through.
@@ -3267,8 +3381,27 @@ static bool ConstexprEvaluateObjectConstantForSymbolAST(Symbol* symbol,
   return ok;
 }
 
+static bool ConstexprEvaluateObjectConstantForSymbolImpl(Symbol* symbol,
+                                                         ASTNode* initializer);
+
 bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer) {
+  bool ok = ConstexprEvaluateObjectConstantForSymbolImpl(symbol, initializer);
+  if (ok && (symbol->flags.is_constexpr || symbol->flags.is_constinit) &&
+      symbol->flags.value_set &&
+      (TypeIsStructOrUnion(symbol->type) || TypeIsFixedArray(symbol->type)) &&
+      !ConstexprObjectFullyInitialized(
+          (ConstexprObject*)symbol->value.other)) {
+    // Static storage is zeroed, but that does not make the member a constant.
+    symbol->flags.value_set = false;
+    symbol->value.other = NULL;
+    return false;
+  }
+  return ok;
+}
+
+static bool ConstexprEvaluateObjectConstantForSymbolImpl(Symbol* symbol,
+                                                         ASTNode* initializer) {
   if (symbol == NULL || initializer == NULL) {
     return false;
   }
@@ -10476,6 +10609,21 @@ static ConstexprStatementResult EvaluateConstexprStatementImpl(
                     : ConstexprFailureStatementResult(ctx);
         }
       }
+      if (expr->expr->op == AST_OP(init) &&
+          (expr->expr->flags & kASTValueInitMemzero) != 0) {
+        // `m()` for a class or array member: zero-fill before any
+        // constructor runs.
+        ConstexprValue* slot = NULL;
+        BinaryASTNode* init = (BinaryASTNode*)expr->expr;
+        if (!EvaluateConstexprObjectLValue(ctx, init->left, &slot, true) ||
+            slot == NULL) {
+          return ConstexprFailureStatementResult(ctx);
+        }
+        if (slot->is_object) {
+          ConstexprMarkDataMembers(ctx, slot->object, kValueStateValid);
+        }
+        return kConstexprStmtNormal;
+      }
       if (expr->expr->op == AST_OP(throw)) {
         if (!ConstexprEvaluateThrowExpression(ctx, expr->expr)) {
           return ConstexprFailureStatementResult(ctx);
@@ -12191,6 +12339,45 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
   return ok;
 }
 
+// A user-provided constructor default-initializes every member its
+// initializers and body do not set, leaving scalars indeterminate
+// ([dcl.init]/7).  The object's storage may hold stale values from zeroing
+// or an earlier object, so mark them before the body runs.
+static void ConstexprBeginUserConstructor(ConstEvalContext* ctx,
+                                          TypeRecord* func) {
+  if (!func->info.function.is_user_provided ||
+      func->info.function.prototype.length == 0) {
+    return;
+  }
+  Symbol* this_formal = func->info.function.prototype.value.p[0];
+  if (this_formal == NULL || !StringEqual(&this_formal->name, "this")) {
+    return;
+  }
+  ConstexprBinding* binding = FindConstexprBinding(ctx, this_formal);
+  if (binding == NULL) {
+    return;
+  }
+  ConstexprObject* object = binding->object;
+  if (object == NULL && binding->is_address) {
+    ConstexprValue address = {.is_address = true,
+                              .address_binding = binding->address_binding,
+                              .address_slot = binding->address_slot,
+                              .address_object = binding->address_object,
+                              .address_index = binding->address_index,
+                              .heap_block = binding->heap_block};
+    ConstexprValue pointee = {0};
+    TypeRecord* this_type = this_formal->type;
+    if (address.heap_block == NULL && this_type != NULL &&
+        TypeIsPointer(this_type) &&
+        ConstexprDereferencePointee(address, this_type->next,
+                                    /*designate_only=*/true, &pointee) &&
+        pointee.is_object) {
+      object = pointee.object;
+    }
+  }
+  ConstexprMarkDataMembers(ctx, object, kValueStateIndeterminate);
+}
+
 static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
                                              ASTNode* node) {
   if (ctx->call_depth > 32) {
@@ -12237,6 +12424,9 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
   ConstexprValue ignored = {0};
   bool bound =
       BindConstexprConstructorActuals(ctx, callee, receiver, call->children);
+  if (bound) {
+    ConstexprBeginUserConstructor(ctx, func);
+  }
   bool pre = bound && EvaluateConstexprFunctionContracts(
                           ctx, func, kContractPrecondition, &ignored);
   ConstexprStatementResult body_result =
@@ -12294,8 +12484,12 @@ static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
   size_t mark = ctx->bindings.length;
   ctx->call_depth++;
   ConstexprValue ignored = {0};
-  bool ok = BindConstexprConstructorObjectActuals(ctx, callee, object,
-                                                  call->children) &&
+  bool bound = BindConstexprConstructorObjectActuals(ctx, callee, object,
+                                                     call->children);
+  if (bound && func->info.function.is_user_provided) {
+    ConstexprMarkDataMembers(ctx, object, kValueStateIndeterminate);
+  }
+  bool ok = bound &&
             EvaluateConstexprFunctionContracts(
                 ctx, func, kContractPrecondition, &ignored) &&
             EvaluateConstexprStatement(ctx, func->info.function.body,

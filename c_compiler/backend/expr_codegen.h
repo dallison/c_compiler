@@ -20,6 +20,10 @@ IROpcode GetStoreOpcodeForType(TypeRecord* type);
 void GenerateConstexprUninitializedObjectMarker(Generator* gen,
                                                 Symbol* symbol,
                                                 SourceLocation location);
+// Constant evaluation: on entry to a user-provided constructor, *this is
+// indeterminate until its initializers and body write it.
+void GenerateConstexprConstructorEntryMarker(Generator* gen,
+                                             SourceLocation location);
 
 // Spill a scalar/pointer value into a fresh stack temporary (returns its
 // address) and reload it, so it survives intervening calls.

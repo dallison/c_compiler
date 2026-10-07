@@ -2345,8 +2345,12 @@ static void GenerateFunctionIRImpl(Generator* gen) {
   // owned by one Generator and are destroyed with its IR, so never reuse the
   // cached pointer left by an earlier emission of the same AST.
   ASTNodeVisit(&body->base, ResetASTIRLabel, 0, NULL);
+  bool marks_constructed_object = gen->for_constant_evaluation &&
+                                  gen->func->info.function.is_constructor &&
+                                  gen->func->info.function.is_user_provided;
   if (body->statements->length == 0 &&
-      gen->func->info.function.contract_assertions.length == 0) {
+      gen->func->info.function.contract_assertions.length == 0 &&
+      !marks_constructed_object) {
     // Empty function, just return.
     GeneratorEmit(gen, NewIR(IR_OP(ret)));
   } else {
@@ -2369,6 +2373,7 @@ static void GenerateFunctionIRImpl(Generator* gen) {
     NoexceptTerminateGuard noexcept_guard;
     GenerateNoexceptGuardEnter(gen, &noexcept_guard);
 
+    GenerateConstexprConstructorEntryMarker(gen, body->base.location);
     GenerateFunctionContractAssertions(gen, kContractPrecondition);
     GenerateStatement(gen, &body->base);
     // Explicit returns evaluate postconditions in GenerateReturnStatement.

@@ -2419,6 +2419,92 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
   return false;
 }
 
+// Marks the scalar slots of |object|, loaded from memory whose byte states
+// are |states|, whose bytes were never written.
+static void ApplyConstexprPCodeMemoryStates(TypeRecord* type,
+                                            ConstexprObject* object,
+                                            const unsigned char* states,
+                                            size_t depth);
+
+static void ApplyConstexprPCodeSlotState(TypeRecord* type,
+                                         ConstexprValue* slot,
+                                         const unsigned char* states,
+                                         size_t depth) {
+  if (type == NULL || slot == NULL || TypeIsReference(type)) {
+    return;
+  }
+  if (slot->is_object) {
+    ApplyConstexprPCodeMemoryStates(type, slot->object, states, depth + 1);
+    return;
+  }
+  if (TypeIsFixedArray(type) || TypeIsStructOrUnion(type)) {
+    return;
+  }
+  for (size_t i = 0; i < (size_t)type->size; i++) {
+    if (states[i] != kValueStateValid) {
+      slot->state = (ValueState)states[i];
+      return;
+    }
+  }
+}
+
+static void ApplyConstexprPCodeMemoryStates(TypeRecord* type,
+                                            ConstexprObject* object,
+                                            const unsigned char* states,
+                                            size_t depth) {
+  if (type == NULL || object == NULL || states == NULL || depth > 64) {
+    return;
+  }
+  if (TypeIsFixedArray(type)) {
+    size_t elem_size = type->next != NULL ? (size_t)type->next->size : 0;
+    for (size_t i = 0; i < object->slots.length; i++) {
+      ApplyConstexprPCodeSlotState(type->next,
+                                   PCodeConstexprObjectSlot(object, i),
+                                   states + i * elem_size, depth);
+    }
+    return;
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->is_union) {
+    return;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && !base->is_virtual && base->byte_offset >= 0) {
+      ApplyConstexprPCodeSlotState(
+          base->type,
+          PCodeConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i)),
+          states + base->byte_offset, depth);
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_bit_field ||
+        member->byte_offset < 0 ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    ApplyConstexprPCodeSlotState(
+        member->symbol->type,
+        PCodeConstexprObjectSlot(object,
+                                 PCodeConstexprMemberSlotIndex(str, member)),
+        states + member->byte_offset, depth);
+  }
+}
+
+static const unsigned char* ConstexprPCodeRegionStates(PCodeVM* vm,
+                                                       void* memory) {
+  for (size_t i = vm->memory_region_count; i > 0; --i) {
+    PCodeVMMemoryRegion* region = &vm->memory_regions[i - 1];
+    if (region->start == (uint64_t)(uintptr_t)memory) {
+      return region->states;
+    }
+  }
+  return NULL;
+}
+
 static ConstexprObject* ConstexprObjectArgument(ASTNode* arg) {
   if (arg == NULL) {
     return NULL;
@@ -3707,9 +3793,16 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
     return false;
   }
   VectorAppend(&allocations, object_memory);
-  if (!PCodeVMRegisterMemoryRegion(
-          &vm, object_memory, ConstexprPCodeHostBufferSize(object_type->size),
-          true)) {
+  // A user-provided constructor leaves members it does not initialize
+  // indeterminate; other constructors run on zero-initialized storage.
+  bool track_states = func->info.function.is_user_provided;
+  size_t object_buffer_size = ConstexprPCodeHostBufferSize(object_type->size);
+  if (!(track_states
+            ? PCodeVMRegisterStatefulMemoryRegion(&vm, object_memory,
+                                                  object_buffer_size, true,
+                                                  kValueStateIndeterminate)
+            : PCodeVMRegisterMemoryRegion(&vm, object_memory,
+                                          object_buffer_size, true))) {
     *reason = "could not register constexpr pcode constructor object";
     for (size_t i = 0; i < allocations.length; i++) {
       free(allocations.value.p[i]);
@@ -3743,6 +3836,11 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
   bool ok = status == kPCodeVMStatusHalted &&
             LoadConstexprObjectBytes(object_type, object_memory, &runtime,
                                      object_result);
+  if (ok && track_states) {
+    ApplyConstexprPCodeMemoryStates(
+        object_type, *object_result,
+        ConstexprPCodeRegionStates(&vm, object_memory), 0);
+  }
   ConstexprPCodeResultRegion result_region = {0};
   if (ok) {
     result_region = (ConstexprPCodeResultRegion){

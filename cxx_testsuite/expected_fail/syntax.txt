@@ -9,6 +9,3 @@
 # A signed bit-field set from a parameter: AST reads it unextended and p-code
 # fails with "undefined escape".
 pass/0589_constexpr_signed_bitfield_runtime_value.cpp
-
-# The AST evaluator accepts a constexpr object with an indeterminate member.
-fail/0564_constexpr_object_indeterminate_member.cpp

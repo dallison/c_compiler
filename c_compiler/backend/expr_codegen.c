@@ -4398,6 +4398,32 @@ void GenerateConstexprUninitializedObjectMarker(Generator* gen,
                                   location);
 }
 
+// A user-provided constructor leaves members it does not initialize
+// indeterminate, whatever the storage held before.
+void GenerateConstexprConstructorEntryMarker(Generator* gen,
+                                             SourceLocation location) {
+  TypeRecord* func = gen->func;
+  if (!gen->for_constant_evaluation || func == NULL || !TypeIsFunction(func) ||
+      !func->info.function.is_constructor ||
+      !func->info.function.is_user_provided ||
+      func->info.function.prototype.length == 0) {
+    return;
+  }
+  Symbol* this_symbol = func->info.function.prototype.value.p[0];
+  if (this_symbol == NULL || !StringEqual(&this_symbol->name, "this") ||
+      this_symbol->type == NULL || !TypeIsPointer(this_symbol->type) ||
+      this_symbol->type->next == NULL || this_symbol->type->next->size <= 0) {
+    return;
+  }
+  IRNode* object = IRSetType(
+      GeneratorEmit(gen, NewIR1(IR_OP(loada),
+                                GeneratorGetVariable(gen, this_symbol))),
+      this_symbol->type);
+  GenerateConstexprLifetimeMarker(
+      gen, object, CONSTEXPR_PCODE_INDETERMINATE_OBJECT_MARKER,
+      ConstexprPCodeTypeToken(this_symbol->type->next), location);
+}
+
 static bool GeneratorIsInStdConstructAt(Generator* gen) {
   Symbol* origin = gen->func != NULL && TypeIsFunction(gen->func)
                        ? gen->func->info.function.template_origin
