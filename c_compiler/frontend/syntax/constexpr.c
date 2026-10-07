@@ -7,6 +7,7 @@
 //
 
 #include "constexpr.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include "compiler.h"
@@ -42,6 +43,9 @@ struct ConstexprHeapBlock {
   size_t allocation_size;
   bool live;
   TypeRecord* object_type;
+  // The class objects a new-expression created here, as an array of
+  // object_type; such storage is not accessed bytewise.
+  ConstexprObject* object;
 };
 
 struct ConstexprValue {
@@ -448,6 +452,35 @@ static void ConstexprHeapFree(ConstEvalContext* ctx, void* memory) {
   if (block != NULL) {
     block->live = false;
   }
+}
+
+// Every subobject of freed storage, as a read checks only the slot it reads.
+static void ConstexprEndObjectLifetime(ConstexprObject* object, size_t depth) {
+  if (object == NULL || depth > 64) {
+    return;
+  }
+  object->lifetime_ended = true;
+  for (size_t i = 0; i < object->slots.length; i++) {
+    ConstexprValue* slot = object->slots.value.p[i];
+    if (slot == NULL) {
+      continue;
+    }
+    slot->lifetime_ended = true;
+    if (slot->is_object) {
+      ConstexprEndObjectLifetime(slot->object, depth + 1);
+    }
+  }
+}
+
+static ConstexprHeapBlock* ConstexprHeapBlockForObject(
+    ConstEvalContext* ctx, ConstexprObject* object) {
+  for (size_t i = 0; object != NULL && i < ctx->heap_blocks.length; i++) {
+    ConstexprHeapBlock* block = ctx->heap_blocks.value.p[i];
+    if (block != NULL && block->object == object) {
+      return block;
+    }
+  }
+  return NULL;
 }
 
 static bool ConstexprHeapAddress(ConstEvalContext* ctx, void* memory,
@@ -909,6 +942,17 @@ static bool ConstexprEvaluateDeallocationCall(ConstEvalContext* ctx,
   ASTNode* pointer_arg = call->children->value.p[0];
   if (!EvaluateConstexprValue(ctx, pointer_arg, pointer_arg->type, &pointer)) {
     return false;
+  }
+  if (pointer.is_address && pointer.heap_block == NULL &&
+      pointer.address_object != NULL) {
+    ConstexprHeapBlock* block =
+        ConstexprHeapBlockForObject(ctx, pointer.address_object);
+    if (block == NULL || !block->live || pointer.address_index != 0) {
+      return false;
+    }
+    block->live = false;
+    ConstexprEndObjectLifetime(block->object, 0);
+    return true;
   }
   int64_t address = 0;
   if (pointer.is_address && pointer.heap_block != NULL) {
@@ -1820,6 +1864,39 @@ static bool ConstexprMaterializeBaseSubobjectSlots(ConstEvalContext* ctx,
       }
     }
     *local_slot = *complete_slot;
+  }
+  return true;
+}
+
+// Gives each class element of the array |array|, at any depth, its own
+// object, as a constructor run on `&a[i]` needs one to write to.
+static bool ConstexprMaterializeClassElements(ConstEvalContext* ctx,
+                                              ConstexprObject* array) {
+  if (array == NULL || array->type == NULL || !TypeIsFixedArray(array->type)) {
+    return true;
+  }
+  TypeRecord* element = array->type->next;
+  if (element == NULL ||
+      !(TypeIsFixedArray(element) || TypeIsStructOrUnion(element))) {
+    return true;
+  }
+  for (size_t i = 0; i < array->slots.length; i++) {
+    ConstexprValue* slot = array->slots.value.p[i];
+    if (slot == NULL) {
+      return false;
+    }
+    if (!slot->is_object || slot->object == NULL) {
+      *slot = (ConstexprValue){
+          .is_object = true,
+          .object = NewConstexprObject(ctx, element,
+                                       ConstexprObjectSlotCount(element)),
+      };
+    }
+    if (slot->object == NULL ||
+        !ConstexprMaterializeClassElements(ctx, slot->object) ||
+        !ConstexprMaterializeBaseSubobjectSlots(ctx, slot->object)) {
+      return false;
+    }
   }
   return true;
 }
@@ -2791,6 +2868,41 @@ static void ConstexprMarkDataMembers(ConstEvalContext* ctx,
 static bool ConstexprObjectFullyInitialized(ConstexprObject* object) {
   return ConstexprWalkDataMembers(NULL, object, kValueStateIndeterminate,
                                   /*set=*/false, 0);
+}
+
+// Storage that `new T` or `new T[n]` allocates for a class T holds objects,
+// which may contain pointers, so it is given an array of T in place of its
+// bytes, and |address| (the start of the block) is redirected to element 0.
+// Storage of any other size or type is left alone.
+static bool ConstexprTypeHeapClassStorage(ConstEvalContext* ctx,
+                                          ConstexprValue* address) {
+  ConstexprHeapBlock* block = address->heap_block;
+  TypeRecord* type = block->object_type;
+  if (address->heap_index != 0 || block->object != NULL || type == NULL ||
+      !TypeIsStructOrUnion(type) || type->size <= 0 ||
+      block->size % (size_t)type->size != 0 || block->size == 0) {
+    return true;
+  }
+  size_t count = block->size / (size_t)type->size;
+  if (count > INT_MAX) {
+    return false;
+  }
+  TypeRecord* array_type =
+      NewBasicArrayTypeRecord(kQualPlain, (int)count, false);
+  TypeRecordChain(array_type, TypeRecordCopy(type));
+  array_type = TypeRecordCalculateSize(array_type);
+  ConstexprObject* array = NewConstexprObject(ctx, array_type, count);
+  if (array == NULL || !ConstexprMaterializeClassElements(ctx, array)) {
+    return false;
+  }
+  ConstexprMarkDataMembers(ctx, array, kValueStateIndeterminate);
+  block->object = array;
+  *address = (ConstexprValue){
+      .is_address = true,
+      .address_object = array,
+      .address_index = 0,
+  };
+  return true;
 }
 
 // A static object that is not a usable constant (`int g;`) still has a
@@ -6949,6 +7061,11 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
                                     member_node->member)) {
       return false;
     }
+    if (object_value.object->lifetime_ended) {
+      ReportConstexprPlacementFailure(
+          node, "read of object outside its lifetime in constant expression");
+      return false;
+    }
     size_t byte_offset = (size_t)member_node->member->byte_offset;
     ConstexprValue* slot = ConstexprSlotForOffset(
         object_value.object->type, object_value.object, byte_offset);
@@ -7312,6 +7429,10 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     if (establishes_allocated_type && target_pointee != NULL) {
       if (result->heap_block != NULL) {
         result->heap_block->object_type = target_pointee;
+        if (!lowers_placement_new &&
+            !ConstexprTypeHeapClassStorage(ctx, result)) {
+          return false;
+        }
       }
     }
     return true;
@@ -9438,6 +9559,27 @@ static bool EvaluateConstexprVariableDeclarationInitializer(
       PushConstexprBinding(ctx, decl->symbol, object_value);
       return true;
     }
+    if (initializer != NULL && initializer->op == AST_OP(stmt_expr) &&
+        TypeIsFixedArray(decl->symbol->type)) {
+      // `T a[n];` of class type: the statement expression runs each
+      // element's constructor on `&a[i]`, so the array must exist first.
+      ConstexprValue array_value = {
+          .is_object = true,
+          .object = NewConstexprObject(
+              ctx, decl->symbol->type,
+              ConstexprObjectSlotCount(decl->symbol->type)),
+      };
+      if (!ConstexprMaterializeClassElements(ctx, array_value.object)) {
+        return false;
+      }
+      size_t mark = ctx->bindings.length;
+      PushConstexprBinding(ctx, decl->symbol, array_value);
+      if (!EvaluateConstexprVoidExpression(ctx, initializer)) {
+        PopConstexprBindings(ctx, mark);
+        return false;
+      }
+      return true;
+    }
     ASTNode* result_call = ConstexprFindClassResultCall(initializer);
     if (result_call != NULL) {
       ConstexprValue object_value = {0};
@@ -9776,6 +9918,18 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
   }
   if (expr->op == AST_OP(builtin_observable_checkpoint)) {
     return true;
+  }
+  if (expr->op == AST_OP(stmt_expr)) {
+    ASTNode* body = ((UnaryASTNode*)expr)->sub;
+    if (body == NULL) {
+      return true;
+    }
+    size_t mark = ctx->bindings.length;
+    ConstexprValue ignored = {0};
+    bool ok = EvaluateConstexprStatement(ctx, body, expr->type, &ignored) ==
+              kConstexprStmtNormal;
+    PopConstexprBindings(ctx, mark);
+    return ok;
   }
   if (expr->op == AST_OP(comma)) {
     BinaryASTNode* comma = (BinaryASTNode*)expr;
@@ -10622,6 +10776,24 @@ static ConstexprStatementResult EvaluateConstexprStatementImpl(
         if (slot->is_object) {
           ConstexprMarkDataMembers(ctx, slot->object, kValueStateValid);
         }
+        return kConstexprStmtNormal;
+      }
+      if (expr->expr->op == AST_OP(init) &&
+          ((BinaryASTNode*)expr->expr)->right != NULL &&
+          ((BinaryASTNode*)expr->expr)->right->op == AST_OP(braced_init) &&
+          TypeIsStructOrUnion(expr->expr->type)) {
+        // `m{...}` for a class member, or `new T{...}`.
+        BinaryASTNode* init = (BinaryASTNode*)expr->expr;
+        ConstexprValue* slot = NULL;
+        ConstexprValue value = {0};
+        if (!EvaluateConstexprObjectLValue(ctx, init->left, &slot, true) ||
+            slot == NULL ||
+            !EvaluateConstexprInitializer(ctx, expr->expr->type, init->right,
+                                          &value) ||
+            !value.is_object || value.object == NULL) {
+          return ConstexprFailureStatementResult(ctx);
+        }
+        *slot = value;
         return kConstexprStmtNormal;
       }
       if (expr->expr->op == AST_OP(throw)) {
