@@ -8,8 +8,3 @@
 #
 # Nothing here is expected to stay: each entry is a compiler bug to fix.
 
-# A constexpr constructor storing &member in a static emits a null pointer.
-0679_constexpr_static_member_address.cpp
-
-# `g.self == &g` for a constexpr object that stored `this` folds to false.
-0680_constexpr_self_pointer_compare.cpp

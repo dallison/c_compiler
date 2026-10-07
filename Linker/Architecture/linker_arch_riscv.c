@@ -111,6 +111,14 @@ static void HandlePICRelocation(DynamicLinker* dynamic, LinkerSymbol* symbol,
       int abs_type = reloc->type == R_RISCV_32 ? R_RISCV_32 : R_RISCV_64;
       Relocation* rel_reloc = NewDataAddressRelocation(
           symbol, reloc, R_RISCV_RELATIVE, abs_type);
+      if (reloc->addend_in_place && reloc->section != NULL &&
+          reloc->section->contents != NULL) {
+        // The dynamic entry is RELA, so a REL addend moves into it.
+        const char* place = (const char*)reloc->section->contents + reloc->offset;
+        rel_reloc->addend += reloc->type == R_RISCV_32
+                                 ? (int64_t)*(const int32_t*)place
+                                 : *(const int64_t*)place;
+      }
       VectorAppend(&dynamic->data_relocations, rel_reloc);
       break;
     }
@@ -260,12 +268,19 @@ static void ApplyRelocation(Linker* linker,
   switch (reloc->type) {
     case R_RISCV_NONE:
       return;
-    case R_RISCV_32:
-      *((int32_t*)target_address) = (int32_t)(S + A);
+    case R_RISCV_32: {
+      // RV32 objects use REL: `.word a+4` keeps its 4 in the word.
+      int32_t implicit_addend =
+          reloc->addend_in_place ? *(const int32_t*)target_address : 0;
+      *((int32_t*)target_address) = (int32_t)(S + A + implicit_addend);
       return;
-    case R_RISCV_64:
-      *((int64_t*)target_address) = S + A;
+    }
+    case R_RISCV_64: {
+      int64_t implicit_addend =
+          reloc->addend_in_place ? *(const int64_t*)target_address : 0;
+      *((int64_t*)target_address) = S + A + implicit_addend;
       return;
+    }
     case R_RISCV_RELATIVE:
       break;
     case R_RISCV_COPY:

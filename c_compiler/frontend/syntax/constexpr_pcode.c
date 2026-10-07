@@ -140,6 +140,12 @@ typedef struct {
   String name;
   unsigned char* memory;
   size_t size;
+  // The object this is a copy of, so a pointer into it maps back to an AST
+  // address.  NULL for literals and generated statics.
+  Symbol* symbol;
+  // Storage of a static object that is not a constant: neither readable nor
+  // writable.
+  bool external;
 } ConstexprPCodeStaticData;
 
 typedef struct ConstexprPCodeFreeBlock {
@@ -307,6 +313,10 @@ static ConstexprObject* NewPCodeConstexprObject(TypeRecord* type);
 static size_t PCodeConstexprMemberSlotIndex(Struct* str, StructMember* member);
 static bool PCodeDataMember(StructMember* member);
 static bool RegisterConstexprPCodeStaticData(Symbol* symbol);
+static bool PCodeSymbolIsExternalStatic(Symbol* symbol);
+static bool RegisterConstexprPCodeExternalData(Symbol* symbol);
+static bool RegisterConstexprPCodeStaticRegion(PCodeVM* vm,
+                                               ConstexprPCodeStaticData* entry);
 static bool RegisterConstexprPCodeLiteral(const char* name);
 static ConstexprPCodeStaticData* FindConstexprPCodeStaticData(const char* name);
 static bool ConstexprPCodeEvaluateConstructorObject(ConstEvalContext* ctx,
@@ -580,6 +590,7 @@ struct ConstexprValue {
   size_t address_index;
   ConstexprHeapBlock* heap_block;
   size_t heap_index;
+  bool external;
 };
 
 // Must match the definition in constexpr.c: objects pass between the two.
@@ -599,6 +610,13 @@ struct ConstexprObject {
 // private to these two translation units.
 bool ConstexprValueAsInteger(ConstexprValue value, int64_t* result);
 bool ConstexprValueAsFloating(ConstexprValue value, double* result);
+bool ConstexprSymbolIsExternalStatic(Symbol* symbol);
+bool ConstexprStaticAddressTarget(const ConstexprValue* value, Symbol** symbol,
+                                  size_t* offset);
+bool ConstexprStaticAddressAt(Symbol* symbol, size_t offset,
+                              TypeRecord* pointee, ConstexprValue* result);
+bool ConstexprAddressInsideObject(ConstexprObject* root, size_t offset,
+                                  TypeRecord* pointee, ConstexprValue* result);
 
 static void ConstexprPCodeImageInit(ConstexprPCodeImage* image) {
   image->text = NULL;
@@ -1322,8 +1340,12 @@ static bool RegisterDirectConstexprPCodeGeneratedStatic(
   if (var == NULL) {
     return false;
   }
+  if (PCodeSymbolIsExternalStatic(var->symbol)) {
+    // Its runtime initializer is not its value during constant evaluation.
+    return RegisterConstexprPCodeExternalData(var->symbol);
+  }
   size_t size = var->size == 0 ? 1 : var->size;
-  ConstexprPCodeStaticData* entry = malloc(sizeof(*entry));
+  ConstexprPCodeStaticData* entry = calloc(1, sizeof(*entry));
   unsigned char* memory = calloc(1, size);
   if (entry == NULL || memory == NULL) {
     free(entry);
@@ -1821,7 +1843,7 @@ static unsigned char* ConstexprPCodeStaticCharArrayMemory(
       return entry->memory;
     }
   }
-  ConstexprPCodeStaticData* entry = malloc(sizeof(*entry));
+  ConstexprPCodeStaticData* entry = calloc(1, sizeof(*entry));
   if (entry == NULL) {
     free(bytes);
     return NULL;
@@ -1848,6 +1870,20 @@ static bool StoreConstexprAddressBytes(ConstexprPCodeMarshal* marshal,
       address.address_slot == NULL && address.heap_block == NULL) {
     host.ivalue = address.ivalue;
     return StoreConstexprScalarBytes(type, &host, dest);
+  }
+  Symbol* target = NULL;
+  size_t target_offset = 0;
+  if (ConstexprStaticAddressTarget(&address, &target, &target_offset) &&
+      RegisterConstexprPCodeStaticData(target)) {
+    char namebuf[1024];
+    ConstexprPCodeStaticData* entry = FindConstexprPCodeStaticData(
+        TargetSymbolName(target, namebuf, sizeof(namebuf)));
+    if (entry != NULL && target_offset <= entry->size &&
+        (marshal == NULL || RegisterConstexprPCodeStaticRegion(marshal->vm,
+                                                               entry))) {
+      host.ivalue = (int64_t)(uintptr_t)(entry->memory + target_offset);
+      return StoreConstexprScalarBytes(type, &host, dest);
+    }
   }
   Symbol* symbol = ConstexprAddressBindingSymbol(&address);
   if (symbol != NULL && address.address_object == NULL &&
@@ -2040,7 +2076,7 @@ static bool RegisterConstexprPCodeLiteral(const char* name) {
     VectorInit(&pcode_static_data);
     pcode_static_data_initialized = true;
   }
-  ConstexprPCodeStaticData* entry = malloc(sizeof(*entry));
+  ConstexprPCodeStaticData* entry = calloc(1, sizeof(*entry));
   if (entry == NULL) {
     free(memory);
     return false;
@@ -2052,7 +2088,53 @@ static bool RegisterConstexprPCodeLiteral(const char* name) {
   return true;
 }
 
+static bool RegisterConstexprPCodeStaticRegion(PCodeVM* vm,
+                                               ConstexprPCodeStaticData* entry) {
+  return entry->external
+             ? PCodeVMRegisterStatefulMemoryRegion(vm, entry->memory,
+                                                   entry->size, false,
+                                                   kValueStateIndeterminate)
+             : PCodeVMRegisterMemoryRegion(vm, entry->memory, entry->size,
+                                           false);
+}
+
+static bool PCodeSymbolIsExternalStatic(Symbol* symbol) {
+  return ConstexprSymbolIsExternalStatic(symbol) &&
+         !TypeIsConst(symbol->type);
+}
+
+static bool RegisterConstexprPCodeExternalData(Symbol* symbol) {
+  char namebuf[1024];
+  const char* name = TargetSymbolName(symbol, namebuf, sizeof(namebuf));
+  ConstexprPCodeStaticData* existing = FindConstexprPCodeStaticData(name);
+  if (existing != NULL) {
+    return existing->external;
+  }
+  size_t size = ConstexprPCodeHostBufferSize(symbol->type->size);
+  unsigned char* memory = calloc(1, size);
+  ConstexprPCodeStaticData* entry = calloc(1, sizeof(*entry));
+  if (memory == NULL || entry == NULL) {
+    free(memory);
+    free(entry);
+    return false;
+  }
+  if (!pcode_static_data_initialized) {
+    VectorInit(&pcode_static_data);
+    pcode_static_data_initialized = true;
+  }
+  StringInit(&entry->name, name);
+  entry->memory = memory;
+  entry->size = size;
+  entry->symbol = symbol;
+  entry->external = true;
+  VectorAppend(&pcode_static_data, entry);
+  return true;
+}
+
 static bool RegisterConstexprPCodeStaticData(Symbol* symbol) {
+  if (PCodeSymbolIsExternalStatic(symbol)) {
+    return RegisterConstexprPCodeExternalData(symbol);
+  }
   if (symbol == NULL || symbol->type == NULL || !symbol->flags.value_set ||
       (!TypeIsIntegral(symbol->type) && !TypeIsFloatingPoint(symbol->type) &&
        !TypeIsPointer(symbol->type) && !TypeIsStructOrUnion(symbol->type) &&
@@ -2091,7 +2173,7 @@ static bool RegisterConstexprPCodeStaticData(Symbol* symbol) {
     VectorInit(&pcode_static_data);
     pcode_static_data_initialized = true;
   }
-  ConstexprPCodeStaticData* entry = malloc(sizeof(*entry));
+  ConstexprPCodeStaticData* entry = calloc(1, sizeof(*entry));
   if (entry == NULL) {
     free(memory);
     return false;
@@ -2099,6 +2181,7 @@ static bool RegisterConstexprPCodeStaticData(Symbol* symbol) {
   StringInit(&entry->name, name);
   entry->memory = memory;
   entry->size = size;
+  entry->symbol = symbol;
   VectorAppend(&pcode_static_data, entry);
   return true;
 }
@@ -2606,7 +2689,7 @@ static bool StoreConstexprPCodeSourceStringArgument(PCodeVM* vm,
     VectorInit(&pcode_static_data);
     pcode_static_data_initialized = true;
   }
-  ConstexprPCodeStaticData* entry = malloc(sizeof(*entry));
+  ConstexprPCodeStaticData* entry = calloc(1, sizeof(*entry));
   if (entry == NULL) {
     *reason = "could not register constexpr source string argument";
     return false;
@@ -3034,8 +3117,7 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
   if (pcode_static_data_initialized) {
     for (size_t i = 0; i < pcode_static_data.length; i++) {
       ConstexprPCodeStaticData* entry = pcode_static_data.value.p[i];
-      if (entry != NULL &&
-          !PCodeVMRegisterMemoryRegion(vm, entry->memory, entry->size, false)) {
+      if (entry != NULL && !RegisterConstexprPCodeStaticRegion(vm, entry)) {
         *reason = "could not register constexpr pcode static data";
         return false;
       }
@@ -3106,7 +3188,14 @@ static void PCodeMapPointeeAddress(PCodeVM* vm, TypeRecord* type,
           .address_object = result->root,
       };
     } else {
-      result->interior_address = true;
+      ConstexprValue interior = {0};
+      if (ConstexprAddressInsideObject(result->root,
+                                       (size_t)(address - result->start),
+                                       type->next, &interior)) {
+        *slot = interior;
+      } else {
+        result->interior_address = true;
+      }
     }
     return;
   }
@@ -3127,6 +3216,26 @@ static void PCodeMapPointeeAddress(PCodeVM* vm, TypeRecord* type,
         .address_object = region->object,
         .address_index = (size_t)((address - start) / elem_size),
     };
+    return;
+  }
+  for (size_t i = 0; pcode_static_data_initialized &&
+                     i < pcode_static_data.length;
+       i++) {
+    ConstexprPCodeStaticData* entry = pcode_static_data.value.p[i];
+    if (entry == NULL || entry->symbol == NULL ||
+        entry->symbol->type == NULL) {
+      continue;
+    }
+    uint64_t start = (uint64_t)(uintptr_t)entry->memory;
+    if (address < start ||
+        address > start + (uint64_t)entry->symbol->type->size) {
+      continue;
+    }
+    ConstexprValue mapped = {0};
+    if (ConstexprStaticAddressAt(entry->symbol, (size_t)(address - start),
+                                 type->next, &mapped)) {
+      *slot = mapped;
+    }
     return;
   }
 }

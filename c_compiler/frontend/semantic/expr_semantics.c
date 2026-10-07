@@ -1007,7 +1007,8 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
   ASTNode* folded = ConstexprFoldPointerExpression(expression);
   if (folded != NULL &&
       (folded->op == AST_OP(string) || folded->op == AST_OP(string_wide) ||
-       folded->op == AST_OP(address) || folded->op == AST_OP(identifier))) {
+       folded->op == AST_OP(address) || folded->op == AST_OP(identifier) ||
+       folded->op == AST_OP(plus))) {
     ASTNodeDelete(symbol->constexpr_initializer);
     symbol->constexpr_initializer =
         ASTNodeClone(folded, IdentityCloneNode, NULL, NULL);
