@@ -1,0 +1,13 @@
+# Execution tests that do not pass at the default optimization level, on any
+# of x86-64, aarch64, ARM and RISC-V.
+#
+# A failure outside this list is a regression, and a test in the list that
+# passes fails the suite too, so that fixing one forces its entry to go and
+# the list cannot drift out of date.  A test marked "flaky" may do either;
+# keep that marker rare.
+#
+# Nothing here is expected to stay: each entry is a compiler bug to fix.
+
+# Namespace-scope arrays of class type with an initializer-list bound.
+0670_namespace_class_array_size.cpp
+0671_namespace_class_array_converting_ctor.cpp

@@ -1,0 +1,18 @@
+# Syntax tests that do not pass yet, as pass/NAME or fail/NAME.
+#
+# A failure outside this list is a regression, and a test in the list that
+# passes fails the suite too, so that fixing one forces its entry to go and
+# the list cannot drift out of date.
+#
+# Nothing here is expected to stay: each entry is a compiler bug to fix.
+
+# &global in constexpr aggregates and constexpr function arguments.
+pass/0579_constexpr_address_of_globals.cpp
+pass/0580_constexpr_address_of_globals_pcode.cpp
+
+# std::variant in constant evaluation.
+pass/0581_constexpr_variant.cpp
+pass/0582_constexpr_variant_pcode.cpp
+
+# The AST evaluator accepts a constexpr object with an indeterminate member.
+fail/0564_constexpr_object_indeterminate_member.cpp

@@ -7,3 +7,7 @@
 # the same result twice running; keep that marker rare.
 #
 # Nothing here is expected to stay: each entry is an -O2 bug to fix.
+
+# Namespace-scope arrays of class type (also failing at -O0; see exec.txt).
+0670_namespace_class_array_size.cpp
+0671_namespace_class_array_converting_ctor.cpp

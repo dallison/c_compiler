@@ -8,10 +8,11 @@ TESTS_DIR="tests/lexical"
 INCLUDE_DIR=""
 DEFAULT_STD="-std=c++20"
 TERMINATE=false
+EXPECT_FAIL_FILE=""
 
 usage() {
   echo "usage: $0 --davecc PATH [--suite-root PATH] [--tests-dir PATH] \\" >&2
-  echo "       [--include-dir PATH] [--std FLAG] [-t]" >&2
+  echo "       [--include-dir PATH] [--std FLAG] [--expected-fail FILE] [-t]" >&2
   exit 2
 }
 
@@ -22,6 +23,7 @@ while [ "$#" -gt 0 ]; do
     --tests-dir) TESTS_DIR=$2; shift 2 ;;
     --include-dir) INCLUDE_DIR=$2; shift 2 ;;
     --std) DEFAULT_STD=$2; shift 2 ;;
+    --expected-fail) EXPECT_FAIL_FILE=$2; shift 2 ;;
     -t|--terminate-on-fail) TERMINATE=true; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
@@ -62,6 +64,34 @@ if [ ! -d "$SUITE_ROOT/$TESTS_DIR" ]; then
   echo "tests directory not found: $SUITE_ROOT/$TESTS_DIR" >&2
   exit 1
 fi
+
+# Tests named in the expected-fail file (as `pass/NAME` or `fail/NAME`) are
+# allowed to fail.  One that passes fails the suite, so that fixing a test
+# forces its entry to be removed and the list cannot quietly go stale.  The
+# list is one delimited string because the bash macOS ships has no
+# associative arrays.
+EXPECTED_FAILS="|"
+if [ -n "$EXPECT_FAIL_FILE" ]; then
+  EXPECT_FAIL_FILE=$(resolve_runfile "$EXPECT_FAIL_FILE")
+  if [ ! -f "$EXPECT_FAIL_FILE" ]; then
+    echo "expected-fail file not found: $EXPECT_FAIL_FILE" >&2
+    exit 2
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ -n "$line" ]; then
+      EXPECTED_FAILS="${EXPECTED_FAILS}${line}|"
+    fi
+  done < "$EXPECT_FAIL_FILE"
+fi
+
+is_expected_fail() {
+  case "$EXPECTED_FAILS" in
+    *"|$1|"*) return 0 ;;
+  esac
+  return 1
+}
 
 work=$(mktemp -d "${TEST_TMPDIR:-/tmp}/cxx-testsuite.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -141,6 +171,41 @@ pass=0
 fail=0
 compile_fail=0
 diagnostic_fail=0
+known_fail=0
+unexpected_pass=0
+
+# The single place a test's outcome is reconciled with the expected-fail list.
+# `kind` is the failure counter to bump (compile or diagnostic).
+record_fail() {
+  local name=$1 detail=$2 kind=$3 log=$4
+  if is_expected_fail "$name"; then
+    echo "known-fail $name${detail:+ ($detail)}"
+    known_fail=$((known_fail + 1))
+    return
+  fi
+  echo "FAIL $name${detail:+ ($detail)}"
+  if [ "$kind" = compile ]; then
+    compile_fail=$((compile_fail + 1))
+  else
+    diagnostic_fail=$((diagnostic_fail + 1))
+  fi
+  fail=$((fail + 1))
+  if [ -n "$log" ]; then
+    sed 's/^/  /' "$log" | head -20
+  fi
+  if $TERMINATE; then exit 1; fi
+}
+
+record_pass() {
+  local name=$1
+  if is_expected_fail "$name"; then
+    echo "UNEXPECTED PASS $name (now passes: remove it from the expected-fail list)"
+    unexpected_pass=$((unexpected_pass + 1))
+    return
+  fi
+  echo "ok $name"
+  pass=$((pass + 1))
+}
 
 echo "=== cxx_testsuite compile: tests=$TESTS_DIR ==="
 echo "davecc=$DAVECC"
@@ -155,15 +220,10 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/pass/*.cpp; do
   status=0
   run_compile "$src" "$log" "$out" || status=$?
   if [ "$status" -ne 0 ] || grep -q "error:" "$log"; then
-    echo "FAIL pass/$base"
-    compile_fail=$((compile_fail + 1))
-    fail=$((fail + 1))
-    sed 's/^/  /' "$log" | head -20
-    if $TERMINATE; then exit 1; fi
+    record_fail "pass/$base" "" compile "$log"
     continue
   fi
-  echo "ok pass/$base"
-  pass=$((pass + 1))
+  record_pass "pass/$base"
 done
 
 for src in "$SUITE_ROOT/$TESTS_DIR"/fail/*.cpp; do
@@ -174,44 +234,37 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/fail/*.cpp; do
   status=0
   run_compile "$src" "$log" "$out" || status=$?
   if compiler_aborted "$status"; then
-    echo "FAIL fail/$base (compiler did not exit normally)"
-    compile_fail=$((compile_fail + 1))
-    fail=$((fail + 1))
-    sed 's/^/  /' "$log" | head -20
-    if $TERMINATE; then exit 1; fi
+    record_fail "fail/$base" "compiler did not exit normally" compile "$log"
     continue
   fi
   if [ "$status" -eq 0 ] && ! grep -q "error:" "$log"; then
-    echo "FAIL fail/$base (expected diagnostic)"
-    diagnostic_fail=$((diagnostic_fail + 1))
-    fail=$((fail + 1))
-    if $TERMINATE; then exit 1; fi
+    record_fail "fail/$base" "expected diagnostic" diagnostic ""
     continue
   fi
-  missing=0
+  missing=""
   while IFS= read -r expected; do
     if ! grep -Fq "$expected" "$log"; then
-      echo "FAIL fail/$base (missing diagnostic: $expected)"
-      diagnostic_fail=$((diagnostic_fail + 1))
-      fail=$((fail + 1))
-      missing=1
-      sed 's/^/  /' "$log" | head -20
+      missing=$expected
       break
     fi
   done < <(print_expected_diags "$src")
-  if [ "$missing" -ne 0 ]; then
-    if $TERMINATE; then exit 1; fi
+  if [ -n "$missing" ]; then
+    record_fail "fail/$base" "missing diagnostic: $missing" diagnostic "$log"
     continue
   fi
-  echo "ok fail/$base"
-  pass=$((pass + 1))
+  record_pass "fail/$base"
 done
 
 echo
 echo "=== summary cxx_testsuite compile ==="
-echo "pass=$pass fail=$fail"
+if [ -n "$EXPECT_FAIL_FILE" ]; then
+  echo "pass=$pass fail=$fail known-fail=$known_fail" \
+       "unexpected-pass=$unexpected_pass"
+else
+  echo "pass=$pass fail=$fail"
+fi
 echo "  compile_fail=$compile_fail diagnostic_fail=$diagnostic_fail"
 
-if [ "$fail" -ne 0 ]; then
+if [ "$fail" -ne 0 ] || [ "$unexpected_pass" -ne 0 ]; then
   exit 1
 fi
