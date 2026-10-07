@@ -269,22 +269,22 @@ union __storage<I, T> {
   }
 
   template <class Visitor>
-  auto __visit(Visitor&& vis, size_t index) {
+  constexpr auto __visit(Visitor&& vis, size_t index) {
     return vis(__value_);
   }
 
   template <class Visitor>
-  auto __visit(Visitor&& vis, size_t index) const {
+  constexpr auto __visit(Visitor&& vis, size_t index) const {
     return vis(__value_);
   }
 
   template <class Visitor>
-  auto __visit_move(Visitor&& vis, size_t index) {
+  constexpr auto __visit_move(Visitor&& vis, size_t index) {
     return vis(std::move(__value_));
   }
 
   template <class Visitor>
-  auto __visit_const_move(Visitor&& vis, size_t index) const {
+  constexpr auto __visit_const_move(Visitor&& vis, size_t index) const {
     return vis(std::move(__value_));
   }
 
@@ -318,16 +318,28 @@ union __storage<I, T, Rest...> {
     }
   }
 
+  // Constant evaluation only allows constructing a direct member of a union,
+  // so __rest_ must become the active member before an alternative inside it
+  // is constructed.
   template <size_t Target, class... Args>
   constexpr void __construct(Args&&... args) {
-    std::__construct_at(this->template __ptr<Target>(),
-                        std::forward<Args>(args)...);
+    if constexpr (Target == I) {
+      std::__construct_at(&__value_, std::forward<Args>(args)...);
+    } else {
+      std::__construct_at(&__rest_);
+      __rest_.template __construct<Target>(std::forward<Args>(args)...);
+    }
   }
 
   template <size_t Target, class U, class... Args>
   constexpr void __construct_list(initializer_list<U> init, Args&&... args) {
-    std::__construct_at(this->template __ptr<Target>(),
-                        init, std::forward<Args>(args)...);
+    if constexpr (Target == I) {
+      std::__construct_at(&__value_, init, std::forward<Args>(args)...);
+    } else {
+      std::__construct_at(&__rest_);
+      __rest_.template __construct_list<Target>(init,
+                                                std::forward<Args>(args)...);
+    }
   }
 
   constexpr void __destroy(size_t index) {
@@ -342,6 +354,7 @@ union __storage<I, T, Rest...> {
     if (index == I) {
       std::__construct_at(&__value_, other.__value_);
     } else {
+      std::__construct_at(&__rest_);
       __rest_.__copy_construct(other.__rest_, index);
     }
   }
@@ -350,6 +363,7 @@ union __storage<I, T, Rest...> {
     if (index == I) {
       std::__construct_at(&__value_, std::move(other.__value_));
     } else {
+      std::__construct_at(&__rest_);
       __rest_.__move_construct(other.__rest_, index);
     }
   }
@@ -400,7 +414,7 @@ union __storage<I, T, Rest...> {
   }
 
   template <class Visitor>
-  auto __visit(Visitor&& vis, size_t index) {
+  constexpr auto __visit(Visitor&& vis, size_t index) {
     if (index == I) {
       return vis(__value_);
     }
@@ -408,7 +422,7 @@ union __storage<I, T, Rest...> {
   }
 
   template <class Visitor>
-  auto __visit(Visitor&& vis, size_t index) const {
+  constexpr auto __visit(Visitor&& vis, size_t index) const {
     if (index == I) {
       return vis(__value_);
     }
@@ -416,7 +430,7 @@ union __storage<I, T, Rest...> {
   }
 
   template <class Visitor>
-  auto __visit_move(Visitor&& vis, size_t index) {
+  constexpr auto __visit_move(Visitor&& vis, size_t index) {
     if (index == I) {
       return vis(std::move(__value_));
     }
@@ -424,7 +438,7 @@ union __storage<I, T, Rest...> {
   }
 
   template <class Visitor>
-  auto __visit_const_move(Visitor&& vis, size_t index) const {
+  constexpr auto __visit_const_move(Visitor&& vis, size_t index) const {
     if (index == I) {
       return vis(std::move(__value_));
     }
@@ -911,22 +925,22 @@ class variant {
   }
 
   template <class Visitor>
-  auto __visit_impl(Visitor&& vis) {
+  constexpr auto __visit_impl(Visitor&& vis) {
     return __storage_.__visit(vis, __index_);
   }
 
   template <class Visitor>
-  auto __visit_impl(Visitor&& vis) const {
+  constexpr auto __visit_impl(Visitor&& vis) const {
     return __storage_.__visit(vis, __index_);
   }
 
   template <class Visitor>
-  auto __visit_impl_move(Visitor&& vis) {
+  constexpr auto __visit_impl_move(Visitor&& vis) {
     return __storage_.__visit_move(vis, __index_);
   }
 
   template <class Visitor>
-  auto __visit_impl_const_move(Visitor&& vis) const {
+  constexpr auto __visit_impl_const_move(Visitor&& vis) const {
     return __storage_.__visit_const_move(vis, __index_);
   }
 
@@ -1062,7 +1076,7 @@ constexpr const T* get_if(const variant<Types...>* value) noexcept {
 }
 
 template <class R, class Visitor, class... Types>
-R visit(Visitor&& vis, variant<Types...>& var) {
+constexpr R visit(Visitor&& vis, variant<Types...>& var) {
   if constexpr (is_void<R>::value) {
     auto invoke = [&](auto&& value) -> void {
       vis(static_cast<decltype(value)&&>(value));
@@ -1077,7 +1091,7 @@ R visit(Visitor&& vis, variant<Types...>& var) {
 }
 
 template <class R, class Visitor, class... Types>
-R visit(Visitor&& vis, const variant<Types...>& var) {
+constexpr R visit(Visitor&& vis, const variant<Types...>& var) {
   if constexpr (is_void<R>::value) {
     auto invoke = [&](auto&& value) -> void {
       vis(static_cast<decltype(value)&&>(value));
@@ -1092,7 +1106,7 @@ R visit(Visitor&& vis, const variant<Types...>& var) {
 }
 
 template <class R, class Visitor, class... Types>
-R visit(Visitor&& vis, variant<Types...>&& var) {
+constexpr R visit(Visitor&& vis, variant<Types...>&& var) {
   if constexpr (is_void<R>::value) {
     auto invoke = [&](auto&& value) -> void {
       vis(static_cast<decltype(value)&&>(value));
@@ -1107,7 +1121,7 @@ R visit(Visitor&& vis, variant<Types...>&& var) {
 }
 
 template <class R, class Visitor, class... Types>
-R visit(Visitor&& vis, const variant<Types...>&& var) {
+constexpr R visit(Visitor&& vis, const variant<Types...>&& var) {
   if constexpr (is_void<R>::value) {
     auto invoke = [&](auto&& value) -> void {
       vis(static_cast<decltype(value)&&>(value));
@@ -1122,29 +1136,29 @@ R visit(Visitor&& vis, const variant<Types...>&& var) {
 }
 
 template <class Visitor, class... Types>
-auto visit(Visitor&& vis, variant<Types...>& var) {
+constexpr auto visit(Visitor&& vis, variant<Types...>& var) {
   return var.__visit_impl(std::forward<Visitor>(vis));
 }
 
 template <class Visitor, class... Types>
-auto visit(Visitor&& vis, const variant<Types...>& var) {
+constexpr auto visit(Visitor&& vis, const variant<Types...>& var) {
   return var.__visit_impl(std::forward<Visitor>(vis));
 }
 
 template <class Visitor, class... Types>
-auto visit(Visitor&& vis, variant<Types...>&& var) {
+constexpr auto visit(Visitor&& vis, variant<Types...>&& var) {
   return var.__visit_impl_move(std::forward<Visitor>(vis));
 }
 
 template <class Visitor, class... Types>
-auto visit(Visitor&& vis, const variant<Types...>&& var) {
+constexpr auto visit(Visitor&& vis, const variant<Types...>&& var) {
   return var.__visit_impl_const_move(std::forward<Visitor>(vis));
 }
 
 namespace __variant_detail {
 
 template <class Visitor, class Variant0, class Variant1>
-auto __visit_two(Visitor vis, Variant0&& var0, Variant1&& var1) {
+constexpr auto __visit_two(Visitor vis, Variant0&& var0, Variant1&& var1) {
   auto visit_rest = [&, vis](auto&& value0) {
     auto invoke = [&, vis](auto&& value1) {
       return vis(value0, value1);
@@ -1155,8 +1169,8 @@ auto __visit_two(Visitor vis, Variant0&& var0, Variant1&& var1) {
 }
 
 template <class Visitor, class Variant0, class Variant1, class Variant2>
-auto __visit_three(Visitor vis, Variant0&& var0, Variant1&& var1,
-                   Variant2&& var2) {
+constexpr auto __visit_three(Visitor vis, Variant0&& var0, Variant1&& var1,
+                             Variant2&& var2) {
   auto visit_first_two = [&, vis](auto value0, auto value1) {
     auto invoke = [&, vis, value0, value1](auto value2) {
       return vis(value0, value1, std::move(value2));
@@ -1170,7 +1184,7 @@ auto __visit_three(Visitor vis, Variant0&& var0, Variant1&& var1,
 }  // namespace __variant_detail
 
 template <class R, class Visitor, class Variant0, class Variant1>
-R visit(Visitor vis, Variant0&& var0, Variant1&& var1) {
+constexpr R visit(Visitor vis, Variant0&& var0, Variant1&& var1) {
   if constexpr (is_void<R>::value) {
     auto invoke = [&, vis](auto&& value0, auto&& value1) -> void {
       vis(value0, value1);
@@ -1188,7 +1202,8 @@ R visit(Visitor vis, Variant0&& var0, Variant1&& var1) {
 
 template <class R, class Visitor, class Variant0, class Variant1,
           class Variant2>
-R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2) {
+constexpr R visit(Visitor vis, Variant0&& var0, Variant1&& var1,
+                  Variant2&& var2) {
   if constexpr (is_void<R>::value) {
     auto invoke = [&, vis](auto&& value0, auto&& value1,
                            auto&& value2) -> void {
@@ -1210,8 +1225,8 @@ R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2) {
 
 template <class R, class Visitor, class Variant0, class Variant1,
           class Variant2, class Variant3>
-R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
-        Variant3&& var3) {
+constexpr R visit(Visitor vis, Variant0&& var0, Variant1&& var1,
+                  Variant2&& var2, Variant3&& var3) {
   if constexpr (is_void<R>::value) {
     auto visit_first_two = [&, vis](auto value0, auto value1) -> void {
       auto visit_last_two = [&, vis, value0, value1](auto value2,
@@ -1243,8 +1258,8 @@ R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
 
 template <class R, class Visitor, class Variant0, class Variant1,
           class Variant2, class Variant3, class Variant4>
-R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
-        Variant3&& var3, Variant4&& var4) {
+constexpr R visit(Visitor vis, Variant0&& var0, Variant1&& var1,
+                  Variant2&& var2, Variant3&& var3, Variant4&& var4) {
   if constexpr (is_void<R>::value) {
     auto visit_first_two = [&, vis](auto value0, auto value1) -> void {
       auto visit_last_three = [&, vis, value0, value1](
@@ -1281,13 +1296,14 @@ R visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
 }
 
 template <class Visitor, class Variant0, class Variant1>
-auto visit(Visitor vis, Variant0&& var0, Variant1&& var1) {
+constexpr auto visit(Visitor vis, Variant0&& var0, Variant1&& var1) {
   return __variant_detail::__visit_two(vis, std::forward<Variant0>(var0),
                                       std::forward<Variant1>(var1));
 }
 
 template <class Visitor, class Variant0, class Variant1, class Variant2>
-auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2) {
+constexpr auto visit(Visitor vis, Variant0&& var0, Variant1&& var1,
+                     Variant2&& var2) {
   return __variant_detail::__visit_three(
       vis, std::forward<Variant0>(var0), std::forward<Variant1>(var1),
       std::forward<Variant2>(var2));
@@ -1295,8 +1311,8 @@ auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2) {
 
 template <class Visitor, class Variant0, class Variant1, class Variant2,
           class Variant3>
-auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
-           Variant3&& var3) {
+constexpr auto visit(Visitor vis, Variant0&& var0, Variant1&& var1,
+                     Variant2&& var2, Variant3&& var3) {
   auto visit_first_two = [&, vis](auto value0, auto value1) {
     auto visit_last_two = [&, vis, value0, value1](auto value2, auto value3) {
       return vis(value0, value1, std::move(value2), std::move(value3));
@@ -1312,8 +1328,8 @@ auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
 
 template <class Visitor, class Variant0, class Variant1, class Variant2,
           class Variant3, class Variant4>
-auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
-           Variant3&& var3, Variant4&& var4) {
+constexpr auto visit(Visitor vis, Variant0&& var0, Variant1&& var1,
+                     Variant2&& var2, Variant3&& var3, Variant4&& var4) {
   auto visit_first_two = [&, vis](auto value0, auto value1) {
     auto visit_last_three = [&, vis, value0, value1](auto value2, auto value3,
                                                      auto value4) {
@@ -1332,9 +1348,9 @@ auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
 
 template <class Visitor, class Variant0, class Variant1, class Variant2,
           class Variant3, class Variant4, class Variant5, class... Variants>
-auto visit(Visitor vis, Variant0&& var0, Variant1&& var1, Variant2&& var2,
-           Variant3&& var3, Variant4&& var4, Variant5&& var5,
-           Variants&&... vars) {
+constexpr auto visit(Visitor vis, Variant0&& var0, Variant1&& var1,
+                     Variant2&& var2, Variant3&& var3, Variant4&& var4,
+                     Variant5&& var5, Variants&&... vars) {
   auto visit_rest = [&, vis](auto&& value0) {
     auto invoke = [&, vis](auto&&... values) {
       return vis(value0, values...);

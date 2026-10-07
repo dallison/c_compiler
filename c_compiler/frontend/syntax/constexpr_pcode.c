@@ -929,10 +929,13 @@ static IRNode* FindInvalidPCodeValueRead(Generator* gen) {
 // lowering would still run whichever passes the real target asked for.  That
 // matters because p-code keeps its own selection, in particular leaving the
 // loop passes off since it depends on the loop and phi shape they rewrite.
+// The evaluator binds symbols itself and maps no GOT, so the p-code is never
+// position independent, whatever the real target uses.
 typedef struct {
   CompilerTarget* target;
   IROptimizations ir_optimizations;
   bool keep_ssa;
+  bool pic;
 } SavedCodegenTarget;
 
 static SavedCodegenTarget EnterPCodeTarget(CompilerTarget* pcode_target) {
@@ -940,9 +943,11 @@ static SavedCodegenTarget EnterPCodeTarget(CompilerTarget* pcode_target) {
   saved.target = compiler->target;
   saved.ir_optimizations = compiler->ir_optimizations;
   saved.keep_ssa = compiler->keep_ssa;
+  saved.pic = compiler->pic;
   compiler->target = pcode_target;
   compiler->ir_optimizations = pcode_target->ir_optimizations;
   compiler->keep_ssa = pcode_target->keep_ssa;
+  compiler->pic = false;
   return saved;
 }
 
@@ -950,6 +955,7 @@ static void LeavePCodeTarget(SavedCodegenTarget saved) {
   compiler->target = saved.target;
   compiler->ir_optimizations = saved.ir_optimizations;
   compiler->keep_ssa = saved.keep_ssa;
+  compiler->pic = saved.pic;
 }
 
 static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
@@ -3057,9 +3063,21 @@ static bool EnableConstexprPCodeCheckedMemory(PCodeVM* vm,
   return true;
 }
 
+// The buffer a p-code result object was built in.  A pointer to its start is
+// a `this` stored by the constructor; the AST form of that is the object's own
+// address.  A pointer elsewhere into it has no AST form, so the result is
+// left to the AST evaluator.
+typedef struct {
+  uint64_t start;
+  size_t size;
+  ConstexprObject* root;
+  bool interior_address;
+} ConstexprPCodeResultRegion;
+
 static void PCodeMapPointeeAddress(PCodeVM* vm, TypeRecord* type,
                                    ConstexprValue* slot, Vector* regions,
-                                   bool narrow) {
+                                   bool narrow,
+                                   ConstexprPCodeResultRegion* result) {
   if (slot == NULL || !TypeIsPointer(type) || slot->is_object ||
       slot->is_address || slot->ivalue == 0) {
     return;
@@ -3077,7 +3095,22 @@ static void PCodeMapPointeeAddress(PCodeVM* vm, TypeRecord* type,
     slot->ivalue = (int64_t)address;
     slot->fvalue = (double)slot->ivalue;
   }
-  for (size_t i = 0; i < regions->length; i++) {
+  if (result != NULL && address >= result->start &&
+      address <= result->start + result->size) {
+    // A pointer to a first member also holds the start address.
+    if (address == result->start && type->next != NULL &&
+        TypeEqualIgnoringTopLevelQualifierMask(type->next, result->root->type,
+                                               kQualConst | kQualVolatile)) {
+      *slot = (ConstexprValue){
+          .is_address = true,
+          .address_object = result->root,
+      };
+    } else {
+      result->interior_address = true;
+    }
+    return;
+  }
+  for (size_t i = 0; regions != NULL && i < regions->length; i++) {
     ConstexprPCodeAddressRegion* region = regions->value.p[i];
     if (region == NULL || !region->pointee) {
       continue;
@@ -3103,7 +3136,8 @@ static void PCodeMapPointeeAddress(PCodeVM* vm, TypeRecord* type,
 // back to host addresses on targets with narrower pointers.
 static void PCodeMapPointeeAddresses(PCodeVM* vm, TypeRecord* type,
                                      ConstexprObject* object, Vector* regions,
-                                     bool narrow) {
+                                     bool narrow,
+                                     ConstexprPCodeResultRegion* result) {
   if (object == NULL || type == NULL) {
     return;
   }
@@ -3112,9 +3146,9 @@ static void PCodeMapPointeeAddresses(PCodeVM* vm, TypeRecord* type,
       ConstexprValue* slot = PCodeConstexprObjectSlot(object, i);
       if (slot != NULL && slot->is_object) {
         PCodeMapPointeeAddresses(vm, type->next, slot->object, regions,
-                                 narrow);
+                                 narrow, result);
       } else {
-        PCodeMapPointeeAddress(vm, type->next, slot, regions, narrow);
+        PCodeMapPointeeAddress(vm, type->next, slot, regions, narrow, result);
       }
     }
     return;
@@ -3130,7 +3164,8 @@ static void PCodeMapPointeeAddresses(PCodeVM* vm, TypeRecord* type,
             ? PCodeConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i))
             : NULL;
     if (slot != NULL && slot->is_object) {
-      PCodeMapPointeeAddresses(vm, base->type, slot->object, regions, narrow);
+      PCodeMapPointeeAddresses(vm, base->type, slot->object, regions, narrow,
+                               result);
     }
   }
   for (size_t i = 0; i < str->members.length; i++) {
@@ -3142,9 +3177,10 @@ static void PCodeMapPointeeAddresses(PCodeVM* vm, TypeRecord* type,
         object, PCodeConstexprMemberSlotIndex(str, member));
     if (slot != NULL && slot->is_object) {
       PCodeMapPointeeAddresses(vm, member->symbol->type, slot->object,
-                               regions, narrow);
+                               regions, narrow, result);
     } else {
-      PCodeMapPointeeAddress(vm, member->symbol->type, slot, regions, narrow);
+      PCodeMapPointeeAddress(vm, member->symbol->type, slot, regions, narrow,
+                             result);
     }
   }
 }
@@ -3432,14 +3468,37 @@ static bool RunRealPCodeCall(ConstEvalContext* ctx, ASTNode* node,
         }
       }
     }
+    ConstexprPCodeResultRegion result_region = {0};
     if (object_result != NULL &&
         LoadConstexprObjectBytes(func->next, struct_return, &runtime,
                                  object_result)) {
+      result_region = (ConstexprPCodeResultRegion){
+          .start = (uint64_t)(uintptr_t)struct_return,
+          .size = func->next->size,
+          .root = *object_result,
+      };
       PCodeMapPointeeAddresses(&vm, func->next, *object_result,
                                &address_regions,
-                               runtime.source_size_t_size < sizeof(uint64_t));
+                               runtime.source_size_t_size < sizeof(uint64_t),
+                               &result_region);
     } else if (object_result != NULL) {
       *reason = "could not decode constexpr pcode object result";
+      for (size_t i = 0; i < allocations.length; i++) {
+        free(allocations.value.p[i]);
+      }
+      VectorDestruct(&allocations);
+      VectorDestructWithContents(&address_regions, NULL,
+                                 /*free_element=*/true);
+      ConstexprPCodeRuntimeDestruct(&runtime);
+      PCodeVMDestruct(&vm);
+      ConstexprPCodeImageDestruct(&image);
+      return false;
+    }
+    if (result_region.interior_address) {
+      DeletePCodeConstexprObject(*object_result);
+      *object_result = NULL;
+      *failure_kind = kConstexprPCodeFailureUnsupported;
+      *reason = "constexpr pcode result holds an address inside itself";
       for (size_t i = 0; i < allocations.length; i++) {
         free(allocations.value.p[i]);
       }
@@ -3575,6 +3634,17 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
   bool ok = status == kPCodeVMStatusHalted &&
             LoadConstexprObjectBytes(object_type, object_memory, &runtime,
                                      object_result);
+  ConstexprPCodeResultRegion result_region = {0};
+  if (ok) {
+    result_region = (ConstexprPCodeResultRegion){
+        .start = (uint64_t)(uintptr_t)object_memory,
+        .size = object_type->size,
+        .root = *object_result,
+    };
+    PCodeMapPointeeAddresses(&vm, object_type, *object_result, NULL,
+                             runtime.source_size_t_size < sizeof(uint64_t),
+                             &result_region);
+  }
   if (status != kPCodeVMStatusHalted && runtime.diagnostic != NULL) {
     *failure_kind = kConstexprPCodeFailureInvalid;
     *reason = runtime.diagnostic;
@@ -3590,6 +3660,11 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
     *reason = PCodeVMStatusName(status);
   } else if (!ok) {
     *reason = "could not decode constexpr pcode constructor object";
+  } else if (result_region.interior_address) {
+    DeletePCodeConstexprObject(*object_result);
+    *object_result = NULL;
+    *reason = "constexpr pcode result holds an address inside itself";
+    ok = false;
   } else if (ConstexprPCodeRuntimeHasLiveHeap(&runtime)) {
     *failure_kind = kConstexprPCodeFailureInvalid;
     *reason = "constexpr pcode evaluation leaked allocation";

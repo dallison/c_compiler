@@ -10,9 +10,5 @@
 pass/0579_constexpr_address_of_globals.cpp
 pass/0580_constexpr_address_of_globals_pcode.cpp
 
-# std::variant in constant evaluation.
-pass/0581_constexpr_variant.cpp
-pass/0582_constexpr_variant_pcode.cpp
-
 # The AST evaluator accepts a constexpr object with an indeterminate member.
 fail/0564_constexpr_object_indeterminate_member.cpp

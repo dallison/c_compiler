@@ -171,6 +171,10 @@ static Symbol* ConstexprVirtualCallSymbol(ConstEvalContext* ctx, ASTNode* node,
                                           ASTNode** receiver);
 static bool ConstexprObjectsTemplateArgumentEquivalent(ConstexprObject* left,
                                                        ConstexprObject* right);
+// The two complete objects an audit compares.  Each evaluator builds its own,
+// so a `this` stored in either names that evaluator's object.
+static ConstexprObject* equivalence_left_root;
+static ConstexprObject* equivalence_right_root;
 
 static void ReportConstexprPlacementFailure(ASTNode* node,
                                             const char* message) {
@@ -785,6 +789,21 @@ static bool ConstexprEvaluateAllocationCall(ConstEvalContext* ctx,
       TypeRecord* target_type =
           placement_pointee != NULL && !TypeIsVoid(placement_pointee)
               ? placement_pointee : ConstexprAddressPointeeType(ctx, *result);
+      // A scalar slot records no type, e.g. a union member reached through
+      // `static_cast<void*>(location)`; use the pointer's type before the
+      // conversion to void*.
+      for (ASTNode* operand = placement;
+           target_type == NULL && operand != NULL &&
+           (operand->op == AST_OP(cast) || operand->op == AST_OP(expr_init));) {
+        operand = operand->op == AST_OP(cast)
+                      ? ((CastASTNode*)operand)->expr
+                      : ((ExpressionInitializerASTNode*)operand)->expr;
+        if (operand != NULL && operand->type != NULL &&
+            TypeIsPointer(operand->type) && operand->type->next != NULL &&
+            !TypeIsVoid(operand->type->next)) {
+          target_type = operand->type->next;
+        }
+      }
       if (allocated_type == NULL || target_type == NULL ||
           !TypeEqualIgnoringTopLevelQualifierMask(
               allocated_type, target_type,
@@ -2733,9 +2752,15 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
   compiler->constexpr_eval_mode = mode;
   ConstexprObject* ast_object =
       ast_ok ? (ConstexprObject*)symbol->value.other : NULL;
-  bool values_match =
-      pcode_ok && ast_ok &&
-      ConstexprObjectsTemplateArgumentEquivalent(pcode_object, ast_object);
+  bool values_match = false;
+  if (pcode_ok && ast_ok) {
+    equivalence_left_root = pcode_object;
+    equivalence_right_root = ast_object;
+    values_match =
+        ConstexprObjectsTemplateArgumentEquivalent(pcode_object, ast_object);
+    equivalence_left_root = NULL;
+    equivalence_right_root = NULL;
+  }
   if (mode == kConstexprEvalAudit && pcode_attempted && pcode_ok &&
       (!ast_ok || !values_match)) {
     SemanticError(
@@ -5520,6 +5545,18 @@ static bool ConstexprValuesTemplateArgumentEquivalent(ConstexprValue* left,
       return left->address_binding != NULL && right->address_binding != NULL &&
              left->address_binding->symbol == right->address_binding->symbol;
     }
+    if (equivalence_left_root != NULL) {
+      ConstexprValue left_address = ConstexprResolveForwardedAddress(*left);
+      ConstexprValue right_address = ConstexprResolveForwardedAddress(*right);
+      ConstexprCanonicalizeAddressValue(&left_address);
+      ConstexprCanonicalizeAddressValue(&right_address);
+      if (left_address.address_object == equivalence_left_root ||
+          right_address.address_object == equivalence_right_root) {
+        return left_address.address_object == equivalence_left_root &&
+               right_address.address_object == equivalence_right_root &&
+               left_address.address_index == right_address.address_index;
+      }
+    }
     if (left->address_object != NULL || right->address_object != NULL) {
       return left->address_object == right->address_object;
     }
@@ -5808,6 +5845,24 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       }
       if (value.is_object && value.object != NULL) {
         *result = value;
+        return true;
+      }
+      // A call returning a class or array by reference yields the referent's
+      // address.
+      if (value.is_address && node->type != NULL &&
+          (TypeIsStructOrUnion(node->type) || TypeIsFixedArray(node->type))) {
+        ConstexprValue referent;
+        if (!ConstexprDereferenceAddress(value, &referent) ||
+            !referent.is_object || referent.object == NULL) {
+          return false;
+        }
+        if (referent.object->lifetime_ended) {
+          ReportConstexprPlacementFailure(
+              node,
+              "read of object outside its lifetime in constant expression");
+          return false;
+        }
+        *result = referent;
         return true;
       }
     }
@@ -10063,14 +10118,26 @@ static bool ConstexprExceptionCallArgument(ConstEvalContext* ctx,
   return EvaluateConstexprValue(ctx, argument, argument->type, value);
 }
 
+static bool ConstexprIsExceptionStateFunction(Symbol* symbol) {
+  if (symbol == NULL || symbol->name.value == NULL) {
+    return false;
+  }
+  const char* name = symbol->name.value;
+  return strncmp(name, "__davecc_exception_ptr_", 23) == 0 ||
+         strcmp(name, "__davecc_uncaught_exceptions") == 0 ||
+         strcmp(name, "current_exception") == 0 ||
+         strcmp(name, "rethrow_exception") == 0 ||
+         strcmp(name, "make_exception_ptr") == 0 ||
+         strcmp(name, "uncaught_exceptions") == 0 ||
+         strcmp(name, "uncaught_exception") == 0;
+}
+
 static bool EvaluateConstexprExceptionCall(ConstEvalContext* ctx,
                                            ASTNode* node, Symbol* symbol,
                                            ConstexprValue* result,
                                            bool* handled) {
-  if (compiler->functions_being_analyzed.length != 0 && symbol != NULL &&
-      symbol->name.value != NULL &&
-      (strstr(symbol->name.value, "exception") != NULL ||
-       strstr(symbol->name.value, "uncaught") != NULL)) {
+  if (compiler->functions_being_analyzed.length != 0 &&
+      ConstexprIsExceptionStateFunction(symbol)) {
     // These calls depend on the dynamic exception state. Do not fold them
     // while semantically analyzing a function body; evaluate them only when
     // that function is actually invoked as a constant expression.
@@ -10794,18 +10861,7 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
 }
 
 static bool ConstexprIsExceptionPropagationCall(ASTNode* node) {
-  Symbol* symbol = ConstexprCallSymbol(node);
-  if (symbol == NULL || symbol->name.value == NULL) {
-    return false;
-  }
-  const char* name = symbol->name.value;
-  return strncmp(name, "__davecc_exception_ptr_", 23) == 0 ||
-         strcmp(name, "__davecc_uncaught_exceptions") == 0 ||
-         strcmp(name, "current_exception") == 0 ||
-         strcmp(name, "rethrow_exception") == 0 ||
-         strcmp(name, "make_exception_ptr") == 0 ||
-         strcmp(name, "uncaught_exceptions") == 0 ||
-         strcmp(name, "uncaught_exception") == 0;
+  return ConstexprIsExceptionStateFunction(ConstexprCallSymbol(node));
 }
 
 bool ConstexprEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,

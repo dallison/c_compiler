@@ -2323,11 +2323,40 @@ static TargetInstruction* LowerBuiltinVaCopy(PCodeGenerator* pcode,
   return NULL;  // TODO
 }
 
+static TargetInstruction* LowerIRNodeOperation(PCodeGenerator* pcode,
+                                               IRNode* node);
+
+// A value with an IR destination (a conditional operator arm writing its merge
+// temporary) must reach that destination even when its lowering reuses an
+// existing register, as extensions of already-extended loads do.
 static TargetInstruction* LowerIRNode(PCodeGenerator* pcode, IRNode* node) {
   // If we have already lowered the IR node, return it.
   if (node->data.ptr != NULL) {
     return node->data.ptr;
   }
+  TargetInstruction* result = LowerIRNodeOperation(pcode, node);
+  if (node->dest == NULL || !IRIsExpression(node) || IRIsConstant(node)) {
+    return result;
+  }
+  TargetInstruction* value = node->data.ptr;
+  TargetInstruction* dest = GetDestInstruction(pcode, node);
+  if (value == NULL || dest == NULL || value->dest == dest) {
+    return result;
+  }
+  PCodeOpcode opcode = P_OP(mov);
+  if (TypeUsesFloat32Representation(node->type)) {
+    opcode = P_OP(movf);
+  } else if (PCodeFpIsDoubleWidth(node->type)) {
+    opcode = P_OP(movd);
+  }
+  TargetInstruction* move = NewInstruction1(opcode, value);
+  move->dest = dest;
+  node->data.ptr = Emit(pcode, move);
+  return node->data.ptr;
+}
+
+static TargetInstruction* LowerIRNodeOperation(PCodeGenerator* pcode,
+                                               IRNode* node) {
   switch (node->opcode) {
     case IR_OP(rotli):
     case IR_OP(rotri):
