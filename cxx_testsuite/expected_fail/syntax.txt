@@ -9,6 +9,12 @@
 # &global in constexpr aggregates and constexpr function arguments.
 pass/0579_constexpr_address_of_globals.cpp
 pass/0580_constexpr_address_of_globals_pcode.cpp
+# The AST evaluator rejects `{&made, ...}` folded from a self-pointer call.
+pass/0590_constexpr_static_local_self_pointer_call.cpp
+
+# A signed bit-field set from a parameter: AST reads it unextended and p-code
+# fails with "undefined escape".
+pass/0589_constexpr_signed_bitfield_runtime_value.cpp
 
 # The AST evaluator accepts a constexpr object with an indeterminate member.
 fail/0564_constexpr_object_indeterminate_member.cpp
