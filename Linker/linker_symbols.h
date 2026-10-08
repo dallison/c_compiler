@@ -60,7 +60,6 @@ void LinkerReadSymbol(struct Linker* linker,
 LinkerSymbol* LinkerInventSymbol(struct Linker* linker, const char* name, int size);
 
 void LinkerAssignSectionSymbolAddresses(struct Linker* linker);
-void LinkerAssignBSSSymbolAddresses(struct Linker* linker);
 void LinkerClearSymbolTable(HashTable* table);
 
 #endif /* linker_symbols_h */

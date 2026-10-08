@@ -528,7 +528,10 @@ static void EmitSymbol(Assembler* assembler, const AsmModuleOp* op) {
     symbol->alignment = op->u.symbol.alignment;
   }
   symbol->exported |= op->u.symbol.exported;
-  if (op->u.symbol.common) {
+  if (op->u.symbol.common && op->u.symbol.binding == SYM_BIND(local)) {
+    AssemblerAllocateLocalCommon(assembler, symbol, op->u.symbol.size,
+                                 op->u.symbol.alignment);
+  } else if (op->u.symbol.common) {
     symbol->section = SHN_COM;
     symbol->value = op->u.symbol.alignment;
     symbol->defined = true;

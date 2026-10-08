@@ -338,6 +338,27 @@ void AssemblerSetSectionSize(Assembler* assembler, size_t index, size_t size) {
   AsmObjectSetSectionSize(&assembler->object, index, size);
 }
 
+void AssemblerAllocateLocalCommon(Assembler* assembler, AssemblerSymbol* sym,
+                                  int32_t size, int32_t alignment) {
+  AsmObject* object = &assembler->object;
+  int saved_section = object->current_section;
+  int bss = AsmObjectEnsureSection(object, NewString(".bss"), SHT(nobits),
+                                   SHF(alloc) | SHF(write), 8);
+  AsmObjectSwitchSection(object, bss);
+  AsmObjectAlignCurrentSection(object, alignment);
+  sym->section = bss;
+  sym->value = AsmObjectCurrentAddress(object);
+  sym->defined = true;
+  sym->binding = SYM_BIND(local);
+  sym->type = SYM_TYPE(object);
+  sym->size = size;
+  if (alignment > sym->alignment) {
+    sym->alignment = alignment;
+  }
+  AsmObjectEmitFill(object, bss, size, 0);
+  AsmObjectSwitchSection(object, saved_section);
+}
+
 int64_t AssemblerCurrentAddress(Assembler* assembler) {
   return AsmObjectCurrentAddress(&assembler->object);
 }
@@ -652,6 +673,7 @@ static void SymbolDirective(Assembler* assembler,
       AssemblerInsertSymbol(assembler, sym);
       sym->exported = true;
     }
+    sym->explicit_local = binding == SYM_BIND(local);
     LexNextToken(&assembler->lex);
   } else {
     AssemblerError(assembler, "Symbol name expected");
@@ -676,9 +698,34 @@ static void HandleDirective_weak(Assembler* assembler) {
 
 static void HandleDirective_comm(Assembler* assembler) {
   if (LexLookingAt(&assembler->lex, TOK(identifier))) {
-    AssemblerSymbol* sym =
-        AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
+    String name;
+    StringInit(&name, assembler->lex.spelling.value);
+    LexNextToken(&assembler->lex);
+    if (!LexMatch(&assembler->lex, TOK(comma))) {
+      AssemblerError(assembler, "Missing size in .comm directive");
+      StringDestruct(&name);
+      return;
+    }
+    int32_t size = 0;
+    if (LexLookingAt(&assembler->lex, TOK(number))) {
+      size = (int32_t)assembler->lex.number;
+      LexNextToken(&assembler->lex);
+    }
+    int32_t alignment = 1;
+    if (LexMatch(&assembler->lex, TOK(comma))) {
+      if (LexLookingAt(&assembler->lex, TOK(number))) {
+        alignment = (int32_t)assembler->lex.number;
+        LexNextToken(&assembler->lex);
+      }
+    }
+    AssemblerSymbol* sym = AssemblerFindSymbol(assembler, name.value);
+    if (sym != NULL && sym->explicit_local) {
+      StringDestruct(&name);
+      AssemblerAllocateLocalCommon(assembler, sym, size, alignment);
+      return;
+    }
     if (sym != NULL) {
+      StringDestruct(&name);
       if (assembler->object.pass == 1 && sym->defined && sym->section != SHN_COM) {
         AssemblerError(assembler, "Duplicate common symbol %s", sym->name.value);
         return;
@@ -690,32 +737,18 @@ static void HandleDirective_comm(Assembler* assembler) {
       sym->binding = SYM_BIND(global);
     } else {
       // No symbol, add it as a global in the COM section..
-      sym = NewAssemblerSymbol(assembler->lex.spelling.value, SHN_COM,
+      sym = NewAssemblerSymbol(name.value, SHN_COM,
                                SYM_TYPE(object), SYM_BIND(global), 0);
+      StringDestruct(&name);
       sym->defined = true;
       AssemblerInsertSymbol(assembler, sym);
       sym->exported = true;
     }
-    LexNextToken(&assembler->lex);
-    if (!LexMatch(&assembler->lex, TOK(comma))) {
-      AssemblerError(assembler, "Missing size in .comm directive");
-      return;
+    if (size > sym->size) {
+      sym->size = size;
     }
-    if (LexLookingAt(&assembler->lex, TOK(number))) {
-      int32_t new_size = (int32_t)assembler->lex.number;
-      if (new_size > sym->size) {
-        sym->size = new_size;
-      }
-      LexNextToken(&assembler->lex);
-    }
-    if (LexMatch(&assembler->lex, TOK(comma))) {
-      if (LexLookingAt(&assembler->lex, TOK(number))) {
-        int32_t new_align = (int32_t)assembler->lex.number;
-        if (new_align > sym->alignment) {
-          sym->alignment = new_align;
-        }
-        LexNextToken(&assembler->lex);
-      }
+    if (alignment > sym->alignment) {
+      sym->alignment = alignment;
     }
   } else {
     AssemblerError(assembler, "Symbol name expected");

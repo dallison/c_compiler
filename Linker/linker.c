@@ -1558,6 +1558,30 @@ static uint64_t LinkerTLSImageSpan(Linker* linker, uint64_t data_end) {
   return addr - data_end;
 }
 
+// Lays out every object's non-TLS .bss input section from |*addr| on.  They
+// are not grouped like other sections, as .bss is written as one output
+// section after the commons are placed.
+static void AssignBSSInputSectionAddresses(Linker* linker, uint64_t* addr) {
+  for (size_t i = 0; i < linker->files.length; i++) {
+    ObjectFile* file = linker->files.value.p[i];
+    Vector* sections = &file->elf_file->sections;
+    for (size_t j = 0; j < sections->length; j++) {
+      ELFReaderSection* section = sections->value.p[j];
+      if (section == NULL || section->header == NULL ||
+          section->discarded || section->header->type != SHT(nobits) ||
+          (section->header->flags & SHF(alloc)) == 0 ||
+          (section->header->flags & SHF(tls)) != 0) {
+        continue;
+      }
+      uint64_t alignment =
+          section->header->addralign > 1 ? section->header->addralign : 1;
+      *addr = (*addr + alignment - 1) & ~(alignment - 1);
+      section->address = *addr;
+      *addr += section->header->size;
+    }
+  }
+}
+
 static void InventEHFrameBounds(Linker* linker) {
   SectionGroup* eh_frame = FindSectionGroup(linker, ".eh_frame");
   uint64_t start = 0;
@@ -2176,16 +2200,6 @@ void LinkerLinkAllFiles(Linker* linker) {
     }
   }
 
-  // Now that we know the addresses of the sections we can work
-  // out the values of the symbols within those sections.
-  LinkerAssignSymbolAddresses(linker);
-  
-  // Assign section symbol addresses.
-  LinkerAssignSectionSymbolAddresses(linker);
-
-  // Function addresses are now final, so materialize the stacktrace table.
-  LinkerStacktraceFinalize(linker);
-  
   // The .bss (nobits) address is just after initialized data.  A
   // program with no writable .data (typical 65C02 C: text+.rodata only)
   // leaves the data segment end at 0, because an empty segment never
@@ -2197,9 +2211,21 @@ void LinkerLinkAllFiles(Linker* linker) {
     linker->nobits_address = SegmentEndAddress(&linker->code_segment);
   }
   addr = linker->nobits_address;
+  // Each object's own .bss comes first: its symbols are offsets into it.
+  AssignBSSInputSectionAddresses(linker, &addr);
+
+  // Now that we know the addresses of the sections we can work
+  // out the values of the symbols within those sections.
+  LinkerAssignSymbolAddresses(linker);
+  
+  // Assign section symbol addresses.
+  LinkerAssignSectionSymbolAddresses(linker);
+
+  // Function addresses are now final, so materialize the stacktrace table.
+  LinkerStacktraceFinalize(linker);
+
   LinkerAssignCommonSymbolAddresses(linker, &addr);
   linker->nobit_size = addr - linker->nobits_address;
-  LinkerAssignBSSSymbolAddresses(linker);
 
   // Define the '_end' symbol for the last assigned address.
   InventSymbol(linker, "_end", 8, addr);

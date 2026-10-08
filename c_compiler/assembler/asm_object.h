@@ -58,6 +58,8 @@ typedef struct AssemblerSymbol {
   bool is_forward_declared;
   int32_t alignment;
   bool is_constant;
+  // Named by a `.local` directive, as opposed to only being referenced.
+  bool explicit_local;
 } AssemblerSymbol;
 
 AssemblerSymbol* NewAssemblerSymbol(const char* name, int32_t section,

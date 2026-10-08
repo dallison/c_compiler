@@ -86,6 +86,7 @@ AssemblerSymbol* NewAssemblerSymbol(const char* name, int section,
   sym->is_label = false;
   sym->is_constant = false;
   sym->is_forward_declared = false;
+  sym->explicit_local = false;
   return sym;
 }
 

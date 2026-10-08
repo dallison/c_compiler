@@ -685,7 +685,8 @@ void EmitBSSVariableToModule(UninitializedStaticVariable* var,
   char buf[256];
   const char* name = VarName2(var, buf, sizeof(buf));
   if (!var->is_weak) {
-    AsmModuleSymbol(module, name, SYM_TYPE(common), SYM_BIND(global),
+    AsmModuleSymbol(module, name, SYM_TYPE(common),
+                    var->is_global ? SYM_BIND(global) : SYM_BIND(local),
                     (int32_t)var->size,
                     (int32_t)var->alignment, true, true, true);
     return;

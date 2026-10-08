@@ -398,18 +398,3 @@ void LinkerAssignSectionSymbolAddresses(Linker* linker) {
   }
 }
 
-// Go through each file and assign every common symbol to the NOBITS (bss)
-// output section.  Each unique common symbol will have an address in the
-// .bss section.  This section occupies no storage in the output ELF
-// file but is allocated when the program is loaded.
-void LinkerAssignBSSSymbolAddresses(Linker* linker) {
-  for (size_t i = 0; i < linker->files.length; i++) {
-    ObjectFile* file = linker->files.value.p[i];
-    LinkerSymbol* section_symbol = ObjectFileFindSymbol(file, ".bss");
-    if (section_symbol != NULL) {
-      section_symbol->address = linker->nobits_address;
-    }
-  }
-}
-
-

@@ -86,6 +86,10 @@ int AssemblerAddSection(Assembler* assembler, String* name, int32_t type,
                         int32_t flags, int32_t alignment);
 int AssemblerFindSection(Assembler* assembler, String* name);
 void AssemblerSetSectionSize(Assembler* assembler, size_t index, size_t size);
+// `.local x` then `.comm x,size,align`: ELF has no local common symbols, so x
+// is a local object of |size| zero bytes in .bss.
+void AssemblerAllocateLocalCommon(Assembler* assembler, AssemblerSymbol* sym,
+                                  int32_t size, int32_t alignment);
 
 void AssemblerAddRelocation(Assembler* assembler, AssemblerRelocation* reloc);
 void AssemblerAddRelocationForSymbol(Assembler* assembler,
