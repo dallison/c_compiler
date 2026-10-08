@@ -43,9 +43,12 @@ struct ConstexprHeapBlock {
   size_t allocation_size;
   bool live;
   TypeRecord* object_type;
-  // The class objects a new-expression created here, as an array of
-  // object_type; such storage is not accessed bytewise.
+  // The objects allocated here, as an array of object_type; such storage is
+  // not accessed bytewise.
   ConstexprObject* object;
+  // The byte offset of |object| in the block: an array new-expression keeps
+  // its element count in a header ahead of the elements, which stays bytewise.
+  size_t object_offset;
 };
 
 struct ConstexprValue {
@@ -447,13 +450,6 @@ static void* ConstexprHeapMalloc(ConstEvalContext* ctx, size_t size,
   return memory;
 }
 
-static void ConstexprHeapFree(ConstEvalContext* ctx, void* memory) {
-  ConstexprHeapBlock* block = ConstexprFindHeapBlock(ctx, memory);
-  if (block != NULL) {
-    block->live = false;
-  }
-}
-
 // Every subobject of freed storage, as a read checks only the slot it reads.
 static void ConstexprEndObjectLifetime(ConstexprObject* object, size_t depth) {
   if (object == NULL || depth > 64) {
@@ -469,6 +465,14 @@ static void ConstexprEndObjectLifetime(ConstexprObject* object, size_t depth) {
     if (slot->is_object) {
       ConstexprEndObjectLifetime(slot->object, depth + 1);
     }
+  }
+}
+
+static void ConstexprHeapFree(ConstEvalContext* ctx, void* memory) {
+  ConstexprHeapBlock* block = ConstexprFindHeapBlock(ctx, memory);
+  if (block != NULL) {
+    block->live = false;
+    ConstexprEndObjectLifetime(block->object, 0);
   }
 }
 
@@ -520,7 +524,14 @@ static bool ConstexprValueFromHeapAddress(ConstEvalContext* ctx,
     if (address.heap_index + size > address.heap_block->size) {
       return false;
     }
+    if (size == 0 || size > sizeof(value)) {
+      return false;
+    }
     memcpy(&value, byte, size);
+    if (size < sizeof(value) && !TypeIsUnsigned(type) &&
+        (value >> (size * 8 - 1)) & 1) {
+      value |= (int64_t)(~(uint64_t)0 << (size * 8));
+    }
     ValueState state = kValueStateValid;
     for (size_t i = 0; i < size; i++) {
       state = ValueStateMerge(
@@ -947,23 +958,28 @@ static bool ConstexprEvaluateDeallocationCall(ConstEvalContext* ctx,
       pointer.address_object != NULL) {
     ConstexprHeapBlock* block =
         ConstexprHeapBlockForObject(ctx, pointer.address_object);
-    if (block == NULL || !block->live || pointer.address_index != 0) {
+    if (block == NULL || !block->live || pointer.address_index != 0 ||
+        block->object_offset != 0) {
       return false;
     }
-    block->live = false;
-    ConstexprEndObjectLifetime(block->object, 0);
+    ConstexprHeapFree(ctx, block->memory);
     return true;
   }
-  int64_t address = 0;
   if (pointer.is_address && pointer.heap_block != NULL) {
-    address = (int64_t)(intptr_t)pointer.heap_block->memory;
-  } else if (!ConstexprValueAsInteger(pointer, &address)) {
-    return false;
+    if (pointer.heap_index != 0 || !pointer.heap_block->live ||
+        !ConstexprHasHeapBlock(ctx, pointer.heap_block)) {
+      return false;
+    }
+    ConstexprHeapFree(ctx, pointer.heap_block->memory);
+    return true;
   }
-  if (address != 0) {
-    ConstexprHeapFree(ctx, (void*)(intptr_t)address);
+  // Only a null pointer is left that may be deallocated.
+  if (pointer.is_address) {
+    return pointer.ivalue == 0 && pointer.address_binding == NULL &&
+           pointer.address_slot == NULL && pointer.address_object == NULL;
   }
-  return true;
+  int64_t address = 0;
+  return ConstexprValueAsInteger(pointer, &address) && address == 0;
 }
 
 static bool ConstexprEvaluateReallocationCall(ConstEvalContext* ctx,
@@ -1229,11 +1245,6 @@ static void PushConstexprBinding(ConstEvalContext* ctx, Symbol* symbol,
 
 bool ConstexprValueAsInteger(ConstexprValue value, int64_t* result) {
   if (value.is_address) {
-    if (value.heap_block != NULL) {
-      *result = (int64_t)(intptr_t)(value.heap_block->memory +
-                                    value.heap_index);
-      return true;
-    }
     ConstexprValue dereferenced;
     return ConstexprDereferenceAddress(value, &dereferenced) &&
            ConstexprValueAsInteger(dereferenced, result);
@@ -2089,7 +2100,7 @@ static bool ConstexprDereferenceAddress(ConstexprValue address,
   if (address.address_object != NULL) {
     ConstexprValue* slot =
         ConstexprObjectSlot(address.address_object, address.address_index);
-    if (slot == NULL || slot->external) {
+    if (slot == NULL || slot->external || slot->lifetime_ended) {
       return false;
     }
     *result = *slot;
@@ -2870,20 +2881,23 @@ static bool ConstexprObjectFullyInitialized(ConstexprObject* object) {
                                   /*set=*/false, 0);
 }
 
-// Storage that `new T` or `new T[n]` allocates for a class T holds objects,
-// which may contain pointers, so it is given an array of T in place of its
-// bytes, and |address| (the start of the block) is redirected to element 0.
-// Storage of any other size or type is left alone.
-static bool ConstexprTypeHeapClassStorage(ConstEvalContext* ctx,
-                                          ConstexprValue* address) {
+// Storage allocated for objects of type T (`new T`, `new T[n]`, or
+// `static_cast<T*>(::operator new(n))`) is given an array of T in place of its
+// bytes from |offset| on, as T may be a pointer or hold one.  With no |offset|,
+// |address| (the start of the block) is redirected to element 0; otherwise
+// the bytes ahead of the elements are addressed as before.  Character storage
+// stays bytewise, and storage of any other size is left alone.
+static bool ConstexprTypeHeapStorage(ConstEvalContext* ctx,
+                                     ConstexprValue* address, size_t offset) {
   ConstexprHeapBlock* block = address->heap_block;
   TypeRecord* type = block->object_type;
   if (address->heap_index != 0 || block->object != NULL || type == NULL ||
-      !TypeIsStructOrUnion(type) || type->size <= 0 ||
-      block->size % (size_t)type->size != 0 || block->size == 0) {
+      TypeIsVoid(type) || TypeIsFunction(type) || TypeIsReference(type) ||
+      TypeIsCharFamily(type) || type->size <= 0 || block->size <= offset ||
+      (block->size - offset) % (size_t)type->size != 0) {
     return true;
   }
-  size_t count = block->size / (size_t)type->size;
+  size_t count = (block->size - offset) / (size_t)type->size;
   if (count > INT_MAX) {
     return false;
   }
@@ -2897,12 +2911,64 @@ static bool ConstexprTypeHeapClassStorage(ConstEvalContext* ctx,
   }
   ConstexprMarkDataMembers(ctx, array, kValueStateIndeterminate);
   block->object = array;
+  block->object_offset = offset;
+  if (offset == 0) {
+    *address = (ConstexprValue){
+        .is_address = true,
+        .address_object = array,
+        .address_index = 0,
+    };
+  }
+  return true;
+}
+
+// A pointer cast between the bytewise header of an array new-expression and
+// its typed elements: a byte address at an element, cast to a pointer to the
+// element type, designates the element; element 0, cast to a pointer to the
+// header's type, is the byte address just past the header.
+static void ConstexprRetypeHeapAddress(ConstEvalContext* ctx,
+                                       ConstexprValue* address,
+                                       TypeRecord* target_pointee) {
+  if (!address->is_address || target_pointee == NULL) {
+    return;
+  }
+  if (address->heap_block != NULL) {
+    ConstexprHeapBlock* block = address->heap_block;
+    ConstexprObject* array = block->object;
+    TypeRecord* element = array != NULL && array->type != NULL
+                              ? array->type->next : NULL;
+    if (element == NULL || block->object_offset == 0 ||
+        element->size <= 0 || address->heap_index < block->object_offset ||
+        (address->heap_index - block->object_offset) % (size_t)element->size !=
+            0 ||
+        !TypeEqualIgnoringTopLevelQualifierMask(target_pointee, element,
+                                                kQualConst | kQualVolatile)) {
+      return;
+    }
+    *address = (ConstexprValue){
+        .is_address = true,
+        .address_object = array,
+        .address_index = (address->heap_index - block->object_offset) /
+                         (size_t)element->size,
+    };
+    return;
+  }
+  if (address->address_object == NULL || address->address_index != 0 ||
+      address->address_slot != NULL || !TypeIsIntegral(target_pointee) ||
+      target_pointee->size <= 0) {
+    return;
+  }
+  ConstexprHeapBlock* block =
+      ConstexprHeapBlockForObject(ctx, address->address_object);
+  if (block == NULL || block->object_offset == 0 ||
+      (size_t)target_pointee->size != block->object_offset) {
+    return;
+  }
   *address = (ConstexprValue){
       .is_address = true,
-      .address_object = array,
-      .address_index = 0,
+      .heap_block = block,
+      .heap_index = block->object_offset,
   };
-  return true;
 }
 
 // A static object that is not a usable constant (`int g;`) still has a
@@ -6927,6 +6993,12 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
         .address_binding = binding->address_binding,
         .address_slot = binding->address_slot,
     };
+    if (id->symbol != NULL && TypeIsReference(id->symbol->type)) {
+      bound.address_object = binding->address_object;
+      bound.address_index = binding->address_index;
+      bound.heap_block = binding->heap_block;
+      bound.heap_index = binding->heap_index;
+    }
     // References can be forwarded through several constexpr calls, forming a
     // chain such as `d -> other -> lhs -> temporary`. Follow the complete
     // chain rather than only one address_binding edge.
@@ -7372,6 +7444,24 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
         !call_value.is_address) {
       return false;
     }
+    // A call returning `T*&` (`std::move(p[0])`) may yield where the pointer
+    // is stored rather than the pointer itself; an address designating a
+    // stored pointer is that location, as a T* designates no pointer.
+    Symbol* callee = ConstexprCallSymbol(node);
+    TypeRecord* returned = callee != NULL && callee->type != NULL &&
+                                   TypeIsFunction(callee->type)
+                               ? callee->type->next
+                               : NULL;
+    if (returned != NULL && TypeIsReference(returned) &&
+        returned->next != NULL && TypeIsPointer(returned->next)) {
+      ConstexprValue stored = {0};
+      if (ConstexprDereferenceAddress(ConstexprResolveForwardedAddress(
+                                          call_value),
+                                      &stored) &&
+          stored.is_address) {
+        call_value = stored;
+      }
+    }
     *result = call_value;
     return true;
   }
@@ -7429,11 +7519,30 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     if (establishes_allocated_type && target_pointee != NULL) {
       if (result->heap_block != NULL) {
         result->heap_block->object_type = target_pointee;
+        size_t header = 0;
+        if ((node->flags & kASTCXXArrayNew) != 0 &&
+            (node->flags & kASTCXXPlacementNew) == 0) {
+          TypeRecord* size_type = NewSizeTypeRecord();
+          header = (size_t)size_type->size;
+          TypeRecordDelete(size_type);
+        }
+        // C allocations stay bytewise unless they hold class objects:
+        // realloc carries the bytes over, not typed storage.
+        Symbol* allocator = cast->expr != NULL && cast->expr->op == AST_OP(call)
+                                ? ConstexprCallSymbol(cast->expr)
+                                : NULL;
+        bool c_allocation =
+            (node->flags & kASTCXXNewExpression) == 0 && allocator != NULL &&
+            (StringEqual(&allocator->name, "malloc") ||
+             ConstexprIsReallocationFunction(allocator));
         if (!lowers_placement_new &&
-            !ConstexprTypeHeapClassStorage(ctx, result)) {
+            (!c_allocation || TypeIsStructOrUnion(target_pointee)) &&
+            !ConstexprTypeHeapStorage(ctx, result, header)) {
           return false;
         }
       }
+    } else {
+      ConstexprRetypeHeapAddress(ctx, result, target_pointee);
     }
     return true;
   }
@@ -7827,23 +7936,25 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
         }
         offset = -offset;
       }
+      // heap_index counts bytes; a scaled offset counts elements.
       TypeRecord* pointer_type = node->type;
-      if (!offset_is_elements && TypeIsPointer(pointer_type) &&
-          pointer_type->next != NULL &&
-          pointer_type->next->size > 1) {
-        int element_size = pointer_type->next->size;
-        if (offset % element_size != 0) {
+      if (offset_is_elements && TypeIsPointer(pointer_type) &&
+          pointer_type->next != NULL && pointer_type->next->size > 1) {
+        int64_t element_size = pointer_type->next->size;
+        if (offset > INT64_MAX / element_size ||
+            offset < INT64_MIN / element_size) {
           return false;
         }
-        offset /= element_size;
+        offset *= element_size;
       }
-      if ((offset < 0 && (uint64_t)(-offset) > base.heap_index) ||
+      // One past the end is a valid pointer, though not dereferenceable.
+      if (offset == INT64_MIN ||
+          (offset < 0 && (uint64_t)(-offset) > base.heap_index) ||
           (offset >= 0 &&
-           (uint64_t)offset > SIZE_MAX - base.heap_index) ||
-          base.heap_index + (size_t)offset >= base.heap_block->size) {
+           (uint64_t)offset > base.heap_block->size - base.heap_index)) {
         return false;
       }
-      base.heap_index += (size_t)offset;
+      base.heap_index = (size_t)((int64_t)base.heap_index + offset);
       *result = base;
       return true;
     }
@@ -11811,6 +11922,14 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
     if (!address_ok || !constructed_ok) {
       return false;
     }
+    if (address.heap_block != NULL) {
+      // Character storage from an allocation; other storage is typed.
+      if (!StoreConstexprHeapAddress(address, target_type, constructed)) {
+        return false;
+      }
+      *result = address;
+      return true;
+    }
     ConstexprValue* slot = address.address_slot;
     if (slot == NULL && address.address_object != NULL) {
       slot = ConstexprObjectSlot(address.address_object,
@@ -12536,7 +12655,8 @@ static void ConstexprBeginUserConstructor(ConstEvalContext* ctx,
                               .address_slot = binding->address_slot,
                               .address_object = binding->address_object,
                               .address_index = binding->address_index,
-                              .heap_block = binding->heap_block};
+                              .heap_block = binding->heap_block,
+                              .heap_index = binding->heap_index};
     ConstexprValue pointee = {0};
     TypeRecord* this_type = this_formal->type;
     if (address.heap_block == NULL && this_type != NULL &&

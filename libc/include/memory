@@ -184,12 +184,12 @@ struct __allocator_destroy_impl;
 
 template <class U>
 struct __allocator_destroy_impl<U, true> {
-  static void apply(U* ptr) { ptr->~U(); }
+  static constexpr void apply(U* ptr) { ptr->~U(); }
 };
 
 template <class U>
 struct __allocator_destroy_impl<U, false> {
-  static void apply(U* ptr) { (void)ptr; }
+  static constexpr void apply(U* ptr) { (void)ptr; }
 };
 
 template <class T>
@@ -243,12 +243,12 @@ struct allocator {
   }
 
   template <class U>
-  void destroy(U* ptr) {
+  constexpr void destroy(U* ptr) {
     __allocator_destroy_impl<U, !is_trivially_destructible<U>::value>::apply(
         ptr);
   }
 
-  size_type max_size() const noexcept {
+  constexpr size_type max_size() const noexcept {
     return static_cast<size_type>(-1) / sizeof(T);
   }
 };
@@ -349,14 +349,14 @@ struct __alloc_traits_rebind {
 
 template <class Alloc, class = void>
 struct __alloc_select_on_copy {
-  static Alloc call(const Alloc& alloc) { return alloc; }
+  static constexpr Alloc call(const Alloc& alloc) { return alloc; }
 };
 
 template <class Alloc>
 struct __alloc_select_on_copy<
     Alloc, __void_t<decltype(declval<const Alloc&>()
                                .select_on_container_copy_construction())>> {
-  static Alloc call(const Alloc& alloc) {
+  static constexpr Alloc call(const Alloc& alloc) {
     return alloc.select_on_container_copy_construction();
   }
 };
@@ -422,7 +422,7 @@ struct __alloc_destroy_dispatch;
 template <>
 struct __alloc_destroy_dispatch<false> {
   template <class Alloc, class T>
-  static void call(Alloc&, T* ptr) {
+  static constexpr void call(Alloc&, T* ptr) {
     __allocator_destroy_impl<T, !is_trivially_destructible<T>::value>::apply(
         ptr);
   }
@@ -431,7 +431,7 @@ struct __alloc_destroy_dispatch<false> {
 template <>
 struct __alloc_destroy_dispatch<true> {
   template <class Alloc, class T>
-  static void call(Alloc& alloc, T* ptr) { alloc.destroy(ptr); }
+  static constexpr void call(Alloc& alloc, T* ptr) { alloc.destroy(ptr); }
 };
 
 template <class Alloc>
@@ -475,11 +475,11 @@ struct allocator_traits {
     return __alloc_traits_bool(static_cast<is_always_equal*>(nullptr));
   }
 
-  static pointer allocate(Alloc& alloc, size_type n) {
+  static constexpr pointer allocate(Alloc& alloc, size_type n) {
     return alloc.allocate(n);
   }
 
-  static void deallocate(Alloc& alloc, pointer ptr, size_type n) {
+  static constexpr void deallocate(Alloc& alloc, pointer ptr, size_type n) {
     alloc.deallocate(ptr, n);
   }
 
@@ -513,16 +513,17 @@ struct allocator_traits {
   }
 
   template <class T>
-  static void destroy(Alloc& alloc, T* ptr) {
+  static constexpr void destroy(Alloc& alloc, T* ptr) {
     __alloc_destroy_dispatch<__alloc_has_destroy<Alloc, T>::value>::call(
         alloc, ptr);
   }
 
-  static size_type max_size(const Alloc& alloc) noexcept {
+  static constexpr size_type max_size(const Alloc& alloc) noexcept {
     return alloc.max_size();
   }
 
-  static Alloc select_on_container_copy_construction(const Alloc& alloc) {
+  static constexpr Alloc select_on_container_copy_construction(
+      const Alloc& alloc) {
     return __alloc_select_on_copy<Alloc>::call(alloc);
   }
 };
