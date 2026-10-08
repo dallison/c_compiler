@@ -599,6 +599,11 @@ static bool ParseOperand(X86Assembler* assembler, X86Op* op) {
     return ParseRegister(assembler, &op->reg, /*allow_rip=*/false, NULL);
   }
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+    // `si(%rip)` addresses a symbol named like a register; a register is
+    // never followed by a base.
+    if (AsmLookingAtLParen(&ASM)) {
+      return ParseMemory(assembler, op);
+    }
     X86Reg reg;
     if (ParseRegSuffix(ASM.lex.spelling.value, ASM.lex.spelling.length, &reg)) {
       op->kind = kX86OpReg;
