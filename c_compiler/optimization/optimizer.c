@@ -608,11 +608,26 @@ void FindTailCalls(BasicBlock* block, void* data) {
        !BasicBlockIsEmpty(block) && inst != BasicBlockREnd(block);
        inst = IRPrev(inst)) {
     if (IRIsResult(inst)) {
-      // Scalar result instruction.
+      // Scalar result instruction.  The call returning the value is in tail
+      // position only if nothing but bookkeeping runs between it and here
+      // (`g = f(); return g;` stores the value after the call).
       IRNode* value = inst->inputs.value.p[0];
-      if (value->opcode == IR_OP(calla)) {
-        value->flags |= kIRTailCall;
+      if (value->opcode != IR_OP(calla) || CallNeedsLiveFrame(value)) {
+        return;
       }
+      for (IRNode* between = IRPrev(inst);; between = IRPrev(between)) {
+        if (between == BasicBlockREnd(block)) {
+          return;
+        }
+        if (between == value) {
+          break;
+        }
+        if (between->opcode != IR_OP(loc) &&
+            !IsTrivialReturnInstruction(between)) {
+          return;
+        }
+      }
+      value->flags |= kIRTailCall;
       return;
     }
     if (inst->opcode == IR_OP(memcpy)) {
