@@ -7144,6 +7144,22 @@ static ASTNode* NewCXXNewBracedInitializer(Vector* items,
   return NewBracedInitializerASTNode(elements, NULL, location);
 }
 
+// The scalar `*p` a new-expression stores its initial value through.  The
+// object is being initialized, so a `const T` is stored through a `T*`.
+static ASTNode* CXXNewScalarTarget(ASTNode* target, TypeRecord* type,
+                                   SourceLocation location) {
+  if (type == NULL || (type->qualifiers & kQualConst) == 0 ||
+      target == NULL || target->op != AST_OP(contents)) {
+    return target;
+  }
+  TypeRecord* plain = TypeRecordCopy(type);
+  plain->qualifiers &= ~kQualConst;
+  UnaryASTNode* contents = (UnaryASTNode*)target;
+  contents->sub = NewTypedCast(NewPointerTo(kQualPlain, plain), contents->sub,
+                               location);
+  return target;
+}
+
 // Initializes the new object `target` of non-array `type` from `initializer`
 // (an expression, a braced list, or NULL to value-initialize).  A class is
 // initialized in place from a braced list -- assigning would run its
@@ -7183,7 +7199,8 @@ static ASTNode* NewCXXNewInitialization(Syntax* syntax, TypeRecord* type,
       value = ((ExpressionInitializerASTNode*)element)->expr;
     }
   }
-  return NewAssign(target, value, type, location);
+  return NewAssign(CXXNewScalarTarget(target, type, location), value, type,
+                   location);
 }
 
 // The non-array type at the bottom of `type`, and how many of it one `type`
@@ -7348,6 +7365,23 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   TypeRecord* allocated_type = TypeParserParseType(&parser, true);
+  // A new-type-id's declarator holds no parentheses ([expr.new]), so
+  // `new int*(&g)` initializes an int* rather than declaring `g`.
+  while (allocated_type != NULL && LexMatch(syntax->lex, TOK(star))) {
+    Qualifiers quals = kQualPlain;
+    for (;;) {
+      if (LexMatch(syntax->lex, TOK(const))) {
+        quals |= kQualConst;
+      } else if (LexMatch(syntax->lex, TOK(volatile))) {
+        quals |= kQualVolatile;
+      } else if (LexMatch(syntax->lex, TOK(restrict))) {
+        quals |= kQualRestrict;
+      } else {
+        break;
+      }
+    }
+    allocated_type = TypeRecordCalculateSize(NewPointerTo(quals, allocated_type));
+  }
   Token initializer_open = TOK(bad);
   ASTNode* array_size = NULL;
   if (LexLookingAt(syntax->lex, TOK(lparen)) ||
@@ -7402,35 +7436,46 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   // The elements of an array new-initializer, each an expression or a braced
   // list; NULL when the array has no initializer.
   Vector* array_initializers = NULL;
-  if (initializer_open == TOK(lsquare)) {
-    LexNextToken(syntax->lex);
-    if (!LexLookingAt(syntax->lex, TOK(rsquare))) {
-      array_size = SyntaxParseSingleExpression(syntax, TC(closebra));
-    }
-    SyntaxNeedBracket(syntax, TOK(rsquare), followers);
-    // `new T[n][2][3]` allocates n objects of type T[2][3]; only the first
-    // bound may be non-constant.
-    Vector inner_bounds;
-    VectorInit(&inner_bounds);
-    while (LexMatch(syntax->lex, TOK(lsquare))) {
-      ASTNode* bound = AnalyzeExpression(
-          SyntaxParseSingleExpression(syntax, TC(closebra)));
-      SyntaxNeedBracket(syntax, TOK(rsquare), followers);
-      int64_t value = 0;
-      if (!EvaluateIntegerExpression(bound, &value) || value <= 0) {
-        SyntaxError(syntax, "array new bound after the first must be a "
-                            "positive constant");
-        value = 1;
+  // `new int*[2]`, or `new A` for `typedef int A[2]`, allocates an array
+  // whose element count is the outermost bound ([expr.new]).
+  bool array_typed_new = initializer_open != TOK(lsquare) &&
+                         TypeIsFixedArray(allocated_type) &&
+                         allocated_type->next != NULL;
+  if (array_typed_new) {
+    array_size = NewIntLiteral(allocated_type->info.array.size.fixed, location);
+    allocated_type = allocated_type->next;
+  }
+  if (initializer_open == TOK(lsquare) || array_typed_new) {
+    if (!array_typed_new) {
+      LexNextToken(syntax->lex);
+      if (!LexLookingAt(syntax->lex, TOK(rsquare))) {
+        array_size = SyntaxParseSingleExpression(syntax, TC(closebra));
       }
-      VectorAppend(&inner_bounds, (void*)(intptr_t)value);
+      SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+      // `new T[n][2][3]` allocates n objects of type T[2][3]; only the first
+      // bound may be non-constant.
+      Vector inner_bounds;
+      VectorInit(&inner_bounds);
+      while (LexMatch(syntax->lex, TOK(lsquare))) {
+        ASTNode* bound = AnalyzeExpression(
+            SyntaxParseSingleExpression(syntax, TC(closebra)));
+        SyntaxNeedBracket(syntax, TOK(rsquare), followers);
+        int64_t value = 0;
+        if (!EvaluateIntegerExpression(bound, &value) || value <= 0) {
+          SyntaxError(syntax, "array new bound after the first must be a "
+                              "positive constant");
+          value = 1;
+        }
+        VectorAppend(&inner_bounds, (void*)(intptr_t)value);
+      }
+      for (size_t i = inner_bounds.length; i > 0; i--) {
+        TypeRecord* array_type = NewBasicArrayTypeRecord(
+            kQualPlain, (int)(intptr_t)inner_bounds.value.p[i - 1], false);
+        TypeRecordChain(array_type, allocated_type);
+        allocated_type = TypeRecordCalculateSize(array_type);
+      }
+      VectorDestruct(&inner_bounds);
     }
-    for (size_t i = inner_bounds.length; i > 0; i--) {
-      TypeRecord* array_type = NewBasicArrayTypeRecord(
-          kQualPlain, (int)(intptr_t)inner_bounds.value.p[i - 1], false);
-      TypeRecordChain(array_type, allocated_type);
-      allocated_type = TypeRecordCalculateSize(array_type);
-    }
-    VectorDestruct(&inner_bounds);
     if (LexMatch(syntax->lex, TOK(lbrace))) {
       array_initializers =
           CXXNewBracedItems(syntax, SyntaxParseBracedInitializer(syntax));
@@ -7811,10 +7856,12 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                           NewIdentifierASTNode(temp, location)),
           aggregate_initializer, location);
     } else {
-      init = NewAssign(NewUnaryASTNode(AST_OP(contents), allocated_type,
-                                       location,
-                                       NewIdentifierASTNode(temp, location)),
-                       scalar_initializer, allocated_type, location);
+      init = NewAssign(
+          CXXNewScalarTarget(
+              NewUnaryASTNode(AST_OP(contents), allocated_type, location,
+                              NewIdentifierASTNode(temp, location)),
+              allocated_type, location),
+          scalar_initializer, allocated_type, location);
     }
     if (ctor_actuals == NULL && TypeContainsTemplateParameter(allocated_type)) {
       init->flags |= kASTDependentNewInitializer;
@@ -7895,6 +7942,12 @@ ASTNode* NewCXXDeleteExpressionForPointer(Syntax* syntax, ASTNode* expr,
                                           bool is_array_delete,
                                           SourceLocation location,
                                           bool global_scope) {
+  // An operand such as `s.d` is not typed until analyzed, and its type
+  // decides the array header and the destructor.
+  if (expr != NULL && expr->type == NULL &&
+      !syntax->parsing_template_declaration) {
+    expr = AnalyzeExpression(expr);
+  }
   TypeRecord* pointer_type = expr->type;
   if ((pointer_type != NULL && TypeContainsTemplateParameter(pointer_type)) ||
       (syntax->parsing_template_declaration &&
