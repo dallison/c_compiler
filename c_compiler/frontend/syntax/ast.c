@@ -1377,7 +1377,8 @@ static ASTNode* ConstantASTNodeClone(const ASTNode* node,
   to->ihi = from->ihi;
   // The clone needs its own copy of the owned string so each node can free it.
   if (ConstantOwnsString(node) && from->value.string != NULL) {
-    to->value.string = NewString(from->value.string->value);
+    to->value.string = NewStringWithLength(from->value.string->value,
+                                           from->value.string->length);
   }
   to->template_arguments =
       TemplateArgumentVectorCopy(from->template_arguments);

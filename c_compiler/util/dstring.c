@@ -174,9 +174,23 @@ void StringSet(String* str, const char* value) {
   str->length = length - 1;
 }
 
+// Copies all of |value|, including embedded NULs (encoded wide literals).
 void StringSetString(String* str, String* value) {
+  CheckMutable(str);
   LazyInit(value);
-  StringSet(str, value->value);
+  size_t length = value->length + 1;
+  if (str->capacity < length) {
+    if (str->value == str->buffer) {
+      str->value = malloc(length);
+    } else {
+      str->value = realloc(str->value, length);
+    }
+    str->capacity = length;
+  }
+  if (str->value != value->value) {
+    memcpy(str->value, value->value, length);
+  }
+  str->length = length - 1;
 }
 
 void StringAppendSegmentSlow(String* str, const char* value, size_t length) {
