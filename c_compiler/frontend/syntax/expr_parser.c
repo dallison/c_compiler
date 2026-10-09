@@ -7362,12 +7362,29 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
         ParseCXXNewInitializerArguments(syntax, TOK(lparen), followers);
   }
 
+  // `new (T)` names its type with a full type-id, whose declarator may hold
+  // parentheses (`new (int (*)[3])`).
+  bool parenthesized_type = LexLookingAt(syntax->lex, TOK(lparen));
+  if (parenthesized_type) {
+    LexNextToken(syntax->lex);
+  }
+
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   TypeRecord* allocated_type = TypeParserParseType(&parser, true);
+  if (parenthesized_type && allocated_type != NULL) {
+    Symbol* sym = TypeParserParseDeclarator(&parser, allocated_type);
+    if (sym != NULL) {
+      allocated_type = sym->type;
+    }
+  }
+  if (parenthesized_type) {
+    SyntaxNeedBracket(syntax, TOK(rparen), followers);
+  }
   // A new-type-id's declarator holds no parentheses ([expr.new]), so
   // `new int*(&g)` initializes an int* rather than declaring `g`.
-  while (allocated_type != NULL && LexMatch(syntax->lex, TOK(star))) {
+  while (!parenthesized_type && allocated_type != NULL &&
+         LexMatch(syntax->lex, TOK(star))) {
     Qualifiers quals = kQualPlain;
     for (;;) {
       if (LexMatch(syntax->lex, TOK(const))) {
@@ -7386,10 +7403,10 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   ASTNode* array_size = NULL;
   if (LexLookingAt(syntax->lex, TOK(lparen)) ||
       LexLookingAt(syntax->lex, TOK(lbrace)) ||
-      LexLookingAt(syntax->lex, TOK(lsquare))) {
+      (!parenthesized_type && LexLookingAt(syntax->lex, TOK(lsquare)))) {
     initializer_open = syntax->lex->current_token;
   }
-  Symbol* sym = initializer_open == TOK(bad)
+  Symbol* sym = initializer_open == TOK(bad) && !parenthesized_type
       ? TypeParserParseDeclarator(&parser, allocated_type)
       : NULL;
   if (sym == NULL) {
@@ -7400,7 +7417,7 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   } else {
     allocated_type = sym->type;
   }
-  if (initializer_open == TOK(bad) &&
+  if (initializer_open == TOK(bad) && !parenthesized_type &&
       (LexLookingAt(syntax->lex, TOK(lparen)) ||
        LexLookingAt(syntax->lex, TOK(lbrace)) ||
        LexLookingAt(syntax->lex, TOK(lsquare)))) {
