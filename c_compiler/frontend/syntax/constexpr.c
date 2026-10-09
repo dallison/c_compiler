@@ -1934,18 +1934,41 @@ static ConstexprValue* ConstexprObjectSlot(ConstexprObject* object,
   return object->slots.value.p[index];
 }
 
+static ConstexprObject* ConstexprCharArrayObject(ConstEvalContext* ctx,
+                                                 TypeRecord* array_type,
+                                                 const unsigned char* bytes,
+                                                 size_t byte_count);
+
+static bool ConstexprIsStringLiteral(ASTNode* node) {
+  return node != NULL &&
+         (node->op == AST_OP(string) || node->op == AST_OP(string_wide));
+}
+
 static ConstexprObject* ConstexprStringObject(ConstEvalContext* ctx,
                                               ASTNode* node,
                                               TypeRecord* array_type) {
-  if (node == NULL || node->op != AST_OP(string) || array_type == NULL ||
-      !TypeIsFixedArray(array_type) || !TypeIsCharFamily(array_type->next)) {
+  if (!ConstexprIsStringLiteral(node) || array_type == NULL ||
+      !TypeIsFixedArray(array_type) || !TypeIsIntegral(array_type->next)) {
     return NULL;
   }
   ConstantASTNode* literal = (ConstantASTNode*)node;
   if (literal->value.string == NULL) {
     return NULL;
   }
-  size_t length = literal->value.string->length;
+  return ConstexprCharArrayObject(
+      ctx, array_type, (const unsigned char*)literal->value.string->value,
+      literal->value.string->length);
+}
+
+// The contents of a string literal hold each element in |element_size|
+// little-endian bytes.
+static ConstexprObject* ConstexprCharArrayObject(ConstEvalContext* ctx,
+                                                 TypeRecord* array_type,
+                                                 const unsigned char* bytes,
+                                                 size_t byte_count) {
+  size_t element_size =
+      array_type->next->size > 0 ? (size_t)array_type->next->size : 1;
+  size_t length = byte_count / element_size;
   size_t slot_count = ConstexprObjectSlotCount(array_type);
   if (slot_count < length + 1) {
     slot_count = length + 1;
@@ -1954,11 +1977,28 @@ static ConstexprObject* ConstexprStringObject(ConstEvalContext* ctx,
       NewConstexprObject(ctx, array_type, slot_count);
   for (size_t i = 0; i < object->slots.length; i++) {
     ConstexprValue* slot = ConstexprObjectSlot(object, i);
-    slot->ivalue =
-        i < length ? (unsigned char)literal->value.string->value[i] : 0;
+    uint64_t value = 0;
+    for (size_t b = 0; i < length && b < element_size && b < 8; b++) {
+      value |= (uint64_t)bytes[i * element_size + b] << (8 * b);
+    }
+    slot->ivalue = (int64_t)value;
     slot->fvalue = (double)slot->ivalue;
   }
   return object;
+}
+
+ConstexprObject* ConstexprDurableCharArrayObject(TypeRecord* element,
+                                                 const unsigned char* bytes,
+                                                 size_t byte_count) {
+  if (element == NULL || element->size <= 0 || !TypeIsIntegral(element)) {
+    return NULL;
+  }
+  size_t length = byte_count / (size_t)element->size;
+  TypeRecord* array_type =
+      NewBasicArrayTypeRecord(kQualPlain, (int)length + 1, false);
+  TypeRecordChain(array_type, TypeRecordCopy(element));
+  array_type = TypeRecordCalculateSize(array_type);
+  return ConstexprCharArrayObject(NULL, array_type, bytes, byte_count);
 }
 
 static bool ConstexprObjectIsUnion(ConstexprObject* object) {
@@ -5833,7 +5873,7 @@ static bool ConstexprEntryElidesBraces(TypeRecord* type, ASTNode* entry) {
     }
     expr = expression_initializer->expr;
   }
-  return expr != NULL && expr->type != NULL && expr->op != AST_OP(string) &&
+  return expr != NULL && expr->type != NULL && !ConstexprIsStringLiteral(expr) &&
          !TypeIsFixedArray(expr->type) && !TypeIsStructOrUnion(expr->type);
 }
 
@@ -5941,7 +5981,7 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   if (!TypeIsFixedArray(type) && !TypeIsStructOrUnion(type)) {
     return false;
   }
-  if (TypeIsFixedArray(type) && initializer->op == AST_OP(string)) {
+  if (TypeIsFixedArray(type) && ConstexprIsStringLiteral(initializer)) {
     ConstexprObject* object = ConstexprStringObject(ctx, initializer, type);
     if (object == NULL) {
       return false;
@@ -6887,7 +6927,7 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     return EvaluateConstexprObjectExpressionInitializer(ctx, node->type, node,
                                                         result);
   }
-  if (node->op == AST_OP(string)) {
+  if (ConstexprIsStringLiteral(node)) {
     TypeRecord* type = node->type;
     if (type != NULL && TypeIsPointer(type)) {
       type = type->next;
@@ -7740,7 +7780,7 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     };
     return true;
   }
-  if (node->op == AST_OP(string)) {
+  if (ConstexprIsStringLiteral(node)) {
     ConstexprObject* object = ConstexprStringObject(ctx, node, node->type);
     if (object == NULL) {
       return false;

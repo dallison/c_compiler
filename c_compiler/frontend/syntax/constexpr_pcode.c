@@ -146,6 +146,11 @@ typedef struct {
   // Storage of a static object that is not a constant: neither readable nor
   // writable.
   bool external;
+  // A string literal's element size, or 0.
+  int literal_element_size;
+  // The AST form of the literal, so that every pointer into it designates
+  // one array.
+  ConstexprObject* literal_object;
 } ConstexprPCodeStaticData;
 
 typedef struct ConstexprPCodeFreeBlock {
@@ -617,6 +622,9 @@ bool ConstexprStaticAddressAt(Symbol* symbol, size_t offset,
                               TypeRecord* pointee, ConstexprValue* result);
 bool ConstexprAddressInsideObject(ConstexprObject* root, size_t offset,
                                   TypeRecord* pointee, ConstexprValue* result);
+ConstexprObject* ConstexprDurableCharArrayObject(TypeRecord* element,
+                                                 const unsigned char* bytes,
+                                                 size_t byte_count);
 
 static void ConstexprPCodeImageInit(ConstexprPCodeImage* image) {
   image->text = NULL;
@@ -1911,7 +1919,9 @@ static bool StoreConstexprAddressBytes(ConstexprPCodeMarshal* marshal,
   if ((marshal != NULL && marshal->address_regions == NULL) || array == NULL ||
       address.address_binding != NULL || address.heap_block != NULL ||
       array->type == NULL || !TypeIsFixedArray(array->type) ||
-      array->type->next == NULL || !TypeIsCharFamily(array->type->next) ||
+      array->type->next == NULL ||
+      !(TypeIsCharFamily(array->type->next) ||
+        TypeIsWchar(array->type->next)) ||
       address.address_index > array->slots.length) {
     return false;
   }
@@ -2084,6 +2094,9 @@ static bool RegisterConstexprPCodeLiteral(const char* name) {
   StringInit(&entry->name, name);
   entry->memory = memory;
   entry->size = size == 0 ? 1 : size;
+  if (literal->type != kLiteralBuffer) {
+    entry->literal_element_size = ((StringLiteral*)literal)->element_size;
+  }
   VectorAppend(&pcode_static_data, entry);
   return true;
 }
@@ -2744,23 +2757,29 @@ static bool StoreConstexprPCodeSourceStringArgument(PCodeVM* vm,
             ? ((ExpressionInitializerASTNode*)expression)->expr
             : ((CastASTNode*)expression)->expr;
   }
-  if (expression != NULL && expression->op == AST_OP(string)) {
+  size_t element_size = 1;
+  if (expression != NULL && (expression->op == AST_OP(string) ||
+                             expression->op == AST_OP(string_wide))) {
     String* literal = ((ConstantASTNode*)expression)->value.string;
     if (literal == NULL) {
       return false;
+    }
+    if (expression->type != NULL && TypeIsFixedArray(expression->type) &&
+        expression->type->next != NULL && expression->type->next->size > 0) {
+      element_size = (size_t)expression->type->next->size;
     }
     StringInitFromSegment(&value, literal->value, literal->length);
   } else if (!PCodeSourceBuiltinStringValue(arg, &value)) {
     return false;
   }
-  size_t size = value.length + 1;
-  char* memory = malloc(size);
+  size_t size = value.length + element_size;
+  char* memory = calloc(1, size);
   if (memory == NULL) {
     StringDestruct(&value);
     *reason = "could not allocate constexpr source string argument";
     return false;
   }
-  memcpy(memory, value.value, size);
+  memcpy(memory, value.value, value.length);
   StringDestruct(&value);
   if (!PCodeVMRegisterMemoryRegion(vm, memory, size, false)) {
     free(memory);
@@ -2783,6 +2802,7 @@ static bool StoreConstexprPCodeSourceStringArgument(PCodeVM* vm,
   StringInit(&entry->name, NULL);
   entry->memory = (unsigned char*)memory;
   entry->size = size;
+  entry->literal_element_size = (int)element_size;
   VectorAppend(&pcode_static_data, entry);
   *sp -= sizeof(uint64_t);
   uint64_t address = (uint64_t)(uintptr_t)memory;
@@ -3308,6 +3328,29 @@ static void PCodeMapPointeeAddress(PCodeVM* vm, TypeRecord* type,
                      i < pcode_static_data.length;
        i++) {
     ConstexprPCodeStaticData* entry = pcode_static_data.value.p[i];
+    if (entry != NULL && entry->literal_element_size > 0) {
+      uint64_t start = (uint64_t)(uintptr_t)entry->memory;
+      size_t element_size = (size_t)entry->literal_element_size;
+      if (address < start || address >= start + entry->size) {
+        continue;
+      }
+      if (type->next == NULL || type->next->size != (int)element_size ||
+          (address - start) % element_size != 0) {
+        return;
+      }
+      if (entry->literal_object == NULL) {
+        entry->literal_object = ConstexprDurableCharArrayObject(
+            type->next, entry->memory, entry->size - element_size);
+      }
+      if (entry->literal_object != NULL) {
+        *slot = (ConstexprValue){
+            .is_address = true,
+            .address_object = entry->literal_object,
+            .address_index = (size_t)((address - start) / element_size),
+        };
+      }
+      return;
+    }
     if (entry == NULL || entry->symbol == NULL ||
         entry->symbol->type == NULL) {
       continue;
@@ -7258,13 +7301,17 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
                                   ASTNode* initializer,
                                   ConstexprObject* object) {
   ASTNode* expression = ConstexprInitializerExpression(initializer);
-  if (expression != NULL && expression->op == AST_OP(string) &&
+  if (expression != NULL &&
+      (expression->op == AST_OP(string) ||
+       expression->op == AST_OP(string_wide)) &&
       type != NULL && type->next != NULL &&
-      TypeIsIntegral(type->next)) {
+      TypeIsIntegral(type->next) && type->next->size > 0) {
     String* value = ((ConstantASTNode*)expression)->value.string;
     if (value != NULL) {
+      size_t element_size = (size_t)type->next->size;
+      size_t length = value->length / element_size;
       if (object->slots.length == 0) {
-        for (size_t i = 0; i <= value->length; i++) {
+        for (size_t i = 0; i <= length; i++) {
           ConstexprValue* slot = NewPCodeConstexprValueSlot();
           if (slot == NULL) {
             return false;
@@ -7280,8 +7327,12 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
               "constexpr pcode string array has no object slot");
           return false;
         }
-        slot->ivalue =
-            i < value->length ? (unsigned char)value->value[i] : 0;
+        uint64_t element = 0;
+        for (size_t b = 0; i < length && b < element_size && b < 8; b++) {
+          element |= (uint64_t)(unsigned char)value->value[i * element_size + b]
+                     << (8 * b);
+        }
+        slot->ivalue = (int64_t)element;
         slot->fvalue = (double)slot->ivalue;
       }
       return true;
@@ -7686,7 +7737,7 @@ static bool PCodeStoreElidedInitializer(ConstEvalContext* ctx,
   bool elided =
       aggregate && entry != NULL && entry->op != AST_OP(braced_init) &&
       entry->op != AST_OP(designated_init) && expr != NULL &&
-      expr->op != AST_OP(string) &&
+      expr->op != AST_OP(string) && expr->op != AST_OP(string_wide) &&
       (expr->type == NULL || (!TypeIsFixedArray(expr->type) &&
                               !TypeIsStructOrUnion(expr->type)));
   if (!elided) {

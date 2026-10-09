@@ -155,6 +155,10 @@ static int64_t NormalizeIntegerValueForNode(int64_t value, ASTNode* node) {
   return NormalizeIntegerValueForType(value, node != NULL ? node->type : NULL);
 }
 
+static bool IsStringLiteral(ASTNode* node) {
+  return node->op == AST_OP(string) || node->op == AST_OP(string_wide);
+}
+
 static bool TypeIsUnsignedIntegral(TypeRecord* type) {
   return type != NULL && TypeIsIntegral(type) && TypeIsUnsigned(type) &&
          !TypeIsBool(type);
@@ -888,7 +892,7 @@ case AST_OP(ast_op): \
         // literal is a non-null pointer, so the condition is true whenever
         // `cond` is.
         if (binary_node->right != NULL &&
-            binary_node->right->op == AST_OP(string)) {
+            IsStringLiteral(binary_node->right)) {
           *result = 1;
           return true;
         }
@@ -920,7 +924,7 @@ case AST_OP(ast_op): \
             return true;
           }
           if (binary_node->right != NULL &&
-              binary_node->right->op == AST_OP(string)) {
+              IsStringLiteral(binary_node->right)) {
             *result = 1;
             return true;
           }
@@ -983,7 +987,7 @@ case AST_OP(ast_op): \
         return ConstexprEvaluateBitCastAsInteger(ctx, node, result);
       }
       // A string literal converted to bool or another integer is non-null.
-      if (c->expr != NULL && c->expr->op == AST_OP(string) &&
+      if (c->expr != NULL && IsStringLiteral(c->expr) &&
           (c->cast_type == NULL || TypeIsIntegral(c->cast_type))) {
         *result = 1;
         return true;
