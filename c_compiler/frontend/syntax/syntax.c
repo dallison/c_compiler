@@ -8301,6 +8301,7 @@ static void CheckMatchingConstexprConsteval(Syntax* syntax,
 static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
                                         Vector* declarations,
                              Symbol* sym, Symbol* old_sym) {
+  int definition_errors_before = NumErrors();
   if (sym->type->info.function.old_style) {
     // Old style functions have the types of their formal
     // arguments specified before the open brace for their
@@ -8542,6 +8543,8 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     }
     sym->type->info.function.body =
         NewCompoundStatementASTNode(body, syntax->lex->current_token_location);
+    sym->type->info.function.body_had_parse_errors =
+        NumErrors() != definition_errors_before;
     // The body is hung off the function type, not reachable from the
     // declaration AST, so register it as a teardown root of its own.
     VectorAppend(&compiler->declaration_asts, sym->type->info.function.body);

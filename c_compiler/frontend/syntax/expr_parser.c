@@ -4201,11 +4201,14 @@ static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator,
   SyntaxOpenScope(syntax);
   AddLambdaFunctionScopeSymbols(syntax, call_operator->type);
   AddLambdaInitCaptureScopeSymbols(syntax, captures);
+  int errors_before = NumErrors();
   ASTNode* body = SyntaxParseStatement(syntax, followers);
   SyntaxCloseScope(syntax);
   syntax->current_template_parameter_count = old_template_parameter_count;
   syntax->context = old_context;
   call_operator->type->info.function.body = body;
+  call_operator->type->info.function.body_had_parse_errors =
+      NumErrors() != errors_before;
   VectorAppend(&compiler->declaration_asts, body);
   return body;
 }

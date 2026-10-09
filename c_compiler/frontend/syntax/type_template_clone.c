@@ -9372,6 +9372,8 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   if (from == NULL || to == NULL || from->info.function.body == NULL) {
     return NULL;
   }
+  to->info.function.body_had_parse_errors =
+      from->info.function.body_had_parse_errors;
   Vector* owned_args =
       AbsoluteMemberTemplateBodyArguments(parser, from, to, args);
   if (owned_args != NULL) {

@@ -644,6 +644,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   // try to lower the still-incomplete body to pcode and crash code generation.
   VectorAppend(&compiler->functions_being_analyzed, node->type);
 
+  int errors_before = NumErrors();
   // Perform semantic analysis on all the statements in the function body.
   AnalyzeStatement(node->type->info.function.body);
   StatementFinishAutoReturnDeduction(node->type, node);
@@ -655,7 +656,9 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
 
   // With the body fully typed, inject destructor calls for automatic objects at
   // each return/break/continue (the parser only appends them on fall-through).
-  if (NumErrors() == 0) {
+  // Errors elsewhere in the translation unit leave this body intact.
+  if (!node->type->info.function.body_had_parse_errors &&
+      NumErrors() == errors_before) {
     CXXInsertScopeExitDestructors(node->type);
   }
 

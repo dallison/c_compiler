@@ -1871,6 +1871,7 @@ static void FinishInlineMemberFunctionBody(
   Syntax* syntax = parser->syntax;
   LexMatch(parser->lex, TOK(lbrace));
 
+  int errors_before = NumErrors();
   TypeRecord* old_current_function = compiler->current_function;
   compiler->current_function = member_symbol->type;
   Vector* body = NewVector();
@@ -1915,6 +1916,8 @@ static void FinishInlineMemberFunctionBody(
   compiler->current_function = old_current_function;
   member_symbol->type->info.function.body =
       NewCompoundStatementASTNode(body, parser->lex->current_token_location);
+  member_symbol->type->info.function.body_had_parse_errors =
+      NumErrors() != errors_before;
   VectorAppend(&compiler->declaration_asts,
                member_symbol->type->info.function.body);
   SyntaxNeedBracket(syntax, TOK(rbrace), TC(decl));

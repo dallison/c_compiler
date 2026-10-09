@@ -266,6 +266,7 @@ typedef struct {
   bool has_constexpr_if;  // Body contains an if constexpr.         // @wire 55
   bool constexpr_if_checked;  // Transient summary cache.           // @wire -
   bool references_marked;  // Transient: body reference edges visited. // @wire -
+  bool body_had_parse_errors;  // Transient: errors parsing the body. // @wire -
   struct TypeRecord* coroutine_promise_type;  // Promise type.      // @wire 37
   struct TypeRecord* coroutine_frame_type;  // Lowered frame.       // @wire 38
   int coroutine_suspend_count;  // Suspension points in body.       // @wire 39
