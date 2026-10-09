@@ -105,4 +105,10 @@ ASTNode* LowerCXXBracedInitToTarget(ASTNode* braced, TypeRecord* target);
 ASTNode* LowerCXXBracedClassInitToConstructor(ASTNode* braced,
                                               TypeRecord* target);
 
+// List-initialization and aggregate member initialization sometimes need
+// `std::vector<T>` to become `T*` (via `.data()`) when the target is still a
+// raw pointer, or into `absl::Span` via its container constructor.
+bool CXXTryConvertStdVectorToPointeePointer(ASTNode* from, TypeRecord* to);
+bool CXXTryConvertStdVectorToSpan(ASTNode* from, TypeRecord* to);
+
 #endif /* expr_semantics_h */

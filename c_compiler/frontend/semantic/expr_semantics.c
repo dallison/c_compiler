@@ -15714,3 +15714,117 @@ bool IsConstantExpression(ASTNode* node) {
       return false;
   }
 }
+
+static bool TypeIsNamedClass(TypeRecord* type, const char* name) {
+  return type != NULL && TypeIsStructOrUnion(type) &&
+         type->info.struct_info != NULL &&
+         type->info.struct_info->tag_name != NULL &&
+         strcmp(type->info.struct_info->tag_name->value, name) == 0;
+}
+
+static bool TypeIsStdVectorType(TypeRecord* type) {
+  if (TypeIsNamedClass(type, "vector")) {
+    return true;
+  }
+  return type != NULL && type->template_origin != NULL &&
+         strcmp(type->template_origin->name.value, "vector") == 0;
+}
+
+static TypeRecord* StdVectorElementType(TypeRecord* vector_type) {
+  if (vector_type == NULL) {
+    return NULL;
+  }
+  if (vector_type->next != NULL) {
+    return vector_type->next;
+  }
+  if (vector_type->template_arguments != NULL &&
+      vector_type->template_arguments->length > 0) {
+    TemplateArgument* arg = vector_type->template_arguments->value.p[0];
+    if (arg != NULL && arg->kind == kTemplateParameterType) {
+      return arg->type;
+    }
+  }
+  return NULL;
+}
+
+bool CXXTryConvertStdVectorToPointeePointer(ASTNode* from, TypeRecord* to) {
+  if (!CompilerIsCXX() || from == NULL || from->type == NULL || to == NULL ||
+      !TypeIsPointer(to) || !TypeIsStdVectorType(from->type)) {
+    return false;
+  }
+  TypeRecord* element = StdVectorElementType(from->type);
+  if (element == NULL || to->next == NULL ||
+      (!TypeEqualIgnoringQualifiers(element, to->next) &&
+       !TypeEqualIgnoringSign(element, to->next))) {
+    return false;
+  }
+  ASTNode* parent = from->parent;
+  int child_id = from->child_id;
+  SourceLocation location = from->location;
+  ASTNode* object = ASTNodeMove(from);
+  ASTNode* data_member =
+      NewStringConstantASTNode(NewString("data"), NULL, location);
+  ASTNode* data_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, object, data_member);
+  Vector* args = NewVector();
+  ASTNode* data_call =
+      NewVectorASTNode(AST_OP(call), NULL, location, data_access, args);
+  ASTNode* analyzed = AnalyzeExpression(data_call);
+  if (analyzed == NULL) {
+    return false;
+  }
+  SemanticConvertType(analyzed, to, kConvertNormal);
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, analyzed, false);
+  }
+  return true;
+}
+
+static ASTNode* CXXStdVectorMemberCall(ASTNode* vector,
+                                       const char* member_name,
+                                       SourceLocation location) {
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(member_name), NULL, location);
+  ASTNode* access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, vector, member);
+  return AnalyzeExpression(
+      NewVectorASTNode(AST_OP(call), NULL, location, access, NewVector()));
+}
+
+bool CXXTryConvertStdVectorToSpan(ASTNode* from, TypeRecord* to) {
+  if (!CompilerIsCXX() || from == NULL || from->type == NULL || to == NULL ||
+      !TypeIsNamedClass(to, "Span") || !TypeIsStdVectorType(from->type)) {
+    return false;
+  }
+  if (TryConvertWithConvertingConstructorImpl(from, to, kConvertNormal,
+                                              /*allow_same_class=*/false)) {
+    return true;
+  }
+  ASTNode* parent = from->parent;
+  int child_id = from->child_id;
+  SourceLocation location = from->location;
+  ASTNode* vector = ASTNodeMove(from);
+  ASTNode* data = CXXStdVectorMemberCall(vector, "data", location);
+  ASTNode* size = CXXStdVectorMemberCall(vector, "size", location);
+  if (data == NULL || size == NULL) {
+    return false;
+  }
+  TypeRecord* span_type = TypeRecordCopy(to);
+  TypeRecordCalculateSize(span_type);
+  Vector* elements = NewVector();
+  VectorAppend(elements,
+               NewExpressionInitializerASTNode(data, location));
+  VectorAppend(elements,
+               NewExpressionInitializerASTNode(size, location));
+  ASTNode* braced =
+      NewBracedInitializerASTNode(elements, span_type, location);
+  ASTNode* lowered = LowerCXXBracedInitToTarget(braced, span_type);
+  TypeRecordDelete(span_type);
+  if (lowered == NULL || lowered == braced) {
+    return false;
+  }
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, lowered, false);
+  }
+  return true;
+}

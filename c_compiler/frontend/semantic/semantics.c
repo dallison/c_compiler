@@ -1709,6 +1709,13 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     return;
   }
 
+  if (CXXTryConvertStdVectorToSpan(from, to)) {
+    return;
+  }
+  if (CXXTryConvertStdVectorToPointeePointer(from, to)) {
+    return;
+  }
+
   if (CXXStructLayoutCompatibleShortcut(from->type, to)) {
     // Use the 'to' type as the node type.
     ASTNodeSetType(from, to);
