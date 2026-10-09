@@ -51,6 +51,8 @@ Symbol* FindFunctionTemplateInstantiation(Symbol* templ, TypeRecord* func,
                                           Vector* args);
 Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
                                                    const char* asm_name);
+StructMember* FindMemberFunctionTemplateSpecialization(StructMember* first,
+                                                       TypeRecord* type);
 void AppendFunctionTemplateInstantiation(Symbol* templ, Symbol* symbol);
 void FunctionTemplateInstantiationCacheDelete(
     struct FunctionTemplateInstantiationCache* cache);

@@ -203,6 +203,43 @@ struct atomic {
     return load();
   }
 
+  friend bool operator==(const atomic& lhs, T rhs) noexcept {
+    return lhs.load() == rhs;
+  }
+  friend bool operator==(T lhs, const atomic& rhs) noexcept {
+    return lhs == rhs.load();
+  }
+  friend bool operator!=(const atomic& lhs, T rhs) noexcept {
+    return lhs.load() != rhs;
+  }
+  friend bool operator!=(T lhs, const atomic& rhs) noexcept {
+    return lhs != rhs.load();
+  }
+  friend bool operator<(const atomic& lhs, T rhs) noexcept {
+    return lhs.load() < rhs;
+  }
+  friend bool operator<(T lhs, const atomic& rhs) noexcept {
+    return lhs < rhs.load();
+  }
+  friend bool operator>(const atomic& lhs, T rhs) noexcept {
+    return lhs.load() > rhs;
+  }
+  friend bool operator>(T lhs, const atomic& rhs) noexcept {
+    return lhs > rhs.load();
+  }
+  friend bool operator<=(const atomic& lhs, T rhs) noexcept {
+    return lhs.load() <= rhs;
+  }
+  friend bool operator<=(T lhs, const atomic& rhs) noexcept {
+    return lhs <= rhs.load();
+  }
+  friend bool operator>=(const atomic& lhs, T rhs) noexcept {
+    return lhs.load() >= rhs;
+  }
+  friend bool operator>=(T lhs, const atomic& rhs) noexcept {
+    return lhs >= rhs.load();
+  }
+
   void store(T value, memory_order order = memory_order_seq_cst) noexcept {
     if constexpr (__atomic_detail::is_word_object<T>) {
       __atomic_detail::store_word(&__value, value, order);

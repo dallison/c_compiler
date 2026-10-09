@@ -4937,6 +4937,12 @@ static void ConvertCompoundAssignmentOperand(BinaryASTNode* node) {
 }
 
 static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
+  if (CompilerIsCXX() && node->base.op == AST_OP(assign) &&
+      node->right != NULL && node->right->op == AST_OP(braced_init) &&
+      (node->base.flags & kASTDependentNewInitializer) != 0) {
+    node->base.flags |= kASTAnalyzed;
+    return (ASTNode*)node;
+  }
   node->left = AnalyzeExpression(node->left);
   // `x = {...}` assigns a braced-init-list, which is not itself an expression.
   // Lower it to a temporary of the left-hand side's type so it is analyzed and
@@ -4951,11 +4957,11 @@ static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
     // initializers".  Leave the braced list for
     // RewriteClonedDependentNewInitializer once T is concrete.
     bool dependent_new =
-        (node->base.flags & kASTDependentNewInitializer) != 0 &&
         node->base.type != NULL &&
         (TypeContainsTemplateParameter(node->base.type) ||
          node->base.type->dependent_member_name != NULL);
     if (dependent_new) {
+      node->base.flags |= kASTAnalyzed;
       return (ASTNode*)node;
     }
     TypeRecord* braced_target = node->left->type;
@@ -8375,7 +8381,62 @@ static int FuncAddrBaseRank(ASTNode* actual, TypeRecord* target) {
   return resolved != NULL ? 0 : -1;
 }
 
+/* True when `type` names a member of a still-dependent type (`T::slot_type`,
+ * `remove_reference<T>::type`). */
+static bool TypeHasDependentMemberName(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (current->dependent_member_name != NULL) {
+      return true;
+    }
+    if (current->template_arguments != NULL) {
+      for (size_t i = 0; i < current->template_arguments->length; i++) {
+        TemplateArgument* arg = current->template_arguments->value.p[i];
+        if (arg != NULL && arg->type != NULL &&
+            TypeHasDependentMemberName(arg->type)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/* The dependent member is a member of the enclosing class template (index below
+ * `template_parameter_base`), not of this function template's own parameters.
+ * `Policy::slot_type` qualifies; `remove_reference<T>::type` on `forward` does
+ * not. */
+static bool TypeDependsOnEnclosingTemplateParameter(TypeRecord* type, int base) {
+  if (base <= 0) {
+    return false;
+  }
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (current->dependent_member_name != NULL &&
+        current->template_parameter_index >= 0 &&
+        current->template_parameter_index < base) {
+      return true;
+    }
+    if (current->template_arguments != NULL) {
+      for (size_t i = 0; i < current->template_arguments->length; i++) {
+        TemplateArgument* arg = current->template_arguments->value.p[i];
+        if (arg != NULL && arg->type != NULL &&
+            TypeDependsOnEnclosingTemplateParameter(arg->type, base)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
+  /* nullptr converts to any object pointer.  While `slot_type*` is still
+   * `Policy::slot_type*`, that conversion is not a typed pointer yet; treat it
+   * as viable so the other arguments can rank the overload. */
+  if (actual != NULL && actual->type != NULL && TypeIsNullPointer(actual->type) &&
+      formal_type != NULL && formal_type->declarator == kDeclPointer &&
+      TypeHasDependentMemberName(formal_type)) {
+    return 0;
+  }
   TypeRecord* target = formal_type;
   bool reference = TypeIsReference(formal_type);
   if (reference) {
@@ -9528,6 +9589,43 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
   }
   if (!candidate->flags.is_template) {
     return explicit_args == NULL ? candidate : NULL;
+  }
+  // `f<T>()` inside a class template, where T is still a template parameter
+  // and does not appear in f's parameter list (`IsNoThrowSwappable<hasher>()`).
+  // The specialization cannot be built yet.  Keep the primary so a dependent
+  // noexcept specifier is not rejected as a deduction failure.
+  if (explicit_args != NULL) {
+    bool dependent_explicit = false;
+    for (size_t i = 0; i < explicit_args->length; i++) {
+      TemplateArgument* arg = explicit_args->value.p[i];
+      if (arg != NULL && arg->type != NULL &&
+          TypeContainsTemplateParameter(arg->type)) {
+        dependent_explicit = true;
+        break;
+      }
+      if (arg != NULL && arg->dependent_expr != NULL) {
+        dependent_explicit = true;
+        break;
+      }
+    }
+    if (dependent_explicit) {
+      return candidate;
+    }
+  }
+  // A member function template whose signature still names a member of the
+  // enclosing class template (`slot_type` = `typename Policy::slot_type`)
+  // cannot be instantiated until that class is.  Keep the primary; the call is
+  // resolved again when the enclosing class is instantiated.
+  {
+    int base = candidate->type->info.function.template_parameter_base;
+    Vector* formals = &candidate->type->info.function.prototype;
+    for (size_t i = 0; i < formals->length; i++) {
+      Symbol* formal = formals->value.p[i];
+      if (formal != NULL &&
+          TypeDependsOnEnclosingTemplateParameter(formal->type, base)) {
+        return candidate;
+      }
+    }
   }
   Vector* prototype = &candidate->type->info.function.prototype;
   for (size_t i = 0; node->children != NULL && i < node->children->length &&
@@ -10818,7 +10916,12 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
       id->symbol != NULL && id->symbol->type != NULL &&
       TypeIsFunction(id->symbol->type) &&
       id->symbol->type->info.function.unknown_args;
-  if (!gathered_inline_overloads && !id->symbol->flags.is_overloaded &&
+  // The class-scope symbol for a static member is cloned from the first
+  // overload, so its is_overloaded flag stays false after later overloads are
+  // added.  The candidates vector still holds the full set.
+  bool gathered_member_overloads = candidates.length > 1;
+  if (!gathered_inline_overloads && !gathered_member_overloads &&
+      !id->symbol->flags.is_overloaded &&
       !has_adl_candidates && !ordinary_unknown &&
       !(id->symbol->flags.is_template && id->symbol->type != NULL &&
         TypeIsFunction(id->symbol->type) &&
@@ -10829,9 +10932,11 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   Symbol* best = ResolveFunctionCandidateVector(
       &id->symbol->name, &candidates, node->children, id->template_arguments,
       /*diagnose_no_match=*/id->symbol->flags.is_overloaded || has_adl_candidates ||
-          ordinary_unknown || gathered_inline_overloads,
+          ordinary_unknown || gathered_inline_overloads ||
+          gathered_member_overloads,
       /*diagnose_ambiguous=*/id->symbol->flags.is_overloaded ||
-          has_adl_candidates || ordinary_unknown || gathered_inline_overloads,
+          has_adl_candidates || ordinary_unknown || gathered_inline_overloads ||
+          gathered_member_overloads,
       (ASTNode*)node);
   VectorDestruct(&candidates);
   if (best == NULL) {
@@ -12210,9 +12315,25 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       // `f<T>()` inside a class template: T is not concrete yet.  Keep the
       // call dependent so the enclosing constexpr initializer waits for
       // instantiation instead of rejecting the primary template.
+      bool dependent_signature = false;
+      if (TypeIsFunction(id->symbol->type)) {
+        Vector* formals = &id->symbol->type->info.function.prototype;
+        for (size_t i = 0; i < formals->length; i++) {
+          Symbol* formal = formals->value.p[i];
+          if (formal != NULL && TypeHasDependentMemberName(formal->type)) {
+            dependent_signature = true;
+            break;
+          }
+        }
+        if (id->symbol->type->next != NULL &&
+            TypeHasDependentMemberName(id->symbol->type->next)) {
+          dependent_signature = true;
+        }
+      }
       if (TypeIsFunction(id->symbol->type) &&
-          TemplateArgumentVectorContainsTemplateParameter(
-              id->template_arguments)) {
+          (TemplateArgumentVectorContainsTemplateParameter(
+               id->template_arguments) ||
+           dependent_signature)) {
         node->base.flags |= kASTDependentFunctorCall;
         TypeRecord* return_type = TypeSubstituteFunctionTemplateReturnType(
             &compiler->syntax, id->symbol, id->template_arguments);

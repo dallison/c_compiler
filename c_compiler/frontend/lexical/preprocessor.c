@@ -306,6 +306,9 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
   PreprocessorDefineMacro(p, "__ORDER_PDP_ENDIAN__", "3412");
   PreprocessorDefineMacro(p, "__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
   PreprocessorDefineMacro(p, "__FLOAT_WORD_ORDER__", "__ORDER_LITTLE_ENDIAN__");
+  // Darwin SDK headers (libkern/OSByteOrder.h) gate on __LITTLE_ENDIAN__ /
+  // __BIG_ENDIAN__, not only __BYTE_ORDER__.
+  PreprocessorDefineMacro(p, "__LITTLE_ENDIAN__", "1");
 }
 
 static void PredefineMacros(Preprocessor* p) {
@@ -5379,7 +5382,7 @@ static void ProcessPossibleMacro(Preprocessor* p,
   } else {
     // Not a predefined macro, let's try a user-defined one.
     Macro* macro = HashTableSearch(&p->macros, possible_macro_name->value);
-    if (macro != NULL && macro->enabled) {
+    if (macro != NULL && macro->enabled && !macro->undefined) {
       MacroDisable(macro);
       if (macro->is_function_like) {
         // Function-like macro, more complex processing needed.

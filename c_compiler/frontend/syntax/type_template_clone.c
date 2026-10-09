@@ -4061,6 +4061,43 @@ static ASTNode* NewClonedDependentConstructorCall(TypeRecord* record,
   return NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
 }
 
+static StructMember* FindStaticNonTemplateCopyConstruct(Struct* str) {
+  StructMember* head = FindStructMemberByName(str, "CopyConstruct");
+  for (StructMember* member = head; member != NULL;
+       member = member->overload_next) {
+    if (!member->is_static || member->symbol == NULL ||
+        member->symbol->flags.is_template || member->symbol->type == NULL ||
+        !TypeIsFunction(member->symbol->type)) {
+      continue;
+    }
+    if (member->symbol->type->info.function.prototype.length == 2) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
+static ASTNode* NewClonedMessageLiteArenaCopyCall(TypeRecord* type,
+                                                  Vector* actuals,
+                                                  SourceLocation location) {
+  if (type == NULL || type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL ||
+      type->info.struct_info->tag_name->value == NULL ||
+      strcmp(type->info.struct_info->tag_name->value, "MessageLite") != 0 ||
+      actuals == NULL || actuals->length != 2) {
+    return NULL;
+  }
+  StructMember* copy =
+      FindStaticNonTemplateCopyConstruct(type->info.struct_info);
+  if (copy == NULL || copy->symbol == NULL ||
+      copy->symbol->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* return_type = copy->symbol->type->next;
+  ASTNode* callee = NewStructMemberASTNode(copy, location);
+  return NewVectorASTNode(AST_OP(call), return_type, location, callee, actuals);
+}
+
 /* `*receiver = (T){}` copy-assigns into storage that placement new has not
  * constructed.  That is a byte copy when assignment is trivial, and ill-formed
  * when it is deleted (`std::atomic` deletes `RefcountedRep::operator=`).
@@ -4284,6 +4321,11 @@ static ASTNode* RewriteClonedDependentNewInitializer(
     VectorDelete(actuals);
     return NewClonedAggregateValueInitialization(clone, node->type, receiver,
                                                 node->location);
+  }
+  ASTNode* message_lite_copy =
+      NewClonedMessageLiteArenaCopyCall(node->type, actuals, node->location);
+  if (message_lite_copy != NULL) {
+    return message_lite_copy;
   }
   return NewClonedDependentConstructorCall(node->type, receiver, actuals,
                                            node->location);
@@ -8058,6 +8100,50 @@ static bool IsConstexprIfNode(ASTNode* node, void* data) {
          ((IfStatementASTNode*)node)->is_constexpr;
 }
 
+static bool StatementUnconditionallyReturns(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return false;
+  }
+  if (stmt->op == AST_OP(return)) {
+    return true;
+  }
+  if (stmt->op == AST_OP(compound)) {
+    Vector* inner = ((CompoundStatementASTNode*)stmt)->statements;
+    if (inner == NULL || inner->length == 0) {
+      return false;
+    }
+    return StatementUnconditionallyReturns(inner->value.p[inner->length - 1]);
+  }
+  return false;
+}
+
+// After `if constexpr` is folded to a branch that returns, later statements in
+// the same compound are not instantiated ([temp.inst] discarded statements).
+static ASTNode* PruneStatementsAfterUnconditionalReturn(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)data;
+  (void)action;
+  if (node == NULL || node->op != AST_OP(compound)) {
+    return node;
+  }
+  Vector* stmts = ((CompoundStatementASTNode*)node)->statements;
+  if (stmts == NULL) {
+    return node;
+  }
+  for (size_t i = 0; i < stmts->length; i++) {
+    if (!StatementUnconditionallyReturns(stmts->value.p[i])) {
+      continue;
+    }
+    for (size_t j = stmts->length; j-- > i + 1;) {
+      ASTNode* dead = stmts->value.p[j];
+      VectorDeleteElement(stmts, j);
+      ASTNodeDelete(dead);
+    }
+    break;
+  }
+  return node;
+}
+
 static ASTNode* PruneConstexprIfBeforeBodyClone(
     ASTNode* node, void* data, ASTNodeTransformAction* action) {
   (void)action;
@@ -9564,6 +9650,8 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
         ASTNodeClone(from->info.function.body, IdentityCloneNode, NULL, NULL);
     clone_source = ASTNodeVisitAndTransform(
         clone_source, PruneConstexprIfBeforeBodyClone, &clone);
+    clone_source = ASTNodeVisitAndTransform(
+        clone_source, PruneStatementsAfterUnconditionalReturn, NULL);
     body = ASTNodeClone(clone_source, CloneTemplateFunctionBodyNode,
                         &clone, NULL);
     ASTNodeDelete(clone_source);
@@ -9578,6 +9666,8 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   // Drop discarded `if constexpr` branches (whose condition the clone above has
   // already folded to a constant) before the re-analysis passes can walk them.
   body = ASTNodeVisitAndTransform(body, PruneClonedConstexprIf, NULL);
+  body = ASTNodeVisitAndTransform(body, PruneStatementsAfterUnconditionalReturn,
+                                  NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
                                   NULL);
   ASTNodeVisit(body, ReplaceSingleElementPackIdentifierVisitor, 0, &clone);
@@ -10263,7 +10353,8 @@ static Symbol* MemberTemplateDefinitionWithBody(Symbol* templ) {
         candidate->type->info.function.template_parameter_count !=
             templ->type->info.function.template_parameter_count ||
         candidate->type->info.function.prototype.length !=
-            templ->type->info.function.prototype.length) {
+            templ->type->info.function.prototype.length ||
+        !TypeEqual(candidate->type, templ->type)) {
       continue;
     }
     Symbol* candidate_definition = FunctionDefinitionWithBody(candidate);
@@ -10329,7 +10420,17 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
   }
   if (symbol->flags.is_template ||
       symbol->type->info.function.cxx_member_owner == NULL) {
-    return;
+    // An inline friend deferred during a signature probe has no member
+    // owner. Its pattern is `func_defn` and the class arguments are already
+    // recorded, so the body clone below still applies.
+    bool deferred_friend =
+        !symbol->flags.is_template &&
+        symbol->type->info.function.body == NULL &&
+        symbol->value.func_defn != NULL &&
+        symbol->type->template_arguments != NULL;
+    if (!deferred_friend) {
+      return;
+    }
   }
   if (symbol->type->info.function.is_defaulted &&
       (symbol->type->info.function.is_implicitly_declared ||

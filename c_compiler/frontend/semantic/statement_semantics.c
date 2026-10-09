@@ -2238,10 +2238,36 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
   }
 }
 
+static bool StatementUnconditionallyReturns(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return false;
+  }
+  if (stmt->op == AST_OP(return)) {
+    return true;
+  }
+  if (stmt->op == AST_OP(compound)) {
+    Vector* inner = ((CompoundStatementASTNode*)stmt)->statements;
+    if (inner == NULL || inner->length == 0) {
+      return false;
+    }
+    return StatementUnconditionallyReturns(inner->value.p[inner->length - 1]);
+  }
+  if (stmt->op == AST_OP(if)) {
+    IfStatementASTNode* if_node = (IfStatementASTNode*)stmt;
+    if (if_node->is_constexpr && if_node->else_part == NULL) {
+      return StatementUnconditionallyReturns(if_node->if_part);
+    }
+  }
+  return false;
+}
+
 static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
   for (size_t i = 0; i < node->statements->length; i++) {
     ASTNode* statement = node->statements->value.p[i];
     AnalyzeStatement(statement);
+    if (StatementUnconditionallyReturns(statement)) {
+      break;
+    }
     if (i == 0 && (node->base.flags & kASTRangeForInitializer) != 0 &&
         statement != NULL && statement->op == AST_OP(decl_list)) {
       DeclarationListASTNode* declarations =

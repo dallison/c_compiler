@@ -556,14 +556,16 @@ extern int    isatty(int fd);
 extern long    lseek(int fd, long offset, int whence);
 extern int    pipe(int *fildes);
 extern ssize_t pread(int fd, void *buf, size_t size, off_t offset);
-extern int    read(int fd, void *buf, size_t size);
+extern ssize_t read(int fd, void *buf, size_t size);
+extern int    ftruncate(int fd, off_t length);
+extern int    getpagesize(void);
 extern int    setgid(gid_t group);
 extern int    setuid(uid_t user);
 extern unsigned    sleep(unsigned seconds);
 extern char *    ttyname(int fd);
 extern int    rmdir(const char *path);
 extern int    unlink(const char *path);
-extern int    write(int fd, const void *buf, size_t size);
+extern ssize_t write(int fd, const void *buf, size_t size);
 extern long   sysconf(int name);
 extern char **environ;
 

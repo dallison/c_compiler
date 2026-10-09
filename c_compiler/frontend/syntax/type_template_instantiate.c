@@ -3150,6 +3150,16 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
       PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
     return;
   }
+  // A member specialization declared without a body (for example
+  // `template <> void MergeFrom<MessageLite>(...);`) must not receive the
+  // primary template's body just because a call names it; the out-of-line
+  // definition supplies the body later.
+  if (!symbol->flags.is_template &&
+      symbol->type->info.function.template_origin != NULL &&
+      (symbol->type->info.function.body == NULL ||
+       !symbol->type->info.function.definition)) {
+    return;
+  }
   // A body cloned only to deduce the return type was analyzed speculatively,
   // so the calls in it never queued their callees.  Clone it again.  The old
   // body is left alone: deduction may still refer to its nodes.
@@ -3371,6 +3381,18 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
   }
   Symbol* existing = FindFunctionTemplateInstantiation(templ, func,
                                                        completed_args);
+  if (existing == NULL && func != NULL &&
+      func->info.function.cxx_member_owner != NULL) {
+    StructMember* member = FindStructMember(
+        func->info.function.cxx_member_owner, &templ->name);
+    if (member != NULL) {
+      StructMember* specialization =
+          FindMemberFunctionTemplateSpecialization(member, func);
+      if (specialization != NULL && specialization->symbol != NULL) {
+        existing = specialization->symbol;
+      }
+    }
+  }
   if (existing != NULL) {
     if (compiler->speculative_template_instantiation_depth == 0) {
       EnsureFunctionTemplateInstantiationQueued(
@@ -4836,9 +4858,12 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
         formal->next != NULL) {
       int pointee_index = -1;
       if (TypeIsTemplateParameterPlaceholder(formal->next, &pointee_index) &&
-          pointee_index >= 0 &&
-          (size_t)pointee_index < explicit_arg_count) {
-        return true;
+          pointee_index >= 0) {
+        int deduced_index = DeductionArgumentIndex(pointee_index);
+        if (deduced_index >= 0 &&
+            (size_t)deduced_index < explicit_arg_count) {
+          return true;
+        }
       }
     }
     return false;
@@ -5091,6 +5116,68 @@ static TypeRecord* FormalWithAliasPattern(TypeRecord* formal) {
   return AliasMemberPatternType(formal);
 }
 
+/* A parameter type that mentions only enclosing class-template parameters (indices
+ * below `template_parameter_base`) is a non-deduced context for this function
+ * template.  `slot_type*` inside `template<class T> struct Box { template<class
+ * Alloc> static void f(slot_type*); }` must not fail deduction of `Alloc`. */
+static bool TypeMentionsFunctionTemplateParameter(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (current->template_parameter_index >= 0) {
+      int index = current->template_parameter_index;
+      if (g_deduce_template_parameter_base <= 0 ||
+          index >= g_deduce_template_parameter_base) {
+        return true;
+      }
+    }
+    if (current->declarator == kDeclArray &&
+        current->info.array.template_parameter_index >= 0) {
+      int index = current->info.array.template_parameter_index;
+      if (g_deduce_template_parameter_base <= 0 ||
+          index >= g_deduce_template_parameter_base) {
+        return true;
+      }
+    }
+    if (current->template_arguments != NULL) {
+      for (size_t i = 0; i < current->template_arguments->length; i++) {
+        TemplateArgument* arg = current->template_arguments->value.p[i];
+        if (arg == NULL) {
+          continue;
+        }
+        if (arg->template_parameter_index >= 0) {
+          int index = arg->template_parameter_index;
+          if (g_deduce_template_parameter_base <= 0 ||
+              index >= g_deduce_template_parameter_base) {
+            return true;
+          }
+        }
+        if (arg->type != NULL &&
+            TypeMentionsFunctionTemplateParameter(arg->type)) {
+          return true;
+        }
+        if (arg->pack_arguments != NULL) {
+          for (size_t j = 0; j < arg->pack_arguments->length; j++) {
+            TemplateArgument* pack_arg = arg->pack_arguments->value.p[j];
+            if (pack_arg != NULL && pack_arg->type != NULL &&
+                TypeMentionsFunctionTemplateParameter(pack_arg->type)) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+    if (TypeIsFunction(current)) {
+      for (size_t i = 0; i < current->info.function.prototype.length; i++) {
+        Symbol* formal = current->info.function.prototype.value.p[i];
+        if (formal != NULL && formal->type != NULL &&
+            TypeMentionsFunctionTemplateParameter(formal->type)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 /* Deduce template arguments for one (non-pack) call argument expression against
  * formal parameter type `formal`, applying the forwarding-reference rule: a
  * `T&&` parameter binding an lvalue deduces `T&` (reference collapsing). */
@@ -5176,6 +5263,14 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
    * wrongly reject calls needing a standard conversion (e.g. int -> long) and
    * corrupt deduction of the other, dependent, parameters. */
   if (!TypeContainsTemplateParameter(formal)) {
+    return true;
+  }
+  /* Enclosing class parameters are not parameters of this function template.
+   * A formal that mentions only those (for example `slot_type*`, a typedef for
+   * the class's `T`) is a non-deduced context: pairing succeeds, and conversion
+   * is checked later.  Failing here rejects `transfer_impl<Alloc>(..., Rank2{})`
+   * while the class template is still the primary. */
+  if (!TypeMentionsFunctionTemplateParameter(formal)) {
     return true;
   }
   /* [temp.deduct.type]: a type nominated by a qualified-id whose
@@ -5514,12 +5609,19 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
       }
     }
   }
+  // A C-style ellipsis (`f(T*, ...)`) is not a parameter pack. Extra call
+  // arguments are not deduced; explicit template arguments already cover
+  // the parameter list. Rejecting every varargs template drops the ellipsis
+  // overload of an SFINAE trait (`ArenaConstructable(...)`) and leaves the
+  // failed substitution's return type in place.
+  bool varargs = func->info.function.varargs;
   if (func->info.function.template_parameter_count <= 0 ||
-      func->info.function.unknown_args || func->info.function.varargs ||
-      (formal_pack_index < 0 &&
+      func->info.function.unknown_args ||
+      (!varargs && formal_pack_index < 0 &&
        (actuals->length < required_formal_count ||
         actuals->length > fixed_formal_count)) ||
-      (formal_pack_index >= 0 && actuals->length < required_formal_count)) {
+      ((varargs || formal_pack_index >= 0) &&
+       actuals->length < required_formal_count)) {
     g_deduce_template_parameter_base = saved_deduce_base;
     return NULL;
   }
@@ -5687,6 +5789,11 @@ retry_deduction:
         return NULL;
       }
       continue;
+    }
+    // Arguments past the fixed formals belong to the ellipsis. The prototype
+    // has no formal there; indexing it is out of range.
+    if (func->info.function.varargs && i >= fixed_formal_count) {
+      break;
     }
     formal = func->info.function.prototype.value.p[i + first_formal_arg];
     ASTNode* actual = actuals->value.p[i];
@@ -6049,8 +6156,15 @@ Symbol* TypeCreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   // Member templates of an instantiated class carry a current signature with
   // the enclosing arguments substituted and their own parameters rebased.
   // Instantiate that signature; the primary definition remains the body source.
+  // Forming the signature can instantiate a class named only in the return
+  // type (`enable_if_t<..., Wrapper<T>>`). That must not compile the class's
+  // inline friend bodies: a discarded SFINAE candidate (`Detect(...)` when
+  // `HasAbslStringify<T>` is false) would otherwise diagnose inside them.
+  // A later odr-use ensures the body.
+  compiler->speculative_template_instantiation_depth++;
   TypeRecord* func =
       InstantiateFunctionTemplateType(&parser, func_type, completed_args);
+  compiler->speculative_template_instantiation_depth--;
   bool substitution_failed = parser.template_substitution_failed;
   parser.template_substitution_failed = saved_substitution_failed;
   // A trailing `decltype` that is still unknown after concrete arguments were
@@ -8773,6 +8887,54 @@ static bool TemplateNonTypeArgumentMatchesParameter(
   return TypeAssignmentCompatible(arg->type, param->type);
 }
 
+/* `std::true_type` / `integral_constant<T, v>` converts to `T` by returning the
+ * static constexpr member `value`.  A converted constant expression of a
+ * non-type parameter (`conditional_t<flag(), ...>`) needs that value, not the
+ * class object itself. */
+static bool IntegralConstantMemberValue(TypeRecord* type, int64_t* out) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || out == NULL) {
+    return false;
+  }
+  String name;
+  StringInit(&name, "value");
+  StructMember* member = FindStructMember(type->info.struct_info, &name);
+  StringDestruct(&name);
+  if (member == NULL || !member->is_static || member->symbol == NULL ||
+      !member->symbol->flags.value_set || member->symbol->type == NULL ||
+      !TypeIsIntegral(member->symbol->type)) {
+    return false;
+  }
+  *out = member->symbol->value.ivalue;
+  return true;
+}
+
+static bool ConvertNonTypeArgumentToParameterType(TypeParser* parser,
+                                                   TemplateParameter* param,
+                                                   TemplateArgument* arg) {
+  (void)parser;
+  if (param == NULL || arg == NULL || param->type == NULL ||
+      param->kind != kTemplateParameterNonType ||
+      arg->kind != kTemplateParameterNonType ||
+      arg->dependent_expr != NULL || arg->template_parameter_index >= 0 ||
+      TemplateArgumentConcreteValueKind(arg) != kTemplateValueObject ||
+      !TypeIsIntegral(param->type)) {
+    return true;
+  }
+  int64_t value = 0;
+  if (!IntegralConstantMemberValue(arg->type, &value)) {
+    return true;
+  }
+  arg->value_kind = kTemplateValueIntegral;
+  arg->int_value = value;
+  arg->value_symbol = NULL;
+  ASTNodeDelete(arg->object_initializer);
+  arg->object_initializer = NULL;
+  TypeRecordDelete(arg->type);
+  arg->type = TypeRecordCopy(param->type);
+  return true;
+}
+
 static bool ConvertClassNonTypeTemplateArgument(TypeParser* parser,
                                                 TemplateParameter* param,
                                                 TemplateArgument* arg) {
@@ -9250,6 +9412,18 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
       return NULL;
     }
     if (param->kind == kTemplateParameterNonType &&
+        !ConvertNonTypeArgumentToParameterType(parser, param, arg)) {
+      if (emit_error) {
+        SyntaxError(parser->syntax,
+                    "Template non-type argument is not compatible with parameter type");
+      }
+      TemplateArgumentDelete(arg);
+      VectorDeleteWithContents(completed,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+      return NULL;
+    }
+    if (param->kind == kTemplateParameterNonType &&
         !TemplateNonTypeArgumentMatchesParameter(param, arg)) {
       if (emit_error) {
         SyntaxError(parser->syntax,
@@ -9681,7 +9855,17 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
     bool is_new_symbol = (in_scope == sym);
     if (is_new_symbol && ftpl->type->info.function.body != NULL &&
         constraints_satisfied &&
-        !PendingTemplateInstantiationHasAsmName(sym->asm_name.value)) {
+        !PendingTemplateInstantiationHasAsmName(sym->asm_name.value) &&
+        compiler->speculative_template_instantiation_depth > 0) {
+      // Signature probe only. Record the pattern so a later call can clone
+      // the body; analyzing it now diagnoses code that may never be used.
+      sym->value.func_defn = ftpl;
+      if (sym->type->template_arguments == NULL && args != NULL) {
+        sym->type->template_arguments = TemplateArgumentVectorCopy(args);
+      }
+    } else if (is_new_symbol && ftpl->type->info.function.body != NULL &&
+               constraints_satisfied &&
+               !PendingTemplateInstantiationHasAsmName(sym->asm_name.value)) {
       sym->type->info.function.body = CloneTemplateFunctionBody(
           parser, ftpl->type, sym->type, args);
       sym->type->info.function.definition = true;

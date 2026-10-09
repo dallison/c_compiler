@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-int write(int fd, const char* buffer, size_t len);
+ssize_t write(int fd, const void* buffer, size_t len);
 
 static void WriteString(const char* text) {
   write(2, text, strlen(text));

@@ -447,6 +447,12 @@ static bool LooksLikeConditionDeclaration(Syntax* syntax,
          after_type == TOK(amp) || after_type == TOK(ampamp))) {
       Symbol* sym = TypeParserParseDeclarator(&parser, type);
       if (sym != NULL && sym->name.length > 0) {
+        while (SyntaxLookingAtAnyAttribute(syntax)) {
+          Vector attrs = {0};
+          VectorInit(&attrs);
+          SyntaxParseAnyAttribute(syntax, &attrs);
+          AttributeListDestruct(&attrs);
+        }
         if (LexLookingAt(syntax->lex, TOK(equal)) ||
             LexLookingAt(syntax->lex, TOK(lbrace))) {
           is_declaration = true;

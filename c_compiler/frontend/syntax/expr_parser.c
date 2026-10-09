@@ -348,8 +348,21 @@ static ASTNode* NewMemberAccessFromThis(Syntax* syntax,
   StructMember* member =
       FindStructMember(this_symbol->type->next->info.struct_info, &member_name);
   if (member != NULL && member->is_static) {
-    StringDestruct(&member_name);
-    return NULL;
+    // The overload head can be static while a later overload is not
+    // (`static Capacity(size_t)` then `Capacity() const`).  Keep the
+    // `this->` form so the call resolves against the whole set.
+    bool has_nonstatic = false;
+    for (StructMember* overload = member->overload_next; overload != NULL;
+         overload = overload->overload_next) {
+      if (!overload->is_static) {
+        has_nonstatic = true;
+        break;
+      }
+    }
+    if (!has_nonstatic) {
+      StringDestruct(&member_name);
+      return NULL;
+    }
   }
   if (member == NULL && !allow_unresolved_member) {
     StringDestruct(&member_name);
@@ -414,6 +427,24 @@ static ASTNode* NewQualifiedBaseMemberAccessFromThis(
   }
   Symbol* owner = SyntaxFindQualifiedPrefixSymbol(
       syntax, name, name->components.length - 1);
+  if ((owner == NULL || owner->type == NULL) &&
+      name->components.length == 2 && !name->absolute) {
+    Struct* derived = this_symbol->type->next->info.struct_info;
+    String* base_name = name->components.value.p[0];
+    for (size_t i = 0; derived != NULL && i < derived->bases.length; i++) {
+      CXXBaseSpecifier* base = derived->bases.value.p[i];
+      if (base == NULL || base->type == NULL ||
+          !TypeIsStructOrUnion(base->type) ||
+          base->type->info.struct_info == NULL ||
+          base->type->info.struct_info->tag_name == NULL) {
+        continue;
+      }
+      if (StringEqual(base_name, base->type->info.struct_info->tag_name->value)) {
+        owner = base->type->info.struct_info->tag_symbol;
+        break;
+      }
+    }
+  }
   if (owner == NULL || owner->type == NULL) {
     return NULL;
   }
@@ -462,7 +493,8 @@ static ASTNode* NewQualifiedBaseMemberAccessFromThis(
   }
   TypeRecord* receiver_type = this_symbol->type->next;
   if (receiver_type->info.struct_info != owner_struct &&
-      !TypeIsDerivedFrom(receiver_type, owner_type)) {
+      !StructIsDerivedFrom(receiver_type->info.struct_info, owner_struct,
+                           /*public_only=*/false)) {
     if (own_materialized) {
       TypeRecordDelete(materialized);
     }
@@ -471,12 +503,22 @@ static ASTNode* NewQualifiedBaseMemberAccessFromThis(
   String member_name;
   StringInit(&member_name, FullyQualifiedIdentifierLast(name));
   StructMember* member = FindStructMember(owner_struct, &member_name);
-  if (member == NULL || member->is_static) {
+  if (member == NULL || member->symbol == NULL) {
     StringDestruct(&member_name);
     if (own_materialized) {
       TypeRecordDelete(materialized);
     }
     return NULL;
+  }
+  if (member->is_static) {
+    ASTNode* ref = NewIdentifierASTNode(
+        member->symbol, syntax->lex->current_token_location);
+    ref->flags |= kASTQualifiedName;
+    StringDestruct(&member_name);
+    if (own_materialized) {
+      TypeRecordDelete(materialized);
+    }
+    return ref;
   }
   ASTNode* left =
       NewIdentifierASTNode(this_symbol, syntax->lex->current_token_location);
@@ -1272,6 +1314,31 @@ static bool SymbolHasFunctionTemplateOverload(Symbol* symbol) {
   return false;
 }
 
+static bool StructMemberHasFunctionTemplate(StructMember* member) {
+  for (; member != NULL; member = member->overload_next) {
+    if (member->symbol != NULL && member->symbol->flags.is_template &&
+        member->symbol->type != NULL && TypeIsFunction(member->symbol->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool IdentifierNamesFunctionTemplateOverload(Symbol* symbol) {
+  if (SymbolHasFunctionTemplateOverload(symbol)) {
+    return true;
+  }
+  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
+    return false;
+  }
+  Struct* owner = symbol->type->info.function.cxx_member_owner;
+  if (owner == NULL) {
+    return false;
+  }
+  return StructMemberHasFunctionTemplate(
+      FindStructMemberByName(owner, symbol->name.value));
+}
+
 // Unqualified `InitializeStorage<QualTRef>(args...)` is rewritten to
 // `this->InitializeStorage` before `<` is seen.  The arrow form does not
 // otherwise keep explicit template arguments, so `<` is parsed as less-than
@@ -1954,8 +2021,11 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       !enclosing_automatic &&
       (block_scope_using_hides_member ||
        (symbol != NULL && symbol->flags.is_block_scope &&
-        !(symbol->flags.is_template && symbol->type != NULL &&
-          TypeIsFunction(symbol->type) &&
+        // Class-scope member functions are injected into the class-body
+        // symbol table, which marks them block-scope.  They are not local
+        // declarations and must not hide a non-static overload of the same
+        // name (`Capacity()` vs `static Capacity(size_t)`).
+        !(symbol->type != NULL && TypeIsFunction(symbol->type) &&
           symbol->type->info.function.cxx_member_owner != NULL)));
   // `symbol == NULL` still counts: out-of-line member bodies do not put
   // class members in the ordinary symbol table, so `Init<kFront>` would
@@ -1987,6 +2057,19 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           member != NULL && member->symbol != NULL &&
           (StorageIs(member->symbol->storage, STO(typedef)) ||
            SymbolIsTagSymbol(member->symbol));
+      // The overload-chain head may be a static function declared first
+      // (`static Capacity(size_t)` before `Capacity() const`).  Unqualified
+      // lookup then binds the injected static symbol, but a later non-static
+      // overload is still part of the set and needs `this->` so member
+      // overload resolution can see both.
+      bool member_has_nonstatic_function = false;
+      for (StructMember* overload = member; overload != NULL;
+           overload = overload->overload_next) {
+        if (overload->is_member_function && !overload->is_static) {
+          member_has_nonstatic_function = true;
+          break;
+        }
+      }
       bool symbol_is_this_member_function =
           symbol != NULL && symbol->type != NULL &&
           TypeIsFunction(symbol->type) &&
@@ -1994,13 +2077,15 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
           symbol->type->info.function.cxx_member_owner ==
               this_symbol->type->next->info.struct_info &&
           !symbol->type->info.function.is_constructor;
-      if ((member != NULL && !member->is_static && !member_is_constructor &&
-           !member_is_type_name) ||
+      if (((member != NULL && !member->is_static && !member_is_constructor &&
+            !member_is_type_name) ||
+           (member_has_nonstatic_function && !member_is_constructor &&
+            !member_is_type_name)) ||
           (member == NULL && symbol_is_this_member_function)) {
         bool member_fn_template =
-            (member != NULL && member->symbol != NULL &&
-             SymbolHasFunctionTemplateOverload(member->symbol)) ||
-            SymbolHasFunctionTemplateOverload(symbol);
+            (member != NULL &&
+             StructMemberHasFunctionTemplate(member)) ||
+            IdentifierNamesFunctionTemplateOverload(symbol);
         ASTNode* member_access = NewMemberAccessFromThis(
             syntax, &name,
             /*allow_unresolved_member=*/member == NULL);
@@ -2044,6 +2129,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     if (name.is_qualified) {
       ASTNode* member_access = NewQualifiedBaseMemberAccessFromThis(syntax, &name);
       if (member_access != NULL) {
+        AttachPendingMemberTemplateArguments(syntax, member_access, followers);
         FullyQualifiedIdentifierDestruct(&name);
         return member_access;
       }
@@ -2072,9 +2158,26 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
       // symbol table) rather than leaked.
       SyntaxAddSymbol(syntax, symbol);
     } else {
+      const char* simple_name = FullyQualifiedIdentifierLast(&name);
+      if (compiler->current_function != NULL &&
+          TypeIsFunction(compiler->current_function) &&
+          compiler->current_function->info.function.symbol != NULL &&
+          (strcmp(simple_name, "__func__") == 0 ||
+           strcmp(simple_name, "__FUNCTION__") == 0)) {
+        String replacement;
+        StringInit(&replacement, NULL);
+        StringPrintf(
+            &replacement, "\"%s\"",
+            compiler->current_function->info.function.symbol->name.value);
+        ASTNode* result = NewStringConstantASTNode(
+            NewString(replacement.value), NULL, lex->current_token_location);
+        StringDestruct(&replacement);
+        FullyQualifiedIdentifierDestruct(&name);
+        return result;
+      }
       bool builtin_call =
           LexLookingAt(lex, TOK(lparen)) &&
-          IsBuiltinCallName(FullyQualifiedIdentifierLast(&name));
+          IsBuiltinCallName(simple_name);
       // A call that is not a member (`clock_gettime(...)` inside a concrete
       // member function) must stay a free function.  A bare name can still be
       // a data member that is absent from the ordinary symbol table
@@ -2172,7 +2275,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
   Vector* template_arguments = NULL;
   if (symbol != NULL && name.template_arguments.length > 0 &&
       (TypeIsFunction(symbol->type) ||
-       SymbolHasFunctionTemplateOverload(symbol) ||
+       IdentifierNamesFunctionTemplateOverload(symbol) ||
        symbol->flags.is_template)) {
     Vector* parsed_args =
         name.template_arguments.value.p[name.template_arguments.length - 1];
@@ -2208,12 +2311,13 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     }
   }
   if (template_arguments == NULL && symbol != NULL &&
-      (symbol->flags.is_template || SymbolHasFunctionTemplateOverload(symbol)) &&
+      (symbol->flags.is_template ||
+       IdentifierNamesFunctionTemplateOverload(symbol)) &&
       LexLookingAt(lex, TOK(less))) {
     Vector* args = SyntaxParseTemplateArgumentList(syntax, followers);
     if (args != NULL) {
       if (TypeIsFunction(symbol->type) ||
-          SymbolHasFunctionTemplateOverload(symbol)) {
+          IdentifierNamesFunctionTemplateOverload(symbol)) {
         template_arguments = args;
         args = NULL;
       } else if (symbol->flags.is_concept) {
@@ -5009,12 +5113,117 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
   return result;
 }
 
+static StructMember* FindOffsetofMemberOnStruct(Struct* str, const char* name,
+                                                int base_offset,
+                                                int* byte_offset) {
+  if (str == NULL || name == NULL) {
+    return NULL;
+  }
+  StructMember* member = FindStructMemberByName(str, name);
+  if (member != NULL) {
+    if (byte_offset != NULL) {
+      *byte_offset = base_offset + member->byte_offset;
+    }
+    return member;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    member = FindOffsetofMemberOnStruct(base->type->info.struct_info, name,
+                                        base_offset + base->byte_offset,
+                                        byte_offset);
+    if (member != NULL) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
+static bool ResolveOffsetofMember(Syntax* syntax, TypeRecord* type,
+                                  const char* member_name, int64_t* offset) {
+  TypeRecord* bare = type;
+  while (bare != NULL && (TypeIsPointer(bare) || TypeIsReference(bare))) {
+    bare = bare->next;
+  }
+  if (bare != NULL && TypeIsStructOrUnion(bare) &&
+      bare->info.struct_info != NULL) {
+    int byte_offset = 0;
+    if (FindOffsetofMemberOnStruct(bare->info.struct_info, member_name, 0,
+                                   &byte_offset) != NULL) {
+      *offset = byte_offset;
+      return true;
+    }
+  }
+  if (bare == NULL || !TypeContainsTemplateParameter(bare)) {
+    return false;
+  }
+  Vector* parameters = syntax->current_template_parameters;
+  if (parameters == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < parameters->length; i++) {
+    TemplateParameter* parameter = parameters->value.p[i];
+    if (parameter == NULL || parameter->kind != kTemplateParameterType ||
+        parameter->name.length == 0) {
+      continue;
+    }
+    Symbol* tag = SyntaxFindTag(syntax, &parameter->name);
+    if (tag == NULL || tag->type == NULL || !TypeIsStructOrUnion(tag->type) ||
+        tag->type->info.struct_info == NULL) {
+      continue;
+    }
+    int byte_offset = 0;
+    if (FindOffsetofMemberOnStruct(tag->type->info.struct_info, member_name, 0,
+                                   &byte_offset) != NULL) {
+      *offset = byte_offset;
+      return true;
+    }
+  }
+  return false;
+}
+
 // Check if we have a varargs intrinsic.
 static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
                                TokenClass followers) {
   if (left->op == AST_OP(identifier)) {
     IdentifierASTNode* id_node = (IdentifierASTNode*)left;
     const char* name = id_node->symbol->name.value;
+    SourceLocation location = left->location;
+
+    if (strcmp(name, "__builtin_offsetof") == 0) {
+      TypeParser parser;
+      TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                     kParsingBlockScope);
+      TypeRecord* type = TypeParserParseType(&parser, true);
+      Symbol* type_sym = TypeParserParseDeclarator(&parser, type);
+      type = type_sym->type;
+      TypeParserDestruct(&parser);
+      SyntaxNeedBracket(syntax, TOK(comma), followers);
+      if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+        SyntaxError(syntax,
+                    "Expected member name in __builtin_offsetof(type, member)");
+      }
+      String member_name;
+      StringInit(&member_name, syntax->lex->spelling.value);
+      LexNextToken(syntax->lex);
+      SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      int64_t offset = 0;
+      if (!ResolveOffsetofMember(syntax, type, member_name.value, &offset)) {
+        SyntaxError(syntax, "%s is not a member of the given type",
+                    member_name.value);
+      }
+      StringDestruct(&member_name);
+      SymbolDelete(type_sym);
+      TypeRecord* size_type =
+          NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain);
+      ASTNode* result =
+          NewIntConstantASTNode(offset, size_type, location);
+      ASTNodeDelete(left);
+      return result;
+    }
 
     const struct Intrinsic* intrinsic = GetIntrinsic(name);
     if (intrinsic == NULL) {
@@ -5247,23 +5456,25 @@ static bool MemberAccessObjectIsDependent(ASTNode* object) {
 // `get` on `Storage<T, I>` rather than looking up `::get` in the derived class.
 static ASTNode* ParseQualifiedNestedStructMember(
     ASTNode* left, ASTOpcode op, Syntax* syntax, String* scope_name,
-    Vector* scope_args) {
+    Vector* scope_args, String* member_name) {
   SourceLocation location = syntax->lex->current_token_location;
-  if (!LexLookingAt(syntax->lex, TOK(identifier))) {
-    SyntaxError(syntax, "Expected member name after '::'");
-    StringDelete(scope_name);
-    if (scope_args != NULL) {
-      VectorDeleteWithContents(scope_args,
-                               (VectorElementDestructor)TemplateArgumentDelete,
-                               /*free_element=*/false);
+  if (member_name == NULL) {
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax, "Expected member name after '::'");
+      StringDelete(scope_name);
+      if (scope_args != NULL) {
+        VectorDeleteWithContents(scope_args,
+                                 (VectorElementDestructor)TemplateArgumentDelete,
+                                 /*free_element=*/false);
+      }
+      return NewBinaryASTNode(
+          op, NULL, location, left,
+          NewStringConstantASTNode(NewString(SyntaxFakeName(syntax)), NULL,
+                                   location));
     }
-    return NewBinaryASTNode(
-        op, NULL, location, left,
-        NewStringConstantASTNode(NewString(SyntaxFakeName(syntax)), NULL,
-                                 location));
+    member_name = NewString(syntax->lex->spelling.value);
+    LexNextToken(syntax->lex);
   }
-  String* member_name = NewString(syntax->lex->spelling.value);
-  LexNextToken(syntax->lex);
 
   Symbol* scope_symbol = SyntaxFindSymbol(syntax, scope_name);
   if (scope_symbol == NULL && left != NULL && left->type != NULL) {
@@ -5340,6 +5551,7 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
   }
 
   String* member_name;
+  String* qualified_base_scope = NULL;
   // Optional 'template' disambiguator in dependent member access, e.g.
   // `g.template onMessage<R>(...)` or `p->template get<0>()`.  When present the
   // member name must be a template-id, so its `<...>` is parsed as a template
@@ -5402,6 +5614,31 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
         LexNextToken(syntax->lex);
         StringDelete(member_name);
         member_name = dtor;
+        break;
+      }
+      // `p->Base::template AddAllocated<H>(...)`: the base-class qualifier is
+      // followed by a dependent template member name, not a destructor.
+      if (LexMatch(syntax->lex, TOK(template))) {
+        saw_template_keyword = true;
+        qualified_base_scope = member_name;
+        member_name = NULL;
+        if (LexLookingAt(syntax->lex, TOK(identifier))) {
+          member_name = NewString(syntax->lex->spelling.value);
+          LexNextToken(syntax->lex);
+        } else if (LexLookingAt(syntax->lex, TOK(operator))) {
+          String op_name;
+          if (SyntaxParseMemberOperatorName(syntax, &op_name)) {
+            member_name = NewString(op_name.value);
+            StringDestruct(&op_name);
+          } else {
+            SyntaxError(syntax, "Expected operator or conversion name");
+            member_name = NewString(SyntaxFakeName(syntax));
+          }
+        } else {
+          SyntaxError(syntax,
+                      "Expected template member name after 'template'");
+          member_name = NewString(SyntaxFakeName(syntax));
+        }
         break;
       }
       if (!LexLookingAt(syntax->lex, TOK(identifier))) {
@@ -5472,7 +5709,8 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
     // object without the `template` disambiguator.  This is well-formed here
     // only thanks to a lookahead heuristic; the standard requires the keyword,
     // and other compilers reject it, so steer the user toward portable code.
-    if (has_template_arguments && MemberAccessObjectIsDependent(left)) {
+    if (has_template_arguments && member_name != NULL &&
+        MemberAccessObjectIsDependent(left)) {
       SyntaxWarning(syntax, "missing-template-keyword",
                     "use 'template' keyword to treat '%s' as a dependent "
                     "template name (e.g. '%stemplate %s<...>')",
@@ -5484,10 +5722,46 @@ static ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
       has_template_arguments
           ? SyntaxParseTemplateArgumentList(syntax, followers)
           : NULL;
+  if (qualified_base_scope != NULL) {
+    String* scope_name = NewString(qualified_base_scope->value);
+    String* inner_member = NewString(member_name->value);
+    StringDelete(qualified_base_scope);
+    StringDelete(member_name);
+    member_name = NULL;
+    qualified_base_scope = NULL;
+    ASTNode* result = ParseQualifiedNestedStructMember(
+        left, op, syntax, scope_name, NULL, inner_member);
+    if (template_arguments != NULL && result != NULL) {
+      BinaryASTNode* access = (BinaryASTNode*)result;
+      ASTNode* member_node = access->right;
+      if (member_node != NULL &&
+          member_node->op == AST_OP(structmember)) {
+        ((StructMemberASTNode*)member_node)->template_arguments =
+            template_arguments;
+        template_arguments = NULL;
+      } else if (member_node != NULL &&
+                 member_node->op == AST_OP(identifier)) {
+        ((IdentifierASTNode*)member_node)->template_arguments =
+            template_arguments;
+        template_arguments = NULL;
+      } else {
+        VectorDeleteWithContents(
+            template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+    } else if (template_arguments != NULL) {
+      VectorDeleteWithContents(
+          template_arguments,
+          (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+    return result;
+  }
   if (CompilerIsCXX() && template_arguments != NULL &&
       LexMatch(syntax->lex, TOK(coloncolon))) {
     return ParseQualifiedNestedStructMember(left, op, syntax, member_name,
-                                           template_arguments);
+                                           template_arguments, NULL);
   }
   ASTNode* member_node = NewStringConstantASTNode(member_name,
                                           NULL,
@@ -6049,6 +6323,54 @@ static ASTNode* GetSizeofVLA(TypeRecord* type, SourceLocation location) {
   return size;
 }
 
+// `sizeof(Nested::member)` names a non-static data member in unevaluated
+// context (common in static_assert).  Parse it directly so the member name is
+// not resolved through the current member-function's injected scope.
+static ASTNode* TryParseSizeofNestedMember(Syntax* syntax,
+                                           SourceLocation location) {
+  if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(identifier))) {
+    return NULL;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  String nested_name;
+  StringInit(&nested_name, syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+  if (!LexMatch(syntax->lex, TOK(coloncolon)) ||
+      !LexLookingAt(syntax->lex, TOK(identifier))) {
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    StringDestruct(&nested_name);
+    return NULL;
+  }
+  String member_name;
+  StringInit(&member_name, syntax->lex->spelling.value);
+  LexNextToken(syntax->lex);
+
+  Symbol* nested = SyntaxFindSymbol(syntax, &nested_name);
+  if (nested == NULL || nested->type == NULL ||
+      !TypeIsStructOrUnion(nested->type) ||
+      nested->type->info.struct_info == NULL) {
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    StringDestruct(&nested_name);
+    StringDestruct(&member_name);
+    return NULL;
+  }
+  StructMember* member =
+      FindStructMemberByName(nested->type->info.struct_info, member_name.value);
+  StringDestruct(&nested_name);
+  StringDestruct(&member_name);
+  if (member == NULL || member->symbol == NULL || member->symbol->type == NULL) {
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return NULL;
+  }
+  LexCheckpointDestruct(&checkpoint);
+  TypeRecordCalculateSize(member->symbol->type);
+  return NewSizeofASTNodeWithKnownSize(member->symbol->type->size, location);
+}
+
 static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
   SourceLocation location = syntax->lex->current_token_location;
   if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(ellipsis))) {
@@ -6090,6 +6412,13 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
                   " in sizeof operator");
     }
     sizeof_type_name = true;
+  }
+  if (has_brackets && !sizeof_type_name) {
+    ASTNode* nested_member = TryParseSizeofNestedMember(syntax, location);
+    if (nested_member != NULL) {
+      SyntaxNeedBracket(syntax, TOK(rparen), followers);
+      return nested_member;
+    }
   }
   if (sizeof_type_name) {
     TypeParser parser;
@@ -7552,7 +7881,10 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
               syntax, allocated_type, NULL, location);
         }
         VectorDelete(initializers);
-      } else if (allocated_type_dependent) {
+      } else if (allocated_type_dependent ||
+                 (placement_actuals != NULL &&
+                  placement_actuals->length == 1 &&
+                  initializers->length > 1)) {
         scalar_initializer =
             NewBracedInitializerASTNode(initializers, NULL, location);
       } else if (TypeIsStructOrUnion(allocated_type) ||
@@ -7567,6 +7899,9 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
         VectorDelete(initializers);
       }
     } else {
+      // `new (p) T{a, b}` on a class with constructors is direct initialization
+      // via the matching constructor, not aggregate/braced assignment into
+      // storage (types such as ArenaBlock have const members and no assignment).
       ctor_actuals =
           ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
     }
@@ -7847,8 +8182,17 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                          temp_lhs, result);
     ASTNode* init;
     if (ctor_actuals != NULL) {
-      init = NewCXXConstructorCallForPointer(allocated_type, temp, ctor_actuals,
-                                             location);
+      if (TypeContainsTemplateParameter(allocated_type)) {
+        init = NewAssign(
+            NewUnaryASTNode(AST_OP(contents), allocated_type, location,
+                            NewIdentifierASTNode(temp, location)),
+            NewBracedInitializerASTNode(ctor_actuals, NULL, location),
+            allocated_type, location);
+        init->flags |= kASTDependentNewInitializer;
+      } else {
+        init = NewCXXConstructorCallForPointer(allocated_type, temp, ctor_actuals,
+                                               location);
+      }
     } else if (aggregate_initializer != NULL) {
       init = NewCXXNewInitialization(
           syntax, allocated_type,
@@ -7863,7 +8207,16 @@ static ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
               allocated_type, location),
           scalar_initializer, allocated_type, location);
     }
-    if (ctor_actuals == NULL && TypeContainsTemplateParameter(allocated_type)) {
+    bool defer_init_until_instantiation =
+        TypeContainsTemplateParameter(allocated_type);
+    if (!defer_init_until_instantiation && standard_placement &&
+        scalar_initializer != NULL &&
+        scalar_initializer->op == AST_OP(braced_init)) {
+      BracedInitializerASTNode* braced =
+          (BracedInitializerASTNode*)scalar_initializer;
+      defer_init_until_instantiation = braced->initializers->length > 1;
+    }
+    if (ctor_actuals == NULL && defer_init_until_instantiation) {
       init->flags |= kASTDependentNewInitializer;
       if (value_init) {
         init->flags |= kASTDependentNewValueInit;

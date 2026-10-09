@@ -4420,7 +4420,7 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
       !LexLookingAt(parser->lex, TOK(ellipsis)) &&
       !LexLookingAt(parser->lex, TOK(this)) &&
       !LexLookingAt(parser->lex, TOK(thread_local)) &&
-      !SyntaxLookingAtCXXAttribute(parser->syntax) &&
+      !SyntaxLookingAtAnyAttribute(parser->syntax) &&
       !SyntaxLookingAtType(parser->syntax);
   LexCheckpointRestore(parser->lex, &checkpoint);
   LexCheckpointDestruct(&checkpoint);
@@ -4440,7 +4440,7 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
   LexCheckpointSave(parser->lex, &file_checkpoint);
   LexNextToken(parser->lex);
   bool parameter_attribute =
-      SyntaxLookingAtCXXAttribute(parser->syntax);
+      SyntaxLookingAtAnyAttribute(parser->syntax);
   bool direct_initializer =
       !LexLookingAt(parser->lex, TOK(rparen)) &&
       !LexLookingAt(parser->lex, TOK(ellipsis)) &&

@@ -74,6 +74,15 @@ ForwardIt uninitialized_copy(InputIt first, InputIt last, ForwardIt output) {
   return output;
 }
 
+template <class InputIt, class Size, class ForwardIt>
+ForwardIt uninitialized_copy_n(InputIt first, Size count, ForwardIt output) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  for (; count > 0; --count, ++first, ++output) {
+    ::new (static_cast<void*>(&*output)) value_type(*first);
+  }
+  return output;
+}
+
 template <class ForwardIt, class T>
 void uninitialized_fill(ForwardIt first, ForwardIt last, const T& value) {
   typedef typename iterator_traits<ForwardIt>::value_type value_type;
@@ -132,6 +141,7 @@ class auto_ptr {
 #include <__construct_at>
 #include <__exception_support>
 #include <exception>
+#include <iterator>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -150,6 +160,41 @@ template <class T>
 constexpr T* addressof(T& value) noexcept {
   return reinterpret_cast<T*>(
       &const_cast<char&>(reinterpret_cast<const volatile char&>(value)));
+}
+
+template <class InputIt, class ForwardIt>
+ForwardIt uninitialized_copy(InputIt first, InputIt last, ForwardIt output) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  for (; first != last; ++first, ++output) {
+    ::new (static_cast<void*>(&*output)) value_type(*first);
+  }
+  return output;
+}
+
+template <class InputIt, class Size, class ForwardIt>
+ForwardIt uninitialized_copy_n(InputIt first, Size count, ForwardIt output) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  for (; count > 0; --count, ++first, ++output) {
+    ::new (static_cast<void*>(&*output)) value_type(*first);
+  }
+  return output;
+}
+
+template <class ForwardIt, class T>
+void uninitialized_fill(ForwardIt first, ForwardIt last, const T& value) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  for (; first != last; ++first) {
+    ::new (static_cast<void*>(&*first)) value_type(value);
+  }
+}
+
+template <class ForwardIt, class Size, class T>
+ForwardIt uninitialized_fill_n(ForwardIt first, Size count, const T& value) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  for (; count > 0; --count, ++first) {
+    ::new (static_cast<void*>(&*first)) value_type(value);
+  }
+  return first;
 }
 
 template <class Ptr>

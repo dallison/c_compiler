@@ -401,29 +401,6 @@ static Symbol* FindMemberFunctionTemplateOverload(StructMember* first) {
   return NULL;
 }
 
-static StructMember* FindMemberFunctionTemplateSpecialization(
-    StructMember* first, TypeRecord* type) {
-  for (StructMember* overload = first; overload != NULL;
-       overload = overload->overload_next) {
-    if (overload->symbol == NULL || overload->symbol->flags.is_template ||
-        overload->symbol->type == NULL ||
-        !TypeIsFunction(overload->symbol->type) ||
-        overload->symbol->type->info.function.template_origin == NULL) {
-      continue;
-    }
-    // Explicit specializations of one function template share a signature
-    // (`Add<kBack>(CordRep*)` and `Add<kFront>(CordRep*)`).  They are
-    // different functions when their template arguments differ.
-    if (TypeEqual(overload->symbol->type, type) &&
-        TemplateArgumentVectorEqual(
-            overload->symbol->type->template_arguments,
-            type->template_arguments)) {
-      return overload;
-    }
-  }
-  return NULL;
-}
-
 static void AppendMemberFunctionSpecialization(Syntax* syntax,
                                                StructMember* first,
                                                StructMember* specialization) {
@@ -449,8 +426,7 @@ static void AppendMemberFunctionSpecialization(Syntax* syntax,
 static void MarkFunctionTemplateSpecialization(Syntax* syntax, Symbol* sym,
                                                Symbol* first_overload) {
   if (!syntax->parsing_template_specialization || sym == NULL ||
-      sym->type == NULL || !TypeIsFunction(sym->type) ||
-      sym->type->template_arguments == NULL) {
+      sym->type == NULL || !TypeIsFunction(sym->type)) {
     return;
   }
   Symbol* templ = FindFunctionTemplateOverload(first_overload);
@@ -469,19 +445,22 @@ static void MarkFunctionTemplateSpecialization(Syntax* syntax, Symbol* sym,
 
 static void MarkMemberFunctionTemplateSpecialization(
     Syntax* syntax, Symbol* sym, StructMember* first_overload) {
+  // `template <> void Set(const string&, Arena*)` specializes a pack
+  // (`template <typename...> void Set(const string&, Arena*)`) with an empty
+  // argument list, so template_arguments may be NULL.
   if (!syntax->parsing_template_specialization || sym == NULL ||
-      sym->type == NULL || !TypeIsFunction(sym->type) ||
-      sym->type->template_arguments == NULL) {
+      sym->type == NULL || !TypeIsFunction(sym->type)) {
     return;
   }
   Symbol* templ = FindMemberFunctionTemplateOverload(first_overload);
+  if (templ == NULL && first_overload != NULL &&
+      first_overload->symbol != NULL &&
+      first_overload->symbol->flags.is_template) {
+    templ = first_overload->symbol;
+  }
   if (templ == NULL) {
-    String suffix;
-    StringInit(&suffix, NULL);
-    SymbolFunctionDiagnosticSuffix(sym, &suffix);
-    SyntaxError(syntax, "%s is not a function template%s",
-                sym->name.value, suffix.value);
-    StringDestruct(&suffix);
+    // `template <> void S<T>::f()` specializes a class-template member, not a
+    // member function template.
     return;
   }
   sym->type->info.function.template_origin = templ;
@@ -1859,14 +1838,29 @@ bool SyntaxCurrentTokenStartsQualifiedName(Syntax* syntax) {
           paren_depth++;
         } else if (current == TOK(rparen)) {
           paren_depth--;
+          // `buffer_ < buffer_end_)` is a comparison, not a template-id.
+          // Scanning until a matching `>` would read the rest of the include
+          // and pop that file out from under the saved checkpoint.
+          if (paren_depth < 0) {
+            break;
+          }
         } else if (current == TOK(lsquare)) {
           square_depth++;
         } else if (current == TOK(rsquare)) {
           square_depth--;
+          if (square_depth < 0) {
+            break;
+          }
         } else if (current == TOK(lbrace)) {
           brace_depth++;
         } else if (current == TOK(rbrace)) {
           brace_depth--;
+          if (brace_depth < 0) {
+            break;
+          }
+        } else if (current == TOK(semicolon) && paren_depth == 0 &&
+                   square_depth == 0 && brace_depth == 0) {
+          break;
         } else if (paren_depth == 0 && square_depth == 0 &&
                    brace_depth == 0) {
           if (current == TOK(less)) {
@@ -1968,6 +1962,32 @@ static Symbol* QualifiedClassAfterMaterialize(Syntax* syntax, Symbol* symbol) {
   return tag;
 }
 
+static Symbol* FindEnclosingBaseClassTagSymbol(Syntax* syntax, String* base_name) {
+  if (!CompilerIsCXX() || base_name == NULL) {
+    return NULL;
+  }
+  Struct* scope = syntax->cxx_class_head;
+  if (scope == NULL && compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    scope = compiler->current_function->info.function.cxx_member_owner;
+  }
+  for (; scope != NULL; scope = scope->lexical_parent) {
+    for (size_t i = 0; i < scope->bases.length; i++) {
+      CXXBaseSpecifier* base = scope->bases.value.p[i];
+      if (base == NULL || base->type == NULL ||
+          !TypeIsStructOrUnion(base->type) ||
+          base->type->info.struct_info == NULL ||
+          base->type->info.struct_info->tag_name == NULL) {
+        continue;
+      }
+      if (StringEqual(base_name, base->type->info.struct_info->tag_name->value)) {
+        return base->type->info.struct_info->tag_symbol;
+      }
+    }
+  }
+  return NULL;
+}
+
 Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
                                   FullyQualifiedIdentifier* name) {
   if (!name->is_qualified && name->components.length == 1) {
@@ -2014,6 +2034,10 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
             syntax, name, name->components.length - 1,
             /*allow_dependent_template_args=*/true);
     owner = QualifiedClassAfterMaterialize(syntax, owner);
+    if (owner == NULL && name->components.length == 2 && !name->absolute) {
+      owner = FindEnclosingBaseClassTagSymbol(syntax, name->components.value.p[0]);
+      owner = QualifiedClassAfterMaterialize(syntax, owner);
+    }
     if (owner != NULL && owner->type != NULL && TypeIsEnum(owner->type) &&
         owner->type->info.enum_info != NULL &&
         (CompilerIsCXX() || owner->type->info.enum_info->is_scoped)) {
@@ -3375,6 +3399,9 @@ bool ExpressionReferencesDeferredConstexprFunction(ASTNode* node,
   return compiler->syntax.current_template_parameter_count > 0;
 }
 
+static ASTNode* ConvertStaticAssertMessageResult(ASTNode* expression,
+                                                 TypeRecord* target);
+
 static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
   ASTNode* cloned = ASTNodeClone(expr, IdentityCloneNode, NULL, NULL);
   if (cloned == NULL) {
@@ -3389,6 +3416,13 @@ static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
   if (cloned == NULL) {
     ASTNodeDelete(cloned);
     return NULL;
+  }
+  // `static_assert(is_trivially_destructible<T>{})` contextually converts the
+  // trait object to bool through `operator bool`.
+  if (cloned->type != NULL && TypeIsStructOrUnion(cloned->type)) {
+    TypeRecord* boolean = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+    TypeRecordCalculateSize(boolean);
+    cloned = ConvertStaticAssertMessageResult(cloned, boolean);
   }
   return cloned;
 }
@@ -10260,7 +10294,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         SyntaxError(syntax,
                     "explicit is only supported on deduction guides");
       }
-      old_sym = parser->cxx_member_definition != NULL
+      old_sym = parser->cxx_member_definition != NULL &&
+                        !syntax->parsing_template_specialization
           ? parser->cxx_member_definition->symbol
           : NULL;
       if (parser->cxx_member_definition == NULL) {
@@ -10293,6 +10328,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
       if (parser->cxx_member_definition != NULL &&
           syntax->parsing_template_specialization) {
+        if (TypeIsFunction(sym->type) &&
+            parser->declarator_template_arguments != NULL &&
+            sym->type->template_arguments == NULL) {
+          sym->type->template_arguments = TemplateArgumentVectorCopy(
+              parser->declarator_template_arguments);
+          parser->declarator_template_arguments = NULL;
+        }
         MarkMemberFunctionTemplateSpecialization(
             syntax, sym, parser->cxx_member_definition);
         StructMember* matching_specialization =
@@ -10358,7 +10400,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           for (StructMember* candidate = parser->cxx_member_definition;
                candidate != NULL; candidate = candidate->overload_next) {
             if (candidate->symbol != NULL &&
-                RedeclarationTypesEqual(candidate->symbol->type, sym->type)) {
+                MemberDefinitionTypesEqual(
+                    parser, candidate->symbol->type, sym->type)) {
               matching_member = candidate;
               break;
             }
@@ -10441,13 +10484,47 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             }
           } else {
             if (IsDefinition(parser, old_sym, storage)) {
-              // This is a declaration of a previously known definition.
-              String symbol_name;
-              StringInit(&symbol_name, NULL);
-              SymbolFunctionDiagnosticName(sym, &symbol_name);
-              SyntaxError(syntax, "Duplicate definition of symbol %s",
-                          symbol_name.value);
-              StringDestruct(&symbol_name);
+              bool distinct_member_specialization =
+                  syntax->parsing_template_specialization &&
+                  parser->cxx_member_definition != NULL &&
+                  TypeIsFunction(old_sym->type) && TypeIsFunction(sym->type) &&
+                  old_sym->type->template_arguments != NULL &&
+                  sym->type->template_arguments != NULL &&
+                  !TemplateArgumentVectorEqual(
+                      old_sym->type->template_arguments,
+                      sym->type->template_arguments);
+              bool ool_explicit_specialization_definition =
+                  syntax->parsing_template_specialization &&
+                  parser->cxx_member_definition != NULL &&
+                  LexLookingAt(parser->lex, TOK(lbrace)) &&
+                  TypeIsFunction(old_sym->type) && TypeIsFunction(sym->type) &&
+                  old_sym->type->info.function.template_origin != NULL &&
+                  old_sym->type->template_arguments != NULL &&
+                  sym->type->template_arguments != NULL &&
+                  TemplateArgumentVectorEqual(
+                      old_sym->type->template_arguments,
+                      sym->type->template_arguments);
+              if (distinct_member_specialization) {
+                old_sym = NULL;
+              } else if (ool_explicit_specialization_definition) {
+                // A header reference can attach the primary template body to
+                // the explicit specialization declaration.  The out-of-line
+                // definition in a .cc file is authoritative.
+                old_sym->flags.is_defined = false;
+                old_sym->type->info.function.definition = false;
+                if (old_sym->type->info.function.body != NULL) {
+                  ASTNodeDelete(old_sym->type->info.function.body);
+                  old_sym->type->info.function.body = NULL;
+                }
+              } else {
+                // This is a declaration of a previously known definition.
+                String symbol_name;
+                StringInit(&symbol_name, NULL);
+                SymbolFunctionDiagnosticName(sym, &symbol_name);
+                SyntaxError(syntax, "Duplicate definition of symbol %s",
+                            symbol_name.value);
+                StringDestruct(&symbol_name);
+              }
             }
           }
         } else {
@@ -11195,7 +11272,8 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
 
 static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
                                            FullyQualifiedIdentifier* name,
-                                           SourceLocation location) {
+                                           SourceLocation location,
+                                           Vector* attributes) {
   Symbol* defining_template =
       LexLookingAt(syntax->lex, TOK(identifier))
           ? SyntaxFindSymbol(syntax, &syntax->lex->spelling)
@@ -11280,6 +11358,11 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
   }
   if (parsed != NULL) {
     SymbolDelete(parsed);
+  }
+  if (added && attributes != NULL && attributes->length != 0) {
+    VectorAppendVector(&alias->attributes, attributes);
+    VectorClear(attributes);
+    SyntaxApplyDeclarationAttributes(syntax, alias);
   }
   SyntaxNeedSemicolon(syntax, TC(decl));
   return EmptyDeclarationList(location);
@@ -11371,11 +11454,22 @@ static ASTNode* ParseUsingDeclaration(Syntax* syntax) {
     return EmptyDeclarationList(location);
   }
 
+  // alias-declaration: `using Name [[attr]] = type;`
+  Vector alias_attributes;
+  VectorInit(&alias_attributes);
+  if (!name.is_qualified) {
+    while (SyntaxParseAnyAttribute(syntax, &alias_attributes)) {
+    }
+  }
+
   if (!name.is_qualified && LexMatch(syntax->lex, TOK(equal))) {
-    ASTNode* result = ParseUsingAliasDeclaration(syntax, &name, location);
+    ASTNode* result = ParseUsingAliasDeclaration(syntax, &name, location,
+                                                 &alias_attributes);
+    AttributeListDestruct(&alias_attributes);
     FullyQualifiedIdentifierDestruct(&name);
     return result;
   }
+  AttributeListDestruct(&alias_attributes);
 
   if (!name.is_qualified) {
     SyntaxError(syntax, "Using declaration requires a qualified name");
@@ -15511,6 +15605,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
       break;
     }
     Symbol* sym = TypeParserParseDeclarator(parser, type);
+    while (SyntaxParseAnyAttribute(syntax, attributes) ||
+           SyntaxParseCXXAlignas(syntax, attributes)) {
+    }
     bool defer_auto_insert = false;
     ValidateC23AutoDeclarator(syntax, sym);
     if (sym != NULL) {
@@ -16416,7 +16513,16 @@ static bool CXXTypeStartsTemporaryExpression(Syntax* syntax) {
       LexCheckpointDestruct(&open_paren);
     }
     int depth = 0;
+    // `Type(obj.member())(arg)` is a temporary, then a call.  A declarator
+    // cannot contain `.` or `->`, so those tokens inside the argument list
+    // mean this is an expression even when another `(...)` follows.
+    bool interior_member = false;
     do {
+      if (depth > 0 &&
+          (LexLookingAt(syntax->lex, TOK(dot)) ||
+           LexLookingAt(syntax->lex, TOK(arrow)))) {
+        interior_member = true;
+      }
       if (LexLookingAt(syntax->lex, open)) {
         depth++;
       } else if (LexLookingAt(syntax->lex, close)) {
@@ -16426,7 +16532,8 @@ static bool CXXTypeStartsTemporaryExpression(Syntax* syntax) {
     } while (!LexEof(syntax->lex) && depth > 0);
     is_member_access =
         depth == 0 &&
-        (not_declarator || LexLookingAt(syntax->lex, TOK(dot)) ||
+        (not_declarator || interior_member ||
+         LexLookingAt(syntax->lex, TOK(dot)) ||
          LexLookingAt(syntax->lex, TOK(arrow)));
   }
   LexCheckpointRestore(syntax->lex, &checkpoint);
