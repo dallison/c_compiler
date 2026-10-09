@@ -3310,9 +3310,12 @@ static void ResolveOutOfLineDependentReturnType(TypeParser* parser) {
       !StorageIs(member->symbol->storage, STO(typedef))) {
     return;
   }
+  Qualifiers preserved = parser->base_type->qualifiers &
+                         (kQualConst | kQualVolatile | kQualRestrict);
   TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
   TypeRecordDelete(parser->base_type);
   parser->base_type = resolved;
+  parser->base_type->qualifiers |= preserved;
 }
 
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {

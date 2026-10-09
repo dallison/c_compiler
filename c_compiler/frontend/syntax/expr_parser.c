@@ -5143,6 +5143,70 @@ static StructMember* FindOffsetofMemberOnStruct(Struct* str, const char* name,
 }
 
 static bool ResolveOffsetofMember(Syntax* syntax, TypeRecord* type,
+                                  const char* member_name, int64_t* offset);
+
+static Struct* StructFromTypeRecord(TypeRecord* type) {
+  TypeRecord* bare = type;
+  while (bare != NULL && (TypeIsPointer(bare) || TypeIsReference(bare))) {
+    bare = bare->next;
+  }
+  if (bare != NULL && TypeIsStructOrUnion(bare) &&
+      bare->info.struct_info != NULL) {
+    return bare->info.struct_info;
+  }
+  return NULL;
+}
+
+static bool ResolveOffsetofDesignator(Syntax* syntax, TypeRecord* type,
+                                      int64_t* offset) {
+  int byte_offset = 0;
+  Struct* current = StructFromTypeRecord(type);
+  while (true) {
+    if (!LexLookingAt(syntax->lex, TOK(identifier))) {
+      SyntaxError(syntax,
+                  "Expected member name in __builtin_offsetof(type, member)");
+      return false;
+    }
+    String member_name;
+    StringInit(&member_name, syntax->lex->spelling.value);
+    LexNextToken(syntax->lex);
+    bool found = false;
+    if (current != NULL &&
+        FindOffsetofMemberOnStruct(current, member_name.value, byte_offset,
+                                   &byte_offset) != NULL) {
+      found = true;
+      StructMember* member = FindStructMemberByName(current, member_name.value);
+      TypeRecord* member_type =
+          member != NULL && member->symbol != NULL ? member->symbol->type
+                                                   : NULL;
+      while (member_type != NULL && TypeIsArray(member_type)) {
+        member_type = member_type->next;
+      }
+      current = StructFromTypeRecord(member_type);
+    } else if (ResolveOffsetofMember(syntax, type, member_name.value,
+                                     &byte_offset)) {
+      found = true;
+      current = NULL;
+    }
+    StringDestruct(&member_name);
+    if (!found) {
+      SyntaxError(syntax, "Member is not a member of the given type");
+      return false;
+    }
+    if (!LexMatch(syntax->lex, TOK(dot))) {
+      break;
+    }
+    if (current == NULL) {
+      SyntaxError(syntax,
+                  "Cannot apply nested member designator to dependent type");
+      return false;
+    }
+  }
+  *offset = byte_offset;
+  return true;
+}
+
+static bool ResolveOffsetofMember(Syntax* syntax, TypeRecord* type,
                                   const char* member_name, int64_t* offset) {
   TypeRecord* bare = type;
   while (bare != NULL && (TypeIsPointer(bare) || TypeIsReference(bare))) {
@@ -5202,20 +5266,11 @@ static ASTNode* VarargsIntrinsic(Syntax* syntax, ASTNode* left,
       type = type_sym->type;
       TypeParserDestruct(&parser);
       SyntaxNeedBracket(syntax, TOK(comma), followers);
-      if (!LexLookingAt(syntax->lex, TOK(identifier))) {
-        SyntaxError(syntax,
-                    "Expected member name in __builtin_offsetof(type, member)");
-      }
-      String member_name;
-      StringInit(&member_name, syntax->lex->spelling.value);
-      LexNextToken(syntax->lex);
-      SyntaxNeedBracket(syntax, TOK(rparen), followers);
       int64_t offset = 0;
-      if (!ResolveOffsetofMember(syntax, type, member_name.value, &offset)) {
-        SyntaxError(syntax, "%s is not a member of the given type",
-                    member_name.value);
+      if (!ResolveOffsetofDesignator(syntax, type, &offset)) {
+        SyntaxError(syntax, "Invalid member designator in __builtin_offsetof");
       }
-      StringDestruct(&member_name);
+      SyntaxNeedBracket(syntax, TOK(rparen), followers);
       SymbolDelete(type_sym);
       TypeRecord* size_type =
           NewTypeRecordWithSize(kTypeLong | kTypeUnsigned, kQualPlain);
