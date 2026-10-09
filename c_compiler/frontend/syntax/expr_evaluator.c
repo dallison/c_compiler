@@ -282,8 +282,35 @@ static bool EvaluateOffsetofStyleAddress(ASTNode* node, int64_t* result) {
   return true;
 }
 
+// Whether |node| is a floating value the host-double evaluator can compute;
+// long double keeps its own representation and is left to the integer walk.
+static bool EvaluatesAsHostFloating(ASTNode* node) {
+  return node != NULL && node->type != NULL &&
+         TypeIsFloatingPoint(node->type) &&
+         !TypeUsesLongDoubleRepresentation(node->type);
+}
+
+// Floating-integral conversion truncates toward zero; a value outside the
+// 64-bit range (or NaN) is undefined and not a constant.
+static bool FloatingToInteger(double value, int64_t* result) {
+  if (!(value >= -9223372036854775808.0 && value < 18446744073709551616.0)) {
+    return false;
+  }
+  *result = value >= 9223372036854775808.0 ? (int64_t)(uint64_t)value
+                                           : (int64_t)value;
+  return true;
+}
+
 bool EvaluateTruthInContext(ConstEvalContext* ctx, ASTNode* node,
                             int64_t* result) {
+  if (EvaluatesAsHostFloating(node)) {
+    double value;
+    if (!EvaluateFloatingPointExpressionInContext(ctx, node, &value)) {
+      return false;
+    }
+    *result = value != 0;
+    return true;
+  }
   // Integer evaluation of a pointer binding reads its pointee, so try the
   // pointer first.
   if (node != NULL && node->type != NULL &&
@@ -314,6 +341,11 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
   if (node->type != NULL &&
       !TypeIsIntegral(node->type) && !TypeIsFloatingPoint(node->type)) {
     return false;
+  }
+  if (EvaluatesAsHostFloating(node)) {
+    double value;
+    return EvaluateFloatingPointExpressionInContext(ctx, node, &value) &&
+           FloatingToInteger(value, result);
   }
   ConstantASTNode* const_node = (ConstantASTNode*)node;
   IdentifierASTNode* id_node = (IdentifierASTNode*)node;
@@ -956,6 +988,10 @@ case AST_OP(ast_op): \
         *result = 1;
         return true;
       }
+      if (c->cast_type != NULL && TypeIsBool(c->cast_type) &&
+          EvaluatesAsHostFloating(c->expr)) {
+        return EvaluateTruthInContext(ctx, c->expr, result);
+      }
       if (EvaluateIntegerExpressionInContext(ctx, c->expr, &left)) {
         *result = NormalizeIntegerValueForType(left, c->cast_type);
         return true;
@@ -985,7 +1021,7 @@ case AST_OP(ast_op): \
     case AST_OP(f2b):
     case AST_OP(d2b):
     case AST_OP(ld2b):
-      if (EvaluateIntegerExpressionInContext(ctx, unary_node->sub, &left)) {
+      if (EvaluateTruthInContext(ctx, unary_node->sub, &left)) {
         *result = left != 0 ? 1 : 0;
         return true;
       }

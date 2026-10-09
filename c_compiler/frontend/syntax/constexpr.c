@@ -8436,6 +8436,30 @@ static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
     *result = object_value;
     return true;
   }
+  // `const double& r = 2.5;` binds to a materialized scalar temporary.
+  if (node != NULL && node->op == AST_OP(compound_literal) &&
+      formal_object_type != NULL &&
+      (TypeIsIntegral(formal_object_type) ||
+       TypeIsFloatingPoint(formal_object_type))) {
+    ConstexprValue value = {0};
+    ConstexprObject* temporary = NewConstexprObject(ctx, formal_object_type, 1);
+    ConstexprValue* slot =
+        temporary != NULL ? ConstexprObjectSlot(temporary, 0) : NULL;
+    if (slot == NULL ||
+        !EvaluateConstexprValue(
+            ctx,
+            ConstexprInitializerExpression(
+                ((CompoundLiteralASTNode*)node)->initializer),
+            formal_object_type, &value) ||
+        !StoreConstexprSlot(ctx, slot, formal_object_type, value)) {
+      return false;
+    }
+    *result = (ConstexprValue){.is_address = true,
+                               .address_object = temporary,
+                               .address_index = 0,
+                               .address_slot = slot};
+    return true;
+  }
   return EvaluateConstexprAddressValue(ctx, node, result);
 }
 
@@ -9949,7 +9973,11 @@ static bool EvaluateConstexprVariableDeclarationInitializer(
     }
     ASTNode* class_call = initializer;
     ASTNode* class_cleanup = NULL;
-    if (initializer != NULL && initializer->op == AST_OP(comma)) {
+    // `(T(&tmp, args), tmp)` initializes from a constructed temporary; only a
+    // trailing call is a temporary's cleanup.
+    if (initializer != NULL && initializer->op == AST_OP(comma) &&
+        ((BinaryASTNode*)initializer)->right != NULL &&
+        ((BinaryASTNode*)initializer)->right->op != AST_OP(identifier)) {
       BinaryASTNode* comma = (BinaryASTNode*)initializer;
       class_call = comma->left;
       class_cleanup = comma->right;
