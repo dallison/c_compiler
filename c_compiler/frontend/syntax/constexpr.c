@@ -146,6 +146,7 @@ void ConstexprCanonicalizeAddressValue(ConstexprValue* value);
 static ConstexprObject* ConstexprAddressTargetObject(ConstEvalContext* ctx,
                                                      ConstexprValue value);
 static ConstexprValue ConstexprResolveForwardedAddress(ConstexprValue value);
+static bool ConstexprBindingForwards(ConstexprBinding* binding);
 static ConstexprObject* NewConstexprObject(ConstEvalContext* ctx,
                                            TypeRecord* type,
                                            size_t slot_count);
@@ -164,6 +165,16 @@ static bool EvaluateConstexprVoidExpression(ConstEvalContext* ctx,
                                             ASTNode* expr);
 static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                           ConstexprValue* result);
+static bool EvaluateConstexprSubscriptLocation(ConstEvalContext* ctx,
+                                               ASTNode* node,
+                                               bool allow_object,
+                                               ConstexprValue* result);
+static bool ConstexprBindPointerReference(ConstEvalContext* ctx,
+                                          ASTNode* node,
+                                          TypeRecord* pointer_type,
+                                          ConstexprValue* result);
+static bool ConstexprReferenceLocation(ConstEvalContext* ctx, ASTNode* node,
+                                       ConstexprValue* result);
 static bool EvaluateConstexprCondition(ConstEvalContext* ctx, ASTNode* cond,
                                        bool* result);
 static Symbol* ConstexprCallSymbol(ASTNode* node);
@@ -1417,6 +1428,9 @@ void ConstexprCanonicalizeAddressValue(ConstexprValue* value) {
        value->heap_block == NULL && value->address_binding != NULL;
        depth++) {
     ConstexprBinding* binding = value->address_binding;
+    if (!ConstexprBindingForwards(binding)) {
+      break;
+    }
     if (binding->address_object != NULL) {
       value->address_object = binding->address_object;
       if ((uint64_t)value->address_index + (uint64_t)binding->address_index <=
@@ -2054,12 +2068,20 @@ static bool ConstexprNullAddress(ConstexprValue* result) {
   return true;
 }
 
+// Whether the address of |binding| is what it holds: a reference's address is
+// its referent's, and `this` may hold the object itself.  A pointer variable's
+// own address is not the address it holds.
+static bool ConstexprBindingForwards(ConstexprBinding* binding) {
+  return binding->symbol == NULL || binding->symbol->type == NULL ||
+         !TypeIsPointer(binding->symbol->type) || !binding->is_address;
+}
+
 static ConstexprValue ConstexprResolveForwardedAddress(ConstexprValue value) {
   size_t forwarded = 0;
   while (value.is_address && value.address_binding != NULL &&
          forwarded++ < 1024) {
     ConstexprBinding* binding = value.address_binding;
-    if (binding->is_address) {
+    if (binding->is_address && ConstexprBindingForwards(binding)) {
       if (binding->address_binding == binding) {
         break;
       }
@@ -2090,6 +2112,24 @@ static ConstexprValue ConstexprResolveForwardedAddress(ConstexprValue value) {
     value.address_index = 0;
   }
   return value;
+}
+
+// The address a pointer binding holds, or the location a reference binding
+// designates.
+static bool ConstexprBindingAddress(ConstexprBinding* binding,
+                                    ConstexprValue* result) {
+  if (binding->heap_block == NULL && binding->address_binding == NULL &&
+      binding->address_slot == NULL && binding->address_object == NULL) {
+    return false;
+  }
+  *result = (ConstexprValue){.is_address = true,
+                             .address_binding = binding->address_binding,
+                             .address_slot = binding->address_slot,
+                             .address_object = binding->address_object,
+                             .address_index = binding->address_index,
+                             .heap_block = binding->heap_block,
+                             .heap_index = binding->heap_index};
+  return true;
 }
 
 static bool ConstexprDereferenceAddress(ConstexprValue address,
@@ -2190,9 +2230,11 @@ static bool ConstexprPointerValueIsExternal(ASTNode* node,
 }
 
 static bool ConstexprAddressEqual(ConstexprValue left, ConstexprValue right) {
+  // An element's address may also carry the element's slot.
+  bool elements = left.address_object != NULL && right.address_object != NULL;
   return left.is_address && right.is_address &&
          left.address_binding == right.address_binding &&
-         left.address_slot == right.address_slot &&
+         (elements || left.address_slot == right.address_slot) &&
          left.address_object == right.address_object &&
          left.address_index == right.address_index &&
          left.heap_block == right.heap_block &&
@@ -2239,6 +2281,7 @@ static bool EvaluateConstexprLValue(ConstEvalContext* ctx, ASTNode* node,
         *binding = (*binding)->address_binding;
         return true;
       }
+      *binding = NULL;
       return false;
     }
     return true;
@@ -4279,6 +4322,10 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
     return EvaluateConstexprAddressValue(
         ctx, ((UnaryASTNode*)node)->sub, result);
   }
+  if (type != NULL && TypeIsReference(type) && type->next != NULL &&
+      TypeIsPointer(type->next)) {
+    return ConstexprBindPointerReference(ctx, node, type->next, result);
+  }
   if (type != NULL && (TypeIsPointer(type) || TypeIsReference(type))) {
     return EvaluateConstexprAddressValue(ctx, node, result);
   }
@@ -4523,6 +4570,100 @@ static bool ConstexprIsVirtualPointerAssignment(BinaryASTNode* node) {
           StringStartsWith(&member->symbol->name, "__vbptr"));
 }
 
+// Moves the pointer |value| of |pointer_type| by |elements| within the array
+// it points into; one past the end is a valid result.
+static bool ConstexprAdvancePointer(ConstexprValue* value,
+                                    TypeRecord* pointer_type,
+                                    int64_t elements) {
+  *value = ConstexprResolveForwardedAddress(*value);
+  uint64_t magnitude = elements < 0 ? (uint64_t)0 - (uint64_t)elements
+                                    : (uint64_t)elements;
+  if (value->address_object != NULL) {
+    size_t length = value->address_object->slots.length;
+    if (value->address_index > length ||
+        (elements < 0 ? magnitude > value->address_index
+                      : magnitude > length - value->address_index)) {
+      return false;
+    }
+    value->address_index = elements < 0
+        ? value->address_index - (size_t)magnitude
+        : value->address_index + (size_t)magnitude;
+    value->address_slot = NULL;
+    return true;
+  }
+  if (value->heap_block != NULL) {
+    uint64_t element_size = pointer_type->next != NULL &&
+            pointer_type->next->size > 0
+        ? (uint64_t)pointer_type->next->size
+        : 1;
+    if (magnitude > SIZE_MAX / element_size) {
+      return false;
+    }
+    size_t bytes = (size_t)(magnitude * element_size);
+    if (value->heap_index > value->heap_block->size ||
+        (elements < 0
+             ? bytes > value->heap_index
+             : bytes > value->heap_block->size - value->heap_index)) {
+      return false;
+    }
+    value->heap_index = elements < 0 ? value->heap_index - bytes
+                                     : value->heap_index + bytes;
+    return true;
+  }
+  return elements == 0;
+}
+
+// `p += n` and `p -= n` on a pointer.
+static bool EvaluateConstexprPointerCompoundAssignment(
+    ConstEvalContext* ctx, BinaryASTNode* node, TypeRecord* pointer_type,
+    ConstexprValue* result) {
+  ASTNode* offset_expr = node->right;
+  if (offset_expr != NULL && offset_expr->op == AST_OP(ptr_scale)) {
+    offset_expr = ((PtrScaleASTNode*)offset_expr)->expr;
+  } else if (pointer_type->next == NULL || pointer_type->next->size > 1) {
+    return false;
+  }
+  int64_t offset;
+  if (!EvaluateIntegerExpressionInContext(ctx, offset_expr, &offset)) {
+    return false;
+  }
+  if (node->base.op == AST_OP(minuseq)) {
+    if (offset == INT64_MIN) {
+      return false;
+    }
+    offset = -offset;
+  }
+  ConstexprBinding* binding = NULL;
+  ConstexprValue* slot = NULL;
+  if (!EvaluateConstexprMutationLValue(ctx, node->left, &binding, &slot,
+                                       false)) {
+    return false;
+  }
+  ConstexprValue value = {.is_address = true};
+  if (binding != NULL) {
+    if (!binding->is_address) {
+      return false;
+    }
+    ConstexprBindingAddress(binding, &value);
+    value.state = binding->state;
+  } else if (slot->is_address) {
+    value = *slot;
+  } else {
+    return false;
+  }
+  if (!ConstexprAdvancePointer(&value, pointer_type, offset)) {
+    return false;
+  }
+  bool stored = binding != NULL
+      ? StoreConstexprBinding(ctx, binding, pointer_type, value)
+      : StoreConstexprSlot(ctx, slot, pointer_type, value);
+  if (!stored) {
+    return false;
+  }
+  *result = value;
+  return true;
+}
+
 static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
                                             BinaryASTNode* node,
                                             TypeRecord* type,
@@ -4584,10 +4725,13 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
     if (!EvaluateConstexprValue(ctx, node->right, left_type, &right)) {
       return false;
     }
-    ASTNode* address_expr =
+    bool located =
         node->left->op == AST_OP(contents)
-            ? ((UnaryASTNode*)node->left)->sub : node->left;
-    if (EvaluateConstexprAddressValue(ctx, address_expr, &address)) {
+            ? EvaluateConstexprAddressValue(
+                  ctx, ((UnaryASTNode*)node->left)->sub, &address)
+            : EvaluateConstexprSubscriptLocation(ctx, node->left, false,
+                                                 &address);
+    if (located) {
       if (ConstexprHasHeapBlock(ctx, address.heap_block)) {
         if (!StoreConstexprHeapAddress(address, left_type, right)) {
           return false;
@@ -4628,6 +4772,11 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
       left_type->declarator == kDeclArray) {
     left_type =
         left_type->next != NULL ? left_type->next : node->right->type;
+  }
+  if ((node->base.op == AST_OP(pluseq) || node->base.op == AST_OP(minuseq)) &&
+      left_type != NULL && TypeIsPointer(left_type)) {
+    return EvaluateConstexprPointerCompoundAssignment(ctx, node, left_type,
+                                                      result);
   }
   ConstexprValue right;
   if (!EvaluateConstexprValue(ctx, node->right, left_type, &right)) {
@@ -4791,37 +4940,10 @@ static bool EvaluateConstexprIncrement(ConstEvalContext* ctx,
     value_type = value_type->next;
   }
   if (value_type != NULL && TypeIsPointer(value_type)) {
-    new_value = ConstexprResolveForwardedAddress(new_value);
-    old_value = new_value;
-    if (new_value.address_object != NULL) {
-      if ((increment &&
-           new_value.address_index >= new_value.address_object->slots.length) ||
-          (!increment && new_value.address_index == 0)) {
-        return false;
-      }
-      if (increment) {
-        new_value.address_index++;
-      } else {
-        new_value.address_index--;
-      }
-    } else if (new_value.heap_block != NULL) {
-      size_t element_size = value_type->next != NULL &&
-              value_type->next->size > 0
-          ? (size_t)value_type->next->size
-          : 1;
-      if ((increment &&
-           (element_size > SIZE_MAX - new_value.heap_index ||
-            new_value.heap_index + element_size >
-                new_value.heap_block->size)) ||
-          (!increment && element_size > new_value.heap_index)) {
-        return false;
-      }
-      if (increment) {
-        new_value.heap_index += element_size;
-      } else {
-        new_value.heap_index -= element_size;
-      }
-    } else {
+    old_value = ConstexprResolveForwardedAddress(old_value);
+    new_value = old_value;
+    if ((new_value.address_object == NULL && new_value.heap_block == NULL) ||
+        !ConstexprAdvancePointer(&new_value, value_type, increment ? 1 : -1)) {
       return false;
     }
   } else if (value_type != NULL && TypeIsFloatingPoint(value_type)) {
@@ -7230,6 +7352,13 @@ static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
       *slot = binding->address_slot;
       return allow_object || !(*slot)->is_object;
     }
+    if (binding != NULL && binding->is_address &&
+        binding->address_object != NULL && id->symbol != NULL &&
+        TypeIsReference(id->symbol->type)) {
+      *slot = ConstexprObjectSlot(binding->address_object,
+                                  binding->address_index);
+      return *slot != NULL && (allow_object || !(*slot)->is_object);
+    }
   }
   if (node->op == AST_OP(subscript) &&
       ASTNodeGetShape(node) == kASTShapeBinary) {
@@ -7396,6 +7525,57 @@ static bool ConstexprFunctionAddress(ConstEvalContext* ctx, Symbol* symbol,
   }
   *result = (ConstexprValue){.is_address = true, .address_binding = binding};
   return true;
+}
+
+// The element `a[i]` designates, even when the element is a pointer.
+static bool EvaluateConstexprSubscriptLocation(ConstEvalContext* ctx,
+                                               ASTNode* node,
+                                               bool allow_object,
+                                               ConstexprValue* result) {
+  BinaryASTNode* subscript = (BinaryASTNode*)node;
+  ConstexprValue base;
+  int64_t index;
+  if (EvaluateConstexprAddressValue(ctx, subscript->left, &base) &&
+      EvaluateIntegerExpressionInContext(ctx, subscript->right, &index) &&
+      index >= 0) {
+    base = ConstexprResolveForwardedAddress(base);
+    if (base.heap_block != NULL) {
+      size_t element_size =
+          node->type != NULL && node->type->size > 0
+              ? (size_t)node->type->size : 1;
+      if ((uint64_t)index > SIZE_MAX / element_size) {
+        return false;
+      }
+      size_t byte_offset = (size_t)index * element_size;
+      if (byte_offset > SIZE_MAX - base.heap_index ||
+          base.heap_index + byte_offset >= base.heap_block->size) {
+        return false;
+      }
+      base.heap_index += byte_offset;
+      *result = base;
+      return true;
+    }
+    if (base.address_object != NULL &&
+        (uint64_t)index <= SIZE_MAX - base.address_index &&
+        base.address_index + (size_t)index <
+            base.address_object->slots.length) {
+      ConstexprValue* element = ConstexprObjectSlot(
+          base.address_object, base.address_index + (size_t)index);
+      if (ConstexprPointerValueIsExternal(node, element)) {
+        return false;
+      }
+      base.address_index += (size_t)index;
+      *result = base;
+      return true;
+    }
+  }
+  ConstexprValue* slot = NULL;
+  if (EvaluateConstexprObjectLValue(ctx, node, &slot, allow_object) &&
+      slot != NULL && !ConstexprPointerValueIsExternal(node, slot)) {
+    *result = (ConstexprValue){.is_address = true, .address_slot = slot};
+    return true;
+  }
+  return false;
 }
 
 static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
@@ -7595,9 +7775,15 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       if (ConstexprFunctionAddress(ctx, symbol, result)) {
         return true;
       }
-      if (symbol != NULL && TypeIsReference(symbol->type) &&
-          EvaluateConstexprAddressValue(ctx, address->sub, result)) {
-        return true;
+      if (symbol != NULL && TypeIsReference(symbol->type)) {
+        ConstexprBinding* binding = FindConstexprBinding(ctx, symbol);
+        if (binding != NULL && binding->is_address &&
+            ConstexprBindingAddress(binding, result)) {
+          return true;
+        }
+        if (EvaluateConstexprAddressValue(ctx, address->sub, result)) {
+          return true;
+        }
       }
     }
     if (address->sub != NULL &&
@@ -7713,15 +7899,19 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     }
     ConstexprBinding* binding = FindConstexprBinding(ctx, id->symbol);
     if (binding != NULL && binding->is_address) {
-      if (binding->heap_block != NULL || binding->address_binding != NULL ||
-          binding->address_slot != NULL || binding->address_object != NULL) {
-        *result = (ConstexprValue){.is_address = true,
-                                   .address_binding = binding->address_binding,
-                                   .address_slot = binding->address_slot,
-                                   .address_object = binding->address_object,
-                                   .address_index = binding->address_index,
-                                   .heap_block = binding->heap_block,
-                                   .heap_index = binding->heap_index};
+      if (ConstexprBindingAddress(binding, result)) {
+        // A `T*&` names where a pointer is stored (`x[0]` for `T*& v = x[0]`);
+        // its value is that pointer.  An address designating no stored
+        // pointer is already the value, as a T* designates no pointer.
+        TypeRecord* type = id->symbol != NULL ? id->symbol->type : NULL;
+        if (type != NULL && TypeIsReference(type) && type->next != NULL &&
+            TypeIsPointer(type->next)) {
+          ConstexprValue stored = {0};
+          if (ConstexprDereferenceAddress(*result, &stored) &&
+              stored.is_address) {
+            *result = stored;
+          }
+        }
         return true;
       }
       if (id->symbol != NULL && TypeIsPointer(id->symbol->type)) {
@@ -8021,47 +8211,7 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
         return true;
       }
     }
-    BinaryASTNode* subscript = (BinaryASTNode*)node;
-    ConstexprValue base;
-    int64_t index;
-    if (EvaluateConstexprAddressValue(ctx, subscript->left, &base) &&
-        EvaluateIntegerExpressionInContext(ctx, subscript->right, &index) &&
-        index >= 0) {
-      base = ConstexprResolveForwardedAddress(base);
-      if (base.heap_block != NULL) {
-        size_t element_size =
-            node->type != NULL && node->type->size > 0
-                ? (size_t)node->type->size : 1;
-        if ((uint64_t)index > SIZE_MAX / element_size) {
-          return false;
-        }
-        size_t byte_offset = (size_t)index * element_size;
-        if (byte_offset > SIZE_MAX - base.heap_index ||
-            base.heap_index + byte_offset >= base.heap_block->size) {
-          return false;
-        }
-        base.heap_index += byte_offset;
-        *result = base;
-        return true;
-      }
-      if (base.address_object != NULL &&
-          (uint64_t)index <= SIZE_MAX - base.address_index &&
-          base.address_index + (size_t)index <
-              base.address_object->slots.length) {
-        ConstexprValue* element = ConstexprObjectSlot(
-            base.address_object, base.address_index + (size_t)index);
-        if (ConstexprPointerValueIsExternal(node, element)) {
-          return false;
-        }
-        base.address_index += (size_t)index;
-        *result = base;
-        return true;
-      }
-    }
-    ConstexprValue* slot = NULL;
-    if (EvaluateConstexprObjectLValue(ctx, node, &slot, false) &&
-        slot != NULL && !ConstexprPointerValueIsExternal(node, slot)) {
-      *result = (ConstexprValue){.is_address = true, .address_slot = slot};
+    if (EvaluateConstexprSubscriptLocation(ctx, node, false, result)) {
       return true;
     }
   }
@@ -8137,10 +8287,44 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   return false;
 }
 
-static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
-                                                  ASTNode* node,
-                                                  TypeRecord* formal_object_type,
-                                                  ConstexprValue* result) {
+// Peels casts that change only a pointer's value category or top-level
+// qualifiers (`static_cast<T*&&>(p)`), which leave the same pointer object.
+static ASTNode* ConstexprStripPointerCasts(ASTNode* node) {
+  while (node != NULL && node->op == AST_OP(cast) &&
+         ((CastASTNode*)node)->kind != kCastBit) {
+    ASTNode* operand = ((CastASTNode*)node)->expr;
+    if (operand == NULL || node->type == NULL || operand->type == NULL ||
+        !TypeIsPointer(node->type) || !TypeIsPointer(operand->type) ||
+        !TypeEqual(node->type->next, operand->type->next)) {
+      break;
+    }
+    node = operand;
+  }
+  return node;
+}
+
+// The location an lvalue a reference binds to designates, or false when
+// |node| is not such an lvalue.  Each operand is evaluated once.
+static bool ConstexprReferenceLocation(ConstEvalContext* ctx, ASTNode* node,
+                                       ConstexprValue* result) {
+  node = ConstexprStripPointerCasts(node);
+  if (node != NULL && node->op == AST_OP(contents)) {
+    return EvaluateConstexprAddressValue(ctx, ((UnaryASTNode*)node)->sub,
+                                         result);
+  }
+  if (node != NULL && node->op == AST_OP(subscript)) {
+    return EvaluateConstexprSubscriptLocation(ctx, node, true, result);
+  }
+  if (node != NULL && node->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+    ConstexprBinding* reference =
+        symbol != NULL && TypeIsReference(symbol->type)
+            ? FindConstexprBinding(ctx, symbol) : NULL;
+    if (reference != NULL && reference->is_address &&
+        ConstexprBindingAddress(reference, result)) {
+      return true;
+    }
+  }
   ConstexprBinding* binding = NULL;
   ConstexprValue* slot = NULL;
   if (EvaluateConstexprLValue(ctx, node, &binding)) {
@@ -8148,17 +8332,78 @@ static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
     return true;
   }
   if (EvaluateConstexprObjectLValue(ctx, node, &slot, true)) {
-    ConstexprValue address = {0};
-    if (node != NULL &&
-        (node->op == AST_OP(subscript) || node->op == AST_OP(dot) ||
-         node->op == AST_OP(arrow)) &&
-        EvaluateConstexprAddressValue(ctx, node, &address) &&
-        address.address_object != NULL) {
-      address.address_slot = slot;
-      *result = address;
-    } else {
-      *result = (ConstexprValue){.is_address = true, .address_slot = slot};
+    *result = (ConstexprValue){.is_address = true, .address_slot = slot};
+    return true;
+  }
+  return false;
+}
+
+// Binds a reference to a pointer object of |pointer_type|: an lvalue
+// designates where the pointer is stored; a prvalue is materialized.
+static bool ConstexprBindPointerReference(ConstEvalContext* ctx,
+                                          ASTNode* node,
+                                          TypeRecord* pointer_type,
+                                          ConstexprValue* result) {
+  ASTNode* lvalue = ConstexprStripPointerCasts(node);
+  Symbol* callee = lvalue != NULL && lvalue->op == AST_OP(call)
+      ? ConstexprCallSymbol(lvalue) : NULL;
+  if (callee != NULL && callee->type != NULL &&
+      TypeIsFunction(callee->type) && callee->type->next != NULL &&
+      TypeIsReference(callee->type->next)) {
+    return EvaluateConstexprCall(ctx, lvalue, result);
+  }
+  bool is_lvalue = lvalue != NULL &&
+      (lvalue->op == AST_OP(identifier) || lvalue->op == AST_OP(contents) ||
+       lvalue->op == AST_OP(subscript) || lvalue->op == AST_OP(dot) ||
+       lvalue->op == AST_OP(arrow));
+  if (is_lvalue) {
+    return ConstexprReferenceLocation(ctx, lvalue, result);
+  }
+  if (lvalue != NULL && lvalue->op == AST_OP(compound_literal)) {
+    node = ConstexprInitializerExpression(
+        ((CompoundLiteralASTNode*)lvalue)->initializer);
+  }
+  ConstexprValue value = {0};
+  if (!EvaluateConstexprAddressValue(ctx, node, &value)) {
+    return false;
+  }
+  ConstexprObject* temporary = NewConstexprObject(ctx, pointer_type, 1);
+  ConstexprValue* slot =
+      temporary != NULL ? ConstexprObjectSlot(temporary, 0) : NULL;
+  if (slot == NULL || !StoreConstexprSlot(ctx, slot, pointer_type, value)) {
+    return false;
+  }
+  *result = (ConstexprValue){.is_address = true,
+                             .address_object = temporary,
+                             .address_index = 0,
+                             .address_slot = slot};
+  return true;
+}
+
+static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
+                                                  ASTNode* node,
+                                                  TypeRecord* formal_object_type,
+                                                  ConstexprValue* result) {
+  if (formal_object_type != NULL && TypeIsPointer(formal_object_type)) {
+    return ConstexprBindPointerReference(ctx, node, formal_object_type,
+                                         result);
+  }
+  if (node != NULL && (node->op == AST_OP(dot) || node->op == AST_OP(arrow))) {
+    ConstexprValue* slot = NULL;
+    if (EvaluateConstexprObjectLValue(ctx, node, &slot, true)) {
+      // Prefer the element form so the location compares equal to `&s.m`.
+      ConstexprValue address = {0};
+      if (EvaluateConstexprAddressValue(ctx, node, &address) &&
+          address.address_object != NULL) {
+        address.address_slot = slot;
+        *result = address;
+      } else {
+        *result = (ConstexprValue){.is_address = true, .address_slot = slot};
+      }
+      return true;
     }
+  }
+  if (ConstexprReferenceLocation(ctx, node, result)) {
     return true;
   }
   // A reference parameter can bind to a class/array prvalue that has been
@@ -8238,6 +8483,11 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
     binding_expr = ConstexprInitializerExpression(
         ((CompoundLiteralASTNode*)binding_expr)->initializer);
   }
+  if (binding_expr != NULL && formal_object_type != NULL &&
+      TypeIsPointer(formal_object_type)) {
+    return ConstexprBindPointerReference(ctx, binding_expr,
+                                         formal_object_type, value);
+  }
   if (binding_expr != NULL && binding_expr->op == AST_OP(contents)) {
     if (EvaluateConstexprAddressValue(
             ctx, ((UnaryASTNode*)binding_expr)->sub, value)) {
@@ -8247,7 +8497,8 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
   if (binding_expr != NULL && binding_expr->op == AST_OP(identifier)) {
     Symbol* symbol = ((IdentifierASTNode*)binding_expr)->symbol;
     if (symbol != NULL && TypeIsReference(symbol->type) &&
-        EvaluateConstexprAddressValue(ctx, binding_expr, value)) {
+        (ConstexprReferenceLocation(ctx, binding_expr, value) ||
+         EvaluateConstexprAddressValue(ctx, binding_expr, value))) {
       return true;
     }
   }
@@ -8262,14 +8513,7 @@ static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,
       return true;
     }
   }
-  ConstexprBinding* binding = NULL;
-  ConstexprValue* slot = NULL;
-  if (EvaluateConstexprLValue(ctx, binding_expr, &binding)) {
-    *value = (ConstexprValue){.is_address = true, .address_binding = binding};
-    return true;
-  }
-  if (EvaluateConstexprObjectLValue(ctx, binding_expr, &slot, true)) {
-    *value = (ConstexprValue){.is_address = true, .address_slot = slot};
+  if (ConstexprReferenceLocation(ctx, binding_expr, value)) {
     return true;
   }
   if (binding_expr != NULL && binding_expr->op == AST_OP(call)) {
@@ -8567,8 +8811,11 @@ bool ConstexprEvaluatePointerDifference(ConstEvalContext* ctx, ASTNode* node,
   }
   BinaryASTNode* difference = (BinaryASTNode*)node;
   if (difference->left == NULL || difference->right == NULL ||
-      !TypeIsPointer(difference->left->type) ||
-      !TypeIsPointer(difference->right->type)) {
+      difference->left->type == NULL || difference->right->type == NULL ||
+      !(TypeIsPointer(difference->left->type) ||
+        TypeIsFixedArray(difference->left->type)) ||
+      !(TypeIsPointer(difference->right->type) ||
+        TypeIsFixedArray(difference->right->type))) {
     return false;
   }
   ConstexprValue left = {0};
