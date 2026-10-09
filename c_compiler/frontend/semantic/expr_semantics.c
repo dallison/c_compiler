@@ -808,6 +808,43 @@ static bool ExpressionHasUnboundAutomatic(ASTNode* node) {
 
 static ASTNode* FoldConstantExpressionValue(ASTNode* node);
 
+static TypeRecord* BitFieldPromotionType(ASTNode* operand);
+
+// A bit-field read whose parent operator will promote it to a different type.
+// Folding it first would leave a constant of the field's declared type, and
+// the promotion depends on seeing the field; the parent folds instead.
+static bool BitFieldReadAwaitsPromotion(ASTNode* node) {
+  if (node->parent == NULL) {
+    return false;
+  }
+  switch (node->parent->op) {
+    case AST_OP(uminus):
+    case AST_OP(uplus):
+    case AST_OP(onescomp):
+    case AST_OP(plus):
+    case AST_OP(minus):
+    case AST_OP(mult):
+    case AST_OP(div):
+    case AST_OP(mod):
+    case AST_OP(lshift):
+    case AST_OP(rshift):
+    case AST_OP(and):
+    case AST_OP(bitor):
+    case AST_OP(exor):
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq):
+    case AST_OP(equal):
+    case AST_OP(noteq):
+      break;
+    default:
+      return false;
+  }
+  TypeRecord* promoted = BitFieldPromotionType(node);
+  return promoted != NULL && !TypeEqual(promoted, node->type);
+}
+
 // Attempt to fold a constant expression by evaluating it and if
 // successful, replacing it with a constant AST node with the value.
 static ASTNode* FoldConstantExpression(ASTNode* node) {
@@ -861,6 +898,9 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
   }
   // `&g[1]` designates the element itself, not its value.
   if (node->parent != NULL && node->parent->op == AST_OP(address)) {
+    return NULL;
+  }
+  if (BitFieldReadAwaitsPromotion(node)) {
     return NULL;
   }
 
@@ -1479,6 +1519,46 @@ bool CXXConvertNonCapturingLambdaToFunctionPointer(ASTNode* from,
   return true;
 }
 
+// The type a bit-field operand promotes to ([conv.prom]/5, C11 6.3.1.1p2):
+// int when int holds every value of the field, unsigned int when that does,
+// otherwise NULL.
+static TypeRecord* BitFieldPromotionType(ASTNode* operand) {
+  if (operand == NULL || !IsBitfieldReference(operand)) {
+    return NULL;
+  }
+  StructMember* member =
+      ((StructMemberASTNode*)((BinaryASTNode*)operand)->right)->member;
+  if (member == NULL || !member->is_bit_field || member->bit_size <= 0 ||
+      member->symbol == NULL || member->symbol->type == NULL ||
+      !TypeIsIntegral(member->symbol->type) ||
+      TypeIsEnum(member->symbol->type) ||
+      TypeIsBitInt(member->symbol->type)) {
+    return NULL;
+  }
+  int int_bits = SizeofType(kTypeInt) * 8;
+  bool is_unsigned = TypeIsUnsigned(member->symbol->type);
+  if (member->bit_size < int_bits ||
+      (member->bit_size == int_bits && !is_unsigned)) {
+    return NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  }
+  if (member->bit_size == int_bits) {
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualPlain);
+  }
+  return NULL;
+}
+
+// Applies bit-field promotion to |operand|; returns whether it promoted.
+static bool PromoteBitFieldOperand(ASTNode* operand) {
+  TypeRecord* promoted = BitFieldPromotionType(operand);
+  if (promoted == NULL) {
+    return false;
+  }
+  if (!TypeEqual(promoted, operand->type)) {
+    NormalConversion(operand, promoted);
+  }
+  return true;
+}
+
 static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   if (node == NULL) {
     return;
@@ -1508,6 +1588,9 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
       if (TypeIsComplex(node->sub->type) || TypeIsVector(node->sub->type)) {
         break;
       }
+      if (PromoteBitFieldOperand(node->sub)) {
+        break;
+      }
       int rank = GetRank(node->sub->type);
       if (!TypeIsBitInt(node->sub->type) && rank < IntRank()) {
         NormalConversion(
@@ -1515,6 +1598,10 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
       }
       break;
     }
+    case AST_OP(uplus):
+    case AST_OP(onescomp):
+      PromoteBitFieldOperand(node->sub);
+      break;
     default:
       break;
       
@@ -1765,6 +1852,14 @@ static void InsertNumericConversions(BinaryASTNode* node, bool promote_to_int) {
       // int.  This must happen on the actual operand types (including integer
       // constants such as `(short)1`) before any of the constant-adaption
       // below, otherwise small constants would skip promotion.
+      if (PromoteBitFieldOperand(node->left)) {
+        ASTNodeSetType((ASTNode*)node, node->left->type);
+        left_rank = GetRank(node->left->type);
+      }
+      if (PromoteBitFieldOperand(node->right)) {
+        ASTNodeSetType((ASTNode*)node, node->right->type);
+        right_rank = GetRank(node->right->type);
+      }
       if (!TypeIsBitInt(node->left->type) && left_rank > 0 &&
           left_rank < IntRank()) {
         NormalConversion(
@@ -2829,6 +2924,9 @@ static ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
 // wrong leaves `(unsigned short)x << 1` unsigned, and the whole point of
 // 6.5.7p3 giving the result the promoted left type is that it is signed.
 static void PromoteShiftOperand(ASTNode* operand) {
+  if (PromoteBitFieldOperand(operand)) {
+    return;
+  }
   int rank = GetRank(operand->type);
   if (TypeIsBitInt(operand->type) || rank <= 0 || rank >= IntRank()) {
     return;
