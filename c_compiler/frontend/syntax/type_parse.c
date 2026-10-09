@@ -1777,7 +1777,13 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       type_record = ParseCXXSplicedType(parser);
       type |= type_record->type;
     } else if (CompilerIsCXX() && allow_typedef &&
-               LexMatch(lex, TOK(typename))) {
+               LexLookingAt(lex, TOK(typename))) {
+      LexMatch(lex, TOK(typename));
+      if (LexLookingAt(lex, TOK(decltype))) {
+        type_record = ParseCXXDecltypeSpecifier(parser);
+        type_record = ParseCXXNestedTypeSuffix(parser, type_record);
+        type |= type_record->type;
+      } else {
       LexCheckpoint typename_name_start;
       LexCheckpointSave(lex, &typename_name_start);
       FullyQualifiedIdentifier typename_name;
@@ -2323,6 +2329,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       }
       LexCheckpointDestruct(&typename_name_start);
       FullyQualifiedIdentifierDestruct(&typename_name);
+      }
     } else if (allow_typedef &&
                (SyntaxCurrentTokenStartsQualifiedName(parser->syntax) ||
                 (parser->syntax->parsing_friend_type_specifier &&

@@ -787,13 +787,57 @@ static bool ClassTemplateIdentityTypesEqual(TypeRecord* left,
 // typedef (`typename Class<T>::size_type`) whose in-class counterpart was
 // recorded as a plain integer while the alias was still dependent.  Those
 // declarations designate the same function.
-static bool OutOfLineMemberTypeEqual(TypeRecord* left, TypeRecord* right,
-                                     bool parameter, bool allow_integral) {
+static TypeRecord* PeelTypeForOutOfLineTypedefMatch(TypeRecord* type) {
+  while (type != NULL) {
+    if (TypeIsPointer(type) || TypeIsReference(type)) {
+      type = type->next;
+      continue;
+    }
+    if (type->qualifiers & kQualConst) {
+      TypeRecord* inner = type->next;
+      if (inner == NULL) {
+        break;
+      }
+      type = inner;
+      continue;
+    }
+    break;
+  }
+  return type;
+}
+
+static bool OutOfLineDependentMemberMatchesInClassTypedef(
+    TypeParser* parser, TypeRecord* decl, TypeRecord* dependent) {
+  if (parser == NULL || parser->cxx_member_owner == NULL || decl == NULL ||
+      dependent == NULL || dependent->dependent_member_name == NULL) {
+    return false;
+  }
+  StructMember* member = FindStructMember(parser->cxx_member_owner,
+                                          dependent->dependent_member_name);
+  if (member == NULL || member->symbol == NULL ||
+      !StorageIs(member->symbol->storage, STO(typedef))) {
+    return false;
+  }
+  decl = PeelTypeForOutOfLineTypedefMatch(decl);
+  dependent = PeelTypeForOutOfLineTypedefMatch(dependent);
+  TypeRecord* typedef_type = member->symbol->type;
+  return OverloadTypesEqual(decl, typedef_type) ||
+         TypeEqual(decl, typedef_type) ||
+         OverloadTypesEqual(decl, dependent) || TypeEqual(decl, dependent);
+}
+
+static bool OutOfLineMemberTypeEqual(TypeParser* parser, TypeRecord* left,
+                                     TypeRecord* right, bool parameter,
+                                     bool allow_integral) {
   if (parameter ? OverloadParameterTypesEqual(left, right)
                 : OverloadTypesEqual(left, right)) {
     return true;
   }
   if (ClassTemplateIdentityTypesEqual(left, right)) {
+    return true;
+  }
+  if (OutOfLineDependentMemberMatchesInClassTypedef(parser, left, right) ||
+      OutOfLineDependentMemberMatchesInClassTypedef(parser, right, left)) {
     return true;
   }
   // `Iter&` in the class and `Iter<T>&` on the out-of-line definition name
@@ -805,24 +849,27 @@ static bool OutOfLineMemberTypeEqual(TypeRecord* left, TypeRecord* right,
        (TypeIsPointer(left) &&
         (left->qualifiers & ~kQualRestrict) ==
             (right->qualifiers & ~kQualRestrict)))) {
-    return OutOfLineMemberTypeEqual(left->next, right->next, parameter,
+    return OutOfLineMemberTypeEqual(parser, left->next, right->next, parameter,
                                     /*allow_integral=*/false);
   }
   return allow_integral && TypeIsIntegral(left) && TypeIsIntegral(right);
 }
 
-static bool OutOfLineMemberParameterTypesEqual(TypeRecord* left,
+static bool OutOfLineMemberParameterTypesEqual(TypeParser* parser,
+                                               TypeRecord* left,
                                                TypeRecord* right) {
-  return OutOfLineMemberTypeEqual(left, right, /*parameter=*/true,
+  return OutOfLineMemberTypeEqual(parser, left, right, /*parameter=*/true,
                                   /*allow_integral=*/true);
 }
 
-static bool OutOfLineMemberFunctionTypesEqual(TypeRecord* left,
+static bool OutOfLineMemberFunctionTypesEqual(TypeParser* parser,
+                                              TypeRecord* left,
                                               TypeRecord* right) {
   if (!TypeIsFunction(left) || !TypeIsFunction(right)) {
     return false;
   }
-  if (!OutOfLineMemberTypeEqual(left->next, right->next, /*parameter=*/false,
+  if (!OutOfLineMemberTypeEqual(parser, left->next, right->next,
+                                /*parameter=*/false,
                                 /*allow_integral=*/true)) {
     return false;
   }
@@ -854,7 +901,8 @@ static bool OutOfLineMemberFunctionTypesEqual(TypeRecord* left,
     Symbol* left_arg = left_fn->prototype.value.p[i];
     Symbol* right_arg = right_fn->prototype.value.p[i];
     if (left_arg == NULL || right_arg == NULL ||
-        !OutOfLineMemberParameterTypesEqual(left_arg->type, right_arg->type)) {
+        !OutOfLineMemberParameterTypesEqual(parser, left_arg->type,
+                                          right_arg->type)) {
       return false;
     }
   }
@@ -867,7 +915,7 @@ static bool MemberDefinitionTypesEqual(TypeParser* parser, TypeRecord* left,
     return true;
   }
   return parser != NULL && parser->cxx_member_definition != NULL &&
-         OutOfLineMemberFunctionTypesEqual(left, right);
+         OutOfLineMemberFunctionTypesEqual(parser, left, right);
 }
 
 static bool SameSignatureTemplateConstraintsAreEquivalent(Symbol* overload,
@@ -10298,6 +10346,18 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
                         !syntax->parsing_template_specialization
           ? parser->cxx_member_definition->symbol
           : NULL;
+      if (parser->cxx_member_definition == NULL && sym != NULL &&
+          TypeIsFunction(sym->type) &&
+          sym->type->info.function.cxx_member_owner != NULL) {
+        StructMember* member_head = FindStructMember(
+            sym->type->info.function.cxx_member_owner, &sym->name);
+        if (member_head != NULL) {
+          parser->cxx_member_definition = member_head;
+          if (!syntax->parsing_template_specialization) {
+            old_sym = member_head->symbol;
+          }
+        }
+      }
       if (parser->cxx_member_definition == NULL) {
         Symbol* raw_old = NULL;
         if (parser->cxx_qualified_definition_namespace != NULL) {
@@ -10309,6 +10369,12 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         }
         if (raw_old == NULL) {
           raw_old = FindFileScopeSymbol(syntax, &sym->name);
+        }
+        if (raw_old != NULL && TypeIsFunction(sym->type) &&
+            sym->type->info.function.cxx_member_owner != NULL &&
+            TypeIsFunction(raw_old->type) &&
+            raw_old->type->info.function.cxx_member_owner == NULL) {
+          raw_old = NULL;
         }
         old_sym = SymbolFindModuleCompatibleOverload(raw_old, sym);
         if (raw_old != NULL && old_sym == NULL) {
@@ -10353,6 +10419,33 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           parser->cxx_member_definition = specialization;
           old_sym = NULL;
           overload_was_appended = true;
+        } else if (TypeIsFunction(sym->type) &&
+                   parser->cxx_member_owner != NULL) {
+          // Explicit specialization of a static member of a class template
+          // specialization, e.g. `template<> Ret Traits<T>::fn() { ... }`.
+          StructMember* member_head =
+              FindStructMember(parser->cxx_member_owner, &sym->name);
+          if (member_head == NULL) {
+            member_head = parser->cxx_member_definition;
+          }
+          if (member_head != NULL) {
+            StructMember* matching =
+                FindStructMemberOverload(member_head, sym->type);
+            if (matching != NULL) {
+              parser->cxx_member_definition = matching;
+              old_sym = matching->symbol;
+            } else {
+              StructMember* specialization = NewStructMember(sym);
+              specialization->is_member_function = true;
+              specialization->is_static = member_head->is_static;
+              specialization->access = member_head->access;
+              AppendStructMemberOverload(parser, parser->cxx_member_owner,
+                                         member_head, specialization);
+              parser->cxx_member_definition = specialization;
+              old_sym = NULL;
+              overload_was_appended = true;
+            }
+          }
         }
       } else {
         MarkFunctionTemplateSpecialization(syntax, sym, old_sym);
@@ -10566,12 +10659,14 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         }
       } else {
         if (!overload_was_appended) {
-          // This is the first declaration of this symbol, add to the symbol
-          // table.
-          bool inserted = InsertFileScopeSymbol(syntax, sym);
-          if (!inserted) {
-            SyntaxError(syntax, "Duplicate symbol %s",
-                        sym->name.value);
+          if (parser->cxx_member_definition == NULL) {
+            // This is the first declaration of this symbol, add to the symbol
+            // table.
+            bool inserted = InsertFileScopeSymbol(syntax, sym);
+            if (!inserted) {
+              SyntaxError(syntax, "Duplicate symbol %s",
+                          sym->name.value);
+            }
           }
         }
         if (IsDefinition(parser, sym, storage)) {
