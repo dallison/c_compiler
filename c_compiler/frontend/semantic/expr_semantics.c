@@ -13564,6 +13564,20 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
   }
 
   TypeRecord* pointee = node->sub->type->next;
+  if (pointee == NULL) {
+    if (CompilerIsCXX() && node->sub->type != NULL &&
+        (TypeIsUnknown(node->sub->type) ||
+         TypeContainsAuto(node->sub->type) ||
+         TypeContainsTemplateParameter(node->sub->type))) {
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+      node->base.value_category = kValueCategoryLvalue;
+      return;
+    }
+    SemanticError(node->sub, "Cannot take contents of this expression");
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
   TypeRecord* materialized =
       TypeMaterializeClassTemplateSpecialization(&compiler->syntax, pointee);
   if (materialized != pointee) {
