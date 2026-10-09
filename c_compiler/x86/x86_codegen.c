@@ -3712,6 +3712,20 @@ static TargetInstruction* LowerDec(X86Generator* rv, Generator* gen,
   Store(rv, addr_node, inc, st_opcode, false);
   return SetLoweredNode(node, inc);}
 
+static TargetInstruction* X86AndBitFieldMask(X86Generator* rv,
+                                             TargetInstruction* value,
+                                             int64_t mask) {
+  if (X86IsPossibleImmediate(mask)) {
+    return Emit(rv, NewInstruction2(
+                        X86_OP(and), value,
+                        GetIntConstant(rv, NULL, kTargetType64Bit, mask)));
+  }
+  TargetInstruction* mask_reg = Emit(
+      rv, NewInstruction1(X86_OP(mov),
+                          GetIntConstant(rv, NULL, kTargetType64Bit, mask)));
+  return Emit(rv, NewInstruction2(X86_OP(and), value, mask_reg));
+}
+
 static TargetInstruction* LowerGetBitField(X86Generator* rv, IRNode* node) {
   TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
   int bit_pos = (int)IRIntConstValue(node->inputs.value.p[1]);
@@ -3720,8 +3734,8 @@ static TargetInstruction* LowerGetBitField(X86Generator* rv, IRNode* node) {
     // Shift right by bit_pos
     // Mask with bit_size
     TargetInstruction* lsr = Emit(rv, NewInstruction2(X86_OP(sar), value, GetIntConstant(rv, NULL, kTargetType32Bit, bit_pos)));
-    uint64_t mask = bit_size == 64 ? -1LL : (1 << bit_size) - 1;
-    TargetInstruction* m = Emit(rv, NewInstruction2(X86_OP(and), lsr, GetIntConstant(rv, NULL, kTargetType32Bit, mask)));
+    uint64_t mask = bit_size == 64 ? -1LL : (UINT64_C(1) << bit_size) - 1;
+    TargetInstruction* m = X86AndBitFieldMask(rv, lsr, (int64_t)mask);
     SetLoweredNode(node, m);
     return m;
   }
@@ -3743,15 +3757,15 @@ static TargetInstruction* LowerSetBitField(X86Generator* rv, IRNode* node) {
   IRNode* input_node = node->inputs.value.p[1];
   int bit_pos = (int)IRIntConstValue(node->inputs.value.p[2]);
   int bit_size = (int)IRIntConstValue(node->inputs.value.p[3]);
-  uint64_t mask = bit_size == 64 ? -1LL : (1 << bit_size) - 1;
+  uint64_t mask = bit_size == 64 ? -1LL : (UINT64_C(1) << bit_size) - 1;
   mask <<= bit_pos;
   
   TargetInstruction* input = Materialize(rv, input_node);
   TargetInstruction* output = Materialize(rv, output_node);
   TargetInstruction* lsl = Emit(rv, NewInstruction2(X86_OP(shl), input, GetIntConstant(rv, NULL, kTargetType32Bit, bit_pos)));
-  TargetInstruction* m1 = Emit(rv, NewInstruction2(X86_OP(and), lsl, GetIntConstant(rv, NULL, kTargetType32Bit, mask)));
+  TargetInstruction* m1 = X86AndBitFieldMask(rv, lsl, (int64_t)mask);
 
-  TargetInstruction* m2 = Emit(rv, NewInstruction2(X86_OP(and), output, GetIntConstant(rv, NULL, kTargetType32Bit, ~mask)));
+  TargetInstruction* m2 = X86AndBitFieldMask(rv, output, (int64_t)~mask);
   TargetInstruction* result = Emit(rv, NewInstruction2(X86_OP(or), m1, m2));
   SetLoweredNode(node, result);
   return result;

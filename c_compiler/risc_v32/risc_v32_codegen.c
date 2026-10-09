@@ -3728,7 +3728,7 @@ static TargetInstruction* LowerGetBitField(RV32Generator* rv, IRNode* node) {
     // Shift right by bit_pos
     // Mask with bit_size
     TargetInstruction* lsr = Emit(rv, NewInstruction2(RV32_OP(srai), value, GetIntConstant(rv, NULL, kTargetType32Bit, bit_pos)));
-    uint64_t mask = bit_size == 64 ? -1LL : (1 << bit_size) - 1;
+    uint64_t mask = bit_size == 64 ? -1LL : (UINT64_C(1) << bit_size) - 1;
     TargetInstruction* m = Emit(rv, NewInstruction2(RV32_OP(andi), lsr, GetIntConstant(rv, NULL, kTargetType32Bit, mask)));
     SetLoweredNode(node, m);
     return m;
@@ -3751,7 +3751,7 @@ static TargetInstruction* LowerSetBitField(RV32Generator* rv, IRNode* node) {
   IRNode* input_node = node->inputs.value.p[1];
   int bit_pos = (int)IRIntConstValue(node->inputs.value.p[2]);
   int bit_size = (int)IRIntConstValue(node->inputs.value.p[3]);
-  uint64_t mask = bit_size == 64 ? -1LL : (1 << bit_size) - 1;
+  uint64_t mask = bit_size == 64 ? -1LL : (UINT64_C(1) << bit_size) - 1;
   mask <<= bit_pos;
   
   TargetInstruction* input = Materialize(rv, input_node);

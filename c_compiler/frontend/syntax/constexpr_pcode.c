@@ -1945,6 +1945,61 @@ static bool StoreConstexprSlotBytes(ConstexprPCodeMarshal* marshal,
   return StoreConstexprScalarBytes(type, value, dest);
 }
 
+// A bit-field lives in bits [bit_offset, bit_offset + bit_size) of the
+// little-endian word of its type's size at its byte offset.
+static bool PCodeBitFieldWord(StructMember* member, size_t* word_size,
+                              uint64_t* mask) {
+  TypeRecord* type = member->symbol->type;
+  if (type == NULL || type->size <= 0 || type->size > 8 ||
+      member->bit_size <= 0 || member->bit_offset < 0 ||
+      member->bit_offset + member->bit_size > type->size * 8) {
+    return false;
+  }
+  *word_size = (size_t)type->size;
+  *mask = member->bit_size >= 64 ? ~UINT64_C(0)
+                                 : (UINT64_C(1) << member->bit_size) - 1;
+  return true;
+}
+
+static bool LoadConstexprBitFieldBytes(StructMember* member,
+                                       unsigned char* object_src,
+                                       ConstexprValue* value) {
+  size_t word_size = 0;
+  uint64_t mask = 0;
+  if (!PCodeBitFieldWord(member, &word_size, &mask)) {
+    return false;
+  }
+  uint64_t word = 0;
+  memcpy(&word, object_src + member->byte_offset, word_size);
+  uint64_t bits = (word >> member->bit_offset) & mask;
+  TypeRecord* type = member->symbol->type;
+  if (!TypeIsUnsigned(type) && !TypeIsBool(type) && member->bit_size < 64 &&
+      ((bits >> (member->bit_size - 1)) & 1) != 0) {
+    bits |= ~mask;
+  }
+  *value = (ConstexprValue){.ivalue = (int64_t)bits,
+                            .fvalue = (double)(int64_t)bits};
+  return true;
+}
+
+static bool StoreConstexprBitFieldBytes(StructMember* member,
+                                        ConstexprValue* value,
+                                        unsigned char* object_dest) {
+  size_t word_size = 0;
+  uint64_t mask = 0;
+  if (!PCodeBitFieldWord(member, &word_size, &mask) ||
+      (value != NULL && (value->is_object || value->is_address))) {
+    return false;
+  }
+  uint64_t bits = value != NULL ? (uint64_t)value->ivalue & mask : 0;
+  uint64_t word = 0;
+  memcpy(&word, object_dest + member->byte_offset, word_size);
+  word = (word & ~(mask << member->bit_offset)) |
+         (bits << member->bit_offset);
+  memcpy(object_dest + member->byte_offset, &word, word_size);
+  return true;
+}
+
 static bool StoreConstexprObjectBytes(ConstexprPCodeMarshal* marshal,
                                       TypeRecord* type,
                                       ConstexprObject* object,
@@ -2007,7 +2062,12 @@ static bool StoreConstexprObjectBytes(ConstexprPCodeMarshal* marshal,
       ConstexprValue* slot = PCodeConstexprObjectSlot(
           object, PCodeConstexprMemberSlotIndex(str, member));
       unsigned char* member_dest = dest + member->byte_offset;
-      if (slot != NULL && slot->is_object) {
+      if (member->is_bit_field) {
+        if (member->bit_size != 0 &&
+            !StoreConstexprBitFieldBytes(member, slot, dest)) {
+          return false;
+        }
+      } else if (slot != NULL && slot->is_object) {
         if (!StoreConstexprObjectBytes(marshal, member->symbol->type, slot->object,
                                        member_dest)) {
           return false;
@@ -2414,9 +2474,18 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
       }
       ConstexprValue* slot = PCodeConstexprObjectSlot(
           object, PCodeConstexprMemberSlotIndex(str, member));
-      if (slot == NULL ||
-          !LoadConstexprValueBytes(member->symbol->type,
-                                   src + member->byte_offset, runtime, slot)) {
+      if (member->is_bit_field) {
+        if (member->bit_size == 0) {
+          continue;
+        }
+        if (slot == NULL || !LoadConstexprBitFieldBytes(member, src, slot)) {
+          DeletePCodeConstexprObject(object);
+          return false;
+        }
+      } else if (slot == NULL ||
+                 !LoadConstexprValueBytes(member->symbol->type,
+                                          src + member->byte_offset, runtime,
+                                          slot)) {
         DeletePCodeConstexprObject(object);
         return false;
       }

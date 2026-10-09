@@ -1214,6 +1214,85 @@ static void InitArray(ASTNode* expr, ASTNode* subinit, int offset,
 static void ExpandBracedInitializer(BracedInitializerASTNode* init,
                                     int dest_offset, Vector* initializers);
 
+// Bit-fields share a storage unit, so their values are merged into the one
+// integer initializer at that unit's offset.
+static void InitBitField(ASTNode* expr, StructMember* member, int offset,
+                         Vector* initializers) {
+  int64_t value = 0;
+  if (!EvaluateIntegerExpression(expr, &value)) {
+    SemanticError(
+        expr, "Invalid static initialization; need a constant expression");
+    return;
+  }
+  int size = member->symbol->type->size;
+  InitializerType kind;
+  switch (size) {
+    case 1:
+      kind = kInitTypeByte;
+      break;
+    case 2:
+      kind = kInitTypeHalf;
+      break;
+    case 4:
+      kind = kInitTypeWord;
+      break;
+    case 8:
+      kind = kInitTypeLong;
+      break;
+    default:
+      SemanticError(expr, "Unsupported bit-field storage size");
+      return;
+  }
+  Initializer* unit = NULL;
+  for (size_t i = initializers->length; i > 0; i--) {
+    Initializer* candidate = initializers->value.p[i - 1];
+    if (candidate->offset == offset && candidate->type == kind) {
+      unit = candidate;
+      break;
+    }
+  }
+  if (unit == NULL) {
+    unit = calloc(1, sizeof(Initializer));
+    unit->type = kind;
+    unit->offset = offset;
+    VectorAppend(initializers, unit);
+  }
+  uint64_t word;
+  switch (kind) {
+    case kInitTypeByte:
+      word = unit->value.byte;
+      break;
+    case kInitTypeHalf:
+      word = unit->value.half;
+      break;
+    case kInitTypeWord:
+      word = unit->value.word;
+      break;
+    default:
+      word = unit->value._long;
+      break;
+  }
+  uint64_t field_mask = member->bit_size >= 64
+                            ? ~UINT64_C(0)
+                            : (UINT64_C(1) << member->bit_size) - 1;
+  uint64_t mask = field_mask << member->bit_offset;
+  word = (word & ~mask) | (((uint64_t)value << member->bit_offset) & mask);
+  switch (kind) {
+    case kInitTypeByte:
+      unit->value.byte = (uint8_t)word;
+      break;
+    case kInitTypeHalf:
+      unit->value.half = (uint16_t)word;
+      break;
+    case kInitTypeWord:
+      unit->value.word = (uint32_t)word;
+      break;
+    default:
+      unit->value._long = word;
+      break;
+  }
+}
+
 // Returns the alignment to use for a variable, honoring an explicit
 // __attribute__((aligned(N))) override that raises the natural alignment.
 static int SymbolEffectiveAlignment(Symbol* sym) {
@@ -1276,7 +1355,24 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
         }
       }
     }
-    if (designated_init->init->op == AST_OP(compound_literal)) {
+    StructMember* bitfield = NULL;
+    if (designated_init->designators != NULL &&
+        designated_init->designators->length > 0) {
+      Designator* last =
+          designated_init->designators
+              ->value.p[designated_init->designators->length - 1];
+      if (last->designator_type == kDesignatorStruct &&
+          last->value.struct_member != NULL &&
+          last->value.struct_member->is_bit_field &&
+          last->value.struct_member->bit_size > 0 &&
+          last->value.struct_member->symbol != NULL &&
+          last->value.struct_member->symbol->type != NULL) {
+        bitfield = last->value.struct_member;
+      }
+    }
+    if (bitfield != NULL) {
+      InitBitField(designated_init->init, bitfield, offset, initializers);
+    } else if (designated_init->init->op == AST_OP(compound_literal)) {
       ASTNode* initval = InitCompoundLiteral(designated_init->init);
       ExpandBracedInitializer((BracedInitializerASTNode*)initval, offset, initializers);
     } else if (TypeIsArray(designated_init->base.type)) {

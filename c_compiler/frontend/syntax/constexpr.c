@@ -1715,7 +1715,7 @@ static ConstexprValue* ConstexprSlotForOffset(TypeRecord* type,
     for (size_t i = 0; i < str->members.length; i++) {
       StructMember* member = str->members.value.p[i];
       if (member == NULL || member->symbol == NULL || member->is_static ||
-          member->is_member_function ||
+          member->is_member_function || member->is_bit_field ||
           StorageIs(member->symbol->storage, STO(typedef))) {
         continue;
       }
@@ -2017,6 +2017,50 @@ static size_t ConstexprMemberSlotIndex(ConstexprObject* object,
     return member != NULL ? member->index : 0;
   }
   return ConstexprMemberStorageIndex(object->type->info.struct_info, member);
+}
+
+static bool ConstexprIsBitField(StructMember* member) {
+  return member != NULL && member->is_bit_field && member->bit_size > 0 &&
+         member->symbol != NULL && member->symbol->type != NULL;
+}
+
+// The value a bit-field holds after storing |value|: its low bit_size bits,
+// sign-extended unless the member's type is unsigned.
+static int64_t ConstexprBitFieldValue(StructMember* member, int64_t value) {
+  if (!ConstexprIsBitField(member) || member->bit_size >= 64) {
+    return value;
+  }
+  uint64_t mask = (UINT64_C(1) << member->bit_size) - 1;
+  uint64_t bits = (uint64_t)value & mask;
+  TypeRecord* type = member->symbol->type;
+  if (!TypeIsUnsigned(type) && !TypeIsBool(type) &&
+      ((bits >> (member->bit_size - 1)) & 1) != 0) {
+    bits |= ~mask;
+  }
+  return (int64_t)bits;
+}
+
+static void ConstexprTruncateBitFieldSlot(StructMember* member,
+                                          ConstexprValue* slot) {
+  if (ConstexprIsBitField(member) && slot != NULL && !slot->is_object &&
+      !slot->is_address && !slot->is_floating) {
+    slot->ivalue = ConstexprBitFieldValue(member, slot->ivalue);
+    slot->fvalue = (double)slot->ivalue;
+  }
+}
+
+// The bit-field an lvalue such as `r.a` or `p->a` designates, or NULL.
+static StructMember* ConstexprLValueBitField(ASTNode* lvalue) {
+  if (lvalue == NULL ||
+      (lvalue->op != AST_OP(dot) && lvalue->op != AST_OP(arrow))) {
+    return NULL;
+  }
+  ASTNode* right = ((BinaryASTNode*)lvalue)->right;
+  if (right == NULL || right->op != AST_OP(structmember)) {
+    return NULL;
+  }
+  StructMember* member = ((StructMemberASTNode*)right)->member;
+  return ConstexprIsBitField(member) ? member : NULL;
 }
 
 ConstexprObject* ConstexprObjectForMember(ConstexprObject* object,
@@ -4826,6 +4870,10 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
                                        is_assignment)) {
     return false;
   }
+  StructMember* bit_field = ConstexprLValueBitField(node->left);
+  if (node->base.op == AST_OP(assign) && bit_field != NULL) {
+    ConstexprTruncateBitFieldSlot(bit_field, &right);
+  }
 
   if (node->base.op == AST_OP(assign)) {
     bool stored = binding != NULL
@@ -4852,6 +4900,7 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
   } else {
     current = *slot;
   }
+  ConstexprTruncateBitFieldSlot(bit_field, &current);
 
   ConstexprValue next = current;
   if (left_type != NULL && TypeIsFloatingPoint(left_type)) {
@@ -4932,6 +4981,7 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
     }
     next.fvalue = (double)next.ivalue;
   }
+  ConstexprTruncateBitFieldSlot(bit_field, &next);
 
   bool stored = binding != NULL
       ? StoreConstexprBinding(ctx, binding, left_type, next)
@@ -4972,6 +5022,8 @@ static bool EvaluateConstexprIncrement(ConstEvalContext* ctx,
   } else {
     old_value = *slot;
   }
+  StructMember* bit_field = ConstexprLValueBitField(node->sub);
+  ConstexprTruncateBitFieldSlot(bit_field, &old_value);
   ConstexprValue new_value = old_value;
   bool increment = node->base.op == AST_OP(preinc) ||
                    node->base.op == AST_OP(postinc);
@@ -4999,6 +5051,7 @@ static bool EvaluateConstexprIncrement(ConstEvalContext* ctx,
     new_value.ivalue = increment ? value + 1 : value - 1;
     new_value.fvalue = (double)new_value.ivalue;
   }
+  ConstexprTruncateBitFieldSlot(bit_field, &new_value);
   bool stored = binding != NULL
       ? StoreConstexprBinding(ctx, binding, value_type, new_value)
       : StoreConstexprSlot(ctx, slot, value_type, new_value);
@@ -5241,6 +5294,10 @@ static bool EvaluateConstexprDesignatedInitializer(ConstEvalContext* ctx,
   if (designator_index + 1 == designators->length) {
     bool initialized =
         EvaluateConstexprInitializer(ctx, slot_type, initializer, slot);
+    if (initialized && designator->designator_type == kDesignatorStruct) {
+      ConstexprTruncateBitFieldSlot(
+          ConstexprDirectDesignatorMember(type, designator), slot);
+    }
     return initialized;
   }
 
@@ -5607,6 +5664,7 @@ static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
                                       member->default_initializer, slot)) {
       return false;
     }
+    ConstexprTruncateBitFieldSlot(member, slot);
   }
   return true;
 }
@@ -5756,6 +5814,7 @@ static bool ApplyConstexprDesignatedBaseDefaults(
                                       member->default_initializer, slot)) {
       return false;
     }
+    ConstexprTruncateBitFieldSlot(member, slot);
   }
   if (!ConstexprMaterializeBaseSubobjectSlots(ctx, base_object)) {
     return false;
@@ -5825,6 +5884,22 @@ static bool ConstexprPositionalDataMember(StructMember* member) {
          !member->is_member_function && !member->is_static &&
          !member->is_using_declaration &&
          !StorageIs(member->symbol->storage, STO(typedef));
+}
+
+// The data member a non-union class object holds in |slot_index|, or NULL.
+static StructMember* ConstexprSlotMember(TypeRecord* type, size_t slot_index) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->is_union) {
+    return NULL;
+  }
+  Struct* str = type->info.struct_info;
+  size_t base_count =
+      ConstexprNonVirtualBaseCount(str) + str->virtual_bases.length;
+  if (slot_index < base_count ||
+      slot_index - base_count >= str->members.length) {
+    return NULL;
+  }
+  return str->members.value.p[slot_index - base_count];
 }
 
 static size_t ConstexprNextPositionalSlot(TypeRecord* type, size_t slot_index) {
@@ -6221,6 +6296,7 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
         break;
       }
     }
+    ConstexprTruncateBitFieldSlot(ConstexprSlotMember(type, slot_index), slot);
     if (slot_index < slot_count) {
       initialized[slot_index] = true;
     }
@@ -7301,10 +7377,22 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       return false;
     }
     size_t byte_offset = (size_t)member_node->member->byte_offset;
-    ConstexprValue* slot = ConstexprSlotForOffset(
-        object_value.object->type, object_value.object, byte_offset);
+    // Bit-fields share byte offsets, so each is found by its own slot.
+    ConstexprValue* slot =
+        ConstexprIsBitField(member_node->member)
+            ? ConstexprObjectSlot(
+                  object_value.object,
+                  ConstexprMemberSlotIndex(object_value.object,
+                                           member_node->member))
+            : ConstexprSlotForOffset(object_value.object->type,
+                                     object_value.object, byte_offset);
     if (slot == NULL) {
       return false;
+    }
+    if (ConstexprIsBitField(member_node->member)) {
+      *result = *slot;
+      ConstexprTruncateBitFieldSlot(member_node->member, result);
+      return true;
     }
     TypeRecord* member_type =
         member_node->member->symbol != NULL
@@ -7522,7 +7610,8 @@ static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
     *slot = ConstexprObjectSlot(
         object_value.object,
         ConstexprMemberSlotIndex(object_value.object, member_node->member));
-    if (*slot != NULL && member_node->member->byte_offset >= 0) {
+    if (*slot != NULL && member_node->member->byte_offset >= 0 &&
+        !ConstexprIsBitField(member_node->member)) {
       ConstexprValue* offset_slot = ConstexprSlotForOffset(
           object_value.object->type, object_value.object,
           (size_t)member_node->member->byte_offset);

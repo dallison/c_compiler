@@ -100,6 +100,7 @@ void StructApplyLayoutAttributes(Struct* str, Vector* attrs) {
 void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
                           Symbol* member_symbol, StructMember* member) {
   char error[256];
+  member->index = str->members.length - 1;
   ASTNode* width_node =
       SyntaxParseConditionalExpression(parser->syntax, TC(semicolon));
   if (width_node == NULL) {
@@ -161,7 +162,6 @@ void ParseBitField(TypeParser* parser, bool is_union, Struct* str,
     AlignNextOffsetForSymbol(
         str, member_symbol);  // Will set current_offset and next_offset.
     member->byte_offset = str->next_offset;
-    member->index = str->members.length - 1;
     str->next_bit_pos = 0;
     if (!is_union) {
       str->next_offset += member_symbol->type->size;
@@ -320,6 +320,7 @@ bool RelayoutStruct(Struct* str) {
       continue;
     }
     if (StructMemberIsBitField(m)) {
+      m->index = i;
       int word_width = TypeIsBitInt(type) ? type->bit_width : type->size * 8;
       if (word_width <= 0) {
         continue;
@@ -334,7 +335,6 @@ bool RelayoutStruct(Struct* str) {
       if (str->next_bit_pos + m->bit_size > word_width) {
         AlignNextOffsetForSymbol(str, m->symbol);
         m->byte_offset = str->next_offset;
-        m->index = i;
         str->next_bit_pos = 0;
         if (!is_union) {
           str->next_offset += type->size;

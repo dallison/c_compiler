@@ -5101,7 +5101,7 @@ static void LowerGetBitField(W65C02Generator* g, IRNode* node) {
   
   // input is in a zero page register.
   int byte_index = bit_pos / 8;
-  uint64_t mask = (1 << bit_size) - 1;
+  uint64_t mask = (UINT64_C(1) << bit_size) - 1;
   int hi_pos = bit_pos % 8;
   for (int i = byte_index; i < byte_index + byte_size; i++) {
     lda(g, input, i);

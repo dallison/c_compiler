@@ -2018,6 +2018,18 @@ static TargetInstruction* LowerAlign(PCodeGenerator* pcode, IRNode* node) {
   return and;
 }
 
+// The ALU instructions take register operands only.
+static TargetInstruction* EmitIntRegisterConstant(PCodeGenerator* pcode,
+                                                  int64_t value) {
+  return Emit(pcode, NewInstruction1(P_OP(movxc),
+                                     GetIntConstant(pcode, NULL,
+                                                    kTargetType64Bit, value)));
+}
+
+static uint64_t BitFieldMask(int bit_size) {
+  return bit_size >= 64 ? ~UINT64_C(0) : (UINT64_C(1) << bit_size) - 1;
+}
+
 static TargetInstruction* LowerGetBitField(PCodeGenerator* pcode, IRNode* node) {
   TargetInstruction* value = Materialize(pcode, node->inputs.value.p[0]);
   int bit_pos = (int)IRIntConstValue(node->inputs.value.p[1]);
@@ -2025,16 +2037,26 @@ static TargetInstruction* LowerGetBitField(PCodeGenerator* pcode, IRNode* node) 
   if (TypeIsUnsigned(node->type)) {
     // Shift right by bit_pos
     // Mask with bit_size
-    TargetInstruction* lsr = Emit(pcode, NewInstruction2(P_OP(asr), value, GetIntConstant(pcode, NULL, kTargetType32Bit, bit_pos)));
-    uint64_t mask = bit_size == 64 ? -1LL : (1 << bit_size) - 1;
-    TargetInstruction* m = Emit(pcode, NewInstruction2(P_OP(and), lsr, GetIntConstant(pcode, NULL, kTargetType32Bit, mask)));
+    TargetInstruction* lsr = Emit(
+        pcode, NewInstruction2(P_OP(lsr), value,
+                               EmitIntRegisterConstant(pcode, bit_pos)));
+    TargetInstruction* m = Emit(
+        pcode,
+        NewInstruction2(P_OP(and), lsr,
+                        EmitIntRegisterConstant(
+                            pcode, (int64_t)BitFieldMask(bit_size))));
     SetLoweredNode(node, m);
     return m;
   }
   // Shift left by 64 - (bit_pos + bit_size).  Top bit in bit 63.
   // Shift right by 64 - bit_size.
-  TargetInstruction* lsl = Emit(pcode, NewInstruction2(P_OP(lsl), value, GetIntConstant(pcode, NULL, kTargetType32Bit, 64 - (bit_pos + bit_size))));
-  TargetInstruction* asr = Emit(pcode, NewInstruction2(P_OP(asr), lsl, GetIntConstant(pcode, NULL, kTargetType32Bit, 64 - bit_size)));
+  TargetInstruction* lsl = Emit(
+      pcode, NewInstruction2(P_OP(lsl), value,
+                             EmitIntRegisterConstant(
+                                 pcode, 64 - (bit_pos + bit_size))));
+  TargetInstruction* asr = Emit(
+      pcode, NewInstruction2(P_OP(asr), lsl,
+                             EmitIntRegisterConstant(pcode, 64 - bit_size)));
 
   SetLoweredNode(node, asr);
   return asr;
@@ -2045,15 +2067,20 @@ static TargetInstruction* LowerSetBitField(PCodeGenerator* pcode, IRNode* node) 
   IRNode* input_node = node->inputs.value.p[1];
   int bit_pos = (int)IRIntConstValue(node->inputs.value.p[2]);
   int bit_size = (int)IRIntConstValue(node->inputs.value.p[3]);
-  uint64_t mask = bit_size == 64 ? -1LL : (1 << bit_size) - 1;
-  mask <<= bit_pos;
-  
+  uint64_t mask = BitFieldMask(bit_size) << bit_pos;
+
   TargetInstruction* input = Materialize(pcode, input_node);
   TargetInstruction* output = Materialize(pcode, output_node);
-  TargetInstruction* lsl = Emit(pcode, NewInstruction2(P_OP(lsl), input, GetIntConstant(pcode, NULL, kTargetType32Bit, bit_pos)));
-  TargetInstruction* m1 = Emit(pcode, NewInstruction2(P_OP(and), lsl, GetIntConstant(pcode, NULL, kTargetType32Bit, mask)));
+  TargetInstruction* lsl = Emit(
+      pcode, NewInstruction2(P_OP(lsl), input,
+                             EmitIntRegisterConstant(pcode, bit_pos)));
+  TargetInstruction* m1 = Emit(
+      pcode, NewInstruction2(P_OP(and), lsl,
+                             EmitIntRegisterConstant(pcode, (int64_t)mask)));
 
-  TargetInstruction* m2 = Emit(pcode, NewInstruction2(P_OP(and), output, GetIntConstant(pcode, NULL, kTargetType32Bit, ~mask)));
+  TargetInstruction* m2 = Emit(
+      pcode, NewInstruction2(P_OP(and), output,
+                             EmitIntRegisterConstant(pcode, (int64_t)~mask)));
   TargetInstruction* result = Emit(pcode, NewInstruction2(P_OP(or), m1, m2));
   SetLoweredNode(node, result);
   return result;

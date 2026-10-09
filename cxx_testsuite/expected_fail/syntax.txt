@@ -5,7 +5,3 @@
 # the list cannot drift out of date.
 #
 # Nothing here is expected to stay: each entry is a compiler bug to fix.
-
-# A signed bit-field set from a parameter: AST reads it unextended and p-code
-# fails with "undefined escape".
-pass/0589_constexpr_signed_bitfield_runtime_value.cpp
