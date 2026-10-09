@@ -687,6 +687,12 @@ static bool OverloadFunctionTypesEqual(TypeRecord* left, TypeRecord* right) {
 // unknown bound.  The definition is still an incomplete array at the
 // redeclaration check (the string length is applied later), so compare element
 // types and copy the known bound onto the incomplete array.
+static bool ArrayHasUnknownBound(TypeRecord* array) {
+  return array != NULL && array->declarator == kDeclArray &&
+         !array->info.array.is_vla && !array->info.array.is_dependent_bound &&
+         array->info.array.size.fixed <= 0;
+}
+
 static bool IncompleteArrayRedeclarationMatches(TypeRecord* left,
                                                TypeRecord* right) {
   if (left == NULL || right == NULL || left->declarator != kDeclArray ||
@@ -699,6 +705,12 @@ static bool IncompleteArrayRedeclarationMatches(TypeRecord* left,
     incomplete = left;
     complete = right;
   } else if (right->info.array.is_flexible && !left->info.array.is_flexible) {
+    incomplete = right;
+    complete = left;
+  } else if (ArrayHasUnknownBound(left) && !ArrayHasUnknownBound(right)) {
+    incomplete = left;
+    complete = right;
+  } else if (ArrayHasUnknownBound(right) && !ArrayHasUnknownBound(left)) {
     incomplete = right;
     complete = left;
   } else {
