@@ -1251,6 +1251,45 @@ static void AppendCXXTemplateArguments(String* out, Symbol* symbol) {
   StringAppendChar(out, 'E');
 }
 
+static bool TypeIsNonDeducedForm(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (t->dependent_member_name != NULL || t->dependent_decltype_expr != NULL) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Specializations of `f(V<T>, V<T>)` and `f(V<T>, type_identity_t<V<T>>)`
+// substitute to the same parameter types, so the parameters the primary
+// template declares in a non-deduced context are recorded in a vendor suffix.
+static void AppendCXXNonDeducedParameterSuffix(String* out, Symbol* symbol) {
+  TypeRecord* func = symbol->type;
+  if (!TypeIsFunction(func) || func->info.function.template_origin == NULL) {
+    return;
+  }
+  TypeRecord* primary = func->info.function.template_origin->type;
+  if (primary == NULL || !TypeIsFunction(primary)) {
+    return;
+  }
+  Vector* prototype = &primary->info.function.prototype;
+  bool any = false;
+  for (size_t i = 0; i < prototype->length && !any; i++) {
+    Symbol* formal = prototype->value.p[i];
+    any = formal != NULL && TypeIsNonDeducedForm(formal->type);
+  }
+  if (!any) {
+    return;
+  }
+  StringAppend(out, ".nd");
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* formal = prototype->value.p[i];
+    StringAppendChar(out, formal != NULL && TypeIsNonDeducedForm(formal->type)
+                              ? 'n'
+                              : 'd');
+  }
+}
+
 void SymbolSetCXXMangledAsmName(Symbol* symbol) {
   if (!CXXSymbolShouldMangle(symbol)) {
     return;
@@ -1265,6 +1304,7 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol) {
   AppendCXXName(&mangled, symbol);
   AppendCXXTemplateArguments(&mangled, symbol);
   AppendCXXFunctionParameterTypes(&mangled, symbol);
+  AppendCXXNonDeducedParameterSuffix(&mangled, symbol);
   StringSetString(&symbol->asm_name, &mangled);
   StringDestruct(&mangled);
   // The cached target name derives from asm_name; drop it so it is recomputed.
