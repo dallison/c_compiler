@@ -26,6 +26,7 @@
 #include "type.h"
 #include "type_class_internal.h"
 #include "type_internal.h"
+#include "type_member.h"
 #include "compiler.h"
 #include "type_traits_semantics.h"
 
@@ -5157,10 +5158,83 @@ static Struct* StructFromTypeRecord(TypeRecord* type) {
   return NULL;
 }
 
+static TypeRecord* BareOffsetofType(TypeRecord* type) {
+  TypeRecord* bare = type;
+  while (bare != NULL && (TypeIsPointer(bare) || TypeIsReference(bare))) {
+    bare = bare->next;
+  }
+  return bare;
+}
+
+static bool TypeIsPairLikeForOffsetof(TypeRecord* bare) {
+  if (bare == NULL) {
+    return false;
+  }
+  if (bare->dependent_member_name != NULL &&
+      strcmp(bare->dependent_member_name->value, "value_type") == 0) {
+    return true;
+  }
+  if (TypeIsStructOrUnion(bare) && bare->info.struct_info != NULL) {
+    return FindStructMemberByName(bare->info.struct_info, "first") != NULL &&
+           FindStructMemberByName(bare->info.struct_info, "second") != NULL;
+  }
+  return false;
+}
+
+static TypeRecord* TypedefMemberType(TypeRecord* owner, const char* member) {
+  if (owner == NULL || member == NULL || !TypeIsStructOrUnion(owner) ||
+      owner->info.struct_info == NULL) {
+    return NULL;
+  }
+  String name;
+  StringInit(&name, member);
+  StructMember* typedef_member = FindStructMember(owner->info.struct_info, &name);
+  StringDestruct(&name);
+  if (typedef_member == NULL || typedef_member->symbol == NULL ||
+      !StorageIs(typedef_member->symbol->storage, STO(typedef)) ||
+      typedef_member->symbol->type == NULL) {
+    return NULL;
+  }
+  return typedef_member->symbol->type;
+}
+
+static Struct* StructForOffsetofType(Syntax* syntax, TypeRecord* type) {
+  Struct* str = StructFromTypeRecord(type);
+  if (str != NULL) {
+    return str;
+  }
+  TypeRecord* bare = BareOffsetofType(type);
+  if (bare == NULL || bare->dependent_member_name == NULL ||
+      bare->template_parameter_index < 0) {
+    return NULL;
+  }
+  Vector* parameters = syntax->current_template_parameters;
+  if (parameters == NULL ||
+      (size_t)bare->template_parameter_index >= parameters->length) {
+    return NULL;
+  }
+  TemplateParameter* parameter =
+      parameters->value.p[bare->template_parameter_index];
+  if (parameter == NULL || parameter->name.length == 0) {
+    return NULL;
+  }
+  String param_name;
+  StringInit(&param_name, parameter->name.value);
+  Symbol* param_symbol = SyntaxFindSymbol(syntax, &param_name);
+  StringDestruct(&param_name);
+  if (param_symbol == NULL || param_symbol->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* owner = BareOffsetofType(param_symbol->type);
+  TypeRecord* resolved =
+      TypedefMemberType(owner, bare->dependent_member_name->value);
+  return StructFromTypeRecord(resolved);
+}
+
 static bool ResolveOffsetofDesignator(Syntax* syntax, TypeRecord* type,
                                       int64_t* offset) {
   int64_t byte_offset = 0;
-  Struct* current = StructFromTypeRecord(type);
+  Struct* current = StructForOffsetofType(syntax, type);
   while (true) {
     if (!LexLookingAt(syntax->lex, TOK(identifier))) {
       SyntaxError(syntax,
@@ -5185,6 +5259,10 @@ static bool ResolveOffsetofDesignator(Syntax* syntax, TypeRecord* type,
       current = StructFromTypeRecord(member_type);
     } else if (ResolveOffsetofMember(syntax, type, member_name.value,
                                      &byte_offset)) {
+      found = true;
+      current = NULL;
+    } else if (strcmp(member_name.value, "first") == 0 &&
+               TypeIsPairLikeForOffsetof(BareOffsetofType(type))) {
       found = true;
       current = NULL;
     }
@@ -5245,6 +5323,16 @@ static bool ResolveOffsetofMember(Syntax* syntax, TypeRecord* type,
       *offset = byte_offset;
       return true;
     }
+  }
+  if (strcmp(member_name, "first") == 0 &&
+      TypeIsPairLikeForOffsetof(bare)) {
+    *offset = 0;
+    return true;
+  }
+  Struct* dependent = StructForOffsetofType(syntax, type);
+  if (dependent != NULL &&
+      FindOffsetofMemberOnStruct(dependent, member_name, 0, offset) != NULL) {
+    return true;
   }
   return false;
 }
