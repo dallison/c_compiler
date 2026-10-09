@@ -5700,6 +5700,9 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
   if (TypeIsVLA(entry->pooled->type)) {
     return;
   }
+  if (SymbolIsAnonymousUnionMemberView(entry->value.symbol)) {
+    return;
+  }
   bool is_arg = entry->pooled->opcode == IR_OP(argument);
   TypeRecord* variable_type =
       is_arg && ((IRVariable*)entry->pooled)->symbol != NULL
@@ -5966,7 +5969,8 @@ static void FinalizeDebugStackLocations(AARCH64Generator* g, Vector* vars) {
   }
 }
 
-static void AssignRegisterVars(AARCH64Generator* g, Vector* vars, Vector* args) {
+static void AssignRegisterVars(AARCH64Generator* g, Generator* gen, Vector* vars,
+                               Vector* args) {
   // Variables are allocated below the frame, arguments are above or in
   // registers.
   // If the argument is in a register, the top bit of the data.ivalue is
@@ -5983,6 +5987,8 @@ static void AssignRegisterVars(AARCH64Generator* g, Vector* vars, Vector* args) 
     PoolEntry* entry = vars->value.p[i];
     AssignRegisterOrOffset(g, entry, args, &var_offset);
   }
+
+  AssignAnonymousUnionMemberOffsets(gen);
   
   // We now know the stack frame size.  This includes the length of the saved
   // registers.
@@ -6018,7 +6024,7 @@ static void LowerVariables(AARCH64Generator* g, Generator* gen) {
     }
   }
 
-  AssignRegisterVars(g, &local_vars,
+  AssignRegisterVars(g, gen, &local_vars,
                      &compiler->current_function->info.function.prototype);
   VectorDestruct(&local_vars);
 }

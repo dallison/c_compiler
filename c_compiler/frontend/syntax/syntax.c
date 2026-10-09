@@ -28,6 +28,7 @@
 #include "type_class_internal.h"
 #include "type_inheritance.h"
 #include "type_internal.h"
+#include "type_member.h"
 #include "type_special_member.h"
 #include "errors.h"
 #include "compiler.h"
@@ -15598,6 +15599,81 @@ ASTNode* SyntaxRewriteCXXCopyInitConstructorIfNeeded(Syntax* syntax,
   return rewritten;
 }
 
+static void InjectBlockScopeAnonymousAggregateMembers(Syntax* syntax,
+                                                      Symbol* object,
+                                                      Struct* aggregate,
+                                                      int base_offset) {
+  if (aggregate == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < aggregate->members.length; i++) {
+    StructMember* member = aggregate->members.value.p[i];
+    if (member == NULL) {
+      continue;
+    }
+    if (member->is_anon) {
+      Struct* nested = NULL;
+      if (member->symbol != NULL && member->symbol->type != NULL &&
+          TypeIsStructOrUnion(member->symbol->type)) {
+        nested = member->symbol->type->info.struct_info;
+      }
+      InjectBlockScopeAnonymousAggregateMembers(
+          syntax, object, nested, base_offset + member->byte_offset);
+      continue;
+    }
+    if (member->symbol == NULL || member->symbol->name.length == 0 ||
+        member->is_member_function || member->is_static ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    Symbol* injected = SymbolClone(member->symbol);
+    injected->flags.is_local = true;
+    injected->flags.is_defined = true;
+    injected->flags.invented = false;
+    injected->storage = STO(auto);
+    injected->location = object->location;
+    injected->anonymous_union_host = object;
+    injected->anonymous_union_member_offset =
+        base_offset + member->byte_offset;
+    if (!SyntaxAddSymbol(syntax, injected)) {
+      SyntaxError(syntax, "Duplicate symbol %s", injected->name.value);
+      SymbolDelete(injected);
+    }
+  }
+}
+
+static bool LocalDeclarationTypeIsAnonymousAggregate(TypeParser* parser,
+                                                     TypeRecord* type) {
+  if (!CompilerIsCXX() || parser->syntax->context != kParsingBlockScope ||
+      type == NULL) {
+    return false;
+  }
+  TypeRecord* bare = type;
+  while (bare != NULL && (TypeIsPointer(bare) || TypeIsReference(bare))) {
+    bare = bare->next;
+  }
+  return bare != NULL && TypeIsStructOrUnion(bare) &&
+         bare->info.struct_info != NULL;
+}
+
+static void MaybeInjectBlockScopeAnonymousAggregateMembers(Syntax* syntax,
+                                                           Symbol* sym) {
+  if (!CompilerIsCXX() || syntax->context != kParsingBlockScope ||
+      sym == NULL || !sym->flags.invented || TypeIsFunction(sym->type)) {
+    return;
+  }
+  TypeRecord* type = sym->type;
+  while (type != NULL && (TypeIsPointer(type) || TypeIsReference(type))) {
+    type = type->next;
+  }
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return;
+  }
+  InjectBlockScopeAnonymousAggregateMembers(syntax, sym,
+                                            type->info.struct_info, 0);
+}
+
 // Emits -Wshadow when a newly declared block-scope variable `sym` hides a
 // variable or parameter from an enclosing scope (or a file-scope object),
 // mirroring clang/gcc -Wshadow.  Called for genuinely new local declarations,
@@ -15695,7 +15771,12 @@ static void ParseLocalDeclarationList(TypeParser* parser,
                                       Vector* attributes, Vector* declarations) {
   Syntax* syntax = parser->syntax;
   while (!LexEof(syntax->lex)) {
-    if (LexLookingAt(syntax->lex, TOK(semicolon))) {
+    bool implicit_anonymous_aggregate =
+        LexLookingAt(syntax->lex, TOK(semicolon)) &&
+        declarations->length == 0 &&
+        LocalDeclarationTypeIsAnonymousAggregate(parser, type);
+    if (LexLookingAt(syntax->lex, TOK(semicolon)) &&
+        !implicit_anonymous_aggregate) {
       // We don't need to have a variable declaration.
       break;
     }
@@ -15854,6 +15935,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
             if (!added) {
               SyntaxError(syntax, "Duplicate symbol %s",
                           sym->name.value);
+            } else {
+              MaybeInjectBlockScopeAnonymousAggregateMembers(syntax, sym);
             }
           }
         }
@@ -15991,6 +16074,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         CheckLocalVariableShadow(syntax, sym);
         if (!SyntaxAddSymbol(syntax, sym)) {
           SyntaxError(syntax, "Duplicate symbol %s", sym->name.value);
+        } else {
+          MaybeInjectBlockScopeAnonymousAggregateMembers(syntax, sym);
         }
       }
       ValidateC23AutoInitializer(syntax, sym, initializer);
@@ -16044,6 +16129,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         LexLookingAt(syntax->lex, TOK(comma))) {
       SyntaxError(syntax,
                   "C23 inferred auto declaration must contain one declarator");
+    }
+    if (implicit_anonymous_aggregate) {
+      break;
     }
     if (!LexMatch(syntax->lex, TOK(comma))) {
       break;

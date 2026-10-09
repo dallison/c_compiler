@@ -8161,6 +8161,9 @@ static void AssignRegisterOrOffset(W65C02Generator* g, PoolEntry* entry,
     if (TypeIsVLA(entry->value.symbol->type)) {
       return;
     }
+    if (SymbolIsAnonymousUnionMemberView(entry->value.symbol)) {
+      return;
+    }
     varset = MaybeUseRegister(g, entry);
     if (varset == NULL) {
       // Make space for variable on the stack.
@@ -8225,7 +8228,8 @@ static int CompareRegisterVar(const void* a, const void* b) {
   return weight2 - weight1;
 }
 
-static void AssignRegisterVars(W65C02Generator* g, Vector* vars, Vector* args) {
+static void AssignRegisterVars(W65C02Generator* g, Generator* gen, Vector* vars,
+                               Vector* args) {
   // Variables are allocated below the frame, arguments are above or in
   // registers.
   // If the argument is in a register, the top bit of the data.ivalue is
@@ -8242,6 +8246,8 @@ static void AssignRegisterVars(W65C02Generator* g, Vector* vars, Vector* args) {
     PoolEntry* entry = vars->value.p[i];
     AssignRegisterOrOffset(g, entry, args, &var_offset);
   }
+
+  AssignAnonymousUnionMemberOffsets(gen);
   
   // We now know the stack frame size.
   g->base.stack_frame_size = (int32_t)var_offset;
@@ -8283,7 +8289,7 @@ static void LowerVariables(W65C02Generator* g) {
     }
   }
 
-  AssignRegisterVars(g, &local_vars,
+  AssignRegisterVars(g, g->gen, &local_vars,
                      &compiler->current_function->info.function.prototype);
   VectorDestruct(&local_vars);
 }

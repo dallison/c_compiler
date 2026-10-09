@@ -5867,6 +5867,9 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
   if (TypeIsVLA(entry->pooled->type)) {
     return;
   }
+  if (SymbolIsAnonymousUnionMemberView(entry->value.symbol)) {
+    return;
+  }
   switch (entry->pooled->opcode) {
     case IR_OP(argument):
     case IR_OP(localvar):
@@ -6197,8 +6200,8 @@ static void FinalizeDebugStackLocations(X86Generator* rv, Vector* vars) {
   }
 }
 
-static void AssignRegisterVars(X86Generator* rv, Vector* vars, Vector* args,
-                               TypeRecord* func) {
+static void AssignRegisterVars(X86Generator* rv, Generator* gen, Vector* vars,
+                               Vector* args, TypeRecord* func) {
   // Variables are allocated below the frame, arguments are above or in
   // registers.
   // If the argument is in a register, the top bit of the data.ivalue is
@@ -6245,6 +6248,7 @@ static void AssignRegisterVars(X86Generator* rv, Vector* vars, Vector* args,
     PoolEntry* entry = vars->value.p[i];
     AssignRegisterOrOffset(rv, entry, args, func, &var_offset);
   }
+  AssignAnonymousUnionMemberOffsets(gen);
   memset(rv->incoming_fp_argument_registers, 0,
          sizeof(rv->incoming_fp_argument_registers));
   
@@ -6282,7 +6286,7 @@ static void LowerVariables(X86Generator* rv, Generator* gen) {
     }
   }
 
-  AssignRegisterVars(rv, &local_vars, &gen->func->info.function.prototype,
+  AssignRegisterVars(rv, gen, &local_vars, &gen->func->info.function.prototype,
                      gen->func);
   VectorDestruct(&local_vars);
 }

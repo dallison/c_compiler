@@ -5114,8 +5114,8 @@ static ASTNode* ParsePrimaryExpression(Syntax* syntax, TokenClass followers) {
 }
 
 static StructMember* FindOffsetofMemberOnStruct(Struct* str, const char* name,
-                                                int base_offset,
-                                                int* byte_offset) {
+                                                int64_t base_offset,
+                                                int64_t* byte_offset) {
   if (str == NULL || name == NULL) {
     return NULL;
   }
@@ -5159,7 +5159,7 @@ static Struct* StructFromTypeRecord(TypeRecord* type) {
 
 static bool ResolveOffsetofDesignator(Syntax* syntax, TypeRecord* type,
                                       int64_t* offset) {
-  int byte_offset = 0;
+  int64_t byte_offset = 0;
   Struct* current = StructFromTypeRecord(type);
   while (true) {
     if (!LexLookingAt(syntax->lex, TOK(identifier))) {
@@ -5214,7 +5214,7 @@ static bool ResolveOffsetofMember(Syntax* syntax, TypeRecord* type,
   }
   if (bare != NULL && TypeIsStructOrUnion(bare) &&
       bare->info.struct_info != NULL) {
-    int byte_offset = 0;
+    int64_t byte_offset = 0;
     if (FindOffsetofMemberOnStruct(bare->info.struct_info, member_name, 0,
                                    &byte_offset) != NULL) {
       *offset = byte_offset;
@@ -5239,7 +5239,7 @@ static bool ResolveOffsetofMember(Syntax* syntax, TypeRecord* type,
         tag->type->info.struct_info == NULL) {
       continue;
     }
-    int byte_offset = 0;
+    int64_t byte_offset = 0;
     if (FindOffsetofMemberOnStruct(tag->type->info.struct_info, member_name, 0,
                                    &byte_offset) != NULL) {
       *offset = byte_offset;

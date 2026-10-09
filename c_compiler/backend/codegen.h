@@ -151,6 +151,8 @@ IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym);
 int PoolEntryStackAlignment(PoolEntry* entry);
 int SymbolStackAlignment(Symbol* symbol);
 bool SymbolNeedsDynamicStackAllocation(Symbol* symbol);
+bool SymbolIsAnonymousUnionMemberView(Symbol* symbol);
+void AssignAnonymousUnionMemberOffsets(Generator* gen);
 
 // True for a return type the caller receives through the hidden pointer that
 // IR_OP(structreturn) holds, rather than in a result register.  Besides classes

@@ -5707,6 +5707,9 @@ static void AssignRegisterOrOffset(XTENSAGenerator* rv, PoolEntry* entry,
   if (TypeIsVLA(entry->pooled->type)) {
     return;
   }
+  if (SymbolIsAnonymousUnionMemberView(entry->value.symbol)) {
+    return;
+  }
   bool is_arg = entry->pooled->opcode == IR_OP(argument);
   TypeRecord* variable_type = entry->pooled->type;
   TypeRecordCalculateSize(entry->pooled->type);
@@ -5952,7 +5955,7 @@ static void FinalizeDebugStackLocations(XTENSAGenerator* rv, Vector* vars) {
   }
 }
 
-static void AssignRegisterVars(XTENSAGenerator* rv, Vector* vars,
+static void AssignRegisterVars(XTENSAGenerator* rv, Generator* gen, Vector* vars,
                                Vector* args) {
   // Variables are allocated below the frame, arguments are above or in
   // registers.
@@ -5970,6 +5973,8 @@ static void AssignRegisterVars(XTENSAGenerator* rv, Vector* vars,
     PoolEntry* entry = vars->value.p[i];
     AssignRegisterOrOffset(rv, entry, args, &var_offset);
   }
+
+  AssignAnonymousUnionMemberOffsets(gen);
 
   // Include the complete argument-home area, including any alignment gaps
   // between homed aggregate arguments.
@@ -6004,7 +6009,7 @@ static void LowerVariables(XTENSAGenerator* rv, Generator* gen) {
     }
   }
 
-  AssignRegisterVars(rv, &local_vars,
+  AssignRegisterVars(rv, gen, &local_vars,
                      &compiler->current_function->info.function.prototype);
   VectorDestruct(&local_vars);
 }
