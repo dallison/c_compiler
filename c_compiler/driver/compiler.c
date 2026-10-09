@@ -2011,6 +2011,62 @@ static TypeRecord* CXXGlobalObjectClassType(Symbol* sym) {
   return type;
 }
 
+// Whether aggregate initialization of |type| may construct a subobject with a
+// constructor that is not constexpr (e.g. an omitted member of class type), so
+// no static image holds the initialized object.
+static bool CXXAggregateMayConstructAtRuntime(TypeRecord* type, int depth) {
+  while (TypeIsFixedArray(type)) {
+    type = type->next;
+  }
+  if (depth > 64 || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  if (!str->is_aggregate) {
+    StructMember* ctor =
+        str->tag_name != NULL ? FindStructMember(str, str->tag_name) : NULL;
+    for (; ctor != NULL; ctor = ctor->overload_next) {
+      if (!ctor->is_member_function || ctor->symbol == NULL ||
+          ctor->symbol->type == NULL || !TypeIsFunction(ctor->symbol->type)) {
+        continue;
+      }
+      FunctionInfo* info = &ctor->symbol->type->info.function;
+      if (info->is_constructor && info->is_user_provided &&
+          !info->is_constexpr && !info->is_deleted) {
+        return true;
+      }
+    }
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL &&
+        CXXAggregateMayConstructAtRuntime(base->type, depth + 1)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->is_static || member->is_member_function ||
+        member->is_using_declaration || member->symbol == NULL ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    if (CXXAggregateMayConstructAtRuntime(member->symbol->type, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CXXGlobalAggregateMayConstructAtRuntime(Symbol* sym) {
+  TypeRecord* type = CXXGlobalObjectClassType(sym);
+  return TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
+         type->info.struct_info->is_aggregate &&
+         CXXAggregateMayConstructAtRuntime(type, 0);
+}
+
 static StructMember* FindCXXSpecialMemberForGlobal(Symbol* sym,
                                                    bool destructor) {
   if (!CompilerIsCXX() || sym == NULL || sym->type == NULL) {
@@ -2132,15 +2188,15 @@ static void AppendCXXThreadLifetimeCall(Vector* calls, Symbol* sym,
   VectorAppend(calls, call);
 }
 
-// An initialized array's elements were constructed by its initializer, so only
-// an array without one is default-constructed here.
+// An initialized object (an aggregate's members, an array's elements) was
+// constructed by its initializer, so only an object without one is
+// default-constructed here.
 static bool CXXGlobalObjectNeedsDefaultConstruction(Symbol* sym,
                                                     bool initialized) {
   bool statically_constructed =
       sym != NULL && sym->flags.value_set && sym->value.other != NULL &&
       (TypeIsFixedArray(sym->type) || TypeIsStructOrUnion(sym->type));
-  if (statically_constructed ||
-      (initialized && TypeIsFixedArray(sym->type))) {
+  if (statically_constructed || initialized) {
     return false;
   }
   return FindCXXSpecialMemberForGlobal(sym, false) != NULL;
@@ -2983,7 +3039,8 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   continue;
                 }
                 if (SymbolIsThreadLocal(decl->symbol) &&
-                    CXXThreadLocalInitializerIsDynamic(decl->initializer)) {
+                    (CXXThreadLocalInitializerIsDynamic(decl->initializer) ||
+                     CXXGlobalAggregateMayConstructAtRuntime(decl->symbol))) {
                   CompleteCXXDynamicArrayBound(decl->symbol, decl->initializer);
                   UninitializedStaticVariable* var =
                       malloc(sizeof(UninitializedStaticVariable));
@@ -3022,9 +3079,11 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                     !decl->symbol->flags.is_constinit &&
                     TypeIsStructOrUnion(object_class) &&
                     object_class->info.struct_info != NULL &&
-                    !object_class->info.struct_info->is_aggregate &&
-                    ConstexprObjectInitializerForSymbol(
-                        decl->symbol, decl->initializer->location) == NULL) {
+                    (object_class->info.struct_info->is_aggregate
+                         ? CXXGlobalAggregateMayConstructAtRuntime(decl->symbol)
+                         : ConstexprObjectInitializerForSymbol(
+                               decl->symbol, decl->initializer->location) ==
+                               NULL)) {
                   class_needs_dynamic_init = true;
                 }
                 if (CompilerIsCXX() && !decl->symbol->flags.is_constexpr &&
