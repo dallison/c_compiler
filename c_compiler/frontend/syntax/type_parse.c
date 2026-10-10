@@ -3305,6 +3305,7 @@ static void ResolveOutOfLineDependentReturnType(TypeParser* parser) {
     return;
   }
   TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
+  resolved->qualifiers |= type->qualifiers;
   TypeRecordDelete(parser->base_type);
   parser->base_type = resolved;
 }
