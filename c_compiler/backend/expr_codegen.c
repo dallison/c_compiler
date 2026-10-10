@@ -2643,27 +2643,68 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       }
       subinit = (ASTNode*)designated_init;
     }
+    IRNode* started_union_member = NULL;
     if (designated_init->designators != NULL) {
       if (designated_init->designators->length > 0) {
         // We have designators.  Need to build up an address from the
         // designators.
         int offset = 0;
+        TypeRecord* designated_type =
+            init->base.type != NULL ? init->base.type : node->type;
         for (size_t i = 0; i < designated_init->designators->length; i++) {
           Designator* d = (Designator*)designated_init->designators->value.p[i];
           switch (d->designator_type) {
             case kDesignatorArray:
               // Array index.  Add index * size of lower dimensions to offset.
               offset += d->value.array_index * d->type->size;
+              designated_type = d->type;
               break;
             case kDesignatorStruct:
+              // A constant evaluation tracks which member of a union is
+              // active.
+              if (gen->for_constant_evaluation && designated_type != NULL &&
+                  TypeIsStructOrUnion(designated_type) &&
+                  designated_type->info.struct_info != NULL &&
+                  designated_type->info.struct_info->is_union) {
+                IRNode* base = dest;
+                if (IRIsVariable(base)) {
+                  base = IRSetType(
+                      GeneratorEmit(gen, NewIR1(IR_OP(addressof), base)),
+                      NewPointerTo(kQualPlain, init->base.type != NULL
+                                                   ? init->base.type
+                                                   : node->type));
+                }
+                started_union_member =
+                    offset == 0
+                        ? base
+                        : GeneratorEmit(
+                              gen, NewIR2(IR_OP(adda), base,
+                                          GeneratorGetIntConstant(gen, NULL,
+                                                                  offset)));
+                GenerateConstexprLifetimeMarker(
+                    gen, started_union_member,
+                    CONSTEXPR_PCODE_UNION_MEMBER_ADDRESS_MARKER,
+                    d->value.struct_member->index + 1, subinit->location);
+              }
               offset += d->value.struct_member->byte_offset;
+              designated_type = d->value.struct_member->symbol != NULL
+                                    ? d->value.struct_member->symbol->type
+                                    : NULL;
               break;
             case kDesignatorBase:
               offset += d->value.base != NULL
                             ? d->value.base->byte_offset
                             : d->base_byte_offset;
+              designated_type =
+                  d->value.base != NULL ? d->value.base->type : d->type;
               break;
           }
+        }
+        if (started_union_member != NULL) {
+          GenerateConstexprLifetimeMarker(
+              gen, started_union_member,
+              CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER, 0,
+              subinit->location);
         }
 
         // Add the offset to the destination to get the address.
@@ -4332,10 +4373,32 @@ static Symbol* GetBuiltinStartLifetimeFunction(SourceLocation location) {
   return symbol;
 }
 
+// A union's defaulted copy or move copies whichever member is active; its
+// memberwise body is not what selects the member.
+static bool GeneratorInTrivialUnionCopy(Generator* gen) {
+  TypeRecord* func = gen->func;
+  if (func == NULL || !TypeIsFunction(func) ||
+      !func->info.function.is_trivial_special_member ||
+      func->info.function.cxx_member_owner == NULL ||
+      !func->info.function.cxx_member_owner->is_union) {
+    return false;
+  }
+  CXXSpecialMemberKind kind = func->info.function.cxx_special_member_kind;
+  return kind == kCXXSpecialMemberCopyConstructor ||
+         kind == kCXXSpecialMemberMoveConstructor ||
+         kind == kCXXSpecialMemberCopyAssignment ||
+         kind == kCXXSpecialMemberMoveAssignment;
+}
+
 static void GenerateConstexprLifetimeMarker(
     Generator* gen, IRNode* address, uint64_t marker_value,
     uint64_t semantic_token, SourceLocation location) {
   if (!gen->for_constant_evaluation || address == NULL) {
+    return;
+  }
+  if ((marker_value == CONSTEXPR_PCODE_UNION_MEMBER_ADDRESS_MARKER ||
+       marker_value == CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER) &&
+      GeneratorInTrivialUnionCopy(gen)) {
     return;
   }
   TypeRecord* integer_type =
@@ -4435,6 +4498,33 @@ void GenerateConstexprConstructorEntryMarker(Generator* gen,
   GenerateConstexprLifetimeMarker(
       gen, object, CONSTEXPR_PCODE_INDETERMINATE_OBJECT_MARKER,
       ConstexprPCodeTypeToken(this_symbol->type->next), location);
+}
+
+void GenerateConstexprUnionCopyMarker(Generator* gen,
+                                      SourceLocation location) {
+  if (!gen->for_constant_evaluation || !GeneratorInTrivialUnionCopy(gen)) {
+    return;
+  }
+  Vector* prototype = &gen->func->info.function.prototype;
+  Symbol* this_symbol = prototype->length == 2 ? prototype->value.p[0] : NULL;
+  Symbol* source_symbol = prototype->length == 2 ? prototype->value.p[1] : NULL;
+  if (this_symbol == NULL || source_symbol == NULL ||
+      this_symbol->type == NULL || !TypeIsPointer(this_symbol->type) ||
+      source_symbol->type == NULL || !TypeIsReference(source_symbol->type)) {
+    return;
+  }
+  IRNode* source = IRSetType(
+      GeneratorEmit(gen, NewIR1(IR_OP(loada),
+                                GeneratorGetVariable(gen, source_symbol))),
+      this_symbol->type);
+  GenerateConstexprLifetimeMarker(
+      gen, source, CONSTEXPR_PCODE_UNION_COPY_SOURCE_MARKER, 0, location);
+  IRNode* object = IRSetType(
+      GeneratorEmit(gen, NewIR1(IR_OP(loada),
+                                GeneratorGetVariable(gen, this_symbol))),
+      this_symbol->type);
+  GenerateConstexprLifetimeMarker(
+      gen, object, CONSTEXPR_PCODE_UNION_COPY_MARKER, 0, location);
 }
 
 static bool GeneratorIsInStdConstructAt(Generator* gen) {

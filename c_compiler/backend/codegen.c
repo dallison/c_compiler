@@ -2374,6 +2374,7 @@ static void GenerateFunctionIRImpl(Generator* gen) {
     GenerateNoexceptGuardEnter(gen, &noexcept_guard);
 
     GenerateConstexprConstructorEntryMarker(gen, body->base.location);
+    GenerateConstexprUnionCopyMarker(gen, body->base.location);
     GenerateFunctionContractAssertions(gen, kContractPrecondition);
     GenerateStatement(gen, &body->base);
     // Explicit returns evaluate postconditions in GenerateReturnStatement.

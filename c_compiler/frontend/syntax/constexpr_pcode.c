@@ -245,6 +245,8 @@ typedef struct {
   uint64_t object_fact_serial;
   uint64_t placement_address;
   size_t placement_size;
+  // The source of the union copy whose destination marker comes next.
+  uint64_t union_copy_source;
   // Why a typing check stopped the evaluation, for the failure report.
   const char* diagnostic;
   unsigned char* heap;
@@ -2371,6 +2373,8 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
   if (TypeIsFixedArray(type)) {
     size_t elem_size = type->next != NULL ? type->next->size : 0;
     bool aggregate_started = false;
+    // Only what is placed after the array's lifetime starts is alive in it.
+    size_t first_element_event = 0;
     if (runtime != NULL) {
       for (size_t i = 0; i < runtime->lifetime_events.length; i++) {
         ConstexprPCodeLifetimeEvent* event =
@@ -2381,6 +2385,7 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
             (event->type_token == 0 ||
              event->type_token == TypeRecordSemanticIdentityHash(type))) {
           aggregate_started = true;
+          first_element_event = i + 1;
         }
       }
     }
@@ -2396,7 +2401,8 @@ static bool LoadConstexprObjectBytes(TypeRecord* type, unsigned char* src,
         slot->lifetime_ended = true;
         uint64_t element_address =
             (uint64_t)(uintptr_t)(src + i * elem_size);
-        for (size_t j = 0; j < runtime->lifetime_events.length; j++) {
+        for (size_t j = first_element_event;
+             j < runtime->lifetime_events.length; j++) {
           ConstexprPCodeLifetimeEvent* event =
               runtime->lifetime_events.value.p[j];
           if (event != NULL && event->address == element_address) {
@@ -5348,6 +5354,39 @@ static PCodeVMStatus ConstexprPCodeEscapeStartLifetime(
         !PCodeVMEndLifetime(vm, address, (size_t)destroyed->size)) {
       return kPCodeVMStatusAllocationFailure;
     }
+    return kPCodeVMStatusRunning;
+  }
+  if (size == CONSTEXPR_PCODE_UNION_COPY_SOURCE_MARKER) {
+    free(event);
+    runtime->union_copy_source = address;
+    return kPCodeVMStatusRunning;
+  }
+  if (size == CONSTEXPR_PCODE_UNION_COPY_MARKER) {
+    size_t union_member_index_plus_one = 0;
+    uint64_t member_type_token = 0;
+    for (size_t i = runtime->lifetime_events.length; i > 0; i--) {
+      ConstexprPCodeLifetimeEvent* started =
+          runtime->lifetime_events.value.p[i - 1];
+      if (started == NULL || started->address != runtime->union_copy_source) {
+        continue;
+      }
+      if (started->kind == kConstexprPCodeLifetimeEnd) {
+        break;
+      }
+      if (started->kind == kConstexprPCodeLifetimeStartAggregate ||
+          started->kind == kConstexprPCodeLifetimePlacementConstruction) {
+        union_member_index_plus_one = started->union_member_index_plus_one;
+        member_type_token = started->type_token;
+        break;
+      }
+    }
+    *event = (ConstexprPCodeLifetimeEvent){
+        .address = address,
+        .type_token = member_type_token,
+        .union_member_index_plus_one = union_member_index_plus_one,
+        .kind = kConstexprPCodeLifetimePlacementConstruction,
+    };
+    VectorAppend(&runtime->lifetime_events, event);
     return kPCodeVMStatusRunning;
   }
   if (size == CONSTEXPR_PCODE_LIFETIME_CONSTRUCTION_MARKER) {

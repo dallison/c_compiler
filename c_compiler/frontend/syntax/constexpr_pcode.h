@@ -28,6 +28,10 @@
 // A call to a non-constexpr C memory function.  The type token is its
 // ConstexprMemoryFunctionCall index.
 #define CONSTEXPR_PCODE_MEMORY_FUNCTION_MARKER UINT64_C(0xfffffff4)
+// A union's trivial copy or move: the source's address, then the
+// destination's, which takes on the source's active member.
+#define CONSTEXPR_PCODE_UNION_COPY_SOURCE_MARKER UINT64_C(0xfffffff3)
+#define CONSTEXPR_PCODE_UNION_COPY_MARKER UINT64_C(0xfffffff2)
 
 typedef enum {
   kConstexprPCodeEligible,

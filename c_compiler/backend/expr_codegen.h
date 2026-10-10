@@ -24,6 +24,9 @@ void GenerateConstexprUninitializedObjectMarker(Generator* gen,
 // indeterminate until its initializers and body write it.
 void GenerateConstexprConstructorEntryMarker(Generator* gen,
                                              SourceLocation location);
+// Constant evaluation: on entry to a union's trivial copy or move, *this takes
+// on the source's active member.
+void GenerateConstexprUnionCopyMarker(Generator* gen, SourceLocation location);
 
 // Spill a scalar/pointer value into a fresh stack temporary (returns its
 // address) and reload it, so it survives intervening calls.

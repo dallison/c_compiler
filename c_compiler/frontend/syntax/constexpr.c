@@ -170,6 +170,8 @@ static bool EvaluateConstexprSubscriptLocation(ConstEvalContext* ctx,
                                                ASTNode* node,
                                                bool allow_object,
                                                ConstexprValue* result);
+static bool ConstexprCopyUnionFrom(ConstEvalContext* ctx, ASTNode* source,
+                                   ConstexprObject* destination);
 static bool ConstexprBindPointerReference(ConstEvalContext* ctx,
                                           ASTNode* node,
                                           TypeRecord* pointer_type,
@@ -626,6 +628,8 @@ static bool ConstexprStructCopySlots(ConstEvalContext* ctx,
       to->fvalue = 0;
       to->heap_block = NULL;
       to->heap_index = 0;
+      to->lifetime_ended = from->lifetime_ended;
+      to->state = from->state;
       to->object = CloneConstexprObject(ctx, from->object);
       if (to->object == NULL) {
         return false;
@@ -12654,6 +12658,22 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
     if (assignment_lvalue && assigned_object != NULL) {
       assigned_object->lifetime_ended = false;
     }
+    Struct* owner = func->info.function.cxx_member_owner;
+    size_t source_index = receiver != NULL ? 0 : 1;
+    if (func->info.function.is_trivial_special_member && owner != NULL &&
+        owner->is_union && call->children != NULL &&
+        call->children->length == source_index + 1) {
+      ConstexprObject* destination = NULL;
+      if (!EvaluateConstexprObjectAddress(ctx, assignment_actual,
+                                          &destination) ||
+          !ConstexprCopyUnionFrom(ctx, call->children->value.p[source_index],
+                                  destination)) {
+        return false;
+      }
+      *result = (ConstexprValue){.is_address = true,
+                                 .address_object = destination};
+      return true;
+    }
   }
   if (callee->name.value != NULL &&
       strcmp(callee->name.value, "construct_at") == 0 &&
@@ -13434,6 +13454,28 @@ static void ConstexprBeginUserConstructor(ConstEvalContext* ctx,
   ConstexprMarkDataMembers(ctx, object, kValueStateIndeterminate);
 }
 
+// A union's defaulted copy or move constructor copies the object
+// representation, whichever member is active; its memberwise body would read
+// inactive members.
+static bool ConstexprIsTrivialUnionCopy(TypeRecord* func) {
+  Struct* owner = func->info.function.cxx_member_owner;
+  CXXSpecialMemberKind kind = func->info.function.cxx_special_member_kind;
+  return func->info.function.is_constructor &&
+         func->info.function.is_trivial_special_member && owner != NULL &&
+         owner->is_union &&
+         (kind == kCXXSpecialMemberCopyConstructor ||
+          kind == kCXXSpecialMemberMoveConstructor);
+}
+
+static bool ConstexprCopyUnionFrom(ConstEvalContext* ctx, ASTNode* source,
+                                   ConstexprObject* destination) {
+  ConstexprValue value = {0};
+  return destination != NULL &&
+         EvaluateConstexprValue(ctx, source, destination->type, &value) &&
+         value.is_object &&
+         ConstexprStructCopySlots(ctx, value.object, destination);
+}
+
 static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
                                              ASTNode* node) {
   if (ctx->call_depth > 32) {
@@ -13466,6 +13508,17 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
       func->info.function.body == NULL &&
       func->info.function.is_trivial_special_member) {
     return true;
+  }
+  Vector* actuals = ((VectorASTNode*)node)->children;
+  size_t source_index = receiver != NULL ? 0 : 1;
+  if (ConstexprIsTrivialUnionCopy(func) && actuals != NULL &&
+      actuals->length == source_index + 1) {
+    ConstexprObject* destination = NULL;
+    return EvaluateConstexprObjectAddress(
+               ctx, receiver != NULL ? receiver : actuals->value.p[0],
+               &destination) &&
+           ConstexprCopyUnionFrom(ctx, actuals->value.p[source_index],
+                                  destination);
   }
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
@@ -13529,6 +13582,10 @@ static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
       object->active_union_member = NULL;
     }
     return true;
+  }
+  if (ConstexprIsTrivialUnionCopy(func) && call->children != NULL &&
+      call->children->length == 1) {
+    return ConstexprCopyUnionFrom(ctx, call->children->value.p[0], object);
   }
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
