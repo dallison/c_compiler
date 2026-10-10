@@ -10747,7 +10747,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (TypeContainsAuto(sym->type) && initializer == NULL) {
       SyntaxError(syntax, "auto variable requires an initializer");
     } else if (TypeContainsAuto(sym->type)) {
-      initializer = AnalyzeExpression(initializer);
+      initializer = SemanticAnalyzeDeducedInitializer(sym, initializer);
       SemanticDeduceAutoType(sym, initializer, (ASTNode*)initializer);
       if (sym->associated_constraint != NULL && sym->type != NULL) {
         Vector* constraint_args = NewVector();

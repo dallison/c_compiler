@@ -35,6 +35,9 @@ bool SemanticInCatchHandler(void);
 
 void SemanticAnalyzeVariableDefinition(Syntax* syntax,
                                        VariableDeclarationASTNode* node);
+// Analyzes |sym|'s initializer.  A decltype(auto) placeholder deduces from the
+// initializer's value category, so that initializer is not folded.
+ASTNode* SemanticAnalyzeDeducedInitializer(Symbol* sym, ASTNode* initializer);
 bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
                             ASTNode* diagnostic_node);
 

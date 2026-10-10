@@ -3070,7 +3070,8 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
               } else {
                 decl->symbol->flags.is_tentative_decl = false;
                 if (TypeContainsAuto(decl->symbol->type)) {
-                  decl->initializer = AnalyzeExpression(decl->initializer);
+                  decl->initializer = SemanticAnalyzeDeducedInitializer(
+                      decl->symbol, decl->initializer);
                   if (!SemanticDeduceAutoType(decl->symbol, decl->initializer,
                                               (ASTNode*)decl)) {
                     continue;

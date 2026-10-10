@@ -331,7 +331,8 @@ static bool AnalyzingTemplatePatternBody(void) {
 // Replaces a read of a scalar constant variable by its value.
 static ASTNode* FoldConstantIdentifier(IdentifierASTNode* node) {
   if (node->symbol == NULL || !node->symbol->flags.value_set ||
-      (node->base.flags & (kASTNeedAddress | kASTIsDeclaration)) != 0) {
+      (node->base.flags & (kASTNeedAddress | kASTIsDeclaration)) != 0 ||
+      &node->base == compiler->decltype_operand) {
     return &node->base;
   }
   if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&
@@ -4691,7 +4692,11 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       reference_initializer->flags |= kASTNeedAddress;
     }
   }
-  init = AnalyzeExpression(init);
+  init = SemanticAnalyzeDeducedInitializer(
+      target != NULL && target->op == AST_OP(identifier)
+          ? ((IdentifierASTNode*)target)->symbol
+          : NULL,
+      init);
   if (init == NULL) {
     // Syntax recovery can leave an initialization node without an initializer
     // (for example, when `int []b` is parsed as a malformed structured

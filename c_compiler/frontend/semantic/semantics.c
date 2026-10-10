@@ -302,6 +302,21 @@ static bool LambdaInitializerHasConcreteClosureType(
   return true;
 }
 
+ASTNode* SemanticAnalyzeDeducedInitializer(Symbol* sym, ASTNode* initializer) {
+  ASTNode* saved_decltype_operand = compiler->decltype_operand;
+  if (sym != NULL && sym->type != NULL && initializer != NULL &&
+      sym->type->declarator == kDeclPrimitive &&
+      (sym->type->type & kTypeDecltypeAuto) != 0) {
+    compiler->decltype_operand =
+        initializer->op == AST_OP(expr_init)
+            ? ((ExpressionInitializerASTNode*)initializer)->expr
+            : initializer;
+  }
+  initializer = AnalyzeExpression(initializer);
+  compiler->decltype_operand = saved_decltype_operand;
+  return initializer;
+}
+
 bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
                             ASTNode* diagnostic_node) {
   if (sym == NULL || !TypeContainsAuto(sym->type)) {
@@ -1985,7 +2000,8 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
       ((ExpressionInitializerASTNode*)node->initializer)->expr->flags |=
           kASTNeedAddress;
     }
-    node->initializer = AnalyzeExpression(node->initializer);
+    node->initializer =
+        SemanticAnalyzeDeducedInitializer(node->symbol, node->initializer);
     if (must_be_constant) {
       compiler->constant_evaluation_required_depth--;
     }
