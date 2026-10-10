@@ -4270,16 +4270,10 @@ static unsigned __int128 ConstexprPackU128(int64_t lo, int64_t hi) {
 }
 
 static void ConstexprUnpackU128(unsigned __int128 value, ConstexprValue* result) {
-  result->is_object = false;
-  result->is_address = false;
-  result->object = NULL;
-  result->address_binding = NULL;
-  result->address_slot = NULL;
-  result->is_floating = false;
-  result->ivalue = (int64_t)(uint64_t)value;
-  result->ihi = (int64_t)(uint64_t)(value >> 64);
-  result->fvalue = 0;
-  result->state = kValueStateValid;
+  *result = (ConstexprValue){
+      .ivalue = (int64_t)(uint64_t)value,
+      .ihi = (int64_t)(uint64_t)(value >> 64),
+  };
 }
 
 static bool EvaluateInt128Expression(ConstEvalContext* ctx, ASTNode* node,
@@ -4584,28 +4578,15 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
     if (!EvaluateFloatingPointExpressionInContext(ctx, node, &value)) {
       return false;
     }
-    result->is_object = false;
-    result->is_address = false;
-    result->object = NULL;
-    result->address_binding = NULL;
-    result->address_slot = NULL;
-    result->is_floating = true;
-    result->fvalue = value;
-    result->ivalue = (int64_t)value;
+    *result = (ConstexprValue){
+        .is_floating = true, .fvalue = value, .ivalue = (int64_t)value};
     return true;
   }
   int64_t value;
   if (!EvaluateIntegerExpressionInContext(ctx, node, &value)) {
     return false;
   }
-  result->is_object = false;
-  result->is_address = false;
-  result->object = NULL;
-  result->address_binding = NULL;
-  result->address_slot = NULL;
-  result->is_floating = false;
-  result->ivalue = value;
-  result->fvalue = (double)value;
+  *result = (ConstexprValue){.ivalue = value, .fvalue = (double)value};
   return true;
 }
 
@@ -5551,22 +5532,14 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
         ConstexprValue source_value = {0};
         if (EvaluateConstexprObjectAccess(ctx, source, &source_value) &&
             source_value.is_object && source_value.object != NULL) {
-          result->is_object = true;
-          result->is_address = false;
-          result->is_floating = false;
-          result->ivalue = 0;
-          result->fvalue = 0;
+          *result = (ConstexprValue){.is_object = true};
           result->object = CloneConstexprObject(ctx, source_value.object);
           ConstexprRecordTemporary(ctx, temporary->symbol, result->object);
           return result->object != NULL;
         }
       }
     }
-    result->is_object = true;
-    result->is_address = false;
-    result->is_floating = false;
-    result->ivalue = 0;
-    result->fvalue = 0;
+    *result = (ConstexprValue){.is_object = true};
     result->object = NewConstexprObject(ctx, type,
                                         ConstexprObjectSlotCount(type));
     size_t mark = ctx->bindings.length;
@@ -5584,11 +5557,7 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
     ConstexprObject* pcode_object = NULL;
     if (ConstexprPCodeEvaluateCallObjectResult(ctx, initializer,
                                               &pcode_object)) {
-      result->is_object = true;
-      result->is_address = false;
-      result->is_floating = false;
-      result->ivalue = 0;
-      result->fvalue = 0;
+      *result = (ConstexprValue){.is_object = true};
       result->object = CloneConstexprObject(ctx, pcode_object);
       if (result->object != NULL) {
         // The p-code object is deleted; its own addresses move to the clone.
@@ -5608,19 +5577,11 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
     ConstexprValue value;
     if (EvaluateConstexprCall(ctx, initializer, &value) &&
         value.is_object && value.object != NULL) {
-      result->is_object = true;
-      result->is_address = false;
-      result->is_floating = false;
-      result->ivalue = 0;
-      result->fvalue = 0;
+      *result = (ConstexprValue){.is_object = true};
       result->object = CloneConstexprObject(ctx, value.object);
       return result->object != NULL;
     }
-    result->is_object = true;
-    result->is_address = false;
-    result->is_floating = false;
-    result->ivalue = 0;
-    result->fvalue = 0;
+    *result = (ConstexprValue){.is_object = true};
     result->object = NewConstexprObject(ctx, type,
                                         ConstexprObjectSlotCount(type));
     return EvaluateConstexprConstructorCallForObject(ctx, initializer,
@@ -5631,11 +5592,7 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
   if (EvaluateConstexprObjectAccess(ctx, initializer, &value) &&
       value.is_object && value.object != NULL &&
       ConstexprCopiedObjectMatchesTarget(type, value.object->type)) {
-    result->is_object = true;
-    result->is_address = false;
-    result->is_floating = false;
-    result->ivalue = 0;
-    result->fvalue = 0;
+    *result = (ConstexprValue){.is_object = true};
     result->object = CloneConstexprObject(ctx, value.object);
     return result->object != NULL;
   }
@@ -6274,11 +6231,7 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
         braced->initializers != NULL ? braced->initializers->length : 0;
   }
   ConstexprObject* object = NewConstexprObject(ctx, type, slot_count);
-  result->is_object = true;
-  result->is_address = false;
-  result->is_floating = false;
-  result->ivalue = 0;
-  result->fvalue = 0;
+  *result = (ConstexprValue){.is_object = true};
   result->object = object;
 
   if (initializer->op != AST_OP(braced_init)) {
@@ -7300,11 +7253,7 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     slot->ivalue = v;
     slot->fvalue = 0;
     slot->object = NULL;
-    result->is_object = true;
-    result->is_address = false;
-    result->is_floating = false;
-    result->ivalue = 0;
-    result->fvalue = 0;
+    *result = (ConstexprValue){.is_object = true};
     result->object = object;
     return true;
   }
@@ -7370,11 +7319,7 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
         id->symbol->flags.value_set &&
         (TypeIsFixedArray(id->symbol->type) ||
          TypeIsStructOrUnion(id->symbol->type))) {
-      result->is_object = true;
-      result->is_address = false;
-      result->is_floating = false;
-      result->ivalue = 0;
-      result->fvalue = 0;
+      *result = (ConstexprValue){.is_object = true};
       result->object = id->symbol->value.other;
       if (result->object != NULL && result->object->lifetime_ended) {
         ReportConstexprPlacementFailure(
@@ -7418,11 +7363,7 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     if (bound_object == NULL) {
       return false;
     }
-    result->is_object = true;
-    result->is_address = false;
-    result->is_floating = false;
-    result->ivalue = 0;
-    result->fvalue = 0;
+    *result = (ConstexprValue){.is_object = true};
     result->object = bound_object;
     return true;
   }
@@ -9692,11 +9633,7 @@ static bool EvaluateConstexprConvertingConstruction(ConstEvalContext* ctx,
     ConstexprReleasePlainObjectType(to, plain_to);
     return false;
   }
-  result->is_object = true;
-  result->is_address = false;
-  result->is_floating = false;
-  result->ivalue = 0;
-  result->fvalue = 0;
+  *result = (ConstexprValue){.is_object = true};
   result->object =
       NewConstexprObject(ctx, plain_to, ConstexprObjectSlotCount(plain_to));
   Vector actuals;
@@ -10472,7 +10409,7 @@ static bool EvaluateConstexprVariableDeclarationInitializer(
       class_cleanup = comma->right;
     }
     if (class_call != NULL && class_call->op == AST_OP(call)) {
-      ConstexprValue object_value;
+      ConstexprValue object_value = {0};
       if (EvaluateConstexprCall(ctx, class_call, &object_value) &&
           object_value.is_object && object_value.object != NULL) {
         PushConstexprBinding(ctx, decl->symbol, object_value);
@@ -10500,7 +10437,7 @@ static bool EvaluateConstexprVariableDeclarationInitializer(
       }
       return true;
     }
-    ConstexprValue object_value;
+    ConstexprValue object_value = {0};
     if (!EvaluateConstexprInitializer(ctx, decl->symbol->type,
                                       decl_initializer, &object_value)) {
       return false;
