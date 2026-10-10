@@ -8265,20 +8265,21 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     if (!EvaluateConstexprAddressValue(ctx, contents->sub, &address)) {
       return false;
     }
-    ConstexprValue resolved = ConstexprResolveForwardedAddress(address);
-    ConstexprValue* element =
-        node->type != NULL && TypeIsFixedArray(node->type) &&
-                resolved.address_object != NULL
-            ? ConstexprObjectSlot(resolved.address_object,
-                                  resolved.address_index)
-            : NULL;
-    if (element != NULL && element->is_object && element->object != NULL &&
-        TypeIsFixedArray(element->object->type)) {
-      // `*p` of an array decays to the address of its first element.
-      *result = (ConstexprValue){.is_address = true,
-                                 .address_object = element->object,
-                                 .address_index = 0};
-      return true;
+    if (node->type != NULL && TypeIsFixedArray(node->type)) {
+      ConstexprValue resolved = ConstexprResolveForwardedAddress(address);
+      ConstexprValue* element =
+          resolved.address_object != NULL
+              ? ConstexprObjectSlot(resolved.address_object,
+                                    resolved.address_index)
+              : NULL;
+      if (element != NULL && element->is_object && element->object != NULL &&
+          TypeIsFixedArray(element->object->type)) {
+        // `*p` of an array decays to the address of its first element.
+        *result = (ConstexprValue){.is_address = true,
+                                   .address_object = element->object,
+                                   .address_index = 0};
+        return true;
+      }
     }
     return ConstexprDereferenceAddress(address, result);
   }
