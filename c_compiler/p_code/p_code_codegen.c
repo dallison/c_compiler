@@ -768,8 +768,33 @@ static TargetInstruction* Materialize(PCodeGenerator* pcode, IRNode* node) {
     switch (node->opcode) {
       case IR_OP(const8):
       case IR_OP(const16):
-      case IR_OP(const32):
-        return Emit(pcode, NewInstruction1(P_OP(movc), GetLoweredNode(node)));
+      case IR_OP(const32): {
+        // Narrow values live in registers zero-extended when unsigned and
+        // sign-extended otherwise; movc sign-extends its 32-bit immediate.
+        int bits = node->type != NULL && node->type->size > 0 &&
+                           node->type->size < 8
+                       ? node->type->size * 8
+                       : 32;
+        uint64_t raw = (uint64_t)((IRConstant*)node)->value.ivalue;
+        uint64_t mask = (UINT64_C(1) << bits) - 1;
+        int64_t value;
+        if (node->type != NULL && TypeIsUnsigned(node->type)) {
+          value = (int64_t)(raw & mask);
+        } else {
+          uint64_t sign = UINT64_C(1) << (bits - 1);
+          value = (int64_t)(((raw & mask) ^ sign) - sign);
+        }
+        if (value >= INT32_MIN && value <= INT32_MAX) {
+          return Emit(pcode,
+                      NewInstruction1(P_OP(movc),
+                                      GetIntConstant(pcode, NULL,
+                                                     kTargetType32Bit, value)));
+        }
+        return Emit(pcode,
+                    NewInstruction1(P_OP(movxc),
+                                    GetIntConstant(pcode, NULL,
+                                                   kTargetType64Bit, value)));
+      }
       case IR_OP(const64):
       case IR_OP(consta):
         return Emit(pcode, NewInstruction1(P_OP(movxc), GetLoweredNode(node)));
@@ -964,13 +989,13 @@ static PCodeOpcode IR2PCode(IROpcode op, bool is_unsigned) {
     case IR_OP(cmpnea):
       return P_OP(cmpne);
     case IR_OP(cmplta):
-      return P_OP(cmplt);
+      return P_OP(cmpltu);
     case IR_OP(cmplea):
-      return P_OP(cmple);
+      return P_OP(cmpleu);
     case IR_OP(cmpgta):
-      return P_OP(cmpgt);
+      return P_OP(cmpgtu);
     case IR_OP(cmpgea):
-      return P_OP(cmpge);
+      return P_OP(cmpgeu);
 
     case IR_OP(cmp3wayi):
       return P_OP(cmp3way);
@@ -1983,22 +2008,35 @@ static TargetInstruction* LowerSignExtend(PCodeGenerator* pcode, IRNode* node) {
   // perform the sign extension since the load instructions already do
   // that.
   TargetInstruction* value = Materialize(pcode, node->inputs.value.p[0]);
-  if (PCodeIsSignedLoad(value)) {
-    return SetLoweredNode(node, value);
-  }
   IRConstant* diff_value = node->inputs.value.p[1];
   int64_t diff = diff_value->value.ivalue;
-  TargetInstruction* diff_inst =
-      Emit(pcode,
-           NewInstruction1(P_OP(movc),
-                           GetIntConstant(pcode, NULL, kTargetType32Bit, diff)));
-  TargetInstruction* lsl =
-      Emit(pcode, NewInstruction2(P_OP(lsl), value, diff_inst));
-  TargetInstruction* asr =
-      Emit(pcode, NewInstruction2(P_OP(asr), lsl, diff_inst));
-
-  SetLoweredNode(node, asr);
-  return asr;
+  int dest_bits = node->type->size * 8;
+  bool narrow_unsigned = TypeIsUnsigned(node->type) && dest_bits < 64;
+  if (diff > 0 && PCodeIsSignedLoad(value) && !narrow_unsigned) {
+    return SetLoweredNode(node, value);
+  }
+  // A narrowing extension (negative diff) keeps the destination's bits.
+  int keep_bits = diff > 0 ? dest_bits - (int)diff : dest_bits;
+  if (keep_bits < 64 && !(diff > 0 && PCodeIsSignedLoad(value))) {
+    TargetInstruction* shift_inst =
+        Emit(pcode, NewInstruction1(P_OP(movc),
+                                    GetIntConstant(pcode, NULL,
+                                                   kTargetType32Bit,
+                                                   64 - keep_bits)));
+    TargetInstruction* lsl =
+        Emit(pcode, NewInstruction2(P_OP(lsl), value, shift_inst));
+    value = Emit(pcode, NewInstruction2(P_OP(asr), lsl, shift_inst));
+  }
+  // Narrow unsigned values are kept zero-extended in their register.
+  if (narrow_unsigned) {
+    uint64_t mask = (UINT64_C(1) << dest_bits) - 1;
+    TargetInstruction* mask_inst =
+        Emit(pcode, NewInstruction1(P_OP(movxc),
+                                    GetIntConstant(pcode, NULL,
+                                                   kTargetType64Bit, mask)));
+    value = Emit(pcode, NewInstruction2(P_OP(and), value, mask_inst));
+  }
+  return SetLoweredNode(node, value);
 }
 
 static TargetInstruction* LowerAlign(PCodeGenerator* pcode, IRNode* node) {
