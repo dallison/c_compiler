@@ -1060,6 +1060,135 @@ static Vector* CXXSubstituteTemplateArgumentsForFold(Vector* template_arguments)
   return args;
 }
 
+static BracedInitializerASTNode* CXXTupleArgumentBracedInit(ASTNode* arg) {
+  while (arg != NULL && arg->op == AST_OP(cast)) {
+    arg = ((CastASTNode*)arg)->expr;
+  }
+  if (arg == NULL) {
+    return NULL;
+  }
+  if (arg->op == AST_OP(expr_init)) {
+    return CXXTupleArgumentBracedInit(
+        ((ExpressionInitializerASTNode*)arg)->expr);
+  }
+  if (arg->op == AST_OP(braced_init)) {
+    return (BracedInitializerASTNode*)arg;
+  }
+  if (arg->op == AST_OP(compound_literal)) {
+    ASTNode* init = ((CompoundLiteralASTNode*)arg)->initializer;
+    if (init != NULL && init->op == AST_OP(braced_init)) {
+      return (BracedInitializerASTNode*)init;
+    }
+  }
+  if (arg->op == AST_OP(comma)) {
+    return CXXTupleArgumentBracedInit(((BinaryASTNode*)arg)->right);
+  }
+  return NULL;
+}
+
+static ASTNode* CXXBracedInitElementExpr(BracedInitializerASTNode* braced,
+                                        size_t index) {
+  if (braced == NULL || braced->initializers == NULL ||
+      index >= braced->initializers->length) {
+    return NULL;
+  }
+  ASTNode* element = braced->initializers->value.p[index];
+  if (element != NULL && element->op == AST_OP(expr_init)) {
+    return ((ExpressionInitializerASTNode*)element)->expr;
+  }
+  return element;
+}
+
+static ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
+  IdentifierASTNode* callee = CXXCallCalleeIdentifier(call->left);
+  if (callee == NULL || callee->symbol == NULL ||
+      !StringEqual(&callee->symbol->name, "get") ||
+      callee->template_arguments == NULL ||
+      callee->template_arguments->length != 1 ||
+      call->children == NULL || call->children->length != 1) {
+    return NULL;
+  }
+  Vector* resolved =
+      CXXSubstituteTemplateArgumentsForFold(callee->template_arguments);
+  if (resolved == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(resolved)) {
+    VectorDeleteWithContents(
+        resolved, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return NULL;
+  }
+  TemplateArgument* t_arg = resolved->value.p[0];
+  size_t index = (size_t)-1;
+  TypeRecord* type_key = NULL;
+  if (TemplateArgumentConcreteValueKind(t_arg) == kTemplateValueIntegral) {
+    index = (size_t)t_arg->int_value;
+  } else if (t_arg->dependent_expr != NULL) {
+    int64_t iv = 0;
+    if (EvaluateIntegerExpression(t_arg->dependent_expr, &iv)) {
+      index = (size_t)iv;
+    }
+  } else if (t_arg->kind == kTemplateParameterNonType && t_arg->int_value >= 0) {
+    index = (size_t)t_arg->int_value;
+  } else if (t_arg->type != NULL) {
+    type_key = CXXResolveTypeForIsSameVArgument(t_arg);
+  }
+  ASTNode* tuple_arg = (ASTNode*)call->children->value.p[0];
+  if (tuple_arg != NULL && tuple_arg->op == AST_OP(expr_init)) {
+    tuple_arg = ((ExpressionInitializerASTNode*)tuple_arg)->expr;
+  }
+  BracedInitializerASTNode* braced = CXXTupleArgumentBracedInit(tuple_arg);
+  if (braced == NULL) {
+    if (type_key != NULL) {
+      TypeRecordDelete(type_key);
+    }
+    VectorDeleteWithContents(
+        resolved, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return NULL;
+  }
+  ASTNode* element = NULL;
+  if (type_key != NULL) {
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      ASTNode* candidate = CXXBracedInitElementExpr(braced, i);
+      if (candidate == NULL) {
+        continue;
+      }
+      candidate = AnalyzeExpression(candidate);
+      if (candidate->type != NULL &&
+          (TypeEqual(candidate->type, type_key) ||
+           (TypeIsMemberPointer(candidate->type) &&
+            TypeIsMemberPointer(type_key) &&
+            TypeEqual(TypeMemberPointerPointeeType(candidate->type),
+                      TypeMemberPointerPointeeType(type_key))))) {
+        element = candidate;
+        break;
+      }
+    }
+    TypeRecordDelete(type_key);
+  } else if (index != (size_t)-1) {
+    element = CXXBracedInitElementExpr(braced, index);
+  }
+  VectorDeleteWithContents(resolved,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (element == NULL) {
+    return NULL;
+  }
+  ASTNode* moved = ASTNodeMove(element);
+  if (moved->op == AST_OP(member_ptr)) {
+    moved = AnalyzeExpression(moved);
+  } else {
+    moved = AnalyzeExpression(moved);
+  }
+  if (call->base.type != NULL) {
+    ASTNodeSetType(moved, TypeRecordCopy(call->base.type));
+  }
+  ASTNodeReplaceChild(call->base.parent, call->base.child_id, moved, true);
+  moved->flags |= kASTAnalyzed;
+  moved->value_category = kValueCategoryPrvalue;
+  return moved;
+}
+
 static ASTNode* CXXTryFoldGetConstructTypeCall(VectorASTNode* call) {
   if (call == NULL) {
     return NULL;
@@ -1222,6 +1351,7 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
       if (initializer->op == AST_OP(expr_init)) {
         initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
       }
+      initializer = CXXFoldIsSameVExpression(initializer);
       ASTNode* value = AnalyzeExpression(initializer);
       if (value != NULL && value->type != NULL) {
         TypeRecord* value_type = CXXVariableTemplateValueType(value->type);
@@ -1234,7 +1364,62 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
     }
     return NULL;
   }
+  if (concrete == NULL) {
+    ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
+        &compiler->syntax, var_sym, template_args);
+    if (initializer != NULL) {
+      if (initializer->op == AST_OP(expr_init)) {
+        initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+      }
+      initializer = CXXFoldIsSameVExpression(initializer);
+      ASTNode* value = AnalyzeExpression(initializer);
+      if (value != NULL && value->type != NULL &&
+          TypeIsMemberPointer(value->type)) {
+        TypeRecord* value_type = CXXVariableTemplateValueType(value->type);
+        if (value_type != NULL) {
+          ASTNodeSetType(value, value_type);
+        }
+        value->value_category = kValueCategoryPrvalue;
+        return value;
+      }
+    }
+  }
   TypeRecordDelete(concrete);
+  return NULL;
+}
+
+static ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)expr;
+    if (id->symbol != NULL && id->symbol->variable_template != NULL &&
+        id->template_arguments != NULL &&
+        (expr->flags & kASTIsDeclaration) == 0 &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            id->template_arguments)) {
+      return CXXInstantiateVariableTemplateValue(
+          id->symbol, id->template_arguments, expr->location);
+    }
+    return NULL;
+  }
+  if (expr->op == AST_OP(dot)) {
+    BinaryASTNode* dot = (BinaryASTNode*)expr;
+    if (dot->right == NULL || dot->right->op != AST_OP(structmember)) {
+      return NULL;
+    }
+    StructMemberASTNode* member_node = (StructMemberASTNode*)dot->right;
+    StructMember* member = member_node->member;
+    if (member != NULL && member->is_static &&
+        member->symbol != NULL && member->symbol->variable_template != NULL &&
+        member_node->template_arguments != NULL &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            member_node->template_arguments)) {
+      return CXXInstantiateVariableTemplateValue(
+          member->symbol, member_node->template_arguments, expr->location);
+    }
+  }
   return NULL;
 }
 
@@ -5628,6 +5813,12 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             !constructor_call &&
             TypeIsStructOrUnion(target->type) &&
             TypeEqual(e->expr->type, target->type);
+        ASTNode* materialized =
+            CXXMaterializeVariableTemplateExpression(e->expr);
+        if (materialized != NULL) {
+          ASTNodeReplaceChild((ASTNode*)e, 0, materialized, true);
+          e->expr = materialized;
+        }
         if (!constructor_call && !cxx_return_elision_initializer) {
           NormalConversion(e->expr, target->type);
         }
@@ -5715,6 +5906,16 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
     }
   }
   MarkCXX26SymbolicConstexprReference(symbol, init);
+
+  if (init != NULL && init->op == AST_OP(expr_init)) {
+    ExpressionInitializerASTNode* expr_init =
+        (ExpressionInitializerASTNode*)init;
+    ASTNode* folded = CXXFoldIsSameVExpression(expr_init->expr);
+    if (folded != NULL && folded != expr_init->expr) {
+      ASTNodeReplaceChild((ASTNode*)expr_init, 0, folded, true);
+      expr_init->expr = folded;
+    }
+  }
 
   // If we are initializing a constant that is integral or floating point
   // we can evaluate the expression, and if successful, assign the value
@@ -13783,6 +13984,14 @@ static StructMember* MemberPointerExpressionMember(ASTNode* node) {
 }
 
 static ASTNode* AnalyzeMemberPointerReference(BinaryASTNode* node) {
+  if (node->right != NULL) {
+    ASTNode* materialized =
+        CXXMaterializeVariableTemplateExpression(node->right);
+    if (materialized != NULL) {
+      ASTNodeReplaceChild((ASTNode*)node, 1, materialized, true);
+      node->right = materialized;
+    }
+  }
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
   bool right_is_nttp =
@@ -16232,6 +16441,10 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
     if (folded != NULL) {
       return folded;
     }
+    folded = CXXTryFoldStdGetFromTupleCall((VectorASTNode*)expr);
+    if (folded != NULL) {
+      return folded;
+    }
     return expr;
   }
   if (expr->op != AST_OP(identifier)) {
@@ -16478,9 +16691,19 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       AnalyzePackIndexExpression(binary_node);
       break;
 
-    case AST_OP(call):  // Function call.
+    case AST_OP(call): {  // Function call.
+      ASTNode* folded = CXXTryFoldStdGetFromTupleCall(vector_node);
+      if (folded != NULL) {
+        node = folded;
+        break;
+      }
       node = AnalyzeFunctionCall(vector_node);
+      folded = CXXTryFoldStdGetFromTupleCall((VectorASTNode*)node);
+      if (folded != NULL) {
+        node = folded;
+      }
       break;
+    }
 
     case AST_OP(range_begin):
     case AST_OP(range_end):

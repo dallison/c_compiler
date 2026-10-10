@@ -15,6 +15,7 @@
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
 #include "list.h"
+#include "member_pointer.h"
 #include "syntax.h"
 
 // The semantic analysis of an initializer converts the tree
@@ -636,6 +637,12 @@ static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
       // (`cond ? &a : &b`, `get_hash_slot_fn()`).  Those are not integer
       // constants; fold them to the selected function or object address.
       folded = ConstexprFoldPointerExpression(expr);
+    }
+  } else if (expr->type != NULL && TypeIsMemberPointer(expr->type)) {
+    expr = CXXFoldIsSameVExpression(expr);
+    MemberPointerValue pm_value;
+    if (MemberPointerTryEvaluateConstant(expr, expr->type, &pm_value)) {
+      folded = NewIntConstantASTNode(pm_value.ptr, expr->type, expr->location);
     }
   }
   if (folded == NULL) {
@@ -1496,17 +1503,34 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
     }
     case AST_OP(braced_init): {
       BracedInitializerASTNode* braced_init = (BracedInitializerASTNode*)init_expr;
-      if (CompilerIsCXX() && !constants_only && inode->kind == kIStruct &&
+      if (CompilerIsCXX() && inode->kind == kIStruct &&
           inode->type->info.struct_info != NULL &&
           (inode->type->info.struct_info->tag_symbol == NULL ||
            !inode->type->info.struct_info->tag_symbol->flags.invented) &&
           !inode->type->info.struct_info->is_aggregate) {
-        ASTNode* constructed =
-            LowerCXXBracedClassInitToConstructor(init_expr, inode->type);
-        if (constructed != NULL) {
-          inode->num_initializers++;
-          inode->expr = ASTNodeMove(constructed);
-          return AdvanceCurrent(inode->parent);
+        Struct* struct_info = inode->type->info.struct_info;
+        bool tuple_braced_init = false;
+        if (constants_only && struct_info != NULL) {
+          if (struct_info->tag_name != NULL &&
+              StringEqual(struct_info->tag_name, "tuple")) {
+            tuple_braced_init = true;
+          } else if (struct_info->tag_symbol != NULL &&
+                     struct_info->tag_symbol->type != NULL &&
+                     struct_info->tag_symbol->type->template_origin != NULL &&
+                     StringEqual(&struct_info->tag_symbol->type->template_origin
+                                      ->name,
+                                 "tuple")) {
+            tuple_braced_init = true;
+          }
+        }
+        if (!constants_only || tuple_braced_init) {
+          ASTNode* constructed =
+              LowerCXXBracedClassInitToConstructor(init_expr, inode->type);
+          if (constructed != NULL) {
+            inode->num_initializers++;
+            inode->expr = ASTNodeMove(constructed);
+            return AdvanceCurrent(inode->parent);
+          }
         }
       }
       ASTNode* same_class_element =
