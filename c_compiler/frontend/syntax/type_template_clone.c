@@ -5224,11 +5224,21 @@ static void RebindBodyCloneDecltypeExpressions(
         !TypeIsDecltypeAliasTemplateId(current)) {
       // `decltype` is unevaluated: cloning `*declval<T&>()` must not demand a
       // function body from declaration-only templates such as `std::declval`.
+      // With only the enclosing arguments bound, the operand is substituted
+      // against them by the caller.  Rebasing the member's own parameters
+      // here first would number `Alloc` into the enclosing slots, binding
+      // `decltype(IDT<Alloc>())` to the class argument; the caller rebases
+      // what is still dependent afterwards.
+      int saved_rebase_base = clone->rebase_template_parameter_base;
+      if (CloneSubstitutesEnclosingArgumentsOnly(clone)) {
+        clone->rebase_template_parameter_base = 0;
+      }
       compiler->speculative_template_instantiation_depth++;
       ASTNode* rebound =
           ASTNodeClone(current->dependent_decltype_expr,
                        CloneTemplateFunctionBodyNode, clone, NULL);
       compiler->speculative_template_instantiation_depth--;
+      clone->rebase_template_parameter_base = saved_rebase_base;
       if (rebound != NULL) {
         VectorAppend(rebound_types, current);
         VectorAppend(original_expressions, current->dependent_decltype_expr);

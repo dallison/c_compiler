@@ -2397,6 +2397,25 @@ static bool DependentDecltypeStackContains(ASTNode* expr) {
   return false;
 }
 
+/* A call whose explicit template arguments still name a template parameter
+ * (`IDT<Alloc>()` while only the enclosing class arguments are bound) is not
+ * resolved to a specialization; its type is the template's declared return
+ * type, which has none of the call's arguments. */
+static bool NodeCallsUnresolvedFunctionTemplate(ASTNode* node, void* data) {
+  (void)data;
+  if (node == NULL || node->op != AST_OP(call)) {
+    return false;
+  }
+  ASTNode* callee = ((VectorASTNode*)node)->left;
+  if (callee == NULL || callee->op != AST_OP(identifier)) {
+    return false;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)callee;
+  return id->symbol != NULL && id->symbol->flags.is_template &&
+         id->symbol->type != NULL && TypeIsFunction(id->symbol->type) &&
+         TemplateArgumentVectorContainsTemplateParameter(id->template_arguments);
+}
+
 /* True when `type` is a *named use* of an alias template whose pattern is a
  * dependent `decltype`, e.g. `all_t<R>` where
  * `template<class T> using all_t = decltype(views::all(declval<T>()))`.
@@ -2656,7 +2675,8 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         bool operand_still_dependent =
             TypeIsUnknown(expr->type) ||
             TypeContainsTemplateParameter(expr->type) ||
-            TypeContainsAuto(expr->type);
+            TypeContainsAuto(expr->type) ||
+            ASTNodeAny(expr, NodeCallsUnresolvedFunctionTemplate, NULL);
         if (operand_still_dependent) {
           TypeRecord* opaque = TypeRecordCopy(type);
           opaque->qualifiers |= type->qualifiers;
