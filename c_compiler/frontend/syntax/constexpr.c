@@ -179,6 +179,14 @@ static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
                                                   ASTNode* node,
                                                   TypeRecord* formal_object_type,
                                                   ConstexprValue* result);
+bool ConstexprEvaluateReferenceBinding(ConstEvalContext* ctx, ASTNode* node,
+                                       TypeRecord* reference_type,
+                                       ConstexprValue* result);
+static bool ConstexprAccessesReferenceMember(ASTNode* node);
+static bool EvaluateConstexprObjectLValueImpl(ConstEvalContext* ctx,
+                                              ASTNode* node,
+                                              ConstexprValue** slot,
+                                              bool allow_object);
 static bool ConstexprStaticReferenceTarget(ConstEvalContext* ctx,
                                            Symbol* symbol,
                                            ConstexprValue* result);
@@ -4027,7 +4035,8 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
     ASTNodeSetType(addr, TypeRecordCopy(type));
     return NewExpressionInitializerASTNode(addr, location);
   }
-  if (TypeIsPointer(type) && value->is_address && value->heap_block == NULL) {
+  if ((TypeIsPointer(type) || TypeIsReference(type)) && value->is_address &&
+      value->heap_block == NULL) {
     size_t offset = 0;
     Symbol* root = NULL;
     if (self_symbol != NULL && self_root != NULL &&
@@ -4036,6 +4045,19 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
     } else {
       ConstexprBinding* durable = ConstexprDurableAddressRoot(value, &offset);
       root = durable != NULL ? durable->symbol : NULL;
+    }
+    if (root != NULL && TypeIsReference(type)) {
+      // A reference member is initialized by the object it designates.
+      TypeRecord* pointer =
+          NewPointerTo(kQualPlain, TypeRecordCopy(type->next));
+      TypeRecordCalculateSize(pointer);
+      ASTNode* address =
+          ConstexprStaticAddressExpression(root, offset, pointer, location);
+      TypeRecordDecRef(pointer);
+      ASTNode* object = NewUnaryASTNode(
+          AST_OP(contents), TypeRecordCopy(type->next), location, address);
+      object->flags |= kASTAnalyzed | kASTNeedAddress;
+      return NewExpressionInitializerASTNode(object, location);
     }
     if (root != NULL) {
       return NewExpressionInitializerASTNode(
@@ -4843,6 +4865,24 @@ static bool EvaluateConstexprBinaryMutation(ConstEvalContext* ctx,
   // is both unnecessary and impossible during constant evaluation.
   if (ConstexprIsVirtualPointerAssignment(node)) {
     *result = (ConstexprValue){0};
+    return true;
+  }
+
+  // A constructor's `this->r = x` with a reference result binds member `r`.
+  if (node->base.op == AST_OP(assign) && TypeIsReference(node->base.type) &&
+      ConstexprAccessesReferenceMember(node->left)) {
+    ConstexprValue bound = {0};
+    ConstexprValue* reference_slot = NULL;
+    if (!ConstexprEvaluateReferenceBinding(ctx, node->right, node->left->type,
+                                           &bound) ||
+        !EvaluateConstexprObjectLValueImpl(ctx, node->left, &reference_slot,
+                                           false) ||
+        !StoreConstexprSlot(ctx, reference_slot, node->left->type->next,
+                            bound)) {
+      return false;
+    }
+    reference_slot->lifetime_ended = false;
+    *result = bound;
     return true;
   }
 
@@ -6101,6 +6141,9 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     // specialization the member's function-pointer type selects.
     if (TypeIsPointer(type) || TypeIsReference(type)) {
       CXXTryResolveFunctionAddressNode(initializer, type);
+    }
+    if (TypeIsReference(type)) {
+      return ConstexprEvaluateReferenceBinding(ctx, initializer, type, result);
     }
     return EvaluateConstexprValue(ctx, initializer, type, result);
   }
@@ -7525,10 +7568,49 @@ bool ConstexprEvaluateObjectSlotInteger(ASTNode* node, size_t slot,
   return ok;
 }
 
+static bool ConstexprAccessesReferenceMember(ASTNode* node) {
+  if (node == NULL ||
+      (node->op != AST_OP(dot) && node->op != AST_OP(arrow)) ||
+      ASTNodeGetShape(node) != kASTShapeBinary) {
+    return false;
+  }
+  ASTNode* right = ((BinaryASTNode*)node)->right;
+  StructMember* member =
+      right != NULL && right->op == AST_OP(structmember)
+          ? ((StructMemberASTNode*)right)->member
+          : NULL;
+  return member != NULL && member->symbol != NULL &&
+         TypeIsReference(member->symbol->type);
+}
+
+// The slot |node| designates.  A reference member designates the object it is
+// bound to, which has a slot only when that object is held by the evaluator.
 static bool EvaluateConstexprObjectLValue(ConstEvalContext* ctx,
                                           ASTNode* node,
                                           ConstexprValue** slot,
                                           bool allow_object) {
+  if (!EvaluateConstexprObjectLValueImpl(ctx, node, slot, allow_object)) {
+    return false;
+  }
+  if (!ConstexprAccessesReferenceMember(node) || !(*slot)->is_address) {
+    return true;
+  }
+  ConstexprValue target = ConstexprResolveForwardedAddress(**slot);
+  ConstexprValue* bound = target.address_slot;
+  if (bound == NULL && target.address_object != NULL) {
+    bound = ConstexprObjectSlot(target.address_object, target.address_index);
+  }
+  if (bound == NULL || (!allow_object && bound->is_object)) {
+    return false;
+  }
+  *slot = bound;
+  return true;
+}
+
+static bool EvaluateConstexprObjectLValueImpl(ConstEvalContext* ctx,
+                                              ASTNode* node,
+                                              ConstexprValue** slot,
+                                              bool allow_object) {
   if (node == NULL) {
     return false;
   }
@@ -8089,6 +8171,13 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     if (EvaluateConstexprLValue(ctx, address->sub, &binding)) {
       *result = (ConstexprValue){.is_address = true,
                                  .address_binding = binding};
+      return true;
+    }
+    if (ConstexprAccessesReferenceMember(address->sub) &&
+        EvaluateConstexprObjectLValueImpl(ctx, address->sub, &slot, true) &&
+        slot->is_address) {
+      // A reference member's slot holds where the reference is bound.
+      *result = *slot;
       return true;
     }
     if (EvaluateConstexprObjectLValue(ctx, address->sub, &slot, true)) {
@@ -8699,6 +8788,17 @@ static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
 bool ConstexprEvaluateAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                    ConstexprValue* result) {
   return EvaluateConstexprAddressValue(ctx, node, result);
+}
+
+// Where a reference of |reference_type| initialized by |node| is bound.
+bool ConstexprEvaluateReferenceBinding(ConstEvalContext* ctx, ASTNode* node,
+                                       TypeRecord* reference_type,
+                                       ConstexprValue* result) {
+  return node != NULL && reference_type != NULL &&
+         TypeIsReference(reference_type) && reference_type->next != NULL &&
+         EvaluateConstexprReferenceInitializer(ctx, node,
+                                               reference_type->next, result) &&
+         result->is_address;
 }
 
 static bool BindConstexprReferenceArgument(ConstEvalContext* ctx,

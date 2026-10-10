@@ -618,6 +618,9 @@ bool ConstexprValueAsFloating(ConstexprValue value, double* result);
 bool ConstexprSymbolIsExternalStatic(Symbol* symbol);
 bool ConstexprStaticAddressTarget(const ConstexprValue* value, Symbol** symbol,
                                   size_t* offset);
+bool ConstexprEvaluateReferenceBinding(ConstEvalContext* ctx, ASTNode* node,
+                                       TypeRecord* reference_type,
+                                       ConstexprValue* result);
 bool ConstexprStaticAddressAt(Symbol* symbol, size_t offset,
                               TypeRecord* pointee, ConstexprValue* result);
 bool ConstexprAddressInsideObject(ConstexprObject* root, size_t offset,
@@ -2306,7 +2309,8 @@ static bool LoadConstexprScalarBytes(TypeRecord* type, unsigned char* src,
     value->ivalue = (int64_t)dvalue;
     return true;
   }
-  if (!TypeIsIntegral(type) && !TypeIsPointer(type)) {
+  if (!TypeIsIntegral(type) && !TypeIsPointer(type) &&
+      !TypeIsReference(type)) {
     return false;
   }
   int64_t ivalue = 0;
@@ -3335,8 +3339,8 @@ static void PCodeMapPointeeAddress(PCodeVM* vm, TypeRecord* type,
                                    ConstexprValue* slot, Vector* regions,
                                    bool narrow,
                                    ConstexprPCodeResultRegion* result) {
-  if (slot == NULL || !TypeIsPointer(type) || slot->is_object ||
-      slot->is_address || slot->ivalue == 0) {
+  if (slot == NULL || (!TypeIsPointer(type) && !TypeIsReference(type)) ||
+      slot->is_object || slot->is_address || slot->ivalue == 0) {
     return;
   }
   uint64_t address = (uint64_t)slot->ivalue;
@@ -7176,6 +7180,21 @@ static bool PCodeStoreInitializer(ConstEvalContext* ctx, TypeRecord* type,
         .is_object = true,
         .object = object,
     };
+    return true;
+  }
+  if (TypeIsReference(type)) {
+    ConstexprValue address = {0};
+    Symbol* target = NULL;
+    size_t offset = 0;
+    if (!ConstexprEvaluateReferenceBinding(
+            ctx, ConstexprInitializerExpression(initializer), type,
+            &address) ||
+        !ConstexprStaticAddressTarget(&address, &target, &offset)) {
+      return ConstexprPCodeFailure(
+          ctx, kConstexprPCodeFailureUnsupported,
+          "constexpr pcode reference member is not bound to a static object");
+    }
+    *slot = address;
     return true;
   }
   return PCodeEvaluateScalarInitializer(ctx, type, initializer, slot);
