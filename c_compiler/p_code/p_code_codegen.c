@@ -1525,48 +1525,50 @@ static TargetInstruction* LowerStore(PCodeGenerator* pcode, IRNode* node) {
   return SetLoweredNode(node, Store(pcode, addr_node, src, opcode));
 }
 
+// Integer-like atomics are accessed at exactly their own width.
 static PCodeOpcode AtomicLoadOpcode(PCodeGenerator* pcode, TypeRecord* type) {
-  if (TypeIsCharFamily(type)) {
-    return TypeIsUnsigned(type) ? P_OP(ldub) : P_OP(ldb);
-  }
-  if (TypeIsShort(type)) {
-    return TypeIsUnsigned(type) ? P_OP(lduh) : P_OP(ldh);
-  }
-  if (TypeIsPointerOrArray(type)) {
-    return PCodeAddressLoadOpcode(pcode);
-  }
-  if (TypeIsLongLong(type) || (TypeIsLong(type) && type->size > 4)) {
-    return P_OP(ldx);
-  }
   if (TypeUsesFloat32Representation(type)) {
     return P_OP(ldf);
   }
   if (PCodeFpIsDoubleWidth(type)) {
     return P_OP(ldd);
   }
-  return TypeIsUnsigned(type) ? P_OP(lduw) : P_OP(ldw);
+  if (TypeIsPointerOrArray(type)) {
+    return PCodeAddressLoadOpcode(pcode);
+  }
+  bool is_unsigned = TypeIsUnsigned(type) || TypeIsBool(type);
+  switch (type->size) {
+    case 1:
+      return is_unsigned ? P_OP(ldub) : P_OP(ldb);
+    case 2:
+      return is_unsigned ? P_OP(lduh) : P_OP(ldh);
+    case 4:
+      return is_unsigned ? P_OP(lduw) : P_OP(ldw);
+    default:
+      return P_OP(ldx);
+  }
 }
 
 static PCodeOpcode AtomicStoreOpcode(PCodeGenerator* pcode, TypeRecord* type) {
-  if (TypeIsCharFamily(type)) {
-    return P_OP(stb);
-  }
-  if (TypeIsShort(type)) {
-    return P_OP(sth);
-  }
-  if (TypeIsPointerOrArray(type)) {
-    return PCodeAddressStoreOpcode(pcode);
-  }
-  if (TypeIsLongLong(type) || (TypeIsLong(type) && type->size > 4)) {
-    return P_OP(stx);
-  }
   if (TypeUsesFloat32Representation(type)) {
     return P_OP(stf);
   }
   if (PCodeFpIsDoubleWidth(type)) {
     return P_OP(std);
   }
-  return P_OP(stw);
+  if (TypeIsPointerOrArray(type)) {
+    return PCodeAddressStoreOpcode(pcode);
+  }
+  switch (type->size) {
+    case 1:
+      return P_OP(stb);
+    case 2:
+      return P_OP(sth);
+    case 4:
+      return P_OP(stw);
+    default:
+      return P_OP(stx);
+  }
 }
 
 static TargetInstruction* LowerAtomicLoad(PCodeGenerator* pcode, IRNode* node) {
@@ -1581,9 +1583,14 @@ static TargetInstruction* LowerAtomicStore(PCodeGenerator* pcode, IRNode* node) 
   IRNode* addr_node = node->inputs.value.p[0];
   IRNode* src_node = node->inputs.value.p[1];
   TargetInstruction* src = Materialize(pcode, src_node);
+  TypeRecord* type = addr_node->type != NULL &&
+                             TypeIsPointer(addr_node->type) &&
+                             addr_node->type->next != NULL &&
+                             addr_node->type->next->size > 0
+                         ? addr_node->type->next
+                         : src_node->type;
   return SetLoweredNode(
-      node,
-      Store(pcode, addr_node, src, AtomicStoreOpcode(pcode, src_node->type)));
+      node, Store(pcode, addr_node, src, AtomicStoreOpcode(pcode, type)));
 }
 
 static TargetInstruction* LowerAtomicFetchAddSub(PCodeGenerator* pcode,
