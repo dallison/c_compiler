@@ -682,10 +682,25 @@ static IROpcode ConstantOpcode(TypeRecord* type) {
   if (TypeIsIntegral(type)) {
     return IntConstOpcode(type);
   }
+  // Function and array NTTP materialization can leave a function type on a
+  // constant that still represents an address.
+  if (TypeIsFunction(type)) {
+    return IR_OP(consta);
+  }
   for (size_t i = 0; type_table[i].type_func != NULL; i++) {
     if (type_table[i].type_func(type)) {
       return type_table[i].opcode;
     }
+  }
+  if (TypeIsComplex(type)) {
+    return IR_OP(consta);
+  }
+  if (TypeIsReflection(type)) {
+    return IR_OP(consta);
+  }
+  if (type != NULL &&
+      (TypeIsUnknown(type) || (type->type & kTypeAuto) != 0)) {
+    return IR_OP(consta);
   }
   assert(false);
   return IR_OP(nop);
