@@ -1060,6 +1060,22 @@ static Vector* CXXSubstituteTemplateArgumentsForFold(Vector* template_arguments)
   return args;
 }
 
+static bool CXXTypeNamesStdTuple(TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return false;
+  }
+  if (type->info.struct_info->tag_name != NULL &&
+      StringEqual(type->info.struct_info->tag_name, "tuple")) {
+    return true;
+  }
+  if (type->template_origin != NULL &&
+      StringEqual(&type->template_origin->name, "tuple")) {
+    return true;
+  }
+  return false;
+}
+
 static BracedInitializerASTNode* CXXTupleArgumentBracedInit(ASTNode* arg) {
   while (arg != NULL && arg->op == AST_OP(cast)) {
     arg = ((CastASTNode*)arg)->expr;
@@ -1070,6 +1086,17 @@ static BracedInitializerASTNode* CXXTupleArgumentBracedInit(ASTNode* arg) {
   if (arg->op == AST_OP(expr_init)) {
     return CXXTupleArgumentBracedInit(
         ((ExpressionInitializerASTNode*)arg)->expr);
+  }
+  if (arg->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)arg;
+    TypeRecord* ctor_type = call->base.type;
+    if (ctor_type == NULL && call->left != NULL) {
+      ctor_type = call->left->type;
+    }
+    if (CXXTypeNamesStdTuple(ctor_type) && call->children != NULL &&
+        call->children->length == 1) {
+      return CXXTupleArgumentBracedInit(call->children->value.p[0]);
+    }
   }
   if (arg->op == AST_OP(braced_init)) {
     return (BracedInitializerASTNode*)arg;
@@ -1262,6 +1289,103 @@ static TypeRecord* CXXVariableTemplateValueType(TypeRecord* type) {
   return copy;
 }
 
+static ASTNode* CXXVariableTemplateExpressionSurface(ASTNode* expr) {
+  while (expr != NULL) {
+    if (expr->op == AST_OP(init)) {
+      expr = ((BinaryASTNode*)expr)->right;
+      continue;
+    }
+    if (expr->op == AST_OP(expr_init)) {
+      expr = ((ExpressionInitializerASTNode*)expr)->expr;
+      continue;
+    }
+    if (expr->op == AST_OP(cast)) {
+      expr = ((CastASTNode*)expr)->expr;
+      continue;
+    }
+    break;
+  }
+  return expr;
+}
+
+static Symbol* CXXStdTupleClassTemplateSymbol(void) {
+  String name;
+  StringInit(&name, "tuple");
+  Symbol* sym = SyntaxFindSymbol(&compiler->syntax, &name);
+  if (sym == NULL || !sym->flags.is_template) {
+    sym = SyntaxFindTag(&compiler->syntax, &name);
+  }
+  StringDestruct(&name);
+  if (sym != NULL && sym->flags.is_template) {
+    return sym;
+  }
+  return NULL;
+}
+
+static TypeRecord* CXXTupleTypeForSingleElementBracedInit(
+    BracedInitializerASTNode* braced) {
+  if (braced == NULL || braced->initializers == NULL ||
+      braced->initializers->length != 1) {
+    return NULL;
+  }
+  if (braced->base.type != NULL && CXXTypeNamesStdTuple(braced->base.type)) {
+    return TypeRecordCopy(braced->base.type);
+  }
+  ASTNode* element = CXXBracedInitElementExpr(braced, 0);
+  if (element == NULL) {
+    return NULL;
+  }
+  DiagnosticSuppressBegin();
+  element = AnalyzeExpression(element);
+  DiagnosticSuppressEnd();
+  if (element == NULL || element->type == NULL ||
+      TypeContainsTemplateParameter(element->type)) {
+    return NULL;
+  }
+  Symbol* tuple_template = CXXStdTupleClassTemplateSymbol();
+  if (tuple_template == NULL || !tuple_template->flags.is_template) {
+    return NULL;
+  }
+  Vector* args = NewVector();
+  VectorAppend(args, NewTypeTemplateArgument(TypeRecordCopy(element->type)));
+  TypeRecord* tuple_type =
+      TypeInstantiateClassTemplate(&compiler->syntax, tuple_template, args);
+  VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return tuple_type;
+}
+
+static void CXXPrepareStdGetVariableTemplateInitializer(ASTNode* expr) {
+  expr = CXXVariableTemplateExpressionSurface(expr);
+  if (expr == NULL || expr->op != AST_OP(call)) {
+    return;
+  }
+  VectorASTNode* call = (VectorASTNode*)expr;
+  IdentifierASTNode* callee = CXXCallCalleeIdentifier(call->left);
+  if (callee == NULL || callee->symbol == NULL ||
+      !StringEqual(&callee->symbol->name, "get") ||
+      call->children == NULL || call->children->length != 1) {
+    return;
+  }
+  ASTNode* arg = call->children->value.p[0];
+  if (arg != NULL && arg->op == AST_OP(expr_init)) {
+    arg = ((ExpressionInitializerASTNode*)arg)->expr;
+  }
+  if (arg == NULL || arg->op != AST_OP(braced_init)) {
+    return;
+  }
+  TypeRecord* tuple_type =
+      CXXTupleTypeForSingleElementBracedInit((BracedInitializerASTNode*)arg);
+  if (tuple_type == NULL) {
+    return;
+  }
+  ASTNode* lowered = LowerCXXBracedInitToTarget(arg, tuple_type);
+  TypeRecordDelete(tuple_type);
+  if (lowered != arg) {
+    ASTNodeReplaceChild((ASTNode*)call, 0, lowered, false);
+  }
+}
+
 static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
                                                     Vector* template_args,
                                                     SourceLocation location) {
@@ -1272,6 +1396,11 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
   }
   TypeRecord* concrete = TypeInstantiateVariableTemplateDeducedType(
       &compiler->syntax, var_sym, template_args);
+  if (concrete != NULL && var_sym->type != NULL &&
+      TypeContainsAuto(var_sym->type) && !TypeIsMemberPointer(concrete)) {
+    TypeRecordDelete(concrete);
+    concrete = NULL;
+  }
   int64_t value = 0;
   if (concrete != NULL && TypeIsIntegral(concrete) &&
       TypeInstantiateVariableTemplateConstant(&compiler->syntax, var_sym,
@@ -1348,11 +1477,16 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
         &compiler->syntax, var_sym, template_args);
     TypeRecordDelete(concrete);
     if (initializer != NULL) {
-      if (initializer->op == AST_OP(expr_init)) {
-        initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
-      }
+      initializer = CXXVariableTemplateExpressionSurface(initializer);
       initializer = CXXFoldIsSameVExpression(initializer);
+      CXXPrepareStdGetVariableTemplateInitializer(initializer);
       ASTNode* value = AnalyzeExpression(initializer);
+      if (value != NULL && value->op == AST_OP(call)) {
+        ASTNode* folded = CXXTryFoldStdGetFromTupleCall((VectorASTNode*)value);
+        if (folded != NULL) {
+          value = folded;
+        }
+      }
       if (value != NULL && value->type != NULL) {
         TypeRecord* value_type = CXXVariableTemplateValueType(value->type);
         if (value_type != NULL) {
@@ -1368,13 +1502,19 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
     ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
         &compiler->syntax, var_sym, template_args);
     if (initializer != NULL) {
-      if (initializer->op == AST_OP(expr_init)) {
-        initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
-      }
+      initializer = CXXVariableTemplateExpressionSurface(initializer);
       initializer = CXXFoldIsSameVExpression(initializer);
+      CXXPrepareStdGetVariableTemplateInitializer(initializer);
       ASTNode* value = AnalyzeExpression(initializer);
+      if (value != NULL && value->op == AST_OP(call)) {
+        ASTNode* folded = CXXTryFoldStdGetFromTupleCall((VectorASTNode*)value);
+        if (folded != NULL) {
+          value = folded;
+        }
+      }
       if (value != NULL && value->type != NULL &&
-          TypeIsMemberPointer(value->type)) {
+          !TypeContainsTemplateParameter(value->type) &&
+          !TypeIsUnknown(value->type)) {
         TypeRecord* value_type = CXXVariableTemplateValueType(value->type);
         if (value_type != NULL) {
           ASTNodeSetType(value, value_type);
@@ -1388,7 +1528,11 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
   return NULL;
 }
 
-static ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr) {
+ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  expr = CXXVariableTemplateExpressionSurface(expr);
   if (expr == NULL) {
     return NULL;
   }
@@ -1404,12 +1548,25 @@ static ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr) {
     }
     return NULL;
   }
-  if (expr->op == AST_OP(dot)) {
-    BinaryASTNode* dot = (BinaryASTNode*)expr;
-    if (dot->right == NULL || dot->right->op != AST_OP(structmember)) {
+  if (expr->op == AST_OP(structmember)) {
+    StructMemberASTNode* member_node = (StructMemberASTNode*)expr;
+    StructMember* member = member_node->member;
+    if (member != NULL && member->is_static &&
+        member->symbol != NULL && member->symbol->variable_template != NULL &&
+        member_node->template_arguments != NULL &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            member_node->template_arguments)) {
+      return CXXInstantiateVariableTemplateValue(
+          member->symbol, member_node->template_arguments, expr->location);
+    }
+    return NULL;
+  }
+  if (expr->op == AST_OP(dot) || expr->op == AST_OP(arrow)) {
+    BinaryASTNode* access = (BinaryASTNode*)expr;
+    if (access->right == NULL || access->right->op != AST_OP(structmember)) {
       return NULL;
     }
-    StructMemberASTNode* member_node = (StructMemberASTNode*)dot->right;
+    StructMemberASTNode* member_node = (StructMemberASTNode*)access->right;
     StructMember* member = member_node->member;
     if (member != NULL && member->is_static &&
         member->symbol != NULL && member->symbol->variable_template != NULL &&

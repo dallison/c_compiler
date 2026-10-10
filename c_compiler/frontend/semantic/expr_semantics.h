@@ -15,6 +15,8 @@
 __attribute__((warn_unused_result)) ASTNode* AnalyzeExpression(ASTNode* node);
 // Fold `std::is_same_v<T, U>` when variable-template instantiation does not.
 ASTNode* CXXFoldIsSameVExpression(ASTNode* expr);
+// Instantiate a variable template-id used as a value (`foo<T>`, `C::foo<T>`).
+ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr);
 // Member access analyzed while its receiver was still `auto` keeps that
 // placeholder after deduction.  Re-run those accesses once the symbol type
 // is concrete.

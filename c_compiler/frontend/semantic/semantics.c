@@ -2016,7 +2016,30 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
       return;
     }
     if (!TypeIsReflection(node->symbol->type)) {
-      NormalConversion(node->initializer, node->symbol->type);
+      ASTNode* init_expr = node->initializer;
+      if (init_expr != NULL && init_expr->op == AST_OP(init)) {
+        init_expr = ((BinaryASTNode*)init_expr)->right;
+      }
+      if (init_expr != NULL && init_expr->op == AST_OP(expr_init)) {
+        init_expr = ((ExpressionInitializerASTNode*)init_expr)->expr;
+      }
+      ASTNode* materialized =
+          CXXMaterializeVariableTemplateExpression(init_expr);
+      if (materialized != NULL && init_expr != NULL) {
+        if (node->initializer->op == AST_OP(init)) {
+          ASTNodeReplaceChild(node->initializer, 1, materialized, true);
+          ((BinaryASTNode*)node->initializer)->right = materialized;
+        } else if (node->initializer->op == AST_OP(expr_init)) {
+          ASTNodeReplaceChild(node->initializer, 0, materialized, true);
+          ((ExpressionInitializerASTNode*)node->initializer)->expr =
+              materialized;
+        } else {
+          node->initializer = materialized;
+        }
+        init_expr = materialized;
+      }
+      NormalConversion(init_expr != NULL ? init_expr : node->initializer,
+                       node->symbol->type);
     }
   }
   if (TypeIsConstevalOnly(node->symbol->type) &&

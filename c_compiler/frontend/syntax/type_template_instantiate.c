@@ -2671,6 +2671,12 @@ ASTNode* TypeInstantiateVariableTemplateInitializer(Syntax* syntax,
     substitution_args = partial_args;
   }
 
+  Struct* saved_substitution_source = parser.template_substitution_source;
+  Struct* saved_substitution_target = parser.template_substitution_target;
+  if (var_template->static_data_member_class != NULL) {
+    parser.template_substitution_source = var_template->static_data_member_class;
+    parser.template_substitution_target = var_template->static_data_member_class;
+  }
   ASTNode* concrete = NULL;
   if (ConceptsConstraintSatisfied(constraint, substitution_args) &&
       initializer != NULL) {
@@ -2681,6 +2687,8 @@ ASTNode* TypeInstantiateVariableTemplateInitializer(Syntax* syntax,
     ReportVariableTemplateConstraintFailure(syntax, var_template,
                                             completed_args);
   }
+  parser.template_substitution_source = saved_substitution_source;
+  parser.template_substitution_target = saved_substitution_target;
   if (partial_args != NULL) {
     VectorDeleteWithContents(partial_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
