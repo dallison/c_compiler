@@ -371,19 +371,12 @@ static void PCodeInterpreterStep(PCodeInterpreter* interpreter) {
             iregs[DEST(inst)] = (uint64_t)iregs[SRC1(inst)] / (uint64_t)iregs[SRC2(inst)];
           }
           break;
+        // IEEE floating division by zero yields an infinity or NaN.
         case PCODE_OP(divf):
-          if (fregs[SRC2(inst)] == 0) {
-            interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
-          } else {
-            fregs[DEST(inst)] = fregs[SRC1(inst)] / fregs[SRC2(inst)];
-          }
+          fregs[DEST(inst)] = fregs[SRC1(inst)] / fregs[SRC2(inst)];
           break;
         case PCODE_OP(divd):
-          if (dregs[SRC2(inst)] == 0) {
-            interpreter->escape(interpreter, P_CODE_ESC_DIV_ZERO);
-          } else {
-            dregs[DEST(inst)] = dregs[SRC1(inst)] / dregs[SRC2(inst)];
-          }
+          dregs[DEST(inst)] = dregs[SRC1(inst)] / dregs[SRC2(inst)];
           break;
         case PCODE_OP(mod):
           iregs[DEST(inst)] =
@@ -491,6 +484,30 @@ static void PCodeInterpreterStep(PCodeInterpreter* interpreter) {
           break;
         case PCODE_OP(cmpged):
           iregs[DEST(inst)] = dregs[SRC1(inst)] >= dregs[SRC2(inst)];
+          break;
+        case PCODE_OP(cmp3way):
+          iregs[DEST(inst)] = (iregs[SRC1(inst)] < iregs[SRC2(inst)])   ? -1
+                              : (iregs[SRC1(inst)] > iregs[SRC2(inst)]) ? 1
+                                                                        : 0;
+          break;
+        case PCODE_OP(cmp3wayu):
+          iregs[DEST(inst)] =
+              ((uint64_t)iregs[SRC1(inst)] < (uint64_t)iregs[SRC2(inst)])   ? -1
+              : ((uint64_t)iregs[SRC1(inst)] > (uint64_t)iregs[SRC2(inst)]) ? 1
+                                                                           : 0;
+          break;
+        // An unordered comparison yields 2.
+        case PCODE_OP(cmp3wayf):
+          iregs[DEST(inst)] = (fregs[SRC1(inst)] < fregs[SRC2(inst)])    ? -1
+                              : (fregs[SRC1(inst)] > fregs[SRC2(inst)])  ? 1
+                              : (fregs[SRC1(inst)] == fregs[SRC2(inst)]) ? 0
+                                                                         : 2;
+          break;
+        case PCODE_OP(cmp3wayd):
+          iregs[DEST(inst)] = (dregs[SRC1(inst)] < dregs[SRC2(inst)])    ? -1
+                              : (dregs[SRC1(inst)] > dregs[SRC2(inst)])  ? 1
+                              : (dregs[SRC1(inst)] == dregs[SRC2(inst)]) ? 0
+                                                                         : 2;
           break;
         case PCODE_OP(decsp):
           iregs[PCODE_SP_REG] -= inst & 0xffffff;
