@@ -562,8 +562,7 @@ static bool ExecuteMovRegMem(X86_64Interpreter* interpreter, size_t insn_len,
         WriteReg(interpreter, modrm.rm, ReadReg(interpreter, modrm.reg));
       } else {
         WriteReg(interpreter, modrm.rm,
-                 (ReadReg(interpreter, modrm.rm) & ~0xffffffffULL) |
-                     (ReadReg(interpreter, modrm.reg) & 0xffffffff));
+                 ReadReg(interpreter, modrm.reg) & 0xffffffff);
       }
     } else {
       if (byte_op) {

@@ -1709,6 +1709,56 @@ static TargetInstruction* MultiplyByConstant(X86Generator* rv,
 }
 
 
+// A 32-bit integer in a 64-bit register must be extended over the whole
+// register according to its signedness: compares, division, right shifts and
+// widening conversions all read the full register.  Returns the final
+// instruction unemitted.
+static TargetInstruction* ExtendInt32Result(X86Generator* rv,
+                                            TargetInstruction* inst,
+                                            bool is_unsigned) {
+  if (inst->block == NULL) {
+    Emit(rv, inst);
+  }
+  TargetInstruction* shift = GetIntConstant(rv, NULL, kTargetType32Bit, 32);
+  inst = Emit(rv, NewInstruction2(X86_OP(shl), inst, shift));
+  return NewInstruction2(is_unsigned ? X86_OP(shr) : X86_OP(sar), inst, shift);
+}
+
+// The second operand of an extension is a signed bit count, not a value.
+static bool IsExtendBitDifference(IRNode* constant) {
+  for (size_t i = 0; i < constant->outputs.length; i++) {
+    IRNode* user = constant->outputs.value.p[i];
+    if ((user->opcode == IR_OP(signextendi) ||
+         user->opcode == IR_OP(zeroextendi)) &&
+        user->inputs.length > 1 && user->inputs.value.p[1] == constant) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A cast whose value is an address (an lvalue of the cast type, as in
+// `addressof(cast(p))`) is not a conversion of that address.
+static bool CastIsLvalue(IRNode* node) {
+  for (size_t i = 0; i < node->outputs.length; i++) {
+    IRNode* user = node->outputs.value.p[i];
+    if (user->opcode == IR_OP(addressof)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool IsInt32Conversion(IRNode* node, IRNode* input) {
+  return node->type != NULL && input->type != NULL &&
+         node->type->size == 4 && TypeIsIntegral(node->type) &&
+         TypeIsIntegral(input->type) &&
+         (input->type->size > 4 ||
+          (input->type->size == 4 &&
+           TypeIsUnsigned(input->type) != TypeIsUnsigned(node->type))) &&
+         !CastIsLvalue(node);
+}
+
 static TargetInstruction* LowerExpression(X86Generator* rv, Generator* gen,
                                           IRNode* node) {
   // If we have already lowered the IR node, return it.
@@ -2019,9 +2069,18 @@ static TargetInstruction* LowerExpression(X86Generator* rv, Generator* gen,
       !TypeIsUnsigned(node->type) &&
       ((node->type->size == 4 &&
         (opcode == X86_OP(addl) || opcode == X86_OP(subl) ||
-         opcode == X86_OP(imull))) ||
+         opcode == X86_OP(imull) ||
+         (X86_IS_64BIT(rv) &&
+          (opcode == X86_OP(neg) || opcode == X86_OP(shl))))) ||
        signed_float_to_int);
-  if (sign_extend_narrow_result) {
+  bool zero_extend_narrow_result =
+      X86_IS_64BIT(rv) && node->type != NULL && node->type->size == 4 &&
+      TypeIsIntegral(node->type) && TypeIsUnsigned(node->type) &&
+      (opcode == X86_OP(neg) || opcode == X86_OP(not) ||
+       opcode == X86_OP(shl));
+  if (zero_extend_narrow_result) {
+    inst = ExtendInt32Result(rv, inst, true);
+  } else if (sign_extend_narrow_result) {
     if (inst->block == NULL) {
       Emit(rv, inst);
     }
@@ -2561,7 +2620,18 @@ static TargetInstruction* LowerLoad(X86Generator* rv, Generator* gen,
   }
 
   TargetInstruction* result = Load(rv, addr_node, opcode);
-  if (X86IsVarRegister(result) && IRLoadedVariableRedefinedBeforeUse(node)) {
+  Symbol* var_symbol = IRGetVariableSymbol(addr_node);
+  bool unsigned_load = opcode == X86_OP(loadl_z);
+  if (X86_IS_64BIT(rv) && X86IsVarRegister(result) &&
+      (unsigned_load || opcode == X86_OP(loadl)) && var_symbol != NULL &&
+      var_symbol->type != NULL && TypeIsIntegral(var_symbol->type) &&
+      var_symbol->type->size == 4 &&
+      TypeIsUnsigned(var_symbol->type) != unsigned_load) {
+    // The register holds the variable extended for its own signedness; a read
+    // with the other signedness must be extended afresh.
+    result = Emit(rv, ExtendInt32Result(rv, result, unsigned_load));
+  } else if (X86IsVarRegister(result) &&
+             IRLoadedVariableRedefinedBeforeUse(node)) {
     result = Emit(rv, NewInstruction1(MoveOpcodeForLoad(opcode), result));
   }
   TargetInstruction* dest = GetDestInstruction(rv, gen, node);
@@ -3790,6 +3860,17 @@ static TargetInstruction* LowerSignExtend(X86Generator* rv, Generator* gen,
   int dest_bits = node->type != NULL ? (int)node->type->size * 8 : 64;
   int extended_bits = diff > 0 && diff < dest_bits ? dest_bits - (int)diff : 0;
   int load_bits = X86SignedLoadBits(value);
+  bool unsigned_result = node->type != NULL && TypeIsUnsigned(node->type);
+  if (diff <= 0 && X86_IS_64BIT(rv) && node->type != NULL &&
+      node->type->size == 4 && TypeIsIntegral(node->type) &&
+      (X86Opcode)value->opcode != X86_OP(x0) &&
+      !(load_bits > 0 && load_bits <= 32 && !unsigned_result)) {
+    value = Emit(rv, ExtendInt32Result(rv, value, unsigned_result));
+    if (dest != NULL) {
+      value = SetDestOrMove(rv, value, dest, X86_OP(mv));
+    }
+    return SetLoweredNode(node, value);
+  }
   if (load_bits > 0 && (diff <= 0 || load_bits <= extended_bits)) {
     if (dest != NULL) {
       value = SetDestOrMove(rv, value, dest, X86_OP(mv));
@@ -5529,7 +5610,28 @@ static TargetInstruction* LowerIRNode(X86Generator* rv, Generator* gen,
           return wide;
         }
       }
-      TargetInstruction* inst = Materialize(rv, node->inputs.value.p[0]);
+      IRNode* input = node->inputs.value.p[0];
+      TargetInstruction* inst = NULL;
+      bool int32_conversion =
+          X86_IS_64BIT(rv) && IsInt32Conversion(node, input);
+      if (int32_conversion && IRIsIntConst(input)) {
+        int64_t value = IRIntConstValue(input);
+        value = TypeIsUnsigned(node->type) ? (int64_t)(uint32_t)value
+                                           : (int64_t)(int32_t)value;
+        inst = value == 0
+                   ? Zero(rv)
+                   : Emit(rv, NewInstruction1(
+                                  X86_OP(mov),
+                                  GetIntConstant(rv, NULL, kTargetType64Bit,
+                                                 value)));
+      } else {
+        inst = Materialize(rv, input);
+        if (int32_conversion && inst != NULL &&
+            (X86Opcode)inst->opcode != X86_OP(x0)) {
+          inst = Emit(rv, ExtendInt32Result(rv, inst,
+                                            TypeIsUnsigned(node->type)));
+        }
+      }
       TargetInstruction* dest = GetDestInstruction(rv, gen, node);
       if (dest != NULL && inst != NULL) {
         X86Opcode mov_opcode = X86_OP(mv);
@@ -5845,9 +5947,18 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(X86Generator* rv,
     case kArgLocationPassedByReferenceInRegister: {
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = IntVariableRegister(rv, reg_var, sym->symbol);
-      TargetInstruction* mv = Emit(rv, NewInstruction1(X86_OP(mv),
-                 IncomingIntArgumentRegister(rv,
-                          (int)arg_loc.location.offset - (X86_P(rv)->int_arg_start))));
+      TargetInstruction* incoming = IncomingIntArgumentRegister(
+          rv, (int)arg_loc.location.offset - (X86_P(rv)->int_arg_start));
+      TypeRecord* type = sym->symbol != NULL ? sym->symbol->type : NULL;
+      if (X86_IS_64BIT(rv) && arg_loc.type == kArgLocationRegister &&
+          type != NULL && type->size == 4 && TypeIsIntegral(type)) {
+        // The ABI leaves the upper half of a 32-bit argument undefined.
+        TargetInstruction* copy =
+            Emit(rv, NewInstruction1(X86_OP(mv), incoming));
+        incoming = Emit(rv, ExtendInt32Result(rv, copy,
+                                              TypeIsUnsigned(type)));
+      }
+      TargetInstruction* mv = Emit(rv, NewInstruction1(X86_OP(mv), incoming));
       mv->dest = var;
       return var;
     }
@@ -6337,7 +6448,18 @@ void X86Lower(X86Generator* rv, Generator* gen) {
        scan = IRNext(scan)) {
     if (scan->opcode == IR_OP(enter)) {
       has_enter = true;
-      break;
+    }
+    // A 32-bit constant may carry a value outside its type's range (-77 typed
+    // unsigned int); give it the full-register form that a 32-bit value of
+    // that type has.
+    if (X86_IS_64BIT(rv) &&
+        (scan->opcode == IR_OP(const32) || scan->opcode == IR_OP(const64)) &&
+        scan->type != NULL && scan->type->size == 4 &&
+        TypeIsIntegral(scan->type) && !IsExtendBitDifference(scan)) {
+      IRConstant* c = (IRConstant*)scan;
+      c->value.ivalue = TypeIsUnsigned(scan->type)
+                            ? (int64_t)(uint32_t)c->value.ivalue
+                            : (int64_t)(int32_t)c->value.ivalue;
     }
   }
   if (has_enter) {
