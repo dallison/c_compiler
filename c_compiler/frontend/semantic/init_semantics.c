@@ -603,6 +603,10 @@ bool InitializerIsLinkTimeConstant(ASTNode* init) {
 // Initialize the current node and advance to the next.  Returns true
 // if the initialization is valid.
 static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
+  ASTNode* is_same_folded = CXXFoldIsSameVExpression(expr);
+  if (is_same_folded != expr) {
+    return is_same_folded;
+  }
   ASTNode* folded = NULL;
   if (TypeIsIntegral(expr->type)) {
     int64_t value;

@@ -4024,6 +4024,11 @@ static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
   }
   LambdaCaptureScan* scan = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol != NULL &&
+      (id->symbol->variable_template != NULL || id->symbol->flags.is_template ||
+       id->symbol->flags.is_concept)) {
+    return;
+  }
   if (!CanCaptureSymbol(id->symbol, scan->lambda_func) ||
       LambdaBodyDeclaresSymbol(scan->body_locals, id->symbol) ||
       FindLambdaCapture(scan->captures, id->symbol) != NULL) {
@@ -4315,6 +4320,23 @@ static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator,
   return body;
 }
 
+// Immutable operator() body copy used by CloneTemplateFunctionBody.  Taken after
+// capture setup and capture-use rewriting so the pattern matches what the call
+// operator will instantiate, while staying free of call-site analysis.
+static void RefreshGenericLambdaTemplatePatternBodyAfterCaptureSetup(
+    TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) || func->info.function.body == NULL ||
+      func->info.function.template_parameters.length == 0) {
+    return;
+  }
+  if (func->info.function.template_pattern_body != NULL &&
+      func->info.function.template_pattern_body != func->info.function.body) {
+    ASTNodeDelete(func->info.function.template_pattern_body);
+  }
+  func->info.function.template_pattern_body =
+      ASTNodeClone(func->info.function.body, IdentityCloneNode, NULL, NULL);
+}
+
 // Build the braced initializer that constructs the closure object, one
 // designated `.field = value` initializer per capture.
 static ASTNode* NewLambdaClosureInitializer(TypeRecord* closure_type,
@@ -4395,6 +4417,9 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
   syntax->parsing_lambda_body_depth--;
   lambda_enclosing_this = saved_lambda_enclosing_this;
   compiler->current_function = enclosing_function;
+  // Snapshot before `[=]`/`[&]` capture scanning or other post-parse work can
+  // semantically analyze the shared operator() body (e.g. lowering
+  // `std::is_same_v` for `if constexpr`).
   if (opened_template_scope) {
     // The TemplateParameter objects were transferred into the operator()'s
     // template-parameter list; free only the vector container here.
@@ -4421,6 +4446,10 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
         &captures, call_operator->type->info.function.prototype.value.p[0]};
     ASTNodeVisit(call_operator->type->info.function.body,
                  RewriteLambdaCaptureUses, 0, &rewrite);
+  }
+  if (call_operator->type->info.function.template_parameters.length > 0) {
+    RefreshGenericLambdaTemplatePatternBodyAfterCaptureSetup(
+        call_operator->type);
   }
 
   // Queue operator() for analysis/codegen unless the closure captures a
@@ -4454,8 +4483,14 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
       }
     }
   }
+  // Default-capture lambdas (`[=]` / `[&]`) share the generic operator() body
+  // with each deduced specialization.  Eager semantic analysis of that pattern
+  // can lower `std::is_same_v` to a non-constant lvalue load before the call
+  // site clones the body with concrete `auto` parameters, breaking
+  // `if constexpr (std::is_same_v<...>)` in the specialization.
   if (!defer_dependent_capture &&
-      !LambdaCallOperatorBodyDependsOnEnclosingTemplate(call_operator)) {
+      !LambdaCallOperatorBodyDependsOnEnclosingTemplate(call_operator) &&
+      capture_default == kLambdaCaptureDefaultNone) {
     QueueLambdaCallOperatorDefinition(call_operator);
   }
 

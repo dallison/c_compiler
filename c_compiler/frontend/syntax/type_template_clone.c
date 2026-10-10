@@ -6511,6 +6511,14 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
       id->template_arguments = concrete_args;
+      if (id->symbol != NULL && StringEqual(&id->symbol->name, "is_same_v") &&
+          !TemplateArgumentVectorContainsTemplateParameter(concrete_args)) {
+        node->flags &= ~kASTAnalyzed;
+        ASTNode* is_same_folded = CXXFoldIsSameVExpression(node);
+        if (is_same_folded != NULL && is_same_folded != node) {
+          return is_same_folded;
+        }
+      }
       if (id->symbol != NULL && id->symbol->variable_template != NULL &&
           !TemplateArgumentVectorContainsTemplateParameter(concrete_args) &&
           (node->flags & kASTNeedAddress) == 0 &&
@@ -6830,7 +6838,20 @@ static ASTNode* CloneIdentifierInTemplateBody(
   if (rewritten != NULL) {
     return rewritten;
   }
-  return RemapMemberFunctionOnSubstitutedOwner(clone, id, node);
+  rewritten = RemapMemberFunctionOnSubstitutedOwner(clone, id, node);
+  if (rewritten != NULL) {
+    return rewritten;
+  }
+  if (id->symbol != NULL && StringEqual(&id->symbol->name, "is_same_v") &&
+      id->template_arguments != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
+    node->flags &= ~kASTAnalyzed;
+    ASTNode* folded = CXXFoldIsSameVExpression(node);
+    if (folded != NULL && folded != node) {
+      return folded;
+    }
+  }
+  return NULL;
 }
 
 /* A named function template that is not being instantiated here (a callee
@@ -8075,6 +8096,15 @@ static ASTNode* PruneClonedConstexprIf(ASTNode* node, void* data,
       }
     }
   }
+  if (!folded && if_node->cond != NULL) {
+    ASTNode* is_same_folded = CXXFoldIsSameVExpression(if_node->cond);
+    if (is_same_folded != NULL && is_same_folded != if_node->cond) {
+      if_node->cond = is_same_folded;
+    }
+    if (EvaluateIntegerExpression(if_node->cond, &value)) {
+      folded = true;
+    }
+  }
   if (!folded) {
     return node;
   }
@@ -8161,21 +8191,30 @@ static ASTNode* PruneConstexprIfBeforeBodyClone(
     return node;
   }
   int64_t value = 0;
-  if (!EvaluateIntegerExpression(condition, &value)) {
-    ASTNodeVisit(condition, ClearAnalyzedFlagVisitor, 0, NULL);
-    bool saved_trap = DiagnosticErrorTrapBegin();
-    DiagnosticSuppressBegin();
-    ASTNode* analyzed = AnalyzeExpression(condition);
-    bool trapped = analyzed == NULL || DiagnosticErrorTrapped();
-    DiagnosticSuppressEnd();
-    DiagnosticErrorTrapEnd(saved_trap);
-    if (trapped || !EvaluateIntegerExpression(analyzed, &value)) {
-      ASTNodeDelete(analyzed != NULL ? analyzed : condition);
-      return node;
-    }
-    ASTNodeDelete(analyzed);
-  } else {
+  if (EvaluateIntegerExpression(condition, &value)) {
     ASTNodeDelete(condition);
+  } else {
+    ASTNode* is_same_folded = CXXFoldIsSameVExpression(condition);
+    if (is_same_folded != NULL && is_same_folded != condition) {
+      ASTNodeDelete(condition);
+      condition = is_same_folded;
+    }
+    if (EvaluateIntegerExpression(condition, &value)) {
+      ASTNodeDelete(condition);
+    } else {
+      ASTNodeVisit(condition, ClearAnalyzedFlagVisitor, 0, NULL);
+      bool saved_trap = DiagnosticErrorTrapBegin();
+      DiagnosticSuppressBegin();
+      ASTNode* analyzed = AnalyzeExpression(condition);
+      bool trapped = analyzed == NULL || DiagnosticErrorTrapped();
+      DiagnosticSuppressEnd();
+      DiagnosticErrorTrapEnd(saved_trap);
+      if (trapped || !EvaluateIntegerExpression(analyzed, &value)) {
+        ASTNodeDelete(analyzed != NULL ? analyzed : condition);
+        return node;
+      }
+      ASTNodeDelete(analyzed);
+    }
   }
   ASTNode** taken_slot = value != 0 ? &if_node->if_part : &if_node->else_part;
   ASTNode* taken = *taken_slot;
@@ -9455,7 +9494,8 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
                                           TypeRecord* from,
                                           TypeRecord* to,
                                           Vector* args) {
-  if (from == NULL || to == NULL || from->info.function.body == NULL) {
+  ASTNode* from_body = FunctionTemplateCloneSourceBody(from);
+  if (from == NULL || to == NULL || from_body == NULL) {
     return NULL;
   }
   Vector* owned_args =
@@ -9641,13 +9681,13 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   if (!from->info.function.has_constexpr_if &&
       !from->info.function.constexpr_if_checked) {
     from->info.function.has_constexpr_if =
-        ASTNodeAny(from->info.function.body, IsConstexprIfNode, NULL);
+        ASTNodeAny(from_body, IsConstexprIfNode, NULL);
     from->info.function.constexpr_if_checked = true;
   }
   ASTNode* body;
   if (from->info.function.has_constexpr_if) {
     ASTNode* clone_source =
-        ASTNodeClone(from->info.function.body, IdentityCloneNode, NULL, NULL);
+        ASTNodeClone(from_body, IdentityCloneNode, NULL, NULL);
     clone_source = ASTNodeVisitAndTransform(
         clone_source, PruneConstexprIfBeforeBodyClone, &clone);
     clone_source = ASTNodeVisitAndTransform(
@@ -9656,8 +9696,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
                         &clone, NULL);
     ASTNodeDelete(clone_source);
   } else {
-    body = ASTNodeClone(from->info.function.body, CloneTemplateFunctionBodyNode,
-                        &clone, NULL);
+    body = ASTNodeClone(from_body, CloneTemplateFunctionBodyNode, &clone, NULL);
   }
   ASTNodeVisit(body, RebindClonedLocalIdentifierVisitor, 0, &clone);
   ASTNodeVisit(body, RebindClonedConcreteMemberAccessVisitor, 0, &clone);

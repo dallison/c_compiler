@@ -229,6 +229,11 @@ typedef struct {
   Vector prototype;     // Formal arguments (owned Symbol*).        // @wire 2
   bool varargs;         // True if varargs function.                // @wire 3
   struct ASTNode* body; // Body AST.                                // @wire 4
+  // Parse-time deep copy of `body` for generic lambda / function-template
+  // instantiation.  The live `body` can be analyzed in place before a call
+  // clones it; this snapshot keeps `if constexpr (std::is_same_v<...>)` etc.
+  // intact for CloneTemplateFunctionBody.
+  struct ASTNode* template_pattern_body;                           // @wire -
   bool unknown_args;    // Old-style or invented function.          // @wire 5
   bool definition;      // Function is a definition.                // @wire 6
   bool old_style;       // Old-style arguments.                     // @wire 7

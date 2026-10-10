@@ -16,6 +16,8 @@ struct CXXConstructorInitList;
 
 struct ASTNode* IdentityCloneNode(struct ASTNode* node, void* data);
 
+struct ASTNode* FunctionTemplateCloneSourceBody(struct TypeRecord* func_type);
+
 void TypeRecordToTemplateKeyString(TypeRecord* type, String* result);
 void TypeToString(Type type, String* result);
 void QualifiersToString(Qualifiers quals, String* result);

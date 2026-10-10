@@ -468,6 +468,12 @@ void TypeRecordDeleteLastReference(TypeRecord* record) {
           /*free_element=*/false);
       ConstraintExprDelete(record->info.function.associated_constraint);
       record->info.function.associated_constraint = NULL;
+      if (record->info.function.template_pattern_body != NULL &&
+          record->info.function.template_pattern_body !=
+              record->info.function.body) {
+        ASTNodeDelete(record->info.function.template_pattern_body);
+      }
+      record->info.function.template_pattern_body = NULL;
     } else if (TypeIsVLA(record)) {
       // Delete the AST containing the size.
       ASTNodeDelete(record->info.array.size.vla.size);
@@ -1155,6 +1161,16 @@ void TypeRecordCopyContractAssertions(TypeRecord* to, TypeRecord* from) {
                  NewContractAssertion(source->kind, predicate, result_binding,
                                       &attrs, source->location));
   }
+}
+
+struct ASTNode* FunctionTemplateCloneSourceBody(TypeRecord* func_type) {
+  if (func_type == NULL || !TypeIsFunction(func_type)) {
+    return NULL;
+  }
+  if (func_type->info.function.template_pattern_body != NULL) {
+    return func_type->info.function.template_pattern_body;
+  }
+  return func_type->info.function.body;
 }
 
 TypeRecord* TypeRecordCopy(TypeRecord* record) {
