@@ -2610,6 +2610,36 @@ TypeRecord* TypeInstantiateVariableTemplateTypeQuiet(Syntax* syntax,
                                                  /*emit_constraint_error=*/false);
 }
 
+TypeRecord* TypeInstantiateVariableTemplateDeducedType(Syntax* syntax,
+                                                       Symbol* var_template,
+                                                       Vector* args) {
+  TypeRecord* declared = TypeInstantiateVariableTemplateTypeImpl(
+      syntax, var_template, args, /*emit_constraint_error=*/false);
+  if (declared != NULL && (declared->type & kTypeAuto) == 0) {
+    return declared;
+  }
+  if (declared != NULL) {
+    TypeRecordDelete(declared);
+  }
+  ASTNode* initializer =
+      TypeInstantiateVariableTemplateInitializer(syntax, var_template, args);
+  if (initializer == NULL) {
+    return NULL;
+  }
+  if (initializer->op == AST_OP(expr_init)) {
+    initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+  }
+  DiagnosticSuppressBegin();
+  initializer = AnalyzeExpression(initializer);
+  TypeRecord* deduced =
+      initializer != NULL && initializer->type != NULL
+          ? TypeRecordCopy(initializer->type)
+          : NULL;
+  DiagnosticSuppressEnd();
+  ASTNodeDelete(initializer);
+  return deduced;
+}
+
 ASTNode* TypeInstantiateVariableTemplateInitializer(Syntax* syntax,
                                                     Symbol* var_template,
                                                     Vector* args) {

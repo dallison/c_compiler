@@ -1117,6 +1117,140 @@ static ASTNode* CXXTryFoldGetConstructTypeCall(VectorASTNode* call) {
   return CXXNewBoolConstantReplacing(&call->base, value);
 }
 
+static TypeRecord* CXXVariableTemplateValueType(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  TypeRecord* normalized = type;
+  while (normalized != NULL && TypeIsReference(normalized)) {
+    normalized = normalized->next;
+  }
+  if (normalized == NULL) {
+    return NULL;
+  }
+  TypeRecord* copy = TypeRecordCopy(normalized);
+  copy->qualifiers &= ~(kQualConst | kQualVolatile);
+  return copy;
+}
+
+static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
+                                                    Vector* template_args,
+                                                    SourceLocation location) {
+  if (!CompilerIsCXX() || var_sym == NULL ||
+      var_sym->variable_template == NULL || template_args == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(template_args)) {
+    return NULL;
+  }
+  TypeRecord* concrete = TypeInstantiateVariableTemplateDeducedType(
+      &compiler->syntax, var_sym, template_args);
+  int64_t value = 0;
+  if (concrete != NULL && TypeIsIntegral(concrete) &&
+      TypeInstantiateVariableTemplateConstant(&compiler->syntax, var_sym,
+                                              template_args, &value)) {
+    return NewIntConstantASTNode(value, concrete, location);
+  }
+  if (StringEqual(&var_sym->name, "is_same_v")) {
+    IdentifierASTNode id = {0};
+    id.base.location = location;
+    id.symbol = var_sym;
+    id.template_arguments = template_args;
+    ASTNode* folded = CXXTryFoldIsSameVIdentifier(&id);
+    if (folded != NULL) {
+      TypeRecordDelete(concrete);
+      return folded;
+    }
+  }
+  double floating_value = 0;
+  if (concrete != NULL && TypeIsFloatingPoint(concrete) &&
+      TypeInstantiateVariableTemplateFloatingConstant(
+          &compiler->syntax, var_sym, template_args, &floating_value)) {
+    return NewRealConstantASTNode(floating_value, concrete, location);
+  }
+  if (concrete != NULL && TypeUsesLongDoubleRepresentation(concrete) &&
+      (concrete->qualifiers & kQualConst) != 0) {
+    ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
+        &compiler->syntax, var_sym, template_args);
+    if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+      initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+    }
+    if (initializer != NULL) {
+      TypeRecord* value_type = CXXVariableTemplateValueType(concrete);
+      ASTNode* cast = NewCastASTNode(value_type, location, initializer);
+      TypeRecordDelete(value_type);
+      TypeRecordDelete(concrete);
+      return AnalyzeExpression(cast);
+    }
+  }
+  if (concrete != NULL && TypeIsStructOrUnion(concrete)) {
+    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, concrete);
+    temp->location = location;
+    ASTNode* temp_id = NewIdentifierASTNode(temp, location);
+    temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+    Vector* initializer_values = NewVector();
+    Struct* value_class = concrete->info.struct_info;
+    bool has_object_state = false;
+    for (size_t i = 0; value_class != NULL && i < value_class->members.length;
+         ++i) {
+      StructMember* member = value_class->members.value.p[i];
+      if (member != NULL && member->symbol != NULL && !member->is_static &&
+          !member->is_member_function &&
+          !StorageIs(member->symbol->storage, STO(typedef))) {
+        has_object_state = true;
+        break;
+      }
+    }
+    if (has_object_state) {
+      ASTNode* concrete_initializer = TypeInstantiateVariableTemplateInitializer(
+          &compiler->syntax, var_sym, template_args);
+      if (concrete_initializer != NULL) {
+        VectorAppend(initializer_values, concrete_initializer);
+      }
+    }
+    ASTNode* initializer =
+        NewBracedInitializerASTNode(initializer_values, NULL, location);
+    ASTNode* literal = NewCompoundLiteralASTNode(temp_id, location, initializer);
+    TypeRecordDelete(concrete);
+    ASTNode* analyzed = AnalyzeExpression(literal);
+    analyzed->value_category = kValueCategoryLvalue;
+    return analyzed;
+  }
+  if (concrete != NULL && TypeIsMemberPointer(concrete)) {
+    ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
+        &compiler->syntax, var_sym, template_args);
+    TypeRecordDelete(concrete);
+    if (initializer != NULL) {
+      if (initializer->op == AST_OP(expr_init)) {
+        initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+      }
+      ASTNode* value = AnalyzeExpression(initializer);
+      if (value != NULL && value->type != NULL) {
+        TypeRecord* value_type = CXXVariableTemplateValueType(value->type);
+        if (value_type != NULL) {
+          ASTNodeSetType(value, value_type);
+        }
+        value->value_category = kValueCategoryPrvalue;
+        return value;
+      }
+    }
+    return NULL;
+  }
+  TypeRecordDelete(concrete);
+  return NULL;
+}
+
+static bool CXXTryReplaceWithVariableTemplateValue(
+    ASTNode* use_site, Symbol* var_sym, Vector* template_args,
+    SourceLocation location) {
+  ASTNode* materialized =
+      CXXInstantiateVariableTemplateValue(var_sym, template_args, location);
+  if (materialized == NULL || use_site == NULL || use_site->parent == NULL) {
+    return false;
+  }
+  ASTNodeReplaceChild(use_site->parent, use_site->child_id, materialized, true);
+  materialized->flags |= kASTAnalyzed;
+  return true;
+}
+
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   if (CompilerCXXAtLeast(kLanguageStandardCXX26) && node->symbol != NULL &&
       (node->base.flags & kASTNameIndependentLookupAmbiguous) != 0 &&
@@ -1210,105 +1344,14 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
       (node->base.flags & kASTIsDeclaration) == 0 &&
       !TemplateArgumentVectorContainsTemplateParameter(
           node->template_arguments)) {
-    TypeRecord* concrete = TypeInstantiateVariableTemplateType(
-        &compiler->syntax, node->symbol, node->template_arguments);
-    int64_t value = 0;
-    if (concrete != NULL && TypeIsIntegral(concrete) &&
-        TypeInstantiateVariableTemplateConstant(
-            &compiler->syntax, node->symbol, node->template_arguments, &value)) {
-      ASTNode* const_node =
-          NewIntConstantASTNode(value, concrete, node->base.location);
-      ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
+    ASTNode* materialized = CXXInstantiateVariableTemplateValue(
+        node->symbol, node->template_arguments, node->base.location);
+    if (materialized != NULL) {
+      ASTNodeReplaceChild(node->base.parent, node->base.child_id, materialized,
                           true);
-      const_node->flags |= kASTAnalyzed;
-      return const_node;
+      materialized->flags |= kASTAnalyzed;
+      return materialized;
     }
-    if (StringEqual(&node->symbol->name, "is_same_v")) {
-      ASTNode* folded = CXXTryFoldIsSameVIdentifier(node);
-      if (folded != NULL) {
-        return folded;
-      }
-    }
-    double floating_value = 0;
-    if (concrete != NULL && TypeIsFloatingPoint(concrete) &&
-        TypeInstantiateVariableTemplateFloatingConstant(
-            &compiler->syntax, node->symbol, node->template_arguments,
-            &floating_value)) {
-      ASTNode* const_node = NewRealConstantASTNode(
-          floating_value, concrete, node->base.location);
-      ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
-                          true);
-      const_node->flags |= kASTAnalyzed;
-      return const_node;
-    }
-    // A constant long double is not folded through host double, so use the
-    // instantiated initializer itself (`std::numbers::pi_v<long double>`).
-    if (concrete != NULL && TypeUsesLongDoubleRepresentation(concrete) &&
-        (concrete->qualifiers & kQualConst) != 0) {
-      ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
-          &compiler->syntax, node->symbol, node->template_arguments);
-      if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
-        initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
-      }
-      if (initializer != NULL) {
-        TypeRecord* value_type = TypeRecordCopy(concrete);
-        value_type->qualifiers &= ~(kQualConst | kQualVolatile);
-        ASTNode* cast =
-            NewCastASTNode(value_type, node->base.location, initializer);
-        TypeRecordDelete(value_type);
-        TypeRecordDelete(concrete);
-        ASTNodeReplaceChild(node->base.parent, node->base.child_id, cast, true);
-        return AnalyzeExpression(cast);
-      }
-    }
-    // A variable template whose instantiation is a class-type tag object (e.g.
-    // `std::in_place_index<1>` of type `in_place_index_t<1>`) rather than a
-    // folded constant.  Materialize a value-initialized temporary of the
-    // concrete type so overload resolution and template argument deduction see
-    // the correct `in_place_index_t<1>` type.
-    if (concrete != NULL && TypeIsStructOrUnion(concrete)) {
-      SourceLocation location = node->base.location;
-      Symbol* temp = SyntaxNewTemporary(&compiler->syntax, concrete);
-      temp->location = location;
-      ASTNode* temp_id = NewIdentifierASTNode(temp, location);
-      temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
-      Vector* initializer_values = NewVector();
-      Struct* value_class = concrete->info.struct_info;
-      bool has_object_state = false;
-      for (size_t i = 0;
-           value_class != NULL && i < value_class->members.length; ++i) {
-        StructMember* member = value_class->members.value.p[i];
-        if (member != NULL && member->symbol != NULL &&
-            !member->is_static && !member->is_member_function &&
-            !StorageIs(member->symbol->storage, STO(typedef))) {
-          has_object_state = true;
-          break;
-        }
-      }
-      if (has_object_state) {
-        ASTNode* concrete_initializer =
-            TypeInstantiateVariableTemplateInitializer(
-                &compiler->syntax, node->symbol, node->template_arguments);
-        if (concrete_initializer != NULL) {
-          VectorAppend(initializer_values, concrete_initializer);
-        }
-      }
-      ASTNode* initializer = NewBracedInitializerASTNode(
-          initializer_values, NULL, location);
-      ASTNode* literal =
-          NewCompoundLiteralASTNode(temp_id, location, initializer);
-      ASTNodeReplaceChild(node->base.parent, node->base.child_id, literal, true);
-      ASTNode* analyzed = AnalyzeExpression(literal);
-      // A variable template specialization names a variable, so referring to it
-      // yields an lvalue -- a const one, these objects being `constexpr`.
-      // Calling it a prvalue made `T&&` deduce `T = X` instead of
-      // `T = const X&`, and binding the const object to the resulting `X&&`
-      // was then rejected (`std::views::empty<int>` passed to a generic range
-      // parameter).
-      analyzed->value_category = kValueCategoryLvalue;
-      return analyzed;
-    }
-    TypeRecordDelete(concrete);
   }
 
   if (CompilerIsCXX() && node->symbol != NULL &&
@@ -13747,12 +13790,18 @@ static ASTNode* AnalyzeMemberPointerReference(BinaryASTNode* node) {
       ((IdentifierASTNode*)node->right)->symbol != NULL &&
       ((IdentifierASTNode*)node->right)->symbol->flags.is_template_parameter &&
       !((IdentifierASTNode*)node->right)->symbol->flags.is_template_type_parameter;
-  if (right_is_nttp || ExpressionIsTemplateDependent(node->right) ||
-      (node->right != NULL && node->right->type != NULL &&
-       (TypeContainsTemplateParameter(node->right->type) ||
-        TypeIsUnknown(node->right->type))) ||
-      (node->left != NULL && node->left->type != NULL &&
-       TypeContainsTemplateParameter(node->left->type))) {
+  bool concrete_member_pointer =
+      node->right != NULL && node->right->type != NULL &&
+      TypeIsMemberPointer(node->right->type) &&
+      !TypeContainsTemplateParameter(node->right->type) &&
+      !TypeIsUnknown(node->right->type);
+  if (!concrete_member_pointer &&
+      (right_is_nttp || ExpressionIsTemplateDependent(node->right) ||
+       (node->right != NULL && node->right->type != NULL &&
+        (TypeContainsTemplateParameter(node->right->type) ||
+         TypeIsUnknown(node->right->type))) ||
+       (node->left != NULL && node->left->type != NULL &&
+        TypeContainsTemplateParameter(node->left->type)))) {
     node->base.flags |= kASTDependentFunctorCall;
     ASTNodeSetType((ASTNode*)node,
                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
@@ -14140,6 +14189,13 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
           member_type = TypeRecordCopy(member_type);
           member_type->qualifiers |= kQualConst;
         }
+        if (member->is_static && member->symbol->variable_template != NULL &&
+            member_node->template_arguments != NULL &&
+            CXXTryReplaceWithVariableTemplateValue(
+                (ASTNode*)node, member->symbol,
+                member_node->template_arguments, node->base.location)) {
+          return;
+        }
         ASTNodeSetType((ASTNode*)node, member_type);
         if (!member->is_member_function) {
           node->base.value_category =
@@ -14180,6 +14236,13 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
           !member->is_mutable && MemberReceiverIsConst(node)) {
         member_type = TypeRecordCopy(member_type);
         member_type->qualifiers |= kQualConst;
+      }
+      if (member->is_static && member->symbol->variable_template != NULL &&
+          member_node->template_arguments != NULL &&
+          CXXTryReplaceWithVariableTemplateValue(
+              (ASTNode*)node, member->symbol, member_node->template_arguments,
+              node->base.location)) {
+        return;
       }
       ASTNodeSetType((ASTNode*)node, member_type);
       if (!member->is_member_function) {

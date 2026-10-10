@@ -6529,23 +6529,45 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
           !TemplateArgumentVectorContainsTemplateParameter(concrete_args) &&
           (node->flags & kASTNeedAddress) == 0 &&
           (node->parent == NULL || node->parent->op != AST_OP(address))) {
-        TypeRecord* concrete_type = TypeInstantiateVariableTemplateType(
+        TypeRecord* concrete_type = TypeInstantiateVariableTemplateDeducedType(
             clone->parser->syntax, id->symbol, concrete_args);
         int64_t value = 0;
         if (concrete_type != NULL && TypeIsIntegral(concrete_type) &&
             TypeInstantiateVariableTemplateConstant(
                 clone->parser->syntax, id->symbol, concrete_args, &value)) {
-          return NewIntConstantASTNode(value, concrete_type, node->location);
+          ASTNode* folded =
+              NewIntConstantASTNode(value, concrete_type, node->location);
+          TypeRecordDelete(concrete_type);
+          return folded;
         }
         double floating_value = 0;
         if (concrete_type != NULL && TypeIsFloatingPoint(concrete_type) &&
             TypeInstantiateVariableTemplateFloatingConstant(
                 clone->parser->syntax, id->symbol, concrete_args,
                 &floating_value)) {
-          return NewRealConstantASTNode(floating_value, concrete_type,
-                                        node->location);
+          ASTNode* folded = NewRealConstantASTNode(floating_value, concrete_type,
+                                                   node->location);
+          TypeRecordDelete(concrete_type);
+          return folded;
         }
-        TypeRecordDelete(concrete_type);
+        if (concrete_type != NULL && TypeIsMemberPointer(concrete_type)) {
+          ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
+              clone->parser->syntax, id->symbol, concrete_args);
+          TypeRecordDelete(concrete_type);
+          if (initializer != NULL) {
+            if (initializer->op == AST_OP(expr_init)) {
+              initializer =
+                  ((ExpressionInitializerASTNode*)initializer)->expr;
+            }
+            initializer = AnalyzeExpression(initializer);
+            if (initializer != NULL && initializer->type != NULL) {
+              initializer->value_category = kValueCategoryLvalue;
+              return initializer;
+            }
+          }
+        } else {
+          TypeRecordDelete(concrete_type);
+        }
       }
       if (id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
           id->symbol->type->info.function.template_origin != NULL) {
