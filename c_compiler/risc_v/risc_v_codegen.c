@@ -4666,6 +4666,8 @@ static TargetInstruction* LowerIRNode(RVGenerator* rv, Generator* gen,
       checkpoint->observable_checkpoint = true;
       return checkpoint;
     }
+    case IR_OP(prefetch):
+      return SetLoweredNode(node, Emit(rv, NewInstruction(RV_OP(nop))));
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;

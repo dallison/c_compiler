@@ -213,6 +213,7 @@ static struct {
     {IR_OP(literalref), "literalref"},
     {IR_OP(loc), "loc"},
     {IR_OP(observable_checkpoint), "observable_checkpoint"},
+    {IR_OP(prefetch), "prefetch"},
     {IR_OP(named_label), "label"},
 
     {IR_OP(pusharg), "pusharg"},

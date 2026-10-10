@@ -5075,6 +5075,8 @@ static TargetInstruction* LowerIRNode(AARCH64Generator* g, Generator* gen,
       checkpoint->observable_checkpoint = true;
       return checkpoint;
     }
+    case IR_OP(prefetch):
+      return SetLoweredNode(node, Emit(g, NewInstruction(AARCH64_OP(nop))));
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;

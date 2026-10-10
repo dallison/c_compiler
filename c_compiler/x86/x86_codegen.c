@@ -159,6 +159,11 @@ const char* X86OpcodeName(int op) {
     OPCODE(movxc)
     OPCODE(tp)
     OPCODE(nop)
+    OPCODE(prefetchnta)
+    OPCODE(prefetcht0)
+    OPCODE(prefetcht1)
+    OPCODE(prefetcht2)
+    OPCODE(prefetchw)
     OPCODE(movslq)
     OPCODE(sete)
     OPCODE(setne)
@@ -3380,6 +3385,33 @@ static TargetInstruction* LowerVectorOperation(X86Generator* rv,
   return SetLoweredNode(node, store);
 }
 
+static TargetInstruction* LowerPrefetch(X86Generator* rv, IRNode* node) {
+  assert(node->inputs.length == 3);
+  TargetInstruction* ptr = Materialize(rv, node->inputs.value.p[0]);
+  int64_t rw = IRIntConstValue(node->inputs.value.p[1]);
+  int64_t locality = IRIntConstValue(node->inputs.value.p[2]);
+  X86Opcode opcode;
+  if (rw != 0) {
+    opcode = X86_OP(prefetchw);
+  } else {
+    switch (locality) {
+      case 0:
+        opcode = X86_OP(prefetchnta);
+        break;
+      case 1:
+        opcode = X86_OP(prefetcht2);
+        break;
+      case 2:
+        opcode = X86_OP(prefetcht1);
+        break;
+      default:
+        opcode = X86_OP(prefetcht0);
+        break;
+    }
+  }
+  return SetLoweredNode(node, Emit(rv, NewInstruction1(opcode, ptr)));
+}
+
 static TargetInstruction* LowerAsm(X86Generator* rv, IRNode* node) {
   // The first argument is a literal containing the assembly language.
   IRConstant* id_node = node->inputs.value.p[0];
@@ -5184,6 +5216,8 @@ static TargetInstruction* LowerIRNode(X86Generator* rv, Generator* gen,
       checkpoint->observable_checkpoint = true;
       return checkpoint;
     }
+    case IR_OP(prefetch):
+      return LowerPrefetch(rv, node);
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;

@@ -218,6 +218,9 @@ typedef enum {
   // motion but lowers to no machine instruction and is not a memory clobber.
   IR_OP(observable_checkpoint),
 
+  // __builtin_prefetch(addr, rw, locality): rw 0/1, locality 0–3.
+  IR_OP(prefetch),
+
   IR_OP(pusharg),     // Push function arg (optional)
   
   // Function results.

@@ -1005,6 +1005,7 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
       return NULL;
 
     case IR_OP(observable_checkpoint):
+    case IR_OP(prefetch):
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;

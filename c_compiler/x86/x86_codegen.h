@@ -213,6 +213,11 @@ typedef enum {
 
   // Pseudo ops and helpers.
   X86_OP(nop),
+  X86_OP(prefetchnta),
+  X86_OP(prefetcht0),
+  X86_OP(prefetcht1),
+  X86_OP(prefetcht2),
+  X86_OP(prefetchw),
   X86_OP(movslq),
   X86_OP(sete),
   X86_OP(setne),

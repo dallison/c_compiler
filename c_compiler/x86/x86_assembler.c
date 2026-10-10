@@ -2214,6 +2214,46 @@ static void Assemble_mfence(X86Assembler* assembler) {
   AssemblerEmitByte(&ASM, ASMO.current_section, 0xf0);
 }
 
+// PREFETCHW m8 — hint that data will be modified (0F 0D /1).
+static void EmitPrefetchHint(X86Assembler* assembler, uint8_t opcode2,
+                             int modrm_reg) {
+  X86Op src;
+  if (!ParseOperand(assembler, &src)) {
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  EncodeByte(&enc, 0x0f);
+  EncodeByte(&enc, opcode2);
+  if (src.kind == kX86OpReg) {
+    X86Op mem = {.kind = kX86OpMem, .base = src.reg};
+    EncodeMemOperand(&enc, modrm_reg, &mem);
+  } else if (src.kind == kX86OpMem) {
+    EncodeMemOperand(&enc, modrm_reg, &src);
+  } else {
+    AssemblerError(&ASM, "prefetch operand must be a memory address");
+    return;
+  }
+  EncodeFinish(&enc);
+}
+
+static void Assemble_prefetchw(X86Assembler* assembler) {
+  EmitPrefetchHint(assembler, 0x0d, 1);
+}
+
+static void Assemble_prefetchnta(X86Assembler* assembler) {
+  EmitPrefetchHint(assembler, 0x18, 0);
+}
+static void Assemble_prefetcht0(X86Assembler* assembler) {
+  EmitPrefetchHint(assembler, 0x18, 1);
+}
+static void Assemble_prefetcht1(X86Assembler* assembler) {
+  EmitPrefetchHint(assembler, 0x18, 2);
+}
+static void Assemble_prefetcht2(X86Assembler* assembler) {
+  EmitPrefetchHint(assembler, 0x18, 3);
+}
+
 #define JCC(name, opcode)                                                    \
   static void Assemble_##name(X86Assembler* assembler) {                  \
     EmitBranch(assembler, opcode, false);                                    \
@@ -2375,6 +2415,11 @@ static void InitializeInstructions(Map* instructions) {
   INST(cdq);
   INST(cltq);
   INST(movslq);
+  INST(prefetchw);
+  INST(prefetchnta);
+  INST(prefetcht0);
+  INST(prefetcht1);
+  INST(prefetcht2);
   INST(addss);
   INST(addsd);
   INST(subss);

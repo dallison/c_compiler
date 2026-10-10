@@ -35,7 +35,7 @@ These parse on every target. Optional arguments are noted.
 | `__builtin_PRETTY_FUNCTION()` | `const char*` | Decorated function name |
 | `__builtin_expect(value, expected)` | both converted to `long`; result is `long` | Branch hint; both operands are evaluated |
 | `__builtin_bswap16(x)` / `__builtin_bswap32(x)` / `__builtin_bswap64(x)` | unsigned integer of that width; result is the operand type | Byte-swap. Folds as a constant when the operand is constant |
-| `__builtin_prefetch(addr [, rw [, locality]])` | `void` | Evaluates the arguments, then emits nothing. `rw` is 0 (read) or 1 (write); `locality` is 0–3 |
+| `__builtin_prefetch(addr [, rw [, locality]])` | `void` | Evaluates the arguments, then emits a prefetch hint on x86_64 (`prefetchnta`/`prefetcht0`–`t2`/`prefetchw`). `rw` is 0 (read) or 1 (write); `locality` is 0–3 (NTA through T0). Other targets ignore the hint |
 | `__builtin_trap()` | `void` | Calls `abort` |
 | `__builtin_unreachable()` | `void` | Calls `abort` |
 | `__builtin_is_constant_evaluated()` | `bool` / `int` | `true` only while folding a constant expression |
@@ -48,7 +48,7 @@ These parse on every target. Optional arguments are noted.
 
 `<stdarg.h>` macros expand to those `va_*` builtins.
 
-`__builtin_prefetch` does not emit `PREFETCH` / `PRFM` / `pld`.
+On x86_64, `__builtin_prefetch` maps read hints to `prefetchnta` (locality 0) through `prefetcht0` (3) and write hints to `prefetchw`. Other architectures still lower it to a no-op.
 `__builtin_trap` and `__builtin_unreachable` are not `ud2` / `brk` /
 `unimp`; they are calls to the guest `abort`.
 

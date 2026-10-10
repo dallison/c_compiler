@@ -6415,16 +6415,30 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
 }
 
 static IRNode* GenerateBuiltinPrefetch(Generator* gen, VectorASTNode* node) {
-  for (size_t i = 0; i < node->children->length; i++) {
-    GenerateExpression(gen, node->children->value.p[i]);
+  IRNode* address = GenerateExpression(gen, node->children->value.p[0]);
+  int64_t rw = 0;
+  int64_t locality = 3;
+  if (node->children->length >= 2) {
+    EvaluateIntegerExpression(node->children->value.p[1], &rw);
   }
-  return IRSetType(GeneratorEmit(gen, NewIR(IR_OP(nop))), node->base.type);
+  if (node->children->length >= 3) {
+    EvaluateIntegerExpression(node->children->value.p[2], &locality);
+  }
+  TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  IRNode* prefetch = NewIR3(
+      IR_OP(prefetch), address, GeneratorGetIntConstant(gen, int_type, rw),
+      GeneratorGetIntConstant(gen, int_type, locality));
+  return IRSetType(GeneratorEmit(gen, prefetch), node->base.type);
 }
 
 static IRNode* GenerateBuiltinStartLifetime(Generator* gen,
                                             VectorASTNode* node) {
   if (!gen->for_constant_evaluation) {
-    return GenerateBuiltinPrefetch(gen, node);
+    if (node->children->length >= 1) {
+      GenerateExpression(gen, node->children->value.p[0]);
+    }
+    return IRSetType(
+        GeneratorGetIntConstant(gen, node->base.type, 0), node->base.type);
   }
   IRNode* address = GenerateExpression(gen, node->children->value.p[0]);
   TypeRecord* target =

@@ -7727,6 +7727,8 @@ static void LowerIRNode(W65C02Generator* g, IRNode* node) {
       checkpoint->observable_checkpoint = true;
       return;
     }
+    case IR_OP(prefetch):
+      return;
     case IR_OP(nop):
     case last_ir_opcode:
       return ;
