@@ -7446,6 +7446,17 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     if (member_node->member == NULL) {
       return false;
     }
+    // `MakeI<long>().value` names the static member, not a slot of the
+    // (possibly empty) object.
+    if (member_node->member->is_static &&
+        !member_node->member->is_member_function &&
+        member_node->member->symbol != NULL) {
+      ASTNode* named = NewIdentifierASTNode(member_node->member->symbol,
+                                            node->location);
+      named->value_category = kValueCategoryLvalue;
+      return EvaluateConstexprValue(ctx, named,
+                                    member_node->member->symbol->type, result);
+    }
     bool have_object = false;
     if (node->op == AST_OP(arrow)) {
       ConstexprValue address = {0};
