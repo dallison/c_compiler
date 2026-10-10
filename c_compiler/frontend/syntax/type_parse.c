@@ -1208,6 +1208,14 @@ static TypeRecord* CurrentInstantiationMemberType(TypeParser* parser,
   // Only a member whose type does not mention a template parameter is safe
   // to copy.  Dependent members stay as `Class<Args>::member`.
   Struct* primary = origin->type->info.struct_info;
+  // Identity is checked by parameter index, so outside the class template
+  // `Pick<T>::type` in `template <class T> f()` also matches.  There the
+  // arguments are f's parameters and a partial or explicit specialization of
+  // Pick may supply a different member, so only the primary's own definition
+  // is the current instantiation.
+  if (!ParsingWithinClass(parser, primary)) {
+    return NULL;
+  }
   StructMember* member = FindStructMember(primary, member_name);
   if (member == NULL || member->symbol == NULL ||
       member->symbol->type == NULL) {
@@ -1215,16 +1223,6 @@ static TypeRecord* CurrentInstantiationMemberType(TypeParser* parser,
   }
   if (!StorageIs(member->symbol->storage, STO(typedef)) &&
       !SymbolIsTagSymbol(member->symbol)) {
-    return NULL;
-  }
-  // Identity is checked by parameter index, so outside the class template
-  // `Stream<C, T>::sentry` in `template <class C, class T> f()` also matches.
-  // A nested class differs per specialization; copying the primary's would
-  // construct a class that is never instantiated.
-  if (TypeIsStructOrUnion(member->symbol->type) &&
-      member->symbol->type->info.struct_info != NULL &&
-      member->symbol->type->info.struct_info->lexical_parent == primary &&
-      !ParsingWithinClass(parser, primary)) {
     return NULL;
   }
   // `typedef T type` inside `type_identity<T>` still names a template

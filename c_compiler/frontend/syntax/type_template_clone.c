@@ -5921,6 +5921,10 @@ static void RemapIdentifierToInstantiatedClassMember(
             concrete_symbol->namespace_ = to_member->symbol->namespace_;
             concrete_symbol->flags = to_member->symbol->flags;
             concrete_symbol->location = to_member->symbol->location;
+            MapKeyValue kv;
+            kv.key.p = concrete_symbol;
+            kv.value.p = concrete_symbol;
+            MapInsert(&clone->symbol_map, kv);
             id->symbol = concrete_symbol;
             ASTNodeSetType(node, concrete_type);
           } else {
@@ -8324,10 +8328,16 @@ static ASTNode* ReanalyzeClonedResolvedCall(
        TypeIsTemplateParameterPlaceholder(id->symbol->type, NULL))) {
     return node;
   }
+  // Only template parameters and typedefs this clone already substituted carry
+  // the clone's rebased indices.  An alias still from the pattern (a local
+  // `using D = typename Pick<T, U>::type`) uses the pattern's numbering and
+  // always needs substituting.
   if (clone != NULL && clone->to_func != NULL &&
       TypeIsFunction(clone->to_func) && id->symbol != NULL &&
       StorageIs(id->symbol->storage, STO(typedef)) &&
-      id->symbol->type != NULL) {
+      id->symbol->type != NULL &&
+      (id->symbol->flags.is_template_parameter ||
+       MapFindPointerKey(&clone->symbol_map, id->symbol) == id->symbol)) {
     int parameter_index =
         FirstTemplateParameterIndexInType(id->symbol->type);
     int parameter_base =
