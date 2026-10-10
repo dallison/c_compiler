@@ -341,6 +341,36 @@ template <class Ret, class... Args>
 struct is_function<Ret(Args...)> : true_type {
 };
 
+template <class Ret, class... Args>
+struct is_function<Ret(Args...) const> : true_type {
+};
+
+template <class Ret, class... Args>
+struct is_function<Ret(Args...) volatile> : true_type {
+};
+
+template <class Ret, class... Args>
+struct is_function<Ret(Args...) const volatile> : true_type {
+};
+
+#if __cplusplus >= 201703L
+template <class Ret, class... Args>
+struct is_function<Ret(Args...) noexcept> : true_type {
+};
+
+template <class Ret, class... Args>
+struct is_function<Ret(Args...) const noexcept> : true_type {
+};
+
+template <class Ret, class... Args>
+struct is_function<Ret(Args...) volatile noexcept> : true_type {
+};
+
+template <class Ret, class... Args>
+struct is_function<Ret(Args...) const volatile noexcept> : true_type {
+};
+#endif
+
 template <class T>
 struct add_pointer {
   using type = remove_reference_t<T>*;

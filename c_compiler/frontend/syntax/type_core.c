@@ -917,6 +917,17 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
     arg->member_function = value.fn_symbol;
     return true;
   }
+  if (TypeIsArray(expr->type)) {
+    Symbol* symbol = TemplatePointerConstantSymbol(expr);
+    if (symbol == NULL || symbol->flags.is_block_scope) {
+      return false;
+    }
+    arg->value_kind = kTemplateValuePointer;
+    arg->value_symbol = symbol;
+    TypeRecordDelete(arg->type);
+    arg->type = NewPointerTo(expr->type->qualifiers, expr->type->next);
+    return true;
+  }
   if (TypeIsPointer(expr->type) || TypeIsFunction(expr->type)) {
     if (TypeIsPointer(expr->type) &&
         TemplateExpressionIsNullAddress(expr)) {
@@ -930,6 +941,10 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
     }
     arg->value_kind = kTemplateValuePointer;
     arg->value_symbol = symbol;
+    if (TypeIsFunction(expr->type)) {
+      TypeRecordDelete(arg->type);
+      arg->type = NewPointerTo(expr->type->qualifiers, TypeRecordCopy(expr->type));
+    }
     return true;
   }
   if (expr->type->declarator == kDeclPrimitive &&

@@ -1561,6 +1561,22 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
       for (size_t i = 0; i < braced_init->initializers->length; i++) {
         INode* current = inode->current == NULL ? inode : inode->current;
         ASTNode* initializer = braced_init->initializers->value.p[i];
+        if (inode->kind == kIArray && inode->type->next != NULL &&
+            TypeIsCharFamily(inode->type->next) &&
+            !TypeIsArray(inode->type->next) &&
+            initializer->op == AST_OP(expr_init)) {
+          ASTNode* expression =
+              ((ExpressionInitializerASTNode*)initializer)->expr;
+          if (expression != NULL &&
+              (expression->op == AST_OP(string) ||
+               expression->op == AST_OP(string_wide))) {
+            if (!InitCurrentAndAdvance(inode, expression, constants_only)) {
+              SemanticError(initializer, "Too many initializers");
+              break;
+            }
+            continue;
+          }
+        }
         bool mixed_positional_base =
             cxx_has_designated && i < cxx_positional_prefix &&
             current != NULL && current->is_base_subobject;

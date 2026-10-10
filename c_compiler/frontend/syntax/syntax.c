@@ -6085,7 +6085,8 @@ static String* CXXPrimaryTemplateName(TypeRecord* type) {
 }
 
 static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
-    Struct* owner, const char* name, Vector* already_used);
+    Struct* owner, const char* name, Vector* already_used,
+    size_t pack_element_index);
 
 /* A mem-initializer may name a direct base through a typedef that is not a
  * member of the class (`using HashSetIteratorGenerationInfo = ...Disabled;`
@@ -6126,15 +6127,15 @@ static TypeRecord* CXXTypedefTypeVisibleFromClass(Struct* owner,
 
 static CXXBaseSpecifier* FindCXXDirectBaseByName(Struct* owner,
                                                  const char* name) {
-  return FindCXXDirectBaseByNameSkipping(owner, name, NULL);
+  return FindCXXDirectBaseByNameSkipping(owner, name, NULL, 0);
 }
 
 /* A mem-initializer may name a direct base by the class template's parameter
  * (`struct Storage<T, I, Tag, true> : T { Storage(...) : T(v) {} }`).  After
  * instantiation the base's tag is the argument type (`Hash<unsigned long>`),
  * not the parameter name `T`. */
-static TypeRecord* CXXTemplateParameterBaseType(Struct* owner,
-                                                const char* name) {
+static TypeRecord* CXXTemplateParameterBaseType(Struct* owner, const char* name,
+                                                size_t pack_element_index) {
   if (owner == NULL || name == NULL || owner->tag_symbol == NULL ||
       owner->tag_symbol->type == NULL) {
     return NULL;
@@ -6161,18 +6162,32 @@ static TypeRecord* CXXTemplateParameterBaseType(Struct* owner,
     if (arg == NULL || arg->kind != kTemplateParameterType) {
       return NULL;
     }
+    if (param->is_parameter_pack) {
+      if (arg->pack_arguments == NULL ||
+          pack_element_index >= arg->pack_arguments->length) {
+        return NULL;
+      }
+      TemplateArgument* element =
+          arg->pack_arguments->value.p[pack_element_index];
+      return element != NULL ? element->type : NULL;
+    }
+    if (pack_element_index != 0) {
+      return NULL;
+    }
     return arg->type;
   }
   return NULL;
 }
 
 static CXXBaseSpecifier* FindCXXDirectBaseByNameSkipping(
-    Struct* owner, const char* name, Vector* already_used) {
+    Struct* owner, const char* name, Vector* already_used,
+    size_t pack_element_index) {
   if (owner == NULL || name == NULL) {
     return NULL;
   }
   TypeRecord* alias_type = CXXTypedefTypeVisibleFromClass(owner, name);
-  TypeRecord* parameter_type = CXXTemplateParameterBaseType(owner, name);
+  TypeRecord* parameter_type =
+      CXXTemplateParameterBaseType(owner, name, pack_element_index);
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
@@ -6206,7 +6221,7 @@ static CXXVirtualBaseInfo* FindCXXVirtualBaseByName(Struct* owner,
     return NULL;
   }
   TypeRecord* alias_type = CXXTypedefTypeVisibleFromClass(owner, name);
-  TypeRecord* parameter_type = CXXTemplateParameterBaseType(owner, name);
+  TypeRecord* parameter_type = CXXTemplateParameterBaseType(owner, name, 0);
   for (size_t i = 0; i < owner->virtual_bases.length; i++) {
     CXXVirtualBaseInfo* base = owner->virtual_bases.value.p[i];
     if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
@@ -7578,8 +7593,9 @@ static bool BindCXXBaseConstructorInitializers(
     Syntax* syntax, TypeRecord* func, CXXConstructorInitList* init_list,
     Struct* owner, const char* init_name, Vector* actuals,
     SourceLocation location, bool is_pack_expansion) {
-  CXXBaseSpecifier* base =
-      FindCXXDirectBaseByNameSkipping(owner, init_name, &init_list->base_specs);
+  size_t pack_element_index = 0;
+  CXXBaseSpecifier* base = FindCXXDirectBaseByNameSkipping(
+      owner, init_name, &init_list->base_specs, pack_element_index);
   if (base != NULL && base->is_virtual) {
     return false;
   }
@@ -7615,8 +7631,10 @@ static bool BindCXXBaseConstructorInitializers(
       break;
     }
     CXXBaseSpecifier* previous = base;
+    pack_element_index++;
     base = FindCXXDirectBaseByNameSkipping(owner, init_name,
-                                           &init_list->base_specs);
+                                           &init_list->base_specs,
+                                           pack_element_index);
     if (base == previous) {
       break;
     }

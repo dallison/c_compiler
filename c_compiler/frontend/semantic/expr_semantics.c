@@ -9379,6 +9379,15 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     if (FuncAddrBaseRank(actual, target) >= 0) {
       return binding_rank;
     }
+    if (TypeIsPointer(target) && target->next != NULL &&
+        TypeIsFunction(target->next)) {
+      ASTNode* lambda_expr = CXXLambdaConversionExpression(actual);
+      if (lambda_expr != NULL &&
+          (lambda_expr->flags & kASTLambdaExpression) != 0 &&
+          LambdaCallMatchesFunctionPointer(lambda_expr, target)) {
+        return binding_rank;
+      }
+    }
     // A user-defined conversion produces a temporary. It can satisfy an rvalue
     // reference or a const lvalue reference, but never a non-const lvalue
     // reference.  Both directions are eligible: a converting constructor of the
@@ -9448,6 +9457,15 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   if (FuncAddrBaseRank(actual, target) >= 0) {
     // Exact function-to-pointer conversion (an lvalue transformation).
     return 5;
+  }
+  if (TypeIsPointer(target) && target->next != NULL &&
+      TypeIsFunction(target->next)) {
+    ASTNode* lambda_expr = CXXLambdaConversionExpression(actual);
+    if (lambda_expr != NULL &&
+        (lambda_expr->flags & kASTLambdaExpression) != 0 &&
+        LambdaCallMatchesFunctionPointer(lambda_expr, target)) {
+      return 5;
+    }
   }
   // A null pointer constant is an integer literal with value zero
   // ([conv.ptr]).  An enumerator is not an integer literal, even when its
@@ -12516,6 +12534,11 @@ static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
     if (actual == NULL) {
       continue;
     }
+    // A generic lambda's closure type carries template parameters, but a
+    // function-pointer formal can still convert it ([over.over] / funcaddr).
+    if ((actual->flags & kASTLambdaExpression) != 0) {
+      continue;
+    }
     // Unknown is the placeholder given to a dependent operand (for example
     // `*this->field` while the capture's type is still a template parameter).
     // Instantiating a function template against it caches a specialization on
@@ -12608,6 +12631,9 @@ static bool IsDependentMemberTemplateCall(VectorASTNode* node) {
   for (size_t i = 0; i < node->children->length; i++) {
     ASTNode* actual = node->children->value.p[i];
     if (actual == NULL || !TypeContainsTemplateParameter(actual->type)) {
+      continue;
+    }
+    if ((actual->flags & kASTLambdaExpression) != 0) {
       continue;
     }
     if (actual->op == AST_OP(identifier)) {
@@ -13057,6 +13083,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     bool actuals_type_dependent = false;
     for (size_t i = 0; i < node->children->length; i++) {
       ASTNode* actual = node->children->value.p[i];
+      if (actual != NULL && (actual->flags & kASTLambdaExpression) != 0) {
+        continue;
+      }
       if (actual != NULL && actual->type != NULL &&
           (TypeContainsTemplateParameter(actual->type) ||
            TypeContainsAuto(actual->type) ||

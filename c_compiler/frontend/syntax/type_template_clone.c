@@ -2559,7 +2559,7 @@ static size_t ConstructorInitPackElementIndex(TemplateFunctionBodyClone* clone,
   const char* tag = recv->info.struct_info->tag_name != NULL
                         ? recv->info.struct_info->tag_name->value
                         : NULL;
-  size_t index = 0;
+  size_t pack_index = 0;
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base == NULL || base->is_virtual || base->type == NULL ||
@@ -2567,18 +2567,24 @@ static size_t ConstructorInitPackElementIndex(TemplateFunctionBodyClone* clone,
         base->type->info.struct_info == NULL) {
       continue;
     }
-    if (TypeEqual(base->type, recv)) {
-      return index;
+    if (TypeEqual(base->type, recv) ||
+        base->type->info.struct_info == recv->info.struct_info) {
+      return pack_index;
     }
     if (tag != NULL && base->type->info.struct_info->tag_name != NULL &&
         StringEqual(base->type->info.struct_info->tag_name, tag)) {
-      return index;
+      return pack_index;
     }
     String* base_primary = ClonedCallPrimaryTemplateName(base->type);
     if (primary != NULL && base_primary != NULL &&
         StringEqual(base_primary, primary->value)) {
-      index++;
+      if (TypeEqual(base->type, recv)) {
+        return pack_index;
+      }
+      pack_index++;
+      continue;
     }
+    pack_index++;
   }
   return 0;
 }
@@ -9811,8 +9817,12 @@ static void PrepareConstructorPreambleClone(TemplateFunctionBodyClone* clone,
  * then assigns that pattern to element 0.  Expand it into one actual per
  * concrete element before that lowering. */
 static void ExpandConstructorInitializerActualPacks(
-    TemplateFunctionBodyClone* clone, Vector* actuals) {
+    TemplateFunctionBodyClone* clone, Vector* actuals,
+    bool mem_initializer_is_pack_expansion) {
   if (clone == NULL || actuals == NULL) {
+    return;
+  }
+  if (mem_initializer_is_pack_expansion) {
     return;
   }
   Vector* expanded = NewVector();
@@ -9882,7 +9892,8 @@ void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
     CXXDeferredConstructorInitializer* init =
         initializers->deferred_initializers.value.p[i];
     if (init != NULL) {
-      ExpandConstructorInitializerActualPacks(&preamble_clone, init->actuals);
+      ExpandConstructorInitializerActualPacks(&preamble_clone, init->actuals,
+                                              init->is_pack_expansion);
     }
   }
   MapDestruct(&preamble_clone.symbol_map);
