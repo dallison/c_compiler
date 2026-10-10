@@ -4839,7 +4839,13 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
       // Emit(rv, NewInstruction2(X86_OP(rmov), StackPointer(rv), newsp));
     }
   }
-  SetLoweredNode(node, call);
+  TargetInstruction* result = call;
+  if (!can_be_tail_call && node->type != NULL && node->type->size == 4 &&
+      TypeIsIntegral(node->type) && !TypeUsesHardwareFloatRegister(node->type)) {
+    // The ABI leaves the upper half of a 32-bit result undefined.
+    result = Emit(rv, ExtendInt32Result(rv, call, TypeIsUnsigned(node->type)));
+  }
+  SetLoweredNode(node, result);
 
   VectorDestructWithContents(&arg_locations, NULL, /*free_element=*/true);
 
@@ -4852,18 +4858,18 @@ static TargetInstruction* LowerCallAMD64(X86Generator* rv, Generator* gen,
   // this the destination register keeps its previous (garbage) contents.
   if (node->dest != NULL) {
     TargetInstruction* dest = GetDestInstruction(rv, gen, node);
-    if (dest != NULL && dest != call) {
+    if (dest != NULL && dest != result) {
       X86Opcode mov_opcode = X86_OP(mv);
       if (TypeUsesHardwareFloatRegister(node->type)) {
         mov_opcode =
             X86FpIsDoubleWidth(node->type) ? X86_OP(fmv_d) : X86_OP(fmv_s);
       }
-      TargetInstruction* move = Emit(rv, NewInstruction1(mov_opcode, call));
+      TargetInstruction* move = Emit(rv, NewInstruction1(mov_opcode, result));
       move->dest = dest;
       return SetLoweredNode(node, move);
     }
   }
-  return call;
+  return result;
 }
 
 static TargetInstruction* LowerCall(X86Generator* rv, Generator* gen,
