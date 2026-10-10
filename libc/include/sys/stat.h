@@ -10,6 +10,7 @@
 #define stat_h
 
 #include <stdint.h>
+#include <sys/types.h>
 
 struct stat {
     uint64_t  st_dev;
@@ -74,7 +75,7 @@ extern "C" {
 extern int stat(const char* path, struct stat* buf);
 extern int fstat(int fd, struct stat* buf);
 extern int lstat(const char* path, struct stat* buf);
-extern int chmod(const char* path, uint32_t mode);
+extern int chmod(const char* path, mode_t mode);
 extern int mkdir(const char* path, unsigned short mode);
 
 #ifdef __cplusplus

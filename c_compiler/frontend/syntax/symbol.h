@@ -197,6 +197,10 @@ typedef struct Symbol {
   // capture field. Transient: closure fields never cross module boundaries.
   struct Symbol* lambda_capture_source;
   bool lambda_capture_by_reference;
+  // Block-scope anonymous union/struct: injected member names alias storage in
+  // `anonymous_union_host` at `anonymous_union_member_offset`.  Transient.
+  struct Symbol* anonymous_union_host;
+  int anonymous_union_member_offset;
   struct Symbol* overload_next; // Next overload, same name.     // @wire 39
   struct ASTNode* default_argument; // C++ default arg, if any.  // @wire 40
   // Portable initializer for serialized constexpr aggregate values. The live

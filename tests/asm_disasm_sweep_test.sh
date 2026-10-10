@@ -526,6 +526,9 @@ x86_entry:
   cdq
   cltq
   movslq %ecx, %rdx
+  prefetchw (%rax)
+  prefetchnta (%rbx)
+  prefetcht0 (%rcx)
   movss %xmm1, %xmm0
   movsd %xmm2, %xmm1
   storess %xmm0, -32(%rbp)

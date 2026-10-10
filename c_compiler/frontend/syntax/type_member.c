@@ -113,6 +113,31 @@ static void FinalizeMemberFunctionTemplateConstraints(
   }
 }
 
+static void FinalizeMemberVariableTemplate(
+    Symbol* member_symbol, Vector* member_template_parameters,
+    ConstraintExpr* member_template_requires_clause) {
+  if (member_symbol == NULL) {
+    ConstraintExprDelete(member_template_requires_clause);
+    return;
+  }
+  member_symbol->flags.is_template = true;
+  VariableTemplate* vt = malloc(sizeof(VariableTemplate));
+  vt->initializer = NULL;
+  vt->associated_constraint = NULL;
+  VectorInit(&vt->parameters);
+  VectorInit(&vt->partial_specializations);
+  for (size_t i = 0; i < member_template_parameters->length; i++) {
+    VectorAppend(&vt->parameters, member_template_parameters->value.p[i]);
+  }
+  member_template_parameters->length = 0;
+  MoveTemplateParameterConstraints(&vt->parameters, &vt->associated_constraint);
+  if (member_template_requires_clause != NULL) {
+    AddOwnedAssociatedConstraint(&vt->associated_constraint,
+                                 member_template_requires_clause);
+  }
+  member_symbol->variable_template = vt;
+}
+
 static Vector pending_inline_constructor_preambles;
 static bool pending_inline_constructor_preambles_initialized = false;
 
@@ -510,6 +535,21 @@ static void ParseCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
   } else {
     base_symbol = SyntaxFindQualifiedPrefixSymbol(
         parser->syntax, &name, name.components.length - 1);
+  }
+  if ((base_symbol == NULL || base_symbol->type == NULL) && owner != NULL) {
+    for (size_t i = 0; i < owner->bases.length; i++) {
+      CXXBaseSpecifier* base = owner->bases.value.p[i];
+      if (base == NULL || base->type == NULL ||
+          !TypeIsStructOrUnion(base->type) ||
+          base->type->info.struct_info == NULL ||
+          base->type->info.struct_info->tag_name == NULL) {
+        continue;
+      }
+      if (StringEqual(base_name, base->type->info.struct_info->tag_name->value)) {
+        base_symbol = base->type->info.struct_info->tag_symbol;
+        break;
+      }
+    }
   }
   if (base_symbol == NULL || base_symbol->type == NULL) {
     SyntaxError(parser->syntax, "No such base class %s", base_name->value);
@@ -2207,12 +2247,18 @@ static void FlushDeferredNoexceptSpecifiers(TypeParser* parser,
     int old_template_parameter_count =
         syntax->current_template_parameter_count;
     bool old_parsing_template = syntax->parsing_template_declaration;
-    syntax->current_template_parameters =
-        &entry->function_type->info.function.template_parameters;
-    syntax->current_template_parameter_count =
-        entry->function_type->info.function.template_parameter_count;
-    syntax->parsing_template_declaration =
-        syntax->current_template_parameters->length != 0;
+    // A non-template member of a class template still depends on the class
+    // parameters (`noexcept(traits<T>::value)`).  Replacing that scope with
+    // the function's empty parameter list makes the lookup fail.  A member
+    // template keeps its own parameters, which already include the enclosing
+    // class parameters when the member was declared.
+    if (entry->function_type->info.function.template_parameters.length != 0) {
+      syntax->current_template_parameters =
+          &entry->function_type->info.function.template_parameters;
+      syntax->current_template_parameter_count =
+          entry->function_type->info.function.template_parameter_count;
+      syntax->parsing_template_declaration = true;
+    }
     SyntaxOpenScope(syntax);
     AddFunctionTemplateParameterScopeSymbols(syntax, entry->function_type);
     AddInlineFunctionScopeSymbols(syntax, entry->function_type);
@@ -2773,6 +2819,13 @@ static void FinishDeferredClassStaticAsserts(TypeParser* parser, Struct* str,
   }
 }
 
+static void ParseInterleavedMemberAttributes(TypeParser* parser,
+                                            Vector* attributes) {
+  while (SyntaxParseCXXAlignas(parser->syntax, attributes) ||
+         SyntaxParseAnyAttribute(parser->syntax, attributes)) {
+  }
+}
+
 void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                String* tag_name) {
   CXXAccess current_access = str->is_class ? kAccessPrivate : kAccessPublic;
@@ -3005,7 +3058,9 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       continue;
     }
 
+    ParseInterleavedMemberAttributes(parser, &member_attributes);
     bool is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
+    ParseInterleavedMemberAttributes(parser, &member_attributes);
     bool is_constinit_member =
         CompilerIsCXX() && LexMatch(parser->lex, TOK(constinit));
     bool is_constexpr_member = false;
@@ -3127,10 +3182,12 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     if (is_mutable_member && !is_static_member) {
       is_static_member = LexMatch(parser->lex, TOK(static));
     }
+    ParseInterleavedMemberAttributes(parser, &member_attributes);
     if (!is_inline_member) {
       is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
       parser->is_inline = is_inline_member;
     }
+    ParseInterleavedMemberAttributes(parser, &member_attributes);
     if (!is_constexpr_member && !is_consteval_member) {
       if (CompilerIsCXX() && LexMatch(parser->lex, TOK(consteval))) {
         is_consteval_member = true;
@@ -3150,6 +3207,12 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->is_constexpr = is_constexpr_member;
       parser->is_consteval = is_consteval_member;
     }
+    // `static constexpr inline` (e.g. PROTOBUF_ALWAYS_INLINE after constexpr).
+    if (!is_inline_member) {
+      is_inline_member = CompilerIsCXX() && LexMatch(parser->lex, TOK(inline));
+      parser->is_inline = is_inline_member;
+    }
+    ParseInterleavedMemberAttributes(parser, &member_attributes);
     if (!is_constinit_member &&
         CompilerIsCXX() && LexMatch(parser->lex, TOK(constinit))) {
       is_constinit_member = true;
@@ -3301,6 +3364,23 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         // list.
         break;
       }
+      // `iterator constexpr operator-` places constexpr after the return type.
+      if (CompilerIsCXX() && !is_constexpr_member && !is_consteval_member) {
+        if (LexMatch(parser->lex, TOK(consteval))) {
+          is_consteval_member = true;
+          is_constexpr_member = true;
+        } else if (LexMatch(parser->lex, TOK(constexpr))) {
+          is_constexpr_member = true;
+        }
+        parser->is_constexpr = is_constexpr_member;
+        parser->is_consteval = is_consteval_member;
+      }
+      if (CompilerIsCXX() && !is_inline_member &&
+          LexMatch(parser->lex, TOK(inline))) {
+        is_inline_member = true;
+        parser->is_inline = is_inline_member;
+      }
+      ParseInterleavedMemberAttributes(parser, &member_attributes);
       // An omitted array bound on a static member is an incomplete type, not
       // a flexible array.  The flag is not storage class: the out-of-line
       // definition does not repeat `static`.
@@ -3511,6 +3591,11 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                            member_template_parameters->value.p[i]);
             }
             member_template_parameters->length = 0;
+          } else if (!member->is_member_function) {
+            FinalizeMemberVariableTemplate(member_symbol,
+                                           member_template_parameters,
+                                           member_template_requires_clause);
+            member_template_requires_clause = NULL;
           } else {
             SyntaxError(parser->syntax,
                         "Member templates must be functions, classes, or aliases");
@@ -3581,9 +3666,11 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         // through implicit `this->`.  Member function templates must be
         // visible though: `InitializeStorage<T>(args)` has to see a template
         // before `<` is parsed as less-than.
-        if (member != NULL && member->is_member_function &&
-            member->symbol != NULL &&
-            (member->is_static || member->symbol->flags.is_template)) {
+        if (member != NULL && member->symbol != NULL &&
+            ((member->is_member_function &&
+              (member->is_static || member->symbol->flags.is_template)) ||
+             (member->is_static &&
+              member->symbol->variable_template != NULL))) {
           Symbol* scope_fn = SymbolClone(member->symbol);
           scope_fn->overload_next = NULL;
           // Member templates parse inside an extra parameter scope that is
@@ -3641,10 +3728,18 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           } else {
             ASTNode* initializer =
                 ParseCXXStaticDataMemberInitializer(parser, member_symbol);
-            if (initializer != NULL) {
+            if (member_symbol->variable_template != NULL) {
+              if (initializer != NULL) {
+                member_symbol->variable_template->initializer = initializer;
+              }
+            } else if (initializer != NULL) {
               member->default_initializer =
                   CloneCXXDefaultMemberInitializer(initializer);
             }
+            if (member_symbol->variable_template != NULL) {
+              // Per-use instantiation handles the initializer; do not emit a
+              // static data member definition for the primary template.
+            } else
             // A const integral/enum static data member with an in-class
             // initializer yields a constant usable by unqualified name in the
             // rest of the class body (array bounds, default arguments, etc.).
@@ -3733,6 +3828,10 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
     AddImplicitCXXSpecialMembers(parser, str, str->tag_symbol);
     AddImplicitCXXDestructorIfNeeded(parser, str, str->tag_symbol);
   }
+  // Deferred inline bodies can call virtual members and need the implicit
+  // __vptr field (and adjusted member offsets) before they are re-parsed.
+  UpdateCXXAbstractStatus(str);
+  AddCXXVPtrMember(parser, str);
   // Re-parse the deferred inline bodies in complete-class context, then
   // restore this frame's collection pointer.  Bodies of a nested class stay
   // deferred until the enclosing class is complete: their potential scope

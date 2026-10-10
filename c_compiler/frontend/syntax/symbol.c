@@ -243,6 +243,8 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->alias_target = NULL;
   sym->lambda_capture_source = NULL;
   sym->lambda_capture_by_reference = false;
+  sym->anonymous_union_host = NULL;
+  sym->anonymous_union_member_offset = 0;
   sym->overload_next = NULL;
   sym->default_argument = NULL;
   sym->constexpr_initializer = NULL;
@@ -1369,6 +1371,9 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->lambda_capture_source = sym->lambda_capture_source;
   new_sym->lambda_capture_by_reference =
       sym->lambda_capture_by_reference;
+  new_sym->anonymous_union_host = sym->anonymous_union_host;
+  new_sym->anonymous_union_member_offset =
+      sym->anonymous_union_member_offset;
   new_sym->overload_next = NULL;
   new_sym->default_argument =
       ASTNodeClone(sym->default_argument, IdentityCloneNode, NULL, NULL);

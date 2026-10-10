@@ -185,6 +185,11 @@ TypeRecord* TypeInstantiateVariableTemplateType(struct Syntax* syntax,
 TypeRecord* TypeInstantiateVariableTemplateTypeQuiet(struct Syntax* syntax,
                                                      Symbol* var_template,
                                                      Vector* args);
+// Like TypeInstantiateVariableTemplateType, but deduces `auto` from the
+// instantiated initializer expression.
+TypeRecord* TypeInstantiateVariableTemplateDeducedType(struct Syntax* syntax,
+                                                       Symbol* var_template,
+                                                       Vector* args);
 struct ASTNode* TypeInstantiateVariableTemplateInitializer(
     struct Syntax* syntax, Symbol* var_template, Vector* args);
 void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide);

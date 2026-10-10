@@ -2735,6 +2735,7 @@ static TargetInstruction* LowerIRNode(Wasm32Generator* wasm, IRNode* node) {
     case IR_OP(nop):
     case IR_OP(leave):
     case IR_OP(observable_checkpoint):
+    case IR_OP(prefetch):
     case last_ir_opcode:
       return NULL;
 

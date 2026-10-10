@@ -468,6 +468,12 @@ void TypeRecordDeleteLastReference(TypeRecord* record) {
           /*free_element=*/false);
       ConstraintExprDelete(record->info.function.associated_constraint);
       record->info.function.associated_constraint = NULL;
+      if (record->info.function.template_pattern_body != NULL &&
+          record->info.function.template_pattern_body !=
+              record->info.function.body) {
+        ASTNodeDelete(record->info.function.template_pattern_body);
+      }
+      record->info.function.template_pattern_body = NULL;
     } else if (TypeIsVLA(record)) {
       // Delete the AST containing the size.
       ASTNodeDelete(record->info.array.size.vla.size);
@@ -912,6 +918,17 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
     arg->member_function = value.fn_symbol;
     return true;
   }
+  if (TypeIsArray(expr->type)) {
+    Symbol* symbol = TemplatePointerConstantSymbol(expr);
+    if (symbol == NULL || symbol->flags.is_block_scope) {
+      return false;
+    }
+    arg->value_kind = kTemplateValuePointer;
+    arg->value_symbol = symbol;
+    TypeRecordDelete(arg->type);
+    arg->type = NewPointerTo(expr->type->qualifiers, expr->type->next);
+    return true;
+  }
   if (TypeIsPointer(expr->type) || TypeIsFunction(expr->type)) {
     if (TypeIsPointer(expr->type) &&
         TemplateExpressionIsNullAddress(expr)) {
@@ -925,6 +942,10 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
     }
     arg->value_kind = kTemplateValuePointer;
     arg->value_symbol = symbol;
+    if (TypeIsFunction(expr->type)) {
+      TypeRecordDelete(arg->type);
+      arg->type = NewPointerTo(expr->type->qualifiers, TypeRecordCopy(expr->type));
+    }
     return true;
   }
   if (expr->type->declarator == kDeclPrimitive &&
@@ -1244,6 +1265,16 @@ void TypeRecordCopyContractAssertions(TypeRecord* to, TypeRecord* from) {
                  NewContractAssertion(source->kind, predicate, result_binding,
                                       &attrs, source->location));
   }
+}
+
+struct ASTNode* FunctionTemplateCloneSourceBody(TypeRecord* func_type) {
+  if (func_type == NULL || !TypeIsFunction(func_type)) {
+    return NULL;
+  }
+  if (func_type->info.function.template_pattern_body != NULL) {
+    return func_type->info.function.template_pattern_body;
+  }
+  return func_type->info.function.body;
 }
 
 TypeRecord* TypeRecordCopy(TypeRecord* record) {

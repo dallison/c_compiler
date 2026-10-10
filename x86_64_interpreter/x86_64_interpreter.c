@@ -1572,6 +1572,16 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       *insn_len = pos;
       return true;
     }
+    if (b1 == 0x18 || b1 == 0x0D) {
+      // PREFETCH* / PREFETCHW: hints only; no architectural state.
+      ModRM modrm;
+      if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
+        return false;
+      }
+      (void)modrm;
+      *insn_len = pos;
+      return true;
+    }
     bool sse_ok = false;
     if (ExecuteSSE(interpreter, &pos, rex, sse_prefix, b1, &sse_ok)) {
       *insn_len = pos;

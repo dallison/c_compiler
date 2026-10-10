@@ -89,11 +89,41 @@ typedef struct {
 typedef int pthread_once_t;
 #endif
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+typedef struct {
+  long __sig;
+  char __opaque[192];
+} pthread_rwlock_t;
+
+typedef struct {
+  long __sig;
+  char __opaque[16];
+} pthread_rwlockattr_t;
+#else
+typedef struct {
+  unsigned int state;
+  int readers;
+  pthread_t writer;
+} pthread_rwlock_t;
+
+typedef struct {
+  int dummy;
+} pthread_rwlockattr_t;
+#endif
+
 int pthread_mutex_init(pthread_mutex_t*, const pthread_mutexattr_t*);
 int pthread_mutex_destroy(pthread_mutex_t*);
 int pthread_mutex_lock(pthread_mutex_t*);
 int pthread_mutex_unlock(pthread_mutex_t*);
 int pthread_mutex_trylock(pthread_mutex_t*);
+
+int pthread_rwlock_init(pthread_rwlock_t*, const pthread_rwlockattr_t*);
+int pthread_rwlock_destroy(pthread_rwlock_t*);
+int pthread_rwlock_rdlock(pthread_rwlock_t*);
+int pthread_rwlock_wrlock(pthread_rwlock_t*);
+int pthread_rwlock_unlock(pthread_rwlock_t*);
+int pthread_rwlock_tryrdlock(pthread_rwlock_t*);
+int pthread_rwlock_trywrlock(pthread_rwlock_t*);
 
 int pthread_cond_init(pthread_cond_t*, const pthread_condattr_t*);
 int pthread_cond_destroy(pthread_cond_t*);

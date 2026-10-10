@@ -5661,6 +5661,8 @@ static TargetInstruction* LowerIRNode(ARMGenerator* g, Generator* gen,
       checkpoint->observable_checkpoint = true;
       return checkpoint;
     }
+    case IR_OP(prefetch):
+      return SetLoweredNode(node, Emit(g, NewInstruction(ARM_OP(nop))));
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;
@@ -6329,6 +6331,9 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
   if (TypeIsVLA(entry->pooled->type)) {
     return;
   }
+  if (SymbolIsAnonymousUnionMemberView(entry->value.symbol)) {
+    return;
+  }
   bool is_arg = entry->pooled->opcode == IR_OP(argument);
   TypeRecord* effective_type = entry->pooled->type;
   if (is_arg) {
@@ -6609,6 +6614,8 @@ static void AssignRegisterVars(ARMGenerator* g, Generator* gen, Vector* vars,
     PoolEntry* entry = vars->value.p[i];
     AssignRegisterOrOffset(g, entry, args, &var_offset);
   }
+
+  AssignAnonymousUnionMemberOffsets(gen);
 
   AssignWideMergeStackHomes(g, gen);
   

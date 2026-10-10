@@ -15,6 +15,7 @@
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
 #include "list.h"
+#include "member_pointer.h"
 #include "syntax.h"
 
 // The semantic analysis of an initializer converts the tree
@@ -641,6 +642,10 @@ bool InitializerIsLinkTimeConstant(ASTNode* init) {
 // Initialize the current node and advance to the next.  Returns true
 // if the initialization is valid.
 static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
+  ASTNode* is_same_folded = CXXFoldIsSameVExpression(expr);
+  if (is_same_folded != expr) {
+    return is_same_folded;
+  }
   ASTNode* folded = NULL;
   if (TypeIsIntegral(expr->type)) {
     int64_t value;
@@ -670,6 +675,12 @@ static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
       // (`cond ? &a : &b`, `get_hash_slot_fn()`).  Those are not integer
       // constants; fold them to the selected function or object address.
       folded = ConstexprFoldPointerExpression(expr);
+    }
+  } else if (expr->type != NULL && TypeIsMemberPointer(expr->type)) {
+    expr = CXXFoldIsSameVExpression(expr);
+    MemberPointerValue pm_value;
+    if (MemberPointerTryEvaluateConstant(expr, expr->type, &pm_value)) {
+      folded = NewIntConstantASTNode(pm_value.ptr, expr->type, expr->location);
     }
   }
   if (folded == NULL) {
@@ -1535,17 +1546,34 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
     }
     case AST_OP(braced_init): {
       BracedInitializerASTNode* braced_init = (BracedInitializerASTNode*)init_expr;
-      if (CompilerIsCXX() && !constants_only && inode->kind == kIStruct &&
+      if (CompilerIsCXX() && inode->kind == kIStruct &&
           inode->type->info.struct_info != NULL &&
           (inode->type->info.struct_info->tag_symbol == NULL ||
            !inode->type->info.struct_info->tag_symbol->flags.invented) &&
           !inode->type->info.struct_info->is_aggregate) {
-        ASTNode* constructed =
-            LowerCXXBracedClassInitToConstructor(init_expr, inode->type);
-        if (constructed != NULL) {
-          inode->num_initializers++;
-          inode->expr = ASTNodeMove(constructed);
-          return AdvanceCurrent(inode->parent);
+        Struct* struct_info = inode->type->info.struct_info;
+        bool tuple_braced_init = false;
+        if (constants_only && struct_info != NULL) {
+          if (struct_info->tag_name != NULL &&
+              StringEqual(struct_info->tag_name, "tuple")) {
+            tuple_braced_init = true;
+          } else if (struct_info->tag_symbol != NULL &&
+                     struct_info->tag_symbol->type != NULL &&
+                     struct_info->tag_symbol->type->template_origin != NULL &&
+                     StringEqual(&struct_info->tag_symbol->type->template_origin
+                                      ->name,
+                                 "tuple")) {
+            tuple_braced_init = true;
+          }
+        }
+        if (!constants_only || tuple_braced_init) {
+          ASTNode* constructed =
+              LowerCXXBracedClassInitToConstructor(init_expr, inode->type);
+          if (constructed != NULL) {
+            inode->num_initializers++;
+            inode->expr = ASTNodeMove(constructed);
+            return AdvanceCurrent(inode->parent);
+          }
         }
       }
       ASTNode* same_class_element =
@@ -1600,6 +1628,22 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
       for (size_t i = 0; i < braced_init->initializers->length; i++) {
         INode* current = inode->current == NULL ? inode : inode->current;
         ASTNode* initializer = braced_init->initializers->value.p[i];
+        if (inode->kind == kIArray && inode->type->next != NULL &&
+            TypeIsCharFamily(inode->type->next) &&
+            !TypeIsArray(inode->type->next) &&
+            initializer->op == AST_OP(expr_init)) {
+          ASTNode* expression =
+              ((ExpressionInitializerASTNode*)initializer)->expr;
+          if (expression != NULL &&
+              (expression->op == AST_OP(string) ||
+               expression->op == AST_OP(string_wide))) {
+            if (!InitCurrentAndAdvance(inode, expression, constants_only)) {
+              SemanticError(initializer, "Too many initializers");
+              break;
+            }
+            continue;
+          }
+        }
         bool mixed_positional_base =
             cxx_has_designated && i < cxx_positional_prefix &&
             current != NULL && current->is_base_subobject;

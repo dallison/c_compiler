@@ -804,6 +804,30 @@ static bool FunctionTemplateInstantiationMatches(Symbol* candidate,
   return true;
 }
 
+StructMember* FindMemberFunctionTemplateSpecialization(StructMember* first,
+                                                       TypeRecord* type) {
+  for (StructMember* overload = first; overload != NULL;
+       overload = overload->overload_next) {
+    if (overload->symbol == NULL || overload->symbol->flags.is_template ||
+        overload->symbol->type == NULL ||
+        !TypeIsFunction(overload->symbol->type) ||
+        overload->symbol->type->info.function.template_origin == NULL) {
+      continue;
+    }
+    if (overload->symbol->type->template_arguments == NULL ||
+        type->template_arguments == NULL) {
+      continue;
+    }
+    if (TypeEqual(overload->symbol->type, type) &&
+        TemplateArgumentVectorEqual(
+            overload->symbol->type->template_arguments,
+            type->template_arguments)) {
+      return overload;
+    }
+  }
+  return NULL;
+}
+
 /* Search a function template's instantiation overload chain for one whose type
  * and template arguments match (cache lookup), or NULL. */
 Symbol* FindFunctionTemplateInstantiation(Symbol* templ,
@@ -849,6 +873,20 @@ Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
     if (!candidate->flags.is_template && candidate->asm_name.value != NULL &&
         strcmp(candidate->asm_name.value, asm_name) == 0) {
       return candidate;
+    }
+  }
+  if (templ != NULL && templ->type != NULL && TypeIsFunction(templ->type) &&
+      templ->type->info.function.cxx_member_owner != NULL) {
+    StructMember* member = FindStructMember(
+        templ->type->info.function.cxx_member_owner, &templ->name);
+    for (StructMember* overload = member; overload != NULL;
+         overload = overload->overload_next) {
+      Symbol* candidate = overload->symbol;
+      if (candidate != NULL && !candidate->flags.is_template &&
+          candidate->asm_name.length != 0 &&
+          strcmp(candidate->asm_name.value, asm_name) == 0) {
+        return candidate;
+      }
     }
   }
   // Instantiations are recorded in the template's `template_instantiations`

@@ -2,7 +2,7 @@
 #include <syscall.h>
 
 #if defined(__p_code__)
-int read(int fd, char* buffer, size_t len) {
+ssize_t read(int fd, char* buffer, size_t len) {
   (void)fd;
   (void)buffer;
   (void)len;
@@ -13,7 +13,7 @@ int read(int fd, char* buffer, size_t len) {
       "esc #3");
 }
 #else
-int read(int fd, char* buffer, size_t len) {
+ssize_t read(int fd, char* buffer, size_t len) {
   return syscall(SYS_READ, fd, buffer, len);
 }
 #endif

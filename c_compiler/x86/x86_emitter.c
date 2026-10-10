@@ -861,6 +861,28 @@ static int FindAsmLabelByName(X86AsmInstruction* inst, const char* name,
   return -1;
 }
 
+static bool AsmConstraintUsesMemory(const AsmOperand* operand) {
+  if (operand == NULL) {
+    return false;
+  }
+  for (const char* p = operand->constraint.value; *p != '\0'; p++) {
+    switch (*p) {
+      case '=':
+      case '+':
+      case '&':
+      case '%':
+        break;
+      case 'm':
+      case 'o':
+      case 'V':
+        return true;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
 static void PrintAsmOperand(FILE* fp, X86AsmInstruction* inst, int index) {
   if (index < 0 || index >= inst->num_operands) {
     fprintf(fp, "<bad-asm-operand>");
@@ -871,11 +893,16 @@ static void PrintAsmOperand(FILE* fp, X86AsmInstruction* inst, int index) {
     return;
   }
   char buf[32];
-  PrintPercentReg(fp, X86RegisterNameFromNum(inst->reg_nums[index],
-                                                inst->is_fp[index]
-                                                    ? kX86RegTypeFloat
-                                                    : kX86RegTypeInt,
-                                                buf, sizeof(buf)));
+  const char* reg = X86RegisterNameFromNum(
+      inst->reg_nums[index],
+      inst->is_fp[index] ? kX86RegTypeFloat : kX86RegTypeInt, buf, sizeof(buf));
+  if (AsmConstraintUsesMemory(GetAsmOperand(inst, index))) {
+    fprintf(fp, "(");
+    PrintPercentReg(fp, reg);
+    fprintf(fp, ")");
+    return;
+  }
+  PrintPercentReg(fp, reg);
 }
 
 static void PrintAsmLabel(FILE* fp, X86AsmInstruction* inst, int index) {
@@ -990,6 +1017,15 @@ static void PrintMemoryBaseRegFromInst(FILE* fp, TargetInstruction* inst,
     reg = "rbp";
   }
   PrintPercentReg(fp, reg);
+}
+
+static void PrintPrefetchHint(FILE* fp, const char* mnemonic,
+                              TargetInstruction* inst, char* buf, size_t len) {
+  fprintf(fp, "\t%s (", mnemonic);
+  if (inst->operand[0] != NULL) {
+    PrintMemoryBaseRegFromInst(fp, inst->operand[0], buf, len);
+  }
+  fprintf(fp, ")\n");
 }
 
 static bool PrintTlsTporffMemoryOperand(FILE* fp, TargetInstruction* addr,
@@ -2351,6 +2387,21 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
         default:
           break;
       }
+      {
+        TargetRegister* dest_reg = inst->reg;
+        if (dest_reg == NULL && inst->dest != NULL) {
+          dest_reg = inst->dest->reg;
+        }
+        if (dest_reg != NULL &&
+            ((X86Register*)dest_reg)->type == kX86RegTypeFloat) {
+          if ((X86Opcode)inst->opcode == X86_OP(loadl) ||
+              (X86Opcode)inst->opcode == X86_OP(loadl_z)) {
+            mov = "movss";
+          } else if ((X86Opcode)inst->opcode == X86_OP(loadq)) {
+            mov = "movsd";
+          }
+        }
+      }
       assert(inst->operand[0] != NULL);
       assert(inst->operand[1] != NULL);
       assert(inst->reg != NULL);
@@ -2525,6 +2576,22 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
                                                        : "\tnop\n");
       }
       break;
+
+    case X86_OP(prefetchnta):
+      PrintPrefetchHint(fp, "prefetchnta", inst, buf1, sizeof(buf1));
+      return;
+    case X86_OP(prefetcht0):
+      PrintPrefetchHint(fp, "prefetcht0", inst, buf1, sizeof(buf1));
+      return;
+    case X86_OP(prefetcht1):
+      PrintPrefetchHint(fp, "prefetcht1", inst, buf1, sizeof(buf1));
+      return;
+    case X86_OP(prefetcht2):
+      PrintPrefetchHint(fp, "prefetcht2", inst, buf1, sizeof(buf1));
+      return;
+    case X86_OP(prefetchw):
+      PrintPrefetchHint(fp, "prefetchw", inst, buf1, sizeof(buf1));
+      return;
 
     case X86_OP(je):
     case X86_OP(jne):
@@ -3694,11 +3761,16 @@ static void PrintAsmOperandI386(FILE* fp, X86AsmInstruction* inst, int index) {
     return;
   }
   char buf[32];
-  PrintPercentRegI386(fp, X86RegisterNameFromNum(inst->reg_nums[index],
-                                                inst->is_fp[index]
-                                                    ? kX86RegTypeFloat
-                                                    : kX86RegTypeInt,
-                                                buf, sizeof(buf)));
+  const char* reg = X86RegisterNameFromNum(
+      inst->reg_nums[index],
+      inst->is_fp[index] ? kX86RegTypeFloat : kX86RegTypeInt, buf, sizeof(buf));
+  if (AsmConstraintUsesMemory(GetAsmOperandI386(inst, index))) {
+    fprintf(fp, "(");
+    PrintPercentRegI386(fp, reg);
+    fprintf(fp, ")");
+    return;
+  }
+  PrintPercentRegI386(fp, reg);
 }
 
 static void PrintAsmLabelI386(FILE* fp, X86AsmInstruction* inst, int index) {
@@ -5205,6 +5277,21 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
         default:
           break;
       }
+      {
+        TargetRegister* dest_reg = inst->reg;
+        if (dest_reg == NULL && inst->dest != NULL) {
+          dest_reg = inst->dest->reg;
+        }
+        if (dest_reg != NULL &&
+            ((X86Register*)dest_reg)->type == kX86RegTypeFloat) {
+          if ((X86Opcode)inst->opcode == X86_OP(loadl) ||
+              (X86Opcode)inst->opcode == X86_OP(loadl_z)) {
+            mov = "movss";
+          } else if ((X86Opcode)inst->opcode == X86_OP(loadq)) {
+            mov = "movsd";
+          }
+        }
+      }
       assert(inst->operand[0] != NULL);
       assert(inst->operand[1] != NULL);
       assert(inst->reg != NULL);
@@ -5379,6 +5466,22 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
                                                        : "\tnop\n");
       }
       break;
+
+    case X86_OP(prefetchnta):
+      PrintPrefetchHint(fp, "prefetchnta", inst, buf1, sizeof(buf1));
+      return;
+    case X86_OP(prefetcht0):
+      PrintPrefetchHint(fp, "prefetcht0", inst, buf1, sizeof(buf1));
+      return;
+    case X86_OP(prefetcht1):
+      PrintPrefetchHint(fp, "prefetcht1", inst, buf1, sizeof(buf1));
+      return;
+    case X86_OP(prefetcht2):
+      PrintPrefetchHint(fp, "prefetcht2", inst, buf1, sizeof(buf1));
+      return;
+    case X86_OP(prefetchw):
+      PrintPrefetchHint(fp, "prefetchw", inst, buf1, sizeof(buf1));
+      return;
 
     case X86_OP(je):
     case X86_OP(jne):

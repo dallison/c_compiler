@@ -13,6 +13,10 @@
 #include "syntax.h"
 
 __attribute__((warn_unused_result)) ASTNode* AnalyzeExpression(ASTNode* node);
+// Fold `std::is_same_v<T, U>` when variable-template instantiation does not.
+ASTNode* CXXFoldIsSameVExpression(ASTNode* expr);
+// Instantiate a variable template-id used as a value (`foo<T>`, `C::foo<T>`).
+ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr);
 // Member access analyzed while its receiver was still `auto` keeps that
 // placeholder after deduction.  Re-run those accesses once the symbol type
 // is concrete.
@@ -104,5 +108,11 @@ ASTNode* SemanticMaterializeClassPrvalue(ASTNode* expr);
 ASTNode* LowerCXXBracedInitToTarget(ASTNode* braced, TypeRecord* target);
 ASTNode* LowerCXXBracedClassInitToConstructor(ASTNode* braced,
                                               TypeRecord* target);
+
+// List-initialization and aggregate member initialization sometimes need
+// `std::vector<T>` to become `T*` (via `.data()`) when the target is still a
+// raw pointer, or into `absl::Span` via its container constructor.
+bool CXXTryConvertStdVectorToPointeePointer(ASTNode* from, TypeRecord* to);
+bool CXXTryConvertStdVectorToSpan(ASTNode* from, TypeRecord* to);
 
 #endif /* expr_semantics_h */

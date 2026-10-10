@@ -778,6 +778,45 @@ bool SymbolNeedsDynamicStackAllocation(Symbol* symbol) {
          SymbolStackAlignment(symbol) > compiler->target->stack_alignment;
 }
 
+bool SymbolIsAnonymousUnionMemberView(Symbol* symbol) {
+  return symbol != NULL && symbol->anonymous_union_host != NULL;
+}
+
+static int PooledVariableStackOffset(Generator* gen, Symbol* sym) {
+  if (gen == NULL || sym == NULL) {
+    return -1;
+  }
+  for (size_t i = 0; i < gen->variable_pool.length; i++) {
+    PoolEntry* entry = gen->variable_pool.value.p[i];
+    if (entry->value.symbol == sym) {
+      return entry->pooled->data.ivalue;
+    }
+  }
+  return -1;
+}
+
+void AssignAnonymousUnionMemberOffsets(Generator* gen) {
+  if (gen == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < gen->variable_pool.length; i++) {
+    PoolEntry* entry = gen->variable_pool.value.p[i];
+    if (entry == NULL || entry->pooled == NULL) {
+      continue;
+    }
+    Symbol* sym = entry->value.symbol;
+    if (!SymbolIsAnonymousUnionMemberView(sym)) {
+      continue;
+    }
+    int host_offset = PooledVariableStackOffset(gen, sym->anonymous_union_host);
+    if (host_offset < 0) {
+      continue;
+    }
+    entry->pooled->data.ivalue =
+        host_offset + sym->anonymous_union_member_offset;
+  }
+}
+
 IRNode* GeneratorGetVariable(Generator* gen, Symbol* sym) {
   // Record symbols materialized by real target code so discardable C++ inline
   // functions and variables can remain parsed and checked without all being

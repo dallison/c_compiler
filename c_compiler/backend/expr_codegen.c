@@ -21,6 +21,7 @@
 #include "statement_codegen.h"
 #include "type_special_member.h"
 #include "type_template.h"
+#include "ast.h"
 
 static bool TypeUsesDoubleIROperations(TypeRecord* type) {
   return TypeUsesFloat64Representation(type);
@@ -206,22 +207,54 @@ static struct {
     {TypeIsFunction, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsStructOrUnion, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {TypeIsMemberPointerAggregate, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
+    {TypeIsVector, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
+    {TypeIsComplex, IR_OP(loada), IR_OP(loada), IR_OP(storea)},
     {NULL, IR_OP(nop), IR_OP(nop), IR_OP(nop)},
 };
 
+static TypeRecord* ReferenceReferent(TypeRecord* type) {
+  if (type != NULL && TypeIsReference(type) && type->next != NULL) {
+    return type->next;
+  }
+  return type;
+}
+
+static TypeRecord* LoadStoreType(TypeRecord* type) {
+  while (type != NULL && TypeIsReference(type) && type->next != NULL) {
+    type = type->next;
+  }
+  return type;
+}
+
+static int IntegralLoadStoreSize(TypeRecord* type) {
+  if (type == NULL) {
+    return 0;
+  }
+  if (TypeIsBitInt(type)) {
+    return type->size;
+  }
+  for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
+    if (int_type_sizes[i].type_func(type)) {
+      return int_type_sizes[i].size_func();
+    }
+  }
+  if (TypeIsEnum(type)) {
+    if (type->size <= 0) {
+      TypeRecordCalculateSize(type);
+    }
+    return type->size;
+  }
+  return 0;
+}
+
 IROpcode GetLoadOpcodeForType(TypeRecord* type) {
+  type = LoadStoreType(type);
   if (TypeIsPointerOrArray(type) || TypeIsNullPointer(type) ||
       TypeIsMemberPointerScalar(type) || TypeIsFunction(type)) {
     return IR_OP(loada);
   }
   // Get size of integral type from compiler object.
-  int size = TypeIsBitInt(type) ? type->size : 0;
-  for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
-    if (int_type_sizes[i].type_func(type)) {
-      size = int_type_sizes[i].size_func();
-      break;
-    }
-  }
+  int size = IntegralLoadStoreSize(type);
   
   // If integral size, translate to opcode.
   if (size > 0) {
@@ -236,6 +269,19 @@ IROpcode GetLoadOpcodeForType(TypeRecord* type) {
     }
   }
   
+  if (size == 0 && type != NULL && type->size > 0 && TypeIsScalar(type)) {
+    size = type->size;
+    for (size_t i = 0; int_opcodes[i].size != 0; i++) {
+      if (int_opcodes[i].size == size) {
+        if (TypeIsUnsigned(type)) {
+          return int_opcodes[i].unsigned_load;
+        } else {
+          return int_opcodes[i].signed_load;
+        }
+      }
+    }
+  }
+
   // Not integral, call type inference funcs.
   for (size_t i = 0; load_store_ops[i].type_func != NULL; i++) {
     if (load_store_ops[i].type_func(type)) {
@@ -256,8 +302,43 @@ IROpcode GetLoadOpcodeForType(TypeRecord* type) {
   return IR_OP(nop);
 }
 
+static TypeRecord* PointerPointee(TypeRecord* pointer) {
+  if (pointer == NULL) {
+    return NULL;
+  }
+  pointer = ReferenceReferent(pointer);
+  if (TypeIsPointerOrArray(pointer) && pointer->next != NULL) {
+    return pointer->next;
+  }
+  return NULL;
+}
+
+// Expression nodes should carry a type after semantic analysis, but some
+// lowered forms (for example a ternary arm) can still reach codegen with a
+// missing node type while the symbol remains typed.
+static TypeRecord* ObjectTypeForExpression(ASTNode* node) {
+  if (node == NULL) {
+    return NULL;
+  }
+  TypeRecord* type = node->type;
+  if (type != NULL) {
+    return ReferenceReferent(type);
+  }
+  if (node->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)node;
+    if (id->symbol != NULL && id->symbol->type != NULL) {
+      return ReferenceReferent(id->symbol->type);
+    }
+  }
+  if (node->op == AST_OP(contents)) {
+    UnaryASTNode* un = (UnaryASTNode*)node;
+    return PointerPointee(un->sub != NULL ? un->sub->type : NULL);
+  }
+  return NULL;
+}
+
 static IROpcode GetLoadOpcode(ASTNode* node) {
-  return GetLoadOpcodeForType(node->type);
+  return GetLoadOpcodeForType(ObjectTypeForExpression(node));
 }
 
 static int BitSizeToByteSize(int bit_size) {
@@ -289,21 +370,25 @@ static COMPILER_UNUSED IROpcode GetLoadOpcodeFromSize(ASTNode* node, int bit_siz
 }
 
 IROpcode GetStoreOpcodeForType(TypeRecord* type) {
+  type = LoadStoreType(type);
   if (TypeIsPointerOrArray(type) || TypeIsNullPointer(type) ||
       TypeIsMemberPointerScalar(type) || TypeIsFunction(type)) {
     return IR_OP(storea);
   }
   // Get size of integral type from compiler object.
-  int size = TypeIsBitInt(type) ? type->size : 0;
-  for (size_t i = 0; int_type_sizes[i].type_func != NULL; i++) {
-    if (int_type_sizes[i].type_func(type)) {
-      size = int_type_sizes[i].size_func();
-      break;
-    }
-  }
+  int size = IntegralLoadStoreSize(type);
   
   // If integral size, translate to opcode.
   if (size > 0) {
+    for (size_t i = 0; int_opcodes[i].size != 0; i++) {
+      if (int_opcodes[i].size == size) {
+        return int_opcodes[i].store;
+      }
+    }
+  }
+
+  if (size == 0 && type != NULL && type->size > 0 && TypeIsScalar(type)) {
+    size = type->size;
     for (size_t i = 0; int_opcodes[i].size != 0; i++) {
       if (int_opcodes[i].size == size) {
         return int_opcodes[i].store;
@@ -316,12 +401,15 @@ IROpcode GetStoreOpcodeForType(TypeRecord* type) {
       return load_store_ops[i].store;
     }
   }
+  if (compiler->constexpr_codegen_recover) {
+    longjmp(compiler->constexpr_codegen_abort, 1);
+  }
   assert(false);
   return IR_OP(nop);
 }
 
 static IROpcode GetStoreOpcode(ASTNode* node) {
-  return GetStoreOpcodeForType(node->type);
+  return GetStoreOpcodeForType(ObjectTypeForExpression(node));
 }
 
 static IRNode* RemoveUnnecesaryShortening(Generator* gen, IRNode* value,
@@ -352,20 +440,24 @@ static IRNode* AtomicObjectAddress(Generator* gen, IRNode* address,
 }
 
 static IRNode* EmitObjectLoad(Generator* gen, ASTNode* node, IRNode* address) {
-  if (TypeIsInt128(node->type)) {
-    return IRSetType(address, node->type);
+  TypeRecord* object_type = ObjectTypeForExpression(node);
+  if (object_type == NULL) {
+    object_type = node->type;
   }
-  if (TypeUsesLongDoubleRepresentation(node->type)) {
-    return LoadLongDoubleFromAddress(gen, address, node->type);
+  if (TypeIsInt128(object_type)) {
+    return IRSetType(address, object_type);
   }
-  if (!TypeIsAtomic(node->type)) {
+  if (TypeUsesLongDoubleRepresentation(object_type)) {
+    return LoadLongDoubleFromAddress(gen, address, object_type);
+  }
+  if (!TypeIsAtomic(object_type)) {
     return IRSetType(
-        GeneratorEmit(gen, NewIR1(GetLoadOpcode(node), address)), node->type);
+        GeneratorEmit(gen, NewIR1(GetLoadOpcode(node), address)), object_type);
   }
-  address = AtomicObjectAddress(gen, address, node->type);
+  address = AtomicObjectAddress(gen, address, object_type);
   IRNode* load = GeneratorEmit(
       gen, NewIR2(IR_OP(atomic_load), address, AtomicSeqCstOrder(gen)));
-  return IRSetType(load, AtomicValueType(node->type));
+  return IRSetType(load, AtomicValueType(object_type));
 }
 
 static IRNode* EmitObjectStore(Generator* gen, ASTNode* node, IRNode* address,
@@ -2229,16 +2321,17 @@ static IRNode* GenerateVariableReference(Generator* gen,
         (node->base.flags & kASTNeedAddress) != 0) {
       return var_ref;
     }
+    TypeRecord* referent = ObjectTypeForExpression(&node->base);
     IRNode* ref_addr =
         IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), var_ref)),
-                  NewPointerTo(kQualPlain, node->base.type));
+                  NewPointerTo(kQualPlain, referent));
     if ((node->base.flags & kASTNeedAddress) != 0 ||
-        TypeIsArray(node->base.type) || TypeIsVector(node->base.type) ||
-        TypeIsStructOrUnion(node->base.type) ||
-        TypeUsesLongDoubleRepresentation(node->base.type) ||
-        TypeIsInt128(node->base.type) ||
-        TypeIsMemberPointerAggregate(node->base.type) ||
-        TypeIsFunction(node->base.type)) {
+        TypeIsArray(referent) || TypeIsVector(referent) ||
+        TypeIsStructOrUnion(referent) ||
+        TypeUsesLongDoubleRepresentation(referent) ||
+        TypeIsInt128(referent) ||
+        TypeIsMemberPointerAggregate(referent) ||
+        TypeIsFunction(referent)) {
       // The slot holds the object address.  Mark the load as a use so SSA
       // keeps the storea that bound the reference; without this, a later
       // `B& b = d; b.virtual()` reads an uninitialized register.
@@ -6462,16 +6555,30 @@ static IRNode* GenerateBuiltinBitOperation(Generator* gen,
 }
 
 static IRNode* GenerateBuiltinPrefetch(Generator* gen, VectorASTNode* node) {
-  for (size_t i = 0; i < node->children->length; i++) {
-    GenerateExpression(gen, node->children->value.p[i]);
+  IRNode* address = GenerateExpression(gen, node->children->value.p[0]);
+  int64_t rw = 0;
+  int64_t locality = 3;
+  if (node->children->length >= 2) {
+    EvaluateIntegerExpression(node->children->value.p[1], &rw);
   }
-  return IRSetType(GeneratorEmit(gen, NewIR(IR_OP(nop))), node->base.type);
+  if (node->children->length >= 3) {
+    EvaluateIntegerExpression(node->children->value.p[2], &locality);
+  }
+  TypeRecord* int_type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  IRNode* prefetch = NewIR3(
+      IR_OP(prefetch), address, GeneratorGetIntConstant(gen, int_type, rw),
+      GeneratorGetIntConstant(gen, int_type, locality));
+  return IRSetType(GeneratorEmit(gen, prefetch), node->base.type);
 }
 
 static IRNode* GenerateBuiltinStartLifetime(Generator* gen,
                                             VectorASTNode* node) {
   if (!gen->for_constant_evaluation) {
-    return GenerateBuiltinPrefetch(gen, node);
+    if (node->children->length >= 1) {
+      GenerateExpression(gen, node->children->value.p[0]);
+    }
+    return IRSetType(
+        GeneratorGetIntConstant(gen, node->base.type, 0), node->base.type);
   }
   IRNode* address = GenerateExpression(gen, node->children->value.p[0]);
   TypeRecord* target =

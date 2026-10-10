@@ -3286,6 +3286,23 @@ static void ForgetUnindexedPendingTemplateInstantiation(ASTNode* node) {
   }
 }
 
+static bool PendingFunctionDefinitionNeedsSemanticAnalysis(
+    VariableDeclarationASTNode* decl) {
+  if (decl == NULL || decl->symbol == NULL || decl->base.type == NULL) {
+    return true;
+  }
+  // Inline member bodies and implicit instantiations are queued during parsing
+  // long before the reference closure runs.  Semantically analyzing every queued
+  // body here would instantiate unreachable template code (for example protobuf
+  // headers).  Defer until CompileReferencedInlineFunctions proves the
+  // definition is needed.
+  if (FunctionDefinitionIsODRDiscardable(decl->base.type) &&
+      !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {
+    return false;
+  }
+  return true;
+}
+
 static void CompilePendingTemplateInstantiations(Syntax* syntax) {
   Vector* pending = &compiler->pending_template_instantiations;
   compiler->pending_template_instantiation_drain_depth++;
@@ -3297,9 +3314,11 @@ static void CompilePendingTemplateInstantiations(Syntax* syntax) {
     if (node != NULL && node->op == AST_OP(vardecl)) {
       // Function instantiations are queued directly, avoiding a one-element
       // declaration vector and the generic declaration classifier.
+      VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
       VectorAppend(&compiler->declaration_asts, node);
-      CompileFunctionDefinitionNode(
-          syntax, (VariableDeclarationASTNode*)node);
+      if (PendingFunctionDefinitionNeedsSemanticAnalysis(decl)) {
+        CompileFunctionDefinitionNode(syntax, decl);
+      }
     } else {
       CompileDeclarationNode(syntax, node);
     }
@@ -3403,10 +3422,13 @@ static void CompileReferencedInlineFunctions(Syntax* syntax) {
         if (decl == NULL || decl->symbol == NULL ||
             !IsFunctionOrInlineDefinition(decl->symbol) ||
             decl->base.type == NULL ||
-            !FunctionDefinitionIsODRDiscardable(decl->base.type)) {
+            !FunctionDefinitionIsODRDiscardable(decl->base.type) ||
+            !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {
           continue;
         }
-        if (GenerateFunctionDefinition(syntax, decl)) {
+        size_t emitted_before = compiler->emitted_function_asm_names.length;
+        CompileFunctionDefinitionNode(syntax, decl);
+        if (compiler->emitted_function_asm_names.length > emitted_before) {
           emitted = true;
         }
       }

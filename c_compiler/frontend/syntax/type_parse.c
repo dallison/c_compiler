@@ -1778,7 +1778,13 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       type_record = ParseCXXSplicedType(parser);
       type |= type_record->type;
     } else if (CompilerIsCXX() && allow_typedef &&
-               LexMatch(lex, TOK(typename))) {
+               LexLookingAt(lex, TOK(typename))) {
+      LexMatch(lex, TOK(typename));
+      if (LexLookingAt(lex, TOK(decltype))) {
+        type_record = ParseCXXDecltypeSpecifier(parser);
+        type_record = ParseCXXNestedTypeSuffix(parser, type_record);
+        type |= type_record->type;
+      } else {
       LexCheckpoint typename_name_start;
       LexCheckpointSave(lex, &typename_name_start);
       FullyQualifiedIdentifier typename_name;
@@ -2324,6 +2330,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       }
       LexCheckpointDestruct(&typename_name_start);
       FullyQualifiedIdentifierDestruct(&typename_name);
+      }
     } else if (allow_typedef &&
                (SyntaxCurrentTokenStartsQualifiedName(parser->syntax) ||
                 (parser->syntax->parsing_friend_type_specifier &&
@@ -3324,10 +3331,13 @@ static void ResolveOutOfLineDependentReturnType(TypeParser* parser) {
       !StorageIs(member->symbol->storage, STO(typedef))) {
     return;
   }
+  Qualifiers preserved = parser->base_type->qualifiers &
+                         (kQualConst | kQualVolatile | kQualRestrict);
   TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
   resolved->qualifiers |= type->qualifiers;
   TypeRecordDelete(parser->base_type);
   parser->base_type = resolved;
+  parser->base_type->qualifiers |= preserved;
 }
 
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
@@ -4448,7 +4458,7 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
       !LexLookingAt(parser->lex, TOK(ellipsis)) &&
       !LexLookingAt(parser->lex, TOK(this)) &&
       !LexLookingAt(parser->lex, TOK(thread_local)) &&
-      !SyntaxLookingAtCXXAttribute(parser->syntax) &&
+      !SyntaxLookingAtAnyAttribute(parser->syntax) &&
       !SyntaxLookingAtType(parser->syntax);
   LexCheckpointRestore(parser->lex, &checkpoint);
   LexCheckpointDestruct(&checkpoint);
@@ -4468,7 +4478,7 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
   LexCheckpointSave(parser->lex, &file_checkpoint);
   LexNextToken(parser->lex);
   bool parameter_attribute =
-      SyntaxLookingAtCXXAttribute(parser->syntax);
+      SyntaxLookingAtAnyAttribute(parser->syntax);
   bool direct_initializer =
       !LexLookingAt(parser->lex, TOK(rparen)) &&
       !LexLookingAt(parser->lex, TOK(ellipsis)) &&

@@ -22,6 +22,75 @@
 #include "errors.h"
 #include "source.h"
 #include "type_inheritance.h"
+#include "type_internal.h"
+#include "constexpr.h"
+#include "debug.h"
+
+static void ClearStaticAssertAnalysis(ASTNode* node, void* data, int child_id,
+                                      VisitorMode mode);
+
+static ASTNode* StatementPruneConstexprIf(ASTNode* node, void* data,
+                                          ASTNodeTransformAction* action) {
+  (void)action;
+  (void)data;
+  if (node == NULL || node->op != AST_OP(if)) {
+    return node;
+  }
+  IfStatementASTNode* if_node = (IfStatementASTNode*)node;
+  if (!if_node->is_constexpr || if_node->cond == NULL) {
+    return node;
+  }
+  int64_t value = 0;
+  bool folded = false;
+  if (if_node->cond->op == AST_OP(number)) {
+    value = ((ConstantASTNode*)if_node->cond)->value.ivalue;
+    folded = true;
+  } else if (EvaluateIntegerExpression(if_node->cond, &value)) {
+    folded = true;
+  } else {
+    ASTNodeVisit(if_node->cond, ClearStaticAssertAnalysis, 0, NULL);
+    bool saved_trap = DiagnosticErrorTrapBegin();
+    DiagnosticSuppressBegin();
+    ASTNode* analyzed = AnalyzeExpression(if_node->cond);
+    bool trapped = analyzed == NULL || DiagnosticErrorTrapped();
+    DiagnosticSuppressEnd();
+    DiagnosticErrorTrapEnd(saved_trap);
+    if (!trapped) {
+      if_node->cond = analyzed;
+      folded = EvaluateIntegerExpression(if_node->cond, &value);
+    }
+  }
+  if (!folded && if_node->cond != NULL) {
+    ASTNode* is_same_folded = CXXFoldIsSameVExpression(if_node->cond);
+    if (is_same_folded != NULL && is_same_folded != if_node->cond) {
+      if_node->cond = is_same_folded;
+    }
+    if (EvaluateIntegerExpression(if_node->cond, &value)) {
+      folded = true;
+    }
+  }
+  if (!folded) {
+    return node;
+  }
+  ASTNode** taken_slot = value != 0 ? &if_node->if_part : &if_node->else_part;
+  ASTNode* taken = *taken_slot;
+  SourceLocation location = node->location;
+  *taken_slot = NULL;
+  ASTNodeDelete(node);
+  if (taken == NULL) {
+    taken = NewCompoundStatementASTNode(NewVector(), location);
+  } else {
+    taken->parent = NULL;
+  }
+  return ASTNodeVisitAndTransform(taken, StatementPruneConstexprIf, data);
+}
+
+ASTNode* StatementPruneConstexprIfTree(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return NULL;
+  }
+  return ASTNodeVisitAndTransform(stmt, StatementPruneConstexprIf, NULL);
+}
 
 static ASTNode* StaticAssertIdentityClone(ASTNode* node, void* data) {
   (void)data;
@@ -1463,7 +1532,17 @@ static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
 }
 
 static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
-  if (ExpressionIsTemplateDependent(node->expr)) {
+  if (compiler->syntax.current_template_parameter_count > 0) {
+    return;
+  }
+  TypeRecord* func = compiler->current_function;
+  if (func != NULL && TypeIsFunction(func) &&
+      (func->info.function.template_parameter_count > 0 ||
+       func->info.function.template_parameters.length > 0)) {
+    return;
+  }
+  if (ExpressionIsTemplateDependent(node->expr) ||
+      DependentExpressionContainsTemplateParameter(node->expr)) {
     return;
   }
   ASTNode* expr = ASTNodeClone(node->expr, StaticAssertIdentityClone, NULL, NULL);
@@ -1472,8 +1551,11 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
     return;
   }
   ASTNodeVisit(expr, ClearStaticAssertAnalysis, 0, NULL);
+  expr = CXXFoldIsSameVExpression(expr);
   compiler->constant_evaluation_required_depth++;
-  expr = AnalyzeExpression(expr);
+  if ((expr->flags & kASTAnalyzed) == 0) {
+    expr = AnalyzeExpression(expr);
+  }
   compiler->constant_evaluation_required_depth--;
   if (expr == NULL) {
     ASTNodeDelete(expr);
@@ -1498,6 +1580,14 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
   }
   ASTNodeDelete(expr);
   if (value == 0) {
+    if (DependentExpressionContainsTemplateParameter(node->expr) ||
+        ExpressionIsTemplateDependent(node->expr)) {
+      return;
+    }
+    if (func != NULL && TypeIsFunction(func) &&
+        func->info.function.template_origin != NULL) {
+      return;
+    }
     String message;
     StringInit(&message, node->message.value);
     if (node->message_expr == NULL ||
@@ -1711,6 +1801,58 @@ static void AnalyzeAsmStatement(AsmASTNode* node) {
   }
 }
 
+static bool IfConstexprConditionIsConstant(IfStatementASTNode* node) {
+  if (node == NULL || !node->is_constexpr || node->cond == NULL) {
+    return true;
+  }
+  int64_t value = 0;
+  return EvaluateIntegerExpression(node->cond, &value);
+}
+
+static bool CXXGenericLambdaCallOperatorHasConcreteFormals(void) {
+  TypeRecord* func = compiler->current_function;
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL ||
+      func->info.function.template_parameters.length == 0) {
+    return false;
+  }
+  Struct* owner = func->info.function.cxx_member_owner;
+  if (owner->tag_symbol == NULL || !owner->tag_symbol->flags.invented) {
+    return false;
+  }
+  size_t start = 1;
+  for (size_t i = start; i < func->info.function.prototype.length; i++) {
+    Symbol* param = func->info.function.prototype.value.p[i];
+    if (param == NULL || param->type == NULL ||
+        TypeContainsAuto(param->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void ReopenStaleIfConstexprAnalysis(ASTNode* node, void* data, int child_id,
+                                           VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  if (node->op == AST_OP(if)) {
+    IfStatementASTNode* if_node = (IfStatementASTNode*)node;
+    if (if_node->is_constexpr && (node->flags & kASTAnalyzed) != 0 &&
+        !IfConstexprConditionIsConstant(if_node)) {
+      node->flags &= ~kASTAnalyzed;
+      if (if_node->cond != NULL) {
+        ASTNodeVisit(if_node->cond, ClearStaticAssertAnalysis, 0, NULL);
+      }
+    }
+  }
+  if (node->op == AST_OP(for) && (node->flags & kASTAnalyzed) != 0) {
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 static void AnalyzeIfStatement(IfStatementASTNode* node) {
   if (node->is_consteval) {
     node->cond = AnalyzeExpression(node->cond);
@@ -1729,10 +1871,19 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
   }
   if (node->is_constexpr) {
     compiler->constant_evaluation_required_depth++;
+    // Generic-lambda bodies can be analyzed before an `auto` parameter is
+    // deduced at the call site, leaving `if constexpr (std::is_same_v<...>)`
+    // un-folded.  Re-run condition analysis when the statement is visited.
+    if (node->cond != NULL) {
+      ASTNodeVisit(node->cond, ClearStaticAssertAnalysis, 0, NULL);
+    }
   }
   node->cond = AnalyzeExpression(node->cond);
-  if (node->is_constexpr) {
-    compiler->constant_evaluation_required_depth--;
+  if (node->is_constexpr && node->cond != NULL) {
+    node->cond = CXXFoldIsSameVExpression(node->cond);
+    if ((node->cond->flags & kASTAnalyzed) == 0) {
+      node->cond = AnalyzeExpression(node->cond);
+    }
   }
   SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                       kConvertContextualBool);
@@ -1740,15 +1891,22 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
   if (node->is_constexpr) {
     int64_t value;
     if (!EvaluateIntegerExpression(node->cond, &value)) {
-      if (ExpressionIsTemplateDependent(node->cond)) {
+      compiler->constant_evaluation_required_depth--;
+      if (ExpressionIsTemplateDependent(node->cond) ||
+          (node->cond != NULL && node->cond->type != NULL &&
+           (TypeIsUnknown(node->cond->type) ||
+            TypeContainsTemplateParameter(node->cond->type)))) {
+        compiler->constant_evaluation_required_depth--;
         AnalyzeStatement(node->if_part);
         AnalyzeStatement(node->else_part);
         return;
       }
+      compiler->constant_evaluation_required_depth--;
       SemanticError(node->cond,
                     "if constexpr condition is not a constant expression");
       return;
     }
+    compiler->constant_evaluation_required_depth--;
     ASTNode* selected = value != 0 ? node->if_part : node->else_part;
     if (selected == NULL) {
       selected = NewCompoundStatementASTNode(NewVector(), node->base.location);
@@ -2238,10 +2396,39 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
   }
 }
 
+static bool StatementUnconditionallyReturns(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return false;
+  }
+  if (stmt->op == AST_OP(return)) {
+    return true;
+  }
+  if (stmt->op == AST_OP(compound)) {
+    Vector* inner = ((CompoundStatementASTNode*)stmt)->statements;
+    if (inner == NULL || inner->length == 0) {
+      return false;
+    }
+    return StatementUnconditionallyReturns(inner->value.p[inner->length - 1]);
+  }
+  if (stmt->op == AST_OP(if)) {
+    IfStatementASTNode* if_node = (IfStatementASTNode*)stmt;
+    if (if_node->is_constexpr && if_node->else_part == NULL) {
+      return StatementUnconditionallyReturns(if_node->if_part);
+    }
+  }
+  return false;
+}
+
 static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
+  if (CXXGenericLambdaCallOperatorHasConcreteFormals()) {
+    ASTNodeVisit((ASTNode*)node, ReopenStaleIfConstexprAnalysis, 0, NULL);
+  }
   for (size_t i = 0; i < node->statements->length; i++) {
     ASTNode* statement = node->statements->value.p[i];
     AnalyzeStatement(statement);
+    if (StatementUnconditionallyReturns(statement)) {
+      break;
+    }
     if (i == 0 && (node->base.flags & kASTRangeForInitializer) != 0 &&
         statement != NULL && statement->op == AST_OP(decl_list)) {
       DeclarationListASTNode* declarations =
@@ -3442,7 +3629,14 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
   if (node->symbol != NULL) {
     SemanticAttachAnnotationAttributes(&node->symbol->attributes, node->symbol);
   }
+  if (node->initializer != NULL) {
+    node->initializer = CXXFoldIsSameVExpression(node->initializer);
+  }
   node->initializer = AnalyzeExpression(node->initializer);
+  if (node->symbol != NULL && node->symbol->flags.is_constexpr &&
+      node->initializer != NULL && !node->symbol->flags.value_set) {
+    EvaluateScalarConstantForSymbol(node->symbol, node->initializer);
+  }
   bool is_cxx_local_static =
       CompilerIsCXX() && node->symbol != NULL &&
       StorageIs(node->symbol->storage, STO(static));
@@ -3907,8 +4101,16 @@ void CheckUnusedLabels(ASTNode* body) {
 }
 
 void AnalyzeStatement(ASTNode* node) {
-  if (node == NULL || (node->flags & kASTAnalyzed) != 0) {
+  if (node == NULL) {
     return;
+  }
+  if ((node->flags & kASTAnalyzed) != 0) {
+    if (CXXGenericLambdaCallOperatorHasConcreteFormals()) {
+      ReopenStaleIfConstexprAnalysis(node, NULL, 0, kVisitPreChildren);
+    }
+    if ((node->flags & kASTAnalyzed) != 0) {
+      return;
+    }
   }
 
   switch (node->op) {

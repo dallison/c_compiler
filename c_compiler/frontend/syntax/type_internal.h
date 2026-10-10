@@ -16,6 +16,8 @@ struct CXXConstructorInitList;
 
 struct ASTNode* IdentityCloneNode(struct ASTNode* node, void* data);
 
+struct ASTNode* FunctionTemplateCloneSourceBody(struct TypeRecord* func_type);
+
 void TypeRecordToTemplateKeyString(TypeRecord* type, String* result);
 void TypeToString(Type type, String* result);
 void QualifiersToString(Qualifiers quals, String* result);
@@ -47,10 +49,14 @@ bool TemplateArgumentVectorEqual(Vector* left, Vector* right);
 bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
 bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg);
 bool TemplateArgumentPatternVectorEqual(Vector* left, Vector* right);
+Symbol* ClassTemplatePartialSpecializationTagForArguments(Symbol* primary,
+                                                          Vector* template_args);
 Symbol* FindFunctionTemplateInstantiation(Symbol* templ, TypeRecord* func,
                                           Vector* args);
 Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
                                                    const char* asm_name);
+StructMember* FindMemberFunctionTemplateSpecialization(StructMember* first,
+                                                       TypeRecord* type);
 void AppendFunctionTemplateInstantiation(Symbol* templ, Symbol* symbol);
 void FunctionTemplateInstantiationCacheDelete(
     struct FunctionTemplateInstantiationCache* cache);

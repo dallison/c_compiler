@@ -2501,6 +2501,7 @@ static TargetInstruction* LowerIRNodeOperation(PCodeGenerator* pcode,
       checkpoint->observable_checkpoint = true;
       return checkpoint;
     }
+    case IR_OP(prefetch):
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;

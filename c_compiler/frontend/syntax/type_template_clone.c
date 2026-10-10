@@ -2592,7 +2592,7 @@ static size_t ConstructorInitPackElementIndex(TemplateFunctionBodyClone* clone,
   const char* tag = recv->info.struct_info->tag_name != NULL
                         ? recv->info.struct_info->tag_name->value
                         : NULL;
-  size_t index = 0;
+  size_t pack_index = 0;
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base == NULL || base->is_virtual || base->type == NULL ||
@@ -2600,18 +2600,24 @@ static size_t ConstructorInitPackElementIndex(TemplateFunctionBodyClone* clone,
         base->type->info.struct_info == NULL) {
       continue;
     }
-    if (TypeEqual(base->type, recv)) {
-      return index;
+    if (TypeEqual(base->type, recv) ||
+        base->type->info.struct_info == recv->info.struct_info) {
+      return pack_index;
     }
     if (tag != NULL && base->type->info.struct_info->tag_name != NULL &&
         StringEqual(base->type->info.struct_info->tag_name, tag)) {
-      return index;
+      return pack_index;
     }
     String* base_primary = ClonedCallPrimaryTemplateName(base->type);
     if (primary != NULL && base_primary != NULL &&
         StringEqual(base_primary, primary->value)) {
-      index++;
+      if (TypeEqual(base->type, recv)) {
+        return pack_index;
+      }
+      pack_index++;
+      continue;
     }
+    pack_index++;
   }
   return 0;
 }
@@ -4094,6 +4100,43 @@ static ASTNode* NewClonedDependentConstructorCall(TypeRecord* record,
   return NewVectorASTNode(AST_OP(call), NULL, location, member_access, actuals);
 }
 
+static StructMember* FindStaticNonTemplateCopyConstruct(Struct* str) {
+  StructMember* head = FindStructMemberByName(str, "CopyConstruct");
+  for (StructMember* member = head; member != NULL;
+       member = member->overload_next) {
+    if (!member->is_static || member->symbol == NULL ||
+        member->symbol->flags.is_template || member->symbol->type == NULL ||
+        !TypeIsFunction(member->symbol->type)) {
+      continue;
+    }
+    if (member->symbol->type->info.function.prototype.length == 2) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
+static ASTNode* NewClonedMessageLiteArenaCopyCall(TypeRecord* type,
+                                                  Vector* actuals,
+                                                  SourceLocation location) {
+  if (type == NULL || type->info.struct_info == NULL ||
+      type->info.struct_info->tag_name == NULL ||
+      type->info.struct_info->tag_name->value == NULL ||
+      strcmp(type->info.struct_info->tag_name->value, "MessageLite") != 0 ||
+      actuals == NULL || actuals->length != 2) {
+    return NULL;
+  }
+  StructMember* copy =
+      FindStaticNonTemplateCopyConstruct(type->info.struct_info);
+  if (copy == NULL || copy->symbol == NULL ||
+      copy->symbol->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* return_type = copy->symbol->type->next;
+  ASTNode* callee = NewStructMemberASTNode(copy, location);
+  return NewVectorASTNode(AST_OP(call), return_type, location, callee, actuals);
+}
+
 /* `*receiver = (T){}` copy-assigns into storage that placement new has not
  * constructed.  That is a byte copy when assignment is trivial, and ill-formed
  * when it is deleted (`std::atomic` deletes `RefcountedRep::operator=`).
@@ -4317,6 +4360,11 @@ static ASTNode* RewriteClonedDependentNewInitializer(
     VectorDelete(actuals);
     return NewClonedAggregateValueInitialization(clone, node->type, receiver,
                                                 node->location);
+  }
+  ASTNode* message_lite_copy =
+      NewClonedMessageLiteArenaCopyCall(node->type, actuals, node->location);
+  if (message_lite_copy != NULL) {
+    return message_lite_copy;
   }
   return NewClonedDependentConstructorCall(node->type, receiver, actuals,
                                            node->location);
@@ -6590,27 +6638,57 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
       id->template_arguments = concrete_args;
+      if (id->symbol != NULL && StringEqual(&id->symbol->name, "is_same_v") &&
+          !TemplateArgumentVectorContainsTemplateParameter(concrete_args)) {
+        node->flags &= ~kASTAnalyzed;
+        ASTNode* is_same_folded = CXXFoldIsSameVExpression(node);
+        if (is_same_folded != NULL && is_same_folded != node) {
+          return is_same_folded;
+        }
+      }
       if (id->symbol != NULL && id->symbol->variable_template != NULL &&
           !TemplateArgumentVectorContainsTemplateParameter(concrete_args) &&
           (node->flags & kASTNeedAddress) == 0 &&
           (node->parent == NULL || node->parent->op != AST_OP(address))) {
-        TypeRecord* concrete_type = TypeInstantiateVariableTemplateType(
+        TypeRecord* concrete_type = TypeInstantiateVariableTemplateDeducedType(
             clone->parser->syntax, id->symbol, concrete_args);
         int64_t value = 0;
         if (concrete_type != NULL && TypeIsIntegral(concrete_type) &&
             TypeInstantiateVariableTemplateConstant(
                 clone->parser->syntax, id->symbol, concrete_args, &value)) {
-          return NewIntConstantASTNode(value, concrete_type, node->location);
+          ASTNode* folded =
+              NewIntConstantASTNode(value, concrete_type, node->location);
+          TypeRecordDelete(concrete_type);
+          return folded;
         }
         double floating_value = 0;
         if (concrete_type != NULL && TypeIsFloatingPoint(concrete_type) &&
             TypeInstantiateVariableTemplateFloatingConstant(
                 clone->parser->syntax, id->symbol, concrete_args,
                 &floating_value)) {
-          return NewRealConstantASTNode(floating_value, concrete_type,
-                                        node->location);
+          ASTNode* folded = NewRealConstantASTNode(floating_value, concrete_type,
+                                                   node->location);
+          TypeRecordDelete(concrete_type);
+          return folded;
         }
-        TypeRecordDelete(concrete_type);
+        if (concrete_type != NULL && TypeIsMemberPointer(concrete_type)) {
+          ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
+              clone->parser->syntax, id->symbol, concrete_args);
+          TypeRecordDelete(concrete_type);
+          if (initializer != NULL) {
+            if (initializer->op == AST_OP(expr_init)) {
+              initializer =
+                  ((ExpressionInitializerASTNode*)initializer)->expr;
+            }
+            initializer = AnalyzeExpression(initializer);
+            if (initializer != NULL && initializer->type != NULL) {
+              initializer->value_category = kValueCategoryLvalue;
+              return initializer;
+            }
+          }
+        } else {
+          TypeRecordDelete(concrete_type);
+        }
       }
       if (id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
           id->symbol->type->info.function.template_origin != NULL) {
@@ -6909,7 +6987,20 @@ static ASTNode* CloneIdentifierInTemplateBody(
   if (rewritten != NULL) {
     return rewritten;
   }
-  return RemapMemberFunctionOnSubstitutedOwner(clone, id, node);
+  rewritten = RemapMemberFunctionOnSubstitutedOwner(clone, id, node);
+  if (rewritten != NULL) {
+    return rewritten;
+  }
+  if (id->symbol != NULL && StringEqual(&id->symbol->name, "is_same_v") &&
+      id->template_arguments != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
+    node->flags &= ~kASTAnalyzed;
+    ASTNode* folded = CXXFoldIsSameVExpression(node);
+    if (folded != NULL && folded != node) {
+      return folded;
+    }
+  }
+  return NULL;
 }
 
 /* A named function template that is not being instantiated here (a callee
@@ -8111,72 +8202,54 @@ static ASTNode* NormalizeClonedPointerDifferenceScale(
   return scale;
 }
 
-/* Post-clone pass: prune the discarded branch of an `if constexpr` whose
- * condition has already been folded to a constant during the body clone (a
- * `requires`-expression condition is evaluated and replaced with 0/1 by
- * CloneTemplateFunctionBodyNode).  Statement-level analysis of `if constexpr`
- * (AnalyzeIfStatement) would eventually drop the not-taken branch, but the
- * intervening re-analysis passes below (ReanalyzeClonedResolvedCall, etc.)
- * would first walk that dead branch and re-resolve its construction calls --
- * e.g. `owning_view(v)` in the false branch of `views::all`'s
- * `if constexpr (requires { ref_view(v); }) ... else ...`.  Re-analyzing a
- * discarded branch can raise spurious errors (its constraints legitimately
- * fail for this argument), so eliminate it here, before those passes run. */
-static ASTNode* PruneClonedConstexprIf(ASTNode* node, void* data,
-                                       ASTNodeTransformAction* action) {
-  (void)action;
-  if (node == NULL || node->op != AST_OP(if)) {
-    return node;
-  }
-  IfStatementASTNode* if_node = (IfStatementASTNode*)node;
-  if (!if_node->is_constexpr || if_node->cond == NULL) {
-    return node;
-  }
-  int64_t value = 0;
-  bool folded = false;
-  if (if_node->cond->op == AST_OP(number)) {
-    value = ((ConstantASTNode*)if_node->cond)->value.ivalue;
-    folded = true;
-  } else {
-    if (EvaluateIntegerExpression(if_node->cond, &value)) {
-      folded = true;
-    } else {
-      ASTNodeVisit(if_node->cond, ClearAnalyzedFlagVisitor, 0, NULL);
-      bool saved_trap = DiagnosticErrorTrapBegin();
-      DiagnosticSuppressBegin();
-      ASTNode* analyzed = AnalyzeExpression(if_node->cond);
-      bool trapped = analyzed == NULL || DiagnosticErrorTrapped();
-      DiagnosticSuppressEnd();
-      DiagnosticErrorTrapEnd(saved_trap);
-      if (!trapped) {
-        if_node->cond = analyzed;
-        folded = EvaluateIntegerExpression(if_node->cond, &value);
-      }
-    }
-  }
-  if (!folded) {
-    return node;
-  }
-  ASTNode** taken_slot = value != 0 ? &if_node->if_part : &if_node->else_part;
-  ASTNode* taken = *taken_slot;
-  SourceLocation location = node->location;
-  // Detach the surviving branch so deleting the `if` node does not free it.
-  *taken_slot = NULL;
-  ASTNodeDelete(node);
-  if (taken == NULL) {
-    taken = NewCompoundStatementASTNode(NewVector(), location);
-  } else {
-    taken->parent = NULL;
-  }
-  // Recurse so nested `if constexpr` statements inside the surviving branch are
-  // pruned too (the driver does not descend into a replaced node).
-  return ASTNodeVisitAndTransform(taken, PruneClonedConstexprIf, data);
-}
-
 static bool IsConstexprIfNode(ASTNode* node, void* data) {
   (void)data;
   return node != NULL && node->op == AST_OP(if) &&
          ((IfStatementASTNode*)node)->is_constexpr;
+}
+
+static bool StatementUnconditionallyReturns(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return false;
+  }
+  if (stmt->op == AST_OP(return)) {
+    return true;
+  }
+  if (stmt->op == AST_OP(compound)) {
+    Vector* inner = ((CompoundStatementASTNode*)stmt)->statements;
+    if (inner == NULL || inner->length == 0) {
+      return false;
+    }
+    return StatementUnconditionallyReturns(inner->value.p[inner->length - 1]);
+  }
+  return false;
+}
+
+// After `if constexpr` is folded to a branch that returns, later statements in
+// the same compound are not instantiated ([temp.inst] discarded statements).
+static ASTNode* PruneStatementsAfterUnconditionalReturn(
+    ASTNode* node, void* data, ASTNodeTransformAction* action) {
+  (void)data;
+  (void)action;
+  if (node == NULL || node->op != AST_OP(compound)) {
+    return node;
+  }
+  Vector* stmts = ((CompoundStatementASTNode*)node)->statements;
+  if (stmts == NULL) {
+    return node;
+  }
+  for (size_t i = 0; i < stmts->length; i++) {
+    if (!StatementUnconditionallyReturns(stmts->value.p[i])) {
+      continue;
+    }
+    for (size_t j = stmts->length; j-- > i + 1;) {
+      ASTNode* dead = stmts->value.p[j];
+      VectorDeleteElement(stmts, j);
+      ASTNodeDelete(dead);
+    }
+    break;
+  }
+  return node;
 }
 
 static ASTNode* PruneConstexprIfBeforeBodyClone(
@@ -8196,21 +8269,30 @@ static ASTNode* PruneConstexprIfBeforeBodyClone(
     return node;
   }
   int64_t value = 0;
-  if (!EvaluateIntegerExpression(condition, &value)) {
-    ASTNodeVisit(condition, ClearAnalyzedFlagVisitor, 0, NULL);
-    bool saved_trap = DiagnosticErrorTrapBegin();
-    DiagnosticSuppressBegin();
-    ASTNode* analyzed = AnalyzeExpression(condition);
-    bool trapped = analyzed == NULL || DiagnosticErrorTrapped();
-    DiagnosticSuppressEnd();
-    DiagnosticErrorTrapEnd(saved_trap);
-    if (trapped || !EvaluateIntegerExpression(analyzed, &value)) {
-      ASTNodeDelete(analyzed != NULL ? analyzed : condition);
-      return node;
-    }
-    ASTNodeDelete(analyzed);
-  } else {
+  if (EvaluateIntegerExpression(condition, &value)) {
     ASTNodeDelete(condition);
+  } else {
+    ASTNode* is_same_folded = CXXFoldIsSameVExpression(condition);
+    if (is_same_folded != NULL && is_same_folded != condition) {
+      ASTNodeDelete(condition);
+      condition = is_same_folded;
+    }
+    if (EvaluateIntegerExpression(condition, &value)) {
+      ASTNodeDelete(condition);
+    } else {
+      ASTNodeVisit(condition, ClearAnalyzedFlagVisitor, 0, NULL);
+      bool saved_trap = DiagnosticErrorTrapBegin();
+      DiagnosticSuppressBegin();
+      ASTNode* analyzed = AnalyzeExpression(condition);
+      bool trapped = analyzed == NULL || DiagnosticErrorTrapped();
+      DiagnosticSuppressEnd();
+      DiagnosticErrorTrapEnd(saved_trap);
+      if (trapped || !EvaluateIntegerExpression(analyzed, &value)) {
+        ASTNodeDelete(analyzed != NULL ? analyzed : condition);
+        return node;
+      }
+      ASTNodeDelete(analyzed);
+    }
   }
   ASTNode** taken_slot = value != 0 ? &if_node->if_part : &if_node->else_part;
   ASTNode* taken = *taken_slot;
@@ -9496,7 +9578,8 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
                                           TypeRecord* from,
                                           TypeRecord* to,
                                           Vector* args) {
-  if (from == NULL || to == NULL || from->info.function.body == NULL) {
+  ASTNode* from_body = FunctionTemplateCloneSourceBody(from);
+  if (from == NULL || to == NULL || from_body == NULL) {
     return NULL;
   }
   to->info.function.body_had_parse_errors =
@@ -9684,21 +9767,22 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   if (!from->info.function.has_constexpr_if &&
       !from->info.function.constexpr_if_checked) {
     from->info.function.has_constexpr_if =
-        ASTNodeAny(from->info.function.body, IsConstexprIfNode, NULL);
+        ASTNodeAny(from_body, IsConstexprIfNode, NULL);
     from->info.function.constexpr_if_checked = true;
   }
   ASTNode* body;
   if (from->info.function.has_constexpr_if) {
     ASTNode* clone_source =
-        ASTNodeClone(from->info.function.body, IdentityCloneNode, NULL, NULL);
+        ASTNodeClone(from_body, IdentityCloneNode, NULL, NULL);
     clone_source = ASTNodeVisitAndTransform(
         clone_source, PruneConstexprIfBeforeBodyClone, &clone);
+    clone_source = ASTNodeVisitAndTransform(
+        clone_source, PruneStatementsAfterUnconditionalReturn, NULL);
     body = ASTNodeClone(clone_source, CloneTemplateFunctionBodyNode,
                         &clone, NULL);
     ASTNodeDelete(clone_source);
   } else {
-    body = ASTNodeClone(from->info.function.body, CloneTemplateFunctionBodyNode,
-                        &clone, NULL);
+    body = ASTNodeClone(from_body, CloneTemplateFunctionBodyNode, &clone, NULL);
   }
   ASTNodeVisit(body, RebindClonedLocalIdentifierVisitor, 0, &clone);
   ASTNodeVisit(body, RebindClonedConcreteMemberAccessVisitor, 0, &clone);
@@ -9706,7 +9790,9 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   ASTNodeVisit(body, RebindClonedDesignatorMemberVisitor, 0, NULL);
   // Drop discarded `if constexpr` branches (whose condition the clone above has
   // already folded to a constant) before the re-analysis passes can walk them.
-  body = ASTNodeVisitAndTransform(body, PruneClonedConstexprIf, NULL);
+  body = StatementPruneConstexprIfTree(body);
+  body = ASTNodeVisitAndTransform(body, PruneStatementsAfterUnconditionalReturn,
+                                  NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,
                                   NULL);
   ASTNodeVisit(body, ReplaceSingleElementPackIdentifierVisitor, 0, &clone);
@@ -9882,8 +9968,12 @@ static void PrepareConstructorPreambleClone(TemplateFunctionBodyClone* clone,
  * then assigns that pattern to element 0.  Expand it into one actual per
  * concrete element before that lowering. */
 static void ExpandConstructorInitializerActualPacks(
-    TemplateFunctionBodyClone* clone, Vector* actuals) {
+    TemplateFunctionBodyClone* clone, Vector* actuals,
+    bool mem_initializer_is_pack_expansion) {
   if (clone == NULL || actuals == NULL) {
+    return;
+  }
+  if (mem_initializer_is_pack_expansion) {
     return;
   }
   Vector* expanded = NewVector();
@@ -9953,7 +10043,8 @@ void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
     CXXDeferredConstructorInitializer* init =
         initializers->deferred_initializers.value.p[i];
     if (init != NULL) {
-      ExpandConstructorInitializerActualPacks(&preamble_clone, init->actuals);
+      ExpandConstructorInitializerActualPacks(&preamble_clone, init->actuals,
+                                              init->is_pack_expansion);
     }
   }
   MapDestruct(&preamble_clone.symbol_map);
@@ -10392,7 +10483,8 @@ static Symbol* MemberTemplateDefinitionWithBody(Symbol* templ) {
         candidate->type->info.function.template_parameter_count !=
             templ->type->info.function.template_parameter_count ||
         candidate->type->info.function.prototype.length !=
-            templ->type->info.function.prototype.length) {
+            templ->type->info.function.prototype.length ||
+        !TypeEqual(candidate->type, templ->type)) {
       continue;
     }
     Symbol* candidate_definition = FunctionDefinitionWithBody(candidate);
@@ -10458,7 +10550,17 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
   }
   if (symbol->flags.is_template ||
       symbol->type->info.function.cxx_member_owner == NULL) {
-    return;
+    // An inline friend deferred during a signature probe has no member
+    // owner. Its pattern is `func_defn` and the class arguments are already
+    // recorded, so the body clone below still applies.
+    bool deferred_friend =
+        !symbol->flags.is_template &&
+        symbol->type->info.function.body == NULL &&
+        symbol->value.func_defn != NULL &&
+        symbol->type->template_arguments != NULL;
+    if (!deferred_friend) {
+      return;
+    }
   }
   if (symbol->type->info.function.is_defaulted &&
       (symbol->type->info.function.is_implicitly_declared ||

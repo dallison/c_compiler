@@ -10,7 +10,7 @@
 #define mman_h
 
 #include <stddef.h>
-#include <stddef.h>
+#include <sys/types.h>
 
 #ifndef __OFF_T
 #define __OFF_T
@@ -54,6 +54,9 @@ extern int    mlock(const void *addr, size_t len);
 extern int    munlock(const void *addr, size_t len);
 
 extern int    mincore(void*  start, size_t  length, unsigned char*  vec);
+
+extern int    shm_open(const char* name, int oflag, mode_t mode);
+extern int    shm_unlink(const char* name);
 
 #ifdef __cplusplus
 }

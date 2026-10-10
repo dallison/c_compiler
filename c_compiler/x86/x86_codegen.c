@@ -159,6 +159,11 @@ const char* X86OpcodeName(int op) {
     OPCODE(movxc)
     OPCODE(tp)
     OPCODE(nop)
+    OPCODE(prefetchnta)
+    OPCODE(prefetcht0)
+    OPCODE(prefetcht1)
+    OPCODE(prefetcht2)
+    OPCODE(prefetchw)
     OPCODE(movslq)
     OPCODE(sete)
     OPCODE(setne)
@@ -3450,6 +3455,33 @@ static TargetInstruction* LowerVectorOperation(X86Generator* rv,
   return SetLoweredNode(node, store);
 }
 
+static TargetInstruction* LowerPrefetch(X86Generator* rv, IRNode* node) {
+  assert(node->inputs.length == 3);
+  TargetInstruction* ptr = Materialize(rv, node->inputs.value.p[0]);
+  int64_t rw = IRIntConstValue(node->inputs.value.p[1]);
+  int64_t locality = IRIntConstValue(node->inputs.value.p[2]);
+  X86Opcode opcode;
+  if (rw != 0) {
+    opcode = X86_OP(prefetchw);
+  } else {
+    switch (locality) {
+      case 0:
+        opcode = X86_OP(prefetchnta);
+        break;
+      case 1:
+        opcode = X86_OP(prefetcht2);
+        break;
+      case 2:
+        opcode = X86_OP(prefetcht1);
+        break;
+      default:
+        opcode = X86_OP(prefetcht0);
+        break;
+    }
+  }
+  return SetLoweredNode(node, Emit(rv, NewInstruction1(opcode, ptr)));
+}
+
 static TargetInstruction* LowerAsm(X86Generator* rv, IRNode* node) {
   // The first argument is a literal containing the assembly language.
   IRConstant* id_node = node->inputs.value.p[0];
@@ -5285,6 +5317,8 @@ static TargetInstruction* LowerIRNode(X86Generator* rv, Generator* gen,
       checkpoint->observable_checkpoint = true;
       return checkpoint;
     }
+    case IR_OP(prefetch):
+      return LowerPrefetch(rv, node);
     case IR_OP(nop):
     case last_ir_opcode:
       return NULL;
@@ -5998,6 +6032,9 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
   if (TypeIsVLA(entry->pooled->type)) {
     return;
   }
+  if (SymbolIsAnonymousUnionMemberView(entry->value.symbol)) {
+    return;
+  }
   switch (entry->pooled->opcode) {
     case IR_OP(argument):
     case IR_OP(localvar):
@@ -6328,8 +6365,8 @@ static void FinalizeDebugStackLocations(X86Generator* rv, Vector* vars) {
   }
 }
 
-static void AssignRegisterVars(X86Generator* rv, Vector* vars, Vector* args,
-                               TypeRecord* func) {
+static void AssignRegisterVars(X86Generator* rv, Generator* gen, Vector* vars,
+                               Vector* args, TypeRecord* func) {
   // Variables are allocated below the frame, arguments are above or in
   // registers.
   // If the argument is in a register, the top bit of the data.ivalue is
@@ -6376,6 +6413,7 @@ static void AssignRegisterVars(X86Generator* rv, Vector* vars, Vector* args,
     PoolEntry* entry = vars->value.p[i];
     AssignRegisterOrOffset(rv, entry, args, func, &var_offset);
   }
+  AssignAnonymousUnionMemberOffsets(gen);
   memset(rv->incoming_fp_argument_registers, 0,
          sizeof(rv->incoming_fp_argument_registers));
   
@@ -6413,7 +6451,7 @@ static void LowerVariables(X86Generator* rv, Generator* gen) {
     }
   }
 
-  AssignRegisterVars(rv, &local_vars, &gen->func->info.function.prototype,
+  AssignRegisterVars(rv, gen, &local_vars, &gen->func->info.function.prototype,
                      gen->func);
   VectorDestruct(&local_vars);
 }

@@ -180,6 +180,57 @@ constexpr const tuple_element_t<I, tuple<Types...>>&& get(
   return static_cast<const Element&&>(get<I>(value));
 }
 
+template <class T, class... Types>
+struct __tuple_type_index;
+
+template <class T>
+struct __tuple_type_index<T, tuple<>> {
+  static constexpr size_t value = static_cast<size_t>(-1);
+};
+
+template <class T, class Head, class... Rest>
+struct __tuple_type_index<T, tuple<Head, Rest...>> {
+  static constexpr size_t value =
+      is_same_v<T, Head> ? 0 : (__tuple_type_index<T, tuple<Rest...>>::value ==
+                                        static_cast<size_t>(-1)
+                                    ? static_cast<size_t>(-1)
+                                    : 1 + __tuple_type_index<T, tuple<Rest...>>::value);
+};
+
+template <class T, class... Types>
+constexpr T& get(tuple<Types...>& value) noexcept {
+  static_assert(__tuple_type_index<T, tuple<Types...>>::value !=
+                    static_cast<size_t>(-1),
+                "type not found in tuple");
+  return get<__tuple_type_index<T, tuple<Types...>>::value>(value);
+}
+
+template <class T, class... Types>
+constexpr const T& get(const tuple<Types...>& value) noexcept {
+  static_assert(__tuple_type_index<T, tuple<Types...>>::value !=
+                    static_cast<size_t>(-1),
+                "type not found in tuple");
+  return get<__tuple_type_index<T, tuple<Types...>>::value>(value);
+}
+
+template <class T, class... Types>
+constexpr T&& get(tuple<Types...>&& value) noexcept {
+  static_assert(__tuple_type_index<T, tuple<Types...>>::value !=
+                    static_cast<size_t>(-1),
+                "type not found in tuple");
+  return get<__tuple_type_index<T, tuple<Types...>>::value>(
+      static_cast<tuple<Types...>&&>(value));
+}
+
+template <class T, class... Types>
+constexpr const T&& get(const tuple<Types...>&& value) noexcept {
+  static_assert(__tuple_type_index<T, tuple<Types...>>::value !=
+                    static_cast<size_t>(-1),
+                "type not found in tuple");
+  return get<__tuple_type_index<T, tuple<Types...>>::value>(
+      static_cast<const tuple<Types...>&&>(value));
+}
+
 template <size_t I, class T1, class T2>
 struct __pair_getter;
 

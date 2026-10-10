@@ -141,6 +141,17 @@ void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func) {
     return;
   }
   Symbol* symbol = func->info.function.symbol;
+  // A generic lambda's primary `operator()` body is shared by every deduced
+  // specialization.  Analyzing it here (for example while type-checking a call
+  // before the body is cloned) can lower `std::is_same_v` to a non-constant
+  // lvalue load and break `if constexpr` in the cloned body.
+  if (symbol != NULL && func->info.function.cxx_member_owner != NULL &&
+      func->info.function.cxx_member_owner->tag_symbol != NULL &&
+      func->info.function.cxx_member_owner->tag_symbol->flags.invented &&
+      StringEqual(&symbol->name, "operator()") &&
+      func->info.function.template_parameters.length > 0) {
+    return;
+  }
   Symbol* definition = symbol != NULL ? symbol->value.func_defn : NULL;
   TypeRecord* defn = definition != NULL ? definition->type : NULL;
   if (func->info.function.body == NULL && defn != NULL && defn != func &&
@@ -363,6 +374,1226 @@ static ASTNode* FoldConstantArgument(ASTNode* actual) {
   return FoldConstantIdentifier((IdentifierASTNode*)actual);
 }
 
+static TypeRecord* CXXTypeFromLambdaInventedParameter(TypeRecord* type) {
+  if (type == NULL || !TypeContainsTemplateParameter(type)) {
+    return NULL;
+  }
+  TypeRecord* func = compiler->current_function;
+  if (func == NULL || !TypeIsFunction(func)) {
+    return NULL;
+  }
+  int idx = type->template_parameter_index;
+  if (idx < 0) {
+    for (TypeRecord* cur = type; cur != NULL; cur = cur->next) {
+      if (cur->template_parameter_index >= 0) {
+        idx = cur->template_parameter_index;
+        break;
+      }
+    }
+  }
+  if (idx < 0) {
+    return NULL;
+  }
+  int local = idx - func->info.function.template_parameter_base;
+  if (local < 0) {
+    return NULL;
+  }
+  size_t start = func->info.function.cxx_member_owner != NULL ? 1 : 0;
+  size_t formal_index = start + (size_t)local;
+  if (formal_index >= func->info.function.prototype.length) {
+    return NULL;
+  }
+  Symbol* formal = func->info.function.prototype.value.p[formal_index];
+  if (formal == NULL || formal->type == NULL ||
+      TypeContainsAuto(formal->type) ||
+      TypeContainsTemplateParameter(formal->type)) {
+    return NULL;
+  }
+  return formal->type;
+}
+
+static Vector* CXXLambdaInventedTemplateArgumentValues(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.template_parameters.length == 0) {
+    return NULL;
+  }
+  size_t start = func->info.function.cxx_member_owner != NULL ? 1 : 0;
+  size_t param_count = func->info.function.prototype.length - start;
+  if (param_count != func->info.function.template_parameters.length) {
+    return NULL;
+  }
+  Vector* args = NewVector();
+  for (size_t i = start; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal == NULL || formal->type == NULL ||
+        TypeContainsAuto(formal->type) ||
+        TypeContainsTemplateParameter(formal->type)) {
+      VectorDeleteWithContents(
+          args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      return NULL;
+    }
+    TemplateArgument* arg = TemplateArgumentAlloc();
+    arg->kind = kTemplateParameterType;
+    arg->type = TypeRecordCopy(formal->type);
+    arg->location = formal->location;
+    VectorAppend(args, arg);
+  }
+  return args;
+}
+
+static TypeRecord* CXXResolveTypeForIsSameVArgument(TemplateArgument* arg) {
+  if (arg == NULL || arg->type == NULL || TypeIsUnknown(arg->type)) {
+    return NULL;
+  }
+  TypeRecord* type = arg->type;
+  if (!TypeContainsTemplateParameter(type)) {
+    return type;
+  }
+  TypeRecord* from_formal = CXXTypeFromLambdaInventedParameter(type);
+  if (from_formal != NULL && !TypeContainsTemplateParameter(from_formal)) {
+    return from_formal;
+  }
+  TypeRecord* func = compiler->current_function;
+  Vector* lambda_args = CXXLambdaInventedTemplateArgumentValues(func);
+  if (lambda_args != NULL) {
+    TypeRecord* substituted = TypeSubstituteTemplateTypeOrFail(
+        &compiler->syntax, TypeRecordCopy(type), lambda_args);
+    VectorDeleteWithContents(
+        lambda_args, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    if (substituted != NULL && !TypeIsUnknown(substituted) &&
+        !TypeContainsTemplateParameter(substituted)) {
+      return substituted;
+    }
+    TypeRecordDelete(substituted);
+  }
+  if (func == NULL || func->template_arguments == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(func->template_arguments)) {
+    return type;
+  }
+  TypeRecord* substituted = TypeSubstituteTemplateTypeOrFail(
+      &compiler->syntax, TypeRecordCopy(type), func->template_arguments);
+  if (substituted == NULL || TypeIsUnknown(substituted) ||
+      TypeContainsTemplateParameter(substituted)) {
+    TypeRecordDelete(substituted);
+    return type;
+  }
+  return substituted;
+}
+
+static Symbol* CXXStructTemplateOrigin(Struct* str);
+static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
+
+static ASTNode* CXXNewBoolConstantReplacing(ASTNode* node, int64_t same) {
+  TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+  ASTNode* const_node = NewIntConstantASTNode(same, bool_type, node->location);
+  TypeRecordDelete(bool_type);
+  if (node->parent != NULL) {
+    ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
+  }
+  const_node->flags |= kASTAnalyzed;
+  return const_node;
+}
+
+static ASTNode* CXXNewIsSameBoolConstant(IdentifierASTNode* node, int64_t same) {
+  return CXXNewBoolConstantReplacing(&node->base, same);
+}
+
+static bool CXXIsSameTemplateParameterType(TypeRecord* left, TypeRecord* right) {
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  if (left->template_parameter_index >= 0 &&
+      left->template_parameter_index == right->template_parameter_index &&
+      left->template_parameter_name != NULL &&
+      right->template_parameter_name != NULL &&
+      StringEqual(left->template_parameter_name, right->template_parameter_name)) {
+    return true;
+  }
+  return TypeEqualIgnoringQualifiers(left, right);
+}
+
+static int64_t CXXFoldIsSameSpecializationToBool(TypeRecord* materialized) {
+  if (materialized == NULL || materialized->template_arguments == NULL ||
+      materialized->template_arguments->length != 2) {
+    return -1;
+  }
+  TemplateArgument* left_arg = materialized->template_arguments->value.p[0];
+  TemplateArgument* right_arg = materialized->template_arguments->value.p[1];
+  if (left_arg == NULL || right_arg == NULL || left_arg->type == NULL ||
+      right_arg->type == NULL) {
+    return -1;
+  }
+  if (CXXIsSameTemplateParameterType(left_arg->type, right_arg->type)) {
+    return 1;
+  }
+  TypeRecord* left_type = CXXResolveTypeForIsSameVArgument(left_arg);
+  TypeRecord* right_type = CXXResolveTypeForIsSameVArgument(right_arg);
+  bool copied_left = left_type != NULL && left_type != left_arg->type;
+  bool copied_right = right_type != NULL && right_type != right_arg->type;
+  int64_t result = -1;
+  if (left_type != NULL && right_type != NULL &&
+      !TypeContainsTemplateParameter(left_type) &&
+      !TypeContainsTemplateParameter(right_type)) {
+    Qualifiers cv_mask =
+        kQualConst | kQualVolatile | kQualRestrict | kQualAtomic;
+    result = TypeEqualIgnoringTopLevelQualifierMask(left_type, right_type,
+                                                      cv_mask)
+                   ? 1
+                   : 0;
+  }
+  if (copied_left) {
+    TypeRecordDelete(left_type);
+  }
+  if (copied_right) {
+    TypeRecordDelete(right_type);
+  }
+  return result;
+}
+
+static bool CXXTypeIsStdArithmeticType(TypeRecord* type) {
+  return type != NULL && !TypeContainsTemplateParameter(type) &&
+         (TypeIsIntegral(type) || TypeIsFloatingPoint(type));
+}
+
+static int64_t CXXFoldIsBaseOfSpecializationToBool(TypeRecord* materialized) {
+  if (materialized == NULL || materialized->template_arguments == NULL ||
+      materialized->template_arguments->length != 2) {
+    return -1;
+  }
+  TemplateArgument* base_arg = materialized->template_arguments->value.p[0];
+  TemplateArgument* derived_arg = materialized->template_arguments->value.p[1];
+  if (base_arg == NULL || derived_arg == NULL || base_arg->type == NULL ||
+      derived_arg->type == NULL) {
+    return -1;
+  }
+  TypeRecord* base_type = CXXResolveTypeForIsSameVArgument(base_arg);
+  TypeRecord* derived_type = CXXResolveTypeForIsSameVArgument(derived_arg);
+  bool copied_base =
+      base_type != NULL && base_type != base_arg->type;
+  bool copied_derived =
+      derived_type != NULL && derived_type != derived_arg->type;
+  int64_t result = -1;
+  if (base_type != NULL && derived_type != NULL &&
+      !TypeContainsTemplateParameter(base_type) &&
+      !TypeContainsTemplateParameter(derived_type)) {
+    Qualifiers cv_mask =
+        kQualConst | kQualVolatile | kQualRestrict | kQualAtomic;
+    if (TypeEqualIgnoringTopLevelQualifierMask(base_type, derived_type,
+                                                 cv_mask)) {
+      result = base_type->size > 0 && derived_type->size > 0 ? 1 : 0;
+    } else if (TypeIsStructOrUnion(base_type) &&
+               TypeIsStructOrUnion(derived_type)) {
+      result =
+          StructIsDerivedFrom(derived_type->info.struct_info,
+                              base_type->info.struct_info,
+                              /*public_only=*/false)
+              ? 1
+              : 0;
+    } else {
+      result = 0;
+    }
+  }
+  if (copied_base) {
+    TypeRecordDelete(base_type);
+  }
+  if (copied_derived) {
+    TypeRecordDelete(derived_type);
+  }
+  return result;
+}
+
+static ASTNode* CXXTryFoldTraitValueDot(BinaryASTNode* dot) {
+  if (dot == NULL || dot->right == NULL ||
+      dot->right->op != AST_OP(structmember)) {
+    return NULL;
+  }
+  StructMemberASTNode* member_node = (StructMemberASTNode*)dot->right;
+  if (member_node->member == NULL || member_node->member->symbol == NULL ||
+      !StringEqual(&member_node->member->symbol->name, "value")) {
+    return NULL;
+  }
+  dot->left->flags &= ~kASTAnalyzed;
+  int saved_depth = compiler->constant_evaluation_required_depth;
+  compiler->constant_evaluation_required_depth++;
+  ASTNode* type_expr = AnalyzeExpression(dot->left);
+  compiler->constant_evaluation_required_depth = saved_depth;
+  if (type_expr == NULL || type_expr->type == NULL ||
+      !TypeIsStructOrUnion(type_expr->type) ||
+      type_expr->type->info.struct_info == NULL) {
+    if (type_expr != dot->left) {
+      ASTNodeDelete(type_expr);
+    }
+    return NULL;
+  }
+  Symbol* origin = CXXStructTemplateOrigin(type_expr->type->info.struct_info);
+  if (origin == NULL) {
+    if (type_expr != dot->left) {
+      ASTNodeDelete(type_expr);
+    }
+    return NULL;
+  }
+  TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+      &compiler->syntax, type_expr->type);
+  int64_t folded = -1;
+  if (StringEqual(&origin->name, "is_same")) {
+    folded = CXXFoldIsSameSpecializationToBool(materialized);
+  } else if (StringEqual(&origin->name, "is_base_of")) {
+    folded = CXXFoldIsBaseOfSpecializationToBool(materialized);
+  } else if (StringEqual(&origin->name, "is_arithmetic") &&
+             materialized->template_arguments != NULL &&
+             materialized->template_arguments->length == 1) {
+    TemplateArgument* arg = materialized->template_arguments->value.p[0];
+    TypeRecord* type = arg != NULL ? CXXResolveTypeForIsSameVArgument(arg) : NULL;
+    bool copied =
+        type != NULL && arg != NULL && arg->type != NULL && type != arg->type;
+    if (type != NULL && !TypeContainsTemplateParameter(type)) {
+      folded = CXXTypeIsStdArithmeticType(type) ? 1 : 0;
+    }
+    if (copied) {
+      TypeRecordDelete(type);
+    }
+  }
+  if (type_expr != dot->left) {
+    ASTNodeDelete(type_expr);
+  }
+  if (folded >= 0) {
+    return CXXNewBoolConstantReplacing(&dot->base, folded);
+  }
+  return NULL;
+}
+
+static ASTNode* CXXTryFoldIsSameValueDot(BinaryASTNode* dot) {
+  return CXXTryFoldTraitValueDot(dot);
+}
+
+static StructMember* CXXFindInheritedStaticMember(Struct* str, String* name) {
+  if (str == NULL || name == NULL) {
+    return NULL;
+  }
+  for (Struct* cur = str; cur != NULL;) {
+    StructMember* member = FindStructMember(cur, name);
+    if (member != NULL && member->is_static) {
+      return member;
+    }
+    if (cur->bases.length == 0) {
+      break;
+    }
+    CXXBaseSpecifier* base_spec = cur->bases.value.p[0];
+    TypeRecord* base_type =
+        base_spec != NULL ? base_spec->type : NULL;
+    cur = base_type != NULL && TypeIsStructOrUnion(base_type)
+              ? base_type->info.struct_info
+              : NULL;
+  }
+  return NULL;
+}
+
+// Same result as `is_same<T, U>::value`, which class-template instantiation
+// already folds in contexts where the `is_same_v` variable template does not.
+static ASTNode* CXXTryFoldIsSameVViaClassTemplate(IdentifierASTNode* node) {
+  Namespace* ns =
+      node->symbol != NULL ? node->symbol->namespace_ : NULL;
+  if (ns == NULL) {
+    ns = NamespaceFindStdNamespace();
+  }
+  if (ns == NULL) {
+    return NULL;
+  }
+  String is_same_name;
+  StringInit(&is_same_name, "is_same");
+  Symbol* is_same = NamespaceLookupUnqualifiedSymbol(ns, &is_same_name);
+  StringDestruct(&is_same_name);
+  if (is_same == NULL || !is_same->flags.is_template) {
+    return NULL;
+  }
+  Vector* args = TemplateArgumentVectorCopy(node->template_arguments);
+  Vector* lambda_args =
+      CXXLambdaInventedTemplateArgumentValues(compiler->current_function);
+  if (lambda_args != NULL) {
+    bool failed = false;
+    Vector* substituted = TypeSubstituteTemplateArgumentVectorOrFail(
+        &compiler->syntax, args, lambda_args, &failed);
+    VectorDeleteWithContents(
+        lambda_args, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    if (substituted != NULL && !failed) {
+      VectorDeleteWithContents(
+          args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      args = substituted;
+    } else if (substituted != NULL) {
+      VectorDeleteWithContents(
+          substituted, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+  }
+  ASTNode* receiver = NewIdentifierASTNode(is_same, node->base.location);
+  IdentifierASTNode* type_id = (IdentifierASTNode*)receiver;
+  type_id->template_arguments = args;
+  type_id->base.flags &= ~kASTAnalyzed;
+  receiver->value_category = kValueCategoryPrvalue;
+
+  int saved_depth = compiler->constant_evaluation_required_depth;
+  compiler->constant_evaluation_required_depth++;
+  ASTNode* type_expr = AnalyzeExpression(receiver);
+  compiler->constant_evaluation_required_depth = saved_depth;
+
+  if (type_expr == NULL || type_expr->type == NULL ||
+      !TypeIsStructOrUnion(type_expr->type) ||
+      type_expr->type->info.struct_info == NULL) {
+    if (type_expr != receiver) {
+      ASTNodeDelete(type_expr);
+    } else {
+      ASTNodeDelete(receiver);
+    }
+    return NULL;
+  }
+  TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+      &compiler->syntax, type_expr->type);
+  if (materialized != type_expr->type) {
+    ASTNodeSetType(type_expr, materialized);
+  }
+
+  String value_name;
+  StringInit(&value_name, "value");
+  StructMember* member =
+      CXXFindInheritedStaticMember(type_expr->type->info.struct_info, &value_name);
+  StringDestruct(&value_name);
+  if (member == NULL) {
+    ASTNodeDelete(type_expr);
+    return NULL;
+  }
+
+  ASTNode* member_node =
+      NewStructMemberASTNode(member, node->base.location);
+  member_node->flags &= ~kASTAnalyzed;
+  ASTNode* dot = NewBinaryASTNode(AST_OP(dot), NULL, node->base.location,
+                                  type_expr, member_node);
+  dot->flags &= ~kASTAnalyzed;
+  dot->value_category = kValueCategoryPrvalue;
+
+  compiler->constant_evaluation_required_depth++;
+  ASTNode* value_expr = AnalyzeExpression(dot);
+  compiler->constant_evaluation_required_depth = saved_depth;
+
+  int64_t ivalue = 0;
+  if (value_expr == NULL || !EvaluateIntegerExpression(value_expr, &ivalue)) {
+    if (value_expr != dot) {
+      ASTNodeDelete(value_expr);
+    } else {
+      ASTNodeDelete(dot);
+    }
+    return NULL;
+  }
+  if (value_expr != dot) {
+    ASTNodeDelete(value_expr);
+  }
+  return CXXNewIsSameBoolConstant(node, ivalue != 0);
+}
+
+// `std::is_same_v<T, U>` is a variable template whose initializer is
+// `is_same<T, U>::value`.  Instantiating that in a generic lambda body can fail
+// even when both type arguments are already concrete (capturing closures are
+// analyzed before `auto` parameters are deduced at the call site).  Fold the
+// trait directly when both sides are known types.
+static ASTNode* CXXTryFoldIsSameVIdentifier(IdentifierASTNode* node) {
+  if (!CompilerIsCXX() || node == NULL || node->symbol == NULL ||
+      node->template_arguments == NULL ||
+      (node->base.flags & kASTIsDeclaration) != 0 ||
+      node->template_arguments->length != 2 ||
+      !StringEqual(&node->symbol->name, "is_same_v")) {
+    return NULL;
+  }
+  TemplateArgument* left_arg = node->template_arguments->value.p[0];
+  TemplateArgument* right_arg = node->template_arguments->value.p[1];
+  TypeRecord* left_type = CXXResolveTypeForIsSameVArgument(left_arg);
+  TypeRecord* right_type = CXXResolveTypeForIsSameVArgument(right_arg);
+  bool copied_left = left_type != NULL && left_arg != NULL &&
+                     left_type != left_arg->type;
+  bool copied_right = right_type != NULL && right_arg != NULL &&
+                      right_type != right_arg->type;
+  if (left_arg != NULL && right_arg != NULL && left_arg->type != NULL &&
+      right_arg->type != NULL &&
+      CXXIsSameTemplateParameterType(left_arg->type, right_arg->type)) {
+    if (copied_left) {
+      TypeRecordDelete(left_type);
+    }
+    if (copied_right) {
+      TypeRecordDelete(right_type);
+    }
+    return CXXNewIsSameBoolConstant(node, 1);
+  }
+  if (left_type != NULL && right_type != NULL &&
+      !TypeContainsTemplateParameter(left_type) &&
+      !TypeContainsTemplateParameter(right_type)) {
+    Qualifiers cv_mask =
+        kQualConst | kQualVolatile | kQualRestrict | kQualAtomic;
+    int64_t same =
+        TypeEqualIgnoringTopLevelQualifierMask(left_type, right_type, cv_mask)
+            ? 1
+            : 0;
+    if (copied_left) {
+      TypeRecordDelete(left_type);
+    }
+    if (copied_right) {
+      TypeRecordDelete(right_type);
+    }
+    return CXXNewIsSameBoolConstant(node, same);
+  }
+  if (copied_left) {
+    TypeRecordDelete(left_type);
+  }
+  if (copied_right) {
+    TypeRecordDelete(right_type);
+  }
+  return CXXTryFoldIsSameVViaClassTemplate(node);
+}
+
+static ASTNode* CXXTryFoldIsArithmeticVIdentifier(IdentifierASTNode* node) {
+  if (!CompilerIsCXX() || node == NULL || node->symbol == NULL ||
+      node->template_arguments == NULL ||
+      (node->base.flags & kASTIsDeclaration) != 0 ||
+      node->template_arguments->length != 1 ||
+      !StringEqual(&node->symbol->name, "is_arithmetic_v")) {
+    return NULL;
+  }
+  TemplateArgument* arg = node->template_arguments->value.p[0];
+  TypeRecord* type = CXXResolveTypeForIsSameVArgument(arg);
+  bool copied = type != NULL && arg != NULL && arg->type != NULL &&
+                type != arg->type;
+  if (type == NULL || TypeContainsTemplateParameter(type)) {
+    if (copied) {
+      TypeRecordDelete(type);
+    }
+    return NULL;
+  }
+  int64_t value = CXXTypeIsStdArithmeticType(type) ? 1 : 0;
+  if (copied) {
+    TypeRecordDelete(type);
+  }
+  return CXXNewIsSameBoolConstant(node, value);
+}
+
+static ASTNode* CXXTryFoldKUsesPointerTemplate(IdentifierASTNode* node) {
+  if (!CompilerIsCXX() || node == NULL || node->symbol == NULL ||
+      node->template_arguments == NULL ||
+      (node->base.flags & kASTIsDeclaration) != 0 ||
+      node->template_arguments->length != 1 ||
+      !StringEqual(&node->symbol->name, "kUsesPointer")) {
+    return NULL;
+  }
+  TemplateArgument* arg = node->template_arguments->value.p[0];
+  TypeRecord* type = CXXResolveTypeForIsSameVArgument(arg);
+  bool copied = type != NULL && arg != NULL && arg->type != NULL &&
+                type != arg->type;
+  if (type == NULL || TypeContainsTemplateParameter(type)) {
+    if (copied) {
+      TypeRecordDelete(type);
+    }
+    return NULL;
+  }
+  int64_t value = CXXTypeIsStdArithmeticType(type) ? 0 : 1;
+  if (copied) {
+    TypeRecordDelete(type);
+  }
+  return CXXNewIsSameBoolConstant(node, value);
+}
+
+static bool CXXStructDerivesFromProtobufMessageLite(Struct* str) {
+  if (str == NULL) {
+    return false;
+  }
+  if (str->tag_name != NULL && StringEqual(str->tag_name, "MessageLite")) {
+    return true;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL &&
+        CXXStructDerivesFromProtobufMessageLite(base->type->info.struct_info)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CXXTypeIsProtobufMessageLiteOrDerived(TypeRecord* type) {
+  return type != NULL && TypeIsStructOrUnion(type) &&
+         type->info.struct_info != NULL &&
+         CXXStructDerivesFromProtobufMessageLite(type->info.struct_info);
+}
+
+static size_t CXXTemplateArgumentPackLength(Vector* template_args,
+                                            size_t pack_index) {
+  if (template_args == NULL || pack_index >= template_args->length) {
+    return 0;
+  }
+  TemplateArgument* arg = template_args->value.p[pack_index];
+  if (arg != NULL && arg->pack_arguments != NULL) {
+    return arg->pack_arguments->length;
+  }
+  return template_args->length - pack_index;
+}
+
+static TypeRecord* CXXTemplateArgumentPackTypeAt(Vector* template_args,
+                                                 size_t pack_index,
+                                                 size_t element_index) {
+  if (template_args == NULL || pack_index >= template_args->length) {
+    return NULL;
+  }
+  TemplateArgument* arg = template_args->value.p[pack_index];
+  if (arg != NULL && arg->pack_arguments != NULL) {
+    if (element_index >= arg->pack_arguments->length) {
+      return NULL;
+    }
+    TemplateArgument* elem = arg->pack_arguments->value.p[element_index];
+    return elem != NULL ? CXXResolveTypeForIsSameVArgument(elem) : NULL;
+  }
+  size_t idx = pack_index + element_index;
+  if (idx >= template_args->length) {
+    return NULL;
+  }
+  return CXXResolveTypeForIsSameVArgument(template_args->value.p[idx]);
+}
+
+// `Arena::GetConstructType` uses `decltype(ProbeConstructType<T>(
+// std::declval<Args>()...))::value`.
+static int64_t CXXFoldProbeConstructTypeFromArgs(Vector* template_args) {
+  size_t pack_len = CXXTemplateArgumentPackLength(template_args, 1);
+  if (pack_len == 0) {
+    return 1;  // ConstructType::kDefault
+  }
+  if (pack_len > 1) {
+    return 0;  // ConstructType::kUnknown
+  }
+  TemplateArgument* pack_arg = template_args->value.p[1];
+  TypeRecord* arg_type = CXXTemplateArgumentPackTypeAt(template_args, 1, 0);
+  bool copied_arg = arg_type != NULL && pack_arg != NULL &&
+                      pack_arg->type != NULL && arg_type != pack_arg->type;
+  if (pack_arg != NULL && pack_arg->pack_arguments != NULL &&
+      pack_arg->pack_arguments->length > 0) {
+    pack_arg = pack_arg->pack_arguments->value.p[0];
+    copied_arg = arg_type != NULL && pack_arg != NULL &&
+                 pack_arg->type != NULL && arg_type != pack_arg->type;
+  }
+  if (arg_type == NULL || TypeContainsTemplateParameter(arg_type)) {
+    if (copied_arg) {
+      TypeRecordDelete(arg_type);
+    }
+    return -1;
+  }
+  int64_t result = 2;  // ConstructType::kCopy
+  if (TypeIsReference(arg_type) &&
+      arg_type->declarator == kDeclRValueReference &&
+      (arg_type->qualifiers & kQualConst) == 0) {
+    result = 3;  // ConstructType::kMove
+  }
+  if (copied_arg) {
+    TypeRecordDelete(arg_type);
+  }
+  return result;
+}
+
+static IdentifierASTNode* CXXCallCalleeIdentifier(ASTNode* callee) {
+  if (callee == NULL) {
+    return NULL;
+  }
+  if (callee->op == AST_OP(identifier)) {
+    return (IdentifierASTNode*)callee;
+  }
+  if (callee->op == AST_OP(dot)) {
+    BinaryASTNode* dot = (BinaryASTNode*)callee;
+    if (dot->right != NULL && dot->right->op == AST_OP(identifier)) {
+      return (IdentifierASTNode*)dot->right;
+    }
+  }
+  return NULL;
+}
+
+static Vector* CXXSubstituteTemplateArgumentsForFold(Vector* template_arguments) {
+  if (template_arguments == NULL) {
+    return NULL;
+  }
+  Vector* args = TemplateArgumentVectorCopy(template_arguments);
+  if (args == NULL) {
+    return NULL;
+  }
+  Vector* lambda_args =
+      CXXLambdaInventedTemplateArgumentValues(compiler->current_function);
+  if (lambda_args != NULL) {
+    bool failed = false;
+    Vector* substituted = TypeSubstituteTemplateArgumentVectorOrFail(
+        &compiler->syntax, args, lambda_args, &failed);
+    VectorDeleteWithContents(
+        lambda_args, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    if (substituted != NULL && !failed) {
+      VectorDeleteWithContents(
+          args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      args = substituted;
+    } else if (substituted != NULL) {
+      VectorDeleteWithContents(
+          substituted, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+  }
+  TypeRecord* func = compiler->current_function;
+  if (func != NULL && func->template_arguments != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(
+          func->template_arguments)) {
+    bool failed = false;
+    Vector* substituted = TypeSubstituteTemplateArgumentVectorOrFail(
+        &compiler->syntax, args, func->template_arguments, &failed);
+    if (substituted != NULL && !failed) {
+      VectorDeleteWithContents(
+          args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      args = substituted;
+    } else if (substituted != NULL) {
+      VectorDeleteWithContents(
+          substituted, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+  }
+  return args;
+}
+
+static bool CXXTypeNamesStdTuple(TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return false;
+  }
+  if (type->info.struct_info->tag_name != NULL &&
+      StringEqual(type->info.struct_info->tag_name, "tuple")) {
+    return true;
+  }
+  if (type->template_origin != NULL &&
+      StringEqual(&type->template_origin->name, "tuple")) {
+    return true;
+  }
+  return false;
+}
+
+static BracedInitializerASTNode* CXXTupleArgumentBracedInit(ASTNode* arg) {
+  while (arg != NULL && arg->op == AST_OP(cast)) {
+    arg = ((CastASTNode*)arg)->expr;
+  }
+  if (arg == NULL) {
+    return NULL;
+  }
+  if (arg->op == AST_OP(expr_init)) {
+    return CXXTupleArgumentBracedInit(
+        ((ExpressionInitializerASTNode*)arg)->expr);
+  }
+  if (arg->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)arg;
+    TypeRecord* ctor_type = call->base.type;
+    if (ctor_type == NULL && call->left != NULL) {
+      ctor_type = call->left->type;
+    }
+    if (CXXTypeNamesStdTuple(ctor_type) && call->children != NULL &&
+        call->children->length == 1) {
+      return CXXTupleArgumentBracedInit(call->children->value.p[0]);
+    }
+  }
+  if (arg->op == AST_OP(braced_init)) {
+    return (BracedInitializerASTNode*)arg;
+  }
+  if (arg->op == AST_OP(compound_literal)) {
+    ASTNode* init = ((CompoundLiteralASTNode*)arg)->initializer;
+    if (init != NULL && init->op == AST_OP(braced_init)) {
+      return (BracedInitializerASTNode*)init;
+    }
+  }
+  if (arg->op == AST_OP(comma)) {
+    return CXXTupleArgumentBracedInit(((BinaryASTNode*)arg)->right);
+  }
+  return NULL;
+}
+
+static ASTNode* CXXBracedInitElementExpr(BracedInitializerASTNode* braced,
+                                        size_t index) {
+  if (braced == NULL || braced->initializers == NULL ||
+      index >= braced->initializers->length) {
+    return NULL;
+  }
+  ASTNode* element = braced->initializers->value.p[index];
+  if (element != NULL && element->op == AST_OP(expr_init)) {
+    return ((ExpressionInitializerASTNode*)element)->expr;
+  }
+  return element;
+}
+
+static ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
+  IdentifierASTNode* callee = CXXCallCalleeIdentifier(call->left);
+  if (callee == NULL || callee->symbol == NULL ||
+      !StringEqual(&callee->symbol->name, "get") ||
+      callee->template_arguments == NULL ||
+      callee->template_arguments->length != 1 ||
+      call->children == NULL || call->children->length != 1) {
+    return NULL;
+  }
+  Vector* resolved =
+      CXXSubstituteTemplateArgumentsForFold(callee->template_arguments);
+  if (resolved == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(resolved)) {
+    VectorDeleteWithContents(
+        resolved, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return NULL;
+  }
+  TemplateArgument* t_arg = resolved->value.p[0];
+  size_t index = (size_t)-1;
+  TypeRecord* type_key = NULL;
+  if (TemplateArgumentConcreteValueKind(t_arg) == kTemplateValueIntegral) {
+    index = (size_t)t_arg->int_value;
+  } else if (t_arg->dependent_expr != NULL) {
+    int64_t iv = 0;
+    if (EvaluateIntegerExpression(t_arg->dependent_expr, &iv)) {
+      index = (size_t)iv;
+    }
+  } else if (t_arg->kind == kTemplateParameterNonType && t_arg->int_value >= 0) {
+    index = (size_t)t_arg->int_value;
+  } else if (t_arg->type != NULL) {
+    type_key = CXXResolveTypeForIsSameVArgument(t_arg);
+  }
+  ASTNode* tuple_arg = (ASTNode*)call->children->value.p[0];
+  if (tuple_arg != NULL && tuple_arg->op == AST_OP(expr_init)) {
+    tuple_arg = ((ExpressionInitializerASTNode*)tuple_arg)->expr;
+  }
+  BracedInitializerASTNode* braced = CXXTupleArgumentBracedInit(tuple_arg);
+  if (braced == NULL) {
+    if (type_key != NULL) {
+      TypeRecordDelete(type_key);
+    }
+    VectorDeleteWithContents(
+        resolved, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return NULL;
+  }
+  ASTNode* element = NULL;
+  if (type_key != NULL) {
+    for (size_t i = 0; i < braced->initializers->length; i++) {
+      ASTNode* candidate = CXXBracedInitElementExpr(braced, i);
+      if (candidate == NULL) {
+        continue;
+      }
+      candidate = AnalyzeExpression(candidate);
+      if (candidate->type != NULL &&
+          (TypeEqual(candidate->type, type_key) ||
+           (TypeIsMemberPointer(candidate->type) &&
+            TypeIsMemberPointer(type_key) &&
+            TypeEqual(TypeMemberPointerPointeeType(candidate->type),
+                      TypeMemberPointerPointeeType(type_key))))) {
+        element = candidate;
+        break;
+      }
+    }
+    TypeRecordDelete(type_key);
+  } else if (index != (size_t)-1) {
+    element = CXXBracedInitElementExpr(braced, index);
+  }
+  VectorDeleteWithContents(resolved,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  if (element == NULL) {
+    return NULL;
+  }
+  ASTNode* moved = ASTNodeMove(element);
+  if (moved->op == AST_OP(member_ptr)) {
+    moved = AnalyzeExpression(moved);
+  } else {
+    moved = AnalyzeExpression(moved);
+  }
+  if (call->base.type != NULL) {
+    ASTNodeSetType(moved, TypeRecordCopy(call->base.type));
+  }
+  ASTNodeReplaceChild(call->base.parent, call->base.child_id, moved, true);
+  moved->flags |= kASTAnalyzed;
+  moved->value_category = kValueCategoryPrvalue;
+  return moved;
+}
+
+static ASTNode* CXXTryFoldGetConstructTypeCall(VectorASTNode* call) {
+  if (call == NULL) {
+    return NULL;
+  }
+  IdentifierASTNode* callee = CXXCallCalleeIdentifier(call->left);
+  if (callee == NULL || callee->symbol == NULL ||
+      !StringEqual(&callee->symbol->name, "GetConstructType") ||
+      callee->template_arguments == NULL ||
+      callee->template_arguments->length < 1) {
+    return NULL;
+  }
+  Vector* resolved =
+      CXXSubstituteTemplateArgumentsForFold(callee->template_arguments);
+  if (resolved == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(resolved)) {
+    VectorDeleteWithContents(
+        resolved, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return NULL;
+  }
+  TemplateArgument* t_arg = resolved->value.p[0];
+  TypeRecord* t_type = CXXResolveTypeForIsSameVArgument(t_arg);
+  bool copied_t =
+      t_type != NULL && t_arg != NULL && t_arg->type != NULL &&
+      t_type != t_arg->type;
+  if (t_type == NULL || TypeContainsTemplateParameter(t_type)) {
+    if (copied_t) {
+      TypeRecordDelete(t_type);
+    }
+    VectorDeleteWithContents(
+        resolved, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return NULL;
+  }
+  int64_t value = 0;
+  if (CXXTypeIsProtobufMessageLiteOrDerived(t_type)) {
+    int64_t probed = CXXFoldProbeConstructTypeFromArgs(resolved);
+    if (probed < 0) {
+      if (copied_t) {
+        TypeRecordDelete(t_type);
+      }
+      VectorDeleteWithContents(
+          resolved, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      return NULL;
+    }
+    value = probed;
+  }
+  if (copied_t) {
+    TypeRecordDelete(t_type);
+  }
+  VectorDeleteWithContents(resolved,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return CXXNewBoolConstantReplacing(&call->base, value);
+}
+
+static TypeRecord* CXXVariableTemplateValueType(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  TypeRecord* normalized = type;
+  while (normalized != NULL && TypeIsReference(normalized)) {
+    normalized = normalized->next;
+  }
+  if (normalized == NULL) {
+    return NULL;
+  }
+  TypeRecord* copy = TypeRecordCopy(normalized);
+  copy->qualifiers &= ~(kQualConst | kQualVolatile);
+  return copy;
+}
+
+static ASTNode* CXXVariableTemplateExpressionSurface(ASTNode* expr) {
+  while (expr != NULL) {
+    if (expr->op == AST_OP(init)) {
+      expr = ((BinaryASTNode*)expr)->right;
+      continue;
+    }
+    if (expr->op == AST_OP(expr_init)) {
+      expr = ((ExpressionInitializerASTNode*)expr)->expr;
+      continue;
+    }
+    if (expr->op == AST_OP(cast)) {
+      expr = ((CastASTNode*)expr)->expr;
+      continue;
+    }
+    break;
+  }
+  return expr;
+}
+
+static Symbol* CXXStdTupleClassTemplateSymbol(void) {
+  String name;
+  StringInit(&name, "tuple");
+  Symbol* sym = SyntaxFindSymbol(&compiler->syntax, &name);
+  if (sym == NULL || !sym->flags.is_template) {
+    sym = SyntaxFindTag(&compiler->syntax, &name);
+  }
+  StringDestruct(&name);
+  if (sym != NULL && sym->flags.is_template) {
+    return sym;
+  }
+  return NULL;
+}
+
+static TypeRecord* CXXTupleTypeForSingleElementBracedInit(
+    BracedInitializerASTNode* braced) {
+  if (braced == NULL || braced->initializers == NULL ||
+      braced->initializers->length != 1) {
+    return NULL;
+  }
+  if (braced->base.type != NULL && CXXTypeNamesStdTuple(braced->base.type)) {
+    return TypeRecordCopy(braced->base.type);
+  }
+  ASTNode* element = CXXBracedInitElementExpr(braced, 0);
+  if (element == NULL) {
+    return NULL;
+  }
+  DiagnosticSuppressBegin();
+  element = AnalyzeExpression(element);
+  DiagnosticSuppressEnd();
+  if (element == NULL || element->type == NULL ||
+      TypeContainsTemplateParameter(element->type)) {
+    return NULL;
+  }
+  Symbol* tuple_template = CXXStdTupleClassTemplateSymbol();
+  if (tuple_template == NULL || !tuple_template->flags.is_template) {
+    return NULL;
+  }
+  Vector* args = NewVector();
+  VectorAppend(args, NewTypeTemplateArgument(TypeRecordCopy(element->type)));
+  TypeRecord* tuple_type =
+      TypeInstantiateClassTemplate(&compiler->syntax, tuple_template, args);
+  VectorDeleteWithContents(args, (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return tuple_type;
+}
+
+static void CXXPrepareStdGetVariableTemplateInitializer(ASTNode* expr) {
+  expr = CXXVariableTemplateExpressionSurface(expr);
+  if (expr == NULL || expr->op != AST_OP(call)) {
+    return;
+  }
+  VectorASTNode* call = (VectorASTNode*)expr;
+  IdentifierASTNode* callee = CXXCallCalleeIdentifier(call->left);
+  if (callee == NULL || callee->symbol == NULL ||
+      !StringEqual(&callee->symbol->name, "get") ||
+      call->children == NULL || call->children->length != 1) {
+    return;
+  }
+  ASTNode* arg = call->children->value.p[0];
+  if (arg != NULL && arg->op == AST_OP(expr_init)) {
+    arg = ((ExpressionInitializerASTNode*)arg)->expr;
+  }
+  if (arg == NULL || arg->op != AST_OP(braced_init)) {
+    return;
+  }
+  TypeRecord* tuple_type =
+      CXXTupleTypeForSingleElementBracedInit((BracedInitializerASTNode*)arg);
+  if (tuple_type == NULL) {
+    return;
+  }
+  ASTNode* lowered = LowerCXXBracedInitToTarget(arg, tuple_type);
+  TypeRecordDelete(tuple_type);
+  if (lowered != arg) {
+    ASTNodeReplaceChild((ASTNode*)call, 0, lowered, false);
+  }
+}
+
+static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
+                                                    Vector* template_args,
+                                                    SourceLocation location) {
+  if (!CompilerIsCXX() || var_sym == NULL ||
+      var_sym->variable_template == NULL || template_args == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(template_args)) {
+    return NULL;
+  }
+  TypeRecord* concrete = TypeInstantiateVariableTemplateDeducedType(
+      &compiler->syntax, var_sym, template_args);
+  if (concrete != NULL && var_sym->type != NULL &&
+      TypeContainsAuto(var_sym->type) && !TypeIsMemberPointer(concrete)) {
+    TypeRecordDelete(concrete);
+    concrete = NULL;
+  }
+  int64_t value = 0;
+  if (concrete != NULL && TypeIsIntegral(concrete) &&
+      TypeInstantiateVariableTemplateConstant(&compiler->syntax, var_sym,
+                                              template_args, &value)) {
+    return NewIntConstantASTNode(value, concrete, location);
+  }
+  if (StringEqual(&var_sym->name, "is_same_v")) {
+    IdentifierASTNode id = {0};
+    id.base.location = location;
+    id.symbol = var_sym;
+    id.template_arguments = template_args;
+    ASTNode* folded = CXXTryFoldIsSameVIdentifier(&id);
+    if (folded != NULL) {
+      TypeRecordDelete(concrete);
+      return folded;
+    }
+  }
+  double floating_value = 0;
+  if (concrete != NULL && TypeIsFloatingPoint(concrete) &&
+      TypeInstantiateVariableTemplateFloatingConstant(
+          &compiler->syntax, var_sym, template_args, &floating_value)) {
+    return NewRealConstantASTNode(floating_value, concrete, location);
+  }
+  if (concrete != NULL && TypeUsesLongDoubleRepresentation(concrete) &&
+      (concrete->qualifiers & kQualConst) != 0) {
+    ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
+        &compiler->syntax, var_sym, template_args);
+    if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+      initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
+    }
+    if (initializer != NULL) {
+      TypeRecord* value_type = CXXVariableTemplateValueType(concrete);
+      ASTNode* cast = NewCastASTNode(value_type, location, initializer);
+      TypeRecordDelete(value_type);
+      TypeRecordDelete(concrete);
+      return AnalyzeExpression(cast);
+    }
+  }
+  if (concrete != NULL && TypeIsStructOrUnion(concrete)) {
+    Symbol* temp = SyntaxNewTemporary(&compiler->syntax, concrete);
+    temp->location = location;
+    ASTNode* temp_id = NewIdentifierASTNode(temp, location);
+    temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+    Vector* initializer_values = NewVector();
+    Struct* value_class = concrete->info.struct_info;
+    bool has_object_state = false;
+    for (size_t i = 0; value_class != NULL && i < value_class->members.length;
+         ++i) {
+      StructMember* member = value_class->members.value.p[i];
+      if (member != NULL && member->symbol != NULL && !member->is_static &&
+          !member->is_member_function &&
+          !StorageIs(member->symbol->storage, STO(typedef))) {
+        has_object_state = true;
+        break;
+      }
+    }
+    if (has_object_state) {
+      ASTNode* concrete_initializer = TypeInstantiateVariableTemplateInitializer(
+          &compiler->syntax, var_sym, template_args);
+      if (concrete_initializer != NULL) {
+        VectorAppend(initializer_values, concrete_initializer);
+      }
+    }
+    ASTNode* initializer =
+        NewBracedInitializerASTNode(initializer_values, NULL, location);
+    ASTNode* literal = NewCompoundLiteralASTNode(temp_id, location, initializer);
+    TypeRecordDelete(concrete);
+    ASTNode* analyzed = AnalyzeExpression(literal);
+    analyzed->value_category = kValueCategoryLvalue;
+    return analyzed;
+  }
+  if (concrete != NULL && TypeIsMemberPointer(concrete)) {
+    ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
+        &compiler->syntax, var_sym, template_args);
+    TypeRecordDelete(concrete);
+    if (initializer != NULL) {
+      initializer = CXXVariableTemplateExpressionSurface(initializer);
+      initializer = CXXFoldIsSameVExpression(initializer);
+      CXXPrepareStdGetVariableTemplateInitializer(initializer);
+      ASTNode* value = AnalyzeExpression(initializer);
+      if (value != NULL && value->op == AST_OP(call)) {
+        ASTNode* folded = CXXTryFoldStdGetFromTupleCall((VectorASTNode*)value);
+        if (folded != NULL) {
+          value = folded;
+        }
+      }
+      if (value != NULL && value->type != NULL) {
+        TypeRecord* value_type = CXXVariableTemplateValueType(value->type);
+        if (value_type != NULL) {
+          ASTNodeSetType(value, value_type);
+        }
+        value->value_category = kValueCategoryPrvalue;
+        return value;
+      }
+    }
+    return NULL;
+  }
+  if (concrete == NULL) {
+    ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
+        &compiler->syntax, var_sym, template_args);
+    if (initializer != NULL) {
+      initializer = CXXVariableTemplateExpressionSurface(initializer);
+      initializer = CXXFoldIsSameVExpression(initializer);
+      CXXPrepareStdGetVariableTemplateInitializer(initializer);
+      ASTNode* value = AnalyzeExpression(initializer);
+      if (value != NULL && value->op == AST_OP(call)) {
+        ASTNode* folded = CXXTryFoldStdGetFromTupleCall((VectorASTNode*)value);
+        if (folded != NULL) {
+          value = folded;
+        }
+      }
+      if (value != NULL && value->type != NULL &&
+          !TypeContainsTemplateParameter(value->type) &&
+          !TypeIsUnknown(value->type)) {
+        TypeRecord* value_type = CXXVariableTemplateValueType(value->type);
+        if (value_type != NULL) {
+          ASTNodeSetType(value, value_type);
+        }
+        value->value_category = kValueCategoryPrvalue;
+        return value;
+      }
+    }
+  }
+  TypeRecordDelete(concrete);
+  return NULL;
+}
+
+ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  expr = CXXVariableTemplateExpressionSurface(expr);
+  if (expr == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(identifier)) {
+    IdentifierASTNode* id = (IdentifierASTNode*)expr;
+    if (id->symbol != NULL && id->symbol->variable_template != NULL &&
+        id->template_arguments != NULL &&
+        (expr->flags & kASTIsDeclaration) == 0 &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            id->template_arguments)) {
+      return CXXInstantiateVariableTemplateValue(
+          id->symbol, id->template_arguments, expr->location);
+    }
+    return NULL;
+  }
+  if (expr->op == AST_OP(structmember)) {
+    StructMemberASTNode* member_node = (StructMemberASTNode*)expr;
+    StructMember* member = member_node->member;
+    if (member != NULL && member->is_static &&
+        member->symbol != NULL && member->symbol->variable_template != NULL &&
+        member_node->template_arguments != NULL &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            member_node->template_arguments)) {
+      return CXXInstantiateVariableTemplateValue(
+          member->symbol, member_node->template_arguments, expr->location);
+    }
+    return NULL;
+  }
+  if (expr->op == AST_OP(dot) || expr->op == AST_OP(arrow)) {
+    BinaryASTNode* access = (BinaryASTNode*)expr;
+    if (access->right == NULL || access->right->op != AST_OP(structmember)) {
+      return NULL;
+    }
+    StructMemberASTNode* member_node = (StructMemberASTNode*)access->right;
+    StructMember* member = member_node->member;
+    if (member != NULL && member->is_static &&
+        member->symbol != NULL && member->symbol->variable_template != NULL &&
+        member_node->template_arguments != NULL &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            member_node->template_arguments)) {
+      return CXXInstantiateVariableTemplateValue(
+          member->symbol, member_node->template_arguments, expr->location);
+    }
+  }
+  return NULL;
+}
+
+static bool CXXTryReplaceWithVariableTemplateValue(
+    ASTNode* use_site, Symbol* var_sym, Vector* template_args,
+    SourceLocation location) {
+  ASTNode* materialized =
+      CXXInstantiateVariableTemplateValue(var_sym, template_args, location);
+  if (materialized == NULL || use_site == NULL || use_site->parent == NULL) {
+    return false;
+  }
+  ASTNodeReplaceChild(use_site->parent, use_site->child_id, materialized, true);
+  materialized->flags |= kASTAnalyzed;
+  return true;
+}
+
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   if (CompilerCXXAtLeast(kLanguageStandardCXX26) && node->symbol != NULL &&
       (node->base.flags & kASTNameIndependentLookupAmbiguous) != 0 &&
@@ -444,105 +1675,26 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   // its initializer with the explicit arguments and fold to a constant.  When
   // the arguments are still dependent (used inside another template), leave the
   // node untouched so it is re-analyzed after substitution.
+  {
+    ASTNode* folded = CXXTryFoldIsSameVIdentifier(node);
+    if (folded != NULL) {
+      return folded;
+    }
+  }
   if (CompilerIsCXX() && node->symbol != NULL &&
       node->symbol->variable_template != NULL &&
       node->template_arguments != NULL &&
       (node->base.flags & kASTIsDeclaration) == 0 &&
       !TemplateArgumentVectorContainsTemplateParameter(
           node->template_arguments)) {
-    TypeRecord* concrete = TypeInstantiateVariableTemplateType(
-        &compiler->syntax, node->symbol, node->template_arguments);
-    int64_t value = 0;
-    if (concrete != NULL && TypeIsIntegral(concrete) &&
-        TypeInstantiateVariableTemplateConstant(
-            &compiler->syntax, node->symbol, node->template_arguments, &value)) {
-      ASTNode* const_node =
-          NewIntConstantASTNode(value, concrete, node->base.location);
-      ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
+    ASTNode* materialized = CXXInstantiateVariableTemplateValue(
+        node->symbol, node->template_arguments, node->base.location);
+    if (materialized != NULL) {
+      ASTNodeReplaceChild(node->base.parent, node->base.child_id, materialized,
                           true);
-      const_node->flags |= kASTAnalyzed;
-      return const_node;
+      materialized->flags |= kASTAnalyzed;
+      return materialized;
     }
-    double floating_value = 0;
-    if (concrete != NULL && TypeIsFloatingPoint(concrete) &&
-        TypeInstantiateVariableTemplateFloatingConstant(
-            &compiler->syntax, node->symbol, node->template_arguments,
-            &floating_value)) {
-      ASTNode* const_node = NewRealConstantASTNode(
-          floating_value, concrete, node->base.location);
-      ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
-                          true);
-      const_node->flags |= kASTAnalyzed;
-      return const_node;
-    }
-    // A constant long double is not folded through host double, so use the
-    // instantiated initializer itself (`std::numbers::pi_v<long double>`).
-    if (concrete != NULL && TypeUsesLongDoubleRepresentation(concrete) &&
-        (concrete->qualifiers & kQualConst) != 0) {
-      ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
-          &compiler->syntax, node->symbol, node->template_arguments);
-      if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
-        initializer = ((ExpressionInitializerASTNode*)initializer)->expr;
-      }
-      if (initializer != NULL) {
-        TypeRecord* value_type = TypeRecordCopy(concrete);
-        value_type->qualifiers &= ~(kQualConst | kQualVolatile);
-        ASTNode* cast =
-            NewCastASTNode(value_type, node->base.location, initializer);
-        TypeRecordDelete(value_type);
-        TypeRecordDelete(concrete);
-        ASTNodeReplaceChild(node->base.parent, node->base.child_id, cast, true);
-        return AnalyzeExpression(cast);
-      }
-    }
-    // A variable template whose instantiation is a class-type tag object (e.g.
-    // `std::in_place_index<1>` of type `in_place_index_t<1>`) rather than a
-    // folded constant.  Materialize a value-initialized temporary of the
-    // concrete type so overload resolution and template argument deduction see
-    // the correct `in_place_index_t<1>` type.
-    if (concrete != NULL && TypeIsStructOrUnion(concrete)) {
-      SourceLocation location = node->base.location;
-      Symbol* temp = SyntaxNewTemporary(&compiler->syntax, concrete);
-      temp->location = location;
-      ASTNode* temp_id = NewIdentifierASTNode(temp, location);
-      temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
-      Vector* initializer_values = NewVector();
-      Struct* value_class = concrete->info.struct_info;
-      bool has_object_state = false;
-      for (size_t i = 0;
-           value_class != NULL && i < value_class->members.length; ++i) {
-        StructMember* member = value_class->members.value.p[i];
-        if (member != NULL && member->symbol != NULL &&
-            !member->is_static && !member->is_member_function &&
-            !StorageIs(member->symbol->storage, STO(typedef))) {
-          has_object_state = true;
-          break;
-        }
-      }
-      if (has_object_state) {
-        ASTNode* concrete_initializer =
-            TypeInstantiateVariableTemplateInitializer(
-                &compiler->syntax, node->symbol, node->template_arguments);
-        if (concrete_initializer != NULL) {
-          VectorAppend(initializer_values, concrete_initializer);
-        }
-      }
-      ASTNode* initializer = NewBracedInitializerASTNode(
-          initializer_values, NULL, location);
-      ASTNode* literal =
-          NewCompoundLiteralASTNode(temp_id, location, initializer);
-      ASTNodeReplaceChild(node->base.parent, node->base.child_id, literal, true);
-      ASTNode* analyzed = AnalyzeExpression(literal);
-      // A variable template specialization names a variable, so referring to it
-      // yields an lvalue -- a const one, these objects being `constexpr`.
-      // Calling it a prvalue made `T&&` deduce `T = X` instead of
-      // `T = const X&`, and binding the const object to the resulting `X&&`
-      // was then rejected (`std::views::empty<int>` passed to a generic range
-      // parameter).
-      analyzed->value_category = kValueCategoryLvalue;
-      return analyzed;
-    }
-    TypeRecordDelete(concrete);
   }
 
   if (CompilerIsCXX() && node->symbol != NULL &&
@@ -1403,10 +2555,63 @@ static ASTNode* AddressOfFunctionSymbol(Symbol* function, SourceLocation locatio
   return address;
 }
 
+static bool ClosureCallOperatorIsGeneric(Symbol* call_op) {
+  return call_op != NULL &&
+         (call_op->flags.is_template ||
+          (call_op->type != NULL &&
+           call_op->type->info.function.template_parameters.length > 0));
+}
+
+/* [temp.deduct.funcaddr]: instantiate a generic lambda's `operator()` against
+ * the destination function-pointer signature. */
+static Symbol* ResolveClosureCallOperatorForFunctionPointer(
+    Struct* closure, TypeRecord* target_fn) {
+  if (closure == NULL || target_fn == NULL || !TypeIsFunction(target_fn)) {
+    return NULL;
+  }
+  StructMember* call_member = ClosureCallOperatorMember(closure);
+  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
+  if (call_op == NULL || call_op->type == NULL || !TypeIsFunction(call_op->type)) {
+    return NULL;
+  }
+  if (!ClosureCallOperatorIsGeneric(call_op)) {
+    return call_op;
+  }
+  if (target_fn == NULL) {
+    return NULL;
+  }
+  Vector* actuals = NewVector();
+  for (size_t i = 0; i < target_fn->info.function.prototype.length; i++) {
+    Symbol* formal = target_fn->info.function.prototype.value.p[i];
+    if (formal == NULL || formal->type == NULL) {
+      VectorDestruct(&actuals);
+      return NULL;
+    }
+    Symbol* standin = NewSymbol("__deduce", TypeRecordCopy(formal->type),
+                                STO(auto));
+    standin->flags.is_defined = true;
+    standin->location = call_op->location;
+    ASTNode* arg = NewIdentifierASTNode(standin, call_op->location);
+    ASTNodeSetType(arg, standin->type);
+    arg->flags |= kASTAnalyzed;
+    VectorAppend(actuals, arg);
+  }
+  Symbol* resolved = TypeDeduceFunctionTemplateFromCallWithOffset(
+      &compiler->syntax, call_op, actuals, 1);
+  VectorDestruct(&actuals);
+  if (resolved == NULL || resolved == call_op || resolved->type == NULL ||
+      !TypeIsFunction(resolved->type)) {
+    return NULL;
+  }
+  TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, resolved);
+  return resolved;
+}
+
 /* Non-capturing lambda `+[](Args) -> R { ... }` converts to `R (*)(Args)`.
  * The pointer addresses a thunk that default-constructs the closure and
  * calls its `operator()`. */
-static ASTNode* LambdaToFunctionPointer(ASTNode* lambda) {
+static ASTNode* LambdaToFunctionPointer(ASTNode* lambda,
+                                        TypeRecord* target_fn) {
   if (lambda == NULL || (lambda->flags & kASTLambdaExpression) == 0 ||
       lambda->type == NULL || !TypeIsStructOrUnion(lambda->type) ||
       lambda->type->info.struct_info == NULL) {
@@ -1417,9 +2622,9 @@ static ASTNode* LambdaToFunctionPointer(ASTNode* lambda) {
     return NULL;
   }
   StructMember* call_member = ClosureCallOperatorMember(closure);
-  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
-  if (call_op == NULL || call_op->flags.is_template ||
-      call_op->type->info.function.template_parameters.length > 0) {
+  Symbol* call_op =
+      ResolveClosureCallOperatorForFunctionPointer(closure, target_fn);
+  if (call_op == NULL || call_member == NULL) {
     return NULL;
   }
   TypeRecord* method = call_op->type;
@@ -1508,12 +2713,17 @@ static bool LambdaCallMatchesFunctionPointer(ASTNode* lambda,
   if (ClosureHasCaptureFields(closure)) {
     return false;
   }
+  TypeRecord* target = pointer->next;
   StructMember* call_member = ClosureCallOperatorMember(closure);
-  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
-  if (call_op == NULL || call_op->flags.is_template || call_op->type == NULL ||
-      !TypeIsFunction(call_op->type) ||
-      call_op->type->info.function.template_parameters.length > 0) {
+  Symbol* primary = call_member != NULL ? call_member->symbol : NULL;
+  Symbol* call_op =
+      ResolveClosureCallOperatorForFunctionPointer(closure, target);
+  if (call_op == NULL || call_op->type == NULL ||
+      !TypeIsFunction(call_op->type)) {
     return false;
+  }
+  if (primary != NULL && ClosureCallOperatorIsGeneric(primary)) {
+    return true;
   }
   TypeRecord* method = call_op->type;
   if (TypeFunctionReturnContainsAuto(method) || method->next == NULL) {
@@ -1522,7 +2732,6 @@ static bool LambdaCallMatchesFunctionPointer(ASTNode* lambda,
   if (method->next == NULL) {
     return false;
   }
-  TypeRecord* target = pointer->next;
   if (method->info.function.varargs != target->info.function.varargs) {
     return false;
   }
@@ -1543,20 +2752,40 @@ static bool LambdaCallMatchesFunctionPointer(ASTNode* lambda,
   if (TypeIsVoid(method->next) && TypeIsVoid(target->next)) {
     return true;
   }
-  return TypeEqual(method->next, target->next);
+  return TypeEqual(method->next, target->next) ||
+         TypeEqualIgnoringQualifiers(method->next, target->next);
+}
+
+static ASTNode* CXXLambdaConversionExpression(ASTNode* from) {
+  ASTNode* expr = from;
+  if (expr != NULL && expr->op == AST_OP(init)) {
+    expr = ((BinaryASTNode*)expr)->right;
+  }
+  if (expr != NULL && expr->op == AST_OP(expr_init)) {
+    expr = ((ExpressionInitializerASTNode*)expr)->expr;
+  }
+  return expr;
 }
 
 bool CXXConvertNonCapturingLambdaToFunctionPointer(ASTNode* from,
                                                    TypeRecord* to) {
-  if (!LambdaCallMatchesFunctionPointer(from, to)) {
+  ASTNode* expr = CXXLambdaConversionExpression(from);
+  if (expr == NULL || (expr->flags & kASTLambdaExpression) == 0) {
     return false;
   }
-  ASTNode* converted = LambdaToFunctionPointer(from);
+  if (!LambdaCallMatchesFunctionPointer(expr, to)) {
+    return false;
+  }
+  TypeRecord* target_fn =
+      TypeIsPointer(to) && to->next != NULL && TypeIsFunction(to->next)
+          ? to->next
+          : NULL;
+  ASTNode* converted = LambdaToFunctionPointer(expr, target_fn);
   if (converted == NULL) {
     return false;
   }
-  ASTNode* parent = from->parent;
-  int child_id = from->child_id;
+  ASTNode* parent = expr->parent;
+  int child_id = expr->child_id;
   if (parent == NULL) {
     ASTNodeDelete(converted);
     return false;
@@ -1611,7 +2840,7 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   }
   node->sub = AnalyzeExpression(node->sub);
   if (node->base.op == AST_OP(uplus)) {
-    ASTNode* function_pointer = LambdaToFunctionPointer(node->sub);
+    ASTNode* function_pointer = LambdaToFunctionPointer(node->sub, NULL);
     if (function_pointer != NULL) {
       ASTNodeReplaceChild((ASTNode*)node, 0, function_pointer, true);
     }
@@ -2767,11 +3996,26 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(
     return NULL;
   }
   ASTNode* analyzed_left = AnalyzeExpression(node->left);
-  ASTNode* analyzed_right = AnalyzeExpression(node->right);
   if (analyzed_left != node->left) {
     ASTNodeReplaceChild((ASTNode*)node, 0, analyzed_left,
                         /*delete_old_child=*/false);
   }
+  if ((node->base.op == AST_OP(logand) || node->base.op == AST_OP(logor)) &&
+      !ExpressionIsTemplateDependent(analyzed_left)) {
+    int64_t left_truth = 0;
+    if (EvaluateTruthExpression(analyzed_left, &left_truth)) {
+      if ((node->base.op == AST_OP(logand) && left_truth == 0) ||
+          (node->base.op == AST_OP(logor) && left_truth != 0)) {
+        TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+        ASTNode* discarded = NewIntConstantASTNode(
+            left_truth != 0 ? 1 : 0, bool_type, node->base.location);
+        TypeRecordDelete(bool_type);
+        ASTNodeReplaceChild((ASTNode*)node, 1, discarded, true);
+        return NULL;
+      }
+    }
+  }
+  ASTNode* analyzed_right = AnalyzeExpression(node->right);
   if (analyzed_right != node->right) {
     ASTNodeReplaceChild((ASTNode*)node, 1, analyzed_right,
                         /*delete_old_child=*/false);
@@ -4874,6 +6118,12 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
             !constructor_call &&
             TypeIsStructOrUnion(target->type) &&
             TypeEqual(e->expr->type, target->type);
+        ASTNode* materialized =
+            CXXMaterializeVariableTemplateExpression(e->expr);
+        if (materialized != NULL) {
+          ASTNodeReplaceChild((ASTNode*)e, 0, materialized, true);
+          e->expr = materialized;
+        }
         if (!constructor_call && !cxx_return_elision_initializer) {
           NormalConversion(e->expr, target->type);
         }
@@ -4961,6 +6211,16 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
     }
   }
   MarkCXX26SymbolicConstexprReference(symbol, init);
+
+  if (init != NULL && init->op == AST_OP(expr_init)) {
+    ExpressionInitializerASTNode* expr_init =
+        (ExpressionInitializerASTNode*)init;
+    ASTNode* folded = CXXFoldIsSameVExpression(expr_init->expr);
+    if (folded != NULL && folded != expr_init->expr) {
+      ASTNodeReplaceChild((ASTNode*)expr_init, 0, folded, true);
+      expr_init->expr = folded;
+    }
+  }
 
   // If we are initializing a constant that is integral or floating point
   // we can evaluate the expression, and if successful, assign the value
@@ -5086,6 +6346,12 @@ static void ConvertCompoundAssignmentOperand(BinaryASTNode* node) {
 }
 
 static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
+  if (CompilerIsCXX() && node->base.op == AST_OP(assign) &&
+      node->right != NULL && node->right->op == AST_OP(braced_init) &&
+      (node->base.flags & kASTDependentNewInitializer) != 0) {
+    node->base.flags |= kASTAnalyzed;
+    return (ASTNode*)node;
+  }
   node->left = AnalyzeExpression(node->left);
   // `x = {...}` assigns a braced-init-list, which is not itself an expression.
   // Lower it to a temporary of the left-hand side's type so it is analyzed and
@@ -5100,11 +6366,11 @@ static ASTNode* AnalyzeAssignmentExpression(BinaryASTNode* node) {
     // initializers".  Leave the braced list for
     // RewriteClonedDependentNewInitializer once T is concrete.
     bool dependent_new =
-        (node->base.flags & kASTDependentNewInitializer) != 0 &&
         node->base.type != NULL &&
         (TypeContainsTemplateParameter(node->base.type) ||
          node->base.type->dependent_member_name != NULL);
     if (dependent_new) {
+      node->base.flags |= kASTAnalyzed;
       return (ASTNode*)node;
     }
     TypeRecord* braced_target = node->left->type;
@@ -7553,6 +8819,31 @@ static Struct* CurrentFunctionMemberOwner(void) {
   return FunctionMemberOwner(compiler->current_function);
 }
 
+// A lambda closure's operator() is a member of the closure class, but the
+// lambda body has the access of the function that contains it ([class.local]).
+static Struct* CXXLambdaEnclosingClassAccessContext(TypeRecord* func) {
+  Struct* owner = FunctionMemberOwner(func);
+  if (owner == NULL || owner->tag_symbol == NULL ||
+      !owner->tag_symbol->flags.invented) {
+    return owner;
+  }
+  Struct* context = owner;
+  if (owner->access_enclosing_function != NULL &&
+      owner->access_enclosing_function->type != NULL &&
+      TypeIsFunction(owner->access_enclosing_function->type)) {
+    Struct* enclosing =
+        owner->access_enclosing_function->type->info.function.cxx_member_owner;
+    if (enclosing != NULL) {
+      context = enclosing;
+    }
+  }
+  if (context == owner && owner->lexical_parent != NULL) {
+    // [class.access.nest]: a lambda is a nested class of its enclosing class.
+    context = owner->lexical_parent;
+  }
+  return context;
+}
+
 static Symbol* CXXStructTemplateOrigin(Struct* str) {
   if (str == NULL || str->tag_symbol == NULL) {
     return NULL;
@@ -7689,16 +8980,36 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   if (effective_access == kAccessPublic) {
     return true;
   }
+  TypeRecord* func = compiler->current_function;
+  if (func != NULL && TypeIsFunction(func) && owner != NULL) {
+    Struct* member_owner = FunctionMemberOwner(func);
+    if (member_owner != NULL &&
+        CXXSameAccessClass(member_owner, owner)) {
+      return true;
+    }
+  }
   Struct* current_owner = NULL;
-  if (compiler->current_class_access_context != NULL) {
+  if (func != NULL && TypeIsFunction(func)) {
+    Struct* closure_owner = FunctionMemberOwner(func);
+    Struct* lambda_context = CXXLambdaEnclosingClassAccessContext(func);
+    if (closure_owner != NULL && closure_owner->tag_symbol != NULL &&
+        closure_owner->tag_symbol->flags.invented &&
+        lambda_context != closure_owner) {
+      // A lambda body uses the access of its enclosing function ([class.local]),
+      // not the closure type that owns operator().
+      current_owner = lambda_context;
+    }
+  }
+  if (current_owner == NULL &&
+      compiler->current_class_access_context != NULL) {
     // A static data member initializer is in the scope of its class and may
     // name the class's private and protected members. Template body cloning also
     // re-analyzes member expressions before current_function has a recoverable
     // owner, but still within the instantiated class context.
     current_owner = compiler->current_class_access_context;
-  } else if (compiler->current_function != NULL &&
-             TypeIsFunction(compiler->current_function)) {
-    current_owner = CurrentFunctionMemberOwner();
+  } else if (current_owner == NULL && func != NULL &&
+             TypeIsFunction(func)) {
+    current_owner = CXXLambdaEnclosingClassAccessContext(func);
   }
   if (CurrentFunctionIsFriendOf(owner) ||
       (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context)) ||
@@ -7756,12 +9067,14 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
     return false;
   }
   if (effective_access == kAccessPrivate) {
-    return current_owner == lookup_context;
+    return lookup_context != NULL &&
+           CXXSameAccessClass(current_owner, lookup_context);
   }
   return effective_access == kAccessProtected &&
-         (current_owner == lookup_context ||
-          StructIsDerivedFrom(current_owner, lookup_context,
-                              /*public_only=*/false));
+         (lookup_context != NULL &&
+          (CXXSameAccessClass(current_owner, lookup_context) ||
+           StructIsDerivedFrom(current_owner, lookup_context,
+                               /*public_only=*/false)));
 }
 
 static bool MemberReceiverIsConst(BinaryASTNode* node) {
@@ -8524,7 +9837,62 @@ static int FuncAddrBaseRank(ASTNode* actual, TypeRecord* target) {
   return resolved != NULL ? 0 : -1;
 }
 
+/* True when `type` names a member of a still-dependent type (`T::slot_type`,
+ * `remove_reference<T>::type`). */
+static bool TypeHasDependentMemberName(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (current->dependent_member_name != NULL) {
+      return true;
+    }
+    if (current->template_arguments != NULL) {
+      for (size_t i = 0; i < current->template_arguments->length; i++) {
+        TemplateArgument* arg = current->template_arguments->value.p[i];
+        if (arg != NULL && arg->type != NULL &&
+            TypeHasDependentMemberName(arg->type)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/* The dependent member is a member of the enclosing class template (index below
+ * `template_parameter_base`), not of this function template's own parameters.
+ * `Policy::slot_type` qualifies; `remove_reference<T>::type` on `forward` does
+ * not. */
+static bool TypeDependsOnEnclosingTemplateParameter(TypeRecord* type, int base) {
+  if (base <= 0) {
+    return false;
+  }
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (current->dependent_member_name != NULL &&
+        current->template_parameter_index >= 0 &&
+        current->template_parameter_index < base) {
+      return true;
+    }
+    if (current->template_arguments != NULL) {
+      for (size_t i = 0; i < current->template_arguments->length; i++) {
+        TemplateArgument* arg = current->template_arguments->value.p[i];
+        if (arg != NULL && arg->type != NULL &&
+            TypeDependsOnEnclosingTemplateParameter(arg->type, base)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
+  /* nullptr converts to any object pointer.  While `slot_type*` is still
+   * `Policy::slot_type*`, that conversion is not a typed pointer yet; treat it
+   * as viable so the other arguments can rank the overload. */
+  if (actual != NULL && actual->type != NULL && TypeIsNullPointer(actual->type) &&
+      formal_type != NULL && formal_type->declarator == kDeclPointer &&
+      TypeHasDependentMemberName(formal_type)) {
+    return 0;
+  }
   TypeRecord* target = formal_type;
   bool reference = TypeIsReference(formal_type);
   if (reference) {
@@ -8560,6 +9928,15 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
     }
     if (FuncAddrBaseRank(actual, target) >= 0) {
       return binding_rank;
+    }
+    if (TypeIsPointer(target) && target->next != NULL &&
+        TypeIsFunction(target->next)) {
+      ASTNode* lambda_expr = CXXLambdaConversionExpression(actual);
+      if (lambda_expr != NULL &&
+          (lambda_expr->flags & kASTLambdaExpression) != 0 &&
+          LambdaCallMatchesFunctionPointer(lambda_expr, target)) {
+        return binding_rank;
+      }
     }
     // A user-defined conversion produces a temporary. It can satisfy an rvalue
     // reference or a const lvalue reference, but never a non-const lvalue
@@ -8630,6 +10007,15 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
   if (FuncAddrBaseRank(actual, target) >= 0) {
     // Exact function-to-pointer conversion (an lvalue transformation).
     return 5;
+  }
+  if (TypeIsPointer(target) && target->next != NULL &&
+      TypeIsFunction(target->next)) {
+    ASTNode* lambda_expr = CXXLambdaConversionExpression(actual);
+    if (lambda_expr != NULL &&
+        (lambda_expr->flags & kASTLambdaExpression) != 0 &&
+        LambdaCallMatchesFunctionPointer(lambda_expr, target)) {
+      return 5;
+    }
   }
   // A null pointer constant is an integer literal with value zero
   // ([conv.ptr]).  An enumerator is not an integer literal, even when its
@@ -9677,6 +11063,43 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
   }
   if (!candidate->flags.is_template) {
     return explicit_args == NULL ? candidate : NULL;
+  }
+  // `f<T>()` inside a class template, where T is still a template parameter
+  // and does not appear in f's parameter list (`IsNoThrowSwappable<hasher>()`).
+  // The specialization cannot be built yet.  Keep the primary so a dependent
+  // noexcept specifier is not rejected as a deduction failure.
+  if (explicit_args != NULL) {
+    bool dependent_explicit = false;
+    for (size_t i = 0; i < explicit_args->length; i++) {
+      TemplateArgument* arg = explicit_args->value.p[i];
+      if (arg != NULL && arg->type != NULL &&
+          TypeContainsTemplateParameter(arg->type)) {
+        dependent_explicit = true;
+        break;
+      }
+      if (arg != NULL && arg->dependent_expr != NULL) {
+        dependent_explicit = true;
+        break;
+      }
+    }
+    if (dependent_explicit) {
+      return candidate;
+    }
+  }
+  // A member function template whose signature still names a member of the
+  // enclosing class template (`slot_type` = `typename Policy::slot_type`)
+  // cannot be instantiated until that class is.  Keep the primary; the call is
+  // resolved again when the enclosing class is instantiated.
+  {
+    int base = candidate->type->info.function.template_parameter_base;
+    Vector* formals = &candidate->type->info.function.prototype;
+    for (size_t i = 0; i < formals->length; i++) {
+      Symbol* formal = formals->value.p[i];
+      if (formal != NULL &&
+          TypeDependsOnEnclosingTemplateParameter(formal->type, base)) {
+        return candidate;
+      }
+    }
   }
   Vector* prototype = &candidate->type->info.function.prototype;
   for (size_t i = 0; node->children != NULL && i < node->children->length &&
@@ -10967,7 +12390,12 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
       id->symbol != NULL && id->symbol->type != NULL &&
       TypeIsFunction(id->symbol->type) &&
       id->symbol->type->info.function.unknown_args;
-  if (!gathered_inline_overloads && !id->symbol->flags.is_overloaded &&
+  // The class-scope symbol for a static member is cloned from the first
+  // overload, so its is_overloaded flag stays false after later overloads are
+  // added.  The candidates vector still holds the full set.
+  bool gathered_member_overloads = candidates.length > 1;
+  if (!gathered_inline_overloads && !gathered_member_overloads &&
+      !id->symbol->flags.is_overloaded &&
       !has_adl_candidates && !ordinary_unknown &&
       !(id->symbol->flags.is_template && id->symbol->type != NULL &&
         TypeIsFunction(id->symbol->type) &&
@@ -10978,9 +12406,11 @@ static void ResolveOverloadedFunctionCall(VectorASTNode* node) {
   Symbol* best = ResolveFunctionCandidateVector(
       &id->symbol->name, &candidates, node->children, id->template_arguments,
       /*diagnose_no_match=*/id->symbol->flags.is_overloaded || has_adl_candidates ||
-          ordinary_unknown || gathered_inline_overloads,
+          ordinary_unknown || gathered_inline_overloads ||
+          gathered_member_overloads,
       /*diagnose_ambiguous=*/id->symbol->flags.is_overloaded ||
-          has_adl_candidates || ordinary_unknown || gathered_inline_overloads,
+          has_adl_candidates || ordinary_unknown || gathered_inline_overloads ||
+          gathered_member_overloads,
       (ASTNode*)node);
   VectorDestruct(&candidates);
   if (best == NULL) {
@@ -11654,6 +13084,11 @@ static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
     if (actual == NULL) {
       continue;
     }
+    // A generic lambda's closure type carries template parameters, but a
+    // function-pointer formal can still convert it ([over.over] / funcaddr).
+    if ((actual->flags & kASTLambdaExpression) != 0) {
+      continue;
+    }
     // Unknown is the placeholder given to a dependent operand (for example
     // `*this->field` while the capture's type is still a template parameter).
     // Instantiating a function template against it caches a specialization on
@@ -11746,6 +13181,9 @@ static bool IsDependentMemberTemplateCall(VectorASTNode* node) {
   for (size_t i = 0; i < node->children->length; i++) {
     ASTNode* actual = node->children->value.p[i];
     if (actual == NULL || !TypeContainsTemplateParameter(actual->type)) {
+      continue;
+    }
+    if ((actual->flags & kASTLambdaExpression) != 0) {
       continue;
     }
     if (actual->op == AST_OP(identifier)) {
@@ -12166,6 +13604,13 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       if (id->symbol->flags.is_template &&
           !TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
               id->symbol, id->template_arguments, node->children, 0)) {
+        if (StringEqual(&id->symbol->name, "CopyConstruct") &&
+            node->children != NULL && node->children->length != 2) {
+          ASTNodeSetType((ASTNode*)node,
+                         NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                               kQualPlain));
+          return (ASTNode*)node;
+        }
         if (ConceptsFunctionTemplateHasAssociatedConstraint(id->symbol)) {
           ReportUnsatisfiedFunctionTemplateConstraints(node, id->symbol,
                                                        id->template_arguments,
@@ -12188,6 +13633,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     bool actuals_type_dependent = false;
     for (size_t i = 0; i < node->children->length; i++) {
       ASTNode* actual = node->children->value.p[i];
+      if (actual != NULL && (actual->flags & kASTLambdaExpression) != 0) {
+        continue;
+      }
       if (actual != NULL && actual->type != NULL &&
           (TypeContainsTemplateParameter(actual->type) ||
            TypeContainsAuto(actual->type) ||
@@ -12359,9 +13807,25 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       // `f<T>()` inside a class template: T is not concrete yet.  Keep the
       // call dependent so the enclosing constexpr initializer waits for
       // instantiation instead of rejecting the primary template.
+      bool dependent_signature = false;
+      if (TypeIsFunction(id->symbol->type)) {
+        Vector* formals = &id->symbol->type->info.function.prototype;
+        for (size_t i = 0; i < formals->length; i++) {
+          Symbol* formal = formals->value.p[i];
+          if (formal != NULL && TypeHasDependentMemberName(formal->type)) {
+            dependent_signature = true;
+            break;
+          }
+        }
+        if (id->symbol->type->next != NULL &&
+            TypeHasDependentMemberName(id->symbol->type->next)) {
+          dependent_signature = true;
+        }
+      }
       if (TypeIsFunction(id->symbol->type) &&
-          TemplateArgumentVectorContainsTemplateParameter(
-              id->template_arguments)) {
+          (TemplateArgumentVectorContainsTemplateParameter(
+               id->template_arguments) ||
+           dependent_signature)) {
         node->base.flags |= kASTDependentFunctorCall;
         TypeRecord* return_type = TypeSubstituteFunctionTemplateReturnType(
             &compiler->syntax, id->symbol, id->template_arguments);
@@ -12409,6 +13873,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     bool argument_not_ready = false;
     for (size_t i = 0; i < node->children->length; i++) {
       ASTNode* actual = node->children->value.p[i];
+      if (actual != NULL && (actual->flags & kASTLambdaExpression) != 0) {
+        continue;
+      }
       if (actual != NULL && actual->type != NULL &&
           (TypeIsUnknown(actual->type) ||
            TypeContainsTemplateParameter(actual->type) ||
@@ -12614,6 +14081,21 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         SetNeedAddress(actual);
       } else {
         actual = FoldConstantArgument(actual);
+        if (!polymorphic_special_this && TypeIsPointer(formal->type) &&
+            formal->type->next != NULL &&
+            TypeIsFunction(formal->type->next)) {
+          ASTNode* lambda_expr = CXXLambdaConversionExpression(actual);
+          if (lambda_expr != NULL &&
+              (lambda_expr->flags & kASTLambdaExpression) != 0 &&
+              LambdaCallMatchesFunctionPointer(lambda_expr, formal->type)) {
+            ASTNode* converted = LambdaToFunctionPointer(
+                lambda_expr, formal->type->next);
+            if (converted != NULL) {
+              ASTNodeReplaceChild((ASTNode*)node, (int)i, converted, true);
+              actual = converted;
+            }
+          }
+        }
         ASTNode* materialized =
             actual->value_category != kValueCategoryPrvalue
                 ? MaterializeCXXByValueClassArgument(actual, formal->type)
@@ -12808,6 +14290,14 @@ static StructMember* MemberPointerExpressionMember(ASTNode* node) {
 }
 
 static ASTNode* AnalyzeMemberPointerReference(BinaryASTNode* node) {
+  if (node->right != NULL) {
+    ASTNode* materialized =
+        CXXMaterializeVariableTemplateExpression(node->right);
+    if (materialized != NULL) {
+      ASTNodeReplaceChild((ASTNode*)node, 1, materialized, true);
+      node->right = materialized;
+    }
+  }
   node->left = AnalyzeExpression(node->left);
   node->right = AnalyzeExpression(node->right);
   bool right_is_nttp =
@@ -12815,12 +14305,18 @@ static ASTNode* AnalyzeMemberPointerReference(BinaryASTNode* node) {
       ((IdentifierASTNode*)node->right)->symbol != NULL &&
       ((IdentifierASTNode*)node->right)->symbol->flags.is_template_parameter &&
       !((IdentifierASTNode*)node->right)->symbol->flags.is_template_type_parameter;
-  if (right_is_nttp || ExpressionIsTemplateDependent(node->right) ||
-      (node->right != NULL && node->right->type != NULL &&
-       (TypeContainsTemplateParameter(node->right->type) ||
-        TypeIsUnknown(node->right->type))) ||
-      (node->left != NULL && node->left->type != NULL &&
-       TypeContainsTemplateParameter(node->left->type))) {
+  bool concrete_member_pointer =
+      node->right != NULL && node->right->type != NULL &&
+      TypeIsMemberPointer(node->right->type) &&
+      !TypeContainsTemplateParameter(node->right->type) &&
+      !TypeIsUnknown(node->right->type);
+  if (!concrete_member_pointer &&
+      (right_is_nttp || ExpressionIsTemplateDependent(node->right) ||
+       (node->right != NULL && node->right->type != NULL &&
+        (TypeContainsTemplateParameter(node->right->type) ||
+         TypeIsUnknown(node->right->type))) ||
+       (node->left != NULL && node->left->type != NULL &&
+        TypeContainsTemplateParameter(node->left->type)))) {
     node->base.flags |= kASTDependentFunctorCall;
     ASTNodeSetType((ASTNode*)node,
                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
@@ -13208,6 +14704,13 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
           member_type = TypeRecordCopy(member_type);
           member_type->qualifiers |= kQualConst;
         }
+        if (member->is_static && member->symbol->variable_template != NULL &&
+            member_node->template_arguments != NULL &&
+            CXXTryReplaceWithVariableTemplateValue(
+                (ASTNode*)node, member->symbol,
+                member_node->template_arguments, node->base.location)) {
+          return;
+        }
         ASTNodeSetType((ASTNode*)node, member_type);
         if (!member->is_member_function) {
           node->base.value_category =
@@ -13248,6 +14751,13 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
           !member->is_mutable && MemberReceiverIsConst(node)) {
         member_type = TypeRecordCopy(member_type);
         member_type->qualifiers |= kQualConst;
+      }
+      if (member->is_static && member->symbol->variable_template != NULL &&
+          member_node->template_arguments != NULL &&
+          CXXTryReplaceWithVariableTemplateValue(
+              (ASTNode*)node, member->symbol, member_node->template_arguments,
+              node->base.location)) {
+        return;
       }
       ASTNodeSetType((ASTNode*)node, member_type);
       if (!member->is_member_function) {
@@ -13611,6 +15121,20 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
   }
 
   TypeRecord* pointee = node->sub->type->next;
+  if (pointee == NULL) {
+    if (CompilerIsCXX() && node->sub->type != NULL &&
+        (TypeIsUnknown(node->sub->type) ||
+         TypeContainsAuto(node->sub->type) ||
+         TypeContainsTemplateParameter(node->sub->type))) {
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+      node->base.value_category = kValueCategoryLvalue;
+      return;
+    }
+    SemanticError(node->sub, "Cannot take contents of this expression");
+    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    return;
+  }
   TypeRecord* materialized =
       TypeMaterializeClassTemplateSpecialization(&compiler->syntax, pointee);
   if (materialized != pointee) {
@@ -14548,8 +16072,29 @@ static void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
 
 static void AnalyzeLogicalOperator(BinaryASTNode* node) {
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
-  
+
+  node->left = CXXFoldIsSameVExpression(node->left);
   node->left = AnalyzeExpression(node->left);
+  if (!ExpressionIsTemplateDependent(node->left)) {
+    int64_t left_truth = 0;
+    if (EvaluateTruthExpression(node->left, &left_truth)) {
+      if (node->base.op == AST_OP(logand) && left_truth == 0) {
+        ASTNode* discarded =
+            NewIntConstantASTNode(0, bool_type, node->base.location);
+        ASTNodeReplaceChild((ASTNode*)node, 1, discarded, true);
+        ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+        return;
+      }
+      if (node->base.op == AST_OP(logor) && left_truth != 0) {
+        ASTNode* discarded =
+            NewIntConstantASTNode(1, bool_type, node->base.location);
+        ASTNodeReplaceChild((ASTNode*)node, 1, discarded, true);
+        ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+        return;
+      }
+    }
+  }
+  node->right = CXXFoldIsSameVExpression(node->right);
   node->right = AnalyzeExpression(node->right);
   if (ExpressionIsTemplateDependent(node->left) ||
       ExpressionIsTemplateDependent(node->right)) {
@@ -15158,7 +16703,110 @@ static void ClearDeferredAutoInitAnalysis(ASTNode* node, void* data,
   }
 }
 
+ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(expr_init)) {
+    ExpressionInitializerASTNode* init = (ExpressionInitializerASTNode*)expr;
+    init->expr = CXXFoldIsSameVExpression(init->expr);
+    return expr;
+  }
+  if (expr->op == AST_OP(init)) {
+    BinaryASTNode* init = (BinaryASTNode*)expr;
+    init->right = CXXFoldIsSameVExpression(init->right);
+    return expr;
+  }
+  if (expr->op == AST_OP(equal) || expr->op == AST_OP(noteq)) {
+    BinaryASTNode* cmp = (BinaryASTNode*)expr;
+    cmp->left = CXXFoldIsSameVExpression(cmp->left);
+    cmp->right = CXXFoldIsSameVExpression(cmp->right);
+    int64_t left_value = 0;
+    int64_t right_value = 0;
+    if (EvaluateIntegerExpression(cmp->left, &left_value) &&
+        EvaluateIntegerExpression(cmp->right, &right_value)) {
+      bool same = left_value == right_value;
+      return CXXNewBoolConstantReplacing(
+          expr, (expr->op == AST_OP(equal)) ? (same ? 1 : 0) : (same ? 0 : 1));
+    }
+    return expr;
+  }
+  if (expr->op == AST_OP(logand) || expr->op == AST_OP(logor)) {
+    BinaryASTNode* logical = (BinaryASTNode*)expr;
+    logical->left = CXXFoldIsSameVExpression(logical->left);
+    logical->right = CXXFoldIsSameVExpression(logical->right);
+    int64_t left_value = 0;
+    int64_t right_value = 0;
+    if (EvaluateIntegerExpression(logical->left, &left_value) &&
+        EvaluateIntegerExpression(logical->right, &right_value)) {
+      bool result = expr->op == AST_OP(logand)
+                        ? (left_value != 0 && right_value != 0)
+                        : (left_value != 0 || right_value != 0);
+      return CXXNewBoolConstantReplacing(expr, result ? 1 : 0);
+    }
+    return expr;
+  }
+  if (expr->op == AST_OP(dot)) {
+    BinaryASTNode* dot = (BinaryASTNode*)expr;
+    if (dot->right != NULL && dot->right->op == AST_OP(identifier)) {
+      ASTNode* folded =
+          CXXTryFoldKUsesPointerTemplate((IdentifierASTNode*)dot->right);
+      if (folded != NULL) {
+        return folded;
+      }
+    }
+    ASTNode* folded = CXXTryFoldIsSameValueDot(dot);
+    if (folded != NULL) {
+      return folded;
+    }
+    return expr;
+  }
+  if (expr->op == AST_OP(call)) {
+    ASTNode* folded = CXXTryFoldGetConstructTypeCall((VectorASTNode*)expr);
+    if (folded != NULL) {
+      return folded;
+    }
+    folded = CXXTryFoldStdGetFromTupleCall((VectorASTNode*)expr);
+    if (folded != NULL) {
+      return folded;
+    }
+    return expr;
+  }
+  if (expr->op != AST_OP(identifier)) {
+    return expr;
+  }
+  expr->flags &= ~kASTAnalyzed;
+  IdentifierASTNode* id = (IdentifierASTNode*)expr;
+  ASTNode* folded = CXXTryFoldIsSameVIdentifier(id);
+  if (folded == NULL) {
+    folded = CXXTryFoldIsArithmeticVIdentifier(id);
+  }
+  if (folded == NULL) {
+    folded = CXXTryFoldKUsesPointerTemplate(id);
+  }
+  return folded != NULL ? folded : expr;
+}
+
+static void ClearStaleIsSameVAnalysis(ASTNode* node, void* data, int child_id,
+                                      VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol != NULL && StringEqual(&id->symbol->name, "is_same_v") &&
+      id->template_arguments != NULL) {
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 ASTNode* AnalyzeExpression(ASTNode* node) {
+  if (node != NULL && (node->flags & kASTAnalyzed) != 0 &&
+      node->op == AST_OP(identifier)) {
+    ClearStaleIsSameVAnalysis(node, NULL, 0, kVisitPreChildren);
+  }
   if (node == NULL || (node->flags & kASTAnalyzed) != 0) {
     return node;
   }
@@ -15368,9 +17016,19 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
       AnalyzePackIndexExpression(binary_node);
       break;
 
-    case AST_OP(call):  // Function call.
+    case AST_OP(call): {  // Function call.
+      ASTNode* folded = CXXTryFoldStdGetFromTupleCall(vector_node);
+      if (folded != NULL) {
+        node = folded;
+        break;
+      }
       node = AnalyzeFunctionCall(vector_node);
+      folded = CXXTryFoldStdGetFromTupleCall((VectorASTNode*)node);
+      if (folded != NULL) {
+        node = folded;
+      }
       break;
+    }
 
     case AST_OP(range_begin):
     case AST_OP(range_end):
@@ -15746,4 +17404,118 @@ bool IsConstantExpression(ASTNode* node) {
     default:
       return false;
   }
+}
+
+static bool TypeIsNamedClass(TypeRecord* type, const char* name) {
+  return type != NULL && TypeIsStructOrUnion(type) &&
+         type->info.struct_info != NULL &&
+         type->info.struct_info->tag_name != NULL &&
+         strcmp(type->info.struct_info->tag_name->value, name) == 0;
+}
+
+static bool TypeIsStdVectorType(TypeRecord* type) {
+  if (TypeIsNamedClass(type, "vector")) {
+    return true;
+  }
+  return type != NULL && type->template_origin != NULL &&
+         strcmp(type->template_origin->name.value, "vector") == 0;
+}
+
+static TypeRecord* StdVectorElementType(TypeRecord* vector_type) {
+  if (vector_type == NULL) {
+    return NULL;
+  }
+  if (vector_type->next != NULL) {
+    return vector_type->next;
+  }
+  if (vector_type->template_arguments != NULL &&
+      vector_type->template_arguments->length > 0) {
+    TemplateArgument* arg = vector_type->template_arguments->value.p[0];
+    if (arg != NULL && arg->kind == kTemplateParameterType) {
+      return arg->type;
+    }
+  }
+  return NULL;
+}
+
+bool CXXTryConvertStdVectorToPointeePointer(ASTNode* from, TypeRecord* to) {
+  if (!CompilerIsCXX() || from == NULL || from->type == NULL || to == NULL ||
+      !TypeIsPointer(to) || !TypeIsStdVectorType(from->type)) {
+    return false;
+  }
+  TypeRecord* element = StdVectorElementType(from->type);
+  if (element == NULL || to->next == NULL ||
+      (!TypeEqualIgnoringQualifiers(element, to->next) &&
+       !TypeEqualIgnoringSign(element, to->next))) {
+    return false;
+  }
+  ASTNode* parent = from->parent;
+  int child_id = from->child_id;
+  SourceLocation location = from->location;
+  ASTNode* object = ASTNodeMove(from);
+  ASTNode* data_member =
+      NewStringConstantASTNode(NewString("data"), NULL, location);
+  ASTNode* data_access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, object, data_member);
+  Vector* args = NewVector();
+  ASTNode* data_call =
+      NewVectorASTNode(AST_OP(call), NULL, location, data_access, args);
+  ASTNode* analyzed = AnalyzeExpression(data_call);
+  if (analyzed == NULL) {
+    return false;
+  }
+  SemanticConvertType(analyzed, to, kConvertNormal);
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, analyzed, false);
+  }
+  return true;
+}
+
+static ASTNode* CXXStdVectorMemberCall(ASTNode* vector,
+                                       const char* member_name,
+                                       SourceLocation location) {
+  ASTNode* member =
+      NewStringConstantASTNode(NewString(member_name), NULL, location);
+  ASTNode* access =
+      NewBinaryASTNode(AST_OP(dot), NULL, location, vector, member);
+  return AnalyzeExpression(
+      NewVectorASTNode(AST_OP(call), NULL, location, access, NewVector()));
+}
+
+bool CXXTryConvertStdVectorToSpan(ASTNode* from, TypeRecord* to) {
+  if (!CompilerIsCXX() || from == NULL || from->type == NULL || to == NULL ||
+      !TypeIsNamedClass(to, "Span") || !TypeIsStdVectorType(from->type)) {
+    return false;
+  }
+  if (TryConvertWithConvertingConstructorImpl(from, to, kConvertNormal,
+                                              /*allow_same_class=*/false)) {
+    return true;
+  }
+  ASTNode* parent = from->parent;
+  int child_id = from->child_id;
+  SourceLocation location = from->location;
+  ASTNode* vector = ASTNodeMove(from);
+  ASTNode* data = CXXStdVectorMemberCall(vector, "data", location);
+  ASTNode* size = CXXStdVectorMemberCall(vector, "size", location);
+  if (data == NULL || size == NULL) {
+    return false;
+  }
+  TypeRecord* span_type = TypeRecordCopy(to);
+  TypeRecordCalculateSize(span_type);
+  Vector* elements = NewVector();
+  VectorAppend(elements,
+               NewExpressionInitializerASTNode(data, location));
+  VectorAppend(elements,
+               NewExpressionInitializerASTNode(size, location));
+  ASTNode* braced =
+      NewBracedInitializerASTNode(elements, span_type, location);
+  ASTNode* lowered = LowerCXXBracedInitToTarget(braced, span_type);
+  TypeRecordDelete(span_type);
+  if (lowered == NULL || lowered == braced) {
+    return false;
+  }
+  if (parent != NULL) {
+    ASTNodeReplaceChild(parent, child_id, lowered, false);
+  }
+  return true;
 }

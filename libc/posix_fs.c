@@ -164,7 +164,7 @@ int remove(const char* path) {
   return Failed(result) ? -1 : 0;
 }
 
-int chmod(const char* path, uint32_t mode) {
+int chmod(const char* path, mode_t mode) {
   long result =
       FsCall(kFsSetPermissions, (intptr_t)path, (intptr_t)mode, 0);
   return Failed(result) ? -1 : 0;
