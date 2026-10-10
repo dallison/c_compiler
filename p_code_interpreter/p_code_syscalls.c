@@ -296,10 +296,14 @@ int64_t PCodeHandlePackedSyscall(PCodeInterpreter* interpreter,
       a0 = ReadPackedLong(&cursor);
       a1 = ReadPackedLong(&cursor);
       break;
+    case P_CODE_SYSCALL_POLL:
+      a0 = ReadPackedLong(&cursor);
+      a1 = (uint32_t)ReadPackedInt(&cursor);
+      a2 = ReadPackedInt(&cursor);
+      break;
     case P_CODE_SYSCALL_FS_READ_SYMLINK:
     case P_CODE_SYSCALL_FS_CANONICAL:
     case P_CODE_SYSCALL_ENVIRONMENT_VALUE:
-    case P_CODE_SYSCALL_POLL:
       a0 = ReadPackedLong(&cursor);
       a1 = ReadPackedLong(&cursor);
       a2 = ReadPackedLong(&cursor);

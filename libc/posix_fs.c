@@ -35,7 +35,8 @@ static long FsCall(int operation, intptr_t first, intptr_t second,
     case kFsSetCurrentPath:
       return syscall(SYS_FS_SET_CURRENT_PATH, first);
     case kFsSetPermissions:
-      return syscall(SYS_FS_SET_PERMISSIONS, first, second, third);
+      return syscall(SYS_FS_SET_PERMISSIONS, first, (unsigned)second,
+                     (int)third);
     case kFsCanonical:
       return syscall(SYS_FS_CANONICAL, first, second, third);
     case kFsDescriptorStatus:

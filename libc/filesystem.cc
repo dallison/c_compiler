@@ -70,6 +70,46 @@ static int64_t __status_call(const char* value, bool follow,
 #endif
 }
 
+static int64_t __read_directory_call(int handle, void* entry) {
+#if defined(__DAVECC_HOST_FS_SERVICE__)
+  return __davecc_linux_fs_service(SYS_FS_READ_DIRECTORY, handle,
+                                    reinterpret_cast<intptr_t>(entry), 0);
+#else
+  return syscall(SYS_FS_READ_DIRECTORY, handle, entry);
+#endif
+}
+
+static int64_t __create_directory_call(const char* value, unsigned mode) {
+#if defined(__DAVECC_HOST_FS_SERVICE__)
+  return __davecc_linux_fs_service(SYS_FS_CREATE_DIRECTORY,
+                                    reinterpret_cast<intptr_t>(value), mode, 0);
+#else
+  return syscall(SYS_FS_CREATE_DIRECTORY, value, mode);
+#endif
+}
+
+static int64_t __set_permissions_call(const char* value, unsigned mode,
+                                      int follow) {
+#if defined(__DAVECC_HOST_FS_SERVICE__)
+  return __davecc_linux_fs_service(SYS_FS_SET_PERMISSIONS,
+                                    reinterpret_cast<intptr_t>(value), mode,
+                                    follow);
+#else
+  return syscall(SYS_FS_SET_PERMISSIONS, value, mode, follow);
+#endif
+}
+
+static int64_t __copy_file_call(const char* source, const char* destination,
+                                int mode) {
+#if defined(__DAVECC_HOST_FS_SERVICE__)
+  return __davecc_linux_fs_service(
+      SYS_FS_COPY_FILE, reinterpret_cast<intptr_t>(source),
+      reinterpret_cast<intptr_t>(destination), mode);
+#else
+  return syscall(SYS_FS_COPY_FILE, source, destination, mode);
+#endif
+}
+
 static int64_t __call1(int operation, const void* first) {
 #if defined(__DAVECC_HOST_FS_SERVICE__)
   return __davecc_linux_fs_service(operation,
@@ -176,10 +216,8 @@ class __directory_stream {
       return;
     }
     __wire_directory_entry entry;
-    int64_t result = __filesystem_detail::__call2(
-        SYS_FS_READ_DIRECTORY,
-        reinterpret_cast<const void*>(static_cast<intptr_t>(__handle)),
-        &entry);
+    int64_t result =
+        __filesystem_detail::__read_directory_call(__handle, &entry);
     if (__error(error, result)) {
       __close();
       return;
@@ -704,9 +742,8 @@ path proximate(const path& value, const path& base) {
 }
 
 bool create_directory(const path& value, error_code& error) noexcept {
-  int64_t result = __filesystem_detail::__call2(
-      SYS_FS_CREATE_DIRECTORY, value.c_str(),
-      reinterpret_cast<const void*>(static_cast<intptr_t>(0777)));
+  int64_t result =
+      __filesystem_detail::__create_directory_call(value.c_str(), 0777);
   if (result == -EEXIST) {
     bool result_is_directory = is_directory(value, error);
     if (!error && !result_is_directory) {
@@ -728,10 +765,9 @@ bool create_directory(const path& value, const path& attributes,
                       error_code& error) noexcept {
   file_status attributes_status = status(attributes, error);
   if (error) return false;
-  int64_t result = __filesystem_detail::__call2(
-      SYS_FS_CREATE_DIRECTORY, value.c_str(),
-      reinterpret_cast<const void*>(static_cast<intptr_t>(
-          static_cast<unsigned>(attributes_status.permissions()) & 07777)));
+  int64_t result = __filesystem_detail::__create_directory_call(
+      value.c_str(),
+      static_cast<unsigned>(attributes_status.permissions()) & 07777);
   if (result == -EEXIST) {
     bool result_is_directory = is_directory(value, error);
     if (!error && !result_is_directory) {
@@ -854,9 +890,8 @@ bool copy_file(const path& source, const path& destination,
   if ((options & copy_options::overwrite_existing) != copy_options::none)
     mode |= 2;
   if ((options & copy_options::update_existing) != copy_options::none) mode |= 4;
-  int64_t result = __filesystem_detail::__call3(
-      SYS_FS_COPY_FILE, source.c_str(), destination.c_str(),
-      reinterpret_cast<const void*>(static_cast<intptr_t>(mode)));
+  int64_t result = __filesystem_detail::__copy_file_call(
+      source.c_str(), destination.c_str(), mode);
   if (__filesystem_detail::__error(error, result)) return false;
   return result == 0;
 }
@@ -1033,10 +1068,8 @@ void permissions(const path& value, perms permissions_value,
   }
   bool follow =
       (options & perm_options::nofollow) == static_cast<perm_options>(0);
-  int64_t result = __filesystem_detail::__call3(
-      SYS_FS_SET_PERMISSIONS, value.c_str(),
-      reinterpret_cast<const void*>(static_cast<intptr_t>(mode)),
-      reinterpret_cast<const void*>(static_cast<intptr_t>(follow ? 1 : 0)));
+  int64_t result = __filesystem_detail::__set_permissions_call(
+      value.c_str(), mode, follow ? 1 : 0);
   __filesystem_detail::__error(error, result);
 }
 void permissions(const path& value, perms permissions_value,
