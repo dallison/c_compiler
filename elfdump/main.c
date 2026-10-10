@@ -282,7 +282,7 @@ static void PrintSymbol(ELFReaderFile* elf,
       bind = "global";
       break;
     case STB(weak):
-      bind = "weal";
+      bind = "weak";
       break;
   }
   const char* type = "notype";

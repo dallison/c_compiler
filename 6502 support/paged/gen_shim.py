@@ -30,7 +30,7 @@ SHIM_PREFIXES = (
 )
 
 
-def parse_funcs(path):
+def parse_funcs(path, weak):
     names = []
     seen = set()
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
@@ -39,7 +39,7 @@ def parse_funcs(path):
             # elfdump: index value size type bind section(shndx) name
             if len(parts) < 7:
                 continue
-            if parts[3] != "func" or parts[4] != "global":
+            if parts[3] != "func" or parts[4] not in ("global", "weak"):
                 continue
             section = parts[5]
             # Undefined references are printed with an empty section and a
@@ -55,6 +55,8 @@ def parse_funcs(path):
                 continue
             seen.add(name)
             names.append(name)
+            if parts[4] == "weak":
+                weak.add(name)
     return names
 
 
@@ -93,7 +95,8 @@ def main():
     parser.add_argument("--update-exports", action="store_true")
     args = parser.parse_args()
 
-    defined = parse_funcs(args.symbols)
+    weak = set()
+    defined = parse_funcs(args.symbols, weak)
     defined_set = set(defined)
     try:
         exports = read_exports(args.exports)
@@ -151,7 +154,8 @@ def main():
         for index, name in enumerate(exports):
             address = VECTOR_BASE + (index + 1) * VECTOR_STRIDE
             out.write('.section ".text.%s", "ax", @progbits\n' % name)
-            out.write(".global %s\n" % name)
+            # A program may override a weak libc definition with its own.
+            out.write("%s %s\n" % (".weak" if name in weak else ".global", name))
             out.write(".type %s, @function\n" % name)
             out.write("%s:\n" % name)
             out.write("  LDA #%d\n" % args.rom_index)

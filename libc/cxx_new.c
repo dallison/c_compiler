@@ -26,32 +26,32 @@ static void* CXXAllocateLong(unsigned long size) {
   return CXXAllocate((size_t)size);
 }
 
-void* __davecc_operator_new(unsigned long size) {
+// A program may replace each of these on its own ([replacement.functions]),
+// while this object is still linked for the others.
+__attribute__((weak)) void* __davecc_operator_new(unsigned long size) {
   return CXXAllocateLong(size);
 }
 
-void* __davecc_operator_new_array(unsigned long size) {
-  return CXXAllocateLong(size);
+__attribute__((weak)) void* __davecc_operator_new_array(unsigned long size) {
+  return __davecc_operator_new(size);
 }
 
-void* __davecc_operator_new32(unsigned int size) {
+__attribute__((weak)) void* __davecc_operator_new32(unsigned int size) {
   return CXXAllocate(size);
 }
 
-void* __davecc_operator_new_array32(unsigned int size) {
-  return CXXAllocate(size);
+__attribute__((weak)) void* __davecc_operator_new_array32(unsigned int size) {
+  return __davecc_operator_new32(size);
 }
 
-void __davecc_operator_delete(void* ptr) {
+__attribute__((weak)) void __davecc_operator_delete(void* ptr) {
   if (ptr != NULL) {
     free(ptr);
   }
 }
 
-void __davecc_operator_delete_array(void* ptr) {
-  if (ptr != NULL) {
-    free(ptr);
-  }
+__attribute__((weak)) void __davecc_operator_delete_array(void* ptr) {
+  __davecc_operator_delete(ptr);
 }
 
 // std::new_handler is `void (*)()`; std::set_new_handler / std::get_new_handler

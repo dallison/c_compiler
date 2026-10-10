@@ -113,7 +113,7 @@ $(asm_return_instruction)
 EOF
   compile_obj "$work/weak_asm.s" "$work/weak_asm.o"
   "$ELFDUMP" -s "$work/weak_asm.o" >"$work/weak_asm.symbols"
-  if ! grep -q "weal.*weak_asm_func" "$work/weak_asm.symbols"; then
+  if ! grep -q "weak.*weak_asm_func" "$work/weak_asm.symbols"; then
     echo "FAIL assembler weak symbol binding"
     sed 's/^/  /' "$work/weak_asm.symbols"
     exit 1
