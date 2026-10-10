@@ -758,6 +758,7 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   copy->pack_index_expr = arg->pack_index_expr;
   copy->object_initializer =
       ASTNodeClone(arg->object_initializer, IdentityCloneNode, NULL, NULL);
+  copy->lvalue_symbol = arg->lvalue_symbol;
   return copy;
 }
 
@@ -942,6 +943,88 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
   return true;
 }
 
+Symbol* TemplateArgumentLvalueSymbol(ASTNode* expr) {
+  if (expr == NULL || expr->op != AST_OP(identifier)) {
+    return NULL;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
+  if (symbol == NULL || symbol->type == NULL ||
+      TypeIsFunction(symbol->type) || TypeIsReference(symbol->type) ||
+      symbol->flags.is_template_parameter || symbol->flags.is_argument ||
+      symbol->flags.is_temp || symbol->flags.is_concept ||
+      symbol->variable_template != NULL ||
+      (symbol->storage & (STO(typedef) | STO(auto) | STO(register) |
+                          STO(thread))) != 0 ||
+      (symbol->flags.is_block_scope && (symbol->storage & STO(static)) == 0) ||
+      (symbol->flags.value_set && !symbol->flags.is_defined)) {
+    return NULL;
+  }
+  return symbol;
+}
+
+bool TemplateArgumentSetLvalue(TemplateArgument* arg, Symbol* symbol,
+                               bool value_ok, bool may_be_dependent) {
+  arg->lvalue_symbol = symbol;
+  if (value_ok) {
+    return true;
+  }
+  if (may_be_dependent && !symbol->flags.value_set &&
+      (symbol->flags.is_constexpr || TypeIsConst(symbol->type))) {
+    return false;
+  }
+  TypeRecordDelete(arg->type);
+  arg->type = NewReferenceTypeRecord(kQualPlain, false);
+  TypeRecordChain(arg->type, TypeRecordCopy(symbol->type));
+  arg->type->type = symbol->type->type;
+  TypeRecordCalculateSize(arg->type);
+  arg->value_kind = kTemplateValuePointer;
+  arg->value_symbol = symbol;
+  arg->value_offset = 0;
+  arg->int_value = 0;
+  return true;
+}
+
+bool TemplateArgumentBindReferenceParameter(TemplateArgument* arg,
+                                            TypeRecord* parameter_type) {
+  if (arg == NULL || parameter_type == NULL ||
+      !TypeIsReference(parameter_type) || arg->lvalue_symbol == NULL ||
+      arg->dependent_expr != NULL || arg->template_parameter_index >= 0) {
+    return false;
+  }
+  TemplateValueKind kind = TemplateArgumentConcreteValueKind(arg);
+  if (kind != kTemplateValueIntegral && kind != kTemplateValueObject &&
+      !(kind == kTemplateValuePointer && arg->type != NULL &&
+        TypeIsReference(arg->type))) {
+    return false;
+  }
+  TypeRecord* object_type = arg->lvalue_symbol->type;
+  TypeRecord* referent = parameter_type->next;
+  if (object_type == NULL || referent == NULL ||
+      !TypeEqualIgnoringTopLevelQualifierMask(object_type, referent,
+                                              kQualConst | kQualVolatile)) {
+    return false;
+  }
+  TypeRecord* object_element = object_type;
+  TypeRecord* referent_element = referent;
+  while (TypeIsArray(object_element) && TypeIsArray(referent_element)) {
+    object_element = object_element->next;
+    referent_element = referent_element->next;
+  }
+  if ((object_element->qualifiers & ~referent_element->qualifiers &
+       (kQualConst | kQualVolatile)) != 0) {
+    return false;
+  }
+  TypeRecordDelete(arg->type);
+  arg->type = TypeRecordCopy(parameter_type);
+  ASTNodeDelete(arg->object_initializer);
+  arg->object_initializer = NULL;
+  arg->value_kind = kTemplateValuePointer;
+  arg->value_symbol = arg->lvalue_symbol;
+  arg->value_offset = 0;
+  arg->int_value = 0;
+  return true;
+}
+
 bool TemplateArgumentValuesEqual(const TemplateArgument* left,
                                  const TemplateArgument* right) {
   if (left == NULL || right == NULL ||
@@ -1030,6 +1113,12 @@ ASTNode* TemplateArgumentMaterializeExpression(
         return NULL;
       }
       ASTNode* id = NewIdentifierASTNode(arg->value_symbol, location);
+      if (TypeIsReference(type)) {
+        ASTNodeSetType(id, TypeRecordCopy(type->next));
+        TypeRecordDelete(type);
+        id->value_category = kValueCategoryLvalue;
+        return id;
+      }
       ASTNode* address = NewUnaryASTNode(AST_OP(address), NULL, location, id);
       ASTNodeSetType(address, type);
       return address;

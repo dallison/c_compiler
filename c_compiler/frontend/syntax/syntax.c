@@ -12680,6 +12680,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
         if (direct_template_parameter_index >= 0) {
           arg->template_parameter_index = direct_template_parameter_index;
         }
+        Symbol* lvalue_symbol = TemplateArgumentLvalueSymbol(expr);
         compiler->constant_evaluation_required_depth++;
         expr = AnalyzeExpression(expr);
         compiler->constant_evaluation_required_depth--;
@@ -12690,6 +12691,10 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
           value_ok = true;
         } else {
           value_ok = TemplateArgumentSetFromExpression(arg, expr);
+          if (lvalue_symbol != NULL) {
+            value_ok = TemplateArgumentSetLvalue(arg, lvalue_symbol, value_ok,
+                                                 template_parameters_in_scope);
+          }
         }
         if (!value_ok) {
           if (template_parameters_in_scope &&

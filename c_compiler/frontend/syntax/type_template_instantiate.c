@@ -8722,6 +8722,11 @@ static bool TemplateNonTypeArgumentMatchesParameter(
            arg->dependent_expr != NULL;
   }
   TemplateValueKind value_kind = TemplateArgumentConcreteValueKind(arg);
+  if (TypeIsReference(param->type) ||
+      (arg->type != NULL && TypeIsReference(arg->type))) {
+    return value_kind == kTemplateValuePointer && arg->type != NULL &&
+           TypeEqual(arg->type, param->type);
+  }
   if (value_kind == kTemplateValueObject) {
     return TypeIsStructOrUnion(param->type) && arg->type != NULL &&
            TypeEqualIgnoringTopLevelQualifierMask(
@@ -9237,6 +9242,10 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
                                /*free_element=*/false);
       return NULL;
     }
+    if (param->kind == kTemplateParameterNonType && param->type != NULL &&
+        !TypeContainsTemplateParameter(param->type)) {
+      TemplateArgumentBindReferenceParameter(arg, param->type);
+    }
     if (param->kind == kTemplateParameterNonType &&
         !ConvertClassNonTypeTemplateArgument(parser, param, arg)) {
       if (emit_error) {
@@ -9252,8 +9261,14 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
     if (param->kind == kTemplateParameterNonType &&
         !TemplateNonTypeArgumentMatchesParameter(param, arg)) {
       if (emit_error) {
-        SyntaxError(parser->syntax,
-                    "Template non-type argument is not compatible with parameter type");
+        bool names_variable_only =
+            arg->type != NULL && TypeIsReference(arg->type) &&
+            param->type != NULL && !TypeIsReference(param->type);
+        SyntaxError(parser->syntax, "%s",
+                    names_variable_only
+                        ? TemplateArgumentKindError(param->kind)
+                        : "Template non-type argument is not compatible with "
+                          "parameter type");
       }
       TemplateArgumentDelete(arg);
       VectorDeleteWithContents(completed,

@@ -173,6 +173,10 @@ typedef struct TemplateArgument {
   // C++29 indexed template-name `Templates...[I]`.
   struct ASTNode* pack_index_expr;  // @wire 54
   struct ASTNode* object_initializer;  // Canonical class NTTP value. // @wire 44
+  // The object with static storage that the argument expression named, for a
+  // reference parameter to bind to.  Set by the parser and consumed when the
+  // argument is matched to its parameter.
+  Symbol* lvalue_symbol;  // @wire - (transient)
 } TemplateArgument;
 
 typedef struct ClassTemplatePartialSpecialization {

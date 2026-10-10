@@ -86,6 +86,18 @@ TemplateValueKind TemplateArgumentConcreteValueKind(
     const TemplateArgument* arg);
 bool TemplateArgumentSetFromExpression(TemplateArgument* arg,
                                        struct ASTNode* expr);
+// The object with static storage that an unanalyzed argument names, which a
+// reference parameter can bind to; NULL if there is none.
+Symbol* TemplateArgumentLvalueSymbol(struct ASTNode* expr);
+// Records that |arg| named |symbol|.  An argument that is not a constant value
+// becomes a reference to it, unless |may_be_dependent| and |symbol| is a
+// constant whose value is not known yet.  Returns whether |arg| is usable.
+bool TemplateArgumentSetLvalue(TemplateArgument* arg, Symbol* symbol,
+                               bool value_ok, bool may_be_dependent);
+// Converts |arg| to a binding of the reference parameter type
+// |parameter_type| if it names a compatible object.
+bool TemplateArgumentBindReferenceParameter(TemplateArgument* arg,
+                                            TypeRecord* parameter_type);
 bool TemplateArgumentValuesEqual(const TemplateArgument* left,
                                  const TemplateArgument* right);
 bool TemplateArgumentEqual(TemplateArgument* left, TemplateArgument* right);
