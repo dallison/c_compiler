@@ -3956,6 +3956,7 @@ bool CompilerPendingTemplateInstantiationHasAsmName(const char* asm_name) {
 }
 
 static void InitBasic(Compiler* compiler, const char* filename) {
+  memset(compiler, 0, sizeof(*compiler));
   // The input filename "-" means standard input; use a plain base name for
   // derived output files (e.g. "stdin.s"/"stdin.o") so they are not mistaken
   // for command-line options (a leading '-') by later tools like the linker.
