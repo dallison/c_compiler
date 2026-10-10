@@ -734,6 +734,10 @@ static RVRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
     case RV_OP(fneg_s):
     case RV_OP(fcvt_s_l):
     case RV_OP(fcvt_d_l):
+    case RV_OP(fcvt_s_w):
+    case RV_OP(fcvt_s_wu):
+    case RV_OP(fcvt_d_w):
+    case RV_OP(fcvt_d_wu):
       return kRVRegTypeFloat;
 
     case RV_OP(vle):

@@ -2438,6 +2438,24 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
     }
   }
 
+  // A 32-bit integer narrowed from a 64-bit value is only the low W view of
+  // that register, and the conversion reads the X register; extend it so the
+  // upper half is ignored.
+  if ((node->opcode == IR_OP(i2f) || node->opcode == IR_OP(i2d)) &&
+      node->inputs.length == 1) {
+    TypeRecord* from = ((IRNode*)node->inputs.value.p[0])->type;
+    if (from != NULL && TypeIsIntegral(from) && from->size == 4 &&
+        inst->operand[0] != NULL && !TargetIsConst(inst->operand[0])) {
+      TargetInstruction* extended =
+          TypeIsUnsigned(from)
+              ? NewInstruction2(AARCH64_OP(and), inst->operand[0],
+                                GetIntConstant(g, NULL, kTargetType64Bit,
+                                               0xffffffffLL))
+              : NewInstruction1(AARCH64_OP(sxtw), inst->operand[0]);
+      inst->operand[0] = Emit(g, SetInstructionSize(extended, kSize64Bit));
+    }
+  }
+
   // A `tmp` merge slot (used for ?: / && / ||) carries no register class in its
   // opcode, so mark it floating-point when its value is, ensuring the allocator
   // routes the producing instruction's result through an FP register.

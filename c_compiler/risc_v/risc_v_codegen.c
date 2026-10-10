@@ -1855,6 +1855,20 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
     if (node->opcode == IR_OP(lsri)) opcode = RV_OP(srlw);
     if (node->opcode == IR_OP(asri)) opcode = RV_OP(sraw);
   }
+  if ((node->opcode == IR_OP(i2f) || node->opcode == IR_OP(i2d)) &&
+      node->inputs.length == 1) {
+    // A 32-bit source has unspecified upper bits; the word forms read only
+    // the low 32.
+    TypeRecord* source = ((IRNode*)node->inputs.value.p[0])->type;
+    if (source != NULL && TypeIsIntegral(source) && source->size == 4) {
+      bool is_unsigned = TypeIsUnsigned(source);
+      if (node->opcode == IR_OP(i2f)) {
+        opcode = is_unsigned ? RV_OP(fcvt_s_wu) : RV_OP(fcvt_s_w);
+      } else {
+        opcode = is_unsigned ? RV_OP(fcvt_d_wu) : RV_OP(fcvt_d_w);
+      }
+    }
+  }
   assert(node->inputs.length <= 2);
   TargetInstruction* inst = NULL;
   bool ref_counts_ok =
