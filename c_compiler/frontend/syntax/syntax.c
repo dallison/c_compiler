@@ -14992,6 +14992,44 @@ static ASTNode* NewCXXLocalStaticGuardedInitializer(
   return guarded;
 }
 
+// An automatic array's cleanup range opens only once the whole array is built,
+// so an exception from one element's constructor must destroy the elements
+// already constructed before it propagates.
+static void GuardCXXAutomaticArrayInitializer(
+    Syntax* syntax, VariableDeclarationASTNode* declaration) {
+  Symbol* array = declaration->symbol;
+  if (!CompilerExceptionsEnabled() || !TypeIsFixedArray(array->type) ||
+      FindCXXDestructorForType(CXXArrayBaseElementType(array->type, NULL)) ==
+          NULL) {
+    return;
+  }
+  SourceLocation location = declaration->base.location;
+  Vector* success = NewVector();
+  Symbol* constructed_count = NULL;
+  if (!PrepareDefaultArrayInitialization(syntax, declaration, success,
+                                         &constructed_count)) {
+    VectorDelete(success);
+    return;
+  }
+  Vector* failure = NewVector();
+  AppendArrayInitializationCleanup(declaration, constructed_count, failure);
+  VectorAppend(failure, NewExpressionStatementASTNode(
+                            NewThrowASTNode(NULL, location), location));
+  Vector* catches = NewVector();
+  VectorAppend(catches,
+               NewCatchASTNode(NULL, true,
+                               NewCompoundStatementASTNode(failure, location),
+                               location));
+  Vector* statements = NewVector();
+  VectorAppend(statements,
+               NewTryASTNode(NewCompoundStatementASTNode(success, location),
+                             catches, location));
+  declaration->initializer = NewUnaryASTNode(
+      AST_OP(stmt_expr), NewTypeRecordWithSize(kTypeVoid, kQualPlain), location,
+      NewCompoundStatementASTNode(statements, location));
+  declaration->initializer->parent = &declaration->base;
+}
+
 typedef struct {
   Syntax* syntax;
   TypeRecord* function;
@@ -15016,12 +15054,18 @@ static void PrepareCXXLocalStaticVisitor(ASTNode* node, void* data, int child_id
   VariableDeclarationASTNode* declaration =
       (VariableDeclarationASTNode*)node;
   Symbol* symbol = declaration->symbol;
+  CXXLocalStaticPreparation* preparation = data;
+  if (symbol != NULL && (symbol->storage == STO(implicit) ||
+                         StorageIs(symbol->storage, STO(auto)) ||
+                         StorageIs(symbol->storage, STO(register)))) {
+    GuardCXXAutomaticArrayInitializer(preparation->syntax, declaration);
+    return;
+  }
   if (symbol == NULL || !StorageIs(symbol->storage, STO(static)) ||
       StorageIs(symbol->storage, STO(thread))) {
     return;
   }
 
-  CXXLocalStaticPreparation* preparation = data;
   SetCXXInlineLocalStaticAsmNameFor(
       preparation->function, symbol, symbol->name.value, symbol->location, "");
   if (declaration->local_static_init_kind == kLocalStaticInitUnclassified) {
