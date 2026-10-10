@@ -63,7 +63,8 @@ struct char_traits {
     }
     return dst;
   }
-  static char_type* move(char_type* dst, const char_type* src, size_t n) {
+  static constexpr char_type* move(char_type* dst, const char_type* src,
+                                   size_t n) {
     if (dst < src) {
       for (size_t i = 0; i < n; ++i) {
         dst[i] = src[i];
@@ -75,14 +76,14 @@ struct char_traits {
     }
     return dst;
   }
-  static char_type* assign(char_type* dst, size_t n, char_type c) {
+  static constexpr char_type* assign(char_type* dst, size_t n, char_type c) {
     for (size_t i = 0; i < n; ++i) {
       dst[i] = c;
     }
     return dst;
   }
-  static const char_type* find(const char_type* s, size_t n,
-                               const char_type& c) {
+  static constexpr const char_type* find(const char_type* s, size_t n,
+                                         const char_type& c) {
     for (size_t i = 0; i < n; ++i) {
       if (eq(s[i], c)) {
         return s + i;
@@ -156,22 +157,41 @@ struct char_traits<char> {
     return dst;
   }
 
-  static char_type* move(char_type* dst, const char_type* src, size_t n) {
+  static constexpr char_type* move(char_type* dst, const char_type* src,
+                                   size_t n) {
+    if (__builtin_is_constant_evaluated()) {
+      if (dst < src) {
+        for (size_t i = 0; i < n; ++i) {
+          dst[i] = src[i];
+        }
+      } else if (dst > src) {
+        for (size_t i = n; i > 0; --i) {
+          dst[i - 1] = src[i - 1];
+        }
+      }
+      return dst;
+    }
     if (n != 0) {
       memmove(dst, src, n);
     }
     return dst;
   }
 
-  static char_type* assign(char_type* dst, size_t n, char_type c) {
+  static constexpr char_type* assign(char_type* dst, size_t n, char_type c) {
+    if (__builtin_is_constant_evaluated()) {
+      for (size_t i = 0; i < n; ++i) {
+        dst[i] = c;
+      }
+      return dst;
+    }
     if (n != 0) {
       memset(dst, static_cast<unsigned char>(c), n);
     }
     return dst;
   }
 
-  static const char_type* find(const char_type* s, size_t n,
-                               const char_type& c) {
+  static constexpr const char_type* find(const char_type* s, size_t n,
+                                         const char_type& c) {
     for (size_t i = 0; i < n; i++) {
       if (s[i] == c) {
         return s + i;
