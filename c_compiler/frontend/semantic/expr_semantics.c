@@ -148,7 +148,8 @@ void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func) {
   if (symbol != NULL && func->info.function.cxx_member_owner != NULL &&
       func->info.function.cxx_member_owner->tag_symbol != NULL &&
       func->info.function.cxx_member_owner->tag_symbol->flags.invented &&
-      StringEqual(&symbol->name, "operator()")) {
+      StringEqual(&symbol->name, "operator()") &&
+      func->info.function.template_parameters.length > 0) {
     return;
   }
   Symbol* definition = symbol != NULL ? symbol->value.func_defn : NULL;
@@ -7722,6 +7723,22 @@ static Struct* CurrentFunctionMemberOwner(void) {
   return FunctionMemberOwner(compiler->current_function);
 }
 
+// A lambda closure's operator() is a member of the closure class, but the
+// lambda body has the access of the function that contains it ([class.local]).
+static Struct* CXXLambdaEnclosingClassAccessContext(TypeRecord* func) {
+  Struct* owner = FunctionMemberOwner(func);
+  if (owner == NULL || owner->tag_symbol == NULL ||
+      !owner->tag_symbol->flags.invented ||
+      owner->access_enclosing_function == NULL ||
+      owner->access_enclosing_function->type == NULL ||
+      !TypeIsFunction(owner->access_enclosing_function->type)) {
+    return owner;
+  }
+  Struct* enclosing =
+      owner->access_enclosing_function->type->info.function.cxx_member_owner;
+  return enclosing != NULL ? enclosing : owner;
+}
+
 static Symbol* CXXStructTemplateOrigin(Struct* str) {
   if (str == NULL || str->tag_symbol == NULL) {
     return NULL;
@@ -7859,15 +7876,28 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
     return true;
   }
   Struct* current_owner = NULL;
-  if (compiler->current_class_access_context != NULL) {
+  TypeRecord* func = compiler->current_function;
+  if (func != NULL && TypeIsFunction(func)) {
+    Struct* closure_owner = FunctionMemberOwner(func);
+    Struct* lambda_context = CXXLambdaEnclosingClassAccessContext(func);
+    if (closure_owner != NULL && closure_owner->tag_symbol != NULL &&
+        closure_owner->tag_symbol->flags.invented &&
+        lambda_context != closure_owner) {
+      // A lambda body uses the access of its enclosing function ([class.local]),
+      // not the closure type that owns operator().
+      current_owner = lambda_context;
+    }
+  }
+  if (current_owner == NULL &&
+      compiler->current_class_access_context != NULL) {
     // A static data member initializer is in the scope of its class and may
     // name the class's private and protected members. Template body cloning also
     // re-analyzes member expressions before current_function has a recoverable
     // owner, but still within the instantiated class context.
     current_owner = compiler->current_class_access_context;
-  } else if (compiler->current_function != NULL &&
-             TypeIsFunction(compiler->current_function)) {
-    current_owner = CurrentFunctionMemberOwner();
+  } else if (current_owner == NULL && func != NULL &&
+             TypeIsFunction(func)) {
+    current_owner = CXXLambdaEnclosingClassAccessContext(func);
   }
   if (CurrentFunctionIsFriendOf(owner) ||
       (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context)) ||
