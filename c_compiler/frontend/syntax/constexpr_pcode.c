@@ -6542,6 +6542,9 @@ static ASTNode* IdentityConstexprThunkClone(ASTNode* node, void* data) {
 typedef struct {
   ConstEvalContext* ctx;
   ASTNode* expression;
+  // A thunk compiles the whole expression, so the evaluator's bindings of the
+  // automatic variables it names never reach it.
+  bool bindings_reachable;
   bool has_unbound_automatic;
 } ConstexprThunkBindingCheck;
 
@@ -6565,22 +6568,35 @@ static void CheckConstexprThunkBindings(ASTNode* node, void* data, int child_id,
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
   if (symbol != NULL &&
       (symbol->flags.is_argument ||
-       StorageIs(symbol->storage, STO(auto) | STO(register))) &&
+       StorageIs(symbol->storage, STO(auto) | STO(register)) ||
+       (symbol->flags.is_local && !symbol->flags.invented &&
+        !symbol->flags.is_temp &&
+        !StorageIs(symbol->storage, STO(static) | STO(thread) | STO(extern) |
+                                        STO(typedef)) &&
+        (symbol->type == NULL || !TypeIsFunction(symbol->type)))) &&
       !symbol->flags.value_set &&
-      !ConstexprHasBinding(check->ctx, symbol)) {
+      (!check->bindings_reachable ||
+       !ConstexprHasBinding(check->ctx, symbol))) {
     check->has_unbound_automatic = true;
   }
 }
 
-static bool ConstexprExpressionCanUseThunk(ConstEvalContext* ctx,
-                                           ASTNode* expression) {
+static bool ConstexprExpressionHasNoUnboundAutomatic(
+    ConstEvalContext* ctx, ASTNode* expression, bool bindings_reachable) {
   ConstexprThunkBindingCheck check = {
       .ctx = ctx,
       .expression = expression,
+      .bindings_reachable = bindings_reachable,
       .has_unbound_automatic = false,
   };
   ASTNodeVisit(expression, CheckConstexprThunkBindings, 0, &check);
   return !check.has_unbound_automatic;
+}
+
+static bool ConstexprExpressionCanUseThunk(ConstEvalContext* ctx,
+                                           ASTNode* expression) {
+  return ConstexprExpressionHasNoUnboundAutomatic(ctx, expression,
+                                                  /*bindings_reachable=*/true);
 }
 
 static TypeRecord* NewConstexprExpressionThunk(ASTNode* expression) {
@@ -6644,8 +6660,9 @@ static bool RunConstexprExpressionThunk(
     ConstexprValue* address_result,
     ConstexprPCodeFailureKind* failure_kind, const char** reason) {
   *failure_kind = kConstexprPCodeFailureUnsupported;
-  if (!ConstexprExpressionCanUseThunk(ctx, expression)) {
-    *reason = "constexpr pcode thunk has an unbound automatic variable";
+  if (!ConstexprExpressionHasNoUnboundAutomatic(
+          ctx, expression, /*bindings_reachable=*/false)) {
+    *reason = "constexpr pcode thunk names an automatic variable";
     return false;
   }
   TypeRecord* thunk = NewConstexprExpressionThunk(expression);
