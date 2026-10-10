@@ -961,7 +961,9 @@ TargetInstruction* TargetGetFloatingPointConstant(TargetGenerator* target,
   while (inst != NULL && TargetPrev(inst) != TargetLastConstant(target)) {
     TargetConstant* c = (TargetConstant*)inst;
     if (TargetIsConst(inst)) {
-      if (c->type == type && c->value.dvalue == value) {
+      // Compare bit patterns so that -0.0 and 0.0 stay distinct.
+      if (c->type == type &&
+          memcmp(&c->value.dvalue, &value, sizeof(value)) == 0) {
         if (node != NULL && node->data.ptr == NULL) {
           TargetSetLoweredNode(node, inst);
         }

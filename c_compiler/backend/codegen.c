@@ -729,7 +729,9 @@ IRNode* GeneratorGetFloatingPointConstant(Generator* gen, TypeRecord* type,
   }
   for (size_t i = 0; i < gen->fp_constant_pool.length; i++) {
     entry = gen->fp_constant_pool.value.p[i];
-    if (entry->value.fvalue == value && entry->type == type_spec) {
+    // Compare bit patterns so that -0.0 and 0.0 stay distinct.
+    if (memcmp(&entry->value.fvalue, &value, sizeof(value)) == 0 &&
+        entry->type == type_spec) {
       return entry->pooled;
     }
   }
