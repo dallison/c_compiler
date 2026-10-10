@@ -14952,7 +14952,9 @@ static ASTNode* NewCXXLocalStaticGuardedInitializer(
       (StringEqual(compiler->target_name, "x86_64") ||
        StringEqual(compiler->target_name, "aarch64") ||
        StringEqual(compiler->target_name, "arm") ||
-       StringEqual(compiler->target_name, "riscv"))) {
+       StringEqual(compiler->target_name, "riscv") ||
+       StringEqual(compiler->target_name, "p-code") ||
+       StringEqual(compiler->target_name, "pcode"))) {
     Vector* catches = NewVector();
     Vector* failure = NewVector();
     AppendArrayInitializationCleanup(declaration, constructed_count, failure);
