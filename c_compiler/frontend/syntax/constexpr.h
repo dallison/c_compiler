@@ -168,6 +168,11 @@ bool ConstexprEvaluateCharacterSequence(ASTNode* pointer, size_t count,
 
 bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);
+bool ConstexprEvaluateReferenceConstantForSymbol(Symbol* symbol,
+                                                 ASTNode* initializer);
+// A reference bound to a static object by a constant initializer that was
+// recorded for it; it is usable in constant expressions.
+bool ConstexprIsConstantInitializedReference(Symbol* symbol);
 void ConstexprPersistObjectAddresses(ConstexprObject* object);
 void ConstexprSetSymbolObjectValueState(Symbol* symbol, ValueState state);
 Symbol* ConstexprFunctionDefinition(Symbol* symbol);

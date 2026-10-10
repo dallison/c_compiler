@@ -574,7 +574,8 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
         return true;
       }
       if (id_node->symbol != NULL &&
-          ConstexprReferenceUsableInCurrentFunction(id_node->symbol) &&
+          (ConstexprReferenceUsableInCurrentFunction(id_node->symbol) ||
+           ConstexprIsConstantInitializedReference(id_node->symbol)) &&
           id_node->symbol->constexpr_initializer != NULL) {
         ASTNode* initializer = ConstexprInitializerExpression(
             id_node->symbol->constexpr_initializer);
@@ -1444,6 +1445,15 @@ static bool EvaluateFloatingPointValueInContext(ConstEvalContext* ctx,
     case AST_OP(identifier): {
       if (ConstexprBindingAsFloating(ctx, id_node->symbol, result)) {
         return true;
+      }
+      if (ConstexprIsConstantInitializedReference(id_node->symbol)) {
+        ASTNode* initializer = ConstexprInitializerExpression(
+            id_node->symbol->constexpr_initializer);
+        if (initializer != NULL && initializer != node &&
+            EvaluateFloatingPointExpressionInContext(ctx, initializer,
+                                                     result)) {
+          return true;
+        }
       }
       TypeRecord* type = id_node->symbol->type;
       if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&

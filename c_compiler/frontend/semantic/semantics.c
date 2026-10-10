@@ -1979,6 +1979,12 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
     if (must_be_constant) {
       compiler->constant_evaluation_required_depth++;
     }
+    if (must_be_constant && TypeIsReference(node->symbol->type) &&
+        node->initializer->op == AST_OP(expr_init) &&
+        ((ExpressionInitializerASTNode*)node->initializer)->expr != NULL) {
+      ((ExpressionInitializerASTNode*)node->initializer)->expr->flags |=
+          kASTNeedAddress;
+    }
     node->initializer = AnalyzeExpression(node->initializer);
     if (must_be_constant) {
       compiler->constant_evaluation_required_depth--;
@@ -2006,7 +2012,13 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
     if (TypeContainsAuto(node->symbol->type)) {
       return;
     }
-    if (!TypeIsReflection(node->symbol->type)) {
+    if (must_be_constant && TypeIsReference(node->symbol->type) &&
+        node->initializer->op == AST_OP(expr_init) &&
+        ((ExpressionInitializerASTNode*)node->initializer)->expr != NULL) {
+      ExpressionInitializerASTNode* init =
+          (ExpressionInitializerASTNode*)node->initializer;
+      SemanticBindReferenceInitializer(init->expr, node->symbol->type);
+    } else if (!TypeIsReflection(node->symbol->type)) {
       NormalConversion(node->initializer, node->symbol->type);
     }
   }
@@ -2028,13 +2040,17 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
       node->symbol->flags.value_set = true;
     }
   }
+  bool reference_constant = false;
   if (TypeIsConst(node->symbol->type) || node->symbol->flags.is_constexpr ||
       node->symbol->flags.is_constinit) {
-    bool scalar = TypeIsReflection(node->symbol->type) &&
-                          node->symbol->flags.value_set
-                      ? true
-                      : EvaluateScalarConstantForSymbol(node->symbol,
-                                                        node->initializer);
+    reference_constant = ConstexprEvaluateReferenceConstantForSymbol(
+        node->symbol, node->initializer);
+    bool scalar = reference_constant ||
+                  (TypeIsReflection(node->symbol->type) &&
+                           node->symbol->flags.value_set
+                       ? true
+                       : EvaluateScalarConstantForSymbol(node->symbol,
+                                                         node->initializer));
     if (!scalar && TypeIsPointer(node->symbol->type)) {
       scalar = SemanticEvaluatePointerConstantForSymbol(node->symbol,
                                                         node->initializer);
@@ -2068,7 +2084,7 @@ void SemanticAnalyzeVariableDefinition(Syntax* syntax,
     }
   }
   if ((node->symbol->flags.is_constexpr || node->symbol->flags.is_constinit) &&
-      !node->symbol->flags.value_set &&
+      !node->symbol->flags.value_set && !reference_constant &&
       !node->symbol->is_constexpr_representable &&
       !ExpressionIsTemplateDependent(node->initializer)) {
     SemanticError(node->initializer,

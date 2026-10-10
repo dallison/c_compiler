@@ -3339,7 +3339,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           SyntaxError(parser->syntax,
                       "'consteval' can only be applied to functions");
         }
-        if (member_symbol->flags.is_constexpr) {
+        if (member_symbol->flags.is_constexpr &&
+            !TypeIsReference(member_symbol->type)) {
           member_symbol->type->qualifiers |= kQualConst;
         }
         member->is_static = is_static_member;

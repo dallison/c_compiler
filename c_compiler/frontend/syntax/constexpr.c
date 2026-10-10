@@ -175,6 +175,13 @@ static bool ConstexprBindPointerReference(ConstEvalContext* ctx,
                                           ConstexprValue* result);
 static bool ConstexprReferenceLocation(ConstEvalContext* ctx, ASTNode* node,
                                        ConstexprValue* result);
+static bool EvaluateConstexprReferenceInitializer(ConstEvalContext* ctx,
+                                                  ASTNode* node,
+                                                  TypeRecord* formal_object_type,
+                                                  ConstexprValue* result);
+static bool ConstexprStaticReferenceTarget(ConstEvalContext* ctx,
+                                           Symbol* symbol,
+                                           ConstexprValue* result);
 static bool EvaluateConstexprCondition(ConstEvalContext* ctx, ASTNode* cond,
                                        bool* result);
 static Symbol* ConstexprCallSymbol(ASTNode* node);
@@ -3705,6 +3712,50 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
   return ok;
 }
 
+bool ConstexprIsConstantInitializedReference(Symbol* symbol) {
+  return symbol != NULL && symbol->type != NULL &&
+         TypeIsReference(symbol->type) && symbol->type->next != NULL &&
+         symbol->constexpr_initializer != NULL &&
+         !symbol->is_constexpr_representable &&
+         !symbol->flags.is_argument &&
+         !StorageIs(symbol->storage, STO(thread));
+}
+
+// [expr.const]: a reference is constant-initialized when it binds to an object
+// with static storage duration, whether or not that object is itself constant.
+// The value is not recorded (reads must observe the object), only the
+// initializer the evaluators resolve the reference through.
+bool ConstexprEvaluateReferenceConstantForSymbol(Symbol* symbol,
+                                                 ASTNode* initializer) {
+  if (symbol == NULL || initializer == NULL || symbol->type == NULL ||
+      !TypeIsReference(symbol->type) || symbol->type->next == NULL) {
+    return false;
+  }
+  ASTNode* expression = ConstexprInitializerExpression(initializer);
+  if (expression == NULL || ExpressionIsTemplateDependent(expression)) {
+    return false;
+  }
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  ConstexprValue address = {0};
+  Symbol* target = NULL;
+  size_t offset = 0;
+  bool ok = EvaluateConstexprReferenceInitializer(&ctx, expression,
+                                                  symbol->type->next,
+                                                  &address) &&
+            ConstexprStaticAddressTarget(&address, &target, &offset);
+  ConstEvalContextDestruct(&ctx);
+  if (!ok) {
+    return false;
+  }
+  // Only the bound expression: a local's `init` node also holds the reference
+  // itself, which would make its initializer refer back to it.
+  ASTNodeDelete(symbol->constexpr_initializer);
+  symbol->constexpr_initializer =
+      ASTNodeClone(expression, IdentityCloneNode, NULL, NULL);
+  return symbol->constexpr_initializer != NULL;
+}
+
 static bool ConstexprEvaluateObjectConstantForSymbolImpl(Symbol* symbol,
                                                          ASTNode* initializer) {
   if (symbol == NULL || initializer == NULL) {
@@ -7158,17 +7209,26 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     ConstexprBinding* binding = FindConstexprBinding(ctx, id->symbol);
+    bool static_reference =
+        binding == NULL &&
+        ConstexprIsConstantInitializedReference(id->symbol);
     if (binding == NULL && id->symbol != NULL &&
-        ConstexprReferenceUsableInCurrentFunction(id->symbol) &&
+        (static_reference ||
+         ConstexprReferenceUsableInCurrentFunction(id->symbol)) &&
         TypeIsReference(id->symbol->type) &&
         id->symbol->constexpr_initializer != NULL) {
       ConstexprValue address = {0};
-      symbolic_constexpr_reference_depth++;
-      bool ok = EvaluateConstexprAddressValue(
-          ctx, ConstexprInitializerExpression(
-                   id->symbol->constexpr_initializer),
-          &address);
-      symbolic_constexpr_reference_depth--;
+      bool ok;
+      if (static_reference) {
+        ok = ConstexprStaticReferenceTarget(ctx, id->symbol, &address);
+      } else {
+        symbolic_constexpr_reference_depth++;
+        ok = EvaluateConstexprAddressValue(
+            ctx, ConstexprInitializerExpression(
+                     id->symbol->constexpr_initializer),
+            &address);
+        symbolic_constexpr_reference_depth--;
+      }
       if (!ok ||
           (address.address_binding != NULL &&
            address.address_binding->symbol != NULL &&
@@ -7707,6 +7767,87 @@ static bool EvaluateConstexprSubscriptLocation(ConstEvalContext* ctx,
   return false;
 }
 
+// The address of the named object that has no binding in |ctx|: a static
+// object, or a symbolic target while the address itself is the result.
+static bool ConstexprStaticIdentifierAddress(ConstEvalContext* ctx,
+                                             Symbol* symbol,
+                                             ConstexprValue* result) {
+  bool static_storage =
+      symbol != NULL && !symbol->flags.is_temp &&
+      !symbol->flags.is_argument &&
+      (!symbol->flags.is_local ||
+       StorageIs(symbol->storage, STO(static)));
+  bool template_argument_target =
+      template_argument_object_evaluation_depth > 0 && static_storage;
+  bool symbolic_reference_target =
+      symbolic_constexpr_reference_depth > 0 && symbol != NULL &&
+      !StorageIs(symbol->storage, STO(thread));
+  if (ConstexprIsStaticConstantObject(symbol) &&
+      !template_argument_target &&
+      !symbolic_reference_target) {
+    ConstexprBinding* binding = ConstexprDurableConstantBinding(symbol);
+    *result = (ConstexprValue){
+        .is_address = true,
+        .address_binding = binding,
+    };
+    return binding != NULL;
+  }
+  if (template_argument_target || symbolic_reference_target) {
+    ConstexprValue initial = {0};
+    if (symbol->flags.value_set) {
+      initial.is_floating = TypeIsFloatingPoint(symbol->type);
+      initial.ivalue = symbol->value.ivalue;
+      initial.fvalue = symbol->value.fvalue;
+      if (TypeIsFixedArray(symbol->type) ||
+          TypeIsStructOrUnion(symbol->type)) {
+        initial.is_object = true;
+        initial.object = symbol->value.other;
+      }
+    }
+    PushConstexprBinding(ctx, symbol, initial);
+    ConstexprBinding* external = FindConstexprBinding(ctx, symbol);
+    *result = (ConstexprValue){
+        .is_address = true,
+        .address_binding = external,
+    };
+    return external != NULL;
+  }
+  ConstexprBinding* external = ConstexprDurableExternalBinding(symbol);
+  if (external != NULL) {
+    *result = (ConstexprValue){.is_address = true,
+                               .address_binding = external};
+    return true;
+  }
+  return false;
+}
+
+// The value of a static reference |symbol| used as an address: where the
+// object it is bound to lives, or, for a reference to a pointer, that pointer.
+static bool ConstexprStaticReferenceTarget(ConstEvalContext* ctx,
+                                           Symbol* symbol,
+                                           ConstexprValue* result) {
+  if (!ConstexprIsConstantInitializedReference(symbol)) {
+    return false;
+  }
+  TypeRecord* type = symbol->type;
+  ConstexprValue location = {0};
+  if (!EvaluateConstexprReferenceInitializer(
+          ctx, ConstexprInitializerExpression(symbol->constexpr_initializer),
+          type->next, &location) ||
+      !location.is_address) {
+    return false;
+  }
+  if (TypeIsPointer(type->next)) {
+    ConstexprValue stored = {0};
+    if (!ConstexprDereferenceAddress(location, &stored) || !stored.is_address) {
+      return false;
+    }
+    location = stored;
+  }
+  *result = location;
+  return true;
+}
+
 static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                           ConstexprValue* result) {
   *result = (ConstexprValue){0};
@@ -7958,53 +8099,8 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       return true;
     }
     if (address->sub != NULL && address->sub->op == AST_OP(identifier)) {
-      Symbol* symbol = ((IdentifierASTNode*)address->sub)->symbol;
-      bool static_storage =
-          symbol != NULL && !symbol->flags.is_temp &&
-          !symbol->flags.is_argument &&
-          (!symbol->flags.is_local ||
-           StorageIs(symbol->storage, STO(static)));
-      bool template_argument_target =
-          template_argument_object_evaluation_depth > 0 && static_storage;
-      bool symbolic_reference_target =
-          symbolic_constexpr_reference_depth > 0 && symbol != NULL &&
-          !StorageIs(symbol->storage, STO(thread));
-      if (ConstexprIsStaticConstantObject(symbol) &&
-          !template_argument_target &&
-          !symbolic_reference_target) {
-        ConstexprBinding* binding = ConstexprDurableConstantBinding(symbol);
-        *result = (ConstexprValue){
-            .is_address = true,
-            .address_binding = binding,
-        };
-        return binding != NULL;
-      }
-      if (template_argument_target || symbolic_reference_target) {
-        ConstexprValue initial = {0};
-        if (symbol->flags.value_set) {
-          initial.is_floating = TypeIsFloatingPoint(symbol->type);
-          initial.ivalue = symbol->value.ivalue;
-          initial.fvalue = symbol->value.fvalue;
-          if (TypeIsFixedArray(symbol->type) ||
-              TypeIsStructOrUnion(symbol->type)) {
-            initial.is_object = true;
-            initial.object = symbol->value.other;
-          }
-        }
-        PushConstexprBinding(ctx, symbol, initial);
-        ConstexprBinding* external = FindConstexprBinding(ctx, symbol);
-        *result = (ConstexprValue){
-            .is_address = true,
-            .address_binding = external,
-        };
-        return external != NULL;
-      }
-      ConstexprBinding* external = ConstexprDurableExternalBinding(symbol);
-      if (external != NULL) {
-        *result = (ConstexprValue){.is_address = true,
-                                   .address_binding = external};
-        return true;
-      }
+      return ConstexprStaticIdentifierAddress(
+          ctx, ((IdentifierASTNode*)address->sub)->symbol, result);
     }
     return false;
   }
@@ -8069,10 +8165,11 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       if (symbolic) {
         symbolic_constexpr_reference_depth++;
       }
-      bool ok = EvaluateConstexprAddressValue(
-          ctx, ConstexprInitializerExpression(
-                   id->symbol->constexpr_initializer),
-          result);
+      bool ok = ConstexprStaticReferenceTarget(ctx, id->symbol, result) ||
+                EvaluateConstexprAddressValue(
+                    ctx, ConstexprInitializerExpression(
+                             id->symbol->constexpr_initializer),
+                    result);
       if (symbolic) {
         symbolic_constexpr_reference_depth--;
       }
@@ -8463,6 +8560,13 @@ static bool ConstexprReferenceLocation(ConstEvalContext* ctx, ASTNode* node,
   if (EvaluateConstexprObjectLValue(ctx, node, &slot, true)) {
     *result = (ConstexprValue){.is_address = true, .address_slot = slot};
     return true;
+  }
+  if (node != NULL && node->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+    if (symbol != NULL && !TypeIsReference(symbol->type) &&
+        FindConstexprBinding(ctx, symbol) == NULL) {
+      return ConstexprStaticIdentifierAddress(ctx, symbol, result);
+    }
   }
   return false;
 }

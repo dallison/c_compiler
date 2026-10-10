@@ -1919,7 +1919,8 @@ static bool TryParseExpansionItemDeclaration(Syntax* syntax,
   binding->item_symbol->flags.is_local = true;
   binding->item_symbol->flags.is_defined = true;
   binding->item_symbol->flags.is_constexpr = binding->is_constexpr;
-  if (binding->is_constexpr && binding->item_symbol->type != NULL) {
+  if (binding->is_constexpr && binding->item_symbol->type != NULL &&
+      !TypeIsReference(binding->item_symbol->type)) {
     binding->item_symbol->type->qualifiers |= kQualConst;
   }
   return true;
@@ -1939,7 +1940,8 @@ static void AddExpansionStructuredBindingVariables(Syntax* syntax,
     }
     sym->flags.is_parameter_pack = binding->pack_index == (int)i;
     sym->flags.is_constexpr = binding->is_constexpr;
-    if (binding->is_constexpr && sym->type != NULL) {
+    if (binding->is_constexpr && sym->type != NULL &&
+        !TypeIsReference(sym->type)) {
       sym->type->qualifiers |= kQualConst;
     }
     sym->structured_binding_pack_size = -1;

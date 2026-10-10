@@ -897,7 +897,8 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
       break;
   }
   // `&g[1]` designates the element itself, not its value.
-  if (node->parent != NULL && node->parent->op == AST_OP(address)) {
+  if ((node->flags & kASTNeedAddress) != 0 ||
+      (node->parent != NULL && node->parent->op == AST_OP(address))) {
     return NULL;
   }
   if (BitFieldReadAwaitsPromotion(node)) {
@@ -1127,6 +1128,9 @@ static bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
     return false;
   }
   if (MarkCXX26SymbolicConstexprReference(symbol, initializer)) {
+    return true;
+  }
+  if (ConstexprEvaluateReferenceConstantForSymbol(symbol, initializer)) {
     return true;
   }
   if (EvaluateScalarConstantForSymbol(symbol, initializer)) {
@@ -4978,9 +4982,10 @@ static ASTNode* AnalyzeInitialization(ASTNode* node,
       !symbol->flags.is_template && !symbol->flags.value_set) {
     // Initializer analysis can finish dependent-template substitutions and
     // expose a scalar constant that was not foldable during the first pass.
-    EvaluateConstantForSymbol(symbol, simplified_init);
+    bool constant = EvaluateConstantForSymbol(symbol, simplified_init);
     if (!symbol->flags.value_set &&
         !symbol->is_constexpr_representable &&
+        !(constant && TypeIsReference(symbol->type)) &&
         !ExpressionIsTemplateDependent(simplified_init)) {
       SemanticError(
           simplified_init,

@@ -1109,7 +1109,20 @@ static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
   Initializer* init_out = calloc(1, sizeof(Initializer));
   TypeRecord* type = subinit->type;
   TypeRecordCalculateSize(type);
-  if (TypeIsIntegral(type)) {
+  if (TypeIsReference(type)) {
+    // A reference is stored as the address of the object it designates.
+    AddressConstant address;
+    if (!InitDesignatedObject(expr, &address)) {
+      free(init_out);
+      SemanticError(subinit, "Invalid static initialization");
+      return;
+    }
+    init_out->type = kInitTypeSymbol;
+    init_out->value.symbol = address.symbol;
+    init_out->symbol_addend = address.addend;
+    init_out->offset = offset;
+    VectorAppend(initializers, init_out);
+  } else if (TypeIsIntegral(type)) {
     InitInteger(expr, type, init_out, offset, initializers);
   } else if (TypeIsFloatingPoint(type)) {
     InitFloatingPoint(expr, type, init_out, offset, initializers);

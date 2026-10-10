@@ -10228,7 +10228,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       // matching against any previous declaration so that an out-of-class
       // definition (`constexpr T C::x;`) compares equal to the in-class
       // `static constexpr` member, whose type is already const-qualified.
-      if (!TypeIsFunction(sym->type) && parser->is_constexpr) {
+      if (!TypeIsFunction(sym->type) && !TypeIsReference(sym->type) &&
+          parser->is_constexpr) {
         sym->type->qualifiers |= kQualConst;
       }
       if (TypeIsFunction(sym->type) &&
@@ -10716,7 +10717,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           SymbolSetCXXDataAsmName(sym, NULL);
         }
       }
-      if (sym->flags.is_constexpr) {
+      if (sym->flags.is_constexpr && !TypeIsReference(sym->type)) {
         sym->type->qualifiers |= kQualConst;
       }
     }
@@ -15531,7 +15532,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
               syntax,
               "'constinit' variable must have static or thread storage duration");
         }
-        if (sym->flags.is_constexpr) {
+        if (sym->flags.is_constexpr && !TypeIsReference(sym->type)) {
           sym->type->qualifiers |= kQualConst;
         }
       }
@@ -15634,7 +15635,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           sym = old_sym;
           if (!TypeIsFunction(sym->type) && parser->is_constexpr) {
             sym->flags.is_constexpr = true;
-            sym->type->qualifiers |= kQualConst;
+            if (!TypeIsReference(sym->type)) {
+              sym->type->qualifiers |= kQualConst;
+            }
           }
           if (!TypeIsFunction(sym->type) && parser->is_constinit) {
             sym->flags.is_constinit = true;

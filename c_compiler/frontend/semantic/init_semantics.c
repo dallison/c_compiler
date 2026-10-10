@@ -574,6 +574,44 @@ static bool HasStaticAddress(ASTNode* expr) {
   return false;
 }
 
+// The lvalue a constant reference initializer binds to: an object or function
+// with static storage duration, or a subobject of one.
+static bool DesignatesStaticObject(ASTNode* expr) {
+  if (expr == NULL) {
+    return false;
+  }
+  switch (expr->op) {
+    case AST_OP(identifier): {
+      Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
+      return symbol != NULL && !symbol->flags.is_argument &&
+             !symbol->flags.is_temp && !TypeIsReference(symbol->type) &&
+             !StorageIs(symbol->storage, STO(thread)) &&
+             (TypeIsFunction(symbol->type) || !symbol->flags.is_local ||
+              StorageIs(symbol->storage, STO(static)));
+    }
+    case AST_OP(dot):
+      return ASTNodeGetShape(expr) == kASTShapeBinary &&
+             DesignatesStaticObject(((BinaryASTNode*)expr)->left);
+    case AST_OP(arrow):
+      return ASTNodeGetShape(expr) == kASTShapeBinary &&
+             HasStaticAddress(((BinaryASTNode*)expr)->left);
+    case AST_OP(subscript): {
+      if (ASTNodeGetShape(expr) != kASTShapeBinary) {
+        return false;
+      }
+      ASTNode* base = ((BinaryASTNode*)expr)->left;
+      return base != NULL && (TypeIsArray(base->type)
+                                  ? DesignatesStaticObject(base)
+                                  : HasStaticAddress(base));
+    }
+    case AST_OP(contents):
+      return ASTNodeGetShape(expr) == kASTShapeUnary &&
+             HasStaticAddress(((UnaryASTNode*)expr)->sub);
+    default:
+      return false;
+  }
+}
+
 bool InitializerIsLinkTimeConstant(ASTNode* init) {
   if (init == NULL) {
     return true;
@@ -687,7 +725,8 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
   dependent_initializer =
       constants_only && CompilerIsCXX() &&
       ExpressionIsTemplateDependent(expr);
-  if (constants_only && !dependent_initializer) {
+  if (constants_only && !dependent_initializer &&
+      !TypeIsReference(inode->type)) {
     expr = FoldRequiredScalarConstant(expr);
   }
   switch (inode->kind) {
@@ -696,7 +735,11 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
         // Complile-time constants are constant expressions of anything
         // that can be done using a single relocation (something that
         // has a static address).
-        if (!IsConstantExpression(expr) && !HasStaticAddress(expr)) {
+        bool constant = TypeIsReference(inode->type)
+                            ? DesignatesStaticObject(expr)
+                            : IsConstantExpression(expr) ||
+                                  HasStaticAddress(expr);
+        if (!constant) {
           SemanticError(expr, "Expression is not a compile-time constant");
         }
       }
