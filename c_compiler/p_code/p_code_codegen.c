@@ -2398,9 +2398,21 @@ static TargetInstruction* LowerBuiltinVaEnd(PCodeGenerator* pcode,
   return NULL;
 }
 
+// A va_list is a single pointer to the next argument.
 static TargetInstruction* LowerBuiltinVaCopy(PCodeGenerator* pcode,
                                              IRNode* node) {
-  return NULL;  // TODO
+  TargetInstruction* dest_addr;
+  TargetInstruction* dest_offset;
+  TargetInstruction* src_addr;
+  TargetInstruction* src_offset;
+  GetAddressAndOffset(pcode, node->inputs.value.p[1], &src_addr, &src_offset);
+  TargetInstruction* value =
+      Emit(pcode, NewInstruction2(P_OP(ldx), src_addr, src_offset));
+  GetAddressAndOffset(pcode, node->inputs.value.p[0], &dest_addr,
+                      &dest_offset);
+  return SetLoweredNode(
+      node, Emit(pcode, NewInstruction3(P_OP(stx), value, dest_addr,
+                                        dest_offset)));
 }
 
 static TargetInstruction* LowerIRNodeOperation(PCodeGenerator* pcode,
