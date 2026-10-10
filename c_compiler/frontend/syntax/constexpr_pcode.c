@@ -2018,6 +2018,11 @@ static bool StoreConstexprObjectBytes(ConstexprPCodeMarshal* marshal,
     for (size_t i = 0; i < object->slots.length; i++) {
       ConstexprValue* slot = object->slots.value.p[i];
       unsigned char* elem = dest + i * elem_size;
+      // A static object that is not a usable constant has an address but no
+      // value p-code may read; copying it would expose zeroes as its value.
+      if (slot != NULL && slot->external) {
+        return false;
+      }
       if (slot != NULL && slot->is_object) {
         if (!StoreConstexprObjectBytes(marshal, type->next, slot->object, elem)) {
           return false;
@@ -2067,6 +2072,9 @@ static bool StoreConstexprObjectBytes(ConstexprPCodeMarshal* marshal,
       }
       ConstexprValue* slot = PCodeConstexprObjectSlot(
           object, PCodeConstexprMemberSlotIndex(str, member));
+      if (slot != NULL && slot->external) {
+        return false;
+      }
       unsigned char* member_dest = dest + member->byte_offset;
       if (member->is_bit_field) {
         if (member->bit_size != 0 &&
@@ -2587,6 +2595,84 @@ static void ApplyConstexprPCodeMemoryStates(TypeRecord* type,
   }
 }
 
+// The inverse of ApplyConstexprPCodeMemoryStates: gives the bytes of
+// |object|, stored at |memory|, the states of its scalar slots, so that
+// p-code cannot read a value the AST evaluator holds as indeterminate.
+static bool MarkConstexprPCodeObjectStates(PCodeVM* vm, TypeRecord* type,
+                                           ConstexprObject* object,
+                                           unsigned char* memory,
+                                           size_t depth);
+
+static bool MarkConstexprPCodeSlotState(PCodeVM* vm, TypeRecord* type,
+                                        ConstexprValue* slot,
+                                        unsigned char* memory, size_t depth) {
+  if (type == NULL || slot == NULL || TypeIsReference(type)) {
+    return true;
+  }
+  if (slot->is_object) {
+    return MarkConstexprPCodeObjectStates(vm, type, slot->object, memory,
+                                          depth + 1);
+  }
+  if (TypeIsFixedArray(type) || TypeIsStructOrUnion(type) ||
+      slot->state == kValueStateValid || type->size <= 0) {
+    return true;
+  }
+  return PCodeVMSetMemoryState(vm, (uint64_t)(uintptr_t)memory,
+                               (size_t)type->size, slot->state);
+}
+
+static bool MarkConstexprPCodeObjectStates(PCodeVM* vm, TypeRecord* type,
+                                           ConstexprObject* object,
+                                           unsigned char* memory,
+                                           size_t depth) {
+  if (type == NULL || object == NULL || memory == NULL || depth > 64) {
+    return true;
+  }
+  if (TypeIsFixedArray(type)) {
+    size_t elem_size = type->next != NULL ? (size_t)type->next->size : 0;
+    for (size_t i = 0; i < object->slots.length; i++) {
+      if (!MarkConstexprPCodeSlotState(vm, type->next,
+                                       PCodeConstexprObjectSlot(object, i),
+                                       memory + i * elem_size, depth)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->is_union) {
+    return true;
+  }
+  Struct* str = type->info.struct_info;
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && !base->is_virtual && base->byte_offset >= 0 &&
+        !MarkConstexprPCodeSlotState(
+            vm, base->type,
+            PCodeConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i)),
+            memory + base->byte_offset, depth)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_bit_field ||
+        member->byte_offset < 0 ||
+        StorageIs(member->symbol->storage, STO(typedef))) {
+      continue;
+    }
+    if (!MarkConstexprPCodeSlotState(
+            vm, member->symbol->type,
+            PCodeConstexprObjectSlot(object,
+                                     PCodeConstexprMemberSlotIndex(str, member)),
+            memory + member->byte_offset, depth)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static const unsigned char* ConstexprPCodeRegionStates(PCodeVM* vm,
                                                        void* memory) {
   for (size_t i = vm->memory_region_count; i > 0; --i) {
@@ -2755,6 +2841,11 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
     return false;
   }
   VectorAppend(allocations, memory);
+  if (object != NULL &&
+      !MarkConstexprPCodeObjectStates(vm, object_type, object, memory, 0)) {
+    *reason = "could not mark constexpr object argument";
+    return false;
+  }
   if (address_regions != NULL) {
     ConstexprPCodeAddressRegion* region = malloc(sizeof(*region));
     if (region == NULL) {
@@ -2933,7 +3024,8 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
       memset(*sp, 0, size);
       return true;
     }
-    if (object == NULL || !StoreConstexprObjectBytes(&marshal, type, object, *sp)) {
+    if (object == NULL || !StoreConstexprObjectBytes(&marshal, type, object, *sp) ||
+        !MarkConstexprPCodeObjectStates(vm, type, object, *sp, 0)) {
       if (delete_object) {
         DeletePCodeConstexprObject(object);
       }
@@ -2995,7 +3087,8 @@ static bool StoreConstexprPCodeArgument(ConstEvalContext* ctx,
       ConstexprEvaluateValue(ctx, arg, type, &evaluated)) {
     if (evaluated.is_object) {
       if (evaluated.object != NULL &&
-          StoreConstexprObjectBytes(&marshal, type, evaluated.object, *sp)) {
+          StoreConstexprObjectBytes(&marshal, type, evaluated.object, *sp) &&
+          MarkConstexprPCodeObjectStates(vm, type, evaluated.object, *sp, 0)) {
         return true;
       }
     } else if (StoreConstexprScalarBytes(type, &evaluated, *sp)) {

@@ -8672,7 +8672,8 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
           return true;
         }
         // P-code objects hold a null pointer as zero.
-        if (!value.is_object && !value.is_floating && value.ivalue == 0) {
+        if (!value.is_object && !value.is_floating && value.ivalue == 0 &&
+            value.state == kValueStateValid && !value.external) {
           return ConstexprNullAddress(result);
         }
       }
@@ -9238,6 +9239,9 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
   // P-code objects hold pointers as host addresses, and null as plain zero.
   ConstexprValue* sides[] = {&left, &right};
   for (size_t i = 0; i < 2; i++) {
+    if (sides[i]->external || sides[i]->state != kValueStateValid) {
+      return false;
+    }
     if (!sides[i]->is_address && !sides[i]->is_object &&
         !sides[i]->is_floating && sides[i]->ivalue == 0) {
       *sides[i] = (ConstexprValue){.is_address = true};
