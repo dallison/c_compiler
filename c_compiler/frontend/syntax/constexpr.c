@@ -6260,10 +6260,16 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
         ASTNode* whole =
             ((DesignatedInitializerASTNode*)entry)->init;
         if (whole != NULL && whole->type != NULL &&
-            TypeEqual(whole->type, type) &&
-            EvaluateConstexprObjectExpressionInitializer(ctx, type, whole,
-                                                         result)) {
-          return true;
+            TypeEqual(whole->type, type)) {
+          // A class-typed conditional initializes from its selected arm.
+          if (whole->op == AST_OP(question) &&
+              ASTNodeGetShape(whole) == kASTShapeBinary) {
+            return EvaluateConstexprValue(ctx, whole, type, result);
+          }
+          if (EvaluateConstexprObjectExpressionInitializer(ctx, type, whole,
+                                                           result)) {
+            return true;
+          }
         }
       }
     }
