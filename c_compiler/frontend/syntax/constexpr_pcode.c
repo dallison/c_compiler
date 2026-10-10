@@ -621,6 +621,7 @@ bool ConstexprStaticAddressTarget(const ConstexprValue* value, Symbol** symbol,
 bool ConstexprEvaluateReferenceBinding(ConstEvalContext* ctx, ASTNode* node,
                                        TypeRecord* reference_type,
                                        ConstexprValue* result);
+bool ConstexprAddressIsFunction(const ConstexprValue* value);
 bool ConstexprStaticAddressAt(Symbol* symbol, size_t offset,
                               TypeRecord* pointee, ConstexprValue* result);
 bool ConstexprAddressInsideObject(ConstexprObject* root, size_t offset,
@@ -7186,10 +7187,11 @@ static bool PCodeStoreInitializer(ConstEvalContext* ctx, TypeRecord* type,
     ConstexprValue address = {0};
     Symbol* target = NULL;
     size_t offset = 0;
-    if (!ConstexprEvaluateReferenceBinding(
-            ctx, ConstexprInitializerExpression(initializer), type,
-            &address) ||
-        !ConstexprStaticAddressTarget(&address, &target, &offset)) {
+    bool bound = ConstexprEvaluateReferenceBinding(
+        ctx, ConstexprInitializerExpression(initializer), type, &address);
+    if (!bound ||
+        (!ConstexprAddressIsFunction(&address) &&
+         !ConstexprStaticAddressTarget(&address, &target, &offset))) {
       return ConstexprPCodeFailure(
           ctx, kConstexprPCodeFailureUnsupported,
           "constexpr pcode reference member is not bound to a static object");

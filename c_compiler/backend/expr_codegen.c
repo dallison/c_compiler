@@ -5422,7 +5422,7 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
         IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(loada), addr)),
                   NewPointerTo(kQualPlain, referent));
     if ((node->base.flags & kASTNeedAddress) != 0 || TypeIsArray(referent) ||
-        TypeIsVector(referent) ||
+        TypeIsFunction(referent) || TypeIsVector(referent) ||
         TypeIsStructOrUnion(referent) ||
         TypeIsMemberPointerAggregate(referent)) {
       return ref_addr;

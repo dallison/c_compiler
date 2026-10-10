@@ -13541,6 +13541,25 @@ static void AnalyzeContentsOperator(UnaryASTNode* node) {
     node->base.value_category = kValueCategoryLvalue;
     return;
   }
+  // `*f` applies the function-to-pointer conversion, designating f itself.
+  if (node->sub->type != NULL && TypeIsFunction(node->sub->type)) {
+    ASTNode* function = node->sub;
+    if (function->op == AST_OP(contents)) {
+      node->sub = ASTNodeMove(((UnaryASTNode*)function)->sub);
+      node->sub->parent = (ASTNode*)node;
+      ASTNodeDelete(function);
+    } else {
+      TypeRecord* pointer_type =
+          NewPointerTo(kQualPlain, TypeRecordCopy(function->type));
+      function->flags |= kASTNeedAddress;
+      node->sub = NewUnaryASTNode(AST_OP(address), NULL, function->location,
+                                  function);
+      ASTNodeSetType(node->sub, pointer_type);
+      node->sub->parent = (ASTNode*)node;
+      node->sub->flags |= kASTAnalyzed;
+      node->sub->value_category = kValueCategoryPrvalue;
+    }
+  }
   if (!TypeIsPointerOrArray(node->sub->type)) {
     SemanticError(node->sub, "Cannot take contents of this expression");
     // Fake an integer type for the result.

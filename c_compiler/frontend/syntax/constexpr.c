@@ -3530,6 +3530,14 @@ bool ConstexprStaticAddressTarget(const ConstexprValue* value, Symbol** symbol,
   return true;
 }
 
+bool ConstexprAddressIsFunction(const ConstexprValue* value) {
+  return value != NULL && value->is_address &&
+         value->address_binding != NULL && value->address_index == 0 &&
+         value->address_binding->symbol != NULL &&
+         value->address_binding->symbol->type != NULL &&
+         TypeIsFunction(value->address_binding->symbol->type);
+}
+
 // The inverse: the address |offset| bytes into static object |symbol|.
 bool ConstexprStaticAddressAt(Symbol* symbol, size_t offset,
                               TypeRecord* pointee, ConstexprValue* result) {
@@ -4116,6 +4124,11 @@ static ASTNode* ConstexprValueInitializer(ConstexprValue* value,
     Symbol* symbol = value->address_binding->symbol;
     ASTNode* object =
         NewIdentifierASTNode(symbol, location);
+    if (TypeIsReference(type)) {
+      // A reference is initialized by the function or object it designates.
+      object->flags |= kASTAnalyzed | kASTNeedAddress;
+      return NewExpressionInitializerASTNode(object, location);
+    }
     expr = NewUnaryASTNode(AST_OP(address), NULL, location, object);
     ASTNodeSetType(expr, TypeRecordCopy(type));
   } else if (TypeIsReflection(type)) {
@@ -8632,6 +8645,10 @@ static bool ConstexprReferenceLocation(ConstEvalContext* ctx, ASTNode* node,
   }
   if (node != NULL && node->op == AST_OP(identifier)) {
     Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+    if (symbol != NULL && symbol->type != NULL &&
+        TypeIsFunction(symbol->type)) {
+      return ConstexprFunctionAddress(ctx, symbol, result);
+    }
     ConstexprBinding* reference =
         symbol != NULL && TypeIsReference(symbol->type)
             ? FindConstexprBinding(ctx, symbol) : NULL;
