@@ -11776,7 +11776,12 @@ static ConstexprStatementResult EvaluateConstexprStatementImpl(
     case AST_OP(return): {
       CombinedStatementASTNode* ret = (CombinedStatementASTNode*)stmt;
       ConstexprValue return_value = {0};
-      if (!EvaluateConstexprValue(ctx, ret->cond, return_type, &return_value)) {
+      if (ret->cond == NULL) {
+        if (return_type != NULL && !TypeIsVoid(return_type)) {
+          return kConstexprStmtInvalid;
+        }
+      } else if (!EvaluateConstexprValue(ctx, ret->cond, return_type,
+                                         &return_value)) {
         return ConstexprFailureStatementResult(ctx);
       }
       if (ret->stmt != NULL) {
