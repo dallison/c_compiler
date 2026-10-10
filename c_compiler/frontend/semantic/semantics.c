@@ -610,6 +610,23 @@ static bool NodeIsZero(ASTNode* node) {
   }
 }
 
+// An integer literal zero converted to a pointer is the null pointer value and
+// must take the pointer's width; backends size stack arguments from the value
+// type, so a 32-bit literal would leave the pointer's upper half undefined.
+static void RetypeNullPointerLiteral(ASTNode* from, TypeRecord* to) {
+  if (from->op == AST_OP(expr_init)) {
+    ASTNode* expr = ((ExpressionInitializerASTNode*)from)->expr;
+    if (expr != NULL) {
+      RetypeNullPointerLiteral(expr, to);
+    }
+    return;
+  }
+  if (from->op == AST_OP(number) && from->type != NULL &&
+      TypeIsIntegral(from->type)) {
+    ASTNodeSetType(from, to);
+  }
+}
+
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   TypeRecord* saved_current_function = compiler->current_function;
   Struct* saved_class_access_context =
@@ -1835,6 +1852,7 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
         }
         // The only integer we can convert to void* is NULL.
         if (NodeIsZero(from)) {
+          RetypeNullPointerLiteral(from, to);
           return;
         }
       }
@@ -1892,7 +1910,8 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
 
       // Allow the number 0 (explicitly) to be converted to a pointer.
       if (NodeIsZero(from) && TypeIsPointer(to)) {
-          return;
+        RetypeNullPointerLiteral(from, to);
+        return;
       }
 
       if (NodeIsZero(from) && TypeIsMemberPointer(to)) {
