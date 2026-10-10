@@ -1472,8 +1472,11 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
     return;
   }
   ASTNodeVisit(expr, ClearStaticAssertAnalysis, 0, NULL);
+  expr = CXXFoldIsSameVExpression(expr);
   compiler->constant_evaluation_required_depth++;
-  expr = AnalyzeExpression(expr);
+  if ((expr->flags & kASTAnalyzed) == 0) {
+    expr = AnalyzeExpression(expr);
+  }
   compiler->constant_evaluation_required_depth--;
   if (expr == NULL) {
     ASTNodeDelete(expr);
@@ -3530,6 +3533,10 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
     node->initializer = CXXFoldIsSameVExpression(node->initializer);
   }
   node->initializer = AnalyzeExpression(node->initializer);
+  if (node->symbol != NULL && node->symbol->flags.is_constexpr &&
+      node->initializer != NULL && !node->symbol->flags.value_set) {
+    EvaluateScalarConstantForSymbol(node->symbol, node->initializer);
+  }
   bool is_cxx_local_static =
       CompilerIsCXX() && node->symbol != NULL &&
       StorageIs(node->symbol->storage, STO(static));

@@ -3310,6 +3310,16 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
            compiler->current_function->info.function.template_parameter_count >
                0);
       if (in_template) {
+        ASTNode* init =
+            ConstexprInitializerExpression(id->symbol->constexpr_initializer);
+        if (init != NULL && !ExpressionIsTemplateDependent(init)) {
+          int64_t ivalue = 0;
+          if (EvaluateIntegerExpression(init, &ivalue)) {
+            id->symbol->flags.value_set = true;
+            id->symbol->value.ivalue = ivalue;
+            return false;
+          }
+        }
         return true;
       }
     }

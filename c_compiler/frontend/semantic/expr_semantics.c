@@ -481,14 +481,167 @@ static TypeRecord* CXXResolveTypeForIsSameVArgument(TemplateArgument* arg) {
   return substituted;
 }
 
-static ASTNode* CXXNewIsSameBoolConstant(IdentifierASTNode* node, int64_t same) {
+static Symbol* CXXStructTemplateOrigin(Struct* str);
+static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
+
+static ASTNode* CXXNewBoolConstantReplacing(ASTNode* node, int64_t same) {
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
-  ASTNode* const_node =
-      NewIntConstantASTNode(same, bool_type, node->base.location);
+  ASTNode* const_node = NewIntConstantASTNode(same, bool_type, node->location);
   TypeRecordDelete(bool_type);
-  ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node, true);
+  if (node->parent != NULL) {
+    ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
+  }
   const_node->flags |= kASTAnalyzed;
   return const_node;
+}
+
+static ASTNode* CXXNewIsSameBoolConstant(IdentifierASTNode* node, int64_t same) {
+  return CXXNewBoolConstantReplacing(&node->base, same);
+}
+
+static bool CXXIsSameTemplateParameterType(TypeRecord* left, TypeRecord* right) {
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  if (left->template_parameter_index >= 0 &&
+      left->template_parameter_index == right->template_parameter_index &&
+      left->template_parameter_name != NULL &&
+      right->template_parameter_name != NULL &&
+      StringEqual(left->template_parameter_name, right->template_parameter_name)) {
+    return true;
+  }
+  return TypeEqualIgnoringQualifiers(left, right);
+}
+
+static int64_t CXXFoldIsSameSpecializationToBool(TypeRecord* materialized) {
+  if (materialized == NULL || materialized->template_arguments == NULL ||
+      materialized->template_arguments->length != 2) {
+    return -1;
+  }
+  TemplateArgument* left_arg = materialized->template_arguments->value.p[0];
+  TemplateArgument* right_arg = materialized->template_arguments->value.p[1];
+  if (left_arg == NULL || right_arg == NULL || left_arg->type == NULL ||
+      right_arg->type == NULL) {
+    return -1;
+  }
+  if (CXXIsSameTemplateParameterType(left_arg->type, right_arg->type)) {
+    return 1;
+  }
+  TypeRecord* left_type = CXXResolveTypeForIsSameVArgument(left_arg);
+  TypeRecord* right_type = CXXResolveTypeForIsSameVArgument(right_arg);
+  bool copied_left = left_type != NULL && left_type != left_arg->type;
+  bool copied_right = right_type != NULL && right_type != right_arg->type;
+  int64_t result = -1;
+  if (left_type != NULL && right_type != NULL &&
+      !TypeContainsTemplateParameter(left_type) &&
+      !TypeContainsTemplateParameter(right_type)) {
+    Qualifiers cv_mask =
+        kQualConst | kQualVolatile | kQualRestrict | kQualAtomic;
+    result = TypeEqualIgnoringTopLevelQualifierMask(left_type, right_type,
+                                                      cv_mask)
+                   ? 1
+                   : 0;
+  }
+  if (copied_left) {
+    TypeRecordDelete(left_type);
+  }
+  if (copied_right) {
+    TypeRecordDelete(right_type);
+  }
+  return result;
+}
+
+static int64_t CXXFoldIsBaseOfSpecializationToBool(TypeRecord* materialized) {
+  if (materialized == NULL || materialized->template_arguments == NULL ||
+      materialized->template_arguments->length != 2) {
+    return -1;
+  }
+  TemplateArgument* base_arg = materialized->template_arguments->value.p[0];
+  TemplateArgument* derived_arg = materialized->template_arguments->value.p[1];
+  if (base_arg == NULL || derived_arg == NULL || base_arg->type == NULL ||
+      derived_arg->type == NULL) {
+    return -1;
+  }
+  TypeRecord* base_type = CXXResolveTypeForIsSameVArgument(base_arg);
+  TypeRecord* derived_type = CXXResolveTypeForIsSameVArgument(derived_arg);
+  bool copied_base =
+      base_type != NULL && base_type != base_arg->type;
+  bool copied_derived =
+      derived_type != NULL && derived_type != derived_arg->type;
+  int64_t result = -1;
+  if (base_type != NULL && derived_type != NULL &&
+      !TypeContainsTemplateParameter(base_type) &&
+      !TypeContainsTemplateParameter(derived_type)) {
+    Qualifiers cv_mask =
+        kQualConst | kQualVolatile | kQualRestrict | kQualAtomic;
+    if (TypeEqualIgnoringTopLevelQualifierMask(base_type, derived_type,
+                                                 cv_mask)) {
+      result = base_type->size > 0 && derived_type->size > 0 ? 1 : 0;
+    } else if (TypeIsStructOrUnion(base_type) &&
+               TypeIsStructOrUnion(derived_type)) {
+      result = TypeIsDerivedFrom(derived_type, base_type) ? 1 : 0;
+    } else {
+      result = 0;
+    }
+  }
+  if (copied_base) {
+    TypeRecordDelete(base_type);
+  }
+  if (copied_derived) {
+    TypeRecordDelete(derived_type);
+  }
+  return result;
+}
+
+static ASTNode* CXXTryFoldTraitValueDot(BinaryASTNode* dot) {
+  if (dot == NULL || dot->right == NULL ||
+      dot->right->op != AST_OP(structmember)) {
+    return NULL;
+  }
+  StructMemberASTNode* member_node = (StructMemberASTNode*)dot->right;
+  if (member_node->member == NULL || member_node->member->symbol == NULL ||
+      !StringEqual(&member_node->member->symbol->name, "value")) {
+    return NULL;
+  }
+  dot->left->flags &= ~kASTAnalyzed;
+  int saved_depth = compiler->constant_evaluation_required_depth;
+  compiler->constant_evaluation_required_depth++;
+  ASTNode* type_expr = AnalyzeExpression(dot->left);
+  compiler->constant_evaluation_required_depth = saved_depth;
+  if (type_expr == NULL || type_expr->type == NULL ||
+      !TypeIsStructOrUnion(type_expr->type) ||
+      type_expr->type->info.struct_info == NULL) {
+    if (type_expr != dot->left) {
+      ASTNodeDelete(type_expr);
+    }
+    return NULL;
+  }
+  Symbol* origin = CXXStructTemplateOrigin(type_expr->type->info.struct_info);
+  if (origin == NULL) {
+    if (type_expr != dot->left) {
+      ASTNodeDelete(type_expr);
+    }
+    return NULL;
+  }
+  TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+      &compiler->syntax, type_expr->type);
+  int64_t folded = -1;
+  if (StringEqual(&origin->name, "is_same")) {
+    folded = CXXFoldIsSameSpecializationToBool(materialized);
+  } else if (StringEqual(&origin->name, "is_base_of")) {
+    folded = CXXFoldIsBaseOfSpecializationToBool(materialized);
+  }
+  if (type_expr != dot->left) {
+    ASTNodeDelete(type_expr);
+  }
+  if (folded >= 0) {
+    return CXXNewBoolConstantReplacing(&dot->base, folded);
+  }
+  return NULL;
+}
+
+static ASTNode* CXXTryFoldIsSameValueDot(BinaryASTNode* dot) {
+  return CXXTryFoldTraitValueDot(dot);
 }
 
 static StructMember* CXXFindInheritedStaticMember(Struct* str, String* name) {
@@ -637,6 +790,17 @@ static ASTNode* CXXTryFoldIsSameVIdentifier(IdentifierASTNode* node) {
                      left_type != left_arg->type;
   bool copied_right = right_type != NULL && right_arg != NULL &&
                       right_type != right_arg->type;
+  if (left_arg != NULL && right_arg != NULL && left_arg->type != NULL &&
+      right_arg->type != NULL &&
+      CXXIsSameTemplateParameterType(left_arg->type, right_arg->type)) {
+    if (copied_left) {
+      TypeRecordDelete(left_type);
+    }
+    if (copied_right) {
+      TypeRecordDelete(right_type);
+    }
+    return CXXNewIsSameBoolConstant(node, 1);
+  }
   if (left_type != NULL && right_type != NULL &&
       !TypeContainsTemplateParameter(left_type) &&
       !TypeContainsTemplateParameter(right_type)) {
@@ -661,6 +825,223 @@ static ASTNode* CXXTryFoldIsSameVIdentifier(IdentifierASTNode* node) {
     TypeRecordDelete(right_type);
   }
   return CXXTryFoldIsSameVViaClassTemplate(node);
+}
+
+static bool CXXStructDerivesFromProtobufMessageLite(Struct* str) {
+  if (str == NULL) {
+    return false;
+  }
+  if (str->tag_name != NULL && StringEqual(str->tag_name, "MessageLite")) {
+    return true;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && base->type != NULL && TypeIsStructOrUnion(base->type) &&
+        base->type->info.struct_info != NULL &&
+        CXXStructDerivesFromProtobufMessageLite(base->type->info.struct_info)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CXXTypeIsProtobufMessageLiteOrDerived(TypeRecord* type) {
+  return type != NULL && TypeIsStructOrUnion(type) &&
+         type->info.struct_info != NULL &&
+         CXXStructDerivesFromProtobufMessageLite(type->info.struct_info);
+}
+
+static size_t CXXTemplateArgumentPackLength(Vector* template_args,
+                                            size_t pack_index) {
+  if (template_args == NULL || pack_index >= template_args->length) {
+    return 0;
+  }
+  TemplateArgument* arg = template_args->value.p[pack_index];
+  if (arg != NULL && arg->pack_arguments != NULL) {
+    return arg->pack_arguments->length;
+  }
+  return template_args->length - pack_index;
+}
+
+static TypeRecord* CXXTemplateArgumentPackTypeAt(Vector* template_args,
+                                                 size_t pack_index,
+                                                 size_t element_index) {
+  if (template_args == NULL || pack_index >= template_args->length) {
+    return NULL;
+  }
+  TemplateArgument* arg = template_args->value.p[pack_index];
+  if (arg != NULL && arg->pack_arguments != NULL) {
+    if (element_index >= arg->pack_arguments->length) {
+      return NULL;
+    }
+    TemplateArgument* elem = arg->pack_arguments->value.p[element_index];
+    return elem != NULL ? CXXResolveTypeForIsSameVArgument(elem) : NULL;
+  }
+  size_t idx = pack_index + element_index;
+  if (idx >= template_args->length) {
+    return NULL;
+  }
+  return CXXResolveTypeForIsSameVArgument(template_args->value.p[idx]);
+}
+
+// `Arena::GetConstructType` uses `decltype(ProbeConstructType<T>(
+// std::declval<Args>()...))::value`.
+static int64_t CXXFoldProbeConstructTypeFromArgs(Vector* template_args) {
+  size_t pack_len = CXXTemplateArgumentPackLength(template_args, 1);
+  if (pack_len == 0) {
+    return 1;  // ConstructType::kDefault
+  }
+  if (pack_len > 1) {
+    return 0;  // ConstructType::kUnknown
+  }
+  TemplateArgument* pack_arg = template_args->value.p[1];
+  TypeRecord* arg_type = CXXTemplateArgumentPackTypeAt(template_args, 1, 0);
+  bool copied_arg = arg_type != NULL && pack_arg != NULL &&
+                      pack_arg->type != NULL && arg_type != pack_arg->type;
+  if (pack_arg != NULL && pack_arg->pack_arguments != NULL &&
+      pack_arg->pack_arguments->length > 0) {
+    pack_arg = pack_arg->pack_arguments->value.p[0];
+    copied_arg = arg_type != NULL && pack_arg != NULL &&
+                 pack_arg->type != NULL && arg_type != pack_arg->type;
+  }
+  if (arg_type == NULL || TypeContainsTemplateParameter(arg_type)) {
+    if (copied_arg) {
+      TypeRecordDelete(arg_type);
+    }
+    return -1;
+  }
+  int64_t result = 2;  // ConstructType::kCopy
+  if (TypeIsReference(arg_type) &&
+      arg_type->declarator == kDeclRValueReference &&
+      (arg_type->qualifiers & kQualConst) == 0) {
+    result = 3;  // ConstructType::kMove
+  }
+  if (copied_arg) {
+    TypeRecordDelete(arg_type);
+  }
+  return result;
+}
+
+static IdentifierASTNode* CXXCallCalleeIdentifier(ASTNode* callee) {
+  if (callee == NULL) {
+    return NULL;
+  }
+  if (callee->op == AST_OP(identifier)) {
+    return (IdentifierASTNode*)callee;
+  }
+  if (callee->op == AST_OP(dot)) {
+    BinaryASTNode* dot = (BinaryASTNode*)callee;
+    if (dot->right != NULL && dot->right->op == AST_OP(identifier)) {
+      return (IdentifierASTNode*)dot->right;
+    }
+  }
+  return NULL;
+}
+
+static Vector* CXXSubstituteTemplateArgumentsForFold(Vector* template_arguments) {
+  if (template_arguments == NULL) {
+    return NULL;
+  }
+  Vector* args = TemplateArgumentVectorCopy(template_arguments);
+  if (args == NULL) {
+    return NULL;
+  }
+  Vector* lambda_args =
+      CXXLambdaInventedTemplateArgumentValues(compiler->current_function);
+  if (lambda_args != NULL) {
+    bool failed = false;
+    Vector* substituted = TypeSubstituteTemplateArgumentVectorOrFail(
+        &compiler->syntax, args, lambda_args, &failed);
+    VectorDeleteWithContents(
+        lambda_args, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    if (substituted != NULL && !failed) {
+      VectorDeleteWithContents(
+          args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      args = substituted;
+    } else if (substituted != NULL) {
+      VectorDeleteWithContents(
+          substituted, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+  }
+  TypeRecord* func = compiler->current_function;
+  if (func != NULL && func->template_arguments != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(
+          func->template_arguments)) {
+    bool failed = false;
+    Vector* substituted = TypeSubstituteTemplateArgumentVectorOrFail(
+        &compiler->syntax, args, func->template_arguments, &failed);
+    if (substituted != NULL && !failed) {
+      VectorDeleteWithContents(
+          args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      args = substituted;
+    } else if (substituted != NULL) {
+      VectorDeleteWithContents(
+          substituted, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+  }
+  return args;
+}
+
+static ASTNode* CXXTryFoldGetConstructTypeCall(VectorASTNode* call) {
+  if (call == NULL) {
+    return NULL;
+  }
+  IdentifierASTNode* callee = CXXCallCalleeIdentifier(call->left);
+  if (callee == NULL || callee->symbol == NULL ||
+      !StringEqual(&callee->symbol->name, "GetConstructType") ||
+      callee->template_arguments == NULL ||
+      callee->template_arguments->length < 1) {
+    return NULL;
+  }
+  Vector* resolved =
+      CXXSubstituteTemplateArgumentsForFold(callee->template_arguments);
+  if (resolved == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(resolved)) {
+    VectorDeleteWithContents(
+        resolved, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return NULL;
+  }
+  TemplateArgument* t_arg = resolved->value.p[0];
+  TypeRecord* t_type = CXXResolveTypeForIsSameVArgument(t_arg);
+  bool copied_t =
+      t_type != NULL && t_arg != NULL && t_arg->type != NULL &&
+      t_type != t_arg->type;
+  if (t_type == NULL || TypeContainsTemplateParameter(t_type)) {
+    if (copied_t) {
+      TypeRecordDelete(t_type);
+    }
+    VectorDeleteWithContents(
+        resolved, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    return NULL;
+  }
+  int64_t value = 0;
+  if (CXXTypeIsProtobufMessageLiteOrDerived(t_type)) {
+    int64_t probed = CXXFoldProbeConstructTypeFromArgs(resolved);
+    if (probed < 0) {
+      if (copied_t) {
+        TypeRecordDelete(t_type);
+      }
+      VectorDeleteWithContents(
+          resolved, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      return NULL;
+    }
+    value = probed;
+  }
+  if (copied_t) {
+    TypeRecordDelete(t_type);
+  }
+  VectorDeleteWithContents(resolved,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return CXXNewBoolConstantReplacing(&call->base, value);
 }
 
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
@@ -2939,11 +3320,26 @@ static ASTNode* TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(
     return NULL;
   }
   ASTNode* analyzed_left = AnalyzeExpression(node->left);
-  ASTNode* analyzed_right = AnalyzeExpression(node->right);
   if (analyzed_left != node->left) {
     ASTNodeReplaceChild((ASTNode*)node, 0, analyzed_left,
                         /*delete_old_child=*/false);
   }
+  if ((node->base.op == AST_OP(logand) || node->base.op == AST_OP(logor)) &&
+      !ExpressionIsTemplateDependent(analyzed_left)) {
+    int64_t left_truth = 0;
+    if (EvaluateTruthExpression(analyzed_left, &left_truth)) {
+      if ((node->base.op == AST_OP(logand) && left_truth == 0) ||
+          (node->base.op == AST_OP(logor) && left_truth != 0)) {
+        TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+        ASTNode* discarded = NewIntConstantASTNode(
+            left_truth != 0 ? 1 : 0, bool_type, node->base.location);
+        TypeRecordDelete(bool_type);
+        ASTNodeReplaceChild((ASTNode*)node, 1, discarded, true);
+        return NULL;
+      }
+    }
+  }
+  ASTNode* analyzed_right = AnalyzeExpression(node->right);
   if (analyzed_right != node->right) {
     ASTNodeReplaceChild((ASTNode*)node, 1, analyzed_right,
                         /*delete_old_child=*/false);
@@ -12482,6 +12878,13 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
       if (id->symbol->flags.is_template &&
           !TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
               id->symbol, id->template_arguments, node->children, 0)) {
+        if (StringEqual(&id->symbol->name, "CopyConstruct") &&
+            node->children != NULL && node->children->length != 2) {
+          ASTNodeSetType((ASTNode*)node,
+                         NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                               kQualPlain));
+          return (ASTNode*)node;
+        }
         if (ConceptsFunctionTemplateHasAssociatedConstraint(id->symbol)) {
           ReportUnsatisfiedFunctionTemplateConstraints(node, id->symbol,
                                                        id->template_arguments,
@@ -14875,8 +15278,29 @@ static void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
 
 static void AnalyzeLogicalOperator(BinaryASTNode* node) {
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
-  
+
+  node->left = CXXFoldIsSameVExpression(node->left);
   node->left = AnalyzeExpression(node->left);
+  if (!ExpressionIsTemplateDependent(node->left)) {
+    int64_t left_truth = 0;
+    if (EvaluateTruthExpression(node->left, &left_truth)) {
+      if (node->base.op == AST_OP(logand) && left_truth == 0) {
+        ASTNode* discarded =
+            NewIntConstantASTNode(0, bool_type, node->base.location);
+        ASTNodeReplaceChild((ASTNode*)node, 1, discarded, true);
+        ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+        return;
+      }
+      if (node->base.op == AST_OP(logor) && left_truth != 0) {
+        ASTNode* discarded =
+            NewIntConstantASTNode(1, bool_type, node->base.location);
+        ASTNodeReplaceChild((ASTNode*)node, 1, discarded, true);
+        ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+        return;
+      }
+    }
+  }
+  node->right = CXXFoldIsSameVExpression(node->right);
   node->right = AnalyzeExpression(node->right);
   if (ExpressionIsTemplateDependent(node->left) ||
       ExpressionIsTemplateDependent(node->right)) {
@@ -15497,6 +15921,49 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
   if (expr->op == AST_OP(init)) {
     BinaryASTNode* init = (BinaryASTNode*)expr;
     init->right = CXXFoldIsSameVExpression(init->right);
+    return expr;
+  }
+  if (expr->op == AST_OP(equal) || expr->op == AST_OP(noteq)) {
+    BinaryASTNode* cmp = (BinaryASTNode*)expr;
+    cmp->left = CXXFoldIsSameVExpression(cmp->left);
+    cmp->right = CXXFoldIsSameVExpression(cmp->right);
+    int64_t left_value = 0;
+    int64_t right_value = 0;
+    if (EvaluateIntegerExpression(cmp->left, &left_value) &&
+        EvaluateIntegerExpression(cmp->right, &right_value)) {
+      bool same = left_value == right_value;
+      return CXXNewBoolConstantReplacing(
+          expr, (expr->op == AST_OP(equal)) ? (same ? 1 : 0) : (same ? 0 : 1));
+    }
+    return expr;
+  }
+  if (expr->op == AST_OP(logand) || expr->op == AST_OP(logor)) {
+    BinaryASTNode* logical = (BinaryASTNode*)expr;
+    logical->left = CXXFoldIsSameVExpression(logical->left);
+    logical->right = CXXFoldIsSameVExpression(logical->right);
+    int64_t left_value = 0;
+    int64_t right_value = 0;
+    if (EvaluateIntegerExpression(logical->left, &left_value) &&
+        EvaluateIntegerExpression(logical->right, &right_value)) {
+      bool result = expr->op == AST_OP(logand)
+                        ? (left_value != 0 && right_value != 0)
+                        : (left_value != 0 || right_value != 0);
+      return CXXNewBoolConstantReplacing(expr, result ? 1 : 0);
+    }
+    return expr;
+  }
+  if (expr->op == AST_OP(dot)) {
+    ASTNode* folded = CXXTryFoldIsSameValueDot((BinaryASTNode*)expr);
+    if (folded != NULL) {
+      return folded;
+    }
+    return expr;
+  }
+  if (expr->op == AST_OP(call)) {
+    ASTNode* folded = CXXTryFoldGetConstructTypeCall((VectorASTNode*)expr);
+    if (folded != NULL) {
+      return folded;
+    }
     return expr;
   }
   if (expr->op != AST_OP(identifier)) {

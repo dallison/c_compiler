@@ -5536,6 +5536,28 @@ static Vector* NewFunctionTemplateDeductionArguments(TypeRecord* func,
   return args;
 }
 
+static bool FunctionTemplateDeductionVectorComplete(Vector* args) {
+  if (args == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    if (args->value.p[i] == NULL) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool FunctionTemplateAllowsExplicitOnlyDeduction(Symbol* templ,
+                                                          Vector* args) {
+  if (templ == NULL || args == NULL ||
+      !(StringEqual(&templ->name, "CopyConstruct") ||
+        StringEqual(&templ->name, "DefaultConstruct"))) {
+    return false;
+  }
+  return FunctionTemplateDeductionVectorComplete(args);
+}
+
 /* Number of leading fixed formals that must be supplied by call arguments (i.e.
  * those without a default argument), used to validate the call's arity. */
 static size_t RequiredFixedFunctionTemplateFormals(TypeRecord* func,
@@ -5640,6 +5662,20 @@ retry_deduction:
   if (args == NULL) {
     g_deduce_template_parameter_base = saved_deduce_base;
     return NULL;
+  }
+  if (FunctionTemplateAllowsExplicitOnlyDeduction(templ, args)) {
+    if (actuals->length < required_formal_count ||
+        (!varargs && formal_pack_index < 0 &&
+         actuals->length > fixed_formal_count) ||
+        ((varargs || formal_pack_index >= 0) &&
+         actuals->length < required_formal_count)) {
+      VectorDeleteWithContents(
+          args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      g_deduce_template_parameter_base = saved_deduce_base;
+      return NULL;
+    }
+    goto deduction_finished;
   }
   g_deduce_defer_bare_member = defer_bare_member;
   if (formal_pack_count > 1) {
@@ -9866,26 +9902,26 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
     } else if (is_new_symbol && ftpl->type->info.function.body != NULL &&
                constraints_satisfied &&
                !PendingTemplateInstantiationHasAsmName(sym->asm_name.value)) {
-      sym->type->info.function.body = CloneTemplateFunctionBody(
-          parser, ftpl->type, sym->type, args);
-      sym->type->info.function.definition = true;
-      sym->flags.is_defined = true;
-      if (sym->type->info.function.is_inline) {
-        sym->flags.is_inline_defn = true;
-      }
-      if (!StorageIs(sym->storage, STO(static)) &&
-          !sym->flags.is_explicit_specialization) {
-        sym->flags.is_weak = true;
-      }
-      // A friend function template materialized for a class specialization is
-      // still only a template definition. Keep its class-substituted body as
-      // the pattern for per-call instantiation; analyzing or emitting that
-      // dependent body now can bind its own parameters against unrelated class
-      // arguments (for example CharT against an engine type).
-      if (!sym->flags.is_template) {
-        CompilerQueuePendingFunctionDefinition(sym);
-        VectorAppend(&compiler->declaration_asts,
-                     sym->type->info.function.body);
+      if (sym->flags.is_template) {
+        sym->type->info.function.body = CloneTemplateFunctionBody(
+            parser, ftpl->type, sym->type, args);
+        sym->type->info.function.definition = true;
+        sym->flags.is_defined = true;
+        if (sym->type->info.function.is_inline) {
+          sym->flags.is_inline_defn = true;
+        }
+        if (!StorageIs(sym->storage, STO(static)) &&
+            !sym->flags.is_explicit_specialization) {
+          sym->flags.is_weak = true;
+        }
+      } else {
+        // Non-template inline friends (for example hidden `operator==`) are
+        // only defined when odr-used; cloning the body at class instantiation
+        // type-checks code that may never run (Abseil raw_hash_set).
+        sym->value.func_defn = ftpl;
+        if (sym->type->template_arguments == NULL && args != NULL) {
+          sym->type->template_arguments = TemplateArgumentVectorCopy(args);
+        }
       }
     } else if (is_new_symbol && ftpl->type->info.function.body != NULL) {
       sym->value.func_defn = ftpl;

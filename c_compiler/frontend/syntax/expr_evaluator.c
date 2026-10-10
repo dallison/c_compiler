@@ -578,6 +578,12 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
         return true;
       }
       TypeRecord* type = id_node->symbol->type;
+      if (id_node->symbol->flags.is_constexpr &&
+          id_node->symbol->flags.value_set &&
+          (TypeIsIntegral(type) || TypeIsEnum(type))) {
+        *result = id_node->symbol->value.ivalue;
+        return true;
+      }
       if (!CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&
           !id_node->symbol->flags.is_constexpr) {
         return false;
@@ -588,7 +594,7 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       if (!id_node->symbol->flags.value_set) {
         return false;
       }
-      if (TypeIsIntegral(type)) {
+      if (TypeIsIntegral(type) || TypeIsEnum(type)) {
         *result = id_node->symbol->value.ivalue;
       } else if (TypeIsFloatingPoint(type)) {
         *result = id_node->symbol->value.fvalue;
@@ -1167,7 +1173,7 @@ bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
     symbol->flags.value_set = false;
     return false;
   }
-  if (TypeIsIntegral(symbol->type)) {
+  if (TypeIsIntegral(symbol->type) || TypeIsEnum(symbol->type)) {
     symbol->flags.value_set =
         EvaluateIntegerExpression(initializer, &symbol->value.ivalue);
     return symbol->flags.value_set;
