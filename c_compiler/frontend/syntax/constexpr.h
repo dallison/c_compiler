@@ -29,6 +29,9 @@ typedef struct {
   // constructed prvalue), which their full-expression cleanup names after the
   // expression that created them has returned.
   Vector temporaries;
+  // ConstexprBinding* copies of a returning call's bindings that its result
+  // still addresses, such as the `this` of `return *this;`.
+  Vector retained_bindings;
   int call_depth;
   int steps;
   int max_steps;

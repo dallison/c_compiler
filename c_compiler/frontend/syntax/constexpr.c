@@ -1083,6 +1083,7 @@ void ConstEvalContextInit(ConstEvalContext* ctx) {
   VectorInit(&ctx->heap_blocks);
   VectorInit(&ctx->exception_handles);
   VectorInit(&ctx->temporaries);
+  VectorInit(&ctx->retained_bindings);
   ctx->exception = NULL;
   ctx->call_depth = 0;
   ctx->steps = 0;
@@ -1108,6 +1109,10 @@ void ConstEvalContextDestruct(ConstEvalContext* ctx) {
     free(ctx->temporaries.value.p[i]);
   }
   VectorDestruct(&ctx->temporaries);
+  for (size_t i = 0; i < ctx->retained_bindings.length; i++) {
+    free(ctx->retained_bindings.value.p[i]);
+  }
+  VectorDestruct(&ctx->retained_bindings);
   for (size_t i = 0; i < ctx->objects.length; i++) {
     ConstexprObject* object = ctx->objects.value.p[i];
     for (size_t j = 0; j < object->slots.length; j++) {
@@ -2617,6 +2622,31 @@ static void PopConstexprBindings(ConstEvalContext* ctx, size_t mark) {
   }
 }
 
+// A returned reference can still name a binding of the returning call's frame,
+// such as the `this` of `return *this;` when `this` holds the receiver object
+// itself.  The frame's bindings are freed when it pops, so the result keeps a
+// copy the context owns.
+static void ConstexprRetainReturnedBinding(ConstEvalContext* ctx, size_t mark,
+                                           ConstexprValue* result) {
+  if (result == NULL || !result->is_address ||
+      result->address_binding == NULL) {
+    return;
+  }
+  for (size_t i = mark; i < ctx->bindings.length; i++) {
+    ConstexprBinding* binding = ctx->bindings.value.p[i];
+    if (binding == result->address_binding) {
+      ConstexprBinding* retained = malloc(sizeof(ConstexprBinding));
+      *retained = *binding;
+      if (retained->address_binding == binding) {
+        retained->address_binding = retained;
+      }
+      VectorAppend(&ctx->retained_bindings, retained);
+      result->address_binding = retained;
+      return;
+    }
+  }
+}
+
 static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
                                    TypeRecord* type,
                                    ConstexprValue* result);
@@ -2856,6 +2886,20 @@ static void ConstexprRelocateObjectAddresses(ConstexprObject* object,
       ConstexprRelocateObjectAddresses(slot->object, sources, clones);
     }
   }
+}
+
+// |copy| replaces |source| as the same object, so the addresses it holds into
+// |source| (a small-buffer pointer, say) must designate |copy|.
+static void ConstexprMoveObjectIdentity(ConstexprObject* source,
+                                        ConstexprObject* copy) {
+  Vector sources;
+  Vector clones;
+  VectorInit(&sources);
+  VectorInit(&clones);
+  ConstexprCollectObjectPairs(source, copy, &sources, &clones);
+  ConstexprRelocateObjectAddresses(copy, &sources, &clones);
+  VectorDestruct(&sources);
+  VectorDestruct(&clones);
 }
 
 // One binding per function for the whole compilation.  It is not owned by an
@@ -5507,8 +5551,16 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
                 TypeIsFunction(constructor_symbol->type)
             ? constructor_symbol->type->info.function.cxx_special_member_kind
             : kCXXSpecialMemberNone;
+    // Cloning the source stands in only for a copy that runs no user code.
+    bool user_provided_constructor =
+        constructor_symbol != NULL && constructor_symbol->type != NULL &&
+        TypeIsFunction(constructor_symbol->type) &&
+        constructor_symbol->type->info.function.body != NULL &&
+        !constructor_symbol->type->info.function.is_trivial_special_member &&
+        !constructor_symbol->type->info.function.is_defaulted;
     if (constructor_call->children != NULL &&
-        constructor_call->children->length >= 2) {
+        constructor_call->children->length == 2 &&
+        !user_provided_constructor) {
       ASTNode* source = constructor_call->children->value.p[
           constructor_call->children->length - 1];
       TypeRecord* source_type = source != NULL ? source->type : NULL;
@@ -5561,15 +5613,7 @@ static bool EvaluateConstexprObjectExpressionInitializer(ConstEvalContext* ctx,
       result->object = CloneConstexprObject(ctx, pcode_object);
       if (result->object != NULL) {
         // The p-code object is deleted; its own addresses move to the clone.
-        Vector sources;
-        Vector clones;
-        VectorInit(&sources);
-        VectorInit(&clones);
-        ConstexprCollectObjectPairs(pcode_object, result->object, &sources,
-                                    &clones);
-        ConstexprRelocateObjectAddresses(result->object, &sources, &clones);
-        VectorDestruct(&sources);
-        VectorDestruct(&clones);
+        ConstexprMoveObjectIdentity(pcode_object, result->object);
       }
       ConstexprPCodeDeleteObject(pcode_object);
       return result->object != NULL;
@@ -7178,6 +7222,12 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     if (!EvaluateConstexprInitializer(ctx, node->type, node, result) ||
         !result->is_object || result->object == NULL) {
       return false;
+    }
+    // The full-expression's cleanup destroys this temporary by name.
+    ASTNode* literal_sym = ((CompoundLiteralASTNode*)node)->sym;
+    if (literal_sym != NULL && literal_sym->op == AST_OP(identifier)) {
+      ConstexprRecordTemporary(ctx, ((IdentifierASTNode*)literal_sym)->symbol,
+                               result->object);
     }
     return true;
   }
@@ -12793,6 +12843,9 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
   }
   bool ok = bound && caller_bound && pre && body && post;
   ctx->call_depth--;
+  if (ok) {
+    ConstexprRetainReturnedBinding(ctx, mark, result);
+  }
   PopConstexprBindings(ctx, mark);
   return ok;
 }
@@ -13430,11 +13483,15 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
     ConstexprObject* destination = NULL;
     ConstexprValue value = {0};
     VectorASTNode* copy = (VectorASTNode*)node;
-    return EvaluateConstexprObjectAddress(ctx, copy->children->value.p[0],
-                                          &destination) &&
-           EvaluateConstexprCall(ctx, elided_source, &value) &&
-           value.is_object &&
-           ConstexprStructCopySlots(ctx, value.object, destination);
+    if (!EvaluateConstexprObjectAddress(ctx, copy->children->value.p[0],
+                                        &destination) ||
+        !EvaluateConstexprCall(ctx, elided_source, &value) ||
+        !value.is_object ||
+        !ConstexprStructCopySlots(ctx, value.object, destination)) {
+      return false;
+    }
+    ConstexprMoveObjectIdentity(value.object, destination);
+    return true;
   }
   ASTNode* receiver = NULL;
   Symbol* callee = ConstexprFunctionDefinition(ConstexprCallSymbol(node));
