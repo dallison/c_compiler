@@ -1747,11 +1747,9 @@ static TargetInstruction* LowerCall(PCodeGenerator* pcode, IRNode* node) {
   size_t args_size = 0;
   for (size_t i = node->inputs.length - 1; i >= 1; i--) {
     IRNode* arg_node = node->inputs.value.p[i];
-    // __int128 does not fit in a pcode register, so copy the 16-byte object
+    // __int128 and vectors do not fit in a pcode register, so copy the object
     // the same way as a struct argument.
-    if (TypeIsStructOrUnion(arg_node->type) ||
-        TypeUsesLongDoubleRepresentation(arg_node->type) ||
-        TypeIsInt128(arg_node->type) ||
+    if (TypePassedAsMemoryAggregate(arg_node->type) ||
         TypeIsMemberPointerAggregate(arg_node->type)) {
       PushStructArg(pcode, arg_node, &args_size);
     } else {
@@ -2346,6 +2344,18 @@ static TargetInstruction* LowerBuiltinVaArg(PCodeGenerator* pcode,
   TargetInstruction* ap_load =
       Emit(pcode, NewInstruction2(P_OP(ldx), ap_addr, ap_offset));
 
+  TargetInstruction* size =
+      GetIntConstant(pcode, NULL, kTargetType32Bit, node->type->size);
+  // Arguments that LowerCall copies onto the stack by value are read in
+  // place: the result is the address of the object.
+  if (TypePassedAsMemoryAggregate(node->type) ||
+      TypeIsMemberPointerAggregate(node->type)) {
+    TargetInstruction* next =
+        Emit(pcode, NewInstruction2(P_OP(addc), ap_load, size));
+    Emit(pcode, NewInstruction3(P_OP(stx), next, ap_addr, ap_offset));
+    return SetLoweredNode(node, ap_load);
+  }
+
   PCodeOpcode load_opcode = P_OP(ldx);
   if (TypeUsesFloat32Representation(node->type)) {
     load_opcode = P_OP(ldf);
@@ -2369,8 +2379,6 @@ static TargetInstruction* LowerBuiltinVaArg(PCodeGenerator* pcode,
       pcode, NewInstruction2(load_opcode, ap_load,
                              GetIntConstant(pcode, NULL, kTargetType32Bit, 0)));
 
-  TargetInstruction* size =
-      GetIntConstant(pcode, NULL, kTargetType32Bit, node->type->size);
   TargetInstruction* addc =
       Emit(pcode, NewInstruction2(P_OP(addc), ap_load, size));
   Emit(pcode, NewInstruction3(P_OP(stx), addc, ap_addr, ap_offset));

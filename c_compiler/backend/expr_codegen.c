@@ -4127,7 +4127,17 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
       // If the argument is the result of another call it may
       // have been converted to an IR_OP(addressof) which is no longer
       // a struct type (we want its address, not its value)
-      if (aggregate_value_formal || TypeIsStructOrUnion(arg_value->type) ||
+      // A variadic long double is passed by value like a prototyped one; its
+      // IR value can be the address of an over-aligned object.
+      bool variadic_long_double =
+          formal_type == NULL && TypeUsesLongDoubleRepresentation(arg->type);
+      if (variadic_long_double &&
+          !TypeUsesLongDoubleRepresentation(arg_value->type)) {
+        arg_value = IRSetType(
+            GeneratorEmit(gen, NewIR1(IR_OP(structarg), arg_value)), arg->type);
+        CheckForVarUse(arg_value, arg);
+      } else if (aggregate_value_formal ||
+          TypeIsStructOrUnion(arg_value->type) ||
           TypeIsVector(arg_value->type) ||
           TypeUsesLongDoubleRepresentation(arg_value->type) ||
           TypeIsInt128(arg_value->type) ||
