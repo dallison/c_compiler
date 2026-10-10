@@ -870,9 +870,8 @@ PCodeVMStatus PCodeVMStep(PCodeVM* vm) {
         break;
       }
       case PCODE_OP(cbra):
-        if (iregs[DEST(inst)] != 0) {
-          iregs[PCODE_PC_REG] = iregs[SRC1(inst)];
-        }
+        // A table of 8-byte 'bra' instructions follows; jump to entry DEST.
+        iregs[PCODE_PC_REG] += (uint64_t)iregs[DEST(inst)] * 8;
         break;
       case PCODE_OP(i2f):
         fregs[DEST(inst)] = iregs[SRC1(inst)];

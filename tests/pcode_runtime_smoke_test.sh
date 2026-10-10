@@ -119,3 +119,37 @@ SRC
   -o "$work/exception_cleanup.exe" "$libc"
 
 "$pcode" "$work/exception_cleanup.exe"
+
+# A dense switch is lowered to a computed branch into a table of branches.
+cat > "$work/dense_switch.c" <<'SRC'
+static int dense(int w) {
+  switch (w) {
+    case 5: return 50;
+    case 6: return 60;
+    case 7: return 70;
+    case 8: return 80;
+    case 9: return 90;
+    case 10: return 100;
+    case 11: return 110;
+    case 13: return 130;
+    default: return -1;
+  }
+}
+
+int main(void) {
+  volatile int k = 3;
+  if (dense(k + 2) != 50) return 1;
+  if (dense(k + 4) != 70) return 2;
+  if (dense(k + 8) != 110) return 3;
+  if (dense(k + 9) != -1) return 4;
+  if (dense(k + 10) != 130) return 5;
+  if (dense(k) != -1 || dense(k + 11) != -1) return 6;
+  return 0;
+}
+SRC
+
+"$davecc" -target pcode -static -Wl,-e -Wl,main \
+  "$work/dense_switch.c" -isystem libc/include \
+  -o "$work/dense_switch.exe" "$libc"
+
+"$pcode" "$work/dense_switch.exe"
