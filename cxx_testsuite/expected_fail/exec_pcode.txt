@@ -1,0 +1,27 @@
+# Execution tests that do not pass on the p-code interpreter.
+#
+# A failure outside this list is a regression, and a test in the list that
+# passes fails the suite too, so that fixing one forces its entry to go and
+# the list cannot drift out of date.
+#
+# p-code has no threads and no thread-local storage; it only needs to run what
+# the constant evaluator can, so these tests are not expected to pass.
+
+# thread_local objects.
+0221_thread_local_lifetime.cpp
+0222_thread_local_scalar_dynamic_init.cpp
+0223_thread_local_block_dtor_order.cpp
+0445_tls_image_clear_of_bss.cpp
+0672_namespace_class_array_forms.cpp
+0675_large_class_arrays.cpp
+0689_aggregate_global_runtime_members.cpp
+
+# Threads.
+0224_cxx_local_static_thread_safe.cpp
+0296_standard_atomic_ref_wait.cpp
+0297_standard_thread.cpp
+0298_standard_blocking_sync.cpp
+0299_standard_stop_token_jthread.cpp
+0309_standard_memory_shared_ptr_threads.cpp
+0487_standard_shared_mutex.cpp
+0491_standard_future.cpp

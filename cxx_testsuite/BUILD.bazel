@@ -334,6 +334,33 @@ sh_test(
     ],
 )
 
+# The constant evaluator runs C++ through p-code, so the execution tests run on
+# the p-code interpreter too.
+sh_test(
+    name = "exec_pcode",
+    size = "large",
+    srcs = ["run_exec_tests.sh"],
+    args = [
+        "--davecc",
+        "$(rootpath //:davecc)",
+        "--target",
+        "p-code",
+        "--libc",
+        "$(rootpath //:libc_pcode)",
+        "--interpreter",
+        "$(rootpath //:pcode)",
+        "--expected-fail",
+        "$(rootpath expected_fail/exec_pcode.txt)",
+    ],
+    data = CXX_TEST_DATA + [
+        "expected_fail/exec_pcode.txt",
+        "//:davecc",
+        "//:libc_headers",
+        "//:libc_pcode",
+        "//:pcode",
+    ],
+)
+
 # The same execution tests at -O2.  Optimization is where the backends diverge
 # most from one another, and running the suite only at the default level let a
 # defect that stopped every vector of a destructible type from compiling sit
