@@ -4,7 +4,8 @@
 // An out-of-line definition of a static data member may spell its type as a
 // cv-qualified dependent member of its own class, as absl::Span does for npos.
 // The qualifiers stay part of the type, including for a class template with
-// a partial specialization.
+// a partial specialization, and a partial specialization's own members name
+// it by its pattern arguments.
 
 template <class T>
 struct S {
@@ -24,9 +25,16 @@ template <class T>
 struct P<T*> {
   using size_type = unsigned;
   static const size_type npos = 7;
+  size_type twice() const;
 };
 template <class T>
 const typename P<T>::size_type P<T>::npos;
+template <class T>
+const typename P<T*>::size_type P<T*>::npos;
+template <class T>
+typename P<T*>::size_type P<T*>::twice() const {
+  return npos * 2;
+}
 
 int main() {
   S<int> s;
@@ -35,5 +43,9 @@ int main() {
   if (P<int*>::npos != 7) return 3;
   const unsigned long* a = &S<int>::npos;
   const unsigned long* b = &P<int>::npos;
-  return (*a == ~0ul && *b == ~0ul) ? 0 : 4;
+  if (*a != ~0ul || *b != ~0ul) return 4;
+  const unsigned* c = &P<int*>::npos;
+  if (*c != 7) return 5;
+  if (P<int*>().twice() != 14) return 6;
+  return 0;
 }

@@ -3283,22 +3283,42 @@ static void ValidateCAtomicDeclarator(TypeParser* parser, TypeRecord* type) {
 // Leaving the qualified name as an unknown `int` makes the definition look
 // like a different function.  Only the class being defined is resolved here;
 // `typename Other<T>::type` stays dependent so it does not collapse into `T`.
+// A member of a partial specialization (`typename P<T*>::size_type
+// P<T*>::npos`) names that specialization by its pattern arguments.
+static bool NamesMemberOwner(TypeRecord* type, Struct* owner) {
+  Struct* origin = type->template_origin->type->info.struct_info;
+  if (origin == NULL) {
+    return false;
+  }
+  if (origin == owner) {
+    return TemplateArgumentsAreIdentity(type->template_arguments,
+                                        type->template_origin);
+  }
+  for (size_t i = 0; i < origin->partial_specializations.length; i++) {
+    ClassTemplatePartialSpecialization* partial =
+        origin->partial_specializations.value.p[i];
+    if (partial != NULL && partial->tag_symbol != NULL &&
+        partial->tag_symbol->type != NULL &&
+        TypeIsStructOrUnion(partial->tag_symbol->type) &&
+        partial->tag_symbol->type->info.struct_info == owner) {
+      return TemplateArgumentPatternVectorEqual(type->template_arguments,
+                                                &partial->pattern_arguments);
+    }
+  }
+  return false;
+}
+
 static void ResolveOutOfLineDependentReturnType(TypeParser* parser) {
   TypeRecord* type = parser->base_type;
   if (type == NULL || parser->cxx_member_owner == NULL ||
       type->dependent_member_name == NULL || type->template_origin == NULL ||
       type->template_origin->type == NULL ||
-      !TypeIsStructOrUnion(type->template_origin->type)) {
-    return;
-  }
-  Struct* origin = type->template_origin->type->info.struct_info;
-  if (origin != parser->cxx_member_owner ||
-      !TemplateArgumentsAreIdentity(type->template_arguments,
-                                    type->template_origin)) {
+      !TypeIsStructOrUnion(type->template_origin->type) ||
+      !NamesMemberOwner(type, parser->cxx_member_owner)) {
     return;
   }
   StructMember* member =
-      FindStructMember(origin, type->dependent_member_name);
+      FindStructMember(parser->cxx_member_owner, type->dependent_member_name);
   if (member == NULL || member->symbol == NULL ||
       member->symbol->type == NULL ||
       !StorageIs(member->symbol->storage, STO(typedef))) {
