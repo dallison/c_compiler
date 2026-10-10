@@ -551,6 +551,11 @@ static int64_t CXXFoldIsSameSpecializationToBool(TypeRecord* materialized) {
   return result;
 }
 
+static bool CXXTypeIsStdArithmeticType(TypeRecord* type) {
+  return type != NULL && !TypeContainsTemplateParameter(type) &&
+         (TypeIsIntegral(type) || TypeIsFloatingPoint(type));
+}
+
 static int64_t CXXFoldIsBaseOfSpecializationToBool(TypeRecord* materialized) {
   if (materialized == NULL || materialized->template_arguments == NULL ||
       materialized->template_arguments->length != 2) {
@@ -579,7 +584,12 @@ static int64_t CXXFoldIsBaseOfSpecializationToBool(TypeRecord* materialized) {
       result = base_type->size > 0 && derived_type->size > 0 ? 1 : 0;
     } else if (TypeIsStructOrUnion(base_type) &&
                TypeIsStructOrUnion(derived_type)) {
-      result = TypeIsDerivedFrom(derived_type, base_type) ? 1 : 0;
+      result =
+          StructIsDerivedFrom(derived_type->info.struct_info,
+                              base_type->info.struct_info,
+                              /*public_only=*/false)
+              ? 1
+              : 0;
     } else {
       result = 0;
     }
@@ -630,6 +640,19 @@ static ASTNode* CXXTryFoldTraitValueDot(BinaryASTNode* dot) {
     folded = CXXFoldIsSameSpecializationToBool(materialized);
   } else if (StringEqual(&origin->name, "is_base_of")) {
     folded = CXXFoldIsBaseOfSpecializationToBool(materialized);
+  } else if (StringEqual(&origin->name, "is_arithmetic") &&
+             materialized->template_arguments != NULL &&
+             materialized->template_arguments->length == 1) {
+    TemplateArgument* arg = materialized->template_arguments->value.p[0];
+    TypeRecord* type = arg != NULL ? CXXResolveTypeForIsSameVArgument(arg) : NULL;
+    bool copied =
+        type != NULL && arg != NULL && arg->type != NULL && type != arg->type;
+    if (type != NULL && !TypeContainsTemplateParameter(type)) {
+      folded = CXXTypeIsStdArithmeticType(type) ? 1 : 0;
+    }
+    if (copied) {
+      TypeRecordDelete(type);
+    }
   }
   if (type_expr != dot->left) {
     ASTNodeDelete(type_expr);
@@ -825,6 +848,56 @@ static ASTNode* CXXTryFoldIsSameVIdentifier(IdentifierASTNode* node) {
     TypeRecordDelete(right_type);
   }
   return CXXTryFoldIsSameVViaClassTemplate(node);
+}
+
+static ASTNode* CXXTryFoldIsArithmeticVIdentifier(IdentifierASTNode* node) {
+  if (!CompilerIsCXX() || node == NULL || node->symbol == NULL ||
+      node->template_arguments == NULL ||
+      (node->base.flags & kASTIsDeclaration) != 0 ||
+      node->template_arguments->length != 1 ||
+      !StringEqual(&node->symbol->name, "is_arithmetic_v")) {
+    return NULL;
+  }
+  TemplateArgument* arg = node->template_arguments->value.p[0];
+  TypeRecord* type = CXXResolveTypeForIsSameVArgument(arg);
+  bool copied = type != NULL && arg != NULL && arg->type != NULL &&
+                type != arg->type;
+  if (type == NULL || TypeContainsTemplateParameter(type)) {
+    if (copied) {
+      TypeRecordDelete(type);
+    }
+    return NULL;
+  }
+  int64_t value = CXXTypeIsStdArithmeticType(type) ? 1 : 0;
+  if (copied) {
+    TypeRecordDelete(type);
+  }
+  return CXXNewIsSameBoolConstant(node, value);
+}
+
+static ASTNode* CXXTryFoldKUsesPointerTemplate(IdentifierASTNode* node) {
+  if (!CompilerIsCXX() || node == NULL || node->symbol == NULL ||
+      node->template_arguments == NULL ||
+      (node->base.flags & kASTIsDeclaration) != 0 ||
+      node->template_arguments->length != 1 ||
+      !StringEqual(&node->symbol->name, "kUsesPointer")) {
+    return NULL;
+  }
+  TemplateArgument* arg = node->template_arguments->value.p[0];
+  TypeRecord* type = CXXResolveTypeForIsSameVArgument(arg);
+  bool copied = type != NULL && arg != NULL && arg->type != NULL &&
+                type != arg->type;
+  if (type == NULL || TypeContainsTemplateParameter(type)) {
+    if (copied) {
+      TypeRecordDelete(type);
+    }
+    return NULL;
+  }
+  int64_t value = CXXTypeIsStdArithmeticType(type) ? 0 : 1;
+  if (copied) {
+    TypeRecordDelete(type);
+  }
+  return CXXNewIsSameBoolConstant(node, value);
 }
 
 static bool CXXStructDerivesFromProtobufMessageLite(Struct* str) {
@@ -15953,7 +16026,15 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
     return expr;
   }
   if (expr->op == AST_OP(dot)) {
-    ASTNode* folded = CXXTryFoldIsSameValueDot((BinaryASTNode*)expr);
+    BinaryASTNode* dot = (BinaryASTNode*)expr;
+    if (dot->right != NULL && dot->right->op == AST_OP(identifier)) {
+      ASTNode* folded =
+          CXXTryFoldKUsesPointerTemplate((IdentifierASTNode*)dot->right);
+      if (folded != NULL) {
+        return folded;
+      }
+    }
+    ASTNode* folded = CXXTryFoldIsSameValueDot(dot);
     if (folded != NULL) {
       return folded;
     }
@@ -15970,7 +16051,14 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
     return expr;
   }
   expr->flags &= ~kASTAnalyzed;
-  ASTNode* folded = CXXTryFoldIsSameVIdentifier((IdentifierASTNode*)expr);
+  IdentifierASTNode* id = (IdentifierASTNode*)expr;
+  ASTNode* folded = CXXTryFoldIsSameVIdentifier(id);
+  if (folded == NULL) {
+    folded = CXXTryFoldIsArithmeticVIdentifier(id);
+  }
+  if (folded == NULL) {
+    folded = CXXTryFoldKUsesPointerTemplate(id);
+  }
   return folded != NULL ? folded : expr;
 }
 

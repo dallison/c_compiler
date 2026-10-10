@@ -22,6 +22,7 @@
 #include "errors.h"
 #include "source.h"
 #include "type_inheritance.h"
+#include "type_internal.h"
 
 static ASTNode* StaticAssertIdentityClone(ASTNode* node, void* data) {
   (void)data;
@@ -1463,7 +1464,17 @@ static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
 }
 
 static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
-  if (ExpressionIsTemplateDependent(node->expr)) {
+  if (compiler->syntax.current_template_parameter_count > 0) {
+    return;
+  }
+  TypeRecord* func = compiler->current_function;
+  if (func != NULL && TypeIsFunction(func) &&
+      (func->info.function.template_parameter_count > 0 ||
+       func->info.function.template_parameters.length > 0)) {
+    return;
+  }
+  if (ExpressionIsTemplateDependent(node->expr) ||
+      DependentExpressionContainsTemplateParameter(node->expr)) {
     return;
   }
   ASTNode* expr = ASTNodeClone(node->expr, StaticAssertIdentityClone, NULL, NULL);
@@ -1501,6 +1512,10 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
   }
   ASTNodeDelete(expr);
   if (value == 0) {
+    if (DependentExpressionContainsTemplateParameter(node->expr) ||
+        ExpressionIsTemplateDependent(node->expr)) {
+      return;
+    }
     String message;
     StringInit(&message, node->message.value);
     if (node->message_expr == NULL ||
@@ -1798,27 +1813,28 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
       node->cond = AnalyzeExpression(node->cond);
     }
   }
-  if (node->is_constexpr) {
-    compiler->constant_evaluation_required_depth--;
-  }
   SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
                       kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
   if (node->is_constexpr) {
     int64_t value;
     if (!EvaluateIntegerExpression(node->cond, &value)) {
+      compiler->constant_evaluation_required_depth--;
       if (ExpressionIsTemplateDependent(node->cond) ||
           (node->cond != NULL && node->cond->type != NULL &&
            (TypeIsUnknown(node->cond->type) ||
             TypeContainsTemplateParameter(node->cond->type)))) {
+        compiler->constant_evaluation_required_depth--;
         AnalyzeStatement(node->if_part);
         AnalyzeStatement(node->else_part);
         return;
       }
+      compiler->constant_evaluation_required_depth--;
       SemanticError(node->cond,
                     "if constexpr condition is not a constant expression");
       return;
     }
+    compiler->constant_evaluation_required_depth--;
     ASTNode* selected = value != 0 ? node->if_part : node->else_part;
     if (selected == NULL) {
       selected = NewCompoundStatementASTNode(NewVector(), node->base.location);
