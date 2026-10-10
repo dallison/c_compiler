@@ -4948,8 +4948,20 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
                                               formal->next, actual->next)) {
         return false;
       }
+      size_t formal_index = 0;
       size_t actual_index = 0;
-      for (size_t i = 0; i < formal->info.function.prototype.length; i++) {
+      // [temp.deduct.funcaddr]: deducing a member function template against a
+      // free function type (as when a generic lambda converts to a function
+      // pointer) matches the target parameters against the member's parameters
+      // other than the implicit object parameter.
+      if (formal->info.function.cxx_member_owner != NULL &&
+          actual->info.function.cxx_member_owner == NULL &&
+          formal->info.function.prototype.length ==
+              actual->info.function.prototype.length + 1) {
+        formal_index = 1;
+      }
+      for (size_t i = formal_index; i < formal->info.function.prototype.length;
+           i++) {
         Symbol* formal_arg = formal->info.function.prototype.value.p[i];
         if (formal_arg == NULL) {
           return false;
@@ -6352,11 +6364,9 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(Syntax* syntax,
       !TypeIsFunction(target_fn)) {
     return NULL;
   }
-  TypeRecord* func =
-      templ->value.func_defn != NULL && templ->value.func_defn->type != NULL
-          ? templ->value.func_defn->type
-          : templ->type;
-  if (func->info.function.template_parameter_count <= 0) {
+  TypeRecord* func = templ->type;
+  if (func->info.function.template_parameter_count <= 0 &&
+      func->info.function.template_parameters.length == 0) {
     return NULL;
   }
   size_t explicit_arg_count = 0;
@@ -6365,8 +6375,13 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(Syntax* syntax,
   if (args == NULL) {
     return NULL;
   }
-  if (!DeduceFunctionTemplateTypeArgument(args, explicit_arg_count, func,
-                                          target_fn)) {
+  int saved_deduce_base = g_deduce_template_parameter_base;
+  g_deduce_template_parameter_base =
+      func->info.function.template_parameter_base;
+  bool deduced = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
+                                                    func, target_fn);
+  g_deduce_template_parameter_base = saved_deduce_base;
+  if (!deduced) {
     VectorDeleteWithContents(args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);

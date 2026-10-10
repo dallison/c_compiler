@@ -2084,10 +2084,63 @@ static ASTNode* AddressOfFunctionSymbol(Symbol* function, SourceLocation locatio
   return address;
 }
 
+static bool ClosureCallOperatorIsGeneric(Symbol* call_op) {
+  return call_op != NULL &&
+         (call_op->flags.is_template ||
+          (call_op->type != NULL &&
+           call_op->type->info.function.template_parameters.length > 0));
+}
+
+/* [temp.deduct.funcaddr]: instantiate a generic lambda's `operator()` against
+ * the destination function-pointer signature. */
+static Symbol* ResolveClosureCallOperatorForFunctionPointer(
+    Struct* closure, TypeRecord* target_fn) {
+  if (closure == NULL || target_fn == NULL || !TypeIsFunction(target_fn)) {
+    return NULL;
+  }
+  StructMember* call_member = ClosureCallOperatorMember(closure);
+  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
+  if (call_op == NULL || call_op->type == NULL || !TypeIsFunction(call_op->type)) {
+    return NULL;
+  }
+  if (!ClosureCallOperatorIsGeneric(call_op)) {
+    return call_op;
+  }
+  if (target_fn == NULL) {
+    return NULL;
+  }
+  Vector* actuals = NewVector();
+  for (size_t i = 0; i < target_fn->info.function.prototype.length; i++) {
+    Symbol* formal = target_fn->info.function.prototype.value.p[i];
+    if (formal == NULL || formal->type == NULL) {
+      VectorDestruct(&actuals);
+      return NULL;
+    }
+    Symbol* standin = NewSymbol("__deduce", TypeRecordCopy(formal->type),
+                                STO(auto));
+    standin->flags.is_defined = true;
+    standin->location = call_op->location;
+    ASTNode* arg = NewIdentifierASTNode(standin, call_op->location);
+    ASTNodeSetType(arg, standin->type);
+    arg->flags |= kASTAnalyzed;
+    VectorAppend(actuals, arg);
+  }
+  Symbol* resolved = TypeDeduceFunctionTemplateFromCallWithOffset(
+      &compiler->syntax, call_op, actuals, 1);
+  VectorDestruct(&actuals);
+  if (resolved == NULL || resolved == call_op || resolved->type == NULL ||
+      !TypeIsFunction(resolved->type)) {
+    return NULL;
+  }
+  TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, resolved);
+  return resolved;
+}
+
 /* Non-capturing lambda `+[](Args) -> R { ... }` converts to `R (*)(Args)`.
  * The pointer addresses a thunk that default-constructs the closure and
  * calls its `operator()`. */
-static ASTNode* LambdaToFunctionPointer(ASTNode* lambda) {
+static ASTNode* LambdaToFunctionPointer(ASTNode* lambda,
+                                        TypeRecord* target_fn) {
   if (lambda == NULL || (lambda->flags & kASTLambdaExpression) == 0 ||
       lambda->type == NULL || !TypeIsStructOrUnion(lambda->type) ||
       lambda->type->info.struct_info == NULL) {
@@ -2098,9 +2151,9 @@ static ASTNode* LambdaToFunctionPointer(ASTNode* lambda) {
     return NULL;
   }
   StructMember* call_member = ClosureCallOperatorMember(closure);
-  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
-  if (call_op == NULL || call_op->flags.is_template ||
-      call_op->type->info.function.template_parameters.length > 0) {
+  Symbol* call_op =
+      ResolveClosureCallOperatorForFunctionPointer(closure, target_fn);
+  if (call_op == NULL || call_member == NULL) {
     return NULL;
   }
   TypeRecord* method = call_op->type;
@@ -2189,12 +2242,17 @@ static bool LambdaCallMatchesFunctionPointer(ASTNode* lambda,
   if (ClosureHasCaptureFields(closure)) {
     return false;
   }
+  TypeRecord* target = pointer->next;
   StructMember* call_member = ClosureCallOperatorMember(closure);
-  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
-  if (call_op == NULL || call_op->flags.is_template || call_op->type == NULL ||
-      !TypeIsFunction(call_op->type) ||
-      call_op->type->info.function.template_parameters.length > 0) {
+  Symbol* primary = call_member != NULL ? call_member->symbol : NULL;
+  Symbol* call_op =
+      ResolveClosureCallOperatorForFunctionPointer(closure, target);
+  if (call_op == NULL || call_op->type == NULL ||
+      !TypeIsFunction(call_op->type)) {
     return false;
+  }
+  if (primary != NULL && ClosureCallOperatorIsGeneric(primary)) {
+    return true;
   }
   TypeRecord* method = call_op->type;
   if (TypeFunctionReturnContainsAuto(method) || method->next == NULL) {
@@ -2203,7 +2261,6 @@ static bool LambdaCallMatchesFunctionPointer(ASTNode* lambda,
   if (method->next == NULL) {
     return false;
   }
-  TypeRecord* target = pointer->next;
   if (method->info.function.varargs != target->info.function.varargs) {
     return false;
   }
@@ -2224,20 +2281,40 @@ static bool LambdaCallMatchesFunctionPointer(ASTNode* lambda,
   if (TypeIsVoid(method->next) && TypeIsVoid(target->next)) {
     return true;
   }
-  return TypeEqual(method->next, target->next);
+  return TypeEqual(method->next, target->next) ||
+         TypeEqualIgnoringQualifiers(method->next, target->next);
+}
+
+static ASTNode* CXXLambdaConversionExpression(ASTNode* from) {
+  ASTNode* expr = from;
+  if (expr != NULL && expr->op == AST_OP(init)) {
+    expr = ((BinaryASTNode*)expr)->right;
+  }
+  if (expr != NULL && expr->op == AST_OP(expr_init)) {
+    expr = ((ExpressionInitializerASTNode*)expr)->expr;
+  }
+  return expr;
 }
 
 bool CXXConvertNonCapturingLambdaToFunctionPointer(ASTNode* from,
                                                    TypeRecord* to) {
-  if (!LambdaCallMatchesFunctionPointer(from, to)) {
+  ASTNode* expr = CXXLambdaConversionExpression(from);
+  if (expr == NULL || (expr->flags & kASTLambdaExpression) == 0) {
     return false;
   }
-  ASTNode* converted = LambdaToFunctionPointer(from);
+  if (!LambdaCallMatchesFunctionPointer(expr, to)) {
+    return false;
+  }
+  TypeRecord* target_fn =
+      TypeIsPointer(to) && to->next != NULL && TypeIsFunction(to->next)
+          ? to->next
+          : NULL;
+  ASTNode* converted = LambdaToFunctionPointer(expr, target_fn);
   if (converted == NULL) {
     return false;
   }
-  ASTNode* parent = from->parent;
-  int child_id = from->child_id;
+  ASTNode* parent = expr->parent;
+  int child_id = expr->child_id;
   if (parent == NULL) {
     ASTNodeDelete(converted);
     return false;
@@ -2252,7 +2329,7 @@ static void AnalyzeUnaryExpression(UnaryASTNode* node) {
   }
   node->sub = AnalyzeExpression(node->sub);
   if (node->base.op == AST_OP(uplus)) {
-    ASTNode* function_pointer = LambdaToFunctionPointer(node->sub);
+    ASTNode* function_pointer = LambdaToFunctionPointer(node->sub, NULL);
     if (function_pointer != NULL) {
       ASTNodeReplaceChild((ASTNode*)node, 0, function_pointer, true);
     }
@@ -13217,6 +13294,9 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
     bool argument_not_ready = false;
     for (size_t i = 0; i < node->children->length; i++) {
       ASTNode* actual = node->children->value.p[i];
+      if (actual != NULL && (actual->flags & kASTLambdaExpression) != 0) {
+        continue;
+      }
       if (actual != NULL && actual->type != NULL &&
           (TypeIsUnknown(actual->type) ||
            TypeContainsTemplateParameter(actual->type) ||
@@ -13422,6 +13502,21 @@ static ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
         SetNeedAddress(actual);
       } else {
         actual = FoldConstantArgument(actual);
+        if (!polymorphic_special_this && TypeIsPointer(formal->type) &&
+            formal->type->next != NULL &&
+            TypeIsFunction(formal->type->next)) {
+          ASTNode* lambda_expr = CXXLambdaConversionExpression(actual);
+          if (lambda_expr != NULL &&
+              (lambda_expr->flags & kASTLambdaExpression) != 0 &&
+              LambdaCallMatchesFunctionPointer(lambda_expr, formal->type)) {
+            ASTNode* converted = LambdaToFunctionPointer(
+                lambda_expr, formal->type->next);
+            if (converted != NULL) {
+              ASTNodeReplaceChild((ASTNode*)node, (int)i, converted, true);
+              actual = converted;
+            }
+          }
+        }
         ASTNode* materialized =
             actual->value_category != kValueCategoryPrvalue
                 ? MaterializeCXXByValueClassArgument(actual, formal->type)
