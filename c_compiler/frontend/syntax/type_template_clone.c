@@ -990,10 +990,13 @@ static void FinishClonedConstexprDefaultInitializer(
                   : "constexpr variable requires an initializer");
 }
 
-// A local array bound that names an earlier constexpr local (`char buf[kN]`)
-// stays an expression in the pattern, where kN has no value yet.  Fold it
-// against this instantiation's copy of the local.  Declarators still shared
-// with the pattern are left alone.
+static void RewriteClonedBodySymbolVisitor(ASTNode* node, void* data,
+                                           int child_id, VisitorMode mode);
+
+// A local array bound that names an earlier constexpr local or a static member
+// of the class (`char buf[kN]`) stays an expression in the pattern, where kN
+// has no value yet.  Fold it against this instantiation's copy.  Declarators
+// still shared with the pattern are left alone.
 static void FoldClonedLocalArrayBounds(TemplateFunctionBodyClone* clone,
                                        TypeRecord* type, TypeRecord* pattern) {
   bool folded_any = false;
@@ -1005,7 +1008,7 @@ static void FoldClonedLocalArrayBounds(TemplateFunctionBodyClone* clone,
     }
     ASTNode* bound = ASTNodeClone(t->info.array.size.vla.size,
                                   IdentityCloneNode, NULL, NULL);
-    RewriteTemplateBodyIdentifiers(bound, &clone->symbol_map);
+    ASTNodeVisit(bound, RewriteClonedBodySymbolVisitor, 0, clone);
     ASTNodeVisit(bound, ClearAnalyzedFlagVisitor, 0, NULL);
     bound = AnalyzeExpression(bound);
     int64_t value = 0;
@@ -5193,11 +5196,23 @@ static bool BodyCloneTypeWasVisited(Vector* visited_types, TypeRecord* type) {
   return false;
 }
 
-static Symbol* ClonedBodySymbolFor(ASTNode* node, Map* symbol_map) {
-  return node != NULL && node->op == AST_OP(identifier)
-             ? MapFindPointerKey(symbol_map,
-                                 ((IdentifierASTNode*)node)->symbol)
-             : NULL;
+/* A body local cloned for this instantiation, or a static data member of the
+ * class template that the instantiated owner provides. */
+static Symbol* ClonedBodySymbolFor(ASTNode* node,
+                                   TemplateFunctionBodyClone* clone) {
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return NULL;
+  }
+  Symbol* source = ((IdentifierASTNode*)node)->symbol;
+  Symbol* replacement = MapFindPointerKey(&clone->symbol_map, source);
+  if (replacement == NULL && source != NULL &&
+      source->static_data_member_class != NULL) {
+    replacement = FindClonedOwnerMemberSymbol(clone, source);
+    if (replacement == source) {
+      replacement = NULL;
+    }
+  }
+  return replacement;
 }
 
 static bool NodeNamesClonedBodySymbol(ASTNode* node, void* data) {
@@ -5207,6 +5222,19 @@ static bool NodeNamesClonedBodySymbol(ASTNode* node, void* data) {
 static bool NodeNamesUnvaluedClonedBodySymbol(ASTNode* node, void* data) {
   Symbol* replacement = ClonedBodySymbolFor(node, data);
   return replacement != NULL && !replacement->flags.value_set;
+}
+
+static void RewriteClonedBodySymbolVisitor(ASTNode* node, void* data,
+                                           int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  Symbol* replacement = ClonedBodySymbolFor(node, data);
+  if (replacement != NULL) {
+    ((IdentifierASTNode*)node)->symbol = replacement;
+    ASTNodeSetType(node, replacement->type);
+  }
 }
 
 static void RebindBodyCloneDecltypeExpressions(
@@ -5259,17 +5287,17 @@ static void RebindBodyCloneDecltypeExpressions(
       } else if (arg != NULL && arg->kind == kTemplateParameterNonType &&
                  arg->dependent_expr != NULL &&
                  ASTNodeAny(arg->dependent_expr, NodeNamesClonedBodySymbol,
-                            &clone->symbol_map) &&
+                            clone) &&
                  !ASTNodeAny(arg->dependent_expr,
-                             NodeNamesUnvaluedClonedBodySymbol,
-                             &clone->symbol_map)) {
-        // `Arr<n>::size` where `n` is a constant local of this body: the
-        // argument must read this instantiation's `n`, which has a value.  A
-        // still-dependent clone keeps naming the pattern's `n` so a later,
-        // concrete clone can map it.
+                             NodeNamesUnvaluedClonedBodySymbol, clone)) {
+        // `Arr<n>::size` where `n` is a constant local of this body, or a
+        // static member of the class: the argument must read this
+        // instantiation's `n`, which has a value.  A still-dependent clone
+        // keeps naming the pattern's `n` so a later, concrete clone can map
+        // it.
         ASTNode* rebound = ASTNodeClone(arg->dependent_expr,
                                         IdentityCloneNode, NULL, NULL);
-        RewriteTemplateBodyIdentifiers(rebound, &clone->symbol_map);
+        ASTNodeVisit(rebound, RewriteClonedBodySymbolVisitor, 0, clone);
         VectorAppend(rebound_arguments, arg);
         VectorAppend(original_argument_expressions, arg->dependent_expr);
         arg->dependent_expr = rebound;

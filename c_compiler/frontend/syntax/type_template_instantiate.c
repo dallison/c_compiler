@@ -1015,6 +1015,26 @@ static void RecordStaticDataMemberPattern(StructMember* member,
       TemplateArgumentVectorCopy(args);
 }
 
+/* The initializer of a class template static data member's out-of-class
+ * definition (`template <class T> const int C<T>::k = sizeof(T);`).  Once the
+ * definition is marked as a template, its initializer has moved to the
+ * member's variable_template. */
+static ASTNode* StaticDataMemberOutOfClassInitializer(Symbol* pattern) {
+  VariableDeclarationASTNode* definition =
+      pattern != NULL ? (VariableDeclarationASTNode*)
+                            pattern->static_data_member_template_definition
+                      : NULL;
+  if (definition == NULL) {
+    return NULL;
+  }
+  if (definition->initializer != NULL) {
+    return definition->initializer;
+  }
+  return pattern->variable_template != NULL
+             ? pattern->variable_template->initializer
+             : NULL;
+}
+
 typedef struct {
   Symbol* pattern;
   Symbol* instance;
@@ -1066,15 +1086,8 @@ void TypeEnsureStaticDataMemberDefinition(Syntax* syntax, Symbol* symbol) {
   // [temp.inst]: the definition is the out-of-class one
   // (`template <class T> const T C<T>::k[] = ...;`), or else the in-class
   // initializer of an inline / constexpr member.  A member that has neither
-  // yet may still be defined later in this translation unit.  Once the
-  // out-of-class definition is marked as a template, its initializer has
-  // moved to the member's variable_template.
-  ASTNode* pattern_initializer =
-      definition != NULL ? definition->initializer : NULL;
-  if (definition != NULL && pattern_initializer == NULL &&
-      pattern->variable_template != NULL) {
-    pattern_initializer = pattern->variable_template->initializer;
-  }
+  // yet may still be defined later in this translation unit.
+  ASTNode* pattern_initializer = StaticDataMemberOutOfClassInitializer(pattern);
   ASTNode* initializer = NULL;
   if (pattern_initializer != NULL) {
     TypeParser parser;
@@ -1490,6 +1503,11 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         member->symbol->constexpr_initializer != NULL) {
       SubstituteStaticMemberInitializerValue(
           parser, member_symbol, member->symbol->constexpr_initializer, args);
+    }
+    if (!member_symbol->flags.value_set && member->is_static) {
+      SubstituteStaticMemberInitializerValue(
+          parser, member_symbol,
+          StaticDataMemberOutOfClassInitializer(member->symbol), args);
     }
 
     StructMember* instantiated = NewStructMember(member_symbol);
@@ -10551,6 +10569,11 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
       SubstituteStaticMemberInitializerValue(
           parser, member_symbol, member->symbol->constexpr_initializer,
           source_args);
+    }
+    if (!member_symbol->flags.value_set && member->is_static) {
+      SubstituteStaticMemberInitializerValue(
+          parser, member_symbol,
+          StaticDataMemberOutOfClassInitializer(member->symbol), source_args);
     }
     StructMember* instantiated = NewStructMember(member_symbol);
     // Substitute template parameters in every member initializer. For a static
