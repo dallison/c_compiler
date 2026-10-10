@@ -13,6 +13,7 @@
 #include "compiler.h"
 #include "constexpr_pcode.h"
 #include "errors.h"
+#include "expr_evaluator.h"
 #include "expr_semantics.h"
 #include "reflection.h"
 #include "reflection_meta_synthesis.h"
@@ -2328,6 +2329,13 @@ static bool ConstexprPointerValueIsExternal(ASTNode* node,
          node->type != NULL && TypeIsPointer(node->type);
 }
 
+static bool ConstexprAddressIsPastEnd(ConstexprValue address) {
+  return address.address_object != NULL &&
+         address.address_object->type != NULL &&
+         TypeIsFixedArray(address.address_object->type) &&
+         address.address_index >= address.address_object->slots.length;
+}
+
 static bool ConstexprAddressEqual(ConstexprValue left, ConstexprValue right) {
   // An element's address may also carry the element's slot.
   bool elements = left.address_object != NULL && right.address_object != NULL;
@@ -4193,8 +4201,41 @@ static bool EvaluateConstexprInlineCall(ConstEvalContext* ctx,
   return ok;
 }
 
+/* `&a[5]` of `int a[4]` designates no object.  Only the outermost subscript
+ * may be the one-past-the-end index. */
+static bool ConstexprAddressSubscriptsInBounds(ASTNode* lvalue) {
+  bool one_past_end = true;
+  while (lvalue != NULL) {
+    if (lvalue->op == AST_OP(cast)) {
+      lvalue = ((CastASTNode*)lvalue)->expr;
+      continue;
+    }
+    if ((lvalue->op != AST_OP(subscript) && lvalue->op != AST_OP(dot)) ||
+        ASTNodeGetShape(lvalue) != kASTShapeBinary) {
+      return true;
+    }
+    BinaryASTNode* access = (BinaryASTNode*)lvalue;
+    int64_t index = 0;
+    if (lvalue->op == AST_OP(subscript) && access->left != NULL &&
+        TypeIsFixedArray(access->left->type) &&
+        EvaluateIntegerExpression(access->right, &index)) {
+      int64_t length = access->left->type->info.array.size.fixed;
+      if (index < 0 || index > length || (index == length && !one_past_end)) {
+        return false;
+      }
+    }
+    one_past_end = false;
+    lvalue = access->left;
+  }
+  return true;
+}
+
 ASTNode* ConstexprFoldPointerExpression(ASTNode* expr) {
   if (expr == NULL || expr->type == NULL || !TypeIsPointer(expr->type)) {
+    return NULL;
+  }
+  if (expr->op == AST_OP(address) &&
+      !ConstexprAddressSubscriptsInBounds(((UnaryASTNode*)expr)->sub)) {
     return NULL;
   }
   if (expr->op == AST_OP(string) || expr->op == AST_OP(string_wide) ||
@@ -8221,8 +8262,25 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
   if (node->op == AST_OP(contents)) {
     UnaryASTNode* contents = (UnaryASTNode*)node;
     ConstexprValue address;
-    return EvaluateConstexprAddressValue(ctx, contents->sub, &address) &&
-           ConstexprDereferenceAddress(address, result);
+    if (!EvaluateConstexprAddressValue(ctx, contents->sub, &address)) {
+      return false;
+    }
+    ConstexprValue resolved = ConstexprResolveForwardedAddress(address);
+    ConstexprValue* element =
+        node->type != NULL && TypeIsFixedArray(node->type) &&
+                resolved.address_object != NULL
+            ? ConstexprObjectSlot(resolved.address_object,
+                                  resolved.address_index)
+            : NULL;
+    if (element != NULL && element->is_object && element->object != NULL &&
+        TypeIsFixedArray(element->object->type)) {
+      // `*p` of an array decays to the address of its first element.
+      *result = (ConstexprValue){.is_address = true,
+                                 .address_object = element->object,
+                                 .address_index = 0};
+      return true;
+    }
+    return ConstexprDereferenceAddress(address, result);
   }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -8559,6 +8617,19 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       }
     }
     if (EvaluateConstexprSubscriptLocation(ctx, node, false, result)) {
+      // An array element `m[i]` decays to the address of its first element.
+      ConstexprValue* element =
+          node->type != NULL && TypeIsFixedArray(node->type) &&
+                  result->address_object != NULL
+              ? ConstexprObjectSlot(result->address_object,
+                                    result->address_index)
+              : NULL;
+      if (element != NULL && element->is_object && element->object != NULL &&
+          TypeIsFixedArray(element->object->type)) {
+        *result = (ConstexprValue){.is_address = true,
+                                   .address_object = element->object,
+                                   .address_index = 0};
+      }
       return true;
     }
   }
@@ -9116,10 +9187,12 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
   bool left_is_pointer =
       binary->left != NULL && binary->left->type != NULL &&
       (TypeIsPointer(binary->left->type) ||
+       TypeIsFixedArray(binary->left->type) ||
        TypeIsNullPointer(binary->left->type));
   bool right_is_pointer =
       binary->right != NULL && binary->right->type != NULL &&
       (TypeIsPointer(binary->right->type) ||
+       TypeIsFixedArray(binary->right->type) ||
        TypeIsNullPointer(binary->right->type));
   if (!left_is_pointer && !right_is_pointer) {
     return false;
@@ -9171,6 +9244,13 @@ bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
     bool right_null = right.address_binding == NULL &&
                       right.address_slot == NULL &&
                       right.address_object == NULL;
+    // Whether a past-the-end address equals the start of another object is
+    // unspecified.
+    if (!equal && !left_null && !right_null &&
+        left.address_object != right.address_object &&
+        (ConstexprAddressIsPastEnd(left) || ConstexprAddressIsPastEnd(right))) {
+      return false;
+    }
     bool names_static =
         (left.address_binding != NULL && left.address_binding->durable) ||
         (right.address_binding != NULL && right.address_binding->durable);

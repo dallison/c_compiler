@@ -956,6 +956,45 @@ static ASTNode* FoldConstantExpressionValue(ASTNode* node) {
   return NULL;
 }
 
+static Symbol* StaticAddressTargetFromExpression(ASTNode* expression);
+
+/* `a[i]` of a fixed-size array designates an element only for a constant `i`
+ * in bounds; `&a[N]` is the one-past-the-end address. */
+static bool StaticSubscriptIndexInBounds(BinaryASTNode* subscript,
+                                         bool one_past_end) {
+  TypeRecord* array_type =
+      subscript->left != NULL ? subscript->left->type : NULL;
+  if (array_type == NULL || !TypeIsFixedArray(array_type)) {
+    return true;
+  }
+  int64_t index = 0;
+  if (!EvaluateIntegerExpression(subscript->right, &index)) {
+    return false;
+  }
+  int64_t length = array_type->info.array.size.fixed;
+  return index >= 0 && (one_past_end ? index <= length : index < length);
+}
+
+static Symbol* StaticAddressTargetFromSubobject(ASTNode* expression,
+                                                bool one_past_end) {
+  if (expression == NULL) {
+    return NULL;
+  }
+  if (expression->op == AST_OP(cast)) {
+    return StaticAddressTargetFromSubobject(((CastASTNode*)expression)->expr,
+                                            one_past_end);
+  }
+  if (expression->op == AST_OP(subscript) &&
+      ASTNodeGetShape(expression) == kASTShapeBinary) {
+    BinaryASTNode* subscript = (BinaryASTNode*)expression;
+    if (!StaticSubscriptIndexInBounds(subscript, one_past_end)) {
+      return NULL;
+    }
+    return StaticAddressTargetFromSubobject(subscript->left, false);
+  }
+  return StaticAddressTargetFromExpression(expression);
+}
+
 static Symbol* StaticAddressTargetFromExpression(ASTNode* expression) {
   if (expression == NULL) {
     return NULL;
@@ -976,8 +1015,7 @@ static Symbol* StaticAddressTargetFromExpression(ASTNode* expression) {
   }
   if (expression->op == AST_OP(subscript) &&
       ASTNodeGetShape(expression) == kASTShapeBinary) {
-    BinaryASTNode* subscript = (BinaryASTNode*)expression;
-    return StaticAddressTargetFromExpression(subscript->left);
+    return StaticAddressTargetFromSubobject(expression, false);
   }
   return NULL;
 }
@@ -1039,7 +1077,7 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
   }
   if (expression->op == AST_OP(address)) {
     UnaryASTNode* address = (UnaryASTNode*)expression;
-    target = StaticAddressTargetFromExpression(address->sub);
+    target = StaticAddressTargetFromSubobject(address->sub, true);
     if (target != NULL) {
       if (CompilerSymbolIsMetaPromotedStatic(target)) {
         ConstexprEnsureMetaPromotedStaticObject(target);
