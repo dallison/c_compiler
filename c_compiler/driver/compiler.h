@@ -383,6 +383,9 @@ typedef struct Compiler {
   // traits. Such probes may populate instantiation caches, but must not clone,
   // queue, analyze, or emit function bodies.
   int speculative_template_instantiation_depth;
+  // The operand of the decltype being parsed.  Folding it to its value would
+  // lose its value category and, for a member access, the declared type.
+  struct ASTNode* decltype_operand;
   // Current #pragma pack(n) member alignment cap (0 = no packing in effect).
   int pack_alignment;
   // Stack of saved pack values for #pragma pack(push[,n]) / pack(pop).

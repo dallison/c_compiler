@@ -903,6 +903,9 @@ static ASTNode* FoldConstantExpression(ASTNode* node) {
   if (BitFieldReadAwaitsPromotion(node)) {
     return NULL;
   }
+  if (node == compiler->decltype_operand) {
+    return NULL;
+  }
 
   bool speculative = compiler->constant_evaluation_required_depth == 0;
   if (speculative) {

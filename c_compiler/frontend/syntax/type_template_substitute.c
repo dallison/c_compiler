@@ -2600,7 +2600,10 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       ASTNodeVisit(expr, RemapDecltypeFunctionParameter, 0,
                    &parameter_remap);
       bool analysis_trap = DiagnosticErrorTrapBegin();
+      ASTNode* saved_decltype_operand = compiler->decltype_operand;
+      compiler->decltype_operand = expr;
       expr = AnalyzeExpression(expr);
+      compiler->decltype_operand = saved_decltype_operand;
       bool analysis_failed = DiagnosticErrorTrapped();
       DiagnosticErrorTrapEnd(analysis_trap);
       if (analysis_failed) {
@@ -2682,8 +2685,22 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           return TypeRecordCalculateSize(opaque);
         }
         TypeRecord* result = NULL;
+        StructMember* accessed_member = NULL;
+        if ((expr->flags & kASTParenthesized) == 0 &&
+            (expr->op == AST_OP(dot) || expr->op == AST_OP(arrow)) &&
+            ((BinaryASTNode*)expr)->right != NULL &&
+            ((BinaryASTNode*)expr)->right->op == AST_OP(structmember)) {
+          accessed_member =
+              ((StructMemberASTNode*)((BinaryASTNode*)expr)->right)->member;
+        }
         if ((expr->flags & kASTUnparenthesizedDecltypeEntity) != 0) {
           result = TypeRecordCopy(expr->type);
+        } else if (accessed_member != NULL && accessed_member->symbol != NULL &&
+                   accessed_member->symbol->type != NULL &&
+                   !accessed_member->is_member_function) {
+          // [dcl.type.decltype]: an unparenthesized class member access names
+          // the member's declared type.
+          result = TypeRecordCopy(accessed_member->symbol->type);
         } else if (expr->value_category == kValueCategoryLvalue) {
           result = NewDecltypeReference(expr->type, false);
         } else if (expr->value_category == kValueCategoryXvalue) {

@@ -2704,7 +2704,19 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
       return_value = lowered;
     }
   }
+  TypeRecord* return_pattern = compiler->current_function->next;
+  bool decltype_auto_return =
+      compiler->current_function->info.function
+          .is_decltype_auto_return_deduced ||
+      (return_pattern != NULL &&
+       (return_pattern->type & kTypeDecltypeAuto) != 0 &&
+       return_pattern->declarator == kDeclPrimitive);
+  ASTNode* saved_decltype_operand = compiler->decltype_operand;
+  if (decltype_auto_return) {
+    compiler->decltype_operand = return_value;
+  }
   return_value = AnalyzeExpression(return_value);
+  compiler->decltype_operand = saved_decltype_operand;
   if (return_value != node->cond) {
     ASTNodeReplaceChild((ASTNode*)node, 0, return_value, false);
   } else {

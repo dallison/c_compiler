@@ -676,7 +676,10 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
     // decltype's operand is unevaluated: declaration-only function templates
     // such as std::declval / SFINAE probes must not require a function body.
     compiler->speculative_template_instantiation_depth++;
+    ASTNode* saved_operand = compiler->decltype_operand;
+    compiler->decltype_operand = expr;
     expr = AnalyzeExpression(expr);
+    compiler->decltype_operand = saved_operand;
     compiler->speculative_template_instantiation_depth--;
     if (expr == NULL || expr->type == NULL) {
       SyntaxError(parser->syntax, "Invalid expression in decltype");
