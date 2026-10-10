@@ -325,7 +325,7 @@ STATIC char* ConvertHexPointer(void* ptr, char* buf, int buflen) {
   if (ptr == NULL) {
     // Write (null) (choice - it's up to the implementation what is printed.
     p = &buf[buflen - 6];
-    strcpy(p, "(null)");
+    memcpy(p, "(null)", 6);
     return p;
   }
   p = &buf[buflen - 1];
