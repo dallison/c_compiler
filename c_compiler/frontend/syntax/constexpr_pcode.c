@@ -6660,6 +6660,7 @@ bool ConstexprPCodeEvaluateCallAsInteger(ConstEvalContext* ctx, ASTNode* node,
                              &failure_kind, &reason);
   if (!ok &&
       (compiler->constexpr_eval_mode == kConstexprEvalAuto ||
+       compiler->constexpr_eval_mode == kConstexprEvalAudit ||
        (compiler->constexpr_eval_mode == kConstexprEvalPCode &&
         (compiler->current_function == NULL ||
          compiler->constant_evaluation_required_depth > 0)))) {
