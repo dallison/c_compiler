@@ -7728,15 +7728,24 @@ static Struct* CurrentFunctionMemberOwner(void) {
 static Struct* CXXLambdaEnclosingClassAccessContext(TypeRecord* func) {
   Struct* owner = FunctionMemberOwner(func);
   if (owner == NULL || owner->tag_symbol == NULL ||
-      !owner->tag_symbol->flags.invented ||
-      owner->access_enclosing_function == NULL ||
-      owner->access_enclosing_function->type == NULL ||
-      !TypeIsFunction(owner->access_enclosing_function->type)) {
+      !owner->tag_symbol->flags.invented) {
     return owner;
   }
-  Struct* enclosing =
-      owner->access_enclosing_function->type->info.function.cxx_member_owner;
-  return enclosing != NULL ? enclosing : owner;
+  Struct* context = owner;
+  if (owner->access_enclosing_function != NULL &&
+      owner->access_enclosing_function->type != NULL &&
+      TypeIsFunction(owner->access_enclosing_function->type)) {
+    Struct* enclosing =
+        owner->access_enclosing_function->type->info.function.cxx_member_owner;
+    if (enclosing != NULL) {
+      context = enclosing;
+    }
+  }
+  if (context == owner && owner->lexical_parent != NULL) {
+    // [class.access.nest]: a lambda is a nested class of its enclosing class.
+    context = owner->lexical_parent;
+  }
+  return context;
 }
 
 static Symbol* CXXStructTemplateOrigin(Struct* str) {
@@ -7875,8 +7884,15 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   if (effective_access == kAccessPublic) {
     return true;
   }
-  Struct* current_owner = NULL;
   TypeRecord* func = compiler->current_function;
+  if (func != NULL && TypeIsFunction(func) && owner != NULL) {
+    Struct* member_owner = FunctionMemberOwner(func);
+    if (member_owner != NULL &&
+        CXXSameAccessClass(member_owner, owner)) {
+      return true;
+    }
+  }
+  Struct* current_owner = NULL;
   if (func != NULL && TypeIsFunction(func)) {
     Struct* closure_owner = FunctionMemberOwner(func);
     Struct* lambda_context = CXXLambdaEnclosingClassAccessContext(func);
@@ -7955,12 +7971,14 @@ static bool CurrentFunctionCanAccessMember(Struct* lookup_context,
     return false;
   }
   if (effective_access == kAccessPrivate) {
-    return current_owner == lookup_context;
+    return lookup_context != NULL &&
+           CXXSameAccessClass(current_owner, lookup_context);
   }
   return effective_access == kAccessProtected &&
-         (current_owner == lookup_context ||
-          StructIsDerivedFrom(current_owner, lookup_context,
-                              /*public_only=*/false));
+         (lookup_context != NULL &&
+          (CXXSameAccessClass(current_owner, lookup_context) ||
+           StructIsDerivedFrom(current_owner, lookup_context,
+                               /*public_only=*/false)));
 }
 
 static bool MemberReceiverIsConst(BinaryASTNode* node) {
