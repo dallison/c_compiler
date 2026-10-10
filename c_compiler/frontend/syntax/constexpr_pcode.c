@@ -4413,6 +4413,43 @@ static bool ConstexprASTOverlayVisited(ConstexprASTOverlayScan* scan,
   return false;
 }
 
+// `p()`, `(*p)()` or `s.fn()`: the callee is a function pointer or reference
+// whose target is only known by evaluating it.  P-code evaluates an expression
+// from a named entry function, so such a call at the top level is AST-only.
+static bool PCodeIsIndirectCall(ASTNode* node) {
+  ASTNode* callee = ((VectorASTNode*)node)->left;
+  while (callee != NULL && callee->op == AST_OP(comma)) {
+    callee = ((BinaryASTNode*)callee)->right;
+  }
+  if (callee == NULL || callee->type == NULL) {
+    return false;
+  }
+  if (TypeIsPointer(callee->type)) {
+    return callee->type->next != NULL && TypeIsFunction(callee->type->next);
+  }
+  if (!TypeIsFunction(callee->type)) {
+    return false;
+  }
+  if (callee->op == AST_OP(contents)) {
+    return true;
+  }
+  if (callee->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)callee)->symbol;
+    return symbol != NULL && TypeIsReference(symbol->type);
+  }
+  if ((callee->op == AST_OP(dot) || callee->op == AST_OP(arrow)) &&
+      ASTNodeGetShape(callee) == kASTShapeBinary) {
+    ASTNode* right = ((BinaryASTNode*)callee)->right;
+    StructMember* member =
+        right != NULL && right->op == AST_OP(structmember)
+            ? ((StructMemberASTNode*)right)->member
+            : NULL;
+    return member != NULL && !member->is_member_function &&
+           member->symbol != NULL && TypeIsReference(member->symbol->type);
+  }
+  return false;
+}
+
 static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
@@ -4466,6 +4503,12 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
     }
     Symbol* callee = PCodeConstexprFunctionDefinition(
         call_symbol);
+    if (callee == NULL && scan->function_depth == 0 &&
+        PCodeIsIndirectCall(node)) {
+      scan->required = true;
+      scan->ast_only = true;
+      return;
+    }
     ScanConstexprFunctionCapabilities(callee, scan);
   }
 }

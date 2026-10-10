@@ -3759,7 +3759,8 @@ bool ConstexprEvaluateReferenceConstantForSymbol(Symbol* symbol,
   bool ok = EvaluateConstexprReferenceInitializer(&ctx, expression,
                                                   symbol->type->next,
                                                   &address) &&
-            ConstexprStaticAddressTarget(&address, &target, &offset);
+            (ConstexprAddressIsFunction(&address) ||
+             ConstexprStaticAddressTarget(&address, &target, &offset));
   ConstEvalContextDestruct(&ctx);
   if (!ok) {
     return false;
@@ -8255,6 +8256,13 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
          StorageIs(id->symbol->storage, STO(static))) &&
         !StorageIs(id->symbol->storage, STO(thread)) &&
         (TypeIsReference(id->symbol->type) || TypeIsConst(id->symbol->type));
+    if (binding == NULL && id->symbol != NULL &&
+        (static_constant_pointer || id->symbol->flags.is_constexpr)) {
+      Symbol* function = CompilerConstantFunctionPointerTarget(id->symbol);
+      if (function != NULL && ConstexprFunctionAddress(ctx, function, result)) {
+        return true;
+      }
+    }
     if ((template_argument_object_evaluation_depth > 0 ||
          static_constant_pointer ||
          ConstexprReferenceUsableInCurrentFunction(id->symbol)) &&
@@ -8656,9 +8664,22 @@ static bool ConstexprReferenceLocation(ConstEvalContext* ctx, ASTNode* node,
         ConstexprBindingAddress(reference, result)) {
       return true;
     }
+    if (reference == NULL && symbol != NULL &&
+        TypeIsReference(symbol->type) &&
+        ConstexprStaticReferenceTarget(ctx, symbol, result)) {
+      return true;
+    }
   }
   ConstexprBinding* binding = NULL;
   ConstexprValue* slot = NULL;
+  if (ConstexprAccessesReferenceMember(node) &&
+      EvaluateConstexprObjectLValueImpl(ctx, node, &slot, true)) {
+    if (!slot->is_address) {
+      return false;
+    }
+    *result = *slot;
+    return true;
+  }
   if (EvaluateConstexprLValue(ctx, node, &binding)) {
     *result = (ConstexprValue){.is_address = true, .address_binding = binding};
     return true;
@@ -9618,6 +9639,28 @@ static Symbol* ConstexprCallSymbol(ASTNode* node) {
   Symbol* symbol = ((IdentifierASTNode*)callee)->symbol;
   Symbol* function = CompilerConstantFunctionPointerTarget(symbol);
   return function != NULL ? function : symbol;
+}
+
+// The function an indirect callee (`p()`, `(*p)()`, `s.fn()`) designates.
+static Symbol* ConstexprIndirectCallTarget(ConstEvalContext* ctx,
+                                           ASTNode* callee) {
+  if (callee == NULL || callee->type == NULL) {
+    return NULL;
+  }
+  ConstexprValue address = {0};
+  bool located = false;
+  if (TypeIsPointer(callee->type) && callee->type->next != NULL &&
+      TypeIsFunction(callee->type->next)) {
+    located = EvaluateConstexprAddressValue(ctx, callee, &address);
+  } else if (TypeIsFunction(callee->type)) {
+    located = ConstexprReferenceLocation(ctx, callee, &address);
+  }
+  if (!located) {
+    return NULL;
+  }
+  address = ConstexprResolveForwardedAddress(address);
+  return ConstexprAddressIsFunction(&address) ? address.address_binding->symbol
+                                              : NULL;
 }
 
 static bool ConstexprParameterTypeSupported(TypeRecord* type) {
@@ -12450,6 +12493,10 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
         ConstexprFunctionDefinition(ConstexprVirtualCallSymbol(ctx, node,
                                                                &receiver));
     receiver_is_explicit_actual = callee != NULL;
+  }
+  if (callee == NULL && node->op == AST_OP(call)) {
+    callee = ConstexprFunctionDefinition(
+        ConstexprIndirectCallTarget(ctx, call->left));
   }
   if (callee == NULL || callee->type == NULL || !TypeIsFunction(callee->type)) {
     return false;
