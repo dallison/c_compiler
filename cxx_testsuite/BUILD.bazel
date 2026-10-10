@@ -222,6 +222,7 @@ sh_test(
 
 sh_test(
     name = "exec_x86_64",
+    size = "large",
     srcs = ["run_exec_tests.sh"],
     args = [
         "--davecc",
@@ -252,6 +253,7 @@ sh_test(
 
 sh_test(
     name = "exec_aarch64",
+    size = "large",
     srcs = ["run_exec_tests.sh"],
     args = [
         "--davecc",
@@ -282,6 +284,7 @@ sh_test(
 
 sh_test(
     name = "exec_arm",
+    size = "large",
     srcs = ["run_exec_tests.sh"],
     args = [
         "--davecc",
@@ -312,6 +315,7 @@ sh_test(
 
 sh_test(
     name = "exec_riscv",
+    size = "large",
     srcs = ["run_exec_tests.sh"],
     args = [
         "--davecc",
