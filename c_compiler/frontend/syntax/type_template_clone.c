@@ -711,6 +711,35 @@ static void RewriteTemplateBodyDecltypePackIndices(
  * `outer<T>::promise_type`).  The normal source/target mapping covers the
  * nested class; temporarily use its lexical-parent mapping when this exact
  * type chain names the enclosing class. */
+static void RebindBodyCloneDecltypeExpressions(
+    TemplateFunctionBodyClone* clone, TypeRecord* type, Vector* visited_types,
+    Vector* rebound_types, Vector* original_expressions,
+    Vector* rebound_arguments, Vector* original_argument_expressions);
+static void RestoreBodyCloneDecltypeExpressions(
+    Vector* rebound_types, Vector* original_expressions,
+    Vector* rebound_arguments, Vector* original_argument_expressions);
+
+static TypeRecord* SubstituteBodyCloneTypeParameters(
+    TemplateFunctionBodyClone* clone, TypeRecord* type) {
+  Vector visited_types;
+  Vector rebound_arguments;
+  Vector original_argument_expressions;
+  VectorInit(&visited_types);
+  VectorInit(&rebound_arguments);
+  VectorInit(&original_argument_expressions);
+  RebindBodyCloneDecltypeExpressions(clone, type, &visited_types, NULL, NULL,
+                                     &rebound_arguments,
+                                     &original_argument_expressions);
+  TypeRecord* substituted =
+      SubstituteTemplateParameters(clone->parser, type, clone->args);
+  RestoreBodyCloneDecltypeExpressions(NULL, NULL, &rebound_arguments,
+                                      &original_argument_expressions);
+  VectorDestruct(&original_argument_expressions);
+  VectorDestruct(&rebound_arguments);
+  VectorDestruct(&visited_types);
+  return substituted;
+}
+
 static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
                                               TypeRecord* type) {
   TypeRecord* prepared = type;
@@ -739,7 +768,7 @@ static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
         clone->parser, clone->substitution_source,
         clone->substitution_target);
     TypeRecord* substituted =
-        SubstituteTemplateParameters(clone->parser, prepared, clone->args);
+        SubstituteBodyCloneTypeParameters(clone, prepared);
     TypeParserPopTemplateSubstitution(&substitution);
     if (prepared != type) {
       TypeRecordDelete(prepared);
@@ -749,8 +778,7 @@ static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
 
   TypeSubstitutionScope substitution =
       TypeParserPushTemplateSubstitution(clone->parser, source, target);
-  TypeRecord* substituted =
-      SubstituteTemplateParameters(clone->parser, prepared, clone->args);
+  TypeRecord* substituted = SubstituteBodyCloneTypeParameters(clone, prepared);
   TypeParserPopTemplateSubstitution(&substitution);
   if (prepared != type) {
     TypeRecordDelete(prepared);
@@ -1065,7 +1093,9 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
     replacement->constexpr_initializer =
         ASTNodeClone(decl->initializer, IdentityCloneNode, NULL, NULL);
   }
-  if (replacement->flags.is_constexpr &&
+  if ((replacement->flags.is_constexpr ||
+       (TypeIsConst(replacement->type) &&
+        TypeIsIntegral(replacement->type))) &&
       !TypeIsReference(replacement->type) &&
       !TypeIsPointer(replacement->type) && decl->initializer != NULL) {
     int64_t value = 0;
@@ -5163,9 +5193,26 @@ static bool BodyCloneTypeWasVisited(Vector* visited_types, TypeRecord* type) {
   return false;
 }
 
+static Symbol* ClonedBodySymbolFor(ASTNode* node, Map* symbol_map) {
+  return node != NULL && node->op == AST_OP(identifier)
+             ? MapFindPointerKey(symbol_map,
+                                 ((IdentifierASTNode*)node)->symbol)
+             : NULL;
+}
+
+static bool NodeNamesClonedBodySymbol(ASTNode* node, void* data) {
+  return ClonedBodySymbolFor(node, data) != NULL;
+}
+
+static bool NodeNamesUnvaluedClonedBodySymbol(ASTNode* node, void* data) {
+  Symbol* replacement = ClonedBodySymbolFor(node, data);
+  return replacement != NULL && !replacement->flags.value_set;
+}
+
 static void RebindBodyCloneDecltypeExpressions(
     TemplateFunctionBodyClone* clone, TypeRecord* type, Vector* visited_types,
-    Vector* rebound_types, Vector* original_expressions) {
+    Vector* rebound_types, Vector* original_expressions,
+    Vector* rebound_arguments, Vector* original_argument_expressions) {
   for (TypeRecord* current = type; current != NULL; current = current->next) {
     if (BodyCloneTypeWasVisited(visited_types, current)) {
       continue;
@@ -5173,7 +5220,7 @@ static void RebindBodyCloneDecltypeExpressions(
     VectorAppend(visited_types, current);
     // An alias use site's operand names the alias's parameters, not this
     // body's; substitution maps it through the recorded alias arguments.
-    if (current->dependent_decltype_expr != NULL &&
+    if (rebound_types != NULL && current->dependent_decltype_expr != NULL &&
         !TypeIsDecltypeAliasTemplateId(current)) {
       // `decltype` is unevaluated: cloning `*declval<T&>()` must not demand a
       // function body from declaration-only templates such as `std::declval`.
@@ -5197,18 +5244,43 @@ static void RebindBodyCloneDecltypeExpressions(
           arg->type != NULL) {
         RebindBodyCloneDecltypeExpressions(
             clone, arg->type, visited_types, rebound_types,
-            original_expressions);
+            original_expressions, rebound_arguments,
+            original_argument_expressions);
+      } else if (arg != NULL && arg->kind == kTemplateParameterNonType &&
+                 arg->dependent_expr != NULL &&
+                 ASTNodeAny(arg->dependent_expr, NodeNamesClonedBodySymbol,
+                            &clone->symbol_map) &&
+                 !ASTNodeAny(arg->dependent_expr,
+                             NodeNamesUnvaluedClonedBodySymbol,
+                             &clone->symbol_map)) {
+        // `Arr<n>::size` where `n` is a constant local of this body: the
+        // argument must read this instantiation's `n`, which has a value.  A
+        // still-dependent clone keeps naming the pattern's `n` so a later,
+        // concrete clone can map it.
+        ASTNode* rebound = ASTNodeClone(arg->dependent_expr,
+                                        IdentityCloneNode, NULL, NULL);
+        RewriteTemplateBodyIdentifiers(rebound, &clone->symbol_map);
+        VectorAppend(rebound_arguments, arg);
+        VectorAppend(original_argument_expressions, arg->dependent_expr);
+        arg->dependent_expr = rebound;
       }
     }
   }
 }
 
-static void RestoreBodyCloneDecltypeExpressions(Vector* rebound_types,
-                                                Vector* original_expressions) {
-  for (size_t i = 0; i < rebound_types->length; i++) {
+static void RestoreBodyCloneDecltypeExpressions(
+    Vector* rebound_types, Vector* original_expressions,
+    Vector* rebound_arguments, Vector* original_argument_expressions) {
+  for (size_t i = 0; rebound_types != NULL && i < rebound_types->length; i++) {
     TypeRecord* type = rebound_types->value.p[i];
     ASTNodeDelete(type->dependent_decltype_expr);
     type->dependent_decltype_expr = original_expressions->value.p[i];
+  }
+  // A substituted argument that is still dependent may share the rebound
+  // expression, so it is left to the AST arena like every dependent_expr.
+  for (size_t i = 0; i < rebound_arguments->length; i++) {
+    TemplateArgument* arg = rebound_arguments->value.p[i];
+    arg->dependent_expr = original_argument_expressions->value.p[i];
   }
 }
 
@@ -5990,17 +6062,24 @@ static TypeRecord* SubstituteQualifiedNameScope(
     TemplateFunctionBodyClone* clone, TypeRecord* scope) {
   Vector rebound_types;
   Vector original_expressions;
+  Vector rebound_arguments;
+  Vector original_argument_expressions;
   Vector visited_types;
   VectorInit(&rebound_types);
   VectorInit(&original_expressions);
+  VectorInit(&rebound_arguments);
+  VectorInit(&original_argument_expressions);
   VectorInit(&visited_types);
   RebindBodyCloneDecltypeExpressions(
-      clone, scope, &visited_types, &rebound_types,
-      &original_expressions);
+      clone, scope, &visited_types, &rebound_types, &original_expressions,
+      &rebound_arguments, &original_argument_expressions);
   TypeRecord* concrete = SubstituteTemplateParameters(clone->parser, scope,
                                                       clone->args);
-  RestoreBodyCloneDecltypeExpressions(&rebound_types,
-                                      &original_expressions);
+  RestoreBodyCloneDecltypeExpressions(&rebound_types, &original_expressions,
+                                      &rebound_arguments,
+                                      &original_argument_expressions);
+  VectorDestruct(&original_argument_expressions);
+  VectorDestruct(&rebound_arguments);
   VectorDestruct(&original_expressions);
   VectorDestruct(&rebound_types);
   VectorDestruct(&visited_types);

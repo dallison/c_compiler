@@ -56,9 +56,24 @@ static bool DependentExpressionNodeContainsParameter(ASTNode* node,
   bool function_template = id->symbol->flags.is_template &&
                            id->symbol->type != NULL &&
                            TypeIsFunction(id->symbol->type);
+  // A local or class-template static constant whose initializer depends on
+  // template parameters has no value until it is instantiated
+  // (`constexpr int n = sizeof(T);`).  A concrete static member may also lack
+  // a value until its initializer is evaluated on demand; that is not
+  // dependent.
+  Struct* owner = id->symbol->static_data_member_class;
+  bool value_dependent_constant =
+      !id->symbol->flags.value_set && id->symbol->type != NULL &&
+      TypeIsIntegral(id->symbol->type) &&
+      (id->symbol->flags.is_constexpr || TypeIsConst(id->symbol->type)) &&
+      ((id->symbol->flags.is_block_scope &&
+        (id->symbol->storage & (STO(static) | STO(extern))) == 0) ||
+       (owner != NULL &&
+        (owner->is_template || owner->defining_template_scope_count > 0)));
   return (id->symbol->flags.is_template_parameter &&
           id->symbol->template_parameter_index >= 0) ||
          id->symbol->dependent_value_template_parameter_index >= 0 ||
+         value_dependent_constant ||
          (!function_template &&
           TypeContainsTemplateParameter(id->symbol->type)) ||
          TemplateArgumentVectorContainsTemplateParameter(
