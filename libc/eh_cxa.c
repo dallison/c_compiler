@@ -380,6 +380,9 @@ void __cxa_rethrow(void) {
   if (header == NULL) {
     abort();
   }
+#if defined(__p_code__)
+  __davecc_eh_raise_header(header);
+#endif
 
   __davecc_capture_regs(&throw_site_regs);
   void* object = __davecc_eh_object_from_header(header);
@@ -425,6 +428,9 @@ void __davecc_exception_ptr_rethrow(void* value) {
   if (header == NULL) {
     DaveCCTerminateFromThrow();
   }
+#if defined(__p_code__)
+  __davecc_eh_raise_header(header);
+#endif
   __davecc_capture_regs(&throw_site_regs);
   if (header->handlerCount > 0) {
     header->handlerCount = -header->handlerCount;
@@ -446,20 +452,23 @@ int __davecc_uncaught_exceptions(void) {
 void __davecc_eh_enter_catch_from_unwinder(long base_offset) {
   struct __cxa_eh_globals* globals = GetGlobalsSlow();
   if (active_thrown_header != NULL) {
-    void* object = active_adjusted_ptr;
-    if (object != NULL && base_offset != 0) {
-      object = (char*)object + base_offset;
-      active_adjusted_ptr = object;
-      active_thrown_header->adjustedPtr = object;
+    // Cleanups run on the way here may have ended other handlers, which
+    // repoints active_adjusted_ptr at the exception they leave current.
+    void* object = (char*)__davecc_eh_object_from_header(active_thrown_header) +
+                   base_offset;
+    active_adjusted_ptr = object;
+    active_thrown_header->adjustedPtr = object;
+    // As in __cxa_begin_catch: a negative count marks a rethrown exception
+    // whose handler has not ended yet.
+    int count = active_thrown_header->handlerCount;
+    if (globals->uncaughtExceptions > 0) {
+      globals->uncaughtExceptions--;
     }
-    if (active_thrown_header->handlerCount == 0) {
-      if (globals->uncaughtExceptions > 0) {
-        globals->uncaughtExceptions--;
-      }
+    if (active_thrown_header != globals->caughtExceptions) {
       active_thrown_header->nextException = globals->caughtExceptions;
       globals->caughtExceptions = active_thrown_header;
     }
-    active_thrown_header->handlerCount++;
+    active_thrown_header->handlerCount = (count < 0 ? -count : count) + 1;
     active_thrown_header = NULL;
     return;
   }

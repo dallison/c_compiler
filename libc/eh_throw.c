@@ -23,35 +23,7 @@ typedef DaveCXXTypeInfo CXXTypeInfo;
 #define DAVECC_EH_THREAD_LOCAL
 #endif
 
-static DAVECC_EH_THREAD_LOCAL intptr_t current_exception_object;
 static DAVECC_EH_THREAD_LOCAL const CXXTypeInfo* current_exception_typeinfo;
-typedef enum {
-  kExceptionDirect,
-  kExceptionI8,
-  kExceptionF4,
-  kExceptionF8,
-} ExceptionValueKind;
-static DAVECC_EH_THREAD_LOCAL ExceptionValueKind current_exception_kind;
-static DAVECC_EH_THREAD_LOCAL long long current_exception_i8;
-static DAVECC_EH_THREAD_LOCAL float current_exception_f4;
-static DAVECC_EH_THREAD_LOCAL double current_exception_f8;
-
-static intptr_t CopyExceptionObject(intptr_t exception_object,
-                                    const CXXTypeInfo* typeinfo) {
-  if (exception_object == 0 || typeinfo == 0 || !typeinfo->object_is_class ||
-      typeinfo->object_size <= 0) {
-    return exception_object;
-  }
-  unsigned char* copy = (unsigned char*)malloc((size_t)typeinfo->object_size);
-  if (copy == 0) {
-    abort();
-  }
-  const unsigned char* source = (const unsigned char*)exception_object;
-  for (long i = 0; i < typeinfo->object_size; i++) {
-    copy[i] = source[i];
-  }
-  return (intptr_t)copy;
-}
 
 extern char __davecc_except_table_start[];
 extern char __davecc_except_table_end[];
@@ -164,13 +136,6 @@ static uintptr_t resume_rbp;
 static uintptr_t resume_cs;
 static uintptr_t resume_ce;
 
-static void SyncLegacyFromAdjusted(void) {
-  void* adjusted = __davecc_eh_current_adjusted_ptr();
-  if (adjusted != NULL) {
-    current_exception_object = (intptr_t)adjusted;
-  }
-}
-
 static void UnwindStep(uintptr_t pc, uintptr_t rsp, uintptr_t rbp, uintptr_t cs,
                        uintptr_t ce) {
   DaveEHFrameRegisters regs;
@@ -183,10 +148,6 @@ static void UnwindStep(uintptr_t pc, uintptr_t rsp, uintptr_t rbp, uintptr_t cs,
     if (action != NULL) {
       if (is_catch) {
         __davecc_eh_enter_catch_from_unwinder(offset);
-        SyncLegacyFromAdjusted();
-        if (__davecc_eh_current_adjusted_ptr() == NULL) {
-          current_exception_object += offset;
-        }
         __davecc_jump_to_landing_pad(action->catch_label, rsp, rbp);
       }
       resume_pc = pc;
@@ -215,93 +176,42 @@ void __davecc_resume(void) {
   UnwindStep(resume_pc, resume_rsp, resume_rbp, resume_cs, resume_ce);
 }
 
+// Every thrown object lives in an exception header; entering a handler leaves
+// the current adjusted pointer at the caught, base-adjusted object.
 char __davecc_current_exception_i1(void) {
-  if (current_exception_kind == kExceptionI8) {
-    return (char)current_exception_i8;
-  }
-  void* adjusted = __davecc_eh_current_adjusted_ptr();
-  if (adjusted != NULL) {
-    return *(char*)adjusted;
-  }
-  return (char)current_exception_object;
+  return *(char*)__davecc_eh_current_adjusted_ptr();
 }
 
 short __davecc_current_exception_i2(void) {
-  if (current_exception_kind == kExceptionI8) {
-    return (short)current_exception_i8;
-  }
-  void* adjusted = __davecc_eh_current_adjusted_ptr();
-  if (adjusted != NULL) {
-    return *(short*)adjusted;
-  }
-  return (short)current_exception_object;
+  return *(short*)__davecc_eh_current_adjusted_ptr();
 }
 
 int __davecc_current_exception_i4(void) {
-  if (current_exception_kind == kExceptionI8) {
-    return (int)current_exception_i8;
-  }
-  void* adjusted = __davecc_eh_current_adjusted_ptr();
-  if (adjusted != NULL) {
-    return *(int*)adjusted;
-  }
-  return (int)current_exception_object;
+  return *(int*)__davecc_eh_current_adjusted_ptr();
 }
 
 long long __davecc_current_exception_i8(void) {
-  if (current_exception_kind == kExceptionI8) {
-    return current_exception_i8;
-  }
-  void* adjusted = __davecc_eh_current_adjusted_ptr();
-  if (adjusted != NULL) {
-    return *(long long*)adjusted;
-  }
-  return (long long)current_exception_object;
+  return *(long long*)__davecc_eh_current_adjusted_ptr();
 }
 
 float __davecc_current_exception_f4(void) {
-  void* adjusted = __davecc_eh_current_adjusted_ptr();
-  if (adjusted != NULL) {
-    return *(float*)adjusted;
-  }
-  return current_exception_f4;
+  return *(float*)__davecc_eh_current_adjusted_ptr();
 }
 
 double __davecc_current_exception_f8(void) {
-  void* adjusted = __davecc_eh_current_adjusted_ptr();
-  if (adjusted != NULL) {
-    return *(double*)adjusted;
-  }
-  return current_exception_f8;
+  return *(double*)__davecc_eh_current_adjusted_ptr();
 }
 
 void* __davecc_current_exception_ptr(void) {
-  void* adjusted = __davecc_eh_current_adjusted_ptr();
-  if (adjusted != NULL) {
-    return adjusted;
-  }
-  return (void*)current_exception_object;
+  return *(void**)__davecc_eh_current_adjusted_ptr();
 }
 
 void* __davecc_current_exception_addr(void) {
-  if (current_exception_kind == kExceptionI8) {
-    return &current_exception_i8;
-  }
-  if (current_exception_kind == kExceptionF4) {
-    return &current_exception_f4;
-  }
-  if (current_exception_kind == kExceptionF8) {
-    return &current_exception_f8;
-  }
-  return &current_exception_object;
+  return __davecc_eh_current_adjusted_ptr();
 }
 
 void* __davecc_current_exception_object(void) {
-  return __davecc_current_exception_ptr();
-}
-
-intptr_t __davecc_current_exception_int(void) {
-  return current_exception_object;
+  return __davecc_eh_current_adjusted_ptr();
 }
 
 static void UnwindCurrentException(void) {
@@ -310,64 +220,45 @@ static void UnwindCurrentException(void) {
   UnwindStep(regs.pc, regs.rsp, regs.rbp, regs.pc, regs.pc);
 }
 
-static void MarkUncaught(void) {
-  struct __cxa_eh_globals* globals = __davecc_eh_get_globals();
-  globals->uncaughtExceptions++;
+// The compiler allocates the object with __cxa_allocate_exception and builds
+// it in place; its header owns the object until the last handler's
+// __cxa_end_catch destroys and frees it.
+void __davecc_throw_object(void* object, const CXXTypeInfo* typeinfo,
+                           void (*destructor)(void*)) {
+  struct __cxa_exception* header = __davecc_eh_header_from_object(object);
+  header->exceptionType = (struct type_info*)typeinfo;
+  header->exceptionDestructor = destructor;
+  header->adjustedPtr = object;
+  header->handlerCount = 0;
+  header->handlerSwitchValue = 0;
+  header->nextException = NULL;
+  current_exception_typeinfo = typeinfo;
+  __davecc_eh_install_active_exception(header, object);
+  __davecc_eh_sync_legacy_current_exception(object, typeinfo);
+  UnwindCurrentException();
 }
 
-void __davecc_throw(intptr_t exception_object, const CXXTypeInfo* typeinfo) {
-  if (exception_object != 0 || typeinfo != NULL) {
-    current_exception_object = CopyExceptionObject(exception_object, typeinfo);
-    current_exception_typeinfo = typeinfo;
-    current_exception_kind = kExceptionDirect;
-    __davecc_eh_sync_legacy_current_exception((void*)current_exception_object,
-                                              typeinfo);
-    MarkUncaught();
-  } else {
-    struct __cxa_eh_globals* globals = __davecc_eh_get_globals();
-    if (globals->caughtExceptions != NULL) {
-      struct __cxa_exception* header = globals->caughtExceptions;
-      void* object = __davecc_eh_object_from_header(header);
-      header->handlerCount--;
-      if (header->handlerCount == 0) {
-        globals->caughtExceptions = header->nextException;
-        header->nextException = NULL;
-      }
-      __davecc_eh_install_active_exception(header, object);
-    } else {
-      MarkUncaught();
-    }
+// A handler of a rethrown exception stays active until its __cxa_end_catch,
+// which the compiler runs as the exception leaves the handler; a negative
+// count marks it rethrown.
+void __davecc_eh_raise_header(struct __cxa_exception* header) {
+  if (header->handlerCount > 0) {
+    header->handlerCount = -header->handlerCount;
   }
+  void* object = __davecc_eh_object_from_header(header);
+  const CXXTypeInfo* typeinfo = (const CXXTypeInfo*)header->exceptionType;
+  current_exception_typeinfo = typeinfo;
+  __davecc_eh_install_active_exception(header, object);
+  __davecc_eh_sync_legacy_current_exception(object, typeinfo);
   UnwindCurrentException();
 }
 
-void __davecc_throw_i8(long long exception_object,
-                       const CXXTypeInfo* typeinfo) {
-  current_exception_i8 = exception_object;
-  current_exception_object = (intptr_t)exception_object;
-  current_exception_typeinfo = typeinfo;
-  current_exception_kind = kExceptionI8;
-  __davecc_eh_sync_legacy_current_exception(NULL, typeinfo);
-  MarkUncaught();
-  UnwindCurrentException();
-}
-
-void __davecc_throw_f4(float exception_object, const CXXTypeInfo* typeinfo) {
-  current_exception_f4 = exception_object;
-  current_exception_typeinfo = typeinfo;
-  current_exception_kind = kExceptionF4;
-  __davecc_eh_sync_legacy_current_exception(NULL, typeinfo);
-  MarkUncaught();
-  UnwindCurrentException();
-}
-
-void __davecc_throw_f8(double exception_object, const CXXTypeInfo* typeinfo) {
-  current_exception_f8 = exception_object;
-  current_exception_typeinfo = typeinfo;
-  current_exception_kind = kExceptionF8;
-  __davecc_eh_sync_legacy_current_exception(NULL, typeinfo);
-  MarkUncaught();
-  UnwindCurrentException();
+void __davecc_rethrow(void) {
+  struct __cxa_exception* header = __davecc_eh_get_globals()->caughtExceptions;
+  if (header == NULL) {
+    abort();
+  }
+  __davecc_eh_raise_header(header);
 }
 
 #endif /* __p_code__ */

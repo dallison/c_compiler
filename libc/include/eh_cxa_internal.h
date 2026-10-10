@@ -44,6 +44,8 @@ void __davecc_eh_unwind_current_exception(void);
 
 void __davecc_eh_enter_catch_from_unwinder(long base_offset);
 
+void __davecc_eh_raise_header(struct __cxa_exception* header);
+
 void __davecc_eh_sync_legacy_current_exception(void* object,
                                                const DaveCXXTypeInfo* typeinfo);
 

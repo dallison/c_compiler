@@ -4715,6 +4715,14 @@ static Symbol* NewExceptionTypeInfoSymbol(EHTypeInfo* info,
   return symbol;
 }
 
+static void AppendRuntimeFunctionFormal(TypeRecord* func_type,
+                                        TypeRecord* formal_type) {
+  Symbol* formal = NewSymbol("", formal_type, STO(auto));
+  formal->flags.is_argument = true;
+  formal->value.arg_number = (int)func_type->info.function.prototype.length;
+  VectorAppend(&func_type->info.function.prototype, formal);
+}
+
 static Symbol* GetCxaAllocateExceptionFunction(SourceLocation location) {
   TypeRecord* void_ptr = NewPointerTo(kQualPlain,
                                       NewTypeRecordWithSize(kTypeVoid,
@@ -4723,8 +4731,8 @@ static Symbol* GetCxaAllocateExceptionFunction(SourceLocation location) {
       SizeofPointer() == 8 ? kTypeLong : kTypeInt, kQualPlain);
   size_type->type |= kTypeUnsigned;
   TypeRecord* func_type = NewFunctionTypeRecord();
+  AppendRuntimeFunctionFormal(func_type, size_type);
   TypeRecordChain(func_type, void_ptr);
-  TypeRecordChain(func_type, size_type);
   String name;
   StringInit(&name, "__cxa_allocate_exception");
   Symbol* symbol = FindGlobalSymbol(&name);
@@ -4740,24 +4748,25 @@ static Symbol* GetCxaAllocateExceptionFunction(SourceLocation location) {
   return symbol;
 }
 
-static Symbol* GetCxaThrowFunction(SourceLocation location) {
+static Symbol* GetCxaThrowFunction(const char* function_name,
+                                   SourceLocation location) {
   TypeRecord* void_ptr = NewPointerTo(kQualPlain,
                                       NewTypeRecordWithSize(kTypeVoid,
                                                             kQualPlain));
   TypeRecord* func_type = NewFunctionTypeRecord();
+  for (int i = 0; i < 3; i++) {
+    AppendRuntimeFunctionFormal(func_type, TypeRecordCopy(void_ptr));
+  }
   TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
-  TypeRecordChain(func_type, void_ptr);
-  TypeRecordChain(func_type, void_ptr);
-  TypeRecordChain(func_type, void_ptr);
   String name;
-  StringInit(&name, "__cxa_throw");
+  StringInit(&name, function_name);
   Symbol* symbol = FindGlobalSymbol(&name);
   StringDestruct(&name);
   if (symbol != NULL) {
     symbol->flags.noreturn = true;
     return symbol;
   }
-  symbol = NewSymbol("__cxa_throw", func_type, STO(extern));
+  symbol = NewSymbol(function_name, func_type, STO(extern));
   symbol->flags.invented = true;
   symbol->flags.is_forward_declared = true;
   symbol->flags.noreturn = true;
@@ -4766,9 +4775,10 @@ static Symbol* GetCxaThrowFunction(SourceLocation location) {
   return symbol;
 }
 
-static Symbol* GetCxaRethrowFunction(SourceLocation location) {
+static Symbol* GetCxaRethrowFunction(const char* function_name,
+                                     SourceLocation location) {
   String name;
-  StringInit(&name, "__cxa_rethrow");
+  StringInit(&name, function_name);
   Symbol* symbol = FindGlobalSymbol(&name);
   StringDestruct(&name);
   if (symbol != NULL) {
@@ -4777,7 +4787,7 @@ static Symbol* GetCxaRethrowFunction(SourceLocation location) {
   }
   TypeRecord* func_type = NewFunctionTypeRecord();
   TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
-  symbol = NewSymbol("__cxa_rethrow", func_type, STO(extern));
+  symbol = NewSymbol(function_name, func_type, STO(extern));
   symbol->flags.invented = true;
   symbol->flags.is_forward_declared = true;
   symbol->flags.noreturn = true;
@@ -4833,12 +4843,18 @@ static bool CanElideExceptionCopy(ASTNode* expr) {
           expr->op == AST_OP(question));
 }
 
-static IRNode* GenerateItaniumThrowExpression(Generator* gen,
-                                              ThrowASTNode* node) {
+// The exception object lives in a runtime-allocated header, which owns it until
+// its last handler ends.  The DaveCC ABI hands the header to the frame-pointer
+// unwinder instead of _Unwind_RaiseException and matches handlers against its
+// own type records.
+static IRNode* GenerateAllocatedThrowExpression(Generator* gen,
+                                                ThrowASTNode* node) {
   SourceLocation location = node->base.location;
+  bool itanium = RttiUsesItaniumABI();
 
   if (node->expr == NULL) {
-    Symbol* rethrow = GetCxaRethrowFunction(location);
+    Symbol* rethrow = GetCxaRethrowFunction(
+        itanium ? "__cxa_rethrow" : "__davecc_rethrow", location);
     IRNode* call = NewIR1(IR_OP(calla), GeneratorGetVariable(gen, rethrow));
     return IRSetType(GeneratorEmit(gen, call),
                      NewTypeRecordWithSize(kTypeVoid, kQualPlain));
@@ -4855,7 +4871,10 @@ static IRNode* GenerateItaniumThrowExpression(Generator* gen,
       SizeofPointer() == 8 ? kTypeLong : kTypeInt, kQualPlain);
   size_type->type |= kTypeUnsigned;
   IRNode* size_node = GeneratorGetIntConstant(gen, size_type, thrown_size);
-  IRAddInput(alloc_call, size_node, false);
+  Vector size_args = {0};
+  PushArg(gen, alloc_call, size_node, 0, &size_args);
+  IRAddInput(alloc_call, GeneratorEmit(gen, size_args.value.p[0]), false);
+  VectorDestruct(&size_args);
   IRNode* object = IRSetType(GeneratorEmit(gen, alloc_call), alloc_fn->type);
   TypeRecord* object_pointer_type = NewPointerTo(kQualPlain, throw_type);
   IRSetType(object, object_pointer_type);
@@ -4923,10 +4942,17 @@ static IRNode* GenerateItaniumThrowExpression(Generator* gen,
     GeneratorEmit(gen, NewIR2(store_op, object, thrown_value));
   }
 
-  Symbol* throw_fn = GetCxaThrowFunction(location);
+  Symbol* throw_fn = GetCxaThrowFunction(
+      itanium ? "__cxa_throw" : "__davecc_throw_object", location);
   IRNode* throw_call = NewIR1(IR_OP(calla), GeneratorGetVariable(gen, throw_fn));
-  Symbol* typeinfo = RttiGetTypeInfoSymbol(throw_type);
-  IRNode* destructor = GeneratorGetIntConstant(gen, NULL, 0);
+  Symbol* typeinfo =
+      itanium ? RttiGetTypeInfoSymbol(throw_type)
+              : NewExceptionTypeInfoSymbol(
+                    GeneratorGetExceptionTypeInfo(gen, throw_type), location);
+  TypeRecord* void_ptr = NewPointerTo(
+      kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  IRNode* destructor =
+      IRSetType(GeneratorGetIntConstant(gen, void_ptr, 0), void_ptr);
   if (TypeIsStructOrUnion(throw_type)) {
     Symbol* destructor_symbol = FindExceptionSpecialMember(
         throw_type, kCXXSpecialMemberDestructor);
@@ -4957,8 +4983,9 @@ static IRNode* GenerateThrowExpression(Generator* gen, ThrowASTNode* node) {
     return IRSetType(GeneratorEmit(gen, call),
                      NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   }
-  if (RttiUsesItaniumABI() && !gen->for_constant_evaluation) {
-    return GenerateItaniumThrowExpression(gen, node);
+  if (!gen->for_constant_evaluation &&
+      (RttiUsesItaniumABI() || CompilerExceptionsEnabled())) {
+    return GenerateAllocatedThrowExpression(gen, node);
   }
 
   IRNode* exception_object = NULL;

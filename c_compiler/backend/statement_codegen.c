@@ -28,6 +28,13 @@ static bool UsesItaniumUnwind(Generator* gen) {
          CompilerExceptionsEnabled();
 }
 
+// Thrown objects live in runtime exception headers, which every handler must
+// release with __cxa_end_catch however it is left.  Constant evaluation keeps
+// its own exception state instead.
+static bool UsesExceptionHeaders(Generator* gen) {
+  return !gen->for_constant_evaluation && CompilerExceptionsEnabled();
+}
+
 static IRNode* GenerateNoArgRuntimeCall(Generator* gen, Symbol* symbol);
 static Symbol* GetDaveCCTerminateFunction(SourceLocation location);
 static Symbol* GetDaveCCConstexprEndCatchFunction(SourceLocation location);
@@ -449,7 +456,7 @@ static void GenerateContractCheck(Generator* gen, ASTNode* predicate,
         compiler->contract_semantic == kContractSemanticQuickEnforce) {
       GenerateNoArgRuntimeCall(gen, GetDaveCCTerminateFunction(location));
     } else {
-      if (UsesItaniumUnwind(gen)) {
+      if (UsesExceptionHeaders(gen)) {
         EmitCxaEndCatch(gen, location);
       }
       GeneratorEmit(gen, NewIR1(IR_OP(bra), passed));
@@ -611,8 +618,8 @@ static void EmitConstexprCatchDestructor(Generator* gen,
 // ends each of them, as falling off the end of a handler does.
 static void EmitCatchExitCleanupsUntil(Generator* gen, ASTNode* node,
                                             ASTNode* stop) {
-  bool itanium = UsesItaniumUnwind(gen);
-  if (!gen->for_constant_evaluation && !itanium) {
+  bool headers = UsesExceptionHeaders(gen);
+  if (!gen->for_constant_evaluation && !headers) {
     return;
   }
   for (ASTNode* parent = node != NULL ? node->parent : NULL;
@@ -621,7 +628,7 @@ static void EmitCatchExitCleanupsUntil(Generator* gen, ASTNode* node,
       continue;
     }
     CatchASTNode* handler = (CatchASTNode*)parent;
-    if (itanium) {
+    if (headers) {
       if (IsSupportedCatchHandler(handler)) {
         EmitCxaEndCatch(gen, handler->base.location);
       }
@@ -1924,7 +1931,7 @@ static bool JumpNeedsExitCode(Generator* gen, ASTNode* node, ASTNode* target) {
   if (target == NULL || FindTopVLAForJump(node, target) != NULL) {
     return true;
   }
-  if (!gen->for_constant_evaluation && !UsesItaniumUnwind(gen)) {
+  if (!gen->for_constant_evaluation && !UsesExceptionHeaders(gen)) {
     return false;
   }
   for (ASTNode* parent = node->parent; parent != NULL && parent != target;
@@ -2225,9 +2232,11 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
     if (UsesItaniumUnwind(gen)) {
       caught_object = EmitCxaBeginCatch(gen, handler->base.location);
       GenerateItaniumCatchBinding(gen, handler, caught_object);
-      handler_start = GeneratorEmit(gen, NewIR(IR_OP(label)));
     } else {
       GenerateCatchBinding(gen, handler);
+    }
+    if (UsesExceptionHeaders(gen)) {
+      handler_start = GeneratorEmit(gen, NewIR(IR_OP(label)));
     }
     GenerateStatement(gen, handler->stmt);
     if (handler_start != NULL) {
@@ -2239,7 +2248,7 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
       pad->end_catch = true;
     }
     if (StatementMayFallThrough(handler->stmt)) {
-      if (UsesItaniumUnwind(gen)) {
+      if (UsesExceptionHeaders(gen)) {
         EmitCxaEndCatch(gen, handler->base.location);
       } else if (gen->for_constant_evaluation) {
         EmitConstexprCatchDestructor(gen, handler);
@@ -2247,7 +2256,7 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
             gen, GetDaveCCConstexprEndCatchFunction(handler->base.location));
       }
       GeneratorEmit(gen, NewIR1(IR_OP(bra), after_try));
-    } else if (UsesItaniumUnwind(gen)) {
+    } else if (UsesExceptionHeaders(gen)) {
       EmitCxaEndCatch(gen, handler->base.location);
     }
   }
