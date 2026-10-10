@@ -8178,6 +8178,71 @@ static ClassTemplatePartialSpecialization* SelectPartialSpecializationFromList(
   return best;
 }
 
+Symbol* ClassTemplatePartialSpecializationTagForArguments(Symbol* primary,
+                                                        Vector* template_args) {
+  if (primary == NULL || template_args == NULL || primary->type == NULL ||
+      !TypeIsStructOrUnion(primary->type) ||
+      primary->type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* str = primary->type->info.struct_info;
+  ClassTemplatePartialSpecialization* best = NULL;
+  Vector* best_bindings = NULL;
+  int best_score = -1;
+  int best_pack_count = 0;
+  int matches = 0;
+  for (size_t i = 0; i < str->partial_specializations.length; i++) {
+    ClassTemplatePartialSpecialization* partial =
+        str->partial_specializations.value.p[i];
+    if (partial == NULL || partial->tag_symbol == NULL) {
+      continue;
+    }
+    Vector* bindings = NULL;
+    int score = 0;
+    if (!MatchClassTemplatePartialSpecialization(partial, template_args,
+                                                 &bindings, &score)) {
+      continue;
+    }
+    if (!PartialSpecializationConstraintsSatisfied(partial, bindings)) {
+      VectorDeleteWithContents(
+          bindings, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      continue;
+    }
+    int pack_count = PartialSpecializationPackCount(partial);
+    bool better = best == NULL || score > best_score ||
+                  (score == best_score && pack_count < best_pack_count);
+    bool tied = best != NULL && score == best_score &&
+                pack_count == best_pack_count;
+    if (tied) {
+      matches++;
+    } else if (better) {
+      if (best_bindings != NULL) {
+        VectorDeleteWithContents(
+            best_bindings, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
+      best = partial;
+      best_score = score;
+      best_pack_count = pack_count;
+      best_bindings = bindings;
+      bindings = NULL;
+      matches = 1;
+    }
+    if (bindings != NULL) {
+      VectorDeleteWithContents(
+          bindings, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+  }
+  if (best_bindings != NULL) {
+    VectorDeleteWithContents(
+        best_bindings, (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+  }
+  return matches == 1 && best != NULL ? best->tag_symbol : NULL;
+}
+
 /* Choose the best-matching partial specialization of class template `primary`
  * for the actual arguments; returns NULL when none match. */
 static ClassTemplatePartialSpecialization* SelectClassTemplatePartialSpecialization(

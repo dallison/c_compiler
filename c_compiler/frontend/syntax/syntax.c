@@ -2266,28 +2266,8 @@ static Symbol* FindInjectedClassNameSymbol(Struct* owner, String* name) {
 // partial-specialization pattern selects that specialization.
 static Symbol* ClassTemplatePartialSpecializationTag(Symbol* primary,
                                                     Vector* template_args) {
-  if (primary == NULL || template_args == NULL || primary->type == NULL ||
-      !TypeIsStructOrUnion(primary->type) ||
-      primary->type->info.struct_info == NULL) {
-    return NULL;
-  }
-  Struct* str = primary->type->info.struct_info;
-  Symbol* found = NULL;
-  int matches = 0;
-  for (size_t i = 0; i < str->partial_specializations.length; i++) {
-    ClassTemplatePartialSpecialization* partial =
-        str->partial_specializations.value.p[i];
-    if (partial == NULL || partial->tag_symbol == NULL) {
-      continue;
-    }
-    if (!TemplateArgumentPatternVectorEqual(template_args,
-                                           &partial->pattern_arguments)) {
-      continue;
-    }
-    found = partial->tag_symbol;
-    matches++;
-  }
-  return matches == 1 ? found : NULL;
+  return ClassTemplatePartialSpecializationTagForArguments(primary,
+                                                           template_args);
 }
 
 static Symbol* SyntaxFindQualifiedPrefixSymbolImpl(
@@ -10294,8 +10274,15 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           syntax->init_storage = storage;
           initializer = SyntaxParseInitializer(syntax, sym, storage);
         } else {
-          SyntaxError(syntax,
-                      "variable template specialization requires an initializer");
+          initializer = ParseCXXDirectInitializer(syntax, sym, false);
+          if (initializer == NULL && CompilerIsCXX() &&
+              LexMatch(syntax->lex, TOK(lbrace))) {
+            initializer = ParseBracedInitializer(syntax);
+          }
+          if (initializer == NULL) {
+            SyntaxError(syntax,
+                        "variable template specialization requires an initializer");
+          }
         }
         AddVariableTemplatePartialSpecialization(
             parser, primary, parser->declarator_template_arguments, initializer,

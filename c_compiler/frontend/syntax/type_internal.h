@@ -49,6 +49,8 @@ bool TemplateArgumentVectorEqual(Vector* left, Vector* right);
 bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
 bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg);
 bool TemplateArgumentPatternVectorEqual(Vector* left, Vector* right);
+Symbol* ClassTemplatePartialSpecializationTagForArguments(Symbol* primary,
+                                                          Vector* template_args);
 Symbol* FindFunctionTemplateInstantiation(Symbol* templ, TypeRecord* func,
                                           Vector* args);
 Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
