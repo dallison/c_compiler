@@ -67,6 +67,13 @@ static void* ResolveGuestAddressFullLocked(ARMProcessRuntime* process,
   if (mapped != NULL) {
     return mapped;
   }
+  Loader* loader = process->loader;
+  // A host address of a loaded segment is exact.  Its low 32 bits can also be
+  // a linked address of another object, so only narrow an address no segment
+  // holds.
+  if (loader != NULL && GuestAddressOk(loader, addr, size)) {
+    return (void*)(uintptr_t)addr;
+  }
   if ((addr >> 32) != 0) {
     mapped = ResolveGuestAddressThreadMapsLocked(process, addr & 0xffffffffu,
                                                  size);
@@ -75,7 +82,6 @@ static void* ResolveGuestAddressFullLocked(ARMProcessRuntime* process,
     }
     addr &= 0xffffffffu;
   }
-  Loader* loader = process->loader;
   if (loader == NULL) {
     return NULL;
   }
