@@ -13,6 +13,8 @@
 #include "syntax.h"
 
 void AnalyzeStatement(ASTNode* node);
+// Removes discarded `if constexpr` branches whose conditions fold to constants.
+ASTNode* StatementPruneConstexprIfTree(ASTNode* stmt);
 void CheckUnusedLabels(ASTNode* body);
 void SemanticDiagnoseConstexprFunctionBody(ASTNode* node);
 ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr);

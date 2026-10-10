@@ -222,14 +222,17 @@ static void ApplyCXXSpecialMemberDeclSpecifiers(TypeParser* parser) {
 
 static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
   Lex* lex = syntax->lex;
-  LexCheckpoint specifier_checkpoint;
-  bool skipped_specifiers = false;
+  LexCheckpoint start;
+  LexCheckpointSave(lex, &start);
+  Vector attrs = {0};
+  while (SyntaxParseAnyAttribute(syntax, &attrs)) {
+  }
+  VectorClear(&attrs);
+
   if (CompilerIsCXX() && LookingAtCXXSpecialMemberDeclSpecifier(lex)) {
-    LexCheckpointSave(lex, &specifier_checkpoint);
     while (LookingAtCXXSpecialMemberDeclSpecifier(lex)) {
       LexNextToken(lex);
     }
-    skipped_specifiers = true;
   }
   String previous;
   StringInit(&previous, NULL);
@@ -310,10 +313,8 @@ static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
 done:
   StringDestruct(&current);
   StringDestruct(&previous);
-  if (skipped_specifiers) {
-    LexCheckpointRestore(lex, &specifier_checkpoint);
-    LexCheckpointDestruct(&specifier_checkpoint);
-  }
+  LexCheckpointRestore(lex, &start);
+  LexCheckpointDestruct(&start);
   return result;
 }
 
@@ -11295,11 +11296,18 @@ static ASTNode* ParseNamespaceAliasDefinition(Syntax* syntax,
 static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
   SourceLocation location = syntax->lex->current_token_location;
   Vector* declarations = NewVector();
+  Vector attributes = {0};
+  while (SyntaxParseAnyAttribute(syntax, &attributes)) {
+  }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), kParsingFileScope);
   ApplyCXXSpecialMemberDeclSpecifiers(&parser);
 
   Symbol* sym = TypeParserParseCXXSpecialMemberDeclarator(&parser);
+  if (sym != NULL && attributes.length > 0) {
+    VectorAppendVector(&sym->attributes, &attributes);
+    SyntaxApplyDeclarationAttributes(syntax, sym);
+  }
   // `template <typename T> inline Condition::Condition(...)` is parsed here,
   // not on the ordinary declarator path that records template_parameter_count.
   // Without that count the definition is not recognized as a member template

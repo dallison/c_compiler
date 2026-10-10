@@ -23,6 +23,74 @@
 #include "source.h"
 #include "type_inheritance.h"
 #include "type_internal.h"
+#include "constexpr.h"
+#include "debug.h"
+
+static void ClearStaticAssertAnalysis(ASTNode* node, void* data, int child_id,
+                                      VisitorMode mode);
+
+static ASTNode* StatementPruneConstexprIf(ASTNode* node, void* data,
+                                          ASTNodeTransformAction* action) {
+  (void)action;
+  (void)data;
+  if (node == NULL || node->op != AST_OP(if)) {
+    return node;
+  }
+  IfStatementASTNode* if_node = (IfStatementASTNode*)node;
+  if (!if_node->is_constexpr || if_node->cond == NULL) {
+    return node;
+  }
+  int64_t value = 0;
+  bool folded = false;
+  if (if_node->cond->op == AST_OP(number)) {
+    value = ((ConstantASTNode*)if_node->cond)->value.ivalue;
+    folded = true;
+  } else if (EvaluateIntegerExpression(if_node->cond, &value)) {
+    folded = true;
+  } else {
+    ASTNodeVisit(if_node->cond, ClearStaticAssertAnalysis, 0, NULL);
+    bool saved_trap = DiagnosticErrorTrapBegin();
+    DiagnosticSuppressBegin();
+    ASTNode* analyzed = AnalyzeExpression(if_node->cond);
+    bool trapped = analyzed == NULL || DiagnosticErrorTrapped();
+    DiagnosticSuppressEnd();
+    DiagnosticErrorTrapEnd(saved_trap);
+    if (!trapped) {
+      if_node->cond = analyzed;
+      folded = EvaluateIntegerExpression(if_node->cond, &value);
+    }
+  }
+  if (!folded && if_node->cond != NULL) {
+    ASTNode* is_same_folded = CXXFoldIsSameVExpression(if_node->cond);
+    if (is_same_folded != NULL && is_same_folded != if_node->cond) {
+      if_node->cond = is_same_folded;
+    }
+    if (EvaluateIntegerExpression(if_node->cond, &value)) {
+      folded = true;
+    }
+  }
+  if (!folded) {
+    return node;
+  }
+  ASTNode** taken_slot = value != 0 ? &if_node->if_part : &if_node->else_part;
+  ASTNode* taken = *taken_slot;
+  SourceLocation location = node->location;
+  *taken_slot = NULL;
+  ASTNodeDelete(node);
+  if (taken == NULL) {
+    taken = NewCompoundStatementASTNode(NewVector(), location);
+  } else {
+    taken->parent = NULL;
+  }
+  return ASTNodeVisitAndTransform(taken, StatementPruneConstexprIf, data);
+}
+
+ASTNode* StatementPruneConstexprIfTree(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return NULL;
+  }
+  return ASTNodeVisitAndTransform(stmt, StatementPruneConstexprIf, NULL);
+}
 
 static ASTNode* StaticAssertIdentityClone(ASTNode* node, void* data) {
   (void)data;
@@ -1514,6 +1582,10 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
   if (value == 0) {
     if (DependentExpressionContainsTemplateParameter(node->expr) ||
         ExpressionIsTemplateDependent(node->expr)) {
+      return;
+    }
+    if (func != NULL && TypeIsFunction(func) &&
+        func->info.function.template_origin != NULL) {
       return;
     }
     String message;

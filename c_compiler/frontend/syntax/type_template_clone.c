@@ -8053,77 +8053,6 @@ static ASTNode* NormalizeClonedPointerDifferenceScale(
   return scale;
 }
 
-/* Post-clone pass: prune the discarded branch of an `if constexpr` whose
- * condition has already been folded to a constant during the body clone (a
- * `requires`-expression condition is evaluated and replaced with 0/1 by
- * CloneTemplateFunctionBodyNode).  Statement-level analysis of `if constexpr`
- * (AnalyzeIfStatement) would eventually drop the not-taken branch, but the
- * intervening re-analysis passes below (ReanalyzeClonedResolvedCall, etc.)
- * would first walk that dead branch and re-resolve its construction calls --
- * e.g. `owning_view(v)` in the false branch of `views::all`'s
- * `if constexpr (requires { ref_view(v); }) ... else ...`.  Re-analyzing a
- * discarded branch can raise spurious errors (its constraints legitimately
- * fail for this argument), so eliminate it here, before those passes run. */
-static ASTNode* PruneClonedConstexprIf(ASTNode* node, void* data,
-                                       ASTNodeTransformAction* action) {
-  (void)action;
-  if (node == NULL || node->op != AST_OP(if)) {
-    return node;
-  }
-  IfStatementASTNode* if_node = (IfStatementASTNode*)node;
-  if (!if_node->is_constexpr || if_node->cond == NULL) {
-    return node;
-  }
-  int64_t value = 0;
-  bool folded = false;
-  if (if_node->cond->op == AST_OP(number)) {
-    value = ((ConstantASTNode*)if_node->cond)->value.ivalue;
-    folded = true;
-  } else {
-    if (EvaluateIntegerExpression(if_node->cond, &value)) {
-      folded = true;
-    } else {
-      ASTNodeVisit(if_node->cond, ClearAnalyzedFlagVisitor, 0, NULL);
-      bool saved_trap = DiagnosticErrorTrapBegin();
-      DiagnosticSuppressBegin();
-      ASTNode* analyzed = AnalyzeExpression(if_node->cond);
-      bool trapped = analyzed == NULL || DiagnosticErrorTrapped();
-      DiagnosticSuppressEnd();
-      DiagnosticErrorTrapEnd(saved_trap);
-      if (!trapped) {
-        if_node->cond = analyzed;
-        folded = EvaluateIntegerExpression(if_node->cond, &value);
-      }
-    }
-  }
-  if (!folded && if_node->cond != NULL) {
-    ASTNode* is_same_folded = CXXFoldIsSameVExpression(if_node->cond);
-    if (is_same_folded != NULL && is_same_folded != if_node->cond) {
-      if_node->cond = is_same_folded;
-    }
-    if (EvaluateIntegerExpression(if_node->cond, &value)) {
-      folded = true;
-    }
-  }
-  if (!folded) {
-    return node;
-  }
-  ASTNode** taken_slot = value != 0 ? &if_node->if_part : &if_node->else_part;
-  ASTNode* taken = *taken_slot;
-  SourceLocation location = node->location;
-  // Detach the surviving branch so deleting the `if` node does not free it.
-  *taken_slot = NULL;
-  ASTNodeDelete(node);
-  if (taken == NULL) {
-    taken = NewCompoundStatementASTNode(NewVector(), location);
-  } else {
-    taken->parent = NULL;
-  }
-  // Recurse so nested `if constexpr` statements inside the surviving branch are
-  // pruned too (the driver does not descend into a replaced node).
-  return ASTNodeVisitAndTransform(taken, PruneClonedConstexprIf, data);
-}
-
 static bool IsConstexprIfNode(ASTNode* node, void* data) {
   (void)data;
   return node != NULL && node->op == AST_OP(if) &&
@@ -9704,7 +9633,7 @@ ASTNode* CloneTemplateFunctionBody(TypeParser* parser,
   ASTNodeVisit(body, RebindClonedDesignatorMemberVisitor, 0, NULL);
   // Drop discarded `if constexpr` branches (whose condition the clone above has
   // already folded to a constant) before the re-analysis passes can walk them.
-  body = ASTNodeVisitAndTransform(body, PruneClonedConstexprIf, NULL);
+  body = StatementPruneConstexprIfTree(body);
   body = ASTNodeVisitAndTransform(body, PruneStatementsAfterUnconditionalReturn,
                                   NULL);
   body = ASTNodeVisitAndTransform(body, ReanalyzeClonedDependentFunctorCall,

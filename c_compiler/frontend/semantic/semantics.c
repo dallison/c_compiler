@@ -645,6 +645,11 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   VectorAppend(&compiler->functions_being_analyzed, node->type);
 
   // Perform semantic analysis on all the statements in the function body.
+  if (node->type->info.function.has_constexpr_if &&
+      node->type->info.function.body != NULL) {
+    node->type->info.function.body =
+        StatementPruneConstexprIfTree(node->type->info.function.body);
+  }
   AnalyzeStatement(node->type->info.function.body);
   StatementFinishAutoReturnDeduction(node->type, node);
   SemanticDiagnoseConstexprFunctionBody(node);
