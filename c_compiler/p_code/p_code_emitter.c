@@ -392,7 +392,7 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
             TargetConstant* constant = (TargetConstant*)inst->operand[i];
             if (constant->type == kTargetTypeFloat ||
                 constant->type == kTargetTypeDouble) {
-              fprintf(fp, "%s#%g", sep, constant->value.dvalue);
+              fprintf(fp, "%s#%.17g", sep, constant->value.dvalue);
             } else {
               fprintf(fp, "%s#%" PRId64, sep, constant->value.ivalue);
             }
@@ -529,6 +529,51 @@ static void PCodePrintExceptionTable(PCodeEmitter* emitter, FILE* fp,
     fprintf(fp, "\n");
   }
   fprintf(fp, "\t.text\n\n");
+}
+
+void PCodePrintCXXAdjustorThunks(FILE* fp) {
+  if (compiler->cxx_this_adjustor_thunks.length == 0) {
+    return;
+  }
+  fprintf(fp, "\t.text\n");
+  for (size_t i = 0; i < compiler->cxx_this_adjustor_thunks.length; i++) {
+    CXXThisAdjustorThunk* thunk = compiler->cxx_this_adjustor_thunks.value.p[i];
+    if (thunk == NULL || thunk->thunk == NULL || thunk->target == NULL) {
+      continue;
+    }
+    char thunk_buf[256];
+    char target_buf[256];
+    const char* thunk_name =
+        TargetSymbolName(thunk->thunk, thunk_buf, sizeof(thunk_buf));
+    const char* target_name =
+        TargetSymbolName(thunk->target, target_buf, sizeof(target_buf));
+    EmitFunctionSection(fp, thunk_name);
+    fprintf(fp, "\t.weak %s\n", thunk_name);
+    fprintf(fp, "\t.type %s, @function\n\n", thunk_name);
+    if (StorageIs(thunk->target->storage, STO(static))) {
+      fprintf(fp, "\t.local %s\n", target_name);
+    } else if (SymbolHasWeakBinding(thunk->target)) {
+      fprintf(fp, "\t.weak %s\n", target_name);
+    } else {
+      fprintf(fp, "\t.global %s\n", target_name);
+    }
+    fprintf(fp, "%s:\n", thunk_name);
+    if (thunk->this_adjustment != 0) {
+      // Arguments are on the stack above the return address; a memory return
+      // pointer, when present, precedes `this`.
+      TypeRecord* type = thunk->target->type;
+      int this_offset =
+          type != NULL && TypeReturnedThroughHiddenPointer(type->next) ? 16
+                                                                       : 8;
+      fprintf(fp, "\tldx      r0, [sp, #%d]\n", this_offset);
+      fprintf(fp, "\taddc     r0, r0, #%d\n", thunk->this_adjustment);
+      fprintf(fp, "\tstx      r0, [sp, #%d]\n", this_offset);
+    }
+    fprintf(fp, "\tjmp      %s\n", target_name);
+    fprintf(fp, ".func_end_%s:\n", thunk_name);
+    fprintf(fp, "\t.size %s, .func_end_%s-%s\n\n", thunk_name, thunk_name,
+            thunk_name);
+  }
 }
 
 void PCodePrintFunction(PCodeEmitter* emitter, FILE* fp) {

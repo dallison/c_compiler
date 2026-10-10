@@ -26,5 +26,6 @@ void PCodeEmitterDestruct(PCodeEmitter* emitter);
 void PCodeEmitterDelete(PCodeEmitter* emitter);
 
 void PCodePrintFunction(PCodeEmitter* emitter, FILE* fp);
+void PCodePrintCXXAdjustorThunks(FILE* fp);
 
 #endif /* pcode_emitter_h */
