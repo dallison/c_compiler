@@ -93,6 +93,8 @@ struct ConstexprBinding {
   // Owned by the compilation rather than an evaluation context.
   bool durable;
   bool external;
+  // For a temporary, the call depth that materialized it.
+  int temporary_call_depth;
 };
 
 // Must match the definition in constexpr_pcode.c: objects pass between the two.
@@ -1211,10 +1213,14 @@ static void ConstexprRecordTemporary(ConstEvalContext* ctx, Symbol* symbol,
   if (symbol == NULL || !symbol->flags.is_temp || object == NULL) {
     return;
   }
+  // A recursive call materializes the same temporary while the caller's is
+  // still alive; that one stays recorded for the caller's cleanup.
   ConstexprBinding* binding = NULL;
-  for (size_t i = 0; i < ctx->temporaries.length && binding == NULL; i++) {
-    ConstexprBinding* candidate = ctx->temporaries.value.p[i];
-    if (candidate->symbol == symbol) {
+  for (size_t i = ctx->temporaries.length; i > 0 && binding == NULL; i--) {
+    ConstexprBinding* candidate = ctx->temporaries.value.p[i - 1];
+    if (candidate->symbol == symbol &&
+        (candidate->temporary_call_depth == ctx->call_depth ||
+         candidate->object == NULL || candidate->object->destroyed)) {
       binding = candidate;
     }
   }
@@ -1222,15 +1228,36 @@ static void ConstexprRecordTemporary(ConstEvalContext* ctx, Symbol* symbol,
     binding = malloc(sizeof(ConstexprBinding));
     VectorAppend(&ctx->temporaries, binding);
   }
-  *binding = (ConstexprBinding){
-      .symbol = symbol, .state = kValueStateValid, .object = object};
+  *binding = (ConstexprBinding){.symbol = symbol,
+                                .state = kValueStateValid,
+                                .object = object,
+                                .temporary_call_depth = ctx->call_depth};
+}
+
+// A class prvalue argument is materialized as the compound literal `T{expr}`,
+// and that temporary is the by-value parameter object.  The caller's
+// full-expression cleanup destroys it by the literal's name after the callee's
+// bindings are gone, including when the call exits by an exception.
+static void ConstexprRecordArgumentTemporary(ConstEvalContext* ctx,
+                                             ASTNode* actual,
+                                             ConstexprValue value) {
+  if (actual == NULL || actual->op != AST_OP(compound_literal) ||
+      !value.is_object) {
+    return;
+  }
+  ASTNode* literal_sym = ((CompoundLiteralASTNode*)actual)->sym;
+  if (literal_sym != NULL && literal_sym->op == AST_OP(identifier)) {
+    ConstexprRecordTemporary(ctx, ((IdentifierASTNode*)literal_sym)->symbol,
+                             value.object);
+  }
 }
 
 static ConstexprBinding* ConstexprRecordScalarTemporary(ConstEvalContext* ctx,
                                                         Symbol* symbol) {
   ConstexprBinding* binding = malloc(sizeof(ConstexprBinding));
   *binding = (ConstexprBinding){.symbol = symbol,
-                                .state = kValueStateIndeterminate};
+                                .state = kValueStateIndeterminate,
+                                .temporary_call_depth = ctx->call_depth};
   VectorAppend(&ctx->temporaries, binding);
   return binding;
 }
@@ -1276,6 +1303,7 @@ static void PushConstexprBinding(ConstEvalContext* ctx, Symbol* symbol,
       value.is_address && ConstexprAddressStorageBegan(ctx, value);
   binding->durable = false;
   binding->external = false;
+  binding->temporary_call_depth = 0;
   VectorAppend(&ctx->bindings, binding);
 }
 
@@ -9895,6 +9923,7 @@ static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
       ok = false;
       break;
     }
+    ConstexprRecordArgumentTemporary(ctx, actual, value);
     formals[i] = formal;
     values[i] = value;
   }
@@ -9963,6 +9992,7 @@ static bool BindConstexprConstructorObjectActuals(ConstEvalContext* ctx,
     } else if (!EvaluateConstexprValue(ctx, actual, formal->type, &value)) {
       return false;
     }
+    ConstexprRecordArgumentTemporary(ctx, actual, value);
     PushConstexprBinding(ctx, formal, value);
   }
   return true;
@@ -10178,6 +10208,7 @@ static bool BindConstexprConstructorActuals(ConstEvalContext* ctx,
     } else if (!EvaluateConstexprValue(ctx, actual, formal->type, &value)) {
       return false;
     }
+    ConstexprRecordArgumentTemporary(ctx, actual, value);
     PushConstexprBinding(ctx, formal, value);
   }
   return true;
@@ -12059,22 +12090,11 @@ static bool ConstexprExceptionCallArgument(ConstEvalContext* ctx,
     return false;
   }
   ASTNode* argument = call->children->value.p[0];
-  if (argument->op == AST_OP(comma)) {
-    ASTNode* construction = ((BinaryASTNode*)argument)->left;
-    if (construction != NULL && construction->op == AST_OP(call)) {
-      VectorASTNode* constructor_call = (VectorASTNode*)construction;
-      Symbol* constructor = ConstexprCallSymbol(construction);
-      if (constructor != NULL && constructor->name.value != NULL &&
-          strcmp(constructor->name.value, "exception_ptr") == 0 &&
-          constructor_call->children != NULL &&
-          constructor_call->children->length >= 2) {
-        ASTNode* source = constructor_call->children->value.p[
-            constructor_call->children->length - 1];
-        return EvaluateConstexprValue(ctx, source, source->type, value);
-      }
-    }
+  if (!EvaluateConstexprValue(ctx, argument, argument->type, value)) {
+    return false;
   }
-  return EvaluateConstexprValue(ctx, argument, argument->type, value);
+  ConstexprRecordArgumentTemporary(ctx, argument, *value);
+  return true;
 }
 
 static bool ConstexprIsExceptionStateFunction(Symbol* symbol) {
@@ -13396,6 +13416,7 @@ static bool EvaluateConstexprDestructorCall(ConstEvalContext* ctx,
   if (ok && receiver_object != NULL &&
       TypeEqual(receiver_object->type, formal_object_type)) {
     receiver_object->destroyed = true;
+    ConstexprForgetTemporaryObject(ctx, receiver_object);
   }
   if (ok && receiver_object != NULL && ctx->destroy_at_depth > 0) {
     receiver_object->lifetime_ended = true;
