@@ -3031,12 +3031,9 @@ void SyntaxErrorAtLocation(Syntax* syntax, SourceLocation location,
   if (abort_on_error) {
     longjmp(error_abort_state, 1);
   }
-  const char* filename;
-  int lineno, start, end;
-  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
   va_list ap;
   va_start(ap, format);
-  if (VReportError(filename, lineno, format, ap)) {
+  if (VReportErrorAtLocation(location, format, ap)) {
     ReportMacroExpansionNotes(location);
   }
   va_end(ap);
@@ -4484,8 +4481,11 @@ static void AttributeAppendArg(Attribute* attr, const char* start,
 // Inside the parentheses, arguments are split on top-level commas.  This
 // correctly handles multi-argument attributes such as format(printf, 1, 2)
 // and aligned(16) (a naive comma split would mangle them).
-static void ParseAttributeText(String* text, Vector* attrs) {
+static void ParseAttributeText(String* text, Vector* attrs,
+                               SourceLocation location, Source* source,
+                               int lineno, int source_offset) {
   const char* p = (text->value != NULL) ? text->value : "";
+  const char* text_start = p;
   while (*p != '\0') {
     while (*p != '\0' && (isspace((unsigned char)*p) || *p == ',')) {
       p++;
@@ -4504,6 +4504,14 @@ static void ParseAttributeText(String* text, Vector* attrs) {
     }
     String* name = NewStringWithLength(name_start, (size_t)(p - name_start));
     Attribute* attr = NewAttribute(name->value);
+    if (source != NULL && source_offset >= 0) {
+      size_t offset = (size_t)source_offset +
+                      (size_t)(name_start - text_start);
+      attr->location =
+          NewSourceLocation(source, lineno, offset, offset + name->length);
+    } else {
+      attr->location = location;
+    }
     StringDelete(name);
 
     while (*p != '\0' && isspace((unsigned char)*p)) {
@@ -4627,11 +4635,22 @@ static bool IsUnsupportedTypeAttribute(const char* name) {
 // Parse an __attribute__((...)) clause list, appending parsed Attribute* to
 // attrs.  Assumes TOK(attribute) was just consumed.
 void SyntaxParseAttribute(Syntax* syntax, Vector* attrs) {
+  SourceLocation location = syntax->lex->current_token_location;
+  int lineno = syntax->lex->source->lineno;
+  int location_start = 0;
+  int ignored_end = 0;
+  int ignored_line = 0;
+  const char* ignored_filename = NULL;
+  DecodeSourceLocation(location, &ignored_filename, &ignored_line,
+                       &location_start, &ignored_end);
   String attribute_list = {0};
   LexReadAttributes(syntax->lex, &attribute_list);
-  size_t start = attrs->length;
-  ParseAttributeText(&attribute_list, attrs);
-  for (size_t i = start; i < attrs->length; i++) {
+  size_t attributes_start = attrs->length;
+  int source_offset =
+      syntax->lex->source->lineno == lineno ? location_start + 2 : -1;
+  ParseAttributeText(&attribute_list, attrs, location, syntax->lex->source,
+                     lineno, source_offset);
+  for (size_t i = attributes_start; i < attrs->length; i++) {
     Attribute* attr = attrs->value.p[i];
     if (IsUnsupportedTypeAttribute(attr->name.value)) {
       SyntaxError(syntax, "'%s' type attribute is not supported",
@@ -4697,6 +4716,7 @@ static void AppendCXXAttributeArgToken(Lex* lex, String* arg) {
 // attribute per `__declspec`; stack them for several.  `align(N)` is accepted
 // as GNU `aligned(N)` so existing layout code applies.
 static void SyntaxParseDeclspec(Syntax* syntax, Vector* attrs) {
+  SourceLocation location = syntax->lex->current_token_location;
   if (!LexMatch(syntax->lex, TOK(lparen))) {
     SyntaxError(syntax, "Expected ( after __declspec");
     return;
@@ -4722,6 +4742,7 @@ static void SyntaxParseDeclspec(Syntax* syntax, Vector* attrs) {
     mapped = "aligned";
   }
   Attribute* attr = NewAttribute(mapped);
+  attr->location = location;
   if (LexMatch(syntax->lex, TOK(lparen))) {
     int depth = 1;
     String arg = {0};
@@ -4868,6 +4889,7 @@ static const char* CanonicalCXXAttributeName(const char* ns,
 
 static void ParseCXXSingleAttribute(Syntax* syntax, Vector* attrs,
                                     const char* using_namespace) {
+  SourceLocation location = syntax->lex->current_token_location;
   String first;
   String second;
   StringInit(&first, NULL);
@@ -4894,7 +4916,14 @@ static void ParseCXXSingleAttribute(Syntax* syntax, Vector* attrs,
 
   Attribute* attr =
       NewAttribute(CanonicalCXXAttributeName(namespace_name, attr_name));
+  attr->location = location;
   AttributeSetCXXIdentity(attr, namespace_name, attr_name);
+  if (namespace_name == NULL && strcmp(attr_name, "deprecated") == 0 &&
+      CompilerIsCXX() &&
+      !CompilerCXXAtLeast(kLanguageStandardCXX14)) {
+    SyntaxErrorAtLocation(syntax, attr->location,
+                          "'deprecated' attribute requires C++14");
+  }
   bool unevaluated_string_argument =
       namespace_name == NULL &&
       (strcmp(attr_name, "deprecated") == 0 ||
@@ -10681,10 +10710,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           StringDestruct(&suffix);
           TypeErrorDetails(syntax->lex->current_token_location,
                            sym->type, old_sym->type);
-          const char* filename;
-          int lineno, start, end;
-          DecodeSourceLocation(old_sym->location, &filename, &lineno, &start, &end);
-          ReportNote(filename, lineno, "Previously declared here");
+          ReportNoteAtLocation(old_sym->location, "Previously declared here");
         } else {
           MergeCXXDefaultArguments(syntax, old_sym, sym);
           MergeCXXContractAssertions(syntax, old_sym, sym);
@@ -10795,6 +10821,12 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             VectorAppend(&old_sym->attributes, AttributeClone(noreturn));
           }
         }
+      }
+      Attribute* deprecated =
+          AttributeListFind(&sym->attributes, "deprecated");
+      if (deprecated != NULL &&
+          !AttributeListHas(&old_sym->attributes, "deprecated")) {
+        VectorAppend(&old_sym->attributes, AttributeClone(deprecated));
       }
       if (sym->asm_name.length != 0) {
         StringSetString(&old_sym->asm_name, &sym->asm_name);
@@ -15823,17 +15855,11 @@ static void CheckLocalVariableShadow(Syntax* syntax, Symbol* sym) {
     what = "a global declaration";
   }
 
-  const char* filename;
-  int lineno, start, end;
-  DecodeSourceLocation(sym->location, &filename, &lineno, &start, &end);
-  ReportWarning(filename, lineno, "shadow",
-                "declaration of '%s' shadows %s", sym->name.value, what);
-
-  const char* prev_filename;
-  int prev_lineno, prev_start, prev_end;
-  DecodeSourceLocation(shadowed->location, &prev_filename, &prev_lineno,
-                       &prev_start, &prev_end);
-  ReportNote(prev_filename, prev_lineno, "shadowed declaration is here");
+  ReportWarningAtLocation(sym->location, "shadow",
+                          "declaration of '%s' shadows %s",
+                          sym->name.value, what);
+  ReportNoteAtLocation(shadowed->location,
+                       "shadowed declaration is here");
 }
 
 /* A class object declared constexpr may be default-initialized; that
@@ -15977,10 +16003,8 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           StringDestruct(&suffix);
           TypeErrorDetails(syntax->lex->current_token_location,
                                     sym->type, old_sym->type);
-           const char* filename;
-           int lineno, start, end;
-           DecodeSourceLocation(old_sym->location, &filename, &lineno, &start, &end);
-           ReportNote(filename, lineno, "Previously declared here");
+           ReportNoteAtLocation(old_sym->location,
+                                "Previously declared here");
            // Keep the declarator we just parsed.  The previous symbol has an
            // incompatible type, and for a name introduced by a using-declaration
            // or using-directive it has no type at all, which the rest of the

@@ -1061,33 +1061,44 @@ bool PreprocessorImportMacro(Preprocessor* p, const Macro* macro,
   return true;
 }
 
+static SourceLocation PreprocessorDiagnosticLocation(
+    Preprocessor* preprocessor) {
+  Lex* lex = preprocessor->lex;
+  size_t end = lex->pos;
+  if (end > lex->line.length) {
+    end = lex->line.length;
+  }
+  size_t start = end > 0 ? end - 1 : 0;
+  return NewSourceLocation(lex->source, lex->source->lineno, start, end);
+}
+
 void PreprocessorError(Preprocessor* preprocessor, const char* error, ...) {
   va_list ap;
   va_start(ap, error);
-  VReportError(preprocessor->lex->source->filename.value,
-               preprocessor->lex->source->lineno, error, ap);
+  VReportErrorAtLocation(PreprocessorDiagnosticLocation(preprocessor), error,
+                         ap);
   va_end(ap);
 }
 
 void VPreprocessorError(Preprocessor* preprocessor, const char* error,
                         va_list ap) {
-  VReportError(preprocessor->lex->source->filename.value,
-               preprocessor->lex->source->lineno, error, ap);
+  VReportErrorAtLocation(PreprocessorDiagnosticLocation(preprocessor), error,
+                         ap);
 }
 
 void PreprocessorWarning(Preprocessor* preprocessor, const char* warn,
                          const char* error, ...) {
   va_list ap;
   va_start(ap, error);
-  VReportWarning(preprocessor->lex->source->filename.value,
-                 preprocessor->lex->source->lineno, warn, error, ap);
+  VReportWarningAtLocation(PreprocessorDiagnosticLocation(preprocessor), warn,
+                           error, ap);
   va_end(ap);
 }
 
 void VPreprocessorWarning(Preprocessor* preprocessor, const char* warn,
                           const char* error, va_list ap) {
-  VReportWarning(preprocessor->lex->source->filename.value,
-                 preprocessor->lex->source->lineno, warn, error, ap);
+  VReportWarningAtLocation(PreprocessorDiagnosticLocation(preprocessor), warn,
+                           error, ap);
 }
 
 

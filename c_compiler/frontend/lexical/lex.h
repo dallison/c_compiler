@@ -70,6 +70,9 @@ typedef struct Lex {
   bool preprocessor_mode;  // Running in preprocessor mode.
   bool in_comment;         // We are inside a multi-line comment.
   bool assembler_mode;     // Running in assembler mode.
+  bool reading_token;      // A token is currently being collected.
+  size_t token_start;      // Byte offset of that token in the current line.
+  int token_lineno;
 
   // When non-NULL, each fully macro-expanded input line is appended here as it
   // is read.  Used to record a deferred inline function body so it can be

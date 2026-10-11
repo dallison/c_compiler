@@ -51,6 +51,54 @@ static void PrintDiagnosticKind(const char* kind, const char* kind_color) {
   fprintf(stderr, "%s%s%s", Color(kind_color), kind, Color(ANSI_RESET));
 }
 
+static void PrintDiagnosticSource(SourceLocation location) {
+  if (location == SOURCE_LOCATION_MISSING ||
+      location == SOURCE_LOCATION_COMMAND_LINE) {
+    return;
+  }
+  const char* filename = NULL;
+  int lineno = 0;
+  int start = 0;
+  int end = 0;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  int fileno = 0;
+  int ignored_line = 0;
+  int ignored_column = 0;
+  SourceLocationNumbers(location, &fileno, &ignored_line, &ignored_column);
+  File* file = SourceFileAt((size_t)fileno);
+  const char* line = SourceFileLineText(file, lineno);
+  if (line == NULL || start < 0 || end < start) {
+    return;
+  }
+  size_t line_length = strlen(line);
+  while (line_length > 0 &&
+         (line[line_length - 1] == '\n' || line[line_length - 1] == '\r')) {
+    line_length--;
+  }
+  if ((size_t)start > line_length) {
+    return;
+  }
+  size_t range_end = (size_t)end;
+  if (range_end > line_length) {
+    range_end = line_length;
+  }
+  if (range_end <= (size_t)start) {
+    range_end = (size_t)start + 1;
+  }
+
+  fprintf(stderr, "    %.*s\n", (int)line_length, line);
+  fprintf(stderr, "    ");
+  for (int i = 0; i < start; i++) {
+    // Preserve tabs so the underline stays aligned in a terminal.
+    fputc(line[i] == '\t' ? '\t' : ' ', stderr);
+  }
+  fprintf(stderr, "%s", Color(ANSI_BOLD));
+  for (size_t i = (size_t)start; i < range_end; i++) {
+    fputc('^', stderr);
+  }
+  fprintf(stderr, "%s\n", Color(ANSI_RESET));
+}
+
 enum {
   kWarningGroupWall = 1 << 0,
   kWarningGroupExtra = 1 << 1,
@@ -423,10 +471,31 @@ bool VReportError(const char* filename, int lineno, const char* error,
   return true;
 }
 
+bool VReportErrorAtLocation(SourceLocation location, const char* error,
+                            va_list arg) {
+  const char* filename = NULL;
+  int lineno = 0;
+  int start = 0;
+  int end = 0;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  bool emitted = VReportError(filename, lineno, error, arg);
+  if (emitted) {
+    PrintDiagnosticSource(location);
+  }
+  return emitted;
+}
+
 void ReportError(const char* filename, int lineno, const char* error, ...) {
   va_list arg;
   va_start(arg, error);
   VReportError(filename, lineno, error, arg);
+  va_end(arg);
+}
+
+void ReportErrorAtLocation(SourceLocation location, const char* error, ...) {
+  va_list arg;
+  va_start(arg, error);
+  VReportErrorAtLocation(location, error, arg);
   va_end(arg);
 }
 
@@ -478,11 +547,33 @@ bool VReportWarning(const char* filename, int lineno, const char* warn,
   return true;
 }
 
+bool VReportWarningAtLocation(SourceLocation location, const char* warn,
+                              const char* warning, va_list arg) {
+  const char* filename = NULL;
+  int lineno = 0;
+  int start = 0;
+  int end = 0;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  bool emitted = VReportWarning(filename, lineno, warn, warning, arg);
+  if (emitted) {
+    PrintDiagnosticSource(location);
+  }
+  return emitted;
+}
+
 void ReportWarning(const char* filename, int lineno, const char* warn,
                    const char* warning, ...) {
   va_list arg;
   va_start(arg, warning);
   VReportWarning(filename, lineno, warn, warning, arg);
+  va_end(arg);
+}
+
+void ReportWarningAtLocation(SourceLocation location, const char* warn,
+                             const char* warning, ...) {
+  va_list arg;
+  va_start(arg, warning);
+  VReportWarningAtLocation(location, warn, warning, arg);
   va_end(arg);
 }
 
@@ -511,6 +602,27 @@ void ReportNote(const char* filename, int lineno, const char* note, ...) {
   va_start(arg, note);
   VReportNote(filename, lineno, note, arg);
   va_end(arg);
+}
+
+void VReportNoteAtLocation(SourceLocation location, const char* note,
+                           va_list ap) {
+  if (DiagnosticsSuppressed()) {
+    return;
+  }
+  const char* filename = NULL;
+  int lineno = 0;
+  int start = 0;
+  int end = 0;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  VReportNote(filename, lineno, note, ap);
+  PrintDiagnosticSource(location);
+}
+
+void ReportNoteAtLocation(SourceLocation location, const char* note, ...) {
+  va_list ap;
+  va_start(ap, note);
+  VReportNoteAtLocation(location, note, ap);
+  va_end(ap);
 }
 
 

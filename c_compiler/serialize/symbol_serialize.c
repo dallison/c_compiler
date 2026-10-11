@@ -178,6 +178,7 @@ enum {
   kAttr_annotation_expr = 5,
   kAttr_namespace = 7,
   kAttr_token = 8,
+  kAttr_location = 9,
 };
 
 //
@@ -233,6 +234,7 @@ void SerialWriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
               kSerialKindAST, a->annotation_expr);
     SWriteStringVal(ctx, &elem, kAttr_namespace, &a->attribute_namespace);
     SWriteStringVal(ctx, &elem, kAttr_token, &a->token);
+    WireWriteUint64(&elem, kAttr_location, (uint64_t)a->location);
     WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
     WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
     WireBufferDestruct(&elem);
@@ -294,6 +296,12 @@ void SerialReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
         case kAttr_token:
           SReadStringVal(ctx, &er, &a->token);
           break;
+        case kAttr_location: {
+          uint64_t location = 0;
+          WireReadUint64(&er, &location);
+          a->location = (SourceLocation)location;
+          break;
+        }
         default:
           WireSkip(&er, wt);
           break;

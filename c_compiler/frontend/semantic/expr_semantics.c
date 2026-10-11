@@ -1788,11 +1788,12 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
       node->symbol->is_read = true;
     }
 
-    // Warn about uses of a symbol marked __attribute__((deprecated)).
+    // Warn about uses of a symbol marked deprecated by either spelling.
     if ((node->base.flags & kASTIsDeclaration) == 0) {
       Attribute* dep = SymbolFindAttribute(node->symbol, "deprecated");
       if (dep != NULL) {
         const char* msg = AttributeArgString(dep, 0);
+        bool emitted = false;
         if (msg != NULL) {
           // The argument token retains its surrounding double quotes; trim them
           // for a cleaner message.
@@ -1807,12 +1808,22 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
             trimmed[inner] = '\0';
             msg = trimmed;
           }
-          SemanticWarning(&node->base, "deprecated-declarations",
-                          "'%s' is deprecated: %s", node->symbol->name.value,
-                          msg);
+          emitted = SemanticWarning(
+              &node->base, "deprecated-declarations",
+              "'%s' is deprecated: %s", node->symbol->name.value, msg);
         } else {
-          SemanticWarning(&node->base, "deprecated-declarations",
-                          "'%s' is deprecated", node->symbol->name.value);
+          emitted = SemanticWarning(
+              &node->base, "deprecated-declarations",
+              "'%s' is deprecated", node->symbol->name.value);
+        }
+        if (emitted) {
+          SourceLocation location =
+              dep->location != SOURCE_LOCATION_MISSING
+                  ? dep->location
+                  : node->symbol->location;
+          SemanticNoteAtLocation(location,
+                                 "'%s' was marked deprecated here",
+                                 node->symbol->name.value);
         }
       }
     }
