@@ -570,11 +570,7 @@ void GeneratorError(Generator* gen, ASTNode* node, const char* format, ...) {
 
 void VGeneratorError(Generator* gen, ASTNode* node, const char* format,
                      va_list ap) {
-  const char* filename;
-  int lineno;
-  int start, end;
-  DecodeSourceLocation(node->location, &filename, &lineno, &start, &end);
-  VReportError(filename, lineno, format, ap);
+  VReportErrorAtLocation(node->location, format, ap);
 }
 
 void GeneratorWarning(Generator* gen, ASTNode* node, const char* warn,
@@ -587,11 +583,7 @@ void GeneratorWarning(Generator* gen, ASTNode* node, const char* warn,
 
 void VGeneratorWarning(Generator* gen, ASTNode* node, const char* warn,
                        const char* format, va_list ap) {
-  const char* filename;
-  int lineno;
-  int start, end;
-  DecodeSourceLocation(node->location, &filename, &lineno, &start, &end);
-  VReportWarning(filename, lineno, warn, format, ap);
+  VReportWarningAtLocation(node->location, warn, format, ap);
 }
 
 IRNode* GeneratorEmit(Generator* gen, IRNode* inst) {
@@ -1746,20 +1738,16 @@ static void DetectUninitializedVars(Generator* gen) {
           if (IRIsVarDef(ref)) {
             continue;
           }
-          const char* filename;
-          int lineno;
-          int start, end;
-          DecodeSourceLocation(ref->location, &filename, &lineno, &start, &end);
           if (ref->value_state == kValueStateIndeterminate) {
-            ReportWarning(
-                filename, lineno, "uninitialized",
+            ReportWarningAtLocation(
+                ref->location, "uninitialized",
                 "Variable '%s' is read with an indeterminate value here in "
                 "function '%s'",
                 var->symbol->name.value,
                 gen->func->info.function.symbol->name.value);
           } else {
-            ReportWarning(
-                filename, lineno, "uninitialized",
+            ReportWarningAtLocation(
+                ref->location, "uninitialized",
                 "Variable '%s' is used uninitialized here in function '%s'",
                 var->symbol->name.value,
                 gen->func->info.function.symbol->name.value);
@@ -1787,13 +1775,8 @@ static void DetectInvalidValueReads(Generator* gen) {
           inst->var.use == NULL) {
         continue;
       }
-      const char* filename;
-      int lineno;
-      int start;
-      int end;
-      DecodeSourceLocation(inst->location, &filename, &lineno, &start, &end);
-      ReportWarning(
-          filename, lineno, "uninitialized",
+      ReportWarningAtLocation(
+          inst->location, "uninitialized",
           "Variable '%s' is read with an erroneous value here in function '%s'",
           inst->var.use->name.value,
           gen->func->info.function.symbol->name.value);

@@ -361,3 +361,27 @@ if [[ "$c23_output" != *"'_Noreturn' is deprecated in C23"* ]]; then
   sed 's/^/  /' "$WORK/c23_noreturn.out" >&2
   exit 1
 fi
+
+deprecated_src="$WORK/deprecated_attribute.c"
+cat >"$deprecated_src" <<'EOF'
+int old_function(void);
+int old_function(void) __attribute__((deprecated("use replacement")));
+int use_old_function(void) { return old_function(); }
+EOF
+set +e
+"$ROOT/$DAVECC" -target x86_64 -std=c11 \
+    -Werror=deprecated-declarations -S "$deprecated_src" \
+    -o "$WORK/deprecated_attribute.s" >"$WORK/deprecated_attribute.out" 2>&1
+deprecated_status=$?
+set -e
+deprecated_output="$(<"$WORK/deprecated_attribute.out")"
+if [[ "$deprecated_status" -eq 0 ||
+      "$deprecated_output" != *"'old_function' is deprecated: use replacement"* ||
+      "$deprecated_output" != *"'old_function' was marked deprecated here"* ||
+      "$deprecated_output" != *"int use_old_function(void) { return old_function(); }"* ||
+      "$deprecated_output" != *"^^^^^^^^^^^^"* ||
+      "$deprecated_output" != *"^^^^^^^^^^"* ]]; then
+  echo "deprecated_attribute: missing C diagnostic or declaration note" >&2
+  sed 's/^/  /' "$WORK/deprecated_attribute.out" >&2
+  exit 1
+fi

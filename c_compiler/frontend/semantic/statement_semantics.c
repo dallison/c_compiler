@@ -3927,22 +3927,18 @@ static void ReportJumpError(ASTNode* jump, ASTNode* target,
   SemanticError(jump, "%s cannot enter a scope by bypassing a variable "
                 "initialization",
                 jump_kind);
-  const char* filename;
-  int lineno;
-  int start, end;
-  DecodeSourceLocation(target->location, &filename, &lineno, &start, &end);
-  ReportNote(filename, lineno, "%s is here", target_kind);
+  ReportNoteAtLocation(target->location, "%s is here", target_kind);
 
   for (size_t i = 0; i < bypassed_decls->length; i++) {
     VariableDeclarationASTNode* decl = bypassed_decls->value.p[i];
-    DecodeSourceLocation(decl->base.location, &filename, &lineno, &start, &end);
     if (TypeIsVLA(decl->base.type)) {
-      ReportNote(filename, lineno,
-                 "Variable length array '%s' is bypassed",
-                 decl->symbol->name.value);
+      ReportNoteAtLocation(decl->base.location,
+                           "Variable length array '%s' is bypassed",
+                           decl->symbol->name.value);
     } else {
-      ReportNote(filename, lineno, "Initialization of '%s' is bypassed",
-                 decl->symbol->name.value);
+      ReportNoteAtLocation(decl->base.location,
+                           "Initialization of '%s' is bypassed",
+                           decl->symbol->name.value);
     }
   }
 }

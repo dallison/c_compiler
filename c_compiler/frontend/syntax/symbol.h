@@ -95,6 +95,8 @@ typedef struct Attribute {
   // while these preserve the source-level attribute-token.
   String attribute_namespace;                                 // @wire 7
   String token;                                               // @wire 8
+  // Location of the attribute-token, used for follow-up diagnostics.
+  SourceLocation location;                                    // @wire 9
 } Attribute;
 
 Attribute* NewAttribute(const char* name);

@@ -1947,6 +1947,9 @@ static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   lex->preprocessor = preprocessor;
   lex->preprocessor_mode = false;
   lex->assembler_mode = false;
+  lex->reading_token = false;
+  lex->token_start = 0;
+  lex->token_lineno = 0;
   lex->in_comment = false;
   lex->capture = NULL;
   lex->suppress_preprocessing = false;
@@ -2494,6 +2497,9 @@ void LexNextToken(Lex* lex) {
   // Keep track of the start of the token before we read it.
   size_t token_start = lex->pos;
   int lineno = lex->source->lineno;
+  lex->reading_token = true;
+  lex->token_start = token_start;
+  lex->token_lineno = lineno;
 
   // Assume token is bad.  It will be set to a valid token if possible.
   lex->current_token = TOK(bad);
@@ -2564,6 +2570,7 @@ record_token_location:
   // Record the token location now that we know the start and end indexes.
   lex->current_token_location =
       NewSourceLocation(lex->source, lineno, token_start, lex->pos);
+  lex->reading_token = false;
   MacroExpansionRemember(lex->current_token_location,
                          MacroExpansionAtLineOffset(token_start));
 }
@@ -2853,21 +2860,35 @@ static void ReportSourceStack(Lex* lex) {
   }
 }
 
+static SourceLocation LexDiagnosticLocation(Lex* lex) {
+  if (!lex->reading_token) {
+    return lex->current_token_location;
+  }
+  size_t end = lex->pos;
+  if (end <= lex->token_start) {
+    end = lex->token_start + 1;
+  }
+  if (end > lex->line.length) {
+    end = lex->line.length;
+  }
+  return NewSourceLocation(lex->source, lex->token_lineno,
+                           lex->token_start, end);
+}
+
 void LexError(Lex* lex, const char* error, ...) {
   va_list ap;
   va_start(ap, error);
-  bool emitted = VReportError(lex->source->filename.value,
-                              lex->source->lineno, error, ap);
+  SourceLocation location = LexDiagnosticLocation(lex);
+  bool emitted = VReportErrorAtLocation(location, error, ap);
   va_end(ap);
   if (emitted) {
-    ReportMacroExpansionNotes(lex->current_token_location);
+    ReportMacroExpansionNotes(location);
     ReportSourceStack(lex);
   }
 }
 
 void VLexError(Lex* lex, const char* error, va_list ap) {
-  if (VReportError(lex->source->filename.value, lex->source->lineno, error,
-                   ap)) {
+  if (VReportErrorAtLocation(lex->current_token_location, error, ap)) {
     ReportMacroExpansionNotes(lex->current_token_location);
     ReportSourceStack(lex);
   }
@@ -2876,19 +2897,17 @@ void VLexError(Lex* lex, const char* error, va_list ap) {
 void LexWarning(Lex* lex, const char* warn, const char* error, ...) {
   va_list ap;
   va_start(ap, error);
-  bool emitted =
-      VReportWarning(lex->source->filename.value, lex->source->lineno, warn,
-                     error, ap);
+  SourceLocation location = LexDiagnosticLocation(lex);
+  bool emitted = VReportWarningAtLocation(location, warn, error, ap);
   va_end(ap);
   if (emitted) {
-    ReportMacroExpansionNotes(lex->current_token_location);
+    ReportMacroExpansionNotes(location);
     ReportSourceStack(lex);
   }
 }
 
 void VLexWarning(Lex* lex, const char* warn, const char* error, va_list ap) {
-  if (VReportWarning(lex->source->filename.value, lex->source->lineno, warn,
-                     error, ap)) {
+  if (VReportWarningAtLocation(lex->current_token_location, warn, error, ap)) {
     ReportMacroExpansionNotes(lex->current_token_location);
     ReportSourceStack(lex);
   }

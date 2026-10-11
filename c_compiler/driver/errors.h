@@ -12,27 +12,38 @@
 #include <stdarg.h>
 #include <stdbool.h>
 
+#include "source.h"
 
 // Reports an error with varargs (printf style) arguments.
 void ReportError(const char* filename, int lineno, const char* error, ...);
+void ReportErrorAtLocation(SourceLocation location, const char* error, ...);
 
 // Reports an error with vprintf style arguments.
 // Returns true when the diagnostic was emitted.
 bool VReportError(const char* filename, int lineno, const char* error,
                   va_list arg);
+bool VReportErrorAtLocation(SourceLocation location, const char* error,
+                            va_list arg);
 
 // Reports a warning with varargs (printf style) arguments.
 void ReportWarning(const char* filename, int lineno, const char* warn,
                    const char* warning, ...);
+void ReportWarningAtLocation(SourceLocation location, const char* warn,
+                             const char* warning, ...);
 
 // Reports a warning with vprintf style arguments.
 // Returns true when the diagnostic was emitted.
 bool VReportWarning(const char* filename, int lineno, const char* warn,
                     const char* warning, va_list arg);
+bool VReportWarningAtLocation(SourceLocation location, const char* warn,
+                              const char* warning, va_list arg);
 
 void ReportNote(const char* filename, int lineno, const char* error, ...);
 void VReportNote(const char* filename, int lineno, const char* error,
                  va_list ap);
+void ReportNoteAtLocation(SourceLocation location, const char* note, ...);
+void VReportNoteAtLocation(SourceLocation location, const char* note,
+                           va_list ap);
 
 // Sets the max errors.
 void SetMaxErrors(int n);

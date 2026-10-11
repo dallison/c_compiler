@@ -51,6 +51,7 @@ Attribute* NewAttribute(const char* name) {
   attr->dependent_alignas_expr = NULL;
   attr->annotation_expr = NULL;
   attr->annotation_value = NULL;
+  attr->location = SOURCE_LOCATION_MISSING;
   return attr;
 }
 
@@ -106,6 +107,7 @@ Attribute* AttributeClone(Attribute* attr) {
   copy->annotation_expr =
       ASTNodeClone(attr->annotation_expr, IdentityCloneNode, NULL, NULL);
   copy->annotation_value = attr->annotation_value;
+  copy->location = attr->location;
   return copy;
 }
 

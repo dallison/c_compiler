@@ -124,42 +124,32 @@ void VSemanticError(ASTNode* node, const char* format, va_list ap) {
   if (abort_on_error) {
     longjmp(error_abort_state, 1);
   }
-  SourceLocation location = node != NULL ? node->location : 0;
-  const char* filename;
-  int lineno;
-  int start, end;
-  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
-  if (VReportError(filename, lineno, format, ap)) {
+  SourceLocation location =
+      node != NULL ? node->location : SOURCE_LOCATION_MISSING;
+  if (VReportErrorAtLocation(location, format, ap)) {
     ReportMacroExpansionNotes(location);
   }
 }
 
-void SemanticWarning(ASTNode* node, const char* warn, const char* format, ...) {
+bool SemanticWarning(ASTNode* node, const char* warn, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
-  VSemanticWarning(node, warn, format, ap);
+  bool emitted = VSemanticWarning(node, warn, format, ap);
   va_end(ap);
+  return emitted;
 }
 
 void SemanticNote(ASTNode* node, const char* format, ...) {
-  const char* filename;
-  int lineno;
-  int start, end;
-  DecodeSourceLocation(node->location, &filename, &lineno, &start, &end);
   va_list ap;
   va_start(ap, format);
-  VReportNote(filename, lineno, format, ap);
+  VReportNoteAtLocation(node->location, format, ap);
   va_end(ap);
 }
 
 void SemanticNoteAtLocation(SourceLocation location, const char* format, ...) {
-  const char* filename;
-  int lineno;
-  int start, end;
-  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
   va_list ap;
   va_start(ap, format);
-  VReportNote(filename, lineno, format, ap);
+  VReportNoteAtLocation(location, format, ap);
   va_end(ap);
 }
 
@@ -188,11 +178,7 @@ void SemanticSymbolWarning(Symbol* symbol, const char* warn, const char* format,
     va_end(ap);
     return;
   }
-  const char* filename;
-  int lineno;
-  int start, end;
-  DecodeSourceLocation(symbol->location, &filename, &lineno, &start, &end);
-  VReportWarning(filename, lineno, warn, format, ap);
+  VReportWarningAtLocation(symbol->location, warn, format, ap);
   va_end(ap);
 }
 
@@ -255,18 +241,17 @@ bool SemanticNodeIsCompilerGenerated(ASTNode* node) {
   return found;
 }
 
-void VSemanticWarning(ASTNode* node, const char* warn, const char* format,
+bool VSemanticWarning(ASTNode* node, const char* warn, const char* format,
                       va_list ap) {
   if (SemanticNodeIsCompilerGenerated(node)) {
-    return;
+    return false;
   }
-  const char* filename;
-  int lineno;
-  int start, end;
-  DecodeSourceLocation(node->location, &filename, &lineno, &start, &end);
-  if (VReportWarning(filename, lineno, warn, format, ap)) {
+  bool emitted =
+      VReportWarningAtLocation(node->location, warn, format, ap);
+  if (emitted) {
     ReportMacroExpansionNotes(node->location);
   }
+  return emitted;
 }
 
 // True for the declared type `auto&&`, which is a forwarding reference rather

@@ -15,9 +15,9 @@
 void SemanticError(ASTNode* node, const char* format, ...);
 void VSemanticError(ASTNode* node, const char* format, va_list ap);
 
-void SemanticWarning(ASTNode* node, const char* warn, const char* format, ...);
+bool SemanticWarning(ASTNode* node, const char* warn, const char* format, ...);
 void SemanticSymbolWarning(Symbol* symbol, const char* warn, const char* format, ...);
-void VSemanticWarning(ASTNode* node, const char* warn, const char* format,
+bool VSemanticWarning(ASTNode* node, const char* warn, const char* format,
                       va_list ap);
 
 // Emits a "note:" diagnostic.  Notes carry no severity of their own and are used

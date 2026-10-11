@@ -948,15 +948,12 @@ TargetInstruction* X86I386LowerIncDec(X86Generator* rv, Generator* gen,
 }
 
 static void I386ReportUnsupported(Generator* gen, const char* msg) {
-  const char* file = "<i386>";
-  int line = 0;
   if (gen->func != NULL && gen->func->info.function.symbol != NULL) {
     Symbol* sym = gen->func->info.function.symbol;
-    int start = 0;
-    int end = 0;
-    DecodeSourceLocation(sym->location, &file, &line, &start, &end);
+    ReportErrorAtLocation(sym->location, "%s", msg);
+  } else {
+    ReportError("<i386>", 0, "%s", msg);
   }
-  ReportError(file, line, "%s", msg);
 }
 
 bool X86I386ValidateFunction(X86Generator* rv, Generator* gen) {

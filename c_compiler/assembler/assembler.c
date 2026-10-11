@@ -620,10 +620,7 @@ void AssemblerError(Assembler* assembler, const char* format, ...) {
 void AssemblerErrorAtLocation(Assembler* assembler, SourceLocation location, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
-  const char* filename;
-  int lineno, s, e;
-  DecodeSourceLocation(location, &filename, &lineno, &s, &e);
-  VReportError(filename, lineno, format, ap);
+  VReportErrorAtLocation(location, format, ap);
   va_end(ap);
   assembler->num_errors++;
 }

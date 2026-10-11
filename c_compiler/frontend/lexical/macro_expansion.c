@@ -178,42 +178,6 @@ static bool LocationIsPrintable(SourceLocation location) {
          location != SOURCE_LOCATION_COMMAND_LINE;
 }
 
-static void PrintCaretSnippet(SourceLocation location) {
-  const char* filename = NULL;
-  int lineno = 0;
-  int start = 0;
-  int end = 0;
-  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
-  if (filename == NULL || lineno <= 0) {
-    return;
-  }
-  int fileno = -1;
-  int decoded_line = 0;
-  int colno = 0;
-  SourceLocationNumbers(location, &fileno, &decoded_line, &colno);
-  File* file = fileno >= 0 ? SourceFileAt((size_t)fileno) : NULL;
-  const char* text = file != NULL ? SourceFileLineText(file, lineno) : NULL;
-  if (text == NULL) {
-    return;
-  }
-  fprintf(stderr, "%s\n", text);
-  if (start < 0) {
-    start = 0;
-  }
-  int caret_end = end;
-  if (caret_end <= start) {
-    caret_end = start + 1;
-  }
-  for (int i = 0; i < start; i++) {
-    fputc(text[i] == '\t' ? '\t' : ' ', stderr);
-  }
-  fputc('^', stderr);
-  for (int i = start + 1; i < caret_end && text[i] != '\0'; i++) {
-    fputc('~', stderr);
-  }
-  fputc('\n', stderr);
-}
-
 static void EmitExpansionChain(MacroExpansion* expansion,
                                MacroExpansion** seen, size_t* seen_count) {
   MacroExpansion* chain[32];
@@ -242,13 +206,8 @@ static void EmitExpansionChain(MacroExpansion* expansion,
     if (*seen_count < 32) {
       seen[(*seen_count)++] = step;
     }
-    const char* filename = NULL;
-    int lineno = 0;
-    int start = 0;
-    int end = 0;
-    DecodeSourceLocation(step->definition, &filename, &lineno, &start, &end);
-    ReportNote(filename, lineno, "expanded from macro '%s'", step->name);
-    PrintCaretSnippet(step->definition);
+    ReportNoteAtLocation(step->definition, "expanded from macro '%s'",
+                         step->name);
   }
 }
 

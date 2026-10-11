@@ -1889,6 +1889,7 @@ static ASTNode* BuildDependentTemplateScopeValueName(
 static ASTNode* ParseIdentifier(Syntax* syntax,
                                             TokenClass followers) {
   Lex* lex = syntax->lex;
+  SourceLocation identifier_location = lex->current_token_location;
 
   FullyQualifiedIdentifier name;
   FullyQualifiedIdentifierInit(&name);
@@ -2431,7 +2432,7 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     }
   }
   FullyQualifiedIdentifierDestruct(&name);
-  ASTNode* node = NewIdentifierASTNode(symbol, lex->current_token_location);
+  ASTNode* node = NewIdentifierASTNode(symbol, identifier_location);
   if (symbol->flags.name_independent_lookup_ambiguous) {
     node->flags |= kASTNameIndependentLookupAmbiguous;
   }
