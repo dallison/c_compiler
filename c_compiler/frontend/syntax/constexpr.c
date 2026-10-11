@@ -6319,13 +6319,20 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     static int constexpr_brace_ctor_depth = 0;
     if (constexpr_brace_ctor_depth < 8 && braced->initializers != NULL &&
         braced->initializers->length > 0) {
+      // Hold the depth across evaluation.  Lowering builds a constructor
+      // call whose constexpr execution can see another brace of the same
+      // shape; dropping the depth first re-lowers that brace forever.
       constexpr_brace_ctor_depth++;
       ASTNode* constructed =
           LowerCXXBracedClassInitToConstructor(initializer, type);
+      bool lowered = false;
+      if (constructed != NULL) {
+        lowered = EvaluateConstexprObjectExpressionInitializer(
+            ctx, type, constructed, result);
+      }
       constexpr_brace_ctor_depth--;
       if (constructed != NULL) {
-        return EvaluateConstexprObjectExpressionInitializer(
-            ctx, type, constructed, result);
+        return lowered;
       }
     }
   }

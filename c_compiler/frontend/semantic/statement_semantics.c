@@ -2409,7 +2409,11 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
 
 static bool StatementIsLabel(ASTNode* node, void* data) {
   (void)data;
-  return node != NULL && node->op == AST_OP(label);
+  // Case and default labels are reached by the switch, the same way a goto
+  // reaches a named label.  Stopping analysis at an earlier return leaves
+  // those statements untyped and code generation cannot load them.
+  return node != NULL &&
+         (node->op == AST_OP(label) || node->op == AST_OP(case));
 }
 
 static bool StatementUnconditionallyReturns(ASTNode* stmt) {
@@ -2443,9 +2447,9 @@ static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
     ASTNode* statement = node->statements->value.p[i];
     AnalyzeStatement(statement);
     if (StatementUnconditionallyReturns(statement)) {
-      // A label after this return is reached by goto.  Keep analyzing through
-      // it; otherwise the labeled statement is untyped and code generation
-      // faults.
+      // A goto label, case, or default after this return is still reached.
+      // Keep analyzing through it; otherwise the labeled statement is untyped
+      // and code generation faults.
       bool label_later = false;
       for (size_t j = i + 1; j < node->statements->length; j++) {
         if (ASTNodeAny(node->statements->value.p[j], StatementIsLabel, NULL)) {

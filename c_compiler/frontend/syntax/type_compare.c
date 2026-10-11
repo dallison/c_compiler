@@ -169,7 +169,22 @@ static bool TypeRecordNodeContainsTemplateParameter(TypeRecord* type) {
 /* True if `type` still mentions an unresolved template parameter anywhere: as a
  * bare parameter, an array bound, a template argument, or a function parameter
  * type. Cache the answer on every queried suffix so shared declarator tails are
- * only examined once. */
+ * only examined once.
+ * A specialization can name itself through a template argument (a member type
+ * that is the class, or a signature that mentions the class). The summary stays
+ * unknown until this walk returns, so that edge has to be cut explicitly. */
+static Vector type_parameter_visit_stack;
+static bool type_parameter_visit_ready = false;
+
+static bool TypeParameterVisitContains(TypeRecord* type) {
+  for (size_t i = 0; i < type_parameter_visit_stack.length; i++) {
+    if (type_parameter_visit_stack.value.p[i] == type) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool TypeContainsTemplateParameterImpl(TypeRecord* type,
                                               bool cache_result) {
   if (type == NULL) {
@@ -185,8 +200,17 @@ static bool TypeContainsTemplateParameterImpl(TypeRecord* type,
     return type->template_parameter_summary ==
            kTypeTemplateParameterSummaryPresent;
   }
+  if (!type_parameter_visit_ready) {
+    VectorInit(&type_parameter_visit_stack);
+    type_parameter_visit_ready = true;
+  }
+  if (TypeParameterVisitContains(type)) {
+    return false;
+  }
+  VectorPush(&type_parameter_visit_stack, type);
   bool contains = TypeRecordNodeContainsTemplateParameter(type) ||
                   TypeContainsTemplateParameterImpl(type->next, cache_result);
+  VectorPop(&type_parameter_visit_stack);
   if (cache_result) {
     type->template_parameter_summary =
         contains ? kTypeTemplateParameterSummaryPresent
