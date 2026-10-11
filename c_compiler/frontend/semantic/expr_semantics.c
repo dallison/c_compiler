@@ -1203,12 +1203,14 @@ static ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
     return NULL;
   }
   ASTNode* moved = ASTNodeMove(element);
-  if (moved->op == AST_OP(member_ptr)) {
-    moved = AnalyzeExpression(moved);
-  } else {
-    moved = AnalyzeExpression(moved);
-  }
-  if (call->base.type != NULL) {
+  moved = AnalyzeExpression(moved);
+  // The callee may still be the primary `get` overload selected while the
+  // tuple was an uninstantiated CTAD placeholder (`T get(integer_sequence)`).
+  // That return type is the template parameter, not the element.  Keep the
+  // element's type in that case; a concrete get<> return type still wins.
+  if (call->base.type != NULL &&
+      !TypeContainsTemplateParameter(call->base.type) &&
+      !TypeIsUnknown(call->base.type)) {
     ASTNodeSetType(moved, TypeRecordCopy(call->base.type));
   }
   ASTNodeReplaceChild(call->base.parent, call->base.child_id, moved, true);
@@ -1581,17 +1583,17 @@ ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr) {
   return NULL;
 }
 
-static bool CXXTryReplaceWithVariableTemplateValue(
+static ASTNode* CXXTryReplaceWithVariableTemplateValue(
     ASTNode* use_site, Symbol* var_sym, Vector* template_args,
     SourceLocation location) {
   ASTNode* materialized =
       CXXInstantiateVariableTemplateValue(var_sym, template_args, location);
   if (materialized == NULL || use_site == NULL || use_site->parent == NULL) {
-    return false;
+    return NULL;
   }
   ASTNodeReplaceChild(use_site->parent, use_site->child_id, materialized, true);
   materialized->flags |= kASTAnalyzed;
-  return true;
+  return materialized;
 }
 
 static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
@@ -14249,7 +14251,7 @@ static ASTNode* TryAnalyzeOverloadedArrowOperator(ASTNode* receiver,
   return AnalyzeExpression(call);
 }
 
-static void AnalyzeMemberReference(BinaryASTNode* node);
+static ASTNode* AnalyzeMemberReference(BinaryASTNode* node);
 
 static StructMember* MemberPointerMemberFromExpression(ASTNode* node) {
   if (node == NULL) {
@@ -14399,7 +14401,10 @@ static ASTNode* AnalyzeMemberPointerReference(BinaryASTNode* node) {
     node->right = NewStructMemberASTNode(known_member, node->base.location);
     ((StructMemberASTNode*)node->right)->byte_offset = known_member->byte_offset;
     ASTNodeDelete(old_right);
-    AnalyzeMemberReference(node);
+    ASTNode* analyzed = AnalyzeMemberReference(node);
+    if (analyzed != (ASTNode*)node) {
+      return analyzed;
+    }
     node->left = old_left;
     return (ASTNode*)node;
   }
@@ -14545,7 +14550,7 @@ static ASTNode* FoldStaticDataMemberReference(BinaryASTNode* node) {
   return const_node;
 }
 
-static void AnalyzeMemberReference(BinaryASTNode* node) {
+static ASTNode* AnalyzeMemberReference(BinaryASTNode* node) {
   if (node->base.type != NULL) {
     // A cloned dependent expression can retain its resolved member and type
     // while its receiver changes from an lvalue to an xvalue. Recompute the
@@ -14562,7 +14567,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
                 : DataMemberAccessValueCategory(node, member);
       }
     }
-    return;
+    return (ASTNode*)node;
   }
   Struct* struct_info = NULL;
 
@@ -14624,7 +14629,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
                     member->symbol->name.value);
       ASTNodeSetType((ASTNode*)node,
                      NewTypeRecordWithSize(kTypeInt, kQualPlain));
-      return;
+      return (ASTNode*)node;
     }
     if (qualified_base_lookup) {
       // `expr.StorageT<I>::get` stores the alias template-id as owner_type.
@@ -14638,7 +14643,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
         TypeRecord* placeholder =
             NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
         ASTNodeSetType((ASTNode*)node, placeholder);
-        return;
+        return (ASTNode*)node;
       }
       Struct* qualified_owner =
           member_node->owner_type != NULL &&
@@ -14697,7 +14702,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
             !MemberReferenceIsInitializerTarget(node)) {
           ASTNodeSetType((ASTNode*)node, member_type->next);
           node->base.value_category = kValueCategoryLvalue;
-          return;
+          return (ASTNode*)node;
         }
         if (!member->is_static && !member->is_member_function &&
             !member->is_mutable && MemberReceiverIsConst(node)) {
@@ -14705,18 +14710,20 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
           member_type->qualifiers |= kQualConst;
         }
         if (member->is_static && member->symbol->variable_template != NULL &&
-            member_node->template_arguments != NULL &&
-            CXXTryReplaceWithVariableTemplateValue(
-                (ASTNode*)node, member->symbol,
-                member_node->template_arguments, node->base.location)) {
-          return;
+            member_node->template_arguments != NULL) {
+          ASTNode* replaced = CXXTryReplaceWithVariableTemplateValue(
+              (ASTNode*)node, member->symbol, member_node->template_arguments,
+              node->base.location);
+          if (replaced != NULL) {
+            return replaced;
+          }
         }
         ASTNodeSetType((ASTNode*)node, member_type);
         if (!member->is_member_function) {
           node->base.value_category =
               DataMemberAccessValueCategory(node, member);
         }
-        return;
+        return (ASTNode*)node;
       }
     }
   }
@@ -14745,7 +14752,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
           !MemberReferenceIsInitializerTarget(node)) {
         ASTNodeSetType((ASTNode*)node, member_type->next);
         node->base.value_category = kValueCategoryLvalue;
-        return;
+        return (ASTNode*)node;
       }
       if (!member->is_static && !member->is_member_function &&
           !member->is_mutable && MemberReceiverIsConst(node)) {
@@ -14753,18 +14760,20 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
         member_type->qualifiers |= kQualConst;
       }
       if (member->is_static && member->symbol->variable_template != NULL &&
-          member_node->template_arguments != NULL &&
-          CXXTryReplaceWithVariableTemplateValue(
-              (ASTNode*)node, member->symbol, member_node->template_arguments,
-              node->base.location)) {
-        return;
+          member_node->template_arguments != NULL) {
+        ASTNode* replaced = CXXTryReplaceWithVariableTemplateValue(
+            (ASTNode*)node, member->symbol, member_node->template_arguments,
+            node->base.location);
+        if (replaced != NULL) {
+          return replaced;
+        }
       }
       ASTNodeSetType((ASTNode*)node, member_type);
       if (!member->is_member_function) {
         node->base.value_category =
             DataMemberAccessValueCategory(node, member);
       }
-      return;
+      return (ASTNode*)node;
     }
   }
   TypeRecord* receiver_type = node->left != NULL ? node->left->type : NULL;
@@ -14776,14 +14785,14 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
     TypeRecord* placeholder = TypeRecordCopy(receiver_type);
     placeholder->type |= kTypeUnknown;
     ASTNodeSetType((ASTNode*)node, placeholder);
-    return;
+    return (ASTNode*)node;
   }
   if (CompilerIsCXX() && receiver_type != NULL &&
       (TypeIsUnknown(receiver_type) || TypeContainsAuto(receiver_type))) {
     TypeRecord* placeholder = TypeRecordCopy(receiver_type);
     placeholder->type |= kTypeUnknown;
     ASTNodeSetType((ASTNode*)node, placeholder);
-    return;
+    return (ASTNode*)node;
   }
   if (CompilerIsCXX() && node->base.op == AST_OP(arrow) &&
       TypeIsPointer(receiver_type) &&
@@ -14798,7 +14807,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
       TypeRecord* placeholder =
           NewTypeRecordWithSize(kTypeUnknown, kQualPlain);
       ASTNodeSetType((ASTNode*)node, placeholder);
-      return;
+      return (ASTNode*)node;
     }
   }
   if (node->base.op == AST_OP(arrow)) {
@@ -14826,7 +14835,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
   if (struct_info == NULL) {
     // Error case, assign type as integer.
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
-    return;
+    return (ASTNode*)node;
   }
 
   if (TypeIsStructOrUnion(receiver_type)) {
@@ -14946,7 +14955,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
                     member_name->value, tag);
     }
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
-    return;
+    return (ASTNode*)node;
   }
   if (member->symbol != NULL &&
       (node->right->flags & kASTNameIndependentLookupAmbiguous) != 0) {
@@ -14955,7 +14964,7 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
                   member->symbol->name.value);
     ASTNodeSetType((ASTNode*)node,
                    NewTypeRecordWithSize(kTypeInt, kQualPlain));
-    return;
+    return (ASTNode*)node;
   }
   ApplyVirtualBaseAdjustmentToMemberReference(node, struct_info, member_owner,
                                               &member_offset);
@@ -15010,17 +15019,27 @@ static void AnalyzeMemberReference(BinaryASTNode* node) {
       !MemberReferenceIsInitializerTarget(node)) {
     ASTNodeSetType((ASTNode*)node, member_type->next);
     node->base.value_category = kValueCategoryLvalue;
-    return;
+    return (ASTNode*)node;
   }
   if (!member->is_static && !member->is_member_function && !member->is_mutable &&
       MemberReceiverIsConst(node)) {
     member_type = TypeRecordCopy(member_type);
     member_type->qualifiers |= kQualConst;
   }
+  if (member->is_static && member->symbol->variable_template != NULL &&
+      member_node->template_arguments != NULL) {
+    ASTNode* replaced = CXXTryReplaceWithVariableTemplateValue(
+        (ASTNode*)node, member->symbol, member_node->template_arguments,
+        node->base.location);
+    if (replaced != NULL) {
+      return replaced;
+    }
+  }
   ASTNodeSetType((ASTNode*)node, member_type);
   if (!member->is_member_function) {
     node->base.value_category = DataMemberAccessValueCategory(node, member);
   }
+  return (ASTNode*)node;
 }
 
 // Address-of operator.  If the operand has an address the type is
@@ -17040,8 +17059,10 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
     case AST_OP(dot):
     case AST_OP(arrow):
       if (!SemanticLowerMemberSplice(binary_node)) {
-        AnalyzeMemberReference(binary_node);
-        node = FoldStaticDataMemberReference(binary_node);
+        ASTNode* analyzed = AnalyzeMemberReference(binary_node);
+        node = analyzed != (ASTNode*)binary_node
+                   ? analyzed
+                   : FoldStaticDataMemberReference(binary_node);
       }
       break;
 

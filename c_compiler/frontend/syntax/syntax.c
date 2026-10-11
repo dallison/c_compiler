@@ -10947,6 +10947,11 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     ValidateC23ConstexprObject(syntax, sym, initializer);
     if (TypeContainsAuto(sym->type) && initializer == NULL) {
       SyntaxError(syntax, "auto variable requires an initializer");
+    } else if (TypeContainsAuto(sym->type) &&
+               syntax->parsing_template_declaration) {
+      // A variable template's type is deduced for each instantiation.
+      // Analyzing `auto` here resolves dependent calls such as
+      // `std::get<T>(std::tuple{...})` against the primary template.
     } else if (TypeContainsAuto(sym->type)) {
       initializer = SemanticAnalyzeDeducedInitializer(sym, initializer);
       SemanticDeduceAutoType(sym, initializer, (ASTNode*)initializer);

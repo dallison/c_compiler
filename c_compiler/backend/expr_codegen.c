@@ -6577,6 +6577,9 @@ static IRNode* GenerateBuiltinStartLifetime(Generator* gen,
     if (node->children->length >= 1) {
       GenerateExpression(gen, node->children->value.p[0]);
     }
+    if (node->base.type == NULL || TypeIsVoid(node->base.type)) {
+      return IRSetType(GeneratorEmit(gen, NewIR(IR_OP(nop))), node->base.type);
+    }
     return IRSetType(
         GeneratorGetIntConstant(gen, node->base.type, 0), node->base.type);
   }
