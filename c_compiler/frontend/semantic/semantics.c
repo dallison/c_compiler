@@ -124,12 +124,13 @@ void VSemanticError(ASTNode* node, const char* format, va_list ap) {
   if (abort_on_error) {
     longjmp(error_abort_state, 1);
   }
+  SourceLocation location = node != NULL ? node->location : 0;
   const char* filename;
   int lineno;
   int start, end;
-  DecodeSourceLocation(node->location, &filename, &lineno, &start, &end);
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
   if (VReportError(filename, lineno, format, ap)) {
-    ReportMacroExpansionNotes(node->location);
+    ReportMacroExpansionNotes(location);
   }
 }
 

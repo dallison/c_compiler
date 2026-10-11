@@ -2274,6 +2274,20 @@ static ASTNode* ParseIdentifier(Syntax* syntax,
     }
   }
   Vector* template_arguments = NULL;
+  // Unqualified lookup inside a class body finds a scope-injected clone of a
+  // static variable template.  The clone is marked as a template but does not
+  // own the variable-template definition, so `<T>` would be parsed and dropped.
+  // Use the class member, which holds the initializer.
+  if (symbol != NULL && symbol->variable_template == NULL &&
+      symbol->flags.is_template &&
+      symbol->static_data_member_class != NULL) {
+    StructMember* member =
+        FindStructMember(symbol->static_data_member_class, &symbol->name);
+    if (member != NULL && member->symbol != NULL &&
+        member->symbol->variable_template != NULL) {
+      symbol = member->symbol;
+    }
+  }
   if (symbol != NULL && name.template_arguments.length > 0 &&
       (TypeIsFunction(symbol->type) ||
        IdentifierNamesFunctionTemplateOverload(symbol) ||

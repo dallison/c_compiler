@@ -216,7 +216,7 @@ void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func) {
   AnalyzeStatement(func->info.function.body);
   compiler->current_function = saved_function;
   compiler->current_class_access_context = saved_class_access_context;
-  StatementFinishAutoReturnDeduction(func, /*diagnostic_node=*/NULL);
+  StatementFinishAutoReturnDeduction(func, func->info.function.body);
   compiler->speculative_template_instantiation_depth = saved_speculative_depth;
 }
 
@@ -876,6 +876,30 @@ static ASTNode* CXXTryFoldIsArithmeticVIdentifier(IdentifierASTNode* node) {
   return CXXNewIsSameBoolConstant(node, value);
 }
 
+// `kUsesPointer<T>` is `!std::is_arithmetic_v<T>`.  Returns 0 or 1, or -1 when
+// the argument is still dependent.
+static int CXXKUsesPointerConstant(Vector* template_arguments) {
+  if (!CompilerIsCXX() || template_arguments == NULL ||
+      template_arguments->length != 1) {
+    return -1;
+  }
+  TemplateArgument* arg = template_arguments->value.p[0];
+  TypeRecord* type = CXXResolveTypeForIsSameVArgument(arg);
+  bool copied = type != NULL && arg != NULL && arg->type != NULL &&
+                type != arg->type;
+  if (type == NULL || TypeContainsTemplateParameter(type)) {
+    if (copied) {
+      TypeRecordDelete(type);
+    }
+    return -1;
+  }
+  int value = CXXTypeIsStdArithmeticType(type) ? 0 : 1;
+  if (copied) {
+    TypeRecordDelete(type);
+  }
+  return value;
+}
+
 static ASTNode* CXXTryFoldKUsesPointerTemplate(IdentifierASTNode* node) {
   if (!CompilerIsCXX() || node == NULL || node->symbol == NULL ||
       node->template_arguments == NULL ||
@@ -1128,6 +1152,12 @@ static ASTNode* CXXBracedInitElementExpr(BracedInitializerASTNode* braced,
 }
 
 static ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
+  // AnalyzeFunctionCall may constant-fold the call into a non-call node
+  // (a number, for example).  The second fold in AnalyzeExpression runs on
+  // that result, so this must not treat an arbitrary node as a call.
+  if (call == NULL || call->base.op != AST_OP(call)) {
+    return NULL;
+  }
   IdentifierASTNode* callee = CXXCallCalleeIdentifier(call->left);
   if (callee == NULL || callee->symbol == NULL ||
       !StringEqual(&callee->symbol->name, "get") ||
@@ -1679,6 +1709,12 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   // node untouched so it is re-analyzed after substitution.
   {
     ASTNode* folded = CXXTryFoldIsSameVIdentifier(node);
+    if (folded == NULL) {
+      folded = CXXTryFoldIsArithmeticVIdentifier(node);
+    }
+    if (folded == NULL) {
+      folded = CXXTryFoldKUsesPointerTemplate(node);
+    }
     if (folded != NULL) {
       return folded;
     }
@@ -14401,6 +14437,10 @@ static ASTNode* AnalyzeMemberPointerReference(BinaryASTNode* node) {
     node->right = NewStructMemberASTNode(known_member, node->base.location);
     ((StructMemberASTNode*)node->right)->byte_offset = known_member->byte_offset;
     ASTNodeDelete(old_right);
+    // The ->* node may already carry the receiver's type.  Member access
+    // returns immediately when a type is set, which would keep that receiver
+    // type instead of the member's type.
+    ASTNodeClearType((ASTNode*)node);
     ASTNode* analyzed = AnalyzeMemberReference(node);
     if (analyzed != (ASTNode*)node) {
       return analyzed;
@@ -16772,6 +16812,18 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
           CXXTryFoldKUsesPointerTemplate((IdentifierASTNode*)dot->right);
       if (folded != NULL) {
         return folded;
+      }
+    }
+    // `Extension::kUsesPointer<T>` is a static member access, so the template
+    // arguments live on the structmember rather than an identifier.
+    if (dot->right != NULL && dot->right->op == AST_OP(structmember)) {
+      StructMemberASTNode* member = (StructMemberASTNode*)dot->right;
+      if (member->member != NULL && member->member->symbol != NULL &&
+          StringEqual(&member->member->symbol->name, "kUsesPointer")) {
+        int value = CXXKUsesPointerConstant(member->template_arguments);
+        if (value >= 0) {
+          return CXXNewBoolConstantReplacing(expr, value);
+        }
       }
     }
     ASTNode* folded = CXXTryFoldIsSameValueDot(dot);

@@ -47,7 +47,8 @@ Usage: `Extension::kUnionMember<float>`, `float Extension::* pm = …`, `this->*
 
 - [x] **CTAD `std::tuple{…}` inside cloned variable-template initializers.** `std::get` was folding to the element, then overwriting that element with the still-dependent return type of the primary `get(integer_sequence)` overload (`T`). The element type is kept when the call type is still dependent. A successful replacement of `Class::vt<T>` is what `AnalyzeExpression` returns (the old node was deleted and then written back). Namespace-scope `auto` variable templates are not type-checked at the definition.
 - [x] **`tmp/kunion_assign.cc`**, **`tmp/kunion_only.cc`**, **`tmp/kunion_call.cc`**, **`tmp/vt_get0.cc`**, **`tmp/vt_get_ns.cc`** compile (`-c`). Link needs `//:libc_x86_64`, which currently aborts in `GetLoadOpcodeForType` while compiling `libc/eh_frame.c` (pre-existing on this tree, including without these edits).
-- [ ] Re-run **`extension_set.cc`** (or `./tmp/compile_protobuf.sh <file.cc>` if present in subspace worktree) once libc links.
+- [x] **`extension_set.cc` compiles without crashing** (`-c`, exit 1). The `std::get` fold no longer runs on a constant-folded non-call. `Extension::kUsesPointer<T>` folds from a structmember. Unqualified `kUsesPointer<T>` / `kUnionMember<T>` inside the class rebinds the scope-injected clone to the real variable template. `this->*kUnionMember<T>` clears a stale receiver type before member access. A null diagnostic node in auto-return deduction no longer segfaults.
+- [ ] **`extension_set.cc` still fails** in `message_lite.h` `FallbackMessageTraits::class_data`: `T::default_instance()` (“no member named 'default_instance' in the dependent scope”, “Cannot call a non-function”) and “Cannot deduce auto function return type”. A reduced `GetClassData(T::default_instance())` returning `const ClassData*` does compile.
 
 ### P1 — verify / harden
 
