@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include "member_pointer.h"
 #include "compiler.h"
 #include "constexpr_pcode.h"
 #include "errors.h"
@@ -4513,6 +4514,30 @@ bool EvaluateInt128Constant(ASTNode* node, int64_t* lo, int64_t* hi) {
   return true;
 }
 
+static bool EvaluateConstexprMemberPointer(ASTNode* node, TypeRecord* type,
+                                           ConstexprValue* result) {
+  MemberPointerValue value;
+  ASTNode* expr = node;
+  while (expr != NULL &&
+         (expr->op == AST_OP(cast) || expr->op == AST_OP(expr_init))) {
+    expr = expr->op == AST_OP(cast) ? ((CastASTNode*)expr)->expr
+                                    : ((ExpressionInitializerASTNode*)expr)->expr;
+  }
+  bool is_null = expr != NULL && expr->op == AST_OP(number) &&
+                 ((ConstantASTNode*)expr)->value.ivalue == 0;
+  bool got = is_null ? MemberPointerEncodeNull(type, &value)
+                     : MemberPointerTryEvaluateConstant(node, type, &value);
+  if (!got) {
+    return false;
+  }
+  *result = (ConstexprValue){
+      .state = kValueStateValid,
+      .ivalue = value.ptr,
+      .ihi = value.adj,
+  };
+  return true;
+}
+
 static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
                                    TypeRecord* type,
                                    ConstexprValue* result) {
@@ -4520,6 +4545,9 @@ static bool EvaluateConstexprValue(ConstEvalContext* ctx, ASTNode* node,
   // some fields must not leave stale address components behind.
   if (result != NULL) {
     *result = (ConstexprValue){.state = kValueStateValid};
+  }
+  if (node != NULL && type != NULL && TypeIsMemberPointer(type)) {
+    return EvaluateConstexprMemberPointer(node, type, result);
   }
   if (node != NULL && node->op == AST_OP(identifier) && type != NULL &&
       TypeIsUninitializedFriendly(type)) {
@@ -6277,6 +6305,29 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   if (EvaluateConstexprObjectExpressionInitializer(ctx, type, initializer,
                                                   result)) {
     return true;
+  }
+  // List-initialization of a non-aggregate selects a constructor
+  // ([dcl.init.list]).  The elements are constructor arguments, not member
+  // initializers.  `ClassData{fn, offset, ...}` otherwise stores a function
+  // pointer in an integer member whenever the argument order differs from
+  // the member order.
+  if (CompilerIsCXX() && initializer->op == AST_OP(braced_init) &&
+      TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
+      !type->info.struct_info->is_union &&
+      !type->info.struct_info->is_aggregate) {
+    BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+    static int constexpr_brace_ctor_depth = 0;
+    if (constexpr_brace_ctor_depth < 8 && braced->initializers != NULL &&
+        braced->initializers->length > 0) {
+      constexpr_brace_ctor_depth++;
+      ASTNode* constructed =
+          LowerCXXBracedClassInitToConstructor(initializer, type);
+      constexpr_brace_ctor_depth--;
+      if (constructed != NULL) {
+        return EvaluateConstexprObjectExpressionInitializer(
+            ctx, type, constructed, result);
+      }
+    }
   }
   // Copy-list-initialization of a non-aggregate class from a single
   // expression (`ConvTag arr[] = { kFSign }`) must invoke a converting
@@ -9787,8 +9838,8 @@ static Symbol* ConstexprIndirectCallTarget(ConstEvalContext* ctx,
 static bool ConstexprParameterTypeSupported(TypeRecord* type) {
   return TypeIsIntegral(type) || TypeIsFloatingPoint(type) ||
          TypeIsFixedArray(type) || TypeIsStructOrUnion(type) ||
-         TypeIsPointer(type) || TypeIsReference(type) ||
-         TypeIsReflection(type);
+         TypeIsPointer(type) || TypeIsMemberPointer(type) ||
+         TypeIsReference(type) || TypeIsReflection(type);
 }
 
 static bool ConstexprClassHasObjectState(TypeRecord* type) {

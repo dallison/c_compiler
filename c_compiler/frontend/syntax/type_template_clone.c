@@ -8225,8 +8225,15 @@ static bool StatementUnconditionallyReturns(ASTNode* stmt) {
   return false;
 }
 
+static bool IsLabelStatement(ASTNode* node, void* data) {
+  (void)data;
+  return node != NULL && node->op == AST_OP(label);
+}
+
 // After `if constexpr` is folded to a branch that returns, later statements in
 // the same compound are not instantiated ([temp.inst] discarded statements).
+// A label after that return is still reachable by `goto` (`parse_loop:` in
+// protobuf's tail-call parsers), so keep the label and everything after it.
 static ASTNode* PruneStatementsAfterUnconditionalReturn(
     ASTNode* node, void* data, ASTNodeTransformAction* action) {
   (void)data;
@@ -8242,7 +8249,14 @@ static ASTNode* PruneStatementsAfterUnconditionalReturn(
     if (!StatementUnconditionallyReturns(stmts->value.p[i])) {
       continue;
     }
-    for (size_t j = stmts->length; j-- > i + 1;) {
+    size_t keep_from = stmts->length;
+    for (size_t j = i + 1; j < stmts->length; j++) {
+      if (ASTNodeAny(stmts->value.p[j], IsLabelStatement, NULL)) {
+        keep_from = j;
+        break;
+      }
+    }
+    for (size_t j = keep_from; j-- > i + 1;) {
       ASTNode* dead = stmts->value.p[j];
       VectorDeleteElement(stmts, j);
       ASTNodeDelete(dead);
@@ -10620,23 +10634,42 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
   Vector* extended_args = NULL;
   Vector* enclosing_function_args = NULL;
   Symbol* pattern = symbol->value.func_defn;
+  TypeRecord* enclosing_function = NULL;
+  if (IsLambdaCallOperator(symbol) && owner != NULL &&
+      owner->access_enclosing_function != NULL &&
+      !owner->access_enclosing_function->flags.is_template &&
+      owner->access_enclosing_function->type != NULL &&
+      TypeIsFunction(owner->access_enclosing_function->type) &&
+      owner->access_enclosing_function->type->template_arguments != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(
+          owner->access_enclosing_function->type->template_arguments)) {
+    enclosing_function = owner->access_enclosing_function->type;
+  } else if (IsLambdaCallOperator(symbol) &&
+             compiler->current_function != NULL &&
+             TypeIsFunction(compiler->current_function) &&
+             compiler->current_function->template_arguments != NULL &&
+             !TemplateArgumentVectorContainsTemplateParameter(
+                 compiler->current_function->template_arguments) &&
+             compiler->current_function->info.function.symbol != NULL &&
+             !compiler->current_function->info.function.symbol->flags
+                  .is_template &&
+             owner != NULL &&
+             compiler->current_function->info.function.cxx_member_owner ==
+                 owner->lexical_parent) {
+    enclosing_function = compiler->current_function;
+  }
   if (IsLambdaCallOperator(symbol) && pattern != NULL && pattern->type != NULL &&
       pattern->type->info.function.body != NULL &&
-      compiler->current_function != NULL &&
-      TypeIsFunction(compiler->current_function) &&
-      compiler->current_function->template_arguments != NULL &&
-      !TemplateArgumentVectorContainsTemplateParameter(
-          compiler->current_function->template_arguments) &&
-      compiler->current_function->info.function.symbol != NULL &&
-      !compiler->current_function->info.function.symbol->flags.is_template &&
-      compiler->current_function->info.function.cxx_member_owner ==
-          owner->lexical_parent) {
+      enclosing_function != NULL) {
     int max_index = MaxTemplateParameterIndexInFunctionBody(
         pattern->type->info.function.body);
-    size_t need = max_index >= 0 ? (size_t)max_index + 1 : 0;
-    Vector* fn_args = compiler->current_function->template_arguments;
-    if (need > template_arguments->length && fn_args->length > 0 &&
-        template_arguments->length + fn_args->length == need) {
+    Vector* fn_args = enclosing_function->template_arguments;
+    // The body may not mention every parameter (`min` is index 1, and a
+    // reference to index 0 makes max_index 0 while the function has two
+    // arguments).  The combined list has to cover the highest index, not
+    // match it exactly.
+    if (max_index >= (int)template_arguments->length && fn_args->length > 0 &&
+        template_arguments->length + fn_args->length > (size_t)max_index) {
       extended_args = NewVector();
       for (size_t i = 0; i < template_arguments->length; i++) {
         VectorAppend(extended_args,

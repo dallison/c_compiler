@@ -1896,12 +1896,12 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
           (node->cond != NULL && node->cond->type != NULL &&
            (TypeIsUnknown(node->cond->type) ||
             TypeContainsTemplateParameter(node->cond->type)))) {
-        compiler->constant_evaluation_required_depth--;
-        AnalyzeStatement(node->if_part);
-        AnalyzeStatement(node->else_part);
+        // The condition depends on a template parameter, so neither branch is
+        // instantiated yet.  Analyzing them here instantiates names that only
+        // the selected specialization may use (`MessageLite::default_instance`
+        // from the discarded `MessageTraits<T>::class_data()` arm).
         return;
       }
-      compiler->constant_evaluation_required_depth--;
       SemanticError(node->cond,
                     "if constexpr condition is not a constant expression");
       return;
@@ -2227,7 +2227,18 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
     .switch_node = node,
     .switch_level = 0,
   };
-    
+
+  // A function template body is analyzed once per instantiation.  Case labels
+  // are recorded on the switch node, so a second pass must not append them
+  // again.
+  VectorClear(&node->cases);
+  node->default_node = NULL;
+  node->min_case_value = INT64_MAX;
+  node->max_case_value = INT64_MIN;
+  node->max_case_width = 0;
+  node->all_cases_covered = false;
+  node->density = 0;
+
   // Visit the switch statement and all its children, collecting
   // case and defaults.
   ASTNodeVisit(&node->base, ResolveSwitchStatement, 0, &resolver);
@@ -2396,6 +2407,11 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
   }
 }
 
+static bool StatementIsLabel(ASTNode* node, void* data) {
+  (void)data;
+  return node != NULL && node->op == AST_OP(label);
+}
+
 static bool StatementUnconditionallyReturns(ASTNode* stmt) {
   if (stmt == NULL) {
     return false;
@@ -2427,7 +2443,19 @@ static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
     ASTNode* statement = node->statements->value.p[i];
     AnalyzeStatement(statement);
     if (StatementUnconditionallyReturns(statement)) {
-      break;
+      // A label after this return is reached by goto.  Keep analyzing through
+      // it; otherwise the labeled statement is untyped and code generation
+      // faults.
+      bool label_later = false;
+      for (size_t j = i + 1; j < node->statements->length; j++) {
+        if (ASTNodeAny(node->statements->value.p[j], StatementIsLabel, NULL)) {
+          label_later = true;
+          break;
+        }
+      }
+      if (!label_later) {
+        break;
+      }
     }
     if (i == 0 && (node->base.flags & kASTRangeForInitializer) != 0 &&
         statement != NULL && statement->op == AST_OP(decl_list)) {

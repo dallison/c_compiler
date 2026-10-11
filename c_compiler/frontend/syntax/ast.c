@@ -3017,12 +3017,15 @@ static ASTNode* IfStatementASTNodeClone(const ASTNode* node,
   IfStatementASTNode* from = (IfStatementASTNode*)node;
   IfStatementASTNode* to = ASTArenaAlloc(sizeof(IfStatementASTNode));
   ASTNodeBaseCopy(&to->base, node);
-  to->cond = ASTNodeClone(from->cond, func, data, &to->base);
-  to->if_part = ASTNodeClone(from->if_part, func, data, &to->base);
-  to->else_part = ASTNodeClone(from->else_part, func, data, &to->base);
+  // Children are cloned with this node as their parent.  The constexpr flag
+  // has to be set first so a discarded branch can be recognized while those
+  // children are cloned.
   to->is_constexpr = from->is_constexpr;
   to->is_consteval = from->is_consteval;
   to->consteval_negated = from->consteval_negated;
+  to->cond = ASTNodeClone(from->cond, func, data, &to->base);
+  to->if_part = ASTNodeClone(from->if_part, func, data, &to->base);
+  to->else_part = ASTNodeClone(from->else_part, func, data, &to->base);
   return func(&to->base, data);
 }
 

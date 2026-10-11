@@ -1247,6 +1247,27 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     str->lexical_parent = from->lexical_parent;
   }
   str->access_enclosing_function = from->access_enclosing_function;
+  // The pattern records the function template that contains the lambda.
+  // Rebuilding the closure while that function is being instantiated should
+  // remember the instantiation, so a later call (from a different function
+  // the lambda was passed into) can still substitute its parameters.
+  if (from->access_enclosing_function != NULL &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    Symbol* current = compiler->current_function->info.function.symbol;
+    Symbol* origin = compiler->current_function->info.function.template_origin;
+    Symbol* pattern_fn = from->access_enclosing_function;
+    bool matches =
+        current == pattern_fn || origin == pattern_fn ||
+        (current != NULL && current->value.func_defn == pattern_fn) ||
+        (origin != NULL && origin->value.func_defn == pattern_fn);
+    if (matches && current != NULL && !current->flags.is_template &&
+        compiler->current_function->template_arguments != NULL &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            compiler->current_function->template_arguments)) {
+      str->access_enclosing_function = current;
+    }
+  }
   str->in_namespace_template = from->in_namespace_template;
   if (from->tag_symbol != NULL && from->tag_symbol->flags.is_block_scope &&
       !from->tag_symbol->flags.invented && args != NULL) {

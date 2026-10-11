@@ -2240,8 +2240,14 @@ static bool RegisterConstexprPCodeStaticData(Symbol* symbol) {
   }
   bool ok = false;
   if (TypeIsStructOrUnion(symbol->type) || TypeIsFixedArray(symbol->type)) {
-    ok = symbol->value.other != NULL &&
-         StoreConstexprObjectBytes(NULL, symbol->type,
+    // `value.other` shares storage with `value.ivalue`.  A mis-cached scalar
+    // is not an object; copying it would fault on the pointer.
+    if (symbol->value.other == NULL ||
+        ((unsigned long)symbol->value.other & (sizeof(void*) - 1)) != 0) {
+      free(memory);
+      return false;
+    }
+    ok = StoreConstexprObjectBytes(NULL, symbol->type,
                                    (ConstexprObject*)symbol->value.other,
                                    memory);
   } else {

@@ -485,11 +485,60 @@ static TypeRecord* CXXResolveTypeForIsSameVArgument(TemplateArgument* arg) {
 static Symbol* CXXStructTemplateOrigin(Struct* str);
 static bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right);
 
+// A clone copies the source node's parent pointer, and the clone callback runs
+// before ASTNodeClone links the copy into its new parent.  Replacing
+// `parent`'s child then deletes the template pattern (`is_same_v<T, Base>`
+// becomes the first instantiation's constant, and every later instantiation
+// clones that).  Splice only when this node is actually in the slot.
+static bool ParentSlotHoldsNode(ASTNode* parent, int child_id, ASTNode* node) {
+  if (parent == NULL || node == NULL) {
+    return false;
+  }
+  switch (ASTNodeGetShape(parent)) {
+    case kASTShapeUnary:
+      return child_id == 0 && ((UnaryASTNode*)parent)->sub == node;
+    case kASTShapeBinary:
+      if (child_id == 0) {
+        return ((BinaryASTNode*)parent)->left == node;
+      }
+      if (child_id == 1) {
+        return ((BinaryASTNode*)parent)->right == node;
+      }
+      return false;
+    case kASTShapeCombined:
+      if (child_id == 0) {
+        return ((CombinedStatementASTNode*)parent)->cond == node;
+      }
+      if (child_id == 1) {
+        return ((CombinedStatementASTNode*)parent)->stmt == node;
+      }
+      return false;
+    case kASTShapeIf:
+      if (child_id == 0) {
+        return ((IfStatementASTNode*)parent)->cond == node;
+      }
+      if (child_id == 1) {
+        return ((IfStatementASTNode*)parent)->if_part == node;
+      }
+      if (child_id == 2) {
+        return ((IfStatementASTNode*)parent)->else_part == node;
+      }
+      return false;
+    case kASTShapeExprStmt: {
+      ExpressionStatementASTNode* stmt = (ExpressionStatementASTNode*)parent;
+      return child_id == 0 && stmt->expr == node;
+    }
+    default:
+      return true;
+  }
+}
+
 static ASTNode* CXXNewBoolConstantReplacing(ASTNode* node, int64_t same) {
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
   ASTNode* const_node = NewIntConstantASTNode(same, bool_type, node->location);
   TypeRecordDelete(bool_type);
-  if (node->parent != NULL) {
+  if (node->parent != NULL &&
+      ParentSlotHoldsNode(node->parent, node->child_id, node)) {
     ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
   }
   const_node->flags |= kASTAnalyzed;
@@ -668,131 +717,6 @@ static ASTNode* CXXTryFoldIsSameValueDot(BinaryASTNode* dot) {
   return CXXTryFoldTraitValueDot(dot);
 }
 
-static StructMember* CXXFindInheritedStaticMember(Struct* str, String* name) {
-  if (str == NULL || name == NULL) {
-    return NULL;
-  }
-  for (Struct* cur = str; cur != NULL;) {
-    StructMember* member = FindStructMember(cur, name);
-    if (member != NULL && member->is_static) {
-      return member;
-    }
-    if (cur->bases.length == 0) {
-      break;
-    }
-    CXXBaseSpecifier* base_spec = cur->bases.value.p[0];
-    TypeRecord* base_type =
-        base_spec != NULL ? base_spec->type : NULL;
-    cur = base_type != NULL && TypeIsStructOrUnion(base_type)
-              ? base_type->info.struct_info
-              : NULL;
-  }
-  return NULL;
-}
-
-// Same result as `is_same<T, U>::value`, which class-template instantiation
-// already folds in contexts where the `is_same_v` variable template does not.
-static ASTNode* CXXTryFoldIsSameVViaClassTemplate(IdentifierASTNode* node) {
-  Namespace* ns =
-      node->symbol != NULL ? node->symbol->namespace_ : NULL;
-  if (ns == NULL) {
-    ns = NamespaceFindStdNamespace();
-  }
-  if (ns == NULL) {
-    return NULL;
-  }
-  String is_same_name;
-  StringInit(&is_same_name, "is_same");
-  Symbol* is_same = NamespaceLookupUnqualifiedSymbol(ns, &is_same_name);
-  StringDestruct(&is_same_name);
-  if (is_same == NULL || !is_same->flags.is_template) {
-    return NULL;
-  }
-  Vector* args = TemplateArgumentVectorCopy(node->template_arguments);
-  Vector* lambda_args =
-      CXXLambdaInventedTemplateArgumentValues(compiler->current_function);
-  if (lambda_args != NULL) {
-    bool failed = false;
-    Vector* substituted = TypeSubstituteTemplateArgumentVectorOrFail(
-        &compiler->syntax, args, lambda_args, &failed);
-    VectorDeleteWithContents(
-        lambda_args, (VectorElementDestructor)TemplateArgumentDelete,
-        /*free_element=*/false);
-    if (substituted != NULL && !failed) {
-      VectorDeleteWithContents(
-          args, (VectorElementDestructor)TemplateArgumentDelete,
-          /*free_element=*/false);
-      args = substituted;
-    } else if (substituted != NULL) {
-      VectorDeleteWithContents(
-          substituted, (VectorElementDestructor)TemplateArgumentDelete,
-          /*free_element=*/false);
-    }
-  }
-  ASTNode* receiver = NewIdentifierASTNode(is_same, node->base.location);
-  IdentifierASTNode* type_id = (IdentifierASTNode*)receiver;
-  type_id->template_arguments = args;
-  type_id->base.flags &= ~kASTAnalyzed;
-  receiver->value_category = kValueCategoryPrvalue;
-
-  int saved_depth = compiler->constant_evaluation_required_depth;
-  compiler->constant_evaluation_required_depth++;
-  ASTNode* type_expr = AnalyzeExpression(receiver);
-  compiler->constant_evaluation_required_depth = saved_depth;
-
-  if (type_expr == NULL || type_expr->type == NULL ||
-      !TypeIsStructOrUnion(type_expr->type) ||
-      type_expr->type->info.struct_info == NULL) {
-    if (type_expr != receiver) {
-      ASTNodeDelete(type_expr);
-    } else {
-      ASTNodeDelete(receiver);
-    }
-    return NULL;
-  }
-  TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
-      &compiler->syntax, type_expr->type);
-  if (materialized != type_expr->type) {
-    ASTNodeSetType(type_expr, materialized);
-  }
-
-  String value_name;
-  StringInit(&value_name, "value");
-  StructMember* member =
-      CXXFindInheritedStaticMember(type_expr->type->info.struct_info, &value_name);
-  StringDestruct(&value_name);
-  if (member == NULL) {
-    ASTNodeDelete(type_expr);
-    return NULL;
-  }
-
-  ASTNode* member_node =
-      NewStructMemberASTNode(member, node->base.location);
-  member_node->flags &= ~kASTAnalyzed;
-  ASTNode* dot = NewBinaryASTNode(AST_OP(dot), NULL, node->base.location,
-                                  type_expr, member_node);
-  dot->flags &= ~kASTAnalyzed;
-  dot->value_category = kValueCategoryPrvalue;
-
-  compiler->constant_evaluation_required_depth++;
-  ASTNode* value_expr = AnalyzeExpression(dot);
-  compiler->constant_evaluation_required_depth = saved_depth;
-
-  int64_t ivalue = 0;
-  if (value_expr == NULL || !EvaluateIntegerExpression(value_expr, &ivalue)) {
-    if (value_expr != dot) {
-      ASTNodeDelete(value_expr);
-    } else {
-      ASTNodeDelete(dot);
-    }
-    return NULL;
-  }
-  if (value_expr != dot) {
-    ASTNodeDelete(value_expr);
-  }
-  return CXXNewIsSameBoolConstant(node, ivalue != 0);
-}
-
 // `std::is_same_v<T, U>` is a variable template whose initializer is
 // `is_same<T, U>::value`.  Instantiating that in a generic lambda body can fail
 // even when both type arguments are already concrete (capturing closures are
@@ -848,7 +772,60 @@ static ASTNode* CXXTryFoldIsSameVIdentifier(IdentifierASTNode* node) {
   if (copied_right) {
     TypeRecordDelete(right_type);
   }
-  return CXXTryFoldIsSameVViaClassTemplate(node);
+  // One side is still a template parameter.  `is_same<T, U>::value` is the
+  // primary template (`false`) until both arguments are concrete, and folding
+  // that into `if constexpr` deletes a branch from the function template body.
+  return NULL;
+}
+
+// `std::is_base_of_v<Base, Derived>` is a variable template whose initializer
+// is `is_base_of<Base, Derived>::value`.  Instantiating the primary trait
+// without folding yields `false` for a real derived class, so
+// `HasDeprecatedArenaConstructor<RepeatedPtrField<T>>` takes the wrong
+// constructor.
+static ASTNode* CXXTryFoldIsBaseOfVIdentifier(IdentifierASTNode* node) {
+  if (!CompilerIsCXX() || node == NULL || node->symbol == NULL ||
+      node->template_arguments == NULL ||
+      (node->base.flags & kASTIsDeclaration) != 0 ||
+      node->template_arguments->length != 2 ||
+      !StringEqual(&node->symbol->name, "is_base_of_v")) {
+    return NULL;
+  }
+  TemplateArgument* base_arg = node->template_arguments->value.p[0];
+  TemplateArgument* derived_arg = node->template_arguments->value.p[1];
+  TypeRecord* base_type = CXXResolveTypeForIsSameVArgument(base_arg);
+  TypeRecord* derived_type = CXXResolveTypeForIsSameVArgument(derived_arg);
+  bool copied_base = base_type != NULL && base_arg != NULL &&
+                     base_type != base_arg->type;
+  bool copied_derived = derived_type != NULL && derived_arg != NULL &&
+                        derived_type != derived_arg->type;
+  ASTNode* folded = NULL;
+  if (base_type != NULL && derived_type != NULL &&
+      !TypeContainsTemplateParameter(base_type) &&
+      !TypeContainsTemplateParameter(derived_type)) {
+    Qualifiers cv_mask =
+        kQualConst | kQualVolatile | kQualRestrict | kQualAtomic;
+    int64_t result = 0;
+    if (TypeEqualIgnoringTopLevelQualifierMask(base_type, derived_type,
+                                                cv_mask)) {
+      result = base_type->size > 0 && derived_type->size > 0 ? 1 : 0;
+    } else if (TypeIsStructOrUnion(base_type) &&
+               TypeIsStructOrUnion(derived_type)) {
+      result = StructIsDerivedFrom(derived_type->info.struct_info,
+                                   base_type->info.struct_info,
+                                   /*public_only=*/false)
+                   ? 1
+                   : 0;
+    }
+    folded = CXXNewIsSameBoolConstant(node, result);
+  }
+  if (copied_base) {
+    TypeRecordDelete(base_type);
+  }
+  if (copied_derived) {
+    TypeRecordDelete(derived_type);
+  }
+  return folded;
 }
 
 static ASTNode* CXXTryFoldIsArithmeticVIdentifier(IdentifierASTNode* node) {
@@ -1440,12 +1417,16 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
                                               template_args, &value)) {
     return NewIntConstantASTNode(value, concrete, location);
   }
-  if (StringEqual(&var_sym->name, "is_same_v")) {
+  if (StringEqual(&var_sym->name, "is_same_v") ||
+      StringEqual(&var_sym->name, "is_base_of_v")) {
     IdentifierASTNode id = {0};
     id.base.location = location;
     id.symbol = var_sym;
     id.template_arguments = template_args;
     ASTNode* folded = CXXTryFoldIsSameVIdentifier(&id);
+    if (folded == NULL) {
+      folded = CXXTryFoldIsBaseOfVIdentifier(&id);
+    }
     if (folded != NULL) {
       TypeRecordDelete(concrete);
       return folded;
@@ -1709,6 +1690,9 @@ static ASTNode* AnalyzeIdentifier(IdentifierASTNode* node) {
   // node untouched so it is re-analyzed after substitution.
   {
     ASTNode* folded = CXXTryFoldIsSameVIdentifier(node);
+    if (folded == NULL) {
+      folded = CXXTryFoldIsBaseOfVIdentifier(node);
+    }
     if (folded == NULL) {
       folded = CXXTryFoldIsArithmeticVIdentifier(node);
     }
@@ -10035,8 +10019,17 @@ static int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type) {
         actual->type->next != NULL && target->next != NULL &&
         added_pointer_qualifiers != 0 &&
         TypeEqualIgnoringQualifiers(actual->type, target);
+    // `T*` to `const void*` is the same pointer conversion as `T*` to `void*`,
+    // plus a qualification conversion.  The less-qualified destination is
+    // better ([over.ics.rank]), so `RefAt(void*)` beats `RefAt(const void*)`
+    // for a `MessageLite*` argument.
+    bool void_pointer_qualification =
+        TypeIsPointer(actual->type) && TypeIsPointer(target) &&
+        actual->type->next != NULL && target->next != NULL &&
+        !TypeIsVoid(actual->type->next) && TypeIsVoid(target->next) &&
+        added_pointer_qualifiers != 0;
     int qualification_penalty =
-        pointer_qualification_conversion
+        (pointer_qualification_conversion || void_pointer_qualification)
             ? ((added_pointer_qualifiers & kQualConst) != 0) +
                   ((added_pointer_qualifiers & kQualVolatile) != 0)
             : 0;
@@ -10811,6 +10804,14 @@ static void DeleteTemporaryFunctionTemplateCandidates(Vector* candidates,
   VectorDestruct(candidates);
 }
 
+// Two instantiations of the same class-template friend can both be exact
+// matches when they are the same function type.  That is one candidate.
+static bool SameFunctionSignature(Symbol* left, Symbol* right) {
+  return left != NULL && right != NULL && left->type != NULL &&
+         right->type != NULL && TypeIsFunction(left->type) &&
+         TypeIsFunction(right->type) && TypeEqual(left->type, right->type);
+}
+
 static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
                                               Vector* actuals,
                                               Vector* explicit_args,
@@ -10840,7 +10841,8 @@ static Symbol* ResolveFunctionCandidateVector(String* name, Vector* candidates,
         best = candidate;
         best_score = score;
         ambiguous = false;
-      } else if (score == best_score) {
+      } else if (score == best_score &&
+                 !SameFunctionSignature(best, candidate)) {
         ambiguous = true;
       }
     }
@@ -11949,7 +11951,8 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
         } else if (DerivedConstructorHidesInherited(candidate, best)) {
           best = candidate;
           ambiguous = false;
-        } else {
+        } else if (best->symbol == NULL || candidate->symbol == NULL ||
+                   !SameFunctionSignature(best->symbol, candidate->symbol)) {
           ambiguous = true;
         }
       }
@@ -12025,7 +12028,9 @@ static StructMember* ResolveMemberFunctionOverload(StructMember* first,
             ambiguous = true;
           }
         } else if (best != effective &&
-                   best_is_template == effective_is_template) {
+                   best_is_template == effective_is_template &&
+                   (best->symbol == NULL || effective->symbol == NULL ||
+                    !SameFunctionSignature(best->symbol, effective->symbol))) {
           ambiguous = true;
         }
       }
@@ -16849,6 +16854,9 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
   expr->flags &= ~kASTAnalyzed;
   IdentifierASTNode* id = (IdentifierASTNode*)expr;
   ASTNode* folded = CXXTryFoldIsSameVIdentifier(id);
+  if (folded == NULL) {
+    folded = CXXTryFoldIsBaseOfVIdentifier(id);
+  }
   if (folded == NULL) {
     folded = CXXTryFoldIsArithmeticVIdentifier(id);
   }

@@ -1,6 +1,6 @@
 # Agent handoff: variable templates, protobuf / Abseil patterns
 
-**Updated:** 2026-10-10  
+**Updated:** 2026-10-11  
 **Repo:** `/Users/FZDSZZ/c_compiler`  
 **Branch:** `master` (merge from `feature/subspace` completed locally; **not pushed** unless user asks)
 
@@ -47,8 +47,10 @@ Usage: `Extension::kUnionMember<float>`, `float Extension::* pm = …`, `this->*
 
 - [x] **CTAD `std::tuple{…}` inside cloned variable-template initializers.** `std::get` was folding to the element, then overwriting that element with the still-dependent return type of the primary `get(integer_sequence)` overload (`T`). The element type is kept when the call type is still dependent. A successful replacement of `Class::vt<T>` is what `AnalyzeExpression` returns (the old node was deleted and then written back). Namespace-scope `auto` variable templates are not type-checked at the definition.
 - [x] **`tmp/kunion_assign.cc`**, **`tmp/kunion_only.cc`**, **`tmp/kunion_call.cc`**, **`tmp/vt_get0.cc`**, **`tmp/vt_get_ns.cc`** compile (`-c`). Link needs `//:libc_x86_64`, which currently aborts in `GetLoadOpcodeForType` while compiling `libc/eh_frame.c` (pre-existing on this tree, including without these edits).
-- [x] **`extension_set.cc` compiles without crashing** (`-c`, exit 1). The `std::get` fold no longer runs on a constant-folded non-call. `Extension::kUsesPointer<T>` folds from a structmember. Unqualified `kUsesPointer<T>` / `kUnionMember<T>` inside the class rebinds the scope-injected clone to the real variable template. `this->*kUnionMember<T>` clears a stale receiver type before member access. A null diagnostic node in auto-return deduction no longer segfaults.
-- [ ] **`extension_set.cc` still fails** in `message_lite.h` `FallbackMessageTraits::class_data`: `T::default_instance()` (“no member named 'default_instance' in the dependent scope”, “Cannot call a non-function”) and “Cannot deduce auto function return type”. A reduced `GetClassData(T::default_instance())` returning `const ClassData*` does compile.
+- [x] **`extension_set.cc` compiles** (`-c`, exit 0). The `std::get` fold no longer runs on a constant-folded non-call. `Extension::kUsesPointer<T>` folds from a structmember. Unqualified `kUsesPointer<T>` / `kUnionMember<T>` inside the class rebinds the scope-injected clone to the real variable template. `this->*kUnionMember<T>` clears a stale receiver type before member access. A null diagnostic node in auto-return deduction no longer segfaults. `if constexpr (std::is_same_v<T, MessageLite> || …)` is no longer folded to false while `T` is still a template parameter, so `GetClassData` keeps the virtual arm and does not instantiate `FallbackMessageTraits<MessageLite>::class_data`.
+- [x] **`arena.cc` compiles.** `static constexpr std::array<size_t, 1> kStaticSizes = {1}` was cached as the integer `1`. Constexpr p-code then treated that integer as a `ConstexprObject*`. Integer caching is limited to integral and enum symbols, and a misaligned object pointer is rejected instead of faulting.
+- [x] **`RefAt<T>(void*)` vs `RefAt<T>(const void*)`.** A `MessageLite*` argument tied both overloads. A pointer conversion to `const void*` now ranks worse than the same conversion to `void*`.
+- [x] **`libprotobuf_lite` sources compile** (`-c`, exit 0), except `io/io_win32.cc` which is not part of this host build. That includes `generated_message_tctable_lite.cc`, `generated_message_util.cc`, `implicit_weak_message.cc`, and the rest of the list in `file_lists.cmake` from `any_lite.cc` through `wire_format_lite.cc`. A constexpr braced initializer of a non-aggregate class now calls the constructor instead of filling members in argument order, so `ClassData{..., &DestroyImpl, ...}` no longer stores a function pointer in `cached_size_offset`. A pointer-to-member constructor parameter (including `nullptr`) is a constant. Identical function signatures injected twice, as with `SplitIterator`'s `operator==` / `operator!=`, are one candidate. Linking is still blocked by `libc/eh_frame.c` (`GetLoadOpcodeForType`, null type).
 
 ### P1 — verify / harden
 

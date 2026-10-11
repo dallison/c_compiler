@@ -3294,12 +3294,22 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
         ASTNode* init =
             ConstexprInitializerExpression(id->symbol->constexpr_initializer);
         if (init != NULL && !ExpressionIsTemplateDependent(init)) {
-          int64_t ivalue = 0;
-          if (EvaluateIntegerExpression(init, &ivalue)) {
-            id->symbol->flags.value_set = true;
-            id->symbol->value.ivalue = ivalue;
-            return false;
+          // Only a scalar constant can be cached in `value.ivalue`.  An
+          // aggregate such as `static constexpr std::array<size_t, 1>
+          // kStaticSizes = {1}` also evaluates as the integer 1, and storing
+          // that in the symbol makes later constexpr code treat `1` as a
+          // ConstexprObject pointer.
+          if (id->symbol->type != NULL &&
+              (TypeIsIntegral(id->symbol->type) ||
+               TypeIsEnum(id->symbol->type))) {
+            int64_t ivalue = 0;
+            if (EvaluateIntegerExpression(init, &ivalue)) {
+              id->symbol->flags.value_set = true;
+              id->symbol->value.ivalue = ivalue;
+              return false;
+            }
           }
+          return false;
         }
         return true;
       }
