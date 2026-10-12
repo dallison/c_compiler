@@ -2611,6 +2611,14 @@ static bool DeducedReturnTypeIsStillDependent(TypeRecord* deduced) {
 static bool DeduceCurrentFunctionAutoReturn(ASTNode* return_value,
                                             ASTNode* diagnostic_node) {
   TypeRecord* pattern = compiler->current_function->next;
+  // A call through a dependent functor uses `void` as a temporary fallback
+  // until the enclosing template is instantiated.  Do not freeze that
+  // fallback into an `auto` return type; the cloned body will reanalyze the
+  // call with the concrete functor and deduce its real result.
+  if (return_value != NULL &&
+      (return_value->flags & kASTDependentFunctorCall) != 0) {
+    return true;
+  }
   if (pattern != NULL && (pattern->type & kTypeDecltypeAuto) != 0 &&
       pattern->declarator == kDeclPrimitive) {
     TypeRecord* deduced = TypeDeduceDecltypeAuto(return_value);

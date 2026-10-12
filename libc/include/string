@@ -388,6 +388,51 @@ class basic_string {
     return *this;
   }
 
+  __DAVECC_STRING_CONSTEXPR basic_string& insert(size_type pos,
+                                                  const CharT* s,
+                                                  size_type n) {
+    if (pos > __size) {
+      return *this;
+    }
+    // Preserve the source when it points into this string and reserve() moves
+    // the allocation or shifting the suffix overlaps the source range.
+    basic_string source(s, n);
+    __reserve_for(__size + n);
+    size_type tail = __size - pos;
+    if (tail != 0 && n != 0) {
+      traits_type::move(__data + pos + n, __data + pos, tail);
+    }
+    if (n != 0) {
+      traits_type::copy(__data + pos, source.__data, n);
+    }
+    __size += n;
+    __data[__size] = CharT();
+    return *this;
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& insert(size_type pos,
+                                                  const CharT* s) {
+    return insert(pos, s, traits_type::length(s));
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& insert(
+      size_type pos, const basic_string& s) {
+    return insert(pos, s.__data, s.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& insert(
+      size_type pos, const basic_string& s, size_type subpos,
+      size_type n = npos) {
+    if (subpos > s.__size) {
+      return *this;
+    }
+    size_type available = s.__size - subpos;
+    if (n > available) {
+      n = available;
+    }
+    return insert(pos, s.__data + subpos, n);
+  }
+
   __DAVECC_STRING_CONSTEXPR basic_string& append(size_type n, CharT c) {
     __reserve_for(__size + n);
     if (n != 0) {

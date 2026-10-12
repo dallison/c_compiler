@@ -790,12 +790,13 @@ static int OverloadConversionRankStandardValue(ASTNode* actual,
   // exact `T*` parameter only by adding pointee cv-qualifiers; give it a small
   // penalty so the exact `T*` overload wins instead of being ambiguous (e.g.
   // `get_if<0>(variant<...>*)` between the `variant<Types...>*` and
-  // `const variant<Types...>*` overloads).  This applies to either const or
-  // volatile qualification; otherwise the standard volatile overloads of
-  // the atomic free functions are ambiguous for non-volatile objects.  Each
-  // added qualifier contributes one sub-tier so adding const is better
-  // than adding both const and volatile, without outweighing a genuine
-  // conversion in another argument.
+  // `const variant<Types...>*` overloads).  The same tie-break applies when
+  // both sequences also perform a derived-to-base or object-to-void pointer
+  // conversion.  This applies to either const or volatile qualification;
+  // otherwise the standard volatile overloads of the atomic free functions
+  // are ambiguous for non-volatile objects.  Each added qualifier contributes
+  // one sub-tier so adding const is better than adding both const and volatile,
+  // without outweighing a genuine conversion in another argument.
   Qualifiers added_pointer_qualifiers =
       (target->next != NULL && actual->type->next != NULL)
           ? ((target->next->qualifiers & (kQualConst | kQualVolatile)) &
@@ -805,19 +806,9 @@ static int OverloadConversionRankStandardValue(ASTNode* actual,
   bool pointer_qualification_conversion =
       TypeIsPointer(actual->type) && TypeIsPointer(target) &&
       actual->type->next != NULL && target->next != NULL &&
-      added_pointer_qualifiers != 0 &&
-      TypeEqualIgnoringQualifiers(actual->type, target);
-  // `T*` to `const void*` is the same pointer conversion as `T*` to `void*`,
-  // plus a qualification conversion.  The less-qualified destination is
-  // better ([over.ics.rank]), so `RefAt(void*)` beats `RefAt(const void*)`
-  // for a `MessageLite*` argument.
-  bool void_pointer_qualification =
-      TypeIsPointer(actual->type) && TypeIsPointer(target) &&
-      actual->type->next != NULL && target->next != NULL &&
-      !TypeIsVoid(actual->type->next) && TypeIsVoid(target->next) &&
       added_pointer_qualifiers != 0;
   int qualification_penalty =
-      (pointer_qualification_conversion || void_pointer_qualification)
+      pointer_qualification_conversion
           ? ((added_pointer_qualifiers & kQualConst) != 0) +
                 ((added_pointer_qualifiers & kQualVolatile) != 0)
           : 0;

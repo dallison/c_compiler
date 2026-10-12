@@ -10122,6 +10122,13 @@ static void NoteBodyTemplateParameterIndex(ASTNode* node, void* data,
   }
   int* max_index = data;
   NoteTypeTemplateParameterIndices(node->type, max_index, 0);
+  // Cast targets are stored separately from the expression's result type.
+  // Include them so a lambda body such as reinterpret_cast<const F*>(p)
+  // requests the enclosing function template's argument for F.
+  if (node->op == AST_OP(cast)) {
+    NoteTypeTemplateParameterIndices(((CastASTNode*)node)->cast_type, max_index,
+                                     0);
+  }
   if (node->op != AST_OP(identifier)) {
     return;
   }

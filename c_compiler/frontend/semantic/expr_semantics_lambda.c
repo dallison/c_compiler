@@ -131,7 +131,7 @@ static Symbol* ResolveClosureCallOperatorForFunctionPointer(
   for (size_t i = 0; i < target_fn->info.function.prototype.length; i++) {
     Symbol* formal = target_fn->info.function.prototype.value.p[i];
     if (formal == NULL || formal->type == NULL) {
-      VectorDestruct(&actuals);
+      VectorDelete(actuals);
       return NULL;
     }
     Symbol* standin = NewSymbol("__deduce", TypeRecordCopy(formal->type),
@@ -145,7 +145,7 @@ static Symbol* ResolveClosureCallOperatorForFunctionPointer(
   }
   Symbol* resolved = TypeDeduceFunctionTemplateFromCallWithOffset(
       &compiler->syntax, call_op, actuals, 1);
-  VectorDestruct(&actuals);
+  VectorDelete(actuals);
   if (resolved == NULL || resolved == call_op || resolved->type == NULL ||
       !TypeIsFunction(resolved->type)) {
     return NULL;
@@ -178,6 +178,10 @@ ASTNode* LambdaToFunctionPointer(ASTNode* lambda,
     return NULL;
   }
   TypeRecord* method = call_op->type;
+  if (TypeFunctionReturnContainsAuto(method) &&
+      method->info.function.body == NULL) {
+    TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, call_op);
+  }
   if (TypeFunctionReturnContainsAuto(method)) {
     StatementFinishAutoReturnDeduction(method, lambda);
   }
@@ -278,6 +282,10 @@ bool LambdaCallMatchesFunctionPointer(ASTNode* lambda,
     return true;
   }
   TypeRecord* method = call_op->type;
+  if (TypeFunctionReturnContainsAuto(method) &&
+      method->info.function.body == NULL) {
+    TypeEnsureTemplateMemberFunctionDefinition(&compiler->syntax, call_op);
+  }
   if (TypeFunctionReturnContainsAuto(method) || method->next == NULL) {
     StatementFinishAutoReturnDeduction(method, lambda);
   }
