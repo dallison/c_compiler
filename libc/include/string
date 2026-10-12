@@ -514,6 +514,42 @@ class basic_string {
     return *this;
   }
 
+  __DAVECC_STRING_CONSTEXPR basic_string& replace(
+      size_type pos, size_type count, const CharT* s, size_type n) {
+    if (pos > __size) {
+      pos = __size;
+    }
+    if (count > __size - pos) {
+      count = __size - pos;
+    }
+    // Preserve sources that point into this string before reserve or suffix
+    // movement can invalidate or overwrite them.
+    basic_string source(s, n);
+    if (n > count) {
+      __reserve_for(__size + (n - count));
+    }
+    size_type tail = __size - pos - count;
+    if (n != count && tail != 0) {
+      traits_type::move(__data + pos + n, __data + pos + count, tail);
+    }
+    if (n != 0) {
+      traits_type::copy(__data + pos, source.__data, n);
+    }
+    __size = __size - count + n;
+    __data[__size] = CharT();
+    return *this;
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& replace(
+      size_type pos, size_type count, const CharT* s) {
+    return replace(pos, count, s, traits_type::length(s));
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& replace(
+      size_type pos, size_type count, const basic_string& s) {
+    return replace(pos, count, s.__data, s.__size);
+  }
+
   __DAVECC_STRING_CONSTEXPR void push_back(CharT c) {
     __reserve_for(__size + 1);
     __data[__size] = c;
