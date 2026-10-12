@@ -5174,12 +5174,63 @@ static bool FormalClassTemplateIdIsNonDeducedAgainst(TypeRecord* formal,
   return true;
 }
 
+/* Recover the deducible argument of a member alias after its enclosing class
+ * has been instantiated. The primary alias still numbers its parameter after
+ * the class parameters, while the call's written alias-id uses a zero-based
+ * argument list. */
+static TypeRecord* InstantiatedOwnerAliasPattern(TypeRecord* type,
+                                                 Struct* member_owner) {
+  if (type == NULL || member_owner == NULL || type->template_origin == NULL ||
+      !StorageIs(type->template_origin->storage, STO(typedef))) {
+    return NULL;
+  }
+  StructMember* member =
+      FindStructMember(member_owner, &type->template_origin->name);
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol == type->template_origin ||
+      member->symbol->alias_template == NULL || member->symbol->type == NULL) {
+    return NULL;
+  }
+  int selected_parameter = -1;
+  if (!TypeIsTemplateParameterPlaceholder(member->symbol->type,
+                                          &selected_parameter) ||
+      selected_parameter < 0) {
+    return NULL;
+  }
+  if (member->symbol->alias_template->parameters.length != 0) {
+    TemplateParameter* first =
+        member->symbol->alias_template->parameters.value.p[0];
+    if (first != NULL && selected_parameter >= first->index) {
+      selected_parameter -= first->index;
+    }
+  }
+  Vector* written_args = TypeSpecializationTemplateArguments(type);
+  if (written_args == NULL ||
+      (size_t)selected_parameter >= written_args->length) {
+    return NULL;
+  }
+  TemplateArgument* selected = written_args->value.p[selected_parameter];
+  if (selected == NULL || selected->kind != kTemplateParameterType ||
+      selected->type == NULL) {
+    return NULL;
+  }
+  TypeRecord* pattern = TypeRecordCopy(selected->type);
+  pattern->qualifiers |= type->qualifiers;
+  return pattern;
+}
+
 /* `KeyArg<true>::type<K, key_type>` is the alias `using type = K`.  The
  * parameter type keeps that dependent member (`const key_arg<K>&`) so a later
  * deduction pass can recover K from the call argument.  The pattern's
  * parameter is numbered after the class template; the written `<K, key_type>`
  * arguments are the member-template argument list. */
-static TypeRecord* AliasMemberPatternType(TypeRecord* type) {
+static TypeRecord* AliasMemberPatternType(TypeRecord* type,
+                                          Struct* member_owner) {
+  TypeRecord* owner_pattern =
+      InstantiatedOwnerAliasPattern(type, member_owner);
+  if (owner_pattern != NULL) {
+    return owner_pattern;
+  }
   if (type == NULL || type->dependent_member_name == NULL ||
       !TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
       type->dependent_member_template_arguments == NULL ||
@@ -5224,13 +5275,14 @@ static TypeRecord* AliasMemberPatternType(TypeRecord* type) {
 
 /* Replace a dependent member-alias parameter type with the alias pattern so
  * deduction sees `const K&` rather than the non-deduced `KeyArg::type`. */
-static TypeRecord* FormalWithAliasPattern(TypeRecord* formal) {
+static TypeRecord* FormalWithAliasPattern(TypeRecord* formal,
+                                          Struct* member_owner) {
   if (formal == NULL) {
     return NULL;
   }
   if (formal->declarator == kDeclReference ||
       formal->declarator == kDeclRValueReference) {
-    TypeRecord* inner = FormalWithAliasPattern(formal->next);
+    TypeRecord* inner = FormalWithAliasPattern(formal->next, member_owner);
     if (inner == NULL) {
       return NULL;
     }
@@ -5240,7 +5292,7 @@ static TypeRecord* FormalWithAliasPattern(TypeRecord* formal) {
     ref->type = inner->type;
     return TypeRecordCalculateSize(ref);
   }
-  return AliasMemberPatternType(formal);
+  return AliasMemberPatternType(formal, member_owner);
 }
 
 /* A parameter type that mentions only enclosing class-template parameters (indices
@@ -5311,7 +5363,8 @@ static bool TypeMentionsFunctionTemplateParameter(TypeRecord* type) {
 static bool DeduceFunctionTemplateCallArgument(Vector* args,
                                                size_t explicit_arg_count,
                                                TypeRecord* formal,
-                                               ASTNode* actual) {
+                                               ASTNode* actual,
+                                               Struct* member_owner) {
   if (formal == NULL || actual == NULL || actual->type == NULL) {
     // A braced list may still be untyped while the surrounding call is
     // deduced.  [temp.deduct.call]: that argument is a non-deduced context
@@ -5329,10 +5382,12 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
     }
     return false;
   }
-  TypeRecord* alias_pattern = FormalWithAliasPattern(formal);
+  TypeRecord* alias_pattern =
+      FormalWithAliasPattern(formal, member_owner);
   if (alias_pattern != NULL) {
     bool ok = DeduceFunctionTemplateCallArgument(args, explicit_arg_count,
-                                                 alias_pattern, actual);
+                                                 alias_pattern, actual,
+                                                 member_owner);
     TypeRecordDelete(alias_pattern);
     return ok;
   }
@@ -5889,7 +5944,9 @@ retry_deduction:
             DeduceFunctionTemplateInitializerListArgument(
                 args, explicit_arg_count, formal->type, actual) ||
             DeduceFunctionTemplateCallArgument(args, explicit_arg_count,
-                                               formal->type, actual))) {
+                                               formal->type, actual,
+                                               func->info.function
+                                                   .cxx_member_owner))) {
         goto deduction_failed;
       }
     }
@@ -5966,7 +6023,9 @@ retry_deduction:
           DeduceFunctionTemplateInitializerListArgument(
               args, explicit_arg_count, formal->type, actual) ||
           DeduceFunctionTemplateCallArgument(args, explicit_arg_count,
-                                             formal->type, actual))) {
+                                             formal->type, actual,
+                                             func->info.function
+                                                 .cxx_member_owner))) {
       g_deduce_defer_bare_member = false;
       g_deduce_template_parameter_base = saved_deduce_base;
       VectorDeleteWithContents(args,
