@@ -4538,14 +4538,19 @@ static ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
       }
     }
   }
-  // Default-capture lambdas (`[=]` / `[&]`) share the generic operator() body
-  // with each deduced specialization.  Eager semantic analysis of that pattern
-  // can lower `std::is_same_v` to a non-constant lvalue load before the call
-  // site clones the body with concrete `auto` parameters, breaking
-  // `if constexpr (std::is_same_v<...>)` in the specialization.
+  // A generic lambda with a default capture (`[=](auto n)` / `[&](auto n)`)
+  // shares its operator() body with every deduced specialization.  Eager
+  // analysis of that pattern can lower `std::is_same_v` to a non-constant
+  // lvalue load before the call site clones the body, breaking
+  // `if constexpr (std::is_same_v<...>)`.  A non-generic `[=]` / `[&]` has no
+  // pattern to protect, and leaving it unqueued drops the call operator
+  // (`[=]{ return base + x; }()`).
+  bool generic_default_capture =
+      capture_default != kLambdaCaptureDefaultNone &&
+      call_operator->type->info.function.template_parameters.length > 0;
   if (!defer_dependent_capture &&
       !LambdaCallOperatorBodyDependsOnEnclosingTemplate(call_operator) &&
-      capture_default == kLambdaCaptureDefaultNone) {
+      !generic_default_capture) {
     QueueLambdaCallOperatorDefinition(call_operator);
   }
 

@@ -1837,7 +1837,6 @@ ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* ast_node, bool constants_
   // PrintINode(inode, 0);
   ASTNode* braced_init = NewBracedInitializerASTNode(NewVector(), type, ast_node->location);
   FlattenINode(inode, (BracedInitializerASTNode*)braced_init);
-  // ASTNodePrint(braced_init, 0);
   DeleteINode(inode);
   return braced_init;
 }

@@ -6323,8 +6323,19 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
       // call whose constexpr execution can see another brace of the same
       // shape; dropping the depth first re-lowers that brace forever.
       constexpr_brace_ctor_depth++;
+      // Lowering consumes the braced initializer (it moves the elements into
+      // the constructor call and clears the list).  This evaluation is
+      // speculative: a failed constant-expression attempt must leave the live
+      // AST alone.  `s != 1 || values.find(2)->second` otherwise drops the
+      // find() call and value-initializes the iterator.
+      ASTNode* lowering_source =
+          ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL);
       ASTNode* constructed =
-          LowerCXXBracedClassInitToConstructor(initializer, type);
+          LowerCXXBracedClassInitToConstructor(lowering_source, type);
+      if (lowering_source != NULL && lowering_source->parent == NULL &&
+          lowering_source != constructed) {
+        ASTNodeDelete(lowering_source);
+      }
       bool lowered = false;
       if (constructed != NULL) {
         lowered = EvaluateConstexprObjectExpressionInitializer(

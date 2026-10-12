@@ -15799,16 +15799,23 @@ static void MaybeInjectBlockScopeAnonymousAggregateMembers(Syntax* syntax,
       sym == NULL || !sym->flags.invented || TypeIsFunction(sym->type)) {
     return;
   }
+  // Only an unnamed aggregate object promotes its members into the block
+  // (`struct { int x; };`).  A pointer or reference is not that object:
+  // a local class member function's `this` has the class type behind a
+  // pointer, and injecting those members collides with the enclosing
+  // function's parameters of the same name.
   TypeRecord* type = sym->type;
-  while (type != NULL && (TypeIsPointer(type) || TypeIsReference(type))) {
-    type = type->next;
-  }
   if (type == NULL || !TypeIsStructOrUnion(type) ||
       type->info.struct_info == NULL) {
     return;
   }
-  InjectBlockScopeAnonymousAggregateMembers(syntax, sym,
-                                            type->info.struct_info, 0);
+  Struct* aggregate = type->info.struct_info;
+  Symbol* tag = aggregate->tag_symbol;
+  if (tag != NULL && !tag->flags.invented && aggregate->tag_name != NULL &&
+      aggregate->tag_name->length != 0) {
+    return;
+  }
+  InjectBlockScopeAnonymousAggregateMembers(syntax, sym, aggregate, 0);
 }
 
 // Emits -Wshadow when a newly declared block-scope variable `sym` hides a

@@ -14291,7 +14291,6 @@ static ASTNode* TryAnalyzeOverloadedArrowOperator(ASTNode* receiver,
       !TypeIsStructOrUnion(receiver->type)) {
     return NULL;
   }
-
   StructMember* member =
       FindStructMemberByName(receiver->type->info.struct_info, "operator->");
   if (member == NULL || !member->is_member_function) {

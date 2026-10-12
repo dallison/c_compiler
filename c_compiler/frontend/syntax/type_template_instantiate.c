@@ -3227,14 +3227,17 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
       PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
     return;
   }
-  // A member specialization declared without a body (for example
+  // An explicit specialization declared without a body (for example
   // `template <> void MergeFrom<MessageLite>(...);`) must not receive the
   // primary template's body just because a call names it; the out-of-line
-  // definition supplies the body later.
-  if (!symbol->flags.is_template &&
-      symbol->type->info.function.template_origin != NULL &&
-      (symbol->type->info.function.body == NULL ||
-       !symbol->type->info.function.definition)) {
+  // definition supplies the body later.  An implicit specialization with no
+  // body yet — one formed while the template was only forward-declared, such
+  // as `&__ready_at_exit_fn<State>` — still has to be cloned from the primary
+  // once that definition exists.  A body that is present but not yet a
+  // definition was cloned only to deduce a constexpr or decltype probe, and
+  // the real use below has to clone it again so the definition is emitted.
+  if (symbol->flags.is_explicit_specialization &&
+      symbol->type->info.function.body == NULL) {
     return;
   }
   // A body cloned only to deduce the return type was analyzed speculatively,

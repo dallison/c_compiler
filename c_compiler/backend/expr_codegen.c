@@ -268,7 +268,21 @@ IROpcode GetLoadOpcodeForType(TypeRecord* type) {
       }
     }
   }
-  
+
+  // Not integral, call type inference funcs.  This has to run before the
+  // scalar-size fallback: a float is a 4-byte scalar, and treating it as
+  // store32/load32 writes the integer result register instead of xmm
+  // (`unordered_map`'s `max_load_factor_` stays 0 and rehash never stops).
+  for (size_t i = 0; load_store_ops[i].type_func != NULL; i++) {
+    if (load_store_ops[i].type_func(type)) {
+      if (TypeIsUnsigned(type)) {
+        return load_store_ops[i].unsigned_load;
+      } else {
+        return load_store_ops[i].signed_load;
+      }
+    }
+  }
+
   if (size == 0 && type != NULL && type->size > 0 && TypeIsScalar(type)) {
     size = type->size;
     for (size_t i = 0; int_opcodes[i].size != 0; i++) {
@@ -278,17 +292,6 @@ IROpcode GetLoadOpcodeForType(TypeRecord* type) {
         } else {
           return int_opcodes[i].signed_load;
         }
-      }
-    }
-  }
-
-  // Not integral, call type inference funcs.
-  for (size_t i = 0; load_store_ops[i].type_func != NULL; i++) {
-    if (load_store_ops[i].type_func(type)) {
-      if (TypeIsUnsigned(type)) {
-        return load_store_ops[i].unsigned_load;
-      } else {
-        return load_store_ops[i].signed_load;
       }
     }
   }
@@ -387,18 +390,20 @@ IROpcode GetStoreOpcodeForType(TypeRecord* type) {
     }
   }
 
+  // See GetLoadOpcodeForType: float/double must not fall into the integer
+  // store selected by scalar size.
+  for (size_t i = 0; load_store_ops[i].type_func != NULL; i++) {
+    if (load_store_ops[i].type_func(type)) {
+      return load_store_ops[i].store;
+    }
+  }
+
   if (size == 0 && type != NULL && type->size > 0 && TypeIsScalar(type)) {
     size = type->size;
     for (size_t i = 0; int_opcodes[i].size != 0; i++) {
       if (int_opcodes[i].size == size) {
         return int_opcodes[i].store;
       }
-    }
-  }
-
-  for (size_t i = 0; load_store_ops[i].type_func != NULL; i++) {
-    if (load_store_ops[i].type_func(type)) {
-      return load_store_ops[i].store;
     }
   }
   if (compiler->constexpr_codegen_recover) {
