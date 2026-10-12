@@ -850,8 +850,11 @@ static ASTNode* ParseArraySubscript(ASTNode* left, Syntax* syntax,
       CompilerCXXAtLeast(kLanguageStandardCXX23)) {
     Vector* indices = NewVector();
     while (!LexLookingAt(syntax->lex, TOK(rsquare))) {
-      ASTNode* index = SyntaxParseSingleExpression(
-          syntax, followers | TC(exprsep) | TC(closebra));
+      ASTNode* index =
+          LexMatch(syntax->lex, TOK(lbrace))
+              ? SyntaxParseBracedInitializer(syntax)
+              : SyntaxParseSingleExpression(
+                    syntax, followers | TC(exprsep) | TC(closebra));
       MarkCXXPackExpansionIfPresent(syntax, index);
       VectorAppend(indices, index);
       if (!LexMatch(syntax->lex, TOK(comma))) {
@@ -871,7 +874,10 @@ static ASTNode* ParseArraySubscript(ASTNode* left, Syntax* syntax,
     return NewVectorASTNode(AST_OP(subscript), NULL,
                             syntax->lex->current_token_location, left, indices);
   }
-  ASTNode* index = SyntaxParseExpression(syntax, followers);
+  ASTNode* index =
+      CompilerIsCXX() && LexMatch(syntax->lex, TOK(lbrace))
+          ? SyntaxParseBracedInitializer(syntax)
+          : SyntaxParseExpression(syntax, followers);
   SyntaxNeedBracket(syntax, TOK(rsquare), followers);
   return NewBinaryASTNode(AST_OP(subscript), NULL,
                           syntax->lex->current_token_location, left, index);
