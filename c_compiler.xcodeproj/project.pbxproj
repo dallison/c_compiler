@@ -264,6 +264,15 @@
 		E5BC31961FA78FBD00C7691B /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = E5BC31951FA78FBD00C7691B /* main.c */; };
 		E5BC319A1FA7903E00C7691B /* libc_compiler_library.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = E5BC31631FA3E80E00C7691B /* libc_compiler_library.dylib */; };
 		E5BC319D1FA82E9100C7691B /* expr_parser.c in Sources */ = {isa = PBXBuildFile; fileRef = E5BC319B1FA82E9100C7691B /* expr_parser.c */; };
+		E5E10001F01D000000000001 /* expr_parser_fold.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E10001F01D000000000002 /* expr_parser_fold.c */; };
+		E5E10002F01D000000000001 /* expr_parser_intrinsic.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E10002F01D000000000002 /* expr_parser_intrinsic.c */; };
+		E5E10003F01D000000000001 /* expr_parser_lambda.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E10003F01D000000000002 /* expr_parser_lambda.c */; };
+		E5E10004F01D000000000001 /* expr_parser_literal.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E10004F01D000000000002 /* expr_parser_literal.c */; };
+		E5E10005F01D000000000001 /* expr_parser_member.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E10005F01D000000000002 /* expr_parser_member.c */; };
+		E5E10006F01D000000000001 /* expr_parser_new.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E10006F01D000000000002 /* expr_parser_new.c */; };
+		E5E10007F01D000000000001 /* expr_parser_operator.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E10007F01D000000000002 /* expr_parser_operator.c */; };
+		E5E10008F01D000000000001 /* expr_parser_reflect.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E10008F01D000000000002 /* expr_parser_reflect.c */; };
+		E5E10009F01D000000000001 /* expr_parser_template.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E10009F01D000000000002 /* expr_parser_template.c */; };
 		E5BC319E1FA82E9100C7691B /* expr_parser.h in Headers */ = {isa = PBXBuildFile; fileRef = E5BC319C1FA82E9100C7691B /* expr_parser.h */; };
 		E5BF30BC275B11070017246D /* liblinkerlibrary.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = E57CB95C22C5A2780068119C /* liblinkerlibrary.dylib */; };
 		E5BF30BD275B11070017246D /* liblinkerlibrary.dylib in Embed Libraries */ = {isa = PBXBuildFile; fileRef = E57CB95C22C5A2780068119C /* liblinkerlibrary.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
@@ -1111,6 +1120,16 @@
 		E5BC31951FA78FBD00C7691B /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
 		E5BC319B1FA82E9100C7691B /* expr_parser.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser.c; sourceTree = "<group>"; };
 		E5BC319C1FA82E9100C7691B /* expr_parser.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = expr_parser.h; sourceTree = "<group>"; };
+		E5E1000AF01D000000000002 /* expr_parser_internal.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = expr_parser_internal.h; sourceTree = "<group>"; };
+		E5E10001F01D000000000002 /* expr_parser_fold.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser_fold.c; sourceTree = "<group>"; };
+		E5E10002F01D000000000002 /* expr_parser_intrinsic.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser_intrinsic.c; sourceTree = "<group>"; };
+		E5E10003F01D000000000002 /* expr_parser_lambda.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser_lambda.c; sourceTree = "<group>"; };
+		E5E10004F01D000000000002 /* expr_parser_literal.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser_literal.c; sourceTree = "<group>"; };
+		E5E10005F01D000000000002 /* expr_parser_member.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser_member.c; sourceTree = "<group>"; };
+		E5E10006F01D000000000002 /* expr_parser_new.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser_new.c; sourceTree = "<group>"; };
+		E5E10007F01D000000000002 /* expr_parser_operator.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser_operator.c; sourceTree = "<group>"; };
+		E5E10008F01D000000000002 /* expr_parser_reflect.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser_reflect.c; sourceTree = "<group>"; };
+		E5E10009F01D000000000002 /* expr_parser_template.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_parser_template.c; sourceTree = "<group>"; };
 		E5C0D3692449233200F8880D /* dwarf_defs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = dwarf_defs.c; sourceTree = "<group>"; };
 		E5C8E9C023CA59C8006124C8 /* stdio.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = stdio.h; sourceTree = "<group>"; };
 		E5C8E9C523CE8432006124C8 /* elfdump */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = elfdump; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -1855,6 +1874,16 @@
 				E5BC31841FA513DF00C7691B /* symbol_table.h */,
 				E5BC319B1FA82E9100C7691B /* expr_parser.c */,
 				E5BC319C1FA82E9100C7691B /* expr_parser.h */,
+				E5E1000AF01D000000000002 /* expr_parser_internal.h */,
+				E5E10001F01D000000000002 /* expr_parser_fold.c */,
+				E5E10002F01D000000000002 /* expr_parser_intrinsic.c */,
+				E5E10003F01D000000000002 /* expr_parser_lambda.c */,
+				E5E10004F01D000000000002 /* expr_parser_literal.c */,
+				E5E10005F01D000000000002 /* expr_parser_member.c */,
+				E5E10006F01D000000000002 /* expr_parser_new.c */,
+				E5E10007F01D000000000002 /* expr_parser_operator.c */,
+				E5E10008F01D000000000002 /* expr_parser_reflect.c */,
+				E5E10009F01D000000000002 /* expr_parser_template.c */,
 				E544B7E51FAD313600F2C59B /* expr_evaluator.c */,
 				E544B7E61FAD313600F2C59B /* expr_evaluator.h */,
 				E544B7DD1FA95F8E00F2C59B /* statement_parser.c */,
@@ -4023,6 +4052,15 @@
 				E5377188203D201E00330B42 /* risc_v_codegen.c in Sources */,
 				E5907472247F3408006CF348 /* target_basic_block.c in Sources */,
 				E5BC319D1FA82E9100C7691B /* expr_parser.c in Sources */,
+				E5E10001F01D000000000001 /* expr_parser_fold.c in Sources */,
+				E5E10002F01D000000000001 /* expr_parser_intrinsic.c in Sources */,
+				E5E10003F01D000000000001 /* expr_parser_lambda.c in Sources */,
+				E5E10004F01D000000000001 /* expr_parser_literal.c in Sources */,
+				E5E10005F01D000000000001 /* expr_parser_member.c in Sources */,
+				E5E10006F01D000000000001 /* expr_parser_new.c in Sources */,
+				E5E10007F01D000000000001 /* expr_parser_operator.c in Sources */,
+				E5E10008F01D000000000001 /* expr_parser_reflect.c in Sources */,
+				E5E10009F01D000000000001 /* expr_parser_template.c in Sources */,
 				E5BC316E1FA3E83600C7691B /* lex.c in Sources */,
 				E5CCAA5B2290D1EA0033AFFF /* 6502_emitter.c in Sources */,
 				E5AE87054EB3BF4EA8BB7123 /* type_core.c in Sources */,

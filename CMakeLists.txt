@@ -273,6 +273,15 @@ davecc_library(davecc_compiler
   c_compiler/frontend/syntax/dwarf_defs.c
   c_compiler/frontend/syntax/expr_evaluator.c
   c_compiler/frontend/syntax/expr_parser.c
+  c_compiler/frontend/syntax/expr_parser_fold.c
+  c_compiler/frontend/syntax/expr_parser_intrinsic.c
+  c_compiler/frontend/syntax/expr_parser_lambda.c
+  c_compiler/frontend/syntax/expr_parser_literal.c
+  c_compiler/frontend/syntax/expr_parser_member.c
+  c_compiler/frontend/syntax/expr_parser_new.c
+  c_compiler/frontend/syntax/expr_parser_operator.c
+  c_compiler/frontend/syntax/expr_parser_reflect.c
+  c_compiler/frontend/syntax/expr_parser_template.c
   c_compiler/frontend/syntax/member_pointer.c
   c_compiler/frontend/syntax/module_identity.c
   c_compiler/frontend/syntax/module_syntax.c
