@@ -615,20 +615,32 @@ int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
     return -1;
   }
   Struct* str = target->info.struct_info;
-  // Analyze the element expressions once; any non-expression element (nested
-  // braces, designated initializers) is left to call-time lowering.
+  // Analyze expression elements once and retain nested braced elements as
+  // constructor arguments.  Designated initializers are aggregate-only.
   Vector elements;
   VectorInit(&elements);
   bool simple_elements = true;
+  bool constructor_elements = true;
   for (size_t i = 0; i < braced->initializers->length; i++) {
     ASTNode* init = braced->initializers->value.p[i];
-    if (init == NULL || init->op != AST_OP(expr_init)) {
+    if (init == NULL) {
       simple_elements = false;
+      constructor_elements = false;
       break;
     }
-    ExpressionInitializerASTNode* ei = (ExpressionInitializerASTNode*)init;
-    ei->expr = AnalyzeExpression(ei->expr);
-    VectorAppend(&elements, ei->expr);
+    if (init->op == AST_OP(expr_init)) {
+      ExpressionInitializerASTNode* ei = (ExpressionInitializerASTNode*)init;
+      ei->expr = AnalyzeExpression(ei->expr);
+      VectorAppend(&elements, ei->expr);
+    } else {
+      simple_elements = false;
+      if (init->op == AST_OP(braced_init)) {
+        VectorAppend(&elements, init);
+      } else {
+        constructor_elements = false;
+        break;
+      }
+    }
   }
   int best = -1;
   StructMember* ctor =
@@ -644,12 +656,12 @@ int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
       best = il_best;
     }
   }
-  if (best < 0 && simple_elements) {
+  if (best < 0 && constructor_elements) {
     CXXBracedInitTargetRankOrdinaryConstructors(ctor, &elements, &best);
+  }
+  if (best < 0 && simple_elements) {
     // Aggregate initialization: element-wise conversion to each data member.
-    if (best < 0) {
-      CXXBracedInitTargetRankAggregateExpressionElements(str, &elements, &best);
-    }
+    CXXBracedInitTargetRankAggregateExpressionElements(str, &elements, &best);
   }
   // Designated-initializer aggregate initialization (`f({.a = 1, .b = 2})`).
   // Positional ranking above only accepts expression elements.
