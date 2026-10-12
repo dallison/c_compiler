@@ -1400,10 +1400,14 @@ static void StraightenGraph(Generator* gen) {
               IRIsUnconditionalBranch(terminator) &&
             (terminator->flags & kIRJumpTableBranch) == 0;
         if (is_candidate) {
-          // Don't merge a block that ends in a label or a result.
+          // Don't merge a block that ends in a label, result, or computed
+          // branch.  A cbra's following bra nodes are its inline jump table;
+          // moving only the cbra would separate it from that table, and it
+          // also has one successor per table entry rather than one fallthrough.
           is_candidate = block != gen->exit_block &&
             block->end_code != NULL &&
             block->end_code->opcode != IR_OP(label) &&
+            block->end_code->opcode != IR_OP(cbra) &&
             !IRIsResult(block->end_code);
         }
         
