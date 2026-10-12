@@ -2904,13 +2904,36 @@ static Struct* SymbolMemberOwner(Symbol* symbol) {
 static Symbol* FindNearerNestedClassMember(Syntax* syntax, Symbol* found,
                                            String* name) {
   Struct* found_owner = SymbolMemberOwner(found);
-  if (!CompilerIsCXX() || found_owner == NULL) {
+  if (!CompilerIsCXX()) {
     return NULL;
   }
   Struct* owner = syntax->cxx_class_head;
   if (owner == NULL && compiler->current_function != NULL &&
       TypeIsFunction(compiler->current_function)) {
     owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  // `friend class Helper;` introduces a namespace-scope tag, but a later
+  // nested `class Helper { ... };` in the same class hides it.  The namespace
+  // tag has no member owner, so prefer a directly nested type while parsing
+  // that class rather than qualifying through the stale friend declaration.
+  if (found_owner == NULL &&
+      (SymbolIsTagSymbol(found) ||
+       (found != NULL && StorageIs(found->storage, STO(typedef))))) {
+    for (Struct* scope = owner; scope != NULL; scope = scope->lexical_parent) {
+      StructMember* member = FindStructMember(scope, name);
+      if (member == NULL || member->symbol == NULL ||
+          member->symbol->type == NULL ||
+          !TypeIsStructOrUnion(member->symbol->type) ||
+          member->symbol->type->info.struct_info == NULL ||
+          member->symbol->type->info.struct_info->lexical_parent != scope) {
+        continue;
+      }
+      return member->symbol;
+    }
+    return NULL;
+  }
+  if (found_owner == NULL) {
+    return NULL;
   }
   bool enclosed = false;
   for (Struct* scope = owner; scope != NULL; scope = scope->lexical_parent) {
