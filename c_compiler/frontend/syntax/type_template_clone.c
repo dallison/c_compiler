@@ -2617,7 +2617,6 @@ static size_t ConstructorInitPackElementIndex(TemplateFunctionBodyClone* clone,
       pack_index++;
       continue;
     }
-    pack_index++;
   }
   return 0;
 }

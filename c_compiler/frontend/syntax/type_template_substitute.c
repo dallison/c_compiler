@@ -1419,6 +1419,85 @@ Vector* RegroupExpandedClassTemplateArguments(Symbol* class_template,
   return grouped;
 }
 
+/* Return the active specialization when `class_template` is the class whose
+ * member signature is currently being substituted.  Re-instantiating that
+ * class while its member function is being formed can recursively rebuild its
+ * bases and virtual overrides. */
+static TypeRecord* ActiveClassTemplateSpecialization(
+    TypeParser* parser, Symbol* class_template) {
+  if (parser == NULL || class_template == NULL) {
+    return NULL;
+  }
+  Struct* candidates[] = {
+      parser->template_substitution_target,
+      parser->enclosing_template_substitution_target,
+  };
+  for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+    Struct* str = candidates[i];
+    if (str != NULL && str->tag_symbol != NULL &&
+        str->tag_symbol->type != NULL &&
+        str->tag_symbol->type->template_origin == class_template) {
+      return TypeRecordCopy(str->tag_symbol->type);
+    }
+  }
+  return NULL;
+}
+
+/* True when `name` is declared by a base of the primary class template.  The
+ * ordinary member lookup skips dependent bases, but their primary member lists
+ * are still useful for deciding whether a deferred member names an inherited
+ * alias such as `raw_hash_map::reference`. */
+static bool PrimaryTemplateBaseDeclaresMember(Struct* str, String* name) {
+  if (str == NULL || name == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    StructMember* member =
+        FindStructMember(base->type->info.struct_info, name);
+    if (member != NULL && member->symbol != NULL &&
+        StorageIs(member->symbol->storage, STO(typedef)) &&
+        member->symbol->type != NULL &&
+        !TypeIsStructOrUnion(member->symbol->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Strip trailing member-template arguments when instantiating a non-variadic
+ * class solely to resolve one of its inherited aliases. */
+static Vector* NonVariadicClassTemplateArgumentPrefix(
+    Symbol* class_template, Vector* args) {
+  if (class_template == NULL || class_template->type == NULL ||
+      !TypeIsStructOrUnion(class_template->type) ||
+      class_template->type->info.struct_info == NULL || args == NULL) {
+    return NULL;
+  }
+  Vector* params =
+      &class_template->type->info.struct_info->template_parameters;
+  if (args->length <= params->length) {
+    return NULL;
+  }
+  for (size_t i = 0; i < params->length; i++) {
+    TemplateParameter* param = params->value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      return NULL;
+    }
+  }
+  Vector* prefix = NewVector();
+  VectorReserve(prefix, params->length);
+  for (size_t i = 0; i < params->length; i++) {
+    VectorAppend(prefix, TemplateArgumentCopy(args->value.p[i]));
+  }
+  return prefix;
+}
+
 static bool TypeReferencesIndexAtLeast(TypeRecord* type, int min_index);
 
 static bool ExprReferencesIndexAtLeast(ASTNode* node, void* data) {
@@ -1799,8 +1878,30 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     return subst != NULL ? TypeRecordCalculateSize(subst) : NULL;
   }
 
+  bool inherited_member =
+      type->dependent_member_name != NULL &&
+      TypeIsStructOrUnion(info.origin->type) &&
+      info.origin->type->info.struct_info != NULL &&
+      PrimaryTemplateBaseDeclaresMember(
+          info.origin->type->info.struct_info,
+          type->dependent_member_name);
+  Vector* class_args =
+      inherited_member
+          ? NonVariadicClassTemplateArgumentPrefix(info.origin, concrete_args)
+          : NULL;
   TypeRecord* subst =
-      InstantiateSimpleClassTemplate(parser, info.origin, concrete_args);
+      inherited_member
+          ? ActiveClassTemplateSpecialization(parser, info.origin)
+          : NULL;
+  if (subst == NULL) {
+    subst = InstantiateSimpleClassTemplate(
+        parser, info.origin, class_args != NULL ? class_args : concrete_args);
+  }
+  if (class_args != NULL) {
+    VectorDeleteWithContents(class_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
   if (subst == NULL) {
     VectorDeleteWithContents(concrete_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
