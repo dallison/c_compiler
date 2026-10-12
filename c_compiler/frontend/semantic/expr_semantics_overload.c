@@ -642,6 +642,93 @@ static int FreeExactMatchScoreCeiling(Vector* actuals) {
   return scored_actuals == 0 ? 0 : (int)(5 * scored_actuals);
 }
 
+/* Compare equally ranked pointer conversions whose destination classes lie on
+ * the same inheritance path.  Converting Generated* to Message* is better than
+ * converting it to MessageLite* when Message derives from MessageLite. */
+static int CompareDerivedPointerTargets(ASTNode* actual, TypeRecord* left,
+                                        TypeRecord* right) {
+  if (TypeIsReference(left)) {
+    left = left->next;
+  }
+  if (TypeIsReference(right)) {
+    right = right->next;
+  }
+  if (actual == NULL || actual->type == NULL ||
+      !TypeIsPointer(actual->type) || !TypeIsPointer(left) ||
+      !TypeIsPointer(right) || actual->type->next == NULL ||
+      left->next == NULL || right->next == NULL ||
+      !TypeIsStructOrUnion(actual->type->next) ||
+      !TypeIsStructOrUnion(left->next) || !TypeIsStructOrUnion(right->next)) {
+    return 0;
+  }
+  bool actual_reaches_left =
+      TypeEqualIgnoringQualifiers(actual->type->next, left->next) ||
+      TypeIsDerivedFrom(actual->type->next, left->next);
+  bool actual_reaches_right =
+      TypeEqualIgnoringQualifiers(actual->type->next, right->next) ||
+      TypeIsDerivedFrom(actual->type->next, right->next);
+  if (!actual_reaches_left || !actual_reaches_right) {
+    return 0;
+  }
+  if (TypeIsDerivedFrom(left->next, right->next)) {
+    return 1;
+  }
+  if (TypeIsDerivedFrom(right->next, left->next)) {
+    return -1;
+  }
+  return 0;
+}
+
+/* Apply the per-argument "no worse, and better for at least one" rule when two
+ * non-template candidates have the same aggregate score.  The numeric rank
+ * intentionally groups all derived-to-base pointer conversions together, so
+ * CompareDerivedPointerTargets supplies the required same-path tie-break. */
+static int CompareEqualScoreConversionSequences(Symbol* left, Symbol* right,
+                                                VectorASTNode* call) {
+  if (left == NULL || right == NULL || left->type == NULL ||
+      right->type == NULL || !TypeIsFunction(left->type) ||
+      !TypeIsFunction(right->type) || call == NULL ||
+      call->children == NULL) {
+    return 0;
+  }
+  Vector* left_params = &left->type->info.function.prototype;
+  Vector* right_params = &right->type->info.function.prototype;
+  if (call->children->length > left_params->length ||
+      call->children->length > right_params->length) {
+    return 0;
+  }
+  int preference = 0;
+  for (size_t i = 0; i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    Symbol* left_param = left_params->value.p[i];
+    Symbol* right_param = right_params->value.p[i];
+    if (actual == NULL || left_param == NULL || right_param == NULL ||
+        left_param->type == NULL || right_param->type == NULL) {
+      return 0;
+    }
+    int left_rank = OverloadConversionRank(actual, left_param->type);
+    int right_rank = OverloadConversionRank(actual, right_param->type);
+    if (left_rank < 0 || right_rank < 0) {
+      return 0;
+    }
+    int argument_preference =
+        left_rank < right_rank
+            ? 1
+            : (right_rank < left_rank
+                   ? -1
+                   : CompareDerivedPointerTargets(actual, left_param->type,
+                                                  right_param->type));
+    if (argument_preference != 0 && preference != 0 &&
+        argument_preference != preference) {
+      return 0;
+    }
+    if (argument_preference != 0) {
+      preference = argument_preference;
+    }
+  }
+  return preference;
+}
+
 /* Contract: scores non-template, non-instantiated overloads in `candidates`;
  * updates `*best`, `*best_score`, and `*ambiguous`.  Skips template symbols. */
 static void RankNonTemplateFreeFunctionCandidates(Vector* candidates,
@@ -666,6 +753,41 @@ static void RankNonTemplateFreeFunctionCandidates(Vector* candidates,
     } else if (score == *best_score &&
                !SameFunctionSignature(*best, candidate)) {
       *ambiguous = true;
+    }
+  }
+  if (*best == NULL || !*ambiguous) {
+    return;
+  }
+  // A pairwise replacement can lose an earlier tied candidate.  Search the
+  // complete minimum-score set for one candidate that is better than every
+  // distinct peer; if none exists, the call remains ambiguous.
+  for (size_t i = 0; i < candidates->length; i++) {
+    Symbol* candidate = candidates->value.p[i];
+    if (candidate == NULL || candidate->flags.is_template ||
+        (candidate->type != NULL && TypeIsFunction(candidate->type) &&
+         candidate->type->info.function.template_origin != NULL) ||
+        OverloadCallScore(candidate, call) != *best_score) {
+      continue;
+    }
+    bool dominates = true;
+    for (size_t j = 0; j < candidates->length; j++) {
+      Symbol* peer = candidates->value.p[j];
+      if (peer == NULL || peer == candidate || peer->flags.is_template ||
+          (peer->type != NULL && TypeIsFunction(peer->type) &&
+           peer->type->info.function.template_origin != NULL) ||
+          OverloadCallScore(peer, call) != *best_score ||
+          SameFunctionSignature(candidate, peer)) {
+        continue;
+      }
+      if (CompareEqualScoreConversionSequences(candidate, peer, call) <= 0) {
+        dominates = false;
+        break;
+      }
+    }
+    if (dominates) {
+      *best = candidate;
+      *ambiguous = false;
+      return;
     }
   }
 }
@@ -774,6 +896,12 @@ static void RankFunctionTemplateCandidates(Vector* candidates,
   }
   for (size_t i = 0; i < candidates->length; i++) {
     Symbol* candidate = candidates->value.p[i];
+    // Non-template candidates were ranked in the first pass.  Reprocessing
+    // them here would feed equal-score ordinary overloads into template
+    // partial ordering and incorrectly mark the selected overload ambiguous.
+    if (candidate == NULL || !candidate->flags.is_template) {
+      continue;
+    }
     Symbol* effective =
         FunctionTemplateOverloadCandidate(candidate, call, explicit_args,
                                           temporary_candidates);
