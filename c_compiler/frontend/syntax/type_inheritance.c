@@ -997,6 +997,23 @@ static bool CXXOverrideTypesCompatible(Syntax* syntax, TypeRecord* a,
                              TypeContainsTemplateParameter(b));
 }
 
+// Top-level cv-qualifiers on by-value parameters do not form part of a C++
+// function type. Preserve qualifiers below pointers and references while
+// comparing an overriding declaration with its base declaration.
+static bool CXXOverrideParameterTypesCompatible(Syntax* syntax, TypeRecord* a,
+                                                TypeRecord* b,
+                                                bool allow_dependent) {
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  TypeRecord normalized_a = *a;
+  TypeRecord normalized_b = *b;
+  normalized_a.qualifiers &= ~(kQualConst | kQualVolatile);
+  normalized_b.qualifiers &= ~(kQualConst | kQualVolatile);
+  return CXXOverrideTypesCompatible(syntax, &normalized_a, &normalized_b,
+                                    allow_dependent);
+}
+
 static bool CXXMemberFunctionSignaturesMatch(Syntax* syntax, TypeRecord* a,
                                              TypeRecord* b,
                                              bool allow_dependent) {
@@ -1017,8 +1034,8 @@ static bool CXXMemberFunctionSignaturesMatch(Syntax* syntax, TypeRecord* a,
   for (size_t i = 0; i < a->info.function.prototype.length - a_first; i++) {
     Symbol* a_arg = a->info.function.prototype.value.p[i + a_first];
     Symbol* b_arg = b->info.function.prototype.value.p[i + b_first];
-    if (!CXXOverrideTypesCompatible(syntax, a_arg->type, b_arg->type,
-                                    allow_dependent)) {
+    if (!CXXOverrideParameterTypesCompatible(
+            syntax, a_arg->type, b_arg->type, allow_dependent)) {
       return false;
     }
   }
