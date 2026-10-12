@@ -1864,7 +1864,10 @@ static ASTNode* CXXFunctionalConstructionTryAggregateFunctionalInit(
   }
   SourceLocation location = node->base.location;
   ASTNode* initializer = NULL;
-  if (node->children->length == 1 && node->children->value.p[0] != NULL &&
+  bool source_used_braces =
+      (node->base.flags & kASTCXXBracedTemporary) != 0;
+  if (!source_used_braces && node->children->length == 1 &&
+      node->children->value.p[0] != NULL &&
       ((ASTNode*)node->children->value.p[0])->op == AST_OP(braced_init)) {
     initializer = ASTNodeMove(node->children->value.p[0]);
   } else {

@@ -1008,7 +1008,13 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
   if (dependent_type) {
     Vector* actuals =
         ParseCXXNewInitializerArguments(syntax, TOK(lbrace), followers);
-    return NewVectorASTNode(AST_OP(call), NULL, location, type_expr, actuals);
+    ASTNode* call =
+        NewVectorASTNode(AST_OP(call), NULL, location, type_expr, actuals);
+    // Preserve the outer braces separately from a braced first argument.
+    // Instantiating `T{{{a, b}}}` must rebuild all three brace levels, while
+    // `T({{a, b}})` intentionally passes the inner list as one argument.
+    call->flags |= kASTCXXBracedTemporary;
+    return call;
   }
   // [dcl.init.list]: an aggregate is initialized memberwise, even when an
   // implicit (possibly deleted) default constructor exists.  `FindElement{set}`
