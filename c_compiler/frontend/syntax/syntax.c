@@ -11069,11 +11069,6 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           !TypeFunctionReturnContainsAuto(sym->type)) {
         SyntaxError(syntax, "auto function parameter type is not supported yet");
       }
-      if (TypeFunctionReturnContainsAuto(sym->type) &&
-          !LexLookingAt(syntax->lex, TOK(lbrace))) {
-        SyntaxError(syntax,
-                    "auto function return type requires a function body");
-      }
       ASTNode *result = DeclareOrDefineFunction(syntax, declarations, sym, old_sym);
       if (result != NULL) {
         // A function definition whose name was already declared: `old_sym`
@@ -11176,14 +11171,15 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     }
     ValidateC23AutoInitializer(syntax, sym, initializer);
     ValidateC23ConstexprObject(syntax, sym, initializer);
-    if (TypeContainsAuto(sym->type) && initializer == NULL) {
+    if (!TypeIsFunction(sym->type) && TypeContainsAuto(sym->type) &&
+        initializer == NULL) {
       SyntaxError(syntax, "auto variable requires an initializer");
-    } else if (TypeContainsAuto(sym->type) &&
+    } else if (!TypeIsFunction(sym->type) && TypeContainsAuto(sym->type) &&
                syntax->parsing_template_declaration) {
       // A variable template's type is deduced for each instantiation.
       // Analyzing `auto` here resolves dependent calls such as
       // `std::get<T>(std::tuple{...})` against the primary template.
-    } else if (TypeContainsAuto(sym->type)) {
+    } else if (!TypeIsFunction(sym->type) && TypeContainsAuto(sym->type)) {
       initializer = SemanticAnalyzeDeducedInitializer(sym, initializer);
       SemanticDeduceAutoType(sym, initializer, (ASTNode*)initializer);
       if (sym->associated_constraint != NULL && sym->type != NULL) {

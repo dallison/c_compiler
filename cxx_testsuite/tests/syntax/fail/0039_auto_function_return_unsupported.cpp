@@ -1,4 +1,6 @@
 // RUN: -std=c++20
-// EXPECT: auto function return type requires a function body
+// EXPECT: Illegal conversion
 
 auto value(void);
+int before_definition = value();
+auto value(void) { return 1; }
