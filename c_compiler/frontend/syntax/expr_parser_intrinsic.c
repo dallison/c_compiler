@@ -424,32 +424,53 @@ static bool ResolveOffsetofDesignator(Syntax* syntax, TypeRecord* type,
     StringInit(&member_name, syntax->lex->spelling.value);
     LexNextToken(syntax->lex);
     bool found = false;
+    TypeRecord* member_type = NULL;
     if (current != NULL &&
         FindOffsetofMemberOnStruct(current, member_name.value, byte_offset,
                                    &byte_offset) != NULL) {
       found = true;
       StructMember* member = FindStructMemberByName(current, member_name.value);
-      TypeRecord* member_type =
-          member != NULL && member->symbol != NULL ? member->symbol->type
-                                                   : NULL;
-      while (member_type != NULL && TypeIsArray(member_type)) {
-        member_type = member_type->next;
-      }
-      current = StructFromTypeRecord(member_type);
+      member_type = member != NULL && member->symbol != NULL
+                        ? member->symbol->type
+                        : NULL;
     } else if (ResolveOffsetofMember(syntax, type, member_name.value,
                                      &byte_offset)) {
       found = true;
-      current = NULL;
     } else if (strcmp(member_name.value, "first") == 0 &&
                TypeIsPairLikeForOffsetof(BareOffsetofType(type))) {
       found = true;
-      current = NULL;
     }
     StringDestruct(&member_name);
     if (!found) {
       SyntaxError(syntax, "Member is not a member of the given type");
       return false;
     }
+    while (LexMatch(syntax->lex, TOK(lsquare))) {
+      if (member_type == NULL ||
+          (!TypeIsArray(member_type) && !TypeIsVector(member_type))) {
+        SyntaxError(syntax,
+                    "offsetof subscript requires an array or vector member");
+        return false;
+      }
+      ASTNode* index_expr =
+          SyntaxParseExpression(syntax, TC(closebra) | TC(exprsep));
+      index_expr = AnalyzeExpression(index_expr);
+      int64_t index = 0;
+      bool constant_index =
+          index_expr != NULL && EvaluateIntegerExpression(index_expr, &index);
+      ASTNodeDelete(index_expr);
+      SyntaxNeedBracket(syntax, TOK(rsquare), TC(closebra) | TC(exprsep));
+      if (!constant_index) {
+        SyntaxError(syntax,
+                    "offsetof array subscript must be an integer constant");
+        return false;
+      }
+      TypeRecord* element_type = member_type->next;
+      TypeRecordCalculateSize(element_type);
+      byte_offset += index * element_type->size;
+      member_type = element_type;
+    }
+    current = StructFromTypeRecord(member_type);
     if (!LexMatch(syntax->lex, TOK(dot))) {
       break;
     }

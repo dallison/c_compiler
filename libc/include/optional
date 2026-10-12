@@ -61,6 +61,9 @@ class optional {
     // then deleted, which deletes optional's destructor.  The contained value
     // is destroyed explicitly in reset().
     constexpr __storage_type() noexcept : __dummy_() {}
+    template <class... Args>
+    constexpr __storage_type(in_place_t, Args&&... args)
+        : __value_(std::forward<Args>(args)...) {}
     constexpr ~__storage_type() {}
   };
 
@@ -92,29 +95,23 @@ class optional {
 
   constexpr optional(nullopt_t) noexcept : __engaged_(false) {}
 
-  constexpr optional(const T& value) : __engaged_(false) {
-    __construct_copy(value);
-  }
+  constexpr optional(const T& value)
+      : __storage_(in_place, value), __engaged_(true) {}
 
-  constexpr optional(T&& value) : __engaged_(false) {
-    __construct_move(std::move(value));
-  }
+  constexpr optional(T&& value)
+      : __storage_(in_place, std::move(value)), __engaged_(true) {}
 
   template <
       class U,
       typename enable_if<!is_same<remove_cvref_t<U>, optional>::value &&
                              is_constructible<T, U>::value,
                          int>::type = 0>
-  constexpr optional(U&& value) : __engaged_(false) {
-    new (__ptr()) T(std::forward<U>(value));
-    __engaged_ = true;
-  }
+  constexpr optional(U&& value)
+      : __storage_(in_place, std::forward<U>(value)), __engaged_(true) {}
 
   template <class... Args>
-  explicit optional(in_place_t, Args&&... args) : __engaged_(false) {
-    new (__ptr()) T(std::forward<Args>(args)...);
-    __engaged_ = true;
-  }
+  constexpr explicit optional(in_place_t, Args&&... args)
+      : __storage_(in_place, std::forward<Args>(args)...), __engaged_(true) {}
 
   template <class U, class... Args>
   explicit optional(in_place_t, initializer_list<U> init, Args&&... args)

@@ -1193,9 +1193,10 @@ static ASTNode* GetSizeofVLA(TypeRecord* type, SourceLocation location) {
 }
 
 
-// `sizeof(Nested::member)` names a non-static data member in unevaluated
-// context (common in static_assert).  Parse it directly so the member name is
-// not resolved through the current member-function's injected scope.
+// `sizeof(Nested::member.submember)` names a non-static data member in
+// unevaluated context (common in generated layout calculations).  Parse the
+// qualified member and any following member chain directly so the first member
+// is not resolved through the current member-function's injected scope.
 static ASTNode* TryParseSizeofNestedMember(Syntax* syntax,
                                            SourceLocation location) {
   if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(identifier))) {
@@ -1236,9 +1237,29 @@ static ASTNode* TryParseSizeofNestedMember(Syntax* syntax,
     LexCheckpointDestruct(&checkpoint);
     return NULL;
   }
+  TypeRecord* member_type = member->symbol->type;
+  while (LexMatch(syntax->lex, TOK(dot))) {
+    if (!LexLookingAt(syntax->lex, TOK(identifier)) ||
+        !TypeIsStructOrUnion(member_type) ||
+        member_type->info.struct_info == NULL) {
+      LexCheckpointRestore(syntax->lex, &checkpoint);
+      LexCheckpointDestruct(&checkpoint);
+      return NULL;
+    }
+    StructMember* nested_member = FindStructMemberByName(
+        member_type->info.struct_info, syntax->lex->spelling.value);
+    if (nested_member == NULL || nested_member->symbol == NULL ||
+        nested_member->symbol->type == NULL) {
+      LexCheckpointRestore(syntax->lex, &checkpoint);
+      LexCheckpointDestruct(&checkpoint);
+      return NULL;
+    }
+    member_type = nested_member->symbol->type;
+    LexNextToken(syntax->lex);
+  }
   LexCheckpointDestruct(&checkpoint);
-  TypeRecordCalculateSize(member->symbol->type);
-  return NewSizeofASTNodeWithKnownSize(member->symbol->type->size, location);
+  TypeRecordCalculateSize(member_type);
+  return NewSizeofASTNodeWithKnownSize(member_type->size, location);
 }
 
 

@@ -1341,7 +1341,11 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
     StringAppendChar(&mangled, 'N');
     AppendCXXNestedNamespaceComponents(&mangled, ns);
     if (owner != NULL && owner->tag_name != NULL) {
-      AppendCXXNameComponent(&mangled, owner->tag_name->value);
+      // A static member of an out-of-line nested class belongs to the complete
+      // class scope (`Api::_Internal::member`), not merely the innermost class.
+      // Omitting lexical parents aliases identically named members of sibling
+      // nested classes.
+      AppendCXXStructNameComponents(&mangled, owner);
     }
     AppendCXXNameComponent(&mangled, symbol->name.value);
     StringAppendChar(&mangled, 'E');

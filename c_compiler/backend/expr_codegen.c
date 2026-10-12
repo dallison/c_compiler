@@ -4142,12 +4142,23 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         !TypeIsArray(arg_value->type) &&
         !TypeIsVector(arg_value->type) &&
         !TypeIsMemberPointerAggregate(arg_value->type)) {
+      // An implicit conversion in a return statement can synthesize an
+      // argument node without retaining its source type.  The reference
+      // formal still supplies the exact object type to materialize.
+      TypeRecord* reference_object_type = arg->type;
+      if (reference_object_type == NULL && TypeIsReference(formal_type)) {
+        reference_object_type = formal_type->next;
+      }
+      if (reference_object_type == NULL) {
+        reference_object_type = arg_value->type;
+      }
       IRNode* ref_source = arg_value;
       bool materialize_prvalue =
           arg->value_category == kValueCategoryPrvalue &&
           !function_reference_formal;
       if (!IRIsVariable(ref_source) || materialize_prvalue) {
-        arg_value = GeneratorSpillValueToTemp(gen, arg_value, arg->type);
+        arg_value =
+            GeneratorSpillValueToTemp(gen, arg_value, reference_object_type);
       } else {
         IRVariable* variable = (IRVariable*)ref_source;
         if (variable->symbol != NULL) {
@@ -4155,7 +4166,7 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
         }
         arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), ref_source));
       }
-      IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
+      IRSetType(arg_value, NewPointerTo(kQualPlain, reference_object_type));
     }
 
     if (reference_formal && reference_returning_call) {

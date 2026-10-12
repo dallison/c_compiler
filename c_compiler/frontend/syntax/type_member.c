@@ -156,6 +156,8 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
                                             bool qualifier_names_constructor);
 static bool CanOverloadStructMember(StructMember* existing,
                                     StructMember* member);
+static bool CXXMemberExplicitParameterListsEqual(StructMember* left,
+                                                 StructMember* right);
 static StructMember* FindConstrainedMemberOverload(StructMember* first,
                                                    Symbol* candidate);
 
@@ -704,6 +706,8 @@ static StructMember* CloneCXXMemberUsingMember(StructMember* member,
   return clone;
 }
 
+// Adds a member selected by a class-scope using-declaration, preserving normal
+// hiding when the derived class already declares the same constructor signature.
 static void AddCXXMemberUsingFunction(TypeParser* parser, Struct* owner,
                                       StructMember* member) {
   if (member == NULL) {
@@ -712,6 +716,22 @@ static void AddCXXMemberUsingFunction(TypeParser* parser, Struct* owner,
   StructMember* existing =
       MapFindPointerKey(&owner->symbol_table, &member->symbol->name);
   if (existing != NULL) {
+    TypeRecord* imported_type = member->symbol->type;
+    if (imported_type != NULL && imported_type->info.function.is_constructor) {
+      for (StructMember* candidate = existing; candidate != NULL;
+           candidate = candidate->overload_next) {
+        TypeRecord* candidate_type =
+            candidate->symbol != NULL ? candidate->symbol->type : NULL;
+        if (candidate_type != NULL &&
+            candidate_type->info.function.is_constructor &&
+            CXXMemberExplicitParameterListsEqual(candidate, member)) {
+          // A constructor already declared by the derived class hides an
+          // inherited constructor with the same explicit parameter types.
+          StructMemberDelete(member);
+          return;
+        }
+      }
+    }
     if (!CanOverloadStructMember(existing, member)) {
       String member_name;
       StringInit(&member_name, NULL);

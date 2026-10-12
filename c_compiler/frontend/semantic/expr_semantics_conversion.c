@@ -144,11 +144,11 @@ bool TypeIsDerivedFromInCurrentClass(TypeRecord* from, TypeRecord* to) {
     return false;
   }
   Struct* from_struct = from->info.struct_info;
-  if (current != from_struct) {
+  if (!CXXSameAccessClass(current, from_struct)) {
     bool nested = false;
     for (Struct* enclosing = current->lexical_parent; enclosing != NULL;
          enclosing = enclosing->lexical_parent) {
-      if (enclosing == from_struct) {
+      if (CXXSameAccessClass(enclosing, from_struct)) {
         nested = true;
         break;
       }
@@ -158,7 +158,8 @@ bool TypeIsDerivedFromInCurrentClass(TypeRecord* from, TypeRecord* to) {
     bool friend_of_derived = false;
     if (!nested) {
       for (size_t i = 0; i < from_struct->friend_classes.length; i++) {
-        if (from_struct->friend_classes.value.p[i] == current) {
+        if (CXXSameAccessClass(from_struct->friend_classes.value.p[i],
+                               current)) {
           friend_of_derived = true;
           break;
         }

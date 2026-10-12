@@ -36,6 +36,7 @@ void ApplyVirtualBaseAdjustmentToMemberReference(BinaryASTNode* node, Struct* fr
 const char* CXXAccessName(CXXAccess access);
 String* CXXFindBaseTagNameForDestructorSpelling(Struct* str, const char* base_name);
 Symbol* CXXStructTemplateOrigin(Struct* str);
+bool CXXSameAccessClass(Struct* a, Struct* b);
 void CheckDeletedFunctionUse(Symbol* function, ASTNode* use);
 bool CurrentFunctionCanAccessMember(Struct* lookup_context, Struct* owner, CXXAccess original_access, CXXAccess effective_access);
 StructMember* FindCXXMemberOverloadHead(Struct* owner, String* name);

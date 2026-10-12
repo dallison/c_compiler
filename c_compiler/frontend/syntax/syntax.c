@@ -240,6 +240,7 @@ static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
   StringInit(&current, NULL);
   size_t pos = lex->pos;
   bool result = false;
+  bool saw_qualifier = false;
 
   if (LexLookingAt(lex, TOK(identifier))) {
     StringSetString(&previous, &lex->spelling);
@@ -265,6 +266,7 @@ static bool CurrentLineLooksLikeSpecialMemberDefinition(Syntax* syntax) {
       goto done;
     }
     pos += 2;
+    saw_qualifier = true;
 
     while (pos < lex->line.length &&
            isspace((unsigned char)lex->line.value[pos])) {
@@ -315,6 +317,41 @@ done:
   StringDestruct(&previous);
   LexCheckpointRestore(lex, &start);
   LexCheckpointDestruct(&start);
+  if (!result && saw_qualifier) {
+    // The character lookahead above is intentionally cheap, but `lex->line`
+    // ends at a physical newline.  Retry with tokens so an out-of-line
+    // constructor whose final `::Name` is wrapped onto the next line is still
+    // recognized before ordinary declaration parsing treats the qualifier as
+    // a return type.
+    LexCheckpoint multiline;
+    LexCheckpointSave(lex, &multiline);
+    Vector multiline_attrs = {0};
+    while (SyntaxParseAnyAttribute(syntax, &multiline_attrs)) {
+    }
+    VectorClear(&multiline_attrs);
+    while (LookingAtCXXSpecialMemberDeclSpecifier(lex)) {
+      LexNextToken(lex);
+    }
+    FullyQualifiedIdentifier name;
+    FullyQualifiedIdentifierInit(&name);
+    if (SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
+                                                           TC(decl)) &&
+        name.is_qualified && name.components.length >= 2 &&
+        LexLookingAt(lex, TOK(lparen))) {
+      String* owner_name =
+          name.components.value.p[name.components.length - 2];
+      String* member_name =
+          name.components.value.p[name.components.length - 1];
+      const char* member = member_name->value;
+      if (member[0] == '~') {
+        member++;
+      }
+      result = StringEqual(owner_name, member);
+    }
+    FullyQualifiedIdentifierDestruct(&name);
+    LexCheckpointRestore(lex, &multiline);
+    LexCheckpointDestruct(&multiline);
+  }
   return result;
 }
 
@@ -2579,6 +2616,20 @@ Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
     Symbol* owner = SyntaxFindQualifiedPrefixSymbolImpl(
         syntax, name, name->components.length - 1,
         /*allow_dependent_template_args=*/true);
+    if (owner == NULL) {
+      // Some class declarations have no ordinary injected-name symbol (for
+      // example after an attribute-bearing nested class head), but their tag
+      // still provides a valid qualifier.
+      FullyQualifiedIdentifier prefix;
+      FullyQualifiedIdentifierInit(&prefix);
+      prefix.absolute = name->absolute;
+      prefix.is_qualified = name->absolute || name->components.length > 2;
+      for (size_t i = 0; i + 1 < name->components.length; i++) {
+        FullyQualifiedIdentifierAppend(&prefix, name->components.value.p[i]);
+      }
+      owner = SyntaxFindQualifiedTag(syntax, &prefix);
+      FullyQualifiedIdentifierDestruct(&prefix);
+    }
     if (owner != NULL && owner->type != NULL &&
         TypeIsStructOrUnion(owner->type) &&
         owner->type->info.struct_info != NULL) {
@@ -2599,6 +2650,26 @@ Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
       if (symbol == NULL) {
         symbol = FindInjectedClassNameSymbol(owner->type->info.struct_info,
                                              &last);
+      }
+      if (symbol == NULL) {
+        // A nested class is not inserted into its enclosing member table until
+        // its definition closes.  While parsing that definition, a qualified
+        // self-reference such as `friend class Outer::Inner;` must still name
+        // the current class.
+        for (Struct* current = syntax->cxx_class_head;
+             current != NULL && symbol == NULL;
+             current = current->lexical_parent) {
+          Struct* parent = current->lexical_parent;
+          bool parent_matches =
+              parent == owner->type->info.struct_info ||
+              (parent != NULL && parent->tag_symbol != NULL &&
+               (parent->tag_symbol == owner ||
+                TypeEqual(parent->tag_symbol->type, owner->type)));
+          if (parent_matches &&
+              CurrentClassNameMatchesTypeName(current, &last)) {
+            symbol = current->tag_symbol;
+          }
+        }
       }
     }
   }
@@ -8792,6 +8863,15 @@ static void RecordFriendFunction(Syntax* syntax, Struct* befriending,
   // friend record stays valid; access checks compare by name and signature so
   // either the merged declaration or the fresh symbol works.
   Symbol* friend_symbol = in_scope_symbol != NULL ? in_scope_symbol : sym;
+  // Preserve the class whose lexical scope and access rights apply while an
+  // inline hidden-friend body is analyzed later.  The function remains a
+  // namespace-scope function, so cxx_member_owner cannot carry this context.
+  if (sym != NULL) {
+    sym->member_lookup_class = befriending;
+  }
+  if (friend_symbol != NULL) {
+    friend_symbol->member_lookup_class = befriending;
+  }
   StructAddFriendFunction(befriending, friend_symbol);
   if (definition != NULL) {
     // Inline friend definitions belong to the enclosing namespace; queue them

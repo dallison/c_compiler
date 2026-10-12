@@ -681,6 +681,41 @@ static void RecordLateMemberBody(Struct* owner, PendingMemberBody* pending,
   VectorAppend(&g_late_member_bodies, late);
 }
 
+/* Returns true when an argument directly names a class that has only been
+ * forward-declared.  Member bodies of a specialization using such an argument
+ * must remain lazy: probing the class from an otherwise-unused body would cache
+ * the result before the class definition is available. */
+static bool TemplateArgumentNamesIncompleteClass(TemplateArgument* argument) {
+  if (argument == NULL) {
+    return false;
+  }
+  if (argument->type != NULL && TypeIsStructOrUnion(argument->type) &&
+      !TypeIsCompleteClass(argument->type)) {
+    return true;
+  }
+  for (size_t i = 0;
+       argument->pack_arguments != NULL &&
+       i < argument->pack_arguments->length;
+       i++) {
+    if (TemplateArgumentNamesIncompleteClass(
+            argument->pack_arguments->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Detects class-template specializations whose body substitution must wait
+ * until one of their concrete class arguments has been completed. */
+static bool TemplateArgumentsNameIncompleteClass(Vector* arguments) {
+  for (size_t i = 0; arguments != NULL && i < arguments->length; i++) {
+    if (TemplateArgumentNamesIncompleteClass(arguments->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void TypeInstantiateLateMemberBodies(Syntax* syntax, Vector* defined) {
   if (!g_late_member_bodies_inited) {
     return;
@@ -10052,11 +10087,15 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
     sym->flags = ftpl->flags;
     sym->location = ftpl->location;
     sym->namespace_ = ftpl->namespace_;
+    sym->member_lookup_class = record_into;
     func->info.function.symbol = sym;
     SymbolSetCXXMangledAsmName(sym);
 
     Symbol* in_scope = SyntaxRegisterInstantiatedFriendFunction(
         parser->syntax, ftpl->namespace_, sym);
+    if (in_scope != NULL) {
+      in_scope->member_lookup_class = record_into;
+    }
     StructAddFriendFunction(record_into, in_scope != NULL ? in_scope : sym);
 
     bool is_new_symbol = (in_scope == sym);
@@ -11052,6 +11091,8 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   if (prefixed_member_body_args != NULL) {
     member_body_args = prefixed_member_body_args;
   }
+  bool defer_bodies_for_incomplete_argument =
+      TemplateArgumentsNameIncompleteClass(source_args);
   for (size_t i = 0; i < pending_member_bodies.length; i++) {
     PendingMemberBody* pmb = pending_member_bodies.value.p[i];
     // A member template of a nested template cloned for the enclosing
@@ -11069,8 +11110,19 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
             (int)source_args->length) {
       body_args = source_args;
     }
-    if (pmb->template_definition == NULL) {
+    if (pmb->template_definition == NULL &&
+        !defer_bodies_for_incomplete_argument) {
       RecordLateMemberBody(str, pmb, body_args);
+    }
+    if (defer_bodies_for_incomplete_argument) {
+      // Instantiating a class from a declaration such as `Map<Key, Value>&`
+      // must not instantiate all of Map's member bodies while Value is still a
+      // forward declaration.  Keep the source definition and arguments for
+      // on-demand cloning; the late-body pass also materializes any referenced
+      // virtual or otherwise indirectly-used member at the end of the TU.
+      RecordLateMemberBody(str, pmb, body_args);
+      free(pmb);
+      continue;
     }
     CloneInstantiatedMemberFunctionBody(parser, str, pmb->symbol,
                                         pmb->template_definition,

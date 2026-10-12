@@ -73,7 +73,7 @@ static void MemberCallLowerRewriteToFunctionCall(
     MemberCallLowerPlan* plan);
 static Struct* FunctionMemberOwner(TypeRecord* current);
 static Struct* CXXLambdaEnclosingClassAccessContext(TypeRecord* func);
-static bool CXXSameAccessClass(Struct* a, Struct* b);
+bool CXXSameAccessClass(Struct* a, Struct* b);
 static bool FunctionIsFriendOf(TypeRecord* current, Struct* owner);
 static bool CurrentFunctionIsFriendOf(Struct* owner);
 static bool EnclosingFunctionIsFriendOf(TypeRecord* current, Struct* owner);
@@ -1045,7 +1045,7 @@ Symbol* CXXStructTemplateOrigin(Struct* str) {
 }
 
 // True when two classes share access (same type, nested, or template family).
-static bool CXXSameAccessClass(Struct* a, Struct* b) {
+bool CXXSameAccessClass(Struct* a, Struct* b) {
   if (a == b) {
     return true;
   }
@@ -1218,18 +1218,24 @@ bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   if (owner != NULL) {
     for (size_t i = 0; i < owner->friend_classes.length; i++) {
       Struct* friend_class = owner->friend_classes.value.p[i];
-      if (friend_class == current_owner ||
-          CXXSameAccessClass(friend_class, current_owner)) {
-        return true;
+      for (Struct* accessor = current_owner; accessor != NULL;
+           accessor = accessor->lexical_parent) {
+        if (CXXSameAccessClass(friend_class, accessor)) {
+          // A nested class is a member of its enclosing friend class and uses
+          // that class's access rights.
+          return true;
+        }
       }
     }
   }
   if (lookup_context != owner && lookup_context != NULL) {
     for (size_t i = 0; i < lookup_context->friend_classes.length; i++) {
       Struct* friend_class = lookup_context->friend_classes.value.p[i];
-      if (friend_class == current_owner ||
-          CXXSameAccessClass(friend_class, current_owner)) {
-        return true;
+      for (Struct* accessor = current_owner; accessor != NULL;
+           accessor = accessor->lexical_parent) {
+        if (CXXSameAccessClass(friend_class, accessor)) {
+          return true;
+        }
       }
     }
   }

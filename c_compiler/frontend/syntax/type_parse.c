@@ -597,6 +597,60 @@ static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
   return current;
 }
 
+// Resolves an unparenthesized qualified data-member chain in decltype, such as
+// `decltype(Message::_impl_.field_)`.  Such an operand denotes the final
+// member's declared type even though it has no object expression.
+static TypeRecord* TryParseCXXDecltypeNestedMember(TypeParser* parser) {
+  if (!LexLookingAt(parser->lex, TOK(identifier))) {
+    return NULL;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  String owner_name;
+  StringInit(&owner_name, parser->lex->spelling.value);
+  LexNextToken(parser->lex);
+  if (!LexMatch(parser->lex, TOK(coloncolon)) ||
+      !LexLookingAt(parser->lex, TOK(identifier))) {
+    LexCheckpointRestore(parser->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    StringDestruct(&owner_name);
+    return NULL;
+  }
+  Symbol* owner = SyntaxFindSymbol(parser->syntax, &owner_name);
+  if (owner == NULL) {
+    owner = SyntaxFindTag(parser->syntax, &owner_name);
+  }
+  StringDestruct(&owner_name);
+  TypeRecord* current_type = owner != NULL ? owner->type : NULL;
+  while (current_type != NULL && TypeIsStructOrUnion(current_type) &&
+         current_type->info.struct_info != NULL) {
+    StructMember* member = FindStructMemberByName(
+        current_type->info.struct_info, parser->lex->spelling.value);
+    if (member == NULL || member->symbol == NULL ||
+        member->symbol->type == NULL) {
+      current_type = NULL;
+      break;
+    }
+    current_type = member->symbol->type;
+    LexNextToken(parser->lex);
+    if (!LexMatch(parser->lex, TOK(dot))) {
+      break;
+    }
+    if (!LexLookingAt(parser->lex, TOK(identifier))) {
+      current_type = NULL;
+      break;
+    }
+  }
+  if (current_type == NULL ||
+      !LexLookingAt(parser->lex, TOK(rparen))) {
+    LexCheckpointRestore(parser->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return NULL;
+  }
+  LexCheckpointDestruct(&checkpoint);
+  return TypeRecordCopy(current_type);
+}
+
 static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   LexNextToken(parser->lex);
   SyntaxNeedBracket(parser->syntax, TOK(lparen), TC(type));
@@ -615,6 +669,13 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
     // than the `decltype(auto)` placeholder.  Restore the `auto` token and
     // parse the complete operand as an expression below.
     LexCheckpointRestore(parser->lex, &checkpoint);
+  }
+
+  TypeRecord* nested_member_type =
+      TryParseCXXDecltypeNestedMember(parser);
+  if (nested_member_type != NULL) {
+    SyntaxNeedBracket(parser->syntax, TOK(rparen), TC(type));
+    return nested_member_type;
   }
 
   bool parenthesized_expression = LexLookingAt(parser->lex, TOK(lparen));

@@ -645,8 +645,12 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   int saved_constant_evaluation_depth =
       compiler->constant_evaluation_required_depth;
   compiler->current_function = node->type;
+  Symbol* function_symbol = node->type->info.function.symbol;
   compiler->current_class_access_context =
-      node->type->info.function.cxx_member_owner;
+      node->type->info.function.cxx_member_owner != NULL
+          ? node->type->info.function.cxx_member_owner
+          : function_symbol != NULL ? function_symbol->member_lookup_class
+                                    : NULL;
   compiler->immediate_function_context_depth = 0;
   compiler->constant_evaluation_required_depth = 0;
   if (TypeIsConstevalOnly(node->type) &&

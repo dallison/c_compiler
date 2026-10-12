@@ -2656,6 +2656,20 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
       assert(inst->operand[0] != NULL);
       assert(inst->operand[2] != NULL);
       if (BranchOperandIsImmediate(inst->operand[0]) &&
+          BranchOperandIsImmediate(inst->operand[1])) {
+        // A folded comparison can leave both branch operands constant.  Keep
+        // the branch explicit, but materialize its left operand because x86
+        // cannot encode an immediate as cmp's destination.
+        fprintf(fp, "\tmovq ");
+        PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+        fprintf(fp, ", %%r11\n\tcmp ");
+        PrintAttOperand(fp, inst->operand[1], buf2, sizeof(buf2));
+        fprintf(fp, ", %%r11\n\t%s .%s_label_%d\n",
+                BranchMnemonic((X86Opcode)inst->opcode), func_name,
+                inst->operand[2]->id);
+        break;
+      }
+      if (BranchOperandIsImmediate(inst->operand[0]) &&
           !BranchOperandIsImmediate(inst->operand[1])) {
         // The destination of the cmp would be an immediate, which the
         // assembler cannot encode.  Compare in the opposite direction and
@@ -5545,6 +5559,19 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
       }
       assert(inst->operand[0] != NULL);
       assert(inst->operand[2] != NULL);
+      if (BranchOperandIsImmediateI386(inst->operand[0]) &&
+          BranchOperandIsImmediateI386(inst->operand[1])) {
+        // As above, materialize the left constant so cmp has an encodable
+        // destination in 32-bit mode.
+        fprintf(fp, "\tmovl ");
+        PrintAttOperandI386(fp, inst->operand[0], buf1, sizeof(buf1));
+        fprintf(fp, ", %%ebx\n\tcmp ");
+        PrintAttOperandI386(fp, inst->operand[1], buf2, sizeof(buf2));
+        fprintf(fp, ", %%ebx\n\t%s .%s_label_%d\n",
+                BranchMnemonicI386((X86Opcode)inst->opcode), func_name,
+                inst->operand[2]->id);
+        break;
+      }
       if (BranchOperandIsImmediateI386(inst->operand[0]) &&
           !BranchOperandIsImmediateI386(inst->operand[1])) {
         // The destination of the cmp would be an immediate, which the

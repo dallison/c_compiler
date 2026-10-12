@@ -1022,6 +1022,79 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
   // still dependent or unknown keeps the member type for a later
   // substitution.
   if (!TypeIsStructOrUnion(arg->type) || arg->type->info.struct_info == NULL) {
+    // allocator_traits<Alloc>::rebind_traits<T>::member can arrive here with
+    // the intermediate rebind type still encoded as `T0::rebind<T>::other`.
+    // Inside a concrete container specialization, bind that root to the
+    // container's concrete allocator_type, then retry the final member lookup.
+    Struct* substitution_target =
+        parser != NULL ? parser->template_substitution_target : NULL;
+    StructMember* allocator_type =
+        FindStructMemberByName(substitution_target, "allocator_type");
+    if (allocator_type != NULL && allocator_type->symbol != NULL &&
+        allocator_type->symbol->type != NULL &&
+        TypeContainsTemplateParameter(arg->type)) {
+      bool saved_substitution_failed =
+          parser != NULL && parser->template_substitution_failed;
+      if (parser != NULL) {
+        parser->template_substitution_failed = false;
+      }
+      Vector* root_args = NewVector();
+      VectorAppend(root_args,
+                   NewTypeTemplateArgument(allocator_type->symbol->type));
+      TypeRecord* rebound =
+          SubstituteTemplateParameters(parser, arg->type, root_args);
+      VectorDeleteWithContents(
+          root_args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      if (rebound != NULL && TypeIsStructOrUnion(rebound) &&
+          !TypeContainsTemplateParameter(rebound)) {
+        Vector* rebound_args = TemplateArgumentVectorCopy(args);
+        TemplateArgument* rebound_arg = rebound_args->value.p[index];
+        TypeRecordDelete(rebound_arg->type);
+        rebound_arg->type = rebound;
+        TypeRecord* resolved =
+            SubstituteDependentMemberType(parser, type, rebound_args);
+        VectorDeleteWithContents(
+            rebound_args, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        if (resolved != NULL && !TypeContainsTemplateParameter(resolved)) {
+          if (parser != NULL) {
+            parser->template_substitution_failed = saved_substitution_failed;
+          }
+          return resolved;
+        }
+        TypeRecordDelete(resolved);
+      } else {
+        TypeRecordDelete(rebound);
+      }
+      if (parser != NULL) {
+        parser->template_substitution_failed = saved_substitution_failed;
+      }
+    }
+    // A non-template nested class can retain an enclosing class parameter as
+    // `T0::member` after its own parameter indices have been rebased away.
+    // Resolve that member against the concrete enclosing specialization rather
+    // than treating T0 as a (nonexistent) parameter of the nested class.
+    Struct* source =
+        parser != NULL ? parser->template_substitution_source : NULL;
+    Struct* enclosing_source =
+        parser != NULL ? parser->enclosing_template_substitution_source : NULL;
+    Struct* enclosing_target =
+        parser != NULL ? parser->enclosing_template_substitution_target : NULL;
+    if (source != NULL && !source->is_template &&
+        source->lexical_parent == enclosing_source &&
+        enclosing_target != NULL) {
+      StructMember* enclosing_member =
+          FindStructMemberByName(enclosing_target,
+                                 type->dependent_member_name->value);
+      if (enclosing_member != NULL && enclosing_member->symbol != NULL &&
+          StorageIs(enclosing_member->symbol->storage, STO(typedef)) &&
+          enclosing_member->symbol->type != NULL) {
+        TypeRecord* resolved = TypeRecordCopy(enclosing_member->symbol->type);
+        resolved->qualifiers |= type->qualifiers;
+        return TypeRecordCalculateSize(resolved);
+      }
+    }
     if (!TypeContainsTemplateParameter(arg->type) &&
         !TypeIsUnknown(arg->type)) {
       if (parser != NULL) {

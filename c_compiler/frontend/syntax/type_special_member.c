@@ -762,6 +762,23 @@ static bool CXXFunctionHasOnlyImplicitObjectParameters(TypeRecord* func) {
   return func->info.function.prototype.length == implicit_count;
 }
 
+static bool CXXCopyConstructorTrailingParametersAreDefaulted(
+    TypeRecord* func, Symbol* source) {
+  bool found_source = false;
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* parameter = func->info.function.prototype.value.p[i];
+    if (parameter == source) {
+      found_source = true;
+      continue;
+    }
+    if (found_source &&
+        (parameter == NULL || parameter->default_argument == NULL)) {
+      return false;
+    }
+  }
+  return found_source;
+}
+
 static CXXSpecialMemberKind CXXDetermineSpecialMemberKind(Symbol* symbol,
                                                          Struct* owner) {
   if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type) ||
@@ -782,7 +799,8 @@ static CXXSpecialMemberKind CXXDetermineSpecialMemberKind(Symbol* symbol,
       return kCXXSpecialMemberDefaultConstructor;
     }
     Symbol* source = CXXSourceObjectParameter(func);
-    if (source != NULL && CXXReferenceTargetsStruct(source->type, owner)) {
+    if (source != NULL && CXXReferenceTargetsStruct(source->type, owner) &&
+        CXXCopyConstructorTrailingParametersAreDefaulted(func, source)) {
       return source->type->declarator == kDeclRValueReference
                  ? kCXXSpecialMemberMoveConstructor
                  : kCXXSpecialMemberCopyConstructor;
@@ -1494,11 +1512,19 @@ void SynthesizeExplicitlyDefaultedMemberFunctionBodies(TypeParser* parser,
 }
 
 static Symbol* CXXSourceObjectParameter(TypeRecord* func) {
-  if (func == NULL || !TypeIsFunction(func) ||
-      func->info.function.prototype.length < 2) {
+  if (func == NULL || !TypeIsFunction(func)) {
     return NULL;
   }
-  return func->info.function.prototype.value.p[func->info.function.prototype.length - 1];
+  size_t index = func->info.function.cxx_member_owner != NULL ? 1 : 0;
+  if ((func->info.function.is_constructor ||
+       func->info.function.is_destructor) &&
+      func->info.function.cxx_member_owner != NULL &&
+      StructHasVirtualBases(func->info.function.cxx_member_owner)) {
+    index++;
+  }
+  return index < func->info.function.prototype.length
+             ? func->info.function.prototype.value.p[index]
+             : NULL;
 }
 
 static ASTNode* NewCXXSourceMemberReceiver(Symbol* source,
@@ -2911,10 +2937,71 @@ static bool CXXUnionDefaultedSpecialMemberIsDeleted(
   return false;
 }
 
+// Re-evaluates whether an implicit special member is deleted after a dependent
+// class has been instantiated.  The declaration cloned from the template
+// pattern reflects only the pattern's dependent members; concrete bases and
+// members can make that declaration deleted without making the class itself
+// ill-formed.
+static bool CXXInstantiatedImplicitSpecialMemberIsDeleted(
+    Struct* str, CXXSpecialMemberKind kind) {
+  if (str == NULL || kind == kCXXSpecialMemberNone) {
+    return false;
+  }
+  if (str->is_union) {
+    return CXXUnionDefaultedSpecialMemberIsDeleted(str, kind);
+  }
+  switch (kind) {
+    case kCXXSpecialMemberDefaultConstructor:
+      return CXXStructHasMemberWithoutDefaultInitialization(str) ||
+             CXXStructHasDeletedBaseSpecialMemberKind(str, kind) ||
+             CXXStructHasDeletedMemberSpecialMemberKind(str, kind);
+    case kCXXSpecialMemberDestructor:
+      return CXXStructHasDeletedBaseSpecialMemberKind(str, kind) ||
+             CXXStructHasDeletedMemberSpecialMemberKind(str, kind);
+    case kCXXSpecialMemberCopyConstructor:
+      return CXXStructHasUserDeclaredSpecialMemberKind(
+                 str, kCXXSpecialMemberMoveConstructor) ||
+             CXXStructHasUserDeclaredSpecialMemberKind(
+                 str, kCXXSpecialMemberMoveAssignment) ||
+             CXXStructHasDeletedBaseSpecialMemberKind(str, kind) ||
+             CXXStructHasDeletedMemberSpecialMemberKind(str, kind) ||
+             CXXStructHasInaccessibleBaseSpecialMemberKind(str, kind) ||
+             CXXStructHasInaccessibleMemberSpecialMemberKind(str, kind);
+    case kCXXSpecialMemberCopyAssignment:
+      return CXXStructHasUserDeclaredSpecialMemberKind(
+                 str, kCXXSpecialMemberMoveConstructor) ||
+             CXXStructHasUserDeclaredSpecialMemberKind(
+                 str, kCXXSpecialMemberMoveAssignment) ||
+             CXXStructHasUnassignableMember(str) ||
+             CXXStructHasDeletedBaseSpecialMemberKind(str, kind) ||
+             CXXStructHasDeletedMemberSpecialMemberKind(str, kind) ||
+             CXXStructHasInaccessibleBaseSpecialMemberKind(str, kind) ||
+             CXXStructHasInaccessibleMemberSpecialMemberKind(str, kind);
+    case kCXXSpecialMemberMoveConstructor:
+      return CXXStructHasDeletedBaseSpecialMemberKind(str, kind) ||
+             CXXStructHasDeletedMemberSpecialMemberKind(str, kind) ||
+             CXXStructMoveSpecialMemberDeletedByMembers(
+                 str, /*assignment=*/false) ||
+             CXXStructMoveSpecialMemberInaccessible(
+                 str, /*assignment=*/false);
+    case kCXXSpecialMemberMoveAssignment:
+      return CXXStructHasUnassignableMember(str) ||
+             CXXStructHasDeletedBaseSpecialMemberKind(str, kind) ||
+             CXXStructHasDeletedMemberSpecialMemberKind(str, kind) ||
+             CXXStructMoveSpecialMemberDeletedByMembers(
+                 str, /*assignment=*/true) ||
+             CXXStructMoveSpecialMemberInaccessible(
+                 str, /*assignment=*/true);
+    case kCXXSpecialMemberNone:
+      return false;
+  }
+  return false;
+}
+
 // Implicit special members of a nested class are declared while the enclosing
 // template is still dependent, then cloned into the instantiation.  Their
-// noexcept and triviality were decided against that dependent base, so
-// recompute them once the concrete bases and members are in place.
+// deletion, noexcept, and triviality were decided against that dependent
+// pattern, so recompute them once the concrete bases and members are in place.
 static void CXXRefreshImplicitSpecialMembers(Struct* str) {
   if (str == NULL) {
     return;
@@ -2936,7 +3023,10 @@ static void CXXRefreshImplicitSpecialMembers(Struct* str) {
       if (kind == kCXXSpecialMemberNone) {
         continue;
       }
-      bool deleted = func->info.function.is_deleted;
+      bool deleted =
+          CXXInstantiatedImplicitSpecialMemberIsDeleted(str, kind);
+      func->info.function.is_deleted = deleted;
+      func->info.function.is_implicitly_deleted = deleted;
       func->info.function.is_noexcept =
           !deleted && CXXImplicitSpecialMemberIsNoexcept(str, kind);
       func->info.function.is_trivial_special_member =
