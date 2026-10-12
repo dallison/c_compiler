@@ -10518,6 +10518,13 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
       !TypeIsFunction(symbol->type)) {
     return;
   }
+  // A declaration-only explicit specialization is supplied by another
+  // translation unit. Do not satisfy it by cloning the primary template when
+  // call checking asks whether the selected member is deleted.
+  if (symbol->flags.is_explicit_specialization &&
+      symbol->type->info.function.body == NULL) {
+    return;
+  }
   if (symbol->type->info.function.body != NULL) {
     // A constexpr or auto-returning specialization first named inside a
     // decltype probe only has a body cloned for deduction.  Code analyzed in

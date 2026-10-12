@@ -18,11 +18,16 @@
 #define ESRCH 3
 #define EINTR 4
 #define EIO 5
+#define ENXIO 6
+#define E2BIG 7
 #define ENOEXEC 8
 #define EBADF 9
+#define ECHILD 10
 #define EAGAIN 11
+#define EWOULDBLOCK EAGAIN
 #define ENOMEM 12
 #define EACCES 13
+#define EFAULT 14
 #define EBUSY 16
 #define EEXIST 17
 #define EXDEV 18
@@ -33,10 +38,13 @@
 #define ENFILE 23
 #define EMFILE 24
 #define ENOTTY 25
+#define ETXTBSY 26
 #define EFBIG 27
 #define ENOSPC 28
 #define ESPIPE 29
 #define EROFS 30
+#define EMLINK 31
+#define EPIPE 32
 #define EDOM 33
 #define ERANGE 34
 #define EDEADLK 35
@@ -46,9 +54,31 @@
 #define ELOOP 40
 #define EOVERFLOW 75
 #define EILSEQ 84
+#define ENOTSOCK 88
+#define EDESTADDRREQ 89
+#define EPROTOTYPE 91
+#define ENOPROTOOPT 92
+#define EPROTONOSUPPORT 93
 #define ENOTSUP 95
 #define EOPNOTSUPP ENOTSUP
+#define EAFNOSUPPORT 97
+#define EADDRINUSE 98
+#define EADDRNOTAVAIL 99
+#define ENETDOWN 100
+#define ENETUNREACH 101
+#define ENETRESET 102
+#define ECONNABORTED 103
+#define ECONNRESET 104
+#define ENOBUFS 105
+#define EISCONN 106
+#define ENOTCONN 107
 #define ETIMEDOUT 110
+#define ECONNREFUSED 111
+#define EHOSTUNREACH 113
+#define EALREADY 114
+#define ECANCELED 125
+#define ENOLCK 37
+#define ENOLINK 67
 #define EUNKNOWN 4095
 #elif defined(__DAVECC_NATIVE_DARWIN__)
 /* Values match Darwin's <sys/errno.h>.  Native code sees libSystem's errno. */
@@ -169,6 +199,7 @@
 #define ENOSPC          8       /* No space left on device */
 #define EEXIST          9       /* File exists */
 #define EAGAIN          10      /* Try again */
+#define EWOULDBLOCK     EAGAIN
 #define EIO             11      /* I/O error */
 #define EINTR           12      /* Interrupted system call */
 #define ENOSYS          13      /* Function not implemented */
@@ -193,6 +224,36 @@
 #define ENFILE          31      /* Too many open files in system */
 #define EOVERFLOW       32      /* Value too large for defined data type */
 #define ENOTTY          33      /* Inappropriate ioctl for device */
+#define ENXIO           34
+#define E2BIG           35
+#define ECHILD          36
+#define EFAULT          37
+#define ETXTBSY         38
+#define EMLINK          39
+#define EPIPE           40
+#define ENOTSOCK        41
+#define EDESTADDRREQ    42
+#define EPROTOTYPE      43
+#define ENOPROTOOPT     44
+#define EPROTONOSUPPORT 45
+#define EAFNOSUPPORT    46
+#define EADDRINUSE      47
+#define EADDRNOTAVAIL   48
+#define ENOBUFS         49
+#define EISCONN         50
+#define ENOTCONN        51
+#define ETIMEDOUT       52
+#define ECONNREFUSED    53
+#define EALREADY        54
+#define ECONNABORTED    55
+#define ECONNRESET      56
+#define EHOSTUNREACH    57
+#define ENETDOWN        58
+#define ENETRESET       59
+#define ENETUNREACH     60
+#define ENOLCK          61
+#define ENOLINK         62
+#define ECANCELED       63
 #endif
 
 #if defined(__6502__)

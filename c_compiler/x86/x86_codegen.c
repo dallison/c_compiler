@@ -191,6 +191,7 @@ const char* X86OpcodeName(int op) {
     OPCODE(resultv)
     OPCODE(x0)
     OPCODE(t0)
+    OPCODE(asm_bx)
     OPCODE(regarg)
     OPCODE(spill)
     OPCODE(reload)
@@ -497,6 +498,7 @@ bool X86IsFixedRegister(TargetInstruction* inst) {
     case X86_OP(fa7):
     case X86_OP(x0):
     case X86_OP(t0):
+    case X86_OP(asm_bx):
     case X86_OP(fp):
     case X86_OP(resulti):
     case X86_OP(resulth):
@@ -3482,6 +3484,58 @@ static TargetInstruction* LowerPrefetch(X86Generator* rv, IRNode* node) {
   return SetLoweredNode(node, Emit(rv, NewInstruction1(opcode, ptr)));
 }
 
+// Return the fixed hardware-register constraint, if any, used by an x86
+// extended-asm operand. Other constraint characters are allocation classes or
+// modifiers and continue through the normal register path.
+static char FixedAsmRegisterConstraint(const AsmOperand* operand) {
+  if (operand == NULL) {
+    return '\0';
+  }
+  for (const char* p = operand->constraint.value; *p != '\0'; p++) {
+    if (*p == 'a' || *p == 'b' || *p == 'c' || *p == 'd') {
+      return *p;
+    }
+  }
+  return '\0';
+}
+
+// Materialize the fixed register requested by GCC's `a`, `b`, `c`, and `d`
+// constraints and report its physical register number to the asm emitter.
+static TargetInstruction* FixedAsmRegister(X86Generator* rv, char constraint,
+                                           int* reg_num) {
+  if (constraint == 'a') {
+    *reg_num = X86_P(rv)->ret_reg;
+    return EmitSymbol(rv, NewInstruction(X86_OP(resulti)));
+  }
+  if (constraint == 'd') {
+    *reg_num = X86_P(rv)->int_arg_start + 2;
+    return IntArgumentRegister(rv, 2);
+  }
+  if (constraint == 'c') {
+    *reg_num = X86_P(rv)->int_arg_start + 3;
+    return IntArgumentRegister(rv, 3);
+  }
+  if (constraint == 'b') {
+    *reg_num = X86_P(rv)->int_saved_end_1;
+    return EmitSymbol(rv, NewInstruction(X86_OP(asm_bx)));
+  }
+  return NULL;
+}
+
+static bool AsmUsesFixedRegister(AsmASTNode* node, char constraint) {
+  for (size_t i = 0; node != NULL && i < node->outputs.length; i++) {
+    if (FixedAsmRegisterConstraint(node->outputs.value.p[i]) == constraint) {
+      return true;
+    }
+  }
+  for (size_t i = 0; node != NULL && i < node->inputs.length; i++) {
+    if (FixedAsmRegisterConstraint(node->inputs.value.p[i]) == constraint) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static TargetInstruction* LowerAsm(X86Generator* rv, IRNode* node) {
   // The first argument is a literal containing the assembly language.
   IRConstant* id_node = node->inputs.value.p[0];
@@ -3507,18 +3561,34 @@ static TargetInstruction* LowerAsm(X86Generator* rv, IRNode* node) {
   asm_inst->num_operands = (int)(asm_node->outputs.length + asm_node->inputs.length);
   memset(asm_inst->immediate_values, 0, sizeof(asm_inst->immediate_values));
 
+  // RBX is callee-saved in the AMD64 ABI. A `b` constraint may overwrite it,
+  // so preserve the incoming value independently of the normal allocator's
+  // saved-register bookkeeping and restore it after outputs are captured.
+  TargetInstruction* saved_bx = NULL;
+  if (AsmUsesFixedRegister(asm_node, 'b')) {
+    TargetInstruction* bx =
+        EmitSymbol(rv, NewInstruction(X86_OP(asm_bx)));
+    saved_bx = Emit(rv, NewInstruction1(X86_OP(mv), bx));
+  }
+
   size_t ir_index = 1;
   int operand_index = 0;
   TargetInstruction* output_regs[X86_MAX_ASM_OPERANDS] = {0};
   for (size_t i = 0; i < asm_node->outputs.length; i++, operand_index++) {
     AsmOperand* operand = asm_node->outputs.value.p[i];
     IRNode* addr_node = node->inputs.value.p[ir_index++];
-    int arg_reg = 5 - (int)i;
-    if (arg_reg < 0) {
-      arg_reg = 5;
+    TargetInstruction* reg = FixedAsmRegister(
+        rv, FixedAsmRegisterConstraint(operand),
+        &asm_inst->reg_nums[operand_index]);
+    if (reg == NULL) {
+      int arg_reg = 5 - (int)i;
+      if (arg_reg < 0) {
+        arg_reg = 5;
+      }
+      reg = IntArgumentRegister(rv, arg_reg);
+      asm_inst->reg_nums[operand_index] =
+          X86_P(rv)->int_arg_start + arg_reg;
     }
-    TargetInstruction* reg = IntArgumentRegister(rv, arg_reg);
-    asm_inst->reg_nums[operand_index] = (X86_P(rv)->int_arg_start) + arg_reg;
     asm_inst->is_fp[operand_index] = false;
     asm_inst->sizes[operand_index] = operand->expr->type->size;
     output_regs[i] = reg;
@@ -3540,9 +3610,15 @@ static TargetInstruction* LowerAsm(X86Generator* rv, IRNode* node) {
       asm_inst->immediate_values[operand_index] = IRIntConstValue(input_node);
       continue;
     }
-    int arg_reg = (int)i;
-    TargetInstruction* reg = IntArgumentRegister(rv, arg_reg);
-    asm_inst->reg_nums[operand_index] = (X86_P(rv)->int_arg_start) + arg_reg;
+    TargetInstruction* reg = FixedAsmRegister(
+        rv, FixedAsmRegisterConstraint(operand),
+        &asm_inst->reg_nums[operand_index]);
+    if (reg == NULL) {
+      int arg_reg = (int)i;
+      reg = IntArgumentRegister(rv, arg_reg);
+      asm_inst->reg_nums[operand_index] =
+          X86_P(rv)->int_arg_start + arg_reg;
+    }
     SetDestOrMove(rv, Materialize(rv, input_node), reg, X86_OP(mv));
   }
 
@@ -3553,6 +3629,11 @@ static TargetInstruction* LowerAsm(X86Generator* rv, IRNode* node) {
     Store(rv, addr_node, output_regs[i],
           operand->expr->type->size <= 4 ? X86_OP(storel) : X86_OP(storeq),
           false);
+  }
+  if (saved_bx != NULL) {
+    TargetInstruction* bx =
+        EmitSymbol(rv, NewInstruction(X86_OP(asm_bx)));
+    SetDestOrMove(rv, saved_bx, bx, X86_OP(mv));
   }
 
   SetLoweredNode(node, result);

@@ -301,11 +301,17 @@ static bool ParseRegSuffix(const char* name, size_t len, X86Reg* reg) {
       {"si", X86_REG_RSI, kX86Size16},  {"di", X86_REG_RDI, kX86Size16},
       {"bp", X86_REG_RBP, kX86Size16},  {"sp", X86_REG_RSP, kX86Size16},
       {"r8w", X86_REG_R8, kX86Size16},  {"r9w", X86_REG_R9, kX86Size16},
+      {"r10w", X86_REG_R10, kX86Size16},{"r11w", X86_REG_R11, kX86Size16},
+      {"r12w", X86_REG_R12, kX86Size16},{"r13w", X86_REG_R13, kX86Size16},
+      {"r14w", X86_REG_R14, kX86Size16},{"r15w", X86_REG_R15, kX86Size16},
       {"al", X86_REG_RAX, kX86Size8},   {"bl", X86_REG_RBX, kX86Size8},
       {"cl", X86_REG_RCX, kX86Size8},   {"dl", X86_REG_RDX, kX86Size8},
       {"sil", X86_REG_RSI, kX86Size8},  {"dil", X86_REG_RDI, kX86Size8},
       {"bpl", X86_REG_RBP, kX86Size8},  {"spl", X86_REG_RSP, kX86Size8},
       {"r8b", X86_REG_R8, kX86Size8},   {"r9b", X86_REG_R9, kX86Size8},
+      {"r10b", X86_REG_R10, kX86Size8}, {"r11b", X86_REG_R11, kX86Size8},
+      {"r12b", X86_REG_R12, kX86Size8}, {"r13b", X86_REG_R13, kX86Size8},
+      {"r14b", X86_REG_R14, kX86Size8}, {"r15b", X86_REG_R15, kX86Size8},
       {"rip", X86_REG_RBP, kX86Size64}, /* placeholder num for %rip */
   };
   for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
@@ -2207,6 +2213,18 @@ static void Assemble_syscall(X86Assembler* assembler) {
   AssemblerEmitByte(&ASM, ASMO.current_section, 0x05);
 }
 
+static void Assemble_rdtsc(X86Assembler* assembler) {
+  (void)assembler;
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0x0f);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0x31);
+}
+
+static void Assemble_cpuid(X86Assembler* assembler) {
+  (void)assembler;
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0x0f);
+  AssemblerEmitByte(&ASM, ASMO.current_section, 0xa2);
+}
+
 static void Assemble_mfence(X86Assembler* assembler) {
   (void)assembler;
   AssemblerEmitByte(&ASM, ASMO.current_section, 0x0f);
@@ -2361,6 +2379,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(sarl);
   INST(rolq);
   INST(rorq);
+  INST2(rolq, rol);
+  INST2(rorq, ror);
   INST(roll);
   INST(rorl);
   INST(bsfq);
@@ -2383,6 +2403,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(ret);
   INST(nop);
   INST(syscall);
+  INST(rdtsc);
+  INST(cpuid);
   INST(mfence);
   INST(je);
   INST(jz);

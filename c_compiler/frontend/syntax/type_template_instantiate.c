@@ -9150,17 +9150,13 @@ static bool ConvertClassNonTypeTemplateArgument(TypeParser* parser,
   if (source == NULL) {
     return false;
   }
-  compiler->constant_evaluation_required_depth++;
-  ASTNode* initializer = AnalyzeInitializer(param->type, source, true);
-  compiler->constant_evaluation_required_depth--;
-  if (initializer == NULL) {
-    ASTNodeDelete(source);
-    return false;
-  }
+  // Preserve the source expression so constexpr evaluation performs the
+  // implicit conversion to the class parameter type. AnalyzeInitializer would
+  // flatten a scalar into the first member, bypassing a converting constructor.
   Symbol* storage =
       SyntaxNewTemporary(parser->syntax, TypeRecordCopy(param->type));
   ASTNode* expression = NewCompoundLiteralASTNode(
-      NewIdentifierASTNode(storage, arg->location), arg->location, initializer);
+      NewIdentifierASTNode(storage, arg->location), arg->location, source);
   ASTNodeSetType(expression, TypeRecordCopy(param->type));
   bool converted = TemplateArgumentSetFromExpression(arg, expression);
   ASTNodeDelete(expression);
@@ -10334,6 +10330,8 @@ static TypeRecord* MaterializeClassBaseType(TypeParser* parser,
   if (parser == NULL || base_type == NULL) {
     return base_type;
   }
+  FoldConcreteNonTypeTemplateArguments(parser, base_type->template_arguments);
+  ExpandConcreteAliasTemplateArguments(parser, base_type->template_arguments);
   TypeRecord* expanded = ExpandConcreteAliasTemplateId(parser, base_type);
   if (expanded != NULL) {
     TypeRecordDelete(base_type);

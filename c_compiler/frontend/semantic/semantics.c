@@ -382,9 +382,32 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
       sym->type->declarator == kDeclPrimitive &&
       (sym->type->type & kTypeDecltypeAuto) != 0;
   ASTNode* deduction_initializer = value_initializer;
-  if (initializer->op == AST_OP(braced_init)) {
+  if (deduction_initializer->op == AST_OP(braced_init) &&
+      ((BracedInitializerASTNode*)deduction_initializer)
+          ->is_direct_list_initializer) {
     BracedInitializerASTNode* braced =
-        (BracedInitializerASTNode*)initializer;
+        (BracedInitializerASTNode*)deduction_initializer;
+    // [dcl.spec.auto]: direct-list-initialization of auto must contain exactly
+    // one assignment-expression and deduces from that expression.  In
+    // contrast, copy-list-initialization (`auto x = {...}`) deduces
+    // std::initializer_list from all elements.
+    if (braced->initializers == NULL ||
+        braced->initializers->length != 1 ||
+        braced->initializers->value.p[0] == NULL ||
+        ((ASTNode*)braced->initializers->value.p[0])->op != AST_OP(expr_init)) {
+      SemanticError(
+          diagnostic_node,
+          "Direct-list-initialization of auto requires exactly one expression");
+      return false;
+    }
+    ExpressionInitializerASTNode* only =
+        braced->initializers->value.p[0];
+    only->expr = AnalyzeExpression(only->expr);
+    deduction_initializer = (ASTNode*)only;
+  }
+  if (deduction_initializer->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced =
+        (BracedInitializerASTNode*)deduction_initializer;
     if (braced->initializers != NULL &&
         braced->initializers->length == 1) {
       ASTNode* only = braced->initializers->value.p[0];

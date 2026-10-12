@@ -156,6 +156,41 @@ int timespec_get(struct timespec* result, int base) {
   return TIME_UTC;
 }
 
+#if !defined(__DAVECC_NATIVE_DARWIN__)
+int clock_gettime(clockid_t clock_id, struct timespec* result) {
+  if (result == NULL) {
+    errno = EFAULT;
+    return -1;
+  }
+#if defined(__DAVECC_NATIVE_LINUX__)
+  long syscall_result = syscall(SYS_clock_gettime, clock_id, result);
+  if (syscall_result < 0) {
+    errno = (int)-syscall_result;
+    return -1;
+  }
+  return 0;
+#elif defined(__DAVECC_HAS_HOST_CLOCK__)
+  int64_t microseconds = 0;
+  int request = clock_id == CLOCK_MONOTONIC ? SYS_MONOTONIC_TIME
+                                            : SYS_REALTIME_TIME;
+  if ((clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC) ||
+      syscall(request, &microseconds) != 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  result->tv_sec = (time_t)(microseconds / 1000000);
+  result->tv_nsec = (long)((microseconds % 1000000) * 1000);
+  return 0;
+#else
+  if (clock_id == CLOCK_REALTIME && timespec_get(result, TIME_UTC) == TIME_UTC) {
+    return 0;
+  }
+  errno = EINVAL;
+  return -1;
+#endif
+}
+#endif
+
 int timespec_getres(struct timespec* result, int base) {
   if (base != TIME_UTC) {
     return 0;
@@ -171,6 +206,28 @@ int timespec_getres(struct timespec* result, int base) {
   }
   return TIME_UTC;
 }
+
+#if !defined(__DAVECC_NATIVE_DARWIN__)
+int nanosleep(const struct timespec* requested, struct timespec* remaining) {
+  if (requested == NULL || requested->tv_sec < 0 ||
+      requested->tv_nsec < 0 || requested->tv_nsec >= 1000000000L) {
+    errno = EINVAL;
+    return -1;
+  }
+#if defined(SYS_nanosleep)
+  long syscall_result = syscall(SYS_nanosleep, requested, remaining);
+  if (syscall_result < 0) {
+    errno = (int)-syscall_result;
+    return -1;
+  }
+  return 0;
+#else
+  (void)remaining;
+  errno = ENOSYS;
+  return -1;
+#endif
+}
+#endif
 
 struct tm* gmtime_r(const time_t* time_point, struct tm* result) {
   if (BrokenDownTime((int64_t)*time_point, result) != 0) {

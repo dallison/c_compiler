@@ -42,6 +42,24 @@ run_exec_case x86_64 "$X86_64" x86_64_inline 0 \
   '  return y - 42;' \
   '}'
 
+run_exec_case x86_64 "$X86_64" x86_64_operand_modifiers 0 \
+  'int main(void) {' \
+  '  unsigned long value = 0x123456789abcdef0UL;' \
+  '  unsigned long byte = 0x5a;' \
+  '  __asm__ volatile ("ror $7,%q0\n\tmovq %q0,%q0\n\tmovl %k0,%k0\n\tmovw %w0,%w0\n\tmovb %b1,%b0" : "+r" (value) : "r" (byte) : "cc");' \
+  '  return (unsigned char)value == (unsigned char)byte ? 0 : 1;' \
+  '}'
+
+run_exec_case x86_64 "$X86_64" x86_64_fixed_register_constraints 0 \
+  'unsigned long fixed_register_values(void) {' \
+  '  unsigned long a, b, c, d;' \
+  '  __asm__ volatile ("movq $10,%0\n\tmovq $8,%1\n\tmovq $2,%2\n\tmovq $10,%3" : "=a" (a), "=b" (b), "=c" (c), "=d" (d));' \
+  '  return a + b + c + d;' \
+  '}' \
+  'int main(void) {' \
+  '  return fixed_register_values() == 42 ? 0 : 1;' \
+  '}'
+
 run_exec_case arm "$ARM" arm_inline 0 \
   'int main(void) {' \
   '  int y;' \

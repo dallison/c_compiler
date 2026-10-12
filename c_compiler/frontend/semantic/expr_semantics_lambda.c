@@ -543,6 +543,18 @@ static void ExpandLambdaArrayCaptureCopies(CompoundLiteralASTNode* node) {
 // array capture expansion, template temporary materialization) before
 // `AnalyzeInitialization`; sets value category on `node->base`.
 void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
+  // Template substitution updates the cloned identifier node's type, but the
+  // hidden temporary symbol can still carry the class-template pattern type.
+  // Initialization reads the symbol type and would otherwise replace a
+  // concrete `C<int>{}` literal with dependent `C<T>`.
+  if (node->sym != NULL && node->sym->op == AST_OP(identifier) &&
+      node->sym->type != NULL) {
+    Symbol* temporary = ((IdentifierASTNode*)node->sym)->symbol;
+    if (temporary != NULL && temporary->flags.is_temp &&
+        temporary->type != node->sym->type) {
+      SymbolSetType(temporary, TypeRecordCopy(node->sym->type));
+    }
+  }
   FinishAutoLambdaCaptureFields(node);
   ExpandLambdaArrayCaptureCopies(node);
   MaterializeBracedClassTemplateTemporary(node);

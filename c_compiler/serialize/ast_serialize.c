@@ -689,6 +689,7 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
     case kASTShapeBracedInit: {
       BracedInitializerASTNode* b = (BracedInitializerASTNode*)n;
       WriteASTVectorPtr(ctx, buf, 16, b->initializers);
+      WireWriteBool(buf, 17, b->is_direct_list_initializer);
       break;
     }
     case kASTShapeDesignatedInit: {
@@ -1510,6 +1511,10 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       BracedInitializerASTNode* b = (BracedInitializerASTNode*)n;
       if (field == 16) {
         b->initializers = ReadASTVectorPtr(ctx, buf);
+        return;
+      }
+      if (field == 17) {
+        WireReadBool(buf, &b->is_direct_list_initializer);
         return;
       }
       break;

@@ -1681,6 +1681,10 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
       reg = &allocator->int_regs[(X86_P(allocator->rv)->int_temp_start_1)];
       break;
 
+    case X86_OP(asm_bx):
+      reg = &allocator->int_regs[(X86_P(allocator->rv)->int_saved_end_1)];
+      break;
+
     case X86_OP(a0):
     case X86_OP(a1):
     case X86_OP(a2):

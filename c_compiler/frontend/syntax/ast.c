@@ -4695,6 +4695,7 @@ static ASTNode* BracedInitializerASTNodeClone(
   BracedInitializerASTNode* to = ASTArenaAlloc(sizeof(BracedInitializerASTNode));
   ASTNodeBaseCopy(&to->base, node);
   to->initializers = NewVector();
+  to->is_direct_list_initializer = from->is_direct_list_initializer;
   for (size_t i = 0; i < from->initializers->length; i++) {
     ASTNode* init =
         ASTNodeClone(from->initializers->value.p[i], func, data, &to->base);
@@ -4737,6 +4738,7 @@ ASTNode* NewBracedInitializerASTNode(Vector* initializers,
   ASTNodeInit(&node->base, AST_OP(braced_init), type, location,
               &braced_init_vtbl);
   node->initializers = initializers;
+  node->is_direct_list_initializer = false;
   for (size_t i = 0; i < node->initializers->length; i++) {
     ASTNode* init = (ASTNode*)node->initializers->value.p[i];
     init->parent = (ASTNode*)node;

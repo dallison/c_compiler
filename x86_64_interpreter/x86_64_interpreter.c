@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct {
   bool present;
@@ -1567,6 +1568,29 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
 
   if (b0 == 0x0F) {
     uint8_t b1 = Fetch8(interpreter, &pos);
+    if (b1 == 0x31) {
+      // RDTSC writes the low and high halves of a monotonically increasing
+      // counter to EAX and EDX. Host monotonic nanoseconds provide the same
+      // ordering contract needed by timing and synchronization libraries.
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      uint64_t ticks =
+          (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+      WriteReg(interpreter, X86_REG_RAX, (uint32_t)ticks);
+      WriteReg(interpreter, X86_REG_RDX, (uint32_t)(ticks >> 32));
+      *insn_len = pos;
+      return true;
+    }
+    if (b1 == 0xA2) {
+      // Report no optional CPU feature leaves. Target code then selects its
+      // portable implementation, which is the safe behavior for an emulator.
+      WriteReg(interpreter, X86_REG_RAX, 0);
+      WriteReg(interpreter, X86_REG_RBX, 0);
+      WriteReg(interpreter, X86_REG_RCX, 0);
+      WriteReg(interpreter, X86_REG_RDX, 0);
+      *insn_len = pos;
+      return true;
+    }
     if (b1 == 0xAE && Fetch8(interpreter, &pos) == 0xF0) {
       __atomic_thread_fence(__ATOMIC_SEQ_CST);
       *insn_len = pos;

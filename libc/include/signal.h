@@ -12,7 +12,27 @@ typedef int sig_atomic_t;
 #define SIG_IGN ((void (*)(int))1)
 #define SIG_ERR ((void (*)(int))-1)
 
-#if defined(__DAVECC_NATIVE_DARWIN__)
+#if defined(__DAVECC_NATIVE_LINUX__)
+#define SIGHUP 1
+#define SIGINT 2
+#define SIGQUIT 3
+#define SIGILL 4
+#define SIGTRAP 5
+#define SIGABRT 6
+#define SIGBUS 7
+#define SIGFPE 8
+#define SIGKILL 9
+#define SIGUSR1 10
+#define SIGSEGV 11
+#define SIGUSR2 12
+#define SIGPIPE 13
+#define SIGALRM 14
+#define SIGTERM 15
+#define SIGCHLD 17
+#define SIGCONT 18
+#define SIGSTOP 19
+#define SIGTSTP 20
+#elif defined(__DAVECC_NATIVE_DARWIN__)
 #define SIGINT 2
 #define SIGILL 4
 #define SIGTRAP 5
@@ -34,12 +54,30 @@ typedef int sig_atomic_t;
 #define SIGALRM 9
 #endif
 
+#if defined(__DAVECC_NATIVE_LINUX__)
+typedef unsigned long sigset_t;
+#else
 typedef unsigned sigset_t;
+#endif
 
+typedef struct {
+  void* ss_sp;
+  int ss_flags;
+  unsigned long ss_size;
+} stack_t;
+
+#if defined(__DAVECC_NATIVE_LINUX__)
+#define SA_SIGINFO 0x00000004
+#define SA_ONSTACK 0x08000000
+#define SA_RESTART 0x10000000
+#define SA_NODEFER 0x40000000
+#define SA_RESETHAND 0x80000000
+#else
 #define SA_ONSTACK 0x0001
 #define SA_RESETHAND 0x0004
 #define SA_NODEFER 0x0010
 #define SA_SIGINFO 0x0040
+#endif
 
 typedef struct {
   int si_signo;
@@ -56,9 +94,15 @@ struct sigaction {
   int sa_flags;
 };
 
+#if defined(__DAVECC_NATIVE_LINUX__)
+#define SIG_BLOCK 0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
+#else
 #define SIG_BLOCK 1
 #define SIG_UNBLOCK 2
 #define SIG_SETMASK 3
+#endif
 
 #ifdef __cplusplus
 extern "C" {

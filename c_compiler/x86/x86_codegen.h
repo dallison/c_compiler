@@ -250,6 +250,7 @@ typedef enum {
 
   X86_OP(x0),
   X86_OP(t0),
+  X86_OP(asm_bx),
 
   X86_OP(regarg),
 

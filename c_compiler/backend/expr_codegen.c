@@ -3441,7 +3441,7 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
       load = LoadLongDoubleFromAddress(gen, dest, store_type);
     } else {
       load = IRSetType(
-          GeneratorEmit(gen, NewIR1(GetLoadOpcode((ASTNode*)node), dest)),
+          GeneratorEmit(gen, NewIR1(GetLoadOpcode(node->left), dest)),
           store_type);
       if (IsBitfieldReference(node->left)) {
         load = LoadBitfield(gen, load, (BinaryASTNode*)node->left);
@@ -3495,7 +3495,7 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
     if (TypeUsesLongDoubleRepresentation(store_type)) {
       store = StoreLongDoubleToAddress(gen, dest, value, store_type);
     } else {
-      IROpcode store_op = GetStoreOpcode((ASTNode*)node);
+      IROpcode store_op = GetStoreOpcode(node->left);
       store = GeneratorEmit(gen, NewIR2(store_op, dest, value));
     }
     CheckForVarDef(store, node->left);
@@ -3503,7 +3503,7 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   }
 
   // Load the value (always at the left operand's storage type).
-  IROpcode load_op = GetLoadOpcode((ASTNode*)node);
+  IROpcode load_op = GetLoadOpcode(node->left);
   IRNode* load = IRSetType(GeneratorEmit(gen, NewIR1(load_op, dest)), store_type);
   IRNode* bitfield_word = load;
 
@@ -3541,7 +3541,7 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   }
 
   // Store back to the destination.
-  IROpcode store_op = GetStoreOpcode((ASTNode*)node);
+  IROpcode store_op = GetStoreOpcode(node->left);
 
   IRNode* result = GeneratorEmit(gen, NewIR2(store_op, dest,
                                              RemoveUnnecesaryShortening(gen, value, store_op)));
@@ -3556,7 +3556,8 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   if (bitfield != NULL) {
     value = ExtractBitfieldValue(gen, value, bitfield);
   }
-  return IRSetType(value, node->base.type);
+  return IRSetType(value,
+                   node->base.type != NULL ? node->base.type : store_type);
 }
 
 static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {

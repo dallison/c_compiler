@@ -83,6 +83,8 @@ static void RankNonTemplateFreeFunctionCandidates(Vector* candidates,
                                                   bool* ambiguous);
 static void ApplyFreeFunctionEqualScoreTie(Symbol* effective, Symbol** best,
                                            bool* ambiguous);
+static bool FunctionTemplateConversionSequencesTie(
+    Symbol* left, Symbol* right, VectorASTNode* call);
 static void RankFunctionTemplateCandidates(Vector* candidates,
                                            VectorASTNode* call,
                                            Vector* explicit_args,
@@ -714,6 +716,50 @@ static void ApplyFreeFunctionEqualScoreTie(Symbol* effective, Symbol** best,
   }
 }
 
+/* Compares template candidates per argument instead of by the aggregate numeric
+ * score. A by-value exact match and a direct reference binding are both exact
+ * conversion sequences; the score's internal +5 value marker must not prevent
+ * template partial ordering from selecting a fixed overload over `Args&&...`. */
+static bool FunctionTemplateConversionSequencesTie(
+    Symbol* left, Symbol* right, VectorASTNode* call) {
+  if (!SymbolIsTemplateFunction(left) || !SymbolIsTemplateFunction(right) ||
+      left->type == NULL || right->type == NULL ||
+      !TypeIsFunction(left->type) || !TypeIsFunction(right->type) ||
+      call == NULL || call->children == NULL) {
+    return false;
+  }
+  Vector* left_params = &left->type->info.function.prototype;
+  Vector* right_params = &right->type->info.function.prototype;
+  if (call->children->length > left_params->length ||
+      call->children->length > right_params->length) {
+    return false;
+  }
+  for (size_t i = 0; i < call->children->length; i++) {
+    ASTNode* actual = call->children->value.p[i];
+    Symbol* left_param = left_params->value.p[i];
+    Symbol* right_param = right_params->value.p[i];
+    if (actual == NULL || left_param == NULL || right_param == NULL ||
+        left_param->type == NULL || right_param->type == NULL) {
+      return false;
+    }
+    int left_rank = OverloadConversionRank(actual, left_param->type);
+    int right_rank = OverloadConversionRank(actual, right_param->type);
+    if (left_rank < 0 || right_rank < 0) {
+      return false;
+    }
+    bool left_reference = TypeIsReference(left_param->type);
+    bool right_reference = TypeIsReference(right_param->type);
+    if (left_reference != right_reference) {
+      if (left_rank / 10 != right_rank / 10) {
+        return false;
+      }
+    } else if (left_rank != right_rank) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /* Contract: instantiates viable function templates from `candidates`, scores
  * them, and merges into `*best`.  Appends temporaries to `temporary_candidates`.
  * Runs only when non-template ranking did not already yield an exact match. */
@@ -736,6 +782,15 @@ static void RankFunctionTemplateCandidates(Vector* candidates,
     }
     int score = OverloadCallScore(effective, call);
     if (score < 0) {
+      continue;
+    }
+    if (*best != NULL &&
+        FunctionTemplateConversionSequencesTie(effective, *best, call)) {
+      Symbol* previous_best = *best;
+      ApplyFreeFunctionEqualScoreTie(effective, best, ambiguous);
+      if (*best != previous_best) {
+        *best_score = score;
+      }
       continue;
     }
     if (*best == NULL || score < *best_score) {

@@ -91,6 +91,7 @@ static bool IsPrintable(TargetInstruction* inst) {
     case X86_OP(fvarreg):
     case X86_OP(x0):
     case X86_OP(t0):
+    case X86_OP(asm_bx):
     case X86_OP(nrvoval):
       return false;
     default:
@@ -774,6 +775,9 @@ static const char* GetRegisterName(TargetInstruction* inst, char* buf, size_t si
     case X86_OP(t0):
       return X86RegisterNameFromNum(profile->int_temp_start_1, kX86RegTypeInt,
                                    buf, size);
+    case X86_OP(asm_bx):
+      return X86RegisterNameFromNum(profile->int_saved_end_1,
+                                    kX86RegTypeInt, buf, size);
     case X86_OP(fp):
       return X86RegisterNameFromNum(profile->fp_reg, kX86RegTypeInt, buf, size);
     case X86_OP(sp):
@@ -883,7 +887,46 @@ static bool AsmConstraintUsesMemory(const AsmOperand* operand) {
   return false;
 }
 
-static void PrintAsmOperand(FILE* fp, X86AsmInstruction* inst, int index) {
+/* Return the GCC inline-asm spelling for an integer register width modifier:
+ * %b0 (8-bit), %w0 (16-bit), %k0 (32-bit), or %q0 (64-bit). */
+static const char* AsmRegisterNameForModifier(const char* reg, char modifier) {
+  if (reg == NULL ||
+      (modifier != 'b' && modifier != 'w' &&
+       modifier != 'k' && modifier != 'q')) {
+    return reg;
+  }
+  struct RegisterWidths {
+    const char* qword;
+    const char* dword;
+    const char* word;
+    const char* byte;
+  };
+  static const struct RegisterWidths widths[] = {
+      {"rax", "eax", "ax", "al"}, {"rbx", "ebx", "bx", "bl"},
+      {"rcx", "ecx", "cx", "cl"}, {"rdx", "edx", "dx", "dl"},
+      {"rsi", "esi", "si", "sil"}, {"rdi", "edi", "di", "dil"},
+      {"rbp", "ebp", "bp", "bpl"}, {"rsp", "esp", "sp", "spl"},
+      {"r8", "r8d", "r8w", "r8b"}, {"r9", "r9d", "r9w", "r9b"},
+      {"r10", "r10d", "r10w", "r10b"}, {"r11", "r11d", "r11w", "r11b"},
+      {"r12", "r12d", "r12w", "r12b"}, {"r13", "r13d", "r13w", "r13b"},
+      {"r14", "r14d", "r14w", "r14b"}, {"r15", "r15d", "r15w", "r15b"},
+  };
+  for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+    if (strcmp(reg, widths[i].qword) == 0 ||
+        strcmp(reg, widths[i].dword) == 0 ||
+        strcmp(reg, widths[i].word) == 0 ||
+        strcmp(reg, widths[i].byte) == 0) {
+      return modifier == 'b' ? widths[i].byte
+             : modifier == 'w' ? widths[i].word
+             : modifier == 'k' ? widths[i].dword
+                               : widths[i].qword;
+    }
+  }
+  return reg;
+}
+
+static void PrintAsmOperand(FILE* fp, X86AsmInstruction* inst, int index,
+                            char modifier) {
   if (index < 0 || index >= inst->num_operands) {
     fprintf(fp, "<bad-asm-operand>");
     return;
@@ -901,6 +944,9 @@ static void PrintAsmOperand(FILE* fp, X86AsmInstruction* inst, int index) {
     PrintPercentReg(fp, reg);
     fprintf(fp, ")");
     return;
+  }
+  if (!inst->is_fp[index]) {
+    reg = AsmRegisterNameForModifier(reg, modifier);
   }
   PrintPercentReg(fp, reg);
 }
@@ -950,7 +996,7 @@ static void PrintExtendedAsm(FILE* fp, X86AsmInstruction* inst,
     if (modifier == 'l') {
       PrintAsmLabel(fp, inst, index);
     } else {
-      PrintAsmOperand(fp, inst, index);
+      PrintAsmOperand(fp, inst, index, modifier);
     }
   }
 }

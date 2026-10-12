@@ -80,3 +80,20 @@ char* strerror(int errnum) {
     }
   }
 }
+
+#if !defined(__DAVECC_NATIVE_DARWIN__)
+int strerror_r(int errnum, char* buf, size_t buflen) {
+  if (buf == NULL || buflen == 0) {
+    return ERANGE;
+  }
+  const char* message = strerror(errnum);
+  size_t length = strlen(message);
+  if (length >= buflen) {
+    memcpy(buf, message, buflen - 1);
+    buf[buflen - 1] = '\0';
+    return ERANGE;
+  }
+  memcpy(buf, message, length + 1);
+  return 0;
+}
+#endif

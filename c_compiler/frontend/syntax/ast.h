@@ -1099,6 +1099,11 @@ ASTNode* NewExpressionInitializerASTNode(ASTNode* expr,
 typedef struct {
   ASTNode base;
   Vector* initializers;   // @wire 16
+  // True when the braces directly followed the declarator (`auto x{1}`),
+  // rather than following `=` (`auto x = {1}`).  C++ auto deduction treats a
+  // single direct-list element as that element's type, while copy-list
+  // initialization deduces std::initializer_list.
+  bool is_direct_list_initializer;  // @wire 17
 } BracedInitializerASTNode;
 
 ASTNode* NewBracedInitializerASTNode(Vector* initializers,

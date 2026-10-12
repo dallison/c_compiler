@@ -1684,6 +1684,15 @@ static bool IsSupportedAsmConstraint(const char* constraint, bool is_output) {
       case 'g':
         saw_constraint = true;
         break;
+      case 'a':
+      case 'b':
+      case 'c':
+      case 'd':
+        if (strcmp(target, "x86-64") != 0) {
+          return false;
+        }
+        saw_constraint = true;
+        break;
       case 'w':
         if (strcmp(target, "aarch64") != 0) {
           return false;

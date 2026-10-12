@@ -13,6 +13,8 @@
 #include <stdlib.h>
 
 #if defined(__DAVECC_HAS_NATIVE_THREADS__)
+#include <pthread.h>
+#include <sched.h>
 #define __DAVECC_HAS_GUEST_THREADS__ 1
 #endif
 
@@ -1064,3 +1066,64 @@ void call_once(dave_once_flag_t* flag, void (*func)(void)) {
     __davecc_once_complete(flag);
   }
 }
+
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+// POSIX compatibility wrappers share DaveCC's C11 thread-local key registry.
+// This is sufficient for libraries such as Abseil, which use pthread keys for
+// per-thread bookkeeping even when their actual waiting primitive is a futex.
+pthread_t pthread_self(void) {
+  return (pthread_t)thrd_current();
+}
+
+int pthread_equal(pthread_t left, pthread_t right) {
+  return thrd_equal((thrd_t)left, (thrd_t)right);
+}
+
+int pthread_key_create(pthread_key_t* key, void (*destructor)(void*)) {
+  if (key == NULL) {
+    return EINVAL;
+  }
+  return tss_create((tss_t*)key, destructor) == thrd_success ? 0 : EAGAIN;
+}
+
+int pthread_key_delete(pthread_key_t key) {
+  tss_delete((tss_t)key);
+  return 0;
+}
+
+void* pthread_getspecific(pthread_key_t key) {
+  return tss_get((tss_t)key);
+}
+
+int pthread_setspecific(pthread_key_t key, const void* value) {
+  return tss_set((tss_t)key, (void*)value) == thrd_success ? 0 : EINVAL;
+}
+
+int pthread_getschedparam(pthread_t thread, int* policy,
+                          struct sched_param* parameter) {
+  (void)thread;
+  if (policy == NULL || parameter == NULL) {
+    return EINVAL;
+  }
+  *policy = 0;
+  parameter->sched_priority = 0;
+  return 0;
+}
+
+int pthread_setschedparam(pthread_t thread, int policy,
+                          const struct sched_param* parameter) {
+  (void)thread;
+  (void)policy;
+  (void)parameter;
+  return ENOTSUP;
+}
+
+int sched_yield(void) {
+  long result = syscall(SYS_sched_yield);
+  if (result < 0) {
+    errno = (int)-result;
+    return -1;
+  }
+  return 0;
+}
+#endif

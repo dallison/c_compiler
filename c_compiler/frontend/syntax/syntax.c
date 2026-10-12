@@ -381,26 +381,77 @@ static void HideClassOrEnumName(Syntax* syntax, Symbol* injected) {
   }
 }
 
-static Symbol* FindFunctionTemplateOverload(Symbol* first) {
+// Rank a template overload against an explicit specialization's concrete
+// parameter list. Concrete template parameters must match exactly; dependent
+// parameters are left for normal specialization substitution.
+static int TemplateOverloadConcreteMatchScore(Symbol* candidate,
+                                              Symbol* specialization) {
+  if (candidate == NULL || specialization == NULL ||
+      candidate->type == NULL || specialization->type == NULL ||
+      !TypeIsFunction(candidate->type) ||
+      !TypeIsFunction(specialization->type) ||
+      candidate->type->info.function.prototype.length !=
+          specialization->type->info.function.prototype.length) {
+    return -1;
+  }
+  int score = 0;
+  for (size_t i = 0;
+       i < candidate->type->info.function.prototype.length; i++) {
+    Symbol* candidate_param =
+        candidate->type->info.function.prototype.value.p[i];
+    Symbol* specialization_param =
+        specialization->type->info.function.prototype.value.p[i];
+    if (candidate_param == NULL || specialization_param == NULL ||
+        candidate_param->type == NULL || specialization_param->type == NULL) {
+      return -1;
+    }
+    if (TypeContainsTemplateParameter(candidate_param->type)) {
+      continue;
+    }
+    if (!TypeEqual(candidate_param->type, specialization_param->type)) {
+      return -1;
+    }
+    score++;
+  }
+  return score;
+}
+
+static Symbol* FindFunctionTemplateOverload(Symbol* first,
+                                            Symbol* specialization) {
+  Symbol* best = NULL;
+  int best_score = -1;
   for (Symbol* overload = first; overload != NULL;
        overload = overload->overload_next) {
     if (overload->flags.is_template && overload->type != NULL &&
         TypeIsFunction(overload->type)) {
-      return overload;
+      int score =
+          TemplateOverloadConcreteMatchScore(overload, specialization);
+      if (score > best_score) {
+        best = overload;
+        best_score = score;
+      }
     }
   }
-  return NULL;
+  return best;
 }
 
-static Symbol* FindMemberFunctionTemplateOverload(StructMember* first) {
+static Symbol* FindMemberFunctionTemplateOverload(
+    StructMember* first, Symbol* specialization) {
+  Symbol* best = NULL;
+  int best_score = -1;
   for (StructMember* overload = first; overload != NULL;
        overload = overload->overload_next) {
     if (overload->symbol != NULL && overload->symbol->flags.is_template &&
         overload->symbol->type != NULL && TypeIsFunction(overload->symbol->type)) {
-      return overload->symbol;
+      int score = TemplateOverloadConcreteMatchScore(overload->symbol,
+                                                     specialization);
+      if (score > best_score) {
+        best = overload->symbol;
+        best_score = score;
+      }
     }
   }
-  return NULL;
+  return best;
 }
 
 static void AppendMemberFunctionSpecialization(Syntax* syntax,
@@ -431,7 +482,7 @@ static void MarkFunctionTemplateSpecialization(Syntax* syntax, Symbol* sym,
       sym->type == NULL || !TypeIsFunction(sym->type)) {
     return;
   }
-  Symbol* templ = FindFunctionTemplateOverload(first_overload);
+  Symbol* templ = FindFunctionTemplateOverload(first_overload, sym);
   if (templ == NULL) {
     String suffix;
     StringInit(&suffix, NULL);
@@ -454,7 +505,7 @@ static void MarkMemberFunctionTemplateSpecialization(
       sym->type == NULL || !TypeIsFunction(sym->type)) {
     return;
   }
-  Symbol* templ = FindMemberFunctionTemplateOverload(first_overload);
+  Symbol* templ = FindMemberFunctionTemplateOverload(first_overload, sym);
   if (templ == NULL && first_overload != NULL &&
       first_overload->symbol != NULL &&
       first_overload->symbol->flags.is_template) {
@@ -4404,6 +4455,17 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax) {
   }
   SyntaxNeedBracket(syntax, TOK(rbrace), TC(closebra));
   return NewBracedInitializerASTNode(initializers, NULL, location);
+}
+
+// Records that a braced initializer directly followed its declarator.  C++
+// placeholder deduction distinguishes `auto x{value}` from
+// `auto x = {value}`, so this source-level distinction must survive template
+// cloning and deferred semantic analysis.
+static ASTNode* MarkDirectListInitializer(ASTNode* initializer) {
+  if (initializer != NULL && initializer->op == AST_OP(braced_init)) {
+    ((BracedInitializerASTNode*)initializer)->is_direct_list_initializer = true;
+  }
+  return initializer;
 }
 
 ASTNode* SyntaxParseBracedInitializer(Syntax* syntax) {
@@ -10337,7 +10399,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           initializer = ParseCXXDirectInitializer(syntax, sym, false);
           if (initializer == NULL && CompilerIsCXX() &&
               LexMatch(syntax->lex, TOK(lbrace))) {
-            initializer = ParseBracedInitializer(syntax);
+            initializer =
+                MarkDirectListInitializer(ParseBracedInitializer(syntax));
           }
           if (initializer == NULL) {
             SyntaxError(syntax,
@@ -10808,6 +10871,23 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       StringDestruct(&asm_name);
     }
 
+    // GNU permits declaration attributes after an assembler name:
+    // `int x asm("name") __attribute__((section("cold"))) = 1;`.
+    while (true) {
+      if (SyntaxParseCXXAlignas(syntax, attributes)) {
+        continue;
+      }
+      if (SyntaxParseAnyAttribute(syntax, attributes)) {
+        continue;
+      }
+      break;
+    }
+    if (attributes->length != 0) {
+      VectorAppendVector(&sym->attributes, attributes);
+      VectorClear(attributes);
+      SyntaxApplyDeclarationAttributes(syntax, sym);
+    }
+
     if (old_sym != NULL) {
       if (sym->flags.is_module_private && !old_sym->flags.is_exported) {
         old_sym->flags.is_module_private = true;
@@ -10979,7 +11059,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           sym->flags.is_defined = true;
         }
       } else if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(lbrace))) {
-        initializer = ParseBracedInitializer(syntax);
+        initializer = MarkDirectListInitializer(ParseBracedInitializer(syntax));
         if (!StorageIs(storage, STO(extern))) {
           sym->flags.is_defined = true;
         }
@@ -15535,7 +15615,7 @@ static bool TryParseStructuredBindingDeclaration(Syntax* syntax,
           syntax->lex->current_token_location);
     }
   } else if (LexMatch(syntax->lex, TOK(lbrace))) {
-    initializer = ParseBracedInitializer(syntax);
+    initializer = MarkDirectListInitializer(ParseBracedInitializer(syntax));
   } else {
     SyntaxError(syntax, "Structured binding declaration requires an initializer");
   }
@@ -16173,8 +16253,9 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         initializer = ParseCXXDirectInitializer(syntax, sym, true);
         if (initializer == NULL && CompilerIsCXX() &&
             LexMatch(syntax->lex, TOK(lbrace))) {
-          initializer =
-              NewVariableInitExpression(syntax, sym, ParseBracedInitializer(syntax));
+          initializer = NewVariableInitExpression(
+              syntax, sym,
+              MarkDirectListInitializer(ParseBracedInitializer(syntax)));
         }
         if (initializer == NULL) {
           if (TypeContainsAuto(sym->type)) {
