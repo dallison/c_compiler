@@ -2859,6 +2859,35 @@ static Symbol* FindInheritedClassMember(Syntax* syntax, String* name) {
   return NULL;
 }
 
+/* Find an injected-class-name inherited by the current class without treating
+ * the base's constructor overload (which has the same spelling) as the type. */
+static Symbol* FindCurrentInheritedInjectedClassName(Syntax* syntax,
+                                                     String* name) {
+  if (!CompilerIsCXX() || syntax == NULL || name == NULL) {
+    return NULL;
+  }
+  Struct* owner = syntax->cxx_class_head;
+  if (owner == NULL && syntax->context == kParsingBlockScope &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  for (Struct* scope = owner; scope != NULL; scope = scope->lexical_parent) {
+    StructMember* member = FindStructMember(scope, name);
+    if (member != NULL && member->symbol != NULL &&
+        (!member->is_member_function ||
+         !TypeIsFunction(member->symbol->type) ||
+         !member->symbol->type->info.function.is_constructor)) {
+      return NULL;
+    }
+    Symbol* injected = FindInheritedInjectedClassName(scope, name);
+    if (injected != NULL && injected->type != NULL) {
+      return injected;
+    }
+  }
+  return NULL;
+}
+
 static Struct* SymbolMemberOwner(Symbol* symbol) {
   if (symbol == NULL || symbol->type == NULL) {
     return NULL;
@@ -16765,6 +16794,10 @@ bool SyntaxLookingAtType(Syntax* syntax) {
       }
       Symbol* sym = SyntaxFindSymbol(syntax, &syntax->lex->spelling);
       if (sym == NULL) {
+        if (FindCurrentInheritedInjectedClassName(
+                syntax, &syntax->lex->spelling) != NULL) {
+          return true;
+        }
         if (CompilerIsCXX() &&
             SyntaxFindTag(syntax, &syntax->lex->spelling) != NULL) {
           LexCheckpoint checkpoint;

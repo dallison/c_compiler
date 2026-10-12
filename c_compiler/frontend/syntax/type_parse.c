@@ -911,13 +911,21 @@ static Symbol* FindCurrentClassNestedType(TypeParser* parser, String* name) {
   for (Struct* owner = CurrentClassBeingParsed(parser); owner != NULL;
        owner = owner->lexical_parent) {
     StructMember* member = FindStructMember(owner, name);
-    if (member == NULL || member->symbol == NULL ||
-        member->symbol->type == NULL) {
-      continue;
-    }
-    if (StorageIs(member->symbol->storage, STO(typedef)) ||
-        SymbolIsTagSymbol(member->symbol)) {
+    if (member != NULL && member->symbol != NULL &&
+        member->symbol->type != NULL &&
+        (StorageIs(member->symbol->storage, STO(typedef)) ||
+         SymbolIsTagSymbol(member->symbol))) {
       return member->symbol;
+    }
+    if (member != NULL && member->symbol != NULL &&
+        (!member->is_member_function ||
+         !TypeIsFunction(member->symbol->type) ||
+         !member->symbol->type->info.function.is_constructor)) {
+      return NULL;
+    }
+    Symbol* injected = FindInheritedInjectedClassName(owner, name);
+    if (injected != NULL) {
+      return injected;
     }
   }
   return NULL;
