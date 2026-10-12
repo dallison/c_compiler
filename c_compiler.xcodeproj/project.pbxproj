@@ -121,6 +121,22 @@
 		E544B7E71FAD313600F2C59B /* expr_evaluator.c in Sources */ = {isa = PBXBuildFile; fileRef = E544B7E51FAD313600F2C59B /* expr_evaluator.c */; };
 		E544B7E81FAD313600F2C59B /* expr_evaluator.h in Headers */ = {isa = PBXBuildFile; fileRef = E544B7E61FAD313600F2C59B /* expr_evaluator.h */; };
 		E544B7EB1FB2259B00F2C59B /* expr_semantics.c in Sources */ = {isa = PBXBuildFile; fileRef = E544B7E91FB2259B00F2C59B /* expr_semantics.c */; };
+		E5E20001E5E2000000000001 /* expr_semantics_auto.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20001E5E2000000000002 /* expr_semantics_auto.c */; };
+		E5E20002E5E2000000000001 /* expr_semantics_call.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20002E5E2000000000002 /* expr_semantics_call.c */; };
+		E5E20003E5E2000000000001 /* expr_semantics_cast.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20003E5E2000000000002 /* expr_semantics_cast.c */; };
+		E5E20004E5E2000000000001 /* expr_semantics_common.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20004E5E2000000000002 /* expr_semantics_common.c */; };
+		E5E20005E5E2000000000001 /* expr_semantics_constexpr.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20005E5E2000000000002 /* expr_semantics_constexpr.c */; };
+		E5E20006E5E2000000000001 /* expr_semantics_conversion.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20006E5E2000000000002 /* expr_semantics_conversion.c */; };
+		E5E20007E5E2000000000001 /* expr_semantics_format.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20007E5E2000000000002 /* expr_semantics_format.c */; };
+		E5E20008E5E2000000000001 /* expr_semantics_init.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20008E5E2000000000002 /* expr_semantics_init.c */; };
+		E5E20009E5E2000000000001 /* expr_semantics_inline.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20009E5E2000000000002 /* expr_semantics_inline.c */; };
+		E5E2000AE5E2000000000001 /* expr_semantics_intrinsic.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E2000AE5E2000000000002 /* expr_semantics_intrinsic.c */; };
+		E5E2000BE5E2000000000001 /* expr_semantics_lambda.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E2000BE5E2000000000002 /* expr_semantics_lambda.c */; };
+		E5E2000CE5E2000000000001 /* expr_semantics_member.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E2000CE5E2000000000002 /* expr_semantics_member.c */; };
+		E5E2000DE5E2000000000001 /* expr_semantics_operator.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E2000DE5E2000000000002 /* expr_semantics_operator.c */; };
+		E5E2000EE5E2000000000001 /* expr_semantics_overload.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E2000EE5E2000000000002 /* expr_semantics_overload.c */; };
+		E5E2000FE5E2000000000001 /* expr_semantics_primary.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E2000FE5E2000000000002 /* expr_semantics_primary.c */; };
+		E5E20010E5E2000000000001 /* expr_semantics_template.c in Sources */ = {isa = PBXBuildFile; fileRef = E5E20010E5E2000000000002 /* expr_semantics_template.c */; };
 		E544B7EC1FB2259B00F2C59B /* expr_semantics.h in Headers */ = {isa = PBXBuildFile; fileRef = E544B7EA1FB2259B00F2C59B /* expr_semantics.h */; };
 		E544B7EF1FB22ABB00F2C59B /* semantics.c in Sources */ = {isa = PBXBuildFile; fileRef = E544B7ED1FB22ABB00F2C59B /* semantics.c */; };
 		E544B7F01FB22ABB00F2C59B /* semantics.h in Headers */ = {isa = PBXBuildFile; fileRef = E544B7EE1FB22ABB00F2C59B /* semantics.h */; };
@@ -892,6 +908,23 @@
 		E544B7E51FAD313600F2C59B /* expr_evaluator.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_evaluator.c; sourceTree = "<group>"; };
 		E544B7E61FAD313600F2C59B /* expr_evaluator.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = expr_evaluator.h; sourceTree = "<group>"; };
 		E544B7E91FB2259B00F2C59B /* expr_semantics.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics.c; sourceTree = "<group>"; };
+		E5E20001E5E2000000000002 /* expr_semantics_auto.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_auto.c; sourceTree = "<group>"; };
+		E5E20002E5E2000000000002 /* expr_semantics_call.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_call.c; sourceTree = "<group>"; };
+		E5E20003E5E2000000000002 /* expr_semantics_cast.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_cast.c; sourceTree = "<group>"; };
+		E5E20004E5E2000000000002 /* expr_semantics_common.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_common.c; sourceTree = "<group>"; };
+		E5E20005E5E2000000000002 /* expr_semantics_constexpr.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_constexpr.c; sourceTree = "<group>"; };
+		E5E20006E5E2000000000002 /* expr_semantics_conversion.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_conversion.c; sourceTree = "<group>"; };
+		E5E20007E5E2000000000002 /* expr_semantics_format.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_format.c; sourceTree = "<group>"; };
+		E5E20008E5E2000000000002 /* expr_semantics_init.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_init.c; sourceTree = "<group>"; };
+		E5E20009E5E2000000000002 /* expr_semantics_inline.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_inline.c; sourceTree = "<group>"; };
+		E5E2000AE5E2000000000002 /* expr_semantics_intrinsic.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_intrinsic.c; sourceTree = "<group>"; };
+		E5E2000BE5E2000000000002 /* expr_semantics_lambda.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_lambda.c; sourceTree = "<group>"; };
+		E5E2000CE5E2000000000002 /* expr_semantics_member.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_member.c; sourceTree = "<group>"; };
+		E5E2000DE5E2000000000002 /* expr_semantics_operator.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_operator.c; sourceTree = "<group>"; };
+		E5E2000EE5E2000000000002 /* expr_semantics_overload.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_overload.c; sourceTree = "<group>"; };
+		E5E2000FE5E2000000000002 /* expr_semantics_primary.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_primary.c; sourceTree = "<group>"; };
+		E5E20010E5E2000000000002 /* expr_semantics_template.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = expr_semantics_template.c; sourceTree = "<group>"; };
+		E5E20011E5E2000000000002 /* expr_semantics_internal.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = expr_semantics_internal.h; sourceTree = "<group>"; };
 		E544B7EA1FB2259B00F2C59B /* expr_semantics.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = expr_semantics.h; sourceTree = "<group>"; };
 		E544B7ED1FB22ABB00F2C59B /* semantics.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = semantics.c; sourceTree = "<group>"; };
 		E544B7EE1FB22ABB00F2C59B /* semantics.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = semantics.h; sourceTree = "<group>"; };
@@ -1900,6 +1933,23 @@
 			isa = PBXGroup;
 			children = (
 				E544B7E91FB2259B00F2C59B /* expr_semantics.c */,
+				E5E20001E5E2000000000002 /* expr_semantics_auto.c */,
+				E5E20002E5E2000000000002 /* expr_semantics_call.c */,
+				E5E20003E5E2000000000002 /* expr_semantics_cast.c */,
+				E5E20004E5E2000000000002 /* expr_semantics_common.c */,
+				E5E20005E5E2000000000002 /* expr_semantics_constexpr.c */,
+				E5E20006E5E2000000000002 /* expr_semantics_conversion.c */,
+				E5E20007E5E2000000000002 /* expr_semantics_format.c */,
+				E5E20008E5E2000000000002 /* expr_semantics_init.c */,
+				E5E20009E5E2000000000002 /* expr_semantics_inline.c */,
+				E5E2000AE5E2000000000002 /* expr_semantics_intrinsic.c */,
+				E5E2000BE5E2000000000002 /* expr_semantics_lambda.c */,
+				E5E2000CE5E2000000000002 /* expr_semantics_member.c */,
+				E5E2000DE5E2000000000002 /* expr_semantics_operator.c */,
+				E5E2000EE5E2000000000002 /* expr_semantics_overload.c */,
+				E5E2000FE5E2000000000002 /* expr_semantics_primary.c */,
+				E5E20010E5E2000000000002 /* expr_semantics_template.c */,
+				E5E20011E5E2000000000002 /* expr_semantics_internal.h */,
 				E544B7EA1FB2259B00F2C59B /* expr_semantics.h */,
 				E52F0A941FD37D0E00F82030 /* init_semantics.c */,
 				E52F0A951FD37D0E00F82030 /* init_semantics.h */,
@@ -4031,6 +4081,22 @@
 				E5E63ACE2887EB7700909B3D /* aarch64_reg_alloc.c in Sources */,
 				E5BC31681FA3E80E00C7691B /* c_compiler_library.m in Sources */,
 				E544B7EB1FB2259B00F2C59B /* expr_semantics.c in Sources */,
+				E5E20001E5E2000000000001 /* expr_semantics_auto.c in Sources */,
+				E5E20002E5E2000000000001 /* expr_semantics_call.c in Sources */,
+				E5E20003E5E2000000000001 /* expr_semantics_cast.c in Sources */,
+				E5E20004E5E2000000000001 /* expr_semantics_common.c in Sources */,
+				E5E20005E5E2000000000001 /* expr_semantics_constexpr.c in Sources */,
+				E5E20006E5E2000000000001 /* expr_semantics_conversion.c in Sources */,
+				E5E20007E5E2000000000001 /* expr_semantics_format.c in Sources */,
+				E5E20008E5E2000000000001 /* expr_semantics_init.c in Sources */,
+				E5E20009E5E2000000000001 /* expr_semantics_inline.c in Sources */,
+				E5E2000AE5E2000000000001 /* expr_semantics_intrinsic.c in Sources */,
+				E5E2000BE5E2000000000001 /* expr_semantics_lambda.c in Sources */,
+				E5E2000CE5E2000000000001 /* expr_semantics_member.c in Sources */,
+				E5E2000DE5E2000000000001 /* expr_semantics_operator.c in Sources */,
+				E5E2000EE5E2000000000001 /* expr_semantics_overload.c in Sources */,
+				E5E2000FE5E2000000000001 /* expr_semantics_primary.c in Sources */,
+				E5E20010E5E2000000000001 /* expr_semantics_template.c in Sources */,
 				E5E63AD32887EB9400909B3D /* aarch64_assembler.c in Sources */,
 				E544B8391FE35F9B00F2C59B /* ssa.c in Sources */,
 				E53AB9DC1FF5A16C00DBD2FD /* p_code_emitter.c in Sources */,

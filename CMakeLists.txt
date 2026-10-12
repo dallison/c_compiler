@@ -257,6 +257,22 @@ davecc_library(davecc_compiler
   c_compiler/frontend/semantic/contracts.c
   c_compiler/frontend/semantic/coro_semantics.c
   c_compiler/frontend/semantic/expr_semantics.c
+  c_compiler/frontend/semantic/expr_semantics_auto.c
+  c_compiler/frontend/semantic/expr_semantics_call.c
+  c_compiler/frontend/semantic/expr_semantics_cast.c
+  c_compiler/frontend/semantic/expr_semantics_common.c
+  c_compiler/frontend/semantic/expr_semantics_constexpr.c
+  c_compiler/frontend/semantic/expr_semantics_conversion.c
+  c_compiler/frontend/semantic/expr_semantics_format.c
+  c_compiler/frontend/semantic/expr_semantics_init.c
+  c_compiler/frontend/semantic/expr_semantics_inline.c
+  c_compiler/frontend/semantic/expr_semantics_intrinsic.c
+  c_compiler/frontend/semantic/expr_semantics_lambda.c
+  c_compiler/frontend/semantic/expr_semantics_member.c
+  c_compiler/frontend/semantic/expr_semantics_operator.c
+  c_compiler/frontend/semantic/expr_semantics_overload.c
+  c_compiler/frontend/semantic/expr_semantics_primary.c
+  c_compiler/frontend/semantic/expr_semantics_template.c
   c_compiler/frontend/semantic/expansion_semantics.c
   c_compiler/frontend/semantic/init_semantics.c
   c_compiler/frontend/semantic/reflection_semantics.c

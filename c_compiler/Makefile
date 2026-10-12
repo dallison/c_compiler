@@ -88,6 +88,22 @@ COMPILER_OBJS = \
 	statement_parser.o \
     semantics.o \
     expr_semantics.o \
+    expr_semantics_auto.o \
+    expr_semantics_call.o \
+    expr_semantics_cast.o \
+    expr_semantics_common.o \
+    expr_semantics_constexpr.o \
+    expr_semantics_conversion.o \
+    expr_semantics_format.o \
+    expr_semantics_init.o \
+    expr_semantics_inline.o \
+    expr_semantics_intrinsic.o \
+    expr_semantics_lambda.o \
+    expr_semantics_member.o \
+    expr_semantics_operator.o \
+    expr_semantics_overload.o \
+    expr_semantics_primary.o \
+    expr_semantics_template.o \
     init_semantics.o \
     statement_semantics.o \
 	ir.o \
