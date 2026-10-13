@@ -702,6 +702,40 @@ class basic_string {
     return find(c, pos);
   }
 
+  __DAVECC_STRING_CONSTEXPR size_type find_last_of(
+      const CharT* s, size_type pos, size_type n) const {
+    if (__size == 0 || n == 0) {
+      return npos;
+    }
+    size_type i = pos < __size ? pos : __size - 1;
+    while (true) {
+      for (size_type j = 0; j < n; j++) {
+        if (traits_type::eq(__data[i], s[j])) {
+          return i;
+        }
+      }
+      if (i == 0) {
+        return npos;
+      }
+      i--;
+    }
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_last_of(
+      const basic_string& s, size_type pos = npos) const {
+    return find_last_of(s.__data, pos, s.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_last_of(
+      const CharT* s, size_type pos = npos) const {
+    return find_last_of(s, pos, traits_type::length(s));
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_last_of(
+      CharT c, size_type pos = npos) const {
+    return rfind(c, pos);
+  }
+
   __DAVECC_STRING_CONSTEXPR size_type rfind(CharT c, size_type pos = npos) const {
     if (__size == 0) {
       return npos;
