@@ -1383,6 +1383,56 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
 
   for (size_t i = 0; i < from->bases.length; i++) {
     CXXBaseSpecifier* template_base = from->bases.value.p[i];
+    int pack_index = -1;
+    size_t pack_length = 0;
+    if (template_base->is_pack_expansion &&
+        TypeIsTemplateParameterPlaceholder(template_base->type, &pack_index) &&
+        pack_index >= 0 && args != NULL &&
+        (size_t)pack_index < args->length) {
+      TemplateArgument* pack = args->value.p[pack_index];
+      if (pack != NULL && pack->pack_arguments != NULL) {
+        for (size_t j = 0; j < pack->pack_arguments->length; j++) {
+          TemplateArgument* element = pack->pack_arguments->value.p[j];
+          if (element == NULL || element->kind != kTemplateParameterType ||
+              element->type == NULL || !TypeIsStructOrUnion(element->type)) {
+            SyntaxError(parser->syntax,
+                        "Base class pack expansion requires class types");
+            continue;
+          }
+          TypeRecord* base_type = TypeRecordCopy(element->type);
+          TypeRecordCalculateSize(base_type);
+          VectorAppend(&str->bases,
+                       NewCXXBaseSpecifier(base_type, template_base->access,
+                                           template_base->is_virtual));
+        }
+        continue;
+      }
+    }
+    if (template_base->is_pack_expansion &&
+        FindPackExpansionInType(template_base->type, args, &pack_index,
+                                &pack_length) &&
+        pack_index >= 0) {
+      for (size_t j = 0; j < pack_length; j++) {
+        TypeRecord* base_type = SubstituteTemplateParametersForPackElement(
+            parser, template_base->type, args, pack_index, j);
+        base_type = MaterializeClassBaseType(parser, base_type);
+        if (!TypeIsStructOrUnion(base_type)) {
+          if (TypeIsStillDependentClassBase(base_type)) {
+            TypeRecordDelete(base_type);
+            continue;
+          }
+          SyntaxError(parser->syntax,
+                      "base class must be a class or struct type");
+          TypeRecordDelete(base_type);
+          continue;
+        }
+        TypeRecordCalculateSize(base_type);
+        VectorAppend(&str->bases,
+                     NewCXXBaseSpecifier(base_type, template_base->access,
+                                         template_base->is_virtual));
+      }
+      continue;
+    }
     TypeRecord* base_type =
         SubstituteTemplateParameters(parser, template_base->type, args);
     // The nested class's own parameters were renumbered above to drop the
