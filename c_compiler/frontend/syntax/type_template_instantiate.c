@@ -1931,15 +1931,17 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
     if (param->default_argument != NULL &&
         param->default_argument->dependent_expr != NULL && parser != NULL &&
         parser->syntax != NULL && rebase_base > 0) {
-      // Rebase only.  Substituting the enclosing class arguments here resolves
-      // `enable_if_t<Trait<T>::value>()` before `T` exists and drops the
-      // condition, so both SFINAE overloads stay viable.
+      // Substitute only the enclosing class arguments. The clone keeps the
+      // member's own parameters deferred, then rebases them for call-site
+      // deduction.
+      DiagnosticSuppressBegin();
       ASTNode* substituted = TypeSubstituteMemberTemplateExpressionAndRebase(
           parser->syntax, param->default_argument->dependent_expr,
-          /*args=*/NULL, rebase_base,
+          subst_args, rebase_base,
           param->default_argument->dependent_expr->location,
           parser->template_substitution_source,
           parser->template_substitution_target);
+      DiagnosticSuppressEnd();
       if (substituted != NULL) {
         param->default_argument->dependent_expr = substituted;
       }
