@@ -1829,7 +1829,8 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     // Arguments folds the trailing arguments back into the pack so the pattern
     // sees a single pack argument.
     Vector* grouped_args =
-        CompleteAliasTemplateArguments(parser, info.origin, concrete_args);
+        CompleteMemberAliasTemplateArguments(parser, info.origin,
+                                             concrete_args);
     Vector* completed = grouped_args != NULL ? grouped_args : concrete_args;
     Vector* prefixed =
         MemberAliasPatternArguments(parser, info.origin, completed);
@@ -3993,20 +3994,30 @@ static Vector* AliasActualsWithDefaults(TypeParser* parser, Symbol* alias,
   for (size_t i = 0; i < actual_count; i++) {
     VectorAppend(extended, TemplateArgumentCopy(actuals->value.p[i]));
   }
+  // A member alias's defaults retain their enclosing-relative parameter
+  // indices. Prefix the concrete class arguments for substitution, while the
+  // returned vector continues to contain only the alias's written arguments.
+  Vector* aligned =
+      parser != NULL ? MemberAliasPatternArguments(parser, alias, extended)
+                     : NULL;
+  Vector* substitution_actuals = aligned != NULL ? aligned : extended;
   for (size_t i = actual_count; i < parameter_count; i++) {
     TemplateParameter* param = parameters->value.p[i];
     TemplateArgument* def = AliasDefaultTemplateArgument(param);
     if (def == NULL && parser != NULL && param != NULL &&
         param->kind == kTemplateParameterType && param->default_type != NULL &&
-        param->index == (int)i &&
-        !TemplateArgumentVectorContainsTemplateParameter(extended)) {
+        param->index >= 0 &&
+        (size_t)param->index <= substitution_actuals->length &&
+        !TemplateArgumentVectorContainsTemplateParameter(
+            substitution_actuals)) {
       // A default naming an earlier parameter (`class C = less<K>`) is
-      // substituted with the arguments so far; a member alias's indices are
-      // offset by its class's parameters, so only a top-level alias qualifies.
+      // substituted with the arguments so far. Member aliases use the aligned
+      // class-plus-alias vector prepared above.
       bool saved_failed = parser->template_substitution_failed;
       parser->template_substitution_failed = false;
       TypeRecord* type =
-          SubstituteTemplateParameters(parser, param->default_type, extended);
+          SubstituteTemplateParameters(parser, param->default_type,
+                                       substitution_actuals);
       bool failed = parser->template_substitution_failed;
       parser->template_substitution_failed = saved_failed;
       if (type != NULL && !failed && !TypeContainsTemplateParameter(type)) {
@@ -4037,9 +4048,22 @@ static Vector* AliasActualsWithDefaults(TypeParser* parser, Symbol* alias,
       VectorDeleteWithContents(extended,
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
+      if (aligned != NULL) {
+        VectorDeleteWithContents(
+            aligned, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
       return NULL;
     }
     VectorAppend(extended, def);
+    if (aligned != NULL) {
+      VectorAppend(aligned, TemplateArgumentCopy(def));
+    }
+  }
+  if (aligned != NULL) {
+    VectorDeleteWithContents(aligned,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
   }
   return extended;
 }

@@ -131,6 +131,8 @@ bool CXXAliasTemplatePatternNamesClassTemplate(Symbol* alias);
 bool CXXAliasTemplateIsDeducible(Symbol* alias);
 Vector* CompleteAliasTemplateArguments(TypeParser* parser, Symbol* alias,
                                        Vector* actuals);
+Vector* CompleteMemberAliasTemplateArguments(TypeParser* parser, Symbol* alias,
+                                             Vector* actuals);
 Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
                                     Vector* alias_args);
 /* Fold an expanded pack (`Box<char, int>` stored as `[char, int]`) back into

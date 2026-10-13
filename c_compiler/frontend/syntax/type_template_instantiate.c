@@ -12090,9 +12090,8 @@ static Vector* PrefixMemberAliasPatternArguments(Symbol* alias,
   return combined;
 }
 
-static Vector* CompleteMemberAliasTemplateArguments(TypeParser* parser,
-                                                    Symbol* alias,
-                                                    Vector* args) {
+Vector* CompleteMemberAliasTemplateArguments(TypeParser* parser,
+                                             Symbol* alias, Vector* args) {
   Vector* completed = CompleteAliasTemplateArguments(parser, alias, args);
   if (completed != NULL) {
     return completed;
