@@ -422,6 +422,7 @@ struct ConstraintExpr;
 #define kASTRequiresASTConstexpr (1ULL << 55)  // Result contains evaluator-only semantic state (for example a materialized reflection query).
 #define kASTConstexprLifetimeInitializer (1ULL << 56)  // Synthesized sparse initializer preserves inactive constexpr subobjects.
 #define kASTUnparenthesizedDecltypeEntity (1ULL << 57)  // Deferred decltype operand uses the declared type, not its value category.
+#define kASTDependentConstCastTarget kASTUnparenthesizedDecltypeEntity  // On const_cast nodes, target must be rebuilt after enclosing-template substitution.
 #define kASTSourceDesignatedInitializer (1ULL << 58)  // Designated-initializer-clause written in source, not synthesized by lowering.
 #define kASTVirtualCallerContract (1ULL << 59)  // P3097 caller check with a runtime dedup guard.
 #define kASTInlinedConstructor (1ULL << 60)  // inline_call that replaced a constructor call.

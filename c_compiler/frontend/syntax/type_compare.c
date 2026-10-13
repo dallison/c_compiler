@@ -1221,6 +1221,16 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
         return false;
       }
     }
+    // An explicit specialization may not carry `template_origin` even though
+    // its tag still contains the complete specialization key.  When the other
+    // side is a materialized specialization too, compare those keys before
+    // falling back to the primary-template name.  Otherwise `tuple<>` and
+    // `tuple<int>` (the former explicitly specialized) collapse to one type.
+    if (left->tag_name != NULL && right->tag_name != NULL &&
+        strchr(left->tag_name->value, '<') != NULL &&
+        strchr(right->tag_name->value, '<') != NULL) {
+      return CXXStructTagNameEqual(left, right);
+    }
     size_t other_name_len = strcspn(other->tag_symbol->name.value, "<$");
     return origin->name.length == other_name_len &&
            strncmp(origin->name.value, other->tag_symbol->name.value,

@@ -45,6 +45,9 @@ static Vector* CompleteAliasTemplateArgumentsFromPattern(Symbol* alias,
                                                          Vector* actuals);
 static Vector* CompleteAliasTemplateArgumentsFromParameters(Vector* parameters,
                                                               Vector* actuals);
+static Struct* StructDeclaringSymbol(Struct* str, Symbol* symbol, int depth);
+static Struct* StructBaseDeclaringMember(Struct* str, String* name, int depth);
+static bool TypeReferencesIndexAtLeast(TypeRecord* type, int min_index);
 bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
                                    int* pack_index, size_t* pack_length);
 
@@ -1292,7 +1295,46 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
     }
     return TypeRecordCopy(type);
   }
-  TypeRecord* subst = TypeRecordCopy(member->symbol->type);
+  TypeRecord* subst = NULL;
+  // An inherited typedef can still carry parameter indices from the base
+  // template that declared it. Substitute those indices with the concrete
+  // base specialization's arguments rather than copying the base's pattern
+  // type into the derived specialization.
+  Struct* declaring = StructDeclaringSymbol(owner_struct, member->symbol, 0);
+  TypeRecord* owner_tag_type =
+      owner_struct->tag_symbol != NULL ? owner_struct->tag_symbol->type : NULL;
+  Vector* owner_args =
+      owner_tag_type != NULL ? owner_tag_type->template_arguments : NULL;
+  if (declaring == owner_struct && owner_args != NULL &&
+      TypeReferencesIndexAtLeast(member->symbol->type,
+                                 (int)owner_args->length)) {
+    Struct* inherited = StructBaseDeclaringMember(
+        owner_struct, type->dependent_member_name, 0);
+    if (inherited != NULL) {
+      declaring = inherited;
+    }
+  }
+  if (declaring != NULL && declaring != owner_struct &&
+      declaring->tag_symbol != NULL &&
+      declaring->tag_symbol->type != NULL &&
+      declaring->tag_symbol->type->template_arguments != NULL &&
+      TypeContainsTemplateParameter(member->symbol->type)) {
+    TypeRecord* declaring_type = declaring->tag_symbol->type;
+    Vector* declaring_args = declaring_type->template_arguments;
+    Vector* grouped_args = RegroupExpandedClassTemplateArguments(
+        declaring_type->template_origin, declaring_args);
+    subst = SubstituteTemplateParameters(
+        parser, member->symbol->type,
+        grouped_args != NULL ? grouped_args : declaring_args);
+    if (grouped_args != NULL) {
+      VectorDeleteWithContents(
+          grouped_args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+  }
+  if (subst == NULL) {
+    subst = TypeRecordCopy(member->symbol->type);
+  }
   subst->qualifiers |= type->qualifiers;
   // The member typedef may itself resolve to a lazy dependent-member type such
   // as `typename ratio<1,1000>::type` (from `using period = typename
@@ -1498,8 +1540,6 @@ static Vector* NonVariadicClassTemplateArgumentPrefix(
   return prefix;
 }
 
-static bool TypeReferencesIndexAtLeast(TypeRecord* type, int min_index);
-
 static bool ExprReferencesIndexAtLeast(ASTNode* node, void* data) {
   int min_index = *(int*)data;
   if (node == NULL || node->op != AST_OP(identifier) || min_index <= 0) {
@@ -1606,6 +1646,35 @@ static Struct* StructDeclaringSymbol(Struct* str, Symbol* symbol, int depth) {
         StructDeclaringSymbol(base->type->info.struct_info, symbol, depth + 1);
     if (found != NULL) {
       return found;
+    }
+  }
+  return NULL;
+}
+
+// Finds the concrete base specialization that directly declares `name`.
+// Instantiated derived classes can contain an inherited typedef clone whose
+// type still uses the base template's parameter indices.
+static Struct* StructBaseDeclaringMember(Struct* str, String* name, int depth) {
+  if (str == NULL || name == NULL || depth > 1024) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL ||
+        base->type->info.struct_info == str) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    StructMember* direct = MapFindPointerKey(&base_struct->symbol_table, name);
+    if (direct != NULL) {
+      return base_struct;
+    }
+    Struct* inherited =
+        StructBaseDeclaringMember(base_struct, name, depth + 1);
+    if (inherited != NULL) {
+      return inherited;
     }
   }
   return NULL;

@@ -3248,8 +3248,17 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
                                         (BinaryASTNode*)node->left);
     }
 
-    // Simple scalar assignment.
-    assignment = EmitObjectStore(gen, node->left, dest, value);
+    // A constructor mem-initializer for a reference member writes the
+    // referent's address into the member's pointer-sized storage.  Ordinary
+    // reference assignments write through the reference and therefore still
+    // use the referent's scalar store selected by EmitObjectStore.
+    bool binds_reference_member =
+        (node->base.flags & kASTCXXMemberInitializer) != 0 &&
+        TypeIsReference(node->left->type);
+    assignment =
+        binds_reference_member
+            ? GeneratorEmit(gen, NewIR2(IR_OP(storea), dest, value))
+            : EmitObjectStore(gen, node->left, dest, value);
     // A store to a variable names the variable, not its address.
     if (!IRIsVariable(dest)) {
       GenerateConstexprLifetimeMarker(

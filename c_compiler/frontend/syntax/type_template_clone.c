@@ -37,6 +37,7 @@
 ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data);
 static void InstantiateClonedFunctionTemplateCall(TemplateFunctionBodyClone* clone,
                                                   ASTNode* node);
+static bool TypeHasDependentDecltype(TypeRecord* type);
 static bool ASTNodeWithinPackExpansion(ASTNode* node);
 static bool ASTNodeWithinUnresolvedPackExpansion(TemplateFunctionBodyClone* clone,
                                                  ASTNode* node);
@@ -142,6 +143,16 @@ static void ClearClonedCastSubtreeFlagVisitor(ASTNode* node, void* data,
       node->op != AST_OP(call)) {
     node->flags &= ~kASTAnalyzed;
   }
+}
+
+static bool TypeSpineHasDeferredAlias(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (current->template_origin != NULL &&
+        current->dependent_member_name != NULL) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static void MarkClonedCastForReanalysis(ASTNode* node, void* data,
@@ -606,6 +617,19 @@ static bool TypeChainReferencesStruct(TypeRecord* type, struct Struct* str) {
     if (TypeIsStructOrUnion(t) && t->info.struct_info != NULL &&
         (t->info.struct_info == str ||
          t->info.struct_info->lexical_parent == str)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Checks whether a type names the current class or one of its lexical owners.
+// Lambda bodies nested in a class-template specialization use this to recognize
+// injected-class names from the enclosing class, not just the closure itself.
+static bool TypeChainReferencesEnclosingStruct(TypeRecord* type, Struct* str) {
+  for (Struct* current = str; current != NULL;
+       current = current->lexical_parent) {
+    if (TypeChainReferencesStruct(type, current)) {
       return true;
     }
   }
@@ -7052,6 +7076,15 @@ static bool CloneCastInTemplateBody(
   bool node_type_substituted = false;
   if (node->op == AST_OP(cast)) {
     CastASTNode* cast = (CastASTNode*)node;
+    if (cast->kind == kCastConst &&
+        (TypeHasDependentDecltype(cast->cast_type) ||
+         TypeSpineHasDeferredAlias(cast->cast_type) ||
+         (clone->from_owner != NULL && clone->to_owner != NULL &&
+          clone->from_owner != clone->to_owner &&
+          TypeChainReferencesEnclosingStruct(cast->cast_type,
+                                             clone->from_owner)))) {
+      node->flags |= kASTDependentConstCastTarget;
+    }
     // `const_cast<key_type*>(addressof(k))` has a concrete target once the
     // enclosing class is instantiated, but `k` is still the member template's
     // own parameter.  Mark the cast so the per-call instantiation rechecks it
@@ -7130,8 +7163,8 @@ static bool CloneCastInTemplateBody(
     } else if (TypeContainsTemplateParameter(cast->cast_type) ||
                (clone->from_owner != NULL && clone->to_owner != NULL &&
                 clone->from_owner != clone->to_owner &&
-                TypeChainReferencesStruct(cast->cast_type,
-                                          clone->from_owner))) {
+                TypeChainReferencesEnclosingStruct(cast->cast_type,
+                                                   clone->from_owner))) {
       node->flags |= kASTDependentCast;
       TypeRecord* cast_pattern = TypeRecordCloneSpine(cast->cast_type);
       TypeRecord* cast_type =

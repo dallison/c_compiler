@@ -263,6 +263,101 @@ constexpr const tuple_element_t<I, pair<T1, T2>>& get(
   return __pair_getter<I, T1, T2>::get(value);
 }
 
+constexpr bool __tuple_equal_impl(const tuple<>&, const tuple<>&) {
+  return true;
+}
+
+template <class L0, class... LRest, class R0, class... RRest>
+constexpr bool __tuple_equal_impl(const tuple<L0, LRest...>& left,
+                                  const tuple<R0, RRest...>& right) {
+  return left.__0 == right.__0 &&
+         __tuple_equal_impl(left.__rest, right.__rest);
+}
+
+constexpr bool operator==(const tuple<>&, const tuple<>&) {
+  return true;
+}
+
+template <class... Left, class... Right>
+constexpr bool operator==(const tuple<Left...>& left,
+                          const tuple<Right...>& right) {
+  static_assert(sizeof...(Left) == sizeof...(Right),
+                "tuple sizes must match");
+  return __tuple_equal_impl(left, right);
+}
+
+constexpr bool operator!=(const tuple<>&, const tuple<>&) {
+  return false;
+}
+
+template <class... Left, class... Right>
+constexpr bool operator!=(const tuple<Left...>& left,
+                          const tuple<Right...>& right) {
+  static_assert(sizeof...(Left) == sizeof...(Right),
+                "tuple sizes must match");
+  return !__tuple_equal_impl(left, right);
+}
+
+constexpr bool __tuple_less_impl(const tuple<>&, const tuple<>&) {
+  return false;
+}
+
+template <class L0, class... LRest, class R0, class... RRest>
+constexpr bool __tuple_less_impl(const tuple<L0, LRest...>& left,
+                                 const tuple<R0, RRest...>& right) {
+  if (left.__0 < right.__0) {
+    return true;
+  }
+  if (right.__0 < left.__0) {
+    return false;
+  }
+  return __tuple_less_impl(left.__rest, right.__rest);
+}
+
+template <class... Left, class... Right>
+constexpr bool operator<(const tuple<Left...>& left,
+                         const tuple<Right...>& right) {
+  static_assert(sizeof...(Left) == sizeof...(Right),
+                "tuple sizes must match");
+  return __tuple_less_impl(left, right);
+}
+
+constexpr bool operator>(const tuple<>&, const tuple<>&) {
+  return false;
+}
+
+template <class... Left, class... Right>
+constexpr bool operator>(const tuple<Left...>& left,
+                         const tuple<Right...>& right) {
+  static_assert(sizeof...(Left) == sizeof...(Right),
+                "tuple sizes must match");
+  return __tuple_less_impl(right, left);
+}
+
+constexpr bool operator<=(const tuple<>&, const tuple<>&) {
+  return true;
+}
+
+template <class... Left, class... Right>
+constexpr bool operator<=(const tuple<Left...>& left,
+                          const tuple<Right...>& right) {
+  static_assert(sizeof...(Left) == sizeof...(Right),
+                "tuple sizes must match");
+  return !__tuple_less_impl(right, left);
+}
+
+constexpr bool operator>=(const tuple<>&, const tuple<>&) {
+  return true;
+}
+
+template <class... Left, class... Right>
+constexpr bool operator>=(const tuple<Left...>& left,
+                          const tuple<Right...>& right) {
+  static_assert(sizeof...(Left) == sizeof...(Right),
+                "tuple sizes must match");
+  return !__tuple_less_impl(left, right);
+}
+
 template <class... Types>
 constexpr tuple<decay_t<Types>...> make_tuple(Types&&... args) {
   return tuple<decay_t<Types>...>(static_cast<Types&&>(args)...);

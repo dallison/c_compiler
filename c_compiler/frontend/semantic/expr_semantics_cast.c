@@ -90,11 +90,69 @@ bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
   return false;
 }
 
-// Contract: Diagnoses only; may skip errors when `node->expr` is template-
-// dependent. Does not convert the operand or set the cast node's type.
+// A dependent alias or injected-class name in a cloned const_cast can retain
+// its template pattern after the operand becomes concrete. Rebuild the target's
+// underlying type from the operand while preserving the written cv-qualifiers
+// and pointer/reference shape.
+static TypeRecord* RebuildDependentConstCastTarget(TypeRecord* target,
+                                                   TypeRecord* source) {
+  if (target == NULL || source == NULL) {
+    return NULL;
+  }
+  if (TypeIsReference(target)) {
+    TypeRecord* referent =
+        RebuildDependentConstCastTarget(target->next,
+                                       TypeIsReference(source) ? source->next
+                                                               : source);
+    if (referent == NULL) {
+      return NULL;
+    }
+    TypeRecord* result = NewReferenceTypeRecord(
+        target->qualifiers, target->declarator == kDeclRValueReference);
+    TypeRecordChain(result, referent);
+    result->type = referent->type;
+    return TypeRecordCalculateSize(result);
+  }
+  if (TypeIsPointer(target)) {
+    if ((!TypeIsPointer(source) && !TypeIsArray(source)) ||
+        target->next == NULL || source->next == NULL) {
+      return NULL;
+    }
+    TypeRecord* pointee =
+        RebuildDependentConstCastTarget(target->next, source->next);
+    if (pointee == NULL) {
+      return NULL;
+    }
+    TypeRecord* result = NewPointerTypeRecord(target->qualifiers);
+    TypeRecordChain(result, pointee);
+    result->type = pointee->type;
+    return TypeRecordCalculateSize(result);
+  }
+  TypeRecord* result = TypeRecordCloneSpine(source);
+  result->qualifiers = target->qualifiers;
+  return TypeRecordCalculateSize(result);
+}
+
+// Contract: Validates the cast and may repair a stale dependent target;
+// may skip errors when `node->expr` is template-dependent. Does not convert the
+// operand or set the cast node's result type.
 static void ValidateCXXConstCast(CastASTNode* node) {
   TypeRecord* to = node->cast_type;
   TypeRecord* from = node->expr->type;
+  bool concrete_source =
+      from != NULL && !TypeContainsTemplateParameter(from);
+  bool stale_dependent_target =
+      (node->base.flags & kASTDependentConstCastTarget) != 0;
+  if (stale_dependent_target && concrete_source) {
+    TypeRecord* repaired = RebuildDependentConstCastTarget(to, from);
+    if (repaired != NULL) {
+      TypeRecordDelete(node->cast_type);
+      node->cast_type = repaired;
+      TypeRecordIncRef(repaired);
+      to = repaired;
+    }
+    node->base.flags &= ~kASTDependentConstCastTarget;
+  }
   bool valid = false;
   if (TypeIsPointer(to) && to->next != NULL && !TypeIsFunction(to->next) &&
       from != NULL && from->next != NULL && !TypeIsFunction(from->next) &&
@@ -124,6 +182,7 @@ static void ValidateCXXConstCast(CastASTNode* node) {
     }
     SemanticError((ASTNode*)node,
                   "const_cast requires pointer or reference to the same type");
+    TypeErrorDetails(node->base.location, to, from);
   }
 }
 

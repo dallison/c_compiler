@@ -1200,9 +1200,43 @@ void TypeRecordStaticDataMemberDefinition(Syntax* syntax, Symbol* member,
   }
 }
 
+// Finds a concrete typedef inherited by `str`. Some instantiated derived
+// aliases retain the base template's parameter indices; the already-instantiated
+// base member is the authoritative replacement.
+static TypeRecord* ConcreteInheritedTypedef(Struct* str, String* name,
+                                            int depth) {
+  if (str == NULL || name == NULL || depth > 1024) {
+    return NULL;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL ||
+        base->type->info.struct_info == str) {
+      continue;
+    }
+    Struct* base_struct = base->type->info.struct_info;
+    StructMember* member =
+        MapFindPointerKey(&base_struct->symbol_table, name);
+    if (member != NULL && member->symbol != NULL &&
+        StorageIs(member->symbol->storage, STO(typedef)) &&
+        member->symbol->type != NULL &&
+        !TypeContainsTemplateParameter(member->symbol->type)) {
+      return TypeRecordCopy(member->symbol->type);
+    }
+    TypeRecord* inherited =
+        ConcreteInheritedTypedef(base_struct, name, depth + 1);
+    if (inherited != NULL) {
+      return inherited;
+    }
+  }
+  return NULL;
+}
+
 TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
-                                                            TypeRecord* type,
-                                                            Vector* args) {
+                                                     TypeRecord* type,
+                                                     Vector* args) {
   Struct* from = type->info.struct_info;
   // A closure copied for one instantiation is named `__invented__N$S<serial>`.
   // Substituting that copy again (its lexical parent is now the instantiation,
@@ -1576,6 +1610,15 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         !str->tag_symbol->flags.invented) {
       RebaseTemplateParameterIndices(
           member_type, enclosing_template_parameter_count);
+    }
+    if (StorageIs(member->symbol->storage, STO(typedef)) &&
+        TypeContainsTemplateParameter(member_type)) {
+      TypeRecord* inherited =
+          ConcreteInheritedTypedef(str, &member->symbol->name, 0);
+      if (inherited != NULL) {
+        TypeRecordDelete(member_type);
+        member_type = inherited;
+      }
     }
     if (member->symbol->flags.invented && from->tag_symbol != NULL &&
         from->tag_symbol->flags.invented && member_type != NULL &&
@@ -2259,6 +2302,46 @@ static bool StructHasBitFieldMembers(Struct* str) {
   return false;
 }
 
+// Replaces a deferred `OwnerParam::typedef_name` node in a member signature
+// with the concrete typedef already installed on the instantiated owner.
+// Returns NULL when no replacement was made.
+static TypeRecord* ResolveInstantiatedOwnerTypedef(TypeRecord* type,
+                                                   Struct* owner) {
+  if (type == NULL || owner == NULL) {
+    return NULL;
+  }
+  if (type->dependent_member_name != NULL) {
+    StructMember* member =
+        FindStructMember(owner, type->dependent_member_name);
+    if (member != NULL && member->symbol != NULL &&
+        StorageIs(member->symbol->storage, STO(typedef)) &&
+        member->symbol->type != NULL &&
+        !TypeContainsTemplateParameter(member->symbol->type)) {
+      TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
+      resolved->qualifiers |= type->qualifiers;
+      return TypeRecordCalculateSize(resolved);
+    }
+    TypeRecord* inherited =
+        ConcreteInheritedTypedef(owner, type->dependent_member_name, 0);
+    if (inherited != NULL) {
+      inherited->qualifiers |= type->qualifiers;
+      return TypeRecordCalculateSize(inherited);
+    }
+  }
+  TypeRecord* resolved_next =
+      ResolveInstantiatedOwnerTypedef(type->next, owner);
+  if (resolved_next == NULL) {
+    return NULL;
+  }
+  TypeRecord* resolved = TypeRecordCopy(type);
+  TypeRecord* shared_next = resolved->next;
+  resolved->next = NULL;
+  TypeRecordDelete(shared_next);
+  TypeRecordChain(resolved, resolved_next);
+  TypeRecordDelete(resolved_next);
+  return TypeRecordCalculateSize(resolved);
+}
+
 /* Build the concrete function type for a member function of an instantiated
  * class template: copy all of `from`'s function attributes (cv/ref/noexcept,
  * special-member kind, coroutine info, etc.), substitute the return type and
@@ -2465,6 +2548,12 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   TypeRecord* return_type =
       SubstituteTemplateParameters(parser, from->next, subst_args);
   RebaseTemplateParameterIndices(return_type, member_template_base);
+  TypeRecord* resolved_return =
+      ResolveInstantiatedOwnerTypedef(return_type, owner);
+  if (resolved_return != NULL) {
+    TypeRecordDelete(return_type);
+    return_type = resolved_return;
+  }
   TypeRecordChain(func, return_type);
 
   if (is_static_member ||
@@ -2497,6 +2586,12 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     TypeRecord* formal_type =
         SubstituteTemplateParameters(parser, formal->type, subst_args);
     RebaseTemplateParameterIndices(formal_type, member_template_base);
+    TypeRecord* resolved_formal =
+        ResolveInstantiatedOwnerTypedef(formal_type, owner);
+    if (resolved_formal != NULL) {
+      TypeRecordDelete(formal_type);
+      formal_type = resolved_formal;
+    }
     Symbol* clone = NewSymbol(formal->name.value, formal_type, formal->storage);
     clone->flags = formal->flags;
     clone->flags.is_argument = true;

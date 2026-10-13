@@ -2416,60 +2416,16 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
   }
 }
 
-static bool StatementIsLabel(ASTNode* node, void* data) {
-  (void)data;
-  // Case and default labels are reached by the switch, the same way a goto
-  // reaches a named label.  Stopping analysis at an earlier return leaves
-  // those statements untyped and code generation cannot load them.
-  return node != NULL &&
-         (node->op == AST_OP(label) || node->op == AST_OP(case));
-}
-
-static bool StatementUnconditionallyReturns(ASTNode* stmt) {
-  if (stmt == NULL) {
-    return false;
-  }
-  if (stmt->op == AST_OP(return)) {
-    return true;
-  }
-  if (stmt->op == AST_OP(compound)) {
-    Vector* inner = ((CompoundStatementASTNode*)stmt)->statements;
-    if (inner == NULL || inner->length == 0) {
-      return false;
-    }
-    return StatementUnconditionallyReturns(inner->value.p[inner->length - 1]);
-  }
-  if (stmt->op == AST_OP(if)) {
-    IfStatementASTNode* if_node = (IfStatementASTNode*)stmt;
-    if (if_node->is_constexpr && if_node->else_part == NULL) {
-      return StatementUnconditionallyReturns(if_node->if_part);
-    }
-  }
-  return false;
-}
-
 static void AnalyzeCompoundStatement(CompoundStatementASTNode* node) {
   if (CXXGenericLambdaCallOperatorHasConcreteFormals()) {
     ASTNodeVisit((ASTNode*)node, ReopenStaleIfConstexprAnalysis, 0, NULL);
   }
   for (size_t i = 0; i < node->statements->length; i++) {
     ASTNode* statement = node->statements->value.p[i];
+    // Unreachable statements still participate in semantic analysis, and
+    // codegen may visit them when preserving later labels. Leaving them
+    // unanalyzed creates AST nodes without types.
     AnalyzeStatement(statement);
-    if (StatementUnconditionallyReturns(statement)) {
-      // A goto label, case, or default after this return is still reached.
-      // Keep analyzing through it; otherwise the labeled statement is untyped
-      // and code generation faults.
-      bool label_later = false;
-      for (size_t j = i + 1; j < node->statements->length; j++) {
-        if (ASTNodeAny(node->statements->value.p[j], StatementIsLabel, NULL)) {
-          label_later = true;
-          break;
-        }
-      }
-      if (!label_later) {
-        break;
-      }
-    }
     if (i == 0 && (node->base.flags & kASTRangeForInitializer) != 0 &&
         statement != NULL && statement->op == AST_OP(decl_list)) {
       DeclarationListASTNode* declarations =
