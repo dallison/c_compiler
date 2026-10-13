@@ -2686,6 +2686,8 @@ void InjectCXXAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src,
       dest_member->is_bit_field = member->is_bit_field;
       dest_member->index = member->index;
       dest_member->is_anon = member->is_anon;
+      dest_member->is_mutable = member->is_mutable;
+      dest_member->access = member->access;
       dest_member->byte_offset = base_offset + member->byte_offset;
 
       StructInsertMemberIntoTables(dest, dest_member);
