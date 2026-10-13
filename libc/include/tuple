@@ -46,6 +46,26 @@ struct tuple<T0, Rest...> {
   constexpr tuple(const tuple<U0, URest...>& other)
       : __0(other.__0), __rest(other.__rest) {}
 
+  // A two-element tuple can be constructed element-wise from a pair.  This is
+  // used by heterogeneous algorithms whose lookup key is a pair while their
+  // comparator accepts the equivalent tuple type.
+  template <class U1, class U2,
+            enable_if_t<sizeof...(Rest) == 1 &&
+                            is_constructible_v<T0, const U1&> &&
+                            is_constructible_v<tuple<Rest...>, const U2&>,
+                        int> = 0>
+  constexpr tuple(const pair<U1, U2>& other)
+      : __0(other.first), __rest(other.second) {}
+
+  template <class U1, class U2,
+            enable_if_t<sizeof...(Rest) == 1 &&
+                            is_constructible_v<T0, U1&&> &&
+                            is_constructible_v<tuple<Rest...>, U2&&>,
+                        int> = 0>
+  constexpr tuple(pair<U1, U2>&& other)
+      : __0(static_cast<U1&&>(other.first)),
+        __rest(static_cast<U2&&>(other.second)) {}
+
   template <class U0, class... URest,
             class = enable_if_t<sizeof...(URest) == sizeof...(Rest)>>
   constexpr tuple& operator=(const tuple<U0, URest...>& other) {

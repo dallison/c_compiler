@@ -1579,17 +1579,21 @@ static void AppendCXXAssignmentReturnThis(TypeRecord* func, Vector* body,
 }
 
 static bool CXXStructHasUserDeclaredConstructor(Struct* str) {
-  if (str == NULL || str->tag_name == NULL) {
+  if (str == NULL) {
     return false;
   }
-  StructMember* first = FindStructMember(str, str->tag_name);
-  for (StructMember* member = first; member != NULL;
-       member = member->overload_next) {
-    TypeRecord* func = member->symbol != NULL ? member->symbol->type : NULL;
-    if (member->is_member_function && func != NULL &&
-        func->info.function.is_constructor &&
-        func->info.function.is_user_declared) {
-      return true;
+  // Constructors of a union are not always indexed under the union's tag in
+  // the member lookup table.  Inspect the actual member chains so aggregate
+  // classification cannot overlook a converting constructor.
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* member = str->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      TypeRecord* func = member->symbol != NULL ? member->symbol->type : NULL;
+      if (member->is_member_function && func != NULL &&
+          func->info.function.is_constructor &&
+          func->info.function.is_user_declared) {
+        return true;
+      }
     }
   }
   return false;
@@ -2023,8 +2027,21 @@ static bool CXXStructHasDeletedMemberSpecialMemberKindImpl(
       continue;
     }
     Struct* member_struct = type->info.struct_info;
-    if (CXXStructHasDeletedSpecialMemberKind(member_struct, kind) ||
-        CXXStructHasDeletedBaseSpecialMemberKind(member_struct, kind) ||
+    // A user-provided (or already finalized implicit) operation controls
+    // whether this subobject can be copied/moved.  Do not look through a
+    // non-deleted operation into implementation-detail members such as
+    // variant's union storage, whose own implicit copy operation is deleted
+    // but is handled by variant's explicit copy constructor.
+    if (CXXStructHasSpecialMemberKind(member_struct, kind)) {
+      if (CXXStructHasDeletedSpecialMemberKind(member_struct, kind)) {
+        if (active != NULL) {
+          active->length--;
+        }
+        return true;
+      }
+      continue;
+    }
+    if (CXXStructHasDeletedBaseSpecialMemberKind(member_struct, kind) ||
         CXXStructHasDeletedMemberSpecialMemberKindImpl(member_struct, kind,
                                                        active)) {
       if (active != NULL) {

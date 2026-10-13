@@ -41,6 +41,10 @@
 static void ClearStaleIsSameVAnalysis(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode);
 
+// Synchronizes an identifier retained from dependent analysis with its symbol
+// after `auto` or template deduction has made the symbol type concrete.
+static void RefreshStaleIdentifierType(ASTNode* node);
+
 // Contract: Runs before opcode dispatch. May replace the AST root via overload or
 // `!=` rewrite; a non-NULL return ends analysis immediately (no post-process).
 // Does not set kASTAnalyzed on the returned subtree.
@@ -981,9 +985,31 @@ static ASTNode* AnalyzeExpressionPostProcess(ASTNode* node) {
   return node;
 }
 
+// An identifier AST normally snapshots its symbol's type. A lambda body can be
+// parsed before an init-capture or local `auto` declaration is deduced, leaving
+// that snapshot as a placeholder even when the symbol is later concrete.
+static void RefreshStaleIdentifierType(ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol == NULL || symbol->type == NULL ||
+      TypeContainsAuto(symbol->type) || TypeIsUnknown(symbol->type) ||
+      TypeContainsTemplateParameter(symbol->type)) {
+    return;
+  }
+  if (node->type == NULL || TypeContainsAuto(node->type) ||
+      TypeIsUnknown(node->type) ||
+      TypeContainsTemplateParameter(node->type)) {
+    ASTNodeSetType(node, symbol->type);
+    node->flags &= ~kASTAnalyzed;
+  }
+}
+
 // Entry: stale is_same_v refresh, analyzed guard, pre-dispatch, category opcode
 // dispatch, then post-process unless dispatch set finished (legacy in-switch return).
 ASTNode* AnalyzeExpression(ASTNode* node) {
+  RefreshStaleIdentifierType(node);
   if (node != NULL && (node->flags & kASTAnalyzed) != 0 &&
       node->op == AST_OP(identifier)) {
     ClearStaleIsSameVAnalysis(node, NULL, 0, kVisitPreChildren);

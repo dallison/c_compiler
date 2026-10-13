@@ -642,6 +642,32 @@ static int FreeExactMatchScoreCeiling(Vector* actuals) {
   return scored_actuals == 0 ? 0 : (int)(5 * scored_actuals);
 }
 
+/* A prvalue binding to `const T&` is viable but worse than binding to `T&&`.
+ * Do not let the exact-match shortcut hide a forwarding-reference template
+ * that can therefore win ([over.ics.rank]). */
+static bool FunctionHasRvalueToConstLvalueReferenceBinding(
+    TypeRecord* func, VectorASTNode* call, size_t first_formal_arg) {
+  if (func == NULL || !TypeIsFunction(func) || call == NULL ||
+      call->children == NULL) {
+    return false;
+  }
+  Vector* prototype = &func->info.function.prototype;
+  for (size_t i = 0; i < call->children->length &&
+                     i + first_formal_arg < prototype->length;
+       i++) {
+    ASTNode* actual = call->children->value.p[i];
+    Symbol* formal = prototype->value.p[i + first_formal_arg];
+    if (actual != NULL && formal != NULL && formal->type != NULL &&
+        TypeIsReference(formal->type) &&
+        formal->type->declarator != kDeclRValueReference &&
+        formal->type->next != NULL && TypeIsConst(formal->type->next) &&
+        !ASTNodeIsLValue(actual)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* Compare equally ranked pointer conversions whose destination classes lie on
  * the same inheritance path.  Converting Generated* to Message* is better than
  * converting it to MessageLite* when Message derives from MessageLite. */
@@ -891,7 +917,9 @@ static void RankFunctionTemplateCandidates(Vector* candidates,
                                            Vector* temporary_candidates,
                                            Vector* actuals, Symbol** best,
                                            int* best_score, bool* ambiguous) {
-  if (*best_score >= 0 && *best_score <= FreeExactMatchScoreCeiling(actuals)) {
+  if (*best_score >= 0 && *best_score <= FreeExactMatchScoreCeiling(actuals) &&
+      *best != NULL &&
+      !FunctionHasRvalueToConstLvalueReferenceBinding((*best)->type, call, 0)) {
     return;
   }
   for (size_t i = 0; i < candidates->length; i++) {
@@ -1172,6 +1200,30 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
       return candidate;
     }
   }
+  // A braced-init-list has no type and therefore cannot deduce an ordinary
+  // template parameter such as `T&&`. Reject this before the enclosing-class
+  // deferral below can preserve the unresolved primary template. Only
+  // initializer_list parameters (and array-reference parameters) are deduced
+  // element-wise from braces.
+  Vector* prototype = &candidate->type->info.function.prototype;
+  for (size_t i = 0; explicit_args == NULL && node->children != NULL &&
+                     i < node->children->length && i < prototype->length;
+       i++) {
+    Symbol* formal = prototype->value.p[i];
+    ASTNode* actual = node->children->value.p[i];
+    TypeRecord* braced_formal_target =
+        formal != NULL && TypeIsReference(formal->type)
+            ? formal->type->next
+            : NULL;
+    if (formal != NULL && actual != NULL &&
+        actual->op == AST_OP(braced_init) &&
+        TypeContainsTemplateParameter(formal->type) &&
+        !TypeIsCXXInitializerList(formal->type) &&
+        (braced_formal_target == NULL ||
+         !TypeIsArray(braced_formal_target))) {
+      return NULL;
+    }
+  }
   // A member function template whose signature still names a member of the
   // enclosing class template (`slot_type` = `typename Policy::slot_type`)
   // cannot be instantiated until that class is.  Keep the primary; the call is
@@ -1187,7 +1239,6 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
       }
     }
   }
-  Vector* prototype = &candidate->type->info.function.prototype;
   for (size_t i = 0; node->children != NULL && i < node->children->length &&
                      i < prototype->length; i++) {
     Symbol* formal = prototype->value.p[i];
@@ -1787,6 +1838,16 @@ static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
       }
       return NULL;
     }
+    if (explicit_args == NULL && formal != NULL && actual != NULL &&
+        actual->op == AST_OP(braced_init) &&
+        TypeContainsTemplateParameter(formal->type) &&
+        !TypeIsCXXInitializerList(target) &&
+        (target == NULL || !TypeIsArray(target))) {
+      if (explicit_object) {
+        VectorDestruct(&explicit_object_actuals);
+      }
+      return NULL;
+    }
   }
   DiagnosticSuppressBegin();
   Symbol* instantiated = TypeCreateFunctionTemplateCandidate(
@@ -1909,6 +1970,72 @@ static bool CallHasBracedInitActual(VectorASTNode* node) {
   return false;
 }
 
+static bool CandidateIsInitializerListConstructor(StructMember* candidate);
+
+/* Implements [over.match.list]'s second phase for direct-list construction.
+ * Once no initializer-list constructor is viable, the clauses in the sole
+ * braced actual become the ordinary constructor arguments.  The whole list is
+ * only passed as one braced actual when the class has initializer-list
+ * constructors; otherwise that actual is a genuine argument (`Entry{{a, b}}`
+ * or a member initializer `base{v}`) and must stay intact. */
+static void ExpandBracedConstructorCallActuals(StructMember* first,
+                                               VectorASTNode* node) {
+  if (first == NULL || first->symbol == NULL || first->symbol->type == NULL ||
+      !TypeIsFunction(first->symbol->type) ||
+      !first->symbol->type->info.function.is_constructor ||
+      node == NULL || node->children == NULL || node->children->length != 1) {
+    return;
+  }
+  bool has_initializer_list_constructor = false;
+  for (StructMember* candidate = first; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (CandidateIsInitializerListConstructor(candidate)) {
+      has_initializer_list_constructor = true;
+      break;
+    }
+  }
+  if (!has_initializer_list_constructor) {
+    return;
+  }
+  ASTNode* actual = node->children->value.p[0];
+  if (actual == NULL || actual->op != AST_OP(braced_init)) {
+    return;
+  }
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)actual;
+  Vector* expanded = NewVector();
+  for (size_t i = 0; i < braced->initializers->length; i++) {
+    ASTNode* initializer = braced->initializers->value.p[i];
+    if (initializer == NULL) {
+      continue;
+    }
+    initializer = ASTNodeMove(initializer);
+    ASTNode* element = initializer;
+    if (initializer->op == AST_OP(expr_init)) {
+      element =
+          ASTNodeMove(((ExpressionInitializerASTNode*)initializer)->expr);
+      ASTNodeDelete(initializer);
+    }
+    if (element != NULL && element->type == NULL &&
+        element->op != AST_OP(braced_init)) {
+      element = AnalyzeExpression(element);
+    }
+    if (element != NULL) {
+      VectorAppend(expanded, element);
+    }
+  }
+  actual = ASTNodeMove(actual);
+  ASTNodeDelete(actual);
+  VectorDeleteWithContents(
+      node->children, (VectorElementDestructor)ASTNodeDelete,
+      /*free_element=*/false);
+  node->children = expanded;
+  for (size_t i = 0; i < expanded->length; i++) {
+    ASTNode* element = expanded->value.p[i];
+    element->parent = (ASTNode*)node;
+    element->child_id = (int)i;
+  }
+}
+
 static bool CandidateIsInitializerListConstructor(StructMember* candidate) {
   return candidate != NULL && candidate->symbol != NULL &&
          candidate->symbol->type != NULL &&
@@ -1922,24 +2049,23 @@ static bool CandidateIsInitializerListConstructor(StructMember* candidate) {
 static bool MemberCallOnlyInitializerListConstructors(
     StructMember* first, VectorASTNode* node, BinaryASTNode* member_access,
     bool explicit_args_present) {
-  if (explicit_args_present || !CallHasBracedInitActual(node)) {
+  (void)member_access;
+  if (explicit_args_present || first == NULL || first->symbol == NULL ||
+      first->symbol->type == NULL ||
+      !TypeIsFunction(first->symbol->type) ||
+      !first->symbol->type->info.function.is_constructor ||
+      node == NULL || node->children == NULL || node->children->length != 1 ||
+      !CallHasBracedInitActual(node)) {
     return false;
   }
-  for (StructMember* candidate = first; candidate != NULL;
-       candidate = candidate->overload_next) {
-    if (candidate->symbol != NULL &&
-        (candidate->symbol->flags.is_template ||
-         (candidate->symbol->type != NULL &&
-          TypeIsFunction(candidate->symbol->type) &&
-          candidate->symbol->type->info.function.template_origin != NULL))) {
-      continue;
-    }
-    if (!CandidateIsInitializerListConstructor(candidate)) {
-      continue;
-    }
-    if (MemberOverloadCallScore(candidate, node, member_access, true) >= 0) {
-      return true;
-    }
+  Struct* owner = first->symbol->type->info.function.cxx_member_owner;
+  TypeRecord* target =
+      owner != NULL && owner->tag_symbol != NULL ? owner->tag_symbol->type
+                                                 : NULL;
+  ASTNode* actual = node->children->value.p[0];
+  if (target != NULL &&
+      CXXBracedInitSelectsInitializerListConstructor(actual, target)) {
+    return true;
   }
   return false;
 }
@@ -2071,7 +2197,12 @@ static void RankMemberTemplateCandidates(
     Vector* explicit_args, bool only_initializer_list_constructors,
     Vector* temporary_members, StructMember** best, int* best_score,
     bool* ambiguous, bool* receiver_const_rejected) {
-  if (*best_score >= 0 && *best_score <= 5) {
+  size_t first_formal_arg =
+      *best != NULL && (*best)->is_static ? 0 : 1;
+  if (*best_score >= 0 && *best_score <= 5 && *best != NULL &&
+      !FunctionHasRvalueToConstLvalueReferenceBinding(
+          (*best)->symbol != NULL ? (*best)->symbol->type : NULL, node,
+          first_formal_arg)) {
     return;
   }
   bool receiver_const = MemberReceiverIsConst(member_access);
@@ -2223,8 +2354,12 @@ StructMember* ResolveMemberFunctionOverload(StructMember* first,
         ((StructMemberASTNode*)member_access->right)->template_arguments;
   }
 
-  bool only_initializer_list_constructors = MemberCallOnlyInitializerListConstructors(
-      first, node, member_access, explicit_args != NULL);
+  bool only_initializer_list_constructors =
+      MemberCallOnlyInitializerListConstructors(
+          first, node, member_access, explicit_args != NULL);
+  if (!only_initializer_list_constructors && explicit_args == NULL) {
+    ExpandBracedConstructorCallActuals(first, node);
+  }
 
   if (explicit_args == NULL) {
     RankNonTemplateMemberCandidates(

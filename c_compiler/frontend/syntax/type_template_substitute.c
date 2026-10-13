@@ -253,6 +253,65 @@ Vector* TemplateArgumentVectorCopyWithPackElement(Vector* args,
   return copy;
 }
 
+/* Build the argument list for element `element_index` of a pack expansion.
+ * Every bound pack of the same length is advanced in lockstep, as required for
+ * patterns such as `Trait<Ts, Us&&>...`; unrelated packs remain intact. */
+static Vector* TemplateArgumentVectorCopyForPackExpansionElement(
+    Vector* args, int pack_index, size_t element_index) {
+  if (args == NULL || pack_index < 0 || (size_t)pack_index >= args->length) {
+    return TemplateArgumentVectorCopy(args);
+  }
+  TemplateArgument* driving_pack = args->value.p[pack_index];
+  if (driving_pack == NULL || driving_pack->pack_arguments == NULL ||
+      element_index >= driving_pack->pack_arguments->length) {
+    return TemplateArgumentVectorCopy(args);
+  }
+  size_t pack_length = driving_pack->pack_arguments->length;
+  Vector* copy = NewVector();
+  for (size_t i = 0; i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    TemplateArgument* selected =
+        arg != NULL && arg->pack_arguments != NULL &&
+                arg->pack_arguments->length == pack_length &&
+                element_index < arg->pack_arguments->length
+            ? arg->pack_arguments->value.p[element_index]
+            : arg;
+    VectorAppend(copy, TemplateArgumentCopy(selected));
+  }
+  return copy;
+}
+
+// A class that is still being defined or instantiated has no members yet, so
+// an operand such as `ranges::begin(declval<subrange<...>&>())` cannot be
+// judged against it.  Constraint checks reached from inside that class (for
+// example through its `view_interface<D>` base) must defer rather than report
+// a substitution failure.
+static bool TemplateArgumentVectorNamesIncompleteClass(Vector* args) {
+  if (args == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg == NULL) {
+      continue;
+    }
+    if (TemplateArgumentVectorNamesIncompleteClass(arg->pack_arguments)) {
+      return true;
+    }
+    TypeRecord* base = arg->type;
+    while (base != NULL && base->next != NULL) {
+      base = base->next;
+    }
+    if (base != NULL && TypeIsStructOrUnion(base) &&
+        base->info.struct_info != NULL &&
+        (base->info.struct_info->instantiation_in_progress ||
+         !TypeIsCompleteClass(base))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Re-evaluate a value-dependent non-type template-argument expression (stored
 // unevaluated at parse time, e.g. `!is_integral<It>::value`) against concrete
 // template arguments; defined after the template-body clone machinery it relies
@@ -719,8 +778,8 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
       for (size_t i = 0; i < pack->pack_arguments->length; i++) {
         if (arg->kind == kTemplateParameterType && index >= 0 &&
             arg->type != NULL && arg->type->qualifiers != kQualPlain) {
-          Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
-              args, index, pack->pack_arguments->value.p[i]);
+          Vector* element_args =
+              TemplateArgumentVectorCopyForPackExpansionElement(args, index, i);
           TemplateArgument* subst =
               NewSubstitutedTemplateArgument(parser, arg, element_args);
           VectorAppend(out, subst);
@@ -751,8 +810,9 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
       TemplateArgument* pattern_pack = args->value.p[pattern_pack_index];
       if (pattern_pack != NULL && pattern_pack->pack_arguments != NULL) {
         for (size_t i = 0; i < pattern_pack->pack_arguments->length; i++) {
-          Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
-              args, pattern_pack_index, pattern_pack->pack_arguments->value.p[i]);
+          Vector* element_args =
+              TemplateArgumentVectorCopyForPackExpansionElement(
+                  args, pattern_pack_index, i);
           TemplateArgument* subst =
               NewSubstitutedTemplateArgument(parser, arg, element_args);
           VectorAppend(out, subst);
@@ -2274,6 +2334,16 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
         !StructContainsTemplateParameter(subst->info.struct_info)) {
       parser->template_substitution_failed = true;
     }
+    TypeRecordDelete(subst);
+    subst = TypeRecordCopy(type);
+    if (subst->template_arguments != NULL) {
+      VectorDeleteWithContents(
+          subst->template_arguments,
+          (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+    }
+    subst->template_origin = info.origin;
+    subst->template_arguments = TemplateArgumentVectorCopy(concrete_args);
   }
   VectorDeleteWithContents(concrete_args,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -2873,10 +2943,18 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         // A still-dependent operand (ElemFromList<I, T...>::type while I is
         // not yet a constant) can fail overload resolution.  That is not
         // ill-formed; keep the decltype opaque for a later substitution.
+        bool arguments_are_concrete =
+            args != NULL &&
+            !TemplateArgumentVectorContainsTemplateParameter(args) &&
+            !TemplateArgumentVectorNamesIncompleteClass(args);
+        bool structurally_dependent =
+            expr != NULL &&
+            DependentExpressionContainsTemplateParameter(expr);
         bool still_dependent =
             expr != NULL &&
-            (ExpressionIsTemplateDependent(expr) ||
-             DependentExpressionContainsTemplateParameter(expr));
+            (structurally_dependent ||
+             (!arguments_are_concrete &&
+              ExpressionIsTemplateDependent(expr)));
         if (still_dependent) {
           TypeRecord* opaque = TypeRecordCopy(type);
           opaque->qualifiers |= type->qualifiers;
@@ -3391,6 +3469,19 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
         }
       }
     }
+    // Function types can occur as ordinary template arguments, for example in
+    // `is_same<void(Box), void(decay_t<T>)>`.  Their parameter symbols own
+    // separate type records, so walking only the function's return-type spine
+    // leaves `T` at its old enclosing-relative index.  Rebase those parameter
+    // types as part of the function type.
+    if (TypeIsFunction(t)) {
+      for (size_t i = 0; i < t->info.function.prototype.length; i++) {
+        Symbol* formal = t->info.function.prototype.value.p[i];
+        if (formal != NULL) {
+          RebaseTemplateParameterIndices(formal->type, base);
+        }
+      }
+    }
     // See RebaseTemplateParameterIndicesSpine for alias-id operands.
     if (t->dependent_decltype_expr != NULL &&
         !TypeIsDecltypeAliasTemplateId(t)) {
@@ -3663,12 +3754,17 @@ ASTNode* CloneDependentExpressionWithArgs(TypeParser* parser,
   clone.from_func = NULL;
   clone.to_func = NULL;
   clone.rebase_template_parameter_base = 0;
-  clone.from_owner = NULL;
-  clone.to_owner = NULL;
   clone.substitution_source =
       parser != NULL ? parser->template_substitution_source : NULL;
   clone.substitution_target =
       parser != NULL ? parser->template_substitution_target : NULL;
+  // Dependent initializers and constraints need the same member-symbol
+  // retargeting as function bodies.  For example, cloning
+  // `Trait<K, V>::value = check<Pair>()` for `Trait<int, int>` must bind
+  // `check` to the specialization; otherwise its body is instantiated without
+  // the enclosing class arguments.
+  clone.from_owner = clone.substitution_source;
+  clone.to_owner = clone.substitution_target;
   ASTNode* cloned =
       ASTNodeClone(expr, CloneDependentDecltypeNode, &clone, NULL);
   MapDestructWithContents(&clone.pack_symbol_map, DeleteMappedVector);

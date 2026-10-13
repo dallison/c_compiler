@@ -848,14 +848,19 @@ static void ImportCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
           clone->symbol->type->info.function.is_constructor &&
           inherits_constructor && owner->tag_name != NULL) {
         StringSetString(&clone->symbol->name, owner->tag_name);
-        // The clone shares the base constructor's type, including a copy or
-        // move kind.  An inherited Base(const Base&) is not a copy constructor
-        // of the derived class; leaving that kind set suppresses the implicit
-        // one.  Copy the type so the base constructor is unchanged.
-        TypeRecord* func = TypeRecordCopy(clone->symbol->type);
-        func->info.function.cxx_special_member_kind = kCXXSpecialMemberNone;
-        func->info.function.is_trivial_special_member = false;
-        SymbolSetType(clone->symbol, func);
+        // An inherited Base(const Base&) is not a copy constructor of the
+        // derived class; leaving that kind set suppresses the implicit one.
+        // Only copy a special-member type that needs changing.  An ordinary
+        // constructor (especially a variadic function template) must retain
+        // its original prototype symbols because identifiers in its deferred
+        // body refer to those symbols when its parameter pack is expanded.
+        if (clone->symbol->type->info.function.cxx_special_member_kind !=
+            kCXXSpecialMemberNone) {
+          TypeRecord* func = TypeRecordCopy(clone->symbol->type);
+          func->info.function.cxx_special_member_kind = kCXXSpecialMemberNone;
+          func->info.function.is_trivial_special_member = false;
+          SymbolSetType(clone->symbol, func);
+        }
       }
       AddCXXMemberUsingFunction(parser, owner, clone);
       imported = true;
@@ -2303,6 +2308,21 @@ static void FlushDeferredNoexceptSpecifiers(TypeParser* parser,
   LexCheckpointRestore(lex, &end_checkpoint);
   LexCheckpointDestruct(&end_checkpoint);
   VectorClear(deferred);
+}
+
+bool ConstructorPreambleIsPending(TypeRecord* func) {
+  if (!pending_inline_constructor_preambles_initialized || func == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < pending_inline_constructor_preambles.length; i++) {
+    PendingInlineConstructorPreamble* pending =
+        pending_inline_constructor_preambles.value.p[i];
+    if (pending != NULL && pending->symbol != NULL &&
+        pending->symbol->type == func) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void FinalizePendingInlineConstructorPreambles(TypeParser* parser,

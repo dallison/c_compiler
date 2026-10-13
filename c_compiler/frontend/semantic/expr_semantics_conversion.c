@@ -358,6 +358,26 @@ static int CXXBracedInitTargetRankScalar(BracedInitializerASTNode* braced,
   return r < 0 ? -1 : r;
 }
 
+// Ranks the braced elements against the initializer_list parameter of a
+// constructor that CXXConstructorIsInitializerListConstructor has recognized.
+static int CXXInitializerListConstructorElementRank(TypeRecord* func,
+                                                    ASTNode* actual) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return -1;
+  }
+  for (size_t i = 0; i < func->info.function.prototype.length; i++) {
+    Symbol* formal = func->info.function.prototype.value.p[i];
+    if (formal == NULL || StringEqual(&formal->name, "this") ||
+        StringEqual(&formal->name, "__complete_object")) {
+      continue;
+    }
+    TypeRecord* target =
+        TypeIsReference(formal->type) ? formal->type->next : formal->type;
+    return CXXInitializerListBracedInitRank(actual, target);
+  }
+  return -1;
+}
+
 // Contract: [over.match.list] initializer-list constructors; speculative template
 // deduction with diagnostics suppressed; bumps cxx_braced_init_target_rank_depth.
 static int CXXBracedInitTargetRankIlConstructors(StructMember* ctor,
@@ -368,8 +388,6 @@ static int CXXBracedInitTargetRankIlConstructors(StructMember* ctor,
   Vector one_actual;
   VectorInit(&one_actual);
   VectorAppend(&one_actual, actual);
-  VectorASTNode il_call = {0};
-  il_call.children = &one_actual;
   int best = -1;
   cxx_braced_init_target_rank_depth++;
   for (StructMember* c = ctor; c != NULL; c = c->overload_next) {
@@ -395,12 +413,10 @@ static int CXXBracedInitTargetRankIlConstructors(StructMember* ctor,
         }
         continue;
       }
-      s = FunctionCallScore(temporary->type, &il_call,
-                            /*first_formal_arg=*/1);
+      s = CXXInitializerListConstructorElementRank(temporary->type, actual);
       SymbolDelete(temporary);
     } else {
-      s = FunctionCallScore(c->symbol->type, &il_call,
-                            /*first_formal_arg=*/1);
+      s = CXXInitializerListConstructorElementRank(c->symbol->type, actual);
     }
     if (s >= 0 && (best < 0 || s < best)) {
       best = s;
@@ -409,6 +425,21 @@ static int CXXBracedInitTargetRankIlConstructors(StructMember* ctor,
   cxx_braced_init_target_rank_depth--;
   VectorDestruct(&one_actual);
   return best;
+}
+
+// Reports whether [over.match.list]'s first phase has a viable
+// initializer-list constructor.  Lowering uses this to decide whether the
+// braces stay one argument or are unpacked for ordinary constructors.
+bool CXXBracedInitSelectsInitializerListConstructor(ASTNode* actual,
+                                                    TypeRecord* target) {
+  if (actual == NULL || actual->op != AST_OP(braced_init) || target == NULL ||
+      !TypeIsStructOrUnion(target) || target->info.struct_info == NULL ||
+      target->info.struct_info->tag_name == NULL) {
+    return false;
+  }
+  StructMember* ctor = FindStructMember(target->info.struct_info,
+                                        target->info.struct_info->tag_name);
+  return CXXBracedInitTargetRankIlConstructors(ctor, actual) >= 0;
 }
 
 // Contract: Non-initializer-list constructors for expression-only element lists;
@@ -438,6 +469,12 @@ static void CXXBracedInitTargetRankOrdinaryConstructors(StructMember* ctor,
 // Contract: Positional aggregate init when every brace element is a analyzed
 // expression; sets `*best` to 0 when each maps to a data member via
 // OverloadConversionRank.
+static bool CXXBracedInitAggregateObjectMember(StructMember* member) {
+  return member != NULL && member->symbol != NULL && !member->is_static &&
+         !member->is_member_function &&
+         !StorageIs(member->symbol->storage, STO(typedef));
+}
+
 static void CXXBracedInitTargetRankAggregateExpressionElements(Struct* str,
                                                                Vector* elements,
                                                                int* best) {
@@ -449,7 +486,7 @@ static void CXXBracedInitTargetRankAggregateExpressionElements(Struct* str,
   for (size_t i = 0; i < elements->length; i++) {
     while (member_index < str->members.length) {
       StructMember* m = str->members.value.p[member_index];
-      if (m != NULL && !m->is_member_function && m->symbol != NULL) {
+      if (CXXBracedInitAggregateObjectMember(m)) {
         break;
       }
       member_index++;
@@ -551,7 +588,7 @@ static void CXXBracedInitTargetRankAggregateMixedElements(Struct* str,
   for (size_t i = 0; ok && i < braced->initializers->length; i++) {
     while (member_index < str->members.length) {
       StructMember* m = str->members.value.p[member_index];
-      if (m != NULL && !m->is_member_function && m->symbol != NULL) {
+      if (CXXBracedInitAggregateObjectMember(m)) {
         break;
       }
       member_index++;

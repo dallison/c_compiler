@@ -64,6 +64,8 @@ ASTNode* FoldConstantExpression(ASTNode* node);
 bool IsConstantExpression(ASTNode* node);
 bool MarkCXX26SymbolicConstexprReference(Symbol* symbol, ASTNode* initializer);
 int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target);
+bool CXXBracedInitSelectsInitializerListConstructor(ASTNode* actual,
+                                                    TypeRecord* target);
 StructMember* FindConvertingConstructorCandidate(TypeRecord* to, ASTNode* from, bool allow_explicit, bool allow_same_class);
 int OverloadConversionRank(ASTNode* actual, TypeRecord* formal_type);
 bool ReferenceCanBind(ASTNode* actual, TypeRecord* reference_type);

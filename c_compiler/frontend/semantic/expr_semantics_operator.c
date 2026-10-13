@@ -1492,6 +1492,28 @@ ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
   if (left_class == NULL && right_class == NULL) {
     return NULL;
   }
+  Symbol* current_symbol =
+      compiler->current_function != NULL &&
+              TypeIsFunction(compiler->current_function)
+          ? compiler->current_function->info.function.symbol
+          : NULL;
+  bool template_pattern =
+      current_symbol != NULL && current_symbol->flags.is_template &&
+      compiler->current_function->template_arguments == NULL;
+  bool dependent_class_operand =
+      (left_class != NULL && left_class->info.struct_info != NULL &&
+       left_class->info.struct_info->is_template) ||
+      (right_class != NULL && right_class->info.struct_info != NULL &&
+       right_class->info.struct_info->is_template);
+  if (template_pattern &&
+      (dependent_class_operand ||
+       ExpressionIsTemplateDependent(node->left) ||
+       ExpressionIsTemplateDependent(node->right))) {
+    // The primary template may only carry a placeholder class (`basic_ostream`
+    // rather than `basic_ostream<char, traits>`) and a fallback scalar for the
+    // dependent operand. Resolve the operator in the concrete body clone.
+    return (ASTNode*)node;
+  }
 
   bool member_present = false;
   if (left_class != NULL && left_class->info.struct_info != NULL) {

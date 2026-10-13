@@ -17,10 +17,10 @@ __attribute__((warn_unused_result)) ASTNode* AnalyzeExpression(ASTNode* node);
 ASTNode* CXXFoldIsSameVExpression(ASTNode* expr);
 // Instantiate a variable template-id used as a value (`foo<T>`, `C::foo<T>`).
 ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr);
-// Member access analyzed while its receiver was still `auto` keeps that
-// placeholder after deduction.  Re-run those accesses once the symbol type
-// is concrete.
-void SemanticReanalyzeAutoMemberAccesses(void);
+// Expressions analyzed while a local was still `auto` can retain placeholder
+// member accesses or built-in operators. Re-run them once deduction makes the
+// operands concrete.
+void SemanticReanalyzeAfterAutoDeduction(void);
 bool IsConstantExpression(ASTNode* node);
 bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);

@@ -842,10 +842,16 @@ StructMember* FindMemberFunctionTemplateSpecialization(StructMember* first,
         type->template_arguments == NULL) {
       continue;
     }
-    if (TypeEqual(overload->symbol->type, type) &&
-        TemplateArgumentVectorEqual(
-            overload->symbol->type->template_arguments,
-            type->template_arguments)) {
+    bool same_origin =
+        type->info.function.template_origin == NULL ||
+        overload->symbol->type->info.function.template_origin ==
+            type->info.function.template_origin;
+    bool same_arguments = TemplateArgumentVectorEqual(
+        overload->symbol->type->template_arguments,
+        type->template_arguments);
+    if (same_origin && same_arguments &&
+        (TypeEqual(overload->symbol->type, type) ||
+         overload->symbol->flags.is_explicit_specialization)) {
       return overload;
     }
   }

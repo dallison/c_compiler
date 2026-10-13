@@ -43,6 +43,11 @@ static bool ClosureCallOperatorIsGeneric(Symbol* call_op);
 static Symbol* ResolveClosureCallOperatorForFunctionPointer( Struct* closure, TypeRecord* target_fn);
 static ASTNode* LambdaCaptureInitializerExpr(ASTNode* init);
 static void ClearCaptureInitializerAnalyzed(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static void ClearLambdaBodyAfterCaptureDeduction(ASTNode* node, void* data,
+                                                 int child_id,
+                                                 VisitorMode mode);
+static void ReanalyzeLambdaBodyAfterCaptureDeduction(Struct* closure,
+                                                     bool fields_changed);
 static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node);
 static void ExpandLambdaArrayCaptureCopies(CompoundLiteralASTNode* node);
 
@@ -380,6 +385,112 @@ static void ClearCaptureInitializerAnalyzed(ASTNode* node, void* data,
   }
 }
 
+// Besides clearing analysis flags, discard fallback types from member chains
+// parsed against an `auto` capture. Member analysis otherwise treats a
+// non-NULL placeholder (often the recovery type `int`) as final and never
+// revisits lookup.
+// Contract: Visitor; mutates analysis flags and stale member/call result types.
+static void ClearLambdaBodyAfterCaptureDeduction(ASTNode* node, void* data,
+                                                 int child_id,
+                                                 VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  node->flags &= ~kASTAnalyzed;
+  if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
+    BinaryASTNode* access = (BinaryASTNode*)node;
+    if (access->right != NULL && access->right->op == AST_OP(string)) {
+      ASTNodeClearType(node);
+    }
+    return;
+  }
+  if (node->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)node;
+    if (call->left != NULL &&
+        (call->left->op == AST_OP(dot) ||
+         call->left->op == AST_OP(arrow))) {
+      BinaryASTNode* access = (BinaryASTNode*)call->left;
+      if (access->right != NULL && access->right->op == AST_OP(string)) {
+        ASTNodeClearType(node);
+      }
+    }
+  }
+}
+
+// A lambda body is initially analyzed while an init-capture field may still be
+// `auto`. Once the field is concrete, repeat statement analysis so member
+// calls, local-auto declarations, and overloaded operators use the real field
+// type. Generic call operators remain patterns and are handled per
+// specialization.
+// Contract: Temporarily changes current function/access context and clears
+// analysis flags in the non-generic call operator body; restores both contexts.
+// No-op unless `fields_changed` or the body still holds placeholder results.
+static bool LambdaBodyNodeIsStale(ASTNode* node, void* data) {
+  (void)data;
+  if (node == NULL || (node->flags & kASTAnalyzed) == 0) {
+    return false;
+  }
+  if (node->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+    if (symbol == NULL || symbol->type == NULL ||
+        TypeContainsTemplateParameter(symbol->type)) {
+      return false;
+    }
+    // A local whose deduction was deferred on a placeholder capture.
+    if (TypeContainsAuto(symbol->type) || TypeIsUnknown(symbol->type)) {
+      return true;
+    }
+    return node->type == NULL || TypeContainsAuto(node->type) ||
+           TypeIsUnknown(node->type);
+  }
+  return (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) &&
+         node->type != NULL &&
+         (TypeContainsAuto(node->type) || TypeIsUnknown(node->type));
+}
+
+static void ReanalyzeLambdaBodyAfterCaptureDeduction(Struct* closure,
+                                                     bool fields_changed) {
+  StructMember* call_member = ClosureCallOperatorMember(closure);
+  Symbol* call_op = call_member != NULL ? call_member->symbol : NULL;
+  if (call_op == NULL || call_op->type == NULL ||
+      !TypeIsFunction(call_op->type) || ClosureCallOperatorIsGeneric(call_op) ||
+      call_op->type->info.function.body == NULL) {
+    return;
+  }
+  // Re-running the body is only needed once after init-capture fields became
+  // concrete, or when something in it is still analyzed against a
+  // placeholder; doing it unconditionally re-analyzes every nested lambda once
+  // per enclosing level.
+  ASTNode* body = call_op->type->info.function.body;
+  if (!fields_changed && !closure->lambda_body_needs_reanalysis &&
+      !ASTNodeAny(body, LambdaBodyNodeIsStale, NULL)) {
+    return;
+  }
+  closure->lambda_body_needs_reanalysis = false;
+  for (size_t i = 0; i < closure->members.length; i++) {
+    StructMember* member = closure->members.value.p[i];
+    if (member != NULL && member->symbol != NULL &&
+        member->symbol->type != NULL &&
+        TypeContainsAuto(member->symbol->type)) {
+      closure->lambda_body_needs_reanalysis = true;
+      break;
+    }
+  }
+  TypeRecord* saved_function = compiler->current_function;
+  Struct* saved_access_context = compiler->current_class_access_context;
+  compiler->current_function = call_op->type;
+  compiler->current_class_access_context = closure;
+  ASTNodeVisit(call_op->type->info.function.body,
+               ClearLambdaBodyAfterCaptureDeduction, 0, NULL);
+  AnalyzeStatement(call_op->type->info.function.body);
+  StatementFinishAutoReturnDeduction(call_op->type,
+                                     call_op->type->info.function.body);
+  compiler->current_function = saved_function;
+  compiler->current_class_access_context = saved_access_context;
+}
+
 // Contract: Updates `auto` capture field types and relayout; may replace init nodes.
 static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node) {
   if (node == NULL || (node->base.flags & kASTLambdaExpression) == 0 ||
@@ -412,11 +523,19 @@ static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node) {
         continue;
       }
       Designator* designator = designated->designators->value.p[0];
+      String* designator_name = NULL;
+      if (designator != NULL && designator->is_resolved_member) {
+        StructMember* resolved = designator->value.struct_member;
+        if (resolved != NULL && resolved->symbol != NULL) {
+          designator_name = &resolved->symbol->name;
+        }
+      } else if (designator != NULL) {
+        designator_name = designator->value.struct_member_name;
+      }
       if (designator == NULL ||
           designator->designator_type != kDesignatorStruct ||
-          designator->value.struct_member_name == NULL ||
-          !StringEqualString(designator->value.struct_member_name,
-                             &member->symbol->name)) {
+          designator_name == NULL ||
+          !StringEqualString(designator_name, &member->symbol->name)) {
         continue;
       }
       value = LambdaCaptureInitializerExpr(designated->init);
@@ -473,12 +592,15 @@ static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node) {
     member->symbol->type = field_type;
     changed = true;
   }
-  if (!changed) {
-    return;
+  if (changed) {
+    RelayoutStruct(closure);
+    node->base.type->size = closure->size;
+    TypeRecordCalculateSize(node->base.type);
   }
-  RelayoutStruct(closure);
-  node->base.type->size = closure->size;
-  TypeRecordCalculateSize(node->base.type);
+  // A prior pass can already have made the capture field concrete while the
+  // call-operator body still contains expressions analyzed from its earlier
+  // placeholder form.
+  ReanalyzeLambdaBodyAfterCaptureDeduction(closure, changed);
 }
 
 // A by-copy array capture copies each element.  The closure initializer's

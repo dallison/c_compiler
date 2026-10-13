@@ -319,7 +319,8 @@ static bool CXXIsSameTemplateParameterType(TypeRecord* left, TypeRecord* right) 
       left->template_parameter_index == right->template_parameter_index &&
       left->template_parameter_name != NULL &&
       right->template_parameter_name != NULL &&
-      StringEqual(left->template_parameter_name, right->template_parameter_name)) {
+      StringEqualString(left->template_parameter_name,
+                        right->template_parameter_name)) {
     return true;
   }
   return TypeEqualIgnoringQualifiers(left, right);

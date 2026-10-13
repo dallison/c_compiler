@@ -38,8 +38,6 @@
 
 static bool CXXCurrentFunctionCanEscalate(bool* deferred_template_pattern);
 static bool SymbolTypeIsConcreteClass(TypeRecord* type);
-static void CollectStaleAutoMemberAccess(ASTNode* node, void* data, int child_id, VisitorMode mode);
-
 // Contract: Mutates `func` (return type chain, deduction flags) and may analyze
 // `func->body` or pull the definition from `symbol->value.func_defn`. Sets
 // `current_function` / `current_class_access_context` for the duration of body
@@ -268,40 +266,140 @@ static bool SymbolTypeIsConcreteClass(TypeRecord* type) {
   return TypeIsStructOrUnion(type);
 }
 
-// A range-for binding (`const auto& it = *begin`) can be used in the loop
-// body before deduction replaces `auto`.  Those member accesses were typed
-// as the placeholder and then frozen.  Once `it` has a class type, look the
-// members up again.
-// Contract: Visitor; appends stale member-access nodes to `data` vector.
-static void CollectStaleAutoMemberAccess(ASTNode* node, void* data,
-                                        int child_id, VisitorMode mode) {
-  (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL) {
-    return;
+// Returns true for raw operator opcodes that may need C++ overload resolution
+// after an operand's placeholder type becomes a concrete class.
+static bool AutoDeductionMayChangeOperator(ASTOpcode op) {
+  switch (op) {
+    case AST_OP(postinc):
+    case AST_OP(postdec):
+    case AST_OP(uminus):
+    case AST_OP(uplus):
+    case AST_OP(contents):
+    case AST_OP(not):
+    case AST_OP(onescomp):
+    case AST_OP(preinc):
+    case AST_OP(predec):
+    case AST_OP(plus):
+    case AST_OP(minus):
+    case AST_OP(mult):
+    case AST_OP(div):
+    case AST_OP(mod):
+    case AST_OP(lshift):
+    case AST_OP(rshift):
+    case AST_OP(rshiftl):
+    case AST_OP(rshifta):
+    case AST_OP(and):
+    case AST_OP(bitor):
+    case AST_OP(exor):
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq):
+    case AST_OP(equal):
+    case AST_OP(noteq):
+    case AST_OP(spaceship):
+    case AST_OP(pluseq):
+    case AST_OP(minuseq):
+    case AST_OP(multeq):
+    case AST_OP(diveq):
+    case AST_OP(percenteq):
+    case AST_OP(lshifteq):
+    case AST_OP(rshifteq):
+    case AST_OP(rshifteql):
+    case AST_OP(rshifteqa):
+    case AST_OP(andeq):
+    case AST_OP(oreq):
+    case AST_OP(exoreq):
+    case AST_OP(logand):
+    case AST_OP(logor):
+    case AST_OP(dotstar):
+    case AST_OP(arrowstar):
+      return true;
+    default:
+      return false;
   }
-  if (node->op != AST_OP(dot) && node->op != AST_OP(arrow)) {
-    return;
-  }
-  if ((node->flags & kASTAnalyzed) == 0 || node->type == NULL ||
-      !TypeContainsAuto(node->type)) {
-    return;
-  }
-  BinaryASTNode* access = (BinaryASTNode*)node;
-  if (access->left == NULL || access->left->op != AST_OP(identifier)) {
-    return;
-  }
-  Symbol* symbol = ((IdentifierASTNode*)access->left)->symbol;
-  if (symbol == NULL || !SymbolTypeIsConcreteClass(symbol->type)) {
-    return;
-  }
-  VectorAppend((Vector*)data, node);
 }
 
-// Contract: Clears `kASTAnalyzed` on stale member accesses under
-// `current_function->body`, re-runs `AnalyzeExpression`, and may replace child
-// slots via `ASTNodeReplaceChild` (old nodes retained when replaced). Re-entrant
-// guard (`depth`); no-op outside a function with a body.
-void SemanticReanalyzeAutoMemberAccesses(void) {
+// Returns true when an expression operand now has a complete, non-dependent
+// class type that participates in overloaded-operator lookup.
+static bool AutoDeductionOperandIsConcreteClass(ASTNode* operand) {
+  if (operand == NULL || operand->type == NULL ||
+      TypeContainsAuto(operand->type) || TypeIsUnknown(operand->type) ||
+      TypeContainsTemplateParameter(operand->type)) {
+    return false;
+  }
+  TypeRecord* type = operand->type;
+  while (TypeIsReference(type)) {
+    type = type->next;
+  }
+  return TypeIsStructOrUnion(type);
+}
+
+// A range-for binding (`const auto& it = *begin`) can be used in the loop
+// body before deduction replaces `auto`. Member accesses and operators in
+// later statements can therefore retain placeholder semantics. Refresh
+// identifier types post-order, then collect expressions that need reanalysis.
+// Contract: Visitor; mutates stale identifier types and appends expressions to
+// the vector in `data`.
+static void CollectStaleAutoExpressions(ASTNode* node, void* data,
+                                        int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPostChildren || node == NULL) {
+    return;
+  }
+  if (node->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+    if (symbol != NULL && symbol->type != NULL &&
+        !TypeContainsAuto(symbol->type) && !TypeIsUnknown(symbol->type) &&
+        !TypeContainsTemplateParameter(symbol->type) &&
+        (node->type == NULL || TypeContainsAuto(node->type) ||
+         TypeIsUnknown(node->type) ||
+         TypeContainsTemplateParameter(node->type))) {
+      ASTNodeSetType(node, symbol->type);
+      node->flags &= ~kASTAnalyzed;
+    }
+    return;
+  }
+  if ((node->flags & kASTAnalyzed) == 0) {
+    return;
+  }
+  if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
+    BinaryASTNode* access = (BinaryASTNode*)node;
+    if ((node->type == NULL || TypeContainsAuto(node->type) ||
+         TypeIsUnknown(node->type)) &&
+        access->left != NULL &&
+        access->left->op == AST_OP(identifier)) {
+      Symbol* symbol = ((IdentifierASTNode*)access->left)->symbol;
+      if (symbol != NULL && SymbolTypeIsConcreteClass(symbol->type)) {
+        VectorAppend((Vector*)data, node);
+      }
+    }
+    return;
+  }
+  if (!AutoDeductionMayChangeOperator(node->op)) {
+    return;
+  }
+  ASTNodeShape shape = ASTNodeGetShape(node);
+  bool has_class_operand = false;
+  if (shape == kASTShapeUnary) {
+    has_class_operand = AutoDeductionOperandIsConcreteClass(
+        ((UnaryASTNode*)node)->sub);
+  } else if (shape == kASTShapeBinary) {
+    BinaryASTNode* binary = (BinaryASTNode*)node;
+    has_class_operand =
+        AutoDeductionOperandIsConcreteClass(binary->left) ||
+        AutoDeductionOperandIsConcreteClass(binary->right);
+  }
+  if (has_class_operand) {
+    VectorAppend((Vector*)data, node);
+  }
+}
+
+// Contract: Refreshes stale expressions under `current_function->body`, re-runs
+// `AnalyzeExpression`, and may replace child slots via `ASTNodeReplaceChild`
+// (old nodes retained when replaced). Re-entrant guard (`depth`); no-op outside
+// a function with a body.
+void SemanticReanalyzeAfterAutoDeduction(void) {
   static int depth = 0;
   if (depth > 0 || compiler->current_function == NULL ||
       !TypeIsFunction(compiler->current_function) ||
@@ -311,19 +409,12 @@ void SemanticReanalyzeAutoMemberAccesses(void) {
   Vector stale;
   VectorInit(&stale);
   ASTNodeVisit(compiler->current_function->info.function.body,
-               CollectStaleAutoMemberAccess, 0, &stale);
+               CollectStaleAutoExpressions, 0, &stale);
   depth++;
   for (size_t i = 0; i < stale.length; i++) {
     ASTNode* node = stale.value.p[i];
-    BinaryASTNode* access = (BinaryASTNode*)node;
     node->flags &= ~kASTAnalyzed;
     ASTNodeClearType(node);
-    if (access->left != NULL) {
-      access->left->flags &= ~kASTAnalyzed;
-    }
-    if (access->right != NULL) {
-      access->right->flags &= ~kASTAnalyzed;
-    }
     ASTNode* analyzed = AnalyzeExpression(node);
     if (analyzed != node && node->parent != NULL) {
       ASTNodeReplaceChild(node->parent, node->child_id, analyzed,

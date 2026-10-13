@@ -1671,6 +1671,29 @@ static bool ClassTemplateIdIsConcrete(TypeParser* parser, Symbol* symbol,
 
 // Parse a type-specifier.  This might also be a typedef reference which
 // contains a full TypeRecord.
+// A dependent use of `template <class K> using key_arg =
+// typename Base::template key_arg<K>`: the alias names a member *template* of
+// a dependent class.  Its pattern must not be copied onto the template-id,
+// because the pattern's type nodes are shared with every other use.  Plain
+// dependent members (`typename type_identity<T>::type`) keep the usual path so
+// they stay non-deduced contexts.
+static bool AliasIdForwardsDependentMemberTemplate(TypeParser* parser,
+                                                   Symbol* symbol,
+                                                   Vector* args) {
+  if (!symbol->flags.is_template || symbol->alias_template == NULL ||
+      args == NULL || symbol->type == NULL ||
+      symbol->type->dependent_member_name == NULL) {
+    return false;
+  }
+  Vector* member_args = symbol->type->dependent_member_template_arguments;
+  if (member_args == NULL || member_args->length == 0 ||
+      VectorLast(member_args) == NULL) {
+    return false;
+  }
+  return parser->syntax->current_template_parameters != NULL ||
+         TemplateArgumentVectorContainsTemplateParameter(args);
+}
+
 static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
   PartialTypeSpecifier result;
   result.error = false;
@@ -2595,45 +2618,60 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
              ClassTemplateIdIsConcrete(parser, symbol, args))) {
           type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
         } else {
-          type_record = TypeRecordCopy(symbol->type);
-          if (symbol->flags.is_template_template_parameter) {
-            type_record->template_origin = symbol;
-          }
-          if (symbol->flags.is_template && args == NULL &&
-              !parser->syntax->parsing_template_declaration &&
-              symbol->alias_template != NULL &&
-              !CXXAliasTemplateIsDeducible(symbol)) {
-            SyntaxError(parser->syntax,
-                        "Alias template %s does not name a deducible class "
-                        "template",
-                        symbol->name.value);
-          }
-          if (symbol->flags.is_template && args == NULL &&
-              !parser->syntax->parsing_template_declaration &&
-              TypeIsStructOrUnion(symbol->type)) {
-            if (CXXAliasTemplateIsDeducible(symbol)) {
-              SetCXXAliasTemplatePlaceholderOrigin(symbol, type_record);
-            } else {
-              type_record->template_origin = symbol;
-            }
-          }
-          if (symbol->flags.is_template && args != NULL &&
-              (parser->syntax->current_template_parameters != NULL ||
-               TemplateArgumentVectorContainsTemplateParameter(args))) {
-            if (symbol->alias_template == NULL &&
-                TypeIsStructOrUnion(symbol->type) &&
-                symbol->type->info.struct_info != NULL) {
-              Vector* completed = CompleteClassTemplateArguments(
-                  parser, symbol->type->info.struct_info, args);
-              if (completed != NULL) {
-                VectorDeleteWithContents(
-                    completed, (VectorElementDestructor)TemplateArgumentDelete,
-                    /*free_element=*/false);
-              }
-            }
+          bool forwarding_member_alias_id =
+              AliasIdForwardsDependentMemberTemplate(parser, symbol, args);
+          if (forwarding_member_alias_id) {
+            // Do not copy the alias pattern (`typename super_type::key_arg<K>`)
+            // onto this template-id.  The pattern shares type nodes with other
+            // uses; partial substitution later collapses parameters to a base
+            // class in every signature that referenced the same nodes.
+            type_record =
+                NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
             type_record->template_origin = symbol;
             type_record->template_arguments = args;
             args = NULL;
+          } else {
+            type_record = TypeRecordCopy(symbol->type);
+            if (symbol->flags.is_template_template_parameter) {
+              type_record->template_origin = symbol;
+            }
+            if (symbol->flags.is_template && args == NULL &&
+                !parser->syntax->parsing_template_declaration &&
+                symbol->alias_template != NULL &&
+                !CXXAliasTemplateIsDeducible(symbol)) {
+              SyntaxError(parser->syntax,
+                          "Alias template %s does not name a deducible class "
+                          "template",
+                          symbol->name.value);
+            }
+            if (symbol->flags.is_template && args == NULL &&
+                !parser->syntax->parsing_template_declaration &&
+                TypeIsStructOrUnion(symbol->type)) {
+              if (CXXAliasTemplateIsDeducible(symbol)) {
+                SetCXXAliasTemplatePlaceholderOrigin(symbol, type_record);
+              } else {
+                type_record->template_origin = symbol;
+              }
+            }
+            if (symbol->flags.is_template && args != NULL &&
+                (parser->syntax->current_template_parameters != NULL ||
+                 TemplateArgumentVectorContainsTemplateParameter(args))) {
+              if (symbol->alias_template == NULL &&
+                  TypeIsStructOrUnion(symbol->type) &&
+                  symbol->type->info.struct_info != NULL) {
+                Vector* completed = CompleteClassTemplateArguments(
+                    parser, symbol->type->info.struct_info, args);
+                if (completed != NULL) {
+                  VectorDeleteWithContents(
+                      completed,
+                      (VectorElementDestructor)TemplateArgumentDelete,
+                      /*free_element=*/false);
+                }
+              }
+              type_record->template_origin = symbol;
+              type_record->template_arguments = args;
+              args = NULL;
+            }
           }
         }
         type |= type_record->type;
@@ -2768,47 +2806,57 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                ClassTemplateIdIsConcrete(parser, symbol, args))) {
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
           } else {
-            type_record = TypeRecordCopy(symbol->type);
-            if (symbol->flags.is_template_template_parameter) {
+            bool forwarding_member_alias_id =
+                AliasIdForwardsDependentMemberTemplate(parser, symbol, args);
+            if (forwarding_member_alias_id) {
+              type_record =
+                  NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
               type_record->template_origin = symbol;
-            }
-            if (symbol->flags.is_template && args == NULL &&
-                !parser->syntax->parsing_template_declaration &&
-                symbol->alias_template != NULL &&
-                !CXXAliasTemplateIsDeducible(symbol)) {
-              SyntaxError(parser->syntax,
-                          "Alias template %s does not name a deducible class "
-                          "template",
-                          symbol->name.value);
-            }
-            if (symbol->flags.is_template && args == NULL &&
-                !parser->syntax->parsing_template_declaration &&
-                TypeIsStructOrUnion(symbol->type)) {
-              if (CXXAliasTemplateIsDeducible(symbol)) {
-                SetCXXAliasTemplatePlaceholderOrigin(symbol, type_record);
-              } else {
-                type_record->template_origin = symbol;
-              }
-            }
-            // A template alias used with arguments inside another template
-            // declaration is a dependent alias template-id: record the alias as
-            // origin and keep the supplied arguments so it is expanded (by
-            // substituting the alias pattern) once they become concrete.  This
-            // must also apply when the alias's pattern is not itself a
-            // class/union (e.g. `using alt_t = typename alt<I, V>::type;`),
-            // otherwise the arguments would be dropped and the alias pattern's
-            // own parameters would leak into the enclosing template.
-            if (symbol->flags.is_template && args != NULL &&
-                parser->syntax->current_template_parameters != NULL) {
-              type_record->template_origin = symbol;
-              if (type_record->template_arguments != NULL) {
-                VectorDeleteWithContents(
-                    type_record->template_arguments,
-                    (VectorElementDestructor)TemplateArgumentDelete,
-                    /*free_element=*/false);
-              }
               type_record->template_arguments = args;
               args = NULL;
+            } else {
+              type_record = TypeRecordCopy(symbol->type);
+              if (symbol->flags.is_template_template_parameter) {
+                type_record->template_origin = symbol;
+              }
+              if (symbol->flags.is_template && args == NULL &&
+                  !parser->syntax->parsing_template_declaration &&
+                  symbol->alias_template != NULL &&
+                  !CXXAliasTemplateIsDeducible(symbol)) {
+                SyntaxError(parser->syntax,
+                            "Alias template %s does not name a deducible class "
+                            "template",
+                            symbol->name.value);
+              }
+              if (symbol->flags.is_template && args == NULL &&
+                  !parser->syntax->parsing_template_declaration &&
+                  TypeIsStructOrUnion(symbol->type)) {
+                if (CXXAliasTemplateIsDeducible(symbol)) {
+                  SetCXXAliasTemplatePlaceholderOrigin(symbol, type_record);
+                } else {
+                  type_record->template_origin = symbol;
+                }
+              }
+              // A template alias used with arguments inside another template
+              // declaration is a dependent alias template-id: record the alias as
+              // origin and keep the supplied arguments so it is expanded (by
+              // substituting the alias pattern) once they become concrete.  This
+              // must also apply when the alias's pattern is not itself a
+              // class/union (e.g. `using alt_t = typename alt<I, V>::type;`),
+              // otherwise the arguments would be dropped and the alias pattern's
+              // own parameters would leak into the enclosing template.
+              if (symbol->flags.is_template && args != NULL &&
+                  parser->syntax->current_template_parameters != NULL) {
+                type_record->template_origin = symbol;
+                if (type_record->template_arguments != NULL) {
+                  VectorDeleteWithContents(
+                      type_record->template_arguments,
+                      (VectorElementDestructor)TemplateArgumentDelete,
+                      /*free_element=*/false);
+                }
+                type_record->template_arguments = args;
+                args = NULL;
+              }
             }
           }
           type |= type_record->type;
@@ -3690,6 +3738,9 @@ static void ParseFormalArgument(TypeParser* proto_parser,
     }
   }
   if (CheckFormalName(&func->info.function.prototype, &formal->name)) {
+    if (formal->type != NULL) {
+      SymbolSetType(formal, TypeRecordCloneSpine(formal->type));
+    }
     // Function arguments are pointer to functions.
     if (TypeIsFunction(formal->type)) {
       TypeRecord* func_ptr = NewPointerTypeRecord(kQualPlain);

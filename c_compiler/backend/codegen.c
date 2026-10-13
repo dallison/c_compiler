@@ -2376,9 +2376,12 @@ static void GenerateFunctionIRImpl(Generator* gen) {
   bool marks_constructed_object = gen->for_constant_evaluation &&
                                   gen->func->info.function.is_constructor &&
                                   gen->func->info.function.is_user_provided;
+  // An empty `main` still returns 0, which the full path below emits.
+  bool is_main =
+      strcmp(gen->func->info.function.symbol->name.value, "main") == 0;
   if (body->statements->length == 0 &&
       gen->func->info.function.contract_assertions.length == 0 &&
-      !marks_constructed_object) {
+      !marks_constructed_object && !is_main) {
     // Empty function, just return.
     GeneratorEmit(gen, NewIR(IR_OP(ret)));
   } else {

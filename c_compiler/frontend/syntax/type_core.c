@@ -75,16 +75,28 @@ static TypeArenaBlock* NewTypeArenaBlock(size_t capacity) {
   return block;
 }
 
-static TypeRecord* TypeArenaAlloc(void) {
-  size_t aligned = (sizeof(TypeRecord) + 15) & ~(size_t)15;
-  if (type_arena == NULL || type_arena->used + aligned > type_arena->capacity) {
+#define TYPE_RECORD_FULL_SIZE ((sizeof(TypeRecord) + 15) & ~(size_t)15)
+#define TYPE_RECORD_NON_FUNCTION_SIZE \
+  ((offsetof(TypeRecord, info) + sizeof(ArrayInfo) + 15) & ~(size_t)15)
+
+// Records that are not functions never use the FunctionInfo arm of the info
+// union, so they may be given a shorter slot.  Every block keeps a full
+// record's worth of slack so by-value copies (`TypeRecord t = *r`) of a short
+// record at the end of a block stay inside the allocation.
+static TypeRecord* TypeArenaAllocSized(size_t bytes) {
+  if (type_arena == NULL ||
+      type_arena->used + TYPE_RECORD_FULL_SIZE > type_arena->capacity) {
     TypeArenaBlock* block = NewTypeArenaBlock(TYPE_ARENA_BLOCK_SIZE);
     block->next = type_arena;
     type_arena = block;
   }
   void* p = type_arena->data + type_arena->used;
-  type_arena->used += aligned;
+  type_arena->used += bytes;
   return (TypeRecord*)p;
+}
+
+static TypeRecord* TypeArenaAlloc(void) {
+  return TypeArenaAllocSized(TYPE_RECORD_FULL_SIZE);
 }
 
 // Free every TypeRecord struct.  Call only after all type-referencing data
@@ -1281,7 +1293,9 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   if (record == NULL) {
     return NULL;
   }
-  TypeRecord* r = TypeArenaAlloc();
+  TypeRecord* r = TypeArenaAllocSized(TypeIsFunction(record)
+                                          ? TYPE_RECORD_FULL_SIZE
+                                          : TYPE_RECORD_NON_FUNCTION_SIZE);
   memcpy(r, record, offsetof(TypeRecord, info));
   r->template_parameter_summary =
       kTypeTemplateParameterSummaryUnknown;
@@ -1334,8 +1348,10 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
         VectorAppend(&r->info.function.prototype, NULL);
         continue;
       }
-      Symbol* clone = NewSymbol(formal->name.value, formal->type,
-                                formal->storage);
+      Symbol* clone = NewSymbol(
+          formal->name.value,
+          formal->type != NULL ? TypeRecordCopy(formal->type) : NULL,
+          formal->storage);
       clone->flags = formal->flags;
       clone->location = formal->location;
       clone->alignment = formal->alignment;
@@ -1863,6 +1879,8 @@ Struct* NewStruct(bool is_union) {
   s->lexical_parent = NULL;
   s->access_enclosing_function = NULL;
   s->in_namespace_template = false;
+  s->lambda_body_needs_reanalysis = false;
+  s->lambda_has_init_capture = false;
   s->local_class_arguments = NULL;
   s->tag_symbol = NULL;
   VectorInit(&s->bases);

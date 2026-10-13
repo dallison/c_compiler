@@ -38,7 +38,6 @@
 
 static ASTNode* NewCXXInitializerListBackingArray(TypeRecord* element_type, BracedInitializerASTNode* braced, SourceLocation location);
 static ASTNode* LowerCXXInitializerListBracedInit(TypeRecord* target_type, BracedInitializerASTNode* braced, SourceLocation location);
-static bool CXXConstructorSetTakesInitializerList(StructMember* ctor);
 static ASTNode* LowerCXXBracedInitToConstructorCall( BracedInitializerASTNode* braced, TypeRecord* target, SourceLocation location);
 static bool NarrowingIntegerConstantFits(int64_t value, TypeRecord* target);
 static void DiagnoseScalarNarrowing(ASTNode* source, TypeRecord* target);
@@ -427,25 +426,6 @@ ASTNode* ConvertCXXInitializerListArgument(ASTNode* actual,
   return AnalyzeExpression(lowered);
 }
 
-// Contract: True if any overload of `ctor` is an initializer-list constructor
-// ([over.match.list]); braced-init is then passed as one argument.
-static bool CXXConstructorSetTakesInitializerList(StructMember* ctor) {
-  for (StructMember* candidate = ctor; candidate != NULL;
-       candidate = candidate->overload_next) {
-    if (!candidate->is_member_function || candidate->symbol == NULL ||
-        candidate->symbol->type == NULL ||
-        !TypeIsFunction(candidate->symbol->type) ||
-        !candidate->symbol->type->info.function.is_constructor) {
-      continue;
-    }
-    if (CXXConstructorIsInitializerListConstructor(
-            &candidate->symbol->type->info.function)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // Contract: List-init non-aggregate class via `(temp.ctor(args...), temp)` when
 // [over.match.list] selects a constructor (CXXBracedInitTargetRank >= 0); returns
 // NULL otherwise so callers use member-wise / constexpr slot init. Moves braced
@@ -463,6 +443,16 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
       target->info.struct_info->is_aggregate ||
       TypeIsCXXInitializerList(target)) {
     return NULL;
+  }
+  // The constexpr evaluator reconstructs a union value with a designated
+  // member initializer.  That list describes the already-selected active
+  // member; it is not a source-level constructor argument list.
+  for (size_t i = 0; braced->initializers != NULL &&
+                     i < braced->initializers->length; i++) {
+    ASTNode* element = braced->initializers->value.p[i];
+    if (element != NULL && element->op == AST_OP(designated_init)) {
+      return NULL;
+    }
   }
   StructMember* constructor = FindCXXMemberOverloadHead(
       target->info.struct_info, target->info.struct_info->tag_name);
@@ -509,7 +499,8 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
   }
 
   Vector* actuals = NewVector();
-  if (CXXConstructorSetTakesInitializerList(constructor)) {
+  if (CXXBracedInitSelectsInitializerListConstructor((ASTNode*)braced,
+                                                      target)) {
     VectorAppend(actuals, ASTNodeMove((ASTNode*)braced));
   } else {
     for (size_t i = 0; i < braced->initializers->length; i++) {
@@ -519,6 +510,13 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
       }
       if (element->op == AST_OP(expr_init)) {
         element = ((ExpressionInitializerASTNode*)element)->expr;
+      }
+      // Nested aggregate initialization reaches this lowering before the
+      // scalar clauses have necessarily been analyzed.  Constructor overload
+      // resolution needs their types (notably for `Union{{&object}}`), so type
+      // each argument before moving it into the synthesized call.
+      if (element != NULL && element->type == NULL) {
+        element = AnalyzeExpression(element);
       }
       VectorAppend(actuals, ASTNodeMove(element));
     }

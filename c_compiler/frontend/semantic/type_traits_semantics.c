@@ -703,6 +703,23 @@ static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
     VectorAppend(&arg_types, type_args->value.p[i]);
   }
 
+  // nullptr_t is a scalar, but its direct-initialization rules are narrower
+  // than the permissive explicit-cast path used by the synthetic expression
+  // below.  In particular, a pointer cannot construct nullptr_t; only another
+  // nullptr_t value (or value-initialization with no argument) can do so.
+  if (TypeIsNullPointer(target)) {
+    bool constructible = arg_types.length == 0;
+    if (arg_types.length == 1) {
+      TypeRecord* source = (TypeRecord*)arg_types.value.p[0];
+      if (TypeIsReference(source)) {
+        source = source->next;
+      }
+      constructible = TypeIsNullPointer(source);
+    }
+    VectorDestruct(&arg_types);
+    return constructible;
+  }
+
   bool result = false;
   bool handled_special_member = false;
   if (arg_types.length == 0 && TypeIsStructOrUnion(target) &&
@@ -1171,6 +1188,15 @@ static bool TypeTraitIsInvocable(Syntax* syntax, Vector* type_args,
   }
   callable = TypeRecordCopy(callable);
   if (callable == NULL) {
+    return false;
+  }
+  // A class object is invocable only through operator().  Reject an ordinary
+  // class before building the synthetic call; otherwise the generic call
+  // analyzer can reinterpret the invented class-typed callee as a functional
+  // construction and make `is_invocable<string>` spuriously true.
+  if (TypeTraitCallableFormalArgCount(syntax, callable) == (size_t)-1 &&
+      !TypeTraitIsMemberPointer(callable)) {
+    TypeRecordDelete(callable);
     return false;
   }
   if (TypeTraitIsMemberPointer(callable) && type_args->length >= 2) {

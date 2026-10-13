@@ -529,6 +529,16 @@ static void MarkFunctionTemplateSpecialization(Syntax* syntax, Symbol* sym,
     StringDestruct(&suffix);
     return;
   }
+  // An explicit specialization may omit the template-id when its arguments
+  // can be deduced from the declared function type:
+  // `template <> const Message* cast(const Base*)`.  Record those deduced
+  // arguments so later `cast<Message>` lookup finds this specialization
+  // instead of instantiating the primary template.
+  if (sym->type->template_arguments == NULL) {
+    sym->type->template_arguments =
+        TypeDeduceFunctionTemplateArgumentsFromFunctionType(
+            syntax, templ, /*explicit_args=*/NULL, sym->type);
+  }
   sym->type->info.function.template_origin = templ;
   sym->flags.is_explicit_specialization = true;
 }
@@ -552,6 +562,14 @@ static void MarkMemberFunctionTemplateSpecialization(
     // `template <> void S<T>::f()` specializes a class-template member, not a
     // member function template.
     return;
+  }
+  // As for a free function specialization, the template-id may be omitted
+  // when its arguments are deducible from the declared member function type.
+  // This is common when the parameter appears only in the return type.
+  if (sym->type->template_arguments == NULL) {
+    sym->type->template_arguments =
+        TypeDeduceFunctionTemplateArgumentsFromFunctionType(
+            syntax, templ, /*explicit_args=*/NULL, sym->type);
   }
   sym->type->info.function.template_origin = templ;
   sym->flags.is_explicit_specialization = true;
@@ -2184,8 +2202,36 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
             syntax, name, name->components.length - 1,
             /*allow_dependent_template_args=*/true);
     owner = QualifiedClassAfterMaterialize(syntax, owner);
+    if (owner != NULL &&
+        (owner->type == NULL ||
+         (!TypeIsStructOrUnion(owner->type) && !TypeIsEnum(owner->type)))) {
+      owner = NULL;
+    }
     if (owner == NULL && name->components.length == 2 && !name->absolute) {
       owner = FindEnclosingBaseClassTagSymbol(syntax, name->components.value.p[0]);
+      owner = QualifiedClassAfterMaterialize(syntax, owner);
+    }
+    if (owner == NULL && name->components.length == 2 && !name->absolute) {
+      // A class member function can hide a namespace-scope class used as the
+      // first component of a nested type (`ExtensionSet::Prefetch`).  Resolve
+      // that qualifier directly in namespace tag/ordinary tables, without
+      // repeating class-member lookup.
+      Namespace* ns = syntax->current_namespace != NULL
+                          ? syntax->current_namespace
+                          : compiler->global_namespace;
+      bool ambiguous = false;
+      owner = LookupTagInEnclosingScopesCheckingAmbiguity(
+          syntax, ns, name->components.value.p[0], &ambiguous);
+      if (owner == NULL && !ambiguous) {
+        owner = LookupSymbolInEnclosingScopesCheckingAmbiguity(
+            syntax, ns, name->components.value.p[0], &ambiguous);
+      }
+      if (owner != NULL &&
+          (owner->type == NULL ||
+           (!TypeIsStructOrUnion(owner->type) &&
+            !TypeIsEnum(owner->type)))) {
+        owner = NULL;
+      }
       owner = QualifiedClassAfterMaterialize(syntax, owner);
     }
     if (owner != NULL && owner->type != NULL && TypeIsEnum(owner->type) &&
@@ -2628,6 +2674,36 @@ Symbol* SyntaxFindQualifiedTag(Syntax* syntax,
         FullyQualifiedIdentifierAppend(&prefix, name->components.value.p[i]);
       }
       owner = SyntaxFindQualifiedTag(syntax, &prefix);
+      if (owner != NULL &&
+          (owner->type == NULL ||
+           (!TypeIsStructOrUnion(owner->type) &&
+            !TypeIsEnum(owner->type)))) {
+        owner = NULL;
+      }
+      // Inside a class, a member function can hide a namespace-scope class
+      // with the same ordinary name.  Tag lookup may not find that class
+      // because C++ class names are also represented in the namespace's
+      // ordinary-symbol table.  Retry the one-component qualifier directly
+      // in enclosing namespaces, bypassing class-member lookup.
+      if (owner == NULL && !prefix.absolute &&
+          prefix.components.length == 1) {
+        Namespace* ns = syntax->current_namespace != NULL
+                            ? syntax->current_namespace
+                            : compiler->global_namespace;
+        bool ambiguous = false;
+        owner = LookupTagInEnclosingScopesCheckingAmbiguity(
+            syntax, ns, prefix.components.value.p[0], &ambiguous);
+        if (owner == NULL && !ambiguous) {
+          owner = LookupSymbolInEnclosingScopesCheckingAmbiguity(
+              syntax, ns, prefix.components.value.p[0], &ambiguous);
+        }
+        if (owner != NULL &&
+            (owner->type == NULL ||
+             (!TypeIsStructOrUnion(owner->type) &&
+              !TypeIsEnum(owner->type)))) {
+          owner = NULL;
+        }
+      }
       FullyQualifiedIdentifierDestruct(&prefix);
     }
     if (owner != NULL && owner->type != NULL &&
@@ -2905,6 +2981,13 @@ static Symbol* FindNearerNestedClassMember(Syntax* syntax, Symbol* found,
                                            String* name) {
   Struct* found_owner = SymbolMemberOwner(found);
   if (!CompilerIsCXX()) {
+    return NULL;
+  }
+  // A template parameter lives in the innermost declaration scope and always
+  // hides members of enclosing classes.  In particular, the `Value` in
+  // `template<class Value> ValueImpl(Value&&)` must not be replaced by an
+  // outer `using Value = ValueImpl<true>`.
+  if (found != NULL && found->flags.is_template_parameter) {
     return NULL;
   }
   Struct* owner = syntax->cxx_class_head;
@@ -3439,10 +3522,23 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
     // unresolved after `T` was concrete, so `Span`'s converting constructor
     // never became viable.
     bool function_template =
-        id->symbol != NULL && id->symbol->flags.is_template &&
-        id->symbol->type != NULL && TypeIsFunction(id->symbol->type);
+        id->symbol != NULL && id->symbol->type != NULL &&
+        TypeIsFunction(id->symbol->type) &&
+        (id->symbol->flags.is_template ||
+         id->symbol->type->info.function.template_origin != NULL);
+    // Inline member-template bodies are parsed only after the surrounding
+    // class is complete.  Until then a call in the same class-template pattern
+    // is dependent: its apparently concrete return type does not reveal
+    // whether the deferred body uses an enclosing template parameter.
+    bool deferred_member_template_body =
+        function_template && id->symbol->type->info.function.body == NULL &&
+        id->symbol->type->info.function.cxx_member_owner != NULL &&
+        (id->symbol->type->info.function.cxx_member_owner->is_template ||
+         id->symbol->type->info.function.cxx_member_owner
+                 ->defining_template_scope_count > 0);
     if (id->symbol != NULL &&
         (structured_binding_dependent ||
+         deferred_member_template_body ||
          id->symbol->template_parameter_index >= 0 ||
          (!function_template &&
           TypeContainsTemplateParameter(id->symbol->type)) ||
@@ -7454,9 +7550,10 @@ ASTNode* SyntaxNewCXXMemberInitializerStatement(
 // the constructor the initializer is being inserted into.
 static ASTNode* BindDefaultMemberInitializerThis(ASTNode* node, void* data) {
   Symbol* this_formal = data;
-  if (this_formal != NULL && node->op == AST_OP(identifier)) {
+  if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
-    if (id->symbol != NULL && id->symbol != this_formal &&
+    if (this_formal != NULL && id->symbol != NULL &&
+        id->symbol != this_formal &&
         id->symbol->flags.invented && !id->symbol->flags.is_argument &&
         id->symbol->storage == STO(implicit) &&
         StringEqual(&id->symbol->name, "this")) {
@@ -15997,8 +16094,14 @@ static bool LocalDeclarationTypeIsAnonymousAggregate(TypeParser* parser,
   while (bare != NULL && (TypeIsPointer(bare) || TypeIsReference(bare))) {
     bare = bare->next;
   }
-  return bare != NULL && TypeIsStructOrUnion(bare) &&
-         bare->info.struct_info != NULL;
+  if (bare == NULL || !TypeIsStructOrUnion(bare) ||
+      bare->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* aggregate = bare->info.struct_info;
+  Symbol* tag = aggregate->tag_symbol;
+  return tag == NULL || tag->flags.invented || aggregate->tag_name == NULL ||
+         aggregate->tag_name->length == 0;
 }
 
 static void MaybeInjectBlockScopeAnonymousAggregateMembers(Syntax* syntax,
@@ -16902,6 +17005,15 @@ bool SyntaxLookingAtType(Syntax* syntax) {
         if (constrained_auto) {
           return true;
         }
+      }
+      // A member function can hide a namespace-scope class with the same
+      // spelling.  For a qualified start, inspect the complete name before
+      // deciding this is an expression; `ExtensionSet::Prefetch value` is a
+      // declaration even inside a class that has `ExtensionSet(...)`.
+      if (CompilerIsCXX() &&
+          SyntaxCurrentIdentifierFollowedByScopeOperator(syntax) &&
+          !SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
+        return SyntaxQualifiedNameLooksLikeType(syntax);
       }
       return false;
     }

@@ -333,6 +333,9 @@ void SyntaxResolveCXXConstructorInitializerList(
 void SyntaxInsertCXXConstructorPreamble(
     Syntax* syntax, TypeRecord* func, Vector* body,
     CXXConstructorInitList* init_list, SourceLocation location);
+// True while an inline constructor's member initializers are still waiting
+// for its class to be completed before being inserted into its body.
+bool ConstructorPreambleIsPending(TypeRecord* func);
 ASTNode* SyntaxNewCXXMemberInitializerStatement(
     Syntax* syntax, TypeRecord* func, StructMember* member, Vector* actuals,
     SourceLocation location);

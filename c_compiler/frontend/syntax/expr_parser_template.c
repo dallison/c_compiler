@@ -712,6 +712,14 @@ ASTNode* ParseIdentifier(Syntax* syntax,
 
   // Find the symbol by searching all symbol tables.  It must exist.
   Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
+  // In a nested-name-specifier, a member function can hide an enclosing class
+  // with the same ordinary name (`ReflectionVisit::ExtensionSet()` versus the
+  // namespace type `ExtensionSet`).  If value lookup cannot complete the
+  // qualified name, retry tag lookup so `ExtensionSet::Prefetch{}` can name
+  // the nested class.
+  if (symbol == NULL && name.is_qualified) {
+    symbol = SyntaxFindQualifiedTag(syntax, &name);
+  }
 
   // An injected class name used in a functional construction expression
   // denotes the class type, even when ordinary member lookup found the

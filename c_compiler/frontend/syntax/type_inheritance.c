@@ -1069,12 +1069,22 @@ static bool CXXBaseMemberFunctionMatches(Syntax* syntax, TypeRecord* derived,
   return match;
 }
 
-static StructMember* FindCXXBaseVirtualOverride(Syntax* syntax, Struct* str,
-                                                StructMember* member) {
+// Searches a base graph for a matching virtual while tolerating malformed or
+// partially instantiated base cycles. Valid C++ inheritance is acyclic, but a
+// dependent specialization can transiently point back to an owner while its
+// bases are being rebuilt; revisiting it must not recurse indefinitely.
+static StructMember* FindCXXBaseVirtualOverrideRec(
+    Syntax* syntax, Struct* str, StructMember* member, Vector* visited) {
   if (str == NULL || member == NULL || member->symbol == NULL ||
       !member->is_member_function) {
     return NULL;
   }
+  for (size_t i = 0; i < visited->length; i++) {
+    if (visited->value.p[i] == str) {
+      return NULL;
+    }
+  }
+  VectorAppend(visited, str);
   TypeRecord* func = member->symbol->type;
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
@@ -1108,12 +1118,23 @@ static StructMember* FindCXXBaseVirtualOverride(Syntax* syntax, Struct* str,
       StringDestruct(&destructor_name);
     }
     StructMember* nested =
-        FindCXXBaseVirtualOverride(syntax, base_struct, member);
+        FindCXXBaseVirtualOverrideRec(syntax, base_struct, member, visited);
     if (nested != NULL) {
       return nested;
     }
   }
   return NULL;
+}
+
+// Entry point for virtual-override lookup; owns the per-search cycle guard.
+static StructMember* FindCXXBaseVirtualOverride(Syntax* syntax, Struct* str,
+                                                StructMember* member) {
+  Vector visited;
+  VectorInit(&visited);
+  StructMember* result =
+      FindCXXBaseVirtualOverrideRec(syntax, str, member, &visited);
+  VectorDestruct(&visited);
+  return result;
 }
 
 int CXXBaseOffsetForMember(Struct* str, StructMember* member) {

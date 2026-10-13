@@ -448,6 +448,19 @@ ASTNode* ParseThisExpression(Syntax* syntax) {
   Symbol* this_symbol =
       lambda_enclosing_this != NULL ? lambda_enclosing_this
                                     : FindThisSymbol(syntax);
+  if (this_symbol == NULL && syntax->parsing_default_member_initializer &&
+      syntax->cxx_class_head != NULL &&
+      syntax->cxx_class_head->tag_symbol != NULL &&
+      syntax->cxx_class_head->tag_symbol->type != NULL) {
+    // An NSDMI is parsed before constructors (and their implicit `this`
+    // parameters) exist.  Keep an invented placeholder that constructor
+    // synthesis later rebinds just like an implicit member access.
+    TypeRecord* class_type =
+        TypeRecordCopy(syntax->cxx_class_head->tag_symbol->type);
+    this_symbol =
+        NewSymbol("this", NewPointerTo(kQualPlain, class_type), STO(implicit));
+    this_symbol->flags.invented = true;
+  }
   if (this_symbol == NULL) {
     SyntaxError(syntax, "'this' is only valid inside a C++ member function");
     TypeRecord* type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown,

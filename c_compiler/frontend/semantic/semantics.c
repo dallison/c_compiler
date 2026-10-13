@@ -303,6 +303,19 @@ ASTNode* SemanticAnalyzeDeducedInitializer(Symbol* sym, ASTNode* initializer) {
   return initializer;
 }
 
+// True when an initializer still names another local whose placeholder type
+// has not been deduced. Deducing from the recovery type attached to that use
+// would permanently turn a dependent `auto it = result.first` into `int`.
+static bool InitializerReferencesUndeducedAuto(ASTNode* node, void* data) {
+  Symbol* self = data;
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  return symbol != NULL && symbol != self && symbol->type != NULL &&
+         TypeContainsAuto(symbol->type);
+}
+
 bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
                             ASTNode* diagnostic_node) {
   if (sym == NULL || !TypeContainsAuto(sym->type)) {
@@ -338,7 +351,15 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
     deduced->qualifiers |= sym->type->qualifiers;
     TypeRecordCalculateSize(deduced);
     SymbolSetType(sym, deduced);
-    SemanticReanalyzeAutoMemberAccesses();
+    SemanticReanalyzeAfterAutoDeduction();
+    return true;
+  }
+  if (ASTNodeAny(value_initializer, InitializerReferencesUndeducedAuto, sym)) {
+    if (sym->type != NULL && !TypeIsUnknown(sym->type)) {
+      TypeRecord* placeholder = TypeRecordCopy(sym->type);
+      placeholder->type |= kTypeUnknown;
+      SymbolSetType(sym, placeholder);
+    }
     return true;
   }
   // A dependent initializer only has a placeholder type while its enclosing
@@ -429,7 +450,7 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
   if (deduced != NULL) {
     SymbolSetType(sym, deduced);
     if (!TypeContainsAuto(sym->type)) {
-      SemanticReanalyzeAutoMemberAccesses();
+      SemanticReanalyzeAfterAutoDeduction();
     }
     return true;
   }
@@ -477,7 +498,7 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
   }
   SymbolSetType(sym, deduced);
   if (!TypeContainsAuto(sym->type)) {
-    SemanticReanalyzeAutoMemberAccesses();
+    SemanticReanalyzeAfterAutoDeduction();
   }
   return true;
 }
@@ -1657,6 +1678,28 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
 
   // If the types are already equal we do nothing.
   if (TypeEqual(from->type, to)) {
+    return;
+  }
+
+  // A conversion involving a still-dependent class/reference or undeduced
+  // `auto` is checked
+  // when the surrounding template is instantiated.  Diagnosing it while only
+  // the enclosing class arguments are being substituted rejects valid member
+  // templates whose nested lambda captures one of the member's own parameters.
+  bool in_template =
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function) &&
+      (TypeContainsTemplateParameter(compiler->current_function) ||
+       (compiler->current_function->info.function.symbol != NULL &&
+        compiler->current_function->info.function.symbol->flags.is_template) ||
+       (compiler->current_function->info.function.cxx_member_owner != NULL &&
+        compiler->current_function->info.function.cxx_member_owner
+            ->is_template));
+  if (CompilerIsCXX() &&
+      (TypeContainsTemplateParameter(from->type) ||
+       TypeContainsTemplateParameter(to) ||
+       (in_template &&
+        (TypeContainsAuto(from->type) || TypeContainsAuto(to))))) {
     return;
   }
 

@@ -864,7 +864,10 @@ static bool EnsureInlinedCalleeBodyIsAnalyzed(FunctionInfo* func) {
     return false;
   }
   TypeRecord* func_type = func->symbol != NULL ? func->symbol->type : NULL;
-  if (FunctionTypeIsBeingAnalyzed(func_type)) {
+  // Analyzing the body before its member initializers are inserted would
+  // mark it analyzed and leave those initializers unanalyzed for codegen.
+  if (FunctionTypeIsBeingAnalyzed(func_type) ||
+      ConstructorPreambleIsPending(func_type)) {
     return false;
   }
   TypeRecord* saved_function = compiler->current_function;

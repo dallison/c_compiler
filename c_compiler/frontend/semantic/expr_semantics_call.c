@@ -1161,6 +1161,32 @@ static bool EnclosingFunctionIsFriendOf(TypeRecord* current, Struct* owner) {
   return false;
 }
 
+// A named local class has the same member-access context as the function in
+// which it is declared, just like a lambda closure. Walk nested local classes
+// and accept an enclosing member function (or one of its nested classes).
+static bool EnclosingFunctionHasClassAccess(TypeRecord* current,
+                                            Struct* owner) {
+  for (int depth = 0; depth < 32; depth++) {
+    Struct* member_owner = FunctionMemberOwner(current);
+    Symbol* enclosing = member_owner != NULL
+                            ? member_owner->access_enclosing_function
+                            : NULL;
+    if (enclosing == NULL || enclosing->type == NULL ||
+        !TypeIsFunction(enclosing->type) || enclosing->type == current) {
+      return false;
+    }
+    Struct* enclosing_owner = FunctionMemberOwner(enclosing->type);
+    for (Struct* accessor = enclosing_owner; accessor != NULL;
+         accessor = accessor->lexical_parent) {
+      if (CXXSameAccessClass(accessor, owner)) {
+        return true;
+      }
+    }
+    current = enclosing->type;
+  }
+  return false;
+}
+
 // Implements [class.access] for the current semantic context: resolves the
 // effective accessor (member function owner, lambda enclosing class, or
 // current_class_access_context), then applies friendship, nesting, protected
@@ -1206,6 +1232,7 @@ bool CurrentFunctionCanAccessMember(Struct* lookup_context,
   }
   if (CurrentFunctionIsFriendOf(owner) ||
       (lookup_context != owner && CurrentFunctionIsFriendOf(lookup_context)) ||
+      EnclosingFunctionHasClassAccess(compiler->current_function, owner) ||
       EnclosingFunctionIsFriendOf(compiler->current_function, owner) ||
       (lookup_context != owner &&
        EnclosingFunctionIsFriendOf(compiler->current_function,
@@ -1771,6 +1798,18 @@ static bool CXXFunctionalConstructionResolveTargetType(VectorASTNode* node,
     TypeRecordDelete(deduced_type);
   }
   TypeRecordCalculateSize(type);
+  if (dependent_explicit_args) {
+    // A construction such as `Info<decltype(ext)>{...}` inside a generic
+    // lambda still names the primary class while `ext` has its invented
+    // `auto&` type.  Resolving constructors now would compare arguments
+    // against the primary's unsubstituted `ExtensionT&`.  Keep the call intact;
+    // cloning the lambda call operator will substitute `decltype(ext)` and
+    // re-run construction against the concrete specialization.
+    node->base.flags |= kASTDependentFunctorCall;
+    ASTNodeSetType((ASTNode*)node, type);
+    *ctad_failed = true;
+    return true;
+  }
   *out_type = type;
   return false;
 }
@@ -2036,6 +2075,19 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
   if (!CompilerIsCXX() || node->left == NULL) {
     return NULL;
   }
+  // Functional construction is spelled with a type-name.  A class-typed
+  // expression in the callee position (`object()`) is instead a call to
+  // `operator()`; if no such member exists it must be rejected as non-callable,
+  // not reinterpreted as value-initialization of the object's class.
+  if (node->left->op != AST_OP(identifier)) {
+    return NULL;
+  }
+  Symbol* callee_symbol = ((IdentifierASTNode*)node->left)->symbol;
+  if (callee_symbol == NULL ||
+      (!StorageIs(callee_symbol->storage, STO(typedef)) &&
+       !SymbolIsTagSymbol(callee_symbol))) {
+    return NULL;
+  }
   ASTNode* early = CXXFunctionalConstructionInstantiateCalleeTypes(node);
   if (early != NULL) {
     return early;
@@ -2224,6 +2276,15 @@ static bool CallActualsContainUndeducedAuto(VectorASTNode* call) {
 static bool CallActualsContainDependentFunctorCall(VectorASTNode* call) {
   for (size_t i = 0; call != NULL && i < call->children->length; i++) {
     ASTNode* actual = call->children->value.p[i];
+    // A braced-init-list is resolved against the selected formal type. In a
+    // concrete function, a dependent nested call such as `std::move(x)` must
+    // not defer the enclosing overload set: selecting `insert(init_type&&)`
+    // provides the target that makes the brace elements analyzable.
+    if (actual != NULL && actual->op == AST_OP(braced_init) &&
+        compiler->current_function != NULL &&
+        !TypeContainsTemplateParameter(compiler->current_function)) {
+      continue;
+    }
     if (actual != NULL && (actual->flags & kASTDependentFunctorCall) != 0) {
       return true;
     }
@@ -2262,9 +2323,10 @@ static bool IsDependentMemberTemplateCall(VectorASTNode* node) {
   // call dependency skips overload resolution and leaves the primary template
   // address in the generated code (e.g. ostream::operator<<(std::endl)).
   bool has_member_template = false;
-  for (Symbol* candidate = member_node->member->symbol; candidate != NULL;
+  for (StructMember* candidate = member_node->member; candidate != NULL;
        candidate = candidate->overload_next) {
-    if (SymbolIsTemplateFunction(candidate)) {
+    if (candidate->symbol != NULL &&
+        SymbolIsTemplateFunction(candidate->symbol)) {
       has_member_template = true;
       break;
     }
@@ -2274,6 +2336,23 @@ static bool IsDependentMemberTemplateCall(VectorASTNode* node) {
     return true;
   }
   if (!CallActualsContainTemplateParameter(node)) {
+    return false;
+  }
+  bool dependence_only_inside_braces = true;
+  for (size_t i = 0; i < node->children->length; i++) {
+    ASTNode* actual = node->children->value.p[i];
+    if (actual != NULL && TypeContainsTemplateParameter(actual->type) &&
+        actual->op != AST_OP(braced_init)) {
+      dependence_only_inside_braces = false;
+      break;
+    }
+  }
+  // A concrete overload set must see an untyped braced-init-list before a
+  // speculative member-template selection can make the nested expressions
+  // look dependent. The selected formal supplies the brace target type.
+  if (dependence_only_inside_braces &&
+      compiler->current_function != NULL &&
+      !TypeContainsTemplateParameter(compiler->current_function)) {
     return false;
   }
   if (has_member_template) {
@@ -2632,11 +2711,39 @@ static ASTNode* FunctionCallTryMetaSynthesisEarly(VectorASTNode* node) {
 }
 
 // Mutates argument child pointers in place; ordering must follow callee analysis.
+// Clears deferred calls nested in a braced argument once the enclosing
+// function specialization is concrete, so target-typed brace conversion sees
+// `std::move(local)` and similar expressions with their real result types.
+static void ClearConcreteBracedDependentCall(ASTNode* node, void* data,
+                                             int child_id,
+                                             VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(call) ||
+      (node->flags & kASTDependentFunctorCall) == 0) {
+    return;
+  }
+  node->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
+  ASTNodeClearType(node);
+  VectorASTNode* call = (VectorASTNode*)node;
+  if (call->left != NULL) {
+    call->left->flags &= ~kASTAnalyzed;
+  }
+}
+
 static void FunctionCallAnalyzeActualArguments(VectorASTNode* node) {
   size_t num_actual_args = node->children->length;
   for (size_t i = 0; i < num_actual_args; i++) {
+    ASTNode* actual = node->children->value.p[i];
+    if (actual != NULL && actual->op == AST_OP(braced_init) &&
+        compiler->current_function != NULL &&
+        !TypeContainsTemplateParameter(compiler->current_function)) {
+      actual->flags &= ~kASTAnalyzed;
+      ASTNodeVisit(actual, ClearConcreteBracedDependentCall, 0, NULL);
+    }
     node->children->value.p[i] =
-        AnalyzeExpression((ASTNode*)node->children->value.p[i]);
+        AnalyzeExpression(actual);
   }
 }
 

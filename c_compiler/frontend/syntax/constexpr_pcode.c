@@ -4555,6 +4555,32 @@ static bool PCodeIsIndirectCall(ASTNode* node) {
   return false;
 }
 
+// P-code stores aggregate bytes but does not retain the active member of an
+// anonymous union embedded in a class.  Such a class must remain in the AST
+// evaluator when one of its member expressions participates in evaluation.
+static bool PCodeStructHasAnonymousUnion(Struct* str) {
+  if (str == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    TypeRecord* member_type =
+        member != NULL && member->symbol != NULL ? member->symbol->type : NULL;
+    if (member != NULL && member->is_anon &&
+        TypeIsStructOrUnion(member_type) &&
+        member_type->info.struct_info != NULL &&
+        member_type->info.struct_info->is_union) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool PCodeTypeHasAnonymousUnion(TypeRecord* type) {
+  return PCodeStructHasAnonymousUnion(
+      TypeIsStructOrUnion(type) ? type->info.struct_info : NULL);
+}
+
 static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
@@ -4590,6 +4616,16 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
         receiver->info.struct_info != NULL &&
         receiver->info.struct_info->is_union) {
       scan->required = true;
+      // For a non-aggregate union, a constructor can select an active member
+      // with an ordinary member initializer.  The bytecode VM does not retain
+      // that selection as a lifetime event, so loading the resulting object
+      // would otherwise assume the union's first member.
+      if (!receiver->info.struct_info->is_aggregate) {
+        scan->ast_only = true;
+      }
+    } else if (PCodeTypeHasAnonymousUnion(receiver)) {
+      scan->required = true;
+      scan->ast_only = true;
     }
   } else if (scan->function_depth <= 1 &&
              (node->op == AST_OP(plus) || node->op == AST_OP(minus))) {
@@ -4626,6 +4662,12 @@ static void ScanConstexprFunctionCapabilities(
     return;
   }
   VectorAppend(&scan->visited_functions, function);
+  Struct* owner = function->type->info.function.cxx_member_owner;
+  if (PCodeStructHasAnonymousUnion(owner)) {
+    scan->required = true;
+    scan->ast_only = true;
+    return;
+  }
   if (function->type->info.function.contract_assertions.length != 0) {
     scan->required = true;
     scan->ast_only = true;

@@ -81,6 +81,7 @@ static void InstantiateClonedFunctionTemplateCallVisitor(ASTNode* node,
                                                            void* data,
                                                            int child_id,
                                                            VisitorMode mode);
+static int MaxTemplateParameterIndexInFunctionBody(ASTNode* body);
 
 ASTNode* CloneCXXDefaultMemberInitializer(ASTNode* initializer) {
   return ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL);
@@ -2631,6 +2632,14 @@ static size_t ConstructorInitPackElementIndex(TemplateFunctionBodyClone* clone,
     if (tag != NULL && base->type->info.struct_info->tag_name != NULL &&
         StringEqual(base->type->info.struct_info->tag_name, tag)) {
       return pack_index;
+    }
+    // Every concrete base produced by one base-pack expansion retains that
+    // provenance.  Count it even when adjacent pack elements are unrelated
+    // closure types and therefore have neither a shared tag nor a template
+    // origin (`Overload<T...> : T...`).
+    if (base->is_pack_expansion) {
+      pack_index++;
+      continue;
     }
     String* base_primary = ClonedCallPrimaryTemplateName(base->type);
     if (primary != NULL && base_primary != NULL &&
@@ -6654,9 +6663,43 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
     if (id->template_arguments != NULL &&
         !ASTNodeWithinPackExpansion(node)) {
       FoldClonedOwnerMemberTemplateArguments(clone, id->template_arguments);
+      Vector* arguments_for_substitution = id->template_arguments;
+      Vector* rebased_arguments = NULL;
+      bool enclosing_only =
+          clone->parser != NULL &&
+          clone->parser->substituting_enclosing_template_arguments_only;
+      size_t own_parameter_count =
+          clone->from_func != NULL && TypeIsFunction(clone->from_func)
+              ? clone->from_func->info.function.template_parameters.length
+              : 0;
+      bool args_are_absolute =
+          clone->args != NULL &&
+          clone->args->length >=
+              (size_t)clone->rebase_template_parameter_base +
+                  own_parameter_count;
+      int substitution_rebase_base =
+          clone->rebase_template_parameter_base;
+      if (!enclosing_only && clone->rebase_template_parameter_base > 0 &&
+          !args_are_absolute) {
+        rebased_arguments =
+            TemplateArgumentVectorCopy(id->template_arguments);
+        for (size_t i = 0; i < rebased_arguments->length; i++) {
+          RebaseTemplateArgumentParameterIndices(
+              rebased_arguments->value.p[i],
+              clone->rebase_template_parameter_base);
+        }
+        arguments_for_substitution = rebased_arguments;
+        substitution_rebase_base = 0;
+      }
       Vector* concrete_args = SubstituteTemplateArgumentVector(
-          clone->parser, id->template_arguments, clone->args,
-          clone->rebase_template_parameter_base);
+          clone->parser, arguments_for_substitution, clone->args,
+          substitution_rebase_base);
+      if (rebased_arguments != NULL) {
+        VectorDeleteWithContents(
+            rebased_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+      }
       VectorDeleteWithContents(id->template_arguments,
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
@@ -6784,6 +6827,26 @@ static ASTNode* RemapClonedIdentifierSymbol(
       return node;
     }
     Symbol* replacement = MapFindPointerKey(&clone->symbol_map, id->symbol);
+    if (replacement == NULL && id->symbol != NULL &&
+        id->symbol->flags.is_argument && clone->from_func != NULL &&
+        TypeIsFunction(clone->from_func)) {
+      // A preserved template-pattern body can contain a cloned formal symbol
+      // rather than the exact symbol stored in `from_func->prototype`.
+      // Recover the authoritative mapping by argument slot and name.
+      for (size_t i = 0;
+           i < clone->from_func->info.function.prototype.length; i++) {
+        Symbol* formal =
+            clone->from_func->info.function.prototype.value.p[i];
+        if (formal != NULL && formal->flags.is_argument &&
+            formal->value.arg_number == id->symbol->value.arg_number &&
+            StringEqualString(&formal->name, &id->symbol->name)) {
+          replacement = MapFindPointerKey(&clone->symbol_map, formal);
+          if (replacement != NULL) {
+            break;
+          }
+        }
+      }
+    }
     if (replacement == NULL) {
       replacement =
           FindClonedLocalSymbolByDeclarationIdentity(clone, id->symbol);
@@ -7092,6 +7155,10 @@ static bool CloneCastInTemplateBody(
     if (cast->expr != NULL && ExpressionIsTemplateDependent(cast->expr)) {
       node->flags |= kASTDependentCast;
     }
+    bool cast_matches_declared_return =
+        clone->from_func != NULL && TypeIsFunction(clone->from_func) &&
+        clone->from_func->next != NULL &&
+        TypeEqual(cast->cast_type, clone->from_func->next);
     if (cast->kind != kCastBit && cast->expr != NULL &&
         cast->expr->op == AST_OP(identifier) && clone->from_func != NULL) {
       IdentifierASTNode* operand = (IdentifierASTNode*)cast->expr;
@@ -7107,7 +7174,8 @@ static bool CloneCastInTemplateBody(
             formal != NULL
                 ? FirstTemplateParameterIndexInType(formal->type) : -1;
         int cast_index = FirstTemplateParameterIndexInType(cast->cast_type);
-        if (formal_index >= 0 && cast_index >= 0 &&
+        if (!cast_matches_declared_return && formal_index >= 0 &&
+            cast_index >= 0 &&
             formal_index != cast_index) {
           TypeRecord* repaired = TypeRecordCloneSpine(cast->cast_type);
           TypeRecordDelete(cast->cast_type);
@@ -7133,7 +7201,15 @@ static bool CloneCastInTemplateBody(
         TypeIsReference(clone->to_func->next) &&
         clone->to_func->next->next != NULL &&
         clone->to_func->next->declarator == cast->cast_type->declarator;
-    if (invalid_return_reference) {
+    bool cast_is_declared_return =
+        node->parent != NULL && node->parent->op == AST_OP(return) &&
+        cast_matches_declared_return;
+    bool authoritative_return_reference =
+        clone->to_func != NULL && TypeIsFunction(clone->to_func) &&
+        TypeIsReference(clone->to_func->next) &&
+        clone->to_func->next->next != NULL &&
+        (invalid_return_reference || cast_is_declared_return);
+    if (authoritative_return_reference) {
       TypeRecordDelete(cast->cast_type);
       cast->cast_type = TypeRecordCopy(clone->to_func->next);
       TypeRecordIncRef(cast->cast_type);
@@ -7155,7 +7231,7 @@ static bool CloneCastInTemplateBody(
         FindPackExpansionInType(cast->cast_type, clone->args, &pack_index,
                                 &pack_length) &&
         ASTNodeWithinPackExpansion(node);
-    if (invalid_return_reference) {
+    if (authoritative_return_reference) {
       // The concrete function return type above is authoritative.
     } else if (pack_dependent_cast) {
       // Leave cast_type / node->type pack-dependent for per-element expansion.
@@ -7431,6 +7507,15 @@ static ASTNode* RebindAndInstantiateClonedCall(
           access->right->flags &= ~kASTAnalyzed;
           ASTNodeClearType(node);
         }
+      } else if (access->right != NULL &&
+                 access->right->op == AST_OP(string)) {
+        // The pattern could not resolve this member call while an argument or
+        // receiver was dependent (for example `map.insert({key, value})`).
+        // The child member access was cleared during cloning; clear the call
+        // as well so ordinary overload resolution runs for the specialization.
+        node->flags &= ~kASTAnalyzed;
+        call->left->flags &= ~kASTAnalyzed;
+        ASTNodeClearType(node);
       }
     }
     RebindClonedLoweredDependentMemberCall(call);
@@ -9612,6 +9697,17 @@ static Vector* AbsoluteMemberTemplateBodyArguments(TypeParser* parser,
       break;
     }
   }
+  // The signature can omit every class parameter while the body still uses a
+  // member-template parameter whose absolute index follows them.  This occurs
+  // for a nested lambda capture in `Outer<T>::f<U>`: passing only `[U]` would
+  // substitute U's index with nothing (or with the wrong argument).  A body
+  // index beyond the supplied own-argument vector proves that its enclosing
+  // prefix is still required.
+  if (!names_enclosing &&
+      MaxTemplateParameterIndexInFunctionBody(
+          FunctionTemplateCloneSourceBody(from)) >= (int)args->length) {
+    names_enclosing = true;
+  }
   if (!names_enclosing) {
     return NULL;
   }
@@ -10204,6 +10300,44 @@ static bool IsLambdaCallOperator(Symbol* symbol) {
              .invented;
 }
 
+/* Return the concrete arguments of the function that originally declared a
+ * captured parameter. Nested generic lambdas have their own argument index
+ * space, so substituting a grandparent capture with the immediate lambda's
+ * arguments can turn `CallbackFn` into that lambda's `auto` parameter. */
+static Vector* LambdaCaptureDefiningFunctionArguments(
+    Struct* closure, Symbol* captured) {
+  if (closure == NULL || captured == NULL ||
+      !captured->flags.is_argument) {
+    return NULL;
+  }
+  Symbol* enclosing = closure->access_enclosing_function;
+  for (int depth = 0; enclosing != NULL && depth < 32; depth++) {
+    TypeRecord* function = enclosing->type;
+    if (function == NULL || !TypeIsFunction(function)) {
+      return NULL;
+    }
+    for (size_t i = 0; i < function->info.function.prototype.length; i++) {
+      Symbol* formal = function->info.function.prototype.value.p[i];
+      if (formal == NULL) {
+        continue;
+      }
+      if (formal == captured ||
+          (formal->flags.is_argument &&
+           formal->value.arg_number == captured->value.arg_number &&
+           StringEqualString(&formal->name, &captured->name))) {
+        Vector* args = function->template_arguments;
+        return args != NULL &&
+                       !TemplateArgumentVectorContainsTemplateParameter(args)
+                   ? args
+                   : NULL;
+      }
+    }
+    Struct* owner = function->info.function.cxx_member_owner;
+    enclosing = owner != NULL ? owner->access_enclosing_function : NULL;
+  }
+  return NULL;
+}
+
 /* Instantiate the body of a member function template into `symbol` by cloning
  * `template_definition`'s body with `args`, mark it defined, set inline/weak
  * linkage as appropriate, and queue the instantiation for code emission (unless
@@ -10765,9 +10899,21 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
       // prefix.  Substituting the extended list would read the class's
       // argument for the member's parameter.
       TypeRecord* substituted = NULL;
-      if (enclosing_function_args != NULL) {
+      Vector* capture_args = LambdaCaptureDefiningFunctionArguments(
+          owner, member->symbol->lambda_capture_source);
+      if (capture_args != NULL) {
         substituted = SubstituteTemplateParameters(
-            &parser, member->symbol->type, enclosing_function_args);
+            &parser, member->symbol->type, capture_args);
+        if (substituted != NULL && TypeContainsTemplateParameter(substituted)) {
+          TypeRecordDelete(substituted);
+          substituted = NULL;
+        }
+      }
+      if (enclosing_function_args != NULL) {
+        if (substituted == NULL) {
+          substituted = SubstituteTemplateParameters(
+              &parser, member->symbol->type, enclosing_function_args);
+        }
         if (substituted != NULL && TypeContainsTemplateParameter(substituted)) {
           TypeRecordDelete(substituted);
           substituted = NULL;

@@ -261,15 +261,32 @@ struct pair {
   constexpr pair(const T1& first_value, const T2& second_value)
       : first(first_value), second(second_value) {}
 
+  constexpr pair(const T1& first_value, T2&& second_value)
+      : first(first_value), second(static_cast<T2&&>(second_value)) {}
+
+  template <class U1, class U2,
+            enable_if_t<is_constructible_v<T1, U1&&> &&
+                            is_constructible_v<T2, U2&&>,
+                        int> = 0>
+  constexpr pair(U1&& first_value, U2&& second_value)
+      : first(static_cast<U1&&>(first_value)),
+        second(static_cast<U2&&>(second_value)) {}
+
   // Converting constructors: build a pair from another pair whose elements are
   // convertible (e.g. pair<iterator, bool> from pair<const_iterator, bool>, or
   // pair<const K, V> from pair<K, V>).  These enable the many implicit pair
   // conversions the containers rely on.
-  template <class U1, class U2>
+  template <class U1, class U2,
+            enable_if_t<is_constructible_v<T1, const U1&> &&
+                            is_constructible_v<T2, const U2&>,
+                        int> = 0>
   constexpr pair(const pair<U1, U2>& other)
       : first(other.first), second(other.second) {}
 
-  template <class U1, class U2>
+  template <class U1, class U2,
+            enable_if_t<is_constructible_v<T1, U1&&> &&
+                            is_constructible_v<T2, U2&&>,
+                        int> = 0>
   constexpr pair(pair<U1, U2>&& other)
       : first(static_cast<U1&&>(other.first)),
         second(static_cast<U2&&>(other.second)) {}

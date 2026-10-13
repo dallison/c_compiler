@@ -2921,15 +2921,41 @@ static void AnalyzeReturnStatement(CombinedStatementASTNode* node) {
     }
   } else if (return_value != NULL &&
              compiler->current_function->info.function.is_auto_return_deduced) {
-    TypeRecord* candidate =
+    TypeRecord* expected = compiler->current_function->next;
+    bool decltype_auto =
         compiler->current_function->info.function
-                .is_decltype_auto_return_deduced
-            ? TypeDeduceDecltypeAuto(return_value)
-            : TypeRecordCopy(return_value->type);
-    bool consistent =
-        candidate != NULL &&
-        TypeEqualIgnoringTopLevelQualifiers(
-            candidate, compiler->current_function->next);
+            .is_decltype_auto_return_deduced;
+    TypeRecord* candidate =
+        decltype_auto ? TypeDeduceDecltypeAuto(return_value) : NULL;
+    bool consistent = false;
+    if (decltype_auto) {
+      consistent =
+          candidate != NULL &&
+          TypeEqualIgnoringTopLevelQualifiers(candidate, expected);
+    } else if (TypeIsReference(expected)) {
+      // Once the first return replaces `const auto&` / `auto&&` with its
+      // concrete reference type, later expression nodes still carry their
+      // referred-to type plus a value category rather than a reference
+      // TypeRecord. Compare against the reference target and enforce the
+      // category constraints that affect placeholder deduction.
+      bool category_matches =
+          expected->declarator != kDeclRValueReference ||
+          return_value->value_category != kValueCategoryLvalue;
+      if (expected->declarator == kDeclReference &&
+          expected->next != NULL && !TypeIsConst(expected->next)) {
+        category_matches =
+            return_value->value_category == kValueCategoryLvalue;
+      }
+      consistent =
+          expected->next != NULL && category_matches &&
+          TypeEqualIgnoringTopLevelQualifiers(return_value->type,
+                                              expected->next);
+    } else {
+      candidate = TypeRecordCopy(return_value->type);
+      consistent =
+          candidate != NULL &&
+          TypeEqualIgnoringTopLevelQualifiers(candidate, expected);
+    }
     TypeRecordDelete(candidate);
     if (!consistent) {
       SemanticError(return_value, "Inconsistent auto function return type");

@@ -408,6 +408,11 @@ struct Struct {
   // (a variable template's initializer).  Like a closure in a function
   // template, each instantiation rebuilds it.  Not serialized.
   bool in_namespace_template;  // @wire -
+  // A lambda closure with an init-capture whose call-operator body was parsed
+  // against the capture's parse-time type and has not yet been re-analyzed
+  // with the deduced field types.  Not serialized.
+  bool lambda_body_needs_reanalysis;  // @wire -
+  bool lambda_has_init_capture;       // @wire -
   // Arguments of the enclosing function template a local class was rebuilt
   // for; they tell its instantiations apart in mangled names.
   Vector* local_class_arguments;  // TemplateArgument*. @wire -

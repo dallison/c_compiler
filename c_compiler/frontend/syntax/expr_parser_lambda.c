@@ -1027,6 +1027,8 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
   for (size_t i = 0; i < captures->length; i++) {
     LambdaCapture* capture = captures->value.p[i];
     if (capture->is_init_capture && capture->initializer != NULL) {
+      closure->lambda_has_init_capture = true;
+      closure->lambda_body_needs_reanalysis = true;
       capture->initializer = AnalyzeExpression(capture->initializer);
       if (capture->initializer->type != NULL && capture->captured != NULL) {
         TypeRecord* deduced = capture->initializer->type;

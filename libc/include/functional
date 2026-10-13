@@ -514,11 +514,7 @@ struct __invoke_result_impl {
 
 template <class T, class... Args>
 struct __invoke_result_impl<reference_wrapper<T>, Args...> {
-  using type = __davecc_invoke_result_t(T, Args...);
-};
-
-template <class F, class... Args>
-struct __invoke_result : __invoke_result_impl<remove_reference_t<F>, Args...> {
+  using type = __davecc_invoke_result_t(T&, Args...);
 };
 
 template <class T>
@@ -532,6 +528,16 @@ struct __is_reference_wrapper<T&> : __is_reference_wrapper<T> {};
 
 template <class T>
 struct __is_reference_wrapper<T&&> : __is_reference_wrapper<T> {};
+
+// The callable keeps its value category so ref-qualified call operators
+// (`int operator()(int) &`) are selected as for the real call.
+template <class F, class... Args>
+struct __invoke_result
+    : __invoke_result_impl<
+          conditional_t<__is_reference_wrapper<F>::value,
+                        remove_cv_t<remove_reference_t<F>>, F>,
+          Args...> {
+};
 
 template <class T>
 struct __is_member_pointer_argument

@@ -173,8 +173,8 @@ static bool EvaluateConstexprSubscriptLocation(ConstEvalContext* ctx,
                                                ASTNode* node,
                                                bool allow_object,
                                                ConstexprValue* result);
-static bool ConstexprCopyUnionFrom(ConstEvalContext* ctx, ASTNode* source,
-                                   ConstexprObject* destination);
+static bool ConstexprCopyObjectFrom(ConstEvalContext* ctx, ASTNode* source,
+                                    ConstexprObject* destination);
 static bool ConstexprBindPointerReference(ConstEvalContext* ctx,
                                           ASTNode* node,
                                           TypeRecord* pointer_type,
@@ -2190,14 +2190,36 @@ static bool ConstexprObjectHasVirtualBases(ConstexprObject* object) {
 
 static bool ConstexprUnionMemberActive(ConstexprObject* object,
                                        StructMember* member) {
-  return !ConstexprObjectIsUnion(object) ||
-         object->active_union_member == member;
+  if (!ConstexprObjectIsUnion(object)) {
+    return true;
+  }
+  StructMember* active = object->active_union_member;
+  if (active == member) {
+    return true;
+  }
+  // Template instantiation and initializer reconstruction can produce an
+  // equivalent StructMember node for the same union field.  Member names are
+  // unique within a union, so compare the canonical field identity rather than
+  // requiring allocator identity.
+  return active != NULL && active->symbol != NULL && member != NULL &&
+         member->symbol != NULL &&
+         StringEqualString(&active->symbol->name, &member->symbol->name);
 }
 
 static void ConstexprActivateUnionMember(ConstexprObject* object,
                                          StructMember* member) {
   if (ConstexprObjectIsUnion(object)) {
+    Struct* str = object->type->info.struct_info;
     object->active_union_member = member;
+    for (size_t i = 0; str != NULL && member != NULL &&
+                       member->symbol != NULL && i < str->members.length; i++) {
+      StructMember* direct = str->members.value.p[i];
+      if (direct != NULL && direct->symbol != NULL &&
+          StringEqualString(&direct->symbol->name, &member->symbol->name)) {
+        object->active_union_member = direct;
+        break;
+      }
+    }
   }
 }
 
@@ -3208,7 +3230,8 @@ static bool ConstexprIsExternalStaticObject(Symbol* symbol) {
          !StorageIs(symbol->storage, STO(thread)) &&
          !StorageIs(symbol->storage, STO(typedef)) &&
          !TypeIsFunction(symbol->type) && !TypeIsReference(symbol->type) &&
-         !TypeIsVoid(symbol->type) && symbol->type->size > 0 &&
+         !TypeIsVoid(symbol->type) &&
+         (symbol->type->size > 0 || TypeIsFixedArray(symbol->type)) &&
          (TypeIsScalar(symbol->type) || TypeIsFixedArray(symbol->type) ||
           TypeIsStructOrUnion(symbol->type)) &&
          !ConstexprIsStaticConstantObject(symbol) &&
@@ -6313,7 +6336,6 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   // the member order.
   if (CompilerIsCXX() && initializer->op == AST_OP(braced_init) &&
       TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
-      !type->info.struct_info->is_union &&
       !type->info.struct_info->is_aggregate) {
     BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
     static int constexpr_brace_ctor_depth = 0;
@@ -7644,9 +7666,12 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       return false;
     }
     size_t byte_offset = (size_t)member_node->member->byte_offset;
-    // Bit-fields share byte offsets, so each is found by its own slot.
+    // Union members share storage and some delayed layouts leave non-first
+    // members without a byte offset.  Their active value is always slot zero.
+    // Bit-fields likewise use their member slot rather than offset lookup.
     ConstexprValue* slot =
-        ConstexprIsBitField(member_node->member)
+        ConstexprObjectIsUnion(object_value.object) ||
+                ConstexprIsBitField(member_node->member)
             ? ConstexprObjectSlot(
                   object_value.object,
                   ConstexprMemberSlotIndex(object_value.object,
@@ -9920,6 +9945,30 @@ static ConstexprObject* ConstexprValueInitParameterObject(
   return NewConstexprObject(ctx, type, ConstexprObjectSlotCount(type));
 }
 
+// Applies the array-to-pointer conversion used for by-value call arguments.
+// The semantic AST can retain the array identifier while recording the pointer
+// formal type, so constant evaluation must form its address explicitly.
+static bool EvaluateConstexprArgumentValue(ConstEvalContext* ctx,
+                                           ASTNode* actual,
+                                           TypeRecord* formal_type,
+                                           ConstexprValue* result) {
+  TypeRecord* source_type = actual != NULL ? actual->type : NULL;
+  if (actual != NULL && actual->op == AST_OP(identifier) &&
+      ((IdentifierASTNode*)actual)->symbol != NULL &&
+      TypeIsArray(((IdentifierASTNode*)actual)->symbol->type)) {
+    source_type = ((IdentifierASTNode*)actual)->symbol->type;
+  }
+  if (TypeIsPointer(formal_type) && TypeIsArray(source_type)) {
+    if (actual->op == AST_OP(identifier) &&
+        ConstexprStaticIdentifierAddress(
+            ctx, ((IdentifierASTNode*)actual)->symbol, result)) {
+      return true;
+    }
+    return EvaluateConstexprAddressValue(ctx, actual, result);
+  }
+  return EvaluateConstexprValue(ctx, actual, formal_type, result);
+}
+
 static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
                                  Vector* actuals) {
   TypeRecord* func = function->type;
@@ -9949,6 +9998,7 @@ static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
     ConstexprValue value = {0};
     if (formal != NULL && StringEqual(&formal->name, "this")) {
       ConstexprObject* object = NULL;
+      bool symbolic_external = false;
       if (actual != NULL && actual->op == AST_OP(identifier) &&
           ((IdentifierASTNode*)actual)->symbol != NULL &&
           StringEqual(&((IdentifierASTNode*)actual)->symbol->name, "this")) {
@@ -9980,14 +10030,34 @@ static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
       }
       if (object == NULL &&
           !EvaluateConstexprObjectAddress(ctx, actual, &object)) {
-        object = ConstexprValueInitParameterObject(ctx, actual);
-        if (object == NULL) {
-          ok = false;
-          break;
+        ASTNode* static_receiver =
+            actual != NULL && actual->op == AST_OP(address)
+                ? ((UnaryASTNode*)actual)->sub : actual;
+        if (static_receiver != NULL &&
+            static_receiver->op == AST_OP(identifier)) {
+          ConstexprValue address = {0};
+          if (ConstexprStaticIdentifierAddress(
+                  ctx, ((IdentifierASTNode*)static_receiver)->symbol,
+                  &address) &&
+              address.address_binding != NULL &&
+              address.address_binding->external &&
+              address.address_binding->object != NULL) {
+            value = address;
+            symbolic_external = true;
+          }
+        }
+        if (!symbolic_external) {
+          object = ConstexprValueInitParameterObject(ctx, actual);
+          if (object == NULL) {
+            ok = false;
+            break;
+          }
         }
       }
-      value.is_object = true;
-      value.object = object;
+      if (!symbolic_external) {
+        value.is_object = true;
+        value.object = object;
+      }
     } else if (formal == NULL || actual == NULL ||
                !ConstexprParameterTypeSupported(formal->type)) {
       ok = false;
@@ -9998,7 +10068,8 @@ static bool BindConstexprActuals(ConstEvalContext* ctx, Symbol* function,
         ok = false;
         break;
       }
-    } else if (!EvaluateConstexprValue(ctx, actual, formal->type, &value)) {
+    } else if (!EvaluateConstexprArgumentValue(ctx, actual, formal->type,
+                                               &value)) {
       ok = false;
       break;
     }
@@ -10068,7 +10139,8 @@ static bool BindConstexprConstructorObjectActuals(ConstEvalContext* ctx,
                                           &value)) {
         return false;
       }
-    } else if (!EvaluateConstexprValue(ctx, actual, formal->type, &value)) {
+    } else if (!EvaluateConstexprArgumentValue(ctx, actual, formal->type,
+                                               &value)) {
       return false;
     }
     ConstexprRecordArgumentTemporary(ctx, actual, value);
@@ -10267,10 +10339,23 @@ static bool BindConstexprConstructorActuals(ConstEvalContext* ctx,
   }
   ConstexprObject* object = NULL;
   if (!EvaluateConstexprObjectAddress(ctx, receiver, &object)) {
-    return false;
+    // A static object need not have a constant value for its address to be a
+    // constant expression.  Preserve that symbolic address as `this`; reads
+    // and writes still fail because the durable binding is marked external.
+    ConstexprValue address = {0};
+    if (receiver == NULL || receiver->op != AST_OP(identifier) ||
+        !ConstexprStaticIdentifierAddress(
+            ctx, ((IdentifierASTNode*)receiver)->symbol, &address) ||
+        address.address_binding == NULL ||
+        !address.address_binding->external ||
+        address.address_binding->object == NULL) {
+      return false;
+    }
+    PushConstexprBinding(ctx, this_formal, address);
+  } else {
+    PushConstexprBinding(ctx, this_formal,
+                         (ConstexprValue){.is_object = true, .object = object});
   }
-  PushConstexprBinding(ctx, this_formal,
-                       (ConstexprValue){.is_object = true, .object = object});
   for (size_t i = 0; i < named_actuals; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i + 1];
     ASTNode* actual = actuals->value.p[i];
@@ -10284,7 +10369,8 @@ static bool BindConstexprConstructorActuals(ConstEvalContext* ctx,
                                           &value)) {
         return false;
       }
-    } else if (!EvaluateConstexprValue(ctx, actual, formal->type, &value)) {
+    } else if (!EvaluateConstexprArgumentValue(ctx, actual, formal->type,
+                                               &value)) {
       return false;
     }
     ConstexprRecordArgumentTemporary(ctx, actual, value);
@@ -12757,8 +12843,8 @@ bool EvaluateConstexprCall(ConstEvalContext* ctx, ASTNode* node,
       ConstexprObject* destination = NULL;
       if (!EvaluateConstexprObjectAddress(ctx, assignment_actual,
                                           &destination) ||
-          !ConstexprCopyUnionFrom(ctx, call->children->value.p[source_index],
-                                  destination)) {
+          !ConstexprCopyObjectFrom(ctx, call->children->value.p[source_index],
+                                   destination)) {
         return false;
       }
       *result = (ConstexprValue){.is_address = true,
@@ -13549,21 +13635,18 @@ static void ConstexprBeginUserConstructor(ConstEvalContext* ctx,
   ConstexprMarkDataMembers(ctx, object, kValueStateIndeterminate);
 }
 
-// A union's defaulted copy or move constructor copies the object
-// representation, whichever member is active; its memberwise body would read
-// inactive members.
-static bool ConstexprIsTrivialUnionCopy(TypeRecord* func) {
-  Struct* owner = func->info.function.cxx_member_owner;
+// A defaulted trivial copy or move constructor has no synthesized body for the
+// AST evaluator to execute.  Copy its modeled slots directly instead.
+static bool ConstexprIsTrivialObjectCopy(TypeRecord* func) {
   CXXSpecialMemberKind kind = func->info.function.cxx_special_member_kind;
   return func->info.function.is_constructor &&
-         func->info.function.is_trivial_special_member && owner != NULL &&
-         owner->is_union &&
+         func->info.function.is_trivial_special_member &&
          (kind == kCXXSpecialMemberCopyConstructor ||
           kind == kCXXSpecialMemberMoveConstructor);
 }
 
-static bool ConstexprCopyUnionFrom(ConstEvalContext* ctx, ASTNode* source,
-                                   ConstexprObject* destination) {
+static bool ConstexprCopyObjectFrom(ConstEvalContext* ctx, ASTNode* source,
+                                    ConstexprObject* destination) {
   ConstexprValue value = {0};
   return destination != NULL &&
          EvaluateConstexprValue(ctx, source, destination->type, &value) &&
@@ -13603,21 +13686,21 @@ static bool EvaluateConstexprConstructorCall(ConstEvalContext* ctx,
     return false;
   }
   TypeRecord* func = callee->type;
-  if (func->info.function.is_constructor &&
-      func->info.function.body == NULL &&
-      func->info.function.is_trivial_special_member) {
-    return true;
-  }
   Vector* actuals = ((VectorASTNode*)node)->children;
   size_t source_index = receiver != NULL ? 0 : 1;
-  if (ConstexprIsTrivialUnionCopy(func) && actuals != NULL &&
+  if (ConstexprIsTrivialObjectCopy(func) && actuals != NULL &&
       actuals->length == source_index + 1) {
     ConstexprObject* destination = NULL;
     return EvaluateConstexprObjectAddress(
                ctx, receiver != NULL ? receiver : actuals->value.p[0],
                &destination) &&
-           ConstexprCopyUnionFrom(ctx, actuals->value.p[source_index],
-                                  destination);
+           ConstexprCopyObjectFrom(ctx, actuals->value.p[source_index],
+                                   destination);
+  }
+  if (func->info.function.is_constructor &&
+      func->info.function.body == NULL &&
+      func->info.function.is_trivial_special_member) {
+    return true;
   }
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
@@ -13672,6 +13755,10 @@ static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
     return false;
   }
   TypeRecord* func = callee->type;
+  if (ConstexprIsTrivialObjectCopy(func) && call->children != NULL &&
+      call->children->length == 1) {
+    return ConstexprCopyObjectFrom(ctx, call->children->value.p[0], object);
+  }
   if (func->info.function.is_constructor &&
       func->info.function.body == NULL &&
       func->info.function.is_trivial_special_member) {
@@ -13681,10 +13768,6 @@ static bool EvaluateConstexprConstructorCallForObject(ConstEvalContext* ctx,
       object->active_union_member = NULL;
     }
     return true;
-  }
-  if (ConstexprIsTrivialUnionCopy(func) && call->children != NULL &&
-      call->children->length == 1) {
-    return ConstexprCopyUnionFrom(ctx, call->children->value.p[0], object);
   }
   if (!func->info.function.is_constexpr ||
       func->info.function.body == NULL ||
