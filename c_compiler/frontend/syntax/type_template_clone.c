@@ -8474,6 +8474,27 @@ static TypeRecord* ResolveClonedDependentTypedef(
   return result;
 }
 
+static bool NodeHasTemplateDependentType(ASTNode* node, void* data) {
+  (void)data;
+  return node != NULL && node->type != NULL &&
+         TypeContainsTemplateParameter(node->type);
+}
+
+// A member function template cloned for its class instantiation is still
+// dependent on its own parameters.  Analyzing a lambda whose captures name
+// them lowers it to a plain braced initializer with `auto` capture fields,
+// which the per-call clone can no longer deduce.
+static bool NodeIsLambdaWithDependentCapture(ASTNode* node, void* data) {
+  (void)data;
+  if (node == NULL || (node->flags & kASTLambdaExpression) == 0 ||
+      node->op != AST_OP(compound_literal)) {
+    return false;
+  }
+  ASTNode* captures = ((CompoundLiteralASTNode*)node)->initializer;
+  return captures != NULL &&
+         ASTNodeAny(captures, NodeHasTemplateDependentType, NULL);
+}
+
 /* Post-clone pass: re-resolve already-typed construction calls in the cloned
  * body. Constructor calls may still reference the generic template's overload
  * set, and typedef class functional casts (e.g. `alias(args)`) may still carry
@@ -8520,6 +8541,9 @@ static ASTNode* ReanalyzeClonedResolvedCall(
           (TypeIsUnknown(actual_type) ||
            TypeContainsTemplateParameter(actual_type) ||
            FirstTemplateParameterIndexInType(actual_type) >= 0)) {
+        return node;
+      }
+      if (ASTNodeAny(actual, NodeIsLambdaWithDependentCapture, NULL)) {
         return node;
       }
     }
@@ -9079,6 +9103,9 @@ static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
   VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
   if (decl->symbol == NULL || !TypeContainsAuto(decl->symbol->type) ||
       decl->initializer == NULL) {
+    return;
+  }
+  if (ASTNodeAny(decl->initializer, NodeIsLambdaWithDependentCapture, NULL)) {
     return;
   }
   // Earlier clone passes re-analyze the initializer (for example a call whose

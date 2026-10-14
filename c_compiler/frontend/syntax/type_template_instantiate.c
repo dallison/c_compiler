@@ -890,9 +890,12 @@ static void PopNestedSubstitution(Struct* source) {
 static bool StructHasDependentDataMember(Struct* str) {
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
+    // An init-capture field (`[c = cb]`) stays `auto` until each instantiation
+    // deduces it, so instantiations must not share the closure.
     if (member != NULL && member->symbol != NULL && !member->is_static &&
         !member->is_member_function &&
-        TypeContainsTemplateParameter(member->symbol->type)) {
+        (TypeContainsTemplateParameter(member->symbol->type) ||
+         TypeContainsAuto(member->symbol->type))) {
       return true;
     }
   }
