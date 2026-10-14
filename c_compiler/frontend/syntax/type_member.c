@@ -59,6 +59,11 @@ typedef struct {
 typedef struct {
   Symbol* symbol;
   CXXConstructorInitList* initializers;
+  // Class whose scope the initializers were parsed in, when it differs from
+  // `symbol`'s owner (a primary template's list re-keyed onto a class-level
+  // member template constructor).  Its nested types and members still need
+  // mapping onto `symbol`'s owner.
+  Struct* source_owner;
 } TemplateConstructorInitializers;
 
 static void AddOwnedAssociatedConstraint(ConstraintExpr** target,
@@ -1822,7 +1827,23 @@ static void QueueTemplateConstructorInitializers(
       malloc(sizeof(TemplateConstructorInitializers));
   stored->symbol = symbol;
   stored->initializers = initializers;
+  stored->source_owner = NULL;
   VectorAppend(&template_constructor_initializers, stored);
+}
+
+static TemplateConstructorInitializers* FindTemplateConstructorInitializersEntry(
+    Symbol* symbol) {
+  if (!template_constructor_initializers_initialized || symbol == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < template_constructor_initializers.length; i++) {
+    TemplateConstructorInitializers* stored =
+        template_constructor_initializers.value.p[i];
+    if (stored != NULL && stored->symbol == symbol) {
+      return stored;
+    }
+  }
+  return NULL;
 }
 
 void RegisterTemplateConstructorInitializers(
@@ -1884,22 +1905,30 @@ void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to,
       VectorDestruct(&enclosing_prefix);
     }
     QueueTemplateConstructorInitializers(to, cloned);
+    Struct* source_owner = FindTemplateConstructorInitializersSourceOwner(from);
+    if (source_owner == NULL && TypeIsFunction(from->type)) {
+      source_owner = from->type->info.function.cxx_member_owner;
+    }
+    Struct* to_owner = TypeIsFunction(to->type)
+                           ? to->type->info.function.cxx_member_owner
+                           : NULL;
+    if (source_owner != to_owner) {
+      FindTemplateConstructorInitializersEntry(to)->source_owner = source_owner;
+    }
   }
 }
 
 CXXConstructorInitList* FindTemplateConstructorInitializers(
     Symbol* symbol) {
-  if (!template_constructor_initializers_initialized || symbol == NULL) {
-    return NULL;
-  }
-  for (size_t i = 0; i < template_constructor_initializers.length; i++) {
-    TemplateConstructorInitializers* stored =
-        template_constructor_initializers.value.p[i];
-    if (stored != NULL && stored->symbol == symbol) {
-      return stored->initializers;
-    }
-  }
-  return NULL;
+  TemplateConstructorInitializers* stored =
+      FindTemplateConstructorInitializersEntry(symbol);
+  return stored != NULL ? stored->initializers : NULL;
+}
+
+Struct* FindTemplateConstructorInitializersSourceOwner(Symbol* symbol) {
+  TemplateConstructorInitializers* stored =
+      FindTemplateConstructorInitializersEntry(symbol);
+  return stored != NULL ? stored->source_owner : NULL;
 }
 
 // An inline member function body whose parse was deferred until the enclosing

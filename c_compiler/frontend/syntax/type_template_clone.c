@@ -70,6 +70,7 @@ static void AnalyzeFunctionTemplateCallActualsVisitor(ASTNode* node, void* data,
                                                       VisitorMode mode);
 static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
                                                TypeRecord* from_func,
+                                               Struct* source_owner,
                                                TypeRecord* func, Vector* body,
                                                size_t inserted_count,
                                                Vector* args);
@@ -10029,6 +10030,7 @@ bool PendingTemplateInstantiationHasAsmName(const char* asm_name) {
 static void PrepareConstructorPreambleClone(TemplateFunctionBodyClone* clone,
                                             TypeParser* parser,
                                             TypeRecord* from_func,
+                                            Struct* source_owner,
                                             TypeRecord* func, Vector* args) {
   MapInitForPointerKeys(&clone->symbol_map);
   MapInitForPointerKeys(&clone->pack_symbol_map);
@@ -10040,7 +10042,8 @@ static void PrepareConstructorPreambleClone(TemplateFunctionBodyClone* clone,
       from_func != NULL && TypeIsFunction(from_func)
           ? from_func->info.function.template_parameter_base
           : 0;
-  clone->from_owner = CloneFunctionMemberOwner(from_func);
+  clone->from_owner = source_owner != NULL ? source_owner
+                                           : CloneFunctionMemberOwner(from_func);
   clone->to_owner = TypeIsFunction(func) ? func->info.function.cxx_member_owner
                                         : NULL;
   clone->substitution_source =
@@ -10177,10 +10180,12 @@ void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
   if (initializers == NULL) {
     return;
   }
+  Struct* source_owner =
+      FindTemplateConstructorInitializersSourceOwner(template_definition);
   TemplateFunctionBodyClone preamble_clone;
   PrepareConstructorPreambleClone(&preamble_clone, parser,
-                                  template_definition->type, symbol->type,
-                                  args);
+                                  template_definition->type, source_owner,
+                                  symbol->type, args);
   for (size_t i = 0; i < initializers->deferred_initializers.length; i++) {
     CXXDeferredConstructorInitializer* init =
         initializers->deferred_initializers.value.p[i];
@@ -10201,8 +10206,8 @@ void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
                                      body->statements, initializers,
                                      symbol->location);
   AnalyzeInsertedConstructorPreamble(
-      parser, template_definition->type, symbol->type, body->statements,
-      body->statements->length - first_new_statement, args);
+      parser, template_definition->type, source_owner, symbol->type,
+      body->statements, body->statements->length - first_new_statement, args);
   compiler->current_class_access_context = saved_access_context;
   SyntaxCXXConstructorInitListDestruct(initializers);
   free(initializers);
@@ -10973,6 +10978,7 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
  * and renumber argument slots. (The body is cloned separately.) */
 static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
                                                TypeRecord* from_func,
+                                               Struct* source_owner,
                                                TypeRecord* func, Vector* body,
                                                size_t inserted_count,
                                                Vector* args) {
@@ -10991,7 +10997,8 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
   // explicit template argument (turning `forward<Arg>` into an un-deducible
   // `forward`).  For a non-member template constructor the base is 0, so this
   // is a no-op there.
-  PrepareConstructorPreambleClone(&clone, parser, from_func, func, args);
+  PrepareConstructorPreambleClone(&clone, parser, from_func, source_owner,
+                                  func, args);
   TypeRecord* saved_function = compiler->current_function;
   Struct* saved_access_context = compiler->current_class_access_context;
   compiler->current_function = func;

@@ -94,6 +94,9 @@ void AddImplicitCXXDeductionGuides(Struct* str, Symbol* tag);
 void ApplyCXXMemberUsingDeclarations(TypeParser* parser, Struct* owner,
                                      Struct* template_struct, Vector* args);
 struct CXXConstructorInitList* FindTemplateConstructorInitializers(Symbol* symbol);
+// The class the stored initializers were parsed in, or NULL when that is
+// `symbol`'s own owner.
+Struct* FindTemplateConstructorInitializersSourceOwner(Symbol* symbol);
 void RegisterTemplateConstructorInitializers(
     Symbol* symbol, struct CXXConstructorInitList* initializers);
 void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to,
