@@ -792,12 +792,37 @@ bool CalleeNamesItsFunction(ASTNode* callee) {
   return symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type);
 }
 
+static bool NodeNamesFormalOf(ASTNode* node, void* data) {
+  FunctionInfo* info = data;
+  if (node == NULL || node->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  for (size_t i = 0; symbol != NULL && i < info->prototype.length; i++) {
+    if (info->prototype.value.p[i] == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Contract: Returns body-bearing FunctionInfo (definition symbol if needed); read-only.
 FunctionInfo* FunctionInfoForCallInlining(FunctionInfo* func) {
   if (func == NULL) {
     return NULL;
   }
   if (func->body != NULL) {
+    // A TypeRecordCopy (e.g. an inherited special-member constructor) shares
+    // the body but owns fresh prototype symbols the body does not reference.
+    TypeRecord* canonical = func->symbol != NULL ? func->symbol->type : NULL;
+    if (canonical != NULL && TypeIsFunction(canonical) &&
+        &canonical->info.function != func &&
+        canonical->info.function.body == func->body &&
+        canonical->info.function.prototype.length == func->prototype.length &&
+        !ASTNodeAny(func->body, NodeNamesFormalOf, func) &&
+        ASTNodeAny(func->body, NodeNamesFormalOf, &canonical->info.function)) {
+      return &canonical->info.function;
+    }
     return func;
   }
   if (func->symbol != NULL && func->symbol->value.func_defn != NULL &&
