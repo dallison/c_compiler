@@ -1951,7 +1951,7 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
       node->flags &= ~kASTAnalyzed;
       node->parent->flags &= ~kASTAnalyzed;
     }
-    if (id->symbol == replace->from) {
+    if (replace->from != NULL && id->symbol == replace->from) {
       id->symbol = replace->to;
       ASTNodeSetType(node, TypeIsReference(replace->to->type)
                                ? replace->to->type->next
@@ -3802,6 +3802,22 @@ static TemplateArgument* ConcreteTemplateArgumentPack(
              : NULL;
 }
 
+static void AddFoldTemplateArgumentPack(FoldPackSearch* search, int pack_index,
+                                        size_t pack_length) {
+  if (pack_index < 0 || search->clone->args == NULL ||
+      (size_t)pack_index >= search->clone->args->length) {
+    search->unresolved_pack = true;
+    return;
+  }
+  TemplateArgument* argument = search->clone->args->value.p[pack_index];
+  if (argument == NULL || argument->pack_arguments == NULL) {
+    search->unresolved_pack = true;
+    return;
+  }
+  AddFoldPackBinding(search, kFoldPackTemplateArgument, NULL, pack_index, NULL,
+                     argument->pack_arguments, pack_length, false);
+}
+
 static void FindFoldPacks(ASTNode* node, void* data, int child_id,
                           VisitorMode mode) {
   (void)child_id;
@@ -3809,6 +3825,18 @@ static void FindFoldPacks(ASTNode* node, void* data, int child_id,
     return;
   }
   FoldPackSearch* search = data;
+  // `(f<N>(sizeof(T)), 0)...` names the type pack only through the operand.
+  if ((node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) &&
+      !((SizeofASTNode*)node)->is_pack_size &&
+      ((SizeofASTNode*)node)->type_operand != NULL) {
+    int pack_index = -1;
+    size_t pack_length = 0;
+    if (FindPackExpansionInType(((SizeofASTNode*)node)->type_operand,
+                                search->clone->args, &pack_index,
+                                &pack_length)) {
+      AddFoldTemplateArgumentPack(search, pack_index, pack_length);
+    }
+  }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
@@ -3845,24 +3873,11 @@ static void FindFoldPacks(ASTNode* node, void* data, int child_id,
        template_arguments != NULL && i < template_arguments->length; i++) {
     int pack_index = -1;
     size_t pack_length = 0;
-    if (!FindPackExpansionInTemplateArgument(
+    if (FindPackExpansionInTemplateArgument(
             template_arguments->value.p[i], search->clone->args, &pack_index,
             &pack_length)) {
-      continue;
+      AddFoldTemplateArgumentPack(search, pack_index, pack_length);
     }
-    if (pack_index < 0 || search->clone->args == NULL ||
-        (size_t)pack_index >= search->clone->args->length) {
-      search->unresolved_pack = true;
-      continue;
-    }
-    TemplateArgument* argument =
-        search->clone->args->value.p[pack_index];
-    if (argument == NULL || argument->pack_arguments == NULL) {
-      search->unresolved_pack = true;
-      continue;
-    }
-    AddFoldPackBinding(search, kFoldPackTemplateArgument, NULL, pack_index,
-                       NULL, argument->pack_arguments, pack_length, false);
   }
 }
 
@@ -3901,10 +3916,12 @@ static ASTNode* CloneFoldPackElement(TemplateFunctionBodyClone* clone,
   ASTNodeVisit(pattern_clone, DetachClonedPackExpansionCastTypes, 0, NULL);
 
   bool only_capture_packs = true;
+  bool replaced_identifiers = false;
   for (size_t i = 0; i < packs->bindings.length; i++) {
     FoldPackBinding* binding = packs->bindings.value.p[i];
     if (binding->kind == kFoldPackFunction) {
       only_capture_packs = false;
+      replaced_identifiers = true;
       ReplacePackIdentifierData replace = {
           .clone = clone,
           .from = binding->symbol,
@@ -3927,6 +3944,15 @@ static ASTNode* CloneFoldPackElement(TemplateFunctionBodyClone* clone,
   }
   if (only_capture_packs) {
     return pattern_clone;
+  }
+  if (!replaced_identifiers) {
+    // The expression clone leaves explicit template arguments such as
+    // `RoundUpTo<N>(sizeof(T))` dependent.
+    ReplacePackIdentifierData replace = {
+        .clone = clone,
+        .element_index = index,
+    };
+    ASTNodeVisit(pattern_clone, ReplacePackIdentifierVisitor, 0, &replace);
   }
   ASTNodeVisit(pattern_clone, InstantiateClonedFunctionTemplateCallVisitor, 0,
                clone);
@@ -4816,6 +4842,14 @@ static bool TypeRecordHasSameAliasTemplateId(TypeRecord* left,
   if (left == NULL || right == NULL || left->declarator != right->declarator ||
       left->type != right->type ||
       left->template_origin != right->template_origin) {
+    return false;
+  }
+  /* `Traits<T>` is not `typename Traits<T>::iterator`. */
+  if ((left->dependent_member_name == NULL) !=
+          (right->dependent_member_name == NULL) ||
+      (left->dependent_member_name != NULL &&
+       !StringEqualString(left->dependent_member_name,
+                          right->dependent_member_name))) {
     return false;
   }
   if (TypeIsStructOrUnion(left) != TypeIsStructOrUnion(right)) {
@@ -11067,9 +11101,12 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
           ? source_owner->info.struct_info
           : NULL,
       symbol->type->info.function.cxx_member_owner);
+  size_t deferred_nested_body_mark = TypeDeferredNestedMemberBodyMark();
   QueueTemplateMemberFunctionDefinitionImpl(
       symbol, template_definition, &parser, template_arguments,
       /*allow_lazy=*/false);
+  TypeFlushDeferredNestedMemberBodiesOutsideClass(&parser,
+                                                  deferred_nested_body_mark);
   TypeParserPopTemplateSubstitution(&substitution);
   TypeParserDestruct(&parser);
   if (extended_args != NULL) {

@@ -1069,6 +1069,14 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
   if (symbol->cached_target_symbol_name != NULL) {
     return symbol->cached_target_symbol_name;
   }
+  // Namespace-scope objects carry their namespace in the symbol name
+  // (`a::x` is `_ZN1a1xE`); otherwise `a::x` and `b::x` collide.
+  if (CompilerIsCXX() && symbol->asm_name.length == 0 &&
+      symbol->namespace_ != NULL && !symbol->flags.is_local &&
+      !symbol->flags.is_c_linkage && symbol->type != NULL &&
+      !TypeIsFunction(symbol->type)) {
+    SymbolSetCXXDataAsmName(symbol, NULL);
+  }
   // Allocate a buffer guaranteed to hold the whole name: sanitization can
   // expand each byte to at most four characters ("_uXX"), plus room for the
   // ".local." prefix / numeric suffix / leading underscore.

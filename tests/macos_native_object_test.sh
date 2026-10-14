@@ -233,3 +233,66 @@ if [[ "$status" != "42" ]]; then
   echo "host default program exited $status, expected 42" >&2
   exit 1
 fi
+
+# An object holding only thread-local definitions must not describe its
+# synthetic section symbol as a TLV (ld: invalid r_symbolnum).
+cat >"$WORK/tlv_only.cc" <<'SRC'
+enum class Mode : int { kDefault = 0, kDebug = 1 };
+struct Flags { static __thread Mode mode; static thread_local int depth; };
+__thread Mode Flags::mode = Mode::kDebug;
+thread_local int Flags::depth = 7;
+SRC
+cat >"$WORK/tlv_main.cc" <<'SRC'
+enum class Mode : int { kDefault = 0, kDebug = 1 };
+struct Flags { static __thread Mode mode; static thread_local int depth; };
+int main() { return Flags::mode == Mode::kDebug && Flags::depth == 7 ? 0 : 1; }
+SRC
+"$DAVECC" -target aarch64-apple-darwin-davecc -std=c++17 -c \
+  "$WORK/tlv_only.cc" -o "$WORK/tlv_only.o"
+"$DAVECC" -target aarch64-apple-darwin-davecc -std=c++17 -c \
+  "$WORK/tlv_main.cc" -o "$WORK/tlv_main.o"
+"$DAVECC" -target aarch64-apple-darwin-davecc "$WORK/tlv_main.o" \
+  "$WORK/tlv_only.o" -o "$WORK/tlv"
+if ! "$WORK/tlv"; then
+  echo "thread-local-only object program failed" >&2
+  exit 1
+fi
+
+# An out-of-line `= default` special member is a strong definition even when
+# its own translation unit never uses it.
+cat >"$WORK/defaulted.h" <<'SRC'
+#include <string>
+namespace defaulted_ns {
+class Table {
+ public:
+  Table();
+  ~Table();
+  std::string name;
+};
+}
+SRC
+cat >"$WORK/defaulted_def.cc" <<'SRC'
+#include "defaulted.h"
+namespace defaulted_ns {
+Table::Table() = default;
+Table::~Table() = default;
+}
+SRC
+cat >"$WORK/defaulted_main.cc" <<'SRC'
+#include "defaulted.h"
+int main() {
+  defaulted_ns::Table table;
+  table.name = "ok";
+  return table.name.size() == 2 ? 0 : 1;
+}
+SRC
+"$DAVECC" -target aarch64-apple-darwin-davecc -std=c++17 -c \
+  "$WORK/defaulted_def.cc" -o "$WORK/defaulted_def.o"
+"$DAVECC" -target aarch64-apple-darwin-davecc -std=c++17 -c \
+  "$WORK/defaulted_main.cc" -o "$WORK/defaulted_main.o"
+"$DAVECC" -target aarch64-apple-darwin-davecc "$WORK/defaulted_main.o" \
+  "$WORK/defaulted_def.o" -o "$WORK/defaulted"
+if ! "$WORK/defaulted"; then
+  echo "out-of-line defaulted member program failed" >&2
+  exit 1
+fi

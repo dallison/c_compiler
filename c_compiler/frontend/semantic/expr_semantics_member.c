@@ -381,11 +381,15 @@ static ASTValueCategory DataMemberAccessValueCategory(BinaryASTNode* node,
 // out-of-class definition to load from.  Only a plain object name is folded
 // away, since any other object expression must still be evaluated.
 ASTNode* FoldStaticDataMemberReference(BinaryASTNode* node) {
+  /* An instantiated template analyzes cloned expressions before attaching
+   * them (`field->CPPTYPE_ENUM` in a function template body); the caller then
+   * takes the returned constant. */
   if (node->right == NULL || node->right->op != AST_OP(structmember) ||
       node->left == NULL || node->left->op != AST_OP(identifier) ||
       node->base.type == NULL ||
       (node->base.flags & (kASTNeedAddress | kASTIsDeclaration)) != 0 ||
-      node->base.parent == NULL || node->base.parent->op == AST_OP(address)) {
+      (node->base.parent != NULL &&
+       node->base.parent->op == AST_OP(address))) {
     return &node->base;
   }
   StructMember* member = ((StructMemberASTNode*)node->right)->member;

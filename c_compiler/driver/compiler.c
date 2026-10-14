@@ -1933,6 +1933,77 @@ static ASTNode* KeepClonedNode(ASTNode* node, void* data) {
   return node;
 }
 
+static void AddThreadLocalStatic(VariableDeclarationASTNode* decl) {
+  if (decl->symbol == NULL ||
+      !StorageIs(decl->symbol->storage, STO(thread)) ||
+      LocalStaticAlreadyRegistered(decl->symbol)) {
+    return;
+  }
+  if (decl->initializer == NULL || decl->initializer->op != AST_OP(init)) {
+    AddUninitializedLocalStatic(decl->symbol);
+    return;
+  }
+  ASTNode* raw = ((BinaryASTNode*)decl->initializer)->right;
+  // Block-scope thread_locals are recorded at parse time and may still be
+  // expression initializers (`static thread_local size_t id = kPoolSize`).
+  // ExpandBracedInitializer only accepts a braced initializer.  Lower a
+  // clone: AnalyzeInitializer moves the expression out of its parent, and
+  // the function body still owns the original tree.
+  if (raw != NULL && raw->op != AST_OP(braced_init) &&
+      decl->symbol->type != NULL && InitializerIsLinkTimeConstant(raw)) {
+    ASTNode* cloned = ASTNodeClone(raw, KeepClonedNode, NULL, NULL);
+    if (cloned != NULL) {
+      bool saved_trap = DiagnosticErrorTrapBegin();
+      ASTNode* simplified =
+          AnalyzeInitializer(decl->symbol->type, cloned, true);
+      bool failed = DiagnosticErrorTrapped();
+      DiagnosticErrorTrapEnd(saved_trap);
+      if (!failed && simplified != NULL &&
+          simplified->op == AST_OP(braced_init)) {
+        raw = simplified;
+      }
+    }
+  }
+  if (raw != NULL && raw->op == AST_OP(braced_init)) {
+    AddInitializedStaticVariable(decl, raw);
+  } else {
+    AddUninitializedLocalStatic(decl->symbol);
+  }
+}
+
+static void CollectFunctionThreadLocal(ASTNode* node, void* data, int child_id,
+                                       VisitorMode mode) {
+  (void)child_id;
+  if (mode == kVisitPreChildren && node != NULL &&
+      node->op == AST_OP(vardecl) &&
+      ((VariableDeclarationASTNode*)node)->symbol != NULL &&
+      StorageIs(((VariableDeclarationASTNode*)node)->symbol->storage,
+                STO(thread)) &&
+      !StorageIs(((VariableDeclarationASTNode*)node)->symbol->storage,
+                 STO(extern))) {
+    VectorAppend((Vector*)data, node);
+  }
+}
+
+/* The per-thread guard NewCXXThreadLocalGuardedInit invents for `guarded`
+ * shares its source location. */
+static void RegisterThreadLocalGuard(ASTNode* node, void* data, int child_id,
+                                     VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* guarded = data;
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol != NULL && symbol != guarded && symbol->flags.invented &&
+      symbol->flags.is_defined && symbol->location == guarded->location &&
+      StorageIs(symbol->storage, STO(thread)) &&
+      !LocalStaticAlreadyRegistered(symbol)) {
+    AddUninitializedLocalStatic(symbol);
+  }
+}
+
 static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
   Vector declarations;
   VectorInit(&declarations);
@@ -1960,49 +2031,27 @@ static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
   VectorDestruct(&declarations);
 
   // Thread-local block variables and their per-thread guard declarations are
-  // still collected during parsing because invented TLS guards do not appear
-  // as declarations in the final function body.
+  // collected during parsing because invented TLS guards do not appear as
+  // declarations in the final function body.  That list only lasts for the
+  // current top-level declaration, so a deferred inline function finds its
+  // thread_locals (and the guards their initializers test) in its body.
   for (size_t i = 0; i < syntax->local_statics.length; i++) {
-    VariableDeclarationASTNode* decl =
-        (VariableDeclarationASTNode*)syntax->local_statics.value.p[i];
-    if (decl->symbol == NULL ||
-        !StorageIs(decl->symbol->storage, STO(thread))) {
-      continue;
-    }
-    if (decl->initializer != NULL &&
-        decl->initializer->op == AST_OP(init)) {
-      ASTNode* raw = ((BinaryASTNode*)decl->initializer)->right;
-      // Block-scope thread_locals are recorded at parse time and may still be
-      // expression initializers (`static thread_local size_t id = kPoolSize`).
-      // ExpandBracedInitializer only accepts a braced initializer.  Lower a
-      // clone: AnalyzeInitializer moves the expression out of its parent, and
-      // the function body still owns the original tree.
-      if (raw != NULL && raw->op != AST_OP(braced_init) &&
-          decl->symbol != NULL && decl->symbol->type != NULL &&
-          InitializerIsLinkTimeConstant(raw)) {
-        ASTNode* cloned = ASTNodeClone(raw, KeepClonedNode, NULL, NULL);
-        if (cloned != NULL) {
-          bool saved_trap = DiagnosticErrorTrapBegin();
-          ASTNode* simplified =
-              AnalyzeInitializer(decl->symbol->type, cloned, true);
-          bool failed = DiagnosticErrorTrapped();
-          DiagnosticErrorTrapEnd(saved_trap);
-          if (!failed && simplified != NULL &&
-              simplified->op == AST_OP(braced_init)) {
-            raw = simplified;
-          }
-        }
-      }
-      if (raw != NULL && raw->op == AST_OP(braced_init)) {
-        AddInitializedStaticVariable(decl, raw);
-      } else {
-        AddUninitializedLocalStatic(decl->symbol);
-      }
-    } else {
-      AddUninitializedLocalStatic(decl->symbol);
-    }
+    AddThreadLocalStatic(syntax->local_statics.value.p[i]);
   }
   VectorClear(&syntax->local_statics);
+  Vector thread_locals;
+  VectorInit(&thread_locals);
+  ASTNodeVisit(function->info.function.body, CollectFunctionThreadLocal, 0,
+               &thread_locals);
+  for (size_t i = 0; i < thread_locals.length; i++) {
+    VariableDeclarationASTNode* decl = thread_locals.value.p[i];
+    if (LocalStaticAlreadyRegistered(decl->symbol)) {
+      continue;
+    }
+    AddThreadLocalStatic(decl);
+    ASTNodeVisit(decl->initializer, RegisterThreadLocalGuard, 0, decl->symbol);
+  }
+  VectorDestruct(&thread_locals);
 }
 
 static bool IsFunctionOrInlineDefinition(Symbol* sym) {

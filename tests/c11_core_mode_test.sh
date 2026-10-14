@@ -385,3 +385,23 @@ if [[ "$deprecated_status" -eq 0 ||
   sed 's/^/  /' "$WORK/deprecated_attribute.out" >&2
   exit 1
 fi
+
+# A `static inline` definition has internal linkage, so it is emitted wherever
+# it is called; C11 6.7.4p7 inline-definition rules apply only to external
+# linkage.
+static_inline_src="$WORK/static_inline.c"
+cat >"$static_inline_src" <<'EOF2'
+#define FORCE_INLINE __attribute__((always_inline)) inline
+static FORCE_INLINE int is_ascii(unsigned char c) { return (c & 0x80) == 0; }
+static inline int plus_one(int x) { return x + 1; }
+int use_static_inline(void) { return is_ascii('a') + plus_one(1); }
+EOF2
+"$ROOT/$DAVECC" -target x86_64 -std=c11 -S "$static_inline_src" \
+    -o "$WORK/static_inline.s"
+for fn in is_ascii plus_one; do
+  if grep -qw "$fn" "$WORK/static_inline.s" &&
+     ! grep -q "^$fn:" "$WORK/static_inline.s"; then
+    echo "static_inline: $fn is called but not defined" >&2
+    exit 1
+  fi
+done

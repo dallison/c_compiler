@@ -1469,7 +1469,12 @@ void ParseCXXPureSpecifier(TypeParser* parser, TypeRecord* func) {
     func->info.function.is_defaulted = true;
     func->info.function.is_explicitly_defaulted = true;
     func->info.function.is_constexpr_eligible = true;
-    func->info.function.is_inline = true;
+    // [dcl.fct.def.default]: only a function defaulted on its first
+    // declaration is implicitly inline; `T::~T() = default;` is a strong
+    // definition.
+    if (parser->cxx_member_definition == NULL) {
+      func->info.function.is_inline = true;
+    }
     if (parser->cxx_member_definition == NULL &&
         func->info.function.contract_assertions.length != 0) {
       SyntaxError(parser->syntax,

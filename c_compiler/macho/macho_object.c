@@ -706,6 +706,16 @@ static bool AppendExternalReloc(MachOObject* macho, MachOSection* section,
   return true;
 }
 
+static bool SymbolIsThreadLocalVariable(MachOObject* macho, MachOSymbol* sym) {
+  /* Synthetic locals such as the index-0 ltmp0 can land in __thread_data
+   * when an object has no code; they are not variables. */
+  if (sym->source == NULL || sym->is_undefined || sym->sect == 0) {
+    return false;
+  }
+  MachOSection* section = FindMachOSectionByIndex(macho, sym->sect);
+  return section != NULL && SectionIsThreadLocalStorage(section);
+}
+
 /* Darwin looks up a thread-local by a descriptor in __thread_vars:
  *   { __tlv_bootstrap, 0, &storage }.
  * The storage stays in __thread_data / __thread_bss under a local
@@ -714,12 +724,7 @@ static bool AppendExternalReloc(MachOObject* macho, MachOSection* section,
 static bool PrepareThreadLocalDescriptors(MachOObject* macho) {
   size_t count = 0;
   for (size_t i = 0; i < macho->symbols.length; i++) {
-    MachOSymbol* sym = macho->symbols.value.p[i];
-    if (sym->is_undefined || sym->sect == 0) {
-      continue;
-    }
-    MachOSection* section = FindMachOSectionByIndex(macho, sym->sect);
-    if (section != NULL && SectionIsThreadLocalStorage(section)) {
+    if (SymbolIsThreadLocalVariable(macho, macho->symbols.value.p[i])) {
       count++;
     }
   }
@@ -734,11 +739,7 @@ static bool PrepareThreadLocalDescriptors(MachOObject* macho) {
   size_t n = 0;
   for (size_t i = 0; i < macho->symbols.length; i++) {
     MachOSymbol* sym = macho->symbols.value.p[i];
-    if (sym->is_undefined || sym->sect == 0) {
-      continue;
-    }
-    MachOSection* section = FindMachOSectionByIndex(macho, sym->sect);
-    if (section != NULL && SectionIsThreadLocalStorage(section)) {
+    if (SymbolIsThreadLocalVariable(macho, sym)) {
       originals[n++] = sym;
     }
   }

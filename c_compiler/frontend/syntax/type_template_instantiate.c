@@ -569,6 +569,10 @@ typedef struct {
 
 static Vector g_deferred_nested_member_bodies;
 static bool g_deferred_nested_member_bodies_inited;
+/* Class instantiations in progress; each flushes the bodies deferred during
+ * it.  A member body cloned after its class is complete (`Box<int>::Get()`
+ * instantiating its local class) must flush its own. */
+static int g_deferred_nested_member_body_scopes;
 
 static void EnsureDeferredNestedMemberBodies(void) {
   if (!g_deferred_nested_member_bodies_inited) {
@@ -582,13 +586,24 @@ static void EnsureDeferredNestedMemberBodies(void) {
  * `raw_hash_set::EmplaceDecomposable` is declared later in the enclosing
  * class; checking the nested body before that member exists reports a false
  * "not a member" error. */
-static void FlushDeferredNestedMemberBodies(TypeParser* parser,
-                                           size_t watermark) {
+static void FlushDeferredNestedMemberBodiesImpl(TypeParser* parser,
+                                               size_t watermark,
+                                               bool keep_closure_bodies) {
   EnsureDeferredNestedMemberBodies();
+  Vector kept;
+  VectorInit(&kept);
   size_t index = watermark;
   while (index < g_deferred_nested_member_bodies.length) {
     DeferredNestedMemberBody* body =
         g_deferred_nested_member_bodies.value.p[index];
+    if (keep_closure_bodies && body->owner != NULL &&
+        body->owner->tag_symbol != NULL &&
+        body->owner->tag_symbol->flags.invented) {
+      VectorAppend(&kept, body);
+      g_deferred_nested_member_bodies.value.p[index] = NULL;
+      index++;
+      continue;
+    }
     Struct* saved_source = parser->template_substitution_source;
     Struct* saved_target = parser->template_substitution_target;
     Struct* saved_enclosing_source =
@@ -618,6 +633,32 @@ static void FlushDeferredNestedMemberBodies(TypeParser* parser,
     index++;
   }
   g_deferred_nested_member_bodies.length = watermark;
+  for (size_t i = 0; i < kept.length; i++) {
+    VectorAppend(&g_deferred_nested_member_bodies, kept.value.p[i]);
+  }
+  VectorDestruct(&kept);
+}
+
+static void FlushDeferredNestedMemberBodies(TypeParser* parser,
+                                           size_t watermark) {
+  FlushDeferredNestedMemberBodiesImpl(parser, watermark,
+                                      /*keep_closure_bodies=*/false);
+}
+
+size_t TypeDeferredNestedMemberBodyMark(void) {
+  EnsureDeferredNestedMemberBodies();
+  return g_deferred_nested_member_bodies.length;
+}
+
+void TypeFlushDeferredNestedMemberBodiesOutsideClass(TypeParser* parser,
+                                                     size_t watermark) {
+  // Closure members are materialized by the lambda instantiation path; cloning
+  // a generic `operator()` against only the enclosing arguments leaves its
+  // `auto` parameters dependent.
+  if (g_deferred_nested_member_body_scopes == 0) {
+    FlushDeferredNestedMemberBodiesImpl(parser, watermark,
+                                        /*keep_closure_bodies=*/true);
+  }
 }
 
 static void DeferNestedMemberBody(Struct* owner, PendingMemberBody* pending,
@@ -3899,6 +3940,7 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
         FunctionTemplateBodyArguments(parser != NULL ? parser->syntax : NULL,
                                       template_definition, symbol,
                                       instantiation_args);
+    size_t deferred_nested_body_mark = TypeDeferredNestedMemberBodyMark();
     symbol->type->info.function.body =
         CloneTemplateFunctionBody(parser, template_definition->type,
                                   symbol->type, body_args);
@@ -3918,6 +3960,10 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
     ReanalyzeDeferredDependentAssignments(parser, symbol->type);
     if (deduction_only_body) {
       return symbol;
+    }
+    if (parser != NULL) {
+      TypeFlushDeferredNestedMemberBodiesOutsideClass(
+          parser, deferred_nested_body_mark);
     }
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;
@@ -11473,6 +11519,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   VectorInit(&pending_member_bodies);
   EnsureDeferredNestedMemberBodies();
   size_t deferred_nested_body_mark = g_deferred_nested_member_bodies.length;
+  g_deferred_nested_member_body_scopes++;
   // Nested classes whose deferred hidden friends must be materialized once the
   // enclosing instantiation is complete (parallel source/target vectors).
   Vector pending_nested_friend_sources;
@@ -11742,6 +11789,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
                                         pmb->substitution_source, body_args);
     free(pmb);
   }
+  g_deferred_nested_member_body_scopes--;
   FlushDeferredNestedMemberBodies(parser, deferred_nested_body_mark);
   EvaluateInstantiatedStaticAsserts(parser, source_struct, str,
                                     member_body_args);

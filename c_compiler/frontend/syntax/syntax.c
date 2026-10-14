@@ -4746,15 +4746,15 @@ ASTNode* SyntaxParseBracedInitializer(Syntax* syntax) {
 
 // Parses a symbol initializer.
 ASTNode* SyntaxParseInitializer(Syntax* syntax, Symbol* sym, Storage storage) {
-  if (StorageIs(storage, STO(extern))) {
+  /* `extern T x = v;` is a definition ([basic.def]/2, C11 6.9.2p1); C++ uses
+   * it to give a namespace-scope const object external linkage. */
+  if (StorageIs(storage, STO(extern)) && !CompilerIsCXX()) {
     SyntaxWarning(syntax, "extern-initializer", "extern with initializer");
   }
   if (StorageIs(storage, STO(typedef))) {
     SyntaxError(syntax, "typdefs can't have initializers");
   }
-  if (!StorageIs(storage, STO(extern))) {
-    sym->flags.is_defined = true;
-  }
+  sym->flags.is_defined = true;
   if (LexMatch(syntax->lex, TOK(lbrace))) {
     // Braced initializer.
     return ParseBracedInitializer(syntax);
@@ -8967,6 +8967,13 @@ static ASTNode* DeclareOrDefineFunction(Syntax* syntax,
       if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
         old_sym->type->info.function.is_inline = true;
       }
+    } else if (sym->type->info.function.is_inline &&
+               (StorageIs(sym->storage, STO(static)) ||
+                (old_sym != NULL &&
+                 StorageIs(old_sym->storage, STO(static))))) {
+      // C11 6.7.4p7 inline-definition rules apply only to external linkage;
+      // a `static inline` function is an ordinary internal definition.
+      sym->flags.is_inline_defn = true;
     }
     
     // Parse the function body.

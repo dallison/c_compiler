@@ -186,6 +186,12 @@ void CloneInstantiatedMemberFunctionBody(TypeParser* parser, Struct* owner,
                                          Symbol* template_definition,
                                          Struct* substitution_source,
                                          Vector* args);
+// Nested-class member bodies deferred until the enclosing class instantiation
+// completes.  A member body cloned outside any class instantiation flushes the
+// bodies deferred since `watermark` itself.
+size_t TypeDeferredNestedMemberBodyMark(void);
+void TypeFlushDeferredNestedMemberBodiesOutsideClass(TypeParser* parser,
+                                                     size_t watermark);
 void ReanalyzeDeferredDependentAssignments(TypeParser* parser, TypeRecord* type);
 
 TemplateArgument* NewEmptyPackTemplateArgument(TemplateParameterKind kind);
