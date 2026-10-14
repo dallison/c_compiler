@@ -802,10 +802,20 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   return ParseCXXNestedTypeSuffix(parser, result);
 }
 
-TypeRecord* FindInheritedInjectedClassType(Struct* owner, String* name) {
+// A class template pattern's dependent base can name the pattern itself
+// (`__make_index_sequence<N - 1, ...>`), so the base graph may be cyclic.
+static TypeRecord* FindInheritedInjectedClassTypeVisit(Struct* owner,
+                                                       String* name,
+                                                       Vector* visited) {
   if (owner == NULL || name == NULL) {
     return NULL;
   }
+  for (size_t i = 0; i < visited->length; i++) {
+    if (visited->value.p[i] == owner) {
+      return NULL;
+    }
+  }
+  VectorAppend(visited, owner);
   for (size_t i = 0; i < owner->bases.length; i++) {
     CXXBaseSpecifier* base = owner->bases.value.p[i];
     if (base == NULL || base->type == NULL ||
@@ -816,8 +826,8 @@ TypeRecord* FindInheritedInjectedClassType(Struct* owner, String* name) {
     if (CurrentClassNameMatchesTypeName(base->type->info.struct_info, name)) {
       return base->type;
     }
-    TypeRecord* found =
-        FindInheritedInjectedClassType(base->type->info.struct_info, name);
+    TypeRecord* found = FindInheritedInjectedClassTypeVisit(
+        base->type->info.struct_info, name, visited);
     if (found != NULL) {
       return found;
     }
@@ -827,6 +837,14 @@ TypeRecord* FindInheritedInjectedClassType(Struct* owner, String* name) {
     return owner->tag_symbol->type;
   }
   return NULL;
+}
+
+TypeRecord* FindInheritedInjectedClassType(Struct* owner, String* name) {
+  Vector visited;
+  VectorInit(&visited);
+  TypeRecord* found = FindInheritedInjectedClassTypeVisit(owner, name, &visited);
+  VectorDestruct(&visited);
+  return found;
 }
 
 Symbol* FindInheritedInjectedClassName(Struct* owner, String* name) {

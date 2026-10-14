@@ -3696,6 +3696,22 @@ static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
       }
     }
   }
+  // Instantiations are keyed by their completed arguments alone, so look one up
+  // before substituting the signature. Heavily reused helpers (`declval`,
+  // `forward`) are otherwise re-substituted, deep-copying their argument
+  // types, on every call.
+  Symbol* cached = FindFunctionTemplateInstantiation(templ, templ->type,
+                                                     completed_args);
+  if (cached != NULL) {
+    if (compiler->speculative_template_instantiation_depth == 0) {
+      EnsureFunctionTemplateInstantiationQueued(
+          parser, template_definition, cached, completed_args);
+    }
+    if (owns_completed_args) {
+      TemplateArgumentVectorDelete(completed_args);
+    }
+    return cached;
+  }
   // A declaration-only function template (`extern template` specializations,
   // `std::declval`) still gets a concrete signature so a call can be type-checked.
   // There is no body to clone; the symbol stays undefined for the linker.
