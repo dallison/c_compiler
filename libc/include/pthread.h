@@ -17,46 +17,26 @@
 extern "C" {
 #endif
 
-typedef unsigned long pthread_t;
-
 #if defined(__DAVECC_NATIVE_DARWIN__)
-// These calls reach libSystem, so the objects must have its sizes.
-typedef unsigned long pthread_key_t;
-
-typedef struct {
-  long __sig;
-  char __opaque[56];
-} pthread_mutex_t;
-
-typedef struct {
-  long __sig;
-  char __opaque[40];
-} pthread_cond_t;
-
-typedef struct {
-  long __sig;
-  char __opaque[8];
-} pthread_mutexattr_t;
-
-typedef struct {
-  long __sig;
-  char __opaque[8];
-} pthread_condattr_t;
-
-typedef struct {
-  long __sig;
-  char __opaque[56];
-} pthread_attr_t;
-
-typedef struct {
-  long __sig;
-  char __opaque[8];
-} pthread_once_t;
+// These calls reach libSystem, and SDK headers (<sys/signal.h> via
+// <sys/vsock.h>) declare the same names, so use the SDK's exact types.
+#include <sys/_pthread/_pthread_types.h>
+#include <sys/_pthread/_pthread_attr_t.h>
+#include <sys/_pthread/_pthread_cond_t.h>
+#include <sys/_pthread/_pthread_condattr_t.h>
+#include <sys/_pthread/_pthread_key_t.h>
+#include <sys/_pthread/_pthread_mutex_t.h>
+#include <sys/_pthread/_pthread_mutexattr_t.h>
+#include <sys/_pthread/_pthread_once_t.h>
+#include <sys/_pthread/_pthread_rwlock_t.h>
+#include <sys/_pthread/_pthread_rwlockattr_t.h>
+#include <sys/_pthread/_pthread_t.h>
 
 #define PTHREAD_MUTEX_INITIALIZER {0x32AAABA7, {0}}
 #define PTHREAD_COND_INITIALIZER {0x3CB0B1BB, {0}}
 #define PTHREAD_ONCE_INIT {0x30B1BCBA, {0}}
 #else
+typedef unsigned long pthread_t;
 typedef unsigned int pthread_key_t;
 
 typedef struct {
@@ -89,17 +69,7 @@ typedef struct {
 typedef int pthread_once_t;
 #endif
 
-#if defined(__DAVECC_NATIVE_DARWIN__)
-typedef struct {
-  long __sig;
-  char __opaque[192];
-} pthread_rwlock_t;
-
-typedef struct {
-  long __sig;
-  char __opaque[16];
-} pthread_rwlockattr_t;
-#else
+#if !defined(__DAVECC_NATIVE_DARWIN__)
 typedef struct {
   unsigned int state;
   int readers;

@@ -65,4 +65,36 @@
 #define __OSX_AVAILABLE_BUT_DEPRECATED(_osxIntro, _osxDep, _iosIntro, _iosDep)
 #endif
 
+// The spellings SDK headers use (from <AvailabilityInternal.h>).
+#ifndef __API_AVAILABLE
+#define __API_AVAILABLE(...)
+#define __API_DEPRECATED(...)
+#define __API_DEPRECATED_WITH_REPLACEMENT(...)
+#define __API_UNAVAILABLE(...)
+#define __API_AVAILABLE_BEGIN(...)
+#define __API_AVAILABLE_END
+#define __API_UNAVAILABLE_BEGIN(...)
+#define __API_UNAVAILABLE_END
+#define __SPI_AVAILABLE(...)
+#endif
+#ifndef __OSX_AVAILABLE
+#define __OSX_AVAILABLE(...)
+#define __IOS_AVAILABLE(...)
+#define __TVOS_AVAILABLE(...)
+#define __WATCHOS_AVAILABLE(...)
+#define __OSX_UNAVAILABLE
+#define __IOS_UNAVAILABLE
+#define __TVOS_UNAVAILABLE
+#define __WATCHOS_UNAVAILABLE
+#define __IOS_PROHIBITED
+#define __TVOS_PROHIBITED
+#define __WATCHOS_PROHIBITED
+#define __OSX_DEPRECATED(...)
+#define __IOS_DEPRECATED(...)
+#endif
+#ifndef __OSX_AVAILABLE_BUT_DEPRECATED_MSG
+#define __OSX_AVAILABLE_BUT_DEPRECATED_MSG(_osxIntro, _osxDep, _iosIntro, \
+                                           _iosDep, _msg)
+#endif
+
 #endif

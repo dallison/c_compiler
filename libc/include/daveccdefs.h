@@ -130,6 +130,8 @@ extern FILE* __last_file;
 #define __mode_t
 #if defined(__6502__)
 typedef char mode_t;
+#elif defined(__DAVECC_NATIVE_DARWIN__)
+typedef unsigned short mode_t;
 #else
 typedef int mode_t;
 #endif

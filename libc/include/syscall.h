@@ -150,6 +150,13 @@
 #define __DAVECC_HAS_TLS_THREAD_ERRNO__ 1
 #endif
 
+// libc/threads.c implements <threads.h> (and the address waits behind
+// atomic wait/notify) for guest threads, native Linux, and Darwin.
+#if defined(__DAVECC_HAS_GUEST_THREADS__) || \
+    defined(__DAVECC_HAS_NATIVE_THREADS__) || defined(__DAVECC_NATIVE_DARWIN__)
+#define __DAVECC_HAS_THREADS__ 1
+#endif
+
 #if defined(SYS_MONOTONIC_TIME) && defined(SYS_REALTIME_TIME)
 #define __DAVECC_HAS_HOST_CLOCK__ 1
 #endif

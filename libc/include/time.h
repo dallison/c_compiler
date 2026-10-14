@@ -13,6 +13,15 @@
 #define __STDC_VERSION_TIME_H__ 202311L
 #endif
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+// libSystem's clock ids differ (CLOCK_MONOTONIC is 6), and SDK headers such
+// as <sys/stat.h> already define struct timespec.
+#include_next <time.h>
+#define tm_gmtoff tm_gmtoff
+#define tm_zone tm_zone
+#define TM_ZONE tm_zone
+#else
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -120,5 +129,7 @@ extern clock_t   clock(void);
 #ifdef __cplusplus
 }
 #endif
+
+#endif  // __DAVECC_NATIVE_DARWIN__
 
 #endif /* time_h */

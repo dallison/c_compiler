@@ -115,12 +115,12 @@ class hive {
 
     constexpr __iterator& operator++() {
       size_type next = __index_ + 1;
-      if (next < __block_->__used) {
+      if (next < __block_->__used_slots) {
         size_type skip = __block_->__skip[next];
         if (skip != 0) {
           next += skip;
         }
-        if (next < __block_->__used) {
+        if (next < __block_->__used_slots) {
           __index_ = next;
           return *this;
         }
@@ -370,15 +370,15 @@ class hive {
 
     __block_base* last_base = __storage_.__end_.__prev;
     if (last_base != &__storage_.__end_ &&
-        last_base->__used < last_base->__capacity) {
+        last_base->__used_slots < last_base->__capacity) {
       __block* last = __as_block(last_base);
-      size_type index = last->__base.__used;
+      size_type index = last->__base.__used_slots;
       __alloc_traits::construct(__alloc_, &last->__elements[index],
                                 std::forward<Args>(args)...);
       last->__base.__skip[index] = 0;
       last->__base.__run_prev[index] = __npos;
       last->__base.__run_next[index] = __npos;
-      ++last->__base.__used;
+      ++last->__base.__used_slots;
       ++last->__base.__live;
       last->__base.__last = index;
       ++__storage_.__size_;
@@ -407,7 +407,7 @@ class hive {
     block->__base.__skip[0] = 0;
     block->__base.__run_prev[0] = __npos;
     block->__base.__run_next[0] = __npos;
-    block->__base.__used = 1;
+    block->__base.__used_slots = 1;
     block->__base.__live = 1;
     block->__base.__first = 0;
     block->__base.__last = 0;
@@ -1076,7 +1076,7 @@ class hive {
       __block* block = __as_block(base);
       const_pointer first = block->__elements;
       const_pointer last =
-          block->__elements + block->__base.__used;
+          block->__elements + block->__base.__used_slots;
       if (!before(value, first) && before(value, last)) {
         return iterator(base, static_cast<size_type>(value - first));
       }
@@ -1092,7 +1092,7 @@ class hive {
       __block* block = __as_block(base);
       const_pointer first = block->__elements;
       const_pointer last =
-          block->__elements + block->__base.__used;
+          block->__elements + block->__base.__used_slots;
       if (!before(value, first) && before(value, last)) {
         return const_iterator(base, static_cast<size_type>(value - first));
       }

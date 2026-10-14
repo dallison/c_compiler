@@ -6,10 +6,6 @@
 #include <stdlib.h>
 #include <time.h>
 
-enum { kDarwinClockRealtime = 0, kDarwinClockMonotonic = 6 };
-
-int clock_gettime(int clock_id, struct timespec* value);
-
 int __cxa_atexit(void (*destructor)(void*), void* object, void* dso);
 
 typedef struct {
@@ -83,7 +79,7 @@ void __davecc_darwin_eh_frame_range(const uint8_t** start,
 
 long long __davecc_monotonic_time_us(void) {
   struct timespec value;
-  if (clock_gettime(kDarwinClockMonotonic, &value) == 0) {
+  if (clock_gettime(CLOCK_MONOTONIC, &value) == 0) {
     return (long long)value.tv_sec * 1000000 + value.tv_nsec / 1000;
   }
   return 0;
@@ -91,7 +87,7 @@ long long __davecc_monotonic_time_us(void) {
 
 long long __davecc_realtime_time_us(void) {
   struct timespec value;
-  if (clock_gettime(kDarwinClockRealtime, &value) == 0) {
+  if (clock_gettime(CLOCK_REALTIME, &value) == 0) {
     return (long long)value.tv_sec * 1000000 + value.tv_nsec / 1000;
   }
   return (long long)time(NULL) * 1000000;

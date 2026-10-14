@@ -13,7 +13,7 @@
 #include <cstddef>
 #include <threads.h>
 
-#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#if !defined(__DAVECC_HAS_THREADS__)
 #error "<semaphore> is unavailable in this single-threaded target profile"
 #endif
 

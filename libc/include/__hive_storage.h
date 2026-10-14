@@ -17,7 +17,7 @@ struct __block_base {
   size_t* __run_prev;
   size_t* __run_next;
   size_t __capacity;
-  size_t __used;
+  size_t __used_slots;
   size_t __live;
   size_t __free_run;
   size_t __first;
@@ -36,7 +36,7 @@ struct __block_base {
         __run_prev(nullptr),
         __run_next(nullptr),
         __capacity(0),
-        __used(0),
+        __used_slots(0),
         __live(0),
         __free_run(static_cast<size_t>(-1)),
         __first(0),

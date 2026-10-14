@@ -52,7 +52,7 @@
 #define __cpp_lib_atomic_ref 201806L
 #endif
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_THREADS__)
 #define __cpp_lib_atomic_wait 201907L
 #define __cpp_lib_barrier 201907L
 #define __cpp_lib_jthread 201911L

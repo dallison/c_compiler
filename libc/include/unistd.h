@@ -25,17 +25,29 @@ typedef int pid_t;
 
 #ifndef __uid_t
 #define __uid_t
+#if defined(__DAVECC_NATIVE_DARWIN__)
+typedef unsigned int uid_t;
+#else
 typedef int uid_t;
+#endif
 #endif
 
 #ifndef __gid_t
 #define __gid_t
+#if defined(__DAVECC_NATIVE_DARWIN__)
+typedef unsigned int gid_t;
+#else
 typedef int gid_t;
+#endif
 #endif
 
 #ifndef __OFF_T
 #define __OFF_T
+#if defined(__DAVECC_NATIVE_DARWIN__)
+typedef long long off_t;
+#else
 typedef long off_t;
+#endif
 #endif
 
 #ifndef __SIZE_T
@@ -562,12 +574,16 @@ extern int    getpagesize(void);
 extern int    setgid(gid_t group);
 extern int    setuid(uid_t user);
 extern unsigned    sleep(unsigned seconds);
+extern unsigned    alarm(unsigned seconds);
 extern char *    ttyname(int fd);
 extern int    rmdir(const char *path);
 extern int    unlink(const char *path);
 extern ssize_t write(int fd, const void *buf, size_t size);
 extern long   sysconf(int name);
 extern char **environ;
+#if defined(__DAVECC_NATIVE_DARWIN__)
+extern int    gethostname(char *name, size_t size);
+#endif
 
 #ifdef __cplusplus
 }

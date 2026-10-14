@@ -18,7 +18,7 @@
 #include <syscall.h>
 #include <type_traits>
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_THREADS__)
 #include <threads.h>
 #endif
 
@@ -28,7 +28,7 @@
 #if __cplusplus >= 202002L
 #define __cpp_lib_atomic_ref 201806L
 #define __cpp_lib_atomic_value_initialization 201911L
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_THREADS__)
 #define __cpp_lib_atomic_wait 201907L
 #endif
 #endif
@@ -151,7 +151,7 @@ bool compare_exchange_word(T* object, T& expected, T desired, int success,
   return ok;
 }
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_THREADS__)
 template <class Atomic>
 void wait(const Atomic& object, const volatile void* address,
           typename Atomic::value_type old, memory_order order) noexcept {
@@ -357,7 +357,7 @@ struct atomic {
         expected, desired, order, __atomic_detail::failure_order(order));
   }
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_THREADS__)
   void wait(T old, memory_order order = memory_order_seq_cst) const noexcept {
     __atomic_detail::wait(*this, &__value, old, order);
   }
@@ -487,7 +487,7 @@ struct atomic {
         expected, desired, order, __atomic_detail::failure_order(order));
   }
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_THREADS__)
   void wait(T old,
             memory_order order = memory_order_seq_cst) const volatile noexcept {
     const_cast<const atomic*>(this)->wait(old, order);
@@ -668,7 +668,7 @@ struct atomic_ref {
         expected, desired, order, __atomic_detail::failure_order(order));
   }
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_THREADS__)
   void wait(T old, memory_order order = memory_order_seq_cst) const noexcept {
     __atomic_detail::wait(*this, __ptr, old, order);
   }
@@ -757,7 +757,7 @@ struct atomic_flag {
     __atomic_store_n(&__value, false, order);
   }
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_THREADS__)
   bool test(memory_order order = memory_order_seq_cst) const noexcept {
     return __atomic_load_n(&__value, order);
   }
@@ -1111,7 +1111,7 @@ inline void atomic_flag_clear_explicit(volatile atomic_flag* object,
   object->clear(order);
 }
 
-#if defined(__DAVECC_HAS_GUEST_THREADS__)
+#if defined(__DAVECC_HAS_THREADS__)
 template <class T>
 void atomic_wait(const atomic<T>* object,
                  typename atomic<T>::value_type old) noexcept {

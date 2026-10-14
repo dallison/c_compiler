@@ -11,6 +11,19 @@
 
 #include <stddef.h>
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+// Native code calls libSystem, and SDK headers expect every BSD type from the
+// SDK's <sys/types.h>.  DaveCC's other headers define the same types with
+// matching definitions; these guards stop them repeating the typedefs.
+#include_next <sys/types.h>
+#define __pid_t
+#define __uid_t
+#define __gid_t
+#define __OFF_T
+#define __SSIZE_T
+#define __mode_t
+#else
+
 #ifndef __pid_t
 #define __pid_t
 typedef int pid_t;
@@ -48,5 +61,7 @@ typedef char mode_t;
 typedef int mode_t;
 #endif
 #endif
+
+#endif /* __DAVECC_NATIVE_DARWIN__ */
 
 #endif /* sys_types_h */

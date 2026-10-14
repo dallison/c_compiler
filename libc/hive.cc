@@ -98,7 +98,7 @@ void __storage::__mark_erased(__block_base* block, size_t index) noexcept {
           ? block->__skip[index - 1]
           : 0;
   size_t right =
-      index + 1 < block->__used && block->__skip[index + 1] != 0
+      index + 1 < block->__used_slots && block->__skip[index + 1] != 0
           ? block->__skip[index + 1]
           : 0;
   size_t start = index - left;
@@ -134,7 +134,7 @@ void __storage::__consume_run_start(__block_base* block,
 }
 
 void __storage::__reset_as_reserved(__block_base* block) noexcept {
-  block->__used = 0;
+  block->__used_slots = 0;
   block->__live = 0;
   block->__free_run = __npos;
   block->__first = 0;

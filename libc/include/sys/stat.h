@@ -9,6 +9,11 @@
 #ifndef stat_h
 #define stat_h
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+// libSystem's stat/fstat fill in the SDK's struct stat layout.
+#include_next <sys/stat.h>
+#else
+
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -81,5 +86,7 @@ extern int mkdir(const char* path, unsigned short mode);
 #ifdef __cplusplus
 }
 #endif
+
+#endif  // __DAVECC_NATIVE_DARWIN__
 
 #endif /* stat_h */

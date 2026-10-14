@@ -14,7 +14,7 @@
 #include <mutex>
 #include <utility>
 
-#if !defined(__DAVECC_HAS_GUEST_THREADS__)
+#if !defined(__DAVECC_HAS_THREADS__)
 #error "<barrier> is unavailable in this single-threaded target profile"
 #endif
 

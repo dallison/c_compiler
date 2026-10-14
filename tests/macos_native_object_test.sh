@@ -140,6 +140,54 @@ int main() {
 }
 SRC
 
+cat >"$WORK/threads.cc" <<'SRC'
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <stop_token>
+#include <thread>
+int main() {
+  if (std::thread::hardware_concurrency() == 0) return 2;
+  std::mutex mutex;
+  std::condition_variable ready;
+  int count = 0;
+  std::thread::id main_id = std::this_thread::get_id();
+  std::thread::id worker_id;
+  std::thread worker([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::lock_guard<std::mutex> lock(mutex);
+    worker_id = std::this_thread::get_id();
+    count = 1;
+    ready.notify_one();
+  });
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    ready.wait(lock, [&] { return count == 1; });
+  }
+  worker.join();
+  if (worker_id == main_id) return 3;
+
+  std::atomic<int> flag{0};
+  std::jthread waiter([&](std::stop_token stop) {
+    flag.wait(0);
+    while (!stop.stop_requested()) std::this_thread::yield();
+  });
+  flag.store(1);
+  flag.notify_one();
+  waiter.request_stop();
+  waiter.join();
+  return 0;
+}
+SRC
+
+"$DAVECC" -target aarch64-apple-darwin-davecc -std=c++20 \
+  "$WORK/threads.cc" -o "$WORK/threads"
+if ! "$WORK/threads"; then
+  echo "Darwin threads program failed" >&2
+  exit 1
+fi
+
 "$DAVECC" -target aarch64-apple-darwin-davecc -std=c++20 \
   "$WORK/fs.cc" -o "$WORK/fs"
 if ! "$WORK/fs"; then

@@ -837,34 +837,44 @@ void PreprocessorReset(Preprocessor* p) {
   p->counter = 0;
 }
 
-void PreprocessorAddUserIncludePath(Preprocessor* p, const char* path) {
-  // Ensure only one entry with this path.
-  for (size_t i = 0; i < p->user_include_paths.length; i++) {
-    if (StringEqual(p->user_include_paths.value.p[i], path)) {
-      return;
+// True when `paths` already names the directory `path`, however spelled.  A
+// second spelling (`libc/include` and the driver's absolute default) would make
+// #include_next find the same header again instead of the next directory.
+static bool IncludePathListContains(Vector* paths, const char* path) {
+  char wanted[PATH_MAX];
+  bool have_wanted = realpath(path, wanted) != NULL;
+  for (size_t i = 0; i < paths->length; i++) {
+    String* existing = paths->value.p[i];
+    if (StringEqual(existing, path)) {
+      return true;
     }
+    char resolved[PATH_MAX];
+    if (have_wanted && realpath(existing->value, resolved) != NULL &&
+        strcmp(resolved, wanted) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void PreprocessorAddUserIncludePath(Preprocessor* p, const char* path) {
+  if (IncludePathListContains(&p->user_include_paths, path)) {
+    return;
   }
   VectorAppend(&p->user_include_paths, NewString(path));
 }
 
 void PreprocessorAddSystemIncludePath(Preprocessor* p, const char* path) {
-  // Ensure only one entry with this path.
-  for (size_t i = 0; i < p->system_include_paths.length; i++) {
-    if (StringEqual(p->system_include_paths.value.p[i], path)) {
-      return;
-    }
+  if (IncludePathListContains(&p->system_include_paths, path)) {
+    return;
   }
   VectorAppend(&p->system_include_paths, NewString(path));
 }
 
 void PreprocessorInsertSystemIncludePath(Preprocessor* p, int index,
                                          const char* path) {
-
-  // Ensure only one entry with this path.
-  for (size_t i = 0; i < p->system_include_paths.length; i++) {
-    if (StringEqual(p->system_include_paths.value.p[i], path)) {
-      return;
-    }
+  if (IncludePathListContains(&p->system_include_paths, path)) {
+    return;
   }
   if (index >= (int)p->system_include_paths.length) {
     VectorAppend(&p->system_include_paths, NewString(path));

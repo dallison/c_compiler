@@ -1,6 +1,9 @@
 #ifndef _UCONTEXT_H
 #define _UCONTEXT_H
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+#include_next <ucontext.h>
+#else
 #include <signal.h>
 
 #if defined(__x86_64__)
@@ -53,5 +56,6 @@ typedef struct ucontext_t {
   sigset_t uc_sigmask;
 } ucontext_t;
 #endif
+#endif  // __DAVECC_NATIVE_DARWIN__
 
 #endif

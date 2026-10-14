@@ -6,6 +6,12 @@
 #ifndef __davecc_signal_h__
 #define __davecc_signal_h__
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+// libSystem implements the signal API; its siginfo_t, stack_t, and sigaction
+// layouts are Darwin's own.
+#include_next <signal.h>
+#else
+
 typedef int sig_atomic_t;
 
 #define SIG_DFL ((void (*)(int))0)
@@ -32,16 +38,6 @@ typedef int sig_atomic_t;
 #define SIGCONT 18
 #define SIGSTOP 19
 #define SIGTSTP 20
-#elif defined(__DAVECC_NATIVE_DARWIN__)
-#define SIGINT 2
-#define SIGILL 4
-#define SIGTRAP 5
-#define SIGABRT 6
-#define SIGFPE 8
-#define SIGBUS 10
-#define SIGSEGV 11
-#define SIGALRM 14
-#define SIGTERM 15
 #else
 #define SIGABRT 1
 #define SIGFPE 2
@@ -123,5 +119,7 @@ unsigned alarm(unsigned seconds);
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* __DAVECC_NATIVE_DARWIN__ */
 
 #endif /* __davecc_signal_h__ */

@@ -3,6 +3,10 @@
 
 #include <sys/socket.h>
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+#include_next <netdb.h>
+#else
+
 struct addrinfo {
   int ai_family;
   int ai_socktype;
@@ -24,5 +28,7 @@ const char* gai_strerror(int errcode);
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* __DAVECC_NATIVE_DARWIN__ */
 
 #endif

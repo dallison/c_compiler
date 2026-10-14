@@ -29,7 +29,10 @@ using ::localtime;
 using ::strftime;
 using ::timespec;
 using ::timespec_get;
+#if !defined(__DAVECC_NATIVE_DARWIN__)
+// The macOS SDK does not declare C23's timespec_getres.
 using ::timespec_getres;
+#endif
 using ::asctime_r;
 using ::ctime_r;
 using ::gmtime_r;

@@ -3,4 +3,8 @@
 
 #include <sys/socket.h>
 
+#if defined(__DAVECC_NATIVE_DARWIN__)
+#include_next <arpa/inet.h>
+#endif
+
 #endif

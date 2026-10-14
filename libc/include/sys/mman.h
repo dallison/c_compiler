@@ -14,7 +14,11 @@
 
 #ifndef __OFF_T
 #define __OFF_T
+#if defined(__DAVECC_NATIVE_DARWIN__)
+typedef long long off_t;
+#else
 typedef long off_t;
+#endif
 #endif
 
 #define PROT_READ       0x1             /* Page can be read.  */
