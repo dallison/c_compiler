@@ -1994,6 +1994,32 @@ static bool DerivedConstructorHidesInherited(StructMember* derived,
   return MemberExplicitParametersEqual(derived, inherited);
 }
 
+/* [over.match.funcs]/9: a constructor inherited from C whose first parameter
+ * is a reference to C (its copy or move constructor) is not a candidate for a
+ * single argument.  `Checked(Cmp)` must build the derived object instead of
+ * an inherited `Cmp(Cmp&&)` initializing only the base subobject. */
+static bool InheritedConstructorExcludedForSingleArgument(
+    StructMember* candidate, VectorASTNode* node) {
+  if (!candidate->is_using_declaration || candidate->symbol == NULL ||
+      candidate->symbol->type == NULL ||
+      !TypeIsFunction(candidate->symbol->type) || node->children == NULL ||
+      node->children->length != 1) {
+    return false;
+  }
+  FunctionInfo* info = &candidate->symbol->type->info.function;
+  if (!info->is_constructor || info->prototype.length < 2) {
+    return false;
+  }
+  Symbol* first = info->prototype.value.p[1];
+  if (first == NULL || first->type == NULL || !TypeIsReference(first->type)) {
+    return false;
+  }
+  TypeRecord* referenced = first->type->next;
+  return referenced != NULL && TypeIsStructOrUnion(referenced) &&
+         referenced->info.struct_info != NULL &&
+         referenced->info.struct_info == info->cxx_member_owner;
+}
+
 static bool CallHasBracedInitActual(VectorASTNode* node) {
   if (node == NULL || node->children == NULL) {
     return false;
@@ -2052,7 +2078,7 @@ static void ExpandBracedConstructorCallActuals(StructMember* first,
           ASTNodeMove(((ExpressionInitializerASTNode*)initializer)->expr);
       ASTNodeDelete(initializer);
     }
-    if (element != NULL && element->type == NULL &&
+    if (element != NULL && (element->flags & kASTAnalyzed) == 0 &&
         element->op != AST_OP(braced_init)) {
       element = AnalyzeExpression(element);
     }
@@ -2125,6 +2151,9 @@ static void RankNonTemplateMemberCandidates(
     }
     if (only_initializer_list_constructors &&
         !CandidateIsInitializerListConstructor(candidate)) {
+      continue;
+    }
+    if (InheritedConstructorExcludedForSingleArgument(candidate, node)) {
       continue;
     }
     int score = MemberOverloadCallScore(candidate, node, member_access, true);
