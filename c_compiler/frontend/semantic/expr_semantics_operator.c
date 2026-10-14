@@ -2052,6 +2052,11 @@ ASTNode* TryRewriteComparisonOperator(BinaryASTNode* node) {
     bool reverse_viable =
         !forward_viable &&
         BinaryOperatorViableForOperands(node->right, node->left, "operator<=>");
+    // Without an `operator<=>` the built-in candidates apply, reached through
+    // a conversion function (`atomic<int> n; n < 3`).
+    if (!forward_viable && !reverse_viable) {
+      return NULL;
+    }
     ASTNode* left = ASTNodeMove(node->left);
     ASTNode* right = ASTNodeMove(node->right);
     ASTNode* zero = NewIntConstantASTNode(

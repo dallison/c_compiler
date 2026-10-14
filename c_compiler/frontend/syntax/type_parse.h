@@ -93,6 +93,9 @@ typedef struct {
   // `typename` may be unqualified (including a simple-template-id), unlike an
   // elaborated typename-specifier which requires a qualified dependent name.
   bool typename_allows_unqualified;
+  // Parsing the type-id of an alias-declaration: in `using A = struct S;` the
+  // `;` ends the alias, so `struct S` names S rather than declaring it.
+  bool parsing_type_id;
   // While parsing a class body, points at a Vector<DeferredInlineBody*> owned by
   // the active ParseStructMembers frame.  Inline member function bodies are not
   // parsed where they appear; instead the body's macro-expanded text is captured

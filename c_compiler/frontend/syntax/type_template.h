@@ -163,6 +163,15 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(struct Syntax* syntax,
 // Recover the template-argument list describing a class-template specialization
 // type, including from the tag symbol when the type record itself omits them.
 Vector* TypeSpecializationTemplateArguments(TypeRecord* type);
+// True when a type argument in `args` (looking through pointers, references,
+// packs and nested specializations) names `str`.
+bool TypeTemplateArgumentsNameStruct(Vector* args, struct Struct* str);
+// True when a type argument in `args` directly names a forward-declared class.
+bool TypeTemplateArgumentsNameIncompleteClass(Vector* args);
+// The class-template primary (looking through pointers and references) that
+// `function` returns with concrete arguments, because the specialization was
+// deferred while an argument class was incomplete; NULL otherwise.
+TypeRecord* TypeDeferredReturnSpecialization(TypeRecord* function);
 // Instantiate a variable template's initializer with concrete template
 // arguments and constant-fold it to an integer.  Returns true on success.
 bool TypeInstantiateVariableTemplateConstant(struct Syntax* syntax,

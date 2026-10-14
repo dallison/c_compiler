@@ -32,6 +32,14 @@ void UpdateStructSize(Struct* str, TypeRecord* member_type, bool is_union);
 void FinalizeStructAlignment(Struct* str);
 void StructApplyLayoutAttributes(Struct* str, Vector* attrs);
 bool RelayoutStruct(Struct* str);
+// Re-lays out class template specializations instantiated while one of their
+// data members' class types was incomplete, once those types are complete.
+void TypeRelayoutStructsAfterClassCompletion(void);
+// A call needs the return type of `function` complete.  If it is a member
+// function whose return type still waits on a forward-declared class (a pimpl
+// `unique_ptr<Impl>`), instantiate it now.
+void TypeMaterializePendingMemberReturnType(struct Syntax* syntax,
+                                            TypeRecord* function);
 void StructAddSyntheticMember(Struct* str, StructMember* member);
 
 void LayoutCXXBaseSpecifiers(Struct* str);

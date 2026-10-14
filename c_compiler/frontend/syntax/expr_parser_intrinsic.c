@@ -49,6 +49,7 @@ static struct Intrinsic {
     {"__builtin_FUNCTION", AST_OP(builtin_source_function), 0},
     {"__builtin_LINE", AST_OP(builtin_source_line), 0},
     {"__builtin_PRETTY_FUNCTION", AST_OP(builtin_source_pretty_function), 0},
+    {"__builtin_alloca", AST_OP(builtin_alloca), 1},
     {"__builtin_bswap16", AST_OP(builtin_bswap), 1},
     {"__builtin_bswap32", AST_OP(builtin_bswap), 1},
     {"__builtin_bswap64", AST_OP(builtin_bswap), 1},

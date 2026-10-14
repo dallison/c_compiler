@@ -62,8 +62,8 @@ static int64_t CXXFoldProbeConstructTypeFromArgs(Vector* template_args);
 static IdentifierASTNode* CXXCallCalleeIdentifier(ASTNode* callee);
 static Vector* CXXSubstituteTemplateArgumentsForFold(Vector* template_arguments);
 static bool CXXTypeNamesStdTuple(TypeRecord* type);
-static BracedInitializerASTNode* CXXTupleArgumentBracedInit(ASTNode* arg);
-static ASTNode* CXXBracedInitElementExpr(BracedInitializerASTNode* braced, size_t index);
+static Vector* CXXTupleArgumentElements(ASTNode* arg);
+static ASTNode* CXXTupleElementExpr(Vector* elements, size_t index);
 static ASTNode* CXXTryFoldGetConstructTypeCall(VectorASTNode* call);
 static TypeRecord* CXXVariableTemplateValueType(TypeRecord* type);
 static ASTNode* CXXVariableTemplateExpressionSurface(ASTNode* expr);
@@ -862,8 +862,34 @@ static bool CXXTypeNamesStdTuple(TypeRecord* type) {
   return false;
 }
 
-// Contract: Peels wrappers to braced-init tuple CTAD argument; no mutation.
-static BracedInitializerASTNode* CXXTupleArgumentBracedInit(ASTNode* arg) {
+static bool CXXTupleElementIsPure(ASTNode* element) {
+  while (element != NULL && (element->op == AST_OP(expr_init) ||
+                             element->op == AST_OP(cast))) {
+    element = element->op == AST_OP(cast)
+                  ? ((CastASTNode*)element)->expr
+                  : ((ExpressionInitializerASTNode*)element)->expr;
+  }
+  if (element == NULL) {
+    return false;
+  }
+  switch (element->op) {
+    case AST_OP(member_ptr):
+    case AST_OP(number):
+    case AST_OP(identifier):
+      return true;
+    case AST_OP(address): {
+      ASTNode* sub = ((UnaryASTNode*)element)->sub;
+      return sub != NULL && sub->op == AST_OP(identifier);
+    }
+    default:
+      return false;
+  }
+}
+
+// Contract: Peels wrappers to the element expressions of a tuple argument:
+// a braced-init list, or the arguments of a tuple constructor call (CTAD
+// through `tuple(Types...)`).  Returns a vector owned by the AST.
+static Vector* CXXTupleArgumentElements(ASTNode* arg) {
   while (arg != NULL && arg->op == AST_OP(cast)) {
     arg = ((CastASTNode*)arg)->expr;
   }
@@ -871,7 +897,7 @@ static BracedInitializerASTNode* CXXTupleArgumentBracedInit(ASTNode* arg) {
     return NULL;
   }
   if (arg->op == AST_OP(expr_init)) {
-    return CXXTupleArgumentBracedInit(
+    return CXXTupleArgumentElements(
         ((ExpressionInitializerASTNode*)arg)->expr);
   }
   if (arg->op == AST_OP(call)) {
@@ -880,34 +906,43 @@ static BracedInitializerASTNode* CXXTupleArgumentBracedInit(ASTNode* arg) {
     if (ctor_type == NULL && call->left != NULL) {
       ctor_type = call->left->type;
     }
-    if (CXXTypeNamesStdTuple(ctor_type) && call->children != NULL &&
-        call->children->length == 1) {
-      return CXXTupleArgumentBracedInit(call->children->value.p[0]);
+    if (CXXTypeNamesStdTuple(ctor_type) && call->children != NULL) {
+      if (call->children->length == 1) {
+        Vector* nested = CXXTupleArgumentElements(call->children->value.p[0]);
+        if (nested != NULL) {
+          return nested;
+        }
+      }
+      // Folding drops the other elements, so they must not have effects.
+      for (size_t i = 0; i < call->children->length; i++) {
+        if (!CXXTupleElementIsPure(call->children->value.p[i])) {
+          return NULL;
+        }
+      }
+      return call->children;
     }
   }
   if (arg->op == AST_OP(braced_init)) {
-    return (BracedInitializerASTNode*)arg;
+    return ((BracedInitializerASTNode*)arg)->initializers;
   }
   if (arg->op == AST_OP(compound_literal)) {
     ASTNode* init = ((CompoundLiteralASTNode*)arg)->initializer;
     if (init != NULL && init->op == AST_OP(braced_init)) {
-      return (BracedInitializerASTNode*)init;
+      return ((BracedInitializerASTNode*)init)->initializers;
     }
   }
   if (arg->op == AST_OP(comma)) {
-    return CXXTupleArgumentBracedInit(((BinaryASTNode*)arg)->right);
+    return CXXTupleArgumentElements(((BinaryASTNode*)arg)->right);
   }
   return NULL;
 }
 
-// Contract: Returns braced-init element expression; read-only on braced node.
-static ASTNode* CXXBracedInitElementExpr(BracedInitializerASTNode* braced,
-                                        size_t index) {
-  if (braced == NULL || braced->initializers == NULL ||
-      index >= braced->initializers->length) {
+// Contract: Returns a tuple element expression; read-only on the vector.
+static ASTNode* CXXTupleElementExpr(Vector* elements, size_t index) {
+  if (elements == NULL || index >= elements->length) {
     return NULL;
   }
-  ASTNode* element = braced->initializers->value.p[index];
+  ASTNode* element = elements->value.p[index];
   if (element != NULL && element->op == AST_OP(expr_init)) {
     return ((ExpressionInitializerASTNode*)element)->expr;
   }
@@ -959,8 +994,8 @@ ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
   if (tuple_arg != NULL && tuple_arg->op == AST_OP(expr_init)) {
     tuple_arg = ((ExpressionInitializerASTNode*)tuple_arg)->expr;
   }
-  BracedInitializerASTNode* braced = CXXTupleArgumentBracedInit(tuple_arg);
-  if (braced == NULL) {
+  Vector* elements = CXXTupleArgumentElements(tuple_arg);
+  if (elements == NULL) {
     if (type_key != NULL) {
       TypeRecordDelete(type_key);
     }
@@ -971,8 +1006,8 @@ ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
   }
   ASTNode* element = NULL;
   if (type_key != NULL) {
-    for (size_t i = 0; i < braced->initializers->length; i++) {
-      ASTNode* candidate = CXXBracedInitElementExpr(braced, i);
+    for (size_t i = 0; i < elements->length; i++) {
+      ASTNode* candidate = CXXTupleElementExpr(elements, i);
       if (candidate == NULL) {
         continue;
       }
@@ -989,7 +1024,7 @@ ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
     }
     TypeRecordDelete(type_key);
   } else if (index != (size_t)-1) {
-    element = CXXBracedInitElementExpr(braced, index);
+    element = CXXTupleElementExpr(elements, index);
   }
   VectorDeleteWithContents(resolved,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -1135,7 +1170,7 @@ static TypeRecord* CXXTupleTypeForSingleElementBracedInit(
   if (braced->base.type != NULL && CXXTypeNamesStdTuple(braced->base.type)) {
     return TypeRecordCopy(braced->base.type);
   }
-  ASTNode* element = CXXBracedInitElementExpr(braced, 0);
+  ASTNode* element = CXXTupleElementExpr(braced->initializers, 0);
   if (element == NULL) {
     return NULL;
   }

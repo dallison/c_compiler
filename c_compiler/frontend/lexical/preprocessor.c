@@ -4969,6 +4969,52 @@ static void ExpandVaOpt(Preprocessor* p, String* rep, bool has_va_args) {
 
 // Process any macros and arguments in the replacement text. This also
 // handles the # operator.
+// An argument macro-replaced for parameter substitution.  Each argument is
+// replaced once per invocation and reused at every occurrence of its
+// parameter, so `__COUNTER__` in an argument yields a single value.
+static MacroExpansion* ExpansionWithAncestor(MacroExpansion* child,
+                                             MacroExpansion* ancestor);
+
+typedef struct ExpandedMacroArgument {
+  const String* actual;
+  String tokens;
+  Vector expansions;
+} ExpandedMacroArgument;
+
+static ExpandedMacroArgument* ExpandMacroArgumentOnce(Preprocessor* p,
+                                                      Vector* expanded_args,
+                                                      String* actual,
+                                                      MacroExpansion* expansion) {
+  for (size_t i = 0; i < expanded_args->length; i++) {
+    ExpandedMacroArgument* entry = VectorGet(expanded_args, i);
+    if (entry->actual == actual) {
+      return entry;
+    }
+  }
+  ExpandedMacroArgument* entry = malloc(sizeof(ExpandedMacroArgument));
+  entry->actual = actual;
+  StringInit(&entry->tokens, actual->value);
+  InitTokenExpansions(&entry->expansions, &entry->tokens, NULL);
+  ReplaceMacrosInTokenizedLine(p, &entry->tokens, &entry->expansions, true);
+  for (size_t i = 0; i < entry->expansions.length; i++) {
+    VectorSet(&entry->expansions, i,
+              ExpansionWithAncestor(VectorGet(&entry->expansions, i),
+                                    expansion));
+  }
+  VectorAppend(expanded_args, entry);
+  return entry;
+}
+
+static void ExpandedMacroArgumentsDestruct(Vector* expanded_args) {
+  for (size_t i = 0; i < expanded_args->length; i++) {
+    ExpandedMacroArgument* entry = VectorGet(expanded_args, i);
+    VectorDestruct(&entry->expansions);
+    StringDestruct(&entry->tokens);
+    free(entry);
+  }
+  VectorDestruct(expanded_args);
+}
+
 static void ProcessFunctionLikeReplacementText(Preprocessor* p,
                                    Macro* macro,
                                    TokenIterator* ti,
@@ -5008,6 +5054,8 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
   // Iterator for passing over replacement text (tokens).
   TokenIterator rep_ti;
   TokenIteratorInit(&rep_ti, p, &rep);
+  Vector expanded_args;
+  VectorInit(&expanded_args);
   
   // Replace all arguments in replacement text by their actual value.
   while (CurrentToken(&rep_ti) != PPTOK(end)) {
@@ -5022,8 +5070,14 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
               StringAppendChar(&placemarker, PPTOK(placemarker));
               ReplaceCurrentToken(&rep_ti, &placemarker);
               StringDestruct(&placemarker);
-            } else {
+            } else if (PrevToken(&rep_ti) == PPTOK(hashhash) ||
+                       NextToken(&rep_ti) == PPTOK(hashhash)) {
               ReplaceCurrentToken(&rep_ti, va_args);
+            } else {
+              ExpandedMacroArgument* expanded = ExpandMacroArgumentOnce(
+                  p, &expanded_args, va_args, expansion);
+              ReplaceCurrentTokenWithExpansions(&rep_ti, &expanded->tokens,
+                                                &expanded->expansions);
             }
           } else {
             PreprocessorError(p, "Use of __VA_ARGS__ outside of varargs macro");
@@ -5056,22 +5110,10 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
                 // are not expanded.
                 ReplaceCurrentToken(&rep_ti, actual);
               } else {
-                // Expand any macros in the actual value.
-                String expanded_actual;
-                StringInit(&expanded_actual, actual->value);
-                Vector actual_map;
-                InitTokenExpansions(&actual_map, &expanded_actual, NULL);
-                ReplaceMacrosInTokenizedLine(p, &expanded_actual, &actual_map,
-                                             true);
-                for (size_t i = 0; i < actual_map.length; i++) {
-                  VectorSet(&actual_map, i,
-                            ExpansionWithAncestor(VectorGet(&actual_map, i),
-                                                  expansion));
-                }
-                ReplaceCurrentTokenWithExpansions(&rep_ti, &expanded_actual,
-                                                  &actual_map);
-                VectorDestruct(&actual_map);
-                StringDestruct(&expanded_actual);
+                ExpandedMacroArgument* expanded = ExpandMacroArgumentOnce(
+                    p, &expanded_args, actual, expansion);
+                ReplaceCurrentTokenWithExpansions(&rep_ti, &expanded->tokens,
+                                                  &expanded->expansions);
               }
             }
           }
@@ -5133,6 +5175,7 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
    }
     MoveToNextToken(&rep_ti);
   }
+  ExpandedMacroArgumentsDestruct(&expanded_args);
   
   // Paste tokens either side of ## in replacement text.
   PasteTokens(p, &rep);

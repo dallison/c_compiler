@@ -5668,6 +5668,37 @@ static void SubstituteClonedMemberTemplateArguments(
   }
 }
 
+/* `u.operator Box<T>()` was registered under the dependent spelling of its
+ * conversion type; respell it from the substituted type so lookup finds the
+ * specialization's `operator Box<int>`. */
+static void RespellClonedConversionMemberName(TemplateFunctionBodyClone* clone,
+                                              ASTNode* node) {
+  if (node->op != AST_OP(string)) {
+    return;
+  }
+  ConstantASTNode* name = (ConstantASTNode*)node;
+  if (name->conversion_type == NULL || name->value.string == NULL) {
+    return;
+  }
+  TypeRecord* substituted =
+      SubstituteTemplateBodyType(clone, name->conversion_type);
+  if (substituted == NULL || substituted == name->conversion_type) {
+    return;
+  }
+  if (TypeContainsTemplateParameter(substituted)) {
+    TypeRecordIncRef(substituted);
+    TypeRecordDelete(name->conversion_type);
+    name->conversion_type = substituted;
+    return;
+  }
+  String spelling;
+  ConversionOperatorName(substituted, &spelling);
+  StringSet(name->value.string, spelling.value);
+  StringDestruct(&spelling);
+  TypeRecordDelete(name->conversion_type);
+  name->conversion_type = NULL;
+}
+
 /* A dependent member access `recv.name` / `recv->name` whose member is still
  * an unresolved string (the receiver was dependent at definition time) must
  * be rebound after substitution.  Clear analyzed state and the placeholder
@@ -6651,6 +6682,21 @@ static void FoldClonedOwnerMemberTemplateArguments(
   }
 }
 
+// FunctionTemplateBodyArguments prepends the enclosing class arguments when a
+// member template is cloned from the class pattern, whose own parameters keep
+// their absolute indices.
+static bool CloneArgumentsIncludeEnclosingPrefix(
+    TemplateFunctionBodyClone* clone) {
+  size_t own_parameter_count =
+      clone->from_func != NULL && TypeIsFunction(clone->from_func)
+          ? clone->from_func->info.function.template_parameters.length
+          : 0;
+  return clone->args != NULL &&
+         clone->args->length >=
+             (size_t)clone->rebase_template_parameter_base +
+                 own_parameter_count;
+}
+
 /* Substitute (or, inside a pack expansion, rebase) explicit template
  * arguments on an identifier.  A now-concrete variable template is folded
  * to a constant when possible. */
@@ -6669,17 +6715,14 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
       bool enclosing_only =
           clone->parser != NULL &&
           clone->parser->substituting_enclosing_template_arguments_only;
-      size_t own_parameter_count =
-          clone->from_func != NULL && TypeIsFunction(clone->from_func)
-              ? clone->from_func->info.function.template_parameters.length
-              : 0;
-      bool args_are_absolute =
-          clone->args != NULL &&
-          clone->args->length >=
-              (size_t)clone->rebase_template_parameter_base +
-                  own_parameter_count;
+      bool args_are_absolute = CloneArgumentsIncludeEnclosingPrefix(clone);
+      // With absolute arguments only a pack awaiting a fold's per-element
+      // expansion is left dependent, and that expansion reads it at its
+      // absolute index too.
       int substitution_rebase_base =
-          clone->rebase_template_parameter_base;
+          !enclosing_only && args_are_absolute
+              ? 0
+              : clone->rebase_template_parameter_base;
       if (!enclosing_only && clone->rebase_template_parameter_base > 0 &&
           !args_are_absolute) {
         rebased_arguments =
@@ -6762,7 +6805,8 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
         id->symbol = id->symbol->type->info.function.template_origin;
       }
     } else if (id->template_arguments != NULL &&
-               clone->rebase_template_parameter_base > 0) {
+               clone->rebase_template_parameter_base > 0 &&
+               !CloneArgumentsIncludeEnclosingPrefix(clone)) {
       // The full substitution above is deferred when this template-id is inside
       // a pack expansion (e.g. `std::forward<Args>(args)...`), because the pack
       // elements are not known until the pattern is expanded later. However, if
@@ -6772,6 +6816,8 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
       // parameter count now. Otherwise the deferred per-element expansion, which
       // runs against the member's own zero-based arguments, would look the pack
       // up at the wrong (enclosing-offset) index and fail to substitute it.
+      // Arguments that still carry the enclosing prefix are read at the
+      // absolute index instead.
       for (size_t i = 0; i < id->template_arguments->length; i++) {
         RebaseTemplateArgumentParameterIndices(
             id->template_arguments->value.p[i],
@@ -7125,6 +7171,15 @@ static bool RetargetUnownedFunctionTemplateIdentifier(ASTNode* node) {
   return false;
 }
 
+static String* SpineTemplateParameterName(TypeRecord* type) {
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (t->template_parameter_index >= 0) {
+      return t->template_parameter_name;
+    }
+  }
+  return NULL;
+}
+
 /* Repair and substitute a cloned cast:
  *  - fix a mismatched template-parameter index inherited from a formal;
  *  - restore a truncated imported reference-cast from the function return
@@ -7175,8 +7230,16 @@ static bool CloneCastInTemplateBody(
             formal != NULL
                 ? FirstTemplateParameterIndexInType(formal->type) : -1;
         int cast_index = FirstTemplateParameterIndexInType(cast->cast_type);
+        // Only a stale index for the formal's own parameter is repaired;
+        // `static_cast<const U*>(p)` with `O* p` names a different one.
+        String* formal_name =
+            formal != NULL ? SpineTemplateParameterName(formal->type) : NULL;
+        String* cast_name = SpineTemplateParameterName(cast->cast_type);
+        bool same_parameter =
+            formal_name == NULL || cast_name == NULL ||
+            strcmp(formal_name->value, cast_name->value) == 0;
         if (!cast_matches_declared_return && formal_index >= 0 &&
-            cast_index >= 0 &&
+            cast_index >= 0 && same_parameter &&
             formal_index != cast_index) {
           TypeRecord* repaired = TypeRecordCloneSpine(cast->cast_type);
           TypeRecordDelete(cast->cast_type);
@@ -7589,6 +7652,7 @@ ASTNode* CloneTemplateFunctionBodyNode(ASTNode* node, void* data) {
   ExpandBuiltinTypeTraitPackArgs(clone, node);
   RemapClonedStructMember(clone, node);
   SubstituteClonedMemberTemplateArguments(clone, node);
+  RespellClonedConversionMemberName(clone, node);
   RebindClonedConcreteMemberAccess(clone, node);
   ClearDependentUnresolvedMemberAccess(node);
   rewritten = CloneSizeofAlignofInTemplateBody(clone, node);
@@ -7989,6 +8053,29 @@ static void RestoreSymbolOverloadLinks(Vector* snapshots) {
   VectorDestructWithContents(snapshots, free, /*free_element=*/false);
 }
 
+/* True if `actual` initializes the already-selected constructor's `formal`
+ * as is.  An actual of type U binds a U& or U&& formal directly (a
+ * forwarding constructor template deduced for an lvalue `int`).  References
+ * to the constructor's own class are excluded so a same-class copy still
+ * recovers the copy or move constructor. */
+static bool ClonedConstructorActualMatchesFormal(ASTNode* actual,
+                                                 TypeRecord* formal_type,
+                                                 Struct* ctor_owner) {
+  if (TypeAssignmentCompatible(actual->type, formal_type)) {
+    return true;
+  }
+  if (!TypeIsReference(formal_type) || formal_type->next == NULL) {
+    return false;
+  }
+  TypeRecord* referenced = formal_type->next;
+  if (TypeIsStructOrUnion(referenced) &&
+      referenced->info.struct_info == ctor_owner) {
+    return false;
+  }
+  return TypeEqualIgnoringTopLevelQualifierMask(actual->type, referenced,
+                                                kQualConst | kQualVolatile);
+}
+
 /* Find the head of the overload chain for member `name` in `owner`, preferring
  * a member that actually has overloads linked; falls back to any match. */
 static bool RebindClonedConstructorCall(VectorASTNode* call,
@@ -8085,7 +8172,8 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
           id->symbol->type->info.function.prototype.value.p[i];
       if (actual == NULL || actual->type == NULL || formal == NULL ||
           formal->type == NULL ||
-          !TypeAssignmentCompatible(actual->type, formal->type)) {
+          !ClonedConstructorActualMatchesFormal(actual, formal->type,
+                                                ctor_owner)) {
         compatible = false;
         break;
       }

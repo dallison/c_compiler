@@ -1162,6 +1162,22 @@ Symbol* CXXResolveOverloadedFunctionTemplateCall(Symbol* callee,
   return best;
 }
 
+// A braced-init-list is a non-deduced context, but the parameter it initializes
+// may have its template arguments deduced from another argument
+// (`SetFlag(Flag<T>*, const T&)` called as `SetFlag(&f, {})`).
+static bool FunctionTemplateDeducesWithoutBracedArguments(
+    Symbol* templ, Vector* actuals, size_t first_formal_arg) {
+  bool saved_trap = DiagnosticErrorTrapBegin();
+  DiagnosticSuppressBegin();
+  bool viable = TypeClassifyFunctionTemplateCandidate(
+                    &compiler->syntax, templ, NULL, actuals,
+                    first_formal_arg) == kFunctionTemplateCandidateViable &&
+                !DiagnosticErrorTrapped();
+  DiagnosticSuppressEnd();
+  DiagnosticErrorTrapEnd(saved_trap);
+  return viable;
+}
+
 /* Contract: returns `candidate`, a dependent primary, or a deduced specialization;
  * NULL when substitution/arity pre-check fails.  Registers temps when provided. */
 static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
@@ -1206,6 +1222,8 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
   // initializer_list parameters (and array-reference parameters) are deduced
   // element-wise from braces.
   Vector* prototype = &candidate->type->info.function.prototype;
+  bool braced_parameters_deduced_elsewhere = false;
+  bool braced_parameters_checked = false;
   for (size_t i = 0; explicit_args == NULL && node->children != NULL &&
                      i < node->children->length && i < prototype->length;
        i++) {
@@ -1221,7 +1239,15 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
         !TypeIsCXXInitializerList(formal->type) &&
         (braced_formal_target == NULL ||
          !TypeIsArray(braced_formal_target))) {
-      return NULL;
+      if (!braced_parameters_checked) {
+        braced_parameters_checked = true;
+        braced_parameters_deduced_elsewhere =
+            FunctionTemplateDeducesWithoutBracedArguments(candidate,
+                                                          node->children, 0);
+      }
+      if (!braced_parameters_deduced_elsewhere) {
+        return NULL;
+      }
     }
   }
   // A member function template whose signature still names a member of the
@@ -1816,6 +1842,8 @@ static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
     deduction_actuals = &explicit_object_actuals;
   }
   Vector* prototype = &candidate->symbol->type->info.function.prototype;
+  bool braced_parameters_deduced_elsewhere = false;
+  bool braced_parameters_checked = false;
   for (size_t i = 0; deduction_actuals != NULL && i < deduction_actuals->length &&
                      i + first_formal_arg < prototype->length; i++) {
     Symbol* formal = prototype->value.p[i + first_formal_arg];
@@ -1843,6 +1871,15 @@ static StructMember* MemberTemplateOverloadCandidate(StructMember* candidate,
         TypeContainsTemplateParameter(formal->type) &&
         !TypeIsCXXInitializerList(target) &&
         (target == NULL || !TypeIsArray(target))) {
+      if (!braced_parameters_checked) {
+        braced_parameters_checked = true;
+        braced_parameters_deduced_elsewhere =
+            FunctionTemplateDeducesWithoutBracedArguments(
+                candidate->symbol, deduction_actuals, first_formal_arg);
+      }
+      if (braced_parameters_deduced_elsewhere) {
+        continue;
+      }
       if (explicit_object) {
         VectorDestruct(&explicit_object_actuals);
       }
@@ -2665,6 +2702,35 @@ static bool ShouldSkipOverloadedCallResolution(
            id->symbol->type->info.function.template_origin == NULL);
 }
 
+static bool CallActualsAreConcrete(VectorASTNode* node) {
+  for (size_t i = 0; node->children != NULL && i < node->children->length;
+       i++) {
+    ASTNode* actual = node->children->value.p[i];
+    if (actual == NULL || actual->type == NULL ||
+        CallActualIsPackExpansion(actual) ||
+        (actual->flags & kASTDependentFunctorCall) != 0 ||
+        TypeContainsTemplateParameter(actual->type) ||
+        TypeContainsAuto(actual->type) || TypeIsUnknown(actual->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/* A lone function template called with concrete explicit template arguments
+ * (`test<T, U>(0)` in a detection idiom) is not viable when substituting those
+ * arguments into its signature fails; that must be diagnosed so the enclosing
+ * SFINAE context sees the failure. */
+static bool ExplicitSingleTemplateCallMustMatch(IdentifierASTNode* id,
+                                                VectorASTNode* node,
+                                                Vector* candidates) {
+  return candidates->length == 1 && id->symbol->flags.is_template &&
+         id->template_arguments != NULL &&
+         !TemplateArgumentVectorContainsTemplateParameter(
+             id->template_arguments) &&
+         CallActualsAreConcrete(node);
+}
+
 /* Contract: binds an identifier callee to the best overload (lookup + ADL +
  * template instantiation) and checks deleted functions. */
 void ResolveOverloadedFunctionCall(VectorASTNode* node) {
@@ -2704,10 +2770,11 @@ void ResolveOverloadedFunctionCall(VectorASTNode* node) {
       id->symbol != NULL && id->symbol->type != NULL &&
       TypeIsFunction(id->symbol->type) &&
       id->symbol->type->info.function.unknown_args;
-  bool diagnose_overload_set = id->symbol->flags.is_overloaded ||
-                               has_adl_candidates || ordinary_unknown ||
-                               gathered_inline_overloads ||
-                               gathered_member_overloads;
+  bool diagnose_overload_set =
+      id->symbol->flags.is_overloaded || has_adl_candidates ||
+      ordinary_unknown || gathered_inline_overloads ||
+      gathered_member_overloads ||
+      ExplicitSingleTemplateCallMustMatch(id, node, &candidates);
   Symbol* best = ResolveFunctionCandidateVector(
       &id->symbol->name, &candidates, node->children, id->template_arguments,
       /*diagnose_no_match=*/diagnose_overload_set,

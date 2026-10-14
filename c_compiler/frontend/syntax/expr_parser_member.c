@@ -349,14 +349,33 @@ ASTNode* NewStaticMemberReference(Syntax* syntax,
   }
   String member_name;
   StringInit(&member_name, FullyQualifiedIdentifierLast(name));
-  StructMember* member = FindStructMember(owner, &member_name);
+  StructMember* member = NULL;
+  bool in_enclosing_class = false;
+  for (int depth = 0; owner != NULL && depth < 16; depth++) {
+    member = FindStructMember(owner, &member_name);
+    if (member != NULL) {
+      break;
+    }
+    // A local class sees the names of the class whose member function it is
+    // defined in; only its static members are usable there ([class.local]).
+    Symbol* enclosing = owner->access_enclosing_function;
+    owner = enclosing != NULL && enclosing->type != NULL &&
+                    TypeIsFunction(enclosing->type)
+                ? enclosing->type->info.function.cxx_member_owner
+                : NULL;
+    in_enclosing_class = true;
+  }
   StringDestruct(&member_name);
-  if (member == NULL || !member->is_static || member->is_member_function ||
-      member->symbol == NULL) {
+  if (member == NULL || !member->is_static || member->symbol == NULL ||
+      (member->is_member_function && !in_enclosing_class)) {
     return NULL;
   }
-  return NewIdentifierASTNode(member->symbol,
-                              syntax->lex->current_token_location);
+  ASTNode* ref = NewIdentifierASTNode(member->symbol,
+                                      syntax->lex->current_token_location);
+  if (member->is_member_function) {
+    ref->flags |= kASTQualifiedName;
+  }
+  return ref;
 }
 
 
@@ -601,6 +620,7 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
 
   String* member_name;
   String* qualified_base_scope = NULL;
+  TypeRecord* conversion_type = NULL;
   // Optional 'template' disambiguator in dependent member access, e.g.
   // `g.template onMessage<R>(...)` or `p->template get<0>()`.  When present the
   // member name must be a template-id, so its `<...>` is parsed as a template
@@ -628,7 +648,7 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
     // operator/conversion function was registered under so the access resolves
     // to it.
     String op_name;
-    if (SyntaxParseMemberOperatorName(syntax, &op_name)) {
+    if (SyntaxParseMemberOperatorName(syntax, &op_name, &conversion_type)) {
       member_name = NewString(op_name.value);
       StringDestruct(&op_name);
     } else {
@@ -676,7 +696,7 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
           LexNextToken(syntax->lex);
         } else if (LexLookingAt(syntax->lex, TOK(operator))) {
           String op_name;
-          if (SyntaxParseMemberOperatorName(syntax, &op_name)) {
+          if (SyntaxParseMemberOperatorName(syntax, &op_name, NULL)) {
             member_name = NewString(op_name.value);
             StringDestruct(&op_name);
           } else {
@@ -771,6 +791,13 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
       has_template_arguments
           ? SyntaxParseTemplateArgumentList(syntax, followers)
           : NULL;
+  if (conversion_type != NULL &&
+      (qualified_base_scope != NULL ||
+       (CompilerIsCXX() && template_arguments != NULL &&
+        LexLookingAt(syntax->lex, TOK(coloncolon))))) {
+    TypeRecordDelete(conversion_type);
+    conversion_type = NULL;
+  }
   if (qualified_base_scope != NULL) {
     String* scope_name = NewString(qualified_base_scope->value);
     String* inner_member = NewString(member_name->value);
@@ -833,6 +860,7 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
     }
   }
   ((ConstantASTNode*)member_node)->template_arguments = template_arguments;
+  ((ConstantASTNode*)member_node)->conversion_type = conversion_type;
   return NewBinaryASTNode(op, NULL,
                           syntax->lex->current_token_location, left,
                           member_node);

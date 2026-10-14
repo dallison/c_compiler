@@ -2022,6 +2022,12 @@ static bool CXXStructHasDeletedMemberSpecialMemberKindImpl(
         StructMemberIsNestedType(member)) {
       continue;
     }
+    // A member with a default member initializer never uses its own default
+    // constructor ([class.default.ctor]/2).
+    if (kind == kCXXSpecialMemberDefaultConstructor &&
+        member->default_initializer != NULL) {
+      continue;
+    }
     TypeRecord* type = member->symbol->type;
     if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
       continue;

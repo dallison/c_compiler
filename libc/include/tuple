@@ -34,7 +34,7 @@ struct tuple<T0, Rest...> {
 
   constexpr tuple() {}
   constexpr explicit tuple(T0 v0, Rest... rest)
-      : __0(v0), __rest(rest...) {}
+      : __0(static_cast<T0&&>(v0)), __rest(static_cast<Rest&&>(rest)...) {}
   constexpr tuple(__tuple_prepend_t, T0 v0, tuple<Rest...> rest)
       : __0(static_cast<T0&&>(v0)),
         __rest(static_cast<tuple<Rest...>&&>(rest)) {}
@@ -83,6 +83,11 @@ struct tuple<T0, Rest...> {
     return *this;
   }
 };
+
+template <class... Types>
+tuple(Types...) -> tuple<Types...>;
+template <class T1, class T2>
+tuple(pair<T1, T2>) -> tuple<T1, T2>;
 
 template <class T>
 struct tuple_size;

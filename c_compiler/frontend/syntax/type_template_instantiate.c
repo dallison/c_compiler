@@ -707,13 +707,83 @@ static bool TemplateArgumentNamesIncompleteClass(TemplateArgument* argument) {
 
 /* Detects class-template specializations whose body substitution must wait
  * until one of their concrete class arguments has been completed. */
-static bool TemplateArgumentsNameIncompleteClass(Vector* arguments) {
+bool TypeTemplateArgumentsNameIncompleteClass(Vector* arguments) {
   for (size_t i = 0; arguments != NULL && i < arguments->length; i++) {
     if (TemplateArgumentNamesIncompleteClass(arguments->value.p[i])) {
       return true;
     }
   }
   return false;
+}
+
+/* Specializations laid out while a data member's class type was still
+ * incomplete, so that member contributed no storage. */
+static Vector g_incomplete_layout_structs;
+
+static bool TypeNeedsPendingLayout(TypeRecord* type) {
+  while (type != NULL && (type->declarator == kDeclArray ||
+                          type->declarator == kDeclVector)) {
+    type = type->next;
+  }
+  if (type == NULL || type->declarator != kDeclPrimitive ||
+      !TypeIsStructOrUnion(type)) {
+    return false;
+  }
+  return !TypeIsCompleteClass(type) ||
+         type->info.struct_info->layout_pending_completion;
+}
+
+static bool StructNeedsPendingLayout(Struct* str) {
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (!base->is_virtual && TypeNeedsPendingLayout(base->type)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member->is_static || member->is_member_function ||
+        member->is_using_declaration || StructMemberIsNestedType(member) ||
+        member->symbol == NULL) {
+      continue;
+    }
+    if (TypeNeedsPendingLayout(member->symbol->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void RecordIncompleteLayoutStruct(Struct* str) {
+  if (!str->layout_pending_completion && !StructContainsTemplateParameter(str) &&
+      StructNeedsPendingLayout(str)) {
+    str->layout_pending_completion = true;
+    VectorAppend(&g_incomplete_layout_structs, str);
+  }
+}
+
+void TypeRelayoutStructsAfterClassCompletion(void) {
+  bool progress = true;
+  while (progress) {
+    progress = false;
+    for (size_t i = 0; i < g_incomplete_layout_structs.length;) {
+      Struct* str = g_incomplete_layout_structs.value.p[i];
+      if (StructNeedsPendingLayout(str)) {
+        i++;
+        continue;
+      }
+      VectorDeleteElement(&g_incomplete_layout_structs, i);
+      str->layout_pending_completion = false;
+      for (size_t m = 0; m < str->members.length; m++) {
+        StructMember* member = str->members.value.p[m];
+        if (member->symbol != NULL) {
+          TypeRecordCalculateSize(member->symbol->type);
+        }
+      }
+      RelayoutStruct(str);
+      progress = true;
+    }
+  }
 }
 
 void TypeInstantiateLateMemberBodies(Syntax* syntax, Vector* defined) {
@@ -746,6 +816,7 @@ void TypeInstantiateLateMemberBodies(Syntax* syntax, Vector* defined) {
 }
 
 void TypeReleaseLateMemberBodies(void) {
+  VectorDestruct(&g_incomplete_layout_structs);
   if (!g_late_member_bodies_inited) {
     return;
   }
@@ -1847,6 +1918,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   }
   InjectInstantiatedAnonymousMembers(parser, str);
   FinalizeStructAlignment(str);
+  RecordIncompleteLayoutStruct(str);
   ComputeCXXAggregateStatus(str);
   str->cxx_special_members_complete = false;
   // Nested classes of a class template are instantiated while the enclosing
@@ -9049,6 +9121,46 @@ static TypeRecord* CXXMapInheritedDeductionToDerived(
   return result;
 }
 
+// A guide whose only parameter is a bare pack (`tuple(Types...)`) deduces from
+// any argument list, so a viable guide without a pack is more specialized
+// ([temp.deduct.partial]/11): `tuple(pair<T1, T2>)` wins for a pair argument.
+static bool GuideIsCatchAllPack(Symbol* guide) {
+  Vector* prototype = &guide->type->info.function.prototype;
+  if (prototype->length != 1) {
+    return false;
+  }
+  Symbol* formal = prototype->value.p[0];
+  if (formal == NULL || !formal->flags.is_parameter_pack ||
+      formal->type == NULL) {
+    return false;
+  }
+  TypeRecord* pattern =
+      TypeIsReference(formal->type) ? formal->type->next : formal->type;
+  int index = -1;
+  return TypeIsTemplateParameterPlaceholder(pattern, &index);
+}
+
+static bool GuideHasParameterPack(Symbol* guide) {
+  Vector* prototype = &guide->type->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* formal = prototype->value.p[i];
+    if (formal != NULL && formal->flags.is_parameter_pack) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static int CompareGuideAgainstCatchAllPack(Symbol* left, Symbol* right) {
+  if (GuideIsCatchAllPack(right) && !GuideHasParameterPack(left)) {
+    return 1;
+  }
+  if (GuideIsCatchAllPack(left) && !GuideHasParameterPack(right)) {
+    return -1;
+  }
+  return 0;
+}
+
 static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
     Syntax* syntax, Symbol* class_template, TypeRecord* placeholder,
     Vector* actuals, bool allow_explicit, bool* alias_rejected,
@@ -9175,6 +9287,13 @@ static TypeRecord* TypeDeduceClassTemplateFromGuideFiltered(
           best_guide != NULL
               ? CompareFunctionTemplateSpecificity(guide, best_guide)
               : 0;
+      if (specificity == 0 && best_guide != NULL &&
+          guide->flags.is_template && best_guide->flags.is_template) {
+        specificity = TypeFunctionTemplateMoreSpecialized(guide, best_guide);
+        if (specificity == 0) {
+          specificity = CompareGuideAgainstCatchAllPack(guide, best_guide);
+        }
+      }
       if (specificity > 0) {
         TypeRecordDelete(result);
         result = candidate;
@@ -10677,6 +10796,52 @@ static bool ClassTemplateArgumentsAreStillDependent(Vector* args) {
   return false;
 }
 
+static bool TypeNamesStruct(TypeRecord* type, Struct* str) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (!TypeIsStructOrUnion(current) || current->info.struct_info == NULL) {
+      continue;
+    }
+    if (current->info.struct_info == str ||
+        TypeTemplateArgumentsNameStruct(
+            TypeSpecializationTemplateArguments(current), str)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TypeTemplateArgumentsNameStruct(Vector* args, Struct* str) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg == NULL) {
+      continue;
+    }
+    if (TypeNamesStruct(arg->type, str) ||
+        TypeTemplateArgumentsNameStruct(arg->pack_arguments, str)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+TypeRecord* TypeDeferredReturnSpecialization(TypeRecord* function) {
+  if (function == NULL || !TypeIsFunction(function)) {
+    return NULL;
+  }
+  TypeRecord* type = function->next;
+  while (type != NULL && (TypeIsPointer(type) || TypeIsReference(type))) {
+    type = type->next;
+  }
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || !type->info.struct_info->is_template ||
+      type->template_origin == NULL || type->template_arguments == NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(
+          type->template_arguments)) {
+    return NULL;
+  }
+  return type;
+}
+
 /* A non-type argument can be a fully substituted expression that was never
  * reduced to a value (`sizeof(const T& (*)()) != 0` after `T` is `int`).
  * Partial specializations such as `enable_if<true, T>` compare integral
@@ -10972,6 +11137,27 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     VectorDeleteWithContents(completed_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
+    return deferred;
+  }
+  // `StatusOr<Self> Create();` in Self's body, or `StatusOr<Fwd> Make();` with
+  // Fwd only forward-declared: instantiating now would evaluate traits such as
+  // is_move_constructible<Self> before Self has its implicit special members.
+  // A function declaration does not need its return type complete, so name the
+  // specialization lazily (MaterializeDeferredMemberReturnTypes).
+  if (parser->syntax != NULL &&
+      parser->syntax->defer_template_ids_naming_class_head &&
+      parser->syntax->cxx_class_head != NULL &&
+      (TypeTemplateArgumentsNameStruct(completed_args,
+                                       parser->syntax->cxx_class_head) ||
+       TypeTemplateArgumentsNameIncompleteClass(completed_args))) {
+    TypeRecord* deferred = TypeRecordCopy(templ->type);
+    deferred->template_origin = templ;
+    if (deferred->template_arguments != NULL) {
+      VectorDeleteWithContents(deferred->template_arguments,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    deferred->template_arguments = completed_args;
     return deferred;
   }
 
@@ -11518,7 +11704,8 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     member_body_args = prefixed_member_body_args;
   }
   bool defer_bodies_for_incomplete_argument =
-      TemplateArgumentsNameIncompleteClass(source_args);
+      TypeTemplateArgumentsNameIncompleteClass(source_args);
+  RecordIncompleteLayoutStruct(str);
   for (size_t i = 0; i < pending_member_bodies.length; i++) {
     PendingMemberBody* pmb = pending_member_bodies.value.p[i];
     // A member template of a nested template cloned for the enclosing

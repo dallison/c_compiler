@@ -212,6 +212,7 @@ static bool NodeIsCompilerGenerated(ASTNode* node) {
     case AST_OP(builtin_trap):
     case AST_OP(builtin_unreachable):
     case AST_OP(builtin_is_constant_evaluated):
+    case AST_OP(builtin_alloca):
       return true;
     case AST_OP(label): {
       LabelASTNode* label = (LabelASTNode*)node;
@@ -503,6 +504,8 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
   return true;
 }
 
+static bool ConvertClassOperandToScalar(ASTNode* from);
+
 void SemanticCheckScalarType(ASTNode* node) {
   if (node == NULL) {
     return;
@@ -511,7 +514,7 @@ void SemanticCheckScalarType(ASTNode* node) {
     SemanticError(node, "Illegal use of void type");
     return;
   }
-  if (!TypeIsScalar(node->type)) {
+  if (!TypeIsScalar(node->type) && !ConvertClassOperandToScalar(node)) {
     SemanticError(node, "Illegal use of composite type (struct or union)");
   }
 }
@@ -1497,6 +1500,61 @@ bool SemanticConvertCXXSwitchCondition(ASTNode* from) {
     return false;
   }
   SemanticConvertType(from, TypeRecordCopy(target), kConvertNormal);
+  return true;
+}
+
+// [over.match.oper]/7: with no user-declared operator viable, a class operand
+// of a built-in operator reaches the built-in candidates through a conversion
+// function (`atomic<int> n; n - 1`).  Only a unique scalar target is chosen;
+// several conversion functions to different types are left as an error.
+static bool ConvertClassOperandToScalar(ASTNode* from) {
+  if (!CompilerIsCXX() || from == NULL || from->parent == NULL ||
+      from->type == NULL || !TypeIsStructOrUnion(from->type) ||
+      from->type->info.struct_info == NULL ||
+      TypeContainsTemplateParameter(from->type)) {
+    return false;
+  }
+  Vector candidates;
+  VectorInit(&candidates);
+  CollectConversionOperators(from->type->info.struct_info, &candidates);
+  TypeRecord* target = NULL;
+  bool ambiguous = false;
+  for (size_t i = 0; i < candidates.length && !ambiguous; i++) {
+    StructMember* member = candidates.value.p[i];
+    if (member == NULL || member->symbol == NULL ||
+        member->symbol->type == NULL || member->symbol->flags.is_template) {
+      continue;
+    }
+    TypeRecord* function = member->symbol->type;
+    if (!ConversionOperatorAllowedInContext(function, function->next,
+                                            kConvertNormal)) {
+      continue;
+    }
+    TypeRecord* result = function->next;
+    if (result != NULL && TypeIsReference(result)) {
+      result = result->next;
+    }
+    if (result == NULL || !TypeIsScalar(result) ||
+        TypeContainsTemplateParameter(result)) {
+      continue;
+    }
+    if (target == NULL) {
+      target = result;
+      continue;
+    }
+    TypeRecordQualifierOverlay target_overlay;
+    TypeRecordQualifierOverlay result_overlay;
+    ambiguous = !TypeEqual(
+        TypeRecordOverlayQualifiers(&target_overlay, target, kQualPlain),
+        TypeRecordOverlayQualifiers(&result_overlay, result, kQualPlain));
+  }
+  VectorDestruct(&candidates);
+  if (target == NULL || ambiguous) {
+    return false;
+  }
+  TypeRecord* to = TypeRecordCopy(target);
+  to->qualifiers = kQualPlain;
+  SemanticConvertType(from, to, kConvertNormal);
   return true;
 }
 

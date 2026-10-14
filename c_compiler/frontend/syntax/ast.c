@@ -358,6 +358,8 @@ const char* ASTOpcodeName(ASTOpcode op) {
       return "builtin_constant_p";
     case AST_OP(builtin_is_constant_evaluated):
       return "builtin_is_constant_evaluated";
+    case AST_OP(builtin_alloca):
+      return "builtin_alloca";
 
     case AST_OP(cast):
       return "cast";
@@ -1364,6 +1366,9 @@ static void ConstantASTNodeDelete(ASTNode* node) {
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
   }
+  if (cnode->conversion_type != NULL) {
+    TypeRecordDelete(cnode->conversion_type);
+  }
   ASTNodeBaseDelete(node);
 }
 
@@ -1382,6 +1387,10 @@ static ASTNode* ConstantASTNodeClone(const ASTNode* node,
   }
   to->template_arguments =
       TemplateArgumentVectorCopy(from->template_arguments);
+  to->conversion_type = from->conversion_type;
+  if (to->conversion_type != NULL) {
+    TypeRecordIncRef(to->conversion_type);
+  }
   return func(&to->base, data);
 }
 

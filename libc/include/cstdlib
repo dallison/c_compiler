@@ -55,6 +55,12 @@ using ::llabs;
 using ::div;
 using ::ldiv;
 using ::lldiv;
+inline long abs(long j) { return ::labs(j); }
+inline long long abs(long long j) { return ::llabs(j); }
+inline ldiv_t div(long numer, long denom) { return ::ldiv(numer, denom); }
+inline lldiv_t div(long long numer, long long denom) {
+  return ::lldiv(numer, denom);
+}
 using ::mblen;
 using ::mbtowc;
 using ::wctomb;

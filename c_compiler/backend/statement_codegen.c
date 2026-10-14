@@ -2907,10 +2907,11 @@ emit_return_branch:
 }
 
 static void GenerateCaseLabel(Generator* gen, CaseLabelASTNode* node) {
-  if (node->label == NULL) {
-    return;
+  // A constant switch labels only the selected case; the statements of the
+  // other labels are still reached by falling through from it.
+  if (node->label != NULL) {
+    GeneratorEmit(gen, node->label);
   }
-  GeneratorEmit(gen, node->label);
   GenerateStatement(gen, node->stmt);
 }
 

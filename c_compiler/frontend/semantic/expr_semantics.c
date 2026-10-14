@@ -648,6 +648,9 @@ static ASTNode* DispatchExpressionBuiltinIntrinsics(ASTNode* node,
     case AST_OP(builtin_is_constant_evaluated):
       AnalyzeBuiltinIsConstantEvaluated(vector);
       return node;
+    case AST_OP(builtin_alloca):
+      AnalyzeBuiltinAlloca(vector);
+      return node;
     default:
       return node;
   }
@@ -906,6 +909,7 @@ static bool AnalyzeExpressionDispatchOpcodePhaseInitBuiltinsAndCoroutine(
     case AST_OP(builtin_unreachable):
     case AST_OP(builtin_constant_p):
     case AST_OP(builtin_is_constant_evaluated):
+    case AST_OP(builtin_alloca):
       node = DispatchExpressionBuiltinIntrinsics(node, vector_node, op);
       break;
 

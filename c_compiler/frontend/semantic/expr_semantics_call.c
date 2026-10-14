@@ -713,6 +713,15 @@ static void MemberCallLowerRebindConstructorMember(
 
 // Access, cv-qualification, and ref-qualifier diagnostics for a resolved member.
 // Does not alter the call shape; errors are reported on `member_access`.
+static bool MemberChainHasUsingDeclaration(StructMember* head) {
+  for (StructMember* m = head; m != NULL; m = m->overload_next) {
+    if (m->is_using_declaration) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void MemberCallLowerDiagnoseMemberCall(
                                               BinaryASTNode* member_access,
                                               StructMember* member) {
@@ -724,6 +733,20 @@ static void MemberCallLowerDiagnoseMemberCall(
     lookup_context = member_access->left->type->next->info.struct_info;
   } else if (TypeIsStructOrUnion(member_access->left->type)) {
     lookup_context = member_access->left->type->info.struct_info;
+  }
+  // A member named through a using-declaration is a member of the class
+  // containing that declaration for access checking ([namespace.udecl]).
+  if (lookup_context != NULL && member->symbol->name.value != NULL) {
+    CXXAccess found_access = kAccessPublic;
+    Struct* found_owner = NULL;
+    int found_offset = 0;
+    StructMember* found = FindStructMemberWithAccessAndOffsetByName(
+        lookup_context, member->symbol->name.value, &found_access,
+        &found_owner, &found_offset);
+    if (found != NULL && found_owner != NULL && found_owner != owner &&
+        MemberChainHasUsingDeclaration(found)) {
+      owner = found_owner;
+    }
   }
   if (!CurrentFunctionCanAccessMember(lookup_context, owner, member->access,
                                       access)) {
@@ -1678,20 +1701,32 @@ static bool CXXFunctionalConstructionResolveTargetType(VectorASTNode* node,
   TypeRecord* explicit_type = NULL;
   if (node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
-    if (id->symbol != NULL && id->symbol->flags.is_template &&
-        id->symbol->type != NULL &&
+    Symbol* template_symbol = id->symbol;
+    // Cloning a member body maps the injected-class-name to the current
+    // specialization, but `SP<int>(...)` inside `SP<char>` still names the
+    // specialization its own arguments select.
+    if (template_symbol != NULL && !template_symbol->flags.is_template &&
+        id->template_arguments != NULL && template_symbol->type != NULL &&
+        TypeIsStructOrUnion(template_symbol->type) &&
+        template_symbol->type->template_arguments != NULL &&
+        template_symbol->type->template_origin != NULL &&
+        template_symbol->type->template_origin->flags.is_template) {
+      template_symbol = template_symbol->type->template_origin;
+    }
+    if (template_symbol != NULL && template_symbol->flags.is_template &&
+        template_symbol->type != NULL &&
         id->template_arguments != NULL &&
         !TemplateArgumentVectorContainsTemplateParameter(
             id->template_arguments)) {
       bool class_template =
-          TypeIsStructOrUnion(id->symbol->type) &&
-          id->symbol->type->template_arguments == NULL &&
-          id->symbol->type->info.struct_info != NULL &&
-          id->symbol->type->info.struct_info->is_template;
-      bool alias_template = StorageIs(id->symbol->storage, STO(typedef));
+          TypeIsStructOrUnion(template_symbol->type) &&
+          template_symbol->type->template_arguments == NULL &&
+          template_symbol->type->info.struct_info != NULL &&
+          template_symbol->type->info.struct_info->is_template;
+      bool alias_template = StorageIs(template_symbol->storage, STO(typedef));
       if (class_template || alias_template) {
         explicit_type = TypeInstantiateClassTemplate(
-            &compiler->syntax, id->symbol, id->template_arguments);
+            &compiler->syntax, template_symbol, id->template_arguments);
       }
     }
   }
@@ -3186,6 +3221,7 @@ static TypeRecord* FunctionCallAssignReturnTypeFromCallee(VectorASTNode* node) {
     subtype = subtype->next;
   }
   SemanticEnsureAutoReturnTypeDeduced(subtype);
+  TypeMaterializePendingMemberReturnType(&compiler->syntax, subtype);
   TypeRecord* return_type = subtype->next;
   if (TypeIsReference(return_type)) {
     ASTNodeSetType((ASTNode*)node, return_type->next);

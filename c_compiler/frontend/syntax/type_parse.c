@@ -75,6 +75,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->substituting_enclosing_template_arguments_only = false;
   parser->placeholder_variable_constraint = NULL;
   parser->typename_allows_unqualified = false;
+  parser->parsing_type_id = false;
   parser->deferred_inline_bodies = NULL;
   parser->deferred_noexcept_specifiers = NULL;
   parser->deferred_static_asserts = NULL;
@@ -2938,6 +2939,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
     composite_parser.cxx_member_owner = parser->cxx_member_owner;
     composite_parser.parsing_direct_class_template =
         parser->parsing_direct_class_template;
+    composite_parser.parsing_type_id = parser->parsing_type_id;
     // A nested class is parsed by a fresh TypeParser.  Share the enclosing
     // class's deferred-body list so the nested class's inline bodies stay
     // deferred until the enclosing class is complete.

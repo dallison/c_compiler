@@ -151,6 +151,7 @@ static bool ExpressionHasSideEffects(ASTNode* node) {
     case AST_OP(builtin_observable_checkpoint):
     case AST_OP(builtin_trap):
     case AST_OP(builtin_unreachable):
+    case AST_OP(builtin_alloca):
       return true;
     case AST_OP(builtin_expect): {
       VectorASTNode* builtin = (VectorASTNode*)node;
@@ -2373,7 +2374,8 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
       // First "expression" might be a list of variable declaration statements.
       AnalyzeStatement(node->c1);
       DeclarationListASTNode* decls = (DeclarationListASTNode*)node->c1;
-      for (size_t i = 0; i < decls->declarations->length; i++) {
+      for (size_t i = 0; !CompilerIsCXX() && i < decls->declarations->length;
+           i++) {
         VariableDeclarationASTNode* vardecl =
             (VariableDeclarationASTNode*)decls->declarations->value.p[i];
         if (!StorageIs(vardecl->symbol->storage, STO(auto)) &&
@@ -2756,7 +2758,14 @@ static bool IsEligibleCXXImplicitMoveReturnValue(ASTNode* return_value) {
       return false;
     }
     target_type = return_type->next;
-  } else if (!TypeIsStructOrUnion(return_type)) {
+  } else if (TypeIsStructOrUnion(return_type)) {
+    // The object is first treated as an rvalue whatever constructor
+    // initializes the result ([class.copy.elision]/3, CWG1579), so
+    // `return m;` reaches a converting constructor such as
+    // `StatusOr<M>(M&&)` for a move-only `M`.
+    return return_value->type != NULL &&
+           TypeIsStructOrUnion(return_value->type);
+  } else {
     return false;
   }
   return target_type != NULL &&

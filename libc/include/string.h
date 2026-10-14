@@ -78,6 +78,7 @@ void *memset_explicit(void *s, int c, size_t n);
 char *strerror(int errnum);
 int strerror_r(int errnum, char *buf, size_t buflen);
 size_t strlen(const char *s);
+size_t strnlen(const char *s, size_t maxlen);
 char *strdup(const char *s);
 char *strndup(const char *s, size_t n);
 
@@ -98,6 +99,9 @@ char *strndup(const char *s, size_t n);
 
 #ifdef __cplusplus
 }
+// C++ compilers on Linux define _GNU_SOURCE, under which glibc's <string.h>
+// also declares the <strings.h> functions (ffs, strcasecmp, ...).
+#include <strings.h>
 #endif
 
 #endif /* __DAVECC__ */

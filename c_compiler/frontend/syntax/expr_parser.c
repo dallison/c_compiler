@@ -1022,10 +1022,17 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
   // ill-formed.
   bool aggregate = TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
                    type->info.struct_info->is_aggregate;
-  if (!aggregate &&
-      (id->template_arguments != NULL ||
-       TypeIsClassTemplatePlaceholder(type) ||
-       FindCXXConstructorForType(type) != NULL)) {
+  // A class template named without arguments needs deduction from its
+  // guides ([over.match.class.deduct]) before it can be initialized.
+  bool needs_deduction =
+      id->template_arguments == NULL && id->symbol->flags.is_template &&
+      TypeIsStructOrUnion(type) && type->template_arguments == NULL &&
+      type->info.struct_info != NULL && type->info.struct_info->is_template;
+  if (needs_deduction ||
+      (!aggregate &&
+       (id->template_arguments != NULL ||
+        TypeIsClassTemplatePlaceholder(type) ||
+        FindCXXConstructorForType(type) != NULL))) {
     type_expr->flags |= kASTCXXFunctionalConstruction;
     Vector* actuals =
         ParseCXXBracedTemporaryActuals(syntax, type, followers);

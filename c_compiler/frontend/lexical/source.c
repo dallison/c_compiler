@@ -349,6 +349,11 @@ void SourceReadLine(Source* src, String* line) {
     for (;;) {
       int ch = SourceGetChar(src);
       if (ch == EOF) {
+        // An unterminated last line still ends like any other ([lex.phases]);
+        // reporting EOF with it would make an includer append its next line.
+        if (newline.length > 0 && src->device == kSourceFromFile) {
+          src->reached_eof = false;
+        }
         break;
       }
       if (ch == '\n') {

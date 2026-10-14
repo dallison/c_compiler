@@ -106,6 +106,9 @@ bool DiagnosticsSuppressed(void);
 // returned value from Begin must be passed to the matching End.
 bool DiagnosticErrorTrapBegin(void);
 void DiagnosticErrorTrapEnd(bool saved);
+// Like DiagnosticErrorTrapEnd, but an error caught by the closing region stays
+// recorded in the enclosing one, as if that region had not been opened.
+void DiagnosticErrorTrapEndPropagating(bool saved);
 bool DiagnosticErrorTrapped(void);
 
 // #pragma diagnostic {ignored,warning,error} "-W<name>" actions.

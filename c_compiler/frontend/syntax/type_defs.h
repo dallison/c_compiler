@@ -456,6 +456,10 @@ struct Struct {
   // instead of treating the empty shell as the member type.
   bool instantiation_in_progress;  // @wire - (recomputed)
   bool resolving_in_progress_member;  // @wire - (recomputed)
+  // True while this specialization's layout omits a data member or base whose
+  // class type was incomplete at instantiation; it is laid out again once that
+  // type is complete.
+  bool layout_pending_completion;  // @wire - (recomputed)
   // Template-parameter count in scope when this class's *body* began parsing
   // (enclosing templates plus this class's own template head).  A class's own
   // `is_template`/`template_parameter_count` are only set after its body is

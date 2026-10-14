@@ -802,6 +802,27 @@ ASTNode* ParseIdentifier(Syntax* syntax,
         // name (`Capacity()` vs `static Capacity(size_t)`).
         !(symbol->type != NULL && TypeIsFunction(symbol->type) &&
           symbol->type->info.function.cxx_member_owner != NULL)));
+  // A default member initializer has no `this` yet, but a non-static data
+  // member it names is still accessed through the object being initialized.
+  if (CompilerIsCXX() && !name.is_qualified && symbol != NULL &&
+      !block_hides_member && syntax->parsing_default_member_initializer &&
+      syntax->cxx_class_head != NULL && FindThisSymbol(syntax) == NULL) {
+    String member_name;
+    StringInit(&member_name, FullyQualifiedIdentifierLast(&name));
+    StructMember* member =
+        FindStructMember(syntax->cxx_class_head, &member_name);
+    StringDestruct(&member_name);
+    if (member != NULL && member->symbol != NULL && !member->is_static &&
+        !member->is_member_function &&
+        !StorageIs(member->symbol->storage, STO(typedef)) &&
+        !SymbolIsTagSymbol(member->symbol)) {
+      ASTNode* member_access = NewMemberAccessFromEnclosingClass(syntax, &name);
+      if (member_access != NULL) {
+        FullyQualifiedIdentifierDestruct(&name);
+        return member_access;
+      }
+    }
+  }
   // `symbol == NULL` still counts: out-of-line member bodies do not put
   // class members in the ordinary symbol table, so `Init<kFront>` would
   // otherwise be parsed as a comparison.
@@ -960,17 +981,19 @@ ASTNode* ParseIdentifier(Syntax* syntax,
       if (!builtin_call &&
           (!LexLookingAt(lex, TOK(lparen)) ||
            UnresolvedNameMayBeDependentMember(syntax))) {
+        // Before `this->name`, which accepts any name: a local class's
+        // member can name a static member of the enclosing function's class.
+        ASTNode* static_member = NewStaticMemberReference(syntax, &name);
+        if (static_member != NULL) {
+          FullyQualifiedIdentifierDestruct(&name);
+          return static_member;
+        }
         ASTNode* member_access =
             NewMemberAccessFromThis(syntax, &name,
                                     /*allow_unresolved_member=*/true);
         if (member_access != NULL) {
           FullyQualifiedIdentifierDestruct(&name);
           return member_access;
-        }
-        ASTNode* static_member = NewStaticMemberReference(syntax, &name);
-        if (static_member != NULL) {
-          FullyQualifiedIdentifierDestruct(&name);
-          return static_member;
         }
         ASTNode* class_member =
             NewMemberAccessFromEnclosingClass(syntax, &name);
@@ -980,6 +1003,13 @@ ASTNode* ParseIdentifier(Syntax* syntax,
         }
       }
       if (LexLookingAt(lex, TOK(lparen))) {
+        if (!builtin_call) {
+          ASTNode* static_member = NewStaticMemberReference(syntax, &name);
+          if (static_member != NULL) {
+            FullyQualifiedIdentifierDestruct(&name);
+            return static_member;
+          }
+        }
         if (!builtin_call && UnresolvedNameMayBeDependentMember(syntax)) {
           ASTNode* deferred_member_access =
               NewMemberAccessFromThis(syntax, &name,

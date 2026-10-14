@@ -427,6 +427,37 @@ static int CXXBracedInitTargetRankIlConstructors(StructMember* ctor,
   return best;
 }
 
+// True when a non-deleted, non-template constructor in `ctor` is callable
+// without explicit arguments.
+static bool CXXConstructorSetHasDefaultConstructor(StructMember* ctor,
+                                                   Struct* owner) {
+  size_t expected = StructHasVirtualBases(owner) ? 2 : 1;
+  for (StructMember* c = ctor; c != NULL; c = c->overload_next) {
+    if (!c->is_member_function || c->symbol == NULL ||
+        c->symbol->type == NULL || !TypeIsFunction(c->symbol->type) ||
+        c->symbol->flags.is_template) {
+      continue;
+    }
+    FunctionInfo* info = &c->symbol->type->info.function;
+    if (!info->is_constructor || info->is_deleted ||
+        info->prototype.length < expected) {
+      continue;
+    }
+    bool callable_without_arguments = true;
+    for (size_t j = expected; j < info->prototype.length; j++) {
+      Symbol* parameter = info->prototype.value.p[j];
+      if (parameter == NULL || parameter->default_argument == NULL) {
+        callable_without_arguments = false;
+        break;
+      }
+    }
+    if (callable_without_arguments) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Reports whether [over.match.list]'s first phase has a viable
 // initializer-list constructor.  Lowering uses this to decide whether the
 // braces stay one argument or are unpacked for ordinary constructors.
@@ -439,6 +470,13 @@ bool CXXBracedInitSelectsInitializerListConstructor(ASTNode* actual,
   }
   StructMember* ctor = FindStructMember(target->info.struct_info,
                                         target->info.struct_info->tag_name);
+  // An empty list value-initializes a class with a default constructor
+  // ([dcl.init.list]/3.4); initializer-list constructors are not considered.
+  BracedInitializerASTNode* braced = (BracedInitializerASTNode*)actual;
+  if ((braced->initializers == NULL || braced->initializers->length == 0) &&
+      CXXConstructorSetHasDefaultConstructor(ctor, target->info.struct_info)) {
+    return false;
+  }
   return CXXBracedInitTargetRankIlConstructors(ctor, actual) >= 0;
 }
 

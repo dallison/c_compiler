@@ -652,7 +652,10 @@ static void ParseStructMemberList(TypeParser* parser, Struct* str,
     return;
   }
   parser->syntax->struct_definition_depth++;
+  bool saved_parsing_type_id = parser->parsing_type_id;
+  parser->parsing_type_id = false;
   ParseStructMembers(parser, str, is_union, tag_name);
+  parser->parsing_type_id = saved_parsing_type_id;
   parser->syntax->struct_definition_depth--;
 }
 
@@ -867,6 +870,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   // stale non-virtual size while constructors use the finalized virtual-base
   // offsets, causing adjacent objects to overlap.
   TypeRecordCalculateSize(tag->type);
+  TypeRelayoutStructsAfterClassCompletion();
   SyntaxNeedBracket(parser->syntax, TOK(rbrace), TC(exprsep));
 
   CheckFlexibleArrays(parser, str, is_union);
@@ -1130,8 +1134,22 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       // No tag name, nothing to do.
       goto done;
     }
-    tag = has_qualified_tag ? SyntaxFindQualifiedTag(parser->syntax, &qualified_tag)
-                            : SyntaxFindTag(parser->syntax, &tag_name);
+    // A standalone `class X;` in a class or block declares X in that scope
+    // even when an enclosing scope already has an X ([dcl.type.elab]).
+    // `friend class X;` instead refers to the existing enclosing X.
+    bool redeclares_in_local_scope =
+        CompilerIsCXX() && !has_qualified_tag &&
+        parser->syntax->local_tag_stack != NULL &&
+        !parser->syntax->parsing_friend_declaration_specifier &&
+        !parser->parsing_type_id &&
+        LexLookingAt(parser->lex, TOK(semicolon));
+    if (has_qualified_tag) {
+      tag = SyntaxFindQualifiedTag(parser->syntax, &qualified_tag);
+    } else if (redeclares_in_local_scope) {
+      tag = SyntaxFindTopScopeTag(parser->syntax, &tag_name);
+    } else {
+      tag = SyntaxFindTag(parser->syntax, &tag_name);
+    }
     if (tag == NULL) {
       if (has_qualified_tag) {
         SyntaxError(parser->syntax, "Unknown struct tag %s",
@@ -1146,7 +1164,8 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       // (`typedef const struct MuHowS* MuHow`) introduces the name in the
       // innermost namespace or block scope, not in the class.
       bool in_class = CompilerIsCXX() && parser->cxx_member_owner != NULL;
-      bool standalone_forward = LexLookingAt(parser->lex, TOK(semicolon));
+      bool standalone_forward = !parser->parsing_type_id &&
+                                LexLookingAt(parser->lex, TOK(semicolon));
       if (in_class && standalone_forward) {
         str->lexical_parent = parser->cxx_member_owner;
       }

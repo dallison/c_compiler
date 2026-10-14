@@ -118,7 +118,9 @@ static bool ClosureCallOperatorIsGeneric(Symbol* call_op) {
 // Contract: May instantiate generic `operator()`; queues member definition materialization.
 static Symbol* ResolveClosureCallOperatorForFunctionPointer(
     Struct* closure, TypeRecord* target_fn) {
-  if (closure == NULL || target_fn == NULL || !TypeIsFunction(target_fn)) {
+  // Without a target (`+[](int v) { ... }`) only a non-generic call operator
+  // determines the pointer type.
+  if (closure == NULL || (target_fn != NULL && !TypeIsFunction(target_fn))) {
     return NULL;
   }
   StructMember* call_member = ClosureCallOperatorMember(closure);

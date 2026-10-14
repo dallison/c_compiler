@@ -125,6 +125,16 @@ __NEON_INLINE int8x16_t vld1q_s8(const int8_t* source) {
   return result;
 }
 
+__NEON_INLINE int32x4_t vld1q_s32(const int32_t* source) {
+  int32x4_t result;
+  for (int i = 0; i < 4; ++i) result[i] = source[i];
+  return result;
+}
+
+__NEON_INLINE int64x2_t vreinterpretq_s64_s32(int32x4_t value) {
+  return (int64x2_t)value;
+}
+
 __NEON_INLINE int64x2_t vld1q_s64(const int64_t* source) {
   int64x2_t result;
   result[0] = source[0];

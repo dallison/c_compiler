@@ -52,6 +52,9 @@ typedef struct Syntax {
   bool parsing_explicit_instantiation;  // Parsing `template R f<A>(...);`.
   bool parsing_template_argument;  // Parsing expression inside template args.
   bool parsing_friend_type_specifier;  // Friend type names are type-only contexts.
+  bool parsing_friend_declaration_specifier;  // Inside `friend <decl-spec>`.
+  // The case label just parsed was directly followed by another label.
+  bool case_label_chains_to_next_label;
   bool parsing_default_member_initializer;  // NSDMI; later members are in scope.
   int parsing_lambda_body_depth;
   int parsing_consteval_block_depth;
@@ -81,6 +84,13 @@ typedef struct Syntax {
                                   // lets self-template-ids resolve inside nested
                                   // template-argument parsing that spins up fresh
                                   // TypeParsers lacking cxx_member_owner.
+  // Parsing a member function's return type: template-ids naming
+  // cxx_class_head or a forward-declared class stay deferred until that class
+  // is complete.
+  bool defer_template_ids_naming_class_head;
+  // Member function Symbol*s (not owned) whose deferred return type still
+  // names a forward-declared class.
+  Vector pending_member_return_types;
   // Active class-template substitution, mirrored from TypeParserPush so
   // TypeInstantiateClassTemplate (which builds a fresh TypeParser) can still
   // prepend enclosing-class arguments onto a member alias such as
@@ -184,8 +194,11 @@ bool SyntaxIsCXXNumericLiteralOperatorTemplate(Symbol* symbol);
 // must be positioned at the `operator` keyword.  On success `name` (which the
 // function initializes) holds the registered member name, matching the names
 // produced at declaration time.  Returns false (leaving `name` untouched) if not
-// positioned at `operator`.
-bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name);
+// positioned at `operator`.  When the conversion type depends on a template
+// parameter and `dependent_conversion_type` is non-NULL, it receives that type
+// (owned by the caller) so the name can be respelled after substitution.
+bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name,
+                                   TypeRecord** dependent_conversion_type);
 ASTNode* SyntaxParseStaticAssert(Syntax* syntax);
 bool SyntaxEvaluateStaticAssertMessage(ASTNode* message_expr, String* message);
 // Re-evaluate a static_assert once its class is complete.  Returns 1 if the

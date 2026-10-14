@@ -109,6 +109,7 @@ void AnalyzeBuiltinIsConstantEvaluated(VectorASTNode* node);
 void AnalyzeBuiltinObservableCheckpoint(VectorASTNode* node);
 void AnalyzeBuiltinPrefetch(VectorASTNode* node);
 void AnalyzeBuiltinStartLifetime(VectorASTNode* node);
+void AnalyzeBuiltinAlloca(VectorASTNode* node);
 void AnalyzeBuiltinTerminator(VectorASTNode* node);
 void AnalyzeSourceIntegerBuiltin(VectorASTNode* node);
 void AnalyzeSourceStringBuiltin(VectorASTNode* node);

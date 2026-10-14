@@ -8,7 +8,8 @@
 
 #include <stdlib.h>
 
-#if 0
+// div and ldiv remain disabled for the 6502 libc.
+#if !defined(__6502__)
 // Integer division as a single operation.
 
 div_t div(int numer, int denom) {

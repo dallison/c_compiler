@@ -251,6 +251,31 @@ class basic_string_view {
     }
   }
 
+  constexpr size_type rfind(basic_string_view v,
+                            size_type pos = npos) const noexcept {
+    if (v.__size > __size) {
+      return npos;
+    }
+    size_type i = __size - v.__size < pos ? __size - v.__size : pos;
+    while (true) {
+      if (traits_type::compare(__data + i, v.__data, v.__size) == 0) {
+        return i;
+      }
+      if (i == 0) {
+        return npos;
+      }
+      i--;
+    }
+  }
+
+  constexpr size_type rfind(const CharT* s, size_type pos, size_type n) const {
+    return rfind(basic_string_view(s, n), pos);
+  }
+
+  constexpr size_type rfind(const CharT* s, size_type pos = npos) const {
+    return rfind(basic_string_view(s), pos);
+  }
+
   constexpr size_type find_first_of(basic_string_view v, size_type pos = 0) const
       noexcept {
     for (size_type i = pos; i < __size; i++) {

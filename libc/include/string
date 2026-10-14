@@ -19,6 +19,9 @@
 #if __cplusplus >= 202002L
 #include <compare>
 #endif
+// libstdc++'s <string> provides errno (through its numeric conversions), and
+// code that calls strerror(errno) after including only <string> relies on it.
+#include <cerrno>
 #include <cstddef>
 #include <iterator>
 #include <memory>
@@ -750,6 +753,90 @@ class basic_string {
       }
       i--;
     }
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type rfind(const CharT* s, size_type pos,
+                                            size_type n) const {
+    if (n > __size) {
+      return npos;
+    }
+    size_type i = __size - n < pos ? __size - n : pos;
+    while (true) {
+      if (traits_type::compare(__data + i, s, n) == 0) {
+        return i;
+      }
+      if (i == 0) {
+        return npos;
+      }
+      i--;
+    }
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type rfind(const basic_string& s,
+                                            size_type pos = npos) const {
+    return rfind(s.__data, pos, s.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type rfind(const CharT* s,
+                                            size_type pos = npos) const {
+    return rfind(s, pos, traits_type::length(s));
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_first_not_of(
+      const CharT* s, size_type pos, size_type n) const {
+    for (size_type i = pos; i < __size; i++) {
+      if (traits_type::find(s, n, __data[i]) == nullptr) {
+        return i;
+      }
+    }
+    return npos;
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_first_not_of(
+      const basic_string& s, size_type pos = 0) const {
+    return find_first_not_of(s.__data, pos, s.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_first_not_of(
+      const CharT* s, size_type pos = 0) const {
+    return find_first_not_of(s, pos, traits_type::length(s));
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_first_not_of(
+      CharT c, size_type pos = 0) const {
+    return find_first_not_of(&c, pos, 1);
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_last_not_of(
+      const CharT* s, size_type pos, size_type n) const {
+    if (__size == 0) {
+      return npos;
+    }
+    size_type i = pos < __size ? pos : __size - 1;
+    while (true) {
+      if (traits_type::find(s, n, __data[i]) == nullptr) {
+        return i;
+      }
+      if (i == 0) {
+        return npos;
+      }
+      i--;
+    }
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_last_not_of(
+      const basic_string& s, size_type pos = npos) const {
+    return find_last_not_of(s.__data, pos, s.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_last_not_of(
+      const CharT* s, size_type pos = npos) const {
+    return find_last_not_of(s, pos, traits_type::length(s));
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_last_not_of(
+      CharT c, size_type pos = npos) const {
+    return find_last_not_of(&c, pos, 1);
   }
 };
 

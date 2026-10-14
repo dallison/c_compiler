@@ -396,6 +396,29 @@ void AnalyzeBuiltinPrefetch(VectorASTNode* node) {
                  NewTypeRecordWithSize(kTypeVoid, kQualPlain));
 }
 
+// Contract: Converts the byte count to size_t; result type void*.  The
+// enclosing function becomes noinline: inlined into a loop, each iteration
+// would keep its allocation until the caller returns.
+void AnalyzeBuiltinAlloca(VectorASTNode* node) {
+  if (compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function) &&
+      compiler->current_function->info.function.symbol != NULL) {
+    compiler->current_function->info.function.symbol->flags.noinline = true;
+  }
+  if (node->children->length == 1) {
+    ASTNode* size = AnalyzeExpression(node->children->value.p[0]);
+    node->children->value.p[0] = size;
+    if (!TypeIsIntegral(size->type) && !TypeContainsTemplateParameter(size->type)) {
+      SemanticError(size, "__builtin_alloca size must be an integer");
+    } else {
+      NormalConversion(size, NewSizeTypeRecord());
+    }
+  }
+  ASTNodeSetType(&node->base,
+                 NewPointerTo(kQualPlain,
+                              NewTypeRecordWithSize(kTypeVoid, kQualPlain)));
+}
+
 // Contract: Analyzes pointer operand; diagnoses complete implicit-lifetime
 // aggregate pointee. Result type void.
 void AnalyzeBuiltinStartLifetime(VectorASTNode* node) {

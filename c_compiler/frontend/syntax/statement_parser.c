@@ -921,27 +921,28 @@ static ASTNode* ParseSwitchStatement(Syntax* syntax, TokenClass followers,
   syntax->switch_count++;
   ASTNode* stmt = SyntaxParseStatement(syntax, followers);
   // `switch (0) case 0: default: stmt;` is an unbraced body.  A case label
-  // leaves a following case/default for the enclosing compound-statement
-  // loop, which this form does not have, so collect them here while the
-  // switch is still open.  A braced body already consumed its labels; the
-  // next case/default belongs to the enclosing switch
-  // (`switch (x) { switch (y) { default: } default: }`).
-  if ((stmt == NULL || stmt->op != AST_OP(compound)) &&
-      (LexLookingAt(syntax->lex, TOK(case)) ||
-       LexLookingAt(syntax->lex, TOK(default)))) {
+  // leaves a directly following case/default for the enclosing
+  // compound-statement loop, which this form does not have, so collect the
+  // chained labels here while the switch is still open.  The chain ends at
+  // the first label with a statement; later labels (and every label after a
+  // braced body) belong to the enclosing switch
+  // (`switch (x) { case 1: switch (0) case 0: default: f(); case 2: }`).
+  if (stmt != NULL && stmt->op == AST_OP(case) &&
+      syntax->case_label_chains_to_next_label) {
     Vector* statements = NewVector();
-    if (stmt != NULL) {
-      VectorAppend(statements, stmt);
-    }
-    while (LexLookingAt(syntax->lex, TOK(case)) ||
-           LexLookingAt(syntax->lex, TOK(default))) {
-      ASTNode* next = SyntaxParseStatement(syntax, followers);
-      if (next != NULL) {
-        VectorAppend(statements, next);
+    VectorAppend(statements, stmt);
+    ASTNode* last = stmt;
+    while (last != NULL && last->op == AST_OP(case) &&
+           syntax->case_label_chains_to_next_label) {
+      syntax->case_label_chains_to_next_label = false;
+      last = SyntaxParseStatement(syntax, followers);
+      if (last != NULL) {
+        VectorAppend(statements, last);
       }
     }
     stmt = NewCompoundStatementASTNode(statements, location);
   }
+  syntax->case_label_chains_to_next_label = false;
   syntax->switch_count--;
   ASTNode* switch_stmt = NewSwitchStatementASTNode(expr, stmt, location);
   ASTNode* inner = FinishConditionScope(syntax, decl, switch_stmt, location);
@@ -2061,7 +2062,10 @@ static ASTNode* ParseForStatement(Syntax* syntax, TokenClass followers,
                     "alias declaration in init-statement requires C++23");
       }
       c1 = SyntaxParseLocalDeclaration(syntax);
-    } else if (SyntaxLookingAtType(syntax)) {
+    } else if (SyntaxLookingAtType(syntax) ||
+               // C++ permits any simple-declaration here, including
+               // `static` locals; C allows only auto and register.
+               (CompilerIsCXX() && SyntaxLookingAtDeclaration(syntax))) {
       c1 = SyntaxParseLocalDeclaration(syntax);
     } else {
       c1 = SyntaxParseExpression(syntax, followers);
@@ -2177,14 +2181,15 @@ static ASTNode* ParseCaseStatement(Syntax* syntax, TokenClass followers,
   // case c:
   //
   ASTNode* stmt = NULL;
-  if (!LexLookingAt(syntax->lex, TOK(case)) &&
-      !LexLookingAt(syntax->lex, TOK(default)) &&
-      !LexLookingAt(syntax->lex, TOK(rbrace))) {
+  bool chains_to_next_label = LexLookingAt(syntax->lex, TOK(case)) ||
+                              LexLookingAt(syntax->lex, TOK(default));
+  if (!chains_to_next_label && !LexLookingAt(syntax->lex, TOK(rbrace))) {
     stmt = ParseStatementAfterLabel(syntax, followers);
   } else if (LexLookingAt(syntax->lex, TOK(rbrace)) &&
              !LanguageAllowsLabelAtEndOfCompoundStatement()) {
     DiagnoseLabelAtEndOfCompoundStatement(syntax);
   }
+  syntax->case_label_chains_to_next_label = chains_to_next_label;
   return NewCaseLabelASTNode(expr, stmt, location);
 }
 

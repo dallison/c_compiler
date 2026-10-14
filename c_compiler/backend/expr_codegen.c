@@ -2902,15 +2902,22 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       // materialize as a value (or skip for a class object).  Take the address
       // unless the initializer is already a pointer -- a dereference, a
       // reference-returning call, or an explicit address-of.
-      if (TypeIsReference(designated_init->base.type) &&
-          !TypeIsPointer(value->type) && value->opcode != IR_OP(addressof)) {
+      bool reference_slot = TypeIsReference(designated_init->base.type);
+      if (reference_slot && !TypeIsPointer(value->type) &&
+          value->opcode != IR_OP(addressof)) {
         TypeRecord* referent = designated_init->base.type->next;
         value = IRSetType(
             GeneratorEmit(gen, NewIR1(IR_OP(addressof), value)),
             NewPointerTo(kQualPlain, referent != NULL ? referent
                                                       : designated_init->base.type));
       }
-      if (TypeUsesLongDoubleRepresentation(designated_init->base.type)) {
+      if (reference_slot) {
+        // The initializer expression has the referent's type; the slot itself
+        // is a pointer.
+        write = IRSetType(
+            GeneratorEmit(gen, NewIR2(IR_OP(storea), destaddr, value)),
+            node->type);
+      } else if (TypeUsesLongDoubleRepresentation(designated_init->base.type)) {
         write = StoreLongDoubleToAddress(gen, destaddr, value,
                                          designated_init->base.type);
       } else if (TypeIsInt128(designated_init->base.type)) {
@@ -6597,6 +6604,23 @@ static IRNode* GenerateBuiltinPrefetch(Generator* gen, VectorASTNode* node) {
   return IRSetType(GeneratorEmit(gen, prefetch), node->base.type);
 }
 
+// The allocation lives until the function returns; the epilogue rebuilds the
+// stack pointer from the frame pointer whenever the frame is non-empty, which
+// the spill slot guarantees.
+static IRNode* GenerateBuiltinAlloca(Generator* gen, VectorASTNode* node) {
+  IRNode* size = GenerateExpression(gen, node->children->value.p[0]);
+  IRNode* aligned = GeneratorEmit(
+      gen, NewIR2(IR_OP(aligni), size,
+                  GeneratorGetIntConstant(
+                      gen, NULL, compiler->target->stack_alignment)));
+  GeneratorEmit(gen, NewIR1(IR_OP(decsp), aligned));
+  IRNode* address =
+      IRSetType(GeneratorEmit(gen, NewIR(IR_OP(tmp))), node->base.type);
+  GeneratorEmit(gen, NewIR1(IR_OP(savesp), address));
+  IRNode* holder = GeneratorSpillValueToTemp(gen, address, node->base.type);
+  return GeneratorReloadSpilledValue(gen, holder, node->base.type);
+}
+
 static IRNode* GenerateBuiltinStartLifetime(Generator* gen,
                                             VectorASTNode* node) {
   if (!gen->for_constant_evaluation) {
@@ -7570,6 +7594,10 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
 
     case AST_OP(builtin_start_lifetime):
       result = GenerateBuiltinStartLifetime(gen, vector_node);
+      break;
+
+    case AST_OP(builtin_alloca):
+      result = GenerateBuiltinAlloca(gen, vector_node);
       break;
 
     case AST_OP(builtin_observable_checkpoint):

@@ -154,6 +154,7 @@ typedef enum {
   AST_OP(builtin_unreachable),
   AST_OP(builtin_constant_p),
   AST_OP(builtin_is_constant_evaluated),
+  AST_OP(builtin_alloca),
 
   AST_OP(cast),   // Cast AST node token.
   AST_OP(label),  // Label AST node.
@@ -642,6 +643,9 @@ typedef struct {
   } value;
   int64_t ihi;                 // @wire 20 high word of __int128 constants
   Vector* template_arguments;  // @wire 19
+  // The dependent type of a conversion-function-id member name
+  // (`u.operator Box<T>()`); the name is respelled once it is substituted.
+  TypeRecord* conversion_type;  // @wire - (template bodies are re-parsed)
 } ConstantASTNode;
 
 ASTNode* NewIntConstantASTNode(int64_t value, TypeRecord* type,

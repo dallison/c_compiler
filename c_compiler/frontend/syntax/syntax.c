@@ -1418,7 +1418,11 @@ bool SyntaxIsCXXNumericLiteralOperatorTemplate(Symbol* symbol) {
          parameter->type->qualifiers == kQualPlain;
 }
 
-bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name) {
+bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name,
+                                   TypeRecord** dependent_conversion_type) {
+  if (dependent_conversion_type != NULL) {
+    *dependent_conversion_type = NULL;
+  }
   if (!CompilerIsCXX() || !LexLookingAt(syntax->lex, TOK(operator))) {
     return false;
   }
@@ -1439,6 +1443,11 @@ bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name) {
   TypeRecord* type = ParseCXXConversionType(&parser);
   ConversionOperatorName(type, name);
   TypeParserDestruct(&parser);
+  if (dependent_conversion_type != NULL &&
+      TypeContainsTemplateParameter(type)) {
+    TypeRecordIncRef(type);
+    *dependent_conversion_type = type;
+  }
   return true;
 }
 
@@ -1921,7 +1930,13 @@ static Namespace* FindNamespaceChildInScope(Syntax* syntax, String* name) {
     if (alias != NULL) {
       return alias;
     }
-    if (FindSymbol(&symbols->table, name) != NULL ||
+    // Lookup of a name before `::` considers only namespaces, types, and
+    // templates ([basic.lookup.qual]): a parameter `color` does not hide
+    // namespace `color` in `color::kNormal`.
+    Symbol* local = FindSymbol(&symbols->table, name);
+    if ((local != NULL && (StorageIs(local->storage, STO(typedef)) ||
+                           local->flags.is_template ||
+                           local->flags.is_template_type_parameter)) ||
         (tags != NULL && FindSymbol(&tags->table, name) != NULL)) {
       return NULL;
     }
@@ -2774,6 +2789,8 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->parsing_explicit_instantiation = false;
   syntax->parsing_template_argument = false;
   syntax->parsing_friend_type_specifier = false;
+  syntax->parsing_friend_declaration_specifier = false;
+  syntax->case_label_chains_to_next_label = false;
   syntax->parsing_default_member_initializer = false;
   syntax->expression_nesting_depth = 0;
   syntax->struct_definition_depth = 0;
@@ -2787,6 +2804,8 @@ void SyntaxInit(Syntax* syntax, Lex* lex) {
   syntax->pending_explicit_condition = NULL;
   syntax->pending_placeholder_variable_constraint = NULL;
   syntax->cxx_class_head = NULL;
+  syntax->defer_template_ids_naming_class_head = false;
+  VectorInit(&syntax->pending_member_return_types);
   syntax->template_substitution_source = NULL;
   syntax->template_substitution_target = NULL;
   syntax->enclosing_template_substitution_source = NULL;
@@ -2816,6 +2835,7 @@ void SyntaxDestruct(Syntax* syntax) {
                              (VectorElementDestructor)SymbolDestruct, /*free_element=*/true);
   VectorDestruct(&syntax->local_statics);
   VectorDestruct(&syntax->inline_static_member_definitions);
+  VectorDestruct(&syntax->pending_member_return_types);
   ConstraintExprDelete(syntax->current_template_requires_clause);
   syntax->current_template_requires_clause = NULL;
   ConstraintExprDelete(syntax->pending_placeholder_variable_constraint);
@@ -4649,6 +4669,38 @@ static void MarkCXXPackExpansionIfPresent(Syntax* syntax, ASTNode* expr) {
   expr->flags |= kASTPackExpansion;
 }
 
+// At a `[` that begins an initializer clause.  C++ has no array designators,
+// so there it is a lambda unless the bracket is followed by what can only
+// continue GNU's `[index] = value` designation (`=`, `[`, or `.`).
+static bool LookingAtArrayDesignator(Syntax* syntax) {
+  if (!CompilerIsCXX()) {
+    return true;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  int depth = 0;
+  do {
+    if (LexLookingAt(syntax->lex, TOK(lsquare)) ||
+        LexLookingAt(syntax->lex, TOK(lparen)) ||
+        LexLookingAt(syntax->lex, TOK(lbrace))) {
+      depth++;
+    } else if (LexLookingAt(syntax->lex, TOK(rsquare)) ||
+               LexLookingAt(syntax->lex, TOK(rparen)) ||
+               LexLookingAt(syntax->lex, TOK(rbrace))) {
+      depth--;
+    } else if (LexLookingAt(syntax->lex, TOK(eof))) {
+      break;
+    }
+    LexNextToken(syntax->lex);
+  } while (depth > 0);
+  bool designator = LexLookingAt(syntax->lex, TOK(equal)) ||
+                    LexLookingAt(syntax->lex, TOK(lsquare)) ||
+                    LexLookingAt(syntax->lex, TOK(dot));
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return designator;
+}
+
 // Parse a brace-enclosed initializer.
 static ASTNode* ParseBracedInitializer(Syntax* syntax) {
   Vector* initializers = NewVector();
@@ -4657,7 +4709,8 @@ static ASTNode* ParseBracedInitializer(Syntax* syntax) {
     if (LexMatch(syntax->lex, TOK(lbrace))) {
       // Braced initializer.
       VectorAppend(initializers, ParseBracedInitializer(syntax));
-    } else if (LexLookingAt(syntax->lex, TOK(lsquare)) ||
+    } else if ((LexLookingAt(syntax->lex, TOK(lsquare)) &&
+                LookingAtArrayDesignator(syntax)) ||
                LexLookingAt(syntax->lex, TOK(dot))) {
       // Designated initializer.
       ParseDesignatedInitializer(syntax, initializers);
@@ -7613,13 +7666,18 @@ static ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
     // constructor ([over.match.list]); flattening it into separate arguments
     // turns `map{{k, v}}` into a two-argument call.  An empty list still
     // value-initializes.
+    // An aggregate member is aggregate-initialized from the whole list, as for
+    // an explicit `member{a, b}` mem-initializer.
     ASTNode* initializer = member->default_initializer;
+    TypeRecord* member_type = member->symbol->type;
     if (initializer->op == AST_OP(braced_init) &&
         ((BracedInitializerASTNode*)initializer)->initializers != NULL &&
         ((BracedInitializerASTNode*)initializer)->initializers->length > 0 &&
-        member->symbol->type != NULL &&
-        TypeIsStructOrUnion(member->symbol->type) &&
-        TypeHasCXXInitializerListConstructor(member->symbol->type)) {
+        member_type != NULL && TypeIsStructOrUnion(member_type) &&
+        (TypeHasCXXInitializerListConstructor(member_type) ||
+         (member_type->info.struct_info != NULL &&
+          member_type->info.struct_info->is_aggregate &&
+          !TypeContainsTemplateParameter(member_type)))) {
       Vector* actuals = NewVector();
       VectorAppend(actuals, CloneDefaultMemberInitializerFor(func, initializer));
       return NewCXXMemberInitializerStatement(
@@ -9449,12 +9507,17 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
       starts_with_qualified_name && FriendQualifierMayBeDependent(syntax);
   bool used_friend_type_only_context =
       CompilerCXXAtLeast(kLanguageStandardCXX26) && starts_with_qualified_name;
+  bool saved_friend_declaration_context =
+      syntax->parsing_friend_declaration_specifier;
   syntax->parsing_friend_type_specifier =
       CompilerCXXAtLeast(kLanguageStandardCXX26);
+  syntax->parsing_friend_declaration_specifier = true;
   ParseDeclarationSpecifier(syntax, &storage, &is_inline, &is_constexpr,
                             &is_consteval, &is_constinit, &is_explicit, &type,
                             &attributes, kParsingFileScope);
   syntax->parsing_friend_type_specifier = saved_friend_type_context;
+  syntax->parsing_friend_declaration_specifier =
+      saved_friend_declaration_context;
 
   TypeRecordIncRef(type);
 
@@ -9503,11 +9566,14 @@ void SyntaxParseFriendDeclaration(Syntax* syntax, Struct* befriending) {
       is_explicit = false;
       syntax->parsing_friend_type_specifier =
           CompilerCXXAtLeast(kLanguageStandardCXX26);
+      syntax->parsing_friend_declaration_specifier = true;
       ParseDeclarationSpecifier(
           syntax, &storage, &is_inline, &is_constexpr, &is_consteval,
           &is_constinit, &is_explicit, &type, &attributes,
           kParsingFileScope);
       syntax->parsing_friend_type_specifier = saved_friend_type_context;
+      syntax->parsing_friend_declaration_specifier =
+          saved_friend_declaration_context;
       TypeRecordIncRef(type);
       if (type == NULL) {
         SyntaxError(syntax, "expected a friend type specifier");
@@ -11773,6 +11839,7 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
             ->ctad_names_template_template_parameter));
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
+  parser.parsing_type_id = true;
   TypeRecord* type = TypeParserParseType(&parser, true);
   Symbol* parsed = TypeParserParseDeclarator(&parser, type);
   if (parsed != NULL) {
@@ -13118,6 +13185,11 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
   if (!LexMatch(lex, TOK(less))) {
     return NULL;
   }
+  // Only the outermost template-id of a member's return type is deferred;
+  // arguments such as `is_same_v<Self, T>` are evaluated as written.
+  bool saved_defer_class_head_ids =
+      syntax->defer_template_ids_naming_class_head;
+  syntax->defer_template_ids_naming_class_head = false;
   Vector* args = NewVector();
   while (!LexEof(lex) && !LexLookingAtClosingAngle(lex)) {
     TemplateArgument* arg = TemplateArgumentAlloc();
@@ -13309,6 +13381,7 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       break;
     }
   }
+  syntax->defer_template_ids_naming_class_head = saved_defer_class_head_ids;
   SyntaxNeedTemplateClose(syntax, followers);
   return args;
 }
@@ -14568,6 +14641,13 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
       ASTNode* initializer = actuals->value.p[0];
       actuals->length = 0;
       VectorDelete(actuals);
+      // Code generation stores a local's initializer only through an init
+      // node, so build the same tree as `T x = e`.
+      if (wrap_aggregate_braces &&
+          (initializer->flags & kASTPackExpansion) == 0) {
+        return NewVariableInitExpression(
+            syntax, sym, NewExpressionInitializerASTNode(initializer, location));
+      }
       return initializer;
     }
     return NewCXXBracedInitializerFromActuals(actuals, location);

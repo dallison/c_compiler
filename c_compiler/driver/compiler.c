@@ -2799,7 +2799,12 @@ static void MarkReferencedSymbolInAST(ASTNode* node, void* data,
   }
   if (symbol != NULL && symbol->type != NULL &&
       TypeIsFunction(symbol->type)) {
-    CompilerMarkFunctionReferenced(symbol);
+    // A body not yet analyzed can still name the template from parse-time
+    // lookup.  Analysis selects the specialization, which is marked then; the
+    // pattern itself never gets code.
+    if (!symbol->flags.is_template) {
+      CompilerMarkFunctionReferenced(symbol);
+    }
   } else if (symbol != NULL) {
     CompilerMarkVariableReferenced(symbol);
   }

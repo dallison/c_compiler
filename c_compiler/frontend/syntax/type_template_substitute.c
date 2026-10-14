@@ -2525,8 +2525,27 @@ static void SubstituteArrayTemplateBound(TypeParser* parser,
   }
   if (original->info.array.is_dependent_bound) {
     int64_t folded = 0;
-    if (TryFoldDependentTemplateArgument(
-            parser, original->info.array.size.vla.size, args, &folded)) {
+    bool saved_trap = DiagnosticErrorTrapBegin();
+    bool folded_ok = TryFoldDependentTemplateArgument(
+        parser, original->info.array.size.vla.size, args, &folded);
+    bool bound_failed = DiagnosticErrorTrapped();
+    DiagnosticErrorTrapEndPropagating(saved_trap);
+    if (bound_failed) {
+      // `char (*)[sizeof(declval<U>().f())]` with no such `f`: once nothing in
+      // the bound is dependent, an invalid bound is a substitution failure.
+      ASTNode* substituted = CloneDependentExpressionWithArgs(
+          parser, original->info.array.size.vla.size, args);
+      bool still_dependent =
+          substituted == NULL ||
+          DependentExpressionContainsTemplateParameter(substituted);
+      ASTNodeDelete(substituted);
+      if (!still_dependent) {
+        parser->template_substitution_failed = true;
+        copy->size = 0;
+        return;
+      }
+    }
+    if (folded_ok) {
       if (folded < 0) {
         SyntaxError(parser->syntax, "Array with negative size");
         folded = 1;

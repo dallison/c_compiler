@@ -1051,6 +1051,10 @@ bool FunctionCanBeInlined(FunctionInfo* func) {
   if (!EnsureInlinedCalleeBodyIsAnalyzed(func)) {
     return false;
   }
+  // Analyzing the body can mark it noinline (`__builtin_alloca`).
+  if (func->symbol != NULL && func->symbol->flags.noinline) {
+    return false;
+  }
   if (InliningBlockedByCalleeContractRules(func)) {
     return false;
   }

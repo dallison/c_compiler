@@ -359,6 +359,14 @@ void DiagnosticErrorTrapEnd(bool saved) {
       compiler->diagnostic_error_trap_depth > 0 ? saved : false;
 }
 
+void DiagnosticErrorTrapEndPropagating(bool saved) {
+  bool trapped = compiler->diagnostic_error_trapped;
+  DiagnosticErrorTrapEnd(saved);
+  if (trapped && compiler->diagnostic_error_trap_depth > 0) {
+    compiler->diagnostic_error_trapped = true;
+  }
+}
+
 bool DiagnosticErrorTrapped(void) {
   return compiler->diagnostic_error_trapped;
 }

@@ -476,7 +476,10 @@ static void ParseCXXMemberUsingAlias(TypeParser* parser, Struct* owner,
     SyntaxRecover(parser->syntax, TC(semicolon));
     return;
   }
+  bool saved_parsing_type_id = parser->parsing_type_id;
+  parser->parsing_type_id = true;
   TypeRecord* type = TypeParserParseType(parser, true);
+  parser->parsing_type_id = saved_parsing_type_id;
   Symbol* parsed = TypeParserParseDeclarator(parser, type);
   if (parsed != NULL) {
     SyntaxApplyDeclarationAttributes(parser->syntax, parsed);
@@ -2280,6 +2283,158 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
   VectorClear(deferred);
 }
 
+// True when the member declaration ahead declares a function (`R name(`)
+// whose return type may name a specialization of the class itself.  A
+// template-id followed by `::` (`Traits<Self>::type f();`) needs its members
+// now, so it is excluded.
+static bool MemberDeclarationLooksLikeFunction(Lex* lex) {
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(lex, &checkpoint);
+  int nesting = 0;
+  int angles = 0;
+  bool previous_was_identifier = false;
+  bool previous_closed_angle = false;
+  bool result = false;
+  for (int steps = 0; steps < 256 && !LexEof(lex); steps++) {
+    if (previous_closed_angle && LexLookingAt(lex, TOK(coloncolon))) {
+      break;
+    }
+    bool closed_angle = false;
+    bool is_identifier = LexLookingAt(lex, TOK(identifier));
+    if (nesting == 0) {
+      if (angles == 0 && (LexLookingAt(lex, TOK(semicolon)) ||
+                          LexLookingAt(lex, TOK(equal)) ||
+                          LexLookingAt(lex, TOK(lbrace)) ||
+                          LexLookingAt(lex, TOK(rbrace)) ||
+                          LexLookingAt(lex, TOK(colon)) ||
+                          LexLookingAt(lex, TOK(comma)))) {
+        break;
+      }
+      if (angles == 0 && LexLookingAt(lex, TOK(lparen)) &&
+          previous_was_identifier) {
+        result = true;
+        break;
+      }
+      if (LexLookingAt(lex, TOK(less))) {
+        angles++;
+      } else if (angles > 0 && LexLookingAt(lex, TOK(greater))) {
+        angles--;
+        closed_angle = true;
+      } else if (angles > 0 && LexLookingAt(lex, TOK(greatergreater))) {
+        angles = angles > 1 ? angles - 2 : 0;
+        closed_angle = true;
+      }
+    }
+    if (LexLookingAt(lex, TOK(lparen)) || LexLookingAt(lex, TOK(lsquare)) ||
+        LexLookingAt(lex, TOK(lbrace))) {
+      nesting++;
+    } else if (nesting > 0 && (LexLookingAt(lex, TOK(rparen)) ||
+                               LexLookingAt(lex, TOK(rsquare)) ||
+                               LexLookingAt(lex, TOK(rbrace)))) {
+      nesting--;
+    }
+    previous_was_identifier = is_identifier;
+    previous_closed_angle = closed_angle;
+    LexNextToken(lex);
+  }
+  LexCheckpointRestore(lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return result;
+}
+
+// True when `function` returns a specialization that was left as the primary
+// template plus arguments because `str` or a forward-declared class was
+// incomplete (see MemberDeclarationLooksLikeFunction).
+static bool MemberFunctionReturnTypeIsDeferred(TypeRecord* function,
+                                               Struct* str) {
+  TypeRecord* deferred = TypeDeferredReturnSpecialization(function);
+  return deferred != NULL &&
+         (TypeTemplateArgumentsNameStruct(deferred->template_arguments, str) ||
+          TypeTemplateArgumentsNameIncompleteClass(
+              deferred->template_arguments));
+}
+
+void TypeMaterializePendingMemberReturnType(Syntax* syntax,
+                                            TypeRecord* function) {
+  Vector* pending = &syntax->pending_member_return_types;
+  for (size_t i = 0; i < pending->length; i++) {
+    Symbol* symbol = pending->value.p[i];
+    if (symbol->type != function) {
+      continue;
+    }
+    VectorDeleteElement(pending, i);
+    TypeRecord* ret =
+        TypeMaterializeClassTemplateSpecialization(syntax, function->next);
+    if (ret != function->next) {
+      TypeRecordIncRef(ret);
+      TypeRecordDelete(function->next);
+      function->next = ret;
+    }
+    return;
+  }
+}
+
+static void MaterializeMemberReturnType(Syntax* syntax, Symbol* symbol) {
+  TypeRecord* materialized =
+      TypeMaterializeClassTemplateSpecialization(syntax, symbol->type);
+  if (materialized != symbol->type) {
+    SymbolSetType(symbol, materialized);
+  }
+}
+
+// Instantiate the return-type template-ids deferred while `str` was
+// incomplete, and those of earlier classes waiting on a class that has since
+// been defined.  Specializations still naming a forward-declared class wait in
+// syntax->pending_member_return_types.
+static void MaterializeDeferredMemberReturnTypes(TypeParser* parser,
+                                                 Struct* str) {
+  Syntax* syntax = parser->syntax;
+  Vector* pending = &syntax->pending_member_return_types;
+  for (size_t i = 0; i < pending->length;) {
+    Symbol* symbol = pending->value.p[i];
+    TypeRecord* deferred = TypeDeferredReturnSpecialization(symbol->type);
+    bool waiting = deferred != NULL && TypeTemplateArgumentsNameIncompleteClass(
+                                           deferred->template_arguments);
+    // A class enclosing `str` is still being defined and lacks its implicit
+    // special members.
+    for (Struct* outer = str->lexical_parent; deferred != NULL && !waiting &&
+                                              outer != NULL;
+         outer = outer->lexical_parent) {
+      waiting = TypeTemplateArgumentsNameStruct(deferred->template_arguments,
+                                                outer);
+    }
+    if (waiting) {
+      i++;
+      continue;
+    }
+    VectorDeleteElement(pending, i);
+    if (deferred != NULL) {
+      MaterializeMemberReturnType(syntax, symbol);
+    }
+  }
+  // A class template pattern's `iterator<Self, false>` is substituted per
+  // specialization; nothing in it was deferred.
+  if (str->defining_template_scope_count != 0) {
+    return;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || !member->is_member_function ||
+        member->symbol == NULL ||
+        !MemberFunctionReturnTypeIsDeferred(member->symbol->type, str)) {
+      continue;
+    }
+    TypeRecord* deferred = TypeDeferredReturnSpecialization(
+        member->symbol->type);
+    if (TypeTemplateArgumentsNameIncompleteClass(
+            deferred->template_arguments)) {
+      VectorAppend(pending, member->symbol);
+    } else {
+      MaterializeMemberReturnType(syntax, member->symbol);
+    }
+  }
+}
+
 static void FlushDeferredNoexceptSpecifiers(TypeParser* parser,
                                             Vector* deferred) {
   if (deferred == NULL || deferred->length == 0) {
@@ -3353,7 +3508,17 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
       parser->storage |= STO(static);
     }
     unsigned enum_bodies_before = parser->syntax->enum_bodies_parsed;
+    bool saved_defer_class_head_ids =
+        parser->syntax->defer_template_ids_naming_class_head;
+    // Members of a class template are cloned per specialization, and the
+    // clones would never see the deferred type materialized.
+    parser->syntax->defer_template_ids_naming_class_head =
+        CompilerIsCXX() && parser->syntax->cxx_class_head == str &&
+        str->defining_template_scope_count == 0 &&
+        MemberDeclarationLooksLikeFunction(parser->lex);
     TypeRecord* member_type = TypeParserParseType(parser, true);
+    parser->syntax->defer_template_ids_naming_class_head =
+        saved_defer_class_head_ids;
     parser->storage = saved_member_storage;
     parser->parsing_direct_class_template = saved_direct_class_template;
     // Unscoped enumerators are members of the enclosing class even when the
@@ -3474,7 +3639,9 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         // specialization as the out-of-line definition does.
         if (CompilerIsCXX() &&
             !parser->syntax->parsing_template_declaration &&
-            (!is_static_member || TypeIsFunction(member_symbol->type))) {
+            (!is_static_member || TypeIsFunction(member_symbol->type)) &&
+            (str->defining_template_scope_count != 0 ||
+             !MemberFunctionReturnTypeIsDeferred(member_symbol->type, str))) {
           TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
               parser->syntax, member_symbol->type);
           if (materialized != member_symbol->type) {
@@ -3903,6 +4070,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
   // __vptr field (and adjusted member offsets) before they are re-parsed.
   UpdateCXXAbstractStatus(str);
   AddCXXVPtrMember(parser, str);
+  MaterializeDeferredMemberReturnTypes(parser, str);
   // Re-parse the deferred inline bodies in complete-class context, then
   // restore this frame's collection pointer.  Bodies of a nested class stay
   // deferred until the enclosing class is complete: their potential scope
