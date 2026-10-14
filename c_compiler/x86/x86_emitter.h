@@ -21,6 +21,9 @@ typedef struct {
   int spill_region_size;
   int first_spill_offset;
   void* current_block;
+  // The prologue pushed the frame pointer and emitted the `.Leh_*_after_push`
+  // labels the unwind info refers to.
+  bool eh_frame_labels_emitted;
 } X86Emitter;
 
 void X86EmitterInit(X86Emitter* emitter, X86Generator* rv);

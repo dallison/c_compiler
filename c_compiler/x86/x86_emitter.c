@@ -459,6 +459,7 @@ static void SaveRegisters(X86Emitter* emitter, FILE* fp) {
     if (!varargs) {
       fprintf(fp, ".Leh_%s_after_leaq:\n",
               emitter->rv->base.function_name.value);
+      emitter->eh_frame_labels_emitted = true;
     }
     int remaining = stack_frame_size - 8;
     if (remaining > 0) {
@@ -3151,6 +3152,7 @@ void X86EmitterInit(X86Emitter* emitter, X86Generator* rv) {
   emitter->spill_region_size = rv->register_allocator.max_spilled_region_size;
   emitter->first_spill_offset = 0;
   emitter->current_block = NULL;
+  emitter->eh_frame_labels_emitted = false;
 }
 
 X86Emitter* NewX86Emitter(X86Generator* rv) {
@@ -3248,7 +3250,7 @@ static void X86PrintEHFrame(X86Emitter* emitter, FILE* fp,
       .ranges = lsda_ranges,
       .range_count = lsda_count,
       .func_name = func_name,
-      .has_frame = !EmptyStackFrame(emitter),
+      .has_frame = emitter->eh_frame_labels_emitted,
       .is_64bit = true,
       .cie_ra_reg = 16,
       .cie_cfa_reg = 7,
@@ -3293,7 +3295,7 @@ static void X86PrintGCCExceptTable(X86Emitter* emitter, FILE* fp,
       .ranges = lsda_ranges,
       .range_count = lsda_count,
       .func_name = func_name,
-      .has_frame = !EmptyStackFrame(emitter),
+      .has_frame = emitter->eh_frame_labels_emitted,
       .is_64bit = true,
       .cie_ra_reg = 16,
       .cie_cfa_reg = 7,
@@ -3551,6 +3553,7 @@ static void SaveRegistersI386(X86Emitter* emitter, FILE* fp) {
     if (!varargs) {
       fprintf(fp, ".Leh_%s_after_leaq:\n",
               emitter->rv->base.function_name.value);
+      emitter->eh_frame_labels_emitted = true;
     }
     if (stack_frame_size > 0) {
       DecrementStackPointer(emitter, stack_frame_size, fp);
@@ -6143,7 +6146,7 @@ static void X86PrintEHFrameI386(X86Emitter* emitter, FILE* fp,
       .ranges = lsda_ranges,
       .range_count = lsda_count,
       .func_name = func_name,
-      .has_frame = !EmptyStackFrame(emitter),
+      .has_frame = emitter->eh_frame_labels_emitted,
       .is_64bit = false,
       .cie_ra_reg = 16,
       .cie_cfa_reg = 4,
@@ -6183,7 +6186,7 @@ static void X86PrintGCCExceptTableI386(X86Emitter* emitter, FILE* fp,
       .ranges = lsda_ranges,
       .range_count = lsda_count,
       .func_name = func_name,
-      .has_frame = !EmptyStackFrame(emitter),
+      .has_frame = emitter->eh_frame_labels_emitted,
       .is_64bit = false,
       .cie_ra_reg = 16,
       .cie_cfa_reg = 4,
