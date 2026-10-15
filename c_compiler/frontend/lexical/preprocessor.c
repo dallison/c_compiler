@@ -4591,11 +4591,15 @@ static void CollectActualArguments(Preprocessor* p,
   bool too_many_args = false;
   bool separate_va_arg = false;
   bool end = false;
+  bool next_follows_space = false;
     
   while (!end && CurrentToken(ti) != PPTOK(closeparen)) {
     String* actual = NewString(NULL);
     int num_nested_brackets = 1;
     bool actual_ended_with_comma = false;
+    bool actual_has_token = false;
+    bool actual_follows_space = next_follows_space;
+    next_follows_space = false;
     while (!end) {
       PreprocessingToken tok = CurrentToken(ti);
       if (tok == PPTOK(end)) {
@@ -4640,6 +4644,7 @@ static void CollectActualArguments(Preprocessor* p,
         if (num_nested_brackets == 1) {
           // Comma outside of nested brackets, end of actual.
           MoveToNextToken(ti);
+          next_follows_space = IsSpaceToken(ti);
           SkipSpaceTokens(ti);
           actual_ended_with_comma = true;
           break;
@@ -4650,16 +4655,30 @@ static void CollectActualArguments(Preprocessor* p,
         MoveToNextToken(ti);
         continue;
       }
+      if (tok != PPTOK(space)) {
+        actual_has_token = true;
+      }
       AppendCurrentToken(ti, actual);
       MoveToNextToken(ti);
+    }
+    // `Z( )` and `Z(/* note */)` pass no arguments to a macro without
+    // parameters; only white space separates the parentheses.
+    if (macro->args.length == 0 && !macro->varargs && actual_index == 0 &&
+        !actual_has_token && !actual_ended_with_comma) {
+      StringDelete(actual);
+      break;
     }
     
     if (actual_index >= macro->args.length) {
       if (macro->varargs) {
         // Append actual arg to the va_args string, separated by comma from
-        // the previous one.
+        // the previous one.  The white space after the comma is kept so
+        // `#__VA_ARGS__` spells `a, b` as written.
         if (separate_va_arg) {
           StringAppendChar(va_args, PPTOK(comma));
+          if (actual_follows_space) {
+            StringAppendChar(va_args, PPTOK(space));
+          }
         }
         StringAppend(va_args, actual->value);
         separate_va_arg = true;
@@ -5159,6 +5178,20 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
           // Detokenize the actual value.
           String detokenized = {0};
           Detokenize(p, actual, &detokenized);
+          // White space before the first and after the last token is
+          // deleted (6.10.3.2p2).
+          size_t first = 0;
+          while (first < detokenized.length &&
+                 isspace((unsigned char)detokenized.value[first])) {
+            first++;
+          }
+          StringErase(&detokenized, 0, first);
+          size_t last = detokenized.length;
+          while (last > 0 &&
+                 isspace((unsigned char)detokenized.value[last - 1])) {
+            last--;
+          }
+          StringErase(&detokenized, last, detokenized.length - last);
 
           // The literal token stores its content already escaped (e.g. an
           // embedded " becomes \").  Escape into a temporary first so the
@@ -5198,8 +5231,12 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
   RemovePlacemarkers(p, &rep);
   
   SwapActiveTokenExpansions(saved_map);
-  // Rescan replacement text for more macros to replace.
+  // Rescan replacement text for more macros to replace.  Only the rescan
+  // disables the macro (6.10.3.4p2); its arguments were replaced with it
+  // still enabled, so `CAT(a, IF(c))` may expand a nested CAT from IF.
+  MacroDisable(macro);
   ReplaceMacrosInTokenizedLine(p, &rep, &rep_map, true);
+  MacroEnable(macro);
   
   // Replace macro name and args with replacement text.
   ReplaceFunctionLikeMacroText(ti, macro_name_token_index, &rep, &rep_map);
@@ -5212,20 +5249,23 @@ static void DeleteActualArg(MapKeyValue* kv, void* data) {
 }
 
 // We have a function-like macro invokation.  It will be followed by
-// a set of actual arguments.
-static void ReplaceFunctionLikeMacro(Preprocessor* p, Macro* macro,
+// a set of actual arguments.  Returns false, leaving `ti` on the name, when
+// no '(' follows.
+static bool ReplaceFunctionLikeMacro(Preprocessor* p, Macro* macro,
                                      TokenIterator* ti,
                                      String* tokens,
                                       bool whole_input) {
   // Save current token (the macro name).  We need to replace the
   // function-like macro name and its args with its replacement text.
+  TokenIterator name = *ti;
   size_t current_token_index = ti->curr;
   MoveToNextToken(ti);
   SkipSpaceTokens(ti);      // Space between macro and ( is OK.
   
   if (CurrentToken(ti) != PPTOK(openparen)) {
     // Missing open paren means that we don't replace the macro.
-    return;
+    *ti = name;
+    return false;
   }
   MoveToNextToken(ti);
   
@@ -5247,6 +5287,43 @@ static void ReplaceFunctionLikeMacro(Preprocessor* p, Macro* macro,
   MapTraverse(&args, DeleteActualArg, NULL);
   MapDestruct(&args);
   StringDestruct(&va_args);
+  return true;
+}
+
+// The rescan of a replacement continues into the tokens after it
+// (6.10.3.4p1), so a function-like macro name ending the replacement can take
+// its arguments from there: `CAT(IF_, c)(a, b)`.  Moves `ti` back so the
+// caller's next step revisits that name, unless it was painted during the
+// rescan by naming the replaced macro or one still being expanded.
+static void RevisitTrailingMacroName(Preprocessor* p, TokenIterator* ti,
+                                     size_t start, Macro* replaced) {
+  TokenIterator walk = *ti;
+  walk.curr = start;
+  walk.next = FindNextTokenIndex(&walk);
+  size_t end = ti->next;
+  TokenIterator last = {0};
+  bool found = false;
+  while (walk.curr < end) {
+    if (!IsSpaceToken(&walk)) {
+      last = walk;
+      found = true;
+    }
+    MoveToNextToken(&walk);
+  }
+  if (!found || CurrentToken(&last) != PPTOK(identifier)) {
+    return;
+  }
+  String spelling;
+  GetCurrentTokenSpelling(&last, &spelling);
+  Macro* macro = HashTableSearch(&p->macros, spelling.value);
+  StringDestruct(&spelling);
+  if (macro == NULL || macro == replaced || !macro->enabled ||
+      macro->undefined || !macro->is_function_like) {
+    return;
+  }
+  ti->prev = last.prev;
+  ti->curr = last.prev;
+  ti->next = last.curr;
 }
 
 // Destringizes the content of a string literal as required by the _Pragma
@@ -5463,11 +5540,15 @@ static void ProcessPossibleMacro(Preprocessor* p,
     // Not a predefined macro, let's try a user-defined one.
     Macro* macro = HashTableSearch(&p->macros, possible_macro_name->value);
     if (macro != NULL && macro->enabled && !macro->undefined) {
-      MacroDisable(macro);
+      size_t start = ti->curr;
       if (macro->is_function_like) {
         // Function-like macro, more complex processing needed.
-        ReplaceFunctionLikeMacro(p, macro, ti, tokenized_line, whole_input);
+        if (ReplaceFunctionLikeMacro(p, macro, ti, tokenized_line,
+                                     whole_input)) {
+          RevisitTrailingMacroName(p, ti, start, macro);
+        }
       } else {
+        MacroDisable(macro);
         // Object-like macro.  Handle ## by pasting adjacent tokens.
         StringSet(&replacement, macro->replacement_text.value);
         MacroExpansion* expansion = ExpansionForCurrentToken(ti, macro, p);
@@ -5486,8 +5567,9 @@ static void ProcessPossibleMacro(Preprocessor* p,
         // Replace the current token with the new replacement text.
         ReplaceCurrentTokenWithExpansions(ti, &replacement, &replacement_map);
         VectorDestruct(&replacement_map);
+        MacroEnable(macro);
+        RevisitTrailingMacroName(p, ti, start, macro);
       }
-      MacroEnable(macro);
     }
   }
   StringDestruct(&replacement);
