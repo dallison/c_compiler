@@ -685,6 +685,26 @@ static void InitInteger(ASTNode* expr,
                         Initializer* init_out,
                         int offset,
                         Vector* initializers) {
+  if (TypeIsInt128(type)) {
+    int64_t lo = 0;
+    int64_t hi = 0;
+    if (!EvaluateInt128Constant(expr, &lo, &hi)) {
+      SemanticError(
+          expr, "Invalid static initialization; need a constant expression");
+      free(init_out);
+      return;
+    }
+    init_out->type = kInitTypeMemory;
+    init_out->offset = offset;
+    BufferInit(&init_out->value.memory);
+    for (size_t i = 0; i < 16; i++) {
+      uint64_t word = (uint64_t)(i < 8 ? lo : hi);
+      char byte = (char)(word >> ((i % 8) * 8));
+      BufferAppend(&init_out->value.memory, &byte, 1);
+    }
+    VectorAppend(initializers, init_out);
+    return;
+  }
   int64_t value = 0;
   if (EvaluateIntegerExpression(expr, &value)) {
     if (TypeIsBitInt(type)) {
@@ -1675,7 +1695,8 @@ static bool CXXThreadLocalInitializerIsDynamic(ASTNode* initializer) {
   if (expr != NULL && expr->op == AST_OP(braced_init)) {
     return !InitializerIsLinkTimeConstant(expr);
   }
-  return expr != NULL && !IsConstantExpression(expr);
+  return expr != NULL && !IsConstantExpression(expr) &&
+         !CXXNamesConstexprPointerConstant(expr);
 }
 
 static bool CXXSymbolHasConstantAddress(Symbol* symbol) {
@@ -1750,6 +1771,69 @@ static bool CXXIsAddressConstant(ASTNode* expr) {
     default:
       return false;
   }
+}
+
+static ASTNode* KeepClonedNode(ASTNode* node, void* data);
+
+// A class object whose initializer the constant evaluator reduces to an object
+// image is constant-initialized ([basic.start.static]), const or not: it is
+// emitted as data rather than constructed by the init function, so
+// initializers in other translation units may read it.  Returns that image, or
+// NULL.  A value evaluated only for this is not kept on the symbol: such an
+// object is not usable in constant expressions, and its non-const or mutable
+// members change at run time.
+static ASTNode* CXXGlobalConstantObjectImage(Symbol* sym, ASTNode* initializer) {
+  if (SymbolIsThreadLocal(sym) || initializer == NULL ||
+      !TypeIsStructOrUnion(sym->type)) {
+    return NULL;
+  }
+  // An aggregate's braced initializer is already emitted as data when constant.
+  if (initializer->op != AST_OP(call) && sym->type->info.struct_info != NULL &&
+      sym->type->info.struct_info->is_aggregate) {
+    return NULL;
+  }
+  if (sym->flags.value_set) {
+    return ConstexprObjectInitializerForSymbol(sym, initializer->location);
+  }
+  // A const object's initializer is analyzed only when the init function is
+  // built.  Try a copy as a constant evaluation; on failure the original is
+  // still dynamically initialized, so diagnostics are the init function's.
+  ASTNode* expression = initializer->op == AST_OP(call)
+                            ? initializer
+                            : initializer->op == AST_OP(expr_init)
+                                  ? ConstexprInitializerExpression(initializer)
+                                  : NULL;
+  if (expression == NULL) {
+    return NULL;
+  }
+  ASTNode* attempt = NULL;
+  if (expression != initializer && (expression->flags & kASTAnalyzed) == 0) {
+    attempt = ASTNodeClone(expression, KeepClonedNode, NULL, NULL);
+    if (attempt == NULL) {
+      return NULL;
+    }
+  }
+  DiagnosticSuppressBegin();
+  bool saved_trap = DiagnosticErrorTrapBegin();
+  ASTNode* evaluated = initializer;
+  if (attempt != NULL) {
+    compiler->constant_evaluation_required_depth++;
+    attempt = AnalyzeExpression(attempt);
+    compiler->constant_evaluation_required_depth--;
+    evaluated = attempt;
+  }
+  ASTNode* image = NULL;
+  if (!DiagnosticErrorTrapped() && evaluated != NULL &&
+      !ExpressionIsTemplateDependent(evaluated) &&
+      ConstexprEvaluateObjectConstantForSymbol(sym, evaluated)) {
+    image = ConstexprObjectInitializerForSymbol(sym, initializer->location);
+    sym->flags.value_set = false;
+    sym->value.other = NULL;
+  }
+  DiagnosticErrorTrapEnd(saved_trap);
+  DiagnosticSuppressEnd();
+  ASTNodeDelete(attempt);
+  return image;
 }
 
 static bool CXXNamespaceInitializerIsDynamic(ASTNode* initializer) {
@@ -2116,8 +2200,13 @@ static bool CXXInitializerIsNoOpDefaultConstructor(Symbol* symbol,
   TypeRecord* callee_type =
       callee_symbol != NULL ? callee_symbol->type : callee != NULL ? callee->type
                                                                   : NULL;
+  // A copy or move constructor's argument is an initializer that still runs
+  // (`Empty e(Registrar(flag))`).  The class has no virtual bases, so the
+  // default constructor's only parameter is `this`.
   return callee_type != NULL && TypeIsFunction(callee_type) &&
-         callee_type->info.function.is_constructor;
+         callee_type->info.function.is_constructor &&
+         callee_type->info.function.prototype.length ==
+             (callee_type->info.function.cxx_member_owner != NULL ? 1u : 0u);
 }
 
 static bool SymbolPointerInVector(Vector* symbols, Symbol* symbol) {
@@ -2136,16 +2225,33 @@ static void RecordCXXNoOpInitializedVariable(Symbol* symbol) {
   }
 }
 
+// The initializing expression of a queued `expr` or `expr(init(object, e))`.
+static ASTNode* QueuedGlobalInitializerExpression(ASTNode* statement) {
+  if (statement == NULL || statement->op != AST_OP(expr)) {
+    return NULL;
+  }
+  ASTNode* expr = ((ExpressionStatementASTNode*)statement)->expr;
+  if (expr != NULL && expr->op == AST_OP(init)) {
+    expr = ((BinaryASTNode*)expr)->right;
+  }
+  return expr;
+}
+
 static void PruneCXXNoOpGlobalConstructorCalls(void) {
   for (size_t i = 0; i < compiler->cxx_global_constructor_objects.length;) {
     Symbol* object = compiler->cxx_global_constructor_objects.value.p[i];
+    ASTNode* call = compiler->cxx_global_constructor_calls.value.p[i];
     // An entry without a call only orders the destructor registration.
-    if (compiler->cxx_global_constructor_calls.value.p[i] == NULL) {
+    if (call == NULL) {
       i++;
       continue;
     }
+    // Only the no-op constructor itself is dropped.  Any other initializer of
+    // an empty class still runs (abseil's `FlagRegistrarEmpty FLAGS_nox =
+    // FlagRegistrar<T, true>(...)` registers the flag as it converts).
     if (object != NULL &&
-        CXXTypeHasNoOpDefaultConstructor(object->type)) {
+        CXXInitializerIsNoOpDefaultConstructor(
+            object, QueuedGlobalInitializerExpression(call))) {
       RecordCXXNoOpInitializedVariable(object);
     }
     if (!SymbolPointerInVector(&compiler->cxx_no_op_initialized_variables,
@@ -2358,6 +2464,18 @@ static bool CXXGlobalObjectNeedsDefaultConstruction(Symbol* sym,
     return false;
   }
   return FindCXXSpecialMemberForGlobal(sym, false) != NULL;
+}
+
+// The default constructor call for a class object defined without an
+// initializer, as a candidate constant initializer, or NULL when default
+// initialization runs no constructor.
+static ASTNode* CXXGlobalDefaultConstructorCall(Symbol* sym) {
+  if (!CompilerIsCXX() || SymbolIsThreadLocal(sym) ||
+      !TypeIsStructOrUnion(sym->type) ||
+      !CXXGlobalObjectNeedsDefaultConstruction(sym, false)) {
+    return NULL;
+  }
+  return SyntaxNewCXXDefaultConstructorCallIfNeeded(&compiler->syntax, sym);
 }
 
 static void RegisterCXXThreadLocalObject(Symbol* sym, bool initialized) {
@@ -3101,6 +3219,18 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
             }
             if (decl->symbol->flags.is_defined || decl->symbol->flags.is_tentative_decl) {
               // Extern or static variable definition.
+              ASTNode* default_image = NULL;
+              if (decl->initializer == NULL) {
+                ASTNode* construct =
+                    CXXGlobalDefaultConstructorCall(decl->symbol);
+                default_image =
+                    CXXGlobalConstantObjectImage(decl->symbol, construct);
+                if (default_image != NULL) {
+                  decl->initializer = construct;
+                } else {
+                  ASTNodeDelete(construct);
+                }
+              }
               if (decl->initializer == NULL) {
                 // No initializer.  Add as unitialized static variable.
                 // Tentative `int x;` in a later LTO TU reuses the same
@@ -3164,9 +3294,16 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   // Reflection values have no runtime representation.
                   continue;
                 }
+                ASTNode* constant_image =
+                    default_image != NULL ? default_image
+                    : CompilerIsCXX()     ? CXXGlobalConstantObjectImage(
+                                            decl->symbol, decl->initializer)
+                                          : NULL;
+                bool constant_object_image = constant_image != NULL;
                 if (CompilerIsCXX() && TypeIsStructOrUnion(decl->symbol->type) &&
                     decl->initializer != NULL &&
-                    decl->initializer->op == AST_OP(call)) {
+                    decl->initializer->op == AST_OP(call) &&
+                    !constant_object_image) {
                   UninitializedStaticVariable* var =
                       malloc(sizeof(UninitializedStaticVariable));
                   var->symbol = decl->symbol;
@@ -3251,7 +3388,7 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                   class_needs_dynamic_init = true;
                 }
                 if (CompilerIsCXX() && !decl->symbol->flags.is_constexpr &&
-                    !decl->symbol->flags.is_constinit &&
+                    !decl->symbol->flags.is_constinit && !constant_object_image &&
                     (CXXNamespaceInitializerIsDynamic(decl->initializer) ||
                      class_needs_dynamic_init)) {
                   if (!VariableDefinitionIsODRDiscardable(decl->symbol)) {
@@ -3284,8 +3421,11 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                 if (!VariableDefinitionIsODRDiscardable(decl->symbol)) {
                   MarkReferencesInAST(decl->initializer);
                 }
-                ASTNode* initializer = ConstexprObjectInitializerForSymbol(
-                    decl->symbol, decl->initializer->location);
+                ASTNode* initializer =
+                    constant_image != NULL
+                        ? constant_image
+                        : ConstexprObjectInitializerForSymbol(
+                              decl->symbol, decl->initializer->location);
                 if (initializer == NULL) {
                   initializer = decl->initializer;
                 }
@@ -3619,6 +3759,23 @@ static Symbol* CompileCXXThreadLifetimeFunction(Syntax* syntax, const char* name
 
   if (NumErrors() != 0) {
     return NULL;
+  }
+  // The queued initializers were found dynamic before analysis.  One that
+  // analysis folds to a link-time constant is still not emitted as data (the
+  // object is in BSS), so it must store at run time like any other.
+  ASTNode* body = func_type->info.function.body;
+  if (body != NULL && body->op == AST_OP(compound)) {
+    Vector* body_statements = ((CompoundStatementASTNode*)body)->statements;
+    for (size_t i = 0; body_statements != NULL && i < body_statements->length;
+         i++) {
+      ASTNode* statement = body_statements->value.p[i];
+      if (statement != NULL && statement->op == AST_OP(expr) &&
+          ((ExpressionStatementASTNode*)statement)->expr != NULL &&
+          ((ExpressionStatementASTNode*)statement)->expr->op == AST_OP(init)) {
+        ((ExpressionStatementASTNode*)statement)->expr->flags &=
+            ~kASTStaticInit;
+      }
+    }
   }
 
   compiler->current_function = func_type;

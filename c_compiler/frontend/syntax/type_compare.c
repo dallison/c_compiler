@@ -1132,6 +1132,40 @@ static bool CXXStructTagNameEqual(Struct* left, Struct* right) {
 static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
                                                        Struct* right);
 
+static Symbol* CXXLocalClassFunction(Struct* str) {
+  if (str->lexical_parent != NULL || str->tag_symbol == NULL ||
+      str->tag_symbol->flags.invented) {
+    return NULL;
+  }
+  Symbol* function = str->access_enclosing_function;
+  if (function != NULL && function->type != NULL &&
+      TypeIsFunction(function->type) &&
+      function->type->info.function.template_origin != NULL) {
+    return function->type->info.function.template_origin;
+  }
+  return function;
+}
+
+// Local classes of different functions, or of different instantiations of one
+// function template, are distinct types that may share a tag name.
+static bool CXXLocalClassScopesEqual(Struct* left, Struct* right) {
+  Symbol* left_function = CXXLocalClassFunction(left);
+  Symbol* right_function = CXXLocalClassFunction(right);
+  if (left_function != right_function) {
+    return false;
+  }
+  if (left_function == NULL) {
+    return true;
+  }
+  if ((left->local_class_arguments == NULL) !=
+      (right->local_class_arguments == NULL)) {
+    return false;
+  }
+  return left->local_class_arguments == NULL ||
+         TemplateArgumentVectorEqual(left->local_class_arguments,
+                                     right->local_class_arguments);
+}
+
 static bool CXXTemplateOriginsSameFamily(Symbol* left, Symbol* right) {
   if (left == right) {
     return true;
@@ -1242,7 +1276,8 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
            strncmp(origin->name.value, other->tag_symbol->name.value,
                    other_name_len) == 0;
   }
-  if (!CXXStructTagNameEqual(left, right)) {
+  if (!CXXStructTagNameEqual(left, right) ||
+      !CXXLocalClassScopesEqual(left, right)) {
     return false;
   }
   if (left->lexical_parent != NULL || right->lexical_parent != NULL) {

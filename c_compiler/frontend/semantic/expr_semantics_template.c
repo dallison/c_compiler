@@ -104,6 +104,11 @@ static ASTNode* FoldConstantIdentifier(IdentifierASTNode* node) {
     return &node->base;
   }
   ASTNode* const_node = NULL;
+  // The symbol value holds only the low word of an __int128; leave the read
+  // for the constant evaluator, which uses the initializer.
+  if (TypeIsInt128(node->symbol->type)) {
+    return &node->base;
+  }
   if (TypeIsIntConstant(node->base.type)) {
     const_node = NewIntConstantASTNode(node->symbol->value.ivalue,
                                        node->symbol->type, node->base.location);

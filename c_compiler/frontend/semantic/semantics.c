@@ -944,6 +944,11 @@ static ASTNode* ConvertIntConstantToType(ConstantASTNode* c, TypeRecord* to) {
       v |= ~dmask;
     }
   }
+  // An __int128 keeps its high word in `ihi`; a narrower source fills it by
+  // its own signedness.
+  if (TypeIsInt128(to) && !TypeIsInt128(c->base.type)) {
+    c->ihi = !TypeIsUnsigned(c->base.type) && (int64_t)v < 0 ? -1 : 0;
+  }
   c->value.ivalue = (int64_t)v;
   return (ASTNode*)c;
 }

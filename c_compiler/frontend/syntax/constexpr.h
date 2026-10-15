@@ -154,6 +154,10 @@ bool ConstexprEvaluatePointerTruth(ConstEvalContext* ctx, ASTNode* node,
 bool ConstexprPointerTruthHasSideEffects(ASTNode* node);
 bool ConstexprEvaluatePointerComparison(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
+// Folds relational/equality operator |node| when an operand is __int128, using
+// all 128 bits; false when it does not apply or an operand is not constant.
+bool ConstexprCompareInt128Operands(ConstEvalContext* ctx, ASTNode* node,
+                                    int64_t* result);
 bool ConstexprEvaluatePointerDifference(ConstEvalContext* ctx, ASTNode* node,
                                         int64_t* result);
 bool ConstexprSameObjectPointerDistance(ConstEvalContext* ctx,

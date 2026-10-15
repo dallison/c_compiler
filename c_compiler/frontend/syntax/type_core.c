@@ -630,10 +630,11 @@ void TypeRecordSyncStructSizes(Struct* str) {
 
 void AppendCXXVTableClassName(String* out, Struct* str) {
   TypeRecord* type = str->tag_symbol != NULL ? str->tag_symbol->type : NULL;
-  // A nested or local class shares its tag name with every other class of that
-  // name (`A::F` and `B::F`, `O<int>::F` and `O<long>::F`), so it is qualified
-  // by its mangled name.
-  if ((str->lexical_parent == NULL && str->access_enclosing_function == NULL) ||
+  // A nested, local, or namespace-scope class shares its tag name with every
+  // other class of that name (`A::F` and `B::F`, `O<int>::F` and `O<long>::F`,
+  // `a::F` and `b::F`), so it is qualified by its mangled name.
+  if ((str->lexical_parent == NULL && str->access_enclosing_function == NULL &&
+       (str->tag_symbol == NULL || str->tag_symbol->namespace_ == NULL)) ||
       type == NULL ||
       !TypeIsStructOrUnion(type) || type->info.struct_info != str) {
     StringAppendString(out, str->tag_name);

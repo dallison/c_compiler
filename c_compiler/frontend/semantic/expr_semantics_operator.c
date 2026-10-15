@@ -52,6 +52,8 @@ static int IntRank(void);
 static Type ComplexArithmeticElementType(TypeRecord* left, TypeRecord* right);
 static TypeRecord* NewVectorComparisonResultType(TypeRecord* vector_type);
 static bool PromoteBitFieldOperand(ASTNode* operand);
+static bool PromoteCXXEnumOperand(ASTNode* operand);
+static void PromoteUnaryIntegerOperand(ASTNode* operand);
 static bool IsIntConstant(ASTNode* node);
 static void DiagnoseCXX26EnumArithmetic(BinaryASTNode* node);
 static ASTNode* ReplaceBinaryWithCall(BinaryASTNode* node, ASTNode* call);
@@ -67,6 +69,8 @@ static bool IsPostIncDec(ASTOpcode op);
 static ASTNode* NewPostfixDummyArgument(SourceLocation location);
 static ASTNode* TryAnalyzeOverloadedIncDecOperator(UnaryASTNode* node);
 static TypeRecord* CXXOperatorOperandClassType(TypeRecord* type);
+static Symbol* ResolveEnumOperandOperator(const char* op_name, ASTNode* left,
+                                          ASTNode* right);
 static bool BestBinaryMemberOperatorScore(BinaryASTNode* node, const char* op_name, int* out_best_score, bool* out_ambiguous, bool* out_has_template);
 static int FreeBinaryOperatorSecondOperandScore(Symbol* function, ASTNode* right);
 static ASTNode* BuildMemberOperatorCall(BinaryASTNode* node, const char* op_name);
@@ -110,6 +114,8 @@ static bool AnalyzeConditionalExpressionPhaseMatchingGlvalueCategory(
     BinaryASTNode* node, BinaryASTNode* colon);
 static bool AnalyzeConditionalExpressionPhaseSameClassPrvalueInit(
     BinaryASTNode* node, BinaryASTNode* colon);
+static bool AnalyzeConditionalExpressionPhaseCSameStruct(BinaryASTNode* node,
+                                                         BinaryASTNode* colon);
 static bool AnalyzeConditionalExpressionPhaseMemberPointerAndMixedPointer(
     BinaryASTNode* node, BinaryASTNode* colon);
 static void AnalyzeConditionalExpressionPhaseUsualArithmetic(
@@ -335,6 +341,89 @@ static bool PromoteBitFieldOperand(ASTNode* operand) {
   return true;
 }
 
+// C++ [conv.prom]: an unscoped enumeration without a fixed underlying type
+// promotes to the first of int, unsigned int, long, long long that can
+// represent all of its enumerators, not to the underlying type DaveCC picked
+// for its storage (which is unsigned int whenever no enumerator is negative).
+// One with a fixed underlying type promotes like that type.  Returns NULL when
+// `type` is not such an enumeration; the caller owns the result.
+static TypeRecord* NewCXXEnumPromotionType(TypeRecord* type) {
+  if (!CompilerIsCXX() || type == NULL || !TypeIsEnum(type) ||
+      TypeIsScopedEnum(type) || (type->type & kTypeBitInt) != 0) {
+    return NULL;
+  }
+  Type underlying = type->type & ~kTypeEnum;
+  Enum* e = type->info.enum_info;
+  if (e == NULL || e->has_fixed_underlying) {
+    return NewTypeRecordWithSize(underlying, kQualPlain);
+  }
+  int64_t minimum = 0;
+  int64_t maximum = 0;
+  for (size_t i = 0; i < e->constants.length; i++) {
+    Symbol* constant = e->constants.value.p[i];
+    if (constant == NULL || !constant->flags.value_set) {
+      continue;
+    }
+    if (constant->value.ivalue < minimum) {
+      minimum = constant->value.ivalue;
+    }
+    if (constant->value.ivalue > maximum) {
+      maximum = constant->value.ivalue;
+    }
+  }
+  static const Type kCandidates[] = {
+      kTypeInt,      kTypeInt | kTypeUnsigned,
+      kTypeLong,     kTypeLong | kTypeUnsigned,
+      kTypeLongLong, kTypeLongLong | kTypeUnsigned,
+  };
+  for (size_t i = 0; i < sizeof(kCandidates) / sizeof(kCandidates[0]); i++) {
+    int bits = SizeofType(kCandidates[i]) * 8;
+    if (bits >= 64) {
+      if ((kCandidates[i] & kTypeUnsigned) == 0 || minimum >= 0) {
+        return NewTypeRecordWithSize(kCandidates[i], kQualPlain);
+      }
+      continue;
+    }
+    bool is_unsigned = (kCandidates[i] & kTypeUnsigned) != 0;
+    int64_t low = is_unsigned ? 0 : -((int64_t)1 << (bits - 1));
+    int64_t high = ((int64_t)1 << (is_unsigned ? bits : bits - 1)) - 1;
+    if (minimum >= low && maximum <= high) {
+      return NewTypeRecordWithSize(kCandidates[i], kQualPlain);
+    }
+  }
+  return NewTypeRecordWithSize(kTypeLongLong, kQualPlain);
+}
+
+// Converts a C++ unscoped-enum operand to its promotion type; returns whether
+// it did.  A promotion below int is finished by the caller's rank check.
+static bool PromoteCXXEnumOperand(ASTNode* operand) {
+  TypeRecord* promoted = NewCXXEnumPromotionType(operand->type);
+  if (promoted == NULL) {
+    return false;
+  }
+  ASTNode* parent = operand->parent;
+  NormalConversion(operand, promoted);
+  // A same-size enum-to-integer conversion inserts no node and leaves the
+  // operand typed as the enumeration, whose unsigned storage type would then
+  // drive later widening and the result type of the enclosing operator.
+  if (operand->parent == parent && TypeIsEnum(operand->type)) {
+    ASTNodeSetType(operand, promoted);
+  }
+  return true;
+}
+
+// Integer promotions for the operand of unary +, - and ~.
+static void PromoteUnaryIntegerOperand(ASTNode* operand) {
+  if (PromoteBitFieldOperand(operand)) {
+    return;
+  }
+  PromoteCXXEnumOperand(operand);
+  int rank = GetRank(operand->type);
+  if (!TypeIsBitInt(operand->type) && rank > 0 && rank < IntRank()) {
+    NormalConversion(operand, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+  }
+}
+
 // Contract: Analyzes `sub` in place; may replace `sub` (lambda-to-pointer on
 // uplus). Sets result type and value category for the unary op.
 void AnalyzeUnaryExpression(UnaryASTNode* node) {
@@ -369,6 +458,7 @@ void AnalyzeUnaryExpression(UnaryASTNode* node) {
       if (PromoteBitFieldOperand(node->sub)) {
         break;
       }
+      PromoteCXXEnumOperand(node->sub);
       int rank = GetRank(node->sub->type);
       if (!TypeIsBitInt(node->sub->type) && rank < IntRank()) {
         NormalConversion(
@@ -378,7 +468,10 @@ void AnalyzeUnaryExpression(UnaryASTNode* node) {
     }
     case AST_OP(uplus):
     case AST_OP(onescomp):
-      PromoteBitFieldOperand(node->sub);
+      if (TypeIsComplex(node->sub->type) || TypeIsVector(node->sub->type)) {
+        break;
+      }
+      PromoteUnaryIntegerOperand(node->sub);
       break;
     default:
       break;
@@ -612,6 +705,14 @@ static void InsertNumericConversionsApplyUsualArithmeticConversions(
     // int.  This must happen on the actual operand types (including integer
     // constants such as `(short)1`) before any of the constant-adaption
     // below, otherwise small constants would skip promotion.
+    if (PromoteCXXEnumOperand(node->left)) {
+      ASTNodeSetType((ASTNode*)node, node->left->type);
+      left_rank = GetRank(node->left->type);
+    }
+    if (PromoteCXXEnumOperand(node->right)) {
+      ASTNodeSetType((ASTNode*)node, node->right->type);
+      right_rank = GetRank(node->right->type);
+    }
     if (PromoteBitFieldOperand(node->left)) {
       ASTNodeSetType((ASTNode*)node, node->left->type);
       left_rank = GetRank(node->left->type);
@@ -1191,7 +1292,14 @@ ASTNode* TryAnalyzeOverloadedUnaryOperator(UnaryASTNode* node) {
     }
   }
   if (!TypeIsStructOrUnion(node->sub->type)) {
-    return NULL;
+    Symbol* function = ResolveEnumOperandOperator(op_name, node->sub, NULL);
+    if (function == NULL) {
+      return NULL;
+    }
+    ASTNode* actual = ASTNodeMove(node->sub);
+    ASTNode* call =
+        NewOperatorFreeCall(function, actual, NULL, node->base.location);
+    return ReplaceUnaryWithCall(node, call);
   }
 
   StructMember* member =
@@ -1330,6 +1438,104 @@ static TypeRecord* CXXOperatorOperandClassType(TypeRecord* type) {
     type = type->next;
   }
   return TypeIsStructOrUnion(type) ? type : NULL;
+}
+
+static TypeRecord* CXXOperatorOperandEnumType(TypeRecord* type) {
+  if (type != NULL && TypeIsReference(type)) {
+    type = type->next;
+  }
+  return type != NULL && TypeIsEnum(type) && type->info.enum_info != NULL
+             ? type
+             : NULL;
+}
+
+static bool CXXOperatorParameterIsEnum(Symbol* parameter, TypeRecord* enum_type) {
+  if (enum_type == NULL || parameter == NULL) {
+    return false;
+  }
+  TypeRecord* parameter_enum = CXXOperatorOperandEnumType(parameter->type);
+  return parameter_enum != NULL &&
+         parameter_enum->info.enum_info == enum_type->info.enum_info;
+}
+
+// Whether `operand` can initialize `parameter` of an operator chosen for
+// enumeration operands.  The overload ranker treats enumerations loosely, so
+// this is checked separately: an enumeration parameter needs that same
+// enumeration and an arithmetic one an arithmetic or unscoped-enum operand.
+static bool CXXEnumOperatorArgumentFits(ASTNode* operand, Symbol* parameter) {
+  if (operand == NULL || operand->type == NULL || parameter == NULL ||
+      parameter->type == NULL) {
+    return false;
+  }
+  TypeRecord* parameter_type = parameter->type;
+  if (TypeIsReference(parameter_type)) {
+    if (parameter_type->declarator == kDeclReference &&
+        !TypeIsConst(parameter_type->next) && !ASTNodeIsGLValue(operand)) {
+      return false;
+    }
+    parameter_type = parameter_type->next;
+  }
+  TypeRecord* operand_type = TypeIsReference(operand->type)
+                                 ? operand->type->next
+                                 : operand->type;
+  if (parameter_type == NULL || operand_type == NULL) {
+    return false;
+  }
+  if (TypeIsEnum(parameter_type)) {
+    return TypeIsEnum(operand_type) && parameter_type->info.enum_info != NULL &&
+           parameter_type->info.enum_info == operand_type->info.enum_info;
+  }
+  if (TypeIsIntegral(parameter_type) || TypeIsFloatingPoint(parameter_type)) {
+    return !TypeIsScopedEnum(operand_type) &&
+           (TypeIsIntegral(operand_type) || TypeIsFloatingPoint(operand_type));
+  }
+  return false;
+}
+
+// [over.match.oper]/3: an operand of enumeration type makes non-member
+// operator functions candidates even when no operand has class type, but only
+// those whose parameter for such an operand is that enumeration or a reference
+// to it.  Returns the selected operator function, or NULL for the built-in.
+// `right` is NULL for a unary operator.
+static Symbol* ResolveEnumOperandOperator(const char* op_name, ASTNode* left,
+                                          ASTNode* right) {
+  TypeRecord* left_enum = CXXOperatorOperandEnumType(left->type);
+  TypeRecord* right_enum =
+      right != NULL ? CXXOperatorOperandEnumType(right->type) : NULL;
+  if ((left_enum == NULL && right_enum == NULL) ||
+      ExpressionIsTemplateDependent(left) ||
+      (right != NULL && ExpressionIsTemplateDependent(right))) {
+    return NULL;
+  }
+  String name;
+  StringInit(&name, op_name);
+  Vector actuals;
+  VectorInit(&actuals);
+  VectorAppend(&actuals, left);
+  if (right != NULL) {
+    VectorAppend(&actuals, right);
+  }
+  Symbol* function = ResolveFreeFunctionWithADL(&name, &actuals,
+                                                /*diagnose_ambiguous=*/false);
+  VectorDestruct(&actuals);
+  StringDestruct(&name);
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type)) {
+    return NULL;
+  }
+  Vector* prototype = &function->type->info.function.prototype;
+  if (prototype->length != (right != NULL ? 2u : 1u) ||
+      !CXXEnumOperatorArgumentFits(left, prototype->value.p[0]) ||
+      (right != NULL &&
+       !CXXEnumOperatorArgumentFits(right, prototype->value.p[1]))) {
+    return NULL;
+  }
+  if (CXXOperatorParameterIsEnum(prototype->value.p[0], left_enum) ||
+      (right != NULL &&
+       CXXOperatorParameterIsEnum(prototype->value.p[1], right_enum))) {
+    return function;
+  }
+  return NULL;
 }
 
 // Scores the built-in-vs-member competition for a binary operator's member
@@ -1490,7 +1696,20 @@ ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
   TypeRecord* left_class = CXXOperatorOperandClassType(node->left->type);
   TypeRecord* right_class = CXXOperatorOperandClassType(node->right->type);
   if (left_class == NULL && right_class == NULL) {
-    return NULL;
+    Symbol* function =
+        ResolveEnumOperandOperator(op_name, node->left, node->right);
+    if (function == NULL) {
+      return NULL;
+    }
+    ASTNode* left = ASTNodeMove(node->left);
+    ASTNode* right = ASTNodeMove(node->right);
+    Vector* actuals = NewVector();
+    VectorAppend(actuals, left);
+    VectorAppend(actuals, right);
+    ASTNode* call = NewVectorASTNode(
+        AST_OP(call), NULL, node->base.location,
+        NewIdentifierASTNode(function, node->base.location), actuals);
+    return ReplaceBinaryWithCall(node, call);
   }
   Symbol* current_symbol =
       compiler->current_function != NULL &&
@@ -1839,6 +2058,7 @@ static void PromoteShiftOperand(ASTNode* operand) {
   if (PromoteBitFieldOperand(operand)) {
     return;
   }
+  PromoteCXXEnumOperand(operand);
   int rank = GetRank(operand->type);
   if (TypeIsBitInt(operand->type) || rank <= 0 || rank >= IntRank()) {
     return;
@@ -2887,6 +3107,25 @@ static bool AnalyzeConditionalExpressionPhaseSameClassPrvalueInit(
   return true;
 }
 
+// Contract: C arms of one structure or union type (C11 6.5.15p3) yield a
+// prvalue of that type. Returns true when this case applies.
+static bool AnalyzeConditionalExpressionPhaseCSameStruct(BinaryASTNode* node,
+                                                         BinaryASTNode* colon) {
+  if (CompilerIsCXX() || !TypeIsStructOrUnion(colon->left->type) ||
+      !TypeIsStructOrUnion(colon->right->type) ||
+      !TypeEqualIgnoringQualifiers(colon->left->type, colon->right->type)) {
+    return false;
+  }
+  TypeRecord* result_type = TypeRecordCopy(colon->left->type);
+  result_type->qualifiers = kQualPlain;
+  ASTNodeSetType((ASTNode*)colon, result_type);
+  ASTNodeSetType((ASTNode*)node, colon->base.type);
+  TypeRecordDelete(result_type);
+  colon->base.value_category = kValueCategoryPrvalue;
+  node->base.value_category = kValueCategoryPrvalue;
+  return true;
+}
+
 // Contract: Equal member pointers and compatible pointer/array arms; sets prvalue
 // pointer result on the colon node. Returns true when either case applies.
 static bool AnalyzeConditionalExpressionPhaseMemberPointerAndMixedPointer(
@@ -2898,6 +3137,26 @@ static bool AnalyzeConditionalExpressionPhaseMemberPointerAndMixedPointer(
     ASTNodeSetType((ASTNode*)node, colon->base.type);
     colon->base.value_category = kValueCategoryPrvalue;
     node->base.value_category = kValueCategoryPrvalue;
+    return true;
+  }
+  // [expr.cond]/7.3: an array arm decays to a pointer, which the `nullptr`
+  // arm converts to (`ok ? nullptr : "bad"`).
+  for (int i = 0; CompilerIsCXX() && i < 2; i++) {
+    ASTNode* array_arm = i == 0 ? colon->left : colon->right;
+    ASTNode* null_arm = i == 0 ? colon->right : colon->left;
+    if (!TypeIsArray(array_arm->type) || !TypeIsNullPointer(null_arm->type)) {
+      continue;
+    }
+    TypeRecord* result =
+        NewPointerTo(kQualPlain, TypeRecordCopy(array_arm->type->next));
+    array_arm->flags |= kASTNeedAddress;
+    ASTNodeSetType(array_arm, result);
+    ASTNodeSetType(null_arm, result);
+    ASTNodeSetType((ASTNode*)colon, result);
+    ASTNodeSetType((ASTNode*)node, result);
+    colon->base.value_category = kValueCategoryPrvalue;
+    node->base.value_category = kValueCategoryPrvalue;
+    TypeRecordDelete(result);
     return true;
   }
   if (!(CompilerIsCXX() &&
@@ -3010,6 +3269,9 @@ void AnalyzeConditionalExpression(BinaryASTNode* node) {
     return;
   }
   if (AnalyzeConditionalExpressionPhaseSameClassPrvalueInit(node, colon)) {
+    return;
+  }
+  if (AnalyzeConditionalExpressionPhaseCSameStruct(node, colon)) {
     return;
   }
   if (AnalyzeConditionalExpressionPhaseMemberPointerAndMixedPointer(node,

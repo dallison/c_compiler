@@ -29,7 +29,11 @@ typedef long off_t;
 #define MAP_PRIVATE     0x02            /* Changes are private.  */
 
 #define MAP_FIXED       0x10            /* Interpret addr exactly.  */
+#if defined(__DAVECC_NATIVE_DARWIN__)
+#define MAP_ANONYMOUS   0x1000          /* Don't use a file.  */
+#else
 #define MAP_ANONYMOUS   0x20            /* Don't use a file.  */
+#endif
 
 #define MAP_ANON  MAP_ANONYMOUS
 

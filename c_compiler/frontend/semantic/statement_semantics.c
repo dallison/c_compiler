@@ -2094,37 +2094,23 @@ static Type DetermineControlType(SwitchStatementASTNode* node) {
     }
   }
   
-  // Determine int type to which to convert control expression.  This is based
-  // on the max width of the cases in the statement.
-  Type control_type = kTypeInt;
-  switch (node->max_case_width) {
-    case 1:
-      control_type = kTypeChar;
-      break;
-    case 2:
-      if (compiler->int_size == 2) {
-        control_type = kTypeInt;
-      } else {
-        control_type = kTypeShort;
-      }
-      break;
-    case 4:
-      if (compiler->long_size == 4) {
-        control_type = kTypeLong;
-      } else {
-        control_type = kTypeInt;
-      }
-      break;
-    case 8:
-      if (compiler->long_size == 8) {
-        control_type = kTypeLong;
-      } else {
-        control_type = kTypeLongLong;
-      }
-      break;
-
+  // The control expression is integer-promoted, never narrowed to the width
+  // of the cases: `switch (x & 0x1c0)` with `case 0x80` compares all of x's
+  // bits, and 0x80 is not a signed char.
+  int width = node->max_case_width;
+  if (node->expr != NULL && node->expr->type != NULL) {
+    TypeRecordCalculateSize(node->expr->type);
+    if (node->expr->type->size > width) {
+      width = node->expr->type->size;
+    }
   }
-  return control_type;
+  if (width <= compiler->int_size) {
+    return kTypeInt;
+  }
+  if (width <= compiler->long_size) {
+    return kTypeLong;
+  }
+  return kTypeLongLong;
 }
 
 
@@ -2691,8 +2677,10 @@ void StatementFinishAutoReturnDeduction(TypeRecord* func,
 // slot.  A variable aligned beyond the stack alignment gets its own
 // dynamically aligned slot (SymbolNeedsDynamicStackAllocation), so it can't.
 static bool SymbolCanLiveInReturnSlot(Symbol* sym) {
+  // A reference names an object that lives elsewhere, which the return copies.
   if (sym == NULL || !sym->flags.is_local || sym->flags.is_argument ||
-      sym->flags.is_temp || StorageIs(sym->storage, STO(static))) {
+      sym->flags.is_temp || StorageIs(sym->storage, STO(static)) ||
+      (sym->type != NULL && TypeIsReference(sym->type))) {
     return false;
   }
   int alignment = sym->type != NULL ? TypeRecordAlignment(sym->type) : 0;

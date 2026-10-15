@@ -17,5 +17,8 @@
 ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* init,
                             bool constants_only);
 bool InitializerIsLinkTimeConstant(ASTNode* init);
+// Whether `expr` names a C++ constexpr pointer or nullptr_t variable that has
+// been evaluated: its value is a null pointer or an address constant.
+bool CXXNamesConstexprPointerConstant(ASTNode* expr);
 
 #endif /* init_semantics_h */

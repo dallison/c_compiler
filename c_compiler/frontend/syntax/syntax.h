@@ -304,6 +304,11 @@ ASTNode* SyntaxNewCXXConstructorCall(Syntax* syntax, Symbol* sym,
                                      SourceLocation location);
 ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
                                                     Symbol* sym);
+// The vtable whose address point a constructor of `complete` stores in the
+// __vptr at byte `vptr_offset` of a complete object, or NULL if none does
+// (its vtables are not registered yet).  The first table for an offset wins,
+// as in the constructor.
+Symbol* SyntaxCXXVTableForVPtrOffset(Struct* complete, int vptr_offset);
 // The initializer default-initializing a constexpr/constinit `sym`, or NULL if
 // default initialization runs no constructor.  `local` selects the
 // block-scope form.

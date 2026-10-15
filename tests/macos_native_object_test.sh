@@ -296,3 +296,42 @@ if ! "$WORK/defaulted"; then
   echo "out-of-line defaulted member program failed" >&2
   exit 1
 fi
+
+# abseil's LowLevelAlloc: libSystem's sysconf and mmap take Darwin's names
+# and flags, and a narrower integer converted to a pointer extends by its
+# signedness, so MAP_FAILED compares equal to what a failed mmap returns.
+cat >"$WORK/posix_values.c" <<'SRC'
+#include <stdint.h>
+#include <sys/mman.h>
+#include <unistd.h>
+__attribute__((noinline)) static int minus_one(void) {
+  volatile int v = -1;
+  return v;
+}
+__attribute__((noinline)) static void* failed_pointer(void) {
+  volatile intptr_t v = -1;
+  return (void*)v;
+}
+int main(void) {
+  long page = sysconf(_SC_PAGESIZE);
+  if (page <= 0 || page != getpagesize()) return 1;
+  if (sysconf(_SC_NPROCESSORS_ONLN) <= 0) return 2;
+  void* p = mmap(0, (size_t)page, PROT_READ | PROT_WRITE,
+                 MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  if (p == MAP_FAILED) return 3;
+  *(volatile char*)p = 1;
+  munmap(p, (size_t)page);
+  if (failed_pointer() != MAP_FAILED) return 4;
+  if ((uintptr_t)(void*)minus_one() != UINTPTR_MAX) return 5;
+  if ((uintptr_t)(void*)(unsigned)minus_one() != 0xffffffffu) return 6;
+  return 0;
+}
+SRC
+"$DAVECC" -target aarch64-apple-darwin-davecc "$WORK/posix_values.c" \
+  -o "$WORK/posix_values"
+status=0
+"$WORK/posix_values" || status=$?
+if [[ "$status" != "0" ]]; then
+  echo "Darwin sysconf/mmap/pointer-conversion program exited $status" >&2
+  exit 1
+fi

@@ -114,6 +114,10 @@ void DeleteStringVector(Vector* strings);
 Vector* SplitDependentMemberPath(String* path);
 bool StructContainsTemplateParameter(Struct* str);
 bool StructIsFunctionTemplateLocalClass(Struct* str);
+// Whether the layout of `type` is only known once the enclosing template is
+// instantiated: it names a template parameter, or is (an array of) a local
+// class of a function template, which each instantiation rebuilds.
+bool TypeLayoutDependsOnTemplate(TypeRecord* type);
 bool CallActualsStillContainPackExpansion(struct ASTNode* call);
 bool PendingTemplateInstantiationHasAsmName(const char* asm_name);
 

@@ -789,9 +789,11 @@ static CXXSpecialMemberKind CXXDetermineSpecialMemberKind(Symbol* symbol,
   if (func->info.function.is_destructor) {
     return kCXXSpecialMemberDestructor;
   }
-  if ((symbol->flags.is_template ||
-       func->info.function.template_parameter_count > 0) &&
-      func->info.function.is_constructor) {
+  // A template is never a copy/move constructor or assignment operator, so
+  // `template <bool O> C& operator=(const C<O>&)` leaves the implicit copy
+  // assignment declared.
+  if (symbol->flags.is_template ||
+      func->info.function.template_parameter_count > 0) {
     return kCXXSpecialMemberNone;
   }
   if (func->info.function.is_constructor) {

@@ -3586,6 +3586,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         member->byte_offset = anon_base;
         member->access = current_access;
         VectorAppend(&str->members, member);
+        member->index = str->members.length - 1;
 
         // Account for the space occupied by the anonymous aggregate.  In a
         // struct we advance past it; in a union it overlays the other members

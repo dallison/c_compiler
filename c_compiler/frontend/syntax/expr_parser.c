@@ -27,6 +27,7 @@
 #include "type_class_internal.h"
 #include "type_internal.h"
 #include "type_member.h"
+#include "type_template_internal.h"
 #include "compiler.h"
 #include "type_traits_semantics.h"
 
@@ -1280,8 +1281,6 @@ static ASTNode* TryParseSizeofNestedMember(Syntax* syntax,
   TypeRecordCalculateSize(member_type);
   return NewSizeofASTNodeWithKnownSize(member_type->size, location);
 }
-
-
 static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
   SourceLocation location = syntax->lex->current_token_location;
   if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(ellipsis))) {
@@ -1346,7 +1345,7 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
         TypeParserDestruct(&parser);
         goto done;
       }
-      if (CompilerIsCXX() && TypeContainsTemplateParameter(sym->type)) {
+      if (CompilerIsCXX() && TypeLayoutDependsOnTemplate(sym->type)) {
         // The size depends on a template parameter, so it cannot be computed
         // until the enclosing template is instantiated.  Retain the operand
         // type so it can be substituted and re-measured then.
@@ -1399,7 +1398,7 @@ static ASTNode* ParseAlignof(Syntax* syntax, TokenClass followers) {
     int alignment = -1;
     Symbol* sym = TypeParserParseDeclarator(&parser, type);
     if (sym != NULL) {
-      if (CompilerIsCXX() && TypeContainsTemplateParameter(sym->type)) {
+      if (CompilerIsCXX() && TypeLayoutDependsOnTemplate(sym->type)) {
         result = NewAlignofASTNodeWithType(
             sym->type, syntax->lex->current_token_location);
         SymbolDelete(sym);

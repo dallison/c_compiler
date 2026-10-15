@@ -127,7 +127,10 @@ Vector* PrependMemberFunctionEnclosingArguments(struct Syntax* syntax,
                                                 Vector* member_args,
                                                 bool keep_existing_prefix);
 /* True when pointing `existing`'s member at `named` would replace a class
- * template specialization with a class that has no template arguments. */
+ * template specialization with a class that has no template arguments, or
+ * when `named` merely inherits the member from `existing`: the symbol is the
+ * base's own definition, so renaming it to `Derived::f` leaves `Base::f`
+ * undefined for every other reference. */
 bool CXXRetargetDropsDeclaringTemplateArguments(Struct* existing,
                                                 Struct* named);
 

@@ -752,6 +752,9 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
         }
         break;
       }
+      if (ConstexprCompareInt128Operands(ctx, node, result)) {
+        return true;
+      }
       if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) &&
           EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) {
         TypeRecord* unsigned_type =
@@ -821,6 +824,9 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
           return true;
         }
         break;
+      }
+      if (ConstexprCompareInt128Operands(ctx, node, result)) {
+        return true;
       }
       if (EvaluateIntegerExpressionInContext(ctx, binary_node->left, &left) &&
           EvaluateIntegerExpressionInContext(ctx, binary_node->right, &right)) {
@@ -1213,6 +1219,21 @@ bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
   if (ExpressionIsTemplateDependent(initializer)) {
     symbol->flags.value_set = false;
     return false;
+  }
+  if (TypeIsInt128(symbol->type)) {
+    // The symbol value holds only the low word; the full value is kept as a
+    // folded constant for EvaluateInt128Expression.
+    int64_t lo = 0;
+    int64_t hi = 0;
+    symbol->flags.value_set = EvaluateInt128Constant(initializer, &lo, &hi);
+    if (symbol->flags.value_set) {
+      symbol->value.ivalue = lo;
+      if (symbol->constexpr_initializer == NULL) {
+        symbol->constexpr_initializer = NewInt128ConstantASTNode(
+            lo, hi, symbol->type, initializer->location);
+      }
+    }
+    return symbol->flags.value_set;
   }
   if (TypeIsIntegral(symbol->type) || TypeIsEnum(symbol->type)) {
     symbol->flags.value_set =

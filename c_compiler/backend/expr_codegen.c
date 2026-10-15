@@ -885,23 +885,20 @@ static IRNode* WidenIntegerToInt128(Generator* gen, IRNode* value,
     IROpcode extend = (!TypeIsUnsigned(from) && !TypeIsBool(from))
                           ? IR_OP(signextendi)
                           : IR_OP(zeroextendi);
-    IRNode* bits = GeneratorGetIntConstant(gen, word, from->size * 8);
+    // The extend operand is the number of bits added, as in GenerateSignExtend.
+    IRNode* bits = GeneratorGetIntConstant(gen, word, (8 - from->size) * 8);
     lo = IRSetType(GeneratorEmit(gen, NewIR2(extend, value, bits)), word);
   }
   IRNode* hi;
   if (TypeIsUnsigned(from) || TypeIsBool(from)) {
     hi = GeneratorGetIntConstant(gen, word, 0);
   } else {
-    IRNode* zero = GeneratorGetIntConstant(gen, word, 0);
-    IRNode* minus_one = GeneratorGetIntConstant(gen, word, (int64_t)-1);
-    IRNode* negative = GeneratorEmit(gen, NewIR2(IR_OP(cmplti), lo, zero));
-    IRNode* diff =
-        IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(subi), minus_one, zero)),
-                  word);
-    IRNode* scaled =
-        IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), negative, diff)),
-                  word);
-    hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), zero, scaled)), word);
+    // The word type is unsigned, so a comparison with zero would never find
+    // the value negative; the arithmetic shift copies the sign bit instead.
+    hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(asri), lo,
+                                             GeneratorGetIntConstant(gen, word,
+                                                                     63))),
+                   word);
   }
   return GenerateInt128FromWords(gen, to, lo, hi);
 }
@@ -1034,8 +1031,15 @@ static IRNode* GenerateInt128Mul(Generator* gen, IRNode* a_lo, IRNode* a_hi,
   IRNode* p2 = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), ah, bl)), word);
   IRNode* p3 = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(muli), ah, bh)), word);
   IRNode* mid = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), p1, p2)), word);
+  // The two cross products can carry out of 64 bits; that carry is worth 2^96.
+  IRNode* mid_carry = IRSetType(
+      GeneratorEmit(gen, NewIR2(IR_OP(lsli), Int128UnsignedLess(gen, mid, p1),
+                                c32)),
+      word);
   IRNode* mid_hi = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(lsri), mid, c32)),
                              word);
+  mid_hi =
+      IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), mid_hi, mid_carry)), word);
   IRNode* mid_lo = IRSetType(
       GeneratorEmit(gen, NewIR2(IR_OP(lsli),
                                 GeneratorEmit(gen, NewIR2(IR_OP(andi), mid,
@@ -1057,20 +1061,21 @@ static IRNode* GenerateInt128Mul(Generator* gen, IRNode* a_lo, IRNode* a_hi,
   return GenerateInt128FromWords(gen, type, lo, hi);
 }
 
-static IRNode* GenerateInt128Binary(Generator* gen, BinaryASTNode* node) {
-  TypeRecord* type = node->base.type;
+// `left` and `right` are values of `left_from` and `right_from`; either may be
+// a narrower integer, which is widened first.
+static IRNode* GenerateInt128BinaryValues(Generator* gen, ASTOpcode op,
+                                          TypeRecord* type,
+                                          TypeRecord* left_from,
+                                          TypeRecord* right_from,
+                                          IRNode* left, IRNode* right) {
   TypeRecord* word = Int128WordType();
-  TypeRecord* left_type =
-      TypeIsInt128(node->left->type) ? node->left->type : type;
-  TypeRecord* right_type =
-      TypeIsInt128(node->right->type) ? node->right->type : type;
-  IRNode* left = GenerateExpression(gen, node->left);
-  IRNode* right = GenerateExpression(gen, node->right);
-  if (!TypeIsInt128(node->left->type)) {
-    left = WidenIntegerToInt128(gen, left, node->left->type, left_type);
+  TypeRecord* left_type = TypeIsInt128(left_from) ? left_from : type;
+  TypeRecord* right_type = TypeIsInt128(right_from) ? right_from : type;
+  if (!TypeIsInt128(left_from)) {
+    left = WidenIntegerToInt128(gen, left, left_from, left_type);
   }
-  if (!TypeIsInt128(node->right->type)) {
-    right = WidenIntegerToInt128(gen, right, node->right->type, right_type);
+  if (!TypeIsInt128(right_from)) {
+    right = WidenIntegerToInt128(gen, right, right_from, right_type);
   }
   IRNode* left_addr = Int128ObjectAddress(gen, left, left_type);
   IRNode* right_addr = Int128ObjectAddress(gen, right, right_type);
@@ -1078,7 +1083,7 @@ static IRNode* GenerateInt128Binary(Generator* gen, BinaryASTNode* node) {
   IRNode* a_hi = LoadInt128Word(gen, left_addr, true);
   IRNode* b_lo = LoadInt128Word(gen, right_addr, false);
   IRNode* b_hi = LoadInt128Word(gen, right_addr, true);
-  switch (node->base.op) {
+  switch (op) {
     case AST_OP(plus): {
       IRNode* lo = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(addi), a_lo, b_lo)),
                              word);
@@ -1114,6 +1119,15 @@ static IRNode* GenerateInt128Binary(Generator* gen, BinaryASTNode* node) {
     }
     case AST_OP(mult):
       return GenerateInt128Mul(gen, a_lo, a_hi, b_lo, b_hi, type);
+    case AST_OP(div):
+    case AST_OP(mod): {
+      bool is_unsigned = TypeIsUnsigned(type);
+      const char* helper =
+          op == AST_OP(div)
+              ? (is_unsigned ? "__davecc_i128_udiv" : "__davecc_i128_sdiv")
+              : (is_unsigned ? "__davecc_i128_umod" : "__davecc_i128_smod");
+      return LongDoubleBinaryValues(gen, helper, left_addr, right_addr, type);
+    }
     case AST_OP(lshift):
       return GenerateInt128Shift(gen, a_lo, a_hi, b_lo, type, true, false);
     case AST_OP(rshiftl):
@@ -1127,15 +1141,14 @@ static IRNode* GenerateInt128Binary(Generator* gen, BinaryASTNode* node) {
     case AST_OP(lesseq):
     case AST_OP(greater):
     case AST_OP(greatereq): {
-      bool is_unsigned = TypeIsUnsigned(node->left->type) ||
-                         TypeIsUnsigned(node->right->type);
+      bool is_unsigned = TypeIsUnsigned(left_from) || TypeIsUnsigned(right_from);
       IRNode* hi_eq = GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), a_hi, b_hi));
       IRNode* lo_eq = GeneratorEmit(gen, NewIR2(IR_OP(cmpeqi), a_lo, b_lo));
       IRNode* eq = GeneratorEmit(gen, NewIR2(IR_OP(andi), hi_eq, lo_eq));
-      if (node->base.op == AST_OP(equal)) {
+      if (op == AST_OP(equal)) {
         return IRSetType(eq, type);
       }
-      if (node->base.op == AST_OP(noteq)) {
+      if (op == AST_OP(noteq)) {
         return IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(noti), eq)), type);
       }
       IRNode* hi_lt = is_unsigned
@@ -1146,13 +1159,13 @@ static IRNode* GenerateInt128Binary(Generator* gen, BinaryASTNode* node) {
           gen, NewIR2(IR_OP(ori), hi_lt,
                       GeneratorEmit(gen, NewIR2(IR_OP(andi), hi_eq, lo_lt))));
       IRNode* result = lt;
-      if (node->base.op == AST_OP(greater)) {
+      if (op == AST_OP(greater)) {
         result = GeneratorEmit(gen, NewIR1(IR_OP(noti),
                                            GeneratorEmit(gen, NewIR2(
                                                IR_OP(ori), lt, eq))));
-      } else if (node->base.op == AST_OP(lesseq)) {
+      } else if (op == AST_OP(lesseq)) {
         result = GeneratorEmit(gen, NewIR2(IR_OP(ori), lt, eq));
-      } else if (node->base.op == AST_OP(greatereq)) {
+      } else if (op == AST_OP(greatereq)) {
         result = GeneratorEmit(gen, NewIR1(IR_OP(noti), lt));
       }
       return IRSetType(result, type);
@@ -1160,6 +1173,14 @@ static IRNode* GenerateInt128Binary(Generator* gen, BinaryASTNode* node) {
     default:
       return GenerateInt128FromWords(gen, type, a_lo, a_hi);
   }
+}
+
+static IRNode* GenerateInt128Binary(Generator* gen, BinaryASTNode* node) {
+  IRNode* left = GenerateExpression(gen, node->left);
+  IRNode* right = GenerateExpression(gen, node->right);
+  return GenerateInt128BinaryValues(gen, node->base.op, node->base.type,
+                                    node->left->type, node->right->type, left,
+                                    right);
 }
 
 static TypeRecord* ComplexElementTypeRecord(TypeRecord* complex_type) {
@@ -3139,10 +3160,16 @@ static IRNode* GenerateCompoundLiteral(Generator* gen, CompoundLiteralASTNode* n
 
 /* C++ assignment expressions are lvalues. The outer operation in a
  * left-assignment fold therefore needs the inner assignment's destination,
- * rather than its stored value, as its own left operand. */
+ * rather than its stored value, as its own left operand, and so does a
+ * reference bound to the assignment (`return l = r;` from a `T&` function). */
 static bool AssignmentResultIsOuterAssignmentLHS(ASTNode* node) {
-  if (node == NULL || (node->flags & kASTNeedAddress) == 0 ||
-      node->parent == NULL || node->child_id != 0) {
+  if (node == NULL || (node->flags & kASTNeedAddress) == 0) {
+    return false;
+  }
+  if (CompilerIsCXX()) {
+    return true;
+  }
+  if (node->parent == NULL || node->child_id != 0) {
     return false;
   }
   switch (node->parent->op) {
@@ -3342,6 +3369,39 @@ static IRNode* GenerateAtomicCompoundAssignment(Generator* gen,
                                                                : result;
 }
 
+// `dest` is the left operand's address and `value` the generated right operand.
+// A narrower left operand is computed in the right operand's __int128 type.
+static IRNode* GenerateInt128CompoundAssignment(Generator* gen,
+                                                BinaryASTNode* node,
+                                                ASTOpcode alu_op, IRNode* dest,
+                                                IRNode* value,
+                                                bool result_address_needed) {
+  TypeRecord* store_type = node->base.type;
+  TypeRecord* right_type = node->right->type;
+  if (TypeIsInt128(store_type)) {
+    IRNode* address = Int128ObjectAddress(gen, dest, store_type);
+    IRNode* result = GenerateInt128BinaryValues(
+        gen, alu_op, store_type, store_type, right_type, address, value);
+    IRNode* assignment = GeneratorEmit(
+        gen, NewIR3(IR_OP(memcpy), address,
+                    Int128ObjectAddress(gen, result, store_type),
+                    GeneratorGetIntConstant(gen, NULL, store_type->size)));
+    CheckForVarDef(assignment, node->left);
+    return result_address_needed ? dest : result;
+  }
+  IRNode* load = IRSetType(
+      GeneratorEmit(gen, NewIR1(GetLoadOpcode(node->left), dest)), store_type);
+  CheckForVarUse(load, node->left);
+  IRNode* result = GenerateInt128BinaryValues(gen, alu_op, right_type,
+                                              store_type, right_type, load,
+                                              value);
+  IRNode* narrowed = NarrowInt128ToInteger(gen, result, right_type, store_type);
+  IRNode* store =
+      GeneratorEmit(gen, NewIR2(GetStoreOpcode(node->left), dest, narrowed));
+  CheckForVarDef(store, node->left);
+  return result_address_needed ? dest : narrowed;
+}
+
 // Compound assignment.
 static IRNode* GenerateCompoundAssignment(Generator* gen,
                                            BinaryASTNode* node) {
@@ -3437,6 +3497,13 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
     if (TypeIsUnsigned(node->base.type)) {
       alu_op = AST_OP(rshiftl);
     }
+  }
+
+  if (TypeIsInt128(node->base.type) ||
+      (TypeIsInt128(node->right->type) && TypeIsIntegral(node->base.type) &&
+       !IsBitfieldReference(node->left))) {
+    return GenerateInt128CompoundAssignment(gen, node, alu_op, dest, value,
+                                            result_address_needed);
   }
 
   // The result is stored back to the left operand using its own type, but the
@@ -7314,6 +7381,18 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
           IRSetType(result, node->type);
         }
         break;
+      }
+      // An integer narrower than the pointer extends by its own signedness,
+      // as GCC and Clang define it: `(void*)-1` (MAP_FAILED) is all ones.
+      // A cast shares its operand's register, whose upper bits are not
+      // otherwise defined.
+      if (TypeIsPointer(node->type) && TypeIsIntegral(cast_node->expr->type) &&
+          !TypeIsInt128(cast_node->expr->type) && result->type != NULL &&
+          result->type->size < node->type->size) {
+        result = TypeIsUnsigned(cast_node->expr->type) ||
+                         TypeIsBool(cast_node->expr->type)
+                     ? GenerateZeroExtend(gen, node, result)
+                     : GenerateSignExtend(gen, result, node);
       }
       result = GeneratorEmit(gen, NewIR1(IR_OP(cast), result));
       IRSetType(result, node->type);

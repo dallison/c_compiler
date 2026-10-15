@@ -101,8 +101,6 @@ static ASTNode* CXXFunctionalConstructionFinishWithType(VectorASTNode* node,
                                                         TypeRecord* type);
 static bool CXXFunctionalConstructionHasUserDeclaredConstructor(
     StructMember* constructor_head);
-static void CXXFunctionalConstructionMaybeBindLexicalParentFromMemberAlias(
-    TypeRecord* type, String* constructor_name);
 static ASTNode* CXXFunctionalConstructionSpliceCastAndAnalyze(
     VectorASTNode* node, TypeRecord* type, ASTNode* arg);
 static ASTNode* CXXFunctionalConstructionSpliceCompoundLiteralAndAnalyze(
@@ -1862,28 +1860,6 @@ static bool CXXFunctionalConstructionHasUserDeclaredConstructor(
   return false;
 }
 
-// When a namespace-scope class shares a nested typedef name, record the enclosing
-// class as lexical parent so member lookup matches the parser.
-static void CXXFunctionalConstructionMaybeBindLexicalParentFromMemberAlias(
-    TypeRecord* type, String* constructor_name) {
-  if (type->info.struct_info->lexical_parent != NULL ||
-      compiler->current_function == NULL ||
-      !TypeIsFunction(compiler->current_function) ||
-      compiler->current_function->info.function.cxx_member_owner == NULL ||
-      constructor_name == NULL) {
-    return;
-  }
-  Struct* current_owner =
-      compiler->current_function->info.function.cxx_member_owner;
-  StructMember* nested = FindStructMember(current_owner, constructor_name);
-  if (nested != NULL && nested->symbol != NULL &&
-      StorageIs(nested->symbol->storage, STO(typedef)) &&
-      !nested->symbol->flags.is_template &&
-      TypeIsStructOrUnion(nested->symbol->type)) {
-    type->info.struct_info->lexical_parent = current_owner;
-  }
-}
-
 // Splices `cast` over the functional-construction call and analyzes it.
 static ASTNode* CXXFunctionalConstructionSpliceCastAndAnalyze(
     VectorASTNode* node, TypeRecord* type, ASTNode* arg) {
@@ -2063,9 +2039,6 @@ static ASTNode* CXXFunctionalConstructionFinishWithType(VectorASTNode* node,
   bool has_user_declared_constructor =
       CXXFunctionalConstructionHasUserDeclaredConstructor(constructor);
 
-  CXXFunctionalConstructionMaybeBindLexicalParentFromMemberAlias(
-      type, constructor_name);
-
   ASTNode* finished =
       CXXFunctionalConstructionTryConversionOperatorCast(node, type);
   if (finished != NULL) {
@@ -2122,6 +2095,24 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
       (!StorageIs(callee_symbol->storage, STO(typedef)) &&
        !SymbolIsTagSymbol(callee_symbol))) {
     return NULL;
+  }
+  // An alias formed while its class template was only forward-declared
+  // (`using ValueView = ValueImpl<false>;` before ValueImpl's definition)
+  // still names the deferred specialization; constructing through it must
+  // see that specialization's constructors, not the primary's.
+  if (StorageIs(callee_symbol->storage, STO(typedef)) &&
+      !compiler->syntax.parsing_template_declaration &&
+      node->left->type != NULL && TypeIsStructOrUnion(node->left->type) &&
+      node->left->type->info.struct_info != NULL &&
+      node->left->type->info.struct_info->is_template &&
+      node->left->type->template_arguments != NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(
+          node->left->type->template_arguments)) {
+    TypeRecord* materialized = TypeMaterializeClassTemplateSpecialization(
+        &compiler->syntax, node->left->type);
+    if (materialized != node->left->type) {
+      ASTNodeSetType(node->left, materialized);
+    }
   }
   ASTNode* early = CXXFunctionalConstructionInstantiateCalleeTypes(node);
   if (early != NULL) {
@@ -3431,6 +3422,13 @@ static void FunctionCallPromoteVarargsActuals(TypeRecord* subtype,
           FoldConstantArgument((ASTNode*)node->children->value.p[i]);
       if (TypeIsFloat(actual->type)) {
         NormalConversion(actual, NewTypeRecordWithSize(kTypeDouble, kQualPlain));
+      } else if (TypeIsIntegral(actual->type) && !TypeIsBitInt(actual->type) &&
+                 actual->type->size < compiler->int_size) {
+        // The callee reads an int, but a narrower value's register is not
+        // extended past its own width.  The cast context admits scoped enums,
+        // which are passed as their underlying type.
+        SemanticConvertType(actual, NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                            kConvertCast);
       }
     }
   }

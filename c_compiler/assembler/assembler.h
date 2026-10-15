@@ -37,6 +37,10 @@ typedef struct Assembler {
   Map directives;
   int num_errors;
   bool parsing_layout_expression;
+  // Set when a parsed expression names a symbol or `Nb` / `Nf` local label,
+  // so its value is an address rather than a plain number.  Never cleared by
+  // the parser; a caller resets it before the expression it asks about.
+  bool expression_names_symbol;
   AssemblerSymbol* (*define_label)(struct Assembler*, String*);
   // GNU `N:` / `Nb` / `Nf` local labels.  Counts reset each assembly pass.
   int* local_label_count;

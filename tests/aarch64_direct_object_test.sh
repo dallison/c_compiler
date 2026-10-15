@@ -155,3 +155,39 @@ EOF
   -Wl,-e -Wl,main "$work/shifted_switch.cpp" \
   -o "$work/shifted_switch.bin"
 "$aarch64" -i "$work/shifted_switch.bin"
+
+# `adr` to a GNU local label encodes the distance from the instruction, as it
+# does for a named label (a coroutine trampoline's return stub is `adr x1, 1b`).
+cat >"$work/local_label_adr.S" <<'EOF'
+  .text
+  .p2align 2
+1:
+  mov x0, #42
+  ret
+  .global label_backward
+label_backward:
+  adr x0, 1b
+  ret
+  .global label_forward
+label_forward:
+  adr x0, 2f
+  ret
+2:
+  mov x0, #7
+  ret
+EOF
+
+cat >"$work/local_label_adr.c" <<'EOF'
+typedef long (*Thunk)(void);
+Thunk label_backward(void);
+Thunk label_forward(void);
+
+int main(void) {
+  return label_backward()() == 42 && label_forward()() == 7 ? 0 : 1;
+}
+EOF
+
+"$davecc" -target aarch64 -O0 -nostdinc -nostdlib -static -Wl,-e -Wl,main \
+  "$work/local_label_adr.c" "$work/local_label_adr.S" \
+  -o "$work/local_label_adr.bin"
+"$aarch64" -i "$work/local_label_adr.bin"

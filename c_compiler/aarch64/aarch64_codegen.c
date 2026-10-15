@@ -2063,10 +2063,15 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
     IRNode* op = node->inputs.value.p[0];
     int compare_size = (op->type->size > 4) ? kSize64Bit : kSize32Bit;
     int result_size = (node->type->size > 4) ? kSize64Bit : kSize32Bit;
-    Emit(g, SetInstructionSize(
-                NewInstruction2(AARCH64_OP(cmp), Materialize(g, op),
-                                GetIntConstant(g, NULL, kTargetType32Bit, 0)),
-                compare_size));
+    TargetInstruction* value = Materialize(g, op);
+    // The immediate form of cmp reads register 31 as sp, so a zero operand
+    // (a constant such as a `false` template argument) compares against zr.
+    TargetInstruction* zero =
+        (AARCH64Opcode)(int)value->opcode == AARCH64_OP(zr)
+            ? value
+            : GetIntConstant(g, NULL, kTargetType32Bit, 0);
+    Emit(g, SetInstructionSize(NewInstruction2(AARCH64_OP(cmp), value, zero),
+                               compare_size));
     TargetInstruction* result = SetInstructionSize(
         NewInstruction1(AARCH64_OP(cset),
                         Condition(g, AARCH64_OP(eq), result_size)),

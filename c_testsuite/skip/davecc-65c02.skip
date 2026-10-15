@@ -59,3 +59,6 @@ echo "tests/single-exec/00237.c"
 
 # POSIX filesystem, environment, and aligned-allocation APIs are not available.
 echo "tests/single-exec/00242.c"
+
+# The 65c02 backend cannot load or store __int128 objects.
+echo "tests/single-exec/00261.c"

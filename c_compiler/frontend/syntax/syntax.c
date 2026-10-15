@@ -7068,6 +7068,21 @@ static bool CXXVPtrPhysicalOffset(Struct* owner, Struct* source,
   return false;
 }
 
+Symbol* SyntaxCXXVTableForVPtrOffset(Struct* complete, int vptr_offset) {
+  for (size_t i = 0; complete != NULL && i < complete->vtable_symbols.length;
+       i++) {
+    CXXVTableInfo* info = complete->vtable_symbols.value.p[i];
+    int physical = 0;
+    if (info != NULL && info->symbol != NULL &&
+        CXXVPtrPhysicalOffset(complete, info->source, info->source_offset,
+                              &physical) &&
+        physical == vptr_offset) {
+      return info->symbol;
+    }
+  }
+  return NULL;
+}
+
 static void AppendCXXVPtrInitializers(TypeRecord* func, Vector* body,
                                       SourceLocation location) {
   if (func == NULL || !TypeIsFunction(func) ||
@@ -10644,6 +10659,34 @@ static bool CXXConstVariableHasInternalLinkage(Syntax* syntax,
   return TypeIsConst(object) && !TypeIsVolatile(object);
 }
 
+// [basic.link]/4: a namespace-scope function or variable declared in an
+// unnamed namespace has internal linkage, even when declared `extern`
+// (abseil's `extern const uint64_t kPower10MantissaHighTable[];` ahead of its
+// definition).  Its name is mangled with the translation unit's own
+// unnamed-namespace ordinal, so an external symbol collides with another
+// TU's unrelated `(anonymous)::GetPageSize()`.
+static bool CXXDeclarationInUnnamedNamespace(Syntax* syntax,
+                                             TypeParser* parser, Symbol* sym,
+                                             Storage storage) {
+  if (!CompilerIsCXX() || sym == NULL || sym->type == NULL ||
+      (storage != STO(implicit) && storage != STO(extern)) ||
+      sym->storage != storage ||
+      parser->cxx_member_definition != NULL ||
+      parser->cxx_qualified_definition_namespace != NULL ||
+      sym->flags.is_c_linkage ||
+      (TypeIsFunction(sym->type) &&
+       sym->type->info.function.cxx_member_owner != NULL)) {
+    return false;
+  }
+  for (Namespace* ns = syntax->current_namespace; ns != NULL;
+       ns = ns->parent) {
+    if (ns->is_anonymous) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Apple SDK headers spell asm labels as Mach-O symbols, so
 // __DARWIN_ALIAS(regcomp) is asm("_regcomp"); the Mach-O writer adds that
 // underscore itself.  DaveCC's own headers and runtime use the ELF name.
@@ -10736,6 +10779,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       }
       if (syntax->export_depth > 0) {
         sym->flags.is_exported = true;
+      }
+      if (CXXDeclarationInUnnamedNamespace(syntax, parser, sym, storage)) {
+        // An `extern` declaration stays a non-defining declaration.
+        if (storage == STO(implicit)) {
+          storage = STO(static);
+        }
+        sym->storage = STO(static);
       }
       SymbolAttachModuleContext(sym, storage);
       ApplyExplicitCXXLinkageAttachment(syntax, sym, storage);
@@ -10926,6 +10976,18 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
           !syntax->parsing_template_specialization) {
         StructMember* matching_member = FindStructMemberOverload(
             parser->cxx_member_definition, sym->type);
+        // A class template's out-of-line member carries the class's template
+        // head, which FindStructMemberOverload reads as a member template.  An
+        // exact signature still wins over the looser comparison below, which
+        // cannot tell `f(const X&)` from `f(X&)`.
+        for (StructMember* candidate = parser->cxx_member_definition;
+             matching_member == NULL && candidate != NULL;
+             candidate = candidate->overload_next) {
+          if (candidate->symbol != NULL && candidate->symbol->type != NULL &&
+              TypeEqual(candidate->symbol->type, sym->type)) {
+            matching_member = candidate;
+          }
+        }
         if (matching_member == NULL) {
           for (StructMember* candidate = parser->cxx_member_definition;
                candidate != NULL; candidate = candidate->overload_next) {
@@ -11393,7 +11455,13 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
             /*free_element=*/false);
       }
     }
+    // Unlike constexpr, constinit may appear on a non-defining declaration
+    // (`constinit extern int x;`); the definition carries the initializer.
+    bool constinit_declaration = sym->flags.is_constinit &&
+                                 !sym->flags.is_constexpr &&
+                                 StorageIs(storage, STO(extern));
     if ((sym->flags.is_constexpr || sym->flags.is_constinit) &&
+        !constinit_declaration &&
         initializer == NULL && parser->cxx_member_definition == NULL &&
         !CXXDeferConstexprDefaultInitialization(syntax, sym->type)) {
       // An out-of-class definition of a static data member

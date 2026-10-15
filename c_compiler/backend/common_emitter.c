@@ -100,6 +100,17 @@ static void EmitBinding(FILE* fp, const char* name, bool is_global,
   }
 }
 
+// The binding a reference declares for `symbol`, which must match its
+// definition's: a later binding directive for the name overrides the
+// definition's, so a reference from a static initializer would otherwise
+// export a `static` object.
+static AssemblerSymbolBinding ReferencedSymbolBinding(Symbol* symbol) {
+  if (symbol->flags.is_local || StorageIs(symbol->storage, STO(static))) {
+    return SYM_BIND(local);
+  }
+  return SymbolHasWeakBinding(symbol) ? SYM_BIND(weak) : SYM_BIND(global);
+}
+
 static int CompareInitializerOffset(const void* left, const void* right) {
   const Initializer* a = *(const Initializer* const*)left;
   const Initializer* b = *(const Initializer* const*)right;
@@ -172,12 +183,16 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
         next_offset += 8;
         break;
       case kInitTypeSymbol:
-        if (init->value.symbol->flags.is_local) {
-          fprintf(fp, "\t.local %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
-        } else if (SymbolHasWeakBinding(init->value.symbol)) {
-          fprintf(fp, "\t.weak %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
-        } else {
-          fprintf(fp, "\t.global %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
+        switch (ReferencedSymbolBinding(init->value.symbol)) {
+          case SYM_BIND(local):
+            fprintf(fp, "\t.local %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
+            break;
+          case SYM_BIND(weak):
+            fprintf(fp, "\t.weak %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
+            break;
+          default:
+            fprintf(fp, "\t.global %s\n", TargetSymbolName(init->value.symbol,  buf, sizeof(buf)));
+            break;
         }
         if (init->symbol_addend != 0) {
           fprintf(fp, "\t%s    %s%+" PRId64 "\t\t// offset %d\n", ptr_asm,
@@ -641,13 +656,9 @@ static void EmitInitializedVariableToModule(InitializedStaticVariable* var,
             TargetSymbolName(init->value.symbol, symbol_buf,
                              sizeof(symbol_buf));
         AsmExprInitSymbol(&value, symbol_name, init->symbol_addend);
-        AsmModuleSymbol(
-            module, value.symbol.value, SYM_TYPE(none),
-            init->value.symbol->flags.is_local
-                ? SYM_BIND(local)
-                : SymbolHasWeakBinding(init->value.symbol) ? SYM_BIND(weak)
-                                                           : SYM_BIND(global),
-            0, 1, false, true, false);
+        AsmModuleSymbol(module, value.symbol.value, SYM_TYPE(none),
+                        ReferencedSymbolBinding(init->value.symbol), 0, 1,
+                        false, true, false);
         AsmModuleInteger(module, compiler->pointer_size, &value);
         AsmExprDestruct(&value);
         next_offset += compiler->pointer_size;
@@ -781,13 +792,9 @@ void EmitInitFiniArrayEntriesToModule(Vector* functions, bool is_fini,
     char buf[256];
     const char* name =
         TargetSymbolName(sorted[i], buf, sizeof(buf));
-    AsmModuleSymbol(
-        module, name, SYM_TYPE(func),
-        sorted[i]->flags.is_local
-            ? SYM_BIND(local)
-            : SymbolHasWeakBinding(sorted[i]) ? SYM_BIND(weak)
-                                              : SYM_BIND(global),
-        0, 1, false, true, false);
+    AsmModuleSymbol(module, name, SYM_TYPE(func),
+                    ReferencedSymbolBinding(sorted[i]), 0, 1, false, true,
+                    false);
     AsmExpr value;
     AsmExprInitSymbol(&value, name, 0);
     AsmModuleInteger(module, compiler->pointer_size, &value);

@@ -410,32 +410,29 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
   }
   if (expression->op == AST_OP(string) ||
       expression->op == AST_OP(string_wide)) {
+    ASTNode* clone = ASTNodeClone(expression, IdentityCloneNode, NULL, NULL);
     ASTNodeDelete(symbol->constexpr_initializer);
-    symbol->constexpr_initializer =
-        ASTNodeClone(expression, IdentityCloneNode, NULL, NULL);
+    symbol->constexpr_initializer = clone;
     symbol->flags.value_set = symbol->constexpr_initializer != NULL;
     return symbol->flags.value_set;
   }
+  // `value.other` names only the object; the initializer keeps the exact
+  // address (`&table[3]`) for the constant evaluator.
   Symbol* target = StaticAddressTargetFromExpression(expression);
+  if (target == NULL && expression->op == AST_OP(address)) {
+    target = StaticAddressTargetFromSubobject(
+        ((UnaryASTNode*)expression)->sub, true);
+  }
   if (target != NULL) {
     if (CompilerSymbolIsMetaPromotedStatic(target)) {
       ConstexprEnsureMetaPromotedStaticObject(target);
     }
     symbol->value.other = target;
     symbol->flags.value_set = true;
+    ASTNode* clone = ASTNodeClone(expression, IdentityCloneNode, NULL, NULL);
+    ASTNodeDelete(symbol->constexpr_initializer);
+    symbol->constexpr_initializer = clone;
     return true;
-  }
-  if (expression->op == AST_OP(address)) {
-    UnaryASTNode* address = (UnaryASTNode*)expression;
-    target = StaticAddressTargetFromSubobject(address->sub, true);
-    if (target != NULL) {
-      if (CompilerSymbolIsMetaPromotedStatic(target)) {
-        ConstexprEnsureMetaPromotedStaticObject(target);
-      }
-      symbol->value.other = target;
-      symbol->flags.value_set = true;
-      return true;
-    }
   }
   ASTNode* folded = ConstexprFoldPointerExpression(expression);
   if (folded != NULL &&

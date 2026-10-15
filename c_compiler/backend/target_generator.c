@@ -1070,9 +1070,13 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
     return symbol->cached_target_symbol_name;
   }
   // Namespace-scope objects carry their namespace in the symbol name
-  // (`a::x` is `_ZN1a1xE`); otherwise `a::x` and `b::x` collide.
+  // (`a::x` is `_ZN1a1xE`); otherwise `a::x` and `b::x` collide.  Invented
+  // metadata (vtables, RTTI, guards) names itself: its namespace_ is wherever
+  // the class happened to be completed, and lazy emission matches references
+  // recorded under the plain name.
   if (CompilerIsCXX() && symbol->asm_name.length == 0 &&
-      symbol->namespace_ != NULL && !symbol->flags.is_local &&
+      symbol->namespace_ != NULL && !symbol->flags.invented &&
+      !symbol->flags.is_local &&
       !symbol->flags.is_c_linkage && symbol->type != NULL &&
       !TypeIsFunction(symbol->type)) {
     SymbolSetCXXDataAsmName(symbol, NULL);

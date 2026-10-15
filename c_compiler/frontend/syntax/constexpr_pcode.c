@@ -173,6 +173,10 @@ typedef struct {
   // A copy of an AST-evaluated array an argument points into, rather than an
   // argument object itself.
   bool pointee;
+  // The static object, and offset into it, an argument object copy stands
+  // for, or NULL.
+  Symbol* static_symbol;
+  size_t static_offset;
 } ConstexprPCodeAddressRegion;
 
 typedef struct {
@@ -2864,6 +2868,22 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
         .type = object_type,
         .object = object,
     };
+    ASTNode* address_of = arg;
+    while (address_of != NULL && (address_of->op == AST_OP(cast) ||
+                                  address_of->op == AST_OP(expr_init))) {
+      address_of = address_of->op == AST_OP(cast)
+                       ? ((CastASTNode*)address_of)->expr
+                       : ((ExpressionInitializerASTNode*)address_of)->expr;
+    }
+    // Evaluated a second time, so only an `&object` without side effects.
+    ConstexprValue address = {0};
+    if (ctx != NULL && TypeIsPointer(type) && address_of != NULL &&
+        address_of->op == AST_OP(address) &&
+        ConstexprEvaluateAddressValue(ctx, arg, &address) &&
+        !ConstexprStaticAddressTarget(&address, &region->static_symbol,
+                                      &region->static_offset)) {
+      region->static_symbol = NULL;
+    }
     VectorAppend(address_regions, region);
   }
   *sp -= sizeof(uint64_t);
@@ -3189,6 +3209,7 @@ static bool PrepareConstexprPCodeConstructorStack(ConstEvalContext* ctx,
                                                   ASTNode* call_node,
                                                   uint32_t* halt_instruction,
                                                   Vector* allocations,
+                                                  Vector* address_regions,
                                                   unsigned char* object_memory,
                                                   const char** reason) {
   if (call_node == NULL || call_node->op != AST_OP(call) ||
@@ -3250,7 +3271,7 @@ static bool PrepareConstexprPCodeConstructorStack(ConstEvalContext* ctx,
       arg_type = arg->type;
     }
     if (!StoreConstexprPCodeArgument(ctx, vm, &sp, arg_type, arg,
-                                     allocations, NULL, reason)) {
+                                     allocations, address_regions, reason)) {
       return false;
     }
   }
@@ -3486,8 +3507,28 @@ static void PCodeMapPointeeAddress(PCodeVM* vm, TypeRecord* type,
   }
   for (size_t i = 0; regions != NULL && i < regions->length; i++) {
     ConstexprPCodeAddressRegion* region = regions->value.p[i];
-    if (region == NULL || !region->pointee) {
+    if (region == NULL) {
       continue;
+    }
+    if (!region->pointee) {
+      // This run's copy of an object passed by address, such as
+      // `&table.header` stored by a constructor: it designates that object.
+      uint64_t start = (uint64_t)(uintptr_t)region->memory;
+      if (address < start || address > start + region->size) {
+        continue;
+      }
+      size_t offset = (size_t)(address - start);
+      ConstexprValue interior = {0};
+      if (region->static_symbol != NULL
+              ? ConstexprStaticAddressAt(region->static_symbol,
+                                         region->static_offset + offset,
+                                         type->next, &interior)
+              : region->object != NULL &&
+                    ConstexprAddressInsideObject(region->object, offset,
+                                                 type->next, &interior)) {
+        *slot = interior;
+      }
+      return;
     }
     uint64_t start = (uint64_t)(uintptr_t)region->memory;
     size_t elem_size = region->type->next->size;
@@ -4036,17 +4077,20 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
     return false;
   }
 
+  Vector address_regions;
+  VectorInit(&address_regions);
   ConstexprEvalMode saved_eval_mode = compiler->constexpr_eval_mode;
   compiler->constexpr_eval_mode = kConstexprEvalAST;
   bool prepared = PrepareConstexprPCodeConstructorStack(
-      ctx, &vm, func, node, &halt_instruction, &allocations, object_memory,
-      reason);
+      ctx, &vm, func, node, &halt_instruction, &allocations, &address_regions,
+      object_memory, reason);
   compiler->constexpr_eval_mode = saved_eval_mode;
   if (!prepared) {
     for (size_t i = 0; i < allocations.length; i++) {
       free(allocations.value.p[i]);
     }
     VectorDestruct(&allocations);
+    VectorDestructWithContents(&address_regions, NULL, /*free_element=*/true);
     ConstexprPCodeRuntimeDestruct(&runtime);
     PCodeVMDestruct(&vm);
     ConstexprPCodeImageDestruct(&image);
@@ -4070,7 +4114,8 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
         .size = object_type->size,
         .root = *object_result,
     };
-    PCodeMapPointeeAddresses(&vm, object_type, *object_result, NULL,
+    PCodeMapPointeeAddresses(&vm, object_type, *object_result,
+                             &address_regions,
                              runtime.source_size_t_size < sizeof(uint64_t),
                              &result_region);
   }
@@ -4103,6 +4148,7 @@ static bool RunRealPCodeConstructor(ConstEvalContext* ctx, TypeRecord* object_ty
     free(allocations.value.p[i]);
   }
   VectorDestruct(&allocations);
+  VectorDestructWithContents(&address_regions, NULL, /*free_element=*/true);
   ConstexprPCodeRuntimeDestruct(&runtime);
   PCodeVMDestruct(&vm);
   ConstexprPCodeImageDestruct(&image);

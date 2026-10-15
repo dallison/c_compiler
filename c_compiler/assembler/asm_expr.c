@@ -24,6 +24,7 @@ static ASTNode* ParseIdentifier(Assembler* assembler) {
   String name;
   StringInit(&name, lex->spelling.value);
   LexNextToken(lex);
+  assembler->expression_names_symbol = true;
 
   // Find the symbol by searching all symbol tables.  It must exist.
   AssemblerSymbol* symbol = AssemblerFindSymbol(assembler, name.value);
@@ -130,6 +131,7 @@ static ASTNode* ParsePrimaryExpression(Assembler* assembler) {
           direction == 'F') {
         bool backward = direction == 'b' || direction == 'B';
         LexNextToken(lex);
+        assembler->expression_names_symbol = true;
         AssemblerSymbol* symbol =
             AssemblerLookupNumericLocalLabel(assembler, (int)value, backward);
         if (symbol == NULL) {

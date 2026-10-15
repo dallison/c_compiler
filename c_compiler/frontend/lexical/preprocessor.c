@@ -5426,7 +5426,9 @@ static void ProcessPossibleMacro(Preprocessor* p,
              p->lex->preprocessor_mode) {
     ProcessHasEmbedOperator(p, ti);
   } else if (StringEqual(possible_macro_name, "__FILE__")) {
-    StringPrintf(&replacement, "\"%s\"", &p->lex->source->filename);
+    StringAppendChar(&replacement, '"');
+    StringAppend(&replacement, p->lex->source->filename.value);
+    StringAppendChar(&replacement, '"');
     TokenizeAndReplaceCurrentToken(ti, &replacement, p->lex->assembler_mode);
   } else if (StringEqual(possible_macro_name, "__LINE__")) {
     StringPrintf(&replacement, "%d", p->lex->source->lineno);

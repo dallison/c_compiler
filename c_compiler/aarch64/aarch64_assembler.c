@@ -1097,6 +1097,7 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
   bool known = false;
   int64_t addr = 0;
   AssemblerSymbol* sym = NULL;
+  bool names_address = false;
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
     sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
@@ -1105,8 +1106,11 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
     known = sym->defined && sym->section == ASMO.current_section &&
             sym->binding != SYM_BIND(weak);
     addr = sym->value;
+    names_address = true;
   } else {
+    ASM.expression_names_symbol = false;
     addr = AssemblerEvaluateKnownExpression(&ASM, &known);
+    names_address = ASM.expression_names_symbol;
   }
   // For adrp (op == 1) the immediate is a *page* delta computed from final
   // load addresses, not a section-relative byte offset.  Resolving it at
@@ -1116,15 +1120,16 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
   if (op == 1 && sym != NULL) {
     known = false;
   }
-  // For a symbol target the encoded value is the PC-relative displacement
-  // (symbol_address - this_instruction_address).  A bare numeric operand, by
-  // contrast, is already a PC-relative byte displacement: the computed-branch
-  // table jump emits `adr t1, 12` to mean "pc + 12" (the start of the jump
-  // table 12 bytes ahead).  Applying the symbol-style `addr - pc` math to such
-  // a constant would treat it as an absolute section offset and produce a
-  // wildly wrong displacement, so use the constant directly.
-  int32_t offset =
-      (sym != NULL) ? (int32_t)(addr - instruction_offset) : (int32_t)addr;
+  // For a symbol or local-label (`1b`) target the encoded value is the
+  // PC-relative displacement (symbol_address - this_instruction_address).  A
+  // bare numeric operand, by contrast, is already a PC-relative byte
+  // displacement: the computed-branch table jump emits `adr t1, 12` to mean
+  // "pc + 12" (the start of the jump table 12 bytes ahead).  Applying the
+  // symbol-style `addr - pc` math to such a constant would treat it as an
+  // absolute section offset and produce a wildly wrong displacement, so use
+  // the constant directly.
+  int32_t offset = names_address ? (int32_t)(addr - instruction_offset)
+                                 : (int32_t)addr;
   int32_t immlo = (offset & 0x3);
   int32_t immhi = (offset >> 2) & 0x7ffff;
   if (!known) {

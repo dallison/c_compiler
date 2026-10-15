@@ -14,9 +14,11 @@
 #include "constexpr.h"
 #include "expr_evaluator.h"
 #include "expr_semantics.h"
+#include "expr_semantics_internal.h"
 #include "list.h"
 #include "member_pointer.h"
 #include "syntax.h"
+#include "type_special_member.h"
 
 // The semantic analysis of an initializer converts the tree
 // of initializers into a single braced initializer containing
@@ -613,6 +615,17 @@ static bool DesignatesStaticObject(ASTNode* expr) {
   }
 }
 
+bool CXXNamesConstexprPointerConstant(ASTNode* expr) {
+  if (!CompilerIsCXX() || expr == NULL || expr->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
+  return symbol != NULL && symbol->type != NULL &&
+         symbol->flags.is_constexpr && symbol->flags.value_set &&
+         !StorageIs(symbol->storage, STO(thread)) &&
+         (TypeIsPointer(symbol->type) || TypeIsNullPointer(symbol->type));
+}
+
 bool InitializerIsLinkTimeConstant(ASTNode* init) {
   if (init == NULL) {
     return true;
@@ -635,7 +648,8 @@ bool InitializerIsLinkTimeConstant(ASTNode* init) {
       return InitializerIsLinkTimeConstant(
           ((ExpressionInitializerASTNode*)init)->expr);
     default:
-      return IsConstantExpression(init) || HasStaticAddress(init);
+      return IsConstantExpression(init) || HasStaticAddress(init) ||
+             CXXNamesConstexprPointerConstant(init);
   }
 }
 
@@ -647,7 +661,13 @@ static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
     return is_same_folded;
   }
   ASTNode* folded = NULL;
-  if (TypeIsIntegral(expr->type)) {
+  if (TypeIsInt128(expr->type)) {
+    int64_t lo = 0;
+    int64_t hi = 0;
+    if (EvaluateInt128Constant(expr, &lo, &hi)) {
+      folded = NewInt128ConstantASTNode(lo, hi, expr->type, expr->location);
+    }
+  } else if (TypeIsIntegral(expr->type)) {
     int64_t value;
     if (EvaluateIntegerExpression(expr, &value)) {
       folded =
@@ -695,6 +715,15 @@ static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
   }
   folded->flags |= kASTAnalyzed;
   return folded;
+}
+
+// An element is copy-initialized ([dcl.init.aggr]/4): from a glvalue of a class
+// whose copy is not trivial, that runs the copy or move constructor; copying
+// the bytes would alias what the source owns (a string's buffer).
+static bool CXXCopiesThroughConstructor(TypeRecord* type, ASTNode* expr) {
+  return CompilerIsCXX() && type->info.struct_info != NULL &&
+         !type->info.struct_info->is_aggregate &&
+         !CXXTypeIsTriviallyCopyable(type) && ASTNodeIsGLValue(expr);
 }
 
 static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_only) {
@@ -781,6 +810,12 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
       return InitArrayAndAdvance(inode, expr, constants_only);
  
     case kIStruct:
+      if (StructInitializationTypesMatch(expr->type, inode->type) &&
+          CXXCopiesThroughConstructor(inode->type, expr)) {
+        SourceLocation location = expr->location;
+        expr = AnalyzeExpression(NewCastASTNode(
+            TypeRecordCopy(inode->type), location, ASTNodeMove(expr)));
+      }
       if (StructInitializationTypesMatch(expr->type, inode->type)) {
         // A struct/union can be initialized by an expression of the same
         // struct/union type (ignoring top-level qualifiers on the source).
@@ -932,7 +967,19 @@ static INode* FindDesignator(INode* inode,
         name = designator->value.struct_member_name;
       }
       StructMember* member = NULL;
-      if (name != NULL) {
+      // A resolved designator may name an anonymous member itself, which has
+      // no name to look up (a constant object image of a union whose active
+      // member is an anonymous struct).
+      for (size_t i = 0; designator->is_resolved_member &&
+                         designator->value.struct_member != NULL &&
+                         i < info->members.length;
+           i++) {
+        if (info->members.value.p[i] == designator->value.struct_member) {
+          member = designator->value.struct_member;
+          break;
+        }
+      }
+      if (name != NULL && member == NULL) {
         for (size_t i = 0; i < info->members.length; i++) {
           StructMember* candidate = info->members.value.p[i];
           if (!StructMemberIsObjectMember(candidate) || candidate->is_anon) {

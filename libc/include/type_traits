@@ -280,9 +280,46 @@ struct extent<T[I], N> : extent<T, N - 1> {};
 template <class T, unsigned N = 0>
 inline constexpr size_t extent_v = extent<T, N>::value;
 
+// The enumeration's storage type, picked by size and by whether -1 survives
+// widening from it.  A 64-bit underlying type is spelled the way <stdint.h>
+// spells int64_t/uint64_t for the target.
+#if defined(__DAVECC_NATIVE_DARWIN__) || !defined(__LP64__)
+#define __DAVECC_UNDERLYING_INT64 long long
+#else
+#define __DAVECC_UNDERLYING_INT64 long
+#endif
+template <class T, bool = __davecc_is_enum(T) != 0>
+struct __underlying_type_impl {
+  using type = int;
+};
+
+template <class T>
+struct __underlying_type_impl<T, true> {
+  static constexpr bool __is_signed =
+      static_cast<__int128>(static_cast<T>(-1)) < 0;
+  using type = typename conditional<
+      sizeof(T) == 1, typename conditional<__is_signed, signed char,
+                                           unsigned char>::type,
+      typename conditional<
+          sizeof(T) == 2,
+          typename conditional<__is_signed, short, unsigned short>::type,
+          typename conditional<
+              sizeof(T) == 4,
+              typename conditional<__is_signed, int, unsigned int>::type,
+              typename conditional<
+                  sizeof(T) == 8,
+                  typename conditional<
+                      __is_signed, __DAVECC_UNDERLYING_INT64,
+                      unsigned __DAVECC_UNDERLYING_INT64>::type,
+                  typename conditional<__is_signed, __int128,
+                                       unsigned __int128>::type>::type>::
+              type>::type>::type;
+};
+#undef __DAVECC_UNDERLYING_INT64
+
 template <class T>
 struct underlying_type {
-  using type = int;
+  using type = typename __underlying_type_impl<T>::type;
 };
 
 template <class T>

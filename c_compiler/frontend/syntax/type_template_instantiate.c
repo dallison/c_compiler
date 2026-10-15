@@ -1493,10 +1493,20 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     Symbol* current = compiler->current_function->info.function.symbol;
     Symbol* origin = compiler->current_function->info.function.template_origin;
     Symbol* pattern_fn = from->access_enclosing_function;
+    // A member function template instantiated from another instantiation's
+    // body (`Outer<F>` calling `Inner(f, body)`) can originate from a copy
+    // of the template symbol; it still shares the pattern's body.
+    ASTNode* pattern_body =
+        pattern_fn->type != NULL && TypeIsFunction(pattern_fn->type)
+            ? pattern_fn->type->info.function.body
+            : NULL;
     bool matches =
         current == pattern_fn || origin == pattern_fn ||
         (current != NULL && current->value.func_defn == pattern_fn) ||
-        (origin != NULL && origin->value.func_defn == pattern_fn);
+        (origin != NULL && origin->value.func_defn == pattern_fn) ||
+        (pattern_body != NULL && origin != NULL && origin->type != NULL &&
+         TypeIsFunction(origin->type) &&
+         origin->type->info.function.body == pattern_body);
     if (matches && current != NULL && !current->flags.is_template &&
         compiler->current_function->template_arguments != NULL &&
         !TemplateArgumentVectorContainsTemplateParameter(
@@ -3241,6 +3251,13 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   Struct* saved_subst_target = NULL;
   ParserApplyMemberOwnerSubstitution(parser, from, &saved_subst_source,
                                      &saved_subst_target);
+  // The signature is in the scope of the member's class, so access checks in
+  // `-> decltype(node.slot())` see that class's friendships, not the caller's.
+  Struct* saved_access_context = compiler->current_class_access_context;
+  if (from->info.function.cxx_member_owner != NULL) {
+    compiler->current_class_access_context =
+        from->info.function.cxx_member_owner;
+  }
   // A member function template parsed inside a class template numbers its own
   // parameters after the enclosing ones (`template_parameter_base`).  Call
   // deduction records those parameters in a 0-based vector.  Rebase a copy of
@@ -3295,6 +3312,7 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
     Symbol* formal = func->info.function.prototype.value.p[i];
     formal->value.arg_number = (int32_t)i;
   }
+  compiler->current_class_access_context = saved_access_context;
   if (parser != NULL) {
     parser->template_substitution_source = saved_subst_source;
     parser->template_substitution_target = saved_subst_target;
@@ -3511,8 +3529,9 @@ Vector* PrependMemberFunctionEnclosingArguments(Syntax* syntax, Symbol* symbol,
 bool CXXRetargetDropsDeclaringTemplateArguments(Struct* existing,
                                                 Struct* named) {
   return existing != NULL && existing != named &&
-         StructConcreteTemplateArguments(existing) != NULL &&
-         StructConcreteTemplateArguments(named) == NULL;
+         ((StructConcreteTemplateArguments(existing) != NULL &&
+           StructConcreteTemplateArguments(named) == NULL) ||
+          StructIsDerivedFrom(named, existing, /*public_only=*/false));
 }
 
 static Vector* FunctionTemplateBodyArguments(Syntax* syntax,
@@ -5173,22 +5192,37 @@ bool StructContainsTemplateParameter(Struct* str) {
   return false;
 }
 
-// A named local class of a function template.  Its member function bodies may
-// use the function's parameters, so every instantiation of the function
-// rebuilds it.  A rebuilt copy has its own tag symbol, which is not a
-// block-scope tag.
+// A named local class of a function template or of a member function of a
+// class template.  Each instantiation of the function has its own class, whose
+// members and member function bodies may use the function's parameters
+// (`unsigned char buf[sizeof(T)]`), so every instantiation rebuilds it.  A
+// rebuilt copy has its own tag symbol, which is not a block-scope tag.
 bool StructIsFunctionTemplateLocalClass(Struct* str) {
   if (str == NULL || str->lexical_parent != NULL || str->is_template ||
       str->local_class_arguments != NULL || str->tag_symbol == NULL ||
       !str->tag_symbol->flags.is_block_scope ||
-      str->tag_symbol->flags.invented || !StructHasMemberFunction(str)) {
+      str->tag_symbol->flags.invented) {
     return false;
   }
   Symbol* function = str->access_enclosing_function;
+  // A member function of a class template is not itself a template, but its
+  // local classes are defined in the template's scope all the same.
   return function != NULL &&
          (function->flags.is_template ||
+          str->defining_template_scope_count > 0 ||
           (function->type != NULL && TypeIsFunction(function->type) &&
            function->type->info.function.template_parameters.length > 0));
+}
+
+bool TypeLayoutDependsOnTemplate(TypeRecord* type) {
+  if (TypeContainsTemplateParameter(type)) {
+    return true;
+  }
+  while (type != NULL && type->declarator == kDeclArray) {
+    type = type->next;
+  }
+  return type != NULL && TypeIsStructOrUnion(type) &&
+         StructIsFunctionTemplateLocalClass(type->info.struct_info);
 }
 
 /* Core type-against-type deduction: match a (possibly dependent) parameter type
@@ -10722,9 +10756,42 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
   }
 }
 
+static bool TemplateArgumentsNameClassTemplatePattern(Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg == NULL) {
+      continue;
+    }
+    if (TemplateArgumentsNameClassTemplatePattern(arg->pack_arguments)) {
+      return true;
+    }
+    for (TypeRecord* t = arg->type; t != NULL; t = t->next) {
+      if (TypeIsStructOrUnion(t) && t->info.struct_info != NULL &&
+          (t->info.struct_info->is_template ||
+           t->info.struct_info->defining_template_scope_count > 0) &&
+          t->template_arguments == NULL) {
+        return true;
+      }
+      if (TemplateArgumentsNameClassTemplatePattern(t->template_arguments)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static void InstantiateTemplateFriendFunctions(TypeParser* parser, Struct* str,
                                                Struct* source_struct,
                                                Vector* args) {
+  // `It<Splitter>` written inside the class template `Splitter` names the
+  // injected class, so this specialization only exists while that pattern is
+  // being parsed.  Its hidden friends would take the namespace-scope
+  // redeclaration slot of every real `It<Splitter<...>>` friend, whose
+  // signatures compare equal to the pattern's, and no definition would be
+  // emitted for it.
+  if (TemplateArgumentsNameClassTemplatePattern(args)) {
+    return;
+  }
   InstantiateTemplateFriendFunctionsImpl(parser, str, source_struct,
                                          source_struct, str, args);
 }

@@ -865,8 +865,11 @@ static int EscapeChar(Lex* lex, LiteralEncoding encoding, int* size,
   } else if (ch >= '0' && ch <= '7') {
     // Octal constant.
     lex->literal_has_numeric_escape = true;
+    // An octal escape is at most three digits: "\0132" is '\013' then '2'.
     int n = 0;
-    while (lex->pos < lex->line.length && lex->line.value[lex->pos] >= '0' &&
+    int digits = 0;
+    while (digits++ < 3 && lex->pos < lex->line.length &&
+           lex->line.value[lex->pos] >= '0' &&
            lex->line.value[lex->pos] <= '7') {
       ch = lex->line.value[lex->pos++];
       n = (n << 3) | ch - '0';
