@@ -1076,7 +1076,15 @@ static int ConvertingConstructorRank(StructMember* member, ASTNode* from,
   if (!fi->is_constructor || fi->is_deleted ||
       (fi->is_explicit && !allow_explicit) ||
       (member->symbol->flags.invented && !allow_invented) ||
-      fi->prototype.length < 2) {
+      fi->prototype.length < 1) {
+    goto done;
+  }
+  if (fi->prototype.length == 1) {
+    // `T(...)`: an ellipsis conversion sequence, worse than any other
+    // ([over.ics.rank]); the same weight overload scoring gives it.
+    if (fi->varargs) {
+      rank = 1000;
+    }
     goto done;
   }
   for (size_t i = 2; i < fi->prototype.length; i++) {

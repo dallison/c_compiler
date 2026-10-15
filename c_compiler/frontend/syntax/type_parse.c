@@ -1758,6 +1758,19 @@ static bool ClassTemplateIdIsConcrete(TypeParser* parser, Symbol* symbol,
   return !TemplateArgumentsNameClassTemplatePattern(args);
 }
 
+/* `Alias<Ts...>` cannot be substituted while `Ts` is unknown.  A pack in the
+ * alias's own pattern (`index_sequence<Is...>`) is no reason to defer. */
+static bool AliasArgumentsExpandPack(Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg != NULL &&
+        (arg->is_pack_expansion || arg->references_parameter_pack)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Parse a type-specifier.  This might also be a typedef reference which
 // contains a full TypeRecord.
 // A dependent use of `template <class K> using key_arg =
@@ -2587,7 +2600,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             !CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
             !TemplateArgumentVectorContainsTemplateParameter(args) &&
             !(parser->syntax->parsing_template_declaration &&
-              TypeContainsParameterPack(parser->syntax, symbol->type))) {
+              AliasArgumentsExpandPack(args))) {
           Vector* completed_args = CompleteAliasTemplateArguments(parser, symbol, args);
           if (completed_args != NULL) {
             if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
@@ -2846,7 +2859,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               !CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
               !TemplateArgumentVectorContainsTemplateParameter(args) &&
               !(parser->syntax->parsing_template_declaration &&
-                TypeContainsParameterPack(parser->syntax, symbol->type))) {
+                AliasArgumentsExpandPack(args))) {
             Vector* completed_args = CompleteAliasTemplateArguments(parser, symbol, args);
             if (completed_args != NULL) {
               if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
@@ -3724,6 +3737,42 @@ static bool CheckFormalName(Vector* formals, String* name) {
 
 static bool TemplateArgumentContainsCurrentParameterPack(TypeParser* parser,
                                                          TemplateArgument* arg);
+typedef struct {
+  TypeParser* parser;
+  ASTNode* root;
+} CurrentParameterPackSearch;
+
+/* An identifier naming a pack of the current template, outside any
+ * `sizeof...` or nested `...` that already expands it. */
+static bool NodeIsUnexpandedCurrentParameterPack(ASTNode* node, void* data) {
+  CurrentParameterPackSearch* search = data;
+  if (node->op != AST_OP(identifier)) {
+    return false;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol == NULL || !symbol->flags.is_parameter_pack ||
+      !CurrentTemplateParameterIsPack(search->parser->syntax,
+                                      symbol->template_parameter_index)) {
+    return false;
+  }
+  for (ASTNode* up = node; up != NULL; up = up->parent) {
+    if ((up->flags & kASTPackExpansion) != 0 ||
+        (up->op == AST_OP(sizeof) && ((SizeofASTNode*)up)->is_pack_size)) {
+      return false;
+    }
+    if (up == search->root) {
+      break;
+    }
+  }
+  return true;
+}
+
+static bool ExpressionContainsCurrentParameterPack(TypeParser* parser,
+                                                   ASTNode* expr) {
+  CurrentParameterPackSearch search = {parser, expr};
+  return expr != NULL &&
+         ASTNodeAny(expr, NodeIsUnexpandedCurrentParameterPack, &search);
+}
 
 /* True if `type` references the parameter pack of the template currently being
  * parsed. Used to decide whether a `pattern...` is a valid pack expansion in
@@ -3758,6 +3807,10 @@ static bool TypeContainsCurrentParameterPack(TypeParser* parser,
         }
       }
     }
+    if (ExpressionContainsCurrentParameterPack(parser,
+                                               t->dependent_decltype_expr)) {
+      return true;
+    }
   }
   return false;
 }
@@ -3782,7 +3835,8 @@ static bool TemplateArgumentContainsCurrentParameterPack(TypeParser* parser,
       }
     }
   }
-  return TypeContainsCurrentParameterPack(parser, arg->type);
+  return TypeContainsCurrentParameterPack(parser, arg->type) ||
+         ExpressionContainsCurrentParameterPack(parser, arg->dependent_expr);
 }
 
 static void MarkNonCommaVariadicEllipsis(TypeParser* parser,

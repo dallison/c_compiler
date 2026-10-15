@@ -181,6 +181,11 @@ static void FindPackExpansionInExpressionNode(ASTNode* node, void* data,
                               search->pack_length)) {
     search->found = true;
   }
+  if (shape == kASTShapeCast &&
+      FindPackExpansionInType(((CastASTNode*)node)->cast_type, search->args,
+                              search->pack_index, search->pack_length)) {
+    search->found = true;
+  }
 }
 
 bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
