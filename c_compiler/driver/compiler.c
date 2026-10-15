@@ -1810,9 +1810,13 @@ static ASTNode* CXXGlobalConstantObjectImage(Symbol* sym, ASTNode* initializer) 
     return NULL;
   }
   ASTNode* attempt = NULL;
+  ASTNode* conversion = NULL;
   if (expression != initializer && (expression->flags & kASTAnalyzed) == 0) {
     attempt = ASTNodeClone(expression, KeepClonedNode, NULL, NULL);
-    if (attempt == NULL) {
+    conversion = ASTNodeClone(expression, KeepClonedNode, NULL, NULL);
+    if (attempt == NULL || conversion == NULL) {
+      ASTNodeDelete(attempt);
+      ASTNodeDelete(conversion);
       return NULL;
     }
   }
@@ -1825,8 +1829,21 @@ static ASTNode* CXXGlobalConstantObjectImage(Symbol* sym, ASTNode* initializer) 
     compiler->constant_evaluation_required_depth--;
     evaluated = attempt;
   }
+  // `T x = expr` with expr of another type is converted to T as the init
+  // function would convert it; an invalid conversion is diagnosed there.
+  bool converts =
+      initializer->op == AST_OP(call) ||
+      (evaluated != NULL && evaluated->type != NULL &&
+       TypeIsStructOrUnion(evaluated->type) &&
+       evaluated->type->info.struct_info == sym->type->info.struct_info);
+  if (!converts && conversion != NULL && !DiagnosticErrorTrapped()) {
+    converts = AnalyzeInitializer(sym->type, conversion, true) != NULL &&
+               !DiagnosticErrorTrapped();
+  } else {
+    ASTNodeDelete(conversion);
+  }
   ASTNode* image = NULL;
-  if (!DiagnosticErrorTrapped() && evaluated != NULL &&
+  if (!DiagnosticErrorTrapped() && converts &&
       !ExpressionIsTemplateDependent(evaluated) &&
       ConstexprEvaluateObjectConstantForSymbol(sym, evaluated)) {
     image = ConstexprObjectInitializerForSymbol(sym, initializer->location);
@@ -3176,9 +3193,18 @@ static void CompileFunctionDefinitionNode(
         decl->base.type->info.function.cxx_member_owner;
   }
 
-  SemanticAnalyzeFunction(syntax, (ASTNode*)decl);
-  if (compiler->print_front_end) {
-    SymbolPrintDetails(decl->symbol, true, compiler->ast_output_file);
+  // An inline definition is analyzed when it is parsed and generated later,
+  // once the reference closure shows it is needed.
+  bool analyze = decl->base.type == NULL || !TypeIsFunction(decl->base.type) ||
+                 !decl->base.type->info.function.body_analyzed;
+  if (analyze) {
+    SemanticAnalyzeFunction(syntax, (ASTNode*)decl);
+    if (decl->base.type != NULL && TypeIsFunction(decl->base.type)) {
+      decl->base.type->info.function.body_analyzed = true;
+    }
+    if (compiler->print_front_end) {
+      SymbolPrintDetails(decl->symbol, true, compiler->ast_output_file);
+    }
   }
   compiler->current_function = saved_current_function;
   compiler->current_class_access_context = saved_class_access_context;
@@ -3519,18 +3545,47 @@ static void ForgetUnindexedPendingTemplateInstantiation(ASTNode* node) {
   }
 }
 
+// A function template specialization, or a member of a class template
+// specialization (directly, through a nested class, or through a local class
+// of such a function).
+static bool FunctionDefinitionIsImplicitInstantiation(TypeRecord* type) {
+  for (int depth = 0; depth < 32 && type != NULL && TypeIsFunction(type);
+       depth++) {
+    if (type->info.function.template_origin != NULL) {
+      return true;
+    }
+    Struct* owner = type->info.function.cxx_member_owner;
+    Symbol* enclosing = NULL;
+    for (Struct* s = owner; s != NULL; s = s->lexical_parent) {
+      if (s->tag_symbol != NULL && s->tag_symbol->type != NULL &&
+          s->tag_symbol->type->template_origin != NULL) {
+        return true;
+      }
+      if (s->access_enclosing_function != NULL) {
+        enclosing = s->access_enclosing_function;
+      }
+    }
+    if (enclosing == NULL || enclosing->type == type) {
+      return false;
+    }
+    type = enclosing->type;
+  }
+  return false;
+}
+
 static bool PendingFunctionDefinitionNeedsSemanticAnalysis(
     VariableDeclarationASTNode* decl) {
   if (decl == NULL || decl->symbol == NULL || decl->base.type == NULL) {
     return true;
   }
-  // Inline member bodies and implicit instantiations are queued during parsing
-  // long before the reference closure runs.  Semantically analyzing every queued
-  // body here would instantiate unreachable template code (for example protobuf
-  // headers).  Defer until CompileReferencedInlineFunctions proves the
-  // definition is needed.
+  // Implicit instantiations are queued during parsing long before the
+  // reference closure runs, and are only instantiated when they are needed
+  // ([temp.inst]).  Defer them until CompileReferencedInlineFunctions proves
+  // the definition is needed.  An ordinary inline function is still checked
+  // whether or not it is used.
   if (FunctionDefinitionIsODRDiscardable(decl->base.type) &&
-      !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {
+      !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type) &&
+      FunctionDefinitionIsImplicitInstantiation(decl->base.type)) {
     return false;
   }
   return true;

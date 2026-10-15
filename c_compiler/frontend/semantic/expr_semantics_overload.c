@@ -619,6 +619,20 @@ static bool SameFunctionSignature(Symbol* left, Symbol* right) {
          TypeIsFunction(right->type) && TypeEqual(left->type, right->type);
 }
 
+// Lookup can reach one free function more than once (ordinary lookup and
+// ADL, a using-declaration, a friend in several instantiations).  Functions of
+// the same type declared in different namespaces are still distinct
+// candidates, and a call that ties them is ambiguous.
+static bool SameFreeFunction(Symbol* left, Symbol* right) {
+  if (!SameFunctionSignature(left, right)) {
+    return false;
+  }
+  if (left->asm_name.length != 0 && right->asm_name.length != 0) {
+    return StringEqualString(&left->asm_name, &right->asm_name);
+  }
+  return left->namespace_ == right->namespace_;
+}
+
 /* Contract: true if any element of `actuals` has auto or unknown type.
  * Overload resolution must defer diagnostics until those types are known. */
 static bool CallActualsContainUndeducedAuto(Vector* actuals) {
@@ -786,8 +800,7 @@ static void RankNonTemplateFreeFunctionCandidates(Vector* candidates,
       *best = candidate;
       *best_score = score;
       *ambiguous = false;
-    } else if (score == *best_score &&
-               !SameFunctionSignature(*best, candidate)) {
+    } else if (score == *best_score && !SameFreeFunction(*best, candidate)) {
       *ambiguous = true;
     }
   }
@@ -812,7 +825,7 @@ static void RankNonTemplateFreeFunctionCandidates(Vector* candidates,
           (peer->type != NULL && TypeIsFunction(peer->type) &&
            peer->type->info.function.template_origin != NULL) ||
           OverloadCallScore(peer, call) != *best_score ||
-          SameFunctionSignature(candidate, peer)) {
+          SameFreeFunction(candidate, peer)) {
         continue;
       }
       if (CompareEqualScoreConversionSequences(candidate, peer, call) <= 0) {

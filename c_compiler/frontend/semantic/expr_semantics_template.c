@@ -1899,6 +1899,9 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
   if (expr->op != AST_OP(identifier)) {
     return expr;
   }
+  // An identifier that does not fold keeps its analysis: its type may not be
+  // its symbol's (a typeid result names raw RTTI storage as a type_info).
+  uint64_t analyzed = expr->flags & kASTAnalyzed;
   expr->flags &= ~kASTAnalyzed;
   IdentifierASTNode* id = (IdentifierASTNode*)expr;
   ASTNode* folded = CXXTryFoldIsSameVIdentifier(id);
@@ -1911,5 +1914,9 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
   if (folded == NULL) {
     folded = CXXTryFoldKUsesPointerTemplate(id);
   }
-  return folded != NULL ? folded : expr;
+  if (folded == NULL) {
+    expr->flags |= analyzed;
+    return expr;
+  }
+  return folded;
 }

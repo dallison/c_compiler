@@ -6481,6 +6481,18 @@ static bool ConstexprEvaluateElidedInitializer(ConstEvalContext* ctx,
   return ok;
 }
 
+static bool BracedInitializerHasDesignatedEntry(
+    BracedInitializerASTNode* braced) {
+  for (size_t i = 0;
+       braced->initializers != NULL && i < braced->initializers->length; i++) {
+    ASTNode* entry = braced->initializers->value.p[i];
+    if (entry != NULL && entry->op == AST_OP(designated_init)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
                                          TypeRecord* type,
                                          ASTNode* initializer,
@@ -6568,10 +6580,14 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   // ([dcl.init.list]).  The elements are constructor arguments, not member
   // initializers.  `ClassData{fn, offset, ...}` otherwise stores a function
   // pointer in an integer member whenever the argument order differs from
-  // the member order.
+  // the member order.  Designators cannot name a non-aggregate's members in
+  // source, so a designated list is a member-wise constant image (a
+  // materialized consteval result) and is stored as written.
   if (CompilerIsCXX() && initializer->op == AST_OP(braced_init) &&
       TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
-      !type->info.struct_info->is_aggregate) {
+      !type->info.struct_info->is_aggregate &&
+      !BracedInitializerHasDesignatedEntry(
+          (BracedInitializerASTNode*)initializer)) {
     BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
     static int constexpr_brace_ctor_depth = 0;
     if (constexpr_brace_ctor_depth < 8 && braced->initializers != NULL &&
@@ -6842,7 +6858,8 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
   if (ok && TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
       !type->info.struct_info->is_union) {
     ok = ConstexprMaterializeBaseSubobjectSlots(ctx, object);
-    if (ok && !type->info.struct_info->is_aggregate) {
+    if (ok && !type->info.struct_info->is_aggregate &&
+        !BracedInitializerHasDesignatedEntry(braced)) {
       ok = ConstexprRunDefaultConstructor(ctx, type, object);
     }
   }
@@ -8426,6 +8443,43 @@ static bool ConstexprStaticReferenceTarget(ConstEvalContext* ctx,
   return true;
 }
 
+// The address of a `define_static_object`/`define_static_array` object.
+static bool ConstexprMetaPromotedAddress(ConstEvalContext* ctx,
+                                         Symbol* promoted,
+                                         ConstexprValue* result) {
+  if ((TypeIsFixedArray(promoted->type) ||
+       TypeIsStructOrUnion(promoted->type)) &&
+      ConstexprEnsureMetaPromotedStaticObject(promoted) &&
+      promoted->value.other != NULL) {
+    *result = (ConstexprValue){
+        .is_address = true,
+        .address_object = (ConstexprObject*)promoted->value.other,
+        .address_index = 0,
+    };
+    return true;
+  }
+  if (TypeIsIntegral(promoted->type) &&
+      promoted->constexpr_initializer != NULL) {
+    int64_t value = 0;
+    ASTNode* initializer =
+        ConstexprInitializerExpression(promoted->constexpr_initializer);
+    if (EvaluateIntegerExpressionInContext(ctx, initializer, &value)) {
+      ConstexprObject* object = NewConstexprObject(ctx, promoted->type, 1);
+      ConstexprValue* slot = ConstexprObjectSlot(object, 0);
+      if (slot != NULL) {
+        slot->ivalue = value;
+        *result = (ConstexprValue){
+            .is_address = true,
+            .address_object = object,
+            .address_index = 0,
+        };
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
                                           ConstexprValue* result) {
   *result = (ConstexprValue){0};
@@ -8621,6 +8675,11 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
         address->sub->op == AST_OP(identifier)) {
       Symbol* symbol = ((IdentifierASTNode*)address->sub)->symbol;
       if (ConstexprFunctionAddress(ctx, symbol, result)) {
+        return true;
+      }
+      if (CompilerSymbolIsMetaPromotedStatic(symbol) &&
+          FindConstexprBinding(ctx, symbol) == NULL &&
+          ConstexprMetaPromotedAddress(ctx, symbol, result)) {
         return true;
       }
       if (symbol != NULL && TypeIsReference(symbol->type)) {
@@ -8823,38 +8882,9 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       return target != NULL;
     }
     Symbol* promoted_target = CompilerMetaPromotedPointerTarget(id->symbol);
-    if (promoted_target != NULL) {
-      if ((TypeIsFixedArray(promoted_target->type) ||
-           TypeIsStructOrUnion(promoted_target->type)) &&
-          ConstexprEnsureMetaPromotedStaticObject(promoted_target) &&
-          promoted_target->value.other != NULL) {
-        *result = (ConstexprValue){
-            .is_address = true,
-            .address_object = (ConstexprObject*)promoted_target->value.other,
-            .address_index = 0,
-        };
-        return true;
-      }
-      if (TypeIsIntegral(promoted_target->type) &&
-          promoted_target->constexpr_initializer != NULL) {
-        int64_t value = 0;
-        ASTNode* initializer = ConstexprInitializerExpression(
-            promoted_target->constexpr_initializer);
-        if (EvaluateIntegerExpressionInContext(ctx, initializer, &value)) {
-          ConstexprObject* object =
-              NewConstexprObject(ctx, promoted_target->type, 1);
-          ConstexprValue* slot = ConstexprObjectSlot(object, 0);
-          if (slot != NULL) {
-            slot->ivalue = value;
-            *result = (ConstexprValue){
-                .is_address = true,
-                .address_object = object,
-                .address_index = 0,
-            };
-            return true;
-          }
-        }
-      }
+    if (promoted_target != NULL &&
+        ConstexprMetaPromotedAddress(ctx, promoted_target, result)) {
+      return true;
     }
     if (binding != NULL && binding->object != NULL &&
         TypeIsFixedArray(binding->object->type)) {

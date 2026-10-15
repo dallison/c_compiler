@@ -1303,6 +1303,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   if (TypeIsFunction(record)) {
     memcpy(&r->info.function, &record->info.function, sizeof(FunctionInfo));
     r->info.function.references_marked = false;
+    r->info.function.body_analyzed = false;
   } else if (record->declarator == kDeclArray ||
              record->declarator == kDeclVector) {
     memcpy(&r->info.array, &record->info.array, sizeof(ArrayInfo));
