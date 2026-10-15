@@ -684,6 +684,13 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
     return nested_member_type;
   }
 
+  // A generic lambda's operator() has invented template parameters even
+  // when no enclosing template is being parsed.
+  TypeRecord* function = compiler->current_function;
+  bool dependent_context =
+      parser->syntax->current_template_parameters != NULL ||
+      (function != NULL && TypeIsFunction(function) &&
+       function->info.function.template_parameters.length > 0);
   bool parenthesized_expression = LexLookingAt(parser->lex, TOK(lparen));
   bool unparenthesized_identifier =
       !parenthesized_expression &&
@@ -698,7 +705,7 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
       expr->op == AST_OP(identifier)) {
     declared_symbol = ((IdentifierASTNode*)expr)->symbol;
     if (declared_symbol != NULL &&
-        parser->syntax->current_template_parameters != NULL &&
+        dependent_context &&
         (declared_symbol->flags.invented ||
          declared_symbol->type == NULL ||
          TypeIsUnknown(declared_symbol->type) ||
@@ -728,7 +735,7 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   TypeRecord* result = NULL;
   if (declared_symbol != NULL) {
     result = TypeRecordCopy(declared_symbol->type);
-  } else if (parser->syntax->current_template_parameters != NULL &&
+  } else if (dependent_context &&
              expr != NULL &&
              (defer_unparenthesized_entity ||
               DependentExpressionContainsTemplateParameter(expr))) {
@@ -779,7 +786,7 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
       result = TypeRecordCopy(expr->type);
     }
     if (result != NULL &&
-        parser->syntax->current_template_parameters != NULL &&
+        dependent_context &&
         (TypeIsUnknown(expr->type) ||
          TypeContainsTemplateParameter(expr->type) ||
          DependentExpressionContainsTemplateParameter(expr))) {

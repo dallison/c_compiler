@@ -2391,6 +2391,10 @@ static bool TypeContainsTemplateParameterReference(TypeRecord* type) {
     if (t->template_parameter_index >= 0) {
       return true;
     }
+    if (t->dependent_decltype_expr != NULL ||
+        t->dependent_splice_expr != NULL || t->is_pack_index) {
+      return true;
+    }
     if (TypeIsArray(t) && t->info.array.template_parameter_index >= 0) {
       return true;
     }
