@@ -1138,6 +1138,11 @@ Vector* SplitDependentMemberPath(String* path) {
   return components;
 }
 
+static bool DependentMemberPathHasMultipleComponents(String* path) {
+  return path != NULL && path->value != NULL &&
+         strstr(path->value, "::") != NULL;
+}
+
 void DeleteStringVector(Vector* strings) {
   if (strings == NULL) {
     return;
@@ -1255,16 +1260,8 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
     }
     return TypeRecordCopy(type);
   }
-  bool multi_component_member = false;
-  if (type->dependent_member_name != NULL &&
-      type->dependent_member_name->value != NULL) {
-    for (const char* c = type->dependent_member_name->value; *c != '\0'; c++) {
-      if (c[0] == ':' && c[1] == ':') {
-        multi_component_member = true;
-        break;
-      }
-    }
-  }
+  bool multi_component_member =
+      DependentMemberPathHasMultipleComponents(type->dependent_member_name);
   // `T::a::b` is stored as one member string.  Looking the whole string up as
   // a single name misses `a`.  Walk each component, the same way a path that
   // carries per-component template arguments already does.
@@ -2130,8 +2127,10 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
   subst->qualifiers |= type->qualifiers;
 
   if (type->dependent_member_name != NULL &&
-      type->dependent_member_template_arguments != NULL &&
-      type->dependent_member_template_arguments->length > 1) {
+      ((type->dependent_member_template_arguments != NULL &&
+        type->dependent_member_template_arguments->length > 1) ||
+       DependentMemberPathHasMultipleComponents(
+           type->dependent_member_name))) {
     Vector* path_args = TemplateArgumentVectorCopy(args);
     if (path_args == NULL) {
       path_args = NewVector();

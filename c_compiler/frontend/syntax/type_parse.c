@@ -37,6 +37,11 @@ static TemplateArgument* NewTemplateParameterTypeArgumentForType(int index,
                                                                  TypeRecord* type);
 static bool ParseMemberPointerDeclarator(TypeParser* parser);
 
+static bool TypeHasDependentMemberPath(TypeRecord* type) {
+  return type->dependent_member_name != NULL &&
+         type->dependent_member_name->length > 0;
+}
+
 void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
                     Storage storage, ParserContext context) {
   parser->lex = lex;
@@ -2293,9 +2298,12 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             // clean dependent-member placeholder that carries the base's
             // template-id (origin + arguments) plus the member name, so it
             // resolves against the correct specialization's member later
-            // without dropping the specialization's arguments.
+            // without dropping the specialization's arguments.  An alias that
+            // is itself a member of a specialization (`using proxy = typename
+            // cond<B, T, U>::type`) keeps its member path below instead.
             if (base->type->template_origin != NULL &&
-                base->type->template_arguments != NULL) {
+                base->type->template_arguments != NULL &&
+                !TypeHasDependentMemberPath(base->type)) {
               type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
               type_record->template_origin = base->type->template_origin;
               type_record->template_arguments =
@@ -2399,7 +2407,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                                  typename_name.components.value.p[i]);
             }
             if (alias->type->template_origin != NULL &&
-                alias->type->template_arguments != NULL) {
+                alias->type->template_arguments != NULL &&
+                !TypeHasDependentMemberPath(alias->type)) {
               type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
               type_record->template_origin = alias->type->template_origin;
               type_record->template_arguments =
@@ -2407,11 +2416,14 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               type_record->dependent_member_name = NewString(tail.value);
             } else {
               type_record = TypeRecordCopy(alias->type);
-              if (type_record->dependent_member_name != NULL) {
+              if (TypeHasDependentMemberPath(type_record)) {
                 StringAppend(type_record->dependent_member_name, "::");
                 StringAppendString(type_record->dependent_member_name,
                                    &tail);
               } else {
+                if (type_record->dependent_member_name != NULL) {
+                  StringDelete(type_record->dependent_member_name);
+                }
                 type_record->dependent_member_name = NewString(tail.value);
               }
             }
