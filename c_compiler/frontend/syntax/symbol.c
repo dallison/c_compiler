@@ -52,6 +52,7 @@ Attribute* NewAttribute(const char* name) {
   attr->annotation_expr = NULL;
   attr->annotation_value = NULL;
   attr->location = SOURCE_LOCATION_MISSING;
+  attr->dependent_alignas_is_pack_expansion = false;
   return attr;
 }
 
@@ -108,6 +109,8 @@ Attribute* AttributeClone(Attribute* attr) {
       ASTNodeClone(attr->annotation_expr, IdentityCloneNode, NULL, NULL);
   copy->annotation_value = attr->annotation_value;
   copy->location = attr->location;
+  copy->dependent_alignas_is_pack_expansion =
+      attr->dependent_alignas_is_pack_expansion;
   return copy;
 }
 
@@ -172,6 +175,29 @@ bool AttributeArgInt(Attribute* attr, size_t index, long* value) {
   }
   *value = v;
   return true;
+}
+
+int AttributeListAlignment(Vector* attrs, int bare_alignment) {
+  int alignment = 0;
+  for (size_t i = 0; attrs != NULL && i < attrs->length; i++) {
+    Attribute* attr = attrs->value.p[i];
+    if (attr == NULL || !StringEqual(&attr->name, "aligned") ||
+        attr->dependent_alignas_type != NULL ||
+        attr->dependent_alignas_expr != NULL) {
+      continue;
+    }
+    long n = 0;
+    int a = 0;
+    if (AttributeArgCount(attr) == 0) {
+      a = bare_alignment;
+    } else if (AttributeArgInt(attr, 0, &n) && n > 0 && n <= 0x7fffffff) {
+      a = (int)n;
+    }
+    if (a > alignment) {
+      alignment = a;
+    }
+  }
+  return alignment;
 }
 
 Attribute* AttributeListFind(Vector* attrs, const char* name) {

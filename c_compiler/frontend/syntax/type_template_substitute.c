@@ -537,8 +537,46 @@ void SubstituteDependentSymbolValue(Symbol* symbol, Vector* args) {
   symbol->dependent_value_template_parameter_index = -1;
 }
 
+// The alignment named by one element of a pack-expanded alignas operand.
+// False while the element is still dependent.
+static bool ResolveAlignasPackElement(TypeParser* parser, Attribute* attr,
+                                      Vector* args, int pack_index,
+                                      size_t element, int64_t* alignment) {
+  bool resolved = false;
+  if (attr->dependent_alignas_type != NULL) {
+    TypeRecord* concrete = SubstituteTemplateParametersForPackElement(
+        parser, attr->dependent_alignas_type, args, pack_index, element);
+    if (concrete != NULL && !TypeContainsTemplateParameter(concrete)) {
+      TypeRecordCalculateSize(concrete);
+      *alignment = TypeRecordAlignment(concrete);
+      resolved = true;
+    }
+    TypeRecordDelete(concrete);
+    return resolved;
+  }
+  Vector* element_args =
+      TemplateArgumentVectorCopyForPackExpansionElement(args, pack_index,
+                                                        element);
+  ASTNode* concrete = CloneDependentExpressionWithArgs(
+      parser, attr->dependent_alignas_expr, element_args);
+  if (concrete != NULL && !ExpressionIsTemplateDependent(concrete)) {
+    concrete = AnalyzeExpression(concrete);
+    resolved = EvaluateIntegerExpression(concrete, alignment);
+  }
+  ASTNodeDelete(concrete);
+  VectorDeleteWithContents(element_args,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  return resolved;
+}
+
+static bool IsValidAlignasValue(int64_t alignment) {
+  return alignment >= 0 && alignment <= 2147483647 &&
+         (alignment & (alignment - 1)) == 0;
+}
+
 void SubstituteDependentSymbolAlignment(TypeParser* parser, Symbol* symbol,
-                                        Vector* args) {
+                                        Vector* args, int rebase_base) {
   if (parser == NULL || symbol == NULL) {
     return;
   }
@@ -552,7 +590,35 @@ void SubstituteDependentSymbolAlignment(TypeParser* parser, Symbol* symbol,
 
     int64_t alignment = 0;
     bool resolved = false;
-    if (attr->dependent_alignas_type != NULL) {
+    // The pack of a member template's `alignas(Us...)` is bound only when
+    // that template is instantiated; until then the operand is substituted
+    // and renumbered like any other.
+    int pack_index = -1;
+    size_t pack_length = 0;
+    bool expand_pack =
+        attr->dependent_alignas_is_pack_expansion &&
+        (attr->dependent_alignas_type != NULL
+             ? FindPackExpansionInType(attr->dependent_alignas_type, args,
+                                       &pack_index, &pack_length)
+             : FindPackExpansionInExpression(attr->dependent_alignas_expr,
+                                             args, &pack_index, &pack_length));
+    if (expand_pack) {
+      // The strictest element alignment applies; an empty pack has no effect.
+      resolved = true;
+      for (size_t e = 0; resolved && e < pack_length; e++) {
+        int64_t element = 0;
+        resolved = ResolveAlignasPackElement(parser, attr, args, pack_index, e,
+                                             &element);
+        if (resolved && !IsValidAlignasValue(element)) {
+          SyntaxError(parser->syntax,
+                      "alignas specifier must name a power-of-two alignment");
+          element = 0;
+        }
+        if (element > alignment) {
+          alignment = element;
+        }
+      }
+    } else if (attr->dependent_alignas_type != NULL) {
       TypeRecord* concrete = SubstituteTemplateParameters(
           parser, attr->dependent_alignas_type, args);
       if (concrete != NULL && !TypeContainsTemplateParameter(concrete)) {
@@ -560,14 +626,21 @@ void SubstituteDependentSymbolAlignment(TypeParser* parser, Symbol* symbol,
         alignment = TypeRecordAlignment(concrete);
         resolved = true;
       } else if (concrete != NULL) {
+        RebaseTemplateParameterIndices(concrete, rebase_base);
         TypeRecordDelete(attr->dependent_alignas_type);
         attr->dependent_alignas_type = concrete;
         concrete = NULL;
       }
       TypeRecordDelete(concrete);
     } else {
-      ASTNode* concrete = CloneDependentExpressionWithArgs(
-          parser, attr->dependent_alignas_expr, args);
+      ASTNode* concrete =
+          rebase_base > 0
+              ? TypeSubstituteMemberTemplateExpressionAndRebase(
+                    parser->syntax, attr->dependent_alignas_expr, args,
+                    rebase_base, attr->dependent_alignas_expr->location, NULL,
+                    NULL)
+              : CloneDependentExpressionWithArgs(
+                    parser, attr->dependent_alignas_expr, args);
       if (concrete != NULL && ExpressionIsTemplateDependent(concrete)) {
         ASTNodeDelete(attr->dependent_alignas_expr);
         attr->dependent_alignas_expr = concrete;
@@ -582,17 +655,27 @@ void SubstituteDependentSymbolAlignment(TypeParser* parser, Symbol* symbol,
     if (!resolved) {
       continue;
     }
-    if (alignment < 0 || alignment > 2147483647 ||
-        (alignment != 0 && (alignment & (alignment - 1)) != 0)) {
+    if (!IsValidAlignasValue(alignment)) {
       SyntaxError(parser->syntax,
                   "alignas specifier must name a power-of-two alignment");
-    } else if (alignment > symbol->alignment) {
-      symbol->alignment = (int)alignment;
+      alignment = 0;
     }
+    // The specifier is now an ordinary `aligned(N)`; alignas(0) has no effect.
     TypeRecordDelete(attr->dependent_alignas_type);
     attr->dependent_alignas_type = NULL;
     ASTNodeDelete(attr->dependent_alignas_expr);
     attr->dependent_alignas_expr = NULL;
+    attr->dependent_alignas_is_pack_expansion = false;
+    char text[24];
+    int length = snprintf(text, sizeof(text), "%lld", (long long)alignment);
+    AttributeAddArg(attr, text, (size_t)length);
+  }
+  // Instantiation builds a fresh symbol, so every specifier, dependent or
+  // not, has to be applied here.
+  int alignment =
+      AttributeListAlignment(&symbol->attributes, compiler->alignment);
+  if (alignment > symbol->alignment) {
+    symbol->alignment = alignment;
   }
 }
 

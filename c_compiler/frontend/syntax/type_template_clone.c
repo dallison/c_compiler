@@ -1146,6 +1146,8 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
       old_symbol->structured_binding_pack_size;
   AttributeListDestruct(&replacement->attributes);
   AttributeListClone(&replacement->attributes, &old_symbol->attributes);
+  SubstituteDependentSymbolAlignment(clone->parser, replacement, clone->args,
+                                     clone->rebase_template_parameter_base);
 
   MapKeyValue kv;
   kv.key.p = old_symbol;

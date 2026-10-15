@@ -808,4 +808,24 @@ run "$DAVECC" -target "$TARGET" -static \
   "$work/token_injection.bin" >"$work/command.log" 2>&1
 [ "$?" -eq 0 ] || fail "execute token injection module program"
 
+run "$DAVECC" -target "$TARGET" -std=c++20 \
+  -Xemit-module "$work/alignas_templates.dcm" \
+  "$FIXTURES/alignas_templates.cppm" ||
+  fail "emit alignas templates module"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  "$FIXTURES/alignas_templates.cppm" -o "$work/alignas_templates.o" ||
+  fail "compile alignas templates module object"
+run "$DAVECC" -target "$TARGET" -std=c++20 -c \
+  -fprebuilt-module-path "$work" "$FIXTURES/use_alignas_templates.cpp" \
+  -o "$work/use_alignas_templates.o" ||
+  fail "instantiate imported alignas templates"
+run "$DAVECC" -target "$TARGET" -static \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
+  "$work/use_alignas_templates.o" "$work/alignas_templates.o" "$LIBC" \
+  -o "$work/alignas_templates.bin" ||
+  fail "link alignas templates module executable"
+"$INTERPRETER" ${INTERP_ARGS[@]+"${INTERP_ARGS[@]}"} \
+  "$work/alignas_templates.bin" >"$work/command.log" 2>&1
+[ "$?" -eq 0 ] || fail "execute alignas templates module program"
+
 echo "ok module emit/import/link/execute"

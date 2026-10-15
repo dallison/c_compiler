@@ -1388,6 +1388,17 @@ static Vector* LambdaCaptureDefiningFunctionArguments(
   return NULL;
 }
 
+static bool SymbolHasDependentAlignas(Symbol* symbol) {
+  for (size_t i = 0; symbol != NULL && i < symbol->attributes.length; i++) {
+    Attribute* attr = symbol->attributes.value.p[i];
+    if (attr != NULL && (attr->dependent_alignas_type != NULL ||
+                         attr->dependent_alignas_expr != NULL)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
                                                      TypeRecord* type,
                                                      Vector* args) {
@@ -1527,7 +1538,10 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       !from->tag_symbol->flags.invented && args != NULL) {
     str->local_class_arguments = TemplateArgumentVectorCopy(args);
   }
-  if (StructHasMemberFunction(from)) {
+  // The copy needs its own tag when its class-level alignas depends on the
+  // enclosing template's arguments.
+  if (StructHasMemberFunction(from) ||
+      SymbolHasDependentAlignas(from->tag_symbol)) {
     bool invented = from->tag_symbol != NULL && from->tag_symbol->flags.invented;
     String synthetic_name;
     StringInit(&synthetic_name, NULL);
@@ -1563,6 +1577,12 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   VectorInit(&str->template_parameters);
   int enclosing_template_parameter_count =
       args != NULL ? (int)args->length : 0;
+  // A nested class template's own parameters follow the enclosing ones and
+  // are renumbered from 0 in the copy.
+  int member_rebase_base = str->is_template && str->tag_symbol != NULL &&
+                                   !str->tag_symbol->flags.invented
+                               ? enclosing_template_parameter_count
+                               : 0;
   for (size_t i = 0; i < from->template_parameters.length; i++) {
     VectorAppend(&str->template_parameters,
                  CloneNestedTemplateParameter(
@@ -1574,6 +1594,16 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   str->packed = from->packed;
   str->explicit_alignment = from->explicit_alignment;
   str->pack = from->pack;
+  if (from->tag_symbol != NULL && str->tag_symbol != from->tag_symbol) {
+    VectorDestruct(&str->tag_symbol->attributes);
+    AttributeListClone(&str->tag_symbol->attributes,
+                       &from->tag_symbol->attributes);
+    SubstituteDependentSymbolAlignment(parser, str->tag_symbol, args,
+                                       member_rebase_base);
+    if (str->tag_symbol->alignment > str->explicit_alignment) {
+      str->explicit_alignment = str->tag_symbol->alignment;
+    }
+  }
   for (size_t i = 0; i < from->friend_classes.length; i++) {
     StructAddFriendClass(str, from->friend_classes.value.p[i]);
   }
@@ -1752,7 +1782,8 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           AttributeListClone(&member_symbol->attributes,
                              &member->symbol->attributes);
           SubstituteDependentSymbolValue(member_symbol, args);
-          SubstituteDependentSymbolAlignment(parser, member_symbol, args);
+          SubstituteDependentSymbolAlignment(parser, member_symbol, args,
+                                             member_rebase_base);
           SubstituteStaticMemberInitializerValue(
               parser, member_symbol, member->default_initializer, args);
           if (!member_symbol->flags.value_set &&
@@ -1849,7 +1880,8 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     AttributeListClone(&member_symbol->attributes,
                        &member->symbol->attributes);
     SubstituteDependentSymbolValue(member_symbol, args);
-    SubstituteDependentSymbolAlignment(parser, member_symbol, args);
+    SubstituteDependentSymbolAlignment(parser, member_symbol, args,
+                                       member_rebase_base);
     SubstituteStaticMemberInitializerValue(parser, member_symbol,
                                            member->default_initializer, args);
     if (!member_symbol->flags.value_set &&
@@ -11488,7 +11520,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     VectorDestruct(&tag->attributes);
     AttributeListClone(&tag->attributes,
                        &source_struct->tag_symbol->attributes);
-    SubstituteDependentSymbolAlignment(parser, tag, source_args);
+    SubstituteDependentSymbolAlignment(parser, tag, source_args, 0);
     if (tag->alignment > str->explicit_alignment) {
       str->explicit_alignment = tag->alignment;
     }
@@ -11740,7 +11772,7 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
     AttributeListClone(&member_symbol->attributes,
                        &member->symbol->attributes);
     SubstituteDependentSymbolValue(member_symbol, source_args);
-    SubstituteDependentSymbolAlignment(parser, member_symbol, source_args);
+    SubstituteDependentSymbolAlignment(parser, member_symbol, source_args, 0);
     SubstituteStaticMemberInitializerValue(parser, member_symbol,
                                            member->default_initializer,
                                            source_args);

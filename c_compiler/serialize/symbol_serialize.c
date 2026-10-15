@@ -179,6 +179,7 @@ enum {
   kAttr_namespace = 7,
   kAttr_token = 8,
   kAttr_location = 9,
+  kAttr_dependent_alignas_is_pack_expansion = 10,
 };
 
 //
@@ -235,6 +236,9 @@ void SerialWriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
     SWriteStringVal(ctx, &elem, kAttr_namespace, &a->attribute_namespace);
     SWriteStringVal(ctx, &elem, kAttr_token, &a->token);
     WireWriteUint64(&elem, kAttr_location, (uint64_t)a->location);
+    if (a->dependent_alignas_is_pack_expansion) {
+      WireWriteBool(&elem, kAttr_dependent_alignas_is_pack_expansion, true);
+    }
     WireWriteRawVarint(&tmp, (uint64_t)WireBufferSize(&elem));
     WireWriteRaw(&tmp, WireBufferData(&elem), WireBufferSize(&elem));
     WireBufferDestruct(&elem);
@@ -302,6 +306,9 @@ void SerialReadAttributeVector(DeserializeContext* ctx, WireBuffer* in,
           a->location = (SourceLocation)location;
           break;
         }
+        case kAttr_dependent_alignas_is_pack_expansion:
+          WireReadBool(&er, &a->dependent_alignas_is_pack_expansion);
+          break;
         default:
           WireSkip(&er, wt);
           break;

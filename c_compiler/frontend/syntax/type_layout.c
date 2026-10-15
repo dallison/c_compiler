@@ -81,19 +81,10 @@ void StructApplyLayoutAttributes(Struct* str, Vector* attrs) {
   if (AttributeListHas(attrs, "packed")) {
     str->packed = true;
   }
-  Attribute* aligned = AttributeListFind(attrs, "aligned");
-  if (aligned != NULL) {
-    long n = 0;
-    int a;
-    if (AttributeArgInt(aligned, 0, &n) && n > 0) {
-      a = (int)n;
-    } else {
-      // aligned with no argument requests the target's maximum alignment.
-      a = compiler->alignment;
-    }
-    if (a > str->explicit_alignment) {
-      str->explicit_alignment = a;
-    }
+  // aligned with no argument requests the target's maximum alignment.
+  int a = AttributeListAlignment(attrs, compiler->alignment);
+  if (a > str->explicit_alignment) {
+    str->explicit_alignment = a;
   }
 }
 

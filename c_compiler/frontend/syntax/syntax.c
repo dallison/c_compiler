@@ -5371,11 +5371,15 @@ bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
                    syntax->context);
     TypeRecord* type = TypeParserParseType(&parser, true);
     Symbol* sym = TypeParserParseDeclarator(&parser, type);
+    bool expansion = parser.declarator_is_parameter_pack;
     if (sym == NULL || sym->type == NULL) {
       SyntaxError(syntax, "alignas type-id is invalid");
     } else if (TypeContainsTemplateParameter(sym->type)) {
       dependent = NewAttribute("aligned");
       dependent->dependent_alignas_type = TypeRecordCopy(sym->type);
+      dependent->dependent_alignas_is_pack_expansion = expansion;
+    } else if (expansion) {
+      SyntaxError(syntax, "alignas pack expansion does not name a pack");
     } else {
       TypeRecordCalculateSize(sym->type);
       value = TypeRecordAlignment(sym->type);
@@ -5384,11 +5388,15 @@ bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
     TypeParserDestruct(&parser);
   } else {
     ASTNode* expr = SyntaxParseExpression(syntax, TC(closebra));
+    bool expansion = CompilerIsCXX() && LexMatch(syntax->lex, TOK(ellipsis));
     if (syntax->parsing_template_declaration &&
         ExpressionIsTemplateDependent(expr)) {
       dependent = NewAttribute("aligned");
       dependent->dependent_alignas_expr = expr;
+      dependent->dependent_alignas_is_pack_expansion = expansion;
       expr = NULL;
+    } else if (expansion) {
+      SyntaxError(syntax, "alignas pack expansion does not name a pack");
     } else {
       expr = AnalyzeExpression(expr);
       bool ok = EvaluateIntegerExpression(expr, &value);
@@ -5519,13 +5527,11 @@ void SyntaxApplyDeclarationAttributes(Syntax* syntax, Symbol* sym) {
     TypeApplyStructAttributesFromSymbol(sym);
     return;
   }
-  // aligned(N) on a variable raises its alignment.
-  Attribute* aligned = AttributeListFind(&sym->attributes, "aligned");
-  if (aligned != NULL) {
-    long n = 0;
-    if (AttributeArgInt(aligned, 0, &n) && n > 0) {
-      sym->alignment = (int)n;
-    }
+  // aligned(N) on a variable raises its alignment; the strictest of several
+  // specifiers applies.
+  int alignment = AttributeListAlignment(&sym->attributes, compiler->alignment);
+  if (alignment > 0) {
+    sym->alignment = alignment;
   }
 }
 

@@ -90,8 +90,11 @@ bool FindPackExpansionInTemplateArgument(TemplateArgument* arg, Vector* args,
 Vector* TemplateArgumentVectorCopyWithPackElement(Vector* args, int pack_index,
                                                   TemplateArgument* element);
 void SubstituteDependentSymbolValue(Symbol* symbol, Vector* args);
+// Applies `symbol`'s alignas/aligned attributes after substituting `args`
+// into the dependent ones.  Operands that stay dependent (a member
+// template's own parameters) are renumbered down by `rebase_base`.
 void SubstituteDependentSymbolAlignment(TypeParser* parser, Symbol* symbol,
-                                        Vector* args);
+                                        Vector* args, int rebase_base);
 void SubstituteStaticMemberInitializerValue(TypeParser* parser, Symbol* symbol,
                                             struct ASTNode* initializer,
                                             Vector* args);

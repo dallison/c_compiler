@@ -97,6 +97,9 @@ typedef struct Attribute {
   String token;                                               // @wire 8
   // Location of the attribute-token, used for follow-up diagnostics.
   SourceLocation location;                                    // @wire 9
+  // `alignas(Ts...)` / `alignas(Ns...)`: the dependent operand is expanded
+  // over its pack and the strictest element alignment applies.
+  bool dependent_alignas_is_pack_expansion;                   // @wire 10
 } Attribute;
 
 Attribute* NewAttribute(const char* name);
@@ -117,6 +120,10 @@ const char* AttributeArgString(Attribute* attr, size_t index);
 // Parses the argument at index as a base-10 integer.  Returns false (and
 // leaves *value unchanged) if missing or not a valid integer.
 bool AttributeArgInt(Attribute* attr, size_t index, long* value);
+// The strictest alignment requested by the non-dependent `aligned` attributes
+// (alignas, [[gnu::aligned]], __attribute__((aligned))) in `attrs`, 0 if
+// none.  An `aligned` without an argument requests `bare_alignment`.
+int AttributeListAlignment(Vector* attrs, int bare_alignment);
 
 // Operations on a Vector of Attribute*.
 Attribute* AttributeListFind(Vector* attrs, const char* name);
