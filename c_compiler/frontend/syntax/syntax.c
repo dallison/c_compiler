@@ -13108,6 +13108,36 @@ static bool SyntaxSkipToMemberPointerDeclarator(Syntax* syntax) {
   return false;
 }
 
+// Classifies the (possibly qualified) name at the current token without
+// consuming it.  A qualified name is a type only when it resolves to a tag or
+// typedef; a dependent qualified name without `typename` is a non-type.
+static void SyntaxClassifyTemplateArgumentName(Syntax* syntax,
+                                               bool* is_qualified,
+                                               bool* names_type,
+                                               bool* followed_by_brace) {
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  FullyQualifiedIdentifier name;
+  FullyQualifiedIdentifierInit(&name);
+  SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
+                                                     TC(closebra) | TC(exprsep));
+  *is_qualified = name.is_qualified;
+  *followed_by_brace = LexLookingAt(syntax->lex, TOK(lbrace));
+  *names_type = false;
+  if (name.is_qualified) {
+    if (SyntaxFindQualifiedTag(syntax, &name) != NULL) {
+      *names_type = true;
+    } else {
+      Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
+      *names_type =
+          symbol != NULL && StorageIs(symbol->storage, STO(typedef));
+    }
+  }
+  FullyQualifiedIdentifierDestruct(&name);
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+}
+
 // `integral_constant<bool, bool(!P::value)>`: a type-name followed by `(expr)`
 // or `{expr}` is a functional cast, not a type-id.  `bool(int)`, `bool(*)()`
 // and `int (S::*)` stay type-ids.
@@ -13135,6 +13165,14 @@ static bool SyntaxTemplateArgumentIsFunctionalCast(Syntax* syntax) {
         ((inner == TOK(identifier) || inner == TOK(coloncolon)) &&
          !SyntaxLookingAtType(syntax))) {
       cast = true;
+    } else if (inner == TOK(identifier) || inner == TOK(coloncolon)) {
+      // `bool(P1::value)`: `P1` is a type, but `P1::value` is not.
+      bool is_qualified = false;
+      bool names_type = false;
+      bool followed_by_brace = false;
+      SyntaxClassifyTemplateArgumentName(syntax, &is_qualified, &names_type,
+                                         &followed_by_brace);
+      cast = is_qualified && !names_type;
     }
     if (cast && (inner == TOK(identifier) || inner == TOK(coloncolon)) &&
         SyntaxSkipToMemberPointerDeclarator(syntax)) {
@@ -13160,35 +13198,13 @@ static bool SyntaxTemplateArgumentLooksLikeType(Syntax* syntax) {
   if (tok != TOK(identifier) && tok != TOK(coloncolon)) {
     return true;
   }
-  LexCheckpoint checkpoint;
-  LexCheckpointSave(syntax->lex, &checkpoint);
-  FullyQualifiedIdentifier name;
-  FullyQualifiedIdentifierInit(&name);
-  SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
-                                                     TC(closebra) | TC(exprsep));
-  bool is_qualified = name.is_qualified;
-  bool followed_by_braced_initializer = LexLookingAt(syntax->lex, TOK(lbrace));
-  bool resolved = false;
-  bool resolved_type = false;
+  bool is_qualified = false;
+  bool names_type = false;
+  bool followed_by_braced_initializer = false;
+  SyntaxClassifyTemplateArgumentName(syntax, &is_qualified, &names_type,
+                                     &followed_by_braced_initializer);
   if (is_qualified) {
-    if (SyntaxFindQualifiedTag(syntax, &name) != NULL) {
-      resolved = true;
-      resolved_type = true;
-    } else {
-      Symbol* symbol = SyntaxFindQualifiedSymbol(syntax, &name);
-      if (symbol != NULL) {
-        resolved = true;
-        resolved_type = StorageIs(symbol->storage, STO(typedef));
-      }
-    }
-  }
-  FullyQualifiedIdentifierDestruct(&name);
-  LexCheckpointRestore(syntax->lex, &checkpoint);
-  LexCheckpointDestruct(&checkpoint);
-  if (is_qualified) {
-    // A resolvable qualified name is a type only when it names a tag/typedef; an
-    // unresolvable (dependent) qualified name without `typename` is a non-type.
-    return resolved && resolved_type && !followed_by_braced_initializer;
+    return names_type && !followed_by_braced_initializer;
   }
   return !followed_by_braced_initializer;
 }
