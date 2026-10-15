@@ -229,6 +229,9 @@ void SyntaxAppendCXXBlockScopeDestructors(Vector* statements) {
   }
 }
 
+static ASTNode* ParseStatement(Syntax* syntax, TokenClass followers,
+                               bool may_be_declaration);
+
 // A compound statement is a brace-enclosed sequence of statements.
 // The AST node holding this is a CompoundStatementASTNode.
 // The node simply contains a vector of statements.
@@ -264,7 +267,8 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
         stmt = SyntaxParseLocalDeclaration(syntax);
       } else {
         seen_statement = true;
-        stmt = SyntaxParseStatement(syntax, followers | TC(closebrace));
+        stmt = ParseStatement(syntax, followers | TC(closebrace),
+                              /*may_be_declaration=*/false);
       }
       SyntaxEnsureProgress(syntax, token_before, location_before,
                            errors_before, TC(closebrace));
@@ -2155,6 +2159,21 @@ static void DiagnoseLabelAtEndOfCompoundStatement(Syntax* syntax) {
           : "label at end of compound statement requires C23");
 }
 
+// A C++ declaration used as a substatement (`else static_assert(...);`,
+// `if (c) T x;`) is in a block scope of its own ([stmt.pre]).
+static ASTNode* ParseDeclarationSubstatement(Syntax* syntax,
+                                             SourceLocation location) {
+  SyntaxOpenScope(syntax);
+  Vector* statements = NewVector();
+  ASTNode* decl = SyntaxParseLocalDeclaration(syntax);
+  if (decl != NULL) {
+    VectorAppend(statements, decl);
+  }
+  SyntaxAppendCXXBlockScopeDestructors(statements);
+  SyntaxCloseScope(syntax);
+  return NewCompoundStatementASTNode(statements, location);
+}
+
 static ASTNode* ParseStatementAfterLabel(Syntax* syntax,
                                          TokenClass followers) {
   if ((CompilerCAtLeast(kLanguageStandardC23) || CompilerIsCXX()) &&
@@ -2404,6 +2423,11 @@ struct StatementParser {
 
 // Parse a single statement, returning an AST node or NULL.
 ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
+  return ParseStatement(syntax, followers, /*may_be_declaration=*/true);
+}
+
+static ASTNode* ParseStatement(Syntax* syntax, TokenClass followers,
+                               bool may_be_declaration) {
   followers |= TC(stmt);
   Lex* lex = syntax->lex;
   Source* start_source = lex->source;
@@ -2461,6 +2485,13 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
     }
     LexCheckpointRestore(lex, &cp);
     LexCheckpointDestruct(&cp);
+  }
+
+  if (may_be_declaration && CompilerIsCXX() &&
+      SyntaxLookingAtDeclaration(syntax)) {
+    stmt = ParseDeclarationSubstatement(syntax, location);
+    stmt->flags |= kASTStatementStart;
+    return stmt;
   }
 
   bool found = false;
