@@ -4603,6 +4603,10 @@ static bool CXXExplicitSpecializationMatchesPrimary(TypeRecord* actual,
       TypeSpecializationTemplateArguments(actual) == NULL) {
     return false;
   }
+  Symbol* tag_symbol = actual->info.struct_info->tag_symbol;
+  if (tag_symbol != NULL && tag_symbol->namespace_ != primary->namespace_) {
+    return false;
+  }
   const char* tag = actual->info.struct_info->tag_name->value;
   const char* name = primary->name.value;
   size_t n = strlen(name);
@@ -5855,6 +5859,27 @@ static bool TypeMentionsFunctionTemplateParameter(TypeRecord* type) {
   return false;
 }
 
+/* [temp.deduct.call]/6: an argument naming an overload set that contains a
+ * function template (`std::endl`, `&h`) is a non-deduced context.  A
+ * template-id naming one specialization (`h<char>`) is not. */
+static bool CallArgumentNamesFunctionTemplate(ASTNode* actual) {
+  if (actual != NULL && actual->op == AST_OP(address)) {
+    actual = ((UnaryASTNode*)actual)->sub;
+  }
+  if (actual == NULL || actual->op != AST_OP(identifier)) {
+    return false;
+  }
+  for (Symbol* candidate = ((IdentifierASTNode*)actual)->symbol;
+       candidate != NULL; candidate = candidate->overload_next) {
+    if (candidate->flags.is_template && candidate->type != NULL &&
+        TypeIsFunction(candidate->type) &&
+        candidate->type->info.function.template_origin == NULL) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* Deduce template arguments for one (non-pack) call argument expression against
  * formal parameter type `formal`, applying the forwarding-reference rule: a
  * `T&&` parameter binding an lvalue deduces `T&` (reference collapsing). */
@@ -5943,6 +5968,9 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
                                                  target, adjusted);
     TypeRecordDelete(adjusted);
     return ok;
+  }
+  if (CallArgumentNamesFunctionTemplate(actual)) {
+    return true;
   }
   /* [temp.deduct.call]: if the parameter type P contains no template
    * parameters, no deduction is performed from this argument.  The pairing
@@ -8271,8 +8299,12 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
           }
           return true;
         }
-        bool origin_matches = ClassTemplateOriginMatches(
-            ClassTemplateOriginOf(pattern), ClassTemplateOriginOf(actual));
+        Symbol* pattern_origin = ClassTemplateOriginOf(pattern);
+        Symbol* actual_origin = ClassTemplateOriginOf(actual);
+        bool origin_matches =
+            ClassTemplateOriginMatches(pattern_origin, actual_origin) ||
+            (actual_origin == NULL &&
+             CXXExplicitSpecializationMatchesPrimary(actual, pattern_origin));
         if (!origin_matches) {
           return false;
         }
@@ -8282,7 +8314,7 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
         if (!args_match) {
           return false;
         }
-        return ClassTemplateOriginOf(pattern) != NULL;
+        return pattern_origin != NULL;
       }
       if (TypeIsEnum(pattern)) {
         return pattern->info.enum_info == actual->info.enum_info;

@@ -2271,15 +2271,34 @@ static ASTNode* TryAnalyzeOverloadedCallOperator(VectorASTNode* node) {
 }
 
 // True when any call operand is still template-dependent for deduction purposes.
+// A bare function-template name (`std::endl`, `&h`) as an argument: its
+// pattern type mentions template parameters, but the call is not dependent;
+// a function-pointer formal supplies the target type ([over.over]).
+static bool ActualIsFunctionTemplateName(ASTNode* actual) {
+  if (actual != NULL && actual->op == AST_OP(address)) {
+    actual = ((UnaryASTNode*)actual)->sub;
+  }
+  if (actual == NULL || actual->op != AST_OP(identifier)) {
+    return false;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)actual;
+  return id->symbol != NULL && actual->type != NULL &&
+         TypeIsFunction(actual->type) && SymbolIsTemplateFunction(id->symbol) &&
+         !TemplateArgumentVectorContainsTemplateParameter(
+             id->template_arguments);
+}
+
 static bool CallActualsContainTemplateParameter(VectorASTNode* call) {
   for (size_t i = 0; call != NULL && i < call->children->length; i++) {
     ASTNode* actual = call->children->value.p[i];
     if (actual == NULL) {
       continue;
     }
-    // A generic lambda's closure type carries template parameters, but a
-    // function-pointer formal can still convert it ([over.over] / funcaddr).
-    if ((actual->flags & kASTLambdaExpression) != 0) {
+    // A generic lambda's closure type and a function template's pattern type
+    // carry template parameters, but a function-pointer formal can still
+    // convert them ([over.over] / funcaddr).
+    if ((actual->flags & kASTLambdaExpression) != 0 ||
+        ActualIsFunctionTemplateName(actual)) {
       continue;
     }
     // Unknown is the placeholder given to a dependent operand (for example
@@ -2327,7 +2346,6 @@ static bool CallActualsContainDependentFunctorCall(VectorASTNode* call) {
   }
   return false;
 }
-
 // True when `node` is a call through a member-function access whose overload
 // cannot yet be resolved because it is still value/type-dependent: either the
 // explicit template arguments or an actual argument mention a template
@@ -2396,23 +2414,15 @@ static bool IsDependentMemberTemplateCall(VectorASTNode* node) {
   }
   // An ordinary member call still has to wait for genuinely dependent values
   // (for example, a member-template constructor initializing a concrete member
-  // from its U&& argument).  The one exception is a bare function-template
-  // name: its pattern type contains template parameters, but a concrete
-  // function-pointer formal supplies the target type needed by [over.over].
+  // from its U&& argument), but not for a bare function-template name.
   for (size_t i = 0; i < node->children->length; i++) {
     ASTNode* actual = node->children->value.p[i];
     if (actual == NULL || !TypeContainsTemplateParameter(actual->type)) {
       continue;
     }
-    if ((actual->flags & kASTLambdaExpression) != 0) {
+    if ((actual->flags & kASTLambdaExpression) != 0 ||
+        ActualIsFunctionTemplateName(actual)) {
       continue;
-    }
-    if (actual->op == AST_OP(identifier)) {
-      IdentifierASTNode* id = (IdentifierASTNode*)actual;
-      if (id->symbol != NULL && TypeIsFunction(actual->type) &&
-          SymbolIsTemplateFunction(id->symbol)) {
-        continue;
-      }
     }
     return true;
   }
@@ -2914,7 +2924,8 @@ static bool FunctionCallDeferTypeDependentOverloadedActuals(VectorASTNode* node)
   bool actuals_type_dependent = false;
   for (size_t i = 0; i < node->children->length; i++) {
     ASTNode* actual = node->children->value.p[i];
-    if (actual != NULL && (actual->flags & kASTLambdaExpression) != 0) {
+    if (actual != NULL && ((actual->flags & kASTLambdaExpression) != 0 ||
+                           ActualIsFunctionTemplateName(actual))) {
       continue;
     }
     if (actual != NULL && actual->type != NULL &&
@@ -3163,12 +3174,8 @@ static ASTNode* FunctionCallValidateCallableAndArguments(VectorASTNode* node) {
           (TypeIsUnknown(actual->type) ||
            TypeContainsTemplateParameter(actual->type) ||
            TypeContainsAuto(actual->type))) {
-        if (actual->op == AST_OP(identifier)) {
-          IdentifierASTNode* id = (IdentifierASTNode*)actual;
-          if (id->symbol != NULL && TypeIsFunction(actual->type) &&
-              SymbolIsTemplateFunction(id->symbol)) {
-            continue;
-          }
+        if (ActualIsFunctionTemplateName(actual)) {
+          continue;
         }
         argument_not_ready = true;
         break;

@@ -760,6 +760,9 @@ int CXXBracedInitTargetRank(ASTNode* actual, TypeRecord* target) {
 // suppressed since this is a speculative probe over every candidate parameter.
 // Contract: Speculative function-address resolution rank; no AST mutation.
 static int FuncAddrBaseRank(ASTNode* actual, TypeRecord* target) {
+  if (actual != NULL && actual->op == AST_OP(address)) {
+    actual = ((UnaryASTNode*)actual)->sub;
+  }
   if (!CompilerIsCXX() || actual == NULL || actual->op != AST_OP(identifier)) {
     return -1;
   }
