@@ -490,6 +490,11 @@ static bool StringLiteralMatchesCharacterArray(TypeRecord* array_element,
   if (TypeChar8IdentityDiffers(array_element, literal_element)) {
     return false;
   }
+  // C++ `wchar_t` is its own type: only `L"..."` initializes a `wchar_t[]`,
+  // and `L"..."` initializes nothing else ([dcl.init.string]).
+  if (TypeIsWchar(array_element) || TypeIsWchar(literal_element)) {
+    return TypeIsWchar(array_element) && TypeIsWchar(literal_element);
+  }
   return TypeIsCharFamily(array_element) || TypeIsInt(array_element);
 }
 
