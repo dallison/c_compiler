@@ -3790,10 +3790,29 @@ static Symbol* OutOfLineMemberTemplateDefinition(Symbol* templ) {
  * operand was still type-dependent when the enclosing member function template
  * was first (class-level) instantiated.  Now that the body has been cloned with
  * concrete arguments the correct conversion can be selected. */
-static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
-                                                 Symbol* templ,
-                                                 Vector* args,
-                                                 bool args_are_completed) {
+// [implimits] recommends at least 1024 nested instantiations; Clang's default.
+#define DEFAULT_TEMPLATE_INSTANTIATION_DEPTH 1024
+
+static void EnterTemplateInstantiation(TypeParser* parser) {
+  int limit = compiler->max_template_instantiation_depth > 0
+                  ? compiler->max_template_instantiation_depth
+                  : DEFAULT_TEMPLATE_INSTANTIATION_DEPTH;
+  if (compiler->template_instantiation_depth >= limit) {
+    ReportFatalErrorAtLocation(
+        parser->syntax->lex->current_token_location,
+        "recursive template instantiation exceeded maximum depth of %d "
+        "(use -ftemplate-depth=N to increase)",
+        limit);
+  }
+  compiler->template_instantiation_depth++;
+}
+
+static void LeaveTemplateInstantiation(void) {
+  compiler->template_instantiation_depth--;
+}
+
+static Symbol* InstantiateSimpleFunctionTemplateUnchecked(
+    TypeParser* parser, Symbol* templ, Vector* args, bool args_are_completed) {
   if (templ == NULL || templ->type == NULL || !templ->flags.is_template ||
       !TypeIsFunction(templ->type)) {
     return templ;
@@ -11301,7 +11320,21 @@ TypeRecord* InstantiateSimpleClassTemplate(TypeParser* parser,
                                             /*emit_constraint_error=*/true);
 }
 
+static TypeRecord* InstantiateSimpleClassTemplateUnchecked(
+    TypeParser* parser, Symbol* templ, Vector* args,
+    bool emit_constraint_error);
+
 static TypeRecord* InstantiateSimpleClassTemplateImpl(
+    TypeParser* parser, Symbol* templ, Vector* args,
+    bool emit_constraint_error) {
+  EnterTemplateInstantiation(parser);
+  TypeRecord* type = InstantiateSimpleClassTemplateUnchecked(
+      parser, templ, args, emit_constraint_error);
+  LeaveTemplateInstantiation();
+  return type;
+}
+
+static TypeRecord* InstantiateSimpleClassTemplateUnchecked(
     TypeParser* parser, Symbol* templ, Vector* args,
     bool emit_constraint_error) {
   TypeRecord* alias_type =
@@ -12352,6 +12385,16 @@ TypeRecord* TypeFindCXXComparisonCategory(const char* category_name) {
     return NULL;
   }
   return tag->type;
+}
+
+static Symbol* InstantiateSimpleFunctionTemplate(TypeParser* parser,
+                                                 Symbol* templ, Vector* args,
+                                                 bool args_are_completed) {
+  EnterTemplateInstantiation(parser);
+  Symbol* symbol = InstantiateSimpleFunctionTemplateUnchecked(
+      parser, templ, args, args_are_completed);
+  LeaveTemplateInstantiation();
+  return symbol;
 }
 
 /* Public entry point: instantiate function template `templ` with `args`. */

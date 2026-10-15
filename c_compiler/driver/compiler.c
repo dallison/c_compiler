@@ -93,6 +93,9 @@ static CompilerOptionDefinition compiler_options[] = {
     {"-fconstexpr-eval", kCompilerOptionString, kOptionConstexprEval, false,
      "Select constexpr evaluator: auto, pcode, ast, or audit",
      kOptionGroupLanguage, "mode"},
+    {"-ftemplate-depth", kCompilerOptionInt, kOptionTemplateDepth, false,
+     "Limit nested template instantiations to <n> (default: 1024)",
+     kOptionGroupLanguage, "n"},
     {"-fcontracts", kCompilerOptionString, kOptionContracts, false,
      "Select contract semantic: ignore, observe, enforce, or quick-enforce",
      kOptionGroupLanguage, "semantic"},
@@ -4476,6 +4479,8 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   int max_errors = OptionIntValue(kOptionErrorLimit, options, 20);
   // 0 means unlimited, matching Clang's -ferror-limit=0.
   compiler->max_errors = max_errors <= 0 ? INT_MAX : max_errors;
+  compiler->max_template_instantiation_depth =
+      OptionIntValue(kOptionTemplateDepth, options, 0);
   compiler->syntax_only = OptionBoolValue(kOptionSyntaxOnly, options, false);
   compiler->lto = OptionBoolValue(kOptionLTO, options, false);
   compiler->enable_all_warnings = false;

@@ -1906,6 +1906,7 @@ static ASTNode* ParseParenthesizedCast(Syntax* syntax, TokenClass followers) {
     // namespace-scope consteval injection target that class.
     int saved_nesting_depth = syntax->expression_nesting_depth;
     int saved_struct_depth = syntax->struct_definition_depth;
+    int saved_instantiation_depth = compiler->template_instantiation_depth;
     Struct* volatile saved_class_head = syntax->cxx_class_head;
     abort_on_error = true;
     if (setjmp(error_abort_state) == 0) {
@@ -1952,6 +1953,7 @@ static ASTNode* ParseParenthesizedCast(Syntax* syntax, TokenClass followers) {
     memcpy(error_abort_state, saved_abort_state, sizeof(error_abort_state));
     syntax->expression_nesting_depth = saved_nesting_depth;
     syntax->struct_definition_depth = saved_struct_depth;
+    compiler->template_instantiation_depth = saved_instantiation_depth;
     if (!parse_completed) {
       syntax->cxx_class_head = saved_class_head;
     }

@@ -493,6 +493,26 @@ bool VReportErrorAtLocation(SourceLocation location, const char* error,
   return emitted;
 }
 
+void ReportFatalErrorAtLocation(SourceLocation location, const char* error,
+                                ...) {
+  const char* filename = NULL;
+  int lineno = 0;
+  int start = 0;
+  int end = 0;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  char buf[4096];
+  va_list arg;
+  va_start(arg, error);
+  vsnprintf(buf, sizeof(buf), error, arg);
+  va_end(arg);
+  PrintDiagnosticKind("fatal error", ANSI_ERROR);
+  fprintf(stderr, ": ");
+  PrintDiagnosticLocation(filename, lineno);
+  fprintf(stderr, "%s\n", buf);
+  PrintDiagnosticSource(location);
+  exit(1);
+}
+
 void ReportError(const char* filename, int lineno, const char* error, ...) {
   va_list arg;
   va_start(arg, error);
