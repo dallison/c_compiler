@@ -1450,13 +1450,19 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   // name Cord again.  Re-entering the substitution that is already building
   // that class would recurse until the stack overflows.  Share the in-progress
   // type; its struct is completed by the outer call.
+  // The shared type keeps the qualifiers of the mention that built it; this
+  // mention may be `const Info` where that one was `Info`.
   TypeRecord* in_progress = NestedSubstitutionAlreadyInProgress(from, args);
   if (in_progress != NULL) {
-    return TypeRecordCopy(in_progress);
+    TypeRecord* shared = TypeRecordCopy(in_progress);
+    shared->qualifiers = type->qualifiers;
+    return shared;
   }
   TypeRecord* cached_lambda = FindCachedLambdaSubstitution(from, args);
   if (cached_lambda != NULL) {
-    return TypeRecordCopy(cached_lambda);
+    TypeRecord* shared = TypeRecordCopy(cached_lambda);
+    shared->qualifiers = type->qualifiers;
+    return shared;
   }
   // An enclosing class template is still collecting members.  Keep this
   // nested class's function bodies until that class is complete so they can
@@ -5221,8 +5227,17 @@ bool TypeLayoutDependsOnTemplate(TypeRecord* type) {
   while (type != NULL && type->declarator == kDeclArray) {
     type = type->next;
   }
-  return type != NULL && TypeIsStructOrUnion(type) &&
-         StructIsFunctionTemplateLocalClass(type->info.struct_info);
+  if (type == NULL || !TypeIsStructOrUnion(type)) {
+    return false;
+  }
+  // A class nested in a class template's pattern (`ThreadLocal<T>::
+  // ValueHolder` holding a `T`) is laid out per instantiation.
+  for (Struct* s = type->info.struct_info; s != NULL; s = s->lexical_parent) {
+    if (s->is_template || s->defining_template_scope_count > 0) {
+      return true;
+    }
+  }
+  return StructIsFunctionTemplateLocalClass(type->info.struct_info);
 }
 
 /* Core type-against-type deduction: match a (possibly dependent) parameter type
@@ -5240,6 +5255,12 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
   // [temp.deduct.type]: a C++26 pack-indexing specifier is a non-deduced
   // context.  The pack must be supplied explicitly or deduced elsewhere.
   if (formal->is_pack_index) {
+    return true;
+  }
+  // So is the expression of a decltype-specifier (the trailing return type
+  // of `auto f(const P& p) -> decltype(p.a())` when its address is taken).
+  if (formal->dependent_decltype_expr != NULL ||
+      TypeIsDetachedDependentDecltype(formal)) {
     return true;
   }
   // A qualified dependent type is a non-deduced context. Defer both the
@@ -6799,6 +6820,40 @@ FunctionTemplateCandidateStatus TypeClassifyFunctionTemplateCandidate(
                            /*free_element=*/false);
   TypeParserDestruct(&parser);
   return kFunctionTemplateCandidateViable;
+}
+
+/* Public: see type_template.h. */
+TypeRecord* TypeSubstituteFunctionTemplateSignature(Syntax* syntax,
+                                                    Symbol* templ,
+                                                    Vector* completed_args) {
+  if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type) ||
+      completed_args == NULL) {
+    return NULL;
+  }
+  TypeParser parser;
+  TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
+                 syntax->context);
+  TypeRecord* func_type = templ->type;
+  SetMemberTemplateSubstitutionContext(&parser, func_type);
+  parser.template_substitution_failed = false;
+  compiler->speculative_template_instantiation_depth++;
+  TypeRecord* func =
+      InstantiateFunctionTemplateType(&parser, func_type, completed_args);
+  compiler->speculative_template_instantiation_depth--;
+  bool unresolved_trailing_decltype =
+      func != NULL && func->next != NULL && TypeIsUnknown(func->next) &&
+      func_type->next != NULL &&
+      (func_type->next->dependent_decltype_expr != NULL ||
+       TypeIsDetachedDependentDecltype(func_type->next));
+  bool failed = parser.template_substitution_failed || func == NULL ||
+                TypeContainsTemplateParameter(func) ||
+                unresolved_trailing_decltype;
+  TypeParserDestruct(&parser);
+  if (failed) {
+    TypeRecordDelete(func);
+    return NULL;
+  }
+  return func;
 }
 
 /* Public: build a non-emitting concrete candidate for overload resolution.

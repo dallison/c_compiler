@@ -722,6 +722,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   }
   AnalyzeStatement(node->type->info.function.body);
   StatementFinishAutoReturnDeduction(node->type, node);
+  StatementValidateNamedReturnObjects(node->type);
   SemanticDiagnoseConstexprFunctionBody(node);
   SemanticAnalyzeFunctionContracts(node->type, node);
   CheckUnusedLabels(node->type->info.function.body);
@@ -1308,6 +1309,21 @@ static bool ConversionOperatorAllowedInContext(TypeRecord* func,
                                                ConversionContext ctx) {
   if (!func->info.function.is_explicit_conversion) {
     return true;
+  }
+  if (ctx == kConvertDirectInit) {
+    TypeRecord* result = func->next;
+    if (result != NULL && TypeIsReference(result)) {
+      result = result->next;
+    }
+    TypeRecord* target = to != NULL && TypeIsReference(to) ? to->next : to;
+    if (result == NULL || target == NULL) {
+      return false;
+    }
+    TypeRecordQualifierOverlay result_overlay;
+    TypeRecordQualifierOverlay target_overlay;
+    return TypeEqual(
+        TypeRecordOverlayQualifiers(&result_overlay, result, kQualPlain),
+        TypeRecordOverlayQualifiers(&target_overlay, target, kQualPlain));
   }
   return ctx == kConvertCast ||
          (ctx == kConvertContextualBool && TypeIsBool(to));
@@ -1976,6 +1992,7 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
       
     case kConvertContextualBool:
     case kConvertNormal:
+    case kConvertDirectInit:
       if (TypeIsVoidPointer(to)) {
         // Can convert any pointer, array or function to void*.
         if (TypeIsFunction(from->type) || TypeIsPointerOrArray(from->type)) {

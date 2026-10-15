@@ -684,6 +684,7 @@ static void WriteASTSub(SerializeContext* ctx, WireBuffer* buf, ASTNode* n,
     case kASTShapeExprInit: {
       ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)n;
       SWriteRef(ctx, buf, 16, kSerialKindAST, e->expr);
+      WireWriteBool(buf, 17, e->is_direct_initializer);
       break;
     }
     case kASTShapeBracedInit: {
@@ -1503,6 +1504,10 @@ static void ReadASTSubField(DeserializeContext* ctx, WireBuffer* buf,
       ExpressionInitializerASTNode* e = (ExpressionInitializerASTNode*)n;
       if (field == 16) {
         e->expr = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        return;
+      }
+      if (field == 17) {
+        WireReadBool(buf, &e->is_direct_initializer);
         return;
       }
       break;

@@ -4576,6 +4576,22 @@ parsed_bound:
   }
 }
 
+// `Count{7}`, `ns::Count{7}` or `int{7}`: a type name followed by `{` is an
+// explicit type conversion, never the start of a parameter declaration.
+static bool LookingAtBracedFunctionalCast(TypeParser* parser) {
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(parser->lex, &checkpoint);
+  LexNextToken(parser->lex);
+  while (LexLookingAt(parser->lex, TOK(identifier)) ||
+         LexLookingAt(parser->lex, TOK(coloncolon))) {
+    LexNextToken(parser->lex);
+  }
+  bool braced = LexLookingAt(parser->lex, TOK(lbrace));
+  LexCheckpointRestore(parser->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  return braced;
+}
+
 static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
   if (!CompilerIsCXX() || parser->symbol == NULL ||
       parser->stack.length != 0 ||
@@ -4599,7 +4615,8 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
       !LexLookingAt(parser->lex, TOK(this)) &&
       !LexLookingAt(parser->lex, TOK(thread_local)) &&
       !SyntaxLookingAtAnyAttribute(parser->syntax) &&
-      !SyntaxLookingAtType(parser->syntax);
+      (!SyntaxLookingAtType(parser->syntax) ||
+       LookingAtBracedFunctionalCast(parser));
   LexCheckpointRestore(parser->lex, &checkpoint);
   LexCheckpointDestruct(&checkpoint);
   if (starts_with_expression) {

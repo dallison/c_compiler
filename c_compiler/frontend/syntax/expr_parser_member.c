@@ -400,18 +400,20 @@ Symbol* CurrentClassSelfTagSymbol(Syntax* syntax,
       TypeIsFunction(compiler->current_function)) {
     owner = compiler->current_function->info.function.cxx_member_owner;
   }
-  if (owner == NULL || owner->tag_name == NULL || owner->tag_symbol == NULL) {
-    return NULL;
-  }
   // The caller only reaches this helper when the resolved symbol is the
   // not-yet-a-template injected-class-name, which happens only while a class
-  // template's own body is being parsed.  `owner` is therefore always the
-  // primary template, whose tag name is the bare class name; instantiated tags
+  // template's own body is being parsed.  The class is therefore the primary
+  // template, whose tag name is the bare class name; instantiated tags
   // (e.g. `Box<int>`) are produced by cloning and never re-parsed through here,
-  // so an exact match against the bare tag name is what we want.
+  // so an exact match against the bare tag name is what we want.  A member of
+  // a nested class sees the enclosing classes' injected-class-names too
+  // (`Spy<void>{}` inside `Spy<T>::Combiner`).
   const char* last = FullyQualifiedIdentifierLast(name);
-  if (strcmp(last, owner->tag_name->value) == 0) {
-    return owner->tag_symbol;
+  for (; owner != NULL; owner = owner->lexical_parent) {
+    if (owner->tag_name != NULL && owner->tag_symbol != NULL &&
+        strcmp(last, owner->tag_name->value) == 0) {
+      return owner->tag_symbol;
+    }
   }
   return NULL;
 }

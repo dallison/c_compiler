@@ -1284,7 +1284,13 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
     return CXXStructSameTemplateFamilyForTypeEquality(left->lexical_parent,
                                                      right->lexical_parent);
   }
-  return true;
+  // `::Message` and `testing::Message` share a tag name.  Tags declared at
+  // global scope have no namespace.
+  Namespace* left_ns =
+      left->tag_symbol != NULL ? left->tag_symbol->namespace_ : NULL;
+  Namespace* right_ns =
+      right->tag_symbol != NULL ? right->tag_symbol->namespace_ : NULL;
+  return left_ns == right_ns;
 }
 
 // C and C++ allow the `int` keyword to be omitted from signed and unsigned
@@ -2053,8 +2059,51 @@ bool TypeBaseAdjustment(TypeRecord* from, TypeRecord* to, bool public_only,
     CXXBaseAdjustmentSet(adjustment, kCXXBaseAdjustmentNone, 0, -1);
     return true;
   }
-  return StructBaseAdjustment(from->info.struct_info, to->info.struct_info,
-                              public_only, 0, adjustment);
+  if (StructBaseAdjustment(from->info.struct_info, to->info.struct_info,
+                           public_only, 0, adjustment)) {
+    return true;
+  }
+  // A typedef formed while its class template was only forward-declared
+  // (`typedef basic_ostream<char> ostream` in <iosfwd>) names the primary
+  // template plus arguments, not the specialization that is the base.
+  bool from_deferred = from->info.struct_info->is_template &&
+                       from->template_arguments != NULL;
+  bool to_deferred =
+      to->info.struct_info->is_template && to->template_arguments != NULL;
+  if (!CompilerIsCXX() || (!from_deferred && !to_deferred)) {
+    return false;
+  }
+  TypeRecord* from_concrete =
+      from_deferred
+          ? TypeMaterializeClassTemplateSpecialization(&compiler->syntax, from)
+          : from;
+  TypeRecord* to_concrete =
+      to_deferred
+          ? TypeMaterializeClassTemplateSpecialization(&compiler->syntax, to)
+          : to;
+  bool found = false;
+  if (from_concrete != NULL && to_concrete != NULL &&
+      TypeIsStructOrUnion(from_concrete) && TypeIsStructOrUnion(to_concrete) &&
+      from_concrete->info.struct_info != NULL &&
+      to_concrete->info.struct_info != NULL &&
+      (from_concrete->info.struct_info != from->info.struct_info ||
+       to_concrete->info.struct_info != to->info.struct_info)) {
+    if (from_concrete->info.struct_info == to_concrete->info.struct_info) {
+      CXXBaseAdjustmentSet(adjustment, kCXXBaseAdjustmentNone, 0, -1);
+      found = true;
+    } else {
+      found = StructBaseAdjustment(from_concrete->info.struct_info,
+                                   to_concrete->info.struct_info, public_only,
+                                   0, adjustment);
+    }
+  }
+  if (from_concrete != from) {
+    TypeRecordDelete(from_concrete);
+  }
+  if (to_concrete != to) {
+    TypeRecordDelete(to_concrete);
+  }
+  return found;
 }
 
 bool TypeIsAbstractClass(TypeRecord* type) {

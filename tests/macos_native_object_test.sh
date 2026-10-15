@@ -335,3 +335,35 @@ if [[ "$status" != "0" ]]; then
   echo "Darwin sysconf/mmap/pointer-conversion program exited $status" >&2
   exit 1
 fi
+
+# libSystem's shm_open is variadic, so its mode travels on the stack.
+cat >"$WORK/shm.c" <<'SRC'
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+int main(void) {
+  char name[64];
+  snprintf(name, sizeof(name), "/davecc_shm_%d", (int)getpid());
+  mode_t old_umask = umask(0);
+  int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
+  umask(old_umask);
+  if (fd < 0) return 1;
+  struct stat st;
+  int mode_ok = fstat(fd, &st) == 0 && (st.st_mode & 0777) == 0600;
+  int again = shm_open(name, O_RDWR, 0);
+  shm_unlink(name);
+  close(fd);
+  if (again < 0) return 2;
+  close(again);
+  return mode_ok ? 0 : 3;
+}
+SRC
+"$DAVECC" -target aarch64-apple-darwin-davecc "$WORK/shm.c" -o "$WORK/shm"
+status=0
+"$WORK/shm" || status=$?
+if [[ "$status" != "0" ]]; then
+  echo "Darwin shm_open program exited $status" >&2
+  exit 1
+fi

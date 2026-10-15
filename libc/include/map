@@ -199,6 +199,13 @@ struct __node {
         color(0),
         value(key, mapped) {}
 
+  __node(const Key& key, T&& mapped)
+      : parent(nullptr),
+        left(nullptr),
+        right(nullptr),
+        color(0),
+        value(key, std::move(mapped)) {}
+
   __node(const pair<const Key, T>& v)
       : parent(nullptr),
         left(nullptr),
@@ -669,6 +676,17 @@ class map {
     __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
     __DAVECC_TRY {
       new (node) __node(key, mapped);
+    } __DAVECC_CATCH_ALL {
+      __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+      __DAVECC_RETHROW;
+    }
+    return node;
+  }
+
+  __node* __create_node(const key_type& key, mapped_type&& mapped) {
+    __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
+    __DAVECC_TRY {
+      new (node) __node(key, std::move(mapped));
     } __DAVECC_CATCH_ALL {
       __node_alloc_traits::deallocate(__node_alloc_, node, 1);
       __DAVECC_RETHROW;
@@ -1163,7 +1181,7 @@ class map {
       return pair<iterator, bool>(iterator(found, __root_), false);
     }
     mapped_type mapped = mapped_type(std::forward<Args>(args)...);
-    return __insert_node(__create_node(key, mapped));
+    return __insert_node(__create_node(key, std::move(mapped)));
   }
 
   template <class... Args>
@@ -1180,7 +1198,7 @@ class map {
       return pair<iterator, bool>(iterator(found, __root_), false);
     }
     mapped_type mapped = std::forward<M>(obj);
-    return __insert_node(__create_node(key, mapped));
+    return __insert_node(__create_node(key, std::move(mapped)));
   }
 
   template <class M>
@@ -1190,8 +1208,11 @@ class map {
   }
 
   mapped_type& operator[](const key_type& key) {
-    mapped_type mapped;
-    return __insert_node(__create_node(key, mapped)).first->second;
+    __node* found = __find_node(key);
+    if (found != nullptr) {
+      return found->value.second;
+    }
+    return __insert_node(__create_node(key, mapped_type())).first->second;
   }
 
   mapped_type& at(const key_type& key) {

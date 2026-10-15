@@ -1700,7 +1700,7 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   bool standard_placement =
       sole_placement_type != NULL && TypeIsPointer(sole_placement_type);
   ASTNode* allocation_size =
-      allocated_type_dependent
+      allocated_type_dependent || TypeLayoutDependsOnTemplate(allocated_type)
           ? NewSizeofASTNodeWithType(allocated_type, location)
           : NewSizeofASTNodeWithKnownSize(allocated_type->size, location);
   Symbol* array_count = NULL;

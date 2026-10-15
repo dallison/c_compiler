@@ -7566,15 +7566,22 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       CompoundStatementASTNode* comp =
           (CompoundStatementASTNode*)unary_node->sub;
       size_t n = comp->statements->length;
+      // An object initialized from the statement expression is the result of
+      // its final expression only; the constructors of the block's locals
+      // must not build into it.
+      IRNode* result_address = gen->current_struct_address;
+      gen->current_struct_address = NULL;
       for (size_t i = 0; i < n; i++) {
         ASTNode* stmt = comp->statements->value.p[i];
         if (i + 1 == n && stmt->op == AST_OP(expr)) {
+          gen->current_struct_address = result_address;
           result =
               GenerateExpression(gen, ((ExpressionStatementASTNode*)stmt)->expr);
         } else {
           GenerateStatement(gen, stmt);
         }
       }
+      gen->current_struct_address = result_address;
       if (result == NULL) {
         result =
             GeneratorGetIntConstant(gen, NULL, 0);

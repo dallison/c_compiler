@@ -658,6 +658,130 @@ static ASTNode* DispatchExpressionBuiltinIntrinsics(ASTNode* node,
 
 // Type-trait builtins finish without post-process; stmt-expr types from the last
 // inner expression; throw and coroutine keywords delegate to coroutine modules.
+static bool IsGeneratedPCLabel(ASTNode* stmt) {
+  return stmt != NULL && stmt->op == AST_OP(label) &&
+         ((LabelASTNode*)stmt)->stmt == NULL &&
+         strncmp(((LabelASTNode*)stmt)->name.value, ".PC.", 4) == 0;
+}
+
+static void RenumberCompoundStatements(CompoundStatementASTNode* comp) {
+  for (size_t i = 0; i < comp->statements->length; i++) {
+    ASTNode* stmt = comp->statements->value.p[i];
+    stmt->parent = &comp->base;
+    stmt->child_id = (int)i;
+  }
+}
+
+// Copies `value` into a new temporary of its unqualified, unreferenced type and
+// returns the analyzed initialization of that temporary.
+static ASTNode* NewStatementExpressionResultCapture(ASTNode* value,
+                                                    Symbol** out_temp) {
+  SourceLocation location = value->location;
+  TypeRecord* type = TypeRecordCopy(
+      TypeIsReference(value->type) ? value->type->next : value->type);
+  type->qualifiers = kQualPlain;
+  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
+  temp->location = location;
+  *out_temp = temp;
+  StructMember* constructor = NULL;
+  if (CompilerIsCXX() && TypeIsStructOrUnion(type) &&
+      type->info.struct_info != NULL &&
+      type->info.struct_info->tag_name != NULL) {
+    constructor = FindStructMember(type->info.struct_info,
+                                   type->info.struct_info->tag_name);
+  }
+  if (constructor != NULL && constructor->is_member_function) {
+    ASTNode* member = NewStringConstantASTNode(
+        NewString(type->info.struct_info->tag_name->value), NULL, location);
+    ASTNode* member_access =
+        NewBinaryASTNode(AST_OP(dot), NULL, location,
+                         NewIdentifierASTNode(temp, location), member);
+    Vector* actuals = NewVector();
+    VectorAppend(actuals, value);
+    return AnalyzeExpression(NewVectorASTNode(AST_OP(call), NULL, location,
+                                              member_access, actuals));
+  }
+  return AnalyzeExpression(
+      NewBinaryASTNode(AST_OP(assign), NULL, location,
+                       NewIdentifierASTNode(temp, location), value));
+}
+
+// A GNU statement expression returns its last expression statement's value
+// by value: it is copied out before that statement's temporaries and the
+// block's locals are destroyed, which run after it in the analyzed compound.
+// Leaves the value as the compound's last statement, capturing it in a
+// temporary of the enclosing full expression when destruction follows it.
+// Returns the value expression, or NULL when there is none.
+static ASTNode* PlaceStatementExpressionValueLast(
+    CompoundStatementASTNode* comp) {
+  Vector* stmts = comp->statements;
+  size_t index = stmts->length;
+  bool destroys_locals = false;
+  for (size_t i = stmts->length; i > 0; i--) {
+    ASTNode* stmt = stmts->value.p[i - 1];
+    if (stmt != NULL && (stmt->flags & kASTFallthroughDestructor) != 0) {
+      destroys_locals = true;
+    } else if (!IsGeneratedPCLabel(stmt)) {
+      index = i - 1;
+      break;
+    }
+  }
+  if (index == stmts->length) {
+    return NULL;
+  }
+  ASTNode* stmt = stmts->value.p[index];
+  if (stmt == NULL || stmt->op != AST_OP(expr)) {
+    return NULL;
+  }
+  ExpressionStatementASTNode* es = (ExpressionStatementASTNode*)stmt;
+  ASTNode** slot = &es->expr;
+  while (*slot != NULL && (*slot)->op == AST_OP(comma) &&
+         ((BinaryASTNode*)*slot)->right != NULL &&
+         (((BinaryASTNode*)*slot)->right->flags & kASTTemporaryCleanupCall) !=
+             0) {
+    slot = &((BinaryASTNode*)*slot)->left;
+  }
+  ASTNode* value = *slot;
+  if (value == NULL || value->type == NULL) {
+    return NULL;
+  }
+  bool destroys_temporaries = slot != &es->expr;
+  TypeRecord* object =
+      TypeIsReference(value->type) ? value->type->next : value->type;
+  if ((!destroys_locals && !destroys_temporaries) || TypeIsVoid(value->type) ||
+      object == NULL || TypeIsArray(object) || TypeIsFunction(object)) {
+    if (index + 1 < stmts->length) {
+      VectorDeleteElement(stmts, index);
+      VectorAppend(stmts, stmt);
+      RenumberCompoundStatements(comp);
+    }
+    return destroys_temporaries ? NULL : value;
+  }
+  ASTNode* parent = value->parent;
+  int child_id = value->child_id;
+  ASTNodeMove(value);
+  Symbol* temp = NULL;
+  ASTNode* capture = NewStatementExpressionResultCapture(value, &temp);
+  ASTNodeReplaceChild(parent, child_id, capture, false);
+  SourceLocation location = capture->location;
+  ASTNode* result = NewIdentifierASTNode(temp, location);
+  if (CompilerIsCXX() && TypeIsStructOrUnion(temp->type)) {
+    // Moved from by the enclosing initialization, then destroyed at the end
+    // of the enclosing full expression.
+    TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, true);
+    TypeRecordChain(reference, TypeRecordCopy(temp->type));
+    reference->type = temp->type->type;
+    TypeRecordCalculateSize(reference);
+    result = NewCastASTNode(reference, location, result);
+  }
+  result = AnalyzeExpression(result);
+  ASTNode* result_stmt = NewExpressionStatementASTNode(result, location);
+  result_stmt->flags |= kASTAnalyzed;
+  VectorAppend(stmts, result_stmt);
+  RenumberCompoundStatements(comp);
+  return result;
+}
+
 static ASTNode* DispatchExpressionCoroutineAndStatementExpr(
     ASTNode* node, UnaryASTNode* unary, VectorASTNode* vector,
     ASTNode** node_inout, bool* finished, int op) {
@@ -671,16 +795,10 @@ static ASTNode* DispatchExpressionCoroutineAndStatementExpr(
       CompoundStatementASTNode* comp =
           (CompoundStatementASTNode*)unary->sub;
       TypeRecord* type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
-      if (comp->statements->length > 0) {
-        ASTNode* last =
-            comp->statements->value.p[comp->statements->length - 1];
-        if (last->op == AST_OP(expr)) {
-          ExpressionStatementASTNode* es = (ExpressionStatementASTNode*)last;
-          if (es->expr != NULL && es->expr->type != NULL) {
-            type = es->expr->type;
-            node->value_category = es->expr->value_category;
-          }
-        }
+      ASTNode* value = PlaceStatementExpressionValueLast(comp);
+      if (value != NULL) {
+        type = value->type;
+        node->value_category = value->value_category;
       }
       ASTNodeSetType(node, type);
       return node;

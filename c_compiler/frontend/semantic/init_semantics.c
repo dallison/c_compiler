@@ -719,10 +719,11 @@ static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
 
 // An element is copy-initialized ([dcl.init.aggr]/4): from a glvalue of a class
 // whose copy is not trivial, that runs the copy or move constructor; copying
-// the bytes would alias what the source owns (a string's buffer).
+// the bytes would alias what the source owns (a string's buffer).  So does an
+// aggregate initialized from a single glvalue of its own class
+// ([dcl.init.list]/3.2).
 static bool CXXCopiesThroughConstructor(TypeRecord* type, ASTNode* expr) {
   return CompilerIsCXX() && type->info.struct_info != NULL &&
-         !type->info.struct_info->is_aggregate &&
          !CXXTypeIsTriviallyCopyable(type) && ASTNodeIsGLValue(expr);
 }
 
@@ -1846,7 +1847,9 @@ static void BuildDesignator(INode* inode, Vector* designators) {
                         designators);
 }
 
-static ASTNode* BuildDesignatedInitializer(INode* inode) {
+// `direct` is set for the scalar a direct-list-initializer (`bool b{lease}`)
+// initializes, which may use an explicit conversion function.
+static ASTNode* BuildDesignatedInitializer(INode* inode, bool direct) {
   Vector* designators = NewVector();
   if (inode->parent == NULL) {
     // Top level: this INode *is* the object being initialized, so the
@@ -1868,22 +1871,23 @@ static ASTNode* BuildDesignatedInitializer(INode* inode) {
     NormalConversion(inode->expr, inode->type->next);
     inode->expr->flags |= kASTNeedAddress;
   } else {
-    NormalConversion(inode->expr, inode->type);
+    SemanticConvertType(inode->expr, inode->type,
+                        direct ? kConvertDirectInit : kConvertNormal);
   }
   ASTNodeSetType(designated_init, inode->type);
   return designated_init;
 }
 
-static void FlattenINode(INode* inode,
-                            BracedInitializerASTNode* braced_init) {
+static void FlattenINode(INode* inode, BracedInitializerASTNode* braced_init,
+                         bool direct) {
   if (inode->expr != NULL) {
-    ASTNode* designated = BuildDesignatedInitializer(inode);
+    ASTNode* designated = BuildDesignatedInitializer(inode, direct);
     designated->parent = &braced_init->base;
     designated->child_id = (int)braced_init->initializers->length;
     VectorAppend(braced_init->initializers, designated);
   }
   for (size_t i = 0; i < inode->children.length; i++) {
-    FlattenINode(inode->children.value.p[i], braced_init);
+    FlattenINode(inode->children.value.p[i], braced_init, false);
   }
 }
 
@@ -1892,8 +1896,11 @@ ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* ast_node, bool constants_
   InitializeINode(inode, ast_node, constants_only);
   ApplyCXXDefaultMemberInitializers(inode, constants_only, ast_node->location);
   // PrintINode(inode, 0);
+  bool direct = CompilerIsCXX() && inode->kind == kIScalar &&
+                ast_node->op == AST_OP(braced_init) &&
+                ((BracedInitializerASTNode*)ast_node)->is_direct_list_initializer;
   ASTNode* braced_init = NewBracedInitializerASTNode(NewVector(), type, ast_node->location);
-  FlattenINode(inode, (BracedInitializerASTNode*)braced_init);
+  FlattenINode(inode, (BracedInitializerASTNode*)braced_init, direct);
   DeleteINode(inode);
   return braced_init;
 }

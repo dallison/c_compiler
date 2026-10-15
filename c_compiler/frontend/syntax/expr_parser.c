@@ -1054,11 +1054,15 @@ static ASTNode* ParseCXXBracedTemporaryExpression(ASTNode* type_expr,
   // re-enters class completion while the surrounding declaration is still
   // being parsed and overflows in triviality checks.  Record the arguments on
   // the temporary and instantiate when the expression is analyzed.
+  // The injected-class-name of a class template whose body is still open
+  // (`Spy<void>{}` in a member of `Spy<T>::Combiner`) is its tag symbol, which
+  // is not yet marked as a template but becomes one.
   TypeRecord* literal_type = TypeRecordCopy(type);
-  if (id->template_arguments != NULL && id->symbol->flags.is_template &&
-      TypeIsStructOrUnion(literal_type) &&
+  if (id->template_arguments != NULL && TypeIsStructOrUnion(literal_type) &&
       literal_type->info.struct_info != NULL &&
-      literal_type->info.struct_info->is_template) {
+      ((id->symbol->flags.is_template &&
+        literal_type->info.struct_info->is_template) ||
+       literal_type->info.struct_info->tag_symbol == id->symbol)) {
     if (literal_type->template_arguments != NULL) {
       VectorDeleteWithContents(
           literal_type->template_arguments,

@@ -1095,6 +1095,9 @@ ASTNode* NewPtrScaleASTNode(TypeRecord* type, ASTOpcode scale_op, ASTNode* expr,
 typedef struct {
   ASTNode base;
   ASTNode* expr;   // @wire 16
+  // True for a parenthesized direct-initializer (`bool b(lease)`), which may
+  // use an explicit conversion function; false after `=`.
+  bool is_direct_initializer;  // @wire 17
 } ExpressionInitializerASTNode;
 
 ASTNode* NewExpressionInitializerASTNode(ASTNode* expr,

@@ -884,7 +884,9 @@ static void AnalyzeNonReferenceExpressionInit(ASTNode* target,
     e->expr = materialized;
   }
   if (!constructor_call && !cxx_return_elision_initializer) {
-    NormalConversion(e->expr, target->type);
+    SemanticConvertType(
+        e->expr, target->type,
+        e->is_direct_initializer ? kConvertDirectInit : kConvertNormal);
   }
 }
 

@@ -34,6 +34,11 @@ ASTNode* SemanticMaterializeClonedStructuredBinding(
 void StatementFinishAutoReturnDeduction(TypeRecord* func,
                                         ASTNode* diagnostic_node);
 
+// Keeps a named local in the return slot only when every return that can run
+// while it is alive returns it.  Must run with compiler->current_function set
+// to `func`, before CXXInsertScopeExitDestructors.
+void StatementValidateNamedReturnObjects(TypeRecord* func);
+
 // Inserts C++ scope-exit destructor calls for automatic objects at each
 // return/break/continue in a fully-analyzed, non-dependent function body.  Must
 // run with compiler->current_function (and access context) set to `func`.

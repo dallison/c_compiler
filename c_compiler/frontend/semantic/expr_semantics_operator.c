@@ -3429,6 +3429,10 @@ static void AnalyzeAssignmentExpressionPhaseCompoundAssignmentOps(
       if (TypeContainsTemplateParameter(node->right->type) ||
           TypeContainsTemplateParameter(node->left->type)) {
         ((ASTNode*)node)->flags |= kASTDeferredDependentAssign;
+      } else if (is_initializer) {
+        // A mem-initializer direct-initializes the member (`success_(value)`
+        // in gtest's AssertionResult may use `explicit operator bool`).
+        SemanticConvertType(node->right, node->left->type, kConvertDirectInit);
       } else {
         NormalConversion(node->right, node->left->type);
       }

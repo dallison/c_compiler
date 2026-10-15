@@ -189,7 +189,9 @@ static bool VectorContainsPointer(Vector* vector, void* ptr) {
 }
 
 static bool CXXTemporaryNeedsDestructor(Symbol* sym) {
+  // A structured binding's invented object lives until its block exits.
   if (!CompilerIsCXX() || sym == NULL || !sym->flags.is_temp ||
+      sym->is_structured_binding_object ||
       sym->type == NULL || !TypeIsStructOrUnion(sym->type) ||
       sym->type->info.struct_info == NULL ||
       sym->type->info.struct_info->tag_name == NULL) {
@@ -936,7 +938,8 @@ static ASTNode* NewAnalyzedDestructorStatement(TypeRecord* type,
 
 // Is `sym` an automatic object this pass is responsible for destroying?
 static bool CXXLocalNeedsScopeExitDestructor(Symbol* sym) {
-  if (sym == NULL || sym->flags.is_temp ||
+  if (sym == NULL ||
+      (sym->flags.is_temp && !sym->is_structured_binding_object) ||
       StorageIs(sym->storage, STO(static)) ||
       StorageIs(sym->storage, STO(extern)) ||
       StorageIs(sym->storage, STO(typedef))) {
@@ -1066,6 +1069,37 @@ void AppendRangeForTemporaryDestructorStatements(ASTNode* range_decl,
   VectorDestruct(&temporaries);
 }
 
+// The destructors, in destruction order, of the temporaries that a block-scope
+// reference's initializer creates; they live until the reference goes out of
+// scope.  The initializer is often a bare lvalue whose address is bound, so
+// none of its temporaries end with the full-expression; keeping a by-value
+// argument alive longer is harmless.  An object constructed on only some
+// evaluation paths is not destroyed.
+static void AppendReferenceTemporaryDestructorStatements(
+    VariableDeclarationASTNode* decl, Vector* out) {
+  Symbol* sym = decl->symbol;
+  if (sym == NULL || !TypeIsReference(sym->type) || !sym->flags.is_local ||
+      decl->initializer == NULL || StorageIs(sym->storage, STO(static)) ||
+      StorageIs(sym->storage, STO(extern)) ||
+      StorageIs(sym->storage, STO(thread)) ||
+      StorageIs(sym->storage, STO(typedef))) {
+    return;
+  }
+  CXXTemporaryCollection collection;
+  CXXTemporaryCollectionInit(&collection, decl->initializer);
+  ASTNodeVisit(decl->initializer, CollectCXXDestroyedTemporarySymbols, 0,
+               &collection);
+  ASTNodeVisit(decl->initializer, CollectCXXTemporarySymbols, 0, &collection);
+  SortCXXTemporariesByConstruction(&collection);
+  for (size_t i = collection.temps.length; i > 0; i--) {
+    Symbol* temporary = collection.temps.value.p[i - 1];
+    if (!VectorContainsPointer(&collection.conditional, temporary)) {
+      AppendLocalDestructorStatements(temporary, out);
+    }
+  }
+  CXXTemporaryCollectionDestruct(&collection);
+}
+
 static size_t IndexOfChildInCompound(CompoundStatementASTNode* compound,
                                      ASTNode* child) {
   for (size_t i = 0; i < compound->statements->length; i++) {
@@ -1087,7 +1121,9 @@ static void CollectCompoundLocalDestructors(CompoundStatementASTNode* compound,
   }
   for (size_t i = hi; i > lo; i--) {
     ASTNode* stmt = compound->statements->value.p[i - 1];
-    if ((compound->base.flags & kASTRangeForInitializer) != 0 && i == 1) {
+    bool range_for_initializer =
+        (compound->base.flags & kASTRangeForInitializer) != 0 && i == 1;
+    if (range_for_initializer) {
       AppendRangeForTemporaryDestructorStatements(stmt, out);
     }
     if (stmt->op != AST_OP(decl_list)) {
@@ -1098,6 +1134,10 @@ static void CollectCompoundLocalDestructors(CompoundStatementASTNode* compound,
       ASTNode* decl_node = decls->declarations->value.p[j - 1];
       if (decl_node->op != AST_OP(vardecl)) {
         continue;
+      }
+      if (!range_for_initializer) {
+        AppendReferenceTemporaryDestructorStatements(
+            (VariableDeclarationASTNode*)decl_node, out);
       }
       Symbol* sym = ((VariableDeclarationASTNode*)decl_node)->symbol;
       if (sym == skip || !CXXLocalNeedsScopeExitDestructor(sym)) {
@@ -1326,14 +1366,27 @@ static void RebuildCompoundFallthroughDestructors(ASTNode* node, void* data,
     ASTNodeDelete(statement);
   }
 
+  // A statement expression's value stays last: its analysis copied the value
+  // out so that the locals can be destroyed before it is read.
+  size_t insert_at = compound->statements->length;
+  if (node->parent != NULL && node->parent->op == AST_OP(stmt_expr) &&
+      insert_at > 0) {
+    ASTNode* last = compound->statements->value.p[insert_at - 1];
+    if (last != NULL && last->op == AST_OP(expr)) {
+      insert_at--;
+    }
+  }
   Vector destructors;
   VectorInit(&destructors);
-  CollectCompoundLocalDestructors(compound, 0, compound->statements->length,
-                                  NULL, &destructors);
+  CollectCompoundLocalDestructors(compound, 0, insert_at, NULL, &destructors);
   for (size_t i = 0; i < destructors.length; i++) {
     ASTNode* destructor = destructors.value.p[i];
     destructor->flags |= kASTFallthroughDestructor;
-    VectorAppend(compound->statements, destructor);
+    if (insert_at + i < compound->statements->length) {
+      VectorInsertBefore(compound->statements, insert_at + i, destructor);
+    } else {
+      VectorAppend(compound->statements, destructor);
+    }
   }
   VectorDestruct(&destructors);
   for (size_t i = 0; i < compound->statements->length; i++) {
@@ -2805,6 +2858,144 @@ static ASTNode* MaterializeCXXReturnByMove(ASTNode* return_value) {
   ASTNode* analyzed = AnalyzeExpression(comma);
   analyzed->value_category = kValueCategoryPrvalue;
   return analyzed;
+}
+
+typedef struct {
+  Vector returns;       // CombinedStatementASTNode* returning a value.
+  Vector declarations;  // VariableDeclarationASTNode* of NRVO candidates.
+} NamedReturnSearch;
+
+static void CollectNamedReturnUses(ASTNode* node, void* data, int child_id,
+                                   VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  NamedReturnSearch* search = data;
+  if (node->op == AST_OP(return) &&
+      ((CombinedStatementASTNode*)node)->cond != NULL) {
+    VectorAppend(&search->returns, node);
+  } else if (node->op == AST_OP(vardecl)) {
+    Symbol* sym = ((VariableDeclarationASTNode*)node)->symbol;
+    if (sym != NULL && sym->is_nrvo) {
+      VectorAppend(&search->declarations, node);
+    }
+  }
+}
+
+static Symbol* NamedReturnObject(ASTNode* ret) {
+  ASTNode* value = ((CombinedStatementASTNode*)ret)->cond;
+  if (value == NULL || value->op != AST_OP(identifier) ||
+      (value->flags & kASTNrvoMarker) == 0) {
+    return NULL;
+  }
+  return ((IdentifierASTNode*)value)->symbol;
+}
+
+// True when `ret` may run while the object declared by `decl` is alive: it
+// follows the declaration in the declaring block, or is anywhere inside the
+// `for`/`if`/`switch` that declares it.
+static bool ReturnInScopeOfDeclaration(ASTNode* ret, ASTNode* decl) {
+  ASTNode* statement = decl;
+  if (statement->parent != NULL && statement->parent->op == AST_OP(decl_list)) {
+    statement = statement->parent;
+  }
+  ASTNode* scope = statement->parent;
+  if (scope == NULL) {
+    return true;
+  }
+  ASTNode* child = ret;
+  for (ASTNode* parent = ret->parent; parent != NULL;
+       child = parent, parent = parent->parent) {
+    if (parent != scope) {
+      continue;
+    }
+    if (scope->op != AST_OP(compound)) {
+      return true;
+    }
+    CompoundStatementASTNode* compound = (CompoundStatementASTNode*)scope;
+    size_t declared_at = IndexOfChildInCompound(compound, statement);
+    return declared_at == compound->statements->length ||
+           IndexOfChildInCompound(compound, child) > declared_at;
+  }
+  return false;
+}
+
+// The returns of a demoted object initialize the return slot by copy or move,
+// as they would have had it never been a candidate.
+static void DemoteNamedReturnObject(Symbol* sym, Vector* returns) {
+  sym->is_nrvo = false;
+  for (size_t i = 0; i < returns->length; i++) {
+    CombinedStatementASTNode* ret = returns->value.p[i];
+    if (NamedReturnObject((ASTNode*)ret) != sym) {
+      continue;
+    }
+    ASTNode* value = ret->cond;
+    value->flags &= ~kASTNrvoMarker;
+    ASTNode* moved = MaterializeCXXReturnByMove(value);
+    if (moved == value) {
+      continue;
+    }
+    ASTNodeReplaceChild((ASTNode*)ret, 0, moved, false);
+    if (ret->stmt == NULL) {
+      ret->stmt = NewCXXReturnTemporaryCleanups(moved);
+      if (ret->stmt != NULL) {
+        ret->stmt->parent = (ASTNode*)ret;
+        ret->stmt->child_id = 1;
+      }
+    }
+  }
+}
+
+// Each `return x` marks `x` for the return slot as it is analyzed.  Only one
+// object can live there: a candidate stays only if every return that can run
+// while it is alive returns it ([class.copy.elision]/1.1 permits, clang's
+// rule), so another object or value never overwrites it there.
+void StatementValidateNamedReturnObjects(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.body == NULL) {
+    return;
+  }
+  NamedReturnSearch search;
+  VectorInit(&search.returns);
+  VectorInit(&search.declarations);
+  ASTNodeVisit(func->info.function.body, CollectNamedReturnUses, 0, &search);
+  for (size_t i = 0; i < search.declarations.length; i++) {
+    ASTNode* decl = search.declarations.value.p[i];
+    Symbol* sym = ((VariableDeclarationASTNode*)decl)->symbol;
+    for (size_t j = 0; j < search.returns.length; j++) {
+      ASTNode* ret = search.returns.value.p[j];
+      if (NamedReturnObject(ret) != sym &&
+          ReturnInScopeOfDeclaration(ret, decl)) {
+        DemoteNamedReturnObject(sym, &search.returns);
+        break;
+      }
+    }
+  }
+  // A candidate whose declaration was not found keeps the slot only if it is
+  // all the function returns.
+  for (size_t i = 0; i < search.returns.length; i++) {
+    Symbol* sym = NamedReturnObject(search.returns.value.p[i]);
+    bool declared = false;
+    for (size_t j = 0; sym != NULL && j < search.declarations.length; j++) {
+      declared = ((VariableDeclarationASTNode*)search.declarations.value.p[j])
+                     ->symbol == sym;
+      if (declared) {
+        break;
+      }
+    }
+    if (sym == NULL || declared) {
+      continue;
+    }
+    for (size_t j = 0; j < search.returns.length; j++) {
+      if (NamedReturnObject(search.returns.value.p[j]) != sym) {
+        DemoteNamedReturnObject(sym, &search.returns);
+        break;
+      }
+    }
+  }
+  VectorDestruct(&search.returns);
+  VectorDestruct(&search.declarations);
 }
 
 // [class.temporary] identifies the glvalues that continue to designate an

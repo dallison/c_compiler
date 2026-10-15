@@ -4625,6 +4625,7 @@ static ASTNode* ExpressionInitializerASTNodeClone(
       ASTArenaAlloc(sizeof(ExpressionInitializerASTNode));
   ASTNodeBaseCopy(&to->base, node);
   to->expr = ASTNodeClone(from->expr, func, data, &to->base);
+  to->is_direct_initializer = from->is_direct_initializer;
   return func(&to->base, data);
 }
 

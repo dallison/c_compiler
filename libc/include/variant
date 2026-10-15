@@ -175,14 +175,118 @@ template <size_t I>
 struct __is_in_place_index<in_place_index_t<I>> : true_type {
 };
 
+template <class Ti>
+struct __single_element_array {
+  Ti __value_[1];
+};
+
+template <class T, bool = is_enum<T>::value>
+struct __narrowing_source {
+  using type = T;
+};
+
+template <class T>
+struct __narrowing_source<T, true> {
+  using type = underlying_type_t<T>;
+};
+
+// [dcl.init.list]/7 for a non-constant arithmetic source.
+template <class From, class To,
+          bool = is_arithmetic<From>::value && is_arithmetic<To>::value>
+struct __is_narrowing : false_type {
+};
+
+template <class From, class To>
+struct __is_narrowing<From, To, true>
+    : bool_constant<
+          (is_floating_point<From>::value && !is_floating_point<To>::value) ||
+          (!is_floating_point<From>::value && is_floating_point<To>::value) ||
+          (is_floating_point<From>::value && sizeof(To) < sizeof(From)) ||
+          (is_integral<From>::value && is_integral<To>::value &&
+           !is_same<From, bool>::value &&
+           (is_same<To, bool>::value ||
+            (is_signed<From>::value && is_unsigned<To>::value) ||
+            (is_unsigned<From>::value && is_signed<To>::value &&
+             sizeof(To) <= sizeof(From)) ||
+            sizeof(To) < sizeof(From)))> {
+};
+
+// `Ti x[] = {std::forward<T>(t)};` is well-formed (no narrowing), and a bool
+// alternative is only considered for a bool argument.
+template <class T, class Ti, class = void>
+struct __accepts_without_narrowing : false_type {
+};
+
+template <class T, class Ti>
+struct __accepts_without_narrowing<
+    T, Ti,
+    void_t<decltype(__single_element_array<Ti>{{std::declval<T>()}})>>
+    : bool_constant<
+          (!is_same<remove_cv_t<Ti>, bool>::value ||
+           is_same<remove_cvref_t<T>, bool>::value) &&
+          !__is_narrowing<
+              typename __narrowing_source<remove_cvref_t<T>>::type,
+              remove_cv_t<Ti>>::value> {
+};
+
+template <size_t I>
+struct __never_selected {
+  __never_selected() = delete;
+};
+
+// The imaginary overload set F(T_i) of [variant.ctor]/14.
+template <class T, size_t I, class... Types>
+struct __imaginary_overloads {
+  static void __select();
+};
+
+template <class T, size_t I, class Ti, class... Rest>
+struct __imaginary_overloads<T, I, Ti, Rest...>
+    : __imaginary_overloads<T, I + 1, Rest...> {
+  using __imaginary_overloads<T, I + 1, Rest...>::__select;
+  static integral_constant<size_t, I> __select(
+      conditional_t<__accepts_without_narrowing<T, Ti>::value, Ti,
+                    __never_selected<I>>);
+};
+
+template <class T, class Void, class... Types>
+struct __selected_alternative {
+};
+
+template <class T, class... Types>
+struct __selected_alternative<
+    T,
+    void_t<decltype(__imaginary_overloads<T, 0, Types...>::__select(
+        std::declval<T>()))>,
+    Types...>
+    : decltype(__imaginary_overloads<T, 0, Types...>::__select(
+          std::declval<T>())) {
+};
+
+template <class T, class Void, class... Types>
+struct __has_selected_alternative : false_type {
+};
+
+template <class T, class... Types>
+struct __has_selected_alternative<
+    T, void_t<decltype(__selected_alternative<T, void, Types...>::value)>,
+    Types...>
+    : __exactly_once<
+          typename __type_at<__selected_alternative<T, void, Types...>::value,
+                             Types...>::type,
+          Types...> {
+};
+
 template <class T, class... Types>
 struct __converting_candidate
-    : bool_constant<
-          __exactly_once<decay_t<T>, Types...>::value &&
-          !__is_variant<remove_cvref_t<T>>::value &&
-          !__is_in_place_type<remove_cvref_t<T>>::value &&
-          !__is_in_place_index<remove_cvref_t<T>>::value> {
+    : conjunction<negation<__is_variant<remove_cvref_t<T>>>,
+                  negation<__is_in_place_type<remove_cvref_t<T>>>,
+                  negation<__is_in_place_index<remove_cvref_t<T>>>,
+                  __has_selected_alternative<T, void, Types...>> {
 };
+
+template <class T, class... Types>
+using __converting_index = __selected_alternative<T, void, Types...>;
 
 template <size_t I, class... Types>
 union __storage;
@@ -719,7 +823,7 @@ class variant {
                         int> = 0>
   constexpr variant(T&& value) : __index_(variant_npos) {
     this->template __construct<
-        __variant_detail::__index_of<decay_t<T>, Types...>::value>(
+        __variant_detail::__converting_index<T, Types...>::value>(
         std::forward<T>(value));
   }
 
@@ -819,15 +923,12 @@ class variant {
                             T, Types...>::value,
                         int> = 0>
   constexpr variant& operator=(T&& value) {
-    if (__index_ ==
-        __variant_detail::__index_of<decay_t<T>, Types...>::value) {
-      *__storage_.template __ptr<
-          __variant_detail::__index_of<decay_t<T>, Types...>::value>() =
-          std::forward<T>(value);
+    constexpr size_t index =
+        __variant_detail::__converting_index<T, Types...>::value;
+    if (__index_ == index) {
+      *__storage_.template __ptr<index>() = std::forward<T>(value);
     } else {
-      this->template emplace<
-          __variant_detail::__index_of<decay_t<T>, Types...>::value>(
-          std::forward<T>(value));
+      this->template emplace<index>(std::forward<T>(value));
     }
     return *this;
   }

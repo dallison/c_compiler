@@ -2403,6 +2403,20 @@ static Symbol* FindInjectedClassNameSymbol(Struct* owner, String* name) {
     }
     Symbol* found =
         FindInjectedClassNameSymbol(base->type->info.struct_info, name);
+    // The injected-class-name of a dependent base (`Spy<A>::HashStateBase`
+    // naming `HashStateBase<Spy<T>>`) is that specialization, not the
+    // template's pattern, whose tag the uninstantiated base still points at.
+    // Returning an invented alias of the base type lets the parser treat
+    // `::combine` as a dependent member of `HashStateBase<Spy<T>>`.
+    if (found != NULL &&
+        found == base->type->info.struct_info->tag_symbol &&
+        base->type->info.struct_info->is_template &&
+        base->type->template_arguments != NULL) {
+      Symbol* alias =
+          NewSymbol(name->value, TypeRecordCopy(base->type), STO(typedef));
+      alias->flags.invented = true;
+      return alias;
+    }
     if (found != NULL) {
       return found;
     }
@@ -14716,14 +14730,19 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
       ASTNode* initializer = actuals->value.p[0];
       actuals->length = 0;
       VectorDelete(actuals);
+      if ((initializer->flags & kASTPackExpansion) != 0) {
+        return initializer;
+      }
+      // An expression initializer is what applies the conversion to the
+      // declared type (`long q(obj)` calls obj's conversion function).
+      ASTNode* direct = NewExpressionInitializerASTNode(initializer, location);
+      ((ExpressionInitializerASTNode*)direct)->is_direct_initializer = true;
       // Code generation stores a local's initializer only through an init
       // node, so build the same tree as `T x = e`.
-      if (wrap_aggregate_braces &&
-          (initializer->flags & kASTPackExpansion) == 0) {
-        return NewVariableInitExpression(
-            syntax, sym, NewExpressionInitializerASTNode(initializer, location));
+      if (wrap_aggregate_braces) {
+        return NewVariableInitExpression(syntax, sym, direct);
       }
-      return initializer;
+      return direct;
     }
     return NewCXXBracedInitializerFromActuals(actuals, location);
   }
@@ -16416,6 +16435,15 @@ static void ParseLocalDeclarationList(TypeParser* parser,
         // A block-scope function declaration has extern linkage (C 6.2.2/5)
         // and names a function, not an automatic object (00078.c).
         sym->flags.is_local = true;
+      }
+      // It names the function of the enclosing namespace, mangled as such.
+      if (CompilerIsCXX() && TypeIsFunction(sym->type) &&
+          sym->asm_name.length == 0) {
+        if (sym->namespace_ == NULL &&
+            syntax->current_namespace != compiler->global_namespace) {
+          sym->namespace_ = syntax->current_namespace;
+        }
+        SymbolSetCXXMangledAsmName(sym);
       }
       MarkCXX26AutomaticNameIndependent(sym);
       Symbol* old_sym =

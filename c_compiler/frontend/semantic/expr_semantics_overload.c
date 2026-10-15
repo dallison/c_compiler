@@ -670,7 +670,9 @@ static bool FunctionHasRvalueToConstLvalueReferenceBinding(
 
 /* Compare equally ranked pointer conversions whose destination classes lie on
  * the same inheritance path.  Converting Generated* to Message* is better than
- * converting it to MessageLite* when Message derives from MessageLite. */
+ * converting it to MessageLite* when Message derives from MessageLite.  The
+ * same holds for a class argument converted or bound to a base class
+ * (`align(minute_tag)` over `align(second_tag)` for a `minute_tag` subclass). */
 static int CompareDerivedPointerTargets(ASTNode* actual, TypeRecord* left,
                                         TypeRecord* right) {
   if (TypeIsReference(left)) {
@@ -679,27 +681,35 @@ static int CompareDerivedPointerTargets(ASTNode* actual, TypeRecord* left,
   if (TypeIsReference(right)) {
     right = right->next;
   }
-  if (actual == NULL || actual->type == NULL ||
-      !TypeIsPointer(actual->type) || !TypeIsPointer(left) ||
-      !TypeIsPointer(right) || actual->type->next == NULL ||
-      left->next == NULL || right->next == NULL ||
-      !TypeIsStructOrUnion(actual->type->next) ||
-      !TypeIsStructOrUnion(left->next) || !TypeIsStructOrUnion(right->next)) {
+  if (actual == NULL || actual->type == NULL || left == NULL ||
+      right == NULL) {
     return 0;
   }
-  bool actual_reaches_left =
-      TypeEqualIgnoringQualifiers(actual->type->next, left->next) ||
-      TypeIsDerivedFrom(actual->type->next, left->next);
-  bool actual_reaches_right =
-      TypeEqualIgnoringQualifiers(actual->type->next, right->next) ||
-      TypeIsDerivedFrom(actual->type->next, right->next);
+  TypeRecord* from = actual->type;
+  if (TypeIsPointer(from) && TypeIsPointer(left) && TypeIsPointer(right)) {
+    from = from->next;
+    left = left->next;
+    right = right->next;
+  } else if (TypeIsPointer(from) || TypeIsPointer(left) ||
+             TypeIsPointer(right)) {
+    return 0;
+  }
+  if (from == NULL || left == NULL || right == NULL ||
+      !TypeIsStructOrUnion(from) || !TypeIsStructOrUnion(left) ||
+      !TypeIsStructOrUnion(right)) {
+    return 0;
+  }
+  bool actual_reaches_left = TypeEqualIgnoringQualifiers(from, left) ||
+                             TypeIsDerivedFrom(from, left);
+  bool actual_reaches_right = TypeEqualIgnoringQualifiers(from, right) ||
+                              TypeIsDerivedFrom(from, right);
   if (!actual_reaches_left || !actual_reaches_right) {
     return 0;
   }
-  if (TypeIsDerivedFrom(left->next, right->next)) {
+  if (TypeIsDerivedFrom(left, right)) {
     return 1;
   }
-  if (TypeIsDerivedFrom(right->next, left->next)) {
+  if (TypeIsDerivedFrom(right, left)) {
     return -1;
   }
   return 0;
@@ -1312,6 +1322,46 @@ static Symbol* InstantiateSelectedFunctionTemplateCandidate(Symbol* selected) {
   return instantiated != NULL ? instantiated : selected;
 }
 
+// Overloads of a class member are chained on its StructMember, not on the
+// symbol: `&S::f<B>` must also consider the `f` declared after the one the
+// name found.
+static void CollectFunctionOverloads(Symbol* head, Vector* out) {
+  Struct* owner = head->overload_next == NULL && head->type != NULL &&
+                          TypeIsFunction(head->type)
+                      ? head->type->info.function.cxx_member_owner
+                      : NULL;
+  StructMember* member =
+      owner != NULL ? FindStructMember(owner, &head->name) : NULL;
+  if (member != NULL && member->overload_next != NULL) {
+    for (; member != NULL; member = member->overload_next) {
+      if (member->symbol != NULL) {
+        VectorAppend(out, member->symbol);
+      }
+    }
+    return;
+  }
+  for (Symbol* cand = head; cand != NULL; cand = cand->overload_next) {
+    VectorAppend(out, cand);
+  }
+}
+
+// Substitutes speculatively, so a failed trailing `decltype` is not diagnosed.
+static TypeRecord* SubstituteFunctionTemplateSignatureQuietly(
+    Symbol* templ, Vector* completed_args) {
+  bool saved_trap = DiagnosticErrorTrapBegin();
+  DiagnosticSuppressBegin();
+  TypeRecord* signature = TypeSubstituteFunctionTemplateSignature(
+      &compiler->syntax, templ, completed_args);
+  bool substitution_failed = DiagnosticErrorTrapped();
+  DiagnosticSuppressEnd();
+  DiagnosticErrorTrapEnd(saved_trap);
+  if (substitution_failed) {
+    TypeRecordDelete(signature);
+    return NULL;
+  }
+  return signature;
+}
+
 // [over.over] / [temp.deduct.funcaddr]: given a (possibly overloaded) function
 // name -- the head |head| of an overload chain, optionally with explicitly
 // written template arguments |explicit_args| -- used where a specific function
@@ -1331,7 +1381,11 @@ Symbol* CXXResolveFunctionAddressForTargetType(Symbol* head,
   bool non_template_ambiguous = false;
   Symbol* template_match = NULL;
   bool template_ambiguous = false;
-  for (Symbol* cand = head; cand != NULL; cand = cand->overload_next) {
+  Vector candidates;
+  VectorInit(&candidates);
+  CollectFunctionOverloads(head, &candidates);
+  for (size_t ci = 0; ci < candidates.length; ci++) {
+    Symbol* cand = candidates.value.p[ci];
     if (cand->type == NULL || !TypeIsFunction(cand->type)) {
       continue;
     }
@@ -1357,8 +1411,20 @@ Symbol* CXXResolveFunctionAddressForTargetType(Symbol* head,
         if (args == NULL) {
           continue;
         }
-        inst = TypeInstantiateFunctionTemplateWithCompletedArguments(
-            &compiler->syntax, cand, args);
+        // The return type is not deduced from the target; substituting it
+        // discards the overload whose trailing `decltype` fails, before an
+        // instantiation could diagnose it.
+        TypeRecord* signature =
+            SubstituteFunctionTemplateSignatureQuietly(cand, args);
+        bool signature_matches =
+            signature != NULL &&
+            (TypeEqual(signature, target_fn) ||
+             TypeEqualIgnoringQualifiers(signature, target_fn));
+        TypeRecordDelete(signature);
+        if (signature_matches) {
+          inst = TypeInstantiateFunctionTemplateWithCompletedArguments(
+              &compiler->syntax, cand, args);
+        }
         VectorDeleteWithContents(
             args, (VectorElementDestructor)TemplateArgumentDelete,
             /*free_element=*/false);
@@ -1388,6 +1454,7 @@ Symbol* CXXResolveFunctionAddressForTargetType(Symbol* head,
       }
     }
   }
+  VectorDestruct(&candidates);
   if (non_template_match != NULL) {
     return non_template_ambiguous ? NULL : non_template_match;
   }

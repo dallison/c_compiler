@@ -188,8 +188,11 @@ static bool CanCaptureSymbol(Symbol* symbol, TypeRecord* lambda_func) {
   }
   // Enumerators are constants, not objects.  Default capture must not treat
   // `E::enumerator` as a by-reference local (that emits an undefined symbol).
-  // STO(implicit) is 0, so it cannot be tested with StorageIs().
-  if (symbol->flags.value_set && symbol->storage == STO(implicit)) {
+  // STO(implicit) is 0, so it cannot be tested with StorageIs().  A constexpr
+  // local array or class object also has a value, but its uses read storage.
+  if (symbol->flags.value_set && symbol->storage == STO(implicit) &&
+      !(symbol->flags.is_constexpr && symbol->type != NULL &&
+        (TypeIsArray(symbol->type) || TypeIsStructOrUnion(symbol->type)))) {
     return false;
   }
   Symbol* global = FindGlobalSymbol(&symbol->name);

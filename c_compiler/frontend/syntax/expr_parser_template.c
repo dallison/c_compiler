@@ -648,6 +648,90 @@ static ASTNode* BuildDependentTemplateScopeValueName(
 }
 
 
+/* `Spy<A>::HashStateBase::combine` inside a class template, where the middle
+ * name is the injected-class-name of a dependent base (`HashStateBase<Spy<T>>`).
+ * Looking `combine` up now finds the base template's pattern member, whose own
+ * parameters are never bound.  Keep the name dependent: on `Spy<A>` with the
+ * member path `HashStateBase::combine`, or, for the current class
+ * (`Spy::HashStateBase::combine`), on the base specialization itself. */
+static ASTNode* BuildDependentInjectedBaseValueName(
+    Syntax* syntax, FullyQualifiedIdentifier* name, SourceLocation location) {
+  if (!CompilerIsCXX() || !name->is_qualified || name->absolute ||
+      name->components.length != 3) {
+    return NULL;
+  }
+  Vector* scope_args = name->template_arguments.length > 0
+                           ? name->template_arguments.value.p[0]
+                           : NULL;
+  Vector* base_args = name->template_arguments.length > 1
+                          ? name->template_arguments.value.p[1]
+                          : NULL;
+  Vector* member_args = name->template_arguments.length > 2
+                            ? name->template_arguments.value.p[2]
+                            : NULL;
+  if (base_args != NULL) {
+    return NULL;
+  }
+  Symbol* injected = SyntaxFindQualifiedPrefixSymbol(syntax, name, 2);
+  if (injected == NULL || !injected->flags.invented ||
+      !StorageIs(injected->storage, STO(typedef)) || injected->type == NULL ||
+      !TypeIsStructOrUnion(injected->type)) {
+    return NULL;
+  }
+  String* base_name = name->components.value.p[1];
+  String* member = name->components.value.p[2];
+  TypeRecord* dependent_type = NULL;
+  if (scope_args == NULL) {
+    dependent_type = TypeRecordCopy(injected->type);
+    dependent_type->dependent_member_name = NewString(member->value);
+  } else {
+    String* scope_name = name->components.value.p[0];
+    // Inside the class template being defined, `Spy` is its injected-class-
+    // name and the tag is not yet flagged as a template; `Spy<A>` names the
+    // template whose tag that is.
+    Struct* enclosing = FindEnclosingClassByName(syntax, scope_name);
+    Symbol* scope = enclosing != NULL ? enclosing->tag_symbol : NULL;
+    if (scope != NULL && scope->type != NULL &&
+        scope->type->template_origin != NULL) {
+      scope = scope->type->template_origin;
+    }
+    if (scope == NULL) {
+      FullyQualifiedIdentifier prefix;
+      FullyQualifiedIdentifierInit(&prefix);
+      StringAppendString(&prefix.spelling, scope_name);
+      VectorAppend(&prefix.components, NewString(scope_name->value));
+      VectorAppend(&prefix.template_arguments, NULL);
+      scope = SyntaxFindQualifiedSymbol(syntax, &prefix);
+      if (scope == NULL) {
+        scope = SyntaxFindQualifiedTag(syntax, &prefix);
+      }
+      FullyQualifiedIdentifierDestruct(&prefix);
+      if (scope != NULL && !scope->flags.is_template) {
+        return NULL;
+      }
+    }
+    if (scope == NULL || scope->type == NULL ||
+        !TypeIsStructOrUnion(scope->type)) {
+      return NULL;
+    }
+    dependent_type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+    dependent_type->template_origin = scope;
+    dependent_type->template_arguments = TemplateArgumentVectorCopy(scope_args);
+    dependent_type->dependent_member_name = NewString(base_name->value);
+    StringAppend(dependent_type->dependent_member_name, "::");
+    StringAppendString(dependent_type->dependent_member_name, member);
+  }
+  Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
+  placeholder->flags.invented = true;
+  ASTNode* node = NewIdentifierASTNode(placeholder, location);
+  node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
+  if (member_args != NULL) {
+    ((IdentifierASTNode*)node)->template_arguments =
+        TemplateArgumentVectorCopy(member_args);
+  }
+  return node;
+}
+
 // An id-expression: a bare name, a qualified name, or an operator-function-id.
 // Dependent qualified names stay unresolved; an unqualified class member is
 // rewritten to `this->member` when lookup would otherwise hide it.
@@ -691,6 +775,12 @@ ASTNode* ParseIdentifier(Syntax* syntax,
   // before the ordinary lookup, which would otherwise instantiate the primary.
   if (name.is_qualified) {
     ASTNode* dependent_scope = BuildDependentMemberTemplateValueName(
+        syntax, &name, lex->current_token_location);
+    if (dependent_scope != NULL) {
+      FullyQualifiedIdentifierDestruct(&name);
+      return dependent_scope;
+    }
+    dependent_scope = BuildDependentInjectedBaseValueName(
         syntax, &name, lex->current_token_location);
     if (dependent_scope != NULL) {
       FullyQualifiedIdentifierDestruct(&name);

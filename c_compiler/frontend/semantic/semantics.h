@@ -45,6 +45,10 @@ typedef enum {
   kConvertNormal,
   kConvertCast,
   kConvertContextualBool,
+  // A normal conversion that is a direct-initialization (`T x(e)`, a
+  // mem-initializer): explicit conversion functions yielding T are also
+  // candidates ([over.match.conv]).
+  kConvertDirectInit,
 } ConversionContext;
 
 // Convert a type 'from' to 'to', replacing 'from' with new ASTNode that

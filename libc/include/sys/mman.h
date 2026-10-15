@@ -63,7 +63,8 @@ extern int    munlock(const void *addr, size_t len);
 
 extern int    mincore(void*  start, size_t  length, unsigned char*  vec);
 
-extern int    shm_open(const char* name, int oflag, mode_t mode);
+// Variadic like open(): Apple arm64 passes the mode on the stack.
+extern int    shm_open(const char* name, int oflag, ...);
 extern int    shm_unlink(const char* name);
 
 #ifdef __cplusplus

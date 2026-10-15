@@ -6271,6 +6271,28 @@ static void RemapIdentifierToInstantiatedClassMember(
  * instantiating each intermediate member alias or member class template so
  * the final component is looked up in the right class.  Consumes `concrete`
  * and returns the type of the last walked segment. */
+/* The base class of `str` (searching bases of bases) whose injected-class-name
+ * is `name`: `Spy<int>::HashStateBase` is `HashStateBase<Spy<int>>`. */
+static TypeRecord* InjectedBaseClassType(Struct* str, String* name) {
+  for (size_t i = 0; str != NULL && i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base == NULL || base->type == NULL ||
+        !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL) {
+      continue;
+    }
+    if (CurrentClassNameMatchesTypeName(base->type->info.struct_info, name)) {
+      return base->type;
+    }
+    TypeRecord* found =
+        InjectedBaseClassType(base->type->info.struct_info, name);
+    if (found != NULL) {
+      return found;
+    }
+  }
+  return NULL;
+}
+
 static TypeRecord* WalkDependentMemberTypePath(
     TemplateFunctionBodyClone* clone, TypeRecord* concrete,
     Vector* path, Vector* path_template_args) {
@@ -6281,7 +6303,24 @@ static TypeRecord* WalkDependentMemberTypePath(
         FindStructMember(concrete->info.struct_info, path->value.p[pi]);
     if (seg == NULL || seg->symbol == NULL ||
         !StorageIs(seg->symbol->storage, STO(typedef))) {
-      break;
+      TypeRecord* base =
+          InjectedBaseClassType(concrete->info.struct_info, path->value.p[pi]);
+      if (base == NULL) {
+        break;
+      }
+      TypeRecord* base_copy = TypeRecordCopy(base);
+      TypeRecord* next = TypeMaterializeClassTemplateSpecialization(
+          clone->parser->syntax, base_copy);
+      if (next != base_copy) {
+        TypeRecordDelete(base_copy);
+      }
+      TypeRecordDelete(concrete);
+      concrete = next;
+      if (concrete == NULL || !TypeIsStructOrUnion(concrete) ||
+          concrete->info.struct_info == NULL) {
+        break;
+      }
+      continue;
     }
     Vector* member_args =
         path_template_args != NULL && pi < path_template_args->length
@@ -9281,6 +9320,17 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
         !TypeContainsAuto(receiver) && !TypeIsUnknown(receiver) &&
         (node->op == AST_OP(arrow) ? TypeIsStructOrUnionPointer(receiver)
                                    : TypeIsStructOrUnion(receiver));
+    // A CRTP base's member template is rebased while the derived class that
+    // is its argument (`state.n` with `H = Spy<void>`) is still being
+    // instantiated.  Its members are not declared yet; the per-call clone
+    // resolves the access once the class is complete.
+    TypeRecord* receiver_class =
+        receiver_is_concrete && node->op == AST_OP(arrow) ? receiver->next
+                                                          : receiver;
+    if (receiver_is_concrete && receiver_class->info.struct_info != NULL &&
+        receiver_class->info.struct_info->instantiation_in_progress) {
+      receiver_is_concrete = false;
+    }
     // `ptr->~U()` is an explicit destructor call.  The spelled name is not a
     // member; TryAnalyzeCXXExplicitDestructorCall rewrites it once the call
     // is analyzed.

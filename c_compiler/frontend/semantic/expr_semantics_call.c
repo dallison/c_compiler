@@ -1916,6 +1916,16 @@ static ASTNode* CXXFunctionalConstructionTryAggregateFunctionalInit(
   ASTNode* initializer = NULL;
   bool source_used_braces =
       (node->base.flags & kASTCXXBracedTemporary) != 0;
+  // `A(a)` runs A's copy or move constructor, not aggregate initialization of
+  // A's first member from `a`.
+  ASTNode* only = node->children->length == 1 ? node->children->value.p[0]
+                                               : NULL;
+  if (!source_used_braces && only != NULL && only->op != AST_OP(braced_init) &&
+      only->type != NULL && TypeIsStructOrUnion(only->type) &&
+      TypeEqualIgnoringQualifiers(only->type, type)) {
+    return CXXFunctionalConstructionSpliceCastAndAnalyze(
+        node, type, ASTNodeMove(node->children->value.p[0]));
+  }
   if (!source_used_braces && node->children->length == 1 &&
       node->children->value.p[0] != NULL &&
       ((ASTNode*)node->children->value.p[0])->op == AST_OP(braced_init)) {

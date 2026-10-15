@@ -2823,6 +2823,45 @@ static void RemapDecltypeFunctionParameter(ASTNode* node, void* data,
   ASTNodeClearType(node);
 }
 
+static bool ClassSubstitutionSourceSeesFunction(Struct* source,
+                                                Symbol* function) {
+  Struct* owner = function->type != NULL && TypeIsFunction(function->type)
+                      ? function->type->info.function.cxx_member_owner
+                      : NULL;
+  for (Struct* s = source; s != NULL; s = s->lexical_parent) {
+    if (s->access_enclosing_function == function) {
+      return true;
+    }
+    for (Struct* o = owner; o != NULL; o = o->lexical_parent) {
+      if (s == o) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/* A local class of a function template depends only on that function's
+ * template parameters.  Instantiating an unrelated class template that names
+ * it (`std::vector<Info>` while the function is still a pattern) substitutes
+ * that class's arguments, which must not rebuild the local class: parameter
+ * indices are positional, so `Info`'s `Container` would become `vector`'s
+ * `T`, and the stray copies are distinct types. */
+static bool LocalClassUnrelatedToClassSubstitution(TypeParser* parser,
+                                                   Struct* str) {
+  if (!StructIsFunctionTemplateLocalClass(str)) {
+    return false;
+  }
+  Struct* source = parser->template_substitution_source;
+  Struct* enclosing = parser->enclosing_template_substitution_source;
+  if (source == NULL && enclosing == NULL) {
+    return false;
+  }
+  Symbol* function = str->access_enclosing_function;
+  return !ClassSubstitutionSourceSeesFunction(source, function) &&
+         !ClassSubstitutionSourceSeesFunction(enclosing, function);
+}
+
 TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
                                          TypeRecord* type,
                                          Vector* args) {
@@ -2903,6 +2942,8 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         // `decltype(args)...` is substituted against the selected pack element
         // rather than reanalyzing an identifier that still denotes the whole
         // function parameter pack.
+        bool saved_substitution_failed =
+            parser != NULL && parser->template_substitution_failed;
         TypeRecord* declared =
             SubstituteTemplateParameters(parser, entity->type, args);
         if (declared != NULL && !TypeContainsTemplateParameter(declared) &&
@@ -2914,6 +2955,12 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           return TypeRecordCalculateSize(declared);
         }
         TypeRecordDelete(declared);
+        // The entity's declared type may not be substitutable on its own
+        // (`decltype(M<T>::value)` names the pattern's member); re-analyzing
+        // the operand below decides whether substitution fails.
+        if (parser != NULL) {
+          parser->template_substitution_failed = saved_substitution_failed;
+        }
       }
     }
     // decltype is unevaluated: cloning and resolving a declaration-only
@@ -2980,6 +3027,8 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           ASTNode* deferred = CloneDependentExpressionWithArgs(
               parser, type->dependent_decltype_expr, args);
           if (deferred != NULL) {
+            ASTNodeVisit(deferred, RemapDecltypeFunctionParameter, 0,
+                         &parameter_remap);
             opaque->dependent_decltype_expr = deferred;
             ASTNodeDelete(expr);
           } else {
@@ -3035,6 +3084,10 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           ASTNode* deferred = CloneDependentExpressionWithArgs(
               parser, type->dependent_decltype_expr, args);
           if (deferred != NULL) {
+            // The class's parameters (`v` of type `T`) are bound now; a later
+            // substitution supplies only the member template's own.
+            ASTNodeVisit(deferred, RemapDecltypeFunctionParameter, 0,
+                         &parameter_remap);
             opaque->dependent_decltype_expr = deferred;
             ASTNodeDelete(expr);
           } else {
@@ -3181,7 +3234,8 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         !nested_in_active_instantiation &&
         (tag_symbol == NULL ||
          (!tag_symbol->flags.invented && !tag_symbol->flags.is_block_scope));
-    if (unrelated_complete_class) {
+    if (unrelated_complete_class ||
+        LocalClassUnrelatedToClassSubstitution(parser, type->info.struct_info)) {
       return SubstituteCopiedTypeRecord(parser, type, args);
     }
     return SubstituteNestedStructTemplateParameters(parser, type, args);

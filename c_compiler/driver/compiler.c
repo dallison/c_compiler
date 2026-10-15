@@ -1836,6 +1836,24 @@ static ASTNode* CXXGlobalConstantObjectImage(Symbol* sym, ASTNode* initializer) 
   return image;
 }
 
+// `int g = Count{5};` calls Count's conversion function.  Initializers are
+// classified before analysis, so a cast's spelled type stands in for its own.
+static bool CXXScalarInitializedFromClassObject(Symbol* sym,
+                                                ASTNode* initializer) {
+  if (sym->type == NULL || !TypeIsScalar(sym->type) ||
+      TypeIsReference(sym->type)) {
+    return false;
+  }
+  ASTNode* expr = CXXThreadLocalInitializerExpression(initializer);
+  if (expr == NULL) {
+    return false;
+  }
+  TypeRecord* type = expr->op == AST_OP(cast)
+                         ? ((CastASTNode*)expr)->cast_type
+                         : expr->type;
+  return type != NULL && TypeIsStructOrUnion(type);
+}
+
 static bool CXXNamespaceInitializerIsDynamic(ASTNode* initializer) {
   ASTNode* expr = CXXThreadLocalInitializerExpression(initializer);
   if (expr != NULL && expr->op != AST_OP(braced_init) &&
@@ -3390,6 +3408,8 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                 if (CompilerIsCXX() && !decl->symbol->flags.is_constexpr &&
                     !decl->symbol->flags.is_constinit && !constant_object_image &&
                     (CXXNamespaceInitializerIsDynamic(decl->initializer) ||
+                     CXXScalarInitializedFromClassObject(decl->symbol,
+                                                         decl->initializer) ||
                      class_needs_dynamic_init)) {
                   if (!VariableDefinitionIsODRDiscardable(decl->symbol)) {
                     MarkReferencesInAST(decl->initializer);

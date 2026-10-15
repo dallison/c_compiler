@@ -112,6 +112,12 @@ Symbol* TypeCreateFunctionTemplateCandidate(struct Syntax* syntax,
                                             Vector* explicit_args,
                                             Vector* actuals,
                                             size_t first_formal_arg);
+// Substitute completed template arguments into a function template's signature
+// without instantiating it.  Returns the function type (caller owns), or NULL
+// when substitution fails: a trailing `decltype(p.a(v))` whose `P` has no `a`.
+TypeRecord* TypeSubstituteFunctionTemplateSignature(struct Syntax* syntax,
+                                                    Symbol* templ,
+                                                    Vector* completed_args);
 // Deduce the template arguments of a conversion function template
 // (`template<class T> operator T()`) for a requested target type.  A conversion
 // function template has no value parameters, so its arguments are deduced by
