@@ -646,7 +646,7 @@ if grep -Eq 'call[[:space:]]+\*' "$WORK/wpd.s"; then
   cat "$WORK/wpd.s" >&2
   exit 1
 fi
-if ! grep -Eq '[[:space:]]call[[:space:]]+_ZN4Base1fEv|movq \$4, %rax' "$WORK/wpd.s"; then
+if ! grep -Eq '[[:space:]]call[[:space:]]+_ZN4Base1fEv|movq \$(0x)?4, %rax' "$WORK/wpd.s"; then
   echo "LTO unique-overrider did not emit Base::f or its inlined body" >&2
   cat "$WORK/wpd.s" >&2
   exit 1

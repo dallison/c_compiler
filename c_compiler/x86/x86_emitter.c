@@ -44,10 +44,10 @@ static void X86PrintGCCExceptTableI386(X86Emitter* emitter, FILE* fp, const char
 
 static void PrintAsmImmediate(FILE* fp, int64_t value) {
   if (value < 0) {
-    fputc('-', fp);
-    value = -value;
+    fprintf(fp, "$-0x%" PRIx64, (uint64_t)0 - (uint64_t)value);
+  } else {
+    fprintf(fp, "$0x%" PRIx64, (uint64_t)value);
   }
-  fprintf(fp, "$%" PRIx64, (uint64_t)value);
 }
 
 // Is the given instruction printable?  Some instructions do not
@@ -933,7 +933,12 @@ static void PrintAsmOperand(FILE* fp, X86AsmInstruction* inst, int index,
     return;
   }
   if (inst->reg_nums[index] == INT_MIN) {
-    PrintAsmImmediate(fp, inst->immediate_values[index]);
+    // %c prints a bare constant (no `$`), as for a displacement.
+    if (modifier == 'c') {
+      fprintf(fp, "%" PRId64, inst->immediate_values[index]);
+    } else {
+      PrintAsmImmediate(fp, inst->immediate_values[index]);
+    }
     return;
   }
   char buf[32];
@@ -1207,13 +1212,13 @@ static void PrintAttOperand(FILE* fp, TargetInstruction* op, char* buf,
     if ((op->flags & X86_HI_RELOC) != 0) {
       fprintf(fp, "%%hi(%s)", symname);
     } else {
-      fprintf(fp, "%s", symname);
+      fprintf(fp, "$%s", symname);
     }
   } else if (((int)op->opcode == (int)X86_OP(literal))) {
     TargetLiteral* literal = (TargetLiteral*)op;
     char litname[64];
     LiteralAsmName(literal->literal_id, litname, sizeof(litname));
-    fprintf(fp, "%s", litname);
+    fprintf(fp, "$%s", litname);
   } else if (((int)op->opcode == (int)X86_OP(x0))) {
     fprintf(fp, "$0");
   } else {
@@ -1684,7 +1689,7 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
       PrintMovToDestIfNeeded(fp, inst, buf1, buf2);
       fprintf(fp, "\tpushq %%r10\n\tpushq %%r11\n\tmovq_xmm ");
       PrintPercentRegFromInst(fp, inst, buf1, sizeof(buf1));
-      fprintf(fp, ", %%r11\n\tmovq $%s, %%r10\n\txorq %%r10, %%r11\n\tmovq_xmm %%r11, ",
+      fprintf(fp, ", %%r11\n\tmovq $0x%s, %%r10\n\txorq %%r10, %%r11\n\tmovq_xmm %%r11, ",
               opcode == X86_OP(fneg_sd) ? "8000000000000000" : "80000000");
       PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
       fprintf(fp, "\n\tpopq %%r11\n\tpopq %%r10\n");
@@ -3118,9 +3123,9 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
         const char* symname =
             TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
         if ((inst->flags & X86_TLS_RELOC) != 0) {
-          fprintf(fp, "%s@TPOFF, ", symname);
+          fprintf(fp, "$%s@TPOFF, ", symname);
         } else {
-          fprintf(fp, "%s, ", symname);
+          fprintf(fp, "$%s, ", symname);
         }
       } else {
         PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
@@ -3767,14 +3772,14 @@ static void EmitI386ImmToXmm(FILE* fp, int64_t bits, bool is_double,
                              const char* xmm) {
   if (is_double) {
     fprintf(fp, "\tsubl $8, %%esp\n");
-    fprintf(fp, "\tmovl $%x, (%%esp)\n", (unsigned)(uint32_t)(uint64_t)bits);
-    fprintf(fp, "\tmovl $%x, 4(%%esp)\n",
+    fprintf(fp, "\tmovl $0x%x, (%%esp)\n", (unsigned)(uint32_t)(uint64_t)bits);
+    fprintf(fp, "\tmovl $0x%x, 4(%%esp)\n",
             (unsigned)(uint32_t)((uint64_t)bits >> 32));
     fprintf(fp, "\tmovsd (%%esp), ");
     PrintPercentRegI386(fp, xmm);
     fprintf(fp, "\n\taddl $8, %%esp\n");
   } else {
-    fprintf(fp, "\tpushl %%ebx\n\tmovl $%x, %%ebx\n\tmovd %%ebx, ",
+    fprintf(fp, "\tpushl %%ebx\n\tmovl $0x%x, %%ebx\n\tmovd %%ebx, ",
             (unsigned)(uint32_t)(uint64_t)bits);
     PrintPercentRegI386(fp, xmm);
     fprintf(fp, "\n\tpopl %%ebx\n");
@@ -3926,18 +3931,17 @@ static void PrintResultRegFromInstI386(FILE* fp, TargetInstruction* inst, char* 
   }
 }
 
-static void PrintMemoryBaseRegFromInstI386(FILE* fp, TargetInstruction* inst,
-                                       char* buf, size_t len) {
+static const char* MemoryBaseRegNameI386(TargetInstruction* inst, char* buf,
+                                         size_t len) {
   const char* reg = GetRegisterName(inst, buf, len);
   if (reg[0] == '\0' && inst != NULL) {
-    char buf2[8];
     switch ((X86Opcode)inst->opcode) {
       case X86_OP(add):
       case X86_OP(addl):
       case X86_OP(sub):
       case X86_OP(subl):
         if (inst->operand[0] != NULL) {
-          reg = GetRegisterName(inst->operand[0], buf2, sizeof(buf2));
+          reg = GetRegisterName(inst->operand[0], buf, len);
         }
         break;
       default:
@@ -3947,7 +3951,48 @@ static void PrintMemoryBaseRegFromInstI386(FILE* fp, TargetInstruction* inst,
   if (reg[0] == '\0') {
     reg = "ebp";
   }
-  PrintPercentRegI386(fp, reg);
+  return reg;
+}
+
+static void PrintMemoryBaseRegFromInstI386(FILE* fp, TargetInstruction* inst,
+                                       char* buf, size_t len) {
+  PrintPercentRegI386(fp, MemoryBaseRegNameI386(inst, buf, len));
+}
+
+static const char* StripPercentI386(const char* reg) {
+  return reg[0] == '%' ? reg + 1 : reg;
+}
+
+static bool I386RegHasByteForm(const char* reg) {
+  return strcmp(reg, "eax") == 0 || strcmp(reg, "ecx") == 0 ||
+         strcmp(reg, "edx") == 0 || strcmp(reg, "ebx") == 0;
+}
+
+// Whether the value of `op` comes from register `reg`, looking through
+// address arithmetic that is folded into the memory operand.
+static bool OperandNamesRegI386(TargetInstruction* op, const char* reg,
+                                int depth) {
+  if (op == NULL || depth > 3 || TargetIsConst(op)) {
+    return false;
+  }
+  char buf[32];
+  const char* name = GetRegisterName(op, buf, sizeof(buf));
+  if (name[0] != '\0') {
+    return strcmp(StripPercentI386(name), reg) == 0;
+  }
+  return OperandNamesRegI386(op->operand[0], reg, depth + 1) ||
+         OperandNamesRegI386(op->operand[1], reg, depth + 1);
+}
+
+// Whether the memory operand of a store (operands 1 and 2) uses `reg`.
+static bool StoreAddressNamesRegI386(TargetInstruction* inst, const char* reg) {
+  char buf[32];
+  TargetInstruction* base = inst->operand[1];
+  MemoryBaseFromOffsetOperand(inst->operand[2], &base);
+  return OperandNamesRegI386(inst->operand[1], reg, 0) ||
+         OperandNamesRegI386(inst->operand[2], reg, 0) ||
+         strcmp(StripPercentI386(MemoryBaseRegNameI386(base, buf, sizeof(buf))),
+                reg) == 0;
 }
 
 static bool PrintTlsTporffMemoryOperandI386(FILE* fp, TargetInstruction* addr,
@@ -4082,13 +4127,13 @@ static void PrintAttOperandI386(FILE* fp, TargetInstruction* op, char* buf,
     if ((op->flags & X86_HI_RELOC) != 0) {
       fprintf(fp, "%%hi(%s)", symname);
     } else {
-      fprintf(fp, "%s", symname);
+      fprintf(fp, "$%s", symname);
     }
   } else if (((int)op->opcode == (int)X86_OP(literal))) {
     TargetLiteral* literal = (TargetLiteral*)op;
     char litname[64];
     LiteralAsmName(literal->literal_id, litname, sizeof(litname));
-    fprintf(fp, "%s", litname);
+    fprintf(fp, "$%s", litname);
   } else if (((int)op->opcode == (int)X86_OP(x0))) {
     fprintf(fp, "$0");
   } else {
@@ -4577,14 +4622,14 @@ static void PrintDefaultInstructionI386(FILE* fp, TargetInstruction* inst,
         fprintf(fp, "\tsubl $8, %%esp\n\tstoresd ");
         PrintPercentRegFromInstI386(fp, inst, buf1, sizeof(buf1));
         fprintf(fp,
-                ", (%%esp)\n\tpushl %%ebx\n\tmovl $80000000, %%ebx\n"
+                ", (%%esp)\n\tpushl %%ebx\n\tmovl $0x80000000, %%ebx\n"
                 "\txorl %%ebx, 4(%%esp)\n\tpopl %%ebx\n\tmovsd (%%esp), ");
         PrintPercentRegFromInstI386(fp, inst, buf2, sizeof(buf2));
         fprintf(fp, "\n\taddl $8, %%esp\n");
       } else {
         fprintf(fp, "\tpushl %%ebx\n\tmovd ");
         PrintPercentRegFromInstI386(fp, inst, buf1, sizeof(buf1));
-        fprintf(fp, ", %%ebx\n\txorl $80000000, %%ebx\n\tmovd %%ebx, ");
+        fprintf(fp, ", %%ebx\n\txorl $0x80000000, %%ebx\n\tmovd %%ebx, ");
         PrintPercentRegFromInstI386(fp, inst, buf2, sizeof(buf2));
         fprintf(fp, "\n\tpopl %%ebx\n");
       }
@@ -5466,8 +5511,41 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
           OperandHasIntRegI386(inst->operand[0])) {
         mov = ((X86Opcode)inst->opcode == X86_OP(storesd)) ? "movl" : "movl";
       }
+      // %esi/%edi/%ebp/%esp have no byte form on i386, so such a value is
+      // stored through %al/%cl/%dl/%bl.
+      char byte_src_buf[32];
+      const char* byte_src = NULL;
+      const char* byte_tmp = NULL;
+      bool byte_tmp_pushed = false;
+      if ((X86Opcode)inst->opcode == X86_OP(storeb) &&
+          OperandHasIntRegI386(inst->operand[0])) {
+        const char* src = StripPercentI386(GetRegisterName(
+            inst->operand[0], byte_src_buf, sizeof(byte_src_buf)));
+        if (!I386RegHasByteForm(src)) {
+          static const char* const kByteRegs[] = {"eax", "ecx", "edx", "ebx"};
+          for (size_t i = 0; i < 4 && byte_tmp == NULL; i++) {
+            if (!StoreAddressNamesRegI386(inst, kByteRegs[i])) {
+              byte_tmp = kByteRegs[i];
+            }
+          }
+          assert(byte_tmp != NULL);
+          byte_src = src;
+          // Swapping would change the address if it uses the value register.
+          byte_tmp_pushed = StoreAddressNamesRegI386(inst, src);
+          // The push would move an %esp-relative address.
+          assert(!byte_tmp_pushed || !StoreAddressNamesRegI386(inst, "esp"));
+          if (byte_tmp_pushed) {
+            fprintf(fp, "\tpushl %%%s\n\tmovl %%%s, %%%s\n", byte_tmp, src,
+                    byte_tmp);
+          } else {
+            fprintf(fp, "\txchgl %%%s, %%%s\n", src, byte_tmp);
+          }
+        }
+      }
       fprintf(fp, "\t%s ", mov);
-      if (TargetIsConst(inst->operand[0])) {
+      if (byte_tmp != NULL) {
+        fprintf(fp, "%%%cl", byte_tmp[1]);
+      } else if (TargetIsConst(inst->operand[0])) {
         PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
       } else if ((int)inst->operand[0]->opcode == (int)X86_OP(x0)) {
         // The x0 pseudo-register is the constant 0; x86-64 has no hardware zero
@@ -5519,6 +5597,11 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
         fprintf(fp, "\n");
       } else {
         assert(false);
+      }
+      if (byte_tmp_pushed) {
+        fprintf(fp, "\tpopl %%%s\n", byte_tmp);
+      } else if (byte_tmp != NULL) {
+        fprintf(fp, "\txchgl %%%s, %%%s\n", byte_src, byte_tmp);
       }
       break;
     }
@@ -5953,7 +6036,7 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
         fprintf(fp, "\tcall .L%s_pic_%d\n", func_name, inst->id);
         fprintf(fp, ".L%s_pic_%d:\n\tpopl ", func_name, inst->id);
         PrintPercentRegFromInstI386(fp, inst, buf2, sizeof(buf2));
-        fprintf(fp, "\n\taddl _GLOBAL_OFFSET_TABLE_, ");
+        fprintf(fp, "\n\taddl $_GLOBAL_OFFSET_TABLE_, ");
         PrintPercentRegFromInstI386(fp, inst, buf2, sizeof(buf2));
         fprintf(fp, "\n\tmovl %s@GOT(", symname);
         PrintPercentRegFromInstI386(fp, inst, buf2, sizeof(buf2));
@@ -5969,6 +6052,9 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
       } else {
         fprintf(fp, "\tlea ");
       }
+      // movl takes the address as an immediate; lea names it as memory.
+      const char* addr_prefix =
+          ((inst->flags & X86_GOTPCREL_RELOC) != 0 || absolute_addr) ? "$" : "";
       if (((int)inst->operand[0]->opcode == (int)X86_OP(symbol))) {
         TargetSymbol* sym = (TargetSymbol*)inst->operand[0];
         // Use TargetSymbolName so function-local statics get the same mangled
@@ -5979,9 +6065,10 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
             TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
         if ((inst->flags & X86_TLSGD_RELOC) != 0 ||
             (inst->flags & X86_GOTPCREL_RELOC) != 0) {
-          fprintf(fp, "/* PIC unsupported on i386 */ %s, ", symname);
+          fprintf(fp, "/* PIC unsupported on i386 */ %s%s, ", addr_prefix,
+                  symname);
         } else if (((int)inst->opcode == (int)X86_OP(lea_rip))) {
-          fprintf(fp, "%s, ", symname);
+          fprintf(fp, "%s%s, ", addr_prefix, symname);
         } else {
           fprintf(fp, "%s(", symname);
           PrintPercentRegFromInstI386(fp, inst->operand[1], buf2, sizeof(buf2));
@@ -5991,15 +6078,17 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
         TargetLiteral* literal = (TargetLiteral*)inst->operand[0];
         char litname[64];
         LiteralAsmName(literal->literal_id, litname, sizeof(litname));
-        fprintf(fp, "%s, ", litname);
+        fprintf(fp, "%s%s, ", addr_prefix, litname);
       } else if (((int)inst->opcode == (int)X86_OP(lea_rip)) &&
                  ((int)inst->operand[0]->opcode == (int)X86_OP(label))) {
-        fprintf(fp, ".%s_label_%d, ", func_name, inst->operand[0]->id);
+        fprintf(fp, "%s.%s_label_%d, ", addr_prefix, func_name,
+                inst->operand[0]->id);
       } else if (((int)inst->opcode == (int)X86_OP(lea_rip)) &&
                  TargetIsConst(inst->operand[0])) {
         // PC-relative lea with an immediate displacement (used to materialize
         // the current instruction pointer for computed branches).
-        fprintf(fp, "%" PRId64 ", ", TargetIntValue(inst->operand[0]));
+        fprintf(fp, "%s%" PRId64 ", ", addr_prefix,
+                TargetIntValue(inst->operand[0]));
       } else if (inst->operand[1] != NULL && TargetIsConst(inst->operand[1])) {
         fprintf(fp, "%" PRId64 "(", TargetIntValue(inst->operand[1]));
         PrintPercentRegFromInstI386(fp, inst->operand[0], buf2, sizeof(buf2));
@@ -6056,9 +6145,9 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
         const char* symname =
             TargetSymbolName(sym->symbol, namebuf, sizeof(namebuf));
         if ((inst->flags & X86_TLS_RELOC) != 0) {
-          fprintf(fp, "%s@TPOFF, ", symname);
+          fprintf(fp, "$%s@TPOFF, ", symname);
         } else {
-          fprintf(fp, "%s, ", symname);
+          fprintf(fp, "$%s, ", symname);
         }
       } else {
         PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));

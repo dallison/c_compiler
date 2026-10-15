@@ -175,6 +175,7 @@ DECLARE_INST_FUNC(ldurb);
 DECLARE_INST_FUNC(ldurh);
 DECLARE_INST_FUNC(ldrsb);
 DECLARE_INST_FUNC(ldrsh);
+DECLARE_INST_FUNC(ldrsw);
 DECLARE_INST_FUNC(ldursb);
 DECLARE_INST_FUNC(ldursh);
 DECLARE_INST_FUNC(ldursw);
@@ -205,6 +206,21 @@ DECLARE_INST_FUNC(stlr);
 DECLARE_INST_FUNC(stlrb);
 DECLARE_INST_FUNC(stlrh);
 DECLARE_INST_FUNC(dmb);
+DECLARE_INST_FUNC(dsb);
+DECLARE_INST_FUNC(isb);
+DECLARE_INST_FUNC(nop);
+DECLARE_INST_FUNC(yield);
+DECLARE_INST_FUNC(wfe);
+DECLARE_INST_FUNC(wfi);
+DECLARE_INST_FUNC(sev);
+DECLARE_INST_FUNC(sevl);
+DECLARE_INST_FUNC(paciasp);
+DECLARE_INST_FUNC(autiasp);
+DECLARE_INST_FUNC(hint);
+DECLARE_INST_FUNC(bti);
+DECLARE_INST_FUNC(brk);
+DECLARE_INST_FUNC(hlt);
+DECLARE_INST_FUNC(udf);
 DECLARE_INST_FUNC(clrex);
 DECLARE_INST_FUNC(mrs);
 DECLARE_INST_FUNC(msr);
@@ -415,6 +431,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(ldurh);
   INST(ldrsb);
   INST(ldrsh);
+  INST(ldrsw);
   INST(ldursb);
   INST(ldursh);
   INST(ldursw);
@@ -445,6 +462,21 @@ static void InitializeInstructions(Map* instructions) {
   INST(stlrb);
   INST(stlrh);
   INST(dmb);
+  INST(dsb);
+  INST(isb);
+  INST(nop);
+  INST(yield);
+  INST(wfe);
+  INST(wfi);
+  INST(sev);
+  INST(sevl);
+  INST(paciasp);
+  INST(autiasp);
+  INST(hint);
+  INST(bti);
+  INST(brk);
+  INST(hlt);
+  INST(udf);
   INST(clrex);
   INST(mrs);
   INST(msr);
@@ -1098,7 +1130,7 @@ static void AssembleADR(AARCH64Assembler* assembler, int op) {
   int64_t addr = 0;
   AssemblerSymbol* sym = NULL;
   bool names_address = false;
-  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+  if (AssemblerLookingAtSymbol(&ASM)) {
     sym = GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
     // Keep calls to weak definitions relocatable so the linker can select a
@@ -2019,7 +2051,7 @@ COND_BRANCH(al);
 
 static void AssembleUnconditionalBranchImmediate(AARCH64Assembler* assembler,
                                                  int l) {
-  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+  if (AssemblerLookingAtSymbol(&ASM)) {
     AssemblerSymbol* sym =
         GetOrCreateSymbol(assembler, ASM.lex.spelling.value);
     LexNextToken(&ASM.lex);
@@ -2322,7 +2354,7 @@ static void AssembleLoadLiteral(AARCH64Assembler* assembler, Register* rt,
                     (opc << 30) |
                     (0x3 << 27) |
                     (v << 26) |
-                    (imm19 << 5) |
+                    ((imm19 & 0x7ffff) << 5) |
                     (rt->num));
 }
 
@@ -2348,7 +2380,9 @@ static void AssembleLoadStoreUnsignedImmediate(AARCH64Assembler* assembler,
                                                Register* rt, Register* rn,
                                                int size, int fp, int opc,
                                                int v, int32_t offset) {
-  int scale = 1 << size;
+  // A 128-bit Q access is encoded as size 0 with opc bit 1 set.
+  int scale_log2 = (fp || v) && size == 0 && (opc & 2) != 0 ? 4 : size;
+  int scale = 1 << scale_log2;
   if ((offset & (scale - 1)) != 0) {
     AssemblerError(&ASM, "Invalid load/store offset alignment");
     return;
@@ -2407,6 +2441,106 @@ static void AssembleLoadStorePair(AARCH64Assembler* assembler, Register* rt,
 }
 
 // Page C4-571.
+// The size field, opc and access-size log2 of a single-register load or
+// store.  `size` is the mnemonic's access size (log2), or -1 for plain
+// ldr/str, which take it from the register.
+static bool SingleLoadStoreForm(AARCH64Assembler* assembler, const Register* rt,
+                                int size, bool is_load, bool is_signed,
+                                int* size_field, int* opc, int* scale_log2) {
+  if (rt->fp_or_simd) {
+    if (size >= 0 || is_signed) {
+      AssemblerError(&ASM, "Invalid register for this load/store");
+      return false;
+    }
+    if (rt->kind == kQ) {
+      *size_field = 0;
+      *opc = is_load ? 3 : 2;
+      *scale_log2 = 4;
+    } else {
+      *size_field = rt->size;
+      *opc = is_load ? 1 : 0;
+      *scale_log2 = rt->size;
+    }
+    return true;
+  }
+  if (is_signed) {
+    // ldrsb/ldrsh to W or X; ldrsw only to X.
+    if (!is_load || (size == 2 && rt->kind != kX)) {
+      AssemblerError(&ASM, "Invalid register for a sign-extending load");
+      return false;
+    }
+    *size_field = size;
+    *opc = rt->kind == kX ? 2 : 3;
+    *scale_log2 = size;
+    return true;
+  }
+  *size_field = size < 0 ? rt->size : size;
+  *opc = is_load ? 1 : 0;
+  *scale_log2 = *size_field;
+  return true;
+}
+
+// LDR (literal): a PC-relative load of the word at a label, within +-1MB.
+static void AssembleLoadLiteralOperand(AARCH64Assembler* assembler,
+                                       Register* rt, int size, bool is_load,
+                                       bool is_signed) {
+  int opc = 0;
+  int v = rt->fp_or_simd ? 1 : 0;
+  if (!is_load) {
+    AssemblerError(&ASM, "Stores have no PC-relative literal form");
+    return;
+  }
+  if (LexLookingAt(&ASM.lex, TOK(equal))) {
+    AssemblerError(&ASM, "The `ldr Rt, =value` literal pool pseudo is not supported");
+    return;
+  }
+  if (rt->fp_or_simd) {
+    if (size >= 0 || is_signed || rt->kind == kB || rt->kind == kH) {
+      AssemblerError(&ASM, "Invalid register for a literal load");
+      return;
+    }
+    opc = rt->kind == kS ? 0 : rt->kind == kD ? 1 : 2;
+  } else if (is_signed) {
+    if (size != 2 || rt->kind != kX) {
+      AssemblerError(&ASM, "Only ldrsw has a sign-extending literal form");
+      return;
+    }
+    opc = 2;
+  } else if (size >= 0) {
+    AssemblerError(&ASM, "Byte and halfword loads have no literal form");
+    return;
+  } else {
+    opc = rt->kind == kX ? 1 : 0;
+  }
+
+  AssemblerSymbol* sym = NULL;
+  int64_t addend = 0;
+  bool ok = AssemblerEvaluateRelocatableExpression(&ASM, &sym, &addend);
+  if (!ok || sym == NULL) {
+    if (ASMO.pass == ASM_OBJECT_FINAL_PASS) {
+      AssemblerError(&ASM, "Literal load needs a label (+ constant)");
+      return;
+    }
+    AssembleLoadLiteral(assembler, rt, opc, v, 0);
+    return;
+  }
+  int64_t pc = AssemblerCurrentAddress(&ASM);
+  if (sym->defined && sym->section == ASMO.current_section &&
+      sym->binding == SYM_BIND(local)) {
+    int64_t offset = sym->value + addend - pc;
+    if ((offset & 3) != 0 || offset < -(1 << 20) || offset >= (1 << 20)) {
+      AssemblerError(&ASM, "Literal offset out of range or misaligned");
+      return;
+    }
+    AssembleLoadLiteral(assembler, rt, opc, v, (int32_t)(offset >> 2));
+    return;
+  }
+  AssemblerAddRelocationForSymbol(&ASM, sym, R_AARCH64_LD_PREL_LO19,
+                                  ASMO.current_section, (int32_t)pc,
+                                  (int32_t)addend);
+  AssembleLoadLiteral(assembler, rt, opc, v, 0);
+}
+
 static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
                               int size,
                               int is_signed, bool is_pair) {
@@ -2434,10 +2568,37 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
     bool post_indexed = false;
     bool writeback = false;
     
+    // A register offset's extend: `[xn, xm, lsl #3]`, `[xn, wm, sxtw]`.
+    int extend_option = 3;  // LSL
+    bool has_extend = false;
+    bool has_amount = false;
+    int amount = 0;
     if (LexMatch(&ASM.lex, TOK(comma))) {
       // Preindexed.
       pre_indexed = true;
       offset = GetOperand(assembler);
+      if (offset.type == kRegister && LexMatch(&ASM.lex, TOK(comma))) {
+        if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+          AssemblerError(&ASM, "Expected register shift LSL, UXTW, SXTW or SXTX");
+          return;
+        }
+        if (StringEqualCaseBlind(&ASM.lex.spelling, "LSL")) {
+        } else if (StringEqualCaseBlind(&ASM.lex.spelling, "UXTW")) {
+          extend_option = 2;
+        } else if (StringEqualCaseBlind(&ASM.lex.spelling, "SXTW")) {
+          extend_option = 6;
+        } else if (StringEqualCaseBlind(&ASM.lex.spelling, "SXTX")) {
+          extend_option = 7;
+        } else {
+          AssemblerError(&ASM, "Invalid register shift");
+          return;
+        }
+        LexNextToken(&ASM.lex);
+        has_extend = true;
+        // The extends may omit the amount; LSL may not.
+        has_amount = LexMatch(&ASM.lex, TOK(hash)) || extend_option == 3;
+        amount = has_amount ? (int)AssemblerEvaluateExpression(&ASM) : 0;
+      }
     }
     if (!LexMatch(&ASM.lex, TOK(rsquare))) {
       AssemblerError(&ASM, "Expected close ]");
@@ -2502,108 +2663,58 @@ static void AssembleLoadStore(AARCH64Assembler* assembler, int is_load,
       AssembleLoadStorePair(assembler, &rt, &rt2, &rn, opc, v, is_load, mode,
                             imm7);
     } else {
+      int size_field;
+      int opc;
+      int scale_log2;
+      if (!SingleLoadStoreForm(assembler, &rt, size, is_load, is_signed,
+                               &size_field, &opc, &scale_log2)) {
+        return;
+      }
+      int v = rt.fp_or_simd ? 1 : 0;
       if (offset.type == kRegister) {
-        // Register offset.
-        // A register offset can have a shift.
-        if (LexMatch(&ASM.lex, TOK(comma))) {
-          if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
-            AssemblerError(&ASM, "Expected register shift LSL, UXTW, SXTW or SXTX");
+        // Register offset, optionally extended or shifted by the access size.
+        if (post_indexed || writeback) {
+          AssemblerError(&ASM, "A register offset can't be indexed");
+          return;
+        }
+        int option = extend_option;
+        int s = 0;
+        if (has_extend) {
+          if (amount != 0 && amount != scale_log2) {
+            AssemblerError(&ASM, "Invalid register shift amount");
             return;
           }
-          int option = 3;
-          if (StringEqualCaseBlind(&ASM.lex.spelling, "LSL")) {
-          } else if (StringEqualCaseBlind(&ASM.lex.spelling, "UXTW")) {
-            option = 2;
-          } else if (StringEqualCaseBlind(&ASM.lex.spelling, "SXTW")) {
-            option = 6;
-          } else if (StringEqualCaseBlind(&ASM.lex.spelling, "SXTX")) {
-            option = 7;
-          } else {
-            AssemblerError(&ASM, "Invalid register shift");
-            return;
-          }
-          LexMatch(&ASM.lex, TOK(hash));
-          int amount = (int)AssemblerEvaluateExpression(&ASM);
-          // Validate shift amount and encode in S.
-          int s = 1;
-          switch (amount) {
-            case 0:
-              s = 0;
-              break;
-            case 2:
-              if (rt.kind != kW) {
-                AssemblerError(&ASM, "Invalid register shift amount");
-                return;
-              }
-              break;
-            case 3:
-              if (rt.kind != kX) {
-                AssemblerError(&ASM, "Invalid register shift amount");
-                return;
-              }
-              break;
-            default:
-              AssemblerError(&ASM, "Invalid register shift amount");
-              return;
-          }
-          int opc = is_load;
-          if (size < 0 && (rt.kind == kX || rt.kind == kW || rt.fp_or_simd)) {
-            size = rt.size;
-          }
-          // TODO: extended register variant.
-          AssembleLoadStoreRegister(assembler, &rt, &rn, &offset.reg, size, opc, 0, option, s);
+          // For a byte access an explicit `#0` still selects S = 1.
+          s = has_amount && amount == scale_log2 ? 1 : 0;
         }
-      } else if (offset.type == kIntImmediate){
-        // Immediate offset.
-        int opc = is_signed && is_load ? (rt.kind == kX ? 2 : 3) : is_load;
-        if (size < 0 && (rt.kind == kX || rt.kind == kW || rt.fp_or_simd)) {
-          size = rt.size;
+        bool index_is_w = offset.reg.kind == kW;
+        if (index_is_w != (option == 2 || option == 6)) {
+          AssemblerError(&ASM, "Index register width does not match the extend");
+          return;
         }
-        int scale = 1 << (size < 0 ? 0 : size);
+        AssembleLoadStoreRegister(assembler, &rt, &rn, &offset.reg, size_field,
+                                  opc, v, option, s);
+      } else if (offset.type == kIntImmediate) {
+        int scale = 1 << scale_log2;
         bool aligned = (offset.i & (scale - 1)) == 0;
         if (!post_indexed && !writeback && offset.i >= 0 && aligned) {
-          AssembleLoadStoreUnsignedImmediate(assembler, &rt, &rn, size,
-                                             rt.fp_or_simd, opc, 0, offset.i);
+          AssembleLoadStoreUnsignedImmediate(assembler, &rt, &rn, size_field,
+                                             v, opc, 0, offset.i);
         } else {
           // Misaligned (or negative/indexed) offsets use the unscaled
           // LDUR/STUR form, which permits any byte offset in [-256, 255].
           int imm9 = offset.i;
           int mode = post_indexed ? 1 : (writeback ? 3 : 0);
-          AssembleLoadStoreImmediate(assembler, &rt, &rn, size,
-                                     rt.fp_or_simd, opc, 0, mode, imm9);
+          AssembleLoadStoreImmediate(assembler, &rt, &rn, size_field, v, opc,
+                                     0, mode, imm9);
         }
       } else {
         AssemblerError(&ASM, "Invalid offset for LDR/STR");
-       return;
+        return;
       }
     }
   } else {
-    // Literal.
-    if (!is_load) {
-      AssemblerError(&ASM, "Only load is supported for literals");
-      return;
-    }
-    if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
-      AssemblerError(&ASM, "Missing symbol for literal");
-      return;
-    }
-    String symbol_name;
-    StringInit(&symbol_name, ASM.lex.spelling.value);
-    LexNextToken(&ASM.lex);
-     AssemblerSymbol* sym = GetOrCreateSymbol(assembler, symbol_name.value);
-
-    int reloc_type = R_AARCH64_CALL26;
-//    if (sym->binding == SYM_BIND(global) && assembler->base.object.pic) {
-//      reloc_type = R_AARCH64_CALL_PLT;
-//    }
-    AssemblerAddRelocationForSymbol(
-        &ASM, sym, reloc_type, ASMO.current_section,
-        (int32_t)AssemblerCurrentAddress(&ASM), 0);
-    
-    int opc = rt.kind == kX;
-    int v = 0;
-    // TODO: floating point and ldrsw.
-    AssembleLoadLiteral(assembler, &rt, opc, v, 0);
+    AssembleLoadLiteralOperand(assembler, &rt, size, is_load, is_signed);
   }
 }
 
@@ -2621,6 +2732,10 @@ static void Assemble_ldrsb(AARCH64Assembler* assembler) {
 
 static void Assemble_ldrsh(AARCH64Assembler* assembler) {
   AssembleLoadStore(assembler, 1, 1, 1, false);
+}
+
+static void Assemble_ldrsw(AARCH64Assembler* assembler) {
+  AssembleLoadStore(assembler, 1, 2, 1, false);
 }
 
 static void Assemble_strb(AARCH64Assembler* assembler) {
@@ -2778,23 +2893,139 @@ static void Assemble_stlrh(AARCH64Assembler* assembler) {
   AssembleAcquireRelease(assembler, false, 1);
 }
 
+// Barrier option (CRm) of dmb/dsb/isb: a named domain or `#imm`, defaulting
+// to sy.  `named_ok` is false for isb, which only accepts sy.
+static bool ParseBarrierOption(AARCH64Assembler* assembler, bool named_ok,
+                               int* option) {
+  static const char* const kNames[16] = {
+      NULL, "oshld", "oshst", "osh", NULL, "nshld", "nshst", "nsh",
+      NULL, "ishld", "ishst", "ish", NULL, "ld",    "st",    "sy",
+  };
+  *option = 0xf;
+  if (LexMatch(&ASM.lex, TOK(hash))) {
+    int64_t value = AssemblerEvaluateExpression(&ASM);
+    if (value < 0 || value > 15) {
+      AssemblerError(&ASM, "Barrier option must be in the range 0..15");
+      return false;
+    }
+    *option = (int)value;
+    return true;
+  }
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    return true;
+  }
+  for (int i = named_ok ? 0 : 15; i < 16; ++i) {
+    if (kNames[i] != NULL &&
+        StringEqualCaseBlind(&ASM.lex.spelling, kNames[i])) {
+      *option = i;
+      LexNextToken(&ASM.lex);
+      return true;
+    }
+  }
+  AssemblerError(&ASM, "Unsupported barrier option");
+  return false;
+}
+
+static void AssembleBarrier(AARCH64Assembler* assembler, uint32_t base,
+                            bool named_ok) {
+  int option = 0;
+  if (ParseBarrierOption(assembler, named_ok, &option)) {
+    AssemblerEmitWord(&ASM, ASMO.current_section,
+                      base | ((uint32_t)option << 8));
+  }
+}
+
 static void Assemble_dmb(AARCH64Assembler* assembler) {
-  int option = 0xf;  // sy
+  AssembleBarrier(assembler, 0xd50330bfu, true);
+}
+
+static void Assemble_dsb(AARCH64Assembler* assembler) {
+  AssembleBarrier(assembler, 0xd503309fu, true);
+}
+
+static void Assemble_isb(AARCH64Assembler* assembler) {
+  AssembleBarrier(assembler, 0xd50330dfu, false);
+}
+
+static void AssembleHint(AARCH64Assembler* assembler, int imm) {
+  AssemblerEmitWord(&ASM, ASMO.current_section,
+                    0xd503201fu | ((uint32_t)imm << 5));
+}
+
+static void Assemble_nop(AARCH64Assembler* assembler) {
+  AssembleHint(assembler, 0);
+}
+static void Assemble_yield(AARCH64Assembler* assembler) {
+  AssembleHint(assembler, 1);
+}
+static void Assemble_wfe(AARCH64Assembler* assembler) {
+  AssembleHint(assembler, 2);
+}
+static void Assemble_wfi(AARCH64Assembler* assembler) {
+  AssembleHint(assembler, 3);
+}
+static void Assemble_sev(AARCH64Assembler* assembler) {
+  AssembleHint(assembler, 4);
+}
+static void Assemble_sevl(AARCH64Assembler* assembler) {
+  AssembleHint(assembler, 5);
+}
+static void Assemble_paciasp(AARCH64Assembler* assembler) {
+  AssembleHint(assembler, 25);
+}
+static void Assemble_autiasp(AARCH64Assembler* assembler) {
+  AssembleHint(assembler, 29);
+}
+
+static void Assemble_hint(AARCH64Assembler* assembler) {
+  LexMatch(&ASM.lex, TOK(hash));
+  int64_t imm = AssemblerEvaluateExpression(&ASM);
+  if (imm < 0 || imm > 127) {
+    AssemblerError(&ASM, "HINT immediate must be in the range 0..127");
+    return;
+  }
+  AssembleHint(assembler, (int)imm);
+}
+
+static void Assemble_bti(AARCH64Assembler* assembler) {
+  int targets = 0;
   if (LexLookingAt(&ASM.lex, TOK(identifier))) {
-    if (StringEqualCaseBlind(&ASM.lex.spelling, "ish")) {
-      option = 0xb;
-    } else if (StringEqualCaseBlind(&ASM.lex.spelling, "ishld")) {
-      option = 0x9;
-    } else if (StringEqualCaseBlind(&ASM.lex.spelling, "ishst")) {
-      option = 0xa;
-    } else if (!StringEqualCaseBlind(&ASM.lex.spelling, "sy")) {
-      AssemblerError(&ASM, "Unsupported DMB option");
+    if (StringEqualCaseBlind(&ASM.lex.spelling, "c")) {
+      targets = 1;
+    } else if (StringEqualCaseBlind(&ASM.lex.spelling, "j")) {
+      targets = 2;
+    } else if (StringEqualCaseBlind(&ASM.lex.spelling, "jc")) {
+      targets = 3;
+    } else {
+      AssemblerError(&ASM, "BTI target must be c, j or jc");
       return;
     }
     LexNextToken(&ASM.lex);
   }
+  AssembleHint(assembler, 32 | (targets << 1));
+}
+
+// brk/hlt/udf: a 16-bit immediate placed at bit `shift` of `base`.
+static void AssembleException16(AARCH64Assembler* assembler,
+                                const char* name, uint32_t base, int shift) {
+  LexMatch(&ASM.lex, TOK(hash));
+  int64_t imm = AssemblerEvaluateExpression(&ASM);
+  if (imm < 0 || imm > 0xffff) {
+    AssemblerError(&ASM, "%s immediate must be in the range 0..65535", name);
+    return;
+  }
   AssemblerEmitWord(&ASM, ASMO.current_section,
-                    0xd50330bfu | ((uint32_t)option << 8));
+                    base | ((uint32_t)imm << shift));
+}
+
+static void Assemble_brk(AARCH64Assembler* assembler) {
+  AssembleException16(assembler, "BRK", 0xd4200000u, 5);
+}
+static void Assemble_hlt(AARCH64Assembler* assembler) {
+  AssembleException16(assembler, "HLT", 0xd4400000u, 5);
+}
+static void Assemble_udf(AARCH64Assembler* assembler) {
+  AssembleException16(assembler, "UDF", 0x00000000u, 0);
 }
 
 static void Assemble_clrex(AARCH64Assembler* assembler) {
@@ -2920,14 +3151,17 @@ static void AssembleUnscaledLoadStore(AARCH64Assembler* assembler, int is_load,
     AssemblerError(&ASM, "Expected ]");
     return;
   }
-  if (size < 0 && (rt.kind == kX || rt.kind == kW || rt.fp_or_simd)) {
-    size = rt.size;
+  int size_field = 0;
+  int opc = 0;
+  int scale_log2 = 0;
+  if (!SingleLoadStoreForm(assembler, &rt, size, is_load, is_signed,
+                           &size_field, &opc, &scale_log2)) {
+    return;
   }
-  int opc = is_signed && is_load ? (rt.kind == kX ? 2 : 3) : is_load;
   CheckImmediateWidth(assembler, imm9, 9);
   AssemblerEmitWord(
       &ASM, ASMO.current_section,
-      (size << 30) | (0x7 << 27) | (rt.fp_or_simd << 26) |
+      ((uint32_t)size_field << 30) | (0x7 << 27) | (rt.fp_or_simd << 26) |
       (opc << 22) | ((imm9 & 0x1ff) << 12) |
       (rn.num << 5) | rt.num);
 }

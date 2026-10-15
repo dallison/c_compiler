@@ -1556,6 +1556,13 @@ static TargetInstruction* Materialize(X86Generator* rv, IRNode* node) {
       case IR_OP(constd): {
         double value = ((IRConstant*)node)->value.fvalue;
         int64_t bits = *(int64_t*)(&value);
+        if (!X86_IS_64BIT(rv)) {
+          // An i386 GPR can't hold the 64 bits, so materialize straight into
+          // an XMM register.
+          return Emit(rv, NewInstruction1(
+                              X86_OP(fmv_d),
+                              GetIntConstant(rv, NULL, kTargetType64Bit, bits)));
+        }
         TargetInstruction* c;
         if (bits == 0) {
           c = Zero(rv);

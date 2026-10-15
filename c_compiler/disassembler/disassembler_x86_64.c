@@ -662,61 +662,109 @@ static bool DAsmDisassembleX86Common(const void* bytes, size_t length,
         DAsmFormat(out, "%s %s, %s", opname, RegName(reg, width), rm_text);
         return true;
       }
-      if (op2 == 0x10 || op2 == 0x11 || op2 == 0x2a || op2 == 0x2c || op2 == 0x2e ||
+      if (op2 == 0x18 || op2 == 0x0d || op2 == 0x1f) {
+        if (!Need(&d, 1)) return false;
+        unsigned char modrm = Get8(&d);
+        int ext = (modrm >> 3) & 7;
+        static const char* const kPrefetch18[] = {"prefetchnta", "prefetcht0",
+                                                  "prefetcht1", "prefetcht2"};
+        static const char* const kPrefetch0d[] = {"prefetch", "prefetchw",
+                                                  "prefetchwt1"};
+        const char* name = op2 == 0x1f ? (ext == 0 ? "nop" : NULL)
+                           : op2 == 0x18 ? (ext < 4 ? kPrefetch18[ext] : NULL)
+                                         : (ext < 3 ? kPrefetch0d[ext] : NULL);
+        if (name != NULL && (op2 == 0x1f || ((modrm >> 6) & 3) != 3)) {
+          char rm_text[80];
+          DecodeRM(rm_text, sizeof(rm_text), &d, modrm, width);
+          DAsmInitInstruction(out, bytes, length, address, d.pos);
+          DAsmFormat(out, "%s %s", name, rm_text);
+          return true;
+        }
+      }
+      if (op2 == 0x10 || op2 == 0x11 || op2 == 0x2a || op2 == 0x2c || op2 == 0x2d ||
+          op2 == 0x2e ||
           op2 == 0x51 || op2 == 0x57 || op2 == 0x58 || op2 == 0x59 ||
           op2 == 0x5a || op2 == 0x5c || op2 == 0x5e || op2 == 0x6e ||
           op2 == 0x7e) {
         if (!Need(&d, 1)) return false;
         unsigned char modrm = Get8(&d);
         int reg = ((modrm >> 3) & 7) | (RexR(&d) << 3);
+        int gpr_width = RexW(&d) ? 8 : 4;
+        // cvtsi2s* and the 66-prefixed movd/movq name a GPR (or memory) in
+        // r/m; every other form here names an XMM register (or memory).
+        bool rm_is_gpr = op2 == 0x2a ||
+                         ((op2 == 0x6e || op2 == 0x7e) && !d.prefixf3);
         char rm_text[80];
-        DecodeRM(rm_text, sizeof(rm_text), &d, modrm, 8);
-        const char* scalar = d.prefixf2 ? "sd" : (d.prefixf3 ? "ss" : "");
-        if (op2 == 0x2e) {
-          scalar = d.prefix66 ? "sd" : "ss";
-        }
-        const char* base = op2 == 0x10 ? "mov"
-                           : op2 == 0x11 ? "mov"
-                           : op2 == 0x2a ? "cvtsi2"
-                           : op2 == 0x2c ? "cvtt"
-                           : op2 == 0x2e ? "ucomi"
-                           : op2 == 0x51 ? "sqrt"
-                           : op2 == 0x57 ? "xor"
-                           : op2 == 0x58 ? "add"
-                           : op2 == 0x59 ? "mul"
-                           : op2 == 0x5a ? "cvt"
-                           : op2 == 0x5c ? "sub"
-                           : op2 == 0x6e ? "movd"
-                           : op2 == 0x7e ? "movd"
-                                         : "div";
-        DAsmInitInstruction(out, bytes, length, address, d.pos);
-        if (op2 == 0x2a) {
-          DAsmFormat(out, "%s%s %s, %s", base, scalar, XMMName(reg), rm_text);
-        } else if (op2 == 0x2e) {
-          DAsmFormat(out, "%s%s %s, %s", base, scalar, XMMName(reg), rm_text);
-        } else if (op2 == 0x2c) {
-          DAsmFormat(out, "%s%s2si %s, %s", base, scalar, RegName(reg, width),
-                     rm_text);
-        } else if (op2 == 0x5a) {
-          const char* dst_scalar = d.prefixf2 ? "ss" : "sd";
-          DAsmFormat(out, "%s%s2%s %s, %s", base, scalar, dst_scalar,
-                     XMMName(reg), rm_text);
-        } else if (op2 == 0x6e) {
-          DAsmFormat(out, "%s %s, %s", RexW(&d) ? "movq" : "movd",
-                     XMMName(reg), rm_text);
-        } else if (op2 == 0x7e) {
-          if (d.prefix66 && RexW(&d)) {
-            DAsmFormat(out, "movq %s, %s", rm_text, XMMName(reg));
-          } else if (d.prefixf3) {
-            DAsmFormat(out, "movq %s, %s", op2 == 0x11 ? rm_text : XMMName(reg),
-                       op2 == 0x11 ? XMMName(reg) : rm_text);
-          } else {
-            DAsmFormat(out, "movd %s, %s", rm_text, XMMName(reg));
-          }
-        } else if (op2 == 0x11) {
-          DAsmFormat(out, "%s%s %s, %s", base, scalar, rm_text, XMMName(reg));
+        if (rm_is_gpr || ((modrm >> 6) & 3) != 3) {
+          DecodeRM(rm_text, sizeof(rm_text), &d, modrm, gpr_width);
         } else {
-          DAsmFormat(out, "%s%s %s, %s", base, scalar, XMMName(reg), rm_text);
+          snprintf(rm_text, sizeof(rm_text), "%s",
+                   XMMName((modrm & 7) | (RexB(&d) << 3)));
+        }
+        // Scalar (F3/F2) or packed (none/66) element suffix.
+        const char* suffix = d.prefixf2   ? "sd"
+                             : d.prefixf3 ? "ss"
+                             : d.prefix66 ? "pd"
+                                          : "ps";
+        DAsmInitInstruction(out, bytes, length, address, d.pos);
+        switch (op2) {
+          case 0x10:
+          case 0x11: {
+            const char* name = d.prefixf2   ? "movsd"
+                               : d.prefixf3 ? "movss"
+                               : d.prefix66 ? "movupd"
+                                            : "movups";
+            if (op2 == 0x11) {
+              DAsmFormat(out, "%s %s, %s", name, rm_text, XMMName(reg));
+            } else {
+              DAsmFormat(out, "%s %s, %s", name, XMMName(reg), rm_text);
+            }
+            break;
+          }
+          case 0x2a:
+            DAsmFormat(out, "cvtsi2%s %s, %s", d.prefixf2 ? "sd" : "ss",
+                       XMMName(reg), rm_text);
+            break;
+          case 0x2c:
+          case 0x2d:
+            DAsmFormat(out, "%s%s2si %s, %s", op2 == 0x2c ? "cvtt" : "cvt",
+                       d.prefixf2 ? "sd" : "ss", RegName(reg, gpr_width),
+                       rm_text);
+            break;
+          case 0x2e:
+            DAsmFormat(out, "ucomis%s %s, %s", d.prefix66 ? "d" : "s",
+                       XMMName(reg), rm_text);
+            break;
+          case 0x5a: {
+            const char* name = d.prefixf2   ? "cvtsd2ss"
+                               : d.prefixf3 ? "cvtss2sd"
+                               : d.prefix66 ? "cvtpd2ps"
+                                            : "cvtps2pd";
+            DAsmFormat(out, "%s %s, %s", name, XMMName(reg), rm_text);
+            break;
+          }
+          case 0x6e:
+            DAsmFormat(out, "%s %s, %s", RexW(&d) ? "movq" : "movd",
+                       XMMName(reg), rm_text);
+            break;
+          case 0x7e:
+            if (d.prefixf3) {
+              DAsmFormat(out, "movq %s, %s", XMMName(reg), rm_text);
+            } else {
+              DAsmFormat(out, "%s %s, %s", RexW(&d) ? "movq" : "movd", rm_text,
+                         XMMName(reg));
+            }
+            break;
+          default: {
+            const char* base = op2 == 0x51   ? "sqrt"
+                               : op2 == 0x57 ? "xor"
+                               : op2 == 0x58 ? "add"
+                               : op2 == 0x59 ? "mul"
+                               : op2 == 0x5c ? "sub"
+                                             : "div";
+            DAsmFormat(out, "%s%s %s, %s", base, suffix, XMMName(reg), rm_text);
+            break;
+          }
         }
         return true;
       }

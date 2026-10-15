@@ -11,16 +11,16 @@ _start:
 	mov %rsp, %r12
 	mov $9, %rax
 	mov $0, %rdi
-	mov $10000, %rsi
+	mov $0x10000, %rsi
 	mov $3, %rdx
-	mov $22, %r10
+	mov $0x22, %r10
 	mov $-1, %r8
 	mov $0, %r9
 	syscall
 	mov %rax, %r13
 	mov %r13, %rsi
-	mov $1002, %rdi
-	mov $9e, %rax
+	mov $0x1002, %rdi
+	mov $0x9e, %rax
 	syscall
 	mov %r13, %rdi
 	mov %r12, %rsi

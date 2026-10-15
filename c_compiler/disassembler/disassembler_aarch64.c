@@ -57,26 +57,161 @@ static int64_t DecodeAArch64ADR(uint32_t inst) {
   return DAsmSignExtend((immhi << 2) | immlo, 21);
 }
 
-static const char* UnscaledIntegerLoadStoreName(int size, int opc,
-                                                bool* width64) {
-  *width64 = size == 3 || opc == 2;
-  if (opc == 0) {
-    static const char* stores[] = {"sturb", "sturh", "stur", "stur"};
-    return stores[size];
+static const char* FPReg(int reg, int scale_log2) {
+  static char bufs[4][8];
+  static int index = 0;
+  char* buf = bufs[index++ & 3];
+  snprintf(buf, 8, "%c%d", "bhsdq"[scale_log2], reg);
+  return buf;
+}
+
+// The mnemonic (`ldr`, `strh`, `ldrsw`, ...), transfer register and access
+// size of a single-register load/store from its size, V and opc fields.
+// `unscaled` selects the ldur/stur spelling.  False for unallocated
+// encodings and prfm.
+static bool LoadStoreRegisterForm(uint32_t inst, bool unscaled, char* name,
+                                  size_t name_len, const char** reg,
+                                  int* scale_log2) {
+  int size = (inst >> 30) & 3;
+  bool v = ((inst >> 26) & 1) != 0;
+  int opc = (inst >> 22) & 3;
+  int rt = inst & 0x1f;
+  const char* base = (opc & 1) != 0 ? "ld" : "st";
+  const char* kind = unscaled ? "ur" : "r";
+  if (v) {
+    if (opc >= 2 && size != 0) {
+      return false;
+    }
+    *scale_log2 = opc >= 2 ? 4 : size;
+    snprintf(name, name_len, "%s%s", base, kind);
+    *reg = FPReg(rt, *scale_log2);
+    return true;
   }
-  if (opc == 1) {
-    static const char* loads[] = {"ldurb", "ldurh", "ldur", "ldur"};
-    return loads[size];
+  static const char* const kSuffix[] = {"b", "h", "", ""};
+  *scale_log2 = size;
+  if (opc <= 1) {
+    snprintf(name, name_len, "%s%s%s", base, kind, kSuffix[size]);
+    *reg = XReg(rt, size == 3, false);
+    return true;
   }
-  if (opc == 2) {
-    static const char* loads[] = {"ldursb", "ldursh", "ldursw", NULL};
-    return loads[size];
+  // opc 2 sign-extends to X (size 3 is prfm); opc 3 to W (bytes/halves only).
+  if (size == 3 || (opc == 3 && size == 2)) {
+    return false;
   }
-  if (opc == 3 && size < 2) {
-    *width64 = false;
-    return size == 0 ? "ldursb" : "ldursh";
+  static const char* const kSigned[] = {"sb", "sh", "sw"};
+  snprintf(name, name_len, "ld%s%s", kind, kSigned[size]);
+  *reg = XReg(rt, opc == 2, false);
+  return true;
+}
+
+// LDR/STR (immediate, unscaled, pre/post-indexed, register) and LDR
+// (literal).
+static bool DisassembleLoadStoreRegister(uint32_t inst, uint64_t address,
+                                         DAsmInstruction* out) {
+  char name[16];
+  const char* reg = NULL;
+  int scale_log2 = 0;
+  int rn = (inst >> 5) & 0x1f;
+  if ((inst & 0x3b000000u) == 0x18000000u) {
+    int opc = (inst >> 30) & 3;
+    bool v = ((inst >> 26) & 1) != 0;
+    int rt = inst & 0x1f;
+    uint64_t target = address + DecodeAArch64Branch19(inst);
+    if (v && opc < 3) {
+      reg = FPReg(rt, opc + 2);
+      snprintf(name, sizeof(name), "ldr");
+    } else if (!v && opc < 3) {
+      reg = XReg(rt, opc != 0, false);
+      snprintf(name, sizeof(name), "%s", opc == 2 ? "ldrsw" : "ldr");
+    } else {
+      return false;
+    }
+    DAsmFormat(out, "%s %s, 0x%" PRIx64, name, reg, target);
+    DAsmSetTarget(out, target);
+    return true;
   }
-  return NULL;
+  if ((inst & 0x3b000000u) == 0x39000000u) {
+    if (!LoadStoreRegisterForm(inst, false, name, sizeof(name), &reg,
+                               &scale_log2)) {
+      return false;
+    }
+    int imm = (int)((inst >> 10) & 0xfff) << scale_log2;
+    DAsmFormat(out, "%s %s, [%s, #%d]", name, reg, XReg(rn, true, true), imm);
+    return true;
+  }
+  if ((inst & 0x3b200000u) != 0x38000000u &&
+      (inst & 0x3b200c00u) != 0x38200800u) {
+    return false;
+  }
+  int mode = (inst >> 10) & 3;
+  if ((inst & 0x00200000u) != 0) {
+    // Register offset.
+    if (!LoadStoreRegisterForm(inst, false, name, sizeof(name), &reg,
+                               &scale_log2)) {
+      return false;
+    }
+    int rm = (inst >> 16) & 0x1f;
+    int option = (inst >> 13) & 7;
+    bool shifted = ((inst >> 12) & 1) != 0;
+    const char* extend = option == 2   ? "uxtw"
+                         : option == 3 ? "lsl"
+                         : option == 6 ? "sxtw"
+                         : option == 7 ? "sxtx"
+                                       : NULL;
+    if (extend == NULL) {
+      return false;
+    }
+    const char* index = XReg(rm, (option & 1) != 0, false);
+    if (shifted) {
+      DAsmFormat(out, "%s %s, [%s, %s, %s #%d]", name, reg,
+                 XReg(rn, true, true), index, extend, scale_log2);
+    } else if (option == 3) {
+      DAsmFormat(out, "%s %s, [%s, %s]", name, reg, XReg(rn, true, true),
+                 index);
+    } else {
+      DAsmFormat(out, "%s %s, [%s, %s, %s]", name, reg, XReg(rn, true, true),
+                 index, extend);
+    }
+    return true;
+  }
+  if (mode == 2) {
+    return false;  // ldtr/sttr
+  }
+  if (!LoadStoreRegisterForm(inst, mode == 0, name, sizeof(name), &reg,
+                             &scale_log2)) {
+    return false;
+  }
+  int imm = (int)DAsmSignExtend((inst >> 12) & 0x1ff, 9);
+  if (mode == 1) {
+    DAsmFormat(out, "%s %s, [%s], #%d", name, reg, XReg(rn, true, true), imm);
+  } else {
+    DAsmFormat(out, "%s %s, [%s, #%d]%s", name, reg, XReg(rn, true, true),
+               imm, mode == 3 ? "!" : "");
+  }
+  return true;
+}
+
+// HINT space: nop, yield, wfe, wfi, sev, sevl, bti and the PAC hints.
+static bool DisassembleHint(uint32_t inst, DAsmInstruction* out) {
+  if ((inst & 0xfffff01fu) != 0xd503201fu) {
+    return false;
+  }
+  int imm = (inst >> 5) & 0x7f;
+  static const char* const kNames[] = {"nop", "yield", "wfe", "wfi", "sev",
+                                       "sevl"};
+  if (imm < 6) {
+    DAsmFormat(out, "%s", kNames[imm]);
+  } else if (imm == 25) {
+    DAsmFormat(out, "paciasp");
+  } else if (imm == 29) {
+    DAsmFormat(out, "autiasp");
+  } else if ((imm & ~6) == 32) {
+    static const char* const kBti[] = {"bti", "bti c", "bti j", "bti jc"};
+    DAsmFormat(out, "%s", kBti[(imm >> 1) & 3]);
+  } else {
+    DAsmFormat(out, "hint #%d", imm);
+  }
+  return true;
 }
 
 bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
@@ -153,18 +288,31 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     DAsmFormat(out, "mrs %s, tpidr_el0", XReg(inst & 0x1f, true, false));
     return true;
   }
-  if ((inst & 0xfffff0ffu) == 0xd50330bfu) {
+  if ((inst & 0xfffff09fu) == 0xd503309fu && ((inst >> 5) & 3) != 3) {
+    static const char* const kOptions[16] = {
+        NULL, "oshld", "oshst", "osh", NULL, "nshld", "nshst", "nsh",
+        NULL, "ishld", "ishst", "ish", NULL, "ld",    "st",    "sy",
+    };
+    static const char* const kOps[] = {"dsb", "dmb", "isb"};
+    int op = (inst >> 5) & 3;
     int option = (inst >> 8) & 0xf;
-    const char* name = option == 0x9 ? "ishld"
-                       : option == 0xa ? "ishst"
-                       : option == 0xb ? "ish"
-                       : option == 0xf ? "sy"
-                                       : NULL;
+    const char* name = op == 2 ? (option == 15 ? "sy" : NULL)
+                               : kOptions[option];
     if (name != NULL) {
-      DAsmFormat(out, "dmb %s", name);
+      DAsmFormat(out, "%s %s", kOps[op], name);
     } else {
-      DAsmFormat(out, "dmb #0x%x", option);
+      DAsmFormat(out, "%s #0x%x", kOps[op], option);
     }
+    return true;
+  }
+  if ((inst & 0xffe0001fu) == 0xd4200000u ||
+      (inst & 0xffe0001fu) == 0xd4400000u) {
+    DAsmFormat(out, "%s #0x%x", (inst & 0x00400000u) != 0 ? "hlt" : "brk",
+               (inst >> 5) & 0xffff);
+    return true;
+  }
+  if ((inst & 0xffff0000u) == 0) {
+    DAsmFormat(out, "udf #%d", inst & 0xffff);
     return true;
   }
   if ((inst & 0xfffff0ffu) == 0xd503305fu) {
@@ -393,28 +541,8 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
       return true;
     }
   }
-  if ((inst & 0x3b200c00u) == 0x38000000u) {
-    int size = (inst >> 30) & 3;
-    bool fp = ((inst >> 26) & 1) != 0;
-    int opc = (inst >> 22) & 3;
-    int imm = (int)DAsmSignExtend((inst >> 12) & 0x1ff, 9);
-    int rn = (inst >> 5) & 0x1f;
-    int rt = inst & 0x1f;
-    if (fp) {
-      if (opc < 2 && size >= 2) {
-        DAsmFormat(out, "%s %s, [%s, #%d]", opc == 1 ? "ldur" : "stur",
-                   VReg(rt, size == 3 ? 8 : 4), XReg(rn, true, true), imm);
-        return true;
-      }
-    } else {
-      bool width64 = false;
-      const char* name = UnscaledIntegerLoadStoreName(size, opc, &width64);
-      if (name != NULL) {
-        DAsmFormat(out, "%s %s, [%s, #%d]", name, XReg(rt, width64, false),
-                   XReg(rn, true, true), imm);
-        return true;
-      }
-    }
+  if (DisassembleLoadStoreRegister(inst, address, out)) {
+    return true;
   }
   if ((inst & 0x7fe00000u) == 0x1ac00000u) {
     bool sf = (inst >> 31) != 0;
@@ -489,20 +617,6 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
                  XReg(rm, true, false));
       return true;
     }
-  }
-  if ((inst & 0x3b000000u) == 0x39000000u ||
-      (inst & 0x3b000000u) == 0x39000000u) {
-    bool load = (inst >> 22) & 1;
-    int size = (inst >> 30) & 3;
-    int scale = 1 << size;
-    int imm = ((inst >> 10) & 0xfff) * scale;
-    int rn = (inst >> 5) & 0x1f;
-    int rt = inst & 0x1f;
-    const char* op = load ? (size == 0 ? "ldrb" : (size == 1 ? "ldrh" : "ldr"))
-                          : (size == 0 ? "strb" : (size == 1 ? "strh" : "str"));
-    DAsmFormat(out, "%s %s, [%s, #%d]", op, XReg(rt, size == 3, false),
-               XReg(rn, true, true), imm);
-    return true;
   }
   if ((inst & 0x1f000000u) == 0x1e000000u) {
     int type = (inst >> 22) & 3;
@@ -583,6 +697,10 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     int rn = (inst >> 5) & 0x1f;
     DAsmFormat(out, "%s %s, %s", unsigned_convert ? "ucvtf" : "scvtf",
                VReg(rd, fp64 ? 8 : 4), XReg(rn, int64, false));
+    return true;
+  }
+
+  if (DisassembleHint(inst, out)) {
     return true;
   }
 

@@ -53,7 +53,7 @@ run_exec_case x86_64 "$X86_64" x86_64_operand_modifiers 0 \
 run_exec_case x86_64 "$X86_64" x86_64_fixed_register_constraints 0 \
   'unsigned long fixed_register_values(void) {' \
   '  unsigned long a, b, c, d;' \
-  '  __asm__ volatile ("movq $10,%0\n\tmovq $8,%1\n\tmovq $2,%2\n\tmovq $10,%3" : "=a" (a), "=b" (b), "=c" (c), "=d" (d));' \
+  '  __asm__ volatile ("movq $16,%0\n\tmovq $8,%1\n\tmovq $2,%2\n\tmovq $16,%3" : "=a" (a), "=b" (b), "=c" (c), "=d" (d));' \
   '  return a + b + c + d;' \
   '}' \
   'int main(void) {' \

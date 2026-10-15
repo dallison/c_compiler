@@ -321,6 +321,11 @@ void AsmObjectEmitSleb128(AsmObject* object, int section, int64_t value) {
 }
 
 void AsmObjectAlignCurrentSection(AsmObject* object, int alignment) {
+  AsmObjectAlignCurrentSectionWithFill(object, alignment, 0, -1);
+}
+
+void AsmObjectAlignCurrentSectionWithFill(AsmObject* object, int alignment,
+                                          int fill, int64_t max_skip) {
   if (object->current_section < 0 ||
       (size_t)object->current_section >= object->sections.length ||
       alignment <= 1) {
@@ -328,21 +333,54 @@ void AsmObjectAlignCurrentSection(AsmObject* object, int alignment) {
   }
   AssemblerSection* sect =
       object->sections.value.p[object->current_section];
+  size_t remainder = sect->address % (size_t)alignment;
+  size_t num_bytes = remainder == 0 ? 0 : (size_t)alignment - remainder;
+  if (max_skip >= 0 && num_bytes > (uint64_t)max_skip) {
+    return;
+  }
   if (alignment > sect->alignment) {
     sect->alignment = alignment;
   }
-  size_t remainder = sect->address % (size_t)alignment;
-  size_t next_address =
-      remainder == 0 ? sect->address
-                     : sect->address + (size_t)alignment - remainder;
-  size_t num_bytes = next_address - sect->address;
-  if (object->pass == ASM_OBJECT_FINAL_PASS) {
-    if (sect->contents.data_location == kSectionContentsBuffered) {
-      BufferAddSpace(&sect->contents.data.buffered, num_bytes);
-    }
-    sect->contents.size += num_bytes;
+  if (fill >= 0) {
+    AsmObjectEmitFill(object, object->current_section, (int64_t)num_bytes,
+                      fill);
+    return;
   }
-  sect->address = next_address;
+  if (object->elf_machine_type == ELF_MACHINE_TYPE_AARCH64 ||
+      object->elf_machine_type == ELF_MACHINE_TYPE_RISC_V) {
+    // Fixed 4-byte NOPs; a leading partial word can't be reached by
+    // execution, so it is zero.
+    uint32_t nop = object->elf_machine_type == ELF_MACHINE_TYPE_AARCH64
+                       ? 0xd503201fu
+                       : 0x00000013u;  // addi x0, x0, 0
+    AsmObjectEmitFill(object, object->current_section,
+                      (int64_t)(num_bytes % 4), 0);
+    for (size_t i = 0; i < num_bytes / 4; i++) {
+      for (int b = 0; b < 4; b++) {
+        AsmObjectEmitByte(object, object->current_section,
+                          (uint8_t)(nop >> (8 * b)));
+      }
+    }
+    return;
+  }
+  // The recommended x86 NOP sequences, indexed by length - 1.
+  static const uint8_t kX86Nops[8][8] = {
+      {0x90},
+      {0x66, 0x90},
+      {0x0f, 0x1f, 0x00},
+      {0x0f, 0x1f, 0x40, 0x00},
+      {0x0f, 0x1f, 0x44, 0x00, 0x00},
+      {0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00},
+      {0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00},
+      {0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00},
+  };
+  while (num_bytes > 0) {
+    size_t n = num_bytes < 8 ? num_bytes : 8;
+    for (size_t i = 0; i < n; i++) {
+      AsmObjectEmitByte(object, object->current_section, kX86Nops[n - 1][i]);
+    }
+    num_bytes -= n;
+  }
 }
 
 static bool ElfRelocationIsTls(uint16_t machine, int32_t type) {
@@ -675,6 +713,12 @@ static void AddSections(AsmObject* object, ELFWriterFile* elf) {
       section_symbol->exported = true;
       section_symbol->defined = true;
       AsmObjectInsertSymbol(object, section_symbol);
+    }
+    // The null section has no section symbol; readers that resolve a section
+    // symbol's name through its st_shndx reject one for index 0.
+    if (elf_section->index == 0) {
+      section_symbol_indexes[i] = 0;
+      continue;
     }
     section_symbol_indexes[i] = (int32_t)elf->symbol_table.length;
     ELFWriterAddSectionSymbol(elf, &elf_section->name, elf_section->index);

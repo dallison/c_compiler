@@ -84,6 +84,9 @@ AssemblerSymbol* AssemblerFindSymbol(Assembler* assembler, const char* name);
 void AssemblerInsertSymbol(Assembler* assembler, AssemblerSymbol* sym);
 void AssemblerTrackOrphanSymbol(Assembler* assembler, AssemblerSymbol* sym);
 void AssemblerReset(Assembler* assembler, bool clear_symbols);
+// Switches to `.text`, creating it in pass 1.  Source assembly starts every
+// pass there, as GNU as does.
+void AssemblerSelectTextSection(Assembler* assembler);
 void AssemblerClearSymbols(Assembler* assembler);
 
 int AssemblerAddSection(Assembler* assembler, String* name, int32_t type,
@@ -115,6 +118,12 @@ void AssemblerEmitHalf(Assembler* assembler, int section, uint16_t half);
 void AssemblerEmitLong(Assembler* assembler, int section, uint64_t l);
 int64_t AssemblerEvaluateKnownExpression(Assembler* assembler, bool* known);
 int64_t AssemblerEvaluateExpression(Assembler* assembler);
+// Evaluates an expression of the form `symbol + constant` (in any order, with
+// constant subexpressions and same-section label differences folded) into
+// `*sym` and `*addend`.  *sym is NULL when the value is absolute.
+bool AssemblerEvaluateRelocatableExpression(Assembler* assembler,
+                                            AssemblerSymbol** sym,
+                                            int64_t* addend);
 double AssemblerGetDoubleConst(Assembler* assembler);
 
 void AssemblerError(Assembler* assembler, const char* format, ...);
@@ -125,6 +134,11 @@ void AssemblerWarning(Assembler* assembler, const char* warn,
 
 int64_t AssemblerCurrentAddress(Assembler* assembler);
 void AssemblerExtractSymbolSuffix(String* symbol, String* name, String* suffix);
+
+// True when the current token names a symbol.  As in GNU as, a symbol name
+// may be written in double quotes (`.global "f"`, `"f":`, `call "f"`); such a
+// token is turned into the identifier it spells.
+bool AssemblerLookingAtSymbol(Assembler* assembler);
 
 void AssemblerNoteNumericLocalLabel(Assembler* assembler, int number);
 AssemblerSymbol* AssemblerLookupNumericLocalLabel(Assembler* assembler,

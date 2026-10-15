@@ -7,7 +7,7 @@
 //
 
 .data
-.align 2
+.p2align 2
 .global __davecc_itanium_vptr_class
 __davecc_itanium_vptr_class:
 	.4byte _ZTVN10__cxxabiv117__class_type_infoE_u2b16

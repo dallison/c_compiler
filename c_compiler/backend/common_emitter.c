@@ -136,15 +136,11 @@ static void SortStaticInitializersByOffset(Vector* initializers) {
 
 void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
   char buf[256];
-  // Pick a data directive that emits exactly pointer_size bytes.  The
-  // assembler treats .short as 2 bytes, .word as 4 bytes and .8byte as 8
-  // bytes, so a 2-byte pointer target (e.g. 6502) must use .short or the
-  // pointer would occupy 4 bytes and shift every following field.
+  // Pick a data directive that emits exactly pointer_size bytes.  The sized
+  // forms mean the same on every target; `.word` and `.long` do not.
   const char* ptr_asm =
       compiler->pointer_size == 8 ? ".8byte" :
-      compiler->pointer_size == 2 ? ".short" : ".word";
-  const char* long_asm =
-      compiler->pointer_size == 8 ? ".8byte" : ".long";
+      compiler->pointer_size == 2 ? ".2byte" : ".4byte";
   SortStaticInitializersByOffset(&var->initializers);
   EmitP2Align(var->alignment, fp);
   fprintf(fp, "%s:\n", VarName(var, buf, sizeof(buf)));
@@ -174,11 +170,11 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
         next_offset += 2;
         break;
       case kInitTypeWord:
-        fprintf(fp, "\t.word   %d\t\t// offset %d\n", init->value.word, next_offset);
+        fprintf(fp, "\t.4byte   %d\t\t// offset %d\n", init->value.word, next_offset);
         next_offset += 4;
         break;
       case kInitTypeLong:
-        fprintf(fp, "\t%s   %" PRId64 "\t\t// offset %d\n", long_asm,
+        fprintf(fp, "\t.8byte   %" PRId64 "\t\t// offset %d\n",
                 (int64_t)init->value._long, next_offset);
         next_offset += 8;
         break;
@@ -385,7 +381,7 @@ static void EmitFunctionPointer(Symbol* function, FILE* fp) {
   char buf[256];
   const char* ptr_asm =
       compiler->pointer_size == 8 ? ".8byte" :
-      compiler->pointer_size == 2 ? ".short" : ".word";
+      compiler->pointer_size == 2 ? ".2byte" : ".4byte";
   if (function->flags.is_local) {
     fprintf(fp, "\t.local %s\n",
             TargetSymbolName(function, buf, sizeof(buf)));

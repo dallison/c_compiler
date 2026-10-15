@@ -153,13 +153,13 @@ check_frame_semantics "$WORK/call5.s"
 grep -Eq '8\(%ebp\)|12\(%ebp\)|16\(%ebp\)|20\(%ebp\)|24\(%ebp\)' "$WORK/call5.s"
 grep -q 'idivl\|divl' "$WORK/divmod.s"
 grep -q 'set' "$WORK/compare.s"
-grep -Eq 'addl \$c, %eax|8\(%ebp\).*12\(%ebp\)' "$WORK/varargs.s" || grep -q 'addl \$12, %eax' "$WORK/varargs.s"
-grep -Eq 'addl \$4, %eax|8\(%ebp\)' "$WORK/struct4.s"
-grep -q 'ret \$4' "$WORK/struct4.s"
+grep -Eq 'addl \$(0xc|12), %eax|8\(%ebp\).*12\(%ebp\)' "$WORK/varargs.s"
+grep -Eq 'addl \$(0x)?4, %eax|8\(%ebp\)' "$WORK/struct4.s"
+grep -Eq 'ret \$(0x)?4' "$WORK/struct4.s"
 grep -q 'call \*' "$WORK/indirect.s" || grep -q 'ff d0' "$WORK/indirect.o" 2>/dev/null || objdump -d "$WORK/indirect.o" | grep -q 'ff d0'
 grep -q 'pushl %ebp' "$WORK/spill.s"
 # Non-leaf forwarding with no locals still allocates an 8-byte frame body.
-grep -Eq 'subl \$8, %esp|addl \$-8, %esp' "$WORK/forward.s"
+grep -Eq 'subl \$(0x)?8, %esp|addl \$-(0x)?8, %esp' "$WORK/forward.s"
 
 # Scalar long long: compile and emit 32-bit pair arithmetic (adcl/sbbl).
 cat >"$WORK/wide_int.c" <<'EOF'

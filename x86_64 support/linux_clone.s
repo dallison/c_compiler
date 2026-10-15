@@ -14,7 +14,7 @@ __davecc_linux_clone:
 	mov %rax, %rsi
 	mov %r9, %rdx
 	mov %r9, %r10
-	mov $38, %rax
+	mov $0x38, %rax
 	syscall
 	test %rax, %rax
 	jz .Lclone_child
@@ -27,5 +27,5 @@ __davecc_linux_clone:
 	mov 8(%rsp), %r13
 	call *%r13
 	mov %rax, %rdi
-	mov $3c, %rax
+	mov $0x3c, %rax
 	syscall

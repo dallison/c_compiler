@@ -1048,9 +1048,9 @@ static const char* AddressDirective(void) {
     case 2:
       return ".short";
     case 4:
-      return ".word";
+      return ".4byte";
     default:
-      return ".long";
+      return ".8byte";
   }
 }
 
@@ -1166,10 +1166,10 @@ static void DebugEmitConstant(DebugBuilder* builder, int width, int64_t value) {
       fprintf(builder->fp, "\t.short %d\n", (int)value);
       break;
     case 4:
-      fprintf(builder->fp, "\t.word %d\n", (int)value);
+      fprintf(builder->fp, "\t.4byte %d\n", (int)value);
       break;
     default:
-      fprintf(builder->fp, "\t.long %lld\n", (long long)value);
+      fprintf(builder->fp, "\t.8byte %lld\n", (long long)value);
       break;
   }
 }
@@ -1262,7 +1262,7 @@ static void DebugAttributeValueEmit(DebugBuilder* builder, DebugAttributeValue* 
         AsmModuleInteger(builder->module, 4, &expr);
         AsmExprDestruct(&expr);
       } else {
-        fprintf(builder->fp, "\t.word %s-.DW_info_begin\n", label);
+        fprintf(builder->fp, "\t.4byte %s-.DW_info_begin\n", label);
       }
       break;
     }
@@ -1286,7 +1286,7 @@ static void DebugAttributeValueEmit(DebugBuilder* builder, DebugAttributeValue* 
         AsmModuleInteger(builder->module, 4, &value);
         AsmExprDestruct(&value);
       } else {
-        fprintf(builder->fp, "\t.word 0x%zx\n", offset);
+        fprintf(builder->fp, "\t.4byte 0x%zx\n", offset);
       }
       BufferAppend(&builder->string_table, attr->v.string.value,
                    attr->v.string.length + 1);
@@ -1300,7 +1300,7 @@ static void DebugAttributeValueEmit(DebugBuilder* builder, DebugAttributeValue* 
       if (builder->module != NULL) {
         DebugModuleInteger(builder, 4, attr->v.string.value);
       } else {
-        fprintf(builder->fp, "\t.word %s\n", attr->v.string.value);
+        fprintf(builder->fp, "\t.4byte %s\n", attr->v.string.value);
       }
       break;
     case DW_FORM(exprloc): {
@@ -1977,9 +1977,9 @@ void DebugBuilderEmitDebugInfo(DebugBuilder* builder) {
   } else {
     fprintf(builder->fp, "\n\t.section .debug_info,\"\",@progbits,1\n");
     fprintf(builder->fp, ".DW_info_begin:\n");
-    fprintf(builder->fp, "\t.word .DW_info_end-.DW_info_begin-4\n");
+    fprintf(builder->fp, "\t.4byte .DW_info_end-.DW_info_begin-4\n");
     fprintf(builder->fp, "\t.short 4\n");
-    fprintf(builder->fp, "\t.word 0\n");
+    fprintf(builder->fp, "\t.4byte 0\n");
     fprintf(builder->fp, "\t.byte %d\n", compiler->pointer_size);
   }
   

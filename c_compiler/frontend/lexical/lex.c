@@ -1950,6 +1950,8 @@ static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   lex->preprocessor = preprocessor;
   lex->preprocessor_mode = false;
   lex->assembler_mode = false;
+  lex->dollar_is_hex = false;
+  lex->dollar_prefixed = false;
   lex->reading_token = false;
   lex->token_start = 0;
   lex->token_lineno = 0;
@@ -2037,6 +2039,8 @@ void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
   checkpoint->preprocessor_mode = lex->preprocessor_mode;
   checkpoint->in_comment = lex->in_comment;
   checkpoint->assembler_mode = lex->assembler_mode;
+  checkpoint->dollar_is_hex = lex->dollar_is_hex;
+  checkpoint->dollar_prefixed = lex->dollar_prefixed;
   checkpoint->replay_active = lex->replay_active;
   checkpoint->replay_tokens = lex->replay_tokens;
   checkpoint->replay_index = lex->replay_index;
@@ -2080,6 +2084,8 @@ void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
   lex->preprocessor_mode = checkpoint->preprocessor_mode;
   lex->in_comment = checkpoint->in_comment;
   lex->assembler_mode = checkpoint->assembler_mode;
+  lex->dollar_is_hex = checkpoint->dollar_is_hex;
+  lex->dollar_prefixed = checkpoint->dollar_prefixed;
   lex->replay_active = checkpoint->replay_active;
   lex->replay_tokens = checkpoint->replay_tokens;
   lex->replay_index = checkpoint->replay_index;
@@ -2506,6 +2512,7 @@ void LexNextToken(Lex* lex) {
 
   // Assume token is bad.  It will be set to a valid token if possible.
   lex->current_token = TOK(bad);
+  lex->dollar_prefixed = false;
   if (LexEof(lex)) {
     // End of file.
     lex->current_token = TOK(eof);
@@ -2513,6 +2520,11 @@ void LexNextToken(Lex* lex) {
   }
 
   char ch = CurrentChar(lex);
+  if (lex->assembler_mode && !lex->dollar_is_hex && ch == '$') {
+    lex->dollar_prefixed = true;
+    lex->pos++;
+    ch = CurrentChar(lex);
+  }
 
   // Check for identifier, reserved word or wide string.
   // Wide strings (and character constants) begin with upper
@@ -2527,9 +2539,9 @@ void LexNextToken(Lex* lex) {
   // Check for number or octal(or hex) constant.
   // NOTE that a floating point number can begin with . but we need to make
   // sure we don't confuse a singular dot or ellipsis (...) here.
-  // For compatibility with other assemblers, we also allow a $ to represent
-  // a hex number.
-  if (isdigit((unsigned char)ch) || (lex->assembler_mode && ch == '$') ||
+  // For compatibility with 6502 assemblers, $ may introduce a hex number.
+  if (isdigit((unsigned char)ch) ||
+      (lex->assembler_mode && lex->dollar_is_hex && ch == '$') ||
       (ch == '.' && isdigit((unsigned char)LookaheadChar(lex)))) {
     CollectNumber(lex, ch);
     goto record_token_location;

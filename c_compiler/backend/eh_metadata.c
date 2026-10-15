@@ -271,7 +271,7 @@ static void DaveEHPrintExceptTable(FILE* fp, const DaveEHFrameEmitInfo* info,
   }
 
   fprintf(fp, "\t.section \"%s\", \"a\", @progbits\n", section_name);
-  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, "\t.p2align 2\n");
   fprintf(fp, ".Leh_%s_lsda:\n", func);
 
   // @LPStart omitted: landing pad offsets are relative to function start.
@@ -329,7 +329,7 @@ static void DaveEHPrintExceptTable(FILE* fp, const DaveEHFrameEmitInfo* info,
     fprintf(fp, ".Leh_%s_ttype_end:\n", func);
   }
 
-  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, "\t.p2align 2\n");
   fprintf(fp, "\t.text\n\n");
 }
 
@@ -419,7 +419,7 @@ void DaveEHPrintEHFrameCIE(FILE* fp, const DaveEHFrameEmitInfo* info,
   size_t cie_length = EHFrameCIELength(info);
 
   fprintf(fp, "\t.section \".eh_frame\", \"a\", @progbits\n");
-  fprintf(fp, "\t.align 2\n");
+  fprintf(fp, "\t.p2align 2\n");
   if (with_eh) {
     fprintf(fp, "\t.weak %s\n", DAVECC_EH_PERSONALITY);
   }

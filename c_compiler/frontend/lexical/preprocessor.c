@@ -3181,6 +3181,7 @@ static bool EvaluatePreprocessorIntegerExpression(Preprocessor* p,
   lex.preprocessor_mode = true;
   lex.suppress_preprocessing = !expand_macros;
   lex.assembler_mode = p->lex->assembler_mode;
+  lex.dollar_is_hex = p->lex->dollar_is_hex;
   LexNextToken(&lex);
   
   Syntax syntax;
@@ -5122,10 +5123,23 @@ static void ProcessFunctionLikeReplacementText(Preprocessor* p,
         break;
       }
       case PPTOK(hash): {
-        // In assembler mode `#` is an immediate prefix (`#imm` / `#(expr)`),
-        // not C stringification.
+        // In assembler mode `#` is also an immediate prefix (`#0`,
+        // `#(expr)`); as in GNU cpp, it only stringizes a macro parameter.
         if (p->lex != NULL && p->lex->assembler_mode) {
-          break;
+          TokenIterator peek = rep_ti;
+          MoveToNextToken(&peek);
+          SkipSpaceTokens(&peek);
+          bool names_param = false;
+          if (CurrentToken(&peek) == PPTOK(identifier)) {
+            String name;
+            GetCurrentTokenSpelling(&peek, &name);
+            names_param = (StringEqual(&name, "__VA_ARGS__") && macro->varargs) ||
+                          FindMacroArg(args, &name) != NULL;
+            StringDestruct(&name);
+          }
+          if (!names_param) {
+            break;
+          }
         }
         EraseCurrentToken(&rep_ti);      // Remove # token.
         SkipSpaceTokens(&rep_ti);

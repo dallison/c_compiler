@@ -62,6 +62,55 @@ void X86_64InterpreterWriteReg(X86_64Interpreter* interpreter, int reg,
   WriteReg(interpreter, reg, value);
 }
 
+// Without a REX prefix, byte registers 4-7 are %ah/%ch/%dh/%bh.
+static bool IsHighByteReg(REX rex, int reg) {
+  return !rex.present && reg >= 4 && reg < 8;
+}
+
+static uint8_t ReadByteReg(X86_64Interpreter* interpreter, REX rex, int reg) {
+  if (IsHighByteReg(rex, reg)) {
+    return (uint8_t)(ReadReg(interpreter, reg - 4) >> 8);
+  }
+  return (uint8_t)ReadReg(interpreter, reg);
+}
+
+// Byte and word writes leave the rest of the register unchanged.
+static void WriteByteReg(X86_64Interpreter* interpreter, REX rex, int reg,
+                         uint8_t value) {
+  if (IsHighByteReg(rex, reg)) {
+    uint64_t old = ReadReg(interpreter, reg - 4);
+    WriteReg(interpreter, reg - 4, (old & ~0xff00ULL) | ((uint64_t)value << 8));
+    return;
+  }
+  WriteReg(interpreter, reg, (ReadReg(interpreter, reg) & ~0xffULL) | value);
+}
+
+static uint64_t WidthMask(int bits) {
+  return bits >= 64 ? UINT64_MAX : (1ULL << bits) - 1;
+}
+
+// Reads the low `bits` of a register operand.
+static uint64_t ReadSizedReg(X86_64Interpreter* interpreter, REX rex, int reg,
+                             int bits) {
+  if (bits == 8) {
+    return ReadByteReg(interpreter, rex, reg);
+  }
+  return ReadReg(interpreter, reg) & WidthMask(bits);
+}
+
+// 32-bit writes zero-extend; narrower writes merge.
+static void WriteSizedReg(X86_64Interpreter* interpreter, REX rex, int reg,
+                          int bits, uint64_t value) {
+  if (bits == 8) {
+    WriteByteReg(interpreter, rex, reg, (uint8_t)value);
+  } else if (bits == 16) {
+    WriteReg(interpreter, reg,
+             (ReadReg(interpreter, reg) & ~0xffffULL) | (value & 0xffff));
+  } else {
+    WriteReg(interpreter, reg, value & WidthMask(bits));
+  }
+}
+
 SymbolScope* X86_64InterpreterFindSymbol(X86_64Interpreter* interpreter,
                                          uint64_t address) {
   if (address >= interpreter->symbol_cache.start &&
@@ -267,6 +316,38 @@ static uint8_t Load8(X86_64Interpreter* interpreter, uint64_t addr) {
   }
   memcpy(&value, p, 1);
   return value;
+}
+
+static uint64_t LoadSized(X86_64Interpreter* interpreter, uint64_t addr,
+                          int bits) {
+  switch (bits) {
+    case 8:
+      return Load8(interpreter, addr);
+    case 16:
+      return Load16(interpreter, addr);
+    case 32:
+      return Load32(interpreter, addr);
+    default:
+      return Load64(interpreter, addr);
+  }
+}
+
+static void StoreSized(X86_64Interpreter* interpreter, uint64_t addr, int bits,
+                       uint64_t value) {
+  switch (bits) {
+    case 8:
+      Store8(interpreter, addr, (uint8_t)value);
+      break;
+    case 16:
+      Store16(interpreter, addr, (uint16_t)value);
+      break;
+    case 32:
+      Store32(interpreter, addr, (uint32_t)value);
+      break;
+    default:
+      Store64(interpreter, addr, value);
+      break;
+  }
 }
 
 static COMPILER_UNUSED int64_t SignExtend64(uint64_t value, int bits) {
@@ -504,44 +585,99 @@ static bool ExecuteMovImm(X86_64Interpreter* interpreter, size_t* pos, REX rex,
   return true;
 }
 
-static void UpdateFlags(X86_64Interpreter* interpreter, uint64_t result,
-                        bool width64) {
-  uint64_t mask = width64 ? UINT64_MAX : 0xffffffffu;
-  result &= mask;
+static void UpdateFlagsBits(X86_64Interpreter* interpreter, uint64_t result,
+                            int bits) {
+  result &= WidthMask(bits);
   interpreter->zf = result == 0;
-  interpreter->sf =
-      width64 ? ((result >> 63) & 1) != 0 : ((result >> 31) & 1) != 0;
+  interpreter->sf = ((result >> (bits - 1)) & 1) != 0;
 }
 
-static void UpdateLogicalFlags(X86_64Interpreter* interpreter, uint64_t result,
-                               bool width64) {
-  UpdateFlags(interpreter, result, width64);
+static void UpdateLogicalFlagsBits(X86_64Interpreter* interpreter,
+                                   uint64_t result, int bits) {
+  UpdateFlagsBits(interpreter, result, bits);
   interpreter->cf = false;
   interpreter->of = false;
 }
 
-static void UpdateAddFlags(X86_64Interpreter* interpreter, uint64_t lhs,
-                           uint64_t rhs, uint64_t result, bool width64) {
-  uint64_t mask = width64 ? UINT64_MAX : 0xffffffffu;
-  uint64_t sign = width64 ? (1ULL << 63) : (1ULL << 31);
+static void UpdateAddFlagsBits(X86_64Interpreter* interpreter, uint64_t lhs,
+                               uint64_t rhs, uint64_t result, int bits) {
+  uint64_t mask = WidthMask(bits);
+  uint64_t sign = 1ULL << (bits - 1);
   lhs &= mask;
   rhs &= mask;
   result &= mask;
-  UpdateFlags(interpreter, result, width64);
+  UpdateFlagsBits(interpreter, result, bits);
   interpreter->cf = result < lhs;
   interpreter->of = ((~(lhs ^ rhs) & (lhs ^ result) & sign) != 0);
 }
 
-static void UpdateSubFlags(X86_64Interpreter* interpreter, uint64_t lhs,
-                           uint64_t rhs, uint64_t result, bool width64) {
-  uint64_t mask = width64 ? UINT64_MAX : 0xffffffffu;
-  uint64_t sign = width64 ? (1ULL << 63) : (1ULL << 31);
+static void UpdateSubFlagsBits(X86_64Interpreter* interpreter, uint64_t lhs,
+                               uint64_t rhs, uint64_t result, int bits) {
+  uint64_t mask = WidthMask(bits);
+  uint64_t sign = 1ULL << (bits - 1);
   lhs &= mask;
   rhs &= mask;
   result &= mask;
-  UpdateFlags(interpreter, result, width64);
+  UpdateFlagsBits(interpreter, result, bits);
   interpreter->cf = lhs < rhs;
   interpreter->of = (((lhs ^ rhs) & (lhs ^ result) & sign) != 0);
+}
+
+static void UpdateFlags(X86_64Interpreter* interpreter, uint64_t result,
+                        bool width64) {
+  UpdateFlagsBits(interpreter, result, width64 ? 64 : 32);
+}
+
+static void UpdateLogicalFlags(X86_64Interpreter* interpreter, uint64_t result,
+                               bool width64) {
+  UpdateLogicalFlagsBits(interpreter, result, width64 ? 64 : 32);
+}
+
+// The eight ALU operations (add, or, adc, sbb, and, sub, xor, cmp) on
+// `bits`-wide operands.  Returns false for cmp, which writes no result.
+static bool AluOperation(X86_64Interpreter* interpreter, int op, uint64_t lhs,
+                         uint64_t rhs, int bits, uint64_t* result) {
+  uint64_t mask = WidthMask(bits);
+  lhs &= mask;
+  rhs &= mask;
+  uint64_t carry = interpreter->cf ? 1 : 0;
+  switch (op & 7) {
+    case 0:
+      *result = lhs + rhs;
+      UpdateAddFlagsBits(interpreter, lhs, rhs, *result, bits);
+      break;
+    case 1:
+      *result = lhs | rhs;
+      UpdateLogicalFlagsBits(interpreter, *result, bits);
+      break;
+    case 2:
+      *result = lhs + rhs + carry;
+      UpdateAddFlagsBits(interpreter, lhs, rhs, *result, bits);
+      // The carry out also happens when rhs + carry alone wraps.
+      interpreter->cf = ((*result & mask) < lhs) ||
+                        (carry != 0 && (*result & mask) == lhs);
+      break;
+    case 3:
+      *result = lhs - rhs - carry;
+      UpdateSubFlagsBits(interpreter, lhs, rhs, *result, bits);
+      interpreter->cf = lhs < rhs || (carry != 0 && lhs == rhs);
+      break;
+    case 4:
+      *result = lhs & rhs;
+      UpdateLogicalFlagsBits(interpreter, *result, bits);
+      break;
+    case 5:
+    case 7:
+      *result = lhs - rhs;
+      UpdateSubFlagsBits(interpreter, lhs, rhs, *result, bits);
+      break;
+    case 6:
+      *result = lhs ^ rhs;
+      UpdateLogicalFlagsBits(interpreter, *result, bits);
+      break;
+  }
+  *result &= mask;
+  return (op & 7) != 7;
 }
 
 static bool ExecuteMovRegMem(X86_64Interpreter* interpreter, size_t insn_len,
@@ -552,9 +688,8 @@ static bool ExecuteMovRegMem(X86_64Interpreter* interpreter, size_t insn_len,
   if (modrm.mod == 3) {
     if (store) {
       if (byte_op) {
-        WriteReg(interpreter, modrm.rm,
-                 (ReadReg(interpreter, modrm.rm) & ~0xffULL) |
-                     (ReadReg(interpreter, modrm.reg) & 0xff));
+        WriteByteReg(interpreter, rex, modrm.rm,
+                     ReadByteReg(interpreter, rex, modrm.reg));
       } else if (word_op) {
         WriteReg(interpreter, modrm.rm,
                  (ReadReg(interpreter, modrm.rm) & ~0xffffULL) |
@@ -567,7 +702,8 @@ static bool ExecuteMovRegMem(X86_64Interpreter* interpreter, size_t insn_len,
       }
     } else {
       if (byte_op) {
-        WriteReg(interpreter, modrm.reg, ReadReg(interpreter, modrm.rm) & 0xff);
+        WriteByteReg(interpreter, rex, modrm.reg,
+                     ReadByteReg(interpreter, rex, modrm.rm));
       } else if (word_op) {
         WriteReg(interpreter, modrm.reg,
                  (ReadReg(interpreter, modrm.reg) & ~0xffffULL) |
@@ -585,7 +721,7 @@ static bool ExecuteMovRegMem(X86_64Interpreter* interpreter, size_t insn_len,
   uint64_t addr = EffectiveAddress(interpreter, &modrm, insn_len);
   if (store) {
     if (byte_op) {
-      Store8(interpreter, addr, (uint8_t)ReadReg(interpreter, modrm.reg));
+      Store8(interpreter, addr, ReadByteReg(interpreter, rex, modrm.reg));
     } else if (word_op) {
       Store16(interpreter, addr, (uint16_t)ReadReg(interpreter, modrm.reg));
     } else if (rex.w) {
@@ -595,7 +731,7 @@ static bool ExecuteMovRegMem(X86_64Interpreter* interpreter, size_t insn_len,
     }
   } else {
     if (byte_op) {
-      WriteReg(interpreter, modrm.reg, Load8(interpreter, addr));
+      WriteByteReg(interpreter, rex, modrm.reg, Load8(interpreter, addr));
     } else if (word_op) {
       WriteReg(interpreter, modrm.reg,
                (ReadReg(interpreter, modrm.reg) & ~0xffffULL) |
@@ -619,164 +755,128 @@ static bool ExecuteLea(X86_64Interpreter* interpreter, size_t insn_len,
   return true;
 }
 
+static int AluOperandBits(REX rex, bool byte_op, bool op16) {
+  return byte_op ? 8 : rex.w ? 64 : op16 ? 16 : 32;
+}
+
 static bool ExecuteAluRegMem(X86_64Interpreter* interpreter, size_t insn_len,
                              REX rex, uint8_t opcode, ModRM modrm,
-                             bool reg_is_dest) {
+                             bool reg_is_dest, bool op16) {
   // For the ALU opcode families (ADD 0x00/0x01, SUB 0x28/0x29, ...), bit 0
   // selects the operand size: 0 => 8-bit byte form, 1 => 16/32/64-bit form.
-  bool byte_op = (opcode & 1) == 0;
+  int bits = AluOperandBits(rex, (opcode & 1) == 0, op16);
   int op = (opcode >> 3) & 7;
-  uint64_t lhs = 0;
-  uint64_t rhs = 0;
-  int dst = reg_is_dest ? modrm.reg : modrm.rm;
-  int src = reg_is_dest ? modrm.rm : modrm.reg;
   uint64_t mem_addr = 0;
-
+  uint64_t reg_value = ReadSizedReg(interpreter, rex, modrm.reg, bits);
+  uint64_t rm_value;
   if (modrm.mod == 3) {
-    lhs = ReadReg(interpreter, dst);
-    rhs = ReadReg(interpreter, src);
-  } else if (reg_is_dest) {
-    lhs = ReadReg(interpreter, modrm.reg);
-    mem_addr = EffectiveAddress(interpreter, &modrm, insn_len);
-    if (byte_op) {
-      rhs = Load8(interpreter, mem_addr);
-    } else if (rex.w) {
-      rhs = Load64(interpreter, mem_addr);
-    } else {
-      rhs = Load32(interpreter, mem_addr);
-    }
+    rm_value = ReadSizedReg(interpreter, rex, modrm.rm, bits);
   } else {
     mem_addr = EffectiveAddress(interpreter, &modrm, insn_len);
-    if (byte_op) {
-      lhs = Load8(interpreter, mem_addr);
-    } else if (rex.w) {
-      lhs = Load64(interpreter, mem_addr);
-    } else {
-      lhs = Load32(interpreter, mem_addr);
-    }
-    rhs = ReadReg(interpreter, modrm.reg);
+    rm_value = LoadSized(interpreter, mem_addr, bits);
   }
-
+  uint64_t lhs = reg_is_dest ? reg_value : rm_value;
+  uint64_t rhs = reg_is_dest ? rm_value : reg_value;
   uint64_t result = 0;
-  bool width64 = rex.w && !byte_op;
-  switch (op) {
-    case 0:
-      result = lhs + rhs;
-      UpdateAddFlags(interpreter, lhs, rhs, result, width64);
-      break;
-    case 1:
-      result = lhs | rhs;
-      UpdateLogicalFlags(interpreter, result, width64);
-      break;
-    case 2: {
-      uint64_t carry = interpreter->cf ? 1 : 0;
-      result = lhs + rhs + carry;
-      UpdateAddFlags(interpreter, lhs, rhs + carry, result, width64);
-      break;
-    }
-    case 3: {
-      uint64_t carry = interpreter->cf ? 1 : 0;
-      result = lhs - rhs - carry;
-      UpdateSubFlags(interpreter, lhs, rhs + carry, result, width64);
-      break;
-    }
-    case 4:
-      result = lhs & rhs;
-      UpdateLogicalFlags(interpreter, result, width64);
-      break;
-    case 5:
-      result = lhs - rhs;
-      UpdateSubFlags(interpreter, lhs, rhs, result, width64);
-      break;
-    case 6:
-      result = lhs ^ rhs;
-      UpdateLogicalFlags(interpreter, result, width64);
-      break;
-    case 7:
-      result = lhs - rhs;
-      UpdateSubFlags(interpreter, lhs, rhs, result, width64);
-      return true;
-    default:
-      return false;
+  if (!AluOperation(interpreter, op, lhs, rhs, bits, &result)) {
+    return true;
   }
-
-  if (!rex.w && !byte_op) {
-    result = (uint64_t)(uint32_t)result;
-  } else if (byte_op) {
-    result = (uint64_t)(uint8_t)result;
-  }
-
-  if (modrm.mod == 3) {
-    WriteReg(interpreter, dst, result);
-  } else if (!reg_is_dest) {
-    if (byte_op) {
-      Store8(interpreter, mem_addr, (uint8_t)result);
-    } else if (rex.w) {
-      Store64(interpreter, mem_addr, result);
-    } else {
-      Store32(interpreter, mem_addr, (uint32_t)result);
-    }
+  if (reg_is_dest) {
+    WriteSizedReg(interpreter, rex, modrm.reg, bits, result);
+  } else if (modrm.mod == 3) {
+    WriteSizedReg(interpreter, rex, modrm.rm, bits, result);
+  } else {
+    StoreSized(interpreter, mem_addr, bits, result);
   }
   return true;
 }
 
-static bool ExecuteAluImm(X86_64Interpreter* interpreter, REX rex, uint8_t opcode,
-                          ModRM modrm, int64_t imm) {
-  int op = modrm.reg;
-  bool byte_op = (opcode == 0x80);
-  if (modrm.mod != 3) {
-    return false;
+static bool ExecuteAluImm(X86_64Interpreter* interpreter, size_t insn_len,
+                          REX rex, uint8_t opcode, ModRM modrm, int64_t imm,
+                          bool op16) {
+  int bits = AluOperandBits(rex, opcode == 0x80, op16);
+  uint64_t mem_addr = 0;
+  uint64_t lhs;
+  if (modrm.mod == 3) {
+    lhs = ReadSizedReg(interpreter, rex, modrm.rm, bits);
+  } else {
+    mem_addr = EffectiveAddress(interpreter, &modrm, insn_len);
+    lhs = LoadSized(interpreter, mem_addr, bits);
   }
-  uint64_t lhs = ReadReg(interpreter, modrm.rm);
-  uint64_t rhs = (uint64_t)imm;
   uint64_t result = 0;
-  bool width64 = rex.w && !byte_op;
-  switch (op) {
-    case 0:
-      result = lhs + rhs;
-      UpdateAddFlags(interpreter, lhs, rhs, result, width64);
-      break;
-    case 1:
-      result = lhs | rhs;
-      UpdateLogicalFlags(interpreter, result, width64);
-      break;
-    case 2: {
-      uint64_t carry = interpreter->cf ? 1 : 0;
-      result = lhs + rhs + carry;
-      UpdateAddFlags(interpreter, lhs, rhs + carry, result, width64);
+  if (!AluOperation(interpreter, modrm.reg, lhs, (uint64_t)imm, bits,
+                    &result)) {
+    return true;
+  }
+  if (modrm.mod == 3) {
+    WriteSizedReg(interpreter, rex, modrm.rm, bits, result);
+  } else {
+    StoreSized(interpreter, mem_addr, bits, result);
+  }
+  return true;
+}
+
+// MOVS/CMPS/STOS/LODS/SCAS with an optional REP (F3) / REPNE (F2) prefix.
+// Segment overrides are ignored: guest code only uses flat segments here.
+static bool ExecuteString(X86_64Interpreter* interpreter, REX rex,
+                          uint8_t opcode, bool op16, uint8_t rep) {
+  int bytes = (opcode & 1) == 0 ? 1 : rex.w ? 8 : op16 ? 2 : 4;
+  int bits = bytes * 8;
+  uint64_t address_mask = interpreter->ia32 ? 0xffffffffULL : UINT64_MAX;
+  uint64_t step = interpreter->df ? (uint64_t)-(int64_t)bytes : (uint64_t)bytes;
+  uint8_t kind = opcode & ~1;
+  bool compares = kind == 0xA6 || kind == 0xAE;
+  bool uses_source = kind == 0xA4 || kind == 0xA6 || kind == 0xAC;
+  bool uses_destination = kind != 0xAC;
+  for (;;) {
+    uint64_t count = ReadReg(interpreter, X86_REG_RCX) & address_mask;
+    if (rep != 0 && count == 0) {
       break;
     }
-    case 3: {
-      uint64_t carry = interpreter->cf ? 1 : 0;
-      result = lhs - rhs - carry;
-      UpdateSubFlags(interpreter, lhs, rhs + carry, result, width64);
+    uint64_t source = ReadReg(interpreter, X86_REG_RSI) & address_mask;
+    uint64_t destination = ReadReg(interpreter, X86_REG_RDI) & address_mask;
+    uint64_t result = 0;
+    switch (kind) {
+      case 0xA4:
+        StoreSized(interpreter, destination, bits,
+                   LoadSized(interpreter, source, bits));
+        break;
+      case 0xA6:
+        AluOperation(interpreter, 7, LoadSized(interpreter, source, bits),
+                     LoadSized(interpreter, destination, bits), bits, &result);
+        break;
+      case 0xAA:
+        StoreSized(interpreter, destination, bits,
+                   ReadSizedReg(interpreter, rex, X86_REG_RAX, bits));
+        break;
+      case 0xAC:
+        WriteSizedReg(interpreter, rex, X86_REG_RAX, bits,
+                      LoadSized(interpreter, source, bits));
+        break;
+      default:
+        AluOperation(interpreter, 7,
+                     ReadSizedReg(interpreter, rex, X86_REG_RAX, bits),
+                     LoadSized(interpreter, destination, bits), bits, &result);
+        break;
+    }
+    if (!interpreter->running) {
+      // The access already reported the fault and stopped this guest thread.
       break;
     }
-    case 4:
-      result = lhs & rhs;
-      UpdateLogicalFlags(interpreter, result, width64);
+    if (uses_source) {
+      WriteReg(interpreter, X86_REG_RSI, (source + step) & address_mask);
+    }
+    if (uses_destination) {
+      WriteReg(interpreter, X86_REG_RDI, (destination + step) & address_mask);
+    }
+    if (rep == 0) {
       break;
-    case 5:
-      result = lhs - rhs;
-      UpdateSubFlags(interpreter, lhs, rhs, result, width64);
+    }
+    WriteReg(interpreter, X86_REG_RCX, (count - 1) & address_mask);
+    if (compares && interpreter->zf != (rep == 0xF3)) {
       break;
-    case 6:
-      result = lhs ^ rhs;
-      UpdateLogicalFlags(interpreter, result, width64);
-      break;
-    case 7:
-      result = lhs - rhs;
-      UpdateSubFlags(interpreter, lhs, rhs, result, width64);
-      return true;
-    default:
-      return false;
+    }
   }
-  if (!rex.w && !byte_op) {
-    result = (uint64_t)(uint32_t)result;
-  } else if (byte_op) {
-    result = (uint64_t)(uint8_t)result;
-  }
-  WriteReg(interpreter, modrm.rm, result);
   return true;
 }
 
@@ -936,15 +1036,34 @@ static bool ConditionHolds(const X86_64Interpreter* interpreter, uint8_t cc) {
   }
 }
 
-static bool ExecuteSetcc(X86_64Interpreter* interpreter, uint8_t cc,
-                         ModRM modrm) {
-  if (modrm.mod != 3) {
-    return false;
+static bool ExecuteSetcc(X86_64Interpreter* interpreter, size_t insn_len,
+                         REX rex, uint8_t cc, ModRM modrm) {
+  uint8_t value = ConditionHolds(interpreter, cc) ? 1 : 0;
+  if (modrm.mod == 3) {
+    WriteByteReg(interpreter, rex, modrm.rm, value);
+  } else {
+    Store8(interpreter, EffectiveAddress(interpreter, &modrm, insn_len),
+           value);
   }
-  bool set = ConditionHolds(interpreter, cc);
-  uint64_t reg = ReadReg(interpreter, modrm.rm);
-  reg = (reg & ~0xffULL) | (set ? 1ULL : 0ULL);
-  WriteReg(interpreter, modrm.rm, reg);
+  return true;
+}
+
+static bool ExecuteCmovcc(X86_64Interpreter* interpreter, size_t insn_len,
+                          REX rex, uint8_t cc, ModRM modrm, bool op16) {
+  int bits = rex.w ? 64 : op16 ? 16 : 32;
+  uint64_t value =
+      modrm.mod == 3
+          ? ReadSizedReg(interpreter, rex, modrm.rm, bits)
+          : LoadSized(interpreter,
+                      EffectiveAddress(interpreter, &modrm, insn_len), bits);
+  if (!ConditionHolds(interpreter, cc)) {
+    // A 32-bit CMOV zero-extends its destination even when not taken.
+    if (bits != 32) {
+      return true;
+    }
+    value = ReadSizedReg(interpreter, rex, modrm.reg, bits);
+  }
+  WriteSizedReg(interpreter, rex, modrm.reg, bits, value);
   return true;
 }
 
@@ -1540,9 +1659,16 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
   // Consume legacy / mandatory SSE prefixes and LOCK. Guest scheduling does
   // not preempt an instruction, so LOCK needs no additional synchronization.
   uint8_t sse_prefix = 0;
+  bool operand_size_prefix = false;
+  uint8_t rep_prefix = 0;
   while (b0 == 0x66 || b0 == 0xf0 || b0 == 0xf2 || b0 == 0xf3) {
     if (b0 != 0xf0) {
       sse_prefix = b0;
+    }
+    if (b0 == 0x66) {
+      operand_size_prefix = true;
+    } else if (b0 != 0xf0) {
+      rep_prefix = b0;
     }
     b0 = Fetch8(interpreter, &pos);
   }
@@ -1596,8 +1722,8 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       *insn_len = pos;
       return true;
     }
-    if (b1 == 0x18 || b1 == 0x0D) {
-      // PREFETCH* / PREFETCHW: hints only; no architectural state.
+    if (b1 == 0x18 || b1 == 0x0D || b1 == 0x1F) {
+      // PREFETCH* / PREFETCHW / multi-byte NOP: no architectural state.
       ModRM modrm;
       if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
         return false;
@@ -1639,7 +1765,16 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
         return false;
       }
       *insn_len = pos;
-      return ExecuteSetcc(interpreter, b1 & 0x0F, modrm);
+      return ExecuteSetcc(interpreter, *insn_len, rex, b1 & 0x0F, modrm);
+    }
+    if (b1 >= 0x40 && b1 <= 0x4F) {
+      ModRM modrm;
+      if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
+        return false;
+      }
+      *insn_len = pos;
+      return ExecuteCmovcc(interpreter, *insn_len, rex, b1 & 0x0F, modrm,
+                           operand_size_prefix);
     }
     if (b1 == 0xC0 || b1 == 0xC1) {  // XADD r/m, r
       ModRM modrm;
@@ -1993,6 +2128,18 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
     return true;
   }
 
+  if (b0 == 0xFC || b0 == 0xFD) {  // CLD / STD
+    interpreter->df = b0 == 0xFD;
+    *insn_len = pos;
+    return true;
+  }
+
+  if ((b0 >= 0xA4 && b0 <= 0xA7) || (b0 >= 0xAA && b0 <= 0xAF)) {
+    *insn_len = pos;
+    return ExecuteString(interpreter, rex, b0, operand_size_prefix,
+                         rep_prefix);
+  }
+
   if (b0 == 0x99) {  // CQO (rex.w) / CDQ: sign-extend RAX into RDX
     uint64_t rax = ReadReg(interpreter, X86_REG_RAX);
     if (rex.w) {
@@ -2113,51 +2260,34 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
     return ExecuteTest(interpreter, *insn_len, rex, b0, modrm);
   }
 
-  if (b0 == 0x01 || b0 == 0x29) {
-    if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
-      return false;
-    }
-    *insn_len = pos;
-    return ExecuteAluRegMem(interpreter, *insn_len, rex, b0, modrm, false);
-  }
-
-  if (b0 == 0x03 || b0 == 0x2B) {
-    if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
-      return false;
-    }
-    *insn_len = pos;
-    return ExecuteAluRegMem(interpreter, *insn_len, rex, b0, modrm, true);
-  }
-
-  if (b0 == 0x39 || b0 == 0x3B) {
-    if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
-      return false;
-    }
-    *insn_len = pos;
-    return ExecuteAluRegMem(interpreter, *insn_len, rex, b0, modrm, b0 == 0x3B);
-  }
-
-  // OR (0x09/0x0B), AND (0x21/0x23) and XOR (0x31/0x33) reg/reg or reg/mem
-  // forms.  The "...1" opcode stores into r/m (reg is source); the "...3"
-  // opcode has the register as destination.
-  if (b0 == 0x09 || b0 == 0x0B || b0 == 0x21 || b0 == 0x23 || b0 == 0x31 ||
-      b0 == 0x33) {
+  // ALU reg/mem forms: 00-03 add, 08-0B or, 10-13 adc, 18-1B sbb, 20-23 and,
+  // 28-2B sub, 30-33 xor, 38-3B cmp.  Bit 0 clear is the byte form; bit 1
+  // set makes the register the destination.
+  if (b0 < 0x40 && (b0 & 7) < 4) {
     if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
       return false;
     }
     *insn_len = pos;
     return ExecuteAluRegMem(interpreter, *insn_len, rex, b0, modrm,
-                            (b0 & 2) != 0);
+                            (b0 & 2) != 0, operand_size_prefix);
   }
 
-  if (b0 == 0x81 || b0 == 0x83) {
+  if (b0 == 0x80 || b0 == 0x81 || b0 == 0x83) {
     if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
       return false;
     }
-    int64_t imm = (b0 == 0x81) ? (int32_t)Fetch32(interpreter, &pos)
-                               : (int8_t)Fetch8(interpreter, &pos);
+    bool op16 = operand_size_prefix && !rex.w;
+    int64_t imm;
+    if (b0 == 0x81 && op16) {
+      uint16_t lo = Fetch8(interpreter, &pos);
+      imm = (int16_t)(lo | (uint16_t)(Fetch8(interpreter, &pos) << 8));
+    } else if (b0 == 0x81) {
+      imm = (int32_t)Fetch32(interpreter, &pos);
+    } else {
+      imm = (int8_t)Fetch8(interpreter, &pos);
+    }
     *insn_len = pos;
-    return ExecuteAluImm(interpreter, rex, b0, modrm, imm);
+    return ExecuteAluImm(interpreter, *insn_len, rex, b0, modrm, imm, op16);
   }
 
   if (b0 == 0x69 || b0 == 0x6B) {  // IMUL r, r/m, imm32/imm8

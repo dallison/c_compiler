@@ -55,7 +55,7 @@ static void TestRetainedOperationsAndText(void) {
   assert(strstr(text, "\t.p2align 3\n") != NULL);
   assert(strstr(text, "value:\n") != NULL);
   assert(strstr(text, "\t.8byte external+20\n") != NULL);
-  assert(strstr(text, "\t.word (value_end-value)\n") != NULL);
+  assert(strstr(text, "\t.4byte (value_end-value)\n") != NULL);
   assert(strstr(text, "\t// retained, zero-sized comment\n") != NULL);
   free(text);
   AsmModuleDestruct(&module);

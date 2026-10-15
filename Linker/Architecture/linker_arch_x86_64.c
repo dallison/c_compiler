@@ -119,6 +119,10 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       *((int16_t*)target_address) = (int16_t)(S + A);
       return;
 
+    case R_X86_64_8:
+      *((int8_t*)target_address) = (int8_t)(S + A);
+      return;
+
     case R_X86_64_PC64:
       *((int64_t*)target_address) = (int64_t)(S + A - P);
       return;

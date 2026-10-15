@@ -161,6 +161,24 @@ static void HandlePICRelocation(
   }
 }
 
+// Places the word offset of a PC-relative branch or literal load in its
+// `bits`-wide field at bit 5, rejecting a target the field can't reach.
+static void PatchPcRelativeWordField(ObjectFile* file, const char* kind,
+                                     char* target_address, int64_t offset,
+                                     int bits) {
+  int64_t limit = (int64_t)1 << (bits + 1);
+  if ((offset & 3) != 0 || offset < -limit || offset >= limit) {
+    LinkerError(file, "%s target is misaligned or out of range (offset %lld)",
+                kind, (long long)offset);
+    return;
+  }
+  uint32_t mask = (1u << bits) - 1;
+  uint32_t instruction = *(uint32_t*)target_address;
+  instruction &= ~(mask << 5);
+  instruction |= ((uint32_t)(offset >> 2) & mask) << 5;
+  *(uint32_t*)target_address = instruction;
+}
+
 static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
                             LinkerSymbol* symbol, char* target_address,
                             uint64_t S, int64_t A) {
@@ -311,7 +329,14 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       break;
 
     case R_AARCH64_LD_PREL_LO19:
-      break;
+      PatchPcRelativeWordField(file, "Literal load", target_address,
+                               (int64_t)(S + A - P), 19);
+      return;
+
+    case R_AARCH64_CONDBR19:
+      PatchPcRelativeWordField(file, "Conditional branch", target_address,
+                               (int64_t)(S + A - P), 19);
+      return;
 
     case R_AARCH64_ADR_PREL_LO21: {
       int64_t offset = (int64_t)(S + A - P);
@@ -370,10 +395,9 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
     }
 
     case R_AARCH64_TSTBR14:
-      break;
-
-    case R_AARCH64_CONDBR19:
-      break;
+      PatchPcRelativeWordField(file, "Test-and-branch", target_address,
+                               (int64_t)(S + A - P), 14);
+      return;
 
     case R_AARCH64_JUMP26: {
       int64_t offset = (int64_t)(S + A - P);

@@ -1040,23 +1040,22 @@ static ASTNode* ConvertPotentialConstant(ASTNode* from, TypeRecord* to,
         case AST_OP(ll2c):
         case AST_OP(l2s):
         case AST_OP(ll2s):
-          return ConvertIntConstantToType(c, to);
-        case AST_OP(ll2l):
+        case AST_OP(ll2l):   // long is narrower than long long on ILP32.
         case AST_OP(l2ll):
-          return from;
+          return ConvertIntConstantToType(c, to);
         case AST_OP(l2f):
         case AST_OP(ll2f):
         case AST_OP(ll2d):
         case AST_OP(l2d):
         case AST_OP(ll2ld):
         case AST_OP(l2ld):
-          return ConvertIntToDouble(c, 64);
+          return ConvertIntToDouble(c, (int)c->base.type->size * 8);
         case AST_OP(b2i):
         case AST_OP(b2c):
         case AST_OP(b2s):
         case AST_OP(b2l):
-          return from;
         case AST_OP(b2ll):
+          return from;
         case AST_OP(b2f):
         case AST_OP(b2d):
         case AST_OP(b2ld):
@@ -1086,7 +1085,7 @@ static ASTNode* ConvertPotentialConstant(ASTNode* from, TypeRecord* to,
         case AST_OP(d2ll):
         case AST_OP(ld2l):
         case AST_OP(ld2ll):
-          return ConvertDoubleToInt(c, to, 64);
+          return ConvertDoubleToInt(c, to, (int)to->size * 8);
         case AST_OP(f2d):
         case AST_OP(f2ld):
         case AST_OP(d2f):

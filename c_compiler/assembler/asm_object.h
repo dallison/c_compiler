@@ -193,6 +193,12 @@ void AsmObjectEmitFill(AsmObject* object, int section, int64_t num_bytes,
 void AsmObjectEmitUleb128(AsmObject* object, int section, uint64_t value);
 void AsmObjectEmitSleb128(AsmObject* object, int section, int64_t value);
 void AsmObjectAlignCurrentSection(AsmObject* object, int alignment);
+// Pads with `fill` bytes, or with the target's NOP instructions if `fill` is
+// negative (x86, AArch64 and RISC-V);
+// skips the alignment entirely if it needs more than `max_skip` bytes (no
+// limit if negative).
+void AsmObjectAlignCurrentSectionWithFill(AsmObject* object, int alignment,
+                                          int fill, int64_t max_skip);
 
 void AsmObjectAddRelocation(AsmObject* object, AssemblerRelocation* reloc);
 void AsmObjectAddRelocationForSymbol(AsmObject* object, AssemblerSymbol* symbol,

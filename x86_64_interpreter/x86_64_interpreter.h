@@ -47,6 +47,7 @@ typedef struct X86_64Interpreter {
   bool sf;
   bool of;
   bool pf;
+  bool df;
   jmp_buf debugger;
   bool running;
   bool rip_updated;

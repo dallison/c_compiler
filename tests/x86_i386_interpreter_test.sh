@@ -31,10 +31,21 @@ cat >"$WORK/program.c" <<'EOF'
 
 int add(int a, int b) { return a + b; }
 
+// Double constants stored straight to memory need all 64 bits.
+struct pair { double a, b; };
+void store_one(double* d) { *d = 1.0; }
+struct pair make_pair(double b) { struct pair p = { 1.0, b }; return p; }
+
 int main(int argc, char** argv) {
   (void)argv;
   if (add(3, 4) != 7) {
     return 2;
+  }
+  double d = 0;
+  store_one(&d);
+  struct pair p = make_pair(2.5);
+  if (d != 1.0 || p.a != 1.0 || p.b != 2.5 || 1.0 + d * 0.5 != 1.5) {
+    return 5;
   }
   if (argc < 1) {
     return 3;

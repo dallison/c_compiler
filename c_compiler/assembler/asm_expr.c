@@ -115,7 +115,7 @@ static ASTNode* ParsePrimaryExpression(Assembler* assembler) {
   }
 
   // Check for identifier.
-  if (LexLookingAt(lex, TOK(identifier))) {
+  if (AssemblerLookingAtSymbol(assembler)) {
     return ParseIdentifier(assembler);
   }
 
@@ -558,6 +558,105 @@ bool AssemblerEvaluateExpressionInternal(Assembler* assembler,
   bool v = EvaluateExpression(assembler, node, 0, result);
   ASTNodeDelete(node);
   return v;
+}
+
+static bool IsLocationCounter(const AssemblerSymbol* sym) {
+  return strcmp(sym->name.value, ".") == 0;
+}
+
+// ParseIdentifier gives a not-yet-seen name a placeholder outside the symbol
+// table (or, for `.`, the current location); a relocation needs the real
+// symbol that a later definition will fill in.
+static AssemblerSymbol* RelocationTarget(Assembler* assembler,
+                                         AssemblerSymbol* sym) {
+  if (IsLocationCounter(sym)) {
+    return sym;
+  }
+  AssemblerSymbol* found = AssemblerFindSymbol(assembler, sym->name.value);
+  if (found == NULL) {
+    found = NewAssemblerSymbol(sym->name.value, assembler->object.current_section,
+                               SYM_TYPE(none), SYM_BIND(local), 0);
+    found->is_forward_declared = true;
+    AssemblerInsertSymbol(assembler, found);
+  }
+  return found;
+}
+
+static bool LabelValueKnown(const AssemblerSymbol* sym) {
+  return sym->defined || IsLocationCounter(sym);
+}
+
+// Reduces `node` to `*sym + *addend`, with *sym NULL for an absolute value.
+// Operators other than +, - and unary +/- only combine absolute values.
+static bool EvaluateRelocatable(Assembler* assembler, ASTNode* node,
+                                AssemblerSymbol** sym, int64_t* addend) {
+  *sym = NULL;
+  *addend = 0;
+  switch (node->op) {
+    case AST_OP(identifier): {
+      AssemblerSymbol* asm_sym = RelocationTarget(
+          assembler, (AssemblerSymbol*)((IdentifierASTNode*)node)->symbol);
+      if (asm_sym->defined && asm_sym->is_constant) {
+        *addend = asm_sym->value;
+      } else {
+        *sym = asm_sym;
+      }
+      return true;
+    }
+    case AST_OP(plus):
+    case AST_OP(minus): {
+      BinaryASTNode* binary = (BinaryASTNode*)node;
+      AssemblerSymbol* left_sym;
+      AssemblerSymbol* right_sym;
+      int64_t left;
+      int64_t right;
+      if (!EvaluateRelocatable(assembler, binary->left, &left_sym, &left) ||
+          !EvaluateRelocatable(assembler, binary->right, &right_sym, &right)) {
+        return false;
+      }
+      if (node->op == AST_OP(plus)) {
+        if (left_sym != NULL && right_sym != NULL) {
+          return false;
+        }
+        *sym = left_sym != NULL ? left_sym : right_sym;
+        *addend = left + right;
+        return true;
+      }
+      if (right_sym == NULL) {
+        *sym = left_sym;
+        *addend = left - right;
+        return true;
+      }
+      // The difference of two labels in one section is absolute.
+      if (left_sym == NULL || !LabelValueKnown(left_sym) ||
+          !LabelValueKnown(right_sym) ||
+          left_sym->section != right_sym->section) {
+        return false;
+      }
+      *addend = (left_sym->value + left) - (right_sym->value + right);
+      return true;
+    }
+    case AST_OP(uplus):
+      return EvaluateRelocatable(assembler, ((UnaryASTNode*)node)->sub, sym,
+                                 addend);
+    default:
+      return EvaluateExpression(assembler, node, 0, addend);
+  }
+}
+
+bool AssemblerEvaluateRelocatableExpression(Assembler* assembler,
+                                            AssemblerSymbol** sym,
+                                            int64_t* addend) {
+  ASTNode* node = ParseExpression(assembler);
+  if (node == NULL) {
+    *sym = NULL;
+    *addend = 0;
+    return false;
+  }
+  bool v = EvaluateRelocatable(assembler, node, sym, addend);
+  ASTNodeDelete(node);
+  // `.` itself has no symbol to relocate against.
+  return v && (*sym == NULL || !IsLocationCounter(*sym));
 }
 
 #undef EVAL_BINARY_OP

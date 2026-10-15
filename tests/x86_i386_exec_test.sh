@@ -336,7 +336,7 @@ EOF
 
 "$DAVECC" -target x86 -nostdinc -c -o "$WORK/davecc_sret.o" "$WORK/davecc_sret.c"
 "$DAVECC" -target x86 -nostdinc -S -o "$WORK/davecc_sret.s" "$WORK/davecc_sret.c"
-grep -q 'ret \$4' "$WORK/davecc_sret.s" || {
+grep -Eq 'ret \$(0x)?4' "$WORK/davecc_sret.s" || {
   echo "davecc struct-return callee missing ret \$4" >&2
   exit 1
 }
@@ -382,7 +382,7 @@ EOF
 
 "$DAVECC" -target x86 -nostdinc -c -o "$WORK/davecc_calls_gcc.o" "$WORK/davecc_calls_gcc.c"
 "$DAVECC" -target x86 -nostdinc -S -o "$WORK/davecc_calls_gcc.s" "$WORK/davecc_calls_gcc.c"
-grep -Eq 'addl \$c, %esp|addl \$12, %esp' "$WORK/davecc_calls_gcc.s" || {
+grep -Eq 'addl \$(0xc|12), %esp' "$WORK/davecc_calls_gcc.s" || {
   echo "davecc struct-return caller missing adjusted stack cleanup" >&2
   exit 1
 }

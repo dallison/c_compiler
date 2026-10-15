@@ -52,8 +52,13 @@ DECLARE_DIRECTIVE_FUNC(hword);
 DECLARE_DIRECTIVE_FUNC(word);
 DECLARE_DIRECTIVE_FUNC(4byte);
 DECLARE_DIRECTIVE_FUNC(long);
+DECLARE_DIRECTIVE_FUNC(int);
 DECLARE_DIRECTIVE_FUNC(8byte);
+DECLARE_DIRECTIVE_FUNC(quad);
 DECLARE_DIRECTIVE_FUNC(space);
+DECLARE_DIRECTIVE_FUNC(zero);
+DECLARE_DIRECTIVE_FUNC(skip);
+DECLARE_DIRECTIVE_FUNC(balign);
 DECLARE_DIRECTIVE_FUNC(p2align);
 DECLARE_DIRECTIVE_FUNC(ascii);
 DECLARE_DIRECTIVE_FUNC(asciz);
@@ -97,8 +102,13 @@ static void InitializeDirectives(Map* directives) {
   DIRECTIVE(word);
   DIRECTIVE(4byte);
   DIRECTIVE(long);
+  DIRECTIVE(int);
   DIRECTIVE(8byte);
+  DIRECTIVE(quad);
   DIRECTIVE(space);
+  DIRECTIVE(zero);
+  DIRECTIVE(skip);
+  DIRECTIVE(balign);
   DIRECTIVE(p2align);
   DIRECTIVE(ascii);
   DIRECTIVE(asciz);
@@ -230,6 +240,8 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
     return false;
   }
   assembler->lex.assembler_mode = true;
+  assembler->lex.dollar_is_hex =
+      assembler->object.elf_machine_type == ELF_MACHINE_TYPEW65C02;
   SyntaxInit(&assembler->syntax, &assembler->lex);
   SyntaxOpenScope(&assembler->syntax);
   return true;
@@ -263,6 +275,8 @@ bool AssemblerInitFromString(Assembler* assembler, int16_t elf_machine_type,
     return false;
   }
   assembler->lex.assembler_mode = true;
+  assembler->lex.dollar_is_hex =
+      assembler->object.elf_machine_type == ELF_MACHINE_TYPEW65C02;
   SyntaxInit(&assembler->syntax, &assembler->lex);
   SyntaxOpenScope(&assembler->syntax);
   return true;
@@ -404,6 +418,14 @@ static void EnsureLocalLabelCap(Assembler* assembler, int number) {
   assembler->local_label_cap = new_cap;
 }
 
+bool AssemblerLookingAtSymbol(Assembler* assembler) {
+  Lex* lex = &assembler->lex;
+  if (lex->current_token == TOK(string) && lex->spelling.length > 0) {
+    lex->current_token = TOK(identifier);
+  }
+  return LexLookingAt(lex, TOK(identifier));
+}
+
 void AssemblerNoteNumericLocalLabel(Assembler* assembler, int number) {
   EnsureLocalLabelCap(assembler, number);
   if (number < 0 || assembler->local_label_count == NULL) {
@@ -453,11 +475,21 @@ AssemblerSymbol* AssemblerLookupNumericLocalLabel(Assembler* assembler,
   return symbol;
 }
 
+// GNU `as` separates statements on a line with `;`, which starts a comment
+// in 6502 syntax.
+static bool MatchStatementSeparator(Assembler* assembler) {
+  return assembler->object.elf_machine_type != ELF_MACHINE_TYPEW65C02 &&
+         LexMatch(&assembler->lex, TOK(semicolon));
+}
+
 static void Assemble(Assembler* assembler,
                      void (*run_func)(Assembler*, String*)) {
   String word = {0};
-  while (!LexEof(&assembler->lex)) {
-    if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+  // LexEof is already true while the tokens of a last line without a
+  // trailing newline are being read.
+  while (!LexEof(&assembler->lex) || AssemblerLookingAtSymbol(assembler) ||
+         LexLookingAt(&assembler->lex, TOK(number))) {
+    if (AssemblerLookingAtSymbol(assembler)) {
       // Starts with identifier.  Could be a symbol definition
       // or instruction.  A symbol definition is followed by a colon.
       StringClear(&word);
@@ -478,6 +510,11 @@ static void Assemble(Assembler* assembler,
             symbol->value = AssemblerCurrentAddress(assembler);
           }
         }
+        // `label: insn` continues on the same line.
+        if (AssemblerLookingAtSymbol(assembler) ||
+            LexLookingAt(&assembler->lex, TOK(number))) {
+          continue;
+        }
       } else {
         // Try as a directive name.
         void* dir_func = MapFindPointerKey(&assembler->directives, word.value);
@@ -488,12 +525,19 @@ static void Assemble(Assembler* assembler,
           // Must be an instruction, pass on.
           run_func(assembler, &word);  // Run the assembly pass.
         }
+        if (MatchStatementSeparator(assembler)) {
+          continue;
+        }
       }
     } else if (LexLookingAt(&assembler->lex, TOK(number))) {
       int number = (int)assembler->lex.number;
       LexNextToken(&assembler->lex);
       if (LexMatch(&assembler->lex, TOK(colon))) {
         AssemblerNoteNumericLocalLabel(assembler, number);
+        if (AssemblerLookingAtSymbol(assembler) ||
+            LexLookingAt(&assembler->lex, TOK(number))) {
+          continue;
+        }
       } else {
         AssemblerError(assembler, "Unexpected numeric token");
       }
@@ -545,6 +589,8 @@ void AssemblerAssembleInput(Assembler* assembler, const char* name, String* inpu
   LexCheckpointSave(&assembler->lex, &checkpoint);
   LexInitFromString(&assembler->lex, name, &owned, &assembler->preprocessor);
   assembler->lex.assembler_mode = true;
+  assembler->lex.dollar_is_hex =
+      assembler->object.elf_machine_type == ELF_MACHINE_TYPEW65C02;
   assembler->lex.suppress_preprocessing = true;
   LexNextToken(&assembler->lex);
   Assemble(assembler, run_func);
@@ -558,6 +604,7 @@ void AssemblerRunRecordedOperations(Assembler* assembler, Vector* inputs,
   assembler->object.pass = 1;
   while (assembler->num_errors == 0 &&
          assembler->object.pass <= ASM_OBJECT_FINAL_PASS) {
+    AssemblerSelectTextSection(assembler);
     for (size_t i = 0; i < inputs->length; i++) {
       AssemblerRecordedInput* input = inputs->value.p[i];
       if (input->kind == kAssemblerRecordedText) {
@@ -599,6 +646,7 @@ void AssemblerRun(Assembler* assembler, void (*run_func)(Assembler*, String*)) {
   LexNextToken(&assembler->lex);
   while (assembler->num_errors == 0 &&
          assembler->object.pass <= ASM_OBJECT_FINAL_PASS) {
+    AssemblerSelectTextSection(assembler);
     Assemble(assembler, run_func);  // Run the assembly pass.
     AssemblerAdvancePass(assembler);
     if (assembler->object.pass <= ASM_OBJECT_FINAL_PASS) {
@@ -640,16 +688,80 @@ void AssemblerWarning(Assembler* assembler, const char* warn,
 #define UNDEFINED_DIRECTIVE(spelling) \
   static void HandleDirective_##spelling(Assembler* assembler) {}
 
-static void HandleDirective_p2align(Assembler* assembler);
+static bool AssemblerTargetIsX86(Assembler* assembler) {
+  return assembler->object.elf_machine_type == ELF_MACHINE_TYPE_X86_64 ||
+         assembler->object.elf_machine_type == ELF_MACHINE_TYPE_X86;
+}
+
+// The alignment amount has been read; parses the optional `, fill, max_skip`.
+static void AlignDirective(Assembler* assembler, int64_t alignment) {
+  if (alignment <= 0 || alignment > (1 << 30) ||
+      (alignment & (alignment - 1)) != 0) {
+    AssemblerError(assembler, "Alignment %" PRId64 " is not a power of 2",
+                   alignment);
+    return;
+  }
+  bool has_fill = false;
+  int64_t fill = 0;
+  int64_t max_skip = -1;
+  if (LexMatch(&assembler->lex, TOK(comma))) {
+    if (!LexEof(&assembler->lex) &&
+        !LexLookingAt(&assembler->lex, TOK(comma))) {
+      fill = AssemblerEvaluateExpression(assembler) & 0xff;
+      has_fill = true;
+    }
+    if (LexMatch(&assembler->lex, TOK(comma))) {
+      max_skip = AssemblerEvaluateExpression(assembler);
+    }
+  }
+  int section = assembler->object.current_section;
+  uint16_t machine = assembler->object.elf_machine_type;
+  bool pads_code_with_nops = AssemblerTargetIsX86(assembler) ||
+                             machine == ELF_MACHINE_TYPE_AARCH64 ||
+                             machine == ELF_MACHINE_TYPE_RISC_V;
+  if (!has_fill && pads_code_with_nops && section >= 0 &&
+      (size_t)section < assembler->object.sections.length) {
+    AssemblerSection* sect = assembler->object.sections.value.p[section];
+    if ((sect->flags & SHF(execinstr)) != 0) {
+      fill = -1;   // NOPs: padding inside code may be executed.
+    }
+  }
+  AsmObjectAlignCurrentSectionWithFill(&assembler->object, (int)alignment,
+                                       (int)fill, max_skip);
+}
+
+static int64_t EvaluateAlignmentAmount(Assembler* assembler) {
+  assembler->parsing_layout_expression = true;
+  int64_t amount = AssemblerEvaluateExpression(assembler);
+  assembler->parsing_layout_expression = false;
+  return amount;
+}
+
+static void HandleDirective_p2align(Assembler* assembler) {
+  int64_t power = EvaluateAlignmentAmount(assembler);
+  if (power < 0 || power > 30) {
+    AssemblerError(assembler, "Invalid .p2align power %" PRId64, power);
+    return;
+  }
+  AlignDirective(assembler, (int64_t)1 << power);
+}
+
+static void HandleDirective_balign(Assembler* assembler) {
+  AlignDirective(assembler, EvaluateAlignmentAmount(assembler));
+}
 
 static void HandleDirective_align(Assembler* assembler) {
-  // GNU `as` treats `.align n` as 2^n-byte alignment on ARM.
-  HandleDirective_p2align(assembler);
+  // GNU `as` takes a byte count on x86 ELF and a power of 2 elsewhere.
+  if (AssemblerTargetIsX86(assembler)) {
+    HandleDirective_balign(assembler);
+  } else {
+    HandleDirective_p2align(assembler);
+  }
 }
 
 static void SymbolDirective(Assembler* assembler,
                             AssemblerSymbolBinding binding) {
-  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+  if (AssemblerLookingAtSymbol(assembler)) {
     AssemblerSymbol* sym =
     AssemblerFindSymbol(assembler, assembler->lex.spelling.value);
     if (sym != NULL) {
@@ -694,7 +806,7 @@ static void HandleDirective_weak(Assembler* assembler) {
 }
 
 static void HandleDirective_comm(Assembler* assembler) {
-  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+  if (AssemblerLookingAtSymbol(assembler)) {
     String name;
     StringInit(&name, assembler->lex.spelling.value);
     LexNextToken(&assembler->lex);
@@ -753,7 +865,7 @@ static void HandleDirective_comm(Assembler* assembler) {
 }
 
 static void HandleDirective_type(Assembler* assembler) {
-  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+  if (AssemblerLookingAtSymbol(assembler)) {
     String name;
     StringInit(&name, assembler->lex.spelling.value);
     LexNextToken(&assembler->lex);
@@ -805,7 +917,7 @@ static void HandleDirective_type(Assembler* assembler) {
 }
 
 static void HandleDirective_size(Assembler* assembler) {
-  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+  if (AssemblerLookingAtSymbol(assembler)) {
     String name;
     StringInit(&name, assembler->lex.spelling.value);
     LexNextToken(&assembler->lex);
@@ -827,7 +939,7 @@ static void HandleDirective_size(Assembler* assembler) {
 }
 
 static AssemblerSymbol* ExpressionPrimary(Assembler* assembler) {
-  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+  if (AssemblerLookingAtSymbol(assembler)) {
     if (assembler->object.pass == 1 && assembler->parsing_layout_expression) {
       assembler->object.requires_layout_pass = true;
     }
@@ -927,8 +1039,8 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   }
   bool prel31 = bits == 32 && MatchPrel31Operator(assembler);
   if (assembler->object.pass != ASM_OBJECT_FINAL_PASS) {
-    while (!prel31 && LexLookingAt(&assembler->lex, TOK(plus)) ||
-           LexLookingAt(&assembler->lex, TOK(minus))) {
+    while (!prel31 && (LexLookingAt(&assembler->lex, TOK(plus)) ||
+                       LexLookingAt(&assembler->lex, TOK(minus)))) {
       LexNextToken(&assembler->lex);
       if (LexLookingAt(&assembler->lex, TOK(number))) {
         LexNextToken(&assembler->lex);
@@ -1084,20 +1196,6 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   return value;
 }
 
-static void HandleDirective_p2align(Assembler* assembler) {
-  if (LexLookingAt(&assembler->lex, TOK(number))) {
-    int num_bits = (int)assembler->lex.number;
-    int alignment = (1 << num_bits) - 1;
-    LexNextToken(&assembler->lex);
-
-    // TODO: implement second and third args to .p2align?
-
-    AsmObjectAlignCurrentSection(&assembler->object, alignment + 1);
-  } else {
-    AssemblerError(assembler, "Alignment expected");
-  }
-}
-
 static int64_t EvaluateDataDirectiveValue(Assembler* assembler) {
   return AssemblerEvaluateExpression(assembler);
 }
@@ -1145,6 +1243,14 @@ static void HandleDirective_space(Assembler* assembler) {
   }
   AsmObjectEmitFill(&assembler->object, assembler->object.current_section,
                     num_bytes, value);
+}
+
+static void HandleDirective_zero(Assembler* assembler) {
+  HandleDirective_space(assembler);
+}
+
+static void HandleDirective_skip(Assembler* assembler) {
+  HandleDirective_space(assembler);
 }
 
 // A string output with optional \0 after the characters.
@@ -1229,7 +1335,7 @@ static void HandleDirective_byte(Assembler* assembler) {
 
 static void HandleDirective_hword(Assembler* assembler) {
   while (!LexEof(&assembler->lex)) {
-    if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+    if (AssemblerLookingAtSymbol(assembler)) {
       int16_t value = (int16_t)SimpleSymbolExpression(assembler, 16);
       AssemblerEmitHalf(assembler, assembler->object.current_section, value);
     } else {
@@ -1246,12 +1352,12 @@ static void HandleDirective_short(Assembler* assembler) {
 }
 
 
-// Words can refer to a symbol.  If this is case the lower 32 bits of the
-// symbol will be used.  If a relocation is needed, the reloc_types[kRelocSet32]
-// will be emitted.
-static void HandleDirective_word(Assembler* assembler) {
+// 32-bit values can refer to a symbol.  If this is case the lower 32 bits of
+// the symbol will be used.  If a relocation is needed, the
+// reloc_types[kRelocSet32] will be emitted.
+static void Emit32BitValues(Assembler* assembler) {
   while (!LexEof(&assembler->lex)) {
-    if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+    if (AssemblerLookingAtSymbol(assembler)) {
       size_t reloc_count = assembler->object.relocations.length;
       int32_t value = (int32_t)SimpleSymbolExpression(assembler, 32);
       AssemblerEmitWord(assembler, assembler->object.current_section, value);
@@ -1276,17 +1382,35 @@ static void HandleDirective_2byte(Assembler* assembler) {
   HandleDirective_short(assembler);
 }
 
-static void HandleDirective_4byte(Assembler* assembler) {
-  HandleDirective_word(assembler);
+// As in GNU as, `.word` is the machine word: 2 bytes on x86, 4 elsewhere.
+static void HandleDirective_word(Assembler* assembler) {
+  if (assembler->object.elf_machine_type == ELF_MACHINE_TYPE_X86_64 ||
+      assembler->object.elf_machine_type == ELF_MACHINE_TYPE_X86) {
+    HandleDirective_hword(assembler);
+  } else {
+    Emit32BitValues(assembler);
+  }
 }
 
-static void HandleDirective_8byte(Assembler* assembler) {
-  HandleDirective_long(assembler);
+static void HandleDirective_4byte(Assembler* assembler) {
+  Emit32BitValues(assembler);
 }
 
 static void HandleDirective_long(Assembler* assembler) {
+  Emit32BitValues(assembler);
+}
+
+static void HandleDirective_int(Assembler* assembler) {
+  Emit32BitValues(assembler);
+}
+
+static void HandleDirective_quad(Assembler* assembler) {
+  HandleDirective_8byte(assembler);
+}
+
+static void HandleDirective_8byte(Assembler* assembler) {
   while (!LexEof(&assembler->lex)) {
-    if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+    if (AssemblerLookingAtSymbol(assembler)) {
       int64_t value = SimpleSymbolExpression(assembler, 64);
       AssemblerEmitLong(assembler, assembler->object.current_section, value);
     } else {
@@ -1449,6 +1573,10 @@ static void HandleDirective_section(Assembler* assembler) {
 }
 
 static void HandleDirective_text(Assembler* assembler) {
+  AssemblerSelectTextSection(assembler);
+}
+
+void AssemblerSelectTextSection(Assembler* assembler) {
   String* name = NewString(".text");
   int section;
   if (assembler->object.pass == 1) {
@@ -1553,7 +1681,7 @@ static void HandleDirective_option(Assembler* assembler) {
 }
 
 static void HandleDirective_set(Assembler* assembler) {
-  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+  if (AssemblerLookingAtSymbol(assembler)) {
     String name;
     StringInit(&name, assembler->lex.spelling.value);
     LexNextToken(&assembler->lex);

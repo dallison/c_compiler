@@ -4,7 +4,7 @@
 //
 
 .data
-.align 3
+.p2align 3
 .weak _ZTVN10__cxxabiv117__class_type_infoE
 _ZTVN10__cxxabiv117__class_type_infoE:
 	.space 64

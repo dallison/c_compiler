@@ -427,6 +427,37 @@ a64_entry:
   ldpsw x11, x12, [sp, #32]
   fldr d0, [sp, #8]
   fstr d1, [sp, #16]
+  ldr x0, a64_entry
+  ldr w1, a64_done
+  ldrsw x2, a64_done
+  ldr d3, a64_entry
+  ldr q4, a64_done
+  ldrsw x6, [x1, #8]
+  ldrsw x9, [x1, x2, lsl #2]
+  ldr w12, [x1, w2, uxtw #2]
+  ldr x13, [x1, w2, sxtw]
+  ldrsb x16, [x1, x2]
+  ldrsh w17, [x1, x2, lsl #1]
+  str s2, [x1, x2]
+  ldr q3, [x1, #32]
+  stur q4, [x1, #-16]
+  ldr x5, [x1, #8]!
+  str w6, [x1], #-4
+  nop
+  yield
+  wfe
+  hint #9
+  bti c
+  paciasp
+  autiasp
+  dmb ish
+  dsb sy
+  dsb oshst
+  isb
+  brk #0x3e8
+  hlt #1
+  udf #7
+  .p2align 4
   fadd d2, d3, d4
   fsub d3, d4, d5
   fmul d4, d5, d6
@@ -465,7 +496,16 @@ run_shared_case aarch64 full "$aarch64asm" "$aarch64dasm" "$work/aarch64.s" \
   'strb ' 'ldrh ' 'strh ' 'ldur ' 'stur ' 'ldursw ' 'stp ' 'ldp ' \
   'ldpsw ' 'fadd ' 'fsub ' 'fmul ' 'fdiv ' 'fmov ' 'fneg ' 'fcmp ' \
   'scvtf ' 'ucvtf ' 'fcvtns ' 'fcvtnu ' 'cbz ' 'cbnz ' 'tbz ' 'tbnz ' \
-  'b.eq ' 'b.ne ' 'bl ' 'br ' 'blr ' 'svc #42' ' ret$'
+  'b.eq ' 'b.ne ' 'bl ' 'br ' 'blr ' 'svc #42' ' ret$' \
+  'ldr x0, a64_entry$' 'ldr w1, 0x' 'ldrsw x2, 0x' 'ldr d3, a64_entry$' \
+  'ldr q4, 0x' \
+  'ldrsw x6, \[x1, #8\]' 'ldrsw x9, \[x1, x2, lsl #2\]' \
+  'ldr w12, \[x1, w2, uxtw #2\]' 'ldr x13, \[x1, w2, sxtw\]' \
+  'ldrsb x16, \[x1, x2\]' 'ldrsh w17, \[x1, x2, lsl #1\]' \
+  'str s2, \[x1, x2\]' 'ldr q3, \[x1, #32\]' 'stur q4, \[x1, #-16\]' \
+  'ldr x5, \[x1, #8\]!' 'str w6, \[x1\], #-4' ' nop$' ' yield$' ' wfe$' \
+  'hint #9$' 'bti c$' 'paciasp$' 'autiasp$' 'dmb ish$' 'dsb sy$' \
+  'dsb oshst$' 'isb sy$' 'brk #0x3e8$' 'hlt #0x1$' 'udf #7$'
 
 cat >"$work/x86_64.s" <<'EOF'
 .text
@@ -553,10 +593,14 @@ x86_entry:
   cvtsi2sd %rax, %xmm1
   cvttss2si %xmm0, %rax
   cvttsd2si %xmm1, %rax
+  cvtsi2sdl (%rdi), %xmm2
+  cvtsi2ssq 8(%rdi), %xmm3
+  cvttsd2sil (%rsi), %ecx
+  cvtss2si %xmm0, %eax
+  cvtsd2siq %xmm1, %rdx
+  cvtsd2si 16(%rdi), %r8
   cvtss2sd %xmm0, %xmm1
   cvtsd2ss %xmm1, %xmm0
-  fneg_ss %xmm0, %xmm0
-  fneg_sd %xmm1, %xmm1
 x86_target:
   nop
   syscall
@@ -575,8 +619,8 @@ run_shared_case x86_64 full "$x86asm" "$x86_64dasm" "$work/x86_64.s" \
   'setb ' 'setg ' 'cqo' 'cdq' 'movss ' 'movsd ' 'movd ' 'movq ' \
   'addss ' 'addsd ' 'subss ' 'subsd ' 'mulss ' 'mulsd ' 'divss ' \
   'divsd ' 'sqrtss ' 'sqrtsd ' 'ucomiss ' 'ucomisd ' 'cvtsi2ss ' \
-  'cvtsi2sd ' 'cvttss2si ' 'cvttsd2si ' 'cvtss2sd ' 'cvtsd2ss ' \
-  'nop' 'syscall' 'leave' 'ret'
+  'cvtsi2sd ' 'cvttss2si ' 'cvttsd2si ' 'cvtss2si ' 'cvtsd2si ' \
+  'cvtss2sd ' 'cvtsd2ss ' 'nop' 'syscall' 'leave' 'ret'
 
 cat >"$work/6502.s" <<'EOF'
 .text

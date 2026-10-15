@@ -70,6 +70,11 @@ typedef struct Lex {
   bool preprocessor_mode;  // Running in preprocessor mode.
   bool in_comment;         // We are inside a multi-line comment.
   bool assembler_mode;     // Running in assembler mode.
+  // In assembler mode `$` is either a hex prefix (`$ff`, 6502 syntax) or, by
+  // default, GNU x86 syntax's immediate marker, which is skipped and recorded
+  // in dollar_prefixed for the token that follows it.
+  bool dollar_is_hex;
+  bool dollar_prefixed;
   bool reading_token;      // A token is currently being collected.
   size_t token_start;      // Byte offset of that token in the current line.
   int token_lineno;
@@ -118,6 +123,8 @@ typedef struct {
   bool preprocessor_mode;
   bool in_comment;
   bool assembler_mode;
+  bool dollar_is_hex;
+  bool dollar_prefixed;
 
   bool replay_active;
   Vector* replay_tokens;

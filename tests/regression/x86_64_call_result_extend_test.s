@@ -3,9 +3,9 @@
 	.text
 	.globl	dirty_int
 dirty_int:
-	movq	$12345678fffffffb, %rax
+	movq	$0x12345678fffffffb, %rax
 	ret
 	.globl	dirty_uint
 dirty_uint:
-	movq	$fedcba9800000007, %rax
+	movq	$0xfedcba9800000007, %rax
 	ret

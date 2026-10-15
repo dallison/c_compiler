@@ -818,7 +818,7 @@ bool AsmModuleWriteText(const AsmModule* module, FILE* out) {
                                    ? ".byte"
                                    : op->u.integer.width == 2
                                          ? ".short"
-                                         : op->u.integer.width == 4 ? ".word"
+                                         : op->u.integer.width == 4 ? ".4byte"
                                                                     : ".8byte");
         WriteExpr(out, &op->u.integer.value);
         fputc('\n', out);
