@@ -1251,7 +1251,9 @@ bool TryConvertWithConvertingConstructorImpl(
       ctor->symbol->type->info.function.is_consteval &&
       compiler->num_errors == errors_before_analysis &&
       !CXXInImmediateFunctionContext() &&
-      analyzed != NULL && analyzed->op == AST_OP(comma)) {
+      analyzed != NULL && analyzed->op == AST_OP(comma) &&
+      ((BinaryASTNode*)analyzed)->left != NULL &&
+      ((BinaryASTNode*)analyzed)->left->op != AST_OP(init)) {
     ASTNode* converted_call = ((BinaryASTNode*)analyzed)->left;
     if (converted_call != NULL && converted_call->op == AST_OP(call)) {
       VectorASTNode* call = (VectorASTNode*)converted_call;

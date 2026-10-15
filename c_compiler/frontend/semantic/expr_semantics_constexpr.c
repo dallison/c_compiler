@@ -118,6 +118,22 @@ static bool ExpressionMayObserveConstantEvaluation(ASTNode* node) {
   return query.found;
 }
 
+static bool RuntimeFoldingMayObserveConstantEvaluation(ASTNode* node) {
+  return CompilerCXXAtLeast(kLanguageStandardCXX20) &&
+         compiler->constant_evaluation_required_depth == 0 &&
+         ExpressionMayObserveConstantEvaluation(node);
+}
+
+bool SemanticEvaluateRuntimeTruth(ASTNode* node, int64_t* value) {
+  return !RuntimeFoldingMayObserveConstantEvaluation(node) &&
+         EvaluateTruthExpression(node, value);
+}
+
+bool SemanticEvaluateRuntimeInteger(ASTNode* node, int64_t* value) {
+  return !RuntimeFoldingMayObserveConstantEvaluation(node) &&
+         EvaluateIntegerExpression(node, value);
+}
+
 typedef struct {
   bool found;
 } UnboundAutomaticFinder;
@@ -219,9 +235,7 @@ ASTNode* FoldConstantExpression(ASTNode* node) {
   // runtime arms. Constant-required consumers (static_assert, constexpr
   // initialization, template arguments) evaluate the retained tree
   // explicitly and therefore still select the constant-evaluation arms.
-  if (CompilerCXXAtLeast(kLanguageStandardCXX20) &&
-      compiler->constant_evaluation_required_depth == 0 &&
-      ExpressionMayObserveConstantEvaluation(node)) {
+  if (RuntimeFoldingMayObserveConstantEvaluation(node)) {
     return NULL;
   }
   switch (node->op) {

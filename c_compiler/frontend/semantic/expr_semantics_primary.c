@@ -49,7 +49,7 @@ void AnalyzeLogicalOperator(BinaryASTNode* node) {
   node->left = AnalyzeExpression(node->left);
   if (!ExpressionIsTemplateDependent(node->left)) {
     int64_t left_truth = 0;
-    if (EvaluateTruthExpression(node->left, &left_truth)) {
+    if (SemanticEvaluateRuntimeTruth(node->left, &left_truth)) {
       if (node->base.op == AST_OP(logand) && left_truth == 0) {
         ASTNode* discarded =
             NewIntConstantASTNode(0, bool_type, node->base.location);

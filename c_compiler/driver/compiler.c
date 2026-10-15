@@ -2910,6 +2910,19 @@ static bool FunctionDefinitionIsODRDiscardable(TypeRecord* type) {
           type->info.function.template_origin != NULL);
 }
 
+static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type);
+
+// A function template, or a member or hidden friend of a class template
+// pattern.  Only its instantiations have code.
+static bool FunctionDefinitionIsTemplatePattern(Symbol* symbol,
+                                                TypeRecord* type) {
+  return TypeContainsTemplateParameter(type) ||
+         TypeContainsUninstantiatedClassTemplate(type) ||
+         FunctionBodyContainsUnexpandedPack(type->info.function.body) ||
+         (symbol->flags.is_template &&
+          type->info.function.template_origin == NULL);
+}
+
 static bool FunctionDefinitionNeedsNativeCode(Symbol* symbol,
                                               TypeRecord* type) {
   if (symbol == NULL || type == NULL || !TypeIsFunction(type)) {
@@ -2929,9 +2942,10 @@ static bool FunctionDefinitionNeedsNativeCode(Symbol* symbol,
   }
   // A module/header-unit object must provide exported inline definitions for
   // importers.  Their bodies may reference internal-linkage helpers that are
-  // intentionally not imported as names.
+  // intentionally not imported as names.  Template patterns are exported as
+  // syntax for importers to instantiate.
   if (symbol->flags.is_exported || compiler->module_header) {
-    return true;
+    return !FunctionDefinitionIsTemplatePattern(symbol, type);
   }
   const char* asm_name = symbol->asm_name.length != 0
                              ? symbol->asm_name.value
@@ -3013,8 +3027,6 @@ static void MarkFunctionsReferencedByBody(TypeRecord* function) {
   }
 }
 
-static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type);
-
 static bool TemplateArgumentContainsUninstantiatedClassTemplate(
     TemplateArgument* argument) {
   if (argument == NULL) {
@@ -3033,16 +3045,28 @@ static bool TemplateArgumentContainsUninstantiatedClassTemplate(
   return false;
 }
 
+static bool StructIsUninstantiatedClassTemplate(Struct* str) {
+  return str->is_template &&
+         (str->tag_symbol == NULL || str->tag_symbol->type == NULL ||
+          str->tag_symbol->type->template_arguments == NULL);
+}
+
 static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type) {
   for (TypeRecord* current = type; current != NULL; current = current->next) {
-    if (TypeIsStructOrUnion(current) && current->info.struct_info != NULL &&
-        current->info.struct_info->is_template &&
-        current->template_arguments == NULL &&
-        (current->info.struct_info->tag_symbol == NULL ||
-         current->info.struct_info->tag_symbol->type == NULL ||
-         current->info.struct_info->tag_symbol->type->template_arguments ==
-             NULL)) {
-      return true;
+    if (TypeIsStructOrUnion(current) && current->info.struct_info != NULL) {
+      Struct* str = current->info.struct_info;
+      if (current->template_arguments == NULL &&
+          StructIsUninstantiatedClassTemplate(str)) {
+        return true;
+      }
+      // A class nested in a class template pattern (`iota_view<W>::__iterator`)
+      // is as dependent as its enclosing template.
+      for (Struct* parent = str->lexical_parent; parent != NULL;
+           parent = parent->lexical_parent) {
+        if (StructIsUninstantiatedClassTemplate(parent)) {
+          return true;
+        }
+      }
     }
     for (size_t i = 0; current->template_arguments != NULL &&
                        i < current->template_arguments->length; i++) {
@@ -3072,20 +3096,12 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
   if (FunctionAsmNameAlreadyEmitted(FunctionEmitName(decl->symbol))) {
     return false;
   }
-  bool dependent_function_body =
-      TypeContainsTemplateParameter(decl->base.type) ||
-      TypeContainsUninstantiatedClassTemplate(decl->base.type) ||
-      FunctionBodyContainsUnexpandedPack(
-          decl->base.type->info.function.body);
-  bool uninstantiated_function_template =
-      decl->symbol->flags.is_template &&
-      decl->base.type->info.function.template_origin == NULL;
   bool unnamed_cxx_function =
       CompilerIsCXX() && decl->symbol->asm_name.length == 0 &&
       !decl->symbol->flags.invented && !decl->symbol->flags.is_c_linkage &&
       strcmp(decl->symbol->name.value, "main") != 0 &&
       strncmp(decl->symbol->name.value, "__", 2) != 0;
-  if (dependent_function_body || uninstantiated_function_template ||
+  if (FunctionDefinitionIsTemplatePattern(decl->symbol, decl->base.type) ||
       unnamed_cxx_function ||
       (decl->base.type->info.function.is_inline &&
        !decl->symbol->flags.is_inline_defn) ||

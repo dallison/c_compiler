@@ -28,6 +28,12 @@ bool AnalyzingTemplatePatternBody(void);
 void CXXAnalyzeImmediateEscalationCandidate(Symbol* symbol);
 bool CXXEscalateCurrentFunction(void);
 bool CXXInImmediateFunctionContext(void);
+// EvaluateTruthExpression / EvaluateIntegerExpression for folding a runtime
+// expression.  They fail when the result could differ at run time because
+// evaluation reaches `if consteval` or __builtin_is_constant_evaluated()
+// outside a constant-required context.
+bool SemanticEvaluateRuntimeTruth(ASTNode* node, int64_t* value);
+bool SemanticEvaluateRuntimeInteger(ASTNode* node, int64_t* value);
 void ClearDeferredAutoInitAnalysis(ASTNode* node, void* data, int child_id, VisitorMode mode);
 void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func);
 bool ASTNodeIsCXXBracedTemporary(ASTNode* node);

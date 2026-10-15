@@ -1638,10 +1638,6 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
         ExpressionIsTemplateDependent(node->expr)) {
       return;
     }
-    if (func != NULL && TypeIsFunction(func) &&
-        func->info.function.template_origin != NULL) {
-      return;
-    }
     String message;
     StringInit(&message, node->message.value);
     if (node->message_expr == NULL ||

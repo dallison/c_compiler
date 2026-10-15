@@ -1835,8 +1835,8 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
     cmp->right = CXXFoldIsSameVExpression(cmp->right);
     int64_t left_value = 0;
     int64_t right_value = 0;
-    if (EvaluateIntegerExpression(cmp->left, &left_value) &&
-        EvaluateIntegerExpression(cmp->right, &right_value)) {
+    if (SemanticEvaluateRuntimeInteger(cmp->left, &left_value) &&
+        SemanticEvaluateRuntimeInteger(cmp->right, &right_value)) {
       bool same = left_value == right_value;
       return CXXNewBoolConstantReplacing(
           expr, (expr->op == AST_OP(equal)) ? (same ? 1 : 0) : (same ? 0 : 1));
@@ -1849,8 +1849,8 @@ ASTNode* CXXFoldIsSameVExpression(ASTNode* expr) {
     logical->right = CXXFoldIsSameVExpression(logical->right);
     int64_t left_value = 0;
     int64_t right_value = 0;
-    if (EvaluateIntegerExpression(logical->left, &left_value) &&
-        EvaluateIntegerExpression(logical->right, &right_value)) {
+    if (SemanticEvaluateRuntimeInteger(logical->left, &left_value) &&
+        SemanticEvaluateRuntimeInteger(logical->right, &right_value)) {
       bool result = expr->op == AST_OP(logand)
                         ? (left_value != 0 && right_value != 0)
                         : (left_value != 0 || right_value != 0);

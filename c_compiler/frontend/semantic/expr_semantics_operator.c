@@ -1731,6 +1731,9 @@ ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
     // The primary template may only carry a placeholder class (`basic_ostream`
     // rather than `basic_ostream<char, traits>`) and a fallback scalar for the
     // dependent operand. Resolve the operator in the concrete body clone.
+    // Until then the result type is unknown, not the left operand's class.
+    ASTNodeSetType((ASTNode*)node,
+                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
     return (ASTNode*)node;
   }
 
@@ -1837,7 +1840,7 @@ ASTNode* TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(
   if ((node->base.op == AST_OP(logand) || node->base.op == AST_OP(logor)) &&
       !ExpressionIsTemplateDependent(analyzed_left)) {
     int64_t left_truth = 0;
-    if (EvaluateTruthExpression(analyzed_left, &left_truth)) {
+    if (SemanticEvaluateRuntimeTruth(analyzed_left, &left_truth)) {
       if ((node->base.op == AST_OP(logand) && left_truth == 0) ||
           (node->base.op == AST_OP(logor) && left_truth != 0)) {
         TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);

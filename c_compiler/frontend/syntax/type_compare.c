@@ -998,6 +998,7 @@ bool TypeUsesLongDoubleRepresentation(TypeRecord* type);
 bool TypeUsesHardwareFloatRegister(TypeRecord* type);
 bool TypeIsBool(TypeRecord* type);
 bool TypeIsVoid(TypeRecord* type);
+bool TypeIsAuto(TypeRecord* type);
 bool TypeIsNullPointer(TypeRecord* type);
 bool TypeIsReflection(TypeRecord* type);
 bool TypeIsBitInt(TypeRecord* type);
@@ -2237,9 +2238,13 @@ bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
     if (TypeBaseOffset(from->next, to->next, /*public_only=*/true, NULL)) {
       return true;
     }
+    // The pointed-to type may gain qualifiers (C 6.5.16.1, C++ [conv.qual]);
+    // losing them is diagnosed separately.  _Atomic is not a qualifier there
+    // and has to match.
     int to_quals = to->next->qualifiers & ~kQualConst;
     int from_quals = from->next->qualifiers & ~kQualConst;
-    if (to_quals == from_quals) {
+    if ((to_quals & kQualAtomic) == (from_quals & kQualAtomic) &&
+        (from_quals & ~to_quals) == 0) {
       return true;
     }
   }

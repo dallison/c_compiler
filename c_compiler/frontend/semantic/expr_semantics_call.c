@@ -166,10 +166,10 @@ static void FunctionCallPromoteVarargsActuals(TypeRecord* subtype,
                                               VectorASTNode* node,
                                               size_t num_formal_args,
                                               size_t num_actual_args);
-static void FunctionCallCheckConstexprImmediate(VectorASTNode* node,
-                                                TypeRecord* subtype,
-                                                TypeRecord* return_type,
-                                                bool call_ok);
+static ASTNode* FunctionCallCheckConstexprImmediate(VectorASTNode* node,
+                                                    TypeRecord* subtype,
+                                                    TypeRecord* return_type,
+                                                    bool call_ok);
 static void FunctionCallCheckFormatAndPrintf(VectorASTNode* node, bool call_ok);
 static ASTNode* FunctionCallTryLowerContractsOrInline(VectorASTNode* node,
                                                       TypeRecord* subtype,
@@ -3444,14 +3444,96 @@ static void FunctionCallPromoteVarargsActuals(TypeRecord* subtype,
   }
 }
 
+// An immediate function is never emitted, so a class or array result is
+// replaced by a temporary initialized from its constant image.
+static ASTNode* MaterializeConstevalObjectResult(VectorASTNode* node,
+                                                 TypeRecord* return_type,
+                                                 bool* ok) {
+  SourceLocation location = node->base.location;
+  ASTNode* parent = node->base.parent;
+  TypeRecord* temporary_type = TypeRecordCopy(return_type);
+  temporary_type->qualifiers = kQualPlain;
+  Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temporary_type);
+  temp->location = location;
+  ASTNode* init = NewExpressionInitializerASTNode((ASTNode*)node, location);
+  *ok = ConstexprEvaluateObjectConstantForSymbol(temp, init);
+  ASTNode* image =
+      *ok ? ConstexprObjectInitializerForSymbol(temp, location) : NULL;
+  node->base.parent = parent;
+  if (image == NULL) {
+    if (*ok) {
+      SemanticError((ASTNode*)node,
+                    "consteval function call result cannot be emitted as a "
+                    "constant object");
+    }
+    return NULL;
+  }
+  ASTNode* temp_id = NewIdentifierASTNode(temp, location);
+  temp_id->flags |= kASTNeedAddress | kASTIsDeclaration;
+  ASTNode* replacement =
+      AnalyzeExpression(NewCompoundLiteralASTNode(temp_id, location, image));
+  replacement->value_category = kValueCategoryPrvalue;
+  replacement->parent = parent;
+  return replacement;
+}
+
+// Likewise a consteval constructor call (`obj.T(&obj, args)`) becomes an
+// initialization of `obj` from the constant it constructs.
+static ASTNode* MaterializeConstevalConstructorCall(VectorASTNode* node,
+                                                    bool* ok) {
+  ASTNode* receiver = node->children != NULL && node->children->length > 0
+                          ? node->children->value.p[0]
+                          : NULL;
+  if (receiver != NULL && receiver->op == AST_OP(address)) {
+    receiver = ((UnaryASTNode*)receiver)->sub;
+  }
+  Symbol* object = receiver != NULL && receiver->op == AST_OP(identifier)
+                       ? ((IdentifierASTNode*)receiver)->symbol
+                       : NULL;
+  ConstEvalContext ctx;
+  ConstEvalContextInit(&ctx);
+  if (object == NULL || object->type == NULL) {
+    *ok = ConstexprEvaluateCall(&ctx, (ASTNode*)node);
+    ConstEvalContextDestruct(&ctx);
+    return NULL;
+  }
+  bool saved_value_set = object->flags.value_set;
+  void* saved_value = object->value.other;
+  SourceLocation location = node->base.location;
+  *ok = ConstexprEvaluateConstructorCallForSymbol(&ctx, (ASTNode*)node, object);
+  ASTNode* image =
+      *ok ? ConstexprObjectInitializerForSymbol(object, location) : NULL;
+  object->flags.value_set = saved_value_set;
+  object->value.other = saved_value;
+  ConstEvalContextDestruct(&ctx);
+  if (image == NULL) {
+    if (*ok) {
+      SemanticError((ASTNode*)node,
+                    "consteval constructor result cannot be emitted as a "
+                    "constant object");
+    }
+    return NULL;
+  }
+  ASTNode* destination = NewIdentifierASTNode(object, location);
+  destination->flags |= kASTNeedAddress | kASTIsDeclaration;
+  ASTNode* replacement = NewBinaryASTNode(
+      AST_OP(init), TypeRecordCopy(object->type), location, destination,
+      AnalyzeInitializer(object->type, image, true));
+  replacement->parent = node->base.parent;
+  return replacement;
+}
+
 // Diagnoses `consteval` calls that cannot be constant-evaluated when the call
 // occurs outside an immediate function context (P2564). Uses the resolved
 // identifier callee type when present; may escalate the enclosing function
-// instead of diagnosing when escalation applies.
-static void FunctionCallCheckConstexprImmediate(VectorASTNode* node,
-                                                TypeRecord* subtype,
-                                                TypeRecord* return_type,
-                                                bool call_ok) {
+// instead of diagnosing when escalation applies.  Returns the constant that
+// replaces a class or array result, since the immediate function itself is
+// never emitted.
+static ASTNode* FunctionCallCheckConstexprImmediate(VectorASTNode* node,
+                                                    TypeRecord* subtype,
+                                                    TypeRecord* return_type,
+                                                    bool call_ok) {
+  ASTNode* replacement = NULL;
   TypeRecord* immediate_function_type = subtype;
   if (node->left->op == AST_OP(identifier)) {
     Symbol* resolved = ((IdentifierASTNode*)node->left)->symbol;
@@ -3470,10 +3552,10 @@ static void FunctionCallCheckConstexprImmediate(VectorASTNode* node,
       int64_t value;
       ok = EvaluateIntegerExpression((ASTNode*)node, &value);
     } else if (TypeIsFixedArray(return_type) || TypeIsStructOrUnion(return_type)) {
-      ConstEvalContext ctx;
-      ConstEvalContextInit(&ctx);
-      ok = ConstexprEvaluateCallAsObject(&ctx, (ASTNode*)node);
-      ConstEvalContextDestruct(&ctx);
+      replacement = MaterializeConstevalObjectResult(node, return_type, &ok);
+    } else if (TypeIsVoid(return_type) &&
+               immediate_function_type->info.function.is_constructor) {
+      replacement = MaterializeConstevalConstructorCall(node, &ok);
     } else if (TypeIsVoid(return_type)) {
       ConstEvalContext ctx;
       ConstEvalContextInit(&ctx);
@@ -3487,6 +3569,7 @@ static void FunctionCallCheckConstexprImmediate(VectorASTNode* node,
       }
     }
   }
+  return replacement;
 }
 
 // Validates `format` attributes and specializes printf-family calls when arity checks passed.
@@ -3659,7 +3742,11 @@ ASTNode* AnalyzeFunctionCall(VectorASTNode* node) {
                                     subtype->info.function.prototype.length,
                                     num_actual_args);
 
-  FunctionCallCheckConstexprImmediate(node, subtype, return_type, call_ok);
+  finished =
+      FunctionCallCheckConstexprImmediate(node, subtype, return_type, call_ok);
+  if (finished != NULL) {
+    return finished;
+  }
   FunctionCallCheckFormatAndPrintf(node, call_ok);
 
   finished = FunctionCallTryLowerContractsOrInline(node, subtype, return_type,
