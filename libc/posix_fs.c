@@ -12,6 +12,7 @@
 
 enum {
   kFsStatus = 1,
+  kFsCreateDirectory = 5,
   kFsRemove = 6,
   kFsCurrentPath = 8,
   kFsSetCurrentPath = 9,
@@ -28,6 +29,8 @@ static long FsCall(int operation, intptr_t first, intptr_t second,
   switch (operation) {
     case kFsStatus:
       return syscall(SYS_FS_STATUS, first, second, third);
+    case kFsCreateDirectory:
+      return syscall(SYS_FS_CREATE_DIRECTORY, first, (unsigned)second);
     case kFsRemove:
       return syscall(SYS_FS_REMOVE, first);
     case kFsCurrentPath:
@@ -170,7 +173,25 @@ int chmod(const char* path, mode_t mode) {
   return Failed(result) ? -1 : 0;
 }
 
-int mkstemp(char* template_name) {
+int mkdir(const char* path, unsigned short mode) {
+  long result = FsCall(kFsCreateDirectory, (intptr_t)path, mode, 0);
+  return Failed(result) ? -1 : 0;
+}
+
+int rmdir(const char* path) {
+  struct stat status;
+  if (stat(path, &status) != 0) return -1;
+  if (!S_ISDIR(status.st_mode)) {
+    errno = ENOTDIR;
+    return -1;
+  }
+  return remove(path);
+}
+
+// Replaces the trailing XXXXXX of `template_name` until `create` makes a new
+// file or directory there, returning create's result.
+static int CreateTemporary(char* template_name,
+                           int (*create)(const char* path)) {
   if (template_name == NULL) {
     errno = EINVAL;
     return -1;
@@ -193,10 +214,28 @@ int mkstemp(char* template_name) {
       current = current * 1664525UL + 1013904223UL;
       template_name[index] = alphabet[current % (sizeof(alphabet) - 1)];
     }
-    int fd = open(template_name, O_RDWR | O_CREAT | O_EXCL, 0600);
-    if (fd >= 0) return fd;
+    int result = create(template_name);
+    if (result >= 0) return result;
     if (errno != EEXIST) return -1;
   }
   errno = EEXIST;
   return -1;
+}
+
+static int CreateTemporaryFile(const char* path) {
+  return open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+}
+
+static int CreateTemporaryDirectory(const char* path) {
+  return mkdir(path, 0700);
+}
+
+int mkstemp(char* template_name) {
+  return CreateTemporary(template_name, CreateTemporaryFile);
+}
+
+char* mkdtemp(char* template_name) {
+  return CreateTemporary(template_name, CreateTemporaryDirectory) == 0
+             ? template_name
+             : NULL;
 }

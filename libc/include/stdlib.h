@@ -114,6 +114,7 @@ void *realloc(void *ptr, size_t size);
 void *aligned_alloc(size_t alignment, size_t size);
 int posix_memalign(void **result, size_t alignment, size_t size);
 int mkstemp(char *template_name);
+char *mkdtemp(char *template_name);
 #ifdef __cplusplus
 [[noreturn]] void abort(void);
 #else

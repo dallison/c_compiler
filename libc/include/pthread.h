@@ -121,6 +121,19 @@ int pthread_once(pthread_once_t*, void (*)(void));
 int pthread_threadid_np(const void* thread, unsigned long long* thread_id);
 pthread_t pthread_self(void);
 int pthread_equal(pthread_t, pthread_t);
+#if defined(__DAVECC_NATIVE_DARWIN__)
+#define PTHREAD_CREATE_JOINABLE 1
+#define PTHREAD_CREATE_DETACHED 2
+#else
+#define PTHREAD_CREATE_JOINABLE 0
+#define PTHREAD_CREATE_DETACHED 1
+#endif
+int pthread_attr_init(pthread_attr_t*);
+int pthread_attr_destroy(pthread_attr_t*);
+int pthread_attr_getdetachstate(const pthread_attr_t*, int*);
+int pthread_attr_setdetachstate(pthread_attr_t*, int);
+int pthread_attr_getstacksize(const pthread_attr_t*, size_t*);
+int pthread_attr_setstacksize(pthread_attr_t*, size_t);
 int pthread_create(pthread_t*, const pthread_attr_t*, void* (*)(void*), void*);
 int pthread_join(pthread_t, void**);
 int pthread_detach(pthread_t);
