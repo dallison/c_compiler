@@ -2,19 +2,33 @@
 //  coroutine
 //  c_compiler
 //
-//  Minimal C++20 coroutine library support for DaveCC.
+//  C++20 <coroutine> for DaveCC: coroutine_traits, coroutine_handle,
+//  noop_coroutine, and the suspend helpers. The frame prefix matches the
+//  layout the compiler emits for a lowered coroutine.
 //
 
 #ifndef coroutine_h
 #define coroutine_h
 
+#include <bit>
+#include <compare>
+#include <stddef.h>
+#include <stdint.h>
+
+#define __cpp_lib_coroutine 201902L
+
 namespace std {
+
+template <class T>
+struct hash;
 
 template <class R, class... Args>
 struct coroutine_traits {
   using promise_type = typename R::promise_type;
 };
 
+// Prefix of every compiler-generated coroutine frame. The promise object is
+// placed immediately after this header.
 struct __coroutine_frame {
   int __state;
   bool __done;
@@ -27,139 +41,229 @@ struct coroutine_handle;
 
 template <>
 struct coroutine_handle<void> {
-  void* __handle;
+  constexpr coroutine_handle() noexcept : __handle(nullptr) {}
 
-  static coroutine_handle from_address(void* address) {
-    return {address};
+  constexpr coroutine_handle(decltype(nullptr)) noexcept : __handle(nullptr) {}
+
+  coroutine_handle& operator=(decltype(nullptr)) noexcept {
+    __handle = nullptr;
+    return *this;
   }
 
-  void* address(void) const {
-    return __handle;
-  }
+  constexpr void* address() const noexcept { return __handle; }
 
-  explicit operator bool() const {
-    return __handle != 0;
-  }
+  constexpr explicit operator bool() const noexcept { return __handle != nullptr; }
 
-  bool done(void) const {
-    return __handle == 0 ||
+  bool done() const {
+    return __handle == nullptr ||
            static_cast<__coroutine_frame*>(__handle)->__done != 0;
   }
 
-  void resume(void) const {
-    if (__handle == 0) {
+  void resume() const {
+    if (__handle == nullptr) {
       return;
     }
-    __coroutine_frame* frame =
-        static_cast<__coroutine_frame*>(__handle);
-    if (!frame->__done && frame->__resume != 0) {
+    __coroutine_frame* frame = static_cast<__coroutine_frame*>(__handle);
+    if (!frame->__done && frame->__resume != nullptr) {
       frame->__resume(__handle);
     }
   }
 
-  void operator()(void) const {
-    resume();
-  }
+  void operator()() const { resume(); }
 
-  void destroy(void) const {
-    if (__handle == 0) {
+  void destroy() const {
+    if (__handle == nullptr) {
       return;
     }
-    __coroutine_frame* frame =
-        static_cast<__coroutine_frame*>(__handle);
-    if (frame->__destroy != 0) {
+    __coroutine_frame* frame = static_cast<__coroutine_frame*>(__handle);
+    if (frame->__destroy != nullptr) {
       frame->__destroy(__handle);
     }
   }
+
+  static constexpr coroutine_handle from_address(void* address) noexcept {
+    return coroutine_handle(address);
+  }
+
+  void* __handle;
+
+ private:
+  explicit constexpr coroutine_handle(void* address) noexcept
+      : __handle(address) {}
 };
 
 template <class Promise>
 struct coroutine_handle {
-  void* __handle;
+  constexpr coroutine_handle() noexcept : __handle(nullptr) {}
 
-  static coroutine_handle from_address(void* address) {
-    return {address};
+  constexpr coroutine_handle(decltype(nullptr)) noexcept : __handle(nullptr) {}
+
+  coroutine_handle& operator=(decltype(nullptr)) noexcept {
+    __handle = nullptr;
+    return *this;
+  }
+
+  static constexpr coroutine_handle from_address(void* address) noexcept {
+    return coroutine_handle(address);
   }
 
   static coroutine_handle from_promise(Promise& promise) {
     char* promise_address = reinterpret_cast<char*>(&promise);
-    return {promise_address - sizeof(__coroutine_frame)};
+    return coroutine_handle(promise_address - sizeof(__coroutine_frame));
   }
 
-  void* address(void) const {
-    return __handle;
-  }
+  constexpr void* address() const noexcept { return __handle; }
 
-  operator coroutine_handle<void>() const noexcept {
+  constexpr operator coroutine_handle<void>() const noexcept {
     return coroutine_handle<void>::from_address(__handle);
   }
 
-  Promise& promise(void) const {
+  Promise& promise() const {
     char* frame_address = static_cast<char*>(__handle);
-    return *reinterpret_cast<Promise*>(
-        frame_address + sizeof(__coroutine_frame));
+    return *reinterpret_cast<Promise*>(frame_address + sizeof(__coroutine_frame));
   }
 
-  explicit operator bool() const {
-    return __handle != 0;
-  }
+  constexpr explicit operator bool() const noexcept { return __handle != nullptr; }
 
-  bool done(void) const {
-    return __handle == 0 ||
+  bool done() const {
+    return __handle == nullptr ||
            static_cast<__coroutine_frame*>(__handle)->__done != 0;
   }
 
-  void resume(void) const {
-    if (__handle == 0) {
+  void resume() const {
+    if (__handle == nullptr) {
       return;
     }
-    __coroutine_frame* frame =
-        static_cast<__coroutine_frame*>(__handle);
-    if (!frame->__done && frame->__resume != 0) {
+    __coroutine_frame* frame = static_cast<__coroutine_frame*>(__handle);
+    if (!frame->__done && frame->__resume != nullptr) {
       frame->__resume(__handle);
     }
   }
 
-  void operator()(void) const {
-    resume();
-  }
+  void operator()() const { resume(); }
 
-  void destroy(void) const {
-    if (__handle == 0) {
+  void destroy() const {
+    if (__handle == nullptr) {
       return;
     }
-    __coroutine_frame* frame =
-        static_cast<__coroutine_frame*>(__handle);
-    if (frame->__destroy != 0) {
+    __coroutine_frame* frame = static_cast<__coroutine_frame*>(__handle);
+    if (frame->__destroy != nullptr) {
       frame->__destroy(__handle);
     }
   }
+
+  void* __handle;
+
+ private:
+  explicit constexpr coroutine_handle(void* address) noexcept
+      : __handle(address) {}
 };
 
+constexpr bool operator==(coroutine_handle<> left,
+                          coroutine_handle<> right) noexcept {
+  return left.address() == right.address();
+}
+
+constexpr strong_ordering operator<=>(coroutine_handle<> left,
+                                      coroutine_handle<> right) noexcept {
+  const auto left_bits = bit_cast<uintptr_t>(left.address());
+  const auto right_bits = bit_cast<uintptr_t>(right.address());
+  if (left_bits < right_bits) {
+    return strong_ordering::less;
+  }
+  if (left_bits > right_bits) {
+    return strong_ordering::greater;
+  }
+  return strong_ordering::equal;
+}
+
+template <class Promise>
+struct hash<coroutine_handle<Promise>> {
+  size_t operator()(coroutine_handle<Promise> handle) const noexcept {
+    return static_cast<size_t>(bit_cast<uintptr_t>(handle.address()));
+  }
+};
+
+struct noop_coroutine_promise {};
+
+template <>
+struct coroutine_handle<noop_coroutine_promise> {
+  constexpr coroutine_handle() noexcept : __handle(nullptr) {}
+
+  constexpr coroutine_handle(decltype(nullptr)) noexcept : __handle(nullptr) {}
+
+  coroutine_handle& operator=(decltype(nullptr)) noexcept {
+    __handle = nullptr;
+    return *this;
+  }
+
+  constexpr void* address() const noexcept { return __handle; }
+
+  constexpr explicit operator bool() const noexcept { return __handle != nullptr; }
+
+  constexpr bool done() const noexcept { return false; }
+
+  constexpr void resume() const noexcept {}
+
+  constexpr void operator()() const noexcept {}
+
+  constexpr void destroy() const noexcept {}
+
+  noop_coroutine_promise& promise() const noexcept;
+
+  constexpr operator coroutine_handle<void>() const noexcept {
+    return coroutine_handle<void>::from_address(__handle);
+  }
+
+  static constexpr coroutine_handle from_address(void* address) noexcept {
+    return coroutine_handle(address);
+  }
+
+  void* __handle;
+
+ private:
+  explicit constexpr coroutine_handle(void* address) noexcept
+      : __handle(address) {}
+
+  friend coroutine_handle<noop_coroutine_promise> noop_coroutine() noexcept;
+};
+
+using noop_coroutine_handle = coroutine_handle<noop_coroutine_promise>;
+
+struct __noop_coroutine_state {
+  __coroutine_frame __frame;
+  noop_coroutine_promise __promise;
+};
+
+inline __noop_coroutine_state __noop_coroutine_state_instance = {
+    {0, false, nullptr, nullptr},
+    {},
+};
+
+inline noop_coroutine_promise&
+coroutine_handle<noop_coroutine_promise>::promise() const noexcept {
+  return __noop_coroutine_state_instance.__promise;
+}
+
+inline noop_coroutine_handle noop_coroutine() noexcept {
+  return noop_coroutine_handle::from_address(
+      &__noop_coroutine_state_instance.__frame);
+}
+
 struct suspend_never {
-  bool await_ready(void) const noexcept {
-    return true;
-  }
+  constexpr bool await_ready() const noexcept { return true; }
 
-  void await_suspend(coroutine_handle<> handle) const noexcept {
-    static_cast<void>(handle);
-  }
+  constexpr void await_suspend(coroutine_handle<>) const noexcept {}
 
-  void await_resume(void) const noexcept {
-  }
+  constexpr void await_resume() const noexcept {}
 };
 
 struct suspend_always {
-  bool await_ready(void) const noexcept {
-    return false;
-  }
+  constexpr bool await_ready() const noexcept { return false; }
 
-  void await_suspend(coroutine_handle<> handle) const noexcept {
-    static_cast<void>(handle);
-  }
+  constexpr void await_suspend(coroutine_handle<>) const noexcept {}
 
-  void await_resume(void) const noexcept {
-  }
+  constexpr void await_resume() const noexcept {}
 };
 
 }  // namespace std

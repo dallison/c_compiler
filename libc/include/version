@@ -27,6 +27,9 @@
 #endif
 
 #if __cplusplus >= 202002L
+#ifndef __cpp_lib_coroutine
+#define __cpp_lib_coroutine 201902L
+#endif
 #define __cpp_lib_is_constant_evaluated 201811L
 #define __cpp_lib_bit_cast 201806L
 #if __cplusplus >= 202700L
@@ -104,6 +107,14 @@
 #endif
 
 #if __cplusplus >= 202600L
+#if !defined(__6502__) && !defined(__W65C02__)
+#ifndef __cpp_lib_senders
+#define __cpp_lib_senders 202406L
+#endif
+#ifndef __cpp_lib_task
+#define __cpp_lib_task 202506L
+#endif
+#endif
 #ifndef __cpp_lib_debugging
 #define __cpp_lib_debugging 202403L
 #endif
