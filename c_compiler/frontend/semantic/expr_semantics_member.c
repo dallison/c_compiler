@@ -1094,6 +1094,17 @@ void AnalyzePackIndexExpression(BinaryASTNode* node) {
 
 // Contract: Computes sizeof/alignof/sizeof... constant when the operand type is
 // known; VLAs and dependent type operands stay runtime-sized or unset.
+// [expr.sizeof]/1, [expr.alignof]/1: a function type has no size or
+// alignment.  C accepts `sizeof` of a function as a GNU extension.
+static void DiagnoseSizeofFunctionType(SizeofASTNode* node,
+                                       TypeRecord* operand_type,
+                                       bool is_alignof) {
+  if (CompilerIsCXX() && operand_type != NULL && TypeIsFunction(operand_type)) {
+    SemanticError((ASTNode*)node, "invalid application of '%s' to a function type",
+                  is_alignof ? "alignof" : "sizeof");
+  }
+}
+
 void AnalyzeSizeofExpression(SizeofASTNode* node) {
   bool is_alignof = node->base.base.op == AST_OP(alignof);
   if (node->is_pack_size) {
@@ -1119,6 +1130,7 @@ void AnalyzeSizeofExpression(SizeofASTNode* node) {
   if (node->expr != NULL) {
     node->expr = AnalyzeExpression(node->expr);
     TypeRecord* operand_type = SizeofOperandType(node->expr->type);
+    DiagnoseSizeofFunctionType(node, operand_type, is_alignof);
     if (TypeIsVLA(operand_type)) {
       // sizeof(vla) is calculated at runtime.
     } else {
@@ -1130,6 +1142,7 @@ void AnalyzeSizeofExpression(SizeofASTNode* node) {
     // A `sizeof(type-id)` / `alignof(type-id)` whose operand has become
     // concrete (e.g. after template instantiation): re-measure now.
     TypeRecord* operand_type = SizeofOperandType(node->type_operand);
+    DiagnoseSizeofFunctionType(node, operand_type, is_alignof);
     TypeRecordCalculateSize(operand_type);
     node->base.value.ivalue =
         is_alignof ? TypeRecordAlignment(operand_type) : operand_type->size;
