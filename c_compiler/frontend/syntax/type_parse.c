@@ -1207,7 +1207,7 @@ static bool TemplateArgumentIsIdentityParameter(TemplateArgument* arg,
          arg->dependent_expr == NULL;
 }
 
-static bool TemplateArgumentsAreIdentity(Vector* args, Symbol* templ) {
+bool TemplateArgumentsAreIdentity(Vector* args, Symbol* templ) {
   if (args == NULL || templ == NULL || templ->type == NULL ||
       !TypeIsStructOrUnion(templ->type) ||
       templ->type->info.struct_info == NULL) {
@@ -1224,6 +1224,56 @@ static bool TemplateArgumentsAreIdentity(Vector* args, Symbol* templ) {
     }
   }
   return true;
+}
+
+static bool TemplateArgumentIsParameterAt(TemplateArgument* arg, int index) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->kind == kTemplateParameterType) {
+    return arg->type != NULL && arg->type->template_parameter_index == index &&
+           arg->type->dependent_member_name == NULL;
+  }
+  return arg->template_parameter_index == index && arg->dependent_expr == NULL;
+}
+
+Symbol* EnclosingClassTemplateForOtherSpecialization(Struct* owner,
+                                                     Vector* args) {
+  if (owner == NULL || owner->tag_symbol == NULL || args == NULL) {
+    return NULL;
+  }
+  // A partial specialization's parameters are not its template's arguments:
+  // inside `S<T*>`, `S<T>` is another specialization, and even `S<T*>` is
+  // chosen among the primary's specializations at instantiation.
+  if (owner->partial_specialization_primary != NULL) {
+    return owner->partial_specialization_primary;
+  }
+  bool defined = owner->is_template && owner->template_parameters.length > 0;
+  if (defined) {
+    if (TemplateArgumentsAreIdentity(args, owner->tag_symbol)) {
+      return NULL;
+    }
+  } else {
+    // The body is still being parsed: the class's own parameters are the last
+    // ones in scope.
+    int first = owner->defining_template_scope_count - (int)args->length;
+    if (owner->defining_template_scope_count <= 0 || first < 0) {
+      return NULL;
+    }
+    bool identity = true;
+    for (size_t i = 0; i < args->length && identity; i++) {
+      identity = TemplateArgumentIsParameterAt(args->value.p[i],
+                                               first + (int)i);
+    }
+    if (identity) {
+      return NULL;
+    }
+  }
+  Symbol* templ = owner->tag_symbol;
+  if (templ->type != NULL && templ->type->template_origin != NULL) {
+    templ = templ->type->template_origin;
+  }
+  return templ;
 }
 
 /* `Class<Args>::template alias<More>::member` looks up `alias` as a primary
@@ -1360,7 +1410,22 @@ static TypeRecord* TryBuildDependentTemplateIdMemberType(
   }
   Symbol* base = SyntaxFindQualifiedSymbol(parser->syntax, &prefix);
   FullyQualifiedIdentifierDestruct(&prefix);
-  if (base == NULL || !base->flags.is_template) {
+  if ((base == NULL || !base->flags.is_template) && base_index == 0 &&
+      !name->absolute) {
+    // `W<char>::type` inside `W<T>`, whose name is not yet a template.
+    String* prefix_name = name->components.value.p[0];
+    for (Struct* owner = CurrentClassBeingParsed(parser); owner != NULL;
+         owner = owner->lexical_parent) {
+      if (CurrentClassNameMatchesTypeName(owner, prefix_name)) {
+        base = EnclosingClassTemplateForOtherSpecialization(owner,
+                                                            parsed_args);
+        break;
+      }
+    }
+    if (base == NULL) {
+      return NULL;
+    }
+  } else if (base == NULL || !base->flags.is_template) {
     return NULL;
   }
   String* member_name = name->components.value.p[name->components.length - 1];
@@ -1956,43 +2021,32 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             } else if (base_index == 0) {
               // The prefix may name an enclosing class template by its
               // injected-class-name, which is not yet flagged is_template while
-              // that class's own body is being parsed.  If any prefix argument
-              // is introduced by a *member* template -- its parameter index sits
-              // at or beyond the class's own parameters -- then `Prefix<...>` is
-              // a different specialization, so `Prefix<...>::member` denotes a
-              // member of an unknown specialization and must stay dependent
-              // (resolved per specialization at instantiation) rather than
-              // collapse to the current instantiation's member and silently drop
-              // the differing argument.
+              // that class's own body is being parsed.  Unless the arguments
+              // are the class's own parameters (`Prefix<T>`), `Prefix<...>` is
+              // a different specialization (`Prefix<T*>`, `Prefix<U>` with a
+              // member template's `U`, `Prefix<char>`), so `Prefix<...>::member`
+              // must stay dependent (resolved per specialization at
+              // instantiation) rather than collapse to the current
+              // instantiation's member and silently drop the arguments.
               String* prefix_name = typename_name.components.value.p[0];
               for (Struct* owner = CurrentClassBeingParsed(parser);
                    owner != NULL; owner = owner->lexical_parent) {
                 bool owner_is_template =
                     owner->is_template || owner->template_parameter_count > 0 ||
                     owner->defining_template_scope_count > 0;
-                if (!owner_is_template || owner->tag_name == NULL ||
-                    owner->tag_symbol == NULL ||
-                    strcmp(owner->tag_name->value, prefix_name->value) != 0) {
+                if (!owner_is_template || owner->tag_symbol == NULL ||
+                    !CurrentClassNameMatchesTypeName(owner, prefix_name)) {
                   continue;
                 }
-                int own_scope = owner->template_parameter_count > 0
-                                    ? owner->template_parameter_count
-                                    : owner->defining_template_scope_count;
-                bool references_member_template_param = false;
-                for (size_t i = 0; i < parsed_args->length; i++) {
-                  if (TemplateArgumentReferencesTemplateParameterAtLeast(
-                          parsed_args->value.p[i], own_scope)) {
-                    references_member_template_param = true;
-                    break;
-                  }
-                }
-                if (references_member_template_param) {
+                Symbol* other = EnclosingClassTemplateForOtherSpecialization(
+                    owner, parsed_args);
+                if (other != NULL) {
                   Symbol* primary =
                       SyntaxFindSymbol(parser->syntax, prefix_name);
                   dependent_member_origin =
                       (primary != NULL && primary->flags.is_template)
                           ? primary
-                          : owner->tag_symbol;
+                          : other;
                 }
                 break;
               }

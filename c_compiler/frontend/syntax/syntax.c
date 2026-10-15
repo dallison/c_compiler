@@ -2171,6 +2171,12 @@ static Symbol* FindEnclosingBaseClassTagSymbol(Syntax* syntax, String* base_name
   return NULL;
 }
 
+static bool NameIsTemplateParameter(Syntax* syntax, String* name) {
+  Symbol* symbol = SyntaxFindSymbol(syntax, name);
+  return symbol != NULL && (symbol->flags.is_template_type_parameter ||
+                            symbol->flags.is_template_template_parameter);
+}
+
 Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
                                   FullyQualifiedIdentifier* name) {
   if (!name->is_qualified && name->components.length == 1) {
@@ -2226,11 +2232,13 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
       owner = FindEnclosingBaseClassTagSymbol(syntax, name->components.value.p[0]);
       owner = QualifiedClassAfterMaterialize(syntax, owner);
     }
-    if (owner == NULL && name->components.length == 2 && !name->absolute) {
+    if (owner == NULL && name->components.length == 2 && !name->absolute &&
+        !NameIsTemplateParameter(syntax, name->components.value.p[0])) {
       // A class member function can hide a namespace-scope class used as the
       // first component of a nested type (`ExtensionSet::Prefetch`).  Resolve
       // that qualifier directly in namespace tag/ordinary tables, without
-      // repeating class-member lookup.
+      // repeating class-member lookup.  A template parameter hides it too
+      // (`typename Types::Head` with a parameter named like class `Types`).
       Namespace* ns = syntax->current_namespace != NULL
                           ? syntax->current_namespace
                           : compiler->global_namespace;
@@ -2267,6 +2275,10 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
       if (member == NULL && owner->name.value != NULL) {
         String prefix_name;
         StringInit(&prefix_name, owner->name.value);
+        Vector* prefix_args =
+            name->template_arguments.length == name->components.length
+                ? name->template_arguments.value.p[name->components.length - 2]
+                : NULL;
         Struct* scope = syntax->cxx_class_head;
         if (scope == NULL && compiler->current_function != NULL &&
             TypeIsFunction(compiler->current_function)) {
@@ -2276,6 +2288,12 @@ Symbol* SyntaxFindQualifiedSymbol(Syntax* syntax,
              scope = scope->lexical_parent) {
           if (!CurrentClassNameMatchesTypeName(scope, &prefix_name)) {
             continue;
+          }
+          // `W<char>::type` inside `W<T>` is another specialization's member.
+          if (EnclosingClassTemplateForOtherSpecialization(scope,
+                                                           prefix_args) !=
+              NULL) {
+            break;
           }
           member = FindStructMember(scope, &last);
           if (member != NULL) {

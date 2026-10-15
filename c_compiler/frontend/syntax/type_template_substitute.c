@@ -1072,6 +1072,12 @@ static TypeRecord* SubstituteNestedTypeFromActiveInstantiation(
         type->info.struct_info->lexical_parent != source) {
       continue;
     }
+    // `G<1>` instantiated from a member of `G<2>` has the same pattern as the
+    // enclosing instantiation; its nested `Tag` is `G<1>::Tag`, even before
+    // that member exists, never `G<2>::Tag`.
+    if (i > 0 && source == lookup_sources[0]) {
+      continue;
+    }
     StructMember* member =
         FindStructMember(target, type->info.struct_info->tag_name);
     if (member != NULL && member->symbol != NULL &&

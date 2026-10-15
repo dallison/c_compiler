@@ -663,7 +663,8 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
                                bool is_union, bool is_class,
                                Vector* attributes, Vector* bases,
                                Symbol* qualified_definition_tag,
-                               Symbol* specialization_primary) {
+                               Symbol* specialization_primary,
+                               Symbol* partial_specialization_primary) {
   // We have a struct body.
   // First check that this is not a duplicate definition.
   Struct* str = NULL;
@@ -745,6 +746,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   // inside a class template (needed for friend-declaration disambiguation).
   str->defining_template_scope_count =
       parser->syntax->current_template_parameter_count;
+  str->partial_specialization_primary = partial_specialization_primary;
   // A class defined in a function body is a local class and has the enclosing
   // function's access, including friendship ([class.local]).
   if (str->access_enclosing_function == NULL &&
@@ -1095,7 +1097,10 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
     tag = ParseStructBody(
         parser, &tag_name, is_union, is_class, &attributes, &bases,
         qualified_definition_tag,
-        is_full_specialization ? specialization_template : NULL);
+        is_full_specialization ? specialization_template : NULL,
+        is_partial_specialization && completed_specialization_args != NULL
+            ? specialization_template
+            : NULL);
     if (is_final && tag != NULL && tag->type != NULL &&
         tag->type->info.struct_info != NULL) {
       tag->type->info.struct_info->is_final = true;

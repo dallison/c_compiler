@@ -1917,6 +1917,7 @@ Struct* NewStruct(bool is_union) {
   s->layout_pending_completion = false;
   s->template_parameter_count = 0;
   s->defining_template_scope_count = 0;
+  s->partial_specialization_primary = NULL;
   s->next_offset = 0;
   s->current_offset = 0;
   s->size = 0;

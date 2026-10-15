@@ -82,6 +82,17 @@ Vector* CompleteAliasTemplateArguments(TypeParser* parser, Symbol* alias,
 void SetCXXAliasTemplatePlaceholderOrigin(Symbol* alias, TypeRecord* type);
 TypeRecord* ParseCurrentClassTemplateType(TypeParser* parser, String* name);
 bool CurrentClassNameMatchesTypeName(Struct* owner, String* name);
+// True when `args` are class template `templ`'s own parameters, in order, so
+// `templ<args>` names the current instantiation.
+bool TemplateArgumentsAreIdentity(Vector* args, Symbol* templ);
+// Inside the class template `owner`, `Name<args>` with other than the
+// template's own parameters names a different specialization.  Returns the
+// template it specializes (the primary, or `owner`'s tag while the primary is
+// still being defined), or NULL when `Name<args>` is the current instantiation
+// or `owner` is not a class template.  Inside a partial specialization every
+// `Name<args>` returns the primary.
+Symbol* EnclosingClassTemplateForOtherSpecialization(Struct* owner,
+                                                     Vector* args);
 // Injected-class-name of `owner` or one of its bases (`Derived::Base`).
 Symbol* FindInheritedInjectedClassName(Struct* owner, String* name);
 // The type of that injected-class-name.  A base match returns the base

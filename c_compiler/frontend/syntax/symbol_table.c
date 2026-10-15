@@ -592,6 +592,10 @@ static void CollectNamespaceChildrenInInlineSet(Namespace* parent, String* name,
       CollectNamespaceChildrenFromInlineNamespace(child, name, children);
     }
   }
+  // Like its other members, a namespace declared in the anonymous namespace
+  // is found from the enclosing one (the implicit using-directive).
+  CollectNamespaceChildrenFromInlineNamespace(parent->anonymous_child, name,
+                                              children);
 }
 
 static void CollectNamespaceChildrenFromInlineNamespace(Namespace* ns,

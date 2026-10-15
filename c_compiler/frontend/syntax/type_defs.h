@@ -469,6 +469,9 @@ struct Struct {
   // function template in a non-template class (register immediately).  Transient
   // parse state; not serialized.
   int defining_template_scope_count;  // @wire - (recomputed)
+  // For a class template partial specialization, the primary template it
+  // specializes (not owned).  Transient parse state; not serialized.
+  Symbol* partial_specialization_primary;  // @wire - (transient)
   Vector template_parameters;  // TemplateParameter* entries.     // @wire 15
   Vector partial_specializations;  // @wire 32
   Vector deduction_guides;  // Symbol* entries owned.             // @wire 33

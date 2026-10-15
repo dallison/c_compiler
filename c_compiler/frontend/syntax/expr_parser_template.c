@@ -218,6 +218,30 @@ done:
 }
 
 
+// `typedef W<char> WC;` inside `W<T>`: while `W` is being defined, `WC` cannot
+// be instantiated, and its members are not those of the class being defined.
+static bool TypeNamesOtherSpecializationOfEnclosingClass(Syntax* syntax,
+                                                         TypeRecord* type) {
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->template_arguments == NULL || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* scope = syntax->cxx_class_head;
+  if (scope == NULL && compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    scope = compiler->current_function->info.function.cxx_member_owner;
+  }
+  for (; scope != NULL; scope = scope->lexical_parent) {
+    if (scope == type->info.struct_info ||
+        (scope->tag_symbol != NULL &&
+         type->template_origin == scope->tag_symbol)) {
+      return EnclosingClassTemplateForOtherSpecialization(
+                 scope, type->template_arguments) != NULL;
+    }
+  }
+  return false;
+}
+
 // A qualified name like `T::member` or `Alias<T>::member::value` whose leading
 // nested-name-specifier is dependent cannot be resolved until the template is
 // instantiated.  Builds a placeholder identifier carrying the dependent scope
@@ -268,7 +292,9 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
                          (scope_symbol->type->dependent_member_name == NULL &&
                           scope_symbol->type->template_origin != NULL &&
                           TemplateArgumentListIsDependent(
-                              scope_symbol->type->template_arguments));
+                              scope_symbol->type->template_arguments)) ||
+                         TypeNamesOtherSpecializationOfEnclosingClass(
+                             syntax, scope_symbol->type);
   if (!dependent_scope) {
     return NULL;
   }
@@ -561,7 +587,24 @@ static ASTNode* BuildDependentTemplateScopeValueName(
   // primary's member template and lose the scope arguments.
   Vector* member_args = name->template_arguments.value.p[member_index];
   Vector* scope_args = name->template_arguments.value.p[base_index];
-  if (!TemplateArgumentVectorContainsTemplateParameter(scope_args) &&
+  // Inside `W<T>`, `W<char>::f` and `W<T*>::f` name members of other
+  // specializations, not of the class being defined.
+  Symbol* other_specialization = NULL;
+  if (base_index == 0 && scope_args != NULL) {
+    Struct* enclosing =
+        FindEnclosingClassByName(syntax, name->components.value.p[0]);
+    // `::W<char>::f` names the same class only when `W` is a global class.
+    if (enclosing != NULL && name->absolute &&
+        (enclosing->lexical_parent != NULL || enclosing->tag_symbol == NULL ||
+         (enclosing->tag_symbol->namespace_ != NULL &&
+          enclosing->tag_symbol->namespace_ != compiler->global_namespace))) {
+      enclosing = NULL;
+    }
+    other_specialization =
+        EnclosingClassTemplateForOtherSpecialization(enclosing, scope_args);
+  }
+  if (other_specialization == NULL &&
+      !TemplateArgumentVectorContainsTemplateParameter(scope_args) &&
       !TemplateArgumentListIsDependent(scope_args)) {
     return NULL;
   }
@@ -586,7 +629,9 @@ static ASTNode* BuildDependentTemplateScopeValueName(
     // so `Trait<T>::value` never stays dependent.
     VectorAppend(&prefix.template_arguments, NULL);
   }
-  Symbol* base = SyntaxFindQualifiedSymbol(syntax, &prefix);
+  Symbol* base = other_specialization != NULL
+                     ? other_specialization
+                     : SyntaxFindQualifiedSymbol(syntax, &prefix);
   if (base == NULL) {
     base = SyntaxFindQualifiedTag(syntax, &prefix);
   }
@@ -626,7 +671,9 @@ static ASTNode* BuildDependentTemplateScopeValueName(
     }
   }
   FullyQualifiedIdentifierDestruct(&prefix);
-  if (base == NULL || !base->flags.is_template || base->type == NULL ||
+  if (base == NULL ||
+      (!base->flags.is_template && base != other_specialization) ||
+      base->type == NULL ||
       (!TypeIsStructOrUnion(base->type) &&
        !StorageIs(base->storage, STO(typedef)))) {
     return NULL;
