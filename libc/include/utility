@@ -98,6 +98,7 @@ bool operator>=(const T& left, const T& right) {
 #else
 
 #include <compare>
+#include <initializer_list>
 #include <stddef.h>
 #include <type_traits>
 
