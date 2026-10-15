@@ -891,6 +891,26 @@ static bool CXXTupleElementIsPure(ASTNode* element) {
   }
 }
 
+// A lone initializer of the list's own class copies a tuple (a materialized
+// temporary is `{ make() }`); its elements are that tuple's, not the
+// initializer itself.  An unanalyzed lone initializer is not yet known not to
+// be such a copy.
+static Vector* CXXTupleBracedElements(Vector* initializers, TypeRecord* type) {
+  if (initializers == NULL || initializers->length != 1) {
+    return initializers;
+  }
+  ASTNode* only = CXXTupleElementExpr(initializers, 0);
+  if (only == NULL || only->type == NULL) {
+    return NULL;
+  }
+  if (type != NULL && TypeIsStructOrUnion(type) &&
+      TypeIsStructOrUnion(only->type) &&
+      only->type->info.struct_info == type->info.struct_info) {
+    return CXXTupleArgumentElements(only);
+  }
+  return initializers;
+}
+
 // Contract: Peels wrappers to the element expressions of a tuple argument:
 // a braced-init list, or the arguments of a tuple constructor call (CTAD
 // through `tuple(Types...)`).  Returns a vector owned by the AST.
@@ -907,33 +927,22 @@ static Vector* CXXTupleArgumentElements(ASTNode* arg) {
   }
   if (arg->op == AST_OP(call)) {
     VectorASTNode* call = (VectorASTNode*)arg;
-    TypeRecord* ctor_type = call->base.type;
-    if (ctor_type == NULL && call->left != NULL) {
-      ctor_type = call->left->type;
-    }
+    // Only `tuple(args...)` itself has its arguments as elements.  The
+    // arguments of a function returning a tuple (`std::move(t)`) are not.
+    TypeRecord* ctor_type = call->left != NULL ? call->left->type : NULL;
     if (CXXTypeNamesStdTuple(ctor_type) && call->children != NULL) {
-      if (call->children->length == 1) {
-        Vector* nested = CXXTupleArgumentElements(call->children->value.p[0]);
-        if (nested != NULL) {
-          return nested;
-        }
-      }
-      // Folding drops the other elements, so they must not have effects.
-      for (size_t i = 0; i < call->children->length; i++) {
-        if (!CXXTupleElementIsPure(call->children->value.p[i])) {
-          return NULL;
-        }
-      }
-      return call->children;
+      return CXXTupleBracedElements(call->children, ctor_type);
     }
   }
   if (arg->op == AST_OP(braced_init)) {
-    return ((BracedInitializerASTNode*)arg)->initializers;
+    return CXXTupleBracedElements(((BracedInitializerASTNode*)arg)->initializers,
+                                  arg->type);
   }
   if (arg->op == AST_OP(compound_literal)) {
     ASTNode* init = ((CompoundLiteralASTNode*)arg)->initializer;
     if (init != NULL && init->op == AST_OP(braced_init)) {
-      return ((BracedInitializerASTNode*)init)->initializers;
+      return CXXTupleBracedElements(
+          ((BracedInitializerASTNode*)init)->initializers, arg->type);
     }
   }
   if (arg->op == AST_OP(comma)) {
@@ -1010,6 +1019,7 @@ ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
     return NULL;
   }
   ASTNode* element = NULL;
+  size_t element_index = 0;
   if (type_key != NULL) {
     for (size_t i = 0; i < elements->length; i++) {
       ASTNode* candidate = CXXTupleElementExpr(elements, i);
@@ -1024,18 +1034,27 @@ ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
             TypeEqual(TypeMemberPointerPointeeType(candidate->type),
                       TypeMemberPointerPointeeType(type_key))))) {
         element = candidate;
+        element_index = i;
         break;
       }
     }
     TypeRecordDelete(type_key);
   } else if (index != (size_t)-1) {
     element = CXXTupleElementExpr(elements, index);
+    element_index = index;
   }
   VectorDeleteWithContents(resolved,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
   if (element == NULL) {
     return NULL;
+  }
+  // Folding drops the other elements, so they must not have effects.
+  for (size_t i = 0; i < elements->length; i++) {
+    if (i != element_index &&
+        !CXXTupleElementIsPure(elements->value.p[i])) {
+      return NULL;
+    }
   }
   ASTNode* moved = ASTNodeMove(element);
   moved = AnalyzeExpression(moved);
