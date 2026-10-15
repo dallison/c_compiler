@@ -255,6 +255,10 @@ typedef struct Symbol {
   // analysis sets this before IR generation so every reference to the pooled
   // variable uses the hidden struct-return address.
   bool is_nrvo;                   // @wire - (transient)
+  // For a function template specialization, the template instantiation depth
+  // that requested it.  Its deferred body is analyzed at that depth, so
+  // instantiations it triggers nest under it.  Transient.
+  int instantiation_depth;        // @wire - (transient)
   // Class that owns this static data member. Its out-of-line definition,
   // including the implicit constructor and destructor calls, is in that
   // class's scope. Transient: rebuilt when the class member is declared.

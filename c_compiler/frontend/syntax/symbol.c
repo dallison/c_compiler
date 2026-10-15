@@ -304,6 +304,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->structured_binding_pack_size = -2;
   sym->is_structured_binding_object = false;
   sym->is_nrvo = false;
+  sym->instantiation_depth = 0;
   sym->static_data_member_class = NULL;
   sym->static_data_member_pattern = NULL;
   sym->static_data_member_template_arguments = NULL;

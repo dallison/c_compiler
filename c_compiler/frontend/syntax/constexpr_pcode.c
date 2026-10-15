@@ -1035,10 +1035,12 @@ static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,
   memcpy(saved_abort, compiler->constexpr_codegen_abort, sizeof(jmp_buf));
   compiler->constexpr_codegen_recover = true;
   PCodeGenerator* pcode = NULL;
+  int saved_instantiation_depth = compiler->template_instantiation_depth;
   if (setjmp(compiler->constexpr_codegen_abort) == 0) {
     pcode = GenerateFunction(&gen);
   } else {
     pcode = NULL;  // recovered from an otherwise-fatal code generation path
+    compiler->template_instantiation_depth = saved_instantiation_depth;
   }
   compiler->constexpr_codegen_recover = saved_recover;
   memcpy(compiler->constexpr_codegen_abort, saved_abort, sizeof(jmp_buf));

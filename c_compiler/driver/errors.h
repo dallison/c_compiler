@@ -17,6 +17,10 @@
 // Reports an error with varargs (printf style) arguments.
 void ReportError(const char* filename, int lineno, const char* error, ...);
 void ReportErrorAtLocation(SourceLocation location, const char* error, ...);
+// Reports an error that ends compilation, even inside an error trap or a
+// suppressed region, and exits.
+void ReportFatalErrorAtLocation(SourceLocation location, const char* error,
+                                ...);
 
 // Reports an error with vprintf style arguments.
 // Returns true when the diagnostic was emitted.

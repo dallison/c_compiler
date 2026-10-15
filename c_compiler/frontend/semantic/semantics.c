@@ -677,6 +677,12 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
                                     : NULL;
   compiler->immediate_function_context_depth = 0;
   compiler->constant_evaluation_required_depth = 0;
+  int saved_instantiation_depth = compiler->template_instantiation_depth;
+  if (function_symbol != NULL &&
+      function_symbol->instantiation_depth > saved_instantiation_depth) {
+    compiler->template_instantiation_depth =
+        function_symbol->instantiation_depth;
+  }
   if (TypeIsConstevalOnly(node->type) &&
       !node->type->info.function.is_consteval &&
       !node->type->info.function.is_constexpr) {
@@ -748,6 +754,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   compiler->immediate_function_context_depth = saved_immediate_context_depth;
   compiler->constant_evaluation_required_depth =
       saved_constant_evaluation_depth;
+  compiler->template_instantiation_depth = saved_instantiation_depth;
   compiler->current_function = saved_current_function;
   compiler->current_class_access_context = saved_class_access_context;
 }

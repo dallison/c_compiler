@@ -383,6 +383,11 @@ typedef struct Compiler {
   // traits. Such probes may populate instantiation caches, but must not clone,
   // queue, analyze, or emit function bodies.
   int speculative_template_instantiation_depth;
+  // Class and function template instantiations in progress, nested.  Past
+  // `max_template_instantiation_depth` (-ftemplate-depth; 0 selects the
+  // default) compilation stops with a fatal diagnostic.
+  int template_instantiation_depth;
+  int max_template_instantiation_depth;
   // The operand of the decltype being parsed.  Folding it to its value would
   // lose its value category and, for a member access, the declared type.
   struct ASTNode* decltype_operand;
