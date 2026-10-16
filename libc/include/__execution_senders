@@ -1,0 +1,3265 @@
+//
+//  __execution_senders
+//  libc
+//
+//  C++26 sender/receiver model ([exec]) for DaveCC. Execution policies remain
+//  in <execution>; this header is included from there in C++26 mode.
+//
+
+#ifndef __execution_senders_h
+#define __execution_senders_h
+
+#if __cplusplus >= 202600L
+
+#include <syscall.h>
+
+#if !defined(__6502__) && !defined(__W65C02__) && defined(__DAVECC_HAS_THREADS__)
+
+#include <atomic>
+#include <concepts>
+#include <condition_variable>
+#include <coroutine>
+#include <exception>
+#include <functional>
+#include <mutex>
+#include <new>
+#include <optional>
+#include <stddef.h>
+#include <stop_token>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <variant>
+
+#ifndef __cpp_lib_senders
+#define __cpp_lib_senders 202406L
+#endif
+#ifndef __cpp_lib_task
+#define __cpp_lib_task 202506L
+#endif
+
+namespace std {
+namespace execution {
+
+struct receiver_t {};
+struct sender_t {};
+struct operation_state_t {};
+struct scheduler_t {};
+
+enum class forward_progress_guarantee {
+  concurrent,
+  parallel,
+  weakly_parallel,
+};
+
+template <class... Sigs>
+struct completion_signatures {};
+
+struct set_value_t {
+  template <class Rcvr, class... Args>
+  void operator()(Rcvr&& rcvr, Args&&... args) const
+      noexcept(noexcept(
+          static_cast<Rcvr&&>(rcvr).set_value(static_cast<Args&&>(args)...))) {
+    static_cast<Rcvr&&>(rcvr).set_value(static_cast<Args&&>(args)...);
+  }
+};
+
+struct set_error_t {
+  template <class Rcvr, class Error>
+  void operator()(Rcvr&& rcvr, Error&& error) const
+      noexcept(noexcept(
+          static_cast<Rcvr&&>(rcvr).set_error(static_cast<Error&&>(error)))) {
+    static_cast<Rcvr&&>(rcvr).set_error(static_cast<Error&&>(error));
+  }
+};
+
+struct set_stopped_t {
+  template <class Rcvr>
+  void operator()(Rcvr&& rcvr) const
+      noexcept(noexcept(static_cast<Rcvr&&>(rcvr).set_stopped())) {
+    static_cast<Rcvr&&>(rcvr).set_stopped();
+  }
+};
+
+struct start_t {
+  template <class Op>
+  void operator()(Op&& op) const {
+    static_cast<Op&&>(op).start();
+  }
+};
+
+struct connect_t {
+  template <class Sndr, class Rcvr>
+  auto operator()(Sndr&& sndr, Rcvr&& rcvr) const {
+    return static_cast<Sndr&&>(sndr).connect(static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+inline constexpr set_value_t set_value{};
+inline constexpr set_error_t set_error{};
+inline constexpr set_stopped_t set_stopped{};
+inline constexpr start_t start{};
+inline constexpr connect_t connect{};
+
+namespace __exec {
+
+template <int N>
+struct priority : priority<N - 1> {};
+
+template <>
+struct priority<0> {};
+
+template <class T, class = void>
+struct has_get_env : false_type {};
+
+template <class T>
+struct has_get_env<T, void_t<decltype(declval<const T&>().get_env())>> : true_type {};
+
+template <class T, class = void>
+struct is_sender : false_type {};
+
+template <class T>
+struct is_sender<T, void_t<typename remove_cvref_t<T>::sender_concept>>
+    : is_base_of<sender_t, typename remove_cvref_t<T>::sender_concept> {};
+
+template <class Env, class Query, class = void>
+struct has_query : false_type {};
+
+template <class Env, class Query>
+struct has_query<
+    Env, Query,
+    void_t<decltype(declval<const Env&>().query(declval<const Query&>()))>> : true_type {};
+
+template <class... Lists>
+struct sig_concat;
+
+template <>
+struct sig_concat<> {
+  using type = completion_signatures<>;
+};
+
+template <class... Sigs>
+struct sig_concat<completion_signatures<Sigs...>> {
+  using type = completion_signatures<Sigs...>;
+};
+
+template <class... Left, class... Right, class... Rest>
+struct sig_concat<completion_signatures<Left...>, completion_signatures<Right...>, Rest...>
+    : sig_concat<completion_signatures<Left..., Right...>, Rest...> {};
+
+template <class... Lists>
+using sig_concat_t = typename sig_concat<Lists...>::type;
+
+template <class E>
+exception_ptr to_exception_ptr(E&& error) {
+  if constexpr (is_same_v<decay_t<E>, exception_ptr>) {
+    return static_cast<E&&>(error);
+  } else {
+#ifdef __cpp_exceptions
+    return make_exception_ptr(static_cast<E&&>(error));
+#else
+    static_cast<void>(error);
+    terminate();
+#endif
+  }
+}
+
+template <class Rcvr, class Tuple, size_t... I>
+void deliver_tuple(Rcvr& rcvr, Tuple&& values, index_sequence<I...>) {
+  set_value_t{}(rcvr, get<I>(static_cast<Tuple&&>(values))...);
+}
+
+template <class Rcvr, class Left, class Right, size_t... IL, size_t... IR>
+void deliver_two(Rcvr& rcvr, Left&& left, Right&& right, index_sequence<IL...>,
+                 index_sequence<IR...>) {
+  set_value_t{}(rcvr, get<IL>(static_cast<Left&&>(left))...,
+                get<IR>(static_cast<Right&&>(right))...);
+}
+
+struct task_stopped {};
+
+struct task_bridge {
+  void* object;
+  void (*on_value)(void*);
+  void (*on_error)(void*, exception_ptr);
+  void (*on_stopped)(void*);
+};
+
+template <class State>
+struct op_box {
+  using operation_state_concept = operation_state_t;
+  State* state;
+
+  explicit op_box(State* value) noexcept : state(value) {}
+  op_box(op_box&& other) noexcept : state(other.state) { other.state = nullptr; }
+  op_box(const op_box&) = delete;
+  op_box& operator=(const op_box&) = delete;
+  op_box& operator=(op_box&&) = delete;
+  ~op_box() { delete state; }
+  void start() noexcept { state->start(); }
+};
+
+template <class State, class... Args>
+op_box<State> make_op(Args&&... args) {
+  return op_box<State>(new State(static_cast<Args&&>(args)...));
+}
+
+template <class Sig>
+struct is_value_sig : false_type {};
+
+template <class... Args>
+struct is_value_sig<set_value_t(Args...)> : true_type {};
+
+template <class Sig>
+struct is_error_sig : false_type {};
+
+template <class E>
+struct is_error_sig<set_error_t(E)> : true_type {};
+
+template <class Sig>
+struct is_stopped_sig : false_type {};
+
+template <>
+struct is_stopped_sig<set_stopped_t()> : true_type {};
+
+template <class... Sigs>
+struct any_error : bool_constant<(is_error_sig<Sigs>::value || ...)> {};
+
+template <>
+struct any_error<> : false_type {};
+
+template <class... Sigs>
+struct any_stopped : bool_constant<(is_stopped_sig<Sigs>::value || ...)> {};
+
+template <>
+struct any_stopped<> : false_type {};
+
+template <class... Sigs>
+struct first_value_sig;
+
+template <class... Args, class... Rest>
+struct first_value_sig<set_value_t(Args...), Rest...> {
+  using type = set_value_t(Args...);
+};
+
+template <class Sig, class... Rest>
+struct first_value_sig<Sig, Rest...> : first_value_sig<Rest...> {};
+
+template <class Completions>
+struct first_value_of;
+
+template <class... Sigs>
+struct first_value_of<completion_signatures<Sigs...>> {
+  using type = typename first_value_sig<Sigs...>::type;
+};
+
+template <class Sig>
+struct value_tuple;
+
+template <class... Args>
+struct value_tuple<set_value_t(Args...)> {
+  using type = tuple<decay_t<Args>...>;
+};
+
+template <class Sig>
+struct await_type;
+
+template <>
+struct await_type<set_value_t()> {
+  using type = void;
+};
+
+template <class T>
+struct await_type<set_value_t(T)> {
+  using type = decay_t<T>;
+};
+
+template <class T, class U, class... Rest>
+struct await_type<set_value_t(T, U, Rest...)> {
+  using type = tuple<decay_t<T>, decay_t<U>, decay_t<Rest>...>;
+};
+
+template <class Completions>
+struct await_type_of;
+
+template <class... Sigs>
+struct await_type_of<completion_signatures<Sigs...>> {
+  using type = typename await_type<typename first_value_sig<Sigs...>::type>::type;
+};
+
+template <class A, class B>
+struct cat_tuple;
+
+template <class... A, class... B>
+struct cat_tuple<tuple<A...>, tuple<B...>> {
+  using type = tuple<A..., B...>;
+};
+
+template <class Tuple>
+struct tuple_as_sig;
+
+template <class... Args>
+struct tuple_as_sig<tuple<Args...>> {
+  using type = completion_signatures<set_value_t(Args...)>;
+};
+
+template <class Fn, class Sig, class = void>
+struct then_one {
+  using type = completion_signatures<Sig>;
+};
+
+template <class Fn, class... Args>
+struct then_one<Fn, set_value_t(Args...), void_t<invoke_result_t<Fn, Args...>>> {
+  using result = invoke_result_t<Fn, Args...>;
+  using type = conditional_t<is_void_v<result>, completion_signatures<set_value_t()>,
+                             completion_signatures<set_value_t(decay_t<result>)>>;
+};
+
+template <class Fn, class Completions>
+struct then_completions;
+
+template <class Fn, class... Sigs>
+struct then_completions<Fn, completion_signatures<Sigs...>> {
+  using type = sig_concat_t<typename then_one<Fn, Sigs>::type...,
+                            completion_signatures<set_error_t(exception_ptr)>>;
+};
+
+template <class Fn, class Sig, class = void>
+struct upon_error_one {
+  using type = completion_signatures<Sig>;
+};
+
+template <class Fn, class E>
+struct upon_error_one<Fn, set_error_t(E), void_t<invoke_result_t<Fn, E>>> {
+  using result = invoke_result_t<Fn, E>;
+  using type = conditional_t<is_void_v<result>, completion_signatures<set_value_t()>,
+                             completion_signatures<set_value_t(decay_t<result>)>>;
+};
+
+template <class Fn, class Completions>
+struct upon_error_completions;
+
+template <class Fn, class... Sigs>
+struct upon_error_completions<Fn, completion_signatures<Sigs...>> {
+  using type = sig_concat_t<typename upon_error_one<Fn, Sigs>::type...,
+                            completion_signatures<set_error_t(exception_ptr)>>;
+};
+
+template <class Fn, class Sig, class = void>
+struct upon_stopped_one {
+  using type = completion_signatures<Sig>;
+};
+
+template <class Fn>
+struct upon_stopped_one<Fn, set_stopped_t(), void_t<invoke_result_t<Fn>>> {
+  using result = invoke_result_t<Fn>;
+  using type = conditional_t<is_void_v<result>, completion_signatures<set_value_t()>,
+                             completion_signatures<set_value_t(decay_t<result>)>>;
+};
+
+template <class Fn, class Completions>
+struct upon_stopped_completions;
+
+template <class Fn, class... Sigs>
+struct upon_stopped_completions<Fn, completion_signatures<Sigs...>> {
+  using type = sig_concat_t<typename upon_stopped_one<Fn, Sigs>::type...,
+                            completion_signatures<set_error_t(exception_ptr)>>;
+};
+
+template <class Left, class Right>
+struct when_completions;
+
+template <class... L, class... R>
+struct when_completions<completion_signatures<L...>, completion_signatures<R...>> {
+  using left_tuple = typename value_tuple<typename first_value_sig<L...>::type>::type;
+  using right_tuple = typename value_tuple<typename first_value_sig<R...>::type>::type;
+  using cat = typename cat_tuple<left_tuple, right_tuple>::type;
+  static constexpr bool error = any_error<L..., R...>::value;
+  static constexpr bool stopped = any_stopped<L..., R...>::value;
+  using type = sig_concat_t<
+      typename tuple_as_sig<cat>::type,
+      conditional_t<error, completion_signatures<set_error_t(exception_ptr)>,
+                    completion_signatures<>>,
+      conditional_t<stopped, completion_signatures<set_stopped_t()>, completion_signatures<>>>;
+};
+
+template <class... Ts>
+struct type_list {
+  template <template <class...> class Pack>
+  using apply = Pack<Ts...>;
+};
+
+template <template <class...> class Tuple, class List, class Sig>
+struct push_value {
+  using type = List;
+};
+
+template <template <class...> class Tuple, class... Done, class... Args>
+struct push_value<Tuple, type_list<Done...>, set_value_t(Args...)> {
+  using type = type_list<Done..., Tuple<decay_t<Args>...>>;
+};
+
+template <template <class...> class Tuple, class List, class... Sigs>
+struct collect_values;
+
+template <template <class...> class Tuple, class List>
+struct collect_values<Tuple, List> {
+  using type = List;
+};
+
+template <template <class...> class Tuple, class List, class Sig, class... Rest>
+struct collect_values<Tuple, List, Sig, Rest...> {
+  using type = typename collect_values<
+      Tuple, typename push_value<Tuple, List, Sig>::type, Rest...>::type;
+};
+
+template <class... Es>
+struct error_list {
+  template <template <class...> class Pack>
+  using apply = Pack<Es...>;
+};
+
+template <class List, class Sig>
+struct push_error {
+  using type = List;
+};
+
+template <class... Done, class E>
+struct push_error<error_list<Done...>, set_error_t(E)> {
+  using type = error_list<Done..., decay_t<E>>;
+};
+
+template <class List, class... Sigs>
+struct collect_errors;
+
+template <class List>
+struct collect_errors<List> {
+  using type = List;
+};
+
+template <class List, class Sig, class... Rest>
+struct collect_errors<List, Sig, Rest...> {
+  using type = typename collect_errors<typename push_error<List, Sig>::type, Rest...>::type;
+};
+
+template <class P, class Op, class = void>
+struct can_own_op : false_type {};
+
+template <class P, class Op>
+struct can_own_op<P, Op, void_t<decltype(declval<P&>().__own_operation(declval<Op*>()))>>
+    : true_type {};
+
+}  // namespace __exec
+
+struct default_domain {
+  template <class Sndr, class... Env>
+  static constexpr decltype(auto) transform_sender(Sndr&& sndr, const Env&...) noexcept {
+    return static_cast<Sndr&&>(sndr);
+  }
+
+  template <class Tag, class... Args>
+  static constexpr decltype(auto) apply_sender(Tag, Args&&... args) {
+    return Tag{}(static_cast<Args&&>(args)...);
+  }
+};
+
+struct transform_sender_t {
+  template <class Domain, class Sndr, class... Env>
+  constexpr decltype(auto) operator()(Domain, Sndr&& sndr, const Env&... env) const {
+    return Domain::transform_sender(static_cast<Sndr&&>(sndr), env...);
+  }
+};
+
+struct apply_sender_t {
+  template <class Domain, class Tag, class... Args>
+  constexpr decltype(auto) operator()(Domain, Tag tag, Args&&... args) const {
+    return Domain::apply_sender(tag, static_cast<Args&&>(args)...);
+  }
+};
+
+inline constexpr transform_sender_t transform_sender{};
+inline constexpr apply_sender_t apply_sender{};
+
+template <class... Envs>
+struct env;
+
+template <>
+struct env<> {};
+
+template <class Query, class Value>
+struct prop {
+  Value value;
+
+  constexpr prop(Query, Value stored) : value(static_cast<Value&&>(stored)) {}
+
+  constexpr const Value& query(Query) const noexcept { return value; }
+};
+
+template <class Query, class Value>
+prop(Query, Value) -> prop<Query, Value>;
+
+template <class First, class... Rest>
+struct env<First, Rest...> {
+  First first;
+  env<Rest...> rest;
+
+  constexpr env(First head, Rest... tail)
+      : first(static_cast<First&&>(head)), rest(static_cast<Rest&&>(tail)...) {}
+
+  template <class Query>
+  constexpr auto __query(__exec::priority<1>, Query query) const
+      -> decltype(first.query(query)) {
+    return first.query(query);
+  }
+
+  template <class Query>
+  constexpr auto __query(__exec::priority<0>, Query query) const
+      -> decltype(rest.query(query)) {
+    return rest.query(query);
+  }
+
+  template <class Query>
+  constexpr auto query(Query query) const
+      -> decltype(__query(__exec::priority<1>{}, query)) {
+    return __query(__exec::priority<1>{}, query);
+  }
+};
+
+template <class... Envs>
+env(Envs...) -> env<Envs...>;
+
+struct get_env_t {
+  template <class T>
+  constexpr auto operator()(const T& object) const noexcept {
+    if constexpr (__exec::has_get_env<T>::value) {
+      return object.get_env();
+    } else {
+      return env<>{};
+    }
+  }
+};
+
+inline constexpr get_env_t get_env{};
+
+struct forwarding_query_t {
+  template <class Query>
+  constexpr bool operator()(const Query& query) const noexcept {
+    if constexpr (__exec::has_query<Query, forwarding_query_t>::value) {
+      return query.query(*this);
+    } else {
+      return false;
+    }
+  }
+};
+
+inline constexpr forwarding_query_t forwarding_query{};
+
+struct get_scheduler_t {
+  template <class Env>
+  constexpr auto operator()(const Env& environment) const
+      -> decltype(environment.query(*this)) {
+    return environment.query(*this);
+  }
+  constexpr bool query(forwarding_query_t) const noexcept { return true; }
+};
+
+struct get_delegation_scheduler_t {
+  template <class Env>
+  constexpr auto operator()(const Env& environment) const
+      -> decltype(environment.query(*this)) {
+    return environment.query(*this);
+  }
+  constexpr bool query(forwarding_query_t) const noexcept { return true; }
+};
+
+struct get_allocator_t {
+  template <class Env>
+  constexpr auto operator()(const Env& environment) const
+      -> decltype(environment.query(*this)) {
+    return environment.query(*this);
+  }
+  constexpr bool query(forwarding_query_t) const noexcept { return true; }
+};
+
+struct get_stop_token_t {
+  template <class Env>
+  constexpr auto operator()(const Env& environment) const noexcept {
+    if constexpr (__exec::has_query<Env, get_stop_token_t>::value) {
+      return environment.query(*this);
+    } else {
+      return never_stop_token{};
+    }
+  }
+  constexpr bool query(forwarding_query_t) const noexcept { return false; }
+};
+
+struct get_forward_progress_guarantee_t {
+  template <class Env>
+  constexpr auto operator()(const Env& environment) const noexcept {
+    if constexpr (__exec::has_query<Env, get_forward_progress_guarantee_t>::value) {
+      return environment.query(*this);
+    } else {
+      return forward_progress_guarantee::weakly_parallel;
+    }
+  }
+  constexpr bool query(forwarding_query_t) const noexcept { return true; }
+};
+
+struct get_domain_t {
+  template <class Env>
+  constexpr auto operator()(const Env& environment) const noexcept {
+    if constexpr (__exec::has_query<Env, get_domain_t>::value) {
+      return environment.query(*this);
+    } else {
+      return default_domain{};
+    }
+  }
+  constexpr bool query(forwarding_query_t) const noexcept { return false; }
+};
+
+template <class Tag>
+struct get_completion_scheduler_t {
+  template <class Env>
+  constexpr auto operator()(const Env& environment) const
+      -> decltype(environment.query(*this)) {
+    return environment.query(*this);
+  }
+  constexpr bool query(forwarding_query_t) const noexcept { return true; }
+};
+
+template <class Tag>
+inline constexpr get_completion_scheduler_t<Tag> get_completion_scheduler{};
+
+inline constexpr get_scheduler_t get_scheduler{};
+inline constexpr get_delegation_scheduler_t get_delegation_scheduler{};
+inline constexpr get_allocator_t get_allocator{};
+inline constexpr get_stop_token_t get_stop_token{};
+inline constexpr get_forward_progress_guarantee_t get_forward_progress_guarantee{};
+inline constexpr get_domain_t get_domain{};
+
+template <class Sndr, class Env = env<>, class = void>
+struct __completions_of {};
+
+template <class Sndr, class Env>
+struct __completions_of<
+    Sndr, Env, void_t<typename remove_cvref_t<Sndr>::template completions<Env>>> {
+  using type = typename remove_cvref_t<Sndr>::template completions<Env>;
+};
+
+template <class Sndr, class Env = env<>>
+using completion_signatures_of_t = typename __completions_of<Sndr, Env>::type;
+
+struct get_completion_signatures_t {
+  template <class Sndr, class Env = env<>>
+  constexpr auto operator()(Sndr&&, const Env& = {}) const noexcept
+      -> completion_signatures_of_t<Sndr, Env> {
+    return {};
+  }
+};
+
+inline constexpr get_completion_signatures_t get_completion_signatures{};
+
+template <class Sndr>
+using tag_of_t = typename remove_cvref_t<Sndr>::sender_tag;
+
+template <class Completions, template <class...> class Tuple, template <class...> class Variant>
+struct __value_types_pack;
+
+template <class... Sigs, template <class...> class Tuple, template <class...> class Variant>
+struct __value_types_pack<completion_signatures<Sigs...>, Tuple, Variant> {
+  using __list =
+      typename __exec::collect_values<Tuple, __exec::type_list<>, Sigs...>::type;
+  using type = typename __list::template apply<Variant>;
+};
+
+template <class Sndr, class Env = env<>, template <class...> class Tuple = tuple,
+          template <class...> class Variant = variant>
+using value_types_of_t =
+    typename __value_types_pack<completion_signatures_of_t<Sndr, Env>, Tuple, Variant>::type;
+
+template <class Completions, template <class...> class Variant>
+struct __error_types_pack;
+
+template <class... Sigs, template <class...> class Variant>
+struct __error_types_pack<completion_signatures<Sigs...>, Variant> {
+  using __list = typename __exec::collect_errors<__exec::error_list<>, Sigs...>::type;
+  using type = typename __list::template apply<Variant>;
+};
+
+template <class Sndr, class Env = env<>, template <class...> class Variant = variant>
+using error_types_of_t =
+    typename __error_types_pack<completion_signatures_of_t<Sndr, Env>, Variant>::type;
+
+template <class Completions>
+struct __sends_stopped_of;
+
+template <class... Sigs>
+struct __sends_stopped_of<completion_signatures<Sigs...>>
+    : __exec::any_stopped<Sigs...> {};
+
+template <class Sndr, class Env = env<>>
+inline constexpr bool sends_stopped =
+    __sends_stopped_of<completion_signatures_of_t<Sndr, Env>>::value;
+
+template <class T>
+concept queryable = destructible<T>;
+
+template <class Rcvr>
+concept receiver =
+    requires { typename remove_cvref_t<Rcvr>::receiver_concept; } &&
+    derived_from<typename remove_cvref_t<Rcvr>::receiver_concept, receiver_t> &&
+    requires(const remove_cvref_t<Rcvr>& rcvr) {
+      { get_env(rcvr) } -> queryable;
+    } && move_constructible<remove_cvref_t<Rcvr>> &&
+    constructible_from<remove_cvref_t<Rcvr>, Rcvr>;
+
+template <class Rcvr, class Sig>
+struct __completion_matches : false_type {};
+
+template <class Rcvr, class... Args>
+struct __completion_matches<Rcvr, set_value_t(Args...)>
+    : bool_constant<is_invocable_v<set_value_t, Rcvr, Args...>> {};
+
+template <class Rcvr, class Error>
+struct __completion_matches<Rcvr, set_error_t(Error)>
+    : bool_constant<is_invocable_v<set_error_t, Rcvr, Error>> {};
+
+template <class Rcvr>
+struct __completion_matches<Rcvr, set_stopped_t()>
+    : bool_constant<is_invocable_v<set_stopped_t, Rcvr>> {};
+
+template <class Rcvr, class Completions>
+struct __receiver_of_impl : false_type {};
+
+template <class Rcvr, class... Sigs>
+struct __receiver_of_impl<Rcvr, completion_signatures<Sigs...>>
+    : bool_constant<(__completion_matches<Rcvr, Sigs>::value && ...)> {};
+
+template <class Rcvr, class Completions>
+concept receiver_of = receiver<Rcvr> && __receiver_of_impl<Rcvr, Completions>::value;
+
+template <class Sndr>
+concept sender =
+    requires { typename remove_cvref_t<Sndr>::sender_concept; } &&
+    derived_from<typename remove_cvref_t<Sndr>::sender_concept, sender_t> &&
+    requires(const remove_cvref_t<Sndr>& sndr) {
+      { get_env(sndr) } -> queryable;
+    } && move_constructible<remove_cvref_t<Sndr>> &&
+    constructible_from<remove_cvref_t<Sndr>, Sndr>;
+
+template <class Sndr, class Env = env<>>
+concept sender_in =
+    sender<Sndr> && queryable<Env> && requires { typename completion_signatures_of_t<Sndr, Env>; };
+
+template <class Sndr>
+concept dependent_sender =
+    sender<Sndr> && !requires { typename completion_signatures_of_t<Sndr, env<>>; };
+
+template <class Rcvr>
+using env_of_t = decltype(get_env(declval<const remove_cvref_t<Rcvr>&>()));
+
+template <class Sndr, class Rcvr>
+using connect_result_t = decltype(connect(declval<Sndr>(), declval<Rcvr>()));
+
+template <class Sndr, class Rcvr>
+concept sender_to =
+    sender_in<Sndr, env_of_t<Rcvr>> &&
+    receiver_of<Rcvr, completion_signatures_of_t<Sndr, env_of_t<Rcvr>>> &&
+    requires(Sndr&& sndr, Rcvr&& rcvr) {
+      connect(static_cast<Sndr&&>(sndr), static_cast<Rcvr&&>(rcvr));
+    };
+
+template <class Op>
+concept operation_state =
+    requires { typename Op::operation_state_concept; } &&
+    derived_from<typename Op::operation_state_concept, operation_state_t> && is_object_v<Op> &&
+    requires(Op& op) { start(op); };
+
+struct schedule_t {
+  template <class Sch>
+  auto operator()(Sch&& sch) const -> decltype(static_cast<Sch&&>(sch).schedule()) {
+    return static_cast<Sch&&>(sch).schedule();
+  }
+};
+
+inline constexpr schedule_t schedule{};
+
+template <class Sch>
+concept scheduler =
+    requires { typename remove_cvref_t<Sch>::scheduler_concept; } &&
+    derived_from<typename remove_cvref_t<Sch>::scheduler_concept, scheduler_t> && queryable<Sch> &&
+    requires(Sch&& sch) {
+      { schedule(static_cast<Sch&&>(sch)) } -> sender;
+    } && copy_constructible<remove_cvref_t<Sch>> &&
+    equality_comparable<remove_cvref_t<Sch>>;
+
+template <class Derived>
+struct sender_adaptor_closure {};
+
+template <class T, class = void>
+struct __is_adaptor_closure : false_type {};
+
+template <class T>
+struct __is_adaptor_closure<T, void_t<typename remove_cvref_t<T>::__adaptor_closure>>
+    : true_type {};
+
+template <class Sndr, class Closure>
+  requires __exec::is_sender<remove_cvref_t<Sndr>>::value &&
+           (__is_adaptor_closure<Closure>::value ||
+            is_base_of_v<sender_adaptor_closure<remove_cvref_t<Closure>>,
+                         remove_cvref_t<Closure>>)
+decltype(auto) operator|(Sndr&& sndr, Closure&& closure) {
+  return static_cast<Closure&&>(closure)(static_cast<Sndr&&>(sndr));
+}
+
+struct just_t;
+struct just_error_t;
+struct just_stopped_t;
+struct read_env_t;
+struct then_t;
+struct upon_error_t;
+struct upon_stopped_t;
+struct let_value_t;
+struct let_error_t;
+struct let_stopped_t;
+struct when_all_t;
+struct into_variant_t;
+struct stopped_as_optional_t;
+struct stopped_as_error_t;
+struct bulk_t;
+struct starts_on_t;
+struct continues_on_t;
+struct on_t;
+struct schedule_from_t;
+struct unstoppable_t;
+struct write_env_t;
+
+template <class... Ts>
+struct __just_sender {
+  using sender_concept = sender_t;
+  using sender_tag = just_t;
+
+  tuple<Ts...> values;
+
+  explicit __just_sender(tuple<Ts...> stored)
+      : values(static_cast<tuple<Ts...>&&>(stored)) {}
+
+  template <class Env>
+  using completions = completion_signatures<set_value_t(Ts...), set_stopped_t()>;
+
+  env<> get_env() const noexcept { return {}; }
+
+  template <class Rcvr>
+  struct __op {
+    using operation_state_concept = operation_state_t;
+    tuple<Ts...> values;
+    Rcvr rcvr;
+
+    __op(tuple<Ts...> stored, Rcvr receiver)
+        : values(static_cast<tuple<Ts...>&&>(stored)),
+          rcvr(static_cast<Rcvr&&>(receiver)) {}
+
+    __op(__op&&) = default;
+    __op(const __op&) = default;
+
+    void start() noexcept {
+      if (get_stop_token(get_env(rcvr)).stop_requested()) {
+        set_stopped_t{}(rcvr);
+        return;
+      }
+      if constexpr (sizeof...(Ts) == 0) {
+        set_value_t{}(rcvr);
+      } else if constexpr (sizeof...(Ts) == 1) {
+        set_value_t{}(rcvr, get<0>(static_cast<tuple<Ts...>&&>(values)));
+      } else if constexpr (sizeof...(Ts) == 2) {
+        set_value_t{}(rcvr, get<0>(values), get<1>(values));
+      } else if constexpr (sizeof...(Ts) == 3) {
+        set_value_t{}(rcvr, get<0>(values), get<1>(values), get<2>(values));
+      }
+    }
+  };
+
+  template <class Rcvr>
+  __op<Rcvr> connect(Rcvr rcvr) {
+    return __op<Rcvr>(static_cast<tuple<Ts...>&&>(values), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct just_t {
+  template <class... Args>
+  __just_sender<decay_t<Args>...> operator()(Args&&... args) const {
+    return __just_sender<decay_t<Args>...>(
+        tuple<decay_t<Args>...>(static_cast<Args&&>(args)...));
+  }
+};
+
+inline constexpr just_t just{};
+
+template <class Error>
+struct __just_error_sender {
+  using sender_concept = sender_t;
+  using sender_tag = just_error_t;
+  Error error;
+
+  template <class Env>
+  using completions = completion_signatures<set_error_t(Error)>;
+
+  env<> get_env() const noexcept { return {}; }
+
+  template <class Rcvr>
+  struct __op {
+    using operation_state_concept = operation_state_t;
+    Error error;
+    Rcvr rcvr;
+    __op(Error stored, Rcvr receiver)
+        : error(static_cast<Error&&>(stored)), rcvr(static_cast<Rcvr&&>(receiver)) {}
+    __op(__op&&) = default;
+    void start() noexcept { set_error(rcvr, static_cast<Error&&>(error)); }
+  };
+
+  template <class Rcvr>
+  __op<decay_t<Rcvr>> connect(Rcvr rcvr) {
+    return __op<decay_t<Rcvr>>(static_cast<Error&&>(error), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct just_error_t {
+  template <class Error>
+  __just_error_sender<decay_t<Error>> operator()(Error&& error) const {
+    return {static_cast<Error&&>(error)};
+  }
+};
+
+inline constexpr just_error_t just_error{};
+
+struct __just_stopped_sender {
+  using sender_concept = sender_t;
+  using sender_tag = just_stopped_t;
+
+  template <class Env>
+  using completions = completion_signatures<set_stopped_t()>;
+
+  env<> get_env() const noexcept { return {}; }
+
+  template <class Rcvr>
+  struct __op {
+    using operation_state_concept = operation_state_t;
+    Rcvr rcvr;
+    explicit __op(Rcvr receiver) : rcvr(static_cast<Rcvr&&>(receiver)) {}
+    __op(__op&&) = default;
+    void start() noexcept { set_stopped(rcvr); }
+  };
+
+  template <class Rcvr>
+  __op<decay_t<Rcvr>> connect(Rcvr rcvr) const {
+    return __op<decay_t<Rcvr>>(static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct just_stopped_t {
+  __just_stopped_sender operator()() const noexcept { return {}; }
+};
+
+inline constexpr just_stopped_t just_stopped{};
+
+template <class Query>
+struct __read_env_sender {
+  using sender_concept = sender_t;
+  using sender_tag = read_env_t;
+  Query query;
+
+  template <class Env>
+  using completions = completion_signatures<
+      set_value_t(decay_t<decltype(declval<Query&>()(declval<const Env&>()))>)>;
+
+  env<> get_env() const noexcept { return {}; }
+
+  template <class Rcvr>
+  struct __op {
+    using operation_state_concept = operation_state_t;
+    Query query;
+    Rcvr rcvr;
+    __op(Query stored, Rcvr receiver)
+        : query(static_cast<Query&&>(stored)), rcvr(static_cast<Rcvr&&>(receiver)) {}
+    __op(__op&&) = default;
+    void start() noexcept { set_value(rcvr, query(get_env(rcvr))); }
+  };
+
+  template <class Rcvr>
+  __op<decay_t<Rcvr>> connect(Rcvr rcvr) const {
+    return __op<decay_t<Rcvr>>(query, static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct read_env_t {
+  template <class Query>
+  __read_env_sender<decay_t<Query>> operator()(Query query) const {
+    return {static_cast<Query&&>(query)};
+  }
+};
+
+inline constexpr read_env_t read_env{};
+
+template <class Fn, class Rcvr, class... Args>
+void __then_complete(Fn& fn, Rcvr& rcvr, Args&&... args) {
+  using Result = invoke_result_t<Fn&, Args...>;
+  if constexpr (is_void_v<Result>) {
+    fn(static_cast<Args&&>(args)...);
+    set_value_t{}(rcvr);
+  } else {
+    set_value_t{}(rcvr, fn(static_cast<Args&&>(args)...));
+  }
+}
+
+template <class Sndr, class Fn>
+struct __then_sender {
+  using sender_concept = sender_t;
+  using sender_tag = then_t;
+  Sndr sndr;
+  Fn fn;
+
+  template <class Env>
+  using completions =
+      typename __exec::then_completions<Fn, completion_signatures_of_t<Sndr, Env>>::type;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  struct __state {
+    struct __rcvr {
+      using receiver_concept = receiver_t;
+      __state* self;
+      explicit __rcvr(__state* state) : self(state) {}
+
+      template <class... Args>
+      void set_value(Args&&... args) noexcept {
+        __then_complete(self->fn, self->rcvr, static_cast<Args&&>(args)...);
+      }
+
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+        set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+      }
+
+      void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+
+      auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+    };
+
+    Rcvr rcvr;
+    Fn fn;
+    using __child = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+    __child child;
+
+    __state(Sndr&& source, Fn&& function, Rcvr&& receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)),
+          fn(static_cast<Fn&&>(function)),
+          child(connect_t{}(static_cast<Sndr&&>(source), __rcvr(this))) {}
+
+    void start() noexcept { start_t{}(child); }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(
+        static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct then_t {
+  template <class Sndr, class Fn>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __then_sender<decay_t<Sndr>, decay_t<Fn>> operator()(Sndr&& sndr, Fn&& fn) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn)};
+  }
+
+  template <class Fn>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Fn> fn;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return then_t{}(static_cast<Sndr&&>(sndr), fn);
+    }
+  };
+
+  template <class Fn>
+  __closure<Fn> operator()(Fn&& fn) const {
+    return {static_cast<Fn&&>(fn)};
+  }
+};
+
+inline constexpr then_t then{};
+
+template <class Sndr, class Fn>
+struct __upon_error_sender {
+  using sender_concept = sender_t;
+  using sender_tag = upon_error_t;
+  Sndr sndr;
+  Fn fn;
+
+  template <class Env>
+  using completions = typename __exec::upon_error_completions<
+      Fn, completion_signatures_of_t<Sndr, Env>>::type;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  struct __state {
+    struct __rcvr {
+      using receiver_concept = receiver_t;
+      __state* self;
+
+      template <class... Args>
+      void set_value(Args&&... args) noexcept {
+        set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+      }
+
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+#ifdef __cpp_exceptions
+        try {
+#endif
+          using Result = invoke_result_t<Fn&, Error>;
+          if constexpr (is_void_v<Result>) {
+            invoke(self->fn, static_cast<Error&&>(error));
+            set_value_t{}(self->rcvr);
+          } else {
+            set_value_t{}(self->rcvr, invoke(self->fn, static_cast<Error&&>(error)));
+          }
+#ifdef __cpp_exceptions
+        } catch (...) {
+          set_error_t{}(self->rcvr, current_exception());
+        }
+#endif
+      }
+
+      void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+      auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+    };
+
+    Rcvr rcvr;
+    Fn fn;
+    using __child = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+    __child child;
+
+    __state(Sndr&& source, Fn&& function, Rcvr&& receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)),
+          fn(static_cast<Fn&&>(function)),
+          child(connect_t{}(static_cast<Sndr&&>(source), __rcvr{this})) {}
+
+    void start() noexcept { start_t{}(child); }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(
+        static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct upon_error_t {
+  template <class Sndr, class Fn>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __upon_error_sender<decay_t<Sndr>, decay_t<Fn>> operator()(Sndr&& sndr, Fn&& fn) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn)};
+  }
+
+  template <class Fn>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Fn> fn;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return upon_error_t{}(static_cast<Sndr&&>(sndr), fn);
+    }
+  };
+
+  template <class Fn>
+  __closure<Fn> operator()(Fn&& fn) const {
+    return {static_cast<Fn&&>(fn)};
+  }
+};
+
+inline constexpr upon_error_t upon_error{};
+
+template <class Sndr, class Fn>
+struct __upon_stopped_sender {
+  using sender_concept = sender_t;
+  using sender_tag = upon_stopped_t;
+  Sndr sndr;
+  Fn fn;
+
+  template <class Env>
+  using completions = typename __exec::upon_stopped_completions<
+      Fn, completion_signatures_of_t<Sndr, Env>>::type;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  struct __state {
+    struct __rcvr {
+      using receiver_concept = receiver_t;
+      __state* self;
+
+      template <class... Args>
+      void set_value(Args&&... args) noexcept {
+        set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+      }
+
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+        set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+      }
+
+      void set_stopped() noexcept {
+#ifdef __cpp_exceptions
+        try {
+#endif
+          using Result = invoke_result_t<Fn&>;
+          if constexpr (is_void_v<Result>) {
+            invoke(self->fn);
+            set_value_t{}(self->rcvr);
+          } else {
+            set_value_t{}(self->rcvr, invoke(self->fn));
+          }
+#ifdef __cpp_exceptions
+        } catch (...) {
+          set_error_t{}(self->rcvr, current_exception());
+        }
+#endif
+      }
+
+      auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+    };
+
+    Rcvr rcvr;
+    Fn fn;
+    using __child = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+    __child child;
+
+    __state(Sndr&& source, Fn&& function, Rcvr&& receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)),
+          fn(static_cast<Fn&&>(function)),
+          child(connect_t{}(static_cast<Sndr&&>(source), __rcvr{this})) {}
+
+    void start() noexcept { start_t{}(child); }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(
+        static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct upon_stopped_t {
+  template <class Sndr, class Fn>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __upon_stopped_sender<decay_t<Sndr>, decay_t<Fn>> operator()(Sndr&& sndr, Fn&& fn) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn)};
+  }
+
+  template <class Fn>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Fn> fn;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return upon_stopped_t{}(static_cast<Sndr&&>(sndr), fn);
+    }
+  };
+
+  template <class Fn>
+  __closure<Fn> operator()(Fn&& fn) const {
+    return {static_cast<Fn&&>(fn)};
+  }
+};
+
+inline constexpr upon_stopped_t upon_stopped{};
+
+// let_value / let_error / let_stopped, when_all, variant adaptors, schedulers,
+// and coroutine task are defined next to keep each sender's operation state
+// next to the algorithm that builds it.
+
+template <class Child, class Sig>
+struct __let_from_sig;
+
+template <class Child, class... Args>
+struct __let_from_sig<Child, set_value_t(Args...)> {
+  using sender_type = invoke_result_t<Child, Args...>;
+};
+
+template <class Child, class Error>
+struct __let_from_error {
+  using sender_type = invoke_result_t<Child, Error>;
+};
+
+template <class Sndr, class Fn, class Down>
+struct __let_value_state {
+  struct __up {
+    using receiver_concept = receiver_t;
+    __let_value_state* self;
+
+    template <class... Args>
+    void set_value(Args&&... args) noexcept {
+#ifdef __cpp_exceptions
+      try {
+#endif
+        auto child = invoke(self->fn, static_cast<Args&&>(args)...);
+        self->launch(static_cast<decltype(child)&&>(child));
+#ifdef __cpp_exceptions
+      } catch (...) {
+        set_error_t{}(self->rcvr, current_exception());
+      }
+#endif
+    }
+
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+    }
+
+    void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  struct __down {
+    using receiver_concept = receiver_t;
+    __let_value_state* self;
+
+    template <class... Args>
+    void set_value(Args&&... args) noexcept {
+      set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+    }
+
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+    }
+
+    void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  using __value_sig =
+      typename __exec::first_value_of<completion_signatures_of_t<Sndr, env_of_t<Down>>>::type;
+  using __child_sender = typename __let_from_sig<Fn, __value_sig>::sender_type;
+  using __child_op = decltype(connect_t{}(declval<__child_sender>(), declval<__down>()));
+  using __up_op = decltype(connect_t{}(declval<Sndr>(), declval<__up>()));
+
+  Down rcvr;
+  Fn fn;
+  __up_op upstream;
+  alignas(__child_op) unsigned char storage[sizeof(__child_op)];
+  bool alive;
+
+  __let_value_state(Sndr&& source, Fn&& function, Down&& receiver)
+      : rcvr(static_cast<Down&&>(receiver)),
+        fn(static_cast<Fn&&>(function)),
+        upstream(connect_t{}(static_cast<Sndr&&>(source), __up{this})),
+        alive(false) {}
+
+  __let_value_state(const __let_value_state&) = delete;
+  __let_value_state& operator=(const __let_value_state&) = delete;
+
+  ~__let_value_state() {
+    if (alive) {
+      reinterpret_cast<__child_op*>(storage)->~__child_op();
+    }
+  }
+
+  template <class Child>
+  void launch(Child&& child) {
+    auto* op = new (storage) __child_op(
+        connect_t{}(static_cast<Child&&>(child), __down{this}));
+    alive = true;
+    start_t{}(*op);
+  }
+
+  void start() noexcept { start_t{}(upstream); }
+};
+
+template <class Sndr, class Fn>
+struct __let_value_sender {
+  using sender_concept = sender_t;
+  using sender_tag = let_value_t;
+  Sndr sndr;
+  Fn fn;
+
+  template <class Env>
+  using completions = completion_signatures_of_t<
+      typename __let_from_sig<
+          Fn, typename __exec::first_value_of<completion_signatures_of_t<Sndr, Env>>::type>::
+          sender_type,
+      Env>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  __exec::op_box<__let_value_state<Sndr, Fn, decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__let_value_state<Sndr, Fn, decay_t<Rcvr>>>(
+        static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct let_value_t {
+  template <class Sndr, class Fn>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __let_value_sender<decay_t<Sndr>, decay_t<Fn>> operator()(Sndr&& sndr, Fn&& fn) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn)};
+  }
+
+  template <class Fn>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Fn> fn;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return let_value_t{}(static_cast<Sndr&&>(sndr), fn);
+    }
+  };
+
+  template <class Fn>
+  __closure<Fn> operator()(Fn&& fn) const {
+    return {static_cast<Fn&&>(fn)};
+  }
+};
+
+inline constexpr let_value_t let_value{};
+
+template <class Sndr, class Fn, class Down>
+struct __let_error_state {
+  struct __up {
+    using receiver_concept = receiver_t;
+    __let_error_state* self;
+    template <class... Args>
+    void set_value(Args&&... args) noexcept {
+      set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+    }
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+#ifdef __cpp_exceptions
+      try {
+#endif
+        auto child = invoke(self->fn, static_cast<Error&&>(error));
+        self->launch(static_cast<decltype(child)&&>(child));
+#ifdef __cpp_exceptions
+      } catch (...) {
+        set_error_t{}(self->rcvr, current_exception());
+      }
+#endif
+    }
+    void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  struct __down {
+    using receiver_concept = receiver_t;
+    __let_error_state* self;
+    template <class... Args>
+    void set_value(Args&&... args) noexcept {
+      set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+    }
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+    }
+    void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  template <class Completions>
+  struct __child_of;
+
+  template <class... Sigs>
+  struct __child_of<completion_signatures<Sigs...>> {
+    template <class Sig, class = void>
+    struct pick {};
+    template <class E>
+    struct pick<set_error_t(E)> {
+      using type = invoke_result_t<Fn, E>;
+    };
+    template <class Sig, class... Rest>
+    struct walk {
+      using type = typename conditional_t<__exec::is_error_sig<Sig>::value, pick<Sig>,
+                                          walk<Rest...>>::type;
+    };
+    template <class Sig>
+    struct walk<Sig> {
+      using type = typename pick<Sig>::type;
+    };
+    using type = typename walk<Sigs...>::type;
+  };
+
+  using __child_sender =
+      typename __child_of<completion_signatures_of_t<Sndr, env_of_t<Down>>>::type;
+  using __child_op = decltype(connect_t{}(declval<__child_sender>(), declval<__down>()));
+  using __up_op = decltype(connect_t{}(declval<Sndr>(), declval<__up>()));
+
+  Down rcvr;
+  Fn fn;
+  __up_op upstream;
+  alignas(__child_op) unsigned char storage[sizeof(__child_op)];
+  bool alive;
+
+  __let_error_state(Sndr&& source, Fn&& function, Down&& receiver)
+      : rcvr(static_cast<Down&&>(receiver)),
+        fn(static_cast<Fn&&>(function)),
+        upstream(connect_t{}(static_cast<Sndr&&>(source), __up{this})),
+        alive(false) {}
+
+  ~__let_error_state() {
+    if (alive) {
+      reinterpret_cast<__child_op*>(storage)->~__child_op();
+    }
+  }
+
+  template <class Child>
+  void launch(Child&& child) {
+    auto* op =
+        new (storage) __child_op(connect_t{}(static_cast<Child&&>(child), __down{this}));
+    alive = true;
+    start_t{}(*op);
+  }
+
+  void start() noexcept { start_t{}(upstream); }
+};
+
+template <class Sndr, class Fn>
+struct __let_error_sender {
+  using sender_concept = sender_t;
+  using sender_tag = let_error_t;
+  Sndr sndr;
+  Fn fn;
+
+  template <class Env>
+  using completions = completion_signatures_of_t<
+      typename __let_error_state<Sndr, Fn, env<Env>>::template __child_of<
+          completion_signatures_of_t<Sndr, Env>>::type,
+      Env>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  __exec::op_box<__let_error_state<Sndr, Fn, decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__let_error_state<Sndr, Fn, decay_t<Rcvr>>>(
+        static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct let_error_t {
+  template <class Sndr, class Fn>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __let_error_sender<decay_t<Sndr>, decay_t<Fn>> operator()(Sndr&& sndr, Fn&& fn) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn)};
+  }
+
+  template <class Fn>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Fn> fn;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return let_error_t{}(static_cast<Sndr&&>(sndr), fn);
+    }
+  };
+
+  template <class Fn>
+  __closure<Fn> operator()(Fn&& fn) const {
+    return {static_cast<Fn&&>(fn)};
+  }
+};
+
+inline constexpr let_error_t let_error{};
+
+template <class Sndr, class Fn, class Down>
+struct __let_stopped_state {
+  struct __up {
+    using receiver_concept = receiver_t;
+    __let_stopped_state* self;
+    template <class... Args>
+    void set_value(Args&&... args) noexcept {
+      set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+    }
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+    }
+    void set_stopped() noexcept {
+#ifdef __cpp_exceptions
+      try {
+#endif
+        auto child = invoke(self->fn);
+        self->launch(static_cast<decltype(child)&&>(child));
+#ifdef __cpp_exceptions
+      } catch (...) {
+        set_error_t{}(self->rcvr, current_exception());
+      }
+#endif
+    }
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  struct __down {
+    using receiver_concept = receiver_t;
+    __let_stopped_state* self;
+    template <class... Args>
+    void set_value(Args&&... args) noexcept {
+      set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+    }
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+    }
+    void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  using __child_sender = invoke_result_t<Fn>;
+  using __child_op = decltype(connect_t{}(declval<__child_sender>(), declval<__down>()));
+  using __up_op = decltype(connect_t{}(declval<Sndr>(), declval<__up>()));
+
+  Down rcvr;
+  Fn fn;
+  __up_op upstream;
+  alignas(__child_op) unsigned char storage[sizeof(__child_op)];
+  bool alive;
+
+  __let_stopped_state(Sndr&& source, Fn&& function, Down&& receiver)
+      : rcvr(static_cast<Down&&>(receiver)),
+        fn(static_cast<Fn&&>(function)),
+        upstream(connect_t{}(static_cast<Sndr&&>(source), __up{this})),
+        alive(false) {}
+
+  ~__let_stopped_state() {
+    if (alive) {
+      reinterpret_cast<__child_op*>(storage)->~__child_op();
+    }
+  }
+
+  template <class Child>
+  void launch(Child&& child) {
+    auto* op =
+        new (storage) __child_op(connect_t{}(static_cast<Child&&>(child), __down{this}));
+    alive = true;
+    start_t{}(*op);
+  }
+
+  void start() noexcept { start_t{}(upstream); }
+};
+
+template <class Sndr, class Fn>
+struct __let_stopped_sender {
+  using sender_concept = sender_t;
+  using sender_tag = let_stopped_t;
+  Sndr sndr;
+  Fn fn;
+
+  template <class Env>
+  using completions = completion_signatures_of_t<invoke_result_t<Fn>, Env>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  __exec::op_box<__let_stopped_state<Sndr, Fn, decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__let_stopped_state<Sndr, Fn, decay_t<Rcvr>>>(
+        static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct let_stopped_t {
+  template <class Sndr, class Fn>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __let_stopped_sender<decay_t<Sndr>, decay_t<Fn>> operator()(Sndr&& sndr, Fn&& fn) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Fn&&>(fn)};
+  }
+
+  template <class Fn>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Fn> fn;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return let_stopped_t{}(static_cast<Sndr&&>(sndr), fn);
+    }
+  };
+
+  template <class Fn>
+  __closure<Fn> operator()(Fn&& fn) const {
+    return {static_cast<Fn&&>(fn)};
+  }
+};
+
+inline constexpr let_stopped_t let_stopped{};
+
+struct __when_all_empty {
+  using sender_concept = sender_t;
+  using sender_tag = when_all_t;
+
+  template <class Env>
+  using completions = completion_signatures<set_value_t()>;
+
+  env<> get_env() const noexcept { return {}; }
+
+  template <class Rcvr>
+  struct __op {
+    using operation_state_concept = operation_state_t;
+    Rcvr rcvr;
+    explicit __op(Rcvr receiver) : rcvr(static_cast<Rcvr&&>(receiver)) {}
+    void start() noexcept { set_value(rcvr); }
+  };
+
+  template <class Rcvr>
+  __op<decay_t<Rcvr>> connect(Rcvr rcvr) const {
+    return __op<decay_t<Rcvr>>(static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+template <class Left, class Right>
+struct __when_all2 {
+  using sender_concept = sender_t;
+  using sender_tag = when_all_t;
+  Left left;
+  Right right;
+
+  template <class Env>
+  using completions = typename __exec::when_completions<completion_signatures_of_t<Left, Env>,
+                                                        completion_signatures_of_t<Right, Env>>::type;
+
+  env<> get_env() const noexcept { return {}; }
+
+  template <class Rcvr>
+  struct __state {
+    struct __shared {
+      Rcvr rcvr;
+      atomic<int> remaining;
+      atomic<bool> failed;
+      atomic<bool> saw_stopped;
+      exception_ptr error;
+      typename __exec::value_tuple<typename __exec::first_value_of<
+          completion_signatures_of_t<Left, env_of_t<Rcvr>>>::type>::type left_values;
+      typename __exec::value_tuple<typename __exec::first_value_of<
+          completion_signatures_of_t<Right, env_of_t<Rcvr>>>::type>::type right_values;
+
+      explicit __shared(Rcvr receiver)
+          : rcvr(static_cast<Rcvr&&>(receiver)), remaining(2), failed(false), saw_stopped(false) {}
+
+      void arrive() noexcept {
+        if (remaining.fetch_sub(1, memory_order_acq_rel) == 1) {
+          if (failed.load(memory_order_acquire)) {
+            set_error_t{}(rcvr, error);
+          } else if (saw_stopped.load(memory_order_acquire)) {
+            set_stopped_t{}(rcvr);
+          } else {
+            __exec::deliver_two(
+                rcvr, static_cast<decltype(left_values)&&>(left_values),
+                static_cast<decltype(right_values)&&>(right_values),
+                make_index_sequence<tuple_size<decltype(left_values)>::value>{},
+                make_index_sequence<tuple_size<decltype(right_values)>::value>{});
+          }
+        }
+      }
+    };
+
+    template <bool IsLeft>
+    struct __side {
+      using receiver_concept = receiver_t;
+      __shared* shared;
+
+      template <class... Args>
+      void set_value(Args&&... args) noexcept {
+        if constexpr (IsLeft) {
+          shared->left_values = decay_t<decltype(shared->left_values)>(static_cast<Args&&>(args)...);
+        } else {
+          shared->right_values =
+              decay_t<decltype(shared->right_values)>(static_cast<Args&&>(args)...);
+        }
+        shared->arrive();
+      }
+
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+        if (!shared->failed.exchange(true, memory_order_acq_rel)) {
+          shared->error = __exec::to_exception_ptr(static_cast<Error&&>(error));
+        }
+        shared->arrive();
+      }
+
+      void set_stopped() noexcept {
+        shared->saw_stopped.store(true, memory_order_release);
+        shared->arrive();
+      }
+
+      auto get_env() const noexcept { return get_env_t{}(shared->rcvr); }
+    };
+
+    using __left_op = decltype(connect_t{}(declval<Left>(), declval<__side<true>>()));
+    using __right_op = decltype(connect_t{}(declval<Right>(), declval<__side<false>>()));
+
+    __shared shared;
+    __left_op left_op;
+    __right_op right_op;
+
+    __state(Left&& left_sender, Right&& right_sender, Rcvr&& receiver)
+        : shared(static_cast<Rcvr&&>(receiver)),
+          left_op(connect_t{}(static_cast<Left&&>(left_sender), __side<true>{&shared})),
+          right_op(connect_t{}(static_cast<Right&&>(right_sender), __side<false>{&shared})) {}
+
+    void start() noexcept {
+      start_t{}(left_op);
+      start_t{}(right_op);
+    }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(
+        static_cast<Left&&>(left), static_cast<Right&&>(right), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct when_all_t {
+  __when_all_empty operator()() const { return {}; }
+
+  template <class Sndr>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  decay_t<Sndr> operator()(Sndr&& sndr) const {
+    return static_cast<Sndr&&>(sndr);
+  }
+
+  template <class A, class B, class... Rest>
+  auto operator()(A&& a, B&& b, Rest&&... rest) const {
+    if constexpr (sizeof...(Rest) == 0) {
+      return __when_all2<decay_t<A>, decay_t<B>>(static_cast<A&&>(a), static_cast<B&&>(b));
+    } else {
+      return (*this)(__when_all2<decay_t<A>, decay_t<B>>(static_cast<A&&>(a), static_cast<B&&>(b)),
+                     static_cast<Rest&&>(rest)...);
+    }
+  }
+};
+
+inline constexpr when_all_t when_all{};
+
+struct when_all_with_variant_t {
+  template <class... Sndrs>
+  auto operator()(Sndrs&&... sndrs) const;
+};
+
+inline constexpr when_all_with_variant_t when_all_with_variant{};
+
+template <class Sndr>
+struct __into_variant_sender {
+  using sender_concept = sender_t;
+  using sender_tag = into_variant_t;
+  Sndr sndr;
+
+  template <class... Sigs>
+  struct __variant_type;
+
+  template <class... Sigs>
+  struct __variant_type<completion_signatures<Sigs...>> {
+    using __list =
+        typename __exec::collect_values<tuple, __exec::type_list<>, Sigs...>::type;
+    using type = typename __list::template apply<variant>;
+  };
+
+  template <class Env>
+  using __variant_t =
+      typename __variant_type<completion_signatures_of_t<Sndr, Env>>::type;
+
+  template <class Env>
+  using completions = completion_signatures<set_value_t(__variant_t<Env>), set_error_t(exception_ptr),
+                                            set_stopped_t()>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  struct __state {
+    struct __rcvr {
+      using receiver_concept = receiver_t;
+      __state* self;
+      using __var = __variant_t<env_of_t<Rcvr>>;
+
+      template <class... Args>
+      void set_value(Args&&... args) noexcept {
+        using Tup = tuple<decay_t<Args>...>;
+        set_value_t{}(self->rcvr, __var(in_place_type<Tup>, static_cast<Args&&>(args)...));
+      }
+
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+        set_error_t{}(self->rcvr, __exec::to_exception_ptr(static_cast<Error&&>(error)));
+      }
+
+      void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+      auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+    };
+
+    Rcvr rcvr;
+    using __child = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+    __child child;
+
+    __state(Sndr&& source, Rcvr&& receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)),
+          child(connect_t{}(static_cast<Sndr&&>(source), __rcvr{this})) {}
+
+    void start() noexcept { start_t{}(child); }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(static_cast<Sndr&&>(sndr),
+                                                   static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct into_variant_t {
+  template <class Sndr>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __into_variant_sender<decay_t<Sndr>> operator()(Sndr&& sndr) const {
+    return {static_cast<Sndr&&>(sndr)};
+  }
+
+  struct __closure {
+    using __adaptor_closure = void;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return into_variant_t{}(static_cast<Sndr&&>(sndr));
+    }
+  };
+
+  __closure operator()() const { return {}; }
+};
+
+inline constexpr into_variant_t into_variant{};
+
+template <class... Sndrs>
+auto when_all_with_variant_t::operator()(Sndrs&&... sndrs) const {
+  return when_all(into_variant(static_cast<Sndrs&&>(sndrs))...);
+}
+
+template <class Sndr>
+struct __stopped_optional_sender {
+  using sender_concept = sender_t;
+  using sender_tag = stopped_as_optional_t;
+  Sndr sndr;
+
+  template <class Env>
+  using __value_t = typename __exec::await_type<typename __exec::first_value_of<
+      completion_signatures_of_t<Sndr, Env>>::type>::type;
+
+  template <class Env>
+  using completions =
+      completion_signatures<set_value_t(optional<decay_t<__value_t<Env>>>),
+                            set_error_t(exception_ptr)>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  struct __state {
+    struct __rcvr {
+      using receiver_concept = receiver_t;
+      __state* self;
+      using Value = decay_t<__value_t<env_of_t<Rcvr>>>;
+
+      void set_value(Value value) noexcept {
+        set_value_t{}(self->rcvr, optional<Value>(static_cast<Value&&>(value)));
+      }
+
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+        set_error_t{}(self->rcvr, __exec::to_exception_ptr(static_cast<Error&&>(error)));
+      }
+
+      void set_stopped() noexcept { set_value_t{}(self->rcvr, optional<Value>()); }
+      auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+    };
+
+    Rcvr rcvr;
+    using __child = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+    __child child;
+
+    __state(Sndr&& source, Rcvr&& receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)),
+          child(connect_t{}(static_cast<Sndr&&>(source), __rcvr{this})) {}
+
+    void start() noexcept { start_t{}(child); }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(static_cast<Sndr&&>(sndr),
+                                                   static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct stopped_as_optional_t {
+  template <class Sndr>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __stopped_optional_sender<decay_t<Sndr>> operator()(Sndr&& sndr) const {
+    return {static_cast<Sndr&&>(sndr)};
+  }
+
+  struct __closure {
+    using __adaptor_closure = void;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return stopped_as_optional_t{}(static_cast<Sndr&&>(sndr));
+    }
+  };
+
+  __closure operator()() const { return {}; }
+};
+
+inline constexpr stopped_as_optional_t stopped_as_optional{};
+
+template <class Sndr, class Error>
+struct __stopped_error_sender {
+  using sender_concept = sender_t;
+  using sender_tag = stopped_as_error_t;
+  Sndr sndr;
+  Error error;
+
+  template <class Env>
+  using completions = completion_signatures<
+      typename __exec::first_value_of<completion_signatures_of_t<Sndr, Env>>::type,
+      set_error_t(Error)>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  struct __state {
+    struct __rcvr {
+      using receiver_concept = receiver_t;
+      __state* self;
+
+      template <class... Args>
+      void set_value(Args&&... args) noexcept {
+        set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+      }
+
+      template <class E>
+      void set_error(E&& err) noexcept {
+        set_error_t{}(self->rcvr, static_cast<E&&>(err));
+      }
+
+      void set_stopped() noexcept { set_error_t{}(self->rcvr, self->error); }
+      auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+    };
+
+    Rcvr rcvr;
+    Error error;
+    using __child = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+    __child child;
+
+    __state(Sndr&& source, Error&& err, Rcvr&& receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)),
+          error(static_cast<Error&&>(err)),
+          child(connect_t{}(static_cast<Sndr&&>(source), __rcvr{this})) {}
+
+    void start() noexcept { start_t{}(child); }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(
+        static_cast<Sndr&&>(sndr), static_cast<Error&&>(error), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct stopped_as_error_t {
+  template <class Sndr, class Error>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __stopped_error_sender<decay_t<Sndr>, decay_t<Error>> operator()(Sndr&& sndr,
+                                                                   Error&& error) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Error&&>(error)};
+  }
+
+  template <class Error>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Error> error;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return stopped_as_error_t{}(static_cast<Sndr&&>(sndr), error);
+    }
+  };
+
+  template <class Error>
+  __closure<Error> operator()(Error&& error) const {
+    return {static_cast<Error&&>(error)};
+  }
+};
+
+inline constexpr stopped_as_error_t stopped_as_error{};
+
+template <class Sndr, class Shape, class Fn>
+struct __bulk_sender {
+  using sender_concept = sender_t;
+  using sender_tag = bulk_t;
+  Sndr sndr;
+  Shape shape;
+  Fn fn;
+
+  template <class Env>
+  using completions = completion_signatures_of_t<Sndr, Env>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  struct __state {
+    struct __rcvr {
+      using receiver_concept = receiver_t;
+      __state* self;
+
+      template <class... Args>
+      void set_value(Args&&... args) noexcept {
+        tuple<decay_t<Args>...> stored(static_cast<Args&&>(args)...);
+        for (Shape index{}; index < self->shape; ++index) {
+          apply(
+              [&](auto&... values) { invoke(self->fn, index, values...); }, stored);
+        }
+        __exec::deliver_tuple(self->rcvr, static_cast<decltype(stored)&&>(stored),
+                              index_sequence_for<decay_t<Args>...>{});
+      }
+
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+        set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+      }
+
+      void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+      auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+    };
+
+    Rcvr rcvr;
+    Shape shape;
+    Fn fn;
+    using __child = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+    __child child;
+
+    __state(Sndr&& source, Shape stored_shape, Fn&& function, Rcvr&& receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)),
+          shape(static_cast<Shape&&>(stored_shape)),
+          fn(static_cast<Fn&&>(function)),
+          child(connect_t{}(static_cast<Sndr&&>(source), __rcvr{this})) {}
+
+    void start() noexcept { start_t{}(child); }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(static_cast<Sndr&&>(sndr),
+                                                   static_cast<Shape&&>(shape),
+                                                   static_cast<Fn&&>(fn),
+                                                   static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct bulk_t {
+  template <class Sndr, class Shape, class Fn>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __bulk_sender<decay_t<Sndr>, decay_t<Shape>, decay_t<Fn>> operator()(Sndr&& sndr, Shape&& shape,
+                                                                       Fn&& fn) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Shape&&>(shape), static_cast<Fn&&>(fn)};
+  }
+
+  template <class Shape, class Fn>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Shape> shape;
+    decay_t<Fn> fn;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return bulk_t{}(static_cast<Sndr&&>(sndr), shape, fn);
+    }
+  };
+
+  template <class Shape, class Fn>
+  __closure<Shape, Fn> operator()(Shape&& shape, Fn&& fn) const {
+    return {static_cast<Shape&&>(shape), static_cast<Fn&&>(fn)};
+  }
+};
+
+inline constexpr bulk_t bulk{};
+
+template <class Env>
+struct __unstop_env {
+  Env base;
+  never_stop_token query(get_stop_token_t) const noexcept { return {}; }
+
+  template <class Query>
+  constexpr auto query(Query query) const -> decltype(base.query(query)) {
+    return base.query(query);
+  }
+};
+
+template <class Sndr>
+struct __unstoppable_sender {
+  using sender_concept = sender_t;
+  using sender_tag = unstoppable_t;
+  Sndr sndr;
+
+  template <class Env>
+  using completions = completion_signatures_of_t<Sndr, __unstop_env<Env>>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  struct __state {
+    struct __rcvr {
+      using receiver_concept = receiver_t;
+      __state* self;
+      template <class... Args>
+      void set_value(Args&&... args) noexcept {
+        set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+      }
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+        set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+      }
+      void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+      auto get_env() const noexcept {
+        return __unstop_env<decltype(get_env_t{}(self->rcvr))>{get_env_t{}(self->rcvr)};
+      }
+    };
+
+    Rcvr rcvr;
+    using __child = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+    __child child;
+
+    __state(Sndr&& source, Rcvr&& receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)),
+          child(connect_t{}(static_cast<Sndr&&>(source), __rcvr{this})) {}
+
+    void start() noexcept { start_t{}(child); }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(static_cast<Sndr&&>(sndr),
+                                                   static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct unstoppable_t {
+  template <class Sndr>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __unstoppable_sender<decay_t<Sndr>> operator()(Sndr&& sndr) const {
+    return {static_cast<Sndr&&>(sndr)};
+  }
+
+  struct __closure {
+    using __adaptor_closure = void;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return unstoppable_t{}(static_cast<Sndr&&>(sndr));
+    }
+  };
+
+  __closure operator()() const { return {}; }
+};
+
+inline constexpr unstoppable_t unstoppable{};
+
+template <class Extra, class Env>
+struct __write_env_env {
+  Extra extra;
+  Env base;
+
+  template <class Query>
+  constexpr auto __query(__exec::priority<1>, Query query) const
+      -> decltype(extra.query(query)) {
+    return extra.query(query);
+  }
+
+  template <class Query>
+  constexpr auto __query(__exec::priority<0>, Query query) const -> decltype(base.query(query)) {
+    return base.query(query);
+  }
+
+  template <class Query>
+  constexpr auto query(Query query) const -> decltype(__query(__exec::priority<1>{}, query)) {
+    return __query(__exec::priority<1>{}, query);
+  }
+};
+
+template <class Sndr, class Extra>
+struct __write_env_sender {
+  using sender_concept = sender_t;
+  using sender_tag = write_env_t;
+  Sndr sndr;
+  Extra extra;
+
+  template <class Env>
+  using completions = completion_signatures_of_t<Sndr, __write_env_env<Extra, Env>>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  struct __state {
+    struct __rcvr {
+      using receiver_concept = receiver_t;
+      __state* self;
+      template <class... Args>
+      void set_value(Args&&... args) noexcept {
+        set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+      }
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+        set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+      }
+      void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+      auto get_env() const noexcept {
+        return __write_env_env<Extra, decltype(get_env_t{}(self->rcvr))>{
+            self->extra, get_env_t{}(self->rcvr)};
+      }
+    };
+
+    Rcvr rcvr;
+    Extra extra;
+    using __child = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+    __child child;
+
+    __state(Sndr&& source, Extra&& environment, Rcvr&& receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)),
+          extra(static_cast<Extra&&>(environment)),
+          child(connect_t{}(static_cast<Sndr&&>(source), __rcvr{this})) {}
+
+    void start() noexcept { start_t{}(child); }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__state<decay_t<Rcvr>>>(
+        static_cast<Sndr&&>(sndr), static_cast<Extra&&>(extra), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct write_env_t {
+  template <class Sndr, class Extra>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __write_env_sender<decay_t<Sndr>, decay_t<Extra>> operator()(Sndr&& sndr, Extra&& extra) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Extra&&>(extra)};
+  }
+
+  template <class Extra>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Extra> extra;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return write_env_t{}(static_cast<Sndr&&>(sndr), extra);
+    }
+  };
+
+  template <class Extra>
+  __closure<Extra> operator()(Extra&& extra) const {
+    return {static_cast<Extra&&>(extra)};
+  }
+};
+
+inline constexpr write_env_t write_env{};
+
+class inline_scheduler {
+ public:
+  using scheduler_concept = scheduler_t;
+
+  struct __sender {
+    using sender_concept = sender_t;
+    using sender_tag = schedule_t;
+
+    template <class Env>
+    using completions = completion_signatures<set_value_t()>;
+
+    env<> get_env() const noexcept { return {}; }
+
+    template <class Rcvr>
+    struct __op {
+      using operation_state_concept = operation_state_t;
+      Rcvr rcvr;
+      explicit __op(Rcvr receiver) : rcvr(static_cast<Rcvr&&>(receiver)) {}
+      __op(__op&&) = default;
+      void start() noexcept { set_value(rcvr); }
+    };
+
+    template <class Rcvr>
+    __op<decay_t<Rcvr>> connect(Rcvr rcvr) const {
+      return __op<decay_t<Rcvr>>(static_cast<Rcvr&&>(rcvr));
+    }
+  };
+
+  __sender schedule() const { return {}; }
+
+  constexpr forward_progress_guarantee query(get_forward_progress_guarantee_t) const noexcept {
+    return forward_progress_guarantee::concurrent;
+  }
+
+  friend constexpr bool operator==(const inline_scheduler&, const inline_scheduler&) noexcept {
+    return true;
+  }
+};
+
+class run_loop {
+ public:
+  class scheduler_type;
+
+ private:
+  struct __node {
+    void (*fn)(__node*) noexcept;
+    __node* next;
+  };
+
+  mutex mutex_;
+  condition_variable cv_;
+  __node* head_;
+  __node* tail_;
+  bool finished_;
+
+  void enqueue(__node* node) {
+    {
+      lock_guard<mutex> guard(mutex_);
+      node->next = nullptr;
+      if (tail_ == nullptr) {
+        head_ = node;
+      } else {
+        tail_->next = node;
+      }
+      tail_ = node;
+    }
+    cv_.notify_one();
+  }
+
+  friend class scheduler_type;
+
+ public:
+  run_loop() : head_(nullptr), tail_(nullptr), finished_(false) {}
+  run_loop(const run_loop&) = delete;
+  run_loop& operator=(const run_loop&) = delete;
+
+  class scheduler_type {
+   public:
+    using scheduler_concept = scheduler_t;
+
+    struct __sender {
+      using sender_concept = sender_t;
+      using sender_tag = schedule_t;
+      run_loop* loop;
+
+      template <class Env>
+      using completions = completion_signatures<set_value_t(), set_stopped_t()>;
+
+      auto get_env() const {
+        return env{prop{get_completion_scheduler_t<set_value_t>{}, scheduler_type{loop}}};
+      }
+
+      template <class Rcvr>
+      struct __state {
+        struct __node_impl : __node {
+          __state* self;
+        };
+
+        Rcvr rcvr;
+        run_loop* loop;
+        __node_impl node;
+        atomic<bool> ready;
+
+        __state(Rcvr receiver, run_loop* owner)
+            : rcvr(static_cast<Rcvr&&>(receiver)), loop(owner), ready(false) {
+          node.fn = &complete;
+          node.self = this;
+        }
+
+        static void complete(__node* raw) noexcept {
+          auto* self = static_cast<__node_impl*>(raw)->self;
+          while (!self->ready.load(memory_order_acquire)) {
+          }
+          if (get_stop_token(get_env(self->rcvr)).stop_requested()) {
+            set_stopped(self->rcvr);
+          } else {
+            set_value(self->rcvr);
+          }
+        }
+
+        void start() noexcept {
+          loop->enqueue(&node);
+          ready.store(true, memory_order_release);
+        }
+      };
+
+      template <class Rcvr>
+      __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) const {
+        return __exec::make_op<__state<decay_t<Rcvr>>>(static_cast<Rcvr&&>(rcvr), loop);
+      }
+    };
+
+    run_loop* loop;
+
+    __sender schedule() const { return {loop}; }
+
+    constexpr forward_progress_guarantee query(get_forward_progress_guarantee_t) const noexcept {
+      return forward_progress_guarantee::parallel;
+    }
+
+    friend bool operator==(const scheduler_type& left, const scheduler_type& right) noexcept {
+      return left.loop == right.loop;
+    }
+  };
+
+  scheduler_type get_scheduler() { return {this}; }
+
+  void run() {
+    unique_lock<mutex> lock(mutex_);
+    while (!(finished_ && head_ == nullptr)) {
+      if (head_ == nullptr) {
+        cv_.wait(lock);
+        continue;
+      }
+      __node* node = head_;
+      head_ = node->next;
+      if (head_ == nullptr) {
+        tail_ = nullptr;
+      }
+      lock.unlock();
+      node->fn(node);
+      lock.lock();
+    }
+  }
+
+  void finish() {
+    {
+      lock_guard<mutex> guard(mutex_);
+      finished_ = true;
+    }
+    cv_.notify_one();
+  }
+};
+
+template <class Sch, class Sndr>
+struct __starts_on_sender;
+
+template <class Sndr, class Sch>
+struct __continues_on_sender;
+
+template <class Sch, class Sndr, class Rcvr>
+struct __starts_on_state {
+  struct __child_rcvr {
+    using receiver_concept = receiver_t;
+    __starts_on_state* self;
+    template <class... Args>
+    void set_value(Args&&... args) noexcept {
+      set_value_t{}(self->rcvr, static_cast<Args&&>(args)...);
+    }
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+    }
+    void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  struct __sched_rcvr {
+    using receiver_concept = receiver_t;
+    __starts_on_state* self;
+    void set_value() noexcept { start_t{}(self->child); }
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+    }
+    void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  Rcvr rcvr;
+  using __child_op = decltype(connect_t{}(declval<Sndr>(), declval<__child_rcvr>()));
+  using __sched_op =
+      decltype(connect_t{}(schedule_t{}(declval<Sch>()), declval<__sched_rcvr>()));
+  __child_op child;
+  __sched_op sched;
+
+  __starts_on_state(Sch&& sch, Sndr&& source, Rcvr&& receiver)
+      : rcvr(static_cast<Rcvr&&>(receiver)),
+        child(connect_t{}(static_cast<Sndr&&>(source), __child_rcvr{this})),
+        sched(connect_t{}(schedule_t{}(static_cast<Sch&&>(sch)), __sched_rcvr{this})) {}
+
+  void start() noexcept { start_t{}(sched); }
+};
+
+template <class Sch, class Sndr>
+struct __starts_on_sender {
+  using sender_concept = sender_t;
+  using sender_tag = starts_on_t;
+  Sch sch;
+  Sndr sndr;
+
+  template <class Env>
+  using completions = completion_signatures_of_t<Sndr, Env>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  __exec::op_box<__starts_on_state<Sch, Sndr, decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__starts_on_state<Sch, Sndr, decay_t<Rcvr>>>(
+        static_cast<Sch&&>(sch), static_cast<Sndr&&>(sndr), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct starts_on_t {
+  template <class Sch, class Sndr>
+  __starts_on_sender<decay_t<Sch>, decay_t<Sndr>> operator()(Sch&& sch, Sndr&& sndr) const {
+    return {static_cast<Sch&&>(sch), static_cast<Sndr&&>(sndr)};
+  }
+
+  template <class Sch>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Sch> sch;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return starts_on_t{}(sch, static_cast<Sndr&&>(sndr));
+    }
+  };
+
+  template <class Sch>
+  __closure<Sch> operator()(Sch&& sch) const {
+    return {static_cast<Sch&&>(sch)};
+  }
+};
+
+inline constexpr starts_on_t starts_on{};
+
+template <class Sndr, class Sch, class Rcvr>
+struct __continues_on_state {
+  struct __sched_rcvr {
+    using receiver_concept = receiver_t;
+    __continues_on_state* self;
+    void set_value() noexcept { self->forward_completion(); }
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      set_error_t{}(self->rcvr, static_cast<Error&&>(error));
+    }
+    void set_stopped() noexcept { set_stopped_t{}(self->rcvr); }
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  struct __up {
+    using receiver_concept = receiver_t;
+    __continues_on_state* self;
+
+    template <class... Args>
+    void set_value(Args&&... args) noexcept {
+      self->values = tuple<decay_t<Args>...>(static_cast<Args&&>(args)...);
+      self->kind = 1;
+      start_t{}(self->sched);
+    }
+
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      self->error = __exec::to_exception_ptr(static_cast<Error&&>(error));
+      self->kind = 2;
+      start_t{}(self->sched);
+    }
+
+    void set_stopped() noexcept {
+      self->kind = 3;
+      start_t{}(self->sched);
+    }
+
+    auto get_env() const noexcept { return get_env_t{}(self->rcvr); }
+  };
+
+  using __values = typename __exec::value_tuple<typename __exec::first_value_of<
+      completion_signatures_of_t<Sndr, env_of_t<Rcvr>>>::type>::type;
+  using __up_op = decltype(connect_t{}(declval<Sndr>(), declval<__up>()));
+  using __sched_op =
+      decltype(connect_t{}(schedule_t{}(declval<Sch>()), declval<__sched_rcvr>()));
+
+  Rcvr rcvr;
+  __values values;
+  exception_ptr error;
+  int kind;
+  __up_op upstream;
+  __sched_op sched;
+
+  __continues_on_state(Sndr&& source, Sch&& sch, Rcvr&& receiver)
+      : rcvr(static_cast<Rcvr&&>(receiver)),
+        kind(0),
+        upstream(connect_t{}(static_cast<Sndr&&>(source), __up{this})),
+        sched(connect_t{}(schedule_t{}(static_cast<Sch&&>(sch)), __sched_rcvr{this})) {}
+
+  void forward_completion() noexcept {
+    if (kind == 1) {
+      __exec::deliver_tuple(rcvr, static_cast<__values&&>(values),
+                            make_index_sequence<tuple_size<__values>::value>{});
+    } else if (kind == 2) {
+      set_error_t{}(rcvr, error);
+    } else {
+      set_stopped_t{}(rcvr);
+    }
+  }
+
+  void start() noexcept { start_t{}(upstream); }
+};
+
+template <class Sndr, class Sch>
+struct __continues_on_sender {
+  using sender_concept = sender_t;
+  using sender_tag = continues_on_t;
+  Sndr sndr;
+  Sch sch;
+
+  template <class Env>
+  using completions = completion_signatures_of_t<Sndr, Env>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  __exec::op_box<__continues_on_state<Sndr, Sch, decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    return __exec::make_op<__continues_on_state<Sndr, Sch, decay_t<Rcvr>>>(
+        static_cast<Sndr&&>(sndr), static_cast<Sch&&>(sch), static_cast<Rcvr&&>(rcvr));
+  }
+};
+
+struct continues_on_t {
+  template <class Sndr, class Sch>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __continues_on_sender<decay_t<Sndr>, decay_t<Sch>> operator()(Sndr&& sndr, Sch&& sch) const {
+    return {static_cast<Sndr&&>(sndr), static_cast<Sch&&>(sch)};
+  }
+
+  template <class Sch>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Sch> sch;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return continues_on_t{}(static_cast<Sndr&&>(sndr), sch);
+    }
+  };
+
+  template <class Sch>
+  __closure<Sch> operator()(Sch&& sch) const {
+    return {static_cast<Sch&&>(sch)};
+  }
+};
+
+inline constexpr continues_on_t continues_on{};
+
+struct schedule_from_t {
+  template <class Sch, class Sndr>
+  auto operator()(Sch&& sch, Sndr&& sndr) const {
+    return continues_on(static_cast<Sndr&&>(sndr), static_cast<Sch&&>(sch));
+  }
+};
+
+inline constexpr schedule_from_t schedule_from{};
+
+template <class Sch, class Sndr>
+struct __on_sender {
+  using sender_concept = sender_t;
+  using sender_tag = on_t;
+  Sch sch;
+  Sndr sndr;
+
+  template <class Env>
+  using completions = completion_signatures_of_t<Sndr, Env>;
+
+  auto get_env() const noexcept { return get_env_t{}(sndr); }
+
+  template <class Rcvr>
+  auto connect(Rcvr rcvr) {
+    using Env = decltype(get_env_t{}(rcvr));
+    if constexpr (__exec::has_query<Env, get_scheduler_t>::value) {
+      auto original = get_scheduler_t{}(get_env_t{}(rcvr));
+      return connect_t{}(starts_on(static_cast<Sch&&>(sch),
+                                   continues_on(static_cast<Sndr&&>(sndr),
+                                                static_cast<decltype(original)&&>(original))),
+                         static_cast<Rcvr&&>(rcvr));
+    } else {
+      return connect_t{}(
+          starts_on(static_cast<Sch&&>(sch),
+                    continues_on(static_cast<Sndr&&>(sndr), inline_scheduler{})),
+          static_cast<Rcvr&&>(rcvr));
+    }
+  }
+};
+
+struct on_t {
+  template <class Sch, class Sndr>
+    requires __exec::is_sender<remove_cvref_t<Sndr>>::value
+  __on_sender<decay_t<Sch>, decay_t<Sndr>> operator()(Sch&& sch, Sndr&& sndr) const {
+    return {static_cast<Sch&&>(sch), static_cast<Sndr&&>(sndr)};
+  }
+
+  template <class Sch>
+  struct __closure {
+    using __adaptor_closure = void;
+    decay_t<Sch> sch;
+    template <class Sndr>
+    auto operator()(Sndr&& sndr) const {
+      return on_t{}(sch, static_cast<Sndr&&>(sndr));
+    }
+  };
+
+  template <class Sch>
+  __closure<Sch> operator()(Sch&& sch) const {
+    return {static_cast<Sch&&>(sch)};
+  }
+};
+
+inline constexpr on_t on{};
+
+struct __sync_result {
+  bool done;
+  bool stopped;
+  exception_ptr error;
+};
+
+template <class Tuple>
+struct __sync_value_receiver {
+  using receiver_concept = receiver_t;
+  __sync_result* result;
+  optional<Tuple>* value;
+
+  template <class... Args>
+  void set_value(Args&&... args) noexcept {
+    value->emplace(static_cast<Args&&>(args)...);
+    result->done = true;
+  }
+
+  template <class Error>
+  void set_error(Error&& error) noexcept {
+    result->error = __exec::to_exception_ptr(static_cast<Error&&>(error));
+    result->done = true;
+  }
+
+  void set_stopped() noexcept {
+    result->stopped = true;
+    result->done = true;
+  }
+
+  env<> get_env() const noexcept { return {}; }
+};
+
+template <class Sndr>
+using __sync_tuple_t = typename __exec::value_tuple<typename __exec::first_value_of<
+    completion_signatures_of_t<Sndr, env<>>>::type>::type;
+
+// Returning optional<__sync_tuple_t<S>> from a function template crashes code
+// generation: the alias never becomes a concrete class in the return type.
+// A class template whose return type is spelled tuple<Ts...> does.
+template <class... Ts>
+struct __sync_runner {
+  template <class Sndr>
+  static optional<tuple<Ts...>> run(Sndr&& sndr) {
+    using Tuple = tuple<Ts...>;
+    __sync_result result{false, false, {}};
+    optional<Tuple> value;
+    __sync_value_receiver<Tuple> rcvr;
+    rcvr.result = &result;
+    rcvr.value = &value;
+    {
+      auto operation = connect(static_cast<Sndr&&>(sndr), rcvr);
+      start(operation);
+    }
+    if (result.error) {
+      rethrow_exception(result.error);
+    }
+    if (result.stopped || !result.done) {
+      optional<Tuple> empty;
+      value = static_cast<optional<Tuple>&&>(empty);
+    }
+    return value;
+  }
+};
+
+template <class Sig>
+struct __sync_runner_of;
+
+template <class... Args>
+struct __sync_runner_of<set_value_t(Args...)> {
+  using type = __sync_runner<decay_t<Args>...>;
+};
+
+template <class Sndr>
+using __sync_runner_t = typename __sync_runner_of<typename __exec::first_value_of<
+    completion_signatures_of_t<Sndr, env<>>>::type>::type;
+
+}  // namespace execution
+
+namespace this_thread {
+
+struct sync_wait_t {
+  template <class Sndr>
+  auto operator()(Sndr&& sndr) const {
+    using Runner = execution::__sync_runner_t<remove_cvref_t<Sndr>>;
+    return Runner::run(static_cast<Sndr&&>(sndr));
+  }
+};
+
+struct sync_wait_with_variant_t {
+  template <class Sndr>
+  auto operator()(Sndr&& sndr) const {
+    using VariantSender = decltype(execution::into_variant(declval<Sndr>()));
+    using Variant = typename remove_cvref_t<VariantSender>::template __variant_t<execution::env<>>;
+    execution::__sync_result result{false, false, {}};
+    optional<Variant> value;
+    struct __rcvr {
+      using receiver_concept = execution::receiver_t;
+      execution::__sync_result* result;
+      optional<Variant>* value;
+      void set_value(Variant stored) noexcept {
+        value->emplace(static_cast<Variant&&>(stored));
+        result->done = true;
+      }
+      template <class Error>
+      void set_error(Error&& error) noexcept {
+        result->error = execution::__exec::to_exception_ptr(static_cast<Error&&>(error));
+        result->done = true;
+      }
+      void set_stopped() noexcept {
+        result->stopped = true;
+        result->done = true;
+      }
+      execution::env<> get_env() const noexcept { return {}; }
+    } rcvr{&result, &value};
+    auto operation =
+        execution::connect(execution::into_variant(static_cast<Sndr&&>(sndr)), static_cast<decltype(rcvr)&&>(rcvr));
+    execution::start(operation);
+    while (!result.done) {
+    }
+    if (result.error) {
+      rethrow_exception(result.error);
+    }
+    if (result.stopped) {
+      return optional<Variant>{};
+    }
+    return value;
+  }
+};
+
+inline constexpr sync_wait_t sync_wait{};
+inline constexpr sync_wait_with_variant_t sync_wait_with_variant{};
+
+}  // namespace this_thread
+
+namespace execution {
+
+template <class Sndr, class Value, class Promise>
+struct __sender_awaiter {
+  struct __rcvr {
+    using receiver_concept = receiver_t;
+    __sender_awaiter* self;
+
+    template <class... Args>
+    void set_value(Args&&... args) noexcept {
+      if constexpr (!is_void_v<Value>) {
+        self->result.emplace(static_cast<Args&&>(args)...);
+      }
+      self->notify();
+    }
+
+    template <class Error>
+    void set_error(Error&& error) noexcept {
+      self->error = __exec::to_exception_ptr(static_cast<Error&&>(error));
+      self->notify();
+    }
+
+    void set_stopped() noexcept {
+      self->stopped = true;
+      self->notify();
+    }
+
+    env<> get_env() const noexcept { return {}; }
+  };
+
+  using __op = decltype(connect_t{}(declval<Sndr>(), declval<__rcvr>()));
+
+  Sndr sndr;
+  Promise* promise;
+  conditional_t<is_void_v<Value>, char, optional<Value>> result;
+  exception_ptr error;
+  bool stopped;
+  bool completed;
+  bool started;
+  coroutine_handle<> continuation;
+  __op* op;
+
+  __sender_awaiter(Sndr&& source, Promise& owner)
+      : sndr(static_cast<Sndr&&>(source)),
+        promise(&owner),
+        stopped(false),
+        completed(false),
+        started(false),
+        op(nullptr) {}
+
+  __sender_awaiter(const __sender_awaiter&) = delete;
+  __sender_awaiter& operator=(const __sender_awaiter&) = delete;
+
+  ~__sender_awaiter() {
+    if (op == nullptr) {
+      return;
+    }
+    if constexpr (__exec::can_own_op<Promise, __op>::value) {
+      promise->__own_operation(op);
+    } else {
+      delete op;
+    }
+    op = nullptr;
+  }
+
+  bool await_ready() const noexcept { return false; }
+
+  bool await_suspend(coroutine_handle<> handle) {
+    continuation = handle;
+    op = new __op(connect_t{}(static_cast<Sndr&&>(sndr), __rcvr{this}));
+    start_t{}(*op);
+    started = true;
+    return !completed;
+  }
+
+  Value await_resume() {
+    if (error) {
+      rethrow_exception(error);
+    }
+    if (stopped) {
+#ifdef __cpp_exceptions
+      throw __exec::task_stopped{};
+#else
+      terminate();
+#endif
+    }
+    if constexpr (!is_void_v<Value>) {
+      return static_cast<Value&&>(*result);
+    }
+  }
+
+  void notify() noexcept {
+    completed = true;
+    if (started && continuation) {
+      continuation.resume();
+    }
+  }
+};
+
+struct as_awaitable_t {
+  template <class Expr, class Promise>
+  decltype(auto) operator()(Expr&& expr, Promise& promise) const {
+    if constexpr (__exec::is_sender<remove_cvref_t<Expr>>::value) {
+      using Sndr = remove_cvref_t<Expr>;
+      using Value =
+          typename __exec::await_type_of<completion_signatures_of_t<Sndr, env<>>>::type;
+      return __sender_awaiter<Sndr, Value, Promise>(static_cast<Expr&&>(expr), promise);
+    } else {
+      return static_cast<Expr&&>(expr);
+    }
+  }
+};
+
+inline constexpr as_awaitable_t as_awaitable{};
+
+template <class Promise>
+struct with_awaitable_senders {
+  struct __owned {
+    void (*destroy)(void*) noexcept;
+    void* pointer;
+    __owned* next;
+  };
+
+  __owned* __owned_head;
+
+  with_awaitable_senders() noexcept : __owned_head(nullptr) {}
+  with_awaitable_senders(const with_awaitable_senders&) = delete;
+  with_awaitable_senders& operator=(const with_awaitable_senders&) = delete;
+
+  ~with_awaitable_senders() { __destroy_owned(); }
+
+  template <class Op>
+  void __own_operation(Op* op) {
+    auto* node = new __owned;
+    node->destroy = &__destroy_one<Op>;
+    node->pointer = op;
+    node->next = __owned_head;
+    __owned_head = node;
+  }
+
+  template <class Value>
+  decltype(auto) await_transform(Value&& value) {
+    return as_awaitable(static_cast<Value&&>(value), static_cast<Promise&>(*this));
+  }
+
+  void __destroy_owned() noexcept {
+    while (__owned_head != nullptr) {
+      __owned* node = __owned_head;
+      __owned_head = node->next;
+      node->destroy(node->pointer);
+      delete node;
+    }
+  }
+
+  template <class Op>
+  static void __destroy_one(void* pointer) noexcept {
+    delete static_cast<Op*>(pointer);
+  }
+};
+
+template <class T>
+struct __task_return {
+  optional<T> result;
+  void return_value(T value) { result = static_cast<T&&>(value); }
+};
+
+template <>
+struct __task_return<void> {
+  void return_void() noexcept {}
+};
+
+template <class T = void>
+class task {
+ public:
+  class promise_type : public with_awaitable_senders<promise_type>, public __task_return<T> {
+   public:
+    __exec::task_bridge* bridge;
+    exception_ptr error;
+    bool stopped;
+
+    promise_type() : bridge(nullptr), stopped(false) {}
+
+    task get_return_object() {
+      return task{coroutine_handle<promise_type>::from_promise(*this)};
+    }
+
+    suspend_always initial_suspend() noexcept { return {}; }
+
+    auto final_suspend() noexcept {
+      struct __awaiter {
+        bool await_ready() const noexcept { return false; }
+
+        coroutine_handle<> await_suspend(coroutine_handle<promise_type> handle) noexcept {
+          promise_type& promise = handle.promise();
+          __exec::task_bridge* bridge = promise.bridge;
+          if (bridge == nullptr) {
+            return noop_coroutine();
+          }
+          if (promise.error) {
+            bridge->on_error(bridge->object, promise.error);
+          } else if (promise.stopped) {
+            bridge->on_stopped(bridge->object);
+          } else {
+            bridge->on_value(bridge->object);
+          }
+          return noop_coroutine();
+        }
+
+        void await_resume() const noexcept {}
+      };
+      return __awaiter{};
+    }
+
+    void unhandled_exception() {
+#ifdef __cpp_exceptions
+      try {
+        throw;
+      } catch (const __exec::task_stopped&) {
+        stopped = true;
+      } catch (...) {
+        error = current_exception();
+      }
+#else
+      terminate();
+#endif
+    }
+  };
+
+  using sender_concept = sender_t;
+  using sender_tag = task;
+
+  template <class Env>
+  using completions = conditional_t<
+      is_void_v<T>,
+      completion_signatures<set_value_t(), set_error_t(exception_ptr), set_stopped_t()>,
+      completion_signatures<set_value_t(T), set_error_t(exception_ptr), set_stopped_t()>>;
+
+  env<> get_env() const noexcept { return {}; }
+
+  task() noexcept : __coro(nullptr) {}
+
+  task(task&& other) noexcept : __coro(other.__coro) { other.__coro = nullptr; }
+
+  task(const task&) = delete;
+  task& operator=(const task&) = delete;
+
+  task& operator=(task&& other) noexcept {
+    if (this != &other) {
+      if (__coro) {
+        __coro.destroy();
+      }
+      __coro = other.__coro;
+      other.__coro = nullptr;
+    }
+    return *this;
+  }
+
+  ~task() {
+    if (__coro) {
+      __coro.destroy();
+    }
+  }
+
+  template <class Rcvr>
+  struct __state {
+    Rcvr rcvr;
+    coroutine_handle<promise_type> coro;
+    __exec::task_bridge bridge;
+
+    __state(coroutine_handle<promise_type> handle, Rcvr receiver)
+        : rcvr(static_cast<Rcvr&&>(receiver)), coro(handle) {
+      bridge.object = this;
+      bridge.on_value = &on_value;
+      bridge.on_error = &on_error;
+      bridge.on_stopped = &on_stopped;
+    }
+
+    static void on_value(void* object) {
+      auto* self = static_cast<__state*>(object);
+      if constexpr (is_void_v<T>) {
+        set_value_t{}(self->rcvr);
+      } else {
+        set_value_t{}(self->rcvr, static_cast<T&&>(*self->coro.promise().result));
+      }
+    }
+
+    static void on_error(void* object, exception_ptr error) {
+      set_error_t{}(static_cast<__state*>(object)->rcvr, error);
+    }
+
+    static void on_stopped(void* object) { set_stopped_t{}(static_cast<__state*>(object)->rcvr); }
+
+    void start() noexcept {
+      coro.promise().bridge = &bridge;
+      coro.resume();
+    }
+  };
+
+  template <class Rcvr>
+  __exec::op_box<__state<decay_t<Rcvr>>> connect(Rcvr rcvr) {
+    auto handle = __coro;
+    __coro = nullptr;
+    return __exec::make_op<__state<decay_t<Rcvr>>>(handle, static_cast<Rcvr&&>(rcvr));
+  }
+
+ private:
+  explicit task(coroutine_handle<promise_type> handle) : __coro(handle) {}
+
+  coroutine_handle<promise_type> __coro;
+};
+
+}  // namespace execution
+}  // namespace std
+
+#endif
+#endif
+#endif

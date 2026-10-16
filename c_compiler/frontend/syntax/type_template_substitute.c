@@ -2158,6 +2158,46 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
       }
       subst->template_arguments = NULL;
     }
+    // `typename alias_t<T>::member` stores the alias template-id plus the
+    // member name. Expanding the alias yields the aliased class; the member
+    // still has to be looked up on that class. Returning the class itself
+    // made `remove_cvref_t<Box>::sender_concept` name `Box`.
+    // The alias pattern itself is often `Class<T>::type`. That member is
+    // already applied by the substitution above; looking it up again asks
+    // the resulting class for `::type` and collapses the trait to `int`.
+    bool member_is_alias_pattern =
+        type->dependent_member_name != NULL && info.origin != NULL &&
+        info.origin->type != NULL &&
+        info.origin->type->dependent_member_name != NULL &&
+        StringEqualString(info.origin->type->dependent_member_name,
+                          type->dependent_member_name);
+    if (subst != NULL && type->dependent_member_name != NULL &&
+        !member_is_alias_pattern && TypeIsStructOrUnion(subst) &&
+        subst->info.struct_info != NULL &&
+        !TypeContainsTemplateParameter(subst)) {
+      Vector* member_args = NewVector();
+      VectorAppend(member_args, NewTypeTemplateArgument(subst));
+      TypeRecordDelete(subst);
+      TypeRecord* pattern = TypeRecordCopy(type);
+      pattern->declarator = kDeclPrimitive;
+      pattern->template_parameter_index = 0;
+      pattern->is_pack_index = false;
+      pattern->template_origin = NULL;
+      if (pattern->template_arguments != NULL) {
+        VectorDeleteWithContents(
+            pattern->template_arguments,
+            (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        pattern->template_arguments = NULL;
+      }
+      TypeRecord* member =
+          SubstituteDependentMemberType(parser, pattern, member_args);
+      TypeRecordDelete(pattern);
+      VectorDeleteWithContents(
+          member_args, (VectorElementDestructor)TemplateArgumentDelete,
+          /*free_element=*/false);
+      subst = member;
+    }
     if (prefixed != NULL) {
       VectorDeleteWithContents(prefixed,
                                (VectorElementDestructor)TemplateArgumentDelete,

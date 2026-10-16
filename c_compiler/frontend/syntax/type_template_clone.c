@@ -594,6 +594,69 @@ static struct Struct* CloneFunctionMemberOwner(TypeRecord* func) {
   return NULL;
 }
 
+static Symbol* NestedTypeTagSymbol(TypeRecord* type) {
+  if (type == NULL) {
+    return NULL;
+  }
+  if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
+    return type->info.struct_info->tag_symbol;
+  }
+  if (TypeIsEnum(type) && type->info.enum_info != NULL) {
+    return type->info.enum_info->tag_symbol;
+  }
+  return NULL;
+}
+
+static void MapClonedSymbol(Map* map, Symbol* from, Symbol* to) {
+  if (from == NULL || to == NULL || from == to ||
+      MapFindPointerKey(map, from) != NULL) {
+    return;
+  }
+  MapKeyValue kv;
+  kv.key.p = from;
+  kv.value.p = to;
+  MapInsert(map, kv);
+}
+
+/* A nested class is a typedef member, but `Rcvr(42)` in a constructor
+ * initializer names the tag.  Map the tag (and the same tag on earlier
+ * patterns this class was cloned from) onto the specialization's tag so the
+ * initializer constructs the current instantiation. */
+static void MapNestedTypeTags(TemplateFunctionBodyClone* clone,
+                              StructMember* from_member,
+                              StructMember* to_member) {
+  Symbol* replacement = NestedTypeTagSymbol(to_member->symbol->type);
+  if (replacement == NULL) {
+    replacement = to_member->symbol;
+  }
+  MapClonedSymbol(&clone->symbol_map,
+                  NestedTypeTagSymbol(from_member->symbol->type), replacement);
+  Struct* cursor = clone->from_owner;
+  for (int depth = 0; cursor != NULL && depth < 4; depth++) {
+    Symbol* origin_symbol =
+        cursor->tag_symbol != NULL && cursor->tag_symbol->type != NULL
+            ? cursor->tag_symbol->type->template_origin
+            : NULL;
+    Struct* origin =
+        origin_symbol != NULL && origin_symbol->type != NULL &&
+                TypeIsStructOrUnion(origin_symbol->type)
+            ? origin_symbol->type->info.struct_info
+            : NULL;
+    if (origin == NULL || origin == cursor) {
+      break;
+    }
+    StructMember* pattern_member = FindStructMemberByName(
+        origin, from_member->symbol->name.value);
+    if (pattern_member != NULL && pattern_member->symbol != NULL) {
+      MapClonedSymbol(&clone->symbol_map, pattern_member->symbol, replacement);
+      MapClonedSymbol(&clone->symbol_map,
+                      NestedTypeTagSymbol(pattern_member->symbol->type),
+                      replacement);
+    }
+    cursor = origin;
+  }
+}
+
 static void AddOwnerMemberSymbolMappings(TemplateFunctionBodyClone* clone) {
   if (clone == NULL || clone->from_owner == NULL || clone->to_owner == NULL ||
       clone->from_owner == clone->to_owner) {
@@ -610,10 +673,8 @@ static void AddOwnerMemberSymbolMappings(TemplateFunctionBodyClone* clone) {
     if (to_member == NULL || to_member->symbol == NULL) {
       continue;
     }
-    MapKeyValue kv;
-    kv.key.p = from_member->symbol;
-    kv.value.p = to_member->symbol;
-    MapInsert(&clone->symbol_map, kv);
+    MapClonedSymbol(&clone->symbol_map, from_member->symbol, to_member->symbol);
+    MapNestedTypeTags(clone, from_member, to_member);
   }
 }
 
@@ -11309,11 +11370,19 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     // pick the wrong overload and emit errors for a specialization that
     // SFINAE (e.g. `EnableIfValueIsConst<LazyT>`) would exclude.  Pack
     // member-inits (`v(static_cast<Args&&>(args)...)`) similarly mis-expand
-    // to `v()`.  Defer the preamble to per-call instantiation; re-key the
+    // to `v()`.  A constructor of a nested class template has no function
+    // template parameters of its own, but the class is still a template:
+    // analyzing `connect(source, Rcvr(this))` now instantiates the call for
+    // the unspecialized nested class and the later specialization keeps that
+    // callee.  Defer the preamble to per-call instantiation; re-key the
     // init-list onto this class-level symbol so the per-call clone can find
     // it.
+    Struct* ctor_owner = symbol->type->info.function.cxx_member_owner;
+    bool owner_still_template =
+        ctor_owner != NULL && ctor_owner->is_template;
     if (symbol->type->info.function.is_constructor &&
-        symbol->type->info.function.template_parameter_count == 0) {
+        symbol->type->info.function.template_parameter_count == 0 &&
+        !owner_still_template) {
       SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
                                                     symbol, args);
     } else if (symbol->type->info.function.is_constructor) {
@@ -11812,6 +11881,193 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
  * copy all function attributes from the template type `from`, substitute the
  * return type and each parameter (expanding parameter packs) against `args`,
  * and renumber argument slots. (The body is cloned separately.) */
+static bool TemplateArgumentListMentionsUnspecializedNestedClass(Vector* args,
+                                                                  int depth);
+
+/* A nested class of a class that is still a template (`Outer<int>::State::Rcvr`
+ * before `State<R>` is instantiated) is not the nested class of the
+ * specialization.  A call instantiated on that type must be deduced again. */
+static bool TypeMentionsUnspecializedNestedClass(TypeRecord* type, int depth) {
+  if (type == NULL || depth > 8) {
+    return false;
+  }
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if (TypeIsStructOrUnion(current) && current->info.struct_info != NULL) {
+      Struct* parent = current->info.struct_info->lexical_parent;
+      if (parent != NULL && parent->is_template) {
+        return true;
+      }
+    }
+    if (TemplateArgumentListMentionsUnspecializedNestedClass(
+            current->template_arguments, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TemplateArgumentListMentionsUnspecializedNestedClass(Vector* args,
+                                                                  int depth) {
+  if (args == NULL || depth > 8) {
+    return false;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg == NULL) {
+      continue;
+    }
+    if (TypeMentionsUnspecializedNestedClass(arg->type, depth + 1) ||
+        TemplateArgumentListMentionsUnspecializedNestedClass(
+            arg->pack_arguments, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* `Rcvr(this)` in a constructor initializer can still name the nested class of
+ * the class template (`Outer<int>::State::Rcvr`) after `State<R>` has been
+ * instantiated.  The specialization's nested class is a different type, so
+ * point the name at that class before the initializer is analyzed again. */
+static void RetargetConstructorNestedClassIdentifier(ASTNode* node, void* data,
+                                                     int child_id,
+                                                     VisitorMode mode) {
+  (void)child_id;
+  TemplateFunctionBodyClone* clone = data;
+  if (mode != kVisitPreChildren || node == NULL || clone == NULL ||
+      clone->to_owner == NULL || node->op != AST_OP(identifier)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  if (id->symbol == NULL || id->symbol->type == NULL ||
+      !TypeIsStructOrUnion(id->symbol->type) ||
+      id->symbol->type->info.struct_info == NULL ||
+      id->symbol->type->info.struct_info->tag_name == NULL) {
+    return;
+  }
+  Struct* nested = id->symbol->type->info.struct_info;
+  StructMember* member = FindStructMemberByName(clone->to_owner,
+                                                 nested->tag_name->value);
+  if (member == NULL || member->symbol == NULL ||
+      member->symbol->type == NULL ||
+      !TypeIsStructOrUnion(member->symbol->type) ||
+      member->symbol->type->info.struct_info == NULL) {
+    return;
+  }
+  Struct* target = member->symbol->type->info.struct_info;
+  if (nested == target) {
+    if (node->type == NULL || !TypeIsStructOrUnion(node->type) ||
+        node->type->info.struct_info != target) {
+      Symbol* refreshed =
+          target->tag_symbol != NULL ? target->tag_symbol : member->symbol;
+      id->symbol = refreshed;
+      ASTNodeSetType(node, refreshed->type);
+      node->flags &= ~kASTAnalyzed;
+    }
+    return;
+  }
+  // Only a nested class of this instantiation's pattern. A same-named class
+  // nested in a sibling template is a different type.
+  Struct* parent = nested->lexical_parent;
+  bool same_pattern = parent == clone->to_owner ||
+                      (clone->from_owner != NULL && parent == clone->from_owner);
+  if (!same_pattern && parent != NULL && parent->is_template) {
+    Struct* cursor = clone->to_owner;
+    for (int depth = 0; cursor != NULL && depth < 4; depth++) {
+      Symbol* origin_symbol =
+          cursor->tag_symbol != NULL && cursor->tag_symbol->type != NULL
+              ? cursor->tag_symbol->type->template_origin
+              : NULL;
+      Struct* origin =
+          origin_symbol != NULL && origin_symbol->type != NULL &&
+                  TypeIsStructOrUnion(origin_symbol->type)
+              ? origin_symbol->type->info.struct_info
+              : NULL;
+      if (origin == NULL || origin == cursor) {
+        break;
+      }
+      if (parent == origin) {
+        same_pattern = true;
+        break;
+      }
+      cursor = origin;
+    }
+  }
+  if (!same_pattern) {
+    return;
+  }
+  Symbol* replacement =
+      target->tag_symbol != NULL ? target->tag_symbol : member->symbol;
+  id->symbol = replacement;
+  ASTNodeSetType(node, replacement->type);
+  node->flags &= ~kASTAnalyzed;
+}
+
+static void RebindMemberCallInstantiatedOnUnspecializedNestedClass(
+    ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  (void)data;
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(structmember) || node->parent == NULL) {
+    return;
+  }
+  ASTNode* owner_expr = node->parent;
+  ASTNode* call = owner_expr;
+  if (owner_expr->op == AST_OP(dot) || owner_expr->op == AST_OP(arrow)) {
+    call = owner_expr->parent;
+  }
+  if (call == NULL || call->op != AST_OP(call) ||
+      ((VectorASTNode*)call)->left != owner_expr) {
+    return;
+  }
+  StructMemberASTNode* member_node = (StructMemberASTNode*)node;
+  Symbol* symbol =
+      member_node->member != NULL ? member_node->member->symbol : NULL;
+  if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
+    return;
+  }
+  Symbol* origin = symbol->type->info.function.template_origin;
+  if (origin == NULL || origin->type == NULL || !TypeIsFunction(origin->type) ||
+      !origin->flags.is_template) {
+    return;
+  }
+  if (!TemplateArgumentListMentionsUnspecializedNestedClass(
+          symbol->type->template_arguments, 0)) {
+    return;
+  }
+  Struct* owner = origin->type->info.function.cxx_member_owner;
+  if (owner == NULL) {
+    return;
+  }
+  StructMember* found = NULL;
+  for (StructMember* candidate = FindStructMember(owner, &origin->name);
+       candidate != NULL; candidate = candidate->overload_next) {
+    if (candidate->symbol == origin) {
+      found = candidate;
+      break;
+    }
+  }
+  if (found == NULL) {
+    return;
+  }
+  StructMemberASTNodeSetMember(member_node, found);
+  if (member_node->template_arguments != NULL) {
+    VectorDeleteWithContents(
+        member_node->template_arguments,
+        (VectorElementDestructor)TemplateArgumentDelete,
+        /*free_element=*/false);
+    member_node->template_arguments = NULL;
+  }
+  ASTNodeClearType(node);
+  node->flags &= ~kASTAnalyzed;
+  if (owner_expr != node) {
+    ASTNodeClearType(owner_expr);
+    owner_expr->flags &= ~kASTAnalyzed;
+  }
+  ASTNodeClearType(call);
+  call->flags &= ~(kASTAnalyzed | kASTDependentFunctorCall);
+}
+
 static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
                                                TypeRecord* from_func,
                                                Struct* source_owner,
@@ -11870,6 +12126,9 @@ static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
     }
     ASTNodeVisit(stmt, ClearAnalyzedFlagVisitor, 0, NULL);
     RewriteTemplateBodyIdentifiers(stmt, &clone.symbol_map);
+    ASTNodeVisit(stmt, RetargetConstructorNestedClassIdentifier, 0, &clone);
+    ASTNodeVisit(stmt, RebindMemberCallInstantiatedOnUnspecializedNestedClass,
+                 0, NULL);
     stmt = ASTNodeVisitAndTransform(
         stmt, ReanalyzeClonedDependentFunctorCall, NULL);
     stmt = ASTNodeVisitAndTransform(

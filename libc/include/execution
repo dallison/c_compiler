@@ -65,4 +65,8 @@ inline constexpr bool is_execution_policy_v = is_execution_policy<T>::value;
 
 }  // namespace std
 
+#if __cplusplus >= 202600L
+#include <__execution_senders>
+#endif
+
 #endif /* execution_h */

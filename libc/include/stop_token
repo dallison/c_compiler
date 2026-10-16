@@ -8,12 +8,40 @@
 #ifndef __davecc_stop_token__
 #define __davecc_stop_token__
 
+#include <type_traits>
+
+#ifndef __davecc_has_never_stop_token
+#define __davecc_has_never_stop_token 1
+
+namespace std {
+
+// C++26 [stoptoken.never]. Available without a threaded runtime: it never
+// requests stop and never invokes a callback.
+struct never_stop_token {
+  template <class Callback>
+  struct callback_type {
+    template <class C>
+    explicit constexpr callback_type(never_stop_token, C&&) noexcept {}
+  };
+
+  static constexpr bool stop_requested() noexcept { return false; }
+
+  static constexpr bool stop_possible() noexcept { return false; }
+
+  constexpr bool operator==(const never_stop_token&) const noexcept {
+    return true;
+  }
+};
+
+}  // namespace std
+
+#endif
+
 #include <atomic>
 #include <mutex>
 #include <new>
 #include <syscall.h>
 #include <threads.h>
-#include <type_traits>
 #include <utility>
 
 #if !defined(__DAVECC_HAS_THREADS__)

@@ -69,6 +69,7 @@ filegroup(
         "libc/include/deque",
         "libc/include/exception",
         "libc/include/execution",
+        "libc/include/__execution_senders",
         "libc/include/expected",
         "libc/include/flat_map",
         "libc/include/flat_set",
