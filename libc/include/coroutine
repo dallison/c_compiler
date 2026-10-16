@@ -22,10 +22,27 @@ namespace std {
 template <class T>
 struct hash;
 
-template <class R, class... Args>
-struct coroutine_traits {
+template <class... Ts>
+struct __coroutine_voider {
+  using type = void;
+};
+
+template <class... Ts>
+using __coroutine_void_t = typename __coroutine_voider<Ts...>::type;
+
+// [coroutine.traits]: promise_type exists only when R::promise_type is a type.
+// Otherwise the specialization has no members, so the check can fail by
+// substitution instead of making coroutine_traits<R> ill-formed.
+template <class R, class = void>
+struct __coroutine_traits_impl {};
+
+template <class R>
+struct __coroutine_traits_impl<R, __coroutine_void_t<typename R::promise_type>> {
   using promise_type = typename R::promise_type;
 };
+
+template <class R, class... Args>
+struct coroutine_traits : __coroutine_traits_impl<R> {};
 
 // Prefix of every compiler-generated coroutine frame. The promise object is
 // placed immediately after this header.

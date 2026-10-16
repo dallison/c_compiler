@@ -5631,6 +5631,23 @@ static bool CollectPersistedCoroutineLocals(
 /* Persist every referenced function parameter, plus every class parameter even
  * when unused because its copy/move construction and destruction are observable.
  * Parameters outlive the ramp and so are copied/moved into the frame. */
+/* The co_await operand is moved onto the suspension point (awaiter_init)
+ * before parameter collection, so a parameter used only there is absent from
+ * the body even though the operand is spliced back in and runs after
+ * initial_suspend. */
+static bool SuspensionPointInitializersUseSymbol(SuspensionPoints* points,
+                                                 Symbol* symbol) {
+  if (points == NULL) {
+    return false;
+  }
+  for (int i = 0; i < points->count; i++) {
+    if (ASTUsesSymbol(points->points[i].awaiter_init, symbol)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool CollectPersistedCoroutineParameters(
     FunctionInfo* info,
     CompoundStatementASTNode* body,
@@ -5644,6 +5661,7 @@ static bool CollectPersistedCoroutineParameters(
   for (size_t i = 0; i < info->prototype.length; i++) {
     Symbol* symbol = info->prototype.value.p[i];
     if (!ASTUsesSymbol((ASTNode*)body, symbol) &&
+        !SuspensionPointInitializersUseSymbol(points, symbol) &&
         !TypeIsStructOrUnion(symbol->type)) {
       continue;
     }

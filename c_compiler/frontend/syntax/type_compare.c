@@ -1200,6 +1200,9 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
   if (left == right) {
     return true;
   }
+  if (left == NULL || right == NULL) {
+    return false;
+  }
   Symbol* left_origin =
       left != NULL && left->tag_symbol != NULL && left->tag_symbol->type != NULL
           ? left->tag_symbol->type->template_origin
@@ -1282,8 +1285,21 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
     return false;
   }
   if (left->lexical_parent != NULL || right->lexical_parent != NULL) {
-    return CXXStructSameTemplateFamilyForTypeEquality(left->lexical_parent,
-                                                     right->lexical_parent);
+    // A nested class of a class template is not the nested class of one
+    // specialization of that template. `State::Rcvr` and `State<int>::Rcvr`
+    // are different types even though the injected class name makes the
+    // primary `State` compare equal to `State<int>`.
+    Struct* left_parent = left->lexical_parent;
+    Struct* right_parent = right->lexical_parent;
+    if (left_parent != NULL && right_parent != NULL &&
+        left_parent->is_template != right_parent->is_template &&
+        left_parent->tag_name != NULL && right_parent->tag_name != NULL &&
+        (strchr(left_parent->tag_name->value, '<') != NULL) !=
+            (strchr(right_parent->tag_name->value, '<') != NULL)) {
+      return false;
+    }
+    return CXXStructSameTemplateFamilyForTypeEquality(left_parent,
+                                                     right_parent);
   }
   // `::Message` and `testing::Message` share a tag name.  Tags declared at
   // global scope have no namespace.
