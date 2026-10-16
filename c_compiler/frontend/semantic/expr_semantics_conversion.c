@@ -286,7 +286,8 @@ static int OverloadBaseConversionRankMaterialized(TypeRecord* actual,
       bool derived = actual_pointee != NULL && target_pointee != NULL &&
                      TypeIsStructOrUnion(actual_pointee) &&
                      TypeIsStructOrUnion(target_pointee) &&
-                     TypeIsDerivedFrom(actual_pointee, target_pointee);
+                     TypeIsDerivedFromInCurrentClass(actual_pointee,
+                                                     target_pointee);
       if (actual_pointee != actual->next) {
         TypeRecordDelete(actual_pointee);
       }

@@ -686,7 +686,9 @@ static bool FunctionHasRvalueToConstLvalueReferenceBinding(
  * the same inheritance path.  Converting Generated* to Message* is better than
  * converting it to MessageLite* when Message derives from MessageLite.  The
  * same holds for a class argument converted or bound to a base class
- * (`align(minute_tag)` over `align(second_tag)` for a `minute_tag` subclass). */
+ * (`align(minute_tag)` over `align(second_tag)` for a `minute_tag` subclass),
+ * and converting a class pointer to a base pointer is better than converting
+ * it to `void*` ([over.ics.rank]/4.4). */
 static int CompareDerivedPointerTargets(ASTNode* actual, TypeRecord* left,
                                         TypeRecord* right) {
   if (TypeIsReference(left)) {
@@ -704,6 +706,17 @@ static int CompareDerivedPointerTargets(ASTNode* actual, TypeRecord* left,
     from = from->next;
     left = left->next;
     right = right->next;
+    if (from != NULL && left != NULL && right != NULL &&
+        TypeIsStructOrUnion(from) && TypeIsVoid(left) != TypeIsVoid(right)) {
+      TypeRecord* base = TypeIsVoid(left) ? right : left;
+      bool reaches_base = TypeIsStructOrUnion(base) &&
+                          (TypeEqualIgnoringQualifiers(from, base) ||
+                           TypeIsDerivedFromInCurrentClass(from, base));
+      if (!reaches_base) {
+        return 0;
+      }
+      return TypeIsVoid(left) ? -1 : 1;
+    }
   } else if (TypeIsPointer(from) || TypeIsPointer(left) ||
              TypeIsPointer(right)) {
     return 0;
@@ -714,9 +727,9 @@ static int CompareDerivedPointerTargets(ASTNode* actual, TypeRecord* left,
     return 0;
   }
   bool actual_reaches_left = TypeEqualIgnoringQualifiers(from, left) ||
-                             TypeIsDerivedFrom(from, left);
+                             TypeIsDerivedFromInCurrentClass(from, left);
   bool actual_reaches_right = TypeEqualIgnoringQualifiers(from, right) ||
-                              TypeIsDerivedFrom(from, right);
+                              TypeIsDerivedFromInCurrentClass(from, right);
   if (!actual_reaches_left || !actual_reaches_right) {
     return 0;
   }

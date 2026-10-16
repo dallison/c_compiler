@@ -42,6 +42,92 @@ static bool TypeHasDependentMemberPath(TypeRecord* type) {
          type->dependent_member_name->length > 0;
 }
 
+// `A<M>` where `template <class T> using A = typename X<T>::type` names
+// `X<M>::type`, and `typename A<M>::member` names `X<M>::type::member`
+// (`member_name` may be NULL; `member_args`, if not NULL, holds the template
+// arguments of each of its components).  An alias-id whose origin is the
+// alias cannot carry a member path: expanding the alias substitutes its
+// pattern and drops the path.  Returns NULL unless the alias is such a
+// dependent member and its parameters map one-to-one onto `args` (no pack,
+// not numbered after an enclosing class).
+static TypeRecord* AliasTemplateIdMemberType(TypeParser* parser, Symbol* alias,
+                                             Vector* args, String* member_name,
+                                             Vector* member_args) {
+  TypeRecord* pattern = alias != NULL ? alias->type : NULL;
+  if (alias == NULL || alias->alias_template == NULL || pattern == NULL ||
+      args == NULL || pattern->declarator != kDeclPrimitive ||
+      pattern->dependent_decltype_expr != NULL ||
+      pattern->template_origin == NULL ||
+      pattern->template_origin->alias_template != NULL ||
+      pattern->template_arguments == NULL ||
+      !TypeHasDependentMemberPath(pattern)) {
+    return NULL;
+  }
+  Vector* params = &alias->alias_template->parameters;
+  if (params->length != args->length) {
+    return NULL;
+  }
+  for (size_t i = 0; i < params->length; i++) {
+    TemplateParameter* param = params->value.p[i];
+    if (param->is_parameter_pack || param->index != (int)i) {
+      return NULL;
+    }
+  }
+  Vector* origin_args = SubstituteTemplateArgumentVectorForTypes(
+      parser, pattern->template_arguments, args);
+  if (origin_args == NULL) {
+    return NULL;
+  }
+  TypeRecord* result = NewTypeRecord(
+      kTypeInt | kTypeUnknown,
+      member_name != NULL ? kQualPlain : pattern->qualifiers);
+  result->template_origin = pattern->template_origin;
+  result->template_arguments = origin_args;
+  result->dependent_member_name =
+      NewString(pattern->dependent_member_name->value);
+  if (member_name != NULL) {
+    StringAppend(result->dependent_member_name, "::");
+    StringAppendString(result->dependent_member_name, member_name);
+  }
+  Vector* pattern_member_args = pattern->dependent_member_template_arguments;
+  if (pattern_member_args == NULL && member_args == NULL) {
+    return result;
+  }
+  size_t pattern_components = 1;
+  for (const char* c = strstr(pattern->dependent_member_name->value, "::");
+       c != NULL; c = strstr(c + 2, "::")) {
+    pattern_components++;
+  }
+  size_t member_components = member_name != NULL ? 1 : 0;
+  for (const char* c = member_name != NULL ? strstr(member_name->value, "::")
+                                           : NULL;
+       c != NULL; c = strstr(c + 2, "::")) {
+    member_components++;
+  }
+  result->dependent_member_template_arguments = NewVector();
+  for (size_t i = 0; i < pattern_components; i++) {
+    Vector* component_args =
+        pattern_member_args != NULL && i < pattern_member_args->length
+            ? pattern_member_args->value.p[i]
+            : NULL;
+    VectorAppend(result->dependent_member_template_arguments,
+                 component_args != NULL
+                     ? SubstituteTemplateArgumentVectorForTypes(
+                           parser, component_args, args)
+                     : NULL);
+  }
+  for (size_t i = 0; i < member_components; i++) {
+    Vector* component_args = member_args != NULL && i < member_args->length
+                                 ? member_args->value.p[i]
+                                 : NULL;
+    VectorAppend(result->dependent_member_template_arguments,
+                 component_args != NULL
+                     ? TemplateArgumentVectorCopy(component_args)
+                     : NULL);
+  }
+  return result;
+}
+
 void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
                     Storage storage, ParserContext context) {
   parser->lex = lex;
@@ -2144,6 +2230,12 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                     : CurrentInstantiationMemberType(
                           parser, dependent_member_origin, parsed_args,
                           member_name);
+            if (type_record == NULL && origin_is_alias && !rewound_alias &&
+                !member_template_id) {
+              type_record = AliasTemplateIdMemberType(
+                  parser, dependent_member_origin, parsed_args, member_name,
+                  NULL);
+            }
             if (type_record == NULL) {
               type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
               type_record->template_origin = dependent_member_origin;
@@ -2521,20 +2613,32 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               StringAppendString(&tail,
                                  typename_name.components.value.p[i]);
             }
-            type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
-            type_record->template_origin = base;
-            type_record->template_arguments =
-                TemplateArgumentVectorCopy(parsed_args);
-            type_record->dependent_member_name = NewString(tail.value);
-            type_record->dependent_member_template_arguments = NewVector();
+            Vector tail_args;
+            VectorInit(&tail_args);
             for (size_t i = template_index + 1;
                  i < typename_name.template_arguments.length; i++) {
-              Vector* component_args =
-                  typename_name.template_arguments.value.p[i];
-              VectorAppend(type_record->dependent_member_template_arguments,
-                           component_args != NULL
-                               ? TemplateArgumentVectorCopy(component_args)
-                               : NULL);
+              VectorAppend(&tail_args,
+                           typename_name.template_arguments.value.p[i]);
+            }
+            type_record = AliasTemplateIdMemberType(parser, base, parsed_args,
+                                                    &tail, &tail_args);
+            VectorDestruct(&tail_args);
+            if (type_record == NULL) {
+              type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
+              type_record->template_origin = base;
+              type_record->template_arguments =
+                  TemplateArgumentVectorCopy(parsed_args);
+              type_record->dependent_member_name = NewString(tail.value);
+              type_record->dependent_member_template_arguments = NewVector();
+              for (size_t i = template_index + 1;
+                   i < typename_name.template_arguments.length; i++) {
+                Vector* component_args =
+                    typename_name.template_arguments.value.p[i];
+                VectorAppend(type_record->dependent_member_template_arguments,
+                             component_args != NULL
+                                 ? TemplateArgumentVectorCopy(component_args)
+                                 : NULL);
+              }
             }
             type |= type_record->type;
             StringDestruct(&tail);
@@ -2751,7 +2855,14 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         } else {
           bool forwarding_member_alias_id =
               AliasIdForwardsDependentMemberTemplate(parser, symbol, args);
-          if (forwarding_member_alias_id) {
+          TypeRecord* alias_member =
+              !forwarding_member_alias_id && symbol->flags.is_template &&
+                      TemplateArgumentVectorContainsTemplateParameter(args)
+                  ? AliasTemplateIdMemberType(parser, symbol, args, NULL, NULL)
+                  : NULL;
+          if (alias_member != NULL) {
+            type_record = alias_member;
+          } else if (forwarding_member_alias_id) {
             // Do not copy the alias pattern (`typename super_type::key_arg<K>`)
             // onto this template-id.  The pattern shares type nodes with other
             // uses; partial substitution later collapses parameters to a base
@@ -2942,7 +3053,15 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           } else {
             bool forwarding_member_alias_id =
                 AliasIdForwardsDependentMemberTemplate(parser, symbol, args);
-            if (forwarding_member_alias_id) {
+            TypeRecord* alias_member =
+                !forwarding_member_alias_id && symbol->flags.is_template &&
+                        TemplateArgumentVectorContainsTemplateParameter(args)
+                    ? AliasTemplateIdMemberType(parser, symbol, args, NULL,
+                                                NULL)
+                    : NULL;
+            if (alias_member != NULL) {
+              type_record = alias_member;
+            } else if (forwarding_member_alias_id) {
               type_record =
                   NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
               type_record->template_origin = symbol;

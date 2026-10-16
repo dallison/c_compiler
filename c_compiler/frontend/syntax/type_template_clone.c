@@ -760,28 +760,86 @@ static void RebindBodyCloneDecltypeExpressions(
 static void RebindBodyCloneNonTypeArgument(
     TemplateFunctionBodyClone* clone, TemplateArgument* arg,
     Vector* rebound_arguments, Vector* original_argument_expressions);
-static void RestoreBodyCloneDecltypeExpressions(
-    Vector* rebound_types, Vector* original_expressions,
-    Vector* rebound_arguments, Vector* original_argument_expressions);
+
+/* The decltype operands a body-clone substitution rebinds to this
+ * instantiation's symbols (`decltype(tag)` naming a generic lambda's own
+ * parameter) for the duration of one substitution. */
+typedef struct {
+  Vector visited_types;
+  Vector rebound_types;
+  Vector original_expressions;
+  Vector rebound_arguments;
+  Vector original_argument_expressions;
+} BodyCloneDecltypeBinding;
+
+static void BodyCloneDecltypeBindingInit(BodyCloneDecltypeBinding* binding) {
+  VectorInit(&binding->visited_types);
+  VectorInit(&binding->rebound_types);
+  VectorInit(&binding->original_expressions);
+  VectorInit(&binding->rebound_arguments);
+  VectorInit(&binding->original_argument_expressions);
+}
+
+/* A clone that binds only the enclosing arguments renumbers the remaining
+ * parameters from 0, while the substitution that follows still reads the
+ * pattern's numbering: an operand rebound to a still-dependent symbol
+ * (`decltype(value)` for a generic lambda's `auto&& value`,
+ * `decltype(declval<Range&>())` in a member template's constraint) would take
+ * an enclosing argument.  Such operands stay on the pattern until the
+ * member's own instantiation; operands that became concrete are kept. */
+static void BodyCloneDecltypeBindingRebindType(
+    TemplateFunctionBodyClone* clone, BodyCloneDecltypeBinding* binding,
+    TypeRecord* type) {
+  size_t first = binding->rebound_types.length;
+  RebindBodyCloneDecltypeExpressions(
+      clone, type, &binding->visited_types, &binding->rebound_types,
+      &binding->original_expressions, &binding->rebound_arguments,
+      &binding->original_argument_expressions);
+  if (clone->rebase_template_parameter_base <= 0) {
+    return;
+  }
+  size_t kept = first;
+  for (size_t i = first; i < binding->rebound_types.length; i++) {
+    TypeRecord* rebound = binding->rebound_types.value.p[i];
+    ASTNode* original = binding->original_expressions.value.p[i];
+    if (ExpressionIsTemplateDependent(rebound->dependent_decltype_expr)) {
+      rebound->dependent_decltype_expr = original;
+      continue;
+    }
+    binding->rebound_types.value.p[kept] = rebound;
+    binding->original_expressions.value.p[kept] = original;
+    kept++;
+  }
+  binding->rebound_types.length = kept;
+  binding->original_expressions.length = kept;
+}
+
+/* A substitution that stays dependent may share a rebound operand or
+ * argument expression, so those are left to the AST arena. */
+static void BodyCloneDecltypeBindingRestore(BodyCloneDecltypeBinding* binding) {
+  for (size_t i = 0; i < binding->rebound_types.length; i++) {
+    TypeRecord* type = binding->rebound_types.value.p[i];
+    type->dependent_decltype_expr = binding->original_expressions.value.p[i];
+  }
+  for (size_t i = 0; i < binding->rebound_arguments.length; i++) {
+    TemplateArgument* arg = binding->rebound_arguments.value.p[i];
+    arg->dependent_expr = binding->original_argument_expressions.value.p[i];
+  }
+  VectorDestruct(&binding->original_argument_expressions);
+  VectorDestruct(&binding->rebound_arguments);
+  VectorDestruct(&binding->original_expressions);
+  VectorDestruct(&binding->rebound_types);
+  VectorDestruct(&binding->visited_types);
+}
 
 static TypeRecord* SubstituteBodyCloneTypeParameters(
     TemplateFunctionBodyClone* clone, TypeRecord* type) {
-  Vector visited_types;
-  Vector rebound_arguments;
-  Vector original_argument_expressions;
-  VectorInit(&visited_types);
-  VectorInit(&rebound_arguments);
-  VectorInit(&original_argument_expressions);
-  RebindBodyCloneDecltypeExpressions(clone, type, &visited_types, NULL, NULL,
-                                     &rebound_arguments,
-                                     &original_argument_expressions);
+  BodyCloneDecltypeBinding binding;
+  BodyCloneDecltypeBindingInit(&binding);
+  BodyCloneDecltypeBindingRebindType(clone, &binding, type);
   TypeRecord* substituted =
       SubstituteTemplateParameters(clone->parser, type, clone->args);
-  RestoreBodyCloneDecltypeExpressions(NULL, NULL, &rebound_arguments,
-                                      &original_argument_expressions);
-  VectorDestruct(&original_argument_expressions);
-  VectorDestruct(&rebound_arguments);
-  VectorDestruct(&visited_types);
+  BodyCloneDecltypeBindingRestore(&binding);
   return substituted;
 }
 
@@ -791,32 +849,22 @@ static TypeRecord* SubstituteBodyCloneTypeParameters(
 static Vector* SubstituteBodyCloneTemplateArguments(
     TemplateFunctionBodyClone* clone, Vector* template_args,
     int rebase_base) {
-  Vector visited_types;
-  Vector rebound_arguments;
-  Vector original_argument_expressions;
-  VectorInit(&visited_types);
-  VectorInit(&rebound_arguments);
-  VectorInit(&original_argument_expressions);
+  BodyCloneDecltypeBinding binding;
+  BodyCloneDecltypeBindingInit(&binding);
   for (size_t i = 0; template_args != NULL && i < template_args->length;
        i++) {
     TemplateArgument* arg = template_args->value.p[i];
     if (arg != NULL && arg->kind == kTemplateParameterType &&
         arg->type != NULL) {
-      RebindBodyCloneDecltypeExpressions(clone, arg->type, &visited_types,
-                                         NULL, NULL, &rebound_arguments,
-                                         &original_argument_expressions);
+      BodyCloneDecltypeBindingRebindType(clone, &binding, arg->type);
     } else {
-      RebindBodyCloneNonTypeArgument(clone, arg, &rebound_arguments,
-                                     &original_argument_expressions);
+      RebindBodyCloneNonTypeArgument(clone, arg, &binding.rebound_arguments,
+                                     &binding.original_argument_expressions);
     }
   }
   Vector* substituted = SubstituteTemplateArgumentVector(
       clone->parser, template_args, clone->args, rebase_base);
-  RestoreBodyCloneDecltypeExpressions(NULL, NULL, &rebound_arguments,
-                                      &original_argument_expressions);
-  VectorDestruct(&original_argument_expressions);
-  VectorDestruct(&rebound_arguments);
-  VectorDestruct(&visited_types);
+  BodyCloneDecltypeBindingRestore(&binding);
   return substituted;
 }
 
@@ -5598,6 +5646,96 @@ static void RebindBodyCloneNonTypeArgument(
   arg->dependent_expr = rebound;
 }
 
+/* The instantiated parameter of an enclosing function that `formal` names.
+ * A local class or lambda body may name an enclosing function's parameter in
+ * an unevaluated operand without capturing it (`decltype(key_type)` in a
+ * lambda nested in a generic lambda).  That parameter belongs to the
+ * enclosing instantiation, which this clone's symbol map does not cover. */
+static Symbol* EnclosingInstantiatedFormal(Struct* owner, Symbol* formal) {
+  if (owner == NULL || formal == NULL || !formal->flags.is_argument) {
+    return NULL;
+  }
+  Symbol* enclosing = owner->access_enclosing_function;
+  for (int depth = 0; enclosing != NULL && depth < 32; depth++) {
+    TypeRecord* function = enclosing->type;
+    if (function == NULL || !TypeIsFunction(function)) {
+      return NULL;
+    }
+    for (size_t i = 0; i < function->info.function.prototype.length; i++) {
+      Symbol* candidate = function->info.function.prototype.value.p[i];
+      if (candidate == NULL || candidate == formal) {
+        continue;
+      }
+      if (candidate->flags.is_argument &&
+          candidate->value.arg_number == formal->value.arg_number &&
+          StringEqualString(&candidate->name, &formal->name)) {
+        return TypeContainsTemplateParameter(candidate->type) ? NULL
+                                                              : candidate;
+      }
+    }
+    Struct* enclosing_owner = function->info.function.cxx_member_owner;
+    enclosing = enclosing_owner != NULL
+                    ? enclosing_owner->access_enclosing_function
+                    : NULL;
+  }
+  return NULL;
+}
+
+typedef struct {
+  TemplateFunctionBodyClone* clone;
+  Struct* owner;
+  Vector* seeded;
+} SeedEnclosingFormalsData;
+
+static void SeedEnclosingFormalVisitor(ASTNode* node, void* data,
+                                       int child_id, VisitorMode mode) {
+  (void)child_id;
+  SeedEnclosingFormalsData* seed = data;
+  if (mode != kVisitPreChildren || node == NULL ||
+      node->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+  if (symbol == NULL || !symbol->flags.is_argument ||
+      MapFindPointerKey(&seed->clone->symbol_map, symbol) != NULL) {
+    return;
+  }
+  Symbol* instantiated = EnclosingInstantiatedFormal(seed->owner, symbol);
+  if (instantiated == NULL) {
+    return;
+  }
+  MapKeyValue kv;
+  kv.key.p = symbol;
+  kv.value.p = instantiated;
+  MapInsert(&seed->clone->symbol_map, kv);
+  VectorAppend(seed->seeded, symbol);
+}
+
+/* Map the enclosing functions' parameters that the unevaluated `operand`
+ * names onto their instantiations for the duration of one operand clone.
+ * Only an unevaluated operand may name them: an evaluated use is a capture. */
+static void SeedEnclosingFormalsForUnevaluatedOperand(
+    TemplateFunctionBodyClone* clone, ASTNode* operand, Vector* seeded) {
+  Struct* owner = clone->to_func != NULL && TypeIsFunction(clone->to_func)
+                      ? clone->to_func->info.function.cxx_member_owner
+                      : NULL;
+  if (owner == NULL || owner->access_enclosing_function == NULL) {
+    return;
+  }
+  SeedEnclosingFormalsData seed = {clone, owner, seeded};
+  ASTNodeVisit(operand, SeedEnclosingFormalVisitor, 0, &seed);
+}
+
+static void UnseedEnclosingFormals(TemplateFunctionBodyClone* clone,
+                                   Vector* seeded) {
+  for (size_t i = 0; i < seeded->length; i++) {
+    MapKeyType key;
+    key.p = seeded->value.p[i];
+    MapRemove(&clone->symbol_map, key);
+  }
+  VectorDestruct(seeded);
+}
+
 static void RebindBodyCloneDecltypeExpressions(
     TemplateFunctionBodyClone* clone, TypeRecord* type, Vector* visited_types,
     Vector* rebound_types, Vector* original_expressions,
@@ -5622,11 +5760,16 @@ static void RebindBodyCloneDecltypeExpressions(
       if (CloneSubstitutesEnclosingArgumentsOnly(clone)) {
         clone->rebase_template_parameter_base = 0;
       }
+      Vector seeded;
+      VectorInit(&seeded);
+      SeedEnclosingFormalsForUnevaluatedOperand(
+          clone, current->dependent_decltype_expr, &seeded);
       compiler->speculative_template_instantiation_depth++;
       ASTNode* rebound =
           ASTNodeClone(current->dependent_decltype_expr,
                        CloneTemplateFunctionBodyNode, clone, NULL);
       compiler->speculative_template_instantiation_depth--;
+      UnseedEnclosingFormals(clone, &seeded);
       clone->rebase_template_parameter_base = saved_rebase_base;
       if (rebound != NULL) {
         VectorAppend(rebound_types, current);
@@ -5650,22 +5793,6 @@ static void RebindBodyCloneDecltypeExpressions(
                                        original_argument_expressions);
       }
     }
-  }
-}
-
-static void RestoreBodyCloneDecltypeExpressions(
-    Vector* rebound_types, Vector* original_expressions,
-    Vector* rebound_arguments, Vector* original_argument_expressions) {
-  for (size_t i = 0; rebound_types != NULL && i < rebound_types->length; i++) {
-    TypeRecord* type = rebound_types->value.p[i];
-    ASTNodeDelete(type->dependent_decltype_expr);
-    type->dependent_decltype_expr = original_expressions->value.p[i];
-  }
-  // A substituted argument that is still dependent may share the rebound
-  // expression, so it is left to the AST arena like every dependent_expr.
-  for (size_t i = 0; i < rebound_arguments->length; i++) {
-    TemplateArgument* arg = rebound_arguments->value.p[i];
-    arg->dependent_expr = original_argument_expressions->value.p[i];
   }
 }
 
@@ -6545,29 +6672,12 @@ static TypeRecord* FindInstantiatedOwnerAliasType(
  * `decltype` expressions so they clone against this instantiation. */
 static TypeRecord* SubstituteQualifiedNameScope(
     TemplateFunctionBodyClone* clone, TypeRecord* scope) {
-  Vector rebound_types;
-  Vector original_expressions;
-  Vector rebound_arguments;
-  Vector original_argument_expressions;
-  Vector visited_types;
-  VectorInit(&rebound_types);
-  VectorInit(&original_expressions);
-  VectorInit(&rebound_arguments);
-  VectorInit(&original_argument_expressions);
-  VectorInit(&visited_types);
-  RebindBodyCloneDecltypeExpressions(
-      clone, scope, &visited_types, &rebound_types, &original_expressions,
-      &rebound_arguments, &original_argument_expressions);
+  BodyCloneDecltypeBinding binding;
+  BodyCloneDecltypeBindingInit(&binding);
+  BodyCloneDecltypeBindingRebindType(clone, &binding, scope);
   TypeRecord* concrete = SubstituteTemplateParameters(clone->parser, scope,
                                                       clone->args);
-  RestoreBodyCloneDecltypeExpressions(&rebound_types, &original_expressions,
-                                      &rebound_arguments,
-                                      &original_argument_expressions);
-  VectorDestruct(&original_argument_expressions);
-  VectorDestruct(&rebound_arguments);
-  VectorDestruct(&original_expressions);
-  VectorDestruct(&rebound_types);
-  VectorDestruct(&visited_types);
+  BodyCloneDecltypeBindingRestore(&binding);
   return concrete;
 }
 
@@ -8431,6 +8541,56 @@ static bool ClonedConstructorActualMatchesFormal(ASTNode* actual,
                                                 kQualConst | kQualVolatile);
 }
 
+static bool TemplateArgumentsNameLocalClass(Vector* args, int depth);
+
+static bool TypeNamesLocalClass(TypeRecord* type, int depth) {
+  for (TypeRecord* t = type; t != NULL && depth < 16; t = t->next) {
+    if (TypeIsStructOrUnion(t) && t->info.struct_info != NULL &&
+        t->info.struct_info->access_enclosing_function != NULL) {
+      return true;
+    }
+    if (TemplateArgumentsNameLocalClass(t->template_arguments, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TemplateArgumentsNameLocalClass(Vector* args, int depth) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg == NULL) {
+      continue;
+    }
+    if (arg->kind == kTemplateParameterType &&
+        TypeNamesLocalClass(arg->type, depth)) {
+      return true;
+    }
+    if (TemplateArgumentsNameLocalClass(arg->pack_arguments, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* `W<decltype(l)>{l}` for a closure `l` in a generic lambda resolves, when the
+ * pattern is parsed, to the constructor of `W<closure>`.  The instantiation
+ * rebuilds the closure, so its receiver is a `W` over the rebuilt closure and
+ * the constructor has to be found again there. */
+static bool ConstructorOwnerNamesStaleLocalClass(Struct* current_owner,
+                                                 Struct* receiver_owner) {
+  TypeRecord* current = current_owner != NULL && current_owner->tag_symbol
+                            ? current_owner->tag_symbol->type
+                            : NULL;
+  TypeRecord* receiver = receiver_owner != NULL && receiver_owner->tag_symbol
+                             ? receiver_owner->tag_symbol->type
+                             : NULL;
+  return current != NULL && receiver != NULL &&
+         current->template_origin != NULL &&
+         current->template_origin == receiver->template_origin &&
+         TemplateArgumentsNameLocalClass(current->template_arguments, 0);
+}
+
 /* Find the head of the overload chain for member `name` in `owner`, preferring
  * a member that actually has overloads linked; falls back to any match. */
 static bool RebindClonedConstructorCall(VectorASTNode* call,
@@ -8447,6 +8607,7 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
   }
   Struct* ctor_owner = NULL;
   String* ctor_name = NULL;
+  bool stale_owner = false;
   if (call->children != NULL && call->children->length > 0) {
     ASTNode* receiver = call->children->value.p[0];
     TypeRecord* receiver_type = receiver != NULL ? receiver->type : NULL;
@@ -8483,9 +8644,12 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
         (StructContainsTemplateParameter(current_owner) ||
          (current_owner->lexical_parent != NULL &&
           current_owner->lexical_parent->is_template));
+    stale_owner = ctor_owner != NULL && current_owner != ctor_owner &&
+                  ConstructorOwnerNamesStaleLocalClass(current_owner,
+                                                       ctor_owner);
     if (ctor_owner != NULL && current_owner != NULL &&
         current_owner != ctor_owner &&
-        !current_owner_is_template_pattern) {
+        !current_owner_is_template_pattern && !stale_owner) {
       ctor_owner = NULL;
       ctor_name = NULL;
     }
@@ -8514,7 +8678,7 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
   bool provisional_function_template =
       id->symbol->flags.is_template ||
       id->symbol->type->info.function.template_origin != NULL;
-  if (original_arity == call->children->length) {
+  if (original_arity == call->children->length && !stale_owner) {
     if (!provisional_function_template &&
         !TypeContainsTemplateParameter(id->symbol->type)) {
       ASTNodeSetType(call->left, id->symbol->type);

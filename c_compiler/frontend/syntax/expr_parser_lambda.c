@@ -62,11 +62,13 @@ typedef struct {
 } LambdaCaptureScan;
 
 
-// State threaded through RewriteLambdaCaptureUses: the captures to look up and
-// the closure's `this` parameter through which their fields are reached.
+// State threaded through RewriteLambdaCaptureUses: the captures to look up,
+// the closure's `this` parameter through which their fields are reached, and
+// the call operator whose body is being rewritten.
 typedef struct {
   Vector* captures;
   Symbol* this_symbol;
+  TypeRecord* call_operator;
 } LambdaRewrite;
 
 
@@ -99,7 +101,8 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures, S
 static ASTNode* NewLambdaCaptureInitializer(LambdaCapture* capture, SourceLocation location);
 static ASTNode* NewLambdaCaptureAccess(Symbol* this_symbol, LambdaCapture* capture, SourceLocation location);
 static void AddLambdaInitCaptureScopeSymbols(Syntax* syntax, Vector* captures);
-static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id, ASTNode* replacement);
+static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
+                                         ASTNode* replacement, bool delete_old);
 static void RewriteLambdaCaptureUses(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator, Vector* captures, TokenClass followers);
 static void RefreshGenericLambdaTemplatePatternBodyAfterCaptureSetup( TypeRecord* func);
@@ -1173,7 +1176,8 @@ static void AddLambdaInitCaptureScopeSymbols(Syntax* syntax, Vector* captures) {
 // (vector slot N); map those explicitly.  All other node shapes go through the
 // generic child-replacement helper.
 static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
-                                         ASTNode* replacement) {
+                                         ASTNode* replacement,
+                                         bool delete_old) {
   if (parent == NULL) {
     ASTNodeDelete(replacement);
     return;
@@ -1188,7 +1192,9 @@ static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
       vector->left = replacement;
       replacement->parent = parent;
       replacement->child_id = 0;
-      ASTNodeDelete(old);
+      if (delete_old) {
+        ASTNodeDelete(old);
+      }
       return;
     }
     ASTNode* old = vector->children->value.p[child_id - 1];
@@ -1197,10 +1203,12 @@ static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
     // Stored child ids index `children` directly.  The visitor id reserves 0
     // for the callee, so argument N arrives here as N+1.
     replacement->child_id = child_id - 1;
-    ASTNodeDelete(old);
+    if (delete_old) {
+      ASTNodeDelete(old);
+    }
     return;
   }
-  ASTNodeReplaceChild(parent, child_id, replacement, true);
+  ASTNodeReplaceChild(parent, child_id, replacement, delete_old);
 }
 
 
@@ -1232,7 +1240,27 @@ static void RewriteLambdaCaptureUses(ASTNode* node, void* data,
   if ((node->flags & kASTPackExpansion) != 0) {
     replacement->flags |= kASTPackExpansion;
   }
-  ReplaceChildForLambdaCapture(node->parent, child_id, replacement);
+  ASTNode* parent = node->parent;
+  // A use already analyzed with the body, such as `&a` capturing `a` again in
+  // a nested closure's initializer, is not revisited when the body is
+  // analyzed: keep what the parent's analysis marked on the use and resolve
+  // the member access now, or it would reach code generation unresolved.
+  bool analyzed_use = parent != NULL && (parent->flags & kASTAnalyzed) != 0;
+  if (analyzed_use) {
+    replacement->flags |= node->flags & kASTNeedAddress;
+  }
+  ReplaceChildForLambdaCapture(parent, child_id, replacement,
+                               /*delete_old=*/true);
+  if (analyzed_use && replacement->parent == parent) {
+    TypeRecord* saved_function = compiler->current_function;
+    compiler->current_function = rewrite->call_operator;
+    ASTNode* analyzed = AnalyzeExpression(replacement);
+    compiler->current_function = saved_function;
+    if (analyzed != replacement) {
+      ReplaceChildForLambdaCapture(parent, child_id, analyzed,
+                                   /*delete_old=*/false);
+    }
+  }
 }
 
 
@@ -1397,7 +1425,8 @@ ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
       captures.length > 0, explicit_template_params != NULL);
   if (!is_static && captures.length > 0) {
     LambdaRewrite rewrite = {
-        &captures, call_operator->type->info.function.prototype.value.p[0]};
+        &captures, call_operator->type->info.function.prototype.value.p[0],
+        call_operator->type};
     ASTNodeVisit(call_operator->type->info.function.body,
                  RewriteLambdaCaptureUses, 0, &rewrite);
   }

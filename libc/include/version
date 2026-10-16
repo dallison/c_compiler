@@ -19,7 +19,12 @@
 #endif
 #endif
 
+#if __cplusplus >= 201703L
+#define __cpp_lib_is_invocable 201703L
+#endif
+
 #if __cplusplus >= 201402L
+#define __cpp_lib_result_of_sfinae 201210L
 #define __cpp_lib_complex_udls 201309L
 #ifndef __cpp_lib_chrono_udls
 #define __cpp_lib_chrono_udls 201304L

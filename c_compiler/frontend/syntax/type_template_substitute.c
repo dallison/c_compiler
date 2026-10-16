@@ -2886,16 +2886,33 @@ TypeRecord* SubstituteCopiedTypeRecord(TypeParser* parser,
  *     reference collapsing), and function prototypes (expanding parameter
  *     packs).
  * Returns a newly allocated, size-calculated type record. */
+/* The decltype operands being substituted, as (operand, arguments) pairs.  Only
+ * the same operand with the same arguments is a recursion: one partial
+ * specialization's operand legitimately recurs with other arguments
+ * (`result_of<C(A...)>` whose call operator is constrained on
+ * `result_of<Compare(A...)>`). */
 static Vector g_dependent_decltype_stack;
 static bool g_dependent_decltype_stack_initialized;
 
-static bool DependentDecltypeStackContains(ASTNode* expr) {
-  for (size_t i = 0; i < g_dependent_decltype_stack.length; i++) {
-    if (g_dependent_decltype_stack.value.p[i] == expr) {
+static bool DependentDecltypeStackContains(ASTNode* expr, Vector* args) {
+  for (size_t i = 0; i + 1 < g_dependent_decltype_stack.length; i += 2) {
+    if (g_dependent_decltype_stack.value.p[i] == expr &&
+        TemplateArgumentVectorEqual(g_dependent_decltype_stack.value.p[i + 1],
+                                    args)) {
       return true;
     }
   }
   return false;
+}
+
+static void DependentDecltypeStackPush(ASTNode* expr, Vector* args) {
+  VectorAppend(&g_dependent_decltype_stack, expr);
+  VectorAppend(&g_dependent_decltype_stack, args);
+}
+
+static void DependentDecltypeStackPop(void) {
+  VectorPop(&g_dependent_decltype_stack);
+  VectorPop(&g_dependent_decltype_stack);
 }
 
 /* A call whose explicit template arguments still name a template parameter
@@ -3130,8 +3147,8 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     return dependent;
   }
   if (type->dependent_decltype_expr != NULL &&
-      !DependentDecltypeStackContains(type->dependent_decltype_expr)) {
-    VectorAppend(&g_dependent_decltype_stack, type->dependent_decltype_expr);
+      !DependentDecltypeStackContains(type->dependent_decltype_expr, args)) {
+    DependentDecltypeStackPush(type->dependent_decltype_expr, args);
     if ((type->dependent_decltype_expr->flags &
          kASTUnparenthesizedDecltypeEntity) != 0 &&
         type->dependent_decltype_expr->op == AST_OP(identifier)) {
@@ -3157,7 +3174,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           declared->qualifiers |= type->qualifiers;
           declared = SubstituteResolvedDependentMemberSuffix(
               parser, type, declared, args);
-          VectorPop(&g_dependent_decltype_stack);
+          DependentDecltypeStackPop();
           return TypeRecordCalculateSize(declared);
         }
         TypeRecordDelete(declared);
@@ -3242,7 +3259,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           }
           compiler->speculative_template_instantiation_depth--;
           DiagnosticSuppressEnd();
-          VectorPop(&g_dependent_decltype_stack);
+          DependentDecltypeStackPop();
           return TypeRecordCalculateSize(opaque);
         }
         if (parser != NULL) {
@@ -3251,7 +3268,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         ASTNodeDelete(expr);
         compiler->speculative_template_instantiation_depth--;
         DiagnosticSuppressEnd();
-        VectorPop(&g_dependent_decltype_stack);
+        DependentDecltypeStackPop();
         return NULL;
       }
       if (expr != NULL && expr->type != NULL) {
@@ -3301,7 +3318,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           }
           compiler->speculative_template_instantiation_depth--;
           DiagnosticSuppressEnd();
-          VectorPop(&g_dependent_decltype_stack);
+          DependentDecltypeStackPop();
           return TypeRecordCalculateSize(opaque);
         }
         TypeRecord* result = NULL;
@@ -3335,7 +3352,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           ASTNodeDelete(expr);
           compiler->speculative_template_instantiation_depth--;
           DiagnosticSuppressEnd();
-          VectorPop(&g_dependent_decltype_stack);
+          DependentDecltypeStackPop();
           return TypeRecordCalculateSize(result);
         }
       }
@@ -3343,7 +3360,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     }
     compiler->speculative_template_instantiation_depth--;
     DiagnosticSuppressEnd();
-    VectorPop(&g_dependent_decltype_stack);
+    DependentDecltypeStackPop();
   }
   if (CompilerIsCXX() && parser != NULL) {
     TypeRecord* subst = SubstituteTemplateSelfReference(
@@ -3899,7 +3916,7 @@ static void RebaseDependentExpressionOwnedType(TypeRecord** slot, int base) {
   if (!TypeContainsTemplateParameter(*slot)) {
     return;
   }
-  TypeRecord* rebased = TypeRecordCopy(*slot);
+  TypeRecord* rebased = TypeRecordCloneSpine(*slot);
   RebaseTemplateParameterIndices(rebased, base);
   TypeRecordIncRef(rebased);
   TypeRecordDelete(*slot);
@@ -3960,8 +3977,10 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
     }
     return;
   }
+  // The symbol's type spine may link records it does not count references
+  // to, so a shallow copy would rebase the shared pattern in place.
   TypeRecord* type =
-      old->type != NULL ? TypeRecordCopy(old->type) : NULL;
+      old->type != NULL ? TypeRecordCloneSpine(old->type) : NULL;
   RebaseTemplateParameterIndices(type, rebase->base);
   Symbol* copy = NewSymbol(old->name.value, type, old->storage);
   copy->namespace_ = old->namespace_;
