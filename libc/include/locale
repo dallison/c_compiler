@@ -389,7 +389,7 @@ class ctype<char> : public locale::facet, public ctype_base {
     while (low != high) {
       *to++ = *low++;
     }
-    return to;
+    return high;
   }
   char narrow(char c, char dfault) const {
     (void)dfault;
@@ -400,7 +400,7 @@ class ctype<char> : public locale::facet, public ctype_base {
     while (low != high) {
       *to++ = narrow(*low++, dfault);
     }
-    return to;
+    return high;
   }
 
  protected:
@@ -473,7 +473,7 @@ class ctype<wchar_t> : public locale::facet, public ctype_base {
     while (low != high) {
       *to++ = widen(*low++);
     }
-    return to;
+    return high;
   }
   char narrow(wchar_t c, char dfault) const {
     if (c >= 0 && c <= 0x7f) {
@@ -486,7 +486,7 @@ class ctype<wchar_t> : public locale::facet, public ctype_base {
     while (low != high) {
       *to++ = narrow(*low++, dfault);
     }
-    return to;
+    return high;
   }
 
  protected:

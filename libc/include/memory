@@ -197,11 +197,105 @@ ForwardIt uninitialized_fill_n(ForwardIt first, Size count, const T& value) {
   return first;
 }
 
-template <class Ptr>
-struct pointer_traits {
-  using pointer = Ptr;
-  using difference_type = ptrdiff_t;
+template <class T>
+struct __alloc_void {
+  using type = void;
 };
+
+template <class T>
+using __void_t = typename __alloc_void<T>::type;
+
+// [pointer.traits.types]: each member comes from Ptr when it declares one,
+// else from the first argument of a template-id Ptr = Sp<T, Args...>.
+template <class Ptr, class = void>
+struct __ptr_traits_has_element_type : false_type {};
+
+template <class Ptr>
+struct __ptr_traits_has_element_type<Ptr, __void_t<typename Ptr::element_type>>
+    : true_type {};
+
+template <class Ptr, bool = __ptr_traits_has_element_type<Ptr>::value>
+struct __ptr_traits_element_type {};
+
+template <class Ptr>
+struct __ptr_traits_element_type<Ptr, true> {
+  using type = typename Ptr::element_type;
+};
+
+template <template <class, class...> class Sp, class T, class... Args>
+struct __ptr_traits_element_type<Sp<T, Args...>, true> {
+  using type = typename Sp<T, Args...>::element_type;
+};
+
+template <template <class, class...> class Sp, class T, class... Args>
+struct __ptr_traits_element_type<Sp<T, Args...>, false> {
+  using type = T;
+};
+
+template <class Ptr, class = void>
+struct __ptr_traits_difference_type {
+  using type = ptrdiff_t;
+};
+
+template <class Ptr>
+struct __ptr_traits_difference_type<
+    Ptr, __void_t<typename Ptr::difference_type>> {
+  using type = typename Ptr::difference_type;
+};
+
+template <class Ptr, class U, class = void>
+struct __ptr_traits_has_rebind : false_type {};
+
+template <class Ptr, class U>
+struct __ptr_traits_has_rebind<
+    Ptr, U, __void_t<typename Ptr::template rebind<U>>> : true_type {};
+
+template <class Ptr, class U,
+          bool = __ptr_traits_has_rebind<Ptr, U>::value>
+struct __ptr_traits_rebind {};
+
+template <class Ptr, class U>
+struct __ptr_traits_rebind<Ptr, U, true> {
+  using type = typename Ptr::template rebind<U>;
+};
+
+template <template <class, class...> class Sp, class T, class... Args,
+          class U>
+struct __ptr_traits_rebind<Sp<T, Args...>, U, true> {
+  using type = typename Sp<T, Args...>::template rebind<U>;
+};
+
+template <template <class, class...> class Sp, class T, class... Args,
+          class U>
+struct __ptr_traits_rebind<Sp<T, Args...>, U, false> {
+  using type = Sp<U, Args...>;
+};
+
+struct __ptr_traits_no_reference {};
+
+template <class Ptr, class = void>
+struct __ptr_traits_impl {};
+
+template <class Ptr>
+struct __ptr_traits_impl<
+    Ptr, __void_t<typename __ptr_traits_element_type<Ptr>::type>> {
+  using pointer = Ptr;
+  using element_type = typename __ptr_traits_element_type<Ptr>::type;
+  using difference_type = typename __ptr_traits_difference_type<Ptr>::type;
+  template <class U>
+  using rebind = typename __ptr_traits_rebind<Ptr, U>::type;
+  // Declaring `pointer_to(void&)` for `element_type = void` would be
+  // ill-formed; that specialization has no usable pointer_to.
+  static pointer pointer_to(
+      typename conditional<is_void<element_type>::value,
+                           __ptr_traits_no_reference, element_type>::type& r) {
+    return Ptr::pointer_to(r);
+  }
+};
+
+// LWG 3545: no members when element_type cannot be formed.
+template <class Ptr>
+struct pointer_traits : __ptr_traits_impl<Ptr> {};
 
 template <class T>
 struct pointer_traits<T*> {
@@ -298,14 +392,6 @@ struct allocator {
   }
 };
 
-template <class T>
-struct __alloc_void {
-  using type = void;
-};
-
-template <class T>
-using __void_t = typename __alloc_void<T>::type;
-
 struct allocator_arg_t {
 };
 
@@ -378,7 +464,7 @@ struct __alloc_traits_swap_propagate<
 
 template <class Alloc, class Void = void>
 struct __alloc_traits_always_equal {
-  using type = false_type;
+  using type = typename is_empty<Alloc>::type;
 };
 
 template <class Alloc>
@@ -387,9 +473,128 @@ struct __alloc_traits_always_equal<
   using type = typename Alloc::is_always_equal;
 };
 
+// [allocator.traits.types]: each member type is the allocator's own when it
+// declares one, and otherwise derived from value_type and pointer.
+template <class Alloc, class = void>
+struct __alloc_traits_pointer {
+  using type = typename Alloc::value_type*;
+};
+
+template <class Alloc>
+struct __alloc_traits_pointer<Alloc, __void_t<typename Alloc::pointer>> {
+  using type = typename Alloc::pointer;
+};
+
+template <class Alloc, class Pointer, class = void>
+struct __alloc_traits_const_pointer {
+  using type = typename pointer_traits<Pointer>::template rebind<
+      const typename Alloc::value_type>;
+};
+
+template <class Alloc, class Pointer>
+struct __alloc_traits_const_pointer<
+    Alloc, Pointer, __void_t<typename Alloc::const_pointer>> {
+  using type = typename Alloc::const_pointer;
+};
+
+template <class Alloc, class Pointer, class = void>
+struct __alloc_traits_void_pointer {
+  using type = typename pointer_traits<Pointer>::template rebind<void>;
+};
+
+template <class Alloc, class Pointer>
+struct __alloc_traits_void_pointer<
+    Alloc, Pointer, __void_t<typename Alloc::void_pointer>> {
+  using type = typename Alloc::void_pointer;
+};
+
+template <class Alloc, class Pointer, class = void>
+struct __alloc_traits_const_void_pointer {
+  using type = typename pointer_traits<Pointer>::template rebind<const void>;
+};
+
+template <class Alloc, class Pointer>
+struct __alloc_traits_const_void_pointer<
+    Alloc, Pointer, __void_t<typename Alloc::const_void_pointer>> {
+  using type = typename Alloc::const_void_pointer;
+};
+
+template <class Alloc, class Pointer, class = void>
+struct __alloc_traits_difference_type {
+  using type = typename pointer_traits<Pointer>::difference_type;
+};
+
+template <class Alloc, class Pointer>
+struct __alloc_traits_difference_type<
+    Alloc, Pointer, __void_t<typename Alloc::difference_type>> {
+  using type = typename Alloc::difference_type;
+};
+
+template <class Alloc, class Difference, class = void>
+struct __alloc_traits_size_type {
+  using type = typename make_unsigned<Difference>::type;
+};
+
+template <class Alloc, class Difference>
+struct __alloc_traits_size_type<Alloc, Difference,
+                                __void_t<typename Alloc::size_type>> {
+  using type = typename Alloc::size_type;
+};
+
+// Alloc::rebind<T>::other when present; otherwise Alloc's first template
+// argument replaced by T.
+template <class Alloc, class T, class = void>
+struct __alloc_has_rebind : false_type {};
+
 template <class Alloc, class T>
-struct __alloc_traits_rebind {
+struct __alloc_has_rebind<
+    Alloc, T, __void_t<typename Alloc::template rebind<T>::other>>
+    : true_type {};
+
+template <class Alloc, class T, bool = __alloc_has_rebind<Alloc, T>::value>
+struct __alloc_traits_rebind {};
+
+template <class Alloc, class T>
+struct __alloc_traits_rebind<Alloc, T, true> {
   using type = typename Alloc::template rebind<T>::other;
+};
+
+template <template <class, class...> class A, class U, class... Args, class T>
+struct __alloc_traits_rebind<A<U, Args...>, T, false> {
+  using type = A<T, Args...>;
+};
+
+template <class Alloc, class SizeType, class = void>
+struct __alloc_max_size {
+  static constexpr SizeType call(const Alloc&) {
+    return static_cast<SizeType>(-1) / sizeof(typename Alloc::value_type);
+  }
+};
+
+template <class Alloc, class SizeType>
+struct __alloc_max_size<Alloc, SizeType,
+                        __void_t<decltype(declval<const Alloc&>().max_size())>> {
+  static constexpr SizeType call(const Alloc& alloc) {
+    return alloc.max_size();
+  }
+};
+
+template <class Alloc, class Pointer, class SizeType, class Hint,
+          class = void>
+struct __alloc_allocate_hint {
+  static constexpr Pointer call(Alloc& alloc, SizeType n, Hint) {
+    return alloc.allocate(n);
+  }
+};
+
+template <class Alloc, class Pointer, class SizeType, class Hint>
+struct __alloc_allocate_hint<
+    Alloc, Pointer, SizeType, Hint,
+    __void_t<decltype(declval<Alloc&>().allocate(declval<SizeType>(),
+                                                 declval<Hint>()))>> {
+  static constexpr Pointer call(Alloc& alloc, SizeType n, Hint hint) {
+    return alloc.allocate(n, hint);
+  }
 };
 
 template <class Alloc, class = void>
@@ -483,10 +688,16 @@ template <class Alloc>
 struct allocator_traits {
   using allocator_type = Alloc;
   using value_type = typename Alloc::value_type;
-  using size_type = typename Alloc::size_type;
-  using difference_type = typename Alloc::difference_type;
-  using pointer = typename Alloc::pointer;
-  using const_pointer = typename Alloc::const_pointer;
+  using pointer = typename __alloc_traits_pointer<Alloc>::type;
+  using const_pointer =
+      typename __alloc_traits_const_pointer<Alloc, pointer>::type;
+  using void_pointer = typename __alloc_traits_void_pointer<Alloc, pointer>::type;
+  using const_void_pointer =
+      typename __alloc_traits_const_void_pointer<Alloc, pointer>::type;
+  using difference_type =
+      typename __alloc_traits_difference_type<Alloc, pointer>::type;
+  using size_type =
+      typename __alloc_traits_size_type<Alloc, difference_type>::type;
   using propagate_on_container_copy_assignment =
       typename __alloc_traits_copy_propagate<Alloc>::type;
   using propagate_on_container_move_assignment =
@@ -522,6 +733,12 @@ struct allocator_traits {
 
   static constexpr pointer allocate(Alloc& alloc, size_type n) {
     return alloc.allocate(n);
+  }
+
+  static constexpr pointer allocate(Alloc& alloc, size_type n,
+                                    const_void_pointer hint) {
+    return __alloc_allocate_hint<Alloc, pointer, size_type,
+                                 const_void_pointer>::call(alloc, n, hint);
   }
 
   static constexpr void deallocate(Alloc& alloc, pointer ptr, size_type n) {
@@ -564,7 +781,7 @@ struct allocator_traits {
   }
 
   static constexpr size_type max_size(const Alloc& alloc) noexcept {
-    return alloc.max_size();
+    return __alloc_max_size<Alloc, size_type>::call(alloc);
   }
 
   static constexpr Alloc select_on_container_copy_construction(
@@ -942,6 +1159,9 @@ class enable_shared_from_this;
 template <class T, class... Args>
 shared_ptr<T> make_shared(Args&&... args);
 
+template <class T, class Alloc, class... Args>
+shared_ptr<T> allocate_shared(const Alloc& alloc, Args&&... args);
+
 namespace __shared_ptr_detail {
 
 #if defined(__6502__) || defined(__W65C02__)
@@ -1028,6 +1248,10 @@ struct __control_block {
 
   virtual void __destroy_object() noexcept = 0;
 
+  virtual void __destroy_self() noexcept {
+    delete this;
+  }
+
   virtual void* __get_deleter(const void*) noexcept {
     return 0;
   }
@@ -1053,7 +1277,7 @@ struct __control_block {
 
   void __release_weak() noexcept {
     if (__weak_owners.__release()) {
-      delete this;
+      __destroy_self();
     }
   }
 
@@ -1101,6 +1325,40 @@ struct __inplace_control_block : __control_block {
   }
 };
 
+// allocate_shared: the block and the object come from (copies of) the
+// caller's allocator, and so does their release.
+template <class T, class Alloc>
+struct __allocator_control_block : __control_block {
+  using __value_alloc =
+      typename allocator_traits<Alloc>::template rebind_alloc<T>;
+  using __block_alloc = typename allocator_traits<
+      Alloc>::template rebind_alloc<__allocator_control_block>;
+
+  __value_alloc __alloc;
+  alignas(T) unsigned char __storage[sizeof(T)];
+
+  template <class... Args>
+  explicit __allocator_control_block(const Alloc& alloc, Args&&... args)
+      : __alloc(alloc) {
+    allocator_traits<__value_alloc>::construct(__alloc, __get(),
+                                               std::forward<Args>(args)...);
+  }
+
+  T* __get() noexcept {
+    return reinterpret_cast<T*>(__storage);
+  }
+
+  void __destroy_object() noexcept override {
+    allocator_traits<__value_alloc>::destroy(__alloc, __get());
+  }
+
+  void __destroy_self() noexcept override {
+    __block_alloc block_alloc(__alloc);
+    this->~__allocator_control_block();
+    allocator_traits<__block_alloc>::deallocate(block_alloc, this, 1);
+  }
+};
+
 struct __adopt_shared_t {
 };
 
@@ -1134,6 +1392,8 @@ class shared_ptr {
   friend class enable_shared_from_this;
   template <class U, class... Args>
   friend shared_ptr<U> make_shared(Args&&... args);
+  template <class U, class Alloc, class... Args>
+  friend shared_ptr<U> allocate_shared(const Alloc& alloc, Args&&... args);
 
   shared_ptr(element_type* pointer,
              __shared_ptr_detail::__control_block* control,
@@ -1568,6 +1828,26 @@ shared_ptr<T> make_shared(Args&&... args) {
                 "make_shared array overloads are not implemented");
   using __block = __shared_ptr_detail::__inplace_control_block<T>;
   __block* control = new __block(std::forward<Args>(args)...);
+  shared_ptr<T> result(control->__get(), control,
+                       __shared_ptr_detail::__adopt_shared_t());
+  result.__enable_weak_this(control->__get(), control->__get());
+  return result;
+}
+
+template <class T, class Alloc, class... Args>
+shared_ptr<T> allocate_shared(const Alloc& alloc, Args&&... args) {
+  static_assert(!is_array<T>::value,
+                "allocate_shared array overloads are not implemented");
+  using __block = __shared_ptr_detail::__allocator_control_block<T, Alloc>;
+  using __block_alloc = typename __block::__block_alloc;
+  __block_alloc block_alloc(alloc);
+  __block* control = allocator_traits<__block_alloc>::allocate(block_alloc, 1);
+  try {
+    ::new (static_cast<void*>(control)) __block(alloc, std::forward<Args>(args)...);
+  } catch (...) {
+    allocator_traits<__block_alloc>::deallocate(block_alloc, control, 1);
+    throw;
+  }
   shared_ptr<T> result(control->__get(), control,
                        __shared_ptr_detail::__adopt_shared_t());
   result.__enable_weak_this(control->__get(), control->__get());

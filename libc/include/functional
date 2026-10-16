@@ -236,7 +236,8 @@ struct less<void> {
   using is_transparent = void;
 
   template <class T, class U>
-  constexpr bool operator()(T&& left, U&& right) const {
+  constexpr auto operator()(T&& left, U&& right) const
+      -> decltype(static_cast<T&&>(left) < static_cast<U&&>(right)) {
     return static_cast<T&&>(left) < static_cast<U&&>(right);
   }
 };
@@ -244,7 +245,7 @@ struct less<void> {
 template <class T = void>
 struct greater {
   constexpr bool operator()(const T& left, const T& right) const {
-    return right < left;
+    return left > right;
   }
 };
 
@@ -253,8 +254,9 @@ struct greater<void> {
   using is_transparent = void;
 
   template <class T, class U>
-  constexpr bool operator()(T&& left, U&& right) const {
-    return static_cast<U&&>(right) < static_cast<T&&>(left);
+  constexpr auto operator()(T&& left, U&& right) const
+      -> decltype(static_cast<T&&>(left) > static_cast<U&&>(right)) {
+    return static_cast<T&&>(left) > static_cast<U&&>(right);
   }
 };
 
@@ -270,7 +272,8 @@ struct equal_to<void> {
   using is_transparent = void;
 
   template <class T, class U>
-  constexpr bool operator()(T&& left, U&& right) const {
+  constexpr auto operator()(T&& left, U&& right) const
+      -> decltype(static_cast<T&&>(left) == static_cast<U&&>(right)) {
     return static_cast<T&&>(left) == static_cast<U&&>(right);
   }
 };
@@ -287,15 +290,16 @@ struct not_equal_to<void> {
   using is_transparent = void;
 
   template <class T, class U>
-  constexpr bool operator()(T&& left, U&& right) const {
-    return !(static_cast<T&&>(left) == static_cast<U&&>(right));
+  constexpr auto operator()(T&& left, U&& right) const
+      -> decltype(static_cast<T&&>(left) != static_cast<U&&>(right)) {
+    return static_cast<T&&>(left) != static_cast<U&&>(right);
   }
 };
 
 template <class T = void>
 struct less_equal {
   constexpr bool operator()(const T& left, const T& right) const {
-    return !(right < left);
+    return left <= right;
   }
 };
 
@@ -304,15 +308,16 @@ struct less_equal<void> {
   using is_transparent = void;
 
   template <class T, class U>
-  constexpr bool operator()(T&& left, U&& right) const {
-    return !(static_cast<U&&>(right) < static_cast<T&&>(left));
+  constexpr auto operator()(T&& left, U&& right) const
+      -> decltype(static_cast<T&&>(left) <= static_cast<U&&>(right)) {
+    return static_cast<T&&>(left) <= static_cast<U&&>(right);
   }
 };
 
 template <class T = void>
 struct greater_equal {
   constexpr bool operator()(const T& left, const T& right) const {
-    return !(left < right);
+    return left >= right;
   }
 };
 
@@ -321,8 +326,9 @@ struct greater_equal<void> {
   using is_transparent = void;
 
   template <class T, class U>
-  constexpr bool operator()(T&& left, U&& right) const {
-    return !(static_cast<T&&>(left) < static_cast<U&&>(right));
+  constexpr auto operator()(T&& left, U&& right) const
+      -> decltype(static_cast<T&&>(left) >= static_cast<U&&>(right)) {
+    return static_cast<T&&>(left) >= static_cast<U&&>(right);
   }
 };
 
@@ -470,19 +476,47 @@ struct hash<T*> {
   }
 };
 
+namespace __functional_detail {
+
+// reference_wrapper<T> is constructible from U only when U binds to T& and
+// not preferentially to T&& (so rvalues are rejected).
+template <class T>
+void __reference_wrapper_bind(T&) noexcept;
+template <class T>
+void __reference_wrapper_bind(T&&) = delete;
+
+template <class T>
+constexpr T* __reference_wrapper_address(T& value) noexcept {
+  return reinterpret_cast<T*>(
+      &const_cast<char&>(reinterpret_cast<const volatile char&>(value)));
+}
+
+}  // namespace __functional_detail
+
 template <class T>
 class reference_wrapper {
  public:
   typedef T type;
 
-  reference_wrapper(T& value) noexcept : __value(&value) {
+  template <class U,
+            class = decltype(__functional_detail::__reference_wrapper_bind<T>(
+                declval<U>())),
+            class = enable_if_t<!is_same<remove_cv_t<remove_reference_t<U>>,
+                                         reference_wrapper>::value>>
+  constexpr reference_wrapper(U&& value) noexcept
+      : __value(__functional_detail::__reference_wrapper_address(
+            static_cast<T&>(static_cast<U&&>(value)))) {
   }
 
-  operator T&() const noexcept {
+  constexpr reference_wrapper(const reference_wrapper&) noexcept = default;
+  constexpr reference_wrapper& operator=(const reference_wrapper&) noexcept =
+      default;
+
+  constexpr operator T&() const noexcept {
     return *__value;
   }
 
-  T& get() const noexcept {
+  constexpr T& get() const noexcept {
     return *__value;
   }
 
@@ -496,14 +530,33 @@ class reference_wrapper {
 };
 
 template <class T>
-reference_wrapper<T> ref(T& value) {
+reference_wrapper(T&) -> reference_wrapper<T>;
+
+template <class T>
+constexpr reference_wrapper<T> ref(T& value) noexcept {
   return reference_wrapper<T>(value);
 }
 
 template <class T>
-reference_wrapper<const T> cref(const T& value) {
+constexpr reference_wrapper<T> ref(reference_wrapper<T> value) noexcept {
+  return value;
+}
+
+template <class T>
+void ref(const T&&) = delete;
+
+template <class T>
+constexpr reference_wrapper<const T> cref(const T& value) noexcept {
   return reference_wrapper<const T>(value);
 }
+
+template <class T>
+constexpr reference_wrapper<const T> cref(reference_wrapper<T> value) noexcept {
+  return reference_wrapper<const T>(value.get());
+}
+
+template <class T>
+void cref(const T&&) = delete;
 
 namespace __invoke_detail {
 
