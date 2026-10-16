@@ -1483,9 +1483,75 @@ Symbol* CXXResolveFunctionAddressForTargetType(Symbol* head,
 // `from` in place to refer to the concrete specialization.  Returns true on a
 // successful rewrite.  A no-op (returns false) for non-C++, non-identifier
 // operands, or when no unique function matches.
+/* [over.over] for `&C::f` converted to a pointer to member function: the
+ * parser picked the first overload; select the one whose type is the target's
+ * pointee and rewrite the member_ptr node to it.  A template-id (`&C::f<T>`)
+ * names only specializations, which the parser already selected; their
+ * members are not in the class's overload chain. */
+static bool ResolveMemberFunctionPointerNode(ASTNode* from, TypeRecord* to) {
+  ASTNode* sub = ((UnaryASTNode*)from)->sub;
+  if (sub == NULL || sub->op != AST_OP(structmember)) {
+    return false;
+  }
+  StructMemberASTNode* member_node = (StructMemberASTNode*)sub;
+  StructMember* current = member_node->member;
+  Struct* owner = TypeMemberPointerClass(from->type);
+  if (current == NULL || current->symbol == NULL ||
+      !current->is_member_function || owner == NULL) {
+    return false;
+  }
+  StructMember* head = FindStructMember(owner, &current->symbol->name);
+  if (head == NULL || head->overload_next == NULL) {
+    return false;
+  }
+  bool declared_overload = false;
+  for (StructMember* cand = head; cand != NULL; cand = cand->overload_next) {
+    declared_overload |= cand == current;
+  }
+  if (!declared_overload) {
+    return false;
+  }
+  StructMember* match = NULL;
+  bool ambiguous = false;
+  for (StructMember* cand = head; cand != NULL; cand = cand->overload_next) {
+    if (cand->is_static || !cand->is_member_function || cand->symbol == NULL ||
+        cand->symbol->type == NULL || cand->symbol->flags.is_template) {
+      continue;
+    }
+    TypeRecord* pointee = TypeMemberPointerPointeeFromMember(cand);
+    bool same = pointee != NULL && (TypeEqual(pointee, to->next) ||
+                                    TypeEqualIgnoringQualifiers(pointee, to->next));
+    TypeRecordDelete(pointee);
+    if (!same) {
+      continue;
+    }
+    if (match != NULL && match != cand) {
+      ambiguous = true;
+    }
+    match = cand;
+  }
+  if (match == NULL || ambiguous || match == current) {
+    return false;
+  }
+  member_node->member = match;
+  member_node->access = match->access;
+  ASTNodeSetType(sub, match->symbol->type);
+  match->symbol->flags.used = true;
+  TypeRecord* mptr = NewMemberPointerTypeRecord(owner, kQualPlain);
+  TypeRecordChain(mptr, TypeMemberPointerPointeeFromMember(match));
+  TypeRecordCalculateSize(mptr);
+  ASTNodeSetType(from, mptr);
+  return true;
+}
+
 bool CXXTryResolveFunctionAddressNode(ASTNode* from, TypeRecord* to) {
   if (!CompilerIsCXX() || from == NULL || to == NULL) {
     return false;
+  }
+  if (from->op == AST_OP(member_ptr) && TypeIsMemberPointer(to) &&
+      to->next != NULL && TypeIsFunction(to->next) &&
+      TypeIsMemberPointer(from->type)) {
+    return ResolveMemberFunctionPointerNode(from, to);
   }
   TypeRecord* target_fn = NULL;
   if (TypeIsPointer(to) && to->next != NULL && TypeIsFunction(to->next)) {
@@ -1821,9 +1887,11 @@ static int MemberOverloadCallScore(StructMember* candidate,
 }
 
 /* Calling a const member on a non-const object is a worse implicit-object
- * binding than the non-const overload.  This is a tie-break only: folding it
- * into the conversion score made an exact `slot_type*` match look worse than
- * 5 and let `hash_of(const K&)` steal a call that passes the slot pointer. */
+ * binding than the non-const overload, and binding an rvalue object to
+ * `f() const&` is worse than to `f() &&` / `f() const&&`, which ranks first
+ * ([over.ics.rank]).  This is a tie-break only: folding it into the
+ * conversion score made an exact `slot_type*` match look worse than 5 and let
+ * `hash_of(const K&)` steal a call that passes the slot pointer. */
 static int MemberCvTiePenalty(StructMember* candidate,
                               BinaryASTNode* member_access) {
   if (candidate == NULL || candidate->is_static || candidate->symbol == NULL ||
@@ -1832,6 +1900,11 @@ static int MemberCvTiePenalty(StructMember* candidate,
     return 0;
   }
   int penalty = 0;
+  if (candidate->symbol->type->info.function.ref_qualifier ==
+          kCXXRefQualifierLValue &&
+      !MemberReceiverIsLValue(member_access)) {
+    penalty += 2;
+  }
   if (candidate->symbol->type->info.function.is_const_member &&
       !MemberReceiverIsConst(member_access)) {
     penalty++;

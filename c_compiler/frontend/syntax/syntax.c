@@ -3787,6 +3787,20 @@ bool ExpressionReferencesDeferredConstexprFunction(ASTNode* node,
 static ASTNode* ConvertStaticAssertMessageResult(ASTNode* expression,
                                                  TypeRecord* target);
 
+// `static_assert(is_trivially_destructible<T>{})` contextually converts the
+// trait object to bool through `operator bool`, and a member pointer to
+// whether it is null.  Returns NULL (deleting `expression`) when that fails.
+static ASTNode* StaticAssertConvertToBool(ASTNode* expression) {
+  if (expression == NULL || expression->type == NULL ||
+      !(TypeIsStructOrUnion(expression->type) ||
+        TypeIsMemberPointer(expression->type))) {
+    return expression;
+  }
+  TypeRecord* boolean = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+  TypeRecordCalculateSize(boolean);
+  return ConvertStaticAssertMessageResult(expression, boolean);
+}
+
 static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
   ASTNode* cloned = ASTNodeClone(expr, IdentityCloneNode, NULL, NULL);
   if (cloned == NULL) {
@@ -3802,14 +3816,7 @@ static ASTNode* EvaluateStaticAssertExpression(ASTNode* expr) {
     ASTNodeDelete(cloned);
     return NULL;
   }
-  // `static_assert(is_trivially_destructible<T>{})` contextually converts the
-  // trait object to bool through `operator bool`.
-  if (cloned->type != NULL && TypeIsStructOrUnion(cloned->type)) {
-    TypeRecord* boolean = NewTypeRecordWithSize(kTypeBool, kQualPlain);
-    TypeRecordCalculateSize(boolean);
-    cloned = ConvertStaticAssertMessageResult(cloned, boolean);
-  }
-  return cloned;
+  return StaticAssertConvertToBool(cloned);
 }
 
 static ASTNode* AnalyzeStaticAssertMessageMemberCall(ASTNode* message_expr,
@@ -4015,6 +4022,9 @@ int SyntaxEvaluateDeferredStaticAssert(ASTNode* node, bool* dependent) {
   compiler->constant_evaluation_required_depth++;
   cloned = AnalyzeExpression(cloned);
   compiler->constant_evaluation_required_depth--;
+  if (cloned != NULL && !ExpressionIsTemplateDependent(cloned)) {
+    cloned = StaticAssertConvertToBool(cloned);
+  }
   if (cloned == NULL) {
     return -1;
   }
@@ -7161,6 +7171,71 @@ static void AppendCXXVPtrInitializers(TypeRecord* func, Vector* body,
     }
   }
   free(seen_offsets);
+}
+
+// `receiver->__vptr = vtable + 2;` as built by NewCXXVPtrInitializer, before
+// or after analysis resolves the member.
+static bool IsCXXVPtrStore(ASTNode* stmt) {
+  if (stmt == NULL || stmt->op != AST_OP(expr)) {
+    return false;
+  }
+  ASTNode* expr = ((ExpressionStatementASTNode*)stmt)->expr;
+  if (expr == NULL || expr->op != AST_OP(assign)) {
+    return false;
+  }
+  ASTNode* target = ((BinaryASTNode*)expr)->left;
+  if (target == NULL || target->op != AST_OP(arrow)) {
+    return false;
+  }
+  ASTNode* member = ((BinaryASTNode*)target)->right;
+  if (member != NULL && member->op == AST_OP(string)) {
+    String* name = ((ConstantASTNode*)member)->value.string;
+    return name != NULL && StringEqual(name, "__vptr");
+  }
+  if (member != NULL && member->op == AST_OP(structmember)) {
+    StructMember* field = ((StructMemberASTNode*)member)->member;
+    return field != NULL && field->symbol != NULL &&
+           StringEqual(&field->symbol->name, "__vptr");
+  }
+  return false;
+}
+
+size_t SyntaxReplaceCXXVPtrInitializers(TypeRecord* func, Vector* body,
+                                        size_t* first_out) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.cxx_member_owner == NULL ||
+      !func->info.function.cxx_member_owner->vtables_registered ||
+      body == NULL) {
+    return 0;
+  }
+  size_t first = body->length;
+  SourceLocation location = SOURCE_LOCATION_MISSING;
+  size_t out = 0;
+  for (size_t i = 0; i < body->length; i++) {
+    ASTNode* stmt = body->value.p[i];
+    if (IsCXXVPtrStore(stmt)) {
+      if (first == body->length) {
+        first = out;
+        location = stmt->location;
+      }
+      ASTNodeDelete(stmt);
+      continue;
+    }
+    body->value.p[out++] = stmt;
+  }
+  if (first == body->length) {
+    return 0;
+  }
+  body->length = out;
+  Vector* stores = NewVector();
+  AppendCXXVPtrInitializers(func, stores, location);
+  for (size_t i = 0; i < stores->length; i++) {
+    VectorInsertOrAppend(body, first + i, stores->value.p[i]);
+  }
+  size_t count = stores->length;
+  VectorDelete(stores);
+  *first_out = first;
+  return count;
 }
 
 static TypeRecord* NewCXXStructType(Struct* str) {
@@ -12936,10 +13011,27 @@ Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base) {
   // `::type` member and yielding a bogus concrete type such as `int`).
   Vector* saved_template_parameters = syntax->current_template_parameters;
   int saved_template_parameter_count = syntax->current_template_parameter_count;
-  syntax->current_template_parameters = params;
+  // A member template's defaults can also expand the enclosing class's packs
+  // (`class = decltype(f(std::declval<A>()...))`), so those stay visible.
+  Vector visible_parameters;
+  VectorInit(&visible_parameters);
+  bool expose_enclosing = base > 0 && saved_template_parameters != NULL;
+  for (size_t i = 0; expose_enclosing && i < saved_template_parameters->length;
+       i++) {
+    TemplateParameter* param = saved_template_parameters->value.p[i];
+    if (param != NULL && param->index < base) {
+      VectorAppend(&visible_parameters, param);
+    }
+  }
+  syntax->current_template_parameters =
+      expose_enclosing ? &visible_parameters : params;
   syntax->current_template_parameter_count = base;
   while (!LexEof(lex) && !LexLookingAtClosingAngle(lex)) {
+    size_t first_new = params->length;
     ParseTemplateParameter(syntax, params, base);
+    for (size_t i = first_new; expose_enclosing && i < params->length; i++) {
+      VectorAppend(&visible_parameters, params->value.p[i]);
+    }
     // Count the parameter now that it exists, so the next one's type sees a
     // non-empty enclosing template.  A qualified name is only treated as
     // dependent when parameters are in scope (see
@@ -12954,6 +13046,7 @@ Vector* SyntaxParseTemplateParameterListWithBase(Syntax* syntax, int base) {
   }
   syntax->current_template_parameters = saved_template_parameters;
   syntax->current_template_parameter_count = saved_template_parameter_count;
+  VectorDestruct(&visible_parameters);
   SyntaxNeedTemplateClose(syntax, TC(decl));
   return params;
 }
@@ -14847,18 +14940,25 @@ static ASTNode* ParseCXXDirectInitializer(Syntax* syntax, Symbol* sym,
       sym->type->info.struct_info->is_aggregate &&
       !sym->type->info.struct_info->is_template &&
       !has_user_declared_constructor;
+  // A dependent specialization whose primary template is only declared
+  // (`template <class F> class Action; Action<R(int)> a(f);`) shows no
+  // constructors yet.  Its arguments are kept in a braced container that
+  // instantiation rebuilds into the constructor call.
+  bool dependent_arguments = !braced && constructor == NULL &&
+                             TypeContainsTemplateParameter(sym->type);
   if (constructor == NULL ||
       (braced && sym->type->info.struct_info->is_aggregate) ||
       paren_aggregate_init) {
     ASTNode* braced_initializer =
-        (braced || paren_aggregate_init)
+        (braced || paren_aggregate_init || dependent_arguments)
             ? NewCXXBracedInitializerFromActuals(actuals, location)
             : NULL;
     if (braced_initializer == NULL) {
       VectorDeleteWithContents(actuals, (VectorElementDestructor)ASTNodeDelete,
                                /*free_element=*/false);
     }
-    if (braced_initializer != NULL && wrap_aggregate_braces) {
+    if (braced_initializer != NULL && wrap_aggregate_braces &&
+        !dependent_arguments) {
       return NewVariableInitExpression(syntax, sym, braced_initializer);
     }
     return braced_initializer;
@@ -16996,6 +17096,25 @@ void SyntaxEnsureProgress(Syntax* syntax, Token token_before,
 // denotes a variable/function it is not.  When the name cannot be resolved
 // (a dependent name, an incomplete template-id, etc.) fall back to the
 // conservative "could be a type" answer so dependent code keeps parsing.
+// The class being defined, or the class of the member function being parsed,
+// or one enclosing it, whose injected-class-name is `name`.
+static Struct* FindEnclosingClassByInjectedName(Syntax* syntax, String* name) {
+  Struct* owner = syntax->cxx_class_head;
+  if (owner == NULL && syntax->context == kParsingBlockScope &&
+      compiler->current_function != NULL &&
+      TypeIsFunction(compiler->current_function)) {
+    owner = compiler->current_function->info.function.cxx_member_owner;
+  }
+  for (; owner != NULL; owner = owner->lexical_parent) {
+    if (CurrentClassNameMatchesTypeName(owner, name) &&
+        owner->tag_symbol != NULL && owner->tag_symbol->type != NULL &&
+        TypeIsStructOrUnion(owner->tag_symbol->type)) {
+      return owner;
+    }
+  }
+  return NULL;
+}
+
 static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
   if (SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
     return false;
@@ -17026,11 +17145,17 @@ static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
         String* owner_name = name.components.value.p[0];
         String* member_name = name.components.value.p[1];
         Symbol* owner = SyntaxFindTag(syntax, owner_name);
-        if (owner != NULL && owner->type != NULL &&
-            TypeIsStructOrUnion(owner->type) &&
-            owner->type->info.struct_info != NULL) {
-          StructMember* member =
-              FindStructMember(owner->type->info.struct_info, member_name);
+        Struct* owner_struct =
+            owner != NULL && owner->type != NULL &&
+                    TypeIsStructOrUnion(owner->type)
+                ? owner->type->info.struct_info
+                : NULL;
+        // A member class template's name inside its own definition.
+        if (owner_struct == NULL) {
+          owner_struct = FindEnclosingClassByInjectedName(syntax, owner_name);
+        }
+        if (owner_struct != NULL) {
+          StructMember* member = FindStructMember(owner_struct, member_name);
           if (member != NULL && member->symbol != NULL) {
             decided = true;
             is_type = StorageIs(member->symbol->storage, STO(typedef));
@@ -17058,25 +17183,9 @@ static bool SyntaxQualifiedNameLooksLikeType(Syntax* syntax) {
 }
 
 bool SyntaxCurrentClassNameStartsType(Syntax* syntax) {
-  if (!CompilerIsCXX() ||
-      !LexLookingAt(syntax->lex, TOK(identifier))) {
-    return false;
-  }
-  Struct* owner = syntax->cxx_class_head;
-  if (owner == NULL && syntax->context == kParsingBlockScope &&
-      compiler->current_function != NULL &&
-      TypeIsFunction(compiler->current_function)) {
-    owner = compiler->current_function->info.function.cxx_member_owner;
-  }
-  while (owner != NULL) {
-    if (CurrentClassNameMatchesTypeName(owner, &syntax->lex->spelling) &&
-        owner->tag_symbol != NULL && owner->tag_symbol->type != NULL &&
-        TypeIsStructOrUnion(owner->tag_symbol->type)) {
-      return true;
-    }
-    owner = owner->lexical_parent;
-  }
-  return false;
+  return CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(identifier)) &&
+         FindEnclosingClassByInjectedName(syntax, &syntax->lex->spelling) !=
+             NULL;
 }
 
 bool SyntaxLookingAtType(Syntax* syntax) {
@@ -17149,13 +17258,7 @@ bool SyntaxLookingAtType(Syntax* syntax) {
         }
         if (CompilerIsCXX() &&
             SyntaxFindTag(syntax, &syntax->lex->spelling) != NULL) {
-          LexCheckpoint checkpoint;
-          LexCheckpointSave(syntax->lex, &checkpoint);
-          LexNextToken(syntax->lex);
-          bool qualified = LexLookingAt(syntax->lex, TOK(coloncolon));
-          LexCheckpointRestore(syntax->lex, &checkpoint);
-          LexCheckpointDestruct(&checkpoint);
-          if (qualified) {
+          if (SyntaxCurrentIdentifierFollowedByScopeOperator(syntax)) {
             if (SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
               return false;
             }
@@ -17166,21 +17269,17 @@ bool SyntaxLookingAtType(Syntax* syntax) {
         if (SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
           return false;
         }
-        if (SyntaxCurrentClassNameStartsType(syntax)) {
+        if (SyntaxCurrentClassNameStartsType(syntax) &&
+            !SyntaxCurrentIdentifierFollowedByScopeOperator(syntax)) {
           return true;
         }
         return SyntaxQualifiedNameLooksLikeType(syntax);
       }
       if (StorageIs(sym->storage , STO(typedef))) {
+        // `C::m` and `C<T>::m` name a type only if `m` does.
         if (CompilerIsCXX() && sym->type != NULL &&
             TypeIsStructOrUnion(sym->type)) {
-          LexCheckpoint checkpoint;
-          LexCheckpointSave(syntax->lex, &checkpoint);
-          LexNextToken(syntax->lex);
-          bool qualified = LexLookingAt(syntax->lex, TOK(coloncolon));
-          LexCheckpointRestore(syntax->lex, &checkpoint);
-          LexCheckpointDestruct(&checkpoint);
-          if (qualified) {
+          if (SyntaxCurrentIdentifierFollowedByScopeOperator(syntax)) {
             if (SyntaxCurrentIdentifierFollowedByMemberPointerDeclarator(syntax)) {
               return false;
             }

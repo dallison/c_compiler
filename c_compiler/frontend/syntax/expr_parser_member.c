@@ -40,7 +40,7 @@ Symbol* lambda_enclosing_this;
 
 static StructMember* FindMemberOnThis(Symbol* this_symbol, const char* name);
 static bool MemberAccessObjectIsDependent(ASTNode* object);
-static ASTNode* ParseQualifiedNestedStructMember( ASTNode* left, ASTOpcode op, Syntax* syntax, String* scope_name, Vector* scope_args, String* member_name);
+static ASTNode* ParseQualifiedNestedStructMember( ASTNode* left, ASTOpcode op, Syntax* syntax, String* scope_name, FullyQualifiedIdentifier* scope_path, Vector* scope_args, String* member_name);
 
 // Finds the current member function’s implicit this parameter.
 Symbol* FindThisSymbol(Syntax* syntax) {
@@ -157,8 +157,13 @@ ASTNode* NewMemberAccessFromThis(Syntax* syntax,
     right->flags |= kASTNameIndependentLookupAmbiguous;
   }
   StringDestruct(&member_name);
-  return NewBinaryASTNode(AST_OP(arrow), NULL,
-                          syntax->lex->current_token_location, left, right);
+  ASTNode* access = NewBinaryASTNode(AST_OP(arrow), NULL,
+                                     syntax->lex->current_token_location, left,
+                                     right);
+  if (member == NULL) {
+    access->flags |= kASTUnresolvedImplicitMember;
+  }
+  return access;
 }
 
 
@@ -522,7 +527,8 @@ static bool MemberAccessObjectIsDependent(ASTNode* object) {
 // `get` on `Storage<T, I>` rather than looking up `::get` in the derived class.
 static ASTNode* ParseQualifiedNestedStructMember(
     ASTNode* left, ASTOpcode op, Syntax* syntax, String* scope_name,
-    Vector* scope_args, String* member_name) {
+    FullyQualifiedIdentifier* scope_path, Vector* scope_args,
+    String* member_name) {
   SourceLocation location = syntax->lex->current_token_location;
   if (member_name == NULL) {
     if (!LexLookingAt(syntax->lex, TOK(identifier))) {
@@ -542,8 +548,12 @@ static ASTNode* ParseQualifiedNestedStructMember(
     LexNextToken(syntax->lex);
   }
 
-  Symbol* scope_symbol = SyntaxFindSymbol(syntax, scope_name);
-  if (scope_symbol == NULL && left != NULL && left->type != NULL) {
+  Symbol* scope_symbol =
+      scope_path != NULL && scope_path->components.length > 1
+          ? SyntaxFindQualifiedSymbol(syntax, scope_path)
+          : SyntaxFindSymbol(syntax, scope_name);
+  if (scope_symbol == NULL && left != NULL && left->type != NULL &&
+      (scope_path == NULL || scope_path->components.length <= 1)) {
     TypeRecord* receiver = left->type;
     if (TypeIsReference(receiver)) {
       receiver = receiver->next;
@@ -673,11 +683,15 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
                             : "Expected struct or union member name");
     member_name = NewString(SyntaxFakeName(syntax));
   }
-  // `node->Node::~Node()` and `rep_->Rep::~Rep()`.  The nested-name-specifier
-  // names the type being destroyed; explicit-destructor analysis matches the
-  // `~Name` spelling.
+  // `d.Base::member`, `d.ns::Base::member`: every name before the last `::`
+  // is part of the nested-name-specifier.
+  FullyQualifiedIdentifier scope_path;
+  FullyQualifiedIdentifierInit(&scope_path);
   if (CompilerIsCXX() && LexLookingAt(syntax->lex, TOK(coloncolon))) {
     while (LexMatch(syntax->lex, TOK(coloncolon))) {
+      // `node->Node::~Node()` and `rep_->Rep::~Rep()`.  The
+      // nested-name-specifier names the type being destroyed;
+      // explicit-destructor analysis matches the `~Name` spelling.
       if (LexMatch(syntax->lex, TOK(tilde)) &&
           LexLookingAt(syntax->lex, TOK(identifier))) {
         String* dtor = NewString("~");
@@ -685,7 +699,18 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
         LexNextToken(syntax->lex);
         StringDelete(member_name);
         member_name = dtor;
+        FullyQualifiedIdentifierDestruct(&scope_path);
+        FullyQualifiedIdentifierInit(&scope_path);
         break;
+      }
+      if (member_name != NULL && conversion_type == NULL) {
+        if (scope_path.spelling.length != 0) {
+          StringAppend(&scope_path.spelling, "::");
+        }
+        StringAppendString(&scope_path.spelling, member_name);
+        VectorAppend(&scope_path.components, NewString(member_name->value));
+        VectorAppend(&scope_path.template_arguments, NULL);
+        scope_path.is_qualified = scope_path.components.length > 1;
       }
       // `p->Base::template AddAllocated<H>(...)`: the base-class qualifier is
       // followed by a dependent template member name, not a destructor.
@@ -712,11 +737,26 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
         }
         break;
       }
-      if (!LexLookingAt(syntax->lex, TOK(identifier))) {
-        SyntaxError(syntax, "Expected destructor name");
+      String* next_name = NULL;
+      if (LexLookingAt(syntax->lex, TOK(identifier))) {
+        next_name = NewString(syntax->lex->spelling.value);
+        LexNextToken(syntax->lex);
+      } else if (LexLookingAt(syntax->lex, TOK(operator))) {
+        String op_name;
+        if (SyntaxParseMemberOperatorName(syntax, &op_name, NULL)) {
+          next_name = NewString(op_name.value);
+          StringDestruct(&op_name);
+        }
+      }
+      if (next_name == NULL) {
+        SyntaxError(syntax, "Expected member name after '::'");
         break;
       }
-      LexNextToken(syntax->lex);
+      StringDelete(member_name);
+      member_name = next_name;
+    }
+    if (qualified_base_scope == NULL && scope_path.components.length > 0) {
+      qualified_base_scope = NewString(FullyQualifiedIdentifierLast(&scope_path));
     }
   }
   bool has_template_arguments = false;
@@ -808,7 +848,8 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
     member_name = NULL;
     qualified_base_scope = NULL;
     ASTNode* result = ParseQualifiedNestedStructMember(
-        left, op, syntax, scope_name, NULL, inner_member);
+        left, op, syntax, scope_name, &scope_path, NULL, inner_member);
+    FullyQualifiedIdentifierDestruct(&scope_path);
     if (template_arguments != NULL && result != NULL) {
       BinaryASTNode* access = (BinaryASTNode*)result;
       ASTNode* member_node = access->right;
@@ -836,9 +877,10 @@ ASTNode* ParseStructMember(ASTNode* left, ASTOpcode op, Syntax* syntax,
     }
     return result;
   }
+  FullyQualifiedIdentifierDestruct(&scope_path);
   if (CompilerIsCXX() && template_arguments != NULL &&
       LexMatch(syntax->lex, TOK(coloncolon))) {
-    return ParseQualifiedNestedStructMember(left, op, syntax, member_name,
+    return ParseQualifiedNestedStructMember(left, op, syntax, member_name, NULL,
                                            template_arguments, NULL);
   }
   ASTNode* member_node = NewStringConstantASTNode(member_name,

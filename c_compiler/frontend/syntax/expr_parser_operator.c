@@ -33,14 +33,46 @@
 
 static bool LookingAtCompleteQualifiedName(Lex* lex);
 static StructMember* PointerToMemberOverload(StructMember* member);
+static StructMember* PointerToMemberTemplateSpecialization(StructMember* member, Vector* args);
 static BinaryPrecedence BinaryOperatorPrecedence(Syntax* syntax, Token token, ASTOpcode* op);
 static ASTNode* ParseBinaryOperand(Syntax* syntax, TokenClass followers, bool constraint);
 static ASTNode* ParseBinaryExpression(Syntax* syntax, TokenClass followers, BinaryPrecedence min_precedence);
 static ASTOpcode AssignASTOpcode(Syntax* syntax, Token tok);
 
+// Skips a balanced `<...>` after a name component (`Q<int>::Get<2>`).
+// Returns false when the brackets do not close before the statement ends.
+static bool SkipTemplateArgumentTokens(Lex* lex) {
+  if (!LexLookingAt(lex, TOK(less))) {
+    return true;
+  }
+  int depth = 0;
+  int paren_depth = 0;
+  do {
+    if (LexEof(lex) || LexLookingAt(lex, TOK(semicolon)) ||
+        LexLookingAt(lex, TOK(lbrace)) || LexLookingAt(lex, TOK(rbrace))) {
+      return false;
+    }
+    Token token = lex->current_token;
+    if (token == TOK(lparen)) {
+      paren_depth++;
+    } else if (token == TOK(rparen)) {
+      paren_depth--;
+    } else if (paren_depth == 0) {
+      if (token == TOK(less)) {
+        depth++;
+      } else {
+        depth -= LexClosingAngleCount(token);
+      }
+    }
+    LexNextToken(lex);
+  } while (depth > 0);
+  return depth == 0;
+}
+
 // True when the lexer is at `A::B` or `ns::A::B` (at least one `::`), and the
-// name does not end on a dangling `::`.  Used so a speculative qualified-name
-// parse does not diagnose `Expected identifier after '::'`.
+// name does not end on a dangling `::`.  Components may be template-ids.
+// Used so a speculative qualified-name parse does not diagnose
+// `Expected identifier after '::'`.
 static bool LookingAtCompleteQualifiedName(Lex* lex) {
   if (!LexLookingAt(lex, TOK(identifier))) {
     return false;
@@ -49,8 +81,8 @@ static bool LookingAtCompleteQualifiedName(Lex* lex) {
   LexCheckpointSave(lex, &checkpoint);
   LexNextToken(lex);
   int parts = 1;
-  bool dangling = false;
-  while (LexLookingAt(lex, TOK(coloncolon))) {
+  bool dangling = !SkipTemplateArgumentTokens(lex);
+  while (!dangling && LexLookingAt(lex, TOK(coloncolon))) {
     LexNextToken(lex);
     if (LexLookingAt(lex, TOK(operator))) {
       // `A::operator()` / `A::operator+`: an operator-function-id ends the
@@ -64,6 +96,7 @@ static bool LookingAtCompleteQualifiedName(Lex* lex) {
     }
     LexNextToken(lex);
     parts++;
+    dangling = !SkipTemplateArgumentTokens(lex);
   }
   LexCheckpointRestore(lex, &checkpoint);
   LexCheckpointDestruct(&checkpoint);
@@ -93,6 +126,36 @@ static StructMember* PointerToMemberOverload(StructMember* member) {
   return templ != NULL ? templ : member;
 }
 
+// `&S::Get<1>` names the specialization of a non-static member function
+// template for those template arguments.  Returns NULL when no member template
+// accepts them.
+static StructMember* PointerToMemberTemplateSpecialization(StructMember* member,
+                                                           Vector* args) {
+  for (StructMember* cand = member; cand != NULL; cand = cand->overload_next) {
+    if (cand->symbol == NULL || cand->symbol->type == NULL ||
+        cand->is_static || !cand->symbol->flags.is_template ||
+        !TypeIsFunction(cand->symbol->type)) {
+      continue;
+    }
+    Vector* explicit_args = TemplateArgumentVectorCopy(args);
+    Symbol* instantiated = TypeInstantiateFunctionTemplate(
+        &compiler->syntax, cand->symbol, explicit_args);
+    VectorDeleteWithContents(explicit_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    if (instantiated == NULL || instantiated == cand->symbol ||
+        instantiated->flags.is_template || instantiated->type == NULL ||
+        TypeContainsTemplateParameter(instantiated->type)) {
+      continue;
+    }
+    StructMember* specialization = NewStructMember(instantiated);
+    specialization->is_member_function = true;
+    specialization->access = cand->access;
+    return specialization;
+  }
+  return NULL;
+}
+
 
 // Tentatively parses &qualified-name as a pointer-to-member expression and
 // restores the token on failure.
@@ -105,7 +168,8 @@ ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
   }
   FullyQualifiedIdentifier name;
   FullyQualifiedIdentifierInit(&name);
-  if (!SyntaxParseFullyQualifiedIdentifier(syntax, &name) ||
+  if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(syntax, &name,
+                                                          followers) ||
       !name.is_qualified || name.components.length < 2) {
     FullyQualifiedIdentifierDestruct(&name);
     LexCheckpointRestore(syntax->lex, &checkpoint);
@@ -122,16 +186,32 @@ ASTNode* ParsePointerToMember(Syntax* syntax, TokenClass followers) {
   }
   String member_name;
   StringInit(&member_name, FullyQualifiedIdentifierLast(&name));
+  Vector* member_args =
+      name.template_arguments.length == name.components.length
+          ? TemplateArgumentVectorCopy(VectorLast(&name.template_arguments))
+          : NULL;
   FullyQualifiedIdentifierDestruct(&name);
   if (class_info == NULL) {
     StringDestruct(&member_name);
+    if (member_args != NULL) {
+      VectorDeleteWithContents(member_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
     LexCheckpointRestore(syntax->lex, &checkpoint);
     LexCheckpointDestruct(&checkpoint);
     return NULL;
   }
   StructMember* member = FindStructMember(class_info, &member_name);
   StringDestruct(&member_name);
-  member = PointerToMemberOverload(member);
+  if (member_args != NULL) {
+    member = PointerToMemberTemplateSpecialization(member, member_args);
+    VectorDeleteWithContents(member_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  } else {
+    member = PointerToMemberOverload(member);
+  }
   if (member == NULL || member->symbol == NULL || member->symbol->type == NULL ||
       member->is_static) {
     LexCheckpointRestore(syntax->lex, &checkpoint);

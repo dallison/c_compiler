@@ -18,6 +18,7 @@
 #include "symbol_table.h"
 #include "rtti.h"
 #include "member_pointer.h"
+#include "semantics.h"
 #include "statement_codegen.h"
 #include "type_special_member.h"
 #include "type_template.h"
@@ -4007,6 +4008,11 @@ static ASTNode* VirtualCalleeReceiverCopy(VectorASTNode* node) {
 }
 
 static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
+  if ((node->base.flags & kASTDependentFunctorCall) != 0) {
+    SemanticError(&node->base,
+                  "Internal error: unresolved dependent call reached code "
+                  "generation");
+  }
   int memory_function = gen->for_constant_evaluation
                             ? ConstexprMemoryFunctionCall(&node->base)
                             : -1;
@@ -7212,6 +7218,15 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
       if (TypeIsInt128(node->type)) {
         result = GenerateInt128Constant(gen, node->type, const_node->value.ivalue,
                                         const_node->ihi);
+      } else if (TypeIsMemberPointerAggregate(node->type)) {
+        // `nullptr` converted to a pointer to member function: both words.
+        MemberPointerValue pm_value = {0};
+        if (const_node->value.ivalue == 0) {
+          MemberPointerEncodeNull(node->type, &pm_value);
+        } else {
+          pm_value.ptr = const_node->value.ivalue;
+        }
+        result = GenerateMemberPointerValue(gen, node->type, &pm_value);
       } else {
         result =
             GeneratorGetIntConstant(gen, node->type, const_node->value.ivalue);

@@ -772,8 +772,13 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
           bool is_invented =
               str->tag_symbol != NULL && str->tag_symbol->flags.invented;
           bool is_anonymous = str->tag_name->value[0] == '<';
+          // A function template's local class with member functions is rebuilt
+          // under its own tag symbol, which is not block-scope.
           bool is_local_class =
-              str->tag_symbol != NULL && str->tag_symbol->flags.is_block_scope;
+              (str->tag_symbol != NULL &&
+               str->tag_symbol->flags.is_block_scope) ||
+              (str->lexical_parent == NULL &&
+               str->access_enclosing_function != NULL);
           bool is_template_specialization =
               (str->tag_symbol != NULL && str->tag_symbol->type != NULL &&
                (str->tag_symbol->type->template_origin != NULL ||

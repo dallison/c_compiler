@@ -398,7 +398,8 @@ static bool MemberPointerValueFromMemberNode(struct ASTNode* node,
     }
     // value is a union.  Member-pointer initializers retain the referenced
     // member in value.other, so never reinterpret that pointer as ivalue.
-    if (id->symbol->value.other != NULL) {
+    if (id->symbol->flags.value_set &&
+        id->symbol->flags.value_is_pointed_member) {
       StructMember* member = (StructMember*)id->symbol->value.other;
       Struct* class_info = TypeMemberPointerClass(id->symbol->type);
       return MemberPointerEncodeFromMember(member, class_info, out);
@@ -457,6 +458,13 @@ bool MemberPointerTryEvaluateConstant(struct ASTNode* node, TypeRecord* type,
     CastASTNode* cast = (CastASTNode*)node;
     TypeRecord* from_type =
         cast->expr != NULL ? cast->expr->type : cast->base.type;
+    // [conv.mem]: a null pointer constant converts to the null member pointer.
+    if (cast->expr != NULL && cast->expr->op == AST_OP(number) &&
+        from_type != NULL && !TypeIsMemberPointer(from_type) &&
+        (TypeIsNullPointer(from_type) || TypeIsIntegral(from_type)) &&
+        ((ConstantASTNode*)cast->expr)->value.ivalue == 0) {
+      return MemberPointerEncodeNull(type, out);
+    }
     MemberPointerValue inner;
     if (!MemberPointerTryEvaluateConstant(cast->expr, from_type, &inner)) {
       return false;

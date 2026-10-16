@@ -1139,8 +1139,14 @@ ASTNode* TemplateArgumentMaterializeExpression(
   switch (TemplateArgumentConcreteValueKind(arg)) {
     case kTemplateValueIntegral:
       return NewIntConstantASTNode(arg->int_value, type, location);
-    case kTemplateValueNull:
-      return NewIntConstantASTNode(0, type, location);
+    case kTemplateValueNull: {
+      // A null data member pointer is not all-zero bits under every ABI.
+      MemberPointerValue null_member = {0};
+      if (TypeIsMemberPointer(type)) {
+        MemberPointerEncodeNull(type, &null_member);
+      }
+      return NewIntConstantASTNode(null_member.ptr, type, location);
+    }
     case kTemplateValuePointer: {
       if (arg->value_symbol == NULL) {
         TypeRecordDelete(type);
@@ -1884,6 +1890,9 @@ Struct* NewStruct(bool is_union) {
   s->lambda_body_needs_reanalysis = false;
   s->lambda_has_init_capture = false;
   s->local_class_arguments = NULL;
+  s->local_class_discriminator = 0;
+  s->local_class_awaits_member_arguments = false;
+  s->local_class_partial_owner = NULL;
   s->tag_symbol = NULL;
   VectorInit(&s->bases);
   VectorInit(&s->friend_classes);

@@ -449,10 +449,17 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
     return true;
   }
   ASTNode* folded = ConstexprFoldPointerExpression(expression);
-  if (folded != NULL &&
-      (folded->op == AST_OP(string) || folded->op == AST_OP(string_wide) ||
-       folded->op == AST_OP(address) || folded->op == AST_OP(identifier) ||
-       folded->op == AST_OP(plus))) {
+  ASTNode* folded_address =
+      folded != NULL && folded->op == AST_OP(cast) &&
+              folded->type != NULL && TypeIsPointer(folded->type)
+          ? ((CastASTNode*)folded)->expr
+          : folded;
+  if (folded_address != NULL &&
+      (folded_address->op == AST_OP(string) ||
+       folded_address->op == AST_OP(string_wide) ||
+       folded_address->op == AST_OP(address) ||
+       folded_address->op == AST_OP(identifier) ||
+       folded_address->op == AST_OP(plus))) {
     ASTNodeDelete(symbol->constexpr_initializer);
     symbol->constexpr_initializer =
         ASTNodeClone(folded, IdentityCloneNode, NULL, NULL);

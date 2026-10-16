@@ -64,6 +64,12 @@ typedef struct {
   // member template constructor).  Its nested types and members still need
   // mapping onto `symbol`'s owner.
   Struct* source_owner;
+  // Set when `initializers` is still the primary constructor's list, kept
+  // unsubstituted because it expands a pack of the enclosing class: each
+  // instantiation substitutes `enclosing_args` followed by its own arguments
+  // into it, against `enclosing_origin`'s parameters.
+  Symbol* enclosing_origin;
+  Vector* enclosing_args;  // Owned.
 } TemplateConstructorInitializers;
 
 static void AddOwnedAssociatedConstraint(ConstraintExpr** target,
@@ -1037,23 +1043,51 @@ static bool MemberIsConversionOperator(StructMember* member) {
 // head of each overload chain is recorded; overloads that share a name (e.g.
 // const/non-const) also share a result type, so callers ranking by result type
 // do not need the whole chain.
+// [class.conv.fct]: a conversion function hides a base class conversion
+// function to the same type; for templates, one with the same dependent
+// conversion type (`operator Action<R(Args...)>` in both DoAllAction levels).
+static bool ConversionOperatorHides(StructMember* derived, StructMember* base) {
+  if (strcmp(derived->symbol->name.value, base->symbol->name.value) != 0 ||
+      derived->symbol->flags.is_template != base->symbol->flags.is_template) {
+    return false;
+  }
+  return !derived->symbol->flags.is_template ||
+         TypeEqual(derived->symbol->type->next, base->symbol->type->next);
+}
+
 void CollectConversionOperators(Struct* str, Vector* out) {
   if (str == NULL || out == NULL) {
     return;
   }
+  size_t own_begin = out->length;
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
     if (MemberIsConversionOperator(member)) {
       VectorAppend(out, member);
     }
   }
+  size_t own_end = out->length;
   for (size_t i = 0; i < str->bases.length; i++) {
     CXXBaseSpecifier* base = str->bases.value.p[i];
-    if (base->type != NULL && TypeIsStructOrUnion(base->type) &&
-        base->type->info.struct_info != NULL &&
-        base->type->info.struct_info != str) {
-      CollectConversionOperators(base->type->info.struct_info, out);
+    if (base->type == NULL || !TypeIsStructOrUnion(base->type) ||
+        base->type->info.struct_info == NULL ||
+        base->type->info.struct_info == str) {
+      continue;
     }
+    Vector inherited;
+    VectorInit(&inherited);
+    CollectConversionOperators(base->type->info.struct_info, &inherited);
+    for (size_t j = 0; j < inherited.length; j++) {
+      StructMember* candidate = inherited.value.p[j];
+      bool hidden = false;
+      for (size_t k = own_begin; k < own_end && !hidden; k++) {
+        hidden = ConversionOperatorHides(out->value.p[k], candidate);
+      }
+      if (!hidden) {
+        VectorAppend(out, candidate);
+      }
+    }
+    VectorDestruct(&inherited);
   }
 }
 
@@ -1836,6 +1870,8 @@ static void QueueTemplateConstructorInitializers(
   stored->symbol = symbol;
   stored->initializers = initializers;
   stored->source_owner = NULL;
+  stored->enclosing_origin = NULL;
+  stored->enclosing_args = NULL;
   VectorAppend(&template_constructor_initializers, stored);
 }
 
@@ -1859,6 +1895,42 @@ void RegisterTemplateConstructorInitializers(
   if (FindTemplateConstructorInitializers(symbol) == NULL) {
     QueueTemplateConstructorInitializers(symbol, initializers);
   }
+}
+
+void SetTemplateConstructorInitializersOrigin(Symbol* symbol,
+                                              Struct* source_owner,
+                                              Symbol* enclosing_origin,
+                                              Vector* enclosing_args) {
+  TemplateConstructorInitializers* stored =
+      FindTemplateConstructorInitializersEntry(symbol);
+  if (stored == NULL) {
+    if (enclosing_args != NULL) {
+      VectorDeleteWithContents(enclosing_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    return;
+  }
+  stored->source_owner = source_owner;
+  if (enclosing_origin != NULL && enclosing_args != NULL) {
+    stored->enclosing_origin = enclosing_origin;
+    stored->enclosing_args = enclosing_args;
+  } else if (enclosing_args != NULL) {
+    VectorDeleteWithContents(enclosing_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+}
+
+Symbol* FindTemplateConstructorInitializersEnclosing(Symbol* symbol,
+                                                     Vector** enclosing_args) {
+  TemplateConstructorInitializers* stored =
+      FindTemplateConstructorInitializersEntry(symbol);
+  if (stored == NULL || stored->enclosing_origin == NULL) {
+    return NULL;
+  }
+  *enclosing_args = stored->enclosing_args;
+  return stored->enclosing_origin;
 }
 
 // Associate the deferred constructor member-initializer list already recorded
@@ -1895,6 +1967,37 @@ void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to,
     int rebase_base = TypeIsFunction(from->type)
                           ? from->type->info.function.template_parameter_base
                           : 0;
+    // A constructor of `Once<R>::Adaptor<Callable>` numbers `[R, Callable, F]`.
+    // Cloned into `Once<char>::Adaptor`, still a template, only `R` is bound:
+    // `Callable` and `F` move down together.
+    int to_base = TypeIsFunction(to->type)
+                      ? to->type->info.function.template_parameter_base
+                      : 0;
+    if (to_base > 0 && to_base < rebase_base) {
+      rebase_base -= to_base;
+    }
+    // `to` is a complete class's constructor template: keep the primary's
+    // list and substitute every argument at once per instantiation.  The
+    // class arguments alone cannot expand a class pack (`v(c(A()...))`), and
+    // rebasing what they leave behind misses types inside the actuals
+    // (`Once(Ignore<C>{c}, 0)`).
+    if (to_base == 0 && rebase_base > 0 && enclosing_args != NULL &&
+        (int)enclosing_args->length >= rebase_base) {
+      QueueTemplateConstructorInitializers(to, cloned);
+      TemplateConstructorInitializers* entry =
+          FindTemplateConstructorInitializersEntry(to);
+      entry->source_owner = FindTemplateConstructorInitializersSourceOwner(from);
+      if (entry->source_owner == NULL && TypeIsFunction(from->type)) {
+        entry->source_owner = from->type->info.function.cxx_member_owner;
+      }
+      entry->enclosing_origin = from;
+      entry->enclosing_args = NewVector();
+      for (int i = 0; i < rebase_base; i++) {
+        VectorAppend(entry->enclosing_args,
+                     TemplateArgumentCopy(enclosing_args->value.p[i]));
+      }
+      return;
+    }
     Vector enclosing_prefix;
     Vector* subst_args = enclosing_args;
     bool own_prefix = false;

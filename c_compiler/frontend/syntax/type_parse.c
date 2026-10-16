@@ -78,6 +78,8 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->template_substitution_failed = false;
   parser->synthesize_instantiated_special_members = false;
   parser->substituting_enclosing_template_arguments_only = false;
+  parser->body_clone_source_function = NULL;
+  parser->body_clone_target_function = NULL;
   parser->placeholder_variable_constraint = NULL;
   parser->typename_allows_unqualified = false;
   parser->parsing_type_id = false;
@@ -226,6 +228,16 @@ TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue) {
   return ref;
 }
 
+// [expr.type]/2: a prvalue of cv-qualified non-class, non-array type has the
+// unqualified type (`decltype(f())` is `int` for `const int f()`).
+TypeRecord* NewDecltypePrvalueType(TypeRecord* expr_type) {
+  TypeRecord* type = TypeRecordCopy(expr_type);
+  if (type != NULL && !TypeIsStructOrUnion(type) && !TypeIsArray(type)) {
+    type->qualifiers &= ~(kQualConst | kQualVolatile);
+  }
+  return type;
+}
+
 static TypeRecord* UnparenthesizedDecltypeEntityType(ASTNode* expr) {
   if (expr == NULL || (expr->flags & kASTParenthesized) != 0) {
     return NULL;
@@ -264,7 +276,7 @@ TypeRecord* TypeDeduceDecltypeAuto(ASTNode* expr) {
   if (expr->value_category == kValueCategoryXvalue) {
     return NewDecltypeReference(expr->type, true);
   }
-  return TypeRecordCopy(expr->type);
+  return NewDecltypePrvalueType(expr->type);
 }
 
 static bool TypeVectorContainsTemplateParameter(Vector* types) {
@@ -776,14 +788,14 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
       } else if (expr->value_category == kValueCategoryXvalue) {
         result = NewDecltypeReference(expr->type, true);
       } else {
-        result = TypeRecordCopy(expr->type);
+        result = NewDecltypePrvalueType(expr->type);
       }
     } else if (expr->value_category == kValueCategoryLvalue) {
       result = NewDecltypeReference(expr->type, false);
     } else if (expr->value_category == kValueCategoryXvalue) {
       result = NewDecltypeReference(expr->type, true);
     } else {
-      result = TypeRecordCopy(expr->type);
+      result = NewDecltypePrvalueType(expr->type);
     }
     if (result != NULL &&
         dependent_context &&
@@ -1803,6 +1815,17 @@ static bool AliasIdForwardsDependentMemberTemplate(TypeParser* parser,
          TemplateArgumentVectorContainsTemplateParameter(args);
 }
 
+// A class instantiation leaves a member alias without a type when its
+// substitution failed (`using type = decltype(T::nope())` with T = int).
+// Deduction treats that as a substitution failure, but naming it in source
+// is an error.
+static TypeRecord* InvalidInstantiatedMemberType(TypeParser* parser,
+                                                 Symbol* symbol) {
+  SyntaxError(parser->syntax, "Invalid type for member '%s' in this instantiation",
+              symbol->name.value);
+  return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+}
+
 static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
   PartialTypeSpecifier result;
   result.error = false;
@@ -2286,6 +2309,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             VectorDeleteWithContents(
                 args, (VectorElementDestructor)TemplateArgumentDelete,
                 /*free_element=*/false);
+          }
+          if (type_record == NULL) {
+            type_record = InvalidInstantiatedMemberType(parser, symbol);
           }
           type |= type_record->type;
           }
@@ -2778,6 +2804,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               args = NULL;
             }
           }
+        }
+        if (type_record == NULL) {
+          type_record = InvalidInstantiatedMemberType(parser, symbol);
         }
         type |= type_record->type;
         if (args != NULL) {
@@ -4916,6 +4945,41 @@ static TypeRecord* MemberPointerTypeForClassName(TypeParser* parser,
   return NULL;
 }
 
+// The class of `int (Q<int>::*)()`: a concrete template-id names its
+// specialization, not the primary template.
+static TypeRecord* NewMemberPointerClassType(TypeParser* parser,
+                                             FullyQualifiedIdentifier* name,
+                                             Symbol* class_sym) {
+  if (class_sym == NULL || class_sym->type == NULL) {
+    return NULL;
+  }
+  Vector* args = name->template_arguments.length == name->components.length
+                     ? VectorLast(&name->template_arguments)
+                     : NULL;
+  if (args != NULL && class_sym->flags.is_template &&
+      TypeIsStructOrUnion(class_sym->type) &&
+      !TemplateArgumentVectorContainsTemplateParameter(args)) {
+    TypeRecord* specialization =
+        TypeInstantiateClassTemplate(parser->syntax, class_sym, args);
+    if (specialization != NULL && TypeIsStructOrUnion(specialization) &&
+        specialization->info.struct_info != NULL) {
+      return specialization;
+    }
+    TypeRecordDelete(specialization);
+  }
+  return TypeRecordCopy(class_sym->type);
+}
+
+// After `C::*`: cv-qualifiers apply to the member pointer itself
+// (`int (C::* const p)(int)`), and the rest is an ordinary declarator that
+// binds tighter (`int C::*p[3]` is an array of member pointers).
+static void FinishMemberPointerDeclarator(TypeParser* parser,
+                                          TypeRecord* mptr) {
+  mptr->qualifiers |= ParseQualifiers(parser);
+  TypeParserParsePointer(parser);
+  VectorAppend(&parser->stack, mptr);
+}
+
 static bool ParseMemberPointerDeclarator(TypeParser* parser) {
   if (!CompilerIsCXX()) {
     return false;
@@ -4937,7 +5001,7 @@ static bool ParseMemberPointerDeclarator(TypeParser* parser) {
     return true;
   }
   Symbol* class_sym = SyntaxFindQualifiedSymbol(parser->syntax, &name);
-  TypeRecord* class_type = class_sym != NULL ? class_sym->type : NULL;
+  TypeRecord* class_type = NewMemberPointerClassType(parser, &name, class_sym);
   int placeholder_index = -1;
   TypeRecord* mptr = NULL;
   if (class_type != NULL &&
@@ -4953,19 +5017,13 @@ static bool ParseMemberPointerDeclarator(TypeParser* parser) {
     mptr = MemberPointerTypeForClassName(
         parser, name.components.value.p[0]);
   }
+  TypeRecordDelete(class_type);
   FullyQualifiedIdentifierDestruct(&name);
   if (mptr == NULL) {
     SyntaxError(parser->syntax, "Pointer-to-member requires a class type");
     return true;
   }
-  VectorAppend(&parser->stack, mptr);
-  if (LexLookingAt(parser->lex, TOK(identifier))) {
-    SourceLocation location = parser->lex->current_token_location;
-    parser->symbol =
-        NewSymbol(parser->lex->spelling.value, parser->base_type, parser->storage);
-    parser->symbol->location = location;
-    LexNextToken(parser->lex);
-  }
+  FinishMemberPointerDeclarator(parser, mptr);
   return true;
 }
 
@@ -5013,7 +5071,7 @@ void TypeParserParseBase(TypeParser* parser) {
           LexMatch(parser->lex, TOK(star))) {
         Symbol* class_sym = SyntaxFindQualifiedSymbol(parser->syntax, &name);
         TypeRecord* class_type =
-            class_sym != NULL ? class_sym->type : NULL;
+            NewMemberPointerClassType(parser, &name, class_sym);
         int placeholder_index = -1;
         TypeRecord* mptr = NULL;
         if (class_type != NULL &&
@@ -5028,19 +5086,12 @@ void TypeParserParseBase(TypeParser* parser) {
           mptr = NewMemberPointerTypeRecord(class_type->info.struct_info,
                                             kQualPlain);
         }
+        TypeRecordDelete(class_type);
         if (mptr == NULL) {
           SyntaxError(parser->syntax,
                       "Pointer-to-member requires a class type");
         } else {
-          VectorAppend(&parser->stack, mptr);
-          if (LexLookingAt(parser->lex, TOK(identifier))) {
-            SourceLocation location = parser->lex->current_token_location;
-            parser->symbol =
-                NewSymbol(parser->lex->spelling.value, parser->base_type,
-                          parser->storage);
-            parser->symbol->location = location;
-            LexNextToken(parser->lex);
-          }
+          FinishMemberPointerDeclarator(parser, mptr);
         }
         FullyQualifiedIdentifierDestruct(&name);
         return;

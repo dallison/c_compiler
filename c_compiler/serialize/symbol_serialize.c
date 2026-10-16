@@ -21,6 +21,7 @@
 #include "concepts.h"
 #include "constraint_serialize.h"
 #include "constexpr.h"
+#include "member_pointer.h"
 #include "reflection.h"
 #include "serialize_common.h"
 #include "symbol.h"
@@ -327,6 +328,14 @@ enum {
   kCtorInit_name = 1,
   kCtorInit_actuals = 2,
   kCtorInit_location = 3,
+  kCtorInit_pack_expansion = 4,
+};
+
+// Tagged fields following the initializer items.
+enum {
+  kCtorInitList_source_owner = 1,
+  kCtorInitList_enclosing_origin = 2,
+  kCtorInitList_enclosing_args = 3,
 };
 
 static void WriteTemplateConstructorInitializers(SerializeContext* ctx,
@@ -354,9 +363,26 @@ static void WriteTemplateConstructorInitializers(SerializeContext* ctx,
     }
     WireWriteUint64(&item, kCtorInit_location,
                     (uint64_t)initializer->location);
+    if (initializer->is_pack_expansion) {
+      WireWriteUint64(&item, kCtorInit_pack_expansion, 1);
+    }
     WireWriteRawVarint(&list, (uint64_t)WireBufferSize(&item));
     WireWriteRaw(&list, WireBufferData(&item), WireBufferSize(&item));
     WireBufferDestruct(&item);
+  }
+  Struct* source_owner = FindTemplateConstructorInitializersSourceOwner(symbol);
+  if (source_owner != NULL) {
+    SWriteRef(ctx, &list, kCtorInitList_source_owner, kSerialKindStruct,
+              source_owner);
+  }
+  Vector* enclosing_args = NULL;
+  Symbol* enclosing_origin =
+      FindTemplateConstructorInitializersEnclosing(symbol, &enclosing_args);
+  if (enclosing_origin != NULL) {
+    SWriteRef(ctx, &list, kCtorInitList_enclosing_origin, kSerialKindSymbol,
+              enclosing_origin);
+    SerialWriteTemplateArgumentVector(ctx, &list, kCtorInitList_enclosing_args,
+                                      enclosing_args);
   }
   WireWriteBytes(out, field, WireBufferData(&list), WireBufferSize(&list));
   WireBufferDestruct(&list);
@@ -410,6 +436,12 @@ static void ReadTemplateConstructorInitializers(DeserializeContext* ctx,
           initializer->location = (SourceLocation)location;
           break;
         }
+        case kCtorInit_pack_expansion: {
+          uint64_t flag;
+          WireReadUint64(&item, &flag);
+          initializer->is_pack_expansion = flag != 0;
+          break;
+        }
         default:
           WireSkip(&item, wire_type);
           break;
@@ -417,7 +449,43 @@ static void ReadTemplateConstructorInitializers(DeserializeContext* ctx,
     }
     VectorAppend(&initializers->deferred_initializers, initializer);
   }
+  Struct* source_owner = NULL;
+  Symbol* enclosing_origin = NULL;
+  Vector* enclosing_args = NULL;
+  while (!WireBufferEof(&list) && !WireBufferHasError(&list)) {
+    int list_field;
+    WireType wire_type;
+    if (!WireReadTag(&list, &list_field, &wire_type)) {
+      break;
+    }
+    switch (list_field) {
+      case kCtorInitList_source_owner:
+        source_owner = SReadRef(ctx, &list, kSerialKindStruct);
+        break;
+      case kCtorInitList_enclosing_origin:
+        enclosing_origin = SReadRef(ctx, &list, kSerialKindSymbol);
+        break;
+      case kCtorInitList_enclosing_args:
+        if (enclosing_args == NULL) {
+          enclosing_args = SerialReadTemplateArgumentVector(ctx, &list);
+        } else {
+          WireSkip(&list, wire_type);
+        }
+        break;
+      default:
+        WireSkip(&list, wire_type);
+        break;
+    }
+  }
   RegisterTemplateConstructorInitializers(symbol, initializers);
+  if (FindTemplateConstructorInitializers(symbol) == initializers) {
+    SetTemplateConstructorInitializersOrigin(symbol, source_owner,
+                                             enclosing_origin, enclosing_args);
+  } else if (enclosing_args != NULL) {
+    VectorDeleteWithContents(enclosing_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -589,7 +657,19 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WriteBoolField(buf, kSym_used, s->flags.used);
   WriteBoolField(buf, kSym_invented, s->flags.invented);
   WriteBoolField(buf, kSym_is_inline_defn, s->flags.is_inline_defn);
-  WriteBoolField(buf, kSym_value_set, s->flags.value_set);
+  // Only the 64-bit value slot is written, so a member-pointer constant that
+  // holds its member travels as its encoding, which a member function's
+  // address does not have.
+  MemberPointerValue pointed_member_value = {0};
+  bool pointed_member_encoded =
+      s->flags.value_is_pointed_member &&
+      MemberPointerEncodeFromMember((StructMember*)s->value.other,
+                                    TypeMemberPointerClass(s->type),
+                                    &pointed_member_value) &&
+      pointed_member_value.fn_symbol == NULL;
+  WriteBoolField(buf, kSym_value_set,
+                 s->flags.value_set && (!s->flags.value_is_pointed_member ||
+                                        pointed_member_encoded));
   WriteBoolField(buf, kSym_noreturn, s->flags.noreturn);
   WriteBoolField(buf, kSym_always_inline, s->flags.always_inline);
   WriteBoolField(buf, kSym_noinline, s->flags.noinline);
@@ -652,6 +732,9 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
     WireWriteInt64(buf, kSym_value_ivalue,
                    constexpr_object || constexpr_reflection
                        ? 0
+                   : s->flags.value_is_pointed_member
+                       ? (pointed_member_encoded ? pointed_member_value.ptr
+                                                 : 0)
                        : s->value.ivalue);
   }
   WireWriteInt32(buf, kSym_stack_offset, s->stack_offset);

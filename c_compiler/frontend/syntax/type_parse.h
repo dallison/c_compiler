@@ -85,6 +85,11 @@ typedef struct {
   // absolute indices and must not be rebased into that argument vector
   // before substitution, or `Allocator` (index 1) becomes the class's `T`.
   bool substituting_enclosing_template_arguments_only;
+  // The function whose body is being cloned, and the instantiation it is
+  // cloned into.  A class instantiation's copy of a member template's local
+  // class is rebuilt only by the clone whose source is that copy's owner.
+  Symbol* body_clone_source_function;
+  Symbol* body_clone_target_function;
   // C++20 `Concept auto x`: constraint to attach to the declared symbol after
   // auto deduction.  Alias templates reuse Symbol::associated_constraint at
   // template definition time instead.

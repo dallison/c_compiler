@@ -191,8 +191,14 @@ static ASTNode* AnalyzeExpressionPreDispatch(ASTNode* node,
                                              BinaryASTNode* binary_node,
                                              UnaryASTNode* unary_node) {
   if (node->op == AST_OP(noteq)) {
-    binary_node->left = AnalyzeExpression(binary_node->left);
-    binary_node->right = AnalyzeExpression(binary_node->right);
+    for (int child_id = 0; child_id < 2; child_id++) {
+      ASTNode* operand = child_id == 0 ? binary_node->left : binary_node->right;
+      ASTNode* analyzed = AnalyzeExpression(operand);
+      if (analyzed != operand) {
+        ASTNodeReplaceChild(node, child_id, analyzed,
+                            /*delete_old_child=*/false);
+      }
+    }
     if (binary_node->left != NULL && binary_node->right != NULL &&
         RewrittenEqualityBeatsInequality(binary_node)) {
       ASTNode* rewritten = TryRewriteComparisonOperator(binary_node);
@@ -485,7 +491,16 @@ static ASTNode* DispatchExpressionCommaAndLogical(ASTNode* node,
                                                   BinaryASTNode* binary,
                                                   int op) {
   switch (op) {
-    case AST_OP(comma):
+    case AST_OP(comma): {
+      // `(T(&tmp, args), tmp)` built for a class prvalue names its temporary
+      // on the right.  Analyzing it again (a cloned template body) must not
+      // turn it into an lvalue that a return or by-value argument copies.
+      bool class_temporary_prvalue =
+          node->value_category == kValueCategoryPrvalue &&
+          binary->right != NULL && binary->right->op == AST_OP(identifier) &&
+          ((IdentifierASTNode*)binary->right)->symbol != NULL &&
+          ((IdentifierASTNode*)binary->right)->symbol->flags.is_temp &&
+          TypeIsStructOrUnion(((IdentifierASTNode*)binary->right)->symbol->type);
       binary->left = AnalyzeExpression(binary->left);
       binary->right = AnalyzeExpression(binary->right);
       {
@@ -496,8 +511,11 @@ static ASTNode* DispatchExpressionCommaAndLogical(ASTNode* node,
       }
       binary->left = SemanticMaterializeClassPrvalue(binary->left);
       ASTNodeSetType(node, binary->right->type);
-      node->value_category = binary->right->value_category;
+      node->value_category = class_temporary_prvalue
+                                 ? kValueCategoryPrvalue
+                                 : binary->right->value_category;
       return node;
+    }
     case AST_OP(logand):
     case AST_OP(logor):
       AnalyzeLogicalOperator(binary);
@@ -796,9 +814,18 @@ static ASTNode* DispatchExpressionCoroutineAndStatementExpr(
           (CompoundStatementASTNode*)unary->sub;
       TypeRecord* type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
       ASTNode* value = PlaceStatementExpressionValueLast(comp);
+      node->value_category = kValueCategoryPrvalue;
       if (value != NULL) {
         type = value->type;
-        node->value_category = value->value_category;
+        // A non-class result is returned by value even when the final
+        // expression names an object.  A class result keeps the category of
+        // the object it designates (an xvalue for a captured result), which
+        // the enclosing initialization copies or moves from.
+        if (CompilerIsCXX() && TypeIsStructOrUnion(TypeIsReference(type)
+                                                       ? type->next
+                                                       : type)) {
+          node->value_category = value->value_category;
+        }
       }
       ASTNodeSetType(node, type);
       return node;

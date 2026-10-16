@@ -178,6 +178,9 @@ typedef struct Symbol {
     // Set on every declaration that ordinary lookup may select after a second
     // name-independent declaration of the same name enters the same scope.
     bool name_independent_lookup_ambiguous: 1;                       // @wire 60
+    // A member-pointer constant's value.other is the referenced StructMember
+    // rather than value.ivalue being its encoding.
+    bool value_is_pointed_member: 1;                                 // @wire -
   } flags;
   
   struct {
@@ -278,6 +281,9 @@ typedef struct Symbol {
   // cxx_member_owner) while the derived class may add further overloads
   // (`using CordRep::Unref` plus `Unref(Span)`).  Transient.
   struct Struct* member_lookup_class;  // @wire - (transient)
+  // Names of the local classes defined in this function's body, in order of
+  // definition (owned String*), for their mangling discriminators.  Transient.
+  Vector* local_class_names;  // @wire - (transient)
   // Compiler-owned copy of a deserialized function template's parameter list.
   // Imported module symbols can have their live parameter vector cleared while
   // pending instantiations are compiled; this backup restores completion.

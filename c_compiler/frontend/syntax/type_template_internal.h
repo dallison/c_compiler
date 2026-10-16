@@ -117,6 +117,10 @@ void DeleteStringVector(Vector* strings);
 Vector* SplitDependentMemberPath(String* path);
 bool StructContainsTemplateParameter(Struct* str);
 bool StructIsFunctionTemplateLocalClass(Struct* str);
+// The class instantiation's copy of a local class of a member function
+// template (`H<short>::get<R>::OA`) still depends on the member's own
+// parameters.  Like the pattern, it is rebuilt once those are known.
+bool StructIsPartialMemberTemplateLocalClass(Struct* str);
 // Whether the layout of `type` is only known once the enclosing template is
 // instantiated: it names a template parameter, or is (an array of) a local
 // class of a function template, which each instantiation rebuilds.

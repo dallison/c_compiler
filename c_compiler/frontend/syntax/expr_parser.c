@@ -1281,10 +1281,78 @@ static ASTNode* TryParseSizeofNestedMember(Syntax* syntax,
     member_type = nested_member->symbol->type;
     LexNextToken(syntax->lex);
   }
+  // `sizeof(C::m + 0)` and `sizeof(C::f())` are ordinary expressions.
+  if (!LexLookingAt(syntax->lex, TOK(rparen))) {
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    return NULL;
+  }
   LexCheckpointDestruct(&checkpoint);
+  if (TypeLayoutDependsOnTemplate(member_type)) {
+    return NewSizeofASTNodeWithType(member_type, location);
+  }
   TypeRecordCalculateSize(member_type);
   return NewSizeofASTNodeWithKnownSize(member_type->size, location);
 }
+// Speculatively parses a type-name and abstract-or-named declarator with
+// diagnostics trapped.  Returns true with `*sym_out` set (NULL when no type
+// was parsed) when the parse finished without error; the caller then owns the
+// symbol and must destruct `parser`.  On false nothing is owned: a longjmp
+// leaves the parser partial, so it is abandoned.
+static bool TrialParseTypeName(Syntax* syntax, TypeParser* parser,
+                               Symbol** sym_out) {
+  volatile bool parse_completed = false;
+  Symbol* volatile sym = NULL;
+  // `abort_on_error` makes a SyntaxError longjmp out immediately (so we stop
+  // at the first one), while the trap additionally catches LexErrors (e.g.
+  // "Missing close parenthesis"), which do not honor `abort_on_error`.
+  volatile bool saved_trap = DiagnosticErrorTrapBegin();
+  bool prev_abort_on_error = abort_on_error;
+  // Save the global abort target: parsing the type-name can recurse through
+  // the expression parser (e.g. an array bound) and set up its own trial,
+  // which would otherwise clobber our jmp_buf.
+  jmp_buf saved_abort_state;
+  memcpy(saved_abort_state, error_abort_state, sizeof(error_abort_state));
+  // A longjmp out of the trial parse skips the bookkeeping of every level
+  // it entered, so restore the nesting depths by hand.  A type-name can
+  // define a class (`(struct { int x; }){0}`), so both counters are at risk.
+  // The class head is reset the same way: a stale head makes a later
+  // namespace-scope consteval injection target that class.
+  int saved_nesting_depth = syntax->expression_nesting_depth;
+  int saved_struct_depth = syntax->struct_definition_depth;
+  int saved_instantiation_depth = compiler->template_instantiation_depth;
+  Struct* volatile saved_class_head = syntax->cxx_class_head;
+  abort_on_error = true;
+  if (setjmp(error_abort_state) == 0) {
+    TypeParserInit(parser, syntax->lex, syntax, STO(implicit),
+                   syntax->context);
+    TypeRecord* type = TypeParserParseType(parser, false);
+    if (type != NULL) {
+      sym = TypeParserParseDeclarator(parser, type);
+    }
+    parse_completed = true;
+  }
+  abort_on_error = prev_abort_on_error;
+  memcpy(error_abort_state, saved_abort_state, sizeof(error_abort_state));
+  syntax->expression_nesting_depth = saved_nesting_depth;
+  syntax->struct_definition_depth = saved_struct_depth;
+  compiler->template_instantiation_depth = saved_instantiation_depth;
+  if (!parse_completed) {
+    syntax->cxx_class_head = saved_class_head;
+  }
+  bool trapped = DiagnosticErrorTrapped();
+  DiagnosticErrorTrapEnd(saved_trap);
+  if (parse_completed && trapped) {
+    if (sym != NULL) {
+      SymbolDelete(sym);
+    }
+    TypeParserDestruct(parser);
+    return false;
+  }
+  *sym_out = sym;
+  return parse_completed;
+}
+
 static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
   SourceLocation location = syntax->lex->current_token_location;
   if (CompilerIsCXX() && LexMatch(syntax->lex, TOK(ellipsis))) {
@@ -1326,6 +1394,26 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
                   " in sizeof operator");
     }
     sizeof_type_name = true;
+  }
+  // `sizeof(W<C>{c})` and `sizeof(T(x))` start with a type but are
+  // expressions: the type-id does not end at the ')'.
+  if (CompilerIsCXX() && has_brackets && sizeof_type_name) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(syntax->lex, &checkpoint);
+    TypeParser trial;
+    Symbol* sym = NULL;
+    if (TrialParseTypeName(syntax, &trial, &sym)) {
+      if (sym != NULL &&
+          (!LexLookingAt(syntax->lex, TOK(rparen)) || !sym->flags.invented)) {
+        sizeof_type_name = false;
+      }
+      if (sym != NULL) {
+        SymbolDelete(sym);
+      }
+      TypeParserDestruct(&trial);
+    }
+    LexCheckpointRestore(syntax->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
   }
   if (has_brackets && !sizeof_type_name) {
     ASTNode* nested_member = TryParseSizeofNestedMember(syntax, location);
@@ -1883,83 +1971,43 @@ static ASTNode* ParseParenthesizedCast(Syntax* syntax, TokenClass followers) {
     LexCheckpoint checkpoint;
     LexCheckpointSave(syntax->lex, &checkpoint);
     TypeParser parser;
-    volatile bool parse_completed = false;
-    volatile bool is_type_name = false;
-    TypeRecord* volatile type = NULL;
-    Symbol* volatile sym = NULL;
-    // Trap any diagnostics emitted while speculatively parsing the type-name
-    // so a backtrack stays silent.  `abort_on_error` makes a SyntaxError
-    // longjmp out immediately (so we stop at the first one), while the trap
-    // additionally catches LexErrors (e.g. "Missing close parenthesis"), which
-    // do not honor `abort_on_error`.
-    volatile bool saved_trap = DiagnosticErrorTrapBegin();
-    bool prev_abort_on_error = abort_on_error;
-    // Save the global abort target: parsing the type-name can recurse through
-    // the expression parser (e.g. an array bound) and set up its own trial,
-    // which would otherwise clobber our jmp_buf.
-    jmp_buf saved_abort_state;
-    memcpy(saved_abort_state, error_abort_state, sizeof(error_abort_state));
-    // A longjmp out of the trial parse skips the bookkeeping of every level
-    // it entered, so restore the nesting depths by hand.  A type-name can
-    // define a class (`(struct { int x; }){0}`), so both counters are at risk.
-    // The class head is reset the same way: a stale head makes a later
-    // namespace-scope consteval injection target that class.
-    int saved_nesting_depth = syntax->expression_nesting_depth;
-    int saved_struct_depth = syntax->struct_definition_depth;
-    int saved_instantiation_depth = compiler->template_instantiation_depth;
-    Struct* volatile saved_class_head = syntax->cxx_class_head;
-    abort_on_error = true;
-    if (setjmp(error_abort_state) == 0) {
-      TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
-                     syntax->context);
-      type = TypeParserParseType(&parser, false);
-      if (type != NULL) {
-        sym = TypeParserParseDeclarator(&parser, type);
-        type = sym->type;
-        // A well-formed cast / compound-literal type-name is an abstract
-        // declarator ending exactly at the closing ')'.  Two shapes of the
-        // parenthesized functional cast `(T(arg))` slip past a naive check and
-        // must be rejected so we backtrack to expression parsing:
-        //   * a value argument is (mis)parsed as a *named* declarator, e.g.
-        //     `(Fahrenheit(c))` -> "Fahrenheit c"; a real type-name names
-        //     nothing, so require the declarator to be abstract (invented),
-        //   * a type argument is (mis)parsed as a *function* type, e.g.
-        //     `(weak_ordering(strong_ordering::x))`; a bare function type is
-        //     never a valid cast target, so reject it (function pointers,
-        //     which are valid, are not function types).
-        is_type_name = LexLookingAt(syntax->lex, TOK(rparen)) &&
-                       sym != NULL && sym->flags.invented &&
-                       !TypeIsFunction(type);
-        // `(std::numeric_limits<T>::max)()` is a parenthesized call, not a
-        // cast to a dependent nested type followed by `()`.
-        if (is_type_name) {
-          LexCheckpoint peek;
-          LexCheckpointSave(syntax->lex, &peek);
-          LexMatch(syntax->lex, TOK(rparen));
-          bool followed_by_call =
-              type != NULL && type->dependent_member_name != NULL &&
-              LexLookingAt(syntax->lex, TOK(lparen));
-          bool operand = CastOrCompoundLiteralFollows(syntax->lex);
-          LexCheckpointRestore(syntax->lex, &peek);
-          LexCheckpointDestruct(&peek);
-          if (followed_by_call || !operand) {
-            is_type_name = false;
-          }
+    bool is_type_name = false;
+    TypeRecord* type = NULL;
+    Symbol* sym = NULL;
+    bool parse_completed = TrialParseTypeName(syntax, &parser, &sym);
+    if (parse_completed && sym != NULL) {
+      type = sym->type;
+      // A well-formed cast / compound-literal type-name is an abstract
+      // declarator ending exactly at the closing ')'.  Two shapes of the
+      // parenthesized functional cast `(T(arg))` slip past a naive check and
+      // must be rejected so we backtrack to expression parsing:
+      //   * a value argument is (mis)parsed as a *named* declarator, e.g.
+      //     `(Fahrenheit(c))` -> "Fahrenheit c"; a real type-name names
+      //     nothing, so require the declarator to be abstract (invented),
+      //   * a type argument is (mis)parsed as a *function* type, e.g.
+      //     `(weak_ordering(strong_ordering::x))`; a bare function type is
+      //     never a valid cast target, so reject it (function pointers,
+      //     which are valid, are not function types).
+      is_type_name = LexLookingAt(syntax->lex, TOK(rparen)) &&
+                     sym->flags.invented && !TypeIsFunction(type);
+      // `(std::numeric_limits<T>::max)()` is a parenthesized call, not a
+      // cast to a dependent nested type followed by `()`.
+      if (is_type_name) {
+        LexCheckpoint peek;
+        LexCheckpointSave(syntax->lex, &peek);
+        LexMatch(syntax->lex, TOK(rparen));
+        bool followed_by_call =
+            type != NULL && type->dependent_member_name != NULL &&
+            LexLookingAt(syntax->lex, TOK(lparen));
+        bool operand = CastOrCompoundLiteralFollows(syntax->lex);
+        LexCheckpointRestore(syntax->lex, &peek);
+        LexCheckpointDestruct(&peek);
+        if (followed_by_call || !operand) {
+          is_type_name = false;
         }
       }
-      parse_completed = true;
     }
-    abort_on_error = prev_abort_on_error;
-    memcpy(error_abort_state, saved_abort_state, sizeof(error_abort_state));
-    syntax->expression_nesting_depth = saved_nesting_depth;
-    syntax->struct_definition_depth = saved_struct_depth;
-    compiler->template_instantiation_depth = saved_instantiation_depth;
-    if (!parse_completed) {
-      syntax->cxx_class_head = saved_class_head;
-    }
-    bool trapped = DiagnosticErrorTrapped();
-    DiagnosticErrorTrapEnd(saved_trap);
-    if (!parse_completed || trapped || !is_type_name) {
+    if (!is_type_name) {
       // Not a well-formed `( type-name )`; abandon the trial parse (its
       // TypeParser is only released when it completed cleanly, since a
       // longjmp leaves it in a partial state) and reparse as an expression.

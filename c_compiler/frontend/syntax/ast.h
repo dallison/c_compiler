@@ -384,6 +384,7 @@ struct ConstraintExpr;
 #define kASTDefaultArgument (1 << 16)  // Expression cloned from a default arg.
 #define kASTDependentDelete (1 << 17)  // Delete expression parsed before type substitution.
 #define kASTDependentArrayDelete (1 << 18)  // Dependent delete[] expression.
+#define kASTUnresolvedImplicitMember kASTDependentArrayDelete  // On arrow nodes: `this->name` invented for an unqualified name that was not a member when parsed.
 #define kASTDependentFunctorCall (1 << 19)  // Dependent object call expression.
 #define kASTDependentNewInitializer (1 << 20)  // new T(expr) parsed before T substitution.
 #define kASTOverloadDiagnosed (1 << 21)  // Overload-failure diagnostics already emitted for this call.

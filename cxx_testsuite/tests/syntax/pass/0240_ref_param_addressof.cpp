@@ -12,9 +12,9 @@ int main() {
   if (box.get() != 7) {
     return 1;
   }
-  int y = 3;
-  Box<int&> ref_box(y);
-  if (ref_box.get() != 3) {
+  const int y = 3;
+  Box<const int> const_box(y);
+  if (const_box.get() != 3) {
     return 2;
   }
   return 0;

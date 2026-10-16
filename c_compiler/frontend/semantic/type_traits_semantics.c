@@ -462,14 +462,20 @@ static bool TypeTraitCanBindToReference(ASTNode* from, TypeRecord* to) {
       to->next == NULL) {
     return false;
   }
-  if (TypeIsConst(from->type) && !TypeIsConst(to->next)) {
-    return false;
-  }
   TypeRecord* source = from->type;
   if (TypeIsReference(source)) {
     source = source->next;
   }
   TypeRecord* target = to->next;
+  // A class source reaches a non-class reference through a conversion
+  // function, whose result binds directly when reference-related to the
+  // target (so `operator int&` never binds `int&&`).
+  if (TypeIsStructOrUnion(source) && !TypeIsStructOrUnion(target)) {
+    return SemanticConversionFunctionRank(from, to) >= 0;
+  }
+  if (TypeIsConst(from->type) && !TypeIsConst(to->next)) {
+    return false;
+  }
   if (to->declarator == kDeclRValueReference) {
     if (from->value_category != kValueCategoryXvalue &&
         from->value_category != kValueCategoryPrvalue) {
@@ -1317,8 +1323,10 @@ static bool TypeTraitIsEmpty(TypeRecord* type) {
   Struct* str = type->info.struct_info;
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = (StructMember*)str->members.value.p[i];
+    bool zero_width_bit_field =
+        member != NULL && member->is_bit_field && member->bit_size == 0;
     if (member != NULL && !member->is_static && !member->is_member_function &&
-        !member->is_anon) {
+        !zero_width_bit_field && !StructMemberIsNestedType(member)) {
       return false;
     }
   }
@@ -1871,7 +1879,9 @@ static TypeRecord* CXXTypeTraitInvokeResultTypeImpl(Syntax* syntax,
   compiler->speculative_template_instantiation_depth--;
   TypeRecord* result = NULL;
   if (analyzed != NULL && analyzed->type != NULL && !DiagnosticErrorTrapped()) {
-    result = TypeRecordCopy(analyzed->type);
+    // [meta.trans.other]: the result is decltype(INVOKE(...)), so an lvalue
+    // call yields `R&` and an xvalue `R&&`.
+    result = TypeDeduceDecltypeAuto(analyzed);
   }
   DiagnosticSuppressEnd();
   DiagnosticErrorTrapEnd(saved_trap);

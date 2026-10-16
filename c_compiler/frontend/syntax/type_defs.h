@@ -417,6 +417,15 @@ struct Struct {
   // Arguments of the enclosing function template a local class was rebuilt
   // for; they tell its instantiations apart in mangled names.
   Vector* local_class_arguments;  // TemplateArgument*. @wire -
+  // How many earlier local classes of the same name the enclosing function
+  // defines: the Itanium discriminator that tells them apart (0 for none).
+  int local_class_discriminator;  // @wire -
+  // Rebuilt by a class instantiation from a local class of a member function
+  // template: still a pattern for the member's own parameters.  The owner is
+  // the class instantiation's member function whose body names this copy,
+  // when it was built while cloning that body.
+  bool local_class_awaits_member_arguments;  // @wire -
+  Symbol* local_class_partial_owner;         // @wire -
   String* tag_name;  // Tag name (owned by Symbol).               // @wire 1
   Symbol* tag_symbol;  // Owning tag symbol, if named.            // @wire 2
   Vector bases;      // CXXBaseSpecifier* (owns entries).         // @wire 3

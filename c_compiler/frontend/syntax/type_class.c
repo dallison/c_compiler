@@ -659,6 +659,27 @@ static void ParseStructMemberList(TypeParser* parser, Struct* str,
   parser->syntax->struct_definition_depth--;
 }
 
+// Numbers `str` among the same-named local classes its function defines, so
+// two `struct Local` in different blocks of one function mangle differently.
+static void AssignLocalClassDiscriminator(Struct* str) {
+  Symbol* function = str->access_enclosing_function;
+  if (function == NULL || str->tag_name == NULL) {
+    return;
+  }
+  if (function->local_class_names == NULL) {
+    function->local_class_names = NewVector();
+  }
+  int earlier = 0;
+  for (size_t i = 0; i < function->local_class_names->length; i++) {
+    String* name = function->local_class_names->value.p[i];
+    if (strcmp(name->value, str->tag_name->value) == 0) {
+      earlier++;
+    }
+  }
+  str->local_class_discriminator = earlier;
+  VectorAppend(function->local_class_names, NewString(str->tag_name->value));
+}
+
 static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
                                bool is_union, bool is_class,
                                Vector* attributes, Vector* bases,
@@ -755,6 +776,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
       TypeIsFunction(compiler->current_function)) {
     str->access_enclosing_function =
         compiler->current_function->info.function.symbol;
+    AssignLocalClassDiscriminator(str);
   }
 
   // Now 'tag' will be the struct tag pointer

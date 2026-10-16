@@ -63,6 +63,7 @@ void FunctionTemplateInstantiationCacheDelete(
 bool DependentExpressionContainsTemplateParameter(struct ASTNode* expr);
 
 TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue);
+TypeRecord* NewDecltypePrvalueType(TypeRecord* expr_type);
 
 void ConversionOperatorName(TypeRecord* type, String* name);
 TypeRecord* ParseCXXConversionType(TypeParser* parser);

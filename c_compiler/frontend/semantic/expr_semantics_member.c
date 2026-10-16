@@ -122,8 +122,11 @@ static StructMember* MemberPointerExpressionMember(ASTNode* node) {
   }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
+    // Only a variable that cannot be reassigned still holds its initializer.
     if (id->symbol != NULL && TypeIsMemberPointer(id->symbol->type) &&
-        id->symbol->flags.value_set && id->symbol->value.other != NULL) {
+        (id->symbol->flags.is_constexpr || TypeIsConst(id->symbol->type)) &&
+        id->symbol->flags.value_set &&
+        id->symbol->flags.value_is_pointed_member) {
       return (StructMember*)id->symbol->value.other;
     }
   }
@@ -353,9 +356,11 @@ static bool CurrentFunctionCountsMemberUses(void) {
 // otherwise referenced.
 static bool MemberReferenceIsInitializerTarget(BinaryASTNode* node) {
   ASTNode* parent = node->base.parent;
+  // A class member's initializer is a constructor call whose child 0 is the
+  // first argument; the member it initializes is inside the callee.
   return parent != NULL &&
          (parent->flags & kASTCXXMemberInitializer) != 0 &&
-         node->base.child_id == 0;
+         parent->op != AST_OP(call) && node->base.child_id == 0;
 }
 
 // Whether a data-member reference at `node` should mark the member as used.
@@ -519,6 +524,21 @@ static ASTNode* FinalizeResolvedMemberReference(BinaryASTNode* node,
   return (ASTNode*)node;
 }
 
+// How a `receiver.Qualifier::member` access reaches the Qualifier subobject.
+// Access is checked separately, so private and protected bases count.
+static bool QualifierSubobjectAdjustment(Struct* receiver, Struct* qualifier,
+                                         CXXBaseAdjustment* adjustment) {
+  TypeRecord* from = NewTypeRecord(kTypeStruct, kQualPlain);
+  TypeRecordSetStructInfo(from, receiver);
+  TypeRecord* to = NewTypeRecord(kTypeStruct, kQualPlain);
+  TypeRecordSetStructInfo(to, qualifier);
+  bool found =
+      TypeBaseAdjustment(from, to, /*public_only=*/false, adjustment);
+  TypeRecordDelete(from);
+  TypeRecordDelete(to);
+  return found;
+}
+
 // Contract: Handles `Base::member` when the right child is already a structmember.
 // Returns `node` when qualified lookup completes or errors; NULL to fall through.
 static ASTNode* TryFinalizeQualifiedMemberReference(BinaryASTNode* node) {
@@ -542,6 +562,22 @@ static ASTNode* TryFinalizeQualifiedMemberReference(BinaryASTNode* node) {
                   member->symbol->name.value);
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return (ASTNode*)node;
+  }
+  // `d.B<2>::value` names a concrete specialization.
+  if (member_node->owner_type != NULL &&
+      !TypeIsStructOrUnion(member_node->owner_type) &&
+      member_node->owner_type->template_origin != NULL &&
+      !TypeContainsTemplateParameter(member_node->owner_type)) {
+    TypeRecord* concrete = TypeMaterializeClassTemplateSpecialization(
+        &compiler->syntax, member_node->owner_type);
+    if (concrete != NULL && concrete != member_node->owner_type &&
+        TypeIsStructOrUnion(concrete) && concrete->info.struct_info != NULL) {
+      TypeRecordIncRef(concrete);
+      TypeRecordDelete(member_node->owner_type);
+      member_node->owner_type = concrete;
+    } else if (concrete != NULL && concrete != member_node->owner_type) {
+      TypeRecordDelete(concrete);
+    }
   }
   // `expr.StorageT<I>::get` stores the alias template-id as owner_type.
   // Until that id materializes to a class, do not resolve `get` against
@@ -582,9 +618,27 @@ static ASTNode* TryFinalizeQualifiedMemberReference(BinaryASTNode* node) {
     member = resolved;
     StructMemberASTNodeSetMember(member_node, resolved);
   }
-  if (receiver_struct != NULL) {
+  // `member_offset` is relative to the qualifier's subobject; `d.B<2>::value`
+  // must not read `value` from the first base.
+  CXXBaseAdjustment qualifier_path = {.kind = kCXXBaseAdjustmentNone};
+  if (resolved != NULL && member_offset >= 0 && receiver_struct != NULL &&
+      receiver_struct != qualified_owner &&
+      QualifierSubobjectAdjustment(receiver_struct, qualified_owner,
+                                   &qualifier_path) &&
+      qualifier_path.kind == kCXXBaseAdjustmentVirtual) {
+    int qualifier_relative_offset = member_offset;
     ApplyVirtualBaseAdjustmentToMemberReference(node, receiver_struct,
-                                                member_owner, &member_offset);
+                                                qualified_owner, &member_offset);
+    member_offset = qualifier_relative_offset;
+  } else {
+    if (resolved != NULL && member_offset >= 0 &&
+        qualifier_path.kind == kCXXBaseAdjustmentStatic) {
+      member_offset += qualifier_path.byte_offset;
+    }
+    if (receiver_struct != NULL) {
+      ApplyVirtualBaseAdjustmentToMemberReference(node, receiver_struct,
+                                                  member_owner, &member_offset);
+    }
   }
   if (member_offset < 0) {
     member_offset =
@@ -828,7 +882,13 @@ static ASTNode* FinalizeLookupMemberReference(
   if (member_offset < 0) {
     member_offset = member->byte_offset;
   }
-  if (!member->is_member_function &&
+  // The vtable pointers are read by compiler-lowered virtual calls and
+  // virtual-base adjustments, whatever the inheritance access of their base.
+  bool vtable_pointer =
+      member->symbol != NULL && member->symbol->flags.invented &&
+      (StringStartsWith(&member->symbol->name, "__vptr") ||
+       StringStartsWith(&member->symbol->name, "__vbptr"));
+  if (!member->is_member_function && !vtable_pointer &&
       !CurrentFunctionCanAccessMember(struct_info, member_owner, member->access,
                                       access)) {
     const char* owner_name =

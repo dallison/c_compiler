@@ -5,3 +5,4 @@
 # the list cannot drift out of date.
 #
 # Nothing here is expected to stay: each entry is a compiler bug to fix.
+pass/0620_constexpr_crtp_downcast_from_base_at_nonzero_offset.cpp

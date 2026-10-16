@@ -905,6 +905,24 @@ static int OverloadConversionRankStandardValue(ASTNode* actual,
   return base_rank * 10 + 5 + qualification_penalty;
 }
 
+// A conversion function of a class argument reaching a non-class parameter:
+// `operator int&()` binds `int&` or `const int&`, and a scalar result converts
+// to a value parameter or initializes the temporary a `const long&` binds.
+// Ranked after any standard conversion, by the trailing standard conversion.
+static int OverloadConversionFunctionRank(ASTNode* actual,
+                                          TypeRecord* parameter_type) {
+  TypeRecord* target = TypeIsReference(parameter_type) ? parameter_type->next
+                                                       : parameter_type;
+  if (!CompilerIsCXX() || g_suppress_user_defined_conversion_rank ||
+      actual == NULL || actual->type == NULL ||
+      !TypeIsStructOrUnion(actual->type) || target == NULL ||
+      TypeIsStructOrUnion(target)) {
+    return -1;
+  }
+  int rank = SemanticConversionFunctionRank(actual, parameter_type);
+  return rank < 0 ? -1 : 100 + rank;
+}
+
 // Contract: Reference parameter after standard conversion failed; function
 // address and lambda exact-match paths, then UDC to temporary (100/101).
 // Respects g_suppress_user_defined_conversion_rank.
@@ -947,7 +965,7 @@ static int OverloadConversionRankReferenceFallback(ASTNode* actual,
     }
     return 101;
   }
-  return -1;
+  return OverloadConversionFunctionRank(actual, formal_type);
 }
 
 // Contract: Value parameter after standard conversion failed; function/lambda
@@ -990,7 +1008,7 @@ static int OverloadConversionRankValueFallback(ASTNode* actual,
        ClassHasConversionOperatorTo(actual, target))) {
     return 100;
   }
-  return -1;
+  return OverloadConversionFunctionRank(actual, target);
 }
 
 // Contract: Reference formal parameter dispatch; may mutate braced-init children.
@@ -1002,7 +1020,7 @@ static int OverloadConversionRankReference(ASTNode* actual,
   }
   int binding_rank = ReferenceBindingRank(actual, formal_type);
   if (binding_rank < 0) {
-    return -1;
+    return OverloadConversionFunctionRank(actual, formal_type);
   }
   int base_rank = OverloadBaseConversionRank(actual->type, target);
   if (base_rank >= 0) {

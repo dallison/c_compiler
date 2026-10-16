@@ -4119,11 +4119,20 @@ static ASTNode* ConstexprStaticAddressExpression(Symbol* root, size_t offset,
                                                  SourceLocation location) {
   ASTNode* address = NewUnaryASTNode(AST_OP(address), NULL, location,
                                      NewIdentifierASTNode(root, location));
+  address = AnalyzeExpression(address);
   if (offset == 0) {
-    ASTNodeSetType(address, TypeRecordCopy(type));
+    // `&array` points to the whole array; the stored pointer may point to its
+    // first element.
+    TypeRecordQualifierOverlay unqualified;
+    if (address->type != NULL &&
+        !TypeEqual(address->type,
+                   TypeRecordOverlayQualifiers(&unqualified, type,
+                                               address->type->qualifiers))) {
+      address = AnalyzeExpression(
+          NewCastASTNode(TypeRecordCopy(type), location, address));
+    }
     return address;
   }
-  address = AnalyzeExpression(address);
   TypeRecord* long_type = NewTypeRecordWithSize(kTypeLong, kQualPlain);
   ASTNode* count = NewIntConstantASTNode((int64_t)offset, long_type, location);
   ASTNode* sum = NewBinaryASTNode(AST_OP(plus), TypeRecordCopy(type), location,
@@ -9884,6 +9893,10 @@ ReflectionValue* ConstexprEvaluatePointerDereferenceAsReflection(
   return (ReflectionValue*)(intptr_t)value.ivalue;
 }
 
+static ConstexprObject* ConstexprBaseSubobjectOfType(ConstEvalContext* ctx,
+                                                     ConstexprObject* object,
+                                                     TypeRecord* type);
+
 static bool EvaluateConstexprObjectAddress(ConstEvalContext* ctx,
                                            ASTNode* node,
                                            ConstexprObject** object) {
@@ -9911,6 +9924,23 @@ static bool EvaluateConstexprObjectAddress(ConstEvalContext* ctx,
       *object = slot->object;
       return *object != NULL;
     }
+    // `&(const B&)*p`: a qualification cast between class lvalues names the
+    // object `p` points to.
+    ASTNode* designated = address->sub;
+    while (designated != NULL && designated->op == AST_OP(cast) &&
+           designated->type != NULL && TypeIsStructOrUnion(designated->type) &&
+           ((CastASTNode*)designated)->expr != NULL &&
+           ((CastASTNode*)designated)->expr->type != NULL &&
+           TypeIsStructOrUnion(((CastASTNode*)designated)->expr->type) &&
+           ((CastASTNode*)designated)->expr->type->info.struct_info ==
+               designated->type->info.struct_info) {
+      designated = ((CastASTNode*)designated)->expr;
+    }
+    if (designated != address->sub && designated->op == AST_OP(contents) &&
+        EvaluateConstexprObjectAddress(ctx, ((UnaryASTNode*)designated)->sub,
+                                       object)) {
+      return true;
+    }
     ConstexprValue value;
     bool ok = EvaluateConstexprObjectAccess(ctx, address->sub, &value);
     if ((!ok || value.object == NULL) && address->sub != NULL) {
@@ -9922,6 +9952,49 @@ static bool EvaluateConstexprObjectAddress(ConstEvalContext* ctx,
     }
     *object = value.object;
     return true;
+  }
+  // A derived-to-base conversion of a class prvalue's address (`this` for a
+  // base member called on `make()`) has no address slot to offset.  It is a
+  // cast, or for a base at a nonzero offset the member call's `p + offset`.
+  // The operand of an offset-0 cast may already carry the base type, so the
+  // evaluated object's class decides.
+  bool this_adjustment =
+      node->op == AST_OP(plus) &&
+      ((BinaryASTNode*)node)->right != NULL &&
+      ASTNodeIsIntConstant(((BinaryASTNode*)node)->right);
+  if (node->op == AST_OP(cast) || this_adjustment) {
+    ASTNode* operand = this_adjustment ? ((BinaryASTNode*)node)->left
+                                       : ((CastASTNode*)node)->expr;
+    Struct* target = node->type != NULL &&
+                             TypeIsStructOrUnionPointer(node->type)
+                         ? node->type->next->info.struct_info
+                         : NULL;
+    ConstexprObject* derived = NULL;
+    if (target != NULL && operand != NULL && operand->type != NULL &&
+        TypeIsStructOrUnionPointer(operand->type) &&
+        (!this_adjustment ||
+         operand->type->next->info.struct_info != target) &&
+        EvaluateConstexprObjectAddress(ctx, operand, &derived) &&
+        derived != NULL && derived->type != NULL &&
+        TypeIsStructOrUnion(derived->type)) {
+      Struct* source = derived->type->info.struct_info;
+      int base_offset = 0;
+      bool related =
+          this_adjustment
+              ? source != target &&
+                    TypeBaseOffset(derived->type, node->type->next,
+                                   /*public_only=*/false, &base_offset) &&
+                    base_offset ==
+                        ASTNodeConstantValue(((BinaryASTNode*)node)->right)
+              : source == target ||
+                    StructIsDerivedFrom(source, target, /*public_only=*/false);
+      if (related) {
+        *object = ConstexprBaseSubobjectOfType(ctx, derived, node->type->next);
+        if (*object != NULL) {
+          return true;
+        }
+      }
+    }
   }
   ConstexprValue value;
   if (EvaluateConstexprObjectAccess(ctx, node, &value) &&

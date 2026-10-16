@@ -151,6 +151,11 @@ static bool TypeRecordNodeContainsTemplateParameter(TypeRecord* type) {
       type->info.array.template_parameter_index >= 0) {
     return true;
   }
+  // `int T::*`: the class of a member pointer is a template parameter.
+  if (type->declarator == kDeclMemberPointer &&
+      type->template_parameter_index >= 0) {
+    return true;
+  }
   if (TemplateArgumentVectorContainsTemplateParameter(
           type->template_arguments)) {
     return true;
@@ -531,7 +536,9 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
   // A primitive placeholder with an index denotes the entire template type.
   // Other declarators also use this field for one dependent component (for
   // example, the class in `R (C::*)(Args...)` or an array bound); those must
-  // still be compared structurally below.
+  // still be compared structurally below.  A template template parameter
+  // applied to arguments (`Sp<T, A...>`) and a member of a parameter
+  // (`T::type`) are placeholders too, distinguished by those parts.
   bool left_is_type_parameter =
       left->declarator == kDeclPrimitive &&
       left->template_parameter_index >= 0;
@@ -542,6 +549,13 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
     return left_is_type_parameter == right_is_type_parameter &&
            left->template_parameter_index ==
                right->template_parameter_index &&
+           TemplateArgumentPatternVectorEqual(left->template_arguments,
+                                              right->template_arguments) &&
+           (left->dependent_member_name == NULL) ==
+               (right->dependent_member_name == NULL) &&
+           (left->dependent_member_name == NULL ||
+            StringEqualString(left->dependent_member_name,
+                              right->dependent_member_name)) &&
            left->is_pack_index == right->is_pack_index &&
            (!left->is_pack_index ||
             (DependentTemplateArgExprEqual(left->pack_index_expr,
@@ -1147,12 +1161,14 @@ static Symbol* CXXLocalClassFunction(Struct* str) {
   return function;
 }
 
-// Local classes of different functions, or of different instantiations of one
-// function template, are distinct types that may share a tag name.
+// Local classes of different functions, of different blocks of one function,
+// or of different instantiations of one function template, are distinct types
+// that may share a tag name.
 static bool CXXLocalClassScopesEqual(Struct* left, Struct* right) {
   Symbol* left_function = CXXLocalClassFunction(left);
   Symbol* right_function = CXXLocalClassFunction(right);
-  if (left_function != right_function) {
+  if (left_function != right_function ||
+      left->local_class_discriminator != right->local_class_discriminator) {
     return false;
   }
   if (left_function == NULL) {
@@ -2228,6 +2244,49 @@ TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type) {
   return result;
 }
 
+// Whether `from`'s pointee may be pointed to by `to` once qualifiers are set
+// aside: the same type, or a C++ pointer conversion that changes only the
+// pointee's noexcept, array bound or array element qualifiers.
+static bool PointeesCompatible(TypeRecord* from, TypeRecord* to) {
+  if (TypeContainsTemplateParameter(from) ||
+      TypeContainsTemplateParameter(to)) {
+    return true;
+  }
+  const Qualifiers cv = kQualConst | kQualVolatile | kQualRestrict;
+  if (TypeEqualIgnoringTopLevelQualifierMask(from, to, cv)) {
+    return true;
+  }
+  // Qualifiers on array elements are the array's own ([basic.type.qualifier]),
+  // so `int (*)[]` converts to `const int (*)[]`.  The bound may also be
+  // dropped ([conv.qual]).
+  if (TypeIsFixedArray(from) && TypeIsFixedArray(to) && from->next != NULL &&
+      to->next != NULL) {
+    if ((from->next->qualifiers & ~to->next->qualifiers & cv) != 0) {
+      return false;
+    }
+    if (!TypeArrayBoundsEqual(&from->info.array, &to->info.array) &&
+        to->info.array.size.fixed > 0) {
+      return false;
+    }
+    return PointeesCompatible(from->next, to->next);
+  }
+  TypeRecord left = *from;
+  TypeRecord right = *to;
+  left.qualifiers &= ~cv;
+  right.qualifiers &= ~cv;
+  if (!CompilerIsCXX()) {
+    return TypeEqualIgnoringSign(&left, &right);
+  }
+  if (TypeEqualForCXXOverride(&compiler->syntax, &left, &right)) {
+    return true;
+  }
+  if (TypeIsFunction(from) && TypeIsFunction(to) &&
+      from->info.function.is_noexcept && !to->info.function.is_noexcept) {
+    return TypeEqualIgnoringFunctionNoexcept(from, to);
+  }
+  return false;
+}
+
 bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
   if (TypeEqual(to, from)) {
     return true;
@@ -2245,7 +2304,7 @@ bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
     int from_quals = from->next->qualifiers & ~kQualConst;
     if ((to_quals & kQualAtomic) == (from_quals & kQualAtomic) &&
         (from_quals & ~to_quals) == 0) {
-      return true;
+      return PointeesCompatible(from->next, to->next);
     }
   }
   return false;

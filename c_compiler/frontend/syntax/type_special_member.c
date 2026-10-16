@@ -3027,6 +3027,9 @@ static bool CXXInstantiatedImplicitSpecialMemberIsDeleted(
 // template is still dependent, then cloned into the instantiation.  Their
 // deletion, noexcept, and triviality were decided against that dependent
 // pattern, so recompute them once the concrete bases and members are in place.
+// A member defaulted on its first declaration (`X(X&&) = default;` in a class
+// template) is trivial exactly when the implicit one would be, which also
+// depends on the concrete members.
 static void CXXRefreshImplicitSpecialMembers(Struct* str) {
   if (str == NULL) {
     return;
@@ -3038,7 +3041,6 @@ static void CXXRefreshImplicitSpecialMembers(Struct* str) {
                              ? member->symbol->type
                              : NULL;
       if (func == NULL || !TypeIsFunction(func) ||
-          !func->info.function.is_implicitly_declared ||
           !func->info.function.is_defaulted ||
           func->info.function.is_user_provided ||
           func->info.function.is_explicitly_deleted) {
@@ -3046,6 +3048,12 @@ static void CXXRefreshImplicitSpecialMembers(Struct* str) {
       }
       CXXSpecialMemberKind kind = func->info.function.cxx_special_member_kind;
       if (kind == kCXXSpecialMemberNone) {
+        continue;
+      }
+      if (!func->info.function.is_implicitly_declared) {
+        func->info.function.is_trivial_special_member =
+            !func->info.function.is_deleted &&
+            CXXImplicitSpecialMemberIsTrivial(str, kind);
         continue;
       }
       bool deleted =

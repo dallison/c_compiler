@@ -967,9 +967,9 @@ static void ApplyMemberPointerConstantSymbolValue(Symbol* symbol, ASTNode* init)
       MemberPointerValue pm_value;
       if (member != NULL && class_info != NULL &&
           MemberPointerEncodeFromMember(member, class_info, &pm_value)) {
-        symbol->value.ivalue = pm_value.ptr;
-        symbol->flags.value_set = true;
         symbol->value.other = member;
+        symbol->flags.value_is_pointed_member = true;
+        symbol->flags.value_set = true;
       }
     }
   } else if (init_expr != NULL) {
@@ -978,14 +978,10 @@ static void ApplyMemberPointerConstantSymbolValue(Symbol* symbol, ASTNode* init)
       StructMember* member = MemberPointerMemberFromExpression(init_expr);
       if (member != NULL) {
         symbol->value.other = member;
-      } else if (TypeIsMemberFunctionPointer(symbol->type) &&
-                 init_expr->op == AST_OP(member_ptr) &&
-                 ((UnaryASTNode*)init_expr)->sub != NULL &&
-                 ((UnaryASTNode*)init_expr)->sub->op == AST_OP(structmember)) {
-        symbol->value.other =
-            ((StructMemberASTNode*)((UnaryASTNode*)init_expr)->sub)->member;
+      } else {
+        symbol->value.ivalue = pm_value.ptr;
       }
-      symbol->value.ivalue = pm_value.ptr;
+      symbol->flags.value_is_pointed_member = member != NULL;
       symbol->flags.value_set = true;
     }
   }

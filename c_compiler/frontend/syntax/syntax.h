@@ -372,5 +372,11 @@ void AppendCXXBaseAssignments(Syntax* syntax, TypeRecord* func, Vector* body,
 // Emits the __vptr initializers that were deferred (see the preamble) for
 // constructors of `owner`, now that its vtables have been registered.
 void SyntaxFlushPendingVPtrInitializers(struct Struct* owner);
+// Replaces the top-level __vptr stores in a constructor body with stores of
+// the vtables of `func`'s own class, inserted where the first old store was.
+// Returns how many stores were inserted (at `*first_out`); 0 if the body had
+// none or the class's vtables are not registered yet.
+size_t SyntaxReplaceCXXVPtrInitializers(TypeRecord* func, Vector* body,
+                                        size_t* first_out);
 
 #endif /* syntax_h */

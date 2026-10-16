@@ -139,11 +139,15 @@ static Symbol* EmitWeakStatic(const char* name, size_t byte_count,
   return symbol;
 }
 
+// The ABI vtable address points are cached with the type_info objects (their
+// `_ZTV...+16` names cannot collide with a mangled type key).  A name lookup
+// would depend on the scope that happened to be open when the first type_info
+// was emitted, and could find an unrelated symbol of the same name.
 static Symbol* GetItaniumVptrApSymbol(const char* name) {
-  String lookup;
-  StringInit(&lookup, name);
-  Symbol* symbol = FindGlobalSymbol(&lookup);
-  StringDestruct(&lookup);
+  String key;
+  StringInit(&key, name);
+  Symbol* symbol = MapFindPointerKey(&compiler->rtti_typeinfo_map, &key);
+  StringDestruct(&key);
   if (symbol != NULL) {
     return symbol;
   }
@@ -154,7 +158,9 @@ static Symbol* GetItaniumVptrApSymbol(const char* name) {
   StringSet(&symbol->asm_name, name);
   symbol->flags.invented = true;
   symbol->flags.is_forward_declared = true;
-  SyntaxAddSymbol(&compiler->syntax, symbol);
+  InsertGlobalSymbol(symbol);
+  MapInsert(&compiler->rtti_typeinfo_map,
+            (MapKeyValue){.key.p = NewString(name), .value.p = symbol});
   return symbol;
 }
 

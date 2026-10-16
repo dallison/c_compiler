@@ -310,6 +310,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->static_data_member_template_arguments = NULL;
   sym->static_data_member_template_definition = NULL;
   sym->member_lookup_class = NULL;
+  sym->local_class_names = NULL;
   VectorInit(&sym->imported_function_template_parameters_backup);
   sym->cached_target_symbol_name = NULL;
 }
@@ -416,6 +417,12 @@ void SymbolDestruct(Symbol* symbol) {
       /*free_element=*/false);
   free(symbol->cached_target_symbol_name);
   symbol->cached_target_symbol_name = NULL;
+  if (symbol->local_class_names != NULL) {
+    VectorDeleteWithContents(symbol->local_class_names,
+                             (VectorElementDestructor)StringDelete,
+                             /*free_element=*/false);
+    symbol->local_class_names = NULL;
+  }
   if (symbol->static_data_member_template_arguments != NULL) {
     VectorDeleteWithContents(symbol->static_data_member_template_arguments,
                              (VectorElementDestructor)TemplateArgumentDelete,
@@ -569,6 +576,9 @@ static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
                                     String* tag_name, Struct* str);
 static Namespace* CXXStructNamespace(Struct* str);
 static void AppendCXXStructNameComponents(String* out, Struct* str);
+static Struct* CXXLocalClassRoot(Struct* str);
+static void AppendCXXLocalNamePrefix(String* out, Struct* local);
+static void AppendCXXLocalNameDiscriminator(String* out, Struct* local);
 
 static void AppendCXXVendorObjectExpression(String* out, const char* prefix,
                                             String* key) {
@@ -811,11 +821,21 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
   if (kind == kTemplateValueMemberPointer &&
       symbol->asm_name.length == 0 && arg->type != NULL) {
     Struct* owner = TypeMemberPointerClass(arg->type);
-    StringAppend(out, "_ZN");
-    AppendCXXNestedNamespaceComponents(out, CXXStructNamespace(owner));
+    Struct* local = CXXLocalClassRoot(owner);
+    StringAppend(out, "_Z");
+    if (local != NULL) {
+      AppendCXXLocalNamePrefix(out, local);
+    }
+    StringAppendChar(out, 'N');
+    if (local == NULL) {
+      AppendCXXNestedNamespaceComponents(out, CXXStructNamespace(owner));
+    }
     AppendCXXStructNameComponents(out, owner);
     AppendCXXNameComponent(out, symbol->name.value);
     StringAppendChar(out, 'E');
+    if (local != NULL) {
+      AppendCXXLocalNameDiscriminator(out, local);
+    }
   } else if (symbol->asm_name.length != 0) {
     StringAppendString(out, &symbol->asm_name);
   } else {
@@ -908,36 +928,57 @@ static bool CXXStructIsLocalClass(Struct* str) {
          (str->tag_symbol == NULL || !str->tag_symbol->flags.invented);
 }
 
-// Two functions may each define a local class of the same name, and every
-// instantiation of a function template has its own, so a local class is
-// qualified by its function and the arguments it was rebuilt for.
-static void AppendCXXLocalClassScope(String* out, Struct* str) {
-  Symbol* function = str->access_enclosing_function;
-  const char* name = function->asm_name.length != 0 ? function->asm_name.value
-                                                    : function->name.value;
-  String scope;
-  StringInit(&scope, NULL);
-  for (const char* p = name; *p != '\0'; p++) {
-    char ch = *p;
-    bool valid = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-                 (ch >= '0' && ch <= '9') || ch == '_';
-    StringAppendChar(&scope, valid ? ch : '_');
+// The local class that `str` is, or is nested in, or NULL.
+static Struct* CXXLocalClassRoot(Struct* str) {
+  while (str != NULL && str->lexical_parent != NULL) {
+    str = str->lexical_parent;
   }
-  AppendCXXNameComponent(out, scope.value);
-  StringDestruct(&scope);
-  if (str->local_class_arguments != NULL) {
-    AppendCXXTemplateArgumentVector(out, str->local_class_arguments);
-  }
+  return str != NULL && CXXStructIsLocalClass(str) ? str : NULL;
 }
 
+// Opens the Itanium <local-name> of an entity in local class `local`:
+// `Z <function encoding> E`.  A copy of a function template's local class
+// rebuilt for particular arguments is named by its function's name and those
+// arguments instead, since its function symbol may still be the pattern.
+static void AppendCXXLocalNamePrefix(String* out, Struct* local) {
+  Symbol* function = local->access_enclosing_function;
+  const char* asm_name = function->asm_name.value;
+  if (compiler->prepend_underscore && asm_name[0] == '_') {
+    asm_name++;
+  }
+  StringAppendChar(out, 'Z');
+  if (local->local_class_arguments == NULL &&
+      strncmp(asm_name, "_Z", 2) == 0) {
+    StringAppend(out, asm_name + 2);
+  } else {
+    AppendCXXNameComponent(out, function->asm_name.length != 0
+                                    ? function->asm_name.value
+                                    : function->name.value);
+    if (local->local_class_arguments != NULL) {
+      AppendCXXTemplateArgumentVector(out, local->local_class_arguments);
+    }
+  }
+  StringAppendChar(out, 'E');
+}
+
+// Closes a <local-name>: `_<n>` for n < 10, else `__<n>_`, numbering the
+// second same-named local class of a function 0.
+static void AppendCXXLocalNameDiscriminator(String* out, Struct* local) {
+  int index = local->local_class_discriminator - 1;
+  if (index < 0) {
+    return;
+  }
+  StringPrintf(out, index < 10 ? "_%d" : "__%d_", index);
+}
+
+// The class's name within its namespace, or within its function for a local
+// class (whose <local-name> callers open and close).
 static void AppendCXXStructNameComponents(String* out, Struct* str) {
   if (str == NULL) {
     return;
   }
   if (str->lexical_parent != NULL) {
     AppendCXXStructNameComponents(out, str->lexical_parent);
-  } else if (CXXStructIsLocalClass(str)) {
-    AppendCXXLocalClassScope(out, str);
   }
   if (str->tag_name != NULL) {
     TypeRecord* tag_type =
@@ -992,6 +1033,11 @@ static void AppendCXXName(String* out, Symbol* symbol) {
   if (ns == NULL && owner != NULL) {
     ns = CXXStructNamespace(owner);
   }
+  Struct* local = owner != NULL ? CXXLocalClassRoot(owner) : NULL;
+  if (local != NULL) {
+    AppendCXXLocalNamePrefix(out, local);
+    ns = NULL;
+  }
 
   StringAppendChar(out, 'N');
   if (symbol->type->info.function.has_explicit_object_parameter) {
@@ -1016,6 +1062,9 @@ static void AppendCXXName(String* out, Symbol* symbol) {
   }
   AppendCXXUnqualifiedName(out, symbol);
   StringAppendChar(out, 'E');
+  if (local != NULL) {
+    AppendCXXLocalNameDiscriminator(out, local);
+  }
 }
 
 // Mangles a class/union/enum type name.  A type that lives in a namespace must
@@ -1025,6 +1074,19 @@ static void AppendCXXName(String* out, Symbol* symbol) {
 // bare `<length><name>` component.
 static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
                                     String* tag_name, Struct* str) {
+  Struct* local = str != NULL ? CXXLocalClassRoot(str) : NULL;
+  if (local != NULL) {
+    AppendCXXLocalNamePrefix(out, local);
+    if (str != local) {
+      StringAppendChar(out, 'N');
+    }
+    AppendCXXStructNameComponents(out, str);
+    if (str != local) {
+      StringAppendChar(out, 'E');
+    }
+    AppendCXXLocalNameDiscriminator(out, local);
+    return;
+  }
   Namespace* ns = str != NULL ? CXXStructNamespace(str)
                               : tag_symbol != NULL ? tag_symbol->namespace_ : NULL;
   if (ns != NULL) {
@@ -1036,8 +1098,7 @@ static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
       AppendCXXNameComponent(out, tag_name->value);
     }
     StringAppendChar(out, 'E');
-  } else if (str != NULL &&
-             (str->lexical_parent != NULL || CXXStructIsLocalClass(str))) {
+  } else if (str != NULL && str->lexical_parent != NULL) {
     StringAppendChar(out, 'N');
     AppendCXXStructNameComponents(out, str);
     StringAppendChar(out, 'E');
@@ -1062,9 +1123,12 @@ static bool CXXTypeIsDeferredTemplateId(TypeRecord* type) {
 
 static void AppendCXXDeferredTemplateIdName(String* out, TypeRecord* type) {
   Struct* str = type->info.struct_info;
-  Namespace* ns = CXXStructNamespace(str);
-  bool nested =
-      ns != NULL || str->lexical_parent != NULL || CXXStructIsLocalClass(str);
+  Struct* local = CXXLocalClassRoot(str);
+  Namespace* ns = local != NULL ? NULL : CXXStructNamespace(str);
+  if (local != NULL) {
+    AppendCXXLocalNamePrefix(out, local);
+  }
+  bool nested = ns != NULL || str->lexical_parent != NULL;
   if (nested) {
     StringAppendChar(out, 'N');
   }
@@ -1073,13 +1137,14 @@ static void AppendCXXDeferredTemplateIdName(String* out, TypeRecord* type) {
   }
   if (str->lexical_parent != NULL) {
     AppendCXXStructNameComponents(out, str->lexical_parent);
-  } else if (CXXStructIsLocalClass(str)) {
-    AppendCXXLocalClassScope(out, str);
   }
   AppendCXXNameComponent(out, type->template_origin->name.value);
   AppendCXXTemplateArgumentVector(out, type->template_arguments);
   if (nested) {
     StringAppendChar(out, 'E');
+  }
+  if (local != NULL) {
+    AppendCXXLocalNameDiscriminator(out, local);
   }
 }
 
@@ -1162,6 +1227,12 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
                             type->info.enum_info->tag_name, NULL);
   } else if (TypeIsVoid(type)) {
     StringAppendChar(out, 'v');
+  } else if (TypeIsNullPointer(type)) {
+    StringAppend(out, "Dn");
+  } else if (TypeIsBitInt(type)) {
+    StringAppend(out, TypeIsUnsigned(type) ? "DU" : "DB");
+    StringAppendInt64(out, type->bit_width);
+    StringAppendChar(out, '_');
   } else if (TypeIsBool(type)) {
     StringAppendChar(out, 'b');
   } else if (TypeIsReflection(type)) {
@@ -1361,6 +1432,13 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
   if (ns == NULL && owner != NULL && owner->tag_symbol != NULL) {
     ns = owner->tag_symbol->namespace_;
   }
+  Struct* local = owner != NULL && owner->tag_name != NULL
+                      ? CXXLocalClassRoot(owner)
+                      : NULL;
+  if (local != NULL) {
+    AppendCXXLocalNamePrefix(&mangled, local);
+    ns = NULL;
+  }
 
   bool nested = ns != NULL ||
                 (owner != NULL && owner->tag_name != NULL);
@@ -1376,6 +1454,9 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
     }
     AppendCXXNameComponent(&mangled, symbol->name.value);
     StringAppendChar(&mangled, 'E');
+    if (local != NULL) {
+      AppendCXXLocalNameDiscriminator(&mangled, local);
+    }
   } else {
     AppendCXXNameComponent(&mangled, symbol->name.value);
   }

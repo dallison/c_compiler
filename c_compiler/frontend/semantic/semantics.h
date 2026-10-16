@@ -55,6 +55,11 @@ typedef enum {
 // contains the conversion operation.
 void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx);
 
+// Rank (0 exact, 1-3 trailing standard conversion) of the best implicit
+// conversion function of class-typed `from` that reaches `to`, which may be a
+// reference type; -1 when there is none or the choice is ambiguous.
+int SemanticConversionFunctionRank(ASTNode* from, TypeRecord* to);
+
 // Applies the unique non-explicit conversion function from a class-valued
 // switch condition to an integral or enumeration type.
 bool SemanticConvertCXXSwitchCondition(ASTNode* from);

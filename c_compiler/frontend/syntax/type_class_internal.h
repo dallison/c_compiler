@@ -105,6 +105,17 @@ struct CXXConstructorInitList* FindTemplateConstructorInitializers(Symbol* symbo
 // The class the stored initializers were parsed in, or NULL when that is
 // `symbol`'s own owner.
 Struct* FindTemplateConstructorInitializersSourceOwner(Symbol* symbol);
+// The primary constructor whose parameters `symbol`'s initializers still name,
+// and the enclosing class arguments to substitute ahead of `symbol`'s own;
+// NULL when the initializers were already re-keyed onto `symbol`.
+Symbol* FindTemplateConstructorInitializersEnclosing(Symbol* symbol,
+                                                     Vector** enclosing_args);
+// Restores a deserialized entry's provenance; takes ownership of
+// `enclosing_args`.
+void SetTemplateConstructorInitializersOrigin(Symbol* symbol,
+                                              Struct* source_owner,
+                                              Symbol* enclosing_origin,
+                                              Vector* enclosing_args);
 void RegisterTemplateConstructorInitializers(
     Symbol* symbol, struct CXXConstructorInitList* initializers);
 void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to,

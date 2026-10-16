@@ -77,7 +77,6 @@ bool CXXSameAccessClass(Struct* a, Struct* b);
 static bool FunctionIsFriendOf(TypeRecord* current, Struct* owner);
 static bool CurrentFunctionIsFriendOf(Struct* owner);
 static bool EnclosingFunctionIsFriendOf(TypeRecord* current, Struct* owner);
-static bool MemberReceiverIsLValue(BinaryASTNode* node);
 static TypeRecord* NewStructTypeForAdjustment(Struct* str);
 static ASTNode* NewVirtualBaseOffsetLoad(ASTNode* receiver, int vbtable_index, SourceLocation location);
 static ASTNode* AddStaticOffsetToRuntimeOffset(ASTNode* offset, int byte_offset, SourceLocation location);
@@ -588,8 +587,19 @@ static void MemberCallLowerRetargetMemberSymbol(
               : member_owner;
     }
   }
-  if (!qualified_base_member && concrete_receiver != NULL &&
-      member->symbol != NULL) {
+  // A member template specialization (`(s.*&S::Get<1>)()`) is already the
+  // selected function; the name would find the template again.
+  bool template_specialization =
+      member->symbol != NULL && member->symbol->type != NULL &&
+      TypeIsFunction(member->symbol->type) &&
+      !member->symbol->flags.is_template &&
+      member->symbol->type->info.function.template_origin != NULL &&
+      member_owner != NULL && concrete_receiver != NULL &&
+      (concrete_receiver == member_owner ||
+       StructIsDerivedFrom(concrete_receiver, member_owner,
+                           /*public_only=*/false));
+  if (!qualified_base_member && !template_specialization &&
+      concrete_receiver != NULL && member->symbol != NULL) {
     StructMember* concrete_member =
         FindStructMember(concrete_receiver, &member->symbol->name);
     if (concrete_member != NULL && concrete_member->symbol != NULL &&
@@ -797,6 +807,43 @@ static void MemberCallLowerDiagnoseMemberCall(
   }
 }
 
+// A member found in a base class still needs `this` converted to that base,
+// which may be private (`using Base::f;`): member access was already checked,
+// so convert as a cast does.  A base at offset 0 is retyped in place, as any
+// offset-0 derived-to-base conversion is, so constant evaluation keeps binding
+// `this` to the complete object that a CRTP `static_cast<D&>(*this)` returns
+// to.
+static ASTNode* ConvertReceiverToMemberBase(ASTNode* receiver,
+                                            StructMember* member) {
+  if (member->symbol->type->info.function.prototype.length == 0 ||
+      receiver->type == NULL || !TypeIsStructOrUnionPointer(receiver->type)) {
+    return receiver;
+  }
+  Symbol* this_arg = member->symbol->type->info.function.prototype.value.p[0];
+  if (this_arg == NULL || this_arg->type == NULL ||
+      !TypeIsStructOrUnionPointer(this_arg->type)) {
+    return receiver;
+  }
+  Struct* from = receiver->type->next->info.struct_info;
+  Struct* base = this_arg->type->next->info.struct_info;
+  if (from == NULL || base == NULL || from == base ||
+      !StructIsDerivedFrom(from, base, /*public_only=*/false)) {
+    return receiver;
+  }
+  TypeRecord* base_type = NewStructTypeForAdjustment(base);
+  base_type->qualifiers = receiver->type->next->qualifiers;
+  int base_offset = -1;
+  if (TypeBaseOffset(receiver->type->next, base_type, /*public_only=*/false,
+                     &base_offset) &&
+      base_offset == 0) {
+    ASTNodeSetType(receiver, NewPointerTo(kQualPlain, base_type));
+    return receiver;
+  }
+  ASTNode* cast = NewCastASTNode(NewPointerTo(kQualPlain, base_type),
+                                 receiver->location, receiver);
+  return AnalyzeExpression(cast);
+}
+
 // Computes virtual vs static dispatch and prepares the implicit `this` argument
 // (or static-receiver side-effect preservation). May set caller_contract_function
 // on `node` for C++29 contract assertions on virtual calls.
@@ -872,6 +919,8 @@ static void MemberCallLowerPlanDispatch(
                                   offset_node);
       ASTNodeSetType(plan->receiver, receiver_type);
       plan->receiver->flags |= kASTAnalyzed;
+    } else if (!explicit_object && !plan->polymorphic_special_member) {
+      plan->receiver = ConvertReceiverToMemberBase(plan->receiver, member);
     }
   } else {
     plan->discarded_static_receiver = ASTNodeMove(member_access->left);
@@ -1352,7 +1401,7 @@ bool ASTNodeIsCXXBracedTemporary(ASTNode* node) {
 
 // Contract: Read-only lvalue category for ref-qualifier matching; arrow receivers
 // are always lvalues; dot excludes C++ braced temporaries lowered as compound literals.
-static bool MemberReceiverIsLValue(BinaryASTNode* node) {
+bool MemberReceiverIsLValue(BinaryASTNode* node) {
   if (node->base.op == AST_OP(arrow)) {
     return true;
   }
@@ -1371,7 +1420,11 @@ bool MemberReceiverMatchesRefQualifier(TypeRecord* func,
     case kCXXRefQualifierNone:
       return true;
     case kCXXRefQualifierLValue:
-      return MemberReceiverIsLValue(member_access);
+      // The implicit object parameter of `f() const&` is `const X&`, which
+      // binds an rvalue as well ([over.match.funcs]).
+      return MemberReceiverIsLValue(member_access) ||
+             (func->info.function.is_const_member &&
+              !func->info.function.is_volatile_member);
     case kCXXRefQualifierRValue:
       return !MemberReceiverIsLValue(member_access);
   }
@@ -2154,6 +2207,13 @@ static ASTNode* AnalyzeCXXFunctionalClassConstruction(VectorASTNode* node) {
 // no materialization applies. Caller owns the returned subtree.
 static ASTNode* MaterializeCXXByValueClassArgument(ASTNode* actual,
                                                    TypeRecord* formal_type) {
+  // An argument of an already-analyzed call (a cloned pack expansion) is our
+  // own `(T(&tmp, actual), tmp)`.  Re-analysis makes the comma an lvalue, and
+  // copying `tmp` again would need a copy constructor (`unique_ptr`).
+  if (actual != NULL && actual->op == AST_OP(comma) &&
+      (actual->flags & kASTFunctionParameterTemporary) != 0) {
+    return actual;
+  }
   if (!CompilerIsCXX() || actual == NULL || formal_type == NULL ||
       !TypeIsStructOrUnion(formal_type) ||
       !TypeIsStructOrUnion(actual->type) ||
@@ -2686,6 +2746,86 @@ static ASTNode* FunctionCallTryExplicitDestructor(VectorASTNode* node) {
   return TryAnalyzeCXXExplicitDestructorCall(node);
 }
 
+// An undeclared function named `name` in `ns`, as the parser invents for a
+// call that only ADL can resolve.  It is not added to `ns`, so a later
+// declaration does not see it; one symbol per (ns, name) is kept.
+static Symbol* AdlOnlyFunctionSymbol(Namespace* ns, String* name) {
+  static Vector symbols;
+  static bool symbols_ready;
+  if (!symbols_ready) {
+    VectorInit(&symbols);
+    symbols_ready = true;
+  }
+  for (size_t i = 0; i < symbols.length; i++) {
+    Symbol* existing = symbols.value.p[i];
+    if (existing->namespace_ == ns && StringEqualString(&existing->name, name)) {
+      return existing;
+    }
+  }
+  TypeRecord* result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                             kQualPlain);
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  func_type->info.function.unknown_args = true;
+  TypeRecordChain(func_type, result);
+  Symbol* function = NewSymbol(name->value, func_type, STO(implicit));
+  function->flags.is_forward_declared = true;
+  function->namespace_ = ns;
+  VectorAppend(&symbols, function);
+  return function;
+}
+
+// A call to an unqualified name in a class template with a dependent base is
+// parsed as `this->name`, since the base may declare it.  When the
+// instantiated class has no such member, the name is an ordinary function
+// found by unqualified lookup and ADL ([temp.dep]), e.g. gmock's `DoAll`
+// declared after `DoAllAction`.  Returns the replacement callee or NULL.
+static ASTNode* UnresolvedImplicitMemberCallee(ASTNode* callee) {
+  if (!CompilerIsCXX() || callee == NULL || callee->op != AST_OP(arrow) ||
+      (callee->flags & kASTUnresolvedImplicitMember) == 0) {
+    return NULL;
+  }
+  BinaryASTNode* access = (BinaryASTNode*)callee;
+  if (access->left == NULL || access->left->op != AST_OP(identifier) ||
+      access->right == NULL || access->right->op != AST_OP(string)) {
+    return NULL;
+  }
+  Symbol* this_symbol = ((IdentifierASTNode*)access->left)->symbol;
+  TypeRecord* this_type = this_symbol != NULL ? this_symbol->type : NULL;
+  if (this_type == NULL || !TypeIsStructOrUnionPointer(this_type) ||
+      this_type->next->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* owner = this_type->next->info.struct_info;
+  if (owner->is_template || TypeContainsTemplateParameter(this_type->next)) {
+    return NULL;
+  }
+  String* name = ((ConstantASTNode*)access->right)->value.string;
+  CXXAccess member_access = kAccessPublic;
+  Struct* member_owner = NULL;
+  int member_offset = 0;
+  if (name == NULL ||
+      FindStructMemberWithAccessAndOffsetByName(owner, name->value,
+                                                &member_access, &member_owner,
+                                                &member_offset) != NULL) {
+    return NULL;
+  }
+  Struct* outermost = owner;
+  while (outermost->lexical_parent != NULL) {
+    outermost = outermost->lexical_parent;
+  }
+  Namespace* ns = outermost->tag_symbol != NULL &&
+                          outermost->tag_symbol->namespace_ != NULL
+                      ? outermost->tag_symbol->namespace_
+                      : compiler->global_namespace;
+  Symbol* function = NamespaceLookupSymbolInEnclosingScopes(ns, name);
+  if (function == NULL || function->type == NULL ||
+      !TypeIsFunction(function->type) ||
+      function->type->info.function.cxx_member_owner != NULL) {
+    function = AdlOnlyFunctionSymbol(ns, name);
+  }
+  return NewIdentifierASTNode(function, callee->location);
+}
+
 // Detaches callee from the call node while analyzing to protect argument child
 // indices from parent replacement. Reattaches with child_id 0; may delete the
 // old callee subtree. Sets *syntactic_class_construction from callee flags.
@@ -2695,6 +2835,11 @@ static void FunctionCallAnalyzeAndAttachCallee(VectorASTNode* node,
   node->left = NULL;
   if (old_callee != NULL) {
     old_callee->parent = NULL;
+  }
+  ASTNode* free_callee = UnresolvedImplicitMemberCallee(old_callee);
+  if (free_callee != NULL) {
+    ASTNodeDelete(old_callee);
+    old_callee = free_callee;
   }
   *syntactic_class_construction =
       old_callee != NULL &&

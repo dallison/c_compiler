@@ -821,6 +821,16 @@ static bool InitCurrentAndAdvance(INode* inode, ASTNode* expr, bool constants_on
         SourceLocation location = expr->location;
         expr = AnalyzeExpression(NewCastASTNode(
             TypeRecordCopy(inode->type), location, ASTNodeMove(expr)));
+      } else if (CompilerIsCXX() && TypeIsStructOrUnion(expr->type) &&
+                 !StructInitializationTypesMatch(expr->type, inode->type) &&
+                 CXXFindConvertingConstructorCandidate(
+                     inode->type, expr, /*allow_explicit=*/false) == NULL &&
+                 SemanticConversionFunctionRank(expr, inode->type) >= 0) {
+        // [over.match.copy]: the source's conversion function yields the
+        // element itself; a constructor call from its result would copy it.
+        SourceLocation location = expr->location;
+        expr = AnalyzeExpression(NewCastASTNode(
+            TypeRecordCopy(inode->type), location, ASTNodeMove(expr)));
       }
       if (StructInitializationTypesMatch(expr->type, inode->type)) {
         // A struct/union can be initialized by an expression of the same

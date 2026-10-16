@@ -50,6 +50,7 @@ ASTNode* IdentityCloneNode(ASTNode* node, void* data);
 bool LowerMemberFunctionCall(VectorASTNode* node);
 bool MemberReceiverIsConst(BinaryASTNode* node);
 bool MemberReceiverIsVolatile(BinaryASTNode* node);
+bool MemberReceiverIsLValue(BinaryASTNode* node);
 bool MemberReceiverMatchesRefQualifier(TypeRecord* func, BinaryASTNode* member_access);
 ASTNode* NewAnalyzedBuiltinAddressOf(ASTNode* sub, SourceLocation location);
 ASTNode* NewVirtualCalleeFromFunction(ASTNode* receiver, TypeRecord* function_type, bool receiver_is_pointer, SourceLocation location);
