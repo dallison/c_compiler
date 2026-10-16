@@ -2670,6 +2670,35 @@ bool CXXTypeIsImplicitLifetimeAggregate(TypeRecord* type) {
   return false;
 }
 
+bool TypeIsEmptyClass(TypeRecord* type) {
+  if (!CompilerIsCXX() || type == NULL || !TypeIsStructOrUnion(type) ||
+      (type->type & kTypeUnion) != 0 || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  if (str->is_union || str->vptr_member != NULL || str->vbptr_member != NULL ||
+      str->virtual_bases.length > 0 || str->virtual_members.length > 0) {
+    return false;
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    bool zero_width_bit_field =
+        member != NULL && member->is_bit_field && member->bit_size == 0;
+    if (member != NULL && !member->is_static && !member->is_member_function &&
+        !member->is_using_declaration && !zero_width_bit_field &&
+        !StructMemberIsNestedType(member)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && !TypeIsEmptyClass(base->type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool CXXTypeIsTriviallyCopyable(TypeRecord* type) {
   if (type == NULL || TypeIsReference(type) || TypeIsFunction(type) ||
       TypeIsVoid(type)) {
@@ -3368,11 +3397,6 @@ void CXXFixupSpecialMemberTrivialityAfterLayout(Struct* str) {
   }
 }
 
-static bool CXXLambdaCaptureMemberIsPlaceholder(StructMember* member) {
-  return member != NULL && member->symbol != NULL &&
-         strcmp(member->symbol->name.value, "__lambda_empty") == 0;
-}
-
 static bool CXXMemberTypePreventsSpecialMember(TypeRecord* type,
                                                CXXSpecialMemberKind kind) {
   if (type == NULL || kind == kCXXSpecialMemberNone) {
@@ -3407,8 +3431,7 @@ static bool CXXLambdaClosureSpecialMemberIsTrivial(Struct* str,
     StructMember* member = str->members.value.p[i];
     if (member == NULL || member->symbol == NULL || member->is_static ||
         member->is_member_function || member->is_using_declaration ||
-        StructMemberIsNestedType(member) ||
-        CXXLambdaCaptureMemberIsPlaceholder(member)) {
+        StructMemberIsNestedType(member)) {
       continue;
     }
     TypeRecord* member_type = member->symbol->type;
@@ -3449,8 +3472,7 @@ static bool CXXLambdaCaptureMemberPreventsSpecialMember(
     StructMember* member = str->members.value.p[i];
     if (member == NULL || member->symbol == NULL || member->is_static ||
         member->is_member_function || member->is_using_declaration ||
-        StructMemberIsNestedType(member) ||
-        CXXLambdaCaptureMemberIsPlaceholder(member)) {
+        StructMemberIsNestedType(member)) {
       continue;
     }
     if (CXXMemberTypePreventsSpecialMember(member->symbol->type, kind)) {
@@ -3458,27 +3480,6 @@ static bool CXXLambdaCaptureMemberPreventsSpecialMember(
     }
   }
   return false;
-}
-
-void LambdaClosureRemoveEmptyPlaceholder(Struct* str) {
-  if (str == NULL) {
-    return;
-  }
-  StructMember* empty = FindStructMemberByName(str, "__lambda_empty");
-  if (empty == NULL) {
-    return;
-  }
-  for (size_t i = 0; i < str->members.length; i++) {
-    if (str->members.value.p[i] == empty) {
-      VectorDeleteElement(&str->members, i);
-      break;
-    }
-  }
-  String name;
-  StringInit(&name, "__lambda_empty");
-  MapRemove(&str->symbol_table, (MapKeyType){.p = &name});
-  StringDestruct(&name);
-  RelayoutStruct(str);
 }
 
 void AddImplicitLambdaClosureSpecialMembers(Syntax* syntax, Struct* str,

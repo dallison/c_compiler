@@ -44,6 +44,9 @@ void CXXVBTableInfoDelete(CXXVBTableInfo* info);
 void CXXVTableInfoDelete(CXXVTableInfo* info);
 
 bool TemplateArgumentEqual(TemplateArgument* left, TemplateArgument* right);
+// The Type bits of one spelling of each primitive type (`signed short int` and
+// `short` are the same type).
+Type CanonicalPrimitiveType(Type type);
 bool TemplateArgumentVectorEqual(Vector* left, Vector* right);
 
 bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);

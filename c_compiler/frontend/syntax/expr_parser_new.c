@@ -453,6 +453,19 @@ Vector* ParseCXXNewInitializerArguments(Syntax* syntax, Token open,
   return actuals;
 }
 
+// Returns the new-initializer arguments, taking ownership of `*parsed` when
+// they were already parsed (to deduce a placeholder type).
+static Vector* TakeCXXNewInitializerArguments(Syntax* syntax, Vector** parsed,
+                                              Token open,
+                                              TokenClass followers) {
+  if (*parsed != NULL) {
+    Vector* actuals = *parsed;
+    *parsed = NULL;
+    return actuals;
+  }
+  return ParseCXXNewInitializerArguments(syntax, open, followers);
+}
+
 
 // Looks ahead to distinguish placement arguments from a parenthesized
 // new-type-id.
@@ -855,6 +868,67 @@ static TypeRecord* DeduceCXXNewAllocatedType(Syntax* syntax,
   }
   TypeRecordDelete(allocated_type);
   return deduced;
+}
+
+
+// Deduces a new-type-id containing `auto` from its sole initializer, as for
+// `auto x(e);` ([expr.new]/2, [dcl.type.auto.deduct]).  Inside a template a
+// type-dependent initializer allocates `decltype(auto(e))`, which yields the
+// same decayed type once substitution makes `e` concrete.
+static TypeRecord* DeduceCXXNewPlaceholderType(Syntax* syntax,
+                                               TypeRecord* allocated_type,
+                                               Vector* actuals,
+                                               SourceLocation location) {
+  ASTNode* actual =
+      actuals != NULL && actuals->length == 1 ? actuals->value.p[0] : NULL;
+  if (actual == NULL || actual->op == AST_OP(braced_init)) {
+    SyntaxError(syntax, "new-expression with a placeholder type requires "
+                        "exactly one initializer expression");
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  TypeRecord* leaf = allocated_type;
+  while (leaf->next != NULL) {
+    leaf = leaf->next;
+  }
+  if ((leaf->type & kTypeDecltypeAuto) != 0) {
+    SyntaxError(syntax, "decltype(auto) in a new-expression is not supported");
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  Vector* analyzed_actuals = CloneAndAnalyzeCXXNewDeductionActuals(actuals);
+  ASTNode* analyzed = analyzed_actuals->value.p[0];
+  TypeRecord* init_type = analyzed != NULL ? analyzed->type : NULL;
+  TypeRecord* function = compiler->current_function;
+  bool dependent_context =
+      syntax->current_template_parameters != NULL ||
+      (function != NULL && TypeIsFunction(function) &&
+       function->info.function.template_parameters.length > 0);
+  bool dependent =
+      dependent_context &&
+      (init_type == NULL || TypeIsUnknown(init_type) ||
+       TypeContainsAuto(init_type) || TypeContainsTemplateParameter(init_type) ||
+       ExpressionIsTemplateDependent(analyzed));
+  TypeRecord* deduced = NULL;
+  if (dependent) {
+    ASTNode* operand = ASTNodeClone(actual, IdentityCloneNodeForCXXNew, NULL, NULL);
+    ASTNode* decay_copy =
+        NewCastASTNode(NewTypeRecord(kTypeAuto, kQualPlain), location, operand);
+    ((CastASTNode*)decay_copy)->kind = kCastAutoParen;
+    deduced = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, leaf->qualifiers);
+    deduced->dependent_decltype_expr = decay_copy;
+  } else if (init_type != NULL && !TypeIsUnknown(init_type) &&
+             !TypeContainsAuto(init_type)) {
+    TypeRecord* decayed = TypeDecayForByValueDeduction(init_type);
+    deduced = TypeDeduceAuto(allocated_type, decayed);
+    TypeRecordDelete(decayed);
+  }
+  VectorDeleteWithContents(analyzed_actuals,
+                           (VectorElementDestructor)ASTNodeDelete,
+                           /*free_element=*/false);
+  if (deduced == NULL) {
+    SyntaxError(syntax, "Cannot deduce the allocated type of a new-expression");
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  }
+  return TypeRecordCalculateSize(deduced);
 }
 
 
@@ -1525,6 +1599,29 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
     SyntaxError(syntax,
                 "Class template argument deduction requires an initializer");
   }
+  // The `auto` initializer, parsed for deduction and consumed below as the
+  // new-initializer.
+  Vector* placeholder_actuals = NULL;
+  if (CompilerIsCXX() && TypeContainsAuto(allocated_type)) {
+    if (initializer_open == TOK(lparen) || initializer_open == TOK(lbrace)) {
+      placeholder_actuals =
+          ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
+      TypeRecord* deduced = DeduceCXXNewPlaceholderType(
+          syntax, allocated_type, placeholder_actuals, location);
+      TypeRecordDelete(allocated_type);
+      allocated_type = deduced;
+      if (TypeIsUnknown(deduced) && !TypeContainsTemplateParameter(deduced)) {
+        VectorDeleteWithContents(placeholder_actuals,
+                                 (VectorElementDestructor)ASTNodeDelete,
+                                 /*free_element=*/false);
+        placeholder_actuals = NewVector();
+      }
+    } else {
+      SyntaxError(syntax, "new-expression with a placeholder type requires "
+                          "an initializer");
+      allocated_type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+    }
+  }
   TypeRecordCalculateSize(allocated_type);
   bool allocated_type_dependent =
       TypeContainsTemplateParameter(allocated_type);
@@ -1611,20 +1708,20 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
       // `new T{...}` is aggregate initialization, as is the C++20
       // parenthesized form `new T(...)`.  A single element of type T copies
       // it ([dcl.init.list]/3.2); no element value-initializes.
-      if (initializer_open == TOK(lbrace)) {
+      if (initializer_open == TOK(lbrace) && placeholder_actuals == NULL) {
         LexNextToken(syntax->lex);
         aggregate_initializer = SyntaxParseBracedInitializer(syntax);
       } else {
         aggregate_initializer = NewCXXNewBracedInitializer(
-            ParseCXXNewInitializerArguments(syntax, initializer_open,
-                                            followers),
+            TakeCXXNewInitializerArguments(syntax, &placeholder_actuals,
+                                           initializer_open, followers),
             location);
       }
       value_init = ((BracedInitializerASTNode*)aggregate_initializer)
                        ->initializers->length == 0;
     } else if (FindCXXConstructorForType(allocated_type) == NULL) {
-      Vector* initializers =
-          ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
+      Vector* initializers = TakeCXXNewInitializerArguments(
+          syntax, &placeholder_actuals, initializer_open, followers);
       bool class_direct_init =
           !allocated_type_dependent && TypeIsStructOrUnion(allocated_type) &&
           allocated_type->info.struct_info != NULL &&
@@ -1679,8 +1776,8 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
       // `new (p) T{a, b}` on a class with constructors is direct initialization
       // via the matching constructor, not aggregate/braced assignment into
       // storage (types such as ArenaBlock have const members and no assignment).
-      ctor_actuals =
-          ParseCXXNewInitializerArguments(syntax, initializer_open, followers);
+      ctor_actuals = TakeCXXNewInitializerArguments(
+          syntax, &placeholder_actuals, initializer_open, followers);
     }
   } else if (ctor_actuals == NULL &&
              FindCXXConstructorForType(allocated_type) != NULL) {

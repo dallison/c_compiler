@@ -1313,7 +1313,7 @@ static bool CXXStructSameTemplateFamilyForTypeEquality(Struct* left,
 // C and C++ allow the `int` keyword to be omitted from signed and unsigned
 // integer type specifiers.  The parser preserves the spelling in Type bits, so
 // canonicalize those equivalent spellings before comparing types.
-static Type CanonicalPrimitiveType(Type type) {
+Type CanonicalPrimitiveType(Type type) {
   if ((type & kTypeInt128) != 0) {
     return type & ~kTypeSigned;
   }
@@ -2247,6 +2247,9 @@ TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type) {
 // Whether `from`'s pointee may be pointed to by `to` once qualifiers are set
 // aside: the same type, or a C++ pointer conversion that changes only the
 // pointee's noexcept, array bound or array element qualifiers.
+static bool MultilevelQualificationCompatible(TypeRecord* from, TypeRecord* to,
+                                              bool outer_const);
+
 static bool PointeesCompatible(TypeRecord* from, TypeRecord* to) {
   if (TypeContainsTemplateParameter(from) ||
       TypeContainsTemplateParameter(to)) {
@@ -2284,7 +2287,34 @@ static bool PointeesCompatible(TypeRecord* from, TypeRecord* to) {
       from->info.function.is_noexcept && !to->info.function.is_noexcept) {
     return TypeEqualIgnoringFunctionNoexcept(from, to);
   }
+  if (from->declarator == kDeclPointer && to->declarator == kDeclPointer) {
+    return MultilevelQualificationCompatible(from, to, true);
+  }
   return false;
+}
+
+// [conv.qual] below the first level: `from` and `to` are pointers whose own
+// qualifiers were already checked, and `outer_const` says whether every level
+// above them is const in `to`.  A deeper level may gain cv-qualifiers only
+// when all levels above it are const (`char**` converts to
+// `const char* const*`, not to `const char**`).
+static bool MultilevelQualificationCompatible(TypeRecord* from, TypeRecord* to,
+                                              bool outer_const) {
+  if (from->next == NULL || to->next == NULL) {
+    return false;
+  }
+  const Qualifiers cv = kQualConst | kQualVolatile;
+  Qualifiers from_cv = from->next->qualifiers & cv;
+  Qualifiers to_cv = to->next->qualifiers & cv;
+  bool all_const = outer_const && (to->qualifiers & kQualConst) != 0;
+  if ((from_cv & ~to_cv) != 0 || (from_cv != to_cv && !all_const)) {
+    return false;
+  }
+  if (from->next->declarator == kDeclPointer &&
+      to->next->declarator == kDeclPointer) {
+    return MultilevelQualificationCompatible(from->next, to->next, all_const);
+  }
+  return PointeesCompatible(from->next, to->next);
 }
 
 bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {

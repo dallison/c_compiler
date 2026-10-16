@@ -274,6 +274,14 @@ static bool TryPlaceNoUniqueAddressMember(Struct* str,
   return false;
 }
 
+void StructLayoutDataMember(Struct* str, StructMember* member) {
+  AlignNextOffsetForSymbol(str, member->symbol);
+  member->byte_offset = str->next_offset;
+  if (!TryPlaceNoUniqueAddressMember(str, member)) {
+    UpdateStructSize(str, member->symbol->type, str->is_union);
+  }
+}
+
 void StructAddSyntheticMember(Struct* str, StructMember* member) {
   bool overlaps = false;
   if (member->is_member_function) {

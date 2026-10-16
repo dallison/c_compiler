@@ -1916,11 +1916,9 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           instantiated->is_bit_field = member->is_bit_field;
           instantiated->bit_offset = member->bit_offset;
           instantiated->cxx_vcall_offset = member->cxx_vcall_offset;
-          AlignNextOffsetForSymbol(str, member_symbol);
-          instantiated->byte_offset = str->next_offset;
           instantiated->index = str->members.length;
           AddStructMember(parser, str, instantiated);
-          UpdateStructSize(str, member_type, str->is_union);
+          StructLayoutDataMember(str, instantiated);
         }
         continue;
       }
@@ -2072,15 +2070,13 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     if (!instantiated->is_static && !instantiated->is_member_function &&
         !instantiated->is_using_declaration &&
         !StructMemberIsNestedType(instantiated)) {
-      AlignNextOffsetForSymbol(str, member_symbol);
-      instantiated->byte_offset = str->next_offset;
       instantiated->index = str->members.length;
       if (instantiated->is_anon) {
         VectorAppend(&str->members, instantiated);
       } else {
         AddStructMember(parser, str, instantiated);
       }
-      UpdateStructSize(str, member_type, str->is_union);
+      StructLayoutDataMember(str, instantiated);
     } else {
       instantiated->byte_offset = member->byte_offset;
       instantiated->index = str->members.length;
@@ -12221,7 +12217,7 @@ static TypeRecord* InstantiateSimpleClassTemplateUnchecked(
     }
     if (!instantiated->is_static && !instantiated->is_using_declaration &&
         !StructMemberIsNestedType(instantiated)) {
-      UpdateStructSize(str, member_type, str->is_union);
+      StructLayoutDataMember(str, instantiated);
     }
   }
   if (StructHasBitFieldMembers(source_struct)) {

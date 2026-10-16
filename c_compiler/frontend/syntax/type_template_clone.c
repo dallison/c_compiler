@@ -4886,6 +4886,23 @@ static bool ClonedLocalClassRebuilt(Struct* receiver, Struct* source) {
          !StructIsDerivedFrom(receiver, source, /*public_only=*/false);
 }
 
+/* A reference data member designates its referent ([expr.ref]); only a
+ * mem-initializer target keeps the reference type.  The cloned access still
+ * carries the type its analysis chose, so keep that choice when retyping it
+ * for the rebound member. */
+static void SetReboundMemberAccessType(ASTNode* node, StructMember* member) {
+  TypeRecord* type = member->symbol->type;
+  if (!member->is_static && !member->is_member_function &&
+      TypeIsReference(type) && node->type != NULL &&
+      !TypeIsReference(node->type)) {
+    type = type->next;
+  }
+  ASTNodeSetType(node, type);
+  if (!member->is_member_function) {
+    node->value_category = kValueCategoryLvalue;
+  }
+}
+
 static void RebindClonedConcreteMemberAccess(
     TemplateFunctionBodyClone* clone, ASTNode* node) {
   if (node == NULL ||
@@ -4938,10 +4955,7 @@ static void RebindClonedConcreteMemberAccess(
       node->flags &= ~kASTAnalyzed;
     }
     if (member_node->member->symbol != NULL) {
-      ASTNodeSetType(node, member_node->member->symbol->type);
-      if (!member_node->member->is_member_function) {
-        node->value_category = kValueCategoryLvalue;
-      }
+      SetReboundMemberAccessType(node, member_node->member);
     }
     return;
   }
@@ -4993,10 +5007,7 @@ static void RebindClonedConcreteMemberAccess(
     }
   }
   if (member_node->member != NULL && member_node->member->symbol != NULL) {
-    ASTNodeSetType(node, member_node->member->symbol->type);
-    if (!member_node->member->is_member_function) {
-      node->value_category = kValueCategoryLvalue;
-    }
+    SetReboundMemberAccessType(node, member_node->member);
   }
 }
 

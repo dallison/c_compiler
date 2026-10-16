@@ -349,7 +349,7 @@ TypeRecord* MaterializeConversionClass(TypeRecord* type) {
   return materialized != NULL ? materialized : type;
 }
 
-// Contract: On success returns a new analyzed lvalue for `referent`, consuming
+// Contract: On success returns a new analyzed glvalue for `referent`, consuming
 // `expr` via ASTNodeMove; on failure returns NULL and leaves `expr` untouched.
 // Materializes template class types internally and deletes any copies that differ
 // from the inputs; caller owns the returned tree. Requires HasAddress(expr).
@@ -412,6 +412,7 @@ ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
     referent = to_type;
   }
   SourceLocation loc = expr->location;
+  bool rvalue = expr->value_category != kValueCategoryLvalue;
   ASTNode* moved = ASTNodeMove(expr);
   ASTNode* addr = NewAnalyzedBuiltinAddressOf(moved, loc);
   TypeRecord* base_ptr = NewPointerTo(kQualPlain, TypeRecordCopy(referent));
@@ -422,7 +423,13 @@ ASTNode* TryBindReferenceToBaseSubobject(ASTNode* expr,
   ((CastASTNode*)ptr_cast)->kind = kCastStatic;
   ptr_cast = AnalyzeExpression(ptr_cast);
   ASTNode* deref = NewUnaryASTNode(AST_OP(contents), NULL, loc, ptr_cast);
-  return AnalyzeExpression(deref);
+  deref = AnalyzeExpression(deref);
+  // The base subobject of an xvalue (or of a materialized prvalue) is an
+  // xvalue ([expr.static.cast]), so it still binds to `Base&&`.
+  if (rvalue && deref != NULL) {
+    deref->value_category = kValueCategoryXvalue;
+  }
+  return deref;
 }
 
 // [bit.cast]: both types are trivially copyable and of the same size, and the

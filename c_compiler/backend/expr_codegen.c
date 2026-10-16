@@ -2875,7 +2875,7 @@ static void GenerateBracedInitializer(Generator* gen, ASTNode* node,
       // into the destination.
       bool by_value_call =
           ExpressionConstructsAggregateInPlace(designated_expr);
-      if (!by_value_call) {
+      if (!by_value_call && !TypeIsEmptyClass(designated_init->base.type)) {
         // A reference-returning call already produces a pointer to the source
         // object; other struct expressions produce the object and need their
         // address taken first.
@@ -3218,6 +3218,9 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       value = GenerateExpression(gen, node->right);
       gen->current_struct_address = old_struct_address;
       return result_address_needed ? dest : value;
+    } else if (TypeIsEmptyClass(node->left->type)) {
+      value = GenerateExpression(gen, node->right);
+      assignment = NULL;
     } else {
       // Struct or union assignment, use memcpy.  A call that returns a
       // reference already yields a pointer to the source object; any other
@@ -3302,7 +3305,7 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     }
   }
 
-  if (!TypeIsAtomic(node->left->type)) {
+  if (assignment != NULL && !TypeIsAtomic(node->left->type)) {
     CheckForVarDef(assignment, node->left);
   }
   if (TypeIsStructOrUnion(node->left->type) ||

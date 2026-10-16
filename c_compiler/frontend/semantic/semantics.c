@@ -2243,6 +2243,9 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
             SemanticTypeConversionError(from, to,
                                         "Illegal pointer conversion; "
                                         "from '%s' to '%s'");
+            // Recover with the target type: an initializer is converted again
+            // when it is flattened, and must not be diagnosed twice.
+            ASTNodeSetType(from, to);
             return;
           }
           SemanticTypeConversionWarning(from, to, "incompatible-pointer-types",

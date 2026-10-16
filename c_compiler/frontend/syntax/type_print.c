@@ -740,7 +740,7 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
       if (type->qualifiers != 0) {
         StringAppend(result, " ");
       }
-      TypeToString(type->type, result);
+      TypeToString(CanonicalPrimitiveType(type->type), result);
       if (TypeIsStructOrUnion(type)) {
         Struct* str = type->info.struct_info;
         if (str != NULL && str->tag_name != NULL) {

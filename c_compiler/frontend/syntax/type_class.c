@@ -846,6 +846,17 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   if (str->lexical_parent == NULL && saved_member_owner != NULL) {
     str->lexical_parent = saved_member_owner;
   }
+  // A specialization of a member class template is a member of the primary's
+  // class, with its access, even when defined at namespace scope
+  // (`template <> struct Outer::Inner<int> { ... };`).
+  Symbol* primary = specialization_primary != NULL
+                        ? specialization_primary
+                        : partial_specialization_primary;
+  if (str->lexical_parent == NULL && primary != NULL && primary->type != NULL &&
+      TypeIsStructOrUnion(primary->type) &&
+      primary->type->info.struct_info != NULL) {
+    str->lexical_parent = primary->type->info.struct_info->lexical_parent;
+  }
   parser->cxx_member_owner = str;
   parser->syntax->cxx_class_head = str;
   ParseStructMemberList(parser, str, is_union, tag_name);

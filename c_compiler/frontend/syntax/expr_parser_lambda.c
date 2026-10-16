@@ -789,15 +789,7 @@ static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location,
   closure->tag_name = &tag->name;
   closure->tag_symbol = tag;
   SyntaxAddTag(syntax, tag);
-  Symbol* empty_member =
-      NewSymbol("__lambda_empty", NewTypeRecordWithSize(kTypeChar, kQualPlain),
-                STO(implicit));
-  empty_member->flags.invented = true;
-  empty_member->flags.is_defined = true;
-  empty_member->location = location;
-  StructMember* member = NewStructMember(empty_member);
-  member->access = kAccessPrivate;
-  StructAddSyntheticMember(closure, member);
+  FinalizeStructAlignment(closure);
   TypeRecordCalculateSize(type);
   StringDestruct(&tag_name);
   *closure_type = type;
@@ -1088,7 +1080,7 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
     capture->field = field;
   }
   if (captures->length > 0) {
-    LambdaClosureRemoveEmptyPlaceholder(closure);
+    RelayoutStruct(closure);
   }
   closure_type->size = closure->size;
   TypeRecordCalculateSize(closure_type);

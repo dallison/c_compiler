@@ -29,6 +29,10 @@ void AddStructMember(TypeParser* parser, Struct* str, StructMember* member);
 void AppendStructMemberOverload(TypeParser* parser, Struct* str,
                                 StructMember* first, StructMember* member);
 void UpdateStructSize(Struct* str, TypeRecord* member_type, bool is_union);
+// Places a non-static, non-bit-field data member at the next aligned offset
+// and grows the struct, unless a [[no_unique_address]] empty member can share
+// existing storage.
+void StructLayoutDataMember(Struct* str, StructMember* member);
 void FinalizeStructAlignment(Struct* str);
 void StructApplyLayoutAttributes(Struct* str, Vector* attrs);
 bool RelayoutStruct(Struct* str);
@@ -94,7 +98,6 @@ void CXXFixupSpecialMemberTrivialityAfterLayout(Struct* str);
 void AddImplicitLambdaClosureSpecialMembers(struct Syntax* syntax, Struct* str,
                                             Symbol* tag, bool has_capture_fields,
                                             bool has_explicit_template_params);
-void LambdaClosureRemoveEmptyPlaceholder(Struct* str);
 void AddImplicitCXXDestructorIfNeeded(TypeParser* parser, Struct* str,
                                       Symbol* tag);
 void AddImplicitCXXDeductionGuides(Struct* str, Symbol* tag);

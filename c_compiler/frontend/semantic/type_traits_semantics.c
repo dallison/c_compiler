@@ -1317,26 +1317,8 @@ static bool TypeTraitIsPolymorphic(TypeRecord* type) {
 }
 
 static bool TypeTraitIsEmpty(TypeRecord* type) {
-  if (!TypeTraitIsClass(type) || TypeTraitIsPolymorphic(type)) {
-    return false;
-  }
-  Struct* str = type->info.struct_info;
-  for (size_t i = 0; i < str->members.length; i++) {
-    StructMember* member = (StructMember*)str->members.value.p[i];
-    bool zero_width_bit_field =
-        member != NULL && member->is_bit_field && member->bit_size == 0;
-    if (member != NULL && !member->is_static && !member->is_member_function &&
-        !zero_width_bit_field && !StructMemberIsNestedType(member)) {
-      return false;
-    }
-  }
-  for (size_t i = 0; i < str->bases.length; i++) {
-    CXXBaseSpecifier* base = (CXXBaseSpecifier*)str->bases.value.p[i];
-    if (base != NULL && !TypeTraitIsEmpty(base->type)) {
-      return false;
-    }
-  }
-  return true;
+  return TypeTraitIsClass(type) && !TypeTraitIsPolymorphic(type) &&
+         TypeIsEmptyClass(type);
 }
 
 static bool TypeTraitIsFinal(TypeRecord* type) {

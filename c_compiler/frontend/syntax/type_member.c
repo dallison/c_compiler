@@ -4125,12 +4125,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           }
           member_decl_had_inline_body |= has_inline_body;
         } else {
-          // Regular member, align the member to the appropriate boundary.
-          AlignNextOffsetForSymbol(str, member_symbol);
-          member->byte_offset = str->next_offset;
           member->index = str->members.length - 1;
-
-          UpdateStructSize(str, member_symbol->type, is_union);
+          StructLayoutDataMember(str, member);
           member->default_initializer =
               SyntaxParseCXXDefaultMemberInitializer(parser->syntax);
         }
@@ -4267,10 +4263,8 @@ bool ParseInjectedClassMember(TypeParser* parser, Struct* str, CXXAccess access,
   member->is_static = false;
   member->is_member_function = false;
   AddStructMember(parser, str, member);
-  AlignNextOffsetForSymbol(str, member_symbol);
-  member->byte_offset = str->next_offset;
   member->index = str->members.length - 1;
-  UpdateStructSize(str, member_symbol->type, str->is_union);
+  StructLayoutDataMember(str, member);
   if (!LexLookingAt(parser->lex, TOK(semicolon))) {
     SyntaxNeedSemicolon(parser->syntax, TC(type));
   } else {

@@ -51,7 +51,7 @@ static void ReanalyzeLambdaBodyAfterCaptureDeduction(Struct* closure,
 static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node);
 static void ExpandLambdaArrayCaptureCopies(CompoundLiteralASTNode* node);
 
-// Contract: Read-only; true when closure has non-sentinel data members.
+// Contract: Read-only; true when closure has data members.
 static bool ClosureHasCaptureFields(Struct* closure) {
   if (closure == NULL) {
     return true;
@@ -59,8 +59,7 @@ static bool ClosureHasCaptureFields(Struct* closure) {
   for (size_t i = 0; i < closure->members.length; i++) {
     StructMember* member = closure->members.value.p[i];
     if (member == NULL || member->symbol == NULL || member->is_static ||
-        member->is_member_function || member->is_using_declaration ||
-        StringEqual(&member->symbol->name, "__lambda_empty")) {
+        member->is_member_function || member->is_using_declaration) {
       continue;
     }
     return true;
