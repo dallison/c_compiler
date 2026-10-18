@@ -115,6 +115,20 @@ void DiagnosticErrorTrapEnd(bool saved);
 void DiagnosticErrorTrapEndPropagating(bool saved);
 bool DiagnosticErrorTrapped(void);
 
+// Counts the diagnostics reported between Begin and End that escape the
+// region: an error that is printed, dropped by suppression active at Begin, or
+// caught by a trap open at Begin; a warning not dropped by suppression begun
+// inside the region.  Diagnostics a region traps or suppresses itself are its
+// own business.  Watches nest; an inner watch may over-count for an outer one.
+typedef struct DiagnosticWatch {
+  int saved_trap_depth;
+  int saved_suppression_depth;
+  int errors;    // After End: escaped errors.
+  int warnings;  // After End: escaped warnings.
+} DiagnosticWatch;
+void DiagnosticWatchBegin(DiagnosticWatch* watch);
+void DiagnosticWatchEnd(DiagnosticWatch* watch);
+
 // #pragma diagnostic {ignored,warning,error} "-W<name>" actions.
 void DiagnosticIgnore(const char* warning);
 void DiagnosticWarn(const char* warning);

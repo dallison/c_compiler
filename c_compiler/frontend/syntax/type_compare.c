@@ -738,6 +738,10 @@ static uint64_t HashTemplateArgumentVector(uint64_t hash, Vector* args) {
   return hash;
 }
 
+uint64_t TemplateArgumentVectorHash(Vector* args) {
+  return HashTemplateArgumentVector(UINT64_C(1469598103934665603), args);
+}
+
 static uint64_t HashFunctionTemplateArguments(Symbol* templ, Vector* args) {
   (void)templ;
   return HashTemplateArgumentVector(UINT64_C(1469598103934665603), args);

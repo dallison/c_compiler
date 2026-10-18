@@ -359,6 +359,12 @@ typedef struct Compiler {
 
   // Front end.
   int num_errors;
+  // Diagnostics that escaped the innermost DiagnosticWatch, and the trap and
+  // suppression depths at which it began.
+  int escaped_error_reports;
+  int escaped_warning_reports;
+  int diagnostic_watch_trap_depth;
+  int diagnostic_watch_suppression_depth;
   int max_errors;
   LanguageStandard language_standard;
   ContractEvaluationSemantic contract_semantic;

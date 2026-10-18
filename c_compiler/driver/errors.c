@@ -364,7 +364,37 @@ void DiagnosticErrorTrapEndPropagating(bool saved) {
   DiagnosticErrorTrapEnd(saved);
   if (trapped && compiler->diagnostic_error_trap_depth > 0) {
     compiler->diagnostic_error_trapped = true;
+    if (compiler->diagnostic_error_trap_depth <=
+        compiler->diagnostic_watch_trap_depth) {
+      compiler->escaped_error_reports++;
+    }
   }
+}
+
+void DiagnosticWatchBegin(DiagnosticWatch* watch) {
+  watch->saved_trap_depth = compiler->diagnostic_watch_trap_depth;
+  watch->saved_suppression_depth = compiler->diagnostic_watch_suppression_depth;
+  watch->errors = compiler->escaped_error_reports;
+  watch->warnings = compiler->escaped_warning_reports;
+  compiler->diagnostic_watch_trap_depth = compiler->diagnostic_error_trap_depth;
+  compiler->diagnostic_watch_suppression_depth =
+      compiler->diagnostic_suppression_depth;
+}
+
+void DiagnosticWatchEnd(DiagnosticWatch* watch) {
+  compiler->diagnostic_watch_trap_depth = watch->saved_trap_depth;
+  compiler->diagnostic_watch_suppression_depth = watch->saved_suppression_depth;
+  watch->errors = compiler->escaped_error_reports - watch->errors;
+  watch->warnings = compiler->escaped_warning_reports - watch->warnings;
+}
+
+static bool ErrorEscapesDiagnosticWatch(void) {
+  if (compiler->diagnostic_error_trap_depth > 0) {
+    return compiler->diagnostic_error_trap_depth <=
+           compiler->diagnostic_watch_trap_depth;
+  }
+  return compiler->diagnostic_suppression_depth <=
+         compiler->diagnostic_watch_suppression_depth;
 }
 
 bool DiagnosticErrorTrapped(void) {
@@ -455,6 +485,9 @@ static bool IsWarningError(const char* warning) {
 
 bool VReportError(const char* filename, int lineno, const char* error,
                   va_list arg) {
+  if (ErrorEscapesDiagnosticWatch()) {
+    compiler->escaped_error_reports++;
+  }
   if (compiler->diagnostic_error_trap_depth > 0) {
     // A speculative parse is in progress; record that an error occurred but do
     // not print or count it.  The caller decides whether to roll back.
@@ -529,6 +562,10 @@ void ReportErrorAtLocation(SourceLocation location, const char* error, ...) {
 
 bool VReportWarning(const char* filename, int lineno, const char* warn,
                     const char* warning, va_list arg) {
+  if (compiler->diagnostic_suppression_depth <=
+      compiler->diagnostic_watch_suppression_depth) {
+    compiler->escaped_warning_reports++;
+  }
   if (DiagnosticsSuppressed()) {
     return false;
   }

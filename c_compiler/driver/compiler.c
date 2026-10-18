@@ -4559,6 +4559,10 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->pack_alignment = 0;
   VectorInit(&compiler->pack_stack);
   compiler->num_errors = 0;
+  compiler->escaped_error_reports = 0;
+  compiler->escaped_warning_reports = 0;
+  compiler->diagnostic_watch_trap_depth = INT_MAX;
+  compiler->diagnostic_watch_suppression_depth = INT_MAX;
   compiler->syntax_only = false;
   compiler->lto = false;
   compiler->lto_ir_only = false;
@@ -5327,6 +5331,7 @@ void CompilerDestruct(Compiler* compiler) {
                              /*free_element=*/true);
   VectorDestruct(&compiler->cxx_lazy_static_variables);
   TypeReleaseLateMemberBodies();
+  TypeReleaseTemplateMemos();
   MapDestructWithContents(&compiler->rtti_typeinfo_map, FreeRttiTypeInfoKey);
 
   for (size_t i = 0; i < compiler->literals.length; i++) {

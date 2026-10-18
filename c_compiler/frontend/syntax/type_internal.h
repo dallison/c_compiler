@@ -48,6 +48,8 @@ bool TemplateArgumentEqual(TemplateArgument* left, TemplateArgument* right);
 // `short` are the same type).
 Type CanonicalPrimitiveType(Type type);
 bool TemplateArgumentVectorEqual(Vector* left, Vector* right);
+// Consistent with TemplateArgumentVectorEqual.
+uint64_t TemplateArgumentVectorHash(Vector* args);
 
 bool TemplateArgumentVectorContainsTemplateParameter(Vector* args);
 bool TemplateArgumentContainsTemplateParameter(TemplateArgument* arg);

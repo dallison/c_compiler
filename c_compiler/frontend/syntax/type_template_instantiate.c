@@ -10934,18 +10934,266 @@ static Vector* CompleteFunctionTemplateArgumentsUnsuspended(
     TypeParser* parser, TypeRecord* func, Vector* args, bool emit_error,
     TemplateArgumentOwnership ownership);
 
+// Overload resolution asks for the same template with the same concrete
+// arguments over and over: every converting-constructor probe completes a
+// function template's default arguments, and every mention of a class template
+// specialization re-derives its default arguments, partial specialization and
+// name before finding the existing instantiation.  A result computed without
+// diagnostics is remembered by template, substitution context and arguments,
+// compared the way instantiations are.  A failure is not remembered: it may be
+// due to a class that is completed later.
+typedef struct TemplateMemo {
+  const void* templ;  // Function template TypeRecord or class template Symbol.
+  Struct* access_context;
+  Struct* substitution_source;
+  Struct* substitution_target;
+  Struct* enclosing_substitution_source;
+  Struct* enclosing_substitution_target;
+  Symbol* body_clone_source_function;
+  Symbol* body_clone_target_function;
+  bool enclosing_arguments_only;
+  Vector* args;       // Owned copy.
+  Vector* completed;  // Completed function template arguments (owned).
+  Symbol* instance;   // Existing class template instantiation.
+  bool only_while_suppressed;
+  uint64_t hash;
+} TemplateMemo;
+
+typedef enum {
+  kTemplateMemoForget,
+  kTemplateMemoRemember,
+  kTemplateMemoRememberWhileSuppressed,
+} TemplateMemoVerdict;
+
+static TemplateMemo** g_template_memos = NULL;
+static size_t g_template_memo_capacity = 0;
+static size_t g_template_memo_count = 0;
+
+static bool TemplateMemoArgumentConcrete(TemplateArgument* arg) {
+  if (arg == NULL || arg->dependent_expr != NULL ||
+      arg->pack_index_expr != NULL || arg->template_parameter_index >= 0 ||
+      (arg->type != NULL && TypeContainsTemplateParameter(arg->type))) {
+    return false;
+  }
+  for (size_t i = 0;
+       arg->pack_arguments != NULL && i < arg->pack_arguments->length; i++) {
+    if (!TemplateMemoArgumentConcrete(arg->pack_arguments->value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// An undeduced function template argument (NULL) takes the parameter's
+// default and keys as itself.
+static bool TemplateMemoArgumentsConcrete(Vector* args) {
+  if (args == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    if (args->value.p[i] != NULL &&
+        !TemplateMemoArgumentConcrete(args->value.p[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static uint64_t TemplateMemoMix(uint64_t h, uint64_t v) {
+  return h ^ (v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2));
+}
+
+static void InitTemplateMemoKey(TemplateMemo* key, TypeParser* parser,
+                                const void* templ, Vector* args) {
+  memset(key, 0, sizeof(*key));
+  key->templ = templ;
+  key->access_context = compiler->current_class_access_context;
+  if (parser != NULL) {
+    key->substitution_source = parser->template_substitution_source;
+    key->substitution_target = parser->template_substitution_target;
+    key->enclosing_substitution_source =
+        parser->enclosing_template_substitution_source;
+    key->enclosing_substitution_target =
+        parser->enclosing_template_substitution_target;
+    key->body_clone_source_function = parser->body_clone_source_function;
+    key->body_clone_target_function = parser->body_clone_target_function;
+    key->enclosing_arguments_only =
+        parser->substituting_enclosing_template_arguments_only;
+  }
+  key->args = args;
+  uint64_t h = TemplateArgumentVectorHash(args);
+  h = TemplateMemoMix(h, (uintptr_t)templ);
+  h = TemplateMemoMix(h, (uintptr_t)key->access_context);
+  h = TemplateMemoMix(h, (uintptr_t)key->substitution_source);
+  h = TemplateMemoMix(h, (uintptr_t)key->substitution_target);
+  h = TemplateMemoMix(h, (uintptr_t)key->enclosing_substitution_source);
+  h = TemplateMemoMix(h, (uintptr_t)key->enclosing_substitution_target);
+  h = TemplateMemoMix(h, (uintptr_t)key->body_clone_source_function);
+  h = TemplateMemoMix(h, (uintptr_t)key->body_clone_target_function);
+  key->hash = TemplateMemoMix(h, key->enclosing_arguments_only);
+}
+
+static bool TemplateMemoKeyMatches(TemplateMemo* entry, TemplateMemo* key) {
+  return entry->hash == key->hash && entry->templ == key->templ &&
+         entry->access_context == key->access_context &&
+         entry->substitution_source == key->substitution_source &&
+         entry->substitution_target == key->substitution_target &&
+         entry->enclosing_substitution_source ==
+             key->enclosing_substitution_source &&
+         entry->enclosing_substitution_target ==
+             key->enclosing_substitution_target &&
+         entry->body_clone_source_function ==
+             key->body_clone_source_function &&
+         entry->body_clone_target_function ==
+             key->body_clone_target_function &&
+         entry->enclosing_arguments_only == key->enclosing_arguments_only &&
+         TemplateArgumentVectorEqual(entry->args, key->args);
+}
+
+static size_t TemplateMemoSlot(TemplateMemo* key) {
+  size_t mask = g_template_memo_capacity - 1;
+  size_t slot = (size_t)key->hash & mask;
+  while (g_template_memos[slot] != NULL &&
+         !TemplateMemoKeyMatches(g_template_memos[slot], key)) {
+    slot = (slot + 1) & mask;
+  }
+  return slot;
+}
+
+static TemplateMemo* FindTemplateMemo(TemplateMemo* key) {
+  return g_template_memo_count > 0 ? g_template_memos[TemplateMemoSlot(key)]
+                                   : NULL;
+}
+
+// Takes ownership of `key->args`.  A nested computation of the same key may
+// have remembered it first.
+static void RememberTemplateMemo(TemplateMemo* key, TemplateMemoVerdict verdict,
+                                 Vector* completed, Symbol* instance) {
+  if (verdict == kTemplateMemoForget || FindTemplateMemo(key) != NULL) {
+    TemplateArgumentVectorDelete(key->args);
+    return;
+  }
+  if ((g_template_memo_count + 1) * 2 > g_template_memo_capacity) {
+    TemplateMemo** old = g_template_memos;
+    size_t old_capacity = g_template_memo_capacity;
+    g_template_memo_capacity = old_capacity ? old_capacity * 2 : 1024;
+    g_template_memos = calloc(g_template_memo_capacity, sizeof(TemplateMemo*));
+    for (size_t i = 0; i < old_capacity; i++) {
+      if (old[i] != NULL) {
+        g_template_memos[TemplateMemoSlot(old[i])] = old[i];
+      }
+    }
+    free(old);
+  }
+  TemplateMemo* entry = malloc(sizeof(*entry));
+  *entry = *key;
+  entry->completed = TemplateArgumentVectorCopy(completed);
+  entry->instance = instance;
+  entry->only_while_suppressed =
+      verdict == kTemplateMemoRememberWhileSuppressed;
+  g_template_memos[TemplateMemoSlot(entry)] = entry;
+  g_template_memo_count++;
+}
+
+void TypeReleaseTemplateMemos(void) {
+  for (size_t i = 0; i < g_template_memo_capacity; i++) {
+    TemplateMemo* entry = g_template_memos[i];
+    if (entry != NULL) {
+      TemplateArgumentVectorDelete(entry->args);
+      TemplateArgumentVectorDelete(entry->completed);
+      free(entry);
+    }
+  }
+  free(g_template_memos);
+  g_template_memos = NULL;
+  g_template_memo_capacity = 0;
+  g_template_memo_count = 0;
+}
+
+// A result is not remembered when its computation reported an error that
+// escaped it or recorded a substitution failure.  Warnings are dropped while
+// diagnostics are suppressed, so a result that warned only there is reused
+// only there.
+typedef struct TemplateMemoWatch {
+  DiagnosticWatch diagnostics;
+  bool suppressed;
+  bool substitution_failed;
+} TemplateMemoWatch;
+
+static void TemplateMemoWatchBegin(TemplateMemoWatch* watch,
+                                   TypeParser* parser) {
+  DiagnosticWatchBegin(&watch->diagnostics);
+  watch->suppressed = DiagnosticsSuppressed();
+  watch->substitution_failed =
+      parser != NULL && parser->template_substitution_failed;
+}
+
+static TemplateMemoVerdict TemplateMemoWatchEnd(TemplateMemoWatch* watch,
+                                                TypeParser* parser) {
+  DiagnosticWatchEnd(&watch->diagnostics);
+  if (watch->diagnostics.errors > 0 ||
+      (parser != NULL && parser->template_substitution_failed &&
+       !watch->substitution_failed)) {
+    return kTemplateMemoForget;
+  }
+  if (watch->diagnostics.warnings == 0) {
+    return kTemplateMemoRemember;
+  }
+  return watch->suppressed ? kTemplateMemoRememberWhileSuppressed
+                           : kTemplateMemoForget;
+}
+
+// A memo for `key` that may stand in for computing it here, or NULL.  Sets
+// `*known` when the key is remembered at all.
+static TemplateMemo* UsableTemplateMemo(TemplateMemo* key, bool* known) {
+  TemplateMemo* memo = FindTemplateMemo(key);
+  *known = memo != NULL;
+  if (memo != NULL && memo->only_while_suppressed &&
+      !DiagnosticsSuppressed()) {
+    return NULL;
+  }
+  return memo;
+}
+
 // Default template arguments (`class = decltype(f(declval<U>()))`) are
 // separate expressions: the at-most-one user-defined conversion rule of a
-// caller ranking a converting constructor does not apply inside them.
+// caller ranking a converting constructor does not apply inside them.  A
+// member template of a class template also reads the enclosing instantiation,
+// so its completions are not remembered.
 static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
                                                  TypeRecord* func,
                                                  Vector* args,
                                                  bool emit_error,
                                                  TemplateArgumentOwnership ownership) {
+  bool memoize = func != NULL && TypeIsFunction(func) &&
+                 func->info.function.template_parameter_base == 0 &&
+                 TemplateMemoArgumentsConcrete(args);
+  TemplateMemo key;
+  TemplateMemoWatch watch;
+  if (memoize) {
+    InitTemplateMemoKey(&key, parser, func, args);
+    bool known = false;
+    TemplateMemo* memo = UsableTemplateMemo(&key, &known);
+    if (memo != NULL) {
+      return TemplateArgumentVectorCopy(memo->completed);
+    }
+    memoize = !known;
+  }
+  if (memoize) {
+    // Consuming completion empties `args`.
+    key.args = TemplateArgumentVectorCopy(args);
+    TemplateMemoWatchBegin(&watch, parser);
+  }
   bool saved_udc = SemanticSuspendUserDefinedConversionRank();
   Vector* completed = CompleteFunctionTemplateArgumentsUnsuspended(
       parser, func, args, emit_error, ownership);
   SemanticResumeUserDefinedConversionRank(saved_udc);
+  if (!memoize) {
+    return completed;
+  }
+  TemplateMemoVerdict verdict = TemplateMemoWatchEnd(&watch, parser);
+  RememberTemplateMemo(&key, completed != NULL ? verdict : kTemplateMemoForget,
+                       completed, /*instance=*/NULL);
   return completed;
 }
 
@@ -11659,9 +11907,64 @@ static TypeRecord* InstantiateSimpleClassTemplateImpl(
   return type;
 }
 
+static TypeRecord* ExistingClassTemplateInstanceType(Symbol* existing) {
+  if (TypeRecordCanIntern(existing->type)) {
+    return TypeRecordIntern(existing->type);
+  }
+  return TypeRecordCopy(existing->type);
+}
+
+static bool IsExistingClassTemplateInstance(Symbol* existing) {
+  return existing != NULL && existing->type != NULL &&
+         TypeIsStructOrUnion(existing->type) &&
+         existing->type->info.struct_info != NULL &&
+         !existing->type->info.struct_info->is_template;
+}
+
+static TypeRecord* InstantiateSimpleClassTemplateUncached(
+    TypeParser* parser, Symbol* templ, Vector* args,
+    bool emit_constraint_error, Symbol** instance);
+
+// While a class head defers template-ids that name it, the same arguments can
+// yield a deferred type instead of the existing instance.
 static TypeRecord* InstantiateSimpleClassTemplateUnchecked(
     TypeParser* parser, Symbol* templ, Vector* args,
     bool emit_constraint_error) {
+  bool memoize = templ != NULL && TemplateMemoArgumentsConcrete(args) &&
+                 !(parser->syntax != NULL &&
+                   parser->syntax->defer_template_ids_naming_class_head &&
+                   parser->syntax->cxx_class_head != NULL);
+  TemplateMemo key;
+  TemplateMemoWatch watch;
+  if (memoize) {
+    InitTemplateMemoKey(&key, parser, templ, args);
+    bool known = false;
+    TemplateMemo* memo = UsableTemplateMemo(&key, &known);
+    if (memo != NULL && IsExistingClassTemplateInstance(memo->instance)) {
+      return ExistingClassTemplateInstanceType(memo->instance);
+    }
+    memoize = !known;
+  }
+  if (memoize) {
+    key.args = TemplateArgumentVectorCopy(args);
+    TemplateMemoWatchBegin(&watch, parser);
+  }
+  Symbol* instance = NULL;
+  TypeRecord* type = InstantiateSimpleClassTemplateUncached(
+      parser, templ, args, emit_constraint_error, &instance);
+  if (!memoize) {
+    return type;
+  }
+  TemplateMemoVerdict verdict = TemplateMemoWatchEnd(&watch, parser);
+  RememberTemplateMemo(&key, instance != NULL ? verdict : kTemplateMemoForget,
+                       /*completed=*/NULL, instance);
+  return type;
+}
+
+// Sets `*instance` when the result is an instantiation that already existed.
+static TypeRecord* InstantiateSimpleClassTemplateUncached(
+    TypeParser* parser, Symbol* templ, Vector* args,
+    bool emit_constraint_error, Symbol** instance) {
   TypeRecord* alias_type =
       InstantiateAliasClassTemplateImpl(parser, templ, args,
                                         emit_constraint_error);
@@ -11781,10 +12084,8 @@ static TypeRecord* InstantiateSimpleClassTemplateUnchecked(
   AppendTemplateInstantiationName(&instantiated_name, templ, completed_args);
   Symbol* existing =
       FindTemplateInstantiationTag(parser, templ, &instantiated_name);
-  if (existing != NULL && existing->type != NULL &&
-      TypeIsStructOrUnion(existing->type) &&
-      existing->type->info.struct_info != NULL &&
-      !existing->type->info.struct_info->is_template) {
+  if (IsExistingClassTemplateInstance(existing)) {
+    *instance = existing;
     StringDestruct(&instantiated_name);
     if (partial_args != NULL) {
       VectorDeleteWithContents(partial_args,
@@ -11794,10 +12095,7 @@ static TypeRecord* InstantiateSimpleClassTemplateUnchecked(
     VectorDeleteWithContents(completed_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
-    if (TypeRecordCanIntern(existing->type)) {
-      return TypeRecordIntern(existing->type);
-    }
-    return TypeRecordCopy(existing->type);
+    return ExistingClassTemplateInstanceType(existing);
   }
   if (existing != NULL) {
     SyntaxError(parser->syntax,
