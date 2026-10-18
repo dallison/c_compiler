@@ -5,7 +5,6 @@
 #include <string.h>
 
 #include "errors.h"
-#include "map.h"
 #include "vector.h"
 
 typedef struct LineExpansionSpan {
@@ -20,8 +19,17 @@ typedef struct FileLineExpansion {
   MacroExpansion* expansion;
 } FileLineExpansion;
 
+typedef struct LocationExpansion {
+  SourceLocation location;
+  MacroExpansion* expansion;  // NULL marks an empty slot.
+} LocationExpansion;
+
 static Vector expansions;
-static Map location_map;
+// The expansion each token location came from, hashed by location.  Every
+// token of every expansion is recorded, so this must not shift on insert.
+static LocationExpansion* location_table;
+static size_t location_capacity;
+static size_t location_count;
 static Vector line_spans;
 static bool line_spans_ordered = true;
 static Vector file_line_expansions;
@@ -33,7 +41,6 @@ static void EnsureInitialized(void) {
     return;
   }
   VectorInit(&expansions);
-  MapInitForInt64Keys(&location_map);
   VectorInit(&line_spans);
   VectorInit(&file_line_expansions);
   last_noted_location = SOURCE_LOCATION_MISSING;
@@ -54,7 +61,10 @@ void MacroExpansionClear(void) {
     return;
   }
   VectorClearWithContents(&expansions, FreeExpansion, true);
-  MapClear(&location_map);
+  free(location_table);
+  location_table = NULL;
+  location_capacity = 0;
+  location_count = 0;
   VectorClearWithContents(&line_spans, FreeSpan, true);
   line_spans_ordered = true;
   VectorClearWithContents(&file_line_expansions, FreeSpan, true);
@@ -76,6 +86,34 @@ MacroExpansion* NewMacroExpansion(const char* name, SourceLocation definition,
   return expansion;
 }
 
+static size_t LocationSlot(SourceLocation location, size_t capacity) {
+  uint64_t h = location;
+  h ^= h >> 33;
+  h *= 0xff51afd7ed558ccdull;
+  h ^= h >> 33;
+  size_t mask = capacity - 1;
+  size_t slot = (size_t)h & mask;
+  while (location_table[slot].expansion != NULL &&
+         location_table[slot].location != location) {
+    slot = (slot + 1) & mask;
+  }
+  return slot;
+}
+
+static void GrowLocationTable(void) {
+  LocationExpansion* old = location_table;
+  size_t old_capacity = location_capacity;
+  location_capacity = old_capacity ? old_capacity * 2 : 1024;
+  location_table = calloc(location_capacity, sizeof(LocationExpansion));
+  for (size_t i = 0; i < old_capacity; i++) {
+    if (old[i].expansion != NULL) {
+      location_table[LocationSlot(old[i].location, location_capacity)] =
+          old[i];
+    }
+  }
+  free(old);
+}
+
 void MacroExpansionRemember(SourceLocation location,
                             MacroExpansion* expansion) {
   if (expansion == NULL || location == SOURCE_LOCATION_MISSING ||
@@ -83,10 +121,16 @@ void MacroExpansionRemember(SourceLocation location,
     return;
   }
   EnsureInitialized();
-  MapKeyValue kv;
-  kv.key.w = (int64_t)location;
-  kv.value.p = expansion;
-  MapInsert(&location_map, kv);
+  if ((location_count + 1) * 2 > location_capacity) {
+    GrowLocationTable();
+  }
+  LocationExpansion* entry =
+      &location_table[LocationSlot(location, location_capacity)];
+  if (entry->expansion == NULL) {
+    location_count++;
+  }
+  entry->location = location;
+  entry->expansion = expansion;
 
   int fileno = 0;
   int lineno = 0;
@@ -101,11 +145,11 @@ void MacroExpansionRemember(SourceLocation location,
     }
     expansion->remembered_fileno = fileno;
     expansion->remembered_lineno = lineno;
-    FileLineExpansion* entry = malloc(sizeof(FileLineExpansion));
-    entry->fileno = fileno;
-    entry->lineno = lineno;
-    entry->expansion = expansion;
-    VectorAppend(&file_line_expansions, entry);
+    FileLineExpansion* line_entry = malloc(sizeof(FileLineExpansion));
+    line_entry->fileno = fileno;
+    line_entry->lineno = lineno;
+    line_entry->expansion = expansion;
+    VectorAppend(&file_line_expansions, line_entry);
   }
 }
 
@@ -114,7 +158,10 @@ MacroExpansion* MacroExpansionForLocation(SourceLocation location) {
       location == SOURCE_LOCATION_COMMAND_LINE) {
     return NULL;
   }
-  return (MacroExpansion*)MapFindInt64Key(&location_map, (int64_t)location);
+  if (location_capacity == 0) {
+    return NULL;
+  }
+  return location_table[LocationSlot(location, location_capacity)].expansion;
 }
 
 void MacroExpansionBeginLine(void) {

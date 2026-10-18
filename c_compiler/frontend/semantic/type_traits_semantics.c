@@ -127,14 +127,14 @@ TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(TypeParser* parser,
     VectorDelete(types);
     return dependent;
   }
+  // `types` borrows the substituted arguments' types.
+  TypeRecord* result =
+      types != NULL ? CXXTypeTraitInvokeResultType(parser->syntax, types)
+                    : NULL;
+  VectorDelete(types);
   VectorDeleteWithContents(substituted,
                            (VectorElementDestructor)TemplateArgumentDelete,
                            /*free_element=*/false);
-  if (types == NULL) {
-    return NULL;
-  }
-  TypeRecord* result = CXXTypeTraitInvokeResultType(parser->syntax, types);
-  VectorDelete(types);
   if (result == NULL) {
     return NULL;
   }

@@ -33,6 +33,10 @@ static inline void TypeRecordDelete(TypeRecord* record) {
   }
   TypeRecordDeleteLastReference(record);
 }
+// Deletes a record its caller created and never shared.  A new record has no
+// counted owner (refs 0), so TypeRecordDelete alone would keep its prototype,
+// template arguments and `next` alive.
+void TypeRecordDeleteUnowned(TypeRecord* record);
 // Free every TypeRecord struct allocated from the type arena.  Call once, at
 // CompilerDestruct, after all type-referencing structures are torn down.
 void TypeRecordArenaRelease(void);

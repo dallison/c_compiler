@@ -12,8 +12,9 @@
 #include <string.h>
 
 // A lot of vectors only have one member so let's keep the
-// initial capacity small so that we don't waste memory.
-#define INIT_CAPACITY 1
+// initial capacity small so that we don't waste memory.  malloc's smallest
+// block holds two elements anyway.
+#define INIT_CAPACITY 2
 
 Vector* NewVector(void) {
   Vector* vec = malloc(sizeof(Vector));
@@ -102,9 +103,12 @@ void VectorReserve(Vector* vec, size_t n) {
 
 void VectorCopy(Vector* dest, Vector* src) {
   VectorClear(dest);
-  for (size_t i = 0; i < src->length; i++) {
-    VectorAppend(dest, src->value.p[i]);
+  if (src->length == 0) {
+    return;
   }
+  VectorReserve(dest, src->length);
+  memcpy(dest->value.p, src->value.p, sizeof(int64_t) * src->length);
+  dest->length = src->length;
 }
 
 void VectorAppendVector(Vector* dest, Vector* src) {

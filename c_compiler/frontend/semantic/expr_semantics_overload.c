@@ -1382,7 +1382,7 @@ static TypeRecord* SubstituteFunctionTemplateSignatureQuietly(
   DiagnosticSuppressEnd();
   DiagnosticErrorTrapEnd(saved_trap);
   if (substitution_failed) {
-    TypeRecordDelete(signature);
+    TypeRecordDeleteUnowned(signature);
     return NULL;
   }
   return signature;
@@ -1446,7 +1446,7 @@ Symbol* CXXResolveFunctionAddressForTargetType(Symbol* head,
             signature != NULL &&
             (TypeEqual(signature, target_fn) ||
              TypeEqualIgnoringQualifiers(signature, target_fn));
-        TypeRecordDelete(signature);
+        TypeRecordDeleteUnowned(signature);
         if (signature_matches) {
           inst = TypeInstantiateFunctionTemplateWithCompletedArguments(
               &compiler->syntax, cand, args);

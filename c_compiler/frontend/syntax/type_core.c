@@ -626,10 +626,21 @@ void TypeRecordDeleteLastReference(TypeRecord* record) {
     } else if (TypeIsVLA(record)) {
       // Delete the AST containing the size.
       ASTNodeDelete(record->info.array.size.vla.size);
+      record->info.array.size.vla.size = NULL;
     }
     // The struct itself lives in the type arena and is reclaimed wholesale by
     // TypeRecordArenaRelease; only its owned auxiliary resources are freed here.
   }
+}
+
+void TypeRecordDeleteUnowned(TypeRecord* record) {
+  if (record == NULL || record->shared_immutable) {
+    return;
+  }
+  if (record->refs == 0) {
+    record->refs = 1;
+  }
+  TypeRecordDelete(record);
 }
 
 int TypeRecordAlignment(TypeRecord* record) {
