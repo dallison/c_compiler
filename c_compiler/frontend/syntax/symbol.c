@@ -740,7 +740,7 @@ Symbol* GetCXXTemplateParameterObject(TemplateArgument* argument) {
   }
   if (symbol == NULL) {
     TypeRecord* type = TypeRecordCopy(argument->type);
-    type->qualifiers |= kQualConst;
+    SetQualifiers(type, GetQualifiers(type) | kQualConst);
     symbol = NewSymbol(name.value, type, STO(static));
     TypeRecordDelete(type);
     symbol->flags.invented = true;
@@ -764,8 +764,9 @@ static void AppendCXXUnqualifiedTypeEncoding(String* out, TypeRecord* type) {
     AppendCXXTypeEncoding(out, type);
     return;
   }
-  TypeRecord unqualified = *type;
-  unqualified.qualifiers &= ~(kQualConst | kQualVolatile);
+  TypeRecord unqualified = TypeRecordValue(type);
+  SetQualifiers(&unqualified,
+                GetQualifiers(&unqualified) & ~(kQualConst | kQualVolatile));
   AppendCXXTypeEncoding(out, &unqualified);
 }
 

@@ -625,7 +625,7 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
           !id_node->symbol->flags.is_constexpr) {
         return false;
       }
-      if ((type->qualifiers & kQualConst) == 0) {
+      if ((GetQualifiers(type) & kQualConst) == 0) {
         return false;
       }
       if (!id_node->symbol->flags.value_set) {
@@ -1487,7 +1487,7 @@ static bool EvaluateFloatingPointValueInContext(ConstEvalContext* ctx,
           !id_node->symbol->flags.is_constexpr) {
         return false;
       }
-      if ((type->qualifiers & kQualConst) == 0) {
+      if ((GetQualifiers(type) & kQualConst) == 0) {
         return false;
       }
       if (!id_node->symbol->flags.value_set) {

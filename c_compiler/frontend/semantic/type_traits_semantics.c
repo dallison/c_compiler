@@ -121,7 +121,7 @@ TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(TypeParser* parser,
   Vector* types = TypeVectorFromTemplateArguments(substituted);
   if (types != NULL && TypeVectorHasDependentTemplateParameter(types)) {
     TypeRecord* dependent =
-        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(type));
     dependent->template_origin = InvokeResultPlaceholderOrigin();
     dependent->template_arguments = substituted;
     VectorDelete(types);
@@ -138,7 +138,7 @@ TypeRecord* TypeRecordSubstituteInvokeResultPlaceholder(TypeParser* parser,
   if (result == NULL) {
     return NULL;
   }
-  result->qualifiers |= type->qualifiers;
+  SetQualifiers(result, GetQualifiers(result) | GetQualifiers(type));
   return TypeRecordCalculateSize(result);
 }
 
@@ -210,7 +210,7 @@ TypeRecord* TypeRecordSubstituteCommonTypePlaceholder(TypeParser* parser,
     }
     return NULL;
   }
-  result->qualifiers |= type->qualifiers;
+  SetQualifiers(result, GetQualifiers(result) | GetQualifiers(type));
   return TypeRecordCalculateSize(result);
 }
 
@@ -245,7 +245,7 @@ static bool TypeVectorHasDependentTemplateParameter(Vector* types) {
 
 static void TypeTraitStripAllQualifiers(TypeRecord* type) {
   for (TypeRecord* cur = type; cur != NULL; cur = cur->next) {
-    cur->qualifiers = kQualPlain;
+    SetQualifiers(cur, kQualPlain);
   }
 }
 
@@ -391,8 +391,9 @@ static ASTNode* TypeTraitSyntheticExpressionFromType(Syntax* syntax,
     if (object_type == NULL) {
       return NULL;
     }
-    object_type->qualifiers |=
-        (type->qualifiers & (kQualConst | kQualVolatile));
+    SetQualifiers(object_type,
+                  GetQualifiers(object_type) |
+                      (GetQualifiers(type) & (kQualConst | kQualVolatile)));
     is_lvalue = type->declarator != kDeclRValueReference;
   } else {
     object_type = TypeRecordCopy(type);
@@ -504,7 +505,7 @@ static bool TypeTraitCanBindToReference(ASTNode* from, TypeRecord* to) {
       (to->declarator == kDeclReference && TypeIsConst(target));
   if (binds_to_temporary) {
     TypeRecord* value_target = TypeRecordCopy(target);
-    value_target->qualifiers = kQualPlain;
+    SetQualifiers(value_target, kQualPlain);
     ASTNode* prvalue = NewSyntheticValue(&compiler->syntax, source);
     bool ok = false;
     if (prvalue != NULL) {
@@ -1398,11 +1399,11 @@ static bool TypeTraitIsStandardLayout(TypeRecord* type) {
 
 static TypeRecord* TypeTraitStripQualifiers(TypeRecord* type) {
   type = TypeRecordCopy(type);
-  while (type != NULL && (type->qualifiers & kQualConst) != 0) {
-    type->qualifiers &= ~kQualConst;
+  while (type != NULL && (GetQualifiers(type) & kQualConst) != 0) {
+    SetQualifiers(type, GetQualifiers(type) & ~kQualConst);
   }
-  while (type != NULL && (type->qualifiers & kQualVolatile) != 0) {
-    type->qualifiers &= ~kQualVolatile;
+  while (type != NULL && (GetQualifiers(type) & kQualVolatile) != 0) {
+    SetQualifiers(type, GetQualifiers(type) & ~kQualVolatile);
   }
   return type;
 }
@@ -1633,8 +1634,9 @@ static bool TypeTraitMemberPointerInvoke(Syntax* syntax, Vector* type_args,
                                          : kDeclRValueReference;
       ref->next = TypeRecordCopy(pointee);
       if (obj != NULL) {
-        ref->next->qualifiers |=
-            obj->qualifiers & (kQualConst | kQualVolatile);
+        SetQualifiers(ref->next,
+                      GetQualifiers(ref->next) |
+                          (GetQualifiers(obj) & (kQualConst | kQualVolatile)));
       }
       *result_out = ref;
     }
@@ -2086,14 +2088,14 @@ static TypeRecord* TypeTraitCopyCv(TypeRecord* left, TypeRecord* right) {
   if (base == NULL) {
     return NULL;
   }
-  base->qualifiers = kQualPlain;
+  SetQualifiers(base, kQualPlain);
   if ((left_inner != NULL && TypeIsConst(left_inner)) ||
       (right_inner != NULL && TypeIsConst(right_inner))) {
-    base->qualifiers |= kQualConst;
+    SetQualifiers(base, GetQualifiers(base) | kQualConst);
   }
   if ((left_inner != NULL && TypeIsVolatile(left_inner)) ||
       (right_inner != NULL && TypeIsVolatile(right_inner))) {
-    base->qualifiers |= kQualVolatile;
+    SetQualifiers(base, GetQualifiers(base) | kQualVolatile);
   }
   return base;
 }

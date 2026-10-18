@@ -245,8 +245,32 @@ static bool StructStackContains(Vector* stack, Struct* str) {
   return false;
 }
 
-static bool TypeIsConstevalOnlyRecursive(TypeRecord* type, Vector* active,
-                                         Vector* checked) {
+/* A completed class keeps its answer.  A class still being instantiated, or
+ * whose layout is waiting on an incomplete member, can gain a reflection
+ * member without changing the member count, so its answer is not stored. */
+static bool ConstevalOnlyCacheLookup(Struct* str, bool* result) {
+  if (str->consteval_only_cached == 0 ||
+      str->consteval_only_member_count != (int)str->members.length ||
+      str->consteval_only_base_count != (int)str->bases.length ||
+      str->instantiation_in_progress || str->layout_pending_completion ||
+      (str->tag_symbol != NULL && str->tag_symbol->flags.is_forward_declared)) {
+    return false;
+  }
+  *result = str->consteval_only_cached > 0;
+  return true;
+}
+
+static void ConstevalOnlyCacheStore(Struct* str, bool result) {
+  if (str->instantiation_in_progress || str->layout_pending_completion ||
+      (str->tag_symbol != NULL && str->tag_symbol->flags.is_forward_declared)) {
+    return;
+  }
+  str->consteval_only_cached = result ? 1 : -1;
+  str->consteval_only_member_count = (int)str->members.length;
+  str->consteval_only_base_count = (int)str->bases.length;
+}
+
+static bool TypeIsConstevalOnlyRecursive(TypeRecord* type, Vector* active) {
   for (TypeRecord* current = type; current != NULL; current = current->next) {
     if (TypeIsReflection(current)) {
       return true;
@@ -255,48 +279,51 @@ static bool TypeIsConstevalOnlyRecursive(TypeRecord* type, Vector* active,
       for (size_t i = 0; i < current->info.function.prototype.length; i++) {
         Symbol* parameter = current->info.function.prototype.value.p[i];
         if (parameter != NULL &&
-            TypeIsConstevalOnlyRecursive(parameter->type, active, checked)) {
+            TypeIsConstevalOnlyRecursive(parameter->type, active)) {
           return true;
         }
       }
     }
-    if (!TypeIsStructOrUnion(current) ||
-        current->info.struct_info == NULL ||
-        StructStackContains(active, current->info.struct_info) ||
-        StructStackContains(checked, current->info.struct_info)) {
+    if (!TypeIsStructOrUnion(current) || current->info.struct_info == NULL ||
+        StructStackContains(active, current->info.struct_info)) {
       continue;
     }
     Struct* str = current->info.struct_info;
+    bool cached = false;
+    if (ConstevalOnlyCacheLookup(str, &cached)) {
+      if (cached) {
+        return true;
+      }
+      continue;
+    }
     VectorAppend(active, str);
     for (size_t i = 0; i < str->bases.length; i++) {
       CXXBaseSpecifier* base = str->bases.value.p[i];
-      if (base != NULL &&
-          TypeIsConstevalOnlyRecursive(base->type, active, checked)) {
+      if (base != NULL && TypeIsConstevalOnlyRecursive(base->type, active)) {
         VectorPop(active);
+        ConstevalOnlyCacheStore(str, true);
         return true;
       }
     }
     for (size_t i = 0; i < str->members.length; i++) {
       StructMember* member = str->members.value.p[i];
       if (member != NULL && !member->is_static && member->symbol != NULL &&
-          TypeIsConstevalOnlyRecursive(member->symbol->type, active, checked)) {
+          TypeIsConstevalOnlyRecursive(member->symbol->type, active)) {
         VectorPop(active);
+        ConstevalOnlyCacheStore(str, true);
         return true;
       }
     }
     VectorPop(active);
-    VectorAppend(checked, str);
+    ConstevalOnlyCacheStore(str, false);
   }
   return false;
 }
 
 bool TypeIsConstevalOnly(TypeRecord* type) {
   Vector active;
-  Vector checked;
   VectorInit(&active);
-  VectorInit(&checked);
-  bool result = TypeIsConstevalOnlyRecursive(type, &active, &checked);
-  VectorDestruct(&checked);
+  bool result = TypeIsConstevalOnlyRecursive(type, &active);
   VectorDestruct(&active);
   return result;
 }
@@ -530,7 +557,7 @@ bool TypeArrayBoundsEqual(ArrayInfo* a, ArrayInfo* b) {
  * them. Used to compare partial-specialization / template signatures. */
 static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
   if (left == NULL || right == NULL || left->declarator != right->declarator ||
-      left->qualifiers != right->qualifiers) {
+      GetQualifiers(left) != GetQualifiers(right)) {
     return left == right;
   }
   // A primitive placeholder with an index denotes the entire template type.
@@ -1518,7 +1545,7 @@ static uint64_t HashTypeRecord(uint64_t hash, TypeRecord* type) {
     return HashTypeValue(hash, 0);
   }
   hash = HashTypeValue(hash, (uint64_t)type->declarator + 1);
-  hash = HashTypeValue(hash, type->qualifiers & ~kQualRestrict);
+  hash = HashTypeValue(hash, GetQualifiers(type) & ~kQualRestrict);
   hash = HashTypeValue(hash, type->is_pack_index);
   if (type->is_pack_index) {
     hash = HashDependentTemplateArgExpr(hash, type->pack_index_expr);
@@ -1652,7 +1679,8 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
   // `const char *` name the same parameter type), so ignore it when comparing
   // qualifiers.  The remaining cv-qualifiers stay significant so that template
   // argument identities such as `const T` versus `T` remain distinct.
-  if ((t1->qualifiers & ~kQualRestrict) != (t2->qualifiers & ~kQualRestrict)) {
+  if ((GetQualifiers(t1) & ~kQualRestrict) !=
+      (GetQualifiers(t2) & ~kQualRestrict)) {
     return false;
   }
   if (t1->is_pack_index != t2->is_pack_index) {
@@ -1777,7 +1805,7 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       }
       if (TypeIsStructOrUnion(t1) || TypeIsStructOrUnion(t2)) {
         if (!TypeIsStructOrUnion(t1) || !TypeIsStructOrUnion(t2) ||
-            t1->type != t2->type || t1->qualifiers != t2->qualifiers) {
+            t1->type != t2->type || GetQualifiers(t1) != GetQualifiers(t2)) {
           return false;
         }
         if (t1->template_origin != NULL || t2->template_origin != NULL) {
@@ -1835,23 +1863,22 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
         // `operator|(match_flag_type)` are rejected as duplicates.
         if (CompilerIsCXX()) {
           return t1->info.enum_info == t2->info.enum_info &&
-                 t1->qualifiers == t2->qualifiers;
+                 GetQualifiers(t1) == GetQualifiers(t2);
         }
         if (TypeIsScopedEnum(t1) || TypeIsScopedEnum(t2)) {
           return t1->info.enum_info == t2->info.enum_info &&
-                 t1->qualifiers == t2->qualifiers;
+                 GetQualifiers(t1) == GetQualifiers(t2);
         }
         // Enums can be char, signed int or unsigned int.
         int e1 = t1->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
         int e2 = t2->type & ~(kTypeInt | kTypeChar | kTypeSigned | kTypeUnsigned);
-        return e1 == e2 && t1->qualifiers == t2->qualifiers &&
+        return e1 == e2 && GetQualifiers(t1) == GetQualifiers(t2) &&
                (((t1->type | t2->type) & kTypeBitInt) == 0 ||
                 t1->bit_width == t2->bit_width);
-
       }
       return CanonicalPrimitiveType(t1->type) ==
                  CanonicalPrimitiveType(t2->type) &&
-             t1->qualifiers == t2->qualifiers;
+             GetQualifiers(t1) == GetQualifiers(t2);
   }
 }
 
@@ -1860,10 +1887,10 @@ bool TypeEqualIgnoringTopLevelQualifierMask(TypeRecord* t1, TypeRecord* t2,
   if (t1 == NULL || t2 == NULL) {
     return t1 == t2;
   }
-  TypeRecord left = *t1;
-  TypeRecord right = *t2;
-  left.qualifiers &= ~ignored;
-  right.qualifiers &= ~ignored;
+  TypeRecord left = TypeRecordValue(t1);
+  TypeRecord right = TypeRecordValue(t2);
+  SetQualifiers(&left, GetQualifiers(&left) & ~ignored);
+  SetQualifiers(&right, GetQualifiers(&right) & ~ignored);
   return TypeEqual(&left, &right);
 }
 
@@ -1871,8 +1898,8 @@ bool TypeEqualIgnoringFunctionNoexcept(TypeRecord* t1, TypeRecord* t2) {
   if (!TypeIsFunction(t1) || !TypeIsFunction(t2)) {
     return TypeEqual(t1, t2);
   }
-  TypeRecord left = *t1;
-  TypeRecord right = *t2;
+  TypeRecord left = TypeRecordValue(t1);
+  TypeRecord right = TypeRecordValue(t2);
   left.info.function.is_noexcept = false;
   right.info.function.is_noexcept = false;
   return TypeEqual(&left, &right);
@@ -2166,13 +2193,13 @@ static TypeRecord* NewDeclaratorLike(TypeRecord* pattern) {
   TypeRecord* result = NULL;
   switch (pattern->declarator) {
     case kDeclPointer:
-      result = NewPointerTypeRecord(pattern->qualifiers);
+      result = NewPointerTypeRecord(GetQualifiers(pattern));
       break;
     case kDeclReference:
-      result = NewReferenceTypeRecord(pattern->qualifiers, false);
+      result = NewReferenceTypeRecord(GetQualifiers(pattern), false);
       break;
     case kDeclRValueReference:
-      result = NewReferenceTypeRecord(pattern->qualifiers, true);
+      result = NewReferenceTypeRecord(GetQualifiers(pattern), true);
       break;
     case kDeclArray:
       result = TypeRecordCopy(pattern);
@@ -2204,7 +2231,7 @@ TypeRecord* TypeDecayForByValueDeduction(TypeRecord* type) {
     result = NewPointerTo(kQualPlain, TypeRecordCopy(type));
   } else {
     result = TypeRecordCopy(type);
-    result->qualifiers = kQualPlain;
+    SetQualifiers(result, kQualPlain);
   }
   TypeRecordCalculateSize(result);
   return result;
@@ -2217,7 +2244,7 @@ TypeRecord* TypeDeduceAuto(TypeRecord* pattern, TypeRecord* initializer_type) {
   if ((pattern->type & kTypeAuto) != 0 &&
       pattern->declarator == kDeclPrimitive) {
     TypeRecord* deduced = TypeRecordCopy(initializer_type);
-    deduced->qualifiers |= pattern->qualifiers;
+    SetQualifiers(deduced, GetQualifiers(deduced) | GetQualifiers(pattern));
     TypeRecordCalculateSize(deduced);
     return deduced;
   }
@@ -2280,7 +2307,7 @@ static bool PointeesCompatible(TypeRecord* from, TypeRecord* to) {
   // dropped ([conv.qual]).
   if (TypeIsFixedArray(from) && TypeIsFixedArray(to) && from->next != NULL &&
       to->next != NULL) {
-    if ((from->next->qualifiers & ~to->next->qualifiers & cv) != 0) {
+    if ((GetQualifiers(from->next) & ~GetQualifiers(to->next) & cv) != 0) {
       return false;
     }
     if (!TypeArrayBoundsEqual(&from->info.array, &to->info.array) &&
@@ -2289,10 +2316,10 @@ static bool PointeesCompatible(TypeRecord* from, TypeRecord* to) {
     }
     return PointeesCompatible(from->next, to->next);
   }
-  TypeRecord left = *from;
-  TypeRecord right = *to;
-  left.qualifiers &= ~cv;
-  right.qualifiers &= ~cv;
+  TypeRecord left = TypeRecordValue(from);
+  TypeRecord right = TypeRecordValue(to);
+  SetQualifiers(&left, GetQualifiers(&left) & ~cv);
+  SetQualifiers(&right, GetQualifiers(&right) & ~cv);
   if (!CompilerIsCXX()) {
     return TypeEqualIgnoringSign(&left, &right);
   }
@@ -2320,9 +2347,9 @@ static bool MultilevelQualificationCompatible(TypeRecord* from, TypeRecord* to,
     return false;
   }
   const Qualifiers cv = kQualConst | kQualVolatile;
-  Qualifiers from_cv = from->next->qualifiers & cv;
-  Qualifiers to_cv = to->next->qualifiers & cv;
-  bool all_const = outer_const && (to->qualifiers & kQualConst) != 0;
+  Qualifiers from_cv = GetQualifiers(from->next) & cv;
+  Qualifiers to_cv = GetQualifiers(to->next) & cv;
+  bool all_const = outer_const && (GetQualifiers(to) & kQualConst) != 0;
   if ((from_cv & ~to_cv) != 0 || (from_cv != to_cv && !all_const)) {
     return false;
   }
@@ -2346,8 +2373,8 @@ bool TypeAssignmentCompatible(TypeRecord* from, TypeRecord* to) {
     // The pointed-to type may gain qualifiers (C 6.5.16.1, C++ [conv.qual]);
     // losing them is diagnosed separately.  _Atomic is not a qualifier there
     // and has to match.
-    int to_quals = to->next->qualifiers & ~kQualConst;
-    int from_quals = from->next->qualifiers & ~kQualConst;
+    int to_quals = GetQualifiers(to->next) & ~kQualConst;
+    int from_quals = GetQualifiers(from->next) & ~kQualConst;
     if ((to_quals & kQualAtomic) == (from_quals & kQualAtomic) &&
         (from_quals & ~to_quals) == 0) {
       return PointeesCompatible(from->next, to->next);
@@ -2475,7 +2502,7 @@ void TypeErrorDetails(SourceLocation location, TypeRecord* t1, TypeRecord* t2) {
       case kDeclPrimitive:
         if (CanonicalPrimitiveType(t1->type) !=
                 CanonicalPrimitiveType(t2->type) ||
-            t1->qualifiers != t2->qualifiers) {
+            GetQualifiers(t1) != GetQualifiers(t2)) {
           ReportNoteAtLocation(location,
                                "Types '%s' and '%s' are different",
                                error1.value, error2.value);

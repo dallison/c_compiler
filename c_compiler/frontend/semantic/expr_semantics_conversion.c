@@ -196,8 +196,8 @@ static int OverloadBaseConversionRankMaterialized(TypeRecord* actual,
   if (TypeIsPointer(actual) && TypeIsPointer(target) &&
       actual->next != NULL && target->next != NULL) {
     Qualifiers discarded =
-        (actual->next->qualifiers & (kQualConst | kQualVolatile)) &
-        ~(target->next->qualifiers & (kQualConst | kQualVolatile));
+        (GetQualifiers(actual->next) & (kQualConst | kQualVolatile)) &
+        ~(GetQualifiers(target->next) & (kQualConst | kQualVolatile));
     if (discarded != 0) {
       return -1;
     }
@@ -890,8 +890,8 @@ static int OverloadConversionRankStandardValue(ASTNode* actual,
   // without outweighing a genuine conversion in another argument.
   Qualifiers added_pointer_qualifiers =
       (target->next != NULL && actual->type->next != NULL)
-          ? ((target->next->qualifiers & (kQualConst | kQualVolatile)) &
-             ~(actual->type->next->qualifiers &
+          ? ((GetQualifiers(target->next) & (kQualConst | kQualVolatile)) &
+             ~(GetQualifiers(actual->type->next) &
                (kQualConst | kQualVolatile)))
           : 0;
   bool pointer_qualification_conversion =

@@ -83,7 +83,112 @@ static TypeArenaBlock* NewTypeArenaBlock(size_t capacity) {
 // union, so they may be given a shorter slot.  Every block keeps a full
 // record's worth of slack so by-value copies (`TypeRecord t = *r`) of a short
 // record at the end of a block stay inside the allocation.
+static size_t type_alloc_full = 0;
+static size_t type_alloc_short = 0;
+static size_t type_copy_count = 0;
+static size_t type_share_count = 0;
+
+// DAVECC_PROFILE duplicate census: every record allocated and every record
+// whose last reference was released, hashed structurally at the end.
+typedef struct {
+  TypeRecord* record;
+  size_t bytes;
+  void* caller;  // TypeRecordCopy's caller; NULL for other allocations.
+} TypeCensusEntry;
+static bool type_census_enabled = false;
+static void* type_census_caller = NULL;
+static TypeCensusEntry* type_census_allocs = NULL;
+static size_t type_census_alloc_count = 0;
+static size_t type_census_alloc_capacity = 0;
+static TypeRecord** type_census_releases = NULL;
+static size_t type_census_release_count = 0;
+static size_t type_census_release_capacity = 0;
+
+static void TypeCensusNoteAlloc(TypeRecord* record, size_t bytes) {
+  if (type_census_alloc_count == type_census_alloc_capacity) {
+    type_census_alloc_capacity =
+        type_census_alloc_capacity ? type_census_alloc_capacity * 2 : 1 << 16;
+    type_census_allocs =
+        realloc(type_census_allocs,
+                type_census_alloc_capacity * sizeof(TypeCensusEntry));
+  }
+  type_census_allocs[type_census_alloc_count].record = record;
+  type_census_allocs[type_census_alloc_count].bytes = bytes;
+  type_census_allocs[type_census_alloc_count].caller = type_census_caller;
+  type_census_caller = NULL;
+  type_census_alloc_count++;
+}
+
+static void TypeCensusNoteRelease(TypeRecord* record) {
+  if (type_census_release_count == type_census_release_capacity) {
+    type_census_release_capacity = type_census_release_capacity
+                                       ? type_census_release_capacity * 2
+                                       : 1 << 16;
+    type_census_releases =
+        realloc(type_census_releases,
+                type_census_release_capacity * sizeof(TypeRecord*));
+  }
+  type_census_releases[type_census_release_count++] = record;
+}
+
+// DAVECC_PROFILE copy attribution: return address -> count.  Open addressing;
+// a full table drops further callers rather than growing.
+#define TYPE_COPY_CALLER_SLOTS 8192
+typedef struct {
+  void* caller;
+  size_t count;
+} TypeCopyCaller;
+static TypeCopyCaller* type_copy_callers = NULL;
+
+void TypeRecordProfileCallers(void) {
+  if (type_copy_callers == NULL) {
+    type_copy_callers = calloc(TYPE_COPY_CALLER_SLOTS, sizeof(TypeCopyCaller));
+  }
+  type_census_enabled = getenv("DAVECC_PROFILE_CENSUS") != NULL;
+}
+
+static void TypeCopyNoteCaller(void* caller) {
+  size_t slot = ((uintptr_t)caller >> 2) & (TYPE_COPY_CALLER_SLOTS - 1);
+  for (size_t probe = 0; probe < TYPE_COPY_CALLER_SLOTS; probe++) {
+    TypeCopyCaller* entry = &type_copy_callers[slot];
+    if (entry->caller == caller || entry->caller == NULL) {
+      entry->caller = caller;
+      entry->count++;
+      return;
+    }
+    slot = (slot + 1) & (TYPE_COPY_CALLER_SLOTS - 1);
+  }
+}
+
+static int CompareTypeCopyCallers(const void* a, const void* b) {
+  size_t ca = ((const TypeCopyCaller*)a)->count;
+  size_t cb = ((const TypeCopyCaller*)b)->count;
+  return ca < cb ? 1 : ca > cb ? -1 : 0;
+}
+
+void TypeRecordProfileReport(FILE* out, size_t limit) {
+  if (type_copy_callers == NULL) {
+    return;
+  }
+  qsort(type_copy_callers, TYPE_COPY_CALLER_SLOTS, sizeof(TypeCopyCaller),
+        CompareTypeCopyCallers);
+  for (size_t i = 0; i < limit && i < TYPE_COPY_CALLER_SLOTS; i++) {
+    if (type_copy_callers[i].count == 0) {
+      break;
+    }
+    fprintf(out, "DAVECC_PROFILE copy-caller %p %zu\n",
+            type_copy_callers[i].caller, type_copy_callers[i].count);
+  }
+  free(type_copy_callers);
+  type_copy_callers = NULL;
+}
+
 static TypeRecord* TypeArenaAllocSized(size_t bytes) {
+  if (bytes >= TYPE_RECORD_FULL_SIZE) {
+    type_alloc_full++;
+  } else {
+    type_alloc_short++;
+  }
   if (type_arena == NULL ||
       type_arena->used + TYPE_RECORD_FULL_SIZE > type_arena->capacity) {
     TypeArenaBlock* block = NewTypeArenaBlock(TYPE_ARENA_BLOCK_SIZE);
@@ -92,17 +197,20 @@ static TypeRecord* TypeArenaAllocSized(size_t bytes) {
   }
   void* p = type_arena->data + type_arena->used;
   type_arena->used += bytes;
+  if (type_census_enabled) {
+    TypeCensusNoteAlloc((TypeRecord*)p, bytes);
+  }
   return (TypeRecord*)p;
-}
-
-static TypeRecord* TypeArenaAlloc(void) {
-  return TypeArenaAllocSized(TYPE_RECORD_FULL_SIZE);
 }
 
 // Free every TypeRecord struct.  Call only after all type-referencing data
 // structures have been torn down (their TypeRecordDelete calls have released
 // the auxiliary resources); the struct memory becomes invalid afterwards.
+static void TypeInternRelease(void);
+
 void TypeRecordArenaRelease(void) {
+  // The type table only holds records from this arena.
+  TypeInternRelease();
   TypeArenaBlock* block = type_arena;
   while (block != NULL) {
     TypeArenaBlock* next = block->next;
@@ -110,6 +218,22 @@ void TypeRecordArenaRelease(void) {
     block = next;
   }
   type_arena = NULL;
+}
+
+size_t TypeArenaFullAllocCount(void) { return type_alloc_full; }
+
+size_t TypeArenaShortAllocCount(void) { return type_alloc_short; }
+
+size_t TypeRecordCopyCount(void) { return type_copy_count; }
+
+size_t TypeRecordShareCount(void) { return type_share_count; }
+
+size_t TypeArenaBytes(void) {
+  size_t bytes = 0;
+  for (TypeArenaBlock* block = type_arena; block != NULL; block = block->next) {
+    bytes += block->used;
+  }
+  return bytes;
 }
 
 TemplateArgument* TemplateArgumentAlloc(void) {
@@ -327,21 +451,30 @@ void TemplateArgumentVectorDelete(Vector* args) {
                            /*free_element=*/false);
 }
 
-TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
+static TypeRecord* NewTypeRecordSized(Type type, Qualifiers quals,
+                                      size_t bytes) {
   // If a plain unsigned or signed is found, this implies an int.
   if (type == kTypeUnsigned || type == kTypeSigned) {
     type |= kTypeInt;
   }
-  TypeRecord* record = TypeArenaAlloc();
+  TypeRecord* record = TypeArenaAllocSized(bytes);
   record->id = next_type_id++;
   record->type = type;
-  record->qualifiers = quals;
+  SetQualifiers(record, quals);
   record->template_parameter_summary =
       kTypeTemplateParameterSummaryUnknown;
   record->template_parameter_index = -1;
   record->declarator = kDeclPrimitive;
   Trap(record);
   return record;
+}
+
+TypeRecord* NewTypeRecord(Type type, Qualifiers quals) {
+  return NewTypeRecordSized(type, quals, TYPE_RECORD_NON_FUNCTION_SIZE);
+}
+
+TypeRecord* NewFunctionCapableTypeRecord(Type type, Qualifiers quals) {
+  return NewTypeRecordSized(type, quals, TYPE_RECORD_FULL_SIZE);
 }
 
 static int BitIntStorageSize(int bit_width) {
@@ -388,6 +521,7 @@ void TypeRecordSetStructInfo(TypeRecord* record, Struct* str) {
   if (record == NULL) {
     return;
   }
+  assert(!record->shared_immutable || record->info.struct_info == str);
   record->info.struct_info = str;
   TypeRecordRegisterStructSizeUser(record);
 }
@@ -403,6 +537,9 @@ void TypeRecordDeleteLastReference(TypeRecord* record) {
   }
   TypeRecordDecRef(record);
   if (record->refs == 0) {
+    if (type_census_enabled) {
+      TypeCensusNoteRelease(record);
+    }
     if (record->next != NULL) {
       TypeRecordDelete(record->next);
       record->next = NULL;
@@ -540,7 +677,7 @@ void TypeRecordIncRef(TypeRecord* record) {
 }
 
 void TypeRecordDecRef(TypeRecord* record) {
-  if (record == NULL) {
+  if (record == NULL || record->shared_immutable) {
     return;
   }
   record->refs--;
@@ -759,7 +896,7 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   copy->kind = arg->kind;
   copy->is_pack_expansion = arg->is_pack_expansion;
   copy->references_parameter_pack = arg->references_parameter_pack;
-  copy->type = arg->type != NULL ? TypeRecordCopy(arg->type) : NULL;
+  copy->type = TypeRecordInternArgumentOrCopy(arg->type);
   copy->int_value = arg->int_value;
   copy->template_parameter_index = arg->template_parameter_index;
   copy->pack_arguments = TemplateArgumentVectorCopy(arg->pack_arguments);
@@ -785,7 +922,7 @@ TemplateArgument* NewTypeTemplateArgument(TypeRecord* type) {
   TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterType;
   arg->template_parameter_index = -1;
-  arg->type = type != NULL ? TypeRecordCopy(type) : NULL;
+  arg->type = TypeRecordInternArgumentOrCopy(type);
   arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
@@ -895,7 +1032,8 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
     return true;
   }
   if (TypeIsStructOrUnion(expr->type)) {
-    arg->type->qualifiers &= ~(kQualConst | kQualVolatile);
+    SetQualifiers(arg->type,
+                  GetQualifiers(arg->type) & ~(kQualConst | kQualVolatile));
     ASTNode* initializer =
         ConstexprTemplateArgumentObjectInitializerForExpression(arg->type,
                                                                 expr);
@@ -939,7 +1077,7 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
     arg->value_kind = kTemplateValuePointer;
     arg->value_symbol = symbol;
     TypeRecordDelete(arg->type);
-    arg->type = NewPointerTo(expr->type->qualifiers, expr->type->next);
+    arg->type = NewPointerTo(GetQualifiers(expr->type), expr->type->next);
     return true;
   }
   if (TypeIsPointer(expr->type) || TypeIsFunction(expr->type)) {
@@ -957,7 +1095,8 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
     arg->value_symbol = symbol;
     if (TypeIsFunction(expr->type)) {
       TypeRecordDelete(arg->type);
-      arg->type = NewPointerTo(expr->type->qualifiers, TypeRecordCopy(expr->type));
+      arg->type =
+          NewPointerTo(GetQualifiers(expr->type), TypeRecordCopy(expr->type));
     }
     return true;
   }
@@ -1044,7 +1183,7 @@ bool TemplateArgumentBindReferenceParameter(TemplateArgument* arg,
     object_element = object_element->next;
     referent_element = referent_element->next;
   }
-  if ((object_element->qualifiers & ~referent_element->qualifiers &
+  if ((GetQualifiers(object_element) & ~GetQualifiers(referent_element) &
        (kQualConst | kQualVolatile)) != 0) {
     return false;
   }
@@ -1296,10 +1435,514 @@ struct ASTNode* FunctionTemplateCloneSourceBody(TypeRecord* func_type) {
   return func_type->info.function.body;
 }
 
+// A class written inside a template (the template itself, its nested and local
+// classes, closures) is rebuilt for each instantiation even though its record
+// names no template parameter.  Closure capture fields are also renumbered in
+// place.
+static bool StructIsTemplatePattern(Struct* str) {
+  for (Struct* s = str; s != NULL; s = s->lexical_parent) {
+    if (s->is_template || s->defining_template_scope_count > 0 ||
+        s->in_namespace_template || s->local_class_awaits_member_arguments ||
+        (s->tag_symbol != NULL && s->tag_symbol->flags.invented)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool TypeSpineCanShareAtDepth(TypeRecord* type, bool allow_class,
+                                     int depth);
+
+// `W<closure>` is rebuilt with each instantiation's closure, so a class is
+// checked through its type arguments as well.
+static bool TemplateArgumentsCanShare(Vector* args, int depth) {
+  if (args == NULL) {
+    return true;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg != NULL && arg->kind == kTemplateParameterType &&
+        !TypeSpineCanShareAtDepth(arg->type, true, depth + 1)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool TypeSpineCanShare(TypeRecord* type, bool allow_class) {
+  return TypeSpineCanShareAtDepth(type, allow_class, 0);
+}
+
+static bool TypeSpineCanShareAtDepth(TypeRecord* type, bool allow_class,
+                                     int depth) {
+  if (depth > 16) {
+    return false;
+  }
+  int guard = 0;
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    // A cycle or a pathological declarator is copied, not shared.
+    if (++guard > 64) {
+      return false;
+    }
+    if (t->template_parameter_index >= 0 || t->dependent_member_name != NULL ||
+        t->dependent_decltype_expr != NULL ||
+        t->dependent_splice_expr != NULL || t->is_pack_index ||
+        t->pack_index_expr != NULL || TypeIsFunction(t)) {
+      return false;
+    }
+    // An unknown bound (`int a[] = {...}`) is completed in place from the
+    // initializer.
+    if (t->declarator == kDeclArray &&
+        (t->info.array.is_vla || t->info.array.is_dependent_bound ||
+         t->info.array.template_parameter_index >= 0 ||
+         t->info.array.is_flexible || t->info.array.size.fixed <= 0)) {
+      return false;
+    }
+    // Callers that cannot see the active instantiation must not share a
+    // class: its injected-class-name is rewritten during substitution.
+    if (!allow_class &&
+        (TypeIsStructOrUnion(t) || t->declarator == kDeclMemberPointer)) {
+      return false;
+    }
+    if (TypeIsStructOrUnion(t) || t->declarator == kDeclMemberPointer) {
+      Struct* str = t->info.struct_info;
+      if (StructIsTemplatePattern(str)) {
+        return false;
+      }
+      Vector* args = t->template_arguments;
+      if (args == NULL && str != NULL && str->tag_symbol != NULL &&
+          str->tag_symbol->type != t && str->tag_symbol->type != NULL) {
+        args = str->tag_symbol->type->template_arguments;
+      }
+      if (!TemplateArgumentsCanShare(args, depth)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static bool TypeRecordCanShare(TypeRecord* type, bool allow_class) {
+  if (type == NULL) {
+    return true;
+  }
+  // Reject function types and dependent declarators before the parameter
+  // walk.  A function record is copied so its prototype stays mutable.
+  if (!TypeSpineCanShare(type, allow_class)) {
+    return false;
+  }
+  return !TypeContainsTemplateParameter(type);
+}
+
+bool TypeRecordCanShareThroughSubstitution(TypeRecord* type) {
+  return TypeRecordCanShare(type, false);
+}
+
+bool TypeRecordCanShareConcreteClass(TypeRecord* type) {
+  return TypeRecordCanShare(type, true);
+}
+
+TypeRecord* TypeRecordShareExisting(TypeRecord* type) {
+  type_share_count++;
+  TypeRecordIncRef(type);
+  return type;
+}
+
+// Concrete types stored once.  A canonical record is marked
+// kTypeRecordCanonical; its `next` and the types of its template arguments
+// are canonical as well, so nothing reachable from it changes.
+#define kTypeRecordCanonical 2
+
+typedef struct {
+  TypeRecord* record;
+  uint64_t hash;
+} TypeInternSlot;
+
+// Canonical records by structural hash, and each canonical record's hash by
+// address so hashing stops at canonical children.
+static TypeInternSlot* type_intern_by_hash = NULL;
+static TypeInternSlot* type_intern_by_record = NULL;
+static size_t type_intern_capacity = 0;
+static size_t type_intern_count = 0;
+static size_t type_intern_hits = 0;
+static size_t type_intern_misses = 0;
+
+static void TypeInternRelease(void) {
+  free(type_intern_by_hash);
+  free(type_intern_by_record);
+  type_intern_by_hash = NULL;
+  type_intern_by_record = NULL;
+  type_intern_capacity = 0;
+  type_intern_count = 0;
+  type_intern_hits = 0;
+  type_intern_misses = 0;
+}
+
+static bool TypeRecordIsCanonical(const TypeRecord* type) {
+  return type != NULL && type->shared_immutable == kTypeRecordCanonical;
+}
+
+static uint64_t TypeInternMix(uint64_t h, uint64_t v) {
+  h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+  return h;
+}
+
+static size_t TypeInternRecordSlot(const TypeRecord* type) {
+  size_t mask = type_intern_capacity - 1;
+  size_t s = ((uintptr_t)type >> 4) & mask;
+  while (type_intern_by_record[s].record != NULL &&
+         type_intern_by_record[s].record != type) {
+    s = (s + 1) & mask;
+  }
+  return s;
+}
+
+static void TypeInternInsert(TypeRecord* canonical, uint64_t hash) {
+  size_t mask = type_intern_capacity - 1;
+  size_t s = hash & mask;
+  while (type_intern_by_hash[s].record != NULL) {
+    s = (s + 1) & mask;
+  }
+  type_intern_by_hash[s].record = canonical;
+  type_intern_by_hash[s].hash = hash;
+  s = TypeInternRecordSlot(canonical);
+  type_intern_by_record[s].record = canonical;
+  type_intern_by_record[s].hash = hash;
+}
+
+static void TypeInternReserve(void) {
+  if (type_intern_count * 2 < type_intern_capacity) {
+    return;
+  }
+  TypeInternSlot* old = type_intern_by_hash;
+  size_t old_capacity = type_intern_capacity;
+  type_intern_capacity = old_capacity ? old_capacity * 2 : 1 << 16;
+  type_intern_by_hash = calloc(type_intern_capacity, sizeof(TypeInternSlot));
+  free(type_intern_by_record);
+  type_intern_by_record = calloc(type_intern_capacity, sizeof(TypeInternSlot));
+  for (size_t i = 0; i < old_capacity; i++) {
+    if (old[i].record != NULL) {
+      TypeInternInsert(old[i].record, old[i].hash);
+    }
+  }
+  free(old);
+}
+
+static uint64_t TypeInternHash(const TypeRecord* type, Qualifiers quals);
+
+static uint64_t TypeInternHashString(const char* text) {
+  uint64_t h = 1469598103934665603ull;
+  for (const char* c = text; *c != '\0'; c++) {
+    h = (h ^ (uint8_t)*c) * 1099511628211ull;
+  }
+  return h;
+}
+
+static uint64_t TypeInternHashChild(const TypeRecord* type) {
+  if (type == NULL) {
+    return 0;
+  }
+  if (TypeRecordIsCanonical(type)) {
+    return type_intern_by_record[TypeInternRecordSlot(type)].hash;
+  }
+  return TypeInternHash(type, GetQualifiers(type));
+}
+
+static uint64_t TypeInternHashArguments(const Vector* args) {
+  if (args == NULL) {
+    return 0;
+  }
+  uint64_t h = TypeInternMix(0x51, args->length);
+  for (size_t i = 0; i < args->length; i++) {
+    const TemplateArgument* arg = args->value.p[i];
+    if (arg == NULL) {
+      h = TypeInternMix(h, 1);
+      continue;
+    }
+    h = TypeInternMix(h, arg->kind);
+    h = TypeInternMix(h, arg->is_pack_expansion);
+    h = TypeInternMix(h, TypeInternHashChild(arg->type));
+    h = TypeInternMix(h, (uint64_t)arg->int_value);
+    h = TypeInternMix(h, (uintptr_t)arg->value_symbol);
+    h = TypeInternMix(h, (uintptr_t)arg->template_symbol);
+    h = TypeInternMix(h, TypeInternHashArguments(arg->pack_arguments));
+  }
+  return h;
+}
+
+static uint64_t TypeInternHash(const TypeRecord* type, Qualifiers quals) {
+  uint64_t h = 1469598103934665603ull;
+  h = TypeInternMix(h, type->type);
+  h = TypeInternMix(h, quals);
+  h = TypeInternMix(h, type->declarator);
+  h = TypeInternMix(h, (uint64_t)type->bit_width);
+  h = TypeInternMix(h, (uint64_t)(int64_t)type->template_parameter_index);
+  if (type->template_parameter_name != NULL) {
+    h = TypeInternMix(h, TypeInternHashString(type->template_parameter_name->value));
+  }
+  h = TypeInternMix(h, (uintptr_t)type->template_origin);
+  h = TypeInternMix(h, TypeInternHashChild(type->next));
+  h = TypeInternMix(h, TypeInternHashArguments(type->template_arguments));
+  if (type->declarator == kDeclArray || type->declarator == kDeclVector) {
+    h = TypeInternMix(h, (uint64_t)type->info.array.size.fixed);
+  } else if (TypeIsStructOrUnion(type) ||
+             type->declarator == kDeclMemberPointer) {
+    h = TypeInternMix(h, (uintptr_t)type->info.struct_info);
+  } else if (TypeIsEnum(type)) {
+    h = TypeInternMix(h, (uintptr_t)type->info.enum_info);
+  }
+  return h;
+}
+
+static bool TypeInternEqual(const TypeRecord* type, Qualifiers quals,
+                            const TypeRecord* canonical);
+
+static bool TypeInternChildEqual(const TypeRecord* type,
+                                 const TypeRecord* canonical) {
+  if (type == canonical) {
+    return true;
+  }
+  if (type == NULL || canonical == NULL || TypeRecordIsCanonical(type)) {
+    return false;
+  }
+  return TypeInternEqual(type, GetQualifiers(type), canonical);
+}
+
+static bool TypeInternArgumentsEqual(const Vector* args,
+                                     const Vector* canonical) {
+  if (args == NULL || canonical == NULL) {
+    return args == canonical;
+  }
+  if (args->length != canonical->length) {
+    return false;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    const TemplateArgument* a = args->value.p[i];
+    const TemplateArgument* b = canonical->value.p[i];
+    if (a == NULL || b == NULL) {
+      if (a != b) {
+        return false;
+      }
+      continue;
+    }
+    if (a->kind != b->kind || a->is_pack_expansion != b->is_pack_expansion ||
+        a->references_parameter_pack != b->references_parameter_pack ||
+        a->int_value != b->int_value ||
+        a->template_parameter_index != b->template_parameter_index ||
+        a->dependent_expr != b->dependent_expr ||
+        a->value_kind != b->value_kind || a->value_symbol != b->value_symbol ||
+        a->value_offset != b->value_offset ||
+        a->value_adjustment != b->value_adjustment ||
+        a->member_function != b->member_function ||
+        a->template_symbol != b->template_symbol ||
+        a->reflection_value != b->reflection_value ||
+        a->pack_index_expr != b->pack_index_expr ||
+        a->object_initializer != b->object_initializer ||
+        !TypeInternChildEqual(a->type, b->type) ||
+        !TypeInternArgumentsEqual(a->pack_arguments, b->pack_arguments)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool TypeInternEqual(const TypeRecord* type, Qualifiers quals,
+                            const TypeRecord* canonical) {
+  if (type->type != canonical->type || quals != GetQualifiers(canonical) ||
+      type->declarator != canonical->declarator ||
+      type->bit_width != canonical->bit_width ||
+      type->template_parameter_index != canonical->template_parameter_index ||
+      type->template_origin != canonical->template_origin ||
+      type->is_pack_index != canonical->is_pack_index ||
+      type->dependent_member_template_arguments !=
+          canonical->dependent_member_template_arguments) {
+    return false;
+  }
+  // Parameters at the same index of different templates print differently.
+  const String* name = type->template_parameter_name;
+  const String* canonical_name = canonical->template_parameter_name;
+  if ((name == NULL) != (canonical_name == NULL) ||
+      (name != NULL && strcmp(name->value, canonical_name->value) != 0)) {
+    return false;
+  }
+  if (type->declarator == kDeclArray || type->declarator == kDeclVector) {
+    const ArrayInfo* a = &type->info.array;
+    const ArrayInfo* b = &canonical->info.array;
+    if (a->size.fixed != b->size.fixed || a->is_flexible != b->is_flexible ||
+        a->is_static != b->is_static || a->is_vla != b->is_vla ||
+        a->is_placeholder_vla != b->is_placeholder_vla ||
+        a->is_dependent_bound != b->is_dependent_bound ||
+        a->template_parameter_index != b->template_parameter_index) {
+      return false;
+    }
+  } else if (TypeIsStructOrUnion(type) ||
+             type->declarator == kDeclMemberPointer) {
+    if (type->info.struct_info != canonical->info.struct_info) {
+      return false;
+    }
+  } else if (TypeIsEnum(type)) {
+    if (type->info.enum_info != canonical->info.enum_info) {
+      return false;
+    }
+  }
+  return TypeInternChildEqual(type->next, canonical->next) &&
+         TypeInternArgumentsEqual(type->template_arguments,
+                                  canonical->template_arguments);
+}
+
+static TypeRecord* TypeRecordInternWithQualifiers(TypeRecord* type,
+                                                  Qualifiers quals);
+
+static void TypeInternArgumentTypes(Vector* args) {
+  if (args == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg == NULL) {
+      continue;
+    }
+    if (arg->type != NULL && !TypeRecordIsCanonical(arg->type)) {
+      TypeRecord* canonical =
+          TypeRecordInternWithQualifiers(arg->type, GetQualifiers(arg->type));
+      TypeRecordDelete(arg->type);
+      arg->type = canonical;
+    }
+    TypeInternArgumentTypes(arg->pack_arguments);
+  }
+}
+
+// The caller has checked TypeRecordCanShareConcreteClass(type) or
+// TypeRecordIsBareTemplateParameter(type).
+static TypeRecord* TypeRecordInternWithQualifiers(TypeRecord* type,
+                                                  Qualifiers quals) {
+  if (TypeRecordIsCanonical(type) && GetQualifiers(type) == quals) {
+    return type;
+  }
+  TypeInternReserve();
+  uint64_t hash = TypeInternHash(type, quals);
+  size_t mask = type_intern_capacity - 1;
+  for (size_t s = hash & mask; type_intern_by_hash[s].record != NULL;
+       s = (s + 1) & mask) {
+    if (type_intern_by_hash[s].hash == hash &&
+        TypeInternEqual(type, quals, type_intern_by_hash[s].record)) {
+      type_intern_hits++;
+      return type_intern_by_hash[s].record;
+    }
+  }
+  type_intern_misses++;
+  // A fresh record: the source may still be modified by its owner.
+  TypeRecord* canonical = TypeRecordCopy(type);
+  SetQualifiers(canonical, quals);
+  if (canonical->next != NULL && !TypeRecordIsCanonical(canonical->next)) {
+    TypeRecord* next = TypeRecordInternWithQualifiers(
+        canonical->next, GetQualifiers(canonical->next));
+    TypeRecordDelete(canonical->next);
+    canonical->next = next;
+  }
+  TypeInternArgumentTypes(canonical->template_arguments);
+  canonical = TypeRecordCalculateSize(canonical);
+  assert(TypeInternHash(canonical, GetQualifiers(canonical)) == hash);
+  canonical->shared_immutable = kTypeRecordCanonical;
+  canonical->refs = 2;
+  // Interning children may have grown the tables.
+  TypeInternReserve();
+  TypeInternInsert(canonical, hash);
+  type_intern_count++;
+  return canonical;
+}
+
+bool TypeRecordCanIntern(TypeRecord* type) {
+  return type != NULL &&
+         (TypeRecordIsCanonical(type) || TypeRecordCanShareConcreteClass(type));
+}
+
+TypeRecord* TypeRecordIntern(TypeRecord* type) {
+  return TypeRecordInternWithQualifiers(type, GetQualifiers(type));
+}
+
+TypeRecord* TypeRecordInternQualified(TypeRecord* type, Qualifiers quals) {
+  return TypeRecordInternWithQualifiers(type, quals);
+}
+
+TypeRecord* TypeRecordInternOrCloneSpine(TypeRecord* type) {
+  if (TypeRecordCanIntern(type)) {
+    return TypeRecordIntern(type);
+  }
+  return TypeRecordCloneSpine(type);
+}
+
+TypeRecord* TypeRecordInternOrCopy(TypeRecord* type) {
+  if (TypeRecordCanIntern(type)) {
+    return TypeRecordIntern(type);
+  }
+  return TypeRecordCopy(type);
+}
+
+static bool TypeRecordIsBareTemplateParameter(const TypeRecord* type) {
+  return type->declarator == kDeclPrimitive &&
+         type->template_parameter_index >= 0 && type->next == NULL &&
+         type->template_arguments == NULL &&
+         type->dependent_member_name == NULL &&
+         type->dependent_member_template_arguments == NULL &&
+         type->dependent_decltype_expr == NULL && !type->is_pack_index &&
+         type->pack_index_expr == NULL && type->pack_index_pack == NULL &&
+         type->dependent_splice_expr == NULL &&
+         type->size_sync_owner == NULL &&
+         !TypeIsStructOrUnion((TypeRecord*)type) &&
+         !TypeIsEnum((TypeRecord*)type);
+}
+
+TypeRecord* TypeRecordInternArgumentOrCopy(TypeRecord* type) {
+  if (type != NULL && TypeRecordIsBareTemplateParameter(type)) {
+    return TypeRecordInternWithQualifiers(type, GetQualifiers(type));
+  }
+  return TypeRecordInternOrCopy(type);
+}
+
+size_t TypeRecordInternHitCount(void) {
+  return type_intern_hits;
+}
+
+size_t TypeRecordInternMissCount(void) {
+  return type_intern_misses;
+}
+
+TypeRecord* TypeRecordForWrite(TypeRecord* type) {
+  if (type == NULL || (type->refs == 0 && !type->shared_immutable)) {
+    return type;
+  }
+  return TypeRecordCopy(type);
+}
+
+TypeRecord* TypeRecordAddQualifiers(TypeRecord* type, Qualifiers quals) {
+  if (type == NULL) {
+    return NULL;
+  }
+  Qualifiers added = quals & ~GetQualifiers(type);
+  if (added == 0) {
+    return type;
+  }
+  // A fresh copy is exclusive.  A record another owner already holds must
+  // not gain qualifiers in place.
+  if (type->refs == 0) {
+    SetQualifiers(type, GetQualifiers(type) | added);
+    return type;
+  }
+  TypeRecord* copy = TypeRecordCopy(type);
+  SetQualifiers(copy, GetQualifiers(copy) | added);
+  return copy;
+}
+
 TypeRecord* TypeRecordCopy(TypeRecord* record) {
   if (record == NULL) {
     return NULL;
   }
+  type_copy_count++;
+  if (type_copy_callers != NULL) {
+    TypeCopyNoteCaller(__builtin_return_address(0));
+  }
+  type_census_caller = __builtin_return_address(0);
   TypeRecord* r = TypeArenaAllocSized(TypeIsFunction(record)
                                           ? TYPE_RECORD_FULL_SIZE
                                           : TYPE_RECORD_NON_FUNCTION_SIZE);
@@ -1321,6 +1964,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   }
   r->id = next_type_id;
   r->refs = 0;  // No refs to this yet.
+  r->shared_immutable = 0;
   r->size_sync_owner = NULL;
   if (r->next == NULL && r->template_parameter_name == NULL &&
       r->dependent_member_name == NULL && r->template_arguments == NULL &&
@@ -1658,7 +2302,7 @@ void ContractAssertionDelete(ContractAssertion* assertion) {
 }
 
 TypeRecord* NewFunctionTypeRecord() {
-  TypeRecord* t = NewTypeRecord(kTypeImplicit, kQualPlain);
+  TypeRecord* t = NewFunctionCapableTypeRecord(kTypeImplicit, kQualPlain);
   t->declarator = kDeclFunction;
   // NewTypeRecord zero-initializes FunctionInfo, including its vectors and
   // enum fields whose "none" values are zero. Only nonzero defaults belong
@@ -1889,6 +2533,9 @@ Struct* NewStruct(bool is_union) {
   s->in_namespace_template = false;
   s->lambda_body_needs_reanalysis = false;
   s->lambda_has_init_capture = false;
+  s->consteval_only_cached = 0;
+  s->consteval_only_member_count = 0;
+  s->consteval_only_base_count = 0;
   s->local_class_arguments = NULL;
   s->local_class_discriminator = 0;
   s->local_class_awaits_member_arguments = false;
@@ -2089,7 +2736,7 @@ Symbol* NewEnumConstant(const char* name, int64_t value) {
 Symbol* NewScopedEnumConstant(const char* name, int64_t value,
                               TypeRecord* enum_type) {
   TypeRecord* type = TypeRecordCopy(enum_type);
-  type->qualifiers |= kQualConst;
+  SetQualifiers(type, GetQualifiers(type) | kQualConst);
   Symbol* c = NewSymbol(name, type, STO(implicit));
   c->value.ivalue = value;
   c->flags.value_set = true;
@@ -2135,4 +2782,268 @@ Symbol* EnumFindConstant(Enum* e, String* name) {
     }
   }
   return NULL;
+}
+
+typedef struct {
+  TypeRecord* key;
+  uint64_t hash;
+} TypeCensusMemo;
+static TypeCensusMemo* type_census_memo = NULL;
+static size_t type_census_memo_mask = 0;
+
+static uint64_t TypeCensusMix(uint64_t h, uint64_t v) {
+  h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+  return h;
+}
+
+static TypeCensusMemo* TypeCensusMemoSlot(TypeRecord* t) {
+  size_t s = ((uintptr_t)t >> 4) & type_census_memo_mask;
+  while (type_census_memo[s].key != NULL && type_census_memo[s].key != t) {
+    s = (s + 1) & type_census_memo_mask;
+  }
+  return &type_census_memo[s];
+}
+
+static uint64_t TypeCensusHash(TypeRecord* t, int depth);
+
+static uint64_t TypeCensusArgsHash(Vector* args, int depth) {
+  if (args == NULL) {
+    return 0;
+  }
+  uint64_t h = TypeCensusMix(17, args->length);
+  for (size_t i = 0; i < args->length; i++) {
+    TemplateArgument* a = args->value.p[i];
+    if (a == NULL) {
+      h = TypeCensusMix(h, 1);
+      continue;
+    }
+    h = TypeCensusMix(h, a->kind);
+    h = TypeCensusMix(h, a->is_pack_expansion);
+    h = TypeCensusMix(h, TypeCensusHash(a->type, depth + 1));
+    h = TypeCensusMix(h, (uint64_t)a->int_value);
+    h = TypeCensusMix(h, (uint64_t)a->template_parameter_index);
+    h = TypeCensusMix(h, TypeCensusArgsHash(a->pack_arguments, depth + 1));
+    h = TypeCensusMix(h, (uintptr_t)a->dependent_expr);
+    h = TypeCensusMix(h, a->value_kind);
+    h = TypeCensusMix(h, (uintptr_t)a->value_symbol);
+    h = TypeCensusMix(h, (uint64_t)a->value_offset);
+    h = TypeCensusMix(h, (uintptr_t)a->member_function);
+    h = TypeCensusMix(h, (uintptr_t)a->template_symbol);
+    h = TypeCensusMix(h, (uintptr_t)a->reflection_value);
+    h = TypeCensusMix(h, (uintptr_t)a->object_initializer);
+  }
+  return h;
+}
+
+static uint64_t TypeCensusHash(TypeRecord* t, int depth) {
+  if (t == NULL) {
+    return 0;
+  }
+  if (depth > 64) {
+    return (uintptr_t)t;
+  }
+  TypeCensusMemo* slot = TypeCensusMemoSlot(t);
+  if (slot->key == t) {
+    return slot->hash;
+  }
+  slot->key = t;
+  slot->hash = (uintptr_t)t;  // Breaks cycles.
+  uint64_t h = 1469598103934665603ull;
+  h = TypeCensusMix(h, t->type);
+  h = TypeCensusMix(h, GetQualifiers(t));
+  h = TypeCensusMix(h, t->declarator);
+  h = TypeCensusMix(h, (uint64_t)t->bit_width);
+  h = TypeCensusMix(h, (uint64_t)t->template_parameter_index);
+  if (t->dependent_member_name != NULL) {
+    for (const char* c = t->dependent_member_name->value; c && *c; c++) {
+      h = TypeCensusMix(h, (unsigned char)*c);
+    }
+  }
+  h = TypeCensusMix(h, (uintptr_t)t->template_origin);
+  h = TypeCensusMix(h, t->is_pack_index);
+  h = TypeCensusMix(h, (uintptr_t)t->dependent_decltype_expr);
+  h = TypeCensusMix(h, (uintptr_t)t->pack_index_expr);
+  h = TypeCensusMix(h, (uintptr_t)t->dependent_splice_expr);
+  h = TypeCensusMix(h, TypeCensusArgsHash(t->template_arguments, depth));
+  if (t->dependent_member_template_arguments != NULL) {
+    for (size_t i = 0; i < t->dependent_member_template_arguments->length;
+         i++) {
+      h = TypeCensusMix(
+          h, TypeCensusArgsHash(
+                 t->dependent_member_template_arguments->value.p[i], depth));
+    }
+  }
+  h = TypeCensusMix(h, TypeCensusHash(t->next, depth + 1));
+  if (t->declarator == kDeclArray || t->declarator == kDeclVector) {
+    h = TypeCensusMix(h, t->info.array.is_vla
+                             ? (uintptr_t)t->info.array.size.vla.size
+                             : (uint64_t)t->info.array.size.fixed);
+    h = TypeCensusMix(h, t->info.array.is_vla | t->info.array.is_flexible << 1 |
+                             t->info.array.is_dependent_bound << 2);
+    h = TypeCensusMix(h, (uint64_t)t->info.array.template_parameter_index);
+  } else if (TypeIsFunction(t)) {
+    // Function records carry their declaration; only identical owners merge.
+    h = TypeCensusMix(h, (uintptr_t)t->info.function.symbol);
+    h = TypeCensusMix(h, t->info.function.prototype.length);
+    for (size_t i = 0; i < t->info.function.prototype.length; i++) {
+      Symbol* formal = t->info.function.prototype.value.p[i];
+      h = TypeCensusMix(
+          h, formal != NULL ? TypeCensusHash(formal->type, depth + 1) : 0);
+    }
+  } else if (TypeIsStructOrUnion(t) || t->declarator == kDeclMemberPointer) {
+    h = TypeCensusMix(h, (uintptr_t)t->info.struct_info);
+  } else if (TypeIsEnum(t)) {
+    h = TypeCensusMix(h, (uintptr_t)t->info.enum_info);
+  }
+  slot = TypeCensusMemoSlot(t);
+  slot->hash = h;
+  return h;
+}
+
+typedef struct {
+  uint64_t hash;
+  size_t bytes;
+  void* caller;
+} TypeCensusItem;
+
+static int CompareTypeCensusItems(const void* a, const void* b) {
+  uint64_t x = ((const TypeCensusItem*)a)->hash;
+  uint64_t y = ((const TypeCensusItem*)b)->hash;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static int CompareTypeRecordPointers(const void* a, const void* b) {
+  uintptr_t x = (uintptr_t)*(TypeRecord* const*)a;
+  uintptr_t y = (uintptr_t)*(TypeRecord* const*)b;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+#define TYPE_CENSUS_CALLER_SLOTS 4096
+static TypeCopyCaller type_census_dup_callers[TYPE_CENSUS_CALLER_SLOTS];
+
+static void TypeCensusNoteDuplicate(void* caller) {
+  size_t slot = ((uintptr_t)caller >> 2) & (TYPE_CENSUS_CALLER_SLOTS - 1);
+  for (size_t probe = 0; probe < TYPE_CENSUS_CALLER_SLOTS; probe++) {
+    TypeCopyCaller* entry = &type_census_dup_callers[slot];
+    if (entry->count == 0 || entry->caller == caller) {
+      entry->caller = caller;
+      entry->count++;
+      return;
+    }
+    slot = (slot + 1) & (TYPE_CENSUS_CALLER_SLOTS - 1);
+  }
+}
+
+static void TypeCensusReportDuplicates(FILE* out, const char* name) {
+  qsort(type_census_dup_callers, TYPE_CENSUS_CALLER_SLOTS,
+        sizeof(TypeCopyCaller), CompareTypeCopyCallers);
+  for (size_t i = 0; i < 25 && type_census_dup_callers[i].count > 0; i++) {
+    fprintf(out, "DAVECC_PROFILE census-dup %s %p %zu\n", name,
+            type_census_dup_callers[i].caller,
+            type_census_dup_callers[i].count);
+  }
+  memset(type_census_dup_callers, 0, sizeof(type_census_dup_callers));
+}
+
+typedef struct {
+  const char* name;
+  TypeCensusItem* items;
+  size_t count;
+} TypeCensusClass;
+
+static void TypeCensusClassReport(FILE* out, TypeCensusClass* c) {
+  qsort(c->items, c->count, sizeof(TypeCensusItem), CompareTypeCensusItems);
+  size_t distinct = 0;
+  size_t total_bytes = 0;
+  size_t dup_bytes = 0;
+  for (size_t i = 0; i < c->count; i++) {
+    total_bytes += c->items[i].bytes;
+    if (i == 0 || c->items[i].hash != c->items[i - 1].hash) {
+      distinct++;
+    } else {
+      dup_bytes += c->items[i].bytes;
+      TypeCensusNoteDuplicate(c->items[i].caller);
+    }
+  }
+  fprintf(out,
+          "DAVECC_PROFILE census %s records=%zu distinct=%zu bytes=%zuMB "
+          "duplicate_bytes=%zuMB\n",
+          c->name, c->count, distinct, total_bytes >> 20, dup_bytes >> 20);
+  TypeCensusReportDuplicates(out, c->name);
+}
+
+void TypeRecordProfileCensus(FILE* out) {
+  if (!type_census_enabled) {
+    return;
+  }
+  type_census_enabled = false;
+  size_t n = type_census_alloc_count;
+  qsort(type_census_releases, type_census_release_count, sizeof(TypeRecord*),
+        CompareTypeRecordPointers);
+  size_t memo_slots = 1;
+  while (memo_slots < 2 * n + 16) {
+    memo_slots <<= 1;
+  }
+  type_census_memo = calloc(memo_slots, sizeof(TypeCensusMemo));
+  type_census_memo_mask = memo_slots - 1;
+  TypeCensusClass classes[8] = {
+      {"concrete", NULL, 0},   {"function", NULL, 0},
+      {"other", NULL, 0},      {"dep-param", NULL, 0},
+      {"dep-member", NULL, 0}, {"dep-template-id", NULL, 0},
+      {"dep-spine", NULL, 0},  {"dep-pattern-class", NULL, 0},
+  };
+  for (int i = 0; i < 8; i++) {
+    classes[i].items = malloc((n + 1) * sizeof(TypeCensusItem));
+  }
+  size_t released = 0;
+  size_t released_bytes = 0;
+  for (size_t i = 0; i < n; i++) {
+    TypeRecord* t = type_census_allocs[i].record;
+    size_t bytes = type_census_allocs[i].bytes;
+    if (bsearch(&t, type_census_releases, type_census_release_count,
+                sizeof(TypeRecord*), CompareTypeRecordPointers) != NULL) {
+      released++;
+      released_bytes += bytes;
+      continue;
+    }
+    uint64_t hash = TypeCensusHash(t, 0);
+    int which = TypeIsFunction(t)                    ? 1
+                : TypeRecordCanShareConcreteClass(t) ? 0
+                                                     : 2;
+    if (which == 2) {
+      if (t->dependent_member_name != NULL) {
+        which = 4;
+      } else if (t->next != NULL) {
+        which = 6;
+      } else if (t->template_parameter_index >= 0 &&
+                 t->template_arguments == NULL) {
+        which = 3;
+      } else if (t->template_arguments != NULL) {
+        which = 5;
+      } else if (TypeIsStructOrUnion(t) &&
+                 StructIsTemplatePattern(t->info.struct_info)) {
+        which = 7;
+      }
+    }
+    TypeCensusClass* c = &classes[which];
+    c->items[c->count].hash = hash;
+    c->items[c->count].bytes = bytes;
+    c->items[c->count].caller = type_census_allocs[i].caller;
+    c->count++;
+  }
+  fprintf(out,
+          "DAVECC_PROFILE census allocated=%zu released=%zu "
+          "released_bytes=%zuMB full_size=%zu short_size=%zu\n",
+          n, released, released_bytes >> 20, (size_t)TYPE_RECORD_FULL_SIZE,
+          (size_t)TYPE_RECORD_NON_FUNCTION_SIZE);
+  for (int i = 0; i < 8; i++) {
+    TypeCensusClassReport(out, &classes[i]);
+    free(classes[i].items);
+  }
+  free(type_census_memo);
+  type_census_memo = NULL;
+  free(type_census_allocs);
+  type_census_allocs = NULL;
+  free(type_census_releases);
+  type_census_releases = NULL;
 }

@@ -19,7 +19,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <malloc/malloc.h>
+#endif
 #include "codegen.h"
 #include "constexpr.h"
 #include "constexpr_pcode.h"
@@ -1428,7 +1434,7 @@ static void AssignScalarValueToConst(Symbol* symbol, BracedInitializerASTNode* i
       !TypeIsMemberPointer(type)) {
     return;
   }
-  if ((type->qualifiers & kQualConst) == 0) {
+  if ((GetQualifiers(type) & kQualConst) == 0) {
     return;
   }
   // Semantic analysis may already have recorded a value that integer
@@ -3177,6 +3183,194 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
   return true;
 }
 
+/* DAVECC_PROFILE=1 times the per-declaration pipeline and logs resident
+ * memory each time it grows by 256MB.  Off unless that variable is set, so
+ * ordinary compiles do not pay for the clocks. */
+static bool profile_enabled = false;
+static uint64_t profile_parse_ns = 0;
+static uint64_t profile_decl_ns = 0;
+static uint64_t profile_pending_ns = 0;
+static uint64_t profile_after_ns = 0;
+static uint64_t profile_semantic_ns = 0;
+static uint64_t profile_codegen_ns = 0;
+static uint64_t profile_n_parse = 0;
+static uint64_t profile_n_decl = 0;
+static uint64_t profile_n_pending = 0;
+static uint64_t profile_n_semantic = 0;
+static uint64_t profile_n_codegen = 0;
+static uint64_t profile_next_rss_mark = 0;
+
+typedef struct {
+  uint64_t ns;
+  SourceLocation location;
+  const char* phase;
+  const char* name;
+} ProfileHit;
+
+static ProfileHit profile_hits[16];
+
+static uint64_t ProfileNow(void) {
+  if (!profile_enabled) {
+    return 0;
+  }
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t ProfileSince(uint64_t start) {
+  if (!profile_enabled || start == 0) {
+    return 0;
+  }
+  uint64_t now = ProfileNow();
+  return now > start ? now - start : 0;
+}
+
+static void ProfileRemember(uint64_t ns, SourceLocation location,
+                            const char* phase, const char* name) {
+  if (!profile_enabled || ns < 2000000ull) {
+    return;
+  }
+  size_t slot = 0;
+  if (profile_hits[15].ns != 0) {
+    slot = 15;
+    for (size_t i = 0; i < 16; i++) {
+      if (profile_hits[i].ns < profile_hits[slot].ns) {
+        slot = i;
+      }
+    }
+    if (ns <= profile_hits[slot].ns) {
+      return;
+    }
+  } else {
+    while (slot < 16 && profile_hits[slot].ns != 0) {
+      slot++;
+    }
+    if (slot == 16) {
+      return;
+    }
+  }
+  profile_hits[slot].ns = ns;
+  profile_hits[slot].location = location;
+  profile_hits[slot].phase = phase;
+  profile_hits[slot].name = name;
+}
+
+static uint64_t ProfileResidentBytes(void) {
+#ifdef __APPLE__
+  struct mach_task_basic_info info;
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info,
+                &count) != KERN_SUCCESS) {
+    return 0;
+  }
+  return info.resident_size;
+#else
+  return 0;
+#endif
+}
+
+static uint64_t ProfileAllocatedBytes(void) {
+#ifdef __APPLE__
+  malloc_statistics_t stats;
+  malloc_zone_statistics(NULL, &stats);
+  return stats.size_in_use;
+#else
+  return 0;
+#endif
+}
+
+static void ProfileNoteMemory(SourceLocation location) {
+  if (!profile_enabled) {
+    return;
+  }
+  uint64_t rss = ProfileResidentBytes();
+  if (profile_next_rss_mark == 0) {
+    profile_next_rss_mark = 256ull << 20;
+  }
+  if (rss < profile_next_rss_mark) {
+    return;
+  }
+  const char* filename = NULL;
+  int lineno = 0;
+  int start = 0;
+  int end = 0;
+  DecodeSourceLocation(location, &filename, &lineno, &start, &end);
+  fprintf(stderr,
+          "DAVECC_PROFILE rss=%lluMB alloc=%lluMB ast=%lluMB types=%lluMB "
+          "at %s:%d\n",
+          (unsigned long long)(rss >> 20),
+          (unsigned long long)(ProfileAllocatedBytes() >> 20),
+          (unsigned long long)(ASTArenaBytes() >> 20),
+          (unsigned long long)(TypeArenaBytes() >> 20),
+          filename != NULL ? filename : "?", lineno);
+  while (profile_next_rss_mark <= rss) {
+    profile_next_rss_mark += 256ull << 20;
+  }
+}
+
+static void ProfileReport(void) {
+  if (!profile_enabled) {
+    return;
+  }
+  fprintf(stderr,
+          "DAVECC_PROFILE parse=%.2fs n=%llu decl=%.2fs n=%llu "
+          "pending=%.2fs n=%llu after=%.2fs\n",
+          profile_parse_ns / 1e9, (unsigned long long)profile_n_parse,
+          profile_decl_ns / 1e9, (unsigned long long)profile_n_decl,
+          profile_pending_ns / 1e9, (unsigned long long)profile_n_pending,
+          profile_after_ns / 1e9);
+  fprintf(stderr,
+          "DAVECC_PROFILE semantic=%.2fs n=%llu codegen=%.2fs n=%llu "
+          "rss=%lluMB alloc=%lluMB ast=%lluMB nodes=%llu types=%lluMB\n",
+          profile_semantic_ns / 1e9, (unsigned long long)profile_n_semantic,
+          profile_codegen_ns / 1e9, (unsigned long long)profile_n_codegen,
+          (unsigned long long)(ProfileResidentBytes() >> 20),
+          (unsigned long long)(ProfileAllocatedBytes() >> 20),
+          (unsigned long long)(ASTArenaBytes() >> 20),
+          (unsigned long long)ASTArenaNodeCount(),
+          (unsigned long long)(TypeArenaBytes() >> 20));
+  fprintf(stderr,
+          "DAVECC_PROFILE types full=%llu short=%llu copies=%llu shares=%llu "
+          "intern_hits=%llu intern_misses=%llu\n",
+          (unsigned long long)TypeArenaFullAllocCount(),
+          (unsigned long long)TypeArenaShortAllocCount(),
+          (unsigned long long)TypeRecordCopyCount(),
+          (unsigned long long)TypeRecordShareCount(),
+          (unsigned long long)TypeRecordInternHitCount(),
+          (unsigned long long)TypeRecordInternMissCount());
+#ifdef __APPLE__
+  fprintf(stderr, "DAVECC_PROFILE image-base %p\n",
+          (void*)_dyld_get_image_header(0));
+#endif
+  TypeRecordProfileCensus(stderr);
+  TypeRecordProfileReport(stderr, 40);
+  for (size_t i = 0; i < 16; i++) {
+    for (size_t j = i + 1; j < 16; j++) {
+      if (profile_hits[j].ns > profile_hits[i].ns) {
+        ProfileHit tmp = profile_hits[i];
+        profile_hits[i] = profile_hits[j];
+        profile_hits[j] = tmp;
+      }
+    }
+  }
+  for (size_t i = 0; i < 16; i++) {
+    if (profile_hits[i].ns == 0) {
+      break;
+    }
+    const char* filename = NULL;
+    int lineno = 0;
+    int start = 0;
+    int end = 0;
+    DecodeSourceLocation(profile_hits[i].location, &filename, &lineno, &start,
+                         &end);
+    fprintf(stderr, "DAVECC_PROFILE slow %s %.2fs %s %s:%d\n",
+            profile_hits[i].phase, profile_hits[i].ns / 1e9,
+            profile_hits[i].name != NULL ? profile_hits[i].name : "?",
+            filename != NULL ? filename : "?", lineno);
+  }
+}
+
 static void CompileFunctionDefinitionNode(
     Syntax* syntax, VariableDeclarationASTNode* decl) {
   if (FunctionAsmNameAlreadyEmitted(FunctionEmitName(decl->symbol))) {
@@ -3198,7 +3392,15 @@ static void CompileFunctionDefinitionNode(
   bool analyze = decl->base.type == NULL || !TypeIsFunction(decl->base.type) ||
                  !decl->base.type->info.function.body_analyzed;
   if (analyze) {
+    uint64_t profile_t0 = ProfileNow();
     SemanticAnalyzeFunction(syntax, (ASTNode*)decl);
+    uint64_t profile_dt = ProfileSince(profile_t0);
+    profile_semantic_ns += profile_dt;
+    profile_n_semantic++;
+    ProfileRemember(
+        profile_dt,
+        decl->symbol != NULL ? decl->symbol->location : decl->base.location,
+        "semantic", decl->symbol != NULL ? decl->symbol->name.value : NULL);
     if (decl->base.type != NULL && TypeIsFunction(decl->base.type)) {
       decl->base.type->info.function.body_analyzed = true;
     }
@@ -3220,7 +3422,15 @@ static void CompileFunctionDefinitionNode(
   if (!(decl->base.type->info.function.is_consteval ||
         (decl->base.type->info.function.is_constexpr &&
          TypeIsConstevalOnly(decl->base.type)))) {
+    uint64_t profile_t0 = ProfileNow();
     GenerateFunctionDefinition(syntax, decl);
+    uint64_t profile_dt = ProfileSince(profile_t0);
+    profile_codegen_ns += profile_dt;
+    profile_n_codegen++;
+    ProfileRemember(
+        profile_dt,
+        decl->symbol != NULL ? decl->symbol->location : decl->base.location,
+        "codegen", decl->symbol != NULL ? decl->symbol->name.value : NULL);
   }
 }
 
@@ -3599,6 +3809,7 @@ static void CompilePendingTemplateInstantiations(Syntax* syntax) {
         pending->value.p[compiler->pending_template_instantiation_head++];
     ForgetUnindexedPendingTemplateInstantiation(node);
     SyntaxResetForNewDeclaration(syntax);
+    profile_n_pending++;
     if (node != NULL && node->op == AST_OP(vardecl)) {
       // Function instantiations are queued directly, avoiding a one-element
       // declaration vector and the generic declaration classifier.
@@ -3956,12 +4167,21 @@ static void CompileDeclaration(Syntax* syntax) {
   int errors_before = NumErrors();
   Token token_before = syntax->lex->current_token;
   SourceLocation location_before = syntax->lex->current_token_location;
+  uint64_t profile_t0 = ProfileNow();
   ASTNode* node = SyntaxParseExternalDeclaration(syntax);
+  profile_parse_ns += ProfileSince(profile_t0);
+  profile_n_parse++;
   DiagnosticSwapState(diag_state);
   SyntaxEnsureProgress(syntax, token_before, location_before, errors_before,
                        0);
+  profile_t0 = ProfileNow();
   CompileDeclarationNode(syntax, node);
+  profile_decl_ns += ProfileSince(profile_t0);
+  profile_n_decl++;
+  profile_t0 = ProfileNow();
   CompilePendingTemplateInstantiations(syntax);
+  profile_pending_ns += ProfileSince(profile_t0);
+  ProfileNoteMemory(syntax->lex->current_token_location);
   CompilerDrainPendingInjectedDeclarations(syntax);
   CompileDeferredCXXStaticMembers(syntax);
   // Restore the post-parse diagnostic state so the next declaration starts from
@@ -5556,10 +5776,18 @@ String* CompilerEmitTranslationUnit(Compiler* compiler, Vector* options) {
 }
 
 static String* Compile(Compiler* compiler, Vector* options) {
+  profile_enabled = getenv("DAVECC_PROFILE") != NULL;
+  if (profile_enabled) {
+    TypeRecordProfileCallers();
+  }
   CreateGlobalSymbolTables();
   DeclarePredefinedTypesAndMacros(&compiler->preprocessor);
   ParseCurrentTranslationUnit(compiler);
-  return CompileAfterParse(compiler, options);
+  uint64_t profile_t0 = ProfileNow();
+  String* result = CompileAfterParse(compiler, options);
+  profile_after_ns += ProfileSince(profile_t0);
+  ProfileReport();
+  return result;
 }
 
 String* CompileTranslationUnit(const char* filename, Vector* options, Vector* target_opts) {

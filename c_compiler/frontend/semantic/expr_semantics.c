@@ -697,7 +697,7 @@ static ASTNode* NewStatementExpressionResultCapture(ASTNode* value,
   SourceLocation location = value->location;
   TypeRecord* type = TypeRecordCopy(
       TypeIsReference(value->type) ? value->type->next : value->type);
-  type->qualifiers = kQualPlain;
+  SetQualifiers(type, kQualPlain);
   Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
   temp->location = location;
   *out_temp = temp;

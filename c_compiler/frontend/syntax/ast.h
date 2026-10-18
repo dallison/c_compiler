@@ -441,6 +441,10 @@ void ASTNodeInit(ASTNode* node, ASTOpcode op, TypeRecord* type,
 // once and must only be called after all nodes have been destructed (via
 // ASTNodeDelete) so their owned (non-arena) resources are released first.
 void* ASTArenaAlloc(size_t size);
+// Bytes retained by the bump allocator, and the number of nodes handed out.
+// Used by DAVECC_PROFILE.
+size_t ASTArenaBytes(void);
+size_t ASTArenaNodeCount(void);
 void ASTArenaRelease(void);
 
 // Creates a new AST node.  The deleter for this will be ASTNodeBaseDelete

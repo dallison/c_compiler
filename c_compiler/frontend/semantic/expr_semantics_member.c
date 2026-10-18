@@ -506,7 +506,7 @@ static ASTNode* FinalizeResolvedMemberReference(BinaryASTNode* node,
   if (!member->is_static && !member->is_member_function && !member->is_mutable &&
       MemberReceiverIsConst(node)) {
     member_type = TypeRecordCopy(member_type);
-    member_type->qualifiers |= kQualConst;
+    SetQualifiers(member_type, GetQualifiers(member_type) | kQualConst);
   }
   if (member->is_static && member->symbol->variable_template != NULL &&
       member_node->template_arguments != NULL) {
@@ -1271,7 +1271,8 @@ ASTNode* AnalyzeTypeidExpression(TypeidASTNode* node) {
 
   TypeRecord* type_info_ptr =
       NewPointerTo(kQualPlain, TypeRecordCopy(type_info_type));
-  type_info_ptr->next->qualifiers |= kQualConst;
+  SetQualifiers(type_info_ptr->next,
+                GetQualifiers(type_info_ptr->next) | kQualConst);
 
   ASTNode* result;
   if (polymorphic) {

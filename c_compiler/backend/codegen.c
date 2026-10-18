@@ -65,7 +65,8 @@ uint64_t CXXExceptionTypeID(TypeRecord* type) {
     hash = HashExceptionTypePart(hash, (uint64_t)type->declarator);
     switch (type->declarator) {
       case kDeclPointer:
-        hash = HashExceptionTypePart(hash, (uint64_t)(type->qualifiers & ~kQualConst));
+        hash = HashExceptionTypePart(
+            hash, (uint64_t)(GetQualifiers(type) & ~kQualConst));
         type = type->next;
         continue;
       case kDeclMemberPointer:
@@ -118,10 +119,9 @@ static void CXXExceptionTypeName(TypeRecord* type, String* result) {
     StringAppend(result, "<unknown>");
     return;
   }
-  Qualifiers old_qualifiers = type->qualifiers;
-  type->qualifiers &= ~kQualConst;
-  TypeRecordToString(type, result);
-  type->qualifiers = old_qualifiers;
+  TypeRecord unqualified = TypeRecordValue(type);
+  SetQualifiers(&unqualified, GetQualifiers(type) & ~kQualConst);
+  TypeRecordToString(&unqualified, result);
 }
 
 static void SanitizeTypeInfoSymbolName(String* name) {

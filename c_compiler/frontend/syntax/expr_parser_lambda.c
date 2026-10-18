@@ -1054,7 +1054,9 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
             placeholder ? NewTypeRecord(kTypeAuto, kQualPlain)
                         : TypeRecordCopy(deduced);
         if (!placeholder) {
-          capture->captured->type->qualifiers &= ~(kQualConst | kQualVolatile);
+          SetQualifiers(capture->captured->type,
+                        GetQualifiers(capture->captured->type) &
+                            ~(kQualConst | kQualVolatile));
         }
       }
     }

@@ -1321,7 +1321,7 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
         !TypeContainsTemplateParameter(expression->type) &&
         !TypeContainsAuto(expression->type)) {
       TypeRecord* deduced = TypeRecordCopy(expression->type);
-      deduced->qualifiers |= kQualConst;
+      SetQualifiers(deduced, GetQualifiers(deduced) | kQualConst);
       SymbolSetType(replacement, deduced);
     }
   }
@@ -5101,7 +5101,7 @@ static void RebindClonedConcreteMemberAccess(
       clone->to_owner->tag_symbol->type != NULL &&
       TypeIsStructOrUnion(clone->to_owner->tag_symbol->type)) {
     TypeRecord* target = TypeRecordCopy(clone->to_owner->tag_symbol->type);
-    target->qualifiers = member_node->owner_type->qualifiers;
+    SetQualifiers(target, GetQualifiers(member_node->owner_type));
     TypeRecordDelete(member_node->owner_type);
     member_node->owner_type = target;
     node->flags &= ~kASTAnalyzed;
@@ -6748,6 +6748,7 @@ static TypeRecord* SubstituteQualifiedNameScope(
  * dropping the enclosing class's arguments. */
 static ASTNode* BakePartialDependentQualifiedName(
     IdentifierASTNode* id, ASTNode* node, TypeRecord* concrete) {
+  concrete = TypeRecordForWrite(concrete);
   concrete->dependent_member_name =
       NewString(id->symbol->type->dependent_member_name->value);
   if (concrete->dependent_member_template_arguments == NULL) {
@@ -7081,6 +7082,7 @@ static ASTNode* ResolveDependentQualifiedValueName(
       TypeIsStructOrUnion(concrete) && concrete->info.struct_info != NULL &&
       FindStructMemberByName(concrete->info.struct_info,
                              effective_member_name) == NULL) {
+    concrete = TypeRecordForWrite(concrete);
     concrete->dependent_member_name =
         NewString(id->symbol->type->dependent_member_name->value);
     Symbol* copy = NewSymbol(id->symbol->name.value, concrete,
@@ -7354,7 +7356,7 @@ static void SubstituteForcedIdentifierType(TemplateFunctionBodyClone* clone,
       TypeIsStructOrUnion(nested_member->symbol->type) &&
       nested_member->symbol->type->info.struct_info != source_nested) {
     TypeRecord* retargeted =
-        is_pointer ? NewPointerTo(node->type->qualifiers,
+        is_pointer ? NewPointerTo(GetQualifiers(node->type),
                                   TypeRecordCopy(nested_member->symbol->type))
                    : TypeRecordCopy(nested_member->symbol->type);
     ASTNodeSetType(node, retargeted);
@@ -9152,7 +9154,7 @@ static TypeRecord* ResolveClonedDependentTypedef(
         member->symbol->type != NULL &&
         StorageIs(member->symbol->storage, STO(typedef))) {
       result = TypeRecordCopy(member->symbol->type);
-      result->qualifiers |= type->qualifiers;
+      SetQualifiers(result, GetQualifiers(result) | GetQualifiers(type));
       result = TypeMaterializeClassTemplateSpecialization(
           clone->parser->syntax, result);
     }

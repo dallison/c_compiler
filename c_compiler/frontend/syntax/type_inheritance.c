@@ -1006,10 +1006,12 @@ static bool CXXOverrideParameterTypesCompatible(Syntax* syntax, TypeRecord* a,
   if (a == NULL || b == NULL) {
     return false;
   }
-  TypeRecord normalized_a = *a;
-  TypeRecord normalized_b = *b;
-  normalized_a.qualifiers &= ~(kQualConst | kQualVolatile);
-  normalized_b.qualifiers &= ~(kQualConst | kQualVolatile);
+  TypeRecord normalized_a = TypeRecordValue(a);
+  TypeRecord normalized_b = TypeRecordValue(b);
+  SetQualifiers(&normalized_a,
+                GetQualifiers(&normalized_a) & ~(kQualConst | kQualVolatile));
+  SetQualifiers(&normalized_b,
+                GetQualifiers(&normalized_b) & ~(kQualConst | kQualVolatile));
   return CXXOverrideTypesCompatible(syntax, &normalized_a, &normalized_b,
                                     allow_dependent);
 }

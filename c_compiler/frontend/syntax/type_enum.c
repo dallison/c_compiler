@@ -142,7 +142,7 @@ static TypeRecord* ParseEnumUnderlyingType(TypeParser* parser) {
     type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
   } else if (!CompilerIsCXX()) {
     // C23 ignores qualifiers on the specified integer type.
-    type->qualifiers = kQualPlain;
+    SetQualifiers(type, kQualPlain);
   }
   return type;
 }
@@ -447,7 +447,7 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
       if (!CompilerIsCXX() && e->has_fixed_underlying) {
         TypeRecordDelete(ec->type);
         ec->type = TypeRecordCopy(enum_type);
-        ec->type->qualifiers |= kQualConst;
+        SetQualifiers(ec->type, GetQualifiers(ec->type) | kQualConst);
       }
       ec->dependent_value_template_parameter_index =
           dependent_value_template_parameter_index;

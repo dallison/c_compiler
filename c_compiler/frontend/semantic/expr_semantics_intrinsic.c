@@ -94,8 +94,9 @@ static TypeRecord* AtomicPointerPointee(VectorASTNode* node) {
 static TypeRecord* AtomicOperationValueType(TypeRecord* object_type) {
   TypeRecord* value_type = TypeRecordCopy(object_type);
   if (value_type != NULL) {
-    value_type->qualifiers &=
-        ~(kQualAtomic | kQualConst | kQualVolatile | kQualRestrict);
+    SetQualifiers(value_type,
+                  GetQualifiers(value_type) & ~(kQualAtomic | kQualConst |
+                                                kQualVolatile | kQualRestrict));
   }
   return value_type;
 }

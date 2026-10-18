@@ -1213,7 +1213,7 @@ static TypeRecord* MetaSynthesisDynamicSpanType(TypeRecord* element_type) {
     return NULL;
   }
   TypeRecord* const_element = TypeRecordCopy(element_type);
-  const_element->qualifiers |= kQualConst;
+  SetQualifiers(const_element, GetQualifiers(const_element) | kQualConst);
   Vector* args = NewVector();
   VectorAppend(args, NewTypeTemplateArgument(const_element));
   TypeRecord* result =

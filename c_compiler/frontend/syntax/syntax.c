@@ -694,10 +694,12 @@ static bool OverloadParameterTypesEqual(TypeRecord* left, TypeRecord* right) {
   if (left == NULL || right == NULL) {
     return false;
   }
-  TypeRecord left_parameter = *left;
-  TypeRecord right_parameter = *right;
-  left_parameter.qualifiers &= ~(kQualConst | kQualVolatile);
-  right_parameter.qualifiers &= ~(kQualConst | kQualVolatile);
+  TypeRecord left_parameter = TypeRecordValue(left);
+  TypeRecord right_parameter = TypeRecordValue(right);
+  SetQualifiers(&left_parameter,
+                GetQualifiers(&left_parameter) & ~(kQualConst | kQualVolatile));
+  SetQualifiers(&right_parameter, GetQualifiers(&right_parameter) &
+                                      ~(kQualConst | kQualVolatile));
   return OverloadTypesEqual(&left_parameter, &right_parameter);
 }
 
@@ -747,7 +749,8 @@ static bool OverloadTypesEqual(TypeRecord* left, TypeRecord* right) {
   }
   if (TypeIsStructOrUnion(left) || TypeIsStructOrUnion(right)) {
     if (!TypeIsStructOrUnion(left) || !TypeIsStructOrUnion(right) ||
-        left->type != right->type || left->qualifiers != right->qualifiers) {
+        left->type != right->type ||
+        GetQualifiers(left) != GetQualifiers(right)) {
       return false;
     }
     if (left->template_origin != NULL || right->template_origin != NULL) {
@@ -888,11 +891,10 @@ static bool TemplateArgumentsDenoteClassTemplate(TypeRecord* type,
 
 static bool ClassTemplateIdentityTypesEqual(TypeRecord* left,
                                             TypeRecord* right) {
-  if (left == NULL || right == NULL ||
-      !TypeIsStructOrUnion(left) || !TypeIsStructOrUnion(right) ||
-      left->type != right->type ||
-      (left->qualifiers & ~kQualRestrict) !=
-          (right->qualifiers & ~kQualRestrict)) {
+  if (left == NULL || right == NULL || !TypeIsStructOrUnion(left) ||
+      !TypeIsStructOrUnion(right) || left->type != right->type ||
+      (GetQualifiers(left) & ~kQualRestrict) !=
+          (GetQualifiers(right) & ~kQualRestrict)) {
     return false;
   }
   Struct* str = left->info.struct_info;
@@ -913,7 +915,7 @@ static TypeRecord* PeelTypeForOutOfLineTypedefMatch(TypeRecord* type) {
       type = type->next;
       continue;
     }
-    if (type->qualifiers & kQualConst) {
+    if (GetQualifiers(type) & kQualConst) {
       TypeRecord* inner = type->next;
       if (inner == NULL) {
         break;
@@ -963,12 +965,10 @@ static bool OutOfLineMemberTypeEqual(TypeParser* parser, TypeRecord* left,
   // `Iter&` in the class and `Iter<T>&` on the out-of-line definition name
   // the same object.  Compare the pointee; do not treat two different
   // integer pointees as the same type.
-  if (left != NULL && right != NULL &&
-      left->declarator == right->declarator &&
+  if (left != NULL && right != NULL && left->declarator == right->declarator &&
       (TypeIsReference(left) ||
-       (TypeIsPointer(left) &&
-        (left->qualifiers & ~kQualRestrict) ==
-            (right->qualifiers & ~kQualRestrict)))) {
+       (TypeIsPointer(left) && (GetQualifiers(left) & ~kQualRestrict) ==
+                                   (GetQualifiers(right) & ~kQualRestrict)))) {
     return OutOfLineMemberTypeEqual(parser, left->next, right->next, parameter,
                                     /*allow_integral=*/false);
   }
@@ -1410,12 +1410,11 @@ bool SyntaxIsCXXNumericLiteralOperatorTemplate(Symbol* symbol) {
   }
   TemplateParameter* parameter =
       symbol->type->info.function.template_parameters.value.p[0];
-  return parameter != NULL &&
-         parameter->kind == kTemplateParameterNonType &&
+  return parameter != NULL && parameter->kind == kTemplateParameterNonType &&
          parameter->is_parameter_pack && parameter->type != NULL &&
          parameter->type->declarator == kDeclPrimitive &&
          parameter->type->type == kTypeChar &&
-         parameter->type->qualifiers == kQualPlain;
+         GetQualifiers(parameter->type) == kQualPlain;
 }
 
 bool SyntaxParseMemberOperatorName(Syntax* syntax, String* name,
@@ -10425,8 +10424,8 @@ static bool C23ConstexprTypeContainsVLA(TypeRecord* type) {
 
 static bool C23ConstexprObjectTypeIsAllowed(TypeRecord* type) {
   if (type == NULL || C23ConstexprTypeContainsVLA(type) ||
-      (type->qualifiers &
-       (kQualAtomic | kQualVolatile | kQualRestrict)) != 0) {
+      (GetQualifiers(type) & (kQualAtomic | kQualVolatile | kQualRestrict)) !=
+          0) {
     return false;
   }
   if (TypeIsPointer(type)) {
@@ -10912,7 +10911,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       // `static constexpr` member, whose type is already const-qualified.
       if (!TypeIsFunction(sym->type) && !TypeIsReference(sym->type) &&
           parser->is_constexpr) {
-        sym->type->qualifiers |= kQualConst;
+        sym->type = TypeRecordAddQualifiers(sym->type, kQualConst);
       }
       if (TypeIsFunction(sym->type) &&
           sym->type->info.function.template_parameters.length > 0 &&
@@ -11517,7 +11516,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
         }
       }
       if (sym->flags.is_constexpr && !TypeIsReference(sym->type)) {
-        sym->type->qualifiers |= kQualConst;
+        sym->type = TypeRecordAddQualifiers(sym->type, kQualConst);
       }
     }
 
@@ -13473,10 +13472,10 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
       Symbol* sym = TypeParserParseDeclarator(&parser, type);
       TypeParserDestruct(&parser);
       if (sym != NULL) {
-        arg->type = TypeRecordCopy(sym->type);
+        arg->type = TypeRecordInternArgumentOrCopy(sym->type);
         arg->is_pack_expansion = sym->flags.is_parameter_pack;
         if (arg->is_pack_expansion && type != NULL) {
-          arg->type->qualifiers |= type->qualifiers;
+          arg->type = TypeRecordAddQualifiers(arg->type, GetQualifiers(type));
         }
         SymbolDelete(sym);
       } else {
@@ -16569,7 +16568,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
               "'constinit' variable must have static or thread storage duration");
         }
         if (sym->flags.is_constexpr && !TypeIsReference(sym->type)) {
-          sym->type->qualifiers |= kQualConst;
+          sym->type = TypeRecordAddQualifiers(sym->type, kQualConst);
         }
       }
       if (!StorageIs(sym->storage, STO(extern)) &&
@@ -16679,7 +16678,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
           if (!TypeIsFunction(sym->type) && parser->is_constexpr) {
             sym->flags.is_constexpr = true;
             if (!TypeIsReference(sym->type)) {
-              sym->type->qualifiers |= kQualConst;
+              sym->type = TypeRecordAddQualifiers(sym->type, kQualConst);
             }
           }
           if (!TypeIsFunction(sym->type) && parser->is_constinit) {

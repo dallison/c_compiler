@@ -147,18 +147,18 @@ inline bool TypeIsConst(TypeRecord* type) {
   if (type == NULL) {
     return false;
   }
-  return (type->qualifiers & kQualConst) != 0;
+  return (GetQualifiers(type) & kQualConst) != 0;
 }
 
 inline bool TypeIsVolatile(TypeRecord* type) {
   if (type == NULL) {
     return false;
   }
-  return (type->qualifiers & kQualVolatile) != 0;
+  return (GetQualifiers(type) & kQualVolatile) != 0;
 }
 
 inline bool TypeIsAtomic(TypeRecord* type) {
-  return type != NULL && (type->qualifiers & kQualAtomic) != 0;
+  return type != NULL && (GetQualifiers(type) & kQualAtomic) != 0;
 }
 
 inline bool TypeIsArray(TypeRecord* type) {
@@ -379,11 +379,11 @@ inline bool TypeIsStructOrUnionPointer(TypeRecord* type) {
 
 
 inline bool TypeIsIntConstant(TypeRecord* type) {
-  return TypeIsIntegral(type) && ((type->qualifiers & kQualConst) != 0);
+  return TypeIsIntegral(type) && ((GetQualifiers(type) & kQualConst) != 0);
 }
 
 inline bool TypeIsFloatingPointConstant(TypeRecord* type) {
-  return TypeIsFloatingPoint(type) && ((type->qualifiers & kQualConst) != 0);
+  return TypeIsFloatingPoint(type) && ((GetQualifiers(type) & kQualConst) != 0);
 }
 
 inline bool TypeIsFunctionReturningStructOrUnion(TypeRecord* type) {

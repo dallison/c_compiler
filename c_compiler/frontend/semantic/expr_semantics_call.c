@@ -831,7 +831,7 @@ static ASTNode* ConvertReceiverToMemberBase(ASTNode* receiver,
     return receiver;
   }
   TypeRecord* base_type = NewStructTypeForAdjustment(base);
-  base_type->qualifiers = receiver->type->next->qualifiers;
+  SetQualifiers(base_type, GetQualifiers(receiver->type->next));
   int base_offset = -1;
   if (TypeBaseOffset(receiver->type->next, base_type, /*public_only=*/false,
                      &base_offset) &&
@@ -3604,7 +3604,7 @@ static ASTNode* MaterializeConstevalObjectResult(VectorASTNode* node,
   SourceLocation location = node->base.location;
   ASTNode* parent = node->base.parent;
   TypeRecord* temporary_type = TypeRecordCopy(return_type);
-  temporary_type->qualifiers = kQualPlain;
+  SetQualifiers(temporary_type, kQualPlain);
   Symbol* temp = SyntaxNewTemporary(&compiler->syntax, temporary_type);
   temp->location = location;
   ASTNode* init = NewExpressionInitializerASTNode((ASTNode*)node, location);

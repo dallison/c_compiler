@@ -969,7 +969,7 @@ static bool CXXDefaultedPostfixTypesMatch(TypeRecord* object,
                                          TypeRecord* result) {
   if (object == NULL || result == NULL || TypeIsConst(object) ||
       TypeIsConst(result) || TypeIsVolatile(result) ||
-      (object->qualifiers & ~kQualVolatile) != 0) {
+      (GetQualifiers(object) & ~kQualVolatile) != 0) {
     return false;
   }
   return TypeEqualIgnoringTopLevelQualifierMask(object, result,

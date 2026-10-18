@@ -349,7 +349,7 @@ bool SemanticDeduceAutoType(Symbol* sym, ASTNode* initializer,
                     sym->name.value);
       return false;
     }
-    deduced->qualifiers |= sym->type->qualifiers;
+    SetQualifiers(deduced, GetQualifiers(deduced) | GetQualifiers(sym->type));
     TypeRecordCalculateSize(deduced);
     SymbolSetType(sym, deduced);
     SemanticReanalyzeAfterAutoDeduction();
@@ -1153,7 +1153,7 @@ static bool TypeDiscardsQualifiers(TypeRecord* from, TypeRecord* to) {
   if (from == NULL || to == NULL) {
     return false;
   }
-  return (from->qualifiers & ~to->qualifiers) != 0;
+  return (GetQualifiers(from) & ~GetQualifiers(to)) != 0;
 }
 
 static bool PointerSignednessDiffers(TypeRecord* from, TypeRecord* to) {
@@ -1348,7 +1348,7 @@ static bool PointerQualificationConversion(TypeRecord* from, TypeRecord* to) {
       to->next == NULL) {
     return false;
   }
-  if ((from->next->qualifiers & ~to->next->qualifiers) != 0) {
+  if ((GetQualifiers(from->next) & ~GetQualifiers(to->next)) != 0) {
     return false;
   }
   TypeRecordQualifierOverlay from_overlay;
@@ -1373,7 +1373,7 @@ static int ConversionOperatorTrailingRank(TypeRecord* result, TypeRecord* to) {
   // TypeEqualIgnoringQualifiers is a real structural comparison here, not the
   // sign hack guarded against below.)
   if (TypeIsStructOrUnion(result) && TypeIsStructOrUnion(to) &&
-      result->qualifiers != to->qualifiers) {
+      GetQualifiers(result) != GetQualifiers(to)) {
     TypeRecordQualifierOverlay result_overlay;
     TypeRecordQualifierOverlay to_overlay;
     bool equal = TypeEqual(
@@ -1447,7 +1447,7 @@ static int ConversionFunctionRank(TypeRecord* result, TypeRecord* to) {
   if (!TypeIsReference(to)) {
     return ConversionOperatorTrailingRank(
         TypeRecordOverlayQualifiers(&referent_overlay, referent,
-                                    to->qualifiers),
+                                    GetQualifiers(to)),
         to);
   }
   TypeRecord* target = to->next;
@@ -1458,7 +1458,7 @@ static int ConversionFunctionRank(TypeRecord* result, TypeRecord* to) {
                        result->declarator != kDeclRValueReference;
   bool rvalue_target = to->declarator == kDeclRValueReference;
   bool const_target =
-      (target->qualifiers & (kQualConst | kQualVolatile)) == kQualConst;
+      (GetQualifiers(target) & (kQualConst | kQualVolatile)) == kQualConst;
   TypeRecordQualifierOverlay target_overlay;
   TypeRecord* plain_referent =
       TypeRecordOverlayQualifiers(&referent_overlay, referent, kQualPlain);
@@ -1466,13 +1466,14 @@ static int ConversionFunctionRank(TypeRecord* result, TypeRecord* to) {
       TypeRecordOverlayQualifiers(&target_overlay, target, kQualPlain);
   if (TypeEqual(plain_referent, plain_target)) {
     Qualifiers cv = kQualConst | kQualVolatile;
-    if ((referent->qualifiers & cv & ~target->qualifiers) != 0) {
+    if ((GetQualifiers(referent) & cv & ~GetQualifiers(target)) != 0) {
       return -1;
     }
     if (lvalue_result ? rvalue_target : (!rvalue_target && !const_target)) {
       return -1;
     }
-    return (referent->qualifiers & cv) == (target->qualifiers & cv) ? 0 : 1;
+    return (GetQualifiers(referent) & cv) == (GetQualifiers(target) & cv) ? 0
+                                                                          : 1;
   }
   if ((!rvalue_target && !const_target) ||
       TypeIsStructOrUnion(plain_referent) ||
@@ -1688,7 +1689,7 @@ static bool ConvertClassOperandToScalar(ASTNode* from) {
     return false;
   }
   TypeRecord* to = TypeRecordCopy(target);
-  to->qualifiers = kQualPlain;
+  SetQualifiers(to, kQualPlain);
   SemanticConvertType(from, to, kConvertNormal);
   return true;
 }
@@ -1879,7 +1880,7 @@ static bool TryConvertWithConversionOperator(ASTNode* from, TypeRecord* to,
                      TypeRecordOverlayQualifiers(&target_overlay, to->next,
                                                  kQualPlain))) {
         TypeRecord* temporary_type = TypeRecordCopy(to->next);
-        temporary_type->qualifiers = kQualPlain;
+        SetQualifiers(temporary_type, kQualPlain);
         SemanticConvertType(call, temporary_type, ctx);
       }
     }

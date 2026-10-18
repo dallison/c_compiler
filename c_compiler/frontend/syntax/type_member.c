@@ -3768,7 +3768,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         }
         if (member_symbol->flags.is_constexpr &&
             !TypeIsReference(member_symbol->type)) {
-          member_symbol->type->qualifiers |= kQualConst;
+          SetQualifiers(member_symbol->type,
+                        GetQualifiers(member_symbol->type) | kQualConst);
         }
         member->is_static = is_static_member;
         member->is_member_function = TypeIsFunction(member_symbol->type);

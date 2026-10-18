@@ -4127,7 +4127,7 @@ static ASTNode* ConstexprStaticAddressExpression(Symbol* root, size_t offset,
     if (address->type != NULL &&
         !TypeEqual(address->type,
                    TypeRecordOverlayQualifiers(&unqualified, type,
-                                               address->type->qualifiers))) {
+                                               GetQualifiers(address->type)))) {
       address = AnalyzeExpression(
           NewCastASTNode(TypeRecordCopy(type), location, address));
     }
@@ -10162,11 +10162,11 @@ Symbol* ConstexprFunctionDefinition(Symbol* symbol) {
 }
 
 static TypeRecord* ConstexprPlainObjectType(TypeRecord* type) {
-  if (type == NULL || type->qualifiers == kQualPlain) {
+  if (type == NULL || GetQualifiers(type) == kQualPlain) {
     return type;
   }
   TypeRecord* plain = TypeRecordCopy(type);
-  plain->qualifiers = kQualPlain;
+  SetQualifiers(plain, kQualPlain);
   return plain;
 }
 

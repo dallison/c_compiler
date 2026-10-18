@@ -773,7 +773,7 @@ static int64_t CXXFoldProbeConstructTypeFromArgs(Vector* template_args) {
   int64_t result = 2;  // ConstructType::kCopy
   if (TypeIsReference(arg_type) &&
       arg_type->declarator == kDeclRValueReference &&
-      (arg_type->qualifiers & kQualConst) == 0) {
+      (GetQualifiers(arg_type) & kQualConst) == 0) {
     result = 3;  // ConstructType::kMove
   }
   if (copied_arg) {
@@ -1144,7 +1144,7 @@ static TypeRecord* CXXVariableTemplateValueType(TypeRecord* type) {
     return NULL;
   }
   TypeRecord* copy = TypeRecordCopy(normalized);
-  copy->qualifiers &= ~(kQualConst | kQualVolatile);
+  SetQualifiers(copy, GetQualifiers(copy) & ~(kQualConst | kQualVolatile));
   return copy;
 }
 
@@ -1296,7 +1296,7 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
     return NewRealConstantASTNode(floating_value, concrete, location);
   }
   if (concrete != NULL && TypeUsesLongDoubleRepresentation(concrete) &&
-      (concrete->qualifiers & kQualConst) != 0) {
+      (GetQualifiers(concrete) & kQualConst) != 0) {
     ASTNode* initializer = TypeInstantiateVariableTemplateInitializer(
         &compiler->syntax, var_sym, template_args);
     if (initializer != NULL && initializer->op == AST_OP(expr_init)) {

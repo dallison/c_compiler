@@ -6,6 +6,7 @@
 #include "type_template_internal.h"
 #include "type_internal.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -334,7 +335,7 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
   concrete->is_pack_expansion = false;
   concrete->type =
       arg->kind == kTemplateParameterNonType && arg->type != NULL
-          ? TypeRecordCopy(arg->type) : NULL;
+          ? TypeRecordInternOrCopy(arg->type) : NULL;
   concrete->int_value = arg->int_value;
   concrete->template_parameter_index = arg->template_parameter_index;
   concrete->pack_arguments = NULL;
@@ -469,7 +470,7 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
     // A type-constraint on an `auto` non-type parameter constrains the type of
     // the argument, not its value. Substitute the concrete value argument's
     // type into the concept-id's synthetic type argument.
-    concrete->type = TypeRecordCopy(placeholder_actual->type);
+    concrete->type = TypeRecordInternOrCopy(placeholder_actual->type);
     concrete->type =
         TypeMaterializeClassTemplateSpecialization(parser->syntax,
                                                    concrete->type);
@@ -490,7 +491,7 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
         return TemplateArgumentCopy(actual);
       }
       if (actual->type != NULL) {
-        concrete->type = TypeRecordCopy(actual->type);
+        concrete->type = TypeRecordInternOrCopy(actual->type);
         concrete->type =
             TypeMaterializeClassTemplateSpecialization(parser->syntax,
                                                        concrete->type);
@@ -500,7 +501,7 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
       }
     } else if (actual != NULL && actual->kind == kTemplateParameterNonType &&
                actual->type != NULL) {
-      concrete->type = TypeRecordCopy(actual->type);
+      concrete->type = TypeRecordInternOrCopy(actual->type);
       concrete->type =
           TypeMaterializeClassTemplateSpecialization(parser->syntax,
                                                      concrete->type);
@@ -900,7 +901,7 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
     if (pack != NULL && pack->pack_arguments != NULL) {
       for (size_t i = 0; i < pack->pack_arguments->length; i++) {
         if (arg->kind == kTemplateParameterType && index >= 0 &&
-            arg->type != NULL && arg->type->qualifiers != kQualPlain) {
+            arg->type != NULL && GetQualifiers(arg->type) != kQualPlain) {
           Vector* element_args =
               TemplateArgumentVectorCopyForPackExpansionElement(args, index, i);
           TemplateArgument* subst =
@@ -1059,6 +1060,51 @@ static bool StructIsCurrentTemplateSelf(Struct* str, Struct* source,
          str;
 }
 
+/* The pattern class and its nested classes are rewritten to the instantiation.
+ * Any other concrete class (`Descriptor`, `string`) can be shared. */
+static bool StructIsSubstitutionPattern(TypeParser* parser, Struct* str) {
+  if (parser == NULL || str == NULL) {
+    return false;
+  }
+  Struct* source = parser->template_substitution_source;
+  Struct* enclosing = parser->enclosing_template_substitution_source;
+  for (Struct* s = str; s != NULL; s = s->lexical_parent) {
+    if (s == source || s == enclosing || s->instantiation_in_progress) {
+      return true;
+    }
+  }
+  if (StructIsCurrentTemplateSelf(str, source,
+                                  parser->template_substitution_target)) {
+    return true;
+  }
+  return StructIsCurrentTemplateSelf(
+      str, enclosing, parser->enclosing_template_substitution_target);
+}
+
+static bool TypeMentionsSubstitutionPattern(TypeParser* parser,
+                                            TypeRecord* type) {
+  int guard = 0;
+  for (TypeRecord* t = type; t != NULL; t = t->next) {
+    if (++guard > 64) {
+      return true;
+    }
+    Struct* str = NULL;
+    if (TypeIsStructOrUnion(t) || t->declarator == kDeclMemberPointer) {
+      str = t->info.struct_info;
+    }
+    if (StructIsSubstitutionPattern(parser, str)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool SubstitutionCanShare(TypeParser* parser, TypeRecord* type) {
+  return type != NULL && type->refs > 0 &&
+         TypeRecordCanShareConcreteClass(type) &&
+         !TypeMentionsSubstitutionPattern(parser, type);
+}
+
 /* Replace a self-reference to a template definition with the concrete struct
  * currently being instantiated. This keeps injected-class-name uses (`map`,
  * `iterator`, etc.) tied to the active instantiation instead of the primary
@@ -1070,6 +1116,21 @@ static TypeRecord* SubstituteTemplateSelfReference(TypeRecord* type,
       !TypeIsStructOrUnion(type) || type->template_arguments != NULL ||
       !StructIsCurrentTemplateSelf(type->info.struct_info, source, target)) {
     return NULL;
+  }
+  // A lookup key borrowing `type`'s fields; interning copies it on a miss.
+  // `type` may be a short record, so copy only the header.
+  TypeRecord key = {0};
+  memcpy(&key, type, offsetof(TypeRecord, info));
+  key.shared_immutable = 0;
+  key.refs = 0;
+  key.template_parameter_summary = kTypeTemplateParameterSummaryUnknown;
+  key.info.struct_info = target;
+  if (target->tag_symbol != NULL && target->tag_symbol->type != NULL) {
+    key.template_origin = target->tag_symbol->type->template_origin;
+    key.template_arguments = target->tag_symbol->type->template_arguments;
+  }
+  if (TypeRecordCanIntern(&key)) {
+    return TypeRecordIntern(&key);
   }
   TypeRecord* subst = TypeRecordCopy(type);
   TypeRecordSetStructInfo(subst, target);
@@ -1130,7 +1191,7 @@ static TypeRecord* SubstituteNestedTypeFromActiveInstantiation(
             parser, member->symbol->type, args);
       }
       TypeRecord* subst = TypeRecordCopy(member->symbol->type);
-      subst->qualifiers |= type->qualifiers;
+      subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
       return TypeRecordCalculateSize(subst);
     }
   }
@@ -1218,7 +1279,7 @@ static TypeRecord* ComposeDependentMemberPath(TypeRecord* root,
     return NULL;
   }
   TypeRecord* composed = TypeRecordCopy(root);
-  composed->qualifiers = member->qualifiers;
+  SetQualifiers(composed, GetQualifiers(member));
   composed->template_parameter_summary = 0;
   if (root->dependent_member_name == NULL) {
     composed->dependent_member_name =
@@ -1314,7 +1375,7 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
           StorageIs(enclosing_member->symbol->storage, STO(typedef)) &&
           enclosing_member->symbol->type != NULL) {
         TypeRecord* resolved = TypeRecordCopy(enclosing_member->symbol->type);
-        resolved->qualifiers |= type->qualifiers;
+        resolved = TypeRecordAddQualifiers(resolved, GetQualifiers(type));
         return TypeRecordCalculateSize(resolved);
       }
     }
@@ -1478,7 +1539,7 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
     TypeRecordDelete(current);
     DeleteStringVector(components);
     if (resolved != NULL) {
-      resolved->qualifiers |= type->qualifiers;
+      resolved = TypeRecordAddQualifiers(resolved, GetQualifiers(type));
       return TypeRecordCalculateSize(resolved);
     }
     if (parser != NULL &&
@@ -1549,7 +1610,7 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
   if (subst == NULL) {
     subst = TypeRecordCopy(member->symbol->type);
   }
-  subst->qualifiers |= type->qualifiers;
+  subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
   // The member typedef may itself resolve to a lazy dependent-member type such
   // as `typename ratio<1,1000>::type` (from `using period = typename
   // Period::type;`).  Collapse it to the concrete specialization so later
@@ -2068,7 +2129,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
       }
       TypeRecord* subst = SubstituteTemplateParameters(
           parser, member->symbol->type, pattern_args);
-      subst->qualifiers |= type->qualifiers;
+      subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
       VectorDeleteWithContents(
           pattern_args, (VectorElementDestructor)TemplateArgumentDelete,
           /*free_element=*/false);
@@ -2092,7 +2153,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
             /*free_element=*/false);
       }
       if (subst != NULL) {
-        subst->qualifiers |= type->qualifiers;
+        subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
         VectorDeleteWithContents(
             concrete_args, (VectorElementDestructor)TemplateArgumentDelete,
             /*free_element=*/false);
@@ -2110,7 +2171,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     }
     deferred->template_arguments = concrete_args;
     deferred->template_origin = info.origin;
-    deferred->qualifiers |= type->qualifiers;
+    deferred = TypeRecordAddQualifiers(deferred, GetQualifiers(type));
     return deferred;
   }
   if (expandable_alias) {
@@ -2135,7 +2196,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     // A pattern such as `decltype(views::all(declval<R>()))` fails to
     // substitute when the call is ill-formed for these arguments.
     if (subst != NULL) {
-      subst->qualifiers |= type->qualifiers;
+      subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
       // The alias pattern may be a dependent-member type such as
       // `typename ratio<...>::type`.  Now that the arguments are concrete the
       // result is a real class type; collapse the lazy
@@ -2244,7 +2305,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
                              /*free_element=*/false);
     return TypeRecordCopy(type);
   }
-  subst->qualifiers |= type->qualifiers;
+  subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
 
   if (type->dependent_member_name != NULL &&
       ((type->dependent_member_template_arguments != NULL &&
@@ -2316,7 +2377,8 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
                            type->dependent_member_name);
         if (matches) {
           TypeRecord* member_type = TypeRecordCopy(candidate);
-          member_type->qualifiers |= type->qualifiers;
+          member_type =
+              TypeRecordAddQualifiers(member_type, GetQualifiers(type));
           if (materialized != concrete) {
             TypeRecordDelete(materialized);
           }
@@ -2340,7 +2402,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
         injected_type = injected->type;
       }
       TypeRecord* member_type = TypeRecordCopy(injected_type);
-      member_type->qualifiers |= type->qualifiers;
+      member_type = TypeRecordAddQualifiers(member_type, GetQualifiers(type));
       TypeRecordDelete(subst);
       VectorDeleteWithContents(concrete_args,
                                (VectorElementDestructor)TemplateArgumentDelete,
@@ -2489,7 +2551,8 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
             if (!TemplateArgumentVectorContainsTemplateParameter(exposed_args)) {
               TypeRecord* resolved_member_type = InstantiateSimpleClassTemplate(
                   parser, exposed.origin, exposed_args);
-              resolved_member_type->qualifiers |= member_type->qualifiers;
+              resolved_member_type = TypeRecordAddQualifiers(
+                  resolved_member_type, GetQualifiers(member_type));
               TypeRecordDelete(member_type);
               member_type = resolved_member_type;
             }
@@ -2518,7 +2581,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
         member_type =
             NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
       }
-      member_type->qualifiers |= type->qualifiers;
+      member_type = TypeRecordAddQualifiers(member_type, GetQualifiers(type));
       TypeRecordDelete(subst);
       VectorDeleteWithContents(concrete_args,
                                (VectorElementDestructor)TemplateArgumentDelete,
@@ -2530,7 +2593,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
       TypeRecord* pending = ResolveInProgressClassMemberType(
           parser, subst->info.struct_info, type->dependent_member_name);
       if (pending != NULL) {
-        pending->qualifiers |= type->qualifiers;
+        pending = TypeRecordAddQualifiers(pending, GetQualifiers(type));
         TypeRecordDelete(subst);
         VectorDeleteWithContents(
             concrete_args, (VectorElementDestructor)TemplateArgumentDelete,
@@ -2602,7 +2665,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
     SemanticError(type->pack_index_expr,
                   "pack index must be a constant expression");
     TypeRecord* fallback =
-        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(type));
     return fallback;
   }
 
@@ -2615,7 +2678,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
                   "pack index %" PRId64
                   " is out of bounds for a pack of length %zu",
                   element_index, pack->pack_arguments->length);
-    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(type));
   }
 
   TemplateArgument* element =
@@ -2629,7 +2692,8 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
       SemanticError(type->pack_index_expr,
                     "Indexed template name requires a template argument list "
                     "when used as a type");
-      return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+      return NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                   GetQualifiers(type));
     }
     Vector* concrete_args = SubstituteTemplateArgumentVectorForTypes(
         parser, type->template_arguments, args);
@@ -2642,12 +2706,13 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
       if (parser != NULL) {
         parser->template_substitution_failed = true;
       }
-      return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+      return NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                   GetQualifiers(type));
     }
     result->is_pack_index = false;
     result->pack_index_expr = NULL;
     result->template_parameter_index = -1;
-    result->qualifiers |= type->qualifiers;
+    result = TypeRecordAddQualifiers(result, GetQualifiers(type));
     return TypeRecordCalculateSize(result);
   }
   if (element == NULL || element->kind != kTemplateParameterType ||
@@ -2657,7 +2722,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
     }
     SemanticError(type->pack_index_expr,
                   "pack indexing specifier requires a type pack");
-    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+    return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(type));
   }
   if (type->dependent_member_name != NULL) {
     Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
@@ -2678,7 +2743,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
                            ? SubstituteTemplateParameters(parser, element->type,
                                                           args)
                            : TypeRecordCopy(element->type);
-  result->qualifiers |= type->qualifiers;
+  result = TypeRecordAddQualifiers(result, GetQualifiers(type));
   return TypeMaterializeClassTemplateSpecialization(parser->syntax, result);
 }
 
@@ -2710,15 +2775,21 @@ static TypeRecord* SubstituteBareTemplateParameter(TypeParser* parser,
           /*free_element=*/false);
       placeholder->template_arguments = NULL;
     }
-    placeholder->qualifiers |= type->qualifiers;
+    placeholder = TypeRecordAddQualifiers(placeholder, GetQualifiers(type));
     return placeholder;
   }
   if (arg == NULL || arg->kind != kTemplateParameterType ||
       arg->type == NULL) {
     return TypeRecordCopy(type);
   }
-  TypeRecord* subst = TypeRecordCopy(arg->type);
-  subst->qualifiers |= type->qualifiers;
+  TypeRecord* subst = NULL;
+  if (SubstitutionCanShare(parser, arg->type)) {
+    subst = TypeRecordShareExisting(arg->type);
+    subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
+  } else {
+    subst = TypeRecordCopy(arg->type);
+    subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
+  }
   subst = TypeMaterializeClassTemplateSpecialization(parser->syntax, subst);
   return subst;
 }
@@ -2816,19 +2887,24 @@ static void SubstituteMemberPointerClass(TypeRecord* copy, Vector* args) {
   copy->size = MemberPointerSize(copy);
 }
 
-/* Replace the `next` type in a copied pointer/reference/array/function spine.
- * C++ reference collapsing and pointer-to-reference cleanup both happen here so
- * callers see a valid post-substitution type chain. */
-static void SubstituteTypeSpineNext(TypeParser* parser, TypeRecord* copy,
-                                    TypeRecord* original, Vector* args) {
-  if (copy->next == NULL) {
-    return;
-  }
+static TypeRecord* SubstituteOriginalSpineNext(TypeParser* parser,
+                                               TypeRecord* original,
+                                               Vector* args) {
   TypeRecord* original_next = original->next;
   TypeRecordIncRef(original_next);
-  TypeRecordDelete(copy->next);
-  copy->next = SubstituteTemplateParameters(parser, original_next, args);
+  TypeRecord* next = SubstituteTemplateParameters(parser, original_next, args);
   TypeRecordDelete(original_next);
+  return next;
+}
+
+/* Replace the `next` type in a copied pointer/reference/array/function spine
+ * with `next`, the substituted original `next`.  C++ reference collapsing and
+ * pointer-to-reference cleanup both happen here so callers see a valid
+ * post-substitution type chain. */
+static void AttachSubstitutedSpineNext(TypeParser* parser, TypeRecord* copy,
+                                       TypeRecord* next) {
+  TypeRecordDelete(copy->next);
+  copy->next = next;
   if (copy->next == NULL) {
     return;
   }
@@ -2896,6 +2972,10 @@ static void SubstituteFunctionPrototype(TypeParser* parser, TypeRecord* copy,
         source_formal->type == NULL) {
       continue;
     }
+    // TypeRecordCopy already shared a parameter type that cannot change.
+    if (formal->type == source_formal->type) {
+      continue;
+    }
     TypeRecord* formal_type =
         SubstituteTemplateParameters(parser, source_formal->type, args);
     SymbolSetType(formal, formal_type);
@@ -2907,10 +2987,47 @@ static void SubstituteFunctionPrototype(TypeParser* parser, TypeRecord* copy,
 TypeRecord* SubstituteCopiedTypeRecord(TypeParser* parser,
                                               TypeRecord* type,
                                               Vector* args) {
+  // The same pattern type is substituted once per instantiation.  Copying it
+  // when nothing in it depends on the arguments retained a new record every
+  // time; the arena never frees those records.
+  if (SubstitutionCanShare(parser, type)) {
+    return TypeRecordShareExisting(type);
+  }
+  if (TypeRecordCanIntern(type) &&
+      !TypeMentionsSubstitutionPattern(parser, type)) {
+    return TypeRecordIntern(type);
+  }
+  if (type->next != NULL &&
+      (type->declarator == kDeclPointer || TypeIsReference(type))) {
+    TypeRecord* next = SubstituteOriginalSpineNext(parser, type, args);
+    if (next != NULL && !TypeIsReference(next) && TypeRecordCanIntern(next)) {
+      TypeRecord* canonical_next = TypeRecordIntern(next);
+      TypeRecordDelete(next);
+      // A lookup key borrowing `type`'s fields; interning copies it on a
+      // miss.  `type` may be a short record, so copy only the header.
+      TypeRecord key = {0};
+      memcpy(&key, type, offsetof(TypeRecord, info));
+      key.shared_immutable = 0;
+      key.refs = 0;
+      key.template_parameter_summary = kTypeTemplateParameterSummaryUnknown;
+      key.next = canonical_next;
+      key.type = canonical_next->type;
+      if (TypeRecordCanIntern(&key)) {
+        return TypeRecordIntern(&key);
+      }
+      next = canonical_next;
+    }
+    TypeRecord* copy = TypeRecordCopy(type);
+    AttachSubstitutedSpineNext(parser, copy, next);
+    return TypeRecordCalculateSize(copy);
+  }
   TypeRecord* copy = TypeRecordCopy(type);
   SubstituteMemberPointerClass(copy, args);
   SubstituteArrayTemplateBound(parser, copy, type, args);
-  SubstituteTypeSpineNext(parser, copy, type, args);
+  if (copy->next != NULL) {
+    AttachSubstitutedSpineNext(parser, copy,
+                               SubstituteOriginalSpineNext(parser, type, args));
+  }
   SubstituteFunctionPrototype(parser, copy, type, args);
   return TypeRecordCalculateSize(copy);
 }
@@ -2925,7 +3042,8 @@ TypeRecord* SubstituteCopiedTypeRecord(TypeParser* parser,
  *   - structs that still contain parameters, pointer/reference chains (with
  *     reference collapsing), and function prototypes (expanding parameter
  *     packs).
- * Returns a newly allocated, size-calculated type record. */
+ * Returns a size-calculated type record.  A type that substitution cannot
+ * change is shared with its existing owners instead of copied. */
 /* The decltype operands being substituted, as (operand, arguments) pairs.  Only
  * the same operand with the same arguments is a recursion: one partial
  * specialization's operand legitimately recurs with other arguments
@@ -3041,8 +3159,8 @@ static TypeRecord* DecltypeThisForSubstitutionTarget(TypeParser* parser,
   }
   TypeRecord* target =
       TypeRecordCopy(parser->template_substitution_target->tag_symbol->type);
-  target->qualifiers = pointee->qualifiers;
-  return NewPointerTo(symbol->type->qualifiers, target);
+  SetQualifiers(target, GetQualifiers(pointee));
+  return NewPointerTo(GetQualifiers(symbol->type), target);
 }
 
 static void RemapDecltypeFunctionParameter(ASTNode* node, void* data,
@@ -3145,7 +3263,8 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       return resolved;
     }
     if (parser->template_substitution_failed) {
-      return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+      return NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
+                                   GetQualifiers(type));
     }
   }
   if (!g_dependent_decltype_stack_initialized) {
@@ -3173,7 +3292,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
         TypeRecord* result = SemanticMaterializeReflectedType(
             reflection, splice_node->base.location);
         if (result != NULL) {
-          result->qualifiers |= type->qualifiers;
+          result = TypeRecordAddQualifiers(result, GetQualifiers(type));
           ASTNodeDelete(splice);
           return TypeRecordCalculateSize(result);
         }
@@ -3182,7 +3301,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       }
     }
     TypeRecord* dependent =
-        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, type->qualifiers);
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(type));
     dependent->dependent_splice_expr = splice;
     return dependent;
   }
@@ -3211,7 +3330,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
             SubstituteTemplateParameters(parser, entity->type, args);
         if (declared != NULL && !TypeContainsTemplateParameter(declared) &&
             !TypeContainsAuto(declared)) {
-          declared->qualifiers |= type->qualifiers;
+          declared = TypeRecordAddQualifiers(declared, GetQualifiers(type));
           declared = SubstituteResolvedDependentMemberSuffix(
               parser, type, declared, args);
           DependentDecltypeStackPop();
@@ -3286,7 +3405,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
               ExpressionIsTemplateDependent(expr)));
         if (still_dependent) {
           TypeRecord* opaque = TypeRecordCopy(type);
-          opaque->qualifiers |= type->qualifiers;
+          opaque = TypeRecordAddQualifiers(opaque, GetQualifiers(type));
           ASTNode* deferred = CloneDependentExpressionWithArgs(
               parser, type->dependent_decltype_expr, args);
           if (deferred != NULL) {
@@ -3332,7 +3451,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
             ASTNodeAny(expr, NodeCallsUnresolvedFunctionTemplate, NULL);
         if (operand_still_dependent) {
           TypeRecord* opaque = TypeRecordCopy(type);
-          opaque->qualifiers |= type->qualifiers;
+          opaque = TypeRecordAddQualifiers(opaque, GetQualifiers(type));
           // Carry a FRESH, UNANALYZED clone of the substituted operand as the
           // deferred expression, not the just-analyzed `expr`.  The re-analysis
           // above may have resolved to an unknown/dependent type only because a
@@ -3386,7 +3505,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           result = NewDecltypePrvalueType(expr->type);
         }
         if (result != NULL) {
-          result->qualifiers |= type->qualifiers;
+          result = TypeRecordAddQualifiers(result, GetQualifiers(type));
           result = SubstituteResolvedDependentMemberSuffix(
               parser, type, result, args);
           ASTNodeDelete(expr);
@@ -3744,11 +3863,12 @@ TypeRecord* SubstituteTemplateParametersForPackElement(
  * element, and member functions are instantiated last (deferred so the layout
  * is finalized first). Returns a copy whose struct_info is the new struct. */
 static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
-  if (type == NULL || base <= 0) {
+  if (type == NULL || base <= 0 || TypeRecordCanShareConcreteClass(type)) {
     return;
   }
   TypeRecordInvalidateTemplateParameterSummary(type);
   for (TypeRecord* t = type; t != NULL; t = t->next) {
+    assert(!t->shared_immutable);
     if (t->template_parameter_index >= base) {
       t->template_parameter_index -= base;
     }
@@ -3801,20 +3921,28 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
   if (type == NULL || base <= 0) {
     return;
   }
+  // Nothing in this type is numbered relative to an enclosing template.
+  // Walking it would copy shared pointer targets that do not change.
+  if (TypeRecordCanShareConcreteClass(type)) {
+    return;
+  }
   TypeRecordInvalidateTemplateParameterSummary(type);
   for (TypeRecord* t = type; t != NULL; t = t->next) {
+    bool rest_is_concrete =
+        t->next != NULL && TypeRecordCanShareConcreteClass(t->next);
     // TypeRecordCopy shares `next`.  Rebasing a copied pointer or reference
     // must not renumber the original pointee: a member function template's
     // parameter types (`F&&`, `Ts&&`) are that shared pointee, and sliding
     // their indices makes a later class instantiation treat them as the
     // enclosing class parameter.
-    if (t->next != NULL && t->next->refs > 1) {
+    if (!rest_is_concrete && t->next != NULL && t->next->refs > 1) {
       TypeRecord* shared = t->next;
       TypeRecord* unique = TypeRecordCopy(shared);
       TypeRecordIncRef(unique);
       t->next = unique;
       TypeRecordDelete(shared);
     }
+    assert(!t->shared_immutable);
     if (t->template_parameter_index >= base) {
       t->template_parameter_index -= base;
     }
@@ -3881,6 +4009,9 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
         RebaseTemplateParameterIndicesSpine(member->symbol->type, base);
       }
     }
+    if (rest_is_concrete) {
+      break;
+    }
   }
 }
 
@@ -3894,10 +4025,12 @@ void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
   if (arg->template_parameter_index >= base) {
     arg->template_parameter_index -= base;
   }
-  TypeRecord* independent_type = TypeRecordCloneSpine(arg->type);
-  TypeRecordDelete(arg->type);
-  arg->type = independent_type;
-  RebaseTemplateParameterIndices(arg->type, base);
+  if (!TypeRecordCanShareConcreteClass(arg->type)) {
+    TypeRecord* independent_type = TypeRecordCloneSpine(arg->type);
+    TypeRecordDelete(arg->type);
+    arg->type = independent_type;
+    RebaseTemplateParameterIndices(arg->type, base);
+  }
   arg->dependent_expr =
       CloneAndRebaseDependentExpression(arg->dependent_expr, base);
   arg->pack_index_expr =

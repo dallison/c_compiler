@@ -78,9 +78,9 @@ static TypeRecord* AliasTemplateIdMemberType(TypeParser* parser, Symbol* alias,
   if (origin_args == NULL) {
     return NULL;
   }
-  TypeRecord* result = NewTypeRecord(
-      kTypeInt | kTypeUnknown,
-      member_name != NULL ? kQualPlain : pattern->qualifiers);
+  TypeRecord* result =
+      NewTypeRecord(kTypeInt | kTypeUnknown,
+                    member_name != NULL ? kQualPlain : GetQualifiers(pattern));
   result->template_origin = pattern->template_origin;
   result->template_arguments = origin_args;
   result->dependent_member_name =
@@ -319,7 +319,7 @@ TypeRecord* NewDecltypeReference(TypeRecord* expr_type, bool rvalue) {
 TypeRecord* NewDecltypePrvalueType(TypeRecord* expr_type) {
   TypeRecord* type = TypeRecordCopy(expr_type);
   if (type != NULL && !TypeIsStructOrUnion(type) && !TypeIsArray(type)) {
-    type->qualifiers &= ~(kQualConst | kQualVolatile);
+    SetQualifiers(type, GetQualifiers(type) & ~(kQualConst | kQualVolatile));
   }
   return type;
 }
@@ -1695,8 +1695,8 @@ static TypeRecord* ParseCAtomicTypeSpecifier(TypeParser* parser) {
   if (TypeIsAtomic(result)) {
     SyntaxError(parser->syntax, "_Atomic cannot be applied to an atomic type");
   }
-  if ((result->qualifiers &
-       (kQualConst | kQualVolatile | kQualRestrict)) != 0) {
+  if ((GetQualifiers(result) & (kQualConst | kQualVolatile | kQualRestrict)) !=
+      0) {
     SyntaxError(parser->syntax,
                 "_Atomic(type-name) requires an unqualified type");
   }
@@ -1704,7 +1704,7 @@ static TypeRecord* ParseCAtomicTypeSpecifier(TypeParser* parser) {
     SyntaxError(parser->syntax,
                 "_Atomic currently supports only scalar and pointer types");
   }
-  result->qualifiers |= kQualAtomic;
+  SetQualifiers(result, GetQualifiers(result) | kQualAtomic);
   return result;
 }
 
@@ -1788,8 +1788,9 @@ static TypeRecord* ParseCTypeofSpecifier(TypeParser* parser, bool unqualified) {
     result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   }
   if (unqualified) {
-    result->qualifiers &=
-        ~(kQualConst | kQualVolatile | kQualRestrict | kQualAtomic);
+    SetQualifiers(result,
+                  GetQualifiers(result) & ~(kQualConst | kQualVolatile |
+                                            kQualRestrict | kQualAtomic));
   }
   return result;
 }
@@ -3205,7 +3206,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
       } else if (LexMatch(lex, TOK(restrict))) {
         quals |= kQualRestrict;
       }
-      type_record->qualifiers |= quals;
+      SetQualifiers(type_record, GetQualifiers(type_record) | quals);
     }
     TypeParserDestruct(&composite_parser);
   }
@@ -3476,7 +3477,8 @@ TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* 
     return NewTypeRecordWithSize(type->type, type->quals);
   } else {
     // Add qualifiers to typedef copy.
-    type->type_record->qualifiers |= type->quals;
+    type->type_record =
+        TypeRecordAddQualifiers(type->type_record, type->quals);
     if (TypeIsBitInt(type->type_record) &&
         type->type_record->bit_width == 1 &&
         !TypeIsUnsigned(type->type_record)) {
@@ -3546,12 +3548,12 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
            LexLookingAt(parser->lex, TOK(volatile)) ||
            LexLookingAt(parser->lex, TOK(restrict))) {
       if (LexMatch(parser->lex, TOK(const))) {
-        built->qualifiers |= kQualConst;
+        SetQualifiers(built, GetQualifiers(built) | kQualConst);
       } else if (LexMatch(parser->lex, TOK(volatile))) {
-        built->qualifiers |= kQualVolatile;
+        SetQualifiers(built, GetQualifiers(built) | kQualVolatile);
       } else {
         LexMatch(parser->lex, TOK(restrict));
-        built->qualifiers |= kQualRestrict;
+        SetQualifiers(built, GetQualifiers(built) | kQualRestrict);
       }
     }
   }
@@ -3702,13 +3704,14 @@ static void ResolveOutOfLineDependentReturnType(TypeParser* parser) {
       !StorageIs(member->symbol->storage, STO(typedef))) {
     return;
   }
-  Qualifiers preserved = parser->base_type->qualifiers &
+  Qualifiers preserved = GetQualifiers(parser->base_type) &
                          (kQualConst | kQualVolatile | kQualRestrict);
   TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
-  resolved->qualifiers |= type->qualifiers;
+  SetQualifiers(resolved, GetQualifiers(resolved) | GetQualifiers(type));
   TypeRecordDelete(parser->base_type);
   parser->base_type = resolved;
-  parser->base_type->qualifiers |= preserved;
+  SetQualifiers(parser->base_type,
+                GetQualifiers(parser->base_type) | preserved);
 }
 
 Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
@@ -5094,7 +5097,7 @@ static TypeRecord* NewMemberPointerClassType(TypeParser* parser,
 // binds tighter (`int C::*p[3]` is an array of member pointers).
 static void FinishMemberPointerDeclarator(TypeParser* parser,
                                           TypeRecord* mptr) {
-  mptr->qualifiers |= ParseQualifiers(parser);
+  SetQualifiers(mptr, GetQualifiers(mptr) | ParseQualifiers(parser));
   TypeParserParsePointer(parser);
   VectorAppend(&parser->stack, mptr);
 }

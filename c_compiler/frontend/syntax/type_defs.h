@@ -8,6 +8,7 @@
 #ifndef type_defs_h
 #define type_defs_h
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdint.h>
 
@@ -414,6 +415,12 @@ struct Struct {
   // with the deduced field types.  Not serialized.
   bool lambda_body_needs_reanalysis;  // @wire -
   bool lambda_has_init_capture;       // @wire -
+  // Memo for TypeIsConstevalOnly.  0 unknown, 1 yes, -1 no.  Valid only while
+  // the member and base counts still match, so adding a member recomputes it.
+  // Not serialized.
+  signed char consteval_only_cached;  // @wire -
+  int consteval_only_member_count;    // @wire -
+  int consteval_only_base_count;      // @wire -
   // Arguments of the enclosing function template a local class was rebuilt
   // for; they tell its instantiations apart in mangled names.
   Vector* local_class_arguments;  // TemplateArgument*. @wire -
@@ -545,11 +552,16 @@ typedef struct TypeRecord {
   int id;     // Unique id for debugging.                         // @wire 1
   int refs;  // Reference count.                                  // @wire - (recomputed)
   Type type;                                                      // @wire 2
-  Qualifiers qualifiers;                                          // @wire 3
+  // Read and write only through GetQualifiers / SetQualifiers.
+  Qualifiers qualifiers_;                                         // @wire 3
   Declarator declarator;                                          // @wire 4
   // Transient suffix summary used by TypeContainsTemplateParameter:
   // 0 = unknown, 1 = absent, 2 = present.
   uint8_t template_parameter_summary;                              // @wire -
+  // Set on a canonical record in the type table (TypeRecordIntern), which
+  // many owners share.  It is never released or modified in place; writers
+  // copy it first.
+  uint8_t shared_immutable;                                       // @wire -
   int size;                                                       // @wire 5
   int bit_width;  // Exact width of kTypeBitInt; zero otherwise.    // @wire 21
   int template_parameter_index;  // >=0 for placeholder types.     // @wire 6
@@ -587,5 +599,24 @@ typedef struct TypeRecord {
     Enum* enum_info;             // @wire 14 (kTypeEnum)
   } info;
 } TypeRecord;
+
+static inline Qualifiers GetQualifiers(const TypeRecord* record) {
+  return record->qualifiers_;
+}
+
+// A shared record never changes; use TypeRecordAddQualifiers or
+// TypeRecordForWrite to get a record that may.
+static inline void SetQualifiers(TypeRecord* record, Qualifiers qualifiers) {
+  assert(!record->shared_immutable || record->qualifiers_ == qualifiers);
+  record->qualifiers_ = qualifiers;
+}
+
+// A by-value copy for local, read-only views.  The copy is not shared even
+// when `record` is, so its qualifiers may be changed.
+static inline TypeRecord TypeRecordValue(const TypeRecord* record) {
+  TypeRecord value = *record;
+  value.shared_immutable = 0;
+  return value;
+}
 
 #endif /* type_defs_h */

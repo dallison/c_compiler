@@ -67,10 +67,10 @@ bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
         if (!TypeIsStructOrUnion(left) || !TypeIsStructOrUnion(right)) {
           return false;
         }
-        TypeRecord unqualified_left = *left;
-        TypeRecord unqualified_right = *right;
-        unqualified_left.qualifiers = kQualPlain;
-        unqualified_right.qualifiers = kQualPlain;
+        TypeRecord unqualified_left = TypeRecordValue(left);
+        TypeRecord unqualified_right = TypeRecordValue(right);
+        SetQualifiers(&unqualified_left, kQualPlain);
+        SetQualifiers(&unqualified_right, kQualPlain);
         return TypeEqual(&unqualified_left, &unqualified_right);
       }
       if (TypeIsEnum(left) || TypeIsEnum(right)) {
@@ -81,10 +81,10 @@ bool TypeEqualIgnoringQualifiers(TypeRecord* left, TypeRecord* right) {
       // can spell one with the signed bit set and the other without it; a raw
       // bit compare then ranks that identity as a sign conversion, tying
       // `operator<<(short)` with `operator<<(int)`.
-      TypeRecord unqualified_left = *left;
-      TypeRecord unqualified_right = *right;
-      unqualified_left.qualifiers = kQualPlain;
-      unqualified_right.qualifiers = kQualPlain;
+      TypeRecord unqualified_left = TypeRecordValue(left);
+      TypeRecord unqualified_right = TypeRecordValue(right);
+      SetQualifiers(&unqualified_left, kQualPlain);
+      SetQualifiers(&unqualified_right, kQualPlain);
       return TypeEqual(&unqualified_left, &unqualified_right);
   }
   return false;
@@ -108,7 +108,7 @@ static TypeRecord* RebuildDependentConstCastTarget(TypeRecord* target,
       return NULL;
     }
     TypeRecord* result = NewReferenceTypeRecord(
-        target->qualifiers, target->declarator == kDeclRValueReference);
+        GetQualifiers(target), target->declarator == kDeclRValueReference);
     TypeRecordChain(result, referent);
     result->type = referent->type;
     return TypeRecordCalculateSize(result);
@@ -123,13 +123,13 @@ static TypeRecord* RebuildDependentConstCastTarget(TypeRecord* target,
     if (pointee == NULL) {
       return NULL;
     }
-    TypeRecord* result = NewPointerTypeRecord(target->qualifiers);
+    TypeRecord* result = NewPointerTypeRecord(GetQualifiers(target));
     TypeRecordChain(result, pointee);
     result->type = pointee->type;
     return TypeRecordCalculateSize(result);
   }
   TypeRecord* result = TypeRecordCloneSpine(source);
-  result->qualifiers = target->qualifiers;
+  SetQualifiers(result, GetQualifiers(target));
   return TypeRecordCalculateSize(result);
 }
 

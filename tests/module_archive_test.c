@@ -285,7 +285,7 @@ static void CheckVariable(Symbol* answer) {
   if (answer->type != NULL) {
     CHECK(answer->type->declarator == kDeclPrimitive);
     CHECK((answer->type->type & kTypeInt) != 0);
-    CHECK((answer->type->qualifiers & kQualConst) != 0);
+    CHECK((GetQualifiers(answer->type) & kQualConst) != 0);
   }
   CHECK(answer->attributes.length == 1);
   if (answer->attributes.length == 1) {

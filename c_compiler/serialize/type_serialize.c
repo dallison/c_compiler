@@ -1904,7 +1904,7 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
          t->next != NULL);
   WireWriteInt32(buf, kType_id, t->id);
   WireWriteInt32(buf, kType_type, (int32_t)t->type);
-  WireWriteInt32(buf, kType_qualifiers, (int32_t)t->qualifiers);
+  WireWriteInt32(buf, kType_qualifiers, (int32_t)GetQualifiers(t));
   WireWriteInt32(buf, kType_declarator, (int32_t)t->declarator);
   WireWriteInt32(buf, kType_size, t->size);
   WireWriteInt32(buf, kType_bit_width, t->bit_width);
@@ -1962,7 +1962,8 @@ static void* AllocType(DeserializeContext* ctx, const void* blob, size_t len) {
   (void)ctx;
   (void)blob;
   (void)len;
-  return NewTypeRecord(0, kQualPlain);
+  // The declarator is read later and may make this a function.
+  return NewFunctionCapableTypeRecord(0, kQualPlain);
 }
 
 static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
@@ -1986,7 +1987,7 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kType_qualifiers: {
         int32_t v;
         WireReadInt32(buf, &v);
-        t->qualifiers = (Qualifiers)v;
+        SetQualifiers(t, (Qualifiers)v);
         break;
       }
       case kType_declarator: {

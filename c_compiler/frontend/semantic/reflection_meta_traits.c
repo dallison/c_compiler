@@ -156,7 +156,7 @@ static TypeRecord* MetaTraitBuildTemplateIdType(TypeRecord* query, Vector* args)
                              /*free_element=*/false);
   }
   template_id->template_arguments = TemplateArgumentVectorCopy(args);
-  template_id->qualifiers |= query->qualifiers;
+  SetQualifiers(template_id, GetQualifiers(template_id) | GetQualifiers(query));
   return TypeRecordCalculateSize(template_id);
 }
 
@@ -194,7 +194,7 @@ static TypeRecord* MetaTraitRecoverTemplateIdType(TypeRecord* type) {
     if (tag_type->template_arguments != NULL &&
         tag_type->template_arguments->length > 0) {
       TypeRecord* recovered = TypeRecordCopy(tag_type);
-      recovered->qualifiers |= query->qualifiers;
+      SetQualifiers(recovered, GetQualifiers(recovered) | GetQualifiers(query));
       return TypeRecordCalculateSize(recovered);
     }
   }
@@ -1755,10 +1755,10 @@ static bool MetaTraitTypeEqual(TypeRecord* left, TypeRecord* right) {
     return false;
   }
   for (TypeRecord* cur = plain_left; cur != NULL; cur = cur->next) {
-    cur->qualifiers = kQualPlain;
+    SetQualifiers(cur, kQualPlain);
   }
   for (TypeRecord* cur = plain_right; cur != NULL; cur = cur->next) {
-    cur->qualifiers = kQualPlain;
+    SetQualifiers(cur, kQualPlain);
   }
   bool equal = TypeEqual(plain_left, plain_right);
   TypeRecordDelete(plain_left);
@@ -1774,7 +1774,7 @@ static TypeRecord* MetaTraitOwnedCopy(TypeRecord* type) {
 static TypeRecord* MetaTraitRemoveTopQual(TypeRecord* type, Qualifiers mask) {
   TypeRecord* copy = MetaTraitOwnedCopy(type);
   if (copy != NULL) {
-    copy->qualifiers &= ~mask;
+    SetQualifiers(copy, GetQualifiers(copy) & ~mask);
   }
   return copy;
 }
@@ -1782,7 +1782,7 @@ static TypeRecord* MetaTraitRemoveTopQual(TypeRecord* type, Qualifiers mask) {
 static TypeRecord* MetaTraitAddTopQual(TypeRecord* type, Qualifiers mask) {
   TypeRecord* copy = MetaTraitOwnedCopy(type);
   if (copy != NULL) {
-    copy->qualifiers |= mask;
+    SetQualifiers(copy, GetQualifiers(copy) | mask);
   }
   return copy;
 }
@@ -1800,7 +1800,7 @@ static TypeRecord* MetaTraitRemoveCv(TypeRecord* type) {
   TypeRecord* copy = MetaTraitOwnedCopy(type);
   if (copy != NULL) {
     for (TypeRecord* cur = copy; cur != NULL; cur = cur->next) {
-      cur->qualifiers &= ~(kQualConst | kQualVolatile);
+      SetQualifiers(cur, GetQualifiers(cur) & ~(kQualConst | kQualVolatile));
     }
   }
   return copy;
@@ -1826,7 +1826,7 @@ static TypeRecord* MetaTraitRemoveExtentOnce(TypeRecord* type) {
   }
   TypeRecord* element = TypeRecordCopy(copy->next);
   if (element != NULL) {
-    element->qualifiers |= copy->qualifiers;
+    SetQualifiers(element, GetQualifiers(element) | GetQualifiers(copy));
   }
   TypeRecordDelete(copy);
   return TypeRecordCalculateSize(element);
@@ -1852,7 +1852,7 @@ static TypeRecord* MetaTraitRemovePointerOnce(TypeRecord* type) {
   }
   TypeRecord* pointee = TypeRecordCopy(copy->next);
   if (pointee != NULL) {
-    pointee->qualifiers |= copy->qualifiers;
+    SetQualifiers(pointee, GetQualifiers(pointee) | GetQualifiers(copy));
   }
   TypeRecordDelete(copy);
   return TypeRecordCalculateSize(pointee);
@@ -1902,7 +1902,7 @@ static TypeRecord* MetaTraitMakeSigned(TypeRecord* type) {
     TypeRecordDelete(type);
     return NULL;
   }
-  type->qualifiers = kQualPlain;
+  SetQualifiers(type, kQualPlain);
   if (TypeIsUnsigned(type)) {
     type->type &= ~kTypeUnsigned;
   }
@@ -1918,7 +1918,7 @@ static TypeRecord* MetaTraitMakeUnsigned(TypeRecord* type) {
     TypeRecordDelete(type);
     return NULL;
   }
-  type->qualifiers = kQualPlain;
+  SetQualifiers(type, kQualPlain);
   if (!TypeIsUnsigned(type)) {
     type->type |= kTypeUnsigned;
   }

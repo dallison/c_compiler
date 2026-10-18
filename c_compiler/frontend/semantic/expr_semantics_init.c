@@ -130,7 +130,7 @@ ASTNode* MaterializeTemporary(ASTNode* expr, TypeRecord* type) {
   // prvalues through constexpr-object reconstruction during initialization.
   TypeRecord* temporary_type =
       TypeRecordCopy(expr->type != NULL ? expr->type : type);
-  temporary_type->qualifiers = kQualPlain;
+  SetQualifiers(temporary_type, kQualPlain);
   // TypeRecordCopy hands back an unreferenced node, so the symbol below holds the
   // only reference: releasing one here would drop it to zero and tear down the
   // declarator spine, leaving a pointer temporary pointing at nothing.
@@ -225,8 +225,7 @@ bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target) {
   // Materializing each candidate's result type at this point -- where the target
   // is necessarily complete -- and comparing types directly sidesteps the name
   // mismatch entirely.
-  TypeRecord* unqualified_target = TypeRecordCopy(target);
-  unqualified_target->qualifiers = kQualPlain;
+  TypeRecord* unqualified_target = NULL;
   Vector operators;
   VectorInit(&operators);
   CollectConversionOperators(actual->type->info.struct_info, &operators);
@@ -243,6 +242,10 @@ bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target) {
     // ([temp.deduct.conv]).  That is how `vector = StrSplit(...)` binds, via
     // Splitter's conversion operator.
     if (member->symbol->flags.is_template) {
+      if (unqualified_target == NULL) {
+        unqualified_target = TypeRecordCopy(target);
+        SetQualifiers(unqualified_target, kQualPlain);
+      }
       Vector* args = TypeDeduceConversionOperatorTemplateArguments(
           &compiler->syntax, member->symbol, unqualified_target);
       if (args != NULL) {
@@ -256,7 +259,7 @@ bool ClassHasConversionOperatorTo(ASTNode* actual, TypeRecord* target) {
     TypeRecord* result = member->symbol->type->next;
     TypeRecord* materialized =
         TypeMaterializeClassTemplateSpecialization(&compiler->syntax, result);
-    if (TypeEqualIgnoringQualifiers(materialized, unqualified_target)) {
+    if (TypeEqualIgnoringQualifiers(materialized, target)) {
       found = true;
     }
     if (materialized != result) {
@@ -327,7 +330,7 @@ static ASTNode* LowerCXXInitializerListBracedInit(TypeRecord* target_type,
   ASTNode* backing_array;
   if (braced->initializers == NULL || braced->initializers->length == 0) {
     TypeRecord* pointee = TypeRecordCopy(element_type);
-    pointee->qualifiers |= kQualConst;
+    SetQualifiers(pointee, GetQualifiers(pointee) | kQualConst);
     TypeRecord* pointer = NewPointerTypeRecord(kQualPlain);
     TypeRecordChain(pointer, pointee);
     TypeRecordCalculateSize(pointer);
@@ -531,7 +534,7 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
   }
 
   TypeRecord* type = TypeRecordCopy(target);
-  type->qualifiers = kQualPlain;
+  SetQualifiers(type, kQualPlain);
   TypeRecordCalculateSize(type);
   Symbol* temp = SyntaxNewTemporary(&compiler->syntax, type);
   temp->location = location;

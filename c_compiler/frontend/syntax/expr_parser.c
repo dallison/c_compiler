@@ -113,7 +113,7 @@ static TypeRecord* GenericControllingType(TypeRecord* ctype) {
     return ptr;
   }
   TypeRecord* copy = TypeRecordCopy(ctype);
-  copy->qualifiers = kQualPlain;
+  SetQualifiers(copy, kQualPlain);
   return copy;
 }
 
@@ -165,7 +165,7 @@ static bool GenericTypeMatch(TypeRecord* a, TypeRecord* b) {
       return TypeEqual(a, b);
     case kDeclPrimitive:
     default:
-      if (a->qualifiers != b->qualifiers) {
+      if (GetQualifiers(a) != GetQualifiers(b)) {
         return false;
       }
       if (TypeIsComplex(a) || TypeIsComplex(b)) {

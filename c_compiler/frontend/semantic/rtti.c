@@ -53,10 +53,10 @@ bool RttiUsesItaniumABI(void) {
 }
 
 static void RttiItaniumMangledKey(TypeRecord* type, String* out) {
-  Qualifiers saved = type->qualifiers;
-  type->qualifiers &= ~(kQualConst | kQualVolatile);
-  AppendCXXMangledTypeName(out, type);
-  type->qualifiers = saved;
+  TypeRecord unqualified = TypeRecordValue(type);
+  SetQualifiers(&unqualified,
+                GetQualifiers(type) & ~(kQualConst | kQualVolatile));
+  AppendCXXMangledTypeName(out, &unqualified);
 }
 
 static void RttiLegacyMangledKey(TypeRecord* type, String* out) {

@@ -100,6 +100,18 @@ void ASTArenaRelease(void) {
   ast_arena = NULL;
 }
 
+size_t ASTArenaBytes(void) {
+  size_t bytes = 0;
+  for (ASTArenaBlock* block = ast_arena; block != NULL; block = block->next) {
+    bytes += block->used;
+  }
+  return bytes;
+}
+
+size_t ASTArenaNodeCount(void) {
+  return ast_all_nodes_initialized ? ast_all_nodes.length : 0;
+}
+
 const char* ASTOpcodeName(ASTOpcode op) {
   switch (op) {
     case AST_OP(bad):

@@ -8,9 +8,14 @@
 #ifndef type_core_h
 #define type_core_h
 
+#include <stdio.h>
+
 #include "type_defs.h"
 
 TypeRecord* NewTypeRecord(Type type, Qualifiers quals);
+// A record with room for FunctionInfo, for callers that set the declarator
+// to kDeclFunction afterwards.
+TypeRecord* NewFunctionCapableTypeRecord(Type type, Qualifiers quals);
 TypeRecord* NewTypeRecordWithSize(Type type, Qualifiers quals);
 TypeRecord* NewComplexTypeRecord(Type element_type, Qualifiers quals);
 TypeRecord* NewBitIntTypeRecord(int bit_width, bool is_unsigned,
@@ -19,7 +24,7 @@ void TypeRecordDeleteLastReference(TypeRecord* record);
 // Most releases only drop one of several references. Keep that common path
 // inline and reserve recursive destruction for the final owner.
 static inline void TypeRecordDelete(TypeRecord* record) {
-  if (record == NULL) {
+  if (record == NULL || record->shared_immutable) {
     return;
   }
   if (record->refs > 1) {
@@ -31,6 +36,16 @@ static inline void TypeRecordDelete(TypeRecord* record) {
 // Free every TypeRecord struct allocated from the type arena.  Call once, at
 // CompilerDestruct, after all type-referencing structures are torn down.
 void TypeRecordArenaRelease(void);
+// Bytes retained by the type bump allocator.  Used by DAVECC_PROFILE.
+size_t TypeArenaBytes(void);
+// Allocation counters for DAVECC_PROFILE.  Full records hold a function type.
+size_t TypeArenaFullAllocCount(void);
+size_t TypeArenaShortAllocCount(void);
+size_t TypeRecordCopyCount(void);
+size_t TypeRecordShareCount(void);
+// Count TypeRecordCopy calls per call site; the report lists the busiest.
+void TypeRecordProfileCallers(void);
+void TypeRecordProfileReport(FILE* out, size_t limit);
 // Allocate/recycle TemplateArgument shells while preserving normal payload
 // destruction. Release the backing blocks with the rest of frontend teardown.
 TemplateArgument* TemplateArgumentAlloc(void);
@@ -53,6 +68,42 @@ void TypeRecordInvalidateTemplateParameterSummary(TypeRecord* record);
 void TypeRecordIncRef(TypeRecord* record);
 void TypeRecordDecRef(TypeRecord* record);
 TypeRecord* TypeRecordCopy(TypeRecord* record);
+// True when template substitution cannot change `type`.  The record must
+// still be reference-counted by its owner before a caller shares it.
+// Class types are excluded; use TypeRecordCanShareConcreteClass when the
+// caller checks that the class is not the one being instantiated.
+bool TypeRecordCanShareThroughSubstitution(TypeRecord* type);
+bool TypeRecordCanShareConcreteClass(TypeRecord* type);
+// One more owner of an existing record.  Used when substitution would have
+// copied a type it does not change.
+TypeRecord* TypeRecordShareExisting(TypeRecord* type);
+// `refs == 0` is updated in place.  A shared record is not modified; a
+// qualified copy is returned and the caller keeps ownership of `type`.
+TypeRecord* TypeRecordAddQualifiers(TypeRecord* type, Qualifiers quals);
+// `type` if this caller may modify it in place, else a private copy.  The
+// caller keeps ownership of `type` either way.
+TypeRecord* TypeRecordForWrite(TypeRecord* type);
+// The type table: each concrete type (TypeRecordCanShareConcreteClass) is
+// stored once as an immutable canonical record.  Callers may hold the result
+// without a reference and must copy it before modifying it.
+bool TypeRecordCanIntern(TypeRecord* type);
+// Requires TypeRecordCanIntern(type).
+TypeRecord* TypeRecordIntern(TypeRecord* type);
+// The canonical record for `type` with its top-level qualifiers replaced.
+// Requires TypeRecordCanIntern(type).
+TypeRecord* TypeRecordInternQualified(TypeRecord* type, Qualifiers quals);
+// The canonical record when `type` is concrete, else TypeRecordCloneSpine.
+TypeRecord* TypeRecordInternOrCloneSpine(TypeRecord* type);
+// The canonical record when `type` is concrete, else TypeRecordCopy.
+TypeRecord* TypeRecordInternOrCopy(TypeRecord* type);
+// For template-argument storage: also shares a bare template parameter.
+// Rebasing an argument clones its type first, so the shared record is never
+// renumbered in place.
+TypeRecord* TypeRecordInternArgumentOrCopy(TypeRecord* type);
+size_t TypeRecordInternHitCount(void);
+size_t TypeRecordInternMissCount(void);
+// DAVECC_PROFILE_CENSUS: how many live records are structural duplicates.
+void TypeRecordProfileCensus(FILE* out);
 // Copies every node in a type's declarator spine so callers may safely mutate
 // qualifiers, template indices, or next links without touching shared nodes.
 TypeRecord* TypeRecordCloneSpine(TypeRecord* record);
@@ -70,8 +121,8 @@ static inline TypeRecord* TypeRecordOverlayQualifiers(
   if (overlay == NULL || base == NULL) {
     return NULL;
   }
-  overlay->value = *base;
-  overlay->value.qualifiers = qualifiers;
+  overlay->value = TypeRecordValue(base);
+  SetQualifiers(&overlay->value, qualifiers);
   return &overlay->value;
 }
 int TypeRecordAlignment(TypeRecord* record);

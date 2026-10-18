@@ -287,7 +287,7 @@ static TypeRecord* NewVectorComparisonResultType(TypeRecord* vector_type) {
     element = TypeRecordCopy(source);
     element->type &= ~kTypeUnsigned;
     element->type |= kTypeSigned;
-    element->qualifiers = kQualPlain;
+    SetQualifiers(element, kQualPlain);
   } else {
     Type type = source->size == 1 ? kTypeChar
                 : source->size == 2 ? kTypeShort
@@ -651,7 +651,7 @@ static bool InsertNumericConversionsPhaseVector(BinaryASTNode* node) {
     return true;
   }
   TypeRecord* result = TypeRecordCopy(node->left->type);
-  result->qualifiers = kQualPlain;
+  SetQualifiers(result, kQualPlain);
   ASTNodeSetType((ASTNode*)node, result);
   return true;
 }
@@ -804,9 +804,9 @@ static void InsertNumericConversionsApplyUsualArithmeticConversions(
   if (node->base.type != NULL &&
       (TypeIsIntegral(node->base.type) ||
        TypeIsFloatingPoint(node->base.type)) &&
-      node->base.type->qualifiers != kQualPlain) {
+      GetQualifiers(node->base.type) != kQualPlain) {
     TypeRecord* unqualified = TypeRecordCopy(node->base.type);
-    unqualified->qualifiers = kQualPlain;
+    SetQualifiers(unqualified, kQualPlain);
     ASTNodeSetType((ASTNode*)node, unqualified);
     TypeRecordDelete(unqualified);
   }
@@ -1879,11 +1879,11 @@ static TypeRecord* PointerArithmeticResultType(TypeRecord* pointer_type) {
     TypeRecordChain(ptr, pointer_type->next);
     return ptr;
   }
-  if (pointer_type->qualifiers == kQualPlain) {
+  if (GetQualifiers(pointer_type) == kQualPlain) {
     return pointer_type;
   }
   TypeRecord* plain = TypeRecordCopy(pointer_type);
-  plain->qualifiers = kQualPlain;
+  SetQualifiers(plain, kQualPlain);
   return plain;
 }
 
@@ -2179,7 +2179,7 @@ bool IsNullPointerConstant(ASTNode* node) {
   if (node->op == AST_OP(charconst)) {
     return false;
   }
-  if (node->type != NULL && (node->type->qualifiers & kQualConst) != 0) {
+  if (node->type != NULL && (GetQualifiers(node->type) & kQualConst) != 0) {
     return false;
   }
   return true;
@@ -2833,8 +2833,9 @@ static bool TryAnalyzeCConditionalObjectPointers(BinaryASTNode* node,
       TypeRecordCopy(TypeIsVoid(left_pointee) ? left_pointee :
                      TypeIsVoid(right_pointee) ? right_pointee :
                      left_pointee);
-  pointee->qualifiers =
-      (left_pointee->qualifiers | right_pointee->qualifiers) & cv_mask;
+  SetQualifiers(
+      pointee,
+      (GetQualifiers(left_pointee) | GetQualifiers(right_pointee)) & cv_mask);
   // The pointer owns the pointee from here on, so only the pointer is released.
   TypeRecord* result = NewPointerTo(kQualPlain, pointee);
   ASTNodeSetType((ASTNode*)colon, result);
@@ -2864,11 +2865,12 @@ static bool TryAnalyzeConditionalDerivedToBaseGlvalue(BinaryASTNode* node,
   Qualifiers cv_mask = kQualConst | kQualVolatile;
   int arm = -1;
   if (TypeIsDerivedFrom(left->type, right->type) &&
-      (left->type->qualifiers & cv_mask & ~right->type->qualifiers) == 0) {
+      (GetQualifiers(left->type) & cv_mask & ~GetQualifiers(right->type)) ==
+          0) {
     arm = 0;
   } else if (TypeIsDerivedFrom(right->type, left->type) &&
-             (right->type->qualifiers & cv_mask & ~left->type->qualifiers) ==
-                 0) {
+             (GetQualifiers(right->type) & cv_mask &
+              ~GetQualifiers(left->type)) == 0) {
     arm = 1;
   }
   if (arm < 0) {
@@ -3030,7 +3032,7 @@ static bool AnalyzeConditionalExpressionPhaseClassArmConversions(
           other, target, kConvertNormal, /*allow_same_class=*/true);
     }
     TypeRecord* result_type = TypeRecordCopy(target);
-    result_type->qualifiers = kQualPlain;
+    SetQualifiers(result_type, kQualPlain);
     ASTNodeSetType((ASTNode*)colon, result_type);
     ASTNodeSetType((ASTNode*)node, colon->base.type);
     colon->base.value_category = kValueCategoryPrvalue;
@@ -3048,7 +3050,7 @@ static bool AnalyzeConditionalExpressionPhaseClassArmConversions(
         left_op ? colon->right->type : colon->left->type;
     SemanticConvertType(conv_source, conv_target, kConvertNormal);
     TypeRecord* result_type = TypeRecordCopy(conv_target);
-    result_type->qualifiers = kQualPlain;
+    SetQualifiers(result_type, kQualPlain);
     ASTNodeSetType((ASTNode*)colon, result_type);
     ASTNodeSetType((ASTNode*)node, colon->base.type);
     colon->base.value_category = kValueCategoryPrvalue;
@@ -3103,7 +3105,7 @@ static bool AnalyzeConditionalExpressionPhaseSameClassPrvalueInit(
         /*allow_same_class=*/true);
   }
   TypeRecord* result_type = TypeRecordCopy(colon->left->type);
-  result_type->qualifiers = kQualPlain;
+  SetQualifiers(result_type, kQualPlain);
   ASTNodeSetType((ASTNode*)colon, result_type);
   ASTNodeSetType((ASTNode*)node, colon->base.type);
   TypeRecordDelete(result_type);
@@ -3120,7 +3122,7 @@ static bool AnalyzeConditionalExpressionPhaseCSameStruct(BinaryASTNode* node,
     return false;
   }
   TypeRecord* result_type = TypeRecordCopy(colon->left->type);
-  result_type->qualifiers = kQualPlain;
+  SetQualifiers(result_type, kQualPlain);
   ASTNodeSetType((ASTNode*)colon, result_type);
   ASTNodeSetType((ASTNode*)node, colon->base.type);
   TypeRecordDelete(result_type);
@@ -3188,8 +3190,9 @@ static bool AnalyzeConditionalExpressionPhaseMemberPointerAndMixedPointer(
       TypeRecord* pointee = TypeRecordCopy(
           TypeIsVoid(left_pointee) ? left_pointee :
           TypeIsVoid(right_pointee) ? right_pointee : left_pointee);
-      pointee->qualifiers =
-          (left_pointee->qualifiers | right_pointee->qualifiers) & cv_mask;
+      SetQualifiers(pointee, (GetQualifiers(left_pointee) |
+                              GetQualifiers(right_pointee)) &
+                                 cv_mask);
       TypeRecord* result = NewPointerTo(kQualPlain, pointee);
       if (TypeIsArray(colon->left->type)) {
         colon->left->flags |= kASTNeedAddress;

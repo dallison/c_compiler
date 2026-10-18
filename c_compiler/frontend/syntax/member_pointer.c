@@ -147,7 +147,7 @@ static bool MemberPointerPointeeTypesCompatible(TypeRecord* from,
     return TypeEqualIgnoringFunctionNoexcept(from, to);
   }
   Qualifiers cv = kQualConst | kQualVolatile;
-  if ((from->qualifiers & cv & ~to->qualifiers) != 0) {
+  if ((GetQualifiers(from) & cv & ~GetQualifiers(to)) != 0) {
     return false;
   }
   return TypeEqualIgnoringTopLevelQualifierMask(from, to, cv);

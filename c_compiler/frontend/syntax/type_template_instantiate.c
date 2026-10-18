@@ -1558,13 +1558,13 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   TypeRecord* in_progress = NestedSubstitutionAlreadyInProgress(from, args);
   if (in_progress != NULL) {
     TypeRecord* shared = TypeRecordCopy(in_progress);
-    shared->qualifiers = type->qualifiers;
+    SetQualifiers(shared, GetQualifiers(type));
     return shared;
   }
   TypeRecord* cached_lambda = FindCachedLambdaSubstitution(from, args);
   if (cached_lambda != NULL) {
     TypeRecord* shared = TypeRecordCopy(cached_lambda);
-    shared->qualifiers = type->qualifiers;
+    SetQualifiers(shared, GetQualifiers(type));
     return shared;
   }
   // An enclosing class template is still collecting members.  Keep this
@@ -1867,7 +1867,8 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
               member_type->next != NULL &&
               TypeIsReference(member_type->next) &&
               member_type->next->next != NULL) {
-            TypeRecord* pointer = NewPointerTypeRecord(member_type->qualifiers);
+            TypeRecord* pointer =
+                NewPointerTypeRecord(GetQualifiers(member_type));
             TypeRecordChain(pointer, member_type->next->next);
             TypeRecordDelete(member_type);
             member_type = pointer;
@@ -1967,6 +1968,11 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         from->tag_symbol->flags.invented && member_type != NULL &&
         TypeIsPointer(member_type) && member_type->next != NULL &&
         TypeIsReference(member_type->next)) {
+      if (member_type->refs > 0) {
+        TypeRecord* exclusive = TypeRecordCopy(member_type);
+        TypeRecordDelete(member_type);
+        member_type = exclusive;
+      }
       TypeRecord* reference = member_type->next;
       TypeRecord* referent = reference->next;
       TypeRecordIncRef(referent);
@@ -2680,13 +2686,13 @@ static TypeRecord* ResolveInstantiatedOwnerTypedef(TypeRecord* type,
         member->symbol->type != NULL &&
         !TypeContainsTemplateParameter(member->symbol->type)) {
       TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
-      resolved->qualifiers |= type->qualifiers;
+      SetQualifiers(resolved, GetQualifiers(resolved) | GetQualifiers(type));
       return TypeRecordCalculateSize(resolved);
     }
     TypeRecord* inherited =
         ConcreteInheritedTypedef(owner, type->dependent_member_name, 0);
     if (inherited != NULL) {
-      inherited->qualifiers |= type->qualifiers;
+      SetQualifiers(inherited, GetQualifiers(inherited) | GetQualifiers(type));
       return TypeRecordCalculateSize(inherited);
     }
   }
@@ -4188,7 +4194,7 @@ static TemplateArgument* NewDeducedTypeTemplateArgument(TypeRecord* type) {
   TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterType;
   arg->is_pack_expansion = false;
-  arg->type = TypeRecordCalculateSize(TypeRecordCloneSpine(type));
+  arg->type = TypeRecordCalculateSize(TypeRecordInternOrCloneSpine(type));
   arg->int_value = 0;
   arg->template_parameter_index = -1;
   arg->pack_arguments = NULL;
@@ -4218,9 +4224,12 @@ static TypeRecord* FunctionTemplateDeductionActualType(TypeRecord* actual) {
   if (actual == NULL) {
     return NULL;
   }
+  if (TypeRecordCanIntern(actual)) {
+    return TypeRecordInternQualified(actual, kQualPlain);
+  }
   TypeRecord* deduced =
       TypeRecordCalculateSize(TypeRecordCloneSpine(actual));
-  deduced->qualifiers = kQualPlain;
+  SetQualifiers(deduced, kQualPlain);
   return deduced;
 }
 
@@ -4243,7 +4252,7 @@ static bool SetDeducedFunctionTemplateTypeArgumentImpl(Vector* args,
   TypeRecord* deduced = strip_top_level_cv
                             ? FunctionTemplateDeductionActualType(actual)
                             : TypeRecordCalculateSize(
-                                  TypeRecordCloneSpine(actual));
+                                  TypeRecordInternOrCloneSpine(actual));
   TemplateArgument* existing = args->value.p[index];
   if (existing == NULL) {
     args->value.p[index] = NewDeducedTypeTemplateArgument(deduced);
@@ -5442,7 +5451,7 @@ static bool DeduceFunctionTemplateNestedTypeArgument(Vector* args,
   int index = -1;
   if (formal != NULL && actual != NULL &&
       TypeIsTemplateParameterPlaceholder(formal, &index) &&
-      (formal->qualifiers & (kQualConst | kQualVolatile)) == 0) {
+      (GetQualifiers(formal) & (kQualConst | kQualVolatile)) == 0) {
     return SetDeducedFunctionTemplateTypeArgumentPreserveQualifiers(
         args, explicit_arg_count, index, actual);
   }
@@ -5544,7 +5553,7 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
     int ref_placeholder = -1;
     if (TypeIsTemplateParameterPlaceholder(formal->next, &ref_placeholder)) {
       Qualifiers pattern_cv =
-          formal->next->qualifiers & (kQualConst | kQualVolatile);
+          GetQualifiers(formal->next) & (kQualConst | kQualVolatile);
       if (pattern_cv != 0) {
         return SetDeducedFunctionTemplateTypeArgument(
             args, explicit_arg_count, ref_placeholder, actual_referent);
@@ -5621,13 +5630,15 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
       // private element copies before recursing.
       TypeRecord* formal_element = TypeRecordCopy(formal->next);
       TypeRecord* actual_element = TypeRecordCopy(actual->next);
-      formal_element->qualifiers |= formal->qualifiers;
-      actual_element->qualifiers |= actual->qualifiers;
+      SetQualifiers(formal_element,
+                    GetQualifiers(formal_element) | GetQualifiers(formal));
+      SetQualifiers(actual_element,
+                    GetQualifiers(actual_element) | GetQualifiers(actual));
       int element_index = -1;
       bool ok;
       if (TypeIsTemplateParameterPlaceholder(formal_element, &element_index)) {
         Qualifiers pattern_cv =
-            formal_element->qualifiers & (kQualConst | kQualVolatile);
+            GetQualifiers(formal_element) & (kQualConst | kQualVolatile);
         ok = pattern_cv == 0
                  ? SetDeducedFunctionTemplateTypeArgumentPreserveQualifiers(
                        args, explicit_arg_count, element_index, actual_element)
@@ -5901,7 +5912,7 @@ static TypeRecord* InstantiatedOwnerAliasPattern(TypeRecord* type,
     return NULL;
   }
   TypeRecord* pattern = TypeRecordCopy(selected->type);
-  pattern->qualifiers |= type->qualifiers;
+  SetQualifiers(pattern, GetQualifiers(pattern) | GetQualifiers(type));
   return pattern;
 }
 
@@ -5955,7 +5966,7 @@ static TypeRecord* AliasMemberPatternType(TypeRecord* type,
     return NULL;
   }
   TypeRecord* pattern = TypeRecordCopy(arg->type);
-  pattern->qualifiers |= type->qualifiers;
+  SetQualifiers(pattern, GetQualifiers(pattern) | GetQualifiers(type));
   return pattern;
 }
 
@@ -5973,7 +5984,7 @@ static TypeRecord* FormalWithAliasPattern(TypeRecord* formal,
       return NULL;
     }
     TypeRecord* ref = NewReferenceTypeRecord(
-        formal->qualifiers, formal->declarator == kDeclRValueReference);
+        GetQualifiers(formal), formal->declarator == kDeclRValueReference);
     TypeRecordChain(ref, inner);
     ref->type = inner->type;
     return TypeRecordCalculateSize(ref);
@@ -6140,7 +6151,7 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
     // the shared element type of the original string-literal expression.
     TypeRecord* adjusted = TypeRecordCopy(actual->type);
     TypeRecord* element = TypeRecordCopy(actual->type->next);
-    element->qualifiers = target->next->qualifiers;
+    SetQualifiers(element, GetQualifiers(target->next));
     TypeRecordIncRef(element);
     // `adjusted->next` still aliases the original (shared) element; drop that
     // borrowed reference before repointing at our private copy.
@@ -6209,7 +6220,7 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
   // template parameter is a forwarding reference; `const T&&` is not.
   bool forwarding_reference =
       formal->declarator == kDeclRValueReference && formal->next != NULL &&
-      (formal->next->qualifiers & (kQualConst | kQualVolatile)) == 0 &&
+      (GetQualifiers(formal->next) & (kQualConst | kQualVolatile)) == 0 &&
       TypeIsTemplateParameterPlaceholder(formal->next, &placeholder_index);
   if (forwarding_reference && ForwardingArgumentIsLvalue(actual)) {
     TypeRecord* lvalue_ref = NewReferenceTypeRecord(kQualPlain, false);
@@ -7333,9 +7344,9 @@ Vector* TypeDeduceConversionOperatorTemplateArguments(Syntax* syntax,
   if (pattern == NULL || deduction_target == NULL) {
     return NULL;
   }
-  if (deduction_target->qualifiers != kQualPlain) {
+  if (GetQualifiers(deduction_target) != kQualPlain) {
     unqualified_target = TypeRecordCopy(deduction_target);
-    unqualified_target->qualifiers = kQualPlain;
+    SetQualifiers(unqualified_target, kQualPlain);
     deduction_target = unqualified_target;
   }
   size_t explicit_arg_count = 0;
@@ -7556,10 +7567,11 @@ static TypeRecord* PartialOrderingDeductionType(TypeRecord* type,
     type = type->next;
   }
   if (type != NULL &&
-      (type->qualifiers & (kQualConst | kQualVolatile)) != 0) {
+      (GetQualifiers(type) & (kQualConst | kQualVolatile)) != 0) {
     *owned = TypeRecordCopy(type);
     TypeRecordIncRef(*owned);
-    (*owned)->qualifiers &= ~(kQualConst | kQualVolatile);
+    SetQualifiers(*owned,
+                  GetQualifiers(*owned) & ~(kQualConst | kQualVolatile));
     type = *owned;
   }
   return type;
@@ -7621,11 +7633,11 @@ static bool PartialOrderingReferenceTieLoses(TypeRecord* specialized_type,
     return general_lvalue;
   }
   Qualifiers cv = kQualConst | kQualVolatile;
-  Qualifiers specialized_cv =
-      specialized_type->next != NULL ? specialized_type->next->qualifiers & cv
-                                     : 0;
+  Qualifiers specialized_cv = specialized_type->next != NULL
+                                  ? GetQualifiers(specialized_type->next) & cv
+                                  : 0;
   Qualifiers general_cv =
-      general_type->next != NULL ? general_type->next->qualifiers & cv : 0;
+      general_type->next != NULL ? GetQualifiers(general_type->next) & cv : 0;
   return (general_cv & ~specialized_cv) != 0;
 }
 
@@ -8365,11 +8377,16 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
   int index = -1;
   if (TypeIsTemplateParameterPlaceholder(pattern, &index) &&
       !pattern->is_pack_index) {
-    if ((pattern->qualifiers & ~actual->qualifiers) != 0) {
+    if ((GetQualifiers(pattern) & ~GetQualifiers(actual)) != 0) {
       return false;
     }
+    Qualifiers quals = GetQualifiers(actual) & ~GetQualifiers(pattern);
+    if (TypeRecordCanIntern(actual)) {
+      return SetDeducedClassTemplateTypeArgument(
+          bindings, index, TypeRecordInternQualified(actual, quals));
+    }
     TypeRecord* deduced = TypeRecordCopy(actual);
-    deduced->qualifiers &= ~pattern->qualifiers;
+    SetQualifiers(deduced, quals);
     bool ok = SetDeducedClassTemplateTypeArgument(bindings, index, deduced);
     TypeRecordDelete(deduced);
     return ok;
@@ -8423,7 +8440,7 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
                      bindings, pattern_args, actual_args);
   }
   if (pattern->declarator != actual->declarator ||
-      pattern->qualifiers != actual->qualifiers) {
+      GetQualifiers(pattern) != GetQualifiers(actual)) {
     return false;
   }
   switch (pattern->declarator) {
@@ -8842,7 +8859,7 @@ static int TemplateTypePatternSpecificity(TypeRecord* type) {
     return 0;
   }
   int score = 1;
-  if (type->qualifiers != kQualPlain) {
+  if (GetQualifiers(type) != kQualPlain) {
     score++;
   }
   switch (type->declarator) {
@@ -9388,14 +9405,14 @@ static bool TypeEqualIgnoringTopLevelQualifiers(TypeRecord* left,
     return false;
   }
   return TypeEqualIgnoringTopLevelQualifierMask(
-      left, right, left->qualifiers | right->qualifiers);
+      left, right, GetQualifiers(left) | GetQualifiers(right));
 }
 
 static bool TypeCanAddTopLevelQualifiers(TypeRecord* from, TypeRecord* to) {
   if (!TypeEqualIgnoringTopLevelQualifiers(from, to)) {
     return false;
   }
-  return (from->qualifiers & ~to->qualifiers) == 0;
+  return (GetQualifiers(from) & ~GetQualifiers(to)) == 0;
 }
 
 /* Rough conversion rank for matching a CTAD deduction-guide parameter `formal`
@@ -10132,7 +10149,7 @@ static bool TemplateNonTypeArgumentMatchesParameter(
       return false;
     }
     if (argument_is_function) {
-      return arg->type->qualifiers == param->type->qualifiers &&
+      return GetQualifiers(arg->type) == GetQualifiers(param->type) &&
              TypeEqualIgnoringFunctionNoexcept(arg->type->next,
                                                param->type->next) &&
              (!param->type->next->info.function.is_noexcept ||
@@ -10635,7 +10652,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
         !TypeContainsTemplateParameter(param->type) &&
         arg != NULL && arg->dependent_expr == NULL) {
       TypeRecordDelete(arg->type);
-      arg->type = TypeRecordCopy(param->type);
+      arg->type = TypeRecordInternOrCopy(param->type);
     }
     if (param->kind == kTemplateParameterTemplate &&
         arg->kind == kTemplateParameterType && arg->type != NULL &&
@@ -10737,7 +10754,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
         !TypeContainsTemplateParameter(param->type) &&
         arg->template_parameter_index < 0 && arg->dependent_expr == NULL) {
       TypeRecordDelete(arg->type);
-      arg->type = TypeRecordCopy(param->type);
+      arg->type = TypeRecordInternOrCopy(param->type);
     }
     VectorAppend(completed, arg);
   }
@@ -11269,7 +11286,7 @@ static TypeRecord* ExpandConcreteAliasTemplateId(TypeParser* parser,
   TypeRecord* subst =
       SubstituteTemplateParameters(parser, alias->type, pattern_args);
   if (subst != NULL) {
-    subst->qualifiers |= type->qualifiers;
+    subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
     subst = TypeMaterializeClassTemplateSpecialization(parser->syntax, subst);
   }
   if (grouped != NULL) {
@@ -11777,6 +11794,9 @@ static TypeRecord* InstantiateSimpleClassTemplateUnchecked(
     VectorDeleteWithContents(completed_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
+    if (TypeRecordCanIntern(existing->type)) {
+      return TypeRecordIntern(existing->type);
+    }
     return TypeRecordCopy(existing->type);
   }
   if (existing != NULL) {
@@ -12485,7 +12505,8 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(Syntax* syntax,
         if (member != NULL && member->symbol != NULL &&
             StorageIs(member->symbol->storage, STO(typedef))) {
           TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
-          resolved->qualifiers |= type->qualifiers;
+          SetQualifiers(resolved,
+                        GetQualifiers(resolved) | GetQualifiers(type));
           TypeRecordDelete(owner);
           return TypeRecordCalculateSize(resolved);
         }
@@ -12500,7 +12521,7 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(Syntax* syntax,
       // `conditional_t<B, T, F>::value` / `StorageT<I>::get`.  Also used when
       // the dependent name was encoded as an unknown-int template-id after
       // the member name was stripped for substitution.
-      owner->qualifiers |= type->qualifiers;
+      owner = TypeRecordAddQualifiers(owner, GetQualifiers(type));
       return TypeRecordCalculateSize(owner);
     }
     TypeRecordDelete(owner);
@@ -12533,8 +12554,7 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(Syntax* syntax,
   if (concrete == NULL) {
     return type;
   }
-  concrete->qualifiers |= type->qualifiers;
-  return concrete;
+  return TypeRecordAddQualifiers(concrete, GetQualifiers(type));
 }
 
 bool SymbolIsInStdNamespace(Symbol* symbol) {

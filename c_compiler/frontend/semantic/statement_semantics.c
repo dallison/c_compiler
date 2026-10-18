@@ -2564,9 +2564,9 @@ static bool TypeEqualIgnoringTopLevelQualifiers(TypeRecord* left,
   TypeRecordQualifierOverlay left_overlay;
   TypeRecordQualifierOverlay right_overlay;
   Qualifiers left_qualifiers =
-      left->qualifiers & ~(kQualConst | kQualVolatile);
+      GetQualifiers(left) & ~(kQualConst | kQualVolatile);
   Qualifiers right_qualifiers =
-      right->qualifiers & ~(kQualConst | kQualVolatile);
+      GetQualifiers(right) & ~(kQualConst | kQualVolatile);
   return TypeEqual(
       TypeRecordOverlayQualifiers(&left_overlay, left, left_qualifiers),
       TypeRecordOverlayQualifiers(&right_overlay, right, right_qualifiers));
@@ -2577,7 +2577,8 @@ static void SetCurrentFunctionReturnType(TypeRecord* deduced) {
   bool decltype_auto =
       old_return != NULL && old_return->declarator == kDeclPrimitive &&
       (old_return->type & kTypeDecltypeAuto) != 0;
-  deduced->qualifiers &= ~(kQualConst | kQualVolatile);
+  SetQualifiers(deduced,
+                GetQualifiers(deduced) & ~(kQualConst | kQualVolatile));
   TypeRecordIncRef(deduced);
   compiler->current_function->next = deduced;
   compiler->current_function->info.function.is_auto_return_deduced = true;
@@ -3626,7 +3627,7 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
   bool is_constinit =
       first_binding != NULL && first_binding->flags.is_constinit;
   if (is_constexpr && !TypeIsReference(hidden_type)) {
-    hidden_type->qualifiers |= kQualConst;
+    SetQualifiers(hidden_type, GetQualifiers(hidden_type) | kQualConst);
   }
   if (hidden != NULL && symbol_map != NULL) {
     Symbol* source_hidden = hidden;
@@ -3736,7 +3737,8 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
       if (element_type != NULL) {
         TypeRecord* concrete_element = TypeRecordCopy(element_type);
         if (TypeIsConst(object_type)) {
-          concrete_element->qualifiers |= kQualConst;
+          SetQualifiers(concrete_element,
+                        GetQualifiers(concrete_element) | kQualConst);
         }
         TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, false);
         TypeRecordChain(reference, concrete_element);

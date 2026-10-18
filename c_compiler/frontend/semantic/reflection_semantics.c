@@ -800,10 +800,10 @@ TypeRecord* SemanticResolveDependentSpliceType(TypeRecord* type,
     TypeRecord* resolved =
         SemanticMaterializeReflectedType(reflection, splice->base.location);
     if (resolved != NULL) {
-      Qualifiers quals = type->qualifiers;
+      Qualifiers quals = GetQualifiers(type);
       ASTNodeDelete(splice_expr);
       TypeRecordDelete(type);
-      resolved->qualifiers |= quals;
+      SetQualifiers(resolved, GetQualifiers(resolved) | quals);
       return TypeRecordCalculateSize(resolved);
     }
     SemanticError(diagnostic != NULL ? diagnostic : splice_expr,
@@ -1540,7 +1540,7 @@ static ASTNode* NewMetaStringViewResult(VectorASTNode* call, const char* text,
         call, MetaLowerToReturnType(call, braced));
   }
   TypeRecord* plain = TypeRecordCopy(return_type);
-  plain->qualifiers = kQualPlain;
+  SetQualifiers(plain, kQualPlain);
   ASTNode* type_id =
       NewIdentifierASTNode(return_type->info.struct_info->tag_symbol, location);
   ASTNodeSetType(type_id, plain);

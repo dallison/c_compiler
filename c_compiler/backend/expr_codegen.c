@@ -431,8 +431,9 @@ static IRNode* AtomicSeqCstOrder(Generator* gen) {
 static TypeRecord* AtomicValueType(TypeRecord* type) {
   TypeRecord* value_type = TypeRecordCopy(type);
   if (value_type != NULL) {
-    value_type->qualifiers &=
-        ~(kQualAtomic | kQualConst | kQualVolatile | kQualRestrict);
+    SetQualifiers(value_type,
+                  GetQualifiers(value_type) & ~(kQualAtomic | kQualConst |
+                                                kQualVolatile | kQualRestrict));
   }
   return value_type;
 }

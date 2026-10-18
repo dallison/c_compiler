@@ -129,8 +129,8 @@ void TypeRecordPrintDetails(TypeRecord* record, bool with_function_body, FILE* f
     } else if (record->declarator == kDeclRValueReference) {
       fprintf(fp, "rvalue reference to ");
     }
-    QualifiersToString(record->qualifiers, &str);
-    if (record->qualifiers != 0) {
+    QualifiersToString(GetQualifiers(record), &str);
+    if (GetQualifiers(record) != 0) {
       StringAppend(&str, " ");
     }
     Type printable_type = record->type;
@@ -269,8 +269,8 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
   switch (type->declarator) {
     case kDeclPrimitive:
       if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
-        QualifiersToString(type->qualifiers, result);
-        if (type->qualifiers != 0) {
+        QualifiersToString(GetQualifiers(type), result);
+        if (GetQualifiers(type) != 0) {
           StringAppend(result, " ");
         }
         String* parameter_name = TemplateParameterDisplayName(
@@ -294,8 +294,8 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
         }
         break;
       }
-      QualifiersToString(type->qualifiers, result);
-      if (type->qualifiers != 0) {
+      QualifiersToString(GetQualifiers(type), result);
+      if (GetQualifiers(type) != 0) {
         StringAppend(result, " ");
       }
       Type printable_type = type->type;
@@ -337,17 +337,17 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
           (type->next->declarator == kDeclArray ||
            type->next->declarator == kDeclFunction)) {
         StringAppend(result, "(*");
-        if (type->qualifiers != 0) {
+        if (GetQualifiers(type) != 0) {
           StringAppend(result, " ");
         }
-        QualifiersToString(type->qualifiers, result);
+        QualifiersToString(GetQualifiers(type), result);
         StringAppendChar(result, ')');
       } else {
         StringAppendChar(result, '*');
-        if (type->qualifiers != 0) {
+        if (GetQualifiers(type) != 0) {
           StringAppend(result, " ");
         }
-        QualifiersToString(type->qualifiers, result);
+        QualifiersToString(GetQualifiers(type), result);
       }
       break;
 
@@ -700,8 +700,8 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
     case kDeclPrimitive:
       if (TypeIsUnknown(type) && type->template_origin != NULL &&
           type->template_arguments != NULL) {
-        QualifiersToString(type->qualifiers, result);
-        if (type->qualifiers != 0) {
+        QualifiersToString(GetQualifiers(type), result);
+        if (GetQualifiers(type) != 0) {
           StringAppend(result, " ");
         }
         StringAppend(result, "$A");
@@ -724,8 +724,8 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
         break;
       }
       if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
-        QualifiersToString(type->qualifiers, result);
-        if (type->qualifiers != 0) {
+        QualifiersToString(GetQualifiers(type), result);
+        if (GetQualifiers(type) != 0) {
           StringAppend(result, " ");
         }
         StringPrintf(result, "$T%d", type->template_parameter_index);
@@ -736,8 +736,8 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
         }
         break;
       }
-      QualifiersToString(type->qualifiers, result);
-      if (type->qualifiers != 0) {
+      QualifiersToString(GetQualifiers(type), result);
+      if (GetQualifiers(type) != 0) {
         StringAppend(result, " ");
       }
       TypeToString(CanonicalPrimitiveType(type->type), result);
@@ -801,10 +801,10 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
     case kDeclPointer:
       TypeRecordToTemplateKeyString(type->next, result);
       StringAppendChar(result, '*');
-      if (type->qualifiers != 0) {
+      if (GetQualifiers(type) != 0) {
         StringAppend(result, " ");
       }
-      QualifiersToString(type->qualifiers, result);
+      QualifiersToString(GetQualifiers(type), result);
       break;
 
     case kDeclMemberPointer: {
@@ -829,7 +829,7 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
       StringAppendChar(result, '{');
       TypeRecordToTemplateKeyString(type->next, result);
       StringAppendChar(result, '}');
-      QualifiersToString(type->qualifiers, result);
+      QualifiersToString(GetQualifiers(type), result);
       break;
     }
 
@@ -849,9 +849,9 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
       } else {
         StringPrintf(result, "[%d]", type->info.array.size.fixed);
       }
-      if (type->qualifiers != 0) {
+      if (GetQualifiers(type) != 0) {
         StringAppendChar(result, '$');
-        QualifiersToString(type->qualifiers, result);
+        QualifiersToString(GetQualifiers(type), result);
       }
       break;
 

@@ -64,7 +64,7 @@ static void SetResultBindingType(TypeRecord* func,
     return_type = return_type->next;
   }
   TypeRecord* object_type = TypeRecordCopy(return_type);
-  object_type->qualifiers |= kQualConst;
+  SetQualifiers(object_type, GetQualifiers(object_type) | kQualConst);
   TypeRecord* binding_type = object_type;
   if (returns_reference || TypeIsStructOrUnion(return_type)) {
     binding_type = NewReferenceTypeRecord(kQualPlain, false);
@@ -95,7 +95,7 @@ TypeRecord* SemanticContractIdentifierViewType(Symbol* symbol,
     return NULL;
   }
   TypeRecord* view = TypeRecordCloneSpine(expression_type);
-  view->qualifiers |= kQualConst;
+  SetQualifiers(view, GetQualifiers(view) | kQualConst);
   return view;
 }
 
@@ -103,11 +103,11 @@ static TypeRecord* ContractParameterViewType(Symbol* formal) {
   TypeRecord* view = TypeRecordCloneSpine(formal->type);
   if (StringEqual(&formal->name, "this") && TypeIsPointer(view) &&
       view->next != NULL) {
-    view->next->qualifiers |= kQualConst;
+    SetQualifiers(view->next, GetQualifiers(view->next) | kQualConst);
   } else if (TypeIsReference(view) && view->next != NULL) {
-    view->next->qualifiers |= kQualConst;
+    SetQualifiers(view->next, GetQualifiers(view->next) | kQualConst);
   } else {
-    view->qualifiers |= kQualConst;
+    SetQualifiers(view, GetQualifiers(view) | kQualConst);
   }
   return view;
 }

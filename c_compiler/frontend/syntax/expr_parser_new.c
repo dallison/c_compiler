@@ -913,7 +913,8 @@ static TypeRecord* DeduceCXXNewPlaceholderType(Syntax* syntax,
     ASTNode* decay_copy =
         NewCastASTNode(NewTypeRecord(kTypeAuto, kQualPlain), location, operand);
     ((CastASTNode*)decay_copy)->kind = kCastAutoParen;
-    deduced = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, leaf->qualifiers);
+    deduced =
+        NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(leaf));
     deduced->dependent_decltype_expr = decay_copy;
   } else if (init_type != NULL && !TypeIsUnknown(init_type) &&
              !TypeContainsAuto(init_type)) {
@@ -1021,12 +1022,12 @@ static ASTNode* NewCXXNewBracedInitializer(Vector* items,
 // object is being initialized, so a `const T` is stored through a `T*`.
 static ASTNode* CXXNewScalarTarget(ASTNode* target, TypeRecord* type,
                                    SourceLocation location) {
-  if (type == NULL || (type->qualifiers & kQualConst) == 0 ||
+  if (type == NULL || (GetQualifiers(type) & kQualConst) == 0 ||
       target == NULL || target->op != AST_OP(contents)) {
     return target;
   }
   TypeRecord* plain = TypeRecordCopy(type);
-  plain->qualifiers &= ~kQualConst;
+  SetQualifiers(plain, GetQualifiers(plain) & ~kQualConst);
   UnaryASTNode* contents = (UnaryASTNode*)target;
   contents->sub = NewTypedCast(NewPointerTo(kQualPlain, plain), contents->sub,
                                location);
@@ -1870,11 +1871,11 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
 // `T* const` is a const pointer.  The delete temporary is assigned, so it
 // cannot keep that top-level const.
 static TypeRecord* CXXMutablePointerType(TypeRecord* pointer_type) {
-  if (pointer_type == NULL || (pointer_type->qualifiers & kQualConst) == 0) {
+  if (pointer_type == NULL || (GetQualifiers(pointer_type) & kQualConst) == 0) {
     return pointer_type;
   }
   TypeRecord* copy = TypeRecordCopy(pointer_type);
-  copy->qualifiers &= ~kQualConst;
+  SetQualifiers(copy, GetQualifiers(copy) & ~kQualConst);
   return copy;
 }
 
