@@ -2273,6 +2273,7 @@ static void TypeidASTNodeDelete(ASTNode* node) {
   if (tnode->expr != NULL) {
     ASTNodeDelete(tnode->expr);
   }
+  TypeRecordDelete(tnode->operand_type);
   ASTNodeBaseDelete(node);
 }
 
@@ -2304,6 +2305,7 @@ static ASTNode* TypeidASTNodeClone(const ASTNode* node,
   to->expr = from->expr != NULL ? ASTNodeClone(from->expr, func, data, &to->base)
                                 : NULL;
   to->operand_type = from->operand_type;
+  TypeRecordIncRef(to->operand_type);
   return func(&to->base, data);
 }
 
@@ -2337,6 +2339,7 @@ ASTNode* NewTypeidASTNodeWithType(TypeRecord* type, SourceLocation location) {
   ASTNodeInit(&node->base, AST_OP(typeid), NULL, location, &typeid_vtbl);
   node->expr = NULL;
   node->operand_type = type;
+  TypeRecordIncRef(type);
   return (ASTNode*)node;
 }
 
@@ -2405,6 +2408,7 @@ static ASTNode* ReflectionASTNodeClone(
   to->operand_type = from->operand_type != NULL
                          ? TypeRecordCopy(from->operand_type)
                          : NULL;
+  TypeRecordIncRef(to->operand_type);
   to->namespace_ = from->namespace_;
   to->value = from->value;
   if (node->op == AST_OP(token_sequence_literal) && from->value != NULL &&

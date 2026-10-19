@@ -147,8 +147,10 @@ static bool TypeRecordNodeContainsTemplateParameter(TypeRecord* type) {
       type->template_origin->flags.is_template_template_parameter) {
     return true;
   }
+  // `char[N]`, or a bound kept as an expression (`char[sizeof(U)]`).
   if (type->declarator == kDeclArray &&
-      type->info.array.template_parameter_index >= 0) {
+      (type->info.array.template_parameter_index >= 0 ||
+       type->info.array.is_dependent_bound)) {
     return true;
   }
   // `int T::*`: the class of a member pointer is a template parameter.
@@ -616,9 +618,12 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
           right->info.array.template_parameter_index) {
         return false;
       }
-      if (left->info.array.template_parameter_index < 0 &&
-          !left->info.array.is_dependent_bound &&
-          !TypeArrayBoundsEqual(&left->info.array, &right->info.array)) {
+      if (left->info.array.is_dependent_bound
+              ? !DependentTemplateArgExprEqual(left->info.array.size.vla.size,
+                                               right->info.array.size.vla.size)
+              : left->info.array.template_parameter_index < 0 &&
+                    !TypeArrayBoundsEqual(&left->info.array,
+                                          &right->info.array)) {
         return false;
       }
       return TemplateTypePatternEqual(left->next, right->next);

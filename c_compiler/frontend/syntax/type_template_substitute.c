@@ -1955,6 +1955,22 @@ static Struct* StructBaseDeclaringMember(Struct* str, String* name, int depth) {
   return NULL;
 }
 
+/* `Z<i>` with `i` a value-dependent expression (a constexpr local of a
+ * template, `One<U>()`).  Substituting such an argument into one of Z's
+ * members cannot replace Z's parameter, so the member must wait for a
+ * concrete `i`. */
+static bool TemplateArgumentsHaveValueDependentExpression(Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg != NULL && arg->kind == kTemplateParameterNonType &&
+        arg->template_parameter_index < 0 && arg->dependent_expr != NULL &&
+        TemplateArgumentContainsTemplateParameter(arg)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* `template <class U> using rt = Tr<ra<U>>` inside `template <class A> struct
  * Tr`, where `ra` is a sibling member alias template.  While `rt`'s pattern is
  * substituted for `Tr<Sym>`, `ra<U>` cannot expand because `U` belongs to `rt`,
@@ -2118,7 +2134,8 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
       type->dependent_member_name != NULL &&
       TypeIsStructOrUnion(info.origin->type) &&
       info.origin->type->info.struct_info != NULL &&
-      info.origin->type->info.struct_info->partial_specializations.length == 0) {
+      info.origin->type->info.struct_info->partial_specializations.length == 0 &&
+      !TemplateArgumentsHaveValueDependentExpression(concrete_args)) {
     // A dependent member of a primary class template with no partial
     // specializations can be resolved from the primary immediately.  This is
     // important for traits such as
@@ -3933,6 +3950,10 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
         t->info.array.template_parameter_index >= base) {
       t->info.array.template_parameter_index -= base;
     }
+    if (t->declarator == kDeclArray && t->info.array.is_dependent_bound) {
+      t->info.array.size.vla.size =
+          CloneAndRebaseDependentExpression(t->info.array.size.vla.size, base);
+    }
     if (t->template_arguments != NULL) {
       for (size_t i = 0; i < t->template_arguments->length; i++) {
         RebaseTemplateArgumentParameterIndices(t->template_arguments->value.p[i],
@@ -4006,6 +4027,10 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
     if (t->declarator == kDeclArray &&
         t->info.array.template_parameter_index >= base) {
       t->info.array.template_parameter_index -= base;
+    }
+    if (t->declarator == kDeclArray && t->info.array.is_dependent_bound) {
+      t->info.array.size.vla.size =
+          CloneAndRebaseDependentExpression(t->info.array.size.vla.size, base);
     }
     if (t->template_arguments != NULL) {
       for (size_t i = 0; i < t->template_arguments->length; i++) {
@@ -4196,9 +4221,13 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   // enclosing class's argument (`T` becomes index 0, the same slot as `B`),
   // so `enable_if_t<false, int>` never forms `enable_if<false, int>::type`.
   // The template arguments live on the identifier and are rebased below; the
-  // symbol itself is the shared definition and must stay.
+  // symbol itself is the shared definition and must stay.  A namespace-scope
+  // function template (`Sz<U>()`) is numbered in its own parameter space; a
+  // copy would be a second template whose specializations duplicate its own.
   if (old->variable_template != NULL ||
-      (old->flags.is_template && StorageIs(old->storage, STO(typedef)))) {
+      (old->flags.is_template && StorageIs(old->storage, STO(typedef))) ||
+      (old->flags.is_template && TypeIsFunction(old->type) &&
+       old->type->info.function.cxx_member_owner == NULL)) {
     if (id->template_arguments != NULL) {
       for (size_t i = 0; i < id->template_arguments->length; i++) {
         RebaseTemplateArgumentParameterIndices(id->template_arguments->value.p[i],

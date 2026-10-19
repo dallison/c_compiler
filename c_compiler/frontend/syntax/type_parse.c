@@ -1915,6 +1915,58 @@ static TypeRecord* InvalidInstantiatedMemberType(TypeParser* parser,
   return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
 }
 
+static bool TemplateArgumentListsContainTemplateParameter(Vector* lists) {
+  for (size_t i = 0; lists != NULL && i < lists->length; i++) {
+    if (TemplateArgumentVectorContainsTemplateParameter(lists->value.p[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// `Origin<args>::member` with concrete arguments, named from non-template
+// code, must resolve.  `using type = typename P<I - 1>::type` instantiated for
+// `I = 1` keeps `P<0>::type` unresolved when P<0> has no `type`: inside a
+// template that is a substitution failure, here it names no type.  Takes
+// ownership of TYPE; returns it when not applicable, its resolution, or NULL.
+static TypeRecord* ResolveConcreteDependentMemberType(TypeParser* parser,
+                                                      TypeRecord* type) {
+  if (type == NULL || type->dependent_member_name == NULL ||
+      type->template_origin == NULL || type->template_parameter_index >= 0 ||
+      parser->syntax->parsing_template_declaration ||
+      parser->syntax->current_template_parameters != NULL ||
+      TemplateArgumentVectorContainsTemplateParameter(
+          type->template_arguments) ||
+      TemplateArgumentListsContainTemplateParameter(
+          type->dependent_member_template_arguments)) {
+    return type;
+  }
+  bool saved_failed = parser->template_substitution_failed;
+  parser->template_substitution_failed = false;
+  Vector no_args;
+  VectorInit(&no_args);
+  TypeRecord* resolved = SubstituteTemplateParameters(parser, type, &no_args);
+  VectorDestruct(&no_args);
+  bool failed = parser->template_substitution_failed;
+  parser->template_substitution_failed = saved_failed;
+  TypeRecordDeleteUnowned(type);
+  if (failed || resolved == NULL || resolved->dependent_member_name != NULL) {
+    TypeRecordDeleteUnowned(resolved);
+    return NULL;
+  }
+  return resolved;
+}
+
+// The type a member typedef names here, or NULL when it names none.
+static TypeRecord* NamedMemberTypedefType(TypeParser* parser, Symbol* symbol) {
+  TypeRecord* type = TypeRecordCopy(symbol->type);
+  if (type == NULL || symbol->flags.is_template ||
+      !StorageIs(symbol->storage, STO(typedef))) {
+    return type;
+  }
+  return ResolveConcreteDependentMemberType(parser, type);
+}
+
 static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
   PartialTypeSpecifier result;
   result.error = false;
@@ -2318,6 +2370,13 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               !member_alias_args_concrete) {
             deferred_typename =
                 TryBuildDependentTemplateIdMemberType(parser, &typename_name);
+            if (deferred_typename != NULL) {
+              deferred_typename =
+                  ResolveConcreteDependentMemberType(parser, deferred_typename);
+              if (deferred_typename == NULL) {
+                deferred_typename = InvalidInstantiatedMemberType(parser, symbol);
+              }
+            }
           }
           if (deferred_typename != NULL) {
             type_record = deferred_typename;
@@ -2387,8 +2446,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               ClassTemplateIdIsConcrete(parser, symbol, args)) {
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
           } else {
-            type_record = TypeRecordCopy(symbol->type);
-            if (symbol->flags.is_template && args != NULL) {
+            type_record = NamedMemberTypedefType(parser, symbol);
+            if (type_record != NULL && symbol->flags.is_template &&
+                args != NULL) {
               if (type_record->template_arguments != NULL) {
                 VectorDeleteWithContents(
                     type_record->template_arguments,
@@ -2716,6 +2776,13 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             !member_alias_args_concrete) {
           deferred_member =
               TryBuildDependentTemplateIdMemberType(parser, &typedef_name);
+          if (deferred_member != NULL) {
+            deferred_member =
+                ResolveConcreteDependentMemberType(parser, deferred_member);
+            if (deferred_member == NULL) {
+              deferred_member = InvalidInstantiatedMemberType(parser, symbol);
+            }
+          }
         }
         if (deferred_member != NULL) {
           type_record = deferred_member;
@@ -2876,7 +2943,10 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             type_record->template_arguments = args;
             args = NULL;
           } else {
-            type_record = TypeRecordCopy(symbol->type);
+            type_record = NamedMemberTypedefType(parser, symbol);
+          }
+          if (type_record != NULL && !forwarding_member_alias_id &&
+              alias_member == NULL) {
             if (symbol->flags.is_template_template_parameter) {
               type_record->template_origin = symbol;
             }
@@ -3071,7 +3141,10 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               type_record->template_arguments = args;
               args = NULL;
             } else {
-              type_record = TypeRecordCopy(symbol->type);
+              type_record = NamedMemberTypedefType(parser, symbol);
+              if (type_record == NULL) {
+                type_record = InvalidInstantiatedMemberType(parser, symbol);
+              }
               if (symbol->flags.is_template_template_parameter) {
                 type_record->template_origin = symbol;
               }

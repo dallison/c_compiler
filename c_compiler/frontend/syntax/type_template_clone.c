@@ -808,30 +808,26 @@ static void RewriteTemplateBodyDecltypePackIndices(
   }
 }
 
-/* Substitute a type in a nested class-template member body.  Besides the
- * nested class itself, such a body can name the injected class name of its
- * enclosing specialization (for example `outer result;` inside
- * `outer<T>::promise_type`).  The normal source/target mapping covers the
- * nested class; temporarily use its lexical-parent mapping when this exact
- * type chain names the enclosing class. */
-static void RebindBodyCloneDecltypeExpressions(
-    TemplateFunctionBodyClone* clone, TypeRecord* type, Vector* visited_types,
-    Vector* rebound_types, Vector* original_expressions,
-    Vector* rebound_arguments, Vector* original_argument_expressions);
-static void RebindBodyCloneNonTypeArgument(
-    TemplateFunctionBodyClone* clone, TemplateArgument* arg,
-    Vector* rebound_arguments, Vector* original_argument_expressions);
-
-/* The decltype operands a body-clone substitution rebinds to this
- * instantiation's symbols (`decltype(tag)` naming a generic lambda's own
- * parameter) for the duration of one substitution. */
+/* The decltype operands, non-type arguments and array bounds a body-clone
+ * substitution rebinds to this instantiation's symbols (`decltype(tag)`
+ * naming a generic lambda's own parameter, `char[n]` naming a constexpr local)
+ * for the duration of one substitution. */
 typedef struct {
   Vector visited_types;
   Vector rebound_types;
   Vector original_expressions;
   Vector rebound_arguments;
   Vector original_argument_expressions;
+  Vector rebound_bounds;
+  Vector original_bounds;
 } BodyCloneDecltypeBinding;
+
+static void RebindBodyCloneDecltypeExpressions(
+    TemplateFunctionBodyClone* clone, TypeRecord* type,
+    BodyCloneDecltypeBinding* binding);
+static void RebindBodyCloneNonTypeArgument(
+    TemplateFunctionBodyClone* clone, TemplateArgument* arg,
+    Vector* rebound_arguments, Vector* original_argument_expressions);
 
 static void BodyCloneDecltypeBindingInit(BodyCloneDecltypeBinding* binding) {
   VectorInit(&binding->visited_types);
@@ -839,6 +835,8 @@ static void BodyCloneDecltypeBindingInit(BodyCloneDecltypeBinding* binding) {
   VectorInit(&binding->original_expressions);
   VectorInit(&binding->rebound_arguments);
   VectorInit(&binding->original_argument_expressions);
+  VectorInit(&binding->rebound_bounds);
+  VectorInit(&binding->original_bounds);
 }
 
 /* A clone that binds only the enclosing arguments renumbers the remaining
@@ -852,10 +850,7 @@ static void BodyCloneDecltypeBindingRebindType(
     TemplateFunctionBodyClone* clone, BodyCloneDecltypeBinding* binding,
     TypeRecord* type) {
   size_t first = binding->rebound_types.length;
-  RebindBodyCloneDecltypeExpressions(
-      clone, type, &binding->visited_types, &binding->rebound_types,
-      &binding->original_expressions, &binding->rebound_arguments,
-      &binding->original_argument_expressions);
+  RebindBodyCloneDecltypeExpressions(clone, type, binding);
   if (clone->rebase_template_parameter_base <= 0) {
     return;
   }
@@ -886,6 +881,12 @@ static void BodyCloneDecltypeBindingRestore(BodyCloneDecltypeBinding* binding) {
     TemplateArgument* arg = binding->rebound_arguments.value.p[i];
     arg->dependent_expr = binding->original_argument_expressions.value.p[i];
   }
+  for (size_t i = 0; i < binding->rebound_bounds.length; i++) {
+    TypeRecord* array = binding->rebound_bounds.value.p[i];
+    array->info.array.size.vla.size = binding->original_bounds.value.p[i];
+  }
+  VectorDestruct(&binding->original_bounds);
+  VectorDestruct(&binding->rebound_bounds);
   VectorDestruct(&binding->original_argument_expressions);
   VectorDestruct(&binding->rebound_arguments);
   VectorDestruct(&binding->original_expressions);
@@ -929,6 +930,12 @@ static Vector* SubstituteBodyCloneTemplateArguments(
   return substituted;
 }
 
+/* Substitute a type in a nested class-template member body.  Besides the
+ * nested class itself, such a body can name the injected class name of its
+ * enclosing specialization (for example `outer result;` inside
+ * `outer<T>::promise_type`).  The normal source/target mapping covers the
+ * nested class; temporarily use its lexical-parent mapping when this exact
+ * type chain names the enclosing class. */
 static TypeRecord* SubstituteTemplateBodyType(TemplateFunctionBodyClone* clone,
                                               TypeRecord* type) {
   TypeRecord* prepared = type;
@@ -5717,20 +5724,31 @@ static void RewriteClonedBodySymbolVisitor(ASTNode* node, void* data,
 // later, concrete clone can map it.  A member template body cloned with only
 // the enclosing arguments is itself what the member's instantiation clones, so
 // it names its own `n`, which that clone maps.
+// The same holds for an array bound (`char[n]`).  Returns a copy of `value`
+// naming this instantiation's symbols, or NULL when it keeps the pattern's.
+static ASTNode* RebindBodyCloneValueExpression(TemplateFunctionBodyClone* clone,
+                                               ASTNode* value) {
+  if (value == NULL ||
+      !ASTNodeAny(value, NodeNamesClonedBodySymbol, clone) ||
+      (!CloneSubstitutesEnclosingArgumentsOnly(clone) &&
+       ASTNodeAny(value, NodeNamesUnvaluedClonedBodySymbol, clone))) {
+    return NULL;
+  }
+  ASTNode* rebound = ASTNodeClone(value, IdentityCloneNode, NULL, NULL);
+  ASTNodeVisit(rebound, RewriteClonedBodySymbolVisitor, 0, clone);
+  return rebound;
+}
+
 static void RebindBodyCloneNonTypeArgument(
     TemplateFunctionBodyClone* clone, TemplateArgument* arg,
     Vector* rebound_arguments, Vector* original_argument_expressions) {
-  if (arg == NULL || arg->kind != kTemplateParameterNonType ||
-      arg->dependent_expr == NULL ||
-      !ASTNodeAny(arg->dependent_expr, NodeNamesClonedBodySymbol, clone) ||
-      (!CloneSubstitutesEnclosingArgumentsOnly(clone) &&
-       ASTNodeAny(arg->dependent_expr, NodeNamesUnvaluedClonedBodySymbol,
-                  clone))) {
+  if (arg == NULL || arg->kind != kTemplateParameterNonType) {
     return;
   }
-  ASTNode* rebound =
-      ASTNodeClone(arg->dependent_expr, IdentityCloneNode, NULL, NULL);
-  ASTNodeVisit(rebound, RewriteClonedBodySymbolVisitor, 0, clone);
+  ASTNode* rebound = RebindBodyCloneValueExpression(clone, arg->dependent_expr);
+  if (rebound == NULL) {
+    return;
+  }
   VectorAppend(rebound_arguments, arg);
   VectorAppend(original_argument_expressions, arg->dependent_expr);
   arg->dependent_expr = rebound;
@@ -5827,17 +5845,27 @@ static void UnseedEnclosingFormals(TemplateFunctionBodyClone* clone,
 }
 
 static void RebindBodyCloneDecltypeExpressions(
-    TemplateFunctionBodyClone* clone, TypeRecord* type, Vector* visited_types,
-    Vector* rebound_types, Vector* original_expressions,
-    Vector* rebound_arguments, Vector* original_argument_expressions) {
+    TemplateFunctionBodyClone* clone, TypeRecord* type,
+    BodyCloneDecltypeBinding* binding) {
   for (TypeRecord* current = type; current != NULL; current = current->next) {
-    if (BodyCloneTypeWasVisited(visited_types, current)) {
+    if (BodyCloneTypeWasVisited(&binding->visited_types, current)) {
       continue;
     }
-    VectorAppend(visited_types, current);
+    VectorAppend(&binding->visited_types, current);
+    if (current->declarator == kDeclArray &&
+        current->info.array.is_dependent_bound) {
+      ASTNode* bound = RebindBodyCloneValueExpression(
+          clone, current->info.array.size.vla.size);
+      if (bound != NULL) {
+        VectorAppend(&binding->rebound_bounds, current);
+        VectorAppend(&binding->original_bounds,
+                     current->info.array.size.vla.size);
+        current->info.array.size.vla.size = bound;
+      }
+    }
     // An alias use site's operand names the alias's parameters, not this
     // body's; substitution maps it through the recorded alias arguments.
-    if (rebound_types != NULL && current->dependent_decltype_expr != NULL &&
+    if (current->dependent_decltype_expr != NULL &&
         !TypeIsDecltypeAliasTemplateId(current)) {
       // `decltype` is unevaluated: cloning `*declval<T&>()` must not demand a
       // function body from declaration-only templates such as `std::declval`.
@@ -5862,8 +5890,9 @@ static void RebindBodyCloneDecltypeExpressions(
       UnseedEnclosingFormals(clone, &seeded);
       clone->rebase_template_parameter_base = saved_rebase_base;
       if (rebound != NULL) {
-        VectorAppend(rebound_types, current);
-        VectorAppend(original_expressions, current->dependent_decltype_expr);
+        VectorAppend(&binding->rebound_types, current);
+        VectorAppend(&binding->original_expressions,
+                     current->dependent_decltype_expr);
         current->dependent_decltype_expr = rebound;
       }
     }
@@ -5874,13 +5903,11 @@ static void RebindBodyCloneDecltypeExpressions(
       TemplateArgument* arg = current->template_arguments->value.p[i];
       if (arg != NULL && arg->kind == kTemplateParameterType &&
           arg->type != NULL) {
-        RebindBodyCloneDecltypeExpressions(
-            clone, arg->type, visited_types, rebound_types,
-            original_expressions, rebound_arguments,
-            original_argument_expressions);
+        RebindBodyCloneDecltypeExpressions(clone, arg->type, binding);
       } else {
-        RebindBodyCloneNonTypeArgument(clone, arg, rebound_arguments,
-                                       original_argument_expressions);
+        RebindBodyCloneNonTypeArgument(
+            clone, arg, &binding->rebound_arguments,
+            &binding->original_argument_expressions);
       }
     }
   }
@@ -6281,10 +6308,10 @@ static ASTNode* CloneSizeofAlignofInTemplateBody(
     if (sizeof_node->type_operand != NULL) {
       TypeRecord* concrete = sizeof_node->type_operand;
       if (TypeLayoutDependsOnTemplate(concrete)) {
-        concrete = SubstituteTemplateParameters(
-            clone->parser, concrete, clone->args);
+        concrete = SubstituteTemplateBodyType(clone, concrete);
         RebaseTemplateParameterIndices(
             concrete, clone->rebase_template_parameter_base);
+        TypeRecordIncRef(concrete);
         TypeRecordDelete(sizeof_node->type_operand);
         sizeof_node->type_operand = concrete;
       }
@@ -6314,6 +6341,7 @@ static void CloneTypeidInTemplateBody(
       RebaseTemplateParameterIndices(
           concrete, clone->rebase_template_parameter_base);
       TypeRecordCalculateSize(concrete);
+      TypeRecordIncRef(concrete);
       TypeRecordDelete(typeid_node->operand_type);
       typeid_node->operand_type = concrete;
     }
@@ -6334,6 +6362,7 @@ static void CloneReflectInTemplateBody(
       RebaseTemplateParameterIndices(
           concrete, clone->rebase_template_parameter_base);
       TypeRecordCalculateSize(concrete);
+      TypeRecordIncRef(concrete);
       TypeRecordDelete(reflection->operand_type);
       reflection->operand_type = concrete;
     }
