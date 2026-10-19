@@ -1484,6 +1484,26 @@ static void DiagnosePointerToReferenceMember(TypeParser* parser,
   }
 }
 
+/* Substitutes the declared type of data member `member` of `source`.  A type
+ * that does not substitute (`decltype(f(T()))` with no viable `f`) makes the
+ * class instantiation ill-formed; that is reported here unless the
+ * substitution already reported it, and NULL tells the caller to drop the
+ * member. */
+static TypeRecord* SubstituteClassDataMemberType(TypeParser* parser,
+                                                 Struct* source, Symbol* member,
+                                                 Vector* args) {
+  DiagnosticWatch watch;
+  DiagnosticWatchBegin(&watch);
+  TypeRecord* type = SubstituteClassMemberType(parser, source, member, args);
+  DiagnosticWatchEnd(&watch);
+  if (type == NULL && watch.errors == 0) {
+    SyntaxErrorAtLocation(parser->syntax, member->location,
+                          "Invalid type for member '%s' in this instantiation",
+                          member->name.value);
+  }
+  return type;
+}
+
 /* The innermost class being copied whose data members are renumbered by
  * NestedClassOfMemberTemplateRebaseBase, so classes nested in it follow. */
 static Struct* nested_member_template_class_target = NULL;
@@ -1977,8 +1997,15 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         member_args = capture_args;
       }
     }
+    bool is_typedef = StorageIs(member->symbol->storage, STO(typedef));
     TypeRecord* member_type =
-        SubstituteClassMemberType(parser, from, member->symbol, member_args);
+        is_typedef ? SubstituteClassMemberType(parser, from, member->symbol,
+                                               member_args)
+                   : SubstituteClassDataMemberType(parser, from, member->symbol,
+                                                   member_args);
+    if (member_type == NULL && !is_typedef) {
+      continue;
+    }
     if (str->is_template && str->tag_symbol != NULL &&
         !str->tag_symbol->flags.invented) {
       RebaseTemplateParameterIndices(
@@ -1986,8 +2013,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     } else if (data_member_rebase_base > 0) {
       RebaseTemplateParameterIndices(member_type, data_member_rebase_base);
     }
-    if (StorageIs(member->symbol->storage, STO(typedef)) &&
-        TypeContainsTemplateParameter(member_type)) {
+    if (is_typedef && TypeContainsTemplateParameter(member_type)) {
       TypeRecord* inherited =
           ConcreteInheritedTypedef(str, &member->symbol->name, 0);
       if (inherited != NULL) {
@@ -12578,8 +12604,11 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
       }
       continue;
     }
-    TypeRecord* member_type = SubstituteClassMemberType(
+    TypeRecord* member_type = SubstituteClassDataMemberType(
         parser, source_struct, member->symbol, source_args);
+    if (member_type == NULL) {
+      continue;
+    }
     DiagnosePointerToReferenceMember(parser, member->symbol, member_type);
     TypeRecordCalculateSize(member_type);
     Symbol* member_symbol =

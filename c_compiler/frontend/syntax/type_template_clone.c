@@ -1415,16 +1415,26 @@ static Symbol* CloneTemplateDependentTemporarySymbol(
   return replacement;
 }
 
+static bool StructIsOrIsNestedInClassTemplate(Struct* str) {
+  for (; str != NULL; str = str->lexical_parent) {
+    if (str->is_template) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* The specialization that contains `source_nested`.  A member of the class
  * template constructs that nested class directly.  A member of a sibling
  * nested class does too (`iterator` converting to `const_iterator`): both
  * live in the same primary template, so the lookup owner is the enclosing
- * specialization rather than the sibling being cloned. */
+ * specialization rather than the sibling being cloned.  The enclosing class
+ * may itself be a non-template member of a class template
+ * (`Forward<S>::State::Rcvr`). */
 static Struct* ClonedNestedConstructorEnclosingTarget(
     TemplateFunctionBodyClone* clone, Struct* source_nested) {
   if (clone == NULL || source_nested == NULL ||
-      source_nested->lexical_parent == NULL ||
-      !source_nested->lexical_parent->is_template ||
+      !StructIsOrIsNestedInClassTemplate(source_nested->lexical_parent) ||
       clone->substitution_source == NULL ||
       clone->substitution_target == NULL) {
     return NULL;
@@ -8726,6 +8736,64 @@ static bool ConstructorOwnerNamesStaleLocalClass(Struct* current_owner,
          TemplateArgumentsNameLocalClass(current->template_arguments, 0);
 }
 
+/* The constructor `ctor` of `pattern`, counted among its same-named members in
+ * declaration order (overload chains included), is declared at the same
+ * position in `specialization`, which was instantiated from that pattern.
+ * NULL when `ctor` is not found there or the counterpart does not have the
+ * same shape. */
+static Symbol* CorrespondingConstructorOverload(Struct* pattern, Symbol* ctor,
+                                                Struct* specialization) {
+  if (ctor->flags.is_template ||
+      ctor->type->info.function.template_origin != NULL) {
+    return NULL;
+  }
+  size_t position = 0;
+  bool found = false;
+  for (size_t i = 0; i < pattern->members.length && !found; i++) {
+    for (StructMember* member = pattern->members.value.p[i]; member != NULL;
+         member = member->overload_next) {
+      if (member->symbol == NULL ||
+          !StringEqual(&member->symbol->name, ctor->name.value)) {
+        break;
+      }
+      if (member->symbol == ctor) {
+        found = true;
+        break;
+      }
+      position++;
+    }
+  }
+  if (!found) {
+    return NULL;
+  }
+  for (size_t i = 0; i < specialization->members.length; i++) {
+    for (StructMember* member = specialization->members.value.p[i];
+         member != NULL; member = member->overload_next) {
+      if (member->symbol == NULL ||
+          !StringEqual(&member->symbol->name, ctor->name.value)) {
+        break;
+      }
+      if (position > 0) {
+        position--;
+        continue;
+      }
+      Symbol* candidate = member->symbol;
+      if (candidate->type == NULL || !TypeIsFunction(candidate->type) ||
+          !candidate->type->info.function.is_constructor ||
+          candidate->flags.is_template ||
+          candidate->type->info.function.template_origin != NULL ||
+          candidate->type->info.function.prototype.length !=
+              ctor->type->info.function.prototype.length ||
+          candidate->type->info.function.is_implicitly_declared !=
+              ctor->type->info.function.is_implicitly_declared) {
+        return NULL;
+      }
+      return candidate;
+    }
+  }
+  return NULL;
+}
+
 /* Find the head of the overload chain for member `name` in `owner`, preferring
  * a member that actually has overloads linked; falls back to any match. */
 static bool RebindClonedConstructorCall(VectorASTNode* call,
@@ -8787,6 +8855,21 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
         !current_owner_is_template_pattern && !stale_owner) {
       ctor_owner = NULL;
       ctor_name = NULL;
+    }
+    /* `Rcvr(this)` in `Forward<S>::State<R>` names the pattern's nested
+     * class's constructor while the receiver is the specialization's.  Bind
+     * the specialization's constructor declared at the same position. */
+    if (ctor_owner != NULL && current_owner != NULL &&
+        current_owner != ctor_owner && current_owner_is_template_pattern &&
+        !stale_owner && current_owner->tag_name != NULL &&
+        StringEqual(current_owner->tag_name, ctor_owner->tag_name->value)) {
+      Symbol* specialized = CorrespondingConstructorOverload(
+          current_owner, id->symbol, ctor_owner);
+      if (specialized != NULL) {
+        id->symbol = specialized;
+        ASTNodeSetType(call->left, specialized->type);
+        return true;
+      }
     }
   }
   if (ctor_owner == NULL &&
