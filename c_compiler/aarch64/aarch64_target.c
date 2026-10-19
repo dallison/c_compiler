@@ -138,6 +138,7 @@ CompilerTarget* NewAARCH64Target() {
   target->assemble_string = AssembleString;
   target->emit_program_file = AARCH64EmitProgramFile;
   target->emit_object_file = NULL;
+  target->stream_function = AARCH64StreamFunction;
   target->emit_static_variable = EmitStaticVariable;
   target->emit_bss_space = EmitBSSVariable;
   target->emit_data_start = EmitDataStart;

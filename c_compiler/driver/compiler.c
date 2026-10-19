@@ -3109,6 +3109,14 @@ static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type) {
   return false;
 }
 
+static void AddFunctionCode(void* code) {
+  if (code != NULL && compiler->target->stream_function != NULL &&
+      compiler->target->stream_function(compiler, code)) {
+    return;
+  }
+  VectorAppend(&compiler->functions, code);
+}
+
 static bool GenerateFunctionDefinition(Syntax* syntax,
                                        VariableDeclarationASTNode* decl) {
   if (compiler->syntax_only || NumErrors() != 0) {
@@ -3159,7 +3167,7 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
   } else {
     void* code = GenerateFunction(&codegen);
     if (code != NULL) {
-      VectorAppend(&compiler->functions, code);
+      AddFunctionCode(code);
       const char* emit_name = FunctionEmitName(decl->symbol);
       VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));
       CompilerStringIndexInsert(compiler->emitted_function_name_index, emit_name,
@@ -4222,7 +4230,7 @@ static Symbol* CompileCXXThreadLifetimeFunction(Syntax* syntax, const char* name
   Generator codegen;
   GeneratorInit(&codegen, syntax, func_type);
   void* code = GenerateFunction(&codegen);
-  VectorAppend(&compiler->functions, code);
+  AddFunctionCode(code);
   VectorAppend(&compiler->emitted_function_asm_names, NewString(name));
   CompilerStringIndexInsert(
       compiler->emitted_function_name_index, name, sym);
@@ -4250,7 +4258,7 @@ static void CompileCXXTlsBlockDtorThunk(Syntax* syntax,
   Generator codegen;
   GeneratorInit(&codegen, syntax, func_type);
   void* code = GenerateFunction(&codegen);
-  VectorAppend(&compiler->functions, code);
+  AddFunctionCode(code);
   GeneratorDestruct(&codegen);
   compiler->current_function = NULL;
 }
@@ -5146,6 +5154,8 @@ static void InitBasicOptionsOrDie(Compiler* compiler,
   compiler->print_preprocessor =
       OptionBoolValue(kOptionPrintPreprocessor, options, false);
   compiler->keep_asm_file = OptionBoolValue(kOptionKeepAsmFile, options, false);
+  compiler->assembly_output =
+      OptionBoolValue(kOptionAssemblyOutput, options, false);
   if (compiler->save_ast) {
     compiler->print_front_end = true;
   }
@@ -5409,6 +5419,10 @@ void CompilerDestruct(Compiler* compiler) {
   StringDestruct(&compiler->listing_path);
   DebugBuilderDestruct(&compiler->debug_builder);
 
+  if (compiler->function_stream != NULL) {
+    compiler->function_stream_delete(compiler->function_stream);
+    compiler->function_stream = NULL;
+  }
   // Back ends may release a function's code early and leave a NULL slot.
   for (size_t i = 0; i < compiler->functions.length; i++) {
     if (compiler->functions.value.p[i] != NULL) {

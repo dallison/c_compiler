@@ -25,13 +25,17 @@ static void ReplaceSourceExtension(String* filename, const char* extension) {
   StringAppend(filename, extension);
 }
 
-bool AARCH64ObjectModuleInit(AARCH64ObjectModule* module, String* src_file,
-                             String* object_file, bool pic) {
+void AARCH64ObjectModuleStart(AARCH64ObjectModule* module, bool keep_text) {
   memset(module, 0, sizeof(*module));
+  AsmModuleInit(&module->program, AARCH64ProgramTargetOps());
+  module->program.keep_text = keep_text;
+}
+
+bool AARCH64ObjectModuleOpen(AARCH64ObjectModule* module, String* src_file,
+                             String* object_file, bool pic) {
   StringInit(&module->object_file, object_file->value);
   StringInit(&module->src_file, src_file->value);
   module->pic = pic;
-  AsmModuleInit(&module->program, AARCH64ProgramTargetOps());
 
   String empty;
   StringInit(&empty, "");
@@ -39,15 +43,18 @@ bool AARCH64ObjectModuleInit(AARCH64ObjectModule* module, String* src_file,
                                                src_file->value, &empty,
                                                object_file)) {
     StringDestruct(&empty);
-    AARCH64ObjectModuleDestruct(module);
     return false;
   }
   module->owns_assembler = true;
   StringDestruct(&empty);
   module->assembler.base.object.pic = pic;
 
+  // The preamble lists every source file, so it can only be written once the
+  // translation unit is complete, but it has to come first.
+  size_t emitted = module->program.operations.length;
   EmitAssemblyPreambleToModule(compiler, &module->program);
   AsmModuleLabel(&module->program, ".PCbegin");
+  AsmModuleMoveOperationsToFront(&module->program, emitted);
   return true;
 }
 
@@ -91,26 +98,57 @@ static String* AARCH64ProgramOutputFilename(Compiler* compiler,
   return filename;
 }
 
+// Emits the function and deletes its generator: the program owns copies of
+// everything it needs.
+static void AARCH64EmitGeneratedFunction(Compiler* compiler,
+                                         AARCH64Generator* generator,
+                                         AsmModule* program) {
+  if (compiler->print_back_end) {
+    AARCH64Emitter debug_emitter;
+    AARCH64EmitterInit(&debug_emitter, generator);
+    AARCH64EmitFunction(&debug_emitter, stdout);
+    AARCH64EmitterDestruct(&debug_emitter);
+  }
+  AARCH64Emitter emitter;
+  AARCH64EmitterInit(&emitter, generator);
+  AARCH64EmitFunctionToModule(&emitter, program);
+  AARCH64EmitterDestruct(&emitter);
+  AARCH64GeneratorDelete(generator);
+}
+
+static void DeleteFunctionStream(void* stream) {
+  AARCH64ObjectModuleDestruct(stream);
+  free(stream);
+}
+
+bool AARCH64StreamFunction(Compiler* compiler, void* code) {
+  AARCH64ObjectModule* module = compiler->function_stream;
+  if (module == NULL) {
+    module = malloc(sizeof(*module));
+    if (module == NULL) {
+      return false;
+    }
+    AARCH64ObjectModuleStart(
+        module, compiler->assembly_output || compiler->keep_asm_file);
+    compiler->function_stream = module;
+    compiler->function_stream_delete = DeleteFunctionStream;
+  }
+  if (module->program.failed) {
+    AARCH64GeneratorDelete(code);
+  } else {
+    AARCH64EmitGeneratedFunction(compiler, code, &module->program);
+  }
+  return true;
+}
+
 static bool AARCH64BuildProgram(Compiler* compiler,
                                 AARCH64ObjectModule* module) {
-  bool ok = true;
+  bool ok = !module->program.failed;
   for (size_t i = 0; i < compiler->functions.length && ok; i++) {
-    AARCH64Generator* generator = compiler->functions.value.p[i];
-    if (compiler->print_back_end) {
-      AARCH64Emitter debug_emitter;
-      AARCH64EmitterInit(&debug_emitter, generator);
-      AARCH64EmitFunction(&debug_emitter, stdout);
-      AARCH64EmitterDestruct(&debug_emitter);
-    }
-    AARCH64Emitter emitter;
-    AARCH64EmitterInit(&emitter, generator);
-    AARCH64EmitFunctionToModule(&emitter, &module->program);
-    AARCH64EmitterDestruct(&emitter);
-    ok = !module->program.failed;
-    // The module owns copies of everything it needs, so the generator can go
-    // now rather than staying live through assembly.
-    AARCH64GeneratorDelete(generator);
+    AARCH64EmitGeneratedFunction(compiler, compiler->functions.value.p[i],
+                                 &module->program);
     compiler->functions.value.p[i] = NULL;
+    ok = !module->program.failed;
   }
   AARCH64EmitCXXAdjustorThunksToModule(&module->program);
   ok = ok && EmitTranslationUnitRemainderToModule(compiler,
@@ -150,43 +188,40 @@ String* AARCH64EmitProgramFile(Compiler* compiler, Vector* options,
   String null_output;
   StringInit(&null_output, "/dev/null");
   String* assembler_output = assembly_only ? &null_output : result;
-  AARCH64ObjectModule module;
-  if (!AARCH64ObjectModuleInit(&module, &compiler->infile, assembler_output,
-                               compiler->pic)) {
-    StringDestruct(&null_output);
-    StringDelete(result);
-    return NULL;
-  }
-  module.program.keep_text = assembly_only || compiler->keep_asm_file;
-
-  bool ok = AARCH64BuildProgram(compiler, &module);
-  if (!ok) {
-    AARCH64ObjectModuleDestruct(&module);
-    StringDestruct(&null_output);
-    StringDelete(result);
-    return NULL;
-  }
-
-  if (assembly_only) {
-    ok = AARCH64WriteProgramAssembly(&module, result);
+  AARCH64ObjectModule local_module;
+  AARCH64ObjectModule* module = compiler->function_stream;
+  if (module != NULL) {
+    compiler->function_stream = NULL;
+    compiler->function_stream_delete = NULL;
   } else {
+    module = &local_module;
+    AARCH64ObjectModuleStart(module, assembly_only || compiler->keep_asm_file);
+  }
+
+  bool ok = AARCH64ObjectModuleOpen(module, &compiler->infile, assembler_output,
+                                    compiler->pic) &&
+            AARCH64BuildProgram(compiler, module);
+  if (ok && assembly_only) {
+    ok = AARCH64WriteProgramAssembly(module, result);
+  } else if (ok) {
     if (compiler->keep_asm_file) {
       String asm_filename;
       StringInit(&asm_filename, compiler->infile.value);
       ReplaceSourceExtension(&asm_filename, ".s");
-      ok = AARCH64WriteProgramAssembly(&module, &asm_filename);
+      ok = AARCH64WriteProgramAssembly(module, &asm_filename);
       StringDestruct(&asm_filename);
     }
-    ok = ok && AARCH64ObjectModuleFinalize(&module);
+    ok = ok && AARCH64ObjectModuleFinalize(module);
   }
+  AARCH64ObjectModuleDestruct(module);
+  if (module != &local_module) {
+    free(module);
+  }
+  StringDestruct(&null_output);
   if (!ok) {
-    AARCH64ObjectModuleDestruct(&module);
-    StringDestruct(&null_output);
     StringDelete(result);
     return NULL;
   }
-  AARCH64ObjectModuleDestruct(&module);
-  StringDestruct(&null_output);
   return result;
 }
 

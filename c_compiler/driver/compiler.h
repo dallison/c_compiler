@@ -294,6 +294,11 @@ typedef struct {
   String* (*emit_program_file)(struct Compiler* compiler, Vector* options,
                                bool assembly_only);
   String* (*emit_object_file)(struct Compiler* compiler, Vector* options);
+  // Optional.  Takes a function's code as soon as it is generated and lowers
+  // it into the program emit_program_file writes, so the code does not stay
+  // live for the rest of the translation unit.  Returns false to leave the
+  // code in Compiler.functions instead.
+  bool (*stream_function)(struct Compiler* compiler, void* code);
 
   // Assembly language emitter.  The 'code' parameter is the return value from
   // the 'codegen' functions.
@@ -457,6 +462,10 @@ typedef struct Compiler {
 
   // Vector containing all the code for all functions.
   Vector functions;
+  // The program the target's stream_function lowers functions into, and how
+  // to release it if the translation unit is never emitted.
+  void* function_stream;
+  void (*function_stream_delete)(void* stream);
   // Mangled names whose function bodies have already reached code generation.
   // Retained across draining template-instantiation queues to prevent emitting
   // the same specialization more than once.
@@ -578,6 +587,7 @@ typedef struct Compiler {
   bool print_back_end;
   bool print_preprocessor;
   bool keep_asm_file;
+  bool assembly_output;  // -S: write assembly instead of an object.
   bool save_ir;
   bool save_ast;
   bool listing_enabled;

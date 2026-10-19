@@ -536,6 +536,24 @@ void AsmModuleText(AsmModule* module, const char* name, const char* text,
   }
 }
 
+void AsmModuleMoveOperationsToFront(AsmModule* module, size_t first) {
+  size_t length = module->operations.length;
+  if (first == 0 || first >= length) {
+    return;
+  }
+  size_t moved = length - first;
+  void** ops = module->operations.value.p;
+  void** tail = malloc(moved * sizeof(*tail));
+  if (tail == NULL) {
+    module->failed = true;
+    return;
+  }
+  memcpy(tail, ops + first, moved * sizeof(*tail));
+  memmove(ops + moved, ops, first * sizeof(*ops));
+  memcpy(ops, tail, moved * sizeof(*tail));
+  free(tail);
+}
+
 AssemblerSymbol* AsmModuleFindSymbol(Assembler* assembler,
                                      const char* interned_name) {
   NameSymbolCache* cache = NameCacheOf(interned_name);

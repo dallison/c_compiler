@@ -203,6 +203,10 @@ void AsmModuleInstruction(AsmModule* module, void* instruction);
 void AsmModuleText(AsmModule* module, const char* name, const char* text,
                    size_t length);
 
+// Moves the operations recorded from index `first` on ahead of the earlier
+// ones, keeping the order within each group.
+void AsmModuleMoveOperationsToFront(AsmModule* module, size_t first);
+
 // Replay the retained operations for the assembler's current pass.  Symbols
 // it creates borrow the module's interned names, so `module` must outlive
 // `assembler`'s symbols.
