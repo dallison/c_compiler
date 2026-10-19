@@ -589,8 +589,7 @@ static void FinishAutoLambdaCaptureFields(CompoundLiteralASTNode* node) {
                                                 TypeRecordCopy(concrete))
                                  : TypeRecordCopy(concrete);
     TypeRecordCalculateSize(field_type);
-    TypeRecordDelete(member->symbol->type);
-    member->symbol->type = field_type;
+    SymbolSetType(member->symbol, field_type);
     changed = true;
   }
   if (changed) {

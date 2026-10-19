@@ -179,7 +179,7 @@ static TypeRecord* MetaTraitRecoverTemplateIdType(TypeRecord* type) {
       if (TypeIsReference(type)) {
         TypeRecord* ref = TypeRecordCopy(type);
         TypeRecordDelete(ref->next);
-        ref->next = rebuilt;
+        ref->next = TypeRecordAdopt(rebuilt);
         TypeRecordDelete(type);
         return TypeRecordCalculateSize(ref);
       }
@@ -224,7 +224,7 @@ static TypeRecord* MetaTraitRecoverQueryType(TypeRecord* type,
       if (TypeIsReference(type)) {
         TypeRecord* ref = TypeRecordCopy(type);
         TypeRecordDelete(ref->next);
-        ref->next = rebuilt;
+        ref->next = TypeRecordAdopt(rebuilt);
         return TypeRecordCalculateSize(ref);
       }
       return rebuilt;
@@ -682,7 +682,7 @@ static TypeRecord* MetaTraitRecoverConcreteQueryType(TypeRecord* object_type,
       if (object_type != NULL && TypeIsReference(object_type)) {
         TypeRecord* ref = TypeRecordCopy(object_type);
         TypeRecordDelete(ref->next);
-        ref->next = rebuilt;
+        ref->next = TypeRecordAdopt(rebuilt);
         return TypeRecordCalculateSize(ref);
       }
       return rebuilt;
@@ -1874,7 +1874,6 @@ static TypeRecord* MetaTraitAddPointer(TypeRecord* type) {
     return TypeRecordCalculateSize(fn_ptr);
   }
   TypeRecord* pointer = NewPointerTo(kQualPlain, decayed);
-  TypeRecordDelete(decayed);
   return TypeRecordCalculateSize(pointer);
 }
 
@@ -2187,7 +2186,7 @@ static TypeRecord* MetaTraitMaterializeQueryType(TypeRecord* object_type) {
   if (TypeIsReference(object_type)) {
     TypeRecord* ref = TypeRecordCopy(object_type);
     TypeRecordDelete(ref->next);
-    ref->next = materialized;
+    ref->next = TypeRecordAdopt(materialized);
     return TypeRecordCalculateSize(ref);
   }
   return materialized;

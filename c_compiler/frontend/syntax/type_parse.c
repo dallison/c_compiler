@@ -3783,7 +3783,6 @@ static void ResolveOutOfLineDependentReturnType(TypeParser* parser) {
                          (kQualConst | kQualVolatile | kQualRestrict);
   TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
   SetQualifiers(resolved, GetQualifiers(resolved) | GetQualifiers(type));
-  TypeRecordDelete(parser->base_type);
   parser->base_type = resolved;
   SetQualifiers(parser->base_type,
                 GetQualifiers(parser->base_type) | preserved);
@@ -4270,8 +4269,8 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
 
   int index = syntax->current_template_parameter_count +
               (int)func->info.function.template_parameters.length;
-  TypeRecord* placeholder =
-      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, placeholder_qualifiers);
+  TypeRecord* placeholder = TypeRecordAdopt(
+      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, placeholder_qualifiers));
   placeholder->template_parameter_index = index;
   placeholder->template_parameter_name = NewString("auto");
   Symbol* formal = TypeParserParseDeclarator(proto_parser, placeholder);
@@ -4299,9 +4298,9 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
         func, NewConceptIdConstraint(concept_symbol, concept_arguments,
                                      constraint_location));
   }
+  TypeRecordDelete(placeholder);
   func->info.function.template_parameter_count =
       (int)func->info.function.template_parameters.length;
-  TypeRecordDelete(placeholder);
   return true;
 }
 
@@ -4639,7 +4638,6 @@ static TypeRecord* ParseCXXTrailingReturnType(TypeParser* parser) {
   if (parsed != NULL) {
     TypeRecord* result = TypeRecordCopy(parsed->type);
     SymbolDelete(parsed);
-    TypeRecordDelete(return_type);
     return result;
   }
   if (return_type == NULL) {

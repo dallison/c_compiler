@@ -125,7 +125,6 @@ static TypeRecord* ParseTemplateTypeDefault(Syntax* syntax) {
   if (sym != NULL) {
     TypeRecord* result = TypeRecordCopy(sym->type);
     SymbolDelete(sym);
-    TypeRecordDelete(type);
     return result;
   }
   return type;
@@ -340,8 +339,8 @@ static void ParseConstrainedTypeTemplateParameter(
     return;
   }
 
-  TypeRecord* placeholder =
-      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+  TypeRecord* placeholder = TypeRecordAdopt(
+      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
   placeholder->template_parameter_index = index;
   placeholder->template_parameter_name = NewString(lex->spelling.value);
   DeclareConstrainedTemplateParameterSymbol(syntax, placeholder,
@@ -357,7 +356,7 @@ static void ParseConstrainedTypeTemplateParameter(
     if (is_parameter_pack) {
       SyntaxError(syntax, "Template parameter pack cannot have a default");
     }
-    default_type = ParseTemplateTypeDefault(syntax);
+    default_type = TypeRecordAdopt(ParseTemplateTypeDefault(syntax));
   }
 
   TemplateParameter* template_param =

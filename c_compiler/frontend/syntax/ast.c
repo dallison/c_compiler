@@ -2167,6 +2167,7 @@ static ASTNode* SizeofASTNodeClone(const ASTNode* node,
   SizeofASTNode* from = (SizeofASTNode*)node;
   SizeofASTNode* to = ASTArenaAlloc(sizeof(SizeofASTNode));
   memcpy(&to->base, &from->base, sizeof(to->base));
+  TypeRecordIncRef(to->base.base.type);
   to->expr = ASTNodeClone(from->expr, func, data, &to->base.base);
   to->type_operand = from->type_operand;
   if (to->type_operand != NULL) {
@@ -2302,6 +2303,7 @@ static ASTNode* TypeidASTNodeClone(const ASTNode* node,
   TypeidASTNode* from = (TypeidASTNode*)node;
   TypeidASTNode* to = ASTArenaAlloc(sizeof(TypeidASTNode));
   memcpy(&to->base, &from->base, sizeof(to->base));
+  TypeRecordIncRef(to->base.type);
   to->expr = from->expr != NULL ? ASTNodeClone(from->expr, func, data, &to->base)
                                 : NULL;
   to->operand_type = from->operand_type;
@@ -4080,6 +4082,7 @@ ASTNode* NewStructuredBindingASTNode(TypeRecord* declared_type, Storage storage,
   ASTNodeInit(&node->base, AST_OP(structured_binding), declared_type, location,
               &structured_binding_vtbl);
   node->declared_type = declared_type;
+  TypeRecordIncRef(declared_type);
   node->storage = storage;
   node->names = names;
   node->symbols = symbols;

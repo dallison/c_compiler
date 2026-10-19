@@ -889,7 +889,6 @@ ASTNode* SemanticAnalyzeSplice(SpliceASTNode* node) {
                      NewTypeRecordWithSize(kTypeInt, kQualPlain));
     } else {
       ASTNodeSetType((ASTNode*)node, type);
-      TypeRecordDelete(type);
     }
     node->base.flags |= kASTAnalyzed;
     return (ASTNode*)node;
@@ -923,7 +922,6 @@ ASTNode* SemanticAnalyzeSplice(SpliceASTNode* node) {
       value->symbol, result != NULL ? result->type : NULL);
   if (contract_view != NULL) {
     ASTNodeSetType(result, contract_view);
-    TypeRecordDelete(contract_view);
   }
   return result;
 }

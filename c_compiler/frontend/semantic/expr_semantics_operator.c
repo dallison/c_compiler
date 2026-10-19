@@ -808,7 +808,6 @@ static void InsertNumericConversionsApplyUsualArithmeticConversions(
     TypeRecord* unqualified = TypeRecordCopy(node->base.type);
     SetQualifiers(unqualified, kQualPlain);
     ASTNodeSetType((ASTNode*)node, unqualified);
-    TypeRecordDelete(unqualified);
   }
 }
 
@@ -1846,7 +1845,6 @@ ASTNode* TryAnalyzeOverloadedBinaryOperatorWithAnalyzedOperands(
         TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
         ASTNode* discarded = NewIntConstantASTNode(
             left_truth != 0 ? 1 : 0, bool_type, node->base.location);
-        TypeRecordDelete(bool_type);
         ASTNodeReplaceChild((ASTNode*)node, 1, discarded, true);
         return NULL;
       }
@@ -2780,14 +2778,12 @@ static bool TryAnalyzeConditionalFunctionPointer(BinaryASTNode* node,
   }
 
   TypeRecord* common_type = NULL;
-  bool owns_common_type = false;
   if (left_kind == kConditionalFunctionArmFunctionPointer) {
     common_type = colon->left->type;
   } else if (right_kind == kConditionalFunctionArmFunctionPointer) {
     common_type = colon->right->type;
   } else {
     common_type = NewPointerTo(kQualPlain, common_function);
-    owns_common_type = true;
   }
 
   if (left_kind == kConditionalFunctionArmFunction) {
@@ -2800,14 +2796,11 @@ static bool TryAnalyzeConditionalFunctionPointer(BinaryASTNode* node,
   ASTNodeSetType(colon->right, common_type);
   ASTNodeSetType((ASTNode*)colon, common_type);
   ASTNodeSetType((ASTNode*)node, colon->base.type);
-  if (owns_common_type) {
-    TypeRecordDelete(common_type);
-  }
   return true;
 }
 
 // Contract: C-only composite pointer type for object pointers; sets prvalue types
-// on colon/`?` nodes. Allocates/deletes temporary result type record.
+// on colon/`?` nodes.
 static bool TryAnalyzeCConditionalObjectPointers(BinaryASTNode* node,
                                                  BinaryASTNode* colon) {
   if (CompilerIsCXX() ||
@@ -2836,13 +2829,12 @@ static bool TryAnalyzeCConditionalObjectPointers(BinaryASTNode* node,
   SetQualifiers(
       pointee,
       (GetQualifiers(left_pointee) | GetQualifiers(right_pointee)) & cv_mask);
-  // The pointer owns the pointee from here on, so only the pointer is released.
+  // The pointer owns the pointee from here on.
   TypeRecord* result = NewPointerTo(kQualPlain, pointee);
   ASTNodeSetType((ASTNode*)colon, result);
   ASTNodeSetType((ASTNode*)node, result);
   colon->base.value_category = kValueCategoryPrvalue;
   node->base.value_category = kValueCategoryPrvalue;
-  TypeRecordDelete(result);
   return true;
 }
 
@@ -2938,7 +2930,6 @@ static bool AnalyzeConditionalExpressionPhaseColonArms(
       type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
       ASTNodeSetType((ASTNode*)colon, type);
       ASTNodeSetType((ASTNode*)node, type);
-      TypeRecordDelete(type);
       return true;
     }
     ASTNodeSetType((ASTNode*)colon, type);
@@ -3037,7 +3028,6 @@ static bool AnalyzeConditionalExpressionPhaseClassArmConversions(
     ASTNodeSetType((ASTNode*)node, colon->base.type);
     colon->base.value_category = kValueCategoryPrvalue;
     node->base.value_category = kValueCategoryPrvalue;
-    TypeRecordDelete(result_type);
     return true;
   }
   // Conversion functions, not only converting constructors:
@@ -3055,7 +3045,6 @@ static bool AnalyzeConditionalExpressionPhaseClassArmConversions(
     ASTNodeSetType((ASTNode*)node, colon->base.type);
     colon->base.value_category = kValueCategoryPrvalue;
     node->base.value_category = kValueCategoryPrvalue;
-    TypeRecordDelete(result_type);
     return true;
   }
   return false;
@@ -3108,7 +3097,6 @@ static bool AnalyzeConditionalExpressionPhaseSameClassPrvalueInit(
   SetQualifiers(result_type, kQualPlain);
   ASTNodeSetType((ASTNode*)colon, result_type);
   ASTNodeSetType((ASTNode*)node, colon->base.type);
-  TypeRecordDelete(result_type);
   return true;
 }
 
@@ -3125,7 +3113,6 @@ static bool AnalyzeConditionalExpressionPhaseCSameStruct(BinaryASTNode* node,
   SetQualifiers(result_type, kQualPlain);
   ASTNodeSetType((ASTNode*)colon, result_type);
   ASTNodeSetType((ASTNode*)node, colon->base.type);
-  TypeRecordDelete(result_type);
   colon->base.value_category = kValueCategoryPrvalue;
   node->base.value_category = kValueCategoryPrvalue;
   return true;
@@ -3161,7 +3148,6 @@ static bool AnalyzeConditionalExpressionPhaseMemberPointerAndMixedPointer(
     ASTNodeSetType((ASTNode*)node, result);
     colon->base.value_category = kValueCategoryPrvalue;
     node->base.value_category = kValueCategoryPrvalue;
-    TypeRecordDelete(result);
     return true;
   }
   if (!(CompilerIsCXX() &&
@@ -3206,7 +3192,6 @@ static bool AnalyzeConditionalExpressionPhaseMemberPointerAndMixedPointer(
       ASTNodeSetType((ASTNode*)node, result);
       colon->base.value_category = kValueCategoryPrvalue;
       node->base.value_category = kValueCategoryPrvalue;
-      TypeRecordDelete(result);
       return true;
     }
   }

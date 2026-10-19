@@ -615,7 +615,7 @@ static void ApplyLocalDeclaratorSpecifiers(TypeParser* parser, Symbol* sym,
           "'constinit' variable must have static or thread storage duration");
     }
     if (sym->flags.is_constexpr && !TypeIsReference(sym->type)) {
-      sym->type = TypeRecordAddQualifiers(sym->type, kQualConst);
+      SymbolSetType(sym, TypeRecordAddQualifiers(sym->type, kQualConst));
     }
   }
   if (!StorageIs(sym->storage, STO(extern)) &&
@@ -785,7 +785,7 @@ static Symbol* ResolveLocalDeclarator(TypeParser* parser, Symbol* sym,
     if (!TypeIsFunction(sym->type) && parser->is_constexpr) {
       sym->flags.is_constexpr = true;
       if (!TypeIsReference(sym->type)) {
-        sym->type = TypeRecordAddQualifiers(sym->type, kQualConst);
+        SymbolSetType(sym, TypeRecordAddQualifiers(sym->type, kQualConst));
       }
     }
     if (!TypeIsFunction(sym->type) && parser->is_constinit) {

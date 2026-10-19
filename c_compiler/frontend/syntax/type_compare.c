@@ -880,6 +880,9 @@ static bool FunctionTemplateInstantiationMatches(Symbol* candidate,
 
 StructMember* FindMemberFunctionTemplateSpecialization(StructMember* first,
                                                        TypeRecord* type) {
+  if (type == NULL || !TypeIsFunction(type)) {
+    return NULL;
+  }
   for (StructMember* overload = first; overload != NULL;
        overload = overload->overload_next) {
     if (overload->symbol == NULL || overload->symbol->flags.is_template ||

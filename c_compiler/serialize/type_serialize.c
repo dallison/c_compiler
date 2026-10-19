@@ -499,9 +499,11 @@ static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
         break;
       case kTParam_type:
         p->type = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        TypeRecordIncRef(p->type);
         break;
       case kTParam_default_type:
         p->default_type = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        TypeRecordIncRef(p->default_type);
         break;
       case kTParam_has_default_int:
         WireReadBool(in, &p->has_default_int);
@@ -728,6 +730,7 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         break;
       case kTArg_type:
         a->type = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        TypeRecordIncRef(a->type);
         break;
       case kTArg_int_value:
         WireReadInt64(in, &a->int_value);
@@ -1692,6 +1695,7 @@ static void ReadBaseVector(DeserializeContext* ctx, WireBuffer* in,
       switch (field) {
         case kBase_type:
           b->type = (TypeRecord*)SReadRef(ctx, &er, kSerialKindType);
+          TypeRecordIncRef(b->type);
           break;
         case kBase_access: {
           int32_t v;

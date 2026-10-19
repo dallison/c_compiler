@@ -1388,7 +1388,6 @@ ASTNode* ParseIdentifier(Syntax* syntax,
       TypeRecordSetStructInfo(owner_type, functional_constructor_owner);
       TypeRecordCalculateSize(owner_type);
       ASTNodeSetType(node, owner_type);
-      TypeRecordDelete(owner_type);
     }
   }
   ((IdentifierASTNode*)node)->template_arguments = template_arguments;

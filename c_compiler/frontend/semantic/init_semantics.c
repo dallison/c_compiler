@@ -1595,7 +1595,7 @@ static ASTNode* CXXSingleSameClassElement(INode* inode,
   if (required) {
     compiler->constant_evaluation_required_depth--;
   }
-  expr_init->expr = expr;
+  ASTNodeReplaceChild((ASTNode*)expr_init, 0, expr, false);
   if (expr->type == NULL || !TypeIsStructOrUnion(expr->type)) {
     return NULL;
   }

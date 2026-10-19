@@ -2518,9 +2518,10 @@ static bool IsMemberTemplateCallWithDependentExplicitArgs(VectorASTNode* node) {
 static void SetDependentMemberTemplateCallType(VectorASTNode* node) {
   BinaryASTNode* access = (BinaryASTNode*)node->left;
   StructMemberASTNode* member_node = (StructMemberASTNode*)access->right;
-  TypeRecord* return_type = TypeSubstituteFunctionTemplateReturnType(
-      &compiler->syntax, member_node->member->symbol,
-      member_node->template_arguments);
+  TypeRecord* return_type =
+      TypeRecordAdopt(TypeSubstituteFunctionTemplateReturnType(
+          &compiler->syntax, member_node->member->symbol,
+          member_node->template_arguments));
   if (return_type == NULL) {
     ASTNodeSetType((ASTNode*)node,
                    NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
@@ -3194,8 +3195,8 @@ static bool FunctionCallTryAssignDependentTemplateCalleeType(
   }
   if (node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
-    TypeRecord* return_type = TypeSubstituteFunctionTemplateReturnType(
-        &compiler->syntax, id->symbol, id->template_arguments);
+    TypeRecord* return_type = TypeRecordAdopt(TypeSubstituteFunctionTemplateReturnType(
+        &compiler->syntax, id->symbol, id->template_arguments));
     if (return_type != NULL) {
       bool result_is_concrete =
           !TypeContainsTemplateParameter(return_type) &&
@@ -3269,8 +3270,8 @@ static ASTNode* FunctionCallResolveCalleeAndTemplates(VectorASTNode* node,
            id->template_arguments) ||
        dependent_signature)) {
     node->base.flags |= kASTDependentFunctorCall;
-    TypeRecord* return_type = TypeSubstituteFunctionTemplateReturnType(
-        &compiler->syntax, id->symbol, id->template_arguments);
+    TypeRecord* return_type = TypeRecordAdopt(TypeSubstituteFunctionTemplateReturnType(
+        &compiler->syntax, id->symbol, id->template_arguments));
     if (return_type == NULL) {
       ASTNodeSetType((ASTNode*)node,
                      NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
@@ -3281,10 +3282,10 @@ static ASTNode* FunctionCallResolveCalleeAndTemplates(VectorASTNode* node,
           return_type->declarator == kDeclRValueReference
               ? kValueCategoryXvalue
               : kValueCategoryLvalue;
-      TypeRecordDelete(return_type);
     } else {
       ASTNodeSetType((ASTNode*)node, return_type);
     }
+    TypeRecordDelete(return_type);
     return (ASTNode*)node;
   }
   if (TypeIsFunction(id->symbol->type) &&

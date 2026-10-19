@@ -2978,7 +2978,7 @@ static TypeRecord* SubstituteOriginalSpineNext(TypeParser* parser,
 static void AttachSubstitutedSpineNext(TypeParser* parser, TypeRecord* copy,
                                        TypeRecord* next) {
   TypeRecordDelete(copy->next);
-  copy->next = next;
+  copy->next = TypeRecordAdopt(next);
   if (copy->next == NULL) {
     return;
   }

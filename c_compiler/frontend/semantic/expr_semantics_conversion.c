@@ -1455,7 +1455,6 @@ bool CXXTryConvertStdVectorToSpan(ASTNode* from, TypeRecord* to) {
   ASTNode* braced =
       NewBracedInitializerASTNode(elements, span_type, location);
   ASTNode* lowered = LowerCXXBracedInitToTarget(braced, span_type);
-  TypeRecordDelete(span_type);
   if (lowered == NULL || lowered == braced) {
     return false;
   }

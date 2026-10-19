@@ -1957,7 +1957,7 @@ static void AddExpansionStructuredBindingVariables(Syntax* syntax,
     sym->flags.is_constexpr = binding->is_constexpr;
     if (binding->is_constexpr && sym->type != NULL &&
         !TypeIsReference(sym->type)) {
-      sym->type = TypeRecordAddQualifiers(sym->type, kQualConst);
+      SymbolSetType(sym, TypeRecordAddQualifiers(sym->type, kQualConst));
     }
     sym->structured_binding_pack_size = -1;
     AddRangeForVariable(syntax, sym);

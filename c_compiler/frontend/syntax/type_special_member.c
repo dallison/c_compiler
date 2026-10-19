@@ -1306,7 +1306,8 @@ static void AppendCXXThreeWayComparisons(TypeParser* parser,
       return;
     }
     category = TypeRecordCalculateSize(TypeRecordCopy(deduced));
-    func->next = category;
+    TypeRecordDelete(func->next);
+    TypeRecordChain(func, category);
   }
   bool is_partial = CXXCategoryIsPartial(category);
 

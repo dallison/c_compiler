@@ -534,7 +534,7 @@ static ASTNode* DispatchExpressionInitializers(ASTNode* node,
   switch (op) {
     case AST_OP(init):
       if ((node->flags & kASTValueInitMemzero) != 0) {
-        binary->left = AnalyzeExpression(binary->left);
+        ASTNodeReplaceChild(node, 0, AnalyzeExpression(binary->left), false);
         if (binary->left != NULL) {
           binary->left->flags |= kASTNeedAddress;
           if (node->type == NULL) {
@@ -557,13 +557,13 @@ static ASTNode* DispatchExpressionInitializers(ASTNode* node,
           }
           return analyzed;
         }
-        binary->right = analyzed;
+        ASTNodeReplaceChild(node, 1, analyzed, false);
       }
       return node;
     case AST_OP(expr_init): {
       ExpressionInitializerASTNode* expr_init =
           (ExpressionInitializerASTNode*)node;
-      expr_init->expr = AnalyzeExpression(expr_init->expr);
+      ASTNodeReplaceChild(node, 0, AnalyzeExpression(expr_init->expr), false);
       if (expr_init->expr == NULL) {
         *node_inout = node;
         *finished = true;
@@ -1157,7 +1157,7 @@ static void RefreshStaleIdentifierType(ASTNode* node) {
 
 // Entry: stale is_same_v refresh, analyzed guard, pre-dispatch, category opcode
 // dispatch, then post-process unless dispatch set finished (legacy in-switch return).
-ASTNode* AnalyzeExpression(ASTNode* node) {
+static ASTNode* AnalyzeExpressionNode(ASTNode* node) {
   RefreshStaleIdentifierType(node);
   if (node != NULL && (node->flags & kASTAnalyzed) != 0 &&
       node->op == AST_OP(identifier)) {
@@ -1185,4 +1185,20 @@ ASTNode* AnalyzeExpression(ASTNode* node) {
   }
 
   return AnalyzeExpressionPostProcess(node);
+}
+
+// Callers store the result in `node`'s slot (`slot = AnalyzeExpression(slot)`).
+// A replacement that analysis did not link anywhere takes over that slot's
+// parent link, so ASTNodeMove on it detaches it from the parent instead of
+// leaving the parent owning it too.
+ASTNode* AnalyzeExpression(ASTNode* node) {
+  ASTNode* parent = node != NULL ? node->parent : NULL;
+  int child_id = node != NULL ? node->child_id : 0;
+  ASTNode* result = AnalyzeExpressionNode(node);
+  if (result != NULL && result != node && result->parent == NULL &&
+      parent != NULL) {
+    result->parent = parent;
+    result->child_id = child_id;
+  }
+  return result;
 }

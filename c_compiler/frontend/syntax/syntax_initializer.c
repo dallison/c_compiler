@@ -724,7 +724,6 @@ static bool ResolveCXXClassTemplateArgumentDeduction(Syntax* syntax,
     return false;
   }
   SymbolSetType(sym, deduced);
-  TypeRecordDelete(deduced);
   return true;
 }
 

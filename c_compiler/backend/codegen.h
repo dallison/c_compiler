@@ -117,6 +117,10 @@ typedef struct Generator {
   // p-code lowering temporarily switches compiler->target to p-code, but the
   // already-analyzed object layouts still use this original width.
   int source_pointer_size;
+
+  // Type of the 64-bit words of __int128 values, created on first use.  The
+  // generator holds one reference.
+  TypeRecord* int128_word;
 } Generator;
 
 void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func);

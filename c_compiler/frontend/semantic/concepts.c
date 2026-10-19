@@ -3228,7 +3228,6 @@ ASTNode* ConceptsParseDefinition(Syntax* syntax,
   ConstraintExpr* constraint = ParseConceptConstraint(syntax, concept_location);
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
   Symbol* symbol = NewSymbol(name.value, bool_type, STO(implicit));
-  TypeRecordDelete(bool_type);
   symbol->location = name_location;
   symbol->flags.is_concept = true;
   symbol->flags.is_template = true;

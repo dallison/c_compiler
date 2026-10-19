@@ -292,6 +292,27 @@ static bool ParentSlotHoldsNode(ASTNode* parent, int child_id, ASTNode* node) {
       ExpressionStatementASTNode* stmt = (ExpressionStatementASTNode*)parent;
       return child_id == 0 && stmt->expr == node;
     }
+    case kASTShapeStaticAssert: {
+      StaticAssertASTNode* assert_node = (StaticAssertASTNode*)parent;
+      return (child_id == 0 && assert_node->expr == node) ||
+             (child_id == 1 && assert_node->message_expr == node);
+    }
+    case kASTShapeVector: {
+      Vector* children = ((VectorASTNode*)parent)->children;
+      return children != NULL && child_id >= 0 &&
+             (size_t)child_id < children->length &&
+             children->value.p[child_id] == node;
+    }
+    case kASTShapeCast:
+      return ((CastASTNode*)parent)->expr == node;
+    case kASTShapeExprInit:
+      return ((ExpressionInitializerASTNode*)parent)->expr == node;
+    case kASTShapeBracedInit: {
+      Vector* initializers = ((BracedInitializerASTNode*)parent)->initializers;
+      return initializers != NULL && child_id >= 0 &&
+             (size_t)child_id < initializers->length &&
+             initializers->value.p[child_id] == node;
+    }
     default:
       return true;
   }
@@ -301,7 +322,6 @@ static bool ParentSlotHoldsNode(ASTNode* parent, int child_id, ASTNode* node) {
 static ASTNode* CXXNewBoolConstantReplacing(ASTNode* node, int64_t same) {
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
   ASTNode* const_node = NewIntConstantASTNode(same, bool_type, node->location);
-  TypeRecordDelete(bool_type);
   if (node->parent != NULL &&
       ParentSlotHoldsNode(node->parent, node->child_id, node)) {
     ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
@@ -1261,8 +1281,8 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
       TemplateArgumentVectorContainsTemplateParameter(template_args)) {
     return NULL;
   }
-  TypeRecord* concrete = TypeInstantiateVariableTemplateDeducedType(
-      &compiler->syntax, var_sym, template_args);
+  TypeRecord* concrete = TypeRecordAdopt(TypeInstantiateVariableTemplateDeducedType(
+      &compiler->syntax, var_sym, template_args));
   if (concrete != NULL && var_sym->type != NULL &&
       TypeContainsAuto(var_sym->type) && !TypeIsMemberPointer(concrete)) {
     TypeRecordDelete(concrete);
@@ -1272,7 +1292,9 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
   if (concrete != NULL && TypeIsIntegral(concrete) &&
       TypeInstantiateVariableTemplateConstant(&compiler->syntax, var_sym,
                                               template_args, &value)) {
-    return NewIntConstantASTNode(value, concrete, location);
+    ASTNode* constant = NewIntConstantASTNode(value, concrete, location);
+    TypeRecordDelete(concrete);
+    return constant;
   }
   if (StringEqual(&var_sym->name, "is_same_v") ||
       StringEqual(&var_sym->name, "is_base_of_v")) {
@@ -1293,7 +1315,10 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
   if (concrete != NULL && TypeIsFloatingPoint(concrete) &&
       TypeInstantiateVariableTemplateFloatingConstant(
           &compiler->syntax, var_sym, template_args, &floating_value)) {
-    return NewRealConstantASTNode(floating_value, concrete, location);
+    ASTNode* constant =
+        NewRealConstantASTNode(floating_value, concrete, location);
+    TypeRecordDelete(concrete);
+    return constant;
   }
   if (concrete != NULL && TypeUsesLongDoubleRepresentation(concrete) &&
       (GetQualifiers(concrete) & kQualConst) != 0) {
@@ -1305,7 +1330,6 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
     if (initializer != NULL) {
       TypeRecord* value_type = CXXVariableTemplateValueType(concrete);
       ASTNode* cast = NewCastASTNode(value_type, location, initializer);
-      TypeRecordDelete(value_type);
       TypeRecordDelete(concrete);
       return AnalyzeExpression(cast);
     }
@@ -1538,7 +1562,6 @@ static ASTNode* AnalyzeIdentifierFoldConceptId(IdentifierASTNode* node) {
     TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
     ASTNode* const_node =
         NewIntConstantASTNode(value != 0, bool_type, node->base.location);
-    TypeRecordDelete(bool_type);
     ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node,
                         true);
     const_node->flags |= kASTAnalyzed;
@@ -1547,7 +1570,6 @@ static ASTNode* AnalyzeIdentifierFoldConceptId(IdentifierASTNode* node) {
   if (DiagnosticsSuppressed()) {
     TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
     ASTNodeSetType(&node->base, bool_type);
-    TypeRecordDelete(bool_type);
     node->base.value_category = kValueCategoryPrvalue;
     return &node->base;
   }
@@ -1556,7 +1578,6 @@ static ASTNode* AnalyzeIdentifierFoldConceptId(IdentifierASTNode* node) {
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
   ASTNode* const_node =
       NewIntConstantASTNode(0, bool_type, node->base.location);
-  TypeRecordDelete(bool_type);
   ASTNodeReplaceChild(node->base.parent, node->base.child_id, const_node, true);
   const_node->flags |= kASTAnalyzed;
   return const_node;
@@ -1738,7 +1759,6 @@ static void AnalyzeIdentifierSetNonDeclarationType(IdentifierASTNode* node) {
       SemanticContractIdentifierViewType(node->symbol, node->base.type);
   if (contract_view != NULL) {
     ASTNodeSetType(&node->base, contract_view);
-    TypeRecordDelete(contract_view);
   }
 }
 

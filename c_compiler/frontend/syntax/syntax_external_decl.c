@@ -153,7 +153,7 @@ static bool PrepareExternalDeclaratorSymbol(TypeParser* parser, Symbol* sym,
   // `static constexpr` member, whose type is already const-qualified.
   if (!TypeIsFunction(sym->type) && !TypeIsReference(sym->type) &&
       parser->is_constexpr) {
-    sym->type = TypeRecordAddQualifiers(sym->type, kQualConst);
+    SymbolSetType(sym, TypeRecordAddQualifiers(sym->type, kQualConst));
   }
   if (TypeIsFunction(sym->type) &&
       sym->type->info.function.template_parameters.length > 0 &&
@@ -263,7 +263,8 @@ static void MatchExplicitMemberSpecialization(TypeParser* parser,
   if (matching_specialization != NULL) {
     parser->cxx_member_definition = matching_specialization;
     d->old_sym = matching_specialization->symbol;
-  } else if (sym->type->info.function.template_origin != NULL) {
+  } else if (TypeIsFunction(sym->type) &&
+             sym->type->info.function.template_origin != NULL) {
     StructMember* specialization = NewStructMember(sym);
     specialization->is_member_function = true;
     specialization->is_static = parser->cxx_member_definition->is_static;
@@ -866,7 +867,7 @@ static void ApplyExternalObjectSpecifiers(TypeParser* parser, Symbol* sym) {
       }
     }
     if (sym->flags.is_constexpr && !TypeIsReference(sym->type)) {
-      sym->type = TypeRecordAddQualifiers(sym->type, kQualConst);
+      SymbolSetType(sym, TypeRecordAddQualifiers(sym->type, kQualConst));
     }
   }
 }

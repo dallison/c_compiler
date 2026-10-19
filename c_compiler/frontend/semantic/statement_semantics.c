@@ -3641,7 +3641,6 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
   }
   if (hidden != NULL) {
     SymbolSetType(hidden, hidden_type);
-    TypeRecordDelete(hidden_type);
   } else {
     hidden = SyntaxNewTemporary(&compiler->syntax, hidden_type);
   }
@@ -4640,8 +4639,7 @@ ASTNode* SemanticCreateHiddenReferenceBinding(ASTNode* init_expr,
       !TypeIsReference(hidden->type)) {
     TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, false);
     TypeRecordChain(ref, hidden->type);
-    TypeRecordDelete(hidden->type);
-    hidden->type = ref;
+    SymbolSetType(hidden, ref);
     TypeRecordCalculateSize(hidden->type);
   }
   hidden->flags.is_local = true;

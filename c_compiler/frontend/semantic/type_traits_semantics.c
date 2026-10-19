@@ -1632,7 +1632,7 @@ static bool TypeTraitMemberPointerInvoke(Syntax* syntax, Vector* type_args,
       TypeRecord* ref = NewTypeRecord(kTypeImplicit, kQualPlain);
       ref->declarator = object_is_lvalue ? kDeclReference
                                          : kDeclRValueReference;
-      ref->next = TypeRecordCopy(pointee);
+      TypeRecordChain(ref, TypeRecordCopy(pointee));
       if (obj != NULL) {
         SetQualifiers(ref->next,
                       GetQualifiers(ref->next) |

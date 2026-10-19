@@ -1060,7 +1060,6 @@ static bool ResolveClonedTemplateTemplateParameterCTAD(
     return false;
   }
   SymbolSetType(replacement, deduced);
-  TypeRecordDelete(deduced);
   return true;
 }
 
@@ -1509,7 +1508,6 @@ static void RetargetClonedNestedConstructorReceiver(
   TypeRecord* pointer =
       NewPointerTo(kQualPlain, TypeRecordCopy(nested_member->symbol->type));
   ASTNodeSetType(receiver, pointer);
-  TypeRecordDelete(pointer);
 }
 
 /* Like SubstituteTemplateArgumentVectorForTypes but additionally rebases the
@@ -5095,7 +5093,9 @@ static void RebindClonedConcreteMemberAccess(
       if (member_node->owner_type != NULL &&
           TypeIsStructOrUnion(member_node->owner_type) &&
           member_node->owner_type->info.struct_info == source_nested) {
+        TypeRecordDelete(member_node->owner_type);
         member_node->owner_type = TypeRecordCopy(target_type);
+        TypeRecordIncRef(member_node->owner_type);
       }
       node->flags &= ~kASTAnalyzed;
     }
@@ -5140,6 +5140,7 @@ static void RebindClonedConcreteMemberAccess(
     SetQualifiers(target, GetQualifiers(member_node->owner_type));
     TypeRecordDelete(member_node->owner_type);
     member_node->owner_type = target;
+    TypeRecordIncRef(target);
     node->flags &= ~kASTAnalyzed;
   }
   if (receiver_owner != NULL &&
@@ -5477,9 +5478,7 @@ static void KeepPartialQualifiedOwnerType(StructMemberASTNode* member_node,
     return;
   }
   TypeRecordDelete(member_node->owner_type);
-  member_node->owner_type = concrete;
-  TypeRecordIncRef(member_node->owner_type);
-  TypeRecordDelete(concrete);
+  member_node->owner_type = TypeRecordAdopt(concrete);
 }
 
 static void MaterializeClonedQualifiedBaseStructMember(
@@ -5524,8 +5523,7 @@ static void MaterializeClonedQualifiedBaseStructMember(
   }
   member_node->member = resolved;
   TypeRecordDelete(member_node->owner_type);
-  member_node->owner_type = concrete;
-  TypeRecordIncRef(member_node->owner_type);
+  member_node->owner_type = TypeRecordAdopt(concrete);
   ASTNodeSetType(node, resolved->symbol->type);
   if (resolved->symbol->type != NULL &&
       TypeIsFunction(resolved->symbol->type)) {
@@ -5925,7 +5923,7 @@ static ASTNode* CloneStructuredBindingInTemplateBody(
     RebaseTemplateParameterIndices(
         declared, clone->rebase_template_parameter_base);
     TypeRecordDelete(binding->declared_type);
-    binding->declared_type = declared;
+    binding->declared_type = TypeRecordAdopt(declared);
     ASTNodeSetType(node, declared);
     node->flags &= ~kASTAnalyzed;
     if (ClonedStructuredBindingStillDependent(binding)) {
@@ -6403,7 +6401,6 @@ static ASTNode* RewriteClonedDependentDelete(
             concrete, clone->rebase_template_parameter_base);
         TypeRecordCalculateSize(concrete);
         ASTNodeSetType(expr, concrete);
-        TypeRecordDelete(concrete);
       }
       bool is_array_delete = (node->flags & kASTDependentArrayDelete) != 0;
       // Transfer the operand into the replacement tree. The old deferred call
@@ -6866,11 +6863,9 @@ static ASTNode* ApplyResolvedDependentMember(
             NewStructMemberASTNode(member, node->location);
         right->flags |= kASTQualifiedName;
         StructMemberASTNode* member_node = (StructMemberASTNode*)right;
-        member_node->owner_type = concrete;
-        TypeRecordIncRef(member_node->owner_type);
+        member_node->owner_type = TypeRecordAdopt(concrete);
         ASTNode* access = NewBinaryASTNode(AST_OP(arrow), NULL,
                                            node->location, left, right);
-        TypeRecordDelete(concrete);
         return access;
       }
     }
@@ -7330,7 +7325,6 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
                 clone->parser->syntax, id->symbol, concrete_args, &value)) {
           ASTNode* folded =
               NewIntConstantASTNode(value, concrete_type, node->location);
-          TypeRecordDelete(concrete_type);
           return folded;
         }
         double floating_value = 0;
@@ -7340,7 +7334,6 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
                 &floating_value)) {
           ASTNode* folded = NewRealConstantASTNode(floating_value, concrete_type,
                                                    node->location);
-          TypeRecordDelete(concrete_type);
           return folded;
         }
         if (concrete_type != NULL && TypeIsMemberPointer(concrete_type)) {
@@ -9467,7 +9460,6 @@ static ASTNode* ReanalyzeClonedResolvedCall(
         TypeRecord* pointer =
             NewPointerTo(kQualPlain, TypeRecordCopy(object->type));
         ASTNodeSetType(receiver, pointer);
-        TypeRecordDelete(pointer);
         receiver->flags &= ~kASTAnalyzed;
       }
     }
@@ -11878,7 +11870,7 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
       if (substituted != NULL &&
           !TypeContainsTemplateParameter(substituted)) {
         TypeRecordDelete(member->symbol->type);
-        member->symbol->type = substituted;
+        member->symbol->type = TypeRecordAdopt(substituted);
       } else {
         TypeRecordDelete(substituted);
       }

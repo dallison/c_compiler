@@ -185,11 +185,51 @@ void TypeRecordProfileReport(FILE* out, size_t limit) {
   type_copy_callers = NULL;
 }
 
+// Released arena slots, by size, linked through their `next` fields.  Records
+// are released when their last reference is dropped; the census keeps every
+// allocation distinct, so slots are not reused while it runs.
+static TypeRecord* free_short_type_records = NULL;
+static TypeRecord* free_full_type_records = NULL;
+
+#ifndef NDEBUG
+#define TYPE_ARENA_CHECKS 1
+#else
+#define TYPE_ARENA_CHECKS 0
+#endif
+// The reference count of a released record in debug builds.
+#define kTypeRecordReleasedRefs (-0x5A5A5A5A)
+
+// Aborts on a reference-count update to a released record.
+static inline void TypeArenaCheckLive(const TypeRecord* record) {
+#if TYPE_ARENA_CHECKS
+  if (record->refs == kTypeRecordReleasedRefs) {
+    abort();
+  }
+#else
+  (void)record;
+#endif
+}
+
+static TypeRecord** TypeArenaFreeList(bool full) {
+  return full ? &free_full_type_records : &free_short_type_records;
+}
+
+// Returns a zeroed slot of `bytes` (TYPE_RECORD_FULL_SIZE or
+// TYPE_RECORD_NON_FUNCTION_SIZE), reusing a released one when available.
 static TypeRecord* TypeArenaAllocSized(size_t bytes) {
-  if (bytes >= TYPE_RECORD_FULL_SIZE) {
+  bool full = bytes >= TYPE_RECORD_FULL_SIZE;
+  if (full) {
     type_alloc_full++;
   } else {
     type_alloc_short++;
+  }
+  TypeRecord** free_list = TypeArenaFreeList(full);
+  if (*free_list != NULL) {
+    TypeRecord* slot = *free_list;
+    *free_list = slot->next;
+    memset(slot, 0, bytes);
+    slot->full_slot = full;
+    return slot;
   }
   if (type_arena == NULL ||
       type_arena->used + TYPE_RECORD_FULL_SIZE > type_arena->capacity) {
@@ -197,12 +237,49 @@ static TypeRecord* TypeArenaAllocSized(size_t bytes) {
     block->next = type_arena;
     type_arena = block;
   }
-  void* p = type_arena->data + type_arena->used;
+  TypeRecord* p = (TypeRecord*)(type_arena->data + type_arena->used);
   type_arena->used += bytes;
+  p->full_slot = full;
   if (type_census_enabled) {
-    TypeCensusNoteAlloc((TypeRecord*)p, bytes);
+    TypeCensusNoteAlloc(p, bytes);
   }
-  return (TypeRecord*)p;
+  return p;
+}
+
+#if TYPE_ARENA_CHECKS
+static bool TypeArenaContains(const TypeRecord* record) {
+  for (TypeArenaBlock* block = type_arena; block != NULL; block = block->next) {
+    if ((const char*)record >= block->data &&
+        (const char*)record < block->data + block->used) {
+      return true;
+    }
+  }
+  return false;
+}
+#endif
+
+// Returns the slot of a record whose owned resources are already freed to its
+// size's free list.  Debug builds poison it so later reads fault and later
+// reference-count updates abort.
+static void TypeArenaRelease(TypeRecord* record) {
+  bool full = record->full_slot;
+#if TYPE_ARENA_CHECKS
+  if (!TypeArenaContains(record)) {
+    abort();
+  }
+#endif
+  if (type_census_enabled) {
+    return;
+  }
+#if TYPE_ARENA_CHECKS
+  memset(record, 0xA5,
+         full ? TYPE_RECORD_FULL_SIZE : TYPE_RECORD_NON_FUNCTION_SIZE);
+  record->refs = kTypeRecordReleasedRefs;
+  record->shared_immutable = 0;
+#endif
+  TypeRecord** free_list = TypeArenaFreeList(full);
+  record->next = *free_list;
+  *free_list = record;
 }
 
 // Free every TypeRecord struct.  Call only after all type-referencing data
@@ -220,6 +297,8 @@ void TypeRecordArenaRelease(void) {
     block = next;
   }
   type_arena = NULL;
+  free_short_type_records = NULL;
+  free_full_type_records = NULL;
 }
 
 size_t TypeArenaFullAllocCount(void) { return type_alloc_full; }
@@ -537,6 +616,7 @@ void TypeRecordDeleteLastReference(TypeRecord* record) {
   if (record == NULL) {
     return;
   }
+  TypeArenaCheckLive(record);
   TypeRecordDecRef(record);
   if (record->refs == 0) {
     if (type_census_enabled) {
@@ -630,8 +710,7 @@ void TypeRecordDeleteLastReference(TypeRecord* record) {
       ASTNodeDelete(record->info.array.size.vla.size);
       record->info.array.size.vla.size = NULL;
     }
-    // The struct itself lives in the type arena and is reclaimed wholesale by
-    // TypeRecordArenaRelease; only its owned auxiliary resources are freed here.
+    TypeArenaRelease(record);
   }
 }
 
@@ -686,6 +765,7 @@ void TypeRecordIncRef(TypeRecord* record) {
   if (record == NULL) {
     return;
   }
+  TypeArenaCheckLive(record);
   record->refs++;
 }
 
@@ -693,6 +773,7 @@ void TypeRecordDecRef(TypeRecord* record) {
   if (record == NULL || record->shared_immutable) {
     return;
   }
+  TypeArenaCheckLive(record);
   record->refs--;
 }
 
@@ -1047,6 +1128,9 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
   if (TypeIsStructOrUnion(expr->type)) {
     SetQualifiers(arg->type,
                   GetQualifiers(arg->type) & ~(kQualConst | kQualVolatile));
+    // The object initializer (and its clones in copies of `arg`) share
+    // `arg->type`, so the argument counts its own reference.
+    TypeRecordAdopt(arg->type);
     ASTNode* initializer =
         ConstexprTemplateArgumentObjectInitializerForExpression(arg->type,
                                                                 expr);
@@ -1561,6 +1645,13 @@ TypeRecord* TypeRecordShareExisting(TypeRecord* type) {
   return type;
 }
 
+TypeRecord* TypeRecordAdopt(TypeRecord* type) {
+  if (type != NULL && type->refs == 0) {
+    TypeRecordIncRef(type);
+  }
+  return type;
+}
+
 // Concrete types stored once.  A canonical record is marked
 // kTypeRecordCanonical; its `next` and the types of its template arguments
 // are canonical as well, so nothing reachable from it changes.
@@ -1951,6 +2042,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   if (record == NULL) {
     return NULL;
   }
+  TypeArenaCheckLive(record);
   type_copy_count++;
   if (type_copy_callers != NULL) {
     TypeCopyNoteCaller(__builtin_return_address(0));
@@ -1959,7 +2051,9 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   TypeRecord* r = TypeArenaAllocSized(TypeIsFunction(record)
                                           ? TYPE_RECORD_FULL_SIZE
                                           : TYPE_RECORD_NON_FUNCTION_SIZE);
+  bool full_slot = r->full_slot;
   memcpy(r, record, offsetof(TypeRecord, info));
+  r->full_slot = full_slot;
   r->template_parameter_summary =
       kTypeTemplateParameterSummaryUnknown;
   if (TypeIsFunction(record)) {

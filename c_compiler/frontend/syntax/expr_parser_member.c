@@ -595,6 +595,7 @@ static ASTNode* ParseQualifiedNestedStructMember(
     right = NewStructMemberASTNode(member, location);
     right->flags |= kASTQualifiedName;
     ((StructMemberASTNode*)right)->owner_type = owner_type;
+    TypeRecordIncRef(owner_type);
     owner_type = NULL;
   } else {
     right = NewStringConstantASTNode(member_name, NULL, location);

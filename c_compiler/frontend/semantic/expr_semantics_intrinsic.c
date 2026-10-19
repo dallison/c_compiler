@@ -182,12 +182,12 @@ void AnalyzeAtomicLoadBuiltin(VectorASTNode* node) {
   ASTNodeSetType(&node->base, value_type);
 }
 
-// Contract: Converts value operand to pointee type; result type void. Deletes
-// temporary `value_type` after use.
+// Contract: Converts value operand to pointee type; result type void. Releases
+// its reference to `value_type` after use.
 void AnalyzeAtomicStoreBuiltin(VectorASTNode* node) {
   AnalyzeAtomicBuiltinChildren(node);
   TypeRecord* value_type =
-      AtomicOperationValueType(AtomicPointerPointee(node));
+      TypeRecordAdopt(AtomicOperationValueType(AtomicPointerPointee(node)));
   if (node->children->length > 1) {
     NormalConversion(node->children->value.p[1], value_type);
   }
@@ -219,8 +219,7 @@ void AnalyzeAtomicFetchBuiltin(VectorASTNode* node, bool returns_new) {
         ASTNode* scale =
             NewPtrScaleASTNode(value_type->next, AST_OP(mult), operand,
                                operand->location);
-        scale->parent = (ASTNode*)node;
-        node->children->value.p[1] = scale;
+        ASTNodeReplaceChild(&node->base, 1, scale, false);
         ASTNodeSetType(scale, value_type);
       }
     } else {
@@ -241,7 +240,7 @@ void AnalyzeAtomicCompareExchangeBuiltin(VectorASTNode* node,
                                                 bool returns_bool) {
   AnalyzeAtomicBuiltinChildren(node);
   TypeRecord* value_type =
-      AtomicOperationValueType(AtomicPointerPointee(node));
+      TypeRecordAdopt(AtomicOperationValueType(AtomicPointerPointee(node)));
   if (node->children->length > 1) {
     ASTNode* expected = node->children->value.p[1];
     if (expected_is_pointer) {
@@ -278,10 +277,10 @@ void AnalyzeAtomicCompareExchangeBuiltin(VectorASTNode* node,
   if (returns_bool) {
     ASTNodeSetType(&node->base,
                    NewTypeRecordWithSize(kTypeBool, kQualPlain));
-    TypeRecordDelete(value_type);
   } else {
     ASTNodeSetType(&node->base, value_type);
   }
+  TypeRecordDelete(value_type);
 }
 
 // Contract: Allocates const char* type for source-location builtins.

@@ -798,8 +798,12 @@ static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node,
                                   IRNode* input);
 static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub);
 
-static TypeRecord* Int128WordType(void) {
-  return NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned, kQualPlain);
+static TypeRecord* Int128WordType(Generator* gen) {
+  if (gen->int128_word == NULL) {
+    gen->int128_word = TypeRecordAdopt(
+        NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned, kQualPlain));
+  }
+  return gen->int128_word;
 }
 
 static IRNode* Int128ObjectAddress(Generator* gen, IRNode* value,
@@ -823,7 +827,7 @@ static IRNode* NewInt128Object(Generator* gen, TypeRecord* type) {
 }
 
 static IRNode* Int128WordPointer(Generator* gen, IRNode* address, bool high) {
-  TypeRecord* word = Int128WordType();
+  TypeRecord* word = Int128WordType(gen);
   if (!high) {
     return IRSetType(address, NewPointerTo(kQualPlain, word));
   }
@@ -833,7 +837,7 @@ static IRNode* Int128WordPointer(Generator* gen, IRNode* address, bool high) {
 }
 
 static IRNode* LoadInt128Word(Generator* gen, IRNode* address, bool high) {
-  TypeRecord* word = Int128WordType();
+  TypeRecord* word = Int128WordType(gen);
   IRNode* word_addr = Int128WordPointer(gen, address, high);
   return IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(load64), word_addr)), word);
 }
@@ -845,7 +849,7 @@ static void StoreInt128Word(Generator* gen, IRNode* address, bool high,
 }
 
 static IRNode* Int128UnsignedLess(Generator* gen, IRNode* left, IRNode* right) {
-  TypeRecord* word = Int128WordType();
+  TypeRecord* word = Int128WordType(gen);
   IRNode* lhs = IRSetType(left, word);
   IRNode* rhs = IRSetType(right, word);
   return GeneratorEmit(gen, NewIR2(IR_OP(cmplti), lhs, rhs));
@@ -873,7 +877,7 @@ static IRNode* GenerateInt128FromWords(Generator* gen, TypeRecord* type,
 
 static IRNode* GenerateInt128Constant(Generator* gen, TypeRecord* type,
                                       int64_t lo, int64_t hi) {
-  TypeRecord* word = Int128WordType();
+  TypeRecord* word = Int128WordType(gen);
   return GenerateInt128FromWords(
       gen, type, GeneratorGetIntConstant(gen, word, lo),
       GeneratorGetIntConstant(gen, word, hi));
@@ -881,7 +885,7 @@ static IRNode* GenerateInt128Constant(Generator* gen, TypeRecord* type,
 
 static IRNode* WidenIntegerToInt128(Generator* gen, IRNode* value,
                                     TypeRecord* from, TypeRecord* to) {
-  TypeRecord* word = Int128WordType();
+  TypeRecord* word = Int128WordType(gen);
   IRNode* lo = IRSetType(value, word);
   if (from != NULL && from->size > 0 && from->size < 8) {
     IROpcode extend = (!TypeIsUnsigned(from) && !TypeIsBool(from))
@@ -911,7 +915,7 @@ static IRNode* NarrowInt128ToInteger(Generator* gen, IRNode* value,
   IRNode* lo = LoadInt128Word(gen, address, false);
   if (to != NULL && TypeIsBool(to)) {
     IRNode* hi = LoadInt128Word(gen, address, true);
-    IRNode* zero = GeneratorGetIntConstant(gen, Int128WordType(), 0);
+    IRNode* zero = GeneratorGetIntConstant(gen, Int128WordType(gen), 0);
     IRNode* lo_nz = GeneratorEmit(gen, NewIR2(IR_OP(cmpnei), lo, zero));
     IRNode* hi_nz = GeneratorEmit(gen, NewIR2(IR_OP(cmpnei), hi, zero));
     return IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(ori), lo_nz, hi_nz)), to);
@@ -921,7 +925,7 @@ static IRNode* NarrowInt128ToInteger(Generator* gen, IRNode* value,
 
 static IRNode* GenerateInt128Unary(Generator* gen, UnaryASTNode* node) {
   TypeRecord* type = node->base.type;
-  TypeRecord* word = Int128WordType();
+  TypeRecord* word = Int128WordType(gen);
   IRNode* value = GenerateExpression(gen, node->sub);
   IRNode* address = Int128ObjectAddress(gen, value, node->sub->type);
   IRNode* lo = LoadInt128Word(gen, address, false);
@@ -951,7 +955,7 @@ static IRNode* GenerateInt128Unary(Generator* gen, UnaryASTNode* node) {
 static IRNode* GenerateInt128Shift(Generator* gen, IRNode* lo, IRNode* hi,
                                    IRNode* amount, TypeRecord* type,
                                    bool left, bool arithmetic) {
-  TypeRecord* word = Int128WordType();
+  TypeRecord* word = Int128WordType(gen);
   IRNode* object = NewInt128Object(gen, type);
   IRNode* result = Int128ObjectAddress(gen, object, type);
   IRNode* amt = IRSetType(amount, word);
@@ -1017,7 +1021,7 @@ static IRNode* GenerateInt128Shift(Generator* gen, IRNode* lo, IRNode* hi,
 
 static IRNode* GenerateInt128Mul(Generator* gen, IRNode* a_lo, IRNode* a_hi,
                                  IRNode* b_lo, IRNode* b_hi, TypeRecord* type) {
-  TypeRecord* word = Int128WordType();
+  TypeRecord* word = Int128WordType(gen);
   IRNode* mask = GeneratorGetIntConstant(gen, word, 0xffffffffu);
   IRNode* c32 = GeneratorGetIntConstant(gen, word, 32);
   IRNode* al = IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(andi), a_lo, mask)),
@@ -1070,7 +1074,7 @@ static IRNode* GenerateInt128BinaryValues(Generator* gen, ASTOpcode op,
                                           TypeRecord* left_from,
                                           TypeRecord* right_from,
                                           IRNode* left, IRNode* right) {
-  TypeRecord* word = Int128WordType();
+  TypeRecord* word = Int128WordType(gen);
   TypeRecord* left_type = TypeIsInt128(left_from) ? left_from : type;
   TypeRecord* right_type = TypeIsInt128(right_from) ? right_from : type;
   if (!TypeIsInt128(left_from)) {
@@ -6877,8 +6881,8 @@ static IRNode* GenerateConversion(Generator* gen, ASTNode* node, IRNode* sub) {
                                         ? IR_OP(f2i)
                                         : IR_OP(d2i),
                                     sub)),
-          Int128WordType());
-      return WidenIntegerToInt128(gen, as_ll, Int128WordType(), node->type);
+          Int128WordType(gen));
+      return WidenIntegerToInt128(gen, as_ll, Int128WordType(gen), node->type);
     }
     return WidenIntegerToInt128(gen, sub, from, node->type);
   }

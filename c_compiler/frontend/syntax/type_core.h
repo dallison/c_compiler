@@ -81,6 +81,12 @@ bool TypeRecordCanShareConcreteClass(TypeRecord* type);
 // One more owner of an existing record.  Used when substitution would have
 // copied a type it does not change.
 TypeRecord* TypeRecordShareExisting(TypeRecord* type);
+// Counts the caller's ownership of a result that is either fresh (refs 0,
+// owned without a count) or shared with the caller's reference already
+// counted (TypeRecordShareExisting).  Afterwards the caller's reference may be
+// handed to one holder as is, or released with TypeRecordDelete after holders
+// take their own.
+TypeRecord* TypeRecordAdopt(TypeRecord* type);
 // `refs == 0` is updated in place.  A shared record is not modified; a
 // qualified copy is returned and the caller keeps ownership of `type`.
 TypeRecord* TypeRecordAddQualifiers(TypeRecord* type, Qualifiers quals);

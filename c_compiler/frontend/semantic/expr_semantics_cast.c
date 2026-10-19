@@ -634,7 +634,7 @@ void MaterializeBracedClassTemplateTemporary(
   if (node->sym != NULL && node->sym->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->sym;
     if (id->symbol != NULL) {
-      id->symbol->type = TypeRecordCopy(specialized);
+      SymbolSetType(id->symbol, TypeRecordCopy(specialized));
       ASTNodeSetType(node->sym, id->symbol->type);
     }
   }

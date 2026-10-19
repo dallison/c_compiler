@@ -472,6 +472,7 @@ static ASTNode* ConvertStaticAssertMessageResult(ASTNode* expression,
     TypeRecordDelete(target);
     return NULL;
   }
+  target = TypeRecordAdopt(target);
   ASTNode* wrapper =
       NewExpressionStatementASTNode(expression, expression->location);
   NormalConversion(expression, target);

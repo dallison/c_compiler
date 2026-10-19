@@ -739,7 +739,6 @@ Symbol* GetCXXTemplateParameterObject(TemplateArgument* argument) {
     TypeRecord* type = TypeRecordCopy(argument->type);
     SetQualifiers(type, GetQualifiers(type) | kQualConst);
     symbol = NewSymbol(name.value, type, STO(static));
-    TypeRecordDelete(type);
     symbol->flags.invented = true;
     symbol->flags.is_defined = true;
     symbol->flags.is_weak = true;

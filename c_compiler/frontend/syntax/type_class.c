@@ -567,7 +567,7 @@ static Struct* AttachNewStructToTag(Symbol* tag, bool is_union, bool is_class) {
   TypeRecord* type = NewTypeRecord(is_union ? kTypeUnion : kTypeStruct,
                                     kQualPlain);
   TypeRecordSetStructInfo(type, str);
-  tag->type = type;
+  SymbolSetType(tag, type);
   tag->storage = STO(implicit);
   tag->flags.is_using_alias = false;
   tag->alias_target = NULL;

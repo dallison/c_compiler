@@ -1044,7 +1044,7 @@ static TemplateParameter* CloneNestedTemplateParameter(TypeParser* parser,
     TypeRecord* substituted =
         SubstituteTemplateParameters(parser, param->type, args);
     TypeRecordDelete(param->type);
-    param->type = substituted;
+    param->type = TypeRecordAdopt(substituted);
     RebaseTemplateParameterIndices(param->type, base);
   }
   if (param->default_type != NULL) {
@@ -1128,8 +1128,8 @@ static void CloneNestedTemplatePartialSpecializations(TypeParser* parser,
         partial->associated_constraint != NULL) {
       continue;
     }
-    TypeRecord* body = SubstituteNestedStructTemplateParameters(
-        parser, partial->tag_symbol->type, args);
+    TypeRecord* body = TypeRecordAdopt(SubstituteNestedStructTemplateParameters(
+        parser, partial->tag_symbol->type, args));
     if (body == NULL || !TypeIsStructOrUnion(body) ||
         body->info.struct_info == NULL) {
       TypeRecordDelete(body);
@@ -1137,6 +1137,7 @@ static void CloneNestedTemplatePartialSpecializations(TypeParser* parser,
     }
     Symbol* tag = NewSymbol(partial->tag_symbol->name.value, body,
                             STO(implicit));
+    TypeRecordDelete(body);
     tag->flags.is_defined = partial->tag_symbol->flags.is_defined;
     tag->flags.is_template = true;
     Vector* pattern = SubstituteTemplateArgumentVector(
@@ -1591,7 +1592,9 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   // call members declared later (raw_hash_set::emplace_at).
   bool defer_nested_bodies =
       parser != NULL && parser->template_substitution_target != NULL;
-  TypeRecord* copy = TypeRecordCopy(type);
+  // The tag symbol and the substitution caches share `copy`; the caller gets a
+  // reference of its own.
+  TypeRecord* copy = TypeRecordAdopt(TypeRecordCopy(type));
   // The copy's operator() has no body of its own.  Ensuring it clones the
   // lambda's pattern, which needs these member arguments after the class's.
   if (member_closure_resubstitution && copy->template_arguments == NULL &&
@@ -2359,7 +2362,7 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
       if (substituted != NULL && !own_parameter_erased &&
           (!failed || TypeContainsTemplateParameter(substituted))) {
         TypeRecordDelete(param->type);
-        param->type = substituted;
+        param->type = TypeRecordAdopt(substituted);
       } else {
         TypeRecordDelete(substituted);
       }
@@ -2726,7 +2729,6 @@ static TypeRecord* ResolveInstantiatedOwnerTypedef(TypeRecord* type,
   resolved->next = NULL;
   TypeRecordDelete(shared_next);
   TypeRecordChain(resolved, resolved_next);
-  TypeRecordDelete(resolved_next);
   return TypeRecordCalculateSize(resolved);
 }
 
@@ -11316,7 +11318,7 @@ static Vector* CompleteFunctionTemplateArgumentsUnsuspended(
           if (substituted != NULL && !failed &&
               (!original_has_own || substituted_has_own)) {
             TypeRecordDelete(param->type);
-            param->type = substituted;
+            param->type = TypeRecordAdopt(substituted);
           } else {
             TypeRecordDelete(substituted);
           }

@@ -565,6 +565,8 @@ typedef struct TypeRecord {
   // C++26 pack-indexing specifier `Ts...[I]`.  The parameter index identifies
   // `Ts`; the unevaluated expression is retained until the pack is bound.
   bool is_pack_index;                                               // @wire 18
+  // The arena slot has room for FunctionInfo (TYPE_RECORD_FULL_SIZE).
+  bool full_slot;                                                   // @wire -
   int size;                                                       // @wire 5
   int bit_width;  // Exact width of kTypeBitInt; zero otherwise.    // @wire 21
   int template_parameter_index;  // >=0 for placeholder types.     // @wire 6

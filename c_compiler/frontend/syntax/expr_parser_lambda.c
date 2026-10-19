@@ -498,7 +498,6 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
     SyntaxError(syntax, "Duplicate function argument '%s'",
                 formal->name.value);
     SymbolDelete(formal);
-    TypeRecordDelete(placeholder);
     if (concept_arguments != NULL) {
       VectorDeleteWithContents(concept_arguments,
                                (VectorElementDestructor)TemplateArgumentDelete,
@@ -534,7 +533,6 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
   }
   func->info.function.template_parameter_count =
       (int)func->info.function.template_parameters.length;
-  TypeRecordDelete(placeholder);
   return true;
 }
 
@@ -723,7 +721,6 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax,
     if (declarator != NULL) {
       TypeRecord* parsed_type = TypeRecordCopy(declarator->type);
       SymbolDelete(declarator);
-      TypeRecordDelete(return_type);
       return_type = parsed_type;
     }
     TypeParserDestruct(&parser);

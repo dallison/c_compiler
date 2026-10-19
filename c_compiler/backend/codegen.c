@@ -260,6 +260,7 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   gen->for_constant_evaluation = false;
   gen->source_pointer_size =
       compiler->target != NULL ? compiler->target->pointer_size : SizeofPointer();
+  gen->int128_word = NULL;
 
   IRResetNodeId();
 }
@@ -285,6 +286,8 @@ static void DestructIRNode(ListElement* hdr, void* data) {
 
 void GeneratorDestruct(Generator* gen) {
   TypeRecordDelete(gen->func);
+  TypeRecordDelete(gen->int128_word);
+  gen->int128_word = NULL;
 
   // Delete all IR nodes.
   ListTraverse(&gen->code, DestructIRNode, NULL);
@@ -1895,6 +1898,7 @@ void GeneratorBindObjectAddressParameters(TypeRecord* func, Vector* saved) {
     VectorAppend(saved, formal->type);
     TypeRecord* reference = NewReferenceTypeRecord(kQualPlain, false);
     TypeRecordChain(reference, formal->type);
+    TypeRecordIncRef(reference);
     formal->type = reference;
   }
 }

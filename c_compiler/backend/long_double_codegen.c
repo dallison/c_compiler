@@ -27,7 +27,6 @@ static TypeRecord* BitsPointerType(void) {
   TypeRecord* ull = NewTypeRecordWithSize(kTypeLongLong | kTypeUnsigned,
                                           kQualPlain);
   TypeRecord* ptr = NewPointerTo(kQualPlain, ull);
-  TypeRecordDelete(ull);
   return ptr;
 }
 

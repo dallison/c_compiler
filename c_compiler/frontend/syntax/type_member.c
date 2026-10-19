@@ -275,7 +275,7 @@ static void AddCXXNestedTypeMember(TypeParser* parser, Struct* owner,
     // the type is diagnosed earlier when the second body is parsed.
     if (existing->symbol != NULL && existing->symbol->type != NULL &&
         NestedTypeMemberDesignatesTag(existing->symbol->type, tag)) {
-      existing->symbol->type = TypeRecordCopy(type);
+      SymbolSetType(existing->symbol, TypeRecordCopy(type));
       return;
     }
     SyntaxError(parser->syntax, "Duplicate nested type %s", tag->name.value);
@@ -4241,7 +4241,7 @@ bool ParseInjectedClassMember(TypeParser* parser, Struct* str, CXXAccess access,
   parser->is_constinit = false;
   parser->cxx_member_owner = str;
 
-  TypeRecord* member_type = TypeParserParseType(parser, true);
+  TypeRecord* member_type = TypeRecordAdopt(TypeParserParseType(parser, true));
   if (member_type == NULL) {
     return false;
   }

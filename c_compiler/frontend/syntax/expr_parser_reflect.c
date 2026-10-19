@@ -491,6 +491,7 @@ ASTNode* ParseReflectionExpression(Syntax* syntax,
             StructMemberASTNode* operand =
                 (StructMemberASTNode*)NewStructMemberASTNode(member, location);
             operand->owner_type = TypeRecordCopy(owner->type);
+            TypeRecordIncRef(operand->owner_type);
             FullyQualifiedIdentifierDestruct(&name);
             LexCheckpointDestruct(&namespace_checkpoint);
             return NewReflectionASTNode(kReflectionOperandExpression,
