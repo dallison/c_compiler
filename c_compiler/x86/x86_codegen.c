@@ -3045,6 +3045,36 @@ static bool IsImmediateOperand(TargetInstruction* inst) {
                           (X86Opcode)inst->opcode == X86_OP(x0));
 }
 
+// `jz`/`jnz` test a register.  A comparison of two constants (`constexpr int
+// ti = 0; ti == 0` in a member function) leaves an immediate or x0 as the
+// tested operand; the branch is decided now instead.
+static TargetInstruction* EmitZeroTestBranch(X86Generator* rv,
+                                             X86Opcode branch,
+                                             TargetInstruction* operand,
+                                             IRNode* target_node) {
+  TargetInstruction* inst;
+  int target_operand_num = 1;
+  if (IsImmediateOperand(operand)) {
+    int64_t value = TargetIsConst(operand) ? TargetIntValue(operand) : 0;
+    bool taken = (branch == X86_OP(jz)) == (value == 0);
+    if (!taken) {
+      return Emit(rv, NewInstruction(X86_OP(nop)));
+    }
+    inst = Emit(rv, NewInstruction(X86_OP(jmp)));
+    target_operand_num = 0;
+  } else {
+    inst = Emit(rv, NewInstruction1(branch, operand));
+  }
+  TargetInstruction* target = target_node->data.ptr;
+  if (target == NULL) {
+    VectorAppend(&rv->base.fixups,
+                 NewBranchFixup(inst, target_node, target_operand_num));
+  } else {
+    inst->operand[target_operand_num] = target;
+  }
+  return inst;
+}
+
 static TargetInstruction* LowerConditionalBranch(X86Generator* rv,
                                                  IRNode* node) {
   // CFG cleanup can detach the target from a branch in an unreachable block
@@ -3077,16 +3107,8 @@ static TargetInstruction* LowerConditionalBranch(X86Generator* rv,
           (X86Opcode)comparison->opcode == X86_OP(sete);
       X86Opcode branch =
           btrue == true_when_zero ? X86_OP(jz) : X86_OP(jnz);
-      TargetInstruction* inst =
-          Emit(rv, NewInstruction1(branch, comparison->operand[0]));
-      TargetInstruction* target = target_node->data.ptr;
-      if (target == NULL) {
-        VectorAppend(&rv->base.fixups,
-                     NewBranchFixup(inst, target_node, 1));
-      } else {
-        inst->operand[1] = target;
-      }
-      return inst;
+      return EmitZeroTestBranch(rv, branch, comparison->operand[0],
+                                target_node);
     }
   }
 
@@ -3130,18 +3152,8 @@ static TargetInstruction* LowerConditionalBranch(X86Generator* rv,
         op1 = op2;
         op2 = tmp;
       }
-      TargetInstruction* inst =
-          Emit(rv, NewInstruction1(branch, Materialize(rv, op1)));
-
-      TargetInstruction* target = target_node->data.ptr;
-      if (target == NULL) {
-        // Forward branch, add fixup for target label.
-        VectorAppend(&rv->base.fixups, NewBranchFixup(inst, target_node, 1));
-      } else {
-        inst->operand[1] = target;
-      }
-
-      return inst;
+      return EmitZeroTestBranch(rv, branch, Materialize(rv, op1),
+                                target_node);
     }
 
     if (branch_info->reverse) {
