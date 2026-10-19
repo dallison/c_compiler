@@ -2106,13 +2106,14 @@ static ReflectionValue* MetaReflectionFromTemplateArgument(
                  ? ReflectionCreateType(argument->type, NULL, location)
                  : NULL;
     case kTemplateParameterNonType:
-      if (argument->reflection_value != NULL) {
-        return argument->reflection_value;
+      if (TemplateArgumentExtraOf(argument)->reflection_value != NULL) {
+        return TemplateArgumentExtraOf(argument)->reflection_value;
       }
-      if (argument->value_symbol != NULL) {
-        ReflectionEntityKind kind =
-            ReflectionKindForSymbol(argument->value_symbol);
-        return ReflectionCreateSymbol(kind, argument->value_symbol, location);
+      if (TemplateArgumentExtraOf(argument)->value_symbol != NULL) {
+        ReflectionEntityKind kind = ReflectionKindForSymbol(
+            TemplateArgumentExtraOf(argument)->value_symbol);
+        return ReflectionCreateSymbol(
+            kind, TemplateArgumentExtraOf(argument)->value_symbol, location);
       }
       if (argument->type != NULL) {
         return ReflectionCreateScalar(
@@ -2121,10 +2122,11 @@ static ReflectionValue* MetaReflectionFromTemplateArgument(
       }
       return NULL;
     case kTemplateParameterTemplate:
-      if (argument->template_symbol != NULL) {
-        ReflectionEntityKind kind =
-            ReflectionKindForSymbol(argument->template_symbol);
-        return ReflectionCreateSymbol(kind, argument->template_symbol, location);
+      if (TemplateArgumentExtraOf(argument)->template_symbol != NULL) {
+        ReflectionEntityKind kind = ReflectionKindForSymbol(
+            TemplateArgumentExtraOf(argument)->template_symbol);
+        return ReflectionCreateSymbol(
+            kind, TemplateArgumentExtraOf(argument)->template_symbol, location);
       }
       return NULL;
     default:

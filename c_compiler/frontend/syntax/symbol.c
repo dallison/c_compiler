@@ -715,14 +715,15 @@ static void AppendCXXTemplateObjectValue(String* out, ASTNode* initializer,
 
 Symbol* GetCXXTemplateParameterObject(TemplateArgument* argument) {
   if (argument == NULL || argument->type == NULL ||
-      argument->object_initializer == NULL) {
+      TemplateArgumentExtraOf(argument)->object_initializer == NULL) {
     return NULL;
   }
   String name;
   StringInit(&name, "_ZTA");
   StringAppendChar(&name, 'X');
-  AppendCXXTemplateObjectValue(&name, argument->object_initializer,
-                               argument->type);
+  AppendCXXTemplateObjectValue(
+      &name, TemplateArgumentExtraOf(argument)->object_initializer,
+      argument->type);
   StringAppendChar(&name, 'E');
   Symbol* symbol = NULL;
   for (size_t i = 0; compiler != NULL &&
@@ -745,8 +746,9 @@ Symbol* GetCXXTemplateParameterObject(TemplateArgument* argument) {
     symbol->flags.is_constexpr = true;
     StringSetString(&symbol->asm_name, &name);
     CompilerRegisterTemplateParameterObject(
-        symbol, ASTNodeClone(argument->object_initializer, IdentityCloneNode,
-                             NULL, NULL));
+        symbol,
+        ASTNodeClone(TemplateArgumentExtraOf(argument)->object_initializer,
+                     IdentityCloneNode, NULL, NULL));
   }
   StringDestruct(&name);
   return symbol;
@@ -798,14 +800,15 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
   }
   if (kind == kTemplateValueObject) {
     StringAppendChar(out, 'X');
-    AppendCXXTemplateObjectValue(out, arg->object_initializer, arg->type);
+    AppendCXXTemplateObjectValue(
+        out, TemplateArgumentExtraOf(arg)->object_initializer, arg->type);
     StringAppendChar(out, 'E');
     return;
   }
   Symbol* symbol = kind == kTemplateValueMemberPointer &&
-                           arg->member_function != NULL
-                       ? arg->member_function
-                       : arg->value_symbol;
+                           TemplateArgumentExtraOf(arg)->member_function != NULL
+                       ? TemplateArgumentExtraOf(arg)->member_function
+                       : TemplateArgumentExtraOf(arg)->value_symbol;
   if (symbol == NULL) {
     StringAppend(out, "LDnE");
     return;
@@ -858,7 +861,7 @@ static void AppendCXXTemplateTemplateArgument(String* out,
     StringAppendChar(out, '_');
     return;
   }
-  Symbol* symbol = arg->template_symbol;
+  Symbol* symbol = TemplateArgumentExtraOf(arg)->template_symbol;
   if (symbol == NULL) {
     StringAppend(out, "Ut0_");
     return;

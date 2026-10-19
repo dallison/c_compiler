@@ -142,15 +142,38 @@ typedef struct TemplateParameter {
   TemplateTemplateParameterKind template_template_kind;             // @wire 13
 } TemplateParameter;
 
+// The fields of a TemplateArgument that only pointer, member-pointer,
+// class-type, reflection and template-template arguments use, owned by that
+// argument.  Its wire numbers are TemplateArgument fields.
+typedef struct TemplateArgumentExtra {
+  // The argument whose fields these are; only it may modify them.
+  struct TemplateArgument* owner;
+  Symbol* value_symbol;      // Object/function address.           // @wire 10
+  int64_t value_offset;      // Pointer byte offset/member ptr.    // @wire 11
+  int64_t value_adjustment;  // Member-function this adjustment.   // @wire 12
+  Symbol* member_function;   // Non-virtual member function.       // @wire 13
+  Symbol* template_symbol;   // Primary class/alias template.      // @wire 14
+  struct ReflectionValue* reflection_value;  // Reflection NTTP.   // @wire 16
+  // C++29 indexed template-name `Templates...[I]`.
+  struct ASTNode* pack_index_expr;  // @wire 54
+  struct ASTNode*
+      object_initializer;  // Canonical class NTTP value. // @wire 44
+  // The object with static storage that the argument expression named, for a
+  // reference parameter to bind to.  Set by the parser and consumed when the
+  // argument is matched to its parameter.
+  Symbol* lvalue_symbol;  // @wire - (transient)
+} TemplateArgumentExtra;
+
 // Serialized as an inline sub-message (see type_serialize.c); the field
 // numbers below are local to that sub-message.
 typedef struct TemplateArgument {
   TemplateParameterKind kind;    // @wire 1
+  TemplateValueKind value_kind;  // Concrete NTTP representation. // @wire 9
+  int template_parameter_index;  // >=0 when non-type arg is a param. // @wire 5
   bool is_pack_expansion;        // @wire 2
   bool references_parameter_pack;  // Pattern names a pack.       // @wire 15
   struct TypeRecord* type;  // Non-NULL for type arguments.        // @wire 3
   long long int_value;      // Valid for simple non-type int args. // @wire 4
-  int template_parameter_index;  // >=0 when non-type arg is a param. // @wire 5
   Vector* pack_arguments;   // TemplateArgument* for bound packs.   // @wire 6
   // A value-dependent non-type argument expression (e.g. `!is_integral<It>::value`)
   // kept unevaluated at parse time.  It is re-cloned, substituted, and folded to a
@@ -164,21 +187,21 @@ typedef struct TemplateArgument {
   // expansion) must report here rather than at the unrelated instantiation
   // point.  SOURCE_LOCATION_MISSING when unknown (synthesized arguments).
   SourceLocation location;   // @wire 8
-  TemplateValueKind value_kind;  // Concrete NTTP representation. // @wire 9
-  Symbol* value_symbol;      // Object/function address.           // @wire 10
-  int64_t value_offset;      // Pointer byte offset/member ptr.    // @wire 11
-  int64_t value_adjustment;  // Member-function this adjustment.   // @wire 12
-  Symbol* member_function;   // Non-virtual member function.       // @wire 13
-  Symbol* template_symbol;   // Primary class/alias template.      // @wire 14
-  struct ReflectionValue* reflection_value;  // Reflection NTTP.   // @wire 16
-  // C++29 indexed template-name `Templates...[I]`.
-  struct ASTNode* pack_index_expr;  // @wire 54
-  struct ASTNode* object_initializer;  // Canonical class NTTP value. // @wire 44
-  // The object with static storage that the argument expression named, for a
-  // reference parameter to bind to.  Set by the parser and consumed when the
-  // argument is matched to its parameter.
-  Symbol* lvalue_symbol;  // @wire - (transient)
+  // NULL until one of its fields is set.  Read through TemplateArgumentExtraOf
+  // and write through TemplateArgumentMutableExtra.
+  TemplateArgumentExtra* extra;
 } TemplateArgument;
+
+extern const TemplateArgumentExtra kNoTemplateArgumentExtra;
+
+// An argument's rarely set fields; all zero when it has none.
+static inline const TemplateArgumentExtra* TemplateArgumentExtraOf(
+    const TemplateArgument* arg) {
+  return arg->extra != NULL ? arg->extra : &kNoTemplateArgumentExtra;
+}
+
+// An argument's rarely set fields for writing, allocated on first use.
+TemplateArgumentExtra* TemplateArgumentMutableExtra(TemplateArgument* arg);
 
 typedef struct ClassTemplatePartialSpecialization {
   Symbol* tag_symbol;       // Parsed specialization body tag (not owned).

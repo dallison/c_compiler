@@ -5640,11 +5640,10 @@ static ASTNode* FoldClonedPackIndex(TemplateFunctionBodyClone* clone,
   }
   TemplateArgument* selected =
       pack->pack_arguments->value.p[(size_t)index];
-  if (selected != NULL &&
-      selected->kind == kTemplateParameterTemplate &&
-      selected->template_symbol != NULL) {
-    ASTNode* result =
-        NewIdentifierASTNode(selected->template_symbol, node->location);
+  if (selected != NULL && selected->kind == kTemplateParameterTemplate &&
+      TemplateArgumentExtraOf(selected)->template_symbol != NULL) {
+    ASTNode* result = NewIdentifierASTNode(
+        TemplateArgumentExtraOf(selected)->template_symbol, node->location);
     ((IdentifierASTNode*)result)->template_arguments =
         TemplateArgumentVectorCopy(id->template_arguments);
     result->flags = node->flags & ~kASTAnalyzed;
@@ -7179,8 +7178,8 @@ static void BindTemplateTemplateParameterIdentifier(
       TemplateArgument* actual =
           clone->args->value.p[id->symbol->template_parameter_index];
       if (actual != NULL && actual->kind == kTemplateParameterTemplate &&
-          actual->template_symbol != NULL) {
-        id->symbol = actual->template_symbol;
+          TemplateArgumentExtraOf(actual)->template_symbol != NULL) {
+        id->symbol = TemplateArgumentExtraOf(actual)->template_symbol;
       }
     }
 }

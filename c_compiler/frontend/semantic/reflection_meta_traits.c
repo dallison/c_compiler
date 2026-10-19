@@ -102,10 +102,12 @@ static bool MetaTraitTemplateArgumentIsConcrete(TemplateArgument* arg) {
   }
   if (arg->kind == kTemplateParameterNonType && arg->type != NULL &&
       TypeContainsTemplateParameter(arg->type) &&
-      arg->reflection_value == NULL && arg->value_symbol == NULL) {
+      TemplateArgumentExtraOf(arg)->reflection_value == NULL &&
+      TemplateArgumentExtraOf(arg)->value_symbol == NULL) {
     return false;
   }
-  return arg->type != NULL || arg->reflection_value != NULL;
+  return arg->type != NULL ||
+         TemplateArgumentExtraOf(arg)->reflection_value != NULL;
 }
 
 static bool MetaTraitTemplateArgumentsAreConcrete(Vector* args) {
@@ -1044,20 +1046,21 @@ static ReflectionValue* MetaTraitReflectionFromTemplateArgument(
   }
   switch (argument->kind) {
     case kTemplateParameterType:
-      if (argument->reflection_value != NULL) {
-        return argument->reflection_value;
+      if (TemplateArgumentExtraOf(argument)->reflection_value != NULL) {
+        return TemplateArgumentExtraOf(argument)->reflection_value;
       }
       return argument->type != NULL
                  ? ReflectionCreateType(argument->type, NULL, location)
                  : NULL;
     case kTemplateParameterNonType:
-      if (argument->reflection_value != NULL) {
-        return argument->reflection_value;
+      if (TemplateArgumentExtraOf(argument)->reflection_value != NULL) {
+        return TemplateArgumentExtraOf(argument)->reflection_value;
       }
-      if (argument->value_symbol != NULL) {
-        ReflectionEntityKind kind =
-            ReflectionKindForSymbol(argument->value_symbol);
-        return ReflectionCreateSymbol(kind, argument->value_symbol, location);
+      if (TemplateArgumentExtraOf(argument)->value_symbol != NULL) {
+        ReflectionEntityKind kind = ReflectionKindForSymbol(
+            TemplateArgumentExtraOf(argument)->value_symbol);
+        return ReflectionCreateSymbol(
+            kind, TemplateArgumentExtraOf(argument)->value_symbol, location);
       }
       if (argument->type != NULL && TypeIsReflection(argument->type)) {
         return ReflectionCreateScalar(
@@ -1066,10 +1069,11 @@ static ReflectionValue* MetaTraitReflectionFromTemplateArgument(
       }
       return NULL;
     case kTemplateParameterTemplate:
-      if (argument->template_symbol != NULL) {
-        ReflectionEntityKind kind =
-            ReflectionKindForSymbol(argument->template_symbol);
-        return ReflectionCreateSymbol(kind, argument->template_symbol, location);
+      if (TemplateArgumentExtraOf(argument)->template_symbol != NULL) {
+        ReflectionEntityKind kind = ReflectionKindForSymbol(
+            TemplateArgumentExtraOf(argument)->template_symbol);
+        return ReflectionCreateSymbol(
+            kind, TemplateArgumentExtraOf(argument)->template_symbol, location);
       }
       return NULL;
     default:

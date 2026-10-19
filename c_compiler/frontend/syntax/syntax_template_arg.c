@@ -315,8 +315,8 @@ static void NormalizeTemplateNameArgument(Syntax* syntax, TemplateArgument* arg,
   TypeRecordDelete(arg->type);
   arg->type = NULL;
   arg->kind = kTemplateParameterTemplate;
-  arg->template_symbol = origin;
-  arg->pack_index_expr = pack_index_expr;
+  TemplateArgumentMutableExtra(arg)->template_symbol = origin;
+  TemplateArgumentMutableExtra(arg)->pack_index_expr = pack_index_expr;
   arg->template_parameter_index =
       origin->flags.is_template_template_parameter
           ? origin->template_parameter_index : -1;
@@ -362,7 +362,7 @@ static void ParseTemplateNameArgument(Syntax* syntax, TemplateArgument* arg,
       syntax, &template_name, TC(closebra) | TC(exprsep));
   FullyQualifiedIdentifierDestruct(&template_name);
   arg->kind = kTemplateParameterTemplate;
-  arg->template_symbol = bare_template;
+  TemplateArgumentMutableExtra(arg)->template_symbol = bare_template;
   arg->template_parameter_index =
       bare_template->flags.is_template_template_parameter
           ? bare_template->template_parameter_index
@@ -373,7 +373,7 @@ static void ParseTemplateNameArgument(Syntax* syntax, TemplateArgument* arg,
         SyntaxError(syntax,
                     "Template-name pack indexing requires C++29");
       }
-      arg->pack_index_expr =
+      TemplateArgumentMutableExtra(arg)->pack_index_expr =
           SyntaxParseSingleExpression(syntax, TC(closebra));
       SyntaxNeedBracket(syntax, TOK(rsquare),
                         TC(closebra) | TC(exprsep));
@@ -382,7 +382,8 @@ static void ParseTemplateNameArgument(Syntax* syntax, TemplateArgument* arg,
     }
   }
   arg->references_parameter_pack =
-      arg->is_pack_expansion || arg->pack_index_expr != NULL ||
+      arg->is_pack_expansion ||
+      TemplateArgumentExtraOf(arg)->pack_index_expr != NULL ||
       bare_template->flags.is_parameter_pack;
 }
 

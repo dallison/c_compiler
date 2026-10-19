@@ -139,6 +139,9 @@ int TypeRecordAlignment(TypeRecord* record);
 void TemplateParameterDelete(TemplateParameter* param);
 Vector* TemplateParameterVectorCopy(Vector* params);
 void TemplateArgumentDelete(TemplateArgument* arg);
+// Replaces `to`'s rarely set fields with a deep copy of `from`'s.
+void TemplateArgumentCopyExtra(TemplateArgument* to,
+                               const TemplateArgument* from);
 TemplateArgument* NewTypeTemplateArgument(TypeRecord* type);
 TemplateArgument* NewIntegralTemplateArgument(long long value);
 TemplateArgument* NewTemplateTemplateArgument(Symbol* symbol,

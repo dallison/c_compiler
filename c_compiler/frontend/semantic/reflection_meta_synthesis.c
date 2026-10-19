@@ -358,14 +358,14 @@ static TemplateArgument* MetaSynthesisTemplateArgumentFromReflection(
       } else {
         arg->kind = kTemplateParameterNonType;
         arg->value_kind = kTemplateValueReflection;
-        arg->reflection_value = reflection;
+        TemplateArgumentMutableExtra(arg)->reflection_value = reflection;
         arg->type = TypeRecordCopy(reflection->reflected_type);
       }
       break;
     default:
       arg->kind = kTemplateParameterNonType;
       arg->value_kind = kTemplateValueReflection;
-      arg->reflection_value = reflection;
+      TemplateArgumentMutableExtra(arg)->reflection_value = reflection;
       if (reflection->reflected_type != NULL) {
         arg->type = TypeRecordCopy(reflection->reflected_type);
       } else if (reflection->symbol != NULL &&

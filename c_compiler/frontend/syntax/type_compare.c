@@ -354,11 +354,12 @@ bool TemplateArgumentEqual(TemplateArgument* left,
     return TypeEqual(left->type, right->type);
   }
   if (left->kind == kTemplateParameterTemplate) {
-    return left->template_symbol == right->template_symbol &&
-           left->template_parameter_index ==
-               right->template_parameter_index &&
-           DependentTemplateArgExprEqual(left->pack_index_expr,
-                                         right->pack_index_expr);
+    return TemplateArgumentExtraOf(left)->template_symbol ==
+               TemplateArgumentExtraOf(right)->template_symbol &&
+           left->template_parameter_index == right->template_parameter_index &&
+           DependentTemplateArgExprEqual(
+               TemplateArgumentExtraOf(left)->pack_index_expr,
+               TemplateArgumentExtraOf(right)->pack_index_expr);
   }
   // Value-dependent non-type arguments (e.g. two `enable_if` SFINAE conditions)
   // are distinguished by comparing their stored expressions structurally, so
@@ -1520,10 +1521,12 @@ static uint64_t HashTemplateArgument(uint64_t hash, TemplateArgument* arg) {
     return HashTypeRecord(hash, arg->type);
   }
   if (arg->kind == kTemplateParameterTemplate) {
-    hash = HashTypeValue(hash, (uintptr_t)arg->template_symbol);
+    hash = HashTypeValue(
+        hash, (uintptr_t)TemplateArgumentExtraOf(arg)->template_symbol);
     hash = HashTypeValue(hash,
                          (uint64_t)(uint32_t)arg->template_parameter_index);
-    return HashDependentTemplateArgExpr(hash, arg->pack_index_expr);
+    return HashDependentTemplateArgExpr(
+        hash, TemplateArgumentExtraOf(arg)->pack_index_expr);
   }
   if (arg->dependent_expr != NULL) {
     return HashDependentTemplateArgExpr(hash, arg->dependent_expr);
@@ -1536,13 +1539,19 @@ static uint64_t HashTemplateArgument(uint64_t hash, TemplateArgument* arg) {
     case kTemplateValueIntegral:
       return HashTypeValue(hash, (uint64_t)arg->int_value);
     case kTemplateValuePointer:
-      hash = HashTypeValue(hash, (uintptr_t)arg->value_symbol);
-      return HashTypeValue(hash, (uint64_t)arg->value_offset);
+      hash = HashTypeValue(
+          hash, (uintptr_t)TemplateArgumentExtraOf(arg)->value_symbol);
+      return HashTypeValue(
+          hash, (uint64_t)TemplateArgumentExtraOf(arg)->value_offset);
     case kTemplateValueMemberPointer:
-      hash = HashTypeValue(hash, (uintptr_t)arg->value_symbol);
-      hash = HashTypeValue(hash, (uint64_t)arg->value_offset);
-      hash = HashTypeValue(hash, (uint64_t)arg->value_adjustment);
-      return HashTypeValue(hash, (uintptr_t)arg->member_function);
+      hash = HashTypeValue(
+          hash, (uintptr_t)TemplateArgumentExtraOf(arg)->value_symbol);
+      hash = HashTypeValue(
+          hash, (uint64_t)TemplateArgumentExtraOf(arg)->value_offset);
+      hash = HashTypeValue(
+          hash, (uint64_t)TemplateArgumentExtraOf(arg)->value_adjustment);
+      return HashTypeValue(
+          hash, (uintptr_t)TemplateArgumentExtraOf(arg)->member_function);
     case kTemplateValueNull:
     case kTemplateValueReflection:
     case kTemplateValueObject:

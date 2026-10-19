@@ -660,8 +660,8 @@ static bool EvaluateConceptTemplatePackFold(ASTNode* expr, Vector* arguments,
         SymbolExtraOf(bound)->template_template_parameter_kind ==
             kTemplateTemplateParameterConcept &&
         element != NULL && element->kind == kTemplateParameterTemplate &&
-        element->template_symbol != NULL) {
-      bound = element->template_symbol;
+        TemplateArgumentExtraOf(element)->template_symbol != NULL) {
+      bound = TemplateArgumentExtraOf(element)->template_symbol;
     }
     Vector* concrete_args = TypeSubstituteTemplateArgumentVector(
         &compiler->syntax, pattern_args, arguments);
@@ -1298,8 +1298,8 @@ static bool EvaluateConstraintInteger(ConstraintExpr* constraint,
         TemplateArgument* actual =
             arguments->value.p[concept_symbol->template_parameter_index];
         if (actual != NULL && actual->kind == kTemplateParameterTemplate &&
-            actual->template_symbol != NULL) {
-          concept_symbol = actual->template_symbol;
+            TemplateArgumentExtraOf(actual)->template_symbol != NULL) {
+          concept_symbol = TemplateArgumentExtraOf(actual)->template_symbol;
         }
       }
       bool substitution_failed = false;
@@ -1604,15 +1604,10 @@ static TemplateArgument* CopyTemplateArgumentForNormalization(
   copy->dependent_expr = arg->dependent_expr;
   copy->location = arg->location;
   copy->value_kind = arg->value_kind;
-  copy->value_symbol = arg->value_symbol;
-  copy->value_offset = arg->value_offset;
-  copy->value_adjustment = arg->value_adjustment;
-  copy->member_function = arg->member_function;
-  copy->template_symbol = arg->template_symbol;
-  copy->reflection_value = arg->reflection_value;
-  copy->pack_index_expr = arg->pack_index_expr;
-  copy->object_initializer =
-      ASTNodeClone(arg->object_initializer, IdentityCloneNode, NULL, NULL);
+  TemplateArgumentCopyExtra(copy, arg);
+  if (copy->extra != NULL) {
+    copy->extra->lvalue_symbol = NULL;
+  }
   return copy;
 }
 

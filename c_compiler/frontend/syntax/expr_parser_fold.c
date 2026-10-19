@@ -114,10 +114,12 @@ static void ClassifyCXXFoldTemplateArgument(CXXFoldPackKinds* kinds,
     return;
   }
   ClassifyCXXFoldPackIndex(kinds, argument->template_parameter_index);
-  if (argument->template_symbol != NULL &&
-      argument->template_symbol->flags.is_parameter_pack) {
-    ClassifyCXXFoldPackIndex(
-        kinds, argument->template_symbol->template_parameter_index);
+  if (TemplateArgumentExtraOf(argument)->template_symbol != NULL &&
+      TemplateArgumentExtraOf(argument)
+          ->template_symbol->flags.is_parameter_pack) {
+    ClassifyCXXFoldPackIndex(kinds,
+                             TemplateArgumentExtraOf(argument)
+                                 ->template_symbol->template_parameter_index);
   }
   for (TypeRecord* type = argument->type; type != NULL; type = type->next) {
     ClassifyCXXFoldPackIndex(kinds, type->template_parameter_index);

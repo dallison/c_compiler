@@ -2481,9 +2481,10 @@ static void AppendReflectionInstantiationKey(String* name,
       TypeRecordToTemplateKeyString(argument->type, name);
     } else if (argument->kind == kTemplateParameterTemplate) {
       StringAppend(name, "TT");
-      StringAppendInt64(name, argument->template_symbol != NULL
-                                  ? argument->template_symbol->id
-                                  : argument->template_parameter_index);
+      StringAppendInt64(
+          name, TemplateArgumentExtraOf(argument)->template_symbol != NULL
+                    ? TemplateArgumentExtraOf(argument)->template_symbol->id
+                    : argument->template_parameter_index);
     } else {
       AppendTemplateNonTypeInstantiationKey(name, argument);
     }
@@ -2518,30 +2519,38 @@ static void AppendTemplateNonTypeInstantiationKey(
       break;
     case kTemplateValuePointer:
       StringAppendChar(name, 'P');
-      StringAppendInt64(
-          name, arg->value_symbol != NULL ? arg->value_symbol->id : -1);
+      StringAppendInt64(name,
+                        TemplateArgumentExtraOf(arg)->value_symbol != NULL
+                            ? TemplateArgumentExtraOf(arg)->value_symbol->id
+                            : -1);
       StringAppendChar(name, ':');
-      StringAppendInt64(name, arg->value_offset);
+      StringAppendInt64(name, TemplateArgumentExtraOf(arg)->value_offset);
       break;
     case kTemplateValueMemberPointer:
       StringAppendChar(name, 'M');
-      StringAppendInt64(
-          name, arg->value_symbol != NULL ? arg->value_symbol->id : -1);
+      StringAppendInt64(name,
+                        TemplateArgumentExtraOf(arg)->value_symbol != NULL
+                            ? TemplateArgumentExtraOf(arg)->value_symbol->id
+                            : -1);
       StringAppendChar(name, ':');
-      StringAppendInt64(name, arg->value_offset);
+      StringAppendInt64(name, TemplateArgumentExtraOf(arg)->value_offset);
       StringAppendChar(name, ':');
-      StringAppendInt64(name, arg->value_adjustment);
+      StringAppendInt64(name, TemplateArgumentExtraOf(arg)->value_adjustment);
       StringAppendChar(name, ':');
-      StringAppendInt64(
-          name, arg->member_function != NULL ? arg->member_function->id : -1);
+      StringAppendInt64(name,
+                        TemplateArgumentExtraOf(arg)->member_function != NULL
+                            ? TemplateArgumentExtraOf(arg)->member_function->id
+                            : -1);
       break;
     case kTemplateValueReflection:
-      AppendReflectionInstantiationKey(name, arg->reflection_value);
+      AppendReflectionInstantiationKey(
+          name, TemplateArgumentExtraOf(arg)->reflection_value);
       break;
     case kTemplateValueObject:
       StringAppend(name, "O");
       if (!ConstexprObjectInitializerTemplateKey(
-              arg->type, arg->object_initializer, name)) {
+              arg->type, TemplateArgumentExtraOf(arg)->object_initializer,
+              name)) {
         StringAppend(name, "?");
       }
       break;
@@ -2571,8 +2580,10 @@ static void AppendTemplateArgumentInstantiationKey(String* name,
       StringAppendInt64(name, arg->template_parameter_index);
     } else {
       StringAppend(name, "TT");
-      StringAppendInt64(
-          name, arg->template_symbol != NULL ? arg->template_symbol->id : -1);
+      StringAppendInt64(name,
+                        TemplateArgumentExtraOf(arg)->template_symbol != NULL
+                            ? TemplateArgumentExtraOf(arg)->template_symbol->id
+                            : -1);
     }
   } else if (arg->template_parameter_index >= 0) {
     StringAppend(name, "$N");
@@ -10236,9 +10247,9 @@ static bool ConvertNonTypeArgumentToParameterType(TypeParser* parser,
   }
   arg->value_kind = kTemplateValueIntegral;
   arg->int_value = value;
-  arg->value_symbol = NULL;
-  ASTNodeDelete(arg->object_initializer);
-  arg->object_initializer = NULL;
+  TemplateArgumentMutableExtra(arg)->value_symbol = NULL;
+  ASTNodeDelete(TemplateArgumentExtraOf(arg)->object_initializer);
+  TemplateArgumentMutableExtra(arg)->object_initializer = NULL;
   TypeRecordDelete(arg->type);
   arg->type = TypeRecordCopy(param->type);
   return true;
@@ -10388,7 +10399,7 @@ static bool TemplateTemplateArgumentMatchesParameter(
       arg->kind != kTemplateParameterTemplate) {
     return false;
   }
-  Symbol* symbol = arg->template_symbol;
+  Symbol* symbol = TemplateArgumentExtraOf(arg)->template_symbol;
   TemplateTemplateParameterKind actual_kind =
       symbol != NULL && symbol->flags.is_template_template_parameter
           ? SymbolExtraOf(symbol)->template_template_parameter_kind
@@ -10400,7 +10411,8 @@ static bool TemplateTemplateArgumentMatchesParameter(
   if (actual_kind != param->template_template_kind) {
     return false;
   }
-  Vector* actual = TemplateParameterListForSymbol(arg->template_symbol);
+  Vector* actual = TemplateParameterListForSymbol(
+      TemplateArgumentExtraOf(arg)->template_symbol);
   if (actual == NULL && arg->template_parameter_index >= 0) {
     return true;
   }
@@ -10708,7 +10720,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
             str == parser->template_substitution_target));
       if (current_instantiation) {
         arg->kind = kTemplateParameterTemplate;
-        arg->template_symbol = origin;
+        TemplateArgumentMutableExtra(arg)->template_symbol = origin;
         TypeRecordDelete(arg->type);
         arg->type = NULL;
       }
@@ -11004,7 +11016,8 @@ static size_t g_template_memo_count = 0;
 
 static bool TemplateMemoArgumentConcrete(TemplateArgument* arg) {
   if (arg == NULL || arg->dependent_expr != NULL ||
-      arg->pack_index_expr != NULL || arg->template_parameter_index >= 0 ||
+      TemplateArgumentExtraOf(arg)->pack_index_expr != NULL ||
+      arg->template_parameter_index >= 0 ||
       (arg->type != NULL && TypeContainsTemplateParameter(arg->type))) {
     return false;
   }

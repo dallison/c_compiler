@@ -1014,17 +1014,33 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   copy->dependent_expr = arg->dependent_expr;
   copy->location = arg->location;
   copy->value_kind = arg->value_kind;
-  copy->value_symbol = arg->value_symbol;
-  copy->value_offset = arg->value_offset;
-  copy->value_adjustment = arg->value_adjustment;
-  copy->member_function = arg->member_function;
-  copy->template_symbol = arg->template_symbol;
-  copy->reflection_value = arg->reflection_value;
-  copy->pack_index_expr = arg->pack_index_expr;
-  copy->object_initializer =
-      ASTNodeClone(arg->object_initializer, IdentityCloneNode, NULL, NULL);
-  copy->lvalue_symbol = arg->lvalue_symbol;
+  TemplateArgumentCopyExtra(copy, arg);
   return copy;
+}
+
+const TemplateArgumentExtra kNoTemplateArgumentExtra;
+
+TemplateArgumentExtra* TemplateArgumentMutableExtra(TemplateArgument* arg) {
+  if (arg->extra == NULL) {
+    arg->extra = calloc(1, sizeof(TemplateArgumentExtra));
+    arg->extra->owner = arg;
+  }
+  assert(arg->extra->owner == arg);
+  return arg->extra;
+}
+
+void TemplateArgumentCopyExtra(TemplateArgument* to,
+                               const TemplateArgument* from) {
+  if (from->extra == NULL) {
+    return;
+  }
+  TemplateArgumentExtra* extra = TemplateArgumentMutableExtra(to);
+  ASTNodeDelete(extra->object_initializer);
+  TemplateArgument* owner = extra->owner;
+  *extra = *from->extra;
+  extra->owner = owner;
+  extra->object_initializer = ASTNodeClone(from->extra->object_initializer,
+                                           IdentityCloneNode, NULL, NULL);
 }
 
 TemplateArgument* NewTypeTemplateArgument(TypeRecord* type) {
@@ -1051,7 +1067,7 @@ TemplateArgument* NewTemplateTemplateArgument(Symbol* symbol,
   TemplateArgument* arg = TemplateArgumentAlloc();
   arg->kind = kTemplateParameterTemplate;
   arg->template_parameter_index = parameter_index;
-  arg->template_symbol = symbol;
+  TemplateArgumentMutableExtra(arg)->template_symbol = symbol;
   arg->location = SOURCE_LOCATION_MISSING;
   return arg;
 }
@@ -1123,13 +1139,16 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
   }
   TypeRecordDelete(arg->type);
   arg->type = TypeRecordCopy(expr->type);
-  arg->value_symbol = NULL;
-  arg->value_offset = 0;
-  arg->value_adjustment = 0;
-  arg->member_function = NULL;
-  arg->reflection_value = NULL;
-  ASTNodeDelete(arg->object_initializer);
-  arg->object_initializer = NULL;
+  if (arg->extra != NULL) {
+    TemplateArgumentExtra* extra = TemplateArgumentMutableExtra(arg);
+    extra->value_symbol = NULL;
+    extra->value_offset = 0;
+    extra->value_adjustment = 0;
+    extra->member_function = NULL;
+    extra->reflection_value = NULL;
+    ASTNodeDelete(extra->object_initializer);
+    extra->object_initializer = NULL;
+  }
 
   if (TypeIsReflection(expr->type)) {
     ReflectionValue* reflection = SemanticEvaluateReflection(expr);
@@ -1137,7 +1156,7 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
       return false;
     }
     arg->value_kind = kTemplateValueReflection;
-    arg->reflection_value = reflection;
+    TemplateArgumentMutableExtra(arg)->reflection_value = reflection;
     return true;
   }
   if (TypeIsStructOrUnion(expr->type)) {
@@ -1153,9 +1172,10 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
       return false;
     }
     arg->value_kind = kTemplateValueObject;
-    arg->object_initializer = initializer;
-    arg->value_symbol = GetCXXTemplateParameterObject(arg);
-    if (arg->value_symbol == NULL) {
+    TemplateArgumentMutableExtra(arg)->object_initializer = initializer;
+    TemplateArgumentMutableExtra(arg)->value_symbol =
+        GetCXXTemplateParameterObject(arg);
+    if (TemplateArgumentExtraOf(arg)->value_symbol == NULL) {
       return false;
     }
     return true;
@@ -1175,10 +1195,11 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
     }
     StructMember* member = MemberPointerReferencedMember(expr);
     arg->value_kind = kTemplateValueMemberPointer;
-    arg->value_symbol = member != NULL ? member->symbol : value.fn_symbol;
-    arg->value_offset = value.ptr;
-    arg->value_adjustment = value.adj;
-    arg->member_function = value.fn_symbol;
+    TemplateArgumentMutableExtra(arg)->value_symbol =
+        member != NULL ? member->symbol : value.fn_symbol;
+    TemplateArgumentMutableExtra(arg)->value_offset = value.ptr;
+    TemplateArgumentMutableExtra(arg)->value_adjustment = value.adj;
+    TemplateArgumentMutableExtra(arg)->member_function = value.fn_symbol;
     return true;
   }
   if (TypeIsArray(expr->type)) {
@@ -1187,7 +1208,7 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
       return false;
     }
     arg->value_kind = kTemplateValuePointer;
-    arg->value_symbol = symbol;
+    TemplateArgumentMutableExtra(arg)->value_symbol = symbol;
     TypeRecordDelete(arg->type);
     arg->type = NewPointerTo(GetQualifiers(expr->type), expr->type->next);
     return true;
@@ -1204,7 +1225,7 @@ bool TemplateArgumentSetFromExpression(TemplateArgument* arg, ASTNode* expr) {
       return false;
     }
     arg->value_kind = kTemplateValuePointer;
-    arg->value_symbol = symbol;
+    TemplateArgumentMutableExtra(arg)->value_symbol = symbol;
     if (TypeIsFunction(expr->type)) {
       TypeRecordDelete(arg->type);
       arg->type =
@@ -1249,7 +1270,7 @@ Symbol* TemplateArgumentLvalueSymbol(ASTNode* expr) {
 
 bool TemplateArgumentSetLvalue(TemplateArgument* arg, Symbol* symbol,
                                bool value_ok, bool may_be_dependent) {
-  arg->lvalue_symbol = symbol;
+  TemplateArgumentMutableExtra(arg)->lvalue_symbol = symbol;
   if (value_ok) {
     return true;
   }
@@ -1263,8 +1284,8 @@ bool TemplateArgumentSetLvalue(TemplateArgument* arg, Symbol* symbol,
   arg->type->type = symbol->type->type;
   TypeRecordCalculateSize(arg->type);
   arg->value_kind = kTemplateValuePointer;
-  arg->value_symbol = symbol;
-  arg->value_offset = 0;
+  TemplateArgumentMutableExtra(arg)->value_symbol = symbol;
+  TemplateArgumentMutableExtra(arg)->value_offset = 0;
   arg->int_value = 0;
   return true;
 }
@@ -1272,7 +1293,8 @@ bool TemplateArgumentSetLvalue(TemplateArgument* arg, Symbol* symbol,
 bool TemplateArgumentBindReferenceParameter(TemplateArgument* arg,
                                             TypeRecord* parameter_type) {
   if (arg == NULL || parameter_type == NULL ||
-      !TypeIsReference(parameter_type) || arg->lvalue_symbol == NULL ||
+      !TypeIsReference(parameter_type) ||
+      TemplateArgumentExtraOf(arg)->lvalue_symbol == NULL ||
       arg->dependent_expr != NULL || arg->template_parameter_index >= 0) {
     return false;
   }
@@ -1282,7 +1304,7 @@ bool TemplateArgumentBindReferenceParameter(TemplateArgument* arg,
         TypeIsReference(arg->type))) {
     return false;
   }
-  TypeRecord* object_type = arg->lvalue_symbol->type;
+  TypeRecord* object_type = TemplateArgumentExtraOf(arg)->lvalue_symbol->type;
   TypeRecord* referent = parameter_type->next;
   if (object_type == NULL || referent == NULL ||
       !TypeEqualIgnoringTopLevelQualifierMask(object_type, referent,
@@ -1301,11 +1323,12 @@ bool TemplateArgumentBindReferenceParameter(TemplateArgument* arg,
   }
   TypeRecordDelete(arg->type);
   arg->type = TypeRecordCopy(parameter_type);
-  ASTNodeDelete(arg->object_initializer);
-  arg->object_initializer = NULL;
+  ASTNodeDelete(TemplateArgumentExtraOf(arg)->object_initializer);
+  TemplateArgumentMutableExtra(arg)->object_initializer = NULL;
   arg->value_kind = kTemplateValuePointer;
-  arg->value_symbol = arg->lvalue_symbol;
-  arg->value_offset = 0;
+  TemplateArgumentMutableExtra(arg)->value_symbol =
+      TemplateArgumentExtraOf(arg)->lvalue_symbol;
+  TemplateArgumentMutableExtra(arg)->value_offset = 0;
   arg->int_value = 0;
   return true;
 }
@@ -1320,9 +1343,9 @@ bool TemplateArgumentValuesEqual(const TemplateArgument* left,
     return TypeEqual(left->type, right->type);
   }
   if (left->kind == kTemplateParameterTemplate) {
-    return left->template_symbol == right->template_symbol &&
-           left->template_parameter_index ==
-               right->template_parameter_index;
+    return TemplateArgumentExtraOf(left)->template_symbol ==
+               TemplateArgumentExtraOf(right)->template_symbol &&
+           left->template_parameter_index == right->template_parameter_index;
   }
   if (left->template_parameter_index != right->template_parameter_index) {
     return false;
@@ -1342,19 +1365,27 @@ bool TemplateArgumentValuesEqual(const TemplateArgument* left,
     case kTemplateValueNull:
       return true;
     case kTemplateValuePointer:
-      return left->value_symbol == right->value_symbol &&
-             left->value_offset == right->value_offset;
+      return TemplateArgumentExtraOf(left)->value_symbol ==
+                 TemplateArgumentExtraOf(right)->value_symbol &&
+             TemplateArgumentExtraOf(left)->value_offset ==
+                 TemplateArgumentExtraOf(right)->value_offset;
     case kTemplateValueMemberPointer:
-      return left->value_symbol == right->value_symbol &&
-             left->value_offset == right->value_offset &&
-             left->value_adjustment == right->value_adjustment &&
-             left->member_function == right->member_function;
+      return TemplateArgumentExtraOf(left)->value_symbol ==
+                 TemplateArgumentExtraOf(right)->value_symbol &&
+             TemplateArgumentExtraOf(left)->value_offset ==
+                 TemplateArgumentExtraOf(right)->value_offset &&
+             TemplateArgumentExtraOf(left)->value_adjustment ==
+                 TemplateArgumentExtraOf(right)->value_adjustment &&
+             TemplateArgumentExtraOf(left)->member_function ==
+                 TemplateArgumentExtraOf(right)->member_function;
     case kTemplateValueReflection:
-      return ReflectionValueEqual(left->reflection_value,
-                                  right->reflection_value);
+      return ReflectionValueEqual(
+          TemplateArgumentExtraOf(left)->reflection_value,
+          TemplateArgumentExtraOf(right)->reflection_value);
     case kTemplateValueObject:
       return ConstexprObjectInitializersEquivalent(
-          left->type, left->object_initializer, right->object_initializer);
+          left->type, TemplateArgumentExtraOf(left)->object_initializer,
+          TemplateArgumentExtraOf(right)->object_initializer);
     case kTemplateValueNone:
       return left->dependent_expr == right->dependent_expr;
   }
@@ -1363,7 +1394,8 @@ bool TemplateArgumentValuesEqual(const TemplateArgument* left,
 
 static StructMember* TemplateArgumentReferencedMember(
     const TemplateArgument* arg) {
-  if (arg == NULL || arg->value_symbol == NULL || arg->type == NULL) {
+  if (arg == NULL || TemplateArgumentExtraOf(arg)->value_symbol == NULL ||
+      arg->type == NULL) {
     return NULL;
   }
   Struct* owner = TypeMemberPointerClass(arg->type);
@@ -1372,7 +1404,8 @@ static StructMember* TemplateArgumentReferencedMember(
   }
   for (size_t i = 0; i < owner->members.length; i++) {
     StructMember* member = owner->members.value.p[i];
-    if (member != NULL && member->symbol == arg->value_symbol) {
+    if (member != NULL &&
+        member->symbol == TemplateArgumentExtraOf(arg)->value_symbol) {
       return member;
     }
   }
@@ -1399,11 +1432,12 @@ ASTNode* TemplateArgumentMaterializeExpression(
       return NewIntConstantASTNode(null_member.ptr, type, location);
     }
     case kTemplateValuePointer: {
-      if (arg->value_symbol == NULL) {
+      if (TemplateArgumentExtraOf(arg)->value_symbol == NULL) {
         TypeRecordDelete(type);
         return NULL;
       }
-      ASTNode* id = NewIdentifierASTNode(arg->value_symbol, location);
+      ASTNode* id = NewIdentifierASTNode(
+          TemplateArgumentExtraOf(arg)->value_symbol, location);
       if (TypeIsReference(type)) {
         ASTNodeSetType(id, TypeRecordCopy(type->next));
         TypeRecordDelete(type);
@@ -1417,7 +1451,8 @@ ASTNode* TemplateArgumentMaterializeExpression(
     case kTemplateValueMemberPointer: {
       StructMember* member = TemplateArgumentReferencedMember(arg);
       if (member == NULL) {
-        return NewIntConstantASTNode(arg->value_offset, type, location);
+        return NewIntConstantASTNode(TemplateArgumentExtraOf(arg)->value_offset,
+                                     type, location);
       }
       ASTNode* member_node = NewStructMemberASTNode(member, location);
       ASTNode* member_pointer =
@@ -1427,16 +1462,17 @@ ASTNode* TemplateArgumentMaterializeExpression(
     }
     case kTemplateValueReflection:
       TypeRecordDelete(type);
-      return arg->reflection_value != NULL
-                 ? NewReflectionConstantASTNode(arg->reflection_value, location)
+      return TemplateArgumentExtraOf(arg)->reflection_value != NULL
+                 ? NewReflectionConstantASTNode(
+                       TemplateArgumentExtraOf(arg)->reflection_value, location)
                  : NULL;
     case kTemplateValueObject: {
-      if (arg->value_symbol == NULL) {
+      if (TemplateArgumentExtraOf(arg)->value_symbol == NULL) {
         TypeRecordDelete(type);
         return NULL;
       }
-      ASTNode* object =
-          NewIdentifierASTNode(arg->value_symbol, location);
+      ASTNode* object = NewIdentifierASTNode(
+          TemplateArgumentExtraOf(arg)->value_symbol, location);
       ASTNodeSetType(object, type);
       return object;
     }
@@ -1783,8 +1819,9 @@ static uint64_t TypeInternHashArguments(const Vector* args) {
     h = TypeInternMix(h, arg->is_pack_expansion);
     h = TypeInternMix(h, TypeInternHashChild(arg->type));
     h = TypeInternMix(h, (uint64_t)arg->int_value);
-    h = TypeInternMix(h, (uintptr_t)arg->value_symbol);
-    h = TypeInternMix(h, (uintptr_t)arg->template_symbol);
+    h = TypeInternMix(h, (uintptr_t)TemplateArgumentExtraOf(arg)->value_symbol);
+    h = TypeInternMix(h,
+                      (uintptr_t)TemplateArgumentExtraOf(arg)->template_symbol);
     h = TypeInternMix(h, TypeInternHashArguments(arg->pack_arguments));
   }
   return h;
@@ -1852,14 +1889,23 @@ static bool TypeInternArgumentsEqual(const Vector* args,
         a->int_value != b->int_value ||
         a->template_parameter_index != b->template_parameter_index ||
         a->dependent_expr != b->dependent_expr ||
-        a->value_kind != b->value_kind || a->value_symbol != b->value_symbol ||
-        a->value_offset != b->value_offset ||
-        a->value_adjustment != b->value_adjustment ||
-        a->member_function != b->member_function ||
-        a->template_symbol != b->template_symbol ||
-        a->reflection_value != b->reflection_value ||
-        a->pack_index_expr != b->pack_index_expr ||
-        a->object_initializer != b->object_initializer ||
+        a->value_kind != b->value_kind ||
+        TemplateArgumentExtraOf(a)->value_symbol !=
+            TemplateArgumentExtraOf(b)->value_symbol ||
+        TemplateArgumentExtraOf(a)->value_offset !=
+            TemplateArgumentExtraOf(b)->value_offset ||
+        TemplateArgumentExtraOf(a)->value_adjustment !=
+            TemplateArgumentExtraOf(b)->value_adjustment ||
+        TemplateArgumentExtraOf(a)->member_function !=
+            TemplateArgumentExtraOf(b)->member_function ||
+        TemplateArgumentExtraOf(a)->template_symbol !=
+            TemplateArgumentExtraOf(b)->template_symbol ||
+        TemplateArgumentExtraOf(a)->reflection_value !=
+            TemplateArgumentExtraOf(b)->reflection_value ||
+        TemplateArgumentExtraOf(a)->pack_index_expr !=
+            TemplateArgumentExtraOf(b)->pack_index_expr ||
+        TemplateArgumentExtraOf(a)->object_initializer !=
+            TemplateArgumentExtraOf(b)->object_initializer ||
         !TypeInternChildEqual(a->type, b->type) ||
         !TypeInternArgumentsEqual(a->pack_arguments, b->pack_arguments)) {
       return false;
@@ -2514,7 +2560,10 @@ void TemplateArgumentDelete(TemplateArgument* arg) {
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
   }
-  ASTNodeDelete(arg->object_initializer);
+  if (arg->extra != NULL) {
+    ASTNodeDelete(arg->extra->object_initializer);
+    free(arg->extra);
+  }
   memset(arg, 0, sizeof(*arg));
   TemplateArgumentSlot* slot = (TemplateArgumentSlot*)arg;
   slot->next = free_template_arguments;
@@ -2965,12 +3014,16 @@ static uint64_t TypeCensusArgsHash(Vector* args, int depth) {
     h = TypeCensusMix(h, TypeCensusArgsHash(a->pack_arguments, depth + 1));
     h = TypeCensusMix(h, (uintptr_t)a->dependent_expr);
     h = TypeCensusMix(h, a->value_kind);
-    h = TypeCensusMix(h, (uintptr_t)a->value_symbol);
-    h = TypeCensusMix(h, (uint64_t)a->value_offset);
-    h = TypeCensusMix(h, (uintptr_t)a->member_function);
-    h = TypeCensusMix(h, (uintptr_t)a->template_symbol);
-    h = TypeCensusMix(h, (uintptr_t)a->reflection_value);
-    h = TypeCensusMix(h, (uintptr_t)a->object_initializer);
+    h = TypeCensusMix(h, (uintptr_t)TemplateArgumentExtraOf(a)->value_symbol);
+    h = TypeCensusMix(h, (uint64_t)TemplateArgumentExtraOf(a)->value_offset);
+    h = TypeCensusMix(h,
+                      (uintptr_t)TemplateArgumentExtraOf(a)->member_function);
+    h = TypeCensusMix(h,
+                      (uintptr_t)TemplateArgumentExtraOf(a)->template_symbol);
+    h = TypeCensusMix(h,
+                      (uintptr_t)TemplateArgumentExtraOf(a)->reflection_value);
+    h = TypeCensusMix(
+        h, (uintptr_t)TemplateArgumentExtraOf(a)->object_initializer);
   }
   return h;
 }

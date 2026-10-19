@@ -623,19 +623,22 @@ static void WriteTemplateArgument(SerializeContext* ctx, WireBuffer* out,
   SWriteRef(ctx, out, kTArg_dependent_expr, kSerialKindAST, a->dependent_expr);
   WireWriteUint64(out, kTArg_location, (uint64_t)a->location);
   WireWriteInt32(out, kTArg_value_kind, (int32_t)a->value_kind);
-  SWriteRef(ctx, out, kTArg_value_symbol, kSerialKindSymbol, a->value_symbol);
-  WireWriteInt64(out, kTArg_value_offset, a->value_offset);
-  WireWriteInt64(out, kTArg_value_adjustment, a->value_adjustment);
+  SWriteRef(ctx, out, kTArg_value_symbol, kSerialKindSymbol,
+            TemplateArgumentExtraOf(a)->value_symbol);
+  WireWriteInt64(out, kTArg_value_offset,
+                 TemplateArgumentExtraOf(a)->value_offset);
+  WireWriteInt64(out, kTArg_value_adjustment,
+                 TemplateArgumentExtraOf(a)->value_adjustment);
   SWriteRef(ctx, out, kTArg_member_function, kSerialKindSymbol,
-            a->member_function);
+            TemplateArgumentExtraOf(a)->member_function);
   SWriteRef(ctx, out, kTArg_template_symbol, kSerialKindSymbol,
-            a->template_symbol);
+            TemplateArgumentExtraOf(a)->template_symbol);
   SWriteRef(ctx, out, kTArg_pack_index_expr, kSerialKindAST,
-            a->pack_index_expr);
+            TemplateArgumentExtraOf(a)->pack_index_expr);
   SWriteRef(ctx, out, kTArg_object_initializer, kSerialKindAST,
-            a->object_initializer);
-  if (a->reflection_value != NULL) {
-    ReflectionValue* reflection = a->reflection_value;
+            TemplateArgumentExtraOf(a)->object_initializer);
+  if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+    ReflectionValue* reflection = TemplateArgumentExtraOf(a)->reflection_value;
     WireWriteInt32(out, kTArg_reflection_kind,
                    (int32_t)reflection->kind);
     SWriteRef(ctx, out, kTArg_reflection_type, kSerialKindType,
@@ -757,72 +760,74 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         break;
       }
       case kTArg_value_symbol:
-        a->value_symbol = (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
+        TemplateArgumentMutableExtra(a)->value_symbol =
+            (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
         break;
       case kTArg_value_offset:
-        WireReadInt64(in, &a->value_offset);
+        WireReadInt64(in, &TemplateArgumentMutableExtra(a)->value_offset);
         break;
       case kTArg_value_adjustment:
-        WireReadInt64(in, &a->value_adjustment);
+        WireReadInt64(in, &TemplateArgumentMutableExtra(a)->value_adjustment);
         break;
       case kTArg_member_function:
-        a->member_function =
+        TemplateArgumentMutableExtra(a)->member_function =
             (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
         break;
       case kTArg_template_symbol:
-        a->template_symbol =
+        TemplateArgumentMutableExtra(a)->template_symbol =
             (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
         break;
       case kTArg_pack_index_expr:
-        a->pack_index_expr =
+        TemplateArgumentMutableExtra(a)->pack_index_expr =
             (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
         break;
       case kTArg_object_initializer:
-        a->object_initializer =
+        TemplateArgumentMutableExtra(a)->object_initializer =
             (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
         break;
       case kTArg_reflection_kind: {
         int32_t value = 0;
         WireReadInt32(in, &value);
-        a->reflection_value = ReflectionCreateDeserialized(
-            (ReflectionEntityKind)value, a->location);
+        TemplateArgumentMutableExtra(a)->reflection_value =
+            ReflectionCreateDeserialized((ReflectionEntityKind)value,
+                                         a->location);
         break;
       }
       case kTArg_reflection_type:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->reflected_type =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->reflected_type =
               (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
         } else {
           (void)SReadRef(ctx, in, kSerialKindType);
         }
         break;
       case kTArg_reflection_symbol:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->symbol =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->symbol =
               (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
         } else {
           (void)SReadRef(ctx, in, kSerialKindSymbol);
         }
         break;
       case kTArg_reflection_member:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->member =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->member =
               (StructMember*)SReadRef(ctx, in, kSerialKindStructMember);
         } else {
           (void)SReadRef(ctx, in, kSerialKindStructMember);
         }
         break;
       case kTArg_reflection_namespace:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->namespace_ =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->namespace_ =
               (Namespace*)SReadRef(ctx, in, kSerialKindNamespace);
         } else {
           (void)SReadRef(ctx, in, kSerialKindNamespace);
         }
         break;
       case kTArg_reflection_parent:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->parent_class =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->parent_class =
               (Struct*)SReadRef(ctx, in, kSerialKindStruct);
         } else {
           (void)SReadRef(ctx, in, kSerialKindStruct);
@@ -831,113 +836,127 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
       case kTArg_reflection_base_index: {
         uint64_t value = 0;
         WireReadUint64(in, &value);
-        if (a->reflection_value != NULL) {
-          a->reflection_value->base_index = (size_t)value;
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->base_index =
+              (size_t)value;
         }
         break;
       }
       case kTArg_reflection_location: {
         uint64_t value = 0;
         WireReadUint64(in, &value);
-        if (a->reflection_value != NULL) {
-          a->reflection_value->location = (SourceLocation)value;
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->location =
+              (SourceLocation)value;
         }
         break;
       }
       case kTArg_reflection_parameter_index: {
         uint64_t value = 0;
         WireReadUint64(in, &value);
-        if (a->reflection_value != NULL) {
-          a->reflection_value->parameter_index = (size_t)value;
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->parameter_index =
+              (size_t)value;
         }
         break;
       }
       case kTArg_reflection_scalar_ivalue:
-        if (a->reflection_value != NULL) {
-          WireReadInt64(in, &a->reflection_value->scalar_ivalue);
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          WireReadInt64(
+              in, &TemplateArgumentExtraOf(a)->reflection_value->scalar_ivalue);
         } else {
           int64_t ignored = 0;
           WireReadInt64(in, &ignored);
         }
         break;
       case kTArg_reflection_scalar_fvalue:
-        if (a->reflection_value != NULL) {
-          WireReadDouble(in, &a->reflection_value->scalar_fvalue);
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          WireReadDouble(
+              in, &TemplateArgumentExtraOf(a)->reflection_value->scalar_fvalue);
         } else {
           double ignored = 0.0;
           WireReadDouble(in, &ignored);
         }
         break;
       case kTArg_reflection_scalar_is_float:
-        if (a->reflection_value != NULL) {
-          WireReadBool(in, &a->reflection_value->scalar_is_float);
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          WireReadBool(
+              in,
+              &TemplateArgumentExtraOf(a)->reflection_value->scalar_is_float);
         } else {
           bool ignored = false;
           WireReadBool(in, &ignored);
         }
         break;
       case kTArg_reflection_namespace_alias_target:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->namespace_alias_target =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->namespace_alias_target =
               (Namespace*)SReadRef(ctx, in, kSerialKindNamespace);
         } else {
           (void)SReadRef(ctx, in, kSerialKindNamespace);
         }
         break;
       case kTArg_reflection_constexpr_initializer:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->constexpr_initializer =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->constexpr_initializer =
               (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
         } else {
           (void)SReadRef(ctx, in, kSerialKindAST);
         }
         break;
       case kTArg_reflection_promoted_symbol:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->promoted_symbol =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->promoted_symbol =
               (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
         } else {
           (void)SReadRef(ctx, in, kSerialKindSymbol);
         }
         break;
       case kTArg_reflection_substituted_template:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->substituted_template =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->substituted_template =
               (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
         } else {
           (void)SReadRef(ctx, in, kSerialKindSymbol);
         }
         break;
       case kTArg_reflection_extract_type:
-        if (a->reflection_value != NULL) {
-          a->reflection_value->extract_type =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          TemplateArgumentExtraOf(a)->reflection_value->extract_type =
               (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
-          TypeRecordIncRef(a->reflection_value->extract_type);
+          TypeRecordIncRef(
+              TemplateArgumentExtraOf(a)->reflection_value->extract_type);
         } else {
           (void)SReadRef(ctx, in, kSerialKindType);
         }
         break;
       case kTArg_reflection_dms_member_type:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->data_member_spec == NULL) {
-            a->reflection_value->data_member_spec =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->data_member_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->data_member_spec =
                 ReflectionDataMemberSpecNew(NULL);
           }
-          a->reflection_value->data_member_spec->member_type =
+          TemplateArgumentExtraOf(a)
+              ->reflection_value->data_member_spec->member_type =
               (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
           TypeRecordIncRef(
-              a->reflection_value->data_member_spec->member_type);
+              TemplateArgumentExtraOf(a)
+                  ->reflection_value->data_member_spec->member_type);
         } else {
           (void)SReadRef(ctx, in, kSerialKindType);
         }
         break;
       case kTArg_reflection_dms_name:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->data_member_spec == NULL) {
-            a->reflection_value->data_member_spec =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->data_member_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->data_member_spec =
                 ReflectionDataMemberSpecNew(NULL);
           }
-          SReadStringVal(ctx, in, &a->reflection_value->data_member_spec->name);
+          SReadStringVal(ctx, in,
+                         &TemplateArgumentExtraOf(a)
+                              ->reflection_value->data_member_spec->name);
         } else {
           String ignored;
           StringInit(&ignored, NULL);
@@ -946,89 +965,108 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         }
         break;
       case kTArg_reflection_dms_alignment:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->data_member_spec == NULL) {
-            a->reflection_value->data_member_spec =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->data_member_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->data_member_spec =
                 ReflectionDataMemberSpecNew(NULL);
           }
           uint64_t alignment = 0;
           WireReadUint64(in, &alignment);
-          a->reflection_value->data_member_spec->alignment = (size_t)alignment;
+          TemplateArgumentExtraOf(a)
+              ->reflection_value->data_member_spec->alignment =
+              (size_t)alignment;
         } else {
           uint64_t ignored = 0;
           WireReadUint64(in, &ignored);
         }
         break;
       case kTArg_reflection_dms_bit_width:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->data_member_spec == NULL) {
-            a->reflection_value->data_member_spec =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->data_member_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->data_member_spec =
                 ReflectionDataMemberSpecNew(NULL);
           }
           uint64_t bit_width = 0;
           WireReadUint64(in, &bit_width);
-          a->reflection_value->data_member_spec->bit_width = (size_t)bit_width;
+          TemplateArgumentExtraOf(a)
+              ->reflection_value->data_member_spec->bit_width =
+              (size_t)bit_width;
         } else {
           uint64_t ignored = 0;
           WireReadUint64(in, &ignored);
         }
         break;
       case kTArg_reflection_dms_no_unique_address:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->data_member_spec == NULL) {
-            a->reflection_value->data_member_spec =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->data_member_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->data_member_spec =
                 ReflectionDataMemberSpecNew(NULL);
           }
-          WireReadBool(in,
-                       &a->reflection_value->data_member_spec->no_unique_address);
+          WireReadBool(
+              in, &TemplateArgumentExtraOf(a)
+                       ->reflection_value->data_member_spec->no_unique_address);
         } else {
           bool ignored = false;
           WireReadBool(in, &ignored);
         }
         break;
       case kTArg_reflection_dms_has_name:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->data_member_spec == NULL) {
-            a->reflection_value->data_member_spec =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->data_member_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->data_member_spec =
                 ReflectionDataMemberSpecNew(NULL);
           }
-          WireReadBool(in, &a->reflection_value->data_member_spec->has_name);
+          WireReadBool(in, &TemplateArgumentExtraOf(a)
+                                ->reflection_value->data_member_spec->has_name);
         } else {
           bool ignored = false;
           WireReadBool(in, &ignored);
         }
         break;
       case kTArg_reflection_dms_has_alignment:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->data_member_spec == NULL) {
-            a->reflection_value->data_member_spec =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->data_member_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->data_member_spec =
                 ReflectionDataMemberSpecNew(NULL);
           }
-          WireReadBool(in,
-                       &a->reflection_value->data_member_spec->has_alignment);
+          WireReadBool(
+              in, &TemplateArgumentExtraOf(a)
+                       ->reflection_value->data_member_spec->has_alignment);
         } else {
           bool ignored = false;
           WireReadBool(in, &ignored);
         }
         break;
       case kTArg_reflection_dms_has_bit_width:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->data_member_spec == NULL) {
-            a->reflection_value->data_member_spec =
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->data_member_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->data_member_spec =
                 ReflectionDataMemberSpecNew(NULL);
           }
-          WireReadBool(in, &a->reflection_value->data_member_spec->has_bit_width);
+          WireReadBool(
+              in, &TemplateArgumentExtraOf(a)
+                       ->reflection_value->data_member_spec->has_bit_width);
         } else {
           bool ignored = false;
           WireReadBool(in, &ignored);
         }
         break;
       case kTArg_reflection_ens_name:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->enumerator_spec == NULL) {
-            a->reflection_value->enumerator_spec = ReflectionEnumeratorSpecNew();
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->enumerator_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->enumerator_spec =
+                ReflectionEnumeratorSpecNew();
           }
-          SReadStringVal(ctx, in, &a->reflection_value->enumerator_spec->name);
+          SReadStringVal(ctx, in,
+                         &TemplateArgumentExtraOf(a)
+                              ->reflection_value->enumerator_spec->name);
         } else {
           String ignored;
           StringInit(&ignored, NULL);
@@ -1037,42 +1075,51 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         }
         break;
       case kTArg_reflection_ens_value:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->enumerator_spec == NULL) {
-            a->reflection_value->enumerator_spec = ReflectionEnumeratorSpecNew();
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->enumerator_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->enumerator_spec =
+                ReflectionEnumeratorSpecNew();
           }
-          WireReadInt64(in, &a->reflection_value->enumerator_spec->value);
+          WireReadInt64(in, &TemplateArgumentExtraOf(a)
+                                 ->reflection_value->enumerator_spec->value);
         } else {
           int64_t ignored = 0;
           WireReadInt64(in, &ignored);
         }
         break;
       case kTArg_reflection_ens_has_value:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->enumerator_spec == NULL) {
-            a->reflection_value->enumerator_spec = ReflectionEnumeratorSpecNew();
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->enumerator_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->enumerator_spec =
+                ReflectionEnumeratorSpecNew();
           }
-          WireReadBool(in, &a->reflection_value->enumerator_spec->has_value);
+          WireReadBool(in, &TemplateArgumentExtraOf(a)
+                                ->reflection_value->enumerator_spec->has_value);
         } else {
           bool ignored = false;
           WireReadBool(in, &ignored);
         }
         break;
       case kTArg_reflection_ens_has_name:
-        if (a->reflection_value != NULL) {
-          if (a->reflection_value->enumerator_spec == NULL) {
-            a->reflection_value->enumerator_spec = ReflectionEnumeratorSpecNew();
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+          if (TemplateArgumentExtraOf(a)->reflection_value->enumerator_spec ==
+              NULL) {
+            TemplateArgumentExtraOf(a)->reflection_value->enumerator_spec =
+                ReflectionEnumeratorSpecNew();
           }
-          WireReadBool(in, &a->reflection_value->enumerator_spec->has_name);
+          WireReadBool(in, &TemplateArgumentExtraOf(a)
+                                ->reflection_value->enumerator_spec->has_name);
         } else {
           bool ignored = false;
           WireReadBool(in, &ignored);
         }
         break;
       default:
-        if (a->reflection_value != NULL &&
-            SerialReadReflectionExtendedField(ctx, in, field,
-                                              a->reflection_value)) {
+        if (TemplateArgumentExtraOf(a)->reflection_value != NULL &&
+            SerialReadReflectionExtendedField(
+                ctx, in, field, TemplateArgumentExtraOf(a)->reflection_value)) {
           break;
         }
         WireSkip(in, wt);
@@ -1085,7 +1132,10 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
     // Modules written before typed NTTPs only carried int_value.
     a->value_kind = kTemplateValueIntegral;
   }
-  a->reflection_value = ReflectionCanonicalize(a->reflection_value);
+  if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
+    TemplateArgumentMutableExtra(a)->reflection_value =
+        ReflectionCanonicalize(a->extra->reflection_value);
+  }
   return a;
 }
 

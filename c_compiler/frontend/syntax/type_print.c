@@ -584,14 +584,16 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
   } else if (argument->kind == kTemplateParameterTemplate) {
     if (argument->template_parameter_index >= 0) {
       StringPrintf(result, "$TT%d", argument->template_parameter_index);
-    } else if (argument->template_symbol != NULL) {
-      StringPrintf(result, "TT%d", argument->template_symbol->id);
+    } else if (TemplateArgumentExtraOf(argument)->template_symbol != NULL) {
+      StringPrintf(result, "TT%d",
+                   TemplateArgumentExtraOf(argument)->template_symbol->id);
     } else {
       StringAppend(result, "TT?");
     }
-    if (argument->pack_index_expr != NULL) {
+    if (TemplateArgumentExtraOf(argument)->pack_index_expr != NULL) {
       StringAppend(result, "...[");
-      PackIndexExpressionToString(argument->pack_index_expr, result);
+      PackIndexExpressionToString(
+          TemplateArgumentExtraOf(argument)->pack_index_expr, result);
       StringAppendChar(result, ']');
     }
   } else if (argument->template_parameter_index >= 0) {
@@ -609,22 +611,28 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
         StringAppend(result, "N");
         break;
       case kTemplateValuePointer:
-        StringPrintf(result, "P%d+%lld",
-                     argument->value_symbol != NULL
-                         ? argument->value_symbol->id : -1,
-                     (long long)argument->value_offset);
+        StringPrintf(
+            result, "P%d+%lld",
+            TemplateArgumentExtraOf(argument)->value_symbol != NULL
+                ? TemplateArgumentExtraOf(argument)->value_symbol->id
+                : -1,
+            (long long)TemplateArgumentExtraOf(argument)->value_offset);
         break;
       case kTemplateValueMemberPointer:
-        StringPrintf(result, "M%d:%lld:%lld:%d",
-                     argument->value_symbol != NULL
-                         ? argument->value_symbol->id : -1,
-                     (long long)argument->value_offset,
-                     (long long)argument->value_adjustment,
-                     argument->member_function != NULL
-                         ? argument->member_function->id : -1);
+        StringPrintf(
+            result, "M%d:%lld:%lld:%d",
+            TemplateArgumentExtraOf(argument)->value_symbol != NULL
+                ? TemplateArgumentExtraOf(argument)->value_symbol->id
+                : -1,
+            (long long)TemplateArgumentExtraOf(argument)->value_offset,
+            (long long)TemplateArgumentExtraOf(argument)->value_adjustment,
+            TemplateArgumentExtraOf(argument)->member_function != NULL
+                ? TemplateArgumentExtraOf(argument)->member_function->id
+                : -1);
         break;
       case kTemplateValueReflection: {
-        ReflectionValue* reflection = argument->reflection_value;
+        ReflectionValue* reflection =
+            TemplateArgumentExtraOf(argument)->reflection_value;
         StringPrintf(result, "R%d:%d:%d:%d:%zu",
                      reflection != NULL ? (int)reflection->kind : -1,
                      reflection != NULL && reflection->reflected_type != NULL
@@ -640,7 +648,9 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
       case kTemplateValueObject:
         StringAppend(result, "O");
         if (!ConstexprObjectInitializerTemplateKey(
-                argument->type, argument->object_initializer, result)) {
+                argument->type,
+                TemplateArgumentExtraOf(argument)->object_initializer,
+                result)) {
           StringAppend(result, "?");
         }
         break;

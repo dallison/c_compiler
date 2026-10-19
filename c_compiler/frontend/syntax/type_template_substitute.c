@@ -215,9 +215,10 @@ bool FindPackExpansionInTemplateArgument(TemplateArgument* arg,
     return false;
   }
   if (arg->kind == kTemplateParameterTemplate &&
-      arg->pack_index_expr != NULL) {
-    return FindPackExpansionInExpression(arg->pack_index_expr, args,
-                                         pack_index, pack_length);
+      TemplateArgumentExtraOf(arg)->pack_index_expr != NULL) {
+    return FindPackExpansionInExpression(
+        TemplateArgumentExtraOf(arg)->pack_index_expr, args, pack_index,
+        pack_length);
   }
   if (arg->kind == kTemplateParameterNonType &&
       RecordPackExpansionIndex(arg->template_parameter_index, args, pack_index,
@@ -343,17 +344,12 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
   concrete->dependent_expr = NULL;
   concrete->location = arg->location;
   concrete->value_kind = arg->value_kind;
-  concrete->value_symbol = arg->value_symbol;
-  concrete->value_offset = arg->value_offset;
-  concrete->value_adjustment = arg->value_adjustment;
-  concrete->member_function = arg->member_function;
-  concrete->template_symbol = arg->template_symbol;
-  concrete->reflection_value = arg->reflection_value;
-  concrete->pack_index_expr = arg->pack_index_expr;
-  concrete->object_initializer =
-      ASTNodeClone(arg->object_initializer, IdentityCloneNode, NULL, NULL);
+  TemplateArgumentCopyExtra(concrete, arg);
+  if (concrete->extra != NULL) {
+    concrete->extra->lvalue_symbol = NULL;
+  }
   if (arg->kind == kTemplateParameterTemplate &&
-      arg->pack_index_expr != NULL) {
+      TemplateArgumentExtraOf(arg)->pack_index_expr != NULL) {
     int pack_parameter = arg->template_parameter_index;
     TemplateArgument* pack =
         args != NULL && pack_parameter >= 0 &&
@@ -362,19 +358,21 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
             : NULL;
     int64_t index = 0;
     if (pack == NULL || pack->pack_arguments == NULL ||
-        !TryFoldDependentTemplateArgument(parser, arg->pack_index_expr, args,
-                                          &index)) {
+        !TryFoldDependentTemplateArgument(
+            parser, TemplateArgumentExtraOf(arg)->pack_index_expr, args,
+            &index)) {
       ASTNode* partial = CloneDependentExpressionWithArgs(
-          parser, arg->pack_index_expr, args);
-      concrete->pack_index_expr =
-          partial != NULL ? partial : arg->pack_index_expr;
+          parser, TemplateArgumentExtraOf(arg)->pack_index_expr, args);
+      TemplateArgumentMutableExtra(concrete)->pack_index_expr =
+          partial != NULL ? partial
+                          : TemplateArgumentExtraOf(arg)->pack_index_expr;
       return concrete;
     }
     if (index < 0 || (uint64_t)index >= pack->pack_arguments->length) {
       if (parser != NULL) {
         parser->template_substitution_failed = true;
       }
-      SemanticError(arg->pack_index_expr,
+      SemanticError(TemplateArgumentExtraOf(arg)->pack_index_expr,
                     "pack index %" PRId64
                     " is out of bounds for a pack of length %zu",
                     index, pack->pack_arguments->length);
@@ -387,7 +385,7 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
       if (parser != NULL) {
         parser->template_substitution_failed = true;
       }
-      SemanticError(arg->pack_index_expr,
+      SemanticError(TemplateArgumentExtraOf(arg)->pack_index_expr,
                     "template-name pack indexing requires a template pack");
       return concrete;
     }
@@ -879,7 +877,7 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
                (size_t)arg->template_parameter_index < args->length) {
       pack = args->value.p[arg->template_parameter_index];
     } else if (arg->kind == kTemplateParameterTemplate &&
-               arg->pack_index_expr == NULL &&
+               TemplateArgumentExtraOf(arg)->pack_index_expr == NULL &&
                arg->template_parameter_index >= 0 &&
                (size_t)arg->template_parameter_index < args->length) {
       pack = args->value.p[arg->template_parameter_index];
@@ -2050,10 +2048,10 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     }
     TemplateArgument* actual = args->value.p[index];
     if (actual == NULL || actual->kind != kTemplateParameterTemplate ||
-        actual->template_symbol == NULL) {
+        TemplateArgumentExtraOf(actual)->template_symbol == NULL) {
       return TypeRecordCopy(type);
     }
-    info.origin = actual->template_symbol;
+    info.origin = TemplateArgumentExtraOf(actual)->template_symbol;
   }
   bool remapped_enclosing_nested_template = false;
   // A deferred template-id (`VP<M>` in a member function template of the
@@ -2780,7 +2778,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
   TemplateArgument* element =
       pack->pack_arguments->value.p[(size_t)element_index];
   if (element != NULL && element->kind == kTemplateParameterTemplate &&
-      element->template_symbol != NULL) {
+      TemplateArgumentExtraOf(element)->template_symbol != NULL) {
     if (type->template_arguments == NULL) {
       if (parser != NULL) {
         parser->template_substitution_failed = true;
@@ -2794,7 +2792,8 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
     Vector* concrete_args = SubstituteTemplateArgumentVectorForTypes(
         parser, type->template_arguments, args);
     TypeRecord* result = InstantiateSimpleClassTemplate(
-        parser, element->template_symbol, concrete_args);
+        parser, TemplateArgumentExtraOf(element)->template_symbol,
+        concrete_args);
     VectorDeleteWithContents(
         concrete_args, (VectorElementDestructor)TemplateArgumentDelete,
         /*free_element=*/false);
@@ -2862,10 +2861,14 @@ static TypeRecord* SubstituteBareTemplateParameter(TypeParser* parser,
   if (type->template_origin != NULL &&
       type->template_origin->flags.is_template_template_parameter &&
       arg != NULL && arg->kind == kTemplateParameterTemplate &&
-      arg->template_symbol != NULL && arg->template_symbol->type != NULL &&
-      TypeIsStructOrUnion(arg->template_symbol->type)) {
-    TypeRecord* placeholder = TypeRecordCopy(arg->template_symbol->type);
-    placeholder->template_origin = arg->template_symbol;
+      TemplateArgumentExtraOf(arg)->template_symbol != NULL &&
+      TemplateArgumentExtraOf(arg)->template_symbol->type != NULL &&
+      TypeIsStructOrUnion(
+          TemplateArgumentExtraOf(arg)->template_symbol->type)) {
+    TypeRecord* placeholder =
+        TypeRecordCopy(TemplateArgumentExtraOf(arg)->template_symbol->type);
+    placeholder->template_origin =
+        TemplateArgumentExtraOf(arg)->template_symbol;
     if (placeholder->template_arguments != NULL) {
       VectorDeleteWithContents(
           placeholder->template_arguments,
@@ -4148,8 +4151,10 @@ void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
   }
   arg->dependent_expr =
       CloneAndRebaseDependentExpression(arg->dependent_expr, base);
-  arg->pack_index_expr =
-      CloneAndRebaseDependentExpression(arg->pack_index_expr, base);
+  if (TemplateArgumentExtraOf(arg)->pack_index_expr != NULL) {
+    TemplateArgumentMutableExtra(arg)->pack_index_expr =
+        CloneAndRebaseDependentExpression(arg->extra->pack_index_expr, base);
+  }
 }
 
 /* A generic lambda written inside another template numbers its invented `auto`
