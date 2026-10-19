@@ -789,7 +789,7 @@ static int FuncAddrBaseRank(ASTNode* actual, TypeRecord* target) {
  * `remove_reference<T>::type`). */
 bool TypeHasDependentMemberName(TypeRecord* type) {
   for (TypeRecord* current = type; current != NULL; current = current->next) {
-    if (current->dependent_member_name != NULL) {
+    if (TypeDependentOf(current)->dependent_member_name != NULL) {
       return true;
     }
     if (current->template_arguments != NULL) {
@@ -814,7 +814,7 @@ bool TypeDependsOnEnclosingTemplateParameter(TypeRecord* type, int base) {
     return false;
   }
   for (TypeRecord* current = type; current != NULL; current = current->next) {
-    if (current->dependent_member_name != NULL &&
+    if (TypeDependentOf(current)->dependent_member_name != NULL &&
         current->template_parameter_index >= 0 &&
         current->template_parameter_index < base) {
       return true;

@@ -277,20 +277,24 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
             parameters, type->template_parameter_index);
         if (parameter_name != NULL) {
           StringAppendString(result, parameter_name);
-        } else if (type->template_parameter_name != NULL &&
-                   type->template_parameter_name->length != 0) {
-          StringAppendString(result, type->template_parameter_name);
+        } else if (TypeDependentOf(type)->template_parameter_name != NULL &&
+                   TypeDependentOf(type)->template_parameter_name->length !=
+                       0) {
+          StringAppendString(result,
+                             TypeDependentOf(type)->template_parameter_name);
         } else {
           StringPrintf(result, "T%d", type->template_parameter_index);
         }
         if (type->is_pack_index) {
           StringAppend(result, "...[");
-          PackIndexExpressionToString(type->pack_index_expr, result);
+          PackIndexExpressionToString(TypeDependentOf(type)->pack_index_expr,
+                                      result);
           StringAppend(result, "]");
         }
-        if (type->dependent_member_name != NULL) {
+        if (TypeDependentOf(type)->dependent_member_name != NULL) {
           StringAppend(result, "::");
-          StringAppendString(result, type->dependent_member_name);
+          StringAppendString(result,
+                             TypeDependentOf(type)->dependent_member_name);
         }
         break;
       }
@@ -655,13 +659,14 @@ static void TemplateArgumentToTemplateKeyString(TemplateArgument* argument,
 // such member-alias instantiations into whichever was formed first.
 static void AppendDependentMemberTemplateArgsToKey(TypeRecord* type,
                                                    String* result) {
-  if (type->dependent_member_template_arguments == NULL) {
+  if (TypeDependentOf(type)->dependent_member_template_arguments == NULL) {
     return;
   }
-  for (size_t i = 0; i < type->dependent_member_template_arguments->length;
+  for (size_t i = 0;
+       i < TypeDependentOf(type)->dependent_member_template_arguments->length;
        i++) {
     Vector* component_args =
-        type->dependent_member_template_arguments->value.p[i];
+        TypeDependentOf(type)->dependent_member_template_arguments->value.p[i];
     if (component_args == NULL) {
       continue;
     }
@@ -716,9 +721,10 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
               type->template_arguments->value.p[i], result);
         }
         StringAppendChar(result, '>');
-        if (type->dependent_member_name != NULL) {
+        if (TypeDependentOf(type)->dependent_member_name != NULL) {
           StringAppend(result, "::");
-          StringAppendString(result, type->dependent_member_name);
+          StringAppendString(result,
+                             TypeDependentOf(type)->dependent_member_name);
           AppendDependentMemberTemplateArgsToKey(type, result);
         }
         break;
@@ -729,9 +735,10 @@ void TypeRecordToTemplateKeyString(TypeRecord* type, String* result) {
           StringAppend(result, " ");
         }
         StringPrintf(result, "$T%d", type->template_parameter_index);
-        if (type->dependent_member_name != NULL) {
+        if (TypeDependentOf(type)->dependent_member_name != NULL) {
           StringAppend(result, "::");
-          StringAppendString(result, type->dependent_member_name);
+          StringAppendString(result,
+                             TypeDependentOf(type)->dependent_member_name);
           AppendDependentMemberTemplateArgsToKey(type, result);
         }
         break;

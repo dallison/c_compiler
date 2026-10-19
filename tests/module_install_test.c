@@ -88,7 +88,7 @@ static Symbol* MakeFnWithParam(const char* name, TypeRecord* int_type,
 static TypeRecord* MakeTemplatePlaceholderType(const char* name, int index) {
   TypeRecord* t = NewTypeRecord(kTypeUnknown, kQualPlain);
   t->template_parameter_index = index;
-  t->template_parameter_name = NewString(name);
+  TypeMutableDependent(t)->template_parameter_name = NewString(name);
   return t;
 }
 

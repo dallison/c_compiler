@@ -134,13 +134,13 @@ static bool TypeRecordNodeContainsTemplateParameter(TypeRecord* type) {
   // carries no parameter index, so it must be re-substituted once concrete
   // arguments arrive.  The operand is only retained while dependent (it is
   // dropped once the decltype resolves), so its mere presence is sufficient.
-  if (type->dependent_decltype_expr != NULL ||
-      type->dependent_splice_expr != NULL || type->is_pack_index) {
+  if (TypeDependentOf(type)->dependent_decltype_expr != NULL ||
+      TypeDependentOf(type)->dependent_splice_expr != NULL ||
+      type->is_pack_index) {
     return true;
   }
-  if (type->dependent_member_name != NULL &&
-      (type->template_parameter_index >= 0 ||
-       type->template_origin != NULL)) {
+  if (TypeDependentOf(type)->dependent_member_name != NULL &&
+      (type->template_parameter_index >= 0 || type->template_origin != NULL)) {
     return true;
   }
   if (type->template_origin != NULL &&
@@ -440,12 +440,13 @@ static bool DependentTemplateArgExprEqual(ASTNode* a, ASTNode* b) {
       TypeRecord* tb = sb->type;
       // Dependent qualified names (`Trait<Args>::member`): equal iff the same
       // scope template, the same member, and structurally-equal scope arguments.
-      if (ta != NULL && tb != NULL && ta->dependent_member_name != NULL &&
-          tb->dependent_member_name != NULL) {
+      if (ta != NULL && tb != NULL &&
+          TypeDependentOf(ta)->dependent_member_name != NULL &&
+          TypeDependentOf(tb)->dependent_member_name != NULL) {
         return ta->template_origin == tb->template_origin &&
                ta->template_parameter_index == tb->template_parameter_index &&
-               StringEqual(ta->dependent_member_name,
-                           tb->dependent_member_name->value) &&
+               StringEqual(TypeDependentOf(ta)->dependent_member_name,
+                           TypeDependentOf(tb)->dependent_member_name->value) &&
                TemplateArgumentVectorEqual(ta->template_arguments,
                                            tb->template_arguments);
       }
@@ -576,21 +577,21 @@ static bool TemplateTypePatternEqual(TypeRecord* left, TypeRecord* right) {
       right->template_parameter_index >= 0;
   if (left_is_type_parameter || right_is_type_parameter) {
     return left_is_type_parameter == right_is_type_parameter &&
-           left->template_parameter_index ==
-               right->template_parameter_index &&
+           left->template_parameter_index == right->template_parameter_index &&
            TemplateArgumentPatternVectorEqual(left->template_arguments,
                                               right->template_arguments) &&
-           (left->dependent_member_name == NULL) ==
-               (right->dependent_member_name == NULL) &&
-           (left->dependent_member_name == NULL ||
-            StringEqualString(left->dependent_member_name,
-                              right->dependent_member_name)) &&
+           (TypeDependentOf(left)->dependent_member_name == NULL) ==
+               (TypeDependentOf(right)->dependent_member_name == NULL) &&
+           (TypeDependentOf(left)->dependent_member_name == NULL ||
+            StringEqualString(TypeDependentOf(left)->dependent_member_name,
+                              TypeDependentOf(right)->dependent_member_name)) &&
            left->is_pack_index == right->is_pack_index &&
            (!left->is_pack_index ||
-            (DependentTemplateArgExprEqual(left->pack_index_expr,
-                                           right->pack_index_expr) &&
-             TemplateArgumentEqual(left->pack_index_pack,
-                                   right->pack_index_pack)));
+            (DependentTemplateArgExprEqual(
+                 TypeDependentOf(left)->pack_index_expr,
+                 TypeDependentOf(right)->pack_index_expr) &&
+             TemplateArgumentEqual(TypeDependentOf(left)->pack_index_pack,
+                                   TypeDependentOf(right)->pack_index_pack)));
   }
   if (left->type != right->type) {
     return false;
@@ -1560,23 +1561,26 @@ static uint64_t HashTypeRecord(uint64_t hash, TypeRecord* type) {
   hash = HashTypeValue(hash, GetQualifiers(type) & ~kQualRestrict);
   hash = HashTypeValue(hash, type->is_pack_index);
   if (type->is_pack_index) {
-    hash = HashDependentTemplateArgExpr(hash, type->pack_index_expr);
-    hash = HashTemplateArgument(hash, type->pack_index_pack);
+    hash = HashDependentTemplateArgExpr(hash,
+                                        TypeDependentOf(type)->pack_index_expr);
+    hash = HashTemplateArgument(hash, TypeDependentOf(type)->pack_index_pack);
   }
   if (type->declarator == kDeclPrimitive &&
       (type->type & kTypeUnknown) != 0) {
     if (type->template_parameter_index >= 0) {
       hash = HashTypeValue(
           hash, (uint64_t)(uint32_t)type->template_parameter_index);
-      if (type->dependent_member_name != NULL) {
-        hash = HashTypeBytes(hash, type->dependent_member_name->value,
-                             type->dependent_member_name->length);
+      if (TypeDependentOf(type)->dependent_member_name != NULL) {
+        hash = HashTypeBytes(
+            hash, TypeDependentOf(type)->dependent_member_name->value,
+            TypeDependentOf(type)->dependent_member_name->length);
       }
     } else if (type->template_origin != NULL) {
       hash = HashTypeValue(hash, (uintptr_t)type->template_origin);
-      if (type->dependent_member_name != NULL) {
-        hash = HashTypeBytes(hash, type->dependent_member_name->value,
-                             type->dependent_member_name->length);
+      if (TypeDependentOf(type)->dependent_member_name != NULL) {
+        hash = HashTypeBytes(
+            hash, TypeDependentOf(type)->dependent_member_name->value,
+            TypeDependentOf(type)->dependent_member_name->length);
       }
       hash = HashTemplateArgumentVector(hash, type->template_arguments);
     }
@@ -1699,10 +1703,11 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
     return false;
   }
   if (t1->is_pack_index &&
-      (!DependentTemplateArgExprEqual(t1->pack_index_expr,
-                                      t2->pack_index_expr) ||
-       !TemplateArgumentEqual(t1->pack_index_pack, t2->pack_index_pack))) {
-      return false;
+      (!DependentTemplateArgExprEqual(TypeDependentOf(t1)->pack_index_expr,
+                                      TypeDependentOf(t2)->pack_index_expr) ||
+       !TemplateArgumentEqual(TypeDependentOf(t1)->pack_index_pack,
+                              TypeDependentOf(t2)->pack_index_pack))) {
+    return false;
   }
   // Dependent (unknown) leaves need care.  Only a leaf primitive carries a
   // template parameter's positional identity, so pointer/reference/array
@@ -1726,8 +1731,8 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
           t1->template_parameter_index != t2->template_parameter_index) {
         return false;
       }
-      String* m1 = t1->dependent_member_name;
-      String* m2 = t2->dependent_member_name;
+      String* m1 = TypeDependentOf(t1)->dependent_member_name;
+      String* m2 = TypeDependentOf(t2)->dependent_member_name;
       if ((m1 == NULL) != (m2 == NULL)) {
         return false;
       }
@@ -1742,8 +1747,8 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
       if (t1->template_origin != t2->template_origin) {
         return false;
       }
-      String* m1 = t1->dependent_member_name;
-      String* m2 = t2->dependent_member_name;
+      String* m1 = TypeDependentOf(t1)->dependent_member_name;
+      String* m2 = TypeDependentOf(t2)->dependent_member_name;
       if ((m1 == NULL) != (m2 == NULL)) {
         return false;
       }
@@ -1760,13 +1765,14 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
     if ((t1->template_origin != NULL) != (t2->template_origin != NULL)) {
       return false;
     }
-    if ((t1->dependent_decltype_expr != NULL) !=
-        (t2->dependent_decltype_expr != NULL)) {
+    if ((TypeDependentOf(t1)->dependent_decltype_expr != NULL) !=
+        (TypeDependentOf(t2)->dependent_decltype_expr != NULL)) {
       return false;
     }
-    if (t1->dependent_decltype_expr != NULL &&
-        t2->dependent_decltype_expr != NULL &&
-        t1->dependent_decltype_expr != t2->dependent_decltype_expr) {
+    if (TypeDependentOf(t1)->dependent_decltype_expr != NULL &&
+        TypeDependentOf(t2)->dependent_decltype_expr != NULL &&
+        TypeDependentOf(t1)->dependent_decltype_expr !=
+            TypeDependentOf(t2)->dependent_decltype_expr) {
       return false;
     }
     if (((t1->type & kTypeUnknown) != 0) !=
@@ -1825,15 +1831,16 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
           // `X<Args>::const_iterator`) share origin and arguments but name
           // different members, so the member name is part of their identity.
           bool same_dependent_member =
-              ((t1->dependent_member_name == NULL &&
-                t2->dependent_member_name == NULL) ||
-               (t1->dependent_member_name != NULL &&
-                t2->dependent_member_name != NULL &&
-                StringEqualString(t1->dependent_member_name,
-                                  t2->dependent_member_name))) &&
+              ((TypeDependentOf(t1)->dependent_member_name == NULL &&
+                TypeDependentOf(t2)->dependent_member_name == NULL) ||
+               (TypeDependentOf(t1)->dependent_member_name != NULL &&
+                TypeDependentOf(t2)->dependent_member_name != NULL &&
+                StringEqualString(
+                    TypeDependentOf(t1)->dependent_member_name,
+                    TypeDependentOf(t2)->dependent_member_name))) &&
               TemplateArgumentVectorListEqual(
-                  t1->dependent_member_template_arguments,
-                  t2->dependent_member_template_arguments);
+                  TypeDependentOf(t1)->dependent_member_template_arguments,
+                  TypeDependentOf(t2)->dependent_member_template_arguments);
           if (t1->template_origin == t2->template_origin &&
               same_dependent_member &&
               TemplateArgumentVectorEqual(t1->template_arguments,

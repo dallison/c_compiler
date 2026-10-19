@@ -431,9 +431,10 @@ static ASTNode* ParseDecltypePrimary(Syntax* syntax, TokenClass followers) {
   // TypeParserParseType also accepts `decltype(expr)::member` as a nested
   // type suffix.  In expression context that names a value (often still
   // dependent), so turn the already-consumed suffix into a qualified-id.
-  if (type->dependent_member_name != NULL) {
-    Symbol* placeholder = NewSymbol(type->dependent_member_name->value,
-                                    TypeRecordCopy(type), STO(implicit));
+  if (TypeDependentOf(type)->dependent_member_name != NULL) {
+    Symbol* placeholder =
+        NewSymbol(TypeDependentOf(type)->dependent_member_name->value,
+                  TypeRecordCopy(type), STO(implicit));
     placeholder->flags.invented = true;
     ASTNode* node = NewIdentifierASTNode(placeholder, location);
     node->flags |= kASTQualifiedName | kASTDependentQualifiedName;
@@ -470,11 +471,13 @@ static ASTNode* ParseDecltypePrimary(Syntax* syntax, TokenClass followers) {
     }
     TypeRecord* dependent =
         TypeRecordCopy(scope != NULL ? scope : type);
-    if (dependent->dependent_member_name == NULL) {
-      dependent->dependent_member_name = NewString(member_name.value);
+    if (TypeDependentOf(dependent)->dependent_member_name == NULL) {
+      TypeMutableDependent(dependent)->dependent_member_name =
+          NewString(member_name.value);
     } else {
-      StringAppend(dependent->dependent_member_name, "::");
-      StringAppend(dependent->dependent_member_name, member_name.value);
+      StringAppend(TypeDependentOf(dependent)->dependent_member_name, "::");
+      StringAppend(TypeDependentOf(dependent)->dependent_member_name,
+                   member_name.value);
     }
     Symbol* placeholder =
         NewSymbol(member_name.value, dependent, STO(implicit));
@@ -1997,7 +2000,8 @@ static ASTNode* ParseParenthesizedCast(Syntax* syntax, TokenClass followers) {
         LexCheckpointSave(syntax->lex, &peek);
         LexMatch(syntax->lex, TOK(rparen));
         bool followed_by_call =
-            type != NULL && type->dependent_member_name != NULL &&
+            type != NULL &&
+            TypeDependentOf(type)->dependent_member_name != NULL &&
             LexLookingAt(syntax->lex, TOK(lparen));
         bool operand = CastOrCompoundLiteralFollows(syntax->lex);
         LexCheckpointRestore(syntax->lex, &peek);

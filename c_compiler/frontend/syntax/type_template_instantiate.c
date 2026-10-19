@@ -2244,15 +2244,17 @@ static bool TypeReferencesParameterAtOrAbove(TypeRecord* type,
         current->info.array.template_parameter_index >= rebase_base) {
       return true;
     }
-    if (current->dependent_decltype_expr != NULL &&
-        ASTNodeAny(current->dependent_decltype_expr,
+    if (TypeDependentOf(current)->dependent_decltype_expr != NULL &&
+        ASTNodeAny(TypeDependentOf(current)->dependent_decltype_expr,
                    ExprReferencesParameterAtOrAbove, &rebase_base)) {
       return true;
     }
-    if (current->dependent_member_template_arguments != NULL) {
-      for (size_t i = 0;
-           i < current->dependent_member_template_arguments->length; i++) {
-        Vector* args = current->dependent_member_template_arguments->value.p[i];
+    if (TypeDependentOf(current)->dependent_member_template_arguments != NULL) {
+      for (size_t i = 0; i < TypeDependentOf(current)
+                                 ->dependent_member_template_arguments->length;
+           i++) {
+        Vector* args = TypeDependentOf(current)
+                           ->dependent_member_template_arguments->value.p[i];
         if (args == NULL) {
           continue;
         }
@@ -2701,9 +2703,9 @@ static TypeRecord* ResolveInstantiatedOwnerTypedef(TypeRecord* type,
   if (type == NULL || owner == NULL) {
     return NULL;
   }
-  if (type->dependent_member_name != NULL) {
+  if (TypeDependentOf(type)->dependent_member_name != NULL) {
     StructMember* member =
-        FindStructMember(owner, type->dependent_member_name);
+        FindStructMember(owner, TypeDependentOf(type)->dependent_member_name);
     if (member != NULL && member->symbol != NULL &&
         StorageIs(member->symbol->storage, STO(typedef)) &&
         member->symbol->type != NULL &&
@@ -2712,8 +2714,8 @@ static TypeRecord* ResolveInstantiatedOwnerTypedef(TypeRecord* type,
       SetQualifiers(resolved, GetQualifiers(resolved) | GetQualifiers(type));
       return TypeRecordCalculateSize(resolved);
     }
-    TypeRecord* inherited =
-        ConcreteInheritedTypedef(owner, type->dependent_member_name, 0);
+    TypeRecord* inherited = ConcreteInheritedTypedef(
+        owner, TypeDependentOf(type)->dependent_member_name, 0);
     if (inherited != NULL) {
       SetQualifiers(inherited, GetQualifiers(inherited) | GetQualifiers(type));
       return TypeRecordCalculateSize(inherited);
@@ -4071,7 +4073,8 @@ static Symbol* InstantiateSimpleFunctionTemplateUnchecked(
   parser->template_substitution_failed = saved_substitution_failed;
   bool pattern_trailing_decltype =
       completion_type != NULL && completion_type->next != NULL &&
-      (completion_type->next->dependent_decltype_expr != NULL ||
+      (TypeDependentOf(completion_type->next)->dependent_decltype_expr !=
+           NULL ||
        TypeIsDetachedDependentDecltype(completion_type->next));
   bool unresolved_trailing_decltype =
       func != NULL && func->next != NULL && TypeIsUnknown(func->next) &&
@@ -4841,7 +4844,7 @@ static bool TemplateArgumentHasDependentMemberName(TemplateArgument* arg) {
     return false;
   }
   for (TypeRecord* type = arg->type; type != NULL; type = type->next) {
-    if (type->dependent_member_name != NULL) {
+    if (TypeDependentOf(type)->dependent_member_name != NULL) {
       return true;
     }
   }
@@ -5497,7 +5500,7 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
   }
   // So is the expression of a decltype-specifier (the trailing return type
   // of `auto f(const P& p) -> decltype(p.a())` when its address is taken).
-  if (formal->dependent_decltype_expr != NULL ||
+  if (TypeDependentOf(formal)->dependent_decltype_expr != NULL ||
       TypeIsDetachedDependentDecltype(formal)) {
     return true;
   }
@@ -5505,11 +5508,12 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
   // `Owner<T>::member` and bare `T::member` forms during the first deduction
   // pass so another parameter can supply T without this argument contaminating
   // that deduction. The extension below is retried only if T remains unbound.
-  if (formal->dependent_member_name != NULL && g_deduce_defer_bare_member) {
+  if (TypeDependentOf(formal)->dependent_member_name != NULL &&
+      g_deduce_defer_bare_member) {
     return true;
   }
   if (formal->template_origin != NULL &&
-      formal->dependent_member_name != NULL) {
+      TypeDependentOf(formal)->dependent_member_name != NULL) {
     bool ok = false;
     // `typename Owner<T, N>::Inner` against a nested class of a concrete
     // `Owner<A, B>` specialization: recover T and N from the enclosing
@@ -5523,12 +5527,11 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
           ClassTemplateOriginMatches(
               ClassTemplateOriginOf(parent->tag_symbol->type),
               formal->template_origin)) {
-        StructMember* nested =
-            FindStructMember(parent, formal->dependent_member_name);
-        if (nested != NULL &&
-            actual->info.struct_info->tag_name != NULL &&
+        StructMember* nested = FindStructMember(
+            parent, TypeDependentOf(formal)->dependent_member_name);
+        if (nested != NULL && actual->info.struct_info->tag_name != NULL &&
             StringEqualString(actual->info.struct_info->tag_name,
-                              formal->dependent_member_name)) {
+                              TypeDependentOf(formal)->dependent_member_name)) {
           ok = DeduceFunctionTemplateTemplateArguments(
               args, explicit_arg_count, formal, parent->tag_symbol->type);
         }
@@ -5542,7 +5545,7 @@ static bool DeduceFunctionTemplateTypeArgument(Vector* args,
           owner->info.struct_info != NULL) {
         StructMember* member =
             FindStructMember(owner->info.struct_info,
-                             formal->dependent_member_name);
+                             TypeDependentOf(formal)->dependent_member_name);
         if (member != NULL && member->symbol != NULL &&
             StorageIs(member->symbol->storage, STO(typedef))) {
           ok = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
@@ -5867,13 +5870,15 @@ static bool FormalClassTemplateIdIsNonDeducedAgainst(TypeRecord* formal,
  * alias's own first parameter, so that parameter stays deducible. */
 static bool MemberAliasForwardsFirstParameter(Symbol* alias) {
   TypeRecord* pattern = alias->type;
-  if (pattern == NULL || pattern->dependent_member_name == NULL ||
-      pattern->dependent_member_template_arguments == NULL ||
-      pattern->dependent_member_template_arguments->length == 0 ||
+  if (pattern == NULL ||
+      TypeDependentOf(pattern)->dependent_member_name == NULL ||
+      TypeDependentOf(pattern)->dependent_member_template_arguments == NULL ||
+      TypeDependentOf(pattern)->dependent_member_template_arguments->length ==
+          0 ||
       alias->alias_template->parameters.length == 0) {
     return false;
   }
-  Vector* lists = pattern->dependent_member_template_arguments;
+  Vector* lists = TypeDependentOf(pattern)->dependent_member_template_arguments;
   Vector* member_args = lists->value.p[lists->length - 1];
   TemplateParameter* first = alias->alias_template->parameters.value.p[0];
   if (member_args == NULL || member_args->length == 0 || first == NULL) {
@@ -5952,18 +5957,19 @@ static TypeRecord* AliasMemberPatternType(TypeRecord* type,
   if (owner_pattern != NULL) {
     return owner_pattern;
   }
-  if (type == NULL || type->dependent_member_name == NULL ||
+  if (type == NULL || TypeDependentOf(type)->dependent_member_name == NULL ||
       !TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
-      type->dependent_member_template_arguments == NULL ||
-      type->dependent_member_template_arguments->length == 0) {
+      TypeDependentOf(type)->dependent_member_template_arguments == NULL ||
+      TypeDependentOf(type)->dependent_member_template_arguments->length == 0) {
     return NULL;
   }
-  Vector* member_args = type->dependent_member_template_arguments->value.p[0];
+  Vector* member_args =
+      TypeDependentOf(type)->dependent_member_template_arguments->value.p[0];
   if (member_args == NULL || member_args->length == 0) {
     return NULL;
   }
-  StructMember* member =
-      FindStructMember(type->info.struct_info, type->dependent_member_name);
+  StructMember* member = FindStructMember(
+      type->info.struct_info, TypeDependentOf(type)->dependent_member_name);
   if (member == NULL || member->symbol == NULL ||
       member->symbol->type == NULL ||
       !StorageIs(member->symbol->storage, STO(typedef))) {
@@ -6222,7 +6228,7 @@ static bool DeduceFunctionTemplateCallArgument(Vector* args,
    * dependent member name). */
   bool non_deduced_member = false;
   for (TypeRecord* p = formal; p != NULL; p = p->next) {
-    if (p->dependent_member_name != NULL) {
+    if (TypeDependentOf(p)->dependent_member_name != NULL) {
       non_deduced_member = true;
       break;
     }
@@ -7184,7 +7190,7 @@ TypeRecord* TypeSubstituteFunctionTemplateSignature(Syntax* syntax,
   bool unresolved_trailing_decltype =
       func != NULL && func->next != NULL && TypeIsUnknown(func->next) &&
       func_type->next != NULL &&
-      (func_type->next->dependent_decltype_expr != NULL ||
+      (TypeDependentOf(func_type->next)->dependent_decltype_expr != NULL ||
        TypeIsDetachedDependentDecltype(func_type->next));
   bool failed = parser.template_substitution_failed || func == NULL ||
                 TypeContainsTemplateParameter(func) ||
@@ -7299,7 +7305,7 @@ static Symbol* CreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   bool unresolved_trailing_decltype =
       func != NULL && func->next != NULL && TypeIsUnknown(func->next) &&
       func_type != NULL && func_type->next != NULL &&
-      (func_type->next->dependent_decltype_expr != NULL ||
+      (TypeDependentOf(func_type->next)->dependent_decltype_expr != NULL ||
        TypeIsDetachedDependentDecltype(func_type->next));
   if (substitution_failed || TypeContainsTemplateParameter(func) ||
       unresolved_trailing_decltype) {
@@ -7569,7 +7575,7 @@ static TypeRecord* FunctionTemplatePatternFunctionType(Symbol* symbol) {
 
 static bool TypeChainHasDependentMemberName(TypeRecord* type) {
   for (TypeRecord* t = type; t != NULL; t = t->next) {
-    if (t->dependent_member_name != NULL) {
+    if (TypeDependentOf(t)->dependent_member_name != NULL) {
       return true;
     }
   }
@@ -8194,13 +8200,13 @@ static bool BindingsReadyForPatternType(Vector* bindings, TypeRecord* type) {
   if (!PartialSpecializationBindingsContainNull(bindings)) {
     return true;
   }
-  if (type == NULL || type->dependent_decltype_expr == NULL ||
+  if (type == NULL || TypeDependentOf(type)->dependent_decltype_expr == NULL ||
       bindings == NULL) {
     return false;
   }
   TemplateParameterReferenceSet referenced;
   memset(&referenced, 0, sizeof(referenced));
-  ASTNodeVisit(type->dependent_decltype_expr,
+  ASTNodeVisit(TypeDependentOf(type)->dependent_decltype_expr,
                CollectTemplateParameterReferenceVisitor, 0, &referenced);
   for (size_t i = 0; i < bindings->length && i < 64; i++) {
     if (referenced.referenced[i] && bindings->value.p[i] == NULL) {
@@ -8692,7 +8698,8 @@ static TemplateArgument* NewTemplateTemplateParameterCTADPatternArgument(
     arg->type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     arg->type->template_parameter_index = param->index;
     if (param->name.length != 0) {
-      arg->type->template_parameter_name = NewString(param->name.value);
+      TypeMutableDependent(arg->type)->template_parameter_name =
+          NewString(param->name.value);
     }
   } else {
     arg->template_parameter_index = param->index;
@@ -10454,10 +10461,9 @@ static bool SubstituteDependentNonTypeParameterTypes(TypeParser* parser,
             completed);
     bool substitution_failed =
         parser->template_substitution_failed || substituted == NULL ||
-        (completed_is_concrete &&
-         !NonTypeParameterHasPlaceholderType(param) &&
+        (completed_is_concrete && !NonTypeParameterHasPlaceholderType(param) &&
          (TypeIsUnknown(substituted) ||
-          substituted->dependent_member_name != NULL ||
+          TypeDependentOf(substituted)->dependent_member_name != NULL ||
           TypeContainsTemplateParameter(substituted)));
     parser->template_substitution_failed = saved_substitution_failed;
     if (substitution_failed) {
@@ -11598,7 +11604,7 @@ static void ExpandConcreteAliasTemplateArguments(TypeParser* parser,
       arg->type = expanded;
       continue;
     }
-    if (arg->type->dependent_member_name != NULL &&
+    if (TypeDependentOf(arg->type)->dependent_member_name != NULL &&
         arg->type->template_origin != NULL &&
         !TemplateArgumentVectorContainsTemplateParameter(
             arg->type->template_arguments)) {
@@ -11623,15 +11629,15 @@ static bool ClassTemplateArgumentIsStillDependent(TemplateArgument* arg) {
     return true;
   }
   for (TypeRecord* type = arg->type; type != NULL; type = type->next) {
-    if (type->dependent_decltype_expr != NULL ||
-        type->dependent_splice_expr != NULL) {
+    if (TypeDependentOf(type)->dependent_decltype_expr != NULL ||
+        TypeDependentOf(type)->dependent_splice_expr != NULL) {
       return true;
     }
   }
   if (TypeIsUnexpandedAliasTemplateId(arg->type)) {
     return true;
   }
-  if (arg->type->dependent_member_name != NULL &&
+  if (TypeDependentOf(arg->type)->dependent_member_name != NULL &&
       arg->type->template_origin != NULL) {
     return true;
   }
@@ -11801,7 +11807,8 @@ static bool TypeIsStillDependentClassBase(TypeRecord* type) {
       TypeIsUnexpandedAliasTemplateId(type)) {
     return true;
   }
-  return type->dependent_member_name != NULL && type->template_origin != NULL;
+  return TypeDependentOf(type)->dependent_member_name != NULL &&
+         type->template_origin != NULL;
 }
 
 static TypeRecord* MaterializeClassBaseType(TypeParser* parser,
@@ -12769,7 +12776,7 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(Syntax* syntax,
   if (syntax == NULL || type == NULL || !CompilerIsCXX()) {
     return type;
   }
-  if (type->is_pack_index && type->pack_index_pack != NULL) {
+  if (type->is_pack_index && TypeDependentOf(type)->pack_index_pack != NULL) {
     Vector no_arguments;
     VectorInit(&no_arguments);
     TypeRecord* selected =
@@ -12821,14 +12828,16 @@ TypeRecord* TypeMaterializeClassTemplateSpecialization(Syntax* syntax,
   if (type->template_origin != NULL && type->template_arguments != NULL &&
       !TemplateArgumentVectorContainsTemplateParameter(
           type->template_arguments) &&
-      (type->dependent_member_name != NULL || !TypeIsStructOrUnion(type))) {
+      (TypeDependentOf(type)->dependent_member_name != NULL ||
+       !TypeIsStructOrUnion(type))) {
     TypeRecord* owner = TypeInstantiateClassTemplate(
         syntax, type->template_origin, type->template_arguments);
     if (owner != NULL && TypeIsStructOrUnion(owner) &&
         owner->info.struct_info != NULL) {
-      if (type->dependent_member_name != NULL) {
+      if (TypeDependentOf(type)->dependent_member_name != NULL) {
         StructMember* member =
-            FindStructMember(owner->info.struct_info, type->dependent_member_name);
+            FindStructMember(owner->info.struct_info,
+                             TypeDependentOf(type)->dependent_member_name);
         if (member != NULL && member->symbol != NULL &&
             StorageIs(member->symbol->storage, STO(typedef))) {
           TypeRecord* resolved = TypeRecordCopy(member->symbol->type);
@@ -13140,7 +13149,7 @@ static bool AliasTemplatePatternIsClassTemplateId(Symbol* alias,
       !StorageIs(alias->storage, STO(typedef)) || alias->type == NULL ||
       (alias->alias_template != NULL &&
        alias->alias_template->ctad_names_template_template_parameter) ||
-      alias->type->dependent_member_name != NULL ||
+      TypeDependentOf(alias->type)->dependent_member_name != NULL ||
       !TypeIsStructOrUnion(alias->type) ||
       alias->type->template_origin == NULL ||
       alias->type->template_arguments == NULL ||
@@ -13715,7 +13724,7 @@ static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
   // nested lookup.  A dependent-member pattern (`enable_if<B, T>::type`)
   // still fails: there the flag is the alias's own result.
   if (substitution_failed && subst != NULL &&
-      alias->type->dependent_member_name == NULL &&
+      TypeDependentOf(alias->type)->dependent_member_name == NULL &&
       TypeIsStructOrUnion(subst) && !TypeIsUnknown(subst) &&
       !TypeContainsTemplateParameter(subst)) {
     substitution_failed = false;

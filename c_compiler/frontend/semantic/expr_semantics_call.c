@@ -2870,7 +2870,7 @@ static bool FunctionCallDeferDependentQualifiedCallee(VectorASTNode* node) {
       analyzed_callee->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)analyzed_callee;
     if (id->symbol != NULL && id->symbol->type != NULL &&
-        id->symbol->type->dependent_member_name != NULL &&
+        TypeDependentOf(id->symbol->type)->dependent_member_name != NULL &&
         TypeContainsTemplateParameter(id->symbol->type)) {
       node->base.flags |= kASTDependentFunctorCall;
       ASTNodeSetType((ASTNode*)node,

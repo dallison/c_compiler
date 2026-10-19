@@ -38,8 +38,8 @@ static TemplateArgument* NewTemplateParameterTypeArgumentForType(int index,
 static bool ParseMemberPointerDeclarator(TypeParser* parser);
 
 static bool TypeHasDependentMemberPath(TypeRecord* type) {
-  return type->dependent_member_name != NULL &&
-         type->dependent_member_name->length > 0;
+  return TypeDependentOf(type)->dependent_member_name != NULL &&
+         TypeDependentOf(type)->dependent_member_name->length > 0;
 }
 
 // `A<M>` where `template <class T> using A = typename X<T>::type` names
@@ -56,7 +56,7 @@ static TypeRecord* AliasTemplateIdMemberType(TypeParser* parser, Symbol* alias,
   TypeRecord* pattern = alias != NULL ? alias->type : NULL;
   if (alias == NULL || alias->alias_template == NULL || pattern == NULL ||
       args == NULL || pattern->declarator != kDeclPrimitive ||
-      pattern->dependent_decltype_expr != NULL ||
+      TypeDependentOf(pattern)->dependent_decltype_expr != NULL ||
       pattern->template_origin == NULL ||
       pattern->template_origin->alias_template != NULL ||
       pattern->template_arguments == NULL ||
@@ -83,18 +83,21 @@ static TypeRecord* AliasTemplateIdMemberType(TypeParser* parser, Symbol* alias,
                     member_name != NULL ? kQualPlain : GetQualifiers(pattern));
   result->template_origin = pattern->template_origin;
   result->template_arguments = origin_args;
-  result->dependent_member_name =
-      NewString(pattern->dependent_member_name->value);
+  TypeMutableDependent(result)->dependent_member_name =
+      NewString(TypeDependentOf(pattern)->dependent_member_name->value);
   if (member_name != NULL) {
-    StringAppend(result->dependent_member_name, "::");
-    StringAppendString(result->dependent_member_name, member_name);
+    StringAppend(TypeDependentOf(result)->dependent_member_name, "::");
+    StringAppendString(TypeDependentOf(result)->dependent_member_name,
+                       member_name);
   }
-  Vector* pattern_member_args = pattern->dependent_member_template_arguments;
+  Vector* pattern_member_args =
+      TypeDependentOf(pattern)->dependent_member_template_arguments;
   if (pattern_member_args == NULL && member_args == NULL) {
     return result;
   }
   size_t pattern_components = 1;
-  for (const char* c = strstr(pattern->dependent_member_name->value, "::");
+  for (const char* c =
+           strstr(TypeDependentOf(pattern)->dependent_member_name->value, "::");
        c != NULL; c = strstr(c + 2, "::")) {
     pattern_components++;
   }
@@ -104,13 +107,14 @@ static TypeRecord* AliasTemplateIdMemberType(TypeParser* parser, Symbol* alias,
        c != NULL; c = strstr(c + 2, "::")) {
     member_components++;
   }
-  result->dependent_member_template_arguments = NewVector();
+  TypeMutableDependent(result)->dependent_member_template_arguments =
+      NewVector();
   for (size_t i = 0; i < pattern_components; i++) {
     Vector* component_args =
         pattern_member_args != NULL && i < pattern_member_args->length
             ? pattern_member_args->value.p[i]
             : NULL;
-    VectorAppend(result->dependent_member_template_arguments,
+    VectorAppend(TypeDependentOf(result)->dependent_member_template_arguments,
                  component_args != NULL
                      ? SubstituteTemplateArgumentVectorForTypes(
                            parser, component_args, args)
@@ -120,7 +124,7 @@ static TypeRecord* AliasTemplateIdMemberType(TypeParser* parser, Symbol* alias,
     Vector* component_args = member_args != NULL && i < member_args->length
                                  ? member_args->value.p[i]
                                  : NULL;
-    VectorAppend(result->dependent_member_template_arguments,
+    VectorAppend(TypeDependentOf(result)->dependent_member_template_arguments,
                  component_args != NULL
                      ? TemplateArgumentVectorCopy(component_args)
                      : NULL);
@@ -542,13 +546,15 @@ static bool TryParseTemplateParameterQualifiedType(TypeParser* parser,
   }
   TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
   type->template_parameter_index = symbol->template_parameter_index;
-  type->dependent_member_name = NewString(member.spelling.value);
+  TypeMutableDependent(type)->dependent_member_name =
+      NewString(member.spelling.value);
   if (member.template_arguments.length > 0) {
-    type->dependent_member_template_arguments = NewVector();
+    TypeMutableDependent(type)->dependent_member_template_arguments =
+        NewVector();
     for (size_t i = 0; i < member.template_arguments.length; i++) {
-      VectorAppend(type->dependent_member_template_arguments,
-                   TemplateArgumentVectorCopy(
-                       member.template_arguments.value.p[i]));
+      VectorAppend(
+          TypeDependentOf(type)->dependent_member_template_arguments,
+          TemplateArgumentVectorCopy(member.template_arguments.value.p[i]));
     }
   }
   FullyQualifiedIdentifierDestruct(&member);
@@ -605,23 +611,25 @@ static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
       TypeIsStructOrUnion(result) && class_args != NULL &&
       !TemplateArgumentVectorContainsTemplateParameter(class_args);
   if (!concrete_class &&
-      (result->dependent_decltype_expr != NULL ||
+      (TypeDependentOf(result)->dependent_decltype_expr != NULL ||
        TypeContainsTemplateParameter(result))) {
-    if (result->dependent_member_name != NULL) {
-      StringDelete(result->dependent_member_name);
+    if (TypeDependentOf(result)->dependent_member_name != NULL) {
+      StringDelete(TypeDependentOf(result)->dependent_member_name);
     }
-    result->dependent_member_name = NewString(member.spelling.value);
-    if (result->dependent_member_template_arguments != NULL) {
+    TypeMutableDependent(result)->dependent_member_name =
+        NewString(member.spelling.value);
+    if (TypeDependentOf(result)->dependent_member_template_arguments != NULL) {
       VectorDeleteWithContents(
-          result->dependent_member_template_arguments,
+          TypeDependentOf(result)->dependent_member_template_arguments,
           (VectorElementDestructor)TemplateArgumentVectorDelete,
           /*free_element=*/false);
     }
-    result->dependent_member_template_arguments = NewVector();
+    TypeMutableDependent(result)->dependent_member_template_arguments =
+        NewVector();
     for (size_t i = 0; i < member.template_arguments.length; i++) {
-      VectorAppend(result->dependent_member_template_arguments,
-                   TemplateArgumentVectorCopy(
-                       member.template_arguments.value.p[i]));
+      VectorAppend(
+          TypeDependentOf(result)->dependent_member_template_arguments,
+          TemplateArgumentVectorCopy(member.template_arguments.value.p[i]));
     }
     FullyQualifiedIdentifierDestruct(&member);
     return result;
@@ -844,7 +852,7 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
     // arguments.  Analyzing it now diagnoses a false "no matching overload"
     // and mutates the operand so later substitution cannot recover.
     result = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
-    result->dependent_decltype_expr = expr;
+    TypeMutableDependent(result)->dependent_decltype_expr = expr;
     expr = NULL;
   } else {
     // decltype's operand is unevaluated: declaration-only function templates
@@ -890,18 +898,20 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
         (TypeIsUnknown(expr->type) ||
          TypeContainsTemplateParameter(expr->type) ||
          DependentExpressionContainsTemplateParameter(expr))) {
-      if (result->dependent_member_name != NULL) {
-        StringDelete(result->dependent_member_name);
-        result->dependent_member_name = NULL;
+      if (TypeDependentOf(result)->dependent_member_name != NULL) {
+        StringDelete(TypeDependentOf(result)->dependent_member_name);
+        TypeMutableDependent(result)->dependent_member_name = NULL;
       }
-      if (result->dependent_member_template_arguments != NULL) {
+      if (TypeDependentOf(result)->dependent_member_template_arguments !=
+          NULL) {
         VectorDeleteWithContents(
-            result->dependent_member_template_arguments,
+            TypeDependentOf(result)->dependent_member_template_arguments,
             (VectorElementDestructor)TemplateArgumentVectorDelete,
             /*free_element=*/false);
-        result->dependent_member_template_arguments = NULL;
+        TypeMutableDependent(result)->dependent_member_template_arguments =
+            NULL;
       }
-      result->dependent_decltype_expr = expr;
+      TypeMutableDependent(result)->dependent_decltype_expr = expr;
       expr = NULL;
     }
   }
@@ -1190,11 +1200,13 @@ static bool TypeReferencesTemplateParameterAtLeast(TypeRecord* type,
       }
     }
   }
-  if (type->dependent_member_template_arguments != NULL) {
-    for (size_t i = 0; i < type->dependent_member_template_arguments->length;
+  if (TypeDependentOf(type)->dependent_member_template_arguments != NULL) {
+    for (size_t i = 0;
+         i < TypeDependentOf(type)->dependent_member_template_arguments->length;
          i++) {
       Vector* component_args =
-          type->dependent_member_template_arguments->value.p[i];
+          TypeDependentOf(type)
+              ->dependent_member_template_arguments->value.p[i];
       if (component_args == NULL) {
         continue;
       }
@@ -1248,21 +1260,27 @@ static TypeRecord* BuildDependentMemberTemplateTypename(
   String encoded_name;
   StringInit(&encoded_name, NULL);
   Vector* component_args = NewVector();
-  if (base_type != NULL && base_type->dependent_member_name != NULL) {
-    StringAppendString(&encoded_name, base_type->dependent_member_name);
+  if (base_type != NULL &&
+      TypeDependentOf(base_type)->dependent_member_name != NULL) {
+    StringAppendString(&encoded_name,
+                       TypeDependentOf(base_type)->dependent_member_name);
     size_t old_component_count = 1;
-    for (const char* cursor = base_type->dependent_member_name->value;
+    for (const char* cursor =
+             TypeDependentOf(base_type)->dependent_member_name->value;
          cursor[0] != '\0'; cursor++) {
       if (cursor[0] == ':' && cursor[1] == ':') {
         old_component_count++;
         cursor++;
       }
     }
-    if (base_type->dependent_member_template_arguments != NULL) {
-      for (size_t i = 0;
-           i < base_type->dependent_member_template_arguments->length; i++) {
+    if (TypeDependentOf(base_type)->dependent_member_template_arguments !=
+        NULL) {
+      for (size_t i = 0; i < TypeDependentOf(base_type)
+                                 ->dependent_member_template_arguments->length;
+           i++) {
         Vector* old_args =
-            base_type->dependent_member_template_arguments->value.p[i];
+            TypeDependentOf(base_type)
+                ->dependent_member_template_arguments->value.p[i];
         VectorAppend(component_args, TemplateArgumentVectorCopy(old_args));
       }
     }
@@ -1286,17 +1304,19 @@ static TypeRecord* BuildDependentMemberTemplateTypename(
   } else {
     type->template_parameter_index = base_template_parameter_index;
   }
-  if (type->dependent_member_name != NULL) {
-    StringDelete(type->dependent_member_name);
+  if (TypeDependentOf(type)->dependent_member_name != NULL) {
+    StringDelete(TypeDependentOf(type)->dependent_member_name);
   }
-  type->dependent_member_name = NewString(encoded_name.value);
-  if (type->dependent_member_template_arguments != NULL) {
+  TypeMutableDependent(type)->dependent_member_name =
+      NewString(encoded_name.value);
+  if (TypeDependentOf(type)->dependent_member_template_arguments != NULL) {
     VectorDeleteWithContents(
-        type->dependent_member_template_arguments,
+        TypeDependentOf(type)->dependent_member_template_arguments,
         (VectorElementDestructor)TemplateArgumentVectorDelete,
         /*free_element=*/false);
   }
-  type->dependent_member_template_arguments = component_args;
+  TypeMutableDependent(type)->dependent_member_template_arguments =
+      component_args;
   StringDestruct(&encoded_name);
   return type;
 }
@@ -1313,7 +1333,7 @@ static bool TemplateArgumentIsIdentityParameter(TemplateArgument* arg,
   if (param->kind == kTemplateParameterType) {
     return arg->type != NULL &&
            arg->type->template_parameter_index == param->index &&
-           arg->type->dependent_member_name == NULL;
+           TypeDependentOf(arg->type)->dependent_member_name == NULL;
   }
   return arg->template_parameter_index == param->index &&
          arg->dependent_expr == NULL;
@@ -1344,7 +1364,7 @@ static bool TemplateArgumentIsParameterAt(TemplateArgument* arg, int index) {
   }
   if (arg->kind == kTemplateParameterType) {
     return arg->type != NULL && arg->type->template_parameter_index == index &&
-           arg->type->dependent_member_name == NULL;
+           TypeDependentOf(arg->type)->dependent_member_name == NULL;
   }
   return arg->template_parameter_index == index && arg->dependent_expr == NULL;
 }
@@ -1544,12 +1564,13 @@ static TypeRecord* TryBuildDependentTemplateIdMemberType(
   TypeRecord* type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
   type->template_origin = base;
   type->template_arguments = TemplateArgumentVectorCopy(parsed_args);
-  type->dependent_member_name = NewString(member_name->value);
-  type->dependent_member_template_arguments = NewVector();
+  TypeMutableDependent(type)->dependent_member_name =
+      NewString(member_name->value);
+  TypeMutableDependent(type)->dependent_member_template_arguments = NewVector();
   for (size_t i = base_index + 1; i < name->template_arguments.length; i++) {
-    VectorAppend(type->dependent_member_template_arguments,
-                 TemplateArgumentVectorCopy(
-                     name->template_arguments.value.p[i]));
+    VectorAppend(
+        TypeDependentOf(type)->dependent_member_template_arguments,
+        TemplateArgumentVectorCopy(name->template_arguments.value.p[i]));
   }
   return type;
 }
@@ -1601,7 +1622,7 @@ static TypeRecord* ParseCXXPackIndexedTypename(TypeParser* parser) {
   LexMatch(parser->lex, TOK(ellipsis));
   LexMatch(parser->lex, TOK(lsquare));
   type->is_pack_index = is_type_parameter;
-  type->pack_index_expr =
+  TypeMutableDependent(type)->pack_index_expr =
       SyntaxParseSingleExpression(parser->syntax, TC(closebra));
   SyntaxNeedBracket(parser->syntax, TOK(rsquare), TC(decl));
   if (!LexMatch(parser->lex, TOK(coloncolon))) {
@@ -1619,12 +1640,13 @@ static TypeRecord* ParseCXXPackIndexedTypename(TypeParser* parser) {
     FullyQualifiedIdentifierDestruct(&member);
     return type;
   }
-  type->dependent_member_name = NewString(member.spelling.value);
-  type->dependent_member_template_arguments = NewVector();
+  TypeMutableDependent(type)->dependent_member_name =
+      NewString(member.spelling.value);
+  TypeMutableDependent(type)->dependent_member_template_arguments = NewVector();
   for (size_t i = 0; i < member.template_arguments.length; i++) {
-    VectorAppend(type->dependent_member_template_arguments,
-                 TemplateArgumentVectorCopy(
-                     member.template_arguments.value.p[i]));
+    VectorAppend(
+        TypeDependentOf(type)->dependent_member_template_arguments,
+        TemplateArgumentVectorCopy(member.template_arguments.value.p[i]));
   }
   FullyQualifiedIdentifierDestruct(&member);
   return type;
@@ -1664,7 +1686,7 @@ static TypeRecord* ParseCXXSplicedType(TypeParser* parser) {
 
   TypeRecord* dependent =
       NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
-  dependent->dependent_splice_expr =
+  TypeMutableDependent(dependent)->dependent_splice_expr =
       NewSpliceASTNode(reflection, kSpliceType, location);
   return dependent;
 }
@@ -1892,10 +1914,11 @@ static bool AliasIdForwardsDependentMemberTemplate(TypeParser* parser,
                                                    Vector* args) {
   if (!symbol->flags.is_template || symbol->alias_template == NULL ||
       args == NULL || symbol->type == NULL ||
-      symbol->type->dependent_member_name == NULL) {
+      TypeDependentOf(symbol->type)->dependent_member_name == NULL) {
     return false;
   }
-  Vector* member_args = symbol->type->dependent_member_template_arguments;
+  Vector* member_args =
+      TypeDependentOf(symbol->type)->dependent_member_template_arguments;
   if (member_args == NULL || member_args->length == 0 ||
       VectorLast(member_args) == NULL) {
     return false;
@@ -1931,14 +1954,14 @@ static bool TemplateArgumentListsContainTemplateParameter(Vector* lists) {
 // ownership of TYPE; returns it when not applicable, its resolution, or NULL.
 static TypeRecord* ResolveConcreteDependentMemberType(TypeParser* parser,
                                                       TypeRecord* type) {
-  if (type == NULL || type->dependent_member_name == NULL ||
+  if (type == NULL || TypeDependentOf(type)->dependent_member_name == NULL ||
       type->template_origin == NULL || type->template_parameter_index >= 0 ||
       parser->syntax->parsing_template_declaration ||
       parser->syntax->current_template_parameters != NULL ||
       TemplateArgumentVectorContainsTemplateParameter(
           type->template_arguments) ||
       TemplateArgumentListsContainTemplateParameter(
-          type->dependent_member_template_arguments)) {
+          TypeDependentOf(type)->dependent_member_template_arguments)) {
     return type;
   }
   bool saved_failed = parser->template_substitution_failed;
@@ -1950,7 +1973,8 @@ static TypeRecord* ResolveConcreteDependentMemberType(TypeParser* parser,
   bool failed = parser->template_substitution_failed;
   parser->template_substitution_failed = saved_failed;
   TypeRecordDeleteUnowned(type);
-  if (failed || resolved == NULL || resolved->dependent_member_name != NULL) {
+  if (failed || resolved == NULL ||
+      TypeDependentOf(resolved)->dependent_member_name != NULL) {
     TypeRecordDeleteUnowned(resolved);
     return NULL;
   }
@@ -2296,15 +2320,16 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               type_record->template_origin = dependent_member_origin;
               type_record->template_arguments =
                   TemplateArgumentVectorCopy(parsed_args);
-              type_record->dependent_member_name =
+              TypeMutableDependent(type_record)->dependent_member_name =
                   NewString(member_name->value);
-              type_record->dependent_member_template_arguments = NewVector();
+              TypeMutableDependent(type_record)
+                  ->dependent_member_template_arguments = NewVector();
               for (size_t i = base_index + 1;
                    i < typename_name.template_arguments.length; i++) {
-                VectorAppend(
-                    type_record->dependent_member_template_arguments,
-                    TemplateArgumentVectorCopy(
-                        typename_name.template_arguments.value.p[i]));
+                VectorAppend(TypeDependentOf(type_record)
+                                 ->dependent_member_template_arguments,
+                             TemplateArgumentVectorCopy(
+                                 typename_name.template_arguments.value.p[i]));
               }
             }
             type |= type_record->type;
@@ -2481,7 +2506,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                 NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
             type_record->template_parameter_index =
                 base->template_parameter_index;
-            type_record->dependent_member_name =
+            TypeMutableDependent(type_record)->dependent_member_name =
                 NewString(member_name->value);
             type |= type_record->type;
           } else if (base != NULL && StorageIs(base->storage, STO(typedef)) &&
@@ -2509,22 +2534,28 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               type_record->template_origin = base->type->template_origin;
               type_record->template_arguments =
                   TemplateArgumentVectorCopy(base->type->template_arguments);
-              type_record->dependent_member_name = NewString(member_name->value);
+              TypeMutableDependent(type_record)->dependent_member_name =
+                  NewString(member_name->value);
             } else {
               // `using mid = typename T::a; typename mid::b` is `T::a::b`.
               // Replacing the stored member drops `a`, so a later `mid::b::value`
               // is looked up on `T` and never reaches `a`.
               type_record = TypeRecordCopy(base->type);
-              if (type_record->dependent_member_name != NULL &&
-                  type_record->dependent_member_name->length > 0) {
-                StringAppend(type_record->dependent_member_name, "::");
-                StringAppendString(type_record->dependent_member_name,
-                                   member_name);
+              if (TypeDependentOf(type_record)->dependent_member_name != NULL &&
+                  TypeDependentOf(type_record)->dependent_member_name->length >
+                      0) {
+                StringAppend(
+                    TypeDependentOf(type_record)->dependent_member_name, "::");
+                StringAppendString(
+                    TypeDependentOf(type_record)->dependent_member_name,
+                    member_name);
               } else {
-                if (type_record->dependent_member_name != NULL) {
-                  StringDelete(type_record->dependent_member_name);
+                if (TypeDependentOf(type_record)->dependent_member_name !=
+                    NULL) {
+                  StringDelete(
+                      TypeDependentOf(type_record)->dependent_member_name);
                 }
-                type_record->dependent_member_name =
+                TypeMutableDependent(type_record)->dependent_member_name =
                     NewString(member_name->value);
               }
             }
@@ -2580,7 +2611,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
               type_record->template_origin = current->tag_symbol;
               type_record->template_arguments = identity;
-              type_record->dependent_member_name = NewString(member_name->value);
+              TypeMutableDependent(type_record)->dependent_member_name =
+                  NewString(member_name->value);
               type |= type_record->type;
             } else {
               SyntaxError(parser->syntax, "Unknown type name %s",
@@ -2614,18 +2646,23 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               type_record->template_origin = alias->type->template_origin;
               type_record->template_arguments =
                   TemplateArgumentVectorCopy(alias->type->template_arguments);
-              type_record->dependent_member_name = NewString(tail.value);
+              TypeMutableDependent(type_record)->dependent_member_name =
+                  NewString(tail.value);
             } else {
               type_record = TypeRecordCopy(alias->type);
               if (TypeHasDependentMemberPath(type_record)) {
-                StringAppend(type_record->dependent_member_name, "::");
-                StringAppendString(type_record->dependent_member_name,
-                                   &tail);
+                StringAppend(
+                    TypeDependentOf(type_record)->dependent_member_name, "::");
+                StringAppendString(
+                    TypeDependentOf(type_record)->dependent_member_name, &tail);
               } else {
-                if (type_record->dependent_member_name != NULL) {
-                  StringDelete(type_record->dependent_member_name);
+                if (TypeDependentOf(type_record)->dependent_member_name !=
+                    NULL) {
+                  StringDelete(
+                      TypeDependentOf(type_record)->dependent_member_name);
                 }
-                type_record->dependent_member_name = NewString(tail.value);
+                TypeMutableDependent(type_record)->dependent_member_name =
+                    NewString(tail.value);
               }
             }
             type |= type_record->type;
@@ -2691,13 +2728,16 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               type_record->template_origin = base;
               type_record->template_arguments =
                   TemplateArgumentVectorCopy(parsed_args);
-              type_record->dependent_member_name = NewString(tail.value);
-              type_record->dependent_member_template_arguments = NewVector();
+              TypeMutableDependent(type_record)->dependent_member_name =
+                  NewString(tail.value);
+              TypeMutableDependent(type_record)
+                  ->dependent_member_template_arguments = NewVector();
               for (size_t i = template_index + 1;
                    i < typename_name.template_arguments.length; i++) {
                 Vector* component_args =
                     typename_name.template_arguments.value.p[i];
-                VectorAppend(type_record->dependent_member_template_arguments,
+                VectorAppend(TypeDependentOf(type_record)
+                                 ->dependent_member_template_arguments,
                              component_args != NULL
                                  ? TemplateArgumentVectorCopy(component_args)
                                  : NULL);
@@ -3684,7 +3724,7 @@ static void ParseCXXTypePackIndex(TypeParser* parser, TypeRecord* base_type) {
   }
   if (is_type_parameter || is_template_parameter) {
     base_type->is_pack_index = true;
-    base_type->pack_index_expr = index;
+    TypeMutableDependent(base_type)->pack_index_expr = index;
     base_type->template_parameter_index = parameter_index;
     if (is_template_parameter &&
         LexLookingAt(parser->lex, TOK(less))) {
@@ -3766,14 +3806,14 @@ static bool NamesMemberOwner(TypeRecord* type, Struct* owner) {
 static void ResolveOutOfLineDependentReturnType(TypeParser* parser) {
   TypeRecord* type = parser->base_type;
   if (type == NULL || parser->cxx_member_owner == NULL ||
-      type->dependent_member_name == NULL || type->template_origin == NULL ||
-      type->template_origin->type == NULL ||
+      TypeDependentOf(type)->dependent_member_name == NULL ||
+      type->template_origin == NULL || type->template_origin->type == NULL ||
       !TypeIsStructOrUnion(type->template_origin->type) ||
       !NamesMemberOwner(type, parser->cxx_member_owner)) {
     return;
   }
-  StructMember* member =
-      FindStructMember(parser->cxx_member_owner, type->dependent_member_name);
+  StructMember* member = FindStructMember(
+      parser->cxx_member_owner, TypeDependentOf(type)->dependent_member_name);
   if (member == NULL || member->symbol == NULL ||
       member->symbol->type == NULL ||
       !StorageIs(member->symbol->storage, STO(typedef))) {
@@ -4039,8 +4079,8 @@ static bool TypeContainsCurrentParameterPack(TypeParser* parser,
         }
       }
     }
-    if (ExpressionContainsCurrentParameterPack(parser,
-                                               t->dependent_decltype_expr)) {
+    if (ExpressionContainsCurrentParameterPack(
+            parser, TypeDependentOf(t)->dependent_decltype_expr)) {
       return true;
     }
   }
@@ -4272,11 +4312,13 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
   TypeRecord* placeholder = TypeRecordAdopt(
       NewTypeRecordWithSize(kTypeInt | kTypeUnknown, placeholder_qualifiers));
   placeholder->template_parameter_index = index;
-  placeholder->template_parameter_name = NewString("auto");
+  TypeMutableDependent(placeholder)->template_parameter_name =
+      NewString("auto");
   Symbol* formal = TypeParserParseDeclarator(proto_parser, placeholder);
   assert(formal != NULL);
   if (formal->name.length != 0) {
-    StringSet(placeholder->template_parameter_name, formal->name.value);
+    StringSet(TypeDependentOf(placeholder)->template_parameter_name,
+              formal->name.value);
   }
   ParseFormalArgument(proto_parser, func, formal, arg_number,
                       /*abbreviated_parameter=*/true);

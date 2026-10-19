@@ -1915,29 +1915,29 @@ static bool WriteType(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteInt32(buf, kType_template_parameter_index,
                  t->template_parameter_index);
   SWriteStringPtr(ctx, buf, kType_template_parameter_name,
-                  t->template_parameter_name);
+                  TypeDependentOf(t)->template_parameter_name);
   SWriteStringPtr(ctx, buf, kType_dependent_member_name,
-                  t->dependent_member_name);
+                  TypeDependentOf(t)->dependent_member_name);
   SWriteRef(ctx, buf, kType_template_origin, kSerialKindSymbol,
             t->template_origin);
   if (t->template_arguments != NULL) {
     WriteTemplateArgumentVector(ctx, buf, kType_template_arguments,
                                 t->template_arguments);
   }
-  if (t->dependent_member_template_arguments != NULL) {
+  if (TypeDependentOf(t)->dependent_member_template_arguments != NULL) {
     WriteTemplateArgumentVectorVector(
         ctx, buf, kType_dependent_member_template_arguments,
-        t->dependent_member_template_arguments);
+        TypeDependentOf(t)->dependent_member_template_arguments);
   }
   SWriteRef(ctx, buf, kType_dependent_decltype_expr, kSerialKindAST,
-            t->dependent_decltype_expr);
+            TypeDependentOf(t)->dependent_decltype_expr);
   WireWriteBool(buf, kType_is_pack_index, t->is_pack_index);
   SWriteRef(ctx, buf, kType_pack_index_expr, kSerialKindAST,
-            t->pack_index_expr);
+            TypeDependentOf(t)->pack_index_expr);
   WriteTemplateArgumentField(ctx, buf, kType_pack_index_pack,
-                             t->pack_index_pack);
+                             TypeDependentOf(t)->pack_index_pack);
   SWriteRef(ctx, buf, kType_dependent_splice_expr, kSerialKindAST,
-            t->dependent_splice_expr);
+            TypeDependentOf(t)->dependent_splice_expr);
   SWriteRef(ctx, buf, kType_next, kSerialKindType, t->next);
 
   if (t->declarator == kDeclArray || t->declarator == kDeclVector) {
@@ -2010,10 +2010,12 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         WireReadInt32(buf, &t->template_parameter_index);
         break;
       case kType_template_parameter_name:
-        t->template_parameter_name = SReadStringPtr(ctx, buf);
+        TypeMutableDependent(t)->template_parameter_name =
+            SReadStringPtr(ctx, buf);
         break;
       case kType_dependent_member_name:
-        t->dependent_member_name = SReadStringPtr(ctx, buf);
+        TypeMutableDependent(t)->dependent_member_name =
+            SReadStringPtr(ctx, buf);
         break;
       case kType_template_origin:
         t->template_origin = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
@@ -2022,25 +2024,26 @@ static bool ReadType(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         t->template_arguments = ReadTemplateArgumentVector(ctx, buf);
         break;
       case kType_dependent_member_template_arguments:
-        t->dependent_member_template_arguments =
+        TypeMutableDependent(t)->dependent_member_template_arguments =
             ReadTemplateArgumentVectorVector(ctx, buf);
         break;
       case kType_dependent_decltype_expr:
-        t->dependent_decltype_expr =
+        TypeMutableDependent(t)->dependent_decltype_expr =
             (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         break;
       case kType_is_pack_index:
         WireReadBool(buf, &t->is_pack_index);
         break;
       case kType_pack_index_expr:
-        t->pack_index_expr =
+        TypeMutableDependent(t)->pack_index_expr =
             (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         break;
       case kType_pack_index_pack:
-        t->pack_index_pack = ReadTemplateArgumentField(ctx, buf);
+        TypeMutableDependent(t)->pack_index_pack =
+            ReadTemplateArgumentField(ctx, buf);
         break;
       case kType_dependent_splice_expr:
-        t->dependent_splice_expr =
+        TypeMutableDependent(t)->dependent_splice_expr =
             (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
         break;
       case kType_next:

@@ -287,39 +287,41 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
       !StorageIs(scope_symbol->storage, STO(typedef))) {
     return NULL;
   }
-  bool dependent_scope = scope_symbol->type->template_parameter_index >= 0 ||
-                         TypeContainsTemplateParameter(scope_symbol->type) ||
-                         (scope_symbol->type->dependent_member_name == NULL &&
-                          scope_symbol->type->template_origin != NULL &&
-                          TemplateArgumentListIsDependent(
-                              scope_symbol->type->template_arguments)) ||
-                         TypeNamesOtherSpecializationOfEnclosingClass(
-                             syntax, scope_symbol->type);
+  bool dependent_scope =
+      scope_symbol->type->template_parameter_index >= 0 ||
+      TypeContainsTemplateParameter(scope_symbol->type) ||
+      (TypeDependentOf(scope_symbol->type)->dependent_member_name == NULL &&
+       scope_symbol->type->template_origin != NULL &&
+       TemplateArgumentListIsDependent(
+           scope_symbol->type->template_arguments)) ||
+      TypeNamesOtherSpecializationOfEnclosingClass(syntax, scope_symbol->type);
   if (!dependent_scope) {
     return NULL;
   }
   String* member =
       name->components.value.p[name->components.length - 1];
   TypeRecord* dependent_type = TypeRecordCopy(scope_symbol->type);
-  if (dependent_type->dependent_member_name == NULL) {
-    dependent_type->dependent_member_name = NewString("");
+  if (TypeDependentOf(dependent_type)->dependent_member_name == NULL) {
+    TypeMutableDependent(dependent_type)->dependent_member_name = NewString("");
   } else {
     // The scope alias is itself a dependent member access (e.g. `q` was
     // `typename W::period`).  Extend the existing member path rather than
     // discarding it, so `q::num` becomes the full `W::period::num` path instead
     // of collapsing to `W::num` (which would drop the intermediate member and
     // leave the name unresolvable).
-    StringAppend(dependent_type->dependent_member_name, "::");
+    StringAppend(TypeDependentOf(dependent_type)->dependent_member_name, "::");
   }
   for (size_t i = 1; i < name->components.length; i++) {
     if (i != 1) {
-      StringAppend(dependent_type->dependent_member_name, "::");
+      StringAppend(TypeDependentOf(dependent_type)->dependent_member_name,
+                   "::");
     }
-    StringAppendString(dependent_type->dependent_member_name,
+    StringAppendString(TypeDependentOf(dependent_type)->dependent_member_name,
                        name->components.value.p[i]);
   }
   if (intermediate_member_template_id &&
-      dependent_type->dependent_member_template_arguments == NULL) {
+      TypeDependentOf(dependent_type)->dependent_member_template_arguments ==
+          NULL) {
     Vector* path_args = NewVector();
     for (size_t i = 1; i < name->components.length; i++) {
       Vector* args = i < name->template_arguments.length
@@ -327,7 +329,8 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
                          : NULL;
       VectorAppend(path_args, TemplateArgumentVectorCopy(args));
     }
-    dependent_type->dependent_member_template_arguments = path_args;
+    TypeMutableDependent(dependent_type)->dependent_member_template_arguments =
+        path_args;
   }
   Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
   placeholder->flags.invented = true;
@@ -355,7 +358,7 @@ static bool StructHasDependentBase(Struct* str) {
       continue;
     }
     if (TypeContainsTemplateParameter(base->type) ||
-        base->type->dependent_member_name != NULL ||
+        TypeDependentOf(base->type)->dependent_member_name != NULL ||
         base->type->template_parameter_index >= 0) {
       return true;
     }
@@ -426,7 +429,8 @@ static ASTNode* BuildDependentCurrentInstantiationMember(
   TypeRecord* dependent_type =
       NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
   dependent_type->template_origin = owner->tag_symbol;
-  dependent_type->dependent_member_name = NewString(member_spelling->value);
+  TypeMutableDependent(dependent_type)->dependent_member_name =
+      NewString(member_spelling->value);
   Symbol* placeholder =
       NewSymbol(member_spelling->value, dependent_type, STO(implicit));
   placeholder->flags.invented = true;
@@ -545,8 +549,10 @@ static ASTNode* BuildDependentMemberTemplateValueName(
     dependent_type->template_origin = base;
     dependent_type->template_arguments =
         TemplateArgumentVectorCopy(origin_args);
-    dependent_type->dependent_member_name = NewString(path.value);
-    dependent_type->dependent_member_template_arguments = path_args;
+    TypeMutableDependent(dependent_type)->dependent_member_name =
+        NewString(path.value);
+    TypeMutableDependent(dependent_type)->dependent_member_template_arguments =
+        path_args;
     StringDestruct(&path);
     String* member = name->components.value.p[last];
     Symbol* placeholder =
@@ -682,7 +688,8 @@ static ASTNode* BuildDependentTemplateScopeValueName(
   TypeRecord* dependent_type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
   dependent_type->template_origin = base;
   dependent_type->template_arguments = TemplateArgumentVectorCopy(scope_args);
-  dependent_type->dependent_member_name = NewString(member->value);
+  TypeMutableDependent(dependent_type)->dependent_member_name =
+      NewString(member->value);
   Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
   placeholder->flags.invented = true;
   ASTNode* node = NewIdentifierASTNode(placeholder, location);
@@ -730,7 +737,8 @@ static ASTNode* BuildDependentInjectedBaseValueName(
   TypeRecord* dependent_type = NULL;
   if (scope_args == NULL) {
     dependent_type = TypeRecordCopy(injected->type);
-    dependent_type->dependent_member_name = NewString(member->value);
+    TypeMutableDependent(dependent_type)->dependent_member_name =
+        NewString(member->value);
   } else {
     String* scope_name = name->components.value.p[0];
     // Inside the class template being defined, `Spy` is its injected-class-
@@ -764,9 +772,11 @@ static ASTNode* BuildDependentInjectedBaseValueName(
     dependent_type = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
     dependent_type->template_origin = scope;
     dependent_type->template_arguments = TemplateArgumentVectorCopy(scope_args);
-    dependent_type->dependent_member_name = NewString(base_name->value);
-    StringAppend(dependent_type->dependent_member_name, "::");
-    StringAppendString(dependent_type->dependent_member_name, member);
+    TypeMutableDependent(dependent_type)->dependent_member_name =
+        NewString(base_name->value);
+    StringAppend(TypeDependentOf(dependent_type)->dependent_member_name, "::");
+    StringAppendString(TypeDependentOf(dependent_type)->dependent_member_name,
+                       member);
   }
   Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
   placeholder->flags.invented = true;

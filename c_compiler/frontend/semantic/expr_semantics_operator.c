@@ -3307,7 +3307,7 @@ static bool AnalyzeAssignmentExpressionPhaseLowerBracedInitBeforeRhs(
   bool dependent_new =
       node->base.type != NULL &&
       (TypeContainsTemplateParameter(node->base.type) ||
-       node->base.type->dependent_member_name != NULL);
+       TypeDependentOf(node->base.type)->dependent_member_name != NULL);
   if (dependent_new) {
     node->base.flags |= kASTAnalyzed;
     return true;

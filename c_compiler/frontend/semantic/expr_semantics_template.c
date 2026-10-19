@@ -342,10 +342,10 @@ static bool CXXIsSameTemplateParameterType(TypeRecord* left, TypeRecord* right) 
   }
   if (left->template_parameter_index >= 0 &&
       left->template_parameter_index == right->template_parameter_index &&
-      left->template_parameter_name != NULL &&
-      right->template_parameter_name != NULL &&
-      StringEqualString(left->template_parameter_name,
-                        right->template_parameter_name)) {
+      TypeDependentOf(left)->template_parameter_name != NULL &&
+      TypeDependentOf(right)->template_parameter_name != NULL &&
+      StringEqualString(TypeDependentOf(left)->template_parameter_name,
+                        TypeDependentOf(right)->template_parameter_name)) {
     return true;
   }
   return TypeEqualIgnoringQualifiers(left, right);
@@ -1529,7 +1529,7 @@ static ASTNode* AnalyzeIdentifierHandleDependentQualifiedName(
     IdentifierASTNode* node) {
   if ((node->base.flags & kASTDependentQualifiedName) != 0 &&
       node->symbol != NULL && node->symbol->type != NULL &&
-      node->symbol->type->dependent_member_name != NULL) {
+      TypeDependentOf(node->symbol->type)->dependent_member_name != NULL) {
     if (TypeContainsTemplateParameter(node->symbol->type)) {
       // The placeholder type is the dependent scope (`allocator_traits<A>`),
       // not the member (`::value`).  A constexpr bool cannot convert from that
@@ -1538,8 +1538,9 @@ static ASTNode* AnalyzeIdentifierHandleDependentQualifiedName(
                      NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
       return &node->base;
     }
-    SemanticError(&node->base, "no member named '%s' in the dependent scope",
-                  node->symbol->type->dependent_member_name->value);
+    SemanticError(
+        &node->base, "no member named '%s' in the dependent scope",
+        TypeDependentOf(node->symbol->type)->dependent_member_name->value);
     ASTNodeSetType(&node->base, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return &node->base;
   }

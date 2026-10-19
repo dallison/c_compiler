@@ -51,9 +51,8 @@ static CXXAggregateDeductionElement* NewCXXAggregateDeductionElement(
 bool TypeIsTemplateParameterPlaceholder(TypeRecord* type, int* index) {
   if (type == NULL || type->declarator != kDeclPrimitive ||
       type->template_parameter_index < 0 ||
-      type->dependent_member_name != NULL ||
-      type->template_origin != NULL ||
-      type->template_arguments != NULL) {
+      TypeDependentOf(type)->dependent_member_name != NULL ||
+      type->template_origin != NULL || type->template_arguments != NULL) {
     return false;
   }
   if (index != NULL) {
@@ -215,7 +214,8 @@ static TemplateArgument* NewTemplateParameterPatternArgument(
     arg->type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     arg->type->template_parameter_index = param->index;
     if (param->name.length != 0) {
-      arg->type->template_parameter_name = NewString(param->name.value);
+      TypeMutableDependent(arg->type)->template_parameter_name =
+          NewString(param->name.value);
     }
   } else {
     arg->template_parameter_index = param->index;

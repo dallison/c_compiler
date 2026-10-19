@@ -915,7 +915,7 @@ static TypeRecord* DeduceCXXNewPlaceholderType(Syntax* syntax,
     ((CastASTNode*)decay_copy)->kind = kCastAutoParen;
     deduced =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(leaf));
-    deduced->dependent_decltype_expr = decay_copy;
+    TypeMutableDependent(deduced)->dependent_decltype_expr = decay_copy;
   } else if (init_type != NULL && !TypeIsUnknown(init_type) &&
              !TypeContainsAuto(init_type)) {
     TypeRecord* decayed = TypeDecayForByValueDeduction(init_type);

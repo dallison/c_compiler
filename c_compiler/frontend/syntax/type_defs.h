@@ -541,6 +541,33 @@ typedef struct {
   int template_parameter_index;  // >=0 if bound is non-type param. // @wire 5
 } ArrayInfo;
 
+// The part of a TypeRecord that only template-dependent types use, owned by
+// that record.  Its wire numbers are TypeRecord fields.
+typedef struct TypeDependentInfo {
+  // The record whose fields these are.  By-value views of a record share its
+  // info, so only the owner may modify it.
+  struct TypeRecord* owner;
+  String* template_parameter_name;  // Source name for diagnostics. // @wire 16
+  String* dependent_member_name;    // For T::type-like types.       // @wire 7
+  // For dependent qualified member type paths rooted at a template parameter.
+  // `dependent_member_name` stores the `::`-joined components after the root;
+  // this vector, when present, has one entry per component.  Each entry is
+  // either NULL or a Vector<TemplateArgument*> for that component's
+  // template-id.
+  Vector* dependent_member_template_arguments;  // @wire 17
+  // Unevaluated operand of a type-dependent decltype expression.  The AST is
+  // arena-owned and re-cloned with concrete template arguments during
+  // substitution.
+  struct ASTNode* dependent_decltype_expr;  // @wire 15
+  // C++26 pack-indexing specifier `Ts...[I]` (see is_pack_index).
+  struct ASTNode* pack_index_expr;  // @wire 19
+  // Concrete pack retained when its index remains dependent across a nested
+  // template substitution.
+  struct TemplateArgument* pack_index_pack;  // @wire 22
+  // C++26 dependent type splice `typename[: r :]`.  Retained until template
+  // substitution makes the reflection value concrete.
+  struct ASTNode* dependent_splice_expr;  // @wire 20
+} TypeDependentInfo;
 
 // Type record.  This represents one part of a type.
 // Each of these structs is chained into a full type by the 'next'
@@ -570,27 +597,11 @@ typedef struct TypeRecord {
   int size;                                                       // @wire 5
   int bit_width;  // Exact width of kTypeBitInt; zero otherwise.    // @wire 21
   int template_parameter_index;  // >=0 for placeholder types.     // @wire 6
-  String* template_parameter_name;  // Source name for diagnostics. // @wire 16
-  String* dependent_member_name;  // For T::type-like types.       // @wire 7
   Symbol* template_origin;       // Primary template for template-ids. // @wire 8
   Vector* template_arguments;    // TemplateArgument* (owned).      // @wire 9
-  // For dependent qualified member type paths rooted at a template parameter.
-  // `dependent_member_name` stores the `::`-joined components after the root;
-  // this vector, when present, has one entry per component.  Each entry is
-  // either NULL or a Vector<TemplateArgument*> for that component's template-id.
-  Vector* dependent_member_template_arguments;                     // @wire 17
-  // Unevaluated operand of a type-dependent decltype expression.  The AST is
-  // arena-owned and re-cloned with concrete template arguments during
-  // substitution.
-  struct ASTNode* dependent_decltype_expr;                          // @wire 15
-  // C++26 pack-indexing specifier `Ts...[I]` (see is_pack_index).
-  struct ASTNode* pack_index_expr;                                  // @wire 19
-  // Concrete pack retained when its index remains dependent across a nested
-  // template substitution.
-  struct TemplateArgument* pack_index_pack;                          // @wire 22
-  // C++26 dependent type splice `typename[: r :]`.  Retained until template
-  // substitution makes the reflection value concrete.
-  struct ASTNode* dependent_splice_expr;                             // @wire 20
+  // Fields only template-dependent types use; NULL until one is set.  Read
+  // through TypeDependentOf and write through TypeMutableDependent.
+  struct TypeDependentInfo* dependent;
   // Struct whose non-owning size-update list most recently registered this
   // arena-backed record. Stale older-list entries are filtered during sync.
   Struct* size_sync_owner;                                           // @wire -
@@ -602,6 +613,17 @@ typedef struct TypeRecord {
     Enum* enum_info;             // @wire 14 (kTypeEnum)
   } info;
 } TypeRecord;
+
+extern const TypeDependentInfo kNoTypeDependentInfo;
+
+// A record's dependent fields; all zero when it has none.
+static inline const TypeDependentInfo* TypeDependentOf(
+    const TypeRecord* record) {
+  return record->dependent != NULL ? record->dependent : &kNoTypeDependentInfo;
+}
+
+// A record's dependent fields for writing, allocated on first use.
+TypeDependentInfo* TypeMutableDependent(TypeRecord* record);
 
 static inline Qualifiers GetQualifiers(const TypeRecord* record) {
   return record->qualifiers_;

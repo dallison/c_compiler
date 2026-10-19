@@ -198,16 +198,16 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
     if ((node->flags & kASTDependentQualifiedName) != 0 &&
         remap->rebase_base > 0 && id->symbol != NULL &&
         id->symbol->type != NULL &&
-        id->symbol->type->dependent_member_name != NULL &&
+        TypeDependentOf(id->symbol->type)->dependent_member_name != NULL &&
         TypeContainsTemplateParameter(id->symbol->type)) {
       TypeRecord* scope = TypeRecordCopy(id->symbol->type);
-      StringDelete(scope->dependent_member_name);
-      scope->dependent_member_name = NULL;
+      StringDelete(TypeDependentOf(scope)->dependent_member_name);
+      TypeMutableDependent(scope)->dependent_member_name = NULL;
       TypeRecord* concrete = RemapEnclosingTemplateType(remap, scope);
       TypeRecordDelete(scope);
       if (concrete != NULL) {
-        concrete->dependent_member_name =
-            NewString(id->symbol->type->dependent_member_name->value);
+        TypeMutableDependent(concrete)->dependent_member_name = NewString(
+            TypeDependentOf(id->symbol->type)->dependent_member_name->value);
         Symbol* copy =
             NewSymbol(id->symbol->name.value, concrete, id->symbol->storage);
         copy->flags = id->symbol->flags;

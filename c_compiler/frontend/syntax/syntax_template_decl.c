@@ -548,7 +548,8 @@ static void SyntaxRegisterClonedTemplateParameter(Syntax* syntax,
     TypeRecord* placeholder =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     placeholder->template_parameter_index = param->index;
-    placeholder->template_parameter_name = NewString(param->name.value);
+    TypeMutableDependent(placeholder)->template_parameter_name =
+        NewString(param->name.value);
     Symbol* sym = NewSymbol(param->name.value, placeholder, STO(typedef));
     sym->flags.invented = true;
     sym->flags.is_template_parameter = true;

@@ -1731,7 +1731,7 @@ static void AddTemplateParameterScopeSymbols(Syntax* syntax,
       parameter_type =
           NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
       parameter_type->template_parameter_index = parameter->index;
-      parameter_type->template_parameter_name =
+      TypeMutableDependent(parameter_type)->template_parameter_name =
           NewString(parameter->name.value);
     } else if (parameter->type != NULL) {
       parameter_type = TypeRecordCopy(parameter->type);

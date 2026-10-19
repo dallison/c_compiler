@@ -157,7 +157,7 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
           SyntaxParseExpression(parser->syntax, TC(spliceclose));
       SyntaxNeedBracket(parser->syntax, TOK(splice_close), TC(type));
       base_type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
-      base_type->dependent_splice_expr =
+      TypeMutableDependent(base_type)->dependent_splice_expr =
           NewSpliceASTNode(reflection, kSpliceBase, location);
     } else {
       base_type = TypeParserParseType(parser, true);

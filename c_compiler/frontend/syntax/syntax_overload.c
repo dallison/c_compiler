@@ -575,7 +575,7 @@ static bool TemplateArgumentIsOwnParameter(TemplateArgument* arg,
   if (param->kind == kTemplateParameterType) {
     return arg->type != NULL &&
            arg->type->template_parameter_index == param->index &&
-           arg->type->dependent_member_name == NULL;
+           TypeDependentOf(arg->type)->dependent_member_name == NULL;
   }
   return arg->template_parameter_index == param->index &&
          arg->dependent_expr == NULL;
@@ -651,11 +651,13 @@ static TypeRecord* PeelTypeForOutOfLineTypedefMatch(TypeRecord* type) {
 static bool OutOfLineDependentMemberMatchesInClassTypedef(
     TypeParser* parser, TypeRecord* decl, TypeRecord* dependent) {
   if (parser == NULL || parser->cxx_member_owner == NULL || decl == NULL ||
-      dependent == NULL || dependent->dependent_member_name == NULL) {
+      dependent == NULL ||
+      TypeDependentOf(dependent)->dependent_member_name == NULL) {
     return false;
   }
-  StructMember* member = FindStructMember(parser->cxx_member_owner,
-                                          dependent->dependent_member_name);
+  StructMember* member =
+      FindStructMember(parser->cxx_member_owner,
+                       TypeDependentOf(dependent)->dependent_member_name);
   if (member == NULL || member->symbol == NULL ||
       !StorageIs(member->symbol->storage, STO(typedef))) {
     return false;

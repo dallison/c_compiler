@@ -607,6 +607,44 @@ void TypeRecordSetStructInfo(TypeRecord* record, Struct* str) {
   TypeRecordRegisterStructSizeUser(record);
 }
 
+const TypeDependentInfo kNoTypeDependentInfo;
+
+TypeDependentInfo* TypeMutableDependent(TypeRecord* record) {
+  assert(!record->shared_immutable);
+  if (record->dependent == NULL) {
+    record->dependent = calloc(1, sizeof(TypeDependentInfo));
+    record->dependent->owner = record;
+  }
+  assert(record->dependent->owner == record);
+  return record->dependent;
+}
+
+static void TypeDependentInfoDelete(TypeDependentInfo* info) {
+  if (info == NULL) {
+    return;
+  }
+  if (info->dependent_member_template_arguments != NULL) {
+    VectorDeleteWithContents(
+        info->dependent_member_template_arguments,
+        (VectorElementDestructor)TemplateArgumentVectorDelete,
+        /*free_element=*/false);
+  }
+  if (info->dependent_member_name != NULL) {
+    StringDelete(info->dependent_member_name);
+  }
+  if (info->template_parameter_name != NULL) {
+    StringDelete(info->template_parameter_name);
+  }
+  if (info->pack_index_expr != NULL) {
+    ASTNodeDelete(info->pack_index_expr);
+  }
+  TemplateArgumentDelete(info->pack_index_pack);
+  if (info->dependent_splice_expr != NULL) {
+    ASTNodeDelete(info->dependent_splice_expr);
+  }
+  free(info);
+}
+
 // Deletes a TypeRecord with regard to the reference count.  The
 // reference count is decremented and if it goes to zero the
 // record can be deleted.  When deleting it, the record pointed
@@ -632,31 +670,8 @@ void TypeRecordDeleteLastReference(TypeRecord* record) {
                                /*free_element=*/false);
       record->template_arguments = NULL;
     }
-    if (record->dependent_member_template_arguments != NULL) {
-      VectorDeleteWithContents(
-          record->dependent_member_template_arguments,
-          (VectorElementDestructor)TemplateArgumentVectorDelete,
-          /*free_element=*/false);
-      record->dependent_member_template_arguments = NULL;
-    }
-    if (record->dependent_member_name != NULL) {
-      StringDelete(record->dependent_member_name);
-      record->dependent_member_name = NULL;
-    }
-    if (record->template_parameter_name != NULL) {
-      StringDelete(record->template_parameter_name);
-      record->template_parameter_name = NULL;
-    }
-    if (record->pack_index_expr != NULL) {
-      ASTNodeDelete(record->pack_index_expr);
-      record->pack_index_expr = NULL;
-    }
-    TemplateArgumentDelete(record->pack_index_pack);
-    record->pack_index_pack = NULL;
-    if (record->dependent_splice_expr != NULL) {
-      ASTNodeDelete(record->dependent_splice_expr);
-      record->dependent_splice_expr = NULL;
-    }
+    TypeDependentInfoDelete(record->dependent);
+    record->dependent = NULL;
     // Delete type-specific info if refs goes to zero.
     if (TypeIsStructOrUnion(record)) {
       // Struct infos are not freed here: they can form reference cycles, so
@@ -1581,10 +1596,11 @@ static bool TypeSpineCanShareAtDepth(TypeRecord* type, bool allow_class,
     if (++guard > 64) {
       return false;
     }
-    if (t->template_parameter_index >= 0 || t->dependent_member_name != NULL ||
-        t->dependent_decltype_expr != NULL ||
-        t->dependent_splice_expr != NULL || t->is_pack_index ||
-        t->pack_index_expr != NULL || TypeIsFunction(t)) {
+    if (t->template_parameter_index >= 0 ||
+        TypeDependentOf(t)->dependent_member_name != NULL ||
+        TypeDependentOf(t)->dependent_decltype_expr != NULL ||
+        TypeDependentOf(t)->dependent_splice_expr != NULL || t->is_pack_index ||
+        TypeDependentOf(t)->pack_index_expr != NULL || TypeIsFunction(t)) {
       return false;
     }
     // An unknown bound (`int a[] = {...}`) is completed in place from the
@@ -1781,8 +1797,10 @@ static uint64_t TypeInternHash(const TypeRecord* type, Qualifiers quals) {
   h = TypeInternMix(h, type->declarator);
   h = TypeInternMix(h, (uint64_t)type->bit_width);
   h = TypeInternMix(h, (uint64_t)(int64_t)type->template_parameter_index);
-  if (type->template_parameter_name != NULL) {
-    h = TypeInternMix(h, TypeInternHashString(type->template_parameter_name->value));
+  if (TypeDependentOf(type)->template_parameter_name != NULL) {
+    h = TypeInternMix(
+        h, TypeInternHashString(
+               TypeDependentOf(type)->template_parameter_name->value));
   }
   h = TypeInternMix(h, (uintptr_t)type->template_origin);
   h = TypeInternMix(h, TypeInternHashChild(type->next));
@@ -1858,13 +1876,14 @@ static bool TypeInternEqual(const TypeRecord* type, Qualifiers quals,
       type->template_parameter_index != canonical->template_parameter_index ||
       type->template_origin != canonical->template_origin ||
       type->is_pack_index != canonical->is_pack_index ||
-      type->dependent_member_template_arguments !=
-          canonical->dependent_member_template_arguments) {
+      TypeDependentOf(type)->dependent_member_template_arguments !=
+          TypeDependentOf(canonical)->dependent_member_template_arguments) {
     return false;
   }
   // Parameters at the same index of different templates print differently.
-  const String* name = type->template_parameter_name;
-  const String* canonical_name = canonical->template_parameter_name;
+  const String* name = TypeDependentOf(type)->template_parameter_name;
+  const String* canonical_name =
+      TypeDependentOf(canonical)->template_parameter_name;
   if ((name == NULL) != (canonical_name == NULL) ||
       (name != NULL && strcmp(name->value, canonical_name->value) != 0)) {
     return false;
@@ -1987,11 +2006,13 @@ static bool TypeRecordIsBareTemplateParameter(const TypeRecord* type) {
   return type->declarator == kDeclPrimitive &&
          type->template_parameter_index >= 0 && type->next == NULL &&
          type->template_arguments == NULL &&
-         type->dependent_member_name == NULL &&
-         type->dependent_member_template_arguments == NULL &&
-         type->dependent_decltype_expr == NULL && !type->is_pack_index &&
-         type->pack_index_expr == NULL && type->pack_index_pack == NULL &&
-         type->dependent_splice_expr == NULL &&
+         TypeDependentOf(type)->dependent_member_name == NULL &&
+         TypeDependentOf(type)->dependent_member_template_arguments == NULL &&
+         TypeDependentOf(type)->dependent_decltype_expr == NULL &&
+         !type->is_pack_index &&
+         TypeDependentOf(type)->pack_index_expr == NULL &&
+         TypeDependentOf(type)->pack_index_pack == NULL &&
+         TypeDependentOf(type)->dependent_splice_expr == NULL &&
          type->size_sync_owner == NULL &&
          !TypeIsStructOrUnion((TypeRecord*)type) &&
          !TypeIsEnum((TypeRecord*)type);
@@ -2073,32 +2094,38 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   r->refs = 0;  // No refs to this yet.
   r->shared_immutable = 0;
   r->size_sync_owner = NULL;
-  if (r->next == NULL && r->template_parameter_name == NULL &&
-      r->dependent_member_name == NULL && r->template_arguments == NULL &&
-      r->dependent_member_template_arguments == NULL &&
-      r->pack_index_expr == NULL && r->pack_index_pack == NULL &&
-      r->dependent_splice_expr == NULL && !TypeIsFunction(record) &&
+  r->dependent = NULL;
+  if (r->next == NULL && record->dependent == NULL &&
+      r->template_arguments == NULL && !TypeIsFunction(record) &&
       !TypeIsStructOrUnion(record) && !TypeIsEnum(record) &&
       !TypeIsVLA(record)) {
     return r;
   }
-  r->template_parameter_name = record->template_parameter_name != NULL
-      ? NewString(record->template_parameter_name->value)
-      : NULL;
-  r->dependent_member_name = record->dependent_member_name != NULL
-      ? NewString(record->dependent_member_name->value)
-      : NULL;
+  if (record->dependent != NULL) {
+    const TypeDependentInfo* from = record->dependent;
+    TypeDependentInfo* to = TypeMutableDependent(r);
+    to->template_parameter_name =
+        from->template_parameter_name != NULL
+            ? NewString(from->template_parameter_name->value)
+            : NULL;
+    to->dependent_member_name =
+        from->dependent_member_name != NULL
+            ? NewString(from->dependent_member_name->value)
+            : NULL;
+    to->dependent_member_template_arguments = TemplateArgumentVectorListCopy(
+        from->dependent_member_template_arguments);
+    to->dependent_decltype_expr = from->dependent_decltype_expr;
+    to->pack_index_expr =
+        ASTNodeClone(from->pack_index_expr, IdentityCloneNode, NULL, NULL);
+    to->pack_index_pack = TemplateArgumentCopy(from->pack_index_pack);
+    to->dependent_splice_expr = ASTNodeClone(from->dependent_splice_expr,
+                                             IdentityCloneNode, NULL, NULL);
+  }
   if (r->next != NULL) {
     TypeRecordIncRef(r->next);  // Another ref to next.
   }
-  r->template_arguments = TemplateArgumentVectorCopy(record->template_arguments);
-  r->dependent_member_template_arguments =
-      TemplateArgumentVectorListCopy(record->dependent_member_template_arguments);
-  r->pack_index_expr =
-      ASTNodeClone(record->pack_index_expr, IdentityCloneNode, NULL, NULL);
-  r->pack_index_pack = TemplateArgumentCopy(record->pack_index_pack);
-  r->dependent_splice_expr =
-      ASTNodeClone(record->dependent_splice_expr, IdentityCloneNode, NULL, NULL);
+  r->template_arguments =
+      TemplateArgumentVectorCopy(record->template_arguments);
   if (TypeIsFunction(record)) {
     VectorInit(&r->info.function.prototype);
     for (size_t i = 0; i < record->info.function.prototype.length; i++) {
@@ -2967,23 +2994,27 @@ static uint64_t TypeCensusHash(TypeRecord* t, int depth) {
   h = TypeCensusMix(h, t->declarator);
   h = TypeCensusMix(h, (uint64_t)t->bit_width);
   h = TypeCensusMix(h, (uint64_t)t->template_parameter_index);
-  if (t->dependent_member_name != NULL) {
-    for (const char* c = t->dependent_member_name->value; c && *c; c++) {
+  if (TypeDependentOf(t)->dependent_member_name != NULL) {
+    for (const char* c = TypeDependentOf(t)->dependent_member_name->value;
+         c && *c; c++) {
       h = TypeCensusMix(h, (unsigned char)*c);
     }
   }
   h = TypeCensusMix(h, (uintptr_t)t->template_origin);
   h = TypeCensusMix(h, t->is_pack_index);
-  h = TypeCensusMix(h, (uintptr_t)t->dependent_decltype_expr);
-  h = TypeCensusMix(h, (uintptr_t)t->pack_index_expr);
-  h = TypeCensusMix(h, (uintptr_t)t->dependent_splice_expr);
+  h = TypeCensusMix(h, (uintptr_t)TypeDependentOf(t)->dependent_decltype_expr);
+  h = TypeCensusMix(h, (uintptr_t)TypeDependentOf(t)->pack_index_expr);
+  h = TypeCensusMix(h, (uintptr_t)TypeDependentOf(t)->dependent_splice_expr);
   h = TypeCensusMix(h, TypeCensusArgsHash(t->template_arguments, depth));
-  if (t->dependent_member_template_arguments != NULL) {
-    for (size_t i = 0; i < t->dependent_member_template_arguments->length;
+  if (TypeDependentOf(t)->dependent_member_template_arguments != NULL) {
+    for (size_t i = 0;
+         i < TypeDependentOf(t)->dependent_member_template_arguments->length;
          i++) {
       h = TypeCensusMix(
           h, TypeCensusArgsHash(
-                 t->dependent_member_template_arguments->value.p[i], depth));
+                 TypeDependentOf(t)
+                     ->dependent_member_template_arguments->value.p[i],
+                 depth));
     }
   }
   h = TypeCensusMix(h, TypeCensusHash(t->next, depth + 1));
@@ -3124,7 +3155,7 @@ void TypeRecordProfileCensus(FILE* out) {
                 : TypeRecordCanShareConcreteClass(t) ? 0
                                                      : 2;
     if (which == 2) {
-      if (t->dependent_member_name != NULL) {
+      if (TypeDependentOf(t)->dependent_member_name != NULL) {
         which = 4;
       } else if (t->next != NULL) {
         which = 6;

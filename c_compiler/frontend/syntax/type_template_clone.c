@@ -166,7 +166,7 @@ static void ClearClonedCastSubtreeFlagVisitor(ASTNode* node, void* data,
 static bool TypeSpineHasDeferredAlias(TypeRecord* type) {
   for (TypeRecord* current = type; current != NULL; current = current->next) {
     if (current->template_origin != NULL &&
-        current->dependent_member_name != NULL) {
+        TypeDependentOf(current)->dependent_member_name != NULL) {
       return true;
     }
   }
@@ -251,7 +251,9 @@ ASTNode* CloneDependentDecltypeNode(ASTNode* node, void* data) {
   // clone substituted leaves the pattern's type cleared.
   TypeRecord* decltype_type = node != NULL ? node->type : NULL;
   ASTNode* deferred =
-      decltype_type != NULL ? decltype_type->dependent_decltype_expr : NULL;
+      decltype_type != NULL
+          ? TypeDependentOf(decltype_type)->dependent_decltype_expr
+          : NULL;
   if (deferred != NULL && node->op == AST_OP(identifier) &&
       (node->flags & kASTDependentQualifiedName) != 0) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -264,7 +266,9 @@ ASTNode* CloneDependentDecltypeNode(ASTNode* node, void* data) {
   if (deferred != NULL) {
     TypeRecordInvalidateTemplateParameterSummary(decltype_type);
     TypeNoteDetachedDependentDecltype(decltype_type);
-    decltype_type->dependent_decltype_expr = NULL;
+    if (decltype_type->dependent != NULL) {
+      TypeMutableDependent(decltype_type)->dependent_decltype_expr = NULL;
+    }
   }
   ASTNode* result = CloneTemplateFunctionBodyNode(node, data);
   if (result != NULL &&
@@ -281,7 +285,7 @@ ASTNode* CloneDependentDecltypeNode(ASTNode* node, void* data) {
   }
   if (deferred != NULL) {
     TypeForgetDetachedDependentDecltype(decltype_type);
-    decltype_type->dependent_decltype_expr = deferred;
+    TypeMutableDependent(decltype_type)->dependent_decltype_expr = deferred;
     TypeRecordInvalidateTemplateParameterSummary(decltype_type);
   }
   return result;
@@ -735,8 +739,9 @@ static bool TemplateArgumentContainsDeferredDecltypePackIndex(
 
 static bool TypeContainsDeferredDecltypePackIndex(TypeRecord* type) {
   for (TypeRecord* current = type; current != NULL; current = current->next) {
-    if (current->dependent_decltype_expr != NULL &&
-        ExpressionContainsPackIndex(current->dependent_decltype_expr)) {
+    if (TypeDependentOf(current)->dependent_decltype_expr != NULL &&
+        ExpressionContainsPackIndex(
+            TypeDependentOf(current)->dependent_decltype_expr)) {
       return true;
     }
     if (current->template_arguments == NULL) {
@@ -791,11 +796,12 @@ static void RewriteTemplateArgumentDecltypePackIndices(
 static void RewriteTemplateBodyDecltypePackIndices(
     TemplateFunctionBodyClone* clone, TypeRecord* type) {
   for (TypeRecord* current = type; current != NULL; current = current->next) {
-    if (current->dependent_decltype_expr != NULL &&
-        ExpressionContainsPackIndex(current->dependent_decltype_expr)) {
-      ASTNode* old = current->dependent_decltype_expr;
-      current->dependent_decltype_expr = ASTNodeClone(
-          old, CloneTemplateFunctionBodyNode, clone, NULL);
+    if (TypeDependentOf(current)->dependent_decltype_expr != NULL &&
+        ExpressionContainsPackIndex(
+            TypeDependentOf(current)->dependent_decltype_expr)) {
+      ASTNode* old = TypeDependentOf(current)->dependent_decltype_expr;
+      TypeMutableDependent(current)->dependent_decltype_expr =
+          ASTNodeClone(old, CloneTemplateFunctionBodyNode, clone, NULL);
       ASTNodeDelete(old);
     }
     if (current->template_arguments == NULL) {
@@ -858,8 +864,9 @@ static void BodyCloneDecltypeBindingRebindType(
   for (size_t i = first; i < binding->rebound_types.length; i++) {
     TypeRecord* rebound = binding->rebound_types.value.p[i];
     ASTNode* original = binding->original_expressions.value.p[i];
-    if (ExpressionIsTemplateDependent(rebound->dependent_decltype_expr)) {
-      rebound->dependent_decltype_expr = original;
+    if (ExpressionIsTemplateDependent(
+            TypeDependentOf(rebound)->dependent_decltype_expr)) {
+      TypeMutableDependent(rebound)->dependent_decltype_expr = original;
       continue;
     }
     binding->rebound_types.value.p[kept] = rebound;
@@ -875,7 +882,8 @@ static void BodyCloneDecltypeBindingRebindType(
 static void BodyCloneDecltypeBindingRestore(BodyCloneDecltypeBinding* binding) {
   for (size_t i = 0; i < binding->rebound_types.length; i++) {
     TypeRecord* type = binding->rebound_types.value.p[i];
-    type->dependent_decltype_expr = binding->original_expressions.value.p[i];
+    TypeMutableDependent(type)->dependent_decltype_expr =
+        binding->original_expressions.value.p[i];
   }
   for (size_t i = 0; i < binding->rebound_arguments.length; i++) {
     TemplateArgument* arg = binding->rebound_arguments.value.p[i];
@@ -1771,9 +1779,10 @@ static bool TypeNamesMemberTemplateOwnParameter(
   for (TypeRecord* t = type; t != NULL; t = t->next) {
     int index = -1;
     if (TypeIsTemplateParameterPlaceholder(t, &index) &&
-        t->template_parameter_name != NULL &&
+        TypeDependentOf(t)->template_parameter_name != NULL &&
         CloneMemberTemplateOwnsParameterName(
-            clone, t->template_parameter_name->value, packs_only)) {
+            clone, TypeDependentOf(t)->template_parameter_name->value,
+            packs_only)) {
       return true;
     }
     for (size_t i = 0;
@@ -4542,7 +4551,7 @@ static ASTNode* RewriteClonedDependentNewInitializer(
   // wrong scalar zero-init and lose the dependent-type information the later
   // member-template instantiation needs to resolve the real class type.
   if (TypeContainsTemplateParameter(node->type) ||
-      node->type->dependent_member_name != NULL ||
+      TypeDependentOf(node->type)->dependent_member_name != NULL ||
       (node->type->type & kTypeUnknown) != 0) {
     return node;
   }
@@ -5204,17 +5213,18 @@ static bool TypeRecordHasSameAliasTemplateId(TypeRecord* left,
     return false;
   }
   /* `Traits<T>` is not `typename Traits<T>::iterator`. */
-  if (left->dependent_member_name == NULL &&
-      right->dependent_member_name != NULL) {
-    if (!DependentMemberPathStartsWith(left_path,
-                                       right->dependent_member_name)) {
+  if (TypeDependentOf(left)->dependent_member_name == NULL &&
+      TypeDependentOf(right)->dependent_member_name != NULL) {
+    if (!DependentMemberPathStartsWith(
+            left_path, TypeDependentOf(right)->dependent_member_name)) {
       return false;
     }
-  } else if ((left->dependent_member_name == NULL) !=
-                 (right->dependent_member_name == NULL) ||
-             (left->dependent_member_name != NULL &&
-              !StringEqualString(left->dependent_member_name,
-                                 right->dependent_member_name))) {
+  } else if ((TypeDependentOf(left)->dependent_member_name == NULL) !=
+                 (TypeDependentOf(right)->dependent_member_name == NULL) ||
+             (TypeDependentOf(left)->dependent_member_name != NULL &&
+              !StringEqualString(
+                  TypeDependentOf(left)->dependent_member_name,
+                  TypeDependentOf(right)->dependent_member_name))) {
     return false;
   }
   if (TypeIsStructOrUnion(left) != TypeIsStructOrUnion(right)) {
@@ -5863,7 +5873,7 @@ static void RebindBodyCloneDecltypeExpressions(
     }
     // An alias use site's operand names the alias's parameters, not this
     // body's; substitution maps it through the recorded alias arguments.
-    if (current->dependent_decltype_expr != NULL &&
+    if (TypeDependentOf(current)->dependent_decltype_expr != NULL &&
         !TypeIsDecltypeAliasTemplateId(current)) {
       // `decltype` is unevaluated: cloning `*declval<T&>()` must not demand a
       // function body from declaration-only templates such as `std::declval`.
@@ -5879,10 +5889,10 @@ static void RebindBodyCloneDecltypeExpressions(
       Vector seeded;
       VectorInit(&seeded);
       SeedEnclosingFormalsForUnevaluatedOperand(
-          clone, current->dependent_decltype_expr, &seeded);
+          clone, TypeDependentOf(current)->dependent_decltype_expr, &seeded);
       compiler->speculative_template_instantiation_depth++;
       ASTNode* rebound =
-          ASTNodeClone(current->dependent_decltype_expr,
+          ASTNodeClone(TypeDependentOf(current)->dependent_decltype_expr,
                        CloneTemplateFunctionBodyNode, clone, NULL);
       compiler->speculative_template_instantiation_depth--;
       UnseedEnclosingFormals(clone, &seeded);
@@ -5890,8 +5900,8 @@ static void RebindBodyCloneDecltypeExpressions(
       if (rebound != NULL) {
         VectorAppend(&binding->rebound_types, current);
         VectorAppend(&binding->original_expressions,
-                     current->dependent_decltype_expr);
-        current->dependent_decltype_expr = rebound;
+                     TypeDependentOf(current)->dependent_decltype_expr);
+        TypeMutableDependent(current)->dependent_decltype_expr = rebound;
       }
     }
     if (current->template_arguments == NULL) {
@@ -6804,12 +6814,12 @@ static TypeRecord* SubstituteQualifiedNameScope(
 static ASTNode* BakePartialDependentQualifiedName(
     IdentifierASTNode* id, ASTNode* node, TypeRecord* concrete) {
   concrete = TypeRecordForWrite(concrete);
-  concrete->dependent_member_name =
-      NewString(id->symbol->type->dependent_member_name->value);
-  if (concrete->dependent_member_template_arguments == NULL) {
-    concrete->dependent_member_template_arguments =
-        TemplateArgumentVectorListCopy(
-            id->symbol->type->dependent_member_template_arguments);
+  TypeMutableDependent(concrete)->dependent_member_name = NewString(
+      TypeDependentOf(id->symbol->type)->dependent_member_name->value);
+  if (TypeDependentOf(concrete)->dependent_member_template_arguments == NULL) {
+    TypeMutableDependent(concrete)
+        ->dependent_member_template_arguments = TemplateArgumentVectorListCopy(
+        TypeDependentOf(id->symbol->type)->dependent_member_template_arguments);
   }
   Symbol* copy = NewSymbol(id->symbol->name.value, concrete,
                            id->symbol->storage);
@@ -6993,7 +7003,7 @@ static Struct* ConcreteCurrentInstantiation(TemplateFunctionBodyClone* clone,
 static bool TypeIsCurrentInstantiationMember(TypeRecord* type) {
   return type != NULL && type->template_arguments == NULL &&
          type->template_origin != NULL &&
-         type->dependent_member_name != NULL &&
+         TypeDependentOf(type)->dependent_member_name != NULL &&
          type->template_origin->type != NULL &&
          TypeIsStructOrUnion(type->template_origin->type);
 }
@@ -7010,7 +7020,7 @@ static ASTNode* ResolveCurrentInstantiationMember(
     return node;
   }
   const char* effective_member_name =
-      id->symbol->type->dependent_member_name->value;
+      TypeDependentOf(id->symbol->type)->dependent_member_name->value;
   for (const char* c = effective_member_name; c != NULL && *c != '\0'; c++) {
     if (c[0] == ':' && c[1] == ':') {
       effective_member_name = c + 2;
@@ -7019,11 +7029,11 @@ static ASTNode* ResolveCurrentInstantiationMember(
   // `Class::alias::value` is a member of `alias`, not of `Class`.  Looking up
   // only the last component misses the intermediate typedef.
   TypeRecord* concrete = TypeRecordCopy(lookup->tag_symbol->type);
-  Vector* path =
-      SplitDependentMemberPath(id->symbol->type->dependent_member_name);
+  Vector* path = SplitDependentMemberPath(
+      TypeDependentOf(id->symbol->type)->dependent_member_name);
   concrete = WalkDependentMemberTypePath(
       clone, concrete, path,
-      id->symbol->type->dependent_member_template_arguments);
+      TypeDependentOf(id->symbol->type)->dependent_member_template_arguments);
   DeleteStringVector(path);
   ASTNode* resolved = ApplyResolvedDependentMember(
       clone, id, node, concrete, effective_member_name);
@@ -7039,7 +7049,7 @@ static ASTNode* ResolveDependentQualifiedValueName(
     ASTNode* node) {
   if ((node->flags & kASTDependentQualifiedName) == 0 || id->symbol == NULL ||
       id->symbol->type == NULL ||
-      id->symbol->type->dependent_member_name == NULL ||
+      TypeDependentOf(id->symbol->type)->dependent_member_name == NULL ||
       (id->symbol->type->template_parameter_index < 0 &&
        id->symbol->type->template_origin == NULL &&
        !TypeContainsTemplateParameter(id->symbol->type))) {
@@ -7049,8 +7059,8 @@ static ASTNode* ResolveDependentQualifiedValueName(
     return ResolveCurrentInstantiationMember(clone, id, node);
   }
   TypeRecord* scope = TypeRecordCopy(id->symbol->type);
-  StringDelete(scope->dependent_member_name);
-  scope->dependent_member_name = NULL;
+  StringDelete(TypeDependentOf(scope)->dependent_member_name);
+  TypeMutableDependent(scope)->dependent_member_name = NULL;
   // Member-function-template bodies are cloned against a member-local argument
   // vector (`[I]`), while names parsed in the class template's parameter space
   // still use absolute indices (`I` at 1 after class parameter `T`).  Rebase
@@ -7084,7 +7094,7 @@ static ASTNode* ResolveDependentQualifiedValueName(
                                    clone->rebase_template_parameter_base);
   }
   TypeRecord* concrete = FindInstantiatedOwnerAliasType(
-      clone, scope, id->symbol->type->dependent_member_name);
+      clone, scope, TypeDependentOf(id->symbol->type)->dependent_member_name);
   if (concrete == NULL) {
     concrete = SubstituteQualifiedNameScope(clone, scope);
   }
@@ -7108,17 +7118,18 @@ static ASTNode* ResolveDependentQualifiedValueName(
       clone->parser->syntax, concrete);
   TypeRecordDelete(scope);
   const char* effective_member_name =
-      id->symbol->type->dependent_member_name->value;
-  for (const char* c = id->symbol->type->dependent_member_name->value;
+      TypeDependentOf(id->symbol->type)->dependent_member_name->value;
+  for (const char* c =
+           TypeDependentOf(id->symbol->type)->dependent_member_name->value;
        c != NULL && *c != '\0'; c++) {
     if (c[0] == ':' && c[1] == ':') {
       effective_member_name = c + 2;
     }
   }
-  Vector* path =
-      SplitDependentMemberPath(id->symbol->type->dependent_member_name);
+  Vector* path = SplitDependentMemberPath(
+      TypeDependentOf(id->symbol->type)->dependent_member_name);
   Vector* path_template_args =
-      id->symbol->type->dependent_member_template_arguments;
+      TypeDependentOf(id->symbol->type)->dependent_member_template_arguments;
   concrete = WalkDependentMemberTypePath(clone, concrete, path,
                                          path_template_args);
   DeleteStringVector(path);
@@ -7136,8 +7147,8 @@ static ASTNode* ResolveDependentQualifiedValueName(
       FindStructMemberByName(concrete->info.struct_info,
                              effective_member_name) == NULL) {
     concrete = TypeRecordForWrite(concrete);
-    concrete->dependent_member_name =
-        NewString(id->symbol->type->dependent_member_name->value);
+    TypeMutableDependent(concrete)->dependent_member_name = NewString(
+        TypeDependentOf(id->symbol->type)->dependent_member_name->value);
     Symbol* copy = NewSymbol(id->symbol->name.value, concrete,
                              id->symbol->storage);
     copy->flags = id->symbol->flags;
@@ -7729,7 +7740,7 @@ static bool RetargetUnownedFunctionTemplateIdentifier(ASTNode* node) {
 static String* SpineTemplateParameterName(TypeRecord* type) {
   for (TypeRecord* t = type; t != NULL; t = t->next) {
     if (t->template_parameter_index >= 0) {
-      return t->template_parameter_name;
+      return TypeDependentOf(t)->template_parameter_name;
     }
   }
   return NULL;
@@ -7887,7 +7898,7 @@ static bool CloneCastInTemplateBody(
       // rebasing the member-template parameters.
       if (cast_type != NULL && cast_type->declarator == kDeclPrimitive &&
           cast_type->template_parameter_index >= 0 &&
-          cast_type->dependent_member_name != NULL &&
+          TypeDependentOf(cast_type)->dependent_member_name != NULL &&
           clone->to_owner != NULL && clone->to_owner->tag_symbol != NULL &&
           clone->to_owner->tag_symbol->type != NULL &&
           clone->to_owner->tag_symbol->type->template_arguments != NULL &&
@@ -9181,12 +9192,13 @@ static ASTNode* PruneConstexprIfBeforeBodyClone(
 
 static TypeRecord* ResolveClonedDependentTypedef(
     TemplateFunctionBodyClone* clone, TypeRecord* type) {
-  if (clone == NULL || type == NULL || type->dependent_member_name == NULL) {
+  if (clone == NULL || type == NULL ||
+      TypeDependentOf(type)->dependent_member_name == NULL) {
     return NULL;
   }
   TypeRecord* scope = TypeRecordCopy(type);
-  StringDelete(scope->dependent_member_name);
-  scope->dependent_member_name = NULL;
+  StringDelete(TypeDependentOf(scope)->dependent_member_name);
+  TypeMutableDependent(scope)->dependent_member_name = NULL;
   TypeRecord* owner =
       SubstituteTemplateParameters(clone->parser, scope, clone->args);
   RebaseTemplateParameterIndices(owner,
@@ -9198,9 +9210,8 @@ static TypeRecord* ResolveClonedDependentTypedef(
   TypeRecord* result = NULL;
   if (owner != NULL && TypeIsStructOrUnion(owner) &&
       owner->info.struct_info != NULL) {
-    StructMember* member =
-        FindStructMember(owner->info.struct_info,
-                         type->dependent_member_name);
+    StructMember* member = FindStructMember(
+        owner->info.struct_info, TypeDependentOf(type)->dependent_member_name);
     if (member != NULL && member->symbol != NULL &&
         member->symbol->type != NULL &&
         StorageIs(member->symbol->storage, STO(typedef))) {
@@ -9979,7 +9990,7 @@ static bool TypeContainsDependentDecltype(TypeRecord* type, Vector* seen) {
       return false;
     }
     VectorAppend(seen, current);
-    if (current->dependent_decltype_expr != NULL) {
+    if (TypeDependentOf(current)->dependent_decltype_expr != NULL) {
       return true;
     }
     if (current->template_arguments == NULL) {
@@ -10039,9 +10050,9 @@ static void RemapAutoDecltypeSymbols(TypeRecord* type, Map* symbol_map,
       return;
     }
     VectorAppend(seen, current);
-    if (current->dependent_decltype_expr != NULL) {
-      ASTNodeVisit(current->dependent_decltype_expr, RemapAutoDecltypeIdentifier,
-                   0, symbol_map);
+    if (TypeDependentOf(current)->dependent_decltype_expr != NULL) {
+      ASTNodeVisit(TypeDependentOf(current)->dependent_decltype_expr,
+                   RemapAutoDecltypeIdentifier, 0, symbol_map);
     }
     if (current->template_arguments == NULL) {
       continue;
@@ -10091,10 +10102,10 @@ static bool TypeDecltypeNamesTemplateParameter(TypeRecord* type, Vector* seen) {
       return false;
     }
     VectorAppend(seen, current);
-    if (current->dependent_decltype_expr != NULL &&
+    if (TypeDependentOf(current)->dependent_decltype_expr != NULL &&
         !TypeIsDecltypeAliasTemplateId(current) &&
         DependentExpressionContainsTemplateParameter(
-            current->dependent_decltype_expr)) {
+            TypeDependentOf(current)->dependent_decltype_expr)) {
       return true;
     }
     if (current->template_arguments == NULL) {

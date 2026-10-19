@@ -1293,8 +1293,8 @@ static bool TypeContainsTemplateParameterReference(TypeRecord* type) {
     if (t->template_parameter_index >= 0) {
       return true;
     }
-    if (t->dependent_decltype_expr != NULL ||
-        t->dependent_splice_expr != NULL || t->is_pack_index) {
+    if (TypeDependentOf(t)->dependent_decltype_expr != NULL ||
+        TypeDependentOf(t)->dependent_splice_expr != NULL || t->is_pack_index) {
       return true;
     }
     if (TypeIsArray(t) && t->info.array.template_parameter_index >= 0) {
@@ -1394,7 +1394,7 @@ static Symbol* InstantiateQualifiedPrefixTag(Syntax* syntax, Symbol* symbol,
 static Symbol* DependentMemberTypedefOfPrefix(Syntax* syntax, Symbol* symbol) {
   if (symbol == NULL || !StorageIs(symbol->storage, STO(typedef)) ||
       symbol->type == NULL || symbol->type->template_origin == NULL ||
-      symbol->type->dependent_member_name == NULL) {
+      TypeDependentOf(symbol->type)->dependent_member_name == NULL) {
     return NULL;
   }
   TypeRecord* owner =
@@ -1405,7 +1405,7 @@ static Symbol* DependentMemberTypedefOfPrefix(Syntax* syntax, Symbol* symbol) {
       owner->info.struct_info != NULL) {
     StructMember* member =
         FindStructMember(owner->info.struct_info,
-                         symbol->type->dependent_member_name);
+                         TypeDependentOf(symbol->type)->dependent_member_name);
     if (member != NULL && member->symbol != NULL &&
         StorageIs(member->symbol->storage, STO(typedef))) {
       nested = member->symbol;

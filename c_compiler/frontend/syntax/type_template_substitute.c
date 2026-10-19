@@ -74,15 +74,15 @@ bool FindPackExpansionInType(TypeRecord* type, Vector* args,
   bool found = false;
   for (TypeRecord* t = type; t != NULL; t = t->next) {
     int index = -1;
-    if (t->is_pack_index && t->pack_index_expr != NULL &&
-        FindPackExpansionInExpression(t->pack_index_expr, args, pack_index,
-                                      pack_length)) {
+    if (t->is_pack_index && TypeDependentOf(t)->pack_index_expr != NULL &&
+        FindPackExpansionInExpression(TypeDependentOf(t)->pack_index_expr, args,
+                                      pack_index, pack_length)) {
       // In `Ts...[Is]...`, the outer expansion is driven by `Is`; `Ts` is
       // selected by the pack-indexing specifier itself and must remain whole.
       found = true;
     } else if (!t->is_pack_index &&
                TypeIsTemplateParameterPlaceholder(t, &index) &&
-        RecordPackExpansionIndex(index, args, pack_index, pack_length)) {
+               RecordPackExpansionIndex(index, args, pack_index, pack_length)) {
       found = true;
     }
     if (t->template_origin != NULL &&
@@ -114,9 +114,10 @@ bool FindPackExpansionInType(TypeRecord* type, Vector* args,
         }
       }
     }
-    if (t->dependent_decltype_expr != NULL &&
-        FindPackExpansionInExpression(t->dependent_decltype_expr, args,
-                                      pack_index, pack_length)) {
+    if (TypeDependentOf(t)->dependent_decltype_expr != NULL &&
+        FindPackExpansionInExpression(
+            TypeDependentOf(t)->dependent_decltype_expr, args, pack_index,
+            pack_length)) {
       found = true;
     }
     if (TypeIsFunction(t)) {
@@ -1267,43 +1268,46 @@ static size_t DependentMemberPathLength(String* path) {
 static TypeRecord* ComposeDependentMemberPath(TypeRecord* root,
                                               TypeRecord* member) {
   if (root == NULL || root->declarator != kDeclPrimitive ||
-      root->is_pack_index || root->dependent_decltype_expr != NULL ||
+      root->is_pack_index ||
+      TypeDependentOf(root)->dependent_decltype_expr != NULL ||
       !TypeContainsTemplateParameter(root)) {
     return NULL;
   }
   bool parameter_root = root->template_parameter_index >= 0;
   bool template_id_root = root->template_parameter_index < 0 &&
                           root->template_origin != NULL &&
-                          root->dependent_member_name != NULL;
+                          TypeDependentOf(root)->dependent_member_name != NULL;
   if (!parameter_root && !template_id_root) {
     return NULL;
   }
   TypeRecord* composed = TypeRecordCopy(root);
   SetQualifiers(composed, GetQualifiers(member));
   composed->template_parameter_summary = 0;
-  if (root->dependent_member_name == NULL) {
-    composed->dependent_member_name =
-        NewString(member->dependent_member_name->value);
-    composed->dependent_member_template_arguments =
+  if (TypeDependentOf(root)->dependent_member_name == NULL) {
+    TypeMutableDependent(composed)->dependent_member_name =
+        NewString(TypeDependentOf(member)->dependent_member_name->value);
+    TypeMutableDependent(composed)->dependent_member_template_arguments =
         TemplateArgumentVectorListCopy(
-            member->dependent_member_template_arguments);
+            TypeDependentOf(member)->dependent_member_template_arguments);
     return TypeRecordCalculateSize(composed);
   }
   String path;
-  StringInit(&path, root->dependent_member_name->value);
+  StringInit(&path, TypeDependentOf(root)->dependent_member_name->value);
   StringAppend(&path, "::");
-  StringAppend(&path, member->dependent_member_name->value);
-  StringDelete(composed->dependent_member_name);
-  composed->dependent_member_name = NewString(path.value);
+  StringAppend(&path, TypeDependentOf(member)->dependent_member_name->value);
+  StringDelete(TypeDependentOf(composed)->dependent_member_name);
+  TypeMutableDependent(composed)->dependent_member_name = NewString(path.value);
   StringDestruct(&path);
-  if (root->dependent_member_template_arguments != NULL ||
-      member->dependent_member_template_arguments != NULL) {
+  if (TypeDependentOf(root)->dependent_member_template_arguments != NULL ||
+      TypeDependentOf(member)->dependent_member_template_arguments != NULL) {
     Vector* component_args = NewVector();
-    Vector* parts[2] = {root->dependent_member_template_arguments,
-                        member->dependent_member_template_arguments};
+    Vector* parts[2] = {
+        TypeDependentOf(root)->dependent_member_template_arguments,
+        TypeDependentOf(member)->dependent_member_template_arguments};
     size_t counts[2] = {
-        DependentMemberPathLength(root->dependent_member_name),
-        DependentMemberPathLength(member->dependent_member_name)};
+        DependentMemberPathLength(TypeDependentOf(root)->dependent_member_name),
+        DependentMemberPathLength(
+            TypeDependentOf(member)->dependent_member_name)};
     for (int p = 0; p < 2; p++) {
       for (size_t i = 0; i < counts[p]; i++) {
         Vector* args = parts[p] != NULL && i < parts[p]->length
@@ -1312,13 +1316,15 @@ static TypeRecord* ComposeDependentMemberPath(TypeRecord* root,
         VectorAppend(component_args, TemplateArgumentVectorCopy(args));
       }
     }
-    if (composed->dependent_member_template_arguments != NULL) {
+    if (TypeDependentOf(composed)->dependent_member_template_arguments !=
+        NULL) {
       VectorDeleteWithContents(
-          composed->dependent_member_template_arguments,
+          TypeDependentOf(composed)->dependent_member_template_arguments,
           (VectorElementDestructor)TemplateArgumentVectorDelete,
           /*free_element=*/false);
     }
-    composed->dependent_member_template_arguments = component_args;
+    TypeMutableDependent(composed)->dependent_member_template_arguments =
+        component_args;
   }
   return TypeRecordCalculateSize(composed);
 }
@@ -1331,7 +1337,8 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
                                                  Vector* args) {
   if (type->declarator != kDeclPrimitive ||
       type->template_parameter_index < 0 ||
-      type->dependent_member_name == NULL || type->is_pack_index) {
+      TypeDependentOf(type)->dependent_member_name == NULL ||
+      type->is_pack_index) {
     return NULL;
   }
   int index = type->template_parameter_index;
@@ -1368,9 +1375,9 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
     if (source != NULL && !source->is_template &&
         source->lexical_parent == enclosing_source &&
         enclosing_target != NULL) {
-      StructMember* enclosing_member =
-          FindStructMemberByName(enclosing_target,
-                                 type->dependent_member_name->value);
+      StructMember* enclosing_member = FindStructMemberByName(
+          enclosing_target,
+          TypeDependentOf(type)->dependent_member_name->value);
       if (enclosing_member != NULL && enclosing_member->symbol != NULL &&
           StorageIs(enclosing_member->symbol->storage, STO(typedef)) &&
           enclosing_member->symbol->type != NULL) {
@@ -1387,14 +1394,15 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
     }
     return TypeRecordCopy(type);
   }
-  bool multi_component_member =
-      DependentMemberPathHasMultipleComponents(type->dependent_member_name);
+  bool multi_component_member = DependentMemberPathHasMultipleComponents(
+      TypeDependentOf(type)->dependent_member_name);
   // `T::a::b` is stored as one member string.  Looking the whole string up as
   // a single name misses `a`.  Walk each component, the same way a path that
   // carries per-component template arguments already does.
-  if (type->dependent_member_template_arguments != NULL ||
+  if (TypeDependentOf(type)->dependent_member_template_arguments != NULL ||
       multi_component_member) {
-    Vector* components = SplitDependentMemberPath(type->dependent_member_name);
+    Vector* components =
+        SplitDependentMemberPath(TypeDependentOf(type)->dependent_member_name);
     TypeRecord* current = TypeRecordCopy(arg->type);
     TypeRecord* resolved = NULL;
     for (size_t i = 0; i < components->length; i++) {
@@ -1403,9 +1411,11 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
       }
       String* component = components->value.p[i];
       Vector* component_args = NULL;
-      if (type->dependent_member_template_arguments != NULL &&
-          i < type->dependent_member_template_arguments->length) {
-        component_args = type->dependent_member_template_arguments->value.p[i];
+      if (TypeDependentOf(type)->dependent_member_template_arguments != NULL &&
+          i < TypeDependentOf(type)
+                  ->dependent_member_template_arguments->length) {
+        component_args = TypeDependentOf(type)
+                             ->dependent_member_template_arguments->value.p[i];
       }
       TypeRecord* owner = current;
       StructMember* member =
@@ -1557,8 +1567,8 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
                                  owner_type->info.struct_info != NULL
                              ? owner_type->info.struct_info
                              : arg->type->info.struct_info;
-  StructMember* member =
-      FindStructMember(owner_struct, type->dependent_member_name);
+  StructMember* member = FindStructMember(
+      owner_struct, TypeDependentOf(type)->dependent_member_name);
   if (member == NULL || member->symbol == NULL ||
       !StorageIs(member->symbol->storage, STO(typedef))) {
     if (parser != NULL &&
@@ -1584,7 +1594,7 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
       TypeReferencesIndexAtLeast(member->symbol->type,
                                  (int)owner_args->length)) {
     Struct* inherited = StructBaseDeclaringMember(
-        owner_struct, type->dependent_member_name, 0);
+        owner_struct, TypeDependentOf(type)->dependent_member_name, 0);
     if (inherited != NULL) {
       declaring = inherited;
     }
@@ -1624,8 +1634,8 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
 
 static TypeRecord* SubstituteResolvedDependentMemberSuffix(
     TypeParser* parser, TypeRecord* pattern, TypeRecord* root, Vector* args) {
-  if (pattern == NULL || pattern->dependent_member_name == NULL ||
-      root == NULL) {
+  if (pattern == NULL ||
+      TypeDependentOf(pattern)->dependent_member_name == NULL || root == NULL) {
     return root;
   }
   Vector* path_args = TemplateArgumentVectorCopy(args);
@@ -1874,9 +1884,9 @@ static bool TypeReferencesIndexAtLeast(TypeRecord* type, int min_index) {
         current->info.array.template_parameter_index >= min_index) {
       return true;
     }
-    if (current->dependent_decltype_expr != NULL &&
-        ASTNodeAny(current->dependent_decltype_expr, ExprReferencesIndexAtLeast,
-                   &min_index)) {
+    if (TypeDependentOf(current)->dependent_decltype_expr != NULL &&
+        ASTNodeAny(TypeDependentOf(current)->dependent_decltype_expr,
+                   ExprReferencesIndexAtLeast, &min_index)) {
       return true;
     }
     if (current->template_arguments == NULL) {
@@ -2106,7 +2116,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
   // `type` up on the primary and substituting it with only the alias arguments.
   bool alias_dependent_member_pattern =
       info.origin->alias_template != NULL && info.origin->type != NULL &&
-      info.origin->type->dependent_member_name != NULL;
+      TypeDependentOf(info.origin->type)->dependent_member_name != NULL;
   bool expandable_alias =
       CompilerIsCXX() && info.origin->flags.is_template &&
       StorageIs(info.origin->storage, STO(typedef)) &&
@@ -2131,10 +2141,11 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     }
   }
   if (dependent_args && !expandable_alias &&
-      type->dependent_member_name != NULL &&
+      TypeDependentOf(type)->dependent_member_name != NULL &&
       TypeIsStructOrUnion(info.origin->type) &&
       info.origin->type->info.struct_info != NULL &&
-      info.origin->type->info.struct_info->partial_specializations.length == 0 &&
+      info.origin->type->info.struct_info->partial_specializations.length ==
+          0 &&
       !TemplateArgumentsHaveValueDependentExpression(concrete_args)) {
     // A dependent member of a primary class template with no partial
     // specializations can be resolved from the primary immediately.  This is
@@ -2143,8 +2154,9 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     // the resulting `T&&` lets a surrounding dependent decltype retain the
     // correct value category instead of degrading to the parser's `int`
     // placeholder.
-    StructMember* member = FindStructMember(
-        info.origin->type->info.struct_info, type->dependent_member_name);
+    StructMember* member =
+        FindStructMember(info.origin->type->info.struct_info,
+                         TypeDependentOf(type)->dependent_member_name);
     // A nested class/struct member (its injected type-name, stored as a
     // typedef to a struct lexically owned by the origin template) must NOT be
     // resolved from the primary while any argument is still dependent: doing so
@@ -2173,10 +2185,12 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
         StorageIs(member->symbol->storage, STO(typedef)) &&
         !TypeIsStructOrUnion(member->symbol->type) &&
         info.origin->alias_template == NULL &&
-        type->dependent_member_template_arguments != NULL &&
-        type->dependent_member_template_arguments->length > 0) {
+        TypeDependentOf(type)->dependent_member_template_arguments != NULL &&
+        TypeDependentOf(type)->dependent_member_template_arguments->length >
+            0) {
       Vector* member_arg_list =
-          type->dependent_member_template_arguments->value.p[0];
+          TypeDependentOf(type)
+              ->dependent_member_template_arguments->value.p[0];
       Vector* concrete_member_args = SubstituteTemplateArgumentVectorForTypes(
           parser, member_arg_list, args);
       Vector* grouped =
@@ -2301,12 +2315,13 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     // already applied by the substitution above; looking it up again asks
     // the resulting class for `::type` and collapses the trait to `int`.
     bool member_is_alias_pattern =
-        type->dependent_member_name != NULL && info.origin != NULL &&
-        info.origin->type != NULL &&
-        info.origin->type->dependent_member_name != NULL &&
-        StringEqualString(info.origin->type->dependent_member_name,
-                          type->dependent_member_name);
-    if (subst != NULL && type->dependent_member_name != NULL &&
+        TypeDependentOf(type)->dependent_member_name != NULL &&
+        info.origin != NULL && info.origin->type != NULL &&
+        TypeDependentOf(info.origin->type)->dependent_member_name != NULL &&
+        StringEqualString(
+            TypeDependentOf(info.origin->type)->dependent_member_name,
+            TypeDependentOf(type)->dependent_member_name);
+    if (subst != NULL && TypeDependentOf(type)->dependent_member_name != NULL &&
         !member_is_alias_pattern && TypeIsStructOrUnion(subst) &&
         subst->info.struct_info != NULL &&
         !TypeContainsTemplateParameter(subst)) {
@@ -2350,12 +2365,12 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
   }
 
   bool inherited_member =
-      type->dependent_member_name != NULL &&
+      TypeDependentOf(type)->dependent_member_name != NULL &&
       TypeIsStructOrUnion(info.origin->type) &&
       info.origin->type->info.struct_info != NULL &&
       PrimaryTemplateBaseDeclaresMember(
           info.origin->type->info.struct_info,
-          type->dependent_member_name);
+          TypeDependentOf(type)->dependent_member_name);
   Vector* class_args =
       inherited_member
           ? NonVariadicClassTemplateArgumentPrefix(info.origin, concrete_args)
@@ -2381,11 +2396,12 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
   }
   subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
 
-  if (type->dependent_member_name != NULL &&
-      ((type->dependent_member_template_arguments != NULL &&
-        type->dependent_member_template_arguments->length > 1) ||
+  if (TypeDependentOf(type)->dependent_member_name != NULL &&
+      ((TypeDependentOf(type)->dependent_member_template_arguments != NULL &&
+        TypeDependentOf(type)->dependent_member_template_arguments->length >
+            1) ||
        DependentMemberPathHasMultipleComponents(
-           type->dependent_member_name))) {
+           TypeDependentOf(type)->dependent_member_name))) {
     Vector* path_args = TemplateArgumentVectorCopy(args);
     if (path_args == NULL) {
       path_args = NewVector();
@@ -2408,16 +2424,16 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     return TypeRecordCalculateSize(member_type);
   }
 
-  if (type->dependent_member_name != NULL &&
+  if (TypeDependentOf(type)->dependent_member_name != NULL &&
       TypeIsStructOrUnion(subst) && subst->info.struct_info != NULL) {
-    StructMember* member =
-        FindStructMember(subst->info.struct_info,
-                         type->dependent_member_name);
+    StructMember* member = FindStructMember(
+        subst->info.struct_info, TypeDependentOf(type)->dependent_member_name);
     Symbol* injected = NULL;
     if (member == NULL || member->symbol == NULL ||
         !StorageIs(member->symbol->storage, STO(typedef))) {
-      injected = FindInheritedInjectedClassName(subst->info.struct_info,
-                                                type->dependent_member_name);
+      injected = FindInheritedInjectedClassName(
+          subst->info.struct_info,
+          TypeDependentOf(type)->dependent_member_name);
     }
     // The instantiation's base list is filled in after member typedefs are
     // substituted.  `typename Derived::Base` still names the injected-class-name
@@ -2448,7 +2464,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
                        candidate->info.struct_info != NULL &&
                        CurrentClassNameMatchesTypeName(
                            candidate->info.struct_info,
-                           type->dependent_member_name);
+                           TypeDependentOf(type)->dependent_member_name);
         if (matches) {
           TypeRecord* member_type = TypeRecordCopy(candidate);
           member_type =
@@ -2471,7 +2487,8 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
     }
     if (injected != NULL && injected->type != NULL) {
       TypeRecord* injected_type = FindInheritedInjectedClassType(
-          subst->info.struct_info, type->dependent_member_name);
+          subst->info.struct_info,
+          TypeDependentOf(type)->dependent_member_name);
       if (injected_type == NULL) {
         injected_type = injected->type;
       }
@@ -2487,9 +2504,11 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
         StorageIs(member->symbol->storage, STO(typedef))) {
       TypeRecord* member_type = NULL;
       Vector* member_template_args =
-          type->dependent_member_template_arguments != NULL &&
-                  type->dependent_member_template_arguments->length > 0
-              ? type->dependent_member_template_arguments->value.p[0]
+          TypeDependentOf(type)->dependent_member_template_arguments != NULL &&
+                  TypeDependentOf(type)
+                          ->dependent_member_template_arguments->length > 0
+              ? TypeDependentOf(type)
+                    ->dependent_member_template_arguments->value.p[0]
               : NULL;
       if (member_template_args != NULL) {
         Vector* concrete_member_args =
@@ -2663,9 +2682,10 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
       return TypeRecordCalculateSize(member_type);
     }
     if (subst->info.struct_info->instantiation_in_progress &&
-        type->dependent_member_name != NULL) {
+        TypeDependentOf(type)->dependent_member_name != NULL) {
       TypeRecord* pending = ResolveInProgressClassMemberType(
-          parser, subst->info.struct_info, type->dependent_member_name);
+          parser, subst->info.struct_info,
+          TypeDependentOf(type)->dependent_member_name);
       if (pending != NULL) {
         pending = TypeRecordAddQualifiers(pending, GetQualifiers(type));
         TypeRecordDelete(subst);
@@ -2705,7 +2725,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
     return NULL;
   }
   int pack_index = type->template_parameter_index;
-  TemplateArgument* pack = type->pack_index_pack;
+  TemplateArgument* pack = TypeDependentOf(type)->pack_index_pack;
   if (pack == NULL && args != NULL && pack_index >= 0 &&
       (size_t)pack_index < args->length) {
     pack = args->value.p[pack_index];
@@ -2718,17 +2738,19 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
   }
 
   int64_t element_index = 0;
-  if (!TryFoldDependentTemplateArgument(parser, type->pack_index_expr, args,
-                                        &element_index)) {
+  if (!TryFoldDependentTemplateArgument(parser,
+                                        TypeDependentOf(type)->pack_index_expr,
+                                        args, &element_index)) {
     ASTNode* partial = CloneDependentExpressionWithArgs(
-        parser, type->pack_index_expr, args);
+        parser, TypeDependentOf(type)->pack_index_expr, args);
     if (partial != NULL &&
         DependentExpressionContainsTemplateParameter(partial)) {
       TypeRecord* deferred = TypeRecordCopy(type);
-      ASTNodeDelete(deferred->pack_index_expr);
-      deferred->pack_index_expr = partial;
-      if (deferred->pack_index_pack == NULL) {
-        deferred->pack_index_pack = TemplateArgumentCopy(pack);
+      ASTNodeDelete(TypeDependentOf(deferred)->pack_index_expr);
+      TypeMutableDependent(deferred)->pack_index_expr = partial;
+      if (TypeDependentOf(deferred)->pack_index_pack == NULL) {
+        TypeMutableDependent(deferred)->pack_index_pack =
+            TemplateArgumentCopy(pack);
       }
       return deferred;
     }
@@ -2736,7 +2758,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
     if (parser != NULL) {
       parser->template_substitution_failed = true;
     }
-    SemanticError(type->pack_index_expr,
+    SemanticError(TypeDependentOf(type)->pack_index_expr,
                   "pack index must be a constant expression");
     TypeRecord* fallback =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(type));
@@ -2748,7 +2770,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
     if (parser != NULL) {
       parser->template_substitution_failed = true;
     }
-    SemanticError(type->pack_index_expr,
+    SemanticError(TypeDependentOf(type)->pack_index_expr,
                   "pack index %" PRId64
                   " is out of bounds for a pack of length %zu",
                   element_index, pack->pack_arguments->length);
@@ -2763,7 +2785,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
       if (parser != NULL) {
         parser->template_substitution_failed = true;
       }
-      SemanticError(type->pack_index_expr,
+      SemanticError(TypeDependentOf(type)->pack_index_expr,
                     "Indexed template name requires a template argument list "
                     "when used as a type");
       return NewTypeRecordWithSize(kTypeInt | kTypeUnknown,
@@ -2784,7 +2806,9 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
                                    GetQualifiers(type));
     }
     result->is_pack_index = false;
-    result->pack_index_expr = NULL;
+    if (result->dependent != NULL) {
+      TypeMutableDependent(result)->pack_index_expr = NULL;
+    }
     result->template_parameter_index = -1;
     result = TypeRecordAddQualifiers(result, GetQualifiers(type));
     return TypeRecordCalculateSize(result);
@@ -2794,17 +2818,17 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
     if (parser != NULL) {
       parser->template_substitution_failed = true;
     }
-    SemanticError(type->pack_index_expr,
+    SemanticError(TypeDependentOf(type)->pack_index_expr,
                   "pack indexing specifier requires a type pack");
     return NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(type));
   }
-  if (type->dependent_member_name != NULL) {
+  if (TypeDependentOf(type)->dependent_member_name != NULL) {
     Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
         args, pack_index, element);
     TypeRecord* member_pattern = TypeRecordCopy(type);
     member_pattern->is_pack_index = false;
-    ASTNodeDelete(member_pattern->pack_index_expr);
-    member_pattern->pack_index_expr = NULL;
+    ASTNodeDelete(TypeDependentOf(member_pattern)->pack_index_expr);
+    TypeMutableDependent(member_pattern)->pack_index_expr = NULL;
     TypeRecord* member = SubstituteDependentMemberType(
         parser, member_pattern, element_args);
     TypeRecordDelete(member_pattern);
@@ -3180,14 +3204,15 @@ static bool NodeCallsUnresolvedFunctionTemplate(ASTNode* node, void* data) {
  * those first and only then expands the pattern -- must handle this. */
 bool TypeIsDecltypeAliasTemplateId(TypeRecord* type) {
   return CompilerIsCXX() && type != NULL &&
-         type->dependent_decltype_expr != NULL &&
+         TypeDependentOf(type)->dependent_decltype_expr != NULL &&
          type->template_origin != NULL && type->template_arguments != NULL &&
          type->template_origin->flags.is_template &&
          StorageIs(type->template_origin->storage, STO(typedef)) &&
          type->template_origin->type != NULL &&
          type->template_origin->type != type &&
-         type->template_origin->type->dependent_decltype_expr ==
-             type->dependent_decltype_expr;
+         TypeDependentOf(type->template_origin->type)
+                 ->dependent_decltype_expr ==
+             TypeDependentOf(type)->dependent_decltype_expr;
 }
 
 static void ClearDependentExpressionAnalysis(ASTNode* node, void* data,
@@ -3353,9 +3378,9 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
       return subst;
     }
   }
-  if (type->dependent_splice_expr != NULL) {
+  if (TypeDependentOf(type)->dependent_splice_expr != NULL) {
     ASTNode* splice = CloneDependentExpressionWithArgs(
-        parser, type->dependent_splice_expr, args);
+        parser, TypeDependentOf(type)->dependent_splice_expr, args);
     if (splice != NULL && splice->op == AST_OP(splice)) {
       ASTNodeVisit(splice, ClearDependentExpressionAnalysis, 0, NULL);
       SpliceASTNode* splice_node = (SpliceASTNode*)splice;
@@ -3376,17 +3401,21 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     }
     TypeRecord* dependent =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, GetQualifiers(type));
-    dependent->dependent_splice_expr = splice;
+    TypeMutableDependent(dependent)->dependent_splice_expr = splice;
     return dependent;
   }
-  if (type->dependent_decltype_expr != NULL &&
-      !DependentDecltypeStackContains(type->dependent_decltype_expr, args)) {
-    DependentDecltypeStackPush(type->dependent_decltype_expr, args);
-    if ((type->dependent_decltype_expr->flags &
+  if (TypeDependentOf(type)->dependent_decltype_expr != NULL &&
+      !DependentDecltypeStackContains(
+          TypeDependentOf(type)->dependent_decltype_expr, args)) {
+    DependentDecltypeStackPush(TypeDependentOf(type)->dependent_decltype_expr,
+                               args);
+    if ((TypeDependentOf(type)->dependent_decltype_expr->flags &
          kASTUnparenthesizedDecltypeEntity) != 0 &&
-        type->dependent_decltype_expr->op == AST_OP(identifier)) {
+        TypeDependentOf(type)->dependent_decltype_expr->op ==
+            AST_OP(identifier)) {
       Symbol* entity =
-          ((IdentifierASTNode*)type->dependent_decltype_expr)->symbol;
+          ((IdentifierASTNode*)TypeDependentOf(type)->dependent_decltype_expr)
+              ->symbol;
       // An undeduced `auto` entity is not a type yet.  Returning the
       // placeholder makes `const T&` print as `const ` and rejects the real
       // initializer type.  Keep the decltype opaque until deduction replaces
@@ -3437,7 +3466,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
     bool saved_substitution_failed =
         parser != NULL && parser->template_substitution_failed;
     ASTNode* expr = CloneDependentExpressionWithArgs(
-        parser, type->dependent_decltype_expr, args);
+        parser, TypeDependentOf(type)->dependent_decltype_expr, args);
     if (parser != NULL) {
       parser->template_substitution_failed = saved_substitution_failed;
     }
@@ -3481,14 +3510,14 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           TypeRecord* opaque = TypeRecordCopy(type);
           opaque = TypeRecordAddQualifiers(opaque, GetQualifiers(type));
           ASTNode* deferred = CloneDependentExpressionWithArgs(
-              parser, type->dependent_decltype_expr, args);
+              parser, TypeDependentOf(type)->dependent_decltype_expr, args);
           if (deferred != NULL) {
             ASTNodeVisit(deferred, RemapDecltypeFunctionParameter, 0,
                          &parameter_remap);
-            opaque->dependent_decltype_expr = deferred;
+            TypeMutableDependent(opaque)->dependent_decltype_expr = deferred;
             ASTNodeDelete(expr);
           } else {
-            opaque->dependent_decltype_expr = expr;
+            TypeMutableDependent(opaque)->dependent_decltype_expr = expr;
           }
           compiler->speculative_template_instantiation_depth--;
           DiagnosticSuppressEnd();
@@ -3538,16 +3567,16 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
           // A clean clone re-analyzes from scratch once Derived is complete and
           // then resolves correctly (e.g. to `int*`).
           ASTNode* deferred = CloneDependentExpressionWithArgs(
-              parser, type->dependent_decltype_expr, args);
+              parser, TypeDependentOf(type)->dependent_decltype_expr, args);
           if (deferred != NULL) {
             // The class's parameters (`v` of type `T`) are bound now; a later
             // substitution supplies only the member template's own.
             ASTNodeVisit(deferred, RemapDecltypeFunctionParameter, 0,
                          &parameter_remap);
-            opaque->dependent_decltype_expr = deferred;
+            TypeMutableDependent(opaque)->dependent_decltype_expr = deferred;
             ASTNodeDelete(expr);
           } else {
-            opaque->dependent_decltype_expr = expr;
+            TypeMutableDependent(opaque)->dependent_decltype_expr = expr;
           }
           compiler->speculative_template_instantiation_depth--;
           DiagnosticSuppressEnd();
@@ -3633,7 +3662,7 @@ TypeRecord* SubstituteTemplateParameters(TypeParser* parser,
   // path below applies the recorded arguments first.
   bool alias_member_template_id =
       type->template_origin != NULL && type->template_arguments != NULL &&
-      type->dependent_member_name != NULL;
+      TypeDependentOf(type)->dependent_member_name != NULL;
   TypeRecord* subst = NULL;
   if (!alias_member_template_id) {
     subst = SubstituteDependentMemberType(parser, type, args);
@@ -3960,11 +3989,12 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
                                                base);
       }
     }
-    if (t->dependent_member_template_arguments != NULL) {
-      for (size_t i = 0; i < t->dependent_member_template_arguments->length;
+    if (TypeDependentOf(t)->dependent_member_template_arguments != NULL) {
+      for (size_t i = 0;
+           i < TypeDependentOf(t)->dependent_member_template_arguments->length;
            i++) {
         Vector* component =
-            t->dependent_member_template_arguments->value.p[i];
+            TypeDependentOf(t)->dependent_member_template_arguments->value.p[i];
         if (component == NULL) {
           continue;
         }
@@ -3981,14 +4011,15 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
     // operand, leaving the decltype permanently unresolved.  An alias-id's
     // operand is the alias's own pattern, numbered in the alias's parameter
     // space; its recorded arguments (rebased above) carry the mapping.
-    if (t->dependent_decltype_expr != NULL &&
+    if (TypeDependentOf(t)->dependent_decltype_expr != NULL &&
         !TypeIsDecltypeAliasTemplateId(t)) {
-      t->dependent_decltype_expr =
-          CloneAndRebaseDependentExpression(t->dependent_decltype_expr, base);
+      TypeMutableDependent(t)->dependent_decltype_expr =
+          CloneAndRebaseDependentExpression(
+              TypeDependentOf(t)->dependent_decltype_expr, base);
     }
-    if (t->pack_index_expr != NULL) {
-      ASTNode* old_index = t->pack_index_expr;
-      t->pack_index_expr =
+    if (TypeDependentOf(t)->pack_index_expr != NULL) {
+      ASTNode* old_index = TypeDependentOf(t)->pack_index_expr;
+      TypeMutableDependent(t)->pack_index_expr =
           CloneAndRebaseDependentExpression(old_index, base);
       ASTNodeDelete(old_index);
     }
@@ -4038,11 +4069,12 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
                                                base);
       }
     }
-    if (t->dependent_member_template_arguments != NULL) {
-      for (size_t i = 0; i < t->dependent_member_template_arguments->length;
+    if (TypeDependentOf(t)->dependent_member_template_arguments != NULL) {
+      for (size_t i = 0;
+           i < TypeDependentOf(t)->dependent_member_template_arguments->length;
            i++) {
         Vector* component =
-            t->dependent_member_template_arguments->value.p[i];
+            TypeDependentOf(t)->dependent_member_template_arguments->value.p[i];
         if (component == NULL) {
           continue;
         }
@@ -4065,10 +4097,11 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
       }
     }
     // See RebaseTemplateParameterIndicesSpine for alias-id operands.
-    if (t->dependent_decltype_expr != NULL &&
+    if (TypeDependentOf(t)->dependent_decltype_expr != NULL &&
         !TypeIsDecltypeAliasTemplateId(t)) {
-      t->dependent_decltype_expr =
-          CloneAndRebaseDependentExpression(t->dependent_decltype_expr, base);
+      TypeMutableDependent(t)->dependent_decltype_expr =
+          CloneAndRebaseDependentExpression(
+              TypeDependentOf(t)->dependent_decltype_expr, base);
     }
     // Nested lambda closures embed placeholder capture-field types numbered
     // relative to an enclosing template.  After substituting the enclosing

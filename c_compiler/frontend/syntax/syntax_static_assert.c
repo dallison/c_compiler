@@ -74,13 +74,15 @@ static bool StaticAssertTemplateArgumentVectorContainsTemplateParameter(
     bool plain_type =
         type == NULL ||
         (type->next == NULL && type->declarator == kDeclPrimitive &&
-         type->template_parameter_index < 0 &&
-         type->template_origin == NULL && type->template_arguments == NULL &&
-         type->dependent_member_name == NULL &&
-         type->dependent_member_template_arguments == NULL &&
-         type->dependent_decltype_expr == NULL &&
-         type->dependent_splice_expr == NULL && !type->is_pack_index &&
-         type->pack_index_expr == NULL && type->pack_index_pack == NULL &&
+         type->template_parameter_index < 0 && type->template_origin == NULL &&
+         type->template_arguments == NULL &&
+         TypeDependentOf(type)->dependent_member_name == NULL &&
+         TypeDependentOf(type)->dependent_member_template_arguments == NULL &&
+         TypeDependentOf(type)->dependent_decltype_expr == NULL &&
+         TypeDependentOf(type)->dependent_splice_expr == NULL &&
+         !type->is_pack_index &&
+         TypeDependentOf(type)->pack_index_expr == NULL &&
+         TypeDependentOf(type)->pack_index_pack == NULL &&
          !TypeIsStructOrUnion(type) && !TypeIsEnum(type));
     if (arg != NULL && arg->template_parameter_index < 0 &&
         arg->pack_arguments == NULL && plain_type) {

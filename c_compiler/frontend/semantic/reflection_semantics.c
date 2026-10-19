@@ -781,14 +781,14 @@ static void SemanticDiagnoseInvalidSpliceContext(SpliceASTNode* node) {
 
 TypeRecord* SemanticResolveDependentSpliceType(TypeRecord* type,
                                                ASTNode* diagnostic) {
-  if (type == NULL || type->dependent_splice_expr == NULL) {
+  if (type == NULL || TypeDependentOf(type)->dependent_splice_expr == NULL) {
     return type;
   }
   if (compiler->syntax.current_template_parameter_count > 0 &&
       type->template_parameter_index >= 0) {
     return type;
   }
-  ASTNode* splice_expr = type->dependent_splice_expr;
+  ASTNode* splice_expr = TypeDependentOf(type)->dependent_splice_expr;
   if (splice_expr->op != AST_OP(splice)) {
     return type;
   }

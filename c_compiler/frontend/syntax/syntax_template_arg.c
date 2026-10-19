@@ -309,8 +309,8 @@ static void NormalizeTemplateNameArgument(Syntax* syntax, TemplateArgument* arg,
   Symbol* origin = bare_template;
   ASTNode* pack_index_expr =
       arg->type->is_pack_index
-          ? ASTNodeClone(arg->type->pack_index_expr, IdentityCloneNode, NULL,
-                         NULL)
+          ? ASTNodeClone(TypeDependentOf(arg->type)->pack_index_expr,
+                         IdentityCloneNode, NULL, NULL)
           : NULL;
   TypeRecordDelete(arg->type);
   arg->type = NULL;

@@ -285,7 +285,8 @@ bool CXXTypeContainsParameterPack(Syntax* syntax, TypeRecord* type) {
        current = current->next) {
     int parameter_index = -1;
     TypeIsTemplateParameterPlaceholder(current, &parameter_index);
-    if (parameter_index < 0 && current->dependent_member_name != NULL) {
+    if (parameter_index < 0 &&
+        TypeDependentOf(current)->dependent_member_name != NULL) {
       parameter_index = current->template_parameter_index;
     }
     if (parameter_index >= 0 &&
@@ -298,9 +299,9 @@ bool CXXTypeContainsParameterPack(Syntax* syntax, TypeRecord* type) {
                                        current->template_parameter_index)) {
       return true;
     }
-    if (current->dependent_decltype_expr != NULL &&
+    if (TypeDependentOf(current)->dependent_decltype_expr != NULL &&
         SyntaxExpressionContainsParameterPack(
-            current->dependent_decltype_expr)) {
+            TypeDependentOf(current)->dependent_decltype_expr)) {
       return true;
     }
     for (size_t i = 0;

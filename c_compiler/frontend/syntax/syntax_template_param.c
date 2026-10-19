@@ -294,7 +294,8 @@ static void ParseConstrainedAutoTemplateParameter(
   TypeRecord* placeholder_type =
       NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
   placeholder_type->template_parameter_index = index;
-  placeholder_type->template_parameter_name = NewString("auto");
+  TypeMutableDependent(placeholder_type)->template_parameter_name =
+      NewString("auto");
   DeclareConstrainedTemplateParameterSymbol(
       syntax, TypeRecordCopy(placeholder_type), /*is_type_parameter=*/false,
       is_parameter_pack, index);
@@ -342,7 +343,8 @@ static void ParseConstrainedTypeTemplateParameter(
   TypeRecord* placeholder = TypeRecordAdopt(
       NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
   placeholder->template_parameter_index = index;
-  placeholder->template_parameter_name = NewString(lex->spelling.value);
+  TypeMutableDependent(placeholder)->template_parameter_name =
+      NewString(lex->spelling.value);
   DeclareConstrainedTemplateParameterSymbol(syntax, placeholder,
                                             /*is_type_parameter=*/true,
                                             is_parameter_pack, index);
@@ -477,7 +479,8 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
             : kTypeInt | kTypeUnknown,
         kQualPlain);
     placeholder->template_parameter_index = index;
-    placeholder->template_parameter_name = NewString(param_name.value);
+    TypeMutableDependent(placeholder)->template_parameter_name =
+        NewString(param_name.value);
     Symbol* param = NewSymbol(
         param_name.value, placeholder,
         template_kind == kTemplateTemplateParameterType ? STO(typedef)
@@ -601,7 +604,8 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
       TypeRecord* placeholder =
           NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
       placeholder->template_parameter_index = index;
-      placeholder->template_parameter_name = NewString(lex->spelling.value);
+      TypeMutableDependent(placeholder)->template_parameter_name =
+          NewString(lex->spelling.value);
       Symbol* param = NewSymbol(lex->spelling.value, placeholder, STO(typedef));
       param->flags.invented = true;
       param->flags.is_template_parameter = true;
@@ -673,7 +677,8 @@ static bool ParseTemplateParameter(Syntax* syntax, Vector* params, int base) {
     TypeRecord* placeholder =
         NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     placeholder->template_parameter_index = index;
-    placeholder->template_parameter_name = NewString("auto");
+    TypeMutableDependent(placeholder)->template_parameter_name =
+        NewString("auto");
     TypeRecordDelete(param->type);
     param->type = placeholder;
     TypeRecordIncRef(param->type);

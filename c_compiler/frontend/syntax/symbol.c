@@ -1352,7 +1352,8 @@ static void AppendCXXTemplateArguments(String* out, Symbol* symbol) {
 
 static bool TypeIsNonDeducedForm(TypeRecord* type) {
   for (TypeRecord* t = type; t != NULL; t = t->next) {
-    if (t->dependent_member_name != NULL || t->dependent_decltype_expr != NULL) {
+    if (TypeDependentOf(t)->dependent_member_name != NULL ||
+        TypeDependentOf(t)->dependent_decltype_expr != NULL) {
       return true;
     }
   }

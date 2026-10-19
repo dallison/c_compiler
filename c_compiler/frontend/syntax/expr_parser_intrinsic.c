@@ -342,8 +342,9 @@ static bool TypeIsPairLikeForOffsetof(TypeRecord* bare) {
   if (bare == NULL) {
     return false;
   }
-  if (bare->dependent_member_name != NULL &&
-      strcmp(bare->dependent_member_name->value, "value_type") == 0) {
+  if (TypeDependentOf(bare)->dependent_member_name != NULL &&
+      strcmp(TypeDependentOf(bare)->dependent_member_name->value,
+             "value_type") == 0) {
     return true;
   }
   if (TypeIsStructOrUnion(bare) && bare->info.struct_info != NULL) {
@@ -382,7 +383,7 @@ static Struct* StructForOffsetofType(Syntax* syntax, TypeRecord* type) {
     return str;
   }
   TypeRecord* bare = BareOffsetofType(type);
-  if (bare == NULL || bare->dependent_member_name == NULL ||
+  if (bare == NULL || TypeDependentOf(bare)->dependent_member_name == NULL ||
       bare->template_parameter_index < 0) {
     return NULL;
   }
@@ -404,8 +405,8 @@ static Struct* StructForOffsetofType(Syntax* syntax, TypeRecord* type) {
     return NULL;
   }
   TypeRecord* owner = BareOffsetofType(param_symbol->type);
-  TypeRecord* resolved =
-      TypedefMemberType(owner, bare->dependent_member_name->value);
+  TypeRecord* resolved = TypedefMemberType(
+      owner, TypeDependentOf(bare)->dependent_member_name->value);
   return StructFromTypeRecord(resolved);
 }
 
