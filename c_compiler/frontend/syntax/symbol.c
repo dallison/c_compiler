@@ -537,32 +537,44 @@ static const char* CXXOperatorEncoding(const char* name) {
   return entry != NULL ? entry->encoding : NULL;
 }
 
+static void AppendCXXDecimal(String* out, size_t value) {
+  char digits[20];
+  size_t start = sizeof(digits);
+  do {
+    digits[--start] = (char)('0' + value % 10);
+    value /= 10;
+  } while (value != 0);
+  StringAppendSegment(out, digits + start, sizeof(digits) - start);
+}
+
+static bool IsCXXIdentifierChar(unsigned char ch) {
+  return isalnum(ch) || ch == '_';
+}
+
 static void AppendCXXNameComponent(String* out, const char* name) {
-  const char* op_encoding = CXXOperatorEncoding(name);
-  if (op_encoding != NULL) {
-    StringAppend(out, op_encoding);
-    return;
-  }
-  String sanitized;
-  StringInit(&sanitized, NULL);
-  bool needs_sanitizing = false;
-  for (const char* p = name; *p != '\0'; p++) {
-    char ch = *p;
-    if (isalnum((unsigned char)ch) || ch == '_') {
-      StringAppendChar(&sanitized, ch);
-    } else {
-      needs_sanitizing = true;
-      StringAppendChar(&sanitized, '_');
+  if (strncmp(name, "operator", 8) == 0) {
+    const char* op_encoding = CXXOperatorEncoding(name);
+    if (op_encoding != NULL) {
+      StringAppend(out, op_encoding);
+      return;
     }
   }
-  const char* component = needs_sanitizing ? sanitized.value : name;
-  String length;
-  StringInit(&length, NULL);
-  StringPrintf(&length, "%zu", strlen(component));
-  StringAppendString(out, &length);
-  StringAppend(out, component);
-  StringDestruct(&length);
-  StringDestruct(&sanitized);
+  size_t length = 0;
+  bool needs_sanitizing = false;
+  for (; name[length] != '\0'; length++) {
+    if (!IsCXXIdentifierChar((unsigned char)name[length])) {
+      needs_sanitizing = true;
+    }
+  }
+  AppendCXXDecimal(out, length);
+  if (!needs_sanitizing) {
+    StringAppendSegment(out, name, length);
+    return;
+  }
+  for (size_t i = 0; i < length; i++) {
+    unsigned char ch = (unsigned char)name[i];
+    StringAppendChar(out, IsCXXIdentifierChar(ch) ? (char)ch : '_');
+  }
 }
 
 static void AppendCXXNestedNamespaceComponents(String* out, Namespace* ns) {
