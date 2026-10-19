@@ -1074,6 +1074,10 @@ static Symbol* FindCurrentClassNestedType(TypeParser* parser, String* name) {
   return NULL;
 }
 
+static bool StructIsWithinClassTemplatePattern(Struct* str);
+static bool ClassTemplateIdIsConcrete(TypeParser* parser, Symbol* symbol,
+                                      Vector* args);
+
 TypeRecord* ParseCurrentClassTemplateType(TypeParser* parser,
                                                  String* name) {
   Struct* owner = CurrentClassBeingParsed(parser);
@@ -1104,11 +1108,31 @@ TypeRecord* ParseCurrentClassTemplateType(TypeParser* parser,
     // use it as the origin so such references instantiate correctly.
     Symbol* template_origin = owner->tag_symbol;
     Symbol* primary = SyntaxFindSymbol(parser->syntax, name);
+    // In an explicit specialization the name finds the injected-class-name
+    // alias, whose target is the primary.
+    if (primary != NULL && !primary->flags.is_template &&
+        SymbolExtraOf(primary)->alias_target != NULL) {
+      primary = SymbolExtraOf(primary)->alias_target;
+    }
     if (primary != NULL && primary->flags.is_template &&
         primary->type != NULL && TypeIsStructOrUnion(primary->type) &&
         primary->type->info.struct_info != NULL &&
         primary->type->info.struct_info->is_template) {
       template_origin = primary;
+      // Inside an explicit specialization (`template <> struct H<N>`),
+      // `H<void>` names another specialization of the primary, not the class
+      // being defined.
+      if (!StructIsWithinClassTemplatePattern(owner) &&
+          ClassTemplateIdIsConcrete(parser, primary, args) &&
+          !TemplateArgumentVectorEqual(
+              owner->tag_symbol->type->template_arguments, args)) {
+        TypeRecordDelete(type_record);
+        type_record = InstantiateSimpleClassTemplate(parser, primary, args);
+        VectorDeleteWithContents(
+            args, (VectorElementDestructor)TemplateArgumentDelete,
+            /*free_element=*/false);
+        return type_record;
+      }
     }
     type_record->template_origin = template_origin;
     type_record->template_arguments = args;
