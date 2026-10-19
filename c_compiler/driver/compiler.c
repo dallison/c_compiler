@@ -3162,6 +3162,7 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
     VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));
     CompilerStringIndexInsert(compiler->emitted_function_name_index, emit_name,
                               decl->symbol);
+    decl->base.type->info.function.native_code_emitted = true;
     AddLocalStatics(syntax, decl->base.type);
     GeneratorDestruct(&codegen);
   } else {
@@ -3172,6 +3173,7 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
       VectorAppend(&compiler->emitted_function_asm_names, NewString(emit_name));
       CompilerStringIndexInsert(compiler->emitted_function_name_index, emit_name,
                                 decl->symbol);
+      decl->base.type->info.function.native_code_emitted = true;
 
       if (compiler->debug_output) {
         BuildDebugInfoAfterCodegen(&compiler->debug_builder, decl->symbol);
@@ -3377,6 +3379,9 @@ static void ProfileReport(void) {
 static void CompileFunctionDefinitionNode(
     Syntax* syntax, VariableDeclarationASTNode* decl) {
   if (FunctionAsmNameAlreadyEmitted(FunctionEmitName(decl->symbol))) {
+    if (decl->base.type != NULL && TypeIsFunction(decl->base.type)) {
+      decl->base.type->info.function.native_code_emitted = true;
+    }
     return;
   }
   CheckMainSignature(syntax, decl->symbol);
@@ -3880,6 +3885,11 @@ static DefinitionReferenceState MarkReferencesOfNeededDefinition(
   }
   if (IsFunctionOrInlineDefinition(decl->symbol) && decl->base.type != NULL &&
       FunctionDefinitionIsODRDiscardable(decl->base.type)) {
+    // Whether or not it is still needed, a body whose references are marked
+    // has nothing more to add.
+    if (decl->base.type->info.function.references_marked) {
+      return kDefinitionReferencesMarked;
+    }
     if (!FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {
       return kFunctionDefinitionUnreferenced;
     }
@@ -4065,6 +4075,7 @@ static void CompileReferencedInlineFunctionsWithClosure(
             !IsFunctionOrInlineDefinition(decl->symbol) ||
             decl->base.type == NULL ||
             !FunctionDefinitionIsODRDiscardable(decl->base.type) ||
+            decl->base.type->info.function.native_code_emitted ||
             !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {
           continue;
         }

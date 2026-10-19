@@ -326,6 +326,7 @@ typedef struct FunctionInfo {
   bool constexpr_if_checked : 1;  // Transient summary cache.           // @wire -
   bool references_marked : 1;  // Transient: body reference edges visited. // @wire -
   bool body_analyzed : 1;  // Transient: definition semantically analyzed. // @wire -
+  bool native_code_emitted : 1;    // Transient: name has code. // @wire -
   bool body_had_parse_errors : 1;  // Transient: errors parsing the body. // @wire -
   bool is_volatile_member : 1;  // C++ trailing volatile qualifier.     // @wire 49
   bool has_explicit_object_parameter : 1;  // C++23 `this T self`.       // @wire 50

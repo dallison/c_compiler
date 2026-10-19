@@ -2179,6 +2179,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
     r->info.function.extra = NULL;
     r->info.function.references_marked = false;
     r->info.function.body_analyzed = false;
+    r->info.function.native_code_emitted = false;
   } else if (record->declarator == kDeclArray ||
              record->declarator == kDeclVector) {
     memcpy(&r->info.array, &record->info.array, sizeof(ArrayInfo));
