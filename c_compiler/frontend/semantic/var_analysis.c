@@ -11,7 +11,6 @@
 
 typedef struct {
   int loop_count;
-  int arg_count;
 } VarAnalyzer;
 
 static void AnalyzeVars(ASTNode* node, void* data, int child_id, VisitorMode mode) {
@@ -26,19 +25,7 @@ static void AnalyzeVars(ASTNode* node, void* data, int child_id, VisitorMode mod
       symbol->usage_info.used_in_loop += a->loop_count;
       break;
     }
-      
 
-    case AST_OP(call):
-      // All children except first are used arguments.
-      if (child_id != 0) {
-        if (mode == kVisitPreChildren) {
-          a->arg_count++;
-        } else {
-          a->arg_count--;
-        }
-      break;
-      }
-      
     case AST_OP(while):
     case AST_OP(do):
       if (mode == kVisitPreChildren) {
