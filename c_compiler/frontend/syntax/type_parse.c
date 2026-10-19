@@ -1139,9 +1139,9 @@ TypeRecord* ParseCurrentClassTemplateType(TypeParser* parser,
     args = NULL;
   }
   if (args != NULL) {
-    VectorDestructWithContents(args,
-                               (VectorElementDestructor)TemplateArgumentDelete,
-                               /*free_element=*/false);
+    VectorDeleteWithContents(args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
   }
   return type_record;
 }
@@ -3065,9 +3065,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         }
         type |= type_record->type;
         if (args != NULL) {
-          VectorDestructWithContents(args,
-                                     (VectorElementDestructor)TemplateArgumentDelete,
-                                     /*free_element=*/false);
+          VectorDeleteWithContents(
+              args, (VectorElementDestructor)TemplateArgumentDelete,
+              /*free_element=*/false);
         }
         }
       } else if (parser->syntax->parsing_friend_type_specifier) {
@@ -3262,9 +3262,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           }
           type |= type_record->type;
           if (args != NULL) {
-            VectorDestructWithContents(args,
-                                       (VectorElementDestructor)TemplateArgumentDelete,
-                                       /*free_element=*/false);
+            VectorDeleteWithContents(
+                args, (VectorElementDestructor)TemplateArgumentDelete,
+                /*free_element=*/false);
           }
         } else if (CompilerIsCXX() && SymbolIsTagSymbol(symbol)) {
           symbol->flags.used = true;
@@ -3291,9 +3291,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           }
           type |= type_record->type;
           if (args != NULL) {
-            VectorDestructWithContents(args,
-                                       (VectorElementDestructor)TemplateArgumentDelete,
-                                       /*free_element=*/false);
+            VectorDeleteWithContents(
+                args, (VectorElementDestructor)TemplateArgumentDelete,
+                /*free_element=*/false);
           }
         }
       } else if (CompilerIsCXX()) {
