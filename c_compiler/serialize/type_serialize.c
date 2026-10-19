@@ -554,7 +554,7 @@ static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
 // Exposed (non-static) so symbol_serialize.c can (de)serialize variable
 // template parameter lists.
 void SerialWriteTemplateParameterVector(SerializeContext* ctx, WireBuffer* buf,
-                                        int field, Vector* v) {
+                                        int field, const Vector* v) {
   WireBuffer tmp;
   WireBufferInitOwned(&tmp, 16);
   size_t length = v == NULL ? 0 : v->length;
@@ -1332,9 +1332,8 @@ static void ReadArrayInfo(DeserializeContext* ctx, WireBuffer* in,
 // ---------------------------------------------------------------------------
 // FunctionInfo (inline).
 // ---------------------------------------------------------------------------
-static void WriteContractAssertionVector(SerializeContext* ctx,
-                                         WireBuffer* out, int field,
-                                         Vector* assertions) {
+static void WriteContractAssertionVector(SerializeContext* ctx, WireBuffer* out,
+                                         int field, const Vector* assertions) {
   WireBuffer tmp;
   WireBufferInitOwned(&tmp, 32);
   WireWriteRawVarint(&tmp, (uint64_t)assertions->length);
@@ -1419,15 +1418,15 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
   SWriteRef(ctx, out, kFn_symbol, kSerialKindSymbol, f->symbol);
   SWriteRefVector(ctx, out, kFn_prototype, kSerialKindSymbol, &f->prototype);
   WireWriteBool(out, kFn_varargs, f->varargs);
-  bool body_is_reachable =
-      !ctx->writing_module_interface || f->is_inline || f->is_constexpr ||
-      f->template_parameter_count > 0 ||
-      (f->symbol != NULL && f->symbol->flags.is_template);
+  bool body_is_reachable = !ctx->writing_module_interface || f->is_inline ||
+                           f->is_constexpr ||
+                           FunctionExtraOf(f)->template_parameter_count > 0 ||
+                           (f->symbol != NULL && f->symbol->flags.is_template);
   if (body_is_reachable) {
     SWriteRef(ctx, out, kFn_body, kSerialKindAST, f->body);
   }
   SWriteRef(ctx, out, kFn_explicit_condition, kSerialKindAST,
-            f->explicit_condition);
+            FunctionExtraOf(f)->explicit_condition);
   WireWriteBool(out, kFn_unknown_args, f->unknown_args);
   WireWriteBool(out, kFn_definition, f->definition);
   WireWriteBool(out, kFn_old_style, f->old_style);
@@ -1465,41 +1464,41 @@ static void WriteFunctionInfo(SerializeContext* ctx, WireBuffer* out,
   WireWriteBool(out, kFn_is_auto_return_deduced, f->is_auto_return_deduced);
   WireWriteBool(out, kFn_is_decltype_auto_return_deduced,
                 f->is_decltype_auto_return_deduced);
-  SWriteStringPtr(ctx, out, kFn_deleted_reason, f->deleted_reason);
+  SWriteStringPtr(ctx, out, kFn_deleted_reason,
+                  FunctionExtraOf(f)->deleted_reason);
   WriteContractAssertionVector(ctx, out, kFn_contract_assertions,
-                               &f->contract_assertions);
+                               &FunctionExtraOf(f)->contract_assertions);
   WireWriteBool(out, kFn_is_deduction_guide, f->is_deduction_guide);
   WireWriteBool(out, kFn_is_coroutine, f->is_coroutine);
   WireWriteBool(out, kFn_has_coroutine_syntax, f->has_coroutine_syntax);
   WireWriteBool(out, kFn_has_constexpr_if, f->has_constexpr_if);
   SWriteRef(ctx, out, kFn_coroutine_promise_type, kSerialKindType,
-            f->coroutine_promise_type);
+            FunctionExtraOf(f)->coroutine_promise_type);
   SWriteRef(ctx, out, kFn_coroutine_frame_type, kSerialKindType,
-            f->coroutine_frame_type);
-  WireWriteInt32(out, kFn_coroutine_suspend_count, f->coroutine_suspend_count);
+            FunctionExtraOf(f)->coroutine_frame_type);
+  WireWriteInt32(out, kFn_coroutine_suspend_count,
+                 FunctionExtraOf(f)->coroutine_suspend_count);
   WireWriteInt32(out, kFn_virtual_index, f->virtual_index);
   SWriteRef(ctx, out, kFn_cxx_member_owner, kSerialKindStruct,
             f->cxx_member_owner);
   SWriteRef(ctx, out, kFn_template_origin, kSerialKindSymbol,
             f->template_origin);
   WireWriteInt32(out, kFn_template_parameter_count,
-                 f->template_parameter_count);
-  WireWriteInt32(out, kFn_template_parameter_base, f->template_parameter_base);
+                 FunctionExtraOf(f)->template_parameter_count);
+  WireWriteInt32(out, kFn_template_parameter_base,
+                 FunctionExtraOf(f)->template_parameter_base);
   SerialWriteTemplateParameterVector(ctx, out, kFn_template_parameters,
-                                     &f->template_parameters);
+                                     &FunctionExtraOf(f)->template_parameters);
   SWriteRefVector(ctx, out, kFn_template_instantiations, kSerialKindSymbol,
-                  &f->template_instantiations);
+                  &FunctionExtraOf(f)->template_instantiations);
   SerialWriteConstraint(ctx, out, kFn_associated_constraint,
-                        f->associated_constraint);
+                        FunctionExtraOf(f)->associated_constraint);
 }
 
 static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
                              FunctionInfo* f) {
   VectorInit(&f->prototype);
-  VectorInit(&f->template_parameters);
-  VectorInit(&f->template_instantiations);
-  f->template_instantiation_cache = NULL;
-  VectorInit(&f->contract_assertions);
+  f->extra = NULL;
   f->virtual_index = -1;
   while (!WireBufferEof(in) && !WireBufferHasError(in)) {
     int field;
@@ -1520,9 +1519,13 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
       case kFn_body:
         f->body = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
         break;
-      case kFn_explicit_condition:
-        f->explicit_condition = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+      case kFn_explicit_condition: {
+        ASTNode* condition = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
+        if (condition != NULL) {
+          FunctionMutableExtra(f)->explicit_condition = condition;
+        }
         break;
+      }
       case kFn_unknown_args:
         WIRE_READ_BOOL_BITFIELD(in, f->unknown_args);
         break;
@@ -1628,12 +1631,23 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
       case kFn_is_decltype_auto_return_deduced:
         WIRE_READ_BOOL_BITFIELD(in, f->is_decltype_auto_return_deduced);
         break;
-      case kFn_deleted_reason:
-        f->deleted_reason = SReadStringPtr(ctx, in);
+      case kFn_deleted_reason: {
+        String* reason = SReadStringPtr(ctx, in);
+        if (reason != NULL) {
+          FunctionMutableExtra(f)->deleted_reason = reason;
+        }
         break;
-      case kFn_contract_assertions:
-        ReadContractAssertionVector(ctx, in, &f->contract_assertions);
+      }
+      case kFn_contract_assertions: {
+        Vector assertions = {0};
+        ReadContractAssertionVector(ctx, in, &assertions);
+        if (assertions.length > 0) {
+          FunctionMutableExtra(f)->contract_assertions = assertions;
+        } else {
+          VectorDestruct(&assertions);
+        }
         break;
+      }
       case kFn_is_deduction_guide:
         WIRE_READ_BOOL_BITFIELD(in, f->is_deduction_guide);
         break;
@@ -1646,17 +1660,28 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
       case kFn_has_constexpr_if:
         WIRE_READ_BOOL_BITFIELD(in, f->has_constexpr_if);
         break;
-      case kFn_coroutine_promise_type:
-        f->coroutine_promise_type =
-            (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+      case kFn_coroutine_promise_type: {
+        TypeRecord* promise = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        if (promise != NULL) {
+          FunctionMutableExtra(f)->coroutine_promise_type = promise;
+        }
         break;
-      case kFn_coroutine_frame_type:
-        f->coroutine_frame_type =
-            (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+      }
+      case kFn_coroutine_frame_type: {
+        TypeRecord* frame = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        if (frame != NULL) {
+          FunctionMutableExtra(f)->coroutine_frame_type = frame;
+        }
         break;
-      case kFn_coroutine_suspend_count:
-        WireReadInt32(in, &f->coroutine_suspend_count);
+      }
+      case kFn_coroutine_suspend_count: {
+        int32_t v = 0;
+        WireReadInt32(in, &v);
+        if (v != 0) {
+          FunctionMutableExtra(f)->coroutine_suspend_count = v;
+        }
         break;
+      }
       case kFn_virtual_index:
         WireReadInt32(in, &f->virtual_index);
         break;
@@ -1666,20 +1691,45 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
       case kFn_template_origin:
         f->template_origin = (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
         break;
-      case kFn_template_parameter_count:
-        WireReadInt32(in, &f->template_parameter_count);
+      case kFn_template_parameter_count: {
+        int32_t v = 0;
+        WireReadInt32(in, &v);
+        if (v != 0) {
+          FunctionMutableExtra(f)->template_parameter_count = v;
+        }
         break;
-      case kFn_template_parameter_base:
-        WireReadInt32(in, &f->template_parameter_base);
+      }
+      case kFn_template_parameter_base: {
+        int32_t v = 0;
+        WireReadInt32(in, &v);
+        if (v != 0) {
+          FunctionMutableExtra(f)->template_parameter_base = v;
+        }
         break;
-      case kFn_template_parameters:
-        SerialReadTemplateParameterVector(ctx, in, &f->template_parameters);
+      }
+      case kFn_template_parameters: {
+        Vector parameters = {0};
+        SerialReadTemplateParameterVector(ctx, in, &parameters);
+        if (parameters.length > 0) {
+          FunctionMutableExtra(f)->template_parameters = parameters;
+        } else {
+          VectorDestruct(&parameters);
+        }
         break;
-      case kFn_template_instantiations:
-        SReadRefVector(ctx, in, kSerialKindSymbol, &f->template_instantiations);
+      }
+      case kFn_template_instantiations: {
+        Vector instantiations = {0};
+        SReadRefVector(ctx, in, kSerialKindSymbol, &instantiations);
+        if (instantiations.length > 0) {
+          FunctionMutableExtra(f)->template_instantiations = instantiations;
+        } else {
+          VectorDestruct(&instantiations);
+        }
         break;
+      }
       case kFn_associated_constraint:
-        f->associated_constraint = SerialReadConstraint(ctx, in);
+        FunctionMutableExtra(f)->associated_constraint =
+            SerialReadConstraint(ctx, in);
         break;
       default:
         WireSkip(in, wt);

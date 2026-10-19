@@ -4716,7 +4716,8 @@ static void ScanConstexprFunctionCapabilities(
     scan->ast_only = true;
     return;
   }
-  if (function->type->info.function.contract_assertions.length != 0) {
+  if (FunctionExtraOf(&function->type->info.function)
+          ->contract_assertions.length != 0) {
     scan->required = true;
     scan->ast_only = true;
     return;

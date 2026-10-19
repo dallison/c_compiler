@@ -56,7 +56,7 @@ static ASTNode* ReanalyzeClonedConcreteMemberCall(
 static bool CloneProducesMemberTemplate(TemplateFunctionBodyClone* clone) {
   TypeRecord* to = clone != NULL ? clone->to_func : NULL;
   return to != NULL && TypeIsFunction(to) &&
-         to->info.function.template_parameters.length > 0 &&
+         FunctionExtraOf(&to->info.function)->template_parameters.length > 0 &&
          to->info.function.symbol != NULL &&
          to->info.function.symbol->flags.is_template;
 }
@@ -1739,7 +1739,8 @@ static bool CloneSubstitutesEnclosingArgumentsOnly(
          clone->parser->substituting_enclosing_template_arguments_only &&
          clone->rebase_template_parameter_base > 0 &&
          clone->from_func != NULL && TypeIsFunction(clone->from_func) &&
-         clone->from_func->info.function.template_parameters.length > 0;
+         FunctionExtraOf(&clone->from_func->info.function)
+                 ->template_parameters.length > 0;
 }
 
 /* Template parameter names cannot be redeclared in a nested scope, so a
@@ -1750,7 +1751,8 @@ static bool CloneMemberTemplateOwnsParameterName(
   if (name == NULL || !CloneSubstitutesEnclosingArgumentsOnly(clone)) {
     return false;
   }
-  Vector* params = &clone->from_func->info.function.template_parameters;
+  const Vector* params =
+      &FunctionExtraOf(&clone->from_func->info.function)->template_parameters;
   for (size_t i = 0; i < params->length; i++) {
     TemplateParameter* param = params->value.p[i];
     if (param != NULL && (param->is_parameter_pack || !packs_only) &&
@@ -1768,7 +1770,8 @@ static bool CloneMemberTemplateOwnsRebasedPackIndex(
   if (index < 0 || !CloneSubstitutesEnclosingArgumentsOnly(clone)) {
     return false;
   }
-  Vector* params = &clone->from_func->info.function.template_parameters;
+  const Vector* params =
+      &FunctionExtraOf(&clone->from_func->info.function)->template_parameters;
   for (size_t i = 0; i < params->length; i++) {
     TemplateParameter* param = params->value.p[i];
     if (param != NULL &&
@@ -7086,8 +7089,8 @@ static ASTNode* ResolveDependentQualifiedValueName(
   if (!enclosing_only && clone->rebase_template_parameter_base > 0 &&
       clone->args != NULL && clone->from_func != NULL &&
       TypeIsFunction(clone->from_func)) {
-    size_t own =
-        clone->from_func->info.function.template_parameters.length;
+    size_t own = FunctionExtraOf(&clone->from_func->info.function)
+                     ->template_parameters.length;
     args_are_absolute =
         clone->args->length >=
         (size_t)clone->rebase_template_parameter_base + own;
@@ -7262,7 +7265,8 @@ static bool CloneArgumentsIncludeEnclosingPrefix(
     TemplateFunctionBodyClone* clone) {
   size_t own_parameter_count =
       clone->from_func != NULL && TypeIsFunction(clone->from_func)
-          ? clone->from_func->info.function.template_parameters.length
+          ? FunctionExtraOf(&clone->from_func->info.function)
+                ->template_parameters.length
           : 0;
   return clone->args != NULL &&
          clone->args->length >=
@@ -9334,10 +9338,10 @@ static ASTNode* ReanalyzeClonedResolvedCall(
        MapFindPointerKey(&clone->symbol_map, id->symbol) == id->symbol)) {
     int parameter_index =
         FirstTemplateParameterIndexInType(id->symbol->type);
-    int parameter_base =
-        clone->to_func->info.function.template_parameter_base;
-    int parameter_count =
-        clone->to_func->info.function.template_parameter_count;
+    int parameter_base = FunctionExtraOf(&clone->to_func->info.function)
+                             ->template_parameter_base;
+    int parameter_count = FunctionExtraOf(&clone->to_func->info.function)
+                              ->template_parameter_count;
     if (parameter_index >= parameter_base &&
         parameter_index < parameter_base + parameter_count) {
       // This functional construction still names one of the cloned function
@@ -10546,10 +10550,11 @@ static Vector* AbsoluteMemberTemplateBodyArguments(TypeParser* parser,
                                                    TypeRecord* to,
                                                    Vector* args) {
   if (from == NULL || to == NULL || args == NULL || !TypeIsFunction(from) ||
-      !TypeIsFunction(to) || from->info.function.template_parameter_base <= 0) {
+      !TypeIsFunction(to) ||
+      FunctionExtraOf(&from->info.function)->template_parameter_base <= 0) {
     return NULL;
   }
-  int base = from->info.function.template_parameter_base;
+  int base = FunctionExtraOf(&from->info.function)->template_parameter_base;
   bool names_enclosing = false;
   for (size_t i = 0; i < from->info.function.prototype.length; i++) {
     Symbol* formal = from->info.function.prototype.value.p[i];
@@ -10626,13 +10631,13 @@ static ASTNode* CloneTemplateFunctionBodyImpl(TypeParser* parser,
   clone.from_func = from;
   clone.to_func = to;
   clone.rebase_template_parameter_base =
-      from->info.function.template_parameter_base;
+      FunctionExtraOf(&from->info.function)->template_parameter_base;
   clone.from_owner = CloneFunctionMemberOwner(from);
   clone.to_owner = CloneFunctionMemberOwner(to);
   // `Init<Arg>` in `MB<T>::VP<M, B>` numbers `[T, M, B, Arg]`.  Cloned into
   // `MB<int>::VP`, still a template, it numbers `[M, B, Arg]`: only `T` is
   // bound, so `M` and `B` move down with `Arg` rather than `Arg` alone.
-  int to_base = to->info.function.template_parameter_base;
+  int to_base = FunctionExtraOf(&to->info.function)->template_parameter_base;
   if (to_base > 0 && to_base < clone.rebase_template_parameter_base &&
       clone.to_owner != NULL && clone.to_owner->is_template) {
     clone.rebase_template_parameter_base -= to_base;
@@ -10758,15 +10763,17 @@ static ASTNode* CloneTemplateFunctionBodyImpl(TypeParser* parser,
     ASTNodeDelete(SymbolExtraOf(to_formal)->default_argument);
     SymbolMutableExtra(to_formal)->default_argument = default_argument;
   }
-  VectorDestructWithContents(
-      &to->info.function.contract_assertions,
-      (VectorElementDestructor)ContractAssertionDelete,
-      /*free_element=*/false);
-  VectorInit(&to->info.function.contract_assertions);
+  if (to->info.function.extra != NULL) {
+    VectorDestructWithContents(&to->info.function.extra->contract_assertions,
+                               (VectorElementDestructor)ContractAssertionDelete,
+                               /*free_element=*/false);
+    VectorInit(&to->info.function.extra->contract_assertions);
+  }
   for (size_t i = 0;
-       i < from->info.function.contract_assertions.length; i++) {
+       i < FunctionExtraOf(&from->info.function)->contract_assertions.length;
+       i++) {
     ContractAssertion* source =
-        from->info.function.contract_assertions.value.p[i];
+        FunctionExtraOf(&from->info.function)->contract_assertions.value.p[i];
     Symbol* result_binding = NULL;
     if (source->result_binding != NULL) {
       result_binding =
@@ -10789,10 +10796,9 @@ static ASTNode* CloneTemplateFunctionBodyImpl(TypeParser* parser,
         predicate, ReanalyzeClonedResolvedCall, &clone);
     Vector attrs = {0};
     AttributeListClone(&attrs, &source->attributes);
-    VectorAppend(&to->info.function.contract_assertions,
-                 NewContractAssertion(source->kind, predicate,
-                                      result_binding, &attrs,
-                                      source->location));
+    VectorAppend(&FunctionMutableExtra(&to->info.function)->contract_assertions,
+                 NewContractAssertion(source->kind, predicate, result_binding,
+                                      &attrs, source->location));
   }
   if (!from->info.function.has_constexpr_if &&
       !from->info.function.constexpr_if_checked) {
@@ -10928,7 +10934,7 @@ static void PrepareConstructorPreambleClone(TemplateFunctionBodyClone* clone,
   clone->to_func = func;
   clone->rebase_template_parameter_base =
       !args_include_enclosing && from_func != NULL && TypeIsFunction(from_func)
-          ? from_func->info.function.template_parameter_base
+          ? FunctionExtraOf(&from_func->info.function)->template_parameter_base
           : 0;
   clone->from_owner = source_owner != NULL ? source_owner
                                            : CloneFunctionMemberOwner(from_func);
@@ -11450,7 +11456,8 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
     bool owner_still_template =
         ctor_owner != NULL && ctor_owner->is_template;
     if (symbol->type->info.function.is_constructor &&
-        symbol->type->info.function.template_parameter_count == 0 &&
+        FunctionExtraOf(&symbol->type->info.function)
+                ->template_parameter_count == 0 &&
         !owner_still_template) {
       SyntaxInsertClonedTemplateConstructorPreamble(parser, template_definition,
                                                     symbol, args);
@@ -11628,8 +11635,10 @@ static Symbol* MemberTemplateDefinitionWithBody(Symbol* templ) {
         !candidate->flags.is_template || candidate->type == NULL ||
         !TypeIsFunction(candidate->type) ||
         !StringEqualString(&candidate->name, &templ->name) ||
-        candidate->type->info.function.template_parameter_count !=
-            templ->type->info.function.template_parameter_count ||
+        FunctionExtraOf(&candidate->type->info.function)
+                ->template_parameter_count !=
+            FunctionExtraOf(&templ->type->info.function)
+                ->template_parameter_count ||
         candidate->type->info.function.prototype.length !=
             templ->type->info.function.prototype.length ||
         !TypeEqual(candidate->type, templ->type)) {

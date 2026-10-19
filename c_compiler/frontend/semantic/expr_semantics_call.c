@@ -228,10 +228,11 @@ void CheckDeletedFunctionUse(Symbol* function, ASTNode* use) {
   if (deleted_type->info.function.is_implicitly_deleted) {
     SemanticError(use, "Use of implicitly deleted function %s",
                   function_name.value);
-  } else if (deleted_type->info.function.deleted_reason != NULL) {
+  } else if (FunctionExtraOf(&deleted_type->info.function)->deleted_reason !=
+             NULL) {
     SemanticError(
         use, "Use of deleted function %s: %s", function_name.value,
-        deleted_type->info.function.deleted_reason->value);
+        FunctionExtraOf(&deleted_type->info.function)->deleted_reason->value);
   } else {
     SemanticError(use, "Use of deleted function %s", function_name.value);
   }
@@ -877,7 +878,8 @@ static void MemberCallLowerPlanDispatch(
   if (plan->use_virtual_dispatch &&
       CompilerCXXAtLeast(kLanguageStandardCXX29) &&
       compiler->contract_semantic != kContractSemanticIgnore &&
-      member->symbol->type->info.function.contract_assertions.length != 0) {
+      FunctionExtraOf(&member->symbol->type->info.function)
+              ->contract_assertions.length != 0) {
     TypeRecordDelete(node->caller_contract_function);
     node->caller_contract_function =
         TypeRecordCopy(member->symbol->type);

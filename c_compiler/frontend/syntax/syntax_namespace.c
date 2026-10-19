@@ -307,7 +307,8 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
   TypeRecord* alias_type = parsed != NULL ? parsed->type : type;
   for (TypeRecord* part = alias_type; part != NULL; part = part->next) {
     if (TypeIsFunction(part) &&
-        part->info.function.contract_assertions.length != 0) {
+        FunctionExtraOf(&part->info.function)->contract_assertions.length !=
+            0) {
       SyntaxError(syntax,
                   "function contract specifiers cannot be associated with a "
                   "function type alias");

@@ -106,10 +106,10 @@ static ASTNode* AddressOfFunctionSymbol(Symbol* function, SourceLocation locatio
 
 // Contract: Read-only; true when closure `operator()` is still a template.
 static bool ClosureCallOperatorIsGeneric(Symbol* call_op) {
-  return call_op != NULL &&
-         (call_op->flags.is_template ||
-          (call_op->type != NULL &&
-           call_op->type->info.function.template_parameters.length > 0));
+  return call_op != NULL && (call_op->flags.is_template ||
+                             (call_op->type != NULL &&
+                              FunctionExtraOf(&call_op->type->info.function)
+                                      ->template_parameters.length > 0));
 }
 
 /* [temp.deduct.funcaddr]: instantiate a generic lambda's `operator()` against

@@ -776,12 +776,14 @@ static bool SameSignatureTemplateConstraintsAreEquivalent(Symbol* overload,
                                                           TypeRecord* type) {
   if (overload == NULL || overload->type == NULL || type == NULL ||
       !overload->flags.is_template || !TypeIsFunction(overload->type) ||
-      !TypeIsFunction(type) || type->info.function.template_parameter_count <= 0) {
+      !TypeIsFunction(type) ||
+      FunctionExtraOf(&type->info.function)->template_parameter_count <= 0) {
     return true;
   }
   bool overload_constrained =
       ConceptsFunctionTemplateHasAssociatedConstraint(overload);
-  bool type_constrained = type->info.function.associated_constraint != NULL;
+  bool type_constrained =
+      FunctionExtraOf(&type->info.function)->associated_constraint != NULL;
   if (!overload_constrained && !type_constrained) {
     return true;
   }
@@ -803,7 +805,8 @@ Symbol* FindMatchingOverload(Symbol* first, TypeRecord* type,
     }
     bool overload_is_template = overload->flags.is_template;
     bool type_is_template =
-        TypeIsFunction(type) && type->info.function.template_parameter_count > 0;
+        TypeIsFunction(type) &&
+        FunctionExtraOf(&type->info.function)->template_parameter_count > 0;
     if (overload_is_template != type_is_template) {
       continue;
     }
@@ -851,8 +854,10 @@ static bool SymbolLooksLikeFunctionTemplate(Symbol* symbol) {
   return symbol != NULL && symbol->type != NULL &&
          TypeIsFunction(symbol->type) &&
          (symbol->flags.is_template ||
-          symbol->type->info.function.template_parameter_count > 0 ||
-          symbol->type->info.function.template_parameters.length > 0);
+          FunctionExtraOf(&symbol->type->info.function)
+                  ->template_parameter_count > 0 ||
+          FunctionExtraOf(&symbol->type->info.function)
+                  ->template_parameters.length > 0);
 }
 
 // Two function templates whose signatures are identical are still distinct
@@ -861,7 +866,8 @@ static bool SymbolLooksLikeFunctionTemplate(Symbol* symbol) {
 // defaulted non-type parameter, as in
 // `template <class T, typename enable_if<C<T>, int>::type = 0> void f(T);`,
 // so the two overloads differ only in that type.
-static bool TemplateParameterListsDiffer(Vector* left, Vector* right) {
+static bool TemplateParameterListsDiffer(const Vector* left,
+                                         const Vector* right) {
   if (left == NULL || right == NULL) {
     return false;
   }
@@ -901,8 +907,10 @@ static bool TemplateParameterListsDiffer(Vector* left, Vector* right) {
 // `syntax->current_template_parameters`.
 Vector* PendingTemplateParameterList(Syntax* syntax, Symbol* symbol) {
   if (symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type) &&
-      symbol->type->info.function.template_parameters.length > 0) {
-    return &symbol->type->info.function.template_parameters;
+      FunctionExtraOf(&symbol->type->info.function)
+              ->template_parameters.length > 0) {
+    return &FunctionMutableExtra(&symbol->type->info.function)
+                ->template_parameters;
   }
   return syntax == NULL ? NULL : syntax->current_template_parameters;
 }
@@ -916,7 +924,8 @@ static bool FunctionTemplateParameterListsDiffer(Symbol* candidate,
     return false;
   }
   return TemplateParameterListsDiffer(
-      &candidate->type->info.function.template_parameters, overload_params);
+      &FunctionExtraOf(&candidate->type->info.function)->template_parameters,
+      overload_params);
 }
 
 // Clones `constraint` and appends it to `target`, forming a conjunction when
@@ -942,7 +951,8 @@ ConstraintExpr* PendingFunctionTemplateConstraint(
   ConstraintExpr* result = NULL;
   if (symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type)) {
     AppendClonedConstraint(
-        &result, symbol->type->info.function.associated_constraint);
+        &result,
+        FunctionExtraOf(&symbol->type->info.function)->associated_constraint);
   }
   if (parameters != NULL) {
     for (size_t i = 0; i < parameters->length; i++) {
@@ -969,9 +979,10 @@ bool TryAppendSameSignatureConstrainedTemplateOverload(
   }
   Vector* overload_params = PendingTemplateParameterList(syntax, overload);
   ConstraintExpr* saved_constraint =
-      overload->type->info.function.associated_constraint;
+      FunctionExtraOf(&overload->type->info.function)->associated_constraint;
   if (saved_constraint == NULL && pending_constraint != NULL) {
-    overload->type->info.function.associated_constraint = pending_constraint;
+    FunctionMutableExtra(&overload->type->info.function)
+        ->associated_constraint = pending_constraint;
   }
   for (Symbol* candidate = first; candidate != NULL;
        candidate = candidate->overload_next) {
@@ -986,12 +997,14 @@ bool TryAppendSameSignatureConstrainedTemplateOverload(
     if (((candidate_constrained || overload_constrained) &&
          !ConceptsFunctionTemplateConstraintsEquivalent(candidate, overload)) ||
         FunctionTemplateParameterListsDiffer(candidate, overload_params)) {
-      overload->type->info.function.associated_constraint = saved_constraint;
+      FunctionSetAssociatedConstraint(&overload->type->info.function,
+                                      saved_constraint);
       AppendOverload(first, overload);
       return true;
     }
   }
-  overload->type->info.function.associated_constraint = saved_constraint;
+  FunctionSetAssociatedConstraint(&overload->type->info.function,
+                                  saved_constraint);
   return false;
 }
 

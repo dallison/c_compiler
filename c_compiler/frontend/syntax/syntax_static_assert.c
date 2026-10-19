@@ -224,8 +224,8 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
           compiler->syntax.current_template_parameter_count > 0 ||
           (compiler->current_function != NULL &&
            TypeIsFunction(compiler->current_function) &&
-           compiler->current_function->info.function.template_parameter_count >
-               0);
+           FunctionExtraOf(&compiler->current_function->info.function)
+                   ->template_parameter_count > 0);
       if (in_template) {
         ASTNode* init = ConstexprInitializerExpression(
             SymbolExtraOf(id->symbol)->constexpr_initializer);

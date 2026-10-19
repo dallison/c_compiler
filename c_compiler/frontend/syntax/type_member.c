@@ -108,19 +108,22 @@ static void FinalizeMemberFunctionTemplateConstraints(
     ConstraintExprDelete(member_requires_clause);
     return;
   }
-  MoveTemplateParameterConstraints(member_template_parameters,
-                                   &func->info.function.associated_constraint);
+  MoveTemplateParameterConstraints(
+      member_template_parameters,
+      &FunctionMutableExtra(&func->info.function)->associated_constraint);
   // The callers transfer the parameter entries into the function type and clear
   // the passed-in list before calling us, so a type-constraint written as a
   // constrained template parameter (`template <Concept T>`) now lives on a
   // parameter in `func->template_parameters`.  Collect those too; otherwise the
   // constraint is silently dropped and never participates in overload
   // resolution (unlike a trailing `requires` clause, which is added below).
-  MoveTemplateParameterConstraints(&func->info.function.template_parameters,
-                                   &func->info.function.associated_constraint);
+  MoveTemplateParameterConstraints(
+      &FunctionMutableExtra(&func->info.function)->template_parameters,
+      &FunctionMutableExtra(&func->info.function)->associated_constraint);
   if (member_requires_clause != NULL) {
-    AddOwnedAssociatedConstraint(&func->info.function.associated_constraint,
-                                 member_requires_clause);
+    AddOwnedAssociatedConstraint(
+        &FunctionMutableExtra(&func->info.function)->associated_constraint,
+        member_requires_clause);
   }
 }
 
@@ -1326,7 +1329,8 @@ StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
     bool overload_is_template =
         overload->symbol->flags.is_template;
     bool type_is_template =
-        TypeIsFunction(type) && type->info.function.template_parameter_count > 0;
+        TypeIsFunction(type) &&
+        FunctionExtraOf(&type->info.function)->template_parameter_count > 0;
     if (overload_is_template != type_is_template) {
       continue;
     }
@@ -1347,8 +1351,10 @@ static bool MemberFunctionTemplateParameterListsDiffer(Symbol* left,
       !TypeIsFunction(right->type)) {
     return false;
   }
-  Vector* left_params = &left->type->info.function.template_parameters;
-  Vector* right_params = &right->type->info.function.template_parameters;
+  const Vector* left_params =
+      &FunctionExtraOf(&left->type->info.function)->template_parameters;
+  const Vector* right_params =
+      &FunctionExtraOf(&right->type->info.function)->template_parameters;
   if (left_params->length != right_params->length) {
     return left_params->length != 0 && right_params->length != 0;
   }
@@ -1388,9 +1394,9 @@ static StructMember* FindConstrainedMemberOverload(StructMember* first,
   if (candidate == NULL) {
     return NULL;
   }
-  bool candidate_is_template =
-      TypeIsFunction(candidate->type) &&
-      candidate->type->info.function.template_parameter_count > 0;
+  bool candidate_is_template = TypeIsFunction(candidate->type) &&
+                               FunctionExtraOf(&candidate->type->info.function)
+                                       ->template_parameter_count > 0;
   for (StructMember* overload = first; overload != NULL;
        overload = overload->overload_next) {
     if (overload->symbol == NULL) {
@@ -1511,7 +1517,8 @@ void ParseCXXPureSpecifier(TypeParser* parser, TypeRecord* func) {
       func->info.function.is_inline = true;
     }
     if (parser->cxx_member_definition == NULL &&
-        func->info.function.contract_assertions.length != 0) {
+        FunctionExtraOf(&func->info.function)->contract_assertions.length !=
+            0) {
       SyntaxError(parser->syntax,
                   "a function defaulted on its first declaration cannot "
                   "have contract assertions");
@@ -1717,8 +1724,8 @@ static bool SkipConstructorInitializersAndBody(TypeParser* parser) {
   return SkipInlineMemberFunctionBody(parser);
 }
 
-static void AddTemplateParameterScopeSymbols(Syntax* syntax,
-                                               Vector* template_parameters) {
+static void AddTemplateParameterScopeSymbols(
+    Syntax* syntax, const Vector* template_parameters) {
   if (template_parameters == NULL) {
     return;
   }
@@ -1760,8 +1767,8 @@ static void AddFunctionTemplateParameterScopeSymbols(Syntax* syntax,
   if (func == NULL || !TypeIsFunction(func)) {
     return;
   }
-  AddTemplateParameterScopeSymbols(syntax,
-                                   &func->info.function.template_parameters);
+  AddTemplateParameterScopeSymbols(
+      syntax, &FunctionExtraOf(&func->info.function)->template_parameters);
 }
 
 // Inline bodies of a nested class are replayed when the enclosing class is
@@ -1833,8 +1840,11 @@ static void ParseCXXSpecialMemberTrailingRequires(TypeParser* parser,
   }
   ConstraintExpr* constraint = ConceptsParseRequiresClause(parser->syntax);
   SyntaxCloseScope(parser->syntax);
-  AddOwnedAssociatedConstraint(&func->info.function.associated_constraint,
-                               constraint);
+  if (constraint != NULL) {
+    AddOwnedAssociatedConstraint(
+        &FunctionMutableExtra(&func->info.function)->associated_constraint,
+        constraint);
+  }
 }
 
 void QueueInlineMemberFunctionDefinition(Symbol* symbol) {
@@ -1966,14 +1976,16 @@ void CopyTemplateConstructorInitializersKey(Symbol* from, Symbol* to,
     // slide down onto index 0.  Only the enclosing prefix is applied: a longer
     // vector would bind the member's parameters during this class-level clone.
     int rebase_base = TypeIsFunction(from->type)
-                          ? from->type->info.function.template_parameter_base
+                          ? FunctionExtraOf(&from->type->info.function)
+                                ->template_parameter_base
                           : 0;
     // A constructor of `Once<R>::Adaptor<Callable>` numbers `[R, Callable, F]`.
     // Cloned into `Once<char>::Adaptor`, still a template, only `R` is bound:
     // `Callable` and `F` move down together.
-    int to_base = TypeIsFunction(to->type)
-                      ? to->type->info.function.template_parameter_base
-                      : 0;
+    int to_base =
+        TypeIsFunction(to->type)
+            ? FunctionExtraOf(&to->type->info.function)->template_parameter_base
+            : 0;
     if (to_base > 0 && to_base < rebase_base) {
       rebase_base -= to_base;
     }
@@ -2188,7 +2200,8 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
     ConstraintExpr* constraint = ConceptsParseRequiresClause(syntax);
     if (constraint != NULL && TypeIsFunction(member_symbol->type)) {
       AddOwnedAssociatedConstraint(
-          &member_symbol->type->info.function.associated_constraint,
+          &FunctionMutableExtra(&member_symbol->type->info.function)
+               ->associated_constraint,
           constraint);
     } else {
       ConstraintExprDelete(constraint);
@@ -2287,8 +2300,9 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
     int old_template_parameter_count = syntax->current_template_parameter_count;
     bool old_parsing_template = syntax->parsing_template_declaration;
     TypeRecord* func = entry->member_symbol->type;
-    bool func_is_template = func != NULL && TypeIsFunction(func) &&
-                            func->info.function.template_parameter_count > 0;
+    bool func_is_template =
+        func != NULL && TypeIsFunction(func) &&
+        FunctionExtraOf(&func->info.function)->template_parameter_count > 0;
     Struct* member_owner =
         func != NULL && TypeIsFunction(func)
             ? func->info.function.cxx_member_owner
@@ -2315,15 +2329,16 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
                        scope->template_parameters.value.p[p]);
         }
       }
-      Vector* function_parameters = &func->info.function.template_parameters;
+      const Vector* function_parameters =
+          &FunctionExtraOf(&func->info.function)->template_parameters;
       for (size_t p = 0; p < function_parameters->length; p++) {
         VectorAppend(&visible_parameters, function_parameters->value.p[p]);
       }
       syntax->current_template_parameters = &visible_parameters;
       using_visible_parameters = true;
       syntax->current_template_parameter_count =
-          func->info.function.template_parameter_base +
-          func->info.function.template_parameter_count;
+          FunctionExtraOf(&func->info.function)->template_parameter_base +
+          FunctionExtraOf(&func->info.function)->template_parameter_count;
       syntax->parsing_template_declaration = true;
     } else {
       Vector* class_parameters = InnermostClosedClassTemplateParameters(
@@ -2570,11 +2585,14 @@ static void FlushDeferredNoexceptSpecifiers(TypeParser* parser,
     // the function's empty parameter list makes the lookup fail.  A member
     // template keeps its own parameters, which already include the enclosing
     // class parameters when the member was declared.
-    if (entry->function_type->info.function.template_parameters.length != 0) {
+    if (FunctionExtraOf(&entry->function_type->info.function)
+            ->template_parameters.length != 0) {
       syntax->current_template_parameters =
-          &entry->function_type->info.function.template_parameters;
+          &FunctionMutableExtra(&entry->function_type->info.function)
+               ->template_parameters;
       syntax->current_template_parameter_count =
-          entry->function_type->info.function.template_parameter_count;
+          FunctionExtraOf(&entry->function_type->info.function)
+              ->template_parameter_count;
       syntax->parsing_template_declaration = true;
     }
     SyntaxOpenScope(syntax);
@@ -2731,7 +2749,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   // Only a constructor may be declared explicit; a destructor never converts.
   func->info.function.is_explicit = is_explicit && !is_destructor;
   if (!is_destructor && parser->syntax->pending_explicit_condition != NULL) {
-    func->info.function.explicit_condition =
+    FunctionMutableExtra(&func->info.function)->explicit_condition =
         parser->syntax->pending_explicit_condition;
     parser->syntax->pending_explicit_condition = NULL;
   }
@@ -2785,18 +2803,20 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
       // resolution deduces its parameters at the call site, exactly like an
       // ordinary member function template (e.g. `emplace`).
       member_symbol->flags.is_template = true;
-      func->info.function.template_parameter_count =
+      FunctionMutableExtra(&func->info.function)->template_parameter_count =
           (int)member_template_parameters->length;
-      func->info.function.template_parameter_base =
+      FunctionMutableExtra(&func->info.function)->template_parameter_base =
           member_template_parameter_base;
       VectorDestructWithContents(
-          &func->info.function.template_parameters,
+          &FunctionMutableExtra(&func->info.function)->template_parameters,
           (VectorElementDestructor)TemplateParameterDelete,
           /*free_element=*/false);
-      VectorInit(&func->info.function.template_parameters);
+      VectorInit(
+          &FunctionMutableExtra(&func->info.function)->template_parameters);
       for (size_t i = 0; i < member_template_parameters->length; i++) {
-        VectorAppend(&func->info.function.template_parameters,
-                     member_template_parameters->value.p[i]);
+        VectorAppend(
+            &FunctionMutableExtra(&func->info.function)->template_parameters,
+            member_template_parameters->value.p[i]);
       }
       // Ownership of the parameter entries has moved into the function type;
       // clear the source so the caller's cleanup frees only the vector.
@@ -2898,7 +2918,7 @@ static bool ParseCXXConversionOperatorMember(
   func->info.function.is_explicit = is_explicit;
   func->info.function.is_explicit_conversion = is_explicit;
   if (parser->syntax->pending_explicit_condition != NULL) {
-    func->info.function.explicit_condition =
+    FunctionMutableExtra(&func->info.function)->explicit_condition =
         parser->syntax->pending_explicit_condition;
     parser->syntax->pending_explicit_condition = NULL;
   }
@@ -2908,18 +2928,20 @@ static bool ParseCXXConversionOperatorMember(
     // at the conversion site by matching the (dependent) target type against
     // the requested type ([temp.deduct.conv]).
     member_symbol->flags.is_template = true;
-    func->info.function.template_parameter_count =
+    FunctionMutableExtra(&func->info.function)->template_parameter_count =
         (int)member_template_parameters->length;
-    func->info.function.template_parameter_base =
+    FunctionMutableExtra(&func->info.function)->template_parameter_base =
         member_template_parameter_base;
     VectorDestructWithContents(
-        &func->info.function.template_parameters,
+        &FunctionMutableExtra(&func->info.function)->template_parameters,
         (VectorElementDestructor)TemplateParameterDelete,
         /*free_element=*/false);
-    VectorInit(&func->info.function.template_parameters);
+    VectorInit(
+        &FunctionMutableExtra(&func->info.function)->template_parameters);
     for (size_t i = 0; i < member_template_parameters->length; i++) {
-      VectorAppend(&func->info.function.template_parameters,
-                   member_template_parameters->value.p[i]);
+      VectorAppend(
+          &FunctionMutableExtra(&func->info.function)->template_parameters,
+          member_template_parameters->value.p[i]);
     }
     // Ownership of the parameter entries has moved into the function type.
     member_template_parameters->length = 0;
@@ -3848,13 +3870,14 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           if (is_constexpr_member || is_consteval_member) {
             member_symbol->type->info.function.is_inline = true;
           }
-          if (member_symbol->type->info.function.template_parameters.length >
-                  0 &&
+          if (FunctionExtraOf(&member_symbol->type->info.function)
+                      ->template_parameters.length > 0 &&
               !member_symbol->flags.is_template) {
             member_symbol->flags.is_template = true;
-            member_symbol->type->info.function.template_parameter_count =
-                (int)member_symbol->type->info.function.template_parameters
-                    .length;
+            FunctionMutableExtra(&member_symbol->type->info.function)
+                ->template_parameter_count =
+                (int)FunctionExtraOf(&member_symbol->type->info.function)
+                    ->template_parameters.length;
           }
         }
         bool has_explicit_object =
@@ -3904,18 +3927,23 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         if (is_member_template) {
           if (member->is_member_function) {
             member_symbol->flags.is_template = true;
-            member_symbol->type->info.function.template_parameter_count =
+            FunctionMutableExtra(&member_symbol->type->info.function)
+                ->template_parameter_count =
                 (int)member_template_parameters->length;
-            member_symbol->type->info.function.template_parameter_base =
-                member_template_parameter_base;
+            FunctionMutableExtra(&member_symbol->type->info.function)
+                ->template_parameter_base = member_template_parameter_base;
             VectorDestructWithContents(
-                &member_symbol->type->info.function.template_parameters,
+                &FunctionMutableExtra(&member_symbol->type->info.function)
+                     ->template_parameters,
                 (VectorElementDestructor)TemplateParameterDelete,
                 /*free_element=*/false);
-            VectorInit(&member_symbol->type->info.function.template_parameters);
+            VectorInit(
+                &FunctionMutableExtra(&member_symbol->type->info.function)
+                     ->template_parameters);
             for (size_t i = 0; i < member_template_parameters->length; i++) {
               VectorAppend(
-                  &member_symbol->type->info.function.template_parameters,
+                  &FunctionMutableExtra(&member_symbol->type->info.function)
+                       ->template_parameters,
                   member_template_parameters->value.p[i]);
             }
             member_template_parameters->length = 0;

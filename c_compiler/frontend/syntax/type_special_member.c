@@ -793,7 +793,7 @@ static CXXSpecialMemberKind CXXDetermineSpecialMemberKind(Symbol* symbol,
   // `template <bool O> C& operator=(const C<O>&)` leaves the implicit copy
   // assignment declared.
   if (symbol->flags.is_template ||
-      func->info.function.template_parameter_count > 0) {
+      FunctionExtraOf(&func->info.function)->template_parameter_count > 0) {
     return kCXXSpecialMemberNone;
   }
   if (func->info.function.is_constructor) {
@@ -987,7 +987,7 @@ static TypeRecord* ValidateCXXDefaultedPostfixOperator(TypeParser* parser,
     return NULL;
   }
   if (symbol->flags.is_template ||
-      func->info.function.template_parameter_count != 0) {
+      FunctionExtraOf(&func->info.function)->template_parameter_count != 0) {
     SyntaxErrorAtLocation(
         parser->syntax, location,
         "a defaulted postfix increment or decrement operator cannot be a template");

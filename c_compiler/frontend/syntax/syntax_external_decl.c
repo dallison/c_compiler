@@ -156,25 +156,28 @@ static bool PrepareExternalDeclaratorSymbol(TypeParser* parser, Symbol* sym,
     SymbolSetType(sym, TypeRecordAddQualifiers(sym->type, kQualConst));
   }
   if (TypeIsFunction(sym->type) &&
-      sym->type->info.function.template_parameters.length > 0 &&
+      FunctionExtraOf(&sym->type->info.function)->template_parameters.length >
+          0 &&
       !sym->flags.is_template) {
     sym->flags.is_template = true;
-    sym->type->info.function.template_parameter_count =
-        (int)sym->type->info.function.template_parameters.length;
-    sym->type->info.function.template_parameter_base = 0;
+    FunctionMutableExtra(&sym->type->info.function)->template_parameter_count =
+        (int)FunctionExtraOf(&sym->type->info.function)
+            ->template_parameters.length;
+    FunctionMutableExtra(&sym->type->info.function)->template_parameter_base =
+        0;
   }
   if (syntax->parsing_template_declaration && TypeIsFunction(sym->type)) {
     sym->flags.is_template = true;
-    sym->type->info.function.template_parameter_count =
+    FunctionMutableExtra(&sym->type->info.function)->template_parameter_count =
         CurrentTemplateParameterListLength(syntax);
-    sym->type->info.function.template_parameter_base =
+    FunctionMutableExtra(&sym->type->info.function)->template_parameter_base =
         CurrentTemplateParameterBase(syntax);
   }
   ValidateCXX26MainDeclaration(syntax, sym, *storage);
   if (TypeIsFunction(sym->type)) {
     sym->type->info.function.is_explicit = is_explicit;
     if (syntax->pending_explicit_condition != NULL) {
-      sym->type->info.function.explicit_condition =
+      FunctionMutableExtra(&sym->type->info.function)->explicit_condition =
           syntax->pending_explicit_condition;
       syntax->pending_explicit_condition = NULL;
     }
@@ -313,13 +316,13 @@ static void AddExternalFunctionOverload(TypeParser* parser,
   Syntax* syntax = parser->syntax;
   Symbol* sym = d->sym;
   ConstraintExpr* saved_constraint =
-      sym->type->info.function.associated_constraint;
+      FunctionExtraOf(&sym->type->info.function)->associated_constraint;
   ConstraintExpr* comparison_constraint =
       PendingFunctionTemplateConstraint(
           sym, PendingTemplateParameterList(syntax, sym),
           syntax->current_template_requires_clause);
   if (comparison_constraint != NULL) {
-    sym->type->info.function.associated_constraint =
+    FunctionMutableExtra(&sym->type->info.function)->associated_constraint =
         comparison_constraint;
   }
   if (TryAppendSameSignatureConstrainedTemplateOverload(
@@ -336,7 +339,7 @@ static void AddExternalFunctionOverload(TypeParser* parser,
       d->overload_was_appended = true;
     }
   }
-  sym->type->info.function.associated_constraint = saved_constraint;
+  FunctionSetAssociatedConstraint(&sym->type->info.function, saved_constraint);
   ConstraintExprDelete(comparison_constraint);
 }
 
@@ -757,14 +760,17 @@ static void MergeDeclaratorIntoPrevious(Syntax* syntax, Symbol* sym,
         old_sym->type->info.function.is_deleted = true;
         old_sym->type->info.function.is_explicitly_deleted =
             sym->type->info.function.is_explicitly_deleted;
-        if (old_sym->type->info.function.deleted_reason != NULL) {
-          StringDelete(old_sym->type->info.function.deleted_reason);
+        if (FunctionExtraOf(&old_sym->type->info.function)->deleted_reason !=
+            NULL) {
+          StringDelete(
+              FunctionExtraOf(&old_sym->type->info.function)->deleted_reason);
         }
-        old_sym->type->info.function.deleted_reason =
-            sym->type->info.function.deleted_reason != NULL
-                ? NewStringWithLength(
-                      sym->type->info.function.deleted_reason->value,
-                      sym->type->info.function.deleted_reason->length)
+        FunctionMutableExtra(&old_sym->type->info.function)->deleted_reason =
+            FunctionExtraOf(&sym->type->info.function)->deleted_reason != NULL
+                ? NewStringWithLength(FunctionExtraOf(&sym->type->info.function)
+                                          ->deleted_reason->value,
+                                      FunctionExtraOf(&sym->type->info.function)
+                                          ->deleted_reason->length)
                 : NULL;
       }
       if (sym->flags.is_weak) {
@@ -1206,14 +1212,17 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
   if (sym != NULL && TypeIsFunction(sym->type) &&
       syntax->parsing_template_declaration &&
       !parser.qualifier_consumed_template_parameters &&
-      sym->type->info.function.template_parameter_count <= 0) {
+      FunctionExtraOf(&sym->type->info.function)->template_parameter_count <=
+          0) {
     int listed = CurrentTemplateParameterListLength(syntax);
-    int moved = (int)sym->type->info.function.template_parameters.length;
+    int moved = (int)FunctionExtraOf(&sym->type->info.function)
+                    ->template_parameters.length;
     int count = listed > 0 ? listed : moved;
     if (count > 0) {
       sym->flags.is_template = true;
-      sym->type->info.function.template_parameter_count = count;
-      sym->type->info.function.template_parameter_base =
+      FunctionMutableExtra(&sym->type->info.function)
+          ->template_parameter_count = count;
+      FunctionMutableExtra(&sym->type->info.function)->template_parameter_base =
           listed > 0 ? CurrentTemplateParameterBase(syntax)
                      : syntax->current_template_parameter_count - count;
     }

@@ -88,7 +88,7 @@ static inline void VectorSet(Vector* vec, size_t index, void* value) {
 }
 
 // Gets a value from the vector at the given index.
-static inline void* VectorGet(Vector* vec, size_t index) {
+static inline void* VectorGet(const Vector* vec, size_t index) {
   return vec->value.p[index];
 }
 

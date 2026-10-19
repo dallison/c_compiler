@@ -25,7 +25,7 @@ void SWriteStringVal(SerializeContext* ctx, WireBuffer* buf, int field,
 }
 
 void SWriteRefVector(SerializeContext* ctx, WireBuffer* buf, int field,
-                     SerialKind kind, Vector* v) {
+                     SerialKind kind, const Vector* v) {
   WireBuffer tmp;
   WireBufferInitOwned(&tmp, 16);
   size_t length = v == NULL ? 0 : v->length;

@@ -240,8 +240,8 @@ static Symbol* BuildConstrainedFunction(TypeRecord* int_type,
   TemplateParameter* tp = MakeTypeParam("T", 0);
   tp->associated_constraint =
       NewAtomicConstraint(NewIntConstantASTNode(1, int_type, 0), 0);
-  VectorAppend(&fn->template_parameters, tp);
-  fn->template_parameter_count = 1;
+  VectorAppend(&FunctionMutableExtra(fn)->template_parameters, tp);
+  FunctionMutableExtra(fn)->template_parameter_count = 1;
 
   Vector* args = NewVector();
   TemplateArgument* arg = (TemplateArgument*)calloc(1, sizeof(*arg));
@@ -249,14 +249,15 @@ static Symbol* BuildConstrainedFunction(TypeRecord* int_type,
   arg->type = int_type;
   arg->template_parameter_index = 0;
   VectorAppend(args, arg);
-  fn->associated_constraint = NewConceptIdConstraint(concept_sym, args, 0);
+  FunctionMutableExtra(fn)->associated_constraint =
+      NewConceptIdConstraint(concept_sym, args, 0);
 
   Symbol* sym = NewSymbol("constrained_fn", func_type, STO(implicit));
   sym->namespace_ = compiler->global_namespace;
   fn->symbol = sym;
 
   // Cache entry (a Symbol reference, shared with the concept root here).
-  VectorAppend(&fn->template_instantiations, concept_sym);
+  VectorAppend(&FunctionMutableExtra(fn)->template_instantiations, concept_sym);
   return sym;
 }
 
@@ -464,22 +465,26 @@ static void CheckConstrainedFunction(Symbol* sym, Symbol* concept_sym) {
   FunctionInfo* fn = &sym->type->info.function;
 
   // Template parameter with its own atomic constraint.
-  CHECK(fn->template_parameters.length == 1);
-  if (fn->template_parameters.length == 1) {
-    TemplateParameter* p =
-        (TemplateParameter*)VectorGet(&fn->template_parameters, 0);
+  CHECK(FunctionExtraOf(fn)->template_parameters.length == 1);
+  if (FunctionExtraOf(fn)->template_parameters.length == 1) {
+    TemplateParameter* p = (TemplateParameter*)VectorGet(
+        &FunctionExtraOf(fn)->template_parameters, 0);
     CHECK(p->associated_constraint != NULL &&
           p->associated_constraint->kind == kConstraintAtomic);
   }
 
   // Requires-clause: a concept-id referencing the shared concept symbol.
-  CHECK(fn->associated_constraint != NULL &&
-        fn->associated_constraint->kind == kConstraintConceptId);
-  if (fn->associated_constraint != NULL &&
-      fn->associated_constraint->kind == kConstraintConceptId) {
-    CHECK(fn->associated_constraint->as.concept_id.concept_symbol ==
+  CHECK(FunctionExtraOf(fn)->associated_constraint != NULL &&
+        FunctionExtraOf(fn)->associated_constraint->kind ==
+            kConstraintConceptId);
+  if (FunctionExtraOf(fn)->associated_constraint != NULL &&
+      FunctionExtraOf(fn)->associated_constraint->kind ==
+          kConstraintConceptId) {
+    CHECK(FunctionExtraOf(fn)
+              ->associated_constraint->as.concept_id.concept_symbol ==
           concept_sym);
-    Vector* args = fn->associated_constraint->as.concept_id.arguments;
+    Vector* args =
+        FunctionExtraOf(fn)->associated_constraint->as.concept_id.arguments;
     CHECK(args != NULL && args->length == 1);
     if (args != NULL && args->length == 1) {
       TemplateArgument* a = (TemplateArgument*)VectorGet(args, 0);
@@ -489,9 +494,10 @@ static void CheckConstrainedFunction(Symbol* sym, Symbol* concept_sym) {
   }
 
   // Instantiation cache entry shared with the concept root.
-  CHECK(fn->template_instantiations.length == 1);
-  if (fn->template_instantiations.length == 1) {
-    CHECK((Symbol*)VectorGet(&fn->template_instantiations, 0) == concept_sym);
+  CHECK(FunctionExtraOf(fn)->template_instantiations.length == 1);
+  if (FunctionExtraOf(fn)->template_instantiations.length == 1) {
+    CHECK((Symbol*)VectorGet(&FunctionExtraOf(fn)->template_instantiations,
+                             0) == concept_sym);
   }
 }
 

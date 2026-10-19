@@ -296,7 +296,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->extra = NULL;
 }
 
-const SymbolExtra kEmptySymbolExtra;
+const SymbolExtra kEmptySymbolExtra = {0};
 
 SymbolExtra* SymbolMutableExtra(Symbol* symbol) {
   if (symbol->extra == NULL) {
@@ -332,7 +332,8 @@ void SymbolBackupImportedFunctionTemplateParameters(Symbol* symbol) {
                              (VectorElementDestructor)TemplateParameterDelete,
                              /*free_element=*/false);
   VectorInit(backup);
-  Vector* live = &symbol->type->info.function.template_parameters;
+  const Vector* live =
+      &FunctionExtraOf(&symbol->type->info.function)->template_parameters;
   for (size_t i = 0; i < live->length; i++) {
     TemplateParameter* param = live->value.p[i];
     if (param != NULL) {
@@ -343,9 +344,10 @@ void SymbolBackupImportedFunctionTemplateParameters(Symbol* symbol) {
 
 void SymbolRestoreImportedFunctionTemplateParameters(Symbol* symbol) {
   if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type) ||
-      symbol->type->info.function.template_parameters.length > 0 ||
-      SymbolExtraOf(symbol)->imported_function_template_parameters_backup
-              .length == 0) {
+      FunctionExtraOf(&symbol->type->info.function)
+              ->template_parameters.length > 0 ||
+      SymbolExtraOf(symbol)
+              ->imported_function_template_parameters_backup.length == 0) {
     return;
   }
   const Vector* backup =
@@ -353,13 +355,17 @@ void SymbolRestoreImportedFunctionTemplateParameters(Symbol* symbol) {
   for (size_t i = 0; i < backup->length; i++) {
     TemplateParameter* param = backup->value.p[i];
     if (param != NULL) {
-      VectorAppend(&symbol->type->info.function.template_parameters,
+      VectorAppend(&FunctionMutableExtra(&symbol->type->info.function)
+                        ->template_parameters,
                    TemplateParameterCopy(param));
     }
   }
-  if (symbol->type->info.function.template_parameters.length > 0) {
-    symbol->type->info.function.template_parameter_count =
-        (int)symbol->type->info.function.template_parameters.length;
+  if (FunctionExtraOf(&symbol->type->info.function)
+          ->template_parameters.length > 0) {
+    FunctionMutableExtra(&symbol->type->info.function)
+        ->template_parameter_count =
+        (int)FunctionExtraOf(&symbol->type->info.function)
+            ->template_parameters.length;
   }
 }
 

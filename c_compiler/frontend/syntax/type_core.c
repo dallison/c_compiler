@@ -607,7 +607,7 @@ void TypeRecordSetStructInfo(TypeRecord* record, Struct* str) {
   TypeRecordRegisterStructSizeUser(record);
 }
 
-const TypeDependentInfo kNoTypeDependentInfo;
+const TypeDependentInfo kNoTypeDependentInfo = {0};
 
 TypeDependentInfo* TypeMutableDependent(TypeRecord* record) {
   assert(!record->shared_immutable);
@@ -643,6 +643,83 @@ static void TypeDependentInfoDelete(TypeDependentInfo* info) {
     ASTNodeDelete(info->dependent_splice_expr);
   }
   free(info);
+}
+
+const FunctionInfoExtra kNoFunctionInfoExtra = {0};
+
+FunctionInfoExtra* FunctionMutableExtra(FunctionInfo* info) {
+  if (info->extra == NULL) {
+    info->extra = calloc(1, sizeof(FunctionInfoExtra));
+    info->extra->owner = info;
+  }
+  assert(info->extra->owner == info);
+  return info->extra;
+}
+
+static void FunctionInfoExtraDelete(FunctionInfo* info) {
+  FunctionInfoExtra* extra = info->extra;
+  if (extra == NULL) {
+    return;
+  }
+  info->extra = NULL;
+  TypeRecordDelete(extra->coroutine_promise_type);
+  TypeRecordDelete(extra->coroutine_frame_type);
+  if (extra->deleted_reason != NULL) {
+    StringDelete(extra->deleted_reason);
+  }
+  VectorDestructWithContents(&extra->template_parameters,
+                             (VectorElementDestructor)TemplateParameterDelete,
+                             /*free_element=*/false);
+  FunctionTemplateInstantiationCacheDelete(extra->template_instantiation_cache);
+  VectorDestructWithContents(&extra->template_instantiations,
+                             (VectorElementDestructor)SymbolDelete,
+                             /*free_element=*/false);
+  VectorDestructWithContents(&extra->contract_assertions,
+                             (VectorElementDestructor)ContractAssertionDelete,
+                             /*free_element=*/false);
+  ConstraintExprDelete(extra->associated_constraint);
+  if (extra->template_pattern_body != info->body) {
+    ASTNodeDelete(extra->template_pattern_body);
+  }
+  free(extra);
+}
+
+// Gives the copy `to` of the function type `from`, which has no rarely set
+// fields yet, its own.  Instantiations are not copied.
+static void TypeRecordCopyFunctionExtra(TypeRecord* to, TypeRecord* from) {
+  FunctionInfo* info = &to->info.function;
+  const FunctionInfoExtra* source = from->info.function.extra;
+  if (source == NULL) {
+    return;
+  }
+  FunctionInfoExtra* extra = FunctionMutableExtra(info);
+  // A pattern body other than the live body is owned, so the copy needs its
+  // own.
+  extra->template_pattern_body =
+      source->template_pattern_body == from->info.function.body
+          ? info->body
+          : ASTNodeClone(source->template_pattern_body, IdentityCloneNode, NULL,
+                         NULL);
+  extra->coroutine_promise_type = source->coroutine_promise_type;
+  TypeRecordIncRef(extra->coroutine_promise_type);
+  extra->coroutine_frame_type = source->coroutine_frame_type;
+  TypeRecordIncRef(extra->coroutine_frame_type);
+  extra->coroutine_suspend_count = source->coroutine_suspend_count;
+  extra->template_parameter_count = source->template_parameter_count;
+  extra->template_parameter_base = source->template_parameter_base;
+  for (size_t i = 0; i < source->template_parameters.length; i++) {
+    VectorAppend(&extra->template_parameters,
+                 TemplateParameterCopy(source->template_parameters.value.p[i]));
+  }
+  extra->associated_constraint =
+      ConceptsCloneConstraint(source->associated_constraint);
+  extra->explicit_condition = source->explicit_condition;
+  extra->deleted_reason =
+      source->deleted_reason != NULL
+          ? NewStringWithLength(source->deleted_reason->value,
+                                source->deleted_reason->length)
+          : NULL;
+  TypeRecordCopyContractAssertions(to, from);
 }
 
 // Deletes a TypeRecord with regard to the reference count.  The
@@ -688,38 +765,10 @@ void TypeRecordDeleteLastReference(TypeRecord* record) {
         record->info.enum_info->refs--;
       }
     } else if (TypeIsFunction(record)) {
-      TypeRecordDelete(record->info.function.coroutine_promise_type);
-      record->info.function.coroutine_promise_type = NULL;
-      TypeRecordDelete(record->info.function.coroutine_frame_type);
-      record->info.function.coroutine_frame_type = NULL;
-      if (record->info.function.deleted_reason != NULL) {
-        StringDelete(record->info.function.deleted_reason);
-        record->info.function.deleted_reason = NULL;
-      }
       VectorDestructWithContents(&record->info.function.prototype,
                                  (VectorElementDestructor)SymbolDelete,
                                  /*free_element=*/false);
-      VectorDestructWithContents(&record->info.function.template_parameters,
-                                 (VectorElementDestructor)TemplateParameterDelete,
-                                 /*free_element=*/false);
-      FunctionTemplateInstantiationCacheDelete(
-          record->info.function.template_instantiation_cache);
-      record->info.function.template_instantiation_cache = NULL;
-      VectorDestructWithContents(&record->info.function.template_instantiations,
-                                 (VectorElementDestructor)SymbolDelete,
-                                 /*free_element=*/false);
-      VectorDestructWithContents(
-          &record->info.function.contract_assertions,
-          (VectorElementDestructor)ContractAssertionDelete,
-          /*free_element=*/false);
-      ConstraintExprDelete(record->info.function.associated_constraint);
-      record->info.function.associated_constraint = NULL;
-      if (record->info.function.template_pattern_body != NULL &&
-          record->info.function.template_pattern_body !=
-              record->info.function.body) {
-        ASTNodeDelete(record->info.function.template_pattern_body);
-      }
-      record->info.function.template_pattern_body = NULL;
+      FunctionInfoExtraDelete(&record->info.function);
     } else if (TypeIsVLA(record)) {
       // Delete the AST containing the size.
       ASTNodeDelete(record->info.array.size.vla.size);
@@ -1018,7 +1067,7 @@ TemplateArgument* TemplateArgumentCopy(TemplateArgument* arg) {
   return copy;
 }
 
-const TemplateArgumentExtra kNoTemplateArgumentExtra;
+const TemplateArgumentExtra kNoTemplateArgumentExtra = {0};
 
 TemplateArgumentExtra* TemplateArgumentMutableExtra(TemplateArgument* arg) {
   if (arg->extra == NULL) {
@@ -1541,9 +1590,10 @@ static ASTNode* RebindContractCloneNode(ASTNode* node, void* data) {
 
 void TypeRecordCopyContractAssertions(TypeRecord* to, TypeRecord* from) {
   for (size_t i = 0;
-       i < from->info.function.contract_assertions.length; i++) {
+       i < FunctionExtraOf(&from->info.function)->contract_assertions.length;
+       i++) {
     ContractAssertion* source =
-        from->info.function.contract_assertions.value.p[i];
+        FunctionExtraOf(&from->info.function)->contract_assertions.value.p[i];
     Symbol* result_binding =
         source->result_binding != NULL
             ? NewSymbol(source->result_binding->name.value,
@@ -1567,7 +1617,7 @@ void TypeRecordCopyContractAssertions(TypeRecord* to, TypeRecord* from) {
     };
     ASTNode* predicate = ASTNodeClone(source->predicate,
                                       RebindContractCloneNode, &map, NULL);
-    VectorAppend(&to->info.function.contract_assertions,
+    VectorAppend(&FunctionMutableExtra(&to->info.function)->contract_assertions,
                  NewContractAssertion(source->kind, predicate, result_binding,
                                       &attrs, source->location));
   }
@@ -1577,8 +1627,9 @@ struct ASTNode* FunctionTemplateCloneSourceBody(TypeRecord* func_type) {
   if (func_type == NULL || !TypeIsFunction(func_type)) {
     return NULL;
   }
-  if (func_type->info.function.template_pattern_body != NULL) {
-    return func_type->info.function.template_pattern_body;
+  if (FunctionExtraOf(&func_type->info.function)->template_pattern_body !=
+      NULL) {
+    return FunctionExtraOf(&func_type->info.function)->template_pattern_body;
   }
   return func_type->info.function.body;
 }
@@ -2125,6 +2176,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
       kTypeTemplateParameterSummaryUnknown;
   if (TypeIsFunction(record)) {
     memcpy(&r->info.function, &record->info.function, sizeof(FunctionInfo));
+    r->info.function.extra = NULL;
     r->info.function.references_marked = false;
     r->info.function.body_analyzed = false;
   } else if (record->declarator == kDeclArray ||
@@ -2194,26 +2246,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
       SymbolCloneDefaultArgument(clone, formal);
       VectorAppend(&r->info.function.prototype, clone);
     }
-    VectorInit(&r->info.function.template_parameters);
-    for (size_t i = 0; i < record->info.function.template_parameters.length; i++) {
-      VectorAppend(&r->info.function.template_parameters,
-                   TemplateParameterCopy(
-                       record->info.function.template_parameters.value.p[i]));
-    }
-    VectorInit(&r->info.function.template_instantiations);
-    r->info.function.template_instantiation_cache = NULL;
-    VectorInit(&r->info.function.contract_assertions);
-    TypeRecordCopyContractAssertions(r, record);
-    r->info.function.associated_constraint =
-        ConceptsCloneConstraint(record->info.function.associated_constraint);
-    r->info.function.deleted_reason =
-        record->info.function.deleted_reason != NULL
-            ? NewStringWithLength(
-                  record->info.function.deleted_reason->value,
-                  record->info.function.deleted_reason->length)
-            : NULL;
-    TypeRecordIncRef(r->info.function.coroutine_promise_type);
-    TypeRecordIncRef(r->info.function.coroutine_frame_type);
+    TypeRecordCopyFunctionExtra(r, record);
   }
   // Increment ref counts for type-specific objects.
   if (TypeIsStructOrUnion(record)) {

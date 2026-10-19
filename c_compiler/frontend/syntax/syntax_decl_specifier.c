@@ -445,7 +445,8 @@ bool TryParseCXXDeductionGuide(Syntax* syntax, Symbol* sym) {
   sym->type->next = guide_return;
   sym->type->info.function.is_deduction_guide = true;
   if (syntax->parsing_template_declaration &&
-      sym->type->info.function.template_parameters.length == 0) {
+      FunctionExtraOf(&sym->type->info.function)->template_parameters.length ==
+          0) {
     MoveCurrentTemplateParametersToFunction(syntax, sym->type);
   }
   if (syntax->current_template_requires_clause != NULL) {

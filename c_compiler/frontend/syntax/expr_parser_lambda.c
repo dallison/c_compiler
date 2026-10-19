@@ -406,12 +406,14 @@ static void AddLambdaFunctionAssociatedConstraint(TypeRecord* func,
   if (func == NULL || !TypeIsFunction(func) || constraint == NULL) {
     return;
   }
-  ConstraintExpr* current = func->info.function.associated_constraint;
+  ConstraintExpr* current =
+      FunctionExtraOf(&func->info.function)->associated_constraint;
   if (current == NULL) {
-    func->info.function.associated_constraint = constraint;
+    FunctionMutableExtra(&func->info.function)->associated_constraint =
+        constraint;
     return;
   }
-  func->info.function.associated_constraint =
+  FunctionMutableExtra(&func->info.function)->associated_constraint =
       NewConjunctionConstraint(current, constraint, constraint->location);
 }
 
@@ -483,8 +485,9 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
   LexCheckpointDestruct(&cv_checkpoint);
   LexNextToken(syntax->lex);  // auto
 
-  int index = syntax->current_template_parameter_count +
-              (int)func->info.function.template_parameters.length;
+  int index =
+      syntax->current_template_parameter_count +
+      (int)FunctionExtraOf(&func->info.function)->template_parameters.length;
   TypeRecord* placeholder =
       NewTypeRecordWithSize(kTypeInt | kTypeUnknown, placeholder_qualifiers);
   placeholder->template_parameter_index = index;
@@ -513,7 +516,7 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
   // match or deduction treats the pack as a single type parameter and the
   // instantiated operator() is never emitted for multi-arg calls.
   VectorAppend(&func->info.function.prototype, formal);
-  VectorAppend(&func->info.function.template_parameters,
+  VectorAppend(&FunctionMutableExtra(&func->info.function)->template_parameters,
                NewLambdaTemplateParameter(syntax, index,
                                           formal->flags.is_parameter_pack));
   if (concept_symbol != NULL) {
@@ -531,8 +534,8 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
         func, NewConceptIdConstraint(concept_symbol, concept_arguments,
                                      constraint_location));
   }
-  func->info.function.template_parameter_count =
-      (int)func->info.function.template_parameters.length;
+  FunctionMutableExtra(&func->info.function)->template_parameter_count =
+      (int)FunctionExtraOf(&func->info.function)->template_parameters.length;
   return true;
 }
 
@@ -813,8 +816,9 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   // any abbreviated `auto` parameters that follow are numbered after them.
   if (explicit_template_params != NULL) {
     for (size_t i = 0; i < explicit_template_params->length; i++) {
-      VectorAppend(&func->info.function.template_parameters,
-                   explicit_template_params->value.p[i]);
+      VectorAppend(
+          &FunctionMutableExtra(&func->info.function)->template_parameters,
+          explicit_template_params->value.p[i]);
     }
   }
   bool has_parameter_list =
@@ -866,14 +870,14 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   op->location = location;
   op->flags.is_defined = true;
   op->flags.is_inline_defn = true;
-  if (func->info.function.template_parameters.length > 0) {
+  if (FunctionExtraOf(&func->info.function)->template_parameters.length > 0) {
     op->flags.is_template = true;
-    func->info.function.template_parameter_count =
-        (int)func->info.function.template_parameters.length;
+    FunctionMutableExtra(&func->info.function)->template_parameter_count =
+        (int)FunctionExtraOf(&func->info.function)->template_parameters.length;
     // Generic lambda inside another template: own auto params are numbered
     // after the enclosing template's; record that offset as the call
     // operator's template-parameter base for deduction/substitution.
-    func->info.function.template_parameter_base =
+    FunctionMutableExtra(&func->info.function)->template_parameter_base =
         syntax->current_template_parameter_count;
   }
   op->value.func_defn = op;
@@ -1278,10 +1282,10 @@ static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator,
   int old_template_parameter_count = syntax->current_template_parameter_count;
   TypeRecord* func = call_operator->type;
   if (func != NULL && TypeIsFunction(func) &&
-      func->info.function.template_parameters.length > 0) {
+      FunctionExtraOf(&func->info.function)->template_parameters.length > 0) {
     syntax->current_template_parameter_count =
-        func->info.function.template_parameter_base +
-        (int)func->info.function.template_parameters.length;
+        FunctionExtraOf(&func->info.function)->template_parameter_base +
+        (int)FunctionExtraOf(&func->info.function)->template_parameters.length;
   }
   SyntaxOpenScope(syntax);
   AddLambdaFunctionScopeSymbols(syntax, call_operator->type);
@@ -1304,15 +1308,17 @@ static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator,
 // operator will instantiate, while staying free of call-site analysis.
 static void RefreshGenericLambdaTemplatePatternBodyAfterCaptureSetup(
     TypeRecord* func) {
-  if (func == NULL || !TypeIsFunction(func) || func->info.function.body == NULL ||
-      func->info.function.template_parameters.length == 0) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      func->info.function.body == NULL ||
+      FunctionExtraOf(&func->info.function)->template_parameters.length == 0) {
     return;
   }
-  if (func->info.function.template_pattern_body != NULL &&
-      func->info.function.template_pattern_body != func->info.function.body) {
-    ASTNodeDelete(func->info.function.template_pattern_body);
+  if (FunctionExtraOf(&func->info.function)->template_pattern_body != NULL &&
+      FunctionExtraOf(&func->info.function)->template_pattern_body !=
+          func->info.function.body) {
+    ASTNodeDelete(FunctionExtraOf(&func->info.function)->template_pattern_body);
   }
-  func->info.function.template_pattern_body =
+  FunctionMutableExtra(&func->info.function)->template_pattern_body =
       ASTNodeClone(func->info.function.body, IdentityCloneNode, NULL, NULL);
 }
 
@@ -1429,7 +1435,8 @@ ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
     ASTNodeVisit(call_operator->type->info.function.body,
                  RewriteLambdaCaptureUses, 0, &rewrite);
   }
-  if (call_operator->type->info.function.template_parameters.length > 0) {
+  if (FunctionExtraOf(&call_operator->type->info.function)
+          ->template_parameters.length > 0) {
     RefreshGenericLambdaTemplatePatternBodyAfterCaptureSetup(
         call_operator->type);
   }
@@ -1474,7 +1481,8 @@ ASTNode* ParseCXXLambdaExpression(Syntax* syntax,
   // (`[=]{ return base + x; }()`).
   bool generic_default_capture =
       capture_default != kLambdaCaptureDefaultNone &&
-      call_operator->type->info.function.template_parameters.length > 0;
+      FunctionExtraOf(&call_operator->type->info.function)
+              ->template_parameters.length > 0;
   if (!defer_dependent_capture &&
       !LambdaCallOperatorBodyDependsOnEnclosingTemplate(call_operator) &&
       !generic_default_capture) {

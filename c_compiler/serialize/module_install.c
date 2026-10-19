@@ -196,12 +196,12 @@ static bool MatchingTemplateKinds(Symbol* existing, Symbol* incoming) {
     return false;
   }
   if (TypeIsFunction(existing->type) && TypeIsFunction(incoming->type)) {
-    bool existing_template =
-        existing->flags.is_template ||
-        existing->type->info.function.template_parameter_count > 0;
-    bool incoming_template =
-        incoming->flags.is_template ||
-        incoming->type->info.function.template_parameter_count > 0;
+    bool existing_template = existing->flags.is_template ||
+                             FunctionExtraOf(&existing->type->info.function)
+                                     ->template_parameter_count > 0;
+    bool incoming_template = incoming->flags.is_template ||
+                             FunctionExtraOf(&incoming->type->info.function)
+                                     ->template_parameter_count > 0;
     if (existing_template != incoming_template) {
       return false;
     }

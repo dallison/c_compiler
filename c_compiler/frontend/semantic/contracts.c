@@ -149,12 +149,14 @@ static void LeaveContractParameterView(TypeRecord* func,
 
 void SemanticAnalyzeFunctionContracts(TypeRecord* func, ASTNode* declaration) {
   if (func == NULL || !TypeIsFunction(func) ||
-      func->info.function.contract_assertions.length == 0) {
+      FunctionExtraOf(&func->info.function)->contract_assertions.length == 0) {
     return;
   }
   FunctionInfo* info = &func->info.function;
-  for (size_t i = 0; i < info->contract_assertions.length; i++) {
-    ContractAssertion* assertion = info->contract_assertions.value.p[i];
+  for (size_t i = 0; i < FunctionExtraOf(info)->contract_assertions.length;
+       i++) {
+    ContractAssertion* assertion =
+        FunctionExtraOf(info)->contract_assertions.value.p[i];
     if (assertion->kind == kContractPostcondition) {
       SetResultBindingType(func, assertion);
       ContractUseCheck check = {

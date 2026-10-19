@@ -4180,7 +4180,7 @@ void TypeRebaseNonDependentLambdaCallOperator(Struct* closure, Symbol* op) {
     return;
   }
   TypeRecord* func = op->type;
-  int base = func->info.function.template_parameter_base;
+  int base = FunctionExtraOf(&func->info.function)->template_parameter_base;
   if (base <= 0 || StructContainsTemplateParameter(closure)) {
     return;
   }
@@ -4191,14 +4191,18 @@ void TypeRebaseNonDependentLambdaCallOperator(Struct* closure, Symbol* op) {
       RebaseTemplateParameterIndices(formal->type, base);
     }
   }
-  for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
+  for (size_t i = 0;
+       i < FunctionExtraOf(&func->info.function)->template_parameters.length;
+       i++) {
     TemplateParameter* param =
-        func->info.function.template_parameters.value.p[i];
+        FunctionExtraOf(&func->info.function)->template_parameters.value.p[i];
     if (param != NULL && param->index >= base) {
       param->index -= base;
     }
   }
-  func->info.function.template_parameter_base = 0;
+  if (func->info.function.extra != NULL) {
+    func->info.function.extra->template_parameter_base = 0;
+  }
 }
 
 typedef struct {

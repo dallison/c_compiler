@@ -58,7 +58,7 @@ void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func) {
       func->info.function.cxx_member_owner->tag_symbol != NULL &&
       func->info.function.cxx_member_owner->tag_symbol->flags.invented &&
       StringEqual(&symbol->name, "operator()") &&
-      func->info.function.template_parameters.length > 0) {
+      FunctionExtraOf(&func->info.function)->template_parameters.length > 0) {
     return;
   }
   Symbol* definition = symbol != NULL ? symbol->value.func_defn : NULL;

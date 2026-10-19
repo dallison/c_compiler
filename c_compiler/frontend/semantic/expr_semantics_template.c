@@ -156,7 +156,8 @@ static TypeRecord* CXXTypeFromLambdaInventedParameter(TypeRecord* type) {
   if (idx < 0) {
     return NULL;
   }
-  int local = idx - func->info.function.template_parameter_base;
+  int local =
+      idx - FunctionExtraOf(&func->info.function)->template_parameter_base;
   if (local < 0) {
     return NULL;
   }
@@ -178,12 +179,13 @@ static TypeRecord* CXXTypeFromLambdaInventedParameter(TypeRecord* type) {
 // caller owns vector or NULL on failure.
 static Vector* CXXLambdaInventedTemplateArgumentValues(TypeRecord* func) {
   if (func == NULL || !TypeIsFunction(func) ||
-      func->info.function.template_parameters.length == 0) {
+      FunctionExtraOf(&func->info.function)->template_parameters.length == 0) {
     return NULL;
   }
   size_t start = func->info.function.cxx_member_owner != NULL ? 1 : 0;
   size_t param_count = func->info.function.prototype.length - start;
-  if (param_count != func->info.function.template_parameters.length) {
+  if (param_count !=
+      FunctionExtraOf(&func->info.function)->template_parameters.length) {
     return NULL;
   }
   Vector* args = NewVector();

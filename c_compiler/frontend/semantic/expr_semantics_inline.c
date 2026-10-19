@@ -504,7 +504,8 @@ static void AppendCallerContractStatements(Vector* statements,
                                            ContractAssertionKind kind,
                                            Inliner* inliner,
                                            VectorASTNode* call) {
-  Vector* assertions = &func->info.function.contract_assertions;
+  const Vector* assertions =
+      &FunctionExtraOf(&func->info.function)->contract_assertions;
   for (size_t i = 0; i < assertions->length; i++) {
     ContractAssertion* assertion = assertions->value.p[i];
     if (assertion == NULL || assertion->kind != kind) {
@@ -548,10 +549,10 @@ static bool VirtualCallerContractsRequireNontrivialCopy(TypeRecord* func) {
 ASTNode* LowerVirtualCallerContracts(VectorASTNode* call) {
   TypeRecord* caller_func = call->caller_contract_function;
   if (caller_func == NULL || !TypeIsFunction(caller_func) ||
-      caller_func->info.function.contract_assertions.length == 0 ||
+      FunctionExtraOf(&caller_func->info.function)
+              ->contract_assertions.length == 0 ||
       call->children == NULL ||
-      call->children->length !=
-          caller_func->info.function.prototype.length) {
+      call->children->length != caller_func->info.function.prototype.length) {
     return (ASTNode*)call;
   }
   if (VirtualCallerContractsRequireNontrivialCopy(caller_func)) {
@@ -631,7 +632,8 @@ ASTNode* LowerVirtualCallerContracts(VectorASTNode* call) {
   }
   VectorAppend(statements, call_statement);
 
-  Vector* assertions = &caller_func->info.function.contract_assertions;
+  const Vector* assertions =
+      &FunctionExtraOf(&caller_func->info.function)->contract_assertions;
   for (size_t i = 0; i < assertions->length; i++) {
     ContractAssertion* assertion = assertions->value.p[i];
     if (assertion != NULL &&
@@ -920,7 +922,7 @@ static bool EnsureInlinedCalleeBodyIsAnalyzed(FunctionInfo* func) {
 
 // Contract: Read-only; true when callee or caller contract context forbids inlining.
 static bool InliningBlockedByCalleeContractRules(FunctionInfo* func) {
-  if (func->contract_assertions.length != 0) {
+  if (FunctionExtraOf(func)->contract_assertions.length != 0) {
     return true;
   }
   return compiler->contract_assertion_depth > 0;

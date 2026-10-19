@@ -1220,7 +1220,8 @@ static bool FunctionTemplateDeducesWithoutBracedArguments(
 // pack expansion may stand for any number of arguments.
 static bool ExplicitArgumentsExceedTemplateParameters(Symbol* templ,
                                                       Vector* explicit_args) {
-  Vector* params = &templ->type->info.function.template_parameters;
+  const Vector* params =
+      &FunctionExtraOf(&templ->type->info.function)->template_parameters;
   if (params->length == 0) {
     return false;
   }
@@ -1320,7 +1321,8 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
   // cannot be instantiated until that class is.  Keep the primary; the call is
   // resolved again when the enclosing class is instantiated.
   {
-    int base = candidate->type->info.function.template_parameter_base;
+    int base = FunctionExtraOf(&candidate->type->info.function)
+                   ->template_parameter_base;
     Vector* formals = &candidate->type->info.function.prototype;
     for (size_t i = 0; i < formals->length; i++) {
       Symbol* formal = formals->value.p[i];
@@ -1819,11 +1821,13 @@ static bool MemberFunctionConstraintsSatisfied(StructMember* candidate,
   if (candidate == NULL || candidate->symbol == NULL ||
       candidate->symbol->type == NULL ||
       !TypeIsFunction(candidate->symbol->type) ||
-      candidate->symbol->type->info.function.associated_constraint == NULL) {
+      FunctionExtraOf(&candidate->symbol->type->info.function)
+              ->associated_constraint == NULL) {
     return true;
   }
   ConstraintExpr* constraint =
-      candidate->symbol->type->info.function.associated_constraint;
+      FunctionExtraOf(&candidate->symbol->type->info.function)
+          ->associated_constraint;
   Vector* class_args = ClassTemplateArgumentsFromMemberAccess(member_access);
   if (class_args == NULL) {
     Struct* owner =
@@ -2517,8 +2521,8 @@ static StructMember* DiagnoseFailedMemberOverload(
         !ConceptsFunctionTemplateHasAssociatedConstraint(candidate->symbol)) {
       if (candidate->symbol != NULL && candidate->symbol->type != NULL &&
           TypeIsFunction(candidate->symbol->type) &&
-          candidate->symbol->type->info.function.associated_constraint !=
-              NULL &&
+          FunctionExtraOf(&candidate->symbol->type->info.function)
+                  ->associated_constraint != NULL &&
           !MemberFunctionConstraintsSatisfied(candidate, member_access)) {
         constraint_rejected = candidate;
         break;
@@ -2552,8 +2556,8 @@ static StructMember* DiagnoseFailedMemberOverload(
       if (constraint_rejected->symbol != NULL &&
           TypeIsFunction(constraint_rejected->symbol->type)) {
         ConceptsReportAssociatedConstraintFailure(
-            constraint_rejected->symbol->type->info.function
-                .associated_constraint,
+            FunctionExtraOf(&constraint_rejected->symbol->type->info.function)
+                ->associated_constraint,
             ClassTemplateArgumentsFromMemberAccess(member_access),
             constraint_rejected->symbol->location, NULL);
       }
@@ -2585,10 +2589,12 @@ static StructMember* DiagnoseFailedMemberOverload(
              MemberOverloadCallScore(first, node, member_access, true) < 0 &&
              first->symbol != NULL && first->symbol->type != NULL &&
              TypeIsFunction(first->symbol->type) &&
-             first->symbol->type->info.function.associated_constraint != NULL) {
+             FunctionExtraOf(&first->symbol->type->info.function)
+                     ->associated_constraint != NULL) {
     SemanticError((ASTNode*)node, "constraints not satisfied");
     ConceptsReportAssociatedConstraintFailure(
-        first->symbol->type->info.function.associated_constraint,
+        FunctionExtraOf(&first->symbol->type->info.function)
+            ->associated_constraint,
         ClassTemplateArgumentsFromMemberAccess(member_access),
         first->symbol->location, NULL);
     ((ASTNode*)node)->flags |= kASTOverloadDiagnosed;
@@ -2666,7 +2672,8 @@ StructMember* ResolveMemberFunctionOverload(StructMember* first,
       SemanticError((ASTNode*)node, "constraints not satisfied");
       if (best->symbol != NULL && TypeIsFunction(best->symbol->type)) {
         ConceptsReportAssociatedConstraintFailure(
-            best->symbol->type->info.function.associated_constraint,
+            FunctionExtraOf(&best->symbol->type->info.function)
+                ->associated_constraint,
             ClassTemplateArgumentsFromMemberAccess(member_access),
             best->symbol->location, NULL);
       }

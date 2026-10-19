@@ -97,8 +97,9 @@ static Symbol* BuildIdFunctionTemplate(const char* name, bool exported) {
   TypeRecord* ft = NewFunctionTypeRecord();
   TypeRecordChain(ft, TypeRecordCopy(t_type));
   ft->info.function.definition = true;
-  VectorAppend(&ft->info.function.template_parameters, MakeTypeParam("T", 0));
-  ft->info.function.template_parameter_count = 1;
+  VectorAppend(&FunctionMutableExtra(&ft->info.function)->template_parameters,
+               MakeTypeParam("T", 0));
+  FunctionMutableExtra(&ft->info.function)->template_parameter_count = 1;
 
   Symbol* param = NewSymbol("x", TypeRecordCopy(t_type), STO(auto));
   param->flags.is_argument = true;
@@ -597,8 +598,9 @@ int main(void) {
     TypeRecord* ft = NewFunctionTypeRecord();
     TypeRecordChain(ft, int_type);
     ft->info.function.definition = true;
-    VectorAppend(&ft->info.function.template_parameters, MakeTypeParam("T", 0));
-    ft->info.function.template_parameter_count = 1;
+    VectorAppend(&FunctionMutableExtra(&ft->info.function)->template_parameters,
+                 MakeTypeParam("T", 0));
+    FunctionMutableExtra(&ft->info.function)->template_parameter_count = 1;
 
     Symbol* tmpl_fn = NewSymbol("tmpl_fn", ft, STO(implicit));
     tmpl_fn->flags.is_template = true;
@@ -650,8 +652,10 @@ int main(void) {
     CHECK(installed_tmpl == loaded_tmpl);
     if (installed_tmpl != NULL && installed_tmpl->type != NULL &&
         TypeIsFunction(installed_tmpl->type)) {
-      CHECK(installed_tmpl->type->info.function.template_parameters.length == 1);
-      CHECK(installed_tmpl->type->info.function.template_parameter_count == 1);
+      CHECK(FunctionExtraOf(&installed_tmpl->type->info.function)
+                ->template_parameters.length == 1);
+      CHECK(FunctionExtraOf(&installed_tmpl->type->info.function)
+                ->template_parameter_count == 1);
     }
     StringDestruct(&name);
     ModuleInstallRecordDestruct(&tmpl_record);
@@ -707,9 +711,11 @@ int main(void) {
       if (root != NULL && StringEqual(&root->name, "id")) {
         loaded_id = root;
         if (root->type != NULL && TypeIsFunction(root->type) &&
-            root->type->info.function.template_parameters.length == 1) {
+            FunctionExtraOf(&root->type->info.function)
+                    ->template_parameters.length == 1) {
           loaded_param = (TemplateParameter*)VectorGet(
-              &root->type->info.function.template_parameters, 0);
+              &FunctionExtraOf(&root->type->info.function)->template_parameters,
+              0);
         }
         break;
       }
@@ -727,9 +733,12 @@ int main(void) {
     CHECK(installed_id == loaded_id);
     if (installed_id != NULL && installed_id->type != NULL &&
         TypeIsFunction(installed_id->type)) {
-      CHECK(installed_id->type->info.function.template_parameters.length == 1);
+      CHECK(FunctionExtraOf(&installed_id->type->info.function)
+                ->template_parameters.length == 1);
       TemplateParameter* installed_param = (TemplateParameter*)VectorGet(
-          &installed_id->type->info.function.template_parameters, 0);
+          &FunctionExtraOf(&installed_id->type->info.function)
+               ->template_parameters,
+          0);
       CHECK(installed_param != NULL);
       Vector actuals;
       VectorInit(&actuals);
@@ -802,15 +811,15 @@ int main(void) {
       CHECK(installed_id == loaded_id);
       if (installed_id != NULL && installed_id->type != NULL &&
           TypeIsFunction(installed_id->type)) {
-        size_t type_params =
-            installed_id->type->info.function.template_parameters.length;
+        size_t type_params = FunctionExtraOf(&installed_id->type->info.function)
+                                 ->template_parameters.length;
         size_t defn_params = 0;
         if (installed_id->value.func_defn != NULL &&
             installed_id->value.func_defn->type != NULL &&
             TypeIsFunction(installed_id->value.func_defn->type)) {
-          defn_params =
-              installed_id->value.func_defn->type->info.function
-                  .template_parameters.length;
+          defn_params = FunctionExtraOf(
+                            &installed_id->value.func_defn->type->info.function)
+                            ->template_parameters.length;
         }
         CHECK(type_params > 0 || defn_params > 0);
         Vector actuals;

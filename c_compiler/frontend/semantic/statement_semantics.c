@@ -739,7 +739,8 @@ ASTNode* AppendCXXFullExpressionTemporaryDestructors(ASTNode* expr) {
   if (!CompilerIsCXX() || expr == NULL ||
       (compiler->current_function != NULL &&
        (compiler->current_function->info.function.is_coroutine ||
-        compiler->current_function->info.function.coroutine_frame_type != NULL))) {
+        FunctionExtraOf(&compiler->current_function->info.function)
+                ->coroutine_frame_type != NULL))) {
     return expr;
   }
   CXXTemporaryCollection collection;
@@ -767,7 +768,8 @@ static ASTNode* AppendCXXFullExpressionTemporaryDestructorsPreservingValue(
   if (!CompilerIsCXX() || expr == NULL ||
       (compiler->current_function != NULL &&
        (compiler->current_function->info.function.is_coroutine ||
-        compiler->current_function->info.function.coroutine_frame_type != NULL))) {
+        FunctionExtraOf(&compiler->current_function->info.function)
+                ->coroutine_frame_type != NULL))) {
     return expr;
   }
   CXXTemporaryCollection collection;
@@ -852,7 +854,8 @@ static ASTNode* NewCXXReturnTemporaryCleanups(ASTNode* expr) {
   if (!CompilerIsCXX() || expr == NULL ||
       (compiler->current_function != NULL &&
        (compiler->current_function->info.function.is_coroutine ||
-        compiler->current_function->info.function.coroutine_frame_type != NULL))) {
+        FunctionExtraOf(&compiler->current_function->info.function)
+                ->coroutine_frame_type != NULL))) {
     return NULL;
   }
   CXXTemporaryCollection collection;
@@ -1400,9 +1403,8 @@ static void RebuildCompoundFallthroughDestructors(ASTNode* node, void* data,
 // return/break/continue in `func`'s body (see the block comment above).
 void CXXInsertScopeExitDestructors(TypeRecord* func) {
   if (!CompilerIsCXX() || func == NULL || !TypeIsFunction(func) ||
-      func->info.function.body == NULL ||
-      func->info.function.is_coroutine ||
-      func->info.function.coroutine_frame_type != NULL ||
+      func->info.function.body == NULL || func->info.function.is_coroutine ||
+      FunctionExtraOf(&func->info.function)->coroutine_frame_type != NULL ||
       TypeContainsTemplateParameter(func)) {
     return;
   }
@@ -1591,8 +1593,8 @@ static void AnalyzeStaticAssert(StaticAssertASTNode* node) {
   }
   TypeRecord* func = compiler->current_function;
   if (func != NULL && TypeIsFunction(func) &&
-      (func->info.function.template_parameter_count > 0 ||
-       func->info.function.template_parameters.length > 0)) {
+      (FunctionExtraOf(&func->info.function)->template_parameter_count > 0 ||
+       FunctionExtraOf(&func->info.function)->template_parameters.length > 0)) {
     return;
   }
   if (ExpressionIsTemplateDependent(node->expr) ||
@@ -1872,7 +1874,7 @@ static bool CXXGenericLambdaCallOperatorHasConcreteFormals(void) {
   TypeRecord* func = compiler->current_function;
   if (func == NULL || !TypeIsFunction(func) ||
       func->info.function.cxx_member_owner == NULL ||
-      func->info.function.template_parameters.length == 0) {
+      FunctionExtraOf(&func->info.function)->template_parameters.length == 0) {
     return false;
   }
   Struct* owner = func->info.function.cxx_member_owner;

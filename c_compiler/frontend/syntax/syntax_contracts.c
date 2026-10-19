@@ -193,9 +193,10 @@ void SyntaxParseFunctionContracts(Syntax* syntax, TypeRecord* func,
     if (kind == kContractPostcondition) {
       DiagnosePostconditionParameterConst(syntax, func, predicate);
     }
-    VectorAppend(&func->info.function.contract_assertions,
-                 NewContractAssertion(kind, predicate, result_binding,
-                                      &attributes, location));
+    VectorAppend(
+        &FunctionMutableExtra(&func->info.function)->contract_assertions,
+        NewContractAssertion(kind, predicate, result_binding, &attributes,
+                             location));
   }
 }
 
@@ -203,7 +204,7 @@ void SyntaxParseFunctionContracts(Syntax* syntax, TypeRecord* func,
 // or otherwise not permitted to carry them under the active language mode.
 void SyntaxDiagnoseInvalidFunctionContracts(Syntax* syntax, TypeRecord* func) {
   if (func == NULL || !TypeIsFunction(func) ||
-      func->info.function.contract_assertions.length == 0) {
+      FunctionExtraOf(&func->info.function)->contract_assertions.length == 0) {
     return;
   }
   FunctionInfo* info = &func->info.function;
@@ -296,7 +297,8 @@ static void DiagnoseOmittedPostconditionParameterConst(
     Syntax* syntax, TypeRecord* old_func, TypeRecord* new_func) {
   Vector* old_formals = &old_func->info.function.prototype;
   Vector* new_formals = &new_func->info.function.prototype;
-  Vector* assertions = &old_func->info.function.contract_assertions;
+  const Vector* assertions =
+      &FunctionExtraOf(&old_func->info.function)->contract_assertions;
   for (size_t i = 0; i < old_formals->length && i < new_formals->length; i++) {
     Symbol* old_formal = old_formals->value.p[i];
     Symbol* new_formal = new_formals->value.p[i];
@@ -359,10 +361,10 @@ void MergeCXXContractAssertions(Syntax* syntax, Symbol* old_sym,
       SymbolAddAttribute(new_parameter, NewAttribute("indeterminate"));
     }
   }
-  Vector* old_assertions =
-      &old_sym->type->info.function.contract_assertions;
-  Vector* new_assertions =
-      &new_sym->type->info.function.contract_assertions;
+  const Vector* old_assertions =
+      &FunctionExtraOf(&old_sym->type->info.function)->contract_assertions;
+  const Vector* new_assertions =
+      &FunctionExtraOf(&new_sym->type->info.function)->contract_assertions;
   // A redeclaration may omit the function-contract-specifier-seq.  When it
   // supplies one, however, it must correspond to the sequence on the reachable
   // first declaration.

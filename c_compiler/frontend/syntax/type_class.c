@@ -61,7 +61,7 @@ bool TypeIsTemplateParameterPlaceholder(TypeRecord* type, int* index) {
   return true;
 }
 
-static bool TemplateParameterVectorHasIndex(Vector* parameters, int index,
+static bool TemplateParameterVectorHasIndex(const Vector* parameters, int index,
                                             bool* is_pack) {
   if (parameters == NULL || index < 0) {
     return false;
@@ -91,7 +91,8 @@ bool CurrentTemplateParameterIsPack(Syntax* syntax, int index) {
   TypeRecord* function = compiler->current_function;
   if (function != NULL && TypeIsFunction(function)) {
     if (TemplateParameterVectorHasIndex(
-            &function->info.function.template_parameters, index, &is_pack)) {
+            &FunctionExtraOf(&function->info.function)->template_parameters,
+            index, &is_pack)) {
       return is_pack;
     }
     for (Struct* scope = function->info.function.cxx_member_owner;
@@ -247,17 +248,19 @@ static void CopyClassTemplateParametersToGuide(Struct* str, TypeRecord* func) {
   if (str == NULL || func == NULL || !TypeIsFunction(func)) {
     return;
   }
-  VectorDestructWithContents(&func->info.function.template_parameters,
-                             (VectorElementDestructor)TemplateParameterDelete,
-                             /*free_element=*/false);
-  VectorInit(&func->info.function.template_parameters);
+  VectorDestructWithContents(
+      &FunctionMutableExtra(&func->info.function)->template_parameters,
+      (VectorElementDestructor)TemplateParameterDelete,
+      /*free_element=*/false);
+  VectorInit(&FunctionMutableExtra(&func->info.function)->template_parameters);
   for (size_t i = 0; i < str->template_parameters.length; i++) {
-    VectorAppend(&func->info.function.template_parameters,
-                 TemplateParameterCopy(str->template_parameters.value.p[i]));
+    VectorAppend(
+        &FunctionMutableExtra(&func->info.function)->template_parameters,
+        TemplateParameterCopy(str->template_parameters.value.p[i]));
   }
-  func->info.function.template_parameter_count =
+  FunctionMutableExtra(&func->info.function)->template_parameter_count =
       (int)str->template_parameters.length;
-  func->info.function.template_parameter_base = 0;
+  FunctionMutableExtra(&func->info.function)->template_parameter_base = 0;
 }
 
 static size_t CXXConstructorImplicitParameterCount(TypeRecord* func) {
@@ -302,7 +305,8 @@ static Symbol* NewCXXDeductionGuideSymbol(Struct* str, Symbol* tag,
     }
   }
   Symbol* guide = NewSymbol(tag->name.value, guide_type, STO(implicit));
-  guide->flags.is_template = guide_type->info.function.template_parameter_count > 0;
+  guide->flags.is_template =
+      FunctionExtraOf(&guide_type->info.function)->template_parameter_count > 0;
   guide->location = tag->location;
   guide_type->info.function.symbol = guide;
   return guide;
@@ -409,7 +413,8 @@ static void AddImplicitCXXAggregateDeductionGuideForPrefix(Struct* str,
     VectorAppend(&guide_type->info.function.prototype, formal);
   }
   Symbol* guide = NewSymbol(tag->name.value, guide_type, STO(implicit));
-  guide->flags.is_template = guide_type->info.function.template_parameter_count > 0;
+  guide->flags.is_template =
+      FunctionExtraOf(&guide_type->info.function)->template_parameter_count > 0;
   guide->location = tag->location;
   guide_type->info.function.symbol = guide;
   TypeAddCXXDeductionGuide(tag, guide);
@@ -461,7 +466,8 @@ static void AddImplicitCXXCopyDeductionGuide(Struct* str, Symbol* tag) {
   formal->value.arg_number = 0;
   VectorAppend(&guide_type->info.function.prototype, formal);
   Symbol* guide = NewSymbol(tag->name.value, guide_type, STO(implicit));
-  guide->flags.is_template = guide_type->info.function.template_parameter_count > 0;
+  guide->flags.is_template =
+      FunctionExtraOf(&guide_type->info.function)->template_parameter_count > 0;
   guide->location = tag->location;
   guide_type->info.function.symbol = guide;
   TypeAddCXXDeductionGuide(tag, guide);

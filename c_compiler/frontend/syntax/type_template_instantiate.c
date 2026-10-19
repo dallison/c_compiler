@@ -1461,10 +1461,11 @@ static int LocalClassMemberTemplateRebaseBase(TypeParser* parser, Struct* from,
   }
   TypeRecord* function = from->access_enclosing_function->type;
   if (function == NULL || !TypeIsFunction(function) ||
-      function->info.function.template_parameters.length == 0) {
+      FunctionExtraOf(&function->info.function)->template_parameters.length ==
+          0) {
     return 0;
   }
-  int base = function->info.function.template_parameter_base;
+  int base = FunctionExtraOf(&function->info.function)->template_parameter_base;
   return base > 0 && args != NULL && (int)args->length <= base ? base : 0;
 }
 
@@ -1565,7 +1566,8 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         enclosing_fn != NULL &&
         (enclosing_fn->flags.is_template ||
          (enclosing_fn->type != NULL && TypeIsFunction(enclosing_fn->type) &&
-          enclosing_fn->type->info.function.template_parameters.length > 0 &&
+          FunctionExtraOf(&enclosing_fn->type->info.function)
+                  ->template_parameters.length > 0 &&
           (enclosing_fn->type->template_arguments == NULL ||
            TemplateArgumentVectorContainsTemplateParameter(
                enclosing_fn->type->template_arguments))));
@@ -2312,13 +2314,20 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
       !TypeIsFunction(from)) {
     return;
   }
-  VectorDestructWithContents(&to->info.function.template_parameters,
-                             (VectorElementDestructor)TemplateParameterDelete,
-                             /*free_element=*/false);
-  VectorInit(&to->info.function.template_parameters);
-  for (size_t i = 0; i < from->info.function.template_parameters.length; i++) {
+  if (FunctionExtraOf(&from->info.function)->template_parameters.length == 0 &&
+      to->info.function.extra == NULL) {
+    return;
+  }
+  VectorDestructWithContents(
+      &FunctionMutableExtra(&to->info.function)->template_parameters,
+      (VectorElementDestructor)TemplateParameterDelete,
+      /*free_element=*/false);
+  VectorInit(&FunctionMutableExtra(&to->info.function)->template_parameters);
+  for (size_t i = 0;
+       i < FunctionExtraOf(&from->info.function)->template_parameters.length;
+       i++) {
     TemplateParameter* original =
-        from->info.function.template_parameters.value.p[i];
+        FunctionExtraOf(&from->info.function)->template_parameters.value.p[i];
     if (original == NULL) {
       continue;
     }
@@ -2438,7 +2447,8 @@ static void CopyFunctionTemplateParameters(TypeParser* parser, TypeRecord* to,
         param->default_argument->dependent_expr = substituted;
       }
     }
-    VectorAppend(&to->info.function.template_parameters, param);
+    VectorAppend(&FunctionMutableExtra(&to->info.function)->template_parameters,
+                 param);
   }
 }
 
@@ -2757,6 +2767,22 @@ static TypeRecord* ResolveInstantiatedOwnerTypedef(TypeRecord* type,
  * each parameter type against `args` (expanding parameter packs), re-add the
  * implicit `this` parameter against the instantiated `owner`, and renumber
  * argument slots. */
+// Gives the new function type `func` copies of the coroutine promise and frame
+// types of its pattern `from`.
+static void CopyFunctionCoroutineState(TypeRecord* func, TypeRecord* from) {
+  const FunctionInfoExtra* source = FunctionExtraOf(&from->info.function);
+  if (source->coroutine_promise_type == NULL &&
+      source->coroutine_frame_type == NULL &&
+      source->coroutine_suspend_count == 0) {
+    return;
+  }
+  FunctionInfoExtra* extra = FunctionMutableExtra(&func->info.function);
+  extra->coroutine_promise_type =
+      TypeRecordCopy(source->coroutine_promise_type);
+  extra->coroutine_frame_type = TypeRecordCopy(source->coroutine_frame_type);
+  extra->coroutine_suspend_count = source->coroutine_suspend_count;
+}
+
 static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
                                                  Struct* owner,
                                                  bool is_static_member,
@@ -2781,7 +2807,6 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_explicit = from->info.function.is_explicit;
   func->info.function.is_explicit_conversion =
       from->info.function.is_explicit_conversion;
-  func->info.function.explicit_condition = NULL;
   func->info.function.is_final = from->info.function.is_final;
   // Virtualness must survive instantiation so the instantiated member is
   // registered into a vtable slot (RegisterCXXVirtualMember, run via
@@ -2793,11 +2818,12 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   func->info.function.is_pure_virtual = from->info.function.is_pure_virtual;
   func->info.function.is_defaulted = from->info.function.is_defaulted;
   func->info.function.is_deleted = from->info.function.is_deleted;
-  func->info.function.deleted_reason =
-      from->info.function.deleted_reason != NULL
-          ? NewStringWithLength(from->info.function.deleted_reason->value,
-                                from->info.function.deleted_reason->length)
-          : NULL;
+  const String* deleted_reason =
+      FunctionExtraOf(&from->info.function)->deleted_reason;
+  if (deleted_reason != NULL) {
+    FunctionMutableExtra(&func->info.function)->deleted_reason =
+        NewStringWithLength(deleted_reason->value, deleted_reason->length);
+  }
   func->info.function.cxx_special_member_kind =
       from->info.function.cxx_special_member_kind;
   func->info.function.is_user_declared = from->info.function.is_user_declared;
@@ -2828,25 +2854,20 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
       from->info.function.has_coroutine_syntax;
   func->info.function.has_constexpr_if =
       from->info.function.has_constexpr_if;
-  func->info.function.coroutine_promise_type =
-      from->info.function.coroutine_promise_type != NULL
-          ? TypeRecordCopy(from->info.function.coroutine_promise_type)
-          : NULL;
-  func->info.function.coroutine_frame_type =
-      from->info.function.coroutine_frame_type != NULL
-          ? TypeRecordCopy(from->info.function.coroutine_frame_type)
-          : NULL;
-  func->info.function.coroutine_suspend_count =
-      from->info.function.coroutine_suspend_count;
-  func->info.function.template_parameter_count =
-      from->info.function.template_parameter_count;
-  int member_template_base = from->info.function.template_parameter_base;
+  CopyFunctionCoroutineState(func, from);
+  if (FunctionExtraOf(&from->info.function)->template_parameter_count != 0) {
+    FunctionMutableExtra(&func->info.function)->template_parameter_count =
+        FunctionExtraOf(&from->info.function)->template_parameter_count;
+  }
+  int member_template_base =
+      FunctionExtraOf(&from->info.function)->template_parameter_base;
   int original_member_template_base = member_template_base;
   Struct* member_owner = from->info.function.cxx_member_owner;
   bool nested_member_owner =
       member_owner != NULL && member_owner->lexical_parent != NULL;
   if (nested_member_owner &&
-      from->info.function.template_parameter_count == 0 && args != NULL) {
+      FunctionExtraOf(&from->info.function)->template_parameter_count == 0 &&
+      args != NULL) {
     // Ordinary members still need unresolved parameters rebased when a nested
     // class template is copied one enclosing-template layer at a time.
     member_template_base = (int)args->length;
@@ -2858,10 +2879,12 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     // nested class parameters survive with the member template parameters.
     member_template_base = (int)args->length;
   }
-  func->info.function.template_parameter_base =
-      nested_member_owner && from->info.function.template_parameter_count > 0
-          ? original_member_template_base - member_template_base
-          : 0;
+  if (nested_member_owner &&
+      FunctionExtraOf(&from->info.function)->template_parameter_count > 0 &&
+      original_member_template_base != member_template_base) {
+    FunctionMutableExtra(&func->info.function)->template_parameter_base =
+        original_member_template_base - member_template_base;
+  }
   // A member function template's own parameters are numbered at/after
   // `member_template_base`.  Only enclosing-template arguments (indices
   // below that base) may be substituted here; the member's own placeholders
@@ -2873,7 +2896,7 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   Vector enclosing_only_args;
   Vector* subst_args = args;
   bool use_enclosing_only = false;
-  if (from->info.function.template_parameter_count > 0) {
+  if (FunctionExtraOf(&from->info.function)->template_parameter_count > 0) {
     VectorInit(&enclosing_only_args);
     use_enclosing_only = true;
     Vector* enclosing_arguments = args;
@@ -2925,14 +2948,17 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
   // directly would consume member parameters that happen to share an index
   // with an enclosing parameter and incorrectly make explicit constructors
   // implicit.
-  if (from->info.function.explicit_condition != NULL) {
+  if (FunctionExtraOf(&from->info.function)->explicit_condition != NULL) {
     ASTNode* condition = TypeSubstituteMemberTemplateExpressionAndRebase(
-        parser->syntax, from->info.function.explicit_condition, subst_args,
-        member_template_base, from->info.function.explicit_condition->location,
+        parser->syntax,
+        FunctionExtraOf(&from->info.function)->explicit_condition, subst_args,
+        member_template_base,
+        FunctionExtraOf(&from->info.function)->explicit_condition->location,
         parser->template_substitution_source,
         parser->template_substitution_target);
     if (ExpressionIsTemplateDependent(condition)) {
-      func->info.function.explicit_condition = condition;
+      FunctionMutableExtra(&func->info.function)->explicit_condition =
+          condition;
     } else {
       int64_t explicit_value = 0;
       DiagnosticSuppressBegin();
@@ -3012,7 +3038,7 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     Symbol* formal = func->info.function.prototype.value.p[i];
     formal->value.arg_number = (int32_t)i;
   }
-  if (from->info.function.associated_constraint != NULL) {
+  if (FunctionExtraOf(&from->info.function)->associated_constraint != NULL) {
     // Substituting an associated constraint is a purely type-level operation:
     // it resolves alias/decltype types such as `iterator_t<D>` (which itself is
     // `decltype(ranges::begin(declval<D&>()))`).  For a CRTP base whose Derived
@@ -3031,9 +3057,10 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     // requirement as unsatisfied.
     bool saved_trap = DiagnosticErrorTrapBegin();
     compiler->speculative_template_instantiation_depth++;
-    func->info.function.associated_constraint =
+    FunctionMutableExtra(&func->info.function)->associated_constraint =
         ConceptsSubstituteMemberConstraint(
-            parser->syntax, from->info.function.associated_constraint,
+            parser->syntax,
+            FunctionExtraOf(&from->info.function)->associated_constraint,
             subst_args, member_template_base,
             from->info.function.cxx_member_owner, owner);
     compiler->speculative_template_instantiation_depth--;
@@ -3394,20 +3421,21 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_explicit = from->info.function.is_explicit;
   func->info.function.is_explicit_conversion =
       from->info.function.is_explicit_conversion;
-  func->info.function.explicit_condition = NULL;
-  if (from->info.function.explicit_condition != NULL) {
+  if (FunctionExtraOf(&from->info.function)->explicit_condition != NULL) {
     int64_t explicit_value = 0;
     if (TryFoldDependentTemplateArgument(
-            parser, from->info.function.explicit_condition, args,
-            &explicit_value)) {
+            parser, FunctionExtraOf(&from->info.function)->explicit_condition,
+            args, &explicit_value)) {
       func->info.function.is_explicit = explicit_value != 0;
       func->info.function.is_explicit_conversion =
           from->info.function.is_explicit_conversion && explicit_value != 0;
     } else {
       ASTNode* condition = CloneDependentExpressionWithArgs(
-          parser, from->info.function.explicit_condition, args);
+          parser, FunctionExtraOf(&from->info.function)->explicit_condition,
+          args);
       if (DependentExpressionContainsTemplateParameter(condition)) {
-        func->info.function.explicit_condition = condition;
+        FunctionMutableExtra(&func->info.function)->explicit_condition =
+            condition;
       } else {
         ASTNodeDelete(condition);
       }
@@ -3419,11 +3447,12 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   func->info.function.is_pure_virtual = from->info.function.is_pure_virtual;
   func->info.function.is_defaulted = from->info.function.is_defaulted;
   func->info.function.is_deleted = from->info.function.is_deleted;
-  if (func->info.function.deleted_reason == NULL &&
-      from->info.function.deleted_reason != NULL) {
-    func->info.function.deleted_reason =
-        NewStringWithLength(from->info.function.deleted_reason->value,
-                            from->info.function.deleted_reason->length);
+  if (FunctionExtraOf(&func->info.function)->deleted_reason == NULL &&
+      FunctionExtraOf(&from->info.function)->deleted_reason != NULL) {
+    FunctionMutableExtra(&func->info.function)->deleted_reason =
+        NewStringWithLength(
+            FunctionExtraOf(&from->info.function)->deleted_reason->value,
+            FunctionExtraOf(&from->info.function)->deleted_reason->length);
   }
   func->info.function.cxx_special_member_kind =
       from->info.function.cxx_special_member_kind;
@@ -3457,16 +3486,7 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
       from->info.function.has_coroutine_syntax;
   func->info.function.has_constexpr_if =
       from->info.function.has_constexpr_if;
-  func->info.function.coroutine_promise_type =
-      from->info.function.coroutine_promise_type != NULL
-          ? TypeRecordCopy(from->info.function.coroutine_promise_type)
-          : NULL;
-  func->info.function.coroutine_frame_type =
-      from->info.function.coroutine_frame_type != NULL
-          ? TypeRecordCopy(from->info.function.coroutine_frame_type)
-          : NULL;
-  func->info.function.coroutine_suspend_count =
-      from->info.function.coroutine_suspend_count;
+  CopyFunctionCoroutineState(func, from);
   func->info.function.virtual_index = from->info.function.virtual_index;
   func->info.function.cxx_member_owner = from->info.function.cxx_member_owner;
   Struct* saved_subst_source = NULL;
@@ -3485,7 +3505,8 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
   // deduction records those parameters in a 0-based vector.  Rebase a copy of
   // the pattern before substituting so `hash_of(const K&)` binds `K` instead
   // of leaving the enclosing-relative placeholder in the specialization.
-  int rebase_base = from->info.function.template_parameter_base;
+  int rebase_base =
+      FunctionExtraOf(&from->info.function)->template_parameter_base;
   TypeRecord* return_pattern = from->next;
   TypeRecord* rebased_return = NULL;
   if (rebase_base > 0 && return_pattern != NULL) {
@@ -3766,9 +3787,10 @@ static Vector* FunctionTemplateBodyArguments(Syntax* syntax,
     return member_args;
   }
   int enclosing_count =
-      template_definition->type->info.function.template_parameter_base;
-  size_t own_count =
-      template_definition->type->info.function.template_parameters.length;
+      FunctionExtraOf(&template_definition->type->info.function)
+          ->template_parameter_base;
+  size_t own_count = FunctionExtraOf(&template_definition->type->info.function)
+                         ->template_parameters.length;
   // The body lives on the primary member template, whose parameters are still
   // numbered after the enclosing class.  Instantiating `get<0>` supplies only
   // `[0]`; without the class arguments (`[long, 0]`) `StorageT<I>` keeps `I`
@@ -3947,12 +3969,13 @@ static Symbol* OutOfLineMemberTemplateDefinition(Symbol* templ) {
   for (size_t i = 0; i < primary->members.length; i++) {
     StructMember* member = primary->members.value.p[i];
     if (member == NULL || member->symbol == NULL ||
-        member->symbol->type == NULL ||
-        !TypeIsFunction(member->symbol->type) ||
+        member->symbol->type == NULL || !TypeIsFunction(member->symbol->type) ||
         !StringEqualString(&member->symbol->name, &templ->name) ||
         member->symbol->flags.is_template != templ->flags.is_template ||
-        member->symbol->type->info.function.template_parameter_count !=
-            templ->type->info.function.template_parameter_count ||
+        FunctionExtraOf(&member->symbol->type->info.function)
+                ->template_parameter_count !=
+            FunctionExtraOf(&templ->type->info.function)
+                ->template_parameter_count ||
         member->symbol->type->info.function.prototype.length !=
             templ->type->info.function.prototype.length) {
       continue;
@@ -4021,16 +4044,19 @@ static Symbol* InstantiateSimpleFunctionTemplateUnchecked(
   if (templ->type->info.function.template_origin != NULL &&
       templ->type->template_arguments == NULL &&
       (!templ->is_imported_module_symbol ||
-       templ->type->info.function.template_parameters.length == 0)) {
+       FunctionExtraOf(&templ->type->info.function)
+               ->template_parameters.length == 0)) {
     templ = templ->type->info.function.template_origin;
   }
   TypeRecord* completion_type = templ->type;
   if (templ->is_imported_module_symbol && completion_type != NULL &&
       TypeIsFunction(completion_type) &&
-      completion_type->info.function.template_parameters.length == 0 &&
+      FunctionExtraOf(&completion_type->info.function)
+              ->template_parameters.length == 0 &&
       templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
       TypeIsFunction(templ->value.func_defn->type) &&
-      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+      FunctionExtraOf(&templ->value.func_defn->type->info.function)
+              ->template_parameters.length > 0) {
     completion_type = templ->value.func_defn->type;
   }
   bool owns_completed_args = !args_are_completed;
@@ -5291,7 +5317,8 @@ static void NoteLambdaBodyEnclosingTemplate(ASTNode* node, void* data,
         TypeIsFunction(named->symbol->type) &&
         (named->symbol->flags.is_template ||
          named->symbol->type->info.function.template_origin != NULL ||
-         named->symbol->type->info.function.template_parameter_count > 0)) {
+         FunctionExtraOf(&named->symbol->type->info.function)
+                 ->template_parameter_count > 0)) {
       names_other_function_template = true;
     }
   }
@@ -5363,10 +5390,12 @@ static bool FunctionBodyDependsOnEnclosingTemplate(Symbol* function,
     return false;
   }
   TypeRecord* func = function->type;
-  int own_base = func->info.function.template_parameter_base;
-  int own_count = func->info.function.template_parameter_count;
+  int own_base = FunctionExtraOf(&func->info.function)->template_parameter_base;
+  int own_count =
+      FunctionExtraOf(&func->info.function)->template_parameter_count;
   if (own_count <= 0) {
-    own_count = (int)func->info.function.template_parameters.length;
+    own_count =
+        (int)FunctionExtraOf(&func->info.function)->template_parameters.length;
   }
   LambdaBodyEnclosingUse use = {.own_base = own_base,
                                 .own_limit = own_base + own_count,
@@ -5459,7 +5488,8 @@ bool StructIsFunctionTemplateLocalClass(Struct* str) {
          (function->flags.is_template ||
           str->defining_template_scope_count > 0 ||
           (function->type != NULL && TypeIsFunction(function->type) &&
-           function->type->info.function.template_parameters.length > 0));
+           FunctionExtraOf(&function->type->info.function)
+                   ->template_parameters.length > 0));
 }
 
 bool StructIsPartialMemberTemplateLocalClass(Struct* str) {
@@ -6396,14 +6426,16 @@ static bool DeduceFunctionTemplateStructMembers(Vector* args,
 static bool FunctionTemplateCanCompleteDeducedArguments(TypeRecord* func,
                                                         Vector* args) {
   if (func == NULL || !TypeIsFunction(func) ||
-      func->info.function.template_parameters.length != args->length) {
+      FunctionExtraOf(&func->info.function)->template_parameters.length !=
+          args->length) {
     return false;
   }
   for (size_t i = 0; i < args->length; i++) {
     if (args->value.p[i] != NULL) {
       continue;
     }
-    TemplateParameter* param = func->info.function.template_parameters.value.p[i];
+    TemplateParameter* param =
+        FunctionExtraOf(&func->info.function)->template_parameters.value.p[i];
     if (param->kind == kTemplateParameterType) {
       if (param->default_type == NULL) {
         return false;
@@ -6437,12 +6469,15 @@ static Vector* NewFunctionTemplateDeductionArguments(TypeRecord* func,
                                                      Vector* explicit_args,
                                                      size_t* explicit_arg_count) {
   Vector* args = NewVector();
-  VectorReserve(args, func->info.function.template_parameters.length);
+  VectorReserve(
+      args, FunctionExtraOf(&func->info.function)->template_parameters.length);
   size_t explicit_index = 0;
   size_t fixed_explicit_count = 0;
-  for (size_t i = 0; i < func->info.function.template_parameters.length; i++) {
+  for (size_t i = 0;
+       i < FunctionExtraOf(&func->info.function)->template_parameters.length;
+       i++) {
     TemplateParameter* param =
-        func->info.function.template_parameters.value.p[i];
+        FunctionExtraOf(&func->info.function)->template_parameters.value.p[i];
     if (param != NULL && param->is_parameter_pack) {
       TemplateArgument* pack = NewEmptyPackTemplateArgument(param->kind);
       // A pack absorbs the tail of an explicit argument list.  `take<Ts...>()`
@@ -6526,13 +6561,14 @@ static bool FunctionTemplateDeductionVectorComplete(Vector* args) {
 static bool FunctionTemplateArgumentsExplicitlyComplete(TypeRecord* func,
                                                         Vector* args) {
   if (func == NULL || args == NULL ||
-      args->length != func->info.function.template_parameters.length ||
+      args->length !=
+          FunctionExtraOf(&func->info.function)->template_parameters.length ||
       !FunctionTemplateDeductionVectorComplete(args)) {
     return false;
   }
   for (size_t i = 0; i < args->length; i++) {
     TemplateParameter* param =
-        func->info.function.template_parameters.value.p[i];
+        FunctionExtraOf(&func->info.function)->template_parameters.value.p[i];
     TemplateArgument* arg = args->value.p[i];
     if (param != NULL && param->is_parameter_pack &&
         (arg == NULL || arg->int_value == 0)) {
@@ -6627,7 +6663,7 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
   TypeRecord* func = templ->type;
   int saved_deduce_base = g_deduce_template_parameter_base;
   g_deduce_template_parameter_base =
-      func->info.function.template_parameter_base;
+      FunctionExtraOf(&func->info.function)->template_parameter_base;
   if (first_formal_arg > func->info.function.prototype.length) {
     g_deduce_template_parameter_base = saved_deduce_base;
     return NULL;
@@ -6666,7 +6702,7 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
   // overload of an SFINAE trait (`ArenaConstructable(...)`) and leaves the
   // failed substitution's return type in place.
   bool varargs = func->info.function.varargs;
-  if (func->info.function.template_parameter_count <= 0 ||
+  if (FunctionExtraOf(&func->info.function)->template_parameter_count <= 0 ||
       func->info.function.unknown_args ||
       (!varargs && formal_pack_index < 0 &&
        (actuals->length < required_formal_count ||
@@ -6928,10 +6964,10 @@ deduction_finished:
   // which otherwise treats the null slot as a missing required argument.
   for (size_t i = 0;
        i < args->length &&
-       i < func->info.function.template_parameters.length;
+       i < FunctionExtraOf(&func->info.function)->template_parameters.length;
        i++) {
     TemplateParameter* parameter =
-        func->info.function.template_parameters.value.p[i];
+        FunctionExtraOf(&func->info.function)->template_parameters.value.p[i];
     if (args->value.p[i] == NULL && parameter != NULL &&
         parameter->is_parameter_pack) {
       args->value.p[i] =
@@ -7042,10 +7078,12 @@ Symbol* TypeDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   TypeRecord* func_type = templ->type;
   if (templ->is_imported_module_symbol && func_type != NULL &&
       TypeIsFunction(func_type) &&
-      func_type->info.function.template_parameters.length == 0 &&
+      FunctionExtraOf(&func_type->info.function)->template_parameters.length ==
+          0 &&
       templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
       TypeIsFunction(templ->value.func_defn->type) &&
-      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+      FunctionExtraOf(&templ->value.func_defn->type->info.function)
+              ->template_parameters.length > 0) {
     func_type = templ->value.func_defn->type;
   }
   SetMemberTemplateSubstitutionContext(&parser, func_type);
@@ -7114,10 +7152,12 @@ bool TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(
   TypeRecord* func_type = templ->type;
   if (templ->is_imported_module_symbol && func_type != NULL &&
       TypeIsFunction(func_type) &&
-      func_type->info.function.template_parameters.length == 0 &&
+      FunctionExtraOf(&func_type->info.function)->template_parameters.length ==
+          0 &&
       templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
       TypeIsFunction(templ->value.func_defn->type) &&
-      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+      FunctionExtraOf(&templ->value.func_defn->type->info.function)
+              ->template_parameters.length > 0) {
     func_type = templ->value.func_defn->type;
   }
   SetMemberTemplateSubstitutionContext(&parser, func_type);
@@ -7157,10 +7197,12 @@ FunctionTemplateCandidateStatus TypeClassifyFunctionTemplateCandidate(
   TypeRecord* func_type = templ->type;
   if (templ->is_imported_module_symbol && func_type != NULL &&
       TypeIsFunction(func_type) &&
-      func_type->info.function.template_parameters.length == 0 &&
+      FunctionExtraOf(&func_type->info.function)->template_parameters.length ==
+          0 &&
       templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
       TypeIsFunction(templ->value.func_defn->type) &&
-      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+      FunctionExtraOf(&templ->value.func_defn->type->info.function)
+              ->template_parameters.length > 0) {
     func_type = templ->value.func_defn->type;
   }
   SetMemberTemplateSubstitutionContext(&parser, func_type);
@@ -7269,10 +7311,12 @@ static Symbol* CreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
   TypeRecord* func_type = templ->type;
   if (templ->is_imported_module_symbol && func_type != NULL &&
       TypeIsFunction(func_type) &&
-      func_type->info.function.template_parameters.length == 0 &&
+      FunctionExtraOf(&func_type->info.function)->template_parameters.length ==
+          0 &&
       templ->value.func_defn != NULL && templ->value.func_defn->type != NULL &&
       TypeIsFunction(templ->value.func_defn->type) &&
-      templ->value.func_defn->type->info.function.template_parameters.length > 0) {
+      FunctionExtraOf(&templ->value.func_defn->type->info.function)
+              ->template_parameters.length > 0) {
     func_type = templ->value.func_defn->type;
   }
   SetMemberTemplateSubstitutionContext(&parser, func_type);
@@ -7383,7 +7427,8 @@ Vector* TypeDeduceConversionOperatorTemplateArguments(Syntax* syntax,
       templ->value.func_defn != NULL && templ->value.func_defn->type != NULL
           ? templ->value.func_defn->type
           : templ->type;
-  if (func->info.function.template_parameter_count <= 0 || func->next == NULL) {
+  if (FunctionExtraOf(&func->info.function)->template_parameter_count <= 0 ||
+      func->next == NULL) {
     return NULL;
   }
   // [temp.deduct.conv]: deduce against the referred-to type, ignoring
@@ -7475,8 +7520,8 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(Syntax* syntax,
     return NULL;
   }
   TypeRecord* func = templ->type;
-  if (func->info.function.template_parameter_count <= 0 &&
-      func->info.function.template_parameters.length == 0) {
+  if (FunctionExtraOf(&func->info.function)->template_parameter_count <= 0 &&
+      FunctionExtraOf(&func->info.function)->template_parameters.length == 0) {
     return NULL;
   }
   size_t explicit_arg_count = 0;
@@ -7487,7 +7532,7 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(Syntax* syntax,
   }
   int saved_deduce_base = g_deduce_template_parameter_base;
   g_deduce_template_parameter_base =
-      func->info.function.template_parameter_base;
+      FunctionExtraOf(&func->info.function)->template_parameter_base;
   bool deduced = DeduceFunctionTemplateTypeArgument(args, explicit_arg_count,
                                                     func, target_fn);
   g_deduce_template_parameter_base = saved_deduce_base;
@@ -7500,8 +7545,10 @@ Vector* TypeDeduceFunctionTemplateArgumentsFromFunctionType(Syntax* syntax,
   // Default template arguments are written on the declaration, not on an
   // out-of-class definition (`template <class T, EnableIf<T>> C::C(T&&)`).
   TypeRecord* completion_func =
-      templ->type->info.function.template_parameters.length > 0 ? templ->type
-                                                                : func;
+      FunctionExtraOf(&templ->type->info.function)->template_parameters.length >
+              0
+          ? templ->type
+          : func;
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args =
@@ -7658,7 +7705,8 @@ static bool DeducePartialOrderingTypeAlone(TypeRecord* func,
                                            TypeRecord* parameter,
                                            TypeRecord* argument) {
   int saved_base = g_deduce_template_parameter_base;
-  g_deduce_template_parameter_base = func->info.function.template_parameter_base;
+  g_deduce_template_parameter_base =
+      FunctionExtraOf(&func->info.function)->template_parameter_base;
   size_t explicit_arg_count = 0;
   Vector* args =
       NewFunctionTemplateDeductionArguments(func, NULL, &explicit_arg_count);
@@ -7729,7 +7777,7 @@ static bool FunctionParametersAtLeastAsSpecialized(Symbol* specialized,
   int saved_base = g_deduce_template_parameter_base;
   bool saved_defer = g_deduce_defer_bare_member;
   g_deduce_template_parameter_base =
-      gfunc->info.function.template_parameter_base;
+      FunctionExtraOf(&gfunc->info.function)->template_parameter_base;
   g_deduce_defer_bare_member = true;
   size_t explicit_arg_count = 0;
   Vector* args =
@@ -10067,8 +10115,13 @@ StructMember* InstantiateTemplateMemberFunction(TypeParser* parser,
   StringDestruct(&conversion_name);
   symbol->location = member->symbol->location;
   symbol->flags.is_template = member->symbol->flags.is_template;
-  symbol->type->info.function.template_parameter_count =
-      member->symbol->type->info.function.template_parameter_count;
+  int template_parameter_count =
+      FunctionExtraOf(&member->symbol->type->info.function)
+          ->template_parameter_count;
+  if (template_parameter_count != 0 || func->info.function.extra != NULL) {
+    FunctionMutableExtra(&func->info.function)->template_parameter_count =
+        template_parameter_count;
+  }
   func->info.function.symbol = symbol;
   SymbolSetCXXMangledAsmName(symbol);
   Symbol* template_definition = member->symbol->value.func_defn;
@@ -11232,9 +11285,10 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
                                                  Vector* args,
                                                  bool emit_error,
                                                  TemplateArgumentOwnership ownership) {
-  bool memoize = func != NULL && TypeIsFunction(func) &&
-                 func->info.function.template_parameter_base == 0 &&
-                 TemplateMemoArgumentsConcrete(args);
+  bool memoize =
+      func != NULL && TypeIsFunction(func) &&
+      FunctionExtraOf(&func->info.function)->template_parameter_base == 0 &&
+      TemplateMemoArgumentsConcrete(args);
   TemplateMemo key;
   TemplateMemoWatch watch;
   if (memoize) {
@@ -11269,7 +11323,8 @@ static Vector* CompleteFunctionTemplateArgumentsUnsuspended(
     TemplateArgumentOwnership ownership) {
   Vector* parameters = NULL;
   if (func != NULL && TypeIsFunction(func)) {
-    parameters = &func->info.function.template_parameters;
+    parameters =
+        &FunctionMutableExtra(&func->info.function)->template_parameters;
     if (parameters->length == 0 && func->info.function.symbol != NULL &&
         SymbolExtraOf(func->info.function.symbol)
                 ->imported_function_template_parameters_backup.length > 0) {
@@ -11293,7 +11348,8 @@ static Vector* CompleteFunctionTemplateArgumentsUnsuspended(
   // instantiations.
   Vector* parameters_for_completion = parameters;
   Vector* rebased_parameters = NULL;
-  int member_base = func->info.function.template_parameter_base;
+  int member_base =
+      FunctionExtraOf(&func->info.function)->template_parameter_base;
   if (member_base > 0) {
     rebased_parameters = TemplateParameterVectorCopy(parameters);
     // The primary still numbers parameters after the enclosing class
@@ -11470,9 +11526,9 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
     parser->template_substitution_source = subst_source;
     parser->template_substitution_target = subst_target;
     bool constraints_satisfied =
-        func->info.function.associated_constraint == NULL ||
+        FunctionExtraOf(&func->info.function)->associated_constraint == NULL ||
         ConceptsConstraintSatisfied(
-            func->info.function.associated_constraint, args);
+            FunctionExtraOf(&func->info.function)->associated_constraint, args);
     func->info.function.cxx_member_owner = NULL;
 
     Symbol* sym = NewSymbol(ftpl->name.value, func, ftpl->storage);
@@ -12684,9 +12740,10 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
                                       : NULL;
     if (prefixed_member_body_args != NULL && source_args != NULL &&
         definition_type != NULL && TypeIsFunction(definition_type) &&
-        definition_type->info.function.template_parameters.length > 0 &&
-        definition_type->info.function.template_parameter_base ==
-            (int)source_args->length) {
+        FunctionExtraOf(&definition_type->info.function)
+                ->template_parameters.length > 0 &&
+        FunctionExtraOf(&definition_type->info.function)
+                ->template_parameter_base == (int)source_args->length) {
       body_args = source_args;
     }
     if (pmb->template_definition == NULL &&

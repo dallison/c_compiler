@@ -112,7 +112,8 @@ static void AddDeferredFriendTemplateParameters(Syntax* syntax,
   if (func == NULL || !TypeIsFunction(func)) {
     return;
   }
-  Vector* parameters = &func->info.function.template_parameters;
+  const Vector* parameters =
+      &FunctionExtraOf(&func->info.function)->template_parameters;
   for (size_t i = 0; i < parameters->length; i++) {
     TemplateParameter* parameter = parameters->value.p[i];
     if (parameter == NULL || parameter->name.length == 0) {
@@ -665,19 +666,21 @@ static void AdoptFriendTemplateHead(Syntax* syntax, Struct* befriending,
     if (first_own == NULL) {
       first_own = param;
     }
-    VectorAppend(&sym->type->info.function.template_parameters,
-                 TemplateParameterCopy(param));
+    VectorAppend(
+        &FunctionMutableExtra(&sym->type->info.function)->template_parameters,
+        TemplateParameterCopy(param));
     own_count++;
   }
   sym->flags.is_template = true;
-  sym->type->info.function.template_parameter_count = own_count;
-  sym->type->info.function.template_parameter_base =
+  FunctionMutableExtra(&sym->type->info.function)->template_parameter_count =
+      own_count;
+  FunctionMutableExtra(&sym->type->info.function)->template_parameter_base =
       first_own != NULL ? first_own->index : parameter_base;
   // Fold any concept-constrained parameters (e.g. `template <integral I>`) and
   // an explicit trailing requires-clause into the function's constraint.
   MoveTemplateParameterConstraints(
-      &sym->type->info.function.template_parameters,
-      &sym->type->info.function.associated_constraint);
+      &FunctionMutableExtra(&sym->type->info.function)->template_parameters,
+      &FunctionMutableExtra(&sym->type->info.function)->associated_constraint);
   if (syntax->current_template_requires_clause != NULL) {
     AddFunctionAssociatedConstraint(sym->type,
                                     syntax->current_template_requires_clause);
@@ -810,7 +813,8 @@ static void DeclareFriendFunction(Syntax* syntax, TypeParser* parser,
   //       never "instantiated").
   bool enclosing_class_is_template = FriendEnclosingClassIsTemplate(befriending);
   if (FriendHasOwnTemplateHead(syntax, befriending, sym) &&
-      sym->type->info.function.template_parameters.length == 0) {
+      FunctionExtraOf(&sym->type->info.function)->template_parameters.length ==
+          0) {
     AdoptFriendTemplateHead(syntax, befriending, sym);
   }
 

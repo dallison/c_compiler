@@ -799,7 +799,8 @@ static TypeRecord* ParseCXXDecltypeSpecifier(TypeParser* parser) {
   bool dependent_context =
       parser->syntax->current_template_parameters != NULL ||
       (function != NULL && TypeIsFunction(function) &&
-       function->info.function.template_parameters.length > 0);
+       FunctionExtraOf(&function->info.function)->template_parameters.length >
+           0);
   bool parenthesized_expression = LexLookingAt(parser->lex, TOK(lparen));
   bool unparenthesized_identifier =
       !parenthesized_expression &&
@@ -4214,12 +4215,14 @@ static void AddFunctionAssociatedConstraint(TypeRecord* func,
   if (func == NULL || !TypeIsFunction(func) || constraint == NULL) {
     return;
   }
-  ConstraintExpr* current = func->info.function.associated_constraint;
+  ConstraintExpr* current =
+      FunctionExtraOf(&func->info.function)->associated_constraint;
   if (current == NULL) {
-    func->info.function.associated_constraint = constraint;
+    FunctionMutableExtra(&func->info.function)->associated_constraint =
+        constraint;
     return;
   }
-  func->info.function.associated_constraint =
+  FunctionMutableExtra(&func->info.function)->associated_constraint =
       NewConjunctionConstraint(current, constraint, constraint->location);
 }
 
@@ -4314,8 +4317,9 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
   LexCheckpointDestruct(&cv_checkpoint);
   LexNextToken(lex);  // auto
 
-  int index = syntax->current_template_parameter_count +
-              (int)func->info.function.template_parameters.length;
+  int index =
+      syntax->current_template_parameter_count +
+      (int)FunctionExtraOf(&func->info.function)->template_parameters.length;
   TypeRecord* placeholder = TypeRecordAdopt(
       NewTypeRecordWithSize(kTypeInt | kTypeUnknown, placeholder_qualifiers));
   placeholder->template_parameter_index = index;
@@ -4330,7 +4334,7 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
   ParseFormalArgument(proto_parser, func, formal, arg_number,
                       /*abbreviated_parameter=*/true);
 
-  VectorAppend(&func->info.function.template_parameters,
+  VectorAppend(&FunctionMutableExtra(&func->info.function)->template_parameters,
                NewAbbreviatedTypeTemplateParameter(proto_parser, index));
   if (concept_symbol != NULL) {
     if (concept_arguments == NULL) {
@@ -4348,8 +4352,8 @@ static bool ParseAbbreviatedFunctionParameter(TypeParser* proto_parser,
                                      constraint_location));
   }
   TypeRecordDelete(placeholder);
-  func->info.function.template_parameter_count =
-      (int)func->info.function.template_parameters.length;
+  FunctionMutableExtra(&func->info.function)->template_parameter_count =
+      (int)FunctionExtraOf(&func->info.function)->template_parameters.length;
   return true;
 }
 
@@ -4792,9 +4796,8 @@ static void ParseFunctionDecl(TypeParser* parser) {
                                parser->cxx_member_owner,
                                parser->cxx_member_owner != NULL &&
                                    !StorageIs(parser->storage, STO(static)));
-  if (func->info.function.contract_assertions.length != 0 &&
-      (parser->stack.length != 0 ||
-       StorageIs(parser->storage, STO(typedef)))) {
+  if (FunctionExtraOf(&func->info.function)->contract_assertions.length != 0 &&
+      (parser->stack.length != 0 || StorageIs(parser->storage, STO(typedef)))) {
     SyntaxError(parser->syntax,
                 "function contract specifiers cannot be associated with a "
                 "function pointer or function type alias");

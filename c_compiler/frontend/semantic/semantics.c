@@ -1775,7 +1775,8 @@ static bool SelectConversionOperatorTemplate(Struct* str, TypeRecord* to,
   // their defaults (`template <class U, class... Args, class = enable_if_t<..>>
   // operator OnceAction<U(Args...)>()`), so pass the list only through the
   // last pack; otherwise the default's `void` joins `Args`.
-  Vector* params = &chosen->type->info.function.template_parameters;
+  const Vector* params =
+      &FunctionExtraOf(&chosen->type->info.function)->template_parameters;
   for (size_t i = params->length; i-- > 0;) {
     TemplateParameter* param = params->value.p[i];
     if (param != NULL && param->is_parameter_pack) {

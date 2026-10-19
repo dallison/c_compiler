@@ -2385,7 +2385,8 @@ static void GenerateFunctionIRImpl(Generator* gen) {
   bool is_main =
       strcmp(gen->func->info.function.symbol->name.value, "main") == 0;
   if (body->statements->length == 0 &&
-      gen->func->info.function.contract_assertions.length == 0 &&
+      FunctionExtraOf(&gen->func->info.function)->contract_assertions.length ==
+          0 &&
       !marks_constructed_object && !is_main) {
     // Empty function, just return.
     GeneratorEmit(gen, NewIR(IR_OP(ret)));

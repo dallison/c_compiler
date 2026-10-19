@@ -128,16 +128,22 @@ void MoveCurrentTemplateParametersToFunction(Syntax* syntax,
   }
   if (func->info.function.symbol != NULL &&
       func->info.function.symbol->is_imported_module_symbol &&
-      func->info.function.template_parameters.length > 0) {
+      FunctionExtraOf(&func->info.function)->template_parameters.length > 0) {
     return;
   }
-  VectorDestructWithContents(&func->info.function.template_parameters,
-                             (VectorElementDestructor)TemplateParameterDelete,
-                             /*free_element=*/false);
-  VectorInit(&func->info.function.template_parameters);
+  if (syntax->current_template_parameters->length == 0 &&
+      func->info.function.extra == NULL) {
+    return;
+  }
+  VectorDestructWithContents(
+      &FunctionMutableExtra(&func->info.function)->template_parameters,
+      (VectorElementDestructor)TemplateParameterDelete,
+      /*free_element=*/false);
+  VectorInit(&FunctionMutableExtra(&func->info.function)->template_parameters);
   for (size_t i = 0; i < syntax->current_template_parameters->length; i++) {
-    VectorAppend(&func->info.function.template_parameters,
-                 syntax->current_template_parameters->value.p[i]);
+    VectorAppend(
+        &FunctionMutableExtra(&func->info.function)->template_parameters,
+        syntax->current_template_parameters->value.p[i]);
   }
   syntax->current_template_parameters->length = 0;
 }
@@ -199,12 +205,14 @@ void AddFunctionAssociatedConstraint(TypeRecord* func,
   if (func == NULL || !TypeIsFunction(func) || constraint == NULL) {
     return;
   }
-  ConstraintExpr* current = func->info.function.associated_constraint;
+  ConstraintExpr* current =
+      FunctionExtraOf(&func->info.function)->associated_constraint;
   if (current == NULL) {
-    func->info.function.associated_constraint = constraint;
+    FunctionMutableExtra(&func->info.function)->associated_constraint =
+        constraint;
     return;
   }
-  func->info.function.associated_constraint =
+  FunctionMutableExtra(&func->info.function)->associated_constraint =
       NewConjunctionConstraint(current, constraint, constraint->location);
 }
 
@@ -247,8 +255,9 @@ static void MoveTemplateParameterConstraintsToFunction(TypeRecord* func) {
   if (func == NULL || !TypeIsFunction(func)) {
     return;
   }
-  MoveTemplateParameterConstraints(&func->info.function.template_parameters,
-                                   &func->info.function.associated_constraint);
+  MoveTemplateParameterConstraints(
+      &FunctionMutableExtra(&func->info.function)->template_parameters,
+      &FunctionMutableExtra(&func->info.function)->associated_constraint);
 }
 
 // Hoists per-parameter constraints from `str`'s template parameter list onto
@@ -302,12 +311,15 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
         var->symbol->flags.is_template = true;
         if (var->symbol->type != NULL && TypeIsFunction(var->symbol->type)) {
           if (!already_template) {
-            var->symbol->type->info.function.template_parameter_count =
+            FunctionMutableExtra(&var->symbol->type->info.function)
+                ->template_parameter_count =
                 CurrentTemplateParameterListLength(syntax);
-            var->symbol->type->info.function.template_parameter_base =
+            FunctionMutableExtra(&var->symbol->type->info.function)
+                ->template_parameter_base =
                 CurrentTemplateParameterBase(syntax);
           }
-          if (var->symbol->type->info.function.template_parameters.length == 0) {
+          if (FunctionExtraOf(&var->symbol->type->info.function)
+                  ->template_parameters.length == 0) {
             MoveCurrentTemplateParametersToFunction(syntax, var->symbol->type);
           }
           MoveTemplateParameterConstraintsToFunction(var->symbol->type);
@@ -577,13 +589,13 @@ static Vector* SyntaxCloneTemplateParametersFromSymbol(Syntax* syntax,
                                                        Symbol* templ,
                                                        int base) {
   Vector* params = NewVector();
-  Vector* source = NULL;
+  const Vector* source = NULL;
   if (templ != NULL && templ->type != NULL && TypeIsStructOrUnion(templ->type) &&
       templ->type->info.struct_info != NULL) {
     source = &templ->type->info.struct_info->template_parameters;
   } else if (templ != NULL && templ->type != NULL &&
              TypeIsFunction(templ->type)) {
-    source = &templ->type->info.function.template_parameters;
+    source = &FunctionExtraOf(&templ->type->info.function)->template_parameters;
   }
   if (source == NULL) {
     SyntaxError(syntax, "Template splice operand does not reflect a template");

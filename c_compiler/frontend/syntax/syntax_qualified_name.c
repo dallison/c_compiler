@@ -210,15 +210,16 @@ bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name) {
 // Returns true when `symbol` is a user-defined literal operator template of
 // the form `operator""` with a single char pack non-type template parameter.
 bool SyntaxIsCXXNumericLiteralOperatorTemplate(Symbol* symbol) {
-  if (symbol == NULL || !symbol->flags.is_template ||
-      symbol->type == NULL || !TypeIsFunction(symbol->type) ||
+  if (symbol == NULL || !symbol->flags.is_template || symbol->type == NULL ||
+      !TypeIsFunction(symbol->type) ||
       !StringStartsWith(&symbol->name, "operator\"\"") ||
       symbol->type->info.function.prototype.length != 0 ||
-      symbol->type->info.function.template_parameters.length != 1) {
+      FunctionExtraOf(&symbol->type->info.function)
+              ->template_parameters.length != 1) {
     return false;
   }
-  TemplateParameter* parameter =
-      symbol->type->info.function.template_parameters.value.p[0];
+  TemplateParameter* parameter = FunctionExtraOf(&symbol->type->info.function)
+                                     ->template_parameters.value.p[0];
   return parameter != NULL && parameter->kind == kTemplateParameterNonType &&
          parameter->is_parameter_pack && parameter->type != NULL &&
          parameter->type->declarator == kDeclPrimitive &&

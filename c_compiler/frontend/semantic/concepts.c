@@ -1532,11 +1532,11 @@ bool ConceptsFunctionTemplateConstraintsSatisfied(Symbol* templ,
       templ != NULL && templ->value.func_defn != NULL
           ? templ->value.func_defn
           : templ;
-  int enclosing_count =
-      definition != NULL && definition->type != NULL &&
-              TypeIsFunction(definition->type)
-          ? definition->type->info.function.template_parameter_base
-          : 0;
+  int enclosing_count = definition != NULL && definition->type != NULL &&
+                                TypeIsFunction(definition->type)
+                            ? FunctionExtraOf(&definition->type->info.function)
+                                  ->template_parameter_base
+                            : 0;
   Vector* enclosing_args =
       templ != NULL && templ->type != NULL
           ? templ->type->template_arguments
@@ -1545,7 +1545,9 @@ bool ConceptsFunctionTemplateConstraintsSatisfied(Symbol* templ,
       ConceptsFunctionTemplateHasAssociatedConstraint(definition)) {
     if (enclosing_count <= 0) {
       return ConceptsConstraintSatisfied(
-          definition->type->info.function.associated_constraint, arguments);
+          FunctionExtraOf(&definition->type->info.function)
+              ->associated_constraint,
+          arguments);
     }
     if (enclosing_args == NULL ||
         enclosing_args->length < (size_t)enclosing_count) {
@@ -1560,7 +1562,9 @@ bool ConceptsFunctionTemplateConstraintsSatisfied(Symbol* templ,
       VectorAppend(&combined, arguments->value.p[i]);
     }
     bool satisfied = ConceptsConstraintSatisfied(
-        definition->type->info.function.associated_constraint, &combined);
+        FunctionExtraOf(&definition->type->info.function)
+            ->associated_constraint,
+        &combined);
     VectorDestruct(&combined);
     return satisfied;
   }
@@ -1568,19 +1572,21 @@ bool ConceptsFunctionTemplateConstraintsSatisfied(Symbol* templ,
     return true;
   }
   return ConceptsConstraintSatisfied(
-      templ->type->info.function.associated_constraint, arguments);
+      FunctionExtraOf(&templ->type->info.function)->associated_constraint,
+      arguments);
 }
 
 bool ConceptsFunctionTemplateHasAssociatedConstraint(Symbol* templ) {
   return templ != NULL && templ->type != NULL && TypeIsFunction(templ->type) &&
-         templ->type->info.function.associated_constraint != NULL;
+         FunctionExtraOf(&templ->type->info.function)->associated_constraint !=
+             NULL;
 }
 
 static ConstraintExpr* FunctionTemplateConstraint(Symbol* templ) {
   if (!ConceptsFunctionTemplateHasAssociatedConstraint(templ)) {
     return NULL;
   }
-  return templ->type->info.function.associated_constraint;
+  return FunctionExtraOf(&templ->type->info.function)->associated_constraint;
 }
 
 // ---------------------------------------------------------------------------
@@ -1737,7 +1743,8 @@ static Vector* FunctionTemplateParameters(Symbol* templ) {
   if (templ == NULL || templ->type == NULL || !TypeIsFunction(templ->type)) {
     return NULL;
   }
-  return &templ->type->info.function.template_parameters;
+  return &FunctionMutableExtra(&templ->type->info.function)
+              ->template_parameters;
 }
 
 static Vector* NewIdentityParameterMappingFromParameters(Vector* parameters) {
@@ -2799,7 +2806,8 @@ void ConceptsReportFunctionTemplateConstraintFailure(Symbol* templ,
     return;
   }
   ConceptsReportAssociatedConstraintFailure(
-      templ->type->info.function.associated_constraint, arguments, templ->location,
+      FunctionExtraOf(&templ->type->info.function)->associated_constraint,
+      arguments, templ->location,
       "candidate template ignored: constraints not satisfied");
 }
 

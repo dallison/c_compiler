@@ -108,10 +108,10 @@ void SyntaxParseCXXDeletedFunctionReason(Syntax* syntax, TypeRecord* func) {
     if (LexValidateUnevaluatedString(
             syntax->lex, "deleted function reason",
             /*allow_user_defined_suffix=*/false)) {
-      if (func->info.function.deleted_reason != NULL) {
-        StringDelete(func->info.function.deleted_reason);
+      if (FunctionExtraOf(&func->info.function)->deleted_reason != NULL) {
+        StringDelete(FunctionExtraOf(&func->info.function)->deleted_reason);
       }
-      func->info.function.deleted_reason =
+      FunctionMutableExtra(&func->info.function)->deleted_reason =
           NewStringWithLength(syntax->lex->spelling.value,
                               syntax->lex->spelling.length);
     }
@@ -141,7 +141,8 @@ void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,
       func->info.function.is_inline = true;
     }
     if (is_first_declaration &&
-        func->info.function.contract_assertions.length != 0) {
+        FunctionExtraOf(&func->info.function)->contract_assertions.length !=
+            0) {
       SyntaxError(syntax,
                   "a function defaulted on its first declaration cannot "
                   "have contract assertions");

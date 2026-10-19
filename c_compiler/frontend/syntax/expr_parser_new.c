@@ -901,7 +901,8 @@ static TypeRecord* DeduceCXXNewPlaceholderType(Syntax* syntax,
   bool dependent_context =
       syntax->current_template_parameters != NULL ||
       (function != NULL && TypeIsFunction(function) &&
-       function->info.function.template_parameters.length > 0);
+       FunctionExtraOf(&function->info.function)->template_parameters.length >
+           0);
   bool dependent =
       dependent_context &&
       (init_type == NULL || TypeIsUnknown(init_type) ||

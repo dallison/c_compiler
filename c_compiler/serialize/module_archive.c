@@ -498,13 +498,15 @@ static void RepairImportedTemplateParameterVector(Vector* vec) {
 }
 
 static void RepairImportedFunctionTemplateParameters(TypeRecord* func) {
-  if (func == NULL || !TypeIsFunction(func)) {
+  if (func == NULL || !TypeIsFunction(func) ||
+      FunctionExtraOf(&func->info.function)->template_parameters.length == 0) {
     return;
   }
-  RepairImportedTemplateParameterVector(&func->info.function.template_parameters);
-  if (func->info.function.template_parameters.length > 0) {
-    func->info.function.template_parameter_count =
-        (int)func->info.function.template_parameters.length;
+  RepairImportedTemplateParameterVector(
+      &FunctionMutableExtra(&func->info.function)->template_parameters);
+  if (FunctionExtraOf(&func->info.function)->template_parameters.length > 0) {
+    FunctionMutableExtra(&func->info.function)->template_parameter_count =
+        (int)FunctionExtraOf(&func->info.function)->template_parameters.length;
   }
 }
 
@@ -573,8 +575,8 @@ static void RepairDeserializedModuleGraph(DeserializeContext* ctx) {
       if (sym->type->info.function.body != NULL && sym->value.func_defn == NULL) {
         sym->value.func_defn = sym;
       }
-      if (sym->flags.is_template ||
-          sym->type->info.function.template_parameters.length > 0) {
+      if (sym->flags.is_template || FunctionExtraOf(&sym->type->info.function)
+                                            ->template_parameters.length > 0) {
         RepairImportedFunctionTemplateParameters(sym->type);
       }
     }

@@ -66,8 +66,8 @@ static bool CXXTemplateParameterIndexIsPack(Syntax* syntax, int index) {
 // parameters owned by the current function.
 static TemplateParameter* CXXTemplateParameterForIndex(Syntax* syntax,
                                                        int index) {
-  Vector* parameters = syntax != NULL ? syntax->current_template_parameters
-                                      : NULL;
+  const Vector* parameters =
+      syntax != NULL ? syntax->current_template_parameters : NULL;
   for (size_t i = 0; parameters != NULL && i < parameters->length; i++) {
     TemplateParameter* parameter = parameters->value.p[i];
     if (parameter != NULL && parameter->index == index) {
@@ -76,7 +76,8 @@ static TemplateParameter* CXXTemplateParameterForIndex(Syntax* syntax,
   }
   TypeRecord* function = compiler->current_function;
   if (function != NULL && TypeIsFunction(function)) {
-    parameters = &function->info.function.template_parameters;
+    parameters =
+        &FunctionExtraOf(&function->info.function)->template_parameters;
     for (size_t i = 0; i < parameters->length; i++) {
       TemplateParameter* parameter = parameters->value.p[i];
       if (parameter != NULL && parameter->index == index) {

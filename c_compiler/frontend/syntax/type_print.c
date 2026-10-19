@@ -232,7 +232,8 @@ static void AppendReadableTypeName(String* result, String* name) {
   }
 }
 
-static String* TemplateParameterDisplayName(Vector* parameters, int index) {
+static String* TemplateParameterDisplayName(const Vector* parameters,
+                                            int index) {
   if (parameters == NULL) {
     return NULL;
   }
@@ -260,7 +261,7 @@ static void PackIndexExpressionToString(ASTNode* expr, String* result) {
 }
 
 static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
-                                                     Vector* parameters,
+                                                     const Vector* parameters,
                                                      String* result) {
   if (type == NULL) {
     StringAppend(result, "<invalid>");
@@ -486,7 +487,8 @@ static void AppendFunctionParameterList(TypeRecord* func, String* out) {
       StringAppend(out, "this ");
     }
     TypeRecordToStringWithTemplateParameters(
-        formal->type, &func->info.function.template_parameters, out);
+        formal->type,
+        &FunctionExtraOf(&func->info.function)->template_parameters, out);
     sep = ", ";
     wrote_parameter = true;
   }
@@ -504,7 +506,8 @@ void TypeRecordFunctionPrettyName(TypeRecord* func, String* result) {
   if (!func->info.function.is_constructor &&
       !func->info.function.is_destructor) {
     TypeRecordToStringWithTemplateParameters(
-        func->next, &func->info.function.template_parameters, result);
+        func->next, &FunctionExtraOf(&func->info.function)->template_parameters,
+        result);
     TrimTrailingSpaces(result);
     StringAppendChar(result, ' ');
   }

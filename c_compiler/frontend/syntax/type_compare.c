@@ -853,17 +853,18 @@ static void IndexFunctionTemplateInstantiation(
 static struct FunctionTemplateInstantiationCache*
 EnsureFunctionTemplateInstantiationCache(Symbol* templ) {
   FunctionInfo* info = &templ->type->info.function;
-  if (info->template_instantiation_cache != NULL) {
-    return info->template_instantiation_cache;
+  if (FunctionExtraOf(info)->template_instantiation_cache != NULL) {
+    return FunctionExtraOf(info)->template_instantiation_cache;
   }
-  info->template_instantiation_cache =
+  FunctionMutableExtra(info)->template_instantiation_cache =
       NewFunctionTemplateInstantiationCache();
-  for (size_t i = 0; i < info->template_instantiations.length; i++) {
+  for (size_t i = 0; i < FunctionExtraOf(info)->template_instantiations.length;
+       i++) {
     IndexFunctionTemplateInstantiation(
-        info->template_instantiation_cache, templ,
-        info->template_instantiations.value.p[i]);
+        FunctionExtraOf(info)->template_instantiation_cache, templ,
+        FunctionExtraOf(info)->template_instantiations.value.p[i]);
   }
-  return info->template_instantiation_cache;
+  return FunctionExtraOf(info)->template_instantiation_cache;
 }
 
 /* A function template and its completed arguments uniquely identify an
@@ -1008,12 +1009,15 @@ void AppendFunctionTemplateInstantiation(Symbol* templ,
   }
   instantiated->overload_next = NULL;
   instantiated->flags.is_overloaded = false;
-  VectorAppend(&templ->type->info.function.template_instantiations,
+  VectorAppend(&FunctionMutableExtra(&templ->type->info.function)
+                    ->template_instantiations,
                instantiated);
-  if (templ->type->info.function.template_instantiation_cache != NULL) {
+  if (FunctionExtraOf(&templ->type->info.function)
+          ->template_instantiation_cache != NULL) {
     IndexFunctionTemplateInstantiation(
-        templ->type->info.function.template_instantiation_cache, templ,
-        instantiated);
+        FunctionExtraOf(&templ->type->info.function)
+            ->template_instantiation_cache,
+        templ, instantiated);
   }
 }
 

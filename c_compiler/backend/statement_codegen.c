@@ -467,7 +467,8 @@ static void GenerateContractCheck(Generator* gen, ASTNode* predicate,
 
 void GenerateFunctionContractAssertions(Generator* gen,
                                         ContractAssertionKind kind) {
-  Vector* assertions = &gen->func->info.function.contract_assertions;
+  const Vector* assertions =
+      &FunctionExtraOf(&gen->func->info.function)->contract_assertions;
   for (size_t i = 0; i < assertions->length; i++) {
     ContractAssertion* assertion = assertions->value.p[i];
     if (assertion->kind == kind) {
@@ -478,7 +479,8 @@ void GenerateFunctionContractAssertions(Generator* gen,
 }
 
 static bool FunctionHasPostconditionResultBindings(TypeRecord* func) {
-  Vector* assertions = &func->info.function.contract_assertions;
+  const Vector* assertions =
+      &FunctionExtraOf(&func->info.function)->contract_assertions;
   for (size_t i = 0; i < assertions->length; i++) {
     ContractAssertion* assertion = assertions->value.p[i];
     if (assertion->kind == kContractPostcondition &&
@@ -490,7 +492,8 @@ static bool FunctionHasPostconditionResultBindings(TypeRecord* func) {
 }
 
 static void BindPostconditionResults(Generator* gen, IRNode* scalar_result) {
-  Vector* assertions = &gen->func->info.function.contract_assertions;
+  const Vector* assertions =
+      &FunctionExtraOf(&gen->func->info.function)->contract_assertions;
   for (size_t i = 0; i < assertions->length; i++) {
     ContractAssertion* assertion = assertions->value.p[i];
     Symbol* binding = assertion->result_binding;
@@ -2795,8 +2798,8 @@ static void GenerateReturnStatement(Generator* gen,
       // allocator does not keep it live across the `result` opcode, so spill it
       // to a stack temporary now and reload it after the destructors.
       bool spill_for_cleanup =
-          node->stmt != NULL ||
-          gen->func->info.function.contract_assertions.length != 0;
+          node->stmt != NULL || FunctionExtraOf(&gen->func->info.function)
+                                        ->contract_assertions.length != 0;
       if (returns_reference) {
         // NeedAddress on an identifier yields the variable node itself, not
         // addressof.  resulta must receive a pointer; without this wrap the

@@ -1100,8 +1100,10 @@ static bool MetaTraitPrototypeContainsParameter(TypeRecord* function_type,
   }
   int index = MetaTraitTemplateParameterIndex(param);
   if (index >= 0 &&
-      function_type->info.function.template_parameters.length > 0 &&
-      (size_t)index < function_type->info.function.template_parameters.length) {
+      FunctionExtraOf(&function_type->info.function)
+              ->template_parameters.length > 0 &&
+      (size_t)index < FunctionExtraOf(&function_type->info.function)
+                          ->template_parameters.length) {
     return true;
   }
   for (size_t i = 0; i < function_type->info.function.prototype.length; i++) {
@@ -1146,10 +1148,11 @@ static void MetaTraitSearchSymbolForParameter(BinaryTreeNode* node, int depth,
       search->found = function_type;
       return;
     }
-    for (size_t i = 0;
-         i < function_type->info.function.template_instantiations.length; i++) {
-      Symbol* instantiation =
-          function_type->info.function.template_instantiations.value.p[i];
+    for (size_t i = 0; i < FunctionExtraOf(&function_type->info.function)
+                               ->template_instantiations.length;
+         i++) {
+      Symbol* instantiation = FunctionExtraOf(&function_type->info.function)
+                                  ->template_instantiations.value.p[i];
       if (instantiation == NULL || instantiation->type == NULL) {
         continue;
       }
@@ -1179,10 +1182,11 @@ static void MetaTraitSearchTemplateInstantiations(BinaryTreeNode* node,
         !symbol->flags.is_template) {
       continue;
     }
-    for (size_t i = 0;
-         i < symbol->type->info.function.template_instantiations.length; i++) {
-      Symbol* instantiation =
-          symbol->type->info.function.template_instantiations.value.p[i];
+    for (size_t i = 0; i < FunctionExtraOf(&symbol->type->info.function)
+                               ->template_instantiations.length;
+         i++) {
+      Symbol* instantiation = FunctionExtraOf(&symbol->type->info.function)
+                                  ->template_instantiations.value.p[i];
       if (instantiation == NULL || instantiation->type == NULL ||
           instantiation->type->template_arguments == NULL ||
           index >= instantiation->type->template_arguments->length) {
@@ -1301,13 +1305,15 @@ static TypeRecord* MetaTraitFunctionTypeForParameterSymbol(Symbol* param) {
       }
     }
     if (TypeIsFunction(function_type) &&
-        function_type->info.function.template_instantiations.length > 0 &&
+        FunctionExtraOf(&function_type->info.function)
+                ->template_instantiations.length > 0 &&
         index >= 0) {
       size_t arg_index = (size_t)index;
-      for (size_t j = 0;
-           j < function_type->info.function.template_instantiations.length; j++) {
-        Symbol* instantiation =
-            function_type->info.function.template_instantiations.value.p[j];
+      for (size_t j = 0; j < FunctionExtraOf(&function_type->info.function)
+                                 ->template_instantiations.length;
+           j++) {
+        Symbol* instantiation = FunctionExtraOf(&function_type->info.function)
+                                    ->template_instantiations.value.p[j];
         if (instantiation == NULL || instantiation->type == NULL) {
           continue;
         }

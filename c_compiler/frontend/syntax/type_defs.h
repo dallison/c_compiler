@@ -250,25 +250,20 @@ typedef struct ContractAssertion {
   SourceLocation location;      // @wire 4
 } ContractAssertion;
 
-// Function info.  Serialized as an inline sub-message of TypeRecord (see
-// type_serialize.c); the field numbers below are local to that sub-message.
-typedef struct {
-  Symbol* symbol;       // Symbol for function (or NULL).           // @wire 1
-  Vector prototype;     // Formal arguments (owned Symbol*).        // @wire 2
-  struct ASTNode* body; // Body AST.                                // @wire 4
+// The rarely set fields of a FunctionInfo: templates, coroutines, contracts
+// and deferred specifiers.  Allocated on first write through
+// FunctionMutableExtra; until then FunctionExtraOf reads every field as zero.
+// Owned by the function info.
+typedef struct FunctionInfoExtra {
+  struct FunctionInfo* owner;
   // Parse-time deep copy of `body` for generic lambda / function-template
   // instantiation.  The live `body` can be analyzed in place before a call
   // clones it; this snapshot keeps `if constexpr (std::is_same_v<...>)` etc.
   // intact for CloneTemplateFunctionBody.
-  struct ASTNode* template_pattern_body;                           // @wire -
-  CXXRefQualifier ref_qualifier;  // C++ trailing & / &&.           // @wire 14
-  CXXSpecialMemberKind cxx_special_member_kind;  // Special kind.   // @wire 23
+  struct ASTNode* template_pattern_body;      // @wire -
   struct TypeRecord* coroutine_promise_type;  // Promise type.      // @wire 37
   struct TypeRecord* coroutine_frame_type;  // Lowered frame.       // @wire 38
-  int coroutine_suspend_count;  // Suspension points in body.       // @wire 39
-  int virtual_index;    // Vtable slot, or -1 if non-virtual.       // @wire 40
-  Struct* cxx_member_owner;  // Owning class for member functions.  // @wire 41
-  Symbol* template_origin;  // Primary template for instantiations. // @wire 42
+  int coroutine_suspend_count;   // Suspension points in body.       // @wire 39
   int template_parameter_count;  // C++ function template arity.    // @wire 43
   int template_parameter_base;  // Param index base for nesting.    // @wire 44
   Vector template_parameters;  // TemplateParameter* for defaults.  // @wire 45
@@ -279,6 +274,21 @@ typedef struct {
   struct ASTNode* explicit_condition;  // Deferred value-dependent explicit(bool). // @wire 48
   String* deleted_reason;  // Optional C++26 `= delete("reason")`.  // @wire 52
   Vector contract_assertions;  // ContractAssertion* in source order. // @wire 53
+} FunctionInfoExtra;
+
+// Function info.  Serialized as an inline sub-message of TypeRecord (see
+// type_serialize.c); the field numbers below are local to that sub-message.
+typedef struct FunctionInfo {
+  Symbol* symbol;        // Symbol for function (or NULL).           // @wire 1
+  Vector prototype;      // Formal arguments (owned Symbol*).        // @wire 2
+  struct ASTNode* body;  // Body AST.                                // @wire 4
+  CXXRefQualifier ref_qualifier;  // C++ trailing & / &&.           // @wire 14
+  CXXSpecialMemberKind cxx_special_member_kind;  // Special kind.   // @wire 23
+  Struct* cxx_member_owner;  // Owning class for member functions.  // @wire 41
+  Symbol* template_origin;   // Primary template for instantiations. // @wire 42
+  // Read through FunctionExtraOf and write through FunctionMutableExtra.
+  FunctionInfoExtra* extra;
+  int virtual_index;  // Vtable slot, or -1 if non-virtual.       // @wire 40
   bool varargs : 1;  // True if varargs function.                // @wire 3
   bool unknown_args : 1;  // Old-style or invented function.          // @wire 5
   bool definition : 1;  // Function is a definition.                // @wire 6
@@ -321,6 +331,26 @@ typedef struct {
   bool has_explicit_object_parameter : 1;  // C++23 `this T self`.       // @wire 50
   bool is_decltype_auto_return_deduced : 1;  // Return used decltype(auto). // @wire 51
 } FunctionInfo;
+
+extern const FunctionInfoExtra kNoFunctionInfoExtra;
+
+// A function's rarely set fields; all zero when it has none.
+static inline const FunctionInfoExtra* FunctionExtraOf(
+    const FunctionInfo* info) {
+  return info->extra != NULL ? info->extra : &kNoFunctionInfoExtra;
+}
+
+// A function's rarely set fields for writing, allocated on first use.
+FunctionInfoExtra* FunctionMutableExtra(FunctionInfo* info);
+
+// Sets a function's associated constraint; clearing an unset one allocates
+// nothing.
+static inline void FunctionSetAssociatedConstraint(
+    FunctionInfo* info, struct ConstraintExpr* constraint) {
+  if (constraint != NULL || info->extra != NULL) {
+    FunctionMutableExtra(info)->associated_constraint = constraint;
+  }
+}
 
 typedef enum {
   kAccessPublic,

@@ -35,7 +35,7 @@ void SWriteStringVal(SerializeContext* ctx, WireBuffer* buf, int field,
 
 // Writes a Vector of interned-object pointers as a length-delimited blob.
 void SWriteRefVector(SerializeContext* ctx, WireBuffer* buf, int field,
-                     SerialKind kind, Vector* v);
+                     SerialKind kind, const Vector* v);
 
 // Writes a Vector of String* as a length-delimited blob.
 void SWriteStringVector(SerializeContext* ctx, WireBuffer* buf, int field,
@@ -71,7 +71,7 @@ void SerialReadAttributeVector(DeserializeContext* ctx, WireBuffer* buf,
 // and shared with symbol_serialize.c (variable templates).  `v` / `out` are
 // embedded Vectors of TemplateParameter*.
 void SerialWriteTemplateParameterVector(SerializeContext* ctx, WireBuffer* buf,
-                                        int field, Vector* v);
+                                        int field, const Vector* v);
 void SerialReadTemplateParameterVector(DeserializeContext* ctx, WireBuffer* buf,
                                        Vector* out);
 

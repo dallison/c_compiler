@@ -2589,7 +2589,8 @@ static TypeRecord* CoYieldResultType(ASTNode* co_yield) {
   }
   TypeRecord* promise_type =
       compiler->current_function != NULL
-          ? compiler->current_function->info.function.coroutine_promise_type
+          ? FunctionExtraOf(&compiler->current_function->info.function)
+                ->coroutine_promise_type
           : NULL;
   TypeRecord* awaiter_type =
       CoroutinePromiseMemberReturnType(promise_type, "yield_value");
@@ -3835,7 +3836,8 @@ static TypeRecord* NewCoroutineResumeFunctionType(TypeRecord* frame_type,
     *frame_param_out = frame_param;
   }
   func->info.function.definition = true;
-  func->info.function.coroutine_frame_type = TypeRecordCopy(frame_type);
+  FunctionMutableExtra(&func->info.function)->coroutine_frame_type =
+      TypeRecordCopy(frame_type);
   return func;
 }
 
@@ -3862,7 +3864,8 @@ static TypeRecord* NewCoroutineDestroyFunctionType(TypeRecord* frame_type,
     *frame_param_out = frame_param;
   }
   func->info.function.definition = true;
-  func->info.function.coroutine_frame_type = TypeRecordCopy(frame_type);
+  FunctionMutableExtra(&func->info.function)->coroutine_frame_type =
+      TypeRecordCopy(frame_type);
   return func;
 }
 
@@ -6576,35 +6579,33 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
     return true;
   }
   FunctionInfo* info = &node->type->info.function;
-  if (info->coroutine_promise_type == NULL || info->body == NULL ||
-      info->body->op != AST_OP(compound)) {
+  if (FunctionExtraOf(info)->coroutine_promise_type == NULL ||
+      info->body == NULL || info->body->op != AST_OP(compound)) {
     return false;
   }
 
-  TypeRecord* initial_awaiter_type =
-      CoroutinePromiseMemberReturnType(info->coroutine_promise_type,
-                                       "initial_suspend");
+  TypeRecord* initial_awaiter_type = CoroutinePromiseMemberReturnType(
+      FunctionExtraOf(info)->coroutine_promise_type, "initial_suspend");
   bool initial_can_suspend = initial_awaiter_type != NULL &&
                              !AwaiterTypeIsAlwaysReady(initial_awaiter_type);
-  TypeRecord* final_awaiter_type =
-      CoroutinePromiseMemberReturnType(info->coroutine_promise_type,
-                                       "final_suspend");
+  TypeRecord* final_awaiter_type = CoroutinePromiseMemberReturnType(
+      FunctionExtraOf(info)->coroutine_promise_type, "final_suspend");
   bool final_can_suspend = final_awaiter_type != NULL &&
                            !AwaiterTypeIsAlwaysReady(final_awaiter_type);
   bool needs_frame = scan.suspend_count > 0 || initial_can_suspend ||
                      final_can_suspend;
   TypeRecord* yield_awaiter_type =
       scan.has_co_yield
-          ? CoroutinePromiseMemberReturnType(info->coroutine_promise_type,
-                                             "yield_value")
+          ? CoroutinePromiseMemberReturnType(
+                FunctionExtraOf(info)->coroutine_promise_type, "yield_value")
           : NULL;
   CompoundStatementASTNode* body = (CompoundStatementASTNode*)info->body;
   SuspensionPoints points = {0};
   Vector persisted_locals;
   VectorInit(&persisted_locals);
-  Symbol* promise =
-      SyntaxNewTemporary(&compiler->syntax,
-                         TypeRecordCopy(info->coroutine_promise_type));
+  Symbol* promise = SyntaxNewTemporary(
+      &compiler->syntax,
+      TypeRecordCopy(FunctionExtraOf(info)->coroutine_promise_type));
   promise->flags.is_local = true;
   promise->flags.is_defined = true;
   promise->location = node->location;
@@ -6689,10 +6690,9 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
     promise_decl = (VariableDeclarationASTNode*)NewVariableDeclarationASTNode(
         promise, NULL, node->location);
   } else {
-    frame = NewCoroutineFrame(info->coroutine_promise_type,
+    frame = NewCoroutineFrame(FunctionExtraOf(info)->coroutine_promise_type,
                               initial_awaiter_type, final_awaiter_type, &points,
-                              &persisted_locals,
-                              yield_awaiter_type,
+                              &persisted_locals, yield_awaiter_type,
                               node->location);
     /* Register parameter copies before the promise. Reverse teardown then
      * destroys active body locals first, followed by the promise and finally
@@ -6820,8 +6820,8 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
     return false;
   }
   if (needs_frame) {
-    StructMember* allocation_failure =
-        FindCoroutineAllocationFailureMember(info->coroutine_promise_type);
+    StructMember* allocation_failure = FindCoroutineAllocationFailureMember(
+        FunctionExtraOf(info)->coroutine_promise_type);
     if (allocation_failure != NULL) {
       CompoundASTNodeInsertStatement(
           body,
@@ -6854,7 +6854,7 @@ static CoroutineScan MarkAndValidateCoroutineFunction(ASTNode* node) {
 
   FunctionInfo* info = &node->type->info.function;
   info->is_coroutine = true;
-  info->coroutine_suspend_count = scan.suspend_count;
+  FunctionMutableExtra(info)->coroutine_suspend_count = scan.suspend_count;
   if (info->is_constexpr || info->is_consteval) {
     SemanticError(node, "coroutine function cannot be constexpr or consteval");
   }
@@ -6883,15 +6883,16 @@ static bool ValidateCoroutinePromise(ASTNode* node, CoroutineScan scan) {
     return false;
   }
   FunctionInfo* info = &node->type->info.function;
-  if (info->coroutine_promise_type == NULL) {
-    info->coroutine_promise_type = ResolveCoroutinePromiseType(node->type);
+  if (FunctionExtraOf(info)->coroutine_promise_type == NULL) {
+    FunctionMutableExtra(info)->coroutine_promise_type =
+        ResolveCoroutinePromiseType(node->type);
   }
-  if (info->coroutine_promise_type == NULL) {
+  if (FunctionExtraOf(info)->coroutine_promise_type == NULL) {
     SemanticError(node, "coroutine return type must provide promise_type");
     return false;
   }
 
-  TypeRecord* promise = info->coroutine_promise_type;
+  TypeRecord* promise = FunctionExtraOf(info)->coroutine_promise_type;
   bool ok = true;
   ok &= RequireCoroutinePromiseMember(node, promise, "get_return_object");
   if (RequireCoroutinePromiseMember(node, promise, "initial_suspend")) {
@@ -6983,7 +6984,7 @@ void SemanticAnalyzeCoroutineFunction(ASTNode* node) {
     lowering_scan = (CoroutineScan){0};
     ASTNodeVisit(node->type->info.function.body, ScanCoroutineNode, 0,
                  &lowering_scan);
-    node->type->info.function.coroutine_suspend_count =
+    FunctionMutableExtra(&node->type->info.function)->coroutine_suspend_count =
         lowering_scan.suspend_count;
   }
   LowerCoroutineFunction(node, lowering_scan);

@@ -579,7 +579,8 @@ void AnalyzeCoYieldExpression(UnaryASTNode* node) {
   }
   TypeRecord* promise =
       compiler->current_function != NULL
-          ? compiler->current_function->info.function.coroutine_promise_type
+          ? FunctionExtraOf(&compiler->current_function->info.function)
+                ->coroutine_promise_type
           : NULL;
   StructMember* yield_value = NULL;
   if (TypeIsStructOrUnion(promise) && promise->info.struct_info != NULL) {

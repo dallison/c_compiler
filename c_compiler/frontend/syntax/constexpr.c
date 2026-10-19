@@ -10115,15 +10115,18 @@ Symbol* ConstexprFunctionDefinition(Symbol* symbol) {
     if (definition == NULL) {
       TypeRecord* origin_type = origin->type;
       if (origin_type != NULL && TypeIsFunction(origin_type) &&
-          origin_type->info.function.template_parameters.length == 0 &&
+          FunctionExtraOf(&origin_type->info.function)
+                  ->template_parameters.length == 0 &&
           origin->value.func_defn != NULL &&
           origin->value.func_defn->type != NULL &&
           TypeIsFunction(origin->value.func_defn->type) &&
-          origin->value.func_defn->type->info.function.template_parameters.length > 0) {
+          FunctionExtraOf(&origin->value.func_defn->type->info.function)
+                  ->template_parameters.length > 0) {
         origin_type = origin->value.func_defn->type;
       }
       if (origin_type != NULL && TypeIsFunction(origin_type) &&
-          origin_type->info.function.template_parameters.length > 0) {
+          FunctionExtraOf(&origin_type->info.function)
+                  ->template_parameters.length > 0) {
         definition = TypeInstantiateFunctionTemplateWithCompletedArguments(
             &compiler->syntax, origin, args);
       }
@@ -10641,8 +10644,8 @@ Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver) {
           member->symbol->value.func_defn != NULL &&
           member->symbol->value.func_defn->type != NULL &&
           TypeIsFunction(member->symbol->value.func_defn->type) &&
-          member->symbol->value.func_defn->type
-                  ->info.function.template_parameters.length > 0) {
+          FunctionExtraOf(&member->symbol->value.func_defn->type->info.function)
+                  ->template_parameters.length > 0) {
         constructor_template = member->symbol->value.func_defn;
       }
       if (constructor_template != NULL) {
@@ -10677,8 +10680,9 @@ Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver) {
           return candidate;
         }
       }
-      Vector* instantiations =
-          &member->symbol->type->info.function.template_instantiations;
+      const Vector* instantiations =
+          &FunctionExtraOf(&member->symbol->type->info.function)
+               ->template_instantiations;
       for (size_t i = 0; i < instantiations->length; i++) {
         Symbol* candidate = instantiations->value.p[i];
         if (ConstexprConstructorCandidateMatches(candidate, call)) {
@@ -12423,7 +12427,8 @@ static bool EvaluateConstexprFunctionContracts(
   if (compiler->contract_semantic == kContractSemanticIgnore) {
     return true;
   }
-  Vector* assertions = &func->info.function.contract_assertions;
+  const Vector* assertions =
+      &FunctionExtraOf(&func->info.function)->contract_assertions;
   for (size_t i = 0; i < assertions->length; i++) {
     ContractAssertion* assertion = assertions->value.p[i];
     if (assertion->kind != kind) {
