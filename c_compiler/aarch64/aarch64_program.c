@@ -15,7 +15,6 @@
 
 static void DestroyInstruction(void* value) {
   AARCH64ProgramInstruction* instruction = value;
-  free(instruction->symbol);
   free(instruction->symbolic_text);
   free(instruction);
 }
@@ -184,13 +183,14 @@ void AARCH64ProgramEmitFixup(AsmModule* module, uint32_t word,
     AsmExpr expression;
     AsmExprInitSymbol(&expression, symbol, addend);
     instruction->addend = (int32_t)expression.addend;
-    instruction->symbol = strdup(expression.symbol.value);
+    instruction->symbol = AsmModuleInternName(module, expression.symbol.value);
     copied = instruction->symbol != NULL;
     AsmExprDestruct(&expression);
   } else {
     instruction->addend = addend;
   }
-  if (symbolic_text != NULL && symbolic_text[0] != '\0') {
+  if (module->keep_text && symbolic_text != NULL &&
+      symbolic_text[0] != '\0') {
     instruction->symbolic_text = strdup(symbolic_text);
     copied = copied && instruction->symbolic_text != NULL;
   }

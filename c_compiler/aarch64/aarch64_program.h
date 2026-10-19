@@ -27,8 +27,8 @@ typedef struct {
   int32_t relocation_type;
   int32_t addend;
   bool force_relocation;
-  // Fixup target symbol, or NULL.
-  char* symbol;
+  // Fixup target symbol interned in the owning module, or NULL.
+  const char* symbol;
   // Optional symbolic spelling for instructions whose encoded immediate is
   // intentionally zero until the linker applies a relocation; NULL if absent.
   char* symbolic_text;

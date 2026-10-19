@@ -156,7 +156,7 @@ String* AARCH64EmitProgramFile(Compiler* compiler, Vector* options,
     StringDelete(result);
     return NULL;
   }
-  module.program.keep_comments = assembly_only || compiler->keep_asm_file;
+  module.program.keep_text = assembly_only || compiler->keep_asm_file;
 
   bool ok = AARCH64BuildProgram(compiler, &module);
   if (!ok) {

@@ -40,6 +40,27 @@ void AsmExprInitDifference(AsmExpr* expr, const char* symbol,
 void AsmExprForceRelocation(AsmExpr* expr);
 void AsmExprDestruct(AsmExpr* expr);
 
+// An AsmExpr as retained by a module: the symbol names are interned in the
+// module's name pool rather than owned.
+typedef struct {
+  AsmExprKind kind;
+  bool force_relocation;
+  int64_t addend;
+  const char* symbol;
+  const char* subtract_symbol;
+} AsmModuleExpr;
+
+// Set of the distinct names a module refers to.  Mangled names are long and
+// each is referenced from many operations, so they are stored once.
+typedef struct {
+  const char** slots;  // Open-addressing table, `capacity` entries.
+  size_t capacity;     // Zero or a power of two.
+  size_t count;
+  Vector blocks;       // Storage the names are carved from.
+  char* free_space;
+  size_t free_length;
+} AsmNamePool;
+
 typedef struct AsmModuleTargetOps {
   void (*destroy_instruction)(void* instruction);
   void (*emit_instruction)(struct Assembler* assembler,
@@ -71,16 +92,16 @@ typedef struct {
   AsmModuleOpKind kind;
   union {
     struct {
-      String name;
+      const char* name;
       int32_t type;
       int32_t flags;
       int32_t alignment;
     } section;
     struct {
-      String name;
+      const char* name;
     } label;
     struct {
-      String name;
+      const char* name;
       AssemblerSymbolType type;
       AssemblerSymbolBinding binding;
       int32_t size;
@@ -90,12 +111,12 @@ typedef struct {
       bool common;
     } symbol;
     struct {
-      String name;
-      AsmExpr value;
+      const char* name;
+      AsmModuleExpr value;
     } symbol_size;
     struct {
       int width;
-      AsmExpr value;
+      AsmModuleExpr value;
     } integer;
     struct {
       uint8_t* value;
@@ -113,11 +134,11 @@ typedef struct {
       int alignment;
     } align;
     struct {
-      AsmExpr value;
+      AsmModuleExpr value;
     } leb128;
     struct {
       int index;
-      String name;
+      const char* name;
     } file;
     struct {
       int file;
@@ -141,13 +162,18 @@ typedef struct AsmModule {
   Vector operations;
   const AsmModuleTargetOps* target;
   bool failed;
-  // When false, AsmModuleComment records nothing. Comments only reach
-  // AsmModuleWriteText, so object-only compiles clear this to save memory.
-  bool keep_comments;
+  // False when the module is only assembled and never written as text; then
+  // comments and the symbolic spellings of instructions are not recorded.
+  bool keep_text;
+  AsmNamePool names;
 } AsmModule;
 
 void AsmModuleInit(AsmModule* module, const AsmModuleTargetOps* target);
 void AsmModuleDestruct(AsmModule* module);
+
+// Returns the module's copy of `name`, which lives until AsmModuleDestruct.
+// Equal names return the same pointer.  Returns NULL if out of memory.
+const char* AsmModuleInternName(AsmModule* module, const char* name);
 
 void AsmModuleSection(AsmModule* module, const char* name, int32_t type,
                       int32_t flags, int32_t alignment);

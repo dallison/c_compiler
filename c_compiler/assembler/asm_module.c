@@ -24,6 +24,98 @@ static bool Require(AsmModule* module, bool condition) {
   return condition;
 }
 
+enum { kNamePoolBlockSize = 64 * 1024 };
+
+// FNV-1a hash of a NUL-terminated name.
+static uint64_t HashName(const char* name) {
+  uint64_t hash = 14695981039346656037ull;
+  for (const unsigned char* p = (const unsigned char*)name; *p != '\0'; p++) {
+    hash = (hash ^ *p) * 1099511628211ull;
+  }
+  return hash;
+}
+
+// Doubles the pool's table (or creates it) and rehashes every name into it.
+static bool GrowNamePool(AsmNamePool* pool) {
+  size_t capacity = pool->capacity == 0 ? 1024 : pool->capacity * 2;
+  const char** slots = calloc(capacity, sizeof(*slots));
+  if (slots == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < pool->capacity; i++) {
+    const char* name = pool->slots[i];
+    if (name == NULL) {
+      continue;
+    }
+    size_t j = HashName(name) & (capacity - 1);
+    while (slots[j] != NULL) {
+      j = (j + 1) & (capacity - 1);
+    }
+    slots[j] = name;
+  }
+  free(pool->slots);
+  pool->slots = slots;
+  pool->capacity = capacity;
+  return true;
+}
+
+// Carves `size` bytes out of the pool's current block, starting a new block
+// when it runs out.  A name too large to share a block gets its own.
+static char* AllocateName(AsmNamePool* pool, size_t size) {
+  if (size > pool->free_length) {
+    bool dedicated = size > kNamePoolBlockSize / 4;
+    char* block = malloc(dedicated ? size : kNamePoolBlockSize);
+    if (block == NULL) {
+      return NULL;
+    }
+    VectorAppend(&pool->blocks, block);
+    if (dedicated) {
+      return block;
+    }
+    pool->free_space = block;
+    pool->free_length = kNamePoolBlockSize;
+  }
+  char* result = pool->free_space;
+  pool->free_space += size;
+  pool->free_length -= size;
+  return result;
+}
+
+static void NamePoolDestruct(AsmNamePool* pool) {
+  for (size_t i = 0; i < pool->blocks.length; i++) {
+    free(pool->blocks.value.p[i]);
+  }
+  VectorDestruct(&pool->blocks);
+  free(pool->slots);
+  memset(pool, 0, sizeof(*pool));
+}
+
+const char* AsmModuleInternName(AsmModule* module, const char* name) {
+  AsmNamePool* pool = &module->names;
+  // Stay at most half full so probe sequences remain short.
+  if ((pool->count + 1) * 2 > pool->capacity && !GrowNamePool(pool)) {
+    module->failed = true;
+    return NULL;
+  }
+  size_t mask = pool->capacity - 1;
+  size_t i = HashName(name) & mask;
+  for (; pool->slots[i] != NULL; i = (i + 1) & mask) {
+    if (strcmp(pool->slots[i], name) == 0) {
+      return pool->slots[i];
+    }
+  }
+  size_t size = strlen(name) + 1;
+  char* copy = AllocateName(pool, size);
+  if (copy == NULL) {
+    module->failed = true;
+    return NULL;
+  }
+  memcpy(copy, name, size);
+  pool->slots[i] = copy;
+  pool->count++;
+  return copy;
+}
+
 // Bytes needed for an operation of `kind`: the header plus only its own union
 // member.  Instructions dominate the stream and need a pointer, not the full
 // union, so operations are allocated at this size and must never be copied
@@ -133,56 +225,36 @@ void AsmExprDestruct(AsmExpr* expr) {
   StringDestruct(&expr->subtract_symbol);
 }
 
-static void CopyExpr(AsmExpr* to, const AsmExpr* from) {
-  memset(to, 0, sizeof(*to));
+static void CopyExpr(AsmModule* module, AsmModuleExpr* to,
+                     const AsmExpr* from) {
   to->kind = from->kind;
   to->addend = from->addend;
   to->force_relocation = from->force_relocation;
-  if (from->symbol.value != NULL) {
-    StringInit(&to->symbol, from->symbol.value);
-  }
-  if (from->subtract_symbol.value != NULL) {
-    StringInit(&to->subtract_symbol, from->subtract_symbol.value);
-  }
+  to->symbol = from->symbol.value != NULL
+                   ? AsmModuleInternName(module, from->symbol.value)
+                   : NULL;
+  to->subtract_symbol =
+      from->subtract_symbol.value != NULL
+          ? AsmModuleInternName(module, from->subtract_symbol.value)
+          : NULL;
 }
 
 void AsmModuleInit(AsmModule* module, const AsmModuleTargetOps* target) {
   VectorInit(&module->operations);
   module->target = target;
   module->failed = false;
-  module->keep_comments = true;
+  module->keep_text = true;
+  memset(&module->names, 0, sizeof(module->names));
+  VectorInit(&module->names.blocks);
 }
 
 static void OperationDelete(AsmModule* module, AsmModuleOp* op) {
   switch (op->kind) {
-    case kAsmModuleOpSection:
-      StringDestruct(&op->u.section.name);
-      break;
-    case kAsmModuleOpLabel:
-      StringDestruct(&op->u.label.name);
-      break;
-    case kAsmModuleOpSymbol:
-      StringDestruct(&op->u.symbol.name);
-      break;
-    case kAsmModuleOpSymbolSize:
-      StringDestruct(&op->u.symbol_size.name);
-      AsmExprDestruct(&op->u.symbol_size.value);
-      break;
-    case kAsmModuleOpInteger:
-      AsmExprDestruct(&op->u.integer.value);
-      break;
     case kAsmModuleOpBytes:
       free(op->u.bytes.value);
       break;
     case kAsmModuleOpString:
       StringDestruct(&op->u.string.value);
-      break;
-    case kAsmModuleOpUleb128:
-    case kAsmModuleOpSleb128:
-      AsmExprDestruct(&op->u.leb128.value);
-      break;
-    case kAsmModuleOpFile:
-      StringDestruct(&op->u.file.name);
       break;
     case kAsmModuleOpComment:
       StringDestruct(&op->u.comment.text);
@@ -197,6 +269,14 @@ static void OperationDelete(AsmModule* module, AsmModuleOp* op) {
       StringDestruct(&op->u.text.name);
       StringDestruct(&op->u.text.value);
       break;
+    case kAsmModuleOpSection:
+    case kAsmModuleOpLabel:
+    case kAsmModuleOpSymbol:
+    case kAsmModuleOpSymbolSize:
+    case kAsmModuleOpInteger:
+    case kAsmModuleOpUleb128:
+    case kAsmModuleOpSleb128:
+    case kAsmModuleOpFile:
     case kAsmModuleOpFill:
     case kAsmModuleOpAlign:
     case kAsmModuleOpLocation:
@@ -210,6 +290,7 @@ void AsmModuleDestruct(AsmModule* module) {
     OperationDelete(module, module->operations.value.p[i]);
   }
   VectorDestruct(&module->operations);
+  NamePoolDestruct(&module->names);
 }
 
 void AsmModuleSection(AsmModule* module, const char* name, int32_t type,
@@ -222,7 +303,7 @@ void AsmModuleSection(AsmModule* module, const char* name, int32_t type,
   if (op == NULL) {
     return;
   }
-  StringInit(&op->u.section.name, name);
+  op->u.section.name = AsmModuleInternName(module, name);
   op->u.section.type = type;
   op->u.section.flags = flags;
   op->u.section.alignment = alignment;
@@ -234,7 +315,7 @@ void AsmModuleLabel(AsmModule* module, const char* name) {
   }
   AsmModuleOp* op = NewOperation(module, kAsmModuleOpLabel);
   if (op != NULL) {
-    StringInit(&op->u.label.name, name);
+    op->u.label.name = AsmModuleInternName(module, name);
   }
 }
 
@@ -250,7 +331,7 @@ void AsmModuleSymbol(AsmModule* module, const char* name,
   if (op == NULL) {
     return;
   }
-  StringInit(&op->u.symbol.name, name);
+  op->u.symbol.name = AsmModuleInternName(module, name);
   op->u.symbol.type = type;
   op->u.symbol.binding = binding;
   op->u.symbol.size = size;
@@ -269,8 +350,8 @@ void AsmModuleSymbolSize(AsmModule* module, const char* name,
   if (op == NULL) {
     return;
   }
-  StringInit(&op->u.symbol_size.name, name);
-  CopyExpr(&op->u.symbol_size.value, value);
+  op->u.symbol_size.name = AsmModuleInternName(module, name);
+  CopyExpr(module, &op->u.symbol_size.value, value);
 }
 
 void AsmModuleInteger(AsmModule* module, int width, const AsmExpr* value) {
@@ -284,7 +365,7 @@ void AsmModuleInteger(AsmModule* module, int width, const AsmExpr* value) {
     return;
   }
   op->u.integer.width = width;
-  CopyExpr(&op->u.integer.value, value);
+  CopyExpr(module, &op->u.integer.value, value);
 }
 
 void AsmModuleBytes(AsmModule* module, const void* bytes, size_t length) {
@@ -347,7 +428,7 @@ void AsmModuleUleb128(AsmModule* module, const AsmExpr* value) {
   }
   AsmModuleOp* op = NewOperation(module, kAsmModuleOpUleb128);
   if (op != NULL) {
-    CopyExpr(&op->u.leb128.value, value);
+    CopyExpr(module, &op->u.leb128.value, value);
   }
 }
 
@@ -357,7 +438,7 @@ void AsmModuleSleb128(AsmModule* module, const AsmExpr* value) {
   }
   AsmModuleOp* op = NewOperation(module, kAsmModuleOpSleb128);
   if (op != NULL) {
-    CopyExpr(&op->u.leb128.value, value);
+    CopyExpr(module, &op->u.leb128.value, value);
   }
 }
 
@@ -370,7 +451,7 @@ void AsmModuleFile(AsmModule* module, int index, const char* name) {
     return;
   }
   op->u.file.index = index;
-  StringInit(&op->u.file.name, name);
+  op->u.file.name = AsmModuleInternName(module, name);
 }
 
 void AsmModuleLocation(AsmModule* module, int file, int line, int column) {
@@ -386,7 +467,7 @@ void AsmModuleLocation(AsmModule* module, int file, int line, int column) {
 }
 
 void AsmModuleComment(AsmModule* module, const char* text) {
-  if (!Require(module, text != NULL) || !module->keep_comments) {
+  if (!Require(module, text != NULL) || !module->keep_text) {
     return;
   }
   AsmModuleOp* op = NewOperation(module, kAsmModuleOpComment);
@@ -440,21 +521,21 @@ static AssemblerSymbol* EnsureSymbol(Assembler* assembler, const char* name) {
   return symbol;
 }
 
-static bool EvaluateExpr(Assembler* assembler, const AsmExpr* expr,
+static bool EvaluateExpr(Assembler* assembler, const AsmModuleExpr* expr,
                          int64_t* value) {
   if (expr->kind == kAsmExprConstant) {
     *value = expr->addend;
     return true;
   }
   AssemblerSymbol* symbol =
-      AssemblerFindSymbol(assembler, expr->symbol.value);
+      AssemblerFindSymbol(assembler, expr->symbol);
   if (symbol == NULL || !symbol->defined) {
     return false;
   }
   *value = symbol->value + expr->addend;
   if (expr->kind == kAsmExprSymbolDifference) {
     AssemblerSymbol* subtract =
-        AssemblerFindSymbol(assembler, expr->subtract_symbol.value);
+        AssemblerFindSymbol(assembler, expr->subtract_symbol);
     if (subtract == NULL || !subtract->defined ||
         subtract->section != symbol->section) {
       return false;
@@ -464,7 +545,7 @@ static bool EvaluateExpr(Assembler* assembler, const AsmExpr* expr,
   return true;
 }
 
-static void EmitInteger(Assembler* assembler, int width, const AsmExpr* expr) {
+static void EmitInteger(Assembler* assembler, int width, const AsmModuleExpr* expr) {
   AsmObject* object = &assembler->object;
   int64_t value = 0;
   bool known = EvaluateExpr(assembler, expr, &value);
@@ -472,7 +553,7 @@ static void EmitInteger(Assembler* assembler, int width, const AsmExpr* expr) {
     known = false;
   }
   if (expr->kind == kAsmExprSymbol) {
-    AssemblerSymbol* symbol = EnsureSymbol(assembler, expr->symbol.value);
+    AssemblerSymbol* symbol = EnsureSymbol(assembler, expr->symbol);
     if (object->pass == ASM_OBJECT_FINAL_PASS && symbol != NULL) {
       int reloc_index =
           width == 8 ? kRelocSet64 : width == 4 ? kRelocSet32 : kRelocSet16;
@@ -485,9 +566,9 @@ static void EmitInteger(Assembler* assembler, int width, const AsmExpr* expr) {
     known = true;
   } else if (expr->kind == kAsmExprSymbolDifference && !known &&
              width == 4) {
-    AssemblerSymbol* symbol = EnsureSymbol(assembler, expr->symbol.value);
+    AssemblerSymbol* symbol = EnsureSymbol(assembler, expr->symbol);
     AssemblerSymbol* subtract =
-        EnsureSymbol(assembler, expr->subtract_symbol.value);
+        EnsureSymbol(assembler, expr->subtract_symbol);
     if (subtract != NULL && subtract->defined &&
         subtract->section == object->current_section) {
       if (object->pass == ASM_OBJECT_FINAL_PASS && symbol != NULL) {
@@ -506,9 +587,9 @@ static void EmitInteger(Assembler* assembler, int width, const AsmExpr* expr) {
     AssemblerError(assembler,
                    "Unable to resolve assembly expression (kind=%d width=%d %s - %s)",
                    (int)expr->kind, width,
-                   expr->symbol.value != NULL ? expr->symbol.value : "?",
-                   expr->subtract_symbol.value != NULL
-                       ? expr->subtract_symbol.value
+                   expr->symbol != NULL ? expr->symbol : "?",
+                   expr->subtract_symbol != NULL
+                       ? expr->subtract_symbol
                        : "?");
   }
   switch (width) {
@@ -555,7 +636,7 @@ static void EmitLabel(Assembler* assembler, const char* name) {
 
 static void EmitSymbol(Assembler* assembler, const AsmModuleOp* op) {
   AssemblerSymbol* symbol =
-      EnsureSymbol(assembler, op->u.symbol.name.value);
+      EnsureSymbol(assembler, op->u.symbol.name);
   if (symbol == NULL) {
     return;
   }
@@ -595,7 +676,7 @@ void AsmModuleEmit(AsmModule* module, Assembler* assembler) {
     AsmModuleOp* op = module->operations.value.p[i];
     switch (op->kind) {
       case kAsmModuleOpSection: {
-        String* name = NewString(op->u.section.name.value);
+        String* name = NewString(op->u.section.name);
         int section = AsmObjectEnsureSection(
             &assembler->object, name, op->u.section.type, op->u.section.flags,
             op->u.section.alignment);
@@ -603,7 +684,7 @@ void AsmModuleEmit(AsmModule* module, Assembler* assembler) {
         break;
       }
       case kAsmModuleOpLabel:
-        EmitLabel(assembler, op->u.label.name.value);
+        EmitLabel(assembler, op->u.label.name);
         break;
       case kAsmModuleOpSymbol:
         EmitSymbol(assembler, op);
@@ -611,12 +692,12 @@ void AsmModuleEmit(AsmModule* module, Assembler* assembler) {
       case kAsmModuleOpSymbolSize: {
         int64_t value;
         AssemblerSymbol* symbol =
-            EnsureSymbol(assembler, op->u.symbol_size.name.value);
+            EnsureSymbol(assembler, op->u.symbol_size.name);
         if (EvaluateExpr(assembler, &op->u.symbol_size.value, &value)) {
           symbol->size = (int32_t)value;
         } else if (assembler->object.pass == ASM_OBJECT_FINAL_PASS) {
           AssemblerError(assembler, "Unable to resolve size of %s",
-                         op->u.symbol_size.name.value);
+                         op->u.symbol_size.name);
         }
         break;
       }
@@ -675,7 +756,7 @@ void AsmModuleEmit(AsmModule* module, Assembler* assembler) {
       case kAsmModuleOpFile: {
         if (assembler->object.pass == 1) {
           String name;
-          StringInit(&name, op->u.file.name.value);
+          StringInit(&name, op->u.file.name);
           DwarfAddFile(&assembler->object.dwarf, &name);
           if (op->u.file.index < 0) {
             StringSet(&assembler->object.filename, name.value);
@@ -718,18 +799,18 @@ void AsmModuleEmit(AsmModule* module, Assembler* assembler) {
   }
 }
 
-static void WriteExpr(FILE* out, const AsmExpr* expr) {
+static void WriteExpr(FILE* out, const AsmModuleExpr* expr) {
   if (expr->kind == kAsmExprConstant) {
     fprintf(out, "%" PRId64, expr->addend);
     return;
   }
   if (expr->kind == kAsmExprSymbolDifference && !expr->force_relocation) {
-    fprintf(out, "(%s-%s", expr->symbol.value,
-            expr->subtract_symbol.value);
+    fprintf(out, "(%s-%s", expr->symbol,
+            expr->subtract_symbol);
   } else {
-    fputs(expr->symbol.value, out);
+    fputs(expr->symbol, out);
     if (expr->kind == kAsmExprSymbolDifference) {
-      fprintf(out, "-%s", expr->subtract_symbol.value);
+      fprintf(out, "-%s", expr->subtract_symbol);
     }
   }
   if (expr->addend != 0) {
@@ -740,10 +821,10 @@ static void WriteExpr(FILE* out, const AsmExpr* expr) {
   }
 }
 
-static void WriteEscapedString(FILE* out, const String* value) {
+static void WriteEscapedString(FILE* out, const char* value, size_t length) {
   fputc('"', out);
-  for (size_t i = 0; i < value->length; i++) {
-    unsigned char c = (unsigned char)value->value[i];
+  for (size_t i = 0; i < length; i++) {
+    unsigned char c = (unsigned char)value[i];
     switch (c) {
       case '\\':
       case '"':
@@ -770,9 +851,9 @@ static void WriteEscapedString(FILE* out, const String* value) {
 static void WriteSection(FILE* out, const AsmModuleOp* op,
                          bool emit_alignment) {
   bool shorthand = false;
-  if (strcmp(op->u.section.name.value, ".text") == 0 ||
-      strcmp(op->u.section.name.value, ".data") == 0) {
-    fprintf(out, "\t%s\n", op->u.section.name.value);
+  if (strcmp(op->u.section.name, ".text") == 0 ||
+      strcmp(op->u.section.name, ".data") == 0) {
+    fprintf(out, "\t%s\n", op->u.section.name);
     shorthand = true;
   }
   if (!shorthand) {
@@ -793,7 +874,7 @@ static void WriteSection(FILE* out, const AsmModuleOp* op,
                   : op->u.section.type == SHT(fini_array) ? "fini_array"
                                                           : "progbits";
     fprintf(out, "\t.section \"%s\", \"%s\", @%s\n",
-            op->u.section.name.value, flags, type);
+            op->u.section.name, flags, type);
   }
   if (emit_alignment && op->u.section.alignment > 1) {
     int power = 0;
@@ -817,44 +898,44 @@ bool AsmModuleWriteText(const AsmModule* module, FILE* out) {
       case kAsmModuleOpSection: {
         bool first = true;
         for (size_t j = 0; j < written_sections.length; j++) {
-          const String* name = written_sections.value.p[j];
-          if (strcmp(name->value, op->u.section.name.value) == 0) {
+          const char* name = written_sections.value.p[j];
+          if (strcmp(name, op->u.section.name) == 0) {
             first = false;
             break;
           }
         }
         if (first) {
-          VectorAppend(&written_sections, (void*)&op->u.section.name);
+          VectorAppend(&written_sections, (void*)op->u.section.name);
         }
         WriteSection(out, op, first);
         break;
       }
       case kAsmModuleOpLabel:
-        fprintf(out, "%s:\n", op->u.label.name.value);
+        fprintf(out, "%s:\n", op->u.label.name);
         break;
       case kAsmModuleOpSymbol:
         if (op->u.symbol.binding == SYM_BIND(weak)) {
-          fprintf(out, "\t.weak %s\n", op->u.symbol.name.value);
+          fprintf(out, "\t.weak %s\n", op->u.symbol.name);
         } else if (op->u.symbol.binding == SYM_BIND(global)) {
-          fprintf(out, "\t.global %s\n", op->u.symbol.name.value);
+          fprintf(out, "\t.global %s\n", op->u.symbol.name);
         } else {
-          fprintf(out, "\t.local %s\n", op->u.symbol.name.value);
+          fprintf(out, "\t.local %s\n", op->u.symbol.name);
         }
         if (op->u.symbol.type != SYM_TYPE(none)) {
           const char* type =
               op->u.symbol.type == SYM_TYPE(func) ? "function" : "object";
-          fprintf(out, "\t.type %s, @%s\n", op->u.symbol.name.value, type);
+          fprintf(out, "\t.type %s, @%s\n", op->u.symbol.name, type);
         }
         if (op->u.symbol.common) {
-          fprintf(out, "\t.comm %s,%d,%d\n", op->u.symbol.name.value,
+          fprintf(out, "\t.comm %s,%d,%d\n", op->u.symbol.name,
                   op->u.symbol.size, op->u.symbol.alignment);
         } else if (op->u.symbol.size != 0) {
-          fprintf(out, "\t.size %s,%d\n", op->u.symbol.name.value,
+          fprintf(out, "\t.size %s,%d\n", op->u.symbol.name,
                   op->u.symbol.size);
         }
         break;
       case kAsmModuleOpSymbolSize:
-        fprintf(out, "\t.size %s, ", op->u.symbol_size.name.value);
+        fprintf(out, "\t.size %s, ", op->u.symbol_size.name);
         WriteExpr(out, &op->u.symbol_size.value);
         fputc('\n', out);
         break;
@@ -875,7 +956,8 @@ bool AsmModuleWriteText(const AsmModule* module, FILE* out) {
         break;
       case kAsmModuleOpString:
         fprintf(out, "\t.%s ", op->u.string.zero_terminate ? "string" : "ascii");
-        WriteEscapedString(out, &op->u.string.value);
+        WriteEscapedString(out, op->u.string.value.value,
+                           op->u.string.value.length);
         fputc('\n', out);
         break;
       case kAsmModuleOpFill:
@@ -908,7 +990,7 @@ bool AsmModuleWriteText(const AsmModule* module, FILE* out) {
         } else {
           fputs("\t.file ", out);
         }
-        WriteEscapedString(out, &op->u.file.name);
+        WriteEscapedString(out, op->u.file.name, strlen(op->u.file.name));
         fputc('\n', out);
         break;
       case kAsmModuleOpLocation:
