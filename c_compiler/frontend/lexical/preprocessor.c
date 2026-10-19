@@ -851,12 +851,6 @@ void PreprocessorInit(Preprocessor* p) {
 #undef str
 #undef xstr
 #endif
-  // Add current dir to the include paths.
-  char current_dir[4096];
-  getcwd(current_dir, sizeof(current_dir));
-
-  PreprocessorAddUserIncludePath(p, current_dir);
-
   PredefineMacros(p);
 }
 
@@ -2662,6 +2656,23 @@ typedef enum {
   kIncludeCandidateGuarded,
 } IncludeCandidateResult;
 
+// Opens `path` for #include.  fopen also opens directories on some systems;
+// those are not headers (a directory named `new` must not satisfy
+// `#include <new>`), so they fail with EISDIR and the search continues.
+static FILE* OpenIncludeFile(const char* path) {
+  FILE* fp = fopen(path, "r");
+  if (fp == NULL) {
+    return NULL;
+  }
+  struct stat st;
+  if (fstat(fileno(fp), &st) == 0 && S_ISDIR(st.st_mode)) {
+    fclose(fp);
+    errno = EISDIR;
+    return NULL;
+  }
+  return fp;
+}
+
 static IncludeCandidateResult ProbeIncludeCandidate(Preprocessor* p,
                                                     const char* path,
                                                     FILE** fp) {
@@ -2675,11 +2686,12 @@ static IncludeCandidateResult ProbeIncludeCandidate(Preprocessor* p,
       return kIncludeCandidateGuarded;
     }
   }
-  *fp = fopen(path, "r");
+  *fp = OpenIncludeFile(path);
   if (*fp != NULL) {
     return kIncludeCandidateOpened;
   }
-  if (fact == NULL && (errno == ENOENT || errno == ENOTDIR)) {
+  if (fact == NULL &&
+      (errno == ENOENT || errno == ENOTDIR || errno == EISDIR)) {
     AddIncludePathFact(p, path, NULL);
   }
   return kIncludeCandidateMissing;
@@ -3153,7 +3165,7 @@ static FILE* OpenDarwinFrameworkInclude(const char* filename) {
     if (written < 0 || (size_t)written >= sizeof(path)) {
       continue;
     }
-    FILE* fp = fopen(path, "r");
+    FILE* fp = OpenIncludeFile(path);
     if (fp != NULL) {
       return fp;
     }

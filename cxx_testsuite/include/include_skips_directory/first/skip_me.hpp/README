@@ -1,0 +1,2 @@
+This directory is named like a header.  `#include <skip_me.hpp>` must skip it
+and find the header in the next include directory.

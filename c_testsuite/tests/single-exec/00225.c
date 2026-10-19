@@ -3,12 +3,11 @@
    This file includes itself.  With a working #pragma once the self-include is
    skipped, so main is defined once and the program prints normally.  If
    #pragma once regressed the self-include would recurse without bound and the
-   compile would fail.  The relative path matches how the test suite invokes the
-   compiler (from the suite root). */
+   compile would fail.  A quoted include is found beside the including file. */
 #pragma once
 #include <stdio.h>
 
-#include "tests/single-exec/00225.c"
+#include "00225.c"
 
 int main(void) {
   printf("pragma once works\n");

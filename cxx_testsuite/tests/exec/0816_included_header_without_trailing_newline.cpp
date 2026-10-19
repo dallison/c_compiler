@@ -1,6 +1,6 @@
 // A header whose last line has no newline must not swallow the includer's
 // next line, so the directive after the #include still takes effect.
-#include "cxx_testsuite/include/no_trailing_newline.hpp"
+#include "../../include/no_trailing_newline.hpp"
 #define AFTER_HEADER 5
 
 int main() {
