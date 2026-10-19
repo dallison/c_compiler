@@ -2275,6 +2275,12 @@ Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
                     object_qualifiers);
   TypeRecordSetStructInfo(class_type, owner);
   TypeRecord* this_type = NewPointerTo(kQualPlain, class_type);
+  // Members of a concrete class share one `this` type per cv-qualification.
+  if (TypeRecordCanIntern(this_type)) {
+    TypeRecord* canonical = TypeRecordIntern(this_type);
+    TypeRecordDeleteUnowned(this_type);
+    this_type = canonical;
+  }
   Symbol* this_symbol = NewSymbol("this", this_type, STO(implicit));
   this_symbol->flags.is_argument = true;
   this_symbol->flags.invented = true;
