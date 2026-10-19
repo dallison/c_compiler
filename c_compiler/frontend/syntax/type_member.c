@@ -1455,7 +1455,7 @@ void AddStructMember(TypeParser* parser, Struct* str, StructMember* member) {
     }
     SymbolSetCXXMangledAsmName(member->symbol);
   } else if (member->is_static && member->symbol != NULL) {
-    member->symbol->static_data_member_class = str;
+    SymbolMutableExtra(member->symbol)->static_data_member_class = str;
     SymbolSetCXXDataAsmName(member->symbol, str);
   }
   VectorAppend(&str->members, member);

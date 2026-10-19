@@ -666,18 +666,20 @@ static void AssignLocalClassDiscriminator(Struct* str) {
   if (function == NULL || str->tag_name == NULL) {
     return;
   }
-  if (function->local_class_names == NULL) {
-    function->local_class_names = NewVector();
+  if (SymbolExtraOf(function)->local_class_names == NULL) {
+    SymbolMutableExtra(function)->local_class_names = NewVector();
   }
   int earlier = 0;
-  for (size_t i = 0; i < function->local_class_names->length; i++) {
-    String* name = function->local_class_names->value.p[i];
+  for (size_t i = 0; i < SymbolExtraOf(function)->local_class_names->length;
+       i++) {
+    String* name = SymbolExtraOf(function)->local_class_names->value.p[i];
     if (strcmp(name->value, str->tag_name->value) == 0) {
       earlier++;
     }
   }
   str->local_class_discriminator = earlier;
-  VectorAppend(function->local_class_names, NewString(str->tag_name->value));
+  VectorAppend(SymbolExtraOf(function)->local_class_names,
+               NewString(str->tag_name->value));
 }
 
 static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,

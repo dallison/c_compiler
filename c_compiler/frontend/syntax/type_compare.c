@@ -61,7 +61,7 @@ static bool DependentExpressionNodeContainsParameter(ASTNode* node,
   // (`constexpr int n = sizeof(T);`).  A concrete static member may also lack
   // a value until its initializer is evaluated on demand; that is not
   // dependent.
-  Struct* owner = id->symbol->static_data_member_class;
+  Struct* owner = SymbolExtraOf(id->symbol)->static_data_member_class;
   bool value_dependent_constant =
       !id->symbol->flags.value_set && id->symbol->type != NULL &&
       TypeIsIntegral(id->symbol->type) &&

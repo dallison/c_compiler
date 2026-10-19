@@ -635,7 +635,8 @@ static ASTNode* MaterializeLambdaCapture(Symbol* source,
   for (size_t i = 0; i < closure->members.length; i++) {
     StructMember* member = closure->members.value.p[i];
     Symbol* field = member != NULL ? member->symbol : NULL;
-    if (field == NULL || field->lambda_capture_source != source) {
+    if (field == NULL ||
+        SymbolExtraOf(field)->lambda_capture_source != source) {
       continue;
     }
     ASTNode* this_node = NewIdentifierASTNode(this_symbol, location);

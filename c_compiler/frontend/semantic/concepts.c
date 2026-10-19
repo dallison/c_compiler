@@ -657,7 +657,7 @@ static bool EvaluateConceptTemplatePackFold(ASTNode* expr, Vector* arguments,
                          : arguments->value.p[start + i];
     Symbol* bound = pattern_concept;
     if (bound != NULL && bound->flags.is_template_template_parameter &&
-        bound->template_template_parameter_kind ==
+        SymbolExtraOf(bound)->template_template_parameter_kind ==
             kTemplateTemplateParameterConcept &&
         element != NULL && element->kind == kTemplateParameterTemplate &&
         element->template_symbol != NULL) {
@@ -1206,7 +1206,7 @@ static void ReportReturnTypeRequirementDetail(Requirement* requirement,
   ConstraintExpr* constraint = requirement->return_type_constraint;
   Symbol* concept_symbol = constraint->as.concept_id.concept_symbol;
   Concept* concept = concept_symbol != NULL
-                         ? concept_symbol->concept_definition
+                         ? SymbolExtraOf(concept_symbol)->concept_definition
                          : NULL;
   Vector* concrete_args = TypeSubstituteTemplateArgumentVector(
       &compiler->syntax, constraint->as.concept_id.arguments, arguments);
@@ -1290,7 +1290,7 @@ static bool EvaluateConstraintInteger(ConstraintExpr* constraint,
       Symbol* concept_symbol = constraint->as.concept_id.concept_symbol;
       if (concept_symbol != NULL &&
           concept_symbol->flags.is_template_template_parameter &&
-          concept_symbol->template_template_parameter_kind ==
+          SymbolExtraOf(concept_symbol)->template_template_parameter_kind ==
               kTemplateTemplateParameterConcept &&
           concept_symbol->template_parameter_index >= 0 && arguments != NULL &&
           (size_t)concept_symbol->template_parameter_index <
@@ -1402,10 +1402,10 @@ static bool EvaluateConceptDefinitionInteger(Symbol* concept_symbol,
                                              SourceLocation location,
                                              int64_t* result) {
   if (concept_symbol == NULL || !concept_symbol->flags.is_concept ||
-      concept_symbol->concept_definition == NULL) {
+      SymbolExtraOf(concept_symbol)->concept_definition == NULL) {
     return false;
   }
-  Concept* definition = concept_symbol->concept_definition;
+  Concept* definition = SymbolExtraOf(concept_symbol)->concept_definition;
   ConstraintExpr* constraint = definition->constraint;
   if (constraint == NULL) {
     return false;
@@ -1467,7 +1467,7 @@ bool ConceptsEvaluateInteger(ASTNode* node, int64_t* result) {
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol == NULL || !id->symbol->flags.is_concept ||
-      id->symbol->concept_definition == NULL) {
+      SymbolExtraOf(id->symbol)->concept_definition == NULL) {
     return false;
   }
   if (TemplateArgumentVectorContainsTemplateParameter(id->template_arguments)) {
@@ -1822,10 +1822,11 @@ static TemplateArgument* SubstituteTemplateArgumentInMapping(
 static Vector* ConceptParameterMapping(Symbol* concept_symbol, Vector* args,
                                        Vector* outer_mapping) {
   Vector* mapping = NewVector();
-  if (concept_symbol == NULL || concept_symbol->concept_definition == NULL) {
+  if (concept_symbol == NULL ||
+      SymbolExtraOf(concept_symbol)->concept_definition == NULL) {
     return mapping;
   }
-  Concept* concept = concept_symbol->concept_definition;
+  Concept* concept = SymbolExtraOf(concept_symbol)->concept_definition;
   for (size_t i = 0; concept->template_parameters != NULL &&
                      i < concept->template_parameters->length; i++) {
     TemplateArgument* arg =
@@ -2092,7 +2093,8 @@ static NormalizedConstraintForm* NormalizeConstraintToCnf(
 static NormalizedConstraintForm* NormalizeConceptIdToDnf(
     Symbol* concept_symbol, Vector* arguments, SourceLocation location,
     Vector* outer_mapping, Set* expanding) {
-  if (concept_symbol == NULL || concept_symbol->concept_definition == NULL) {
+  if (concept_symbol == NULL ||
+      SymbolExtraOf(concept_symbol)->concept_definition == NULL) {
     NormalizedAtomic* atom = NewNormalizedAtomic(
         NULL, NULL, CopyParameterMapping(outer_mapping), location);
     return NormalizedFormFromAtom(atom);
@@ -2106,8 +2108,8 @@ static NormalizedConstraintForm* NormalizeConceptIdToDnf(
   Vector* concept_mapping =
       ConceptParameterMapping(concept_symbol, arguments, outer_mapping);
   NormalizedConstraintForm* result = NormalizeConstraintToDnf(
-      concept_symbol->concept_definition->constraint, concept_mapping,
-      expanding);
+      SymbolExtraOf(concept_symbol)->concept_definition->constraint,
+      concept_mapping, expanding);
   SetRemove(expanding, concept_symbol);
   VectorDeleteWithContents(concept_mapping,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -2118,7 +2120,8 @@ static NormalizedConstraintForm* NormalizeConceptIdToDnf(
 static NormalizedConstraintForm* NormalizeConceptIdToCnf(
     Symbol* concept_symbol, Vector* arguments, SourceLocation location,
     Vector* outer_mapping, Set* expanding) {
-  if (concept_symbol == NULL || concept_symbol->concept_definition == NULL) {
+  if (concept_symbol == NULL ||
+      SymbolExtraOf(concept_symbol)->concept_definition == NULL) {
     NormalizedAtomic* atom = NewNormalizedAtomic(
         NULL, NULL, CopyParameterMapping(outer_mapping), location);
     return NormalizedFormFromAtom(atom);
@@ -2132,8 +2135,8 @@ static NormalizedConstraintForm* NormalizeConceptIdToCnf(
   Vector* concept_mapping =
       ConceptParameterMapping(concept_symbol, arguments, outer_mapping);
   NormalizedConstraintForm* result = NormalizeConstraintToCnf(
-      concept_symbol->concept_definition->constraint, concept_mapping,
-      expanding);
+      SymbolExtraOf(concept_symbol)->concept_definition->constraint,
+      concept_mapping, expanding);
   SetRemove(expanding, concept_symbol);
   VectorDeleteWithContents(concept_mapping,
                            (VectorElementDestructor)TemplateArgumentDelete,
@@ -2440,7 +2443,7 @@ static void FindConceptTemplateParameterReference(ASTNode* node, void* data,
   }
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
   if (symbol != NULL && symbol->flags.is_template_template_parameter &&
-      symbol->template_template_parameter_kind ==
+      SymbolExtraOf(symbol)->template_template_parameter_kind ==
           kTemplateTemplateParameterConcept) {
     *(bool*)data = true;
   }
@@ -2460,9 +2463,8 @@ bool ConceptsConstraintReferencesConceptTemplateParameter(
                  constraint->as.binary.right);
     case kConstraintConceptId: {
       Symbol* symbol = constraint->as.concept_id.concept_symbol;
-      return symbol != NULL &&
-             symbol->flags.is_template_template_parameter &&
-             symbol->template_template_parameter_kind ==
+      return symbol != NULL && symbol->flags.is_template_template_parameter &&
+             SymbolExtraOf(symbol)->template_template_parameter_kind ==
                  kTemplateTemplateParameterConcept;
     }
     case kConstraintAtomic: {
@@ -2697,7 +2699,7 @@ static void ReportConstraintFailure(ConstraintExpr* constraint,
     case kConstraintConceptId: {
       Symbol* concept_symbol = constraint->as.concept_id.concept_symbol;
       Concept* concept = concept_symbol != NULL
-                             ? concept_symbol->concept_definition
+                             ? SymbolExtraOf(concept_symbol)->concept_definition
                              : NULL;
       Vector* concrete_args = TypeSubstituteTemplateArgumentVector(
           &compiler->syntax, constraint->as.concept_id.arguments, arguments);
@@ -3231,9 +3233,9 @@ ASTNode* ConceptsParseDefinition(Syntax* syntax,
   symbol->flags.is_concept = true;
   symbol->flags.is_template = true;
   symbol->flags.is_defined = true;
-  symbol->concept_definition = NewConcept(
-      name.value, MoveCurrentTemplateParameters(syntax), constraint,
-      concept_location);
+  SymbolMutableExtra(symbol)->concept_definition =
+      NewConcept(name.value, MoveCurrentTemplateParameters(syntax), constraint,
+                 concept_location);
 
   if (!AddConceptSymbolToEnclosingScope(syntax, symbol)) {
     SyntaxError(syntax, "Duplicate definition of concept %s", name.value);

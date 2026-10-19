@@ -283,7 +283,7 @@ static Struct* SymbolMemberOwner(Symbol* symbol) {
   if (TypeIsFunction(symbol->type)) {
     return symbol->type->info.function.cxx_member_owner;
   }
-  return symbol->static_data_member_class;
+  return SymbolExtraOf(symbol)->static_data_member_class;
 }
 
 // The enclosing class's members stay in an open scope while a nested class's

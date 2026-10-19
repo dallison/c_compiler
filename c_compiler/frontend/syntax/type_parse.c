@@ -4774,7 +4774,8 @@ static bool ArrayBoundNamesValueDependentConstexpr(ASTNode* expression) {
   Symbol* symbol = ((IdentifierASTNode*)expression)->symbol;
   // A class template's `static const int k;` is initialized by its
   // out-of-class definition, which may depend on the class's parameters.
-  Struct* owner = symbol != NULL ? symbol->static_data_member_class : NULL;
+  Struct* owner =
+      symbol != NULL ? SymbolExtraOf(symbol)->static_data_member_class : NULL;
   return symbol != NULL &&
          (symbol->flags.is_constexpr ||
           (owner != NULL && TypeIsConst(symbol->type) &&

@@ -2477,11 +2477,12 @@ static ASTNode* NewCXXGlobalSpecialMemberCall(Symbol* sym, bool destructor) {
 // is not a member keeps a null class and is checked as an ordinary caller.
 static void AnalyzeStaticDataMemberLifetimeCall(Symbol* object, ASTNode* stmt) {
   if (object == NULL || stmt == NULL ||
-      object->static_data_member_class == NULL) {
+      SymbolExtraOf(object)->static_data_member_class == NULL) {
     return;
   }
   Struct* saved_access = compiler->current_class_access_context;
-  compiler->current_class_access_context = object->static_data_member_class;
+  compiler->current_class_access_context =
+      SymbolExtraOf(object)->static_data_member_class;
   AnalyzeStatement(stmt);
   compiler->current_class_access_context = saved_access;
 }
@@ -4021,8 +4022,8 @@ static bool CompileDeferredCXXStaticMembers(Syntax* syntax) {
     }
     compiled = true;
     struct Struct* owner =
-        decl->symbol->static_data_member_class != NULL
-            ? decl->symbol->static_data_member_class
+        SymbolExtraOf(decl->symbol)->static_data_member_class != NULL
+            ? SymbolExtraOf(decl->symbol)->static_data_member_class
         : TypeIsStructOrUnion(decl->symbol->type)
             ? decl->symbol->type->info.struct_info
             : NULL;

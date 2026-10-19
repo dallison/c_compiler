@@ -697,13 +697,13 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
                  s->flags.is_name_independent);
   WriteBoolField(buf, kSym_name_independent_lookup_ambiguous,
                  s->flags.name_independent_lookup_ambiguous);
-  if (s->template_template_parameters != NULL) {
+  if (SymbolExtraOf(s)->template_template_parameters != NULL) {
     SerialWriteTemplateParameterVector(
         ctx, buf, kSym_template_template_parameters,
-        s->template_template_parameters);
+        SymbolExtraOf(s)->template_template_parameters);
   }
   WireWriteInt32(buf, kSym_template_template_parameter_kind,
-                 (int32_t)s->template_template_parameter_kind);
+                 (int32_t)SymbolExtraOf(s)->template_template_parameter_kind);
 
   WireWriteInt32(buf, kSym_alignment, s->alignment);
   WireWriteInt32(buf, kSym_template_parameter_index,
@@ -764,7 +764,8 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   if (s->alias_template != NULL) {
     WriteAliasTemplate(ctx, buf, kSym_alias_template, s->alias_template);
   }
-  SerialWriteConcept(ctx, buf, kSym_concept_definition, s->concept_definition);
+  SerialWriteConcept(ctx, buf, kSym_concept_definition,
+                     SymbolExtraOf(s)->concept_definition);
   SerialWriteConstraint(ctx, buf, kSym_associated_constraint,
                         s->associated_constraint);
   WriteTemplateConstructorInitializers(
@@ -916,15 +917,18 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         s->flags.is_template_template_parameter = b;
         break;
       case kSym_template_template_parameters:
-        s->template_template_parameters = NewVector();
+        SymbolMutableExtra(s)->template_template_parameters = NewVector();
         SerialReadTemplateParameterVector(
-            ctx, buf, s->template_template_parameters);
+            ctx, buf, SymbolExtraOf(s)->template_template_parameters);
         break;
       case kSym_template_template_parameter_kind: {
         int32_t v;
         WireReadInt32(buf, &v);
-        s->template_template_parameter_kind =
-            (TemplateTemplateParameterKind)v;
+        // Written for every symbol; only a non-default kind needs storage.
+        if (v != kTemplateTemplateParameterType || s->extra != NULL) {
+          SymbolMutableExtra(s)->template_template_parameter_kind =
+              (TemplateTemplateParameterKind)v;
+        }
         break;
       }
       case kSym_is_parameter_pack:
@@ -996,7 +1000,7 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         s->variable_template = ReadVariableTemplate(ctx, buf);
         break;
       case kSym_concept_definition:
-        s->concept_definition = SerialReadConcept(ctx, buf);
+        SymbolMutableExtra(s)->concept_definition = SerialReadConcept(ctx, buf);
         break;
       case kSym_associated_constraint:
         s->associated_constraint = SerialReadConstraint(ctx, buf);

@@ -347,7 +347,7 @@ static bool BareTemplateNameIsNotAType(Symbol* bare_template) {
          (bare_template->flags.is_concept ||
           bare_template->variable_template != NULL ||
           (bare_template->flags.is_template_template_parameter &&
-           bare_template->template_template_parameter_kind !=
+           SymbolExtraOf(bare_template)->template_template_parameter_kind !=
                kTemplateTemplateParameterType));
 }
 

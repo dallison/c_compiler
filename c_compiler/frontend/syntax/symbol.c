@@ -265,23 +265,17 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.is_explicit_specialization = false;
   sym->flags.is_name_independent = false;
   sym->flags.name_independent_lookup_ambiguous = false;
-  sym->concept_definition = NULL;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
   sym->alias_target = NULL;
-  sym->lambda_capture_source = NULL;
   sym->lambda_capture_by_reference = false;
-  sym->anonymous_union_host = NULL;
-  sym->anonymous_union_member_offset = 0;
   sym->overload_next = NULL;
   sym->default_argument = NULL;
   sym->constexpr_initializer = NULL;
   sym->is_constexpr_representable = false;
   sym->requires_ast_constexpr = false;
-  sym->constexpr_reference_scope = NULL;
   sym->variable_template = NULL;
   sym->alias_template = NULL;
-  sym->template_template_parameters = NULL;
   sym->associated_constraint = NULL;
   sym->cxx_linkage = kCXXLinkageExternal;
   sym->module_identity = NULL;
@@ -303,14 +297,18 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->is_structured_binding_object = false;
   sym->is_nrvo = false;
   sym->instantiation_depth = 0;
-  sym->static_data_member_class = NULL;
-  sym->static_data_member_pattern = NULL;
-  sym->static_data_member_template_arguments = NULL;
-  sym->static_data_member_template_definition = NULL;
   sym->member_lookup_class = NULL;
-  sym->local_class_names = NULL;
-  VectorInit(&sym->imported_function_template_parameters_backup);
   sym->cached_target_symbol_name = NULL;
+  sym->extra = NULL;
+}
+
+const SymbolExtra kEmptySymbolExtra;
+
+SymbolExtra* SymbolMutableExtra(Symbol* symbol) {
+  if (symbol->extra == NULL) {
+    symbol->extra = calloc(1, sizeof(SymbolExtra));
+  }
+  return symbol->extra;
 }
 
 Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage) {
@@ -325,17 +323,17 @@ void SymbolBackupImportedFunctionTemplateParameters(Symbol* symbol) {
       !symbol->flags.is_template) {
     return;
   }
-  VectorDestructWithContents(
-      &symbol->imported_function_template_parameters_backup,
-      (VectorElementDestructor)TemplateParameterDelete,
-      /*free_element=*/false);
-  VectorInit(&symbol->imported_function_template_parameters_backup);
+  Vector* backup =
+      &SymbolMutableExtra(symbol)->imported_function_template_parameters_backup;
+  VectorDestructWithContents(backup,
+                             (VectorElementDestructor)TemplateParameterDelete,
+                             /*free_element=*/false);
+  VectorInit(backup);
   Vector* live = &symbol->type->info.function.template_parameters;
   for (size_t i = 0; i < live->length; i++) {
     TemplateParameter* param = live->value.p[i];
     if (param != NULL) {
-      VectorAppend(&symbol->imported_function_template_parameters_backup,
-                   TemplateParameterCopy(param));
+      VectorAppend(backup, TemplateParameterCopy(param));
     }
   }
 }
@@ -343,13 +341,14 @@ void SymbolBackupImportedFunctionTemplateParameters(Symbol* symbol) {
 void SymbolRestoreImportedFunctionTemplateParameters(Symbol* symbol) {
   if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type) ||
       symbol->type->info.function.template_parameters.length > 0 ||
-      symbol->imported_function_template_parameters_backup.length == 0) {
+      SymbolExtraOf(symbol)->imported_function_template_parameters_backup
+              .length == 0) {
     return;
   }
-  for (size_t i = 0;
-       i < symbol->imported_function_template_parameters_backup.length; i++) {
-    TemplateParameter* param =
-        symbol->imported_function_template_parameters_backup.value.p[i];
+  const Vector* backup =
+      &symbol->extra->imported_function_template_parameters_backup;
+  for (size_t i = 0; i < backup->length; i++) {
+    TemplateParameter* param = backup->value.p[i];
     if (param != NULL) {
       VectorAppend(&symbol->type->info.function.template_parameters,
                    TemplateParameterCopy(param));
@@ -395,35 +394,37 @@ void SymbolDestruct(Symbol* symbol) {
     free(symbol->alias_template);
     symbol->alias_template = NULL;
   }
-  if (symbol->template_template_parameters != NULL) {
-    VectorDeleteWithContents(
-        symbol->template_template_parameters,
-        (VectorElementDestructor)TemplateParameterDelete,
-        /*free_element=*/false);
-    symbol->template_template_parameters = NULL;
-  }
   ConstraintExprDelete(symbol->associated_constraint);
   symbol->associated_constraint = NULL;
   symbol->module_identity = NULL;
-  ConceptDelete(symbol->concept_definition);
   AttributeListDestruct(&symbol->attributes);
-  VectorDestructWithContents(
-      &symbol->imported_function_template_parameters_backup,
-      (VectorElementDestructor)TemplateParameterDelete,
-      /*free_element=*/false);
   free(symbol->cached_target_symbol_name);
   symbol->cached_target_symbol_name = NULL;
-  if (symbol->local_class_names != NULL) {
-    VectorDeleteWithContents(symbol->local_class_names,
-                             (VectorElementDestructor)StringDelete,
-                             /*free_element=*/false);
-    symbol->local_class_names = NULL;
-  }
-  if (symbol->static_data_member_template_arguments != NULL) {
-    VectorDeleteWithContents(symbol->static_data_member_template_arguments,
-                             (VectorElementDestructor)TemplateArgumentDelete,
-                             /*free_element=*/false);
-    symbol->static_data_member_template_arguments = NULL;
+  SymbolExtra* extra = symbol->extra;
+  if (extra != NULL) {
+    symbol->extra = NULL;
+    if (extra->template_template_parameters != NULL) {
+      VectorDeleteWithContents(
+          extra->template_template_parameters,
+          (VectorElementDestructor)TemplateParameterDelete,
+          /*free_element=*/false);
+    }
+    ConceptDelete(extra->concept_definition);
+    VectorDestructWithContents(
+        &extra->imported_function_template_parameters_backup,
+        (VectorElementDestructor)TemplateParameterDelete,
+        /*free_element=*/false);
+    if (extra->local_class_names != NULL) {
+      VectorDeleteWithContents(extra->local_class_names,
+                               (VectorElementDestructor)StringDelete,
+                               /*free_element=*/false);
+    }
+    if (extra->static_data_member_template_arguments != NULL) {
+      VectorDeleteWithContents(extra->static_data_member_template_arguments,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    free(extra);
   }
   if (symbol->overload_next != NULL) {
     SymbolDelete(symbol->overload_next);
@@ -1468,7 +1469,6 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
 Symbol* SymbolClone(Symbol* sym) {
   Symbol* new_sym = NewSymbol(sym->name.value, sym->type, sym->storage);
   new_sym->flags = sym->flags;
-  new_sym->concept_definition = NULL;
   new_sym->associated_constraint =
       ConceptsCloneConstraint(sym->associated_constraint);
   new_sym->cxx_linkage = sym->cxx_linkage;
@@ -1477,12 +1477,8 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->value = sym->value;
   new_sym->stack_offset = sym->stack_offset;
   new_sym->alias_target = sym->alias_target;
-  new_sym->lambda_capture_source = sym->lambda_capture_source;
   new_sym->lambda_capture_by_reference =
       sym->lambda_capture_by_reference;
-  new_sym->anonymous_union_host = sym->anonymous_union_host;
-  new_sym->anonymous_union_member_offset =
-      sym->anonymous_union_member_offset;
   new_sym->overload_next = NULL;
   new_sym->default_argument =
       ASTNodeClone(sym->default_argument, IdentityCloneNode, NULL, NULL);
@@ -1490,11 +1486,6 @@ Symbol* SymbolClone(Symbol* sym) {
       ASTNodeClone(sym->constexpr_initializer, IdentityCloneNode, NULL, NULL);
   new_sym->is_constexpr_representable = sym->is_constexpr_representable;
   new_sym->requires_ast_constexpr = sym->requires_ast_constexpr;
-  new_sym->constexpr_reference_scope = sym->constexpr_reference_scope;
-  new_sym->template_template_parameters =
-      TemplateParameterVectorCopy(sym->template_template_parameters);
-  new_sym->template_template_parameter_kind =
-      sym->template_template_parameter_kind;
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
   new_sym->template_parameter_index = sym->template_parameter_index;
@@ -1503,13 +1494,26 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->structured_binding_pack_size =
       sym->structured_binding_pack_size;
   new_sym->namespace_ = sym->namespace_;
-  new_sym->static_data_member_class = sym->static_data_member_class;
-  new_sym->static_data_member_pattern = sym->static_data_member_pattern;
-  new_sym->static_data_member_template_arguments =
-      TemplateArgumentVectorCopy(sym->static_data_member_template_arguments);
-  new_sym->static_data_member_template_definition =
-      sym->static_data_member_template_definition;
   new_sym->member_lookup_class = sym->member_lookup_class;
+  // The concept body, local class names and import backup are not cloned.
+  const SymbolExtra* from = sym->extra;
+  if (from != NULL) {
+    SymbolExtra* to = SymbolMutableExtra(new_sym);
+    to->lambda_capture_source = from->lambda_capture_source;
+    to->anonymous_union_host = from->anonymous_union_host;
+    to->anonymous_union_member_offset = from->anonymous_union_member_offset;
+    to->constexpr_reference_scope = from->constexpr_reference_scope;
+    to->template_template_parameters =
+        TemplateParameterVectorCopy(from->template_template_parameters);
+    to->template_template_parameter_kind =
+        from->template_template_parameter_kind;
+    to->static_data_member_class = from->static_data_member_class;
+    to->static_data_member_pattern = from->static_data_member_pattern;
+    to->static_data_member_template_arguments =
+        TemplateArgumentVectorCopy(from->static_data_member_template_arguments);
+    to->static_data_member_template_definition =
+        from->static_data_member_template_definition;
+  }
   StringSetString(&new_sym->asm_name, &sym->asm_name);
   // NewSymbol already initialized new_sym->attributes; replace it with a deep
   // copy of the source's attributes.

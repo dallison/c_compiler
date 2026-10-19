@@ -4258,7 +4258,7 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   copy->value = old->value;
   copy->stack_offset = old->stack_offset;
   copy->alias_target = old->alias_target;
-  copy->lambda_capture_source = old->lambda_capture_source;
+  SymbolCopyLambdaCaptureSource(copy, old);
   copy->lambda_capture_by_reference =
       old->lambda_capture_by_reference;
   id->symbol = copy;

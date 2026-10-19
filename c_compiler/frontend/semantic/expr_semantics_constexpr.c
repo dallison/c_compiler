@@ -509,7 +509,8 @@ bool MarkCXX26SymbolicConstexprReference(Symbol* symbol,
                      STO(static) | STO(thread));
       if (target_referenceable) {
         symbol->is_constexpr_representable = true;
-        symbol->constexpr_reference_scope = compiler->current_function;
+        SymbolMutableExtra(symbol)->constexpr_reference_scope =
+            compiler->current_function;
         ASTNodeDelete(symbol->constexpr_initializer);
         symbol->constexpr_initializer =
             ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL);

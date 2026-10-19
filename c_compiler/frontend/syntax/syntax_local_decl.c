@@ -447,8 +447,8 @@ static void InjectBlockScopeAnonymousAggregateMembers(Syntax* syntax,
     injected->flags.invented = false;
     injected->storage = STO(auto);
     injected->location = object->location;
-    injected->anonymous_union_host = object;
-    injected->anonymous_union_member_offset =
+    SymbolMutableExtra(injected)->anonymous_union_host = object;
+    SymbolMutableExtra(injected)->anonymous_union_member_offset =
         base_offset + member->byte_offset;
     if (!SyntaxAddSymbol(syntax, injected)) {
       SyntaxError(syntax, "Duplicate symbol %s", injected->name.value);

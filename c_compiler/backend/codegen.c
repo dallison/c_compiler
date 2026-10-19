@@ -771,7 +771,7 @@ bool SymbolNeedsDynamicStackAllocation(Symbol* symbol) {
 }
 
 bool SymbolIsAnonymousUnionMemberView(Symbol* symbol) {
-  return symbol != NULL && symbol->anonymous_union_host != NULL;
+  return symbol != NULL && SymbolExtraOf(symbol)->anonymous_union_host != NULL;
 }
 
 static int PooledVariableStackOffset(Generator* gen, Symbol* sym) {
@@ -800,12 +800,13 @@ void AssignAnonymousUnionMemberOffsets(Generator* gen) {
     if (!SymbolIsAnonymousUnionMemberView(sym)) {
       continue;
     }
-    int host_offset = PooledVariableStackOffset(gen, sym->anonymous_union_host);
+    int host_offset = PooledVariableStackOffset(
+        gen, SymbolExtraOf(sym)->anonymous_union_host);
     if (host_offset < 0) {
       continue;
     }
     entry->pooled->data.ivalue =
-        host_offset + sym->anonymous_union_member_offset;
+        host_offset + SymbolExtraOf(sym)->anonymous_union_member_offset;
   }
 }
 

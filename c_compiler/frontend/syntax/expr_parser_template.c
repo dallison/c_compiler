@@ -1221,9 +1221,9 @@ ASTNode* ParseIdentifier(Syntax* syntax,
   // Use the class member, which holds the initializer.
   if (symbol != NULL && symbol->variable_template == NULL &&
       symbol->flags.is_template &&
-      symbol->static_data_member_class != NULL) {
-    StructMember* member =
-        FindStructMember(symbol->static_data_member_class, &symbol->name);
+      SymbolExtraOf(symbol)->static_data_member_class != NULL) {
+    StructMember* member = FindStructMember(
+        SymbolExtraOf(symbol)->static_data_member_class, &symbol->name);
     if (member != NULL && member->symbol != NULL &&
         member->symbol->variable_template != NULL) {
       symbol = member->symbol;

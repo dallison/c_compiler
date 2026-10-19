@@ -155,7 +155,7 @@ static Symbol* BuildConceptSymbol(TypeRecord* int_type) {
   Symbol* sym = NewSymbol("Integral", NULL, STO(implicit));
   sym->namespace_ = compiler->global_namespace;
   sym->flags.is_concept = true;
-  sym->concept_definition = concept;
+  SymbolMutableExtra(sym)->concept_definition = concept;
   return sym;
 }
 
@@ -379,7 +379,7 @@ static void CheckConceptSymbol(Symbol* sym) {
   if (sym == NULL) return;
   CHECK(StringEqual(&sym->name, "Integral"));
   CHECK(sym->flags.is_concept);
-  Concept* concept = sym->concept_definition;
+  Concept* concept = SymbolExtraOf(sym)->concept_definition;
   CHECK(concept != NULL);
   if (concept == NULL) return;
   CHECK(StringEqual(&concept->name, "Integral"));

@@ -1527,7 +1527,7 @@ static ASTNode* AnalyzeIdentifierHandleDependentQualifiedName(
 static ASTNode* AnalyzeIdentifierFoldConceptId(IdentifierASTNode* node) {
   if (!CompilerIsCXX() || node->symbol == NULL ||
       !node->symbol->flags.is_concept ||
-      node->symbol->concept_definition == NULL ||
+      SymbolExtraOf(node->symbol)->concept_definition == NULL ||
       (node->base.flags & kASTIsDeclaration) != 0 ||
       TemplateArgumentVectorContainsTemplateParameter(
           node->template_arguments)) {

@@ -3753,7 +3753,8 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
         location);
     if (is_constexpr || is_constinit) {
       sym->is_constexpr_representable = true;
-      sym->constexpr_reference_scope = compiler->current_function;
+      SymbolMutableExtra(sym)->constexpr_reference_scope =
+          compiler->current_function;
       ASTNodeDelete(sym->constexpr_initializer);
       sym->constexpr_initializer =
           ASTNodeClone(access, StaticAssertIdentityClone, NULL, NULL);

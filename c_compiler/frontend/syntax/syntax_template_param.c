@@ -490,8 +490,8 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
     param->flags.is_template_template_parameter = true;
     param->flags.is_parameter_pack = is_parameter_pack;
     param->template_parameter_index = index;
-    param->template_template_parameter_kind = template_kind;
-    param->template_template_parameters =
+    SymbolMutableExtra(param)->template_template_parameter_kind = template_kind;
+    SymbolMutableExtra(param)->template_template_parameters =
         TemplateParameterVectorCopy(inner_parameters);
     if (template_kind == kTemplateTemplateParameterVariable) {
       param->variable_template = malloc(sizeof(VariableTemplate));

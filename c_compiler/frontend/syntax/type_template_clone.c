@@ -1289,7 +1289,7 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
   RewriteTemplateBodyIdentifiers(decl->initializer, &clone->symbol_map);
   if (old_symbol->is_constexpr_representable) {
     replacement->is_constexpr_representable = true;
-    replacement->constexpr_reference_scope = clone->to_func;
+    SymbolMutableExtra(replacement)->constexpr_reference_scope = clone->to_func;
     ASTNodeDelete(replacement->constexpr_initializer);
     replacement->constexpr_initializer =
         ASTNodeClone(decl->initializer, IdentityCloneNode, NULL, NULL);
@@ -5687,7 +5687,7 @@ static Symbol* ClonedBodySymbolFor(ASTNode* node,
   Symbol* source = ((IdentifierASTNode*)node)->symbol;
   Symbol* replacement = MapFindPointerKey(&clone->symbol_map, source);
   if (replacement == NULL && source != NULL &&
-      source->static_data_member_class != NULL) {
+      SymbolExtraOf(source)->static_data_member_class != NULL) {
     replacement = FindClonedOwnerMemberSymbol(clone, source);
     if (replacement == source) {
       replacement = NULL;
@@ -7587,7 +7587,7 @@ static ASTNode* RebaseDeferredMemberTemplateParameterIdentifier(
       copy->value = old->value;
       copy->stack_offset = old->stack_offset;
       copy->alias_target = old->alias_target;
-      copy->lambda_capture_source = old->lambda_capture_source;
+      SymbolCopyLambdaCaptureSource(copy, old);
       copy->lambda_capture_by_reference =
           old->lambda_capture_by_reference;
       id->symbol = copy;
@@ -11852,7 +11852,7 @@ void TypeEnsureTemplateMemberFunctionDefinition(Syntax* syntax, Symbol* symbol) 
       // argument for the member's parameter.
       TypeRecord* substituted = NULL;
       Vector* capture_args = LambdaCaptureDefiningFunctionArguments(
-          owner, member->symbol->lambda_capture_source);
+          owner, SymbolExtraOf(member->symbol)->lambda_capture_source);
       if (capture_args != NULL) {
         substituted = SubstituteTemplateParameters(
             &parser, member->symbol->type, capture_args);

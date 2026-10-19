@@ -1076,7 +1076,7 @@ static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures,
     field->flags.invented = true;
     field->flags.is_defined = true;
     field->flags.is_parameter_pack = capture->is_pack_expansion;
-    field->lambda_capture_source = capture->captured;
+    SymbolMutableExtra(field)->lambda_capture_source = capture->captured;
     field->lambda_capture_by_reference = capture->by_reference;
     field->location = location;
     StructMember* member = NewStructMember(field);

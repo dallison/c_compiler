@@ -1175,8 +1175,8 @@ static void RecordStaticDataMemberPattern(StructMember* member,
       TypeIsFunction(instantiated->type) || args == NULL) {
     return;
   }
-  instantiated->static_data_member_pattern = member->symbol;
-  instantiated->static_data_member_template_arguments =
+  SymbolMutableExtra(instantiated)->static_data_member_pattern = member->symbol;
+  SymbolMutableExtra(instantiated)->static_data_member_template_arguments =
       TemplateArgumentVectorCopy(args);
 }
 
@@ -1186,8 +1186,8 @@ static void RecordStaticDataMemberPattern(StructMember* member,
  * member's variable_template. */
 static ASTNode* StaticDataMemberOutOfClassInitializer(Symbol* pattern) {
   VariableDeclarationASTNode* definition =
-      pattern != NULL ? (VariableDeclarationASTNode*)
-                            pattern->static_data_member_template_definition
+      pattern != NULL ? (VariableDeclarationASTNode*)SymbolExtraOf(pattern)
+                            ->static_data_member_template_definition
                       : NULL;
   if (definition == NULL) {
     return NULL;
@@ -1228,21 +1228,22 @@ static void RetargetStaticDataMemberIdentifier(ASTNode* node, void* data,
 
 void TypeEnsureStaticDataMemberDefinition(Syntax* syntax, Symbol* symbol) {
   if (syntax == NULL || symbol == NULL || symbol->type == NULL ||
-      symbol->static_data_member_pattern == NULL ||
-      symbol->static_data_member_class == NULL ||
+      SymbolExtraOf(symbol)->static_data_member_pattern == NULL ||
+      SymbolExtraOf(symbol)->static_data_member_class == NULL ||
       TypeContainsTemplateParameter(symbol->type) ||
       TemplateArgumentVectorContainsTemplateParameter(
-          symbol->static_data_member_template_arguments)) {
+          SymbolExtraOf(symbol)->static_data_member_template_arguments)) {
     return;
   }
-  Symbol* pattern = symbol->static_data_member_pattern;
-  Struct* owner = symbol->static_data_member_class;
+  Symbol* pattern = SymbolExtraOf(symbol)->static_data_member_pattern;
+  Struct* owner = SymbolExtraOf(symbol)->static_data_member_class;
   StructMember* member = MapFindPointerKey(&owner->symbol_table, &symbol->name);
   if (member == NULL || member->symbol != symbol) {
     return;
   }
   VariableDeclarationASTNode* definition =
-      (VariableDeclarationASTNode*)pattern->static_data_member_template_definition;
+      (VariableDeclarationASTNode*)SymbolExtraOf(pattern)
+          ->static_data_member_template_definition;
   // A member variable template (`template <class U> static constexpr bool
   // v = ...;`) is instantiated per use, not here.
   if (definition == NULL && pattern->variable_template != NULL) {
@@ -1258,11 +1259,12 @@ void TypeEnsureStaticDataMemberDefinition(Syntax* syntax, Symbol* symbol) {
     TypeParser parser;
     TypeParserInit(&parser, syntax->lex, syntax, STO(implicit),
                    syntax->context);
-    parser.template_substitution_source = pattern->static_data_member_class;
+    parser.template_substitution_source =
+        SymbolExtraOf(pattern)->static_data_member_class;
     parser.template_substitution_target = owner;
     initializer = CloneDependentExpressionWithArgs(
         &parser, pattern_initializer,
-        symbol->static_data_member_template_arguments);
+        SymbolExtraOf(symbol)->static_data_member_template_arguments);
     TypeParserDestruct(&parser);
     if (initializer == NULL) {
       initializer = CloneCXXDefaultMemberInitializer(pattern_initializer);
@@ -1284,7 +1286,7 @@ void TypeEnsureStaticDataMemberDefinition(Syntax* syntax, Symbol* symbol) {
     VectorAppend(undefined, symbol);
     return;
   }
-  symbol->static_data_member_pattern = NULL;
+  symbol->extra->static_data_member_pattern = NULL;
   if (initializer != NULL && TypeIsArray(symbol->type) &&
       !symbol->type->info.array.is_flexible &&
       !symbol->type->info.array.is_vla &&
@@ -1314,14 +1316,17 @@ void TypeRecordStaticDataMemberDefinition(Syntax* syntax, Symbol* member,
   if (!is_template_definition) {
     // An explicit specialization (`template <> const T C<X>::k[] = ...;`) is
     // this specialization's own definition.
-    member->static_data_member_pattern = NULL;
+    if (member->extra != NULL) {
+      member->extra->static_data_member_pattern = NULL;
+    }
     return;
   }
-  member->static_data_member_template_definition = definition;
+  SymbolMutableExtra(member)->static_data_member_template_definition =
+      definition;
   Vector* undefined = &compiler->cxx_undefined_template_static_members;
   for (size_t i = 0; i < undefined->length;) {
     Symbol* symbol = undefined->value.p[i];
-    if (symbol->static_data_member_pattern != member) {
+    if (SymbolExtraOf(symbol)->static_data_member_pattern != member) {
       i++;
       continue;
     }
@@ -1901,8 +1906,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           member_symbol->location = member->symbol->location;
           member_symbol->flags = member->symbol->flags;
           member_symbol->flags.is_parameter_pack = false;
-          member_symbol->lambda_capture_source =
-              member->symbol->lambda_capture_source;
+          SymbolCopyLambdaCaptureSource(member_symbol, member->symbol);
           member_symbol->lambda_capture_by_reference =
               member->symbol->lambda_capture_by_reference;
           member_symbol->value = member->symbol->value;
@@ -1957,7 +1961,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     Vector* member_args = args;
     if (from->tag_symbol != NULL && from->tag_symbol->flags.invented) {
       Vector* capture_args = LambdaCaptureDefiningFunctionArguments(
-          str, member->symbol->lambda_capture_source);
+          str, SymbolExtraOf(member->symbol)->lambda_capture_source);
       if (capture_args != NULL) {
         member_args = capture_args;
       }
@@ -2003,8 +2007,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         NewSymbol(member->symbol->name.value, member_type, member->symbol->storage);
     member_symbol->location = member->symbol->location;
     member_symbol->flags = member->symbol->flags;
-    member_symbol->lambda_capture_source =
-        member->symbol->lambda_capture_source;
+    SymbolCopyLambdaCaptureSource(member_symbol, member->symbol);
     member_symbol->lambda_capture_by_reference =
         member->symbol->lambda_capture_by_reference;
     CopySymbolAliasTemplate(member_symbol, member->symbol);
@@ -3279,9 +3282,11 @@ ASTNode* TypeInstantiateVariableTemplateInitializer(Syntax* syntax,
 
   Struct* saved_substitution_source = parser.template_substitution_source;
   Struct* saved_substitution_target = parser.template_substitution_target;
-  if (var_template->static_data_member_class != NULL) {
-    parser.template_substitution_source = var_template->static_data_member_class;
-    parser.template_substitution_target = var_template->static_data_member_class;
+  if (SymbolExtraOf(var_template)->static_data_member_class != NULL) {
+    parser.template_substitution_source =
+        SymbolExtraOf(var_template)->static_data_member_class;
+    parser.template_substitution_target =
+        SymbolExtraOf(var_template)->static_data_member_class;
   }
   ASTNode* concrete = NULL;
   if (ConceptsConstraintSatisfied(constraint, substitution_args) &&
@@ -4888,7 +4893,7 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   if (formal_is_template_parameter) {
     if (actual_origin == NULL ||
         !TemplateTemplateParameterListsCompatible(
-            formal_origin->template_template_parameters,
+            SymbolExtraOf(formal_origin)->template_template_parameters,
             TemplateParameterListForSymbol(actual_origin))) {
       return false;
     }
@@ -8440,7 +8445,8 @@ static bool ClassTemplateTypePatternMatches(Vector* bindings,
     Vector* actual_args = TypeSpecializationTemplateArguments(actual);
     if (actual_origin == NULL || pattern_args == NULL || actual_args == NULL ||
         !TemplateTemplateParameterListsCompatible(
-            pattern->template_origin->template_template_parameters,
+            SymbolExtraOf(pattern->template_origin)
+                ->template_template_parameters,
             TemplateParameterListForSymbol(actual_origin))) {
       return false;
     }
@@ -8705,10 +8711,9 @@ static void AppendFlattenedTemplateArguments(Vector* out, Vector* args) {
 
 bool TypeTemplateTemplateParameterAcceptsDeduced(Symbol* parameter,
                                                  TypeRecord* deduced) {
-  if (parameter == NULL ||
-      !parameter->flags.is_template_template_parameter ||
-      parameter->template_template_parameters == NULL || deduced == NULL ||
-      !TypeIsStructOrUnion(deduced)) {
+  if (parameter == NULL || !parameter->flags.is_template_template_parameter ||
+      SymbolExtraOf(parameter)->template_template_parameters == NULL ||
+      deduced == NULL || !TypeIsStructOrUnion(deduced)) {
     return false;
   }
   Vector* deduced_args = TypeSpecializationTemplateArguments(deduced);
@@ -8722,9 +8727,11 @@ bool TypeTemplateTemplateParameterAcceptsDeduced(Symbol* parameter,
   Vector patterns;
   VectorInit(&patterns);
   int max_index = -1;
-  for (size_t i = 0; i < parameter->template_template_parameters->length; i++) {
+  for (size_t i = 0;
+       i < SymbolExtraOf(parameter)->template_template_parameters->length;
+       i++) {
     TemplateParameter* param =
-        parameter->template_template_parameters->value.p[i];
+        SymbolExtraOf(parameter)->template_template_parameters->value.p[i];
     TemplateArgument* pattern =
         NewTemplateTemplateParameterCTADPatternArgument(param);
     if (pattern != NULL) {
@@ -8782,7 +8789,7 @@ TypeRecord* TypeTemplateTemplateParameterApplyDefaults(
       TypeTemplateTemplateParameterAcceptsDeduced(parameter, deduced)) {
     return deduced != NULL ? TypeRecordCopy(deduced) : NULL;
   }
-  Vector* parameters = parameter->template_template_parameters;
+  Vector* parameters = SymbolExtraOf(parameter)->template_template_parameters;
   Vector* deduced_args = TypeSpecializationTemplateArguments(deduced);
   Vector flat_deduced_args;
   VectorInit(&flat_deduced_args);
@@ -10281,7 +10288,7 @@ static Vector* TemplateParameterListForSymbol(Symbol* symbol) {
     return NULL;
   }
   if (symbol->flags.is_template_template_parameter) {
-    return symbol->template_template_parameters;
+    return SymbolExtraOf(symbol)->template_template_parameters;
   }
   if (symbol->alias_template != NULL) {
     return &symbol->alias_template->parameters;
@@ -10289,8 +10296,9 @@ static Vector* TemplateParameterListForSymbol(Symbol* symbol) {
   if (symbol->variable_template != NULL) {
     return &symbol->variable_template->parameters;
   }
-  if (symbol->flags.is_concept && symbol->concept_definition != NULL) {
-    return symbol->concept_definition->template_parameters;
+  if (symbol->flags.is_concept &&
+      SymbolExtraOf(symbol)->concept_definition != NULL) {
+    return SymbolExtraOf(symbol)->concept_definition->template_parameters;
   }
   if (symbol->type != NULL && TypeIsStructOrUnion(symbol->type) &&
       symbol->type->info.struct_info != NULL) {
@@ -10374,12 +10382,12 @@ static bool TemplateTemplateArgumentMatchesParameter(
   Symbol* symbol = arg->template_symbol;
   TemplateTemplateParameterKind actual_kind =
       symbol != NULL && symbol->flags.is_template_template_parameter
-          ? symbol->template_template_parameter_kind
-          : symbol != NULL && symbol->flags.is_concept
-                ? kTemplateTemplateParameterConcept
-                : symbol != NULL && symbol->variable_template != NULL
-                      ? kTemplateTemplateParameterVariable
-                      : kTemplateTemplateParameterType;
+          ? SymbolExtraOf(symbol)->template_template_parameter_kind
+      : symbol != NULL && symbol->flags.is_concept
+          ? kTemplateTemplateParameterConcept
+      : symbol != NULL && symbol->variable_template != NULL
+          ? kTemplateTemplateParameterVariable
+          : kTemplateTemplateParameterType;
   if (actual_kind != param->template_template_kind) {
     return false;
   }
@@ -11221,10 +11229,10 @@ static Vector* CompleteFunctionTemplateArgumentsUnsuspended(
   if (func != NULL && TypeIsFunction(func)) {
     parameters = &func->info.function.template_parameters;
     if (parameters->length == 0 && func->info.function.symbol != NULL &&
-        func->info.function.symbol->imported_function_template_parameters_backup
-                .length > 0) {
-      parameters =
-          &func->info.function.symbol->imported_function_template_parameters_backup;
+        SymbolExtraOf(func->info.function.symbol)
+                ->imported_function_template_parameters_backup.length > 0) {
+      parameters = &func->info.function.symbol->extra
+                        ->imported_function_template_parameters_backup;
     }
   }
   if (func == NULL || !TypeIsFunction(func) || parameters == NULL ||

@@ -1150,11 +1150,11 @@ bool ConstEvalStep(ConstEvalContext* ctx) {
 
 bool ConstexprReferenceUsableInCurrentFunction(Symbol* symbol) {
   if (symbol == NULL || !symbol->is_constexpr_representable ||
-      symbol->constexpr_reference_scope == NULL ||
+      SymbolExtraOf(symbol)->constexpr_reference_scope == NULL ||
       compiler->current_function == NULL) {
     return false;
   }
-  TypeRecord* scope = symbol->constexpr_reference_scope;
+  TypeRecord* scope = SymbolExtraOf(symbol)->constexpr_reference_scope;
   TypeRecord* current = compiler->current_function;
   if (scope == current) {
     return true;

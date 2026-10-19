@@ -140,16 +140,57 @@ typedef struct SymbolModuleIdentity {
   const char* import_source_module;     // Import provenance for importers.
 } SymbolModuleIdentity;
 
+// Fields that few symbols ever set.  A symbol has no SymbolExtra until the
+// first write through SymbolMutableExtra; until then SymbolExtraOf reads every
+// field as zero.  Owned by the symbol.
+typedef struct SymbolExtra {
+  // Original entity represented by an implementation-generated lambda
+  // capture field. Transient: closure fields never cross module boundaries.
+  struct Symbol* lambda_capture_source;
+  // Block-scope anonymous union/struct: injected member names alias storage in
+  // `anonymous_union_host` at `anonymous_union_member_offset`.  Transient.
+  struct Symbol* anonymous_union_host;
+  int anonymous_union_member_offset;
+  TemplateTemplateParameterKind template_template_parameter_kind;  // @wire 57
+  // See is_constexpr_representable.
+  struct TypeRecord* constexpr_reference_scope;
+  // Owned signature copy for a template-template parameter placeholder.
+  Vector* template_template_parameters;  // TemplateParameter*.     // @wire 56
+  struct Concept* concept_definition;  // Body when flags.is_concept. // @wire 45
+  // Class that owns this static data member. Its out-of-line definition,
+  // including the implicit constructor and destructor calls, is in that
+  // class's scope. Transient: rebuilt when the class member is declared.
+  struct Struct* static_data_member_class;  // @wire - (transient)
+  // Static data member of a class template specialization: the template's
+  // member it was instantiated from and the (owned) arguments used, so its
+  // definition can be instantiated when it is first odr-used.  Transient.
+  struct Symbol* static_data_member_pattern;  // @wire - (transient)
+  Vector* static_data_member_template_arguments;  // @wire - (transient)
+  // A class template's static data member: its out-of-class definition
+  // (`template <class T> const T C<T>::k[] = {...};`), owned by the
+  // translation unit's declaration list.  Transient.
+  struct ASTNode* static_data_member_template_definition;  // @wire - (transient)
+  // Names of the local classes defined in this function's body, in order of
+  // definition (owned String*), for their mangling discriminators.  Transient.
+  Vector* local_class_names;  // @wire - (transient)
+  // Compiler-owned copy of a deserialized function template's parameter list.
+  // Imported module symbols can have their live parameter vector cleared while
+  // pending instantiations are compiled; this backup restores completion.
+  Vector imported_function_template_parameters_backup;  // transient
+} SymbolExtra;
+
 // A symbol.  This is a variable, function or type used in a program.
 // Module-serialization field numbers (see
 // c_compiler/serialize/symbol_serialize.c).  Transient/codegen fields
 // (usage_info, die) are recomputed on load and carry no wire number.
+// Fields are ordered to avoid padding; there are hundreds of thousands of
+// symbols in a large C++ translation unit.
 typedef struct Symbol {
   String name;                // Symbol name.                     // @wire 1
   String asm_name;            // Optional asm-visible name.       // @wire 2
   struct Namespace* namespace_;  // Owning C++ namespace, if any. // @wire 3
-  int id;                                                         // @wire 4
   struct TypeRecord* type;    // Type.                            // @wire 5
+  int id;                                                         // @wire 4
   Storage storage;            // Storage (static, typedef, etc.)  // @wire 6
   struct {
     bool is_defined: 1;            // Symbol is defined.              // @wire 7
@@ -215,19 +256,19 @@ typedef struct Symbol {
   // analysis sets this before IR generation so every reference to the pooled
   // variable uses the hidden struct-return address.
   bool is_nrvo : 1;
-  
+
   struct {
     int used_as_arg;              // Times used as function arg.
     int used_in_loop;             // Times used in loop.
     int reads;                    // Number of reads.
   } usage_info;                   // @wire - (transient, not serialized)
-  
-  Vector attributes;          // Attributes (owns Attribute*).    // @wire 42
   int alignment;              // aligned(N) override; 0 = natural. // @wire 32
+
+  Vector attributes;          // Attributes (owns Attribute*).    // @wire 42
   int template_parameter_index;  // Template parameter index.      // @wire 33
   int dependent_value_template_parameter_index;  // Deferred value. // @wire 34
   SourceLocation location;                                         // @wire 35
-  
+
   // Symbol value, one of these.  Serialized as the raw 64-bit slot.
   union {
     int64_t ivalue;         // Integer value for constants.      // @wire 36
@@ -237,32 +278,19 @@ typedef struct Symbol {
     struct Symbol* func_defn;      // Defn of this func decl.     // @wire -
   } value;
   int32_t stack_offset;     // Stack offset if local.            // @wire 37
+  CXXLinkageKind cxx_linkage;        // C++20 external/internal/module. // @wire 48
   struct Symbol* alias_target;  // C++ using-declaration target. // @wire 38
-  // Original entity represented by an implementation-generated lambda
-  // capture field. Transient: closure fields never cross module boundaries.
-  struct Symbol* lambda_capture_source;
-  // Block-scope anonymous union/struct: injected member names alias storage in
-  // `anonymous_union_host` at `anonymous_union_member_offset`.  Transient.
-  struct Symbol* anonymous_union_host;
-  int anonymous_union_member_offset;
   struct Symbol* overload_next; // Next overload, same name.     // @wire 39
   struct ASTNode* default_argument; // C++ default arg, if any.  // @wire 40
   // Portable initializer for serialized constexpr aggregate values. The live
   // ConstexprObject cache in value.other is process-local and cannot be wired.
   struct ASTNode* constexpr_initializer;                       // @wire 58
-  // See is_constexpr_representable.
-  struct TypeRecord* constexpr_reference_scope;
   struct VariableTemplate* variable_template;  // C++ variable template body. // @wire 44
   struct AliasTemplate* alias_template;  // C++ alias template parameters. // @wire 47
-  // Owned signature copy for a template-template parameter placeholder.
-  Vector* template_template_parameters;  // TemplateParameter*.          // @wire 56
-  TemplateTemplateParameterKind template_template_parameter_kind;       // @wire 57
-  struct Concept* concept_definition;  // C++20 concept body when flags.is_concept. // @wire 45
   // C++20 requires-clause for alias templates (`template<...> using A = ...`).
   // Function/class/variable templates store constraints on their type bodies;
   // alias templates have no other durable owner.
   struct ConstraintExpr* associated_constraint;  // @wire 46
-  CXXLinkageKind cxx_linkage;        // C++20 external/internal/module. // @wire 48
   // Interned and shared; NULL when attached to no module and not imported.
   const SymbolModuleIdentity* module_identity;            // @wire 49, 50, 51
   struct DIE* die;          // @wire - (debug info, not serialized)
@@ -274,39 +302,42 @@ typedef struct Symbol {
   // that requested it.  Its deferred body is analyzed at that depth, so
   // instantiations it triggers nest under it.  Transient.
   int instantiation_depth;        // @wire - (transient)
-  // Class that owns this static data member. Its out-of-line definition,
-  // including the implicit constructor and destructor calls, is in that
-  // class's scope. Transient: rebuilt when the class member is declared.
-  struct Struct* static_data_member_class;  // @wire - (transient)
-  // Static data member of a class template specialization: the template's
-  // member it was instantiated from and the (owned) arguments used, so its
-  // definition can be instantiated when it is first odr-used.  Transient.
-  struct Symbol* static_data_member_pattern;  // @wire - (transient)
-  Vector* static_data_member_template_arguments;  // @wire - (transient)
-  // A class template's static data member: its out-of-class definition
-  // (`template <class T> const T C<T>::k[] = {...};`), owned by the
-  // translation unit's declaration list.  Transient.
-  struct ASTNode* static_data_member_template_definition;  // @wire - (transient)
   // Class whose member list holds this function's overload set.  Usually the
   // same as the function type's cxx_member_owner.  A using-declaration clone
   // keeps the base function's type (and therefore the base as
   // cxx_member_owner) while the derived class may add further overloads
   // (`using CordRep::Unref` plus `Unref(Span)`).  Transient.
   struct Struct* member_lookup_class;  // @wire - (transient)
-  // Names of the local classes defined in this function's body, in order of
-  // definition (owned String*), for their mangling discriminators.  Transient.
-  Vector* local_class_names;  // @wire - (transient)
-  // Compiler-owned copy of a deserialized function template's parameter list.
-  // Imported module symbols can have their live parameter vector cleared while
-  // pending instantiations are compiled; this backup restores completion.
-  Vector imported_function_template_parameters_backup;  // transient
   // Lazily computed, full (untruncated) target assembly symbol name.  Owned by
   // the symbol and reused across every emission site so that long mangled names
   // (e.g. deeply nested template specializations) are never truncated to a
   // caller's fixed-size scratch buffer, which would let distinct symbols
   // collide.  @wire - (transient)
   char* cached_target_symbol_name;
+  // Rarely set fields; NULL until one is written.  Use SymbolExtraOf to read
+  // and SymbolMutableExtra to write.
+  SymbolExtra* extra;
 } Symbol;
+
+extern const SymbolExtra kEmptySymbolExtra;
+
+// The symbol's rarely set fields, all zero if none has been written.
+static inline const SymbolExtra* SymbolExtraOf(const Symbol* symbol) {
+  return symbol->extra != NULL ? symbol->extra : &kEmptySymbolExtra;
+}
+
+// The symbol's rarely set fields for writing, allocated on first use.
+SymbolExtra* SymbolMutableExtra(Symbol* symbol);
+
+// Gives `to` the lambda capture source of `from` without allocating extra
+// fields for `to` when there is nothing to copy.
+static inline void SymbolCopyLambdaCaptureSource(Symbol* to,
+                                                 const Symbol* from) {
+  Symbol* source = SymbolExtraOf(from)->lambda_capture_source;
+  if (source != NULL || to->extra != NULL) {
+    SymbolMutableExtra(to)->lambda_capture_source = source;
+  }
+}
 
 
 void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,

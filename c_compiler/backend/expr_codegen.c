@@ -5654,8 +5654,9 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
     // the field.  The captured variable still has it.
     Symbol* field = member->member->symbol;
     TypeRecord* recovered = field->type;
-    if (recovered == NULL && field->lambda_capture_source != NULL) {
-      recovered = field->lambda_capture_source->type;
+    if (recovered == NULL &&
+        SymbolExtraOf(field)->lambda_capture_source != NULL) {
+      recovered = SymbolExtraOf(field)->lambda_capture_source->type;
       if (recovered != NULL && TypeIsReference(recovered)) {
         recovered = recovered->next;
       }
