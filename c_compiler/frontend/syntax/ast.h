@@ -420,6 +420,7 @@ struct ConstraintExpr;
 #define kASTCXXArrayNew (1ULL << 51)  // New-expression allocated an array type.
 #define kASTConstexprPlacementDiagnosed (1ULL << 52)  // Constexpr placement/provenance diagnostic already emitted.
 #define kASTSourceEmptyCompound (1ULL << 53)  // Source spelling was exactly an empty compound-statement.
+#define kASTFoldedConstant kASTSourceEmptyCompound  // On number nodes: folded from a non-literal expression (not a C++11 null pointer constant).
 #define kASTTrivialInfiniteLoop (1ULL << 54)  // P2809 trivial infinite loop; runtime iterations yield.
 #define kASTRequiresASTConstexpr (1ULL << 55)  // Result contains evaluator-only semantic state (for example a materialized reflection query).
 #define kASTConstexprLifetimeInitializer (1ULL << 56)  // Synthesized sparse initializer preserves inactive constexpr subobjects.

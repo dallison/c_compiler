@@ -291,7 +291,7 @@ static ASTNode* FoldConstantExpressionValue(ASTNode* node) {
       ASTNode* const_node =
           NewInt128ConstantASTNode(lo, hi, node->type, node->location);
       ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
-      const_node->flags |= kASTAnalyzed;
+      const_node->flags |= kASTAnalyzed | kASTFoldedConstant;
       return const_node;
     }
   } else if (TypeIsIntegral(node->type)) {
@@ -301,7 +301,7 @@ static ASTNode* FoldConstantExpressionValue(ASTNode* node) {
       ASTNode* const_node =
           NewIntConstantASTNode(value, node->type, node->location);
       ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
-      const_node->flags |= kASTAnalyzed;
+      const_node->flags |= kASTAnalyzed | kASTFoldedConstant;
       return const_node;
     }
   } else if (TypeIsFloatingPoint(node->type)) {

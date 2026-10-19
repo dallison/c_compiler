@@ -711,6 +711,13 @@ static ASTNode* FoldRequiredScalarConstant(ASTNode* expr) {
   if (folded == NULL) {
     return expr;
   }
+  if (TypeIsIntegral(expr->type)) {
+    // A literal stays a literal; a named constant (`const int z = 0`) is not
+    // one.
+    folded->flags |= expr->op == AST_OP(number)
+                         ? expr->flags & kASTFoldedConstant
+                         : kASTFoldedConstant;
+  }
   ASTNode* parent = expr->parent;
   int child_id = expr->child_id;
   if (parent != NULL) {

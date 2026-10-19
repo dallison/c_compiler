@@ -643,6 +643,22 @@ static bool NodeIsZero(ASTNode* node) {
   }
 }
 
+// [conv.ptr]: since C++11 (CWG 903) only an integer literal with value zero is
+// a null pointer constant, so an explicit cast of zero is not.  C and C++98
+// take any integer constant expression equal to zero.
+static bool NodeIsNullPointerConstant(ASTNode* node) {
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX11)) {
+    return NodeIsZero(node);
+  }
+  if (node->op == AST_OP(expr_init)) {
+    ASTNode* expr = ((ExpressionInitializerASTNode*)node)->expr;
+    return expr != NULL && NodeIsNullPointerConstant(expr);
+  }
+  return node->op == AST_OP(number) &&
+         ((ConstantASTNode*)node)->value.ivalue == 0 &&
+         ZeroConstantIsNullPointerLiteral(node);
+}
+
 // An integer literal zero converted to a pointer is the null pointer value and
 // must take the pointer's width; backends size stack arguments from the value
 // type, so a 32-bit literal would leave the pointer's upper half undefined.
@@ -2137,8 +2153,11 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
   }
 
   // A null pointer constant, implicitly or in a cast, becomes the null member
-  // pointer, which is not all-zero bits for data members.
-  if (NodeIsZero(from) && TypeIsMemberPointer(to)) {
+  // pointer, which is not all-zero bits for data members.  Value-initializing
+  // a member pointer casts a synthesized zero.
+  if ((ctx == kConvertCast ? NodeIsZero(from)
+                           : NodeIsNullPointerConstant(from)) &&
+      TypeIsMemberPointer(to)) {
     MemberPointerValue null_value;
     MemberPointerEncodeNull(to, &null_value);
     ASTNode* parent = from->parent;
@@ -2217,7 +2236,7 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
           return;
         }
         // The only integer we can convert to void* is NULL.
-        if (NodeIsZero(from)) {
+        if (NodeIsNullPointerConstant(from)) {
           RetypeNullPointerLiteral(from, to);
           return;
         }
@@ -2284,7 +2303,7 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
       }
 
       // Allow the number 0 (explicitly) to be converted to a pointer.
-      if (NodeIsZero(from) && TypeIsPointer(to)) {
+      if (NodeIsNullPointerConstant(from) && TypeIsPointer(to)) {
         RetypeNullPointerLiteral(from, to);
         return;
       }

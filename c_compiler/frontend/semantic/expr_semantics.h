@@ -22,6 +22,8 @@ ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr);
 // operands concrete.
 void SemanticReanalyzeAfterAutoDeduction(void);
 bool IsConstantExpression(ASTNode* node);
+// Whether a zero-valued number node may be a C++11 null pointer constant.
+bool ZeroConstantIsNullPointerLiteral(ASTNode* node);
 bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
                                               ASTNode* initializer);
 int CompareFunctionTemplateSpecificity(Symbol* left, Symbol* right);

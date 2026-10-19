@@ -112,6 +112,7 @@ static ASTNode* FoldConstantIdentifier(IdentifierASTNode* node) {
   if (TypeIsIntConstant(node->base.type)) {
     const_node = NewIntConstantASTNode(node->symbol->value.ivalue,
                                        node->symbol->type, node->base.location);
+    const_node->flags |= kASTFoldedConstant;
   } else if (TypeIsFloatingPointConstant(node->base.type)) {
     const_node = NewRealConstantASTNode(
         node->symbol->value.fvalue, node->symbol->type, node->base.location);

@@ -2181,7 +2181,20 @@ bool IsNullPointerConstant(ASTNode* node) {
   if (node->type != NULL && (GetQualifiers(node->type) & kQualConst) != 0) {
     return false;
   }
-  return true;
+  return !CompilerCXXAtLeast(kLanguageStandardCXX11) ||
+         ZeroConstantIsNullPointerLiteral(node);
+}
+
+// CWG 903: since C++11 a null pointer constant is an integer literal.  Folded
+// expressions (`int()`, `(int)0`, `1 - 1`), `false` and enumerators are zero
+// constants but not literals.  Zeros the compiler synthesizes count as
+// literals.
+bool ZeroConstantIsNullPointerLiteral(ASTNode* node) {
+  if ((node->flags & kASTFoldedConstant) != 0) {
+    return false;
+  }
+  return node->type == NULL ||
+         (!TypeIsBool(node->type) && !TypeIsEnum(node->type));
 }
 
 // Returns true if `op_name` is a viable binary operator for the ordered operand
