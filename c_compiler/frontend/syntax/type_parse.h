@@ -58,6 +58,10 @@ typedef struct {
   Struct* template_substitution_target;
   Struct* enclosing_template_substitution_source;
   Struct* enclosing_template_substitution_target;
+  // The class template pattern whose member alias template's pattern is being
+  // substituted during class instantiation, or NULL.  Only there are deferred
+  // sibling alias-ids rebound to the instantiated class's aliases.
+  Struct* member_alias_pattern_source;
   StructMember* cxx_member_definition;
   // `template <class T> Matcher<T>::Matcher(T)` uses its template head for the
   // class. That head must not be copied onto the constructor, or overload

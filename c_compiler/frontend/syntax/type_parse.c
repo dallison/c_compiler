@@ -154,6 +154,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->template_substitution_target = NULL;
   parser->enclosing_template_substitution_source = NULL;
   parser->enclosing_template_substitution_target = NULL;
+  parser->member_alias_pattern_source = NULL;
   parser->cxx_member_definition = NULL;
   parser->qualifier_consumed_template_parameters = false;
   parser->cxx_qualified_friend_function = NULL;
@@ -212,6 +213,7 @@ void TypeParserReset(TypeParser* parser) {
   parser->template_substitution_target = NULL;
   parser->enclosing_template_substitution_source = NULL;
   parser->enclosing_template_substitution_target = NULL;
+  parser->member_alias_pattern_source = NULL;
   parser->cxx_member_definition = NULL;
   parser->qualifier_consumed_template_parameters = false;
   parser->cxx_qualified_friend_function = NULL;

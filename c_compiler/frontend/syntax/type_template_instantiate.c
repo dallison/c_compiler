@@ -100,6 +100,20 @@ static void CopySymbolAliasTemplate(Symbol* dest, Symbol* source) {
   }
 }
 
+// Substitutes a member's declared type while instantiating class `source`.
+// A member alias template's pattern is marked so deferred ids of sibling
+// member alias templates are rebound to the instantiated class.
+static TypeRecord* SubstituteClassMemberType(TypeParser* parser, Struct* source,
+                                             Symbol* member, Vector* args) {
+  Struct* saved = parser->member_alias_pattern_source;
+  parser->member_alias_pattern_source =
+      member->alias_template != NULL && member->flags.is_template ? source
+                                                                  : NULL;
+  TypeRecord* result = SubstituteTemplateParameters(parser, member->type, args);
+  parser->member_alias_pattern_source = saved;
+  return result;
+}
+
 // When set, a parameter appearing only in a bare `T::member` non-deduced
 // context is left unbound during argument deduction (so a default template
 // argument can supply it) rather than deduced from the argument via this
@@ -1734,6 +1748,9 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   }
   parser->template_substitution_source = from;
   parser->template_substitution_target = str;
+  Struct* saved_member_alias_pattern_source =
+      parser->member_alias_pattern_source;
+  parser->member_alias_pattern_source = NULL;
   Struct* saved_nested_class_target = nested_member_template_class_target;
   int saved_nested_class_base = nested_member_template_class_base;
   if (nested_class_rebase_base > 0) {
@@ -1946,8 +1963,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       }
     }
     TypeRecord* member_type =
-        SubstituteTemplateParameters(parser, member->symbol->type,
-                                     member_args);
+        SubstituteClassMemberType(parser, from, member->symbol, member_args);
     if (str->is_template && str->tag_symbol != NULL &&
         !str->tag_symbol->flags.invented) {
       RebaseTemplateParameterIndices(
@@ -2126,6 +2142,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   EvaluateInstantiatedStaticAsserts(parser, from, str, args);
   nested_member_template_class_target = saved_nested_class_target;
   nested_member_template_class_base = saved_nested_class_base;
+  parser->member_alias_pattern_source = saved_member_alias_pattern_source;
   parser->template_substitution_source = saved_substitution_source;
   parser->template_substitution_target = saved_substitution_target;
   parser->enclosing_template_substitution_source =
@@ -12266,6 +12283,9 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
   }
   parser->template_substitution_source = source_struct;
   parser->template_substitution_target = str;
+  Struct* saved_member_alias_pattern_source =
+      parser->member_alias_pattern_source;
+  parser->member_alias_pattern_source = NULL;
   // Member-template default arguments are completed against the primary,
   // whose parameter indices still include this class.  Remember the concrete
   // arguments so that completion can fill those indices.
@@ -12382,9 +12402,8 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
       continue;
     }
     if (StructMemberIsNestedType(member)) {
-      TypeRecord* nested_type =
-          SubstituteTemplateParameters(parser, member->symbol->type,
-                                       source_args);
+      TypeRecord* nested_type = SubstituteClassMemberType(
+          parser, source_struct, member->symbol, source_args);
       DiagnosePointerToReferenceMember(parser, member->symbol, nested_type);
       // A member type alias may substitute to a lazy dependent-member type such
       // as `typename ratio<1,1000>::type` (from `using period = typename
@@ -12449,9 +12468,8 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
       }
       continue;
     }
-    TypeRecord* member_type =
-        SubstituteTemplateParameters(parser, member->symbol->type,
-                                     source_args);
+    TypeRecord* member_type = SubstituteClassMemberType(
+        parser, source_struct, member->symbol, source_args);
     DiagnosePointerToReferenceMember(parser, member->symbol, member_type);
     TypeRecordCalculateSize(member_type);
     Symbol* member_symbol =
@@ -12650,6 +12668,7 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
   str->instantiation_in_progress = false;
   parser->template_substitution_failed = saved_member_substitution_failed;
   PopNestedSubstitution(source_struct);
+  parser->member_alias_pattern_source = saved_member_alias_pattern_source;
   parser->template_substitution_source = saved_substitution_source;
   parser->template_substitution_target = saved_substitution_target;
   parser->enclosing_template_substitution_source =

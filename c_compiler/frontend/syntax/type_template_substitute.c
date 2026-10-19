@@ -1955,6 +1955,59 @@ static Struct* StructBaseDeclaringMember(Struct* str, String* name, int depth) {
   return NULL;
 }
 
+/* `template <class U> using rt = Tr<ra<U>>` inside `template <class A> struct
+ * Tr`, where `ra` is a sibling member alias template.  While `rt`'s pattern is
+ * substituted for `Tr<Sym>`, `ra<U>` cannot expand because `U` belongs to `rt`,
+ * so it stays a deferred alias-id.  Bound to the pattern's `ra`, it would
+ * expand later (`Tr<Sym>::rt<int>`) with no enclosing class in scope and leave
+ * `A` unsubstituted.  `Tr<Sym>`'s own `ra` already has `A` substituted, so the
+ * deferred id must name it instead.
+ *
+ * Only member alias patterns need this.  A member function template's
+ * signature (`operator[](key_arg<K>&&)`) keeps the pattern's alias: its
+ * deduction and instantiation run with the class in scope and number `K` in
+ * the pattern's parameter space.
+ *
+ * Returns NULL when no rebinding applies. */
+static Symbol* ConcreteMemberAliasTemplate(TypeParser* parser, Symbol* origin) {
+  if (parser == NULL || parser->member_alias_pattern_source == NULL ||
+      parser->member_alias_pattern_source !=
+          parser->template_substitution_source ||
+      origin == NULL || origin->alias_template == NULL ||
+      !origin->flags.is_template || !StorageIs(origin->storage, STO(typedef))) {
+    return NULL;
+  }
+  Struct* sources[2] = {parser->template_substitution_source,
+                        parser->enclosing_template_substitution_source};
+  Struct* targets[2] = {parser->template_substitution_target,
+                        parser->enclosing_template_substitution_target};
+  for (int i = 0; i < 2; i++) {
+    if (sources[i] == NULL || targets[i] == NULL || sources[i] == targets[i]) {
+      continue;
+    }
+    // The class-body lookup symbol is a separate Symbol from the member, but
+    // both are created over the same pattern type.
+    StructMember* pattern =
+        MapFindPointerKey(&sources[i]->symbol_table, &origin->name);
+    if (pattern == NULL || pattern->symbol == NULL ||
+        (pattern->symbol != origin &&
+         (origin->type == NULL || pattern->symbol->type != origin->type))) {
+      continue;
+    }
+    StructMember* concrete =
+        MapFindPointerKey(&targets[i]->symbol_table, &origin->name);
+    if (concrete == NULL || concrete->symbol == NULL ||
+        concrete->symbol == origin ||
+        concrete->symbol->alias_template == NULL ||
+        !concrete->symbol->flags.is_template ||
+        !StorageIs(concrete->symbol->storage, STO(typedef))) {
+      return NULL;
+    }
+    return concrete->symbol;
+  }
+  return NULL;
+}
+
 TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
                                             TypeRecord* type,
                                             Vector* args,
@@ -2024,6 +2077,10 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
           NULL) {
     info.origin =
         parser->template_substitution_target->tag_symbol->type->template_origin;
+  }
+  Symbol* concrete_alias = ConcreteMemberAliasTemplate(parser, info.origin);
+  if (concrete_alias != NULL) {
+    info.origin = concrete_alias;
   }
   Vector* concrete_args =
       SubstituteTemplateArgumentVectorForTypes(parser, info.args, args);

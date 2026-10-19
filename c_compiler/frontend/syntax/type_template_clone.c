@@ -1295,7 +1295,13 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
     int64_t value = 0;
     ASTNode* expression =
         ConstexprInitializerExpression(decl->initializer);
-    if (expression != NULL &&
+    // While only the class arguments are bound, `Ov<U, char, short>()` still
+    // calls whichever overload the pattern named; evaluating it records that
+    // unrelated result as the value of every instantiation's constant.
+    bool member_parameters_unbound =
+        CloneProducesMemberTemplate(clone) && expression != NULL &&
+        DependentExpressionContainsTemplateParameter(expression);
+    if (expression != NULL && !member_parameters_unbound &&
         EvaluateIntegerExpression(expression, &value)) {
       replacement->value.ivalue = value;
       replacement->flags.value_set = true;
@@ -1598,18 +1604,26 @@ static void FindTemplateArgumentPackExpression(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
   (void)child_id;
-  if (mode != kVisitPreChildren || node == NULL ||
-      node->op != AST_OP(identifier)) {
+  if (mode != kVisitPreChildren || node == NULL) {
     return;
   }
-  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  // Explicit template arguments sit on an identifier, or on the member node
+  // of an accessed member template (`this->template Check<T>()...`).
+  Vector* template_arguments = NULL;
+  if (node->op == AST_OP(identifier)) {
+    template_arguments = ((IdentifierASTNode*)node)->template_arguments;
+  } else if (node->op == AST_OP(structmember)) {
+    template_arguments = ((StructMemberASTNode*)node)->template_arguments;
+  } else if (node->op == AST_OP(string)) {
+    template_arguments = ((ConstantASTNode*)node)->template_arguments;
+  }
   TemplateArgumentPackExpressionSearch* search = data;
-  for (size_t i = 0; id->template_arguments != NULL &&
-                     i < id->template_arguments->length; i++) {
+  for (size_t i = 0; template_arguments != NULL &&
+                     i < template_arguments->length; i++) {
     int pack_index = -1;
     size_t pack_length = 0;
     if (!FindPackExpansionInTemplateArgument(
-            id->template_arguments->value.p[i], search->clone->args,
+            template_arguments->value.p[i], search->clone->args,
             &pack_index, &pack_length)) {
       continue;
     }
@@ -2023,11 +2037,83 @@ static void InstantiateClonedFunctionTemplateCallVisitor(ASTNode* node,
   InstantiateClonedFunctionTemplateCall(data, node);
 }
 
+/* Substitute explicit template arguments for one element of a pack
+ * expansion.  An argument naming the expanded pack takes element
+ * `replace->element_index`; others take the clone's arguments.  Returns true
+ * when a pack element was substituted. */
+static bool SubstitutePackElementTemplateArguments(
+    ReplacePackIdentifierData* replace, Vector** template_arguments) {
+  Vector* original = *template_arguments;
+  TemplateFunctionBodyClone* clone = replace->clone;
+  int pack_index = -1;
+  size_t pack_length = 0;
+  Vector* template_args_for_substitution = original;
+  Vector* rebased_template_args = NULL;
+  int substitution_rebase_base = clone->rebase_template_parameter_base;
+  for (size_t i = 0; i < original->length; i++) {
+    if (FindPackExpansionInTemplateArgument(original->value.p[i], clone->args,
+                                            &pack_index, &pack_length)) {
+      break;
+    }
+  }
+  if (pack_index < 0 && clone->rebase_template_parameter_base > 0) {
+    rebased_template_args = TemplateArgumentVectorCopy(original);
+    for (size_t i = 0; i < rebased_template_args->length; i++) {
+      RebaseTemplateArgumentParameterIndices(
+          rebased_template_args->value.p[i],
+          clone->rebase_template_parameter_base);
+    }
+    for (size_t i = 0; i < rebased_template_args->length; i++) {
+      if (FindPackExpansionInTemplateArgument(
+              rebased_template_args->value.p[i], clone->args, &pack_index,
+              &pack_length)) {
+        template_args_for_substitution = rebased_template_args;
+        substitution_rebase_base = 0;
+        break;
+      }
+    }
+  }
+  Vector* concrete_args = NULL;
+  bool substituted_pack_element = false;
+  if (pack_index >= 0 && (size_t)pack_index < clone->args->length) {
+    TemplateArgument* pack = clone->args->value.p[pack_index];
+    if (pack != NULL && pack->pack_arguments != NULL &&
+        replace->element_index < pack->pack_arguments->length) {
+      Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
+          clone->args, pack_index,
+          pack->pack_arguments->value.p[replace->element_index]);
+      concrete_args = SubstituteTemplateArgumentVector(
+          clone->parser, template_args_for_substitution, element_args,
+          substitution_rebase_base);
+      VectorDeleteWithContents(element_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+      substituted_pack_element = true;
+    }
+  }
+  if (rebased_template_args != NULL) {
+    VectorDeleteWithContents(rebased_template_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+  if (!substituted_pack_element) {
+    concrete_args = SubstituteTemplateArgumentVector(
+        clone->parser, original, clone->args,
+        clone->rebase_template_parameter_base);
+  }
+  VectorDeleteWithContents(original,
+                           (VectorElementDestructor)TemplateArgumentDelete,
+                           /*free_element=*/false);
+  *template_arguments = concrete_args;
+  return substituted_pack_element;
+}
+
 /* Visitor that materializes one element of a pack expansion in a cloned body:
- * clears the pack-expansion flag, substitutes any per-identifier template
- * arguments for this element, rewrites pack-symbol references to the element's
- * symbol, and substitutes pack-dependent cast types. Invoked once per element
- * index while expanding `pattern...`. */
+ * clears the pack-expansion flag, substitutes explicit template arguments (on
+ * identifiers and accessed member templates) for this element, rewrites
+ * pack-symbol references to the element's symbol, and substitutes
+ * pack-dependent cast types. Invoked once per element index while expanding
+ * `pattern...`. */
 static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
                                          int child_id, VisitorMode mode) {
   (void)child_id;
@@ -2087,82 +2173,12 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
       }
     }
     if (replace->clone != NULL && id->template_arguments != NULL &&
-        !repaired_direct_pack_template_argument) {
-      bool substituted_template_args = false;
-      int pack_index = -1;
-      size_t pack_length = 0;
-      Vector* template_args_for_substitution = id->template_arguments;
-      Vector* rebased_template_args = NULL;
-      int substitution_rebase_base =
-          replace->clone->rebase_template_parameter_base;
-      for (size_t i = 0; i < id->template_arguments->length; i++) {
-        if (FindPackExpansionInTemplateArgument(
-                id->template_arguments->value.p[i], replace->clone->args,
-                &pack_index, &pack_length)) {
-          break;
-        }
-      }
-      if (pack_index < 0 &&
-          replace->clone->rebase_template_parameter_base > 0) {
-        rebased_template_args =
-            TemplateArgumentVectorCopy(id->template_arguments);
-        for (size_t i = 0; i < rebased_template_args->length; i++) {
-          RebaseTemplateArgumentParameterIndices(
-              rebased_template_args->value.p[i],
-              replace->clone->rebase_template_parameter_base);
-        }
-        for (size_t i = 0; i < rebased_template_args->length; i++) {
-          if (FindPackExpansionInTemplateArgument(
-                  rebased_template_args->value.p[i], replace->clone->args,
-                  &pack_index, &pack_length)) {
-            template_args_for_substitution = rebased_template_args;
-            substitution_rebase_base = 0;
-            break;
-          }
-        }
-      }
-      if (pack_index >= 0 && (size_t)pack_index < replace->clone->args->length) {
-        TemplateArgument* pack = replace->clone->args->value.p[pack_index];
-        if (pack != NULL && pack->pack_arguments != NULL &&
-            replace->element_index < pack->pack_arguments->length) {
-          Vector* element_args = TemplateArgumentVectorCopyWithPackElement(
-              replace->clone->args, pack_index,
-              pack->pack_arguments->value.p[replace->element_index]);
-          Vector* concrete_args = SubstituteTemplateArgumentVector(
-              replace->clone->parser, template_args_for_substitution,
-              element_args, substitution_rebase_base);
-          VectorDeleteWithContents(
-              id->template_arguments,
-              (VectorElementDestructor)TemplateArgumentDelete,
-              /*free_element=*/false);
-          id->template_arguments = concrete_args;
-          if (id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
-              id->symbol->type->info.function.template_origin != NULL) {
-            id->symbol = id->symbol->type->info.function.template_origin;
-          }
-          VectorDeleteWithContents(
-              element_args, (VectorElementDestructor)TemplateArgumentDelete,
-              /*free_element=*/false);
-          substituted_template_args = true;
-        }
-      }
-      if (rebased_template_args != NULL) {
-        VectorDeleteWithContents(
-            rebased_template_args,
-            (VectorElementDestructor)TemplateArgumentDelete,
-            /*free_element=*/false);
-      }
-      if (!substituted_template_args) {
-        Vector* concrete_args = SubstituteTemplateArgumentVector(
-            replace->clone->parser, id->template_arguments,
-            replace->clone->args,
-            replace->clone->rebase_template_parameter_base);
-        VectorDeleteWithContents(
-            id->template_arguments,
-            (VectorElementDestructor)TemplateArgumentDelete,
-            /*free_element=*/false);
-        id->template_arguments = concrete_args;
-      }
+        !repaired_direct_pack_template_argument &&
+        SubstitutePackElementTemplateArguments(replace,
+                                               &id->template_arguments) &&
+        id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
+        id->symbol->type->info.function.template_origin != NULL) {
+      id->symbol = id->symbol->type->info.function.template_origin;
     }
     if (id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
         id->symbol->type->info.function.template_origin != NULL &&
@@ -2193,6 +2209,19 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
           node->value_category = kValueCategoryLvalue;
         }
       }
+    }
+  }
+  // `this->template Check<T>()...`: the member template's arguments wait on
+  // the StructMember (or unresolved name) node for this per-element slice.
+  if (replace->clone != NULL) {
+    Vector** member_template_args = NULL;
+    if (node->op == AST_OP(structmember)) {
+      member_template_args = &((StructMemberASTNode*)node)->template_arguments;
+    } else if (node->op == AST_OP(string)) {
+      member_template_args = &((ConstantASTNode*)node)->template_arguments;
+    }
+    if (member_template_args != NULL && *member_template_args != NULL) {
+      SubstitutePackElementTemplateArguments(replace, member_template_args);
     }
   }
   if (node->op != AST_OP(cast) || replace->clone == NULL) {

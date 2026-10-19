@@ -1214,6 +1214,33 @@ static bool FunctionTemplateDeducesWithoutBracedArguments(
   return viable;
 }
 
+// True when `templ` cannot accept this many explicit template arguments, even
+// though some of them are still dependent.  `Ov<U, char, short>()` must not
+// keep the unary `template <class U> Ov()` as a viable primary.  An explicit
+// pack expansion may stand for any number of arguments.
+static bool ExplicitArgumentsExceedTemplateParameters(Symbol* templ,
+                                                      Vector* explicit_args) {
+  Vector* params = &templ->type->info.function.template_parameters;
+  if (params->length == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < params->length; i++) {
+    TemplateParameter* param = params->value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < explicit_args->length; i++) {
+    TemplateArgument* arg = explicit_args->value.p[i];
+    if (arg != NULL && (arg->is_pack_expansion ||
+                        arg->references_parameter_pack ||
+                        arg->pack_arguments != NULL)) {
+      return false;
+    }
+  }
+  return explicit_args->length > params->length;
+}
+
 /* Contract: returns `candidate`, a dependent primary, or a deduced specialization;
  * NULL when substitution/arity pre-check fails.  Registers temps when provided. */
 static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
@@ -1249,7 +1276,9 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
       }
     }
     if (dependent_explicit) {
-      return candidate;
+      return ExplicitArgumentsExceedTemplateParameters(candidate, explicit_args)
+                 ? NULL
+                 : candidate;
     }
   }
   // A braced-init-list has no type and therefore cannot deduce an ordinary
