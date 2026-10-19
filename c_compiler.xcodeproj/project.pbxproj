@@ -256,6 +256,28 @@
 		E5BC31701FA3E88100C7691B /* libc_compiler_library.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = E5BC31631FA3E80E00C7691B /* libc_compiler_library.dylib */; };
 		E5BC31721FA4115400C7691B /* tokens.c in Sources */ = {isa = PBXBuildFile; fileRef = E5BC31711FA4115400C7691B /* tokens.c */; };
 		E5BC31791FA4FFFE00C7691B /* syntax.c in Sources */ = {isa = PBXBuildFile; fileRef = E5BC31771FA4FFFE00C7691B /* syntax.c */; };
+		E5D50001F01D000000000001 /* syntax_lookahead.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50001F01D000000000002 /* syntax_lookahead.c */; };
+		E5D50002F01D000000000001 /* syntax_overload.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50002F01D000000000002 /* syntax_overload.c */; };
+		E5D50003F01D000000000001 /* syntax_qualified_name.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50003F01D000000000002 /* syntax_qualified_name.c */; };
+		E5D50004F01D000000000001 /* syntax_static_assert.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50004F01D000000000002 /* syntax_static_assert.c */; };
+		E5D50005F01D000000000001 /* syntax_contracts.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50005F01D000000000002 /* syntax_contracts.c */; };
+		E5D50006F01D000000000001 /* syntax_initializer.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50006F01D000000000002 /* syntax_initializer.c */; };
+		E5D50007F01D000000000001 /* syntax_attribute.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50007F01D000000000002 /* syntax_attribute.c */; };
+		E5D50008F01D000000000001 /* syntax_special_member.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50008F01D000000000002 /* syntax_special_member.c */; };
+		E5D50009F01D000000000001 /* syntax_ctor_init.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50009F01D000000000002 /* syntax_ctor_init.c */; };
+		E5D5000AF01D000000000001 /* syntax_vptr.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D5000AF01D000000000002 /* syntax_vptr.c */; };
+		E5D5000BF01D000000000001 /* syntax_ctor_preamble.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D5000BF01D000000000002 /* syntax_ctor_preamble.c */; };
+		E5D5000CF01D000000000001 /* syntax_function_decl.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D5000CF01D000000000002 /* syntax_function_decl.c */; };
+		E5D5000DF01D000000000001 /* syntax_friend.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D5000DF01D000000000002 /* syntax_friend.c */; };
+		E5D5000EF01D000000000001 /* syntax_decl_specifier.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D5000EF01D000000000002 /* syntax_decl_specifier.c */; };
+		E5D5000FF01D000000000001 /* syntax_declaration_checks.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D5000FF01D000000000002 /* syntax_declaration_checks.c */; };
+		E5D50010F01D000000000001 /* syntax_external_decl.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50010F01D000000000002 /* syntax_external_decl.c */; };
+		E5D50011F01D000000000001 /* syntax_namespace.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50011F01D000000000002 /* syntax_namespace.c */; };
+		E5D50012F01D000000000001 /* syntax_template_param.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50012F01D000000000002 /* syntax_template_param.c */; };
+		E5D50013F01D000000000001 /* syntax_template_arg.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50013F01D000000000002 /* syntax_template_arg.c */; };
+		E5D50014F01D000000000001 /* syntax_template_decl.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50014F01D000000000002 /* syntax_template_decl.c */; };
+		E5D50015F01D000000000001 /* syntax_object_lifetime.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50015F01D000000000002 /* syntax_object_lifetime.c */; };
+		E5D50016F01D000000000001 /* syntax_local_decl.c in Sources */ = {isa = PBXBuildFile; fileRef = E5D50016F01D000000000002 /* syntax_local_decl.c */; };
 		E5BC317A1FA4FFFE00C7691B /* syntax.h in Headers */ = {isa = PBXBuildFile; fileRef = E5BC31781FA4FFFE00C7691B /* syntax.h */; };
 		E5BC317D1FA5004600C7691B /* ast.c in Sources */ = {isa = PBXBuildFile; fileRef = E5BC317B1FA5004600C7691B /* ast.c */; };
 		E5BC317E1FA5004600C7691B /* ast.h in Headers */ = {isa = PBXBuildFile; fileRef = E5BC317C1FA5004600C7691B /* ast.h */; };
@@ -1114,6 +1136,29 @@
 		E5BC31741FA4F40D00C7691B /* errors.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = errors.h; sourceTree = "<group>"; };
 		E5BC31771FA4FFFE00C7691B /* syntax.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax.c; sourceTree = "<group>"; };
 		E5BC31781FA4FFFE00C7691B /* syntax.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = syntax.h; sourceTree = "<group>"; };
+		E5D50017F01D000000000002 /* syntax_internal.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = syntax_internal.h; sourceTree = "<group>"; };
+		E5D50001F01D000000000002 /* syntax_lookahead.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_lookahead.c; sourceTree = "<group>"; };
+		E5D50002F01D000000000002 /* syntax_overload.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_overload.c; sourceTree = "<group>"; };
+		E5D50003F01D000000000002 /* syntax_qualified_name.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_qualified_name.c; sourceTree = "<group>"; };
+		E5D50004F01D000000000002 /* syntax_static_assert.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_static_assert.c; sourceTree = "<group>"; };
+		E5D50005F01D000000000002 /* syntax_contracts.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_contracts.c; sourceTree = "<group>"; };
+		E5D50006F01D000000000002 /* syntax_initializer.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_initializer.c; sourceTree = "<group>"; };
+		E5D50007F01D000000000002 /* syntax_attribute.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_attribute.c; sourceTree = "<group>"; };
+		E5D50008F01D000000000002 /* syntax_special_member.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_special_member.c; sourceTree = "<group>"; };
+		E5D50009F01D000000000002 /* syntax_ctor_init.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_ctor_init.c; sourceTree = "<group>"; };
+		E5D5000AF01D000000000002 /* syntax_vptr.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_vptr.c; sourceTree = "<group>"; };
+		E5D5000BF01D000000000002 /* syntax_ctor_preamble.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_ctor_preamble.c; sourceTree = "<group>"; };
+		E5D5000CF01D000000000002 /* syntax_function_decl.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_function_decl.c; sourceTree = "<group>"; };
+		E5D5000DF01D000000000002 /* syntax_friend.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_friend.c; sourceTree = "<group>"; };
+		E5D5000EF01D000000000002 /* syntax_decl_specifier.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_decl_specifier.c; sourceTree = "<group>"; };
+		E5D5000FF01D000000000002 /* syntax_declaration_checks.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_declaration_checks.c; sourceTree = "<group>"; };
+		E5D50010F01D000000000002 /* syntax_external_decl.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_external_decl.c; sourceTree = "<group>"; };
+		E5D50011F01D000000000002 /* syntax_namespace.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_namespace.c; sourceTree = "<group>"; };
+		E5D50012F01D000000000002 /* syntax_template_param.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_template_param.c; sourceTree = "<group>"; };
+		E5D50013F01D000000000002 /* syntax_template_arg.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_template_arg.c; sourceTree = "<group>"; };
+		E5D50014F01D000000000002 /* syntax_template_decl.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_template_decl.c; sourceTree = "<group>"; };
+		E5D50015F01D000000000002 /* syntax_object_lifetime.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_object_lifetime.c; sourceTree = "<group>"; };
+		E5D50016F01D000000000002 /* syntax_local_decl.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = syntax_local_decl.c; sourceTree = "<group>"; };
 		E5BC317B1FA5004600C7691B /* ast.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ast.c; sourceTree = "<group>"; };
 		E5BC317C1FA5004600C7691B /* ast.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ast.h; sourceTree = "<group>"; };
 		E5BC317F1FA513CE00C7691B /* symbol.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = symbol.c; sourceTree = "<group>"; };
@@ -1901,6 +1946,29 @@
 				E5BC317C1FA5004600C7691B /* ast.h */,
 				E5BC31771FA4FFFE00C7691B /* syntax.c */,
 				E5BC31781FA4FFFE00C7691B /* syntax.h */,
+				E5D50017F01D000000000002 /* syntax_internal.h */,
+				E5D50001F01D000000000002 /* syntax_lookahead.c */,
+				E5D50002F01D000000000002 /* syntax_overload.c */,
+				E5D50003F01D000000000002 /* syntax_qualified_name.c */,
+				E5D50004F01D000000000002 /* syntax_static_assert.c */,
+				E5D50005F01D000000000002 /* syntax_contracts.c */,
+				E5D50006F01D000000000002 /* syntax_initializer.c */,
+				E5D50007F01D000000000002 /* syntax_attribute.c */,
+				E5D50008F01D000000000002 /* syntax_special_member.c */,
+				E5D50009F01D000000000002 /* syntax_ctor_init.c */,
+				E5D5000AF01D000000000002 /* syntax_vptr.c */,
+				E5D5000BF01D000000000002 /* syntax_ctor_preamble.c */,
+				E5D5000CF01D000000000002 /* syntax_function_decl.c */,
+				E5D5000DF01D000000000002 /* syntax_friend.c */,
+				E5D5000EF01D000000000002 /* syntax_decl_specifier.c */,
+				E5D5000FF01D000000000002 /* syntax_declaration_checks.c */,
+				E5D50010F01D000000000002 /* syntax_external_decl.c */,
+				E5D50011F01D000000000002 /* syntax_namespace.c */,
+				E5D50012F01D000000000002 /* syntax_template_param.c */,
+				E5D50013F01D000000000002 /* syntax_template_arg.c */,
+				E5D50014F01D000000000002 /* syntax_template_decl.c */,
+				E5D50015F01D000000000002 /* syntax_object_lifetime.c */,
+				E5D50016F01D000000000002 /* syntax_local_decl.c */,
 				E5BC317F1FA513CE00C7691B /* symbol.c */,
 				E5BC31801FA513CE00C7691B /* symbol.h */,
 				E5BC31831FA513DF00C7691B /* symbol_table.c */,
@@ -4064,6 +4132,28 @@
 				E53AB9E51FFB056100DBD2FD /* assembler.c in Sources */,
 				E5E13095252BC05E00EEE6B7 /* asm_expr.c in Sources */,
 				E5BC31791FA4FFFE00C7691B /* syntax.c in Sources */,
+				E5D50001F01D000000000001 /* syntax_lookahead.c in Sources */,
+				E5D50002F01D000000000001 /* syntax_overload.c in Sources */,
+				E5D50003F01D000000000001 /* syntax_qualified_name.c in Sources */,
+				E5D50004F01D000000000001 /* syntax_static_assert.c in Sources */,
+				E5D50005F01D000000000001 /* syntax_contracts.c in Sources */,
+				E5D50006F01D000000000001 /* syntax_initializer.c in Sources */,
+				E5D50007F01D000000000001 /* syntax_attribute.c in Sources */,
+				E5D50008F01D000000000001 /* syntax_special_member.c in Sources */,
+				E5D50009F01D000000000001 /* syntax_ctor_init.c in Sources */,
+				E5D5000AF01D000000000001 /* syntax_vptr.c in Sources */,
+				E5D5000BF01D000000000001 /* syntax_ctor_preamble.c in Sources */,
+				E5D5000CF01D000000000001 /* syntax_function_decl.c in Sources */,
+				E5D5000DF01D000000000001 /* syntax_friend.c in Sources */,
+				E5D5000EF01D000000000001 /* syntax_decl_specifier.c in Sources */,
+				E5D5000FF01D000000000001 /* syntax_declaration_checks.c in Sources */,
+				E5D50010F01D000000000001 /* syntax_external_decl.c in Sources */,
+				E5D50011F01D000000000001 /* syntax_namespace.c in Sources */,
+				E5D50012F01D000000000001 /* syntax_template_param.c in Sources */,
+				E5D50013F01D000000000001 /* syntax_template_arg.c in Sources */,
+				E5D50014F01D000000000001 /* syntax_template_decl.c in Sources */,
+				E5D50015F01D000000000001 /* syntax_object_lifetime.c in Sources */,
+				E5D50016F01D000000000001 /* syntax_local_decl.c in Sources */,
 				E53AB9E11FF86AA200DBD2FD /* p_code_assembler.c in Sources */,
 				E544B8181FC51DE600F2C59B /* ir.c in Sources */,
 				E58B4DBA243A765C002C24C4 /* debug.c in Sources */,

@@ -307,6 +307,28 @@ davecc_library(davecc_compiler
   c_compiler/frontend/syntax/symbol.c
   c_compiler/frontend/syntax/symbol_table.c
   c_compiler/frontend/syntax/syntax.c
+  c_compiler/frontend/syntax/syntax_attribute.c
+  c_compiler/frontend/syntax/syntax_contracts.c
+  c_compiler/frontend/syntax/syntax_ctor_init.c
+  c_compiler/frontend/syntax/syntax_ctor_preamble.c
+  c_compiler/frontend/syntax/syntax_decl_specifier.c
+  c_compiler/frontend/syntax/syntax_declaration_checks.c
+  c_compiler/frontend/syntax/syntax_external_decl.c
+  c_compiler/frontend/syntax/syntax_friend.c
+  c_compiler/frontend/syntax/syntax_function_decl.c
+  c_compiler/frontend/syntax/syntax_initializer.c
+  c_compiler/frontend/syntax/syntax_local_decl.c
+  c_compiler/frontend/syntax/syntax_lookahead.c
+  c_compiler/frontend/syntax/syntax_namespace.c
+  c_compiler/frontend/syntax/syntax_object_lifetime.c
+  c_compiler/frontend/syntax/syntax_overload.c
+  c_compiler/frontend/syntax/syntax_qualified_name.c
+  c_compiler/frontend/syntax/syntax_special_member.c
+  c_compiler/frontend/syntax/syntax_static_assert.c
+  c_compiler/frontend/syntax/syntax_template_arg.c
+  c_compiler/frontend/syntax/syntax_template_decl.c
+  c_compiler/frontend/syntax/syntax_template_param.c
+  c_compiler/frontend/syntax/syntax_vptr.c
   c_compiler/frontend/syntax/std_header_suggestion.c
   c_compiler/frontend/syntax/typo_correction.c
   c_compiler/frontend/syntax/type_core.c
