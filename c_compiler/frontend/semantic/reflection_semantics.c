@@ -56,10 +56,10 @@ ReflectionEntityKind ReflectionKindForSymbol(Symbol* symbol) {
   if (symbol->flags.is_concept) {
     return kReflectionConcept;
   }
-  if (symbol->alias_template != NULL) {
+  if (SymbolExtraOf(symbol)->alias_template != NULL) {
     return kReflectionAliasTemplate;
   }
-  if (symbol->variable_template != NULL) {
+  if (SymbolExtraOf(symbol)->variable_template != NULL) {
     return kReflectionVariableTemplate;
   }
   if (symbol->flags.is_template && symbol->type != NULL &&
@@ -468,9 +468,9 @@ ReflectionValue* SemanticReflectionValueFromExpression(ASTNode* expression) {
       return (ReflectionValue*)symbol->value.other;
     }
     if (symbol != NULL && TypeIsReflection(symbol->type) &&
-        symbol->constexpr_initializer != NULL) {
-      ASTNode* initializer =
-          ConstexprInitializerExpression(symbol->constexpr_initializer);
+        SymbolExtraOf(symbol)->constexpr_initializer != NULL) {
+      ASTNode* initializer = ConstexprInitializerExpression(
+          SymbolExtraOf(symbol)->constexpr_initializer);
       initializer = AnalyzeExpression(initializer);
       ReflectionValue* value =
           initializer != expression
@@ -772,7 +772,7 @@ static void SemanticDiagnoseInvalidSpliceContext(SpliceASTNode* node) {
       SemanticError((ASTNode*)node,
                     "A destructor cannot be spliced in this context");
     }
-    if (symbol->default_argument != NULL) {
+    if (SymbolExtraOf(symbol)->default_argument != NULL) {
       SemanticError((ASTNode*)node,
                     "A default argument cannot be spliced");
     }
@@ -1089,9 +1089,10 @@ static Symbol* MetaCallSymbol(VectorASTNode* call) {
     }
   }
   for (size_t depth = 0;
-       symbol != NULL && symbol->alias_target != NULL && depth < 64;
+       symbol != NULL && SymbolExtraOf(symbol)->alias_target != NULL &&
+       depth < 64;
        depth++) {
-    symbol = symbol->alias_target;
+    symbol = SymbolExtraOf(symbol)->alias_target;
   }
   if (symbol == NULL ||
       !SymbolHasAttribute(symbol, "meta_intrinsic")) {
@@ -1504,7 +1505,7 @@ static ASTNode* MetaMaterializeConstexprObjectResult(VectorASTNode* call,
   }
   // The compiler builds every field of a reflection result explicitly.
   ConstexprSetSymbolObjectValueState(temp, kValueStateValid);
-  temp->constexpr_initializer = init;
+  SymbolMutableExtra(temp)->constexpr_initializer = init;
   ASTNode* value = NewIdentifierASTNode(temp, location);
   ASTNodeSetType(value, TypeRecordCopy(return_type));
   value->value_category = kValueCategoryPrvalue;
@@ -2806,7 +2807,8 @@ static bool MetaEvaluatePredicate(MetaOperation operation,
                 value->member->default_initializer != NULL;
       return true;
     case kMetaHasDefaultArgument:
-      *result = symbol != NULL && symbol->default_argument != NULL;
+      *result =
+          symbol != NULL && SymbolExtraOf(symbol)->default_argument != NULL;
       return true;
     case kMetaIsBitField:
       *result = value != NULL && value->member != NULL &&

@@ -1585,11 +1585,11 @@ bool ConstexprEnsureMetaPromotedStaticObject(Symbol* promoted) {
       !TypeIsPointer(promoted->type)) {
     return true;
   }
-  if (promoted->constexpr_initializer == NULL) {
+  if (SymbolExtraOf(promoted)->constexpr_initializer == NULL) {
     return false;
   }
-  return ConstexprEvaluateObjectConstantForSymbol(promoted,
-                                                  promoted->constexpr_initializer);
+  return ConstexprEvaluateObjectConstantForSymbol(
+      promoted, SymbolExtraOf(promoted)->constexpr_initializer);
 }
 
 void InitializerDelete(Initializer* init) {

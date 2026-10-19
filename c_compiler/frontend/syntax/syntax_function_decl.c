@@ -71,19 +71,19 @@ void MergeCXXDefaultArguments(Syntax* syntax, Symbol* old_sym,
     if (old_formal == NULL || new_formal == NULL) {
       continue;
     }
-    if (old_formal->default_argument != NULL &&
-        new_formal->default_argument != NULL) {
+    if (SymbolExtraOf(old_formal)->default_argument != NULL &&
+        SymbolExtraOf(new_formal)->default_argument != NULL) {
       SyntaxError(syntax, "default argument already specified");
       continue;
     }
-    if (old_formal->default_argument == NULL &&
-        new_formal->default_argument != NULL) {
-      old_formal->default_argument =
-          CloneCXXDefaultArgument(new_formal->default_argument);
-    } else if (old_formal->default_argument != NULL &&
-               new_formal->default_argument == NULL) {
-      new_formal->default_argument =
-          CloneCXXDefaultArgument(old_formal->default_argument);
+    if (SymbolExtraOf(old_formal)->default_argument == NULL &&
+        SymbolExtraOf(new_formal)->default_argument != NULL) {
+      SymbolMutableExtra(old_formal)->default_argument =
+          CloneCXXDefaultArgument(SymbolExtraOf(new_formal)->default_argument);
+    } else if (SymbolExtraOf(old_formal)->default_argument != NULL &&
+               SymbolExtraOf(new_formal)->default_argument == NULL) {
+      SymbolMutableExtra(new_formal)->default_argument =
+          CloneCXXDefaultArgument(SymbolExtraOf(old_formal)->default_argument);
     }
   }
 }

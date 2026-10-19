@@ -447,7 +447,8 @@ static bool CXXConstructorSetHasDefaultConstructor(StructMember* ctor,
     bool callable_without_arguments = true;
     for (size_t j = expected; j < info->prototype.length; j++) {
       Symbol* parameter = info->prototype.value.p[j];
-      if (parameter == NULL || parameter->default_argument == NULL) {
+      if (parameter == NULL ||
+          SymbolExtraOf(parameter)->default_argument == NULL) {
         callable_without_arguments = false;
         break;
       }
@@ -1108,7 +1109,7 @@ static int ConvertingConstructorRank(StructMember* member, ASTNode* from,
   }
   for (size_t i = 2; i < fi->prototype.length; i++) {
     Symbol* param = fi->prototype.value.p[i];
-    if (param == NULL || param->default_argument == NULL) {
+    if (param == NULL || SymbolExtraOf(param)->default_argument == NULL) {
       goto done;
     }
   }

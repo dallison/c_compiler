@@ -721,12 +721,12 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
     ASTNode* semantic_initializer =
         ConstexprObjectInitializerForSymbol(s, s->location);
     if (semantic_initializer != NULL) {
-      s->constexpr_initializer = semantic_initializer;
+      SymbolMutableExtra(s)->constexpr_initializer = semantic_initializer;
     }
   }
-  if (constexpr_reflection && s->constexpr_initializer == NULL &&
+  if (constexpr_reflection && SymbolExtraOf(s)->constexpr_initializer == NULL &&
       s->value.other != NULL) {
-    s->constexpr_initializer = NewReflectionConstantASTNode(
+    SymbolMutableExtra(s)->constexpr_initializer = NewReflectionConstantASTNode(
         (ReflectionValue*)s->value.other, s->location);
   }
   if (s->type == NULL || !TypeIsFunction(s->type)) {
@@ -739,7 +739,8 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
                        : s->value.ivalue);
   }
   WireWriteInt32(buf, kSym_stack_offset, s->stack_offset);
-  SWriteRef(ctx, buf, kSym_alias_target, kSerialKindSymbol, s->alias_target);
+  SWriteRef(ctx, buf, kSym_alias_target, kSerialKindSymbol,
+            SymbolExtraOf(s)->alias_target);
   Symbol* overload_next =
       ctx->writing_module_interface &&
               SymbolVisibleInModuleArtifact(ctx, s)
@@ -753,21 +754,22 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
               s->value.func_defn);
   }
   SWriteRef(ctx, buf, kSym_default_argument, kSerialKindAST,
-            s->default_argument);
+            SymbolExtraOf(s)->default_argument);
   SWriteRef(ctx, buf, kSym_constexpr_initializer, kSerialKindAST,
-            s->constexpr_initializer);
+            SymbolExtraOf(s)->constexpr_initializer);
   SerialWriteAttributeVector(ctx, buf, kSym_attributes, &s->attributes);
-  if (s->variable_template != NULL) {
+  if (SymbolExtraOf(s)->variable_template != NULL) {
     WriteVariableTemplate(ctx, buf, kSym_variable_template,
-                          s->variable_template);
+                          SymbolExtraOf(s)->variable_template);
   }
-  if (s->alias_template != NULL) {
-    WriteAliasTemplate(ctx, buf, kSym_alias_template, s->alias_template);
+  if (SymbolExtraOf(s)->alias_template != NULL) {
+    WriteAliasTemplate(ctx, buf, kSym_alias_template,
+                       SymbolExtraOf(s)->alias_template);
   }
   SerialWriteConcept(ctx, buf, kSym_concept_definition,
                      SymbolExtraOf(s)->concept_definition);
   SerialWriteConstraint(ctx, buf, kSym_associated_constraint,
-                        s->associated_constraint);
+                        SymbolExtraOf(s)->associated_constraint);
   WriteTemplateConstructorInitializers(
       ctx, buf, kSym_template_constructor_initializers, s);
   WireWriteInt32(buf, kSym_cxx_linkage, (int32_t)s->cxx_linkage);
@@ -980,33 +982,48 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kSym_stack_offset:
         WireReadInt32(buf, &s->stack_offset);
         break;
-      case kSym_alias_target:
-        s->alias_target = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+      // alias_target, default_argument and constexpr_initializer are written
+      // for every symbol; only a non-NULL one needs storage.
+      case kSym_alias_target: {
+        Symbol* target = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
+        if (target != NULL || s->extra != NULL) {
+          SymbolMutableExtra(s)->alias_target = target;
+        }
         break;
+      }
       case kSym_overload_next:
         s->overload_next = (Symbol*)SReadRef(ctx, buf, kSerialKindSymbol);
         break;
-      case kSym_default_argument:
-        s->default_argument = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+      case kSym_default_argument: {
+        ASTNode* argument = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        if (argument != NULL || s->extra != NULL) {
+          SymbolMutableExtra(s)->default_argument = argument;
+        }
         break;
-      case kSym_constexpr_initializer:
-        s->constexpr_initializer =
-            (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+      }
+      case kSym_constexpr_initializer: {
+        ASTNode* initializer = (ASTNode*)SReadRef(ctx, buf, kSerialKindAST);
+        if (initializer != NULL || s->extra != NULL) {
+          SymbolMutableExtra(s)->constexpr_initializer = initializer;
+        }
         break;
+      }
       case kSym_attributes:
         SerialReadAttributeVector(ctx, buf, &s->attributes);
         break;
       case kSym_variable_template:
-        s->variable_template = ReadVariableTemplate(ctx, buf);
+        SymbolMutableExtra(s)->variable_template =
+            ReadVariableTemplate(ctx, buf);
         break;
       case kSym_concept_definition:
         SymbolMutableExtra(s)->concept_definition = SerialReadConcept(ctx, buf);
         break;
       case kSym_associated_constraint:
-        s->associated_constraint = SerialReadConstraint(ctx, buf);
+        SymbolMutableExtra(s)->associated_constraint =
+            SerialReadConstraint(ctx, buf);
         break;
       case kSym_alias_template:
-        s->alias_template = ReadAliasTemplate(ctx, buf);
+        SymbolMutableExtra(s)->alias_template = ReadAliasTemplate(ctx, buf);
         break;
       case kSym_cxx_linkage: {
         int32_t v = 0;
@@ -1064,7 +1081,7 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       s->value.func_defn = s;
     }
   }
-  if (s->constexpr_initializer != NULL && s->type != NULL &&
+  if (SymbolExtraOf(s)->constexpr_initializer != NULL && s->type != NULL &&
       (TypeIsFixedArray(s->type) || TypeIsStructOrUnion(s->type) ||
        TypeIsReflection(s->type))) {
     s->flags.value_set = false;

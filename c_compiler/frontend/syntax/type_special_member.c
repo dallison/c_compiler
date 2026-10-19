@@ -771,8 +771,8 @@ static bool CXXCopyConstructorTrailingParametersAreDefaulted(
       found_source = true;
       continue;
     }
-    if (found_source &&
-        (parameter == NULL || parameter->default_argument == NULL)) {
+    if (found_source && (parameter == NULL ||
+                         SymbolExtraOf(parameter)->default_argument == NULL)) {
       return false;
     }
   }

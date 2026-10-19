@@ -455,7 +455,7 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
         ec->flags.value_set = false;
       }
       if (dependent_value_expr != NULL) {
-        ec->constexpr_initializer = dependent_value_expr;
+        SymbolMutableExtra(ec)->constexpr_initializer = dependent_value_expr;
         ec->flags.value_set = false;
       }
       StringDestruct(&const_name);
@@ -515,7 +515,9 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
     // A using-directive made this name visible; an enum definition in this
     // scope still introduces a distinct enumeration.
     tag->flags.is_using_alias = false;
-    tag->alias_target = NULL;
+    if (SymbolExtraOf(tag)->alias_target != NULL) {
+      SymbolMutableExtra(tag)->alias_target = NULL;
+    }
     tag->type = NULL;
     tag->flags.is_forward_declared = true;
     tag->flags.is_defined = false;

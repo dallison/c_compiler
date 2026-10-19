@@ -508,7 +508,8 @@ static ASTNode* FinalizeResolvedMemberReference(BinaryASTNode* node,
     member_type = TypeRecordCopy(member_type);
     SetQualifiers(member_type, GetQualifiers(member_type) | kQualConst);
   }
-  if (member->is_static && member->symbol->variable_template != NULL &&
+  if (member->is_static &&
+      SymbolExtraOf(member->symbol)->variable_template != NULL &&
       member_node->template_arguments != NULL) {
     ASTNode* replaced = CXXTryReplaceWithVariableTemplateValue(
         (ASTNode*)node, member->symbol, member_node->template_arguments,

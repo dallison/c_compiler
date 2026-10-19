@@ -54,16 +54,17 @@ static TypeRecord* AliasTemplateIdMemberType(TypeParser* parser, Symbol* alias,
                                              Vector* args, String* member_name,
                                              Vector* member_args) {
   TypeRecord* pattern = alias != NULL ? alias->type : NULL;
-  if (alias == NULL || alias->alias_template == NULL || pattern == NULL ||
-      args == NULL || pattern->declarator != kDeclPrimitive ||
+  if (alias == NULL || SymbolExtraOf(alias)->alias_template == NULL ||
+      pattern == NULL || args == NULL ||
+      pattern->declarator != kDeclPrimitive ||
       TypeDependentOf(pattern)->dependent_decltype_expr != NULL ||
       pattern->template_origin == NULL ||
-      pattern->template_origin->alias_template != NULL ||
+      SymbolExtraOf(pattern->template_origin)->alias_template != NULL ||
       pattern->template_arguments == NULL ||
       !TypeHasDependentMemberPath(pattern)) {
     return NULL;
   }
-  Vector* params = &alias->alias_template->parameters;
+  Vector* params = &SymbolExtraOf(alias)->alias_template->parameters;
   if (params->length != args->length) {
     return NULL;
   }
@@ -655,7 +656,7 @@ static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
     Vector* template_args = member.template_arguments.value.p[i];
     TypeRecord* next = NULL;
     if (template_args != NULL && nested->symbol->flags.is_template &&
-        nested->symbol->alias_template != NULL &&
+        SymbolExtraOf(nested->symbol)->alias_template != NULL &&
         !TypeIsStructOrUnion(nested->symbol->type)) {
       // `Layout<Ts...>::WithStaticSizes<1, 0, 4>` names a member alias.
       // The pattern also mentions the enclosing class parameters.  Instantiate
@@ -679,7 +680,7 @@ static TypeRecord* ParseCXXNestedTypeSuffix(TypeParser* parser,
       parser->template_substitution_source = saved_source;
       parser->template_substitution_target = saved_target;
     } else if (template_args != NULL && nested->symbol->flags.is_template &&
-        TypeIsStructOrUnion(nested->symbol->type)) {
+               TypeIsStructOrUnion(nested->symbol->type)) {
       Vector* copied_args = TemplateArgumentVectorCopy(template_args);
       next = InstantiateSimpleClassTemplate(parser, nested->symbol,
                                             copied_args);
@@ -1449,7 +1450,7 @@ static bool QualifiedNameClassBeforeAlias(Syntax* syntax,
     // Class templates are stored as typedef symbols.  An alias template also
     // has alias_template set; stop on the class that owns the alias.
     if (found != NULL && found->flags.is_template &&
-        found->alias_template == NULL) {
+        SymbolExtraOf(found)->alias_template == NULL) {
       *class_index = i;
       *class_symbol = found;
       return true;
@@ -1912,8 +1913,9 @@ static bool AliasArgumentsExpandPack(Vector* args) {
 static bool AliasIdForwardsDependentMemberTemplate(TypeParser* parser,
                                                    Symbol* symbol,
                                                    Vector* args) {
-  if (!symbol->flags.is_template || symbol->alias_template == NULL ||
-      args == NULL || symbol->type == NULL ||
+  if (!symbol->flags.is_template ||
+      SymbolExtraOf(symbol)->alias_template == NULL || args == NULL ||
+      symbol->type == NULL ||
       TypeDependentOf(symbol->type)->dependent_member_name == NULL) {
     return false;
   }
@@ -2268,7 +2270,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               String tail_name;
               StringInit(&tail_name, NULL);
               bool rewound_alias = false;
-              if (dependent_member_origin->alias_template != NULL) {
+              if (SymbolExtraOf(dependent_member_origin)->alias_template !=
+                  NULL) {
                 size_t class_index = 0;
                 Symbol* class_symbol = NULL;
                 if (QualifiedNameClassBeforeAlias(
@@ -2294,27 +2297,28 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                       ? &tail_name
                       : typename_name.components.value.p[
                             typename_name.components.length - 1];
-            bool origin_is_alias =
-                dependent_member_origin->alias_template != NULL;
-            // A member template-id (`outer<T>::template inner<long>`) needs
-            // its own arguments applied, not the member's primary type.
-            bool member_template_id =
-                typename_name.template_arguments.length ==
-                    typename_name.components.length &&
-                typename_name.template_arguments.value.p[
-                    typename_name.components.length - 1] != NULL;
-            type_record =
-                rewound_alias || origin_is_alias || member_template_id
-                    ? NULL
-                    : CurrentInstantiationMemberType(
-                          parser, dependent_member_origin, parsed_args,
-                          member_name);
-            if (type_record == NULL && origin_is_alias && !rewound_alias &&
-                !member_template_id) {
-              type_record = AliasTemplateIdMemberType(
-                  parser, dependent_member_origin, parsed_args, member_name,
-                  NULL);
-            }
+              bool origin_is_alias =
+                  SymbolExtraOf(dependent_member_origin)->alias_template !=
+                  NULL;
+              // A member template-id (`outer<T>::template inner<long>`) needs
+              // its own arguments applied, not the member's primary type.
+              bool member_template_id =
+                  typename_name.template_arguments.length ==
+                      typename_name.components.length &&
+                  typename_name.template_arguments.value
+                          .p[typename_name.components.length - 1] != NULL;
+              type_record =
+                  rewound_alias || origin_is_alias || member_template_id
+                      ? NULL
+                      : CurrentInstantiationMemberType(
+                            parser, dependent_member_origin, parsed_args,
+                            member_name);
+              if (type_record == NULL && origin_is_alias && !rewound_alias &&
+                  !member_template_id) {
+                type_record =
+                    AliasTemplateIdMemberType(parser, dependent_member_origin,
+                                              parsed_args, member_name, NULL);
+              }
             if (type_record == NULL) {
               type_record = NewTypeRecord(kTypeInt | kTypeUnknown, kQualPlain);
               type_record->template_origin = dependent_member_origin;
@@ -2372,7 +2376,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             !base_is_dependent_alias) {
           TypeRecord* deferred_typename = NULL;
           bool member_alias_args_concrete = false;
-          if (symbol->alias_template != NULL &&
+          if (SymbolExtraOf(symbol)->alias_template != NULL &&
               !parser->syntax->parsing_template_declaration &&
               typename_name.components.length >= 2 &&
               typename_name.template_arguments.length >=
@@ -2416,8 +2420,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                     typename_name.template_arguments.length - 1];
             args = TemplateArgumentVectorCopy(parsed_args);
           }
-          if (member_alias_args_concrete && symbol->alias_template != NULL &&
-              args != NULL && typename_name.components.length >= 2) {
+          if (member_alias_args_concrete &&
+              SymbolExtraOf(symbol)->alias_template != NULL && args != NULL &&
+              typename_name.components.length >= 2) {
             size_t base_index = typename_name.components.length - 2;
             FullyQualifiedIdentifier prefix;
             FullyQualifiedIdentifierInit(&prefix);
@@ -2467,8 +2472,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             parser->template_substitution_target = saved_target;
             TypeRecordDelete(base_type);
           } else if (symbol->flags.is_template &&
-              TypeIsStructOrUnion(symbol->type) &&
-              ClassTemplateIdIsConcrete(parser, symbol, args)) {
+                     TypeIsStructOrUnion(symbol->type) &&
+                     ClassTemplateIdIsConcrete(parser, symbol, args)) {
             type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
           } else {
             type_record = NamedMemberTypedefType(parser, symbol);
@@ -2792,7 +2797,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         // Copying the primary's typedef makes T collide with the enclosing
         // template's parameter 0 (`Spec<int... Xs> : MD<Base, Xs...>::type`).
         bool member_alias_args_concrete = false;
-        if (symbol->alias_template != NULL &&
+        if (SymbolExtraOf(symbol)->alias_template != NULL &&
             !parser->syntax->parsing_template_declaration &&
             typedef_name.components.length >= 2 &&
             typedef_name.template_arguments.length >=
@@ -2842,7 +2847,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         }
         if (symbol->flags.is_template &&
             !symbol->flags.is_template_template_parameter && args != NULL &&
-            (symbol->alias_template != NULL ||
+            (SymbolExtraOf(symbol)->alias_template != NULL ||
              !TypeIsStructOrUnion(symbol->type)) &&
             !CXXAliasTemplatePatternNamesClassTemplate(symbol) &&
             !TemplateArgumentVectorContainsTemplateParameter(args) &&
@@ -2850,14 +2855,15 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               AliasArgumentsExpandPack(args))) {
           Vector* completed_args = CompleteAliasTemplateArguments(parser, symbol, args);
           if (completed_args != NULL) {
-            if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
-                                             completed_args)) {
+            if (!ConceptsConstraintSatisfied(
+                    SymbolExtraOf(symbol)->associated_constraint,
+                    completed_args)) {
               SyntaxError(parser->syntax,
                           "constraints not satisfied for alias template %s",
                           symbol->name.value);
               ConceptsReportAssociatedConstraintFailure(
-                  symbol->associated_constraint, completed_args, symbol->location,
-                  NULL);
+                  SymbolExtraOf(symbol)->associated_constraint, completed_args,
+                  symbol->location, NULL);
               type_record = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
             } else {
               // A member alias is written with only its own arguments
@@ -2957,10 +2963,10 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
           // is instantiated.
           type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
         } else if (symbol->flags.is_template && args != NULL &&
-            symbol->alias_template == NULL &&
-            TypeIsStructOrUnion(symbol->type) &&
-            (!parser->syntax->parsing_template_declaration ||
-             ClassTemplateIdIsConcrete(parser, symbol, args))) {
+                   SymbolExtraOf(symbol)->alias_template == NULL &&
+                   TypeIsStructOrUnion(symbol->type) &&
+                   (!parser->syntax->parsing_template_declaration ||
+                    ClassTemplateIdIsConcrete(parser, symbol, args))) {
           type_record = InstantiateSimpleClassTemplate(parser, symbol, args);
         } else {
           bool forwarding_member_alias_id =
@@ -2992,7 +2998,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             }
             if (symbol->flags.is_template && args == NULL &&
                 !parser->syntax->parsing_template_declaration &&
-                symbol->alias_template != NULL &&
+                SymbolExtraOf(symbol)->alias_template != NULL &&
                 !CXXAliasTemplateIsDeducible(symbol)) {
               SyntaxError(parser->syntax,
                           "Alias template %s does not name a deducible class "
@@ -3011,7 +3017,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
             if (symbol->flags.is_template && args != NULL &&
                 (parser->syntax->current_template_parameters != NULL ||
                  TemplateArgumentVectorContainsTemplateParameter(args))) {
-              if (symbol->alias_template == NULL &&
+              if (SymbolExtraOf(symbol)->alias_template == NULL &&
                   TypeIsStructOrUnion(symbol->type) &&
                   symbol->type->info.struct_info != NULL) {
                 Vector* completed = CompleteClassTemplateArguments(
@@ -3122,14 +3128,15 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
                 AliasArgumentsExpandPack(args))) {
             Vector* completed_args = CompleteAliasTemplateArguments(parser, symbol, args);
             if (completed_args != NULL) {
-              if (!ConceptsConstraintSatisfied(symbol->associated_constraint,
-                                               completed_args)) {
+              if (!ConceptsConstraintSatisfied(
+                      SymbolExtraOf(symbol)->associated_constraint,
+                      completed_args)) {
                 SyntaxError(parser->syntax,
                             "constraints not satisfied for alias template %s",
                             symbol->name.value);
                 ConceptsReportAssociatedConstraintFailure(
-                    symbol->associated_constraint, completed_args,
-                    symbol->location, NULL);
+                    SymbolExtraOf(symbol)->associated_constraint,
+                    completed_args, symbol->location, NULL);
                 type_record =
                     NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
               } else {
@@ -3190,7 +3197,7 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
               }
               if (symbol->flags.is_template && args == NULL &&
                   !parser->syntax->parsing_template_declaration &&
-                  symbol->alias_template != NULL &&
+                  SymbolExtraOf(symbol)->alias_template != NULL &&
                   !CXXAliasTemplateIsDeducible(symbol)) {
                 SyntaxError(parser->syntax,
                             "Alias template %s does not name a deducible class "
@@ -4405,10 +4412,10 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
                     "explicit object parameter cannot have a default argument");
       }
       if (LexMatch(proto_parser->lex, TOK(lbrace))) {
-        formal->default_argument =
+        SymbolMutableExtra(formal)->default_argument =
             SyntaxParseBracedInitializer(proto_parser->syntax);
       } else {
-        formal->default_argument =
+        SymbolMutableExtra(formal)->default_argument =
             SyntaxParseSingleExpression(proto_parser->syntax,
                                         TC(closebra) | TC(exprsep));
       }
@@ -4452,10 +4459,10 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
                     "function parameter pack cannot have a default argument");
       }
       if (LexMatch(proto_parser->lex, TOK(lbrace))) {
-        formal->default_argument =
+        SymbolMutableExtra(formal)->default_argument =
             SyntaxParseBracedInitializer(proto_parser->syntax);
       } else {
-        formal->default_argument =
+        SymbolMutableExtra(formal)->default_argument =
             SyntaxParseSingleExpression(proto_parser->syntax,
                                         TC(closebra) | TC(exprsep));
       }

@@ -1460,7 +1460,7 @@ TypeRecord* SubstituteDependentMemberType(TypeParser* parser,
         bool substitutable_alias =
             member->symbol->flags.is_template &&
             StorageIs(member->symbol->storage, STO(typedef)) &&
-            (member->symbol->alias_template != NULL ||
+            (SymbolExtraOf(member->symbol)->alias_template != NULL ||
              !TypeIsStructOrUnion(member->symbol->type));
         if (TemplateArgumentVectorContainsTemplateParameter(concrete_args) &&
             !substitutable_alias) {
@@ -1997,7 +1997,7 @@ static Symbol* ConcreteMemberAliasTemplate(TypeParser* parser, Symbol* origin) {
   if (parser == NULL || parser->member_alias_pattern_source == NULL ||
       parser->member_alias_pattern_source !=
           parser->template_substitution_source ||
-      origin == NULL || origin->alias_template == NULL ||
+      origin == NULL || SymbolExtraOf(origin)->alias_template == NULL ||
       !origin->flags.is_template || !StorageIs(origin->storage, STO(typedef))) {
     return NULL;
   }
@@ -2022,7 +2022,7 @@ static Symbol* ConcreteMemberAliasTemplate(TypeParser* parser, Symbol* origin) {
         MapFindPointerKey(&targets[i]->symbol_table, &origin->name);
     if (concrete == NULL || concrete->symbol == NULL ||
         concrete->symbol == origin ||
-        concrete->symbol->alias_template == NULL ||
+        SymbolExtraOf(concrete->symbol)->alias_template == NULL ||
         !concrete->symbol->flags.is_template ||
         !StorageIs(concrete->symbol->storage, STO(typedef))) {
       return NULL;
@@ -2113,7 +2113,8 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
   // name.  That is still an alias pattern: expand it, instead of looking
   // `type` up on the primary and substituting it with only the alias arguments.
   bool alias_dependent_member_pattern =
-      info.origin->alias_template != NULL && info.origin->type != NULL &&
+      SymbolExtraOf(info.origin)->alias_template != NULL &&
+      info.origin->type != NULL &&
       TypeDependentOf(info.origin->type)->dependent_member_name != NULL;
   bool expandable_alias =
       CompilerIsCXX() && info.origin->flags.is_template &&
@@ -2182,7 +2183,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
         member->symbol->flags.is_template &&
         StorageIs(member->symbol->storage, STO(typedef)) &&
         !TypeIsStructOrUnion(member->symbol->type) &&
-        info.origin->alias_template == NULL &&
+        SymbolExtraOf(info.origin)->alias_template == NULL &&
         TypeDependentOf(type)->dependent_member_template_arguments != NULL &&
         TypeDependentOf(type)->dependent_member_template_arguments->length >
             0) {
@@ -2520,7 +2521,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
         // with only the member arguments binds the enclosing pack to whatever
         // shares index 0.
         if (member->symbol->flags.is_template &&
-            member->symbol->alias_template == NULL &&
+            SymbolExtraOf(member->symbol)->alias_template == NULL &&
             TypeIsStructOrUnion(member->symbol->type)) {
           member_type = InstantiateSimpleClassTemplate(
               parser, member->symbol, concrete_member_args);
@@ -2540,10 +2541,12 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
           // base specialization's arguments so the alias parameter (numbered
           // after those parameters) lines up with the use-site argument.
           int alias_index = -1;
-          if (member->symbol->alias_template != NULL &&
-              member->symbol->alias_template->parameters.length > 0) {
+          if (SymbolExtraOf(member->symbol)->alias_template != NULL &&
+              SymbolExtraOf(member->symbol)->alias_template->parameters.length >
+                  0) {
             TemplateParameter* alias_param =
-                member->symbol->alias_template->parameters.value.p[0];
+                SymbolExtraOf(member->symbol)
+                    ->alias_template->parameters.value.p[0];
             if (alias_param != NULL) {
               alias_index = alias_param->index;
             }
@@ -3788,8 +3791,7 @@ static void AppendFormalClone(Vector* out, Symbol* formal,
   clone->flags.is_argument = true;
   clone->flags.is_parameter_pack = false;
   clone->location = formal->location;
-  clone->default_argument =
-      ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
+  SymbolCloneDefaultArgument(clone, formal);
   VectorAppend(out, clone);
 }
 
@@ -4262,7 +4264,7 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   // symbol itself is the shared definition and must stay.  A namespace-scope
   // function template (`Sz<U>()`) is numbered in its own parameter space; a
   // copy would be a second template whose specializations duplicate its own.
-  if (old->variable_template != NULL ||
+  if (SymbolExtraOf(old)->variable_template != NULL ||
       (old->flags.is_template && StorageIs(old->storage, STO(typedef))) ||
       (old->flags.is_template && TypeIsFunction(old->type) &&
        old->type->info.function.cxx_member_owner == NULL)) {
@@ -4295,7 +4297,7 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   copy->location = old->location;
   copy->value = old->value;
   copy->stack_offset = old->stack_offset;
-  copy->alias_target = old->alias_target;
+  SymbolCopyAliasTarget(copy, old);
   SymbolCopyLambdaCaptureSource(copy, old);
   copy->lambda_capture_by_reference =
       old->lambda_capture_by_reference;
@@ -4782,10 +4784,10 @@ static TemplateArgument* AliasDefaultTemplateArgument(TemplateParameter* param) 
  * parameters during substitution). */
 static Vector* AliasActualsWithDefaults(TypeParser* parser, Symbol* alias,
                                         Vector* actuals) {
-  if (alias == NULL || alias->alias_template == NULL) {
+  if (alias == NULL || SymbolExtraOf(alias)->alias_template == NULL) {
     return NULL;
   }
-  Vector* parameters = &alias->alias_template->parameters;
+  Vector* parameters = &SymbolExtraOf(alias)->alias_template->parameters;
   size_t parameter_count = parameters->length;
   size_t actual_count = actuals != NULL ? actuals->length : 0;
   if (parameter_count == 0 || actual_count >= parameter_count) {
@@ -4892,10 +4894,10 @@ Vector* CompleteAliasTemplateArguments(TypeParser* parser, Symbol* alias,
   // mentions enclosing-class parameters in its pattern.  Completing from those
   // pattern indices would demand `[T, I]` while the name is written `StorageT<I>`.
   // Prefer the alias's own parameter list when it is known.
-  if (alias->alias_template != NULL &&
-      alias->alias_template->parameters.length != 0) {
+  if (SymbolExtraOf(alias)->alias_template != NULL &&
+      SymbolExtraOf(alias)->alias_template->parameters.length != 0) {
     result = CompleteAliasTemplateArgumentsFromParameters(
-        &alias->alias_template->parameters, effective);
+        &SymbolExtraOf(alias)->alias_template->parameters, effective);
   } else if (alias->type != NULL && alias->type->template_arguments != NULL) {
     result = CompleteAliasTemplateArgumentsFromPattern(alias, effective);
   }

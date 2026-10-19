@@ -334,7 +334,8 @@ static ASTNode* FoldDependentStaticMemberReference(TemplateFunctionBodyClone* cl
     StructMember* m = FindStructMember(sources[i], &symbol->name);
     if (m != NULL && m->is_static && !m->is_member_function &&
         (m->default_initializer != NULL ||
-         (m->symbol != NULL && m->symbol->constexpr_initializer != NULL))) {
+         (m->symbol != NULL &&
+          SymbolExtraOf(m->symbol)->constexpr_initializer != NULL))) {
       member = m;
     }
   }
@@ -346,11 +347,13 @@ static ASTNode* FoldDependentStaticMemberReference(TemplateFunctionBodyClone* cl
     init = ConstexprInitializerExpression(member->default_initializer);
   }
   if (init == NULL && member != NULL && member->symbol != NULL &&
-      member->symbol->constexpr_initializer != NULL) {
-    init = ConstexprInitializerExpression(member->symbol->constexpr_initializer);
+      SymbolExtraOf(member->symbol)->constexpr_initializer != NULL) {
+    init = ConstexprInitializerExpression(
+        SymbolExtraOf(member->symbol)->constexpr_initializer);
   }
-  if (init == NULL && symbol->constexpr_initializer != NULL) {
-    init = ConstexprInitializerExpression(symbol->constexpr_initializer);
+  if (init == NULL && SymbolExtraOf(symbol)->constexpr_initializer != NULL) {
+    init = ConstexprInitializerExpression(
+        SymbolExtraOf(symbol)->constexpr_initializer);
   }
   if (init == NULL) {
     return NULL;
@@ -409,7 +412,8 @@ static bool CXXRecordHasDefaultConstructorMember(TypeRecord* type) {
           overload->symbol->type->info.function.prototype.value.p[i];
       if (formal == NULL || StringEqual(&formal->name, "this") ||
           StringEqual(&formal->name, "__complete_object") ||
-          formal->default_argument != NULL || formal->flags.is_parameter_pack) {
+          SymbolExtraOf(formal)->default_argument != NULL ||
+          formal->flags.is_parameter_pack) {
         continue;
       }
       required_parameters++;
@@ -447,7 +451,8 @@ static bool CXXRecordHasDefaultConstructor(TypeRecord* type) {
           overload->symbol->type->info.function.prototype.value.p[i];
       if (formal == NULL || StringEqual(&formal->name, "this") ||
           StringEqual(&formal->name, "__complete_object") ||
-          formal->default_argument != NULL || formal->flags.is_parameter_pack) {
+          SymbolExtraOf(formal)->default_argument != NULL ||
+          formal->flags.is_parameter_pack) {
         continue;
       }
       required_parameters++;
@@ -1297,8 +1302,8 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
   if (old_symbol->is_constexpr_representable) {
     replacement->is_constexpr_representable = true;
     SymbolMutableExtra(replacement)->constexpr_reference_scope = clone->to_func;
-    ASTNodeDelete(replacement->constexpr_initializer);
-    replacement->constexpr_initializer =
+    ASTNodeDelete(SymbolExtraOf(replacement)->constexpr_initializer);
+    SymbolMutableExtra(replacement)->constexpr_initializer =
         ASTNodeClone(decl->initializer, IdentityCloneNode, NULL, NULL);
   }
   if ((replacement->flags.is_constexpr ||
@@ -7323,7 +7328,8 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
           return is_same_folded;
         }
       }
-      if (id->symbol != NULL && id->symbol->variable_template != NULL &&
+      if (id->symbol != NULL &&
+          SymbolExtraOf(id->symbol)->variable_template != NULL &&
           !TemplateArgumentVectorContainsTemplateParameter(concrete_args) &&
           (node->flags & kASTNeedAddress) == 0 &&
           (node->parent == NULL || node->parent->op != AST_OP(address))) {
@@ -7589,7 +7595,7 @@ static ASTNode* RebaseDeferredMemberTemplateParameterIdentifier(
       copy->location = old->location;
       copy->value = old->value;
       copy->stack_offset = old->stack_offset;
-      copy->alias_target = old->alias_target;
+      SymbolCopyAliasTarget(copy, old);
       SymbolCopyLambdaCaptureSource(copy, old);
       copy->lambda_capture_by_reference =
           old->lambda_capture_by_reference;
@@ -10733,7 +10739,8 @@ static ASTNode* CloneTemplateFunctionBodyImpl(TypeParser* parser,
   // retaining the identity clone made while the prototype was built.
   for (size_t i = 0; i < from->info.function.prototype.length; i++) {
     Symbol* from_formal = from->info.function.prototype.value.p[i];
-    if (from_formal == NULL || from_formal->default_argument == NULL ||
+    if (from_formal == NULL ||
+        SymbolExtraOf(from_formal)->default_argument == NULL ||
         from_formal->flags.is_parameter_pack) {
       continue;
     }
@@ -10742,14 +10749,14 @@ static ASTNode* CloneTemplateFunctionBodyImpl(TypeParser* parser,
       continue;
     }
     ASTNode* default_argument =
-        ASTNodeClone(from_formal->default_argument,
+        ASTNodeClone(SymbolExtraOf(from_formal)->default_argument,
                      CloneTemplateFunctionBodyNode, &clone, NULL);
     default_argument = ASTNodeVisitAndTransform(
         default_argument, ReanalyzeClonedDependentFunctorCall, NULL);
     default_argument = ASTNodeVisitAndTransform(
         default_argument, ReanalyzeClonedResolvedCall, &clone);
-    ASTNodeDelete(to_formal->default_argument);
-    to_formal->default_argument = default_argument;
+    ASTNodeDelete(SymbolExtraOf(to_formal)->default_argument);
+    SymbolMutableExtra(to_formal)->default_argument = default_argument;
   }
   VectorDestructWithContents(
       &to->info.function.contract_assertions,

@@ -576,9 +576,9 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       if (id_node->symbol != NULL &&
           (ConstexprReferenceUsableInCurrentFunction(id_node->symbol) ||
            ConstexprIsConstantInitializedReference(id_node->symbol)) &&
-          id_node->symbol->constexpr_initializer != NULL) {
+          SymbolExtraOf(id_node->symbol)->constexpr_initializer != NULL) {
         ASTNode* initializer = ConstexprInitializerExpression(
-            id_node->symbol->constexpr_initializer);
+            SymbolExtraOf(id_node->symbol)->constexpr_initializer);
         if (initializer != NULL && initializer != node &&
             EvaluateIntegerExpressionInContext(ctx, initializer, result)) {
           return true;
@@ -589,11 +589,11 @@ bool EvaluateIntegerExpressionInContext(ConstEvalContext* ctx,
       // Fold the initializer now that its operands are concrete.
       if (id_node->symbol != NULL && !id_node->symbol->flags.value_set &&
           id_node->symbol->flags.is_constexpr &&
-          id_node->symbol->constexpr_initializer != NULL &&
+          SymbolExtraOf(id_node->symbol)->constexpr_initializer != NULL &&
           id_node->symbol->type != NULL &&
           TypeIsIntegral(id_node->symbol->type)) {
         ASTNode* initializer = ConstexprInitializerExpression(
-            id_node->symbol->constexpr_initializer);
+            SymbolExtraOf(id_node->symbol)->constexpr_initializer);
         if (initializer != NULL && initializer != node &&
             EvaluateIntegerExpressionInContext(ctx, initializer, result)) {
           id_node->symbol->value.ivalue = *result;
@@ -1228,9 +1228,10 @@ bool EvaluateScalarConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
     symbol->flags.value_set = EvaluateInt128Constant(initializer, &lo, &hi);
     if (symbol->flags.value_set) {
       symbol->value.ivalue = lo;
-      if (symbol->constexpr_initializer == NULL) {
-        symbol->constexpr_initializer = NewInt128ConstantASTNode(
-            lo, hi, symbol->type, initializer->location);
+      if (SymbolExtraOf(symbol)->constexpr_initializer == NULL) {
+        SymbolMutableExtra(symbol)->constexpr_initializer =
+            NewInt128ConstantASTNode(lo, hi, symbol->type,
+                                     initializer->location);
       }
     }
     return symbol->flags.value_set;
@@ -1475,7 +1476,7 @@ static bool EvaluateFloatingPointValueInContext(ConstEvalContext* ctx,
       }
       if (ConstexprIsConstantInitializedReference(id_node->symbol)) {
         ASTNode* initializer = ConstexprInitializerExpression(
-            id_node->symbol->constexpr_initializer);
+            SymbolExtraOf(id_node->symbol)->constexpr_initializer);
         if (initializer != NULL && initializer != node &&
             EvaluateFloatingPointExpressionInContext(ctx, initializer,
                                                      result)) {

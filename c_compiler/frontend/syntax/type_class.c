@@ -296,8 +296,7 @@ static Symbol* NewCXXDeductionGuideSymbol(Struct* str, Symbol* tag,
       clone->flags = formal->flags;
       clone->flags.is_argument = true;
       clone->location = formal->location;
-      clone->default_argument =
-          ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
+      SymbolCloneDefaultArgument(clone, formal);
       clone->value.arg_number = (int32_t)guide_type->info.function.prototype.length;
       VectorAppend(&guide_type->info.function.prototype, clone);
     }
@@ -570,7 +569,9 @@ static Struct* AttachNewStructToTag(Symbol* tag, bool is_union, bool is_class) {
   SymbolSetType(tag, type);
   tag->storage = STO(implicit);
   tag->flags.is_using_alias = false;
-  tag->alias_target = NULL;
+  if (SymbolExtraOf(tag)->alias_target != NULL) {
+    SymbolMutableExtra(tag)->alias_target = NULL;
+  }
   tag->flags.is_forward_declared = true;
   tag->flags.is_defined = false;
   str->tag_name = &tag->name;
@@ -837,7 +838,7 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
       Symbol* alias = NewSymbol(specialization_primary->name.value, tag->type,
                                 STO(typedef));
       alias->namespace_ = tag->namespace_;
-      alias->alias_target = specialization_primary;
+      SymbolMutableExtra(alias)->alias_target = specialization_primary;
       if (!SyntaxAddSymbol(parser->syntax, alias)) {
         SymbolDelete(alias);
       }

@@ -370,7 +370,7 @@ static bool AppendDefaultCallArguments(VectorASTNode* call, TypeRecord* func) {
   }
   for (size_t i = num_actual_args; i < num_formal_args; i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
-    if (formal == NULL || formal->default_argument == NULL) {
+    if (formal == NULL || SymbolExtraOf(formal)->default_argument == NULL) {
       return false;
     }
   }
@@ -381,8 +381,8 @@ static bool AppendDefaultCallArguments(VectorASTNode* call, TypeRecord* func) {
             ? NewSourceLocationDefaultArgument(formal, call->base.location)
             : NULL;
     if (default_arg == NULL) {
-      default_arg =
-          ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
+      default_arg = ASTNodeClone(SymbolExtraOf(formal)->default_argument,
+                                 IdentityCloneNode, NULL, NULL);
     }
     default_arg->flags |= kASTDefaultArgument;
     default_arg->location = call->base.location;

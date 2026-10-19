@@ -108,9 +108,10 @@ static Symbol* MetaSynthesisCallSymbol(VectorASTNode* call) {
   }
   Symbol* symbol = ((IdentifierASTNode*)call->left)->symbol;
   for (size_t depth = 0;
-       symbol != NULL && symbol->alias_target != NULL && depth < 64;
+       symbol != NULL && SymbolExtraOf(symbol)->alias_target != NULL &&
+       depth < 64;
        depth++) {
-    symbol = symbol->alias_target;
+    symbol = SymbolExtraOf(symbol)->alias_target;
   }
   for (Symbol* candidate = symbol; candidate != NULL;
        candidate = candidate->overload_next) {
@@ -246,8 +247,9 @@ static bool MetaSynthesisReflectionRange(VectorASTNode* call, size_t arg_index,
         TypeIsFixedArray(symbol->type)) {
       ASTNode* initializer =
           ConstexprObjectInitializerForSymbol(symbol, arg->location);
-      if (initializer == NULL && symbol->constexpr_initializer != NULL) {
-        initializer = ASTNodeClone(symbol->constexpr_initializer,
+      if (initializer == NULL &&
+          SymbolExtraOf(symbol)->constexpr_initializer != NULL) {
+        initializer = ASTNodeClone(SymbolExtraOf(symbol)->constexpr_initializer,
                                    IdentityCloneNode, NULL, NULL);
       }
       ASTNode* elements = initializer;
@@ -1265,10 +1267,10 @@ static Symbol* MetaSynthesisPromoteStaticData(TypeRecord* type,
   symbol->flags.value_set = true;
   symbol->location = location;
   symbol->cxx_linkage = kCXXLinkageInternal;
-  symbol->constexpr_initializer = initializer != NULL
-                                      ? ASTNodeClone(initializer, IdentityCloneNode,
-                                                     NULL, NULL)
-                                      : NULL;
+  SymbolMutableExtra(symbol)->constexpr_initializer =
+      initializer != NULL
+          ? ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL)
+          : NULL;
   MetaSynthesisRegisterPromotedStatic(key, symbol);
   CompilerRegisterMetaPromotedStatic(symbol, initializer);
   return symbol;
@@ -1466,7 +1468,7 @@ static bool MetaSynthesisTryInstantiateTemplate(Symbol* templ, Vector* args,
                                       out_value, location);
     return true;
   }
-  if (templ->alias_template != NULL) {
+  if (SymbolExtraOf(templ)->alias_template != NULL) {
     TypeParser parser;
     TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
                    STO(implicit), compiler->syntax.context);
@@ -1481,7 +1483,7 @@ static bool MetaSynthesisTryInstantiateTemplate(Symbol* templ, Vector* args,
                                       out_value, location);
     return true;
   }
-  if (templ->variable_template != NULL) {
+  if (SymbolExtraOf(templ)->variable_template != NULL) {
     if (templ->type != NULL && TypeIsIntegral(templ->type)) {
       int64_t value = 0;
       bool ok = quiet
@@ -1832,8 +1834,9 @@ ASTNode* SemanticTryAnalyzeMetaSynthesisCall(VectorASTNode* call) {
             ConstexprObjectInitializerForSymbol(source, call->base.location);
         if (object_initializer != NULL) {
           promoted_initializer = object_initializer;
-        } else if (source != NULL && source->constexpr_initializer != NULL) {
-          promoted_initializer = source->constexpr_initializer;
+        } else if (source != NULL &&
+                   SymbolExtraOf(source)->constexpr_initializer != NULL) {
+          promoted_initializer = SymbolExtraOf(source)->constexpr_initializer;
         }
       }
       ASTNode* stored_initializer =

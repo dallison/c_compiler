@@ -177,8 +177,8 @@ void ModuleInstallRecordRollback(ModuleInstallRecord* record) {
 
 static Symbol* FollowAlias(Symbol* symbol) {
   while (symbol != NULL && symbol->flags.is_using_alias &&
-         symbol->alias_target != NULL) {
-    symbol = symbol->alias_target;
+         SymbolExtraOf(symbol)->alias_target != NULL) {
+    symbol = SymbolExtraOf(symbol)->alias_target;
   }
   return symbol;
 }

@@ -427,8 +427,8 @@ static bool SymbolOrOverloadIsTemplate(Symbol* symbol) {
        candidate = candidate->overload_next) {
     if (candidate->flags.is_template ||
         candidate->flags.is_template_template_parameter ||
-        candidate->alias_template != NULL ||
-        candidate->variable_template != NULL) {
+        SymbolExtraOf(candidate)->alias_template != NULL ||
+        SymbolExtraOf(candidate)->variable_template != NULL) {
       return true;
     }
     if (candidate->type == NULL || !TypeIsFunction(candidate->type) ||
@@ -462,8 +462,8 @@ static bool NameMayBeTemplateId(Syntax* syntax, String* component) {
     }
     // The injected-class-name of an explicit specialization denotes that
     // specialization, but `numeric_limits<double>` still names the primary.
-    if (symbol->alias_target != NULL &&
-        symbol->alias_target->flags.is_template &&
+    if (SymbolExtraOf(symbol)->alias_target != NULL &&
+        SymbolExtraOf(symbol)->alias_target->flags.is_template &&
         !symbol->flags.is_using_alias) {
       return true;
     }
@@ -1428,11 +1428,11 @@ static Symbol* FindUnqualifiedQualifiedPrefix(Syntax* syntax,
   // The specialization's injected-class-name hides the primary.  A
   // template-id on that name (`numeric_limits<double>::infinity`) still
   // instantiates the primary.
-  if (template_args != NULL && symbol != NULL &&
-      !symbol->flags.is_template && !symbol->flags.is_using_alias &&
-      symbol->alias_target != NULL &&
-      symbol->alias_target->flags.is_template) {
-    symbol = symbol->alias_target;
+  if (template_args != NULL && symbol != NULL && !symbol->flags.is_template &&
+      !symbol->flags.is_using_alias &&
+      SymbolExtraOf(symbol)->alias_target != NULL &&
+      SymbolExtraOf(symbol)->alias_target->flags.is_template) {
+    symbol = SymbolExtraOf(symbol)->alias_target;
   }
   if (allow_dependent_template_args) {
     Symbol* nested = DependentMemberTypedefOfPrefix(syntax, symbol);

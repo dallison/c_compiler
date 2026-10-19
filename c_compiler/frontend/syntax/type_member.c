@@ -146,7 +146,7 @@ static void FinalizeMemberVariableTemplate(
     AddOwnedAssociatedConstraint(&vt->associated_constraint,
                                  member_template_requires_clause);
   }
-  member_symbol->variable_template = vt;
+  SymbolMutableExtra(member_symbol)->variable_template = vt;
 }
 
 static Vector pending_inline_constructor_preambles;
@@ -394,10 +394,11 @@ static void AttachMemberAliasTemplate(TypeParser* parser, Symbol* alias,
     return;
   }
   Syntax* syntax = parser->syntax;
-  if (alias->alias_template == NULL) {
-    alias->alias_template = malloc(sizeof(AliasTemplate));
-    VectorInit(&alias->alias_template->parameters);
-    alias->alias_template->ctad_names_template_template_parameter = false;
+  if (SymbolExtraOf(alias)->alias_template == NULL) {
+    SymbolMutableExtra(alias)->alias_template = malloc(sizeof(AliasTemplate));
+    VectorInit(&SymbolExtraOf(alias)->alias_template->parameters);
+    SymbolExtraOf(alias)
+        ->alias_template->ctad_names_template_template_parameter = false;
   }
   // A member alias is parsed while the enclosing class parameters are still
   // on `current_template_parameters`.  Those belong to the class.  Recording
@@ -410,7 +411,7 @@ static void AttachMemberAliasTemplate(TypeParser* parser, Symbol* alias,
     return;
   }
   for (size_t p = 0; p < parameters->length; p++) {
-    VectorAppend(&alias->alias_template->parameters,
+    VectorAppend(&SymbolExtraOf(alias)->alias_template->parameters,
                  TemplateParameterCopy(parameters->value.p[p]));
   }
 }
@@ -4018,7 +4019,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
             ((member->is_member_function &&
               (member->is_static || member->symbol->flags.is_template)) ||
              (member->is_static &&
-              member->symbol->variable_template != NULL))) {
+              SymbolExtraOf(member->symbol)->variable_template != NULL))) {
           Symbol* scope_fn = SymbolClone(member->symbol);
           scope_fn->overload_next = NULL;
           // Member templates parse inside an extra parameter scope that is
@@ -4076,38 +4077,39 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           } else {
             ASTNode* initializer =
                 ParseCXXStaticDataMemberInitializer(parser, member_symbol);
-            if (member_symbol->variable_template != NULL) {
+            if (SymbolExtraOf(member_symbol)->variable_template != NULL) {
               if (initializer != NULL) {
-                member_symbol->variable_template->initializer = initializer;
+                SymbolExtraOf(member_symbol)->variable_template->initializer =
+                    initializer;
               }
             } else if (initializer != NULL) {
               member->default_initializer =
                   CloneCXXDefaultMemberInitializer(initializer);
             }
-            if (member_symbol->variable_template != NULL) {
+            if (SymbolExtraOf(member_symbol)->variable_template != NULL) {
               // Per-use instantiation handles the initializer; do not emit a
               // static data member definition for the primary template.
             } else
-            // A const integral/enum static data member with an in-class
-            // initializer yields a constant usable by unqualified name in the
-            // rest of the class body (array bounds, default arguments, etc.).
-            // Inside a template the regular queue defers this, but such
-            // initializers are typically non-dependent, so evaluate them now to
-            // make the constant available.  Dependent initializers must wait
-            // until template substitution; evaluating them against the primary
-            // template would reject valid constexpr expressions such as
-            // `static constexpr intmax_t n = f(R::num)`.
-            if (parser->syntax->parsing_template_declaration &&
-                !is_inline_member && initializer != NULL &&
-                CXXStaticDataMemberAllowsInClassInitializer(member_symbol) &&
-                !TypeContainsTemplateParameter(member_symbol->type) &&
-                !DependentExpressionContainsTemplateParameter(initializer)) {
-              AnalyzeCXXStaticDataMemberConstantInitializer(parser, member_symbol,
-                                                            initializer);
-            } else {
-              QueueCXXInlineStaticDataMemberDefinition(
-                  parser, str, member, initializer, is_inline_member);
-            }
+              // A const integral/enum static data member with an in-class
+              // initializer yields a constant usable by unqualified name in the
+              // rest of the class body (array bounds, default arguments, etc.).
+              // Inside a template the regular queue defers this, but such
+              // initializers are typically non-dependent, so evaluate them now
+              // to make the constant available.  Dependent initializers must
+              // wait until template substitution; evaluating them against the
+              // primary template would reject valid constexpr expressions such
+              // as `static constexpr intmax_t n = f(R::num)`.
+              if (parser->syntax->parsing_template_declaration &&
+                  !is_inline_member && initializer != NULL &&
+                  CXXStaticDataMemberAllowsInClassInitializer(member_symbol) &&
+                  !TypeContainsTemplateParameter(member_symbol->type) &&
+                  !DependentExpressionContainsTemplateParameter(initializer)) {
+                AnalyzeCXXStaticDataMemberConstantInitializer(
+                    parser, member_symbol, initializer);
+              } else {
+                QueueCXXInlineStaticDataMemberDefinition(
+                    parser, str, member, initializer, is_inline_member);
+              }
             // Inject a clone into the class scope so static data members
             // resolve by unqualified name in later member initializers.  For
             // non-dependent constants this clone carries the folded value; for

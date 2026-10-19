@@ -1277,7 +1277,8 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
                                                     Vector* template_args,
                                                     SourceLocation location) {
   if (!CompilerIsCXX() || var_sym == NULL ||
-      var_sym->variable_template == NULL || template_args == NULL ||
+      SymbolExtraOf(var_sym)->variable_template == NULL ||
+      template_args == NULL ||
       TemplateArgumentVectorContainsTemplateParameter(template_args)) {
     return NULL;
   }
@@ -1436,7 +1437,8 @@ ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr) {
   }
   if (expr->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)expr;
-    if (id->symbol != NULL && id->symbol->variable_template != NULL &&
+    if (id->symbol != NULL &&
+        SymbolExtraOf(id->symbol)->variable_template != NULL &&
         id->template_arguments != NULL &&
         (expr->flags & kASTIsDeclaration) == 0 &&
         !TemplateArgumentVectorContainsTemplateParameter(
@@ -1449,8 +1451,8 @@ ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr) {
   if (expr->op == AST_OP(structmember)) {
     StructMemberASTNode* member_node = (StructMemberASTNode*)expr;
     StructMember* member = member_node->member;
-    if (member != NULL && member->is_static &&
-        member->symbol != NULL && member->symbol->variable_template != NULL &&
+    if (member != NULL && member->is_static && member->symbol != NULL &&
+        SymbolExtraOf(member->symbol)->variable_template != NULL &&
         member_node->template_arguments != NULL &&
         !TemplateArgumentVectorContainsTemplateParameter(
             member_node->template_arguments)) {
@@ -1466,8 +1468,8 @@ ASTNode* CXXMaterializeVariableTemplateExpression(ASTNode* expr) {
     }
     StructMemberASTNode* member_node = (StructMemberASTNode*)access->right;
     StructMember* member = member_node->member;
-    if (member != NULL && member->is_static &&
-        member->symbol != NULL && member->symbol->variable_template != NULL &&
+    if (member != NULL && member->is_static && member->symbol != NULL &&
+        SymbolExtraOf(member->symbol)->variable_template != NULL &&
         member_node->template_arguments != NULL &&
         !TemplateArgumentVectorContainsTemplateParameter(
             member_node->template_arguments)) {
@@ -1607,7 +1609,7 @@ static ASTNode* AnalyzeIdentifierFoldVariableTemplateTraits(
 static ASTNode* AnalyzeIdentifierMaterializeVariableTemplate(
     IdentifierASTNode* node) {
   if (!CompilerIsCXX() || node->symbol == NULL ||
-      node->symbol->variable_template == NULL ||
+      SymbolExtraOf(node->symbol)->variable_template == NULL ||
       node->template_arguments == NULL ||
       (node->base.flags & kASTIsDeclaration) != 0 ||
       TemplateArgumentVectorContainsTemplateParameter(

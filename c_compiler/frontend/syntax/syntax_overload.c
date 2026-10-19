@@ -1000,9 +1000,9 @@ bool TryAppendSameSignatureConstrainedTemplateOverload(
 Symbol* FollowAlias(Symbol* symbol) {
   int depth = 0;
   while (symbol != NULL && symbol->flags.is_using_alias &&
-         symbol->alias_target != NULL && symbol->overload_next == NULL &&
-         depth < 64) {
-    symbol = symbol->alias_target;
+         SymbolExtraOf(symbol)->alias_target != NULL &&
+         symbol->overload_next == NULL && depth < 64) {
+    symbol = SymbolExtraOf(symbol)->alias_target;
     depth++;
   }
   return symbol;

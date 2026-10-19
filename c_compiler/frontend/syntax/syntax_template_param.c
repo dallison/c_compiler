@@ -496,13 +496,15 @@ static bool ParseTemplateTemplateParameter(Syntax* syntax, Vector* params,
     SymbolMutableExtra(param)->template_template_parameters =
         TemplateParameterVectorCopy(inner_parameters);
     if (template_kind == kTemplateTemplateParameterVariable) {
-      param->variable_template = malloc(sizeof(VariableTemplate));
-      param->variable_template->initializer = NULL;
-      param->variable_template->associated_constraint = NULL;
-      VectorInit(&param->variable_template->parameters);
-      VectorInit(&param->variable_template->partial_specializations);
+      SymbolMutableExtra(param)->variable_template =
+          malloc(sizeof(VariableTemplate));
+      SymbolExtraOf(param)->variable_template->initializer = NULL;
+      SymbolExtraOf(param)->variable_template->associated_constraint = NULL;
+      VectorInit(&SymbolExtraOf(param)->variable_template->parameters);
+      VectorInit(
+          &SymbolExtraOf(param)->variable_template->partial_specializations);
       for (size_t i = 0; i < inner_parameters->length; i++) {
-        VectorAppend(&param->variable_template->parameters,
+        VectorAppend(&SymbolExtraOf(param)->variable_template->parameters,
                      TemplateParameterCopy(inner_parameters->value.p[i]));
       }
     } else if (template_kind == kTemplateTemplateParameterConcept) {

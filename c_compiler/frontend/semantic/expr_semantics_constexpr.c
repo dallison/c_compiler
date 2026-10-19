@@ -425,9 +425,10 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
   if (expression->op == AST_OP(string) ||
       expression->op == AST_OP(string_wide)) {
     ASTNode* clone = ASTNodeClone(expression, IdentityCloneNode, NULL, NULL);
-    ASTNodeDelete(symbol->constexpr_initializer);
-    symbol->constexpr_initializer = clone;
-    symbol->flags.value_set = symbol->constexpr_initializer != NULL;
+    ASTNodeDelete(SymbolExtraOf(symbol)->constexpr_initializer);
+    SymbolMutableExtra(symbol)->constexpr_initializer = clone;
+    symbol->flags.value_set =
+        SymbolExtraOf(symbol)->constexpr_initializer != NULL;
     return symbol->flags.value_set;
   }
   // `value.other` names only the object; the initializer keeps the exact
@@ -444,8 +445,8 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
     symbol->value.other = target;
     symbol->flags.value_set = true;
     ASTNode* clone = ASTNodeClone(expression, IdentityCloneNode, NULL, NULL);
-    ASTNodeDelete(symbol->constexpr_initializer);
-    symbol->constexpr_initializer = clone;
+    ASTNodeDelete(SymbolExtraOf(symbol)->constexpr_initializer);
+    SymbolMutableExtra(symbol)->constexpr_initializer = clone;
     return true;
   }
   ASTNode* folded = ConstexprFoldPointerExpression(expression);
@@ -460,10 +461,11 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
        folded_address->op == AST_OP(address) ||
        folded_address->op == AST_OP(identifier) ||
        folded_address->op == AST_OP(plus))) {
-    ASTNodeDelete(symbol->constexpr_initializer);
-    symbol->constexpr_initializer =
+    ASTNodeDelete(SymbolExtraOf(symbol)->constexpr_initializer);
+    SymbolMutableExtra(symbol)->constexpr_initializer =
         ASTNodeClone(folded, IdentityCloneNode, NULL, NULL);
-    symbol->flags.value_set = symbol->constexpr_initializer != NULL;
+    symbol->flags.value_set =
+        SymbolExtraOf(symbol)->constexpr_initializer != NULL;
     if (expression->parent != NULL) {
       ASTNodeReplaceChild(expression->parent, expression->child_id, folded,
                           true);
@@ -511,8 +513,8 @@ bool MarkCXX26SymbolicConstexprReference(Symbol* symbol,
         symbol->is_constexpr_representable = true;
         SymbolMutableExtra(symbol)->constexpr_reference_scope =
             compiler->current_function;
-        ASTNodeDelete(symbol->constexpr_initializer);
-        symbol->constexpr_initializer =
+        ASTNodeDelete(SymbolExtraOf(symbol)->constexpr_initializer);
+        SymbolMutableExtra(symbol)->constexpr_initializer =
             ASTNodeClone(initializer, IdentityCloneNode, NULL, NULL);
         return true;
       }

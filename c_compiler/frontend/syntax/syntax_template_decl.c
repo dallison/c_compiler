@@ -317,7 +317,7 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
                 var->symbol->type, syntax->current_template_requires_clause);
             syntax->current_template_requires_clause = NULL;
           }
-        } else if (var->symbol->variable_template == NULL) {
+        } else if (SymbolExtraOf(var->symbol)->variable_template == NULL) {
           // A C++ variable template: capture its (unanalyzed) initializer and
           // template parameters for per-use instantiation.  The initializer is
           // transferred off the declaration node so the template itself emits
@@ -342,7 +342,7 @@ static void MarkTemplateDeclaration(Syntax* syntax, ASTNode* node) {
                                          syntax->current_template_requires_clause);
             syntax->current_template_requires_clause = NULL;
           }
-          var->symbol->variable_template = vt;
+          SymbolMutableExtra(var->symbol)->variable_template = vt;
         }
         marked_symbol = true;
       }

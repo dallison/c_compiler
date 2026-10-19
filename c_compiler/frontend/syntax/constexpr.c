@@ -3938,9 +3938,8 @@ bool ConstexprEvaluateObjectConstantForSymbol(Symbol* symbol,
 bool ConstexprIsConstantInitializedReference(Symbol* symbol) {
   return symbol != NULL && symbol->type != NULL &&
          TypeIsReference(symbol->type) && symbol->type->next != NULL &&
-         symbol->constexpr_initializer != NULL &&
-         !symbol->is_constexpr_representable &&
-         !symbol->flags.is_argument &&
+         SymbolExtraOf(symbol)->constexpr_initializer != NULL &&
+         !symbol->is_constexpr_representable && !symbol->flags.is_argument &&
          !StorageIs(symbol->storage, STO(thread));
 }
 
@@ -3974,10 +3973,10 @@ bool ConstexprEvaluateReferenceConstantForSymbol(Symbol* symbol,
   }
   // Only the bound expression: a local's `init` node also holds the reference
   // itself, which would make its initializer refer back to it.
-  ASTNodeDelete(symbol->constexpr_initializer);
-  symbol->constexpr_initializer =
+  ASTNodeDelete(SymbolExtraOf(symbol)->constexpr_initializer);
+  SymbolMutableExtra(symbol)->constexpr_initializer =
       ASTNodeClone(expression, IdentityCloneNode, NULL, NULL);
-  return symbol->constexpr_initializer != NULL;
+  return SymbolExtraOf(symbol)->constexpr_initializer != NULL;
 }
 
 static bool ConstexprEvaluateObjectConstantForSymbolImpl(Symbol* symbol,
@@ -4583,10 +4582,11 @@ static bool EvaluateInt128Expression(ConstEvalContext* ctx, ASTNode* node,
     // EvaluateScalarConstantForSymbol keeps a constant __int128 variable's
     // full value as a folded initializer; the symbol value is the low word.
     if (symbol != NULL && symbol->flags.value_set && symbol->type != NULL &&
-        TypeIsInt128(symbol->type) && symbol->constexpr_initializer != NULL &&
-        symbol->constexpr_initializer->op == AST_OP(number)) {
+        TypeIsInt128(symbol->type) &&
+        SymbolExtraOf(symbol)->constexpr_initializer != NULL &&
+        SymbolExtraOf(symbol)->constexpr_initializer->op == AST_OP(number)) {
       ConstantASTNode* constant =
-          (ConstantASTNode*)symbol->constexpr_initializer;
+          (ConstantASTNode*)SymbolExtraOf(symbol)->constexpr_initializer;
       *result = ConstexprPackU128(constant->value.ivalue, constant->ihi);
       return true;
     }
@@ -7707,7 +7707,7 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
         (static_reference ||
          ConstexprReferenceUsableInCurrentFunction(id->symbol)) &&
         TypeIsReference(id->symbol->type) &&
-        id->symbol->constexpr_initializer != NULL) {
+        SymbolExtraOf(id->symbol)->constexpr_initializer != NULL) {
       ConstexprValue address = {0};
       bool ok;
       if (static_reference) {
@@ -7715,8 +7715,9 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       } else {
         symbolic_constexpr_reference_depth++;
         ok = EvaluateConstexprAddressValue(
-            ctx, ConstexprInitializerExpression(
-                     id->symbol->constexpr_initializer),
+            ctx,
+            ConstexprInitializerExpression(
+                SymbolExtraOf(id->symbol)->constexpr_initializer),
             &address);
         symbolic_constexpr_reference_depth--;
       }
@@ -7742,18 +7743,17 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
     }
     if (binding == NULL && id->symbol != NULL &&
         TypeIsFixedArray(id->symbol->type) &&
-        id->symbol->constexpr_initializer != NULL &&
+        SymbolExtraOf(id->symbol)->constexpr_initializer != NULL &&
         (CompilerSymbolIsMetaPromotedStatic(id->symbol) ||
          !id->symbol->flags.value_set)) {
       ConstexprEvaluateObjectConstantForSymbol(
-          id->symbol, id->symbol->constexpr_initializer);
+          id->symbol, SymbolExtraOf(id->symbol)->constexpr_initializer);
     }
-    if (binding == NULL && id->symbol != NULL &&
-        !id->symbol->flags.value_set &&
-        id->symbol->constexpr_initializer != NULL &&
+    if (binding == NULL && id->symbol != NULL && !id->symbol->flags.value_set &&
+        SymbolExtraOf(id->symbol)->constexpr_initializer != NULL &&
         TypeIsStructOrUnion(id->symbol->type)) {
       ConstexprEvaluateObjectConstantForSymbol(
-          id->symbol, id->symbol->constexpr_initializer);
+          id->symbol, SymbolExtraOf(id->symbol)->constexpr_initializer);
     }
     if (binding == NULL && id->symbol != NULL &&
         id->symbol->flags.value_set &&
@@ -8436,7 +8436,9 @@ static bool ConstexprStaticReferenceTarget(ConstEvalContext* ctx,
   TypeRecord* type = symbol->type;
   ConstexprValue location = {0};
   if (!EvaluateConstexprReferenceInitializer(
-          ctx, ConstexprInitializerExpression(symbol->constexpr_initializer),
+          ctx,
+          ConstexprInitializerExpression(
+              SymbolExtraOf(symbol)->constexpr_initializer),
           type->next, &location) ||
       !location.is_address) {
     return false;
@@ -8468,10 +8470,10 @@ static bool ConstexprMetaPromotedAddress(ConstEvalContext* ctx,
     return true;
   }
   if (TypeIsIntegral(promoted->type) &&
-      promoted->constexpr_initializer != NULL) {
+      SymbolExtraOf(promoted)->constexpr_initializer != NULL) {
     int64_t value = 0;
-    ASTNode* initializer =
-        ConstexprInitializerExpression(promoted->constexpr_initializer);
+    ASTNode* initializer = ConstexprInitializerExpression(
+        SymbolExtraOf(promoted)->constexpr_initializer);
     if (EvaluateIntegerExpressionInContext(ctx, initializer, &value)) {
       ConstexprObject* object = NewConstexprObject(ctx, promoted->type, 1);
       ConstexprValue* slot = ConstexprObjectSlot(object, 0);
@@ -8843,9 +8845,8 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     if ((template_argument_object_evaluation_depth > 0 ||
          static_constant_pointer ||
          ConstexprReferenceUsableInCurrentFunction(id->symbol)) &&
-        binding == NULL &&
-        id->symbol != NULL &&
-        id->symbol->constexpr_initializer != NULL &&
+        binding == NULL && id->symbol != NULL &&
+        SymbolExtraOf(id->symbol)->constexpr_initializer != NULL &&
         (TypeIsPointer(id->symbol->type) ||
          TypeIsReference(id->symbol->type))) {
       bool symbolic = id->symbol->is_constexpr_representable;
@@ -8854,8 +8855,9 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       }
       bool ok = ConstexprStaticReferenceTarget(ctx, id->symbol, result) ||
                 EvaluateConstexprAddressValue(
-                    ctx, ConstexprInitializerExpression(
-                             id->symbol->constexpr_initializer),
+                    ctx,
+                    ConstexprInitializerExpression(
+                        SymbolExtraOf(id->symbol)->constexpr_initializer),
                     result);
       if (symbolic) {
         symbolic_constexpr_reference_depth--;
@@ -8903,13 +8905,14 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       return true;
     }
     if (id->symbol != NULL && id->symbol->flags.is_constexpr &&
-        id->symbol->constexpr_initializer != NULL &&
+        SymbolExtraOf(id->symbol)->constexpr_initializer != NULL &&
         !id->symbol->is_constexpr_representable &&
         (TypeIsPointer(id->symbol->type) ||
          TypeIsReference(id->symbol->type))) {
       return EvaluateConstexprAddressValue(
           ctx,
-          ConstexprInitializerExpression(id->symbol->constexpr_initializer),
+          ConstexprInitializerExpression(
+              SymbolExtraOf(id->symbol)->constexpr_initializer),
           result);
     }
     // EvaluateScalarConstantForSymbol records a null pointer constant as a
@@ -8918,7 +8921,7 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
         TypeIsPointer(id->symbol->type) &&
         (static_constant_pointer || id->symbol->flags.is_constexpr) &&
         id->symbol->flags.value_set &&
-        id->symbol->constexpr_initializer == NULL &&
+        SymbolExtraOf(id->symbol)->constexpr_initializer == NULL &&
         id->symbol->value.ivalue == 0 &&
         CompilerMetaPromotedPointerTarget(id->symbol) == NULL) {
       return ConstexprNullAddress(result);
@@ -8936,11 +8939,11 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       }
     }
     if (id->symbol != NULL && TypeIsFixedArray(id->symbol->type) &&
-        id->symbol->constexpr_initializer != NULL &&
+        SymbolExtraOf(id->symbol)->constexpr_initializer != NULL &&
         (CompilerSymbolIsMetaPromotedStatic(id->symbol) ||
          !id->symbol->flags.value_set)) {
       ConstexprEvaluateObjectConstantForSymbol(
-          id->symbol, id->symbol->constexpr_initializer);
+          id->symbol, SymbolExtraOf(id->symbol)->constexpr_initializer);
     }
     if (id->symbol != NULL && id->symbol->flags.value_set &&
         TypeIsFixedArray(id->symbol->type) &&
@@ -9590,11 +9593,11 @@ bool ConstexprEvaluatePointerTruth(ConstEvalContext* ctx, ASTNode* node,
       return false;
     }
     Symbol* target = NULL;
-    if (symbol->constexpr_initializer == NULL) {
+    if (SymbolExtraOf(symbol)->constexpr_initializer == NULL) {
       target = (Symbol*)symbol->value.other;
     } else {
-      ASTNode* initializer =
-          ConstexprInitializerExpression(symbol->constexpr_initializer);
+      ASTNode* initializer = ConstexprInitializerExpression(
+          SymbolExtraOf(symbol)->constexpr_initializer);
       while (initializer != NULL && initializer->op == AST_OP(cast)) {
         initializer = ((CastASTNode*)initializer)->expr;
       }
@@ -11227,9 +11230,9 @@ bool ConstexprBindExpansionRangeHidden(ConstEvalContext* ctx,
   if (init_expr != NULL && init_expr->op == AST_OP(identifier)) {
     Symbol* range_symbol = ((IdentifierASTNode*)init_expr)->symbol;
     if (range_symbol != NULL && !range_symbol->flags.value_set &&
-        range_symbol->constexpr_initializer != NULL) {
+        SymbolExtraOf(range_symbol)->constexpr_initializer != NULL) {
       ConstexprEvaluateObjectConstantForSymbol(
-          range_symbol, range_symbol->constexpr_initializer);
+          range_symbol, SymbolExtraOf(range_symbol)->constexpr_initializer);
     }
   }
   if (ConstexprBindVariableDeclaration(ctx, hidden_decl)) {

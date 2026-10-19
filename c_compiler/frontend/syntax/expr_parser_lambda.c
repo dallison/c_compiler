@@ -970,8 +970,8 @@ static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
   LambdaCaptureScan* scan = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol != NULL &&
-      (id->symbol->variable_template != NULL || id->symbol->flags.is_template ||
-       id->symbol->flags.is_concept)) {
+      (SymbolExtraOf(id->symbol)->variable_template != NULL ||
+       id->symbol->flags.is_template || id->symbol->flags.is_concept)) {
     return;
   }
   if (!CanCaptureSymbol(id->symbol, scan->lambda_func) ||

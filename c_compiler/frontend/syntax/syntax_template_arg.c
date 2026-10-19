@@ -221,7 +221,8 @@ bool SymbolNamesTemplateArgument(Symbol* symbol) {
     return false;
   }
   if (symbol->flags.is_template_template_parameter ||
-      symbol->alias_template != NULL || symbol->variable_template != NULL ||
+      SymbolExtraOf(symbol)->alias_template != NULL ||
+      SymbolExtraOf(symbol)->variable_template != NULL ||
       symbol->flags.is_concept) {
     return true;
   }
@@ -266,7 +267,7 @@ static Symbol* SyntaxBareTemplateArgumentSymbol(Syntax* syntax) {
       // of the class template that type is a specialization of.
       bool names_alias = symbol != NULL &&
                          StorageIs(symbol->storage, STO(typedef)) &&
-                         symbol->alias_template == NULL &&
+                         SymbolExtraOf(symbol)->alias_template == NULL &&
                          !symbol->flags.is_template;
       if (!SymbolNamesTemplateArgument(symbol) && !names_alias) {
         symbol = SyntaxFindQualifiedTag(syntax, &name);
@@ -345,7 +346,7 @@ static TemplateArgument* NewTemplateArgumentAtCurrentToken(Lex* lex) {
 static bool BareTemplateNameIsNotAType(Symbol* bare_template) {
   return bare_template != NULL &&
          (bare_template->flags.is_concept ||
-          bare_template->variable_template != NULL ||
+          SymbolExtraOf(bare_template)->variable_template != NULL ||
           (bare_template->flags.is_template_template_parameter &&
            SymbolExtraOf(bare_template)->template_template_parameter_kind !=
                kTemplateTemplateParameterType));

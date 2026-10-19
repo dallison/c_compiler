@@ -543,7 +543,8 @@ bool CXXTypeHasDefaultConstructor(TypeRecord* type) {
     for (size_t j = expected;
          callable_without_arguments && j < info->prototype.length; j++) {
       Symbol* parameter = info->prototype.value.p[j];
-      if (parameter == NULL || parameter->default_argument == NULL) {
+      if (parameter == NULL ||
+          SymbolExtraOf(parameter)->default_argument == NULL) {
         callable_without_arguments = false;
       }
     }

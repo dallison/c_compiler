@@ -3754,8 +3754,8 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
       sym->is_constexpr_representable = true;
       SymbolMutableExtra(sym)->constexpr_reference_scope =
           compiler->current_function;
-      ASTNodeDelete(sym->constexpr_initializer);
-      sym->constexpr_initializer =
+      ASTNodeDelete(SymbolExtraOf(sym)->constexpr_initializer);
+      SymbolMutableExtra(sym)->constexpr_initializer =
           ASTNodeClone(access, StaticAssertIdentityClone, NULL, NULL);
       // Analyze the invented reference using the ordinary structured-binding
       // path. Its constexpr property belongs to the binding declaration, while

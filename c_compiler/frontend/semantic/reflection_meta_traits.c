@@ -49,9 +49,9 @@ static bool MetaTraitEvaluateIntegralSymbol(Symbol* sym, size_t* value_out) {
     }
     return true;
   }
-  if (sym->constexpr_initializer != NULL) {
-    ASTNode* init =
-        ConstexprInitializerExpression(sym->constexpr_initializer);
+  if (SymbolExtraOf(sym)->constexpr_initializer != NULL) {
+    ASTNode* init = ConstexprInitializerExpression(
+        SymbolExtraOf(sym)->constexpr_initializer);
     int64_t ivalue = 0;
     if (EvaluateIntegerExpression(init, &ivalue)) {
       if (value_out != NULL) {
@@ -980,9 +980,10 @@ static Symbol* MetaTraitCallSymbol(VectorASTNode* call) {
   }
   Symbol* symbol = ((IdentifierASTNode*)call->left)->symbol;
   for (size_t depth = 0;
-       symbol != NULL && symbol->alias_target != NULL && depth < 64;
+       symbol != NULL && SymbolExtraOf(symbol)->alias_target != NULL &&
+       depth < 64;
        depth++) {
-    symbol = symbol->alias_target;
+    symbol = SymbolExtraOf(symbol)->alias_target;
   }
   if (symbol == NULL || !SymbolHasAttribute(symbol, "meta_intrinsic")) {
     return NULL;
@@ -1605,9 +1606,9 @@ static void MetaTraitAppendTypesFromVectorIdentifier(IdentifierASTNode* id,
       !MetaTraitVectorElementType(id->symbol->type, NULL)) {
     return;
   }
-  if (id->symbol->constexpr_initializer != NULL) {
-    ASTNode* init =
-        ConstexprInitializerExpression(id->symbol->constexpr_initializer);
+  if (SymbolExtraOf(id->symbol)->constexpr_initializer != NULL) {
+    ASTNode* init = ConstexprInitializerExpression(
+        SymbolExtraOf(id->symbol)->constexpr_initializer);
     init = MetaTraitUnwrapInitExpression(init);
     if (init != NULL && init->op == AST_OP(call)) {
       MetaTraitAppendTypesFromVectorCall((VectorASTNode*)init, types, dependent,
@@ -2517,8 +2518,10 @@ static TypeRecord* MetaTraitTraitStructMemberType(TypeRecord* trait_type,
       FindStructMemberByName(trait_type->info.struct_info, member_name);
   if (member != NULL && member->symbol != NULL) {
     Symbol* sym = member->symbol;
-    if (sym->alias_target != NULL && sym->alias_target->type != NULL) {
-      return TypeRecordCalculateSize(TypeRecordCopy(sym->alias_target->type));
+    if (SymbolExtraOf(sym)->alias_target != NULL &&
+        SymbolExtraOf(sym)->alias_target->type != NULL) {
+      return TypeRecordCalculateSize(
+          TypeRecordCopy(SymbolExtraOf(sym)->alias_target->type));
     }
     if (sym->type != NULL) {
       return TypeRecordCalculateSize(TypeRecordCopy(sym->type));
@@ -2542,7 +2545,8 @@ static bool MetaTraitInstantiateVariableSizeTrait(const char* var_name,
                                                   TypeRecord* object_type,
                                                   size_t* size_out) {
   Symbol* var = MetaTraitFindStdSymbol(var_name);
-  if (var == NULL || var->variable_template == NULL || object_type == NULL) {
+  if (var == NULL || SymbolExtraOf(var)->variable_template == NULL ||
+      object_type == NULL) {
     return false;
   }
   TypeRecord* query_type = MetaTraitRecoverTemplateIdType(object_type);

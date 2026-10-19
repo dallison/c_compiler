@@ -466,8 +466,8 @@ static bool SymbolOverloadChainContains(Symbol* head, Symbol* symbol) {
 
 static bool SymbolChainAliases(Symbol* head, Symbol* symbol) {
   for (Symbol* current = head; current != NULL; current = current->overload_next) {
-    if (current == symbol ||
-        (current->flags.is_using_alias && current->alias_target == symbol)) {
+    if (current == symbol || (current->flags.is_using_alias &&
+                              SymbolExtraOf(current)->alias_target == symbol)) {
       return true;
     }
   }
@@ -492,7 +492,7 @@ static void LinkAnonymousFunctionOverload(Symbol* first, Symbol* extra) {
     }
     Symbol* clone = SymbolClone(current);
     clone->flags.is_using_alias = true;
-    clone->alias_target = current;
+    SymbolMutableExtra(clone)->alias_target = current;
     clone->overload_next = NULL;
     Symbol* tail = first;
     while (tail->overload_next != NULL) {

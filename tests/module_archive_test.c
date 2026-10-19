@@ -170,7 +170,7 @@ static Symbol* BuildVariableTemplate(TypeRecord* int_type) {
   vt->associated_constraint = NULL;
   VectorInit(&vt->parameters);
   VectorAppend(&vt->parameters, MakeTypeParam("T", 0));
-  sym->variable_template = vt;
+  SymbolMutableExtra(sym)->variable_template = vt;
   return sym;
 }
 
@@ -195,7 +195,7 @@ static Symbol* BuildConstrainedVariableTemplate(TypeRecord* int_type,
   arg->template_parameter_index = 0;
   VectorAppend(args, arg);
   vt->associated_constraint = NewConceptIdConstraint(concept_sym, args, 0);
-  sym->variable_template = vt;
+  SymbolMutableExtra(sym)->variable_template = vt;
   return sym;
 }
 
@@ -405,7 +405,7 @@ static void CheckVariableTemplate(Symbol* sym) {
   if (sym == NULL) return;
   CHECK(StringEqual(&sym->name, "pi_v"));
   CHECK(sym->flags.is_template);
-  VariableTemplate* vt = sym->variable_template;
+  VariableTemplate* vt = SymbolExtraOf(sym)->variable_template;
   CHECK(vt != NULL);
   if (vt == NULL) return;
   CHECK(vt->initializer != NULL &&
@@ -422,7 +422,7 @@ static void CheckConstrainedVariableTemplate(Symbol* sym, Symbol* concept_sym) {
   if (sym == NULL) return;
   CHECK(StringEqual(&sym->name, "constrained_pi_v"));
   CHECK(sym->flags.is_template);
-  VariableTemplate* vt = sym->variable_template;
+  VariableTemplate* vt = SymbolExtraOf(sym)->variable_template;
   CHECK(vt != NULL);
   if (vt == NULL) return;
   CHECK(vt->associated_constraint != NULL &&

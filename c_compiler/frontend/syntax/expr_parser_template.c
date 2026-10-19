@@ -1215,13 +1215,14 @@ ASTNode* ParseIdentifier(Syntax* syntax,
     }
   }
   if (symbol != NULL && !symbol->flags.is_template &&
-      !symbol->flags.is_using_alias && symbol->alias_target != NULL &&
-      symbol->alias_target->flags.is_template &&
+      !symbol->flags.is_using_alias &&
+      SymbolExtraOf(symbol)->alias_target != NULL &&
+      SymbolExtraOf(symbol)->alias_target->flags.is_template &&
       name.template_arguments.length > 0) {
     Vector* parsed_args =
         name.template_arguments.value.p[name.template_arguments.length - 1];
     if (parsed_args != NULL && parsed_args->length > 0) {
-      symbol = symbol->alias_target;
+      symbol = SymbolExtraOf(symbol)->alias_target;
     }
   }
   Vector* template_arguments = NULL;
@@ -1229,20 +1230,21 @@ ASTNode* ParseIdentifier(Syntax* syntax,
   // static variable template.  The clone is marked as a template but does not
   // own the variable-template definition, so `<T>` would be parsed and dropped.
   // Use the class member, which holds the initializer.
-  if (symbol != NULL && symbol->variable_template == NULL &&
+  if (symbol != NULL && SymbolExtraOf(symbol)->variable_template == NULL &&
       symbol->flags.is_template &&
       SymbolExtraOf(symbol)->static_data_member_class != NULL) {
     StructMember* member = FindStructMember(
         SymbolExtraOf(symbol)->static_data_member_class, &symbol->name);
     if (member != NULL && member->symbol != NULL &&
-        member->symbol->variable_template != NULL) {
+        SymbolExtraOf(member->symbol)->variable_template != NULL) {
       symbol = member->symbol;
     }
   }
   if (symbol != NULL && name.template_arguments.length > 0 &&
       (TypeIsFunction(symbol->type) ||
        IdentifierNamesFunctionTemplateOverload(symbol) ||
-       symbol->flags.is_template || symbol->variable_template != NULL)) {
+       symbol->flags.is_template ||
+       SymbolExtraOf(symbol)->variable_template != NULL)) {
     Vector* parsed_args =
         name.template_arguments.value.p[name.template_arguments.length - 1];
     template_arguments = TemplateArgumentVectorCopy(parsed_args);
@@ -1279,7 +1281,7 @@ ASTNode* ParseIdentifier(Syntax* syntax,
   if (template_arguments == NULL && symbol != NULL &&
       (symbol->flags.is_template ||
        IdentifierNamesFunctionTemplateOverload(symbol) ||
-       symbol->variable_template != NULL) &&
+       SymbolExtraOf(symbol)->variable_template != NULL) &&
       LexLookingAt(lex, TOK(less))) {
     Vector* args = SyntaxParseTemplateArgumentList(syntax, followers);
     if (args != NULL) {
@@ -1304,7 +1306,7 @@ ASTNode* ParseIdentifier(Syntax* syntax,
         // they still route through the placeholder/CTAD path.
         template_arguments = args;
         args = NULL;
-      } else if (symbol->variable_template != NULL) {
+      } else if (SymbolExtraOf(symbol)->variable_template != NULL) {
         // A variable template-id used as a value, e.g. `variant_size_v<T>`.
         // Retain the explicit arguments; the identifier is instantiated and
         // constant-folded during semantic analysis.
@@ -1340,12 +1342,11 @@ ASTNode* ParseIdentifier(Syntax* syntax,
       ((TypeIsStructOrUnion(symbol->type) &&
         (StorageIs(symbol->storage, STO(typedef)) ||
          (symbol->flags.is_template &&
-          symbol->variable_template == NULL))) ||
-       is_alias_template ||
-       functional_constructor_owner != NULL) &&
+          SymbolExtraOf(symbol)->variable_template == NULL))) ||
+       is_alias_template || functional_constructor_owner != NULL) &&
       LexLookingAt(lex, TOK(lparen));
   if (template_arguments == NULL && symbol != NULL &&
-      symbol->variable_template != NULL &&
+      SymbolExtraOf(symbol)->variable_template != NULL &&
       name.template_arguments.length > 0) {
     Vector* parsed_args =
         name.template_arguments.value.p[name.template_arguments.length - 1];
@@ -1354,7 +1355,7 @@ ASTNode* ParseIdentifier(Syntax* syntax,
     }
   }
   if (CompilerIsCXX() && is_qualified_name && template_arguments != NULL &&
-      symbol != NULL && symbol->variable_template != NULL &&
+      symbol != NULL && SymbolExtraOf(symbol)->variable_template != NULL &&
       name.components.length >= 2) {
     Symbol* owner = SyntaxFindQualifiedPrefixSymbol(
         syntax, &name, name.components.length - 1);

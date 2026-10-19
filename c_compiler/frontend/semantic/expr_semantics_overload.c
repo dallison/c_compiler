@@ -189,7 +189,7 @@ static size_t FunctionRequiredArgumentCount(TypeRecord* func,
   for (size_t i = first_formal_arg; i < func->info.function.prototype.length;
        i++) {
     Symbol* formal = func->info.function.prototype.value.p[i];
-    if (formal != NULL && formal->default_argument == NULL) {
+    if (formal != NULL && SymbolExtraOf(formal)->default_argument == NULL) {
       required = i - first_formal_arg + 1;
     }
   }

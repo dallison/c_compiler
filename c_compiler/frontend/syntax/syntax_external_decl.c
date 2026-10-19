@@ -94,7 +94,7 @@ static ExternalDeclaratorFlow ParseSpecialExternalDeclarator(
       (syntax->parsing_template_declaration ||
        syntax->parsing_template_specialization)) {
     Symbol* primary = SyntaxFindSymbol(syntax, &sym->name);
-    if (primary != NULL && primary->variable_template != NULL) {
+    if (primary != NULL && SymbolExtraOf(primary)->variable_template != NULL) {
       ASTNode* initializer = NULL;
       if (LexMatch(syntax->lex, TOK(equal))) {
         syntax->init_storage = storage;
@@ -685,10 +685,12 @@ static void ParseExternalDeclaratorSuffix(TypeParser* parser, Symbol* sym,
   VectorClear(attributes);
   SyntaxApplyDeclarationAttributes(syntax, sym);
   if (parser->placeholder_variable_constraint != NULL) {
-    sym->associated_constraint = parser->placeholder_variable_constraint;
+    SymbolMutableExtra(sym)->associated_constraint =
+        parser->placeholder_variable_constraint;
     parser->placeholder_variable_constraint = NULL;
   } else if (syntax->pending_placeholder_variable_constraint != NULL) {
-    sym->associated_constraint = syntax->pending_placeholder_variable_constraint;
+    SymbolMutableExtra(sym)->associated_constraint =
+        syntax->pending_placeholder_variable_constraint;
     syntax->pending_placeholder_variable_constraint = NULL;
   }
 
@@ -875,7 +877,7 @@ static void ApplyExternalObjectSpecifiers(TypeParser* parser, Symbol* sym) {
 // Checks a deduced `auto` object's placeholder constraint
 // (`Concept auto x = ...`) against the deduced type.
 static void CheckDeducedObjectConstraint(Syntax* syntax, Symbol* sym) {
-  if (sym->associated_constraint == NULL || sym->type == NULL) {
+  if (SymbolExtraOf(sym)->associated_constraint == NULL || sym->type == NULL) {
     return;
   }
   Vector* constraint_args = NewVector();
@@ -883,12 +885,12 @@ static void CheckDeducedObjectConstraint(Syntax* syntax, Symbol* sym) {
   type_arg->kind = kTemplateParameterType;
   type_arg->type = TypeRecordCopy(sym->type);
   VectorAppend(constraint_args, type_arg);
-  if (!ConceptsConstraintSatisfied(sym->associated_constraint,
+  if (!ConceptsConstraintSatisfied(SymbolExtraOf(sym)->associated_constraint,
                                    constraint_args)) {
     SyntaxError(syntax, "constraints not satisfied");
-    ConceptsReportAssociatedConstraintFailure(sym->associated_constraint,
-                                              constraint_args,
-                                              sym->location, NULL);
+    ConceptsReportAssociatedConstraintFailure(
+        SymbolExtraOf(sym)->associated_constraint, constraint_args,
+        sym->location, NULL);
   }
   VectorDeleteWithContents(
       constraint_args, (VectorElementDestructor)TemplateArgumentDelete,

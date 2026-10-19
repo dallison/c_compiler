@@ -144,6 +144,19 @@ typedef struct SymbolModuleIdentity {
 // first write through SymbolMutableExtra; until then SymbolExtraOf reads every
 // field as zero.  Owned by the symbol.
 typedef struct SymbolExtra {
+  struct Symbol* alias_target;  // C++ using-declaration target. // @wire 38
+  struct ASTNode* default_argument;  // C++ default arg, if any.  // @wire 40
+  // Portable initializer for serialized constexpr aggregate values. The live
+  // ConstexprObject cache in value.other is process-local and cannot be wired.
+  struct ASTNode* constexpr_initializer;  // @wire 58
+  struct VariableTemplate*
+      variable_template;  // C++ variable template body. // @wire 44
+  struct AliasTemplate*
+      alias_template;  // C++ alias template parameters. // @wire 47
+  // C++20 requires-clause for alias templates (`template<...> using A = ...`).
+  // Function/class/variable templates store constraints on their type bodies;
+  // alias templates have no other durable owner.
+  struct ConstraintExpr* associated_constraint;  // @wire 46
   // Original entity represented by an implementation-generated lambda
   // capture field. Transient: closure fields never cross module boundaries.
   struct Symbol* lambda_capture_source;
@@ -278,19 +291,8 @@ typedef struct Symbol {
     struct Symbol* func_defn;      // Defn of this func decl.     // @wire -
   } value;
   int32_t stack_offset;     // Stack offset if local.            // @wire 37
-  CXXLinkageKind cxx_linkage;        // C++20 external/internal/module. // @wire 48
-  struct Symbol* alias_target;  // C++ using-declaration target. // @wire 38
-  struct Symbol* overload_next; // Next overload, same name.     // @wire 39
-  struct ASTNode* default_argument; // C++ default arg, if any.  // @wire 40
-  // Portable initializer for serialized constexpr aggregate values. The live
-  // ConstexprObject cache in value.other is process-local and cannot be wired.
-  struct ASTNode* constexpr_initializer;                       // @wire 58
-  struct VariableTemplate* variable_template;  // C++ variable template body. // @wire 44
-  struct AliasTemplate* alias_template;  // C++ alias template parameters. // @wire 47
-  // C++20 requires-clause for alias templates (`template<...> using A = ...`).
-  // Function/class/variable templates store constraints on their type bodies;
-  // alias templates have no other durable owner.
-  struct ConstraintExpr* associated_constraint;  // @wire 46
+  CXXLinkageKind cxx_linkage;    // C++20 external/internal/module. // @wire 48
+  struct Symbol* overload_next;  // Next overload, same name.     // @wire 39
   // Interned and shared; NULL when attached to no module and not imported.
   const SymbolModuleIdentity* module_identity;            // @wire 49, 50, 51
   struct DIE* die;          // @wire - (debug info, not serialized)
@@ -339,6 +341,16 @@ static inline void SymbolCopyLambdaCaptureSource(Symbol* to,
   }
 }
 
+// Gives `to` the using-declaration target of `from`, likewise.
+static inline void SymbolCopyAliasTarget(Symbol* to, const Symbol* from) {
+  Symbol* target = SymbolExtraOf(from)->alias_target;
+  if (target != NULL || to->extra != NULL) {
+    SymbolMutableExtra(to)->alias_target = target;
+  }
+}
+
+// Gives a new `to` a clone of `from`'s default argument, likewise.
+void SymbolCloneDefaultArgument(Symbol* to, const Symbol* from);
 
 void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
                 Storage storage);

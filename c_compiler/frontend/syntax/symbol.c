@@ -267,16 +267,10 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->flags.name_independent_lookup_ambiguous = false;
   sym->value.fvalue = 0;
   sym->stack_offset = 0;
-  sym->alias_target = NULL;
   sym->lambda_capture_by_reference = false;
   sym->overload_next = NULL;
-  sym->default_argument = NULL;
-  sym->constexpr_initializer = NULL;
   sym->is_constexpr_representable = false;
   sym->requires_ast_constexpr = false;
-  sym->variable_template = NULL;
-  sym->alias_template = NULL;
-  sym->associated_constraint = NULL;
   sym->cxx_linkage = kCXXLinkageExternal;
   sym->module_identity = NULL;
   sym->location = 0;
@@ -309,6 +303,15 @@ SymbolExtra* SymbolMutableExtra(Symbol* symbol) {
     symbol->extra = calloc(1, sizeof(SymbolExtra));
   }
   return symbol->extra;
+}
+
+void SymbolCloneDefaultArgument(Symbol* to, const Symbol* from) {
+  ASTNode* argument = SymbolExtraOf(from)->default_argument;
+  if (argument == NULL && to->extra == NULL) {
+    return;
+  }
+  SymbolMutableExtra(to)->default_argument =
+      ASTNodeClone(argument, IdentityCloneNode, NULL, NULL);
 }
 
 Symbol* NewSymbol(const char* name, struct TypeRecord* type, Storage storage) {
@@ -370,32 +373,6 @@ void SymbolDestruct(Symbol* symbol) {
   StringDestruct(&symbol->name);
   StringDestruct(&symbol->asm_name);
   TypeRecordDelete(symbol->type);
-  ASTNodeDelete(symbol->default_argument);
-  ASTNodeDelete(symbol->constexpr_initializer);
-  if (symbol->variable_template != NULL) {
-    ASTNodeDelete(symbol->variable_template->initializer);
-    VectorDestructWithContents(
-        &symbol->variable_template->parameters,
-        (VectorElementDestructor)TemplateParameterDelete,
-        /*free_element=*/false);
-    ConstraintExprDelete(symbol->variable_template->associated_constraint);
-    VectorDestructWithContents(
-        &symbol->variable_template->partial_specializations,
-        (VectorElementDestructor)ClassTemplatePartialSpecializationDelete,
-        /*free_element=*/false);
-    free(symbol->variable_template);
-    symbol->variable_template = NULL;
-  }
-  if (symbol->alias_template != NULL) {
-    VectorDestructWithContents(
-        &symbol->alias_template->parameters,
-        (VectorElementDestructor)TemplateParameterDelete,
-        /*free_element=*/false);
-    free(symbol->alias_template);
-    symbol->alias_template = NULL;
-  }
-  ConstraintExprDelete(symbol->associated_constraint);
-  symbol->associated_constraint = NULL;
   symbol->module_identity = NULL;
   AttributeListDestruct(&symbol->attributes);
   free(symbol->cached_target_symbol_name);
@@ -403,6 +380,30 @@ void SymbolDestruct(Symbol* symbol) {
   SymbolExtra* extra = symbol->extra;
   if (extra != NULL) {
     symbol->extra = NULL;
+    ASTNodeDelete(extra->default_argument);
+    ASTNodeDelete(extra->constexpr_initializer);
+    VariableTemplate* variable_template = extra->variable_template;
+    if (variable_template != NULL) {
+      ASTNodeDelete(variable_template->initializer);
+      VectorDestructWithContents(
+          &variable_template->parameters,
+          (VectorElementDestructor)TemplateParameterDelete,
+          /*free_element=*/false);
+      ConstraintExprDelete(variable_template->associated_constraint);
+      VectorDestructWithContents(
+          &variable_template->partial_specializations,
+          (VectorElementDestructor)ClassTemplatePartialSpecializationDelete,
+          /*free_element=*/false);
+      free(variable_template);
+    }
+    if (extra->alias_template != NULL) {
+      VectorDestructWithContents(
+          &extra->alias_template->parameters,
+          (VectorElementDestructor)TemplateParameterDelete,
+          /*free_element=*/false);
+      free(extra->alias_template);
+    }
+    ConstraintExprDelete(extra->associated_constraint);
     if (extra->template_template_parameters != NULL) {
       VectorDeleteWithContents(
           extra->template_template_parameters,
@@ -866,7 +867,7 @@ static void AppendCXXTemplateTemplateArgument(String* out,
     StringAppend(out, "Ut0_");
     return;
   }
-  if (symbol->alias_template != NULL) {
+  if (SymbolExtraOf(symbol)->alias_template != NULL) {
     AppendCXXTaggedTypeName(out, symbol, &symbol->name, NULL);
     return;
   }
@@ -1472,21 +1473,14 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
 Symbol* SymbolClone(Symbol* sym) {
   Symbol* new_sym = NewSymbol(sym->name.value, sym->type, sym->storage);
   new_sym->flags = sym->flags;
-  new_sym->associated_constraint =
-      ConceptsCloneConstraint(sym->associated_constraint);
   new_sym->cxx_linkage = sym->cxx_linkage;
   new_sym->module_identity = sym->module_identity;
   new_sym->usage_info = sym->usage_info;
   new_sym->value = sym->value;
   new_sym->stack_offset = sym->stack_offset;
-  new_sym->alias_target = sym->alias_target;
   new_sym->lambda_capture_by_reference =
       sym->lambda_capture_by_reference;
   new_sym->overload_next = NULL;
-  new_sym->default_argument =
-      ASTNodeClone(sym->default_argument, IdentityCloneNode, NULL, NULL);
-  new_sym->constexpr_initializer =
-      ASTNodeClone(sym->constexpr_initializer, IdentityCloneNode, NULL, NULL);
   new_sym->is_constexpr_representable = sym->is_constexpr_representable;
   new_sym->requires_ast_constexpr = sym->requires_ast_constexpr;
   new_sym->location = sym->location;
@@ -1498,10 +1492,18 @@ Symbol* SymbolClone(Symbol* sym) {
       sym->structured_binding_pack_size;
   new_sym->namespace_ = sym->namespace_;
   new_sym->member_lookup_class = sym->member_lookup_class;
-  // The concept body, local class names and import backup are not cloned.
+  // The concept body, variable and alias template bodies, local class names
+  // and import backup are not cloned.
   const SymbolExtra* from = sym->extra;
   if (from != NULL) {
     SymbolExtra* to = SymbolMutableExtra(new_sym);
+    to->alias_target = from->alias_target;
+    to->default_argument =
+        ASTNodeClone(from->default_argument, IdentityCloneNode, NULL, NULL);
+    to->constexpr_initializer = ASTNodeClone(from->constexpr_initializer,
+                                             IdentityCloneNode, NULL, NULL);
+    to->associated_constraint =
+        ConceptsCloneConstraint(from->associated_constraint);
     to->lambda_capture_source = from->lambda_capture_source;
     to->anonymous_union_host = from->anonymous_union_host;
     to->anonymous_union_member_offset = from->anonymous_union_member_offset;

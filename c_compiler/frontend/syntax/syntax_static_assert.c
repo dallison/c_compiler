@@ -227,8 +227,8 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
            compiler->current_function->info.function.template_parameter_count >
                0);
       if (in_template) {
-        ASTNode* init =
-            ConstexprInitializerExpression(id->symbol->constexpr_initializer);
+        ASTNode* init = ConstexprInitializerExpression(
+            SymbolExtraOf(id->symbol)->constexpr_initializer);
         if (init != NULL && !ExpressionIsTemplateDependent(init)) {
           // Only a scalar constant can be cached in `value.ivalue`.  An
           // aggregate such as `static constexpr std::array<size_t, 1>
@@ -252,10 +252,12 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
     }
     // `enum { N = sizeof...(Ts) }; static_assert(N > 0)` — the enumerator is
     // not itself constexpr, but its value is still the dependent initializer.
-    if (id->symbol != NULL && id->symbol->constexpr_initializer != NULL &&
+    if (id->symbol != NULL &&
+        SymbolExtraOf(id->symbol)->constexpr_initializer != NULL &&
         !id->symbol->flags.value_set &&
         (compiler->syntax.current_template_parameter_count > 0 ||
-         ExpressionIsTemplateDependent(id->symbol->constexpr_initializer))) {
+         ExpressionIsTemplateDependent(
+             SymbolExtraOf(id->symbol)->constexpr_initializer))) {
       return true;
     }
     // `static constexpr auto value = T{}()` is value-dependent even though
@@ -333,7 +335,7 @@ static bool ExpressionNodeNamesPendingConstexprObject(ASTNode* node,
   return symbol->flags.is_constexpr && !symbol->flags.value_set &&
          (TypeIsStructOrUnion(symbol->type) ||
           TypeIsFixedArray(symbol->type)) &&
-         symbol->constexpr_initializer != NULL;
+         SymbolExtraOf(symbol)->constexpr_initializer != NULL;
 }
 
 // Clears `kASTAnalyzed` on each visited node so a cloned static_assert

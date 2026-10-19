@@ -1254,13 +1254,13 @@ Symbol* TemplateArgumentLvalueSymbol(ASTNode* expr) {
     return NULL;
   }
   Symbol* symbol = ((IdentifierASTNode*)expr)->symbol;
-  if (symbol == NULL || symbol->type == NULL ||
-      TypeIsFunction(symbol->type) || TypeIsReference(symbol->type) ||
-      symbol->flags.is_template_parameter || symbol->flags.is_argument ||
-      symbol->flags.is_temp || symbol->flags.is_concept ||
-      symbol->variable_template != NULL ||
-      (symbol->storage & (STO(typedef) | STO(auto) | STO(register) |
-                          STO(thread))) != 0 ||
+  if (symbol == NULL || symbol->type == NULL || TypeIsFunction(symbol->type) ||
+      TypeIsReference(symbol->type) || symbol->flags.is_template_parameter ||
+      symbol->flags.is_argument || symbol->flags.is_temp ||
+      symbol->flags.is_concept ||
+      SymbolExtraOf(symbol)->variable_template != NULL ||
+      (symbol->storage &
+       (STO(typedef) | STO(auto) | STO(register) | STO(thread))) != 0 ||
       (symbol->flags.is_block_scope && (symbol->storage & STO(static)) == 0) ||
       (symbol->flags.value_set && !symbol->flags.is_defined)) {
     return NULL;
@@ -2191,8 +2191,7 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
       clone->value = formal->value;
       AttributeListDestruct(&clone->attributes);
       AttributeListClone(&clone->attributes, &formal->attributes);
-      clone->default_argument =
-          ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
+      SymbolCloneDefaultArgument(clone, formal);
       VectorAppend(&r->info.function.prototype, clone);
     }
     VectorInit(&r->info.function.template_parameters);

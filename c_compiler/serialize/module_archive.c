@@ -556,15 +556,15 @@ static void RepairDeserializedModuleGraph(DeserializeContext* ctx) {
   Vector* sym_pool = &ctx->objects[kSerialKindSymbol];
   for (size_t i = 0; i < sym_pool->length; i++) {
     Symbol* sym = (Symbol*)VectorGet(sym_pool, i);
-    if (sym != NULL && sym->alias_template != NULL) {
+    if (sym != NULL && SymbolExtraOf(sym)->alias_template != NULL) {
       RepairImportedTemplateParameterVector(
-          &sym->alias_template->parameters);
+          &SymbolExtraOf(sym)->alias_template->parameters);
     }
-    if (sym != NULL && sym->variable_template != NULL) {
+    if (sym != NULL && SymbolExtraOf(sym)->variable_template != NULL) {
       RepairImportedTemplateParameterVector(
-          &sym->variable_template->parameters);
+          &SymbolExtraOf(sym)->variable_template->parameters);
       RepairImportedPartialSpecializationParameters(
-          &sym->variable_template->partial_specializations);
+          &SymbolExtraOf(sym)->variable_template->partial_specializations);
     }
     if (sym != NULL && sym->type != NULL && TypeIsFunction(sym->type)) {
       if (sym->type->info.function.symbol == NULL) {

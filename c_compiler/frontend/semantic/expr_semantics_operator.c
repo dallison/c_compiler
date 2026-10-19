@@ -1042,8 +1042,8 @@ static ASTNode* NewOperatorFreeCall(Symbol* function, ASTNode* first_actual,
 Symbol* FollowUsingAliasForADL(Symbol* symbol) {
   int depth = 0;
   while (symbol != NULL && symbol->flags.is_using_alias &&
-         symbol->alias_target != NULL && depth < 64) {
-    symbol = symbol->alias_target;
+         SymbolExtraOf(symbol)->alias_target != NULL && depth < 64) {
+    symbol = SymbolExtraOf(symbol)->alias_target;
     depth++;
   }
   return symbol;

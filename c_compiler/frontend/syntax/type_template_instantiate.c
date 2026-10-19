@@ -86,17 +86,21 @@ static void InjectInstantiatedAnonymousMembers(TypeParser* parser,
 static bool StructHasBitFieldMembers(Struct* str);
 
 static void CopySymbolAliasTemplate(Symbol* dest, Symbol* source) {
-  if (dest == NULL || source == NULL || source->alias_template == NULL) {
+  if (dest == NULL || source == NULL ||
+      SymbolExtraOf(source)->alias_template == NULL) {
     return;
   }
-  dest->alias_template = malloc(sizeof(AliasTemplate));
-  VectorInit(&dest->alias_template->parameters);
-  dest->alias_template->ctad_names_template_template_parameter =
-      source->alias_template->ctad_names_template_template_parameter;
-  for (size_t p = 0; p < source->alias_template->parameters.length; p++) {
-    VectorAppend(&dest->alias_template->parameters,
-                 TemplateParameterCopy(
-                     source->alias_template->parameters.value.p[p]));
+  SymbolMutableExtra(dest)->alias_template = malloc(sizeof(AliasTemplate));
+  VectorInit(&SymbolExtraOf(dest)->alias_template->parameters);
+  SymbolExtraOf(dest)->alias_template->ctad_names_template_template_parameter =
+      SymbolExtraOf(source)
+          ->alias_template->ctad_names_template_template_parameter;
+  for (size_t p = 0;
+       p < SymbolExtraOf(source)->alias_template->parameters.length; p++) {
+    VectorAppend(
+        &SymbolExtraOf(dest)->alias_template->parameters,
+        TemplateParameterCopy(
+            SymbolExtraOf(source)->alias_template->parameters.value.p[p]));
   }
 }
 
@@ -107,8 +111,9 @@ static TypeRecord* SubstituteClassMemberType(TypeParser* parser, Struct* source,
                                              Symbol* member, Vector* args) {
   Struct* saved = parser->member_alias_pattern_source;
   parser->member_alias_pattern_source =
-      member->alias_template != NULL && member->flags.is_template ? source
-                                                                  : NULL;
+      SymbolExtraOf(member)->alias_template != NULL && member->flags.is_template
+          ? source
+          : NULL;
   TypeRecord* result = SubstituteTemplateParameters(parser, member->type, args);
   parser->member_alias_pattern_source = saved;
   return result;
@@ -1196,8 +1201,8 @@ static ASTNode* StaticDataMemberOutOfClassInitializer(Symbol* pattern) {
   if (definition->initializer != NULL) {
     return definition->initializer;
   }
-  return pattern->variable_template != NULL
-             ? pattern->variable_template->initializer
+  return SymbolExtraOf(pattern)->variable_template != NULL
+             ? SymbolExtraOf(pattern)->variable_template->initializer
              : NULL;
 }
 
@@ -1247,7 +1252,7 @@ void TypeEnsureStaticDataMemberDefinition(Syntax* syntax, Symbol* symbol) {
           ->static_data_member_template_definition;
   // A member variable template (`template <class U> static constexpr bool
   // v = ...;`) is instantiated per use, not here.
-  if (definition == NULL && pattern->variable_template != NULL) {
+  if (definition == NULL && SymbolExtraOf(pattern)->variable_template != NULL) {
     return;
   }
   // [temp.inst]: the definition is the out-of-class one
@@ -1924,10 +1929,10 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           SubstituteStaticMemberInitializerValue(
               parser, member_symbol, member->default_initializer, args);
           if (!member_symbol->flags.value_set &&
-              member->symbol->constexpr_initializer != NULL) {
+              SymbolExtraOf(member->symbol)->constexpr_initializer != NULL) {
             SubstituteStaticMemberInitializerValue(
-                parser, member_symbol, member->symbol->constexpr_initializer,
-                args);
+                parser, member_symbol,
+                SymbolExtraOf(member->symbol)->constexpr_initializer, args);
           }
 
           StructMember* instantiated = NewStructMember(member_symbol);
@@ -2026,9 +2031,10 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     SubstituteStaticMemberInitializerValue(parser, member_symbol,
                                            member->default_initializer, args);
     if (!member_symbol->flags.value_set &&
-        member->symbol->constexpr_initializer != NULL) {
+        SymbolExtraOf(member->symbol)->constexpr_initializer != NULL) {
       SubstituteStaticMemberInitializerValue(
-          parser, member_symbol, member->symbol->constexpr_initializer, args);
+          parser, member_symbol,
+          SymbolExtraOf(member->symbol)->constexpr_initializer, args);
     }
     if (!member_symbol->flags.value_set && member->is_static) {
       SubstituteStaticMemberInitializerValue(
@@ -2076,11 +2082,11 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     // member's default initializer.  Keep the substituted initializer there
     // once every template parameter in it has been replaced.
     if (member->is_static && !member_symbol->flags.value_set &&
-        member_symbol->constexpr_initializer == NULL &&
+        SymbolExtraOf(member_symbol)->constexpr_initializer == NULL &&
         instantiated->default_initializer != NULL &&
         !DependentExpressionContainsTemplateParameter(
             instantiated->default_initializer)) {
-      member_symbol->constexpr_initializer = ASTNodeClone(
+      SymbolMutableExtra(member_symbol)->constexpr_initializer = ASTNodeClone(
           instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
     }
     RecordStaticDataMemberPattern(member, member_symbol, args);
@@ -2999,8 +3005,7 @@ static TypeRecord* InstantiateMemberFunctionType(TypeParser* parser,
     clone->flags = formal->flags;
     clone->flags.is_argument = true;
     clone->location = formal->location;
-    clone->default_argument =
-        ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
+    SymbolCloneDefaultArgument(clone, formal);
     VectorAppend(&func->info.function.prototype, clone);
   }
   for (size_t i = 0; i < func->info.function.prototype.length; i++) {
@@ -3061,14 +3066,16 @@ bool TypeInstantiateVariableTemplateConstantQuiet(Syntax* syntax,
 static bool TypeInstantiateVariableTemplateConstantImpl(
     Syntax* syntax, Symbol* var_template, Vector* args, int64_t* out,
     bool emit_constraint_error) {
-  if (var_template == NULL || var_template->variable_template == NULL ||
-      var_template->variable_template->initializer == NULL) {
+  if (var_template == NULL ||
+      SymbolExtraOf(var_template)->variable_template == NULL ||
+      SymbolExtraOf(var_template)->variable_template->initializer == NULL) {
     return false;
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args = CompleteVariableTemplateArguments(
-      &parser, var_template->variable_template, args, emit_constraint_error);
+      &parser, SymbolExtraOf(var_template)->variable_template, args,
+      emit_constraint_error);
   if (completed_args == NULL) {
     TypeParserDestruct(&parser);
     return false;
@@ -3080,9 +3087,10 @@ static bool TypeInstantiateVariableTemplateConstantImpl(
   ClassTemplatePartialSpecialization* partial =
       SelectVariableTemplatePartialSpecialization(&parser, var_template,
                                                   completed_args, &partial_args);
-  ASTNode* initializer = var_template->variable_template->initializer;
+  ASTNode* initializer =
+      SymbolExtraOf(var_template)->variable_template->initializer;
   ConstraintExpr* constraint =
-      var_template->variable_template->associated_constraint;
+      SymbolExtraOf(var_template)->variable_template->associated_constraint;
   Vector* fold_args = completed_args;
   if (partial != NULL) {
     initializer = partial->variable_initializer;
@@ -3113,14 +3121,17 @@ static bool TypeInstantiateVariableTemplateConstantImpl(
 static bool TypeInstantiateVariableTemplateFloatingConstantImpl(
     Syntax* syntax, Symbol* var_template, Vector* args, double* out,
     bool emit_constraint_error) {
-  if (var_template == NULL || var_template->variable_template == NULL ||
-      var_template->variable_template->initializer == NULL || out == NULL) {
+  if (var_template == NULL ||
+      SymbolExtraOf(var_template)->variable_template == NULL ||
+      SymbolExtraOf(var_template)->variable_template->initializer == NULL ||
+      out == NULL) {
     return false;
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args = CompleteVariableTemplateArguments(
-      &parser, var_template->variable_template, args, emit_constraint_error);
+      &parser, SymbolExtraOf(var_template)->variable_template, args,
+      emit_constraint_error);
   if (completed_args == NULL) {
     TypeParserDestruct(&parser);
     return false;
@@ -3130,9 +3141,10 @@ static bool TypeInstantiateVariableTemplateFloatingConstantImpl(
   ClassTemplatePartialSpecialization* partial =
       SelectVariableTemplatePartialSpecialization(
           &parser, var_template, completed_args, &partial_args);
-  ASTNode* initializer = var_template->variable_template->initializer;
+  ASTNode* initializer =
+      SymbolExtraOf(var_template)->variable_template->initializer;
   ConstraintExpr* constraint =
-      var_template->variable_template->associated_constraint;
+      SymbolExtraOf(var_template)->variable_template->associated_constraint;
   Vector* fold_args = completed_args;
   if (partial != NULL) {
     initializer = partial->variable_initializer;
@@ -3181,20 +3193,22 @@ bool TypeInstantiateVariableTemplateFloatingConstantQuiet(
 static TypeRecord* TypeInstantiateVariableTemplateTypeImpl(
     Syntax* syntax, Symbol* var_template, Vector* args,
     bool emit_constraint_error) {
-  if (var_template == NULL || var_template->variable_template == NULL ||
+  if (var_template == NULL ||
+      SymbolExtraOf(var_template)->variable_template == NULL ||
       var_template->type == NULL) {
     return NULL;
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args = CompleteVariableTemplateArguments(
-      &parser, var_template->variable_template, args, emit_constraint_error);
+      &parser, SymbolExtraOf(var_template)->variable_template, args,
+      emit_constraint_error);
   if (completed_args == NULL) {
     TypeParserDestruct(&parser);
     return NULL;
   }
   if (!ConceptsConstraintSatisfied(
-          var_template->variable_template->associated_constraint,
+          SymbolExtraOf(var_template)->variable_template->associated_constraint,
           completed_args)) {
     if (emit_constraint_error) {
       ReportVariableTemplateConstraintFailure(syntax, var_template,
@@ -3267,14 +3281,15 @@ TypeRecord* TypeInstantiateVariableTemplateDeducedType(Syntax* syntax,
 ASTNode* TypeInstantiateVariableTemplateInitializer(Syntax* syntax,
                                                     Symbol* var_template,
                                                     Vector* args) {
-  if (var_template == NULL || var_template->variable_template == NULL ||
-      var_template->variable_template->initializer == NULL) {
+  if (var_template == NULL ||
+      SymbolExtraOf(var_template)->variable_template == NULL ||
+      SymbolExtraOf(var_template)->variable_template->initializer == NULL) {
     return NULL;
   }
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   Vector* completed_args = CompleteVariableTemplateArguments(
-      &parser, var_template->variable_template, args,
+      &parser, SymbolExtraOf(var_template)->variable_template, args,
       /*emit_constraint_error=*/true);
   if (completed_args == NULL) {
     TypeParserDestruct(&parser);
@@ -3285,9 +3300,10 @@ ASTNode* TypeInstantiateVariableTemplateInitializer(Syntax* syntax,
   ClassTemplatePartialSpecialization* partial =
       SelectVariableTemplatePartialSpecialization(
           &parser, var_template, completed_args, &partial_args);
-  ASTNode* initializer = var_template->variable_template->initializer;
+  ASTNode* initializer =
+      SymbolExtraOf(var_template)->variable_template->initializer;
   ConstraintExpr* constraint =
-      var_template->variable_template->associated_constraint;
+      SymbolExtraOf(var_template)->variable_template->associated_constraint;
   Vector* substitution_args = completed_args;
   if (partial != NULL) {
     initializer = partial->variable_initializer;
@@ -3510,8 +3526,7 @@ static TypeRecord* InstantiateFunctionTemplateType(TypeParser* parser,
     clone->flags = formal->flags;
     clone->flags.is_argument = true;
     clone->location = formal->location;
-    clone->default_argument =
-        ASTNodeClone(formal->default_argument, IdentityCloneNode, NULL, NULL);
+    SymbolCloneDefaultArgument(clone, formal);
     VectorAppend(&func->info.function.prototype, clone);
   }
   for (size_t i = 0; i < func->info.function.prototype.length; i++) {
@@ -5886,12 +5901,13 @@ static bool MemberAliasForwardsFirstParameter(Symbol* alias) {
       TypeDependentOf(pattern)->dependent_member_template_arguments == NULL ||
       TypeDependentOf(pattern)->dependent_member_template_arguments->length ==
           0 ||
-      alias->alias_template->parameters.length == 0) {
+      SymbolExtraOf(alias)->alias_template->parameters.length == 0) {
     return false;
   }
   Vector* lists = TypeDependentOf(pattern)->dependent_member_template_arguments;
   Vector* member_args = lists->value.p[lists->length - 1];
-  TemplateParameter* first = alias->alias_template->parameters.value.p[0];
+  TemplateParameter* first =
+      SymbolExtraOf(alias)->alias_template->parameters.value.p[0];
   if (member_args == NULL || member_args->length == 0 || first == NULL) {
     return false;
   }
@@ -5916,11 +5932,11 @@ static TypeRecord* InstantiatedOwnerAliasPattern(TypeRecord* type,
       FindStructMember(member_owner, &type->template_origin->name);
   Symbol* alias =
       member != NULL && member->symbol != NULL &&
-              member->symbol->alias_template != NULL &&
+              SymbolExtraOf(member->symbol)->alias_template != NULL &&
               member->symbol->type != NULL
           ? member->symbol
           : type->template_origin;
-  if (alias->alias_template == NULL || alias->type == NULL) {
+  if (SymbolExtraOf(alias)->alias_template == NULL || alias->type == NULL) {
     return NULL;
   }
   Vector* written_args = TypeSpecializationTemplateArguments(type);
@@ -5935,9 +5951,9 @@ static TypeRecord* InstantiatedOwnerAliasPattern(TypeRecord* type,
       return NULL;
     }
     selected_parameter = 0;
-  } else if (alias->alias_template->parameters.length != 0) {
+  } else if (SymbolExtraOf(alias)->alias_template->parameters.length != 0) {
     TemplateParameter* first =
-        alias->alias_template->parameters.value.p[0];
+        SymbolExtraOf(alias)->alias_template->parameters.value.p[0];
     if (first != NULL && selected_parameter >= first->index) {
       selected_parameter -= first->index;
     }
@@ -6580,7 +6596,7 @@ static size_t RequiredFixedFunctionTemplateFormals(TypeRecord* func,
   for (size_t i = 0; i < fixed_formal_count; i++) {
     Symbol* formal =
         func->info.function.prototype.value.p[i + first_formal_arg];
-    if (formal != NULL && formal->default_argument == NULL) {
+    if (formal != NULL && SymbolExtraOf(formal)->default_argument == NULL) {
       required = i + 1;
     }
   }
@@ -6639,7 +6655,7 @@ static Vector* DeduceSimpleFunctionTemplateArguments(Symbol* templ,
          i < func->info.function.prototype.length; i++) {
       Symbol* formal = func->info.function.prototype.value.p[i];
       if (formal != NULL && !formal->flags.is_parameter_pack &&
-          formal->default_argument == NULL) {
+          SymbolExtraOf(formal)->default_argument == NULL) {
         required_formal_count++;
       }
     }
@@ -6774,7 +6790,7 @@ retry_deduction:
         continue;
       }
       if (actual_index >= actuals->length) {
-        if (formal->default_argument == NULL) {
+        if (SymbolExtraOf(formal)->default_argument == NULL) {
           goto deduction_failed;
         }
         continue;
@@ -9185,28 +9201,32 @@ static Vector* CompleteVariableTemplateArguments(TypeParser* parser,
 static void ReportVariableTemplateConstraintFailure(Syntax* syntax,
                                                     Symbol* var_template,
                                                     Vector* arguments) {
-  if (var_template == NULL || var_template->variable_template == NULL ||
+  if (var_template == NULL ||
+      SymbolExtraOf(var_template)->variable_template == NULL ||
       !ConceptsHasAssociatedConstraint(
-          var_template->variable_template->associated_constraint)) {
+          SymbolExtraOf(var_template)
+              ->variable_template->associated_constraint)) {
     return;
   }
   SyntaxError(syntax, "constraints not satisfied for variable template %s",
               var_template->name.value);
   ConceptsReportAssociatedConstraintFailure(
-      var_template->variable_template->associated_constraint, arguments,
-      var_template->location, NULL);
+      SymbolExtraOf(var_template)->variable_template->associated_constraint,
+      arguments, var_template->location, NULL);
 }
 
 static void ReportAliasTemplateConstraintFailure(TypeParser* parser,
                                                  Symbol* alias,
                                                  Vector* arguments) {
-  if (!ConceptsHasAssociatedConstraint(alias->associated_constraint)) {
+  if (!ConceptsHasAssociatedConstraint(
+          SymbolExtraOf(alias)->associated_constraint)) {
     return;
   }
   SyntaxError(parser->syntax, "constraints not satisfied for alias template %s",
               alias->name.value);
-  ConceptsReportAssociatedConstraintFailure(alias->associated_constraint,
-                                            arguments, alias->location, NULL);
+  ConceptsReportAssociatedConstraintFailure(
+      SymbolExtraOf(alias)->associated_constraint, arguments, alias->location,
+      NULL);
 }
 
 /* Whether `partial`'s pattern deduces from `args`, another specialization's
@@ -9431,11 +9451,12 @@ static ClassTemplatePartialSpecialization*
 SelectVariableTemplatePartialSpecialization(TypeParser* parser, Symbol* primary,
                                             Vector* actual_args,
                                             Vector** bindings_out) {
-  if (primary == NULL || primary->variable_template == NULL) {
+  if (primary == NULL || SymbolExtraOf(primary)->variable_template == NULL) {
     return NULL;
   }
   return SelectPartialSpecializationFromList(
-      parser, &primary->variable_template->partial_specializations,
+      parser,
+      &SymbolExtraOf(primary)->variable_template->partial_specializations,
       "variable template", primary->name.value, actual_args, bindings_out);
 }
 
@@ -9596,7 +9617,7 @@ static bool ScoreDeductionGuideCall(TypeParser* parser,
   for (size_t i = actuals->length;
        i < concrete_guide->info.function.prototype.length; i++) {
     Symbol* formal = concrete_guide->info.function.prototype.value.p[i];
-    if (formal == NULL || formal->default_argument == NULL) {
+    if (formal == NULL || SymbolExtraOf(formal)->default_argument == NULL) {
       if (template_args != NULL) {
         TypeRecordDeleteUnowned(concrete_guide);
       }
@@ -10310,11 +10331,11 @@ static Vector* TemplateParameterListForSymbol(Symbol* symbol) {
   if (symbol->flags.is_template_template_parameter) {
     return SymbolExtraOf(symbol)->template_template_parameters;
   }
-  if (symbol->alias_template != NULL) {
-    return &symbol->alias_template->parameters;
+  if (SymbolExtraOf(symbol)->alias_template != NULL) {
+    return &SymbolExtraOf(symbol)->alias_template->parameters;
   }
-  if (symbol->variable_template != NULL) {
-    return &symbol->variable_template->parameters;
+  if (SymbolExtraOf(symbol)->variable_template != NULL) {
+    return &SymbolExtraOf(symbol)->variable_template->parameters;
   }
   if (symbol->flags.is_concept &&
       SymbolExtraOf(symbol)->concept_definition != NULL) {
@@ -10405,7 +10426,7 @@ static bool TemplateTemplateArgumentMatchesParameter(
           ? SymbolExtraOf(symbol)->template_template_parameter_kind
       : symbol != NULL && symbol->flags.is_concept
           ? kTemplateTemplateParameterConcept
-      : symbol != NULL && symbol->variable_template != NULL
+      : symbol != NULL && SymbolExtraOf(symbol)->variable_template != NULL
           ? kTemplateTemplateParameterVariable
           : kTemplateTemplateParameterType;
   if (actual_kind != param->template_template_kind) {
@@ -10932,14 +10953,14 @@ void AddVariableTemplatePartialSpecialization(TypeParser* parser,
                                               Vector* pattern_args,
                                               struct ASTNode* initializer,
                                               struct TypeRecord* type) {
-  if (primary == NULL || primary->variable_template == NULL ||
+  if (primary == NULL || SymbolExtraOf(primary)->variable_template == NULL ||
       pattern_args == NULL) {
     if (initializer != NULL) {
       ASTNodeDelete(initializer);
     }
     return;
   }
-  VariableTemplate* vt = primary->variable_template;
+  VariableTemplate* vt = SymbolExtraOf(primary)->variable_template;
   for (size_t i = 0; i < vt->partial_specializations.length; i++) {
     ClassTemplatePartialSpecialization* existing =
         vt->partial_specializations.value.p[i];
@@ -12519,10 +12540,10 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
                                            member->default_initializer,
                                            source_args);
     if (!member_symbol->flags.value_set &&
-        member->symbol->constexpr_initializer != NULL) {
+        SymbolExtraOf(member->symbol)->constexpr_initializer != NULL) {
       SubstituteStaticMemberInitializerValue(
-          parser, member_symbol, member->symbol->constexpr_initializer,
-          source_args);
+          parser, member_symbol,
+          SymbolExtraOf(member->symbol)->constexpr_initializer, source_args);
     }
     if (!member_symbol->flags.value_set && member->is_static) {
       SubstituteStaticMemberInitializerValue(
@@ -12534,9 +12555,11 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
     // member the instantiated initializer is retained until an odr-use queues
     // its storage; for a non-static member it is used by constructor lowering.
     ASTNode* member_initializer = member->default_initializer;
-    if (member->is_static && member->symbol->variable_template != NULL &&
-        member->symbol->variable_template->initializer != NULL) {
-      member_initializer = member->symbol->variable_template->initializer;
+    if (member->is_static &&
+        SymbolExtraOf(member->symbol)->variable_template != NULL &&
+        SymbolExtraOf(member->symbol)->variable_template->initializer != NULL) {
+      member_initializer =
+          SymbolExtraOf(member->symbol)->variable_template->initializer;
     }
     if (member_initializer != NULL) {
       ASTNode* substituted = CloneDependentExpressionWithArgs(
@@ -12550,11 +12573,11 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
           CloneCXXDefaultMemberInitializer(member_initializer);
     }
     if (member->is_static && !member_symbol->flags.value_set &&
-        member_symbol->constexpr_initializer == NULL &&
+        SymbolExtraOf(member_symbol)->constexpr_initializer == NULL &&
         instantiated->default_initializer != NULL &&
         !DependentExpressionContainsTemplateParameter(
             instantiated->default_initializer)) {
-      member_symbol->constexpr_initializer = ASTNodeClone(
+      SymbolMutableExtra(member_symbol)->constexpr_initializer = ASTNodeClone(
           instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
     }
     RecordStaticDataMemberPattern(member, member_symbol, source_args);
@@ -12990,7 +13013,7 @@ bool CXXConstructorIsInitializerListConstructor(FunctionInfo* info) {
   }
   for (size_t i = first + 1; i < info->prototype.length; i++) {
     Symbol* rest = info->prototype.value.p[i];
-    if (rest != NULL && rest->default_argument == NULL) {
+    if (rest != NULL && SymbolExtraOf(rest)->default_argument == NULL) {
       return false;
     }
   }
@@ -13160,8 +13183,9 @@ static bool AliasTemplatePatternIsClassTemplateId(Symbol* alias,
                                                   bool forwarding_only) {
   if (!CompilerIsCXX() || alias == NULL || !alias->flags.is_template ||
       !StorageIs(alias->storage, STO(typedef)) || alias->type == NULL ||
-      (alias->alias_template != NULL &&
-       alias->alias_template->ctad_names_template_template_parameter) ||
+      (SymbolExtraOf(alias)->alias_template != NULL &&
+       SymbolExtraOf(alias)
+           ->alias_template->ctad_names_template_template_parameter) ||
       TypeDependentOf(alias->type)->dependent_member_name != NULL ||
       !TypeIsStructOrUnion(alias->type) ||
       alias->type->template_origin == NULL ||
@@ -13176,7 +13200,7 @@ static bool AliasTemplatePatternIsClassTemplateId(Symbol* alias,
        * alias of integral_constant and instantiate it with two *types*.
        * `alias_template != NULL` distinguishes that from a class template
        * (or its injected-class-name typedef). */
-      alias->type->template_origin->alias_template != NULL) {
+      SymbolExtraOf(alias->type->template_origin)->alias_template != NULL) {
     return false;
   }
   size_t expected =
@@ -13338,10 +13362,11 @@ static Vector* PrefixMemberAliasPatternArguments(Symbol* alias,
  * formed from `Arg` rather than from whatever occupies slot 0. */
 static Vector* AlignAliasArgumentsToParameterIndices(Symbol* alias,
                                                      Vector* alias_args) {
-  if (alias == NULL || alias->alias_template == NULL || alias_args == NULL) {
+  if (alias == NULL || SymbolExtraOf(alias)->alias_template == NULL ||
+      alias_args == NULL) {
     return NULL;
   }
-  Vector* params = &alias->alias_template->parameters;
+  Vector* params = &SymbolExtraOf(alias)->alias_template->parameters;
   if (params->length == 0 || alias_args->length == 0 ||
       alias_args->length > params->length) {
     return NULL;
@@ -13471,13 +13496,13 @@ Vector* MemberAliasPatternArguments(TypeParser* parser, Symbol* alias,
         target = compiler->current_function->info.function.cxx_member_owner;
       }
     }
-    if (target != NULL && alias->alias_template != NULL &&
-        alias->alias_template->parameters.length > 0 &&
+    if (target != NULL && SymbolExtraOf(alias)->alias_template != NULL &&
+        SymbolExtraOf(alias)->alias_template->parameters.length > 0 &&
         target->tag_symbol != NULL && target->tag_symbol->type != NULL &&
         target->tag_symbol->type->template_arguments != NULL &&
         target->tag_symbol->type->template_arguments->length > 0) {
       TemplateParameter* first =
-          alias->alias_template->parameters.value.p[0];
+          SymbolExtraOf(alias)->alias_template->parameters.value.p[0];
       size_t class_n = target->tag_symbol->type->template_arguments->length;
       Vector* partial_args =
           PartialSpecializationMemberPatternArguments(parser, target);
@@ -13550,17 +13575,18 @@ static Vector* PrefixMemberAliasPatternArguments(Symbol* alias,
                                                  Vector* alias_args,
                                                  Vector* class_args) {
   size_t alias_param_count =
-      alias->alias_template != NULL ? alias->alias_template->parameters.length
-                                    : 0;
+      SymbolExtraOf(alias)->alias_template != NULL
+          ? SymbolExtraOf(alias)->alias_template->parameters.length
+          : 0;
   // After the enclosing class is instantiated, a member alias pattern may
   // already have had class parameters substituted and its own parameters
   // rebased to zero (`Storage<ElemT<I0>, I0, StorageTag<long>>`).  Prefixing
   // class arguments then rebinds `I` to the class pack.
   if (alias_args->length == alias_param_count && alias->type != NULL) {
-    if (alias->alias_template != NULL &&
-        alias->alias_template->parameters.length > 0) {
+    if (SymbolExtraOf(alias)->alias_template != NULL &&
+        SymbolExtraOf(alias)->alias_template->parameters.length > 0) {
       TemplateParameter* first =
-          alias->alias_template->parameters.value.p[0];
+          SymbolExtraOf(alias)->alias_template->parameters.value.p[0];
       if (first != NULL && first->index == 0) {
         return NULL;
       }
@@ -13639,7 +13665,7 @@ static TypeRecord* InstantiateAliasClassTemplateImpl(TypeParser* parser,
                              /*free_element=*/false);
     return deferred;
   }
-  if (!ConceptsConstraintSatisfied(alias->associated_constraint,
+  if (!ConceptsConstraintSatisfied(SymbolExtraOf(alias)->associated_constraint,
                                    completed_alias_args)) {
     if (emit_constraint_error) {
       ReportAliasTemplateConstraintFailure(parser, alias, completed_alias_args);
@@ -13712,7 +13738,7 @@ static TypeRecord* InstantiateGenericAliasTemplate(TypeParser* parser,
   if (completed_args == NULL) {
     return NULL;
   }
-  if (!ConceptsConstraintSatisfied(alias->associated_constraint,
+  if (!ConceptsConstraintSatisfied(SymbolExtraOf(alias)->associated_constraint,
                                    completed_args)) {
     if (emit_constraint_error) {
       ReportAliasTemplateConstraintFailure(parser, alias, completed_args);

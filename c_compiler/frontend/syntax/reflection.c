@@ -23,10 +23,10 @@ static ReflectionEntityKind ReflectionKindForSymbol(Symbol* symbol) {
   if (symbol->flags.is_concept) {
     return kReflectionConcept;
   }
-  if (symbol->alias_template != NULL) {
+  if (SymbolExtraOf(symbol)->alias_template != NULL) {
     return kReflectionAliasTemplate;
   }
-  if (symbol->variable_template != NULL) {
+  if (SymbolExtraOf(symbol)->variable_template != NULL) {
     return kReflectionVariableTemplate;
   }
   if (symbol->flags.is_template && symbol->type != NULL &&

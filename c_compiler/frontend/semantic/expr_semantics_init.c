@@ -490,7 +490,7 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
       user_provided_default = true;
       for (size_t i = first_user_formal; i < info->prototype.length; i++) {
         Symbol* formal = info->prototype.value.p[i];
-        if (formal == NULL || formal->default_argument == NULL) {
+        if (formal == NULL || SymbolExtraOf(formal)->default_argument == NULL) {
           user_provided_default = false;
           break;
         }

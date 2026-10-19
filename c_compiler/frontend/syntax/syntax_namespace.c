@@ -50,7 +50,7 @@ static Symbol* NewUsingAliasSymbol(const char* name, Symbol* target,
           : NewSymbol(name, NULL,
                       target != NULL ? target->storage : STO(implicit));
   alias->flags.is_using_alias = true;
-  alias->alias_target = target;
+  SymbolMutableExtra(alias)->alias_target = target;
   alias->location = location;
   return alias;
 }
@@ -75,8 +75,9 @@ static bool AddUsingAlias(Syntax* syntax, Symbol* alias, bool is_tag,
   }
   if (existing != NULL) {
     Symbol* existing_target = FollowAlias(existing);
-    Symbol* new_target = alias->alias_target != NULL ? FollowAlias(alias->alias_target)
-                                                     : NULL;
+    Symbol* new_target = SymbolExtraOf(alias)->alias_target != NULL
+                             ? FollowAlias(SymbolExtraOf(alias)->alias_target)
+                             : NULL;
     if (existing_target != NULL && existing_target == new_target) {
       SymbolDelete(alias);
       return true;
@@ -290,9 +291,9 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
   bool ctad_names_template_template_parameter =
       defining_template != NULL &&
       (defining_template->flags.is_template_template_parameter ||
-       (defining_template->alias_template != NULL &&
-        defining_template->alias_template
-            ->ctad_names_template_template_parameter));
+       (SymbolExtraOf(defining_template)->alias_template != NULL &&
+        SymbolExtraOf(defining_template)
+            ->alias_template->ctad_names_template_template_parameter));
   TypeParser parser;
   TypeParserInit(&parser, syntax->lex, syntax, STO(implicit), syntax->context);
   parser.parsing_type_id = true;
@@ -344,23 +345,27 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
     }
   }
   if (added && !block_scope_alias && syntax->parsing_template_declaration) {
-    MoveTemplateParameterConstraints(syntax->current_template_parameters,
-                                     &alias->associated_constraint);
+    MoveTemplateParameterConstraints(
+        syntax->current_template_parameters,
+        &SymbolMutableExtra(alias)->associated_constraint);
     if (syntax->current_template_requires_clause != NULL) {
-      AddOwnedAssociatedConstraint(&alias->associated_constraint,
-                                   syntax->current_template_requires_clause);
+      AddOwnedAssociatedConstraint(
+          &SymbolMutableExtra(alias)->associated_constraint,
+          syntax->current_template_requires_clause);
       syntax->current_template_requires_clause = NULL;
     }
-    if (alias->alias_template == NULL) {
-      alias->alias_template = malloc(sizeof(AliasTemplate));
-      VectorInit(&alias->alias_template->parameters);
-      alias->alias_template->ctad_names_template_template_parameter = false;
+    if (SymbolExtraOf(alias)->alias_template == NULL) {
+      SymbolMutableExtra(alias)->alias_template = malloc(sizeof(AliasTemplate));
+      VectorInit(&SymbolExtraOf(alias)->alias_template->parameters);
+      SymbolExtraOf(alias)
+          ->alias_template->ctad_names_template_template_parameter = false;
     }
-    alias->alias_template->ctad_names_template_template_parameter =
+    SymbolExtraOf(alias)
+        ->alias_template->ctad_names_template_template_parameter =
         ctad_names_template_template_parameter;
     if (syntax->current_template_parameters != NULL) {
       for (size_t p = 0; p < syntax->current_template_parameters->length; p++) {
-        VectorAppend(&alias->alias_template->parameters,
+        VectorAppend(&SymbolExtraOf(alias)->alias_template->parameters,
                      syntax->current_template_parameters->value.p[p]);
       }
       syntax->current_template_parameters->length = 0;
