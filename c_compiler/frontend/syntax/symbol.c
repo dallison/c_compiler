@@ -276,19 +276,16 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->module_identity = NULL;
   sym->location = 0;
   sym->usage_info.reads = 0;
-  sym->usage_info.used_as_arg = 0;
   sym->usage_info.used_in_loop = 0;
   sym->id = compiler->next_symbol_id++;
   VectorInit(&sym->attributes);
   sym->alignment = 0;
   sym->template_parameter_index = -1;
-  sym->dependent_value_template_parameter_index = -1;
   SymbolSetType(sym, type);
   sym->die = NULL;
   sym->is_imported_module_symbol = false;
   sym->destruction_complete = false;
   sym->is_read = false;
-  sym->structured_binding_pack_size = -2;
   sym->is_structured_binding_object = false;
   sym->is_nrvo = false;
   sym->instantiation_depth = 0;
@@ -297,13 +294,32 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->extra = NULL;
 }
 
-const SymbolExtra kEmptySymbolExtra = {0};
+const SymbolExtra kEmptySymbolExtra = {
+    .dependent_value_template_parameter_index = -1,
+    .structured_binding_pack_size = -2,
+};
 
 SymbolExtra* SymbolMutableExtra(Symbol* symbol) {
   if (symbol->extra == NULL) {
-    symbol->extra = calloc(1, sizeof(SymbolExtra));
+    symbol->extra = malloc(sizeof(SymbolExtra));
+    *symbol->extra = kEmptySymbolExtra;
   }
   return symbol->extra;
+}
+
+void SymbolSetDependentValueTemplateParameterIndex(Symbol* symbol, int index) {
+  if (index != kEmptySymbolExtra.dependent_value_template_parameter_index ||
+      symbol->extra != NULL) {
+    SymbolMutableExtra(symbol)->dependent_value_template_parameter_index =
+        index;
+  }
+}
+
+void SymbolSetStructuredBindingPackSize(Symbol* symbol, int size) {
+  if (size != kEmptySymbolExtra.structured_binding_pack_size ||
+      symbol->extra != NULL) {
+    SymbolMutableExtra(symbol)->structured_binding_pack_size = size;
+  }
 }
 
 void SymbolCloneDefaultArgument(Symbol* to, const Symbol* from) {
@@ -1533,10 +1549,6 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->location = sym->location;
   new_sym->alignment = sym->alignment;
   new_sym->template_parameter_index = sym->template_parameter_index;
-  new_sym->dependent_value_template_parameter_index =
-      sym->dependent_value_template_parameter_index;
-  new_sym->structured_binding_pack_size =
-      sym->structured_binding_pack_size;
   new_sym->namespace_ = sym->namespace_;
   new_sym->member_lookup_class = sym->member_lookup_class;
   // The concept body, variable and alias template bodies, local class names
@@ -1559,6 +1571,9 @@ Symbol* SymbolClone(Symbol* sym) {
         TemplateParameterVectorCopy(from->template_template_parameters);
     to->template_template_parameter_kind =
         from->template_template_parameter_kind;
+    to->dependent_value_template_parameter_index =
+        from->dependent_value_template_parameter_index;
+    to->structured_binding_pack_size = from->structured_binding_pack_size;
     to->static_data_member_class = from->static_data_member_class;
     to->static_data_member_pattern = from->static_data_member_pattern;
     to->static_data_member_template_arguments =

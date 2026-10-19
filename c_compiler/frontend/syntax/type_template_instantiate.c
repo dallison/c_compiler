@@ -1920,8 +1920,9 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           member_symbol->lambda_capture_by_reference =
               member->symbol->lambda_capture_by_reference;
           member_symbol->value = member->symbol->value;
-          member_symbol->dependent_value_template_parameter_index =
-              member->symbol->dependent_value_template_parameter_index;
+          SymbolSetDependentValueTemplateParameterIndex(
+              member_symbol,
+              SymbolDependentValueTemplateParameterIndex(member->symbol));
           VectorDestruct(&member_symbol->attributes);
           AttributeListClone(&member_symbol->attributes,
                              &member->symbol->attributes);
@@ -2022,8 +2023,9 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
         member->symbol->lambda_capture_by_reference;
     CopySymbolAliasTemplate(member_symbol, member->symbol);
     member_symbol->value = member->symbol->value;
-    member_symbol->dependent_value_template_parameter_index =
-        member->symbol->dependent_value_template_parameter_index;
+    SymbolSetDependentValueTemplateParameterIndex(
+        member_symbol,
+        SymbolDependentValueTemplateParameterIndex(member->symbol));
     VectorDestruct(&member_symbol->attributes);
     AttributeListClone(&member_symbol->attributes,
                        &member->symbol->attributes);
@@ -2206,7 +2208,7 @@ static bool ExprReferencesParameterAtOrAbove(ASTNode* node, void* data) {
       id->symbol->template_parameter_index >= rebase_base) {
     return true;
   }
-  if (id->symbol->dependent_value_template_parameter_index >= rebase_base) {
+  if (SymbolDependentValueTemplateParameterIndex(id->symbol) >= rebase_base) {
     return true;
   }
   if (id->symbol->type != NULL &&
@@ -7941,8 +7943,8 @@ static void MaxTemplateParameterIndexInExprVisitor(ASTNode* node, void* data,
         id->symbol->template_parameter_index > *max_index) {
       *max_index = id->symbol->template_parameter_index;
     }
-    if (id->symbol->dependent_value_template_parameter_index > *max_index) {
-      *max_index = id->symbol->dependent_value_template_parameter_index;
+    if (SymbolDependentValueTemplateParameterIndex(id->symbol) > *max_index) {
+      *max_index = SymbolDependentValueTemplateParameterIndex(id->symbol);
     }
     MaxTemplateParameterIndexInType(id->symbol->type, max_index);
   }
@@ -8247,7 +8249,7 @@ static void CollectTemplateParameterReferenceVisitor(ASTNode* node, void* data,
       NoteTemplateParameterReference(set, id->symbol->template_parameter_index);
     }
     NoteTemplateParameterReference(
-        set, id->symbol->dependent_value_template_parameter_index);
+        set, SymbolDependentValueTemplateParameterIndex(id->symbol));
   }
   if (id->template_arguments != NULL) {
     for (size_t i = 0; i < id->template_arguments->length; i++) {
@@ -12586,8 +12588,9 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
     member_symbol->flags = member->symbol->flags;
     CopySymbolAliasTemplate(member_symbol, member->symbol);
     member_symbol->value = member->symbol->value;
-    member_symbol->dependent_value_template_parameter_index =
-        member->symbol->dependent_value_template_parameter_index;
+    SymbolSetDependentValueTemplateParameterIndex(
+        member_symbol,
+        SymbolDependentValueTemplateParameterIndex(member->symbol));
     VectorDestruct(&member_symbol->attributes);
     AttributeListClone(&member_symbol->attributes,
                        &member->symbol->attributes);

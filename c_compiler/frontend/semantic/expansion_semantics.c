@@ -51,7 +51,7 @@ static Symbol* CloneExpansionLocalSymbol(Symbol* source, const char* name) {
   }
   replacement->flags.is_local = true;
   replacement->flags.is_defined = true;
-  replacement->structured_binding_pack_size = -2;
+  SymbolSetStructuredBindingPackSize(replacement, -2);
   return replacement;
 }
 

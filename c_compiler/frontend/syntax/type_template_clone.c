@@ -1286,8 +1286,8 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
   replacement->alignment = old_symbol->alignment;
   replacement->namespace_ = old_symbol->namespace_;
   replacement->value = old_symbol->value;
-  replacement->structured_binding_pack_size =
-      old_symbol->structured_binding_pack_size;
+  SymbolSetStructuredBindingPackSize(
+      replacement, SymbolStructuredBindingPackSize(old_symbol));
   AttributeListDestruct(&replacement->attributes);
   AttributeListClone(&replacement->attributes, &old_symbol->attributes);
   SubstituteDependentSymbolAlignment(clone->parser, replacement, clone->args,
@@ -1405,8 +1405,8 @@ static Symbol* CloneTemplateDependentTemporarySymbol(
   replacement->alignment = old_symbol->alignment;
   replacement->namespace_ = old_symbol->namespace_;
   replacement->value = old_symbol->value;
-  replacement->structured_binding_pack_size =
-      old_symbol->structured_binding_pack_size;
+  SymbolSetStructuredBindingPackSize(
+      replacement, SymbolStructuredBindingPackSize(old_symbol));
 
   MapKeyValue kv;
   kv.key.p = old_symbol;
@@ -6833,8 +6833,8 @@ static ASTNode* BakePartialDependentQualifiedName(
   copy->namespace_ = id->symbol->namespace_;
   copy->flags = id->symbol->flags;
   copy->template_parameter_index = id->symbol->template_parameter_index;
-  copy->dependent_value_template_parameter_index =
-      id->symbol->dependent_value_template_parameter_index;
+  SymbolSetDependentValueTemplateParameterIndex(
+      copy, SymbolDependentValueTemplateParameterIndex(id->symbol));
   id->symbol = copy;
   ASTNodeSetType(node, concrete);
   return node;
@@ -7573,7 +7573,7 @@ static ASTNode* RebaseDeferredMemberTemplateParameterIdentifier(
         id->symbol->flags.is_template_parameter &&
         (id->symbol->template_parameter_index >=
              clone->rebase_template_parameter_base ||
-         id->symbol->dependent_value_template_parameter_index >=
+         SymbolDependentValueTemplateParameterIndex(id->symbol) >=
              clone->rebase_template_parameter_base)) {
       Symbol* old = id->symbol;
       TypeRecord* type = old->type != NULL ? TypeRecordCopy(old->type) : NULL;
@@ -7589,12 +7589,13 @@ static ASTNode* RebaseDeferredMemberTemplateParameterIdentifier(
         copy->template_parameter_index -=
             clone->rebase_template_parameter_base;
       }
-      copy->dependent_value_template_parameter_index =
-          old->dependent_value_template_parameter_index;
-      if (copy->dependent_value_template_parameter_index >=
+      SymbolSetDependentValueTemplateParameterIndex(
+          copy, SymbolDependentValueTemplateParameterIndex(old));
+      if (SymbolDependentValueTemplateParameterIndex(copy) >=
           clone->rebase_template_parameter_base) {
-        copy->dependent_value_template_parameter_index -=
-            clone->rebase_template_parameter_base;
+        SymbolSetDependentValueTemplateParameterIndex(
+            copy, SymbolDependentValueTemplateParameterIndex(copy) -
+                      clone->rebase_template_parameter_base);
       }
       copy->location = old->location;
       copy->value = old->value;
@@ -11224,7 +11225,7 @@ static void NoteBodyTemplateParameterIndex(ASTNode* node, void* data,
                                  max_index);
     }
     NoteTemplateParameterIndex(
-        id->symbol->dependent_value_template_parameter_index, max_index);
+        SymbolDependentValueTemplateParameterIndex(id->symbol), max_index);
     if (!names_function_template) {
       NoteTypeTemplateParameterIndices(id->symbol->type, max_index, 0);
     }

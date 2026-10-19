@@ -524,10 +524,10 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
  * parameter index (when the actual is itself still parameter-dependent). */
 void SubstituteDependentSymbolValue(Symbol* symbol, Vector* args) {
   if (symbol == NULL ||
-      symbol->dependent_value_template_parameter_index < 0) {
+      SymbolDependentValueTemplateParameterIndex(symbol) < 0) {
     return;
   }
-  int index = symbol->dependent_value_template_parameter_index;
+  int index = SymbolDependentValueTemplateParameterIndex(symbol);
   if (args == NULL || (size_t)index >= args->length) {
     return;
   }
@@ -537,14 +537,14 @@ void SubstituteDependentSymbolValue(Symbol* symbol, Vector* args) {
     return;
   }
   if (arg->template_parameter_index >= 0) {
-    symbol->dependent_value_template_parameter_index =
-        arg->template_parameter_index;
+    SymbolSetDependentValueTemplateParameterIndex(
+        symbol, arg->template_parameter_index);
     symbol->flags.value_set = false;
     return;
   }
   symbol->value.ivalue = arg->int_value;
   symbol->flags.value_set = true;
-  symbol->dependent_value_template_parameter_index = -1;
+  SymbolSetDependentValueTemplateParameterIndex(symbol, -1);
 }
 
 // The alignment named by one element of a pack-expanded alignas operand.
@@ -726,7 +726,7 @@ void SubstituteStaticMemberInitializerValue(TypeParser* parser,
       if (EvaluateIntegerExpression(cloned, &ivalue)) {
         symbol->value.ivalue = ivalue;
         symbol->flags.value_set = true;
-        symbol->dependent_value_template_parameter_index = -1;
+        SymbolSetDependentValueTemplateParameterIndex(symbol, -1);
       }
     }
     DiagnosticSuppressEnd();
@@ -741,7 +741,7 @@ void SubstituteStaticMemberInitializerValue(TypeParser* parser,
       TryFoldDependentTemplateArgument(parser, expr, args, &ivalue)) {
     symbol->value.ivalue = ivalue;
     symbol->flags.value_set = true;
-    symbol->dependent_value_template_parameter_index = -1;
+    SymbolSetDependentValueTemplateParameterIndex(symbol, -1);
     return;
   }
   ASTNode* cloned = CloneDependentExpressionWithArgs(parser, expr, args);
@@ -768,7 +768,7 @@ void SubstituteStaticMemberInitializerValue(TypeParser* parser,
   ASTNodeDelete(cloned);
   if (ok) {
     symbol->flags.value_set = true;
-    symbol->dependent_value_template_parameter_index = -1;
+    SymbolSetDependentValueTemplateParameterIndex(symbol, -1);
   }
 }
 
@@ -1836,7 +1836,7 @@ static bool ExprReferencesIndexAtLeast(ASTNode* node, void* data) {
       id->symbol->template_parameter_index >= min_index) {
     return true;
   }
-  if (id->symbol->dependent_value_template_parameter_index >= min_index) {
+  if (SymbolDependentValueTemplateParameterIndex(id->symbol) >= min_index) {
     return true;
   }
   return id->symbol->type != NULL &&
@@ -4248,13 +4248,12 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   if (old == NULL) {
     return;
   }
-  bool needs_copy = old->template_parameter_index >= rebase->base ||
-                    old->dependent_value_template_parameter_index >=
-                        rebase->base ||
-                    TypeContainsTemplateParameter(old->type) ||
-                    (id->template_arguments != NULL &&
-                     TemplateArgumentVectorContainsTemplateParameter(
-                         id->template_arguments));
+  bool needs_copy =
+      old->template_parameter_index >= rebase->base ||
+      SymbolDependentValueTemplateParameterIndex(old) >= rebase->base ||
+      TypeContainsTemplateParameter(old->type) ||
+      (id->template_arguments != NULL &&
+       TemplateArgumentVectorContainsTemplateParameter(id->template_arguments));
   if (!needs_copy) {
     return;
   }
@@ -4293,10 +4292,11 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   if (copy->template_parameter_index >= rebase->base) {
     copy->template_parameter_index -= rebase->base;
   }
-  copy->dependent_value_template_parameter_index =
-      old->dependent_value_template_parameter_index;
-  if (copy->dependent_value_template_parameter_index >= rebase->base) {
-    copy->dependent_value_template_parameter_index -= rebase->base;
+  SymbolSetDependentValueTemplateParameterIndex(
+      copy, SymbolDependentValueTemplateParameterIndex(old));
+  if (SymbolDependentValueTemplateParameterIndex(copy) >= rebase->base) {
+    SymbolSetDependentValueTemplateParameterIndex(
+        copy, SymbolDependentValueTemplateParameterIndex(copy) - rebase->base);
   }
   copy->location = old->location;
   copy->value = old->value;

@@ -709,7 +709,7 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteInt32(buf, kSym_template_parameter_index,
                  s->template_parameter_index);
   WireWriteInt32(buf, kSym_dependent_value_template_parameter_index,
-                 s->dependent_value_template_parameter_index);
+                 SymbolDependentValueTemplateParameterIndex(s));
   WireWriteUint64(buf, kSym_location, (uint64_t)s->location);
   bool constexpr_object =
       s->flags.value_set && s->type != NULL &&
@@ -967,9 +967,12 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kSym_template_parameter_index:
         WireReadInt32(buf, &s->template_parameter_index);
         break;
-      case kSym_dependent_value_template_parameter_index:
-        WireReadInt32(buf, &s->dependent_value_template_parameter_index);
+      case kSym_dependent_value_template_parameter_index: {
+        int32_t index = -1;
+        WireReadInt32(buf, &index);
+        SymbolSetDependentValueTemplateParameterIndex(s, index);
         break;
+      }
       case kSym_location: {
         uint64_t v;
         WireReadUint64(buf, &v);

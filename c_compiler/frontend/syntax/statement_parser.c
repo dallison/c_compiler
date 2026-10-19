@@ -541,7 +541,7 @@ static ASTNode* ParseControllingCondition(Syntax* syntax, TokenClass followers,
               syntax, TypeRecordCopy(binding->declared_type));
           binding->condition_symbol->flags.is_local = true;
           binding->condition_symbol->flags.is_defined = true;
-          binding->condition_symbol->structured_binding_pack_size = -1;
+          SymbolSetStructuredBindingPackSize(binding->condition_symbol, -1);
           binding->condition_symbol->location = first->location;
           sym = binding->condition_symbol;
         }
@@ -1530,7 +1530,7 @@ static void AddRangeForStructuredBindingVariables(Syntax* syntax,
       SyntaxApplyDeclarationAttributes(syntax, sym);
     }
     sym->flags.is_parameter_pack = binding->pack_index == (int)i;
-    sym->structured_binding_pack_size = -1;
+    SymbolSetStructuredBindingPackSize(sym, -1);
     AddRangeForVariable(syntax, sym);
     VectorAppend(&binding->symbols, sym);
   }
@@ -1959,7 +1959,7 @@ static void AddExpansionStructuredBindingVariables(Syntax* syntax,
         !TypeIsReference(sym->type)) {
       SymbolSetType(sym, TypeRecordAddQualifiers(sym->type, kQualConst));
     }
-    sym->structured_binding_pack_size = -1;
+    SymbolSetStructuredBindingPackSize(sym, -1);
     AddRangeForVariable(syntax, sym);
     VectorAppend(&binding->symbols, sym);
   }

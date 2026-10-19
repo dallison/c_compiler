@@ -1089,7 +1089,7 @@ static int MetaTraitTemplateParameterIndex(Symbol* param) {
   if (param->template_parameter_index >= 0) {
     return param->template_parameter_index;
   }
-  return param->dependent_value_template_parameter_index;
+  return SymbolDependentValueTemplateParameterIndex(param);
 }
 
 static bool MetaTraitPrototypeContainsParameter(TypeRecord* function_type,

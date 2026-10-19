@@ -72,7 +72,7 @@ static bool DependentExpressionNodeContainsParameter(ASTNode* node,
         (owner->is_template || owner->defining_template_scope_count > 0)));
   return (id->symbol->flags.is_template_parameter &&
           id->symbol->template_parameter_index >= 0) ||
-         id->symbol->dependent_value_template_parameter_index >= 0 ||
+         SymbolDependentValueTemplateParameterIndex(id->symbol) >= 0 ||
          value_dependent_constant ||
          (!function_template &&
           TypeContainsTemplateParameter(id->symbol->type)) ||

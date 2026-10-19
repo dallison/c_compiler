@@ -35,7 +35,7 @@ static ReflectionValue* MetaEvaluateReflectionArg(ASTNode* node);
 static void EvaluateAnnotationAttribute(Attribute* attr);
 
 static bool SymbolIsStructuredBinding(Symbol* symbol) {
-  return symbol != NULL && symbol->structured_binding_pack_size != -2;
+  return symbol != NULL && SymbolStructuredBindingPackSize(symbol) != -2;
 }
 
 static bool SymbolIsStaticStorageObject(Symbol* symbol) {

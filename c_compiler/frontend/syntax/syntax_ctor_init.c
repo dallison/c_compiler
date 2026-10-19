@@ -234,7 +234,7 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
                id->symbol->flags.is_template_parameter &&
                !id->symbol->flags.is_template_type_parameter &&
                (id->symbol->template_parameter_index >= remap->rebase_base ||
-                id->symbol->dependent_value_template_parameter_index >=
+                SymbolDependentValueTemplateParameterIndex(id->symbol) >=
                     remap->rebase_base)) {
       // The member template's own non-type parameter used as a value, as in
       // `s(N)` for `template <class U, size_t N> S(U (&)[N])`.  Copy the
@@ -250,11 +250,13 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
       if (copy->template_parameter_index >= remap->rebase_base) {
         copy->template_parameter_index -= remap->rebase_base;
       }
-      copy->dependent_value_template_parameter_index =
-          old->dependent_value_template_parameter_index;
-      if (copy->dependent_value_template_parameter_index >=
+      SymbolSetDependentValueTemplateParameterIndex(
+          copy, SymbolDependentValueTemplateParameterIndex(old));
+      if (SymbolDependentValueTemplateParameterIndex(copy) >=
           remap->rebase_base) {
-        copy->dependent_value_template_parameter_index -= remap->rebase_base;
+        SymbolSetDependentValueTemplateParameterIndex(
+            copy, SymbolDependentValueTemplateParameterIndex(copy) -
+                      remap->rebase_base);
       }
       copy->location = old->location;
       copy->value = old->value;

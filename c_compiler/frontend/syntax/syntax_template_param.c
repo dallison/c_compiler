@@ -814,7 +814,7 @@ static void DependentTemplateExpressionVisitor(ASTNode* node, void* data,
   }
   if ((id->symbol->flags.is_template_parameter &&
        id->symbol->template_parameter_index >= 0) ||
-      id->symbol->dependent_value_template_parameter_index >= 0 ||
+      SymbolDependentValueTemplateParameterIndex(id->symbol) >= 0 ||
       TypeContainsTemplateParameter(id->symbol->type) ||
       TemplateArgumentVectorIsDependent(id->template_arguments)) {
     *(bool*)data = true;

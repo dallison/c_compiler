@@ -20,7 +20,6 @@ static void AnalyzeVars(ASTNode* node, void* data, int child_id, VisitorMode mod
     case AST_OP(identifier): {
       IdentifierASTNode* id = (IdentifierASTNode*)node;
       Symbol* symbol = id->symbol;
-      symbol->usage_info.used_as_arg += a->arg_count > 0;
       symbol->usage_info.reads++;
       
       // Loop counts accumulate so nested loops count for more.

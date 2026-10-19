@@ -1181,8 +1181,8 @@ void AnalyzeSizeofExpression(SizeofASTNode* node) {
     }
     if (node->expr != NULL && node->expr->op == AST_OP(identifier)) {
       Symbol* pack = ((IdentifierASTNode*)node->expr)->symbol;
-      if (pack != NULL && pack->structured_binding_pack_size >= 0) {
-        node->base.value.ivalue = pack->structured_binding_pack_size;
+      if (pack != NULL && SymbolStructuredBindingPackSize(pack) >= 0) {
+        node->base.value.ivalue = SymbolStructuredBindingPackSize(pack);
       }
     }
     ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());

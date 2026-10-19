@@ -142,7 +142,8 @@ typedef struct SymbolModuleIdentity {
 
 // Fields that few symbols ever set.  A symbol has no SymbolExtra until the
 // first write through SymbolMutableExtra; until then SymbolExtraOf reads every
-// field as zero.  Owned by the symbol.
+// field as its kEmptySymbolExtra default, which is zero unless noted.  Owned by
+// the symbol.
 typedef struct SymbolExtra {
   struct Symbol* alias_target;  // C++ using-declaration target. // @wire 38
   struct ASTNode* default_argument;  // C++ default arg, if any.  // @wire 40
@@ -165,6 +166,12 @@ typedef struct SymbolExtra {
   struct Symbol* anonymous_union_host;
   int anonymous_union_member_offset;
   TemplateTemplateParameterKind template_template_parameter_kind;  // @wire 57
+  // Template parameter index of a deferred dependent value; -1 if none.
+  int dependent_value_template_parameter_index;  // @wire 34
+  // Structured-binding dependence marker and, for a pack, known cardinality:
+  // -2 (the default) means materialized/not a binding, -1 means still
+  // dependent, and a nonnegative value is the known pack size.  Transient.
+  int structured_binding_pack_size;
   // See is_constexpr_representable.
   struct TypeRecord* constexpr_reference_scope;
   // Owned signature copy for a template-template parameter placeholder.
@@ -274,17 +281,17 @@ typedef struct Symbol {
   // SymbolAsmName mangles the name on first read
   // (SymbolDeferCXXMangledAsmName).
   bool asm_name_deferred : 1;
+  // A CXXLinkageKind: C++20 external/internal/module.  // @wire 48
+  unsigned cxx_linkage : 2;
 
   struct {
-    int used_as_arg;              // Times used as function arg.
     int used_in_loop;             // Times used in loop.
     int reads;                    // Number of reads.
   } usage_info;                   // @wire - (transient, not serialized)
   int alignment;              // aligned(N) override; 0 = natural. // @wire 32
-
-  Vector attributes;          // Attributes (owns Attribute*).    // @wire 42
   int template_parameter_index;  // Template parameter index.      // @wire 33
-  int dependent_value_template_parameter_index;  // Deferred value. // @wire 34
+
+  Vector attributes;  // Attributes (owns Attribute*).    // @wire 42
   SourceLocation location;                                         // @wire 35
 
   // Symbol value, one of these.  Serialized as the raw 64-bit slot.
@@ -295,20 +302,15 @@ typedef struct Symbol {
     void* other;            // Something else.                   // @wire -
     struct Symbol* func_defn;      // Defn of this func decl.     // @wire -
   } value;
-  int32_t stack_offset;     // Stack offset if local.            // @wire 37
-  CXXLinkageKind cxx_linkage;    // C++20 external/internal/module. // @wire 48
-  struct Symbol* overload_next;  // Next overload, same name.     // @wire 39
-  // Interned and shared; NULL when attached to no module and not imported.
-  const SymbolModuleIdentity* module_identity;            // @wire 49, 50, 51
-  struct DIE* die;          // @wire - (debug info, not serialized)
-  // Structured-binding dependence marker and, for a pack, known cardinality:
-  // -2 means materialized/not a binding, -1 means still dependent, and a
-  // nonnegative value is the known pack size.
-  int structured_binding_pack_size;  // transient
+  int32_t stack_offset;  // Stack offset if local.            // @wire 37
   // For a function template specialization, the template instantiation depth
   // that requested it.  Its deferred body is analyzed at that depth, so
   // instantiations it triggers nest under it.  Transient.
   int instantiation_depth;        // @wire - (transient)
+  struct Symbol* overload_next;   // Next overload, same name.     // @wire 39
+  // Interned and shared; NULL when attached to no module and not imported.
+  const SymbolModuleIdentity* module_identity;  // @wire 49, 50, 51
+  struct DIE* die;  // @wire - (debug info, not serialized)
   // Class whose member list holds this function's overload set.  Usually the
   // same as the function type's cxx_member_owner.  A using-declaration clone
   // keeps the base function's type (and therefore the base as
@@ -353,6 +355,17 @@ static inline void SymbolCopyAliasTarget(Symbol* to, const Symbol* from) {
     SymbolMutableExtra(to)->alias_target = target;
   }
 }
+
+static inline int SymbolDependentValueTemplateParameterIndex(
+    const Symbol* symbol) {
+  return SymbolExtraOf(symbol)->dependent_value_template_parameter_index;
+}
+void SymbolSetDependentValueTemplateParameterIndex(Symbol* symbol, int index);
+
+static inline int SymbolStructuredBindingPackSize(const Symbol* symbol) {
+  return SymbolExtraOf(symbol)->structured_binding_pack_size;
+}
+void SymbolSetStructuredBindingPackSize(Symbol* symbol, int size);
 
 // Gives a new `to` a clone of `from`'s default argument, likewise.
 void SymbolCloneDefaultArgument(Symbol* to, const Symbol* from);

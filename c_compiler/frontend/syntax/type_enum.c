@@ -449,8 +449,8 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
         ec->type = TypeRecordCopy(enum_type);
         SetQualifiers(ec->type, GetQualifiers(ec->type) | kQualConst);
       }
-      ec->dependent_value_template_parameter_index =
-          dependent_value_template_parameter_index;
+      SymbolSetDependentValueTemplateParameterIndex(
+          ec, dependent_value_template_parameter_index);
       if (dependent_value_template_parameter_index >= 0) {
         ec->flags.value_set = false;
       }

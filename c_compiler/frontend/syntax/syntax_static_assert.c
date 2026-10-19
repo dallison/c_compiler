@@ -175,11 +175,9 @@ static bool ExpressionNodeIsTemplateDependent(ASTNode* node, void* data) {
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     bool structured_binding_dependent =
-        id->symbol != NULL &&
-        id->symbol->structured_binding_pack_size >= -1;
-    if (structured_binding_dependent &&
-        id->symbol->flags.is_parameter_pack &&
-        id->symbol->structured_binding_pack_size >= 0 &&
+        id->symbol != NULL && SymbolStructuredBindingPackSize(id->symbol) >= -1;
+    if (structured_binding_dependent && id->symbol->flags.is_parameter_pack &&
+        SymbolStructuredBindingPackSize(id->symbol) >= 0 &&
         node->parent != NULL && node->parent->op == AST_OP(sizeof) &&
         ((SizeofASTNode*)node->parent)->is_pack_size) {
       structured_binding_dependent = false;
@@ -311,7 +309,8 @@ static bool ExpressionNodeNamesPendingStructuredBinding(ASTNode* node,
   (void)data;
   return node != NULL && node->op == AST_OP(identifier) &&
          ((IdentifierASTNode*)node)->symbol != NULL &&
-         ((IdentifierASTNode*)node)->symbol->structured_binding_pack_size >= -1;
+         SymbolStructuredBindingPackSize(((IdentifierASTNode*)node)->symbol) >=
+             -1;
 }
 
 // Visitor predicate: true when `node` names a constexpr aggregate or array

@@ -356,10 +356,11 @@ static RequiresExpr* RequiresExprSubstitute(Syntax* syntax, RequiresExpr* expr,
     if (copy->template_parameter_index >= rebase_base) {
       copy->template_parameter_index -= rebase_base;
     }
-    copy->dependent_value_template_parameter_index =
-        parameter->dependent_value_template_parameter_index;
-    if (copy->dependent_value_template_parameter_index >= rebase_base) {
-      copy->dependent_value_template_parameter_index -= rebase_base;
+    SymbolSetDependentValueTemplateParameterIndex(
+        copy, SymbolDependentValueTemplateParameterIndex(parameter));
+    if (SymbolDependentValueTemplateParameterIndex(copy) >= rebase_base) {
+      SymbolSetDependentValueTemplateParameterIndex(
+          copy, SymbolDependentValueTemplateParameterIndex(copy) - rebase_base);
     }
     VectorAppend(parameters, copy);
   }

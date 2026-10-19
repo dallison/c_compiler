@@ -91,7 +91,7 @@ static Vector* ParseStructuredBindingNames(Syntax* syntax, Vector* symbols,
       // regardless of the backing object's storage duration.
       sym->flags.is_name_independent = true;
     }
-    sym->structured_binding_pack_size = -1;
+    SymbolSetStructuredBindingPackSize(sym, -1);
     sym->location = syntax->lex->current_token_location;
     LexNextToken(syntax->lex);
     if (SyntaxLookingAtCXXAttribute(syntax)) {

@@ -3493,13 +3493,13 @@ static Symbol* CloneStructuredBindingSymbol(Symbol* source, const char* name) {
     replacement->alignment = source->alignment;
     replacement->namespace_ = source->namespace_;
     replacement->value = source->value;
-    replacement->structured_binding_pack_size =
-        source->structured_binding_pack_size;
+    SymbolSetStructuredBindingPackSize(replacement,
+                                       SymbolStructuredBindingPackSize(source));
     AttributeListDestruct(&replacement->attributes);
     AttributeListClone(&replacement->attributes, &source->attributes);
   }
   replacement->flags.is_parameter_pack = false;
-  replacement->structured_binding_pack_size = -2;
+  SymbolSetStructuredBindingPackSize(replacement, -2);
   return replacement;
 }
 
@@ -3663,7 +3663,7 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
 
   AnalyzeStatement(hidden_decl);
   if (binding->condition_symbol != NULL) {
-    hidden->structured_binding_pack_size = -2;
+    SymbolSetStructuredBindingPackSize(hidden, -2);
   }
 
   TypeRecord* object_type = TypeIsReference(hidden->type) ? hidden->type->next
@@ -3705,7 +3705,7 @@ static bool LowerStructuredBindingDeclaration(DeclarationListASTNode* list,
   for (size_t i = 0; i < binding->symbols->length; i++) {
     Symbol* symbol = binding->symbols->value.p[i];
     if (symbol != NULL) {
-      symbol->structured_binding_pack_size = -2;
+      SymbolSetStructuredBindingPackSize(symbol, -2);
     }
   }
   for (size_t i = 0; i < binding->symbols->length; i++) {
@@ -4017,7 +4017,7 @@ void AnalyzeDeclarationList(DeclarationListASTNode* node) {
           Symbol* pack =
               binding->symbols->value.p[(size_t)binding->pack_index];
           if (pack != NULL) {
-            pack->structured_binding_pack_size = (int)pack_size;
+            SymbolSetStructuredBindingPackSize(pack, (int)pack_size);
           }
         }
       }
