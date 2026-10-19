@@ -115,9 +115,9 @@ static void TestManglingDistinctAcrossModules(void) {
   Symbol* beta = MakeModuleFunction("helper", "beta", false, kCXXLinkageModule);
   SymbolSetCXXMangledAsmName(alpha);
   SymbolSetCXXMangledAsmName(beta);
-  CHECK(alpha->asm_name.length > 0);
-  CHECK(beta->asm_name.length > 0);
-  CHECK(!StringEqualString(&alpha->asm_name, &beta->asm_name));
+  CHECK(SymbolHasAsmName(alpha));
+  CHECK(SymbolHasAsmName(beta));
+  CHECK(!StringEqualString(SymbolAsmName(alpha), SymbolAsmName(beta)));
 
   Symbol* alpha_exported =
       MakeModuleFunction("helper", "alpha", true, kCXXLinkageExternal);
@@ -125,7 +125,8 @@ static void TestManglingDistinctAcrossModules(void) {
       MakeModuleFunction("helper", "beta", true, kCXXLinkageExternal);
   SymbolSetCXXMangledAsmName(alpha_exported);
   SymbolSetCXXMangledAsmName(beta_exported);
-  CHECK(!StringEqualString(&alpha_exported->asm_name, &beta_exported->asm_name));
+  CHECK(!StringEqualString(SymbolAsmName(alpha_exported),
+                           SymbolAsmName(beta_exported)));
 
   Symbol* partition_a =
       MakeModuleFunction("shared", "partitioned", false, kCXXLinkageModule);
@@ -135,12 +136,13 @@ static void TestManglingDistinctAcrossModules(void) {
   SymbolSetModuleIdentity(partition_b, "partitioned", "b", NULL);
   SymbolSetCXXMangledAsmName(partition_a);
   SymbolSetCXXMangledAsmName(partition_b);
-  CHECK(StringEqualString(&partition_a->asm_name, &partition_b->asm_name));
+  CHECK(StringEqualString(SymbolAsmName(partition_a),
+                          SymbolAsmName(partition_b)));
 
   Symbol* dotted =
       MakeModuleFunction("f", "company.math", false, kCXXLinkageModule);
   SymbolSetCXXMangledAsmName(dotted);
-  CHECK(strstr(dotted->asm_name.value, "W7company4mathE") != NULL);
+  CHECK(strstr(SymbolAsmName(dotted)->value, "W7company4mathE") != NULL);
 
   CompilerDelete(compiler);
   compiler = NULL;

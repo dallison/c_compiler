@@ -723,7 +723,7 @@ static Symbol* DeclareFriendAtNamespaceScope(Syntax* syntax, Symbol* sym,
   }
 
   SymbolSetCXXMangledAsmName(sym);
-  if (old_sym != NULL && old_sym->asm_name.length == 0) {
+  if (old_sym != NULL && !SymbolHasAsmName(old_sym)) {
     SymbolSetCXXMangledAsmName(old_sym);
   }
   *old_sym_out = old_sym;

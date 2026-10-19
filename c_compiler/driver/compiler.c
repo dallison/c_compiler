@@ -2786,15 +2786,15 @@ static const char* FunctionEmitName(Symbol* symbol) {
   if (symbol == NULL) {
     return "";
   }
-  if (symbol->asm_name.length != 0) {
-    return symbol->asm_name.value;
+  if (SymbolHasAsmName(symbol)) {
+    return SymbolAsmName(symbol)->value;
   }
   return symbol->name.value;
 }
 
 // The name a symbol is referenced and emitted by.
 static const String* SymbolReferenceNameString(Symbol* symbol) {
-  return symbol->asm_name.length != 0 ? &symbol->asm_name : &symbol->name;
+  return SymbolHasAsmName(symbol) ? SymbolAsmName(symbol) : &symbol->name;
 }
 
 static bool SymbolNameIsIn(struct CompilerStringIndex* index, Symbol* symbol) {
@@ -2847,9 +2847,7 @@ void CompilerMarkVariableReferenced(Symbol* symbol) {
     return;
   }
   TypeEnsureStaticDataMemberDefinition(&compiler->syntax, symbol);
-  const char* asm_name = symbol->asm_name.length != 0
-                             ? symbol->asm_name.value
-                             : symbol->name.value;
+  const char* asm_name = SymbolAsmNameOrName(symbol);
   if (CompilerStringIndexInsert(compiler->referenced_variable_name_index,
                                 asm_name, symbol)) {
     VectorAppend(&compiler->referenced_variable_asm_names,
@@ -2873,8 +2871,7 @@ static const char* SymbolReferenceName(Symbol* symbol) {
   if (symbol == NULL) {
     return NULL;
   }
-  return symbol->asm_name.length != 0 ? symbol->asm_name.value
-                                      : symbol->name.value;
+  return SymbolAsmNameOrName(symbol);
 }
 
 static bool FunctionSymbolIsReferenced(Symbol* symbol) {
@@ -3126,7 +3123,7 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
     return false;
   }
   bool unnamed_cxx_function =
-      CompilerIsCXX() && decl->symbol->asm_name.length == 0 &&
+      CompilerIsCXX() && !SymbolHasAsmName(decl->symbol) &&
       !decl->symbol->flags.invented && !decl->symbol->flags.is_c_linkage &&
       strcmp(decl->symbol->name.value, "main") != 0 &&
       strncmp(decl->symbol->name.value, "__", 2) != 0;
@@ -4600,8 +4597,8 @@ static void** CompilerStringIndexValueSlot(struct CompilerStringIndex* index,
 
 static bool PendingSymbolIsDefinition(Symbol* symbol, const char* asm_name) {
   if (symbol == NULL || symbol->type == NULL || asm_name == NULL ||
-      symbol->asm_name.value == NULL ||
-      strcmp(symbol->asm_name.value, asm_name) != 0) {
+      SymbolAsmName(symbol)->value == NULL ||
+      strcmp(SymbolAsmName(symbol)->value, asm_name) != 0) {
     return false;
   }
   return !TypeIsFunction(symbol->type) ||
@@ -4610,7 +4607,7 @@ static bool PendingSymbolIsDefinition(Symbol* symbol, const char* asm_name) {
 }
 
 static bool IndexPendingTemplateInstantiationSymbol(Symbol* symbol) {
-  const char* asm_name = symbol != NULL ? symbol->asm_name.value : NULL;
+  const char* asm_name = symbol != NULL ? SymbolAsmName(symbol)->value : NULL;
   if (asm_name == NULL || *asm_name == '\0' ||
       !PendingSymbolIsDefinition(symbol, asm_name)) {
     return false;

@@ -7424,8 +7424,8 @@ static void AppendConstexprTemplateArgumentValueKey(ConstexprValue* value,
     if (value->address_binding != NULL &&
         value->address_binding->symbol != NULL) {
       Symbol* symbol = value->address_binding->symbol;
-      if (symbol->asm_name.length != 0) {
-        StringAppendString(result, &symbol->asm_name);
+      if (SymbolHasAsmName(symbol)) {
+        StringAppendString(result, SymbolAsmName(symbol));
       } else {
         StringAppendString(result, &symbol->name);
       }

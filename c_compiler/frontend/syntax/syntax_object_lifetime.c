@@ -123,7 +123,7 @@ static void AppendSanitizedAsmComponent(String* out, const char* component) {
   }
 }
 
-// Sets `sym->asm_name` to a unique weak global name derived from the
+// Sets the asm name of `sym` to a unique weak global name derived from the
 // enclosing function, `local_name`, source location, and optional `suffix`.
 static void SetCXXInlineLocalStaticAsmNameFor(TypeRecord* func, Symbol* sym,
                                               const char* local_name,
@@ -134,9 +134,7 @@ static void SetCXXInlineLocalStaticAsmNameFor(TypeRecord* func, Symbol* sym,
   }
 
   Symbol* func_symbol = func->info.function.symbol;
-  const char* func_name = func_symbol->asm_name.length != 0
-                              ? func_symbol->asm_name.value
-                              : func_symbol->name.value;
+  const char* func_name = SymbolAsmNameOrName(func_symbol);
   char fallback_func_name[64];
   if (func_name == NULL || func_name[0] == '\0') {
     const char* function_filename;
@@ -171,7 +169,7 @@ static void SetCXXInlineLocalStaticAsmNameFor(TypeRecord* func, Symbol* sym,
     AppendSanitizedAsmComponent(&asm_name, suffix);
   }
 
-  StringSetString(&sym->asm_name, &asm_name);
+  SymbolSetAsmName(sym, &asm_name);
   StringDestruct(&asm_name);
   sym->flags.is_local = false;
   sym->flags.is_weak = true;

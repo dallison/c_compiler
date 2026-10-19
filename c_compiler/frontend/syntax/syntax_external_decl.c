@@ -666,10 +666,10 @@ static void ParseDeclaratorAsmLabel(Syntax* syntax, Symbol* sym) {
   if (AsmLabelIsMachOSymbolName(syntax) && asm_name.value[0] == '_') {
     String stripped;
     StringInit(&stripped, asm_name.value + 1);
-    StringSetString(&sym->asm_name, &stripped);
+    SymbolSetAsmName(sym, &stripped);
     StringDestruct(&stripped);
   } else {
-    StringSetString(&sym->asm_name, &asm_name);
+    SymbolSetAsmName(sym, &asm_name);
   }
   StringDestruct(&asm_name);
 }
@@ -742,10 +742,10 @@ static void MergeDeclaratorIntoPrevious(Syntax* syntax, Symbol* sym,
         !AttributeListHas(&old_sym->attributes, "deprecated")) {
       VectorAppend(&old_sym->attributes, AttributeClone(deprecated));
     }
-    if (sym->asm_name.length != 0) {
-      StringSetString(&old_sym->asm_name, &sym->asm_name);
-    } else if (old_sym->asm_name.length != 0) {
-      StringSetString(&sym->asm_name, &old_sym->asm_name);
+    if (SymbolHasAsmName(sym)) {
+      SymbolSetAsmName(old_sym, SymbolAsmName(sym));
+    } else if (SymbolHasAsmName(old_sym)) {
+      SymbolSetAsmName(sym, SymbolAsmName(old_sym));
     }
   }
   if (TypeIsFunction(sym->type)) {
@@ -783,7 +783,7 @@ static void MergeDeclaratorIntoPrevious(Syntax* syntax, Symbol* sym,
       old_sym->flags.is_c_linkage = true;
     }
     SymbolSetCXXMangledAsmName(sym);
-    if (old_sym != NULL && old_sym->asm_name.length == 0) {
+    if (old_sym != NULL && !SymbolHasAsmName(old_sym)) {
       SymbolSetCXXMangledAsmName(old_sym);
     }
   }
@@ -1107,8 +1107,8 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
     if (old_sym != NULL) {
       // We now refer to the previously defined symbol rather than this new
       // one.
-      if (sym->asm_name.length != 0) {
-        StringSetString(&old_sym->asm_name, &sym->asm_name);
+      if (SymbolHasAsmName(sym)) {
+        SymbolSetAsmName(old_sym, SymbolAsmName(sym));
       }
       SymbolDelete(sym);
       sym = old_sym;

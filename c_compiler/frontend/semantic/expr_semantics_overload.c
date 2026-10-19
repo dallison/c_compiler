@@ -627,8 +627,8 @@ static bool SameFreeFunction(Symbol* left, Symbol* right) {
   if (!SameFunctionSignature(left, right)) {
     return false;
   }
-  if (left->asm_name.length != 0 && right->asm_name.length != 0) {
-    return StringEqualString(&left->asm_name, &right->asm_name);
+  if (SymbolHasAsmName(left) && SymbolHasAsmName(right)) {
+    return StringEqualString(SymbolAsmName(left), SymbolAsmName(right));
   }
   return left->namespace_ == right->namespace_;
 }

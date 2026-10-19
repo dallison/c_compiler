@@ -670,11 +670,12 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
         const char* code_name = name;
         bool is_external = false;
         if (func_sym != NULL) {
-          if (func_sym->asm_name.value != NULL &&
-              func_sym->asm_name.length > 0) {
-            code_name = func_sym->asm_name.value;
-            if (name == NULL || strcmp(func_sym->asm_name.value, name) != 0) {
-              linkage = func_sym->asm_name.value;
+          if (SymbolAsmName(func_sym)->value != NULL &&
+              SymbolHasAsmName(func_sym)) {
+            code_name = SymbolAsmName(func_sym)->value;
+            if (name == NULL ||
+                strcmp(SymbolAsmName(func_sym)->value, name) != 0) {
+              linkage = SymbolAsmName(func_sym)->value;
             }
           }
           is_external = !StorageIs(func_sym->storage, STO(static));

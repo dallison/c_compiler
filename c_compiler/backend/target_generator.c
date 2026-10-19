@@ -1074,19 +1074,18 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
   // metadata (vtables, RTTI, guards) names itself: its namespace_ is wherever
   // the class happened to be completed, and lazy emission matches references
   // recorded under the plain name.
-  if (CompilerIsCXX() && symbol->asm_name.length == 0 &&
+  if (CompilerIsCXX() && !SymbolHasAsmName(symbol) &&
       symbol->namespace_ != NULL && !symbol->flags.invented &&
-      !symbol->flags.is_local &&
-      !symbol->flags.is_c_linkage && symbol->type != NULL &&
-      !TypeIsFunction(symbol->type)) {
+      !symbol->flags.is_local && !symbol->flags.is_c_linkage &&
+      symbol->type != NULL && !TypeIsFunction(symbol->type)) {
     SymbolSetCXXDataAsmName(symbol, NULL);
   }
   // Allocate a buffer guaranteed to hold the whole name: sanitization can
   // expand each byte to at most four characters ("_uXX"), plus room for the
   // ".local." prefix / numeric suffix / leading underscore.
   size_t source_len = symbol->name.length;
-  if (symbol->asm_name.length > source_len) {
-    source_len = symbol->asm_name.length;
+  if (SymbolAsmName(symbol)->length > source_len) {
+    source_len = SymbolAsmName(symbol)->length;
   }
   size_t cap = source_len * 4 + 64;
   char* dyn = malloc(cap);
@@ -1098,8 +1097,8 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
     AppendToBuffer(&out, &remaining, ".local.");
     AppendSanitizedName(&out, &remaining, symbol->name.value);
     AppendToBuffer(&out, &remaining, suffix);
-  } else if (symbol->asm_name.length != 0) {
-    AppendToBuffer(&out, &remaining, symbol->asm_name.value);
+  } else if (SymbolHasAsmName(symbol)) {
+    AppendToBuffer(&out, &remaining, SymbolAsmName(symbol)->value);
   } else {
     if (compiler->prepend_underscore) {
       AppendToBuffer(&out, &remaining, "_");

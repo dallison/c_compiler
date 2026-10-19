@@ -1454,13 +1454,24 @@ void StructRebuildMemberLookupTables(Struct* str) {
   }
 }
 
+// Most implicitly declared members are never odr-used, so their mangled names
+// are formed only when first read.
+static void SetMemberFunctionAsmName(Symbol* symbol) {
+  if (symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type) &&
+      symbol->type->info.function.is_implicitly_declared) {
+    SymbolDeferCXXMangledAsmName(symbol);
+  } else {
+    SymbolSetCXXMangledAsmName(symbol);
+  }
+}
+
 void AddStructMember(TypeParser* parser, Struct* str, StructMember* member) {
   if (member->is_member_function) {
     RegisterCXXVirtualMember(parser, str, member);
     if (member->symbol != NULL) {
       member->symbol->member_lookup_class = str;
     }
-    SymbolSetCXXMangledAsmName(member->symbol);
+    SetMemberFunctionAsmName(member->symbol);
   } else if (member->is_static && member->symbol != NULL) {
     SymbolMutableExtra(member->symbol)->static_data_member_class = str;
     SymbolSetCXXDataAsmName(member->symbol, str);
@@ -1637,7 +1648,7 @@ static void SetStructMemberOverloadAsmName(Struct* str,
                                            StructMember* overload) {
   (void)str;
   (void)first;
-  SymbolSetCXXMangledAsmName(overload->symbol);
+  SetMemberFunctionAsmName(overload->symbol);
 }
 
 void AppendStructMemberOverload(TypeParser* parser, Struct* str,

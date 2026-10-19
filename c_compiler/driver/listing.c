@@ -316,8 +316,7 @@ void ListingEmitFunction(Generator* gen, void* target_code) {
   if (gen->func != NULL && TypeIsFunction(gen->func) &&
       gen->func->info.function.symbol != NULL) {
     Symbol* symbol = gen->func->info.function.symbol;
-    name = symbol->asm_name.length != 0 ? symbol->asm_name.value
-                                        : symbol->name.value;
+    name = SymbolAsmNameOrName(symbol);
     fprintf(fp, "function %s\n", name);
     PrintLocation(fp, symbol->location);
   } else {

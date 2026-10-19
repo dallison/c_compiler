@@ -104,7 +104,7 @@ static void SetItaniumAsmName(Symbol* symbol, const char* prefix,
   String asm_name;
   StringInit(&asm_name, prefix);
   StringAppend(&asm_name, mangled->value);
-  StringSetString(&symbol->asm_name, &asm_name);
+  SymbolSetAsmName(symbol, &asm_name);
   StringDestruct(&asm_name);
   free(symbol->cached_target_symbol_name);
   symbol->cached_target_symbol_name = NULL;
@@ -155,7 +155,7 @@ static Symbol* GetItaniumVptrApSymbol(const char* name) {
   TypeRecord* void_type = NewTypeRecordWithSize(kTypeVoid, kQualPlain);
   TypeRecord* void_ptr = NewPointerTo(kQualPlain, void_type);
   symbol = NewSymbol(name, void_ptr, STO(extern));
-  StringSet(&symbol->asm_name, name);
+  SymbolSetAsmNameCString(symbol, name);
   symbol->flags.invented = true;
   symbol->flags.is_forward_declared = true;
   InsertGlobalSymbol(symbol);

@@ -122,10 +122,10 @@ static void PrintSymbolFlags(FILE* fp, Symbol* symbol) {
 
 static void PrintSymbolRef(FILE* fp, Symbol* symbol) {
   fprintf(fp, "%s", SymbolName(symbol));
-  if (symbol != NULL && symbol->asm_name.length != 0 &&
+  if (symbol != NULL && SymbolHasAsmName(symbol) &&
       (symbol->name.value == NULL ||
-       strcmp(symbol->asm_name.value, symbol->name.value) != 0)) {
-    fprintf(fp, " asm=%s", symbol->asm_name.value);
+       strcmp(SymbolAsmName(symbol)->value, symbol->name.value) != 0)) {
+    fprintf(fp, " asm=%s", SymbolAsmName(symbol)->value);
   }
 }
 

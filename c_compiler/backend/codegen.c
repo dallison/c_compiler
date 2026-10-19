@@ -206,8 +206,8 @@ EHTypeInfo* GeneratorGetExceptionTypeInfo(Generator* gen, TypeRecord* type) {
     // instantiations of a same-named function template (e.g. std::get<0> for
     // different variant types) get distinct, non-colliding typeinfo labels.
     Symbol* func_symbol = gen->func->info.function.symbol;
-    String* func_key = func_symbol->asm_name.length > 0
-                           ? &func_symbol->asm_name
+    String* func_key = SymbolHasAsmName(func_symbol)
+                           ? SymbolAsmName(func_symbol)
                            : &func_symbol->name;
     StringAppendString(&info->symbol_name, func_key);
     StringAppendChar(&info->symbol_name, '_');

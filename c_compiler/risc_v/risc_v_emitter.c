@@ -1671,8 +1671,8 @@ static const char* LSDATypeInfoSymbol(EHTypeInfo* info) {
     return NULL;
   }
   if (info->canonical_typeinfo != NULL &&
-      info->canonical_typeinfo->asm_name.length > 0) {
-    return info->canonical_typeinfo->asm_name.value;
+      SymbolHasAsmName(info->canonical_typeinfo)) {
+    return SymbolAsmName(info->canonical_typeinfo)->value;
   }
   return NULL;
 }

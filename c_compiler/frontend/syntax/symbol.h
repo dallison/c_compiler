@@ -200,7 +200,9 @@ typedef struct SymbolExtra {
 // symbols in a large C++ translation unit.
 typedef struct Symbol {
   String name;                // Symbol name.                     // @wire 1
-  String asm_name;            // Optional asm-visible name.       // @wire 2
+  // Optional asm-visible name.  Read through SymbolAsmName and write through
+  // SymbolSetAsmName, which handle deferred C++ mangling.
+  String asm_name_;              // @wire 2
   struct Namespace* namespace_;  // Owning C++ namespace, if any. // @wire 3
   struct TypeRecord* type;    // Type.                            // @wire 5
   int id;                                                         // @wire 4
@@ -269,6 +271,9 @@ typedef struct Symbol {
   // analysis sets this before IR generation so every reference to the pooled
   // variable uses the hidden struct-return address.
   bool is_nrvo : 1;
+  // SymbolAsmName mangles the name on first read
+  // (SymbolDeferCXXMangledAsmName).
+  bool asm_name_deferred : 1;
 
   struct {
     int used_as_arg;              // Times used as function arg.
@@ -362,6 +367,32 @@ Symbol* SymbolClone(Symbol* sym);
 
 void SymbolSetType(Symbol* symbol, struct TypeRecord* type);
 void SymbolSetCXXMangledAsmName(Symbol* symbol);
+// Like SymbolSetCXXMangledAsmName, but mangles only when the name is first
+// read.  Most implicit special members are never odr-used, so most of their
+// long mangled names are never needed.
+void SymbolDeferCXXMangledAsmName(Symbol* symbol);
+void SymbolMaterializeDeferredAsmName(Symbol* symbol);
+
+// The asm-visible name; empty when the symbol has none.  Edits through the
+// result are safe since any deferred name has already been mangled.
+static inline String* SymbolAsmName(Symbol* symbol) {
+  if (symbol->asm_name_deferred) {
+    SymbolMaterializeDeferredAsmName(symbol);
+  }
+  return &symbol->asm_name_;
+}
+static inline bool SymbolHasAsmName(Symbol* symbol) {
+  return SymbolAsmName(symbol)->length != 0;
+}
+// The asm-visible name if there is one, otherwise the source name.
+static inline const char* SymbolAsmNameOrName(Symbol* symbol) {
+  return SymbolHasAsmName(symbol) ? symbol->asm_name_.value
+                                  : symbol->name.value;
+}
+// These replace any name, including a deferred one, without mangling it.
+void SymbolSetAsmName(Symbol* symbol, String* name);
+void SymbolSetAsmNameCString(Symbol* symbol, const char* name);
+void SymbolClearAsmName(Symbol* symbol);
 void SymbolBackupImportedFunctionTemplateParameters(Symbol* symbol);
 void SymbolRestoreImportedFunctionTemplateParameters(Symbol* symbol);
 // Appends the Itanium-style mangled encoding of `type` to `out`.  Used to form

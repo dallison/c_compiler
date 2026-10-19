@@ -641,7 +641,7 @@ static Symbol* NextVisibleOverload(SerializeContext* ctx, Symbol* symbol) {
 static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   Symbol* s = (Symbol*)obj;
   SWriteStringVal(ctx, buf, kSym_name, &s->name);
-  SWriteStringVal(ctx, buf, kSym_asm_name, &s->asm_name);
+  SWriteStringVal(ctx, buf, kSym_asm_name, SymbolAsmName(s));
   SWriteRef(ctx, buf, kSym_namespace, kSerialKindNamespace, s->namespace_);
   WireWriteInt32(buf, kSym_id, s->id);
   SWriteRef(ctx, buf, kSym_type, kSerialKindType, s->type);
@@ -817,7 +817,7 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         SReadStringVal(ctx, buf, &s->name);
         break;
       case kSym_asm_name:
-        SReadStringVal(ctx, buf, &s->asm_name);
+        SReadStringVal(ctx, buf, &s->asm_name_);
         break;
       case kSym_namespace:
         s->namespace_ = (Namespace*)SReadRef(ctx, buf, kSerialKindNamespace);

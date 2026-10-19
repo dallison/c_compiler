@@ -2471,10 +2471,10 @@ static void ARMPrintExidx(ARMEmitter* emitter, FILE* fp,
 
 static const char* ARMLSDATypeInfoSymbol(EHTypeInfo* info) {
   if (info == NULL || info->canonical_typeinfo == NULL ||
-      info->canonical_typeinfo->asm_name.length == 0) {
+      !SymbolHasAsmName(info->canonical_typeinfo)) {
     return NULL;
   }
-  return info->canonical_typeinfo->asm_name.value;
+  return SymbolAsmName(info->canonical_typeinfo)->value;
 }
 
 static void ARMPrintGCCExceptTable(ARMEmitter* emitter, FILE* fp,

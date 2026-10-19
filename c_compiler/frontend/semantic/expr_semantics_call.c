@@ -714,7 +714,7 @@ static void MemberCallLowerRebindConstructorMember(
   }
   if (same_constructor_owner && concrete_owner != NULL) {
     member->symbol->type->info.function.cxx_member_owner = concrete_owner;
-    StringClear(&member->symbol->asm_name);
+    SymbolClearAsmName(member->symbol);
     SymbolSetCXXMangledAsmName(member->symbol);
   }
   *member_out = member;
@@ -1191,11 +1191,10 @@ static bool FunctionIsFriendOf(TypeRecord* current, Struct* owner) {
         TypeEqual(friend_symbol->type, current_template->type)) {
       return true;
     }
-    if (current_symbol != NULL &&
-        friend_symbol->asm_name.length != 0 &&
-        current_symbol->asm_name.length != 0 &&
-        StringEqualString(&friend_symbol->asm_name,
-                          &current_symbol->asm_name)) {
+    if (current_symbol != NULL && SymbolHasAsmName(friend_symbol) &&
+        SymbolHasAsmName(current_symbol) &&
+        StringEqualString(SymbolAsmName(friend_symbol),
+                          SymbolAsmName(current_symbol))) {
       return true;
     }
     if (current_symbol != NULL &&
@@ -2044,7 +2043,7 @@ static void CXXFunctionalConstructionRetargetConstructorMemberOwners(
     if (!inherited_base_constructor) {
       candidate->symbol->type->info.function.cxx_member_owner =
           type->info.struct_info;
-      StringClear(&candidate->symbol->asm_name);
+      SymbolClearAsmName(candidate->symbol);
       SymbolSetCXXMangledAsmName(candidate->symbol);
     }
   }

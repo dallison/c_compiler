@@ -1485,7 +1485,7 @@ static Symbol* FindQualifiedPrefixClassMember(Syntax* syntax, Symbol* parent,
             member->symbol->type->info.function.cxx_member_owner,
             parent_struct)) {
       member->symbol->type->info.function.cxx_member_owner = parent_struct;
-      StringClear(&member->symbol->asm_name);
+      SymbolClearAsmName(member->symbol);
       SymbolSetCXXMangledAsmName(member->symbol);
     }
     Symbol* found = FollowAlias(member->symbol);

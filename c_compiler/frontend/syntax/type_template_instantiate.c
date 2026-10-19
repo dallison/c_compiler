@@ -3857,7 +3857,7 @@ static void EnsureFunctionTemplateInstantiationQueued(TypeParser* parser,
       (symbol->type->info.function.body != NULL &&
        symbol->type->info.function.definition) ||
       FunctionTemplateInstantiationInProgress(symbol) ||
-      PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
+      PendingTemplateInstantiationHasAsmName(SymbolAsmName(symbol)->value)) {
     return;
   }
   // An explicit specialization declared without a body (for example
@@ -4180,8 +4180,8 @@ static Symbol* InstantiateSimpleFunctionTemplateUnchecked(
                           : TemplateArgumentVectorCopy(completed_args);
   Vector* instantiation_args = func->template_arguments;
   SymbolSetCXXMangledAsmName(symbol);
-  existing = FindFunctionTemplateInstantiationByAsmName(templ,
-                                                       symbol->asm_name.value);
+  existing = FindFunctionTemplateInstantiationByAsmName(
+      templ, SymbolAsmName(symbol)->value);
   if (existing != NULL) {
     if (compiler->speculative_template_instantiation_depth == 0) {
       EnsureFunctionTemplateInstantiationQueued(
@@ -4190,7 +4190,7 @@ static Symbol* InstantiateSimpleFunctionTemplateUnchecked(
     SymbolDelete(symbol);
     return existing;
   }
-  if (PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
+  if (PendingTemplateInstantiationHasAsmName(SymbolAsmName(symbol)->value)) {
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;
     AppendFunctionTemplateInstantiation(templ, symbol);
@@ -11549,7 +11549,7 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
     bool is_new_symbol = (in_scope == sym);
     if (is_new_symbol && ftpl->type->info.function.body != NULL &&
         constraints_satisfied &&
-        !PendingTemplateInstantiationHasAsmName(sym->asm_name.value) &&
+        !PendingTemplateInstantiationHasAsmName(SymbolAsmName(sym)->value) &&
         compiler->speculative_template_instantiation_depth > 0) {
       // Signature probe only. Record the pattern so a later call can clone
       // the body; analyzing it now diagnoses code that may never be used.
@@ -11559,7 +11559,8 @@ static void InstantiateTemplateFriendFunctionsImpl(TypeParser* parser,
       }
     } else if (is_new_symbol && ftpl->type->info.function.body != NULL &&
                constraints_satisfied &&
-               !PendingTemplateInstantiationHasAsmName(sym->asm_name.value)) {
+               !PendingTemplateInstantiationHasAsmName(
+                   SymbolAsmName(sym)->value)) {
       if (sym->flags.is_template) {
         sym->type->info.function.body = CloneTemplateFunctionBody(
             parser, ftpl->type, sym->type, args);

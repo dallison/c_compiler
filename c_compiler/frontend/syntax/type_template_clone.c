@@ -5303,10 +5303,10 @@ static void QueueODRUsedStaticDataMember(StructMember* member) {
     return;
   }
   Symbol* symbol = member->symbol;
-  if (symbol->asm_name.length == 0) {
+  if (!SymbolHasAsmName(symbol)) {
     SymbolSetCXXMangledAsmName(symbol);
   }
-  if (PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
+  if (PendingTemplateInstantiationHasAsmName(SymbolAsmName(symbol)->value)) {
     return;
   }
 
@@ -6936,7 +6936,7 @@ static ASTNode* ApplyResolvedDependentMember(
               concrete->info.struct_info)) {
         id->symbol->type->info.function.cxx_member_owner =
             concrete->info.struct_info;
-        StringClear(&id->symbol->asm_name);
+        SymbolClearAsmName(id->symbol);
         SymbolSetCXXMangledAsmName(id->symbol);
       }
       if (TypeIsFunction(id->symbol->type) &&
@@ -9000,7 +9000,7 @@ static bool RebindClonedConstructorCall(VectorASTNode* call,
       TypeIsFunction(id->symbol->type) &&
       id->symbol->type->info.function.is_constructor) {
     id->symbol->type->info.function.cxx_member_owner = ctor_owner;
-    StringClear(&id->symbol->asm_name);
+    SymbolClearAsmName(id->symbol);
     SymbolSetCXXMangledAsmName(id->symbol);
   }
   ASTNodeSetType(call->left, id->symbol->type);
@@ -11406,7 +11406,7 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
       return;
     }
   }
-  if (PendingTemplateInstantiationHasAsmName(symbol->asm_name.value)) {
+  if (PendingTemplateInstantiationHasAsmName(SymbolAsmName(symbol)->value)) {
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;
     symbol->value.func_defn = symbol;

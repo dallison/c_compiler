@@ -627,8 +627,7 @@ static void ApplyLocalDeclaratorSpecifiers(TypeParser* parser, Symbol* sym,
     sym->flags.is_local = true;
   }
   // It names the function of the enclosing namespace, mangled as such.
-  if (CompilerIsCXX() && TypeIsFunction(sym->type) &&
-      sym->asm_name.length == 0) {
+  if (CompilerIsCXX() && TypeIsFunction(sym->type) && !SymbolHasAsmName(sym)) {
     if (sym->namespace_ == NULL &&
         syntax->current_namespace != compiler->global_namespace) {
       sym->namespace_ = syntax->current_namespace;

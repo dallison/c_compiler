@@ -1217,9 +1217,7 @@ static bool IsConstexprPCodeRuntimeCallSymbol(Symbol* symbol) {
   if (PCodeConstexprFunctionDefinition(symbol) != NULL) {
     return false;
   }
-  const char* runtime_name = symbol->asm_name.length != 0
-                                 ? symbol->asm_name.value
-                                 : symbol->name.value;
+  const char* runtime_name = SymbolAsmNameOrName(symbol);
   uint64_t address;
   return ConstexprPCodeRuntimeSymbolAddress(runtime_name, &address);
 }
@@ -4166,8 +4164,8 @@ static Symbol* PCodeConstexprFunctionDefinition(Symbol* symbol) {
       TypeIsFunction(resolved->type) &&
       resolved->type->info.function.body != NULL) {
     SymbolSetCXXMangledAsmName(resolved);
-    if (symbol->asm_name.length == 0 && resolved->asm_name.length != 0) {
-      StringSetString(&symbol->asm_name, &resolved->asm_name);
+    if (!SymbolHasAsmName(symbol) && SymbolHasAsmName(resolved)) {
+      SymbolSetAsmName(symbol, SymbolAsmName(resolved));
     }
     return resolved;
   }
@@ -4176,9 +4174,9 @@ static Symbol* PCodeConstexprFunctionDefinition(Symbol* symbol) {
       TypeIsFunction(symbol->value.func_defn->type) &&
       symbol->value.func_defn->type->info.function.body != NULL) {
     SymbolSetCXXMangledAsmName(symbol->value.func_defn);
-    if (symbol->asm_name.length == 0 &&
-        symbol->value.func_defn->asm_name.length != 0) {
-      StringSetString(&symbol->asm_name, &symbol->value.func_defn->asm_name);
+    if (!SymbolHasAsmName(symbol) &&
+        SymbolHasAsmName(symbol->value.func_defn)) {
+      SymbolSetAsmName(symbol, SymbolAsmName(symbol->value.func_defn));
     }
     return symbol->value.func_defn;
   }
