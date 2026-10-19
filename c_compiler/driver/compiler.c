@@ -5240,8 +5240,11 @@ void CompilerDestruct(Compiler* compiler) {
   StringDestruct(&compiler->listing_path);
   DebugBuilderDestruct(&compiler->debug_builder);
 
+  // Back ends may release a function's code early and leave a NULL slot.
   for (size_t i = 0; i < compiler->functions.length; i++) {
-    compiler->target->cleanup(compiler->functions.value.p[i]);
+    if (compiler->functions.value.p[i] != NULL) {
+      compiler->target->cleanup(compiler->functions.value.p[i]);
+    }
   }
   VectorDestruct(&compiler->functions);
   if (compiler->lto_module != NULL) {

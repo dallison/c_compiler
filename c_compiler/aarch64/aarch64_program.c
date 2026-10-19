@@ -15,8 +15,8 @@
 
 static void DestroyInstruction(void* value) {
   AARCH64ProgramInstruction* instruction = value;
-  StringDestruct(&instruction->symbol);
-  StringDestruct(&instruction->symbolic_text);
+  free(instruction->symbol);
+  free(instruction->symbolic_text);
   free(instruction);
 }
 
@@ -100,7 +100,7 @@ static void EmitInstruction(Assembler* assembler, const void* value) {
   uint32_t word = instruction->word;
   if (instruction->fixup != kAARCH64FixupNone) {
     AssemblerSymbol* symbol =
-        GetOrCreateSymbol(assembler, instruction->symbol.value);
+        GetOrCreateSymbol(assembler, instruction->symbol);
     int32_t address = (int32_t)AssemblerCurrentAddress(assembler);
     // A Mach-O object is split into atoms at every symbol-table entry
     // (MH_SUBSECTIONS_VIA_SYMBOLS); the linker may drop or move the atom
@@ -130,8 +130,8 @@ static void EmitInstruction(Assembler* assembler, const void* value) {
 
 static bool WriteInstruction(FILE* out, const void* value) {
   const AARCH64ProgramInstruction* instruction = value;
-  if (instruction->symbolic_text.length != 0) {
-    return fprintf(out, "\t%s\n", instruction->symbolic_text.value) >= 0;
+  if (instruction->symbolic_text != NULL) {
+    return fprintf(out, "\t%s\n", instruction->symbolic_text) >= 0;
   }
   DAsmInstruction decoded;
   if (!DAsmDisassembleInstruction(kDAsmAArch64, &instruction->word,
@@ -179,17 +179,25 @@ void AARCH64ProgramEmitFixup(AsmModule* module, uint32_t word,
   instruction->fixup = fixup;
   instruction->relocation_type = relocation_type;
   instruction->force_relocation = force_relocation;
+  bool copied = true;
   if (symbol != NULL) {
     AsmExpr expression;
     AsmExprInitSymbol(&expression, symbol, addend);
     instruction->addend = (int32_t)expression.addend;
-    StringInit(&instruction->symbol, expression.symbol.value);
+    instruction->symbol = strdup(expression.symbol.value);
+    copied = instruction->symbol != NULL;
     AsmExprDestruct(&expression);
   } else {
     instruction->addend = addend;
   }
-  if (symbolic_text != NULL) {
-    StringInit(&instruction->symbolic_text, symbolic_text);
+  if (symbolic_text != NULL && symbolic_text[0] != '\0') {
+    instruction->symbolic_text = strdup(symbolic_text);
+    copied = copied && instruction->symbolic_text != NULL;
+  }
+  if (!copied) {
+    DestroyInstruction(instruction);
+    module->failed = true;
+    return;
   }
   AsmModuleInstruction(module, instruction);
 }

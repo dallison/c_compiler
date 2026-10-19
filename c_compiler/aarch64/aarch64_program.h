@@ -27,10 +27,11 @@ typedef struct {
   int32_t relocation_type;
   int32_t addend;
   bool force_relocation;
-  String symbol;
+  // Fixup target symbol, or NULL.
+  char* symbol;
   // Optional symbolic spelling for instructions whose encoded immediate is
-  // intentionally zero until the linker applies a relocation.
-  String symbolic_text;
+  // intentionally zero until the linker applies a relocation; NULL if absent.
+  char* symbolic_text;
 } AARCH64ProgramInstruction;
 
 const AsmModuleTargetOps* AARCH64ProgramTargetOps(void);

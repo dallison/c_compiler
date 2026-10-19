@@ -141,6 +141,9 @@ typedef struct AsmModule {
   Vector operations;
   const AsmModuleTargetOps* target;
   bool failed;
+  // When false, AsmModuleComment records nothing. Comments only reach
+  // AsmModuleWriteText, so object-only compiles clear this to save memory.
+  bool keep_comments;
 } AsmModule;
 
 void AsmModuleInit(AsmModule* module, const AsmModuleTargetOps* target);

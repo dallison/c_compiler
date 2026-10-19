@@ -24,8 +24,52 @@ static bool Require(AsmModule* module, bool condition) {
   return condition;
 }
 
+// Bytes needed for an operation of `kind`: the header plus only its own union
+// member.  Instructions dominate the stream and need a pointer, not the full
+// union, so operations are allocated at this size and must never be copied
+// or accessed through a different member.
+static size_t OperationSize(AsmModuleOpKind kind) {
+#define OP_SIZE(member) \
+  (offsetof(AsmModuleOp, u) + sizeof(((AsmModuleOp*)0)->u.member))
+  switch (kind) {
+    case kAsmModuleOpSection:
+      return OP_SIZE(section);
+    case kAsmModuleOpLabel:
+      return OP_SIZE(label);
+    case kAsmModuleOpSymbol:
+      return OP_SIZE(symbol);
+    case kAsmModuleOpSymbolSize:
+      return OP_SIZE(symbol_size);
+    case kAsmModuleOpInteger:
+      return OP_SIZE(integer);
+    case kAsmModuleOpBytes:
+      return OP_SIZE(bytes);
+    case kAsmModuleOpString:
+      return OP_SIZE(string);
+    case kAsmModuleOpFill:
+      return OP_SIZE(fill);
+    case kAsmModuleOpAlign:
+      return OP_SIZE(align);
+    case kAsmModuleOpUleb128:
+    case kAsmModuleOpSleb128:
+      return OP_SIZE(leb128);
+    case kAsmModuleOpFile:
+      return OP_SIZE(file);
+    case kAsmModuleOpLocation:
+      return OP_SIZE(location);
+    case kAsmModuleOpComment:
+      return OP_SIZE(comment);
+    case kAsmModuleOpInstruction:
+      return OP_SIZE(instruction);
+    case kAsmModuleOpText:
+      return OP_SIZE(text);
+  }
+#undef OP_SIZE
+  return sizeof(AsmModuleOp);
+}
+
 static AsmModuleOp* NewOperation(AsmModule* module, AsmModuleOpKind kind) {
-  AsmModuleOp* op = calloc(1, sizeof(*op));
+  AsmModuleOp* op = calloc(1, OperationSize(kind));
   if (op == NULL) {
     module->failed = true;
     return NULL;
@@ -106,6 +150,7 @@ void AsmModuleInit(AsmModule* module, const AsmModuleTargetOps* target) {
   VectorInit(&module->operations);
   module->target = target;
   module->failed = false;
+  module->keep_comments = true;
 }
 
 static void OperationDelete(AsmModule* module, AsmModuleOp* op) {
@@ -341,7 +386,7 @@ void AsmModuleLocation(AsmModule* module, int file, int line, int column) {
 }
 
 void AsmModuleComment(AsmModule* module, const char* text) {
-  if (!Require(module, text != NULL)) {
+  if (!Require(module, text != NULL) || !module->keep_comments) {
     return;
   }
   AsmModuleOp* op = NewOperation(module, kAsmModuleOpComment);

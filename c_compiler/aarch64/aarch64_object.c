@@ -106,6 +106,10 @@ static bool AARCH64BuildProgram(Compiler* compiler,
     AARCH64EmitFunctionToModule(&emitter, &module->program);
     AARCH64EmitterDestruct(&emitter);
     ok = !module->program.failed;
+    // The module owns copies of everything it needs, so the generator can go
+    // now rather than staying live through assembly.
+    AARCH64GeneratorDelete(generator);
+    compiler->functions.value.p[i] = NULL;
   }
   AARCH64EmitCXXAdjustorThunksToModule(&module->program);
   ok = ok && EmitTranslationUnitRemainderToModule(compiler,
@@ -152,6 +156,7 @@ String* AARCH64EmitProgramFile(Compiler* compiler, Vector* options,
     StringDelete(result);
     return NULL;
   }
+  module.program.keep_comments = assembly_only || compiler->keep_asm_file;
 
   bool ok = AARCH64BuildProgram(compiler, &module);
   if (!ok) {
