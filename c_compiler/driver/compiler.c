@@ -70,6 +70,8 @@ static Vector cxx_fini_array_functions;
 
 static bool CompilerStringIndexContains(struct CompilerStringIndex* index,
                                         const char* key);
+static bool CompilerStringIndexContainsSegment(
+    struct CompilerStringIndex* index, const char* key, size_t length);
 static bool CompilerStringIndexInsert(struct CompilerStringIndex* index,
                                       const char* key, void* value);
 static struct CompilerStringIndex* NewCompilerStringIndex(void);
@@ -2790,6 +2792,16 @@ static const char* FunctionEmitName(Symbol* symbol) {
   return symbol->name.value;
 }
 
+// The name a symbol is referenced and emitted by.
+static const String* SymbolReferenceNameString(Symbol* symbol) {
+  return symbol->asm_name.length != 0 ? &symbol->asm_name : &symbol->name;
+}
+
+static bool SymbolNameIsIn(struct CompilerStringIndex* index, Symbol* symbol) {
+  const String* name = SymbolReferenceNameString(symbol);
+  return CompilerStringIndexContainsSegment(index, name->value, name->length);
+}
+
 static bool FunctionAsmNameAlreadyEmitted(const char* asm_name) {
   return CompilerStringIndexContains(
       compiler->emitted_function_name_index, asm_name);
@@ -2806,12 +2818,10 @@ void CompilerMarkFunctionReferenced(Symbol* symbol) {
   // Do not assign an asm name here.  Compiler-invented runtime declarations
   // deliberately have an empty asm_name so they retain their ABI spelling
   // (for example __davecc_throw rather than a C++-mangled name).
-  const char* asm_name = symbol->asm_name.length != 0
-                             ? symbol->asm_name.value
-                             : symbol->name.value;
-  bool first_reference =
-      !CompilerStringIndexContains(
-          compiler->referenced_function_name_index, asm_name);
+  const String* name = SymbolReferenceNameString(symbol);
+  const char* asm_name = name->value;
+  bool first_reference = !CompilerStringIndexContainsSegment(
+      compiler->referenced_function_name_index, name->value, name->length);
   if (first_reference && symbol->is_imported_module_symbol &&
       StorageIs(symbol->storage, STO(static)) &&
       symbol->type->info.function.template_origin != NULL &&
@@ -2869,15 +2879,12 @@ static const char* SymbolReferenceName(Symbol* symbol) {
 
 static bool FunctionSymbolIsReferenced(Symbol* symbol) {
   return symbol != NULL &&
-         CompilerStringIndexContains(
-             compiler->referenced_function_name_index,
-             SymbolReferenceName(symbol));
+         SymbolNameIsIn(compiler->referenced_function_name_index, symbol);
 }
 
 static bool VariableSymbolIsReferenced(Symbol* symbol) {
   return symbol != NULL &&
-         CompilerStringIndexContains(compiler->referenced_variable_name_index,
-                                     SymbolReferenceName(symbol));
+         SymbolNameIsIn(compiler->referenced_variable_name_index, symbol);
 }
 
 static bool IsLazyCXXStatic(InitializedStaticVariable* var) {
@@ -2968,11 +2975,7 @@ static bool FunctionDefinitionNeedsNativeCode(Symbol* symbol,
   if (symbol->flags.is_exported || compiler->module_header) {
     return !FunctionDefinitionIsTemplatePattern(symbol, type);
   }
-  const char* asm_name = symbol->asm_name.length != 0
-                             ? symbol->asm_name.value
-                             : symbol->name.value;
-  return CompilerStringIndexContains(
-      compiler->referenced_function_name_index, asm_name);
+  return SymbolNameIsIn(compiler->referenced_function_name_index, symbol);
 }
 
 static bool VariableDefinitionIsODRDiscardable(Symbol* symbol) {
@@ -2997,11 +3000,7 @@ static bool VariableDefinitionNeedsStorage(Symbol* symbol) {
   if (!VariableDefinitionIsODRDiscardable(symbol)) {
     return true;
   }
-  const char* asm_name = symbol->asm_name.length != 0
-                             ? symbol->asm_name.value
-                             : symbol->name.value;
-  return CompilerStringIndexContains(compiler->referenced_variable_name_index,
-                                     asm_name);
+  return SymbolNameIsIn(compiler->referenced_variable_name_index, symbol);
 }
 
 static void MarkReferencedSymbolInAST(ASTNode* node, void* data,
@@ -4422,6 +4421,7 @@ TlsModel ParseTlsModelName(String* tls_model) {
 
 typedef struct CompilerStringIndexEntry {
   char* key;
+  size_t key_length;
   void* value;
   uint64_t hash;
   struct CompilerStringIndexEntry* next;
@@ -4436,8 +4436,7 @@ struct CompilerStringIndex {
 #define COMPILER_STRING_INDEX_INITIAL_BUCKETS 16
 
 // Keys are mostly long mangled names, so they are hashed eight bytes at a time.
-static uint64_t HashCompilerStringIndexKey(const char* key) {
-  size_t length = strlen(key);
+static uint64_t HashCompilerStringIndexKey(const char* key, size_t length) {
   uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^ length;
   const char* current = key;
   for (; length >= 8; length -= 8, current += 8) {
@@ -4479,12 +4478,13 @@ static void CompilerStringIndexDelete(struct CompilerStringIndex* index) {
 }
 
 static CompilerStringIndexEntry* CompilerStringIndexFindEntry(
-    struct CompilerStringIndex* index, const char* key) {
-  uint64_t hash = HashCompilerStringIndexKey(key);
+    struct CompilerStringIndex* index, const char* key, size_t length,
+    uint64_t hash) {
   size_t bucket = hash % index->bucket_count;
   for (CompilerStringIndexEntry* entry = index->buckets[bucket];
        entry != NULL; entry = entry->next) {
-    if (entry->hash == hash && strcmp(entry->key, key) == 0) {
+    if (entry->hash == hash && entry->key_length == length &&
+        memcmp(entry->key, key, length) == 0) {
       return entry;
     }
   }
@@ -4496,16 +4496,26 @@ static void* CompilerStringIndexFind(struct CompilerStringIndex* index,
   if (index == NULL || key == NULL || *key == '\0') {
     return NULL;
   }
-  CompilerStringIndexEntry* entry = CompilerStringIndexFindEntry(index, key);
+  size_t length = strlen(key);
+  CompilerStringIndexEntry* entry = CompilerStringIndexFindEntry(
+      index, key, length, HashCompilerStringIndexKey(key, length));
   return entry != NULL ? entry->value : NULL;
+}
+
+static bool CompilerStringIndexContainsSegment(
+    struct CompilerStringIndex* index, const char* key, size_t length) {
+  if (index == NULL || key == NULL || length == 0) {
+    return false;
+  }
+  return CompilerStringIndexFindEntry(
+             index, key, length, HashCompilerStringIndexKey(key, length)) !=
+         NULL;
 }
 
 static bool CompilerStringIndexContains(struct CompilerStringIndex* index,
                                         const char* key) {
-  if (index == NULL || key == NULL || *key == '\0') {
-    return false;
-  }
-  return CompilerStringIndexFindEntry(index, key) != NULL;
+  return key != NULL &&
+         CompilerStringIndexContainsSegment(index, key, strlen(key));
 }
 
 static void ResizeCompilerStringIndex(struct CompilerStringIndex* index) {
@@ -4532,20 +4542,18 @@ static bool CompilerStringIndexInsert(struct CompilerStringIndex* index,
   if (index == NULL || key == NULL || *key == '\0') {
     return false;
   }
-  uint64_t hash = HashCompilerStringIndexKey(key);
-  size_t bucket = hash % index->bucket_count;
-  for (CompilerStringIndexEntry* entry = index->buckets[bucket];
-       entry != NULL; entry = entry->next) {
-    if (entry->hash == hash && strcmp(entry->key, key) == 0) {
-      return false;
-    }
+  size_t length = strlen(key);
+  uint64_t hash = HashCompilerStringIndexKey(key, length);
+  if (CompilerStringIndexFindEntry(index, key, length, hash) != NULL) {
+    return false;
   }
   if ((index->entry_count + 1) * 4 > index->bucket_count * 3) {
     ResizeCompilerStringIndex(index);
-    bucket = hash % index->bucket_count;
   }
+  size_t bucket = hash % index->bucket_count;
   CompilerStringIndexEntry* entry = malloc(sizeof(*entry));
   entry->key = strdup(key);
+  entry->key_length = length;
   entry->value = value;
   entry->hash = hash;
   entry->next = index->buckets[bucket];
@@ -4560,12 +4568,15 @@ static void** CompilerStringIndexValueSlot(struct CompilerStringIndex* index,
   if (index == NULL || key == NULL || *key == '\0') {
     return NULL;
   }
-  CompilerStringIndexEntry* entry = CompilerStringIndexFindEntry(index, key);
+  size_t length = strlen(key);
+  uint64_t hash = HashCompilerStringIndexKey(key, length);
+  CompilerStringIndexEntry* entry =
+      CompilerStringIndexFindEntry(index, key, length, hash);
   if (entry == NULL) {
     CompilerStringIndexInsert(index, key, NULL);
-    entry = CompilerStringIndexFindEntry(index, key);
+    entry = CompilerStringIndexFindEntry(index, key, length, hash);
   }
-  return &entry->value;
+  return entry != NULL ? &entry->value : NULL;
 }
 
 static bool PendingSymbolIsDefinition(Symbol* symbol, const char* asm_name) {
