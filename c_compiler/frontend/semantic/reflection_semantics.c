@@ -805,7 +805,7 @@ TypeRecord* SemanticResolveDependentSpliceType(TypeRecord* type,
       ASTNodeDelete(splice_expr);
       TypeRecordDelete(type);
       SetQualifiers(resolved, GetQualifiers(resolved) | quals);
-      return TypeRecordCalculateSize(resolved);
+      return TypeRecordCalculateSize(TypeRecordAdopt(resolved));
     }
     SemanticError(diagnostic != NULL ? diagnostic : splice_expr,
                   "Type splice operand does not reflect a type");

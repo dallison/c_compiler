@@ -34,6 +34,7 @@ Symbol* SemanticMaterializeReflectedTemplate(ReflectionValue* value,
                                              SourceLocation location);
 Namespace* SemanticMaterializeReflectedNamespace(ReflectionValue* value);
 
+// Takes the caller's counted reference to `type`; the result carries one.
 TypeRecord* SemanticResolveDependentSpliceType(TypeRecord* type,
                                                ASTNode* diagnostic);
 void SemanticResolveStructDependentSplices(Struct* str, ASTNode* diagnostic);

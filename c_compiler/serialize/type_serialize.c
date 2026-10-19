@@ -797,6 +797,8 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         if (TemplateArgumentExtraOf(a)->reflection_value != NULL) {
           TemplateArgumentExtraOf(a)->reflection_value->reflected_type =
               (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+          TypeRecordIncRef(
+              TemplateArgumentExtraOf(a)->reflection_value->reflected_type);
         } else {
           (void)SReadRef(ctx, in, kSerialKindType);
         }
@@ -2871,6 +2873,7 @@ static ReflectionValue* ReadReflectionValueInline(DeserializeContext* ctx,
       case kTArg_reflection_type:
         reflection->reflected_type =
             (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
+        TypeRecordIncRef(reflection->reflected_type);
         break;
       case kTArg_reflection_symbol:
         reflection->symbol = (Symbol*)SReadRef(ctx, in, kSerialKindSymbol);
