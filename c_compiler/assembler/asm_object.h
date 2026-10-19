@@ -175,6 +175,8 @@ void AsmObjectInit(AsmObject* object, int16_t elf_machine_type,
 void AsmObjectDestruct(AsmObject* object);
 void AsmObjectReset(AsmObject* object, bool clear_symbols);
 void AsmObjectClearSymbols(AsmObject* object);
+// Grows the symbol table for about `count` symbols.  Existing symbols are kept.
+void AsmObjectReserveSymbols(AsmObject* object, size_t count);
 
 AssemblerSymbol* AsmObjectFindSymbol(AsmObject* object, const char* name);
 void AsmObjectInsertSymbol(AsmObject* object, AssemblerSymbol* sym);
@@ -215,11 +217,11 @@ void AsmObjectAddRelocationForSymbol(AsmObject* object, AssemblerSymbol* symbol,
 
 AssemblerSymbol* AsmObjectDefineLabel(AsmObject* object, struct Assembler* assembler,
                                       String* spelling);
-// Like AsmObjectDefineLabel, but a new symbol borrows `name`, which must stay
-// unchanged until the object's symbols are deleted.
-AssemblerSymbol* AsmObjectDefineLabelWithStableName(AsmObject* object,
-                                                    struct Assembler* assembler,
-                                                    const char* name);
+// Defines a label at the current address for a `name` that is not yet a
+// symbol.  The symbol borrows `name`, which must stay unchanged until the
+// object's symbols are deleted.
+AssemblerSymbol* AsmObjectNewLabelWithStableName(AsmObject* object,
+                                                 const char* name);
 
 void AsmObjectBeginRecording(AsmObject* object);
 void AsmObjectEndRecording(AsmObject* object);

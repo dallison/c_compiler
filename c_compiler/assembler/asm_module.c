@@ -26,13 +26,20 @@ static bool Require(AsmModule* module, bool condition) {
 
 enum { kNamePoolBlockSize = 64 * 1024 };
 
-// FNV-1a hash of a NUL-terminated name.
-static uint64_t HashName(const char* name) {
-  uint64_t hash = 14695981039346656037ull;
-  for (const unsigned char* p = (const unsigned char*)name; *p != '\0'; p++) {
-    hash = (hash ^ *p) * 1099511628211ull;
+// Hashes the `length` bytes of `name` eight at a time.
+static uint64_t HashName(const char* name, size_t length) {
+  const uint64_t kMultiplier = 0x9e3779b97f4a7c15ull;
+  uint64_t hash = 14695981039346656037ull ^ length;
+  for (; length >= 8; name += 8, length -= 8) {
+    uint64_t word;
+    memcpy(&word, name, 8);
+    hash = (hash ^ word) * kMultiplier;
+    hash ^= hash >> 29;
   }
-  return hash;
+  uint64_t tail = 0;
+  memcpy(&tail, name, length);
+  hash = (hash ^ tail) * kMultiplier;
+  return hash ^ (hash >> 32);
 }
 
 // Doubles the pool's table (or creates it) and rehashes every name into it.
@@ -47,7 +54,7 @@ static bool GrowNamePool(AsmNamePool* pool) {
     if (name == NULL) {
       continue;
     }
-    size_t j = HashName(name) & (capacity - 1);
+    size_t j = HashName(name, strlen(name)) & (capacity - 1);
     while (slots[j] != NULL) {
       j = (j + 1) & (capacity - 1);
     }
@@ -109,13 +116,14 @@ const char* AsmModuleInternName(AsmModule* module, const char* name) {
     return NULL;
   }
   size_t mask = pool->capacity - 1;
-  size_t i = HashName(name) & mask;
+  size_t length = strlen(name);
+  size_t i = HashName(name, length) & mask;
   for (; pool->slots[i] != NULL; i = (i + 1) & mask) {
     if (strcmp(pool->slots[i], name) == 0) {
       return pool->slots[i];
     }
   }
-  size_t size = strlen(name) + 1;
+  size_t size = length + 1;
   // Rounded so the next name's cache header stays aligned.
   size_t entry_size = (sizeof(NameSymbolCache) + size + 7) & ~(size_t)7;
   NameSymbolCache* cache = (NameSymbolCache*)AllocateName(pool, entry_size);
@@ -542,12 +550,20 @@ AssemblerSymbol* AsmModuleFindSymbol(Assembler* assembler,
   return symbol;
 }
 
+static void CacheSymbol(Assembler* assembler, const char* interned_name,
+                        AssemblerSymbol* symbol) {
+  NameSymbolCache* cache = NameCacheOf(interned_name);
+  cache->symbol = symbol;
+  cache->epoch = assembler->object.symbol_epoch;
+}
+
 static AssemblerSymbol* EnsureSymbol(Assembler* assembler, const char* name) {
   AssemblerSymbol* symbol = AsmModuleFindSymbol(assembler, name);
   if (symbol == NULL && assembler->object.pass == 1) {
     symbol = NewAssemblerSymbolWithStableName(name, 0, SYM_TYPE(none),
                                               SYM_BIND(global), 0);
     AssemblerInsertSymbol(assembler, symbol);
+    CacheSymbol(assembler, name, symbol);
   }
   return symbol;
 }
@@ -645,7 +661,8 @@ static void EmitLabel(Assembler* assembler, const char* name) {
   AssemblerSymbol* symbol = AsmModuleFindSymbol(assembler, name);
   if (assembler->object.pass == 1) {
     if (symbol == NULL) {
-      AsmObjectDefineLabelWithStableName(&assembler->object, assembler, name);
+      CacheSymbol(assembler, name,
+                  AsmObjectNewLabelWithStableName(&assembler->object, name));
       return;
     }
     if (symbol->defined) {

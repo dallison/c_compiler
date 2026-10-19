@@ -255,6 +255,40 @@ void AsmObjectReset(AsmObject* object, bool clear_symbols) {
   }
 }
 
+static void CollectSymbolNode(BinaryTreeNode* node, int depth, void* data) {
+  (void)depth;
+  VectorAppend(data, node);
+}
+
+static void CollectAndFreeSymbolTree(void* table, void* data) {
+  BinaryTreeTraverse(table, CollectSymbolNode, data);
+  free(table);
+}
+
+void AsmObjectReserveSymbols(AsmObject* object, size_t count) {
+  size_t size = (count + count / 2) | 1;
+  HashTable* table = &object->symbol_table;
+  if (size <= table->size) {
+    return;
+  }
+  void** entries = calloc(size, sizeof(void*));
+  if (entries == NULL) {
+    return;
+  }
+  Vector symbols;
+  VectorInit(&symbols);
+  HashTableTraverse(table, CollectAndFreeSymbolTree, &symbols);
+  free(table->entries);
+  table->entries = entries;
+  table->size = size;
+  table->object_count = 0;
+  for (size_t i = 0; i < symbols.length; i++) {
+    BinaryTreeNodeInit(symbols.value.p[i]);
+    HashTableInsert(table, symbols.value.p[i]);
+  }
+  VectorDestruct(&symbols);
+}
+
 AssemblerSymbol* AsmObjectFindSymbol(AsmObject* object, const char* name) {
   return HashTableSearch(&object->symbol_table, (void*)name);
 }
@@ -535,8 +569,20 @@ int64_t AsmObjectCurrentAddress(AsmObject* object) {
   return section->address;
 }
 
-static AssemblerSymbol* DefineLabel(AsmObject* object, Assembler* assembler,
-                                    const char* name, bool stable_name) {
+static AssemblerSymbol* NewLabel(AsmObject* object, const char* name,
+                                 bool stable_name) {
+  AssemblerSymbol* sym = AllocAssemblerSymbol(
+      name, stable_name, object->current_section, SYM_TYPE(none),
+      SYM_BIND(local), AsmObjectCurrentAddress(object));
+  sym->is_label = true;
+  sym->defined = true;
+  AsmObjectInsertSymbol(object, sym);
+  return sym;
+}
+
+AssemblerSymbol* AsmObjectDefineLabel(AsmObject* object, Assembler* assembler,
+                                      String* spelling) {
+  const char* name = spelling->value;
   AssemblerSymbol* sym = AsmObjectFindSymbol(object, name);
   if (sym != NULL) {
     if (!sym->defined) {
@@ -551,25 +597,14 @@ static AssemblerSymbol* DefineLabel(AsmObject* object, Assembler* assembler,
       AssemblerError(assembler, "Duplicate symbol %s", name);
     }
   } else {
-    sym = AllocAssemblerSymbol(name, stable_name, object->current_section,
-                               SYM_TYPE(none), SYM_BIND(local),
-                               AsmObjectCurrentAddress(object));
-    sym->is_label = true;
-    sym->defined = true;
-    AsmObjectInsertSymbol(object, sym);
+    sym = NewLabel(object, name, false);
   }
   return sym;
 }
 
-AssemblerSymbol* AsmObjectDefineLabel(AsmObject* object, Assembler* assembler,
-                                      String* spelling) {
-  return DefineLabel(object, assembler, spelling->value, false);
-}
-
-AssemblerSymbol* AsmObjectDefineLabelWithStableName(AsmObject* object,
-                                                    Assembler* assembler,
-                                                    const char* name) {
-  return DefineLabel(object, assembler, name, true);
+AssemblerSymbol* AsmObjectNewLabelWithStableName(AsmObject* object,
+                                                 const char* name) {
+  return NewLabel(object, name, true);
 }
 
 void AsmObjectBeginRecording(AsmObject* object) {

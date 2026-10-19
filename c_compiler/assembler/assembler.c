@@ -625,6 +625,7 @@ void AssemblerRunRecordedOperations(Assembler* assembler, Vector* inputs,
 }
 
 void AssemblerRunModule(Assembler* assembler, AsmModule* module) {
+  AsmObjectReserveSymbols(&assembler->object, module->names.count);
   assembler->object.pass = 1;
   while (!module->failed && assembler->num_errors == 0 &&
          assembler->object.pass <= ASM_OBJECT_FINAL_PASS) {
