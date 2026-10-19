@@ -203,7 +203,9 @@ void AsmModuleInstruction(AsmModule* module, void* instruction);
 void AsmModuleText(AsmModule* module, const char* name, const char* text,
                    size_t length);
 
-// Replay the retained operations for the assembler's current pass.
+// Replay the retained operations for the assembler's current pass.  Symbols
+// it creates borrow the module's interned names, so `module` must outlive
+// `assembler`'s symbols.
 void AsmModuleEmit(AsmModule* module, struct Assembler* assembler);
 
 // Write canonical assembly source. Comments are emitted only by this path.

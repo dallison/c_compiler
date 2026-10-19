@@ -1106,6 +1106,11 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
     }
     AppendSanitizedName(&out, &remaining, symbol->name.value);
   }
+  // The cache lives as long as the symbol; give back the worst-case slack.
+  char* fitted = realloc(dyn, (size_t)(out - dyn) + 1);
+  if (fitted != NULL) {
+    dyn = fitted;
+  }
   symbol->cached_target_symbol_name = dyn;
   (void)buf;
   (void)len;

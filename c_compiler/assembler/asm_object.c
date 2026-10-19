@@ -67,13 +67,18 @@ void AssemblerRelocationDelete(AssemblerRelocation* reloc) {
   free(reloc);
 }
 
-AssemblerSymbol* NewAssemblerSymbol(const char* name, int section,
-                                    AssemblerSymbolType type,
-                                    AssemblerSymbolBinding binding,
-                                    int64_t value) {
+static AssemblerSymbol* AllocAssemblerSymbol(const char* name, bool stable_name,
+                                             int section,
+                                             AssemblerSymbolType type,
+                                             AssemblerSymbolBinding binding,
+                                             int64_t value) {
   AssemblerSymbol* sym = malloc(sizeof(AssemblerSymbol));
   BinaryTreeNodeInit(&sym->header);
-  StringInit(&sym->name, name);
+  if (stable_name) {
+    StringInitImmutable(&sym->name, name);
+  } else {
+    StringInit(&sym->name, name);
+  }
   sym->type = type;
   sym->binding = binding;
   sym->value = value;
@@ -88,6 +93,19 @@ AssemblerSymbol* NewAssemblerSymbol(const char* name, int section,
   sym->is_forward_declared = false;
   sym->explicit_local = false;
   return sym;
+}
+
+AssemblerSymbol* NewAssemblerSymbol(const char* name, int section,
+                                    AssemblerSymbolType type,
+                                    AssemblerSymbolBinding binding,
+                                    int64_t value) {
+  return AllocAssemblerSymbol(name, false, section, type, binding, value);
+}
+
+AssemblerSymbol* NewAssemblerSymbolWithStableName(
+    const char* name, int section, AssemblerSymbolType type,
+    AssemblerSymbolBinding binding, int64_t value) {
+  return AllocAssemblerSymbol(name, true, section, type, binding, value);
 }
 
 void AssemblerSymbolDelete(AssemblerSymbol* sym) { StringDestruct(&sym->name); }
@@ -517,12 +535,12 @@ int64_t AsmObjectCurrentAddress(AsmObject* object) {
   return section->address;
 }
 
-AssemblerSymbol* AsmObjectDefineLabel(AsmObject* object, Assembler* assembler,
-                                      String* spelling) {
-  AssemblerSymbol* sym = AsmObjectFindSymbol(object, spelling->value);
+static AssemblerSymbol* DefineLabel(AsmObject* object, Assembler* assembler,
+                                    const char* name, bool stable_name) {
+  AssemblerSymbol* sym = AsmObjectFindSymbol(object, name);
   if (sym != NULL) {
     if (!sym->defined) {
-      if (spelling->value[0] == '.') {
+      if (name[0] == '.') {
         sym->binding = SYM_BIND(local);
       }
       sym->defined = true;
@@ -530,17 +548,28 @@ AssemblerSymbol* AsmObjectDefineLabel(AsmObject* object, Assembler* assembler,
       sym->section = object->current_section;
       sym->value = AsmObjectCurrentAddress(object);
     } else {
-      AssemblerError(assembler, "Duplicate symbol %s", spelling->value);
+      AssemblerError(assembler, "Duplicate symbol %s", name);
     }
   } else {
-    sym = NewAssemblerSymbol(spelling->value, object->current_section,
-                             SYM_TYPE(none), SYM_BIND(local),
-                             AsmObjectCurrentAddress(object));
+    sym = AllocAssemblerSymbol(name, stable_name, object->current_section,
+                               SYM_TYPE(none), SYM_BIND(local),
+                               AsmObjectCurrentAddress(object));
     sym->is_label = true;
     sym->defined = true;
     AsmObjectInsertSymbol(object, sym);
   }
   return sym;
+}
+
+AssemblerSymbol* AsmObjectDefineLabel(AsmObject* object, Assembler* assembler,
+                                      String* spelling) {
+  return DefineLabel(object, assembler, spelling->value, false);
+}
+
+AssemblerSymbol* AsmObjectDefineLabelWithStableName(AsmObject* object,
+                                                    Assembler* assembler,
+                                                    const char* name) {
+  return DefineLabel(object, assembler, name, true);
 }
 
 void AsmObjectBeginRecording(AsmObject* object) {

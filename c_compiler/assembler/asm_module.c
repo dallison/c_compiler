@@ -545,7 +545,8 @@ AssemblerSymbol* AsmModuleFindSymbol(Assembler* assembler,
 static AssemblerSymbol* EnsureSymbol(Assembler* assembler, const char* name) {
   AssemblerSymbol* symbol = AsmModuleFindSymbol(assembler, name);
   if (symbol == NULL && assembler->object.pass == 1) {
-    symbol = NewAssemblerSymbol(name, 0, SYM_TYPE(none), SYM_BIND(global), 0);
+    symbol = NewAssemblerSymbolWithStableName(name, 0, SYM_TYPE(none),
+                                              SYM_BIND(global), 0);
     AssemblerInsertSymbol(assembler, symbol);
   }
   return symbol;
@@ -644,10 +645,7 @@ static void EmitLabel(Assembler* assembler, const char* name) {
   AssemblerSymbol* symbol = AsmModuleFindSymbol(assembler, name);
   if (assembler->object.pass == 1) {
     if (symbol == NULL) {
-      String spelling;
-      StringInit(&spelling, name);
-      AsmObjectDefineLabel(&assembler->object, assembler, &spelling);
-      StringDestruct(&spelling);
+      AsmObjectDefineLabelWithStableName(&assembler->object, assembler, name);
       return;
     }
     if (symbol->defined) {

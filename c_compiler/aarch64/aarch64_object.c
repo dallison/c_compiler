@@ -69,11 +69,12 @@ bool AARCH64ObjectModuleWriteAssembly(AARCH64ObjectModule* module, FILE* out) {
 }
 
 void AARCH64ObjectModuleDestruct(AARCH64ObjectModule* module) {
-  AsmModuleDestruct(&module->program);
+  // The assembler's symbols borrow the program's names.
   if (module->owns_assembler) {
     AARCH64AssemblerDestruct(&module->assembler);
     module->owns_assembler = false;
   }
+  AsmModuleDestruct(&module->program);
   StringDestruct(&module->object_file);
   StringDestruct(&module->src_file);
 }

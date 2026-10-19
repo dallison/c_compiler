@@ -66,6 +66,11 @@ AssemblerSymbol* NewAssemblerSymbol(const char* name, int32_t section,
                                     AssemblerSymbolType type,
                                     AssemblerSymbolBinding binding,
                                     int64_t value);
+// Like NewAssemblerSymbol, but borrows `name`, which must stay unchanged until
+// the symbol is deleted.
+AssemblerSymbol* NewAssemblerSymbolWithStableName(
+    const char* name, int32_t section, AssemblerSymbolType type,
+    AssemblerSymbolBinding binding, int64_t value);
 void AssemblerSymbolDelete(AssemblerSymbol* sym);
 
 typedef struct AssemblerSection {
@@ -210,6 +215,11 @@ void AsmObjectAddRelocationForSymbol(AsmObject* object, AssemblerSymbol* symbol,
 
 AssemblerSymbol* AsmObjectDefineLabel(AsmObject* object, struct Assembler* assembler,
                                       String* spelling);
+// Like AsmObjectDefineLabel, but a new symbol borrows `name`, which must stay
+// unchanged until the object's symbols are deleted.
+AssemblerSymbol* AsmObjectDefineLabelWithStableName(AsmObject* object,
+                                                    struct Assembler* assembler,
+                                                    const char* name);
 
 void AsmObjectBeginRecording(AsmObject* object);
 void AsmObjectEndRecording(AsmObject* object);
