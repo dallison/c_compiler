@@ -386,36 +386,38 @@ static void DumpSymbol(Symbol* s, size_t handle, String* scratch) {
     }
     printf("\n");
   }
-  if (s->alias_target != NULL) {
-    printf("        alias   : %s\n", s->alias_target->name.value);
+  if (SymbolExtraOf(s)->alias_target != NULL) {
+    printf("        alias   : %s\n",
+           SymbolExtraOf(s)->alias_target->name.value);
   }
   if (s->overload_next != NULL) {
     printf("        overload-> %s\n", s->overload_next->name.value);
   }
-  if (s->default_argument != NULL) {
+  if (SymbolExtraOf(s)->default_argument != NULL) {
     printf("        default argument:\n");
-    ASTNodePrint(s->default_argument, 5, stdout);
+    ASTNodePrint(SymbolExtraOf(s)->default_argument, 5, stdout);
   }
   if (s->type != NULL && TypeIsFunction(s->type)) {
-    printf("        fn template params: count=%d vec=%zu\n",
-           s->type->info.function.template_parameter_count,
-           s->type->info.function.template_parameters.length);
+    printf(
+        "        fn template params: count=%d vec=%zu\n",
+        FunctionExtraOf(&s->type->info.function)->template_parameter_count,
+        FunctionExtraOf(&s->type->info.function)->template_parameters.length);
   }
-  if (s->variable_template != NULL) {
+  if (SymbolExtraOf(s)->variable_template != NULL) {
     printf("        variable template:\n");
-    DumpTemplateParameters(&s->variable_template->parameters, 5);
-    if (s->variable_template->initializer != NULL) {
+    DumpTemplateParameters(&SymbolExtraOf(s)->variable_template->parameters, 5);
+    if (SymbolExtraOf(s)->variable_template->initializer != NULL) {
       for (int i = 0; i < 5; i++) printf("  ");
       printf("initializer:\n");
-      ASTNodePrint(s->variable_template->initializer, 6, stdout);
+      ASTNodePrint(SymbolExtraOf(s)->variable_template->initializer, 6, stdout);
     }
   }
-  if (s->alias_template != NULL) {
+  if (SymbolExtraOf(s)->alias_template != NULL) {
     printf("        alias template:\n");
-    DumpTemplateParameters(&s->alias_template->parameters, 5);
+    DumpTemplateParameters(&SymbolExtraOf(s)->alias_template->parameters, 5);
   }
-  if (s->concept_definition != NULL) {
-    Concept* c = s->concept_definition;
+  if (SymbolExtraOf(s)->concept_definition != NULL) {
+    Concept* c = SymbolExtraOf(s)->concept_definition;
     printf("        concept definition: %s\n", c->name.value);
     DumpTemplateParameters(c->template_parameters, 5);
     DumpConstraint(c->constraint, 5);
@@ -599,21 +601,22 @@ static void DumpAST(LoadedModule* m) {
       ASTNodePrint(s->type->info.function.body, 2, stdout);
       any = true;
     }
-    if (s->default_argument != NULL) {
+    if (SymbolExtraOf(s)->default_argument != NULL) {
       printf("  default argument of %s:\n", s->name.value);
-      ASTNodePrint(s->default_argument, 2, stdout);
+      ASTNodePrint(SymbolExtraOf(s)->default_argument, 2, stdout);
       any = true;
     }
-    if (s->variable_template != NULL &&
-        s->variable_template->initializer != NULL) {
+    if (SymbolExtraOf(s)->variable_template != NULL &&
+        SymbolExtraOf(s)->variable_template->initializer != NULL) {
       printf("  variable-template initializer of %s:\n", s->name.value);
-      ASTNodePrint(s->variable_template->initializer, 2, stdout);
+      ASTNodePrint(SymbolExtraOf(s)->variable_template->initializer, 2, stdout);
       any = true;
     }
-    if (s->concept_definition != NULL &&
-        s->concept_definition->constraint != NULL) {
-      printf("  concept %s constraint:\n", s->concept_definition->name.value);
-      DumpConstraint(s->concept_definition->constraint, 2);
+    if (SymbolExtraOf(s)->concept_definition != NULL &&
+        SymbolExtraOf(s)->concept_definition->constraint != NULL) {
+      printf("  concept %s constraint:\n",
+             SymbolExtraOf(s)->concept_definition->name.value);
+      DumpConstraint(SymbolExtraOf(s)->concept_definition->constraint, 2);
       any = true;
     }
   }
