@@ -95,6 +95,9 @@ typedef struct Lex {
   Vector* replay_tokens;
   size_t replay_index;
   struct ASTNode* replay_injected_value;
+
+  // Shared with the checkpoints saved on the current line, or NULL.
+  struct LexSavedLine* saved_line;
 } Lex;
 
 typedef struct {
@@ -106,6 +109,9 @@ typedef struct {
   uint32_t file_index;
   size_t path_index;
 
+  // The line is copied only once the lexer replaces it.  `line` holds a copy
+  // instead when `saved_line` could not be allocated.
+  struct LexSavedLine* saved_line;
   String line;
   size_t pos;
   SourceLocation current_token_location;
@@ -148,6 +154,9 @@ void LexRewind(Lex* lex);
 void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint);
 void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint);
 void LexCheckpointDestruct(LexCheckpoint* checkpoint);
+// Must be called before changing `lex->line` other than through the lexer, so
+// checkpoints saved on the line keep its text.
+void LexWillChangeLine(Lex* lex);
 
 // Begin/end capturing macro-expanded source text.  LexBeginCapture assumes the
 // current token is the '{' that opens the text to record; it seeds `out` with

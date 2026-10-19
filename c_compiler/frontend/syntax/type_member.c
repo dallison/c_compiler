@@ -2292,6 +2292,7 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
 
     lex->source = replay;
     lex->suppress_preprocessing = true;
+    LexWillChangeLine(lex);
     StringClear(&lex->line);
     lex->pos = 0;
     LexNextToken(lex);  // Prime the first token (':' or '{').

@@ -249,6 +249,7 @@ void SyntaxFlushDeferredFriendBodies(Syntax* syntax) {
     replay->is_system_header = entry->body_is_system_header;
     lex->source = replay;
     lex->suppress_preprocessing = true;
+    LexWillChangeLine(lex);
     StringClear(&lex->line);
     lex->pos = 0;
     LexNextToken(lex);

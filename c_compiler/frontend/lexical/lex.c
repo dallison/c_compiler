@@ -1170,6 +1170,7 @@ static bool ReadRawStringContinuation(Lex* lex, LiteralEncoding encoding) {
     return false;
   }
   AppendRawLiteralChar(lex, encoding, '\n');
+  LexWillChangeLine(lex);
   StringClear(&lex->line);
   ReadUTF8SourceLine(lex);
   lex->pos = 0;
@@ -1958,6 +1959,7 @@ static void InitCommon(Lex* lex, Preprocessor* preprocessor) {
   lex->in_comment = false;
   lex->capture = NULL;
   lex->suppress_preprocessing = false;
+  lex->saved_line = NULL;
   lex->replay_active = false;
   lex->replay_tokens = NULL;
   lex->replay_index = 0;
@@ -2001,6 +2003,42 @@ bool LexInitFromString(Lex* lex, const char* filename, String* code,
   return true;
 }
 
+// A line some checkpoint may return to.  While it is still the lexer's current
+// line the text stays in `lex->line`; the lexer moves it here before replacing
+// it.
+typedef struct LexSavedLine {
+  size_t refs;  // The checkpoints holding it, plus one while it is current.
+  bool has_text;
+  String text;
+} LexSavedLine;
+
+static void ReleaseSavedLine(LexSavedLine* saved) {
+  if (saved == NULL || --saved->refs != 0) {
+    return;
+  }
+  if (saved->has_text) {
+    StringDestruct(&saved->text);
+  }
+  free(saved);
+}
+
+void LexWillChangeLine(Lex* lex) {
+  LexSavedLine* saved = lex->saved_line;
+  if (saved == NULL) {
+    return;
+  }
+  lex->saved_line = NULL;
+  if (!saved->has_text && saved->refs > 1) {
+    saved->text = lex->line;
+    if (lex->line.value == lex->line.buffer) {
+      saved->text.value = saved->text.buffer;
+    }
+    saved->has_text = true;
+    StringInit(&lex->line, NULL);
+  }
+  ReleaseSavedLine(saved);
+}
+
 void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
   checkpoint->source = lex->source;
   checkpoint->source_device = lex->source->device;
@@ -2017,7 +2055,20 @@ void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
   checkpoint->file_index = lex->source->file_index;
   checkpoint->path_index = lex->source->path_index;
 
-  StringInitFromSegment(&checkpoint->line, lex->line.value, lex->line.length);
+  if (lex->saved_line == NULL) {
+    lex->saved_line = malloc(sizeof(LexSavedLine));
+    if (lex->saved_line != NULL) {
+      lex->saved_line->refs = 1;
+      lex->saved_line->has_text = false;
+    }
+  }
+  checkpoint->saved_line = lex->saved_line;
+  if (checkpoint->saved_line != NULL) {
+    checkpoint->saved_line->refs++;
+    StringInit(&checkpoint->line, NULL);
+  } else {
+    StringInitFromSegment(&checkpoint->line, lex->line.value, lex->line.length);
+  }
   checkpoint->pos = lex->pos;
   checkpoint->current_token_location = lex->current_token_location;
   checkpoint->current_token = lex->current_token;
@@ -2054,20 +2105,37 @@ void LexCheckpointSave(Lex* lex, LexCheckpoint* checkpoint) {
 }
 
 void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
+  // Sources are only read when the current line is replaced, so while the
+  // checkpoint's line is still current the source is where it was.
+  bool line_is_current = checkpoint->saved_line != NULL &&
+                         checkpoint->saved_line == lex->saved_line &&
+                         checkpoint->source == lex->source;
   lex->source = checkpoint->source;
-  if (checkpoint->source_device == kSourceFromFile &&
-      lex->source->from.file != NULL) {
-    fsetpos(lex->source->from.file, &checkpoint->file_pos);
-    clearerr(lex->source->from.file);
-    lex->source->reached_eof = false;
-  } else if (checkpoint->source_device == kSourceFromString) {
-    lex->source->from.string.index = checkpoint->string_index;
+  if (!line_is_current) {
+    if (checkpoint->source_device == kSourceFromFile &&
+        lex->source->from.file != NULL) {
+      fsetpos(lex->source->from.file, &checkpoint->file_pos);
+      clearerr(lex->source->from.file);
+      lex->source->reached_eof = false;
+    } else if (checkpoint->source_device == kSourceFromString) {
+      lex->source->from.string.index = checkpoint->string_index;
+    }
+    lex->source->lineno = checkpoint->lineno;
+    lex->source->file_index = checkpoint->file_index;
+    lex->source->path_index = checkpoint->path_index;
   }
-  lex->source->lineno = checkpoint->lineno;
-  lex->source->file_index = checkpoint->file_index;
-  lex->source->path_index = checkpoint->path_index;
 
-  StringSetString(&lex->line, &checkpoint->line);
+  LexSavedLine* saved = checkpoint->saved_line;
+  if (saved == NULL) {
+    LexWillChangeLine(lex);
+    StringSetString(&lex->line, &checkpoint->line);
+  } else if (saved != lex->saved_line) {
+    // The lexer gave up the line, so it moved the text into `saved`.
+    LexWillChangeLine(lex);
+    StringSetString(&lex->line, &saved->text);
+    saved->refs++;
+    lex->saved_line = saved;
+  }
   lex->pos = checkpoint->pos;
   lex->current_token_location = checkpoint->current_token_location;
   lex->current_token = checkpoint->current_token;
@@ -2097,6 +2165,8 @@ void LexCheckpointRestore(Lex* lex, LexCheckpoint* checkpoint) {
 }
 
 void LexCheckpointDestruct(LexCheckpoint* checkpoint) {
+  ReleaseSavedLine(checkpoint->saved_line);
+  checkpoint->saved_line = NULL;
   StringDestruct(&checkpoint->line);
   StringDestruct(&checkpoint->spelling);
   StringDestruct(&checkpoint->literal_spelling);
@@ -2130,6 +2200,7 @@ void LexDestruct(Lex* lex) {
     free(lex->source);
   }
 
+  LexWillChangeLine(lex);
   StringDestruct(&lex->line);
   StringDestruct(&lex->spelling);
   StringDestruct(&lex->literal_spelling);
@@ -2699,6 +2770,7 @@ bool LexConsumeClosingAngle(Lex* lex) {
 
 // Reads another line from the input.
 void LexReadLine(Lex* lex) {
+  LexWillChangeLine(lex);
   StringClear(&lex->line);
   lex->pos = 0;
 
@@ -2963,6 +3035,7 @@ void LexReadAttributes(Lex* lex, String* attrs) {
 }
 
 void LexRewind(Lex* lex) {
+  LexWillChangeLine(lex);
   SourceRewind(lex->source);
   lex->pos = 0;
   lex->current_token = TOK(bad);
