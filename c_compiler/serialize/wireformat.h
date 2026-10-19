@@ -122,6 +122,15 @@ bool WireReadRaw(WireBuffer* buf, void* dest, size_t length);
 bool WireReadVarint(WireBuffer* buf, uint64_t* out);
 bool WireReadSignedVarint(WireBuffer* buf, int64_t* out);
 bool WireReadBool(WireBuffer* buf, bool* out);
+// WireReadBool into a bit-field, which has no address.  Like WireReadBool,
+// leaves the field unchanged when the read fails.
+#define WIRE_READ_BOOL_BITFIELD(buf, field)  \
+  do {                                        \
+    bool wire_bool_value_;                    \
+    if (WireReadBool((buf), &wire_bool_value_)) { \
+      (field) = wire_bool_value_;             \
+    }                                         \
+  } while (0)
 bool WireReadInt32(WireBuffer* buf, int32_t* out);
 bool WireReadUint32(WireBuffer* buf, uint32_t* out);
 bool WireReadInt64(WireBuffer* buf, int64_t* out);

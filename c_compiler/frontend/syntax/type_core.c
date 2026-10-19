@@ -75,9 +75,11 @@ static TypeArenaBlock* NewTypeArenaBlock(size_t capacity) {
   return block;
 }
 
-#define TYPE_RECORD_FULL_SIZE ((sizeof(TypeRecord) + 15) & ~(size_t)15)
+#define TYPE_RECORD_ALIGN(bytes) \
+  (((bytes) + _Alignof(TypeRecord) - 1) & ~(size_t)(_Alignof(TypeRecord) - 1))
+#define TYPE_RECORD_FULL_SIZE TYPE_RECORD_ALIGN(sizeof(TypeRecord))
 #define TYPE_RECORD_NON_FUNCTION_SIZE \
-  ((offsetof(TypeRecord, info) + sizeof(ArrayInfo) + 15) & ~(size_t)15)
+  TYPE_RECORD_ALIGN(offsetof(TypeRecord, info) + sizeof(ArrayInfo))
 
 // Records that are not functions never use the FunctionInfo arm of the info
 // union, so they may be given a shorter slot.  Every block keeps a full

@@ -1462,7 +1462,7 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         SReadRefVector(ctx, in, kSerialKindSymbol, &f->prototype);
         break;
       case kFn_varargs:
-        WireReadBool(in, &f->varargs);
+        WIRE_READ_BOOL_BITFIELD(in, f->varargs);
         break;
       case kFn_body:
         f->body = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
@@ -1471,37 +1471,37 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         f->explicit_condition = (ASTNode*)SReadRef(ctx, in, kSerialKindAST);
         break;
       case kFn_unknown_args:
-        WireReadBool(in, &f->unknown_args);
+        WIRE_READ_BOOL_BITFIELD(in, f->unknown_args);
         break;
       case kFn_definition:
-        WireReadBool(in, &f->definition);
+        WIRE_READ_BOOL_BITFIELD(in, f->definition);
         break;
       case kFn_old_style:
-        WireReadBool(in, &f->old_style);
+        WIRE_READ_BOOL_BITFIELD(in, f->old_style);
         break;
       case kFn_is_inline:
-        WireReadBool(in, &f->is_inline);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_inline);
         break;
       case kFn_is_constexpr:
-        WireReadBool(in, &f->is_constexpr);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_constexpr);
         break;
       case kFn_is_consteval:
-        WireReadBool(in, &f->is_consteval);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_consteval);
         break;
       case kFn_is_constructor:
-        WireReadBool(in, &f->is_constructor);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_constructor);
         break;
       case kFn_is_destructor:
-        WireReadBool(in, &f->is_destructor);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_destructor);
         break;
       case kFn_is_const_member:
-        WireReadBool(in, &f->is_const_member);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_const_member);
         break;
       case kFn_is_volatile_member:
-        WireReadBool(in, &f->is_volatile_member);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_volatile_member);
         break;
       case kFn_has_explicit_object_parameter:
-        WireReadBool(in, &f->has_explicit_object_parameter);
+        WIRE_READ_BOOL_BITFIELD(in, f->has_explicit_object_parameter);
         break;
       case kFn_ref_qualifier: {
         int32_t v;
@@ -1510,28 +1510,28 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         break;
       }
       case kFn_is_explicit:
-        WireReadBool(in, &f->is_explicit);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_explicit);
         break;
       case kFn_is_explicit_conversion:
-        WireReadBool(in, &f->is_explicit_conversion);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_explicit_conversion);
         break;
       case kFn_is_virtual:
-        WireReadBool(in, &f->is_virtual);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_virtual);
         break;
       case kFn_is_override:
-        WireReadBool(in, &f->is_override);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_override);
         break;
       case kFn_is_final:
-        WireReadBool(in, &f->is_final);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_final);
         break;
       case kFn_is_pure_virtual:
-        WireReadBool(in, &f->is_pure_virtual);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_pure_virtual);
         break;
       case kFn_is_defaulted:
-        WireReadBool(in, &f->is_defaulted);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_defaulted);
         break;
       case kFn_is_deleted:
-        WireReadBool(in, &f->is_deleted);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_deleted);
         break;
       case kFn_cxx_special_member_kind: {
         int32_t v;
@@ -1540,40 +1540,40 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         break;
       }
       case kFn_is_user_declared:
-        WireReadBool(in, &f->is_user_declared);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_user_declared);
         break;
       case kFn_is_user_provided:
-        WireReadBool(in, &f->is_user_provided);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_user_provided);
         break;
       case kFn_is_explicitly_defaulted:
-        WireReadBool(in, &f->is_explicitly_defaulted);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_explicitly_defaulted);
         break;
       case kFn_is_explicitly_deleted:
-        WireReadBool(in, &f->is_explicitly_deleted);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_explicitly_deleted);
         break;
       case kFn_is_implicitly_declared:
-        WireReadBool(in, &f->is_implicitly_declared);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_implicitly_declared);
         break;
       case kFn_is_implicitly_deleted:
-        WireReadBool(in, &f->is_implicitly_deleted);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_implicitly_deleted);
         break;
       case kFn_is_trivial_special_member:
-        WireReadBool(in, &f->is_trivial_special_member);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_trivial_special_member);
         break;
       case kFn_is_constexpr_eligible:
-        WireReadBool(in, &f->is_constexpr_eligible);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_constexpr_eligible);
         break;
       case kFn_is_noexcept_eligible:
-        WireReadBool(in, &f->is_noexcept_eligible);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_noexcept_eligible);
         break;
       case kFn_is_noexcept:
-        WireReadBool(in, &f->is_noexcept);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_noexcept);
         break;
       case kFn_is_auto_return_deduced:
-        WireReadBool(in, &f->is_auto_return_deduced);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_auto_return_deduced);
         break;
       case kFn_is_decltype_auto_return_deduced:
-        WireReadBool(in, &f->is_decltype_auto_return_deduced);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_decltype_auto_return_deduced);
         break;
       case kFn_deleted_reason:
         f->deleted_reason = SReadStringPtr(ctx, in);
@@ -1582,16 +1582,16 @@ static void ReadFunctionInfo(DeserializeContext* ctx, WireBuffer* in,
         ReadContractAssertionVector(ctx, in, &f->contract_assertions);
         break;
       case kFn_is_deduction_guide:
-        WireReadBool(in, &f->is_deduction_guide);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_deduction_guide);
         break;
       case kFn_is_coroutine:
-        WireReadBool(in, &f->is_coroutine);
+        WIRE_READ_BOOL_BITFIELD(in, f->is_coroutine);
         break;
       case kFn_has_coroutine_syntax:
-        WireReadBool(in, &f->has_coroutine_syntax);
+        WIRE_READ_BOOL_BITFIELD(in, f->has_coroutine_syntax);
         break;
       case kFn_has_constexpr_if:
-        WireReadBool(in, &f->has_constexpr_if);
+        WIRE_READ_BOOL_BITFIELD(in, f->has_constexpr_if);
         break;
       case kFn_coroutine_promise_type:
         f->coroutine_promise_type =

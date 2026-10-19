@@ -182,6 +182,30 @@ typedef struct Symbol {
     // rather than value.ivalue being its encoding.
     bool value_is_pointed_member: 1;                                 // @wire -
   } flags;
+  // Transient: none of these cross a module boundary.
+  // The implementation-generated lambda capture field (lambda_capture_source)
+  // captures by reference.
+  bool lambda_capture_by_reference : 1;
+  // C++26 symbolic constexpr reference/pointer whose initializer designates an
+  // object relative to the current function frame (constexpr_reference_scope).
+  // Automatic-storage identities cannot cross a module boundary.
+  bool is_constexpr_representable : 1;
+  bool requires_ast_constexpr : 1;
+  // Deserialized module symbols are graph-owned until the importing compiler
+  // has finished tearing down structs/types that may still point at them.
+  bool is_imported_module_symbol : 1;
+  bool destruction_complete : 1;
+  // Set when the symbol's value is read (used in any context other than as the
+  // pure left-hand side of a plain assignment).  Combined with flags.used this
+  // distinguishes "referenced but only written" objects for
+  // -Wunused-but-set-variable.  Recomputed during analysis.
+  bool is_read : 1;
+  // The hidden object a structured binding declaration decomposes.
+  bool is_structured_binding_object : 1;
+  // Local object selected for named return-value optimization.  Semantic
+  // analysis sets this before IR generation so every reference to the pooled
+  // variable uses the hidden struct-return address.
+  bool is_nrvo : 1;
   
   struct {
     int used_as_arg;              // Times used as function arg.
@@ -208,7 +232,6 @@ typedef struct Symbol {
   // Original entity represented by an implementation-generated lambda
   // capture field. Transient: closure fields never cross module boundaries.
   struct Symbol* lambda_capture_source;
-  bool lambda_capture_by_reference;
   // Block-scope anonymous union/struct: injected member names alias storage in
   // `anonymous_union_host` at `anonymous_union_member_offset`.  Transient.
   struct Symbol* anonymous_union_host;
@@ -218,11 +241,7 @@ typedef struct Symbol {
   // Portable initializer for serialized constexpr aggregate values. The live
   // ConstexprObject cache in value.other is process-local and cannot be wired.
   struct ASTNode* constexpr_initializer;                       // @wire 58
-  // C++26 symbolic constexpr reference/pointer whose initializer designates an
-  // object relative to the current function frame. This is transient because
-  // automatic-storage identities cannot cross a module boundary.
-  bool is_constexpr_representable;
-  bool requires_ast_constexpr;
+  // See is_constexpr_representable.
   struct TypeRecord* constexpr_reference_scope;
   struct VariableTemplate* variable_template;  // C++ variable template body. // @wire 44
   struct AliasTemplate* alias_template;  // C++ alias template parameters. // @wire 47
@@ -239,25 +258,10 @@ typedef struct Symbol {
   String owning_module_partition;    // Owning partition, if any.       // @wire 50
   String import_source_module;       // Import provenance for importers. // @wire 51
   struct DIE* die;          // @wire - (debug info, not serialized)
-  // Deserialized module symbols are graph-owned until the importing compiler
-  // has finished tearing down structs/types that may still point at them.
-  bool is_imported_module_symbol;  // @wire - (transient)
-  bool destruction_complete;      // @wire - (transient)
-  // Set when the symbol's value is read (used in any context other than as the
-  // pure left-hand side of a plain assignment).  Combined with flags.used this
-  // distinguishes "referenced but only written" objects for
-  // -Wunused-but-set-variable.  Recomputed during analysis, never serialized.
-  bool is_read;                   // @wire - (transient)
   // Structured-binding dependence marker and, for a pack, known cardinality:
   // -2 means materialized/not a binding, -1 means still dependent, and a
   // nonnegative value is the known pack size.
   int structured_binding_pack_size;  // transient
-  // The hidden object a structured binding declaration decomposes.
-  bool is_structured_binding_object;  // @wire - (transient)
-  // Local object selected for named return-value optimization.  Semantic
-  // analysis sets this before IR generation so every reference to the pooled
-  // variable uses the hidden struct-return address.
-  bool is_nrvo;                   // @wire - (transient)
   // For a function template specialization, the template instantiation depth
   // that requested it.  Its deferred body is analyzed at that depth, so
   // instantiations it triggers nest under it.  Transient.

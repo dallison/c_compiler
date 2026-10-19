@@ -232,52 +232,14 @@ typedef struct ContractAssertion {
 typedef struct {
   Symbol* symbol;       // Symbol for function (or NULL).           // @wire 1
   Vector prototype;     // Formal arguments (owned Symbol*).        // @wire 2
-  bool varargs;         // True if varargs function.                // @wire 3
   struct ASTNode* body; // Body AST.                                // @wire 4
   // Parse-time deep copy of `body` for generic lambda / function-template
   // instantiation.  The live `body` can be analyzed in place before a call
   // clones it; this snapshot keeps `if constexpr (std::is_same_v<...>)` etc.
   // intact for CloneTemplateFunctionBody.
   struct ASTNode* template_pattern_body;                           // @wire -
-  bool unknown_args;    // Old-style or invented function.          // @wire 5
-  bool definition;      // Function is a definition.                // @wire 6
-  bool old_style;       // Old-style arguments.                     // @wire 7
-  bool is_inline;       // This is an inline function.              // @wire 8
-  bool is_constexpr;    // C++ constexpr function.                  // @wire 9
-  bool is_consteval;    // C++ consteval immediate function.        // @wire 10
-  bool is_constructor;  // Called before main.                      // @wire 11
-  bool is_destructor;   // Called after exit.                       // @wire 12
-  bool is_const_member; // C++ trailing const qualifier.            // @wire 13
   CXXRefQualifier ref_qualifier;  // C++ trailing & / &&.           // @wire 14
-  bool is_explicit;     // C++ explicit ctor/conv/deduction guide.  // @wire 15
-  bool is_explicit_conversion;  // C++ explicit conversion op.      // @wire 16
-  bool is_virtual;      // C++ virtual member function.             // @wire 17
-  bool is_override;     // C++ override virt-specifier.             // @wire 18
-  bool is_final;        // C++ final virt-specifier.                // @wire 19
-  bool is_pure_virtual; // C++ pure virtual function (`= 0`).       // @wire 20
-  bool is_defaulted;    // C++ explicitly defaulted (`= default`).  // @wire 21
-  bool is_deleted;      // C++ deleted function (`= delete`).       // @wire 22
   CXXSpecialMemberKind cxx_special_member_kind;  // Special kind.   // @wire 23
-  bool is_user_declared;      // C++ user-declared function.        // @wire 24
-  bool is_user_provided;      // C++ user-provided function body.   // @wire 25
-  bool is_explicitly_defaulted;  // C++ explicitly defaulted.       // @wire 26
-  bool is_explicitly_deleted;    // C++ explicitly deleted.         // @wire 27
-  bool is_implicitly_declared;   // C++ implicitly declared.        // @wire 28
-  bool is_implicitly_deleted;    // C++ implicitly deleted.         // @wire 29
-  bool is_trivial_special_member;  // C++ trivial special member.   // @wire 30
-  bool is_constexpr_eligible;  // C++ constexpr-suitable.           // @wire 31
-  bool is_noexcept_eligible;   // C++ nothrow special member.       // @wire 32
-  bool is_noexcept;            // C++ declared non-throwing.        // @wire 33
-  bool has_exception_specifier;  // C++ noexcept/throw() was written. // @wire -
-  bool is_auto_return_deduced;  // C++ auto return deduced.         // @wire 34
-  bool is_deduction_guide;  // C++ class template deduction guide.  // @wire 35
-  bool is_coroutine;  // C++ coroutine function.                    // @wire 36
-  bool has_coroutine_syntax;  // Body contains co_await/return/yield. // @wire 54
-  bool has_constexpr_if;  // Body contains an if constexpr.         // @wire 55
-  bool constexpr_if_checked;  // Transient summary cache.           // @wire -
-  bool references_marked;  // Transient: body reference edges visited. // @wire -
-  bool body_analyzed;  // Transient: definition semantically analyzed. // @wire -
-  bool body_had_parse_errors;  // Transient: errors parsing the body. // @wire -
   struct TypeRecord* coroutine_promise_type;  // Promise type.      // @wire 37
   struct TypeRecord* coroutine_frame_type;  // Lowered frame.       // @wire 38
   int coroutine_suspend_count;  // Suspension points in body.       // @wire 39
@@ -292,11 +254,49 @@ typedef struct {
       template_instantiation_cache;  // Indexed transient view of cache. // @wire -
   struct ConstraintExpr* associated_constraint;  // Optional C++20 requires-clause. // @wire 47
   struct ASTNode* explicit_condition;  // Deferred value-dependent explicit(bool). // @wire 48
-  bool is_volatile_member;  // C++ trailing volatile qualifier.     // @wire 49
-  bool has_explicit_object_parameter;  // C++23 `this T self`.       // @wire 50
-  bool is_decltype_auto_return_deduced;  // Return used decltype(auto). // @wire 51
   String* deleted_reason;  // Optional C++26 `= delete("reason")`.  // @wire 52
   Vector contract_assertions;  // ContractAssertion* in source order. // @wire 53
+  bool varargs : 1;  // True if varargs function.                // @wire 3
+  bool unknown_args : 1;  // Old-style or invented function.          // @wire 5
+  bool definition : 1;  // Function is a definition.                // @wire 6
+  bool old_style : 1;  // Old-style arguments.                     // @wire 7
+  bool is_inline : 1;  // This is an inline function.              // @wire 8
+  bool is_constexpr : 1;  // C++ constexpr function.                  // @wire 9
+  bool is_consteval : 1;  // C++ consteval immediate function.        // @wire 10
+  bool is_constructor : 1;  // Called before main.                      // @wire 11
+  bool is_destructor : 1;  // Called after exit.                       // @wire 12
+  bool is_const_member : 1;  // C++ trailing const qualifier.            // @wire 13
+  bool is_explicit : 1;  // C++ explicit ctor/conv/deduction guide.  // @wire 15
+  bool is_explicit_conversion : 1;  // C++ explicit conversion op.      // @wire 16
+  bool is_virtual : 1;  // C++ virtual member function.             // @wire 17
+  bool is_override : 1;  // C++ override virt-specifier.             // @wire 18
+  bool is_final : 1;  // C++ final virt-specifier.                // @wire 19
+  bool is_pure_virtual : 1;  // C++ pure virtual function (`= 0`).       // @wire 20
+  bool is_defaulted : 1;  // C++ explicitly defaulted (`= default`).  // @wire 21
+  bool is_deleted : 1;  // C++ deleted function (`= delete`).       // @wire 22
+  bool is_user_declared : 1;  // C++ user-declared function.        // @wire 24
+  bool is_user_provided : 1;  // C++ user-provided function body.   // @wire 25
+  bool is_explicitly_defaulted : 1;  // C++ explicitly defaulted.       // @wire 26
+  bool is_explicitly_deleted : 1;  // C++ explicitly deleted.         // @wire 27
+  bool is_implicitly_declared : 1;  // C++ implicitly declared.        // @wire 28
+  bool is_implicitly_deleted : 1;  // C++ implicitly deleted.         // @wire 29
+  bool is_trivial_special_member : 1;  // C++ trivial special member.   // @wire 30
+  bool is_constexpr_eligible : 1;  // C++ constexpr-suitable.           // @wire 31
+  bool is_noexcept_eligible : 1;  // C++ nothrow special member.       // @wire 32
+  bool is_noexcept : 1;  // C++ declared non-throwing.        // @wire 33
+  bool has_exception_specifier : 1;  // C++ noexcept/throw() was written. // @wire -
+  bool is_auto_return_deduced : 1;  // C++ auto return deduced.         // @wire 34
+  bool is_deduction_guide : 1;  // C++ class template deduction guide.  // @wire 35
+  bool is_coroutine : 1;  // C++ coroutine function.                    // @wire 36
+  bool has_coroutine_syntax : 1;  // Body contains co_await/return/yield. // @wire 54
+  bool has_constexpr_if : 1;  // Body contains an if constexpr.         // @wire 55
+  bool constexpr_if_checked : 1;  // Transient summary cache.           // @wire -
+  bool references_marked : 1;  // Transient: body reference edges visited. // @wire -
+  bool body_analyzed : 1;  // Transient: definition semantically analyzed. // @wire -
+  bool body_had_parse_errors : 1;  // Transient: errors parsing the body. // @wire -
+  bool is_volatile_member : 1;  // C++ trailing volatile qualifier.     // @wire 49
+  bool has_explicit_object_parameter : 1;  // C++23 `this T self`.       // @wire 50
+  bool is_decltype_auto_return_deduced : 1;  // Return used decltype(auto). // @wire 51
 } FunctionInfo;
 
 typedef enum {
@@ -562,6 +562,9 @@ typedef struct TypeRecord {
   // many owners share.  It is never released or modified in place; writers
   // copy it first.
   uint8_t shared_immutable;                                       // @wire -
+  // C++26 pack-indexing specifier `Ts...[I]`.  The parameter index identifies
+  // `Ts`; the unevaluated expression is retained until the pack is bound.
+  bool is_pack_index;                                               // @wire 18
   int size;                                                       // @wire 5
   int bit_width;  // Exact width of kTypeBitInt; zero otherwise.    // @wire 21
   int template_parameter_index;  // >=0 for placeholder types.     // @wire 6
@@ -578,9 +581,7 @@ typedef struct TypeRecord {
   // arena-owned and re-cloned with concrete template arguments during
   // substitution.
   struct ASTNode* dependent_decltype_expr;                          // @wire 15
-  // C++26 pack-indexing specifier `Ts...[I]`.  The parameter index identifies
-  // `Ts`; the unevaluated expression is retained until the pack is bound.
-  bool is_pack_index;                                               // @wire 18
+  // C++26 pack-indexing specifier `Ts...[I]` (see is_pack_index).
   struct ASTNode* pack_index_expr;                                  // @wire 19
   // Concrete pack retained when its index remains dependent across a nested
   // template substitution.
