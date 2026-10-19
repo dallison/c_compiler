@@ -209,33 +209,13 @@ static bool BitFieldReadAwaitsPromotion(ASTNode* node) {
 // Contract: Returns replacement constant or NULL without mutating when folding
 // is unsafe (dependent, unbound automatic, consteval observation, address use).
 ASTNode* FoldConstantExpression(ASTNode* node) {
-  // A value-dependent expression cannot be evaluated until its template
-  // arguments are known. Folding it now would freeze placeholder properties
-  // such as the provisional size of a dependent type into the template body.
-  if (CompilerIsCXX() && ExpressionIsTemplateDependent(node)) {
-    return NULL;
-  }
+  // Every analyzed node is offered for folding, so the checks that walk the
+  // whole subtree come after the constant-time ones.
   if (compiler->current_function != NULL &&
       compiler->current_function->info.function.prototype.length != 0) {
     // A function body is analyzed before any invocation binds its formals.
     // Even a subtree that does not retain a reliable parent link to an
     // argument identifier must not be frozen from placeholder argument data.
-    return NULL;
-  }
-  // Function parameters and ordinary automatic variables have no value until
-  // the function executes. Speculatively interpreting such a subtree during
-  // semantic analysis would freeze a placeholder value into the function
-  // body, making every later invocation observe that value.
-  if (ExpressionHasUnboundAutomatic(node)) {
-    return NULL;
-  }
-  // Speculative runtime folding is not a manifestly constant-evaluated
-  // context. Keep calls that can reach `if consteval` or
-  // std::is_constant_evaluated() intact so target codegen selects their
-  // runtime arms. Constant-required consumers (static_assert, constexpr
-  // initialization, template arguments) evaluate the retained tree
-  // explicitly and therefore still select the constant-evaluation arms.
-  if (RuntimeFoldingMayObserveConstantEvaluation(node)) {
     return NULL;
   }
   switch (node->op) {
@@ -264,6 +244,28 @@ ASTNode* FoldConstantExpression(ASTNode* node) {
     return NULL;
   }
   if (node == compiler->decltype_operand) {
+    return NULL;
+  }
+  // A value-dependent expression cannot be evaluated until its template
+  // arguments are known. Folding it now would freeze placeholder properties
+  // such as the provisional size of a dependent type into the template body.
+  if (CompilerIsCXX() && ExpressionIsTemplateDependent(node)) {
+    return NULL;
+  }
+  // Function parameters and ordinary automatic variables have no value until
+  // the function executes. Speculatively interpreting such a subtree during
+  // semantic analysis would freeze a placeholder value into the function
+  // body, making every later invocation observe that value.
+  if (ExpressionHasUnboundAutomatic(node)) {
+    return NULL;
+  }
+  // Speculative runtime folding is not a manifestly constant-evaluated
+  // context. Keep calls that can reach `if consteval` or
+  // std::is_constant_evaluated() intact so target codegen selects their
+  // runtime arms. Constant-required consumers (static_assert, constexpr
+  // initialization, template arguments) evaluate the retained tree
+  // explicitly and therefore still select the constant-evaluation arms.
+  if (RuntimeFoldingMayObserveConstantEvaluation(node)) {
     return NULL;
   }
 

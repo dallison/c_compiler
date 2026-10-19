@@ -9877,13 +9877,12 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
       unary_operand_concrete = false;
     }
   }
-  if (node == NULL ||
-      (ExpressionIsTemplateDependent(node) && !receiver_is_concrete &&
-       !class_operator && !unary_operand_concrete) ||
-      (!stale_floating_arithmetic && !receiver_is_concrete &&
-       !class_operator && node->type != NULL &&
-       !TypeContainsAuto(node->type)) ||
-      !IsReanalyzableClonedExpressionOpcode(node->op)) {
+  // The dependence test walks the subtree, so it goes last.
+  if (node == NULL || !IsReanalyzableClonedExpressionOpcode(node->op) ||
+      (!stale_floating_arithmetic && !receiver_is_concrete && !class_operator &&
+       node->type != NULL && !TypeContainsAuto(node->type)) ||
+      (!receiver_is_concrete && !class_operator && !unary_operand_concrete &&
+       ExpressionIsTemplateDependent(node))) {
     return node;
   }
   ASTNodeShape shape = ASTNodeGetShape(node);
