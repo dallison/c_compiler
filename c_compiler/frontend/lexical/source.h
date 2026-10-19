@@ -83,6 +83,13 @@ typedef enum {
   kSourceFromString,  // Input comes from a string.
 } SourceDevice;
 
+typedef enum {
+  kIncludeGuardStart,   // Only comments have been read.
+  kIncludeGuardOpen,    // Inside the #ifndef that may guard the file.
+  kIncludeGuardClosed,  // Past its #endif; only comments may follow.
+  kIncludeGuardNone,    // The file is not guarded.
+} IncludeGuardState;
+
 // A Source provides the source code from somewhere.  It can be
 // from a file or from a string.
 typedef struct Source {
@@ -103,6 +110,11 @@ typedef struct Source {
   } from;
   size_t path_index;  // Index into search path.
   bool is_system_header;  // Set by -isystem resolution or system_header pragma.
+  // Multiple-include optimization: whether everything in the file outside
+  // comments lies within one #ifndef include_guard ... #endif.
+  IncludeGuardState include_guard_state;
+  size_t include_guard_depth;  // Preprocessor if-stack depth inside the guard.
+  char* include_guard;
 } Source;
 
 SourceLocation NewSourceLocation(Source* sou, int lineno, size_t start,

@@ -220,6 +220,9 @@ Source* NewSourceFromFile(const char* filename, FILE* in) {
   src->prev = NULL;
   src->path_index = 0;
   src->is_system_header = false;
+  src->include_guard_state = kIncludeGuardStart;
+  src->include_guard_depth = 0;
+  src->include_guard = NULL;
   return src;
 }
 
@@ -237,6 +240,9 @@ Source* NewSourceFromString(const char* filename, String* str) {
   src->prev = NULL;
   src->path_index = 0;
   src->is_system_header = false;
+  src->include_guard_state = kIncludeGuardNone;
+  src->include_guard_depth = 0;
+  src->include_guard = NULL;
   return src;
 }
 
@@ -277,6 +283,8 @@ void SourceDestruct(Source* src) {
   }
   StringDestruct(&src->filename);
   StringDestruct(&src->original);
+  free(src->include_guard);
+  src->include_guard = NULL;
 }
 
 void SourceDelete(Source* src) {
@@ -299,6 +307,7 @@ void SourceRewind(Source* src) {
   src->at_start = true;
   src->reached_eof = false;
   src->file_index = -1;
+  src->include_guard_state = kIncludeGuardNone;
 }
 
 void SourceResetFiles(Source* src) {

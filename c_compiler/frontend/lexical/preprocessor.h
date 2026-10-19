@@ -47,6 +47,12 @@ typedef struct {
   // Canonical (realpath) paths of files that contained a #pragma once and so
   // must not be included again.  Elements are owned char* and freed on destruct.
   Set pragma_once_files;
+  // What is known about include-search candidates, so a missing one is probed
+  // only once and a guarded header is not reread.  Open addressing; entries
+  // with a NULL path are empty.
+  struct IncludePathFact* include_path_facts;
+  size_t include_path_fact_capacity;  // Zero or a power of two.
+  size_t include_path_fact_count;
   struct Lex* lex;
   bool is_compiled_in;  // Is the current state compiled in?
   // Set when a directive such as #embed replaces itself with ordinary
@@ -92,6 +98,9 @@ void PreprocessorWarning(Preprocessor* preprocessor, const char* warn,
                          const char* error, ...);
 
 bool PreprocessorLineIsCompiledIn(Preprocessor* p);
+// Called when `lex` has read all of its current, included source, before
+// deleting it.
+void PreprocessorFinishIncludedSource(struct Lex* lex);
 
 void PreprocessorPrintStats(Preprocessor* p, FILE* fp);
 

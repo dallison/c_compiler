@@ -742,10 +742,95 @@ static int ComparePragmaOncePath(const void* a, const void* b) {
   return strcmp(*(const char* const*)a, *(const char* const*)b);
 }
 
+static size_t HashIncludePath(const char* path) {
+  uint64_t hash = 14695981039346656037ull;
+  for (const unsigned char* c = (const unsigned char*)path; *c != '\0'; c++) {
+    hash = (hash ^ *c) * 1099511628211ull;
+  }
+  return (size_t)(hash ^ (hash >> 32));
+}
+
+// Either no file exists at `path`, or all of the file there is guarded by
+// `guard`.
+typedef struct IncludePathFact {
+  char* path;
+  char* guard;  // NULL when there is no file.
+} IncludePathFact;
+
+static IncludePathFact* FindIncludePathFact(Preprocessor* p, const char* path) {
+  if (p->include_path_fact_count == 0) {
+    return NULL;
+  }
+  size_t mask = p->include_path_fact_capacity - 1;
+  for (size_t i = HashIncludePath(path) & mask;
+       p->include_path_facts[i].path != NULL; i = (i + 1) & mask) {
+    if (strcmp(p->include_path_facts[i].path, path) == 0) {
+      return &p->include_path_facts[i];
+    }
+  }
+  return NULL;
+}
+
+// Records a fact about a path with none yet.  Takes ownership of `guard`.
+static void AddIncludePathFact(Preprocessor* p, const char* path, char* guard) {
+  // Stay at most half full so probe sequences remain short.
+  if ((p->include_path_fact_count + 1) * 2 > p->include_path_fact_capacity) {
+    size_t capacity = p->include_path_fact_capacity == 0
+                          ? 256
+                          : p->include_path_fact_capacity * 2;
+    IncludePathFact* facts = calloc(capacity, sizeof(*facts));
+    if (facts == NULL) {
+      free(guard);
+      return;
+    }
+    for (size_t i = 0; i < p->include_path_fact_capacity; i++) {
+      IncludePathFact* existing = &p->include_path_facts[i];
+      if (existing->path == NULL) {
+        continue;
+      }
+      size_t j = HashIncludePath(existing->path) & (capacity - 1);
+      while (facts[j].path != NULL) {
+        j = (j + 1) & (capacity - 1);
+      }
+      facts[j] = *existing;
+    }
+    free(p->include_path_facts);
+    p->include_path_facts = facts;
+    p->include_path_fact_capacity = capacity;
+  }
+  char* copy = strdup(path);
+  if (copy == NULL) {
+    free(guard);
+    return;
+  }
+  size_t mask = p->include_path_fact_capacity - 1;
+  size_t i = HashIncludePath(path) & mask;
+  while (p->include_path_facts[i].path != NULL) {
+    i = (i + 1) & mask;
+  }
+  p->include_path_facts[i].path = copy;
+  p->include_path_facts[i].guard = guard;
+  p->include_path_fact_count++;
+}
+
+static void ClearIncludePathFacts(Preprocessor* p) {
+  for (size_t i = 0; i < p->include_path_fact_capacity; i++) {
+    free(p->include_path_facts[i].path);
+    free(p->include_path_facts[i].guard);
+  }
+  free(p->include_path_facts);
+  p->include_path_facts = NULL;
+  p->include_path_fact_capacity = 0;
+  p->include_path_fact_count = 0;
+}
+
 void PreprocessorInit(Preprocessor* p) {
   HashTableInit(&p->macros, "macros", MACROS_TABLE_SIZE, HashMacro,
                 InsertMacroInHashTable, FindMacroInHashTable);
   VectorInit(&p->if_stack);
+  p->include_path_facts = NULL;
+  p->include_path_fact_capacity = 0;
+  p->include_path_fact_count = 0;
   p->lex = NULL;
   VectorInit(&p->user_include_paths);
   VectorInit(&p->system_include_paths);
@@ -810,6 +895,7 @@ void PreprocessorDestruct(Preprocessor* p) {
   VectorDestruct(&p->macro_stack);
 
   SetDestructWithContents(&p->pragma_once_files, free, false);
+  ClearIncludePathFacts(p);
 }
 
 static void PreprocessorResetMacros(Preprocessor* p, bool clear_pragma_once) {
@@ -833,6 +919,7 @@ static void PreprocessorResetMacros(Preprocessor* p, bool clear_pragma_once) {
 void PreprocessorReset(Preprocessor* p) {
   PreprocessorResetMacros(p, true);
   VectorClear(&p->if_stack);
+  ClearIncludePathFacts(p);
   p->is_compiled_in = true;
   p->counter = 0;
 }
@@ -2567,13 +2654,43 @@ static bool MacroEqual(Macro* macro, bool is_function_like, Vector* args,
   return true;
 }
 
+typedef enum {
+  kIncludeCandidateMissing,
+  kIncludeCandidateOpened,
+  // The file exists, and its include guard is defined so it would add
+  // nothing.  It is not opened.
+  kIncludeCandidateGuarded,
+} IncludeCandidateResult;
 
-// Given a path (vector of strings) and a filename, search the path for the file
-// and open it in `mode` if found.  If it is found, sets the filename string to
-// the pathname.  Returns NULL if the file couldn't be found or opened.
+static IncludeCandidateResult ProbeIncludeCandidate(Preprocessor* p,
+                                                    const char* path,
+                                                    FILE** fp) {
+  IncludePathFact* fact = FindIncludePathFact(p, path);
+  if (fact != NULL) {
+    if (fact->guard == NULL) {
+      return kIncludeCandidateMissing;
+    }
+    Macro* guard = HashTableSearch(&p->macros, fact->guard);
+    if (guard != NULL && !guard->undefined) {
+      return kIncludeCandidateGuarded;
+    }
+  }
+  *fp = fopen(path, "r");
+  if (*fp != NULL) {
+    return kIncludeCandidateOpened;
+  }
+  if (fact == NULL && (errno == ENOENT || errno == ENOTDIR)) {
+    AddIncludePathFact(p, path, NULL);
+  }
+  return kIncludeCandidateMissing;
+}
+
 // #include "..." searches the directory of the file that contains the
-// directive before the -I paths ([cpp.include]).
-static FILE* OpenIncludeBesideCurrentFile(Preprocessor* p, String* filename) {
+// directive before the -I paths ([cpp.include]).  If the file is there, sets
+// `filename` to its pathname and returns it opened, or returns NULL and sets
+// `*guarded` when its include guard is already defined.
+static FILE* OpenIncludeBesideCurrentFile(Preprocessor* p, String* filename,
+                                          bool* guarded) {
   if (p == NULL || p->lex == NULL || p->lex->source == NULL ||
       p->lex->source->filename.value == NULL ||
       p->lex->source->filename.length == 0 || filename == NULL ||
@@ -2595,30 +2712,44 @@ static FILE* OpenIncludeBesideCurrentFile(Preprocessor* p, String* filename) {
     path[dir_len] = '/';
     memcpy(path + dir_len + 1, filename->value, filename->length + 1);
   }
-  FILE* fp = fopen(path, "r");
-  if (fp != NULL) {
+  FILE* fp = NULL;
+  if (ProbeIncludeCandidate(p, path, &fp) != kIncludeCandidateMissing) {
     StringSet(filename, path);
+    *guarded = fp == NULL;
   }
   free(path);
   return fp;
 }
 
-static FILE* FindFileInPath(Vector* path, String* filename, size_t* start,
-                            const char* mode) {
-  for (size_t i = *start; i < path->length; i++) {
-    String pathname = {0};
-    StringPrintf(&pathname, "%s/%s", ((String*)path->value.p[i])->value,
-                 filename->value);
-    FILE* fp = fopen(pathname.value, mode);
-    if (fp != NULL) {
-      StringSetString(filename, &pathname);
-      StringDestruct(&pathname);
-      *start = i;
-      return fp;
+// Like OpenIncludeBesideCurrentFile, but searches the directories of `path`
+// from index `*start`, setting `*start` to the index where the file is found.
+static FILE* FindFileInPath(Preprocessor* p, Vector* path, String* filename,
+                            size_t* start, bool* guarded) {
+  char* candidate = NULL;
+  size_t capacity = 0;
+  FILE* fp = NULL;
+  for (size_t i = *start; i < path->length && fp == NULL && !*guarded; i++) {
+    String* dir = path->value.p[i];
+    size_t needed = dir->length + 1 + filename->length + 1;
+    if (needed > capacity) {
+      char* grown = realloc(candidate, needed);
+      if (grown == NULL) {
+        break;
+      }
+      candidate = grown;
+      capacity = needed;
     }
-    StringDestruct(&pathname);
+    memcpy(candidate, dir->value, dir->length);
+    candidate[dir->length] = '/';
+    memcpy(candidate + dir->length + 1, filename->value, filename->length + 1);
+    if (ProbeIncludeCandidate(p, candidate, &fp) != kIncludeCandidateMissing) {
+      StringSet(filename, candidate);
+      *start = i;
+      *guarded = fp == NULL;
+    }
   }
-  return NULL;
+  free(candidate);
+  return fp;
 }
 
 // Type for function to handle preprocessor commands.
@@ -3058,27 +3189,36 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   }
   
   FILE* fp = NULL;
+  bool guarded = false;
   size_t path_index = start_index;
   bool found_in_system_path = false;
   if (!system_include) {
     // Not a system include (#include "...") so search the including file's
     // directory, then the user include paths.
     if (start_index == 0) {
-      fp = OpenIncludeBesideCurrentFile(p, &filename);
+      fp = OpenIncludeBesideCurrentFile(p, &filename, &guarded);
     }
-    if (fp == NULL) {
-      fp = FindFileInPath(&p->user_include_paths, &filename, &path_index, "r");
+    if (fp == NULL && !guarded) {
+      fp = FindFileInPath(p, &p->user_include_paths, &filename, &path_index,
+                          &guarded);
     }
   } else {
     // `#include <file>` searches `-I` directories before the system paths.
-    fp = FindFileInPath(&p->user_include_paths, &filename, &path_index, "r");
+    fp = FindFileInPath(p, &p->user_include_paths, &filename, &path_index,
+                        &guarded);
   }
-  if (fp == NULL) {
+  if (fp == NULL && !guarded) {
     // Not found in user include paths or this was a system include
     // (#include <...>).  Search system include paths.
-    fp =
-        FindFileInPath(&p->system_include_paths, &filename, &path_index, "r");
+    fp = FindFileInPath(p, &p->system_include_paths, &filename, &path_index,
+                        &guarded);
     found_in_system_path = fp != NULL;
+  }
+  if (guarded) {
+    // Rereading the file would skip all of it.
+    StringDestruct(&filename);
+    StringDestruct(&tokenized_line);
+    return;
   }
   if (fp == NULL && start_index == 0) {
     // `#include <CoreFoundation/CFTimeZone.h>` is a framework header.  Clang
@@ -3091,6 +3231,8 @@ static void DoInclude(Preprocessor* p, String* line, size_t pos,
   if (fp == NULL) {
     if (start_index != 0) {
       // For #include_next we don't abort if there is no next include file.
+      StringDestruct(&filename);
+      StringDestruct(&tokenized_line);
       return;
     }
     // There is no point in continuing to compile if we can't find
@@ -4455,14 +4597,134 @@ static struct {
     {NULL, NULL},
 };
 
+// Whether `line` has anything but spaces and comments from `pos` on.
+static bool LineHasContentFrom(Preprocessor* p, String* line, size_t pos) {
+  for (;;) {
+    size_t next = SkipSpacesAndComments(p, pos, line, NULL);
+    if (next >= line->length) {
+      return false;
+    }
+    if (next == pos) {
+      return true;
+    }
+    pos = next;
+  }
+}
+
+// Reads an #if expression that is exactly `!defined(name)` or
+// `!defined name`.
+static bool ReadNegatedDefinedTest(Preprocessor* p, String* line, size_t pos,
+                                   String* name) {
+  StringInit(name, NULL);
+  if (pos >= line->length || line->value[pos] != '!') {
+    return false;
+  }
+  String word;
+  pos = ReadIdentifier(line, SkipSpacesAndComments(p, pos + 1, line, NULL),
+                       &word);
+  bool is_defined = StringEqual(&word, "defined");
+  StringDestruct(&word);
+  if (!is_defined) {
+    return false;
+  }
+  pos = SkipSpacesAndComments(p, pos, line, NULL);
+  bool parenthesized = pos < line->length && line->value[pos] == '(';
+  if (parenthesized) {
+    pos = SkipSpacesAndComments(p, pos + 1, line, NULL);
+  }
+  StringDestruct(name);
+  pos = SkipSpacesAndComments(p, ReadIdentifier(line, pos, name), line, NULL);
+  if (parenthesized) {
+    if (pos >= line->length || line->value[pos] != ')') {
+      return false;
+    }
+    pos = SkipSpacesAndComments(p, pos + 1, line, NULL);
+  }
+  return name->length != 0 && !LineHasContentFrom(p, line, pos);
+}
+
+// Follows whether `src` is wholly enclosed by one #ifndef, given the directive
+// `command_name` read from it, before the directive runs.
+static void TrackIncludeGuardDirective(Preprocessor* p, Source* src,
+                                       String* command_name, String* line,
+                                       size_t pos) {
+  switch (src->include_guard_state) {
+    case kIncludeGuardStart: {
+      String name;
+      bool opens = false;
+      if (StringEqual(command_name, "ifndef")) {
+        pos = ReadIdentifier(line, pos, &name);
+        opens = name.length != 0 && !LineHasContentFrom(p, line, pos);
+      } else if (StringEqual(command_name, "if")) {
+        opens = ReadNegatedDefinedTest(p, line, pos, &name);
+      } else {
+        StringInit(&name, NULL);
+      }
+      src->include_guard_state = kIncludeGuardNone;
+      if (opens) {
+        src->include_guard = strdup(name.value);
+        if (src->include_guard != NULL) {
+          src->include_guard_state = kIncludeGuardOpen;
+          src->include_guard_depth = p->if_stack.length + 1;
+        }
+      }
+      StringDestruct(&name);
+      break;
+    }
+    case kIncludeGuardOpen:
+      if (p->if_stack.length != src->include_guard_depth) {
+        break;
+      }
+      if (StringEqual(command_name, "endif")) {
+        src->include_guard_state = kIncludeGuardClosed;
+      } else if (StringEqual(command_name, "else") ||
+                 StringEqual(command_name, "elif") ||
+                 StringEqual(command_name, "elifdef") ||
+                 StringEqual(command_name, "elifndef")) {
+        src->include_guard_state = kIncludeGuardNone;
+      }
+      break;
+    case kIncludeGuardClosed:
+      src->include_guard_state = kIncludeGuardNone;
+      break;
+    case kIncludeGuardNone:
+      break;
+  }
+}
+
+void PreprocessorFinishIncludedSource(Lex* lex) {
+  Preprocessor* p = lex->preprocessor;
+  Source* source = lex->source;
+  if (source->include_guard_state != kIncludeGuardClosed || lex->in_comment) {
+    return;
+  }
+  // Keyed by the path the file was opened with, which #line does not change.
+  char* guard = source->include_guard;
+  source->include_guard = NULL;
+  IncludePathFact* fact = FindIncludePathFact(p, source->original.value);
+  if (fact != NULL) {
+    free(fact->guard);
+    fact->guard = guard;
+  } else {
+    AddIncludePathFact(p, source->original.value, guard);
+  }
+}
+
 bool PreprocessorParseDirective(Preprocessor* p, String* line) {
   p->directive_produced_output = false;
+  Source* src = p->lex->source;
+  bool track_guard =
+      src != NULL && src->include_guard_state != kIncludeGuardNone;
   size_t pos = 0;
   if (p->lex->in_comment) {
     pos = SkipToEndOfComment(line, pos);
   }
   pos = SkipSpacesAndComments(p, pos, line, NULL);
   if (pos >= line->length || line->value[pos] != '#') {
+    if (track_guard && src->include_guard_state != kIncludeGuardOpen &&
+        LineHasContentFrom(p, line, pos)) {
+      src->include_guard_state = kIncludeGuardNone;
+    }
     return false;
   }
   pos++;
@@ -4495,6 +4757,9 @@ bool PreprocessorParseDirective(Preprocessor* p, String* line) {
       break;
     }
   }
+  if (track_guard) {
+    TrackIncludeGuardDirective(p, src, &command_name, line, pos);
+  }
   if (command == NULL) {
     // Unknown preprocessor command, we have an unknown preprocessor directive.
     // Only give this error if the line is compiled in.
@@ -4520,46 +4785,51 @@ bool PreprocessorDirectiveProducedOutput(Preprocessor* p) {
 bool PreprocessorHasInclude(Preprocessor* p, String* filename,
                             bool system_include) {
   FILE* fp = NULL;
+  bool guarded = false;
   size_t path_index = 0;
   if (!system_include) {
-    fp = OpenIncludeBesideCurrentFile(p, filename);
-    if (fp == NULL) {
-      fp = FindFileInPath(&p->user_include_paths, filename, &path_index, "r");
+    fp = OpenIncludeBesideCurrentFile(p, filename, &guarded);
+    if (fp == NULL && !guarded) {
+      fp = FindFileInPath(p, &p->user_include_paths, filename, &path_index,
+                          &guarded);
     }
   } else {
-    fp = FindFileInPath(&p->user_include_paths, filename, &path_index, "r");
+    fp = FindFileInPath(p, &p->user_include_paths, filename, &path_index,
+                        &guarded);
   }
-  if (fp == NULL) {
+  if (fp == NULL && !guarded) {
     // Not found in user include paths or this was a system include
     // (#include <...>).  Search system include paths.
-    fp = FindFileInPath(&p->system_include_paths, filename, &path_index, "r");
+    fp = FindFileInPath(p, &p->system_include_paths, filename, &path_index,
+                        &guarded);
   }
-  if (fp == NULL) {
-    return false;
+  if (fp != NULL) {
+    fclose(fp);
   }
-  fclose(fp);
-  return true;
+  return fp != NULL || guarded;
 }
 
 bool PreprocessorHasIncludeNext(Preprocessor* p, String* filename,
                                 bool system_include) {
   FILE* fp = NULL;
+  bool guarded = false;
   size_t path_index = compiler->current_include_path_index + 1;
   if (!system_include) {
     // Not a system include (#include "...") so search user include
     // paths.
-    fp = FindFileInPath(&p->user_include_paths, filename, &path_index, "r");
+    fp = FindFileInPath(p, &p->user_include_paths, filename, &path_index,
+                        &guarded);
   }
-  if (fp == NULL) {
+  if (fp == NULL && !guarded) {
     // Not found in user include paths or this was a system include
     // (#include <...>).  Search system include paths.
-    fp = FindFileInPath(&p->system_include_paths, filename, &path_index, "r");
+    fp = FindFileInPath(p, &p->system_include_paths, filename, &path_index,
+                        &guarded);
   }
-  if (fp == NULL) {
-    return false;
+  if (fp != NULL) {
+    fclose(fp);
   }
-  fclose(fp);
-  return true;
+  return fp != NULL || guarded;
 }
 
 //

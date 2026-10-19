@@ -2773,6 +2773,7 @@ void LexReadLine(Lex* lex) {
       // previous one and continue reading.
       if (lex->source->prev != NULL) {
         Source* prev = lex->source->prev;
+        PreprocessorFinishIncludedSource(lex);
         SourceDelete(lex->source);
         lex->source = prev;
         compiler->current_include_path_index = prev->path_index;
