@@ -175,6 +175,11 @@ void AsmModuleDestruct(AsmModule* module);
 // Equal names return the same pointer.  Returns NULL if out of memory.
 const char* AsmModuleInternName(AsmModule* module, const char* name);
 
+// Looks up a name returned by AsmModuleInternName in `assembler`'s symbol
+// table.  The name remembers the symbol it found until the table is cleared.
+AssemblerSymbol* AsmModuleFindSymbol(struct Assembler* assembler,
+                                     const char* interned_name);
+
 void AsmModuleSection(AsmModule* module, const char* name, int32_t type,
                       int32_t flags, int32_t alignment);
 void AsmModuleLabel(AsmModule* module, const char* name);

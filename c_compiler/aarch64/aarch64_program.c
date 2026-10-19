@@ -21,7 +21,7 @@ static void DestroyInstruction(void* value) {
 
 static AssemblerSymbol* GetOrCreateSymbol(Assembler* assembler,
                                           const char* name) {
-  AssemblerSymbol* symbol = AssemblerFindSymbol(assembler, name);
+  AssemblerSymbol* symbol = AsmModuleFindSymbol(assembler, name);
   if (symbol == NULL && assembler->object.pass == 1) {
     symbol = NewAssemblerSymbol(name, 0, SYM_TYPE(none), SYM_BIND(global), 0);
     AssemblerInsertSymbol(assembler, symbol);

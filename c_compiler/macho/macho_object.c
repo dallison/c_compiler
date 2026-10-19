@@ -47,18 +47,23 @@ typedef struct {
   uint16_t desc;
   uint64_t value;
   AssemblerSymbol* source;
+  uint32_t index;  // Final symbol table index, set by NumberSymbols.
   bool is_undefined;
 } MachOSymbol;
 
 typedef struct {
   uint32_t address;
-  uint32_t packed;
+  uint32_t packed;  // Symbol number is filled in from `symbol` at the end.
   uint32_t section;
+  MachOSymbol* symbol;  // NULL when the symbol field holds a constant.
 } MachOReloc;
 
 typedef struct {
   Vector sections;
   Vector symbols;
+  // Locals made while preparing relocations, in creation order.  They follow
+  // the other locals in the symbol table.
+  Vector synthetic_locals;
   Vector relocs;
   Buffer strings;
   uint32_t nlocals;
@@ -422,9 +427,6 @@ static bool PrepareSymbols(AsmObject* object, MachOObject* macho) {
   }
   for (size_t i = 0; i < macho->symbols.length; i++) {
     MachOSymbol* sym = macho->symbols.value.p[i];
-    if (sym->source != NULL) {
-      sym->source->index = (int32_t)i;
-    }
     if (!sym->is_undefined && (sym->type & MACHO_N_SECT) == MACHO_N_SECT) {
       MachOSection* section =
           FindMachOSection(&macho->sections, sym->source->section);
@@ -454,12 +456,6 @@ static bool PrepareSymbols(AsmObject* object, MachOObject* macho) {
         ((MachOSection*)macho->sections.value.p[0])->macho_index;
     VectorInsertBefore(&macho->symbols, 0, dummy);
     macho->nlocals++;
-    for (size_t i = 0; i < macho->symbols.length; i++) {
-      MachOSymbol* sym = macho->symbols.value.p[i];
-      if (sym->source != NULL) {
-        sym->source->index = (int32_t)i;
-      }
-    }
   }
   return true;
 }
@@ -472,31 +468,6 @@ static bool RelocUsesAddendPair(uint32_t macho_type) {
          macho_type == MACHO_ARM64_RELOC_GOT_LOAD_PAGEOFF12 ||
          macho_type == MACHO_ARM64_RELOC_TLVP_LOAD_PAGE21 ||
          macho_type == MACHO_ARM64_RELOC_TLVP_LOAD_PAGEOFF12;
-}
-
-/* A local symbol inserted among the locals shifts every later symbol.
- * Relocations already packed have to follow that shift.  ADDEND pairs store
- * a constant in the symbol field, not a symbol index. */
-static void BumpPackedSymbolIndices(MachOObject* macho, uint32_t inserted) {
-  for (size_t i = 0; i < macho->symbols.length; i++) {
-    MachOSymbol* sym = macho->symbols.value.p[i];
-    if (sym->source != NULL && sym->source->index >= (int32_t)inserted) {
-      sym->source->index++;
-    }
-  }
-  for (size_t i = 0; i < macho->relocs.length; i++) {
-    MachOReloc* reloc = macho->relocs.value.p[i];
-    uint32_t packed = reloc->packed;
-    if (((packed >> 27) & 1u) == 0) {
-      continue;
-    }
-    uint32_t symnum = packed & 0xffffffu;
-    if (symnum < inserted) {
-      continue;
-    }
-    reloc->packed = PackReloc(symnum + 1, (packed >> 24) & 1u,
-                               (packed >> 25) & 3u, 1, (packed >> 28) & 0xfu);
-  }
 }
 
 /* ld64 rejects a section whose first atom is N_ALT_ENTRY.  Sections whose own
@@ -516,7 +487,6 @@ static void EnsureSectionStartSymbol(MachOObject* macho,
       return;
     }
   }
-  uint32_t index = macho->nlocals;
   MachOSymbol* sym = calloc(1, sizeof(*sym));
   char name[32];
   snprintf(name, sizeof(name), "ltmp%u", section->macho_index);
@@ -524,19 +494,17 @@ static void EnsureSectionStartSymbol(MachOObject* macho,
   sym->type = MACHO_N_SECT;
   sym->sect = (uint8_t)section->macho_index;
   sym->value = section->addr;
-  VectorInsertBefore(&macho->symbols, index, sym);
-  macho->nlocals++;
-  BumpPackedSymbolIndices(macho, index);
+  VectorAppend(&macho->synthetic_locals, sym);
 }
 
 /* arm64 Mach-O has no PC-relative data relocation.  A SUBTRACTOR/UNSIGNED
  * pair at the same address computes target - pc, which is what the LSDA's
  * DW_EH_PE_pcrel sdata4 slots need.  N_ALT_ENTRY keeps the temporary from
  * splitting the exception table into subsections. */
-static int AddPcRelSubtractor(MachOObject* macho, MachOSection* section,
-                              uint32_t offset) {
+static MachOSymbol* AddPcRelSubtractor(MachOObject* macho,
+                                       MachOSection* section,
+                                       uint32_t offset) {
   EnsureSectionStartSymbol(macho, section);
-  uint32_t index = macho->nlocals;
   MachOSymbol* sym = calloc(1, sizeof(*sym));
   char name[64];
   snprintf(name, sizeof(name), "ltmp_pcrel_%u_%u", section->macho_index,
@@ -546,10 +514,57 @@ static int AddPcRelSubtractor(MachOObject* macho, MachOSection* section,
   sym->sect = (uint8_t)section->macho_index;
   sym->desc = MACHO_N_ALT_ENTRY;
   sym->value = section->addr + offset;
-  VectorInsertBefore(&macho->symbols, index, sym);
-  macho->nlocals++;
-  BumpPackedSymbolIndices(macho, index);
-  return (int)index;
+  VectorAppend(&macho->synthetic_locals, sym);
+  return sym;
+}
+
+/* The Mach-O symbol for a relocation's target, or NULL if it has none.
+ * Symbol indices are those assigned by IndexSourceSymbols. */
+static MachOSymbol* RelocTarget(MachOObject* macho,
+                                const AssemblerRelocation* reloc) {
+  if (reloc->symbol == NULL || reloc->symbol->index < 0 ||
+      (size_t)reloc->symbol->index >= macho->symbols.length) {
+    return NULL;
+  }
+  return macho->symbols.value.p[reloc->symbol->index];
+}
+
+static void IndexSourceSymbols(MachOObject* macho) {
+  for (size_t i = 0; i < macho->symbols.length; i++) {
+    MachOSymbol* sym = macho->symbols.value.p[i];
+    if (sym->source != NULL) {
+      sym->source->index = (int32_t)i;
+    }
+  }
+}
+
+/* Places the synthetic locals after the other locals, numbers every symbol and
+ * fills the symbol number into each relocation that names one. */
+static void NumberSymbols(MachOObject* macho) {
+  size_t extra = macho->synthetic_locals.length;
+  if (extra > 0) {
+    size_t old_length = macho->symbols.length;
+    size_t tail = old_length - macho->nlocals;
+    VectorReserve(&macho->symbols, old_length + extra);
+    void** p = macho->symbols.value.p;
+    memmove(p + macho->nlocals + extra, p + macho->nlocals,
+            tail * sizeof(void*));
+    memcpy(p + macho->nlocals, macho->synthetic_locals.value.p,
+           extra * sizeof(void*));
+    macho->symbols.length = old_length + extra;
+    macho->nlocals += (uint32_t)extra;
+    macho->synthetic_locals.length = 0;
+  }
+  for (size_t i = 0; i < macho->symbols.length; i++) {
+    MachOSymbol* sym = macho->symbols.value.p[i];
+    sym->index = (uint32_t)i;
+  }
+  for (size_t i = 0; i < macho->relocs.length; i++) {
+    MachOReloc* reloc = macho->relocs.value.p[i];
+    if (reloc->symbol != NULL) {
+      reloc->packed |= reloc->symbol->index & 0xffffffu;
+    }
+  }
 }
 
 static bool SetIntegerInSection(MachOSection* section, uint32_t offset,
@@ -566,9 +581,9 @@ static bool SetIntegerInSection(MachOSection* section, uint32_t offset,
 
 static bool EmitPcRelData(MachOObject* macho, MachOSection* section,
                           AssemblerRelocation* reloc, uint32_t nbytes) {
-  int pc = AddPcRelSubtractor(macho, section, (uint32_t)reloc->offset);
-  int target = reloc->symbol != NULL ? reloc->symbol->index : -1;
-  if (target < 0) {
+  MachOSymbol* pc = AddPcRelSubtractor(macho, section, (uint32_t)reloc->offset);
+  MachOSymbol* target = RelocTarget(macho, reloc);
+  if (target == NULL) {
     fprintf(stderr, "Mach-O: relocation has no symbol\n");
     return false;
   }
@@ -580,21 +595,22 @@ static bool EmitPcRelData(MachOObject* macho, MachOSection* section,
   MachOReloc* sub = malloc(sizeof(*sub));
   sub->address = (uint32_t)reloc->offset;
   sub->section = section->macho_index;
-  sub->packed =
-      PackReloc((uint32_t)pc, 0, length, 1, MACHO_ARM64_RELOC_SUBTRACTOR);
+  sub->packed = PackReloc(0, 0, length, 1, MACHO_ARM64_RELOC_SUBTRACTOR);
+  sub->symbol = pc;
   VectorAppend(&macho->relocs, sub);
   section->nreloc++;
   MachOReloc* uns = malloc(sizeof(*uns));
   uns->address = (uint32_t)reloc->offset;
   uns->section = section->macho_index;
-  uns->packed =
-      PackReloc((uint32_t)target, 0, length, 1, MACHO_ARM64_RELOC_UNSIGNED);
+  uns->packed = PackReloc(0, 0, length, 1, MACHO_ARM64_RELOC_UNSIGNED);
+  uns->symbol = target;
   VectorAppend(&macho->relocs, uns);
   section->nreloc++;
   return true;
 }
 
 static bool PrepareRelocs(AsmObject* object, MachOObject* macho) {
+  IndexSourceSymbols(macho);
   for (size_t i = 0; i < object->relocations.length; i++) {
     AssemblerRelocation* reloc = object->relocations.value.p[i];
     MachOSection* section =
@@ -619,8 +635,8 @@ static bool PrepareRelocs(AsmObject* object, MachOObject* macho) {
               reloc->symbol != NULL ? reloc->symbol->name.value : "?");
       return false;
     }
-    int symbol = reloc->symbol != NULL ? reloc->symbol->index : -1;
-    if (symbol < 0) {
+    MachOSymbol* symbol = RelocTarget(macho, reloc);
+    if (symbol == NULL) {
       fprintf(stderr, "Mach-O: relocation has no symbol\n");
       return false;
     }
@@ -637,6 +653,7 @@ static bool PrepareRelocs(AsmObject* object, MachOObject* macho) {
         addend->packed =
             PackReloc((uint32_t)reloc->addend & 0xffffffu, 0, 2, 0,
                       MACHO_ARM64_RELOC_ADDEND);
+        addend->symbol = NULL;
         VectorAppend(&macho->relocs, addend);
         section->nreloc++;
       }
@@ -651,7 +668,8 @@ static bool PrepareRelocs(AsmObject* object, MachOObject* macho) {
     MachOReloc* out = malloc(sizeof(*out));
     out->address = (uint32_t)reloc->offset;
     out->section = section->macho_index;
-    out->packed = PackReloc((uint32_t)symbol, pcrel, length, 1, type);
+    out->packed = PackReloc(0, pcrel, length, 1, type);
+    out->symbol = symbol;
     VectorAppend(&macho->relocs, out);
     section->nreloc++;
   }
@@ -682,17 +700,8 @@ static bool SectionIsThreadLocalStorage(const MachOSection* section) {
          type == MACHO_S_THREAD_LOCAL_ZEROFILL;
 }
 
-static int MachOSymbolIndex(const MachOObject* macho, const MachOSymbol* sym) {
-  for (size_t i = 0; i < macho->symbols.length; i++) {
-    if (macho->symbols.value.p[i] == sym) {
-      return (int)i;
-    }
-  }
-  return -1;
-}
-
 static bool AppendExternalReloc(MachOObject* macho, MachOSection* section,
-                                uint32_t address, uint32_t symbol,
+                                uint32_t address, MachOSymbol* symbol,
                                 uint32_t length, uint32_t type) {
   MachOReloc* reloc = malloc(sizeof(*reloc));
   if (reloc == NULL) {
@@ -700,7 +709,8 @@ static bool AppendExternalReloc(MachOObject* macho, MachOSection* section,
   }
   reloc->address = address;
   reloc->section = section->macho_index;
-  reloc->packed = PackReloc(symbol, 0, length, 1, type);
+  reloc->packed = PackReloc(0, 0, length, 1, type);
+  reloc->symbol = symbol;
   VectorAppend(&macho->relocs, reloc);
   section->nreloc++;
   return true;
@@ -761,10 +771,8 @@ static bool PrepareThreadLocalDescriptors(MachOObject* macho) {
     init->type = MACHO_N_SECT;
     init->sect = originals[i]->sect;
     init->value = originals[i]->value;
-    uint32_t index = macho->nlocals;
-    VectorInsertBefore(&macho->symbols, index, init);
+    VectorInsertBefore(&macho->symbols, macho->nlocals, init);
     macho->nlocals++;
-    BumpPackedSymbolIndices(macho, index);
     inits[i] = init;
   }
 
@@ -809,16 +817,13 @@ static bool PrepareThreadLocalDescriptors(MachOObject* macho) {
   vars->macho_index = (uint32_t)macho->sections.length + 1;
   VectorAppend(&macho->sections, vars);
 
-  int bootstrap_index = MachOSymbolIndex(macho, bootstrap);
   for (size_t i = 0; i < n; i++) {
     originals[i]->sect = (uint8_t)vars->macho_index;
     originals[i]->value = vars->addr + i * 24;
-    int init_index = MachOSymbolIndex(macho, inits[i]);
     uint32_t base = (uint32_t)(i * 24);
-    if (bootstrap_index < 0 || init_index < 0 ||
-        !AppendExternalReloc(macho, vars, base, (uint32_t)bootstrap_index, 3,
+    if (!AppendExternalReloc(macho, vars, base, bootstrap, 3,
                              MACHO_ARM64_RELOC_UNSIGNED) ||
-        !AppendExternalReloc(macho, vars, base + 16, (uint32_t)init_index, 3,
+        !AppendExternalReloc(macho, vars, base + 16, inits[i], 3,
                              MACHO_ARM64_RELOC_UNSIGNED)) {
       free(originals);
       free(inits);
@@ -839,6 +844,7 @@ bool AsmObjectWriteMachO(AsmObject* object, FILE* out) {
   MachOObject macho = {0};
   VectorInit(&macho.sections);
   VectorInit(&macho.symbols);
+  VectorInit(&macho.synthetic_locals);
   VectorInit(&macho.relocs);
   BufferInit(&macho.strings);
   BufferAppend(&macho.strings, "\0", 1);
@@ -849,6 +855,7 @@ bool AsmObjectWriteMachO(AsmObject* object, FILE* out) {
   if (!ok) {
     goto done;
   }
+  NumberSymbols(&macho);
 
   uint32_t nsects = (uint32_t)macho.sections.length;
   uint32_t cmd_segment = 72 + 80 * nsects;
@@ -1038,11 +1045,17 @@ done:
     StringDestruct(&sym->name);
     free(sym);
   }
+  for (size_t i = 0; i < macho.synthetic_locals.length; i++) {
+    MachOSymbol* sym = macho.synthetic_locals.value.p[i];
+    StringDestruct(&sym->name);
+    free(sym);
+  }
   for (size_t i = 0; i < macho.relocs.length; i++) {
     free(macho.relocs.value.p[i]);
   }
   VectorDestruct(&macho.sections);
   VectorDestruct(&macho.symbols);
+  VectorDestruct(&macho.synthetic_locals);
   VectorDestruct(&macho.relocs);
   BufferDestruct(&macho.strings);
   return ok;

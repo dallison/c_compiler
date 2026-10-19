@@ -471,6 +471,8 @@ typedef struct Compiler {
   struct CompilerStringIndex* referenced_function_name_index;
   // Assembly names of namespace/static data referenced by reachable code.
   Vector referenced_variable_asm_names;
+  // Membership index for the vector above.
+  struct CompilerStringIndex* referenced_variable_name_index;
 
   // Vector containing initialized static variables (InitializedStaticVariable*)
   Vector initialized_static_variables;

@@ -151,9 +151,15 @@ static void DeleteSymbolTable(void* table, void* data) {
   free(table);
 }
 
-static void ClearAssemblerSymbolTable(HashTable* table) {
-  HashTableTraverse(table, DeleteSymbolTable, NULL);
-  HashTableClear(table);
+static uint64_t NewSymbolEpoch(void) {
+  static uint64_t last_epoch = 0;
+  return ++last_epoch;
+}
+
+static void ClearAssemblerSymbolTable(AsmObject* object) {
+  HashTableTraverse(&object->symbol_table, DeleteSymbolTable, NULL);
+  HashTableClear(&object->symbol_table);
+  object->symbol_epoch = NewSymbolEpoch();
 }
 
 void AsmObjectInit(AsmObject* object, int16_t elf_machine_type,
@@ -168,6 +174,7 @@ void AsmObjectInit(AsmObject* object, int16_t elf_machine_type,
   object->recording_operations = false;
   HashTableInit(&object->symbol_table, "assembler_symbols", 1009, HashSymbol,
                 InsertSymbolIntoHashTable, FindSymbolInHashTable);
+  object->symbol_epoch = NewSymbolEpoch();
   object->elf_machine_type = elf_machine_type;
   object->elf_flags = elf_flags;
   switch (elf_machine_type) {
@@ -203,7 +210,7 @@ void AsmObjectDestruct(AsmObject* object) {
   VectorDestructWithContents(
       &object->relocations, (VectorElementDestructor)AssemblerRelocationDestruct,
       /*free_element=*/true);
-  ClearAssemblerSymbolTable(&object->symbol_table);
+  ClearAssemblerSymbolTable(object);
   HashTableDestruct(&object->symbol_table);
   for (size_t i = 0; i < object->orphan_symbols.length; i++) {
     AssemblerSymbol* sym = object->orphan_symbols.value.p[i];
@@ -217,7 +224,7 @@ void AsmObjectDestruct(AsmObject* object) {
 }
 
 void AsmObjectClearSymbols(AsmObject* object) {
-  ClearAssemblerSymbolTable(&object->symbol_table);
+  ClearAssemblerSymbolTable(object);
 }
 
 void AsmObjectReset(AsmObject* object, bool clear_symbols) {

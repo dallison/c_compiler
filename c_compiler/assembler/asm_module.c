@@ -90,6 +90,17 @@ static void NamePoolDestruct(AsmNamePool* pool) {
   memset(pool, 0, sizeof(*pool));
 }
 
+// Stored in front of every interned name: the assembler symbol the name last
+// resolved to, valid while `epoch` equals that object's symbol_epoch.
+typedef struct {
+  AssemblerSymbol* symbol;
+  uint64_t epoch;
+} NameSymbolCache;
+
+static NameSymbolCache* NameCacheOf(const char* interned_name) {
+  return (NameSymbolCache*)interned_name - 1;
+}
+
 const char* AsmModuleInternName(AsmModule* module, const char* name) {
   AsmNamePool* pool = &module->names;
   // Stay at most half full so probe sequences remain short.
@@ -105,11 +116,16 @@ const char* AsmModuleInternName(AsmModule* module, const char* name) {
     }
   }
   size_t size = strlen(name) + 1;
-  char* copy = AllocateName(pool, size);
-  if (copy == NULL) {
+  // Rounded so the next name's cache header stays aligned.
+  size_t entry_size = (sizeof(NameSymbolCache) + size + 7) & ~(size_t)7;
+  NameSymbolCache* cache = (NameSymbolCache*)AllocateName(pool, entry_size);
+  if (cache == NULL) {
     module->failed = true;
     return NULL;
   }
+  cache->symbol = NULL;
+  cache->epoch = 0;
+  char* copy = (char*)(cache + 1);
   memcpy(copy, name, size);
   pool->slots[i] = copy;
   pool->count++;
@@ -512,8 +528,22 @@ void AsmModuleText(AsmModule* module, const char* name, const char* text,
   }
 }
 
+AssemblerSymbol* AsmModuleFindSymbol(Assembler* assembler,
+                                     const char* interned_name) {
+  NameSymbolCache* cache = NameCacheOf(interned_name);
+  if (cache->epoch == assembler->object.symbol_epoch) {
+    return cache->symbol;
+  }
+  AssemblerSymbol* symbol = AssemblerFindSymbol(assembler, interned_name);
+  if (symbol != NULL) {
+    cache->symbol = symbol;
+    cache->epoch = assembler->object.symbol_epoch;
+  }
+  return symbol;
+}
+
 static AssemblerSymbol* EnsureSymbol(Assembler* assembler, const char* name) {
-  AssemblerSymbol* symbol = AssemblerFindSymbol(assembler, name);
+  AssemblerSymbol* symbol = AsmModuleFindSymbol(assembler, name);
   if (symbol == NULL && assembler->object.pass == 1) {
     symbol = NewAssemblerSymbol(name, 0, SYM_TYPE(none), SYM_BIND(global), 0);
     AssemblerInsertSymbol(assembler, symbol);
@@ -527,15 +557,14 @@ static bool EvaluateExpr(Assembler* assembler, const AsmModuleExpr* expr,
     *value = expr->addend;
     return true;
   }
-  AssemblerSymbol* symbol =
-      AssemblerFindSymbol(assembler, expr->symbol);
+  AssemblerSymbol* symbol = AsmModuleFindSymbol(assembler, expr->symbol);
   if (symbol == NULL || !symbol->defined) {
     return false;
   }
   *value = symbol->value + expr->addend;
   if (expr->kind == kAsmExprSymbolDifference) {
     AssemblerSymbol* subtract =
-        AssemblerFindSymbol(assembler, expr->subtract_symbol);
+        AsmModuleFindSymbol(assembler, expr->subtract_symbol);
     if (subtract == NULL || !subtract->defined ||
         subtract->section != symbol->section) {
       return false;
@@ -612,7 +641,7 @@ static void EmitInteger(Assembler* assembler, int width, const AsmModuleExpr* ex
 }
 
 static void EmitLabel(Assembler* assembler, const char* name) {
-  AssemblerSymbol* symbol = AssemblerFindSymbol(assembler, name);
+  AssemblerSymbol* symbol = AsmModuleFindSymbol(assembler, name);
   if (assembler->object.pass == 1) {
     if (symbol == NULL) {
       String spelling;

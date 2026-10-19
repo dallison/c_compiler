@@ -143,6 +143,9 @@ typedef struct AsmObject {
   Vector sections;
   Vector relocations;
   HashTable symbol_table;
+  // Unique among all objects and renewed whenever symbol_table is cleared, so
+  // a cached AssemblerSymbol* tagged with it is valid while it matches.
+  uint64_t symbol_epoch;
   Vector orphan_symbols;
   Vector operations;
   int pass;

@@ -2774,19 +2774,6 @@ static bool FunctionBodyContainsUnexpandedPack(ASTNode* body) {
   return search.found;
 }
 
-static bool AsmNameInVector(Vector* names, const char* asm_name) {
-  if (asm_name == NULL || *asm_name == '\0') {
-    return false;
-  }
-  for (size_t i = 0; i < names->length; i++) {
-    String* name = names->value.p[i];
-    if (name != NULL && strcmp(name->value, asm_name) == 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
 static const char* FunctionEmitName(Symbol* symbol) {
   if (symbol == NULL) {
     return "";
@@ -2847,7 +2834,8 @@ void CompilerMarkVariableReferenced(Symbol* symbol) {
   const char* asm_name = symbol->asm_name.length != 0
                              ? symbol->asm_name.value
                              : symbol->name.value;
-  if (!AsmNameInVector(&compiler->referenced_variable_asm_names, asm_name)) {
+  if (CompilerStringIndexInsert(compiler->referenced_variable_name_index,
+                                asm_name, symbol)) {
     VectorAppend(&compiler->referenced_variable_asm_names,
                  NewString(asm_name));
   }
@@ -2882,8 +2870,8 @@ static bool FunctionSymbolIsReferenced(Symbol* symbol) {
 
 static bool VariableSymbolIsReferenced(Symbol* symbol) {
   return symbol != NULL &&
-         AsmNameInVector(&compiler->referenced_variable_asm_names,
-                         SymbolReferenceName(symbol));
+         CompilerStringIndexContains(compiler->referenced_variable_name_index,
+                                     SymbolReferenceName(symbol));
 }
 
 static bool IsLazyCXXStatic(InitializedStaticVariable* var) {
@@ -3006,7 +2994,8 @@ static bool VariableDefinitionNeedsStorage(Symbol* symbol) {
   const char* asm_name = symbol->asm_name.length != 0
                              ? symbol->asm_name.value
                              : symbol->name.value;
-  return AsmNameInVector(&compiler->referenced_variable_asm_names, asm_name);
+  return CompilerStringIndexContains(compiler->referenced_variable_name_index,
+                                     asm_name);
 }
 
 static void MarkReferencedSymbolInAST(ASTNode* node, void* data,
@@ -4300,14 +4289,21 @@ struct CompilerStringIndex {
 
 #define COMPILER_STRING_INDEX_INITIAL_BUCKETS 16
 
+// Keys are mostly long mangled names, so they are hashed eight bytes at a time.
 static uint64_t HashCompilerStringIndexKey(const char* key) {
-  uint64_t hash = UINT64_C(1469598103934665603);
-  const unsigned char* current = (const unsigned char*)key;
-  while (*current != '\0') {
-    hash ^= *current++;
-    hash *= UINT64_C(1099511628211);
+  size_t length = strlen(key);
+  uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^ length;
+  const char* current = key;
+  for (; length >= 8; length -= 8, current += 8) {
+    uint64_t word;
+    memcpy(&word, current, 8);
+    hash = (hash ^ word) * UINT64_C(0xff51afd7ed558ccd);
+    hash ^= hash >> 32;
   }
-  return hash;
+  uint64_t tail = 0;
+  memcpy(&tail, current, length);
+  hash = (hash ^ tail) * UINT64_C(0xc4ceb9fe1a85ec53);
+  return hash ^ (hash >> 29);
 }
 
 static struct CompilerStringIndex* NewCompilerStringIndex(void) {
@@ -4517,6 +4513,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   VectorInit(&compiler->referenced_function_asm_names);
   compiler->referenced_function_name_index = NewCompilerStringIndex();
   VectorInit(&compiler->referenced_variable_asm_names);
+  compiler->referenced_variable_name_index = NewCompilerStringIndex();
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
   VectorInit(&compiler->cxx_deferred_static_member_definitions);
@@ -5265,6 +5262,8 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestructWithContents(
       &compiler->referenced_variable_asm_names,
       (VectorElementDestructor)StringDelete, /*free_element=*/false);
+  CompilerStringIndexDelete(compiler->referenced_variable_name_index);
+  compiler->referenced_variable_name_index = NULL;
 
   VectorDestructWithContents(
       &compiler->reflection_values,
