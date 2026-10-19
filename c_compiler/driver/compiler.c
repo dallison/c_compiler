@@ -72,6 +72,12 @@ static bool CompilerStringIndexContains(struct CompilerStringIndex* index,
                                         const char* key);
 static bool CompilerStringIndexInsert(struct CompilerStringIndex* index,
                                       const char* key, void* value);
+static struct CompilerStringIndex* NewCompilerStringIndex(void);
+static void CompilerStringIndexDelete(struct CompilerStringIndex* index);
+static void* CompilerStringIndexFind(struct CompilerStringIndex* index,
+                                     const char* key);
+static void** CompilerStringIndexValueSlot(struct CompilerStringIndex* index,
+                                           const char* key);
 
 static CompilerOptionDefinition compiler_options[] = {
     {"-c", kCompilerOptionBool, kOptionCompileOnly, false,
@@ -3852,45 +3858,185 @@ static VariableDeclarationASTNode* DeclarationRootAt(ASTNode* root,
 // point: emitting one inline body can make further inline callees reachable.
 static bool CompileDeferredCXXStaticMembers(Syntax* syntax);
 
+typedef enum {
+  kDefinitionNotDiscardable,
+  kDefinitionReferencesMarked,
+  kFunctionDefinitionUnreferenced,
+  kVariableDefinitionUnreferenced,
+} DefinitionReferenceState;
+
+// Marks what a discardable definition references once it is itself needed.
+static DefinitionReferenceState MarkReferencesOfNeededDefinition(
+    VariableDeclarationASTNode* decl) {
+  if (decl == NULL || decl->symbol == NULL) {
+    return kDefinitionNotDiscardable;
+  }
+  if (IsFunctionOrInlineDefinition(decl->symbol) && decl->base.type != NULL &&
+      FunctionDefinitionIsODRDiscardable(decl->base.type)) {
+    if (!FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {
+      return kFunctionDefinitionUnreferenced;
+    }
+    MarkFunctionsReferencedByBody(decl->base.type);
+    return kDefinitionReferencesMarked;
+  }
+  if (VariableDefinitionIsODRDiscardable(decl->symbol)) {
+    if (!VariableDefinitionNeedsStorage(decl->symbol)) {
+      return kVariableDefinitionUnreferenced;
+    }
+    MarkReferencesInAST(decl->initializer);
+    return kDefinitionReferencesMarked;
+  }
+  return kDefinitionNotDiscardable;
+}
+
+// A discardable definition that was not needed when the closure reached it.
+typedef struct {
+  VariableDeclarationASTNode* decl;
+  size_t next;  // Index + 1 of the next one waiting on the same name, or 0.
+} WaitingDefinition;
+
+// Incremental state for closing the reference graph: each definition is
+// visited when first seen, and again only when its name is first referenced,
+// instead of rescanning every definition until nothing changes.
+typedef struct {
+  // Asm name -> index + 1 of the first definition waiting on it.
+  struct CompilerStringIndex* waiting_functions;
+  struct CompilerStringIndex* waiting_variables;
+  WaitingDefinition* waiting;
+  size_t waiting_length;
+  size_t waiting_capacity;
+  size_t next_root;
+  size_t next_function_reference;
+  size_t next_variable_reference;
+} ReferenceClosure;
+
+static void ReferenceClosureWait(ReferenceClosure* closure,
+                                 struct CompilerStringIndex* waiting_names,
+                                 VariableDeclarationASTNode* decl) {
+  void** head = CompilerStringIndexValueSlot(waiting_names,
+                                             SymbolReferenceName(decl->symbol));
+  if (head == NULL) {
+    return;
+  }
+  if (closure->waiting_length == closure->waiting_capacity) {
+    size_t capacity =
+        closure->waiting_capacity == 0 ? 256 : closure->waiting_capacity * 2;
+    WaitingDefinition* waiting =
+        realloc(closure->waiting, capacity * sizeof(*waiting));
+    if (waiting == NULL) {
+      // ReferenceClosureVerify still reaches the definition.
+      return;
+    }
+    closure->waiting = waiting;
+    closure->waiting_capacity = capacity;
+  }
+  closure->waiting[closure->waiting_length].decl = decl;
+  closure->waiting[closure->waiting_length].next = (size_t)(uintptr_t)*head;
+  closure->waiting_length++;
+  *head = (void*)(uintptr_t)closure->waiting_length;
+}
+
+static void ReferenceClosureVisit(ReferenceClosure* closure,
+                                  VariableDeclarationASTNode* decl) {
+  switch (MarkReferencesOfNeededDefinition(decl)) {
+    case kFunctionDefinitionUnreferenced:
+      ReferenceClosureWait(closure, closure->waiting_functions, decl);
+      break;
+    case kVariableDefinitionUnreferenced:
+      ReferenceClosureWait(closure, closure->waiting_variables, decl);
+      break;
+    case kDefinitionNotDiscardable:
+    case kDefinitionReferencesMarked:
+      break;
+  }
+}
+
+// Revisits the definitions waiting on names referenced since the last call.
+static bool ReferenceClosureRevisit(ReferenceClosure* closure,
+                                    struct CompilerStringIndex* waiting_names,
+                                    Vector* referenced_names, size_t* next) {
+  bool progressed = false;
+  while (*next < referenced_names->length) {
+    String* name = referenced_names->value.p[(*next)++];
+    progressed = true;
+    for (size_t i = (size_t)(uintptr_t)CompilerStringIndexFind(waiting_names,
+                                                               name->value);
+         i != 0; i = closure->waiting[i - 1].next) {
+      MarkReferencesOfNeededDefinition(closure->waiting[i - 1].decl);
+    }
+  }
+  return progressed;
+}
+
+static void ReferenceClosureAdvance(ReferenceClosure* closure) {
+  bool progressed;
+  do {
+    MarkReferencedCXXMetadataDependencies();
+    progressed = false;
+    while (closure->next_root < compiler->declaration_asts.length) {
+      ASTNode* root = compiler->declaration_asts.value.p[closure->next_root++];
+      size_t num_declarations = DeclarationRootLength(root);
+      for (size_t j = 0; j < num_declarations; j++) {
+        ReferenceClosureVisit(closure, DeclarationRootAt(root, j));
+      }
+      progressed = true;
+    }
+    if (ReferenceClosureRevisit(closure, closure->waiting_functions,
+                                &compiler->referenced_function_asm_names,
+                                &closure->next_function_reference)) {
+      progressed = true;
+    }
+    if (ReferenceClosureRevisit(closure, closure->waiting_variables,
+                                &compiler->referenced_variable_asm_names,
+                                &closure->next_variable_reference)) {
+      progressed = true;
+    }
+  } while (progressed);
+}
+
+// Applies the closure rules to every definition once, so the result is a fixed
+// point even where a definition's name or discardability changed after it
+// started waiting.  Returns whether anything new was referenced.
+static bool ReferenceClosureVerify(void) {
+  size_t function_references = compiler->referenced_function_asm_names.length;
+  size_t variable_references = compiler->referenced_variable_asm_names.length;
+  MarkReferencedCXXMetadataDependencies();
+  size_t num_roots = compiler->declaration_asts.length;
+  for (size_t i = 0; i < num_roots; i++) {
+    ASTNode* root = compiler->declaration_asts.value.p[i];
+    size_t num_declarations = DeclarationRootLength(root);
+    for (size_t j = 0; j < num_declarations; j++) {
+      MarkReferencesOfNeededDefinition(DeclarationRootAt(root, j));
+    }
+  }
+  return compiler->referenced_function_asm_names.length !=
+             function_references ||
+         compiler->referenced_variable_asm_names.length != variable_references;
+}
+
+static void CompileReferencedInlineFunctionsWithClosure(
+    Syntax* syntax, ReferenceClosure* closure);
+
 static void CompileReferencedInlineFunctions(Syntax* syntax) {
+  ReferenceClosure closure = {0};
+  closure.waiting_functions = NewCompilerStringIndex();
+  closure.waiting_variables = NewCompilerStringIndex();
+  CompileReferencedInlineFunctionsWithClosure(syntax, &closure);
+  CompilerStringIndexDelete(closure.waiting_functions);
+  CompilerStringIndexDelete(closure.waiting_variables);
+  free(closure.waiting);
+}
+
+static void CompileReferencedInlineFunctionsWithClosure(
+    Syntax* syntax, ReferenceClosure* closure) {
   bool emitted;
   do {
     // First close the reference graph without generating code.  This lets the
     // subsequent pass emit reachable definitions in their original declaration
     // order, matching eager compilation while omitting unreachable bodies.
-    size_t previous_function_reference_count;
-    size_t previous_variable_reference_count;
     do {
-      previous_function_reference_count =
-          compiler->referenced_function_asm_names.length;
-      previous_variable_reference_count =
-          compiler->referenced_variable_asm_names.length;
-      MarkReferencedCXXMetadataDependencies();
-      size_t num_roots = compiler->declaration_asts.length;
-      for (size_t i = 0; i < num_roots; i++) {
-        ASTNode* root = compiler->declaration_asts.value.p[i];
-        size_t num_declarations = DeclarationRootLength(root);
-        for (size_t j = 0; j < num_declarations; j++) {
-          VariableDeclarationASTNode* decl = DeclarationRootAt(root, j);
-          if (decl == NULL || decl->symbol == NULL) {
-            continue;
-          }
-          if (IsFunctionOrInlineDefinition(decl->symbol) &&
-              decl->base.type != NULL &&
-              FunctionDefinitionIsODRDiscardable(decl->base.type) &&
-              FunctionDefinitionNeedsNativeCode(decl->symbol,
-                                                decl->base.type)) {
-            MarkFunctionsReferencedByBody(decl->base.type);
-          } else if (VariableDefinitionIsODRDiscardable(decl->symbol) &&
-                     VariableDefinitionNeedsStorage(decl->symbol)) {
-            MarkReferencesInAST(decl->initializer);
-          }
-        }
-      }
-    } while (compiler->referenced_function_asm_names.length !=
-                 previous_function_reference_count ||
-             compiler->referenced_variable_asm_names.length !=
-                 previous_variable_reference_count);
+      ReferenceClosureAdvance(closure);
+    } while (ReferenceClosureVerify());
 
     CompilePendingTemplateInstantiations(syntax);
     if (NumErrors() != 0) {
@@ -4406,6 +4552,20 @@ static bool CompilerStringIndexInsert(struct CompilerStringIndex* index,
   index->buckets[bucket] = entry;
   index->entry_count++;
   return true;
+}
+
+// The value stored for `key`, which is inserted with a NULL value if absent.
+static void** CompilerStringIndexValueSlot(struct CompilerStringIndex* index,
+                                           const char* key) {
+  if (index == NULL || key == NULL || *key == '\0') {
+    return NULL;
+  }
+  CompilerStringIndexEntry* entry = CompilerStringIndexFindEntry(index, key);
+  if (entry == NULL) {
+    CompilerStringIndexInsert(index, key, NULL);
+    entry = CompilerStringIndexFindEntry(index, key);
+  }
+  return &entry->value;
 }
 
 static bool PendingSymbolIsDefinition(Symbol* symbol, const char* asm_name) {
