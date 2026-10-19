@@ -48,10 +48,11 @@ void SymbolAttachModuleContext(Symbol* sym, Storage storage) {
   }
 
   if (unit->id.name.length > 0) {
-    StringSet(&sym->owning_module_name, unit->id.name.value);
-    if (unit->id.partition.length > 0) {
-      StringSet(&sym->owning_module_partition, unit->id.partition.value);
-    }
+    SymbolSetModuleIdentity(sym, unit->id.name.value,
+                            unit->id.partition.length > 0
+                                ? unit->id.partition.value
+                                : SymbolOwningModulePartition(sym),
+                            SymbolImportSourceModule(sym));
   }
   sym->flags.is_module_private =
       unit->fragment == kModuleFragmentPrivate;
@@ -69,23 +70,22 @@ bool SymbolSameOwningModule(const Symbol* a, const Symbol* b) {
   if (a == NULL || b == NULL) {
     return false;
   }
-  return strcmp(a->owning_module_name.value, b->owning_module_name.value) == 0 &&
-         strcmp(a->owning_module_partition.value,
-                b->owning_module_partition.value) == 0;
+  return strcmp(SymbolOwningModuleName(a), SymbolOwningModuleName(b)) == 0 &&
+         strcmp(SymbolOwningModulePartition(a),
+                SymbolOwningModulePartition(b)) == 0;
 }
 
 static bool ImportedPrimaryInterfaceBinding(const Symbol* imported,
                                             const Symbol* local) {
   if (imported == NULL || local == NULL ||
-      imported->import_source_module.length == 0 ||
-      local->owning_module_name.length == 0) {
+      !SymbolIsImportedFromModule(imported) || !SymbolHasOwningModule(local)) {
     return false;
   }
-  return strcmp(imported->owning_module_name.value,
-                local->owning_module_name.value) == 0 &&
-         strcmp(imported->import_source_module.value,
-                local->owning_module_name.value) == 0 &&
-         local->owning_module_partition.length == 0;
+  return strcmp(SymbolOwningModuleName(imported),
+                SymbolOwningModuleName(local)) == 0 &&
+         strcmp(SymbolImportSourceModule(imported),
+                SymbolOwningModuleName(local)) == 0 &&
+         SymbolOwningModulePartition(local)[0] == '\0';
 }
 
 bool SymbolCompatibleModuleRedeclaration(const Symbol* existing,
@@ -95,8 +95,7 @@ bool SymbolCompatibleModuleRedeclaration(const Symbol* existing,
   }
 
   if (SymbolSameOwningModule(existing, incoming) &&
-      (existing->owning_module_name.length > 0 ||
-       incoming->owning_module_name.length > 0)) {
+      (SymbolHasOwningModule(existing) || SymbolHasOwningModule(incoming))) {
     return true;
   }
 
@@ -105,17 +104,16 @@ bool SymbolCompatibleModuleRedeclaration(const Symbol* existing,
     return true;
   }
 
-  if (existing->import_source_module.length > 0 &&
-      incoming->owning_module_name.length == 0 && existing->flags.is_exported) {
+  if (SymbolIsImportedFromModule(existing) &&
+      !SymbolHasOwningModule(incoming) && existing->flags.is_exported) {
     return true;
   }
-  if (incoming->import_source_module.length > 0 &&
-      existing->owning_module_name.length == 0 && incoming->flags.is_exported) {
+  if (SymbolIsImportedFromModule(incoming) &&
+      !SymbolHasOwningModule(existing) && incoming->flags.is_exported) {
     return true;
   }
 
-  if (existing->owning_module_name.length == 0 &&
-      incoming->owning_module_name.length == 0) {
+  if (!SymbolHasOwningModule(existing) && !SymbolHasOwningModule(incoming)) {
     return true;
   }
 
@@ -126,7 +124,8 @@ void SymbolSetImportProvenance(Symbol* sym, const char* source_module) {
   if (sym == NULL || source_module == NULL || source_module[0] == '\0') {
     return;
   }
-  StringSet(&sym->import_source_module, source_module);
+  SymbolSetModuleIdentity(sym, SymbolOwningModuleName(sym),
+                          SymbolOwningModulePartition(sym), source_module);
 }
 
 Symbol* SymbolFindModuleCompatibleOverload(Symbol* head, Symbol* incoming) {
@@ -142,7 +141,7 @@ Symbol* SymbolFindModuleCompatibleOverload(Symbol* head, Symbol* incoming) {
 
 void AppendCXXModuleIdentityMangling(String* out, const Symbol* symbol) {
   if (symbol == NULL || symbol->flags.is_c_linkage ||
-      symbol->owning_module_name.length == 0) {
+      !SymbolHasOwningModule(symbol)) {
     return;
   }
 
@@ -153,7 +152,7 @@ void AppendCXXModuleIdentityMangling(String* out, const Symbol* symbol) {
   // same-spelled namespace nested-name.  Partitions share the primary module's
   // attachment and therefore deliberately use the same ABI module name.
   StringAppendChar(out, 'W');
-  const char* component = symbol->owning_module_name.value;
+  const char* component = SymbolOwningModuleName(symbol);
   while (component != NULL && *component != '\0') {
     const char* dot = strchr(component, '.');
     size_t len = dot != NULL ? (size_t)(dot - component) : strlen(component);

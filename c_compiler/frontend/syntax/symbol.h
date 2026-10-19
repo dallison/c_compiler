@@ -131,6 +131,15 @@ bool AttributeListHas(Vector* attrs, const char* name);
 void AttributeListDestruct(Vector* attrs);          // Frees contained Attribute*.
 void AttributeListClone(Vector* dest, Vector* src); // dest is initialized.
 
+// A symbol's named-module attachment.  Records are interned and immutable, so
+// symbols share them; set one with SymbolSetModuleIdentity.  Each field is ""
+// when absent, never NULL.
+typedef struct SymbolModuleIdentity {
+  const char* owning_module_name;       // Named-module purview owner.
+  const char* owning_module_partition;  // Owning partition, if any.
+  const char* import_source_module;     // Import provenance for importers.
+} SymbolModuleIdentity;
+
 // A symbol.  This is a variable, function or type used in a program.
 // Module-serialization field numbers (see
 // c_compiler/serialize/symbol_serialize.c).  Transient/codegen fields
@@ -254,9 +263,8 @@ typedef struct Symbol {
   // alias templates have no other durable owner.
   struct ConstraintExpr* associated_constraint;  // @wire 46
   CXXLinkageKind cxx_linkage;        // C++20 external/internal/module. // @wire 48
-  String owning_module_name;         // Named-module purview owner.      // @wire 49
-  String owning_module_partition;    // Owning partition, if any.       // @wire 50
-  String import_source_module;       // Import provenance for importers. // @wire 51
+  // Interned and shared; NULL when attached to no module and not imported.
+  const SymbolModuleIdentity* module_identity;            // @wire 49, 50, 51
   struct DIE* die;          // @wire - (debug info, not serialized)
   // Structured-binding dependence marker and, for a pack, known cardinality:
   // -2 means materialized/not a binding, -1 means still dependent, and a
@@ -329,5 +337,36 @@ ValueState SymbolInitialValueState(Symbol* symbol);
 
 void SymbolPrintDetails(Symbol* sym, bool with_function_body, FILE* fp);
 void SymbolPrint(Symbol* sym, FILE* fp);
+
+// Sets the module identity fields.  NULL or "" means absent.
+void SymbolSetModuleIdentity(Symbol* symbol, const char* owning_module_name,
+                             const char* owning_module_partition,
+                             const char* import_source_module);
+
+static inline const char* SymbolOwningModuleName(const Symbol* symbol) {
+  return symbol->module_identity != NULL
+             ? symbol->module_identity->owning_module_name
+             : "";
+}
+
+static inline const char* SymbolOwningModulePartition(const Symbol* symbol) {
+  return symbol->module_identity != NULL
+             ? symbol->module_identity->owning_module_partition
+             : "";
+}
+
+static inline const char* SymbolImportSourceModule(const Symbol* symbol) {
+  return symbol->module_identity != NULL
+             ? symbol->module_identity->import_source_module
+             : "";
+}
+
+static inline bool SymbolHasOwningModule(const Symbol* symbol) {
+  return SymbolOwningModuleName(symbol)[0] != '\0';
+}
+
+static inline bool SymbolIsImportedFromModule(const Symbol* symbol) {
+  return SymbolImportSourceModule(symbol)[0] != '\0';
+}
 
 #endif /* symbol_h */

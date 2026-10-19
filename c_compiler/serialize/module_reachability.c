@@ -56,11 +56,11 @@ static void CollectExportedNode(BinaryTreeNode* node, int depth, void* data) {
   for (Symbol* symbol = head; symbol != NULL;
        symbol = symbol->overload_next) {
     bool visible = context->internal_partition
-                       ? symbol->import_source_module.length == 0 &&
-                             symbol->owning_module_name.length != 0 &&
+                       ? !SymbolIsImportedFromModule(symbol) &&
+                             SymbolHasOwningModule(symbol) &&
                              symbol->cxx_linkage != kCXXLinkageInternal
                        : symbol->flags.is_exported &&
-                             symbol->import_source_module.length == 0;
+                             !SymbolIsImportedFromModule(symbol);
     if (!visible) {
       continue;
     }

@@ -10700,8 +10700,7 @@ static void ApplyExplicitCXXLinkageAttachment(Syntax* syntax, Symbol* sym,
       !syntax->explicit_cxx_linkage || sym == NULL) {
     return;
   }
-  StringClear(&sym->owning_module_name);
-  StringClear(&sym->owning_module_partition);
+  SymbolSetModuleIdentity(sym, NULL, NULL, SymbolImportSourceModule(sym));
   sym->flags.is_module_private = false;
   sym->cxx_linkage = StorageIs(storage, STO(static)) ? kCXXLinkageInternal
                                                       : kCXXLinkageExternal;
@@ -10740,7 +10739,7 @@ static void ValidateCXX26MainDeclaration(Syntax* syntax, Symbol* sym,
   if (info->is_consteval) {
     SyntaxError(syntax, "'main' cannot be declared consteval");
   }
-  if (sym->owning_module_name.length != 0) {
+  if (SymbolHasOwningModule(sym)) {
     SyntaxError(syntax, "'main' cannot be attached to a named module");
   }
 }

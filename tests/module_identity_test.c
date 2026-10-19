@@ -69,7 +69,7 @@ static Symbol* MakeModuleFunction(const char* name, const char* module_name,
   sym->flags.is_defined = true;
   sym->flags.is_exported = exported;
   sym->cxx_linkage = linkage;
-  StringSet(&sym->owning_module_name, module_name);
+  SymbolSetModuleIdentity(sym, module_name, NULL, NULL);
   ft->info.function.symbol = sym;
   return sym;
 }
@@ -88,7 +88,7 @@ static void TestLinkageAttachment(void) {
   exported->flags.is_exported = true;
   SymbolAttachModuleContext(exported, STO(implicit));
   CHECK(exported->cxx_linkage == kCXXLinkageExternal);
-  CHECK(StringEqual(&exported->owning_module_name, "mod_a"));
+  CHECK(strcmp(SymbolOwningModuleName(exported), "mod_a") == 0);
 
   Symbol* hidden = NewSymbol("hidden", NewTypeRecord(kTypeInt, kQualPlain),
                              STO(implicit));
@@ -131,8 +131,8 @@ static void TestManglingDistinctAcrossModules(void) {
       MakeModuleFunction("shared", "partitioned", false, kCXXLinkageModule);
   Symbol* partition_b =
       MakeModuleFunction("shared", "partitioned", false, kCXXLinkageModule);
-  StringSet(&partition_a->owning_module_partition, "a");
-  StringSet(&partition_b->owning_module_partition, "b");
+  SymbolSetModuleIdentity(partition_a, "partitioned", "a", NULL);
+  SymbolSetModuleIdentity(partition_b, "partitioned", "b", NULL);
   SymbolSetCXXMangledAsmName(partition_a);
   SymbolSetCXXMangledAsmName(partition_b);
   CHECK(StringEqualString(&partition_a->asm_name, &partition_b->asm_name));
@@ -176,7 +176,7 @@ static void TestSerializeRoundTrip(void) {
   NewCompiler(options);
   Symbol* hidden =
       MakeModuleFunction("hidden", "roundtrip", false, kCXXLinkageModule);
-  StringSet(&hidden->owning_module_partition, "part");
+  SymbolSetModuleIdentity(hidden, "roundtrip", "part", NULL);
   Vector roots;
   VectorInit(&roots);
   VectorAppend(&roots, hidden);
@@ -197,8 +197,8 @@ static void TestSerializeRoundTrip(void) {
   CHECK(loaded.root_symbols.length == 1);
   Symbol* loaded_sym = (Symbol*)VectorGet(&loaded.root_symbols, 0);
   CHECK(loaded_sym->cxx_linkage == kCXXLinkageModule);
-  CHECK(StringEqual(&loaded_sym->owning_module_name, "roundtrip"));
-  CHECK(StringEqual(&loaded_sym->owning_module_partition, "part"));
+  CHECK(strcmp(SymbolOwningModuleName(loaded_sym), "roundtrip") == 0);
+  CHECK(strcmp(SymbolOwningModulePartition(loaded_sym), "part") == 0);
   LoadedModuleReleaseGraph(&loaded);
   LoadedModuleDestruct(&loaded);
   CompilerDelete(compiler);
@@ -238,7 +238,7 @@ static void TestInstallProvenance(void) {
   Symbol* installed = FindGlobalSymbol(&name);
   StringDestruct(&name);
   CHECK(installed != NULL);
-  CHECK(StringEqual(&installed->import_source_module, "prov_mod"));
+  CHECK(strcmp(SymbolImportSourceModule(installed), "prov_mod") == 0);
   UninstallGlobalSymbol(installed, false);
   LoadedModuleReleaseGraph(&loaded);
   LoadedModuleDestruct(&loaded);

@@ -284,9 +284,7 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->template_template_parameters = NULL;
   sym->associated_constraint = NULL;
   sym->cxx_linkage = kCXXLinkageExternal;
-  StringInit(&sym->owning_module_name, NULL);
-  StringInit(&sym->owning_module_partition, NULL);
-  StringInit(&sym->import_source_module, NULL);
+  sym->module_identity = NULL;
   sym->location = 0;
   sym->usage_info.reads = 0;
   sym->usage_info.used_as_arg = 0;
@@ -406,9 +404,7 @@ void SymbolDestruct(Symbol* symbol) {
   }
   ConstraintExprDelete(symbol->associated_constraint);
   symbol->associated_constraint = NULL;
-  StringDestruct(&symbol->owning_module_name);
-  StringDestruct(&symbol->owning_module_partition);
-  StringDestruct(&symbol->import_source_module);
+  symbol->module_identity = NULL;
   ConceptDelete(symbol->concept_definition);
   AttributeListDestruct(&symbol->attributes);
   VectorDestructWithContents(
@@ -1476,9 +1472,7 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->associated_constraint =
       ConceptsCloneConstraint(sym->associated_constraint);
   new_sym->cxx_linkage = sym->cxx_linkage;
-  StringSetString(&new_sym->owning_module_name, &sym->owning_module_name);
-  StringSetString(&new_sym->owning_module_partition, &sym->owning_module_partition);
-  StringSetString(&new_sym->import_source_module, &sym->import_source_module);
+  new_sym->module_identity = sym->module_identity;
   new_sym->usage_info = sym->usage_info;
   new_sym->value = sym->value;
   new_sym->stack_offset = sym->stack_offset;
@@ -1594,4 +1588,48 @@ void SymbolSetType(Symbol* symbol, struct TypeRecord* type) {
   }
   symbol->type = type;
   TypeRecordIncRef(type);
+}
+
+// Every distinct combination ever set; a translation unit has only a handful.
+// Records live for the process because symbols and their clones share them.
+static Vector module_identities;
+static bool module_identities_initialized = false;
+
+static char* CopyModuleIdentityName(const char* name) {
+  size_t length = strlen(name);
+  char* copy = malloc(length + 1);
+  memcpy(copy, name, length + 1);
+  return copy;
+}
+
+void SymbolSetModuleIdentity(Symbol* symbol, const char* owning_module_name,
+                             const char* owning_module_partition,
+                             const char* import_source_module) {
+  const char* name = owning_module_name != NULL ? owning_module_name : "";
+  const char* partition =
+      owning_module_partition != NULL ? owning_module_partition : "";
+  const char* source = import_source_module != NULL ? import_source_module : "";
+  if (name[0] == '\0' && partition[0] == '\0' && source[0] == '\0') {
+    symbol->module_identity = NULL;
+    return;
+  }
+  if (!module_identities_initialized) {
+    VectorInit(&module_identities);
+    module_identities_initialized = true;
+  }
+  for (size_t i = 0; i < module_identities.length; i++) {
+    const SymbolModuleIdentity* existing = VectorGet(&module_identities, i);
+    if (strcmp(existing->owning_module_name, name) == 0 &&
+        strcmp(existing->owning_module_partition, partition) == 0 &&
+        strcmp(existing->import_source_module, source) == 0) {
+      symbol->module_identity = existing;
+      return;
+    }
+  }
+  SymbolModuleIdentity* identity = malloc(sizeof(SymbolModuleIdentity));
+  identity->owning_module_name = CopyModuleIdentityName(name);
+  identity->owning_module_partition = CopyModuleIdentityName(partition);
+  identity->import_source_module = CopyModuleIdentityName(source);
+  VectorAppend(&module_identities, identity);
+  symbol->module_identity = identity;
 }

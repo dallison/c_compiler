@@ -16,6 +16,7 @@
 //
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "ast.h"
 #include "concepts.h"
@@ -617,11 +618,11 @@ static void WriteBoolField(WireBuffer* buf, int field, bool value) {
 
 static bool SymbolVisibleInModuleArtifact(SerializeContext* ctx,
                                           Symbol* symbol) {
-  if (symbol == NULL || symbol->import_source_module.length != 0) {
+  if (symbol == NULL || SymbolIsImportedFromModule(symbol)) {
     return false;
   }
   if (ctx->writing_internal_partition) {
-    return symbol->owning_module_name.length != 0 &&
+    return SymbolHasOwningModule(symbol) &&
            symbol->cxx_linkage != kCXXLinkageInternal;
   }
   return symbol->flags.is_exported;
@@ -769,11 +770,17 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WriteTemplateConstructorInitializers(
       ctx, buf, kSym_template_constructor_initializers, s);
   WireWriteInt32(buf, kSym_cxx_linkage, (int32_t)s->cxx_linkage);
-  SWriteStringVal(ctx, buf, kSym_owning_module_name, &s->owning_module_name);
-  SWriteStringVal(ctx, buf, kSym_owning_module_partition,
-                  &s->owning_module_partition);
-  SWriteStringVal(ctx, buf, kSym_import_source_module,
-                  &s->import_source_module);
+  const char* module_names[] = {SymbolOwningModuleName(s),
+                                SymbolOwningModulePartition(s),
+                                SymbolImportSourceModule(s)};
+  const int module_fields[] = {kSym_owning_module_name,
+                               kSym_owning_module_partition,
+                               kSym_import_source_module};
+  for (size_t i = 0; i < 3; i++) {
+    WireWriteVarint(buf, module_fields[i],
+                    SerializeInternStringN(ctx, module_names[i],
+                                           strlen(module_names[i])));
+  }
   return !WireBufferHasError(buf);
 }
 
@@ -790,6 +797,12 @@ static void* AllocSymbol(DeserializeContext* ctx, const void* blob,
 static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
   Symbol* s = (Symbol*)obj;
   bool b;
+  String module_name;
+  String module_partition;
+  String import_source;
+  StringInit(&module_name, SymbolOwningModuleName(s));
+  StringInit(&module_partition, SymbolOwningModulePartition(s));
+  StringInit(&import_source, SymbolImportSourceModule(s));
   while (!WireBufferEof(buf) && !WireBufferHasError(buf)) {
     int field;
     WireType wt;
@@ -998,13 +1011,13 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
       }
       case kSym_owning_module_name:
-        SReadStringVal(ctx, buf, &s->owning_module_name);
+        SReadStringVal(ctx, buf, &module_name);
         break;
       case kSym_owning_module_partition:
-        SReadStringVal(ctx, buf, &s->owning_module_partition);
+        SReadStringVal(ctx, buf, &module_partition);
         break;
       case kSym_import_source_module:
-        SReadStringVal(ctx, buf, &s->import_source_module);
+        SReadStringVal(ctx, buf, &import_source);
         break;
       case kSym_is_module_private:
         WireReadBool(buf, &b);
@@ -1034,6 +1047,11 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         break;
     }
   }
+  SymbolSetModuleIdentity(s, module_name.value, module_partition.value,
+                          import_source.value);
+  StringDestruct(&module_name);
+  StringDestruct(&module_partition);
+  StringDestruct(&import_source);
   if (s->type != NULL && TypeIsFunction(s->type)) {
     if (s->type->info.function.symbol == NULL) {
       s->type->info.function.symbol = s;
