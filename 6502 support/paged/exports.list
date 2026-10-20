@@ -51,3 +51,4 @@ strstr
 strtok
 strtok_r
 write
+strnlen

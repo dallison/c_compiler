@@ -1696,7 +1696,7 @@ static void HandleDirective_set(Assembler* assembler) {
           sym->defined = true;
           sym->is_constant = true;
           sym->section = assembler->object.current_section;
-          sym->value = AssemblerCurrentAddress(assembler);
+          sym->value = value;
         } else {
           AssemblerError(assembler, "Duplicate symbol %s", name.value);
         }

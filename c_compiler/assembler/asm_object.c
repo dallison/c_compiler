@@ -686,6 +686,15 @@ static int64_t SymbolELFValue(AssemblerSymbol* sym) {
   return sym->value;
 }
 
+// A `.set` constant is a number, not an offset into the section it was
+// defined in; the linker must not add that section's address.
+static int32_t SymbolELFSection(const AssemblerSymbol* sym) {
+  if (!sym->defined) {
+    return 0;
+  }
+  return sym->is_constant ? SHN_ABS : sym->section;
+}
+
 static bool SymbolIsELFGlobal(const AssemblerSymbol* sym) {
   return sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak) ||
          !sym->defined;
@@ -701,7 +710,7 @@ static void AddLocalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
   // and leaves references unresolved.
   if (sym->exported && sym->binding == SYM_BIND(local) &&
       !SymbolIsELFGlobal(sym)) {
-    ELFWriterAddSymbol(elf, &sym->name, sym->section,
+    ELFWriterAddSymbol(elf, &sym->name, SymbolELFSection(sym),
                        SymbolTypeToELFType(sym->type), STB(local), sym->size,
                        SymbolELFValue(sym), &sym->index);
   }
@@ -720,7 +729,7 @@ static void AddGlobalSymbolFunc(BinaryTreeNode* node, int depth, void* data) {
     if (binding == SYM_BIND(local)) {
       binding = SYM_BIND(global);
     }
-    ELFWriterAddSymbol(elf, &sym->name, sym->defined ? sym->section : 0,
+    ELFWriterAddSymbol(elf, &sym->name, SymbolELFSection(sym),
                        SymbolTypeToELFType(sym->type),
                        SymbolBindingToELFBinding(binding), sym->size,
                        SymbolELFValue(sym), &sym->index);
