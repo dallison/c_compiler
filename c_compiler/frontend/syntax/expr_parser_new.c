@@ -1546,24 +1546,6 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
   if (parenthesized_type) {
     SyntaxNeedBracket(syntax, TOK(rparen), followers);
   }
-  // A new-type-id's declarator holds no parentheses ([expr.new]), so
-  // `new int*(&g)` initializes an int* rather than declaring `g`.
-  while (!parenthesized_type && allocated_type != NULL &&
-         LexMatch(syntax->lex, TOK(star))) {
-    Qualifiers quals = kQualPlain;
-    for (;;) {
-      if (LexMatch(syntax->lex, TOK(const))) {
-        quals |= kQualConst;
-      } else if (LexMatch(syntax->lex, TOK(volatile))) {
-        quals |= kQualVolatile;
-      } else if (LexMatch(syntax->lex, TOK(restrict))) {
-        quals |= kQualRestrict;
-      } else {
-        break;
-      }
-    }
-    allocated_type = TypeRecordCalculateSize(NewPointerTo(quals, allocated_type));
-  }
   Token initializer_open = TOK(bad);
   ASTNode* array_size = NULL;
   if (LexLookingAt(syntax->lex, TOK(lparen)) ||
@@ -1571,6 +1553,8 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
       (!parenthesized_type && LexLookingAt(syntax->lex, TOK(lsquare)))) {
     initializer_open = syntax->lex->current_token;
   }
+  // `new int*(&g)` initializes an int* rather than declaring `g`.
+  parser.parsing_new_type_id = true;
   Symbol* sym = initializer_open == TOK(bad) && !parenthesized_type
       ? TypeParserParseDeclarator(&parser, allocated_type)
       : NULL;
@@ -1580,7 +1564,10 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
       allocated_type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
     }
   } else {
+    // Take the declarator symbol's reference: placeholder deduction below
+    // releases the pattern, and `sym` is deleted at the end.
     allocated_type = sym->type;
+    sym->type = NULL;
   }
   if (initializer_open == TOK(bad) && !parenthesized_type &&
       (LexLookingAt(syntax->lex, TOK(lparen)) ||

@@ -576,6 +576,8 @@ static ASTNode* LowerScalarBracedInitToTarget(BracedInitializerASTNode* braced,
     ASTNode* zero =
         TypeIsFloatingPoint(target)
             ? NewRealConstantASTNode(0.0, TypeRecordCopy(target), location)
+        : TypeIsMemberPointer(target)
+            ? NewNullMemberPointerConstant(target, location)
             : NewIntConstantASTNode(0, TypeRecordCopy(target), location);
     return AnalyzeExpression(zero);
   }

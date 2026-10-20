@@ -175,6 +175,7 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->placeholder_variable_constraint = NULL;
   parser->typename_allows_unqualified = false;
   parser->parsing_type_id = false;
+  parser->parsing_new_type_id = false;
   parser->deferred_inline_bodies = NULL;
   parser->deferred_noexcept_specifiers = NULL;
   parser->deferred_static_asserts = NULL;
@@ -5075,6 +5076,9 @@ static bool CXXDirectInitializerAfterDeclarator(TypeParser* parser) {
 }
 
 void TypeParserParseFuncOrArray(TypeParser* parser) {
+  if (parser->parsing_new_type_id) {
+    return;
+  }
   TypeParserParseBase(parser);
   while (parser->syntax->found_open_paren ||
          LexLookingAt(parser->lex, TOK(lparen)) ||

@@ -473,6 +473,98 @@ static void ApplyCXXDefaultMemberInitializers(INode* inode,
   }
 }
 
+// True if zero-initializing a `type` object stores a data member pointer,
+// whose null value is not all-zero bits.
+static bool TypeZeroInitStoresDataMemberPointer(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  while (TypeIsArray(type)) {
+    if (type->info.array.is_flexible || type->info.array.size.fixed <= 0) {
+      return false;
+    }
+    type = type->next;
+  }
+  if (TypeIsMemberPointer(type)) {
+    return !TypeIsMemberFunctionPointer(type);
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* info = type->info.struct_info;
+  for (size_t i = 0; i < info->bases.length; i++) {
+    CXXBaseSpecifier* base = info->bases.value.p[i];
+    if (base != NULL && TypeZeroInitStoresDataMemberPointer(base->type)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < info->members.length; i++) {
+    StructMember* member = info->members.value.p[i];
+    if (!StructMemberIsObjectMember(member)) {
+      continue;
+    }
+    if (TypeZeroInitStoresDataMemberPointer(member->symbol->type)) {
+      return true;
+    }
+    if (info->is_union) {
+      // Zero-initializing a union initializes its first member only.
+      return false;
+    }
+  }
+  return false;
+}
+
+ASTNode* NewNullMemberPointerConstant(TypeRecord* type,
+                                      SourceLocation location) {
+  MemberPointerValue null_value;
+  MemberPointerEncodeNull(type, &null_value);
+  return NewIntConstantASTNode(null_value.ptr, TypeRecordCopy(type), location);
+}
+
+// [dcl.init]/6: subobjects that no initializer reached are zero-initialized,
+// which makes a data member pointer null.  Give each such pointer its null
+// value; the rest of the object is zero-filled.  Unless `through_constructors`,
+// a class subobject that a constructor initializes is left to it.
+static void ApplyNullDataMemberPointers(INode* inode, bool through_constructors,
+                                        SourceLocation location) {
+  if (inode == NULL || inode->expr != NULL ||
+      !TypeZeroInitStoresDataMemberPointer(inode->type)) {
+    return;
+  }
+  switch (inode->kind) {
+    case kIScalar:
+      inode->expr = NewNullMemberPointerConstant(inode->type, location);
+      return;
+    case kIArray:
+      if (!TypeIsArray(inode->type)) {
+        return;
+      }
+      MaterializeArrayINodeChildren(inode);
+      break;
+    case kIStruct:
+      if (!through_constructors && CXXINodeNeedsConstructor(inode)) {
+        return;
+      }
+      LazyInitINode(inode);
+      if (inode->type->info.struct_info->is_union) {
+        if (!INodeWasInitialized(inode) && inode->children.length > 0) {
+          ApplyNullDataMemberPointers(inode->children.value.p[0],
+                                      through_constructors, location);
+        }
+        return;
+      }
+      break;
+  }
+  for (size_t i = 0; i < inode->children.length; i++) {
+    INode* child = inode->children.value.p[i];
+    if (inode->kind == kIArray && !inode->type->info.array.is_flexible &&
+        child->index >= (size_t)inode->type->info.array.size.fixed) {
+      continue;
+    }
+    ApplyNullDataMemberPointers(child, through_constructors, location);
+  }
+}
+
 static bool StringLiteralMatchesCharacterArray(TypeRecord* array_element,
                                                TypeRecord* literal_element) {
   if (array_element == NULL || literal_element == NULL) {
@@ -1702,6 +1794,8 @@ static bool InitializeINode(INode* inode, ASTNode* init_expr, bool constants_onl
             TypeIsFloatingPoint(inode->type)
                 ? NewRealConstantASTNode(0.0, TypeRecordCopy(inode->type),
                                          init_expr->location)
+            : TypeIsMemberPointer(inode->type)
+                ? NewNullMemberPointerConstant(inode->type, init_expr->location)
                 : NewIntConstantASTNode(0, TypeRecordCopy(inode->type),
                                         init_expr->location);
       }
@@ -1917,6 +2011,10 @@ ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* ast_node, bool constants_
   INode* inode = BuildINode(type, NULL);
   InitializeINode(inode, ast_node, constants_only);
   ApplyCXXDefaultMemberInitializers(inode, constants_only, ast_node->location);
+  if (CompilerIsCXX()) {
+    ApplyNullDataMemberPointers(inode, /*through_constructors=*/false,
+                                ast_node->location);
+  }
   // PrintINode(inode, 0);
   bool direct = CompilerIsCXX() && inode->kind == kIScalar &&
                 ast_node->op == AST_OP(braced_init) &&
@@ -1927,3 +2025,16 @@ ASTNode* AnalyzeInitializer(TypeRecord* type, ASTNode* ast_node, bool constants_
   return braced_init;
 }
 
+ASTNode* CXXStaticZeroImage(TypeRecord* type, SourceLocation location) {
+  if (!CompilerIsCXX() || type == NULL ||
+      !TypeZeroInitStoresDataMemberPointer(type)) {
+    return NULL;
+  }
+  INode* inode = BuildINode(type, NULL);
+  ApplyNullDataMemberPointers(inode, /*through_constructors=*/true, location);
+  ASTNode* braced_init =
+      NewBracedInitializerASTNode(NewVector(), type, location);
+  FlattenINode(inode, (BracedInitializerASTNode*)braced_init, false);
+  DeleteINode(inode);
+  return braced_init;
+}

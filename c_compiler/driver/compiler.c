@@ -1467,21 +1467,37 @@ static void AssignScalarValueToConst(Symbol* symbol, BracedInitializerASTNode* i
   }
 }
 
-static void AddInitializedStaticVariable(VariableDeclarationASTNode* decl,
-                                         ASTNode* init) {
+static void AddStaticVariableImage(Symbol* symbol, ASTNode* init) {
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
-  var->symbol = decl->symbol;
-  var->is_global = !StorageIs(decl->symbol->storage, STO(static));
-  var->is_weak = SymbolHasWeakBinding(decl->symbol);
+  var->symbol = symbol;
+  var->is_global = !StorageIs(symbol->storage, STO(static));
+  var->is_weak = SymbolHasWeakBinding(symbol);
   VectorInit(&var->initializers);
-  var->size = decl->symbol->type->size;
-  var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
-  var->is_local = decl->symbol->flags.is_local;
-  var->alignment = SymbolEffectiveAlignment(decl->symbol);
+  var->size = symbol->type->size;
+  var->is_tls = StorageIs(symbol->storage, STO(thread));
+  var->is_local = symbol->flags.is_local;
+  var->alignment = SymbolEffectiveAlignment(symbol);
   ExpandBracedInitializer((BracedInitializerASTNode*)init, 0,
                           &var->initializers);
   VectorAppend(&compiler->initialized_static_variables, var);
+}
+
+static void AddInitializedStaticVariable(VariableDeclarationASTNode* decl,
+                                         ASTNode* init) {
+  AddStaticVariableImage(decl->symbol, init);
   AssignScalarValueToConst(decl->symbol, (BracedInitializerASTNode*)init);
+}
+
+// Static storage that is not constant-initialized starts out zero-initialized,
+// and any dynamic initialization runs over it.  Where that zero value is not
+// all-zero bits, emit it as data instead of BSS.  Returns false if BSS will do.
+static bool AddStaticZeroImage(Symbol* symbol) {
+  ASTNode* image = CXXStaticZeroImage(symbol->type, symbol->location);
+  if (image == NULL) {
+    return false;
+  }
+  AddStaticVariableImage(symbol, image);
+  return true;
 }
 
 static bool InitializedStaticAlreadyRegistered(Symbol* symbol) {
@@ -1984,6 +2000,9 @@ static ASTNode* CXXThreadLocalDynamicInitStatement(Symbol* sym,
 }
 
 static void AddUninitializedLocalStatic(Symbol* symbol) {
+  if (AddStaticZeroImage(symbol)) {
+    return;
+  }
   UninitializedStaticVariable* var =
       malloc(sizeof(UninitializedStaticVariable));
   var->symbol = symbol;
@@ -3514,19 +3533,22 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                 // Tentative `int x;` in a later LTO TU reuses the same
                 // Symbol*, so skip a second BSS entry.
                 if (!LocalStaticAlreadyRegistered(decl->symbol)) {
-                  UninitializedStaticVariable* var =
-                      malloc(sizeof(UninitializedStaticVariable));
-                  var->symbol = decl->symbol;
-                  var->is_global =
-                      !StorageIs(decl->symbol->storage, STO(static));
-                  var->is_weak = SymbolHasWeakBinding(decl->symbol);
-                  var->size = decl->symbol->type != NULL
-                                  ? decl->symbol->type->size
-                                  : 0;
-                  var->alignment = SymbolEffectiveAlignment(decl->symbol);
-                  var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
-                  var->is_local = decl->symbol->flags.is_local;
-                  VectorAppend(&compiler->uninitialized_static_variables, var);
+                  if (!AddStaticZeroImage(decl->symbol)) {
+                    UninitializedStaticVariable* var =
+                        malloc(sizeof(UninitializedStaticVariable));
+                    var->symbol = decl->symbol;
+                    var->is_global =
+                        !StorageIs(decl->symbol->storage, STO(static));
+                    var->is_weak = SymbolHasWeakBinding(decl->symbol);
+                    var->size = decl->symbol->type != NULL
+                                    ? decl->symbol->type->size
+                                    : 0;
+                    var->alignment = SymbolEffectiveAlignment(decl->symbol);
+                    var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
+                    var->is_local = decl->symbol->flags.is_local;
+                    VectorAppend(&compiler->uninitialized_static_variables,
+                                 var);
+                  }
                   RegisterCXXGlobalObject(decl->symbol, false);
                 }
               } else {
@@ -3582,17 +3604,20 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                     decl->initializer != NULL &&
                     decl->initializer->op == AST_OP(call) &&
                     !constant_object_image) {
-                  UninitializedStaticVariable* var =
-                      malloc(sizeof(UninitializedStaticVariable));
-                  var->symbol = decl->symbol;
-                  var->is_global =
-                      !StorageIs(decl->symbol->storage, STO(static));
-                  var->is_weak = SymbolHasWeakBinding(decl->symbol);
-                  var->size = decl->symbol->type->size;
-                  var->alignment = SymbolEffectiveAlignment(decl->symbol);
-                  var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
-                  var->is_local = decl->symbol->flags.is_local;
-                  VectorAppend(&compiler->uninitialized_static_variables, var);
+                  if (!AddStaticZeroImage(decl->symbol)) {
+                    UninitializedStaticVariable* var =
+                        malloc(sizeof(UninitializedStaticVariable));
+                    var->symbol = decl->symbol;
+                    var->is_global =
+                        !StorageIs(decl->symbol->storage, STO(static));
+                    var->is_weak = SymbolHasWeakBinding(decl->symbol);
+                    var->size = decl->symbol->type->size;
+                    var->alignment = SymbolEffectiveAlignment(decl->symbol);
+                    var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
+                    var->is_local = decl->symbol->flags.is_local;
+                    VectorAppend(&compiler->uninitialized_static_variables,
+                                 var);
+                  }
 
                   if (CXXInitializerIsNoOpDefaultConstructor(
                           decl->symbol, decl->initializer)) {
@@ -3621,17 +3646,20 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                     (CXXThreadLocalInitializerIsDynamic(decl->initializer) ||
                      CXXGlobalAggregateMayConstructAtRuntime(decl->symbol))) {
                   CompleteCXXDynamicArrayBound(decl->symbol, decl->initializer);
-                  UninitializedStaticVariable* var =
-                      malloc(sizeof(UninitializedStaticVariable));
-                  var->symbol = decl->symbol;
-                  var->is_global =
-                      !StorageIs(decl->symbol->storage, STO(static));
-                  var->is_weak = SymbolHasWeakBinding(decl->symbol);
-                  var->size = decl->symbol->type->size;
-                  var->alignment = SymbolEffectiveAlignment(decl->symbol);
-                  var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
-                  var->is_local = decl->symbol->flags.is_local;
-                  VectorAppend(&compiler->uninitialized_static_variables, var);
+                  if (!AddStaticZeroImage(decl->symbol)) {
+                    UninitializedStaticVariable* var =
+                        malloc(sizeof(UninitializedStaticVariable));
+                    var->symbol = decl->symbol;
+                    var->is_global =
+                        !StorageIs(decl->symbol->storage, STO(static));
+                    var->is_weak = SymbolHasWeakBinding(decl->symbol);
+                    var->size = decl->symbol->type->size;
+                    var->alignment = SymbolEffectiveAlignment(decl->symbol);
+                    var->is_tls = StorageIs(decl->symbol->storage, STO(thread));
+                    var->is_local = decl->symbol->flags.is_local;
+                    VectorAppend(&compiler->uninitialized_static_variables,
+                                 var);
+                  }
 
                   ASTNode* dynamic_init =
                       CXXThreadLocalDynamicInitStatement(decl->symbol,
@@ -3675,17 +3703,20 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                     MarkReferencesInAST(decl->initializer);
                   }
                   CompleteCXXDynamicArrayBound(decl->symbol, decl->initializer);
-                  UninitializedStaticVariable* var =
-                      malloc(sizeof(UninitializedStaticVariable));
-                  var->symbol = decl->symbol;
-                  var->is_global =
-                      !StorageIs(decl->symbol->storage, STO(static));
-                  var->is_weak = SymbolHasWeakBinding(decl->symbol);
-                  var->size = decl->symbol->type->size;
-                  var->alignment = SymbolEffectiveAlignment(decl->symbol);
-                  var->is_tls = false;
-                  var->is_local = decl->symbol->flags.is_local;
-                  VectorAppend(&compiler->uninitialized_static_variables, var);
+                  if (!AddStaticZeroImage(decl->symbol)) {
+                    UninitializedStaticVariable* var =
+                        malloc(sizeof(UninitializedStaticVariable));
+                    var->symbol = decl->symbol;
+                    var->is_global =
+                        !StorageIs(decl->symbol->storage, STO(static));
+                    var->is_weak = SymbolHasWeakBinding(decl->symbol);
+                    var->size = decl->symbol->type->size;
+                    var->alignment = SymbolEffectiveAlignment(decl->symbol);
+                    var->is_tls = false;
+                    var->is_local = decl->symbol->flags.is_local;
+                    VectorAppend(&compiler->uninitialized_static_variables,
+                                 var);
+                  }
 
                   ASTNode* dynamic_init =
                       CXXThreadLocalDynamicInitStatement(decl->symbol,
