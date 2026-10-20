@@ -413,8 +413,19 @@ void StringPrintf(String* str, const char* format, ...) {
 void StringVPrintf(String* str, const char* format, va_list ap) {
   LazyInit(str);
   char buf[1024];
-  vsnprintf(buf, sizeof(buf), format, ap);
-  StringAppend(str, buf);
+  va_list measure;
+  va_copy(measure, ap);
+  int length = vsnprintf(buf, sizeof(buf), format, measure);
+  va_end(measure);
+  if (length < 0 || (size_t)length < sizeof(buf)) {
+    StringAppend(str, buf);
+    return;
+  }
+  // Mangled names alone can exceed the stack buffer.
+  char* heap = malloc((size_t)length + 1);
+  vsnprintf(heap, (size_t)length + 1, format, ap);
+  StringAppend(str, heap);
+  free(heap);
 }
 
 bool StringContainsChar(String* str, char ch) {
