@@ -640,16 +640,17 @@ static COMPILER_UNUSED bool MetaTraitNeedsTemplateArgumentRecovery(
     return false;
   }
   Struct* str = query->info.struct_info;
-  if (str->is_template && str->members.length == 0) {
+  bool no_members =
+      str->members.length == 0 && str->pending_special_members.kinds == 0;
+  if (str->is_template && no_members) {
     return true;
   }
   if (str->tag_symbol != NULL && str->tag_symbol->flags.is_template &&
-      str->members.length == 0) {
+      no_members) {
     return true;
   }
   return MetaTraitPrimaryTemplateSymbol(query) != NULL &&
-         MetaTraitFindTemplateArguments(query) == NULL &&
-         str->members.length == 0;
+         MetaTraitFindTemplateArguments(query) == NULL && no_members;
 }
 
 static bool MetaTraitTypeIsConcreteForQuery(TypeRecord* type) {
@@ -2865,6 +2866,8 @@ static bool MetaTraitTypesLayoutCompatible(TypeRecord* left, TypeRecord* right) 
   }
   Struct* left_str = left->info.struct_info;
   Struct* right_str = right->info.struct_info;
+  CXXDeclarePendingSpecialMembers(left_str);
+  CXXDeclarePendingSpecialMembers(right_str);
   if (left_str->is_union != right_str->is_union ||
       left_str->members.length != right_str->members.length ||
       left_str->bases.length != right_str->bases.length) {

@@ -640,6 +640,12 @@ static Symbol* NextVisibleOverload(SerializeContext* ctx, Symbol* symbol) {
 
 static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   Symbol* s = (Symbol*)obj;
+  // Declaring a pending constructor or assignment marks its user-declared
+  // overloads as overloaded.
+  if (s->member_lookup_class != NULL &&
+      CXXNameIsPendingSpecialMember(s->member_lookup_class, s->name.value)) {
+    CXXDeclarePendingSpecialMembersSlow(s->member_lookup_class);
+  }
   SWriteStringVal(ctx, buf, kSym_name, &s->name);
   SWriteStringVal(ctx, buf, kSym_asm_name, SymbolAsmName(s));
   SWriteRef(ctx, buf, kSym_namespace, kSerialKindNamespace, s->namespace_);

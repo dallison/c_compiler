@@ -232,6 +232,19 @@ typedef enum {
   kCXXSpecialMemberMoveAssignment,
 } CXXSpecialMemberKind;
 
+// Implicit special members decided when their class was completed but not
+// declared until something needs them (CXXDeclarePendingSpecialMembers).
+// Each mask has bit (1 << kind) for one CXXSpecialMemberKind.
+typedef struct CXXPendingSpecialMembers {
+  struct Symbol* tag;
+  uint8_t kinds;
+  // Deleted when first decided; a member declared deleted has no definition.
+  uint8_t declared_deleted;
+  uint8_t deleted;
+  uint8_t noexcept_;
+  uint8_t trivial;
+} CXXPendingSpecialMembers;
+
 typedef enum {
   kCXXRefQualifierNone,
   kCXXRefQualifierLValue,
@@ -522,6 +535,8 @@ struct Struct {
   bool is_template;  // True if this is a C++ class template.     // @wire 12
   bool is_aggregate; // True if this is a C++ aggregate class.    // @wire 13
   bool cxx_special_members_complete;  // Special members declared. // @wire 14
+  // Serializing a class declares its pending members first.
+  CXXPendingSpecialMembers pending_special_members;  // @wire -
   // True once RegisterCXXVTable has run for this class (i.e. vtable_symbols is
   // populated).  Constructor preambles built before this point defer their
   // __vptr initializers, since the vtables they reference do not exist yet.

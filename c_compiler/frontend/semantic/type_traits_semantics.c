@@ -569,10 +569,44 @@ static bool TypeIsReferenceConstructibleFrom(Syntax* syntax, TypeRecord* target,
   return ok && !DiagnosticErrorTrapped();
 }
 
-static StructMember* TypeTraitFindSpecialMember(
+// What the traits read from a class's special member of one kind.
+typedef struct {
+  bool found;
+  bool is_public;
+  bool is_deleted;
+  bool is_noexcept;
+  // The parameter naming the class is a reference to const.
+  bool source_is_const;
+} TypeTraitSpecialMember;
+
+static bool TypeTraitSpecialMemberSourceIsConst(FunctionInfo* info,
+                                                Struct* str) {
+  for (size_t i = 0; i < info->prototype.length; i++) {
+    Symbol* formal = info->prototype.value.p[i];
+    TypeRecord* formal_object = formal != NULL && TypeIsReference(formal->type)
+                                    ? formal->type->next
+                                    : NULL;
+    if (formal_object != NULL && TypeIsStructOrUnion(formal_object) &&
+        formal_object->info.struct_info == str) {
+      return TypeIsConst(formal_object);
+    }
+  }
+  return false;
+}
+
+static TypeTraitSpecialMember TypeTraitFindSpecialMember(
     Struct* str, CXXSpecialMemberKind kind) {
+  TypeTraitSpecialMember result = {0};
   if (str == NULL) {
-    return NULL;
+    return result;
+  }
+  if (CXXPendingSpecialMemberFlags(str, kind, &result.is_deleted,
+                                   &result.is_noexcept)) {
+    result.found = true;
+    result.is_public = true;
+    result.source_is_const = kind == kCXXSpecialMemberCopyConstructor ||
+                             kind == kCXXSpecialMemberCopyAssignment;
+    return result;
   }
   for (size_t i = 0; i < str->members.length; i++) {
     for (StructMember* member = str->members.value.p[i]; member != NULL;
@@ -583,11 +617,17 @@ static StructMember* TypeTraitFindSpecialMember(
               : NULL;
       if (func != NULL && TypeIsFunction(func) &&
           func->info.function.cxx_special_member_kind == kind) {
-        return member;
+        result.found = true;
+        result.is_public = member->access == kAccessPublic;
+        result.is_deleted = func->info.function.is_deleted;
+        result.is_noexcept = func->info.function.is_noexcept;
+        result.source_is_const =
+            TypeTraitSpecialMemberSourceIsConst(&func->info.function, str);
+        return result;
       }
     }
   }
-  return NULL;
+  return result;
 }
 
 static bool TypeTraitSameClassSpecialMemberConstruction(
@@ -614,44 +654,20 @@ static bool TypeTraitSameClassSpecialMemberConstruction(
   CXXSpecialMemberKind kind =
       use_move ? kCXXSpecialMemberMoveConstructor
                : kCXXSpecialMemberCopyConstructor;
-  StructMember* member =
+  TypeTraitSpecialMember member =
       TypeTraitFindSpecialMember(target->info.struct_info, kind);
-  if (member == NULL && use_move) {
+  if (!member.found && use_move) {
     member = TypeTraitFindSpecialMember(target->info.struct_info,
                                         kCXXSpecialMemberCopyConstructor);
   }
-  if (member == NULL || member->symbol == NULL ||
-      member->symbol->type == NULL ||
-      member->access != kAccessPublic ||
-      member->symbol->type->info.function.is_deleted ||
+  if (!member.found || !member.is_public || member.is_deleted ||
       CXXTypeSpecialMemberIsDeleted(target, kind)) {
     return false;
   }
-  if (TypeIsConst(object)) {
-    TypeRecord* source_type = NULL;
-    FunctionInfo* info = &member->symbol->type->info.function;
-    for (size_t i = 0; i < info->prototype.length; i++) {
-      Symbol* formal = info->prototype.value.p[i];
-      TypeRecord* formal_object =
-          formal != NULL && TypeIsReference(formal->type)
-              ? formal->type->next
-              : NULL;
-      if (formal_object != NULL && TypeIsStructOrUnion(formal_object) &&
-          formal_object->info.struct_info == target->info.struct_info) {
-        source_type = formal->type;
-        break;
-      }
-    }
-    TypeRecord* source_object =
-        source_type != NULL && TypeIsReference(source_type)
-            ? source_type->next
-            : source_type;
-    if (source_object == NULL || !TypeIsConst(source_object)) {
-      return false;
-    }
+  if (TypeIsConst(object) && !member.source_is_const) {
+    return false;
   }
-  return !check_nothrow ||
-         member->symbol->type->info.function.is_noexcept;
+  return !check_nothrow || member.is_noexcept;
 }
 
 static bool TypeTraitSameClassSpecialMemberAssignment(
@@ -673,24 +689,20 @@ static bool TypeTraitSameClassSpecialMemberAssignment(
   bool use_move =
       (!TypeIsReference(rhs) || rhs->declarator == kDeclRValueReference) &&
       !TypeIsConst(source);
-  StructMember* member = TypeTraitFindSpecialMember(
-      target->info.struct_info,
-      use_move ? kCXXSpecialMemberMoveAssignment
-               : kCXXSpecialMemberCopyAssignment);
-  if (member == NULL && use_move) {
+  TypeTraitSpecialMember member = TypeTraitFindSpecialMember(
+      target->info.struct_info, use_move ? kCXXSpecialMemberMoveAssignment
+                                         : kCXXSpecialMemberCopyAssignment);
+  if (!member.found && use_move) {
     member = TypeTraitFindSpecialMember(target->info.struct_info,
                                         kCXXSpecialMemberCopyAssignment);
   }
-  if (member == NULL || member->symbol == NULL ||
-      member->symbol->type == NULL || member->access != kAccessPublic ||
-      member->symbol->type->info.function.is_deleted ||
+  if (!member.found || !member.is_public || member.is_deleted ||
       CXXTypeSpecialMemberIsDeleted(
           target, use_move ? kCXXSpecialMemberMoveAssignment
                            : kCXXSpecialMemberCopyAssignment)) {
     return false;
   }
-  return !check_nothrow ||
-         member->symbol->type->info.function.is_noexcept;
+  return !check_nothrow || member.is_noexcept;
 }
 
 static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
@@ -732,16 +744,12 @@ static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
   if (arg_types.length == 0 && TypeIsStructOrUnion(target) &&
       target->info.struct_info != NULL &&
       target->info.struct_info->is_union) {
-    StructMember* constructor = TypeTraitFindSpecialMember(
+    TypeTraitSpecialMember constructor = TypeTraitFindSpecialMember(
         target->info.struct_info, kCXXSpecialMemberDefaultConstructor);
-    result =
-        constructor != NULL && constructor->symbol != NULL &&
-        constructor->symbol->type != NULL &&
-        constructor->access == kAccessPublic &&
-        !CXXTypeSpecialMemberIsDeleted(
-            target, kCXXSpecialMemberDefaultConstructor) &&
-        (!check_nothrow ||
-         constructor->symbol->type->info.function.is_noexcept);
+    result = constructor.found && constructor.is_public &&
+             !CXXTypeSpecialMemberIsDeleted(
+                 target, kCXXSpecialMemberDefaultConstructor) &&
+             (!check_nothrow || constructor.is_noexcept);
     VectorDestruct(&arg_types);
     return result;
   }
@@ -2347,13 +2355,9 @@ static bool TypeTraitConversionSelectedOperationIsNoexcept(TypeRecord* from,
         TypeIsDerivedFrom(from, to)) {
       return true;
     }
-    StructMember* ctor = TypeTraitFindSpecialMember(
+    TypeTraitSpecialMember ctor = TypeTraitFindSpecialMember(
         from->info.struct_info, kCXXSpecialMemberCopyConstructor);
-    if (ctor == NULL || ctor->symbol == NULL ||
-        ctor->symbol->type == NULL) {
-      return false;
-    }
-    return ctor->symbol->type->info.function.is_noexcept;
+    return ctor.found && ctor.is_noexcept;
   }
   return true;
 }

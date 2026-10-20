@@ -2480,6 +2480,7 @@ void SerialReadPartialSpecializationVector(DeserializeContext* ctx,
 // ---------------------------------------------------------------------------
 static bool WriteStruct(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   Struct* s = (Struct*)obj;
+  CXXDeclarePendingSpecialMembers(s);
   SWriteStringPtr(ctx, buf, kStruct_tag_name, s->tag_name);
   SWriteRef(ctx, buf, kStruct_tag_symbol, kSerialKindSymbol, s->tag_symbol);
   WriteBaseVector(ctx, buf, kStruct_bases, &s->bases);

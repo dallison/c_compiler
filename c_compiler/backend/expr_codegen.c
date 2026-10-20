@@ -5009,6 +5009,7 @@ static Symbol* FindExceptionSpecialMember(TypeRecord* type,
     return NULL;
   }
   Struct* str = type->info.struct_info;
+  CXXDeclarePendingSpecialMembers(str);
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
     for (StructMember* candidate = member; candidate != NULL;

@@ -3687,6 +3687,9 @@ static bool StructDeclaresMemberNamed(Struct* str, String* name) {
   if (str == NULL || name == NULL) {
     return false;
   }
+  if (CXXNameIsPendingSpecialMember(str, name->value)) {
+    return true;
+  }
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
     if (member != NULL && member->symbol != NULL &&
@@ -13513,6 +13516,9 @@ static Vector* AlignAliasArgumentsToParameterIndices(Symbol* alias,
 static Struct* StructDeclaringMember(Struct* str, String* name, int depth) {
   if (str == NULL || name == NULL || name->value == NULL || depth > 16) {
     return NULL;
+  }
+  if (CXXNameIsPendingSpecialMember(str, name->value)) {
+    return str;
   }
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];

@@ -593,6 +593,7 @@ static Symbol* ConstexprFindSpecialMember(TypeRecord* type,
     return NULL;
   }
   Struct* str = type->info.struct_info;
+  CXXDeclarePendingSpecialMembers(str);
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
     for (StructMember* candidate = member; candidate != NULL;
@@ -1685,6 +1686,9 @@ size_t ConstexprObjectSlotCount(TypeRecord* type) {
   if (type != NULL && TypeIsStructOrUnion(type) &&
       type->info.struct_info != NULL) {
     Struct* str = type->info.struct_info;
+    // Every member has a slot, so declaring members after an object exists
+    // would leave that object shorter than later ones.
+    CXXDeclarePendingSpecialMembers(str);
     return str->is_union
                ? 1
                : str->members.length + ConstexprNonVirtualBaseCount(str) +
@@ -10719,6 +10723,7 @@ Symbol* ConstexprConstructorForObjectType(TypeRecord* type,
     return NULL;
   }
   Struct* str = type->info.struct_info;
+  CXXDeclarePendingSpecialMembers(str);
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
     while (member != NULL) {
@@ -11675,6 +11680,7 @@ static Symbol* ConstexprFindDestructorSymbol(TypeRecord* type) {
       type->info.struct_info == NULL) {
     return NULL;
   }
+  CXXDeclarePendingSpecialMembers(type->info.struct_info);
   for (size_t i = 0; i < type->info.struct_info->members.length; i++) {
     StructMember* member = type->info.struct_info->members.value.p[i];
     if (member != NULL && member->is_member_function &&

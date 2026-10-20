@@ -21,6 +21,23 @@ bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type, CXXSpecialMemberKind kind);
 bool CXXTypeSpecialMemberIsDeleted(TypeRecord* type, CXXSpecialMemberKind kind);
 bool CXXTypeIsImplicitLifetimeAggregate(TypeRecord* type);
 
+// Declares the implicit special members of `str` that its completion
+// deferred.  Anything that looks for a constructor, destructor or assignment
+// operator in the member list or lookup tables calls this first.
+void CXXDeclarePendingSpecialMembersSlow(Struct* str);
+static inline void CXXDeclarePendingSpecialMembers(Struct* str) {
+  if (str != NULL && str->pending_special_members.kinds != 0) {
+    CXXDeclarePendingSpecialMembersSlow(str);
+  }
+}
+// True when `name` would find a constructor, the destructor or an assignment
+// operator of `str` that is still pending.
+bool CXXNameIsPendingSpecialMember(Struct* str, const char* name);
+// True when the implicit member of `kind` is pending; it is then public, and
+// a copy operation takes a const source.
+bool CXXPendingSpecialMemberFlags(Struct* str, CXXSpecialMemberKind kind,
+                                  bool* is_deleted, bool* is_noexcept);
+
 bool CXXFunctionIsDefaultedPostfixOperator(Symbol* symbol);
 void CXXFinalizeDefaultedPostfixFriendFunctions(TypeParser* parser,
                                                 Struct* owner);

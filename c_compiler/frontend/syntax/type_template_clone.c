@@ -4830,9 +4830,14 @@ static Symbol* FindClonedOwnerMemberSymbol(TemplateFunctionBodyClone* clone,
     if (original == NULL || original->symbol != source) {
       continue;
     }
-    StructMember* concrete =
-        i < clone->to_owner->members.length
-            ? clone->to_owner->members.value.p[i] : NULL;
+    // Implicit members may be declared later in the instantiation, so their
+    // positions differ from the pattern's.
+    bool implicit = original->is_member_function && source->type != NULL &&
+                    TypeIsFunction(source->type) &&
+                    source->type->info.function.is_implicitly_declared;
+    StructMember* concrete = !implicit && i < clone->to_owner->members.length
+                                 ? clone->to_owner->members.value.p[i]
+                                 : NULL;
     if (concrete != NULL && concrete->symbol != NULL &&
         concrete->is_static == original->is_static &&
         concrete->is_member_function == original->is_member_function) {
@@ -8765,6 +8770,7 @@ static Symbol* CorrespondingConstructorOverload(Struct* pattern, Symbol* ctor,
   if (!found) {
     return NULL;
   }
+  CXXDeclarePendingSpecialMembers(specialization);
   for (size_t i = 0; i < specialization->members.length; i++) {
     for (StructMember* member = specialization->members.value.p[i];
          member != NULL; member = member->overload_next) {

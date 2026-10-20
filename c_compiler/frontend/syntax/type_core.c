@@ -3004,6 +3004,7 @@ Struct* NewStruct(bool is_union) {
   s->is_template = false;
   s->is_aggregate = CompilerIsCXX();
   s->cxx_special_members_complete = false;
+  s->pending_special_members = (CXXPendingSpecialMembers){0};
   s->vtables_registered = false;
   s->instantiation_in_progress = false;
   s->being_defined = false;

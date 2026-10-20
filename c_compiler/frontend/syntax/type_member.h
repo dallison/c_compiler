@@ -10,6 +10,8 @@
 
 void StructAddSyntheticMember(Struct* str, StructMember* member);
 StructMember* FindStructMember(Struct* str, String* name);
+// A member `str` itself declares, not one inherited from a base.
+StructMember* FindOwnStructMember(Struct* str, String* name);
 StructMember* FindStructMemberByName(Struct* str, const char* name);
 StructMember* FindStructMemberWithAccess(Struct* str, String* name,
                                          CXXAccess* access,

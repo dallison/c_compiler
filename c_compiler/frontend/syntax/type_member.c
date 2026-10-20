@@ -28,6 +28,22 @@
 #include "rtti.h"
 #include "set.h"
 
+// Declares a pending implicit special member of that name first.
+StructMember* FindOwnStructMember(Struct* str, String* name) {
+  if (str->pending_special_members.kinds != 0 &&
+      CXXNameIsPendingSpecialMember(str, name->value)) {
+    CXXDeclarePendingSpecialMembersSlow(str);
+  }
+  return MapFindPointerKey(&str->symbol_table, name);
+}
+
+static StructMember* FindOwnStructMemberByName(Struct* str, const char* name) {
+  if (str->pending_special_members.kinds != 0 &&
+      CXXNameIsPendingSpecialMember(str, name)) {
+    CXXDeclarePendingSpecialMembersSlow(str);
+  }
+  return MapFindPointerKey(&str->symbol_name_table, (void*)name);
+}
 
 static bool ParsedClassHasVirtualBases(Struct* str) {
   if (str == NULL) {
@@ -184,6 +200,9 @@ bool StructHasMemberFunction(Struct* str) {
   if (str == NULL) {
     return false;
   }
+  if (str->pending_special_members.kinds != 0) {
+    return true;
+  }
   for (size_t i = 0; i < str->members.length; i++) {
     StructMember* member = str->members.value.p[i];
     if (member != NULL && member->is_member_function) {
@@ -268,7 +287,7 @@ static void AddCXXNestedTypeMember(TypeParser* parser, Struct* owner,
   }
   // Only a *direct* member of this class collides.  A base class's nested type
   // of the same name is lawfully hidden by this one, so do not walk bases here.
-  StructMember* existing = MapFindPointerKey(&owner->symbol_table, &tag->name);
+  StructMember* existing = FindOwnStructMember(owner, &tag->name);
   if (existing != NULL) {
     // Completing a previously forward-declared nested type -- `class X;`
     // followed by `class X { ... };` -- reaches here twice for the same tag,
@@ -731,8 +750,7 @@ static void AddCXXMemberUsingFunction(TypeParser* parser, Struct* owner,
   if (member == NULL) {
     return;
   }
-  StructMember* existing =
-      MapFindPointerKey(&owner->symbol_table, &member->symbol->name);
+  StructMember* existing = FindOwnStructMember(owner, &member->symbol->name);
   if (existing != NULL) {
     TypeRecord* imported_type = member->symbol->type;
     if (TypeIsFunction(imported_type) &&
@@ -994,7 +1012,7 @@ static StructMember* FindStructMemberRec(Struct* str, String* name, int depth) {
   if (str == NULL || name == NULL || depth > 1024) {
     return NULL;
   }
-  StructMember* member = MapFindPointerKey(&str->symbol_table, name);
+  StructMember* member = FindOwnStructMember(str, name);
   if (member != NULL) {
     return member;
   }
@@ -1122,7 +1140,7 @@ static StructMember* FindDirectStructMemberByName(Struct* str,
   if (str == NULL || name == NULL) {
     return NULL;
   }
-  StructMember* member = MapFindPointerKey(&str->symbol_name_table, (void*)name);
+  StructMember* member = FindOwnStructMemberByName(str, name);
   if (member != NULL) {
     return member;
   }
@@ -1213,7 +1231,7 @@ static StructMember* FindStructMemberWithAccessFromBase(Struct* str,
                                                         CXXAccess* access,
                                                         Struct** owner,
                                                         int* byte_offset) {
-  StructMember* member = MapFindPointerKey(&str->symbol_table, name);
+  StructMember* member = FindOwnStructMember(str, name);
   if (member != NULL) {
     if (access != NULL) {
       *access = CombineInheritedAccess(inherited, member->access);
@@ -1259,7 +1277,7 @@ StructMember* FindStructMemberWithAccessAndOffset(Struct* str, String* name,
                                                   CXXAccess* access,
                                                   Struct** owner,
                                                   int* byte_offset) {
-  StructMember* member = MapFindPointerKey(&str->symbol_table, name);
+  StructMember* member = FindOwnStructMember(str, name);
   if (member != NULL) {
     if (access != NULL) {
       *access = member->access;
@@ -1424,7 +1442,7 @@ static StructMember* FindConstrainedMemberOverload(StructMember* first,
 }
 
 static bool CheckStructMember(Struct* str, String* name) {
-  return MapFindPointerKey(&str->symbol_table, name) == NULL;
+  return FindOwnStructMember(str, name) == NULL;
 }
 
 void StructInsertMemberIntoTables(Struct* str, StructMember* member) {
@@ -2854,7 +2872,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   StructMember* member = NewStructMember(member_symbol);
   member->is_member_function = true;
   member->access = access;
-  StructMember* existing = MapFindPointerKey(&str->symbol_table, &member_name);
+  StructMember* existing = FindOwnStructMember(str, &member_name);
   if (existing != NULL) {
     if (!CanOverloadStructMember(existing, member)) {
       String diagnostic_name;
@@ -2966,7 +2984,7 @@ static bool ParseCXXConversionOperatorMember(
   member->is_member_function = true;
   member->access = access;
 
-  StructMember* existing = MapFindPointerKey(&str->symbol_table, &member_name);
+  StructMember* existing = FindOwnStructMember(str, &member_name);
   if (existing != NULL) {
     if (!CanOverloadStructMember(existing, member)) {
       SyntaxError(parser->syntax, "Duplicate struct/union member %s",
@@ -4021,8 +4039,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
             StringEqual(&member_symbol->name, "_")) {
           member_symbol->flags.is_name_independent = true;
         }
-        StructMember* existing =
-            MapFindPointerKey(&str->symbol_table, &member_symbol->name);
+        StructMember* existing = FindOwnStructMember(str, &member_symbol->name);
         if (existing != NULL) {
           if (member_symbol->flags.is_name_independent) {
             existing->symbol->flags.name_independent_lookup_ambiguous = true;

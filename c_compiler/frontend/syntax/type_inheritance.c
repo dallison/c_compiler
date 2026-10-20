@@ -385,7 +385,9 @@ static bool TypeHasNonTrivialDestructorImpl(TypeRecord* type, Set* visited) {
     return false;
   }
   SetInsert(visited, str);
-  if (str->tag_name != NULL) {
+  bool destructor_pending = (str->pending_special_members.kinds &
+                             (1u << kCXXSpecialMemberDestructor)) != 0;
+  if (str->tag_name != NULL && !destructor_pending) {
     String destructor_name;
     StringInit(&destructor_name, "~");
     StringAppendString(&destructor_name, str->tag_name);

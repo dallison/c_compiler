@@ -2565,6 +2565,7 @@ static Vector* MetaCollectRange(MetaOperation operation, ReflectionValue* value,
     }
     return values;
   }
+  CXXDeclarePendingSpecialMembers(owner);
   for (size_t i = 0; i < owner->members.length; i++) {
     MetaCollectRangeMember(owner, owner->members.value.p[i], operation, ctx,
                            location, values);

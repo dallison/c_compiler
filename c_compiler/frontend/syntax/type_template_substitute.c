@@ -1951,7 +1951,7 @@ static Struct* StructBaseDeclaringMember(Struct* str, String* name, int depth) {
       continue;
     }
     Struct* base_struct = base->type->info.struct_info;
-    StructMember* direct = MapFindPointerKey(&base_struct->symbol_table, name);
+    StructMember* direct = FindOwnStructMember(base_struct, name);
     if (direct != NULL) {
       return base_struct;
     }
