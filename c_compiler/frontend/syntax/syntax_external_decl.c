@@ -244,6 +244,16 @@ static Symbol* FindPreviousExternalDeclaration(TypeParser* parser,
   return old_sym;
 }
 
+static bool StructMemberOverloadsIncludeTemplate(StructMember* first) {
+  for (StructMember* overload = first; overload != NULL;
+       overload = overload->overload_next) {
+    if (overload->symbol != NULL && overload->symbol->flags.is_template) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // An explicit specialization of a member function (`template<> R C<T>::f()`):
 // finds the matching specialization among the member's overloads, or adds a
 // new specialization member, and makes it the definition target.
@@ -287,8 +297,21 @@ static void MatchExplicitMemberSpecialization(TypeParser* parser,
       member_head = parser->cxx_member_definition;
     }
     if (member_head != NULL) {
+      if (sym->type->template_arguments != NULL &&
+          !StructMemberOverloadsIncludeTemplate(member_head)) {
+        SyntaxError(syntax, "'%s' is not a template", sym->name.value);
+      }
+      // A member specialization for other template arguments is a
+      // different function, even with the same type.
       StructMember* matching =
           FindStructMemberOverload(member_head, sym->type);
+      while (matching != NULL && sym->type->template_arguments != NULL &&
+             matching->symbol->type->template_arguments != NULL &&
+             !TemplateArgumentVectorEqual(
+                 matching->symbol->type->template_arguments,
+                 sym->type->template_arguments)) {
+        matching = FindStructMemberOverload(matching->overload_next, sym->type);
+      }
       if (matching != NULL) {
         parser->cxx_member_definition = matching;
         d->old_sym = matching->symbol;
@@ -515,6 +538,9 @@ static void MergeWithPreviousExternalDeclaration(TypeParser* parser,
   // this must be a declaration.
   if (d->old_sym->flags.is_defined) {
     CheckExternalRedefinition(parser, d, storage);
+    if (d->old_sym == NULL) {
+      return;
+    }
   } else {
     // Old sym is a declaration.
     if (IsDefinition(parser, sym,  storage)) {
@@ -627,7 +653,10 @@ static void ResolveExternalDeclarator(TypeParser* parser,
   }
   if (d->old_sym != NULL) {
     MergeWithPreviousExternalDeclaration(parser, d, storage);
-  } else {
+  }
+  // The merge drops a previous definition that is a different member
+  // specialization.
+  if (d->old_sym == NULL) {
     RegisterNewExternalDeclaration(parser, d, storage);
   }
 }
