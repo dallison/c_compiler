@@ -1239,7 +1239,21 @@ ASTNode* ParseIdentifier(Syntax* syntax,
         // and so it is owned/freed by a symbol table rather than leaked.
         SyntaxAddSymbol(syntax, symbol);
       } else {
-        TypoCorrectionErrorUnknownSymbol(syntax, &name);
+        // The [temp.names]/3 rule above also makes `Q<T>` a template-id when
+        // no call follows; parsing its arguments keeps the `>` from reading
+        // as a comparison.
+        if (CompilerIsCXX() && !adl_template_id &&
+            name.template_arguments.length == 1 &&
+            name.template_arguments.value.p[0] == NULL &&
+            LexLookingAt(lex, TOK(less)) &&
+            SyntaxAngleBracketsAreBalanced(syntax)) {
+          SyntaxError(syntax, "No template named \"%s\"",
+                      FullyQualifiedIdentifierLast(&name));
+          name.template_arguments.value.p[0] =
+              SyntaxParseTemplateArgumentList(syntax, followers);
+        } else {
+          TypoCorrectionErrorUnknownSymbol(syntax, &name);
+        }
         TypeRecord* type =
             NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
         symbol = NewSymbol(FullyQualifiedIdentifierLast(&name), type,

@@ -365,15 +365,18 @@ static bool ScanAngleBrackets(Syntax* syntax, Token* next,
     if (token == TOK(lparen)) {
       paren_depth++;
     } else if (token == TOK(rparen)) {
-      if (paren_depth > 0) {
-        paren_depth--;
+      if (paren_depth == 0) {
+        // Closes a parenthesis opened before the `<`.
+        break;
       }
+      paren_depth--;
     } else if (token == TOK(lsquare)) {
       square_depth++;
     } else if (token == TOK(rsquare)) {
-      if (square_depth > 0) {
-        square_depth--;
+      if (square_depth == 0) {
+        break;
       }
+      square_depth--;
     } else if (token == TOK(lbrace)) {
       brace_depth++;
     } else if (token == TOK(rbrace)) {
@@ -436,6 +439,14 @@ bool SyntaxAngleBracketsPrecedeCall(Syntax* syntax) {
   return ScanAngleBrackets(syntax, &next, &next_closes_angle,
                            &closed_by_nested_angle) &&
          !closed_by_nested_angle && next == TOK(lparen);
+}
+
+bool SyntaxAngleBracketsAreBalanced(Syntax* syntax) {
+  Token next;
+  bool next_closes_angle;
+  bool closed_by_nested_angle;
+  return ScanAngleBrackets(syntax, &next, &next_closes_angle,
+                           &closed_by_nested_angle);
 }
 
 // A non-template can share a name with a function template (`operator<<(char)`
