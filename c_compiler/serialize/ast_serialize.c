@@ -1618,6 +1618,11 @@ static bool ReadAST(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
     }
     ReadASTSubField(ctx, buf, n, shape, field, wt);
   }
+  // The writer's label names can collide with this translation unit's.
+  LabelASTNode* pc_label = ASTNodeAsPCLabel(n);
+  if (pc_label != NULL) {
+    AssignFreshPCLabelName(pc_label);
+  }
   return !WireBufferHasError(buf);
 }
 

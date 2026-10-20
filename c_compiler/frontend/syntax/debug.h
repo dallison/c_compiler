@@ -145,6 +145,10 @@ typedef struct LexicalScopeDIE {
   struct LexicalScopeDIE* parent;
   String low_pc_label;
   String high_pc_expr;
+  // A nested block's PC labels, which only its function's codegen emits.  Read
+  // when the function's DIE is built right after that codegen, then NULL.
+  const struct LabelASTNode* low_label;
+  const struct LabelASTNode* high_label;
 } LexicalScopeDIE;
 
 typedef struct {
@@ -224,5 +228,8 @@ DIE* BuildDebugInfo(DebugBuilder* builder, Symbol* sym, DW_TAG tag);
 DIE* BuildTypeDebugInfo(DebugBuilder* builder, TypeRecord* type);
 void DIEPrint(DIE* die, int level);
 void BuildDebugInfoAfterCodegen(DebugBuilder* builder, Symbol* sym);
+// Builds the namespace-scope variable DIEs; call once every emitted static
+// has its location (VariableDIESetStatic).
+void DebugBuilderBuildVariables(DebugBuilder* builder);
 
 #endif /* debug_h */

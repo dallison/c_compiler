@@ -18,6 +18,7 @@
 #include "member_pointer.h"
 
 static DIE* NewSymbolDIE(DebugBuilder* builder, Symbol* symbol, DW_TAG tag);
+static VariableDIE* DIEAsVariable(DIE* die);
 static DIE* NewMemberDIE(DebugBuilder* builder, StructMember* member);
 static DIE* NewEnumConstDIE(DebugBuilder* builder, Symbol* c);
 static COMPILER_UNUSED void DebugAbbreviationPrint(DebugAbbreviation* abbrev, int level);
@@ -95,6 +96,15 @@ DIE* BuildDebugInfo(DebugBuilder* builder, Symbol* sym, DW_TAG tag) {
   return die;
 }
 
+void DebugBuilderBuildVariables(DebugBuilder* builder) {
+  for (size_t i = 0; i < builder->top_dies.length; i++) {
+    DIE* die = builder->top_dies.value.p[i];
+    if (DIEAsVariable(die) != NULL) {
+      DIEBuild(builder, die);
+    }
+  }
+}
+
 void BuildDebugInfoAfterCodegen(DebugBuilder* builder, Symbol* sym) {
   DIE* die = SymbolDIE(sym);
   assert(die != NULL);
@@ -103,7 +113,23 @@ void BuildDebugInfoAfterCodegen(DebugBuilder* builder, Symbol* sym) {
   die->virtuals->builder(builder, die);
 }
 
+// A class defined in a template is a pattern, not a type of the program; its
+// members can name template parameters or have no type at all.
+static bool StructIsDefinedInTemplate(Struct* str) {
+  for (Struct* s = str; s != NULL; s = s->lexical_parent) {
+    if (s->is_template || s->defining_template_scope_count > 0 ||
+        s->in_namespace_template) {
+      return true;
+    }
+  }
+  return false;
+}
+
 DIE* BuildTypeDebugInfo(DebugBuilder* builder, TypeRecord* type) {
+  if (TypeIsStructOrUnion(type) &&
+      StructIsDefinedInTemplate(type->info.struct_info)) {
+    return NULL;
+  }
   DIE* die = NewTypeRecordDIE(builder, type);
   VectorAppend(&builder->top_dies, die);
   die->virtuals->builder(builder, die);
@@ -458,6 +484,8 @@ static LexicalScopeDIE* NewLexicalScope(DebugBuilder* builder, DW_TAG tag,
                  low_pc->name.value);
   }
   scope->parent = parent;
+  scope->low_label = low_pc;
+  scope->high_label = high_pc;
   AddDIE(builder, &scope->die);
   return scope;
 }
@@ -504,10 +532,38 @@ static DIE* NewFunctionTypeDIE(DebugBuilder* builder, DIE* subtype) {
 }
 
 static bool DebugLabelIsReady(const LabelASTNode* label) {
-  return label != NULL && label->name.value != NULL &&
-         label->name.length != 0 &&
-         (label->name.capacity == STRING_IMMUTABLE ||
-          label->name.length < label->name.capacity);
+  return label != NULL && label->emitted;
+}
+
+// Debug info can only name emitted labels.  A nested block whose labels were
+// not emitted (code that was never generated) gives its variables and blocks
+// to the enclosing scope.
+static void DropUnemittedLexicalScopes(LexicalScopeDIE* scope) {
+  Vector kept;
+  VectorInit(&kept);
+  for (size_t i = 0; i < scope->lexical_scopes.length; i++) {
+    LexicalScopeDIE* child = scope->lexical_scopes.value.p[i];
+    DropUnemittedLexicalScopes(child);
+    if (DebugLabelIsReady(child->low_label) &&
+        DebugLabelIsReady(child->high_label)) {
+      VectorAppend(&kept, child);
+    } else {
+      for (size_t j = 0; j < child->variables.length; j++) {
+        VectorAppend(&scope->variables, child->variables.value.p[j]);
+      }
+      for (size_t j = 0; j < child->lexical_scopes.length; j++) {
+        LexicalScopeDIE* grandchild = child->lexical_scopes.value.p[j];
+        grandchild->parent = scope;
+        VectorAppend(&kept, grandchild);
+      }
+      VectorClear(&child->variables);
+      VectorClear(&child->lexical_scopes);
+    }
+    child->low_label = NULL;
+    child->high_label = NULL;
+  }
+  VectorDestruct(&scope->lexical_scopes);
+  scope->lexical_scopes = kept;
 }
 
 static void StructDIEDestruct(DIE* die) {
@@ -576,9 +632,7 @@ static void LexicalScopeVisitor(ASTNode* node, void* data, int child_id,
   if (node->op == AST_OP(compound)) {
     CompoundStatementASTNode* compound =
         (CompoundStatementASTNode*)node;
-    bool has_debug_range =
-        DebugLabelIsReady(compound->low_pc) &&
-        DebugLabelIsReady(compound->high_pc);
+    bool has_debug_range = compound->low_pc != NULL;
     if (mode == kVisitPreChildren) {
       if (builder->level > 0 && has_debug_range) {
         LexicalScopeDIE* new_scope =
@@ -619,12 +673,60 @@ static void CVDIEEmit(DebugBuilder* builder, DIE* die);
 static DIEVirtuals cv_virtuals = {DIEBaseDestruct, CVDIEBuild, CVDIEPrint,
                                   CVDIEEmit};
 
+// A subprogram for the function being compiled (`definition`), whose code
+// this translation unit emits; otherwise only the subroutine type.
+static DIE* NewFunctionTypeRecordDIE(DebugBuilder* builder, TypeRecord* type,
+                                     bool definition) {
+  CompoundStatementASTNode* body =
+      (CompoundStatementASTNode*)type->info.function.body;
+  DIE* return_type = NULL;
+  if (!TypeIsVoid(type->next)) {
+    return_type = NewTypeRecordDIE(builder, type->next);
+  }
+  DIE* die;
+  if (!definition || body == NULL || body->base.op != AST_OP(compound) ||
+      body->low_pc == NULL) {
+    die = NewFunctionTypeDIE(builder, return_type);
+  } else {
+    Symbol* func_sym = type->info.function.symbol;
+    const char* name = func_sym == NULL ? NULL : func_sym->name.value;
+    const char* linkage = NULL;
+    const char* code_name = name;
+    bool is_external = false;
+    if (func_sym != NULL) {
+      if (SymbolAsmName(func_sym)->value != NULL &&
+          SymbolHasAsmName(func_sym)) {
+        code_name = SymbolAsmName(func_sym)->value;
+        if (name == NULL || strcmp(SymbolAsmName(func_sym)->value, name) != 0) {
+          linkage = SymbolAsmName(func_sym)->value;
+        }
+      }
+      is_external = !StorageIs(func_sym->storage, STO(static));
+    }
+    die = NewFunctionDIE(builder, return_type, name, linkage, is_external,
+                         code_name, body->low_pc, body->high_pc);
+  }
+  FunctionTypeDIE* func = (FunctionTypeDIE*)die;
+  for (size_t i = 0; i < type->info.function.prototype.length; i++) {
+    Symbol* formal = (Symbol*)type->info.function.prototype.value.p[i];
+    DIE* arg = NewSymbolDIE(builder, formal, DW_TAG(formal_parameter));
+    VectorAppend(&func->top_scope->variables, arg);
+    SymbolSetDIE(formal, arg);
+  }
+  if (die->tag == DW_TAG(subprogram)) {
+    BuildLexicalScopes(builder, type, func);
+  }
+  return die;
+}
+
 static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
   DIE* die = NULL;
   switch (type->declarator) {
     case kDeclArray:
-      die = NewArrayDIE(builder, type->info.array.size.fixed,
-                        NewTypeRecordDIE(builder, type->next));
+      // A VLA or dependent bound has no constant count.
+      die = NewArrayDIE(
+          builder, TypeIsFixedArray(type) ? type->info.array.size.fixed : 0,
+          NewTypeRecordDIE(builder, type->next));
       break;
 
     case kDeclVector:
@@ -652,49 +754,9 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
       break;
     }
 
-    case kDeclFunction: {
-      CompoundStatementASTNode* body =
-          (CompoundStatementASTNode*)type->info.function.body;
-      DIE* return_type = NULL;
-      if (!TypeIsVoid(type->next)) {
-        return_type = NewTypeRecordDIE(builder, type->next);
-      }
-      if (body == NULL || body->base.op != AST_OP(compound) ||
-          !DebugLabelIsReady(body->low_pc) ||
-          !DebugLabelIsReady(body->high_pc)) {
-        die = NewFunctionTypeDIE(builder, return_type);
-      } else {
-        Symbol* func_sym = type->info.function.symbol;
-        const char* name = func_sym == NULL ? NULL : func_sym->name.value;
-        const char* linkage = NULL;
-        const char* code_name = name;
-        bool is_external = false;
-        if (func_sym != NULL) {
-          if (SymbolAsmName(func_sym)->value != NULL &&
-              SymbolHasAsmName(func_sym)) {
-            code_name = SymbolAsmName(func_sym)->value;
-            if (name == NULL ||
-                strcmp(SymbolAsmName(func_sym)->value, name) != 0) {
-              linkage = SymbolAsmName(func_sym)->value;
-            }
-          }
-          is_external = !StorageIs(func_sym->storage, STO(static));
-        }
-        die = NewFunctionDIE(builder, return_type, name, linkage, is_external,
-                              code_name, body->low_pc, body->high_pc);
-      }
-      FunctionTypeDIE* func = (FunctionTypeDIE*)die;
-      for (size_t i = 0; i < type->info.function.prototype.length; i++) {
-        Symbol* formal = (Symbol*)type->info.function.prototype.value.p[i];
-        DIE* arg = NewSymbolDIE(builder, formal, DW_TAG(formal_parameter));
-        VectorAppend(&func->top_scope->variables, arg);
-        SymbolSetDIE(formal, arg);
-      }
-      if (die->tag == DW_TAG(subprogram)) {
-        BuildLexicalScopes(builder, type, func);
-      }
+    case kDeclFunction:
+      die = NewFunctionTypeRecordDIE(builder, type, false);
       break;
-    }
     case kDeclPrimitive:
       if (TypeIsStructOrUnion(type)) {
         die = FindTag(builder, type->info.struct_info->tag_name->value);
@@ -704,7 +766,13 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
                                 type->info.struct_info->tag_name->value,
                             .value.p = die};
           MapInsert(&builder->tags, kv);
-          for (size_t i = 0; i < type->info.struct_info->members.length; i++) {
+          // An ill-formed specialization that is only named has members
+          // without a type.
+          size_t member_count =
+              type->info.struct_info->invalid_instantiated_member != NULL
+                  ? 0
+                  : type->info.struct_info->members.length;
+          for (size_t i = 0; i < member_count; i++) {
             DIE* member = NewMemberDIE(
                 builder,
                 (StructMember*)type->info.struct_info->members.value.p[i]);
@@ -761,7 +829,8 @@ static DIEVirtuals symbol_virtuals = {NamedDIEDestruct, SymbolDIEBuild,
 
 static DIE* NewSymbolDIE(DebugBuilder* builder, Symbol* symbol, DW_TAG tag) {
   if (TypeIsFunction(symbol->type)) {
-    return NewTypeRecordDIE(builder, symbol->type);
+    return NewFunctionTypeRecordDIE(builder, symbol->type,
+                                    tag == DW_TAG(subprogram));
   }
   VariableDIE* var = malloc(sizeof(VariableDIE));
   NamedDIEInit(&var->die, tag, &symbol_virtuals, symbol->name.value, false);
@@ -1088,23 +1157,18 @@ static void DebugModuleInteger(DebugBuilder* builder, int width,
     length -= 2;
   }
   const char* minus = memchr(value, '-', length);
+  // Mangled names of template specializations run to thousands of bytes.
   if (minus != NULL) {
-    char left[512];
-    char right[512];
     size_t left_length = (size_t)(minus - value);
-    size_t right_length = length - left_length - 1;
-    assert(left_length < sizeof(left) && right_length < sizeof(right));
-    memcpy(left, value, left_length);
-    left[left_length] = '\0';
-    memcpy(right, minus + 1, right_length);
-    right[right_length] = '\0';
+    char* left = strndup(value, left_length);
+    char* right = strndup(minus + 1, length - left_length - 1);
     AsmExprInitDifference(&expr, left, right, 0);
+    free(left);
+    free(right);
   } else {
-    char symbol[512];
-    assert(length < sizeof(symbol));
-    memcpy(symbol, value, length);
-    symbol[length] = '\0';
+    char* symbol = strndup(value, length);
     AsmExprInitSymbol(&expr, symbol, 0);
+    free(symbol);
   }
   AsmModuleInteger(builder->module, width, &expr);
   AsmExprDestruct(&expr);
@@ -1563,6 +1627,9 @@ static void LexicalScopeDIEEmit(DebugBuilder* builder, DIE* die) {
 
 static void FunctionDIEBuild(DebugBuilder* builder, DIE* die) {
   FunctionTypeDIE* func = (FunctionTypeDIE*)die;
+  DropUnemittedLexicalScopes(func->top_scope);
+  func->top_scope->low_label = NULL;
+  func->top_scope->high_label = NULL;
   if (func->subtype != NULL) {
     DIEBuild(builder, func->subtype);
     AddAttributeAndValue(builder, die,
@@ -1777,29 +1844,38 @@ static void SymbolDIEEmit(DebugBuilder* builder, DIE* die) {
   DIEEmit(builder, var->type);
 }
 
+// Only variables and parameters have a location; a symbol's DIE can also be a
+// subprogram or typedef.
+static VariableDIE* DIEAsVariable(DIE* die) {
+  return die != NULL && (die->tag == DW_TAG(variable) ||
+                         die->tag == DW_TAG(formal_parameter))
+             ? (VariableDIE*)die
+             : NULL;
+}
+
 void VariableDIESetRegister(DIE* die, int reg) {
-  if (die == NULL) {
+  VariableDIE* var = DIEAsVariable(die);
+  if (var == NULL) {
     return;
   }
-  VariableDIE* var = (VariableDIE*)die;
   var->location.type = kLocationInRegister;
   var->location.v.reg = reg;
 }
 
 void VariableDIESetStackOffset(DIE* die, int offset) {
-  if (die == NULL) {
+  VariableDIE* var = DIEAsVariable(die);
+  if (var == NULL) {
     return;
   }
-  VariableDIE* var = (VariableDIE*)die;
   var->location.type = kLocationOnStack;
   var->location.v.stack_offset = offset;
 }
 
 void VariableDIESetStatic(DIE* die, const char* symbol) {
-  if (die == NULL) {
+  VariableDIE* var = DIEAsVariable(die);
+  if (var == NULL) {
     return;
   }
-  VariableDIE* var = (VariableDIE*)die;
   var->location.type = kLocationStatic;
   var->location.v.symbol_name = symbol;
 }

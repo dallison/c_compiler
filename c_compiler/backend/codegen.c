@@ -2384,7 +2384,7 @@ static void GenerateFunctionIRImpl(Generator* gen) {
   // An empty `main` still returns 0, which the full path below emits.
   bool is_main =
       strcmp(gen->func->info.function.symbol->name.value, "main") == 0;
-  if (body->statements->length == 0 &&
+  if (body->statements->length == 0 && body->low_pc == NULL &&
       FunctionExtraOf(&gen->func->info.function)->contract_assertions.length ==
           0 &&
       !marks_constructed_object && !is_main) {

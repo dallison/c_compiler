@@ -5559,11 +5559,6 @@ static void SetDebugStackLocation(PoolEntry* entry, int offset) {
   VariableDIESetStackOffset(SymbolDIE(entry->value.symbol), offset);
 }
 
-static void SetDebugSymbolLocation(PoolEntry* entry) {
-  VariableDIESetStatic(SymbolDIE(entry->value.symbol),
-                       entry->value.symbol->name.value);
-}
-
 static TargetInstruction* LoadFpArgumentIntoRegisterVariable(
     XTENSAGenerator* rv, int reg_var, ArgLocation arg_loc, IRNode* symbol) {
   switch (arg_loc.type) {
@@ -5878,7 +5873,6 @@ static void AssignRegisterOrOffset(XTENSAGenerator* rv, PoolEntry* entry,
     IRVariable* var = (IRVariable*)entry->pooled;
     TargetInstruction* inst = GetSymbol(rv, NULL, var->symbol);
     entry->pooled->data.ptr = inst;
-    SetDebugSymbolLocation(entry);
   } else {
     // Integer or pointer.
     if (UseRegisterForVariable(rv, entry->pooled)) {

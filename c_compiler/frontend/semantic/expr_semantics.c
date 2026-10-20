@@ -674,14 +674,9 @@ static ASTNode* DispatchExpressionBuiltinIntrinsics(ASTNode* node,
   }
 }
 
-// Type-trait builtins finish without post-process; stmt-expr types from the last
-// inner expression; throw and coroutine keywords delegate to coroutine modules.
-static bool IsGeneratedPCLabel(ASTNode* stmt) {
-  return stmt != NULL && stmt->op == AST_OP(label) &&
-         ((LabelASTNode*)stmt)->stmt == NULL &&
-         strncmp(((LabelASTNode*)stmt)->name.value, ".PC.", 4) == 0;
-}
-
+// Type-trait builtins finish without post-process; stmt-expr types from the
+// last inner expression; throw and coroutine keywords delegate to coroutine
+// modules.
 static void RenumberCompoundStatements(CompoundStatementASTNode* comp) {
   for (size_t i = 0; i < comp->statements->length; i++) {
     ASTNode* stmt = comp->statements->value.p[i];
@@ -739,7 +734,7 @@ static ASTNode* PlaceStatementExpressionValueLast(
     ASTNode* stmt = stmts->value.p[i - 1];
     if (stmt != NULL && (stmt->flags & kASTFallthroughDestructor) != 0) {
       destroys_locals = true;
-    } else if (!IsGeneratedPCLabel(stmt)) {
+    } else {
       index = i - 1;
       break;
     }

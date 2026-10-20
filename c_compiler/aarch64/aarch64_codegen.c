@@ -5617,11 +5617,6 @@ static void SetDebugStackLocation(PoolEntry* entry, int offset) {
   VariableDIESetStackOffset(SymbolDIE(entry->value.symbol), offset);
 }
 
-static void SetDebugSymbolLocation(PoolEntry* entry) {
-  VariableDIESetStatic(SymbolDIE(entry->value.symbol),
-                       entry->value.symbol->name.value);
-}
-
 static TargetInstruction* LoadFpArgumentIntoRegisterVariable(AARCH64Generator* g,
                                                              int reg_var,
                                              ArgLocation arg_loc,
@@ -5910,7 +5905,6 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
     IRVariable* var = (IRVariable*)entry->pooled;
     TargetInstruction* inst = GetSymbol(g, NULL, var->symbol);
     entry->pooled->data.ptr = inst;
-    SetDebugSymbolLocation(entry);
   } else {
     // Integer or pointer.
     if (UseRegisterForVariable(g, entry->pooled)) {

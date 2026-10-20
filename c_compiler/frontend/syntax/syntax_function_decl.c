@@ -418,9 +418,7 @@ static ASTNode* DefineFunctionWithBody(Syntax* syntax, Vector* declarations,
   TypeRecord* old_current_function = compiler->current_function;
   compiler->current_function = sym->type;
   Vector* body = NewVector();
-  if (compiler->debug_output) {
-    VectorAppend(body, SyntaxNewPCLabel(syntax->lex->current_token_location));
-  }
+  SourceLocation body_begin = syntax->lex->current_token_location;
   ParseFunctionBodyStatements(syntax, body);
   SyntaxInsertCXXConstructorPreamble(syntax, sym->type, body,
                                      cxx_initializers, sym->location);
@@ -442,11 +440,13 @@ static ASTNode* DefineFunctionWithBody(Syntax* syntax, Vector* declarations,
   syntax->context = old_context;
   compiler->current_function = old_current_function;
 
-  if (compiler->debug_output) {
-    VectorAppend(body, SyntaxNewPCLabel(syntax->lex->current_token_location));
-  }
   sym->type->info.function.body =
       NewCompoundStatementASTNode(body, syntax->lex->current_token_location);
+  if (compiler->debug_output) {
+    CompoundStatementAddDebugRange(
+        (CompoundStatementASTNode*)sym->type->info.function.body, body_begin,
+        syntax->lex->current_token_location);
+  }
   sym->type->info.function.body_had_parse_errors =
       NumErrors() != definition_errors_before;
   // The body is hung off the function type, not reachable from the

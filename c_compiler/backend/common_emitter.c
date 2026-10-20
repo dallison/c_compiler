@@ -89,6 +89,36 @@ static const char* VarName2(UninitializedStaticVariable* var, char* buf, size_t 
   return TargetSymbolName(var->symbol, buf, len);
 }
 
+static bool UninitializedStaticIsEmitted(UninitializedStaticVariable* var) {
+  return var->symbol->flags.is_tentative_decl || var->is_local ||
+         var->symbol->flags.is_defined ||
+         (CompilerIsCXX() && TypeIsStructOrUnion(var->symbol->type));
+}
+
+// Gives each emitted static the address of its storage in debug info, then
+// builds the variable DIEs.  A thread-local address would need
+// DW_OP_form_tls_address, so those keep no location.
+static void BuildStaticVariableDebugInfo(struct Compiler* compiler) {
+  char buf[256];
+  for (size_t i = 0; i < compiler->initialized_static_variables.length; i++) {
+    InitializedStaticVariable* var =
+        compiler->initialized_static_variables.value.p[i];
+    if (!var->is_tls) {
+      VariableDIESetStatic(SymbolDIE(var->symbol),
+                           VarName(var, buf, sizeof(buf)));
+    }
+  }
+  for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
+    UninitializedStaticVariable* var =
+        compiler->uninitialized_static_variables.value.p[i];
+    if (!var->is_tls && UninitializedStaticIsEmitted(var)) {
+      VariableDIESetStatic(SymbolDIE(var->symbol),
+                           VarName2(var, buf, sizeof(buf)));
+    }
+  }
+  DebugBuilderBuildVariables(&compiler->debug_builder);
+}
+
 static void EmitBinding(FILE* fp, const char* name, bool is_global,
                         bool is_weak) {
   if (is_weak) {
@@ -512,10 +542,7 @@ bool EmitTranslationUnitRemainder(struct Compiler* compiler, FILE* asm_file) {
   for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
     UninitializedStaticVariable* var =
         compiler->uninitialized_static_variables.value.p[i];
-    if (!var->is_tls &&
-        (var->symbol->flags.is_tentative_decl || var->is_local ||
-         var->symbol->flags.is_defined ||
-         (CompilerIsCXX() && TypeIsStructOrUnion(var->symbol->type)))) {
+    if (!var->is_tls && UninitializedStaticIsEmitted(var)) {
       compiler->target->emit_bss_space(var, asm_file);
     }
     contains_tls_vars |= var->is_tls;
@@ -551,6 +578,7 @@ bool EmitTranslationUnitRemainder(struct Compiler* compiler, FILE* asm_file) {
 
   compiler->target->emit_debug(asm_file);
   if (compiler->debug_output) {
+    BuildStaticVariableDebugInfo(compiler);
     compiler->debug_builder.fp = asm_file;
     DebugBuilderEmitDebugInfo(&compiler->debug_builder);
     DebugBuilderEmitAbbreviations(&compiler->debug_builder);
@@ -820,10 +848,7 @@ bool EmitTranslationUnitRemainderToModule(struct Compiler* compiler,
   for (size_t i = 0; i < compiler->uninitialized_static_variables.length; i++) {
     UninitializedStaticVariable* var =
         compiler->uninitialized_static_variables.value.p[i];
-    if (!var->is_tls &&
-        (var->symbol->flags.is_tentative_decl || var->is_local ||
-         var->symbol->flags.is_defined ||
-         (CompilerIsCXX() && TypeIsStructOrUnion(var->symbol->type)))) {
+    if (!var->is_tls && UninitializedStaticIsEmitted(var)) {
       EmitBSSVariableToModule(var, module);
     }
     contains_tls_vars |= var->is_tls;
@@ -860,6 +885,7 @@ bool EmitTranslationUnitRemainderToModule(struct Compiler* compiler,
   }
   AsmModuleSection(module, ".debug_line", SHT(progbits), 0, 1);
   if (compiler->debug_output) {
+    BuildStaticVariableDebugInfo(compiler);
     compiler->debug_builder.module = module;
     DebugBuilderEmitDebugInfo(&compiler->debug_builder);
     DebugBuilderEmitAbbreviations(&compiler->debug_builder);

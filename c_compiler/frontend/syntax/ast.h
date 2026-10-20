@@ -885,12 +885,16 @@ ASTNode* NewThrowASTNode(ASTNode* expr, SourceLocation location);
 typedef struct {
   ASTNode base;
   Vector* statements;            // @wire 16
+  // Owned PC labels emitted around the statements under -g, or both NULL.
   struct LabelASTNode* low_pc;   // @wire 17
   struct LabelASTNode* high_pc;  // @wire 18
 } CompoundStatementASTNode;
 
 ASTNode* NewCompoundStatementASTNode(Vector* statements,
                                      SourceLocation location);
+// Gives `node` a debug-info address range bounded by two new PC labels.
+void CompoundStatementAddDebugRange(CompoundStatementASTNode* node,
+                                    SourceLocation begin, SourceLocation end);
 void CompoundASTNodeInsertStatement(CompoundStatementASTNode* node,
                                     ASTNode* stmt, size_t at_index);
 
@@ -1043,9 +1047,17 @@ typedef struct LabelASTNode {
   String name;           // @wire 17
   struct IRNode* label;  // @wire - (codegen only, not serialized)
   bool named;            // Use label name in asm output.   // @wire 18
+  // Codegen emitted the label; debug info only names emitted labels.
+  bool emitted;  // @wire -
 } LabelASTNode;
 
 ASTNode* NewLabelASTNode(const char* name, ASTNode* stmt, bool named, SourceLocation location);
+// A named label that marks a debug-info address range (".PC.<n>").
+ASTNode* NewPCLabelASTNode(SourceLocation location);
+// Gives an imported PC label a name not used elsewhere.
+void AssignFreshPCLabelName(LabelASTNode* label);
+// `node` as a PC label, or NULL.
+LabelASTNode* ASTNodeAsPCLabel(ASTNode* node);
 
 // Serialized as an inline sub-message (see WriteAsmOperandVector); the field
 // numbers below are local to that sub-message.

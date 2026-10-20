@@ -3289,6 +3289,10 @@ static void CompoundStatementASTNodeDelete(ASTNode* node) {
   }
   // statements is heap-allocated (NewVector), so free the struct too.
   VectorDelete(vnode->statements);
+  if (vnode->low_pc != NULL) {
+    ASTNodeDelete(&vnode->low_pc->base);
+    ASTNodeDelete(&vnode->high_pc->base);
+  }
   ASTNodeBaseDelete(node);
 }
 
@@ -3314,6 +3318,15 @@ static void CompoundStatementASTNodeReplaceChild(ASTNode* parent, int child_id,
   }
 }
 
+void CompoundStatementAddDebugRange(CompoundStatementASTNode* node,
+                                    SourceLocation begin, SourceLocation end) {
+  node->low_pc = (LabelASTNode*)NewPCLabelASTNode(begin);
+  node->high_pc = (LabelASTNode*)NewPCLabelASTNode(end);
+  // Not statements of the block, so no child id names them.
+  SetParent(&node->low_pc->base, &node->base, -1);
+  SetParent(&node->high_pc->base, &node->base, -1);
+}
+
 static ASTNode* CompoundStatementASTNodeClone(
     const ASTNode* node, ASTNode* (*func)(ASTNode* node, void*), void* data) {
   CompoundStatementASTNode* from = (CompoundStatementASTNode*)node;
@@ -3324,6 +3337,12 @@ static ASTNode* CompoundStatementASTNodeClone(
     ASTNode* child =
         ASTNodeClone(from->statements->value.p[i], func, data, &to->base);
     VectorAppend(to->statements, child);
+  }
+  to->low_pc = NULL;
+  to->high_pc = NULL;
+  if (from->low_pc != NULL) {
+    CompoundStatementAddDebugRange(to, from->low_pc->base.location,
+                                   from->high_pc->base.location);
   }
   return func(&to->base, data);
 }
@@ -3348,8 +3367,6 @@ static void CompoundStatementASTNodeTransform(ASTNode* node,
   for (size_t i = n->statements->length; i > 0; i--) {
     ASTNodeTransformVectorElement(node, n->statements, i - 1, func, data);
   }
-  n->low_pc = VectorFirst(n->statements);
-  n->high_pc = VectorLast(n->statements);
 }
 
 static ASTNodeVirtuals compound_stmt_vtbl = {
@@ -3373,8 +3390,8 @@ ASTNode* NewCompoundStatementASTNode(Vector* statements,
     stmt->parent = (ASTNode*)node;
     stmt->child_id = (int)i;
   }
-  node->low_pc = VectorFirst(statements);
-  node->high_pc = VectorLast(statements);
+  node->low_pc = NULL;
+  node->high_pc = NULL;
   return (ASTNode*)node;
 }
 
@@ -4476,6 +4493,34 @@ ASTNode* NewLabelASTNode(const char* name, ASTNode* stmt, bool named, SourceLoca
   node->label = NULL;
   node->named = named;
   return (ASTNode*)node;
+}
+
+// Debug info refers to these labels by name, so every label node needs a name
+// of its own within the translation unit.
+static int next_pc_label_id = 0;
+
+void AssignFreshPCLabelName(LabelASTNode* label) {
+  StringDestruct(&label->name);
+  StringPrintf(&label->name, ".PC.%d", next_pc_label_id++);
+}
+
+ASTNode* NewPCLabelASTNode(SourceLocation location) {
+  LabelASTNode* label =
+      (LabelASTNode*)NewLabelASTNode(NULL, NULL, true, location);
+  AssignFreshPCLabelName(label);
+  return &label->base;
+}
+
+LabelASTNode* ASTNodeAsPCLabel(ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(label)) {
+    return NULL;
+  }
+  // An `asm goto` target is named too, but by a user identifier.
+  LabelASTNode* label = (LabelASTNode*)node;
+  return label->named && label->name.value != NULL &&
+                 strncmp(label->name.value, ".PC.", 4) == 0
+             ? label
+             : NULL;
 }
 
 static void AsmASTNodeDelete(ASTNode* node) {

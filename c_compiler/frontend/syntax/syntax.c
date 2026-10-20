@@ -65,10 +65,6 @@ bool AbortsOnError(void) {
          compiler->diagnostic_error_trap_depth <= abort_on_error_trap_depth;
 }
 
-static int next_pc_label_id = 0;
-
-static String next_pc_label;
-
 // Returns true when `syntax` is parsing inside a user-defined namespace rather
 // than the global namespace.
 bool InNamedNamespace(Syntax* syntax) {
@@ -199,16 +195,6 @@ void SyntaxResetForNewDeclaration(Syntax* syntax) {
   VectorInit(&syntax->all_local_symbols);
   VectorInit(&syntax->local_statics);
   VectorInit(&syntax->inline_static_member_definitions);
-}
-
-// Allocates a fresh internal label AST node at `location` for control-flow
-// lowering; the returned node is owned by the AST arena.
-ASTNode* SyntaxNewPCLabel(SourceLocation location) {
-  StringInit(&next_pc_label, NULL);
-  StringPrintf(&next_pc_label, ".PC.%d", next_pc_label_id++);
-  ASTNode* node = NewLabelASTNode(next_pc_label.value, NULL, true, location);
-  StringDestruct(&next_pc_label);
-  return node;
 }
 
 // C++ unqualified lookup searches the current class scope -- including base

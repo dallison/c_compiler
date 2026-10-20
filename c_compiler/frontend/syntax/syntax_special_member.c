@@ -304,11 +304,7 @@ void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
     if (call == NULL) {
       continue;
     }
-    if (compiler->debug_output && body->length > 0) {
-      VectorInsertBefore(body, body->length - 1, call);
-    } else {
-      VectorAppend(body, call);
-    }
+    VectorAppend(body, call);
   }
   Vector* virtual_base_destructors = NewVector();
   for (size_t i = owner->virtual_bases.length; i > 0; i--) {
@@ -323,11 +319,7 @@ void AppendCXXBaseDestructorCalls(Syntax* syntax, TypeRecord* func,
   ASTNode* guarded = NewCXXCompleteObjectGuardedStatement(
       func, virtual_base_destructors, location);
   if (guarded != NULL) {
-    if (compiler->debug_output && body->length > 0) {
-      VectorInsertBefore(body, body->length - 1, guarded);
-    } else {
-      VectorAppend(body, guarded);
-    }
+    VectorAppend(body, guarded);
   }
 }
 

@@ -932,6 +932,8 @@ TargetInstruction* TargetNewLocation(IRLocation* loc) {
 TargetInstruction* TargetNewNamedLabel(const char* name) {
   TargetNamedLabel* l = malloc(sizeof(TargetNamedLabel));
   TargetInitInstruction(&l->base, TARGET_OP(named_label));
+  // Debug info names it even when the code after it is dead.
+  l->base.flags |= TARGET_INST_KEEP_UNREACHABLE;
   l->name = name;
   return (TargetInstruction*)l;
 }

@@ -46,7 +46,7 @@
 
 // Bumped whenever the on-wire schema changes incompatibly.  Readers reject a
 // mismatching version (strict-match policy to start).
-#define MODULE_FORMAT_VERSION 1u
+#define MODULE_FORMAT_VERSION 2u
 
 enum {
   kModuleArchivePrimaryInterface = 1u << 0,

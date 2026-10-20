@@ -1794,9 +1794,20 @@ static void ScheduleOpenLocalCleanups(Generator* gen,
   }
 }
 
+// A block emitted more than once (a cleanup on several exit paths) keeps the
+// debug range of its first copy; a label name can only be defined once.
+static void GeneratePCLabel(Generator* gen, LabelASTNode* label) {
+  if (label == NULL || label->emitted || gen->for_constant_evaluation) {
+    return;
+  }
+  GeneratorEmit(gen, NewIRNamedLabel(label->name.value));
+  label->emitted = true;
+}
+
 static void GenerateCompoundStatement(Generator* gen,
                                       CompoundStatementASTNode* node) {
   size_t num_statements = node->statements->length;
+  GeneratePCLabel(gen, node->low_pc);
 
   // For C++ with exceptions on, give every automatic object with a destructor a
   // precise EH cleanup range covering [after its construction, block-scope end],
@@ -1925,6 +1936,7 @@ static void GenerateCompoundStatement(Generator* gen,
       }
     }
   }
+  GeneratePCLabel(gen, node->high_pc);
 }
 
 // Is the statement just a branch (possibly enclosed in a compound).

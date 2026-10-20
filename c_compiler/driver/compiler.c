@@ -3758,13 +3758,11 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
               }
             }
             if (compiler->debug_output) {
+              // Built when the translation unit is emitted, once it is known
+              // whether and under what name the variable has storage here.
               SymbolSetDIE(decl->symbol,
                            BuildDebugInfo(&compiler->debug_builder,
                                           decl->symbol, DW_TAG(variable)));
-              VariableDIESetStatic(SymbolDIE(decl->symbol),
-                                   decl->symbol->name.value);
-              BuildDebugInfoAfterCodegen(&compiler->debug_builder,
-                                           decl->symbol);
             }
 
           }

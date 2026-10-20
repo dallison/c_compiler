@@ -317,7 +317,6 @@ bool SyntaxCurrentClassNameStartsType(Syntax* syntax);
 bool SyntaxLookingAtDeclaration(Syntax* syntax);
 
 Symbol* SyntaxNewTemporary(Syntax* syntax, struct TypeRecord* type);
-ASTNode* SyntaxNewPCLabel(SourceLocation location);
 ASTNode* SyntaxNewCXXConstructorCall(Syntax* syntax, Symbol* sym,
                                      Vector* actuals,
                                      SourceLocation location);

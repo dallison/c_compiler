@@ -6195,11 +6195,6 @@ static void SetDebugStackLocation(PoolEntry* entry, int offset) {
   VariableDIESetStackOffset(SymbolDIE(entry->value.symbol), offset);
 }
 
-static void SetDebugSymbolLocation(PoolEntry* entry) {
-  VariableDIESetStatic(SymbolDIE(entry->value.symbol),
-                       entry->value.symbol->name.value);
-}
-
 static TargetInstruction* LoadFpArgumentIntoRegisterVariable(ARMGenerator* g,
                                                              int reg_var,
                                              ArgLocation arg_loc,
@@ -6499,7 +6494,6 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
     IRVariable* var = (IRVariable*)entry->pooled;
     TargetInstruction* inst = GetSymbol(g, NULL, var->symbol);
     entry->pooled->data.ptr = inst;
-    SetDebugSymbolLocation(entry);
   } else {
     // Integer or pointer.
     // A stack-passed argument cannot be promoted to a register variable here:

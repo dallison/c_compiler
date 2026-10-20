@@ -243,10 +243,6 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
   Vector* statements = NewVector();
   Lex* lex = syntax->lex;
 
-  // Add label for start of statements in block
-  if (compiler->debug_output) {
-    VectorAppend(statements, SyntaxNewPCLabel(location));
-  }
   // Parse the sequence of statements or declarations, adding them to the vector.
   bool seen_statement = false;
   bool source_empty = true;
@@ -286,11 +282,6 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
    
   SyntaxAppendCXXBlockScopeDestructors(statements);
 
-  if (compiler->debug_output) {
-    // Label at end of statements in block.
-    VectorAppend(statements, SyntaxNewPCLabel(location));
-  }
-  
   // We have not consumed the close paren yet, do so now.
   SyntaxNeedBracket(syntax, TOK(rbrace), followers);
 
@@ -299,6 +290,10 @@ static ASTNode* ParseCompoundStatement(Syntax* syntax, TokenClass followers,
   ASTNode* compound = NewCompoundStatementASTNode(statements, location);
   if (source_empty) {
     compound->flags |= kASTSourceEmptyCompound;
+  }
+  if (compiler->debug_output) {
+    CompoundStatementAddDebugRange((CompoundStatementASTNode*)compound,
+                                   location, location);
   }
   return compound;
 }
