@@ -1438,8 +1438,9 @@ static bool CurrentFunctionInstantiates(Symbol* pattern_fn) {
 }
 
 static bool SymbolHasDependentAlignas(Symbol* symbol) {
-  for (size_t i = 0; symbol != NULL && i < symbol->attributes.length; i++) {
-    Attribute* attr = symbol->attributes.value.p[i];
+  for (size_t i = 0; symbol != NULL && i < SymbolAttributes(symbol)->length;
+       i++) {
+    Attribute* attr = SymbolAttributes(symbol)->value.p[i];
     if (attr != NULL && (attr->dependent_alignas_type != NULL ||
                          attr->dependent_alignas_expr != NULL)) {
       return true;
@@ -1757,13 +1758,12 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
   str->explicit_alignment = from->explicit_alignment;
   str->pack = from->pack;
   if (from->tag_symbol != NULL && str->tag_symbol != from->tag_symbol) {
-    VectorDestruct(&str->tag_symbol->attributes);
-    AttributeListClone(&str->tag_symbol->attributes,
-                       &from->tag_symbol->attributes);
+    SymbolSetAttributeCopies(str->tag_symbol,
+                             SymbolAttributes(from->tag_symbol));
     SubstituteDependentSymbolAlignment(parser, str->tag_symbol, args,
                                        member_rebase_base);
-    if (str->tag_symbol->alignment > str->explicit_alignment) {
-      str->explicit_alignment = str->tag_symbol->alignment;
+    if (SymbolAlignment(str->tag_symbol) > str->explicit_alignment) {
+      str->explicit_alignment = SymbolAlignment(str->tag_symbol);
     }
   }
   for (size_t i = 0; i < from->friend_classes.length; i++) {
@@ -1954,9 +1954,8 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
           SymbolSetDependentValueTemplateParameterIndex(
               member_symbol,
               SymbolDependentValueTemplateParameterIndex(member->symbol));
-          VectorDestruct(&member_symbol->attributes);
-          AttributeListClone(&member_symbol->attributes,
-                             &member->symbol->attributes);
+          SymbolSetAttributeCopies(member_symbol,
+                                   SymbolAttributes(member->symbol));
           SubstituteDependentSymbolValue(member_symbol, args);
           SubstituteDependentSymbolAlignment(parser, member_symbol, args,
                                              member_rebase_base);
@@ -2063,9 +2062,7 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     SymbolSetDependentValueTemplateParameterIndex(
         member_symbol,
         SymbolDependentValueTemplateParameterIndex(member->symbol));
-    VectorDestruct(&member_symbol->attributes);
-    AttributeListClone(&member_symbol->attributes,
-                       &member->symbol->attributes);
+    SymbolSetAttributeCopies(member_symbol, SymbolAttributes(member->symbol));
     SubstituteDependentSymbolValue(member_symbol, args);
     SubstituteDependentSymbolAlignment(parser, member_symbol, args,
                                        member_rebase_base);
@@ -4235,8 +4232,7 @@ static Symbol* InstantiateSimpleFunctionTemplateUnchecked(
     AppendFunctionTemplateInstantiation(templ, symbol);
     return symbol;
   }
-  VectorDestruct(&symbol->attributes);
-  AttributeListClone(&symbol->attributes, &templ->attributes);
+  SymbolSetAttributeCopies(symbol, SymbolAttributes(templ));
   // Register this instantiation in the template's cache *before* cloning its
   // body.  A recursive function template (e.g. an introsort/merge-sort helper
   // that calls itself on subranges) contains a call to the very specialization
@@ -12375,12 +12371,10 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
   Symbol* tag = NewSymbol(instantiated_name.value, type, STO(implicit));
   tag->flags.is_defined = true;
   if (source_struct->tag_symbol != NULL) {
-    VectorDestruct(&tag->attributes);
-    AttributeListClone(&tag->attributes,
-                       &source_struct->tag_symbol->attributes);
+    SymbolSetAttributeCopies(tag, SymbolAttributes(source_struct->tag_symbol));
     SubstituteDependentSymbolAlignment(parser, tag, source_args, 0);
-    if (tag->alignment > str->explicit_alignment) {
-      str->explicit_alignment = tag->alignment;
+    if (SymbolAlignment(tag) > str->explicit_alignment) {
+      str->explicit_alignment = SymbolAlignment(tag);
     }
   }
   str->tag_name = &tag->name;
@@ -12649,9 +12643,7 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
     SymbolSetDependentValueTemplateParameterIndex(
         member_symbol,
         SymbolDependentValueTemplateParameterIndex(member->symbol));
-    VectorDestruct(&member_symbol->attributes);
-    AttributeListClone(&member_symbol->attributes,
-                       &member->symbol->attributes);
+    SymbolSetAttributeCopies(member_symbol, SymbolAttributes(member->symbol));
     SubstituteDependentSymbolValue(member_symbol, source_args);
     SubstituteDependentSymbolAlignment(parser, member_symbol, source_args, 0);
     SubstituteStaticMemberInitializerValue(parser, member_symbol,

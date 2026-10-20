@@ -884,7 +884,7 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
   func->info.function.symbol = op;
   func->info.function.is_inline = true;
   func->info.function.definition = true;
-  VectorAppendVector(&op->attributes, &attributes);
+  SymbolAppendAttributes(op, &attributes);
   VectorClear(&attributes);
   VectorDestruct(&attributes);
   SyntaxApplyDeclarationAttributes(syntax, op);

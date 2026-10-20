@@ -715,7 +715,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
     if (param == NULL) {
       continue;
     }
-    SemanticAttachAnnotationAttributes(&param->attributes, param);
+    SemanticAttachAnnotationAttributes(SymbolAttributes(param), param);
     if (param->type != NULL) {
       param->type =
           SemanticResolveDependentSpliceType(param->type, (ASTNode*)node);
@@ -725,7 +725,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
     Struct* owner = node->type->info.function.cxx_member_owner;
     SemanticResolveStructDependentSplices(owner, (ASTNode*)node);
     if (owner->tag_symbol != NULL) {
-      SemanticAttachAnnotationAttributes(&owner->tag_symbol->attributes,
+      SemanticAttachAnnotationAttributes(SymbolAttributes(owner->tag_symbol),
                                          owner->tag_symbol);
     }
   }

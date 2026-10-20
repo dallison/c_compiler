@@ -1760,7 +1760,8 @@ void TypeRecordCopyContractAssertions(TypeRecord* to, TypeRecord* from) {
     if (result_binding != NULL) {
       result_binding->flags = source->result_binding->flags;
       result_binding->location = source->result_binding->location;
-      result_binding->alignment = source->result_binding->alignment;
+      SymbolSetAlignment(result_binding,
+                         SymbolAlignment(source->result_binding));
       result_binding->namespace_ = source->result_binding->namespace_;
       result_binding->value = source->result_binding->value;
     }
@@ -2375,11 +2376,10 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
           formal->storage);
       clone->flags = formal->flags;
       clone->location = formal->location;
-      clone->alignment = formal->alignment;
+      SymbolSetAlignment(clone, SymbolAlignment(formal));
       clone->namespace_ = formal->namespace_;
       clone->value = formal->value;
-      AttributeListDestruct(&clone->attributes);
-      AttributeListClone(&clone->attributes, &formal->attributes);
+      SymbolSetAttributeCopies(clone, SymbolAttributes(formal));
       SymbolCloneDefaultArgument(clone, formal);
       VectorAppend(&r->info.function.prototype, clone);
     }

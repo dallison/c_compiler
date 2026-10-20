@@ -376,7 +376,7 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
     SymbolDelete(parsed);
   }
   if (added && attributes != NULL && attributes->length != 0) {
-    VectorAppendVector(&alias->attributes, attributes);
+    SymbolAppendAttributes(alias, attributes);
     VectorClear(attributes);
     SyntaxApplyDeclarationAttributes(syntax, alias);
   }

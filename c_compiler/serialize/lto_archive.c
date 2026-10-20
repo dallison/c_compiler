@@ -531,8 +531,8 @@ static void RemapLoadedLocations(LoadedLTOModule* loaded, Vector* new_indices) {
     Symbol* symbol = (Symbol*)sym_pool->value.p[i];
     if (symbol != NULL) {
       symbol->location = RemapLocation(symbol->location, new_indices);
-      for (size_t j = 0; j < symbol->attributes.length; j++) {
-        Attribute* attribute = symbol->attributes.value.p[j];
+      for (size_t j = 0; j < SymbolAttributes(symbol)->length; j++) {
+        Attribute* attribute = SymbolAttributes(symbol)->value.p[j];
         attribute->location =
             RemapLocation(attribute->location, new_indices);
       }

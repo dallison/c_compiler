@@ -22,7 +22,8 @@ ASTNode* SemanticAnalyzeConstevalBlockWithAccess(ConstevalBlockASTNode* node,
 ASTNode* SemanticAnalyzeFunctionConstevalBlockDuringParse(
     ConstevalBlockASTNode* node, Vector* statements, size_t insert_index);
 
-void SemanticAttachAnnotationAttributes(Vector* attributes, Symbol* symbol);
+void SemanticAttachAnnotationAttributes(const Vector* attributes,
+                                        Symbol* symbol);
 
 ReflectionEntityKind ReflectionKindForSymbol(Symbol* symbol);
 

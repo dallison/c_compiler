@@ -123,13 +123,14 @@ bool AttributeArgInt(Attribute* attr, size_t index, long* value);
 // The strictest alignment requested by the non-dependent `aligned` attributes
 // (alignas, [[gnu::aligned]], __attribute__((aligned))) in `attrs`, 0 if
 // none.  An `aligned` without an argument requests `bare_alignment`.
-int AttributeListAlignment(Vector* attrs, int bare_alignment);
+int AttributeListAlignment(const Vector* attrs, int bare_alignment);
 
 // Operations on a Vector of Attribute*.
-Attribute* AttributeListFind(Vector* attrs, const char* name);
-bool AttributeListHas(Vector* attrs, const char* name);
+Attribute* AttributeListFind(const Vector* attrs, const char* name);
+bool AttributeListHas(const Vector* attrs, const char* name);
 void AttributeListDestruct(Vector* attrs);          // Frees contained Attribute*.
-void AttributeListClone(Vector* dest, Vector* src); // dest is initialized.
+void AttributeListClone(Vector* dest,
+                        const Vector* src);  // dest is initialized.
 
 // A symbol's named-module attachment.  Records are interned and immutable, so
 // symbols share them; set one with SymbolSetModuleIdentity.  Each field is ""
@@ -165,9 +166,10 @@ typedef struct SymbolExtra {
   // `anonymous_union_host` at `anonymous_union_member_offset`.  Transient.
   struct Symbol* anonymous_union_host;
   int anonymous_union_member_offset;
-  TemplateTemplateParameterKind template_template_parameter_kind;  // @wire 57
+  int alignment;  // aligned(N) override; 0 = natural.              // @wire 32
   // Template parameter index of a deferred dependent value; -1 if none.
   int dependent_value_template_parameter_index;  // @wire 34
+  TemplateTemplateParameterKind template_template_parameter_kind;  // @wire 57
   // Structured-binding dependence marker and, for a pack, known cardinality:
   // -2 (the default) means materialized/not a binding, -1 means still
   // dependent, and a nonnegative value is the known pack size.  Transient.
@@ -199,10 +201,20 @@ typedef struct SymbolExtra {
   Vector imported_function_template_parameters_backup;  // transient
 } SymbolExtra;
 
+// State only emitted symbols have.  Owned by the symbol.
+typedef struct SymbolCodegen {
+  struct DIE* die;  // Debug-info entry.
+  // Lazily computed, full (untruncated) target assembly symbol name, reused
+  // across every emission site so that long mangled names (e.g. deeply nested
+  // template specializations) are never truncated to a caller's fixed-size
+  // scratch buffer, which would let distinct symbols collide.
+  char* target_symbol_name;
+} SymbolCodegen;
+
 // A symbol.  This is a variable, function or type used in a program.
 // Module-serialization field numbers (see
 // c_compiler/serialize/symbol_serialize.c).  Transient/codegen fields
-// (usage_info, die) are recomputed on load and carry no wire number.
+// (usage_info, codegen) are recomputed on load and carry no wire number.
 // Fields are ordered to avoid padding; there are hundreds of thousands of
 // symbols in a large C++ translation unit.
 typedef struct Symbol {
@@ -213,7 +225,7 @@ typedef struct Symbol {
   struct Namespace* namespace_;  // Owning C++ namespace, if any. // @wire 3
   struct TypeRecord* type;    // Type.                            // @wire 5
   int id;                                                         // @wire 4
-  Storage storage;            // Storage (static, typedef, etc.)  // @wire 6
+  uint8_t storage;  // Storage (static, typedef, etc.)  // @wire 6
   struct {
     bool is_defined: 1;            // Symbol is defined.              // @wire 7
     bool is_tentative_decl: 1;     // Tentative declaration.          // @wire 8
@@ -288,10 +300,11 @@ typedef struct Symbol {
     int used_in_loop;             // Times used in loop.
     int reads;                    // Number of reads.
   } usage_info;                   // @wire - (transient, not serialized)
-  int alignment;              // aligned(N) override; 0 = natural. // @wire 32
   int template_parameter_index;  // Template parameter index.      // @wire 33
 
-  Vector attributes;  // Attributes (owns Attribute*).    // @wire 42
+  // Owned Attribute*; NULL until one is added.  Read through SymbolAttributes
+  // and add through SymbolAddAttribute.
+  Vector* attributes_;                                             // @wire 42
   SourceLocation location;                                         // @wire 35
 
   // Symbol value, one of these.  Serialized as the raw 64-bit slot.
@@ -310,19 +323,14 @@ typedef struct Symbol {
   struct Symbol* overload_next;   // Next overload, same name.     // @wire 39
   // Interned and shared; NULL when attached to no module and not imported.
   const SymbolModuleIdentity* module_identity;  // @wire 49, 50, 51
-  struct DIE* die;  // @wire - (debug info, not serialized)
   // Class whose member list holds this function's overload set.  Usually the
   // same as the function type's cxx_member_owner.  A using-declaration clone
   // keeps the base function's type (and therefore the base as
   // cxx_member_owner) while the derived class may add further overloads
   // (`using CordRep::Unref` plus `Unref(Span)`).  Transient.
   struct Struct* member_lookup_class;  // @wire - (transient)
-  // Lazily computed, full (untruncated) target assembly symbol name.  Owned by
-  // the symbol and reused across every emission site so that long mangled names
-  // (e.g. deeply nested template specializations) are never truncated to a
-  // caller's fixed-size scratch buffer, which would let distinct symbols
-  // collide.  @wire - (transient)
-  char* cached_target_symbol_name;
+  // Code generation and debug-info state; NULL until one is set.  Transient.
+  SymbolCodegen* codegen;  // @wire - (transient)
   // Rarely set fields; NULL until one is written.  Use SymbolExtraOf to read
   // and SymbolMutableExtra to write.
   SymbolExtra* extra;
@@ -337,6 +345,33 @@ static inline const SymbolExtra* SymbolExtraOf(const Symbol* symbol) {
 
 // The symbol's rarely set fields for writing, allocated on first use.
 SymbolExtra* SymbolMutableExtra(Symbol* symbol);
+
+// The symbol's aligned(N) override; 0 for natural alignment.
+static inline int SymbolAlignment(const Symbol* symbol) {
+  return SymbolExtraOf(symbol)->alignment;
+}
+void SymbolSetAlignment(Symbol* symbol, int alignment);
+
+static inline struct DIE* SymbolDIE(const Symbol* symbol) {
+  return symbol->codegen != NULL ? symbol->codegen->die : NULL;
+}
+void SymbolSetDIE(Symbol* symbol, struct DIE* die);
+
+// The cached full target assembly name, or NULL if not computed yet.
+static inline const char* SymbolCachedTargetName(const Symbol* symbol) {
+  return symbol->codegen != NULL ? symbol->codegen->target_symbol_name : NULL;
+}
+// Takes ownership of `name` (heap-allocated) and frees the previous one; NULL
+// clears the cache.
+void SymbolSetCachedTargetName(Symbol* symbol, char* name);
+
+extern const Vector kNoSymbolAttributes;
+
+// The symbol's attributes (Attribute*), empty if it has none.
+static inline const Vector* SymbolAttributes(const Symbol* symbol) {
+  return symbol->attributes_ != NULL ? symbol->attributes_
+                                     : &kNoSymbolAttributes;
+}
 
 // Gives `to` the lambda capture source of `from` without allocating extra
 // fields for `to` when there is nothing to copy.
@@ -416,6 +451,11 @@ Symbol* GetCXXTemplateParameterObject(struct TemplateArgument* argument);
 
 // Adds attribute and takes ownership of the Attribute.
 void SymbolAddAttribute(Symbol* symbol, Attribute* attribute);
+// Adds the Attribute* entries of `attributes`, taking ownership of the entries
+// but not of the vector.
+void SymbolAppendAttributes(Symbol* symbol, const Vector* attributes);
+// Replaces the symbol's attributes with copies of `attributes`.
+void SymbolSetAttributeCopies(Symbol* symbol, const Vector* attributes);
 bool SymbolHasAttribute(Symbol* symbol, const char* attribute);
 // Returns the attribute with the given (normalized) name, or NULL.
 Attribute* SymbolFindAttribute(Symbol* symbol, const char* attribute);

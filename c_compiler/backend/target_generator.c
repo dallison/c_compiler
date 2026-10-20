@@ -1066,8 +1066,9 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
   // buffer; truncating them would let distinct symbols collapse onto the same
   // label and be rejected as duplicates by the assembler, so the authoritative
   // name is always the untruncated cached copy rather than `buf`.
-  if (symbol->cached_target_symbol_name != NULL) {
-    return symbol->cached_target_symbol_name;
+  const char* cached = SymbolCachedTargetName(symbol);
+  if (cached != NULL) {
+    return cached;
   }
   // Namespace-scope objects carry their namespace in the symbol name
   // (`a::x` is `_ZN1a1xE`); otherwise `a::x` and `b::x` collide.  Invented
@@ -1110,7 +1111,7 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
   if (fitted != NULL) {
     dyn = fitted;
   }
-  symbol->cached_target_symbol_name = dyn;
+  SymbolSetCachedTargetName(symbol, dyn);
   (void)buf;
   (void)len;
   return dyn;

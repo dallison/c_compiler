@@ -106,8 +106,7 @@ static void SetItaniumAsmName(Symbol* symbol, const char* prefix,
   StringAppend(&asm_name, mangled->value);
   SymbolSetAsmName(symbol, &asm_name);
   StringDestruct(&asm_name);
-  free(symbol->cached_target_symbol_name);
-  symbol->cached_target_symbol_name = NULL;
+  SymbolSetCachedTargetName(symbol, NULL);
 }
 
 static Symbol* EmitWeakStatic(const char* name, size_t byte_count,

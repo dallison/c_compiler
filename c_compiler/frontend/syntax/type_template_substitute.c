@@ -591,8 +591,8 @@ void SubstituteDependentSymbolAlignment(TypeParser* parser, Symbol* symbol,
   if (parser == NULL || symbol == NULL) {
     return;
   }
-  for (size_t i = 0; i < symbol->attributes.length; i++) {
-    Attribute* attr = symbol->attributes.value.p[i];
+  for (size_t i = 0; i < SymbolAttributes(symbol)->length; i++) {
+    Attribute* attr = SymbolAttributes(symbol)->value.p[i];
     if (attr == NULL ||
         (attr->dependent_alignas_type == NULL &&
          attr->dependent_alignas_expr == NULL)) {
@@ -684,9 +684,9 @@ void SubstituteDependentSymbolAlignment(TypeParser* parser, Symbol* symbol,
   // Instantiation builds a fresh symbol, so every specifier, dependent or
   // not, has to be applied here.
   int alignment =
-      AttributeListAlignment(&symbol->attributes, compiler->alignment);
-  if (alignment > symbol->alignment) {
-    symbol->alignment = alignment;
+      AttributeListAlignment(SymbolAttributes(symbol), compiler->alignment);
+  if (alignment > SymbolAlignment(symbol)) {
+    SymbolSetAlignment(symbol, alignment);
   }
 }
 
@@ -4287,7 +4287,7 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   Symbol* copy = NewSymbol(old->name.value, type, old->storage);
   copy->namespace_ = old->namespace_;
   copy->flags = old->flags;
-  copy->alignment = old->alignment;
+  SymbolSetAlignment(copy, SymbolAlignment(old));
   copy->template_parameter_index = old->template_parameter_index;
   if (copy->template_parameter_index >= rebase->base) {
     copy->template_parameter_index -= rebase->base;

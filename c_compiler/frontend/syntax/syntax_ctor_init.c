@@ -245,7 +245,7 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
       Symbol* copy = NewSymbol(old->name.value, type, old->storage);
       copy->namespace_ = old->namespace_;
       copy->flags = old->flags;
-      copy->alignment = old->alignment;
+      SymbolSetAlignment(copy, SymbolAlignment(old));
       copy->template_parameter_index = old->template_parameter_index;
       if (copy->template_parameter_index >= remap->rebase_base) {
         copy->template_parameter_index -= remap->rebase_base;

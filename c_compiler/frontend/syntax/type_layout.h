@@ -11,7 +11,7 @@
 // Applies layout-affecting attributes (packed, aligned) from an Attribute
 // vector to a struct.  Must be called before the struct is laid out (or
 // followed by a re-layout for the trailing/typedef form).
-void StructApplyLayoutAttributes(struct Struct* str, Vector* attrs);
+void StructApplyLayoutAttributes(struct Struct* str, const Vector* attrs);
 // Propagates packed/aligned attributes from a (typedef) symbol onto its
 // struct/union type and re-lays out the struct.  No-op if the symbol carries
 // no layout attribute or its type is not a struct/union.

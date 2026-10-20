@@ -614,8 +614,9 @@ void SyntaxRegisterFunctionInitFiniAttributes(Syntax* syntax, Symbol* sym) {
     return;
   }
   Attribute* constructor =
-      AttributeListFind(&sym->attributes, "constructor");
-  Attribute* destructor = AttributeListFind(&sym->attributes, "destructor");
+      AttributeListFind(SymbolAttributes(sym), "constructor");
+  Attribute* destructor =
+      AttributeListFind(SymbolAttributes(sym), "destructor");
   if (constructor == NULL && destructor == NULL) {
     return;
   }
@@ -660,7 +661,7 @@ static Symbol* NewCXXLocalStaticGuard(Syntax* syntax, TypeRecord* func,
   guard->flags.invented = true;
   guard->flags.is_defined = true;
   guard->flags.is_local = true;
-  guard->alignment = 8;
+  SymbolSetAlignment(guard, 8);
   guard->location = sym->location;
   SetCXXInlineLocalStaticGuardAsmName(func, guard, sym);
   VectorAppend(&syntax->all_local_symbols, guard);

@@ -58,7 +58,7 @@ static Symbol* BuildVariable(TypeRecord* const_int) {
   answer->flags.is_defined = true;
   answer->flags.value_set = true;
   answer->value.ivalue = 42;
-  answer->alignment = 16;
+  SymbolSetAlignment(answer, 16);
   Attribute* attr = NewAttribute("aligned");
   AttributeAddArg(attr, "16", 2);
   SymbolAddAttribute(answer, attr);
@@ -281,16 +281,16 @@ static void CheckVariable(Symbol* answer) {
   CHECK(answer->flags.is_defined);
   CHECK(answer->flags.value_set);
   CHECK(answer->value.ivalue == 42);
-  CHECK(answer->alignment == 16);
+  CHECK(SymbolAlignment(answer) == 16);
   CHECK(answer->type != NULL);
   if (answer->type != NULL) {
     CHECK(answer->type->declarator == kDeclPrimitive);
     CHECK((answer->type->type & kTypeInt) != 0);
     CHECK((GetQualifiers(answer->type) & kQualConst) != 0);
   }
-  CHECK(answer->attributes.length == 1);
-  if (answer->attributes.length == 1) {
-    Attribute* attr = (Attribute*)VectorGet(&answer->attributes, 0);
+  CHECK(SymbolAttributes(answer)->length == 1);
+  if (SymbolAttributes(answer)->length == 1) {
+    Attribute* attr = (Attribute*)VectorGet(SymbolAttributes(answer), 0);
     CHECK(StringEqual(&attr->name, "aligned"));
     CHECK(AttributeArgCount(attr) == 1);
     const char* arg = AttributeArgString(attr, 0);

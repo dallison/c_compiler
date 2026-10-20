@@ -45,9 +45,8 @@ static Symbol* CloneExpansionLocalSymbol(Symbol* source, const char* name) {
     replacement->flags = source->flags;
     replacement->flags.is_parameter_pack = false;
     replacement->location = source->location;
-    replacement->alignment = source->alignment;
-    AttributeListDestruct(&replacement->attributes);
-    AttributeListClone(&replacement->attributes, &source->attributes);
+    SymbolSetAlignment(replacement, SymbolAlignment(source));
+    SymbolSetAttributeCopies(replacement, SymbolAttributes(source));
   }
   replacement->flags.is_local = true;
   replacement->flags.is_defined = true;

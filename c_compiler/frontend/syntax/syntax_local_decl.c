@@ -99,7 +99,11 @@ static Vector* ParseStructuredBindingNames(Syntax* syntax, Vector* symbols,
         SyntaxError(syntax,
                     "Attributes on structured bindings require C++26");
       }
-      SyntaxParseCXXAttributes(syntax, &sym->attributes);
+      Vector attributes;
+      VectorInit(&attributes);
+      SyntaxParseCXXAttributes(syntax, &attributes);
+      SymbolAppendAttributes(sym, &attributes);
+      VectorDestruct(&attributes);
       SyntaxApplyDeclarationAttributes(syntax, sym);
     }
     if (!SyntaxAddSymbol(syntax, sym)) {
@@ -1010,7 +1014,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
     }
 
     // Symbol takes ownerhip of attribute strings.
-    VectorAppendVector(&sym->attributes, attributes);
+    SymbolAppendAttributes(sym, attributes);
     VectorClear(attributes);
     SyntaxApplyDeclarationAttributes(syntax, sym);
     if (StorageIs(storage, STO(static)) && !TypeIsFunction(sym->type)) {

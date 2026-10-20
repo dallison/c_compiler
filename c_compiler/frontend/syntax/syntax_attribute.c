@@ -683,9 +683,9 @@ bool SyntaxParseCXXAlignas(Syntax* syntax, Vector* attrs) {
 // affect the symbol/type directly (layout and function-behavior flags).
 static void ApplyVectorTypeAttribute(Syntax* syntax, Symbol* sym) {
   Attribute* vector_size =
-      AttributeListFind(&sym->attributes, "vector_size");
+      AttributeListFind(SymbolAttributes(sym), "vector_size");
   Attribute* ext_vector =
-      AttributeListFind(&sym->attributes, "ext_vector_type");
+      AttributeListFind(SymbolAttributes(sym), "ext_vector_type");
   Attribute* attr = vector_size != NULL ? vector_size : ext_vector;
   if (attr == NULL) {
     return;
@@ -744,24 +744,24 @@ void SyntaxApplyDeclarationAttributes(Syntax* syntax, Symbol* sym) {
   ApplyVectorTypeAttribute(syntax, sym);
 
   // Function-behavior flags (also meaningful on forward declarations).
-  if (AttributeListHas(&sym->attributes, "noreturn")) {
+  if (AttributeListHas(SymbolAttributes(sym), "noreturn")) {
     if (!TypeIsFunction(sym->type) ||
         StorageIs(sym->storage, STO(typedef))) {
       SyntaxError(syntax, "'noreturn' attribute applies only to functions");
     }
     sym->flags.noreturn = true;
   }
-  if (AttributeListHas(&sym->attributes, "always_inline")) {
+  if (AttributeListHas(SymbolAttributes(sym), "always_inline")) {
     sym->flags.always_inline = true;
   }
-  if (AttributeListHas(&sym->attributes, "noinline")) {
+  if (AttributeListHas(SymbolAttributes(sym), "noinline")) {
     sym->flags.noinline = true;
   }
-  if (AttributeListHas(&sym->attributes, "weak")) {
+  if (AttributeListHas(SymbolAttributes(sym), "weak")) {
     sym->flags.is_weak = true;
   }
   Attribute* indeterminate =
-      AttributeListFind(&sym->attributes, "indeterminate");
+      AttributeListFind(SymbolAttributes(sym), "indeterminate");
   if (indeterminate != NULL) {
     if (!CompilerCXXAtLeast(kLanguageStandardCXX26)) {
       SyntaxError(syntax, "'indeterminate' attribute requires C++26");
@@ -789,8 +789,9 @@ void SyntaxApplyDeclarationAttributes(Syntax* syntax, Symbol* sym) {
   }
   // aligned(N) on a variable raises its alignment; the strictest of several
   // specifiers applies.
-  int alignment = AttributeListAlignment(&sym->attributes, compiler->alignment);
+  int alignment =
+      AttributeListAlignment(SymbolAttributes(sym), compiler->alignment);
   if (alignment > 0) {
-    sym->alignment = alignment;
+    SymbolSetAlignment(sym, alignment);
   }
 }

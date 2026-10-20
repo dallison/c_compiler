@@ -1350,7 +1350,7 @@ static int SymbolEffectiveAlignment(Symbol* sym) {
     return 1;
   }
   int natural = TypeRecordAlignment(sym->type);
-  return sym->alignment > natural ? sym->alignment : natural;
+  return SymbolAlignment(sym) > natural ? SymbolAlignment(sym) : natural;
 }
 
 static ASTNode* InitCompoundLiteral(ASTNode* node) {
@@ -3162,8 +3162,9 @@ static bool GenerateFunctionDefinition(Syntax* syntax,
       decl->base.type->info.function.cxx_member_owner;
 
   if (compiler->debug_output) {
-    decl->symbol->die = BuildDebugInfo(&compiler->debug_builder,
-                                      decl->symbol, DW_TAG(subprogram));
+    SymbolSetDIE(decl->symbol,
+                 BuildDebugInfo(&compiler->debug_builder, decl->symbol,
+                                DW_TAG(subprogram)));
   }
   SyntaxPrepareCXXLocalStatics(syntax, decl->base.type);
   Generator codegen;
@@ -3497,9 +3498,9 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
           } else {
             if (StorageIs(decl->symbol->storage, STO(typedef))) {
               if (compiler->debug_output) {
-                decl->symbol->die = BuildDebugInfo(&compiler->debug_builder,
-                                             decl->symbol,
-                                             DW_TAG(typedef));
+                SymbolSetDIE(decl->symbol,
+                             BuildDebugInfo(&compiler->debug_builder,
+                                            decl->symbol, DW_TAG(typedef)));
                 BuildDebugInfoAfterCodegen(&compiler->debug_builder,
                                              decl->symbol);
               }
@@ -3757,10 +3758,11 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
               }
             }
             if (compiler->debug_output) {
-              decl->symbol->die = BuildDebugInfo(&compiler->debug_builder,
-                                           decl->symbol,
-                                           DW_TAG(variable));
-              VariableDIESetStatic(decl->symbol->die, decl->symbol->name.value);
+              SymbolSetDIE(decl->symbol,
+                           BuildDebugInfo(&compiler->debug_builder,
+                                          decl->symbol, DW_TAG(variable)));
+              VariableDIESetStatic(SymbolDIE(decl->symbol),
+                                   decl->symbol->name.value);
               BuildDebugInfoAfterCodegen(&compiler->debug_builder,
                                            decl->symbol);
             }

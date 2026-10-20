@@ -96,7 +96,7 @@ DIE* BuildDebugInfo(DebugBuilder* builder, Symbol* sym, DW_TAG tag) {
 }
 
 void BuildDebugInfoAfterCodegen(DebugBuilder* builder, Symbol* sym) {
-  DIE* die = sym->die;
+  DIE* die = SymbolDIE(sym);
   assert(die != NULL);
   // printf("DIE\n");
   // DIEPrint(die, 1);
@@ -601,7 +601,7 @@ static void LexicalScopeVisitor(ASTNode* node, void* data, int child_id,
       VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
       DIE* die = NewSymbolDIE(builder->builder, decl->symbol, DW_TAG(variable));
       VectorAppend(&builder->current->variables, die);
-      decl->symbol->die = die;
+      SymbolSetDIE(decl->symbol, die);
     }
   }
 }
@@ -688,7 +688,7 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
         Symbol* formal = (Symbol*)type->info.function.prototype.value.p[i];
         DIE* arg = NewSymbolDIE(builder, formal, DW_TAG(formal_parameter));
         VectorAppend(&func->top_scope->variables, arg);
-        formal->die = arg;
+        SymbolSetDIE(formal, arg);
       }
       if (die->tag == DW_TAG(subprogram)) {
         BuildLexicalScopes(builder, type, func);

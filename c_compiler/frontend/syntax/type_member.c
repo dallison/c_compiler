@@ -2847,7 +2847,7 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   while (SyntaxParseCXXAlignas(parser->syntax, &trailing_attributes) ||
          SyntaxParseAnyAttribute(parser->syntax, &trailing_attributes)) {
   }
-  VectorAppendVector(&member_symbol->attributes, &trailing_attributes);
+  SymbolAppendAttributes(member_symbol, &trailing_attributes);
   VectorDestruct(&trailing_attributes);
   SyntaxApplyDeclarationAttributes(parser->syntax, member_symbol);
   CXXFinalizeSpecialMemberMetadata(member_symbol, str, true);
@@ -3775,7 +3775,7 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         while (SyntaxParseCXXAlignas(parser->syntax, &member_attributes) ||
                SyntaxParseAnyAttribute(parser->syntax, &member_attributes)) {
         }
-        VectorAppendVector(&member_symbol->attributes, &member_attributes);
+        SymbolAppendAttributes(member_symbol, &member_attributes);
         VectorClear(&member_attributes);
         SyntaxApplyDeclarationAttributes(parser->syntax, member_symbol);
         // `std::ostringstream stream_;` names an alias formed while the class

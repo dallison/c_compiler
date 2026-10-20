@@ -1523,8 +1523,7 @@ static void AddRangeForStructuredBindingVariables(Syntax* syntax,
     Symbol* sym = NewRangeForAutoSymbol(syntax, name->value, location);
     if (i < binding->attributes.length) {
       Vector* attributes = binding->attributes.value.p[i];
-      AttributeListDestruct(&sym->attributes);
-      AttributeListClone(&sym->attributes, attributes);
+      SymbolSetAttributeCopies(sym, attributes);
       SyntaxApplyDeclarationAttributes(syntax, sym);
     }
     sym->flags.is_parameter_pack = binding->pack_index == (int)i;
@@ -1947,8 +1946,7 @@ static void AddExpansionStructuredBindingVariables(Syntax* syntax,
     Symbol* sym = NewRangeForAutoSymbol(syntax, name->value, location);
     if (i < binding->attributes.length) {
       Vector* attributes = binding->attributes.value.p[i];
-      AttributeListDestruct(&sym->attributes);
-      AttributeListClone(&sym->attributes, attributes);
+      SymbolSetAttributeCopies(sym, attributes);
       SyntaxApplyDeclarationAttributes(syntax, sym);
     }
     sym->flags.is_parameter_pack = binding->pack_index == (int)i;

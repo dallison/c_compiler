@@ -60,7 +60,7 @@ void AlignNextOffset(Struct* str, TypeRecord* type) {
 }
 
 void AlignNextOffsetForSymbol(Struct* str, Symbol* symbol) {
-  AlignNextOffsetWithAlignment(str, symbol->type, symbol->alignment);
+  AlignNextOffsetWithAlignment(str, symbol->type, SymbolAlignment(symbol));
 }
 
 void FinalizeStructAlignment(Struct* str) {
@@ -77,7 +77,7 @@ void FinalizeStructAlignment(Struct* str) {
   TypeRecordSyncStructSizes(str);
 }
 
-void StructApplyLayoutAttributes(Struct* str, Vector* attrs) {
+void StructApplyLayoutAttributes(Struct* str, const Vector* attrs) {
   if (AttributeListHas(attrs, "packed")) {
     str->packed = true;
   }
@@ -222,7 +222,8 @@ static bool TryPlaceNoUniqueAddressMember(Struct* str,
                                           StructMember* member) {
   if (str == NULL || member == NULL || member->symbol == NULL ||
       str->is_union ||
-      !AttributeListHas(&member->symbol->attributes, "no_unique_address") ||
+      !AttributeListHas(SymbolAttributes(member->symbol),
+                        "no_unique_address") ||
       !TypeIsEmptyClassForNoUniqueAddress(member->symbol->type)) {
     return false;
   }
@@ -364,11 +365,11 @@ bool RelayoutStruct(Struct* str) {
 }
 
 void TypeApplyStructAttributesFromSymbol(Symbol* sym) {
-  if (sym == NULL || sym->attributes.length == 0) {
+  if (sym == NULL || SymbolAttributes(sym)->length == 0) {
     return;
   }
-  if (!AttributeListHas(&sym->attributes, "packed") &&
-      AttributeListFind(&sym->attributes, "aligned") == NULL) {
+  if (!AttributeListHas(SymbolAttributes(sym), "packed") &&
+      AttributeListFind(SymbolAttributes(sym), "aligned") == NULL) {
     return;
   }
   TypeRecord* type = sym->type;
@@ -379,7 +380,7 @@ void TypeApplyStructAttributesFromSymbol(Symbol* sym) {
   Struct* str = type->info.struct_info;
   bool was_packed = str->packed;
   int was_align = str->explicit_alignment;
-  StructApplyLayoutAttributes(str, &sym->attributes);
+  StructApplyLayoutAttributes(str, SymbolAttributes(sym));
   if (str->packed != was_packed || str->explicit_alignment != was_align) {
     if (RelayoutStruct(str)) {
       // The type's size may already have been cached at the old (unpacked)

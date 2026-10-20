@@ -3932,8 +3932,9 @@ Symbol* TypeParserParseDeclarator(TypeParser* parser, TypeRecord* base_type) {
   for (size_t attr_index = 0;
        attr_index < parser->pending_declaration_attributes.length;
        attr_index++) {
-    VectorAppend(&parser->symbol->attributes,
-                 parser->pending_declaration_attributes.value.p[attr_index]);
+    SymbolAddAttribute(
+        parser->symbol,
+        parser->pending_declaration_attributes.value.p[attr_index]);
   }
   VectorClear(&parser->pending_declaration_attributes);
   if (TypeIsFunction(parser->symbol->type) &&
@@ -4470,8 +4471,8 @@ static PrototypeStyle ParseFunctionParameter(TypeParser* proto_parser,
     for (size_t attr_index = 0;
          attr_index < proto_parser->pending_declaration_attributes.length;
          attr_index++) {
-      VectorAppend(
-          &formal->attributes,
+      SymbolAddAttribute(
+          formal,
           proto_parser->pending_declaration_attributes.value.p[attr_index]);
     }
     VectorClear(&proto_parser->pending_declaration_attributes);

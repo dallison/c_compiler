@@ -758,8 +758,8 @@ int SymbolStackAlignment(Symbol* symbol) {
     return 1;
   }
   int alignment = TypeRecordAlignment(symbol->type);
-  if (symbol->alignment > alignment) {
-    alignment = symbol->alignment;
+  if (SymbolAlignment(symbol) > alignment) {
+    alignment = SymbolAlignment(symbol);
   }
   return alignment > 0 ? alignment : 1;
 }

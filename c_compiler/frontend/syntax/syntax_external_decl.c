@@ -713,7 +713,7 @@ static void ParseExternalDeclaratorSuffix(TypeParser* parser, Symbol* sym,
   // Parse common __attribute__ / __declspec / C++ attribute syntax.
   ParseExternalDeclaratorAttributeList(syntax, attributes);
 
-  VectorAppendVector(&sym->attributes, attributes);
+  SymbolAppendAttributes(sym, attributes);
   VectorClear(attributes);
   SyntaxApplyDeclarationAttributes(syntax, sym);
   if (parser->placeholder_variable_constraint != NULL) {
@@ -739,7 +739,7 @@ static void ParseExternalDeclaratorSuffix(TypeParser* parser, Symbol* sym,
   // `int x asm("name") __attribute__((section("cold"))) = 1;`.
   ParseExternalDeclaratorAttributeList(syntax, attributes);
   if (attributes->length != 0) {
-    VectorAppendVector(&sym->attributes, attributes);
+    SymbolAppendAttributes(sym, attributes);
     VectorClear(attributes);
     SyntaxApplyDeclarationAttributes(syntax, sym);
   }
@@ -757,19 +757,19 @@ static void MergeDeclaratorIntoPrevious(Syntax* syntax, Symbol* sym,
     }
     if (sym->flags.noreturn) {
       old_sym->flags.noreturn = true;
-      if (!AttributeListHas(&old_sym->attributes, "noreturn")) {
+      if (!AttributeListHas(SymbolAttributes(old_sym), "noreturn")) {
         Attribute* noreturn =
-            AttributeListFind(&sym->attributes, "noreturn");
+            AttributeListFind(SymbolAttributes(sym), "noreturn");
         if (noreturn != NULL) {
-          VectorAppend(&old_sym->attributes, AttributeClone(noreturn));
+          SymbolAddAttribute(old_sym, AttributeClone(noreturn));
         }
       }
     }
     Attribute* deprecated =
-        AttributeListFind(&sym->attributes, "deprecated");
+        AttributeListFind(SymbolAttributes(sym), "deprecated");
     if (deprecated != NULL &&
-        !AttributeListHas(&old_sym->attributes, "deprecated")) {
-      VectorAppend(&old_sym->attributes, AttributeClone(deprecated));
+        !AttributeListHas(SymbolAttributes(old_sym), "deprecated")) {
+      SymbolAddAttribute(old_sym, AttributeClone(deprecated));
     }
     if (SymbolHasAsmName(sym)) {
       SymbolSetAsmName(old_sym, SymbolAsmName(sym));
@@ -1239,7 +1239,7 @@ static ASTNode* ParseCXXSpecialMemberDefinition(Syntax* syntax) {
 
   Symbol* sym = TypeParserParseCXXSpecialMemberDeclarator(&parser);
   if (sym != NULL && attributes.length > 0) {
-    VectorAppendVector(&sym->attributes, &attributes);
+    SymbolAppendAttributes(sym, &attributes);
     SyntaxApplyDeclarationAttributes(syntax, sym);
   }
   // `template <typename T> inline Condition::Condition(...)` is parsed here,

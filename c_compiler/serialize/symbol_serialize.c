@@ -10,7 +10,7 @@
 //     the scalar payload (value.ivalue bits, which also covers fvalue and
 //     arg_number) is round-tripped.  Pointer members of the union (func_defn,
 //     other) are codegen/transient and are not serialized.
-//   * usage_info and die are codegen/debug-only and are omitted.
+//   * usage_info and codegen are codegen/debug-only and are omitted.
 //   * Namespace symbol/tag tables are stored as flat symbol handle lists and
 //     rebuilt via NamespaceInsertSymbol/Tag on load.
 //
@@ -219,7 +219,7 @@ static const WireFieldDesc kNamespaceFields[] = {
 // Attribute vector (inline).
 // ---------------------------------------------------------------------------
 void SerialWriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
-                                int field, Vector* v) {
+                                int field, const Vector* v) {
   WireBuffer tmp;
   WireBufferInitOwned(&tmp, 16);
   WireWriteRawVarint(&tmp, (uint64_t)v->length);
@@ -705,7 +705,7 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
   WireWriteInt32(buf, kSym_template_template_parameter_kind,
                  (int32_t)SymbolExtraOf(s)->template_template_parameter_kind);
 
-  WireWriteInt32(buf, kSym_alignment, s->alignment);
+  WireWriteInt32(buf, kSym_alignment, SymbolAlignment(s));
   WireWriteInt32(buf, kSym_template_parameter_index,
                  s->template_parameter_index);
   WireWriteInt32(buf, kSym_dependent_value_template_parameter_index,
@@ -757,7 +757,7 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
             SymbolExtraOf(s)->default_argument);
   SWriteRef(ctx, buf, kSym_constexpr_initializer, kSerialKindAST,
             SymbolExtraOf(s)->constexpr_initializer);
-  SerialWriteAttributeVector(ctx, buf, kSym_attributes, &s->attributes);
+  SerialWriteAttributeVector(ctx, buf, kSym_attributes, SymbolAttributes(s));
   if (SymbolExtraOf(s)->variable_template != NULL) {
     WriteVariableTemplate(ctx, buf, kSym_variable_template,
                           SymbolExtraOf(s)->variable_template);
@@ -961,9 +961,12 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         WireReadBool(buf, &b);
         s->flags.is_concept = b;
         break;
-      case kSym_alignment:
-        WireReadInt32(buf, &s->alignment);
+      case kSym_alignment: {
+        int32_t alignment = 0;
+        WireReadInt32(buf, &alignment);
+        SymbolSetAlignment(s, alignment);
         break;
+      }
       case kSym_template_parameter_index:
         WireReadInt32(buf, &s->template_parameter_index);
         break;
@@ -1011,9 +1014,14 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
         }
         break;
       }
-      case kSym_attributes:
-        SerialReadAttributeVector(ctx, buf, &s->attributes);
+      case kSym_attributes: {
+        Vector attributes;
+        VectorInit(&attributes);
+        SerialReadAttributeVector(ctx, buf, &attributes);
+        SymbolAppendAttributes(s, &attributes);
+        VectorDestruct(&attributes);
         break;
+      }
       case kSym_variable_template:
         SymbolMutableExtra(s)->variable_template =
             ReadVariableTemplate(ctx, buf);

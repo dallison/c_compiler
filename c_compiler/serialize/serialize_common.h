@@ -63,7 +63,7 @@ void SReadStringVector(DeserializeContext* ctx, WireBuffer* buf, Vector* out);
 
 // Attribute vector (de)serialization, implemented in symbol_serialize.c.
 void SerialWriteAttributeVector(SerializeContext* ctx, WireBuffer* buf,
-                                int field, Vector* attributes);
+                                int field, const Vector* attributes);
 void SerialReadAttributeVector(DeserializeContext* ctx, WireBuffer* buf,
                                Vector* attributes);
 

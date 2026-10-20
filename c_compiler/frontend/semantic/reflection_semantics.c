@@ -2348,7 +2348,7 @@ static ASTNode* MetaAccessContextExpression(VectorASTNode* call,
   return result;
 }
 
-static void MetaCollectAnnotationsFromAttributes(Vector* attributes,
+static void MetaCollectAnnotationsFromAttributes(const Vector* attributes,
                                                  Vector* out,
                                                  ReflectionValue* type_filter,
                                                  SourceLocation location) {
@@ -2391,19 +2391,19 @@ static Vector* MetaCollectAnnotations(ReflectionValue* value,
     return values;
   }
   if (value->symbol != NULL) {
-    MetaCollectAnnotationsFromAttributes(&value->symbol->attributes, values,
-                                         type_filter, location);
+    MetaCollectAnnotationsFromAttributes(SymbolAttributes(value->symbol),
+                                         values, type_filter, location);
   }
   if (value->member != NULL && value->member->symbol != NULL) {
-    MetaCollectAnnotationsFromAttributes(&value->member->symbol->attributes,
-                                         values, type_filter, location);
+    MetaCollectAnnotationsFromAttributes(
+        SymbolAttributes(value->member->symbol), values, type_filter, location);
   }
   if (value->reflected_type != NULL && TypeIsStructOrUnion(value->reflected_type) &&
       value->reflected_type->info.struct_info != NULL &&
       value->reflected_type->info.struct_info->tag_symbol != NULL) {
     MetaCollectAnnotationsFromAttributes(
-        &value->reflected_type->info.struct_info->tag_symbol->attributes, values,
-        type_filter, location);
+        SymbolAttributes(value->reflected_type->info.struct_info->tag_symbol),
+        values, type_filter, location);
   }
   return values;
 }
@@ -2492,8 +2492,8 @@ static Vector* MetaCollectAttributes(ReflectionValue* value,
   if (symbol == NULL) {
     return values;
   }
-  for (size_t i = 0; i < symbol->attributes.length; i++) {
-    Attribute* attribute = symbol->attributes.value.p[i];
+  for (size_t i = 0; i < SymbolAttributes(symbol)->length; i++) {
+    Attribute* attribute = SymbolAttributes(symbol)->value.p[i];
     if (SyntaxAttributeIsReflectable(attribute)) {
       VectorAppend(values, ReflectionCreateAttribute(attribute, location));
     }
@@ -3164,8 +3164,9 @@ ASTNode* SemanticTryAnalyzeMetaCall(VectorASTNode* call) {
     }
     bool found = false;
     Symbol* owner = MetaAttributeOwner(value);
-    for (size_t i = 0; owner != NULL && i < owner->attributes.length; i++) {
-      Attribute* candidate = owner->attributes.value.p[i];
+    for (size_t i = 0; owner != NULL && i < SymbolAttributes(owner)->length;
+         i++) {
+      Attribute* candidate = SymbolAttributes(owner)->value.p[i];
       if (SyntaxAttributeIsReflectable(candidate) &&
           AttributeIdentityEqual(candidate, attribute->attribute,
                                  (flags & 1) != 0, (flags & 2) != 0)) {
@@ -3296,8 +3297,8 @@ ASTNode* SemanticTryAnalyzeMetaCall(VectorASTNode* call) {
           "alignment_of requires an entity with a complete object type");
     }
     if (value->member != NULL && value->member->symbol != NULL &&
-        value->member->symbol->alignment > 0) {
-      alignment = (size_t)value->member->symbol->alignment;
+        SymbolAlignment(value->member->symbol) > 0) {
+      alignment = (size_t)SymbolAlignment(value->member->symbol);
     } else if (entity_type != NULL && TypeIsStructOrUnion(entity_type) &&
                entity_type->info.struct_info != NULL) {
       alignment = (size_t)entity_type->info.struct_info->alignment;
@@ -3409,7 +3410,8 @@ static void EvaluateAnnotationAttribute(Attribute* attr) {
   }
 }
 
-void SemanticAttachAnnotationAttributes(Vector* attributes, Symbol* symbol) {
+void SemanticAttachAnnotationAttributes(const Vector* attributes,
+                                        Symbol* symbol) {
   (void)symbol;
   if (attributes == NULL) {
     return;

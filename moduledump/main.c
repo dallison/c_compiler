@@ -371,11 +371,11 @@ static void DumpSymbol(Symbol* s, size_t handle, String* scratch) {
   if (s->flags.value_set) {
     printf("        value   : %lld\n", (long long)s->value.ivalue);
   }
-  if (s->alignment != 0) {
-    printf("        align   : %d\n", s->alignment);
+  if (SymbolAlignment(s) != 0) {
+    printf("        align   : %d\n", SymbolAlignment(s));
   }
-  for (size_t i = 0; i < s->attributes.length; i++) {
-    Attribute* a = (Attribute*)VectorGet(&s->attributes, i);
+  for (size_t i = 0; i < SymbolAttributes(s)->length; i++) {
+    Attribute* a = (Attribute*)VectorGet(SymbolAttributes(s), i);
     printf("        attr    : %s", a->name.value);
     if (AttributeArgCount(a) > 0) {
       printf("(");

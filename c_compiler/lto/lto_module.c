@@ -252,8 +252,7 @@ static void RenameSymbolForTU(Symbol* symbol, const char* tu_id) {
     StringAppend(SymbolAsmName(symbol), ".lto.");
     StringAppend(SymbolAsmName(symbol), tu_id);
   }
-  free(symbol->cached_target_symbol_name);
-  symbol->cached_target_symbol_name = NULL;
+  SymbolSetCachedTargetName(symbol, NULL);
 }
 
 static void RenameIRSymbols(List* code, const char* tu_id) {

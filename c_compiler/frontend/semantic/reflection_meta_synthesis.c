@@ -879,14 +879,12 @@ static ReflectionValue* MetaSynthesisDefineEnum(ReflectionValue* target_enum,
         VectorDestruct(&seen_names);
         return NULL;
       }
-      VectorAppend(&constant->attributes,
-                   AttributeClone(attribute->attribute));
+      SymbolAddAttribute(constant, AttributeClone(attribute->attribute));
     }
     for (size_t j = 0; j < spec->annotations.length; j++) {
       ReflectionValue* annotation = spec->annotations.value.p[j];
       if (annotation != NULL && annotation->annotation != NULL) {
-        VectorAppend(&constant->attributes,
-                     AttributeClone(annotation->annotation));
+        SymbolAddAttribute(constant, AttributeClone(annotation->annotation));
       }
     }
     int errors_before_attributes = NumErrors();
@@ -945,18 +943,19 @@ static bool MetaSynthesisMemberMatchesSpec(StructMember* member,
     }
   }
   if (spec->has_alignment &&
-      (size_t)member->symbol->alignment != spec->alignment) {
+      (size_t)SymbolAlignment(member->symbol) != spec->alignment) {
     return false;
   }
   if (spec->has_bit_width && (size_t)member->bit_size != spec->bit_width) {
     return false;
   }
   if (spec->no_unique_address &&
-      !AttributeListHas(&member->symbol->attributes, "no_unique_address")) {
+      !AttributeListHas(SymbolAttributes(member->symbol),
+                        "no_unique_address")) {
     return false;
   }
   if (spec->annotations.length > 0) {
-    if (member->symbol->attributes.length < spec->annotations.length) {
+    if (SymbolAttributes(member->symbol)->length < spec->annotations.length) {
       return false;
     }
   }
@@ -977,8 +976,8 @@ static bool MetaSynthesisMemberMatchesSpec(StructMember* member,
       }
     }
     size_t installed_count = 0;
-    for (size_t j = 0; j < member->symbol->attributes.length; j++) {
-      Attribute* installed = member->symbol->attributes.value.p[j];
+    for (size_t j = 0; j < SymbolAttributes(member->symbol)->length; j++) {
+      Attribute* installed = SymbolAttributes(member->symbol)->value.p[j];
       if (AttributeIdentityEqual(installed, reflected->attribute, false,
                                  false)) {
         installed_count++;
@@ -1025,7 +1024,7 @@ static bool MetaSynthesisApplyDataMemberSpec(Struct* str,
   member_symbol->flags.is_defined = true;
   member_symbol->location = location;
   if (spec->has_alignment) {
-    member_symbol->alignment = (int)spec->alignment;
+    SymbolSetAlignment(member_symbol, (int)spec->alignment);
   }
   for (size_t i = 0; i < spec->attributes.length; i++) {
     ReflectionValue* attribute = spec->attributes.value.p[i];
@@ -1035,19 +1034,18 @@ static bool MetaSynthesisApplyDataMemberSpec(Struct* str,
       StringDestruct(&member_name);
       return false;
     }
-    VectorAppend(&member_symbol->attributes,
-                 AttributeClone(attribute->attribute));
+    SymbolAddAttribute(member_symbol, AttributeClone(attribute->attribute));
   }
   if (spec->no_unique_address &&
-      !AttributeListHas(&member_symbol->attributes, "no_unique_address")) {
-    VectorAppend(&member_symbol->attributes, NewAttribute("no_unique_address"));
+      !AttributeListHas(SymbolAttributes(member_symbol), "no_unique_address")) {
+    SymbolAddAttribute(member_symbol, NewAttribute("no_unique_address"));
   }
   for (size_t i = 0; i < spec->annotations.length; i++) {
     ReflectionValue* annotation = spec->annotations.value.p[i];
     if (annotation != NULL && annotation->annotation != NULL &&
         annotation->annotation->name.value != NULL) {
-      VectorAppend(&member_symbol->attributes,
-                   NewAttribute(annotation->annotation->name.value));
+      SymbolAddAttribute(member_symbol,
+                         NewAttribute(annotation->annotation->name.value));
     }
   }
   int errors_before_attributes = NumErrors();

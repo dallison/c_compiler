@@ -2736,8 +2736,8 @@ static bool SymbolCanLiveInReturnSlot(Symbol* sym) {
     return false;
   }
   int alignment = sym->type != NULL ? TypeRecordAlignment(sym->type) : 0;
-  if (sym->alignment > alignment) {
-    alignment = sym->alignment;
+  if (SymbolAlignment(sym) > alignment) {
+    alignment = SymbolAlignment(sym);
   }
   return compiler->target == NULL ||
          alignment <= compiler->target->stack_alignment;
@@ -3490,13 +3490,12 @@ static Symbol* CloneStructuredBindingSymbol(Symbol* source, const char* name) {
   if (source != NULL) {
     replacement->flags = source->flags;
     replacement->location = source->location;
-    replacement->alignment = source->alignment;
+    SymbolSetAlignment(replacement, SymbolAlignment(source));
     replacement->namespace_ = source->namespace_;
     replacement->value = source->value;
     SymbolSetStructuredBindingPackSize(replacement,
                                        SymbolStructuredBindingPackSize(source));
-    AttributeListDestruct(&replacement->attributes);
-    AttributeListClone(&replacement->attributes, &source->attributes);
+    SymbolSetAttributeCopies(replacement, SymbolAttributes(source));
   }
   replacement->flags.is_parameter_pack = false;
   SymbolSetStructuredBindingPackSize(replacement, -2);
@@ -3846,7 +3845,8 @@ void AnalyzeVariableDeclaration(VariableDeclarationASTNode* node) {
         SemanticResolveDependentSpliceType(node->symbol->type, (ASTNode*)node);
   }
   if (node->symbol != NULL) {
-    SemanticAttachAnnotationAttributes(&node->symbol->attributes, node->symbol);
+    SemanticAttachAnnotationAttributes(SymbolAttributes(node->symbol),
+                                       node->symbol);
   }
   if (node->initializer != NULL) {
     node->initializer = CXXFoldIsSameVExpression(node->initializer);

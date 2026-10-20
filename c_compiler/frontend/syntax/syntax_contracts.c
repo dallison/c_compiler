@@ -128,8 +128,8 @@ static Symbol* ParseContractResultBinding(Syntax* syntax) {
   binding->location = location;
   binding->flags.is_local = true;
   binding->flags.is_block_scope = true;
-  AttributeListDestruct(&binding->attributes);
-  binding->attributes = attributes;
+  SymbolAppendAttributes(binding, &attributes);
+  VectorDestruct(&attributes);
   StringDestruct(&name);
   return binding;
 }

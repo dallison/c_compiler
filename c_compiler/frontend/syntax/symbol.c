@@ -177,7 +177,7 @@ bool AttributeArgInt(Attribute* attr, size_t index, long* value) {
   return true;
 }
 
-int AttributeListAlignment(Vector* attrs, int bare_alignment) {
+int AttributeListAlignment(const Vector* attrs, int bare_alignment) {
   int alignment = 0;
   for (size_t i = 0; attrs != NULL && i < attrs->length; i++) {
     Attribute* attr = attrs->value.p[i];
@@ -200,7 +200,7 @@ int AttributeListAlignment(Vector* attrs, int bare_alignment) {
   return alignment;
 }
 
-Attribute* AttributeListFind(Vector* attrs, const char* name) {
+Attribute* AttributeListFind(const Vector* attrs, const char* name) {
   for (size_t i = 0; i < attrs->length; i++) {
     Attribute* attr = attrs->value.p[i];
     if (StringEqual(&attr->name, name)) {
@@ -210,7 +210,7 @@ Attribute* AttributeListFind(Vector* attrs, const char* name) {
   return NULL;
 }
 
-bool AttributeListHas(Vector* attrs, const char* name) {
+bool AttributeListHas(const Vector* attrs, const char* name) {
   return AttributeListFind(attrs, name) != NULL;
 }
 
@@ -219,7 +219,7 @@ void AttributeListDestruct(Vector* attrs) {
                              /*free_element=*/true);
 }
 
-void AttributeListClone(Vector* dest, Vector* src) {
+void AttributeListClone(Vector* dest, const Vector* src) {
   VectorInit(dest);
   for (size_t i = 0; i < src->length; i++) {
     VectorAppend(dest, AttributeClone((Attribute*)src->value.p[i]));
@@ -278,11 +278,10 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->usage_info.reads = 0;
   sym->usage_info.used_in_loop = 0;
   sym->id = compiler->next_symbol_id++;
-  VectorInit(&sym->attributes);
-  sym->alignment = 0;
+  sym->attributes_ = NULL;
   sym->template_parameter_index = -1;
   SymbolSetType(sym, type);
-  sym->die = NULL;
+  sym->codegen = NULL;
   sym->is_imported_module_symbol = false;
   sym->destruction_complete = false;
   sym->is_read = false;
@@ -290,9 +289,10 @@ void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
   sym->is_nrvo = false;
   sym->instantiation_depth = 0;
   sym->member_lookup_class = NULL;
-  sym->cached_target_symbol_name = NULL;
   sym->extra = NULL;
 }
+
+const Vector kNoSymbolAttributes = {{0}};
 
 const SymbolExtra kEmptySymbolExtra = {
     .dependent_value_template_parameter_index = -1,
@@ -386,6 +386,14 @@ void SymbolRestoreImportedFunctionTemplateParameters(Symbol* symbol) {
   }
 }
 
+static void SymbolClearAttributes(Symbol* symbol) {
+  if (symbol->attributes_ != NULL) {
+    AttributeListDestruct(symbol->attributes_);
+    free(symbol->attributes_);
+    symbol->attributes_ = NULL;
+  }
+}
+
 void SymbolDestruct(Symbol* symbol) {
   if (symbol == NULL || symbol->destruction_complete) {
     return;
@@ -397,9 +405,12 @@ void SymbolDestruct(Symbol* symbol) {
   StringDestruct(&symbol->asm_name_);
   TypeRecordDelete(symbol->type);
   symbol->module_identity = NULL;
-  AttributeListDestruct(&symbol->attributes);
-  free(symbol->cached_target_symbol_name);
-  symbol->cached_target_symbol_name = NULL;
+  SymbolClearAttributes(symbol);
+  if (symbol->codegen != NULL) {
+    free(symbol->codegen->target_symbol_name);
+    free(symbol->codegen);
+    symbol->codegen = NULL;
+  }
   SymbolExtra* extra = symbol->extra;
   if (extra != NULL) {
     symbol->extra = NULL;
@@ -467,7 +478,54 @@ void SymbolDelete(Symbol* symbol) {
 }
 
 void SymbolAddAttribute(Symbol* symbol, Attribute* attribute) {
-  VectorAppend(&symbol->attributes, attribute);   // Takes ownership.
+  if (symbol->attributes_ == NULL) {
+    symbol->attributes_ = NewVector();
+  }
+  VectorAppend(symbol->attributes_, attribute);  // Takes ownership.
+}
+
+void SymbolSetAlignment(Symbol* symbol, int alignment) {
+  if (alignment != 0 || symbol->extra != NULL) {
+    SymbolMutableExtra(symbol)->alignment = alignment;
+  }
+}
+
+static SymbolCodegen* SymbolMutableCodegen(Symbol* symbol) {
+  if (symbol->codegen == NULL) {
+    symbol->codegen = calloc(1, sizeof(SymbolCodegen));
+  }
+  return symbol->codegen;
+}
+
+void SymbolSetDIE(Symbol* symbol, struct DIE* die) {
+  if (die != NULL || symbol->codegen != NULL) {
+    SymbolMutableCodegen(symbol)->die = die;
+  }
+}
+
+void SymbolSetCachedTargetName(Symbol* symbol, char* name) {
+  if (name == NULL && symbol->codegen == NULL) {
+    return;
+  }
+  SymbolCodegen* codegen = SymbolMutableCodegen(symbol);
+  free(codegen->target_symbol_name);
+  codegen->target_symbol_name = name;
+}
+
+void SymbolAppendAttributes(Symbol* symbol, const Vector* attributes) {
+  for (size_t i = 0; attributes != NULL && i < attributes->length; i++) {
+    SymbolAddAttribute(symbol, attributes->value.p[i]);
+  }
+}
+
+void SymbolSetAttributeCopies(Symbol* symbol, const Vector* attributes) {
+  if (attributes != NULL && attributes == symbol->attributes_) {
+    return;
+  }
+  SymbolClearAttributes(symbol);
+  for (size_t i = 0; attributes != NULL && i < attributes->length; i++) {
+    SymbolAddAttribute(symbol, AttributeClone(attributes->value.p[i]));
+  }
 }
 
 static bool CXXSymbolShouldMangle(Symbol* symbol) {
@@ -1449,8 +1507,7 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol) {
   StringDestruct(&mangled);
   // The cached target name derives from asm_name_; drop it so it is
   // recomputed.
-  free(symbol->cached_target_symbol_name);
-  symbol->cached_target_symbol_name = NULL;
+  SymbolSetCachedTargetName(symbol, NULL);
 }
 
 void SymbolDeferCXXMangledAsmName(Symbol* symbol) {
@@ -1529,8 +1586,7 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
   StringDestruct(&mangled);
   // The cached target name derives from asm_name_; drop it so it is
   // recomputed.
-  free(symbol->cached_target_symbol_name);
-  symbol->cached_target_symbol_name = NULL;
+  SymbolSetCachedTargetName(symbol, NULL);
 }
 
 Symbol* SymbolClone(Symbol* sym) {
@@ -1547,7 +1603,6 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->is_constexpr_representable = sym->is_constexpr_representable;
   new_sym->requires_ast_constexpr = sym->requires_ast_constexpr;
   new_sym->location = sym->location;
-  new_sym->alignment = sym->alignment;
   new_sym->template_parameter_index = sym->template_parameter_index;
   new_sym->namespace_ = sym->namespace_;
   new_sym->member_lookup_class = sym->member_lookup_class;
@@ -1566,6 +1621,7 @@ Symbol* SymbolClone(Symbol* sym) {
     to->lambda_capture_source = from->lambda_capture_source;
     to->anonymous_union_host = from->anonymous_union_host;
     to->anonymous_union_member_offset = from->anonymous_union_member_offset;
+    to->alignment = from->alignment;
     to->constexpr_reference_scope = from->constexpr_reference_scope;
     to->template_template_parameters =
         TemplateParameterVectorCopy(from->template_template_parameters);
@@ -1582,19 +1638,16 @@ Symbol* SymbolClone(Symbol* sym) {
         from->static_data_member_template_definition;
   }
   StringSetString(&new_sym->asm_name_, SymbolAsmName(sym));
-  // NewSymbol already initialized new_sym->attributes; replace it with a deep
-  // copy of the source's attributes.
-  VectorDestruct(&new_sym->attributes);
-  AttributeListClone(&new_sym->attributes, &sym->attributes);
+  SymbolSetAttributeCopies(new_sym, sym->attributes_);
   return new_sym;
 }
 
 bool SymbolHasAttribute(Symbol* symbol, const char* attribute) {
-  return AttributeListHas(&symbol->attributes, attribute);
+  return AttributeListHas(SymbolAttributes(symbol), attribute);
 }
 
 Attribute* SymbolFindAttribute(Symbol* symbol, const char* attribute) {
-  return AttributeListFind(&symbol->attributes, attribute);
+  return AttributeListFind(SymbolAttributes(symbol), attribute);
 }
 
 bool SymbolHasWeakBinding(Symbol* symbol) {

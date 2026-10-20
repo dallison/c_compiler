@@ -401,7 +401,7 @@ static int InitFiniPriorityForSymbol(Symbol* function, bool is_fini) {
     return kCXXInitFiniPriorityDefault;
   }
   const char* name = is_fini ? "destructor" : "constructor";
-  Attribute* attr = AttributeListFind(&function->attributes, name);
+  Attribute* attr = AttributeListFind(SymbolAttributes(function), name);
   if (attr == NULL) {
     return kCXXInitFiniPriorityDefault;
   }

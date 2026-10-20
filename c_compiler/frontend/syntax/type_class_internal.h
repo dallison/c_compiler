@@ -34,7 +34,7 @@ void UpdateStructSize(Struct* str, TypeRecord* member_type, bool is_union);
 // existing storage.
 void StructLayoutDataMember(Struct* str, StructMember* member);
 void FinalizeStructAlignment(Struct* str);
-void StructApplyLayoutAttributes(Struct* str, Vector* attrs);
+void StructApplyLayoutAttributes(Struct* str, const Vector* attrs);
 bool RelayoutStruct(Struct* str);
 // Re-lays out class template specializations instantiated while one of their
 // data members' class types was incomplete, once those types are complete.

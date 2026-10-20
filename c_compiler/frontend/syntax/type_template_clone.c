@@ -1283,13 +1283,12 @@ static void CloneTemplateLocalDeclarationSymbol(TemplateFunctionBodyClone* clone
       NewSymbol(old_symbol->name.value, type, old_symbol->storage);
   replacement->flags = old_symbol->flags;
   replacement->location = old_symbol->location;
-  replacement->alignment = old_symbol->alignment;
+  SymbolSetAlignment(replacement, SymbolAlignment(old_symbol));
   replacement->namespace_ = old_symbol->namespace_;
   replacement->value = old_symbol->value;
   SymbolSetStructuredBindingPackSize(
       replacement, SymbolStructuredBindingPackSize(old_symbol));
-  AttributeListDestruct(&replacement->attributes);
-  AttributeListClone(&replacement->attributes, &old_symbol->attributes);
+  SymbolSetAttributeCopies(replacement, SymbolAttributes(old_symbol));
   SubstituteDependentSymbolAlignment(clone->parser, replacement, clone->args,
                                      clone->rebase_template_parameter_base);
 
@@ -1402,7 +1401,7 @@ static Symbol* CloneTemplateDependentTemporarySymbol(
       NewSymbol(old_symbol->name.value, type, old_symbol->storage);
   replacement->flags = old_symbol->flags;
   replacement->location = old_symbol->location;
-  replacement->alignment = old_symbol->alignment;
+  SymbolSetAlignment(replacement, SymbolAlignment(old_symbol));
   replacement->namespace_ = old_symbol->namespace_;
   replacement->value = old_symbol->value;
   SymbolSetStructuredBindingPackSize(
@@ -7592,7 +7591,7 @@ static ASTNode* RebaseDeferredMemberTemplateParameterIdentifier(
       Symbol* copy = NewSymbol(old->name.value, type, old->storage);
       copy->namespace_ = old->namespace_;
       copy->flags = old->flags;
-      copy->alignment = old->alignment;
+      SymbolSetAlignment(copy, SymbolAlignment(old));
       copy->template_parameter_index = old->template_parameter_index;
       if (copy->template_parameter_index >=
           clone->rebase_template_parameter_base) {
@@ -9491,7 +9490,7 @@ static ASTNode* ReanalyzeClonedResolvedCall(
                                    id->symbol->storage);
       concrete->flags = id->symbol->flags;
       concrete->location = id->symbol->location;
-      concrete->alignment = id->symbol->alignment;
+      SymbolSetAlignment(concrete, SymbolAlignment(id->symbol));
       concrete->namespace_ = id->symbol->namespace_;
       concrete->value = id->symbol->value;
       concrete->stack_offset = id->symbol->stack_offset;
@@ -9530,7 +9529,7 @@ static ASTNode* ReanalyzeClonedResolvedCall(
                                   id->symbol->storage);
       partial->flags = id->symbol->flags;
       partial->location = id->symbol->location;
-      partial->alignment = id->symbol->alignment;
+      SymbolSetAlignment(partial, SymbolAlignment(id->symbol));
       partial->namespace_ = id->symbol->namespace_;
       MapKeyValue kv;
       kv.key.p = partial;

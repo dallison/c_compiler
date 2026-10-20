@@ -5139,15 +5139,15 @@ static void AlignOffset(PoolEntry* entry, int* offset) {
 }
 
 static void SetDebugRegisterLocation(PoolEntry* entry, int reg) {
-  VariableDIESetRegister(entry->value.symbol->die, reg);
+  VariableDIESetRegister(SymbolDIE(entry->value.symbol), reg);
 }
 
 static void SetDebugStackLocation(PoolEntry* entry, int offset) {
-  VariableDIESetStackOffset(entry->value.symbol->die, offset);
+  VariableDIESetStackOffset(SymbolDIE(entry->value.symbol), offset);
 }
 
 static void SetDebugSymbolLocation(PoolEntry* entry) {
-  VariableDIESetStatic(entry->value.symbol->die,
+  VariableDIESetStatic(SymbolDIE(entry->value.symbol),
                        entry->value.symbol->name.value);
 }
 
@@ -5529,17 +5529,17 @@ static void FinalizeDebugStackLocations(RVGenerator* rv, Vector* vars) {
   }
   for (size_t i = 0; i < vars->length; i++) {
     PoolEntry* entry = vars->value.p[i];
-    if (entry->value.symbol == NULL || entry->value.symbol->die == NULL) {
+    if (entry->value.symbol == NULL || SymbolDIE(entry->value.symbol) == NULL) {
       continue;
     }
-    VariableDIE* var = (VariableDIE*)entry->value.symbol->die;
+    VariableDIE* var = (VariableDIE*)SymbolDIE(entry->value.symbol);
     if (var->location.type != kLocationOnStack) {
       continue;
     }
     if (entry->pooled->opcode == IR_OP(localvar) ||
         entry->pooled->opcode == IR_OP(tempvar)) {
       VariableDIESetStackOffset(
-          entry->value.symbol->die,
+          SymbolDIE(entry->value.symbol),
           LocalVariableOffset(rv, var->location.v.stack_offset));
     }
   }
