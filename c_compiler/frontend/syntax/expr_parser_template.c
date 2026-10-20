@@ -1135,9 +1135,8 @@ ASTNode* ParseIdentifier(Syntax* syntax,
           FullyQualifiedIdentifierDestruct(&name);
           return static_member;
         }
-        ASTNode* member_access =
-            NewMemberAccessFromThis(syntax, &name,
-                                    /*allow_unresolved_member=*/true);
+        ASTNode* member_access = NewMemberAccessFromThis(
+            syntax, &name, UnresolvedNameMayBeDependentMember(syntax));
         if (member_access != NULL) {
           FullyQualifiedIdentifierDestruct(&name);
           return member_access;
