@@ -1827,6 +1827,19 @@ static TypeRecord* NewCXXClassTypeForStruct(Struct* str, Qualifiers quals) {
   return type;
 }
 
+// Implicit members of a concrete class share canonical parameter and return
+// types instead of allocating records for each member.
+static TypeRecord* InternCXXSyntheticType(TypeRecord* type) {
+  if (!TypeRecordCanIntern(type)) {
+    return type;
+  }
+  TypeRecord* canonical = TypeRecordIntern(type);
+  if (canonical != type) {
+    TypeRecordDeleteUnowned(type);
+  }
+  return canonical;
+}
+
 static TypeRecord* NewCXXClassReferenceType(Struct* str, bool is_const,
                                             bool rvalue) {
   TypeRecord* ref = NewReferenceTypeRecord(kQualPlain, rvalue);
@@ -1834,7 +1847,7 @@ static TypeRecord* NewCXXClassReferenceType(Struct* str, bool is_const,
                                                 is_const ? kQualConst
                                                          : kQualPlain));
   TypeRecordCalculateSize(ref);
-  return ref;
+  return InternCXXSyntheticType(ref);
 }
 
 static Symbol* NewCXXSyntheticFormal(const char* name, TypeRecord* type,
@@ -2552,7 +2565,8 @@ static void AddImplicitCXXEqualityOperator(TypeParser* parser, Struct* str,
   func->info.function.is_const_member = true;
   func->info.function.is_constexpr_eligible = true;
   func->info.function.is_noexcept_eligible = true;
-  TypeRecordChain(func, NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  TypeRecordChain(func, InternCXXSyntheticType(
+                            NewTypeRecordWithSize(kTypeBool, kQualPlain)));
   TypeRecordAddCXXThisParameter(func, str, location);
   AppendCXXSyntheticFormal(
       func, NewCXXSyntheticFormal(
@@ -3265,7 +3279,7 @@ static Symbol* NewCXXSyntheticSpecialMember(TypeParser* parser, Struct* str,
       !deleted && CXXImplicitSpecialMemberIsNoexcept(str, kind);
   func->info.function.is_trivial_special_member =
       !deleted && CXXImplicitSpecialMemberIsTrivial(str, kind);
-  TypeRecordChain(func, return_type);
+  TypeRecordChain(func, InternCXXSyntheticType(return_type));
   TypeRecordAddCXXThisParameter(func, str, location);
   if (!is_destructor && (source_is_const || source_is_rvalue)) {
     AppendCXXSyntheticFormal(
