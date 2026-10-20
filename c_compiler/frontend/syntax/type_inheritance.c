@@ -17,6 +17,7 @@
 #include "expr_evaluator.h"
 #include "expr_parser.h"
 #include "expr_semantics.h"
+#include "reflection_semantics.h"
 #include "statement_semantics.h"
 #include "statement_parser.h"
 #include "symbol_table.h"
@@ -159,6 +160,17 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
       base_type = NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
       TypeMutableDependent(base_type)->dependent_splice_expr =
           NewSpliceASTNode(reflection, kSpliceBase, location);
+      // The class is laid out as soon as its body is parsed, so a splice that
+      // does not depend on a template parameter names its base right away.
+      if (!parser->syntax->parsing_template_declaration &&
+          parser->syntax->current_template_parameter_count == 0) {
+        base_type = SemanticResolveDependentSpliceType(base_type, NULL);
+        if (TypeDependentOf(base_type)->dependent_splice_expr != NULL) {
+          // Diagnosed; leave the base out.
+          TypeRecordDelete(base_type);
+          continue;
+        }
+      }
     } else {
       base_type = TypeParserParseType(parser, true);
     }
