@@ -71,4 +71,15 @@ void SemanticTypeConversionError(ASTNode* from, TypeRecord* to,
 void SemanticTypeConversionWarning(ASTNode* from, TypeRecord* to,
                                    const char* warn, const char* format);
 
+// True unless the code being analyzed belongs to a template: a template
+// pattern, an instantiation, or a member (or closure, or local class) of a
+// class template or of one of its specializations.
+bool SemanticAnalyzingNonTemplateCode(void);
+// Reports `format` (given the class's name) at `node` and returns true when
+// an object of `type` has incomplete class type in non-template code.  Not
+// checked in templates, whose classes are instantiated whenever their
+// template-id is named.
+bool SemanticRejectIncompleteObjectType(ASTNode* node, TypeRecord* type,
+                                        const char* format);
+
 #endif /* semantics_h */

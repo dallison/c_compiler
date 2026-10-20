@@ -1450,6 +1450,9 @@ static ASTNode* ParseSizeof(Syntax* syntax, TokenClass followers) {
         TypeParserDestruct(&parser);
         goto done;
       }
+      SyntaxRejectIncompleteObjectType(
+          syntax, sym->type, false,
+          "invalid application of 'sizeof' to an incomplete type '%s'");
       size = sym->type->size;
       SymbolDelete(sym);
     }
@@ -1500,6 +1503,9 @@ static ASTNode* ParseAlignof(Syntax* syntax, TokenClass followers) {
         TypeParserDestruct(&parser);
         goto done;
       }
+      SyntaxRejectIncompleteObjectType(
+          syntax, sym->type, false,
+          "invalid application of 'alignof' to an incomplete type '%s'");
       TypeRecordCalculateSize(sym->type);
       alignment = TypeRecordAlignment(sym->type);
       SymbolDelete(sym);

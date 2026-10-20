@@ -212,6 +212,12 @@ bool StructMemberIsBitField(StructMember* member);
 // intentionally separate from size: complete empty C++ classes have a size,
 // while a forward declaration is represented by its owning tag symbol.
 bool TypeIsCompleteClass(TypeRecord* type);
+// The class that makes an object of `type` (or of its array elements)
+// incomplete: one that is only declared, or, with `open_class_is_incomplete`,
+// one whose body is still being parsed.  NULL when the object type is
+// complete, is not a class, or depends on template parameters.
+TypeRecord* TypeIncompleteObjectClass(TypeRecord* type,
+                                      bool open_class_is_incomplete);
 
 Symbol* NewEnumConstant(const char* name, int64_t value);
 Symbol* NewScopedEnumConstant(const char* name, int64_t value,

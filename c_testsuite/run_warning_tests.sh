@@ -225,4 +225,33 @@ expect_warn prelex 'undef'
 expect_warn prelex 'unknown-pragmas'
 expect_warn prelex 'multichar'
 
+cat >"$work/incomplete.c" <<'EOF'
+struct Never;
+struct Never never;
+struct Member { struct Never member; };
+int f(struct Never* p) {
+  struct Never local;
+  p++;
+  return sizeof(struct Never);
+}
+void g(struct Never value) {}
+int main(void) { return 0; }
+EOF
+run_fail_o0 incomplete "$work/incomplete.c"
+expect_warn incomplete "Tentative definition has type 'struct Never' that is never completed"
+expect_warn incomplete "Field has incomplete type 'struct Never'"
+expect_warn incomplete "Variable has incomplete type 'struct Never'"
+expect_warn incomplete "arithmetic on a pointer to an incomplete type 'struct Never'"
+expect_warn incomplete "invalid application of 'sizeof' to an incomplete type 'struct Never'"
+
+cat >"$work/completed_later.c" <<'EOF'
+struct Later g;
+extern struct Never n;
+struct Never* np;
+struct Later { int a[4]; };
+static struct Later s;
+int main(void) { g.a[3] = 1; return g.a[3] + s.a[0] - 1 + (np != 0); }
+EOF
+run_ok completed_later "$work/completed_later.c"
+
 echo "warning diagnostics ok"

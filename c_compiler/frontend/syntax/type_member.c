@@ -2100,6 +2100,7 @@ static void FinishInlineMemberFunctionBody(
     CXXConstructorInitList* cxx_initializers, ParserContext old_context) {
   Syntax* syntax = parser->syntax;
   LexMatch(parser->lex, TOK(lbrace));
+  SyntaxRejectIncompleteFunctionDefinitionTypes(syntax, member_symbol->type);
 
   int errors_before = NumErrors();
   TypeRecord* old_current_function = compiler->current_function;
@@ -4169,6 +4170,9 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
           }
           member_decl_had_inline_body |= has_inline_body;
         } else {
+          SyntaxRejectIncompleteObjectType(parser->syntax, member_symbol->type,
+                                           true,
+                                           "Field has incomplete type '%s'");
           member->index = str->members.length - 1;
           StructLayoutDataMember(str, member);
           member->default_initializer =

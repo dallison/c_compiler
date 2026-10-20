@@ -563,6 +563,45 @@ static void AddInjectedClassName(TypeParser* parser, Symbol* tag) {
   }
 }
 
+bool SyntaxRejectIncompleteObjectType(Syntax* syntax, TypeRecord* type,
+                                      bool open_class_is_incomplete,
+                                      const char* format) {
+  if (syntax->parsing_template_declaration ||
+      syntax->current_template_parameters != NULL ||
+      syntax->current_template_parameter_count != 0 ||
+      compiler->template_instantiation_depth > 0) {
+    return false;
+  }
+  TypeRecord* incomplete =
+      TypeIncompleteObjectClass(type, open_class_is_incomplete);
+  if (incomplete == NULL) {
+    return false;
+  }
+  String name = {0};
+  TypeRecordToString(incomplete, &name);
+  SyntaxError(syntax, format, name.value);
+  StringDestruct(&name);
+  return true;
+}
+
+void SyntaxRejectIncompleteFunctionDefinitionTypes(Syntax* syntax,
+                                                   TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return;
+  }
+  SyntaxRejectIncompleteObjectType(
+      syntax, func->next, false,
+      "Incomplete result type '%s' in function definition");
+  Vector* prototype = &func->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* param = prototype->value.p[i];
+    if (param != NULL) {
+      SyntaxRejectIncompleteObjectType(syntax, param->type, false,
+                                       "Variable has incomplete type '%s'");
+    }
+  }
+}
+
 // Attach a fresh class/union type to an existing tag symbol.  Used when a
 // using-directive alias occupies the name, or when a prior symbol has no type:
 // a local class definition still has to parse its base-clause and body.
@@ -868,7 +907,9 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   }
   parser->cxx_member_owner = str;
   parser->syntax->cxx_class_head = str;
+  str->being_defined = true;
   ParseStructMemberList(parser, str, is_union, tag_name);
+  str->being_defined = false;
   parser->cxx_member_owner = saved_member_owner;
   parser->syntax->cxx_class_head = saved_class_head;
   if (class_symbol_scope != NULL) {

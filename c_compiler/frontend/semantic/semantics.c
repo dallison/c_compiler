@@ -936,6 +936,59 @@ void SemanticTypeConversionWarning(ASTNode* from, TypeRecord* to,
   StringDestruct(&to_string);
 }
 
+static bool FunctionBelongsToTemplate(TypeRecord* function, int depth);
+
+static bool ClassBelongsToTemplate(Struct* str, int depth) {
+  for (Struct* s = str; s != NULL; s = s->lexical_parent) {
+    if (s->is_template || s->defining_template_scope_count > 0 ||
+        s->in_namespace_template || s->local_class_arguments != NULL ||
+        (s->tag_symbol != NULL && s->tag_symbol->type != NULL &&
+         s->tag_symbol->type->template_origin != NULL)) {
+      return true;
+    }
+    // A closure or local class belongs to the function that defines it.
+    Symbol* enclosing = s->access_enclosing_function;
+    if (enclosing != NULL && depth < 8 &&
+        FunctionBelongsToTemplate(enclosing->type, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool FunctionBelongsToTemplate(TypeRecord* function, int depth) {
+  if (function == NULL || !TypeIsFunction(function)) {
+    return false;
+  }
+  FunctionInfo* info = &function->info.function;
+  return info->template_origin != NULL ||
+         (info->symbol != NULL && info->symbol->flags.is_template) ||
+         TypeContainsTemplateParameter(function) ||
+         ClassBelongsToTemplate(info->cxx_member_owner, depth);
+}
+
+bool SemanticAnalyzingNonTemplateCode(void) {
+  return compiler->template_instantiation_depth == 0 &&
+         !FunctionBelongsToTemplate(compiler->current_function, 0) &&
+         !ClassBelongsToTemplate(compiler->current_class_access_context, 0);
+}
+
+bool SemanticRejectIncompleteObjectType(ASTNode* node, TypeRecord* type,
+                                        const char* format) {
+  if (!SemanticAnalyzingNonTemplateCode()) {
+    return false;
+  }
+  TypeRecord* incomplete = TypeIncompleteObjectClass(type, false);
+  if (incomplete == NULL) {
+    return false;
+  }
+  String name = {0};
+  TypeRecordToString(incomplete, &name);
+  SemanticError(node, format, name.value);
+  StringDestruct(&name);
+  return true;
+}
+
 // Fold an integer-to-integer constant conversion to type `to`.  The stored
 // 64-bit value is reduced to the destination width (a no-op when widening) and
 // then re-extended: sign-extended for a signed destination, zero-extended for

@@ -5859,6 +5859,49 @@ static void CheckUnusedGlobalVariables(void) {
   }
 }
 
+// A C tentative definition may name a structure completed later in the
+// translation unit, but it must be complete by the end (C11 6.9.2p3).
+static void CheckIncompleteTentativeDefinitions(void) {
+  if (CompilerIsCXX()) {
+    return;
+  }
+  Vector reported;
+  VectorInit(&reported);
+  for (size_t i = 0; i < compiler->declaration_asts.length; i++) {
+    ASTNode* node = compiler->declaration_asts.value.p[i];
+    if (node == NULL || node->op != AST_OP(decl_list)) {
+      continue;
+    }
+    DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
+    for (size_t j = 0; j < decls->declarations->length; j++) {
+      VariableDeclarationASTNode* decl =
+          (VariableDeclarationASTNode*)decls->declarations->value.p[j];
+      Symbol* sym = decl->symbol;
+      if (sym == NULL || !sym->flags.is_tentative_decl ||
+          decl->initializer != NULL || StorageIs(sym->storage, STO(typedef))) {
+        continue;
+      }
+      TypeRecord* incomplete = TypeIncompleteObjectClass(sym->type, false);
+      bool already_reported = false;
+      for (size_t k = 0; k < reported.length; k++) {
+        already_reported |= reported.value.p[k] == sym;
+      }
+      if (incomplete == NULL || already_reported) {
+        continue;
+      }
+      VectorAppend(&reported, sym);
+      String name = {0};
+      TypeRecordToString(incomplete, &name);
+      SemanticError((ASTNode*)decl,
+                    "Tentative definition has type '%s' that is never "
+                    "completed",
+                    name.value);
+      StringDestruct(&name);
+    }
+  }
+  VectorDestruct(&reported);
+}
+
 static void ParseCurrentTranslationUnit(Compiler* compiler) {
   LexNextToken(&compiler->lex);
   while (!LexEof(&compiler->lex)) {
@@ -5877,6 +5920,7 @@ bool CompileFrontEndOnly(Compiler* compiler) {
   CheckUnusedStaticFunctions();
   CheckUnusedGlobalVariables();
   CheckUnusedPrivateFields();
+  CheckIncompleteTentativeDefinitions();
   return NumErrors() == 0;
 }
 
@@ -5884,6 +5928,7 @@ static String* CompileAfterParse(Compiler* compiler, Vector* options) {
   CheckUnusedStaticFunctions();
   CheckUnusedGlobalVariables();
   CheckUnusedPrivateFields();
+  CheckIncompleteTentativeDefinitions();
 
   if (compiler->print_front_end) {
     HashTablePrintStats(&compiler->global_symbol_table, compiler->ast_output_file);

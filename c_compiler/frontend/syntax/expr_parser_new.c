@@ -1620,6 +1620,8 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
                     ? allocated_type->info.struct_info->tag_name->value
                     : "<anonymous>");
   }
+  SyntaxRejectIncompleteObjectType(syntax, allocated_type, false,
+                                   "Allocation of incomplete type '%s'");
 
   ASTNode* scalar_initializer = NULL;
   // The braced list that initializes a class aggregate in place.

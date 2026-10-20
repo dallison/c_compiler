@@ -528,6 +528,9 @@ struct Struct {
   // (for example its own base naming a member typedef) must read the pattern
   // instead of treating the empty shell as the member type.
   bool instantiation_in_progress;  // @wire - (recomputed)
+  // True while the member list of a parsed class definition is being parsed:
+  // the class is incomplete as a data member or base class type there.
+  bool being_defined;                 // @wire - (recomputed)
   bool resolving_in_progress_member;  // @wire - (recomputed)
   // True while this specialization's layout omits a data member or base whose
   // class type was incomplete at instantiation; it is laid out again once that

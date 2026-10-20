@@ -2768,6 +2768,23 @@ bool TypeIsCompleteClass(TypeRecord* type) {
   return tag == NULL || !tag->flags.is_forward_declared;
 }
 
+TypeRecord* TypeIncompleteObjectClass(TypeRecord* type,
+                                      bool open_class_is_incomplete) {
+  while (type != NULL && TypeIsArray(type)) {
+    type = type->next;
+  }
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->is_template ||
+      TypeContainsTemplateParameter(type)) {
+    return NULL;
+  }
+  if (!TypeIsCompleteClass(type) ||
+      (open_class_is_incomplete && type->info.struct_info->being_defined)) {
+    return type;
+  }
+  return NULL;
+}
+
 static int CompareStructMember(const void* a, const void* b) {
   const MapKeyValue* key1 = (const MapKeyValue*)a;
   const MapKeyValue* key2 = (const MapKeyValue*)b;
@@ -2819,6 +2836,7 @@ Struct* NewStruct(bool is_union) {
   s->cxx_special_members_complete = false;
   s->vtables_registered = false;
   s->instantiation_in_progress = false;
+  s->being_defined = false;
   s->resolving_in_progress_member = false;
   s->layout_pending_completion = false;
   s->template_parameter_count = 0;

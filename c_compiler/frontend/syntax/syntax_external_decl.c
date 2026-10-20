@@ -873,6 +873,13 @@ void CheckDeclaredObjectType(Syntax* syntax, Symbol* sym) {
       StorageIs(sym->storage, STO(extern)) &&
       !LexLookingAt(syntax->lex, TOK(equal)) &&
       !LexLookingAt(syntax->lex, TOK(lbrace));
+  bool has_initializer = LexLookingAt(syntax->lex, TOK(equal)) ||
+                         LexLookingAt(syntax->lex, TOK(lbrace)) ||
+                         LexLookingAt(syntax->lex, TOK(lparen));
+  // A C file-scope declaration without an initializer is a tentative
+  // definition, whose type may be completed later in the translation unit.
+  bool tentative = !CompilerIsCXX() && !has_initializer &&
+                   syntax->context != kParsingBlockScope;
   if (declares_object && !syntax->parsing_template_declaration &&
       TypeIsClassTemplateObject(sym->type) &&
       !extern_incomplete_declaration) {
@@ -880,6 +887,10 @@ void CheckDeclaredObjectType(Syntax* syntax, Symbol* sym) {
                 "Cannot declare an object of class template '%s'; no "
                 "specialization was instantiated",
                 ClassTemplateObjectName(sym->type));
+  } else if (declares_object && !TypeIsFunction(sym->type) && !tentative &&
+             (!StorageIs(sym->storage, STO(extern)) || has_initializer)) {
+    SyntaxRejectIncompleteObjectType(syntax, sym->type, false,
+                                     "Variable has incomplete type '%s'");
   }
 }
 

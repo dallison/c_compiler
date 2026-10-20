@@ -45,6 +45,17 @@ void TypeRelayoutStructsAfterClassCompletion(void);
 void TypeMaterializePendingMemberReturnType(struct Syntax* syntax,
                                             TypeRecord* function);
 void StructAddSyntheticMember(Struct* str, StructMember* member);
+// Reports `format` (given the class's name) and returns true when an object
+// of `type` has incomplete class type (see TypeIncompleteObjectClass).  Not
+// checked inside templates: a class template is instantiated whenever its
+// template-id is named, so completeness there is not decided where the
+// standard decides it.
+bool SyntaxRejectIncompleteObjectType(struct Syntax* syntax, TypeRecord* type,
+                                      bool open_class_is_incomplete,
+                                      const char* format);
+// A function definition needs complete parameter and result types.
+void SyntaxRejectIncompleteFunctionDefinitionTypes(struct Syntax* syntax,
+                                                   TypeRecord* func);
 
 void LayoutCXXBaseSpecifiers(Struct* str);
 void CollectCXXVirtualBases(Struct* str);

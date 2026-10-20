@@ -234,6 +234,13 @@ void ParseCXXBaseSpecifiers(TypeParser* parser, Vector* bases,
       TypeRecordDelete(base_type);
       continue;
     }
+    if (!is_template_parameter_base && !allow_dependent_pack_base &&
+        SyntaxRejectIncompleteObjectType(parser->syntax, base_type, true,
+                                         "Base class has incomplete type "
+                                         "'%s'")) {
+      TypeRecordDelete(base_type);
+      continue;
+    }
     if (!is_template_parameter_base && base_struct != NULL &&
         base_struct->is_final) {
       const char* base_name =

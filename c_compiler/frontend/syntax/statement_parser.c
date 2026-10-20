@@ -17,6 +17,7 @@
 #include "errors.h"
 #include "std_header_suggestion.h"
 #include "type.h"
+#include "type_class_internal.h"
 #include "type_inheritance.h"
 #include "type_template.h"
 
@@ -2295,6 +2296,20 @@ static Symbol* ParseCatchDeclaration(Syntax* syntax, TokenClass followers) {
   }
   symbol->flags.is_local = true;
   symbol->flags.is_defined = true;
+  // [except.handle]/1: no incomplete type, nor a pointer or reference to one.
+  TypeRecord* caught = symbol->type;
+  if (caught != NULL && TypeIsReference(caught)) {
+    SyntaxRejectIncompleteObjectType(
+        syntax, caught->next, false,
+        "cannot catch reference to incomplete type '%s'");
+  } else if (caught != NULL && TypeIsPointer(caught)) {
+    SyntaxRejectIncompleteObjectType(
+        syntax, caught->next, false,
+        "cannot catch pointer to incomplete type '%s'");
+  } else {
+    SyntaxRejectIncompleteObjectType(syntax, caught, false,
+                                     "cannot catch incomplete type '%s'");
+  }
   return symbol;
 }
 

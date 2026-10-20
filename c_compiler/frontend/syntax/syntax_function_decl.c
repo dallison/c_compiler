@@ -401,6 +401,7 @@ static ASTNode* DefineFunctionWithBody(Syntax* syntax, Vector* declarations,
                   "old-style function definition");
   }
   InheritDeclarationIntoDefinition(syntax, sym, old_sym);
+  SyntaxRejectIncompleteFunctionDefinitionTypes(syntax, sym->type);
   ParserContext old_context = syntax->context;
   syntax->context = kParsingBlockScope;
   // `void ns::f() { ... }` is lexically outside `ns`, but unqualified lookup

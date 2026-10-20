@@ -846,6 +846,12 @@ static StructMember* LookupStructMemberForReference(
       StringDestruct(&concrete_name);
     }
   }
+  if (member == NULL && struct_info->tag_symbol != NULL &&
+      SemanticRejectIncompleteObjectType(
+          (ASTNode*)node, struct_info->tag_symbol->type,
+          "member access into incomplete type '%s'")) {
+    return NULL;
+  }
   if (member == NULL) {
     const char* suggestion =
         TypoCorrectionFindMemberName(struct_info, member_name->value);
@@ -1188,10 +1194,15 @@ void AnalyzeSizeofExpression(SizeofASTNode* node) {
     ASTNodeSetType((ASTNode*)node, NewSizeTypeRecord());
     return;
   }
+  const char* incomplete_format =
+      is_alignof ? "invalid application of 'alignof' to an incomplete type '%s'"
+                 : "invalid application of 'sizeof' to an incomplete type '%s'";
   if (node->expr != NULL) {
     node->expr = AnalyzeExpression(node->expr);
     TypeRecord* operand_type = SizeofOperandType(node->expr->type);
     DiagnoseSizeofFunctionType(node, operand_type, is_alignof);
+    SemanticRejectIncompleteObjectType((ASTNode*)node, operand_type,
+                                       incomplete_format);
     if (TypeIsVLA(operand_type)) {
       // sizeof(vla) is calculated at runtime.
     } else {
@@ -1204,6 +1215,8 @@ void AnalyzeSizeofExpression(SizeofASTNode* node) {
     // concrete (e.g. after template instantiation): re-measure now.
     TypeRecord* operand_type = SizeofOperandType(node->type_operand);
     DiagnoseSizeofFunctionType(node, operand_type, is_alignof);
+    SemanticRejectIncompleteObjectType((ASTNode*)node, operand_type,
+                                       incomplete_format);
     TypeRecordCalculateSize(operand_type);
     node->base.value.ivalue =
         is_alignof ? TypeRecordAlignment(operand_type) : operand_type->size;

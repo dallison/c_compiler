@@ -149,6 +149,16 @@ void AnalyzeThrowExpression(ThrowASTNode* node) {
     }
     if (TypeIsVoid(node->expr->type) || TypeIsFunction(node->expr->type)) {
       SemanticError(node->expr, "Cannot throw expression of this type");
+    } else if (TypeIsPointer(node->expr->type)) {
+      SemanticRejectIncompleteObjectType(
+          node->expr, node->expr->type->next,
+          "cannot throw pointer to object of incomplete type '%s'");
+    } else if (SemanticRejectIncompleteObjectType(
+                   node->expr, node->expr->type,
+                   "cannot throw object of incomplete type '%s'")) {
+      ASTNodeSetType((ASTNode*)node,
+                     NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+      return;
     }
     EnsureThrowCopyConstructor(node);
   }

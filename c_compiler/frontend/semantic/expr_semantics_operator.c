@@ -1886,6 +1886,17 @@ static TypeRecord* PointerArithmeticResultType(TypeRecord* pointer_type) {
   return plain;
 }
 
+// Pointer arithmetic scales by the pointee's size, which an incomplete class
+// does not have.
+static void RejectIncompletePointeeArithmetic(ASTNode* node,
+                                              TypeRecord* operand_type) {
+  if (TypeIsPointer(operand_type)) {
+    SemanticRejectIncompleteObjectType(
+        node, operand_type->next,
+        "arithmetic on a pointer to an incomplete type '%s'");
+  }
+}
+
 // True if `node` is the multiply-by-element-size node that pointer arithmetic
 // inserts, so a re-analyzed `p + n` does not scale `n` twice.  A pointer
 // *difference* is also a ptr_scale node, but a dividing one, and it is an
@@ -1923,6 +1934,7 @@ ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
       return &node->base;
     }
     if (TypeIsIntegral(node->right->type)) {
+      RejectIncompletePointeeArithmetic((ASTNode*)node, node->left->type);
       // Scale right side by size of left.
       // If the right node is a constant we can do the multiplication now.
       if (ASTNodeIsIntConstant(node->right)) {
@@ -1948,6 +1960,7 @@ ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
       return &node->base;
     }
     if (TypeIsIntegral(node->left->type)) {
+      RejectIncompletePointeeArithmetic((ASTNode*)node, node->right->type);
       // Scale left side by size of right.
       if (ASTNodeIsIntConstant(node->left)) {
          int64_t size = node->right->type->next->size;
@@ -1981,6 +1994,7 @@ ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
   }
   AnalyzeBinaryExpression(node);
   if (TypeIsPointerOrArray(node->left->type)) {
+    RejectIncompletePointeeArithmetic((ASTNode*)node, node->left->type);
     if (TypeIsIntegral(node->right->type)) {
       ASTNodeSetType((ASTNode*)node,
                      PointerArithmeticResultType(node->left->type));
@@ -3452,6 +3466,7 @@ static void AnalyzeAssignmentExpressionPhaseCompoundAssignmentOps(
           SemanticError((ASTNode*)node,
                         "Cannot add or subtract non-integers from pointers");
         }
+        RejectIncompletePointeeArithmetic((ASTNode*)node, node->left->type);
         ASTNode* scale = NewPtrScaleASTNode(node->left->type->next,
                                             AST_OP(mult),
                                             node->right,
@@ -3561,6 +3576,7 @@ ASTNode* AnalyzeIncDec(UnaryASTNode* node) {
   }
   // NOTE: the scaling by the size of the pointer is handled by code
   // generation, not here.
+  RejectIncompletePointeeArithmetic((ASTNode*)node, node->sub->type);
 
   // Here we mark the sub node as needing the address, not value.
   node->sub->flags |= kASTNeedAddress;
