@@ -1046,7 +1046,7 @@ static bool IsDestructorCall(ASTNode* expr) {
   }
   if (call->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)call->left;
-    return id->symbol != NULL && id->symbol->type != NULL &&
+    return id->symbol != NULL && TypeIsFunction(id->symbol->type) &&
            id->symbol->type->info.function.is_destructor;
   }
   if (call->left->op != AST_OP(dot) && call->left->op != AST_OP(arrow)) {

@@ -735,12 +735,13 @@ static void AddCXXMemberUsingFunction(TypeParser* parser, Struct* owner,
       MapFindPointerKey(&owner->symbol_table, &member->symbol->name);
   if (existing != NULL) {
     TypeRecord* imported_type = member->symbol->type;
-    if (imported_type != NULL && imported_type->info.function.is_constructor) {
+    if (TypeIsFunction(imported_type) &&
+        imported_type->info.function.is_constructor) {
       for (StructMember* candidate = existing; candidate != NULL;
            candidate = candidate->overload_next) {
         TypeRecord* candidate_type =
             candidate->symbol != NULL ? candidate->symbol->type : NULL;
-        if (candidate_type != NULL &&
+        if (TypeIsFunction(candidate_type) &&
             candidate_type->info.function.is_constructor &&
             CXXMemberExplicitParameterListsEqual(candidate, member)) {
           // A constructor already declared by the derived class hides an

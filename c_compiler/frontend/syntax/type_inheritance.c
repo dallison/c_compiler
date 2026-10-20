@@ -1153,7 +1153,7 @@ static StructMember* FindCXXBaseVirtualOverride(Syntax* syntax, Struct* str,
 
 int CXXBaseOffsetForMember(Struct* str, StructMember* member) {
   if (str == NULL || member == NULL || member->symbol == NULL ||
-      member->symbol->type == NULL ||
+      !TypeIsFunction(member->symbol->type) ||
       member->symbol->type->info.function.cxx_member_owner == NULL) {
     return 0;
   }

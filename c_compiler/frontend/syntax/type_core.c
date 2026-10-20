@@ -15,6 +15,10 @@
 #include <stddef.h>
 
 #include <assert.h>
+#if TYPE_RECORD_GUARD_PAGES
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 #include "ast.h"
 #include "compiler.h"
 #include "concepts.h"
@@ -214,6 +218,22 @@ static TypeRecord** TypeArenaFreeList(bool full) {
   return full ? &free_full_type_records : &free_short_type_records;
 }
 
+#if TYPE_RECORD_GUARD_PAGES
+// A zeroed slot that ends where an inaccessible page begins, so reading or
+// writing FunctionInfo past a short record's end faults at that access.  Costs
+// two pages per record; for finding such accesses, not for normal builds.
+static TypeRecord* TypeArenaAllocGuarded(size_t bytes) {
+  size_t page = (size_t)getpagesize();
+  size_t data = (bytes + page - 1) / page * page;
+  char* base = mmap(NULL, data + page, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (base == MAP_FAILED || mprotect(base + data, page, PROT_NONE) != 0) {
+    abort();
+  }
+  return (TypeRecord*)(base + data - bytes);
+}
+#endif
+
 // Returns a zeroed slot of `bytes` (TYPE_RECORD_FULL_SIZE or
 // TYPE_RECORD_NON_FUNCTION_SIZE), reusing a released one when available.
 static TypeRecord* TypeArenaAllocSized(size_t bytes) {
@@ -231,6 +251,13 @@ static TypeRecord* TypeArenaAllocSized(size_t bytes) {
     slot->full_slot = full;
     return slot;
   }
+#if TYPE_RECORD_GUARD_PAGES
+  if (!full) {
+    TypeRecord* p = TypeArenaAllocGuarded(bytes);
+    p->full_slot = false;
+    return p;
+  }
+#endif
   if (type_arena == NULL ||
       type_arena->used + TYPE_RECORD_FULL_SIZE > type_arena->capacity) {
     TypeArenaBlock* block = NewTypeArenaBlock(TYPE_ARENA_BLOCK_SIZE);
@@ -246,7 +273,7 @@ static TypeRecord* TypeArenaAllocSized(size_t bytes) {
   return p;
 }
 
-#if TYPE_ARENA_CHECKS
+#if TYPE_ARENA_CHECKS && !TYPE_RECORD_GUARD_PAGES
 static bool TypeArenaContains(const TypeRecord* record) {
   for (TypeArenaBlock* block = type_arena; block != NULL; block = block->next) {
     if ((const char*)record >= block->data &&
@@ -263,7 +290,7 @@ static bool TypeArenaContains(const TypeRecord* record) {
 // reference-count updates abort.
 static void TypeArenaRelease(TypeRecord* record) {
   bool full = record->full_slot;
-#if TYPE_ARENA_CHECKS
+#if TYPE_ARENA_CHECKS && !TYPE_RECORD_GUARD_PAGES
   if (!TypeArenaContains(record)) {
     abort();
   }

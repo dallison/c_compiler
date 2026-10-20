@@ -9,8 +9,10 @@
 #define type_defs_h
 
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "symbol.h"
 #include "vector.h"
@@ -690,10 +692,25 @@ static inline void SetQualifiers(TypeRecord* record, Qualifiers qualifiers) {
   record->qualifiers_ = qualifiers;
 }
 
+// Build with -DTYPE_RECORD_GUARD_PAGES=1 to place each record without room
+// for FunctionInfo against an inaccessible page (see TypeArenaAllocGuarded).
+#ifndef TYPE_RECORD_GUARD_PAGES
+#define TYPE_RECORD_GUARD_PAGES 0
+#endif
+
 // A by-value copy for local, read-only views.  The copy is not shared even
 // when `record` is, so its qualifiers may be changed.
 static inline TypeRecord TypeRecordValue(const TypeRecord* record) {
+#if TYPE_RECORD_GUARD_PAGES
+  TypeRecord value;
+  memset(&value, 0, sizeof(value));
+  memcpy(&value, record,
+         record->full_slot || record->declarator == kDeclFunction
+             ? sizeof(value)
+             : offsetof(TypeRecord, info) + sizeof(ArrayInfo));
+#else
   TypeRecord value = *record;
+#endif
   value.shared_immutable = 0;
   return value;
 }
