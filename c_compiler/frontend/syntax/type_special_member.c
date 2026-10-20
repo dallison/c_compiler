@@ -2421,6 +2421,46 @@ static bool CXXStructMoveSpecialMemberInaccessible(Struct* str,
 static TypeRecord* CXXFindSpecialMemberFunction(Struct* str,
                                                 CXXSpecialMemberKind kind);
 
+// What queries read from a class's special member of one kind.
+typedef struct {
+  bool found;
+  bool is_user_declared;
+  bool is_user_provided;
+  bool is_defaulted;
+  bool is_deleted;
+  bool is_noexcept;
+  bool is_trivial;
+} CXXSpecialMemberInfo;
+
+static CXXSpecialMemberInfo CXXFindSpecialMember(Struct* str,
+                                                 CXXSpecialMemberKind kind) {
+  CXXSpecialMemberInfo info = {0};
+  TypeRecord* func = CXXFindSpecialMemberFunction(str, kind);
+  if (func != NULL) {
+    info.found = true;
+    info.is_user_declared = func->info.function.is_user_declared;
+    info.is_user_provided = func->info.function.is_user_provided;
+    info.is_defaulted = func->info.function.is_defaulted;
+    info.is_deleted = func->info.function.is_deleted;
+    info.is_noexcept = func->info.function.is_noexcept;
+    info.is_trivial = func->info.function.is_trivial_special_member;
+  }
+  return info;
+}
+
+// A class without a move operation copies instead.
+static CXXSpecialMemberInfo CXXFindSpecialMemberOrCopy(
+    Struct* str, CXXSpecialMemberKind kind) {
+  CXXSpecialMemberInfo info = CXXFindSpecialMember(str, kind);
+  if (!info.found && kind == kCXXSpecialMemberMoveConstructor) {
+    return CXXFindSpecialMember(str, kCXXSpecialMemberCopyConstructor);
+  }
+  if (!info.found && kind == kCXXSpecialMemberMoveAssignment) {
+    return CXXFindSpecialMember(str, kCXXSpecialMemberCopyAssignment);
+  }
+  return info;
+}
+
 // [dcl.fct.def.default]: user-provided means user-declared and not explicitly
 // defaulted or deleted on its first declaration.  `T();` qualifies even when
 // the body is defined out of line.
@@ -2432,12 +2472,10 @@ static bool CXXClassHasUserProvidedDefaultConstructor(TypeRecord* type) {
       type->info.struct_info == NULL) {
     return false;
   }
-  TypeRecord* ctor = CXXFindSpecialMemberFunction(
+  CXXSpecialMemberInfo ctor = CXXFindSpecialMember(
       type->info.struct_info, kCXXSpecialMemberDefaultConstructor);
-  return ctor != NULL && TypeIsFunction(ctor) &&
-         ctor->info.function.is_user_declared &&
-         !ctor->info.function.is_defaulted &&
-         !ctor->info.function.is_deleted;
+  return ctor.found && ctor.is_user_declared && !ctor.is_defaulted &&
+         !ctor.is_deleted;
 }
 
 static bool CXXTypeNeedsDefaultInitializer(TypeRecord* type) {
@@ -2619,17 +2657,9 @@ static bool CXXTypeSpecialMemberIsNoexcept(TypeRecord* type,
   if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
     return true;
   }
-  TypeRecord* func =
-      CXXFindSpecialMemberFunction(type->info.struct_info, kind);
-  if (func == NULL && kind == kCXXSpecialMemberMoveConstructor) {
-    func = CXXFindSpecialMemberFunction(type->info.struct_info,
-                                        kCXXSpecialMemberCopyConstructor);
-  } else if (func == NULL && kind == kCXXSpecialMemberMoveAssignment) {
-    func = CXXFindSpecialMemberFunction(type->info.struct_info,
-                                        kCXXSpecialMemberCopyAssignment);
-  }
-  return func != NULL && !func->info.function.is_deleted &&
-         func->info.function.is_noexcept;
+  CXXSpecialMemberInfo func =
+      CXXFindSpecialMemberOrCopy(type->info.struct_info, kind);
+  return func.found && !func.is_deleted && func.is_noexcept;
 }
 
 static bool CXXImplicitSpecialMemberIsNoexcept(Struct* str,
@@ -2688,24 +2718,16 @@ bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type,
   if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
     return true;
   }
-  TypeRecord* func =
-      CXXFindSpecialMemberFunction(type->info.struct_info, kind);
-  if (func == NULL && kind == kCXXSpecialMemberMoveConstructor) {
-    func = CXXFindSpecialMemberFunction(type->info.struct_info,
-                                        kCXXSpecialMemberCopyConstructor);
-  } else if (func == NULL && kind == kCXXSpecialMemberMoveAssignment) {
-    func = CXXFindSpecialMemberFunction(type->info.struct_info,
-                                        kCXXSpecialMemberCopyAssignment);
-  }
-  if (func == NULL) {
+  CXXSpecialMemberInfo func =
+      CXXFindSpecialMemberOrCopy(type->info.struct_info, kind);
+  if (!func.found) {
     // Unnamed / invented class types skip special-member synthesis, so there
     // is no function to consult.  A struct of trivial members (e.g. the
     // anonymous `struct { void*; size_t; }` inside Abseil's TypeErasedState)
     // is still trivially copyable and assignable.
     return CXXImplicitSpecialMemberIsTrivial(type->info.struct_info, kind);
   }
-  return !func->info.function.is_deleted &&
-         func->info.function.is_trivial_special_member;
+  return !func.is_deleted && func.is_trivial;
 }
 
 bool CXXTypeSpecialMemberIsDeleted(TypeRecord* type,
@@ -2719,19 +2741,12 @@ bool CXXTypeSpecialMemberIsDeleted(TypeRecord* type,
   if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
     return false;
   }
-  TypeRecord* func =
-      CXXFindSpecialMemberFunction(type->info.struct_info, kind);
-  if (func == NULL && kind == kCXXSpecialMemberMoveConstructor) {
-    func = CXXFindSpecialMemberFunction(type->info.struct_info,
-                                        kCXXSpecialMemberCopyConstructor);
-  } else if (func == NULL && kind == kCXXSpecialMemberMoveAssignment) {
-    func = CXXFindSpecialMemberFunction(type->info.struct_info,
-                                        kCXXSpecialMemberCopyAssignment);
-  }
-  return (func != NULL && func->info.function.is_deleted) ||
+  CXXSpecialMemberInfo func =
+      CXXFindSpecialMemberOrCopy(type->info.struct_info, kind);
+  return (func.found && func.is_deleted) ||
          (type->info.struct_info->is_union &&
-          CXXUnionDefaultedSpecialMemberIsDeleted(
-              type->info.struct_info, kind));
+          CXXUnionDefaultedSpecialMemberIsDeleted(type->info.struct_info,
+                                                  kind));
 }
 
 bool CXXTypeIsImplicitLifetimeAggregate(TypeRecord* type) {
@@ -2748,9 +2763,9 @@ bool CXXTypeIsImplicitLifetimeAggregate(TypeRecord* type) {
     return false;
   }
   Struct* str = type->info.struct_info;
-  TypeRecord* dtor =
-      CXXFindSpecialMemberFunction(str, kCXXSpecialMemberDestructor);
-  if (dtor == NULL || !dtor->info.function.is_user_provided) {
+  CXXSpecialMemberInfo dtor =
+      CXXFindSpecialMember(str, kCXXSpecialMemberDestructor);
+  if (!dtor.found || !dtor.is_user_provided) {
     return true;
   }
   static const CXXSpecialMemberKind constructors[] = {
@@ -2815,10 +2830,9 @@ bool CXXTypeIsTriviallyCopyable(TypeRecord* type) {
     return false;
   }
 
-  TypeRecord* destructor =
-      CXXFindSpecialMemberFunction(str, kCXXSpecialMemberDestructor);
-  if (destructor == NULL || destructor->info.function.is_deleted ||
-      !destructor->info.function.is_trivial_special_member) {
+  CXXSpecialMemberInfo destructor =
+      CXXFindSpecialMember(str, kCXXSpecialMemberDestructor);
+  if (!destructor.found || destructor.is_deleted || !destructor.is_trivial) {
     return false;
   }
 
@@ -3006,12 +3020,12 @@ static bool CXXUnionDefaultInitializedMemberHasUnusableDestructor(
       }
       continue;
     }
-    TypeRecord* dtor = CXXFindSpecialMemberFunction(
+    CXXSpecialMemberInfo dtor = CXXFindSpecialMember(
         type->info.struct_info, kCXXSpecialMemberDestructor);
-    if ((dtor != NULL && dtor->info.function.is_deleted) ||
-        !CXXSubobjectSpecialMemberAccessible(
-            type->info.struct_info, kCXXSpecialMemberDestructor, str,
-            /*subobj_is_base=*/false)) {
+    if ((dtor.found && dtor.is_deleted) ||
+        !CXXSubobjectSpecialMemberAccessible(type->info.struct_info,
+                                             kCXXSpecialMemberDestructor, str,
+                                             /*subobj_is_base=*/false)) {
       return true;
     }
   }
@@ -3019,10 +3033,9 @@ static bool CXXUnionDefaultInitializedMemberHasUnusableDestructor(
 }
 
 static bool CXXUnionSelectedDefaultConstructorIsUnusable(Struct* str) {
-  TypeRecord* ctor = CXXFindSpecialMemberFunction(
-      str, kCXXSpecialMemberDefaultConstructor);
-  if (ctor == NULL || ctor->info.function.is_deleted ||
-      ctor->info.function.is_user_provided) {
+  CXXSpecialMemberInfo ctor =
+      CXXFindSpecialMember(str, kCXXSpecialMemberDefaultConstructor);
+  if (!ctor.found || ctor.is_deleted || ctor.is_user_provided) {
     return true;
   }
   return false;
