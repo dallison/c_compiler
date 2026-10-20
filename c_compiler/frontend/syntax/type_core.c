@@ -636,18 +636,147 @@ void TypeRecordSetStructInfo(TypeRecord* record, Struct* str) {
 
 const TypeDependentInfo kNoTypeDependentInfo = {0};
 
+#ifndef NDEBUG
+static uint64_t FingerprintMix(uint64_t hash, uint64_t value) {
+  return (hash ^ value) * 0x100000001b3ULL;
+}
+
+static uint64_t FingerprintString(uint64_t hash, const String* string) {
+  hash = FingerprintMix(hash, (uintptr_t)string);
+  if (string != NULL) {
+    for (size_t i = 0; i < string->length; i++) {
+      hash = FingerprintMix(hash, (unsigned char)string->value[i]);
+    }
+  }
+  return hash;
+}
+
+static uint64_t FingerprintArgument(uint64_t hash,
+                                    const TemplateArgument* arg) {
+  hash = FingerprintMix(hash, (uintptr_t)arg);
+  if (arg != NULL) {
+    hash = FingerprintMix(hash, arg->kind);
+    hash = FingerprintMix(hash, (uint64_t)arg->template_parameter_index);
+    hash = FingerprintMix(hash, (uintptr_t)arg->type);
+    hash = FingerprintMix(hash, (uint64_t)arg->int_value);
+    hash = FingerprintMix(hash, (uintptr_t)arg->pack_arguments);
+    hash = FingerprintMix(hash, (uintptr_t)arg->dependent_expr);
+  }
+  return hash;
+}
+
+static uint64_t TypeDependentInfoFingerprint(const TypeDependentInfo* info) {
+  uint64_t hash = 0xcbf29ce484222325ULL;
+  hash = FingerprintString(hash, info->template_parameter_name);
+  hash = FingerprintString(hash, info->dependent_member_name);
+  const Vector* lists = info->dependent_member_template_arguments;
+  hash = FingerprintMix(hash, (uintptr_t)lists);
+  for (size_t i = 0; lists != NULL && i < lists->length; i++) {
+    const Vector* args = lists->value.p[i];
+    hash = FingerprintMix(hash, (uintptr_t)args);
+    for (size_t j = 0; args != NULL && j < args->length; j++) {
+      hash = FingerprintArgument(hash, args->value.p[j]);
+    }
+  }
+  hash = FingerprintMix(hash, (uintptr_t)info->dependent_decltype_expr);
+  hash = FingerprintMix(hash, (uintptr_t)info->pack_index_expr);
+  hash = FingerprintArgument(hash, info->pack_index_pack);
+  hash = FingerprintMix(hash, (uintptr_t)info->dependent_splice_expr);
+  return hash;
+}
+#endif
+
+static void TypeDependentInfoCheckShared(const TypeDependentInfo* info) {
+#ifndef NDEBUG
+  assert(info->refs > 1);
+  assert(info->shared_fingerprint == TypeDependentInfoFingerprint(info) &&
+         "shared TypeDependentInfo modified without TypeMutableDependent");
+#else
+  (void)info;
+#endif
+}
+
+static TypeDependentInfo* TypeDependentInfoShare(TypeDependentInfo* info) {
+  if (info != NULL) {
+#ifndef NDEBUG
+    if (info->refs == 1) {
+      info->shared_fingerprint = TypeDependentInfoFingerprint(info);
+    } else {
+      TypeDependentInfoCheckShared(info);
+    }
+#endif
+    info->refs++;
+  }
+  return info;
+}
+
+static TypeDependentInfo* NewTypeDependentInfo(TypeRecord* owner) {
+  TypeDependentInfo* info = calloc(1, sizeof(TypeDependentInfo));
+  info->refs = 1;
+#ifndef NDEBUG
+  info->owner = owner;
+#else
+  (void)owner;
+#endif
+  return info;
+}
+
+static TypeDependentInfo* TypeDependentInfoClone(const TypeDependentInfo* from,
+                                                 TypeRecord* owner) {
+  TypeDependentInfo* to = NewTypeDependentInfo(owner);
+  to->template_parameter_name =
+      from->template_parameter_name != NULL
+          ? NewString(from->template_parameter_name->value)
+          : NULL;
+  to->dependent_member_name =
+      from->dependent_member_name != NULL
+          ? NewString(from->dependent_member_name->value)
+          : NULL;
+  to->dependent_member_template_arguments =
+      TemplateArgumentVectorListCopy(from->dependent_member_template_arguments);
+  to->dependent_decltype_expr = from->dependent_decltype_expr;
+  to->pack_index_expr =
+      ASTNodeClone(from->pack_index_expr, IdentityCloneNode, NULL, NULL);
+  to->pack_index_pack = TemplateArgumentCopy(from->pack_index_pack);
+  to->dependent_splice_expr =
+      ASTNodeClone(from->dependent_splice_expr, IdentityCloneNode, NULL, NULL);
+  return to;
+}
+
+static void TypeDependentInfoRelease(TypeDependentInfo* info);
+
 TypeDependentInfo* TypeMutableDependent(TypeRecord* record) {
   assert(!record->shared_immutable);
-  if (record->dependent == NULL) {
-    record->dependent = calloc(1, sizeof(TypeDependentInfo));
-    record->dependent->owner = record;
+  TypeDependentInfo* info = record->dependent;
+  if (info == NULL) {
+    record->dependent = NewTypeDependentInfo(record);
+  } else if (info->refs > 1) {
+    TypeDependentInfoCheckShared(info);
+    record->dependent = TypeDependentInfoClone(info, record);
+    TypeDependentInfoRelease(info);
+  } else {
+#ifndef NDEBUG
+    if (info->owner == NULL) {
+      info->owner = record;
+    }
+    assert(info->owner == record);
+#endif
   }
-  assert(record->dependent->owner == record);
   return record->dependent;
 }
 
-static void TypeDependentInfoDelete(TypeDependentInfo* info) {
+static void TypeDependentInfoRelease(TypeDependentInfo* info) {
   if (info == NULL) {
+    return;
+  }
+  if (info->refs > 1) {
+    TypeDependentInfoCheckShared(info);
+    info->refs--;
+#ifndef NDEBUG
+    if (info->refs == 1) {
+      info->owner = NULL;
+    }
+#endif
     return;
   }
   if (info->dependent_member_template_arguments != NULL) {
@@ -774,7 +903,7 @@ void TypeRecordDeleteLastReference(TypeRecord* record) {
                                /*free_element=*/false);
       record->template_arguments = NULL;
     }
-    TypeDependentInfoDelete(record->dependent);
+    TypeDependentInfoRelease(record->dependent);
     record->dependent = NULL;
     // Delete type-specific info if refs goes to zero.
     if (TypeIsStructOrUnion(record)) {
@@ -2221,32 +2350,11 @@ TypeRecord* TypeRecordCopy(TypeRecord* record) {
   r->refs = 0;  // No refs to this yet.
   r->shared_immutable = 0;
   r->size_sync_owner = NULL;
-  r->dependent = NULL;
-  if (r->next == NULL && record->dependent == NULL &&
-      r->template_arguments == NULL && !TypeIsFunction(record) &&
-      !TypeIsStructOrUnion(record) && !TypeIsEnum(record) &&
-      !TypeIsVLA(record)) {
+  r->dependent = TypeDependentInfoShare(record->dependent);
+  if (r->next == NULL && r->template_arguments == NULL &&
+      !TypeIsFunction(record) && !TypeIsStructOrUnion(record) &&
+      !TypeIsEnum(record) && !TypeIsVLA(record)) {
     return r;
-  }
-  if (record->dependent != NULL) {
-    const TypeDependentInfo* from = record->dependent;
-    TypeDependentInfo* to = TypeMutableDependent(r);
-    to->template_parameter_name =
-        from->template_parameter_name != NULL
-            ? NewString(from->template_parameter_name->value)
-            : NULL;
-    to->dependent_member_name =
-        from->dependent_member_name != NULL
-            ? NewString(from->dependent_member_name->value)
-            : NULL;
-    to->dependent_member_template_arguments = TemplateArgumentVectorListCopy(
-        from->dependent_member_template_arguments);
-    to->dependent_decltype_expr = from->dependent_decltype_expr;
-    to->pack_index_expr =
-        ASTNodeClone(from->pack_index_expr, IdentityCloneNode, NULL, NULL);
-    to->pack_index_pack = TemplateArgumentCopy(from->pack_index_pack);
-    to->dependent_splice_expr = ASTNodeClone(from->dependent_splice_expr,
-                                             IdentityCloneNode, NULL, NULL);
   }
   if (r->next != NULL) {
     TypeRecordIncRef(r->next);  // Another ref to next.

@@ -788,10 +788,10 @@ TypeRecord* SemanticResolveDependentSpliceType(TypeRecord* type,
       type->template_parameter_index >= 0) {
     return type;
   }
-  ASTNode* splice_expr = TypeDependentOf(type)->dependent_splice_expr;
-  if (splice_expr->op != AST_OP(splice)) {
+  if (TypeDependentOf(type)->dependent_splice_expr->op != AST_OP(splice)) {
     return type;
   }
+  ASTNode* splice_expr = TypeMutableDependent(type)->dependent_splice_expr;
   SpliceASTNode* splice = (SpliceASTNode*)splice_expr;
   splice->context = kSpliceType;
   splice->reflection = AnalyzeExpression(splice->reflection);

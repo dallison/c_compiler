@@ -475,8 +475,9 @@ static ASTNode* ParseDecltypePrimary(Syntax* syntax, TokenClass followers) {
       TypeMutableDependent(dependent)->dependent_member_name =
           NewString(member_name.value);
     } else {
-      StringAppend(TypeDependentOf(dependent)->dependent_member_name, "::");
-      StringAppend(TypeDependentOf(dependent)->dependent_member_name,
+      StringAppend(TypeMutableDependent(dependent)->dependent_member_name,
+                   "::");
+      StringAppend(TypeMutableDependent(dependent)->dependent_member_name,
                    member_name.value);
     }
     Symbol* placeholder =

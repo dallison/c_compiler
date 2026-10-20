@@ -320,15 +320,17 @@ static ASTNode* BuildDependentQualifiedValueName(Syntax* syntax,
     // discarding it, so `q::num` becomes the full `W::period::num` path instead
     // of collapsing to `W::num` (which would drop the intermediate member and
     // leave the name unresolvable).
-    StringAppend(TypeDependentOf(dependent_type)->dependent_member_name, "::");
+    StringAppend(TypeMutableDependent(dependent_type)->dependent_member_name,
+                 "::");
   }
   for (size_t i = 1; i < name->components.length; i++) {
     if (i != 1) {
-      StringAppend(TypeDependentOf(dependent_type)->dependent_member_name,
+      StringAppend(TypeMutableDependent(dependent_type)->dependent_member_name,
                    "::");
     }
-    StringAppendString(TypeDependentOf(dependent_type)->dependent_member_name,
-                       name->components.value.p[i]);
+    StringAppendString(
+        TypeMutableDependent(dependent_type)->dependent_member_name,
+        name->components.value.p[i]);
   }
   if (intermediate_member_template_id &&
       TypeDependentOf(dependent_type)->dependent_member_template_arguments ==
@@ -785,9 +787,10 @@ static ASTNode* BuildDependentInjectedBaseValueName(
     dependent_type->template_arguments = TemplateArgumentVectorCopy(scope_args);
     TypeMutableDependent(dependent_type)->dependent_member_name =
         NewString(base_name->value);
-    StringAppend(TypeDependentOf(dependent_type)->dependent_member_name, "::");
-    StringAppendString(TypeDependentOf(dependent_type)->dependent_member_name,
-                       member);
+    StringAppend(TypeMutableDependent(dependent_type)->dependent_member_name,
+                 "::");
+    StringAppendString(
+        TypeMutableDependent(dependent_type)->dependent_member_name, member);
   }
   Symbol* placeholder = NewSymbol(member->value, dependent_type, STO(implicit));
   placeholder->flags.invented = true;

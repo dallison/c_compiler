@@ -1294,7 +1294,7 @@ static TypeRecord* ComposeDependentMemberPath(TypeRecord* root,
   StringInit(&path, TypeDependentOf(root)->dependent_member_name->value);
   StringAppend(&path, "::");
   StringAppend(&path, TypeDependentOf(member)->dependent_member_name->value);
-  StringDelete(TypeDependentOf(composed)->dependent_member_name);
+  StringDelete(TypeMutableDependent(composed)->dependent_member_name);
   TypeMutableDependent(composed)->dependent_member_name = NewString(path.value);
   StringDestruct(&path);
   if (TypeDependentOf(root)->dependent_member_template_arguments != NULL ||
@@ -1318,7 +1318,7 @@ static TypeRecord* ComposeDependentMemberPath(TypeRecord* root,
     if (TypeDependentOf(composed)->dependent_member_template_arguments !=
         NULL) {
       VectorDeleteWithContents(
-          TypeDependentOf(composed)->dependent_member_template_arguments,
+          TypeMutableDependent(composed)->dependent_member_template_arguments,
           (VectorElementDestructor)TemplateArgumentVectorDelete,
           /*free_element=*/false);
     }
@@ -2748,7 +2748,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
     if (partial != NULL &&
         DependentExpressionContainsTemplateParameter(partial)) {
       TypeRecord* deferred = TypeRecordCopy(type);
-      ASTNodeDelete(TypeDependentOf(deferred)->pack_index_expr);
+      ASTNodeDelete(TypeMutableDependent(deferred)->pack_index_expr);
       TypeMutableDependent(deferred)->pack_index_expr = partial;
       if (TypeDependentOf(deferred)->pack_index_pack == NULL) {
         TypeMutableDependent(deferred)->pack_index_pack =
@@ -2830,7 +2830,7 @@ static TypeRecord* SubstituteTypePackIndex(TypeParser* parser,
         args, pack_index, element);
     TypeRecord* member_pattern = TypeRecordCopy(type);
     member_pattern->is_pack_index = false;
-    ASTNodeDelete(TypeDependentOf(member_pattern)->pack_index_expr);
+    ASTNodeDelete(TypeMutableDependent(member_pattern)->pack_index_expr);
     TypeMutableDependent(member_pattern)->pack_index_expr = NULL;
     TypeRecord* member = SubstituteDependentMemberType(
         parser, member_pattern, element_args);
@@ -3996,11 +3996,10 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
       }
     }
     if (TypeDependentOf(t)->dependent_member_template_arguments != NULL) {
-      for (size_t i = 0;
-           i < TypeDependentOf(t)->dependent_member_template_arguments->length;
-           i++) {
-        Vector* component =
-            TypeDependentOf(t)->dependent_member_template_arguments->value.p[i];
+      Vector* lists =
+          TypeMutableDependent(t)->dependent_member_template_arguments;
+      for (size_t i = 0; i < lists->length; i++) {
+        Vector* component = lists->value.p[i];
         if (component == NULL) {
           continue;
         }
@@ -4024,8 +4023,9 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
               TypeDependentOf(t)->dependent_decltype_expr, base);
     }
     if (TypeDependentOf(t)->pack_index_expr != NULL) {
-      ASTNode* old_index = TypeDependentOf(t)->pack_index_expr;
-      TypeMutableDependent(t)->pack_index_expr =
+      TypeDependentInfo* dependent = TypeMutableDependent(t);
+      ASTNode* old_index = dependent->pack_index_expr;
+      dependent->pack_index_expr =
           CloneAndRebaseDependentExpression(old_index, base);
       ASTNodeDelete(old_index);
     }
@@ -4076,11 +4076,10 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
       }
     }
     if (TypeDependentOf(t)->dependent_member_template_arguments != NULL) {
-      for (size_t i = 0;
-           i < TypeDependentOf(t)->dependent_member_template_arguments->length;
-           i++) {
-        Vector* component =
-            TypeDependentOf(t)->dependent_member_template_arguments->value.p[i];
+      Vector* lists =
+          TypeMutableDependent(t)->dependent_member_template_arguments;
+      for (size_t i = 0; i < lists->length; i++) {
+        Vector* component = lists->value.p[i];
         if (component == NULL) {
           continue;
         }

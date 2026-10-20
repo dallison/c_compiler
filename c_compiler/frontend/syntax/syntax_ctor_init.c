@@ -201,7 +201,7 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
         TypeDependentOf(id->symbol->type)->dependent_member_name != NULL &&
         TypeContainsTemplateParameter(id->symbol->type)) {
       TypeRecord* scope = TypeRecordCopy(id->symbol->type);
-      StringDelete(TypeDependentOf(scope)->dependent_member_name);
+      StringDelete(TypeMutableDependent(scope)->dependent_member_name);
       TypeMutableDependent(scope)->dependent_member_name = NULL;
       TypeRecord* concrete = RemapEnclosingTemplateType(remap, scope);
       TypeRecordDelete(scope);

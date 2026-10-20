@@ -7076,7 +7076,7 @@ static ASTNode* ResolveDependentQualifiedValueName(
     return ResolveCurrentInstantiationMember(clone, id, node);
   }
   TypeRecord* scope = TypeRecordCopy(id->symbol->type);
-  StringDelete(TypeDependentOf(scope)->dependent_member_name);
+  StringDelete(TypeMutableDependent(scope)->dependent_member_name);
   TypeMutableDependent(scope)->dependent_member_name = NULL;
   // Member-function-template bodies are cloned against a member-local argument
   // vector (`[I]`), while names parsed in the class template's parameter space
@@ -9290,7 +9290,7 @@ static TypeRecord* ResolveClonedDependentTypedef(
     return NULL;
   }
   TypeRecord* scope = TypeRecordCopy(type);
-  StringDelete(TypeDependentOf(scope)->dependent_member_name);
+  StringDelete(TypeMutableDependent(scope)->dependent_member_name);
   TypeMutableDependent(scope)->dependent_member_name = NULL;
   TypeRecord* owner =
       SubstituteTemplateParameters(clone->parser, scope, clone->args);

@@ -611,12 +611,20 @@ typedef struct {
   int template_parameter_index;  // >=0 if bound is non-type param. // @wire 5
 } ArrayInfo;
 
-// The part of a TypeRecord that only template-dependent types use, owned by
-// that record.  Its wire numbers are TypeRecord fields.
+// The part of a TypeRecord that only template-dependent types use.  Copies of
+// a record share it until one of them writes (TypeMutableDependent), so
+// everything it points to is immutable while it is shared.  Its wire numbers
+// are TypeRecord fields.
 typedef struct TypeDependentInfo {
-  // The record whose fields these are.  By-value views of a record share its
-  // info, so only the owner may modify it.
+  int refs;  // Records holding this info.
+#ifndef NDEBUG
+  // The unshared record allowed to modify it in place, or NULL until one
+  // writes.  By-value views copy the pointer without holding a reference.
   struct TypeRecord* owner;
+  // Contents when it became shared, checked to catch writes that bypass
+  // TypeMutableDependent.
+  uint64_t shared_fingerprint;
+#endif
   String* template_parameter_name;  // Source name for diagnostics. // @wire 16
   String* dependent_member_name;    // For T::type-like types.       // @wire 7
   // For dependent qualified member type paths rooted at a template parameter.
@@ -692,7 +700,8 @@ static inline const TypeDependentInfo* TypeDependentOf(
   return record->dependent != NULL ? record->dependent : &kNoTypeDependentInfo;
 }
 
-// A record's dependent fields for writing, allocated on first use.
+// A record's dependent fields for writing, allocated on first use and
+// unshared from other copies of the record first.
 TypeDependentInfo* TypeMutableDependent(TypeRecord* record);
 
 static inline Qualifiers GetQualifiers(const TypeRecord* record) {
