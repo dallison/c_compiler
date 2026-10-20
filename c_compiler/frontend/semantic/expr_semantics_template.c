@@ -40,7 +40,6 @@ static ASTNode* FoldConstantIdentifier(IdentifierASTNode* node);
 static TypeRecord* CXXTypeFromLambdaInventedParameter(TypeRecord* type);
 static Vector* CXXLambdaInventedTemplateArgumentValues(TypeRecord* func);
 static TypeRecord* CXXResolveTypeForIsSameVArgument(TemplateArgument* arg);
-static bool ParentSlotHoldsNode(ASTNode* parent, int child_id, ASTNode* node);
 static ASTNode* CXXNewBoolConstantReplacing(ASTNode* node, int64_t same);
 static ASTNode* CXXNewIsSameBoolConstant(IdentifierASTNode* node, int64_t same);
 static bool CXXIsSameTemplateParameterType(TypeRecord* left, TypeRecord* right);
@@ -256,79 +255,11 @@ static TypeRecord* CXXResolveTypeForIsSameVArgument(TemplateArgument* arg) {
 // `parent`'s child then deletes the template pattern (`is_same_v<T, Base>`
 // becomes the first instantiation's constant, and every later instantiation
 // clones that).  Splice only when this node is actually in the slot.
-// Contract: Read-only parent/child consistency check before trait replacement.
-static bool ParentSlotHoldsNode(ASTNode* parent, int child_id, ASTNode* node) {
-  if (parent == NULL || node == NULL) {
-    return false;
-  }
-  switch (ASTNodeGetShape(parent)) {
-    case kASTShapeUnary:
-      return child_id == 0 && ((UnaryASTNode*)parent)->sub == node;
-    case kASTShapeBinary:
-      if (child_id == 0) {
-        return ((BinaryASTNode*)parent)->left == node;
-      }
-      if (child_id == 1) {
-        return ((BinaryASTNode*)parent)->right == node;
-      }
-      return false;
-    case kASTShapeCombined:
-      if (child_id == 0) {
-        return ((CombinedStatementASTNode*)parent)->cond == node;
-      }
-      if (child_id == 1) {
-        return ((CombinedStatementASTNode*)parent)->stmt == node;
-      }
-      return false;
-    case kASTShapeIf:
-      if (child_id == 0) {
-        return ((IfStatementASTNode*)parent)->cond == node;
-      }
-      if (child_id == 1) {
-        return ((IfStatementASTNode*)parent)->if_part == node;
-      }
-      if (child_id == 2) {
-        return ((IfStatementASTNode*)parent)->else_part == node;
-      }
-      return false;
-    case kASTShapeExprStmt: {
-      ExpressionStatementASTNode* stmt = (ExpressionStatementASTNode*)parent;
-      return child_id == 0 && stmt->expr == node;
-    }
-    case kASTShapeStaticAssert: {
-      StaticAssertASTNode* assert_node = (StaticAssertASTNode*)parent;
-      return (child_id == 0 && assert_node->expr == node) ||
-             (child_id == 1 && assert_node->message_expr == node);
-    }
-    case kASTShapeVector: {
-      Vector* children = ((VectorASTNode*)parent)->children;
-      return children != NULL && child_id >= 0 &&
-             (size_t)child_id < children->length &&
-             children->value.p[child_id] == node;
-    }
-    case kASTShapeCast:
-      return ((CastASTNode*)parent)->expr == node;
-    case kASTShapeExprInit:
-      return ((ExpressionInitializerASTNode*)parent)->expr == node;
-    case kASTShapeBracedInit: {
-      Vector* initializers = ((BracedInitializerASTNode*)parent)->initializers;
-      return initializers != NULL && child_id >= 0 &&
-             (size_t)child_id < initializers->length &&
-             initializers->value.p[child_id] == node;
-    }
-    default:
-      return true;
-  }
-}
-
 // Contract: Replaces `node` in parent when slot matches; returns new constant.
 static ASTNode* CXXNewBoolConstantReplacing(ASTNode* node, int64_t same) {
   TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
   ASTNode* const_node = NewIntConstantASTNode(same, bool_type, node->location);
-  if (node->parent != NULL &&
-      ParentSlotHoldsNode(node->parent, node->child_id, node)) {
-    ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
-  }
+  ASTNodeReplaceInParent(node, const_node, true);
   const_node->flags |= kASTAnalyzed;
   return const_node;
 }
@@ -1492,7 +1423,7 @@ ASTNode* CXXTryReplaceWithVariableTemplateValue(
   if (materialized == NULL || use_site == NULL || use_site->parent == NULL) {
     return NULL;
   }
-  ASTNodeReplaceChild(use_site->parent, use_site->child_id, materialized, true);
+  ASTNodeReplaceInParent(use_site, materialized, true);
   materialized->flags |= kASTAnalyzed;
   return materialized;
 }

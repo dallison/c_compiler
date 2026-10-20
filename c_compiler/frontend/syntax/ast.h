@@ -521,6 +521,15 @@ void ASTNodeReplaceChild(ASTNode* parent, int child_id, ASTNode* child,
                          bool delete_old_child);
 void ASTNodePrint(ASTNode* node, int indents, FILE* fp);
 void ASTNodePrintTree(ASTNode* node, int indents, FILE* fp);
+// The node in `parent`'s child_id slot, as ASTNodeReplaceChild addresses it,
+// or NULL.
+ASTNode* ASTNodeChildAt(const ASTNode* parent, int child_id);
+// Puts `replacement` in `node`'s parent slot and returns true, only when the
+// parent still holds `node` there.  A clone keeps its source's parent until it
+// is linked, so an unchecked splice could rewrite the template pattern.
+bool ASTNodeReplaceInParent(ASTNode* node, ASTNode* replacement,
+                            bool delete_node);
+// Detaches `node` from its parent's slot, if the parent still holds it there.
 ASTNode* ASTNodeMove(ASTNode* node);
 bool ASTNodeUsesValue(ASTNode* node, ASTNode* value);
 

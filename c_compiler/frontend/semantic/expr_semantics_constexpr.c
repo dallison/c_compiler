@@ -290,7 +290,7 @@ static ASTNode* FoldConstantExpressionValue(ASTNode* node) {
     if (EvaluateInt128Constant((ASTNode*)node, &lo, &hi)) {
       ASTNode* const_node =
           NewInt128ConstantASTNode(lo, hi, node->type, node->location);
-      ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
+      ASTNodeReplaceInParent(node, const_node, true);
       const_node->flags |= kASTAnalyzed | kASTFoldedConstant;
       return const_node;
     }
@@ -300,7 +300,7 @@ static ASTNode* FoldConstantExpressionValue(ASTNode* node) {
     if (ok) {
       ASTNode* const_node =
           NewIntConstantASTNode(value, node->type, node->location);
-      ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
+      ASTNodeReplaceInParent(node, const_node, true);
       const_node->flags |= kASTAnalyzed | kASTFoldedConstant;
       return const_node;
     }
@@ -310,7 +310,7 @@ static ASTNode* FoldConstantExpressionValue(ASTNode* node) {
     if (ok) {
       ASTNode* const_node =
           NewRealConstantASTNode(value, node->type, node->location);
-      ASTNodeReplaceChild(node->parent, node->child_id, const_node, true);
+      ASTNodeReplaceInParent(node, const_node, true);
       const_node->flags |= kASTAnalyzed;
       return const_node;
     }
@@ -468,10 +468,7 @@ bool SemanticEvaluatePointerConstantForSymbol(Symbol* symbol,
         ASTNodeClone(folded, IdentityCloneNode, NULL, NULL);
     symbol->flags.value_set =
         SymbolExtraOf(symbol)->constexpr_initializer != NULL;
-    if (expression->parent != NULL) {
-      ASTNodeReplaceChild(expression->parent, expression->child_id, folded,
-                          true);
-    } else {
+    if (!ASTNodeReplaceInParent(expression, folded, true)) {
       ASTNodeDelete(folded);
     }
     return symbol->flags.value_set;

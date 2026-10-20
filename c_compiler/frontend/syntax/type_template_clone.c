@@ -9483,9 +9483,6 @@ static ASTNode* ReanalyzeClonedResolvedCall(
         !TypeContainsTemplateParameter(concrete_type) &&
         call->children != NULL && call->children->length == 0) {
       ASTNode* zero = NewIntConstantASTNode(0, concrete_type, node->location);
-      if (node->parent != NULL) {
-        ASTNodeReplaceChild(node->parent, node->child_id, zero, true);
-      }
       return AnalyzeExpression(zero);
     }
     if (TypeIsStructOrUnion(concrete_type) &&

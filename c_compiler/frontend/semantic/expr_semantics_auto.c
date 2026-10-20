@@ -416,9 +416,8 @@ void SemanticReanalyzeAfterAutoDeduction(void) {
     node->flags &= ~kASTAnalyzed;
     ASTNodeClearType(node);
     ASTNode* analyzed = AnalyzeExpression(node);
-    if (analyzed != node && node->parent != NULL) {
-      ASTNodeReplaceChild(node->parent, node->child_id, analyzed,
-                          /*delete_old_child=*/false);
+    if (analyzed != node) {
+      ASTNodeReplaceInParent(node, analyzed, /*delete_node=*/false);
     }
   }
   depth--;

@@ -1554,9 +1554,8 @@ static void LowerReadyCoAwaitNode(ASTNode* node, void* data, int child_id,
       node->op != AST_OP(co_await) || !CoAwaitIsAlwaysReady(node)) {
     return;
   }
-  ASTNodeReplaceChild(node->parent, node->child_id,
-                      LowerReadyCoAwaitExpression((UnaryASTNode*)node),
-                      true);
+  ASTNodeReplaceInParent(node, LowerReadyCoAwaitExpression((UnaryASTNode*)node),
+                         true);
 }
 
 /* AST visitor that records coroutine-defining keywords (co_return/co_await/
@@ -4369,7 +4368,7 @@ static void ReplaceFrameOwnedIdentifier(ASTNode* node, void* data,
         AST_OP(contents), TypeRecordCopy(identifier->symbol->type->next),
         node->location, access);
   }
-  ASTNodeReplaceChild(node->parent, node->child_id, access, true);
+  ASTNodeReplaceInParent(node, access, true);
 }
 
 /* Rewrite all references to frame-owned locals within `node` into frame

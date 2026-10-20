@@ -1071,12 +1071,6 @@ static void ASTNodeTransformVectorElement(ASTNode* parent, Vector* children,
   ASTNodeDelete(child);
 }
 
-ASTNode* ASTNodeMove(ASTNode* node) {
-  ASTNodeReplaceChild(node->parent, node->child_id, NULL, false);
-  node->parent = NULL;
-  return node;
-}
-
 bool ASTNodeIsIntConstant(ASTNode* node) {
   switch (node->op) {
     case AST_OP(number):
@@ -5029,10 +5023,239 @@ ASTNode* NewCompoundLiteralASTNode(ASTNode* sym, SourceLocation location,
   CompoundLiteralASTNode* node = ASTArenaAlloc(sizeof(CompoundLiteralASTNode));
   ASTNodeInit(&node->base, AST_OP(compound_literal), sym->type, location, &compound_literal_vtbl);
   node->sym = sym;
-  sym->parent = (ASTNode*)node;
+  SetParent(sym, (ASTNode*)node, 0);
   node->initializer = initializer;
-  initializer->parent = (ASTNode*)node;
+  SetParent(initializer, (ASTNode*)node, 1);
   return (ASTNode*)node;
+}
+
+static ASTNode* VectorChildAt(Vector* children, int child_id) {
+  return children != NULL && child_id >= 0 &&
+                 (size_t)child_id < children->length
+             ? children->value.p[child_id]
+             : NULL;
+}
+
+// Mirrors each shape's replacer: single-slot replacers ignore child_id, and a
+// vector call's callee (`left`) has no child_id of its own.
+ASTNode* ASTNodeChildAt(const ASTNode* parent, int child_id) {
+  if (parent == NULL) {
+    return NULL;
+  }
+  if (parent->virtuals == &structured_binding_vtbl) {
+    return ((const StructuredBindingASTNode*)parent)->initializer;
+  }
+  switch (ASTNodeGetShape(parent)) {
+    case kASTShapeUnary:
+      return ((const UnaryASTNode*)parent)->sub;
+    case kASTShapeBinary: {
+      const BinaryASTNode* node = (const BinaryASTNode*)parent;
+      return child_id == 0 ? node->left : child_id == 1 ? node->right : NULL;
+    }
+    case kASTShapeInlineCall: {
+      const InlineCallASTNode* node = (const InlineCallASTNode*)parent;
+      return child_id == 0   ? node->inlined
+             : child_id == 1 ? node->ret_value
+                             : NULL;
+    }
+    case kASTShapeVector:
+      return VectorChildAt(((const VectorASTNode*)parent)->children, child_id);
+    case kASTShapeCast:
+      return ((const CastASTNode*)parent)->expr;
+    case kASTShapePtrScale:
+      return ((const PtrScaleASTNode*)parent)->expr;
+    case kASTShapeSizeof:
+      return ((const SizeofASTNode*)parent)->expr;
+    case kASTShapeTypeid:
+      return ((const TypeidASTNode*)parent)->expr;
+    case kASTShapeReflection:
+      return ((const ReflectionASTNode*)parent)->operand;
+    case kASTShapeSplice:
+      return ((const SpliceASTNode*)parent)->reflection;
+    case kASTShapeSpliceQualified: {
+      const SpliceQualifiedASTNode* node =
+          (const SpliceQualifiedASTNode*)parent;
+      return child_id == 0 ? node->reflection : node->suffix;
+    }
+    case kASTShapeConstevalBlock:
+      return ((const ConstevalBlockASTNode*)parent)->body;
+    case kASTShapeExprStmt:
+      return ((const ExpressionStatementASTNode*)parent)->expr;
+    case kASTShapeStaticAssert: {
+      const StaticAssertASTNode* node = (const StaticAssertASTNode*)parent;
+      return child_id == 0   ? node->expr
+             : child_id == 1 ? node->message_expr
+                             : NULL;
+    }
+    case kASTShapeContractAssert:
+      return ((const ContractAssertASTNode*)parent)->predicate;
+    case kASTShapeIf: {
+      const IfStatementASTNode* node = (const IfStatementASTNode*)parent;
+      return child_id == 0   ? node->cond
+             : child_id == 1 ? node->if_part
+             : child_id == 2 ? node->else_part
+                             : NULL;
+    }
+    case kASTShapeCombined: {
+      const CombinedStatementASTNode* node =
+          (const CombinedStatementASTNode*)parent;
+      return child_id == 0 ? node->cond : child_id == 1 ? node->stmt : NULL;
+    }
+    case kASTShapeThrow:
+      return ((const ThrowASTNode*)parent)->expr;
+    case kASTShapeCompound:
+      return VectorChildAt(
+          ((const CompoundStatementASTNode*)parent)->statements, child_id);
+    case kASTShapeCatch:
+      return ((const CatchASTNode*)parent)->stmt;
+    case kASTShapeTry: {
+      const TryASTNode* node = (const TryASTNode*)parent;
+      return child_id == 0 ? node->try_stmt
+                           : VectorChildAt(node->catches, child_id - 1);
+    }
+    case kASTShapeFor: {
+      const ForStatementASTNode* node = (const ForStatementASTNode*)parent;
+      return child_id == 0   ? node->c1
+             : child_id == 1 ? node->c2
+             : child_id == 2 ? node->c3
+             : child_id == 3 ? node->stmt
+                             : NULL;
+    }
+    case kASTShapeExpansionFor: {
+      const ExpansionStatementASTNode* node =
+          (const ExpansionStatementASTNode*)parent;
+      return child_id == 0   ? node->init_stmt
+             : child_id == 1 ? node->initializer
+             : child_id == 2 ? node->stmt
+                             : NULL;
+    }
+    case kASTShapeVarDecl:
+      return ((const VariableDeclarationASTNode*)parent)->initializer;
+    case kASTShapeDeclList:
+      return VectorChildAt(
+          ((const DeclarationListASTNode*)parent)->declarations, child_id);
+    case kASTShapeCaseLabel: {
+      const CaseLabelASTNode* node = (const CaseLabelASTNode*)parent;
+      return child_id == 0 ? node->expr : child_id == 1 ? node->stmt : NULL;
+    }
+    case kASTShapeSwitch: {
+      const SwitchStatementASTNode* node =
+          (const SwitchStatementASTNode*)parent;
+      return child_id == 0 ? node->expr : child_id == 1 ? node->stmt : NULL;
+    }
+    case kASTShapeLabel:
+      return ((const LabelASTNode*)parent)->stmt;
+    case kASTShapeExprInit:
+      return ((const ExpressionInitializerASTNode*)parent)->expr;
+    case kASTShapeBracedInit:
+      return VectorChildAt(
+          ((const BracedInitializerASTNode*)parent)->initializers, child_id);
+    case kASTShapeDesignatedInit:
+      return ((const DesignatedInitializerASTNode*)parent)->init;
+    case kASTShapeCompoundLiteral: {
+      const CompoundLiteralASTNode* node =
+          (const CompoundLiteralASTNode*)parent;
+      return child_id == 0 ? node->sym : node->initializer;
+    }
+    case kASTShapeBase:
+    case kASTShapeIdentifier:
+    case kASTShapeStructMember:
+    case kASTShapeConstant:
+    case kASTShapeMacro:
+    case kASTShapeGoto:
+    case kASTShapeAsm:
+    case kASTShapeRequiresExpr:
+      return NULL;
+  }
+  return NULL;
+}
+
+static int VectorLength(const Vector* children) {
+  return children != NULL ? (int)children->length : 0;
+}
+
+// Number of child_ids ASTNodeChildAt distinguishes for `parent`.
+static int ASTNodeChildSlotCount(const ASTNode* parent) {
+  if (parent->virtuals == &structured_binding_vtbl) {
+    return 1;
+  }
+  switch (ASTNodeGetShape(parent)) {
+    case kASTShapeVector:
+      return VectorLength(((const VectorASTNode*)parent)->children);
+    case kASTShapeCompound:
+      return VectorLength(
+          ((const CompoundStatementASTNode*)parent)->statements);
+    case kASTShapeDeclList:
+      return VectorLength(
+          ((const DeclarationListASTNode*)parent)->declarations);
+    case kASTShapeBracedInit:
+      return VectorLength(
+          ((const BracedInitializerASTNode*)parent)->initializers);
+    case kASTShapeTry:
+      return 1 + VectorLength(((const TryASTNode*)parent)->catches);
+    case kASTShapeFor:
+      return 4;
+    case kASTShapeIf:
+    case kASTShapeExpansionFor:
+      return 3;
+    case kASTShapeBinary:
+    case kASTShapeInlineCall:
+    case kASTShapeSpliceQualified:
+    case kASTShapeStaticAssert:
+    case kASTShapeCombined:
+    case kASTShapeCaseLabel:
+    case kASTShapeSwitch:
+    case kASTShapeCompoundLiteral:
+      return 2;
+    case kASTShapeBase:
+    case kASTShapeIdentifier:
+    case kASTShapeStructMember:
+    case kASTShapeConstant:
+    case kASTShapeMacro:
+    case kASTShapeGoto:
+    case kASTShapeAsm:
+    case kASTShapeRequiresExpr:
+      return 0;
+    default:
+      return 1;
+  }
+}
+
+bool ASTNodeReplaceInParent(ASTNode* node, ASTNode* replacement,
+                            bool delete_node) {
+  if (node == NULL || node->parent == NULL ||
+      ASTNodeChildAt(node->parent, node->child_id) != node) {
+    return false;
+  }
+  ASTNodeReplaceChild(node->parent, node->child_id, replacement, delete_node);
+  return true;
+}
+
+ASTNode* ASTNodeMove(ASTNode* node) {
+  ASTNode* parent = node->parent;
+  node->parent = NULL;
+  if (parent == NULL) {
+    return node;
+  }
+  int child_id = node->child_id;
+  if (ASTNodeChildAt(parent, child_id) != node) {
+    // A stale child_id must not clear whichever node now holds that slot.
+    child_id = -1;
+    int count = ASTNodeChildSlotCount(parent);
+    for (int i = 0; i < count; i++) {
+      if (ASTNodeChildAt(parent, i) == node) {
+        child_id = i;
+        break;
+      }
+    }
+  }
+  if (child_id >= 0) {
+    ASTNodeReplaceChild(parent, child_id, NULL, false);
+  } else if (ASTNodeGetShape(parent) == kASTShapeVector &&
+             ((VectorASTNode*)parent)->left == node) {
+    ((VectorASTNode*)parent)->left = NULL;
+  }
+  return node;
 }
 
 ASTNodeShape ASTNodeGetShape(const ASTNode* node) {

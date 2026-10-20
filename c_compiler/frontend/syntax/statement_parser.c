@@ -1328,10 +1328,7 @@ static ASTNode* NewRangeForDependentIteratorLoop(Syntax* syntax,
 // live tree rather than the discarded one.
 static ASTNode* RangeForIteratorReplacement(ASTNode* iterator,
                                             ASTNode* replacement) {
-  if (iterator->parent != NULL) {
-    ASTNodeReplaceChild(iterator->parent, iterator->child_id, replacement,
-                        /*delete_old_child=*/false);
-  }
+  ASTNodeReplaceInParent(iterator, replacement, /*delete_node=*/false);
   return replacement;
 }
 
