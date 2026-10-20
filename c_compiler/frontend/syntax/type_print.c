@@ -228,8 +228,35 @@ static void AppendReadableTypeName(String* result, String* name) {
       i++;
       continue;
     }
+    // `$nested<id>$I<char>` tags a member class template's specialization.
+    if (strncmp(name->value + i, "$nested", 7) == 0) {
+      size_t j = i + 7;
+      while (j < name->length && isdigit((unsigned char)name->value[j])) {
+        j++;
+      }
+      if (j > i + 7 && j < name->length && name->value[j] == '$') {
+        i = j + 1;
+        continue;
+      }
+    }
     StringAppendChar(result, name->value[i++]);
   }
+}
+
+static bool StructHasReadableName(Struct* str) {
+  return str != NULL && str->tag_name != NULL &&
+         str->tag_name->value[0] != '<' &&
+         (str->tag_symbol == NULL || !str->tag_symbol->flags.invented);
+}
+
+// A named class with the named classes it is nested in, as `O<int>::I<char>`.
+static void AppendReadableClassName(String* result, Struct* str) {
+  if (StructHasReadableName(str) &&
+      StructHasReadableName(str->lexical_parent)) {
+    AppendReadableClassName(result, str->lexical_parent);
+    StringAppend(result, "::");
+  }
+  AppendReadableTypeName(result, str->tag_name);
 }
 
 static String* TemplateParameterDisplayName(const Vector* parameters,
@@ -321,7 +348,7 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
         }
         if (type->info.struct_info != NULL &&
             type->info.struct_info->tag_name != NULL) {
-          AppendReadableTypeName(result, type->info.struct_info->tag_name);
+          AppendReadableClassName(result, type->info.struct_info);
         } else {
           StringAppend(result, "<invalid>");
         }
@@ -359,7 +386,7 @@ static void TypeRecordToStringWithTemplateParameters(TypeRecord* type,
     case kDeclMemberPointer:
       if (type->info.struct_info != NULL &&
           type->info.struct_info->tag_name != NULL) {
-        AppendReadableTypeName(result, type->info.struct_info->tag_name);
+        AppendReadableClassName(result, type->info.struct_info);
       } else {
         StringAppend(result, "<class>");
       }
