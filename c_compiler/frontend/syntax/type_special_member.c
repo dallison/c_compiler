@@ -1965,6 +1965,88 @@ static bool CXXStructHasDeletedSpecialMemberKind(Struct* str,
   return false;
 }
 
+// True if `type` (or its array element type) is a class whose declared
+// constructors all need arguments, so it has no default constructor
+// ([class.default.ctor]/2).  Constructor templates and C variadic constructors
+// count as callable without arguments.
+static bool CXXTypeLacksDefaultConstructor(TypeRecord* type) {
+  while (TypeIsArray(type)) {
+    type = type->next;
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  size_t implicit_parameters = StructHasVirtualBases(str) ? 2 : 1;
+  bool any_constructor = false;
+  for (size_t i = 0; i < str->members.length; i++) {
+    for (StructMember* overload = str->members.value.p[i]; overload != NULL;
+         overload = overload->overload_next) {
+      TypeRecord* func =
+          overload->symbol != NULL ? overload->symbol->type : NULL;
+      if (!overload->is_member_function || func == NULL ||
+          !TypeIsFunction(func) || !func->info.function.is_constructor) {
+        continue;
+      }
+      any_constructor = true;
+      FunctionInfo* info = &func->info.function;
+      if (info->varargs || info->unknown_args ||
+          FunctionExtraOf(info)->template_parameter_count > 0 ||
+          info->prototype.length < implicit_parameters) {
+        return false;
+      }
+      bool callable_without_arguments = true;
+      for (size_t j = implicit_parameters; j < info->prototype.length; j++) {
+        Symbol* parameter = info->prototype.value.p[j];
+        if (parameter == NULL ||
+            SymbolExtraOf(parameter)->default_argument == NULL) {
+          callable_without_arguments = false;
+          break;
+        }
+      }
+      if (callable_without_arguments) {
+        return false;
+      }
+    }
+  }
+  return any_constructor;
+}
+
+// True if a direct or virtual base of `str`, or a non-variant data member
+// without a default member initializer, has a class type with no default
+// constructor, so the implicit default constructor of `str` is deleted.
+static bool CXXStructHasSubobjectWithoutDefaultConstructor(Struct* str) {
+  if (str == NULL || str->is_union) {
+    return false;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    if (base != NULL && !base->is_virtual &&
+        CXXTypeLacksDefaultConstructor(base->type)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->virtual_bases.length; i++) {
+    CXXVirtualBaseInfo* base = str->virtual_bases.value.p[i];
+    if (base != NULL && CXXTypeLacksDefaultConstructor(base->type)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < str->members.length; i++) {
+    StructMember* member = str->members.value.p[i];
+    if (member == NULL || member->symbol == NULL || member->is_static ||
+        member->is_member_function || member->is_using_declaration ||
+        StructMemberIsNestedType(member) ||
+        member->default_initializer != NULL) {
+      continue;
+    }
+    if (CXXTypeLacksDefaultConstructor(member->symbol->type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool CXXStructHasDeletedBaseSpecialMemberKind(
     Struct* str, CXXSpecialMemberKind kind) {
   if (str == NULL || kind == kCXXSpecialMemberNone) {
@@ -3008,6 +3090,7 @@ static bool CXXInstantiatedImplicitSpecialMemberIsDeleted(
   switch (kind) {
     case kCXXSpecialMemberDefaultConstructor:
       return CXXStructHasMemberWithoutDefaultInitialization(str) ||
+             CXXStructHasSubobjectWithoutDefaultConstructor(str) ||
              CXXStructHasDeletedBaseSpecialMemberKind(str, kind) ||
              CXXStructHasDeletedMemberSpecialMemberKind(str, kind);
     case kCXXSpecialMemberDestructor:
@@ -3236,18 +3319,18 @@ void AddImplicitCXXSpecialMembers(TypeParser* parser, Struct* str,
   AddImplicitCXXEqualityOperator(parser, str, tag);
   if (!CXXStructHasAnyConstructor(str)) {
     bool deleted_default_constructor =
-        cxx26_union
-            ? CXXUnionAllVariantMembersAreConst(str) ||
-                  CXXUnionDefaultInitializedMemberHasUnusableDestructor(
-                      str, /*require_nontrivial=*/false)
-            : CXXStructHasMemberWithoutDefaultInitialization(str) ||
-                  CXXStructHasDeletedBaseSpecialMemberKind(
-                      str, kCXXSpecialMemberDefaultConstructor) ||
-                  CXXStructHasDeletedMemberSpecialMemberKind(
-                      str, kCXXSpecialMemberDefaultConstructor) ||
-                  (str->is_union &&
-                   CXXStructHasNonTrivialMemberSpecialMemberKind(
-                       str, kCXXSpecialMemberDefaultConstructor));
+        cxx26_union ? CXXUnionAllVariantMembersAreConst(str) ||
+                          CXXUnionDefaultInitializedMemberHasUnusableDestructor(
+                              str, /*require_nontrivial=*/false)
+                    : CXXStructHasMemberWithoutDefaultInitialization(str) ||
+                          CXXStructHasSubobjectWithoutDefaultConstructor(str) ||
+                          CXXStructHasDeletedBaseSpecialMemberKind(
+                              str, kCXXSpecialMemberDefaultConstructor) ||
+                          CXXStructHasDeletedMemberSpecialMemberKind(
+                              str, kCXXSpecialMemberDefaultConstructor) ||
+                          (str->is_union &&
+                           CXXStructHasNonTrivialMemberSpecialMemberKind(
+                               str, kCXXSpecialMemberDefaultConstructor));
     Symbol* ctor = NewCXXSyntheticSpecialMember(
         parser, str, tag, str->tag_name->value,
         NewTypeRecordWithSize(kTypeVoid, kQualPlain),

@@ -1789,9 +1789,10 @@ int main(void) {
     template_destructor_trace = destroyed_at_block_exit.value - 13;
   }
   Holder<IntAlias> alias_holder;
-  Holder<const int> const_holder;
+  Holder<const int> const_holder{};
   Holder<int*> pointer_holder;
-  Holder<int&> reference_holder;
+  int referenced_value = 0;
+  Holder<int&> reference_holder{referenced_value};
   DefaultHolder<> default_holder;
   DefaultHolder<char> explicit_default_holder;
   DefaultedPair<> default_pair;

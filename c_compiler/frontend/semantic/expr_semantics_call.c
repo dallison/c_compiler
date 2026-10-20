@@ -3404,19 +3404,24 @@ static bool FunctionCallValidateFixedArity(VectorASTNode* node,
   if (AppendDefaultCallArguments(node, subtype)) {
     *num_actual_args = node->children->length;
   }
-  if (*num_actual_args < num_formal_args) {
-    SemanticError((ASTNode*)node,
-                  "Too few arguments supplied to varargs function call; need "
-                  "%zd, got %zd",
-                  num_formal_args, *num_actual_args);
-    call_ok = false;
-  }
-  if (!subtype->info.function.varargs &&
-      *num_actual_args != num_formal_args) {
-    SemanticError((ASTNode*)node,
-                  "Incorrect number of arguments supplied to function call; "
-                  "need %zd, got %zd",
-                  num_formal_args, *num_actual_args);
+  bool already_diagnosed = (node->base.flags & kASTOverloadDiagnosed) != 0;
+  if (subtype->info.function.varargs) {
+    if (*num_actual_args < num_formal_args) {
+      if (!already_diagnosed) {
+        SemanticError((ASTNode*)node,
+                      "Too few arguments supplied to varargs function call; "
+                      "need %zd, got %zd",
+                      num_formal_args, *num_actual_args);
+      }
+      call_ok = false;
+    }
+  } else if (*num_actual_args != num_formal_args) {
+    if (!already_diagnosed) {
+      SemanticError((ASTNode*)node,
+                    "Incorrect number of arguments supplied to function call; "
+                    "need %zd, got %zd",
+                    num_formal_args, *num_actual_args);
+    }
     call_ok = false;
   }
   return call_ok;

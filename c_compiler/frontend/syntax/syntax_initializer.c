@@ -956,8 +956,8 @@ ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
     }
     if (element_type->info.struct_info->is_aggregate &&
         ctor->symbol->flags.invented &&
-        (ctor->symbol->type->info.function.is_deleted ||
-         ctor->symbol->type->info.function.is_trivial_special_member)) {
+        !ctor->symbol->type->info.function.is_deleted &&
+        ctor->symbol->type->info.function.is_trivial_special_member) {
       return NULL;
     }
     if (element_count > kCXXUnrolledArrayElementLimit) {
@@ -1009,11 +1009,12 @@ ASTNode* SyntaxNewCXXDefaultConstructorCallIfNeeded(Syntax* syntax,
   // so aggregate default-initialization can omit it.  A non-trivial implicit
   // constructor must still run: in particular, aggregates may have default
   // member initializers or members with non-trivial default constructors.
+  // A deleted one is called so that the use is diagnosed.
   if (TypeIsStructOrUnion(sym->type) && sym->type->info.struct_info != NULL &&
       sym->type->info.struct_info->is_aggregate &&
       ctor->symbol->flags.invented &&
-      (ctor->symbol->type->info.function.is_deleted ||
-       ctor->symbol->type->info.function.is_trivial_special_member)) {
+      !ctor->symbol->type->info.function.is_deleted &&
+      ctor->symbol->type->info.function.is_trivial_special_member) {
     return NULL;
   }
   return SyntaxNewCXXConstructorCall(syntax, sym, NewVector(), sym->location);

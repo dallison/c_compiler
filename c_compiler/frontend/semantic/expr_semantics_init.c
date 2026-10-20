@@ -467,13 +467,16 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
   }
   // `T{}` value-initializes ([dcl.init]/8).  A user-provided default
   // constructor must be run and must *not* be preceded by zero-initialization,
-  // so call it here.  Anything else -- a defaulted or implicit default
-  // constructor -- is left to the caller's zero-initializing aggregate path,
-  // which recurses into the members that still need construction.
+  // so call it here.  A usable defaulted or implicit default constructor is
+  // left to the caller's zero-initializing aggregate path, which recurses into
+  // the members that still need construction.  Without one (deleted, missing,
+  // or only reachable through a constructor template) the call is built so
+  // that overload resolution runs or diagnoses it.
   if (braced->initializers == NULL || braced->initializers->length == 0) {
     size_t first_user_formal =
         StructHasVirtualBases(target->info.struct_info) ? 2 : 1;
     bool user_provided_default = false;
+    bool usable_implicit_default = false;
     for (StructMember* candidate = constructor;
          candidate != NULL && !user_provided_default;
          candidate = candidate->overload_next) {
@@ -483,20 +486,28 @@ static ASTNode* LowerCXXBracedInitToConstructorCall(
       }
       FunctionInfo* info = &candidate->symbol->type->info.function;
       if (!info->is_constructor || info->is_deleted ||
-          !info->is_user_provided ||
+          FunctionExtraOf(info)->template_parameter_count > 0 ||
           info->prototype.length < first_user_formal) {
         continue;
       }
-      user_provided_default = true;
+      bool callable_without_arguments = true;
       for (size_t i = first_user_formal; i < info->prototype.length; i++) {
         Symbol* formal = info->prototype.value.p[i];
         if (formal == NULL || SymbolExtraOf(formal)->default_argument == NULL) {
-          user_provided_default = false;
+          callable_without_arguments = false;
           break;
         }
       }
+      if (!callable_without_arguments) {
+        continue;
+      }
+      if (info->is_user_provided) {
+        user_provided_default = true;
+      } else {
+        usable_implicit_default = true;
+      }
     }
-    if (!user_provided_default) {
+    if (!user_provided_default && usable_implicit_default) {
       return NULL;
     }
   }

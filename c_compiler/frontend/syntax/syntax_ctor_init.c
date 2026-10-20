@@ -856,6 +856,23 @@ static Vector* CXXDefaultMemberInitializerActuals(TypeRecord* func,
   return actuals;
 }
 
+// True if constructor `func` default-initializing `member`, of class `type`,
+// is ill-formed because the class declares constructors but none is a usable
+// default constructor.  The call is then still built so that overload
+// resolution diagnoses it.
+static bool CXXMemberLacksUsableDefaultConstructor(TypeRecord* func,
+                                                   StructMember* member,
+                                                   TypeRecord* type) {
+  if (func == NULL || !TypeIsFunction(func) || func->info.function.is_deleted ||
+      member->is_anon || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL || type->info.struct_info->is_union ||
+      type->info.struct_info->tag_name == NULL ||
+      TypeContainsTemplateParameter(type)) {
+    return false;
+  }
+  return FindCXXConstructor(type) != NULL;
+}
+
 // Returns a mem-initializer statement for `member` from its default member
 // initializer or synthesized default construction, or NULL when no initializer
 // is needed (e.g. copy/move special members or trivial members).
@@ -916,19 +933,22 @@ ASTNode* NewCXXDefaultMemberInitializerStatement(Syntax* syntax,
     // Each element of a class array member is default-constructed.  Skip the
     // calls when that constructor is the trivial implicit one.
     TypeRecord* element_type = member_type->next;
-    if (!CXXTypeHasDefaultConstructor(element_type)) {
+    if (!CXXTypeHasDefaultConstructor(element_type) &&
+        !CXXMemberLacksUsableDefaultConstructor(func, member, element_type)) {
       return NULL;
     }
     StructMember* ctor = FindCXXConstructor(element_type);
     if (ctor != NULL && ctor->overload_next == NULL &&
         ctor->symbol->flags.invented &&
+        !ctor->symbol->type->info.function.is_deleted &&
         ctor->symbol->type->info.function.is_trivial_special_member) {
       return NULL;
     }
     return NewCXXMemberInitializerStatement(
         syntax, func, member, NewVector(), false, member->symbol->location);
   }
-  if (!CXXTypeHasDefaultConstructor(member_type)) {
+  if (!CXXTypeHasDefaultConstructor(member_type) &&
+      !CXXMemberLacksUsableDefaultConstructor(func, member, member_type)) {
     return NULL;
   }
   return NewCXXMemberInitializerStatement(
