@@ -1851,6 +1851,7 @@ static TypeRecord* MetaTraitRemoveAllExtents(TypeRecord* type) {
     TypeRecordDelete(copy);
     copy = next != NULL ? TypeRecordCalculateSize(TypeRecordCloneSpine(next))
                         : NULL;
+    TypeRecordDelete(next);
   }
   return copy;
 }
