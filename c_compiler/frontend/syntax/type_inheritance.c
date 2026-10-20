@@ -1118,7 +1118,11 @@ static StructMember* FindCXXBaseVirtualOverrideRec(
     Struct* base_struct = base->type->info.struct_info;
     String destructor_name = {0};
     StructMember* base_member = NULL;
-    if (func->info.function.is_destructor) {
+    if (base_struct->pending_special_members.kinds != 0) {
+      // Only a class without virtual functions leaves its special members
+      // pending, so none of its own members can be overridden; looking the
+      // name up would only declare them.
+    } else if (func->info.function.is_destructor) {
       StringInit(&destructor_name, "~");
       StringAppendString(&destructor_name, base_struct->tag_name);
       base_member = FindStructMember(base_struct, &destructor_name);
