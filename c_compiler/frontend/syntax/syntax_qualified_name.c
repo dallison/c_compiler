@@ -334,11 +334,16 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
   return true;
 }
 
-// True when the `<` at the current token introduces a template-argument list
-// rather than a comparison.  Used for names that are not already known to be
-// templates: `tuple_size<T>::value < 2` must leave the second `<` as an
-// operator, while `Unknown<T>::type` is still a template-id.
-static bool AngleBracketsLookLikeTemplateId(Syntax* syntax) {
+// Scans the `<...>` at the current token without consuming it.  Returns true
+// when it is balanced, with `*next` the token after the closing `>`,
+// `*next_closes_angle` set when that token closes an enclosing list, and
+// `*closed_by_nested_angle` set when a `>>` closed it along with an enclosing
+// list.
+static bool ScanAngleBrackets(Syntax* syntax, Token* next,
+                              bool* next_closes_angle,
+                              bool* closed_by_nested_angle) {
+  *next_closes_angle = false;
+  *closed_by_nested_angle = false;
   if (!LexLookingAt(syntax->lex, TOK(less))) {
     return false;
   }
@@ -349,7 +354,6 @@ static bool AngleBracketsLookLikeTemplateId(Syntax* syntax) {
   int square_depth = 0;
   int brace_depth = 0;
   bool balanced = false;
-  bool closed_by_nested_angle = false;
   do {
     Token token = syntax->lex->current_token;
     bool at_top = paren_depth == 0 && square_depth == 0 && brace_depth == 0;
@@ -384,7 +388,7 @@ static bool AngleBracketsLookLikeTemplateId(Syntax* syntax) {
         if (closes > 0) {
           if (closes > depth) {
             balanced = true;
-            closed_by_nested_angle = true;
+            *closed_by_nested_angle = true;
             break;
           }
           depth -= closes;
@@ -398,26 +402,40 @@ static bool AngleBracketsLookLikeTemplateId(Syntax* syntax) {
     }
     LexNextToken(syntax->lex);
   } while (!LexEof(syntax->lex) && depth > 0);
-
-  bool result = false;
-  if (balanced) {
-    if (closed_by_nested_angle) {
-      result = true;
-    } else {
-      Token next = syntax->lex->current_token;
-      result = next == TOK(coloncolon) || next == TOK(lparen) ||
-               next == TOK(rparen) || next == TOK(comma) ||
-               next == TOK(semicolon) || next == TOK(lbrace) ||
-               next == TOK(rbrace) || next == TOK(colon) ||
-               next == TOK(eof) || next == TOK(ellipsis) ||
-               next == TOK(amp) || next == TOK(ampamp) ||
-               next == TOK(star) || next == TOK(lsquare) ||
-               LexLookingAtClosingAngle(syntax->lex);
-    }
-  }
+  *next = syntax->lex->current_token;
+  *next_closes_angle = LexLookingAtClosingAngle(syntax->lex);
   LexCheckpointRestore(syntax->lex, &checkpoint);
   LexCheckpointDestruct(&checkpoint);
-  return result;
+  return balanced;
+}
+
+// True when the `<` at the current token introduces a template-argument list
+// rather than a comparison.  Used for names that are not already known to be
+// templates: `tuple_size<T>::value < 2` must leave the second `<` as an
+// operator, while `Unknown<T>::type` is still a template-id.
+static bool AngleBracketsLookLikeTemplateId(Syntax* syntax) {
+  Token next;
+  bool next_closes_angle;
+  bool closed_by_nested_angle;
+  if (!ScanAngleBrackets(syntax, &next, &next_closes_angle,
+                         &closed_by_nested_angle)) {
+    return false;
+  }
+  return closed_by_nested_angle || next == TOK(coloncolon) ||
+         next == TOK(lparen) || next == TOK(rparen) || next == TOK(comma) ||
+         next == TOK(semicolon) || next == TOK(lbrace) || next == TOK(rbrace) ||
+         next == TOK(colon) || next == TOK(eof) || next == TOK(ellipsis) ||
+         next == TOK(amp) || next == TOK(ampamp) || next == TOK(star) ||
+         next == TOK(lsquare) || next_closes_angle;
+}
+
+bool SyntaxAngleBracketsPrecedeCall(Syntax* syntax) {
+  Token next;
+  bool next_closes_angle;
+  bool closed_by_nested_angle;
+  return ScanAngleBrackets(syntax, &next, &next_closes_angle,
+                           &closed_by_nested_angle) &&
+         !closed_by_nested_angle && next == TOK(lparen);
 }
 
 // A non-template can share a name with a function template (`operator<<(char)`

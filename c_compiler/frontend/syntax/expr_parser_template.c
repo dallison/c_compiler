@@ -57,6 +57,17 @@ static bool SymbolHasFunctionTemplateOverload(Symbol* symbol) {
   return false;
 }
 
+// True if every overload of `symbol` is a function and none is a template.
+static bool SymbolIsNonTemplateFunctionSet(Symbol* symbol) {
+  for (Symbol* candidate = symbol; candidate != NULL;
+       candidate = candidate->overload_next) {
+    if (candidate->flags.is_template || candidate->type == NULL ||
+        !TypeIsFunction(candidate->type)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 // Reports whether a member overload chain contains a function template.
 static bool StructMemberHasFunctionTemplate(StructMember* member) {
@@ -1068,6 +1079,27 @@ ASTNode* ParseIdentifier(Syntax* syntax,
       }
     }
   }
+  // [temp.names]/3: an unqualified name that lookup finds nothing for, or
+  // only non-template functions, is a template-name before `<`, so that
+  // `get<0>(t)` can call a function template found by argument-dependent
+  // lookup.
+  bool adl_template_id = false;
+  if (CompilerIsCXX() && !name.is_qualified &&
+      name.template_arguments.length == 1 &&
+      name.template_arguments.value.p[0] == NULL &&
+      LexLookingAt(lex, TOK(less)) &&
+      (symbol == NULL || SymbolIsNonTemplateFunctionSet(symbol)) &&
+      SyntaxAngleBracketsPrecedeCall(syntax)) {
+    if (!CompilerCXXAtLeast(kLanguageStandardCXX20)) {
+      SyntaxWarning(syntax, "c++20-extensions",
+                    "Call of undeclared template name '%s' with explicit "
+                    "template arguments is a C++20 extension",
+                    FullyQualifiedIdentifierLast(&name));
+    }
+    name.template_arguments.value.p[0] =
+        SyntaxParseTemplateArgumentList(syntax, followers);
+    adl_template_id = name.template_arguments.value.p[0] != NULL;
+  }
   if (symbol == NULL) {
     if (name.is_qualified) {
       ASTNode* member_access = NewQualifiedBaseMemberAccessFromThis(syntax, &name);
@@ -1125,7 +1157,7 @@ ASTNode* ParseIdentifier(Syntax* syntax,
       // member function) must stay a free function.  A bare name can still be
       // a data member that is absent from the ordinary symbol table
       // (`__len_` in an out-of-line `basic_string` method).
-      if (!builtin_call &&
+      if (!builtin_call && !adl_template_id &&
           (!LexLookingAt(lex, TOK(lparen)) ||
            UnresolvedNameMayBeDependentMember(syntax))) {
         // Before `this->name`, which accepts any name: a local class's
@@ -1156,7 +1188,8 @@ ASTNode* ParseIdentifier(Syntax* syntax,
             return static_member;
           }
         }
-        if (!builtin_call && UnresolvedNameMayBeDependentMember(syntax)) {
+        if (!builtin_call && !adl_template_id &&
+            UnresolvedNameMayBeDependentMember(syntax)) {
           ASTNode* deferred_member_access =
               NewMemberAccessFromThis(syntax, &name,
                                       /*allow_unresolved_member=*/true);

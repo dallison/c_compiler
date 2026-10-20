@@ -186,6 +186,9 @@ bool SyntaxParseFullyQualifiedIdentifier(Syntax* syntax,
                                          FullyQualifiedIdentifier* name);
 bool SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
     Syntax* syntax, FullyQualifiedIdentifier* name, TokenClass followers);
+// True when the `<` at the current token opens a balanced list followed by
+// `(`.  Does not consume tokens.
+bool SyntaxAngleBracketsPrecedeCall(Syntax* syntax);
 bool SyntaxParseOperatorFunctionName(Syntax* syntax, String* name);
 bool SyntaxIsCXXNumericLiteralOperatorTemplate(Symbol* symbol);
 // Parses an operator-function-id (operator+, operator(), operator[], ...) or a
