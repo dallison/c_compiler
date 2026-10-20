@@ -122,6 +122,18 @@ print_expected_diags() {
   done < "$file"
 }
 
+print_unexpected_diags() {
+  local file=$1
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "// EXPECT-NOT:"*)
+        printf '%s\n' "${line#// EXPECT-NOT: }"
+        ;;
+    esac
+  done < "$file"
+}
+
 run_compile() {
   local src=$1
   local log=$2
@@ -250,6 +262,18 @@ for src in "$SUITE_ROOT/$TESTS_DIR"/fail/*.cpp; do
   done < <(print_expected_diags "$src")
   if [ -n "$missing" ]; then
     record_fail "fail/$base" "missing diagnostic: $missing" diagnostic "$log"
+    continue
+  fi
+  unexpected=""
+  while IFS= read -r rejected; do
+    if grep -Fq "$rejected" "$log"; then
+      unexpected=$rejected
+      break
+    fi
+  done < <(print_unexpected_diags "$src")
+  if [ -n "$unexpected" ]; then
+    record_fail "fail/$base" "unexpected diagnostic: $unexpected" diagnostic \
+      "$log"
     continue
   fi
   record_pass "fail/$base"

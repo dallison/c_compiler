@@ -10657,7 +10657,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
             !TemplateTemplateArgumentMatchesParameter(param, arg);
         if (arg == NULL || arg->kind != param->kind ||
             incompatible_template) {
-          if (emit_error) {
+          if (emit_error && (arg == NULL || !arg->is_erroneous)) {
             SyntaxError(
                 parser->syntax, "%s",
                 incompatible_template
@@ -10679,7 +10679,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
                 !TemplateTemplateArgumentMatchesParameter(param, element);
             if (element == NULL || element->kind != param->kind ||
                 incompatible_element) {
-              if (emit_error) {
+              if (emit_error && (element == NULL || !element->is_erroneous)) {
                 SyntaxError(
                     parser->syntax, "%s",
                     incompatible_element
@@ -10804,6 +10804,8 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
         return NULL;
       }
     }
+    // An argument whose parse failed has been diagnosed already.
+    bool report_mismatch = emit_error && !arg->is_erroneous;
     if (argument_from_default &&
         param->kind == kTemplateParameterNonType &&
         param->type != NULL && (param->type->type & kTypeAuto) == 0 &&
@@ -10839,7 +10841,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
       }
     }
     if (param->kind != arg->kind) {
-      if (emit_error) {
+      if (report_mismatch) {
         SyntaxError(parser->syntax, "%s",
                     TemplateArgumentKindError(param->kind));
       }
@@ -10855,7 +10857,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
     }
     if (param->kind == kTemplateParameterNonType &&
         !ConvertClassNonTypeTemplateArgument(parser, param, arg)) {
-      if (emit_error) {
+      if (report_mismatch) {
         SyntaxError(parser->syntax,
                     "Template non-type argument cannot initialize the parameter object");
       }
@@ -10867,7 +10869,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
     }
     if (param->kind == kTemplateParameterNonType &&
         !ConvertNonTypeArgumentToParameterType(parser, param, arg)) {
-      if (emit_error) {
+      if (report_mismatch) {
         SyntaxError(parser->syntax,
                     "Template non-type argument is not compatible with parameter type");
       }
@@ -10879,7 +10881,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
     }
     if (param->kind == kTemplateParameterNonType &&
         !TemplateNonTypeArgumentMatchesParameter(param, arg)) {
-      if (emit_error) {
+      if (report_mismatch) {
         bool names_variable_only =
             arg->type != NULL && TypeIsReference(arg->type) &&
             param->type != NULL && !TypeIsReference(param->type);
@@ -10897,7 +10899,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
     }
     if (param->kind == kTemplateParameterTemplate &&
         !TemplateTemplateArgumentMatchesParameter(param, arg)) {
-      if (emit_error) {
+      if (report_mismatch) {
         SyntaxError(parser->syntax,
                     "Template argument does not match template parameter list");
       }

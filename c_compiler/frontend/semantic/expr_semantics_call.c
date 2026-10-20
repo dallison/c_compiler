@@ -3046,6 +3046,13 @@ static ASTNode* FunctionCallTryDeduceIdentifierFunctionTemplate(
                                              kQualPlain));
         return (ASTNode*)node;
       }
+      if (TemplateArgumentVectorContainsErroneous(id->template_arguments)) {
+        // An explicit argument that failed to parse was diagnosed already.
+        ASTNodeSetType(
+            (ASTNode*)node,
+            NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain));
+        return (ASTNode*)node;
+      }
       if (ConceptsFunctionTemplateHasAssociatedConstraint(id->symbol)) {
         ReportUnsatisfiedFunctionTemplateConstraints(node, id->symbol,
                                                      id->template_arguments,
@@ -3288,6 +3295,10 @@ static ASTNode* FunctionCallResolveCalleeAndTemplates(VectorASTNode* node,
     }
     TypeRecordDelete(return_type);
     return (ASTNode*)node;
+  }
+  if (TemplateArgumentVectorContainsErroneous(id->template_arguments)) {
+    // An explicit argument that failed to parse was diagnosed already.
+    return NULL;
   }
   if (TypeIsFunction(id->symbol->type) &&
       !TypeCanDeduceFunctionTemplateFromCallWithExplicitArgsAndOffset(

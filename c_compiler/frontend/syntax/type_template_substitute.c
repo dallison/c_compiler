@@ -335,6 +335,7 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
   TemplateArgument* concrete = TemplateArgumentAlloc();
   concrete->kind = arg->kind;
   concrete->is_pack_expansion = false;
+  concrete->is_erroneous = arg->is_erroneous;
   concrete->type =
       arg->kind == kTemplateParameterNonType && arg->type != NULL
           ? TypeRecordInternOrCopy(arg->type) : NULL;

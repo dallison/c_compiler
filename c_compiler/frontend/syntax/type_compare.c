@@ -123,6 +123,18 @@ bool TemplateArgumentVectorContainsTemplateParameter(Vector* args) {
   return false;
 }
 
+bool TemplateArgumentVectorContainsErroneous(Vector* args) {
+  for (size_t i = 0; args != NULL && i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg != NULL &&
+        (arg->is_erroneous ||
+         TemplateArgumentVectorContainsErroneous(arg->pack_arguments))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool TypeRecordNodeContainsTemplateParameter(TypeRecord* type) {
   if (TypeIsUnknown(type) && type->template_parameter_index >= 0) {
     return true;

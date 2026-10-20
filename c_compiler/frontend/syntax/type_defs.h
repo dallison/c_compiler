@@ -174,6 +174,9 @@ typedef struct TemplateArgument {
   int template_parameter_index;  // >=0 when non-type arg is a param. // @wire 5
   bool is_pack_expansion;        // @wire 2
   bool references_parameter_pack;  // Pattern names a pack.       // @wire 15
+  // Parsing the argument reported an error; matching it to a parameter
+  // fails without another diagnostic.
+  bool is_erroneous;        // @wire - (transient)
   struct TypeRecord* type;  // Non-NULL for type arguments.        // @wire 3
   long long int_value;      // Valid for simple non-type int args. // @wire 4
   Vector* pack_arguments;   // TemplateArgument* for bound packs.   // @wire 6

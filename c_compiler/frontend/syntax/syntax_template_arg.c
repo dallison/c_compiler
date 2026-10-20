@@ -453,19 +453,25 @@ static bool TemplateParameterIndexIsPack(Syntax* syntax, int parameter_index) {
 // into `arg`: a direct reference to a template parameter, a constant value,
 // or an lvalue (pointer / reference argument).  With template parameters in
 // scope an argument that cannot be folded yet is kept as a dependent
-// expression; otherwise it is diagnosed.
+// expression; otherwise it is diagnosed unless `parse_failed` or its analysis
+// reported an error already.
 static void FoldNonTypeTemplateArgument(Syntax* syntax, TemplateArgument* arg,
                                         ASTNode* expr,
                                         int direct_template_parameter_index,
-                                        bool template_parameters_in_scope) {
+                                        bool template_parameters_in_scope,
+                                        bool parse_failed) {
   Lex* lex = syntax->lex;
   if (direct_template_parameter_index >= 0) {
     arg->template_parameter_index = direct_template_parameter_index;
   }
   Symbol* lvalue_symbol = TemplateArgumentLvalueSymbol(expr);
+  DiagnosticWatch watch;
+  DiagnosticWatchBegin(&watch);
   compiler->constant_evaluation_required_depth++;
   expr = AnalyzeExpression(expr);
   compiler->constant_evaluation_required_depth--;
+  DiagnosticWatchEnd(&watch);
+  bool diagnosed = parse_failed || watch.errors > 0;
   bool value_ok = false;
   if (arg->template_parameter_index >= 0) {
     arg->type = expr != NULL && expr->type != NULL
@@ -494,10 +500,12 @@ static void FoldNonTypeTemplateArgument(Syntax* syntax, TemplateArgument* arg,
         arg->is_pack_expansion = LexMatch(lex, TOK(ellipsis));
         return;
       }
-      SyntaxError(syntax,
-                  "Template non-type argument must be an integer constant "
-                  "expression, or a pointer/member-pointer argument must "
-                  "be a constant expression");
+      if (!diagnosed) {
+        SyntaxError(syntax,
+                    "Template non-type argument must be an integer constant "
+                    "expression, or a pointer/member-pointer argument must "
+                    "be a constant expression");
+      }
     }
   }
   ASTNodeDelete(expr);
@@ -512,8 +520,11 @@ static void ParseNonTypeTemplateArgument(Syntax* syntax,
   Lex* lex = syntax->lex;
   bool old_parsing_template_argument = syntax->parsing_template_argument;
   syntax->parsing_template_argument = true;
+  DiagnosticWatch watch;
+  DiagnosticWatchBegin(&watch);
   ASTNode* expr = SyntaxParseSingleExpression(syntax,
                                               TC(closebra) | TC(exprsep));
+  DiagnosticWatchEnd(&watch);
   syntax->parsing_template_argument = old_parsing_template_argument;
   arg->kind = kTemplateParameterNonType;
   arg->references_parameter_pack =
@@ -551,7 +562,7 @@ static void ParseNonTypeTemplateArgument(Syntax* syntax,
   }
   FoldNonTypeTemplateArgument(syntax, arg, expr,
                               direct_template_parameter_index,
-                              template_parameters_in_scope);
+                              template_parameters_in_scope, watch.errors > 0);
 }
 
 // Parses a template argument list `<...>` if one follows, synchronizing on
@@ -571,6 +582,8 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
   Vector* args = NewVector();
   while (!LexEof(lex) && !LexLookingAtClosingAngle(lex)) {
     TemplateArgument* arg = NewTemplateArgumentAtCurrentToken(lex);
+    DiagnosticWatch watch;
+    DiagnosticWatchBegin(&watch);
     Symbol* bare_template = SyntaxBareTemplateArgumentSymbol(syntax);
     if (BareTemplateNameIsNotAType(bare_template)) {
       ParseTemplateNameArgument(syntax, arg, bare_template);
@@ -579,6 +592,8 @@ Vector* SyntaxParseTemplateArgumentList(Syntax* syntax, TokenClass followers) {
     } else {
       ParseNonTypeTemplateArgument(syntax, arg);
     }
+    DiagnosticWatchEnd(&watch);
+    arg->is_erroneous = watch.errors > 0;
     VectorAppend(args, arg);
     if (!LexMatch(lex, TOK(comma))) {
       break;

@@ -22,5 +22,11 @@ Failing tests can list required diagnostic substrings:
 // EXPECT: Expected semicolon
 ```
 
+and substrings that must not appear (for example a follow-on error):
+
+```cpp
+// EXPECT-NOT: Template argument must name a type
+```
+
 The runner defaults to `-target pcode -S -std=c++20` and writes only assembly,
 so tests do not require a C++ runtime or executable support.

@@ -403,6 +403,10 @@ inline bool TypeIsUnknown(TypeRecord* type) {
   return (type->type & kTypeUnknown) != 0;
 }
 
+// True when an argument (or pack element) failed to parse
+// (TemplateArgument.is_erroneous).
+bool TemplateArgumentVectorContainsErroneous(Vector* args);
+
 bool TypeEqual(TypeRecord* t1, TypeRecord* t2);
 // Non-allocating variants for comparisons that intentionally ignore one
 // top-level property while preserving strict comparison of the remaining type.

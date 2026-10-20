@@ -1604,6 +1604,7 @@ static TemplateArgument* CopyTemplateArgumentForNormalization(
   copy->kind = arg->kind;
   copy->is_pack_expansion = arg->is_pack_expansion;
   copy->references_parameter_pack = arg->references_parameter_pack;
+  copy->is_erroneous = arg->is_erroneous;
   copy->type = arg->type != NULL ? TypeRecordCopy(arg->type) : NULL;
   copy->int_value = arg->int_value;
   copy->template_parameter_index = arg->template_parameter_index;
