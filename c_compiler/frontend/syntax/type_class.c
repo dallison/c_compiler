@@ -563,25 +563,35 @@ static void AddInjectedClassName(TypeParser* parser, Symbol* tag) {
   }
 }
 
+static bool SyntaxParsingTemplatePattern(Syntax* syntax) {
+  return syntax->parsing_template_declaration ||
+         syntax->current_template_parameters != NULL ||
+         syntax->current_template_parameter_count != 0;
+}
+
 bool SyntaxRejectIncompleteObjectType(Syntax* syntax, TypeRecord* type,
                                       bool open_class_is_incomplete,
                                       const char* format) {
-  if (syntax->parsing_template_declaration ||
-      syntax->current_template_parameters != NULL ||
-      syntax->current_template_parameter_count != 0 ||
-      compiler->template_instantiation_depth > 0) {
-    return false;
-  }
   TypeRecord* incomplete =
       TypeIncompleteObjectClass(type, open_class_is_incomplete);
-  if (incomplete == NULL) {
+  TypeRecord* invalid =
+      incomplete == NULL ? TypeUnreportedInvalidInstantiation(type) : NULL;
+  if ((incomplete == NULL && invalid == NULL) ||
+      SyntaxParsingTemplatePattern(syntax) ||
+      (incomplete != NULL && compiler->template_instantiation_depth > 0)) {
     return false;
   }
-  String name = {0};
-  TypeRecordToString(incomplete, &name);
-  SyntaxError(syntax, format, name.value);
-  StringDestruct(&name);
-  return true;
+  String message = {0};
+  if (incomplete != NULL) {
+    TypeRecordToString(incomplete, &message);
+    SyntaxError(syntax, format, message.value);
+  } else {
+    TypeInvalidInstantiationMessage(invalid, &message);
+    SyntaxError(syntax, "%s", message.value);
+    TypeNoteInvalidInstantiation(invalid);
+  }
+  StringDestruct(&message);
+  return incomplete != NULL;
 }
 
 void SyntaxRejectIncompleteFunctionDefinitionTypes(Syntax* syntax,

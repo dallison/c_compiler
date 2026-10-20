@@ -1484,22 +1484,23 @@ static void DiagnosePointerToReferenceMember(TypeParser* parser,
   }
 }
 
-/* Substitutes the declared type of data member `member` of `source`.  A type
- * that does not substitute (`decltype(f(T()))` with no viable `f`) makes the
- * class instantiation ill-formed; that is reported here unless the
- * substitution already reported it, and NULL tells the caller to drop the
- * member. */
-static TypeRecord* SubstituteClassDataMemberType(TypeParser* parser,
-                                                 Struct* source, Symbol* member,
-                                                 Vector* args) {
+/* Substitutes the declared type of data member or member alias `member` of
+ * `source` for its copy in `target`.  A type that does not substitute
+ * (`decltype(f(T()))` with no viable `f`) makes `target` ill-formed, but only
+ * once it is required to be complete: unless the substitution reported it,
+ * the member is recorded on `target` (Struct.invalid_instantiated_member).
+ * NULL tells the caller to drop a data member. */
+static TypeRecord* SubstituteClassMemberTypeFor(TypeParser* parser,
+                                                Struct* target, Struct* source,
+                                                Symbol* member, Vector* args) {
   DiagnosticWatch watch;
   DiagnosticWatchBegin(&watch);
   TypeRecord* type = SubstituteClassMemberType(parser, source, member, args);
   DiagnosticWatchEnd(&watch);
-  if (type == NULL && watch.errors == 0) {
-    SyntaxErrorAtLocation(parser->syntax, member->location,
-                          "Invalid type for member '%s' in this instantiation",
-                          member->name.value);
+  if (type == NULL && watch.errors == 0 &&
+      target->invalid_instantiated_member == NULL) {
+    target->invalid_instantiated_member = member;
+    target->invalid_instantiation_owner = target;
   }
   return type;
 }
@@ -1656,6 +1657,12 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     }
   }
   str->in_namespace_template = from->in_namespace_template;
+  if (from->invalid_instantiated_member != NULL) {
+    str->invalid_instantiated_member = from->invalid_instantiated_member;
+    str->invalid_instantiation_owner = from->invalid_instantiation_owner == from
+                                           ? str
+                                           : from->invalid_instantiation_owner;
+  }
   str->lambda_has_init_capture = from->lambda_has_init_capture;
   str->lambda_body_needs_reanalysis = from->lambda_has_init_capture;
   // The final copy of a member template's local class is built from the class
@@ -1883,6 +1890,10 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
                  NewCXXBaseSpecifier(base_type, template_base->access,
                                      template_base->is_virtual));
   }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    TypeInheritInvalidInstantiation(str, base->type);
+  }
   CollectCXXVirtualBases(str);
   CopyCXXBaseVirtualMembers(str);
   LayoutCXXBaseSpecifiers(str);
@@ -1998,11 +2009,8 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       }
     }
     bool is_typedef = StorageIs(member->symbol->storage, STO(typedef));
-    TypeRecord* member_type =
-        is_typedef ? SubstituteClassMemberType(parser, from, member->symbol,
-                                               member_args)
-                   : SubstituteClassDataMemberType(parser, from, member->symbol,
-                                                   member_args);
+    TypeRecord* member_type = SubstituteClassMemberTypeFor(
+        parser, str, from, member->symbol, member_args);
     if (member_type == NULL && !is_typedef) {
       continue;
     }
@@ -2040,6 +2048,9 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
     }
     DiagnosePointerToReferenceMember(parser, member->symbol, member_type);
     TypeRecordCalculateSize(member_type);
+    if (!is_typedef && !member->is_static) {
+      TypeInheritInvalidInstantiation(str, member_type);
+    }
     Symbol* member_symbol =
         NewSymbol(member->symbol->name.value, member_type, member->symbol->storage);
     member_symbol->location = member->symbol->location;
@@ -12528,6 +12539,19 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
   Vector pending_nested_friend_targets;
   VectorInit(&pending_nested_friend_sources);
   VectorInit(&pending_nested_friend_targets);
+  if (str->invalid_instantiated_member == NULL &&
+      source_struct->invalid_instantiated_member != NULL) {
+    str->invalid_instantiated_member =
+        source_struct->invalid_instantiated_member;
+    str->invalid_instantiation_owner =
+        source_struct->invalid_instantiation_owner == source_struct
+            ? str
+            : source_struct->invalid_instantiation_owner;
+  }
+  for (size_t i = 0; i < str->bases.length; i++) {
+    CXXBaseSpecifier* base = str->bases.value.p[i];
+    TypeInheritInvalidInstantiation(str, base->type);
+  }
   for (size_t i = 0; i < source_struct->members.length; i++) {
     StructMember* member = source_struct->members.value.p[i];
     // Layout-only fields from the primary template are not source-level
@@ -12538,8 +12562,8 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
       continue;
     }
     if (StructMemberIsNestedType(member)) {
-      TypeRecord* nested_type = SubstituteClassMemberType(
-          parser, source_struct, member->symbol, source_args);
+      TypeRecord* nested_type = SubstituteClassMemberTypeFor(
+          parser, str, source_struct, member->symbol, source_args);
       DiagnosePointerToReferenceMember(parser, member->symbol, nested_type);
       // A member type alias may substitute to a lazy dependent-member type such
       // as `typename ratio<1,1000>::type` (from `using period = typename
@@ -12604,13 +12628,16 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
       }
       continue;
     }
-    TypeRecord* member_type = SubstituteClassDataMemberType(
-        parser, source_struct, member->symbol, source_args);
+    TypeRecord* member_type = SubstituteClassMemberTypeFor(
+        parser, str, source_struct, member->symbol, source_args);
     if (member_type == NULL) {
       continue;
     }
     DiagnosePointerToReferenceMember(parser, member->symbol, member_type);
     TypeRecordCalculateSize(member_type);
+    if (!member->is_static) {
+      TypeInheritInvalidInstantiation(str, member_type);
+    }
     Symbol* member_symbol =
         NewSymbol(member->symbol->name.value, member_type, member->symbol->storage);
     member_symbol->location = member->symbol->location;

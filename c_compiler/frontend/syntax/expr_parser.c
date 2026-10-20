@@ -1310,7 +1310,6 @@ static bool TrialParseTypeName(Syntax* syntax, TypeParser* parser,
   // at the first one), while the trap additionally catches LexErrors (e.g.
   // "Missing close parenthesis"), which do not honor `abort_on_error`.
   volatile bool saved_trap = DiagnosticErrorTrapBegin();
-  bool prev_abort_on_error = abort_on_error;
   // Save the global abort target: parsing the type-name can recurse through
   // the expression parser (e.g. an array bound) and set up its own trial,
   // which would otherwise clobber our jmp_buf.
@@ -1324,8 +1323,11 @@ static bool TrialParseTypeName(Syntax* syntax, TypeParser* parser,
   int saved_nesting_depth = syntax->expression_nesting_depth;
   int saved_struct_depth = syntax->struct_definition_depth;
   int saved_instantiation_depth = compiler->template_instantiation_depth;
+  int saved_watch_trap_depth = compiler->diagnostic_watch_trap_depth;
+  int saved_watch_suppression_depth =
+      compiler->diagnostic_watch_suppression_depth;
   Struct* volatile saved_class_head = syntax->cxx_class_head;
-  abort_on_error = true;
+  AbortOnErrorState saved_abort = AbortOnErrorBegin();
   if (setjmp(error_abort_state) == 0) {
     TypeParserInit(parser, syntax->lex, syntax, STO(implicit),
                    syntax->context);
@@ -1335,11 +1337,13 @@ static bool TrialParseTypeName(Syntax* syntax, TypeParser* parser,
     }
     parse_completed = true;
   }
-  abort_on_error = prev_abort_on_error;
+  AbortOnErrorEnd(saved_abort);
   memcpy(error_abort_state, saved_abort_state, sizeof(error_abort_state));
   syntax->expression_nesting_depth = saved_nesting_depth;
   syntax->struct_definition_depth = saved_struct_depth;
   compiler->template_instantiation_depth = saved_instantiation_depth;
+  compiler->diagnostic_watch_trap_depth = saved_watch_trap_depth;
+  compiler->diagnostic_watch_suppression_depth = saved_watch_suppression_depth;
   if (!parse_completed) {
     syntax->cxx_class_head = saved_class_head;
   }

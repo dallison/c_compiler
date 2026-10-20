@@ -49,7 +49,9 @@ void StructAddSyntheticMember(Struct* str, StructMember* member);
 // of `type` has incomplete class type (see TypeIncompleteObjectClass).  Not
 // checked inside templates: a class template is instantiated whenever its
 // template-id is named, so completeness there is not decided where the
-// standard decides it.
+// standard decides it.  Outside template patterns it also reports, once, a
+// class specialization that is complete but ill-formed
+// (TypeUnreportedInvalidInstantiation); that returns false.
 bool SyntaxRejectIncompleteObjectType(struct Syntax* syntax, TypeRecord* type,
                                       bool open_class_is_incomplete,
                                       const char* format);

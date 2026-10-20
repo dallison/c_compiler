@@ -846,7 +846,8 @@ static StructMember* LookupStructMemberForReference(
       StringDestruct(&concrete_name);
     }
   }
-  if (member == NULL && struct_info->tag_symbol != NULL &&
+  if ((member == NULL || struct_info->invalid_instantiated_member != NULL) &&
+      struct_info->tag_symbol != NULL &&
       SemanticRejectIncompleteObjectType(
           (ASTNode*)node, struct_info->tag_symbol->type,
           "member access into incomplete type '%s'")) {

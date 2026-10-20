@@ -121,7 +121,7 @@ void SemanticError(ASTNode* node, const char* format, ...) {
 }
 
 void VSemanticError(ASTNode* node, const char* format, va_list ap) {
-  if (abort_on_error) {
+  if (AbortsOnError()) {
     longjmp(error_abort_state, 1);
   }
   SourceLocation location =
@@ -936,57 +936,78 @@ void SemanticTypeConversionWarning(ASTNode* from, TypeRecord* to,
   StringDestruct(&to_string);
 }
 
-static bool FunctionBelongsToTemplate(TypeRecord* function, int depth);
+static bool FunctionBelongsToTemplate(TypeRecord* function, int depth,
+                                      bool patterns_only);
 
-static bool ClassBelongsToTemplate(Struct* str, int depth) {
+// With `patterns_only`, instantiations and specializations do not count.
+static bool ClassBelongsToTemplate(Struct* str, int depth, bool patterns_only) {
   for (Struct* s = str; s != NULL; s = s->lexical_parent) {
     if (s->is_template || s->defining_template_scope_count > 0 ||
-        s->in_namespace_template || s->local_class_arguments != NULL ||
-        (s->tag_symbol != NULL && s->tag_symbol->type != NULL &&
-         s->tag_symbol->type->template_origin != NULL)) {
+        s->in_namespace_template) {
+      return true;
+    }
+    if (!patterns_only &&
+        (s->local_class_arguments != NULL ||
+         (s->tag_symbol != NULL && s->tag_symbol->type != NULL &&
+          s->tag_symbol->type->template_origin != NULL))) {
       return true;
     }
     // A closure or local class belongs to the function that defines it.
     Symbol* enclosing = s->access_enclosing_function;
     if (enclosing != NULL && depth < 8 &&
-        FunctionBelongsToTemplate(enclosing->type, depth + 1)) {
+        FunctionBelongsToTemplate(enclosing->type, depth + 1, patterns_only)) {
       return true;
     }
   }
   return false;
 }
 
-static bool FunctionBelongsToTemplate(TypeRecord* function, int depth) {
+static bool FunctionBelongsToTemplate(TypeRecord* function, int depth,
+                                      bool patterns_only) {
   if (function == NULL || !TypeIsFunction(function)) {
     return false;
   }
   FunctionInfo* info = &function->info.function;
-  return info->template_origin != NULL ||
+  return (!patterns_only && info->template_origin != NULL) ||
          (info->symbol != NULL && info->symbol->flags.is_template) ||
          TypeContainsTemplateParameter(function) ||
-         ClassBelongsToTemplate(info->cxx_member_owner, depth);
+         ClassBelongsToTemplate(info->cxx_member_owner, depth, patterns_only);
 }
 
 bool SemanticAnalyzingNonTemplateCode(void) {
   return compiler->template_instantiation_depth == 0 &&
-         !FunctionBelongsToTemplate(compiler->current_function, 0) &&
-         !ClassBelongsToTemplate(compiler->current_class_access_context, 0);
+         !FunctionBelongsToTemplate(compiler->current_function, 0, false) &&
+         !ClassBelongsToTemplate(compiler->current_class_access_context, 0,
+                                 false);
+}
+
+static bool SemanticAnalyzingTemplatePattern(void) {
+  return FunctionBelongsToTemplate(compiler->current_function, 0, true) ||
+         ClassBelongsToTemplate(compiler->current_class_access_context, 0,
+                                true);
 }
 
 bool SemanticRejectIncompleteObjectType(ASTNode* node, TypeRecord* type,
                                         const char* format) {
-  if (!SemanticAnalyzingNonTemplateCode()) {
-    return false;
-  }
   TypeRecord* incomplete = TypeIncompleteObjectClass(type, false);
-  if (incomplete == NULL) {
+  TypeRecord* invalid =
+      incomplete == NULL ? TypeUnreportedInvalidInstantiation(type) : NULL;
+  if ((incomplete != NULL && !SemanticAnalyzingNonTemplateCode()) ||
+      (invalid != NULL && SemanticAnalyzingTemplatePattern()) ||
+      (incomplete == NULL && invalid == NULL)) {
     return false;
   }
-  String name = {0};
-  TypeRecordToString(incomplete, &name);
-  SemanticError(node, format, name.value);
-  StringDestruct(&name);
-  return true;
+  String message = {0};
+  if (incomplete != NULL) {
+    TypeRecordToString(incomplete, &message);
+    SemanticError(node, format, message.value);
+  } else {
+    TypeInvalidInstantiationMessage(invalid, &message);
+    SemanticError(node, "%s", message.value);
+    TypeNoteInvalidInstantiation(invalid);
+  }
+  StringDestruct(&message);
+  return incomplete != NULL;
 }
 
 // Fold an integer-to-integer constant conversion to type `to`.  The stored

@@ -218,6 +218,19 @@ bool TypeIsCompleteClass(TypeRecord* type);
 // complete, is not a class, or depends on template parameters.
 TypeRecord* TypeIncompleteObjectClass(TypeRecord* type,
                                       bool open_class_is_incomplete);
+// The class specialization an object of `type` (or of its array elements) is
+// when its instantiation left a member without a type that has not been
+// reported yet (Struct.invalid_instantiated_member); otherwise NULL.
+TypeRecord* TypeUnreportedInvalidInstantiation(TypeRecord* type);
+// The error to report for TypeUnreportedInvalidInstantiation `type`.
+void TypeInvalidInstantiationMessage(TypeRecord* type, String* message);
+// Follows the error the caller reported for TypeUnreportedInvalidInstantiation
+// `type` with a note at the member.  Unless diagnostics are suppressed or
+// trapped, marks it reported so the class is diagnosed once.
+void TypeNoteInvalidInstantiation(TypeRecord* type);
+// A specialization `target` with a base or data member of ill-formed class
+// `type` (or array of it) is ill-formed too.
+void TypeInheritInvalidInstantiation(Struct* target, TypeRecord* type);
 
 Symbol* NewEnumConstant(const char* name, int64_t value);
 Symbol* NewScopedEnumConstant(const char* name, int64_t value,

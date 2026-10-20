@@ -25,6 +25,20 @@ struct Struct;
 extern jmp_buf error_abort_state;       // Where to abort to.
 extern bool abort_on_error;
 
+// Sets abort_on_error for a speculative parse, returning the previous setting
+// for AbortOnErrorEnd.  An error raised inside a diagnostic suppression or
+// error trap region entered after Begin (a substitution probing for SFINAE, a
+// nested tentative parse) is left to that region and does not abort.
+typedef struct AbortOnErrorState {
+  bool enabled;
+  int suppression_depth;
+  int trap_depth;
+} AbortOnErrorState;
+AbortOnErrorState AbortOnErrorBegin(void);
+void AbortOnErrorEnd(AbortOnErrorState saved);
+// True when an error reported now must longjmp to error_abort_state.
+bool AbortsOnError(void);
+
 // The syntax analyzer.
 typedef struct Syntax {
   Lex* lex;                             // Lexical analyzer providing tokens.

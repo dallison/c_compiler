@@ -78,7 +78,9 @@ bool SemanticAnalyzingNonTemplateCode(void);
 // Reports `format` (given the class's name) at `node` and returns true when
 // an object of `type` has incomplete class type in non-template code.  Not
 // checked in templates, whose classes are instantiated whenever their
-// template-id is named.
+// template-id is named.  Outside template patterns it also reports, once, a
+// class specialization that is complete but ill-formed
+// (TypeUnreportedInvalidInstantiation); that returns false.
 bool SemanticRejectIncompleteObjectType(ASTNode* node, TypeRecord* type,
                                         const char* format);
 

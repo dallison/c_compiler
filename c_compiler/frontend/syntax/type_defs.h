@@ -536,6 +536,14 @@ struct Struct {
   // class type was incomplete at instantiation; it is laid out again once that
   // type is complete.
   bool layout_pending_completion;  // @wire - (recomputed)
+  // Set once invalid_instantiated_member has been reported.
+  bool invalid_instantiation_reported;  // @wire - (recomputed)
+  // The pattern member (alias or data member) whose type did not substitute
+  // when invalid_instantiation_owner, this specialization or one of its bases
+  // or data member classes, was instantiated.  This class is ill-formed, which
+  // is reported where it is required to be complete.
+  Symbol* invalid_instantiated_member;  // @wire - (recomputed)
+  Struct* invalid_instantiation_owner;  // @wire - (recomputed)
   // Template-parameter count in scope when this class's *body* began parsing
   // (enclosing templates plus this class's own template head).  A class's own
   // `is_template`/`template_parameter_count` are only set after its body is

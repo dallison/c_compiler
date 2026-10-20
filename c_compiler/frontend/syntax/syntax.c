@@ -40,6 +40,30 @@
 jmp_buf error_abort_state;       // Where to abort to.
 
 bool abort_on_error;
+static int abort_on_error_suppression_depth;
+static int abort_on_error_trap_depth;
+
+AbortOnErrorState AbortOnErrorBegin(void) {
+  AbortOnErrorState saved = {abort_on_error, abort_on_error_suppression_depth,
+                             abort_on_error_trap_depth};
+  abort_on_error = true;
+  abort_on_error_suppression_depth = compiler->diagnostic_suppression_depth;
+  abort_on_error_trap_depth = compiler->diagnostic_error_trap_depth;
+  return saved;
+}
+
+void AbortOnErrorEnd(AbortOnErrorState saved) {
+  abort_on_error = saved.enabled;
+  abort_on_error_suppression_depth = saved.suppression_depth;
+  abort_on_error_trap_depth = saved.trap_depth;
+}
+
+bool AbortsOnError(void) {
+  return abort_on_error &&
+         compiler->diagnostic_suppression_depth <=
+             abort_on_error_suppression_depth &&
+         compiler->diagnostic_error_trap_depth <= abort_on_error_trap_depth;
+}
 
 static int next_pc_label_id = 0;
 
@@ -601,7 +625,7 @@ bool SyntaxAddTag(Syntax* syntax, Symbol* symbol) {
 // Reports a parse error at the lexer's current position; longjmps when
 // `abort_on_error` is set.
 void SyntaxError(Syntax* syntax, const char* format, ...) {
-  if (abort_on_error) {
+  if (AbortsOnError()) {
     longjmp(error_abort_state, 1);
   }
   va_list ap;
@@ -616,7 +640,7 @@ void SyntaxError(Syntax* syntax, const char* format, ...) {
  * so the error must point back at where the construct was actually written. */
 void SyntaxErrorAtLocation(Syntax* syntax, SourceLocation location,
                            const char* format, ...) {
-  if (abort_on_error) {
+  if (AbortsOnError()) {
     longjmp(error_abort_state, 1);
   }
   va_list ap;

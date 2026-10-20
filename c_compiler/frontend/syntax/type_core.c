@@ -2785,6 +2785,67 @@ TypeRecord* TypeIncompleteObjectClass(TypeRecord* type,
   return NULL;
 }
 
+TypeRecord* TypeUnreportedInvalidInstantiation(TypeRecord* type) {
+  while (type != NULL && TypeIsArray(type)) {
+    type = type->next;
+  }
+  if (type == NULL || !TypeIsStructOrUnion(type) ||
+      type->info.struct_info == NULL) {
+    return NULL;
+  }
+  Struct* s = type->info.struct_info;
+  if (s->invalid_instantiated_member == NULL ||
+      s->invalid_instantiation_reported ||
+      s->invalid_instantiation_owner->invalid_instantiation_reported ||
+      s->is_template || TypeContainsTemplateParameter(type)) {
+    return NULL;
+  }
+  return type;
+}
+
+void TypeInvalidInstantiationMessage(TypeRecord* type, String* message) {
+  Struct* s = type->info.struct_info;
+  Struct* owner = s->invalid_instantiation_owner;
+  String name = {0};
+  TypeRecord* owner_type =
+      owner->tag_symbol != NULL && owner->tag_symbol->type != NULL
+          ? owner->tag_symbol->type
+          : type;
+  TypeRecordToString(owner_type, &name);
+  StringInit(message, "Invalid type for member '");
+  StringAppend(message, s->invalid_instantiated_member->name.value);
+  StringAppend(message, "' in instantiation of '");
+  StringAppend(message, name.value);
+  StringAppend(message, "'");
+  StringDestruct(&name);
+}
+
+void TypeNoteInvalidInstantiation(TypeRecord* type) {
+  Struct* s = type->info.struct_info;
+  if (DiagnosticsSuppressed() || compiler->diagnostic_error_trap_depth > 0) {
+    return;
+  }
+  Symbol* member = s->invalid_instantiated_member;
+  ReportNoteAtLocation(member->location, "'%s' declared here",
+                       member->name.value);
+  s->invalid_instantiation_reported = true;
+  s->invalid_instantiation_owner->invalid_instantiation_reported = true;
+}
+
+void TypeInheritInvalidInstantiation(Struct* target, TypeRecord* type) {
+  while (type != NULL && TypeIsArray(type)) {
+    type = type->next;
+  }
+  if (target->invalid_instantiated_member != NULL || type == NULL ||
+      !TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
+      type->info.struct_info->invalid_instantiated_member == NULL) {
+    return;
+  }
+  Struct* s = type->info.struct_info;
+  target->invalid_instantiated_member = s->invalid_instantiated_member;
+  target->invalid_instantiation_owner = s->invalid_instantiation_owner;
+}
+
 static int CompareStructMember(const void* a, const void* b) {
   const MapKeyValue* key1 = (const MapKeyValue*)a;
   const MapKeyValue* key2 = (const MapKeyValue*)b;
@@ -2839,6 +2900,9 @@ Struct* NewStruct(bool is_union) {
   s->being_defined = false;
   s->resolving_in_progress_member = false;
   s->layout_pending_completion = false;
+  s->invalid_instantiation_reported = false;
+  s->invalid_instantiated_member = NULL;
+  s->invalid_instantiation_owner = NULL;
   s->template_parameter_count = 0;
   s->defining_template_scope_count = 0;
   s->partial_specialization_primary = NULL;

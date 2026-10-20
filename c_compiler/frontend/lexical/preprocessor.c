@@ -3340,8 +3340,7 @@ static bool EvaluatePreprocessorIntegerExpression(Preprocessor* p,
   
   Syntax syntax;
   SyntaxInit(&syntax, &lex);
-  bool prev_abort_on_error = abort_on_error;
-  abort_on_error = true;
+  AbortOnErrorState saved_abort = AbortOnErrorBegin();
   bool evaluated = false;
   if (setjmp(error_abort_state) == 0) {
     ASTNode* expr = SyntaxParseExpression(&syntax, 0);
@@ -3357,7 +3356,7 @@ static bool EvaluatePreprocessorIntegerExpression(Preprocessor* p,
       ASTNodeDelete(expr);
     }
   }
-  abort_on_error = prev_abort_on_error;
+  AbortOnErrorEnd(saved_abort);
   SyntaxDestruct(&syntax);
   // The source borrows the caller-owned expression string, so we can't let
   // SourceDestruct free it (it would free a non-owned string).  Detach the

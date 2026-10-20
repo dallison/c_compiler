@@ -1,5 +1,5 @@
 // RUN: -std=c++20
-// EXPECT: Invalid type for member 'm' in this instantiation
+// EXPECT: Invalid type for member 'm' in instantiation of 'A<int>'
 
 // No f accepts an int, so A<int> cannot declare m.
 struct X {};
