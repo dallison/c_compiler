@@ -76,6 +76,10 @@ struct ASTNode* CloneDependentExpressionWithArgs(TypeParser* parser,
                                                Vector* args);
 bool TryFoldDependentTemplateArgument(TypeParser* parser, struct ASTNode* expr,
                                       Vector* args, int64_t* out);
+// TryFoldDependentTemplateArgument without consulting or filling the memo.
+bool FoldDependentTemplateArgumentUncached(TypeParser* parser,
+                                           struct ASTNode* expr, Vector* args,
+                                           int64_t* out);
 TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
                                                  TemplateArgument* arg,
                                                  Vector* args);

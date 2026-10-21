@@ -4429,8 +4429,8 @@ ASTNode* CloneDependentExpressionWithArgs(TypeParser* parser,
   return cloned;
 }
 
-bool TryFoldDependentTemplateArgument(TypeParser* parser, ASTNode* expr,
-                                             Vector* args, int64_t* out) {
+bool FoldDependentTemplateArgumentUncached(TypeParser* parser, ASTNode* expr,
+                                           Vector* args, int64_t* out) {
   if (expr == NULL || args == NULL) {
     return false;
   }

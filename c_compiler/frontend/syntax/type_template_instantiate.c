@@ -11102,7 +11102,9 @@ static Vector* CompleteFunctionTemplateArgumentsUnsuspended(
 // compared the way instantiations are.  A failure is not remembered: it may be
 // due to a class that is completed later.
 typedef struct TemplateMemo {
-  const void* templ;  // Function template TypeRecord or class template Symbol.
+  // Function template TypeRecord, class template Symbol, or the ASTNode of a
+  // folded dependent template argument.
+  const void* templ;
   Struct* access_context;
   Struct* substitution_source;
   Struct* substitution_target;
@@ -11114,6 +11116,7 @@ typedef struct TemplateMemo {
   Vector* args;       // Owned copy.
   Vector* completed;  // Completed function template arguments (owned).
   Symbol* instance;   // Existing class template instantiation.
+  int64_t folded_value;
   bool only_while_suppressed;
   uint64_t hash;
 } TemplateMemo;
@@ -11356,6 +11359,38 @@ static Vector* CompleteFunctionTemplateArguments(TypeParser* parser,
   RememberTemplateMemo(&key, completed != NULL ? verdict : kTemplateMemoForget,
                        completed, /*instance=*/NULL);
   return completed;
+}
+
+// Each fold clones and analyzes the argument's expression, and the same
+// argument is folded with the same arguments many times.
+bool TryFoldDependentTemplateArgument(TypeParser* parser, ASTNode* expr,
+                                      Vector* args, int64_t* out) {
+  bool memoize = expr != NULL && TemplateMemoArgumentsConcrete(args);
+  TemplateMemo key;
+  TemplateMemoWatch watch;
+  if (memoize) {
+    InitTemplateMemoKey(&key, parser, expr, args);
+    bool known = false;
+    TemplateMemo* memo = UsableTemplateMemo(&key, &known);
+    if (memo != NULL) {
+      *out = memo->folded_value;
+      return true;
+    }
+    memoize = !known;
+  }
+  if (memoize) {
+    key.args = TemplateArgumentVectorCopy(args);
+    TemplateMemoWatchBegin(&watch, parser);
+  }
+  bool ok = FoldDependentTemplateArgumentUncached(parser, expr, args, out);
+  if (!memoize) {
+    return ok;
+  }
+  TemplateMemoVerdict verdict = TemplateMemoWatchEnd(&watch, parser);
+  key.folded_value = ok ? *out : 0;
+  RememberTemplateMemo(&key, ok ? verdict : kTemplateMemoForget,
+                       /*completed=*/NULL, /*instance=*/NULL);
+  return ok;
 }
 
 static Vector* CompleteFunctionTemplateArgumentsUnsuspended(
