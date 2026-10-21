@@ -177,6 +177,10 @@ typedef struct TemplateArgument {
   // Parsing the argument reported an error; matching it to a parameter
   // fails without another diagnostic.
   bool is_erroneous;        // @wire - (transient)
+  // Owners besides the first (see TemplateArgumentShare), or UINT8_MAX when
+  // pinned (TemplateArgumentPin).  While nonzero no owner may modify the
+  // argument, except a pinned argument's single owner.
+  uint8_t shares;           // @wire - (transient)
   struct TypeRecord* type;  // Non-NULL for type arguments.        // @wire 3
   long long int_value;      // Valid for simple non-type int args. // @wire 4
   Vector* pack_arguments;   // TemplateArgument* for bound packs.   // @wire 6

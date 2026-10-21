@@ -831,6 +831,9 @@ typedef struct {
   Vector original_argument_expressions;
   Vector rebound_bounds;
   Vector original_bounds;
+  // Arguments on the way to a rebound operand, pinned so that copies taken
+  // during the substitution keep the rebound state.
+  Vector pinned_arguments;
 } BodyCloneDecltypeBinding;
 
 static void RebindBodyCloneDecltypeExpressions(
@@ -839,6 +842,8 @@ static void RebindBodyCloneDecltypeExpressions(
 static void RebindBodyCloneNonTypeArgument(
     TemplateFunctionBodyClone* clone, TemplateArgument* arg,
     Vector* rebound_arguments, Vector* original_argument_expressions);
+static TemplateArgument* BodyClonePinRebindableArgument(
+    Vector* args, size_t index, BodyCloneDecltypeBinding* binding);
 
 static void BodyCloneDecltypeBindingInit(BodyCloneDecltypeBinding* binding) {
   VectorInit(&binding->visited_types);
@@ -848,6 +853,7 @@ static void BodyCloneDecltypeBindingInit(BodyCloneDecltypeBinding* binding) {
   VectorInit(&binding->original_argument_expressions);
   VectorInit(&binding->rebound_bounds);
   VectorInit(&binding->original_bounds);
+  VectorInit(&binding->pinned_arguments);
 }
 
 /* A clone that binds only the enclosing arguments renumbers the remaining
@@ -898,6 +904,10 @@ static void BodyCloneDecltypeBindingRestore(BodyCloneDecltypeBinding* binding) {
     TypeRecord* array = binding->rebound_bounds.value.p[i];
     array->info.array.size.vla.size = binding->original_bounds.value.p[i];
   }
+  for (size_t i = 0; i < binding->pinned_arguments.length; i++) {
+    TemplateArgumentUnpin(binding->pinned_arguments.value.p[i]);
+  }
+  VectorDestruct(&binding->pinned_arguments);
   VectorDestruct(&binding->original_bounds);
   VectorDestruct(&binding->rebound_bounds);
   VectorDestruct(&binding->original_argument_expressions);
@@ -928,7 +938,8 @@ static Vector* SubstituteBodyCloneTemplateArguments(
   BodyCloneDecltypeBindingInit(&binding);
   for (size_t i = 0; template_args != NULL && i < template_args->length;
        i++) {
-    TemplateArgument* arg = template_args->value.p[i];
+    TemplateArgument* arg =
+        BodyClonePinRebindableArgument(template_args, i, &binding);
     if (arg != NULL && arg->kind == kTemplateParameterType &&
         arg->type != NULL) {
       BodyCloneDecltypeBindingRebindType(clone, &binding, arg->type);
@@ -2089,11 +2100,8 @@ static bool SubstitutePackElementTemplateArguments(
   }
   if (pack_index < 0 && clone->rebase_template_parameter_base > 0) {
     rebased_template_args = TemplateArgumentVectorCopy(original);
-    for (size_t i = 0; i < rebased_template_args->length; i++) {
-      RebaseTemplateArgumentParameterIndices(
-          rebased_template_args->value.p[i],
-          clone->rebase_template_parameter_base);
-    }
+    RebaseTemplateArgumentVectorParameterIndices(
+        rebased_template_args, clone->rebase_template_parameter_base);
     for (size_t i = 0; i < rebased_template_args->length; i++) {
       if (FindPackExpansionInTemplateArgument(
               rebased_template_args->value.p[i], clone->args, &pack_index,
@@ -2423,11 +2431,8 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
     if (pack_index < 0 && clone->rebase_template_parameter_base > 0) {
       rebased_template_args =
           TemplateArgumentVectorCopy(id->template_arguments);
-      for (size_t i = 0; i < rebased_template_args->length; i++) {
-        RebaseTemplateArgumentParameterIndices(
-            rebased_template_args->value.p[i],
-            clone->rebase_template_parameter_base);
-      }
+      RebaseTemplateArgumentVectorParameterIndices(
+          rebased_template_args, clone->rebase_template_parameter_base);
       for (size_t i = 0; i < rebased_template_args->length; i++) {
         if (FindPackExpansionInTemplateArgument(
                 rebased_template_args->value.p[i], clone->args, &pack_index,
@@ -5873,6 +5878,51 @@ static void UnseedEnclosingFormals(TemplateFunctionBodyClone* clone,
   VectorDestruct(seeded);
 }
 
+static bool BodyCloneArgumentMayRebind(const TemplateArgument* arg);
+
+// Whether RebindBodyCloneDecltypeExpressions could modify `type`.
+static bool BodyCloneTypeMayRebind(TypeRecord* type) {
+  for (TypeRecord* current = type; current != NULL; current = current->next) {
+    if ((current->declarator == kDeclArray &&
+         current->info.array.is_dependent_bound) ||
+        (TypeDependentOf(current)->dependent_decltype_expr != NULL &&
+         !TypeIsDecltypeAliasTemplateId(current))) {
+      return true;
+    }
+    for (size_t i = 0; current->template_arguments != NULL &&
+                       i < current->template_arguments->length;
+         i++) {
+      if (BodyCloneArgumentMayRebind(current->template_arguments->value.p[i])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool BodyCloneArgumentMayRebind(const TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->kind == kTemplateParameterType && arg->type != NULL) {
+    return BodyCloneTypeMayRebind(arg->type);
+  }
+  return arg->kind == kTemplateParameterNonType && arg->dependent_expr != NULL;
+}
+
+// `args[index]`, made private and pinned until the binding is restored if the
+// rebinding could modify it.
+static TemplateArgument* BodyClonePinRebindableArgument(
+    Vector* args, size_t index, BodyCloneDecltypeBinding* binding) {
+  TemplateArgument* arg = args->value.p[index];
+  if (arg != NULL && BodyCloneArgumentMayRebind(arg)) {
+    arg = TemplateArgumentVectorMutableAt(args, index);
+    TemplateArgumentPin(arg);
+    VectorAppend(&binding->pinned_arguments, arg);
+  }
+  return arg;
+}
+
 static void RebindBodyCloneDecltypeExpressions(
     TemplateFunctionBodyClone* clone, TypeRecord* type,
     BodyCloneDecltypeBinding* binding) {
@@ -5929,7 +5979,8 @@ static void RebindBodyCloneDecltypeExpressions(
       continue;
     }
     for (size_t i = 0; i < current->template_arguments->length; i++) {
-      TemplateArgument* arg = current->template_arguments->value.p[i];
+      TemplateArgument* arg = BodyClonePinRebindableArgument(
+          current->template_arguments, i, binding);
       if (arg != NULL && arg->kind == kTemplateParameterType &&
           arg->type != NULL) {
         RebindBodyCloneDecltypeExpressions(clone, arg->type, binding);
@@ -6186,11 +6237,8 @@ static void SubstituteClonedMemberTemplateArguments(
             /*free_element=*/false);
         *member_template_args = concrete_args;
       } else if (clone->rebase_template_parameter_base > 0) {
-        for (size_t i = 0; i < member_args->length; i++) {
-          RebaseTemplateArgumentParameterIndices(
-              member_args->value.p[i],
-              clone->rebase_template_parameter_base);
-        }
+        RebaseTemplateArgumentVectorParameterIndices(
+            member_args, clone->rebase_template_parameter_base);
       }
     }
   }
@@ -7231,6 +7279,7 @@ static void FoldClonedOwnerMemberTemplateArguments(
       // pattern's argument, so rewrite a copy.
       if (ASTNodeAny(arg->dependent_expr, IdentifierHasClonedReplacement,
                      &clone->symbol_map)) {
+        arg = TemplateArgumentVectorMutableAt(args, i);
         arg->dependent_expr = ASTNodeClone(arg->dependent_expr,
                                            IdentityCloneNode, NULL, NULL);
         RewriteTemplateBodyIdentifiers(arg->dependent_expr,
@@ -7265,6 +7314,7 @@ static void FoldClonedOwnerMemberTemplateArguments(
         concrete->type == NULL || !TypeIsIntegral(concrete->type)) {
       continue;
     }
+    arg = TemplateArgumentVectorMutableAt(args, i);
     arg->int_value = concrete->value.ivalue;
     arg->value_kind = kTemplateValueIntegral;
     arg->template_parameter_index = -1;
@@ -7318,11 +7368,8 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
           !args_are_absolute) {
         rebased_arguments =
             TemplateArgumentVectorCopy(id->template_arguments);
-        for (size_t i = 0; i < rebased_arguments->length; i++) {
-          RebaseTemplateArgumentParameterIndices(
-              rebased_arguments->value.p[i],
-              clone->rebase_template_parameter_base);
-        }
+        RebaseTemplateArgumentVectorParameterIndices(
+            rebased_arguments, clone->rebase_template_parameter_base);
         arguments_for_substitution = rebased_arguments;
         substitution_rebase_base = 0;
       }
@@ -7407,11 +7454,8 @@ static ASTNode* SubstituteIdentifierExplicitTemplateArguments(
       // up at the wrong (enclosing-offset) index and fail to substitute it.
       // Arguments that still carry the enclosing prefix are read at the
       // absolute index instead.
-      for (size_t i = 0; i < id->template_arguments->length; i++) {
-        RebaseTemplateArgumentParameterIndices(
-            id->template_arguments->value.p[i],
-            clone->rebase_template_parameter_base);
-      }
+      RebaseTemplateArgumentVectorParameterIndices(
+          id->template_arguments, clone->rebase_template_parameter_base);
     }
   return NULL;
 }

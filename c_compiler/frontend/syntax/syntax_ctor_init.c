@@ -188,10 +188,8 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
         id->template_arguments = concrete;
       }
     } else if (remap->rebase_base > 0 && id->template_arguments != NULL) {
-      for (size_t i = 0; i < id->template_arguments->length; i++) {
-        RebaseTemplateArgumentParameterIndices(
-            id->template_arguments->value.p[i], remap->rebase_base);
-      }
+      RebaseTemplateArgumentVectorParameterIndices(id->template_arguments,
+                                                   remap->rebase_base);
     }
     // `Period::den` names its scope by the class parameter's absolute index.
     // Once rebased, index 0 is the member template's first parameter.

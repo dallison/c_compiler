@@ -3989,23 +3989,12 @@ static void RebaseTemplateParameterIndicesSpine(TypeRecord* type, int base) {
       t->info.array.size.vla.size =
           CloneAndRebaseDependentExpression(t->info.array.size.vla.size, base);
     }
-    if (t->template_arguments != NULL) {
-      for (size_t i = 0; i < t->template_arguments->length; i++) {
-        RebaseTemplateArgumentParameterIndices(t->template_arguments->value.p[i],
-                                               base);
-      }
-    }
+    RebaseTemplateArgumentVectorParameterIndices(t->template_arguments, base);
     if (TypeDependentOf(t)->dependent_member_template_arguments != NULL) {
       Vector* lists =
           TypeMutableDependent(t)->dependent_member_template_arguments;
       for (size_t i = 0; i < lists->length; i++) {
-        Vector* component = lists->value.p[i];
-        if (component == NULL) {
-          continue;
-        }
-        for (size_t j = 0; j < component->length; j++) {
-          RebaseTemplateArgumentParameterIndices(component->value.p[j], base);
-        }
+        RebaseTemplateArgumentVectorParameterIndices(lists->value.p[i], base);
       }
     }
     // A deferred `decltype` operand (e.g. `iterator_t<R> =
@@ -4069,23 +4058,12 @@ void RebaseTemplateParameterIndices(TypeRecord* type, int base) {
       t->info.array.size.vla.size =
           CloneAndRebaseDependentExpression(t->info.array.size.vla.size, base);
     }
-    if (t->template_arguments != NULL) {
-      for (size_t i = 0; i < t->template_arguments->length; i++) {
-        RebaseTemplateArgumentParameterIndices(t->template_arguments->value.p[i],
-                                               base);
-      }
-    }
+    RebaseTemplateArgumentVectorParameterIndices(t->template_arguments, base);
     if (TypeDependentOf(t)->dependent_member_template_arguments != NULL) {
       Vector* lists =
           TypeMutableDependent(t)->dependent_member_template_arguments;
       for (size_t i = 0; i < lists->length; i++) {
-        Vector* component = lists->value.p[i];
-        if (component == NULL) {
-          continue;
-        }
-        for (size_t j = 0; j < component->length; j++) {
-          RebaseTemplateArgumentParameterIndices(component->value.p[j], base);
-        }
+        RebaseTemplateArgumentVectorParameterIndices(lists->value.p[i], base);
       }
     }
     // Function types can occur as ordinary template arguments, for example in
@@ -4142,6 +4120,7 @@ void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
   if (arg == NULL || base <= 0) {
     return;
   }
+  assert(arg->shares == 0);
   if (arg->template_parameter_index >= base) {
     arg->template_parameter_index -= base;
   }
@@ -4156,6 +4135,23 @@ void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
   if (TemplateArgumentExtraOf(arg)->pack_index_expr != NULL) {
     TemplateArgumentMutableExtra(arg)->pack_index_expr =
         CloneAndRebaseDependentExpression(arg->extra->pack_index_expr, base);
+  }
+}
+
+void RebaseTemplateArgumentVectorParameterIndices(Vector* args, int base) {
+  if (args == NULL || base <= 0) {
+    return;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    TemplateArgument* arg = args->value.p[i];
+    if (arg != NULL &&
+        (arg->template_parameter_index >= base ||
+         !TypeRecordCanShareConcreteClass(arg->type) ||
+         arg->dependent_expr != NULL ||
+         TemplateArgumentExtraOf(arg)->pack_index_expr != NULL)) {
+      RebaseTemplateArgumentParameterIndices(
+          TemplateArgumentVectorMutableAt(args, i), base);
+    }
   }
 }
 
@@ -4271,12 +4267,8 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
       (old->flags.is_template && StorageIs(old->storage, STO(typedef))) ||
       (old->flags.is_template && TypeIsFunction(old->type) &&
        old->type->info.function.cxx_member_owner == NULL)) {
-    if (id->template_arguments != NULL) {
-      for (size_t i = 0; i < id->template_arguments->length; i++) {
-        RebaseTemplateArgumentParameterIndices(id->template_arguments->value.p[i],
-                                               rebase->base);
-      }
-    }
+    RebaseTemplateArgumentVectorParameterIndices(id->template_arguments,
+                                                 rebase->base);
     return;
   }
   // The symbol's type spine may link records it does not count references
@@ -4313,12 +4305,8 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   // vector (IdentifierASTNodeCopy deep-copies it), so rebasing it in place is
   // safe and is required or the operand keeps naming the pre-rebase parameter
   // and never resolves once the member's own arguments arrive.
-  if (id->template_arguments != NULL) {
-    for (size_t i = 0; i < id->template_arguments->length; i++) {
-      RebaseTemplateArgumentParameterIndices(id->template_arguments->value.p[i],
-                                             rebase->base);
-    }
-  }
+  RebaseTemplateArgumentVectorParameterIndices(id->template_arguments,
+                                               rebase->base);
 }
 
 static ASTNode* CloneAndRebaseDependentExpression(ASTNode* expr, int base) {
@@ -4732,8 +4720,8 @@ Vector* SubstituteTemplateArgumentVector(TypeParser* parser,
     AppendSubstitutedTemplateArgument(parser, concrete_args,
                                       template_args->value.p[i], args);
     for (size_t j = start; j < concrete_args->length; j++) {
-      RebaseTemplateArgumentParameterIndices(concrete_args->value.p[j],
-                                             rebase_base);
+      RebaseTemplateArgumentParameterIndices(
+          TemplateArgumentVectorMutableAt(concrete_args, j), rebase_base);
     }
   }
   return concrete_args;

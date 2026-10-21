@@ -324,7 +324,7 @@ bool CXXDeferConstexprDefaultInitialization(Syntax* syntax,
                                             TypeRecord* type);
 
 // Defined outside the syntax_*.c files.
-void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg, int base);
+void RebaseTemplateArgumentVectorParameterIndices(Vector* args, int base);
 void RebaseTemplateParameterIndices(TypeRecord* type, int base);
 
 #endif /* syntax_internal_h */

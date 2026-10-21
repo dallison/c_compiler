@@ -5422,6 +5422,7 @@ static void FreeRttiTypeInfoKey(MapKeyValue* kv) {
 }
 
 void CompilerDestruct(Compiler* compiler) {
+  TemplateArgumentCheckShared();
   ConstexprPCodeClearImageCache();
 
   // Tear down the AST forest first, while the symbol table and type records it

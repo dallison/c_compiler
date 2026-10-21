@@ -10600,6 +10600,7 @@ static bool SubstituteDependentNonTypeParameterTypes(TypeParser* parser,
         i < completed->length ? completed->value.p[i] : NULL;
     if (arg != NULL && arg->dependent_expr == NULL &&
         !TypeContainsTemplateParameter(substituted)) {
+      arg = TemplateArgumentVectorMutableAt(completed, i);
       TypeRecordDelete(arg->type);
       arg->type = TypeRecordCopy(substituted);
     }
@@ -10669,6 +10670,9 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
                                    /*free_element=*/false);
           return NULL;
         }
+        if (ownership == kTemplateArgumentsConsume) {
+          arg = TemplateArgumentVectorMutableAt(args, j);
+        }
         if (arg->pack_arguments != NULL) {
           for (size_t k = 0; k < arg->pack_arguments->length; k++) {
             TemplateArgument* element = arg->pack_arguments->value.p[k];
@@ -10719,6 +10723,7 @@ static Vector* CompleteTemplateArguments(TypeParser* parser,
     TemplateArgument* arg = i < args->length ? args->value.p[i] : NULL;
     if (arg != NULL) {
       if (ownership == kTemplateArgumentsConsume) {
+        arg = TemplateArgumentVectorMutableAt(args, i);
         args->value.p[i] = NULL;
       } else {
         arg = TemplateArgumentCopy(arg);
@@ -11864,54 +11869,63 @@ TypeRecord* TypeDeferredReturnSpecialization(TypeRecord* function) {
   return type;
 }
 
+static bool ConcreteNonTypeTemplateArgumentMayFold(
+    const TemplateArgument* arg) {
+  if (arg == NULL) {
+    return false;
+  }
+  if (arg->pack_arguments != NULL) {
+    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
+      if (ConcreteNonTypeTemplateArgumentMayFold(
+              arg->pack_arguments->value.p[i])) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return arg->kind == kTemplateParameterNonType &&
+         arg->dependent_expr != NULL &&
+         !DependentExpressionContainsTemplateParameter(arg->dependent_expr);
+}
+
 /* A non-type argument can be a fully substituted expression that was never
  * reduced to a value (`sizeof(const T& (*)()) != 0` after `T` is `int`).
  * Partial specializations such as `enable_if<true, T>` compare integral
  * values and miss that argument while it still carries the expression, so
  * the primary template is instantiated instead. */
-static void FoldConcreteNonTypeTemplateArgument(TypeParser* parser,
-                                                TemplateArgument* arg) {
-  if (arg == NULL) {
-    return;
-  }
-  if (arg->pack_arguments != NULL) {
-    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
-      FoldConcreteNonTypeTemplateArgument(parser,
-                                          arg->pack_arguments->value.p[i]);
-    }
-    return;
-  }
-  if (arg->kind != kTemplateParameterNonType || arg->dependent_expr == NULL ||
-      DependentExpressionContainsTemplateParameter(arg->dependent_expr)) {
-    return;
-  }
-  Vector empty_args;
-  VectorInit(&empty_args);
-  bool saved_failed = parser != NULL && parser->template_substitution_failed;
-  if (parser != NULL) {
-    parser->template_substitution_failed = false;
-  }
-  int64_t folded = 0;
-  bool ok = TryFoldDependentTemplateArgument(parser, arg->dependent_expr,
-                                             &empty_args, &folded);
-  if (parser != NULL) {
-    parser->template_substitution_failed = saved_failed;
-  }
-  VectorDestruct(&empty_args);
-  if (!ok) {
-    return;
-  }
-  ASTNodeDelete(arg->dependent_expr);
-  arg->dependent_expr = NULL;
-  arg->int_value = folded;
-  arg->value_kind = kTemplateValueIntegral;
-  arg->template_parameter_index = -1;
-}
-
 static void FoldConcreteNonTypeTemplateArguments(TypeParser* parser,
                                                  Vector* args) {
   for (size_t i = 0; args != NULL && i < args->length; i++) {
-    FoldConcreteNonTypeTemplateArgument(parser, args->value.p[i]);
+    TemplateArgument* arg = args->value.p[i];
+    if (!ConcreteNonTypeTemplateArgumentMayFold(arg)) {
+      continue;
+    }
+    if (arg->pack_arguments != NULL) {
+      arg = TemplateArgumentVectorMutableAt(args, i);
+      FoldConcreteNonTypeTemplateArguments(parser, arg->pack_arguments);
+      continue;
+    }
+    Vector empty_args;
+    VectorInit(&empty_args);
+    bool saved_failed = parser != NULL && parser->template_substitution_failed;
+    if (parser != NULL) {
+      parser->template_substitution_failed = false;
+    }
+    int64_t folded = 0;
+    bool ok = TryFoldDependentTemplateArgument(parser, arg->dependent_expr,
+                                               &empty_args, &folded);
+    if (parser != NULL) {
+      parser->template_substitution_failed = saved_failed;
+    }
+    VectorDestruct(&empty_args);
+    if (!ok) {
+      continue;
+    }
+    arg = TemplateArgumentVectorMutableAt(args, i);
+    arg->dependent_expr = NULL;
+    arg->int_value = folded;
+    arg->value_kind = kTemplateValueIntegral;
+    arg->template_parameter_index = -1;
   }
 }
 

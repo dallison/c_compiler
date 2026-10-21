@@ -111,7 +111,10 @@ TypeRecord* SubstituteTemplateParametersForPackElement(TypeParser* parser,
                                                        int pack_index,
                                                        size_t element_index);
 void RebaseTemplateParameterIndices(TypeRecord* type, int base);
+// `arg` must not be shared.
 void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg, int base);
+// Rebases each argument, first copying any shared one it changes.
+void RebaseTemplateArgumentVectorParameterIndices(Vector* args, int base);
 void AppendSubstitutedFormalParameter(TypeParser* parser, Vector* out,
                                       Symbol* formal, Vector* args,
                                       int rebase_base);

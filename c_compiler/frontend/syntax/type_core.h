@@ -54,6 +54,9 @@ void TypeRecordProfileReport(FILE* out, size_t limit);
 // destruction. Release the backing blocks with the rest of frontend teardown.
 TemplateArgument* TemplateArgumentAlloc(void);
 void TemplateArgumentArenaRelease(void);
+// Debug builds: abort if a shared argument was modified.  Call before
+// teardown starts releasing the types arguments refer to.
+void TemplateArgumentCheckShared(void);
 // Free every Struct info (and its members) in one pass.  Call once, at
 // CompilerDestruct, after the AST/symbols/tags are gone but before
 // TypeRecordArenaRelease.  Structs are freed here rather than by refcount
@@ -167,7 +170,18 @@ bool TemplateArgumentValuesEqual(const TemplateArgument* left,
 bool TemplateArgumentEqual(TemplateArgument* left, TemplateArgument* right);
 struct ASTNode* TemplateArgumentMaterializeExpression(
     const TemplateArgument* arg, SourceLocation location);
+// A new vector of the same arguments, each shared with `args` (see
+// TemplateArgumentShare).  Copy an element before modifying it.
 Vector* TemplateArgumentVectorCopy(Vector* args);
+// Another owner of `arg`, released with TemplateArgumentDelete.  No owner may
+// modify a shared argument; TemplateArgumentCopy gives a private one.
+TemplateArgument* TemplateArgumentShare(TemplateArgument* arg);
+// `args[index]` for modifying, first replaced by a private copy if shared.
+TemplateArgument* TemplateArgumentVectorMutableAt(Vector* args, size_t index);
+// Until unpinned, TemplateArgumentShare gives copies of the unshared `arg`, so
+// its owner may modify it temporarily without the change reaching them.
+void TemplateArgumentPin(TemplateArgument* arg);
+void TemplateArgumentUnpin(TemplateArgument* arg);
 TypeRecord* NewPointerTypeRecord(Qualifiers quals);
 TypeRecord* NewMemberPointerTypeRecord(Struct* class_info, Qualifiers quals);
 TypeRecord* TypeMemberPointerPointeeFromMember(StructMember* member);

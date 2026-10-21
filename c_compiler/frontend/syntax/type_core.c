@@ -55,9 +55,15 @@ typedef struct TypeArenaBlock {
 
 static TypeArenaBlock* type_arena = NULL;
 
-typedef union TemplateArgumentSlot {
-  TemplateArgument argument;
-  union TemplateArgumentSlot* next;
+typedef struct TemplateArgumentSlot {
+  union {
+    TemplateArgument argument;
+    struct TemplateArgumentSlot* next;
+  };
+#ifndef NDEBUG
+  // The argument's contents when it was first shared.
+  uint64_t shared_hash;
+#endif
 } TemplateArgumentSlot;
 
 typedef struct TemplateArgumentArenaBlock {
@@ -379,6 +385,132 @@ void TemplateArgumentArenaRelease(void) {
   }
   template_argument_arena = NULL;
   free_template_arguments = NULL;
+}
+
+#if TYPE_ARENA_CHECKS
+static uint64_t SharedArgumentMix(uint64_t hash, uint64_t value) {
+  return (hash ^ value) * 0x100000001B3ull + (hash >> 29);
+}
+
+static uint64_t SharedArgumentMixBytes(uint64_t hash, const void* bytes,
+                                       size_t size) {
+  const unsigned char* p = bytes;
+  for (size_t i = 0; i < size; i++) {
+    hash = SharedArgumentMix(hash, p[i]);
+  }
+  return hash;
+}
+
+// What an owner could modify in place: the argument's fields, its pack and
+// extra fields, and the outer record of its type.  Lazily computed type
+// fields (size, summaries) are left out, as is the identity of the type's
+// dependent info, which writers replace with an equal copy.
+static uint64_t SharedArgumentHash(const TemplateArgument* arg) {
+  uint64_t hash = SharedArgumentMix(0, arg->kind);
+  hash = SharedArgumentMix(hash, arg->value_kind);
+  hash = SharedArgumentMix(hash, (uint64_t)arg->template_parameter_index);
+  hash = SharedArgumentMix(hash, arg->is_pack_expansion |
+                                     arg->references_parameter_pack << 1 |
+                                     arg->is_erroneous << 2);
+  hash = SharedArgumentMix(hash, (uint64_t)arg->int_value);
+  hash = SharedArgumentMix(hash, (uintptr_t)arg->dependent_expr);
+  hash = SharedArgumentMixBytes(hash, &arg->location, sizeof(arg->location));
+  hash = SharedArgumentMix(hash, (uintptr_t)arg->type);
+  if (arg->type != NULL) {
+    const TypeRecord* type = arg->type;
+    hash = SharedArgumentMix(hash, type->type);
+    hash = SharedArgumentMixBytes(hash, &type->qualifiers_,
+                                  sizeof(type->qualifiers_));
+    hash = SharedArgumentMix(hash, type->declarator);
+    hash = SharedArgumentMix(hash, type->is_pack_index);
+    hash = SharedArgumentMix(hash, (uint64_t)type->bit_width);
+    hash = SharedArgumentMix(hash, (uint64_t)type->template_parameter_index);
+    hash = SharedArgumentMix(hash, (uintptr_t)type->template_origin);
+    hash = SharedArgumentMix(hash, (uintptr_t)type->template_arguments);
+    hash = SharedArgumentMix(hash, type->dependent != NULL);
+    hash = SharedArgumentMix(
+        hash, (uintptr_t)TypeDependentOf(type)->dependent_decltype_expr);
+    hash = SharedArgumentMix(hash, (uintptr_t)type->next);
+  }
+  hash = SharedArgumentMix(hash, (uintptr_t)arg->pack_arguments);
+  if (arg->pack_arguments != NULL) {
+    hash = SharedArgumentMix(hash, arg->pack_arguments->length);
+    for (size_t i = 0; i < arg->pack_arguments->length; i++) {
+      const TemplateArgument* element = arg->pack_arguments->value.p[i];
+      hash = SharedArgumentMix(hash, (uintptr_t)element);
+      if (element != NULL) {
+        hash = SharedArgumentMix(hash, SharedArgumentHash(element));
+      }
+    }
+  }
+  hash = SharedArgumentMix(hash, (uintptr_t)arg->extra);
+  if (arg->extra != NULL) {
+    hash = SharedArgumentMixBytes(hash, arg->extra, sizeof(*arg->extra));
+  }
+  return hash;
+}
+
+static void CheckSharedArgument(const TemplateArgument* arg) {
+  if (((const TemplateArgumentSlot*)arg)->shared_hash !=
+      SharedArgumentHash(arg)) {
+    fprintf(stderr, "internal error: shared template argument %p modified\n",
+            (const void*)arg);
+    abort();
+  }
+}
+#endif
+
+void TemplateArgumentCheckShared(void) {
+#if TYPE_ARENA_CHECKS
+  for (TemplateArgumentArenaBlock* block = template_argument_arena;
+       block != NULL; block = block->next) {
+    for (size_t i = 0; i < block->used; i++) {
+      const TemplateArgument* arg = &block->slots[i].argument;
+      if (arg->shares > 0) {
+        CheckSharedArgument(arg);
+      }
+    }
+  }
+#endif
+}
+
+void TemplateArgumentPin(TemplateArgument* arg) {
+  assert(arg->shares == 0);
+  arg->shares = UINT8_MAX;
+}
+
+void TemplateArgumentUnpin(TemplateArgument* arg) {
+  assert(arg->shares == UINT8_MAX);
+  arg->shares = 0;
+}
+
+TemplateArgument* TemplateArgumentVectorMutableAt(Vector* args, size_t index) {
+  TemplateArgument* arg = args->value.p[index];
+  if (arg != NULL && arg->shares > 0) {
+    TemplateArgument* own = TemplateArgumentCopy(arg);
+    TemplateArgumentDelete(arg);
+    args->value.p[index] = own;
+    arg = own;
+  }
+  return arg;
+}
+
+TemplateArgument* TemplateArgumentShare(TemplateArgument* arg) {
+  if (arg == NULL) {
+    return NULL;
+  }
+  if (arg->shares == UINT8_MAX) {
+    return TemplateArgumentCopy(arg);
+  }
+#if TYPE_ARENA_CHECKS
+  if (arg->shares == 0) {
+    ((TemplateArgumentSlot*)arg)->shared_hash = SharedArgumentHash(arg);
+  } else {
+    CheckSharedArgument(arg);
+  }
+#endif
+  arg->shares++;
+  return arg;
 }
 
 // Registries of every Struct and Enum created.  Struct infos can form
@@ -1232,6 +1364,7 @@ TemplateArgumentExtra* TemplateArgumentMutableExtra(TemplateArgument* arg) {
     arg->extra->owner = arg;
   }
   assert(arg->extra->owner == arg);
+  assert(arg->shares == 0);
   return arg->extra;
 }
 
@@ -1698,7 +1831,7 @@ Vector* TemplateArgumentVectorCopy(Vector* args) {
   Vector* copy = NewVector();
   VectorReserve(copy, args->length);
   for (size_t i = 0; i < args->length; i++) {
-    VectorAppend(copy, TemplateArgumentCopy(args->value.p[i]));
+    VectorAppend(copy, TemplateArgumentShare(args->value.p[i]));
   }
   return copy;
 }
@@ -2171,6 +2304,21 @@ static bool TypeInternEqual(const TypeRecord* type, Qualifiers quals,
 static TypeRecord* TypeRecordInternWithQualifiers(TypeRecord* type,
                                                   Qualifiers quals);
 
+static bool TypeArgumentTypesAreCanonical(const Vector* args) {
+  if (args == NULL) {
+    return true;
+  }
+  for (size_t i = 0; i < args->length; i++) {
+    const TemplateArgument* arg = args->value.p[i];
+    if (arg != NULL &&
+        ((arg->type != NULL && !TypeRecordIsCanonical(arg->type)) ||
+         !TypeArgumentTypesAreCanonical(arg->pack_arguments))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static void TypeInternArgumentTypes(Vector* args) {
   if (args == NULL) {
     return;
@@ -2179,6 +2327,13 @@ static void TypeInternArgumentTypes(Vector* args) {
     TemplateArgument* arg = args->value.p[i];
     if (arg == NULL) {
       continue;
+    }
+    if (arg->shares > 0) {
+      if ((arg->type == NULL || TypeRecordIsCanonical(arg->type)) &&
+          TypeArgumentTypesAreCanonical(arg->pack_arguments)) {
+        continue;
+      }
+      arg = TemplateArgumentVectorMutableAt(args, i);
     }
     if (arg->type != NULL && !TypeRecordIsCanonical(arg->type)) {
       TypeRecord* canonical =
@@ -2721,6 +2876,13 @@ void TemplateParameterDelete(TemplateParameter* param) {
 /* Free a template argument, recursively freeing any pack elements. */
 void TemplateArgumentDelete(TemplateArgument* arg) {
   if (arg == NULL) {
+    return;
+  }
+  if (arg->shares > 0) {
+#if TYPE_ARENA_CHECKS
+    CheckSharedArgument(arg);
+#endif
+    arg->shares--;
     return;
   }
   TypeRecordDelete(arg->type);
