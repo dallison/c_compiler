@@ -85,6 +85,7 @@ typedef enum {
   kAsmModuleOpLocation,
   kAsmModuleOpComment,
   kAsmModuleOpInstruction,
+  kAsmModuleOpWords,
   kAsmModuleOpText,
 } AsmModuleOpKind;
 
@@ -118,10 +119,11 @@ typedef struct {
       int width;
       AsmModuleExpr value;
     } integer;
+    // Bytes, or 32-bit instruction words, stored in the module's data blocks.
     struct {
       uint8_t* value;
-      size_t length;
-    } bytes;
+      size_t length;  // In bytes.
+    } data;
     struct {
       String value;
       bool zero_terminate;
@@ -167,6 +169,10 @@ typedef struct AsmModule {
   bool keep_text;
   AsmNamePool names;
   uint32_t label_stem_count;
+  // Storage for the contents of the bytes and words operations.
+  Vector data_blocks;
+  uint8_t* data_free;
+  size_t data_free_length;
 } AsmModule;
 
 void AsmModuleInit(AsmModule* module, const AsmModuleTargetOps* target);
@@ -208,6 +214,10 @@ void AsmModuleFile(AsmModule* module, int index, const char* name);
 void AsmModuleLocation(AsmModule* module, int file, int line, int column);
 void AsmModuleComment(AsmModule* module, const char* text);
 void AsmModuleInstruction(AsmModule* module, void* instruction);
+// Appends a 32-bit instruction word that refers to no symbol.  Consecutive
+// words share one operation, so this is much smaller than an instruction, but
+// the text output shows only the encoding.
+void AsmModuleWord(AsmModule* module, uint32_t word);
 void AsmModuleText(AsmModule* module, const char* name, const char* text,
                    size_t length);
 

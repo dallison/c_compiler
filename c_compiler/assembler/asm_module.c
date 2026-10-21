@@ -24,7 +24,7 @@ static bool Require(AsmModule* module, bool condition) {
   return condition;
 }
 
-enum { kNamePoolBlockSize = 64 * 1024 };
+enum { kNamePoolBlockSize = 64 * 1024, kDataBlockSize = 64 * 1024 };
 
 // Hashes the `length` bytes of `name` eight at a time.
 static uint64_t HashName(const char* name, size_t length) {
@@ -159,7 +159,7 @@ static size_t OperationSize(AsmModuleOpKind kind) {
     case kAsmModuleOpInteger:
       return OP_SIZE(integer);
     case kAsmModuleOpBytes:
-      return OP_SIZE(bytes);
+      return OP_SIZE(data);
     case kAsmModuleOpString:
       return OP_SIZE(string);
     case kAsmModuleOpFill:
@@ -177,6 +177,8 @@ static size_t OperationSize(AsmModuleOpKind kind) {
       return OP_SIZE(comment);
     case kAsmModuleOpInstruction:
       return OP_SIZE(instruction);
+    case kAsmModuleOpWords:
+      return OP_SIZE(data);
     case kAsmModuleOpText:
       return OP_SIZE(text);
   }
@@ -193,6 +195,61 @@ static AsmModuleOp* NewOperation(AsmModule* module, AsmModuleOpKind kind) {
   op->kind = kind;
   VectorAppend(&module->operations, op);
   return op;
+}
+
+static uint8_t* NewDataBlock(AsmModule* module, size_t size) {
+  uint8_t* block = malloc(size);
+  if (block == NULL) {
+    module->failed = true;
+    return NULL;
+  }
+  VectorAppend(&module->data_blocks, block);
+  return block;
+}
+
+// Appends `length` bytes to a bytes or words operation: the last operation if
+// it is of `kind` and its contents can grow in place, else a new one.
+static void AppendData(AsmModule* module, AsmModuleOpKind kind,
+                       const void* bytes, size_t length) {
+  if (length > kDataBlockSize / 4) {
+    // Too big to share a block without wasting the rest of the current one.
+    AsmModuleOp* op = NewOperation(module, kind);
+    uint8_t* block = op != NULL ? NewDataBlock(module, length) : NULL;
+    if (block != NULL) {
+      memcpy(block, bytes, length);
+      op->u.data.value = block;
+      op->u.data.length = length;
+    }
+    return;
+  }
+  AsmModuleOp* op = NULL;
+  if (module->operations.length != 0) {
+    op = module->operations.value.p[module->operations.length - 1];
+    if (op->kind != kind ||
+        op->u.data.value + op->u.data.length != module->data_free ||
+        length > module->data_free_length) {
+      op = NULL;
+    }
+  }
+  if (op == NULL) {
+    if (length > module->data_free_length) {
+      uint8_t* block = NewDataBlock(module, kDataBlockSize);
+      if (block == NULL) {
+        return;
+      }
+      module->data_free = block;
+      module->data_free_length = kDataBlockSize;
+    }
+    op = NewOperation(module, kind);
+    if (op == NULL) {
+      return;
+    }
+    op->u.data.value = module->data_free;
+  }
+  memcpy(module->data_free, bytes, length);
+  module->data_free += length;
+  module->data_free_length -= length;
+  op->u.data.length += length;
 }
 
 void AsmExprInitConstant(AsmExpr* expr, int64_t value) {
@@ -271,6 +328,9 @@ void AsmModuleInit(AsmModule* module, const AsmModuleTargetOps* target) {
   memset(&module->names, 0, sizeof(module->names));
   VectorInit(&module->names.blocks);
   module->label_stem_count = 0;
+  VectorInit(&module->data_blocks);
+  module->data_free = NULL;
+  module->data_free_length = 0;
 }
 
 void AsmModuleFunctionLabelStem(AsmModule* module, const char* function,
@@ -286,9 +346,6 @@ void AsmModuleFunctionLabelStem(AsmModule* module, const char* function,
 
 static void OperationDelete(AsmModule* module, AsmModuleOp* op) {
   switch (op->kind) {
-    case kAsmModuleOpBytes:
-      free(op->u.bytes.value);
-      break;
     case kAsmModuleOpString:
       StringDestruct(&op->u.string.value);
       break;
@@ -305,6 +362,8 @@ static void OperationDelete(AsmModule* module, AsmModuleOp* op) {
       StringDestruct(&op->u.text.name);
       StringDestruct(&op->u.text.value);
       break;
+    case kAsmModuleOpBytes:
+    case kAsmModuleOpWords:
     case kAsmModuleOpSection:
     case kAsmModuleOpLabel:
     case kAsmModuleOpSymbol:
@@ -327,6 +386,9 @@ void AsmModuleDestruct(AsmModule* module) {
   }
   VectorDestruct(&module->operations);
   NamePoolDestruct(&module->names);
+  VectorDestructWithContents(&module->data_blocks, NULL, true);
+  module->data_free = NULL;
+  module->data_free_length = 0;
 }
 
 void AsmModuleSection(AsmModule* module, const char* name, int32_t type,
@@ -396,6 +458,32 @@ void AsmModuleInteger(AsmModule* module, int width, const AsmExpr* value) {
                             width == 8))) {
     return;
   }
+  if (!module->keep_text && value->kind == kAsmExprConstant &&
+      !value->force_relocation) {
+    // In host byte order, as EmitInteger writes it.
+    union {
+      uint8_t b;
+      uint16_t h;
+      uint32_t w;
+      uint64_t l;
+    } bytes;
+    switch (width) {
+      case 1:
+        bytes.b = (uint8_t)value->addend;
+        break;
+      case 2:
+        bytes.h = (uint16_t)value->addend;
+        break;
+      case 4:
+        bytes.w = (uint32_t)value->addend;
+        break;
+      default:
+        bytes.l = (uint64_t)value->addend;
+        break;
+    }
+    AsmModuleBytes(module, &bytes, (size_t)width);
+    return;
+  }
   AsmModuleOp* op = NewOperation(module, kAsmModuleOpInteger);
   if (op == NULL) {
     return;
@@ -411,18 +499,7 @@ void AsmModuleBytes(AsmModule* module, const void* bytes, size_t length) {
   if (!Require(module, bytes != NULL)) {
     return;
   }
-  AsmModuleOp* op = NewOperation(module, kAsmModuleOpBytes);
-  if (op == NULL) {
-    return;
-  }
-  op->u.bytes.value = malloc(length);
-  if (op->u.bytes.value == NULL) {
-    module->failed = true;
-    op->u.bytes.length = 0;
-    return;
-  }
-  memcpy(op->u.bytes.value, bytes, length);
-  op->u.bytes.length = length;
+  AppendData(module, kAsmModuleOpBytes, bytes, length);
 }
 
 void AsmModuleString(AsmModule* module, const char* value, bool zero_terminate) {
@@ -458,8 +535,29 @@ void AsmModuleAlign(AsmModule* module, int alignment) {
   }
 }
 
+// A constant that is not written as text needs only its encoding.
+static bool LebAsBytes(const AsmModule* module, const AsmExpr* value) {
+  return !module->keep_text && value->kind == kAsmExprConstant &&
+         !value->force_relocation;
+}
+
 void AsmModuleUleb128(AsmModule* module, const AsmExpr* value) {
   if (!Require(module, value != NULL)) {
+    return;
+  }
+  if (LebAsBytes(module, value)) {
+    uint8_t bytes[10];
+    size_t length = 0;
+    uint64_t rest = (uint64_t)value->addend;
+    do {
+      bytes[length] = (uint8_t)(rest & 0x7f);
+      rest >>= 7;
+      if (rest != 0) {
+        bytes[length] |= 0x80;
+      }
+      length++;
+    } while (rest != 0);
+    AsmModuleBytes(module, bytes, length);
     return;
   }
   AsmModuleOp* op = NewOperation(module, kAsmModuleOpUleb128);
@@ -470,6 +568,25 @@ void AsmModuleUleb128(AsmModule* module, const AsmExpr* value) {
 
 void AsmModuleSleb128(AsmModule* module, const AsmExpr* value) {
   if (!Require(module, value != NULL)) {
+    return;
+  }
+  if (LebAsBytes(module, value)) {
+    uint8_t bytes[10];
+    size_t length = 0;
+    int64_t rest = value->addend;
+    bool more = true;
+    while (more) {
+      uint8_t byte = (uint8_t)(rest & 0x7f);
+      rest >>= 7;
+      if ((rest == 0 && (byte & 0x40) == 0) ||
+          (rest == -1 && (byte & 0x40) != 0)) {
+        more = false;
+      } else {
+        byte |= 0x80;
+      }
+      bytes[length++] = byte;
+    }
+    AsmModuleBytes(module, bytes, length);
     return;
   }
   AsmModuleOp* op = NewOperation(module, kAsmModuleOpSleb128);
@@ -529,6 +646,10 @@ void AsmModuleInstruction(AsmModule* module, void* instruction) {
              module->target->destroy_instruction != NULL) {
     module->target->destroy_instruction(instruction);
   }
+}
+
+void AsmModuleWord(AsmModule* module, uint32_t word) {
+  AppendData(module, kAsmModuleOpWords, &word, sizeof(word));
 }
 
 void AsmModuleText(AsmModule* module, const char* name, const char* text,
@@ -779,10 +900,10 @@ void AsmModuleEmit(AsmModule* module, Assembler* assembler) {
         EmitInteger(assembler, op->u.integer.width, &op->u.integer.value);
         break;
       case kAsmModuleOpBytes:
-        for (size_t j = 0; j < op->u.bytes.length; j++) {
+        for (size_t j = 0; j < op->u.data.length; j++) {
           AsmObjectEmitByte(&assembler->object,
                             assembler->object.current_section,
-                            op->u.bytes.value[j]);
+                            op->u.data.value[j]);
         }
         break;
       case kAsmModuleOpString:
@@ -857,6 +978,14 @@ void AsmModuleEmit(AsmModule* module, Assembler* assembler) {
         } else {
           module->target->emit_instruction(
               assembler, op->u.instruction.value);
+        }
+        break;
+      case kAsmModuleOpWords:
+        for (size_t j = 0; j < op->u.data.length; j += sizeof(uint32_t)) {
+          uint32_t word;
+          memcpy(&word, op->u.data.value + j, sizeof(word));
+          AssemblerEmitWord(assembler, assembler->object.current_section,
+                            (int32_t)word);
         }
         break;
       case kAsmModuleOpText:
@@ -1024,8 +1153,8 @@ bool AsmModuleWriteText(const AsmModule* module, FILE* out) {
         fputc('\n', out);
         break;
       case kAsmModuleOpBytes:
-        for (size_t j = 0; j < op->u.bytes.length; j++) {
-          fprintf(out, "\t.byte 0x%02x\n", op->u.bytes.value[j]);
+        for (size_t j = 0; j < op->u.data.length; j++) {
+          fprintf(out, "\t.byte 0x%02x\n", op->u.data.value[j]);
         }
         break;
       case kAsmModuleOpString:
@@ -1081,6 +1210,13 @@ bool AsmModuleWriteText(const AsmModule* module, FILE* out) {
                 out, op->u.instruction.value)) {
           VectorDestruct(&written_sections);
           return false;
+        }
+        break;
+      case kAsmModuleOpWords:
+        for (size_t j = 0; j < op->u.data.length; j += sizeof(uint32_t)) {
+          uint32_t word;
+          memcpy(&word, op->u.data.value + j, sizeof(word));
+          fprintf(out, "\t.4byte 0x%08" PRIx32 "\n", word);
         }
         break;
       case kAsmModuleOpText:

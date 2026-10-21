@@ -169,6 +169,10 @@ void AARCH64ProgramEmitFixup(AsmModule* module, uint32_t word,
                              const char* symbol, int32_t addend,
                              bool force_relocation,
                              const char* symbolic_text) {
+  if (fixup == kAARCH64FixupNone && symbol == NULL && !module->keep_text) {
+    AsmModuleWord(module, word);
+    return;
+  }
   AARCH64ProgramInstruction* instruction =
       calloc(1, sizeof(*instruction));
   if (instruction == NULL) {
