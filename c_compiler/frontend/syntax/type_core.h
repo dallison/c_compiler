@@ -54,9 +54,9 @@ void TypeRecordProfileReport(FILE* out, size_t limit);
 // destruction. Release the backing blocks with the rest of frontend teardown.
 TemplateArgument* TemplateArgumentAlloc(void);
 void TemplateArgumentArenaRelease(void);
-// Debug builds: abort if a shared argument was modified.  Call before
-// teardown starts releasing the types arguments refer to.
-void TemplateArgumentCheckShared(void);
+// Debug builds: abort if a shared argument or a canonical type record was
+// modified.  Call before teardown starts releasing types.
+void TypeCheckSharedRecords(void);
 // Free every Struct info (and its members) in one pass.  Call once, at
 // CompilerDestruct, after the AST/symbols/tags are gone but before
 // TypeRecordArenaRelease.  Structs are freed here rather than by refcount
@@ -113,6 +113,9 @@ TypeRecord* TypeRecordInternOrCopy(TypeRecord* type);
 // Rebasing an argument clones its type first, so the shared record is never
 // renumbered in place.
 TypeRecord* TypeRecordInternArgumentOrCopy(TypeRecord* type);
+// For template-argument storage: consumes `type` and returns its canonical
+// record when it is a bare template parameter, else returns `type`.
+TypeRecord* TypeRecordInternBareParameter(TypeRecord* type);
 size_t TypeRecordInternHitCount(void);
 size_t TypeRecordInternMissCount(void);
 // DAVECC_PROFILE_CENSUS: how many live records are structural duplicates.

@@ -460,20 +460,6 @@ static void CheckSharedArgument(const TemplateArgument* arg) {
 }
 #endif
 
-void TemplateArgumentCheckShared(void) {
-#if TYPE_ARENA_CHECKS
-  for (TemplateArgumentArenaBlock* block = template_argument_arena;
-       block != NULL; block = block->next) {
-    for (size_t i = 0; i < block->used; i++) {
-      const TemplateArgument* arg = &block->slots[i].argument;
-      if (arg->shares > 0) {
-        CheckSharedArgument(arg);
-      }
-    }
-  }
-#endif
-}
-
 void TemplateArgumentPin(TemplateArgument* arg) {
   assert(arg->shares == 0);
   arg->shares = UINT8_MAX;
@@ -2433,6 +2419,40 @@ TypeRecord* TypeRecordInternArgumentOrCopy(TypeRecord* type) {
     return TypeRecordInternWithQualifiers(type, GetQualifiers(type));
   }
   return TypeRecordInternOrCopy(type);
+}
+
+TypeRecord* TypeRecordInternBareParameter(TypeRecord* type) {
+  if (type == NULL || TypeRecordIsCanonical(type) ||
+      !TypeRecordIsBareTemplateParameter(type)) {
+    return type;
+  }
+  TypeRecord* canonical =
+      TypeRecordInternWithQualifiers(type, GetQualifiers(type));
+  TypeRecordDelete(TypeRecordAdopt(type));
+  return canonical;
+}
+
+void TypeCheckSharedRecords(void) {
+#if TYPE_ARENA_CHECKS
+  for (TemplateArgumentArenaBlock* block = template_argument_arena;
+       block != NULL; block = block->next) {
+    for (size_t i = 0; i < block->used; i++) {
+      const TemplateArgument* arg = &block->slots[i].argument;
+      if (arg->shares > 0) {
+        CheckSharedArgument(arg);
+      }
+    }
+  }
+  for (size_t s = 0; s < type_intern_capacity; s++) {
+    TypeRecord* record = type_intern_by_hash[s].record;
+    if (record != NULL && TypeInternHash(record, GetQualifiers(record)) !=
+                              type_intern_by_hash[s].hash) {
+      fprintf(stderr, "internal error: canonical type record %p modified\n",
+              (void*)record);
+      abort();
+    }
+  }
+#endif
 }
 
 size_t TypeRecordInternHitCount(void) {

@@ -470,16 +470,16 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
     // A type-constraint on an `auto` non-type parameter constrains the type of
     // the argument, not its value. Substitute the concrete value argument's
     // type into the concept-id's synthetic type argument.
-    concrete->type = TypeRecordInternOrCopy(placeholder_actual->type);
+    concrete->type = TypeRecordInternArgumentOrCopy(placeholder_actual->type);
     concrete->type =
         TypeMaterializeClassTemplateSpecialization(parser->syntax,
                                                    concrete->type);
     concrete->template_parameter_index = -1;
   } else if (arg->kind == kTemplateParameterType && arg->type != NULL) {
     concrete->type = SubstituteTemplateParameters(parser, arg->type, args);
-    concrete->type =
+    concrete->type = TypeRecordInternBareParameter(
         TypeMaterializeClassTemplateSpecialization(parser->syntax,
-                                                   concrete->type);
+                                                   concrete->type));
     concrete->template_parameter_index = -1;
   } else if (arg->kind == kTemplateParameterType &&
              arg->template_parameter_index >= 0 &&
@@ -491,7 +491,7 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
         return TemplateArgumentCopy(actual);
       }
       if (actual->type != NULL) {
-        concrete->type = TypeRecordInternOrCopy(actual->type);
+        concrete->type = TypeRecordInternArgumentOrCopy(actual->type);
         concrete->type =
             TypeMaterializeClassTemplateSpecialization(parser->syntax,
                                                        concrete->type);
@@ -501,7 +501,7 @@ TemplateArgument* NewSubstitutedTemplateArgument(TypeParser* parser,
       }
     } else if (actual != NULL && actual->kind == kTemplateParameterNonType &&
                actual->type != NULL) {
-      concrete->type = TypeRecordInternOrCopy(actual->type);
+      concrete->type = TypeRecordInternArgumentOrCopy(actual->type);
       concrete->type =
           TypeMaterializeClassTemplateSpecialization(parser->syntax,
                                                      concrete->type);
@@ -4127,8 +4127,8 @@ void RebaseTemplateArgumentParameterIndices(TemplateArgument* arg,
   if (!TypeRecordCanShareConcreteClass(arg->type)) {
     TypeRecord* independent_type = TypeRecordCloneSpine(arg->type);
     TypeRecordDelete(arg->type);
-    arg->type = independent_type;
-    RebaseTemplateParameterIndices(arg->type, base);
+    RebaseTemplateParameterIndices(independent_type, base);
+    arg->type = TypeRecordInternBareParameter(independent_type);
   }
   arg->dependent_expr =
       CloneAndRebaseDependentExpression(arg->dependent_expr, base);
