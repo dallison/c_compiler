@@ -1,6 +1,6 @@
 // RUN: -std=c++23
-// EXPECT-ASM: _ZNH5value3addER5valuei
-// EXPECT-ASM: _ZNH5value4copyE5valuei
+// EXPECT-ASM: _ZNH5value3addERS_i
+// EXPECT-ASM: _ZNH5value4copyES_i
 
 struct value {
   int number;

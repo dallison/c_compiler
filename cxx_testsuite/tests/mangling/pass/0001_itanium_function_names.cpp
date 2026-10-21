@@ -6,7 +6,7 @@
 // EXPECT-ASM: _ZN3Box6methodEi
 // EXPECT-ASM: _ZNK3Box5valueEv
 // EXPECT-ASM: _ZN3Box4statEd
-// EXPECT-ASM: _Zpl3Box3Box
+// EXPECT-ASM: _Zpl3BoxS_
 
 namespace ns {
 void f(int value) {

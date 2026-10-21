@@ -149,9 +149,9 @@ ARM_COROUTINE_ASM="$WORK/arm_coroutine.s"
   -isystem "$ROOT/libc/include" -S \
   "$AARCH64_COROUTINE_SOURCE" -o "$ARM_COROUTINE_ASM"
 ARM_FROM_PROMISE=$(
-  awk '/^_ZN3std16coroutine_handleI7PromiseE12from_promiseER7Promise:/{inside=1} \
+  awk '/^_ZNSt16coroutine_handleI7PromiseE12from_promiseERS0_:/{inside=1} \
        inside{print} \
-       /^\.func_end__ZN3std16coroutine_handleI7PromiseE12from_promiseER7Promise:/{exit}' \
+       /^\.func_end__ZNSt16coroutine_handleI7PromiseE12from_promiseERS0_:/{exit}' \
       "$ARM_COROUTINE_ASM"
 )
 if grep -Eq 'stmdb sp|ldmia sp|add fp|str[[:space:]]+r1,|mov[[:space:]]+r[0-3],[[:space:]]*r[0-3]' \

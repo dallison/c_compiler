@@ -61,10 +61,10 @@ typedef void (*__davecc_new_handler)(void);
 
 static __davecc_new_handler __davecc_current_new_handler = NULL;
 
-__davecc_new_handler __davecc_set_new_handler(__davecc_new_handler handler)
-    asm("_ZN3std15set_new_handlerEPFvE");
-__davecc_new_handler __davecc_get_new_handler(void)
-    asm("_ZN3std15get_new_handlerEv");
+__davecc_new_handler __davecc_set_new_handler(__davecc_new_handler handler) asm(
+    "_ZSt15set_new_handlerPFvvE");
+__davecc_new_handler __davecc_get_new_handler(void) asm(
+    "_ZSt15get_new_handlerv");
 
 __davecc_new_handler __davecc_set_new_handler(__davecc_new_handler handler) {
   __davecc_new_handler previous = __davecc_current_new_handler;

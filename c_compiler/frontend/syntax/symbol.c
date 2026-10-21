@@ -10,14 +10,15 @@
 #include "concepts.h"
 #include "type_internal.h"
 
+#include <assert.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ast.h"
+#include "compiler.h"
 #include "constexpr.h"
 #include "dstring.h"
-#include "compiler.h"
 #include "member_pointer.h"
 #include "module_identity.h"
 #include "symbol_table.h"
@@ -626,6 +627,266 @@ static const char* CXXOperatorEncoding(const char* name) {
   return entry != NULL ? entry->encoding : NULL;
 }
 
+// The mangler writes a marked encoding: kCXXMarkOpen 'C' ... kCXXMarkClose
+// brackets an Itanium substitution candidate, kCXXMarkOpen 'N' ...
+// kCXXMarkClose a nested name, kCXXStdMark the global std namespace, and
+// kCXXSlotMark a substitution table entry that nothing can refer to.
+// CompressCXXMangledName turns it into the final name.
+#define kCXXMarkOpen '\x01'
+#define kCXXMarkClose '\x02'
+static const char kCXXStdMark[] = {kCXXMarkOpen, 'S', kCXXMarkClose, '\0'};
+static const char kCXXNestedMark[] = {kCXXMarkOpen, 'N', '\0'};
+static const char kCXXSlotMark[] = {kCXXMarkOpen, 'U', kCXXMarkClose, '\0'};
+
+// Brackets out[start..] as a substitution candidate.
+static void CXXMarkCandidate(String* out, size_t start) {
+  static const char open[] = {kCXXMarkOpen, 'C'};
+  size_t length = out->length;
+  StringAppendSegment(out, open, sizeof(open));
+  memmove(out->value + start + sizeof(open), out->value + start,
+          length - start);
+  memcpy(out->value + start, open, sizeof(open));
+  StringAppendChar(out, kCXXMarkClose);
+}
+
+static void CXXOpenNestedName(String* out) {
+  StringAppend(out, kCXXNestedMark);
+}
+
+static void CXXCloseNestedName(String* out) {
+  StringAppendChar(out, kCXXMarkClose);
+}
+
+typedef struct {
+  size_t start;
+  size_t length;
+  uint64_t hash;
+} CXXSubstitutionCandidate;
+
+typedef struct {
+  const char* raw;
+  size_t* close;  // Index of the kCXXMarkClose matching each kCXXMarkOpen.
+  String* out;
+  CXXSubstitutionCandidate* candidates;
+  size_t candidate_count;
+  size_t candidate_capacity;
+} CXXNameCompressor;
+
+static uint64_t HashCXXCandidate(const char* raw, size_t length) {
+  uint64_t hash = UINT64_C(1469598103934665603);
+  for (size_t i = 0; i < length; i++) {
+    hash ^= (unsigned char)raw[i];
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static void AppendCXXSubstitution(String* out, size_t index) {
+  StringAppendChar(out, 'S');
+  if (index > 0) {
+    char digits[16];
+    size_t start = sizeof(digits);
+    size_t value = index - 1;
+    do {
+      size_t digit = value % 36;
+      digits[--start] = (char)(digit < 10 ? '0' + digit : 'A' + (digit - 10));
+      value /= 36;
+    } while (value != 0);
+    StringAppendSegment(out, digits + start, sizeof(digits) - start);
+  }
+  StringAppendChar(out, '_');
+}
+
+// The standard abbreviations for candidates that are not themselves
+// substitution candidates.
+static const char* CXXStandardAbbreviation(const char* raw, size_t length) {
+#define CXX_STD_TEMPLATE(name) \
+  "\x01"                       \
+  "C"                          \
+  "\x01"                       \
+  "C"                          \
+  "\x01"                       \
+  "S"                          \
+  "\x02" name "\x02"
+#define CXX_STD_CHAR_TRAITS         \
+  CXX_STD_TEMPLATE("11char_traits") \
+  "IcE"                             \
+  "\x02"
+#define CXX_STD_CHAR_ALLOCATOR   \
+  CXX_STD_TEMPLATE("9allocator") \
+  "IcE"                          \
+  "\x02"
+  static const struct {
+    const char* raw;
+    const char* abbreviation;
+  } abbreviations[] = {
+      {"\x01"
+       "C"
+       "\x01"
+       "S"
+       "\x02"
+       "9allocator"
+       "\x02",
+       "Sa"},
+      {"\x01"
+       "C"
+       "\x01"
+       "S"
+       "\x02"
+       "12basic_string"
+       "\x02",
+       "Sb"},
+      {CXX_STD_TEMPLATE(
+           "12basic_string") "Ic" CXX_STD_CHAR_TRAITS CXX_STD_CHAR_ALLOCATOR "E"
+                             "\x02",
+       "Ss"},
+      {CXX_STD_TEMPLATE("13basic_istream") "Ic" CXX_STD_CHAR_TRAITS "E"
+                                           "\x02",
+       "Si"},
+      {CXX_STD_TEMPLATE("13basic_ostream") "Ic" CXX_STD_CHAR_TRAITS "E"
+                                           "\x02",
+       "So"},
+      {CXX_STD_TEMPLATE("14basic_iostream") "Ic" CXX_STD_CHAR_TRAITS "E"
+                                            "\x02",
+       "Sd"},
+  };
+#undef CXX_STD_CHAR_ALLOCATOR
+#undef CXX_STD_CHAR_TRAITS
+#undef CXX_STD_TEMPLATE
+  for (size_t i = 0; i < sizeof(abbreviations) / sizeof(abbreviations[0]);
+       i++) {
+    if (strlen(abbreviations[i].raw) == length &&
+        memcmp(abbreviations[i].raw, raw, length) == 0) {
+      return abbreviations[i].abbreviation;
+    }
+  }
+  return NULL;
+}
+
+static void CompressCXXRange(CXXNameCompressor* c, size_t begin, size_t end);
+
+// An entry of length 0 matches no candidate.
+static void AddCXXCandidate(CXXNameCompressor* c, size_t start, size_t length,
+                            uint64_t hash) {
+  if (c->candidate_count == c->candidate_capacity) {
+    c->candidate_capacity =
+        c->candidate_capacity != 0 ? c->candidate_capacity * 2 : 16;
+    c->candidates =
+        realloc(c->candidates, c->candidate_capacity * sizeof(*c->candidates));
+  }
+  c->candidates[c->candidate_count++] =
+      (CXXSubstitutionCandidate){start, length, hash};
+}
+
+// Writes the candidate opened at `open`, or its substitution if the same
+// candidate came earlier.  Returns true for a substitution.
+static bool CompressCXXCandidate(CXXNameCompressor* c, size_t open) {
+  size_t close = c->close[open];
+  const char* key = c->raw + open;
+  size_t length = close + 1 - open;
+  uint64_t hash = HashCXXCandidate(key, length);
+  for (size_t i = 0; i < c->candidate_count; i++) {
+    CXXSubstitutionCandidate* candidate = &c->candidates[i];
+    if (candidate->hash == hash && candidate->length == length &&
+        memcmp(c->raw + candidate->start, key, length) == 0) {
+      AppendCXXSubstitution(c->out, i);
+      return true;
+    }
+  }
+  const char* abbreviation = CXXStandardAbbreviation(key, length);
+  if (abbreviation != NULL) {
+    StringAppend(c->out, abbreviation);
+    return false;
+  }
+  CompressCXXRange(c, open + 2, close);
+  AddCXXCandidate(c, open, length, hash);
+  return false;
+}
+
+// A nested name that is wholly one substitution is written without its N...E.
+static void CompressCXXNestedName(CXXNameCompressor* c, size_t open) {
+  size_t close = c->close[open];
+  size_t inner = open + 2;
+  size_t mark = c->out->length;
+  StringAppendChar(c->out, 'N');
+  if (c->raw[inner] == kCXXMarkOpen && c->raw[inner + 1] == 'C' &&
+      c->close[inner] + 1 == close) {
+    if (CompressCXXCandidate(c, inner)) {
+      String* out = c->out;
+      memmove(out->value + mark, out->value + mark + 1, out->length - mark - 1);
+      out->length--;
+      out->value[out->length] = '\0';
+      return;
+    }
+  } else {
+    CompressCXXRange(c, inner, close);
+  }
+  StringAppendChar(c->out, 'E');
+}
+
+static void CompressCXXRange(CXXNameCompressor* c, size_t begin, size_t end) {
+  size_t i = begin;
+  while (i < end) {
+    if (c->raw[i] != kCXXMarkOpen) {
+      size_t run = i;
+      while (run < end && c->raw[run] != kCXXMarkOpen) {
+        run++;
+      }
+      StringAppendSegment(c->out, c->raw + i, run - i);
+      i = run;
+      continue;
+    }
+    switch (c->raw[i + 1]) {
+      case 'C':
+        CompressCXXCandidate(c, i);
+        break;
+      case 'N':
+        CompressCXXNestedName(c, i);
+        break;
+      case 'S':
+        StringAppend(c->out, "St");
+        break;
+      case 'U':
+        AddCXXCandidate(c, i, 0, 0);
+        break;
+      default:
+        assert(false);
+        break;
+    }
+    i = c->close[i] + 1;
+  }
+}
+
+// Replaces the marked encoding in name[start..] by its final form.
+static void CompressCXXMangledName(String* name, size_t start) {
+  if (memchr(name->value + start, kCXXMarkOpen, name->length - start) == NULL) {
+    return;
+  }
+  size_t length = name->length - start;
+  char* raw = malloc(length + 1);
+  memcpy(raw, name->value + start, length + 1);
+  size_t* close = malloc(length * sizeof(*close));
+  size_t* stack = malloc(length * sizeof(*stack));
+  size_t depth = 0;
+  for (size_t i = 0; i < length; i++) {
+    if (raw[i] == kCXXMarkOpen) {
+      stack[depth++] = i;
+    } else if (raw[i] == kCXXMarkClose) {
+      assert(depth > 0);
+      close[stack[--depth]] = i;
+    }
+  }
+  assert(depth == 0);
+  free(stack);
+  name->length = start;
+  name->value[start] = '\0';
+  CXXNameCompressor compressor = {raw, close, name, NULL, 0, 0};
+  CompressCXXRange(&compressor, 0, length);
+  free(compressor.candidates);
+  free(close);
+  free(raw);
+}
+
 static void AppendCXXDecimal(String* out, size_t value) {
   char digits[20];
   size_t start = sizeof(digits);
@@ -666,27 +927,44 @@ static void AppendCXXNameComponent(String* out, const char* name) {
   }
 }
 
-static void AppendCXXNestedNamespaceComponents(String* out, Namespace* ns) {
+static bool CXXNamespaceIsStd(Namespace* ns) {
+  return ns != NULL && ns->parent != NULL && ns->parent->parent == NULL &&
+         strcmp(ns->name.value, "std") == 0;
+}
+
+// Each namespace prefix, from out[chain_start] on, is a candidate; std is not.
+static void AppendCXXNestedNamespaceComponents(String* out, size_t chain_start,
+                                               Namespace* ns) {
   if (ns == NULL || ns->parent == NULL) {
     return;
   }
-  AppendCXXNestedNamespaceComponents(out, ns->parent);
-  if (ns->name.length != 0) {
-    AppendCXXNameComponent(out, ns->name.value);
+  AppendCXXNestedNamespaceComponents(out, chain_start, ns->parent);
+  if (ns->name.length == 0) {
+    return;
   }
+  if (CXXNamespaceIsStd(ns)) {
+    StringAppend(out, kCXXStdMark);
+    return;
+  }
+  AppendCXXNameComponent(out, ns->name.value);
+  CXXMarkCandidate(out, chain_start);
 }
 
 static void AppendCXXTypeEncoding(String* out, TypeRecord* type);
 static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
                                     String* tag_name, Struct* str);
 static Namespace* CXXStructNamespace(Struct* str);
-static void AppendCXXStructNameComponents(String* out, Struct* str);
+static void AppendCXXStructNameComponents(String* out, size_t chain_start,
+                                          Struct* str);
 static Struct* CXXLocalClassRoot(Struct* str);
 static void AppendCXXLocalNamePrefix(String* out, Struct* local);
 static void AppendCXXLocalNameDiscriminator(String* out, Struct* local);
 
 static void AppendCXXVendorObjectExpression(String* out, const char* prefix,
                                             String* key) {
+  if (key != NULL) {
+    CompressCXXMangledName(key, 0);
+  }
   String encoded;
   StringInit(&encoded, prefix);
   for (size_t i = 0; key != NULL && i < key->length; i++) {
@@ -833,6 +1111,7 @@ Symbol* GetCXXTemplateParameterObject(TemplateArgument* argument) {
       &name, TemplateArgumentExtraOf(argument)->object_initializer,
       argument->type);
   StringAppendChar(&name, 'E');
+  CompressCXXMangledName(&name, 0);
   Symbol* symbol = NULL;
   for (size_t i = 0; compiler != NULL &&
                      i < compiler->initialized_static_variables.length; i++) {
@@ -934,13 +1213,15 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
     if (local != NULL) {
       AppendCXXLocalNamePrefix(out, local);
     }
-    StringAppendChar(out, 'N');
+    CXXOpenNestedName(out);
+    size_t chain_start = out->length;
     if (local == NULL) {
-      AppendCXXNestedNamespaceComponents(out, CXXStructNamespace(owner));
+      AppendCXXNestedNamespaceComponents(out, chain_start,
+                                         CXXStructNamespace(owner));
     }
-    AppendCXXStructNameComponents(out, owner);
+    AppendCXXStructNameComponents(out, chain_start, owner);
     AppendCXXNameComponent(out, symbol->name.value);
-    StringAppendChar(out, 'E');
+    CXXCloseNestedName(out);
     if (local != NULL) {
       AppendCXXLocalNameDiscriminator(out, local);
     }
@@ -962,11 +1243,13 @@ static void AppendCXXTemplateTemplateArgument(String* out,
     return;
   }
   if (arg->template_parameter_index >= 0) {
+    size_t start = out->length;
     StringAppendChar(out, 'T');
     if (arg->template_parameter_index > 0) {
       StringPrintf(out, "%d", arg->template_parameter_index - 1);
     }
     StringAppendChar(out, '_');
+    CXXMarkCandidate(out, start);
     return;
   }
   Symbol* symbol = TemplateArgumentExtraOf(arg)->template_symbol;
@@ -1078,23 +1361,27 @@ static void AppendCXXLocalNameDiscriminator(String* out, Struct* local) {
 }
 
 // The class's name within its namespace, or within its function for a local
-// class (whose <local-name> callers open and close).
-static void AppendCXXStructNameComponents(String* out, Struct* str) {
+// class (whose <local-name> callers open and close).  Each prefix from
+// out[chain_start] on, and each template prefix, is a candidate.
+static void AppendCXXStructNameComponents(String* out, size_t chain_start,
+                                          Struct* str) {
   if (str == NULL) {
     return;
   }
   if (str->lexical_parent != NULL) {
-    AppendCXXStructNameComponents(out, str->lexical_parent);
+    AppendCXXStructNameComponents(out, chain_start, str->lexical_parent);
   }
   if (str->tag_name != NULL) {
     TypeRecord* tag_type =
         str->tag_symbol != NULL ? str->tag_symbol->type : NULL;
     if (tag_type != NULL && tag_type->template_origin != NULL) {
       AppendCXXNameComponent(out, tag_type->template_origin->name.value);
+      CXXMarkCandidate(out, chain_start);
       AppendCXXTemplateArgumentVector(out, tag_type->template_arguments);
     } else {
       AppendCXXNameComponent(out, str->tag_name->value);
     }
+    CXXMarkCandidate(out, chain_start);
   }
 }
 
@@ -1145,7 +1432,12 @@ static void AppendCXXName(String* out, Symbol* symbol) {
     ns = NULL;
   }
 
-  StringAppendChar(out, 'N');
+  if (owner == NULL && CXXNamespaceIsStd(ns)) {
+    StringAppend(out, kCXXStdMark);
+    AppendCXXUnqualifiedName(out, symbol);
+    return;
+  }
+  CXXOpenNestedName(out);
   if (symbol->type->info.function.has_explicit_object_parameter) {
     StringAppendChar(out, 'H');
   } else {
@@ -1162,54 +1454,63 @@ static void AppendCXXName(String* out, Symbol* symbol) {
       StringAppendChar(out, 'O');
     }
   }
-  AppendCXXNestedNamespaceComponents(out, ns);
+  size_t chain_start = out->length;
+  AppendCXXNestedNamespaceComponents(out, chain_start, ns);
   if (owner != NULL) {
-    AppendCXXStructNameComponents(out, owner);
+    AppendCXXStructNameComponents(out, chain_start, owner);
   }
   AppendCXXUnqualifiedName(out, symbol);
-  StringAppendChar(out, 'E');
+  CXXCloseNestedName(out);
   if (local != NULL) {
     AppendCXXLocalNameDiscriminator(out, local);
   }
 }
 
 // Mangles a class/union/enum type name.  A type that lives in a namespace must
-// use the Itanium nested-name form (`N <namespace-components> <tag> E`) so that,
-// e.g., a parameter of type `std::nothrow_t` encodes as `N3std9nothrow_tE`
-// rather than the unqualified `9nothrow_t`.  Types at global scope keep the
-// bare `<length><name>` component.
+// use the Itanium nested-name form (`N <namespace-components> <tag> E`) so
+// that, e.g., a parameter of type `ns::tag` encodes as `N2ns3tagE` rather than
+// the unqualified `3tag`; `std::nothrow_t` takes the unscoped `St9nothrow_t`.
+// Types at global scope keep the bare `<length><name>` component.
 static void AppendCXXTaggedTypeName(String* out, Symbol* tag_symbol,
                                     String* tag_name, Struct* str) {
+  size_t start = out->length;
   Struct* local = str != NULL ? CXXLocalClassRoot(str) : NULL;
   if (local != NULL) {
     AppendCXXLocalNamePrefix(out, local);
     if (str != local) {
-      StringAppendChar(out, 'N');
+      CXXOpenNestedName(out);
     }
-    AppendCXXStructNameComponents(out, str);
+    AppendCXXStructNameComponents(out, out->length, str);
     if (str != local) {
-      StringAppendChar(out, 'E');
+      CXXCloseNestedName(out);
     }
     AppendCXXLocalNameDiscriminator(out, local);
+    CXXMarkCandidate(out, start);
     return;
   }
   Namespace* ns = str != NULL ? CXXStructNamespace(str)
                               : tag_symbol != NULL ? tag_symbol->namespace_ : NULL;
-  if (ns != NULL) {
-    StringAppendChar(out, 'N');
-    AppendCXXNestedNamespaceComponents(out, ns);
-    if (str != NULL) {
-      AppendCXXStructNameComponents(out, str);
-    } else {
-      AppendCXXNameComponent(out, tag_name->value);
-    }
-    StringAppendChar(out, 'E');
-  } else if (str != NULL && str->lexical_parent != NULL) {
-    StringAppendChar(out, 'N');
-    AppendCXXStructNameComponents(out, str);
-    StringAppendChar(out, 'E');
+  bool nested = ns != NULL || (str != NULL && str->lexical_parent != NULL);
+  // `std::X` is the unscoped `St X`.
+  if (CXXNamespaceIsStd(ns) && (str == NULL || str->lexical_parent == NULL)) {
+    StringAppend(out, kCXXStdMark);
+    nested = false;
+  }
+  if (nested) {
+    CXXOpenNestedName(out);
+  }
+  size_t chain_start = nested ? out->length : start;
+  if (nested) {
+    AppendCXXNestedNamespaceComponents(out, chain_start, ns);
+  }
+  if (str != NULL) {
+    AppendCXXStructNameComponents(out, chain_start, str);
   } else {
     AppendCXXNameComponent(out, tag_name->value);
+    CXXMarkCandidate(out, chain_start);
+  }
+  if (nested) {
+    CXXCloseNestedName(out);
   }
 }
 
@@ -1228,6 +1529,7 @@ static bool CXXTypeIsDeferredTemplateId(TypeRecord* type) {
 }
 
 static void AppendCXXDeferredTemplateIdName(String* out, TypeRecord* type) {
+  size_t start = out->length;
   Struct* str = type->info.struct_info;
   Struct* local = CXXLocalClassRoot(str);
   Namespace* ns = local != NULL ? NULL : CXXStructNamespace(str);
@@ -1235,49 +1537,116 @@ static void AppendCXXDeferredTemplateIdName(String* out, TypeRecord* type) {
     AppendCXXLocalNamePrefix(out, local);
   }
   bool nested = ns != NULL || str->lexical_parent != NULL;
-  if (nested) {
-    StringAppendChar(out, 'N');
+  if (CXXNamespaceIsStd(ns) && str->lexical_parent == NULL) {
+    StringAppend(out, kCXXStdMark);
+    nested = false;
   }
-  if (ns != NULL) {
-    AppendCXXNestedNamespaceComponents(out, ns);
+  if (nested) {
+    CXXOpenNestedName(out);
+  }
+  size_t chain_start = nested || local != NULL ? out->length : start;
+  if (nested) {
+    AppendCXXNestedNamespaceComponents(out, chain_start, ns);
   }
   if (str->lexical_parent != NULL) {
-    AppendCXXStructNameComponents(out, str->lexical_parent);
+    AppendCXXStructNameComponents(out, chain_start, str->lexical_parent);
   }
   AppendCXXNameComponent(out, type->template_origin->name.value);
+  CXXMarkCandidate(out, chain_start);
   AppendCXXTemplateArgumentVector(out, type->template_arguments);
+  CXXMarkCandidate(out, chain_start);
   if (nested) {
-    StringAppendChar(out, 'E');
+    CXXCloseNestedName(out);
   }
   if (local != NULL) {
     AppendCXXLocalNameDiscriminator(out, local);
+    CXXMarkCandidate(out, start);
   }
 }
 
+static bool AppendCXXUnqualifiedTypeBody(String* out, TypeRecord* type);
+
+// The parameter types of `func` from `first` on, without their top-level
+// cv-qualifiers, which are not part of the function type.  No parameters is
+// `v` and a trailing ellipsis `z`.
+static void AppendCXXBareFunctionParameters(String* out, TypeRecord* func,
+                                            size_t first) {
+  Vector* prototype = &func->info.function.prototype;
+  if (prototype->length <= first && !func->info.function.varargs) {
+    StringAppendChar(out, 'v');
+    return;
+  }
+  for (size_t i = first; i < prototype->length; i++) {
+    Symbol* formal = prototype->value.p[i];
+    AppendCXXUnqualifiedTypeEncoding(out, formal->type);
+  }
+  if (func->info.function.varargs) {
+    StringAppendChar(out, 'z');
+  }
+}
+
+// The function type of a pointer to member function carries the member's cv-
+// and ref-qualifiers.  The class is part of its type for substitution, and
+// the whole member pointer is the only candidate that can repeat it, so it
+// takes a table entry nothing refers to (Itanium ABI 5.1.8, as Clang does).
+static void AppendCXXMemberFunctionType(String* out, TypeRecord* func) {
+  if (func->info.function.is_volatile_member) {
+    StringAppendChar(out, 'V');
+  }
+  if (func->info.function.is_const_member) {
+    StringAppendChar(out, 'K');
+  }
+  StringAppendChar(out, 'F');
+  AppendCXXTypeEncoding(out, func->next);
+  AppendCXXBareFunctionParameters(out, func, 0);
+  if (func->info.function.ref_qualifier == kCXXRefQualifierLValue) {
+    StringAppendChar(out, 'R');
+  } else if (func->info.function.ref_qualifier == kCXXRefQualifierRValue) {
+    StringAppendChar(out, 'O');
+  }
+  StringAppendChar(out, 'E');
+  StringAppend(out, kCXXSlotMark);
+}
+
+// Every type but a builtin one is a substitution candidate.
 static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
   if (type == NULL) {
     StringAppendChar(out, 'v');
     return;
   }
-  if (TypeIsConst(type)) {
-    StringAppendChar(out, 'K');
-  }
+  size_t start = out->length;
+  bool qualified = TypeIsConst(type) || TypeIsVolatile(type);
   if (TypeIsVolatile(type)) {
     StringAppendChar(out, 'V');
   }
+  if (TypeIsConst(type)) {
+    StringAppendChar(out, 'K');
+  }
+  size_t body = out->length;
+  if (AppendCXXUnqualifiedTypeBody(out, type)) {
+    CXXMarkCandidate(out, body);
+  }
+  if (qualified) {
+    CXXMarkCandidate(out, start);
+  }
+}
+
+// Returns true when the encoding of a compound type was written: one that is
+// a candidate but does not mark itself.
+static bool AppendCXXUnqualifiedTypeBody(String* out, TypeRecord* type) {
   switch (type->declarator) {
     case kDeclPointer:
       StringAppendChar(out, 'P');
       AppendCXXTypeEncoding(out, type->next);
-      return;
+      return true;
     case kDeclReference:
       StringAppendChar(out, 'R');
       AppendCXXTypeEncoding(out, type->next);
-      return;
+      return true;
     case kDeclRValueReference:
       StringAppendChar(out, 'O');
       AppendCXXTypeEncoding(out, type->next);
-      return;
+      return true;
     case kDeclMemberPointer: {
       StringAppendChar(out, 'M');
       Struct* owner = type->info.struct_info;
@@ -1286,8 +1655,12 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
       } else {
         StringAppendChar(out, 'v');
       }
-      AppendCXXTypeEncoding(out, type->next);
-      return;
+      if (type->next != NULL && type->next->declarator == kDeclFunction) {
+        AppendCXXMemberFunctionType(out, type->next);
+      } else {
+        AppendCXXTypeEncoding(out, type->next);
+      }
+      return true;
     }
     case kDeclArray:
       // Itanium ABI array encoding is `A <bound> _ <element>`.  Encoding an
@@ -1302,23 +1675,20 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
       }
       StringAppendChar(out, '_');
       AppendCXXTypeEncoding(out, type->next);
-      return;
+      return true;
     case kDeclVector:
       // Itanium ABI fixed-length vector encoding.
       StringAppend(out, "Dv");
       StringAppendInt64(out, type->info.array.size.fixed);
       StringAppendChar(out, '_');
       AppendCXXTypeEncoding(out, type->next);
-      return;
+      return true;
     case kDeclFunction:
       StringAppendChar(out, 'F');
       AppendCXXTypeEncoding(out, type->next);
-      for (size_t i = 0; i < type->info.function.prototype.length; i++) {
-        Symbol* formal = type->info.function.prototype.value.p[i];
-        AppendCXXTypeEncoding(out, formal->type);
-      }
+      AppendCXXBareFunctionParameters(out, type, 0);
       StringAppendChar(out, 'E');
-      return;
+      return true;
     case kDeclPrimitive:
       break;
   }
@@ -1381,7 +1751,7 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
              type->info.struct_info->tag_name != NULL) {
     if (CXXTypeIsDeferredTemplateId(type)) {
       AppendCXXDeferredTemplateIdName(out, type);
-      return;
+      return false;
     }
     AppendCXXTaggedTypeName(out, type->info.struct_info->tag_symbol,
                             type->info.struct_info->tag_name,
@@ -1389,10 +1759,13 @@ static void AppendCXXTypeEncoding(String* out, TypeRecord* type) {
   } else {
     StringAppendChar(out, 'v');
   }
+  return false;
 }
 
 void AppendCXXMangledTypeName(String* out, TypeRecord* type) {
+  size_t start = out->length;
   AppendCXXTypeEncoding(out, type);
+  CompressCXXMangledName(out, start);
 }
 
 static void AppendCXXFunctionParameterTypes(String* out, Symbol* symbol) {
@@ -1401,28 +1774,7 @@ static void AppendCXXFunctionParameterTypes(String* out, Symbol* symbol) {
       func->info.function.prototype.length > 0 &&
       strcmp(((Symbol*)func->info.function.prototype.value.p[0])->name.value,
              "this") == 0;
-  size_t first_arg = has_implicit_this ? 1 : 0;
-  if (func->info.function.prototype.length <= first_arg) {
-    StringAppendChar(out, 'v');
-    return;
-  }
-  TypeRecord* first_vector_type = NULL;
-  for (size_t i = first_arg; i < func->info.function.prototype.length; i++) {
-    Symbol* formal = func->info.function.prototype.value.p[i];
-    if (TypeIsVector(formal->type)) {
-      if (first_vector_type != NULL &&
-          TypeEqual(first_vector_type, formal->type)) {
-        // Fixed vector types are substitutable in the Itanium ABI.  This is
-        // the common `f(vec, vec)` form emitted by GCC and Clang.
-        StringAppend(out, "S_");
-        continue;
-      }
-      if (first_vector_type == NULL) {
-        first_vector_type = formal->type;
-      }
-    }
-    AppendCXXTypeEncoding(out, formal->type);
-  }
+  AppendCXXBareFunctionParameters(out, func, has_implicit_this ? 1 : 0);
 }
 
 static void AppendCXXTemplateArguments(String* out, Symbol* symbol) {
@@ -1517,6 +1869,7 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol) {
   AppendCXXTemplateArguments(&mangled, symbol);
   AppendCXXFunctionParameterTypes(&mangled, symbol);
   AppendCXXNonDeducedParameterSuffix(&mangled, symbol);
+  CompressCXXMangledName(&mangled, 0);
   StoreAsmName(symbol, mangled.value);
   StringDestruct(&mangled);
   // The cached target name derives from asm_name_; drop it so it is
@@ -1575,20 +1928,25 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
     ns = NULL;
   }
 
-  bool nested = ns != NULL ||
-                (owner != NULL && owner->tag_name != NULL);
+  bool has_owner = owner != NULL && owner->tag_name != NULL;
+  bool nested = ns != NULL || has_owner;
+  if (!has_owner && CXXNamespaceIsStd(ns)) {
+    StringAppend(&mangled, kCXXStdMark);
+    nested = false;
+  }
   if (nested) {
-    StringAppendChar(&mangled, 'N');
-    AppendCXXNestedNamespaceComponents(&mangled, ns);
-    if (owner != NULL && owner->tag_name != NULL) {
+    CXXOpenNestedName(&mangled);
+    size_t chain_start = mangled.length;
+    AppendCXXNestedNamespaceComponents(&mangled, chain_start, ns);
+    if (has_owner) {
       // A static member of an out-of-line nested class belongs to the complete
       // class scope (`Api::_Internal::member`), not merely the innermost class.
       // Omitting lexical parents aliases identically named members of sibling
       // nested classes.
-      AppendCXXStructNameComponents(&mangled, owner);
+      AppendCXXStructNameComponents(&mangled, chain_start, owner);
     }
     AppendCXXNameComponent(&mangled, symbol->name.value);
-    StringAppendChar(&mangled, 'E');
+    CXXCloseNestedName(&mangled);
     if (local != NULL) {
       AppendCXXLocalNameDiscriminator(&mangled, local);
     }
@@ -1596,6 +1954,7 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
     AppendCXXNameComponent(&mangled, symbol->name.value);
   }
 
+  CompressCXXMangledName(&mangled, 0);
   StoreAsmName(symbol, mangled.value);
   StringDestruct(&mangled);
   // The cached target name derives from asm_name_; drop it so it is

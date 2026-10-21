@@ -1,6 +1,6 @@
 // RUN: -std=c++20
 // Itanium mangling of operator<=> (encoded `ss`), member and free forms.
-// EXPECT-ASM: _ZNK3BoxssERK3Box
+// EXPECT-ASM: _ZNK3BoxssERKS_
 // EXPECT-ASM: _ZssRK3Boxi
 struct Box {
   int value;
