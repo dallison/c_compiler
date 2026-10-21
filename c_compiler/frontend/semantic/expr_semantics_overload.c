@@ -628,7 +628,7 @@ static bool SameFreeFunction(Symbol* left, Symbol* right) {
     return false;
   }
   if (SymbolHasAsmName(left) && SymbolHasAsmName(right)) {
-    return StringEqualString(SymbolAsmName(left), SymbolAsmName(right));
+    return strcmp(SymbolAsmName(left), SymbolAsmName(right)) == 0;
   }
   return left->namespace_ == right->namespace_;
 }

@@ -27,7 +27,7 @@ const char* LTOSymbolAsmName(Symbol* symbol) {
     return "";
   }
   if (SymbolHasAsmName(symbol)) {
-    return SymbolAsmName(symbol)->value;
+    return SymbolAsmName(symbol);
   }
   return symbol->name.value;
 }
@@ -249,8 +249,12 @@ static void RenameSymbolForTU(Symbol* symbol, const char* tu_id) {
   StringAppend(&symbol->name, ".lto.");
   StringAppend(&symbol->name, tu_id);
   if (SymbolHasAsmName(symbol)) {
-    StringAppend(SymbolAsmName(symbol), ".lto.");
-    StringAppend(SymbolAsmName(symbol), tu_id);
+    String asm_name;
+    StringInit(&asm_name, SymbolAsmName(symbol));
+    StringAppend(&asm_name, ".lto.");
+    StringAppend(&asm_name, tu_id);
+    SymbolSetAsmName(symbol, &asm_name);
+    StringDestruct(&asm_name);
   }
   SymbolSetCachedTargetName(symbol, NULL);
 }

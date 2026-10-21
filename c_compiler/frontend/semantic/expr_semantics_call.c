@@ -1193,8 +1193,8 @@ static bool FunctionIsFriendOf(TypeRecord* current, Struct* owner) {
     }
     if (current_symbol != NULL && SymbolHasAsmName(friend_symbol) &&
         SymbolHasAsmName(current_symbol) &&
-        StringEqualString(SymbolAsmName(friend_symbol),
-                          SymbolAsmName(current_symbol))) {
+        strcmp(SymbolAsmName(friend_symbol), SymbolAsmName(current_symbol)) ==
+            0) {
       return true;
     }
     if (current_symbol != NULL &&

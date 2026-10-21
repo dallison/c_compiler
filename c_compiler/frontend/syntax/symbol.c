@@ -226,10 +226,23 @@ void AttributeListClone(Vector* dest, const Vector* src) {
   }
 }
 
+// Replaces the asm name with a copy of `name`; NULL or "" leaves none.  `name`
+// may be the current asm name.
+static void StoreAsmName(Symbol* symbol, const char* name) {
+  char* copy = NULL;
+  if (name != NULL && name[0] != '\0') {
+    size_t size = strlen(name) + 1;
+    copy = malloc(size);
+    memcpy(copy, name, size);
+  }
+  free(symbol->asm_name_);
+  symbol->asm_name_ = copy;
+}
+
 void SymbolInit(Symbol* sym, const char* name, struct TypeRecord* type,
                 Storage storage) {
   StringInit(&sym->name, name);
-  StringInit(&sym->asm_name_, NULL);
+  sym->asm_name_ = NULL;
   sym->asm_name_deferred = false;
   sym->namespace_ = NULL;
   sym->type = NULL;
@@ -402,7 +415,8 @@ void SymbolDestruct(Symbol* symbol) {
   // references make destruction idempotent.
   symbol->destruction_complete = true;
   StringDestruct(&symbol->name);
-  StringDestruct(&symbol->asm_name_);
+  free(symbol->asm_name_);
+  symbol->asm_name_ = NULL;
   TypeRecordDelete(symbol->type);
   symbol->module_identity = NULL;
   SymbolClearAttributes(symbol);
@@ -536,7 +550,7 @@ static bool CXXSymbolShouldMangle(Symbol* symbol) {
   if (symbol->flags.is_c_linkage) {
     return false;
   }
-  if (symbol->asm_name_.length != 0) {
+  if (symbol->asm_name_ != NULL) {
     return false;
   }
   if (strcmp(symbol->name.value, "main") == 0 &&
@@ -754,7 +768,7 @@ static void AppendCXXTemplateObjectValue(String* out, ASTNode* initializer,
       Symbol* symbol = ((IdentifierASTNode*)operand)->symbol;
       StringAppend(out, "adL");
       if (SymbolHasAsmName(symbol)) {
-        StringAppendString(out, SymbolAsmName(symbol));
+        StringAppend(out, SymbolAsmName(symbol));
       } else {
         StringAppend(out, "_Z");
         AppendCXXNameComponent(out, symbol->name.value);
@@ -825,7 +839,7 @@ Symbol* GetCXXTemplateParameterObject(TemplateArgument* argument) {
     InitializedStaticVariable* existing =
         compiler->initialized_static_variables.value.p[i];
     if (existing != NULL && existing->symbol != NULL &&
-        StringEqual(SymbolAsmName(existing->symbol), name.value)) {
+        strcmp(SymbolAsmName(existing->symbol), name.value) == 0) {
       symbol = existing->symbol;
       break;
     }
@@ -931,7 +945,7 @@ static void AppendCXXTemplateNonTypeArgument(String* out,
       AppendCXXLocalNameDiscriminator(out, local);
     }
   } else if (SymbolHasAsmName(symbol)) {
-    StringAppendString(out, SymbolAsmName(symbol));
+    StringAppend(out, SymbolAsmName(symbol));
   } else {
     StringAppend(out, "_Z");
     AppendCXXNameComponent(out, symbol->name.value);
@@ -1036,7 +1050,7 @@ static Struct* CXXLocalClassRoot(Struct* str) {
 // arguments instead, since its function symbol may still be the pattern.
 static void AppendCXXLocalNamePrefix(String* out, Struct* local) {
   Symbol* function = local->access_enclosing_function;
-  const char* asm_name = SymbolAsmName(function)->value;
+  const char* asm_name = SymbolAsmName(function);
   if (compiler->prepend_underscore && asm_name[0] == '_') {
     asm_name++;
   }
@@ -1503,7 +1517,7 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol) {
   AppendCXXTemplateArguments(&mangled, symbol);
   AppendCXXFunctionParameterTypes(&mangled, symbol);
   AppendCXXNonDeducedParameterSuffix(&mangled, symbol);
-  StringSetString(&symbol->asm_name_, &mangled);
+  StoreAsmName(symbol, mangled.value);
   StringDestruct(&mangled);
   // The cached target name derives from asm_name_; drop it so it is
   // recomputed.
@@ -1522,17 +1536,17 @@ void SymbolMaterializeDeferredAsmName(Symbol* symbol) {
 
 void SymbolSetAsmName(Symbol* symbol, String* name) {
   symbol->asm_name_deferred = false;
-  StringSetString(&symbol->asm_name_, name);
+  StoreAsmName(symbol, name->value);
 }
 
 void SymbolSetAsmNameCString(Symbol* symbol, const char* name) {
   symbol->asm_name_deferred = false;
-  StringSet(&symbol->asm_name_, name);
+  StoreAsmName(symbol, name);
 }
 
 void SymbolClearAsmName(Symbol* symbol) {
   symbol->asm_name_deferred = false;
-  StringClear(&symbol->asm_name_);
+  StoreAsmName(symbol, NULL);
 }
 
 void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
@@ -1582,7 +1596,7 @@ void SymbolSetCXXDataAsmName(Symbol* symbol, Struct* owner) {
     AppendCXXNameComponent(&mangled, symbol->name.value);
   }
 
-  StringSetString(&symbol->asm_name_, &mangled);
+  StoreAsmName(symbol, mangled.value);
   StringDestruct(&mangled);
   // The cached target name derives from asm_name_; drop it so it is
   // recomputed.
@@ -1637,7 +1651,7 @@ Symbol* SymbolClone(Symbol* sym) {
     to->static_data_member_template_definition =
         from->static_data_member_template_definition;
   }
-  StringSetString(&new_sym->asm_name_, SymbolAsmName(sym));
+  StoreAsmName(new_sym, SymbolAsmName(sym));
   SymbolSetAttributeCopies(new_sym, sym->attributes_);
   return new_sym;
 }

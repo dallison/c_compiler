@@ -362,8 +362,8 @@ static void DumpSymbol(Symbol* s, size_t handle, String* scratch) {
   RenderSymbolFlags(s, scratch);
   printf("        flags   : %s\n", scratch->value);
 
-  if (SymbolAsmName(s)->length) {
-    printf("        asm name: %s\n", SymbolAsmName(s)->value);
+  if (SymbolHasAsmName(s)) {
+    printf("        asm name: %s\n", SymbolAsmName(s));
   }
   if (s->namespace_ != NULL && s->namespace_->qualified_name.length) {
     printf("        in ns   : %s\n", s->namespace_->qualified_name.value);

@@ -7429,7 +7429,7 @@ static void AppendConstexprTemplateArgumentValueKey(ConstexprValue* value,
         value->address_binding->symbol != NULL) {
       Symbol* symbol = value->address_binding->symbol;
       if (SymbolHasAsmName(symbol)) {
-        StringAppendString(result, SymbolAsmName(symbol));
+        StringAppend(result, SymbolAsmName(symbol));
       } else {
         StringAppendString(result, &symbol->name);
       }

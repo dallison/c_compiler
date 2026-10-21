@@ -4165,7 +4165,7 @@ static Symbol* PCodeConstexprFunctionDefinition(Symbol* symbol) {
       resolved->type->info.function.body != NULL) {
     SymbolSetCXXMangledAsmName(resolved);
     if (!SymbolHasAsmName(symbol) && SymbolHasAsmName(resolved)) {
-      SymbolSetAsmName(symbol, SymbolAsmName(resolved));
+      SymbolSetAsmNameCString(symbol, SymbolAsmName(resolved));
     }
     return resolved;
   }
@@ -4176,7 +4176,7 @@ static Symbol* PCodeConstexprFunctionDefinition(Symbol* symbol) {
     SymbolSetCXXMangledAsmName(symbol->value.func_defn);
     if (!SymbolHasAsmName(symbol) &&
         SymbolHasAsmName(symbol->value.func_defn)) {
-      SymbolSetAsmName(symbol, SymbolAsmName(symbol->value.func_defn));
+      SymbolSetAsmNameCString(symbol, SymbolAsmName(symbol->value.func_defn));
     }
     return symbol->value.func_defn;
   }

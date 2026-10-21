@@ -5320,7 +5320,7 @@ static void QueueODRUsedStaticDataMember(StructMember* member) {
   if (!SymbolHasAsmName(symbol)) {
     SymbolSetCXXMangledAsmName(symbol);
   }
-  if (PendingTemplateInstantiationHasAsmName(SymbolAsmName(symbol)->value)) {
+  if (PendingTemplateInstantiationHasAsmName(SymbolAsmName(symbol))) {
     return;
   }
 
@@ -11492,7 +11492,7 @@ void QueueTemplateMemberFunctionDefinitionImpl(Symbol* symbol,
       return;
     }
   }
-  if (PendingTemplateInstantiationHasAsmName(SymbolAsmName(symbol)->value)) {
+  if (PendingTemplateInstantiationHasAsmName(SymbolAsmName(symbol))) {
     symbol->type->info.function.definition = true;
     symbol->flags.is_defined = true;
     symbol->value.func_defn = symbol;

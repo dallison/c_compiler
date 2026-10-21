@@ -219,9 +219,10 @@ typedef struct SymbolCodegen {
 // symbols in a large C++ translation unit.
 typedef struct Symbol {
   String name;                // Symbol name.                     // @wire 1
-  // Optional asm-visible name.  Read through SymbolAsmName and write through
-  // SymbolSetAsmName, which handle deferred C++ mangling.
-  String asm_name_;              // @wire 2
+  // Optional asm-visible name: NULL or a nonempty owned string.  Read through
+  // SymbolAsmName and write through SymbolSetAsmName, which handle deferred
+  // C++ mangling.
+  char* asm_name_;               // @wire 2
   struct Namespace* namespace_;  // Owning C++ namespace, if any. // @wire 3
   struct TypeRecord* type;    // Type.                            // @wire 5
   int id;                                                         // @wire 4
@@ -421,21 +422,20 @@ void SymbolSetCXXMangledAsmName(Symbol* symbol);
 void SymbolDeferCXXMangledAsmName(Symbol* symbol);
 void SymbolMaterializeDeferredAsmName(Symbol* symbol);
 
-// The asm-visible name; empty when the symbol has none.  Edits through the
-// result are safe since any deferred name has already been mangled.
-static inline String* SymbolAsmName(Symbol* symbol) {
+// The asm-visible name; "" when the symbol has none.  Valid until the name is
+// next set.
+static inline const char* SymbolAsmName(Symbol* symbol) {
   if (symbol->asm_name_deferred) {
     SymbolMaterializeDeferredAsmName(symbol);
   }
-  return &symbol->asm_name_;
+  return symbol->asm_name_ != NULL ? symbol->asm_name_ : "";
 }
 static inline bool SymbolHasAsmName(Symbol* symbol) {
-  return SymbolAsmName(symbol)->length != 0;
+  return SymbolAsmName(symbol)[0] != '\0';
 }
 // The asm-visible name if there is one, otherwise the source name.
 static inline const char* SymbolAsmNameOrName(Symbol* symbol) {
-  return SymbolHasAsmName(symbol) ? symbol->asm_name_.value
-                                  : symbol->name.value;
+  return SymbolHasAsmName(symbol) ? symbol->asm_name_ : symbol->name.value;
 }
 // These replace any name, including a deferred one, without mangling it.
 void SymbolSetAsmName(Symbol* symbol, String* name);

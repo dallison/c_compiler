@@ -812,8 +812,7 @@ static void ResizeFunctionTemplateInstantiationCache(
       size_t argument_bucket = entry->argument_hash % new_bucket_count;
       entry->argument_next = argument_buckets[argument_bucket];
       argument_buckets[argument_bucket] = entry;
-      if (SymbolAsmName(entry->symbol)->value != NULL &&
-          *SymbolAsmName(entry->symbol)->value != '\0') {
+      if (SymbolHasAsmName(entry->symbol)) {
         size_t asm_name_bucket = entry->asm_name_hash % new_bucket_count;
         entry->asm_name_next = asm_name_buckets[asm_name_bucket];
         asm_name_buckets[asm_name_bucket] = entry;
@@ -849,7 +848,7 @@ static void IndexFunctionTemplateInstantiation(
   entry->argument_next = cache->argument_buckets[argument_bucket];
   cache->argument_buckets[argument_bucket] = entry;
 
-  const char* asm_name = SymbolAsmName(instantiated)->value;
+  const char* asm_name = SymbolAsmName(instantiated);
   if (asm_name != NULL && *asm_name != '\0') {
     entry->asm_name_hash = HashFunctionTemplateCacheString(asm_name);
     size_t asm_name_bucket = entry->asm_name_hash % cache->bucket_count;
@@ -969,8 +968,7 @@ Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
   for (Symbol* candidate = templ; candidate != NULL;
        candidate = candidate->overload_next) {
     if (!candidate->flags.is_template &&
-        SymbolAsmName(candidate)->value != NULL &&
-        strcmp(SymbolAsmName(candidate)->value, asm_name) == 0) {
+        strcmp(SymbolAsmName(candidate), asm_name) == 0) {
       return candidate;
     }
   }
@@ -983,7 +981,7 @@ Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
       Symbol* candidate = overload->symbol;
       if (candidate != NULL && !candidate->flags.is_template &&
           SymbolHasAsmName(candidate) &&
-          strcmp(SymbolAsmName(candidate)->value, asm_name) == 0) {
+          strcmp(SymbolAsmName(candidate), asm_name) == 0) {
         return candidate;
       }
     }
@@ -1005,7 +1003,7 @@ Symbol* FindFunctionTemplateInstantiationByAsmName(Symbol* templ,
          entry != NULL; entry = entry->asm_name_next) {
       Symbol* candidate = entry->symbol;
       if (entry->asm_name_hash == asm_name_hash &&
-          strcmp(SymbolAsmName(candidate)->value, asm_name) == 0) {
+          strcmp(SymbolAsmName(candidate), asm_name) == 0) {
         return candidate;
       }
     }

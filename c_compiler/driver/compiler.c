@@ -2806,19 +2806,27 @@ static const char* FunctionEmitName(Symbol* symbol) {
     return "";
   }
   if (SymbolHasAsmName(symbol)) {
-    return SymbolAsmName(symbol)->value;
+    return SymbolAsmName(symbol);
   }
   return symbol->name.value;
 }
 
-// The name a symbol is referenced and emitted by.
-static const String* SymbolReferenceNameString(Symbol* symbol) {
-  return SymbolHasAsmName(symbol) ? SymbolAsmName(symbol) : &symbol->name;
+// The name a symbol is referenced and emitted by, and its length.
+static const char* SymbolReferenceNameAndLength(Symbol* symbol,
+                                                size_t* length) {
+  if (SymbolHasAsmName(symbol)) {
+    const char* asm_name = SymbolAsmName(symbol);
+    *length = strlen(asm_name);
+    return asm_name;
+  }
+  *length = symbol->name.length;
+  return symbol->name.value;
 }
 
 static bool SymbolNameIsIn(struct CompilerStringIndex* index, Symbol* symbol) {
-  const String* name = SymbolReferenceNameString(symbol);
-  return CompilerStringIndexContainsSegment(index, name->value, name->length);
+  size_t length;
+  const char* name = SymbolReferenceNameAndLength(symbol, &length);
+  return CompilerStringIndexContainsSegment(index, name, length);
 }
 
 static bool FunctionAsmNameAlreadyEmitted(const char* asm_name) {
@@ -2837,10 +2845,10 @@ void CompilerMarkFunctionReferenced(Symbol* symbol) {
   // Do not assign an asm name here.  Compiler-invented runtime declarations
   // deliberately have an empty asm_name so they retain their ABI spelling
   // (for example __davecc_throw rather than a C++-mangled name).
-  const String* name = SymbolReferenceNameString(symbol);
-  const char* asm_name = name->value;
+  size_t asm_name_length;
+  const char* asm_name = SymbolReferenceNameAndLength(symbol, &asm_name_length);
   bool first_reference = !CompilerStringIndexContainsSegment(
-      compiler->referenced_function_name_index, name->value, name->length);
+      compiler->referenced_function_name_index, asm_name, asm_name_length);
   if (first_reference && symbol->is_imported_module_symbol &&
       StorageIs(symbol->storage, STO(static)) &&
       symbol->type->info.function.template_origin != NULL &&
@@ -4628,8 +4636,7 @@ static void** CompilerStringIndexValueSlot(struct CompilerStringIndex* index,
 
 static bool PendingSymbolIsDefinition(Symbol* symbol, const char* asm_name) {
   if (symbol == NULL || symbol->type == NULL || asm_name == NULL ||
-      SymbolAsmName(symbol)->value == NULL ||
-      strcmp(SymbolAsmName(symbol)->value, asm_name) != 0) {
+      strcmp(SymbolAsmName(symbol), asm_name) != 0) {
     return false;
   }
   return !TypeIsFunction(symbol->type) ||
@@ -4638,7 +4645,7 @@ static bool PendingSymbolIsDefinition(Symbol* symbol, const char* asm_name) {
 }
 
 static bool IndexPendingTemplateInstantiationSymbol(Symbol* symbol) {
-  const char* asm_name = symbol != NULL ? SymbolAsmName(symbol)->value : NULL;
+  const char* asm_name = symbol != NULL ? SymbolAsmName(symbol) : NULL;
   if (asm_name == NULL || *asm_name == '\0' ||
       !PendingSymbolIsDefinition(symbol, asm_name)) {
     return false;

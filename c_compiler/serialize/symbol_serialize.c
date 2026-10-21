@@ -647,7 +647,10 @@ static bool WriteSymbol(SerializeContext* ctx, WireBuffer* buf, void* obj) {
     CXXDeclarePendingSpecialMembersSlow(s->member_lookup_class);
   }
   SWriteStringVal(ctx, buf, kSym_name, &s->name);
-  SWriteStringVal(ctx, buf, kSym_asm_name, SymbolAsmName(s));
+  String asm_name;
+  StringInit(&asm_name, SymbolAsmName(s));
+  SWriteStringVal(ctx, buf, kSym_asm_name, &asm_name);
+  StringDestruct(&asm_name);
   SWriteRef(ctx, buf, kSym_namespace, kSerialKindNamespace, s->namespace_);
   WireWriteInt32(buf, kSym_id, s->id);
   SWriteRef(ctx, buf, kSym_type, kSerialKindType, s->type);
@@ -822,9 +825,14 @@ static bool ReadSymbol(DeserializeContext* ctx, WireBuffer* buf, void* obj) {
       case kSym_name:
         SReadStringVal(ctx, buf, &s->name);
         break;
-      case kSym_asm_name:
-        SReadStringVal(ctx, buf, &s->asm_name_);
+      case kSym_asm_name: {
+        String asm_name;
+        StringInit(&asm_name, NULL);
+        SReadStringVal(ctx, buf, &asm_name);
+        SymbolSetAsmName(s, &asm_name);
+        StringDestruct(&asm_name);
         break;
+      }
       case kSym_namespace:
         s->namespace_ = (Namespace*)SReadRef(ctx, buf, kSerialKindNamespace);
         break;

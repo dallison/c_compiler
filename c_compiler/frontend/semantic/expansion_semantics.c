@@ -453,8 +453,7 @@ static bool IsStaticOrThreadLocalVardecl(ASTNode* node) {
   if (StorageIs(decl->symbol->storage, STO(static) | STO(thread))) {
     return true;
   }
-  return SymbolAsmName(decl->symbol)->value != NULL &&
-         strncmp(SymbolAsmName(decl->symbol)->value, ".local.", 7) == 0;
+  return strncmp(SymbolAsmName(decl->symbol), ".local.", 7) == 0;
 }
 
 static void CollectStaticLocalDeclarations(ASTNode* stmt, Vector* out) {

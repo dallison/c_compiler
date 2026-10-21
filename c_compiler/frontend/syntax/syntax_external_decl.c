@@ -772,9 +772,9 @@ static void MergeDeclaratorIntoPrevious(Syntax* syntax, Symbol* sym,
       SymbolAddAttribute(old_sym, AttributeClone(deprecated));
     }
     if (SymbolHasAsmName(sym)) {
-      SymbolSetAsmName(old_sym, SymbolAsmName(sym));
+      SymbolSetAsmNameCString(old_sym, SymbolAsmName(sym));
     } else if (SymbolHasAsmName(old_sym)) {
-      SymbolSetAsmName(sym, SymbolAsmName(old_sym));
+      SymbolSetAsmNameCString(sym, SymbolAsmName(old_sym));
     }
   }
   if (TypeIsFunction(sym->type)) {
@@ -1148,7 +1148,7 @@ static ASTNode* ParseExternalDeclarationList(TypeParser* parser,
       // We now refer to the previously defined symbol rather than this new
       // one.
       if (SymbolHasAsmName(sym)) {
-        SymbolSetAsmName(old_sym, SymbolAsmName(sym));
+        SymbolSetAsmNameCString(old_sym, SymbolAsmName(sym));
       }
       SymbolDelete(sym);
       sym = old_sym;

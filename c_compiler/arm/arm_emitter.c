@@ -2474,7 +2474,7 @@ static const char* ARMLSDATypeInfoSymbol(EHTypeInfo* info) {
       !SymbolHasAsmName(info->canonical_typeinfo)) {
     return NULL;
   }
-  return SymbolAsmName(info->canonical_typeinfo)->value;
+  return SymbolAsmName(info->canonical_typeinfo);
 }
 
 static void ARMPrintGCCExceptTable(ARMEmitter* emitter, FILE* fp,

@@ -1087,8 +1087,9 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
   // expand each byte to at most four characters ("_uXX"), plus room for the
   // ".local." prefix / numeric suffix / leading underscore.
   size_t source_len = symbol->name.length;
-  if (SymbolAsmName(symbol)->length > source_len) {
-    source_len = SymbolAsmName(symbol)->length;
+  size_t asm_name_len = strlen(SymbolAsmName(symbol));
+  if (asm_name_len > source_len) {
+    source_len = asm_name_len;
   }
   size_t cap = source_len * 4 + 64;
   char* dyn = malloc(cap);
@@ -1101,7 +1102,7 @@ const char* TargetSymbolName(Symbol* symbol, char* buf, size_t len) {
     AppendSanitizedName(&out, &remaining, symbol->name.value);
     AppendToBuffer(&out, &remaining, suffix);
   } else if (SymbolHasAsmName(symbol)) {
-    AppendToBuffer(&out, &remaining, SymbolAsmName(symbol)->value);
+    AppendToBuffer(&out, &remaining, SymbolAsmName(symbol));
   } else {
     if (compiler->prepend_underscore) {
       AppendToBuffer(&out, &remaining, "_");
