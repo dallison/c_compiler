@@ -32,72 +32,100 @@ static int next_ast_node_id = 1;
 // references, owned strings/vectors) and then the arena blocks are freed in one
 // shot.  See ASTNodeDelete (which is idempotent via kASTDestructed) and
 // ASTArenaRelease.
+//
+// Nodes fill a block from the start of `data`.  Their sizes, in 16-byte units,
+// fill it backward from the end, one byte per node, so that teardown can visit
+// every node, including those that semantic analysis replaced or discarded and
+// which are therefore no longer reachable from any declaration root.  A node
+// too large for one byte has a block of its own, with a size byte of 0.
 typedef struct ASTArenaBlock {
-  struct ASTArenaBlock* next;
-  size_t used;
+  struct ASTArenaBlock* next;  // The block allocated before this one.
+  size_t used;                 // Node bytes at the start of data.
+  size_t count;                // Nodes, and size bytes at the end of data.
   size_t capacity;
   char data[];
 } ASTArenaBlock;
 
 #define AST_ARENA_BLOCK_SIZE (256 * 1024)
+#define AST_ARENA_UNIT 16
+#define AST_ARENA_MAX_UNITS UCHAR_MAX
 
 static ASTArenaBlock* ast_arena = NULL;
-
-// Every node handed out by ASTArenaAlloc, in allocation order.  Used at
-// teardown to destruct every node (releasing its type references and owned
-// resources), including nodes that semantic analysis replaced or discarded and
-// which are therefore no longer reachable from any declaration root.
-static Vector ast_all_nodes;
-static bool ast_all_nodes_initialized = false;
+static size_t ast_arena_nodes = 0;
 
 static ASTArenaBlock* NewASTArenaBlock(size_t capacity) {
   ASTArenaBlock* block = malloc(capacity + sizeof(ASTArenaBlock));
   block->next = NULL;
   block->used = 0;
+  block->count = 0;
   block->capacity = capacity;
   return block;
 }
 
+static unsigned char* ASTArenaBlockUnits(ASTArenaBlock* block, size_t index) {
+  return (unsigned char*)block->data + block->capacity - 1 - index;
+}
+
 // Allocate node memory from the arena.  Memory is 16-byte aligned and zeroed.
 void* ASTArenaAlloc(size_t size) {
-  size_t aligned = (size + 15) & ~(size_t)15;
-  if (ast_arena == NULL || ast_arena->used + aligned > ast_arena->capacity) {
-    size_t capacity = aligned > AST_ARENA_BLOCK_SIZE ? aligned
-                                                     : (size_t)AST_ARENA_BLOCK_SIZE;
-    ASTArenaBlock* block = NewASTArenaBlock(capacity);
+  size_t aligned = (size + AST_ARENA_UNIT - 1) & ~(size_t)(AST_ARENA_UNIT - 1);
+  size_t units = aligned / AST_ARENA_UNIT;
+  ASTArenaBlock* block = ast_arena;
+  if (units > AST_ARENA_MAX_UNITS) {
+    block = NewASTArenaBlock(aligned + 1);
+    units = 0;
+    // Behind the current block, which still has room for small nodes.
+    if (ast_arena != NULL) {
+      block->next = ast_arena->next;
+      ast_arena->next = block;
+    } else {
+      ast_arena = block;
+    }
+  } else if (block == NULL ||
+             block->used + aligned + block->count + 1 > block->capacity) {
+    block = NewASTArenaBlock(AST_ARENA_BLOCK_SIZE);
     block->next = ast_arena;
     ast_arena = block;
   }
-  void* p = ast_arena->data + ast_arena->used;
-  ast_arena->used += aligned;
+  void* p = block->data + block->used;
+  block->used += aligned;
+  *ASTArenaBlockUnits(block, block->count++) = (unsigned char)units;
+  ast_arena_nodes++;
   memset(p, 0, size);
-  if (!ast_all_nodes_initialized) {
-    VectorInit(&ast_all_nodes);
-    ast_all_nodes_initialized = true;
-  }
-  VectorAppend(&ast_all_nodes, p);
   return p;
 }
 
-// Free all arena blocks.  First destruct every node so the non-arena resources
-// they own (type references, owned strings/vectors) are released; this is
-// idempotent (see ASTNodeDelete) so nodes already destructed via a declaration
-// root are skipped.  Then free the node structs wholesale.
+// Free all arena blocks.  First destruct every node, oldest first, so the
+// non-arena resources they own (type references, owned strings/vectors) are
+// released; this is idempotent (see ASTNodeDelete) so nodes already destructed
+// via a declaration root are skipped.  Then free the node structs wholesale.
 void ASTArenaRelease(void) {
-  for (size_t i = 0; i < ast_all_nodes.length; i++) {
-    ASTNodeDelete((ASTNode*)ast_all_nodes.value.p[i]);
+  ASTArenaBlock* oldest_first = NULL;
+  while (ast_arena != NULL) {
+    ASTArenaBlock* block = ast_arena;
+    ast_arena = block->next;
+    block->next = oldest_first;
+    oldest_first = block;
   }
-  if (ast_all_nodes_initialized) {
-    VectorDestruct(&ast_all_nodes);
-    ast_all_nodes_initialized = false;
+  // ASTNodeDelete does nothing once ast_arena is NULL.
+  ast_arena = oldest_first;
+  for (ASTArenaBlock* block = oldest_first; block != NULL;
+       block = block->next) {
+    size_t offset = 0;
+    for (size_t i = 0; i < block->count; i++) {
+      size_t units = *ASTArenaBlockUnits(block, i);
+      ASTNodeDelete((ASTNode*)(block->data + offset));
+      offset += units != 0 ? units * AST_ARENA_UNIT : block->used;
+    }
   }
-  ASTArenaBlock* block = ast_arena;
+  ASTArenaBlock* block = oldest_first;
   while (block != NULL) {
     ASTArenaBlock* next = block->next;
     free(block);
     block = next;
   }
   ast_arena = NULL;
+  ast_arena_nodes = 0;
 }
 
 size_t ASTArenaBytes(void) {
@@ -108,9 +136,7 @@ size_t ASTArenaBytes(void) {
   return bytes;
 }
 
-size_t ASTArenaNodeCount(void) {
-  return ast_all_nodes_initialized ? ast_all_nodes.length : 0;
-}
+size_t ASTArenaNodeCount(void) { return ast_arena_nodes; }
 
 const char* ASTOpcodeName(ASTOpcode op) {
   switch (op) {
@@ -651,7 +677,7 @@ void ASTNodeDelete(ASTNode* node) {
     return;
   }
   // Once the arena has been released every node struct has already been
-  // destructed (via the ast_all_nodes sweep in ASTArenaRelease) and its backing
+  // destructed (via the arena sweep in ASTArenaRelease) and its backing
   // memory freed, so ast_arena is NULL.  Later teardown steps still hold
   // pointers to arena nodes -- e.g. Symbol default arguments and variable-
   // template / partial-specialization initializers reached from SymbolDestruct
