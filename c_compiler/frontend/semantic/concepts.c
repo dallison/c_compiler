@@ -1020,9 +1020,9 @@ static bool EvaluateCompoundNoexceptCondition(Requirement* requirement,
     ASTNode* holder = NewExpressionStatementASTNode(
         condition, requirement->location);
     DiagnosticSuppressBegin();
-    SemanticConvertType(condition,
-                        NewTypeRecordWithSize(kTypeBool, kQualPlain),
-                        kConvertContextualBool);
+    SemanticConvertToNewType(condition,
+                             NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                             kConvertContextualBool);
     condition = ASTNodeMove(((ExpressionStatementASTNode*)holder)->expr);
     failed = DiagnosticErrorTrapped() || condition == NULL ||
              !TypeIsBool(condition->type);

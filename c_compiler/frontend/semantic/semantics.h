@@ -54,6 +54,10 @@ typedef enum {
 // Convert a type 'from' to 'to', replacing 'from' with new ASTNode that
 // contains the conversion operation.
 void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx);
+// SemanticConvertType to a record the caller just created and does not keep;
+// conversion nodes that use it hold their own references.
+void SemanticConvertToNewType(ASTNode* from, TypeRecord* to,
+                              ConversionContext ctx);
 
 // Rank (0 exact, 1-3 trailing standard conversion) of the best implicit
 // conversion function of class-typed `from` that reaches `to`, which may be a

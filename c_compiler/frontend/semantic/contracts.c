@@ -179,9 +179,9 @@ void SemanticAnalyzeFunctionContracts(TypeRecord* func, ASTNode* declaration) {
       SemanticError(declaration, "invalid contract assertion predicate");
       continue;
     }
-    SemanticConvertType(assertion->predicate,
-                        NewTypeRecordWithSize(kTypeBool, kQualPlain),
-                        kConvertContextualBool);
+    SemanticConvertToNewType(assertion->predicate,
+                             NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                             kConvertContextualBool);
     assertion->predicate =
         AppendCXXFullExpressionTemporaryDestructors(assertion->predicate);
   }
@@ -203,9 +203,9 @@ void SemanticAnalyzeContractAssert(ContractAssertASTNode* node) {
     SemanticError((ASTNode*)node, "invalid contract assertion predicate");
     return;
   }
-  SemanticConvertType(node->predicate,
-                      NewTypeRecordWithSize(kTypeBool, kQualPlain),
-                      kConvertContextualBool);
+  SemanticConvertToNewType(node->predicate,
+                           NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                           kConvertContextualBool);
   node->predicate =
       AppendCXXFullExpressionTemporaryDestructors(node->predicate);
 }

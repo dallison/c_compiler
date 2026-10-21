@@ -50,6 +50,7 @@ static Symbol* GetInventedRuntimeFunction(const char* function_name,
   Symbol* symbol = FindGlobalSymbol(&name);
   StringDestruct(&name);
   if (symbol != NULL) {
+    TypeRecordDelete(return_type);
     return symbol;
   }
 
@@ -94,18 +95,12 @@ static Symbol* GetContractViolationFunction(SourceLocation location) {
 }
 
 static Symbol* GetCxaBeginCatchFunction(SourceLocation location) {
-  TypeRecord* void_ptr = NewPointerTo(kQualPlain,
-                                      NewTypeRecordWithSize(kTypeVoid,
-                                                            kQualPlain));
-  TypeRecord* func_type = NewFunctionTypeRecord();
-  TypeRecordChain(func_type, void_ptr);
-  TypeRecordChain(func_type, void_ptr);
+  TypeRecord* void_ptr =
+      NewPointerTo(kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   return GetInventedRuntimeFunction("__cxa_begin_catch", void_ptr, location);
 }
 
 static Symbol* GetCxaEndCatchFunction(SourceLocation location) {
-  TypeRecord* func_type = NewFunctionTypeRecord();
-  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   String name;
   StringInit(&name, "__cxa_end_catch");
   Symbol* symbol = FindGlobalSymbol(&name);
@@ -113,6 +108,8 @@ static Symbol* GetCxaEndCatchFunction(SourceLocation location) {
   if (symbol != NULL) {
     return symbol;
   }
+  TypeRecord* func_type = NewFunctionTypeRecord();
+  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
   symbol = NewSymbol("__cxa_end_catch", func_type, STO(extern));
   symbol->flags.invented = true;
   symbol->flags.is_forward_declared = true;
@@ -137,12 +134,6 @@ static Symbol* GetLandingPadSelectorFunction(SourceLocation location) {
 }
 
 static Symbol* GetUnwindResumeFunction(SourceLocation location) {
-  TypeRecord* void_ptr = NewPointerTo(kQualPlain,
-                                      NewTypeRecordWithSize(kTypeVoid,
-                                                            kQualPlain));
-  TypeRecord* func_type = NewFunctionTypeRecord();
-  TypeRecordChain(func_type, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
-  TypeRecordChain(func_type, void_ptr);
   Symbol* symbol =
       GetInventedRuntimeFunction("_Unwind_Resume",
                                  NewTypeRecordWithSize(kTypeVoid, kQualPlain),

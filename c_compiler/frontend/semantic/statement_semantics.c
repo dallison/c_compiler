@@ -1946,8 +1946,9 @@ static void AnalyzeIfStatement(IfStatementASTNode* node) {
       node->cond = AnalyzeExpression(node->cond);
     }
   }
-  SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
-                      kConvertContextualBool);
+  SemanticConvertToNewType(node->cond,
+                           NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                           kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
   if (node->is_constexpr) {
     int64_t value;
@@ -2005,8 +2006,9 @@ static bool CXXLoopConditionIsConstantTrue(ASTNode* cond) {
 
 static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
   node->cond = AnalyzeExpression(node->cond);
-  SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
-                      kConvertContextualBool);
+  SemanticConvertToNewType(node->cond,
+                           NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                           kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
   bool trivial_infinite =
       CompilerCXXAtLeast(kLanguageStandardCXX11) &&
@@ -2023,8 +2025,9 @@ static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
 
 static void AnalyzeDoStatement(CombinedStatementASTNode* node) {
   node->cond = AnalyzeExpression(node->cond);
-  SemanticConvertType(node->cond, NewTypeRecordWithSize(kTypeBool, kQualPlain),
-                      kConvertContextualBool);
+  SemanticConvertToNewType(node->cond,
+                           NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                           kConvertContextualBool);
   SemanticCheckScalarType(node->cond);
   bool trivial_infinite =
       CompilerCXXAtLeast(kLanguageStandardCXX11) &&
@@ -2243,11 +2246,14 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
   // Convert expr to int.  The conversion is to signed or unsigned.  A scoped
   // enum has no implicit conversion to an integer, so convert as a cast.
   if (node->all_cases_positive) {
-    SemanticConvertType(node->expr,
-                        NewTypeRecordWithSize(control_type | kTypeUnsigned, kQualPlain), kConvertCast);
+    SemanticConvertToNewType(
+        node->expr,
+        NewTypeRecordWithSize(control_type | kTypeUnsigned, kQualPlain),
+        kConvertCast);
   } else {
-    SemanticConvertType(node->expr,
-                        NewTypeRecordWithSize(control_type, kQualPlain), kConvertCast);
+    SemanticConvertToNewType(node->expr,
+                             NewTypeRecordWithSize(control_type, kQualPlain),
+                             kConvertCast);
   }
   
   VectorDestruct(&missing_constants);
@@ -2325,11 +2331,14 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   if (!TypeIsEnum(node->expr->type)) {
     // Convert expr to int.  The conversion is to signed or unsigned.
     if (TypeIsUnsigned(node->expr->type)) {
-      SemanticConvertType(node->expr,
-                          NewTypeRecordWithSize(control_type | kTypeUnsigned, kQualPlain), kConvertNormal);
+      SemanticConvertToNewType(
+          node->expr,
+          NewTypeRecordWithSize(control_type | kTypeUnsigned, kQualPlain),
+          kConvertNormal);
     } else {
-      SemanticConvertType(node->expr,
-                          NewTypeRecordWithSize(control_type, kQualPlain), kConvertNormal);
+      SemanticConvertToNewType(node->expr,
+                               NewTypeRecordWithSize(control_type, kQualPlain),
+                               kConvertNormal);
     }
   }
   
@@ -2434,8 +2443,9 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
   node->c2 = AnalyzeExpression(node->c2);
   bool constant_true_condition = node->c2 == NULL;
   if (node->c2 != NULL) {
-    SemanticConvertType(node->c2, NewTypeRecordWithSize(kTypeBool, kQualPlain),
-                        kConvertContextualBool);
+    SemanticConvertToNewType(node->c2,
+                             NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                             kConvertContextualBool);
     SemanticCheckScalarType(node->c2);
     constant_true_condition = CXXLoopConditionIsConstantTrue(node->c2);
     node->c2 =

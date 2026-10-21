@@ -3037,9 +3037,6 @@ static void AttachSubstitutedSpineNext(TypeParser* parser, TypeRecord* copy,
   if (copy->next == NULL) {
     return;
   }
-  if (!collapsed_reference) {
-    TypeRecordIncRef(copy->next);
-  }
   copy->type = copy->next->type;
 }
 

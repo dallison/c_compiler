@@ -1354,7 +1354,8 @@ static Symbol* FunctionTemplateOverloadCandidate(Symbol* candidate,
   bool substitution_failed = DiagnosticErrorTrapped();
   DiagnosticSuppressEnd();
   DiagnosticErrorTrapEnd(saved_trap);
-  if (substitution_failed) {
+  if (substitution_failed && instantiated != NULL) {
+    SymbolDelete(instantiated);
     instantiated = NULL;
   }
   if (instantiated != NULL && temporary_candidates != NULL) {

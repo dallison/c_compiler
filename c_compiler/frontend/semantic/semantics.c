@@ -1207,6 +1207,13 @@ void NormalConversion(ASTNode* from, TypeRecord* to) {
   SemanticConvertType(from, to, kConvertNormal);
 }
 
+void SemanticConvertToNewType(ASTNode* from, TypeRecord* to,
+                              ConversionContext ctx) {
+  to = TypeRecordAdopt(to);
+  SemanticConvertType(from, to, ctx);
+  TypeRecordDelete(to);
+}
+
 static bool CXXSameClassTypeIgnoringQualifiers(TypeRecord* from,
                                                TypeRecord* to) {
   if (from == NULL || to == NULL || !TypeIsStructOrUnion(from) ||

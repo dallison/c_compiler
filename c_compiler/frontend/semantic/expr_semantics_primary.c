@@ -43,7 +43,9 @@ static bool IsCXX23MoveEligibleThrowOperand(ASTNode* expression);
 // an unreachable arm with a bool constant, inserts contextual bool conversions,
 // and sets logical result type. Mutates `node->left`/`node->right` in place.
 void AnalyzeLogicalOperator(BinaryASTNode* node) {
-  TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+  // Nodes and conversions take their own references.
+  TypeRecord* bool_type =
+      TypeRecordAdopt(NewTypeRecordWithSize(kTypeBool, kQualPlain));
 
   node->left = CXXFoldIsSameVExpression(node->left);
   node->left = AnalyzeExpression(node->left);
@@ -55,6 +57,7 @@ void AnalyzeLogicalOperator(BinaryASTNode* node) {
             NewIntConstantASTNode(0, bool_type, node->base.location);
         ASTNodeReplaceChild((ASTNode*)node, 1, discarded, true);
         ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+        TypeRecordDelete(bool_type);
         return;
       }
       if (node->base.op == AST_OP(logor) && left_truth != 0) {
@@ -62,6 +65,7 @@ void AnalyzeLogicalOperator(BinaryASTNode* node) {
             NewIntConstantASTNode(1, bool_type, node->base.location);
         ASTNodeReplaceChild((ASTNode*)node, 1, discarded, true);
         ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+        TypeRecordDelete(bool_type);
         return;
       }
     }
@@ -71,6 +75,7 @@ void AnalyzeLogicalOperator(BinaryASTNode* node) {
   if (ExpressionIsTemplateDependent(node->left) ||
       ExpressionIsTemplateDependent(node->right)) {
     ASTNodeSetType((ASTNode*)node, bool_type);
+    TypeRecordDelete(bool_type);
     return;
   }
   SemanticConvertType(node->left, bool_type, kConvertContextualBool);
@@ -80,6 +85,7 @@ void AnalyzeLogicalOperator(BinaryASTNode* node) {
   SemanticCheckScalarType(node->right);
 
   ASTNodeSetType((ASTNode*)node, NewLogicalResultType());
+  TypeRecordDelete(bool_type);
 }
 
 // Contract: May synthesize defaulted copy ctor body on thrown class type; mutates type metadata only.

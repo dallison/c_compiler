@@ -3601,14 +3601,16 @@ static void FunctionCallPromoteVarargsActuals(TypeRecord* subtype,
       ASTNode* actual =
           FoldConstantArgument((ASTNode*)node->children->value.p[i]);
       if (TypeIsFloat(actual->type)) {
-        NormalConversion(actual, NewTypeRecordWithSize(kTypeDouble, kQualPlain));
+        SemanticConvertToNewType(actual,
+                                 NewTypeRecordWithSize(kTypeDouble, kQualPlain),
+                                 kConvertNormal);
       } else if (TypeIsIntegral(actual->type) && !TypeIsBitInt(actual->type) &&
                  actual->type->size < compiler->int_size) {
         // The callee reads an int, but a narrower value's register is not
         // extended past its own width.  The cast context admits scoped enums,
         // which are passed as their underlying type.
-        SemanticConvertType(actual, NewTypeRecordWithSize(kTypeInt, kQualPlain),
-                            kConvertCast);
+        SemanticConvertToNewType(
+            actual, NewTypeRecordWithSize(kTypeInt, kQualPlain), kConvertCast);
       }
     }
   }

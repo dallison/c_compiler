@@ -328,7 +328,8 @@ void AnalyzeBuiltinExpect(VectorASTNode* node) {
     ASTNode* child = node->children->value.p[i];
     child = AnalyzeExpression(child);
     node->children->value.p[i] = child;
-    NormalConversion(child, NewTypeRecordWithSize(kTypeLong, kQualPlain));
+    SemanticConvertToNewType(
+        child, NewTypeRecordWithSize(kTypeLong, kQualPlain), kConvertNormal);
   }
   ASTNodeSetType(&node->base, result_type);
 }

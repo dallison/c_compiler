@@ -420,7 +420,8 @@ static void PromoteUnaryIntegerOperand(ASTNode* operand) {
   PromoteCXXEnumOperand(operand);
   int rank = GetRank(operand->type);
   if (!TypeIsBitInt(operand->type) && rank > 0 && rank < IntRank()) {
-    NormalConversion(operand, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    SemanticConvertToNewType(
+        operand, NewTypeRecordWithSize(kTypeInt, kQualPlain), kConvertNormal);
   }
 }
 
@@ -438,9 +439,9 @@ void AnalyzeUnaryExpression(UnaryASTNode* node) {
     }
   }
   if (node->base.op == AST_OP(not)) {
-    SemanticConvertType(node->sub,
-                        NewTypeRecordWithSize(kTypeBool, kQualPlain),
-                        kConvertContextualBool);
+    SemanticConvertToNewType(node->sub,
+                             NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                             kConvertContextualBool);
   }
   if (!TypeIsVector(node->sub->type)) {
     SemanticCheckScalarType(node->sub);
@@ -461,8 +462,9 @@ void AnalyzeUnaryExpression(UnaryASTNode* node) {
       PromoteCXXEnumOperand(node->sub);
       int rank = GetRank(node->sub->type);
       if (!TypeIsBitInt(node->sub->type) && rank < IntRank()) {
-        NormalConversion(
-            node->sub, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+        SemanticConvertToNewType(node->sub,
+                                 NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                                 kConvertNormal);
       }
       break;
     }
@@ -724,15 +726,17 @@ static void InsertNumericConversionsApplyUsualArithmeticConversions(
     }
     if (!TypeIsBitInt(node->left->type) && left_rank > 0 &&
         left_rank < IntRank()) {
-      NormalConversion(
-          node->left, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+      SemanticConvertToNewType(node->left,
+                               NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                               kConvertNormal);
       ASTNodeSetType((ASTNode*)node, node->left->type);
       left_rank = GetRank(node->left->type);
     }
     if (!TypeIsBitInt(node->right->type) && right_rank > 0 &&
         right_rank < IntRank()) {
-      NormalConversion(
-          node->right, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+      SemanticConvertToNewType(node->right,
+                               NewTypeRecordWithSize(kTypeInt, kQualPlain),
+                               kConvertNormal);
       ASTNodeSetType((ASTNode*)node, node->right->type);
       right_rank = GetRank(node->right->type);
     }
@@ -2084,7 +2088,8 @@ static void PromoteShiftOperand(ASTNode* operand) {
       operand->type->size >= SizeofType(kTypeInt)) {
     promoted |= kTypeUnsigned;
   }
-  NormalConversion(operand, NewTypeRecordWithSize(promoted, kQualPlain));
+  SemanticConvertToNewType(operand, NewTypeRecordWithSize(promoted, kQualPlain),
+                           kConvertNormal);
 }
 
 // Both sides of a shift operator needs to be an integral type.
@@ -2926,8 +2931,9 @@ static bool AnalyzeConditionalExpressionPhaseCondition(
     ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
     return true;
   }
-  SemanticConvertType(node->left, NewTypeRecordWithSize(kTypeBool, kQualPlain),
-                      kConvertContextualBool);
+  SemanticConvertToNewType(node->left,
+                           NewTypeRecordWithSize(kTypeBool, kQualPlain),
+                           kConvertContextualBool);
   if (!TypeIsScalar(node->left->type)) {
     SemanticError((ASTNode*)node, "Condition for ? operator must be scalar");
     ASTNodeSetType((ASTNode*)node, node->left->type);
