@@ -19,6 +19,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #include "ast.h"
 #include "compiler.h"
 #include "concepts.h"
@@ -116,6 +119,27 @@ static TypeRecord** type_census_releases = NULL;
 static size_t type_census_release_count = 0;
 static size_t type_census_release_capacity = 0;
 
+// DAVECC_PROFILE_LEAKS=<file>: the allocation stack of every non-canonical
+// record still live when the arena is released, one line per record.
+#define TYPE_LEAK_FRAMES 8
+typedef struct {
+  void* frames[TYPE_LEAK_FRAMES];
+} TypeLeakStack;
+static FILE* type_leak_out = NULL;
+static TypeLeakStack* type_leak_stacks = NULL;
+
+// Walks the frame-pointer chain, which the Apple arm64 ABI always keeps.
+static void TypeLeakCaptureStack(TypeLeakStack* stack) {
+  memset(stack, 0, sizeof(*stack));
+#if defined(__APPLE__) && defined(__aarch64__) && defined(__clang__)
+  void** fp = __builtin_frame_address(0);
+  for (int i = 0; i < TYPE_LEAK_FRAMES && fp != NULL; i++) {
+    stack->frames[i] = fp[1];
+    fp = (void**)fp[0];
+  }
+#endif
+}
+
 static void TypeCensusNoteAlloc(TypeRecord* record, size_t bytes) {
   if (type_census_alloc_count == type_census_alloc_capacity) {
     type_census_alloc_capacity =
@@ -123,6 +147,13 @@ static void TypeCensusNoteAlloc(TypeRecord* record, size_t bytes) {
     type_census_allocs =
         realloc(type_census_allocs,
                 type_census_alloc_capacity * sizeof(TypeCensusEntry));
+    if (type_leak_out != NULL) {
+      type_leak_stacks = realloc(
+          type_leak_stacks, type_census_alloc_capacity * sizeof(TypeLeakStack));
+    }
+  }
+  if (type_leak_out != NULL) {
+    TypeLeakCaptureStack(&type_leak_stacks[type_census_alloc_count]);
   }
   type_census_allocs[type_census_alloc_count].record = record;
   type_census_allocs[type_census_alloc_count].bytes = bytes;
@@ -156,7 +187,12 @@ void TypeRecordProfileCallers(void) {
   if (type_copy_callers == NULL) {
     type_copy_callers = calloc(TYPE_COPY_CALLER_SLOTS, sizeof(TypeCopyCaller));
   }
-  type_census_enabled = getenv("DAVECC_PROFILE_CENSUS") != NULL;
+  const char* leak_path = getenv("DAVECC_PROFILE_LEAKS");
+  if (leak_path != NULL) {
+    type_leak_out = fopen(leak_path, "w");
+  }
+  type_census_enabled =
+      getenv("DAVECC_PROFILE_CENSUS") != NULL || type_leak_out != NULL;
 }
 
 static void TypeCopyNoteCaller(void* caller) {
@@ -319,8 +355,10 @@ static void TypeArenaRelease(TypeRecord* record) {
 // structures have been torn down (their TypeRecordDelete calls have released
 // the auxiliary resources); the struct memory becomes invalid afterwards.
 static void TypeInternRelease(void);
+static void TypeRecordReportLeaks(void);
 
 void TypeRecordArenaRelease(void) {
+  TypeRecordReportLeaks();
   // The type table only holds records from this arena.
   TypeInternRelease();
   TypeArenaBlock* block = type_arena;
@@ -3601,8 +3639,39 @@ static void TypeCensusClassReport(FILE* out, TypeCensusClass* c) {
   TypeCensusReportDuplicates(out, c->name);
 }
 
+static const char* const kTypeCensusClassNames[8] = {
+    "concrete",   "function",        "other",     "dep-param",
+    "dep-member", "dep-template-id", "dep-spine", "dep-pattern-class",
+};
+
+static int TypeCensusClassOf(TypeRecord* t) {
+  if (TypeIsFunction(t)) {
+    return 1;
+  }
+  if (TypeRecordCanShareConcreteClass(t)) {
+    return 0;
+  }
+  if (TypeDependentOf(t)->dependent_member_name != NULL) {
+    return 4;
+  }
+  if (t->next != NULL) {
+    return 6;
+  }
+  if (t->template_parameter_index >= 0 && t->template_arguments == NULL) {
+    return 3;
+  }
+  if (t->template_arguments != NULL) {
+    return 5;
+  }
+  if (TypeIsStructOrUnion(t) && StructIsTemplatePattern(t->info.struct_info)) {
+    return 7;
+  }
+  return 2;
+}
+
 void TypeRecordProfileCensus(FILE* out) {
-  if (!type_census_enabled) {
+  // The leak report at arena release needs the allocation log intact.
+  if (!type_census_enabled || type_leak_out != NULL) {
     return;
   }
   type_census_enabled = false;
@@ -3615,14 +3684,11 @@ void TypeRecordProfileCensus(FILE* out) {
   }
   type_census_memo = calloc(memo_slots, sizeof(TypeCensusMemo));
   type_census_memo_mask = memo_slots - 1;
-  TypeCensusClass classes[8] = {
-      {"concrete", NULL, 0},   {"function", NULL, 0},
-      {"other", NULL, 0},      {"dep-param", NULL, 0},
-      {"dep-member", NULL, 0}, {"dep-template-id", NULL, 0},
-      {"dep-spine", NULL, 0},  {"dep-pattern-class", NULL, 0},
-  };
+  TypeCensusClass classes[8];
   for (int i = 0; i < 8; i++) {
+    classes[i].name = kTypeCensusClassNames[i];
     classes[i].items = malloc((n + 1) * sizeof(TypeCensusItem));
+    classes[i].count = 0;
   }
   size_t released = 0;
   size_t released_bytes = 0;
@@ -3636,25 +3702,7 @@ void TypeRecordProfileCensus(FILE* out) {
       continue;
     }
     uint64_t hash = TypeCensusHash(t, 0);
-    int which = TypeIsFunction(t)                    ? 1
-                : TypeRecordCanShareConcreteClass(t) ? 0
-                                                     : 2;
-    if (which == 2) {
-      if (TypeDependentOf(t)->dependent_member_name != NULL) {
-        which = 4;
-      } else if (t->next != NULL) {
-        which = 6;
-      } else if (t->template_parameter_index >= 0 &&
-                 t->template_arguments == NULL) {
-        which = 3;
-      } else if (t->template_arguments != NULL) {
-        which = 5;
-      } else if (TypeIsStructOrUnion(t) &&
-                 StructIsTemplatePattern(t->info.struct_info)) {
-        which = 7;
-      }
-    }
-    TypeCensusClass* c = &classes[which];
+    TypeCensusClass* c = &classes[TypeCensusClassOf(t)];
     c->items[c->count].hash = hash;
     c->items[c->count].bytes = bytes;
     c->items[c->count].caller = type_census_allocs[i].caller;
@@ -3675,4 +3723,57 @@ void TypeRecordProfileCensus(FILE* out) {
   type_census_allocs = NULL;
   free(type_census_releases);
   type_census_releases = NULL;
+}
+
+// Struct and enum infos are already freed, so only the record's own fields
+// classify it.
+static const char* TypeLeakKind(TypeRecord* t) {
+  if (TypeIsFunction(t)) {
+    return "function";
+  }
+  if (TypeDependentOf(t)->dependent_member_name != NULL) {
+    return "dep-member";
+  }
+  if (t->next != NULL) {
+    return "spine";
+  }
+  if (t->template_arguments != NULL) {
+    return "template-id";
+  }
+  if (t->template_parameter_index >= 0) {
+    return "param";
+  }
+  if (TypeIsStructOrUnion(t)) {
+    return "class";
+  }
+  return "other";
+}
+
+static void TypeRecordReportLeaks(void) {
+  if (type_leak_out == NULL) {
+    return;
+  }
+  qsort(type_census_releases, type_census_release_count, sizeof(TypeRecord*),
+        CompareTypeRecordPointers);
+#ifdef __APPLE__
+  fprintf(type_leak_out, "image-base %p\n", (void*)_dyld_get_image_header(0));
+#endif
+  for (size_t i = 0; i < type_census_alloc_count; i++) {
+    TypeRecord* t = type_census_allocs[i].record;
+    if (t->shared_immutable == kTypeRecordCanonical ||
+        bsearch(&t, type_census_releases, type_census_release_count,
+                sizeof(TypeRecord*), CompareTypeRecordPointers) != NULL) {
+      continue;
+    }
+    fprintf(type_leak_out, "%s %zu", TypeLeakKind(t),
+            type_census_allocs[i].bytes);
+    for (int f = 0; f < TYPE_LEAK_FRAMES; f++) {
+      fprintf(type_leak_out, " %p", type_leak_stacks[i].frames[f]);
+    }
+    fputc('\n', type_leak_out);
+  }
+  fclose(type_leak_out);
+  type_leak_out = NULL;
+  free(type_leak_stacks);
+  type_leak_stacks = NULL;
 }
