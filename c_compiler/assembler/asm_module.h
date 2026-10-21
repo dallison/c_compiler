@@ -166,10 +166,18 @@ typedef struct AsmModule {
   // comments and the symbolic spellings of instructions are not recorded.
   bool keep_text;
   AsmNamePool names;
+  uint32_t label_stem_count;
 } AsmModule;
 
 void AsmModuleInit(AsmModule* module, const AsmModuleTargetOps* target);
 void AsmModuleDestruct(AsmModule* module);
+
+// Sets `stem` to the name that `function`'s local labels are derived from.  A
+// module written as text uses the function's own name so that its labels stay
+// readable; otherwise each function gets a short stem unique within the
+// module, so that its labels do not each repeat a long mangled name.
+void AsmModuleFunctionLabelStem(AsmModule* module, const char* function,
+                                String* stem);
 
 // Returns the module's copy of `name`, which lives until AsmModuleDestruct.
 // Equal names return the same pointer.  Returns NULL if out of memory.

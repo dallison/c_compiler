@@ -270,6 +270,18 @@ void AsmModuleInit(AsmModule* module, const AsmModuleTargetOps* target) {
   module->keep_text = true;
   memset(&module->names, 0, sizeof(module->names));
   VectorInit(&module->names.blocks);
+  module->label_stem_count = 0;
+}
+
+void AsmModuleFunctionLabelStem(AsmModule* module, const char* function,
+                                String* stem) {
+  if (module->keep_text) {
+    StringSet(stem, function);
+    return;
+  }
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "L%" PRIu32, module->label_stem_count++);
+  StringSet(stem, buffer);
 }
 
 static void OperationDelete(AsmModule* module, AsmModuleOp* op) {

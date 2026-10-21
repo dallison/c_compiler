@@ -2023,7 +2023,8 @@ static void ProgramSpillAddress(AsmModule* module, int offset) {
   }
 }
 
-static void ProgramSaveRegisters(AARCH64Emitter* emitter, AsmModule* module) {
+static void ProgramSaveRegisters(AARCH64Emitter* emitter,
+                                 const char* label_stem, AsmModule* module) {
   int stack_frame_size = StackFrameSize(emitter);
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
                  !emitter->g->not_leaf;
@@ -2042,18 +2043,14 @@ static void ProgramSaveRegisters(AARCH64Emitter* emitter, AsmModule* module) {
                                            -16));
     if (!varargs) {
       String label = {0};
-      ProgramNamedFunctionLabel(&label, ".Leh_",
-                                emitter->g->base.function_name.value,
-                                "_after_push");
+      ProgramNamedFunctionLabel(&label, ".Leh_", label_stem, "_after_push");
       AsmModuleLabel(module, label.value);
       StringDestruct(&label);
     }
     ProgramMoveRegister(module, 29, 31, true, false);
     if (!varargs) {
       String label = {0};
-      ProgramNamedFunctionLabel(&label, ".Leh_",
-                                emitter->g->base.function_name.value,
-                                "_after_leaq");
+      ProgramNamedFunctionLabel(&label, ".Leh_", label_stem, "_after_leaq");
       AsmModuleLabel(module, label.value);
       StringDestruct(&label);
     }
@@ -2171,7 +2168,7 @@ static void ProgramRestoreExceptionLandingState(AARCH64Emitter* emitter,
 }
 
 static void ProgramEmitAtomic(AARCH64Emitter* emitter, TargetInstruction* inst,
-                              const char* function, AsmModule* module) {
+                              const char* label_stem, AsmModule* module) {
   int size = AtomicSizeLog2(inst);
   int order = AtomicOrder(inst);
   int failure_order = AtomicFailureOrder(inst);
@@ -2227,7 +2224,7 @@ static void ProgramEmitAtomic(AARCH64Emitter* emitter, TargetInstruction* inst,
       char suffix[64];
       snprintf(suffix, sizeof(suffix), "_atomic_retry_%d", inst->id);
       String retry = {0};
-      ProgramNamedFunctionLabel(&retry, ".L", function, suffix);
+      ProgramNamedFunctionLabel(&retry, ".L", label_stem, suffix);
       AsmModuleLabel(module, retry.value);
       AARCH64ProgramEmitWord(
           module, AARCH64EncodeExclusiveLoad(size, acquire, loaded, address));
@@ -2278,13 +2275,13 @@ static void ProgramEmitAtomic(AARCH64Emitter* emitter, TargetInstruction* inst,
       String retry = {0}, mismatch = {0}, spurious = {0}, done = {0};
       char suffix[64];
       snprintf(suffix, sizeof(suffix), "_atomic_retry_%d", inst->id);
-      ProgramNamedFunctionLabel(&retry, ".L", function, suffix);
+      ProgramNamedFunctionLabel(&retry, ".L", label_stem, suffix);
       snprintf(suffix, sizeof(suffix), "_atomic_mismatch_%d", inst->id);
-      ProgramNamedFunctionLabel(&mismatch, ".L", function, suffix);
+      ProgramNamedFunctionLabel(&mismatch, ".L", label_stem, suffix);
       snprintf(suffix, sizeof(suffix), "_atomic_spurious_%d", inst->id);
-      ProgramNamedFunctionLabel(&spurious, ".L", function, suffix);
+      ProgramNamedFunctionLabel(&spurious, ".L", label_stem, suffix);
       snprintf(suffix, sizeof(suffix), "_atomic_done_%d", inst->id);
-      ProgramNamedFunctionLabel(&done, ".L", function, suffix);
+      ProgramNamedFunctionLabel(&done, ".L", label_stem, suffix);
       AsmModuleLabel(module, retry.value);
       AARCH64ProgramEmitWord(
           module, AARCH64EncodeExclusiveLoad(size, acquire, result, address));
@@ -2549,7 +2546,7 @@ static void ProgramUnsupportedInstruction(TargetInstruction* inst,
 
 static void ProgramEmitInstruction(AARCH64Emitter* emitter,
                                    TargetInstruction* inst,
-                                   const char* function, AsmModule* module) {
+                                   const char* label_stem, AsmModule* module) {
   if (inst->block == NULL) {
     return;
   }
@@ -2562,7 +2559,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
   }
   if (inst->opcode == (TargetOpcode)AARCH64_OP(label)) {
     String name = {0};
-    ProgramLabelName(&name, function, inst);
+    ProgramLabelName(&name, label_stem, inst);
     if ((inst->flags & AARCH64_EXPORTED_LABEL) != 0) {
       AsmModuleSymbol(module, name.value, SYM_TYPE(none), SYM_BIND(local), 0, 1,
                       false, true, false);
@@ -2589,7 +2586,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
   bool is_64bit = ProgramIs64(inst);
   switch ((AARCH64Opcode)inst->opcode) {
     case AARCH64_OP(save):
-      ProgramSaveRegisters(emitter, module);
+      ProgramSaveRegisters(emitter, label_stem, module);
       return;
     case AARCH64_OP(restore):
       ProgramRestoreRegisters(emitter, module);
@@ -2686,7 +2683,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       TargetInstruction* condition = inst->operand[0];
       TargetInstruction* target = inst->operand[1];
       String name = {0};
-      ProgramLabelName(&name, function, target);
+      ProgramLabelName(&name, label_stem, target);
       AARCH64AsmCondition cond = ProgramCondition(condition);
       if (cond == AARCH64_ASM_COND_AL) {
         ProgramBranch(module, "b",
@@ -2711,7 +2708,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       int reg = ProgramRegNum(inst->operand[0]);
       bool width = ProgramIs64(inst);
       String name = {0};
-      ProgramLabelName(&name, function, inst->operand[1]);
+      ProgramLabelName(&name, label_stem, inst->operand[1]);
       bool nonzero = inst->opcode == (TargetOpcode)AARCH64_OP(cbnz);
       ProgramRegisterBranch(
           module, nonzero ? "cbnz" : "cbz",
@@ -2725,7 +2722,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       int reg = ProgramRegNum(inst->operand[0]);
       int bit = (int)TargetIntValue(inst->operand[1]);
       String name = {0};
-      ProgramLabelName(&name, function, inst->operand[2]);
+      ProgramLabelName(&name, label_stem, inst->operand[2]);
       bool nonzero = inst->opcode == (TargetOpcode)AARCH64_OP(tbnz);
       char prefix[64];
       snprintf(prefix, sizeof(prefix), "%s %c%d, #%d, ",
@@ -3223,7 +3220,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
         AARCH64ProgramEmitWord(module, word);
       } else {
         String name = {0};
-        ProgramLabelName(&name, function, inst->operand[0]);
+        ProgramLabelName(&name, label_stem, inst->operand[0]);
         char prefix[64];
         snprintf(prefix, sizeof(prefix), "%s x%d, ",
                  inst->opcode == (TargetOpcode)AARCH64_OP(adrp) ? "adrp"
@@ -3252,7 +3249,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
     }
     case AARCH64_OP(tlsgd): {
       String name = {0};
-      ProgramLabelName(&name, function, inst->operand[0]);
+      ProgramLabelName(&name, label_stem, inst->operand[0]);
       char prefix[80];
       snprintf(prefix, sizeof(prefix), "adrp x%d, :tlsgd:", dest);
       String text = {0};
@@ -3293,7 +3290,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
     }
     case AARCH64_OP(gotaddr): {
       String name = {0};
-      ProgramLabelName(&name, function, inst->operand[0]);
+      ProgramLabelName(&name, label_stem, inst->operand[0]);
       char prefix[64];
       snprintf(prefix, sizeof(prefix), "adrp x%d, :got:", dest);
       String text = {0};
@@ -3347,7 +3344,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
     case AARCH64_OP(atomic_compare_exchange_val):
     case AARCH64_OP(atomic_compare_exchange_n):
     case AARCH64_OP(atomic_fence):
-      ProgramEmitAtomic(emitter, inst, function, module);
+      ProgramEmitAtomic(emitter, inst, label_stem, module);
       return;
     case AARCH64_OP(nop):
       AARCH64ProgramEmitWord(module, 0xd503201fu);
@@ -3663,7 +3660,8 @@ static void AARCH64PrintEHMetadata(AARCH64Emitter* emitter, FILE* fp,
 }
 
 static void AARCH64EmitEHMetadata(AARCH64Emitter* emitter, AsmModule* module,
-                                  const char* function) {
+                                  const char* function,
+                                  const char* label_stem) {
   if (emitter->g->base.varargs) {
     return;
   }
@@ -3678,6 +3676,7 @@ static void AARCH64EmitEHMetadata(AARCH64Emitter* emitter, AsmModule* module,
       .ranges = ranges,
       .range_count = range_count,
       .func_name = function,
+      .label_stem = label_stem,
       .has_frame = !EmptyStackFrame(emitter),
       .is_64bit = true,
       .cie_ra_reg = 30,
@@ -3734,7 +3733,9 @@ void AARCH64EmitFunctionToModule(AARCH64Emitter* emitter, AsmModule* module) {
                                                    : SYM_BIND(local),
                   0, 4, false, true, false);
   AsmModuleLabel(module, function);
-  DaveEHEmitFuncTextLabel(module, function);
+  String label_stem = {0};
+  AsmModuleFunctionLabelStem(module, function, &label_stem);
+  DaveEHEmitFuncTextLabel(module, label_stem.value);
   if (compiler->pic && emitter->g->base.is_global &&
       strcmp(function, "main") != 0) {
     AsmModuleComment(module, "bti c");
@@ -3742,8 +3743,9 @@ void AARCH64EmitFunctionToModule(AARCH64Emitter* emitter, AsmModule* module) {
   }
   for (TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
        inst != NULL && !module->failed; inst = TargetNext(inst)) {
-    ProgramEmitInstruction(emitter, inst, function, module);
+    ProgramEmitInstruction(emitter, inst, label_stem.value, module);
   }
+  // The debug information finds the end of the function by this name.
   String end = {0};
   ProgramNamedFunctionLabel(&end, ".func_end_", function, "");
   AsmModuleLabel(module, end.value);
@@ -3753,7 +3755,8 @@ void AARCH64EmitFunctionToModule(AARCH64Emitter* emitter, AsmModule* module) {
   AsmExprDestruct(&size);
   StringDestruct(&end);
 
-  AARCH64EmitEHMetadata(emitter, module, function);
+  AARCH64EmitEHMetadata(emitter, module, function, label_stem.value);
+  StringDestruct(&label_stem);
 }
 
 void AARCH64EmitFunction(AARCH64Emitter* emitter, FILE* text_out) {

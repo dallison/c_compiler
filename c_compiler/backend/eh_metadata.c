@@ -558,44 +558,44 @@ static void ModuleLeb128Difference(AsmModule* module, const char* left,
   AsmExprDestruct(&expr);
 }
 
-static void EHLabelName(String* result, const char* function,
-                        const char* suffix) {
+static void EHLabelName(String* result, const char* stem, const char* suffix) {
   StringClear(result);
   StringAppend(result, ".Leh_");
-  StringAppend(result, function);
+  StringAppend(result, stem);
   StringAppend(result, suffix);
 }
 
-void DaveEHEmitFuncTextLabel(AsmModule* module, const char* func_name) {
+void DaveEHEmitFuncTextLabel(AsmModule* module, const char* label_stem) {
   String label = {0};
-  EHLabelName(&label, func_name, "_text");
+  EHLabelName(&label, label_stem, "_text");
   AsmModuleLabel(module, label.value);
   StringDestruct(&label);
 }
 
-static void EHLabelNameWithSuffix(String* result, const char* function,
+static void EHLabelNameWithSuffix(String* result, const char* stem,
                                   const char* kind, const char* suffix) {
-  EHLabelName(result, function, kind);
+  EHLabelName(result, stem, kind);
   StringAppend(result, suffix);
 }
 
-static void InsnLabelName(String* result, const char* function, long long id) {
+static void InsnLabelName(String* result, const char* stem, long long id) {
   char number[32];
   snprintf(number, sizeof(number), "%lld", id);
   StringClear(result);
   StringAppendChar(result, '.');
-  StringAppend(result, function);
+  StringAppend(result, stem);
   StringAppend(result, "_label_");
   StringAppend(result, number);
 }
 
-static void OffsetLabels(String* left, String* right, const char* function,
-                         long long from, long long to) {
-  InsnLabelName(left, function, to);
+static void OffsetLabels(String* left, String* right,
+                         const DaveEHFrameEmitInfo* info, long long from,
+                         long long to) {
+  InsnLabelName(left, info->label_stem, to);
   if (from == 0) {
-    StringSet(right, function);
+    StringSet(right, info->func_name);
   } else {
-    InsnLabelName(right, function, from);
+    InsnLabelName(right, info->label_stem, from);
   }
 }
 
@@ -604,7 +604,7 @@ void DaveEHEmitGCCExceptTable(AsmModule* module,
   if (info == NULL || info->range_count == 0) {
     return;
   }
-  const char* function = info->func_name;
+  const char* stem = info->label_stem;
   const char* type_symbols[64];
   size_t type_count = 0;
   bool has_catch_all = false;
@@ -691,34 +691,34 @@ void DaveEHEmitGCCExceptTable(AsmModule* module,
   String label = {0};
   String left = {0};
   String right = {0};
-  EHLabelName(&label, function, "_lsda");
+  EHLabelName(&label, stem, "_lsda");
   AsmModuleLabel(module, label.value);
   ModuleInteger(module, 1, DW_EH_PE_omit);
   if (type_count != 0) {
     ModuleInteger(module, 1, DW_EH_PE_pcrel_sdata4);
-    EHLabelName(&left, function, "_ttype_end");
-    EHLabelName(&right, function, "_ttype_base");
+    EHLabelName(&left, stem, "_ttype_end");
+    EHLabelName(&right, stem, "_ttype_base");
     ModuleLeb128Difference(module, left.value, right.value);
     AsmModuleLabel(module, right.value);
   } else {
     ModuleInteger(module, 1, DW_EH_PE_omit);
   }
   ModuleInteger(module, 1, DW_EH_PE_uleb128);
-  EHLabelName(&left, function, "_cs_end");
-  EHLabelName(&right, function, "_cs_start");
+  EHLabelName(&left, stem, "_cs_end");
+  EHLabelName(&right, stem, "_cs_start");
   ModuleLeb128Difference(module, left.value, right.value);
   AsmModuleLabel(module, right.value);
   for (size_t i = 0; i < group_count; i++) {
-    OffsetLabels(&left, &right, function, 0, groups[i].try_start_id);
+    OffsetLabels(&left, &right, info, 0, groups[i].try_start_id);
     ModuleLeb128Difference(module, left.value, right.value);
-    OffsetLabels(&left, &right, function, groups[i].try_start_id,
+    OffsetLabels(&left, &right, info, groups[i].try_start_id,
                  groups[i].try_end_id);
     ModuleLeb128Difference(module, left.value, right.value);
-    OffsetLabels(&left, &right, function, 0, groups[i].landing_pad_id);
+    OffsetLabels(&left, &right, info, 0, groups[i].landing_pad_id);
     ModuleLeb128Difference(module, left.value, right.value);
     ModuleLeb128(module, false, (int64_t)groups[i].first_action + 1);
   }
-  EHLabelName(&label, function, "_cs_end");
+  EHLabelName(&label, stem, "_cs_end");
   AsmModuleLabel(module, label.value);
   action_index = 0;
   for (size_t i = 0; i < group_count; i++) {
@@ -729,12 +729,12 @@ void DaveEHEmitGCCExceptTable(AsmModule* module,
     }
   }
   if (type_count != 0) {
-    EHLabelName(&label, function, "_ttype");
+    EHLabelName(&label, stem, "_ttype");
     AsmModuleLabel(module, label.value);
     for (size_t i = type_count; i-- > 0;) {
       char suffix[64];
       snprintf(suffix, sizeof(suffix), "_ttype_entry_%zu", i);
-      EHLabelName(&right, function, suffix);
+      EHLabelName(&right, stem, suffix);
       AsmModuleLabel(module, right.value);
       if (type_symbols[i] == NULL) {
         ModuleInteger(module, 4, 0);
@@ -742,7 +742,7 @@ void DaveEHEmitGCCExceptTable(AsmModule* module,
         ModuleRelocDifference(module, 4, type_symbols[i], right.value);
       }
     }
-    EHLabelName(&label, function, "_ttype_end");
+    EHLabelName(&label, stem, "_ttype_end");
     AsmModuleLabel(module, label.value);
   }
   StringDestruct(&label);
@@ -756,7 +756,7 @@ void DaveEHEmitGCCExceptTable(AsmModule* module,
 void DaveEHEmitEHFrameCIE(AsmModule* module,
                           const DaveEHFrameEmitInfo* info,
                           const char* suffix) {
-  const char* function = info->func_name;
+  const char* stem = info->label_stem;
   bool with_eh = info->range_count > 0;
   AsmModuleSection(module, ".eh_frame", SHT(progbits), SHF(alloc), 4);
   AsmModuleAlign(module, 4);
@@ -766,10 +766,10 @@ void DaveEHEmitEHFrameCIE(AsmModule* module,
   }
   String label = {0};
   String reference = {0};
-  EHLabelNameWithSuffix(&label, function, "_cie", suffix);
+  EHLabelNameWithSuffix(&label, stem, "_cie", suffix);
   AsmModuleLabel(module, label.value);
   ModuleInteger(module, 4, (int64_t)EHFrameCIELength(info));
-  EHLabelNameWithSuffix(&label, function, "_cie_start", suffix);
+  EHLabelNameWithSuffix(&label, stem, "_cie_start", suffix);
   AsmModuleLabel(module, label.value);
   ModuleInteger(module, 4, 0);
   ModuleInteger(module, 1, 1);
@@ -784,7 +784,7 @@ void DaveEHEmitEHFrameCIE(AsmModule* module,
     bytes[count++] = 0x1b;
     AsmModuleBytes(module, bytes, count);
     count = 0;
-    EHLabelNameWithSuffix(&reference, function, "_cie_pers_ref", suffix);
+    EHLabelNameWithSuffix(&reference, stem, "_cie_pers_ref", suffix);
     AsmModuleLabel(module, reference.value);
     ModuleRelocDifference(module, 4, DAVECC_EH_PERSONALITY,
                           reference.value);
@@ -805,7 +805,7 @@ void DaveEHEmitEHFrameCIE(AsmModule* module,
   AsmModuleBytes(module, bytes, count);
   EmitEHFrameNops(module,
                   EHFrameCIELength(info) - EHFrameCIEContentLength(info));
-  EHLabelNameWithSuffix(&label, function, "_cie_end", suffix);
+  EHLabelNameWithSuffix(&label, stem, "_cie_end", suffix);
   AsmModuleLabel(module, label.value);
   StringDestruct(&label);
   StringDestruct(&reference);
@@ -814,40 +814,40 @@ void DaveEHEmitEHFrameCIE(AsmModule* module,
 void DaveEHEmitEHFrameFDE(AsmModule* module,
                           const DaveEHFrameEmitInfo* info,
                           const char* suffix) {
-  const char* function = info->func_name;
+  const char* stem = info->label_stem;
   bool with_eh = info->range_count > 0;
   bool has_frame = info->has_frame;
   size_t length = EHFrameFDELength(info);
   String label = {0};
   String left = {0};
   String right = {0};
-  EHLabelName(&label, function, "_fde");
+  EHLabelName(&label, stem, "_fde");
   AsmModuleLabel(module, label.value);
   ModuleInteger(module, 4, length);
-  EHLabelName(&label, function, "_fde_start");
+  EHLabelName(&label, stem, "_fde_start");
   AsmModuleLabel(module, label.value);
   ModuleInteger(module, 4, EHFrameCIELength(info) + 8);
-  EHLabelName(&right, function, "_fde_pc");
+  EHLabelName(&right, stem, "_fde_pc");
   AsmModuleLabel(module, right.value);
-  EHLabelName(&left, function, "_text");
+  EHLabelName(&left, stem, "_text");
   ModuleRelocDifference(module, 4, left.value, right.value);
   StringSet(&left, ".func_end_");
-  StringAppend(&left, function);
-  EHLabelName(&right, function, "_text");
+  StringAppend(&left, info->func_name);
+  EHLabelName(&right, stem, "_text");
   ModuleDifference(module, 4, left.value, right.value);
   if (with_eh) {
     ModuleLeb128(module, false, 4);
-    EHLabelName(&right, function, "_fde_lsda_ref");
+    EHLabelName(&right, stem, "_fde_lsda_ref");
     AsmModuleLabel(module, right.value);
-    EHLabelName(&left, function, "_lsda");
+    EHLabelName(&left, stem, "_lsda");
     ModuleRelocDifference(module, 4, left.value, right.value);
   } else {
     ModuleLeb128(module, false, 0);
   }
   if (has_frame) {
     ModuleInteger(module, 1, 4);
-    EHLabelName(&left, function, "_after_push");
-    EHLabelName(&right, function, "_text");
+    EHLabelName(&left, stem, "_after_push");
+    EHLabelName(&right, stem, "_text");
     ModuleDifference(module, 4, left.value, right.value);
     ModuleInteger(module, 1, 14);
     ModuleLeb128(module, false, info->frame_cfa_offset);
@@ -859,8 +859,8 @@ void DaveEHEmitEHFrameFDE(AsmModule* module,
       ModuleLeb128(module, false, -info->saved_ra_offset / 8);
     }
     ModuleInteger(module, 1, 4);
-    EHLabelName(&left, function, "_after_leaq");
-    EHLabelName(&right, function, "_after_push");
+    EHLabelName(&left, stem, "_after_leaq");
+    EHLabelName(&right, stem, "_after_push");
     ModuleDifference(module, 4, left.value, right.value);
     ModuleInteger(module, 1, 12);
     ModuleLeb128(module, false, info->cie_fp_reg);
@@ -875,7 +875,7 @@ void DaveEHEmitEHFrameFDE(AsmModule* module,
     }
   }
   EmitEHFrameNops(module, length - EHFrameFDEContentLength(info));
-  EHLabelName(&label, function, "_fde_end");
+  EHLabelName(&label, stem, "_fde_end");
   AsmModuleLabel(module, label.value);
   StringDestruct(&label);
   StringDestruct(&left);

@@ -29,6 +29,9 @@ typedef struct {
   const DaveEHLSDARange* ranges;
   size_t range_count;
   const char* func_name;
+  // What the module emitters derive the function's local labels from (see
+  // AsmModuleFunctionLabelStem); the text printers use func_name.
+  const char* label_stem;
   bool has_frame;
   bool is_64bit;
   int cie_ra_reg;
@@ -49,7 +52,7 @@ void DaveEHPrintSleb128(FILE* fp, long long value);
 // this, not the exported name: GNU ld rejects FDEs whose PC reloc binds to
 // another object's winning weak definition.
 void DaveEHPrintFuncTextLabel(FILE* fp, const char* func_name);
-void DaveEHEmitFuncTextLabel(AsmModule* module, const char* func_name);
+void DaveEHEmitFuncTextLabel(AsmModule* module, const char* label_stem);
 
 void DaveEHPrintGCCExceptTable(FILE* fp, const DaveEHFrameEmitInfo* info);
 void DaveEHPrintARMExtabLSDA(FILE* fp, const DaveEHFrameEmitInfo* info);
