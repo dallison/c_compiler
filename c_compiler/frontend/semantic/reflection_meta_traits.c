@@ -2184,7 +2184,7 @@ static TypeRecord* MetaTraitMaterializeQueryType(TypeRecord* object_type) {
       compiler->speculative_template_instantiation_depth;
   compiler->speculative_template_instantiation_depth++;
   TypeRecord* materialized =
-      CXXTypeTraitMaterializeType(&compiler->syntax, query_type);
+      TypeMaterializeClassTemplateSpecialization(&compiler->syntax, query_type);
   compiler->speculative_template_instantiation_depth = saved_speculative_depth;
   DiagnosticSuppressEnd();
   DiagnosticErrorTrapEnd(saved_trap);

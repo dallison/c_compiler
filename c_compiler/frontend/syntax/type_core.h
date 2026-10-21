@@ -21,8 +21,10 @@ TypeRecord* NewComplexTypeRecord(Type element_type, Qualifiers quals);
 TypeRecord* NewBitIntTypeRecord(int bit_width, bool is_unsigned,
                                 Qualifiers quals);
 void TypeRecordDeleteLastReference(TypeRecord* record);
-// Most releases only drop one of several references. Keep that common path
-// inline and reserve recursive destruction for the final owner.
+// Releases one owner's reference.  A record with refs 0 has a single,
+// uncounted owner, so releasing it frees it.  Most releases only drop one of
+// several references; keep that common path inline and reserve recursive
+// destruction for the final owner.
 static inline void TypeRecordDelete(TypeRecord* record) {
   if (record == NULL || record->shared_immutable) {
     return;
@@ -33,10 +35,6 @@ static inline void TypeRecordDelete(TypeRecord* record) {
   }
   TypeRecordDeleteLastReference(record);
 }
-// Deletes a record its caller created and never shared.  A new record has no
-// counted owner (refs 0), so TypeRecordDelete alone would keep its prototype,
-// template arguments and `next` alive.
-void TypeRecordDeleteUnowned(TypeRecord* record);
 // Free every TypeRecord struct allocated from the type arena.  Call once, at
 // CompilerDestruct, after all type-referencing structures are torn down.
 void TypeRecordArenaRelease(void);
@@ -90,6 +88,10 @@ TypeRecord* TypeRecordShareExisting(TypeRecord* type);
 // handed to one holder as is, or released with TypeRecordDelete after holders
 // take their own.
 TypeRecord* TypeRecordAdopt(TypeRecord* type);
+// A reference the caller owns and releases with TypeRecordDelete, leaving
+// `type` with its holders: `type` itself when immutable or counted, else a
+// copy.  An uncounted (refs 0) record has one owner, which may free it.
+TypeRecord* TypeRecordRetain(TypeRecord* type);
 // `refs == 0` is updated in place.  A shared record is not modified; a
 // qualified copy is returned and the caller keeps ownership of `type`.
 TypeRecord* TypeRecordAddQualifiers(TypeRecord* type, Qualifiers quals);

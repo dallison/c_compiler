@@ -4174,7 +4174,7 @@ static Symbol* InstantiateSimpleFunctionTemplateUnchecked(
     // A dependent type in the signature (e.g. an `enable_if` SFINAE guard) had
     // no valid substitution.  Abandon this instantiation quietly so overload
     // resolution can discard the candidate; do not create or queue a symbol.
-    TypeRecordDeleteUnowned(func);
+    TypeRecordDelete(func);
     if (owns_completed_args) {
       TemplateArgumentVectorDelete(completed_args);
     }
@@ -4199,7 +4199,7 @@ static Symbol* InstantiateSimpleFunctionTemplateUnchecked(
       EnsureFunctionTemplateInstantiationQueued(
           parser, template_definition, existing, completed_args);
     }
-    TypeRecordDeleteUnowned(func);
+    TypeRecordDelete(func);
     if (owns_completed_args) {
       TemplateArgumentVectorDelete(completed_args);
     }
@@ -7304,7 +7304,7 @@ TypeRecord* TypeSubstituteFunctionTemplateSignature(Syntax* syntax,
                 unresolved_trailing_decltype;
   TypeParserDestruct(&parser);
   if (failed) {
-    TypeRecordDeleteUnowned(func);
+    TypeRecordDelete(func);
     return NULL;
   }
   return func;
@@ -7418,7 +7418,7 @@ static Symbol* CreateFunctionTemplateCandidate(Syntax* syntax, Symbol* templ,
        TypeIsDetachedDependentDecltype(func_type->next));
   if (substitution_failed || TypeContainsTemplateParameter(func) ||
       unresolved_trailing_decltype) {
-    TypeRecordDeleteUnowned(func);
+    TypeRecordDelete(func);
     VectorDeleteWithContents(completed_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
@@ -9696,7 +9696,7 @@ static bool ScoreDeductionGuideCall(TypeParser* parser,
   if (concrete_guide == NULL || !TypeIsFunction(concrete_guide) ||
       concrete_guide->info.function.prototype.length < actuals->length) {
     if (template_args != NULL) {
-      TypeRecordDeleteUnowned(concrete_guide);
+      TypeRecordDelete(concrete_guide);
     }
     return false;
   }
@@ -9705,7 +9705,7 @@ static bool ScoreDeductionGuideCall(TypeParser* parser,
     Symbol* formal = concrete_guide->info.function.prototype.value.p[i];
     if (formal == NULL || SymbolExtraOf(formal)->default_argument == NULL) {
       if (template_args != NULL) {
-        TypeRecordDeleteUnowned(concrete_guide);
+        TypeRecordDelete(concrete_guide);
       }
       return false;
     }
@@ -9716,7 +9716,7 @@ static bool ScoreDeductionGuideCall(TypeParser* parser,
     ASTNode* actual = actuals->value.p[i];
     if (formal == NULL || formal->type == NULL || actual == NULL) {
       if (template_args != NULL) {
-        TypeRecordDeleteUnowned(concrete_guide);
+        TypeRecordDelete(concrete_guide);
       }
       return false;
     }
@@ -9730,14 +9730,14 @@ static bool ScoreDeductionGuideCall(TypeParser* parser,
         : DeductionGuideConversionRank(formal_type, actual->type);
     if (rank < 0) {
       if (template_args != NULL) {
-        TypeRecordDeleteUnowned(concrete_guide);
+        TypeRecordDelete(concrete_guide);
       }
       return false;
     }
     total += rank;
   }
   if (template_args != NULL) {
-    TypeRecordDeleteUnowned(concrete_guide);
+    TypeRecordDelete(concrete_guide);
   }
   *score = total;
   return true;

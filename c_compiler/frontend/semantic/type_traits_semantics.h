@@ -71,6 +71,9 @@ TypeRecord* TypeRecordNewCommonTypePlaceholder(Vector* type_args);
 TypeRecord* TypeRecordTryResolveTraitPlaceholder(Syntax* syntax,
                                                  TypeRecord* type);
 
+// `type` with class-template primaries materialized (see
+// TypeMaterializeClassTemplateSpecialization).  The caller owns the result
+// and releases it with TypeRecordDelete.
 TypeRecord* CXXTypeTraitMaterializeType(Syntax* syntax, TypeRecord* type);
 
 bool CXXTypeTraitIsConvertible(Syntax* syntax, Vector* type_args);

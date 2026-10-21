@@ -338,11 +338,17 @@ TypeRecord* CXXTypeTraitMaterializeType(Syntax* syntax, TypeRecord* type) {
   if (type == NULL) {
     return NULL;
   }
-  return TypeMaterializeClassTemplateSpecialization(syntax, type);
+  TypeRecord* materialized =
+      TypeMaterializeClassTemplateSpecialization(syntax, type);
+  return materialized == type ? TypeRecordRetain(type) : materialized;
 }
 
+// `type` itself when nothing changes, else a new record the caller owns.
 static TypeRecord* MaterializeTraitType(Syntax* syntax, TypeRecord* type) {
-  return CXXTypeTraitMaterializeType(syntax, type);
+  if (type == NULL) {
+    return NULL;
+  }
+  return TypeMaterializeClassTemplateSpecialization(syntax, type);
 }
 
 static ASTNode* NewSyntheticValue(Syntax* syntax, TypeRecord* type) {
@@ -803,24 +809,16 @@ static bool TypeTraitIsConstructible(Syntax* syntax, Vector* type_args,
   return result;
 }
 
-static bool TypeTraitIsConvertible(Syntax* syntax, Vector* type_args) {
-  if (type_args == NULL || type_args->length != 2) {
-    return false;
+static TypeRecord* TypeTraitPointerBase(TypeRecord* type) {
+  while (type != NULL && TypeIsPointer(type)) {
+    type = type->next;
   }
-  TypeRecord* from =
-      MaterializeTraitType(syntax, (TypeRecord*)type_args->value.p[0]);
-  TypeRecord* to =
-      MaterializeTraitType(syntax, (TypeRecord*)type_args->value.p[1]);
+  return type;
+}
+
+static bool TypeTraitIsConvertibleMaterialized(Syntax* syntax, TypeRecord* from,
+                                               TypeRecord* to) {
   if (from == NULL || to == NULL) {
-    TypeRecordDelete(from);
-    TypeRecordDelete(to);
-    return false;
-  }
-  from = TypeRecordCopy(from);
-  to = TypeRecordCopy(to);
-  if (from == NULL || to == NULL) {
-    TypeRecordDelete(from);
-    TypeRecordDelete(to);
     return false;
   }
   if (TypeIsVoidLike(from) || TypeIsVoidLike(to)) {
@@ -830,39 +828,32 @@ static bool TypeTraitIsConvertible(Syntax* syntax, Vector* type_args) {
       TypeIsFunction(from) || TypeIsFunction(to)) {
     return false;
   }
-  bool from_pointer = TypeIsPointer(from);
-  bool to_pointer = TypeIsPointer(to);
-  TypeRecord* from_copy = TypeRecordCopy(from);
-  TypeRecord* to_copy = TypeRecordCopy(to);
-  while (from_copy != NULL && TypeIsPointer(from_copy)) {
-    from_copy = from_copy->next;
-  }
-  while (to_copy != NULL && TypeIsPointer(to_copy)) {
-    to_copy = to_copy->next;
-  }
-  if (from_pointer && to_pointer && from_copy != NULL && to_copy != NULL &&
-      TypeIsStructOrUnion(from_copy) &&
-      TypeIsStructOrUnion(to_copy) && from_copy->info.struct_info != NULL &&
-      to_copy->info.struct_info != NULL &&
-      !TypeEqualIgnoringQualifiers(from_copy, to_copy)) {
-    int paths = StructCountPublicDerivationPaths(from_copy->info.struct_info,
-                                                 to_copy->info.struct_info);
-    TypeRecordDelete(from_copy);
-    TypeRecordDelete(to_copy);
-    if (paths != 1) {
+  if (TypeIsPointer(from) && TypeIsPointer(to)) {
+    TypeRecord* from_base = TypeTraitPointerBase(from);
+    TypeRecord* to_base = TypeTraitPointerBase(to);
+    if (from_base != NULL && to_base != NULL &&
+        TypeIsStructOrUnion(from_base) && TypeIsStructOrUnion(to_base) &&
+        from_base->info.struct_info != NULL &&
+        to_base->info.struct_info != NULL &&
+        !TypeEqualIgnoringQualifiers(from_base, to_base) &&
+        StructCountPublicDerivationPaths(from_base->info.struct_info,
+                                         to_base->info.struct_info) != 1) {
       return false;
     }
-  } else {
-    TypeRecordDelete(from_copy);
-    TypeRecordDelete(to_copy);
   }
   ASTNode* value = TypeTraitSyntheticExpressionFromType(syntax, from);
-  if (value == NULL) {
-    TypeRecordDelete(from);
-    TypeRecordDelete(to);
+  return value != NULL && TryConvertImplicit(value, to);
+}
+
+static bool TypeTraitIsConvertible(Syntax* syntax, Vector* type_args) {
+  if (type_args == NULL || type_args->length != 2) {
     return false;
   }
-  bool ok = TryConvertImplicit(value, to);
+  TypeRecord* from =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[0]);
+  TypeRecord* to =
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[1]);
+  bool ok = TypeTraitIsConvertibleMaterialized(syntax, from, to);
   TypeRecordDelete(from);
   TypeRecordDelete(to);
   return ok;
@@ -2002,9 +1993,9 @@ static TypeRecord* CXXTypeTraitCommonTypeImpl(Syntax* syntax,
     return NULL;
   }
   TypeRecord* left =
-      MaterializeTraitType(syntax, (TypeRecord*)type_args->value.p[0]);
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[0]);
   TypeRecord* right =
-      MaterializeTraitType(syntax, (TypeRecord*)type_args->value.p[1]);
+      CXXTypeTraitMaterializeType(syntax, (TypeRecord*)type_args->value.p[1]);
   if (left == NULL || right == NULL) {
     TypeRecordDelete(left);
     TypeRecordDelete(right);

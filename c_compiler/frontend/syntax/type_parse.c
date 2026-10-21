@@ -2000,10 +2000,10 @@ static TypeRecord* ResolveConcreteDependentMemberType(TypeParser* parser,
   VectorDestruct(&no_args);
   bool failed = parser->template_substitution_failed;
   parser->template_substitution_failed = saved_failed;
-  TypeRecordDeleteUnowned(type);
+  TypeRecordDelete(type);
   if (failed || resolved == NULL ||
       TypeDependentOf(resolved)->dependent_member_name != NULL) {
-    TypeRecordDeleteUnowned(resolved);
+    TypeRecordDelete(resolved);
     return NULL;
   }
   return resolved;

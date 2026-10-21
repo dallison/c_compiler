@@ -996,70 +996,57 @@ static void TypeRecordCopyFunctionExtra(TypeRecord* to, TypeRecord* from) {
   TypeRecordCopyContractAssertions(to, from);
 }
 
-// Deletes a TypeRecord with regard to the reference count.  The
-// reference count is decremented and if it goes to zero the
-// record can be deleted.  When deleting it, the record pointed
-// to by the 'next' field is first deleted (using the same function)
-// and then the memory is freed.
+// Frees a record whose last owner releases it: its one counted owner (refs
+// 1) or, for a record never counted (refs 0), its creator or the holder it
+// was handed to.  `next`, the template arguments and type-specific info are
+// released first.
 void TypeRecordDeleteLastReference(TypeRecord* record) {
   if (record == NULL) {
     return;
   }
   TypeArenaCheckLive(record);
-  TypeRecordDecRef(record);
-  if (record->refs == 0) {
-    if (type_census_enabled) {
-      TypeCensusNoteRelease(record);
+  assert(record->refs <= 1 && !record->shared_immutable);
+  record->refs = 0;
+  if (type_census_enabled) {
+    TypeCensusNoteRelease(record);
+  }
+  if (record->next != NULL) {
+    TypeRecordDelete(record->next);
+    record->next = NULL;
+  }
+  if (record->template_arguments != NULL) {
+    VectorDeleteWithContents(record->template_arguments,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+    record->template_arguments = NULL;
+  }
+  TypeDependentInfoRelease(record->dependent);
+  record->dependent = NULL;
+  if (TypeIsStructOrUnion(record)) {
+    // Struct infos are not freed here: they can form reference cycles, so
+    // they are all freed in one pass by StructRegistryRelease at end of
+    // compilation.  Keep the count balanced for any code that reads it.
+    if (record->info.struct_info != NULL) {
+      record->info.struct_info->refs--;
     }
-    if (record->next != NULL) {
-      TypeRecordDelete(record->next);
-      record->next = NULL;
+  } else if (TypeIsEnum(record)) {
+    // Enum infos are freed in bulk by StructRegistryRelease (alongside
+    // structs) so that decrements during the bulk teardown never touch an
+    // already-freed info.  Keep the count balanced for any reader.
+    if (record->info.enum_info != NULL) {
+      record->info.enum_info->refs--;
     }
-    if (record->template_arguments != NULL) {
-      VectorDeleteWithContents(record->template_arguments,
-                               (VectorElementDestructor)TemplateArgumentDelete,
+  } else if (TypeIsFunction(record)) {
+    VectorDestructWithContents(&record->info.function.prototype,
+                               (VectorElementDestructor)SymbolDelete,
                                /*free_element=*/false);
-      record->template_arguments = NULL;
-    }
-    TypeDependentInfoRelease(record->dependent);
-    record->dependent = NULL;
-    // Delete type-specific info if refs goes to zero.
-    if (TypeIsStructOrUnion(record)) {
-      // Struct infos are not freed here: they can form reference cycles, so
-      // they are all freed in one pass by StructRegistryRelease at end of
-      // compilation.  Keep the count balanced for any code that reads it.
-      if (record->info.struct_info != NULL) {
-        record->info.struct_info->refs--;
-      }
-    } else if (TypeIsEnum(record)) {
-      // Enum infos are freed in bulk by StructRegistryRelease (alongside
-      // structs) so that decrements during the bulk teardown never touch an
-      // already-freed info.  Keep the count balanced for any reader.
-      if (record->info.enum_info != NULL) {
-        record->info.enum_info->refs--;
-      }
-    } else if (TypeIsFunction(record)) {
-      VectorDestructWithContents(&record->info.function.prototype,
-                                 (VectorElementDestructor)SymbolDelete,
-                                 /*free_element=*/false);
-      FunctionInfoExtraDelete(&record->info.function);
-    } else if (TypeIsVLA(record)) {
-      // Delete the AST containing the size.
-      ASTNodeDelete(record->info.array.size.vla.size);
-      record->info.array.size.vla.size = NULL;
-    }
-    TypeArenaRelease(record);
+    FunctionInfoExtraDelete(&record->info.function);
+  } else if (TypeIsVLA(record)) {
+    // Delete the AST containing the size.
+    ASTNodeDelete(record->info.array.size.vla.size);
+    record->info.array.size.vla.size = NULL;
   }
-}
-
-void TypeRecordDeleteUnowned(TypeRecord* record) {
-  if (record == NULL || record->shared_immutable) {
-    return;
-  }
-  if (record->refs == 0) {
-    record->refs = 1;
-  }
-  TypeRecordDelete(record);
+  TypeArenaRelease(record);
 }
 
 int TypeRecordAlignment(TypeRecord* record) {
@@ -2032,6 +2019,17 @@ TypeRecord* TypeRecordAdopt(TypeRecord* type) {
   return type;
 }
 
+TypeRecord* TypeRecordRetain(TypeRecord* type) {
+  if (type == NULL || type->shared_immutable) {
+    return type;
+  }
+  if (type->refs > 0) {
+    TypeRecordIncRef(type);
+    return type;
+  }
+  return TypeRecordCopy(type);
+}
+
 // Concrete types stored once.  A canonical record is marked
 // kTypeRecordCanonical; its `next` and the types of its template arguments
 // are canonical as well, so nothing reachable from it changes.
@@ -2695,7 +2693,7 @@ Symbol* NewCXXThisSymbol(Struct* owner, bool is_const_member,
   // Members of a concrete class share one `this` type per cv-qualification.
   if (TypeRecordCanIntern(this_type)) {
     TypeRecord* canonical = TypeRecordIntern(this_type);
-    TypeRecordDeleteUnowned(this_type);
+    TypeRecordDelete(this_type);
     this_type = canonical;
   }
   Symbol* this_symbol = NewSymbol("this", this_type, STO(implicit));

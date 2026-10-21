@@ -10175,6 +10175,10 @@ static TypeRecord* ConstexprPlainObjectType(TypeRecord* type) {
   if (type == NULL || GetQualifiers(type) == kQualPlain) {
     return type;
   }
+  // Objects built for the result keep borrowing their type.
+  if (TypeRecordCanIntern(type)) {
+    return TypeRecordInternQualified(type, kQualPlain);
+  }
   TypeRecord* plain = TypeRecordCopy(type);
   SetQualifiers(plain, kQualPlain);
   return plain;

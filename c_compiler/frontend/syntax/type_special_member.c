@@ -1859,7 +1859,7 @@ static TypeRecord* InternCXXSyntheticType(TypeRecord* type) {
   }
   TypeRecord* canonical = TypeRecordIntern(type);
   if (canonical != type) {
-    TypeRecordDeleteUnowned(type);
+    TypeRecordDelete(type);
   }
   return canonical;
 }
