@@ -1871,6 +1871,18 @@ bool TypeEqual(TypeRecord* t1, TypeRecord* t2) {
                                           t2->template_arguments)) {
             return true;
           }
+          // A concrete specialization owns one Struct.  A later substitution
+          // can leave another TypeRecord pointing at that Struct with a stale
+          // argument list (so `function<void(T*)>` and an older
+          // `function<void(string_view)>` record share the class).  The Struct
+          // is the type.  The primary template also shares one Struct across
+          // still-dependent ids, and those must stay distinct; `is_template`
+          // marks that case.
+          if (t1->info.struct_info != NULL &&
+              t1->info.struct_info == t2->info.struct_info &&
+              !t1->info.struct_info->is_template && same_dependent_member) {
+            return true;
+          }
           // When both operands are template-ids that carry explicit arguments,
           // their identity is exactly the (origin, arguments) pair, so an
           // argument mismatch is decisive.  Must NOT fall through to the

@@ -12356,9 +12356,25 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
   // specialization -- deferring it would leave consumers that immediately need
   // the (empty) type, such as the structured-bindings `tuple_size<E>::value`
   // lookup, unable to complete it.
+  //
+  // A variadic tag that is never given a body (`template<class... Ts> struct
+  // StorageTag;`) is a different case.  Every specialization must be its own
+  // type, or `Storage<T, I, StorageTag<Ts...>>` collapses to the primary and
+  // distinct compressed-tuple bases become the same class.  Non-variadic
+  // forward declarations (basic_string_view) stay deferred so a later
+  // definition is not shadowed by an empty shell.
+  bool variadic_forward_declaration = false;
+  for (size_t i = 0; i < template_struct->template_parameters.length; i++) {
+    TemplateParameter* param = template_struct->template_parameters.value.p[i];
+    if (param != NULL && param->is_parameter_pack) {
+      variadic_forward_declaration = true;
+      break;
+    }
+  }
   if (partial == NULL && template_struct->tag_symbol != NULL &&
       !template_struct->tag_symbol->flags.is_defined &&
-      template_struct->partial_specializations.length == 0) {
+      template_struct->partial_specializations.length == 0 &&
+      !variadic_forward_declaration) {
     StringDestruct(&instantiated_name);
     TypeRecord* deferred = TypeRecordCopy(templ->type);
     if (deferred->template_arguments != NULL) {

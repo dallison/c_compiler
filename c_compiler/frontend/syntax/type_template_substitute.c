@@ -898,6 +898,22 @@ static void AppendSubstitutedTemplateArgument(TypeParser* parser, Vector* out,
       VectorAppend(out, TemplateArgumentCopy(arg));
       return;
     }
+    // An outer expansion such as `Storage<Ts, I, Tag<Ts...>>...` substitutes
+    // this pattern once per element, with `Ts` already reduced to that
+    // element.  A nested expansion of the same pack still names every element.
+    if (pack != NULL && pack->pack_arguments == NULL &&
+        !pack->is_pack_expansion && parser != NULL &&
+        parser->outer_pack_args != NULL && parser->outer_pack_element >= 0) {
+      int idx = index >= 0 ? index : arg->template_parameter_index;
+      Vector* full = parser->outer_pack_args;
+      if (idx >= 0 && (size_t)idx < full->length) {
+        TemplateArgument* original = full->value.p[idx];
+        if (original != NULL && original->pack_arguments != NULL &&
+            original->pack_arguments->length == parser->outer_pack_length) {
+          pack = original;
+        }
+      }
+    }
     if (pack != NULL && pack->pack_arguments != NULL) {
       for (size_t i = 0; i < pack->pack_arguments->length; i++) {
         if (arg->kind == kTemplateParameterType && index >= 0 &&
@@ -3957,8 +3973,24 @@ TypeRecord* SubstituteTemplateParametersForPackElement(
       VectorAppend(&element_args, arg);
     }
   }
+  Vector* saved_outer_args = NULL;
+  int saved_outer_element = -1;
+  size_t saved_outer_length = 0;
+  if (parser != NULL) {
+    saved_outer_args = parser->outer_pack_args;
+    saved_outer_element = parser->outer_pack_element;
+    saved_outer_length = parser->outer_pack_length;
+    parser->outer_pack_args = args;
+    parser->outer_pack_element = (int)element_index;
+    parser->outer_pack_length = pack_length;
+  }
   TypeRecord* result = SubstituteTemplateParameters(parser, type,
                                                     &element_args);
+  if (parser != NULL) {
+    parser->outer_pack_args = saved_outer_args;
+    parser->outer_pack_element = saved_outer_element;
+    parser->outer_pack_length = saved_outer_length;
+  }
   VectorDestruct(&element_args);
   return result;
 }

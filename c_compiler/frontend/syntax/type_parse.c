@@ -179,6 +179,9 @@ void TypeParserInit(TypeParser* parser, Lex* lex, struct Syntax* syntax,
   parser->deferred_inline_bodies = NULL;
   parser->deferred_noexcept_specifiers = NULL;
   parser->deferred_static_asserts = NULL;
+  parser->outer_pack_args = NULL;
+  parser->outer_pack_element = -1;
+  parser->outer_pack_length = 0;
 }
 
 static void TypeParserRestoreClassScope(TypeParser* parser) {

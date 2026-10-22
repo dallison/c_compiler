@@ -124,6 +124,13 @@ typedef struct {
   // deferred, or that are template-dependent.  Owned by the active
   // ParseStructMembers frame and checked after inline bodies are re-parsed.
   Vector* deferred_static_asserts;
+  // Set while substituting one element of an outer pack expansion
+  // (`Storage<Ts, I, Tag<Ts...>>...`).  Nested expansions of the same pack
+  // (`Tag<Ts...>`) must still see every element; the argument vector passed
+  // to substitution has already replaced those packs with the current element.
+  Vector* outer_pack_args;
+  int outer_pack_element;
+  size_t outer_pack_length;
 } TypeParser;
 
 typedef struct {

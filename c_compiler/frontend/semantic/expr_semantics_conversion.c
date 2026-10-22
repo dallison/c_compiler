@@ -483,7 +483,10 @@ bool CXXBracedInitSelectsInitializerListConstructor(ASTNode* actual,
 }
 
 // Contract: Non-initializer-list constructors for expression-only element lists;
-// updates `*best` with the minimum FunctionCallScore when viable.
+// updates `*best` with the minimum FunctionCallScore when viable.  Member
+// template constructors are deduced against the elements; skipping them made
+// `vector<Sub>{{"k", value}}` non-viable when `Sub`'s only constructor is
+// `template<class V> Sub(string, V&&)`.
 static void CXXBracedInitTargetRankOrdinaryConstructors(StructMember* ctor,
                                                           Vector* elements,
                                                           int* best) {
@@ -494,12 +497,31 @@ static void CXXBracedInitTargetRankOrdinaryConstructors(StructMember* ctor,
         c->symbol->type == NULL || !TypeIsFunction(c->symbol->type) ||
         !c->symbol->type->info.function.is_constructor ||
         c->symbol->type->info.function.is_deleted ||
-        c->symbol->flags.is_template ||
         CXXConstructorIsInitializerListConstructor(
             &c->symbol->type->info.function)) {
       continue;
     }
-    int s = FunctionCallScore(c->symbol->type, &call, /*first_formal_arg=*/1);
+    Symbol* scored = c->symbol;
+    Symbol* temporary = NULL;
+    if (c->symbol->flags.is_template) {
+      DiagnosticSuppressBegin();
+      temporary = TypeCreateFunctionTemplateCandidate(
+          &compiler->syntax, c->symbol, NULL, elements,
+          /*first_formal_arg=*/1);
+      DiagnosticSuppressEnd();
+      if (temporary == NULL || temporary->type == NULL ||
+          !TypeIsFunction(temporary->type)) {
+        if (temporary != NULL) {
+          SymbolDelete(temporary);
+        }
+        continue;
+      }
+      scored = temporary;
+    }
+    int s = FunctionCallScore(scored->type, &call, /*first_formal_arg=*/1);
+    if (temporary != NULL) {
+      SymbolDelete(temporary);
+    }
     if (s >= 0 && (*best < 0 || s < *best)) {
       *best = s;
     }

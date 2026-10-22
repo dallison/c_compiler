@@ -2177,6 +2177,18 @@ void SemanticConvertType(ASTNode* from, TypeRecord* to, ConversionContext ctx) {
     ASTNodeSetType(from, to);
     return;
   }
+  // [conv.ptr]: std::nullptr_t also converts to a pointer-to-member.  The null
+  // member pointer is not all-zero bits, so this cannot just retype the node.
+  if (TypeIsNullPointer(from->type) && TypeIsMemberPointer(to)) {
+    MemberPointerValue null_value;
+    MemberPointerEncodeNull(to, &null_value);
+    ASTNode* parent = from->parent;
+    int child_id = from->child_id;
+    ASTNode* converted =
+        NewIntConstantASTNode(null_value.ptr, to, from->location);
+    ASTNodeReplaceChild(parent, child_id, converted, false);
+    return;
+  }
   if (TypeIsNullPointer(from->type) && TypeIsBool(to)) {
     ASTNodeSetType(from, to);
     return;

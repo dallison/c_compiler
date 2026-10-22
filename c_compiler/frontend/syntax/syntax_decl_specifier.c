@@ -359,7 +359,14 @@ void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
     } else if (!(type_specifier.type != kTypeImplicit &&
                  SyntaxCurrentIdentifierFollowedByScopeOperator(syntax)) &&
                SyntaxLookingAtType(syntax) &&
-               (type_specifier.type & (kTypeStruct | kTypeUnion | kTypeEnum)) == 0) {
+               // A class, union, or enum specifier ends the type, except for a
+               // trailing cv-qualifier (`code const *`, `struct S volatile x`).
+               ((type_specifier.type &
+                 (kTypeStruct | kTypeUnion | kTypeEnum)) == 0 ||
+                LexLookingAt(syntax->lex, TOK(const)) ||
+                LexLookingAt(syntax->lex, TOK(volatile)) ||
+                LexLookingAt(syntax->lex, TOK(restrict)) ||
+                LexLookingAt(syntax->lex, TOK(atomic)))) {
       // Guard against a type specifier that consumes no input (e.g. a stray
       // `::` that cannot begin a new specifier): if the lexer does not
       // advance, stop rather than spinning forever.

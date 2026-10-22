@@ -304,7 +304,13 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
   StringInit(&target->function_name,
              TargetSymbolName(func, func_name, sizeof(func_name)));
   target->is_global = !StorageIs(func->storage, STO(static));
-  target->is_weak = SymbolHasWeakBinding(func);
+  // An inline function with external linkage may be defined in every
+  // translation unit that odr-uses it (in-class member definitions are
+  // implicitly inline).  Those definitions have to be weak so the linker can
+  // keep one.  SymbolHasWeakBinding only sees flags.is_weak, which the class
+  // template member clone does not always set.
+  target->is_weak = SymbolHasWeakBinding(func) ||
+                    (target->is_global && func_type->info.function.is_inline);
   target->num_calls = GeneratorNumCalls(gen);
   target->varargs = gen->func->info.function.varargs;
   target->is_void = TypeIsVoid(func_type->next) ||

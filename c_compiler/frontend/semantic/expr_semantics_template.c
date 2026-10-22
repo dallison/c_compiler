@@ -963,8 +963,13 @@ ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
     tuple_arg = ((ExpressionInitializerASTNode*)tuple_arg)->expr;
   }
   Vector* elements = CXXTupleArgumentElements(tuple_arg);
+  // `CXXResolveTypeForIsSameVArgument` returns `t_arg->type` itself when the
+  // argument is already concrete.  Deleting that pointer frees the argument's
+  // type, and the `resolved` cleanup below frees it again.
+  bool type_key_owned =
+      type_key != NULL && (t_arg == NULL || type_key != t_arg->type);
   if (elements == NULL) {
-    if (type_key != NULL) {
+    if (type_key_owned) {
       TypeRecordDelete(type_key);
     }
     VectorDeleteWithContents(
@@ -992,7 +997,9 @@ ASTNode* CXXTryFoldStdGetFromTupleCall(VectorASTNode* call) {
         break;
       }
     }
-    TypeRecordDelete(type_key);
+    if (type_key_owned) {
+      TypeRecordDelete(type_key);
+    }
   } else if (index != (size_t)-1) {
     element = CXXTupleElementExpr(elements, index);
     element_index = index;
