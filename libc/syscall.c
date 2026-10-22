@@ -6,10 +6,56 @@
 //  Copyright © 2020 David Allison. All rights reserved.
 //
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <syscall.h>
 #include <time.h>
+
+#if defined(__DAVECC_INTERPRETER_ABI__) && defined(__linux__)
+#undef syscall
+
+struct DaveccLinuxMmapRequest {
+  uint64_t address;
+  uint64_t length;
+  int32_t protection;
+  int32_t flags;
+  int32_t fd;
+  int32_t pad;
+  int64_t offset;
+};
+
+long __davecc_linux_syscall(long number, ...) {
+  unsigned long arg[6];
+  va_list ap;
+  va_start(ap, number);
+  for (int i = 0; i < 6; i++) arg[i] = va_arg(ap, unsigned long);
+  va_end(ap);
+  if (number == SYS_read) return syscall(SYS_READ, arg[0], arg[1], arg[2]);
+  if (number == SYS_write) return syscall(SYS_WRITE, arg[0], arg[1], arg[2]);
+  if (number == SYS_close) return syscall(SYS_CLOSE, arg[0]);
+  if (number == SYS_munmap) return syscall(SYS_MUNMAP, arg[0], arg[1]);
+  if (number == SYS_mprotect) {
+    return syscall(SYS_MPROTECT, arg[0], arg[1], arg[2]);
+  }
+  if (number == SYS_getpid) return syscall(SYS_GETPID);
+  if (number == SYS_mmap || number == SYS_mmap2) {
+    struct DaveccLinuxMmapRequest request;
+    request.address = (uint64_t)arg[0];
+    request.length = (uint64_t)arg[1];
+    request.protection = (int32_t)arg[2];
+    request.flags = (int32_t)arg[3];
+    request.fd = (int32_t)arg[4];
+    request.pad = 0;
+    request.offset = number == SYS_mmap2 ? (int64_t)arg[5] * 4096
+                                         : (int64_t)arg[5];
+    return syscall(SYS_MMAP, &request);
+  }
+  errno = ENOSYS;
+  return -1;
+}
+#endif
 
 #if defined(__DAVECC_NATIVE_LINUX__)
 typedef struct {

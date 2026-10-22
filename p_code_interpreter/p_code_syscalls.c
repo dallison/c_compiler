@@ -11,6 +11,7 @@
 
 #include "chrono_host.h"
 #include "filesystem_host.h"
+#include "posix_host.h"
 #include "random_host.h"
 #include "loader_lifecycle.h"
 #include "p_code_interpreter.h"
@@ -65,9 +66,24 @@ static int64_t Terminate(PCodeInterpreter* interpreter, int64_t status,
   return 0;
 }
 
+static void* PCodeGuestPtr(void* context, uint64_t guest, size_t size) {
+  (void)context;
+  (void)size;
+  if (guest == 0) return NULL;
+  void* mapped = DaveHostMappingFind(guest, size == 0 ? 1 : size);
+  if (mapped != NULL) return mapped;
+  return (void*)(uintptr_t)guest;
+}
+
 int64_t PCodeHandleSyscall(PCodeInterpreter* interpreter, int64_t number,
                            int64_t a0, int64_t a1, int64_t a2, int64_t a3,
                            int64_t a4, int64_t a5) {
+  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_DUP2) {
+    (void)interpreter;
+    return DaveHostPosixSyscall((int)number, 8, 64, PCodeGuestPtr, interpreter,
+                                (uint64_t)a0, (uint64_t)a1, (uint64_t)a2,
+                                (uint64_t)a3, (uint64_t)a4, (uint64_t)a5);
+  }
   (void)a5;
   switch (number) {
     case P_CODE_SYSCALL_OPEN:
@@ -352,6 +368,76 @@ int64_t PCodeHandlePackedSyscall(PCodeInterpreter* interpreter,
     case P_CODE_SYSCALL_RANDOM_BYTES:
       a0 = ReadPackedLong(&cursor);
       a1 = ReadPackedLong(&cursor);
+      break;
+    case DAVE_SYS_MMAP:
+    case DAVE_SYS_SHM_UNLINK:
+    case DAVE_SYS_SETSOCKOPT:
+    case DAVE_SYS_GETSOCKOPT:
+    case DAVE_SYS_PIPE:
+    case DAVE_SYS_UNLINK:
+      a0 = ReadPackedLong(&cursor);
+      break;
+    case DAVE_SYS_MUNMAP:
+    case DAVE_SYS_GETHOSTNAME:
+      a0 = ReadPackedLong(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      break;
+    case DAVE_SYS_MPROTECT:
+      a0 = ReadPackedLong(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      a2 = ReadPackedInt(&cursor);
+      break;
+    case DAVE_SYS_SHM_OPEN:
+      a0 = ReadPackedLong(&cursor);
+      a1 = ReadPackedInt(&cursor);
+      a2 = ReadPackedInt(&cursor);
+      break;
+    case DAVE_SYS_FTRUNCATE:
+      a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      break;
+    case DAVE_SYS_SENDMSG:
+    case DAVE_SYS_RECVMSG:
+      a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      a2 = ReadPackedInt(&cursor);
+      break;
+    case DAVE_SYS_SOCKET:
+    case DAVE_SYS_FCNTL:
+      a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedInt(&cursor);
+      a2 = ReadPackedInt(&cursor);
+      break;
+    case DAVE_SYS_BIND:
+    case DAVE_SYS_CONNECT:
+      a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      a2 = ReadPackedInt(&cursor);
+      break;
+    case DAVE_SYS_LISTEN:
+    case DAVE_SYS_SHUTDOWN:
+    case DAVE_SYS_DUP2:
+      a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedInt(&cursor);
+      break;
+    case DAVE_SYS_ACCEPT:
+    case DAVE_SYS_GETSOCKNAME:
+    case DAVE_SYS_GETPEERNAME:
+      a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      a2 = ReadPackedLong(&cursor);
+      break;
+    case DAVE_SYS_SEND:
+    case DAVE_SYS_RECV:
+      a0 = ReadPackedInt(&cursor);
+      a1 = ReadPackedLong(&cursor);
+      a2 = ReadPackedLong(&cursor);
+      a3 = ReadPackedInt(&cursor);
+      break;
+    case DAVE_SYS_DUP:
+      a0 = ReadPackedInt(&cursor);
+      break;
+    case DAVE_SYS_GETPID:
       break;
     default:
       break;

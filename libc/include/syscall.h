@@ -118,6 +118,33 @@
 #define SYS_FS_DESCRIPTOR_STATUS DAVE_SYS_FS_DESCRIPTOR_STATUS
 #define SYS_ENVIRONMENT_VALUE DAVE_SYS_ENVIRONMENT_VALUE
 #define SYS_POLL DAVE_SYS_POLL
+#define SYS_MMAP DAVE_SYS_MMAP
+#define SYS_MUNMAP DAVE_SYS_MUNMAP
+#define SYS_MPROTECT DAVE_SYS_MPROTECT
+#define SYS_SHM_OPEN DAVE_SYS_SHM_OPEN
+#define SYS_SHM_UNLINK DAVE_SYS_SHM_UNLINK
+#define SYS_FTRUNCATE DAVE_SYS_FTRUNCATE
+#define SYS_SOCKET DAVE_SYS_SOCKET
+#define SYS_BIND DAVE_SYS_BIND
+#define SYS_LISTEN DAVE_SYS_LISTEN
+#define SYS_ACCEPT DAVE_SYS_ACCEPT
+#define SYS_CONNECT DAVE_SYS_CONNECT
+#define SYS_SEND DAVE_SYS_SEND
+#define SYS_RECV DAVE_SYS_RECV
+#define SYS_SENDMSG DAVE_SYS_SENDMSG
+#define SYS_RECVMSG DAVE_SYS_RECVMSG
+#define SYS_SHUTDOWN DAVE_SYS_SHUTDOWN
+#define SYS_SETSOCKOPT DAVE_SYS_SETSOCKOPT
+#define SYS_GETSOCKOPT DAVE_SYS_GETSOCKOPT
+#define SYS_GETSOCKNAME DAVE_SYS_GETSOCKNAME
+#define SYS_GETPEERNAME DAVE_SYS_GETPEERNAME
+#define SYS_PIPE DAVE_SYS_PIPE
+#define SYS_FCNTL DAVE_SYS_FCNTL
+#define SYS_GETPID DAVE_SYS_GETPID
+#define SYS_GETHOSTNAME DAVE_SYS_GETHOSTNAME
+#define SYS_UNLINK DAVE_SYS_UNLINK
+#define SYS_DUP DAVE_SYS_DUP
+#define SYS_DUP2 DAVE_SYS_DUP2
 
 #define SYS_TZDB_VERSION DAVE_SYS_TZDB_VERSION
 #define SYS_TZDB_GENERATION DAVE_SYS_TZDB_GENERATION
@@ -131,6 +158,43 @@
 #define SYS_TZDB_LEAP_COUNT DAVE_SYS_TZDB_LEAP_COUNT
 #define SYS_TZDB_LEAP_INFO DAVE_SYS_TZDB_LEAP_INFO
 #define SYS_RANDOM_BYTES DAVE_SYS_RANDOM_BYTES
+
+// Linux programs call syscall(SYS_mmap, ...) with kernel numbers and the
+// kernel argument list. Those numbers collide with the DaveCC guest ABI, so
+// interpreter builds publish them in a private range and __davecc_linux_syscall
+// turns them back into guest calls.
+#if defined(__linux__)
+#define __NR_read 0x40000001
+#define SYS_read __NR_read
+#define __NR_write 0x40000002
+#define SYS_write __NR_write
+#define __NR_close 0x40000003
+#define SYS_close __NR_close
+#define __NR_mmap 0x40000004
+#define SYS_mmap __NR_mmap
+#define __NR_mmap2 0x40000005
+#define SYS_mmap2 __NR_mmap2
+#define __NR_munmap 0x40000006
+#define SYS_munmap __NR_munmap
+#define __NR_mprotect 0x40000007
+#define SYS_mprotect __NR_mprotect
+#define __NR_getpid 0x40000008
+#define SYS_getpid __NR_getpid
+#define __NR_futex 0x40000009
+#define SYS_futex __NR_futex
+#define __NR_gettid 0x4000000a
+#define SYS_gettid __NR_gettid
+#define __NR_clone 0x4000000b
+#define SYS_clone __NR_clone
+#define __NR_exit 0x4000000c
+#define SYS_exit __NR_exit
+#define __NR_exit_group 0x4000000d
+#define SYS_exit_group __NR_exit_group
+#define __NR_rt_sigprocmask 0x4000000e
+#define SYS_rt_sigprocmask __NR_rt_sigprocmask
+#define __NR_getcpu 0x4000000f
+#define SYS_getcpu __NR_getcpu
+#endif
 #endif
 
 #if defined(SYS_TZDB_VERSION)
@@ -220,5 +284,15 @@ extern long syscall(int n, ...);
 #error "Unknown architecture"
 #endif
 
+#if defined(__DAVECC_INTERPRETER_ABI__) && defined(__linux__)
+#ifdef __cplusplus
+extern "C" {
+#endif
+long __davecc_linux_syscall(long number, ...);
+#ifdef __cplusplus
+}
+#endif
+#define syscall __davecc_linux_syscall
+#endif
 
 #endif /* syscall_h */

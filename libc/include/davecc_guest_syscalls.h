@@ -68,6 +68,37 @@
 #define DAVE_SYS_ENVIRONMENT_VALUE 62
 #define DAVE_SYS_POLL 63
 
+// Shared memory, Unix sockets, and the file operations Subspace uses to
+// hand channel buffers between client and server.  These are DaveCC guest
+// numbers, not kernel syscall numbers.
+#define DAVE_SYS_MMAP 64
+#define DAVE_SYS_MUNMAP 65
+#define DAVE_SYS_MPROTECT 66
+#define DAVE_SYS_SHM_OPEN 67
+#define DAVE_SYS_SHM_UNLINK 68
+#define DAVE_SYS_FTRUNCATE 69
+#define DAVE_SYS_SOCKET 70
+#define DAVE_SYS_BIND 71
+#define DAVE_SYS_LISTEN 72
+#define DAVE_SYS_ACCEPT 73
+#define DAVE_SYS_CONNECT 74
+#define DAVE_SYS_SEND 75
+#define DAVE_SYS_RECV 76
+#define DAVE_SYS_SENDMSG 77
+#define DAVE_SYS_RECVMSG 78
+#define DAVE_SYS_SHUTDOWN 79
+#define DAVE_SYS_SETSOCKOPT 80
+#define DAVE_SYS_GETSOCKOPT 81
+#define DAVE_SYS_GETSOCKNAME 82
+#define DAVE_SYS_GETPEERNAME 83
+#define DAVE_SYS_PIPE 84
+#define DAVE_SYS_FCNTL 85
+#define DAVE_SYS_GETPID 86
+#define DAVE_SYS_GETHOSTNAME 87
+#define DAVE_SYS_UNLINK 88
+#define DAVE_SYS_DUP 89
+#define DAVE_SYS_DUP2 90
+
 #define DAVE_SYS_6502_EXIT 1
 #define DAVE_SYS_6502_ABORT 8
 
@@ -133,6 +164,33 @@
   X(RANDOM_BYTES)                   \
   X(FS_DESCRIPTOR_STATUS)           \
   X(ENVIRONMENT_VALUE)              \
-  X(POLL)
+  X(POLL)                           \
+  X(MMAP)                           \
+  X(MUNMAP)                         \
+  X(MPROTECT)                       \
+  X(SHM_OPEN)                       \
+  X(SHM_UNLINK)                     \
+  X(FTRUNCATE)                      \
+  X(SOCKET)                         \
+  X(BIND)                           \
+  X(LISTEN)                         \
+  X(ACCEPT)                         \
+  X(CONNECT)                        \
+  X(SEND)                           \
+  X(RECV)                           \
+  X(SENDMSG)                        \
+  X(RECVMSG)                        \
+  X(SHUTDOWN)                       \
+  X(SETSOCKOPT)                     \
+  X(GETSOCKOPT)                     \
+  X(GETSOCKNAME)                    \
+  X(GETPEERNAME)                    \
+  X(PIPE)                           \
+  X(FCNTL)                          \
+  X(GETPID)                         \
+  X(GETHOSTNAME)                    \
+  X(UNLINK)                         \
+  X(DUP)                            \
+  X(DUP2)
 
 #endif

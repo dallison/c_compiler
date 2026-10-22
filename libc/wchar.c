@@ -244,6 +244,20 @@ size_t wcstombs(char* restrict output, const wchar_t* restrict string,
   return wcsrtombs(output, &source, count, &state);
 }
 
+int wcscasecmp(const wchar_t* left, const wchar_t* right) {
+  while (*left != 0 && *right != 0) {
+    wchar_t a = *left;
+    wchar_t b = *right;
+    if (a >= 'A' && a <= 'Z') a = (wchar_t)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (wchar_t)(b - 'A' + 'a');
+    if (a != b) return a < b ? -1 : 1;
+    left++;
+    right++;
+  }
+  if (*left == *right) return 0;
+  return *left == 0 ? -1 : 1;
+}
+
 size_t wcslen(const wchar_t* string) {
   const wchar_t* end = string;
   while (*end != L'\0') end++;

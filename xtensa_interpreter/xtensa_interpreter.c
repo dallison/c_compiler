@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "../libc/include/davecc_guest_syscalls.h"
+#include "posix_host.h"
 #include "xtensa_isa.h"
 
 static unsigned PhysicalRegister(const XtensaInterpreter* interpreter,
@@ -35,7 +36,11 @@ static void WriteRegister(XtensaInterpreter* interpreter, unsigned visible,
 }
 
 static void* GuestPointer(XtensaInterpreter* interpreter, uint32_t address,
-                          size_t size) {
+                           size_t size) {
+  void* mapped = DaveHostMappingFind(address, size);
+  if (mapped != NULL) {
+    return mapped;
+  }
   uint64_t end = (uint64_t)address + size;
   if (address >= XTENSA_HOSTED_STACK_BASE &&
       end <= XTENSA_HOSTED_STACK_BASE + XTENSA_HOSTED_STACK_SIZE) {
@@ -215,12 +220,22 @@ static void TraceInstruction(const XtensaInterpreter* interpreter,
           ReadRegister(interpreter, instruction->rt));
 }
 
+static void* XtensaGuestPtr(void* context, uint64_t guest, size_t size) {
+  return GuestPointer(context, (uint32_t)guest, size == 0 ? 1 : size);
+}
+
 static void HandleHostTrap(XtensaInterpreter* interpreter) {
   uint32_t service = ReadRegister(interpreter, 8);
   uint32_t a2 = ReadRegister(interpreter, 2);
   uint32_t a3 = ReadRegister(interpreter, 3);
   uint32_t a4 = ReadRegister(interpreter, 4);
   uint32_t a5 = ReadRegister(interpreter, 5);
+  if (service >= DAVE_SYS_MMAP && service <= DAVE_SYS_DUP2) {
+    int64_t result = DaveHostPosixSyscall(service, 4, 32, XtensaGuestPtr,
+                                          interpreter, a2, a3, a4, a5, 0, 0);
+    WriteRegister(interpreter, 2, (uint32_t)result);
+    return;
+  }
   switch (service) {
     case DAVE_SYS_EXIT:
     case DAVE_SYS_EXIT_CLEAN:

@@ -126,12 +126,17 @@ typedef long fpos_t;
 #ifndef O_NDELAY
 #define O_NDELAY O_NONBLOCK
 #endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 02000000
+#endif
 
 #define F_DUPFD 0
 #define F_GETFD 1
 #define F_SETFD 2
 #define F_GETFL 3
 #define F_SETFL 4
+#define F_SETPIPE_SZ 1031
+#define F_GETPIPE_SZ 1032
 #ifndef F_GETLK
 #define F_GETLK 5
 #define F_SETLK 6

@@ -434,6 +434,9 @@ LIBC_SRCS = [
     "libc/posix_open.c",
     "libc/posix_read.c",
     "libc/posix_poll.c",
+    "libc/posix_ipc.c",
+    "libc/posix_events.c",
+    "libc/regex.c",
     "libc/pow.c",
     "libc/printf.c",
     "libc/printf_common.c",
@@ -1130,11 +1133,23 @@ cc_library(
         ":elf",
         ":chrono_host",
         ":filesystem_host",
+        ":posix_host",
         ":random_host",
         ":linker",
         ":loader",
         ":utils",
     ],
+)
+
+cc_library(
+    name = "posix_host",
+    srcs = ["c_compiler/Loader/posix_host.c"],
+    hdrs = [
+        "c_compiler/Loader/posix_host.h",
+        "libc/include/davecc_guest_syscalls.h",
+    ],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
 )
 
 cc_library(
@@ -1183,6 +1198,7 @@ cc_library(
         ":elf",
         ":chrono_host",
         ":filesystem_host",
+        ":posix_host",
         ":random_host",
         ":guest_addr_wait",
         ":linker",
@@ -1207,6 +1223,7 @@ cc_library(
     deps = [
         ":elf",
         ":loader",
+        ":posix_host",
         ":utils",
         ":xtensa_isa_lib",
     ],
@@ -1235,6 +1252,7 @@ cc_library(
         ":elf",
         ":chrono_host",
         ":filesystem_host",
+        ":posix_host",
         ":random_host",
         ":guest_addr_wait",
         ":linker",
@@ -1263,6 +1281,7 @@ cc_library(
         ":elf",
         ":chrono_host",
         ":filesystem_host",
+        ":posix_host",
         ":random_host",
         ":guest_addr_wait",
         ":linker",
@@ -1293,6 +1312,7 @@ cc_library(
         ":elf",
         ":chrono_host",
         ":filesystem_host",
+        ":posix_host",
         ":random_host",
         ":guest_addr_wait",
         ":linker",
@@ -1321,6 +1341,7 @@ cc_library(
         ":elf",
         ":chrono_host",
         ":filesystem_host",
+        ":posix_host",
         ":random_host",
         ":linker",
         ":loader",
@@ -1953,6 +1974,9 @@ libc_srcs=(
   "libc/posix_open.c"
   "libc/posix_read.c"
   "libc/posix_poll.c"
+  "libc/posix_ipc.c"
+  "libc/posix_events.c"
+  "libc/regex.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -2152,6 +2176,9 @@ libc_srcs=(
   "libc/posix_open.c"
   "libc/posix_read.c"
   "libc/posix_poll.c"
+  "libc/posix_ipc.c"
+  "libc/posix_events.c"
+  "libc/regex.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -2350,6 +2377,9 @@ libc_srcs=(
   "libc/posix_open.c"
   "libc/posix_read.c"
   "libc/posix_poll.c"
+  "libc/posix_ipc.c"
+  "libc/posix_events.c"
+  "libc/regex.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -2544,6 +2574,9 @@ libc_srcs=(
   "libc/posix_open.c"
   "libc/posix_read.c"
   "libc/posix_poll.c"
+  "libc/posix_ipc.c"
+  "libc/posix_events.c"
+  "libc/regex.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -2740,6 +2773,9 @@ libc_srcs=(
   "libc/posix_open.c"
   "libc/posix_read.c"
   "libc/posix_poll.c"
+  "libc/posix_ipc.c"
+  "libc/posix_events.c"
+  "libc/regex.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"
@@ -3282,6 +3318,9 @@ libc_srcs=(
   "libc/posix_open.c"
   "libc/posix_read.c"
   "libc/posix_poll.c"
+  "libc/posix_ipc.c"
+  "libc/posix_events.c"
+  "libc/regex.c"
   "libc/printf.c"
   "libc/printf_common.c"
   "libc/printf_literal.c"

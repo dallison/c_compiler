@@ -3040,6 +3040,12 @@ static bool SystemRegisterMrsEncoding(AARCH64Assembler* assembler,
   }
   if (StringEqualCaseBlind(&ASM.lex.spelling, "tpidr_el0")) {
     *encoding = 0xd53bd040u;
+  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "cntvct_el0")) {
+    *encoding = 0xd53be040u;
+  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "cntfrq_el0")) {
+    *encoding = 0xd53be000u;
+  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "midr_el1")) {
+    *encoding = 0xd5380000u;
   } else if (StringEqualCaseBlind(&ASM.lex.spelling, "fpsr")) {
     *encoding = 0xd53b4420u;
   } else if (StringEqualCaseBlind(&ASM.lex.spelling, "fpcr")) {

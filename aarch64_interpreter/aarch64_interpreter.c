@@ -4,6 +4,7 @@
 //
 
 #include "aarch64_interpreter.h"
+#include "posix_host.h"
 #include "aarch64_process.h"
 #include "aarch64_syscalls.h"
 #include <inttypes.h>
@@ -98,6 +99,9 @@ static bool InterpreterAddressOk(AARCH64Interpreter* interpreter, uint64_t addr,
                                  size_t size) {
   if (RangeWraps(addr, size)) {
     return false;
+  }
+  if (DaveHostMappingFind(addr, size) != NULL) {
+    return true;
   }
   if (interpreter->tp_base != 0 && interpreter->tls_block_size > 0) {
     uint64_t tls_start = interpreter->tp_base;

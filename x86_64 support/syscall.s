@@ -22,3 +22,9 @@ syscall:
 	mov %r9, %r8
 	syscall
 	ret
+
+.global __builtin_return_address
+.type __builtin_return_address, @function
+__builtin_return_address:
+	xor %rax, %rax
+	ret

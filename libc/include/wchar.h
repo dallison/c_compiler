@@ -107,6 +107,7 @@ wchar_t* wcstok(wchar_t* restrict string, const wchar_t* restrict delimiters,
                 wchar_t** restrict state);
 wchar_t* wmemchr(const wchar_t* memory, wchar_t value, size_t count);
 size_t wcslen(const wchar_t* string);
+int wcscasecmp(const wchar_t* left, const wchar_t* right);
 wchar_t* wmemset(wchar_t* destination, wchar_t value, size_t count);
 
 size_t wcsftime(wchar_t* restrict destination, size_t count,

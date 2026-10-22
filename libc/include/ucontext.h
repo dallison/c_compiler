@@ -5,6 +5,7 @@
 #include_next <ucontext.h>
 #else
 #include <signal.h>
+#include <stdint.h>
 
 #if defined(__x86_64__)
 typedef long greg_t;
@@ -42,6 +43,23 @@ typedef struct ucontext_t {
   stack_t uc_stack;
   mcontext_t uc_mcontext;
   sigset_t uc_sigmask;
+} ucontext_t;
+#elif defined(__aarch64__)
+typedef struct {
+  uint64_t fault_address;
+  uint64_t regs[31];
+  uint64_t sp;
+  uint64_t pc;
+  uint64_t pstate;
+  uint8_t __reserved[32];
+} mcontext_t;
+
+typedef struct ucontext_t {
+  unsigned long uc_flags;
+  struct ucontext_t* uc_link;
+  stack_t uc_stack;
+  sigset_t uc_sigmask;
+  mcontext_t uc_mcontext;
 } ucontext_t;
 #else
 typedef struct {

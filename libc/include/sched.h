@@ -1,14 +1,15 @@
-#ifndef _SCHED_H
-#define _SCHED_H
-
-#ifdef __cplusplus
-extern "C" {
-#endif
+#ifndef davecc_sched_h
+#define davecc_sched_h
 
 struct sched_param {
   int sched_priority;
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int sched_getcpu(void);
 int sched_yield(void);
 
 #ifdef __cplusplus

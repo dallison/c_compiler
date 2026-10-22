@@ -48,7 +48,21 @@ typedef int sig_atomic_t;
 #define SIGTRAP 7
 #define SIGBUS 8
 #define SIGALRM 9
+#define SIGHUP 10
+#define SIGQUIT 11
+#define SIGKILL 12
+#define SIGPIPE 13
+#define SIGUSR1 14
+#define SIGUSR2 15
+#define SIGCHLD 16
+#define SIGCONT 17
+#define SIGSTOP 18
+#define SIGTSTP 19
+#define SIGPROF 27
 #endif
+
+#define SIGSTKSZ 8192
+#define MINSIGSTKSZ 2048
 
 #if defined(__DAVECC_NATIVE_LINUX__)
 typedef unsigned long sigset_t;
@@ -114,6 +128,7 @@ int sigismember(const sigset_t* set, int signal_number);
 int pthread_sigmask(int how, const sigset_t* set, sigset_t* oldset);
 int sigaction(int signal_number, const struct sigaction* action,
               struct sigaction* old_action);
+int sigaltstack(const stack_t* stack, stack_t* old_stack);
 unsigned alarm(unsigned seconds);
 
 #ifdef __cplusplus

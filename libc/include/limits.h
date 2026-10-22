@@ -81,6 +81,9 @@
 /* Maximum value an `unsigned long long int' can hold.  (Minimum is 0.)  */
 #   define ULLONG_MAX  18446744073709551615ULL
 
+#ifndef NAME_MAX
+#define NAME_MAX 255
+#endif
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif

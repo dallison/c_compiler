@@ -12,6 +12,7 @@
 #include "elf.h"
 #include "chrono_host.h"
 #include "filesystem_host.h"
+#include "posix_host.h"
 #include "random_host.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -303,9 +304,22 @@ static int TranslateGuestOpenFlags(int guest_flags) {
   return host;
 }
 
+static void* Aarch64GuestPtr(void* context, uint64_t guest, size_t size) {
+  (void)context;
+  (void)size;
+  if (guest == 0) return NULL;
+  return (void*)(uintptr_t)guest;
+}
+
 int64_t AARCH64HandleSyscall(AARCH64Interpreter* interpreter, int64_t number,
                              int64_t a0, int64_t a1, int64_t a2, int64_t a3,
                              int64_t a4, int64_t a5) {
+  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_DUP2) {
+    return DaveHostPosixSyscall((int)number, 8, 64, Aarch64GuestPtr,
+                                interpreter, (uint64_t)a0, (uint64_t)a1,
+                                (uint64_t)a2, (uint64_t)a3, (uint64_t)a4,
+                                (uint64_t)a5);
+  }
   (void)a4;
   (void)a5;
   switch (number) {

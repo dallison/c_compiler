@@ -612,6 +612,21 @@ static void PredefineMacros(Preprocessor* p) {
   }
 }
 
+static bool InterpreterTargetUsesLinuxUserspace(String* name) {
+  return StringEqual(name, "x86_64") || StringEqual(name, "x86") ||
+         StringEqual(name, "aarch64") || StringEqual(name, "arm") ||
+         StringEqual(name, "riscv") || StringEqual(name, "riscv32") ||
+         StringEqual(name, "esp32") || StringEqual(name, "pcode");
+}
+
+static void DefineLinuxUserspaceMacros(Preprocessor* p) {
+  PreprocessorDefineMacro(p, "__linux__", "1");
+  PreprocessorDefineMacro(p, "__linux", "1");
+  PreprocessorDefineMacro(p, "__unix__", "1");
+  PreprocessorDefineMacro(p, "__unix", "1");
+  PreprocessorDefineMacro(p, "__ELF__", "1");
+}
+
 void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   // Architecture macros.
   if (StringEqual(compiler->target_name, "x86_64")) {
@@ -714,10 +729,7 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   }
 
   if (CompilerTargetTripleIsLinux(&compiler->target_triple)) {
-    PreprocessorDefineMacro(p, "__linux__", "1");
-    PreprocessorDefineMacro(p, "__linux", "1");
-    PreprocessorDefineMacro(p, "__unix__", "1");
-    PreprocessorDefineMacro(p, "__unix", "1");
+    DefineLinuxUserspaceMacros(p);
     PreprocessorDefineMacro(p, "__DAVECC_NATIVE_LINUX__", "1");
   } else if (CompilerTargetTripleIsDarwin(&compiler->target_triple) ||
              compiler->native_object) {
@@ -733,6 +745,26 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__DAVECC_PAGED_LIBC__", "1");
   } else {
     PreprocessorDefineMacro(p, "__DAVECC_INTERPRETER_ABI__", "1");
+    // ELF interpreter guests are a Linux userspace on the DaveCC syscall ABI.
+    // Native Linux syscall numbers stay behind __DAVECC_NATIVE_LINUX__.
+    if (InterpreterTargetUsesLinuxUserspace(compiler->target_name)) {
+      DefineLinuxUserspaceMacros(p);
+      // Abseil's stack walker calls this builtin. Interpreter targets have no
+      // frame-pointer builtin yet, and a null result makes the walker stop.
+      String frame_raw;
+      StringInitImmutable(&frame_raw, "((void*)0)");
+      String frame_tokens;
+      Tokenize(p, &frame_raw, &frame_tokens, 0, true, false, false);
+      Vector frame_args;
+      VectorInit(&frame_args);
+      VectorAppend(&frame_args, NewString("n"));
+      Macro* frame_macro =
+          NewMacro("__builtin_frame_address", true, false, &frame_args,
+                   &frame_tokens, SOURCE_LOCATION_COMMAND_LINE);
+      HashTableInsert(&p->macros, frame_macro);
+      VectorDestruct(&frame_args);
+      StringDestruct(&frame_tokens);
+    }
   }
 }
 

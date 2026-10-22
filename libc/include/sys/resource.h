@@ -18,6 +18,7 @@ struct rlimit {
 #define RLIMIT_AS 5
 #define RLIMIT_RSS 5
 #define RLIMIT_NOFILE 8
+#define RLIM_INFINITY ((rlim_t)-1)
 #define RLIMIT_MEMLOCK 6
 #define RLIMIT_NPROC 7
 

@@ -48,11 +48,14 @@ compile_profile riscv-unknown-linux-davecc 63 56 220
 compile_profile riscv32-unknown-linux-davecc 63 56 220
 
 cat >"$WORK/interpreter.c" <<'SRC'
-#ifdef __linux__
-#error bare targets must not claim Linux
+#ifndef __linux__
+#error interpreter Unix targets define a Linux userspace
+#endif
+#ifndef __unix__
+#error interpreter Unix targets must define __unix__
 #endif
 #ifdef __DAVECC_NATIVE_LINUX__
-#error bare targets must not claim the native Linux ABI
+#error interpreter targets must not claim the native Linux ABI
 #endif
 #ifndef __DAVECC_INTERPRETER_ABI__
 #error bare targets must retain the interpreter ABI
@@ -61,6 +64,15 @@ int interpreter_profile_is_valid(void) { return 1; }
 SRC
 "$DAVECC" -target aarch64 -std=c11 -S "$WORK/interpreter.c" \
   -o "$WORK/interpreter.s"
+
+cat >"$WORK/freestanding.c" <<'SRC'
+#ifdef __linux__
+#error freestanding targets must not claim Linux
+#endif
+int freestanding_profile_is_valid(void) { return 1; }
+SRC
+"$DAVECC" -target 6502 -std=c11 -S "$WORK/freestanding.c" \
+  -o "$WORK/freestanding.s"
 
 if "$DAVECC" -target aarch64-unknown-notlinux-davecc -std=c11 -S \
     "$WORK/interpreter.c" -o "$WORK/invalid.s" \

@@ -694,10 +694,14 @@ extern uid_t    geteuid(void);
 extern gid_t    getgid(void);
 extern int    getgroups(int bufSize, int *buffer);
 extern pid_t    getpid(void);
+extern int      kill(pid_t pid, int signal_number);
+extern int      clone(int (*function)(void*), void* child_stack, int flags,
+                      void* argument, ...);
 extern uid_t    getuid(void);
 extern int    isatty(int fd);
 extern long    lseek(int fd, long offset, int whence);
 extern int    pipe(int *fildes);
+extern int    pipe2(int *fildes, int flags);
 extern ssize_t pread(int fd, void *buf, size_t size, off_t offset);
 extern ssize_t read(int fd, void *buf, size_t size);
 extern int    ftruncate(int fd, off_t length);
@@ -712,9 +716,7 @@ extern int    unlink(const char *path);
 extern ssize_t write(int fd, const void *buf, size_t size);
 extern long   sysconf(int name);
 extern char **environ;
-#if defined(__DAVECC_NATIVE_DARWIN__)
 extern int    gethostname(char *name, size_t size);
-#endif
 
 #ifdef __cplusplus
 }

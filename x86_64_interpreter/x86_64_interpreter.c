@@ -4,6 +4,7 @@
 //
 
 #include "x86_64_interpreter.h"
+#include "posix_host.h"
 #include "x86_64_process.h"
 #include "x86_64_syscalls.h"
 #include "elf.h"
@@ -192,6 +193,10 @@ static void* HostPtr(X86_64Interpreter* interpreter, uint64_t addr,
                      size_t size) {
   if ((uint64_t)size > UINT64_MAX - addr) {
     return NULL;
+  }
+  void* mapped = DaveHostMappingFind(addr, size);
+  if (mapped != NULL) {
+    return mapped;
   }
   if (interpreter->ia32) {
     return ResolveIA32HostPtr(interpreter, addr, size);
@@ -742,6 +747,24 @@ static bool ExecuteMovRegMem(X86_64Interpreter* interpreter, size_t insn_len,
       WriteReg(interpreter, modrm.reg, (uint64_t)Load32(interpreter, addr));
     }
   }
+  return true;
+}
+
+static bool ExecuteXchg(X86_64Interpreter* interpreter, size_t insn_len,
+                        REX rex, uint8_t opcode, ModRM modrm, bool op16) {
+  bool byte_op = opcode == 0x86;
+  int bits = byte_op ? 8 : rex.w ? 64 : op16 ? 16 : 32;
+  uint64_t reg_value = ReadSizedReg(interpreter, rex, modrm.reg, bits);
+  if (modrm.mod == 3) {
+    uint64_t rm_value = ReadSizedReg(interpreter, rex, modrm.rm, bits);
+    WriteSizedReg(interpreter, rex, modrm.reg, bits, rm_value);
+    WriteSizedReg(interpreter, rex, modrm.rm, bits, reg_value);
+    return true;
+  }
+  uint64_t addr = EffectiveAddress(interpreter, &modrm, insn_len);
+  uint64_t mem_value = LoadSized(interpreter, addr, bits);
+  WriteSizedReg(interpreter, rex, modrm.reg, bits, mem_value);
+  StoreSized(interpreter, addr, bits, reg_value);
   return true;
 }
 
@@ -2128,6 +2151,17 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
     return true;
   }
 
+  if (b0 >= 0x91 && b0 <= 0x97) {
+    int reg = (b0 - 0x90) + (rex.b ? 8 : 0);
+    int bits = rex.w ? 64 : (sse_prefix == 0x66 ? 16 : 32);
+    uint64_t rax = ReadSizedReg(interpreter, rex, X86_REG_RAX, bits);
+    uint64_t other = ReadSizedReg(interpreter, rex, reg, bits);
+    WriteSizedReg(interpreter, rex, X86_REG_RAX, bits, other);
+    WriteSizedReg(interpreter, rex, reg, bits, rax);
+    *insn_len = pos;
+    return true;
+  }
+
   if (b0 == 0xFC || b0 == 0xFD) {  // CLD / STD
     interpreter->df = b0 == 0xFD;
     *insn_len = pos;
@@ -2233,6 +2267,15 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       Store32(interpreter, addr, (uint32_t)imm);
     }
     return true;
+  }
+
+  if (b0 == 0x86 || b0 == 0x87) {
+    if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
+      return false;
+    }
+    *insn_len = pos;
+    return ExecuteXchg(interpreter, *insn_len, rex, b0, modrm,
+                       sse_prefix == 0x66);
   }
 
   if ((b0 & 0xFE) == 0x88 || (b0 & 0xFE) == 0x8A) {

@@ -22,6 +22,7 @@
 #include "loader_lifecycle.h"
 #include "chrono_host.h"
 #include "filesystem_host.h"
+#include "posix_host.h"
 #include "random_host.h"
 #include <errno.h>
 #include "risc_v_disassembler.h"
@@ -91,6 +92,10 @@ static bool AddressInExecutableRegion(Loader* loader, uint64_t addr) {
 
 static void* GuestMem(RISCVInterpreter* interpreter, int64_t addr, size_t size) {
   uint64_t a = interpreter->xlen32 ? GuestAddr32(addr) : (uint64_t)addr;
+  void* mapped = DaveHostMappingFind(a, size);
+  if (mapped != NULL) {
+    return mapped;
+  }
   if (interpreter->stack != NULL) {
     uint64_t start = interpreter->stack_guest_base;
     uint64_t end = start + RISC_V_STACK_SIZE;
@@ -282,7 +287,22 @@ static void* EcallGuestPtr(RISCVInterpreter* interpreter, int64_t addr,
   return GuestMem(interpreter, addr, size);
 }
 
+static void* RiscvGuestPtr(void* context, uint64_t guest, size_t size) {
+  return GuestMem(context, (int64_t)guest, size == 0 ? 1 : size);
+}
+
 static void HandleEcall(RISCVInterpreter* interpreter) {
+  int64_t number = interpreter->iregs[REG(t6)];
+  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_DUP2) {
+    int bits = interpreter->xlen32 ? 32 : 64;
+    int pointer = interpreter->xlen32 ? 4 : 8;
+    interpreter->iregs[REG(a0)] = (uint64_t)DaveHostPosixSyscall(
+        (int)number, pointer, bits, RiscvGuestPtr, interpreter,
+        interpreter->iregs[REG(a1)], interpreter->iregs[REG(a2)],
+        interpreter->iregs[REG(a3)], interpreter->iregs[REG(a4)],
+        interpreter->iregs[REG(a5)], interpreter->iregs[REG(a6)]);
+    return;
+  }
   switch (interpreter->iregs[REG(t6)]) {
     case RISC_V_ECALL_HALT:
       interpreter->exit_code = (int)interpreter->iregs[REG(a0)];

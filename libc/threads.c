@@ -1067,7 +1067,11 @@ void call_once(dave_once_flag_t* flag, void (*func)(void)) {
   }
 }
 
-#if defined(__DAVECC_HAS_NATIVE_THREADS__)
+#if defined(__DAVECC_HAS_NATIVE_THREADS__) || \
+    (defined(__DAVECC_HAS_GUEST_THREADS__) && !defined(__DAVECC_NATIVE_DARWIN__))
+#include <pthread.h>
+#include <sched.h>
+#include <semaphore.h>
 // POSIX compatibility wrappers share DaveCC's C11 thread-local key registry.
 // This is sufficient for libraries such as Abseil, which use pthread keys for
 // per-thread bookkeeping even when their actual waiting primitive is a futex.
@@ -1119,11 +1123,146 @@ int pthread_setschedparam(pthread_t thread, int policy,
 }
 
 int sched_yield(void) {
+#if defined(__DAVECC_HAS_NATIVE_THREADS__)
   long result = syscall(SYS_sched_yield);
   if (result < 0) {
     errno = (int)-result;
     return -1;
   }
+#else
+  (void)syscall(SYS_THREAD_YIELD);
+#endif
+  return 0;
+}
+
+int pthread_mutex_init(pthread_mutex_t* mutex, const pthread_mutexattr_t* attr) {
+  (void)attr;
+  if (mutex == NULL) return EINVAL;
+  mutex->state = 0;
+  mutex->owner = 0;
+  mutex->recursion = 0;
+  mutex->type = 0;
+  return 0;
+}
+
+int pthread_mutex_destroy(pthread_mutex_t* mutex) {
+  (void)mutex;
+  return 0;
+}
+
+int pthread_mutex_lock(pthread_mutex_t* mutex) {
+  if (mutex == NULL) return EINVAL;
+  for (;;) {
+    unsigned int expected = 0;
+    if (__atomic_compare_exchange_n(&mutex->state, &expected, 1, 0, 2, 0)) {
+      return 0;
+    }
+    thrd_yield();
+  }
+}
+
+int pthread_mutex_unlock(pthread_mutex_t* mutex) {
+  if (mutex == NULL) return EINVAL;
+  __atomic_store_n(&mutex->state, 0, 3);
+  return 0;
+}
+
+int pthread_mutex_trylock(pthread_mutex_t* mutex) {
+  if (mutex == NULL) return EINVAL;
+  unsigned int expected = 0;
+  if (__atomic_compare_exchange_n(&mutex->state, &expected, 1, 0, 2, 0)) {
+    return 0;
+  }
+  return EBUSY;
+}
+
+int pthread_cond_init(pthread_cond_t* cond, const pthread_condattr_t* attr) {
+  (void)attr;
+  if (cond == NULL) return EINVAL;
+  cond->generation = 0;
+  return 0;
+}
+
+int pthread_cond_destroy(pthread_cond_t* cond) {
+  (void)cond;
+  return 0;
+}
+
+int pthread_cond_signal(pthread_cond_t* cond) {
+  if (cond == NULL) return EINVAL;
+  __atomic_fetch_add(&cond->generation, 1, 0);
+  return 0;
+}
+
+int pthread_cond_broadcast(pthread_cond_t* cond) {
+  return pthread_cond_signal(cond);
+}
+
+int pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) {
+  if (cond == NULL || mutex == NULL) return EINVAL;
+  unsigned int seen = cond->generation;
+  pthread_mutex_unlock(mutex);
+  while (__atomic_load_n(&cond->generation, 0) == seen) thrd_yield();
+  return pthread_mutex_lock(mutex);
+}
+
+int pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex,
+                           const struct timespec* deadline) {
+  (void)deadline;
+  return pthread_cond_wait(cond, mutex);
+}
+
+int sem_init(sem_t* sem, int shared, unsigned int value) {
+  (void)shared;
+  if (sem == NULL) return -1;
+  sem->__alignment = (long)value;
+  return 0;
+}
+
+int sem_destroy(sem_t* sem) {
+  (void)sem;
+  return 0;
+}
+
+int sem_post(sem_t* sem) {
+  if (sem == NULL) return -1;
+  __atomic_fetch_add(&sem->__alignment, 1, 0);
+  return 0;
+}
+
+int sem_wait(sem_t* sem) {
+  if (sem == NULL) return -1;
+  for (;;) {
+    long value = __atomic_load_n(&sem->__alignment, 0);
+    if (value > 0 &&
+        __atomic_compare_exchange_n(&sem->__alignment, &value, value - 1, 0, 2,
+                                    0)) {
+      return 0;
+    }
+    thrd_yield();
+  }
+}
+
+int sem_trywait(sem_t* sem) {
+  if (sem == NULL) return -1;
+  long value = __atomic_load_n(&sem->__alignment, 0);
+  if (value > 0 &&
+      __atomic_compare_exchange_n(&sem->__alignment, &value, value - 1, 0, 2,
+                                  0)) {
+    return 0;
+  }
+  errno = EAGAIN;
+  return -1;
+}
+
+int sem_timedwait(sem_t* sem, const struct timespec* deadline) {
+  (void)deadline;
+  return sem_wait(sem);
+}
+
+int sem_getvalue(sem_t* sem, int* value) {
+  if (sem == NULL || value == NULL) return -1;
+  *value = (int)sem->__alignment;
   return 0;
 }
 #endif

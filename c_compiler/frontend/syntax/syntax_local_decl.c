@@ -970,6 +970,28 @@ static void DeclareLocalObject(TypeParser* parser, Symbol* sym,
                                  initializer);
 }
 
+// GNU register variables are written `register T name __asm__("reg") = value`.
+// The binding is not honored; the declaration is an ordinary local.
+static void SkipGnuRegisterAsm(Syntax* syntax) {
+  if (!LexLookingAt(syntax->lex, TOK(asm))) {
+    return;
+  }
+  LexNextToken(syntax->lex);
+  if (!LexMatch(syntax->lex, TOK(lparen))) {
+    SyntaxError(syntax, "Expected '(' after asm");
+    return;
+  }
+  if (LexLookingAt(syntax->lex, TOK(string)) ||
+      LexLookingAt(syntax->lex, TOK(string_wide))) {
+    LexNextToken(syntax->lex);
+  } else {
+    SyntaxError(syntax, "Expected a string literal asm register name");
+  }
+  if (!LexMatch(syntax->lex, TOK(rparen))) {
+    SyntaxError(syntax, "Expected ')' after asm register name");
+  }
+}
+
 // Parses the init-declarator list of a block-scope declaration whose
 // specifiers (`type`, `storage`, leading `attributes`) have been parsed,
 // appending a declaration for each object to `declarations`.  A lone
@@ -1012,6 +1034,7 @@ static void ParseLocalDeclarationList(TypeParser* parser,
     // Parse trailing __attribute__ / __declspec / C++ attribute syntax.
     while (SyntaxParseAnyAttribute(syntax, attributes)) {
     }
+    SkipGnuRegisterAsm(syntax);
 
     // Symbol takes ownerhip of attribute strings.
     SymbolAppendAttributes(sym, attributes);

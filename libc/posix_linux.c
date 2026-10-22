@@ -111,30 +111,46 @@ long sysconf(int name) {
 
 #else
 
-void* mmap(void* address, size_t length, int protection, int flags, int fd,
-           off_t offset) {
-  (void)address;
-  (void)length;
-  (void)protection;
-  (void)flags;
-  (void)fd;
-  (void)offset;
-  errno = ENOSYS;
+struct __davecc_mmap_request {
+  uint64_t address;
+  uint64_t length;
+  int32_t protection;
+  int32_t flags;
+  int32_t fd;
+  int32_t pad;
+  int64_t offset;
+};
+
+static void* MmapFail(long result) {
+  if (result >= 0) return (void*)(uintptr_t)result;
+  errno = (int)-result;
   return MAP_FAILED;
 }
 
+void* mmap(void* address, size_t length, int protection, int flags, int fd,
+           off_t offset) {
+  struct __davecc_mmap_request request;
+  request.address = (uint64_t)(uintptr_t)address;
+  request.length = (uint64_t)length;
+  request.protection = protection;
+  request.flags = flags;
+  request.fd = fd;
+  request.pad = 0;
+  request.offset = (int64_t)offset;
+  return MmapFail(syscall(SYS_MMAP, &request));
+}
+
 int munmap(void* address, size_t length) {
-  (void)address;
-  (void)length;
-  errno = ENOSYS;
+  long result = syscall(SYS_MUNMAP, address, length);
+  if (result >= 0) return 0;
+  errno = (int)-result;
   return -1;
 }
 
 int mprotect(const void* address, size_t length, int protection) {
-  (void)address;
-  (void)length;
-  (void)protection;
-  errno = ENOSYS;
+  long result = syscall(SYS_MPROTECT, address, length, protection);
+  if (result >= 0) return 0;
+  errno = (int)-result;
   return -1;
 }
 

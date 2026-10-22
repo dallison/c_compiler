@@ -23,6 +23,12 @@ syscall:
 	svc #0
 	ret
 
+.global __builtin_return_address
+.type __builtin_return_address, @function
+__builtin_return_address:
+	mov x0, #0
+	ret
+
 .global __tls_get_addr
 .type __tls_get_addr, @function
 
