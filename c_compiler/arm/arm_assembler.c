@@ -691,16 +691,33 @@ static void AssembleLoadStore(ARMAssembler* assembler, bool load, bool byte,
     AssemblerError(&ASM, "Expected register and memory operand");
     return;
   }
-  if (addr.index >= 0) {
-    AssemblerError(&ASM, "Indexed load/store not yet supported in emitter output");
-    return;
-  }
   // P=1 for offset and pre-indexed addressing; post-indexed (writeback without
   // an explicit '!') is not produced by the emitter.
   int p = (addr.preindex || !addr.writeback) ? 1 : 0;
   int w = addr.writeback ? 1 : 0;
   if (!p && w) {
     AssemblerError(&ASM, "Post-indexed writeback not supported");
+    return;
+  }
+  if (addr.index >= 0) {
+    // Register offset: cond 011 P U B W L Rn Rt imm5 type 0 Rm.
+    // The emitter uses this when a frame offset does not fit in imm12,
+    // as `ldr rt, [rn, rm]` with no shift.
+    if (half || sign) {
+      AssemblerError(&ASM, "Indexed halfword load/store not yet supported");
+      return;
+    }
+    if (addr.shift_amount < 0 || addr.shift_amount > 31) {
+      AssemblerError(&ASM, "Load/store index shift out of range");
+      return;
+    }
+    int u = addr.add_offset ? 1 : 0;
+    uint32_t inst = ARM_COND(ARM_COND_AL) | (3u << 25) | (p << 24) | (u << 23) |
+                    ((byte ? 1 : 0) << 22) | (w << 21) | ((load ? 1 : 0) << 20) |
+                    (addr.base << 16) | (rd.num << 12) |
+                    ((uint32_t)addr.shift_amount << 7) |
+                    ((uint32_t)addr.shift_type << 5) | (addr.index & 0xf);
+    EmitInst(assembler, inst);
     return;
   }
   int32_t off = addr.imm;

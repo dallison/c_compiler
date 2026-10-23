@@ -353,7 +353,7 @@ static struct CompilerTargetDefinition{
        kTargetSupports8ByteAtomics},
   {"arm", {"arm", "armv7", "armv7-a", "arm32"}, NewARMTarget, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
-       kTargetSupports8ByteAtomics},
+       kTargetSupportsC11Atomics | kTargetSupports8ByteAtomics},
   {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupportsC11Atomics | kTargetSupports8ByteAtomics},

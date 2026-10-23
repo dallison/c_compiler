@@ -3637,6 +3637,17 @@ ASTNode* AnalyzeArraySubscript(BinaryASTNode* node) {
     }
     StringDestruct(&name);
   }
+  // `0[array]` is the same lvalue as `array[0]`.
+  if (node->left != NULL && node->right != NULL &&
+      TypeIsIntegral(node->left->type) &&
+      (TypeIsPointerOrArray(node->right->type) ||
+       TypeIsVector(node->right->type))) {
+    ASTNode* swapped = node->left;
+    node->left = node->right;
+    node->right = swapped;
+    node->left->child_id = 0;
+    node->right->child_id = 1;
+  }
   if (node->right != NULL && !TypeIsIntegral(node->right->type)) {
     SemanticError(node->right, "Subscripts must be integral types");
   }

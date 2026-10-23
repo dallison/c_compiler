@@ -348,6 +348,15 @@ static ASTNode* NewCXXCopyInitConstructorInitializer(Syntax* syntax, Symbol* sym
   if (expr == NULL) {
     return initializer;
   }
+  // The expression is not analyzed yet, so a call or conditional has no type
+  // and no value category.  Turning it into a copy constructor here makes
+  // `T x = f();` ill-formed when T's copy and move constructors are deleted.
+  // C++17 builds that prvalue directly in x; semantic analysis decides after
+  // the call's type is known.
+  if (expr->type == NULL &&
+      (expr->op == AST_OP(call) || expr->op == AST_OP(question))) {
+    return initializer;
+  }
   bool same_class =
       TypeIsStructOrUnion(expr->type) &&
       expr->type->info.struct_info == sym->type->info.struct_info;

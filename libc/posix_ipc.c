@@ -17,6 +17,8 @@
 #include <net/if.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <stdlib.h>
+#include <sys/select.h>
 #include <unistd.h>
 
 #if !defined(__DAVECC_NATIVE_LINUX__) && !defined(__DAVECC_NATIVE_DARWIN__)
@@ -372,19 +374,103 @@ struct hostent* gethostbyname(const char* name) {
   return NULL;
 }
 
+enum { kGuestDirNameMax = 1024 };
+
+struct DaveccDir {
+  int handle;
+  struct dirent entry;
+};
+
+typedef struct {
+  uint32_t type;
+  uint32_t reserved;
+  char name[kGuestDirNameMax];
+} GuestDirEntry;
+
 DIR* opendir(const char* name) {
-  (void)name;
-  errno = ENOSYS;
-  return NULL;
+  long handle = syscall(SYS_FS_OPEN_DIRECTORY, name);
+  if (handle < 0) {
+    errno = (int)-handle;
+    return NULL;
+  }
+  DIR* directory = (DIR*)malloc(sizeof(*directory));
+  if (directory == NULL) {
+    syscall(SYS_FS_CLOSE_DIRECTORY, handle);
+    errno = ENOMEM;
+    return NULL;
+  }
+  directory->handle = (int)handle;
+  directory->entry.d_ino = 0;
+  directory->entry.d_name[0] = '\0';
+  return directory;
 }
 
 struct dirent* readdir(DIR* directory) {
-  (void)directory;
-  return NULL;
+  if (directory == NULL) {
+    errno = EBADF;
+    return NULL;
+  }
+  GuestDirEntry entry;
+  long result =
+      syscall(SYS_FS_READ_DIRECTORY, directory->handle, &entry);
+  if (result <= 0) {
+    if (result < 0) errno = (int)-result;
+    return NULL;
+  }
+  size_t length = 0;
+  while (length < sizeof(entry.name) && entry.name[length] != '\0') {
+    length++;
+  }
+  if (length > NAME_MAX) length = NAME_MAX;
+  memcpy(directory->entry.d_name, entry.name, length);
+  directory->entry.d_name[length] = '\0';
+  directory->entry.d_ino = 0;
+  return &directory->entry;
 }
 
 int closedir(DIR* directory) {
-  (void)directory;
+  if (directory == NULL) {
+    errno = EBADF;
+    return -1;
+  }
+  long result = syscall(SYS_FS_CLOSE_DIRECTORY, directory->handle);
+  free(directory);
+  return Fail(result);
+}
+
+int dirfd(DIR* directory) {
+  if (directory == NULL) {
+    errno = EBADF;
+    return -1;
+  }
+  return directory->handle;
+}
+
+ssize_t readlink(const char* path, char* buffer, size_t size) {
+  if (path == NULL || buffer == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  return (ssize_t)FailLong(syscall(SYS_FS_READ_SYMLINK, path, buffer, size));
+}
+
+int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds,
+           struct timeval* timeout) {
+  (void)nfds;
+  (void)readfds;
+  (void)writefds;
+  (void)exceptfds;
+  (void)timeout;
+  errno = ENOSYS;
+  return -1;
+}
+
+int flock(int fd, int operation) {
+  (void)operation;
+  if (fd < 0) {
+    errno = EBADF;
+    return -1;
+  }
   return 0;
 }
 
@@ -443,6 +529,13 @@ int chown(const char* path, uid_t owner, gid_t group) {
 int rename(const char* from, const char* to) {
   (void)from;
   (void)to;
+  errno = ENOSYS;
+  return -1;
+}
+
+int execvp(const char* file, char** argv) {
+  (void)file;
+  (void)argv;
   errno = ENOSYS;
   return -1;
 }

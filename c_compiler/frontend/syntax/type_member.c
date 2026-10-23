@@ -21,6 +21,8 @@
 #include "reflection_semantics.h"
 #include "symbol_table.h"
 #include "syntax.h"
+
+bool RedeclarationTypesEqual(TypeRecord* left, TypeRecord* right);
 #include "semantics.h"
 #include "compiler.h"
 #include "errors.h"
@@ -1353,7 +1355,9 @@ StructMember* FindStructMemberOverload(StructMember* first, TypeRecord* type) {
     if (overload_is_template != type_is_template) {
       continue;
     }
-    if (TypeEqual(overload->symbol->type, type)) {
+    if (TypeEqual(overload->symbol->type, type) ||
+        (TypeIsFunction(type) &&
+         RedeclarationTypesEqual(overload->symbol->type, type))) {
       return overload;
     }
   }

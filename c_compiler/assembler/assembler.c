@@ -51,6 +51,7 @@ DECLARE_DIRECTIVE_FUNC(short);
 DECLARE_DIRECTIVE_FUNC(2byte);
 DECLARE_DIRECTIVE_FUNC(hword);
 DECLARE_DIRECTIVE_FUNC(word);
+DECLARE_DIRECTIVE_FUNC(prel31);
 DECLARE_DIRECTIVE_FUNC(4byte);
 DECLARE_DIRECTIVE_FUNC(long);
 DECLARE_DIRECTIVE_FUNC(int);
@@ -103,6 +104,7 @@ static void InitializeDirectives(Map* directives) {
   DIRECTIVE(2byte);
   DIRECTIVE(hword);
   DIRECTIVE(word);
+  DIRECTIVE(prel31);
   DIRECTIVE(4byte);
   DIRECTIVE(long);
   DIRECTIVE(int);
@@ -1420,6 +1422,25 @@ static void HandleDirective_2byte(Assembler* assembler) {
 }
 
 // As in GNU as, `.word` is the machine word: 2 bytes on x86, 4 elsewhere.
+// `.prel31 symbol` is the EHABI 31-bit relative word.  It is not written as
+// `symbol(prel31)` because that form is a function-like macro invocation when
+// the symbol name is also a macro (`gzgetc` in zlib).
+static void HandleDirective_prel31(Assembler* assembler) {
+  AssemblerSymbol* symbol = ExpressionPrimary(assembler);
+  if (symbol == NULL) {
+    AssemblerError(assembler, "expected symbol after .prel31");
+    return;
+  }
+  if (assembler->object.pass == ASM_OBJECT_FINAL_PASS) {
+    AssemblerAddRelocation(
+        assembler,
+        NewAssemblerRelocation(symbol, R_ARM_PREL31,
+                               assembler->object.current_section,
+                               (int32_t)AssemblerCurrentAddress(assembler), 0));
+  }
+  AssemblerEmitWord(assembler, assembler->object.current_section, 0);
+}
+
 static void HandleDirective_word(Assembler* assembler) {
   if (assembler->object.elf_machine_type == ELF_MACHINE_TYPE_X86_64 ||
       assembler->object.elf_machine_type == ELF_MACHINE_TYPE_X86) {

@@ -161,11 +161,15 @@ static bool AtomicFailureOrderAllowed(int success, int failure) {
   if (failure == 0) {
     return true;
   }
+  // acquire and release are the same strength.  A release success with an
+  // acquire failure is the usual reference-count decrement
+  // (compare_exchange_weak(..., memory_order_release, memory_order_acquire)).
   if (failure == 1) {
-    return success == 1 || success == 2 || success == 4 || success == 5;
+    return success == 1 || success == 2 || success == 3 || success == 4 ||
+           success == 5;
   }
   if (failure == 2) {
-    return success == 2 || success == 4 || success == 5;
+    return success == 2 || success == 3 || success == 4 || success == 5;
   }
   return failure == 5 && success == 5;
 }
@@ -348,9 +352,25 @@ void AnalyzeBuiltinBitOperation(VectorASTNode* node) {
   }
   ASTNode* value = node->children->value.p[0];
   bool allow_signed = node->base.op == AST_OP(builtin_bswap);
-  if (!TypeIsIntegral(value->type) ||
-      (!allow_signed && !TypeIsUnsigned(value->type))) {
-    SemanticError(value, "bit builtin requires an unsigned integer operand");
+  if (!TypeIsIntegral(value->type)) {
+    SemanticError(value, "bit builtin requires an integer operand");
+  } else if (!allow_signed && !TypeIsUnsigned(value->type)) {
+    // GCC accepts a signed operand and converts it to the corresponding
+    // unsigned type.  __builtin_clz(int) is the common form.
+    Type unsigned_bits = kTypeUnsigned;
+    if (value->type->size <= 1) {
+      unsigned_bits |= kTypeChar;
+    } else if (value->type->size == 2) {
+      unsigned_bits |= kTypeShort;
+    } else if (value->type->size == 8) {
+      unsigned_bits |= kTypeLongLong;
+    } else {
+      unsigned_bits |= kTypeInt;
+    }
+    TypeRecord* unsigned_type =
+        NewTypeRecordWithSize(unsigned_bits, kQualPlain);
+    SemanticConvertToNewType(value, unsigned_type, kConvertNormal);
+    value = node->children->value.p[0];
   }
   bool rotate = node->base.op == AST_OP(builtin_rotl) ||
                 node->base.op == AST_OP(builtin_rotr) ||

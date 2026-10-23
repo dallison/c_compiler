@@ -104,6 +104,8 @@ class optional {
   template <
       class U,
       typename enable_if<!is_same<remove_cvref_t<U>, optional>::value &&
+                             !is_same<remove_cvref_t<U>, nullopt_t>::value &&
+                             !is_same<remove_cvref_t<U>, in_place_t>::value &&
                              is_constructible<T, U>::value,
                          int>::type = 0>
   constexpr optional(U&& value)

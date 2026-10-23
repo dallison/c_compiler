@@ -890,8 +890,9 @@ static void AnalyzeNonReferenceExpressionInit(ASTNode* target,
     constructor_call = true;
   }
   bool cxx_return_elision_initializer =
-      CompilerIsCXX() && e->expr->op == AST_OP(call) &&
-      e->expr->value_category != kValueCategoryXvalue && !constructor_call &&
+      CompilerIsCXX() &&
+      (e->expr->op == AST_OP(call) || e->expr->op == AST_OP(question)) &&
+      e->expr->value_category == kValueCategoryPrvalue && !constructor_call &&
       TypeIsStructOrUnion(target->type) &&
       TypeEqual(e->expr->type, target->type);
   ASTNode* materialized = CXXMaterializeVariableTemplateExpression(e->expr);

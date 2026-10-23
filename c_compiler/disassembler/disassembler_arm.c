@@ -153,6 +153,27 @@ bool DAsmDisassembleARM(const void* bytes, size_t length, uint64_t address,
                RegName((inst >> 16) & 0xf));
     return true;
   }
+  if ((inst & 0x0e000010u) == 0x06000000u) {
+    bool load = (inst & 0x00100000u) != 0;
+    bool byte = (inst & 0x00400000u) != 0;
+    bool up = (inst & 0x00800000u) != 0;
+    int rn = (inst >> 16) & 0xf;
+    int rd = (inst >> 12) & 0xf;
+    int rm = inst & 0xf;
+    int shift_imm = (inst >> 7) & 0x1f;
+    const char* op = load ? (byte ? "ldrb" : "ldr") : (byte ? "strb" : "str");
+    if (shift_imm == 0) {
+      DAsmFormat(out, "%s%s %s, [%s, %s%s]", op, cc, RegName(rd), RegName(rn),
+                 up ? "" : "-", RegName(rm));
+    } else {
+      const char* shifts[] = {"lsl", "lsr", "asr", "ror"};
+      int shift_type = (inst >> 5) & 3;
+      DAsmFormat(out, "%s%s %s, [%s, %s%s, %s #%d]", op, cc, RegName(rd),
+                 RegName(rn), up ? "" : "-", RegName(rm), shifts[shift_type],
+                 shift_imm);
+    }
+    return true;
+  }
   if ((inst & 0x0c000000u) == 0x04000000u) {
     bool load = (inst & 0x00100000u) != 0;
     bool byte = (inst & 0x00400000u) != 0;

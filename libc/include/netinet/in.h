@@ -23,6 +23,9 @@ struct sockaddr_in {
 };
 
 #define INADDR_ANY ((in_addr_t)0)
+#define INADDR_LOOPBACK ((in_addr_t)0x7f000001)
+#define INADDR_BROADCAST ((in_addr_t)0xffffffff)
+#define INADDR_NONE ((in_addr_t)0xffffffff)
 #define INET_ADDRSTRLEN 16
 
 #define IPPROTO_IP 0

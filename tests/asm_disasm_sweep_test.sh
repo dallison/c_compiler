@@ -315,6 +315,7 @@ arm_entry:
   strh r5, [sp, #6]
   push {r4, r5, lr}
   pop {r4, r5, pc}
+  ldr r4, [fp, ip]
   ldrexd r2, r3, [r0]
   strexd r1, r2, r3, [r0]
   stmia sp!, {r0, r1}
@@ -369,7 +370,7 @@ run_shared_case arm full "$armasm" "$armdasm" "$work/arm.s" \
   'add ' 'adds ' 'sub ' 'subs ' 'adc ' 'sbc ' 'sbcs ' 'and ' 'orr ' \
   'orrs ' 'eor ' 'bic ' 'cmp ' 'cmn ' 'tst ' 'teq ' 'mul ' 'ldr ' \
   'str ' 'ldrb ' 'strb ' 'ldrh ' 'strh ' 'stm' 'ldm' 'movw ' 'movt ' \
-  'sub r2, pc, #8' 'stmia r2' 'ldrexd ' 'strexd ' \
+  'sub r2, pc, #8' 'stmia r2' 'ldr r4, \[fp, ip\]' 'ldrexd ' 'strexd ' \
   'vmov' 'vldr ' 'vstr ' 'vadd.f32 ' 'vsub.f32 ' 'vmul.f64 ' 'vdiv.f64 ' \
   'scvtf ' 'ucvtf ' 'fcvtns ' 'fcvtnu ' 'bl ' 'b ' 'bx ' 'blx ' 'svc'
 

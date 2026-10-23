@@ -5018,15 +5018,17 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
     }
   }
   Vector* completed_formal_args = NULL;
+  Vector* completed_actual_args = NULL;
+  // `P` written as `vector<T>` still has the class template's later default
+  // arguments (`allocator<T>`).  Fill them in on both the pattern and the
+  // argument.  Partial ordering compares two patterns that each stored only
+  // the written arguments; completing just the pattern makes its list longer
+  // than the argument's and deduction fails both ways.
   if (formal_origin->type != NULL &&
       TypeIsStructOrUnion(formal_origin->type) &&
       formal_origin->type->info.struct_info != NULL && formal_args != NULL &&
       formal_origin->type->info.struct_info->template_parameters.length >
           formal_args->length) {
-    // `P` written as `basic_string<CharT>` still has the class template's later
-    // default arguments (`char_traits<CharT>`, `allocator<CharT>`).  Fill
-    // them in so deduction can match a fully-specified argument type such as
-    // `basic_string<char, char_traits<char>, allocator<char>>`.
     TypeParser parser;
     TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
                    STO(implicit), compiler->syntax.context);
@@ -5043,9 +5045,34 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
     }
   }
   Vector* actual_args = TypeSpecializationTemplateArguments(actual);
+  if (actual_origin != NULL && actual_origin->type != NULL &&
+      TypeIsStructOrUnion(actual_origin->type) &&
+      actual_origin->type->info.struct_info != NULL && actual_args != NULL &&
+      actual_origin->type->info.struct_info->template_parameters.length >
+          actual_args->length) {
+    TypeParser parser;
+    TypeParserInit(&parser, compiler->syntax.lex, &compiler->syntax,
+                   STO(implicit), compiler->syntax.context);
+    bool saved_trap = DiagnosticErrorTrapBegin();
+    DiagnosticSuppressBegin();
+    completed_actual_args = CompleteTemplateArguments(
+        &parser, &actual_origin->type->info.struct_info->template_parameters,
+        actual_args, "", /*emit_error=*/false, kTemplateArgumentsBorrow);
+    DiagnosticSuppressEnd();
+    DiagnosticErrorTrapEnd(saved_trap);
+    TypeParserDestruct(&parser);
+    if (completed_actual_args != NULL) {
+      actual_args = completed_actual_args;
+    }
+  }
   if (formal_args == NULL || actual_args == NULL) {
     if (completed_formal_args != NULL) {
       VectorDeleteWithContents(completed_formal_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    if (completed_actual_args != NULL) {
+      VectorDeleteWithContents(completed_actual_args,
                                (VectorElementDestructor)TemplateArgumentDelete,
                                /*free_element=*/false);
     }
@@ -5252,6 +5279,11 @@ static bool DeduceFunctionTemplateTemplateArguments(Vector* args,
   VectorDestruct(&flat_actual_args);
   if (completed_formal_args != NULL) {
     VectorDeleteWithContents(completed_formal_args,
+                             (VectorElementDestructor)TemplateArgumentDelete,
+                             /*free_element=*/false);
+  }
+  if (completed_actual_args != NULL) {
+    VectorDeleteWithContents(completed_actual_args,
                              (VectorElementDestructor)TemplateArgumentDelete,
                              /*free_element=*/false);
   }
@@ -12327,12 +12359,18 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
   }
   Struct* source_struct = template_struct;
   Vector* source_args = completed_args;
+  // Only a partial specialization's members are numbered against a parameter
+  // list that is not the primary's argument list.  Rebasing a primary's
+  // member aliases (`allocator_traits::rebind_traits`) drops the class
+  // argument the use site still prefixes.
+  bool rebase_partial_member_aliases = false;
   if (partial != NULL && partial->tag_symbol != NULL &&
       partial->tag_symbol->type != NULL &&
       TypeIsStructOrUnion(partial->tag_symbol->type) &&
       partial->tag_symbol->type->info.struct_info != NULL) {
     source_struct = partial->tag_symbol->type->info.struct_info;
     source_args = partial_args;
+    rebase_partial_member_aliases = true;
   }
 
   // When the primary template has only been forward-declared (its body not yet
@@ -12674,6 +12712,32 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
       // pattern (`Storage<ElemT<I>, I, Tag>`) and instantiate Storage with
       // `I` in the element-type slot.
       CopySymbolAliasTemplate(nested_symbol, member->symbol);
+      // Partial-specialization members are numbered after the partial's
+      // parameters.  Once those are substituted, the alias's own parameters
+      // must start at 0 or `A<int>` looks up index 2 and stays dependent.
+      if (rebase_partial_member_aliases && nested_symbol->flags.is_template &&
+          SymbolExtraOf(nested_symbol)->alias_template != NULL &&
+          source_args != NULL && source_args->length > 0) {
+        int alias_base = (int)source_args->length;
+        RebaseTemplateParameterIndices(nested_type, alias_base);
+        Vector* alias_params =
+            &SymbolExtraOf(nested_symbol)->alias_template->parameters;
+        for (size_t alias_index = 0; alias_index < alias_params->length;
+             alias_index++) {
+          TemplateParameter* alias_param = alias_params->value.p[alias_index];
+          if (alias_param == NULL) {
+            continue;
+          }
+          if (alias_param->index >= alias_base) {
+            alias_param->index -= alias_base;
+          }
+          RebaseTemplateParameterIndices(alias_param->type, alias_base);
+          RebaseTemplateParameterIndices(alias_param->default_type, alias_base);
+          if (alias_param->default_template_parameter_index >= alias_base) {
+            alias_param->default_template_parameter_index -= alias_base;
+          }
+        }
+      }
       StructMember* nested_member = NewStructMember(nested_symbol);
       nested_member->access = member->access;
       AddStructMember(parser, str, nested_member);
@@ -12706,6 +12770,34 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
     member_symbol->location = member->symbol->location;
     member_symbol->flags = member->symbol->flags;
     CopySymbolAliasTemplate(member_symbol, member->symbol);
+    // A member alias of a partial specialization is numbered after that
+    // partial's parameters (`F` at 2 in `template<class R, class... P>
+    // struct Impl<R(P...)> { template<class F> using A = is_same<F, int>; }`).
+    // The instantiation's argument list is only `A`'s own arguments, so slide
+    // those parameters down to 0 once the class arguments have been substituted.
+    if (rebase_partial_member_aliases && member_symbol->flags.is_template &&
+        SymbolExtraOf(member_symbol)->alias_template != NULL &&
+        source_args != NULL && source_args->length > 0) {
+      int alias_base = (int)source_args->length;
+      RebaseTemplateParameterIndices(member_type, alias_base);
+      Vector* alias_params =
+          &SymbolExtraOf(member_symbol)->alias_template->parameters;
+      for (size_t alias_index = 0; alias_index < alias_params->length;
+           alias_index++) {
+        TemplateParameter* alias_param = alias_params->value.p[alias_index];
+        if (alias_param == NULL) {
+          continue;
+        }
+        if (alias_param->index >= alias_base) {
+          alias_param->index -= alias_base;
+        }
+        RebaseTemplateParameterIndices(alias_param->type, alias_base);
+        RebaseTemplateParameterIndices(alias_param->default_type, alias_base);
+        if (alias_param->default_template_parameter_index >= alias_base) {
+          alias_param->default_template_parameter_index -= alias_base;
+        }
+      }
+    }
     member_symbol->value = member->symbol->value;
     SymbolSetDependentValueTemplateParameterIndex(
         member_symbol,

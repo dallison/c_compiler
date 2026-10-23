@@ -1526,9 +1526,9 @@ static bool EvaluateFloatingPointValueInContext(ConstEvalContext* ctx,
     case AST_OP(div):
       if (EvaluateFloatingPointExpressionInContext(ctx, binary_node->left, &left) &&
           EvaluateFloatingPointExpressionInContext(ctx, binary_node->right, &right)) {
-        if (right == 0) {
-          return false;
-        }
+        // IEEE floating division by zero is a constant: infinity, or NaN when
+        // the dividend is also zero.  Integer division by zero is rejected in
+        // the integer evaluator.
         *result = left / right;
         return true;
       }

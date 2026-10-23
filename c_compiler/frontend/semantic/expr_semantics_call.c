@@ -387,7 +387,17 @@ static bool AppendDefaultCallArguments(VectorASTNode* call, TypeRecord* func) {
     }
     default_arg->flags |= kASTDefaultArgument;
     default_arg->location = call->base.location;
+    // A default argument is its own full-expression.  Converting it to the
+    // parameter type may use a user-defined conversion even when this call is
+    // itself the user-defined conversion of an outer initialization
+    // (`AnnotationRecord r = desc` with `optional<E> semantic = nullopt`).
+    bool saved_udc = SemanticSuspendUserDefinedConversionRank();
     default_arg = AnalyzeExpression(default_arg);
+    SemanticResumeUserDefinedConversionRank(saved_udc);
+    if (default_arg == NULL) {
+      return false;
+    }
+    default_arg->flags |= kASTDefaultArgument;
     default_arg->parent = (ASTNode*)call;
     // A stored child_id on a call argument is its index in `children`, not the
     // number visitors pass down (those reserve 0 for the callee in `left`).
@@ -3584,7 +3594,17 @@ static bool FunctionCallConvertFixedArguments(VectorASTNode* node,
   }
   size_t num_formal_args = subtype->info.function.prototype.length;
   for (size_t i = 0; i < num_formal_args && i < *num_actual_args; i++) {
+    ASTNode* actual = (ASTNode*)node->children->value.p[i];
+    bool is_default_argument =
+        actual != NULL && (actual->flags & kASTDefaultArgument) != 0;
+    bool saved_udc = false;
+    if (is_default_argument) {
+      saved_udc = SemanticSuspendUserDefinedConversionRank();
+    }
     FunctionCallConvertOneFixedArgument(node, subtype, i);
+    if (is_default_argument) {
+      SemanticResumeUserDefinedConversionRank(saved_udc);
+    }
   }
   return call_ok;
 }

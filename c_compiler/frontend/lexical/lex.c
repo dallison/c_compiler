@@ -1173,6 +1173,13 @@ static bool ReadRawStringContinuation(Lex* lex, LiteralEncoding encoding) {
   LexWillChangeLine(lex);
   StringClear(&lex->line);
   ReadUTF8SourceLine(lex);
+  // Inline member bodies are captured one lexer line at a time.  A raw string
+  // reads its continuation lines directly, so record them too; otherwise the
+  // deferred body is replayed with the opener and not the closing delimiter.
+  if (lex->capture != NULL) {
+    StringAppendSegment(lex->capture, lex->line.value, lex->line.length);
+    StringAppendChar(lex->capture, '\n');
+  }
   lex->pos = 0;
   return lex->line.length != 0 || !SourceEof(lex->source);
 }

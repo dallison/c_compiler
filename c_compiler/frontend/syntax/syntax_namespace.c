@@ -334,8 +334,14 @@ static ASTNode* ParseUsingAliasDeclaration(Syntax* syntax,
   }
   if (!added) {
     Symbol* existing = SyntaxFindSymbol(syntax, &alias->name);
-    if (existing != NULL && existing->flags.is_template &&
-        alias->flags.is_template) {
+    // [dcl.typedef]: a typedef or alias-declaration may redefine a name in
+    // the same scope when it refers to the type it already refers to.
+    // `using Sub = Printer::Sub` appears twice in one protobuf function.
+    if (existing != NULL && existing->type != NULL && alias->type != NULL &&
+        TypeEqual(existing->type, alias->type)) {
+      SymbolDelete(alias);
+    } else if (existing != NULL && existing->flags.is_template &&
+               alias->flags.is_template) {
       // Identical alias-template redefinition: Abseil repeats
       // `using SizeType = typename AllocatorTraits<A>::size_type`.
       SymbolDelete(alias);

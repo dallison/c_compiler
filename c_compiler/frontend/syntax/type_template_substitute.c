@@ -2553,6 +2553,7 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
           Vector* class_args = concrete_args;
           Symbol* class_template = info.origin;
           Struct* alias_class = subst->info.struct_info;
+          Vector* partial_class_args = NULL;
           // `Layout<Ts...>::ElementType<N>` is declared on the LayoutImpl base,
           // whose parameters are a different list from Layout's.  Prefix that
           // base specialization's arguments so the alias parameter (numbered
@@ -2581,8 +2582,22 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
               }
             }
           }
+          // A partial specialization's members are numbered against its own
+          // parameters (`template<class R, class... P> struct Impl<R(P...)>`),
+          // not the primary's single function-type argument.  Prefixing
+          // `[void()]` leaves the alias parameter `F` unbound.
+          if (parser != NULL && parser->syntax != NULL && alias_class != NULL) {
+            partial_class_args = StructPartialSpecializationPatternArguments(
+                parser->syntax, alias_class);
+            if (partial_class_args != NULL) {
+              class_args = partial_class_args;
+            }
+          }
           Vector* grouped_class_args =
-              RegroupExpandedClassTemplateArguments(class_template, class_args);
+              partial_class_args != NULL
+                  ? NULL
+                  : RegroupExpandedClassTemplateArguments(class_template,
+                                                          class_args);
           if (grouped_class_args != NULL) {
             class_args = grouped_class_args;
           }
@@ -2592,6 +2607,13 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
                 grouped_class_args,
                 (VectorElementDestructor)TemplateArgumentDelete,
                 /*free_element=*/false);
+          }
+          if (partial_class_args != NULL) {
+            VectorDeleteWithContents(
+                partial_class_args,
+                (VectorElementDestructor)TemplateArgumentDelete,
+                /*free_element=*/false);
+            partial_class_args = NULL;
           }
           // `<1, 0, 4>` supplied to `template <size_t... StaticSizes>` is three
           // arguments.  The alias pattern names that pack as one parameter

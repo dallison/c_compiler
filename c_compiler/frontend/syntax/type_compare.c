@@ -1146,6 +1146,8 @@ bool TypeIsUnknown(TypeRecord* type);
 bool TypeIsFixedArray(TypeRecord* type);
 bool TypeIsVLA(TypeRecord* type);
 
+static bool FunctionParameterTypesEquivalent(TypeRecord* left, TypeRecord* right);
+
 static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
   if (a->prototype.length != b->prototype.length) {
     return false;
@@ -1170,11 +1172,29 @@ static bool FunctionPrototypesEqual(FunctionInfo* a, FunctionInfo* b) {
   for (size_t i = 0; i < a->prototype.length; i++) {
     Symbol* s1 = a->prototype.value.p[i];
     Symbol* s2 = b->prototype.value.p[i];
-    if (!TypeEqual(s1->type, s2->type)) {
+    // [dcl.fct]: top-level cv-qualifiers on a parameter are deleted when
+    // forming the function type.  `int f(const int)` and `int f(int)` are
+    // the same function, and so are `string(const string_view)` and
+    // `string(string_view)`.
+    if (!FunctionParameterTypesEquivalent(s1->type, s2->type)) {
       return false;
     }
   }
   return true;
+}
+
+static bool FunctionParameterTypesEquivalent(TypeRecord* left,
+                                            TypeRecord* right) {
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  TypeRecord left_parameter = TypeRecordValue(left);
+  TypeRecord right_parameter = TypeRecordValue(right);
+  SetQualifiers(&left_parameter,
+                GetQualifiers(&left_parameter) & ~(kQualConst | kQualVolatile));
+  SetQualifiers(&right_parameter, GetQualifiers(&right_parameter) &
+                                      ~(kQualConst | kQualVolatile));
+  return TypeEqual(&left_parameter, &right_parameter);
 }
 
 static bool CXXStructTagNameEqual(Struct* left, Struct* right) {

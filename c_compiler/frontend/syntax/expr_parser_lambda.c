@@ -540,6 +540,29 @@ static bool ParseLambdaAbbreviatedParameter(Syntax* syntax, TypeRecord* func,
 }
 
 
+// C++14 default arguments on lambda parameters (`[&](string_view s = "")`).
+static void ParseLambdaParameterDefault(Syntax* syntax, Symbol* formal,
+                                       bool explicit_object_parameter) {
+  if (!CompilerIsCXX() || formal == NULL ||
+      !LexMatch(syntax->lex, TOK(equal))) {
+    return;
+  }
+  if (!CompilerCXXAtLeast(kLanguageStandardCXX14)) {
+    SyntaxError(syntax, "lambda default arguments require C++14");
+  }
+  if (explicit_object_parameter) {
+    SyntaxError(syntax,
+                "explicit object parameter cannot have a default argument");
+  }
+  if (LexMatch(syntax->lex, TOK(lbrace))) {
+    SymbolMutableExtra(formal)->default_argument =
+        SyntaxParseBracedInitializer(syntax);
+  } else {
+    SymbolMutableExtra(formal)->default_argument =
+        SyntaxParseSingleExpression(syntax, TC(closebra) | TC(exprsep));
+  }
+}
+
 // Parse the optional `(params)` of a lambda into `func`'s prototype.  An
 // omitted parameter list is allowed and leaves the prototype empty.  Return
 // whether the parameter list was present so C++23's expanded parameter-list
@@ -570,6 +593,7 @@ static bool ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
         SyntaxError(syntax,
                     "explicit object parameter cannot be a parameter pack");
       }
+      ParseLambdaParameterDefault(syntax, formal, explicit_object_parameter);
       arg_number++;
     } else {
       TypeParser parser;
@@ -589,6 +613,7 @@ static bool ParseLambdaParameterList(Syntax* syntax, TypeRecord* func,
                       "explicit object parameter cannot be a parameter pack");
         }
         VectorAppend(&func->info.function.prototype, formal);
+        ParseLambdaParameterDefault(syntax, formal, explicit_object_parameter);
       }
     }
     if (!LexMatch(syntax->lex, TOK(comma))) {
