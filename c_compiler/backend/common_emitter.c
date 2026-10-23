@@ -37,6 +37,19 @@ void EmitAssemblyPreamble(String* src_file, FILE* fp) {
   // metadata generation, independently of full DWARF debug information.
   SourceTraverseFiles(fp, FilePrinter);
   fprintf(fp, "\t.text\n");
+  if (compiler != NULL) {
+    for (size_t i = 0; i < compiler->toplevel_asm.length; i++) {
+      String* text = compiler->toplevel_asm.value.p[i];
+      if (text == NULL || text->value == NULL) {
+        continue;
+      }
+      fputs(text->value, fp);
+      size_t length = strlen(text->value);
+      if (length == 0 || text->value[length - 1] != '\n') {
+        fputc('\n', fp);
+      }
+    }
+  }
   if (compiler->pic) {
     fprintf(fp, "\t.option pic\n");
   }

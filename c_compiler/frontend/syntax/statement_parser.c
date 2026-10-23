@@ -2432,6 +2432,17 @@ ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers) {
   return ParseStatement(syntax, followers, /*may_be_declaration=*/true);
 }
 
+ASTNode* SyntaxParseAsmStatement(Syntax* syntax, TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  if (!LexMatch(syntax->lex, TOK(asm))) {
+    SyntaxError(syntax, "Expected asm statement");
+    return NULL;
+  }
+  ASTNode* node = ParseAsmStatement(syntax, followers, location);
+  SyntaxNeedSemicolon(syntax, followers);
+  return node;
+}
+
 static ASTNode* ParseStatement(Syntax* syntax, TokenClass followers,
                                bool may_be_declaration) {
   followers |= TC(stmt);

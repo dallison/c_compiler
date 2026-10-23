@@ -21,6 +21,7 @@
 
 #if __cplusplus >= 201703L
 #define __cpp_lib_is_invocable 201703L
+#define __cpp_lib_not_fn 201603L
 #endif
 
 #if __cplusplus >= 201402L
@@ -49,6 +50,11 @@
 #define __cpp_lib_format 201907L
 #endif
 #define __cpp_lib_int_pow2 202002L
+#define __cpp_lib_interpolate 201902L
+#define __cpp_lib_shift 201806L
+#define __cpp_lib_ssize 201902L
+#define __cpp_lib_bind_front 201907L
+#define __cpp_lib_starts_ends_with 201711L
 #define __cpp_lib_math_constants 201907L
 #define __cpp_lib_source_location 201907L
 #define __cpp_lib_span 202002L
@@ -71,6 +77,11 @@
 
 #if __cplusplus >= 202302L
 #define __cpp_lib_bind_back 202202L
+#define __cpp_lib_byteswap 202110L
+#define __cpp_lib_forward_like 202207L
+#define __cpp_lib_string_contains 202011L
+#define __cpp_lib_to_underlying 202102L
+#define __cpp_lib_unreachable 202202L
 #if __cplusplus >= 202700L
 #define __cpp_lib_expected 202606L
 #else

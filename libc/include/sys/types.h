@@ -45,10 +45,10 @@ typedef long off_t;
 #endif
 
 #ifndef __SSIZE_T
-#if defined(__6502__)
-typedef int ssize_t;
-#else
+#if defined(__LP64__)
 typedef long ssize_t;
+#else
+typedef int ssize_t;
 #endif
 #define __SSIZE_T
 #endif

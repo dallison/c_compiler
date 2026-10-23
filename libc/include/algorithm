@@ -1706,6 +1706,55 @@ constexpr void nth_element(It first, It nth, It last) {
   std::nth_element(first, nth, last, __algorithm_detail::__less());
 }
 
+#if __cplusplus >= 202002L
+template <class ForwardIt>
+constexpr ForwardIt shift_left(
+    ForwardIt first, ForwardIt last,
+    typename iterator_traits<ForwardIt>::difference_type n) {
+  if (n <= 0) {
+    return last;
+  }
+  ForwardIt middle = first;
+  for (; n > 0; --n) {
+    if (middle == last) {
+      return first;
+    }
+    ++middle;
+  }
+  ForwardIt result = first;
+  while (middle != last) {
+    *result = std::move(*middle);
+    ++result;
+    ++middle;
+  }
+  return result;
+}
+
+template <class ForwardIt>
+constexpr ForwardIt shift_right(
+    ForwardIt first, ForwardIt last,
+    typename iterator_traits<ForwardIt>::difference_type n) {
+  if (n <= 0) {
+    return first;
+  }
+  ForwardIt source = last;
+  for (typename iterator_traits<ForwardIt>::difference_type i = 0; i < n;
+       ++i) {
+    if (source == first) {
+      return last;
+    }
+    --source;
+  }
+  ForwardIt destination = last;
+  while (source != first) {
+    --destination;
+    --source;
+    *destination = std::move(*source);
+  }
+  return destination;
+}
+#endif
+
 // ------------------------------------------------------------------
 // Merge and set operations on sorted ranges
 // ------------------------------------------------------------------
@@ -2309,6 +2358,28 @@ constexpr borrowed_iterator_t<R> find_if_not(R&& r, Pred pred,
                                               Proj proj = {}) {
   return ranges::find_if_not(ranges::begin(r), ranges::end(r), pred, proj);
 }
+#if __cplusplus >= 202302L
+template <class I, class S, class T, class Proj = identity>
+constexpr subrange<I, I> find_last(I first, S last, const T& value,
+                                   Proj proj = {}) {
+  I match = first;
+  bool found = false;
+  I current = first;
+  for (; current != last; ++current) {
+    if (__project(proj, *current) == value) {
+      match = current;
+      found = true;
+    }
+  }
+  if (!found) return {current, current};
+  return {match, current};
+}
+template <range R, class T, class Proj = identity>
+constexpr borrowed_subrange_t<R> find_last(R&& r, const T& value,
+                                           Proj proj = {}) {
+  return ranges::find_last(ranges::begin(r), ranges::end(r), value, proj);
+}
+#endif
 template <class I, class S, class T, class Proj = identity>
 constexpr iter_difference_t<I> count(I first, S last, const T& value,
                                      Proj proj = {}) {
@@ -2864,6 +2935,28 @@ template <range R>
 constexpr borrowed_subrange_t<R> rotate(R&& r, iterator_t<R> middle) {
   return ranges::rotate(ranges::begin(r), middle, ranges::end(r));
 }
+#if __cplusplus >= 202302L
+template <class I, class S>
+constexpr I shift_left(I first, S last, iter_difference_t<I> n) {
+  I end = first;
+  while (end != last) ++end;
+  return std::shift_left(first, end, n);
+}
+template <range R>
+constexpr borrowed_iterator_t<R> shift_left(R&& r, range_difference_t<R> n) {
+  return ranges::shift_left(ranges::begin(r), ranges::end(r), n);
+}
+template <class I, class S>
+constexpr I shift_right(I first, S last, iter_difference_t<I> n) {
+  I end = first;
+  while (end != last) ++end;
+  return std::shift_right(first, end, n);
+}
+template <range R>
+constexpr borrowed_iterator_t<R> shift_right(R&& r, range_difference_t<R> n) {
+  return ranges::shift_right(ranges::begin(r), ranges::end(r), n);
+}
+#endif
 template <class I, class S, class O>
 constexpr copy_result<I, O> rotate_copy(I first, I middle, S last, O out) {
   I current = middle;

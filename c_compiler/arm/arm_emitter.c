@@ -1292,6 +1292,233 @@ static void AtomicScratchEnd(const char* scratch, bool saved, FILE* fp) {
   }
 }
 
+static int ArmRegNum(TargetInstruction* inst) {
+  if (inst == NULL || inst->reg == NULL) {
+    return -1;
+  }
+  return inst->reg->num;
+}
+
+static TargetInstruction* FlaggedUser(TargetInstruction* inst, int flag) {
+  if (inst == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < inst->users.length; i++) {
+    TargetInstruction* user = inst->users.value.p[i];
+    if (user != NULL && (user->flags & flag) != 0) {
+      return user;
+    }
+  }
+  return NULL;
+}
+
+static const char* ArmRegText(TargetInstruction* inst, char* buf, size_t n) {
+  if (inst == NULL || inst->reg == NULL) {
+    return "r0";
+  }
+  return GetRegisterName(inst, kSize32Bit, buf, n);
+}
+
+// LDREXD/STREXD sequence for an 8-byte atomic.  r4:r5 is the exclusive pair,
+// r3 is the status/temp, and ip holds the address.  All three are saved across
+// the sequence; a result that the allocator placed in one of them is written
+// after that restore.
+static void PrintAtomic64(TargetInstruction* inst, const char* func_name,
+                          FILE* fp) {
+  int order = AtomicOrder(inst);
+  int failure_order = AtomicFailureOrder(inst);
+  bool acquire = AtomicOrderHasAcquire(order);
+  bool release = AtomicOrderHasRelease(order);
+  bool weak = (inst->flags & ARM_ATOMIC_WEAK) != 0;
+  ARMOpcode op = (ARMOpcode)inst->opcode;
+  bool is_load = op == ARM_OP(atomic_load);
+  bool is_store = op == ARM_OP(atomic_store);
+  bool is_add = op == ARM_OP(atomic_fetch_add) || op == ARM_OP(atomic_add_fetch);
+  bool is_sub = op == ARM_OP(atomic_fetch_sub) || op == ARM_OP(atomic_sub_fetch);
+  bool return_new = op == ARM_OP(atomic_add_fetch) || op == ARM_OP(atomic_sub_fetch);
+  bool is_cas = op == ARM_OP(atomic_compare_exchange_bool) ||
+                op == ARM_OP(atomic_compare_exchange_val) ||
+                op == ARM_OP(atomic_compare_exchange_n);
+  bool expected_is_pointer = op == ARM_OP(atomic_compare_exchange_n);
+  bool returns_value = op == ARM_OP(atomic_compare_exchange_val);
+  bool returns_bool = is_cas && !returns_value;
+
+  TargetInstruction* result_lo = inst;
+  TargetInstruction* result_hi = NULL;
+  TargetInstruction* addr = inst->operand[0];
+  TargetInstruction* a_lo = NULL;
+  TargetInstruction* a_hi = NULL;
+  TargetInstruction* b_lo = NULL;
+  TargetInstruction* b_hi = NULL;
+  if (is_load) {
+    result_hi = inst->operand[1];
+  } else if (is_store) {
+    a_lo = inst->operand[0];
+    a_hi = inst->operand[1];
+    addr = inst->operand[2];
+    result_lo = NULL;
+  } else if (is_add || is_sub) {
+    a_lo = inst->operand[1];
+    a_hi = inst->operand[2];
+    result_hi = inst->operand[3];
+  } else if (expected_is_pointer) {
+    a_lo = inst->operand[1];
+    b_lo = inst->operand[2];
+    b_hi = inst->operand[3];
+    result_lo = inst;
+  } else if (is_cas) {
+    a_lo = inst->operand[1];
+    a_hi = inst->operand[2];
+    b_lo = inst->operand[3];
+    b_hi = FlaggedUser(b_lo, ARM_WIDE_HI);
+    if (returns_value) {
+      result_hi = FlaggedUser(inst, ARM_WIDE_RESULT);
+    }
+  }
+
+  char naddr[16], na_lo[16], na_hi[16], nb_lo[16], nb_hi[16];
+  char nlo[16], nhi[16];
+  const char* saddr = ArmRegText(addr, naddr, sizeof(naddr));
+  const char* slo = result_lo == NULL ? NULL
+                                      : ArmRegText(result_lo, nlo, sizeof(nlo));
+  const char* shi = result_hi == NULL ? NULL
+                                      : ArmRegText(result_hi, nhi, sizeof(nhi));
+  int lo_num = ArmRegNum(result_lo);
+  int hi_num = ArmRegNum(result_hi);
+
+  if (order == 5 || (release && !is_load)) {
+    fprintf(fp, "\tdmb ish\n");
+  }
+  // Nothing between ldrexd and strexd may store: a store drops the exclusive
+  // reservation.  Operands and r0-r6 are snapshotted first; the retry loop
+  // only uses those registers.
+  fprintf(fp, "\tsub sp, sp, #80\n");
+  fprintf(fp, "\tstr %s, [sp, #0]\n", saddr);
+  if (a_lo != NULL) {
+    fprintf(fp, "\tstr %s, [sp, #4]\n", ArmRegText(a_lo, na_lo, sizeof(na_lo)));
+  }
+  if (a_hi != NULL) {
+    fprintf(fp, "\tstr %s, [sp, #8]\n", ArmRegText(a_hi, na_hi, sizeof(na_hi)));
+  }
+  if (b_lo != NULL) {
+    fprintf(fp, "\tstr %s, [sp, #12]\n",
+            ArmRegText(b_lo, nb_lo, sizeof(nb_lo)));
+  }
+  if (b_hi != NULL) {
+    fprintf(fp, "\tstr %s, [sp, #16]\n",
+            ArmRegText(b_hi, nb_hi, sizeof(nb_hi)));
+  }
+  fprintf(fp, "\tstr r0, [sp, #40]\n");
+  fprintf(fp, "\tstr r1, [sp, #44]\n");
+  fprintf(fp, "\tstr r2, [sp, #48]\n");
+  fprintf(fp, "\tstr r3, [sp, #52]\n");
+  fprintf(fp, "\tstr r4, [sp, #56]\n");
+  fprintf(fp, "\tstr r5, [sp, #60]\n");
+  fprintf(fp, "\tstr r6, [sp, #64]\n");
+  fprintf(fp, "\tldr ip, [sp, #0]\n");
+
+  if (is_load) {
+    fprintf(fp, "\tldrexd r4, r5, [ip]\n");
+    fprintf(fp, "\tclrex\n");
+    fprintf(fp, "\tstr r4, [sp, #32]\n");
+    fprintf(fp, "\tstr r5, [sp, #36]\n");
+  } else if (is_store || is_add || is_sub) {
+    fprintf(fp, "\tldr r0, [sp, #4]\n");
+    fprintf(fp, "\tldr r1, [sp, #8]\n");
+    fprintf(fp, ".L%s_a64_%d:\n", func_name, inst->id);
+    fprintf(fp, "\tldrexd r4, r5, [ip]\n");
+    if (is_store) {
+      fprintf(fp, "\tmov r4, r0\n");
+      fprintf(fp, "\tmov r5, r1\n");
+    } else {
+      fprintf(fp, "\tmov r2, r4\n");
+      fprintf(fp, "\tmov r3, r5\n");
+      fprintf(fp, "\t%s r4, r2, r0\n", is_add ? "adds" : "subs");
+      fprintf(fp, "\t%s r5, r3, r1\n", is_add ? "adc" : "sbc");
+    }
+    fprintf(fp, "\tstrexd r6, r4, r5, [ip]\n");
+    fprintf(fp, "\tcmp r6, #0\n");
+    fprintf(fp, "\tbne .L%s_a64_%d\n", func_name, inst->id);
+    if (!is_store) {
+      fprintf(fp, "\tstr %s, [sp, #32]\n", return_new ? "r4" : "r2");
+      fprintf(fp, "\tstr %s, [sp, #36]\n", return_new ? "r5" : "r3");
+    }
+  } else if (is_cas) {
+    // A failed STREXD retries.  That is a valid implementation of weak CAS.
+    (void)weak;
+    if (expected_is_pointer) {
+      fprintf(fp, "\tldr r2, [sp, #4]\n");
+      fprintf(fp, "\tldr r0, [r2]\n");
+      fprintf(fp, "\tldr r1, [r2, #4]\n");
+    } else {
+      fprintf(fp, "\tldr r0, [sp, #4]\n");
+      fprintf(fp, "\tldr r1, [sp, #8]\n");
+    }
+    fprintf(fp, "\tldr r2, [sp, #12]\n");
+    fprintf(fp, "\tldr r3, [sp, #16]\n");
+    fprintf(fp, ".L%s_a64_%d:\n", func_name, inst->id);
+    fprintf(fp, "\tldrexd r4, r5, [ip]\n");
+    fprintf(fp, "\tcmp r4, r0\n");
+    fprintf(fp, "\tbne .L%s_a64_miss_%d\n", func_name, inst->id);
+    fprintf(fp, "\tcmp r5, r1\n");
+    fprintf(fp, "\tbne .L%s_a64_miss_%d\n", func_name, inst->id);
+    fprintf(fp, "\tmov r4, r2\n");
+    fprintf(fp, "\tmov r5, r3\n");
+    fprintf(fp, "\tstrexd r6, r4, r5, [ip]\n");
+    fprintf(fp, "\tcmp r6, #0\n");
+    fprintf(fp, "\tbne .L%s_a64_%d\n", func_name, inst->id);
+    if (acquire) {
+      fprintf(fp, "\tdmb ish\n");
+    }
+    if (returns_bool) {
+      fprintf(fp, "\tmov r0, #1\n");
+      fprintf(fp, "\tstr r0, [sp, #32]\n");
+    } else if (returns_value) {
+      fprintf(fp, "\tstr r0, [sp, #32]\n");
+      fprintf(fp, "\tstr r1, [sp, #36]\n");
+    }
+    fprintf(fp, "\tb .L%s_a64_out_%d\n", func_name, inst->id);
+    fprintf(fp, ".L%s_a64_miss_%d:\n", func_name, inst->id);
+    fprintf(fp, "\tclrex\n");
+    if (AtomicOrderHasAcquire(failure_order)) {
+      fprintf(fp, "\tdmb ish\n");
+    }
+    if (expected_is_pointer) {
+      fprintf(fp, "\tldr r2, [sp, #4]\n");
+      fprintf(fp, "\tstr r4, [r2]\n");
+      fprintf(fp, "\tstr r5, [r2, #4]\n");
+    }
+    if (returns_bool) {
+      fprintf(fp, "\tmov r0, #0\n");
+      fprintf(fp, "\tstr r0, [sp, #32]\n");
+    } else if (returns_value) {
+      fprintf(fp, "\tstr r4, [sp, #32]\n");
+      fprintf(fp, "\tstr r5, [sp, #36]\n");
+    }
+    fprintf(fp, ".L%s_a64_out_%d:\n", func_name, inst->id);
+  }
+
+  for (int reg = 0; reg <= 6; reg++) {
+    if (lo_num != reg && hi_num != reg) {
+      fprintf(fp, "\tldr r%d, [sp, #%d]\n", reg, 40 + reg * 4);
+    }
+  }
+  if (slo != NULL) {
+    fprintf(fp, "\tldr %s, [sp, #32]\n", slo);
+  }
+  if (shi != NULL) {
+    fprintf(fp, "\tldr %s, [sp, #36]\n", shi);
+  }
+  fprintf(fp, "\tadd sp, sp, #80\n");
+  if (is_load && acquire) {
+    fprintf(fp, "\tdmb ish\n");
+  } else if (!is_cas && order == 5) {
+    fprintf(fp, "\tdmb ish\n");
+  } else if (!is_cas && !is_load && !is_store && acquire) {
+    fprintf(fp, "\tdmb ish\n");
+  }
+}
+
 static void PrintAtomicInstruction(TargetInstruction* inst,
                                    const char* func_name, FILE* fp) {
   int size = AtomicSizeLog2(inst);
@@ -1299,6 +1526,10 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
   int failure_order = AtomicFailureOrder(inst);
   bool acquire = AtomicOrderHasAcquire(order);
   bool release = AtomicOrderHasRelease(order);
+  if (size == 3) {
+    PrintAtomic64(inst, func_name, fp);
+    return;
+  }
   char b0[16], b1[16], b2[16], b3[16];
   const char* result =
       inst->reg == NULL ? NULL : AtomicRegName(inst, b0, sizeof(b0));

@@ -490,6 +490,10 @@ typedef struct Compiler {
   // (UninitializedStaticVariable*)
   Vector uninitialized_static_variables;
 
+  // File-scope `asm("...")` statements, emitted verbatim into .text.
+  // Elements are String*.
+  Vector toplevel_asm;
+
   // In-class `static constexpr`/`constinit` data members whose own type is the
   // (then-incomplete) enclosing class, so their constant evaluation was deferred
   // by the parser until the whole translation unit is parsed and the class --

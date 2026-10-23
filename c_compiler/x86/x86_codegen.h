@@ -225,6 +225,7 @@ typedef enum {
   X86_OP(atomic_compare_exchange_val),
   X86_OP(atomic_compare_exchange_n),
   X86_OP(atomic_fetch_add_sub),
+  X86_OP(atomic64),
 
   // Integer argument registers.
   X86_OP(a0),
@@ -285,6 +286,22 @@ typedef enum {
 #define X86_MFENCE 0x800000
 #define X86_ATOMIC_SIZE_SHIFT 24
 #define X86_ATOMIC_SIZE_MASK (3 << X86_ATOMIC_SIZE_SHIFT)
+// i386 CMPXCHG8B expansion.  The kind occupies bits 8-11.  The high half of a
+// wide operand that does not fit in the four-operand instruction is a user
+// flagged with X86_WIDE_HI; a wide result's high half is X86_WIDE_RESULT.
+#define X86_ATOMIC64_KIND_SHIFT 8
+#define X86_ATOMIC64_KIND_MASK (15 << X86_ATOMIC64_KIND_SHIFT)
+#define X86_ATOMIC64_LOAD 1
+#define X86_ATOMIC64_STORE 2
+#define X86_ATOMIC64_FETCH_ADD 3
+#define X86_ATOMIC64_FETCH_SUB 4
+#define X86_ATOMIC64_ADD_FETCH 5
+#define X86_ATOMIC64_SUB_FETCH 6
+#define X86_ATOMIC64_CAS_BOOL 7
+#define X86_ATOMIC64_CAS_VAL 8
+#define X86_ATOMIC64_CAS_N 9
+#define X86_WIDE_HI 0x20000000
+#define X86_WIDE_RESULT 0x40000000
 
 #define X86_MAX_ASM_OPERANDS 16
 

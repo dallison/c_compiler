@@ -9,6 +9,7 @@
 #include "assembler.h"
 #include "asm_module.h"
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -77,6 +78,8 @@ DECLARE_DIRECTIVE_FUNC(set);
 DECLARE_DIRECTIVE_FUNC(chkaddr);
 DECLARE_DIRECTIVE_FUNC(uleb128);
 DECLARE_DIRECTIVE_FUNC(sleb128);
+DECLARE_DIRECTIVE_FUNC(syntax);
+DECLARE_DIRECTIVE_FUNC(arm);
 
 #undef DECLARE_DIRECTIVE_FUNC
 
@@ -127,6 +130,8 @@ static void InitializeDirectives(Map* directives) {
   DIRECTIVE(chkaddr);
   DIRECTIVE(uleb128);
   DIRECTIVE(sleb128);
+  DIRECTIVE(syntax);
+  DIRECTIVE(arm);
 }
 
 #undef DIRECTIVE
@@ -865,6 +870,42 @@ static void HandleDirective_comm(Assembler* assembler) {
   }
 }
 
+// GNU as writes symbol and section types as @function or, on ARM where @
+// starts a comment, %function.  The lexer keeps '@' inside the identifier
+// and returns '%' as its own token.
+static bool ReadGasTypeName(Assembler* assembler, char* buf, size_t buflen) {
+  bool percent = LexMatch(&assembler->lex, TOK(percent));
+  if (!LexLookingAt(&assembler->lex, TOK(identifier))) {
+    return false;
+  }
+  const char* spelling = assembler->lex.spelling.value;
+  if (percent) {
+    snprintf(buf, buflen, "%%%s", spelling);
+  } else {
+    snprintf(buf, buflen, "%s", spelling);
+  }
+  LexNextToken(&assembler->lex);
+  return true;
+}
+
+static bool GasTypeEquals(const char* token, const char* name) {
+  if (strcmp(token, name) == 0) {
+    return true;
+  }
+  return (token[0] == '@' || token[0] == '%') && strcmp(token + 1, name) == 0;
+}
+
+static void HandleDirective_syntax(Assembler* assembler) {
+  // `.syntax unified` is the syntax this assembler already parses.
+  if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+    LexNextToken(&assembler->lex);
+  }
+}
+
+static void HandleDirective_arm(Assembler* assembler) {
+  (void)assembler;
+}
+
 static void HandleDirective_type(Assembler* assembler) {
   if (AssemblerLookingAtSymbol(assembler)) {
     String name;
@@ -881,18 +922,15 @@ static void HandleDirective_type(Assembler* assembler) {
 
       // If the symbol has a .type then it is exported to the object file.
       sym->exported = true;
-      if (LexLookingAt(&assembler->lex, TOK(identifier))) {
+      char type[64];
+      if (ReadGasTypeName(assembler, type, sizeof(type))) {
         AssemblerSection* sect = sym->section == SHN_COM ? NULL :
           assembler->object.sections.value.p[sym->section];
-        String type;
-        StringInit(&type, assembler->lex.spelling.value);
-        if (StringEqual(&type, "function") || StringEqual(&type, "@function")) {
+        if (GasTypeEquals(type, "function")) {
           sym->type = SYM_TYPE(func);
-        } else if (StringEqual(&type, "tls_object") ||
-                   StringEqual(&type, "@tls_object")) {
+        } else if (GasTypeEquals(type, "tls_object")) {
           sym->type = SYM_TYPE(tls);
-        } else if (StringEqual(&type, "object") ||
-                   StringEqual(&type, "@object")) {
+        } else if (GasTypeEquals(type, "object")) {
           // An object is TLS if the section it's in has the TLS flag.
           if (sect != NULL && (sect->flags & SHF(tls)) != 0) {
             sym->type = SYM_TYPE(tls);
@@ -901,10 +939,8 @@ static void HandleDirective_type(Assembler* assembler) {
           }
         } else {
           AssemblerError(assembler, "Invalid .type syntax; unsupported type %s",
-                         type.value);
+                         type);
         }
-        StringDestruct(&type);
-        LexNextToken(&assembler->lex);
       } else {
         AssemblerError(assembler, "Invalid .type syntax; missing type");
       }
@@ -1522,27 +1558,24 @@ static void HandleDirective_section(Assembler* assembler) {
         }
         LexNextToken(&assembler->lex);
         if (LexMatch(&assembler->lex, TOK(comma))) {
-          // Type argument
-          if (LexLookingAt(&assembler->lex, TOK(identifier))) {
-            if (strcmp(assembler->lex.spelling.value, "@progbits") == 0) {
+          // Type argument.  ARM uses %progbits because @ starts a comment.
+          char type_name[64];
+          if (ReadGasTypeName(assembler, type_name, sizeof(type_name))) {
+            if (GasTypeEquals(type_name, "progbits")) {
               type = SHT(progbits);
-            } else if (strcmp(assembler->lex.spelling.value, "@nobits") == 0) {
+            } else if (GasTypeEquals(type_name, "nobits")) {
               type = SHT(nobits);
-            } else if (strcmp(assembler->lex.spelling.value, "@init_array") ==
-                       0) {
+            } else if (GasTypeEquals(type_name, "init_array")) {
               type = SHT(init_array);
-            } else if (strcmp(assembler->lex.spelling.value, "@fini_array") ==
-                       0) {
+            } else if (GasTypeEquals(type_name, "fini_array")) {
               type = SHT(fini_array);
-            } else if (strcmp(assembler->lex.spelling.value,
-                              "@preinit_array") == 0) {
+            } else if (GasTypeEquals(type_name, "preinit_array")) {
               type = SHT(preinit_array);
-            } else if (strcmp(assembler->lex.spelling.value, "@note") == 0) {
+            } else if (GasTypeEquals(type_name, "note")) {
               type = SHT(note);
-            } else if (strcmp(assembler->lex.spelling.value, "@unwind") == 0) {
+            } else if (GasTypeEquals(type_name, "unwind")) {
               type = SHT(ARM_EXIDX);
             }
-            LexNextToken(&assembler->lex);
           }
         }
       }

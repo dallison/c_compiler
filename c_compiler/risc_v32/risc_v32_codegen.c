@@ -2598,7 +2598,7 @@ static Symbol* GetLibcallSymbol(const char* name) {
   static struct {
     const char* name;
     Symbol* sym;
-  } cache[12];
+  } cache[16];
   static int count = 0;
   for (int i = 0; i < count; i++) {
     if (strcmp(cache[i].name, name) == 0) {
@@ -4910,6 +4910,152 @@ static TargetInstruction* FinishAtomicValue(RV32Generator* rv, IRNode* node,
   return SetLoweredNode(node, inst);
 }
 
+static TargetInstruction* LowerAtomic64(RV32Generator* rv, IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  TargetInstruction* addr = AtomicAddress(rv, addr_node);
+  int op = 0;
+  TargetInstruction* a_lo = NULL;
+  TargetInstruction* a_hi = NULL;
+  TargetInstruction* b_lo = NULL;
+  TargetInstruction* b_hi = NULL;
+  bool wide_result = false;
+  bool scalar_result = false;
+
+  switch (node->opcode) {
+    case IR_OP(atomic_load):
+      op = 1;
+      wide_result = true;
+      break;
+    case IR_OP(atomic_store):
+      op = 2;
+      MaterializeWide(rv, node->inputs.value.p[1], &a_lo, &a_hi);
+      break;
+    case IR_OP(atomic_fetch_add):
+      op = 3;
+      wide_result = true;
+      MaterializeWide(rv, node->inputs.value.p[1], &a_lo, &a_hi);
+      break;
+    case IR_OP(atomic_fetch_sub):
+      op = 4;
+      wide_result = true;
+      MaterializeWide(rv, node->inputs.value.p[1], &a_lo, &a_hi);
+      break;
+    case IR_OP(atomic_add_fetch):
+      op = 5;
+      wide_result = true;
+      MaterializeWide(rv, node->inputs.value.p[1], &a_lo, &a_hi);
+      break;
+    case IR_OP(atomic_sub_fetch):
+      op = 6;
+      wide_result = true;
+      MaterializeWide(rv, node->inputs.value.p[1], &a_lo, &a_hi);
+      break;
+    case IR_OP(atomic_compare_exchange_bool):
+      op = 7;
+      scalar_result = true;
+      MaterializeWide(rv, node->inputs.value.p[1], &a_lo, &a_hi);
+      MaterializeWide(rv, node->inputs.value.p[2], &b_lo, &b_hi);
+      break;
+    case IR_OP(atomic_compare_exchange_val):
+      op = 8;
+      wide_result = true;
+      MaterializeWide(rv, node->inputs.value.p[1], &a_lo, &a_hi);
+      MaterializeWide(rv, node->inputs.value.p[2], &b_lo, &b_hi);
+      break;
+    case IR_OP(atomic_compare_exchange_n):
+      op = 9;
+      scalar_result = true;
+      a_lo = Materialize(rv, node->inputs.value.p[1]);
+      MaterializeWide(rv, node->inputs.value.p[2], &b_lo, &b_hi);
+      break;
+    default:
+      assert(false);
+      return NULL;
+  }
+
+  TargetInstruction* zero = Zero(rv);
+  if (a_lo == NULL) a_lo = zero;
+  if (a_hi == NULL) a_hi = zero;
+  if (b_lo == NULL) b_lo = zero;
+  if (b_hi == NULL) b_hi = zero;
+
+  TargetInstruction* newsp = AddImmediate(rv, StackPointer(rv), -32);
+  TargetSetDest(newsp, StackPointer(rv));
+  TargetInstruction* sp = StackPointer(rv);
+  Emit(rv, NewInstruction3(RV32_OP(sw), a_lo, sp,
+                           GetIntConstant(rv, NULL, kTargetType32Bit, 0)));
+  Emit(rv, NewInstruction3(RV32_OP(sw), a_hi, sp,
+                           GetIntConstant(rv, NULL, kTargetType32Bit, 4)));
+  Emit(rv, NewInstruction3(RV32_OP(sw), b_lo, sp,
+                           GetIntConstant(rv, NULL, kTargetType32Bit, 8)));
+  Emit(rv, NewInstruction3(RV32_OP(sw), b_hi, sp,
+                           GetIntConstant(rv, NULL, kTargetType32Bit, 12)));
+
+  TargetInstruction* sp_copy =
+      Emit(rv, NewInstruction1(RV32_OP(mv), StackPointer(rv)));
+  TargetInstruction* bslot = AddImmediate(rv, sp_copy, 8);
+  TargetInstruction* out_slot =
+      (wide_result || scalar_result) ? AddImmediate(rv, sp_copy, 16) : zero;
+  TargetInstruction* op_reg = Emit(
+      rv, NewInstruction1(RV32_OP(li),
+                          GetIntConstant(rv, NULL, kTargetType32Bit, op)));
+
+  TargetInstruction* arg2 =
+      SetDestOrMove(rv, sp_copy, IntArgumentRegister(rv, 2), RV32_OP(mv));
+  TargetInstruction* arg3 =
+      SetDestOrMove(rv, bslot, IntArgumentRegister(rv, 3), RV32_OP(mv));
+  TargetInstruction* arg4 =
+      SetDestOrMove(rv, out_slot, IntArgumentRegister(rv, 4), RV32_OP(mv));
+  TargetInstruction* arg1 =
+      SetDestOrMove(rv, addr, IntArgumentRegister(rv, 1), RV32_OP(mv));
+  TargetInstruction* arg0 =
+      SetDestOrMove(rv, op_reg, IntArgumentRegister(rv, 0), RV32_OP(mv));
+
+  TargetInstruction* regarg =
+      Emit(rv, NewInstruction2(RV32_OP(regarg), NULL, arg4));
+  regarg = Emit(rv, NewInstruction2(RV32_OP(regarg), regarg, arg3));
+  regarg = Emit(rv, NewInstruction2(RV32_OP(regarg), regarg, arg2));
+  regarg = Emit(rv, NewInstruction2(RV32_OP(regarg), regarg, arg1));
+  regarg = Emit(rv, NewInstruction2(RV32_OP(regarg), regarg, arg0));
+
+  TargetInstruction* sym =
+      GetSymbol(rv, NULL, GetLibcallSymbol("__davecc_atomic64"));
+  Emit(rv, NewInstruction2(RV32_OP(call), sym, regarg));
+  rv->not_leaf = true;
+  rv->base.num_calls++;
+
+  TargetInstruction* lo = NULL;
+  TargetInstruction* hi = NULL;
+  if (wide_result || scalar_result) {
+    lo = Emit(rv, NewInstruction2(
+                     RV32_OP(lw), sp,
+                     GetIntConstant(rv, NULL, kTargetType32Bit, 16)));
+    if (wide_result) {
+      hi = Emit(rv, NewInstruction2(
+                       RV32_OP(lw), sp,
+                       GetIntConstant(rv, NULL, kTargetType32Bit, 20)));
+    }
+  }
+  TargetInstruction* restore = AddImmediate(rv, StackPointer(rv), 32);
+  TargetSetDest(restore, StackPointer(rv));
+  if (lo != NULL) {
+    TargetAddUser(lo, restore);
+  }
+  if (hi != NULL) {
+    TargetAddUser(hi, restore);
+  }
+
+  if (wide_result) {
+    PairWideHalves(lo, hi);
+    SetLoweredHi(node, hi);
+    return SetLoweredNode(node, lo);
+  }
+  if (scalar_result) {
+    return FinishWithDest(rv, node, lo, RV32_OP(mv));
+  }
+  return SetLoweredNode(node, restore);
+}
+
 static TargetInstruction* LowerAtomic(RV32Generator* rv, IRNode* node) {
   if (node->opcode == IR_OP(atomic_fence)) {
     TargetInstruction* inst = NewInstruction(RV32_OP(atomic_fence));
@@ -4922,6 +5068,9 @@ static TargetInstruction* LowerAtomic(RV32Generator* rv, IRNode* node) {
   IRNode* addr_node = node->inputs.value.p[0];
   TypeRecord* value_type = addr_node->type->next;
   assert(value_type != NULL);
+  if (value_type->size == 8) {
+    return LowerAtomic64(rv, node);
+  }
   TargetInstruction* addr = AtomicAddress(rv, addr_node);
   TargetInstruction* inst = NULL;
 

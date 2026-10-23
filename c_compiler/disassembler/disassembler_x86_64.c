@@ -662,6 +662,17 @@ static bool DAsmDisassembleX86Common(const void* bytes, size_t length,
         DAsmFormat(out, "%s %s, %s", opname, RegName(reg, width), rm_text);
         return true;
       }
+      if (op2 == 0xc7) {
+        if (!Need(&d, 1)) return false;
+        unsigned char modrm = Get8(&d);
+        if (((modrm >> 3) & 7) == 1 && ((modrm >> 6) & 3) != 3) {
+          char rm_text[80];
+          DecodeRM(rm_text, sizeof(rm_text), &d, modrm, 8);
+          DAsmInitInstruction(out, bytes, length, address, d.pos);
+          DAsmFormat(out, "cmpxchg8b %s", rm_text);
+          return true;
+        }
+      }
       if (op2 == 0x18 || op2 == 0x0d || op2 == 0x1f) {
         if (!Need(&d, 1)) return false;
         unsigned char modrm = Get8(&d);

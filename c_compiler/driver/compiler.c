@@ -324,8 +324,9 @@ enum {
   kTargetSupportsThreads = 1u << 0,
   kTargetSupportsAtomics = 1u << 1,
   // A complete C11 profile includes atomic_llong even when it is not lock-free.
-  // ARM32 lacks 64-bit lowering; AArch64 lacks the required bit-preserving
-  // floating-point transfer; pcode and wasm do not yet implement the profile.
+  // AArch64 lacks the required bit-preserving floating-point transfer; pcode
+  // and wasm do not yet implement the profile.  ARM32 64-bit integers use
+  // LDREXD/STREXD and are covered by kTargetSupports8ByteAtomics.
   kTargetSupportsC11Atomics = 1u << 2,
   kTargetSupports8ByteAtomics = 1u << 3,
 };
@@ -344,18 +345,22 @@ static struct CompilerTargetDefinition{
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupportsC11Atomics | kTargetSupports8ByteAtomics},
   {"riscv32", {"riscv32", "risc-v32"}, NewRV32Target, false, 0,
-   kTargetSupportsThreads | kTargetSupportsAtomics},
+   kTargetSupportsThreads | kTargetSupportsAtomics |
+       kTargetSupports8ByteAtomics},
   {"esp32", {"esp32", "xtensa-esp32"}, NewXTENSATarget, true, 0, 0},
   {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupports8ByteAtomics},
   {"arm", {"arm", "armv7", "armv7-a", "arm32"}, NewARMTarget, false, 0,
-   kTargetSupportsThreads | kTargetSupportsAtomics},
+   kTargetSupportsThreads | kTargetSupportsAtomics |
+       kTargetSupports8ByteAtomics},
   {"x86_64", {"x86_64", "x86-64"}, NewX86_64Target, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupportsC11Atomics | kTargetSupports8ByteAtomics},
   {"x86", {"x86", "i386", "i486", "i586", "i686", "x86-32"}, NewX86Target,
-   false, 0, kTargetSupportsThreads | kTargetSupportsAtomics},
+   false, 0,
+   kTargetSupportsThreads | kTargetSupportsAtomics |
+       kTargetSupports8ByteAtomics},
   {"6502", {"6502"}, New6502Target, true, 2, 0},
   {"65c02", {"65c02", "65C02"}, New65c02Target, true, 2, 0},
   {"wasm32", {"wasm32", "wasm"}, NewWasm32Target, true, 0,
@@ -3475,6 +3480,13 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
       SemanticAnalyzeConstevalBlock((ConstevalBlockASTNode*)node);
       return;
     }
+    if (node->op == AST_OP(asm)) {
+      AsmASTNode* asm_node = (AsmASTNode*)node;
+      if (asm_node->text != NULL && asm_node->text->value != NULL) {
+        VectorAppend(&compiler->toplevel_asm, NewString(asm_node->text->value));
+      }
+      return;
+    }
     // 'node' will be a declaration list containing declarations.
     if (node->op == AST_OP(decl_list)) {
       DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
@@ -4741,6 +4753,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->referenced_variable_name_index = NewCompilerStringIndex();
   VectorInit(&compiler->initialized_static_variables);
   VectorInit(&compiler->uninitialized_static_variables);
+  VectorInit(&compiler->toplevel_asm);
   VectorInit(&compiler->cxx_deferred_static_member_definitions);
   VectorInit(&compiler->cxx_undefined_template_static_members);
   VectorInit(&compiler->cxx_global_destructors);
@@ -5549,6 +5562,9 @@ void CompilerDestruct(Compiler* compiler) {
         compiler->uninitialized_static_variables.value.p[i]);
   }
   VectorDestruct(&compiler->uninitialized_static_variables);
+  VectorDestructWithContents(&compiler->toplevel_asm,
+                             (VectorElementDestructor)StringDelete,
+                             /*free_element=*/false);
 
   VectorDestruct(&compiler->cxx_deferred_static_member_definitions);
   VectorDestruct(&compiler->cxx_undefined_template_static_members);
@@ -5801,10 +5817,15 @@ static void CheckUnusedStaticFunctions(void) {
     }
     DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
     for (size_t j = 0; j < decls->declarations->length; j++) {
-      VariableDeclarationASTNode* decl =
-          (VariableDeclarationASTNode*)decls->declarations->value.p[j];
+      ASTNode* decl_node = decls->declarations->value.p[j];
+      // A namespace list also holds using-declarations, asm statements, and
+      // other non-variable nodes.  Only variable declarations have a symbol.
+      if (decl_node == NULL || decl_node->op != AST_OP(vardecl)) {
+        continue;
+      }
+      VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)decl_node;
       Symbol* sym = decl->symbol;
-      if (sym != NULL && TypeIsFunction(sym->type) &&
+      if (sym != NULL && sym->type != NULL && TypeIsFunction(sym->type) &&
           sym->flags.is_defined && StorageIs(sym->storage, STO(static)) &&
           !sym->flags.is_inline_defn && !FunctionSymbolWasUsed(sym)) {
         SemanticSymbolWarning(sym, "unused-function",
@@ -5829,10 +5850,13 @@ static void CheckUnusedGlobalVariables(void) {
     }
     DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
     for (size_t j = 0; j < decls->declarations->length; j++) {
-      VariableDeclarationASTNode* decl =
-          (VariableDeclarationASTNode*)decls->declarations->value.p[j];
+      ASTNode* decl_node = decls->declarations->value.p[j];
+      if (decl_node == NULL || decl_node->op != AST_OP(vardecl)) {
+        continue;
+      }
+      VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)decl_node;
       Symbol* sym = decl->symbol;
-      if (sym == NULL || sym->name.length == 0) {
+      if (sym == NULL || sym->type == NULL || sym->name.length == 0) {
         continue;
       }
       // Only ordinary data objects: not functions, typedefs, tags, or template
@@ -5882,8 +5906,11 @@ static void CheckIncompleteTentativeDefinitions(void) {
     }
     DeclarationListASTNode* decls = (DeclarationListASTNode*)node;
     for (size_t j = 0; j < decls->declarations->length; j++) {
-      VariableDeclarationASTNode* decl =
-          (VariableDeclarationASTNode*)decls->declarations->value.p[j];
+      ASTNode* decl_node = decls->declarations->value.p[j];
+      if (decl_node == NULL || decl_node->op != AST_OP(vardecl)) {
+        continue;
+      }
+      VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)decl_node;
       Symbol* sym = decl->symbol;
       if (sym == NULL || !sym->flags.is_tentative_decl ||
           decl->initializer != NULL || StorageIs(sym->storage, STO(typedef))) {

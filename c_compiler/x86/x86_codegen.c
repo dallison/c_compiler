@@ -171,6 +171,7 @@ const char* X86OpcodeName(int op) {
     OPCODE(atomic_compare_exchange_val)
     OPCODE(atomic_compare_exchange_n)
     OPCODE(atomic_fetch_add_sub)
+    OPCODE(atomic64)
     OPCODE(a0)
     OPCODE(a1)
     OPCODE(a2)
@@ -5812,30 +5813,60 @@ static TargetInstruction* LowerIRNode(X86Generator* rv, Generator* gen,
       return LowerBuiltinVaCopy(rv, node);
 
     case IR_OP(atomic_load):
+      if (!X86_IS_64BIT(rv) && node->type != NULL && node->type->size == 8) {
+        return X86I386LowerAtomic(rv, gen, node);
+      }
       return LowerAtomicLoad(rv, gen, node);
 
     case IR_OP(atomic_store):
+      if (!X86_IS_64BIT(rv) && ((IRNode*)node->inputs.value.p[0])->type->next->size == 8) {
+        return X86I386LowerAtomic(rv, gen, node);
+      }
       return LowerAtomicStore(rv, node);
 
     case IR_OP(atomic_fetch_add):
+      if (!X86_IS_64BIT(rv) && node->type != NULL && node->type->size == 8) {
+        return X86I386LowerAtomic(rv, gen, node);
+      }
       return LowerAtomicFetchAddSub(rv, gen, node, true, false);
 
     case IR_OP(atomic_fetch_sub):
+      if (!X86_IS_64BIT(rv) && node->type != NULL && node->type->size == 8) {
+        return X86I386LowerAtomic(rv, gen, node);
+      }
       return LowerAtomicFetchAddSub(rv, gen, node, false, false);
 
     case IR_OP(atomic_add_fetch):
+      if (!X86_IS_64BIT(rv) && node->type != NULL && node->type->size == 8) {
+        return X86I386LowerAtomic(rv, gen, node);
+      }
       return LowerAtomicFetchAddSub(rv, gen, node, true, true);
 
     case IR_OP(atomic_sub_fetch):
+      if (!X86_IS_64BIT(rv) && node->type != NULL && node->type->size == 8) {
+        return X86I386LowerAtomic(rv, gen, node);
+      }
       return LowerAtomicFetchAddSub(rv, gen, node, false, true);
 
     case IR_OP(atomic_compare_exchange_bool):
+      if (!X86_IS_64BIT(rv) &&
+          ((IRNode*)node->inputs.value.p[0])->type->next->size == 8) {
+        return X86I386LowerAtomic(rv, gen, node);
+      }
       return LowerAtomicCompareExchange(rv, gen, node, false, true);
 
     case IR_OP(atomic_compare_exchange_val):
+      if (!X86_IS_64BIT(rv) &&
+          ((IRNode*)node->inputs.value.p[0])->type->next->size == 8) {
+        return X86I386LowerAtomic(rv, gen, node);
+      }
       return LowerAtomicCompareExchange(rv, gen, node, false, false);
 
     case IR_OP(atomic_compare_exchange_n):
+      if (!X86_IS_64BIT(rv) &&
+          ((IRNode*)node->inputs.value.p[0])->type->next->size == 8) {
+        return X86I386LowerAtomic(rv, gen, node);
+      }
       return LowerAtomicCompareExchange(rv, gen, node, true, true);
 
     case IR_OP(atomic_fence):

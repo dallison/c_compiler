@@ -72,7 +72,7 @@ typedef _Atomic _Bool atomic_flag;
 #define ATOMIC_SHORT_LOCK_FREE 2
 #define ATOMIC_INT_LOCK_FREE 2
 #define ATOMIC_LONG_LOCK_FREE 2
-#if defined(__arm__)
+#if (defined(__riscv) && __riscv_xlen == 32) || defined(__XTENSA__)
 #define ATOMIC_LLONG_LOCK_FREE 0
 #else
 #define ATOMIC_LLONG_LOCK_FREE 2

@@ -1588,9 +1588,32 @@ static ASTNode* ParseSimpleExternalDeclaration(Syntax* syntax) {
                                    syntax->lex->current_token_location);
 }
 
+// File-scope `asm("...")` is a statement, not an asm-name on an implicit int.
+static ASTNode* ParseFileScopeAsmStatement(Syntax* syntax) {
+  if (!LexLookingAt(syntax->lex, TOK(asm))) {
+    return NULL;
+  }
+  LexCheckpoint checkpoint;
+  LexCheckpointSave(syntax->lex, &checkpoint);
+  LexNextToken(syntax->lex);
+  bool statement = LexLookingAt(syntax->lex, TOK(lparen)) ||
+                   LexLookingAt(syntax->lex, TOK(volatile)) ||
+                   LexLookingAt(syntax->lex, TOK(goto));
+  LexCheckpointRestore(syntax->lex, &checkpoint);
+  LexCheckpointDestruct(&checkpoint);
+  if (!statement) {
+    return NULL;
+  }
+  return SyntaxParseAsmStatement(syntax, TC(semicolon) | TC(decl));
+}
+
 // Parses an external declaration (a global variable, etc.) and adds it
 // to the symbol table.
 static ASTNode* ParseExternalDeclarationBody(Syntax* syntax) {
+  ASTNode* file_asm = ParseFileScopeAsmStatement(syntax);
+  if (file_asm != NULL) {
+    return file_asm;
+  }
   syntax->context = kParsingFileScope;
   if (syntax->current_namespace == NULL) {
     syntax->current_namespace = compiler->global_namespace;

@@ -63,7 +63,10 @@ template <class T>
 constexpr bool always_lock_free() noexcept {
 #if defined(__p_code__)
   return false;
-#elif defined(__arm__)
+#elif defined(__arm__) || defined(__i386__)
+  return sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
+         sizeof(T) == 8;
+#elif (defined(__riscv) && __riscv_xlen == 32) || defined(__XTENSA__)
   return sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4;
 #else
   return sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||

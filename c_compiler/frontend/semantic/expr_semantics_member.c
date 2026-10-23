@@ -1044,6 +1044,45 @@ void AnalyzeAddressOperator(UnaryASTNode* node) {
   }
 }
 
+// `*object` where `object` converts to a pointer: `std::atomic<Fn*>` provides
+// `operator Fn*()` and has no overloaded `operator*`. Apply that conversion
+// before the built-in indirection.
+static void ApplyPointerConversionForDereference(UnaryASTNode* node) {
+  if (!CompilerIsCXX() || node->sub == NULL || node->sub->type == NULL ||
+      !TypeIsStructOrUnion(node->sub->type) ||
+      node->sub->type->info.struct_info == NULL) {
+    return;
+  }
+  Vector operators;
+  VectorInit(&operators);
+  CollectConversionOperators(node->sub->type->info.struct_info, &operators);
+  TypeRecord* pointer_type = NULL;
+  bool ambiguous = false;
+  for (size_t i = 0; i < operators.length; i++) {
+    StructMember* member = operators.value.p[i];
+    if (member == NULL || member->symbol == NULL ||
+        member->symbol->flags.is_template ||
+        !TypeIsFunction(member->symbol->type)) {
+      continue;
+    }
+    TypeRecord* function = member->symbol->type;
+    if (function->info.function.is_explicit_conversion ||
+        function->next == NULL || !TypeIsPointer(function->next)) {
+      continue;
+    }
+    if (pointer_type != NULL && !TypeEqual(pointer_type, function->next)) {
+      ambiguous = true;
+      break;
+    }
+    pointer_type = function->next;
+  }
+  VectorDestruct(&operators);
+  if (ambiguous || pointer_type == NULL) {
+    return;
+  }
+  NormalConversion(node->sub, pointer_type);
+}
+
 // Contract: Dereferences pointer/array (or applies function-to-pointer for `*f`);
 // leaves dependent operands unknown; materializes class-template pointees on `*p`.
 void AnalyzeContentsOperator(UnaryASTNode* node) {
@@ -1079,6 +1118,9 @@ void AnalyzeContentsOperator(UnaryASTNode* node) {
       node->sub->flags |= kASTAnalyzed;
       node->sub->value_category = kValueCategoryPrvalue;
     }
+  }
+  if (!TypeIsPointerOrArray(node->sub->type)) {
+    ApplyPointerConversionForDereference(node);
   }
   if (!TypeIsPointerOrArray(node->sub->type)) {
     SemanticError(node->sub, "Cannot take contents of this expression");

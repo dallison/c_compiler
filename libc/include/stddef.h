@@ -17,19 +17,19 @@
 #endif
 
 #ifndef __SIZE_T
-#if defined(__6502__)
-typedef unsigned int size_t;
-#else
+#if defined(__LP64__)
 typedef unsigned long size_t;
+#else
+typedef unsigned int size_t;
 #endif
 #define __SIZE_T
 #endif
 
 #ifndef __SSIZE_T
-#if defined(__6502__)
-typedef int ssize_t;
-#else
+#if defined(__LP64__)
 typedef long ssize_t;
+#else
+typedef int ssize_t;
 #endif
 #define __SSIZE_T
 #endif
@@ -70,10 +70,10 @@ typedef typeof(nullptr) nullptr_t;
 #define offsetof(type, member) ((size_t)(&((type*)0)->member))
 
 #ifndef SIZE_MAX
-#if defined(__6502__)
-#define SIZE_MAX UINT_MAX
-#else
+#if defined(__LP64__)
 #define SIZE_MAX ULONG_MAX
+#else
+#define SIZE_MAX UINT_MAX
 #endif
 #endif
 #endif /* __DAVECC__ */

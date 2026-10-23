@@ -182,10 +182,10 @@ typedef uint64_t uint_fast64_t;
 #endif
 
 #ifndef SIZE_MAX
-#if defined(__6502__)
-#define SIZE_MAX UINT_MAX
-#else
+#if defined(__LP64__)
 #define SIZE_MAX ULONG_MAX
+#else
+#define SIZE_MAX UINT_MAX
 #endif
 #endif
 

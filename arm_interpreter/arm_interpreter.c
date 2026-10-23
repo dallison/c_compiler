@@ -1876,10 +1876,12 @@ static bool ExecuteVfp(ARMInterpreter* interpreter, uint32_t insn) {
 static bool ExecuteExclusive(ARMInterpreter* interpreter, uint32_t insn) {
   uint32_t load_key = insn & 0x0ff00fffu;
   uint32_t store_key = insn & 0x0ff00ff0u;
-  bool load = load_key == 0x01900f9fu ||
+  bool load64 = (insn & 0x0ff00ff0u) == 0x01b00f90u;
+  bool store64 = (insn & 0x0ff00ff0u) == 0x01a00f90u;
+  bool load = load64 || load_key == 0x01900f9fu ||
               load_key == 0x01d00f9fu ||
               load_key == 0x01f00f9fu;
-  bool store = store_key == 0x01800f90u ||
+  bool store = store64 || store_key == 0x01800f90u ||
                store_key == 0x01c00f90u ||
                store_key == 0x01e00f90u;
   if (!load && !store) {
@@ -1887,7 +1889,9 @@ static bool ExecuteExclusive(ARMInterpreter* interpreter, uint32_t insn) {
   }
 
   size_t size;
-  if (load ? load_key == 0x01d00f9fu : store_key == 0x01c00f90u) {
+  if (load64 || store64) {
+    size = 8;
+  } else if (load ? load_key == 0x01d00f9fu : store_key == 0x01c00f90u) {
     size = 1;
   } else if (load ? load_key == 0x01f00f9fu
                   : store_key == 0x01e00f90u) {
@@ -1907,10 +1911,16 @@ static bool ExecuteExclusive(ARMInterpreter* interpreter, uint32_t insn) {
   GuestMemoryLock(interpreter);
   if (load) {
     int rt = (int)((insn >> 12) & 0xfu);
-    uint32_t value = size == 1 ? *(uint8_t*)p
-                     : size == 2 ? *(uint16_t*)p
-                                 : *(uint32_t*)p;
-    WriteReg(interpreter, rt, value);
+    if (size == 8) {
+      uint64_t value = *(uint64_t*)p;
+      WriteReg(interpreter, rt, (uint32_t)value);
+      WriteReg(interpreter, rt + 1, (uint32_t)(value >> 32));
+    } else {
+      uint32_t value = size == 1 ? *(uint8_t*)p
+                       : size == 2 ? *(uint16_t*)p
+                                   : *(uint32_t*)p;
+      WriteReg(interpreter, rt, value);
+    }
     interpreter->reservation_valid = true;
     interpreter->reservation_address = addr;
     interpreter->reservation_size = size;
@@ -1922,6 +1932,9 @@ static bool ExecuteExclusive(ARMInterpreter* interpreter, uint32_t insn) {
 
   int rd = (int)((insn >> 12) & 0xfu);
   int rt = (int)(insn & 0xfu);
+  if (size == 8) {
+    rt = (int)(insn & 0xfu);
+  }
   bool success = interpreter->reservation_valid &&
                  interpreter->reservation_address == addr &&
                  interpreter->reservation_size == size &&
@@ -1930,13 +1943,19 @@ static bool ExecuteExclusive(ARMInterpreter* interpreter, uint32_t insn) {
                       interpreter->process->write_epoch);
   interpreter->reservation_valid = false;
   if (success) {
-    uint32_t value = (uint32_t)ReadReg(interpreter, rt);
-    if (size == 1) {
-      *(uint8_t*)p = (uint8_t)value;
-    } else if (size == 2) {
-      *(uint16_t*)p = (uint16_t)value;
+    if (size == 8) {
+      uint64_t value = (uint32_t)ReadReg(interpreter, rt) |
+                       ((uint64_t)(uint32_t)ReadReg(interpreter, rt + 1) << 32);
+      *(uint64_t*)p = value;
     } else {
-      *(uint32_t*)p = value;
+      uint32_t value = (uint32_t)ReadReg(interpreter, rt);
+      if (size == 1) {
+        *(uint8_t*)p = (uint8_t)value;
+      } else if (size == 2) {
+        *(uint16_t*)p = (uint16_t)value;
+      } else {
+        *(uint32_t*)p = value;
+      }
     }
     if (interpreter->process != NULL) {
       interpreter->process->write_epoch++;

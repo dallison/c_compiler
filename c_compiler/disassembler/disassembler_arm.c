@@ -119,6 +119,17 @@ bool DAsmDisassembleARM(const void* bytes, size_t length, uint64_t address,
     DAsmFormat(out, "clrex");
     return true;
   }
+  if ((inst & 0x0ff00ff0u) == 0x01b00f90u) {
+    DAsmFormat(out, "ldrexd%s %s, %s, [%s]", cc, RegName((inst >> 12) & 0xf),
+               RegName(inst & 0xf), RegName((inst >> 16) & 0xf));
+    return true;
+  }
+  if ((inst & 0x0ff00ff0u) == 0x01a00f90u) {
+    int rt = (int)(inst & 0xf);
+    DAsmFormat(out, "strexd%s %s, %s, %s, [%s]", cc, RegName((inst >> 12) & 0xf),
+               RegName(rt), RegName(rt + 1), RegName((inst >> 16) & 0xf));
+    return true;
+  }
   uint32_t exclusive_load = inst & 0x0ff00fffu;
   if (exclusive_load == 0x01900f9fu ||
       exclusive_load == 0x01d00f9fu ||

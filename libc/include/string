@@ -646,6 +646,48 @@ class basic_string {
     return 0;
   }
 
+#if __cplusplus >= 202002L
+  constexpr bool starts_with(basic_string_view<CharT, traits_type> prefix) const
+      noexcept {
+    return __size >= prefix.size() &&
+           traits_type::compare(__data, prefix.data(), prefix.size()) == 0;
+  }
+
+  constexpr bool starts_with(CharT c) const noexcept {
+    return __size != 0 && traits_type::eq(__data[0], c);
+  }
+
+  constexpr bool starts_with(const CharT* s) const {
+    return starts_with(basic_string_view<CharT, traits_type>(s));
+  }
+
+  constexpr bool ends_with(basic_string_view<CharT, traits_type> suffix) const
+      noexcept {
+    return __size >= suffix.size() &&
+           traits_type::compare(__data + (__size - suffix.size()), suffix.data(),
+                                suffix.size()) == 0;
+  }
+
+  constexpr bool ends_with(CharT c) const noexcept {
+    return __size != 0 && traits_type::eq(__data[__size - 1], c);
+  }
+
+  constexpr bool ends_with(const CharT* s) const {
+    return ends_with(basic_string_view<CharT, traits_type>(s));
+  }
+#endif
+
+#if __cplusplus >= 202302L
+  constexpr bool contains(basic_string_view<CharT, traits_type> view) const
+      noexcept {
+    return find(view.data(), 0, view.size()) != npos;
+  }
+
+  constexpr bool contains(CharT c) const noexcept { return find(c) != npos; }
+
+  constexpr bool contains(const CharT* s) const { return find(s) != npos; }
+#endif
+
   __DAVECC_STRING_CONSTEXPR size_type find(const CharT* s, size_type pos, size_type n) const {
     if (n == 0) {
       return pos <= __size ? pos : npos;

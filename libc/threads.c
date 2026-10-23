@@ -1266,3 +1266,66 @@ int sem_getvalue(sem_t* sem, int* value) {
   return 0;
 }
 #endif
+
+#if !defined(__XTENSA__) && !defined(__6502__)
+static int davecc_atomic64_lock;
+
+static void davecc_atomic64_take(void) {
+  int expected = 0;
+  while (!__atomic_compare_exchange_n(&davecc_atomic64_lock, &expected, 1, 0,
+                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+    expected = 0;
+  }
+}
+
+static void davecc_atomic64_give(void) {
+  __atomic_store_n(&davecc_atomic64_lock, 0, __ATOMIC_RELEASE);
+}
+
+// Software 64-bit atomics for targets with no 8-byte atomic instruction.
+// op: 1 load, 2 store, 3 fetch_add, 4 fetch_sub, 5 add_fetch, 6 sub_fetch,
+// 7 compare_exchange bool, 8 compare_exchange value, 9 compare_exchange
+// through an expected pointer (low word of *a).  a and b are operand slots.
+// out receives the previous value, the stored value, or 0/1.
+void __davecc_atomic64(int op, uint64_t* addr, uint64_t* a, uint64_t* b,
+                       uint64_t* out) {
+  davecc_atomic64_take();
+  uint64_t current = *addr;
+  uint64_t result = current;
+  if (op == 2) {
+    *addr = *a;
+    result = *a;
+  } else if (op == 3) {
+    *addr = current + *a;
+  } else if (op == 4) {
+    *addr = current - *a;
+  } else if (op == 5) {
+    *addr = current + *a;
+    result = *addr;
+  } else if (op == 6) {
+    *addr = current - *a;
+    result = *addr;
+  } else if (op == 7 || op == 8) {
+    int same = current == *a;
+    if (same) {
+      *addr = *b;
+    }
+    if (op == 7) {
+      result = (uint64_t)same;
+    }
+  } else if (op == 9) {
+    uint64_t* expected = (uint64_t*)(uintptr_t) * (uint32_t*)a;
+    int same = current == *expected;
+    if (same) {
+      *addr = *b;
+    } else {
+      *expected = current;
+    }
+    result = (uint64_t)same;
+  }
+  if (out != NULL) {
+    *out = result;
+  }
+  davecc_atomic64_give();
+}
+#endif

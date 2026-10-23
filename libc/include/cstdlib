@@ -44,6 +44,9 @@ using ::_Exit;
 using ::quick_exit;
 #if __cplusplus >= 201703L
 using ::aligned_alloc;
+using ::free_sized;
+using ::free_aligned_sized;
+using ::memalignment;
 #endif
 using ::getenv;
 using ::system;

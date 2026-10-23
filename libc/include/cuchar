@@ -11,6 +11,10 @@ using ::mbrtoc16;
 using ::c16rtomb;
 using ::mbrtoc32;
 using ::c32rtomb;
+#if __cplusplus >= 202002L
+using ::mbrtoc8;
+using ::c8rtomb;
+#endif
 
 }  // namespace std
 

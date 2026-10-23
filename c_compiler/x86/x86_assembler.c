@@ -2592,6 +2592,21 @@ static void Assemble_atomic_cmpxchgq(X86Assembler* assembler) {
   EmitAtomicCmpxchg(assembler, kX86Size64);
 }
 
+static void Assemble_atomic_cmpxchg8b(X86Assembler* assembler) {
+  X86Op dst;
+  if (!ParseOperand(assembler, &dst) || dst.kind != kX86OpMem) {
+    AssemblerError(&ASM, "atomic_cmpxchg8b expects a memory operand");
+    return;
+  }
+  X86Encode enc;
+  EncodeInit(&enc, assembler);
+  EncodeLegacyPrefix(&enc, 0xf0);
+  EncodeByte(&enc, 0x0f);
+  EncodeByte(&enc, 0xc7);
+  EncodeMemOperand(&enc, 1, &dst);
+  EncodeFinish(&enc);
+}
+
 static void EmitAtomicXadd(X86Assembler* assembler, X86Size size) {
   X86Op src, dst;
   if (!ParseOperand(assembler, &src) || !ExpectComma(assembler) ||
@@ -3000,6 +3015,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(atomic_cmpxchgw);
   INST(atomic_cmpxchgl);
   INST(atomic_cmpxchgq);
+  INST(atomic_cmpxchg8b);
   INST(atomic_xaddb);
   INST(atomic_xaddw);
   INST(atomic_xaddl);

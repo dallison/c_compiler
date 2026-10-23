@@ -264,9 +264,11 @@ run_shared_case riscv full "$rvasm" "$riscvdasm" "$work/riscv.s" \
   'fcvt.d.l ' 'fcvt.d.lu ' 'ecall' 'ebreak'
 
 cat >"$work/arm.s" <<'EOF'
+.syntax unified
+.arm
 .text
 .global arm_entry
-.type arm_entry, @function
+.type arm_entry, %function
 arm_entry:
   mov r0, #1
   moveq r1, #2
@@ -313,6 +315,8 @@ arm_entry:
   strh r5, [sp, #6]
   push {r4, r5, lr}
   pop {r4, r5, pc}
+  ldrexd r2, r3, [r0]
+  strexd r1, r2, r3, [r0]
   stmia sp!, {r0, r1}
   ldmia sp!, {r0, r1}
   stmdb sp!, {r2, r3}
@@ -346,6 +350,10 @@ arm_done:
   svc #0
   swi #7
   ret
+1:
+  adr r2, 1b
+  stmia r2, {r4-r11}
+  ldmia r2, {r4-r7}
 .global arm_external
 .type arm_external, @function
 arm_external:
@@ -353,6 +361,7 @@ arm_external:
 .data
 arm_data:
   .4byte 0
+.section .note.GNU-stack,"",%progbits
 EOF
 
 run_shared_case arm full "$armasm" "$armdasm" "$work/arm.s" \
@@ -360,6 +369,7 @@ run_shared_case arm full "$armasm" "$armdasm" "$work/arm.s" \
   'add ' 'adds ' 'sub ' 'subs ' 'adc ' 'sbc ' 'sbcs ' 'and ' 'orr ' \
   'orrs ' 'eor ' 'bic ' 'cmp ' 'cmn ' 'tst ' 'teq ' 'mul ' 'ldr ' \
   'str ' 'ldrb ' 'strb ' 'ldrh ' 'strh ' 'stm' 'ldm' 'movw ' 'movt ' \
+  'sub r2, pc, #8' 'stmia r2' 'ldrexd ' 'strexd ' \
   'vmov' 'vldr ' 'vstr ' 'vadd.f32 ' 'vsub.f32 ' 'vmul.f64 ' 'vdiv.f64 ' \
   'scvtf ' 'ucvtf ' 'fcvtns ' 'fcvtnu ' 'bl ' 'b ' 'bx ' 'blx ' 'svc'
 

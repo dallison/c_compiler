@@ -30,19 +30,19 @@ void* __builtin_return_address(unsigned int __level);
 #endif
 
 #ifndef __SIZE_T
-#if defined(__6502__)
-typedef unsigned int size_t;
-#else
+#if defined(__LP64__)
 typedef unsigned long size_t;
+#else
+typedef unsigned int size_t;
 #endif
 #define __SIZE_T
 #endif
 
 #ifndef __SSIZE_T
-#if defined(__6502__)
-typedef int ssize_t;
-#else
+#if defined(__LP64__)
 typedef long ssize_t;
+#else
+typedef int ssize_t;
 #endif
 #define __SSIZE_T
 #endif
@@ -112,6 +112,7 @@ void free_aligned_sized(void *ptr, size_t alignment, size_t size);
 void *malloc(size_t size);
 void *realloc(void *ptr, size_t size);
 void *aligned_alloc(size_t alignment, size_t size);
+size_t memalignment(const void *ptr);
 int posix_memalign(void **result, size_t alignment, size_t size);
 int mkstemp(char *template_name);
 char *mkdtemp(char *template_name);

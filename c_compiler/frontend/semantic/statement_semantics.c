@@ -2655,6 +2655,17 @@ static bool DeduceCurrentFunctionAutoReturn(ASTNode* return_value,
     TypeRecordDelete(deduced);
     return true;
   }
+  // `auto&&` is a forwarding reference. An lvalue return collapses `T&&` to
+  // `T&`; an xvalue or prvalue keeps the rvalue reference.
+  if (CompilerIsCXX() && pattern != NULL &&
+      pattern->declarator == kDeclRValueReference && pattern->next != NULL &&
+      pattern->next->declarator == kDeclPrimitive &&
+      (pattern->next->type & kTypeAuto) != 0 &&
+      deduced->declarator == kDeclRValueReference && return_value != NULL &&
+      return_value->value_category == kValueCategoryLvalue) {
+    deduced->declarator = kDeclReference;
+    TypeRecordCalculateSize(deduced);
+  }
   SetCurrentFunctionReturnType(deduced);
   return true;
 }

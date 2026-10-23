@@ -209,6 +209,21 @@ constexpr size_t size(const T (&)[N]) noexcept {
   return N;
 }
 
+#if __cplusplus >= 202002L
+template <class C>
+constexpr auto ssize(const C& container)
+    -> common_type_t<ptrdiff_t, make_signed_t<decltype(container.size())>> {
+  using Result =
+      common_type_t<ptrdiff_t, make_signed_t<decltype(container.size())>>;
+  return static_cast<Result>(container.size());
+}
+
+template <class T, ptrdiff_t N>
+constexpr ptrdiff_t ssize(const T (&)[N]) noexcept {
+  return N;
+}
+#endif
+
 template <class Iter, class = void>
 struct __iterator_concept_member {};
 

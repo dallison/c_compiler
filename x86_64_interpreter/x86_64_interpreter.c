@@ -1745,6 +1745,37 @@ static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
       *insn_len = pos;
       return true;
     }
+    if (b1 == 0xC7) {  // CMPXCHG8B m64
+      ModRM modrm;
+      if (!DecodeModRM(interpreter, &pos, rex, true, &modrm)) {
+        return false;
+      }
+      if (modrm.reg != 1 || modrm.mod == 3) {
+        return false;
+      }
+      uint64_t address = EffectiveAddress(interpreter, &modrm, pos);
+      void* host = HostPtr(interpreter, address, 8);
+      if (host == NULL) {
+        fprintf(stderr, "CMPXCHG8B outside mapped memory at 0x%" PRIx64 "\n",
+                address);
+        X86_64InterpreterFail(interpreter, 1);
+        return false;
+      }
+      uint64_t expected = (uint32_t)ReadReg(interpreter, X86_REG_EAX) |
+                          ((uint64_t)(uint32_t)ReadReg(interpreter, X86_REG_EDX)
+                           << 32);
+      uint64_t desired = (uint32_t)ReadReg(interpreter, X86_REG_EBX) |
+                         ((uint64_t)(uint32_t)ReadReg(interpreter, X86_REG_ECX)
+                          << 32);
+      uint64_t observed = expected;
+      interpreter->zf = __atomic_compare_exchange_n(
+          (uint64_t*)host, &observed, desired, false, __ATOMIC_SEQ_CST,
+          __ATOMIC_SEQ_CST);
+      WriteReg(interpreter, X86_REG_EAX, (uint32_t)observed);
+      WriteReg(interpreter, X86_REG_EDX, (uint32_t)(observed >> 32));
+      *insn_len = pos;
+      return true;
+    }
     if (b1 == 0x18 || b1 == 0x0D || b1 == 0x1F) {
       // PREFETCH* / PREFETCHW / multi-byte NOP: no architectural state.
       ModRM modrm;

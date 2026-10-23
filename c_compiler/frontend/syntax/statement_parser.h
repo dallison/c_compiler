@@ -12,6 +12,9 @@
 #include "syntax.h"
 
 ASTNode* SyntaxParseStatement(Syntax* syntax, TokenClass followers);
+// File-scope and other callers that already know this is an asm statement.
+// Declaration lookahead must not treat `asm("...")` as an implicit-int declarator.
+ASTNode* SyntaxParseAsmStatement(Syntax* syntax, TokenClass followers);
 
 // Parses a C++26/29 `consteval { ... }` block and returns a ConstevalBlockASTNode.
 ASTNode* SyntaxParseConstevalBlock(Syntax* syntax, TokenClass followers);

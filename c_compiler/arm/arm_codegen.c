@@ -1912,6 +1912,10 @@ static void LoadWideFromMergeTmp(ARMGenerator* g, IRNode* tmp,
 // Produce the low and high 32-bit halves of a wide (64-bit) operand.  Constants
 // are materialized on demand; other wide nodes have already been lowered to a
 // (low, high) pair by LowerWideExpression and friends.
+static void LoadWideVariableHalves(ARMGenerator* g, IRNode* node,
+                                   TargetInstruction** lo,
+                                   TargetInstruction** hi);
+
 static void MaterializeWide(ARMGenerator* g, IRNode* node,
                             TargetInstruction** lo, TargetInstruction** hi) {
   if (node->opcode == IR_OP(pusharg) && node->inputs.length > 0) {
@@ -1929,6 +1933,12 @@ static void MaterializeWide(ARMGenerator* g, IRNode* node,
   IRNode* src = node;
   if (WideMergeTmpHasStackHome(src)) {
     LoadWideFromMergeTmp(g, src, lo, hi);
+    return;
+  }
+  if (node->data.ptr == NULL &&
+      (IRIsArgument(node) || IRIsAutoVariable(node) ||
+       IRIsStaticVariable(node))) {
+    LoadWideVariableHalves(g, node, lo, hi);
     return;
   }
   *lo = GetLoweredNode(node);
@@ -3106,6 +3116,31 @@ static TargetInstruction* Load(ARMGenerator* g, IRNode* addr_node, ARMOpcode opc
 
 // Load a 64-bit integer from memory into a (low, high) register pair using two
 // 32-bit loads (avoids the alignment/consecutive-register constraints of ldrd).
+static void LoadWideVariableHalves(ARMGenerator* g, IRNode* node,
+                                   TargetInstruction** lo,
+                                   TargetInstruction** hi) {
+  TargetInstruction* addr;
+  TargetInstruction* offset;
+  TargetInstruction* scale;
+  bool on_stack = GetRegAndOffset(g, node, &addr, &offset, &scale);
+  assert(on_stack && "wide variable must live in memory");
+  (void)on_stack;
+  assert(TargetIsConst(offset));
+  int off = (int)TargetIntValue(offset);
+  TargetInstruction* lo_addr = WideMov(g, addr);
+  *lo = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), lo_addr, offset),
+                                   kSize32Bit));
+  TargetInstruction* offset_hi =
+      GetIntConstant(g, NULL, kTargetType32Bit, off + 4);
+  TargetInstruction* hi_addr = WideMov(g, addr);
+  *hi = Emit(g, SetInstructionSize(NewInstruction2(ARM_OP(ldr), hi_addr, offset_hi),
+                                   kSize32Bit));
+  uint32_t frame_flag = FrameOffsetFlagForNode(node);
+  (*lo)->flags |= frame_flag;
+  (*hi)->flags |= frame_flag;
+  PairWideHalves(*lo, *hi);
+}
+
 static TargetInstruction* LowerWideLoad(ARMGenerator* g, IRNode* node) {
   IRNode* addr_node = node->inputs.value.p[0];
   TargetInstruction* addr;
@@ -5391,8 +5426,9 @@ static int AtomicAccessLog2(TypeRecord* type) {
     case 1: return 0;
     case 2: return 1;
     case 4: return 2;
+    case 8: return 3;
     default:
-      assert(false && "ARM atomics require a 1/2/4-byte object");
+      assert(false && "ARM atomics require a 1/2/4/8-byte object");
       return 2;
   }
 }
@@ -5423,6 +5459,125 @@ static void SetAtomicMetadata(TargetInstruction* inst, TypeRecord* value_type,
 }
 
 static TargetInstruction* FinishAtomicValue(ARMGenerator* g, IRNode* node,
+                                             TargetInstruction* inst);
+
+static void MarkWideHalf(TargetInstruction* lo, TargetInstruction* hi) {
+  if (lo == NULL || hi == NULL || lo == hi) {
+    return;
+  }
+  PairWideHalves(lo, hi);
+  hi->flags |= ARM_WIDE_HI;
+}
+
+static TargetInstruction* FinishWideAtomic(ARMGenerator* g, IRNode* node,
+                                           TargetInstruction* lo,
+                                           TargetInstruction* hi) {
+  SetLoweredHi(node, hi);
+  RouteWideResultToDest(g, node, lo, hi);
+  return SetLoweredNode(node, lo);
+}
+
+// 64-bit atomics use LDREXD/STREXD.  The two halves stay in ordinary registers;
+// the emitter stages the exclusive pair through r4/r5.
+static TargetInstruction* LowerAtomic64(ARMGenerator* g, IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  TypeRecord* value_type = addr_node->type->next;
+  TargetInstruction* addr = AtomicAddress(g, addr_node);
+  TargetInstruction* inst = NULL;
+  TargetInstruction* result_hi = NULL;
+
+  switch (node->opcode) {
+    case IR_OP(atomic_load): {
+      result_hi = Emit(g, NewInstruction(ARM_OP(tmp)));
+      inst = NewInstruction2(ARM_OP(atomic_load), addr, result_hi);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[1]), 0, false);
+      Emit(g, inst);
+      return FinishWideAtomic(g, node, inst, result_hi);
+    }
+    case IR_OP(atomic_store): {
+      TargetInstruction *value_lo, *value_hi;
+      MaterializeWide(g, node->inputs.value.p[1], &value_lo, &value_hi);
+      MarkWideHalf(value_lo, value_hi);
+      inst = NewInstruction3(ARM_OP(atomic_store), value_lo, value_hi, addr);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[2]), 0, false);
+      Emit(g, inst);
+      return SetLoweredNode(node, inst);
+    }
+    case IR_OP(atomic_fetch_add):
+    case IR_OP(atomic_fetch_sub):
+    case IR_OP(atomic_add_fetch):
+    case IR_OP(atomic_sub_fetch): {
+      ARMOpcode opcode =
+          node->opcode == IR_OP(atomic_fetch_add)
+              ? ARM_OP(atomic_fetch_add)
+              : node->opcode == IR_OP(atomic_fetch_sub)
+                    ? ARM_OP(atomic_fetch_sub)
+                    : node->opcode == IR_OP(atomic_add_fetch)
+                          ? ARM_OP(atomic_add_fetch)
+                          : ARM_OP(atomic_sub_fetch);
+      TargetInstruction *delta_lo, *delta_hi;
+      MaterializeWide(g, node->inputs.value.p[1], &delta_lo, &delta_hi);
+      MarkWideHalf(delta_lo, delta_hi);
+      result_hi = Emit(g, NewInstruction(ARM_OP(tmp)));
+      inst = NewInstruction4(opcode, addr, delta_lo, delta_hi, result_hi);
+      SetAtomicMetadata(inst, value_type,
+                        AtomicIRConstant(node->inputs.value.p[2]), 0, false);
+      Emit(g, inst);
+      return FinishWideAtomic(g, node, inst, result_hi);
+    }
+    case IR_OP(atomic_compare_exchange_bool):
+    case IR_OP(atomic_compare_exchange_val):
+    case IR_OP(atomic_compare_exchange_n): {
+      bool expected_is_pointer =
+          node->opcode == IR_OP(atomic_compare_exchange_n);
+      bool returns_value =
+          node->opcode == IR_OP(atomic_compare_exchange_val);
+      ARMOpcode opcode =
+          expected_is_pointer
+              ? ARM_OP(atomic_compare_exchange_n)
+              : returns_value ? ARM_OP(atomic_compare_exchange_val)
+                              : ARM_OP(atomic_compare_exchange_bool);
+      int order_index = expected_is_pointer ? 4 : 3;
+      bool weak =
+          expected_is_pointer &&
+          AtomicIRConstant(node->inputs.value.p[3]) != 0;
+      if (expected_is_pointer) {
+        TargetInstruction* expected = Materialize(g, node->inputs.value.p[1]);
+        TargetInstruction *desired_lo, *desired_hi;
+        MaterializeWide(g, node->inputs.value.p[2], &desired_lo, &desired_hi);
+        MarkWideHalf(desired_lo, desired_hi);
+        inst = NewInstruction4(opcode, addr, expected, desired_lo, desired_hi);
+      } else {
+        TargetInstruction *expected_lo, *expected_hi, *desired_lo, *desired_hi;
+        MaterializeWide(g, node->inputs.value.p[1], &expected_lo, &expected_hi);
+        MaterializeWide(g, node->inputs.value.p[2], &desired_lo, &desired_hi);
+        MarkWideHalf(expected_lo, expected_hi);
+        MarkWideHalf(desired_lo, desired_hi);
+        inst = NewInstruction4(opcode, addr, expected_lo, expected_hi,
+                               desired_lo);
+      }
+      SetAtomicMetadata(
+          inst, value_type,
+          AtomicIRConstant(node->inputs.value.p[order_index]),
+          AtomicIRConstant(node->inputs.value.p[order_index + 1]), weak);
+      if (!returns_value) {
+        return FinishAtomicValue(g, node, inst);
+      }
+      Emit(g, inst);
+      result_hi = Emit(g, NewInstruction(ARM_OP(tmp)));
+      result_hi->flags |= ARM_WIDE_RESULT;
+      TargetAddUser(inst, result_hi);
+      return FinishWideAtomic(g, node, inst, result_hi);
+    }
+    default:
+      assert(false);
+      return NULL;
+  }
+}
+
+static TargetInstruction* FinishAtomicValue(ARMGenerator* g, IRNode* node,
                                              TargetInstruction* inst) {
   CopyOrSetInstructionSize(node, inst);
   Emit(g, inst);
@@ -5434,6 +5589,13 @@ static TargetInstruction* FinishAtomicValue(ARMGenerator* g, IRNode* node,
 }
 
 static TargetInstruction* LowerAtomic(ARMGenerator* g, IRNode* node) {
+  if (node->opcode != IR_OP(atomic_fence) && node->inputs.length > 0) {
+    IRNode* addr_node = node->inputs.value.p[0];
+    if (addr_node->type != NULL && addr_node->type->next != NULL &&
+        addr_node->type->next->size == 8) {
+      return LowerAtomic64(g, node);
+    }
+  }
   if (node->opcode == IR_OP(atomic_fence)) {
     TargetInstruction* inst = NewInstruction(ARM_OP(atomic_fence));
     SetAtomicMetadata(inst, NewTypeRecordWithSize(kTypeInt, kQualPlain),

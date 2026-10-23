@@ -46,6 +46,8 @@ bool X86I386TypeIsWideInt(TypeRecord* type);
 bool X86I386NodeIsWideInt(IRNode* node);
 void X86I386AssignWideMergeStackHomes(X86Generator* rv, Generator* gen);
 bool X86I386ValidateFunction(X86Generator* rv, Generator* gen);
+TargetInstruction* X86I386LowerAtomic(X86Generator* rv, Generator* gen,
+                                      IRNode* node);
 TargetInstruction* X86I386LowerExpression(X86Generator* rv, Generator* gen,
                                             IRNode* node);
 TargetInstruction* X86I386LowerLoad(X86Generator* rv, Generator* gen,

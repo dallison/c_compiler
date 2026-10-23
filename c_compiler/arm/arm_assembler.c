@@ -774,6 +774,47 @@ static void AssembleStoreExclusive(ARMAssembler* assembler, int size) {
                           ((uint32_t)rd.num << 12) | (uint32_t)rt.num);
 }
 
+static void Assemble_ldrexd(ARMAssembler* assembler) {
+  ARMReg rt;
+  ARMReg rt2;
+  ARMOp addr;
+  if (!ParseRegister(assembler, &rt) || !ExpectComma(assembler) ||
+      !ParseRegister(assembler, &rt2) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &addr) || addr.kind != kARMOpMem ||
+      addr.index >= 0 || addr.imm != 0 || addr.writeback) {
+    AssemblerError(&ASM, "Expected even register pair and [base]");
+    return;
+  }
+  if ((rt.num & 1) != 0 || rt2.num != rt.num + 1) {
+    AssemblerError(&ASM, "ldrexd requires an even/odd register pair");
+    return;
+  }
+  EmitInst(assembler, 0xe1b00f90u | ((uint32_t)addr.base << 16) |
+                          ((uint32_t)rt.num << 12) | (uint32_t)rt2.num);
+}
+
+static void Assemble_strexd(ARMAssembler* assembler) {
+  ARMReg rd;
+  ARMReg rt;
+  ARMReg rt2;
+  ARMOp addr;
+  if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler) ||
+      !ParseRegister(assembler, &rt) || !ExpectComma(assembler) ||
+      !ParseRegister(assembler, &rt2) || !ExpectComma(assembler) ||
+      !ParseOperand(assembler, &addr) || addr.kind != kARMOpMem ||
+      addr.index >= 0 || addr.imm != 0 || addr.writeback) {
+    AssemblerError(&ASM, "Expected status, even register pair and [base]");
+    return;
+  }
+  if ((rt.num & 1) != 0 || rt2.num != rt.num + 1 || rd.num == rt.num ||
+      rd.num == rt2.num || rd.num == addr.base) {
+    AssemblerError(&ASM, "strexd register pair is invalid");
+    return;
+  }
+  EmitInst(assembler, 0xe1a00f90u | ((uint32_t)addr.base << 16) |
+                          ((uint32_t)rd.num << 12) | (uint32_t)rt.num);
+}
+
 static void Assemble_ldrex(ARMAssembler* assembler) {
   AssembleLoadExclusive(assembler, 2);
 }
@@ -958,49 +999,60 @@ static void Assemble_blx(ARMAssembler* assembler) {
   EmitInst(assembler, EncodeBranchExchange(ARM_COND_AL, rm.num, true));
 }
 
-static void Assemble_push(ARMAssembler* assembler) {
+// `{r4, r5, r6}` or `{r4-r11}`.  A range is inclusive and only valid for
+// integer registers.
+static bool ParseRegisterList(ARMAssembler* assembler, uint16_t* reglist) {
   if (!LexMatch(&ASM.lex, TOK(lbrace))) {
     AssemblerError(&ASM, "Expected {");
-    return;
+    return false;
   }
-  uint16_t reglist = 0;
+  *reglist = 0;
   bool first = true;
   while (!LexMatch(&ASM.lex, TOK(rbrace))) {
-    if (!first) {
-      if (!ExpectComma(assembler)) {
-        return;
+    if (!first && !ExpectComma(assembler)) {
+      return false;
+    }
+    ARMReg start;
+    if (!ParseRegister(assembler, &start)) {
+      return false;
+    }
+    int end = start.num;
+    if (LexMatch(&ASM.lex, TOK(minus))) {
+      if (start.type != kARMRegTypeInt) {
+        AssemblerError(&ASM, "Register range requires integer registers");
+        return false;
       }
+      ARMReg last;
+      if (!ParseRegister(assembler, &last)) {
+        return false;
+      }
+      if (last.type != kARMRegTypeInt || last.num < start.num) {
+        AssemblerError(&ASM, "Invalid register range");
+        return false;
+      }
+      end = last.num;
     }
-    ARMReg reg;
-    if (!ParseRegister(assembler, &reg)) {
-      return;
+    for (int reg = start.num; reg <= end; reg++) {
+      *reglist |= (uint16_t)(1u << reg);
     }
-    reglist |= (uint16_t)(1 << reg.num);
     first = false;
+  }
+  return true;
+}
+
+static void Assemble_push(ARMAssembler* assembler) {
+  uint16_t reglist = 0;
+  if (!ParseRegisterList(assembler, &reglist)) {
+    return;
   }
   // stmfd sp!, {regs...}
   EmitInst(assembler, 0xE92D0000u | reglist);
 }
 
 static void Assemble_pop(ARMAssembler* assembler) {
-  if (!LexMatch(&ASM.lex, TOK(lbrace))) {
-    AssemblerError(&ASM, "Expected {");
-    return;
-  }
   uint16_t reglist = 0;
-  bool first = true;
-  while (!LexMatch(&ASM.lex, TOK(rbrace))) {
-    if (!first) {
-      if (!ExpectComma(assembler)) {
-        return;
-      }
-    }
-    ARMReg reg;
-    if (!ParseRegister(assembler, &reg)) {
-      return;
-    }
-    reglist |= (uint16_t)(1 << reg.num);
-    first = false;
+  if (!ParseRegisterList(assembler, &reglist)) {
+    return;
   }
   // ldmfd sp!, {regs...}
   EmitInst(assembler, 0xE8BD0000u | reglist);
@@ -1019,24 +1071,9 @@ static void Assemble_block_transfer(ARMAssembler* assembler, bool load,
   if (!ExpectComma(assembler)) {
     return;
   }
-  if (!LexMatch(&ASM.lex, TOK(lbrace))) {
-    AssemblerError(&ASM, "Expected {");
-    return;
-  }
   uint16_t reglist = 0;
-  bool first = true;
-  while (!LexMatch(&ASM.lex, TOK(rbrace))) {
-    if (!first) {
-      if (!ExpectComma(assembler)) {
-        return;
-      }
-    }
-    ARMReg reg;
-    if (!ParseRegister(assembler, &reg)) {
-      return;
-    }
-    reglist |= (uint16_t)(1 << reg.num);
-    first = false;
+  if (!ParseRegisterList(assembler, &reglist)) {
+    return;
   }
   // cond=AL, block transfer (100), P/U select IA/IB/DA/DB.
   uint32_t insn = 0xE8000000u | ((uint32_t)rn.num << 16) | reglist;
@@ -1149,6 +1186,38 @@ static void Assemble_movt(ARMAssembler* assembler) {
   uint32_t imm4 = ((uint32_t)value >> 12) & 0xf;
   EmitInst(assembler, ARM_AL | (0x3 << 24) | (1 << 22) | (imm4 << 16) |
                         (rd.num << 12) | (imm16 & 0xfff));
+}
+
+// `adr Rd, label` is ADD or SUB of the PC-relative distance.  The ARM PC
+// reads as the address of this instruction plus 8.
+static void Assemble_adr(ARMAssembler* assembler) {
+  ARMReg rd;
+  if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler)) {
+    return;
+  }
+  bool known = false;
+  int64_t target = AssemblerEvaluateKnownExpression(&ASM, &known);
+  if (!known) {
+    EmitInst(assembler, EncodeDataProcImm(ARM_COND_AL, 0x4, 0, ARM_PC_REG,
+                                          rd.num, 0));
+    return;
+  }
+  int32_t here = (int32_t)AssemblerCurrentAddress(&ASM);
+  int32_t offset = (int32_t)target - (here + 8);
+  int opcode = 0x4;  // add
+  int32_t imm = offset;
+  if (offset < 0) {
+    opcode = 0x2;  // sub
+    imm = -offset;
+  }
+  uint32_t inst =
+      EncodeDataProcImm(ARM_COND_AL, opcode, 0, ARM_PC_REG, rd.num, imm);
+  if (inst == 0) {
+    AssemblerError(&ASM, "adr offset out of range");
+    EmitInst(assembler, 0);
+    return;
+  }
+  EmitInst(assembler, inst);
 }
 
 static void Assemble_adr32(ARMAssembler* assembler) {
@@ -1643,7 +1712,9 @@ static void InitializeInstructions(Map* instructions) {
   INST(ldrex);
   INST(ldrexb);
   INST(ldrexh);
+  INST(ldrexd);
   INST(strex);
+  INST(strexd);
   INST(strexb);
   INST(strexh);
   INST(dmb);
@@ -1694,6 +1765,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(ret);
   INST(movw);
   INST(movt);
+  INST(adr);
   INST(adr32);
   INST(gotaddr);
   INST2("vmov.f32", vmov_f32);

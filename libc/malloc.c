@@ -13,6 +13,14 @@
 #include <string.h>
 #include <syscall.h>
 
+size_t memalignment(const void* pointer) {
+  uintptr_t address = (uintptr_t)pointer;
+  if (address == 0) {
+    return 0;
+  }
+  return (size_t)(address & (~address + 1));
+}
+
 #if defined(__6502__)
 
 #include "6502/_malloc.h"

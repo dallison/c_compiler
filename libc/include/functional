@@ -728,6 +728,65 @@ invoke(F&& function, T&& object, Args&&... args) {
 
 using __invoke_detail::invoke;
 
+#if __cplusplus >= 201703L
+namespace __not_fn_detail {
+
+template <class F>
+class __wrapper {
+ public:
+  template <class G>
+  explicit constexpr __wrapper(G&& function)
+      : __function(static_cast<G&&>(function)) {}
+
+  __wrapper(const __wrapper&) = default;
+  __wrapper(__wrapper&&) = default;
+
+  template <class... Args>
+  constexpr auto operator()(Args&&... args) & noexcept(
+      noexcept(!std::invoke(__function, static_cast<Args&&>(args)...)))
+      -> decltype(!std::invoke(declval<F&>(), static_cast<Args&&>(args)...)) {
+    return !std::invoke(__function, static_cast<Args&&>(args)...);
+  }
+
+  template <class... Args>
+  constexpr auto operator()(Args&&... args) const& noexcept(
+      noexcept(!std::invoke(__function, static_cast<Args&&>(args)...)))
+      -> decltype(!std::invoke(declval<const F&>(),
+                               static_cast<Args&&>(args)...)) {
+    return !std::invoke(__function, static_cast<Args&&>(args)...);
+  }
+
+  template <class... Args>
+  constexpr auto operator()(Args&&... args) && noexcept(
+      noexcept(!std::invoke(static_cast<F&&>(__function),
+                            static_cast<Args&&>(args)...)))
+      -> decltype(!std::invoke(declval<F&&>(), static_cast<Args&&>(args)...)) {
+    return !std::invoke(static_cast<F&&>(__function),
+                        static_cast<Args&&>(args)...);
+  }
+
+  template <class... Args>
+  constexpr auto operator()(Args&&... args) const&& noexcept(
+      noexcept(!std::invoke(static_cast<const F&&>(__function),
+                            static_cast<Args&&>(args)...)))
+      -> decltype(!std::invoke(declval<const F&&>(),
+                               static_cast<Args&&>(args)...)) {
+    return !std::invoke(static_cast<const F&&>(__function),
+                        static_cast<Args&&>(args)...);
+  }
+
+ private:
+  F __function;
+};
+
+}  // namespace __not_fn_detail
+
+template <class F>
+constexpr __not_fn_detail::__wrapper<decay_t<F>> not_fn(F&& function) {
+  return __not_fn_detail::__wrapper<decay_t<F>>(static_cast<F&&>(function));
+}
+#endif
+
 #if __cplusplus >= 202302L
 
 template <class R, class F, class... Args>
@@ -744,25 +803,29 @@ constexpr R invoke_r(F&& function, Args&&... args)
   }
 }
 
+#endif
+
+#if __cplusplus >= 202002L
+
 namespace __bind_back_detail {
 
-template <class Sequence>
+template <class Sequence, bool Front>
 struct __binder_caller;
 
-template <size_t... Indices>
-struct __binder_caller<index_sequence<Indices...>> {
+template <size_t... Indices, bool Front>
+struct __binder_caller<index_sequence<Indices...>, Front> {
   template <class Function, class Tuple, class... Args>
-  static constexpr invoke_result_t<
-      Function&&, Args&&...,
-      decltype(std::get<Indices>(declval<Tuple>()))...>
-  __call(Function&& function, Tuple&& bound, Args&&... args)
-      noexcept(is_nothrow_invocable<
-               Function&&, Args&&...,
-               decltype(std::get<Indices>(declval<Tuple>()))...>::value) {
-    return std::invoke(
-        static_cast<Function&&>(function),
-        static_cast<Args&&>(args)...,
-        std::get<Indices>(static_cast<Tuple&&>(bound))...);
+  static constexpr decltype(auto) __call(Function&& function, Tuple&& bound,
+                                         Args&&... args) {
+    if constexpr (Front) {
+      return std::invoke(static_cast<Function&&>(function),
+                         std::get<Indices>(static_cast<Tuple&&>(bound))...,
+                         static_cast<Args&&>(args)...);
+    } else {
+      return std::invoke(static_cast<Function&&>(function),
+                         static_cast<Args&&>(args)...,
+                         std::get<Indices>(static_cast<Tuple&&>(bound))...);
+    }
   }
 };
 
@@ -777,7 +840,7 @@ struct __all_constructible<Arg, Rest...>
     : bool_constant<is_constructible<decay_t<Arg>, Arg>::value &&
                     __all_constructible<Rest...>::value> {};
 
-template <class Function, class... Bound>
+template <bool Front, class Function, class... Bound>
 class __binder {
  private:
   using __indices = make_index_sequence<sizeof...(Bound)>;
@@ -823,11 +886,11 @@ class __binder {
  private:
   template <class Self, class... Args>
   static constexpr decltype(auto) __call(Self&& self, Args&&... args)
-      noexcept(noexcept(__binder_caller<__indices>::__call(
+      noexcept(noexcept(__binder_caller<__indices, Front>::__call(
           static_cast<Self&&>(self).__function,
           static_cast<Self&&>(self).__bound,
           static_cast<Args&&>(args)...))) {
-    return __binder_caller<__indices>::__call(
+    return __binder_caller<__indices, Front>::__call(
         static_cast<Self&&>(self).__function,
         static_cast<Self&&>(self).__bound,
         static_cast<Args&&>(args)...);
@@ -842,10 +905,20 @@ class __binder {
 template <class F, class... Args>
   requires (is_constructible<decay_t<F>, F>::value &&
             __bind_back_detail::__all_constructible<Args...>::value)
-constexpr auto bind_back(F&& function, Args&&... args) {
-  return __bind_back_detail::__binder<decay_t<F>, decay_t<Args>...>(
+constexpr auto bind_front(F&& function, Args&&... args) {
+  return __bind_back_detail::__binder<true, decay_t<F>, decay_t<Args>...>(
       static_cast<F&&>(function), static_cast<Args&&>(args)...);
 }
+
+#if __cplusplus >= 202302L
+template <class F, class... Args>
+  requires (is_constructible<decay_t<F>, F>::value &&
+            __bind_back_detail::__all_constructible<Args...>::value)
+constexpr auto bind_back(F&& function, Args&&... args) {
+  return __bind_back_detail::__binder<false, decay_t<F>, decay_t<Args>...>(
+      static_cast<F&&>(function), static_cast<Args&&>(args)...);
+}
+#endif
 
 #endif
 

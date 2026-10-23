@@ -150,6 +150,24 @@ inline typename enable_if<is_integral<T>::value, bool>::type isnormal(T x) {
   return x != T(0);
 }
 
+#if __cplusplus >= 202002L
+template <class T>
+constexpr typename enable_if<is_floating_point<T>::value, T>::type lerp(
+    T a, T b, T t) noexcept {
+  if ((a <= T(0) && b >= T(0)) || (a >= T(0) && b <= T(0))) {
+    return t * b + (T(1) - t) * a;
+  }
+  if (t == T(1)) {
+    return b;
+  }
+  T x = a + t * (b - a);
+  if ((t > T(1)) == (b > a)) {
+    return x < b ? b : x;
+  }
+  return x < b ? x : b;
+}
+#endif
+
 }  // namespace std
 
 // The <math.h> classification macros were undefined above; keep the global

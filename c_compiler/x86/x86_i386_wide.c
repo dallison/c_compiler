@@ -956,6 +956,137 @@ static void I386ReportUnsupported(Generator* gen, const char* msg) {
   }
 }
 
+static TargetInstruction* I386ForceReg(X86Generator* rv, TargetInstruction* value) {
+  return X86CgEmit(rv, X86CgNewInstruction1(X86_OP(mv), value));
+}
+
+static void I386MarkWideHalf(TargetInstruction* lo, TargetInstruction* hi) {
+  if (lo == NULL || hi == NULL || lo == hi) {
+    return;
+  }
+  I386PairWideHalves(lo, hi);
+  hi->flags |= X86_WIDE_HI;
+}
+
+static TargetInstruction* I386FinishWideAtomic(X86Generator* rv, Generator* gen,
+                                               IRNode* node,
+                                               TargetInstruction* inst,
+                                               TargetInstruction* result_hi) {
+  I386SetLoweredHi(node, result_hi);
+  TargetInstruction* result = TargetSetLoweredNode(node, inst);
+  I386RouteWideResultToDest(rv, gen, node, inst, result_hi);
+  return result;
+}
+
+TargetInstruction* X86I386LowerAtomic(X86Generator* rv, Generator* gen,
+                                      IRNode* node) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  TargetInstruction* addr = I386ForceReg(rv, X86CgMaterialize(rv, addr_node));
+  int kind = 0;
+  TargetInstruction* inst = NULL;
+
+  switch (node->opcode) {
+    case IR_OP(atomic_load): {
+      kind = X86_ATOMIC64_LOAD;
+      TargetInstruction* result_hi =
+          X86CgEmit(rv, X86CgNewInstruction(X86_OP(tmp)));
+      inst = TargetNewInstruction2((TargetOpcode)X86_OP(atomic64), addr,
+                                   result_hi);
+      X86CgEmit(rv, inst);
+      inst->flags |= kind << X86_ATOMIC64_KIND_SHIFT;
+      return I386FinishWideAtomic(rv, gen, node, inst, result_hi);
+    }
+    case IR_OP(atomic_store): {
+      kind = X86_ATOMIC64_STORE;
+      TargetInstruction *lo, *hi;
+      I386MaterializeWide(rv, node->inputs.value.p[1], &lo, &hi);
+      lo = I386ForceReg(rv, lo);
+      hi = I386ForceReg(rv, hi);
+      I386MarkWideHalf(lo, hi);
+      inst = TargetNewInstruction3((TargetOpcode)X86_OP(atomic64), lo, hi, addr);
+      X86CgEmit(rv, inst);
+      inst->flags |= kind << X86_ATOMIC64_KIND_SHIFT;
+      return TargetSetLoweredNode(node, inst);
+    }
+    case IR_OP(atomic_fetch_add):
+    case IR_OP(atomic_fetch_sub):
+    case IR_OP(atomic_add_fetch):
+    case IR_OP(atomic_sub_fetch): {
+      bool add = node->opcode == IR_OP(atomic_fetch_add) ||
+                 node->opcode == IR_OP(atomic_add_fetch);
+      bool return_new = node->opcode == IR_OP(atomic_add_fetch) ||
+                        node->opcode == IR_OP(atomic_sub_fetch);
+      kind = add ? (return_new ? X86_ATOMIC64_ADD_FETCH
+                               : X86_ATOMIC64_FETCH_ADD)
+                 : (return_new ? X86_ATOMIC64_SUB_FETCH
+                               : X86_ATOMIC64_FETCH_SUB);
+      TargetInstruction *lo, *hi;
+      I386MaterializeWide(rv, node->inputs.value.p[1], &lo, &hi);
+      lo = I386ForceReg(rv, lo);
+      hi = I386ForceReg(rv, hi);
+      I386MarkWideHalf(lo, hi);
+      TargetInstruction* result_hi =
+          X86CgEmit(rv, X86CgNewInstruction(X86_OP(tmp)));
+      inst = TargetNewInstruction4((TargetOpcode)X86_OP(atomic64), addr, lo, hi,
+                                   result_hi);
+      X86CgEmit(rv, inst);
+      inst->flags |= kind << X86_ATOMIC64_KIND_SHIFT;
+      return I386FinishWideAtomic(rv, gen, node, inst, result_hi);
+    }
+    case IR_OP(atomic_compare_exchange_n): {
+      kind = X86_ATOMIC64_CAS_N;
+      TargetInstruction* expected =
+          I386ForceReg(rv, X86CgMaterialize(rv, node->inputs.value.p[1]));
+      TargetInstruction *lo, *hi;
+      I386MaterializeWide(rv, node->inputs.value.p[2], &lo, &hi);
+      lo = I386ForceReg(rv, lo);
+      hi = I386ForceReg(rv, hi);
+      I386MarkWideHalf(lo, hi);
+      inst = TargetNewInstruction4((TargetOpcode)X86_OP(atomic64), addr,
+                                   expected, lo, hi);
+      X86CgEmit(rv, inst);
+      inst->flags |= kind << X86_ATOMIC64_KIND_SHIFT;
+      TargetInstruction* dest = X86CgGetDestInstruction(rv, gen, node);
+      if (dest != NULL) {
+        inst = X86CgSetDestOrMove(rv, inst, dest, X86_OP(mv));
+      }
+      return TargetSetLoweredNode(node, inst);
+    }
+    case IR_OP(atomic_compare_exchange_bool):
+    case IR_OP(atomic_compare_exchange_val): {
+      bool returns_value = node->opcode == IR_OP(atomic_compare_exchange_val);
+      kind = returns_value ? X86_ATOMIC64_CAS_VAL : X86_ATOMIC64_CAS_BOOL;
+      TargetInstruction *elo, *ehi, *dlo, *dhi;
+      I386MaterializeWide(rv, node->inputs.value.p[1], &elo, &ehi);
+      I386MaterializeWide(rv, node->inputs.value.p[2], &dlo, &dhi);
+      elo = I386ForceReg(rv, elo);
+      ehi = I386ForceReg(rv, ehi);
+      dlo = I386ForceReg(rv, dlo);
+      dhi = I386ForceReg(rv, dhi);
+      I386MarkWideHalf(elo, ehi);
+      I386MarkWideHalf(dlo, dhi);
+      inst = TargetNewInstruction4((TargetOpcode)X86_OP(atomic64), addr, elo,
+                                   ehi, dlo);
+      X86CgEmit(rv, inst);
+      inst->flags |= kind << X86_ATOMIC64_KIND_SHIFT;
+      if (!returns_value) {
+        TargetInstruction* dest = X86CgGetDestInstruction(rv, gen, node);
+        if (dest != NULL) {
+          inst = X86CgSetDestOrMove(rv, inst, dest, X86_OP(mv));
+        }
+        return TargetSetLoweredNode(node, inst);
+      }
+      TargetInstruction* result_hi =
+          X86CgEmit(rv, X86CgNewInstruction(X86_OP(tmp)));
+      result_hi->flags |= X86_WIDE_RESULT;
+      TargetAddUser(inst, result_hi);
+      return I386FinishWideAtomic(rv, gen, node, inst, result_hi);
+    }
+    default:
+      return NULL;
+  }
+}
+
 bool X86I386ValidateFunction(X86Generator* rv, Generator* gen) {
   (void)rv;
   for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
@@ -970,11 +1101,6 @@ bool X86I386ValidateFunction(X86Generator* rv, Generator* gen) {
       case IR_OP(atomic_compare_exchange_bool):
       case IR_OP(atomic_compare_exchange_val):
       case IR_OP(atomic_compare_exchange_n):
-        if (node->type != NULL && node->type->size == 8) {
-          I386ReportUnsupported(
-              gen, "8-byte atomic operations are not supported on i386");
-          return false;
-        }
         break;
       default:
         break;

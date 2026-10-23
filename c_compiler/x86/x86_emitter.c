@@ -5085,6 +5085,195 @@ static void ReloadStructReturnRegisterAtLandingPad(X86Emitter* emitter,
                                                    FILE* fp);
 
 // Main instruction printer.
+static void PrintI386Reg(FILE* fp, TargetInstruction* inst) {
+  char buf[16];
+  fprintf(fp, "%%%s", GetRegisterName(inst, buf, sizeof(buf)));
+}
+
+static TargetInstruction* X86FlaggedUser(TargetInstruction* inst, int flag) {
+  if (inst == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < inst->users.length; i++) {
+    TargetInstruction* user = inst->users.value.p[i];
+    if (user != NULL && (user->flags & flag) != 0) {
+      return user;
+    }
+  }
+  return NULL;
+}
+
+static int X86RegNum(TargetInstruction* inst) {
+  if (inst == NULL || inst->reg == NULL) {
+    return -1;
+  }
+  return inst->reg->num;
+}
+
+// CMPXCHG8B sequence.  EAX:EDX is the observed value, EBX:ECX the new value,
+// and ESI the address.  All five are saved; a result that lands in one of
+// them is reloaded after that restore.
+static void PrintAtomic64I386(TargetInstruction* inst, const char* func_name,
+                              FILE* fp) {
+  int kind = (inst->flags & X86_ATOMIC64_KIND_MASK) >> X86_ATOMIC64_KIND_SHIFT;
+  bool is_load = kind == X86_ATOMIC64_LOAD;
+  bool is_store = kind == X86_ATOMIC64_STORE;
+  bool is_add = kind == X86_ATOMIC64_FETCH_ADD || kind == X86_ATOMIC64_ADD_FETCH;
+  bool is_sub = kind == X86_ATOMIC64_FETCH_SUB || kind == X86_ATOMIC64_SUB_FETCH;
+  bool return_new =
+      kind == X86_ATOMIC64_ADD_FETCH || kind == X86_ATOMIC64_SUB_FETCH;
+  bool is_cas = kind == X86_ATOMIC64_CAS_BOOL || kind == X86_ATOMIC64_CAS_VAL ||
+                kind == X86_ATOMIC64_CAS_N;
+  bool expected_is_pointer = kind == X86_ATOMIC64_CAS_N;
+  bool returns_value = kind == X86_ATOMIC64_CAS_VAL;
+
+  TargetInstruction* result_lo = is_store ? NULL : inst;
+  TargetInstruction* result_hi = NULL;
+  TargetInstruction* addr = inst->operand[0];
+  TargetInstruction* a_lo = NULL;
+  TargetInstruction* a_hi = NULL;
+  TargetInstruction* b_lo = NULL;
+  TargetInstruction* b_hi = NULL;
+  if (is_load) {
+    result_hi = inst->operand[1];
+  } else if (is_store) {
+    a_lo = inst->operand[0];
+    a_hi = inst->operand[1];
+    addr = inst->operand[2];
+  } else if (is_add || is_sub) {
+    a_lo = inst->operand[1];
+    a_hi = inst->operand[2];
+    result_hi = inst->operand[3];
+  } else if (expected_is_pointer) {
+    a_lo = inst->operand[1];
+    b_lo = inst->operand[2];
+    b_hi = inst->operand[3];
+  } else if (is_cas) {
+    a_lo = inst->operand[1];
+    a_hi = inst->operand[2];
+    b_lo = inst->operand[3];
+    b_hi = X86FlaggedUser(b_lo, X86_WIDE_HI);
+    if (returns_value) {
+      result_hi = X86FlaggedUser(inst, X86_WIDE_RESULT);
+    }
+  }
+
+  fprintf(fp, "\tsubl $80, %%esp\n");
+  fprintf(fp, "\tmovl ");
+  PrintI386Reg(fp, addr);
+  fprintf(fp, ", (%%esp)\n");
+  if (a_lo != NULL) {
+    fprintf(fp, "\tmovl ");
+    PrintI386Reg(fp, a_lo);
+    fprintf(fp, ", 4(%%esp)\n");
+  }
+  if (a_hi != NULL) {
+    fprintf(fp, "\tmovl ");
+    PrintI386Reg(fp, a_hi);
+    fprintf(fp, ", 8(%%esp)\n");
+  }
+  if (b_lo != NULL) {
+    fprintf(fp, "\tmovl ");
+    PrintI386Reg(fp, b_lo);
+    fprintf(fp, ", 12(%%esp)\n");
+  }
+  if (b_hi != NULL) {
+    fprintf(fp, "\tmovl ");
+    PrintI386Reg(fp, b_hi);
+    fprintf(fp, ", 16(%%esp)\n");
+  }
+  fprintf(fp, "\tmovl %%eax, 40(%%esp)\n");
+  fprintf(fp, "\tmovl %%ecx, 44(%%esp)\n");
+  fprintf(fp, "\tmovl %%edx, 48(%%esp)\n");
+  fprintf(fp, "\tmovl %%ebx, 52(%%esp)\n");
+  fprintf(fp, "\tmovl %%esi, 56(%%esp)\n");
+  fprintf(fp, "\tmovl (%%esp), %%esi\n");
+
+  if (is_load || is_add || is_sub) {
+    fprintf(fp, ".L%s_a64_%d:\n", func_name, inst->id);
+    fprintf(fp, "\tmovl (%%esi), %%eax\n");
+    fprintf(fp, "\tmovl 4(%%esi), %%edx\n");
+    fprintf(fp, "\tmovl %%eax, %%ebx\n");
+    fprintf(fp, "\tmovl %%edx, %%ecx\n");
+    if (is_add || is_sub) {
+      fprintf(fp, "\t%sl 4(%%esp), %%ebx\n", is_add ? "add" : "sub");
+      fprintf(fp, "\t%sbl 8(%%esp), %%ecx\n", is_add ? "adc" : "sbb");
+    }
+    fprintf(fp, "\tatomic_cmpxchg8b (%%esi)\n");
+    fprintf(fp, "\tjne .L%s_a64_%d\n", func_name, inst->id);
+    if (is_load || !return_new) {
+      fprintf(fp, "\tmovl %%eax, 32(%%esp)\n");
+      fprintf(fp, "\tmovl %%edx, 36(%%esp)\n");
+    } else {
+      fprintf(fp, "\tmovl %%ebx, 32(%%esp)\n");
+      fprintf(fp, "\tmovl %%ecx, 36(%%esp)\n");
+    }
+  } else if (is_store) {
+    fprintf(fp, "\tmovl 4(%%esp), %%ebx\n");
+    fprintf(fp, "\tmovl 8(%%esp), %%ecx\n");
+    fprintf(fp, ".L%s_a64_%d:\n", func_name, inst->id);
+    fprintf(fp, "\tmovl (%%esi), %%eax\n");
+    fprintf(fp, "\tmovl 4(%%esi), %%edx\n");
+    fprintf(fp, "\tatomic_cmpxchg8b (%%esi)\n");
+    fprintf(fp, "\tjne .L%s_a64_%d\n", func_name, inst->id);
+  } else if (is_cas) {
+    if (expected_is_pointer) {
+      fprintf(fp, "\tmovl 4(%%esp), %%eax\n");
+      fprintf(fp, "\tmovl 4(%%eax), %%edx\n");
+      fprintf(fp, "\tmovl (%%eax), %%eax\n");
+    } else {
+      fprintf(fp, "\tmovl 4(%%esp), %%eax\n");
+      fprintf(fp, "\tmovl 8(%%esp), %%edx\n");
+    }
+    fprintf(fp, "\tmovl 12(%%esp), %%ebx\n");
+    fprintf(fp, "\tmovl 16(%%esp), %%ecx\n");
+    fprintf(fp, "\tatomic_cmpxchg8b (%%esi)\n");
+    fprintf(fp, "\tje .L%s_a64_ok_%d\n", func_name, inst->id);
+    if (expected_is_pointer) {
+      fprintf(fp, "\tmovl 4(%%esp), %%ebx\n");
+      fprintf(fp, "\tmovl %%eax, (%%ebx)\n");
+      fprintf(fp, "\tmovl %%edx, 4(%%ebx)\n");
+    }
+    if (returns_value) {
+      fprintf(fp, "\tmovl %%eax, 32(%%esp)\n");
+      fprintf(fp, "\tmovl %%edx, 36(%%esp)\n");
+    } else {
+      fprintf(fp, "\tmovl $0, 32(%%esp)\n");
+    }
+    fprintf(fp, "\tjmp .L%s_a64_out_%d\n", func_name, inst->id);
+    fprintf(fp, ".L%s_a64_ok_%d:\n", func_name, inst->id);
+    if (returns_value) {
+      fprintf(fp, "\tmovl %%eax, 32(%%esp)\n");
+      fprintf(fp, "\tmovl %%edx, 36(%%esp)\n");
+    } else {
+      fprintf(fp, "\tmovl $1, 32(%%esp)\n");
+    }
+    fprintf(fp, ".L%s_a64_out_%d:\n", func_name, inst->id);
+  }
+
+  int lo_num = X86RegNum(result_lo);
+  int hi_num = X86RegNum(result_hi);
+  static const int saved[] = {0, 1, 2, 3, 6};
+  static const int slots[] = {40, 44, 48, 52, 56};
+  static const char* names[] = {"eax", "ecx", "edx", "ebx", "esi"};
+  for (int i = 0; i < 5; i++) {
+    if (lo_num != saved[i] && hi_num != saved[i]) {
+      fprintf(fp, "\tmovl %d(%%esp), %%%s\n", slots[i], names[i]);
+    }
+  }
+  if (result_lo != NULL) {
+    fprintf(fp, "\tmovl 32(%%esp), ");
+    PrintI386Reg(fp, result_lo);
+    fprintf(fp, "\n");
+  }
+  if (result_hi != NULL) {
+    fprintf(fp, "\tmovl 36(%%esp), ");
+    PrintI386Reg(fp, result_hi);
+    fprintf(fp, "\n");
+  }
+  fprintf(fp, "\taddl $80, %%esp\n");
+}
+
 static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
   if (inst->block == NULL) {
@@ -5136,6 +5325,9 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
 
   // Special case instructions.
   switch ((X86Opcode)inst->opcode) {
+    case X86_OP(atomic64):
+      PrintAtomic64I386(inst, func_name, fp);
+      return;
     case X86_OP(atomic_compare_exchange_bool):
     case X86_OP(atomic_compare_exchange_val):
     case X86_OP(atomic_compare_exchange_n):
