@@ -358,6 +358,38 @@ static ASTNode* NewSourceLocationDefaultArgument(Symbol* formal,
                           NewRawIdentifierASTNode(NULL, location), NewVector());
 }
 
+// Substitution rewrites a default argument's types but leaves the callee
+// symbol pointing at the template parameter (`Allocator`).  Analysis would
+// copy that parameter type back over the concrete class.  Retarget the
+// callee at the substituted type.
+static void RetargetSubstitutedDefaultArgumentCallee(ASTNode* expr) {
+  if (expr == NULL || expr->op != AST_OP(call)) {
+    return;
+  }
+  VectorASTNode* call = (VectorASTNode*)expr;
+  if (call->left == NULL || call->left->op != AST_OP(identifier) ||
+      call->left->type == NULL ||
+      TypeContainsTemplateParameter(call->left->type) ||
+      !TypeIsStructOrUnion(call->left->type)) {
+    return;
+  }
+  IdentifierASTNode* id = (IdentifierASTNode*)call->left;
+  if (id->symbol == NULL || !id->symbol->flags.is_template_parameter) {
+    return;
+  }
+  Symbol* concrete = NewSymbol(id->symbol->name.value,
+                               TypeRecordCopy(call->left->type),
+                               id->symbol->storage);
+  concrete->flags = id->symbol->flags;
+  concrete->flags.is_template_parameter = false;
+  concrete->flags.is_template_type_parameter = false;
+  concrete->template_parameter_index = -1;
+  id->symbol = concrete;
+  expr->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
+  ASTNodeClearType(expr);
+  call->left->flags &= ~kASTAnalyzed;
+}
+
 // Appends analyzed default-argument expressions; returns false if any formal lacks a default.
 static bool AppendDefaultCallArguments(VectorASTNode* call, TypeRecord* func) {
   if (call == NULL || call->children == NULL || func == NULL ||
@@ -391,6 +423,42 @@ static bool AppendDefaultCallArguments(VectorASTNode* call, TypeRecord* func) {
     // parameter type may use a user-defined conversion even when this call is
     // itself the user-defined conversion of an outer initialization
     // (`AnnotationRecord r = desc` with `optional<E> semantic = nullopt`).
+    //
+    // The expression is parsed against the function template, so it still
+    // names that template's parameters (`Allocator()` on vector's fill
+    // constructor).  The specialization can be called before its body clone
+    // rewrites the stored default — a lambda instantiated while the class
+    // is still being instantiated hits that window and would leave
+    // `Allocator()` dependent through code generation.  Substitute the
+    // specialization's template arguments first.
+    if (ExpressionIsTemplateDependent(default_arg) &&
+        !TypeContainsTemplateParameter(func)) {
+      Vector* specialization_args = NULL;
+      if (func->template_arguments != NULL &&
+          !TemplateArgumentVectorContainsTemplateParameter(
+              func->template_arguments)) {
+        specialization_args = func->template_arguments;
+      }
+      Struct* owner = func->info.function.cxx_member_owner;
+      if (specialization_args == NULL && owner != NULL && !owner->is_template &&
+          owner->tag_symbol != NULL && owner->tag_symbol->type != NULL &&
+          !TemplateArgumentVectorContainsTemplateParameter(
+              owner->tag_symbol->type->template_arguments)) {
+        specialization_args = owner->tag_symbol->type->template_arguments;
+      }
+      if (specialization_args != NULL) {
+        ASTNode* substituted = TypeSubstituteTemplateExpression(
+            &compiler->syntax, default_arg, specialization_args,
+            call->base.location);
+        if (substituted != NULL) {
+          ASTNodeDelete(default_arg);
+          default_arg = substituted;
+          default_arg->flags |= kASTDefaultArgument;
+          default_arg->location = call->base.location;
+          RetargetSubstitutedDefaultArgumentCallee(default_arg);
+        }
+      }
+    }
     bool saved_udc = SemanticSuspendUserDefinedConversionRank();
     default_arg = AnalyzeExpression(default_arg);
     SemanticResumeUserDefinedConversionRank(saved_udc);

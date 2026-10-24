@@ -8527,6 +8527,31 @@ static ASTNode* ReanalyzeClonedDependentFunctorCall(
   if (call->children != NULL) {
     for (size_t i = 0; i < call->children->length; i++) {
       ASTNode* actual = call->children->value.p[i];
+      // `T(args)` is lowered to `(T::T(&tmp, args), tmp)`.  The constructor
+      // call is the comma's left child, not a direct argument of the
+      // enclosing call, so it has to be resolved before overload resolution
+      // sees the temporary.
+      if (actual != NULL && actual->op == AST_OP(comma)) {
+        BinaryASTNode* comma = (BinaryASTNode*)actual;
+        if (comma->left != NULL && comma->left->op == AST_OP(call) &&
+            (comma->left->flags & kASTDependentFunctorCall) != 0) {
+          int left_child_id = comma->left->child_id;
+          ASTNodeTransformAction child_action = kASTTransformContinue;
+          ASTNode* analyzed_left = ReanalyzeClonedDependentFunctorCall(
+              comma->left, data, &child_action);
+          if (analyzed_left != NULL) {
+            comma->left = analyzed_left;
+            analyzed_left->parent = actual;
+            analyzed_left->child_id = left_child_id;
+          }
+        }
+        if ((actual->type == NULL || TypeIsUnknown(actual->type)) &&
+            comma->right != NULL && comma->right->type != NULL &&
+            !TypeIsUnknown(comma->right->type) &&
+            !TypeContainsTemplateParameter(comma->right->type)) {
+          ASTNodeSetType(actual, comma->right->type);
+        }
+      }
       if (actual != NULL && actual->op == AST_OP(call) &&
           (actual->flags & kASTDependentFunctorCall) != 0) {
         int actual_child_id = actual->child_id;
@@ -11343,6 +11368,14 @@ static void NoteBodyTemplateParameterIndex(ASTNode* node, void* data,
   if (node->op == AST_OP(cast)) {
     NoteTypeTemplateParameterIndices(((CastASTNode*)node)->cast_type, max_index,
                                      0);
+  }
+  // `sizeof(T)` / `alignof(T)` keep the operand type beside the expression.
+  // The node's own type is `size_t`, so without this a member template whose
+  // body mentions T only there looks like it has no enclosing parameter and
+  // is cloned with the wrong argument vector.
+  if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
+    NoteTypeTemplateParameterIndices(
+        ((SizeofASTNode*)node)->type_operand, max_index, 0);
   }
   if (node->op != AST_OP(identifier)) {
     return;

@@ -1732,6 +1732,13 @@ ASTNode* TryAnalyzeOverloadedBinaryOperator(BinaryASTNode* node) {
       (dependent_class_operand ||
        ExpressionIsTemplateDependent(node->left) ||
        ExpressionIsTemplateDependent(node->right))) {
+    // Built-in comma yields the right operand even when the left is a
+    // constructor call that is still dependent (`Del(sizeof(T))` lowered to
+    // `(Del::Del(&tmp, sizeof(T)), tmp)`).  An unknown result type survives
+    // instantiation and the enclosing call never resolves.
+    if (node->base.op == AST_OP(comma)) {
+      return NULL;
+    }
     // The primary template may only carry a placeholder class (`basic_ostream`
     // rather than `basic_ostream<char, traits>`) and a fallback scalar for the
     // dependent operand. Resolve the operator in the concrete body clone.

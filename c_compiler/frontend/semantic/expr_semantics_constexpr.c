@@ -559,7 +559,10 @@ bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
   // Its initializer may refer to other automatic objects whose runtime values
   // are not bound in the P-code constexpr thunk.  Treating that partial result
   // as a constant freezes zero-filled members into later expressions.
-  if (symbol->flags.is_local &&
+  // A temporary materialized to bind `const T&` (`f({})`) is not a local, but
+  // the same speculative cache then re-analyzes the image as a required
+  // constant and rejects members whose constructors are not constant.
+  if ((symbol->flags.is_local || symbol->flags.is_temp) &&
       !StorageIs(symbol->storage, STO(static) | STO(thread)) &&
       !symbol->flags.is_constexpr && !symbol->flags.is_constinit) {
     return false;

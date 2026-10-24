@@ -222,8 +222,12 @@ static int OverloadBaseConversionRankMaterialized(TypeRecord* actual,
     }
     return -1;
   }
+  // A same-width signedness change (`unsigned char` to `char`, `int` to
+  // `unsigned int`) is an integral conversion, not a promotion.  Ranking it
+  // with promotions made `unsigned char` ambiguous between `Arg(char)` and
+  // `Arg(int)`, so `absl::Substitute` rejected a descriptor type field.
   if (TypeEqualIgnoringSign(actual, target)) {
-    return 1;
+    return 2;
   }
   if (TypeIsEnum(actual) && TypeIsEnum(target)) {
     return actual->info.enum_info == target->info.enum_info ? 0 : -1;

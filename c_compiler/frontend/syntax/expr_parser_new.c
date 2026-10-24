@@ -1763,6 +1763,16 @@ ASTNode* ParseCXXNewExpression(Syntax* syntax, TokenClass followers,
         SyntaxError(syntax, "new initializer for non-class type requires one expression");
         VectorDelete(initializers);
       }
+    } else if (placeholder_actuals == NULL &&
+               initializer_open == TOK(lbrace) &&
+               CXXNewConstructorSetHasInitializerList(
+                   FindCXXConstructorForType(allocated_type))) {
+      // `new T{a, b}` list-initializes.  Keep the brace as one actual so an
+      // initializer-list constructor is considered; overload resolution
+      // expands the elements only when no such constructor is viable.
+      LexNextToken(syntax->lex);
+      ctor_actuals = NewVector();
+      VectorAppend(ctor_actuals, SyntaxParseBracedInitializer(syntax));
     } else {
       // `new (p) T{a, b}` on a class with constructors is direct initialization
       // via the matching constructor, not aggregate/braced assignment into

@@ -2837,8 +2837,15 @@ static void ResolveLoweredConstructorOverload(VectorASTNode* node,
     return;
   }
   size_t num_actual = node->children != NULL ? node->children->length : 0;
+  // The lowered call is attached to whichever constructor was in hand when
+  // the expression was built.  A non-template of the same arity is not
+  // necessarily viable: `iterator(const_iterator)` may have been attached to
+  // `iterator(Node*)`.  Keep that constructor only when the argument
+  // conversion succeeds; otherwise rank the other constructors, including
+  // constructor templates.
   if (id->symbol->type->info.function.prototype.length == num_actual &&
-      !id->symbol->flags.is_template) {
+      !id->symbol->flags.is_template &&
+      FunctionCallScore(id->symbol->type, node, /*first_formal_arg=*/0) >= 0) {
     return;
   }
   Struct* owner = id->symbol->type->info.function.cxx_member_owner;
@@ -2847,7 +2854,9 @@ static void ResolveLoweredConstructorOverload(VectorASTNode* node,
           ? FindCXXMemberOverloadHead(owner, owner->tag_name)
           : NULL;
   StructMember* match = NULL;
-  if (id->symbol->type->info.function.prototype.length != num_actual) {
+  if (id->symbol->type->info.function.prototype.length != num_actual ||
+      (!id->symbol->flags.is_template &&
+       FunctionCallScore(id->symbol->type, node, /*first_formal_arg=*/0) < 0)) {
     match = RankLoweredConstructorNonTemplateMatch(head, node);
   }
   if (match == NULL) {

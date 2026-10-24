@@ -870,8 +870,14 @@ static ASTNode* MemberPointerBuildVirtualCallee(ASTNode* receiver,
     ASTNodeSetType(slot_ptr, slot_ptr_type);
     ASTNode* fn_ptr =
         NewUnaryASTNode(AST_OP(contents), function_pointer, location, slot_ptr);
+    // Analysis types the dereference as the pointee and drops the function
+    // pointer type it was constructed with.  The loaded slot is already that
+    // pointer, so put the type back; keep a reference across analysis or the
+    // retype uses a record analysis just released.
+    TypeRecordIncRef(function_pointer);
     fn_ptr = AnalyzeExpression(fn_ptr);
     ASTNodeSetType(fn_ptr, function_pointer);
+    TypeRecordDelete(function_pointer);
     return fn_ptr;
   }
 

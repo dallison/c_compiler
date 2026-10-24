@@ -1262,6 +1262,18 @@ void RegisterCXXVirtualMember(TypeParser* parser, Struct* str,
     VectorAppend(&str->virtual_members, member);
     return;
   }
+  // CopyCXXBaseVirtualMembers concatenates every base vtable, and each base
+  // numbers its slots from zero.  An override of a non-primary base shares
+  // that index with a primary-base slot, so writing by index would clobber
+  // the primary vtable.  Replace the base member itself; abstractness and
+  // the final-overrider walk both read this vector.
+  if (override != NULL) {
+    for (size_t i = 0; i < str->virtual_members.length; i++) {
+      if (str->virtual_members.value.p[i] == override) {
+        VectorSet(&str->virtual_members, i, member);
+      }
+    }
+  }
   if (member->cxx_vcall_offset != 0) {
     return;
   }
