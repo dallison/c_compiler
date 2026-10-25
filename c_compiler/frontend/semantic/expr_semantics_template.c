@@ -1276,6 +1276,22 @@ static ASTNode* CXXInstantiateVariableTemplateValue(Symbol* var_sym,
       return AnalyzeExpression(cast);
     }
   }
+  if (concrete != NULL && TypeIsStructOrUnion(concrete) &&
+      !var_sym->flags.is_constexpr) {
+    Symbol* object = CXXMaterializeVariableTemplateObject(
+        &compiler->syntax, var_sym, template_args, concrete, location);
+    TypeRecordDelete(concrete);
+    if (object == NULL) {
+      return NULL;
+    }
+    ASTNode* id = NewIdentifierASTNode(object, location);
+    id->flags |= kASTNeedAddress;
+    ASTNode* analyzed = AnalyzeExpression(id);
+    if (analyzed != NULL) {
+      analyzed->value_category = kValueCategoryLvalue;
+    }
+    return analyzed;
+  }
   if (concrete != NULL && TypeIsStructOrUnion(concrete)) {
     Symbol* temp = SyntaxNewTemporary(&compiler->syntax, concrete);
     temp->location = location;

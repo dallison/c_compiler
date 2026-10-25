@@ -85,6 +85,24 @@ static void InjectInstantiatedAnonymousMembers(TypeParser* parser,
                                                Struct* str);
 static bool StructHasBitFieldMembers(Struct* str);
 
+static void CopySymbolVariableTemplate(Symbol* dest, Symbol* source) {
+  if (dest == NULL || source == NULL ||
+      SymbolExtraOf(source)->variable_template == NULL) {
+    return;
+  }
+  VariableTemplate* from = SymbolExtraOf(source)->variable_template;
+  VariableTemplate* vt = malloc(sizeof(VariableTemplate));
+  vt->initializer = NULL;
+  vt->associated_constraint = NULL;
+  VectorInit(&vt->parameters);
+  VectorInit(&vt->partial_specializations);
+  for (size_t p = 0; p < from->parameters.length; p++) {
+    VectorAppend(&vt->parameters,
+                 TemplateParameterCopy(from->parameters.value.p[p]));
+  }
+  SymbolMutableExtra(dest)->variable_template = vt;
+}
+
 static void CopySymbolAliasTemplate(Symbol* dest, Symbol* source) {
   if (dest == NULL || source == NULL ||
       SymbolExtraOf(source)->alias_template == NULL) {
@@ -3404,6 +3422,64 @@ ASTNode* TypeInstantiateVariableTemplateInitializer(Syntax* syntax,
                            false);
   TypeParserDestruct(&parser);
   return concrete;
+}
+
+typedef struct VariableTemplateObject {
+  Symbol* primary;
+  Vector* args;
+  Symbol* instance;
+} VariableTemplateObject;
+
+static Vector g_variable_template_objects;
+static bool g_variable_template_objects_ready = false;
+
+Symbol* CXXMaterializeVariableTemplateObject(Syntax* syntax,
+                                            Symbol* var_template, Vector* args,
+                                            TypeRecord* concrete,
+                                            SourceLocation location) {
+  if (syntax == NULL || var_template == NULL || args == NULL ||
+      concrete == NULL) {
+    return NULL;
+  }
+  if (!g_variable_template_objects_ready) {
+    VectorInit(&g_variable_template_objects);
+    g_variable_template_objects_ready = true;
+  }
+  for (size_t i = 0; i < g_variable_template_objects.length; i++) {
+    VariableTemplateObject* existing =
+        g_variable_template_objects.value.p[i];
+    if (existing != NULL && existing->primary == var_template &&
+        TemplateArgumentVectorEqual(existing->args, args)) {
+      return existing->instance;
+    }
+  }
+  String name;
+  StringInit(&name, NULL);
+  AppendTemplateInstantiationName(&name, var_template, args);
+  Symbol* object =
+      NewSymbol(name.value, TypeRecordCopy(concrete), var_template->storage);
+  StringDestruct(&name);
+  object->location = location != SOURCE_LOCATION_MISSING ? location
+                                                      : var_template->location;
+  object->namespace_ = var_template->namespace_;
+  object->flags.is_defined = true;
+  object->flags.is_weak = true;
+  Struct* owner = SymbolExtraOf(var_template)->static_data_member_class;
+  if (owner != NULL) {
+    SymbolMutableExtra(object)->static_data_member_class = owner;
+  }
+  SymbolSetCXXDataAsmName(object, owner);
+  VariableTemplateObject* created = malloc(sizeof(VariableTemplateObject));
+  created->primary = var_template;
+  created->args = TemplateArgumentVectorCopy(args);
+  created->instance = object;
+  VectorAppend(&g_variable_template_objects, created);
+  ASTNode* initializer =
+      TypeInstantiateVariableTemplateInitializer(syntax, var_template, args);
+  VectorAppend(&compiler->cxx_deferred_static_member_definitions,
+               NewVariableDeclarationASTNode(object, initializer,
+                                             object->location));
+  return object;
 }
 
 static void ParserApplyMemberOwnerSubstitution(TypeParser* parser,
@@ -12770,6 +12846,31 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
     member_symbol->location = member->symbol->location;
     member_symbol->flags = member->symbol->flags;
     CopySymbolAliasTemplate(member_symbol, member->symbol);
+    CopySymbolVariableTemplate(member_symbol, member->symbol);
+    if (member_symbol->flags.is_template &&
+        SymbolExtraOf(member_symbol)->variable_template != NULL &&
+        source_args != NULL && source_args->length > 0) {
+      int variable_base = (int)source_args->length;
+      Vector* variable_params =
+          &SymbolExtraOf(member_symbol)->variable_template->parameters;
+      for (size_t variable_index = 0; variable_index < variable_params->length;
+           variable_index++) {
+        TemplateParameter* variable_param =
+            variable_params->value.p[variable_index];
+        if (variable_param == NULL) {
+          continue;
+        }
+        if (variable_param->index >= variable_base) {
+          variable_param->index -= variable_base;
+        }
+        RebaseTemplateParameterIndices(variable_param->type, variable_base);
+        RebaseTemplateParameterIndices(variable_param->default_type,
+                                       variable_base);
+        if (variable_param->default_template_parameter_index >= variable_base) {
+          variable_param->default_template_parameter_index -= variable_base;
+        }
+      }
+    }
     // A member alias of a partial specialization is numbered after that
     // partial's parameters (`F` at 2 in `template<class R, class... P>
     // struct Impl<R(P...)> { template<class F> using A = is_same<F, int>; }`).
@@ -12847,6 +12948,11 @@ static TypeRecord* InstantiateSimpleClassTemplateUncached(
         !DependentExpressionContainsTemplateParameter(
             instantiated->default_initializer)) {
       SymbolMutableExtra(member_symbol)->constexpr_initializer = ASTNodeClone(
+          instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
+    }
+    if (SymbolExtraOf(member_symbol)->variable_template != NULL &&
+        instantiated->default_initializer != NULL) {
+      SymbolExtraOf(member_symbol)->variable_template->initializer = ASTNodeClone(
           instantiated->default_initializer, IdentityCloneNode, NULL, NULL);
     }
     RecordStaticDataMemberPattern(member, member_symbol, source_args);

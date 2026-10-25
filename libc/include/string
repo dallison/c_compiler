@@ -363,6 +363,11 @@ class basic_string {
     return append(s.__data, s.__size);
   }
 
+  __DAVECC_STRING_CONSTEXPR basic_string& append(
+      basic_string_view<CharT, Traits> sv) {
+    return append(sv.data(), sv.size());
+  }
+
   __DAVECC_STRING_CONSTEXPR basic_string& append(const basic_string& s, size_type pos,
                        size_type n = npos) {
     if (pos > s.__size) {
@@ -421,6 +426,11 @@ class basic_string {
   __DAVECC_STRING_CONSTEXPR basic_string& insert(
       size_type pos, const basic_string& s) {
     return insert(pos, s.__data, s.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& insert(
+      size_type pos, basic_string_view<CharT, Traits> sv) {
+    return insert(pos, sv.data(), sv.size());
   }
 
   __DAVECC_STRING_CONSTEXPR basic_string& insert(
@@ -546,6 +556,11 @@ class basic_string {
   __DAVECC_STRING_CONSTEXPR basic_string& replace(
       size_type pos, size_type count, const CharT* s) {
     return replace(pos, count, s, traits_type::length(s));
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& replace(
+      size_type pos, size_type count, basic_string_view<CharT, Traits> sv) {
+    return replace(pos, count, sv.data(), sv.size());
   }
 
   __DAVECC_STRING_CONSTEXPR basic_string& replace(

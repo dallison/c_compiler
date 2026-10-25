@@ -395,6 +395,22 @@ static bool UnresolvedNameMayBeDependentMember(Syntax* syntax) {
       (syntax != NULL && StructHasDependentBase(syntax->cxx_class_head))) {
     return true;
   }
+  // `using Loc::Id` in a class template introduces the name before the base
+  // is a real class.  A static member (`Id()`, `Offset()`) is not found by
+  // ordinary lookup yet, and must stay a dependent member call rather than
+  // an unknown free function.
+  Struct* scopes[3];
+  scopes[0] = owner;
+  scopes[1] = StructFromThisSymbol(lambda_enclosing_this);
+  scopes[2] = syntax != NULL ? syntax->cxx_class_head : NULL;
+  for (int i = 0; i < 3; i++) {
+    Struct* scope = scopes[i];
+    if (scope != NULL &&
+        (scope->is_template || scope->defining_template_scope_count > 0) &&
+        scope->member_using_declarations.length > 0) {
+      return true;
+    }
+  }
   return false;
 }
 

@@ -357,6 +357,11 @@ static bool ConditionStartsWithType(Syntax* syntax) {
       return true;
     case TOK(auto): case TOK(decltype): case TOK(typename):
       return CompilerIsCXX();
+    case TOK(coloncolon):
+      // `if (::phaser::PayloadBuffer* pb = ...)` is a condition declaration.
+      // A leading `::` on a comparison or call fails the declarator check
+      // below and stays an expression.
+      return CompilerIsCXX();
     case TOK(identifier): {
       // `if (std::size_t len = ...)` starts with a qualified type.  A
       // comparison such as `a < b` has no `::`, so it stays an expression.

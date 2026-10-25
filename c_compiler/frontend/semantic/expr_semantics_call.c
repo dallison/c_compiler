@@ -2876,8 +2876,21 @@ static ASTNode* UnresolvedImplicitMemberCallee(ASTNode* callee) {
     return NULL;
   }
   Struct* owner = this_type->next->info.struct_info;
-  if (owner->is_template || TypeContainsTemplateParameter(this_type->next)) {
+  // The class template is not marked is_template until its definition
+  // finishes, but member bodies are analyzed before that.  A dependent base
+  // or a using-declaration of one (`using Loc::Id`) means the name is not a
+  // free function.
+  if (owner->is_template || TypeContainsTemplateParameter(this_type->next) ||
+      owner->member_using_declarations.length > 0) {
     return NULL;
+  }
+  for (size_t i = 0; i < owner->bases.length; i++) {
+    CXXBaseSpecifier* base = owner->bases.value.p[i];
+    if (base != NULL && base->type != NULL &&
+        (TypeContainsTemplateParameter(base->type) ||
+         base->type->template_parameter_index >= 0)) {
+      return NULL;
+    }
   }
   String* name = ((ConstantASTNode*)access->right)->value.string;
   CXXAccess member_access = kAccessPublic;

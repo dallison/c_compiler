@@ -546,6 +546,42 @@ static void ParseCXXMemberUsingDeclaration(TypeParser* parser, Struct* owner,
     return;
   }
 
+  // `using typename Base::iterator` introduces the nested type immediately,
+  // even when Base is dependent ([namespace.udecl]).
+  if (LexLookingAt(parser->lex, TOK(typename))) {
+    LexCheckpoint checkpoint;
+    LexCheckpointSave(parser->lex, &checkpoint);
+    LexNextToken(parser->lex);
+    FullyQualifiedIdentifier name;
+    FullyQualifiedIdentifierInit(&name);
+    bool parsed_name = SyntaxParseFullyQualifiedIdentifierWithTemplateIds(
+        parser->syntax, &name, TC(decl));
+    String member_name;
+    StringInit(&member_name, NULL);
+    if (parsed_name && name.is_qualified && name.components.length >= 2) {
+      StringSetString(&member_name,
+                      name.components.value.p[name.components.length - 1]);
+    }
+    FullyQualifiedIdentifierDestruct(&name);
+    LexCheckpointRestore(parser->lex, &checkpoint);
+    LexCheckpointDestruct(&checkpoint);
+    if (member_name.length == 0) {
+      SyntaxError(parser->syntax,
+                  "Member using declaration requires Base::member");
+      StringDestruct(&member_name);
+      SyntaxRecover(parser->syntax, TC(semicolon));
+      return;
+    }
+    bool saved_parsing_type_id = parser->parsing_type_id;
+    parser->parsing_type_id = true;
+    TypeRecord* type = TypeParserParseType(parser, true);
+    parser->parsing_type_id = saved_parsing_type_id;
+    AddCXXNestedAliasMember(parser, owner, member_name.value, type, access,
+                            location, /*is_template_alias=*/false, NULL);
+    StringDestruct(&member_name);
+    return;
+  }
+
   FullyQualifiedIdentifier name;
   FullyQualifiedIdentifierInit(&name);
   if (!SyntaxParseFullyQualifiedIdentifierWithTemplateIds(parser->syntax, &name,
@@ -3784,6 +3820,16 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
         is_inline_member = true;
         parser->is_inline = is_inline_member;
       }
+      // `size_t static MakeTag(...)` — decl-specifiers may follow the type.
+      if (CompilerIsCXX() && !is_static_member &&
+          LexMatch(parser->lex, TOK(static))) {
+        is_static_member = true;
+      }
+      if (CompilerIsCXX() && !is_inline_member &&
+          LexMatch(parser->lex, TOK(inline))) {
+        is_inline_member = true;
+        parser->is_inline = is_inline_member;
+      }
       ParseInterleavedMemberAttributes(parser, &member_attributes);
       // An omitted array bound on a static member is an incomplete type, not
       // a flexible array.  The flag is not storage class: the out-of-line
@@ -3988,7 +4034,14 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                 member_template_requires_clause);
             member_template_requires_clause = NULL;
           } else if (TypeIsStructOrUnion(member_symbol->type) &&
-                     member_symbol->type->info.struct_info != NULL) {
+                     member_symbol->type->info.struct_info != NULL &&
+                     member_symbol->type->info.struct_info->lexical_parent ==
+                         str) {
+            // A nested class template (`template<class T> struct Inner`).
+            // A variable template of some other class type
+            // (`static inline std::atomic<uint32_t> hint`) must not mark
+            // that class as a template; the next use then collides with
+            // the tag of the specialization.
             member_symbol->flags.is_template = true;
             Struct* nested = member_symbol->type->info.struct_info;
             nested->is_template = true;

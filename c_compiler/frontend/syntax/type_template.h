@@ -209,6 +209,12 @@ TypeRecord* TypeInstantiateVariableTemplateDeducedType(struct Syntax* syntax,
                                                        Vector* args);
 struct ASTNode* TypeInstantiateVariableTemplateInitializer(
     struct Syntax* syntax, Symbol* var_template, Vector* args);
+// One static object for a non-constexpr variable template specialization.
+// Further uses with the same arguments return the same symbol.
+Symbol* CXXMaterializeVariableTemplateObject(struct Syntax* syntax,
+                                            Symbol* var_template, Vector* args,
+                                            TypeRecord* concrete,
+                                            SourceLocation location);
 void TypeAddCXXDeductionGuide(Symbol* class_template, Symbol* guide);
 TypeRecord* TypeDeduceClassTemplateFromGuide(struct Syntax* syntax,
                                              Symbol* class_template,

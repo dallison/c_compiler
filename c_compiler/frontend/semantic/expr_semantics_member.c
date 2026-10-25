@@ -689,6 +689,27 @@ static ASTNode* TryFinalizeKnownMemberReference(BinaryASTNode* node) {
 // Returns `node` when handled; NULL to proceed with concrete lookup.
 static ASTNode* TryHandleDependentMemberReference(BinaryASTNode* node,
                                                    TypeRecord* receiver_type) {
+  // `this->Parent()` invented for a using-declaration of a dependent base.
+  // The primary class template does not have that member yet; the
+  // specialization imports it before the cloned body is analyzed again.
+  if (CompilerIsCXX() &&
+      (node->base.flags & kASTUnresolvedImplicitMember) != 0 &&
+      receiver_type != NULL) {
+    TypeRecord* class_type =
+        TypeIsPointer(receiver_type) && receiver_type->next != NULL
+            ? receiver_type->next
+            : receiver_type;
+    Struct* str = class_type != NULL && TypeIsStructOrUnion(class_type)
+                      ? class_type->info.struct_info
+                      : NULL;
+    if (str != NULL &&
+        (str->is_template || TypeContainsTemplateParameter(class_type))) {
+      TypeRecord* placeholder =
+          NewTypeRecordWithSize(kTypeInt | kTypeUnknown, kQualPlain);
+      ASTNodeSetType((ASTNode*)node, placeholder);
+      return (ASTNode*)node;
+    }
+  }
   if (CompilerIsCXX() && receiver_type != NULL &&
       TypeContainsTemplateParameter(receiver_type)) {
     TypeRecord* placeholder = TypeRecordCopy(receiver_type);
@@ -853,6 +874,21 @@ static StructMember* LookupStructMemberForReference(
           "member access into incomplete type '%s'")) {
     return NULL;
   }
+  if (member == NULL &&
+      (struct_info->is_template ||
+       struct_info->member_using_declarations.length > 0)) {
+    return NULL;
+  }
+  if (member == NULL) {
+    for (size_t i = 0; i < struct_info->bases.length; i++) {
+      CXXBaseSpecifier* base = struct_info->bases.value.p[i];
+      if (base != NULL && base->type != NULL &&
+          (TypeContainsTemplateParameter(base->type) ||
+           base->type->template_parameter_index >= 0)) {
+        return NULL;
+      }
+    }
+  }
   if (member == NULL) {
     const char* suggestion =
         TypoCorrectionFindMemberName(struct_info, member_name->value);
@@ -979,7 +1015,23 @@ ASTNode* AnalyzeMemberReference(BinaryASTNode* node) {
       node, struct_info, receiver_type, member_name, &access, &member_owner,
       &member_offset);
   if (member == NULL) {
-    ASTNodeSetType((ASTNode*)node, NewTypeRecordWithSize(kTypeInt, kQualPlain));
+    bool dependent = struct_info->is_template ||
+                     struct_info->member_using_declarations.length > 0;
+    if (!dependent) {
+      for (size_t i = 0; i < struct_info->bases.length; i++) {
+        CXXBaseSpecifier* base = struct_info->bases.value.p[i];
+        if (base != NULL && base->type != NULL &&
+            (TypeContainsTemplateParameter(base->type) ||
+             base->type->template_parameter_index >= 0)) {
+          dependent = true;
+          break;
+        }
+      }
+    }
+    TypeRecord* fallback =
+        NewTypeRecordWithSize(dependent ? kTypeInt | kTypeUnknown : kTypeInt,
+                              kQualPlain);
+    ASTNodeSetType((ASTNode*)node, fallback);
     return (ASTNode*)node;
   }
 
