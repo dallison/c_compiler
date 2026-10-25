@@ -222,6 +222,7 @@ davecc_library(davecc_compiler
   c_compiler/bpf/bpf_reg_alloc.c
   c_compiler/bpf/bpf_target.c
   c_compiler/assembler/asm_expr.c
+  c_compiler/assembler/asm_macro.c
   c_compiler/assembler/asm_module.c
   c_compiler/assembler/asm_object.c
   c_compiler/assembler/assembler.c

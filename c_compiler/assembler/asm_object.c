@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "assembler.h"
+#include "asm_expr.h"
 #include "dwarf.h"
 #include "elf_writer.h"
 
@@ -27,11 +28,23 @@ AssemblerSection* NewAssemblerSection(String* name, int32_t type, int32_t flags,
   section->flags = flags;
   section->type = type;
   section->alignment = alignment;
+  section->has_subsections = false;
+  section->current_subsection = 0;
+  section->subsection_cap = 0;
+  section->sub_size = NULL;
+  section->prev_sub_size = NULL;
+  section->sub_bytes = NULL;
   return section;
 }
 
 void AssemblerSectionDestruct(AssemblerSection* section) {
   ELFWriterSectionContentsDestruct(&section->contents);
+  for (int i = 0; i < section->subsection_cap; i++) {
+    BufferDestruct(&section->sub_bytes[i]);
+  }
+  free(section->sub_size);
+  free(section->prev_sub_size);
+  free(section->sub_bytes);
   if (section->name != NULL) {
     StringDelete(section->name);
   }
@@ -84,6 +97,7 @@ static AssemblerSymbol* AllocAssemblerSymbol(const char* name, bool stable_name,
   sym->value = value;
   sym->size = 0;
   sym->defined = false;
+  sym->defined_pass = 0;
   sym->section = section;
   sym->index = -1;
   sym->exported = false;
@@ -92,6 +106,9 @@ static AssemblerSymbol* AllocAssemblerSymbol(const char* name, bool stable_name,
   sym->is_constant = false;
   sym->is_forward_declared = false;
   sym->explicit_local = false;
+  sym->is_eqv = false;
+  sym->eqv_busy = false;
+  sym->eqv_ast = NULL;
   return sym;
 }
 
@@ -108,7 +125,13 @@ AssemblerSymbol* NewAssemblerSymbolWithStableName(
   return AllocAssemblerSymbol(name, true, section, type, binding, value);
 }
 
-void AssemblerSymbolDelete(AssemblerSymbol* sym) { StringDestruct(&sym->name); }
+void AssemblerSymbolDelete(AssemblerSymbol* sym) {
+  if (sym->eqv_ast != NULL) {
+    AssemblerReleaseExpression(sym->eqv_ast);
+    sym->eqv_ast = NULL;
+  }
+  StringDestruct(&sym->name);
+}
 
 static int SymbolInsertCompare(BinaryTreeNode* node1, BinaryTreeNode* node2) {
   AssemblerSymbol* sym1 = (AssemblerSymbol*)node1;
@@ -248,6 +271,14 @@ void AsmObjectClearSymbols(AsmObject* object) {
 void AsmObjectReset(AsmObject* object, bool clear_symbols) {
   for (size_t i = 0; i < object->sections.length; i++) {
     AssemblerSection* section = object->sections.value.p[i];
+    if (section->has_subsections) {
+      for (int s = 0; s < section->subsection_cap; s++) {
+        section->prev_sub_size[s] = section->sub_size[s];
+        section->sub_size[s] = 0;
+        BufferClear(&section->sub_bytes[s]);
+      }
+      section->current_subsection = 0;
+    }
     section->address = 0;
   }
   if (clear_symbols) {
@@ -305,52 +336,175 @@ void AsmObjectInsertSymbol(AsmObject* object, AssemblerSymbol* sym) {
   HashTableInsert(&object->symbol_table, sym);
 }
 
-void AsmObjectEmitWord(AsmObject* object, int section, int32_t word) {
+static size_t SubsectionBase(const AssemblerSection* section, int subsection) {
+  size_t base = 0;
+  for (int i = 0; i < subsection && i < section->subsection_cap; i++) {
+    base += section->prev_sub_size[i];
+  }
+  return base;
+}
+
+static void NoteEmitted(AssemblerSection* section, size_t count) {
+  if (!section->has_subsections) {
+    section->address += count;
+    return;
+  }
+  int sub = section->current_subsection;
+  section->sub_size[sub] += count;
+  section->address = SubsectionBase(section, sub) + section->sub_size[sub];
+}
+
+static Buffer* EmitDestination(AssemblerSection* section) {
+  if (section->has_subsections) {
+    return &section->sub_bytes[section->current_subsection];
+  }
+  return &section->contents.data.buffered;
+}
+
+static bool EnsureSubsectionSlot(AssemblerSection* section, int subsection) {
+  if (subsection < section->subsection_cap) {
+    return true;
+  }
+  int cap = section->subsection_cap == 0 ? 4 : section->subsection_cap;
+  while (cap <= subsection) {
+    if (cap > 8192) {
+      cap = 8193;
+      break;
+    }
+    cap *= 2;
+  }
+  if (subsection >= cap) {
+    return false;
+  }
+  size_t* sizes = realloc(section->sub_size, (size_t)cap * sizeof(size_t));
+  if (sizes == NULL) {
+    return false;
+  }
+  section->sub_size = sizes;
+  size_t* prev = realloc(section->prev_sub_size, (size_t)cap * sizeof(size_t));
+  if (prev == NULL) {
+    return false;
+  }
+  section->prev_sub_size = prev;
+  Buffer* bytes = realloc(section->sub_bytes, (size_t)cap * sizeof(Buffer));
+  if (bytes == NULL) {
+    return false;
+  }
+  section->sub_bytes = bytes;
+  for (int i = section->subsection_cap; i < cap; i++) {
+    section->sub_size[i] = 0;
+    section->prev_sub_size[i] = 0;
+    BufferInit(&section->sub_bytes[i]);
+  }
+  section->subsection_cap = cap;
+  return true;
+}
+
+bool AsmObjectSelectSubsection(AsmObject* object, int subsection) {
+  if (subsection < 0 || subsection > 8192) {
+    return false;
+  }
+  if (object->current_section < 0 ||
+      (size_t)object->current_section >= object->sections.length) {
+    return false;
+  }
+  AssemblerSection* section =
+      object->sections.value.p[object->current_section];
+  if (!section->has_subsections && subsection == section->current_subsection) {
+    return true;
+  }
+  if (!EnsureSubsectionSlot(section, subsection)) {
+    return false;
+  }
+  if (!section->has_subsections) {
+    section->sub_size[0] = (size_t)section->address;
+    section->has_subsections = true;
+    object->requires_layout_pass = true;
+    if (object->pass == ASM_OBJECT_FINAL_PASS &&
+        section->contents.data_location == kSectionContentsBuffered &&
+        section->contents.data.buffered.length > 0) {
+      BufferAppend(&section->sub_bytes[0], section->contents.data.buffered.value,
+                   section->contents.data.buffered.length);
+      BufferClear(&section->contents.data.buffered);
+    }
+  }
+  section->current_subsection = subsection;
+  section->address =
+      SubsectionBase(section, subsection) + section->sub_size[subsection];
+  return true;
+}
+
+void AsmObjectFinishSubsections(AsmObject* object) {
+  for (size_t i = 0; i < object->sections.length; i++) {
+    AssemblerSection* section = object->sections.value.p[i];
+    if (!section->has_subsections) {
+      continue;
+    }
+    size_t total = 0;
+    Buffer combined;
+    BufferInit(&combined);
+    for (int s = 0; s < section->subsection_cap; s++) {
+      total += section->sub_size[s];
+      if (section->sub_bytes[s].length > 0) {
+        BufferAppend(&combined, section->sub_bytes[s].value,
+                     section->sub_bytes[s].length);
+      }
+    }
+    if (section->contents.data_location == kSectionContentsBuffered) {
+      BufferDestruct(&section->contents.data.buffered);
+      section->contents.data.buffered = combined;
+    } else {
+      BufferDestruct(&combined);
+    }
+    section->contents.size = total;
+  }
+}
+
+static void EmitBytes(AsmObject* object, int section, const void* bytes,
+                      size_t count) {
   AssemblerSection* sect = object->sections.value.p[section];
   if (object->pass == ASM_OBJECT_FINAL_PASS) {
-    BufferAppend(&sect->contents.data.buffered, (char*)&word, 4);
-    sect->contents.size += 4;
+    if (sect->contents.data_location == kSectionContentsBuffered) {
+      BufferAppend(EmitDestination(sect), (char*)bytes, count);
+    }
+    if (!sect->has_subsections) {
+      sect->contents.size += count;
+    }
   }
-  sect->address += 4;
+  NoteEmitted(sect, count);
+}
+
+void AsmObjectEmitWord(AsmObject* object, int section, int32_t word) {
+  EmitBytes(object, section, &word, 4);
 }
 
 void AsmObjectEmitByte(AsmObject* object, int section, uint8_t byte) {
-  AssemblerSection* sect = object->sections.value.p[section];
-  if (object->pass == ASM_OBJECT_FINAL_PASS) {
-    BufferAppend(&sect->contents.data.buffered, (char*)&byte, 1);
-    sect->contents.size += 1;
-  }
-  sect->address += 1;
+  EmitBytes(object, section, &byte, 1);
 }
 
 void AsmObjectEmitHalf(AsmObject* object, int section, uint16_t half) {
-  AssemblerSection* sect = object->sections.value.p[section];
-  if (object->pass == ASM_OBJECT_FINAL_PASS) {
-    BufferAppend(&sect->contents.data.buffered, (char*)&half, 2);
-    sect->contents.size += 2;
-  }
-  sect->address += 2;
+  EmitBytes(object, section, &half, 2);
 }
 
 void AsmObjectEmitLong(AsmObject* object, int section, uint64_t l) {
-  AssemblerSection* sect = object->sections.value.p[section];
-  if (object->pass == ASM_OBJECT_FINAL_PASS) {
-    BufferAppend(&sect->contents.data.buffered, (char*)&l, 8);
-    sect->contents.size += 8;
-  }
-  sect->address += 8;
+  EmitBytes(object, section, &l, 8);
 }
 
 void AsmObjectEmitFill(AsmObject* object, int section, int64_t num_bytes,
                         int fill) {
+  if (num_bytes < 0) {
+    return;
+  }
   AssemblerSection* sect = object->sections.value.p[section];
   if (object->pass == ASM_OBJECT_FINAL_PASS) {
     if (sect->contents.data_location == kSectionContentsBuffered) {
-      BufferFill(&sect->contents.data.buffered, num_bytes, fill);
+      BufferFill(EmitDestination(sect), (size_t)num_bytes, (char)fill);
     }
-    sect->contents.size += num_bytes;
+    if (!sect->has_subsections) {
+      sect->contents.size += (size_t)num_bytes;
+    }
   }
-  sect->address += num_bytes;
+  NoteEmitted(sect, (size_t)num_bytes);
 }
 
 void AsmObjectEmitUleb128(AsmObject* object, int section, uint64_t value) {
@@ -576,6 +730,7 @@ static AssemblerSymbol* NewLabel(AsmObject* object, const char* name,
       SYM_BIND(local), AsmObjectCurrentAddress(object));
   sym->is_label = true;
   sym->defined = true;
+  sym->defined_pass = object->pass;
   AsmObjectInsertSymbol(object, sym);
   return sym;
 }
@@ -590,6 +745,7 @@ AssemblerSymbol* AsmObjectDefineLabel(AsmObject* object, Assembler* assembler,
         sym->binding = SYM_BIND(local);
       }
       sym->defined = true;
+      sym->defined_pass = object->pass;
       sym->is_label = true;
       sym->section = object->current_section;
       sym->value = AsmObjectCurrentAddress(object);

@@ -51,6 +51,9 @@ typedef struct AssemblerSymbol {
   int64_t value;
   int32_t size;
   bool defined;
+  // Assembly pass that last saw this symbol's definition.  .ifdef follows
+  // gas and is false until that definition is reached again on this pass.
+  int defined_pass;
   int32_t section;
   int32_t index;
   bool exported;
@@ -60,6 +63,10 @@ typedef struct AssemblerSymbol {
   bool is_constant;
   // Named by a `.local` directive, as opposed to only being referenced.
   bool explicit_local;
+  // `.eqv` stores the expression and evaluates it at each use.
+  bool is_eqv;
+  bool eqv_busy;
+  void* eqv_ast;
 } AssemblerSymbol;
 
 AssemblerSymbol* NewAssemblerSymbol(const char* name, int32_t section,
@@ -80,6 +87,17 @@ typedef struct AssemblerSection {
   int32_t flags;
   int32_t type;
   int32_t alignment;
+  // GNU as subsections.  Until one is selected, bytes live in `contents`.
+  // After that, each subsection has its own buffer and the section is
+  // concatenated in subsection order before the object is written.
+  // `prev_sub_size` is the previous pass, so a label in a later subsection
+  // gets a stable address on the next pass.
+  bool has_subsections;
+  int current_subsection;
+  int subsection_cap;
+  size_t* sub_size;
+  size_t* prev_sub_size;
+  Buffer* sub_bytes;
 } AssemblerSection;
 
 AssemblerSection* NewAssemblerSection(String* name, int32_t type, int32_t flags,
@@ -192,6 +210,11 @@ int AsmObjectEnsureSection(AsmObject* object, String* name, int32_t type,
 void AsmObjectSwitchSection(AsmObject* object, int section);
 void AsmObjectSetSectionSize(AsmObject* object, size_t index, size_t size);
 void AsmObjectSetCurrentSection(AsmObject* object, int32_t section);
+// GNU as numbers subsections from 0 through 8192.  Returns false when
+// `subsection` is outside that range.
+bool AsmObjectSelectSubsection(AsmObject* object, int subsection);
+// Concatenate subsection buffers into each section's contents.
+void AsmObjectFinishSubsections(AsmObject* object);
 int64_t AsmObjectCurrentAddress(AsmObject* object);
 
 void AsmObjectEmitWord(AsmObject* object, int section, int32_t word);

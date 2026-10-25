@@ -45,6 +45,28 @@ typedef struct Assembler {
   // GNU `N:` / `Nb` / `Nf` local labels.  Counts reset each assembly pass.
   int* local_label_count;
   size_t local_label_cap;
+  // GNU as macros (.macro / .rept / .irp / .irpc) and conditional assembly.
+  // Macro names are stored lowercased, matching gas.  Counts reset each pass
+  // so `\@`, `\+`, and LOCAL symbols stay stable across layout passes.
+  Map macros;
+  bool altmacro;
+  int macro_invocation_count;
+  int macro_local_count;
+  Vector expansion_frames;
+  Vector cond_stack;
+  // .include files pushed above the current source.  Popped before macro
+  // frames so an include inside a macro returns to that macro.
+  Vector include_frames;
+  // .pushsection / .popsection.  Elements are heap pairs of section index
+  // and subsection number.
+  Vector section_stack;
+  int previous_section;
+  int previous_subsection;
+  // .exitm replayed the rest of the invocation line; Assemble should tokenise
+  // it instead of reading the next physical line.
+  bool replay_current_line;
+  // .abort stops the rest of this pass.
+  bool stop_assembly;
 } Assembler;
 
 struct AsmModule;
