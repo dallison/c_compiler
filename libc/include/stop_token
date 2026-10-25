@@ -37,6 +37,12 @@ struct never_stop_token {
 
 #endif
 
+#include <syscall.h>
+
+#if !defined(__DAVECC_HAS_THREADS__) && !defined(__p_code__)
+#error "<stop_token> is unavailable in this single-threaded target profile"
+#else
+
 #include <atomic>
 #include <mutex>
 #include <new>
@@ -44,9 +50,6 @@ struct never_stop_token {
 #include <threads.h>
 #include <utility>
 
-#if !defined(__DAVECC_HAS_THREADS__)
-#error "<stop_token> is unavailable in this single-threaded target profile"
-#endif
 
 #define __cpp_lib_jthread 201911L
 
@@ -431,4 +434,5 @@ stop_callback(stop_token, Callback) -> stop_callback<decay_t<Callback>>;
 
 }  // namespace std
 
+#endif /* __DAVECC_HAS_THREADS__ */
 #endif /* __davecc_stop_token__ */

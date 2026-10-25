@@ -1381,7 +1381,18 @@ static bool RegisterDirectConstexprPCodeGeneratedStatic(
   for (size_t i = 0; i < var->initializers.length; i++) {
     Initializer* init = var->initializers.value.p[i];
     if (!StoreDirectConstexprPCodeInitializer(object, image, entry, init)) {
-      pcode_static_data.length--;
+      // Storing an initializer can register other statics (a vptr's typeinfo,
+      // a string literal). Those land after this entry, so dropping the last
+      // element would free this entry while leaving it in the vector.
+      for (size_t j = 0; j < pcode_static_data.length; j++) {
+        if (pcode_static_data.value.p[j] == entry) {
+          for (size_t k = j + 1; k < pcode_static_data.length; k++) {
+            pcode_static_data.value.p[k - 1] = pcode_static_data.value.p[k];
+          }
+          pcode_static_data.length--;
+          break;
+        }
+      }
       StringDestruct(&entry->name);
       free(entry->memory);
       free(entry);
@@ -2769,14 +2780,78 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
     }
   } else {
     object = ConstexprObjectArgument(arg);
+    // Materialize a class prvalue as its own type.  Using the formal pointee
+    // would copy only the base and drop the derived members a later cast
+    // reads back.
+    if (object == NULL && ctx != NULL && arg != NULL && arg->type != NULL &&
+        TypeIsStructOrUnion(arg->type)) {
+      (void)ConstexprMaterializeClassArgument(ctx, arg, arg->type, &object);
+    }
     if (object == NULL && ctx != NULL) {
       (void)ConstexprEvaluateObjectAddress(ctx, arg, &object);
+    }
+    // `this` for a base member of a prvalue is `&temporary + offset`, a cast
+    // of that pointer.  The temporary is the complete object; the pointer
+    // adjustment only selects the base inside it.
+    if (ctx != NULL && arg != NULL) {
+      ASTNode* source = arg;
+      while (source != NULL &&
+             (source->op == AST_OP(cast) || source->op == AST_OP(address) ||
+              source->op == AST_OP(expr_init))) {
+        source = source->op == AST_OP(cast)
+                     ? ((CastASTNode*)source)->expr
+                 : source->op == AST_OP(address)
+                     ? ((UnaryASTNode*)source)->sub
+                     : ((ExpressionInitializerASTNode*)source)->expr;
+      }
+      if (source != NULL &&
+          (source->op == AST_OP(plus) || source->op == AST_OP(minus))) {
+        source = ((BinaryASTNode*)source)->left;
+        while (source != NULL &&
+               (source->op == AST_OP(address) || source->op == AST_OP(cast))) {
+          source = source->op == AST_OP(address)
+                       ? ((UnaryASTNode*)source)->sub
+                       : ((CastASTNode*)source)->expr;
+        }
+      }
+      if (source != NULL && source->type != NULL &&
+          TypeIsStructOrUnion(source->type) &&
+          (object == NULL || object->type == NULL ||
+           source->type->size > object->type->size)) {
+        ConstexprObject* complete = NULL;
+        if (ConstexprMaterializeClassArgument(ctx, source, source->type,
+                                              &complete) &&
+            complete != NULL) {
+          object = complete;
+        }
+      }
     }
   }
   if (object_type == NULL) {
     return false;
   }
-  size_t memory_size = ConstexprPCodeHostBufferSize(object_type->size);
+  // A member call on a derived prvalue passes `this` as a pointer to the base
+  // subobject.  Keep the complete object in the buffer and point `this` at the
+  // base, so a cast back to the derived class still sees the other members.
+  if (object != NULL && object->complete_object != NULL &&
+      object->complete_object != object) {
+    object = object->complete_object;
+  }
+  TypeRecord* store_type = object_type;
+  size_t pointer_offset = 0;
+  if (object != NULL && object->type != NULL &&
+      TypeIsStructOrUnion(object->type) && TypeIsStructOrUnion(object_type) &&
+      !TypeEqualIgnoringTopLevelQualifierMask(object->type, object_type,
+                                             kQualConst | kQualVolatile)) {
+    int base_offset = 0;
+    if (TypeBaseOffset(object->type, object_type, /*public_only=*/false,
+                       &base_offset) &&
+        base_offset >= 0 && object->type->size >= base_offset) {
+      store_type = object->type;
+      pointer_offset = (size_t)base_offset;
+    }
+  }
+  size_t memory_size = ConstexprPCodeHostBufferSize(store_type->size);
   unsigned char* memory = calloc(1, memory_size);
   if (memory == NULL) {
     *reason = "could not allocate constexpr object argument";
@@ -2785,7 +2860,7 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
   ConstexprPCodeMarshal marshal = {
       .vm = vm, .allocations = allocations, .address_regions = address_regions};
   if (object != NULL) {
-    if (!StoreConstexprObjectBytes(&marshal, object_type, object, memory)) {
+    if (!StoreConstexprObjectBytes(&marshal, store_type, object, memory)) {
       free(memory);
       return false;
     }
@@ -2852,7 +2927,7 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
   }
   VectorAppend(allocations, memory);
   if (object != NULL &&
-      !MarkConstexprPCodeObjectStates(vm, object_type, object, memory, 0)) {
+      !MarkConstexprPCodeObjectStates(vm, store_type, object, memory, 0)) {
     *reason = "could not mark constexpr object argument";
     return false;
   }
@@ -2864,8 +2939,8 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
     }
     *region = (ConstexprPCodeAddressRegion){
         .memory = memory,
-        .size = object_type->size,
-        .type = object_type,
+        .size = store_type->size,
+        .type = store_type,
         .object = object,
     };
     ASTNode* address_of = arg;
@@ -2887,7 +2962,7 @@ static bool StoreConstexprPCodeObjectPointer(ConstEvalContext* ctx,
     VectorAppend(address_regions, region);
   }
   *sp -= sizeof(uint64_t);
-  uint64_t address = (uint64_t)(uintptr_t)memory;
+  uint64_t address = (uint64_t)(uintptr_t)(memory + pointer_offset);
   memcpy(*sp, &address, sizeof(address));
   return true;
 }

@@ -789,11 +789,20 @@ static void RewriteTemplateArgumentDecltypePackIndices(
   if (argument == NULL) {
     return;
   }
+  // The operand is replaced below.  The caller detaches a shared argument;
+  // a private argument can still point at a type another owner holds.
+  if (argument->shares == 0 && argument->type != NULL &&
+      (argument->type->refs > 0 || argument->type->shared_immutable)) {
+    // The argument does not own a counted reference, so the shared record
+    // stays with its other owners.
+    argument->type = TypeRecordCopy(argument->type);
+  }
   RewriteTemplateBodyDecltypePackIndices(clone, argument->type);
   if (argument->pack_arguments != NULL) {
     for (size_t i = 0; i < argument->pack_arguments->length; i++) {
-      RewriteTemplateArgumentDecltypePackIndices(
-          clone, argument->pack_arguments->value.p[i]);
+      TemplateArgument* element = TemplateArgumentVectorMutableAt(
+          argument->pack_arguments, i);
+      RewriteTemplateArgumentDecltypePackIndices(clone, element);
     }
   }
 }
@@ -813,8 +822,11 @@ static void RewriteTemplateBodyDecltypePackIndices(
       continue;
     }
     for (size_t i = 0; i < current->template_arguments->length; i++) {
-      RewriteTemplateArgumentDecltypePackIndices(
-          clone, current->template_arguments->value.p[i]);
+      // Copying the class type shares its arguments.  Rewriting a pack
+      // index inside one of them has to detach that argument first.
+      TemplateArgument* argument = TemplateArgumentVectorMutableAt(
+          current->template_arguments, i);
+      RewriteTemplateArgumentDecltypePackIndices(clone, argument);
     }
   }
 }

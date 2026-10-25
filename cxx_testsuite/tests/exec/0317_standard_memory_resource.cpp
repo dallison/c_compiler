@@ -13,17 +13,17 @@ class counting_resource : public std::pmr::memory_resource {
 
   int allocations;
   int deallocations;
-  unsigned long bytes;
+  std::size_t bytes;
 
  protected:
-  void* do_allocate(unsigned long count, unsigned long alignment) override {
+  void* do_allocate(std::size_t count, std::size_t alignment) override {
     ++allocations;
     bytes += count;
     return upstream_->allocate(count, alignment);
   }
 
-  void do_deallocate(void* pointer, unsigned long count,
-                     unsigned long alignment) override {
+  void do_deallocate(void* pointer, std::size_t count,
+                     std::size_t alignment) override {
     ++deallocations;
     upstream_->deallocate(pointer, count, alignment);
   }

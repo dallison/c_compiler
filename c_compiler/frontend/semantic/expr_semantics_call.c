@@ -1832,6 +1832,25 @@ static bool CXXFunctionalConstructionResolveTargetType(VectorASTNode* node,
   if (node->left->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node->left;
     Symbol* template_symbol = id->symbol;
+    // A member alias template hides a class template of the same name
+    // (`using IteratorValueAdapter = internal::IteratorValueAdapter<A, I>`).
+    // Lookup can still return the class template; the alias is the name in
+    // scope inside the member function.
+    if (template_symbol != NULL && template_symbol->flags.is_template &&
+        !StorageIs(template_symbol->storage, STO(typedef)) &&
+        compiler->current_function != NULL &&
+        TypeIsFunction(compiler->current_function) &&
+        compiler->current_function->info.function.cxx_member_owner != NULL) {
+      Struct* owner =
+          compiler->current_function->info.function.cxx_member_owner;
+      StructMember* member = FindStructMember(owner, &template_symbol->name);
+      if (member != NULL && member->symbol != NULL &&
+          member->symbol->flags.is_template &&
+          StorageIs(member->symbol->storage, STO(typedef)) &&
+          SymbolExtraOf(member->symbol)->alias_template != NULL) {
+        template_symbol = member->symbol;
+      }
+    }
     // Cloning a member body maps the injected-class-name to the current
     // specialization, but `SP<int>(...)` inside `SP<char>` still names the
     // specialization its own arguments select.

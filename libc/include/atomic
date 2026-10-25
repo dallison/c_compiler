@@ -61,9 +61,7 @@ constexpr memory_order failure_order(memory_order order) noexcept {
 
 template <class T>
 constexpr bool always_lock_free() noexcept {
-#if defined(__p_code__)
-  return false;
-#elif defined(__arm__) || defined(__i386__)
+#if defined(__arm__) || defined(__i386__)
   return sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
          sizeof(T) == 8;
 #elif (defined(__riscv) && __riscv_xlen == 32) || defined(__XTENSA__)
@@ -154,10 +152,10 @@ bool compare_exchange_word(T* object, T& expected, T desired, int success,
   return ok;
 }
 
-#if defined(__DAVECC_HAS_THREADS__)
 template <class Atomic>
 void wait(const Atomic& object, const volatile void* address,
           typename Atomic::value_type old, memory_order order) noexcept {
+#if defined(__DAVECC_HAS_THREADS__)
   for (;;) {
     typename Atomic::value_type current = object.load(order);
     if (representation_differs(current, old)) {
@@ -167,8 +165,15 @@ void wait(const Atomic& object, const volatile void* address,
       return;
     }
   }
-}
+#else
+  // No other thread can change the value. A return here is the spurious
+  // wakeup atomic::wait is allowed to make.
+  (void)object;
+  (void)address;
+  (void)old;
+  (void)order;
 #endif
+}
 
 }  // namespace __atomic_detail
 
@@ -360,19 +365,25 @@ struct atomic {
         expected, desired, order, __atomic_detail::failure_order(order));
   }
 
-#if defined(__DAVECC_HAS_THREADS__)
   void wait(T old, memory_order order = memory_order_seq_cst) const noexcept {
     __atomic_detail::wait(*this, &__value, old, order);
   }
 
   void notify_one() noexcept {
+#if defined(__DAVECC_HAS_THREADS__)
     (void)__davecc_addr_wake(&__value, 0);
+#else
+    (void)this;
+#endif
   }
 
   void notify_all() noexcept {
+#if defined(__DAVECC_HAS_THREADS__)
     (void)__davecc_addr_wake(&__value, 1);
-  }
+#else
+    (void)this;
 #endif
+  }
 
   T operator++() noexcept {
     return fetch_add(1) + 1;
@@ -490,7 +501,6 @@ struct atomic {
         expected, desired, order, __atomic_detail::failure_order(order));
   }
 
-#if defined(__DAVECC_HAS_THREADS__)
   void wait(T old,
             memory_order order = memory_order_seq_cst) const volatile noexcept {
     const_cast<const atomic*>(this)->wait(old, order);
@@ -503,7 +513,6 @@ struct atomic {
   void notify_all() volatile noexcept {
     const_cast<atomic*>(this)->notify_all();
   }
-#endif
 
   T operator++() volatile noexcept {
     return fetch_add(1) + 1;

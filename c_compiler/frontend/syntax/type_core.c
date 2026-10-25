@@ -1649,9 +1649,16 @@ bool TemplateArgumentBindReferenceParameter(TemplateArgument* arg,
     return false;
   }
   TemplateValueKind kind = TemplateArgumentConcreteValueKind(arg);
+  // An array lvalue decays to a pointer before it is bound. The symbol still
+  // names the array, which is what a reference-to-array parameter binds.
+  bool decayed_array =
+      kind == kTemplateValuePointer &&
+      TemplateArgumentExtraOf(arg)->lvalue_symbol->type != NULL &&
+      TypeIsArray(TemplateArgumentExtraOf(arg)->lvalue_symbol->type);
   if (kind != kTemplateValueIntegral && kind != kTemplateValueObject &&
       !(kind == kTemplateValuePointer && arg->type != NULL &&
-        TypeIsReference(arg->type))) {
+        TypeIsReference(arg->type)) &&
+      !decayed_array) {
     return false;
   }
   TypeRecord* object_type = TemplateArgumentExtraOf(arg)->lvalue_symbol->type;
@@ -1710,8 +1717,18 @@ bool TemplateArgumentValuesEqual(const TemplateArgument* left,
     return false;
   }
   switch (left_kind) {
-    case kTemplateValueIntegral:
+    case kTemplateValueIntegral: {
+      // Reference parameters stay integral until they are bound. Two different
+      // objects are different arguments even when their values match. A bare
+      // integer compared with a named constant of that value still matches.
+      Symbol* left_lvalue = TemplateArgumentExtraOf(left)->lvalue_symbol;
+      Symbol* right_lvalue = TemplateArgumentExtraOf(right)->lvalue_symbol;
+      if (left_lvalue != NULL && right_lvalue != NULL &&
+          left_lvalue != right_lvalue) {
+        return false;
+      }
       return left->int_value == right->int_value;
+    }
     case kTemplateValueNull:
       return true;
     case kTemplateValuePointer:
@@ -2184,6 +2201,7 @@ static uint64_t TypeInternHashArguments(const Vector* args) {
     h = TypeInternMix(h, TypeInternHashChild(arg->type));
     h = TypeInternMix(h, (uint64_t)arg->int_value);
     h = TypeInternMix(h, (uintptr_t)TemplateArgumentExtraOf(arg)->value_symbol);
+    h = TypeInternMix(h, (uintptr_t)TemplateArgumentExtraOf(arg)->lvalue_symbol);
     h = TypeInternMix(h,
                       (uintptr_t)TemplateArgumentExtraOf(arg)->template_symbol);
     h = TypeInternMix(h, TypeInternHashArguments(arg->pack_arguments));
@@ -2213,6 +2231,25 @@ static uint64_t TypeInternHash(const TypeRecord* type, Qualifiers quals) {
     h = TypeInternMix(h, (uintptr_t)type->info.struct_info);
   } else if (TypeIsEnum(type)) {
     h = TypeInternMix(h, (uintptr_t)type->info.enum_info);
+  } else if (type->declarator == kDeclFunction) {
+    // A function type used as a template argument is interned.  The
+    // prototype is part of its identity: set_value_t(int) is not
+    // set_value_t().
+    const FunctionInfo* function = &type->info.function;
+    h = TypeInternMix(h, function->prototype.length);
+    h = TypeInternMix(h, function->is_const_member);
+    h = TypeInternMix(h, function->is_volatile_member);
+    h = TypeInternMix(h, function->ref_qualifier);
+    h = TypeInternMix(h, function->is_noexcept);
+    for (size_t i = 0; i < function->prototype.length; i++) {
+      const Symbol* formal = function->prototype.value.p[i];
+      if (formal == NULL) {
+        h = TypeInternMix(h, 1);
+        continue;
+      }
+      h = TypeInternMix(h, formal->flags.is_parameter_pack);
+      h = TypeInternMix(h, TypeInternHashChild(formal->type));
+    }
   }
   return h;
 }
@@ -2256,6 +2293,8 @@ static bool TypeInternArgumentsEqual(const Vector* args,
         a->value_kind != b->value_kind ||
         TemplateArgumentExtraOf(a)->value_symbol !=
             TemplateArgumentExtraOf(b)->value_symbol ||
+        TemplateArgumentExtraOf(a)->lvalue_symbol !=
+            TemplateArgumentExtraOf(b)->lvalue_symbol ||
         TemplateArgumentExtraOf(a)->value_offset !=
             TemplateArgumentExtraOf(b)->value_offset ||
         TemplateArgumentExtraOf(a)->value_adjustment !=
@@ -2276,6 +2315,28 @@ static bool TypeInternArgumentsEqual(const Vector* args,
     }
   }
   return true;
+}
+
+static bool TypeInternEqual(const TypeRecord* type, Qualifiers quals,
+                            const TypeRecord* canonical);
+
+// Parameter types of an interned function are copies until they are
+// themselves interned.  Either side may already be the canonical record.
+static bool TypeInternParameterTypeEqual(const TypeRecord* type,
+                                        const TypeRecord* canonical) {
+  if (type == canonical) {
+    return true;
+  }
+  if (type == NULL || canonical == NULL) {
+    return false;
+  }
+  if (!TypeRecordIsCanonical(type)) {
+    return TypeInternEqual(type, GetQualifiers(type), canonical);
+  }
+  if (!TypeRecordIsCanonical(canonical)) {
+    return TypeInternEqual(canonical, GetQualifiers(canonical), type);
+  }
+  return false;
 }
 
 static bool TypeInternEqual(const TypeRecord* type, Qualifiers quals,
@@ -2316,6 +2377,35 @@ static bool TypeInternEqual(const TypeRecord* type, Qualifiers quals,
   } else if (TypeIsEnum(type)) {
     if (type->info.enum_info != canonical->info.enum_info) {
       return false;
+    }
+  } else if (type->declarator == kDeclFunction) {
+    const FunctionInfo* function = &type->info.function;
+    const FunctionInfo* canonical_function = &canonical->info.function;
+    if (function->prototype.length != canonical_function->prototype.length ||
+        function->is_const_member != canonical_function->is_const_member ||
+        function->is_volatile_member !=
+            canonical_function->is_volatile_member ||
+        function->ref_qualifier != canonical_function->ref_qualifier ||
+        function->is_noexcept != canonical_function->is_noexcept) {
+      return false;
+    }
+    for (size_t i = 0; i < function->prototype.length; i++) {
+      const Symbol* formal = function->prototype.value.p[i];
+      const Symbol* canonical_formal =
+          canonical_function->prototype.value.p[i];
+      if ((formal == NULL) != (canonical_formal == NULL)) {
+        return false;
+      }
+      if (formal == NULL) {
+        continue;
+      }
+      if (formal->flags.is_parameter_pack !=
+          canonical_formal->flags.is_parameter_pack) {
+        return false;
+      }
+      if (!TypeInternParameterTypeEqual(formal->type, canonical_formal->type)) {
+        return false;
+      }
     }
   }
   return TypeInternChildEqual(type->next, canonical->next) &&
@@ -2396,6 +2486,19 @@ static TypeRecord* TypeRecordInternWithQualifiers(TypeRecord* type,
     canonical->next = next;
   }
   TypeInternArgumentTypes(canonical->template_arguments);
+  if (TypeIsFunction(canonical)) {
+    for (size_t i = 0; i < canonical->info.function.prototype.length; i++) {
+      Symbol* formal = canonical->info.function.prototype.value.p[i];
+      if (formal == NULL || formal->type == NULL ||
+          TypeRecordIsCanonical(formal->type) ||
+          !TypeRecordCanIntern(formal->type)) {
+        continue;
+      }
+      TypeRecord* parameter = TypeRecordInternWithQualifiers(
+          formal->type, GetQualifiers(formal->type));
+      SymbolSetType(formal, parameter);
+    }
+  }
   canonical = TypeRecordCalculateSize(canonical);
   assert(TypeInternHash(canonical, GetQualifiers(canonical)) == hash);
   canonical->shared_immutable = kTypeRecordCanonical;

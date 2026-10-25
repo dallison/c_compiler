@@ -351,9 +351,19 @@ void AnalyzeBuiltinBitOperation(VectorASTNode* node) {
     return;
   }
   ASTNode* value = node->children->value.p[0];
+  // `__davecc_clz/ctz/popcount` take an explicit width and require an
+  // unsigned value. GCC's one-argument `__builtin_*` forms accept a signed
+  // operand and convert it.
+  bool davecc_width_builtin =
+      node->children->length == 2 &&
+      (node->base.op == AST_OP(builtin_clz) ||
+       node->base.op == AST_OP(builtin_ctz) ||
+       node->base.op == AST_OP(builtin_popcount));
   bool allow_signed = node->base.op == AST_OP(builtin_bswap);
   if (!TypeIsIntegral(value->type)) {
     SemanticError(value, "bit builtin requires an integer operand");
+  } else if (davecc_width_builtin && !TypeIsUnsigned(value->type)) {
+    SemanticError(value, "bit builtin requires an unsigned integer operand");
   } else if (!allow_signed && !TypeIsUnsigned(value->type)) {
     // GCC accepts a signed operand and converts it to the corresponding
     // unsigned type.  __builtin_clz(int) is the common form.

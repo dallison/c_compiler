@@ -26,6 +26,8 @@ def guest_libc_shared(
         crt_runtime_srcs = [],
         no_cxx = False):
     extra_flags = " ".join(['--cflags "%s"' % flag for flag in cflags])
+    # libc's own syscall() must not be rewritten to the guest wrapper.
+    extra_flags += ' --cflags "-D__DAVECC_LIBC_BUILD__"'
     runtime_flags = " ".join(['--runtime "%s"' % src for src in runtime_srcs])
     source_flags = " ".join([
         '--source "%s"' % src

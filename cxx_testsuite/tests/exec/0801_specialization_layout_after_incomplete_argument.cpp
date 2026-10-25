@@ -23,14 +23,17 @@ using O1 = Outer<Record>;
 using Opt = std::optional<Record>;
 
 struct Record { long value = 0; };
+struct Complete { long value = 0; };
 
 int main() {
-  static_assert(sizeof(Entry) == 16);
-  static_assert(sizeof(A1) == 24);
-  static_assert(sizeof(N1) == 24);
-  static_assert(sizeof(D1) == 16);
-  static_assert(sizeof(O1) == 24);
-  static_assert(sizeof(Opt) == 16);
+  // Compare with a type that was complete when it was named, so the check is
+  // the layout of the earlier incomplete argument, on both LP64 and ILP32.
+  static_assert(sizeof(Entry) == sizeof(std::pair<const int, Complete>));
+  static_assert(sizeof(A1) == sizeof(Arr<Complete>));
+  static_assert(sizeof(N1) == sizeof(Nest<Complete>));
+  static_assert(sizeof(D1) == sizeof(Derived<Complete>));
+  static_assert(sizeof(O1) == sizeof(Outer<Complete>));
+  static_assert(sizeof(Opt) == sizeof(std::optional<Complete>));
 
   Entry entry{1, Record{}};
   A1 arr{};

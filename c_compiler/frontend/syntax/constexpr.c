@@ -1750,6 +1750,20 @@ static ConstexprValue* ConstexprSlotForOffset(TypeRecord* type,
         base_slot->fvalue = 0;
         base_slot->object = NewConstexprObject(
             NULL, base->type, ConstexprObjectSlotCount(base->type));
+        if (base_slot->object != NULL) {
+          ConstexprObject* root =
+              object->complete_object != NULL &&
+                      object->complete_object != object
+                  ? object->complete_object
+                  : object;
+          if (base_slot->object != root) {
+            base_slot->object->complete_object = root;
+            size_t parent_offset =
+                object->complete_object == root ? object->complete_offset : 0;
+            base_slot->object->complete_offset =
+                parent_offset + (size_t)base->byte_offset;
+          }
+        }
         if (base_slot->object == NULL ||
             !ConstexprMaterializeBaseSubobjectSlots(NULL, base_slot->object)) {
           return NULL;
@@ -1813,7 +1827,9 @@ static ConstexprObject* ConstexprSubobjectAtOffset(ConstexprObject* object,
   if (object == NULL || object->type == NULL || target_type == NULL) {
     return NULL;
   }
-  if (offset == 0 && TypeEqual(object->type, target_type)) {
+  if (offset == 0 &&
+      TypeEqualIgnoringTopLevelQualifierMask(
+          object->type, target_type, kQualConst | kQualVolatile)) {
     return object;
   }
   if (!TypeIsStructOrUnion(object->type) ||
@@ -1880,6 +1896,19 @@ static bool ConstexprMaterializeBaseSubobjectSlots(ConstEvalContext* ctx,
       return false;
     }
     if (slot->is_object && slot->object != NULL) {
+      // A base records the complete object so a later cast back to the
+      // derived class (`static_cast<D&>(*this)` from a CRTP base) can find it.
+      ConstexprObject* root =
+          object->complete_object != NULL ? object->complete_object : object;
+      // New objects start as their own complete object.  A base that still
+      // says that has not been attached to the object it is a part of.
+      if (slot->object != root &&
+          (slot->object->complete_object == NULL ||
+           slot->object->complete_object == slot->object)) {
+        slot->object->complete_object = root;
+        slot->object->complete_offset =
+            object->complete_offset + (size_t)base->byte_offset;
+      }
       if (!ConstexprMaterializeBaseSubobjectSlots(ctx, slot->object)) {
         return false;
       }
@@ -1894,9 +1923,7 @@ static bool ConstexprMaterializeBaseSubobjectSlots(ConstEvalContext* ctx,
         NewConstexprObject(ctx, base->type, ConstexprObjectSlotCount(base->type));
     ConstexprObject* root =
         object->complete_object != NULL ? object->complete_object : object;
-    if (root->type != NULL && TypeIsStructOrUnion(root->type) &&
-        root->type->info.struct_info != NULL &&
-        StructHasVirtualBases(root->type->info.struct_info)) {
+    if (slot->object != NULL && slot->object != root) {
       slot->object->complete_object = root;
       slot->object->complete_offset =
           object->complete_offset + (size_t)base->byte_offset;
@@ -7580,7 +7607,10 @@ bool EvaluateConstexprObjectAccess(ConstEvalContext* ctx,
       if (value.is_address && node->type != NULL &&
           (TypeIsStructOrUnion(node->type) || TypeIsFixedArray(node->type))) {
         ConstexprValue referent;
-        if (!ConstexprDereferenceAddress(value, &referent) ||
+        // The address names the class object.  Reading its first slot would
+        // be the first base or member, not the object the reference returns.
+        if (!ConstexprDereferencePointee(value, node->type,
+                                         /*designate_only=*/true, &referent) ||
             !referent.is_object || referent.object == NULL) {
           return false;
         }
@@ -8581,17 +8611,28 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
         lowers_placement_new) {
       ctx->allocation_new_expression = node;
     }
-    bool operand_ok =
-        EvaluateConstexprAddressValue(ctx, cast->expr, result);
+    // A reference cast's operand is the glvalue `*p`.  Dereferencing it yields
+    // the first slot of the class, not the class object the reference names.
+    ASTNode* operand = cast->expr;
+    if (cast->cast_type != NULL && TypeIsReference(cast->cast_type) &&
+        operand != NULL && operand->op == AST_OP(contents)) {
+      operand = ((UnaryASTNode*)operand)->sub;
+    }
+    bool operand_ok = EvaluateConstexprAddressValue(ctx, operand, result);
     ctx->allocation_new_expression = saved_new_expression;
     if (!operand_ok) {
       return false;
     }
     TypeRecord* source_pointee =
-        cast->expr != NULL && TypeIsPointer(cast->expr->type)
-            ? cast->expr->type->next : NULL;
-    TypeRecord* target_pointee =
-        TypeIsPointer(cast->cast_type) ? cast->cast_type->next : NULL;
+        operand != NULL && operand->type != NULL &&
+                (TypeIsPointer(operand->type) || TypeIsReference(operand->type))
+            ? operand->type->next
+            : NULL;
+    TypeRecord* target_pointee = NULL;
+    if (cast->cast_type != NULL &&
+        (TypeIsPointer(cast->cast_type) || TypeIsReference(cast->cast_type))) {
+      target_pointee = cast->cast_type->next;
+    }
     bool establishes_allocated_type =
         (node->flags & kASTCXXNewExpression) != 0 ||
         (result->heap_block != NULL && cast->expr != NULL &&
@@ -9042,11 +9083,78 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
     TypeRecord* pointer_type = node->type;
     TypeRecord* pointee =
         TypeIsPointer(pointer_type) ? pointer_type->next : NULL;
+    if (!offset_is_elements && offset < 0 && node->op == AST_OP(plus) &&
+        base.address_object == NULL && pointee != NULL &&
+        TypeIsStructOrUnion(pointee)) {
+      ConstexprObject* source = NULL;
+      if (base.address_binding != NULL) {
+        source = base.address_binding->object != NULL
+                     ? base.address_binding->object
+                     : base.address_binding->address_object;
+      }
+      if (source == NULL && base.address_slot != NULL &&
+          base.address_slot->is_object) {
+        source = base.address_slot->object;
+      }
+      if (source != NULL) {
+        base.address_object = source;
+        base.address_binding = NULL;
+        base.address_slot = NULL;
+        base.address_index = 0;
+      }
+    }
+    if (!offset_is_elements && offset < 0 && node->op == AST_OP(plus) &&
+        base.address_object != NULL && pointee != NULL &&
+        TypeIsStructOrUnion(pointee) &&
+        TypeIsStructOrUnion(base.address_object->type)) {
+      // A base-to-derived cast subtracts the base offset.  The source names
+      // the base subobject; the result names the derived object that contains
+      // it.
+      ConstexprObject* source = base.address_object;
+      ConstexprObject* root =
+          source->complete_object != NULL && source->complete_object != source
+              ? source->complete_object
+              : source;
+      size_t source_offset =
+          source->complete_object == root ? source->complete_offset : 0;
+      int64_t target_offset = (int64_t)source_offset + offset;
+      if (target_offset >= 0) {
+        ConstexprObject* subobject = ConstexprSubobjectAtOffset(
+            root, pointee, (size_t)target_offset);
+        if (subobject != NULL) {
+          *result = (ConstexprValue){
+              .is_address = true,
+              .address_object = subobject,
+          };
+          return true;
+        }
+      }
+    }
     if (!offset_is_elements && offset >= 0 &&
         base.address_object != NULL && pointee != NULL &&
         TypeIsStructOrUnion(pointee)) {
       ConstexprObject* subobject = ConstexprSubobjectAtOffset(
           base.address_object, pointee, (size_t)offset);
+      if (subobject == NULL) {
+        // The base slot may not have been materialized yet.  Building it also
+        // records the complete object, so a later cast back to the derived
+        // class can find the value that was initialized there.
+        ConstexprValue at = {0};
+        if (ConstexprAddressAtOffset(base.address_object, (size_t)offset,
+                                     pointee, &at)) {
+          if (at.address_object == NULL && at.address_slot != NULL &&
+              at.address_slot->is_object && at.address_slot->object != NULL) {
+            at.address_object = at.address_slot->object;
+            at.address_slot = NULL;
+            at.address_index = 0;
+            at.is_address = true;
+          }
+          if (at.address_object != NULL) {
+            *result = at;
+            return true;
+          }
+        }
+      }
       if (subobject != NULL) {
         *result = (ConstexprValue){
             .is_address = true,
@@ -9069,14 +9177,26 @@ static bool EvaluateConstexprAddressValue(ConstEvalContext* ctx, ASTNode* node,
       }
       offset = -offset;
     }
+    // A byte offset is counted in elements of the pointer's pointee. A
+    // `char *` into an array has pointee size 1, but `address_index` counts
+    // the array's elements, so the step is the element size. An untyped
+    // offset is already an element count and must not be scaled.
     if (!offset_is_elements && TypeIsPointer(pointer_type) &&
-        pointer_type->next != NULL &&
-        pointer_type->next->size > 1) {
-      int element_size = pointer_type->next->size;
-      if (offset % element_size != 0) {
-        return false;
+        pointer_type->next != NULL) {
+      size_t index_unit = (size_t)pointer_type->next->size;
+      if (index_unit <= 1 && base.address_object != NULL &&
+          base.address_object->type != NULL &&
+          TypeIsFixedArray(base.address_object->type) &&
+          base.address_object->type->next != NULL &&
+          base.address_object->type->next->size > 1) {
+        index_unit = (size_t)base.address_object->type->next->size;
       }
-      offset /= element_size;
+      if (index_unit > 1) {
+        if (offset % (int64_t)index_unit != 0) {
+          return false;
+        }
+        offset /= (int64_t)index_unit;
+      }
     }
     if ((offset < 0 && (uint64_t)(-offset) > base.address_index) ||
         (offset >= 0 && (uint64_t)offset > SIZE_MAX - base.address_index)) {
@@ -14116,6 +14236,18 @@ static ConstexprObject* ConstexprBaseSubobjectOfType(ConstEvalContext* ctx,
       slot->object = NewConstexprObject(ConstexprSubobjectOwner(ctx, object),
                                         base->type,
                                         ConstexprObjectSlotCount(base->type));
+    }
+    if (slot->object != NULL &&
+        (slot->object->complete_object == NULL ||
+         slot->object->complete_object == slot->object)) {
+      ConstexprObject* root =
+          object->complete_object != NULL && object->complete_object != object
+              ? object->complete_object
+              : object;
+      slot->object->complete_object = root;
+      slot->object->complete_offset =
+          (root == object ? 0 : object->complete_offset) +
+          (size_t)base->byte_offset;
     }
     return ConstexprBaseSubobjectOfType(ctx, slot->object, type);
   }

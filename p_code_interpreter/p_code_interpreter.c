@@ -863,6 +863,9 @@ int PCodeInterpreterRun(PCodeInterpreter* interpreter, Loader* loader,
   WriteU64((void*)iregs[PCODE_SP_REG], guest_argv);
   iregs[PCODE_SP_REG] -= 4;
   WriteU32((void*)iregs[PCODE_SP_REG], (uint32_t)argc);
+  if (loader != NULL && loader->tls.present) {
+    iregs[PCODE_TP_REG] = (int64_t)loader->tls.tp_base;
+  }
 
   while (interpreter->running) {
     if (interpreter->iregs[PCODE_PC_REG] == 0) {

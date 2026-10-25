@@ -2717,6 +2717,209 @@ static TargetInstruction* LowerVectorOperation(Wasm32Generator* wasm,
       node, EmitStore(wasm, W_OP(v128_store), destination, result, 0));
 }
 
+// Wasm32 here is single-threaded, so the atomic family is an ordinary
+// load/store.  The width follows the pointee: a later libc atomic must not
+// fall into the unhandled-opcode failure.
+static void AtomicAccess(TypeRecord* type, Wasm32Opcode* load,
+                         Wasm32Opcode* store, WasmValueType* value_type) {
+  if (type != NULL && TypeUsesFloat32Representation(type)) {
+    *load = W_OP(f32_load);
+    *store = W_OP(f32_store);
+    *value_type = kWasmTypeF32;
+    return;
+  }
+  if (type != NULL && TypeUsesFloat64Representation(type)) {
+    *load = W_OP(f64_load);
+    *store = W_OP(f64_store);
+    *value_type = kWasmTypeF64;
+    return;
+  }
+  int size = type != NULL && type->size > 0 ? (int)type->size : 4;
+  bool is_unsigned = type != NULL &&
+                     (TypeIsUnsigned(type) || TypeIsBool(type) ||
+                      TypeIsPointerOrArray(type));
+  if (size >= 8) {
+    *value_type = kWasmTypeI64;
+    *load = W_OP(i64_load);
+    *store = W_OP(i64_store);
+    return;
+  }
+  *value_type = kWasmTypeI32;
+  if (size == 1) {
+    *load = is_unsigned ? W_OP(i32_load8_u) : W_OP(i32_load8_s);
+    *store = W_OP(i32_store8);
+  } else if (size == 2) {
+    *load = is_unsigned ? W_OP(i32_load16_u) : W_OP(i32_load16_s);
+    *store = W_OP(i32_store16);
+  } else {
+    *load = W_OP(i32_load);
+    *store = W_OP(i32_store);
+  }
+}
+
+static TypeRecord* AtomicPointee(IRNode* address, IRNode* fallback) {
+  if (address != NULL && address->type != NULL &&
+      TypeIsPointer(address->type) && address->type->next != NULL &&
+      address->type->next->size > 0) {
+    return address->type->next;
+  }
+  return fallback != NULL ? fallback->type : NULL;
+}
+
+static bool AtomicAddress(Wasm32Generator* wasm, IRNode* address,
+                          TargetInstruction** base, int32_t* offset) {
+  if (address == NULL) {
+    Fail(wasm, "atomic access with no address");
+    return false;
+  }
+  if (IsLocalVariable(address)) {
+    Fail(wasm, "atomic access of a variable that has no address");
+    return false;
+  }
+  return GetAddressAndOffset(wasm, address, base, offset);
+}
+
+static TargetInstruction* LowerAtomicLoad(Wasm32Generator* wasm, IRNode* node) {
+  IRNode* address = node->inputs.value.p[0];
+  TargetInstruction* base;
+  int32_t offset;
+  if (!AtomicAddress(wasm, address, &base, &offset)) {
+    return NULL;
+  }
+  Wasm32Opcode load_op;
+  Wasm32Opcode store_op;
+  WasmValueType value_type;
+  AtomicAccess(node->type != NULL ? node->type : AtomicPointee(address, NULL),
+               &load_op, &store_op, &value_type);
+  (void)store_op;
+  return SetLoweredNode(node, EmitLoad(wasm, load_op, base, offset, value_type));
+}
+
+static TargetInstruction* LowerAtomicStore(Wasm32Generator* wasm, IRNode* node) {
+  IRNode* address = node->inputs.value.p[0];
+  IRNode* value_node = node->inputs.value.p[1];
+  TargetInstruction* base;
+  int32_t offset;
+  if (!AtomicAddress(wasm, address, &base, &offset)) {
+    return NULL;
+  }
+  TargetInstruction* value = Materialize(wasm, value_node);
+  if (value == NULL) {
+    return NULL;
+  }
+  Wasm32Opcode load_op;
+  Wasm32Opcode store_op;
+  WasmValueType value_type;
+  AtomicAccess(AtomicPointee(address, value_node), &load_op, &store_op,
+               &value_type);
+  (void)load_op;
+  (void)value_type;
+  return SetLoweredNode(node, EmitStore(wasm, store_op, base, value, offset));
+}
+
+static TargetInstruction* LowerAtomicFetchAddSub(Wasm32Generator* wasm,
+                                                 IRNode* node, bool add,
+                                                 bool return_new) {
+  IRNode* address = node->inputs.value.p[0];
+  IRNode* value_node = node->inputs.value.p[1];
+  TargetInstruction* base;
+  int32_t offset;
+  if (!AtomicAddress(wasm, address, &base, &offset)) {
+    return NULL;
+  }
+  TypeRecord* type = node->type != NULL ? node->type : AtomicPointee(address, value_node);
+  Wasm32Opcode load_op;
+  Wasm32Opcode store_op;
+  WasmValueType value_type;
+  AtomicAccess(type, &load_op, &store_op, &value_type);
+  if (value_type != kWasmTypeI32 && value_type != kWasmTypeI64) {
+    Fail(wasm, "atomic add of a non-integer");
+    return NULL;
+  }
+  TargetInstruction* old_value = EmitLoad(wasm, load_op, base, offset, value_type);
+  TargetInstruction* value = Materialize(wasm, value_node);
+  if (value == NULL) {
+    return NULL;
+  }
+  Wasm32Opcode arith = value_type == kWasmTypeI64
+                           ? (add ? W_OP(i64_add) : W_OP(i64_sub))
+                           : (add ? W_OP(i32_add) : W_OP(i32_sub));
+  TargetInstruction* new_value =
+      EmitBinary(wasm, arith, value_type, old_value, value);
+  EmitStore(wasm, store_op, base, new_value, offset);
+  return SetLoweredNode(node, return_new ? new_value : old_value);
+}
+
+static TargetInstruction* LowerAtomicCompareExchange(Wasm32Generator* wasm,
+                                                     IRNode* node,
+                                                     bool expected_is_pointer,
+                                                     bool returns_bool) {
+  IRNode* address = node->inputs.value.p[0];
+  TargetInstruction* base;
+  int32_t offset;
+  if (!AtomicAddress(wasm, address, &base, &offset)) {
+    return NULL;
+  }
+  TypeRecord* type = AtomicPointee(address, node);
+  Wasm32Opcode load_op;
+  Wasm32Opcode store_op;
+  WasmValueType value_type;
+  AtomicAccess(type, &load_op, &store_op, &value_type);
+  TargetInstruction* old_value = EmitLoad(wasm, load_op, base, offset, value_type);
+
+  TargetInstruction* expected_base = NULL;
+  int32_t expected_offset = 0;
+  TargetInstruction* expected;
+  if (expected_is_pointer) {
+    IRNode* expected_node = node->inputs.value.p[1];
+    if (!AtomicAddress(wasm, expected_node, &expected_base, &expected_offset)) {
+      return NULL;
+    }
+    expected = EmitLoad(wasm, load_op, expected_base, expected_offset, value_type);
+  } else {
+    expected = Materialize(wasm, node->inputs.value.p[1]);
+  }
+  TargetInstruction* desired = Materialize(wasm, node->inputs.value.p[2]);
+  if (expected == NULL || desired == NULL) {
+    return NULL;
+  }
+  Wasm32Opcode eq = value_type == kWasmTypeI64   ? W_OP(i64_eq)
+                    : value_type == kWasmTypeF32 ? W_OP(f32_eq)
+                    : value_type == kWasmTypeF64 ? W_OP(f64_eq)
+                                                 : W_OP(i32_eq);
+  TargetInstruction* matches =
+      EmitBinary(wasm, eq, kWasmTypeI32, old_value, expected);
+
+  TargetInstruction* failure = NewInstruction(W_OP(label));
+  failure->flags |= WASM32_FLAG_NO_RESULT;
+  TargetInstruction* done = NewInstruction(W_OP(label));
+  done->flags |= WASM32_FLAG_NO_RESULT;
+
+  TargetInstruction* unequal = NewInstruction1(W_OP(i32_eqz), matches);
+  Wasm32SetInstructionType(unequal, kWasmTypeI32);
+  TargetUpdateOperandUsers(unequal);
+  unequal = Emit(wasm, unequal);
+  TargetInstruction* branch = NewInstruction1(W_OP(br_if), unequal);
+  branch->flags |= WASM32_FLAG_NO_RESULT;
+  branch->operand[1] = failure;
+  TargetUpdateOperandUsers(branch);
+  Emit(wasm, branch);
+
+  EmitStore(wasm, store_op, base, desired, offset);
+  TargetInstruction* skip = NewInstruction(W_OP(br));
+  skip->flags |= WASM32_FLAG_NO_RESULT;
+  skip->operand[1] = done;
+  TargetUpdateOperandUsers(skip);
+  Emit(wasm, skip);
+
+  Emit(wasm, failure);
+  if (expected_is_pointer) {
+    EmitStore(wasm, store_op, expected_base, old_value, expected_offset);
+  }
+  Emit(wasm, done);
+  return SetLoweredNode(node, returns_bool ? matches : old_value);
+}
+
 static TargetInstruction* LowerIRNode(Wasm32Generator* wasm, IRNode* node) {
   if (node->data.ptr != NULL) {
     return node->data.ptr;
@@ -2989,6 +3192,28 @@ static TargetInstruction* LowerIRNode(Wasm32Generator* wasm, IRNode* node) {
     case IR_OP(capturev):
       Fail(wasm, "vector operation must be software-expanded before wasm32 lowering");
       return NULL;
+
+    case IR_OP(atomic_load):
+      return LowerAtomicLoad(wasm, node);
+    case IR_OP(atomic_store):
+      return LowerAtomicStore(wasm, node);
+    case IR_OP(atomic_fetch_add):
+      return LowerAtomicFetchAddSub(wasm, node, true, false);
+    case IR_OP(atomic_fetch_sub):
+      return LowerAtomicFetchAddSub(wasm, node, false, false);
+    case IR_OP(atomic_add_fetch):
+      return LowerAtomicFetchAddSub(wasm, node, true, true);
+    case IR_OP(atomic_sub_fetch):
+      return LowerAtomicFetchAddSub(wasm, node, false, true);
+    case IR_OP(atomic_compare_exchange_bool):
+      return LowerAtomicCompareExchange(wasm, node, false, true);
+    case IR_OP(atomic_compare_exchange_val):
+      return LowerAtomicCompareExchange(wasm, node, false, false);
+    case IR_OP(atomic_compare_exchange_n):
+      return LowerAtomicCompareExchange(wasm, node, true, true);
+    case IR_OP(atomic_fence):
+      return SetLoweredNode(
+          node, EmitIntConstant(wasm, kWasmTypeI32, 0));
 
     default:
       Fail(wasm, IROpcodeName(node->opcode));

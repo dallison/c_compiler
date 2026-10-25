@@ -2601,7 +2601,12 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
           if (grouped_class_args != NULL) {
             class_args = grouped_class_args;
           }
-          combined_args = TemplateArgumentVectorCopy(class_args);
+          // After a partial specialization is instantiated, its member alias
+          // parameters are rebased to 0 and the class arguments are already
+          // substituted into the pattern (`pointer_traits<T*>::rebind` is
+          // `U*`). Prefixing the class argument again binds `U` to `T`.
+          combined_args = alias_index == 0 ? NewVector()
+                                           : TemplateArgumentVectorCopy(class_args);
           if (grouped_class_args != NULL) {
             VectorDeleteWithContents(
                 grouped_class_args,

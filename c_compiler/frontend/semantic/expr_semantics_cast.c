@@ -278,13 +278,17 @@ static bool TryCastReferenceRelatedClass(CastASTNode* node) {
     }
     return false;
   }
-  CXXBaseAdjustment adjustment;
-  bool related =
-      TypeBaseAdjustment(from_type, to_type, /*public_only=*/false,
-                         &adjustment) ||
-      TypeBaseAdjustment(to_type, from_type, /*public_only=*/false,
-                         &adjustment);
-  if (!related) {
+  // `from` to a base adds that base's offset.  A base cast back to the
+  // derived class (`static_cast<D&>(*this)` in a CRTP base) subtracts it.
+  // A virtual base is reached through its vbtable, not a fixed delta.
+  CXXBaseAdjustment to_base_adjustment;
+  CXXBaseAdjustment to_derived_adjustment;
+  bool to_base = TypeBaseAdjustment(from_type, to_type, /*public_only=*/false,
+                                    &to_base_adjustment);
+  bool to_derived =
+      !to_base && TypeBaseAdjustment(to_type, from_type, /*public_only=*/false,
+                                     &to_derived_adjustment);
+  if (!to_base && !to_derived) {
     if (own_from) {
       TypeRecordDelete(from_type);
     }
@@ -306,9 +310,26 @@ static bool TryCastReferenceRelatedClass(CastASTNode* node) {
   if (own_to) {
     TypeRecordDelete(to_type);
   }
+  int delta = 0;
+  bool virtual_base =
+      to_base && to_base_adjustment.kind == kCXXBaseAdjustmentVirtual;
+  if (to_base && to_base_adjustment.kind == kCXXBaseAdjustmentStatic) {
+    delta = to_base_adjustment.byte_offset;
+  } else if (to_derived &&
+             to_derived_adjustment.kind == kCXXBaseAdjustmentStatic) {
+    delta = -to_derived_adjustment.byte_offset;
+  }
   SourceLocation loc = node->expr->location;
   ASTNode* addr = NewAnalyzedBuiltinAddressOf(node->expr, loc);
   TypeRecord* target_ptr = NewPointerTo(kQualPlain, TypeRecordCopy(target));
+  if (delta != 0 && !virtual_base) {
+    // A byte offset, not an element count.  Leave the plus analyzed so
+    // pointer arithmetic does not scale it by the pointee size.
+    ASTNode* offset_node = NewIntConstantASTNode(
+        delta, NewTypeRecordWithSize(kTypeInt, kQualPlain), loc);
+    addr = NewBinaryASTNode(AST_OP(plus), target_ptr, loc, addr, offset_node);
+    addr->flags |= kASTAnalyzed;
+  }
   ASTNode* ptr_cast = NewCastASTNode(target_ptr, loc, addr);
   ((CastASTNode*)ptr_cast)->kind = node->kind;
   ptr_cast = AnalyzeExpression(ptr_cast);

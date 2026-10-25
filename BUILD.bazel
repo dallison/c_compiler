@@ -1884,7 +1884,7 @@ mkdir -p "$$work"
 
 davecc="$(location :davecc)"
 archivist="$(location :archivist)"
-cflags=(-target x86_64 -O1 -c -isystem libc/include -Ilibc)
+cflags=(-target x86_64 -O1 -c -isystem libc/include -Ilibc -D__DAVECC_LIBC_BUILD__)
 
 runtime_srcs=(
   "x86_64 support/cxx_guard.s"
@@ -2085,7 +2085,7 @@ mkdir -p "$$work"
 
 davecc="$(location :davecc)"
 archivist="$(location :archivist)"
-cflags=(-target x86 -O0 -c -isystem libc/include -Ilibc)
+cflags=(-target x86 -O0 -c -isystem libc/include -Ilibc -D__DAVECC_LIBC_BUILD__)
 
 runtime_srcs=(
   "x86 support/cxx_guard.s"
@@ -2288,7 +2288,7 @@ mkdir -p "$$work"
 
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
-cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc)
+cflags=(-target riscv -O1 -c -isystem libc/include -Ilibc -D__DAVECC_LIBC_BUILD__)
 
 runtime_srcs=(
   "RISCV_support/cxx_guard.s"
@@ -2485,7 +2485,7 @@ mkdir -p "$$work"
 
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
-cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc)
+cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc -D__DAVECC_LIBC_BUILD__)
 
 runtime_srcs=(
   "aarch64 support/cxx_guard.s"
@@ -2683,7 +2683,7 @@ mkdir -p "$$work"
 
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
-cflags=(-target riscv32 -O1 -c -isystem libc/include -Ilibc)
+cflags=(-target riscv32 -O1 -c -isystem libc/include -Ilibc -D__DAVECC_LIBC_BUILD__)
 
 runtime_srcs=(
   "RISCV32_support/cxx_guard.s"
@@ -2897,7 +2897,7 @@ mkdir -p "$$work"
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
 cflags=(-target esp32 -O1 -nostdinc -D__DAVECC_HAS_HEAP_LOCK__=1 \
-  -c -isystem libc/include -Ilibc)
+  -D__DAVECC_LIBC_BUILD__ -c -isystem libc/include -Ilibc)
 
 "$$davecc" "$${cflags[@]}" xtensa_support/syscall.s \
   -o "$$work/syscall_asm.o"
@@ -3227,7 +3227,7 @@ mkdir -p "$$work"
 
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
-cflags=(-target arm -O0 -c -isystem libc/include -Ilibc)
+cflags=(-target arm -O0 -c -isystem libc/include -Ilibc -D__DAVECC_LIBC_BUILD__)
 
 runtime_srcs=(
   "arm support/cxx_guard.s"
@@ -3427,7 +3427,7 @@ mkdir -p "$$work"
 
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
-cflags=(-target pcode -O1 -c -isystem libc/include -Ilibc)
+cflags=(-target pcode -O1 -c -isystem libc/include -Ilibc -D__DAVECC_LIBC_BUILD__)
 
 runtime_objs=()
 for src in "pcode support"/*.s; do
@@ -3656,7 +3656,7 @@ mkdir -p "$$work"
 
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
-cflags=(-target wasm32 -O1 -c -isystem libc/include -Ilibc)
+cflags=(-target wasm32 -O1 -c -isystem libc/include -Ilibc -D__DAVECC_LIBC_BUILD__)
 
 # There is no assembler runtime: wasm has no instructions to write one in,
 # so what other targets put in .s files is either in C here or not yet

@@ -1906,9 +1906,10 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
             return;
           }
           if ((int)inst->operand[0]->opcode == (int)X86_OP(x0)) {
-            fprintf(fp, "\tmovq ");
-            PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
-            fprintf(fp, ", ");
+            // x0 is not a physical register.  Printing it as %rax stores
+            // whatever the previous call left there, so a 0.0 double becomes
+            // that integer (cproj's copysign magnitude).
+            fprintf(fp, "\tmovq $0, ");
             if (inst->dest != NULL && inst->dest->reg != NULL) {
         PrintPercentReg(fp,
                         X86RegisterName((X86Register*)inst->dest->reg, buf2,
@@ -4841,9 +4842,9 @@ static void PrintDefaultInstructionI386(FILE* fp, TargetInstruction* inst,
             return;
           }
           if ((int)inst->operand[0]->opcode == (int)X86_OP(x0)) {
-            fprintf(fp, "\tmovl ");
-            PrintPercentRegFromInstI386(fp, inst->operand[0], buf1, sizeof(buf1));
-            fprintf(fp, ", ");
+            // x0 is not a physical register.  An immediate zero does not
+            // alias whichever GPR the allocator mapped the pseudo onto.
+            fprintf(fp, "\tmovl $0, ");
             if (inst->dest != NULL && inst->dest->reg != NULL) {
         PrintPercentRegI386(fp,
                         X86RegisterName((X86Register*)inst->dest->reg, buf2,

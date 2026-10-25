@@ -6691,15 +6691,36 @@ static IRNode* GenerateBuiltinPrefetch(Generator* gen, VectorASTNode* node) {
 // stack pointer from the frame pointer whenever the frame is non-empty, which
 // the spill slot guarantees.
 static IRNode* GenerateBuiltinAlloca(Generator* gen, VectorASTNode* node) {
+  // Reserve the bytes, then align the pointer down. Aligning only the size
+  // leaves the pointer misaligned when the stack pointer is not already a
+  // multiple of the alignment (p-code's entry stack is eight-byte aligned).
+  // When it is aligned, this is the same address as rounding the size up.
+  int64_t alignment = compiler->target->stack_alignment;
+  if (alignment < 1) {
+    alignment = 1;
+  }
+  // alloca storage is sixteen-byte aligned on every target with at least
+  // four-byte pointers. Aligning the pointer, rather than the target's
+  // frame alignment, leaves ARM's eight-byte stack ABI alone.
+  if (alignment < 16 && compiler->target->pointer_size >= 4) {
+    alignment = 16;
+  }
   IRNode* size = GenerateExpression(gen, node->children->value.p[0]);
-  IRNode* aligned = GeneratorEmit(
-      gen, NewIR2(IR_OP(aligni), size,
-                  GeneratorGetIntConstant(
-                      gen, NULL, compiler->target->stack_alignment)));
-  GeneratorEmit(gen, NewIR1(IR_OP(decsp), aligned));
-  IRNode* address =
+  GeneratorEmit(gen, NewIR1(IR_OP(decsp), size));
+  IRNode* raw =
       IRSetType(GeneratorEmit(gen, NewIR(IR_OP(tmp))), node->base.type);
-  GeneratorEmit(gen, NewIR1(IR_OP(savesp), address));
+  GeneratorEmit(gen, NewIR1(IR_OP(savesp), raw));
+  IRNode* address = raw;
+  if (alignment > 1) {
+    IRNode* backed = GeneratorEmit(
+        gen, NewIR2(IR_OP(suba), raw,
+                    GeneratorGetIntConstant(gen, NULL, alignment - 1)));
+    address = GeneratorEmit(
+        gen, NewIR2(IR_OP(aligni), backed,
+                    GeneratorGetIntConstant(gen, NULL, alignment)));
+    address = IRSetType(address, node->base.type);
+    GeneratorEmit(gen, NewIR1(IR_OP(restoresp), address));
+  }
   IRNode* holder = GeneratorSpillValueToTemp(gen, address, node->base.type);
   return GeneratorReloadSpilledValue(gen, holder, node->base.type);
 }

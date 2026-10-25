@@ -284,7 +284,8 @@ extern long syscall(int n, ...);
 #error "Unknown architecture"
 #endif
 
-#if defined(__DAVECC_INTERPRETER_ABI__) && defined(__linux__)
+#if defined(__DAVECC_INTERPRETER_ABI__) && defined(__linux__) && \
+    !defined(__DAVECC_LIBC_BUILD__)
 #ifdef __cplusplus
 extern "C" {
 #endif

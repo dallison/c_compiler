@@ -13585,6 +13585,14 @@ static bool AliasTemplatePatternIsClassTemplateId(Symbol* alias,
   if (alias->type->template_arguments->length != expected) {
     return false;
   }
+  // `using IteratorValueAdapter = Other<A, Iterator>` inside a class template
+  // has one alias parameter and two pattern arguments.  The extra argument is
+  // the enclosing class's parameter, so this is not `using X = vector<T>`.
+  if (forwarding_only && SymbolExtraOf(alias)->alias_template != NULL &&
+      SymbolExtraOf(alias)->alias_template->parameters.length !=
+          alias->type->template_arguments->length) {
+    return false;
+  }
   // `using StorageT = Storage<ElemT<I>, I, Tag<Ts...>>` has the same arity
   // as Storage, but the arguments are computed.  Treating it as a
   // forwarding alias instantiates Storage with only `I` (`StorageT<0>` →

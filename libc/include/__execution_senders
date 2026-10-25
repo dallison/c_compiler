@@ -13,7 +13,10 @@
 
 #include <syscall.h>
 
-#if !defined(__6502__) && !defined(__W65C02__) && defined(__DAVECC_HAS_THREADS__)
+// P-code has no guest threads. The sender algorithms used here run on the
+// calling thread; mutexes fall back to the single-threaded implementation.
+#if !defined(__6502__) && !defined(__W65C02__) && \
+    (defined(__DAVECC_HAS_THREADS__) || defined(__p_code__))
 
 #include <atomic>
 #include <concepts>

@@ -16,7 +16,8 @@ work="$(dirname "$out")/libc${target}.build"
 rm -rf "$work"
 mkdir -p "$work"
 
-cflags=(-target "$target" -c -Xkeep-asm -isystem libc/include -Ilibc)
+cflags=(-target "$target" -c -Xkeep-asm -isystem libc/include -Ilibc \
+  -D__DAVECC_LIBC_BUILD__)
 
 runtime_srcs=(
   "6502 support/start.s"
