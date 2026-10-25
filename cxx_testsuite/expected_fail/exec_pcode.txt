@@ -11,7 +11,6 @@
 0221_thread_local_lifetime.cpp
 0222_thread_local_scalar_dynamic_init.cpp
 0223_thread_local_block_dtor_order.cpp
-0445_tls_image_clear_of_bss.cpp
 0672_namespace_class_array_forms.cpp
 0675_large_class_arrays.cpp
 0689_aggregate_global_runtime_members.cpp
