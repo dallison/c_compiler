@@ -335,7 +335,7 @@ template <class T>
 struct allocator {
   using value_type = T;
   using size_type = size_t;
-  using difference_type = long;
+  using difference_type = ptrdiff_t;
   using pointer = T*;
   using const_pointer = const T*;
   using reference = T&;

@@ -4277,14 +4277,23 @@ static IRNode* GenerateFunctionCall(Generator* gen, VectorASTNode* node) {
     } else if (reference_formal &&
                (TypeIsStructOrUnion(arg_value->type) ||
                 TypeIsVector(arg_value->type))) {
-      if (IRIsVariable(arg_value)) {
-        IRVariable* variable = (IRVariable*)arg_value;
-        if (variable->symbol != NULL) {
-          variable->symbol->flags.address_taken = true;
+      // A member access is already the object's address (`adda` / `loada`).
+      // Taking its address again passes a pointer to that temporary address,
+      // so `path::compare` reads the wrong string.
+      if (arg_value->opcode == IR_OP(adda) ||
+          arg_value->opcode == IR_OP(loada) ||
+          arg_value->opcode == IR_OP(addressof)) {
+        IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
+      } else {
+        if (IRIsVariable(arg_value)) {
+          IRVariable* variable = (IRVariable*)arg_value;
+          if (variable->symbol != NULL) {
+            variable->symbol->flags.address_taken = true;
+          }
         }
+        arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), arg_value));
+        IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
       }
-      arg_value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), arg_value));
-      IRSetType(arg_value, NewPointerTo(kQualPlain, arg->type));
       // Binding a reference consumes the object's current storage; it does not
       // create a fresh definition at the point where its address is taken.
       // Treating this as a definition lets SSA rename the address to a new,
@@ -6071,12 +6080,15 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
         node->base.value_category == kValueCategoryPrvalue));
   if (OptLevel1() && ASTNodeIsIntConstant(node->left) &&
       !fills_struct_address) {
-    // Condition is constant  Just return the left or right.
+    // Condition is constant.  Just return the selected arm.  A reference
+    // result needs that arm's address; generating it as a value returns the
+    // loaded object and the caller loads through the value.
     ConstantASTNode* c = (ConstantASTNode*)node->left;
-    if (c->value.ivalue != 0) {
-      return GenerateExpression(gen, colon->left);
+    ASTNode* selected = c->value.ivalue != 0 ? colon->left : colon->right;
+    if ((node->base.flags & kASTNeedAddress) != 0) {
+      selected->flags |= kASTNeedAddress;
     }
-    return GenerateExpression(gen, colon->right);
+    return GenerateExpression(gen, selected);
   }
 
   // Class, GNU-vector, and member-pointer results cannot be merged through a

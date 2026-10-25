@@ -34,8 +34,12 @@ typedef int ssize_t;
 #define __SSIZE_T
 #endif
 
-#ifndef __PTRIFF_T
+#ifndef __PTRDIFF_T
+#if defined(__LP64__)
 typedef long ptrdiff_t;
+#else
+typedef int ptrdiff_t;
+#endif
 #define __PTRDIFF_T
 #endif
 

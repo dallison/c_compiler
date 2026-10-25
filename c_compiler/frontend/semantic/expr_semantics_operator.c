@@ -2059,10 +2059,17 @@ ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
                                              node->right->location);
         ASTNodeReplaceChild(parent, node->base.child_id, scale, false);
 
-        // The result of subtracting two pointers is the signed type
-        // ptrdiff_t (`long` on this target), not an unsigned type.
+        // The result of subtracting two pointers is ptrdiff_t: long on
+        // LP64, int on ILP32 (where size_t is unsigned int).
+        Type ptrdiff_kind = kTypeLong;
+        if (compiler->pointer_size == compiler->int_size) {
+          ptrdiff_kind = kTypeInt;
+        } else if (compiler->pointer_size == compiler->long_long_size &&
+                   compiler->pointer_size != compiler->long_size) {
+          ptrdiff_kind = kTypeLongLong;
+        }
         ASTNodeSetType(scale,
-                       NewTypeRecordWithSize(kTypeLong, kQualPlain));
+                       NewTypeRecordWithSize(ptrdiff_kind, kQualPlain));
         return scale;
       }
     } else {

@@ -233,7 +233,8 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
   const char* size_suffix =
       pointer_size == long_size ? "UL" : (pointer_size == int_size ? "U" : "ULL");
   const char* ptrdiff_suffix =
-      pointer_size == long_size ? "L" : (pointer_size == int_size ? "" : "LL");
+      pointer_size == int_size ? ""
+                               : (pointer_size == long_size ? "L" : "LL");
   DefineMaxMacro(p, "__SIZE_MAX__", pointer_size, true, size_suffix);
   DefineMaxMacro(p, "__PTRDIFF_MAX__", pointer_size, false, ptrdiff_suffix);
 

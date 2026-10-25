@@ -538,6 +538,19 @@ static void RestoreRegisters(RVEmitter* emitter, FILE* fp) {
     fprintf(fp, "\t// Restored registers.\n");
   }
 
+  // Callee-saved slots are addressed from the prologue stack pointer.
+  // alloca (decsp) moves sp, so put it back before those loads.  s0 is the
+  // entry stack pointer minus any varargs area above the frame.
+  if (!EmptyStackFrame(emitter)) {
+    int frame_below_fp = StackFrameSize(emitter) - space_above_frame_pointer;
+    if (frame_below_fp > 0x7ff) {
+      fprintf(fp, "\tli t0, %d\n", frame_below_fp);
+      fprintf(fp, "\tsub sp, s0, t0\n");
+    } else if (frame_below_fp > 0) {
+      fprintf(fp, "\taddi sp, s0, -%d\n", frame_below_fp);
+    }
+  }
+
   int offset = emitter->saved_reg_offset;
 
   BitSetIterator it;

@@ -972,6 +972,9 @@ typedef struct {
   IROptimizations ir_optimizations;
   bool keep_ssa;
   bool pic;
+  bool optimize;
+  bool optimize_for_size;
+  int opt_level;
 } SavedCodegenTarget;
 
 static SavedCodegenTarget EnterPCodeTarget(CompilerTarget* pcode_target) {
@@ -980,10 +983,19 @@ static SavedCodegenTarget EnterPCodeTarget(CompilerTarget* pcode_target) {
   saved.ir_optimizations = compiler->ir_optimizations;
   saved.keep_ssa = compiler->keep_ssa;
   saved.pic = compiler->pic;
+  saved.optimize = compiler->optimize;
+  saved.optimize_for_size = compiler->optimize_for_size;
+  saved.opt_level = compiler->opt_level;
   compiler->target = pcode_target;
   compiler->ir_optimizations = pcode_target->ir_optimizations;
   compiler->keep_ssa = pcode_target->keep_ssa;
   compiler->pic = false;
+  // Constant results must not depend on the caller's -O level.  The -O2
+  // passes rewrite stack slots in a way the p-code lowering does not read
+  // back, so a nested local folds to zero.
+  compiler->optimize = false;
+  compiler->optimize_for_size = false;
+  compiler->opt_level = 0;
   return saved;
 }
 
@@ -992,6 +1004,9 @@ static void LeavePCodeTarget(SavedCodegenTarget saved) {
   compiler->ir_optimizations = saved.ir_optimizations;
   compiler->keep_ssa = saved.keep_ssa;
   compiler->pic = saved.pic;
+  compiler->optimize = saved.optimize;
+  compiler->optimize_for_size = saved.optimize_for_size;
+  compiler->opt_level = saved.opt_level;
 }
 
 static bool CompileFunctionToPCodeObject(TypeRecord* func, PCodeObject* object,

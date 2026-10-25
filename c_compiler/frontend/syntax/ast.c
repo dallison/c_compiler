@@ -1312,6 +1312,11 @@ static ASTNode* StructMemberASTNodeClone(const ASTNode* node,
   StructMemberASTNode* to = ASTArenaAlloc(sizeof(StructMemberASTNode));
   ASTNodeBaseCopy(&to->base, node);
   StructMemberASTNodeSetMember(to, from->member);
+  // SetMember stores the member's offset within its declaring class.  A
+  // qualified access such as `C::value` on a `D` object keeps the offset
+  // within `D` on the node; copying must not replace that with zero.
+  to->byte_offset = from->byte_offset;
+  to->access = from->access;
   to->template_arguments =
       TemplateArgumentVectorCopy(from->template_arguments);
   to->owner_type = from->owner_type;

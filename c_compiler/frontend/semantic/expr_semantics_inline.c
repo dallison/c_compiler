@@ -60,6 +60,7 @@ static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id, 
 static bool FunctionTypeIsBeingAnalyzed(TypeRecord* func_type);
 static bool InliningBlockedByCalleeOrCompilerFlags(FunctionInfo* func);
 static bool InliningBlockedByCallerTemplateParameters(void);
+static bool InliningBlockedByCallerSharingTemplateBody(void);
 static bool EnsureInlinedCalleeBodyIsAnalyzed(FunctionInfo* func);
 static bool InliningBlockedByCalleeContractRules(FunctionInfo* func);
 static bool InliningBlockedByLazyTemplateBodySharing(FunctionInfo* func);
@@ -849,7 +850,42 @@ static bool FunctionTypeIsBeingAnalyzed(TypeRecord* func_type) {
   return false;
 }
 
-// Contract: Read-only early gates (-O2, constexpr evaluation, consteval, noinline).
+// A static or thread_local local has one definition tied to the callee.
+// Cloning the body would reference that object from the caller without
+// emitting it.  A template parameter named in the body is a constant only
+// while the callee is compiled; copied into the caller it is an undefined
+// symbol (`RoundUpTo<R>`'s `R`).
+static void FindInlineUnsafeLocal(ASTNode* node, void* data, int child_id,
+                                  VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  bool* found = data;
+  if (node->op == AST_OP(vardecl)) {
+    Symbol* symbol = ((VariableDeclarationASTNode*)node)->symbol;
+    if (symbol != NULL &&
+        (StorageIs(symbol->storage, STO(static)) ||
+         StorageIs(symbol->storage, STO(thread)))) {
+      *found = true;
+    }
+  }
+  if (node->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
+    if (symbol != NULL && symbol->flags.is_template_parameter) {
+      *found = true;
+    }
+  }
+}
+
+static bool InliningBlockedByUnsafeBody(FunctionInfo* func) {
+  if (func->body == NULL) {
+    return false;
+  }
+  bool found = false;
+  ASTNodeVisit(func->body, FindInlineUnsafeLocal, 0, &found);
+  return found;
+}
 // Returns true when inlining must not proceed (caller should return false).
 static bool InliningBlockedByCalleeOrCompilerFlags(FunctionInfo* func) {
   if (func == NULL || !OptLevel2()) {
@@ -858,7 +894,35 @@ static bool InliningBlockedByCalleeOrCompilerFlags(FunctionInfo* func) {
   if (compiler->constant_evaluation_required_depth > 0) {
     return true;
   }
-  if (func->is_consteval) {
+  // decltype needs the call's type.  Inlining a member template here binds
+  // the nested class from the primary template instead of the specialization.
+  if (compiler->decltype_operand != NULL) {
+    return true;
+  }
+  if (func->is_consteval || func->is_constexpr) {
+    return true;
+  }
+  // Inlining a scoped-enum return into a function template turns the result
+  // into a plain int, so the caller can no longer convert it back.
+  if (func->symbol != NULL && func->symbol->type != NULL &&
+      func->symbol->type->next != NULL &&
+      TypeIsScopedEnum(func->symbol->type->next)) {
+    return true;
+  }
+  // Constructor and destructor bodies are tied to the object's lifetime.
+  // Cloning them drops or repeats the body relative to the initializer and
+  // the caller's cleanup.  Other member functions are not inlined either:
+  // a cloned member access is an address (`adda`) that argument lowering
+  // then takes the address of again, and the resulting call reads the wrong
+  // object (`path::compare`, `map` node lookup).
+  if (func->is_constructor || func->is_destructor ||
+      func->cxx_member_owner != NULL) {
+    return true;
+  }
+  if (func->symbol != NULL && func->symbol->type != NULL &&
+      func->symbol->type->next != NULL &&
+      (TypeIsStructOrUnion(func->symbol->type->next) ||
+       TypeIsReference(func->symbol->type->next))) {
     return true;
   }
   if (func->symbol != NULL && func->symbol->flags.noinline) {
@@ -873,6 +937,24 @@ static bool InliningBlockedByCallerTemplateParameters(void) {
   return compiler->current_function != NULL &&
          TypeIsFunction(compiler->current_function) &&
          TypeContainsTemplateParameter(compiler->current_function);
+}
+
+// Instantiations that still share the primary template's body must not be
+// rewritten: inlining replaces call nodes in that body, so later
+// instantiations see the first specialization's result.
+static bool InliningBlockedByCallerSharingTemplateBody(void) {
+  if (compiler->current_function == NULL ||
+      !TypeIsFunction(compiler->current_function)) {
+    return false;
+  }
+  FunctionInfo* info = &compiler->current_function->info.function;
+  if (info->body == NULL || info->template_origin == NULL ||
+      info->template_origin->type == NULL ||
+      !TypeIsFunction(info->template_origin->type)) {
+    return false;
+  }
+  return info->body ==
+         info->template_origin->type->info.function.body;
 }
 
 // Contract: Ensures `func->body` is analyzed when policy allows synchronous analysis
@@ -1047,7 +1129,8 @@ bool FunctionCanBeInlined(FunctionInfo* func) {
   if (InliningBlockedByCalleeOrCompilerFlags(func)) {
     return false;
   }
-  if (InliningBlockedByCallerTemplateParameters()) {
+  if (InliningBlockedByCallerTemplateParameters() ||
+      InliningBlockedByCallerSharingTemplateBody()) {
     return false;
   }
   if (!EnsureInlinedCalleeBodyIsAnalyzed(func)) {
@@ -1073,6 +1156,9 @@ bool FunctionCanBeInlined(FunctionInfo* func) {
     return false;
   }
   if (InliningBlockedByCalleeFormals(func)) {
+    return false;
+  }
+  if (InliningBlockedByUnsafeBody(func)) {
     return false;
   }
   return CalleeBodyEligibleByStructureAndSize(func, force_inline,
