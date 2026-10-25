@@ -12,5 +12,9 @@
 #include "assembler.h"
 
 bool AssemblerEvaluateExpressionInternal(Assembler* assembler, int64_t* result);
+// Parses an assembler expression and returns it.  The caller owns the node.
+ASTNode* AssemblerCaptureExpression(Assembler* assembler);
+void AssemblerReleaseExpression(void* expression);
+void AssemblerSetEqvExpression(AssemblerSymbol* symbol, ASTNode* expression);
 
 #endif /* asm_expr_h */

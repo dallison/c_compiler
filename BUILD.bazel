@@ -647,6 +647,22 @@ cc_test(
     deps = [":compiler"],
 )
 
+cc_test(
+    name = "asm_macro_test",
+    srcs = ["tests/asm_macro_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":compiler"],
+)
+
+cc_test(
+    name = "asm_control_test",
+    srcs = ["tests/asm_control_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":compiler"],
+)
+
 sh_test(
     name = "listing_test",
     srcs = ["tests/listing_test.sh"],
@@ -914,6 +930,7 @@ cc_library(
         "c_compiler/bpf/bpf_reg_alloc.c",
         "c_compiler/bpf/bpf_target.c",
         "c_compiler/assembler/asm_expr.c",
+        "c_compiler/assembler/asm_macro.c",
         "c_compiler/assembler/asm_module.c",
         "c_compiler/assembler/asm_object.c",
         "c_compiler/assembler/assembler.c",

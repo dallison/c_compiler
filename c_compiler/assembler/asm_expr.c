@@ -14,6 +14,8 @@
 #include "assembler.h"
 
 static ASTNode* ParseExpression(Assembler* assembler);
+static bool EvaluateExpression(Assembler* assembler, ASTNode* node, int depth,
+                               int64_t* result);
 
 static ASTNode* ParseIdentifier(Assembler* assembler) {
   Lex* lex = assembler->syntax.lex;
@@ -395,6 +397,43 @@ static ASTNode* ParseExpression(Assembler* assembler) {
   return ParseConditionalExpression(assembler);
 }
 
+ASTNode* AssemblerCaptureExpression(Assembler* assembler) {
+  return ParseExpression(assembler);
+}
+
+void AssemblerReleaseExpression(void* expression) {
+  if (expression != NULL) {
+    ASTNodeDelete((ASTNode*)expression);
+  }
+}
+
+void AssemblerSetEqvExpression(AssemblerSymbol* symbol, ASTNode* expression) {
+  if (symbol->eqv_ast != NULL) {
+    ASTNodeDelete((ASTNode*)symbol->eqv_ast);
+  }
+  symbol->eqv_ast = expression;
+  symbol->is_eqv = true;
+  symbol->defined = true;
+  symbol->is_constant = true;
+}
+
+static bool EvaluateEqv(Assembler* assembler, AssemblerSymbol* symbol,
+                        int64_t* result) {
+  if (symbol->eqv_busy || symbol->eqv_ast == NULL) {
+    if (symbol->eqv_busy) {
+      AssemblerError(assembler, "recursive .eqv `%s'", symbol->name.value);
+    }
+    return false;
+  }
+  symbol->eqv_busy = true;
+  bool ok = EvaluateExpression(assembler, (ASTNode*)symbol->eqv_ast, 0, result);
+  symbol->eqv_busy = false;
+  if (ok) {
+    symbol->value = *result;
+  }
+  return ok;
+}
+
 static bool EvaluateExpression(Assembler* assembler, ASTNode* node, int depth, int64_t* result) {
   ConstantASTNode* const_node = (ConstantASTNode*)node;
   IdentifierASTNode* id_node = (IdentifierASTNode*)node;
@@ -415,12 +454,18 @@ static bool EvaluateExpression(Assembler* assembler, ASTNode* node, int depth, i
       return true;
     case AST_OP(identifier): {
       AssemblerSymbol* asm_sym = (AssemblerSymbol*)id_node->symbol;
-#if 0
-      if (asm_sym->is_label && depth > 0) {
-        AssemblerError(assembler, "Use of label %s in expression", asm_sym->name.value);
-        return false;
+      if (strcmp(asm_sym->name.value, ".") == 0) {
+        *result = AssemblerCurrentAddress(assembler);
+        return true;
       }
-#endif
+      AssemblerSymbol* found =
+          AssemblerFindSymbol(assembler, asm_sym->name.value);
+      if (found != NULL) {
+        asm_sym = found;
+      }
+      if (asm_sym->is_eqv) {
+        return EvaluateEqv(assembler, asm_sym, result);
+      }
       if (!asm_sym->defined) {
         return false;
       }
@@ -594,8 +639,16 @@ static bool EvaluateRelocatable(Assembler* assembler, ASTNode* node,
   *addend = 0;
   switch (node->op) {
     case AST_OP(identifier): {
-      AssemblerSymbol* asm_sym = RelocationTarget(
-          assembler, (AssemblerSymbol*)((IdentifierASTNode*)node)->symbol);
+      AssemblerSymbol* named =
+          (AssemblerSymbol*)((IdentifierASTNode*)node)->symbol;
+      if (strcmp(named->name.value, ".") == 0) {
+        *addend = AssemblerCurrentAddress(assembler);
+        return true;
+      }
+      AssemblerSymbol* asm_sym = RelocationTarget(assembler, named);
+      if (asm_sym->is_eqv) {
+        return EvaluateEqv(assembler, asm_sym, addend);
+      }
       if (asm_sym->defined && asm_sym->is_constant) {
         *addend = asm_sym->value;
       } else {

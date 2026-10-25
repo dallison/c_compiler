@@ -7,8 +7,10 @@
 //
 
 #include "assembler.h"
+#include "asm_macro.h"
 #include "asm_module.h"
 #include <assert.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +25,7 @@
 #define ASM_OBJECT_FINAL_PASS 3
 
 static void AssemblerWriteObject(Assembler* assembler) {
+  AsmObjectFinishSubsections(&assembler->object);
   if (assembler->object.write_macho) {
     if (!AsmObjectWriteMachO(&assembler->object, assembler->out)) {
       assembler->num_errors++;
@@ -81,6 +84,21 @@ DECLARE_DIRECTIVE_FUNC(uleb128);
 DECLARE_DIRECTIVE_FUNC(sleb128);
 DECLARE_DIRECTIVE_FUNC(syntax);
 DECLARE_DIRECTIVE_FUNC(arm);
+DECLARE_DIRECTIVE_FUNC(equ);
+DECLARE_DIRECTIVE_FUNC(equiv);
+DECLARE_DIRECTIVE_FUNC(eqv);
+DECLARE_DIRECTIVE_FUNC(org);
+DECLARE_DIRECTIVE_FUNC(fill);
+DECLARE_DIRECTIVE_FUNC(pushsection);
+DECLARE_DIRECTIVE_FUNC(popsection);
+DECLARE_DIRECTIVE_FUNC(previous);
+DECLARE_DIRECTIVE_FUNC(subsection);
+DECLARE_DIRECTIVE_FUNC(err);
+DECLARE_DIRECTIVE_FUNC(error);
+DECLARE_DIRECTIVE_FUNC(warning);
+DECLARE_DIRECTIVE_FUNC(fail);
+DECLARE_DIRECTIVE_FUNC(print);
+DECLARE_DIRECTIVE_FUNC(abort);
 
 #undef DECLARE_DIRECTIVE_FUNC
 
@@ -134,6 +152,77 @@ static void InitializeDirectives(Map* directives) {
   DIRECTIVE(sleb128);
   DIRECTIVE(syntax);
   DIRECTIVE(arm);
+  DIRECTIVE(macro);
+  DIRECTIVE(endm);
+  DIRECTIVE(exitm);
+  DIRECTIVE(purgem);
+  DIRECTIVE(rept);
+  DIRECTIVE(irp);
+  DIRECTIVE(irpc);
+  DIRECTIVE(endr);
+  DIRECTIVE(altmacro);
+  DIRECTIVE(noaltmacro);
+  DIRECTIVE(if);
+  DIRECTIVE(ifdef);
+  DIRECTIVE(ifndef);
+  DIRECTIVE(ifb);
+  DIRECTIVE(ifnb);
+  DIRECTIVE(ifc);
+  DIRECTIVE(ifnc);
+  DIRECTIVE(ifeq);
+  DIRECTIVE(ifne);
+  DIRECTIVE(ifgt);
+  DIRECTIVE(ifge);
+  DIRECTIVE(iflt);
+  DIRECTIVE(ifle);
+  DIRECTIVE(ifeqs);
+  DIRECTIVE(ifnes);
+  DIRECTIVE(else);
+  DIRECTIVE(elseif);
+  DIRECTIVE(endif);
+  DIRECTIVE(ifnotdef);
+  DIRECTIVE(include);
+  DIRECTIVE(incbin);
+  DIRECTIVE(equ);
+  DIRECTIVE(equiv);
+  DIRECTIVE(eqv);
+  DIRECTIVE(org);
+  DIRECTIVE(fill);
+  DIRECTIVE(pushsection);
+  DIRECTIVE(popsection);
+  DIRECTIVE(previous);
+  DIRECTIVE(subsection);
+  DIRECTIVE(err);
+  DIRECTIVE(error);
+  DIRECTIVE(warning);
+  DIRECTIVE(fail);
+  DIRECTIVE(print);
+  DIRECTIVE(abort);
+}
+
+static void* FindDirective(Assembler* assembler, const char* spelling) {
+  void* handler = MapFindPointerKey(&assembler->directives, spelling);
+  if (handler != NULL) {
+    return handler;
+  }
+  bool folded = false;
+  for (const char* p = spelling; *p != '\0'; p++) {
+    if (isupper((unsigned char)*p)) {
+      folded = true;
+      break;
+    }
+  }
+  if (!folded) {
+    return NULL;
+  }
+  String lower;
+  StringInit(&lower, spelling);
+  for (size_t i = 0; i < lower.length; i++) {
+    lower.value[i] = (char)tolower((unsigned char)lower.value[i]);
+  }
+  handler = MapFindPointerKey(&assembler->directives, lower.value);
+  StringDestruct(&lower);
+  return handler;
 }
 
 #undef DIRECTIVE
@@ -223,6 +312,7 @@ static bool AssemblerInitCommon(Assembler* assembler, int16_t elf_machine_type,
   }
   MapInit(&assembler->directives, CompareCharPointer);
   InitializeDirectives(&assembler->directives);
+  AssemblerMacroInit(assembler);
   assembler->num_errors = 0;
   assembler->parsing_layout_expression = false;
   assembler->define_label = DefineLabel;
@@ -240,6 +330,7 @@ bool AssemblerInit(Assembler* assembler, int16_t elf_machine_type,
   }
   if (!LexInitFromFile(&assembler->lex, infile->value,
                        &assembler->preprocessor)) {
+    AssemblerMacroShutdown(assembler);
     MapDestruct(&assembler->directives);
     AsmObjectDestruct(&assembler->object);
     PreprocessorDestruct(&assembler->preprocessor);
@@ -264,6 +355,7 @@ bool AssemblerInitFromString(Assembler* assembler, int16_t elf_machine_type,
   }
   String* owned_input = malloc(sizeof(String));
   if (owned_input == NULL) {
+    AssemblerMacroShutdown(assembler);
     MapDestruct(&assembler->directives);
     AsmObjectDestruct(&assembler->object);
     PreprocessorDestruct(&assembler->preprocessor);
@@ -275,6 +367,7 @@ bool AssemblerInitFromString(Assembler* assembler, int16_t elf_machine_type,
                          &assembler->preprocessor)) {
     StringDestruct(owned_input);
     free(owned_input);
+    AssemblerMacroShutdown(assembler);
     MapDestruct(&assembler->directives);
     AsmObjectDestruct(&assembler->object);
     PreprocessorDestruct(&assembler->preprocessor);
@@ -290,6 +383,7 @@ bool AssemblerInitFromString(Assembler* assembler, int16_t elf_machine_type,
 }
 
 void AssemblerDestruct(Assembler* assembler) {
+  AssemblerMacroShutdown(assembler);
   fclose(assembler->out);
   SyntaxCloseScope(&assembler->syntax);
   SyntaxDestruct(&assembler->syntax);
@@ -489,13 +583,41 @@ static bool MatchStatementSeparator(Assembler* assembler) {
          LexMatch(&assembler->lex, TOK(semicolon));
 }
 
+static void AssembleStatement(Assembler* assembler, String* word,
+                              void (*run_func)(Assembler*, String*)) {
+  bool active = AssemblerCondActive(assembler);
+  void* dir_func = FindDirective(assembler, word->value);
+  if (!active) {
+    if (dir_func != NULL && AssemblerIsConditionalDirective(word->value)) {
+      void (*func)(Assembler*) = dir_func;
+      func(assembler);
+    } else {
+      AssemblerSkipInactiveStatement(assembler);
+    }
+    return;
+  }
+  if (dir_func != NULL) {
+    void (*func)(Assembler*) = dir_func;
+    func(assembler);
+    return;
+  }
+  if (AssemblerMacroTryInvoke(assembler, word->value)) {
+    return;
+  }
+  run_func(assembler, word);
+}
+
 static void Assemble(Assembler* assembler,
                      void (*run_func)(Assembler*, String*)) {
   String word = {0};
   // LexEof is already true while the tokens of a last line without a
   // trailing newline are being read.
-  while (!LexEof(&assembler->lex) || AssemblerLookingAtSymbol(assembler) ||
-         LexLookingAt(&assembler->lex, TOK(number))) {
+  while (!assembler->stop_assembly &&
+         (!LexEof(&assembler->lex) || AssemblerLookingAtSymbol(assembler) ||
+          LexLookingAt(&assembler->lex, TOK(number)))) {
+    if (MatchStatementSeparator(assembler)) {
+      continue;
+    }
     if (AssemblerLookingAtSymbol(assembler)) {
       // Starts with identifier.  Could be a symbol definition
       // or instruction.  A symbol definition is followed by a colon.
@@ -503,18 +625,21 @@ static void Assemble(Assembler* assembler,
       StringSetString(&word, &assembler->lex.spelling);
       LexNextToken(&assembler->lex);
       if (LexMatch(&assembler->lex, TOK(colon))) {
-        // Defining a label.
-        if (assembler->object.pass == 1) {
-          assembler->define_label(assembler, &word);
-        } else {
-          // Variable-length directives can make pass-two offsets differ from
-          // the provisional pass-one layout. Refresh labels as they are
-          // encountered so following relocations use the emitted location.
-          AssemblerSymbol* symbol =
-              AssemblerFindSymbol(assembler, word.value);
-          if (symbol != NULL) {
-            symbol->section = assembler->object.current_section;
-            symbol->value = AssemblerCurrentAddress(assembler);
+        // Defining a label.  A label in a skipped conditional is not defined.
+        if (AssemblerCondActive(assembler)) {
+          if (assembler->object.pass == 1) {
+            assembler->define_label(assembler, &word);
+          } else {
+            // Variable-length directives can make pass-two offsets differ from
+            // the provisional pass-one layout. Refresh labels as they are
+            // encountered so following relocations use the emitted location.
+            AssemblerSymbol* symbol =
+                AssemblerFindSymbol(assembler, word.value);
+            if (symbol != NULL) {
+              symbol->section = assembler->object.current_section;
+              symbol->value = AssemblerCurrentAddress(assembler);
+              symbol->defined_pass = assembler->object.pass;
+            }
           }
         }
         // `label: insn` continues on the same line.
@@ -523,41 +648,50 @@ static void Assemble(Assembler* assembler,
           continue;
         }
       } else {
-        // Try as a directive name.
-        void* dir_func = MapFindPointerKey(&assembler->directives, word.value);
-        if (dir_func != NULL) {
-          void (*func)(Assembler*) = dir_func;
-          func(assembler);
-        } else {
-          // Must be an instruction, pass on.
-          run_func(assembler, &word);  // Run the assembly pass.
-        }
-        if (MatchStatementSeparator(assembler)) {
-          continue;
-        }
+        AssembleStatement(assembler, &word, run_func);
       }
     } else if (LexLookingAt(&assembler->lex, TOK(number))) {
       int number = (int)assembler->lex.number;
       LexNextToken(&assembler->lex);
       if (LexMatch(&assembler->lex, TOK(colon))) {
-        AssemblerNoteNumericLocalLabel(assembler, number);
+        if (AssemblerCondActive(assembler)) {
+          AssemblerNoteNumericLocalLabel(assembler, number);
+        }
         if (AssemblerLookingAtSymbol(assembler) ||
             LexLookingAt(&assembler->lex, TOK(number))) {
           continue;
         }
-      } else {
+      } else if (AssemblerCondActive(assembler)) {
         AssemblerError(assembler, "Unexpected numeric token");
+      } else {
+        AssemblerSkipInactiveStatement(assembler);
       }
     }
+    if (assembler->stop_assembly) {
+      break;
+    }
+    if (assembler->replay_current_line) {
+      assembler->replay_current_line = false;
+      LexNextToken(&assembler->lex);
+      continue;
+    }
+    if (MatchStatementSeparator(assembler)) {
+      continue;
+    }
     // In assembler mode the lexical analyzer doesn't read past the
-    // end of line.  Read another line now.
-    LexReadLine(&assembler->lex);
+    // end of line.  Read another line now.  Macro expansions are nested
+    // sources; AssemblerReadAssemblyLine returns to the caller when one ends.
+    AssemblerReadAssemblyLine(assembler);
     LexNextToken(&assembler->lex);
+  }
+  if (assembler->cond_stack.length > 0 && assembler->num_errors == 0) {
+    AssemblerError(assembler, "unclosed conditional");
   }
   StringDestruct(&word);
 }
 
 void AssemblerReset(Assembler* assembler, bool clear_symbols) {
+  AssemblerMacroReset(assembler);
   AsmObjectReset(&assembler->object, clear_symbols);
   PreprocessorReset(&assembler->preprocessor);
   // Reset restores only the standard predefined macros.  Command-line -D
@@ -849,6 +983,7 @@ static void HandleDirective_comm(Assembler* assembler) {
       }
       sym->exported = true;
       sym->defined = true;
+      sym->defined_pass = assembler->object.pass;
       sym->section = SHN_COM;
       sym->value = 0;
       sym->binding = SYM_BIND(global);
@@ -858,6 +993,7 @@ static void HandleDirective_comm(Assembler* assembler) {
                                SYM_TYPE(object), SYM_BIND(global), 0);
       StringDestruct(&name);
       sym->defined = true;
+      sym->defined_pass = assembler->object.pass;
       AssemblerInsertSymbol(assembler, sym);
       sym->exported = true;
     }
@@ -1523,6 +1659,9 @@ static void MapMachOSectionName(String* name, const char* section,
   }
 }
 
+static void AssemblerUseSection(Assembler* assembler, int section,
+                                int subsection);
+
 static void HandleDirective_section(Assembler* assembler) {
   if (LexLookingAt(&assembler->lex, TOK(identifier)) ||
       LexLookingAt(&assembler->lex, TOK(string))) {
@@ -1532,6 +1671,7 @@ static void HandleDirective_section(Assembler* assembler) {
     int32_t flags = 0;
     int32_t type = SHT(null);
     int alignment = DefaultSectionAlignment(assembler, name->value);
+    int subsection = 0;
     if (IsMachOSectionName(name->value) &&
         LexMatch(&assembler->lex, TOK(comma)) &&
         (LexLookingAt(&assembler->lex, TOK(identifier)) ||
@@ -1550,6 +1690,16 @@ static void HandleDirective_section(Assembler* assembler) {
         }
       }
     } else if (LexMatch(&assembler->lex, TOK(comma))) {
+      if (LexLookingAt(&assembler->lex, TOK(number))) {
+        subsection = (int)AssemblerEvaluateExpression(assembler);
+        if (LexMatch(&assembler->lex, TOK(comma)) &&
+            (LexLookingAt(&assembler->lex, TOK(identifier)) ||
+             LexLookingAt(&assembler->lex, TOK(string)))) {
+          // Flags follow the subsection.
+        } else {
+          goto section_ready;
+        }
+      }
       if (LexLookingAt(&assembler->lex, TOK(identifier)) ||
           LexLookingAt(&assembler->lex, TOK(string))) {
         for (size_t i = 0; assembler->lex.spelling.value[i] != '\0'; i++) {
@@ -1605,6 +1755,7 @@ static void HandleDirective_section(Assembler* assembler) {
     if (LexMatch(&assembler->lex, TOK(comma))) {
       alignment = (int)AssemblerEvaluateExpression(assembler);
     }
+  section_ready:;
     int section;
     if (assembler->object.pass == 1) {
       section = AssemblerFindSection(assembler, name);
@@ -1620,15 +1771,62 @@ static void HandleDirective_section(Assembler* assembler) {
     if (section == -1) {
       AssemblerError(assembler, "Bad .section directive");
     } else {
-      assembler->object.current_section = section;
+      AssemblerUseSection(assembler, section, subsection);
     }
   } else {
     AssemblerError(assembler, "Missing section name");
   }
 }
 
+static int CurrentSubsection(const Assembler* assembler) {
+  if (assembler->object.current_section < 0 ||
+      (size_t)assembler->object.current_section >=
+          assembler->object.sections.length) {
+    return 0;
+  }
+  AssemblerSection* section =
+      assembler->object.sections.value.p[assembler->object.current_section];
+  return section->current_subsection;
+}
+
+static void AssemblerUseSection(Assembler* assembler, int section,
+                                int subsection) {
+  assembler->previous_section = assembler->object.current_section;
+  assembler->previous_subsection = CurrentSubsection(assembler);
+  assembler->object.current_section = section;
+  if (!AsmObjectSelectSubsection(&assembler->object, subsection)) {
+    AssemblerError(assembler, "subsection %d is out of range", subsection);
+  }
+}
+
+static bool DirectiveHasArgument(const Assembler* assembler) {
+  const Lex* lex = &assembler->lex;
+  if (lex->current_token == TOK(eof) || lex->current_token == TOK(semicolon) ||
+      lex->current_token == TOK(bad)) {
+    return false;
+  }
+  return lex->pos < lex->line.length ||
+         lex->current_token == TOK(number) ||
+         lex->current_token == TOK(identifier) ||
+         lex->current_token == TOK(string) ||
+         lex->current_token == TOK(minus) ||
+         lex->current_token == TOK(plus) ||
+         lex->current_token == TOK(lparen);
+}
+
 static void HandleDirective_text(Assembler* assembler) {
+  int subsection = 0;
+  if (DirectiveHasArgument(assembler)) {
+    subsection = (int)AssemblerEvaluateExpression(assembler);
+  }
+  int old_section = assembler->object.current_section;
+  int old_subsection = CurrentSubsection(assembler);
   AssemblerSelectTextSection(assembler);
+  assembler->previous_section = old_section;
+  assembler->previous_subsection = old_subsection;
+  if (!AsmObjectSelectSubsection(&assembler->object, subsection)) {
+    AssemblerError(assembler, "subsection %d is out of range", subsection);
+  }
 }
 
 void AssemblerSelectTextSection(Assembler* assembler) {
@@ -1652,6 +1850,12 @@ void AssemblerSelectTextSection(Assembler* assembler) {
 }
 
 static void HandleDirective_data(Assembler* assembler) {
+  int subsection = 0;
+  if (DirectiveHasArgument(assembler)) {
+    subsection = (int)AssemblerEvaluateExpression(assembler);
+  }
+  int old_section = assembler->object.current_section;
+  int old_subsection = CurrentSubsection(assembler);
   String* name = NewString(".data");
   int section;
   if (assembler->object.pass == 1) {
@@ -1668,7 +1872,12 @@ static void HandleDirective_data(Assembler* assembler) {
     StringDelete(name);
   }
   assert(section != -1);
+  assembler->previous_section = old_section;
+  assembler->previous_subsection = old_subsection;
   assembler->object.current_section = section;
+  if (!AsmObjectSelectSubsection(&assembler->object, subsection)) {
+    AssemblerError(assembler, "subsection %d is out of range", subsection);
+  }
 }
 
 static void HandleDirective_file(Assembler* assembler) {
@@ -1735,34 +1944,251 @@ static void HandleDirective_option(Assembler* assembler) {
   }
 }
 
-static void HandleDirective_set(Assembler* assembler) {
-  if (AssemblerLookingAtSymbol(assembler)) {
-    String name;
-    StringInit(&name, assembler->lex.spelling.value);
-    LexNextToken(&assembler->lex);
-    int64_t value = AssemblerEvaluateExpression(assembler);
-    
+typedef enum {
+  kAssignSet,
+  kAssignEquiv,
+  kAssignEqv,
+} SymbolAssignKind;
+
+static void AssignSymbol(Assembler* assembler, SymbolAssignKind kind) {
+  if (!AssemblerLookingAtSymbol(assembler)) {
+    AssemblerError(assembler, "symbol name expected");
+    return;
+  }
+  String name;
+  StringInit(&name, assembler->lex.spelling.value);
+  LexNextToken(&assembler->lex);
+  LexMatch(&assembler->lex, TOK(comma));
+
+  if (kind == kAssignEqv) {
+    ASTNode* expression = AssemblerCaptureExpression(assembler);
     AssemblerSymbol* sym = AssemblerFindSymbol(assembler, name.value);
-    if (assembler->object.pass == 1) {
-      // Only define symbols in pass 1.
-      if (sym != NULL) {
-        if (!sym->defined) {
-          sym->defined = true;
-          sym->is_constant = true;
-          sym->section = assembler->object.current_section;
-          sym->value = value;
-        } else {
-          AssemblerError(assembler, "Duplicate symbol %s", name.value);
-        }
-      } else {
-        // Symbol is new, define it as a local constant.
-        sym = NewAssemblerSymbol(name.value, assembler->object.current_section,
-                                 SYM_TYPE(none), SYM_BIND(local),
-                                 value);
-        sym->defined = true;
-        sym->is_constant = true;
-        AssemblerInsertSymbol(assembler, sym);
+    if (sym != NULL && sym->defined && !sym->is_constant && !sym->is_eqv &&
+        assembler->object.pass == 1) {
+      AssemblerError(assembler, "symbol `%s' is already defined", name.value);
+      AssemblerReleaseExpression(expression);
+      StringDestruct(&name);
+      return;
+    }
+    if (sym == NULL) {
+      if (assembler->object.pass != 1) {
+        AssemblerReleaseExpression(expression);
+        StringDestruct(&name);
+        return;
       }
+      sym = NewAssemblerSymbol(name.value, assembler->object.current_section,
+                               SYM_TYPE(none), SYM_BIND(local), 0);
+      AssemblerInsertSymbol(assembler, sym);
+    }
+    AssemblerSetEqvExpression(sym, expression);
+    sym->defined_pass = assembler->object.pass;
+    StringDestruct(&name);
+    return;
+  }
+
+  int64_t value = AssemblerEvaluateExpression(assembler);
+  AssemblerSymbol* sym = AssemblerFindSymbol(assembler, name.value);
+  if (sym != NULL && sym->defined && !sym->is_constant) {
+    if (assembler->object.pass == 1) {
+      AssemblerError(assembler, "symbol `%s' is already defined", name.value);
+    }
+    StringDestruct(&name);
+    return;
+  }
+  if (sym != NULL && sym->defined && kind == kAssignEquiv) {
+    if (assembler->object.pass == 1) {
+      AssemblerError(assembler, "symbol `%s' is already defined", name.value);
+      StringDestruct(&name);
+      return;
+    }
+    sym->value = value;
+    sym->defined_pass = assembler->object.pass;
+    StringDestruct(&name);
+    return;
+  }
+  if (sym == NULL) {
+    sym = NewAssemblerSymbol(name.value, assembler->object.current_section,
+                             SYM_TYPE(none), SYM_BIND(local), value);
+    sym->defined = true;
+    sym->defined_pass = assembler->object.pass;
+    sym->is_constant = true;
+    AssemblerInsertSymbol(assembler, sym);
+  } else {
+    sym->defined = true;
+    sym->defined_pass = assembler->object.pass;
+    sym->is_constant = true;
+    sym->value = value;
+    sym->section = assembler->object.current_section;
+  }
+  StringDestruct(&name);
+}
+
+static void HandleDirective_set(Assembler* assembler) {
+  AssignSymbol(assembler, kAssignSet);
+}
+
+static void HandleDirective_equ(Assembler* assembler) {
+  AssignSymbol(assembler, kAssignSet);
+}
+
+static void HandleDirective_equiv(Assembler* assembler) {
+  AssignSymbol(assembler, kAssignEquiv);
+}
+
+static void HandleDirective_eqv(Assembler* assembler) {
+  AssignSymbol(assembler, kAssignEqv);
+}
+
+typedef struct {
+  int section;
+  int subsection;
+} SectionPlace;
+
+static void HandleDirective_pushsection(Assembler* assembler) {
+  int errors = assembler->num_errors;
+  int old_section = assembler->object.current_section;
+  int old_subsection = CurrentSubsection(assembler);
+  HandleDirective_section(assembler);
+  if (assembler->num_errors != errors) {
+    return;
+  }
+  SectionPlace* place = malloc(sizeof(SectionPlace));
+  if (place == NULL) {
+    AssemblerError(assembler, "out of memory");
+    return;
+  }
+  place->section = old_section;
+  place->subsection = old_subsection;
+  VectorAppend(&assembler->section_stack, place);
+}
+
+static void HandleDirective_popsection(Assembler* assembler) {
+  if (assembler->section_stack.length == 0) {
+    AssemblerError(assembler, ".popsection without .pushsection");
+    return;
+  }
+  SectionPlace* place =
+      assembler->section_stack.value.p[assembler->section_stack.length - 1];
+  VectorPop(&assembler->section_stack);
+  AssemblerUseSection(assembler, place->section, place->subsection);
+  free(place);
+}
+
+static void HandleDirective_previous(Assembler* assembler) {
+  if (assembler->previous_section < 0) {
+    AssemblerError(assembler, "no previous section");
+    return;
+  }
+  AssemblerUseSection(assembler, assembler->previous_section,
+                      assembler->previous_subsection);
+}
+
+static void HandleDirective_subsection(Assembler* assembler) {
+  int subsection = (int)AssemblerEvaluateExpression(assembler);
+  AssemblerUseSection(assembler, assembler->object.current_section, subsection);
+}
+
+static bool ReadDirectiveString(Assembler* assembler, String* text) {
+  if (!LexLookingAt(&assembler->lex, TOK(string))) {
+    AssemblerError(assembler, "quoted string expected");
+    return false;
+  }
+  StringInit(text, assembler->lex.spelling.value);
+  LexNextToken(&assembler->lex);
+  return true;
+}
+
+static void HandleDirective_err(Assembler* assembler) {
+  AssemblerError(assembler, ".err encountered");
+}
+
+static void HandleDirective_error(Assembler* assembler) {
+  String text;
+  if (!ReadDirectiveString(assembler, &text)) {
+    return;
+  }
+  AssemblerError(assembler, "%s", text.value);
+  StringDestruct(&text);
+}
+
+static void HandleDirective_warning(Assembler* assembler) {
+  String text;
+  if (!ReadDirectiveString(assembler, &text)) {
+    return;
+  }
+  if (assembler->object.pass == ASM_OBJECT_FINAL_PASS) {
+    AssemblerWarning(assembler, "assembler", "%s", text.value);
+  }
+  StringDestruct(&text);
+}
+
+static void HandleDirective_fail(Assembler* assembler) {
+  int64_t value = AssemblerEvaluateExpression(assembler);
+  if (value >= 500) {
+    if (assembler->object.pass == ASM_OBJECT_FINAL_PASS) {
+      AssemblerWarning(assembler, "assembler", ".fail %" PRId64 " encountered",
+                       value);
+    }
+  } else {
+    AssemblerError(assembler, ".fail %" PRId64 " encountered", value);
+  }
+}
+
+static void HandleDirective_print(Assembler* assembler) {
+  String text;
+  if (!ReadDirectiveString(assembler, &text)) {
+    return;
+  }
+  if (assembler->object.pass == ASM_OBJECT_FINAL_PASS) {
+    printf("%s\n", text.value);
+  }
+  StringDestruct(&text);
+}
+
+static void HandleDirective_abort(Assembler* assembler) {
+  AssemblerError(assembler, ".abort encountered");
+  assembler->stop_assembly = true;
+}
+
+static void HandleDirective_org(Assembler* assembler) {
+  int64_t dest = AssemblerEvaluateExpression(assembler);
+  int fill = 0;
+  if (LexMatch(&assembler->lex, TOK(comma))) {
+    fill = (int)AssemblerEvaluateExpression(assembler);
+  }
+  int64_t here = AssemblerCurrentAddress(assembler);
+  if (dest < here) {
+    AssemblerError(assembler, ".org moves the location counter backwards");
+    return;
+  }
+  AsmObjectEmitFill(&assembler->object, assembler->object.current_section,
+                    dest - here, fill);
+}
+
+static void HandleDirective_fill(Assembler* assembler) {
+  int64_t repeat = AssemblerEvaluateExpression(assembler);
+  int64_t size = 1;
+  int64_t value = 0;
+  if (LexMatch(&assembler->lex, TOK(comma))) {
+    size = AssemblerEvaluateExpression(assembler);
+    if (LexMatch(&assembler->lex, TOK(comma))) {
+      value = AssemblerEvaluateExpression(assembler);
+    }
+  }
+  if (repeat < 0 || size < 0) {
+    AssemblerError(assembler, "negative .fill count");
+    return;
+  }
+  if (size > 8) {
+    size = 8;
+  }
+  uint64_t bits = (uint64_t)value;
+  bool little = assembler->object.is_little_endian;
+  for (int64_t n = 0; n < repeat; n++) {
+    for (int64_t b = 0; b < size; b++) {
+      int shift = little ? (int)(b * 8) : (int)((size - 1 - b) * 8);
+      AssemblerEmitByte(assembler, assembler->object.current_section,
+                        (uint8_t)(bits >> shift));
     }
   }
 }
