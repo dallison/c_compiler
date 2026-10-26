@@ -1152,9 +1152,11 @@ static void AllocateRegisterOnce(XTENSARegisterAllocator* allocator,
       break;
 
     case XTENSA_OP(structreturn):
-      reg = &allocator->int_regs[(is_leaf ? XTENSA_FIRST_LEAF_INT_REG_VAR
-                                          : XTENSA_FIRST_INT_REG_VAR) +
-                                 allocator->rv->struct_return_reg];
+      // a9 is reloaded from the stack home before each use.  It is not an
+      // argument register, so preparing the next call does not have to keep
+      // the pointer live there across the call.
+      (void)is_leaf;
+      reg = &allocator->int_regs[XTENSA_INT_TEMP_START_1 + 1];
       BitSetInsert(&allocator->used_int_regs, reg->base.num);
       break;
 
@@ -1169,6 +1171,15 @@ static void AllocateRegisterOnce(XTENSARegisterAllocator* allocator,
 
     case XTENSA_OP(call):
     case XTENSA_OP(rcall):
+      // CALL8 preserves a2-a7, but the emitter then copies the windowed
+      // return (a10/a11) back into a2/a3.  A value still live in either
+      // register does not survive that copy, so spill it before the result
+      // takes the register.  Arguments consumed by this call were already
+      // freed above.
+      EvictPhysicalRegister(allocator, kXTENSARegTypeInt,
+                            XTENSA_INT_RETURN_VALUE_0, inst);
+      EvictPhysicalRegister(allocator, kXTENSARegTypeInt,
+                            XTENSA_INT_RETURN_VALUE_1, inst);
       reg = &allocator->int_regs[XTENSA_INT_RETURN_REG];
       break;
     case XTENSA_OP(callf):

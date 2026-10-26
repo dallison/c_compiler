@@ -251,6 +251,9 @@ static void SaveRegisters(XTENSAEmitter* emitter, FILE* fp) {
   // function needs it, including leaf functions, because arguments arrive in
   // the caller's a10-a15 and become this function's a2-a7 only after ENTRY.
   fprintf(fp, "\tentry a1, %d\n", stack_frame_size);
+  if (emitter->rv->struct_return_offset >= 0) {
+    fprintf(fp, "\ts32i a2, a1, %d\n", emitter->rv->struct_return_offset);
+  }
   if (!emitter->rv->base.varargs) {
     fprintf(fp, ".Leh_%s_after_push:\n", emitter->rv->base.function_name.value);
     fprintf(fp, ".Leh_%s_after_leaq:\n", emitter->rv->base.function_name.value);
@@ -328,10 +331,15 @@ static void RestoreExceptionLandingState(XTENSAEmitter* emitter, FILE* fp) {
                8 * BitSetCount(&emitter->regs->used_float_regs);
   if (struct_return_phys >= 0 && HasExceptionStructReturn(emitter)) {
     char buf[8];
-    fprintf(fp, "\tlw %s, %d(sp)\t// hidden result pointer\n",
-            XTENSARegisterNameFromNum(struct_return_phys, kXTENSARegTypeInt,
-                                      buf, sizeof(buf)),
-            offset);
+    const char* reg = XTENSARegisterNameFromNum(
+        struct_return_phys, kXTENSARegTypeInt, buf, sizeof(buf));
+    if (offset >= 0 && offset <= 1020 && (offset & 3) == 0) {
+      fprintf(fp, "\tl32i %s, sp, %d\t// hidden result pointer\n", reg, offset);
+    } else {
+      fprintf(fp, "\tli a15, %d\n", offset);
+      fprintf(fp, "\tadd a15, sp, a15\n");
+      fprintf(fp, "\tl32i %s, a15, 0\t// hidden result pointer\n", reg);
+    }
   }
 }
 
@@ -379,8 +387,16 @@ static void PrintRmov(XTENSAEmitter* emitter, TargetInstruction* inst,
   assert(inst->operand[1]->reg != NULL);
 
   char buf1[8], buf2[8];
-  const char* destination = XTENSARegisterName(
-      (XTENSARegister*)inst->operand[0]->reg, buf1, sizeof(buf1));
+  XTENSARegister* destination_reg = (XTENSARegister*)inst->operand[0]->reg;
+  XTENSARegister* source_reg = (XTENSARegister*)inst->operand[1]->reg;
+  if (destination_reg->type == kXTENSARegTypeFloat ||
+      source_reg->type == kXTENSARegTypeFloat) {
+    // No floating register file.  Integer code never reads these copies.
+    fprintf(fp, "\tnop\n");
+    return;
+  }
+  const char* destination =
+      XTENSARegisterName(destination_reg, buf1, sizeof(buf1));
   if (IsZeroValue(inst->operand[1])) {
     fprintf(fp, "\t%-12s%s, 0\n", "li", destination);
     return;
@@ -425,6 +441,11 @@ static void PrintDestMove(TargetInstruction* inst, FILE* fp) {
     return;
   }
 
+  if (((XTENSARegister*)dest_reg)->type == kXTENSARegTypeFloat ||
+      ((XTENSARegister*)src->reg)->type == kXTENSARegTypeFloat) {
+    fprintf(fp, "\tnop\n");
+    return;
+  }
   const char* mnemonic =
       MoveMnemonic((XTENSAOpcode)inst->opcode, (XTENSARegister*)dest_reg,
                    (XTENSARegister*)src->reg);
@@ -504,77 +525,60 @@ static int AtomicSizeLog2(TargetInstruction* inst) {
   return (inst->flags & XTENSA_ATOMIC_SIZE_MASK) >> XTENSA_ATOMIC_SIZE_SHIFT;
 }
 
-static int AtomicOrder(TargetInstruction* inst) {
-  return (inst->flags & XTENSA_ATOMIC_ORDER_MASK) >> XTENSA_ATOMIC_ORDER_SHIFT;
-}
-
-static int AtomicFailureOrder(TargetInstruction* inst) {
-  return (inst->flags & XTENSA_ATOMIC_FAILURE_ORDER_MASK) >>
-         XTENSA_ATOMIC_FAILURE_ORDER_SHIFT;
-}
-
-static bool AtomicOrderHasAcquire(int order) {
-  return order == 1 || order == 2 || order == 4 || order == 5;
-}
-
-static bool AtomicOrderHasRelease(int order) {
-  return order == 3 || order == 4 || order == 5;
-}
-
-static const char* AtomicSuffix(bool acquire, bool release) {
-  if (acquire && release) {
-    return ".aqrl";
+static const char* AtomicLoadMnemonic(int size) {
+  static const char* loads[] = {"l8ui", "l16ui", "l32i"};
+  if (size < 0 || size > 2) {
+    size = 2;
   }
-  if (acquire) {
-    return ".aq";
+  return loads[size];
+}
+
+static const char* AtomicStoreMnemonic(int size) {
+  static const char* stores[] = {"s8i", "s16i", "s32i"};
+  if (size < 0 || size > 2) {
+    size = 2;
   }
-  if (release) {
-    return ".rl";
+  return stores[size];
+}
+
+// The zero pseudo is named a15, which is also the emitter scratch.  Materialize
+// it before that register is reused.
+static const char* AtomicOperand(FILE* fp, TargetInstruction* operand, char* buf,
+                                 size_t size) {
+  if (IsZeroValue(operand)) {
+    fprintf(fp, "\tli a15, 0\n");
+    return "a15";
   }
-  return "";
+  return GetRegisterName(operand, buf, size);
+}
+
+static void EmitAtomicAccess(FILE* fp, int size, bool store, const char* value,
+                             const char* addr) {
+  fprintf(fp, "\t%s %s, %s, 0\n",
+          store ? AtomicStoreMnemonic(size) : AtomicLoadMnemonic(size), value,
+          addr);
 }
 
 static void PrintAtomicInstruction(TargetInstruction* inst,
                                    const char* func_name, FILE* fp) {
   int size = AtomicSizeLog2(inst);
-  int order = AtomicOrder(inst);
-  int failure_order = AtomicFailureOrder(inst);
-  bool acquire = AtomicOrderHasAcquire(order);
-  bool release = AtomicOrderHasRelease(order);
-  bool seq_cst = order == 5;
   char b0[16], b1[16], b2[16], b3[16];
   const char* result = GetRegisterName(inst, b0, sizeof(b0));
 
   switch ((XTENSAOpcode)inst->opcode) {
     case XTENSA_OP(atomic_load): {
       const char* addr = GetRegisterName(inst->operand[0], b1, sizeof(b1));
-      static const char* loads[] = {"lbu", "lhu", "lw", "lw"};
-      if (seq_cst) {
-        fprintf(fp, "\tfence\n");
-      }
-      fprintf(fp, "\t%s %s, 0(%s)\n", loads[size], result, addr);
-      if (acquire) {
-        fprintf(fp, "\tfence\n");
-      }
+      EmitAtomicAccess(fp, size, false, result, addr);
       return;
     }
     case XTENSA_OP(atomic_store): {
-      const char* value = GetRegisterName(inst->operand[0], b0, sizeof(b0));
+      const char* value = AtomicOperand(fp, inst->operand[0], b0, sizeof(b0));
       const char* addr = GetRegisterName(inst->operand[1], b1, sizeof(b1));
-      static const char* stores[] = {"sb", "sh", "sw", "sw"};
-      if (release || seq_cst) {
-        fprintf(fp, "\tfence\n");
-      }
-      fprintf(fp, "\t%s %s, 0(%s)\n", stores[size], value, addr);
-      if (seq_cst) {
-        fprintf(fp, "\tfence\n");
-      }
+      EmitAtomicAccess(fp, size, true, value, addr);
       return;
     }
     case XTENSA_OP(atomic_fence):
-      if (order != 0) {
-        fprintf(fp, "\tfence\n");
-      }
+      // One guest thread.  The instruction itself is the compiler barrier.
       return;
     case XTENSA_OP(atomic_fetch_add):
     case XTENSA_OP(atomic_fetch_sub):
@@ -586,45 +590,25 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
           inst->opcode == (TargetOpcode)XTENSA_OP(atomic_add_fetch) ||
           inst->opcode == (TargetOpcode)XTENSA_OP(atomic_sub_fetch);
       const char* addr = GetRegisterName(inst->operand[0], b1, sizeof(b1));
-      const char* value = GetRegisterName(inst->operand[1], b2, sizeof(b2));
-      if (size < 2) {
-        int value_mask = size == 0 ? 0xff : 0xffff;
-        fprintf(fp, "\tandi t1, %s, 3\n", addr);
-        fprintf(fp, "\tslli t1, t1, 3\n");
-        fprintf(fp, "\tli t2, %d\n", value_mask);
-        fprintf(fp, "\tsll t2, t2, t1\n");
-        fprintf(fp, "\tsll t3, %s, t1\n", value);
-        fprintf(fp, "\tand t3, t3, t2\n");
-        fprintf(fp, "\tandi t0, %s, -4\n", addr);
-        fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
-        fprintf(fp, "\tlr.w%s %s, (t0)\n", AtomicSuffix(acquire, release),
-                result);
-        fprintf(fp, "\tnot t4, t2\n");
-        fprintf(fp, "\tand t4, %s, t4\n", result);
-        fprintf(fp, "\tand t5, %s, t2\n", result);
-        fprintf(fp, "\t%s t5, t5, t3\n", add ? "add" : "sub");
-        fprintf(fp, "\tand t5, t5, t2\n");
-        fprintf(fp, "\tor t5, t5, t4\n");
-        fprintf(fp, "\tsc.w%s t6, t5, (t0)\n",
-                AtomicSuffix(order == 5, release));
-        fprintf(fp, "\tbnez t6, .L%s_atomic_retry_%d\n", func_name, inst->id);
-        if (return_new) {
-          fprintf(fp, "\tmv %s, t5\n", result);
-        }
-        fprintf(fp, "\tsrl %s, %s, t1\n", result, result);
-        fprintf(fp, "\tli t4, %d\n", value_mask);
-        fprintf(fp, "\tand %s, %s, t4\n", result, result);
-        return;
+      const char* value = AtomicOperand(fp, inst->operand[1], b2, sizeof(b2));
+      // a15 is not allocatable.  Spill the inputs so the update still works
+      // when the result register aliases an input.
+      fprintf(fp, "\taddi sp, sp, -16\n");
+      fprintf(fp, "\ts32i %s, sp, 0\n", addr);
+      fprintf(fp, "\ts32i %s, sp, 4\n", value);
+      fprintf(fp, "\tl32i a15, sp, 0\n");
+      EmitAtomicAccess(fp, size, false, result, "a15");
+      fprintf(fp, "\tl32i a15, sp, 4\n");
+      fprintf(fp, "\t%s a15, %s, a15\n", add ? "add" : "sub", result);
+      fprintf(fp, "\ts32i a15, sp, 8\n");
+      fprintf(fp, "\ts32i %s, sp, 12\n", result);
+      fprintf(fp, "\tl32i a15, sp, 0\n");
+      fprintf(fp, "\tl32i %s, sp, 8\n", result);
+      EmitAtomicAccess(fp, size, true, result, "a15");
+      if (!return_new) {
+        fprintf(fp, "\tl32i %s, sp, 12\n", result);
       }
-      fprintf(fp, "\tmv t0, %s\n", value);
-      if (!add) {
-        fprintf(fp, "\tsub t0, zero, t0\n");
-      }
-      fprintf(fp, "\tamoadd.w%s %s, t0, (%s)\n", AtomicSuffix(acquire, release),
-              result, addr);
-      if (return_new) {
-        fprintf(fp, "\tadd %s, %s, t0\n", result, result);
-      }
+      fprintf(fp, "\taddi sp, sp, 16\n");
       return;
     }
     case XTENSA_OP(atomic_compare_exchange_bool):
@@ -634,98 +618,61 @@ static void PrintAtomicInstruction(TargetInstruction* inst,
           inst->opcode == (TargetOpcode)XTENSA_OP(atomic_compare_exchange_n);
       bool returns_bool =
           inst->opcode != (TargetOpcode)XTENSA_OP(atomic_compare_exchange_val);
-      bool lr_acquire =
-          acquire || AtomicOrderHasAcquire(failure_order) || order == 5;
       const char* addr = GetRegisterName(inst->operand[0], b1, sizeof(b1));
-      const char* expected = GetRegisterName(inst->operand[1], b2, sizeof(b2));
-      const char* desired = GetRegisterName(inst->operand[2], b3, sizeof(b3));
+      const char* expected =
+          AtomicOperand(fp, inst->operand[1], b2, sizeof(b2));
+      const char* desired =
+          AtomicOperand(fp, inst->operand[2], b3, sizeof(b3));
+      fprintf(fp, "\taddi sp, sp, -32\n");
+      fprintf(fp, "\ts32i %s, sp, 0\n", addr);
+      fprintf(fp, "\ts32i %s, sp, 4\n", expected);
+      fprintf(fp, "\ts32i %s, sp, 8\n", desired);
+      fprintf(fp, "\tl32i a15, sp, 0\n");
+      EmitAtomicAccess(fp, size, false, result, "a15");
+      fprintf(fp, "\ts32i %s, sp, 12\n", result);
       if (size < 2) {
-        int value_mask = size == 0 ? 0xff : 0xffff;
-        if (expected_is_pointer) {
-          fprintf(fp, "\t%s t3, 0(%s)\n", size == 0 ? "lbu" : "lhu", expected);
-        } else {
-          fprintf(fp, "\tmv t3, %s\n", expected);
-        }
-        fprintf(fp, "\tandi t1, %s, 3\n", addr);
-        fprintf(fp, "\tslli t1, t1, 3\n");
-        fprintf(fp, "\tli t2, %d\n", value_mask);
-        fprintf(fp, "\tand t3, t3, t2\n");
-        fprintf(fp, "\tand t4, %s, t2\n", desired);
-        fprintf(fp, "\tsll t2, t2, t1\n");
-        fprintf(fp, "\tsll t3, t3, t1\n");
-        fprintf(fp, "\tsll t4, t4, t1\n");
-        fprintf(fp, "\tandi t0, %s, -4\n", addr);
-        fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
-        fprintf(fp, "\tlr.w%s %s, (t0)\n", AtomicSuffix(lr_acquire, order == 5),
-                result);
-        fprintf(fp, "\tand t6, %s, t2\n", result);
-        fprintf(fp, "\tbne t6, t3, .L%s_atomic_mismatch_%d\n", func_name,
-                inst->id);
-        fprintf(fp, "\tnot t6, t2\n");
-        fprintf(fp, "\tand t5, %s, t6\n", result);
-        fprintf(fp, "\tor t5, t5, t4\n");
-        fprintf(fp, "\tsc.w%s t6, t5, (t0)\n",
-                AtomicSuffix(order == 5, release));
-        if ((inst->flags & XTENSA_ATOMIC_WEAK) != 0) {
-          fprintf(fp, "\tbnez t6, .L%s_atomic_mismatch_%d\n", func_name,
-                  inst->id);
-        } else {
-          fprintf(fp, "\tbnez t6, .L%s_atomic_retry_%d\n", func_name, inst->id);
-        }
-        if (returns_bool) {
-          fprintf(fp, "\tli %s, 1\n", result);
-        } else {
-          fprintf(fp, "\tsrl %s, %s, t1\n", result, result);
-          fprintf(fp, "\tli t6, %d\n", value_mask);
-          fprintf(fp, "\tand %s, %s, t6\n", result, result);
-        }
-        fprintf(fp, "\tj .L%s_atomic_done_%d\n", func_name, inst->id);
-        fprintf(fp, ".L%s_atomic_mismatch_%d:\n", func_name, inst->id);
-        fprintf(fp, "\tsrl %s, %s, t1\n", result, result);
-        fprintf(fp, "\tli t6, %d\n", value_mask);
-        fprintf(fp, "\tand %s, %s, t6\n", result, result);
-        if (expected_is_pointer) {
-          fprintf(fp, "\t%s %s, 0(%s)\n", size == 0 ? "sb" : "sh", result,
-                  expected);
-        }
-        if (returns_bool) {
-          fprintf(fp, "\tli %s, 0\n", result);
-        }
-        fprintf(fp, ".L%s_atomic_done_%d:\n", func_name, inst->id);
-        return;
+        int mask = size == 0 ? 0xff : 0xffff;
+        fprintf(fp, "\tli a15, %d\n", mask);
+        fprintf(fp, "\tand %s, %s, a15\n", result, result);
+        fprintf(fp, "\ts32i %s, sp, 12\n", result);
       }
+      fprintf(fp, "\tl32i a15, sp, 4\n");
       if (expected_is_pointer) {
-        fprintf(fp, "\tlw t0, 0(%s)\n", expected);
-      } else {
-        fprintf(fp, "\tmv t0, %s\n", expected);
+        EmitAtomicAccess(fp, size, false, "a15", "a15");
       }
-      fprintf(fp, "\tmv t1, %s\n", desired);
-      fprintf(fp, "\tmv t3, %s\n", addr);
-      fprintf(fp, ".L%s_atomic_retry_%d:\n", func_name, inst->id);
-      fprintf(fp, "\tlr.w%s %s, (%s)\n", AtomicSuffix(lr_acquire, order == 5),
-              result, "t3");
-      fprintf(fp, "\tbne %s, t0, .L%s_atomic_mismatch_%d\n", result, func_name,
+      if (size < 2) {
+        int mask = size == 0 ? 0xff : 0xffff;
+        fprintf(fp, "\ts32i a15, sp, 16\n");
+        fprintf(fp, "\tli a15, %d\n", mask);
+        fprintf(fp, "\tl32i %s, sp, 16\n", result);
+        fprintf(fp, "\tand %s, %s, a15\n", result, result);
+        fprintf(fp, "\tmov a15, %s\n", result);
+        fprintf(fp, "\tl32i %s, sp, 12\n", result);
+      }
+      fprintf(fp, "\tbne %s, a15, .L%s_atomic_mismatch_%d\n", result, func_name,
               inst->id);
-      fprintf(fp, "\tsc.w%s t2, t1, (%s)\n", AtomicSuffix(order == 5, release),
-              "t3");
-      if ((inst->flags & XTENSA_ATOMIC_WEAK) != 0) {
-        fprintf(fp, "\tbnez t2, .L%s_atomic_mismatch_%d\n", func_name,
-                inst->id);
-      } else {
-        fprintf(fp, "\tbnez t2, .L%s_atomic_retry_%d\n", func_name, inst->id);
-      }
+      fprintf(fp, "\tl32i a15, sp, 0\n");
+      fprintf(fp, "\tl32i %s, sp, 8\n", result);
+      EmitAtomicAccess(fp, size, true, result, "a15");
       if (returns_bool) {
         fprintf(fp, "\tli %s, 1\n", result);
+      } else {
+        fprintf(fp, "\tl32i %s, sp, 12\n", result);
       }
       fprintf(fp, "\tj .L%s_atomic_done_%d\n", func_name, inst->id);
       fprintf(fp, ".L%s_atomic_mismatch_%d:\n", func_name, inst->id);
       if (expected_is_pointer) {
-        fprintf(fp, "\tsw %s, 0(%s)\n", result, expected);
+        fprintf(fp, "\tl32i a15, sp, 4\n");
+        fprintf(fp, "\tl32i %s, sp, 12\n", result);
+        EmitAtomicAccess(fp, size, true, result, "a15");
       }
       if (returns_bool) {
         fprintf(fp, "\tli %s, 0\n", result);
+      } else {
+        fprintf(fp, "\tl32i %s, sp, 12\n", result);
       }
       fprintf(fp, ".L%s_atomic_done_%d:\n", func_name, inst->id);
+      fprintf(fp, "\taddi sp, sp, 32\n");
       return;
     }
     default:
@@ -863,6 +810,17 @@ static void PrintInstruction(XTENSAEmitter* emitter, TargetInstruction* inst,
     return;
   }
 
+  if (emitter->rv->struct_return_offset >= 0) {
+    for (int operand = 0; operand < 4; operand++) {
+      TargetInstruction* input = inst->operand[operand];
+      if (input != NULL &&
+          (XTENSAOpcode)input->opcode == XTENSA_OP(structreturn)) {
+        fprintf(fp, "\tl32i a9, a1, %d\n", emitter->rv->struct_return_offset);
+        break;
+      }
+    }
+  }
+
   const bool show_id = 1;
 
   if (show_id) {
@@ -914,6 +872,11 @@ static void PrintInstruction(XTENSAEmitter* emitter, TargetInstruction* inst,
         return;
       }
       int offset = zero_offset ? 0 : (int)TargetIntValue(inst->operand[1]);
+      if ((inst->flags & XTENSA_INST_FRAME_SLOT) != 0) {
+        // Homes sit at the top of the entry frame, above locals and
+        // argument saves, so a slot of 0 cannot alias another spill.
+        offset += StackFrameSize(emitter) - emitter->rv->indirect_target_spill_bytes;
+      }
       if ((XTENSAOpcode)inst->operand[0]->opcode == XTENSA_OP(fp)) {
         offset += StackFrameSize(emitter) + emitter->stack_pointer_adjustment;
       }
@@ -961,6 +924,9 @@ static void PrintInstruction(XTENSAEmitter* emitter, TargetInstruction* inst,
         return;
       }
       int offset = zero_offset ? 0 : (int)TargetIntValue(inst->operand[2]);
+      if ((inst->flags & XTENSA_INST_FRAME_SLOT) != 0) {
+        offset += StackFrameSize(emitter) - emitter->rv->indirect_target_spill_bytes;
+      }
       if ((XTENSAOpcode)inst->operand[1]->opcode == XTENSA_OP(fp)) {
         offset += StackFrameSize(emitter) + emitter->stack_pointer_adjustment;
       }
@@ -1127,6 +1093,16 @@ static void PrintInstruction(XTENSAEmitter* emitter, TargetInstruction* inst,
   }
 
   // General case for instruction printing.
+  // ESP32 codegen still names RISC-V float ops.  There is no float register
+  // file, so those operations become nops.  Integer instructions are unchanged.
+  {
+    XTENSAOpcode op = (XTENSAOpcode)inst->opcode;
+    if ((op >= XTENSA_OP(flw) && op <= XTENSA_OP(fmv_d_x)) ||
+        op == XTENSA_OP(fneg_s) || op == XTENSA_OP(fneg_d)) {
+      fprintf(fp, "\tnop\n");
+      return;
+    }
+  }
 
   for (int operand = 0; operand < 4 && inst->operand[operand] != NULL;
        ++operand) {

@@ -346,6 +346,10 @@ typedef enum {
 // register file.
 #define XTENSA_INST_FLOAT_TMP 0x40000
 
+// sw/lw of an indirect-call target.  The immediate is the slot within the
+// spill area; the emitter places that area at the top of the entry frame.
+#define XTENSA_INST_FRAME_SLOT (1 << 29)
+
 // Atomic pseudo metadata in the target-instruction flag word.
 #define XTENSA_ATOMIC_SIZE_SHIFT 18
 #define XTENSA_ATOMIC_SIZE_MASK (3 << XTENSA_ATOMIC_SIZE_SHIFT)
@@ -388,6 +392,15 @@ typedef struct XTENSAGenerator {
   int num_int_reg_vars;  // Number of int regs used for variables.
   int num_fp_reg_vars;   // Number of floating point regs for vars.
   int struct_return_reg;
+  int struct_return_offset;
+  // Indirect call targets are spilled here across argument evaluation.
+  // a10 (t2) is the windowed return register, so a nested call would
+  // destroy a target staged only in t2.  Depth is the live nesting;
+  // the byte count is the high-water mark reserved at the bottom of
+  // the frame.
+  int indirect_target_depth;
+  int indirect_target_spill_bytes;
+  int indirect_target_base;
   bool not_leaf;  // Not a leaf procedure.
   bool stages_tail_target;  // An indirect tail call stages its target in t2.
 

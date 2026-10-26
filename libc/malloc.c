@@ -193,7 +193,14 @@ typedef struct DaveHeap {
 static DaveHeap heap;
 int __initial_heap_size;
 
-#if defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
+#if defined(__XTENSA__)
+// ESP32 DRAM is 320KB.  The storage itself is defined in
+// xtensa_support/heap.c at 256KB; a second 1MB common would merge to the
+// larger size and push the rest of .bss onto IRAM.
+extern unsigned long long
+    __davecc_guest_heap_storage[((256 * 1024) + 15) /
+                                sizeof(unsigned long long)];
+#elif defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
 // Lives in the same image as malloc so PIC GOT slots stay RELATIVE to a
 // mapped .bss range.  CRT used to define this instead; a DSO cannot resolve
 // that EXE symbol (no GLOB_DAT), and the loader only heap-reserves the EXE.

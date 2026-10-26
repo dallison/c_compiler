@@ -5,12 +5,12 @@
 _start:
 	// The hosted loader initializes a1.  CALL8 presents arguments in a10-a15;
 	// main(void) does not consume any, but zero argc/argv for main signatures.
+	call8 __davecc_program_init
 	li a10, 0
 	li a11, 0
 	call8 main
-	mov a2, a10
-	// Private hosted-runtime EXIT service, with status in a2.
-	li a8, 12
-	break 1, 0
+	// main's result is already in a10, which is exit's first argument.
+	// exit runs atexit handlers and flushes stdio before the host trap.
+	call8 exit
 .Lstart_end:
 	.size _start, .Lstart_end-_start

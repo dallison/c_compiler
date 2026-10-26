@@ -347,7 +347,8 @@ static struct CompilerTargetDefinition{
   {"riscv32", {"riscv32", "risc-v32"}, NewRV32Target, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupports8ByteAtomics},
-  {"esp32", {"esp32", "xtensa-esp32"}, NewXTENSATarget, true, 0, 0},
+  {"esp32", {"esp32", "xtensa-esp32"}, NewXTENSATarget, true, 0,
+   kTargetSupportsAtomics},
   {"aarch64", {"aarch64", "armv8"}, NewAARCH64Target, false, 0,
    kTargetSupportsThreads | kTargetSupportsAtomics |
        kTargetSupports8ByteAtomics},

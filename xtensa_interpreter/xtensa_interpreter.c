@@ -87,7 +87,9 @@ static bool ReadMemory(XtensaInterpreter* interpreter, uint32_t address,
                        void* value, size_t size) {
   const void* source = GuestPointer(interpreter, address, size);
   if (source == NULL) {
-    fprintf(stderr, "ESP32 invalid read at 0x%08" PRIx32 "\n", address);
+    fprintf(stderr,
+            "ESP32 invalid read at 0x%08" PRIx32 " pc 0x%08" PRIx32 "\n",
+            address, interpreter->pc);
     interpreter->running = false;
     interpreter->exit_code = 1;
     return false;
@@ -100,7 +102,9 @@ static bool WriteMemory(XtensaInterpreter* interpreter, uint32_t address,
                         const void* value, size_t size) {
   void* destination = GuestPointer(interpreter, address, size);
   if (destination == NULL) {
-    fprintf(stderr, "ESP32 invalid write at 0x%08" PRIx32 "\n", address);
+    fprintf(stderr,
+            "ESP32 invalid write at 0x%08" PRIx32 " pc 0x%08" PRIx32 "\n",
+            address, interpreter->pc);
     interpreter->running = false;
     interpreter->exit_code = 1;
     return false;
@@ -334,8 +338,10 @@ bool XtensaInterpreterInit(XtensaInterpreter* interpreter, Loader* loader,
     return false;
   }
   interpreter->window_start = 1;
-  WriteRegister(interpreter, 1,
-                XTENSA_HOSTED_STACK_BASE + XTENSA_HOSTED_STACK_SIZE);
+  // The pointer itself must be a mapped address.  Prologue stores land at
+  // the incoming stack pointer, so leave a slot below the end of the stack.
+  WriteRegister(interpreter, 1, XTENSA_HOSTED_STACK_BASE +
+                                    XTENSA_HOSTED_STACK_SIZE - 16);
   return true;
 }
 

@@ -2894,7 +2894,7 @@ set -euo pipefail
 
 genrule(
     name = "libc_xtensa",
-    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + [":libc_headers"] + glob([
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
         "libc/include/**/*.h",
         "xtensa_support/*.c",
         "xtensa_support/*.s",
@@ -2914,7 +2914,7 @@ mkdir -p "$$work"
 
 davecc="$$(pwd)/$(execpath :davecc)"
 archivist="$$(pwd)/$(execpath :archivist)"
-cflags=(-target esp32 -O1 -nostdinc -D__DAVECC_HAS_HEAP_LOCK__=1 \
+cflags=(-target esp32 -O1 -nostdinc -fno-exceptions -D__DAVECC_HAS_HEAP_LOCK__=1 \
   -D__DAVECC_LIBC_BUILD__ -c -isystem libc/include -Ilibc)
 
 "$$davecc" "$${cflags[@]}" xtensa_support/syscall.s \
@@ -2931,10 +2931,9 @@ for src in libc/*.c; do
     libc/guest_heap.c|libc/lsda.c|libc/unwind_api.c|libc/wasi_*|\
     libc/acos.c|libc/asin.c|libc/atan.c|libc/atan2.c|libc/ceil.c|libc/ckdint.c|\
     libc/complex_*.c|libc/exp.c|libc/fabs.c|libc/fenv.c|libc/floor.c|\
-    libc/fpfuncs.c|libc/frexp.c|libc/ftoa.c|libc/ldexp.c|libc/log.c|\
+    libc/frexp.c|libc/ldexp.c|libc/log.c|\
     libc/long_double.c|libc/math_extra.c|libc/modf.c|libc/pow.c|libc/scanf.c|libc/sincos.c|\
-    libc/sqrt.c|libc/stdlib_extra.c|libc/strtod.c|libc/strtoll.c|\
-    libc/strtoull.c|libc/tan.c|libc/threads.c|libc/time.c|libc/wchar.c) \
+    libc/sqrt.c|libc/stdlib_extra.c|libc/tan.c|libc/threads.c|libc/time.c|libc/wchar.c) \
       continue ;;
   esac
   obj="$$work/$$(basename "$${src%.c}").o"
@@ -2947,6 +2946,13 @@ for src in libc/*.c; do
 done
 
 "$$davecc" "$${cflags[@]}" xtensa_support/heap.c -o "$$work/heap.o"
+
+# ESP32 has no frame unwinder, so the C++ runtime is built without exceptions.
+# iostream, locale, and the coroutine helpers still have to be present.
+for src in libc/*.cc; do
+  "$$davecc" "$${cflags[@]}" -std=c++20 -fno-exceptions "$$src" \
+    -o "$$work/$$(basename "$${src%.cc}").o"
+done
 
 case "$$out" in
   /*) ;;

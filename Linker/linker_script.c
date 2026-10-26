@@ -1996,7 +1996,7 @@ static const char kBuiltinEsp32Program[] =
     "}\n"
     "MEMORY\n"
     "{\n"
-    "  iram (rx) : ORIGIN = 0x40080000, LENGTH = 0x20000\n"
+    "  iram (rx) : ORIGIN = 0x40080000, LENGTH = 0x40000\n"
     "  dram (rw) : ORIGIN = 0x3ffb0000, LENGTH = 0x50000\n"
     "}\n"
     "SECTIONS\n"

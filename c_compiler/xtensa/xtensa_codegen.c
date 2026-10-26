@@ -834,6 +834,10 @@ void XTENSAGeneratorInit(XTENSAGenerator* rv, Generator* gen) {
   rv->num_int_reg_vars = 0;
   rv->num_fp_reg_vars = 0;
   rv->struct_return_reg = -1;
+  rv->struct_return_offset = -1;
+  rv->indirect_target_depth = 0;
+  rv->indirect_target_spill_bytes = 0;
+  rv->indirect_target_base = 0;
   rv->zero = NULL;
   rv->tmp = NULL;
   rv->tmp2 = NULL;
@@ -4394,12 +4398,29 @@ static TargetInstruction* LowerCall(XTENSAGenerator* rv, IRNode* node) {
   bool will_tail_call = (node->flags & kIRTailCall) != 0 &&
                         total_stack_size == 0 && rv->base.stack_frame_size == 0;
   TargetInstruction* staged_target = NULL;
+  int indirect_target_offset = -1;
   if ((int)addr->opcode != (int)XTENSA_OP(symbol)) {
-    // t2 is reserved from general allocation and from the argument parallel
-    // copy resolver, so it keeps the target intact while argument registers
-    // are populated.  A tail call needs this as much as a call does: the
-    // target may otherwise sit in an argument register.
-    staged_target = Emit(rv, NewInstruction2(XTENSA_OP(mv), Tmp2(rv), addr));
+    // Argument setup can itself call (virtual calls pass the result of
+    // another call).  t2 is a10, which a nested call overwrites with its
+    // return value, so the target has to live in the frame until every
+    // argument has been evaluated.  The store is inserted next to the
+    // callee, which is before this call's outgoing-arg adjustment; the
+    // reload (below) adds that adjustment back.
+    int slot = rv->indirect_target_depth * 4;
+    indirect_target_offset = slot + (int)total_stack_size;
+    rv->indirect_target_depth++;
+    if (rv->indirect_target_depth * 4 > rv->indirect_target_spill_bytes) {
+      rv->indirect_target_spill_bytes = rv->indirect_target_depth * 4;
+    }
+    TargetInstruction* spill = NewInstruction3(
+        XTENSA_OP(sw), addr, StackPointer(rv),
+        GetIntConstant(rv, NULL, kTargetType32Bit, slot));
+    spill->flags |= XTENSA_INST_FRAME_SLOT;
+    if (TargetNext(addr) != NULL || TargetPrev(addr) != NULL) {
+      EmitAfter(rv, spill, addr);
+    } else {
+      Emit(rv, spill);
+    }
     rv->stages_tail_target |= will_tail_call;
   }
 
@@ -4608,6 +4629,15 @@ static TargetInstruction* LowerCall(XTENSAGenerator* rv, IRNode* node) {
   // the lifetime of the registers allocated for argument passing
   // extend to the call site, thus enabling the register allocator
   // to keep them from being used before the call.
+  if (indirect_target_offset >= 0) {
+    staged_target = Emit(
+        rv, NewInstruction2(XTENSA_OP(lw), StackPointer(rv),
+                            GetIntConstant(rv, NULL, kTargetType32Bit,
+                                           indirect_target_offset)));
+    staged_target->flags |= XTENSA_INST_FRAME_SLOT;
+    TargetSetDest(staged_target, Tmp2(rv));
+    rv->indirect_target_depth--;
+  }
   XTENSAOpcode opcode;
   TargetInstruction* call;
 
@@ -5971,6 +6001,19 @@ static void AssignRegisterVars(XTENSAGenerator* rv, Generator* gen, Vector* vars
   }
 
   AssignAnonymousUnionMemberOffsets(gen);
+
+  // The hidden result pointer arrives in a2 and that register is reused for
+  // the next call.  Keep a stack home for it for the rest of the function.
+  if (rv->struct_return_reg >= 0) {
+    var_offset = (var_offset + 3) & ~3;
+    rv->struct_return_offset = (int32_t)var_offset;
+    var_offset += 4;
+  }
+  if (rv->indirect_target_spill_bytes > 0) {
+    var_offset = (var_offset + 3) & ~3;
+    rv->indirect_target_base = (int)var_offset;
+    var_offset += rv->indirect_target_spill_bytes;
+  }
 
   // Include the complete argument-home area, including any alignment gaps
   // between homed aggregate arguments.

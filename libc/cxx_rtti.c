@@ -90,7 +90,7 @@ struct __class_type_info {
   const char* __type_name;
 };
 
-#ifdef __wasm32__
+#if defined(__wasm32__) || defined(__XTENSA__)
 // Wasm has no assembler runtime to provide the ABI RTTI vtable address-point
 // symbols used by emitted type_info records.  RTTI only needs stable,
 // distinguishable addresses for these class-kind tags.
