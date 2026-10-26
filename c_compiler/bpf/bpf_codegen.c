@@ -793,13 +793,31 @@ static TargetInstruction* LowerUnary(BPFGenerator* bpf, IRNode* node) {
 
 // A 32-bit ALU result is zero-extended to 64 by the interpreter.  A signed
 // value used by a 64-bit operation, such as a negative pointer index, has to
-// be sign-extended first or `p[-1]` adds 4GB.
+// be sign-extended first or `p[-1]` adds 4GB.  An address is already 64 bits.
+// The node type of a local or an adda is the object's type, so a 1-byte
+// struct would otherwise be sign-extended down to its low 8 bits.
+static bool HoldsAddress(IRNode* src) {
+  if (src == NULL) {
+    return false;
+  }
+  if (src->type != NULL &&
+      (TypeIsPointer(src->type) || TypeIsStructOrUnion(src->type) ||
+       TypeIsArray(src->type))) {
+    return true;
+  }
+  return IRIsAutoVariable(src) || IRIsArgument(src) || IRIsStaticVariable(src) ||
+         src->opcode == IR_OP(externvar) || src->opcode == IR_OP(adda) ||
+         src->opcode == IR_OP(suba) || src->opcode == IR_OP(addressof) ||
+         src->opcode == IR_OP(literalref) || src->opcode == IR_OP(structreturn);
+}
+
 static TargetInstruction* WidenFor64(BPFGenerator* bpf, TargetInstruction* v,
                                     IRNode* src) {
   if (v == NULL || TargetIsConst(v) || BPFIsSymbol(v) || BPFIsLabel(v)) {
     return v;
   }
-  if (src == NULL || src->type == NULL || TypeIsPointer(src->type)) {
+  if (src == NULL || src->type == NULL || HoldsAddress(src) ||
+      !TypeIsIntegral(src->type)) {
     return v;
   }
   TypeRecordCalculateSize(src->type);
@@ -1013,8 +1031,20 @@ static TargetInstruction* LowerCall(BPFGenerator* bpf, IRNode* node) {
   // r1–r5 are full.  Park the rest in the outgoing area and pass its address
   // in r0.  The callee copies them out before using r0.
   if (nargs > BPF_NUM_ARG_REGS) {
+    // LowerVariables reserves 16 slots.  Past that the stores land on the
+    // saved registers.
+    if (nargs > BPF_NUM_ARG_REGS + 16) {
+      fprintf(stderr,
+              "eBPF backend: call has %zu arguments; only %d stack slots are "
+              "reserved\n",
+              nargs, 16);
+    }
     int base_off = LocalOffset(bpf, bpf->outgoing_offset);
-    for (size_t i = BPF_NUM_ARG_REGS; i < nargs; i++) {
+    size_t nstack = nargs;
+    if (nstack > BPF_NUM_ARG_REGS + 16) {
+      nstack = BPF_NUM_ARG_REGS + 16;
+    }
+    for (size_t i = BPF_NUM_ARG_REGS; i < nstack; i++) {
       int off = base_off + (int)(i - BPF_NUM_ARG_REGS) * 8;
       Emit(bpf, NewInstruction3(BPF_OP(stxdw), FramePointer(bpf),
                                 GetIntConstant(bpf, NULL, kTargetType32Bit, off),
@@ -1186,23 +1216,40 @@ static TargetInstruction* LowerMemzero(BPFGenerator* bpf, IRNode* node) {
   return dest;
 }
 
-// va_list is a pointer to the next 8-byte argument slot.  Only the five
-// register arguments are saved; a call with more than that cannot be read
-// back through va_arg.
-static TargetInstruction* LowerVaStart(BPFGenerator* bpf, IRNode* node) {
-  TargetInstruction* base;
-  TargetInstruction* offset;
-  GetBaseAndOffset(bpf, node->inputs.value.p[0], &base, &offset);
+// The saved r0 sits in the slot just past r1–r5.  It points at the caller's
+// outgoing area, which holds arguments that did not fit in registers.
+static int VarargStackPtrOffset(BPFGenerator* bpf) {
   int slot = bpf->vararg_save_offset;
   if (slot < 0) {
     slot = 0;
   }
-  slot += bpf->num_int_arg_regs * 8;
-  TargetInstruction* ap =
-      Emit(bpf, NewInstruction2(
-                    BPF_OP(add), FramePointer(bpf),
-                    GetIntConstant(bpf, NULL, kTargetType32Bit,
-                                   LocalOffset(bpf, slot))));
+  return slot + BPF_NUM_ARG_REGS * 8;
+}
+
+// va_list is a pointer to the next 8-byte argument slot.  Named parameters
+// consume the first register slots.  Once those are exhausted, va_arg follows
+// the pointer the caller passed in r0.
+static TargetInstruction* LowerVaStart(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  GetBaseAndOffset(bpf, node->inputs.value.p[0], &base, &offset);
+  TargetInstruction* ap;
+  if (bpf->num_int_arg_regs >= BPF_NUM_ARG_REGS) {
+    ap = Emit(bpf, NewInstruction2(
+                       BPF_OP(ldxdw), FramePointer(bpf),
+                       GetIntConstant(bpf, NULL, kTargetType32Bit,
+                                      LocalOffset(bpf, VarargStackPtrOffset(bpf)))));
+  } else {
+    int slot = bpf->vararg_save_offset;
+    if (slot < 0) {
+      slot = 0;
+    }
+    slot += bpf->num_int_arg_regs * 8;
+    ap = Emit(bpf, NewInstruction2(
+                       BPF_OP(add), FramePointer(bpf),
+                       GetIntConstant(bpf, NULL, kTargetType32Bit,
+                                      LocalOffset(bpf, slot))));
+  }
   Emit(bpf, NewInstruction3(BPF_OP(stxdw), base, offset, ap));
   return SetLoweredNode(node, ap);
 }
@@ -1230,6 +1277,23 @@ static TargetInstruction* LowerVaArg(BPFGenerator* bpf, IRNode* node) {
   TargetInstruction* next =
       Emit(bpf, NewInstruction2(BPF_OP(add), cursor,
                                 GetIntConstant(bpf, NULL, kTargetType32Bit, 8)));
+  int stack_ptr = LocalOffset(bpf, VarargStackPtrOffset(bpf));
+  TargetInstruction* limit =
+      Emit(bpf, NewInstruction2(
+                    BPF_OP(add), FramePointer(bpf),
+                    GetIntConstant(bpf, NULL, kTargetType32Bit, stack_ptr)));
+  TargetInstruction* still_reg =
+      Emit(bpf, NewInstruction3(BPF_OP(jne), next, limit, NULL));
+  // The next slot is past r5.  Continue at the caller's stack-argument array.
+  // This writes the same register as `next`, so the store below reads it on
+  // both paths.
+  TargetInstruction* stack =
+      Emit(bpf, NewInstruction2(
+                    BPF_OP(ldxdw), FramePointer(bpf),
+                    GetIntConstant(bpf, NULL, kTargetType32Bit, stack_ptr)));
+  stack->dest = next;
+  TargetInstruction* keep = Emit(bpf, NewInstruction(BPF_OP(label)));
+  still_reg->operand[2] = keep;
   Emit(bpf, NewInstruction3(BPF_OP(stxdw), base, offset, next));
   return FinishWithDest(bpf, node, value);
 }
@@ -1351,12 +1415,12 @@ static void LowerVariables(BPFGenerator* bpf, Generator* gen) {
     }
     VectorAppend(&bpf->saved_args, saved);
   }
-  // A va_list is a pointer into this area.  Named parameters occupy the
-  // first slots; va_start points just past them.  Each slot is one register.
+  // Named parameters occupy the first slots.  One extra slot holds the
+  // caller's pointer to arguments past r5, so va_arg can continue there.
   if (bpf->base.varargs) {
     var_offset = (var_offset + 7) & ~7;
     bpf->vararg_save_offset = var_offset;
-    var_offset += BPF_NUM_ARG_REGS * 8;
+    var_offset += (BPF_NUM_ARG_REGS + 1) * 8;
   }
   // Room for arguments past r5.  Sixteen slots covers the calls libc makes;
   // each is one register-width value or an aggregate pointer.

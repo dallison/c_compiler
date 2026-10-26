@@ -363,9 +363,15 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
         }
       }
       // Aggregate copies use r0 as scratch.  Park the stack-argument pointer
-      // before those copies run.
-      if (has_stack_arg) {
+      // before those copies run.  A varargs function also keeps it: va_arg
+      // follows that pointer after the five register slots.
+      if (has_stack_arg || emitter->bpf->vararg_save_offset >= 0) {
         fprintf(fp, "\tmov64 r9, r0\n");
+      }
+      if (emitter->bpf->vararg_save_offset >= 0) {
+        int sp = LocalOffset(emitter, emitter->bpf->vararg_save_offset +
+                                          BPF_NUM_ARG_REGS * 8);
+        fprintf(fp, "\tstxdw [r10%d], r9\n", sp);
       }
       for (size_t i = 0; i < emitter->bpf->saved_args.length; i++) {
         BPFSavedArgument* a = emitter->bpf->saved_args.value.p[i];

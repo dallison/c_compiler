@@ -311,7 +311,7 @@ static void RestoreAcrossBackEdge(BPFRegisterAllocator* alloc,
     if (earliest == NULL) {
       continue;
     }
-    if (!spilled_at_def) {
+    if (!spilled_at_def && (owner->flags & TARGET_INST_SPILLED) == 0) {
       EmitSpill(alloc, owner, TargetNext(owner));
       spilled_at_def = true;
     }
@@ -319,12 +319,40 @@ static void RestoreAcrossBackEdge(BPFRegisterAllocator* alloc,
   }
 }
 
+// The owner was computed before `before`'s loop and is not updated by that
+// loop.  A store inserted at the clobber re-executes and writes whatever the
+// register holds after the previous iteration, which is no longer this value.
+static bool LoopInvariantClobber(BPFRegisterAllocator* alloc,
+                                 TargetInstruction* owner,
+                                 TargetInstruction* before,
+                                 const BPFBackEdge* edges, int nedges) {
+  if (owner == NULL || before == NULL || edges == NULL) {
+    return false;
+  }
+  for (int e = 0; e < nedges; e++) {
+    int target = edges[e].target;
+    int branch = edges[e].branch;
+    if (owner->addr < target && before->addr >= target &&
+        before->addr <= branch &&
+        !UpdatedInLoop(alloc->bpf, owner, target, branch)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void SpillOwner(BPFRegisterAllocator* alloc, BPFRegister* reg,
                        TargetInstruction* before, const BPFBackEdge* edges,
                        int nedges) {
   TargetInstruction* owner = reg->base.owner;
   if (owner != NULL && !BPFIsFixedRegister(owner)) {
-    EmitSpill(alloc, owner, before);
+    if (LoopInvariantClobber(alloc, owner, before, edges, nedges)) {
+      if ((owner->flags & TARGET_INST_SPILLED) == 0) {
+        EmitSpill(alloc, owner, TargetNext(owner));
+      }
+    } else {
+      EmitSpill(alloc, owner, before);
+    }
     RestoreAcrossBackEdge(alloc, owner, before, edges, nedges);
     // If users name the coalesced home rather than the defining instruction,
     // that home has to reload the same slot.  Skip the home when the
