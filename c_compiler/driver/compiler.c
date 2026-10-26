@@ -366,7 +366,8 @@ static struct CompilerTargetDefinition{
   {"65c02", {"65c02", "65C02"}, New65c02Target, true, 2, 0},
   {"wasm32", {"wasm32", "wasm"}, NewWasm32Target, true, 0,
    kTargetSupportsAtomics | kTargetSupports8ByteAtomics},
-  {"bpf", {"bpf", "bpfel", "ebpf"}, NewBPFTarget, true, 0, 0},
+  {"bpf", {"bpf", "bpfel", "ebpf"}, NewBPFTarget, true, 0,
+   kTargetSupportsAtomics | kTargetSupports8ByteAtomics},
 };
 
 #define kNumTargets (sizeof(compiler_targets) / sizeof(compiler_targets[0]))

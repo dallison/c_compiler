@@ -427,6 +427,11 @@ static DaveBlock* CoalesceFreeBlock(DaveBlock* block) {
   return block;
 }
 
+static int RegionIsLargeEnough(size_t size) {
+  size_t overhead = DAVE_REGION_HEADER_SIZE + 2 * DAVE_BLOCK_HEADER_SIZE;
+  return size >= overhead + DAVE_MIN_BLOCK_SIZE;
+}
+
 static int RegisterRegion(void* memory, size_t memory_size) {
   uintptr_t raw = (uintptr_t)memory;
   uintptr_t aligned = AlignPointer(raw);
@@ -435,9 +440,7 @@ static int RegisterRegion(void* memory, size_t memory_size) {
   }
   size_t size = AlignDown(memory_size - (size_t)(aligned - raw),
                           DAVE_HEAP_ALIGNMENT);
-  size_t overhead =
-      DAVE_REGION_HEADER_SIZE + 2 * DAVE_BLOCK_HEADER_SIZE;
-  if (size < overhead + DAVE_MIN_BLOCK_SIZE) {
+  if (!RegionIsLargeEnough(size)) {
     return 0;
   }
 
@@ -453,6 +456,7 @@ static int RegisterRegion(void* memory, size_t memory_size) {
 
   DaveBlock* free_block =
       (DaveBlock*)((char*)start + DAVE_BLOCK_HEADER_SIZE);
+  size_t overhead = DAVE_REGION_HEADER_SIZE + 2 * DAVE_BLOCK_HEADER_SIZE;
   size_t free_size = size - overhead;
   SetBlock(free_block, free_size, DAVE_BLOCK_FREE);
   free_block->previous_size = DAVE_BLOCK_HEADER_SIZE;

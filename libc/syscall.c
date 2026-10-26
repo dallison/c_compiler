@@ -153,6 +153,8 @@ long syscall(int n, ...) {
 #elif defined(__wasm32__)
 // Implemented in wasi_syscall.c, since a wasm call out of the module is an
 // ordinary call rather than anything that could be written here.
+#elif defined(__bpf__)
+// Implemented in bpf support/syscall.s
 #else
 #error "Unknown architecture"
 #endif

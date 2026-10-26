@@ -617,7 +617,8 @@ static bool InterpreterTargetUsesLinuxUserspace(String* name) {
   return StringEqual(name, "x86_64") || StringEqual(name, "x86") ||
          StringEqual(name, "aarch64") || StringEqual(name, "arm") ||
          StringEqual(name, "riscv") || StringEqual(name, "riscv32") ||
-         StringEqual(name, "esp32") || StringEqual(name, "pcode");
+         StringEqual(name, "esp32") || StringEqual(name, "pcode") ||
+         StringEqual(name, "bpf");
 }
 
 static void DefineLinuxUserspaceMacros(Preprocessor* p) {

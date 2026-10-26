@@ -368,7 +368,8 @@ TargetInstruction* BPFGetBranchTarget(TargetInstruction* inst) {
 }
 
 static bool BPFIsJumpTableEntry(TargetInstruction* inst) {
-  return (BPFOpcode)inst->opcode == BPF_OP(ja);
+  (void)inst;
+  return false;
 }
 
 static TargetVirtuals virtuals = {
@@ -393,6 +394,8 @@ void BPFGeneratorInit(BPFGenerator* bpf, Generator* gen) {
   TargetGeneratorInit(&bpf->base, gen, &virtuals);
   bpf->num_int_arg_regs = 0;
   bpf->struct_return_reg = -1;
+  bpf->vararg_save_offset = -1;
+  bpf->outgoing_offset = 0;
   bpf->not_leaf = false;
   bpf->r0 = NULL;
   memset(bpf->int_argument_registers, 0, sizeof(bpf->int_argument_registers));
@@ -442,6 +445,174 @@ static TargetInstruction* SetDestOrMove(BPFGenerator* bpf,
 
 static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
                                       IRNode* node);
+static TargetInstruction* Materialize(BPFGenerator* bpf, IRNode* node);
+static TargetInstruction* FinishWithDest(BPFGenerator* bpf, IRNode* node,
+                                         TargetInstruction* value);
+static TargetInstruction* SignExtend(BPFGenerator* bpf, TargetInstruction* v,
+                                     int bits);
+static bool GetBaseAndOffset(BPFGenerator* bpf, IRNode* addr_node,
+                             TargetInstruction** base,
+                             TargetInstruction** offset);
+
+// One guest thread.  Atomics are ordinary loads and stores of the same
+// width; the sequence itself is the ordering.
+static int AtomicBits(IRNode* node) {
+  IRNode* sized = node;
+  if (node->opcode == IR_OP(atomic_store) && node->inputs.length > 1) {
+    sized = node->inputs.value.p[1];
+  } else if ((node->opcode == IR_OP(atomic_compare_exchange_bool) ||
+              node->opcode == IR_OP(atomic_compare_exchange_val) ||
+              node->opcode == IR_OP(atomic_compare_exchange_n)) &&
+             node->inputs.length > 2) {
+    sized = node->inputs.value.p[2];
+  }
+  int bits = sized->type != NULL && sized->type->size > 0 ? sized->type->size * 8
+                                                           : 32;
+  if (bits <= 8) return 8;
+  if (bits <= 16) return 16;
+  if (bits <= 32) return 32;
+  return 64;
+}
+
+static void AtomicAccessOps(int bits, BPFOpcode* load, BPFOpcode* store,
+                            BPFOpcode* add, BPFOpcode* sub) {
+  if (bits <= 8) {
+    *load = BPF_OP(ldxb);
+    *store = BPF_OP(stxb);
+    *add = BPF_OP(add32);
+    *sub = BPF_OP(sub32);
+  } else if (bits <= 16) {
+    *load = BPF_OP(ldxh);
+    *store = BPF_OP(stxh);
+    *add = BPF_OP(add32);
+    *sub = BPF_OP(sub32);
+  } else if (bits <= 32) {
+    *load = BPF_OP(ldxw);
+    *store = BPF_OP(stxw);
+    *add = BPF_OP(add32);
+    *sub = BPF_OP(sub32);
+  } else {
+    *load = BPF_OP(ldxdw);
+    *store = BPF_OP(stxdw);
+    *add = BPF_OP(add);
+    *sub = BPF_OP(sub);
+  }
+}
+
+static TargetInstruction* MaskAtomic(BPFGenerator* bpf, TargetInstruction* value,
+                                     int bits) {
+  if (bits >= 64) {
+    return value;
+  }
+  uint64_t mask = ((uint64_t)1 << bits) - 1;
+  return Emit(bpf, NewInstruction2(BPF_OP(and), value,
+                                   GetIntConstant(bpf, NULL, kTargetType64Bit,
+                                                  (int64_t)mask)));
+}
+
+static TargetInstruction* LowerAtomicLoad(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  GetBaseAndOffset(bpf, node->inputs.value.p[0], &base, &offset);
+  BPFOpcode load, store, add, sub;
+  int bits = AtomicBits(node);
+  AtomicAccessOps(bits, &load, &store, &add, &sub);
+  (void)store;
+  (void)add;
+  (void)sub;
+  TargetInstruction* value = Emit(bpf, NewInstruction2(load, base, offset));
+  if (bits < 64 && node->type != NULL && !TypeIsUnsigned(node->type)) {
+    value = SignExtend(bpf, value, bits);
+  }
+  return FinishWithDest(bpf, node, value);
+}
+
+static TargetInstruction* LowerAtomicStore(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  GetBaseAndOffset(bpf, node->inputs.value.p[0], &base, &offset);
+  TargetInstruction* value = Materialize(bpf, node->inputs.value.p[1]);
+  BPFOpcode load, store, add, sub;
+  AtomicAccessOps(AtomicBits(node), &load, &store, &add, &sub);
+  (void)load;
+  (void)add;
+  (void)sub;
+  return SetLoweredNode(node, Emit(bpf, NewInstruction3(store, base, offset, value)));
+}
+
+static TargetInstruction* LowerAtomicRmw(BPFGenerator* bpf, IRNode* node,
+                                         bool add, bool return_new) {
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  GetBaseAndOffset(bpf, node->inputs.value.p[0], &base, &offset);
+  TargetInstruction* delta = Materialize(bpf, node->inputs.value.p[1]);
+  BPFOpcode load, store, add_op, sub_op;
+  int bits = AtomicBits(node);
+  AtomicAccessOps(bits, &load, &store, &add_op, &sub_op);
+  TargetInstruction* old = Emit(bpf, NewInstruction2(load, base, offset));
+  TargetInstruction* updated =
+      Emit(bpf, NewInstruction2(add ? add_op : sub_op, old, delta));
+  Emit(bpf, NewInstruction3(store, base, offset, updated));
+  TargetInstruction* result = return_new ? updated : old;
+  if (bits < 64 && node->type != NULL && !TypeIsUnsigned(node->type)) {
+    result = SignExtend(bpf, result, bits);
+  }
+  return FinishWithDest(bpf, node, result);
+}
+
+static TargetInstruction* LowerAtomicCompareExchange(BPFGenerator* bpf,
+                                                     IRNode* node) {
+  bool expected_is_pointer =
+      node->opcode == IR_OP(atomic_compare_exchange_n);
+  bool returns_bool = node->opcode != IR_OP(atomic_compare_exchange_val);
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  GetBaseAndOffset(bpf, node->inputs.value.p[0], &base, &offset);
+  BPFOpcode load, store, add, sub;
+  int bits = AtomicBits(node);
+  AtomicAccessOps(bits, &load, &store, &add, &sub);
+  (void)add;
+  (void)sub;
+  TargetInstruction* old = Emit(bpf, NewInstruction2(load, base, offset));
+  TargetInstruction* expected;
+  TargetInstruction* expected_base = NULL;
+  TargetInstruction* expected_offset = NULL;
+  if (expected_is_pointer) {
+    GetBaseAndOffset(bpf, node->inputs.value.p[1], &expected_base,
+                     &expected_offset);
+    expected = Emit(bpf, NewInstruction2(load, expected_base, expected_offset));
+  } else {
+    expected = Materialize(bpf, node->inputs.value.p[1]);
+  }
+  TargetInstruction* desired = Materialize(bpf, node->inputs.value.p[2]);
+  TargetInstruction* mismatch = NewInstruction(BPF_OP(label));
+  TargetInstruction* done = NewInstruction(BPF_OP(label));
+  TargetInstruction* branch = Emit(
+      bpf, NewInstruction3(BPF_OP(jne), MaskAtomic(bpf, old, bits),
+                           MaskAtomic(bpf, expected, bits), mismatch));
+  (void)branch;
+  Emit(bpf, NewInstruction3(store, base, offset, desired));
+  TargetInstruction* result = old;
+  if (returns_bool) {
+    result = Emit(bpf, NewInstruction1(BPF_OP(li),
+                                       GetIntConstant(bpf, NULL, kTargetType32Bit,
+                                                      1)));
+  }
+  TargetInstruction* skip = Emit(bpf, NewInstruction(BPF_OP(ja)));
+  skip->operand[0] = done;
+  Emit(bpf, mismatch);
+  if (expected_is_pointer) {
+    Emit(bpf, NewInstruction3(store, expected_base, expected_offset, old));
+  }
+  if (returns_bool) {
+    TargetInstruction* zero = Emit(
+        bpf, NewInstruction1(BPF_OP(li),
+                             GetIntConstant(bpf, NULL, kTargetType32Bit, 0)));
+    zero->dest = result;
+  }
+  Emit(bpf, done);
+  return FinishWithDest(bpf, node, result);
+}
 
 static int LocalOffset(BPFGenerator* bpf, int32_t var_offset) {
   return -(bpf->base.stack_frame_size - var_offset);
@@ -598,15 +769,16 @@ static TargetInstruction* LowerUnary(BPFGenerator* bpf, IRNode* node) {
     if (node->opcode == IR_OP(noti) || node->opcode == IR_OP(nota)) {
       TargetInstruction* zero = GetIntConstant(bpf, NULL, kTargetType32Bit, 0);
       TargetInstruction* one = GetIntConstant(bpf, NULL, kTargetType32Bit, 1);
+      // Result is 1 only when the input is zero.  Branching the other way
+      // turns `!` into a booleanize and inverts every early-out.
       TargetInstruction* eq =
           Emit(bpf, NewInstruction1(BPF_OP(li), one));
-      TargetInstruction* jne =
-          Emit(bpf, NewInstruction3(BPF_OP(jne), src, zero, NULL));
-      TargetInstruction* skip = Emit(bpf, NewInstruction(BPF_OP(label)));
-      jne->operand[2] = skip;
+      TargetInstruction* jeq =
+          Emit(bpf, NewInstruction3(BPF_OP(jeq), src, zero, NULL));
       TargetInstruction* z = Emit(bpf, NewInstruction1(BPF_OP(li), zero));
       z->dest = eq;
-      Emit(bpf, skip);
+      TargetInstruction* skip = Emit(bpf, NewInstruction(BPF_OP(label)));
+      jeq->operand[2] = skip;
       return FinishWithDest(bpf, node, eq);
     }
     return FinishWithDest(bpf, node, Emit(bpf, NewInstruction2(op, src, ones)));
@@ -619,10 +791,42 @@ static TargetInstruction* LowerUnary(BPFGenerator* bpf, IRNode* node) {
   return FinishWithDest(bpf, node, src);
 }
 
+// A 32-bit ALU result is zero-extended to 64 by the interpreter.  A signed
+// value used by a 64-bit operation, such as a negative pointer index, has to
+// be sign-extended first or `p[-1]` adds 4GB.
+static TargetInstruction* WidenFor64(BPFGenerator* bpf, TargetInstruction* v,
+                                    IRNode* src) {
+  if (v == NULL || TargetIsConst(v) || BPFIsSymbol(v) || BPFIsLabel(v)) {
+    return v;
+  }
+  if (src == NULL || src->type == NULL || TypeIsPointer(src->type)) {
+    return v;
+  }
+  TypeRecordCalculateSize(src->type);
+  int size = src->type->size;
+  if (size >= 8 || size <= 0) {
+    return v;
+  }
+  if (TypeIsUnsigned(src->type)) {
+    if (size >= 4) {
+      return v;
+    }
+    uint64_t mask = ((uint64_t)1 << (size * 8)) - 1;
+    TargetInstruction* m =
+        GetIntConstant(bpf, NULL, kTargetType64Bit, (int64_t)mask);
+    return Emit(bpf, NewInstruction2(BPF_OP(and), v, m));
+  }
+  return SignExtend(bpf, v, size * 8);
+}
+
 static TargetInstruction* LowerBinop(BPFGenerator* bpf, IRNode* node) {
   TargetInstruction* lhs = Materialize(bpf, node->inputs.value.p[0]);
   TargetInstruction* rhs = Materialize(bpf, node->inputs.value.p[1]);
   bool is32 = Is32BitType(node->type);
+  if (!is32) {
+    lhs = WidenFor64(bpf, lhs, node->inputs.value.p[0]);
+    rhs = WidenFor64(bpf, rhs, node->inputs.value.p[1]);
+  }
   BPFOpcode op = AluOp(node->opcode, is32);
   return FinishWithDest(bpf, node, Emit(bpf, NewInstruction2(op, lhs, rhs)));
 }
@@ -739,6 +943,35 @@ static TargetInstruction* LowerBranch(BPFGenerator* bpf, IRNode* node) {
   return inst;
 }
 
+// A dense switch is a cbra followed by one bra per slot.  eBPF has no
+// indirect jump, so each slot becomes a compare against the index.
+static TargetInstruction* LowerComputedBranch(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* index = Materialize(bpf, node->inputs.value.p[0]);
+  int slot = 0;
+  for (IRNode* entry = IRNext(node);
+       entry != NULL && entry->opcode == IR_OP(bra) &&
+       (entry->flags & kIRJumpTableBranch) != 0;
+       entry = IRNext(entry), slot++) {
+    TargetInstruction* cmp = Emit(
+        bpf, NewInstruction3(
+                 BPF_OP(jne), index,
+                 GetIntConstant(bpf, NULL, kTargetType32Bit, slot), NULL));
+    TargetInstruction* ja = Emit(bpf, NewInstruction(BPF_OP(ja)));
+    IRNode* target_node = entry->inputs.value.p[0];
+    TargetInstruction* target =
+        target_node != NULL ? target_node->data.ptr : NULL;
+    if (target == NULL) {
+      VectorAppend(&bpf->base.fixups, NewBranchFixup(ja, target_node, 0));
+    } else {
+      ja->operand[0] = target;
+    }
+    TargetInstruction* skip = Emit(bpf, NewInstruction(BPF_OP(label)));
+    cmp->operand[2] = skip;
+    entry->data.ptr = ja;
+  }
+  return SetLoweredNode(node, index);
+}
+
 static TargetInstruction* LowerLabel(BPFGenerator* bpf, IRNode* label) {
   TargetInstruction* inst = Emit(bpf, NewInstruction(BPF_OP(label)));
   label->data.ptr = inst;
@@ -755,14 +988,46 @@ static TargetInstruction* LowerCall(BPFGenerator* bpf, IRNode* node) {
           : Materialize(bpf, callee_node);
   int next_arg = 0;
   bool hidden = (node->flags & kIRStructReturnCall) != 0;
-  for (size_t i = 1; i < node->inputs.length && next_arg < BPF_NUM_ARG_REGS;
-       i++) {
-    IRNode* arg_node = node->inputs.value.p[i];
-    TargetInstruction* arg = Materialize(bpf, arg_node);
-    TargetInstruction* dest = IntArgumentRegister(bpf, next_arg++);
-    SetDestOrMove(bpf, arg, dest);
-    (void)hidden;
+  (void)hidden;
+  // Materialize every argument before moving any of them into r1–r5.  A call
+  // inside a later argument would otherwise clobber the registers already
+  // holding the earlier ones, and the real call would see that garbage.
+  size_t nargs = node->inputs.length > 0 ? node->inputs.length - 1 : 0;
+  TargetInstruction** args = NULL;
+  if (nargs > 0) {
+    args = malloc(nargs * sizeof(TargetInstruction*));
+    for (size_t i = 0; i < nargs; i++) {
+      args[i] = Materialize(bpf, node->inputs.value.p[i + 1]);
+    }
   }
+  // A fresh move, not SetDest on the value.  Materializing a later argument
+  // can emit a call, and the earlier value's instruction is already in the
+  // stream before that call.  Pinning that instruction to r1–r5 would make
+  // the call clobber the argument with nothing left to reload.
+  size_t nreg = nargs < BPF_NUM_ARG_REGS ? nargs : BPF_NUM_ARG_REGS;
+  for (size_t i = 0; i < nreg; i++) {
+    TargetInstruction* dest = IntArgumentRegister(bpf, next_arg++);
+    TargetInstruction* move = Emit(bpf, NewInstruction1(BPF_OP(mov), args[i]));
+    move->dest = dest;
+  }
+  // r1–r5 are full.  Park the rest in the outgoing area and pass its address
+  // in r0.  The callee copies them out before using r0.
+  if (nargs > BPF_NUM_ARG_REGS) {
+    int base_off = LocalOffset(bpf, bpf->outgoing_offset);
+    for (size_t i = BPF_NUM_ARG_REGS; i < nargs; i++) {
+      int off = base_off + (int)(i - BPF_NUM_ARG_REGS) * 8;
+      Emit(bpf, NewInstruction3(BPF_OP(stxdw), FramePointer(bpf),
+                                GetIntConstant(bpf, NULL, kTargetType32Bit, off),
+                                args[i]));
+    }
+    TargetInstruction* addr =
+        Emit(bpf, NewInstruction2(
+                      BPF_OP(add), FramePointer(bpf),
+                      GetIntConstant(bpf, NULL, kTargetType32Bit, base_off)));
+    TargetInstruction* ptr = Emit(bpf, NewInstruction1(BPF_OP(mov), addr));
+    ptr->dest = ResultReg(bpf);
+  }
+  free(args);
   TargetInstruction* call = Emit(bpf, NewInstruction1(BPF_OP(call), addr));
   // Calls return in r0, which is also the function-result register.  Copy
   // the value into a virtual immediately so later uses (a + call(), dest in
@@ -776,19 +1041,33 @@ static TargetInstruction* LowerResult(BPFGenerator* bpf, IRNode* node) {
   return SetLoweredNode(node, SetDestOrMove(bpf, result, ResultReg(bpf)));
 }
 
+// The second IR operand is the bit difference (dest_bits - src_bits), not the
+// width to keep.  A char promoted to int carries 24; masking with that keeps
+// three bytes of garbage.  Keep the source type's low bits instead.
+static int ExtendKeepBits(IRNode* node) {
+  IRNode* src = node->inputs.length > 0 ? node->inputs.value.p[0] : NULL;
+  int src_size = src != NULL && src->type != NULL ? src->type->size : 0;
+  int dst_size = node->type != NULL ? node->type->size : src_size;
+  if (src_size <= 0) {
+    src_size = dst_size > 0 ? dst_size : 4;
+  }
+  int keep = dst_size > 0 && dst_size < src_size ? dst_size : src_size;
+  if (keep >= 8) {
+    return 64;
+  }
+  if (keep <= 0) {
+    return 32;
+  }
+  return keep * 8;
+}
+
 static TargetInstruction* LowerZeroExtend(BPFGenerator* bpf, IRNode* node) {
   TargetInstruction* src = Materialize(bpf, node->inputs.value.p[0]);
-  int bits = 32;
-  if (node->inputs.length > 1 && IRIsConst(node->inputs.value.p[1])) {
-    bits = (int)((IRConstant*)node->inputs.value.p[1])->value.ivalue;
-  } else if (node->type != NULL) {
-    TypeRecordCalculateSize(node->type);
-    bits = (int)(node->type->size * 8);
-  }
+  int bits = ExtendKeepBits(node);
   if (bits >= 64) {
     return FinishWithDest(bpf, node, src);
   }
-  uint64_t mask = bits >= 64 ? (uint64_t)-1 : ((uint64_t)1 << bits) - 1;
+  uint64_t mask = ((uint64_t)1 << bits) - 1;
   TargetInstruction* m =
       GetIntConstant(bpf, NULL, kTargetType64Bit, (int64_t)mask);
   return FinishWithDest(bpf, node, Emit(bpf, NewInstruction2(BPF_OP(and), src, m)));
@@ -796,14 +1075,7 @@ static TargetInstruction* LowerZeroExtend(BPFGenerator* bpf, IRNode* node) {
 
 static TargetInstruction* LowerSignExtendOp(BPFGenerator* bpf, IRNode* node) {
   TargetInstruction* src = Materialize(bpf, node->inputs.value.p[0]);
-  int bits = 32;
-  if (node->inputs.length > 1 && IRIsConst(node->inputs.value.p[1])) {
-    bits = (int)((IRConstant*)node->inputs.value.p[1])->value.ivalue;
-  } else if (node->type != NULL) {
-    TypeRecordCalculateSize(node->type);
-    bits = (int)(node->type->size * 8);
-  }
-  return FinishWithDest(bpf, node, SignExtend(bpf, src, bits));
+  return FinishWithDest(bpf, node, SignExtend(bpf, src, ExtendKeepBits(node)));
 }
 
 static TargetInstruction* LowerIncDec(BPFGenerator* bpf, IRNode* node, bool inc) {
@@ -881,8 +1153,19 @@ static TargetInstruction* LowerMemcpy(BPFGenerator* bpf, IRNode* node) {
 }
 
 static TargetInstruction* LowerMemzero(BPFGenerator* bpf, IRNode* node) {
-  TargetInstruction* dest = Materialize(bpf, node->inputs.value.p[0]);
-  TargetInstruction* n = Materialize(bpf, node->inputs.value.p[1]);
+  // memzero names only the destination.  The byte count is the object's size.
+  IRNode* destination_node = node->inputs.value.p[0];
+  IRVariable* variable = (IRVariable*)destination_node;
+  int64_t size = (IRIsVariable(destination_node) && variable->symbol != NULL)
+                     ? variable->symbol->type->size
+                     : (node->type != NULL ? node->type->size : 0);
+  TargetInstruction* dest = Materialize(bpf, destination_node);
+  if (size <= 0) {
+    return dest;
+  }
+  TargetInstruction* n =
+      Emit(bpf, NewInstruction1(BPF_OP(li),
+                                GetIntConstant(bpf, NULL, kTargetType64Bit, size)));
   TargetInstruction* i =
       Emit(bpf, NewInstruction1(BPF_OP(li),
                                 GetIntConstant(bpf, NULL, kTargetType32Bit, 0)));
@@ -901,6 +1184,67 @@ static TargetInstruction* LowerMemzero(BPFGenerator* bpf, IRNode* node) {
   TargetInstruction* done = Emit(bpf, NewInstruction(BPF_OP(label)));
   cmp->operand[2] = done;
   return dest;
+}
+
+// va_list is a pointer to the next 8-byte argument slot.  Only the five
+// register arguments are saved; a call with more than that cannot be read
+// back through va_arg.
+static TargetInstruction* LowerVaStart(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  GetBaseAndOffset(bpf, node->inputs.value.p[0], &base, &offset);
+  int slot = bpf->vararg_save_offset;
+  if (slot < 0) {
+    slot = 0;
+  }
+  slot += bpf->num_int_arg_regs * 8;
+  TargetInstruction* ap =
+      Emit(bpf, NewInstruction2(
+                    BPF_OP(add), FramePointer(bpf),
+                    GetIntConstant(bpf, NULL, kTargetType32Bit,
+                                   LocalOffset(bpf, slot))));
+  Emit(bpf, NewInstruction3(BPF_OP(stxdw), base, offset, ap));
+  return SetLoweredNode(node, ap);
+}
+
+static TargetInstruction* LowerVaArg(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  GetBaseAndOffset(bpf, node->inputs.value.p[0], &base, &offset);
+  TargetInstruction* cursor = Emit(bpf, NewInstruction2(BPF_OP(ldxdw), base, offset));
+  int size = node->type != NULL && node->type->size > 0 ? (int)node->type->size : 8;
+  BPFOpcode load = BPF_OP(ldxdw);
+  if (size <= 1) {
+    load = BPF_OP(ldxb);
+  } else if (size <= 2) {
+    load = BPF_OP(ldxh);
+  } else if (size <= 4) {
+    load = BPF_OP(ldxw);
+  }
+  TargetInstruction* value =
+      Emit(bpf, NewInstruction2(load, cursor,
+                                GetIntConstant(bpf, NULL, kTargetType32Bit, 0)));
+  if (node->type != NULL && !TypeIsUnsigned(node->type) && size < 8 && size != 3) {
+    value = SignExtend(bpf, value, size * 8);
+  }
+  TargetInstruction* next =
+      Emit(bpf, NewInstruction2(BPF_OP(add), cursor,
+                                GetIntConstant(bpf, NULL, kTargetType32Bit, 8)));
+  Emit(bpf, NewInstruction3(BPF_OP(stxdw), base, offset, next));
+  return FinishWithDest(bpf, node, value);
+}
+
+static TargetInstruction* LowerVaCopy(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* src_base;
+  TargetInstruction* src_offset;
+  TargetInstruction* dst_base;
+  TargetInstruction* dst_offset;
+  GetBaseAndOffset(bpf, node->inputs.value.p[1], &src_base, &src_offset);
+  GetBaseAndOffset(bpf, node->inputs.value.p[0], &dst_base, &dst_offset);
+  TargetInstruction* value =
+      Emit(bpf, NewInstruction2(BPF_OP(ldxdw), src_base, src_offset));
+  return SetLoweredNode(
+      node, Emit(bpf, NewInstruction3(BPF_OP(stxdw), dst_base, dst_offset, value)));
 }
 
 static void LowerVariables(BPFGenerator* bpf, Generator* gen) {
@@ -932,15 +1276,6 @@ static void LowerVariables(BPFGenerator* bpf, Generator* gen) {
         }
         var_offset = (var_offset + align - 1) & ~(align - 1);
         pooled->data.ivalue = var_offset;
-        if (pooled->opcode == IR_OP(argument) &&
-            bpf->num_int_arg_regs < BPF_NUM_ARG_REGS) {
-          BPFSavedArgument* saved = malloc(sizeof(BPFSavedArgument));
-          saved->reg_num = BPF_REG_1 + bpf->num_int_arg_regs;
-          saved->offset = var_offset;
-          saved->size = size > 4 ? 8 : (int)size;
-          VectorAppend(&bpf->saved_args, saved);
-          bpf->num_int_arg_regs++;
-        }
         var_offset += (int32_t)size;
         break;
       }
@@ -952,6 +1287,82 @@ static void LowerVariables(BPFGenerator* bpf, Generator* gen) {
       }
     }
   }
+  // Incoming registers follow the prototype, not the variable-pool order.
+  // A hidden aggregate result occupies r1; the first user argument is r2.
+  bpf->num_int_arg_regs = 0;
+  int hidden_result =
+      gen->func != NULL && gen->func->next != NULL &&
+              TypeReturnedThroughHiddenPointer(gen->func->next)
+          ? 1
+          : 0;
+  Vector* prototype = &gen->func->info.function.prototype;
+  int stack_index = 0;
+  for (size_t i = 0; i < prototype->length; i++) {
+    Symbol* sym = prototype->value.p[i];
+    if (sym == NULL) {
+      continue;
+    }
+    bool on_stack =
+        hidden_result + bpf->num_int_arg_regs >= BPF_NUM_ARG_REGS;
+    IRNode* pooled = NULL;
+    for (size_t j = 0; j < gen->variable_pool.length; j++) {
+      IRNode* candidate = ((PoolEntry*)gen->variable_pool.value.p[j])->pooled;
+      if (candidate->opcode == IR_OP(argument) &&
+          ((IRVariable*)candidate)->symbol == sym) {
+        pooled = candidate;
+        break;
+      }
+    }
+    // An unused parameter is absent from the variable pool, but the caller
+    // still passed it.  Member functions often leave `this` unused; skipping
+    // the slot would assign the next parameter to the same place.
+    if (pooled == NULL) {
+      if (on_stack) {
+        stack_index++;
+      } else {
+        bpf->num_int_arg_regs++;
+      }
+      continue;
+    }
+    TypeRecord* type = sym->type != NULL ? sym->type : pooled->type;
+    TypeRecordCalculateSize(type);
+    int64_t size = type != NULL ? type->size : 8;
+    BPFSavedArgument* saved = malloc(sizeof(BPFSavedArgument));
+    saved->offset = pooled->data.ivalue;
+    saved->size = size > 4 ? 8 : (int)size;
+    saved->copy_bytes = 0;
+    saved->copy_align = 0;
+    // Aggregates are passed as a pointer to the caller's object.  The frame
+    // slot is the parameter, so copy the bytes in; storing the pointer itself
+    // makes every field access read the address bits.
+    if (type != NULL && type->size > 0 &&
+        TypeReturnedThroughHiddenPointer(type)) {
+      saved->copy_bytes = (int)type->size;
+      int align = TypeRecordAlignment(type);
+      saved->copy_align = align > 0 ? align : 1;
+    }
+    if (on_stack) {
+      saved->reg_num = -1;
+      saved->stack_index = stack_index++;
+    } else {
+      saved->reg_num = BPF_REG_1 + hidden_result + bpf->num_int_arg_regs;
+      saved->stack_index = -1;
+      bpf->num_int_arg_regs++;
+    }
+    VectorAppend(&bpf->saved_args, saved);
+  }
+  // A va_list is a pointer into this area.  Named parameters occupy the
+  // first slots; va_start points just past them.  Each slot is one register.
+  if (bpf->base.varargs) {
+    var_offset = (var_offset + 7) & ~7;
+    bpf->vararg_save_offset = var_offset;
+    var_offset += BPF_NUM_ARG_REGS * 8;
+  }
+  // Room for arguments past r5.  Sixteen slots covers the calls libc makes;
+  // each is one register-width value or an aggregate pointer.
+  var_offset = (var_offset + 7) & ~7;
+  bpf->outgoing_offset = var_offset;
+  var_offset += 16 * 8;
   bpf->base.stack_frame_size =
       ((var_offset + 7) & ~7) + BPF_NUM_SAVED_REGS * 8;
 }
@@ -1015,20 +1426,27 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
       break;
 
     case IR_OP(structreturn): {
+      // The structreturn pseudo is not in the instruction stream, so it never
+      // receives a register.  Users of the hidden result pointer must name
+      // the move that captured r1; otherwise every use prints as r0 and the
+      // return slot is a null store.
       TargetInstruction* result =
-          SetLoweredNode(node, EmitSymbol(bpf, NewInstruction(BPF_OP(structreturn))));
+          EmitSymbol(bpf, NewInstruction(BPF_OP(structreturn)));
       TargetInstruction* mv =
           Emit(bpf, NewInstruction1(BPF_OP(mov), IntArgumentRegister(bpf, 0)));
       mv->dest = result;
-      return result;
+      return SetLoweredNode(node, mv);
     }
 
-    case IR_OP(literalref):
+    case IR_OP(literalref): {
+      // The id lives in the constant input.  The literalref node itself is
+      // not that constant; reading it as one emits `.str.0` for every string.
+      IRConstant* id = node->inputs.value.p[0];
       return FinishWithDest(
           bpf, node,
           Emit(bpf, NewInstruction1(BPF_OP(lddw),
-                                    TargetNewLiteral((int)((IRConstant*)node)
-                                                         ->value.ivalue))));
+                                    TargetNewLiteral((int)id->value.ivalue))));
+    }
 
     case IR_OP(addressof):
       return FinishWithDest(bpf, node, Materialize(bpf, node->inputs.value.p[0]));
@@ -1145,8 +1563,13 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
     case IR_OP(d2i):
     case IR_OP(movf):
     case IR_OP(movd):
-      fprintf(stderr, "eBPF backend: floating point is not supported\n");
-      return Emit(bpf, NewInstruction(BPF_OP(nop)));
+      // No floating-point register file.  Integer formatting never executes
+      // these; a float result is the zero bit pattern.
+      return FinishWithDest(
+          bpf, node,
+          Emit(bpf, NewInstruction1(
+                        BPF_OP(li),
+                        GetIntConstant(bpf, NULL, kTargetType64Bit, 0))));
 
     case IR_OP(noti):
     case IR_OP(nota):
@@ -1205,7 +1628,7 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
     case IR_OP(bra):
       return LowerBranch(bpf, node);
     case IR_OP(cbra):
-      return LowerBranch(bpf, node);
+      return LowerComputedBranch(bpf, node);
 
     case IR_OP(label):
       return LowerLabel(bpf, node);
@@ -1248,24 +1671,35 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
       return Emit(bpf, NewInstruction(BPF_OP(nop)));
     case IR_OP(loc):
       return SetLoweredNode(node, Emit(bpf, TargetNewLocation((IRLocation*)node)));
-    case IR_OP(builtin_va_start):
-    case IR_OP(builtin_va_arg):
-    case IR_OP(builtin_va_end):
-    case IR_OP(builtin_va_copy):
     case IR_OP(atomic_load):
+      return LowerAtomicLoad(bpf, node);
     case IR_OP(atomic_store):
+      return LowerAtomicStore(bpf, node);
     case IR_OP(atomic_fetch_add):
+      return LowerAtomicRmw(bpf, node, true, false);
     case IR_OP(atomic_fetch_sub):
+      return LowerAtomicRmw(bpf, node, false, false);
     case IR_OP(atomic_add_fetch):
+      return LowerAtomicRmw(bpf, node, true, true);
     case IR_OP(atomic_sub_fetch):
+      return LowerAtomicRmw(bpf, node, false, true);
     case IR_OP(atomic_compare_exchange_bool):
     case IR_OP(atomic_compare_exchange_val):
     case IR_OP(atomic_compare_exchange_n):
+      return LowerAtomicCompareExchange(bpf, node);
     case IR_OP(atomic_fence):
     case IR_OP(decsp):
     case IR_OP(savesp):
     case IR_OP(restoresp):
       return Emit(bpf, NewInstruction(BPF_OP(nop)));
+    case IR_OP(builtin_va_start):
+      return LowerVaStart(bpf, node);
+    case IR_OP(builtin_va_arg):
+      return LowerVaArg(bpf, node);
+    case IR_OP(builtin_va_end):
+      return SetLoweredNode(node, Emit(bpf, NewInstruction(BPF_OP(nop))));
+    case IR_OP(builtin_va_copy):
+      return LowerVaCopy(bpf, node);
     default:
       break;
   }

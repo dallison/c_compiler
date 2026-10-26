@@ -1763,13 +1763,14 @@ cc_library(
     ],
     hdrs = glob([
         "bpf_interpreter/*.h",
-    ]),
+    ]) + ["libc/include/davecc_guest_syscalls.h"],
     copts = COMMON_COPTS,
-    includes = COMMON_INCLUDES + ["bpf_interpreter"],
+    includes = COMMON_INCLUDES + ["bpf_interpreter", "libc/include"],
     deps = [
         ":elf",
         ":linker",
         ":loader",
+        ":posix_host",
         ":utils",
     ],
 )
@@ -3479,6 +3480,83 @@ for src in libc/*.cc; do
 done
 
 "$$archivist" r "$$out" "$${runtime_objs[@]}" "$${libc_objs[@]}" "$${cxx_objs[@]}"
+""",
+)
+
+genrule(
+    name = "bpf_start",
+    srcs = [
+        "bpf support/start.s",
+        ":davecc",
+    ],
+    outs = ["libc/bpf_start.o"],
+    cmd = """
+set -euo pipefail
+"$(execpath :davecc)" -target bpf -nostdinc -c \
+  "bpf support/start.s" -o "$@"
+""",
+)
+
+genrule(
+    name = "libc_bpf",
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([
+        "libc/include/**/*.h",
+        "bpf support/*.s",
+    ]) + [
+        "bpf support/runtime.c",
+        ":davecc",
+        ":archivist",
+    ],
+    outs = ["libc/libcbpf.a"],
+    cmd = """
+set -euo pipefail
+
+out="$@"
+work="$(@D)/libcbpf.build"
+rm -rf "$$work"
+mkdir -p "$$work"
+
+davecc="$$(pwd)/$(execpath :davecc)"
+archivist="$$(pwd)/$(execpath :archivist)"
+cflags=(-target bpf -O1 -nostdinc -fno-exceptions -D__DAVECC_HAS_HEAP_LOCK__=1 \
+  -D__DAVECC_LIBC_BUILD__ -c -isystem libc/include -Ilibc)
+
+"$$davecc" "$${cflags[@]}" "bpf support/syscall.s" -o "$$work/bpf_syscall.o"
+"$$davecc" "$${cflags[@]}" "bpf support/cxx_rtti_vtables.s" -o "$$work/cxx_rtti_vtables.o"
+"$$davecc" "$${cflags[@]}" "bpf support/runtime.c" -o "$$work/bpf_runtime.o"
+
+for src in libc/*.c; do
+  case "$$src" in
+    libc/cxx_tls.c|libc/cxx_tls_stubs.c|libc/dynamic_*|libc/eh_*|\
+    libc/gxx_personality.c|libc/linux_*|libc/darwin_*|\
+    libc/guest_heap.c|libc/lsda.c|libc/unwind_api.c|libc/wasi_*|\
+    libc/acos.c|libc/asin.c|libc/atan.c|libc/atan2.c|libc/ceil.c|libc/ckdint.c|\
+    libc/complex_*.c|libc/exp.c|libc/fabs.c|libc/fenv.c|libc/floor.c|\
+    libc/frexp.c|libc/ldexp.c|libc/log.c|\
+    libc/long_double.c|libc/math_extra.c|libc/modf.c|libc/pow.c|libc/scanf.c|libc/sincos.c|\
+    libc/sqrt.c|libc/stdlib_extra.c|libc/strtod.c|libc/tan.c|libc/threads.c|libc/time.c|libc/wchar.c) \
+      continue ;;
+  esac
+  obj="$$work/$$(basename "$${src%.c}").o"
+  source_cflags=()
+  if [[ "$$src" == "libc/printf.c" ]]; then
+    source_cflags+=(-DPRINTF_DISABLE_FLOAT=1)
+  fi
+  "$$davecc" "$${cflags[@]}" $${source_cflags[@]+"$${source_cflags[@]}"} \
+    "$$src" -o "$$obj"
+done
+
+for src in libc/*.cc; do
+  "$$davecc" "$${cflags[@]}" -std=c++20 -fno-exceptions "$$src" \
+    -o "$$work/$$(basename "$${src%.cc}").o"
+done
+
+case "$$out" in
+  /*) ;;
+  *) out="$$(pwd)/$$out" ;;
+esac
+cd "$$work"
+"$$archivist" r "$$out" *.o
 """,
 )
 

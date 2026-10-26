@@ -1,11 +1,21 @@
 #include "bpf_interpreter.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "davecc_guest_syscalls.h"
 #include "bpf_machine.h"
 #include "elf.h"
+#include "posix_host.h"
+
+// call imm used by libc's syscall().  Not a kernel helper.
+#define BPF_HOST_SYSCALL 2147483647
 
 void BPFInterpreterInit(BPFInterpreter* interp) {
   memset(interp, 0, sizeof(*interp));
@@ -115,6 +125,67 @@ static uint64_t Alu(uint8_t op, uint64_t dst, uint64_t src, bool is64) {
   return result;
 }
 
+static void* BpfGuestPtr(void* context, uint64_t guest, size_t size) {
+  (void)context;
+  if (guest == 0) {
+    return NULL;
+  }
+  void* mapped = DaveHostMappingFind(guest, size == 0 ? 1 : size);
+  if (mapped != NULL) {
+    return mapped;
+  }
+  return (void*)(uintptr_t)guest;
+}
+
+static int64_t BpfHostSyscall(BPFInterpreter* interp) {
+  int64_t number = (int64_t)interp->r[1];
+  uint64_t a0 = interp->r[2];
+  uint64_t a1 = interp->r[3];
+  uint64_t a2 = interp->r[4];
+  uint64_t a3 = interp->r[5];
+  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_DUP2) {
+    return DaveHostPosixSyscall((int)number, 8, 64, BpfGuestPtr, interp, a0, a1,
+                                a2, a3, 0, 0);
+  }
+  switch (number) {
+    case DAVE_SYS_OPEN:
+      return open((const char*)(uintptr_t)a0, (int)a1, (mode_t)a2);
+    case DAVE_SYS_CLOSE:
+      return close((int)a0);
+    case DAVE_SYS_WRITE:
+      return write((int)a0, (const void*)(uintptr_t)a1, (size_t)a2);
+    case DAVE_SYS_READ:
+      return read((int)a0, (void*)(uintptr_t)a1, (size_t)a2);
+    case DAVE_SYS_LSEEK:
+      return lseek((int)a0, (off_t)a1, (int)a2);
+    case DAVE_SYS_ABORT:
+      interp->exit_code = 134;
+      interp->running = false;
+      return 0;
+    case DAVE_SYS_EXIT:
+    case DAVE_SYS_EXIT_CLEAN:
+      interp->exit_code = (int)a0;
+      interp->running = false;
+      return 0;
+    case DAVE_SYS_TIME:
+      return (int64_t)time(NULL);
+    case DAVE_SYS_CLOCK:
+    case DAVE_SYS_MONOTONIC_TIME:
+    case DAVE_SYS_REALTIME_TIME: {
+      struct timespec now;
+      clockid_t clock_id =
+          number == DAVE_SYS_REALTIME_TIME ? CLOCK_REALTIME : CLOCK_MONOTONIC;
+      if (clock_gettime(clock_id, &now) != 0) {
+        return -1;
+      }
+      return (int64_t)now.tv_sec * 1000000000ll + now.tv_nsec;
+    }
+    default:
+      fprintf(stderr, "unsupported eBPF syscall %" PRId64 "\n", number);
+      return -ENOSYS;
+  }
+}
+
 static bool JumpTaken(uint8_t op, uint64_t dst, uint64_t src) {
   switch (op) {
     case BPF_JA:
@@ -192,7 +263,7 @@ int BPFInterpreterRun(BPFInterpreter* interp, Loader* loader, uint64_t entry) {
   interp->depth = 0;
 
   uint64_t steps = 0;
-  const uint64_t kMaxSteps = 10000000;
+  const uint64_t kMaxSteps = 100000000;
   while (interp->running) {
     if (++steps > kMaxSteps) {
       fprintf(stderr, "eBPF interpreter exceeded step limit at 0x%" PRIx64 "\n",
@@ -252,6 +323,12 @@ int BPFInterpreterRun(BPFInterpreter* interp, Loader* loader, uint64_t entry) {
       uint8_t op = BPF_ALU_OP(insn.code);
       if (op == BPF_CALL) {
         uint64_t next = interp->pc + BPF_INSN_SIZE;
+        if ((insn.code & BPF_X) == 0 && insn.src_reg != BPF_PSEUDO_CALL &&
+            insn.imm == BPF_HOST_SYSCALL) {
+          interp->r[0] = (uint64_t)BpfHostSyscall(interp);
+          interp->pc = next;
+          continue;
+        }
         uint64_t target;
         if (insn.code & BPF_X) {
           target = interp->r[insn.dst_reg];

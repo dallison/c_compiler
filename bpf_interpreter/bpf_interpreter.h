@@ -5,8 +5,8 @@
 #include <stdint.h>
 #include "loader.h"
 
-#define BPF_INTERP_MAX_FRAMES 32
-#define BPF_INTERP_STACK 8192
+#define BPF_INTERP_MAX_FRAMES 128
+#define BPF_INTERP_STACK 65536
 
 typedef struct {
   uint64_t ret_pc;

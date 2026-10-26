@@ -48,6 +48,12 @@ static int RegNum(TargetInstruction* inst) {
 }
 
 static int DestReg(TargetInstruction* inst) {
+  // The allocator records the value's register on the instruction itself.
+  // dest->reg is the coalesced home and may be overwritten when a later
+  // instruction is assigned the same destination, so prefer inst->reg.
+  if (inst->reg != NULL) {
+    return inst->reg->num;
+  }
   if (inst->dest != NULL) {
     return RegNum(inst->dest);
   }
@@ -229,6 +235,12 @@ static void PrintAlu(BPFEmitter* emitter, TargetInstruction* inst, FILE* fp) {
   TargetInstruction* src1 = inst->operand[1];
   const char* name = AluName((BPFOpcode)inst->opcode);
   if (src1 == NULL) {
+    if (src0 != NULL && (BPFOpcode)src0->opcode == BPF_OP(literal)) {
+      char lit[64];
+      LiteralAsmName(((TargetLiteral*)src0)->literal_id, lit, sizeof(lit));
+      fprintf(fp, "\tlddw r%d, %s\n", dst, lit);
+      return;
+    }
     if (TargetIsConst(src0) || BPFIsSymbol(src0)) {
       if (BPFIsSymbol(src0)) {
         char buf[256];
@@ -262,6 +274,58 @@ static void PrintAlu(BPFEmitter* emitter, TargetInstruction* inst, FILE* fp) {
   }
 }
 
+static const char* MemWidthName(int width, bool store) {
+  switch (width) {
+    case 1:
+      return store ? "stxb" : "ldxb";
+    case 2:
+      return store ? "stxh" : "ldxh";
+    case 4:
+      return store ? "stxw" : "ldxw";
+    default:
+      return store ? "stxdw" : "ldxdw";
+  }
+}
+
+static void PrintMemAddr(FILE* fp, int reg, int off) {
+  if (off < 0) {
+    fprintf(fp, "[r%d%d]", reg, off);
+  } else if (off > 0) {
+    fprintf(fp, "[r%d+%d]", reg, off);
+  } else {
+    fprintf(fp, "[r%d]", reg);
+  }
+}
+
+// Largest access that stays inside the object and matches its alignment.
+static int AggregateCopyWidth(int offset, int remain, int align) {
+  int width = 8;
+  if (align < 8) {
+    width = align >= 4 ? 4 : align >= 2 ? 2 : 1;
+  }
+  while (width > 1 && (remain < width || (offset & (width - 1)) != 0)) {
+    width >>= 1;
+  }
+  return width;
+}
+
+static void PrintAggregateArgCopy(int src_reg, int dest_off, int bytes,
+                                  int align, FILE* fp) {
+  if (align < 1) {
+    align = 1;
+  }
+  int copied = 0;
+  while (copied < bytes) {
+    int width = AggregateCopyWidth(copied, bytes - copied, align);
+    fprintf(fp, "\t%s r0, ", MemWidthName(width, false));
+    PrintMemAddr(fp, src_reg, copied);
+    fprintf(fp, "\n\t%s ", MemWidthName(width, true));
+    PrintMemAddr(fp, BPF_REG_10, dest_off + copied);
+    fprintf(fp, ", r0\n");
+    copied += width;
+  }
+}
+
 static void PrintMemOff(int base, TargetInstruction* off, FILE* fp) {
   int64_t o = 0;
   if (off != NULL && TargetIsConst(off)) {
@@ -290,11 +354,51 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
         off += 8;
         fprintf(fp, "\tstxdw [r10-%d], r%d\n", off, r);
       }
+      bool has_stack_arg = false;
+      for (size_t i = 0; i < emitter->bpf->saved_args.length; i++) {
+        BPFSavedArgument* a = emitter->bpf->saved_args.value.p[i];
+        if (a->stack_index >= 0) {
+          has_stack_arg = true;
+          break;
+        }
+      }
+      // Aggregate copies use r0 as scratch.  Park the stack-argument pointer
+      // before those copies run.
+      if (has_stack_arg) {
+        fprintf(fp, "\tmov64 r9, r0\n");
+      }
       for (size_t i = 0; i < emitter->bpf->saved_args.length; i++) {
         BPFSavedArgument* a = emitter->bpf->saved_args.value.p[i];
         int loff = LocalOffset(emitter, a->offset);
-        const char* st = a->size == 4 ? "stxw" : "stxdw";
-        fprintf(fp, "\t%s [r10%d], r%d\n", st, loff, a->reg_num);
+        if (a->stack_index >= 0) {
+          int src = BPF_REG_6;
+          fprintf(fp, "\t%s r%d, ", a->copy_bytes > 0 ? "ldxdw" : MemWidthName(a->size, false),
+                  src);
+          PrintMemAddr(fp, BPF_REG_9, a->stack_index * 8);
+          fprintf(fp, "\n");
+          if (a->copy_bytes > 0) {
+            PrintAggregateArgCopy(src, loff, a->copy_bytes, a->copy_align, fp);
+            continue;
+          }
+          fprintf(fp, "\t%s ", MemWidthName(a->size, true));
+          PrintMemAddr(fp, BPF_REG_10, loff);
+          fprintf(fp, ", r%d\n", src);
+          continue;
+        }
+        if (a->copy_bytes > 0) {
+          PrintAggregateArgCopy(a->reg_num, loff, a->copy_bytes, a->copy_align,
+                                fp);
+          continue;
+        }
+        fprintf(fp, "\t%s ", MemWidthName(a->size <= 0 ? 8 : a->size, true));
+        PrintMemAddr(fp, BPF_REG_10, loff);
+        fprintf(fp, ", r%d\n", a->reg_num);
+      }
+      if (emitter->bpf->vararg_save_offset >= 0) {
+        for (int i = 0; i < BPF_NUM_ARG_REGS; i++) {
+          int loff = LocalOffset(emitter, emitter->bpf->vararg_save_offset + i * 8);
+          fprintf(fp, "\tstxdw [r10%d], r%d\n", loff, BPF_REG_1 + i);
+        }
       }
       return;
     }
@@ -351,10 +455,20 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
       PrintAlu(emitter, inst, fp);
       return;
     case BPF_OP(neg):
-    case BPF_OP(neg32):
-      fprintf(fp, "\t%s r%d\n", op == BPF_OP(neg32) ? "neg32" : "neg64",
-              DestReg(inst));
+    case BPF_OP(neg32): {
+      // neg is unary and overwrites its register.  Copy the source in first
+      // when it lives somewhere else; otherwise (size_t)-1 becomes the
+      // negation of whatever the destination happened to hold.
+      int dst = DestReg(inst);
+      TargetInstruction* src = inst->operand[0];
+      if (src != NULL && TargetIsConst(src)) {
+        fprintf(fp, "\tmov64 r%d, %" PRId64 "\n", dst, TargetIntValue(src));
+      } else if (src != NULL && RegNum(src) != dst) {
+        fprintf(fp, "\tmov64 r%d, r%d\n", dst, RegNum(src));
+      }
+      fprintf(fp, "\t%s r%d\n", op == BPF_OP(neg32) ? "neg32" : "neg64", dst);
       return;
+    }
     case BPF_OP(ldxb):
     case BPF_OP(ldxh):
     case BPF_OP(ldxw):
@@ -369,12 +483,18 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
     case BPF_OP(stxh):
     case BPF_OP(stxw):
     case BPF_OP(stxdw):
-    case BPF_OP(spill):
+    case BPF_OP(spill): {
       fprintf(fp, "\t%s ", StoreName(op == BPF_OP(spill) ? BPF_OP(stxdw) : op));
       PrintMemOff(RegNum(inst->operand[0]), inst->operand[1], fp);
-      fprintf(fp, ", r%d\n", RegNum(inst->operand[2] != NULL ? inst->operand[2]
-                                                            : inst->operand[1]));
+      // A spill snapshots the source register onto inst->reg.  The value's
+      // own register is retargeted when it is reloaded.
+      int src = inst->reg != NULL && op == BPF_OP(spill)
+                    ? inst->reg->num
+                    : RegNum(inst->operand[2] != NULL ? inst->operand[2]
+                                                      : inst->operand[1]);
+      fprintf(fp, ", r%d\n", src);
       return;
+    }
     case BPF_OP(ja):
       fprintf(fp, "\tja %s\n",
               LabelName(func_name, inst->operand[0], buf, sizeof(buf)));

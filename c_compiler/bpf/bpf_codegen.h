@@ -113,6 +113,11 @@ typedef struct BPFGenerator {
   TargetGenerator base;
   int num_int_arg_regs;
   int struct_return_reg;
+  // Byte offset of the r1–r5 save area in a variadic function, or -1.
+  int vararg_save_offset;
+  // Frame offset of the outgoing stack-argument area.  Args past r5 are
+  // stored here and r0 points at the first one.
+  int outgoing_offset;
   bool not_leaf;
   TargetInstruction* int_argument_registers[BPF_NUM_ARG_REGS];
   Vector var_regs;
@@ -125,6 +130,14 @@ typedef struct {
   int reg_num;
   int offset;
   int size;
+  // Nonzero when reg_num holds a pointer to the caller's aggregate and the
+  // prologue must copy this many bytes into the frame slot.  The slot is then
+  // the by-value object; taking its address is the parameter's address.
+  int copy_bytes;
+  int copy_align;
+  // Index in the r0 array for an argument that did not fit in r1–r5, or -1
+  // when the value arrives in reg_num.
+  int stack_index;
 } BPFSavedArgument;
 
 void BPFGeneratorInit(BPFGenerator* bpf, Generator* gen);

@@ -71,7 +71,7 @@
 // memory is the module's own, so it is left out along with the targets that
 // never had either.
 #if !defined(__p_code__) && !defined(__6502__) && !defined(__wasm32__) && \
-    !defined(__xtensa__)
+    !defined(__xtensa__) && !defined(__bpf__)
 #define SYS_MALLOC DAVE_SYS_MALLOC
 #define SYS_FREE DAVE_SYS_FREE
 #define SYS_REALLOC DAVE_SYS_REALLOC
@@ -275,6 +275,12 @@ extern "C" long syscall(int n, ...);
 extern long syscall(int n, ...);
 #endif
 #elif defined(__wasm32__)
+#ifdef __cplusplus
+extern "C" long syscall(int n, ...);
+#else
+extern long syscall(int n, ...);
+#endif
+#elif defined(__bpf__)
 #ifdef __cplusplus
 extern "C" long syscall(int n, ...);
 #else
