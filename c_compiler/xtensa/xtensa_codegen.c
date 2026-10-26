@@ -181,7 +181,7 @@ const char* XTENSAOpcodeName(int op) {
     case XTENSA_OP(mulhsu):
       return "mulhsu";
     case XTENSA_OP(mulhu):
-      return "mulhu";
+      return "muluh";
     case XTENSA_OP(div):
       return "div";
     case XTENSA_OP(divu):

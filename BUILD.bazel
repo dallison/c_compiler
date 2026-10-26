@@ -2145,6 +2145,7 @@ libc_srcs=(
   "libc/cxx_tls_stubs.c"
   "libc/davecc_lifecycle.c"
   "libc/eh_frame.c"
+  "libc/eh_frame_pointer.c"
   "libc/eh_cxa.c"
   "libc/eh_terminate.c"
   "libc/eh_personality.c"
@@ -3653,8 +3654,7 @@ filegroup(
 
 genrule(
     name = "libc_wasm32",
-    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + [
-        "libc/cxx_new_overloads.cc",
+    srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [
         ":libc_headers",
     ] + glob([
         "libc/include/**/*.h",
@@ -3690,8 +3690,12 @@ for src in libc/*.c; do
   esac
   "$$davecc" "$${cflags[@]}" "$$src" -o "$$work/$$(basename "$${src%.c}").o"
 done
-"$$davecc" "$${cflags[@]}" -std=c++20 -fno-exceptions \
-  libc/cxx_new_overloads.cc -o "$$work/cxx_new_overloads.o"
+# Wasm has no frame unwinder, so the C++ runtime is built without exceptions.
+# iostream, locale, and the coroutine helpers still have to be present.
+for src in libc/*.cc; do
+  "$$davecc" "$${cflags[@]}" -std=c++20 -fno-exceptions "$$src" \
+    -o "$$work/$$(basename "$${src%.cc}").o"
+done
 
 # Members are named from the working directory, because a name holding a
 # slash does not survive the archive's long-name table.

@@ -260,6 +260,7 @@ bool XtensaEncode(const XtensaInstruction* inst, uint8_t out[3]) {
       }
       return true;
     case kXtensaMull:
+    case kXtensaMuluh:
     case kXtensaQuou:
     case kXtensaQuos:
     case kXtensaRemu:
@@ -267,11 +268,13 @@ bool XtensaEncode(const XtensaInstruction* inst, uint8_t out[3]) {
       unsigned op2 =
           inst->kind == kXtensaMull
               ? 8
-              : (inst->kind == kXtensaQuou
+              : (inst->kind == kXtensaMuluh
+                     ? 10
+                     : (inst->kind == kXtensaQuou
                      ? 12
                      : (inst->kind == kXtensaQuos
                             ? 13
-                            : (inst->kind == kXtensaRemu ? 14 : 15)));
+                            : (inst->kind == kXtensaRemu ? 14 : 15))));
       if (!ValidRegister(inst->rd) || !ValidRegister(inst->rs) ||
           !ValidRegister(inst->rt)) {
         return false;
@@ -360,14 +363,16 @@ bool XtensaDecode(const uint8_t* bytes, size_t available,
       inst->rs = (uint8_t)(op2 == 10 ? s : t);
       return true;
     }
-    if (op1 == 2 && (op2 == 8 || op2 >= 12)) {
+    if (op1 == 2 && (op2 == 8 || op2 == 10 || op2 >= 12)) {
       inst->kind =
           op2 == 8
               ? kXtensaMull
-              : (op2 == 12
+              : (op2 == 10
+                     ? kXtensaMuluh
+                     : (op2 == 12
                      ? kXtensaQuou
                      : (op2 == 13 ? kXtensaQuos
-                                  : (op2 == 14 ? kXtensaRemu : kXtensaRems)));
+                                  : (op2 == 14 ? kXtensaRemu : kXtensaRems))));
       inst->rd = (uint8_t)r;
       inst->rs = (uint8_t)s;
       inst->rt = (uint8_t)t;
@@ -577,7 +582,7 @@ const char* XtensaInstructionName(XtensaInstructionKind kind) {
       "beq",     "bne",   "blt",   "bge",   "bltu", "bgeu",  "beqz",   "bnez",
       "bltz",    "bgez",  "l32r",  "j",     "jx",   "call8", "callx8", "entry",
       "retw",    "break", "slli",  "srai",  "srli", "ssl",   "ssr",    "sll",
-      "srl",     "sra",   "mull",  "quou",  "quos", "remu",  "rems",
+      "srl",     "sra",   "mull",  "muluh", "quou", "quos", "remu",  "rems",
   };
   if ((unsigned)kind >= sizeof(names) / sizeof(names[0])) {
     return "invalid";

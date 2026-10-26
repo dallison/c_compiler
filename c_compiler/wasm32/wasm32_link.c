@@ -591,6 +591,12 @@ static void AssignFunctionIndices(Wasm32Linker* linker) {
     }
     for (size_t j = 0; j < object->functions.length; j++) {
       Wasm32Function* function = object->functions.value.p[j];
+      // A weak copy that lost to another definition is not a second
+      // function.  Calls already point at the winner.
+      if (function->symbol != NULL && function->symbol->definition != NULL &&
+          function->symbol->definition != function->symbol) {
+        continue;
+      }
       if (function->symbol != NULL) {
         function->symbol->final_index =
             (int32_t)(linker->imports.length + linker->functions.length);
@@ -871,6 +877,10 @@ static bool WriteModule(Wasm32Linker* linker, Vector* type_maps) {
     Vector* type_map = type_maps->value.p[i];
     for (size_t j = 0; j < object->functions.length; j++) {
       Wasm32Function* function = object->functions.value.p[j];
+      if (function->symbol != NULL && function->symbol->definition != NULL &&
+          function->symbol->definition != function->symbol) {
+        continue;
+      }
       uint32_t type_index = function->type_index < type_map->length
                                 ? (uint32_t)(intptr_t)
                                       type_map->value.p[function->type_index]

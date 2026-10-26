@@ -30,6 +30,7 @@ bool DAsmDisassembleXtensa(const void* bytes, size_t length, uint64_t address,
     case kXtensaOr:
     case kXtensaXor:
     case kXtensaMull:
+    case kXtensaMuluh:
     case kXtensaQuou:
     case kXtensaQuos:
     case kXtensaRemu:

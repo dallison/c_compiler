@@ -58,6 +58,7 @@ typedef enum {
   kXtensaSrl,
   kXtensaSra,
   kXtensaMull,
+  kXtensaMuluh,
   kXtensaQuou,
   kXtensaQuos,
   kXtensaRemu,

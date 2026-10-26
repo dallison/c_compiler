@@ -532,6 +532,12 @@ bool Wasm32WriteObject(String* filename) {
     Wasm32Symbol* symbol =
         Wasm32ObjectSymbol(object, WASM_SYMBOL_FUNCTION, name);
     symbol->flags = wasm->base.is_global ? 0 : WASM_SYM_BINDING_LOCAL;
+    // Inline and template functions are emitted in every translation unit
+    // that uses them.  A strong binding makes the second copy a duplicate
+    // definition and stops the link.
+    if (wasm->base.is_weak) {
+      symbol->flags |= WASM_SYM_BINDING_WEAK;
+    }
 
     Wasm32Function* function = malloc(sizeof(Wasm32Function));
     function->name = strdup(name);

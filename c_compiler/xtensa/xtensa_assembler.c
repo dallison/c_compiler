@@ -59,6 +59,7 @@ DECLARE_INST_FUNC(xt_sll);
 DECLARE_INST_FUNC(xt_srl);
 DECLARE_INST_FUNC(xt_sra);
 DECLARE_INST_FUNC(xt_mul);
+DECLARE_INST_FUNC(xt_muluh);
 DECLARE_INST_FUNC(xt_div);
 DECLARE_INST_FUNC(xt_divu);
 DECLARE_INST_FUNC(xt_rem);
@@ -134,6 +135,7 @@ static void InitializeInstructions(Map* instructions) {
   INST2(xt_srl, srl);
   INST2(xt_sra, sra);
   INST2(xt_mul, mul);
+  INST2(xt_muluh, muluh);
   INST2(xt_div, div);
   INST2(xt_divu, divu);
   INST2(xt_rem, rem);
@@ -920,6 +922,7 @@ static void AssembleXtensaMulDiv(XTENSAAssembler* assembler,
   }
 
 XTENSA_MULDIV_HANDLER(mul, kXtensaMull)
+XTENSA_MULDIV_HANDLER(muluh, kXtensaMuluh)
 XTENSA_MULDIV_HANDLER(div, kXtensaQuos)
 XTENSA_MULDIV_HANDLER(divu, kXtensaQuou)
 XTENSA_MULDIV_HANDLER(rem, kXtensaRems)

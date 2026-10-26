@@ -3377,6 +3377,10 @@ static void ReloadStructReturnRegisterAtLandingPad(X86Emitter* emitter,
 static int StackFrameSizeI386(X86Emitter* emitter) {
   int body = emitter->rv->base.stack_frame_size +
              emitter->rv->saved_arg_area_size;
+  // Locals are addressed `header` bytes below %ebp (LocalVariableOffset).
+  // That shift has to be real frame space, or the local area lands on the
+  // callee-saved slots.
+  body += X86_P(emitter->rv)->stack_frame_header_size;
   body += BitSetCount(&emitter->regs->used_int_regs) * 8;
   body += BitSetCount(&emitter->regs->used_float_regs) * 8;
   body += emitter->spill_region_size;
@@ -3544,8 +3548,12 @@ static void SaveRegistersI386(X86Emitter* emitter, FILE* fp) {
   int local_vars = emitter->rv->base.stack_frame_size +
                    emitter->rv->saved_arg_area_size;
 
-  // Callee-saved GPR/XMM slots sit at the top of the frame body (%esp relative).
-  int saved_reg_offset = stack_frame_size - 8;
+  // Callee-saved slots sit at the bottom of the frame. The top is the
+  // header gap and the locals; spills sit just below the locals. Starting
+  // at stack_frame_size-8 put these saves on top of that local area.
+  int saved_slots = (int)BitSetCount(&emitter->regs->used_int_regs) +
+                    (int)BitSetCount(&emitter->regs->used_float_regs);
+  int saved_reg_offset = saved_slots > 0 ? saved_slots * 8 - 8 : 0;
 
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame, no need to store frame pointer.
@@ -6136,16 +6144,18 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
       }
       bool constant_count = TargetIsConst(inst->operand[1]);
       if (!constant_count) {
-        // Variable shifts require %cl. Use %ebx as scratch (callee-saved).
-        // the result and save %rcx around the operation. This handles every
-        // overlap between lhs, count, destination, and an unrelated live value
-        // in %rcx without requiring allocator constraints.
-        fprintf(fp, "\tpushl %%ebx\n\tmovl ");
+        // Variable shifts require %cl. %ebx is allocatable, so the count may
+        // already live there: spill both operands before clobbering %ebx and
+        // %ecx, shift, restore those registers, then pop the result.
+        fprintf(fp, "\tpushl ");
         PrintPercentRegFromInstI386(fp, inst->operand[0], buf1, sizeof(buf1));
-        fprintf(fp, ", %%ebx\n\tpushl %%ecx\n\tmovl ");
+        fprintf(fp, "\n\tpushl ");
         PrintPercentRegFromInstI386(fp, inst->operand[1], buf1, sizeof(buf1));
-        fprintf(fp, ", %%ecx\n");
-        fprintf(fp, "\t%s %%cl, %%ebx\n\tpopl %%ecx\n\tmovl %%ebx, ", op);
+        fprintf(fp, "\n\tpushl %%ecx\n\tpushl %%ebx\n");
+        fprintf(fp, "\tmovl 12(%%esp), %%ebx\n\tmovl 8(%%esp), %%ecx\n");
+        fprintf(fp, "\t%s %%cl, %%ebx\n", op);
+        fprintf(fp, "\tmovl %%ebx, 12(%%esp)\n\tpopl %%ebx\n\tpopl %%ecx\n"
+                    "\taddl $4, %%esp\n\tpopl ");
         if (inst->dest != NULL && inst->dest->reg != NULL) {
           PrintPercentRegI386(
               fp, X86RegisterName((X86Register*)inst->dest->reg, buf2,
@@ -6153,7 +6163,7 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
         } else {
           PrintPercentRegFromInstI386(fp, inst, buf2, sizeof(buf2));
         }
-        fprintf(fp, "\n\tpopl %%ebx\n");
+        fprintf(fp, "\n");
         break;
       }
       if ((X86Opcode)inst->opcode == X86_OP(roll) ||

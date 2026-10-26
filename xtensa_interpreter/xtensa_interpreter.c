@@ -555,6 +555,10 @@ bool XtensaInterpreterStep(XtensaInterpreter* interpreter) {
     case kXtensaMull:
       WriteRegister(interpreter, instruction.rd, lhs * rhs);
       break;
+    case kXtensaMuluh:
+      WriteRegister(interpreter, instruction.rd,
+                    (uint32_t)(((uint64_t)lhs * (uint64_t)rhs) >> 32));
+      break;
     case kXtensaQuou:
       WriteRegister(interpreter, instruction.rd,
                     rhs == 0 ? UINT32_MAX : lhs / rhs);
