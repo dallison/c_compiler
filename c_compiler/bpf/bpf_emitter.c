@@ -228,8 +228,35 @@ static int LocalOffset(BPFEmitter* emitter, int var_offset) {
   return -(emitter->bpf->base.stack_frame_size - var_offset);
 }
 
+static void PrintMemAddr(FILE* fp, int reg, int off);
+
+static int ImmFits32(int64_t v) {
+  return (int64_t)(int32_t)v == v;
+}
+
+// ALU and mov immediates are signed 32-bit.  A mask such as 0xffffffff is
+// assembled as -1, so `and64` keeps every bit and a uint32_t cast does
+// nothing.  Load the full value through a saved scratch register.
+static void PrintWideImm(BPFEmitter* emitter, FILE* fp, const char* name,
+                         int dst, int64_t v) {
+  int scratch = dst == 0 ? 1 : 0;
+  int off = -(emitter->bpf->base.stack_frame_size + emitter->spill_bytes + 8);
+  if (off < -32768 || off > 32767) {
+    fprintf(stderr,
+            "eBPF backend: wide immediate scratch offset %d does not fit\n",
+            off);
+  }
+  fprintf(fp, "\tstxdw ");
+  PrintMemAddr(fp, 10, off);
+  fprintf(fp, ", r%d\n", scratch);
+  fprintf(fp, "\tlddw r%d, %" PRId64 "\n", scratch, v);
+  fprintf(fp, "\t%s r%d, r%d\n", name, dst, scratch);
+  fprintf(fp, "\tldxdw r%d, ", scratch);
+  PrintMemAddr(fp, 10, off);
+  fprintf(fp, "\n");
+}
+
 static void PrintAlu(BPFEmitter* emitter, TargetInstruction* inst, FILE* fp) {
-  (void)emitter;
   int dst = DestReg(inst);
   TargetInstruction* src0 = inst->operand[0];
   TargetInstruction* src1 = inst->operand[1];
@@ -247,7 +274,7 @@ static void PrintAlu(BPFEmitter* emitter, TargetInstruction* inst, FILE* fp) {
         fprintf(fp, "\tlddw r%d, %s\n", dst, SymbolName(src0, buf, sizeof(buf)));
       } else {
         int64_t v = TargetIntValue(src0);
-        if ((int64_t)(int32_t)v == v) {
+        if (ImmFits32(v)) {
           fprintf(fp, "\t%s r%d, %" PRId64 "\n", name, dst, v);
         } else {
           fprintf(fp, "\tlddw r%d, %" PRId64 "\n", dst, v);
@@ -263,12 +290,22 @@ static void PrintAlu(BPFEmitter* emitter, TargetInstruction* inst, FILE* fp) {
   }
   int s0 = RegNum(src0);
   if (TargetIsConst(src0)) {
-    fprintf(fp, "\tmov64 r%d, %" PRId64 "\n", dst, TargetIntValue(src0));
+    int64_t v = TargetIntValue(src0);
+    if (ImmFits32(v)) {
+      fprintf(fp, "\tmov64 r%d, %" PRId64 "\n", dst, v);
+    } else {
+      fprintf(fp, "\tlddw r%d, %" PRId64 "\n", dst, v);
+    }
   } else if (s0 != dst) {
     fprintf(fp, "\tmov64 r%d, r%d\n", dst, s0);
   }
   if (TargetIsConst(src1)) {
-    fprintf(fp, "\t%s r%d, %" PRId64 "\n", name, dst, TargetIntValue(src1));
+    int64_t v = TargetIntValue(src1);
+    if (ImmFits32(v)) {
+      fprintf(fp, "\t%s r%d, %" PRId64 "\n", name, dst, v);
+    } else {
+      PrintWideImm(emitter, fp, name, dst, v);
+    }
   } else {
     fprintf(fp, "\t%s r%d, r%d\n", name, dst, RegNum(src1));
   }
@@ -468,7 +505,12 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
       int dst = DestReg(inst);
       TargetInstruction* src = inst->operand[0];
       if (src != NULL && TargetIsConst(src)) {
-        fprintf(fp, "\tmov64 r%d, %" PRId64 "\n", dst, TargetIntValue(src));
+        int64_t v = TargetIntValue(src);
+        if (ImmFits32(v)) {
+          fprintf(fp, "\tmov64 r%d, %" PRId64 "\n", dst, v);
+        } else {
+          fprintf(fp, "\tlddw r%d, %" PRId64 "\n", dst, v);
+        }
       } else if (src != NULL && RegNum(src) != dst) {
         fprintf(fp, "\tmov64 r%d, r%d\n", dst, RegNum(src));
       }

@@ -15,18 +15,3 @@ void free(void* pointer) { Free(pointer); }
 void* realloc(void* pointer, size_t size) { return Realloc(pointer, size); }
 
 void __davecc_tls_thread_fini(void) {}
-
-// Float parsing is not lowered.  Integer iostream does not call these.
-double strtod(const char* str, char** endptr) {
-  if (endptr != NULL) {
-    *endptr = (char*)str;
-  }
-  return 0;
-}
-
-long double strtold(const char* str, char** endptr) {
-  if (endptr != NULL) {
-    *endptr = (char*)str;
-  }
-  return 0;
-}
