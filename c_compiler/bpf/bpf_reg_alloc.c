@@ -370,8 +370,19 @@ static void SpillOwner(BPFRegisterAllocator* alloc, BPFRegister* reg,
     if (home != NULL && home != owner &&
         (before == NULL || home != before->dest)) {
       int slot = (owner->flags >> 16) & 0xffff;
+      // `one` is 1, then a later `mov 0` with the same dest spills only on
+      // the path that executes it.  Uses of `one` after the join reload that
+      // slot, so the skip path must have stored the original 1 first.
+      bool home_spilled = (home->flags & TARGET_INST_SPILLED) != 0;
       home->flags = (home->flags & 0xffff) | (slot << 16);
       home->flags |= TARGET_INST_SPILLED;
+      if (!home_spilled && slot != 0) {
+        TargetInstruction* at = TargetNext(home);
+        if (at == NULL) {
+          at = before;
+        }
+        EmitSpill(alloc, home, at);
+      }
     }
   }
   reg->base.owner = NULL;

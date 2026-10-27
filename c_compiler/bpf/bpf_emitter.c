@@ -2,7 +2,9 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "bpf_assembler.h"
 #include "common_emitter.h"
 #include "compiler.h"
@@ -13,6 +15,7 @@ void BPFEmitterInit(BPFEmitter* emitter, BPFGenerator* bpf) {
   emitter->regs = &bpf->register_allocator;
   emitter->saved_reg_bytes = BPF_NUM_SAVED_REGS * 8;
   emitter->spill_bytes = bpf->register_allocator.max_spill_size;
+  emitter->wide_seq = 0;
 }
 
 void BPFEmitterDestruct(BPFEmitter* emitter) { (void)emitter; }
@@ -234,26 +237,62 @@ static int ImmFits32(int64_t v) {
   return (int64_t)(int32_t)v == v;
 }
 
-// ALU and mov immediates are signed 32-bit.  A mask such as 0xffffffff is
-// assembled as -1, so `and64` keeps every bit and a uint32_t cast does
-// nothing.  Load the full value through a saved scratch register.
-static void PrintWideImm(BPFEmitter* emitter, FILE* fp, const char* name,
-                         int dst, int64_t v) {
-  int scratch = dst == 0 ? 1 : 0;
+static int ScratchSlot(BPFEmitter* emitter) {
   int off = -(emitter->bpf->base.stack_frame_size + emitter->spill_bytes + 8);
   if (off < -32768 || off > 32767) {
     fprintf(stderr,
             "eBPF backend: wide immediate scratch offset %d does not fit\n",
             off);
   }
+  return off;
+}
+
+static void SaveScratch(FILE* fp, int scratch, int off) {
   fprintf(fp, "\tstxdw ");
   PrintMemAddr(fp, 10, off);
   fprintf(fp, ", r%d\n", scratch);
-  fprintf(fp, "\tlddw r%d, %" PRId64 "\n", scratch, v);
-  fprintf(fp, "\t%s r%d, r%d\n", name, dst, scratch);
+}
+
+static void RestoreScratch(FILE* fp, int scratch, int off) {
   fprintf(fp, "\tldxdw r%d, ", scratch);
   PrintMemAddr(fp, 10, off);
   fprintf(fp, "\n");
+}
+
+// ALU and mov immediates are signed 32-bit.  A mask such as 0xffffffff is
+// assembled as -1, so `and64` keeps every bit and a uint32_t cast does
+// nothing.  Load the full value through a saved scratch register.
+static void PrintWideImm(BPFEmitter* emitter, FILE* fp, const char* name,
+                         int dst, int64_t v) {
+  int scratch = dst == 0 ? 1 : 0;
+  int off = ScratchSlot(emitter);
+  SaveScratch(fp, scratch, off);
+  fprintf(fp, "\tlddw r%d, %" PRId64 "\n", scratch, v);
+  fprintf(fp, "\t%s r%d, r%d\n", name, dst, scratch);
+  RestoreScratch(fp, scratch, off);
+}
+
+// A conditional branch falls through, so the scratch has to be restored on
+// the taken path as well as the fallthrough path.
+static void PrintWideBranch(BPFEmitter* emitter, FILE* fp, const char* func_name,
+                            BPFOpcode op, int lhs, int64_t imm,
+                            const char* target) {
+  int scratch = lhs == 0 ? 1 : 0;
+  int off = ScratchSlot(emitter);
+  int id = emitter->wide_seq++;
+  char taken[128];
+  char fall[128];
+  snprintf(taken, sizeof(taken), ".L%s_wi%d_t", func_name, id);
+  snprintf(fall, sizeof(fall), ".L%s_wi%d_f", func_name, id);
+  SaveScratch(fp, scratch, off);
+  fprintf(fp, "\tlddw r%d, %" PRId64 "\n", scratch, imm);
+  fprintf(fp, "\t%s r%d, r%d, %s\n", JccName(op), lhs, scratch, taken);
+  RestoreScratch(fp, scratch, off);
+  fprintf(fp, "\tja %s\n", fall);
+  fprintf(fp, "%s:\n", taken);
+  RestoreScratch(fp, scratch, off);
+  fprintf(fp, "\tja %s\n", target);
+  fprintf(fp, "%s:\n", fall);
 }
 
 static void PrintAlu(BPFEmitter* emitter, TargetInstruction* inst, FILE* fp) {
@@ -562,9 +601,16 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
       TargetInstruction* lab = inst->operand[2] != NULL ? inst->operand[2]
                                                         : inst->operand[1];
       if (rhs != NULL && TargetIsConst(rhs) && inst->operand[2] != NULL) {
-        fprintf(fp, "\t%s r%d, %" PRId64 ", %s\n", JccName(op),
-                RegNum(inst->operand[0]), TargetIntValue(rhs),
-                LabelName(func_name, lab, buf, sizeof(buf)));
+        int64_t imm = TargetIntValue(rhs);
+        char target[128];
+        LabelName(func_name, lab, target, sizeof(target));
+        if (ImmFits32(imm)) {
+          fprintf(fp, "\t%s r%d, %" PRId64 ", %s\n", JccName(op),
+                  RegNum(inst->operand[0]), imm, target);
+        } else {
+          PrintWideBranch(emitter, fp, func_name, op, RegNum(inst->operand[0]),
+                          imm, target);
+        }
       } else if (rhs != NULL && inst->operand[2] != NULL) {
         fprintf(fp, "\t%s r%d, r%d, %s\n", JccName(op), RegNum(inst->operand[0]),
                 RegNum(rhs), LabelName(func_name, lab, buf, sizeof(buf)));

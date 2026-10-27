@@ -9,6 +9,7 @@ typedef struct {
   BPFRegisterAllocator* regs;
   int saved_reg_bytes;
   int spill_bytes;
+  int wide_seq;
 } BPFEmitter;
 
 void BPFEmitterInit(BPFEmitter* emitter, BPFGenerator* bpf);
