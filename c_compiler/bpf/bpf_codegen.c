@@ -393,6 +393,8 @@ static TargetVirtuals virtuals = {
 void BPFGeneratorInit(BPFGenerator* bpf, Generator* gen) {
   TargetGeneratorInit(&bpf->base, gen, &virtuals);
   bpf->num_int_arg_regs = 0;
+  bpf->named_stack_args = 0;
+  bpf->dynamic_sp_offset = -1;
   bpf->struct_return_reg = -1;
   bpf->vararg_save_offset = -1;
   bpf->outgoing_offset = 0;
@@ -1264,23 +1266,19 @@ static TargetInstruction* LowerCall(BPFGenerator* bpf, IRNode* node) {
     move->dest = dest;
   }
   // r1–r5 are full.  Park the rest in the outgoing area and pass its address
-  // in r0.  The callee copies them out before using r0.
+  // in r0.  The callee copies them out before using r0.  The area is sized
+  // to the widest call in this function.
   if (nargs > BPF_NUM_ARG_REGS) {
-    // LowerVariables reserves 16 slots.  Past that the stores land on the
-    // saved registers.
-    if (nargs > BPF_NUM_ARG_REGS + 16) {
-      fprintf(stderr,
-              "eBPF backend: call has %zu arguments; only %d stack slots are "
-              "reserved\n",
-              nargs, 16);
-    }
     int base_off = LocalOffset(bpf, bpf->outgoing_offset);
-    size_t nstack = nargs;
-    if (nstack > BPF_NUM_ARG_REGS + 16) {
-      nstack = BPF_NUM_ARG_REGS + 16;
-    }
-    for (size_t i = BPF_NUM_ARG_REGS; i < nstack; i++) {
+    for (size_t i = BPF_NUM_ARG_REGS; i < nargs; i++) {
       int off = base_off + (int)(i - BPF_NUM_ARG_REGS) * 8;
+      if (off < -32768 || off > 32767) {
+        fprintf(stderr,
+                "eBPF backend: stack argument %zu offset %d does not fit in "
+                "imm16\n",
+                i, off);
+        break;
+      }
       Emit(bpf, NewInstruction3(BPF_OP(stxdw), FramePointer(bpf),
                                 GetIntConstant(bpf, NULL, kTargetType32Bit, off),
                                 args[i]));
@@ -1477,8 +1475,8 @@ static TargetInstruction* LowerMemzero(BPFGenerator* bpf, IRNode* node) {
   return dest;
 }
 
-// The saved r0 sits in the slot just past r1–r5.  It points at the caller's
-// outgoing area, which holds arguments that did not fit in registers.
+// The saved r0 sits in the slot just past r1–r5.  It points at the first
+// unnamed stack argument.
 static int VarargStackPtrOffset(BPFGenerator* bpf) {
   int slot = bpf->vararg_save_offset;
   if (slot < 0) {
@@ -1487,9 +1485,12 @@ static int VarargStackPtrOffset(BPFGenerator* bpf) {
   return slot + BPF_NUM_ARG_REGS * 8;
 }
 
-// va_list is a pointer to the next 8-byte argument slot.  Named parameters
-// consume the first register slots.  Once those are exhausted, va_arg follows
-// the pointer the caller passed in r0.
+// va_list is one pointer.  While unnamed register arguments remain, its low
+// three bits are how many of those slots are left (the address itself is
+// 8-aligned).  The last of them is r5, and the word after r5 is the caller's
+// stack-argument pointer.  A pointer with a zero tag is already on that
+// stack.  The tag travels with the pointer, so va_arg still works after the
+// list is passed to another function.
 static TargetInstruction* LowerVaStart(BPFGenerator* bpf, IRNode* node) {
   TargetInstruction* base;
   TargetInstruction* offset;
@@ -1510,6 +1511,10 @@ static TargetInstruction* LowerVaStart(BPFGenerator* bpf, IRNode* node) {
                        BPF_OP(add), FramePointer(bpf),
                        GetIntConstant(bpf, NULL, kTargetType32Bit,
                                       LocalOffset(bpf, slot))));
+    int remain = BPF_NUM_ARG_REGS - bpf->num_int_arg_regs;
+    ap = Emit(bpf, NewInstruction2(
+                       BPF_OP(or), ap,
+                       GetIntConstant(bpf, NULL, kTargetType32Bit, remain)));
   }
   Emit(bpf, NewInstruction3(BPF_OP(stxdw), base, offset, ap));
   return SetLoweredNode(node, ap);
@@ -1519,7 +1524,14 @@ static TargetInstruction* LowerVaArg(BPFGenerator* bpf, IRNode* node) {
   TargetInstruction* base;
   TargetInstruction* offset;
   GetBaseAndOffset(bpf, node->inputs.value.p[0], &base, &offset);
-  TargetInstruction* cursor = Emit(bpf, NewInstruction2(BPF_OP(ldxdw), base, offset));
+  TargetInstruction* raw = Emit(bpf, NewInstruction2(BPF_OP(ldxdw), base, offset));
+  TargetInstruction* tag =
+      Emit(bpf, NewInstruction2(BPF_OP(and), raw,
+                                GetIntConstant(bpf, NULL, kTargetType32Bit, 7)));
+  // ~7 in a sign-extended immediate is -8, which clears the tag.
+  TargetInstruction* ptr =
+      Emit(bpf, NewInstruction2(BPF_OP(and), raw,
+                                GetIntConstant(bpf, NULL, kTargetType32Bit, -8)));
   int size = node->type != NULL && node->type->size > 0 ? (int)node->type->size : 8;
   BPFOpcode load = BPF_OP(ldxdw);
   if (size <= 1) {
@@ -1530,31 +1542,39 @@ static TargetInstruction* LowerVaArg(BPFGenerator* bpf, IRNode* node) {
     load = BPF_OP(ldxw);
   }
   TargetInstruction* value =
-      Emit(bpf, NewInstruction2(load, cursor,
+      Emit(bpf, NewInstruction2(load, ptr,
                                 GetIntConstant(bpf, NULL, kTargetType32Bit, 0)));
   if (node->type != NULL && !TypeIsUnsigned(node->type) && size < 8 && size != 3) {
     value = SignExtend(bpf, value, size * 8);
   }
-  TargetInstruction* next =
-      Emit(bpf, NewInstruction2(BPF_OP(add), cursor,
-                                GetIntConstant(bpf, NULL, kTargetType32Bit, 8)));
-  int stack_ptr = LocalOffset(bpf, VarargStackPtrOffset(bpf));
-  TargetInstruction* limit =
-      Emit(bpf, NewInstruction2(
-                    BPF_OP(add), FramePointer(bpf),
-                    GetIntConstant(bpf, NULL, kTargetType32Bit, stack_ptr)));
-  TargetInstruction* still_reg =
-      Emit(bpf, NewInstruction3(BPF_OP(jne), next, limit, NULL));
-  // The next slot is past r5.  Continue at the caller's stack-argument array.
-  // This writes the same register as `next`, so the store below reads it on
-  // both paths.
-  TargetInstruction* stack =
-      Emit(bpf, NewInstruction2(
-                    BPF_OP(ldxdw), FramePointer(bpf),
-                    GetIntConstant(bpf, NULL, kTargetType32Bit, stack_ptr)));
-  stack->dest = next;
-  TargetInstruction* keep = Emit(bpf, NewInstruction(BPF_OP(label)));
-  still_reg->operand[2] = keep;
+  TargetInstruction* eight = GetIntConstant(bpf, NULL, kTargetType32Bit, 8);
+  TargetInstruction* next_slot =
+      Emit(bpf, NewInstruction2(BPF_OP(add), ptr, eight));
+  // Tag 0: already walking the caller's stack, so the next slot is adjacent.
+  TargetInstruction* next = Emit(bpf, NewInstruction1(BPF_OP(mov), next_slot));
+  TargetInstruction* on_stack =
+      Emit(bpf, NewInstruction3(BPF_OP(jeq), tag,
+                                GetIntConstant(bpf, NULL, kTargetType32Bit, 0),
+                                NULL));
+  // Tag 1: this slot is r5.  The word after it is the stack-argument pointer.
+  // A larger tag steps to the next register slot and decrements.
+  // Both stores write `next`, so the update below reads one register.
+  TargetInstruction* from_stack =
+      Emit(bpf, NewInstruction2(BPF_OP(ldxdw), ptr, eight));
+  from_stack->dest = next;
+  TargetInstruction* was_last =
+      Emit(bpf, NewInstruction3(BPF_OP(jeq), tag,
+                                GetIntConstant(bpf, NULL, kTargetType32Bit, 1),
+                                NULL));
+  TargetInstruction* tag_m1 =
+      Emit(bpf, NewInstruction2(BPF_OP(sub), tag,
+                                GetIntConstant(bpf, NULL, kTargetType32Bit, 1)));
+  TargetInstruction* stepped =
+      Emit(bpf, NewInstruction2(BPF_OP(or), next_slot, tag_m1));
+  stepped->dest = next;
+  TargetInstruction* done = Emit(bpf, NewInstruction(BPF_OP(label)));
+  on_stack->operand[2] = done;
+  was_last->operand[2] = done;
   Emit(bpf, NewInstruction3(BPF_OP(stxdw), base, offset, next));
   return FinishWithDest(bpf, node, value);
 }
@@ -1570,6 +1590,160 @@ static TargetInstruction* LowerVaCopy(BPFGenerator* bpf, IRNode* node) {
       Emit(bpf, NewInstruction2(BPF_OP(ldxdw), src_base, src_offset));
   return SetLoweredNode(
       node, Emit(bpf, NewInstruction3(BPF_OP(stxdw), dst_base, dst_offset, value)));
+}
+
+static int BitfieldConst(IRNode* node) {
+  if (node != NULL && IRIsConst(node)) {
+    return (int)((IRConstant*)node)->value.ivalue;
+  }
+  return 0;
+}
+
+static int BitfieldWidth(IRNode* word) {
+  if (word != NULL && word->type != NULL) {
+    TypeRecordCalculateSize(word->type);
+    int width = word->type->size * 8;
+    if (width > 0 && width <= 64) {
+      return width;
+    }
+  }
+  return 32;
+}
+
+static TargetInstruction* MaskTo(BPFGenerator* bpf, TargetInstruction* value,
+                                 int bits) {
+  if (bits >= 64) {
+    return value;
+  }
+  uint64_t mask = ((uint64_t)1 << bits) - 1;
+  return Emit(bpf, NewInstruction2(
+                       BPF_OP(and), value,
+                       GetIntConstant(bpf, NULL, kTargetType64Bit, (int64_t)mask)));
+}
+
+// getbit(word, offset, size) extracts a field.  BPF has no insert/extract
+// instruction, so this is a shift and a mask.  A signed field is sign-extended
+// to its result type; the high bits stay clear so a later widen can extend
+// them again.
+static TargetInstruction* LowerGetBit(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* word = Materialize(bpf, node->inputs.value.p[0]);
+  int offset = BitfieldConst(node->inputs.value.p[1]);
+  int size = BitfieldConst(node->inputs.value.p[2]);
+  int width = BitfieldWidth(node->inputs.value.p[0]);
+  if (size <= 0) {
+    size = 1;
+  }
+  word = MaskTo(bpf, word, width);
+  if (offset > 0) {
+    word = Emit(bpf, NewInstruction2(
+                         BPF_OP(rsh), word,
+                         GetIntConstant(bpf, NULL, kTargetType32Bit, offset)));
+  }
+  word = MaskTo(bpf, word, size);
+  if (node->type != NULL && !TypeIsUnsigned(node->type) && size < 64) {
+    word = SignExtend(bpf, word, size);
+    int result_bits = node->type->size > 0 ? node->type->size * 8 : 32;
+    word = MaskTo(bpf, word, result_bits);
+  }
+  return FinishWithDest(bpf, node, word);
+}
+
+// setbit(word, value, offset, size) replaces the field and leaves the other
+// bits of the storage word alone.
+static TargetInstruction* LowerSetBit(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* word = Materialize(bpf, node->inputs.value.p[0]);
+  TargetInstruction* value = Materialize(bpf, node->inputs.value.p[1]);
+  int offset = BitfieldConst(node->inputs.value.p[2]);
+  int size = BitfieldConst(node->inputs.value.p[3]);
+  int width = BitfieldWidth(node->inputs.value.p[0]);
+  if (size <= 0) {
+    size = 1;
+  }
+  uint64_t field_mask = (((uint64_t)1 << size) - 1) << offset;
+  if (offset > 0) {
+    value = Emit(bpf, NewInstruction2(
+                          BPF_OP(lsh), value,
+                          GetIntConstant(bpf, NULL, kTargetType32Bit, offset)));
+  }
+  value = Emit(bpf, NewInstruction2(
+                        BPF_OP(and), value,
+                        GetIntConstant(bpf, NULL, kTargetType64Bit,
+                                       (int64_t)field_mask)));
+  TargetInstruction* rest = Emit(
+      bpf, NewInstruction2(BPF_OP(and), word,
+                           GetIntConstant(bpf, NULL, kTargetType64Bit,
+                                          (int64_t)~field_mask)));
+  TargetInstruction* merged =
+      Emit(bpf, NewInstruction2(BPF_OP(or), rest, value));
+  return FinishWithDest(bpf, node, MaskTo(bpf, merged, width));
+}
+
+static bool FunctionUsesDynamicStack(Generator* gen) {
+  for (IRNode* node = (IRNode*)gen->code.first; node != NULL;
+       node = IRNext(node)) {
+    if (node->opcode == IR_OP(decsp) || node->opcode == IR_OP(savesp) ||
+        node->opcode == IR_OP(restoresp)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static int DynamicSPSlot(BPFGenerator* bpf) {
+  return LocalOffset(bpf, bpf->dynamic_sp_offset);
+}
+
+static TargetInstruction* LoadDynamicSP(BPFGenerator* bpf) {
+  return Emit(bpf, NewInstruction2(
+                       BPF_OP(ldxdw), FramePointer(bpf),
+                       GetIntConstant(bpf, NULL, kTargetType32Bit,
+                                      DynamicSPSlot(bpf))));
+}
+
+static void StoreDynamicSP(BPFGenerator* bpf, TargetInstruction* value) {
+  Emit(bpf, NewInstruction3(
+                BPF_OP(stxdw), FramePointer(bpf),
+                GetIntConstant(bpf, NULL, kTargetType32Bit, DynamicSPSlot(bpf)),
+                value));
+}
+
+static TargetInstruction* LowerDecSP(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* sp = LoadDynamicSP(bpf);
+  TargetInstruction* size = Materialize(bpf, node->inputs.value.p[0]);
+  TargetInstruction* next =
+      Emit(bpf, NewInstruction2(BPF_OP(sub), sp, size));
+  StoreDynamicSP(bpf, next);
+  return SetLoweredNode(node, next);
+}
+
+static TargetInstruction* LowerSaveSP(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* dest = Materialize(bpf, node->inputs.value.p[0]);
+  TargetInstruction* saved = Emit(bpf, NewInstruction1(BPF_OP(mov), LoadDynamicSP(bpf)));
+  saved->dest = dest;
+  return SetLoweredNode(node, saved);
+}
+
+static TargetInstruction* LowerRestoreSP(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* value = Materialize(bpf, node->inputs.value.p[0]);
+  StoreDynamicSP(bpf, value);
+  return SetLoweredNode(node, value);
+}
+
+// Arguments past r5 are stored in the caller's frame.  Reserve one slot per
+// extra argument of the widest call, instead of a fixed 16 that dropped the rest.
+static int WidestStackArgCount(Generator* gen) {
+  int max_stack = 0;
+  for (IRNode* node = (IRNode*)gen->code.first; node != NULL; node = IRNext(node)) {
+    if (!IRIsCall(node)) {
+      continue;
+    }
+    int nargs = node->inputs.length > 0 ? (int)node->inputs.length - 1 : 0;
+    int stack = nargs - BPF_NUM_ARG_REGS;
+    if (stack > max_stack) {
+      max_stack = stack;
+    }
+  }
+  return max_stack;
 }
 
 static void LowerVariables(BPFGenerator* bpf, Generator* gen) {
@@ -1685,6 +1859,7 @@ static void LowerVariables(BPFGenerator* bpf, Generator* gen) {
     }
     VectorAppend(&bpf->saved_args, saved);
   }
+  bpf->named_stack_args = stack_index;
   // Named parameters occupy the first slots.  One extra slot holds the
   // caller's pointer to arguments past r5, so va_arg can continue there.
   if (bpf->base.varargs) {
@@ -1692,11 +1867,17 @@ static void LowerVariables(BPFGenerator* bpf, Generator* gen) {
     bpf->vararg_save_offset = var_offset;
     var_offset += (BPF_NUM_ARG_REGS + 1) * 8;
   }
-  // Room for arguments past r5.  Sixteen slots covers the calls libc makes;
-  // each is one register-width value or an aggregate pointer.
+  // Room for arguments past r5.  Each is one register-width value or an
+  // aggregate pointer.  Calls created while lowering (soft-float helpers)
+  // take at most two register arguments and do not need a slot here.
   var_offset = (var_offset + 7) & ~7;
   bpf->outgoing_offset = var_offset;
-  var_offset += 16 * 8;
+  var_offset += WidestStackArgCount(gen) * 8;
+  if (FunctionUsesDynamicStack(gen)) {
+    var_offset = (var_offset + 7) & ~7;
+    bpf->dynamic_sp_offset = var_offset;
+    var_offset += 8;
+  }
   bpf->base.stack_frame_size =
       ((var_offset + 7) & ~7) + BPF_NUM_SAVED_REGS * 8;
 }
@@ -1872,8 +2053,9 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
       return LowerFloatIncDec(bpf, node, false);
 
     case IR_OP(getbit):
+      return LowerGetBit(bpf, node);
     case IR_OP(setbit):
-      return Emit(bpf, NewInstruction(BPF_OP(nop)));
+      return LowerSetBit(bpf, node);
 
     case IR_OP(addi):
     case IR_OP(adda):
@@ -2031,10 +2213,13 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
     case IR_OP(atomic_compare_exchange_n):
       return LowerAtomicCompareExchange(bpf, node);
     case IR_OP(atomic_fence):
-    case IR_OP(decsp):
-    case IR_OP(savesp):
-    case IR_OP(restoresp):
       return Emit(bpf, NewInstruction(BPF_OP(nop)));
+    case IR_OP(decsp):
+      return LowerDecSP(bpf, node);
+    case IR_OP(savesp):
+      return LowerSaveSP(bpf, node);
+    case IR_OP(restoresp):
+      return LowerRestoreSP(bpf, node);
     case IR_OP(builtin_va_start):
       return LowerVaStart(bpf, node);
     case IR_OP(builtin_va_arg):

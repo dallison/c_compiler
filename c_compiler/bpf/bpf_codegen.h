@@ -112,6 +112,12 @@ typedef struct {
 typedef struct BPFGenerator {
   TargetGenerator base;
   int num_int_arg_regs;
+  // Named parameters that did not fit in r1–r5.  The saved stack pointer
+  // skips them so the first variadic slot is the first unnamed argument.
+  int named_stack_args;
+  // Frame offset of the dynamic stack pointer, or -1.  VLAs and alloca grow
+  // down from below the fixed frame; r10 itself stays put.
+  int dynamic_sp_offset;
   int struct_return_reg;
   // Byte offset of the r1–r5 save area in a variadic function, or -1.
   int vararg_save_offset;

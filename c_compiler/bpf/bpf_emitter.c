@@ -280,8 +280,8 @@ static void PrintWideBranch(BPFEmitter* emitter, FILE* fp, const char* func_name
   int scratch = lhs == 0 ? 1 : 0;
   int off = ScratchSlot(emitter);
   int id = emitter->wide_seq++;
-  char taken[128];
-  char fall[128];
+  char taken[4096];
+  char fall[4096];
   snprintf(taken, sizeof(taken), ".L%s_wi%d_t", func_name, id);
   snprintf(fall, sizeof(fall), ".L%s_wi%d_f", func_name, id);
   SaveScratch(fp, scratch, off);
@@ -422,7 +422,7 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
     return;
   }
   BPFOpcode op = (BPFOpcode)inst->opcode;
-  char buf[256];
+  char buf[4096];
   switch (op) {
     case BPF_OP(save): {
       int off = 0;
@@ -447,7 +447,16 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
       if (emitter->bpf->vararg_save_offset >= 0) {
         int sp = LocalOffset(emitter, emitter->bpf->vararg_save_offset +
                                           BPF_NUM_ARG_REGS * 8);
-        fprintf(fp, "\tstxdw [r10%d], r9\n", sp);
+        int skip = emitter->bpf->named_stack_args * 8;
+        if (skip > 0) {
+          // r6 was saved above.  Keep r9 pointing at the first stack slot
+          // so the named-parameter copies below still use stack_index.
+          fprintf(fp, "\tmov64 r6, r9\n");
+          fprintf(fp, "\tadd64 r6, %d\n", skip);
+          fprintf(fp, "\tstxdw [r10%d], r6\n", sp);
+        } else {
+          fprintf(fp, "\tstxdw [r10%d], r9\n", sp);
+        }
       }
       for (size_t i = 0; i < emitter->bpf->saved_args.length; i++) {
         BPFSavedArgument* a = emitter->bpf->saved_args.value.p[i];
@@ -475,6 +484,15 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
         fprintf(fp, "\t%s ", MemWidthName(a->size <= 0 ? 8 : a->size, true));
         PrintMemAddr(fp, BPF_REG_10, loff);
         fprintf(fp, ", r%d\n", a->reg_num);
+      }
+      if (emitter->bpf->dynamic_sp_offset >= 0) {
+        // Below the fixed frame and the spill/scratch word.  r10 is not
+        // moved; calls give the callee its own frame and restore this one.
+        int slot = LocalOffset(emitter, emitter->bpf->dynamic_sp_offset);
+        int gap = emitter->bpf->base.stack_frame_size + emitter->spill_bytes + 16;
+        fprintf(fp, "\tmov64 r6, r10\n");
+        fprintf(fp, "\tsub64 r6, %d\n", gap);
+        fprintf(fp, "\tstxdw [r10%d], r6\n", slot);
       }
       if (emitter->bpf->vararg_save_offset >= 0) {
         for (int i = 0; i < BPF_NUM_ARG_REGS; i++) {
@@ -602,7 +620,7 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
                                                         : inst->operand[1];
       if (rhs != NULL && TargetIsConst(rhs) && inst->operand[2] != NULL) {
         int64_t imm = TargetIntValue(rhs);
-        char target[128];
+        char target[4096];
         LabelName(func_name, lab, target, sizeof(target));
         if (ImmFits32(imm)) {
           fprintf(fp, "\t%s r%d, %" PRId64 ", %s\n", JccName(op),
