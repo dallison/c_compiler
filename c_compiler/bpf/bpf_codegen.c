@@ -1879,7 +1879,7 @@ static void LowerVariables(BPFGenerator* bpf, Generator* gen) {
     var_offset += 8;
   }
   bpf->base.stack_frame_size =
-      ((var_offset + 7) & ~7) + BPF_NUM_SAVED_REGS * 8;
+      ((var_offset + 7) & ~7) + BPF_WIDE_MEM_BYTES + BPF_NUM_SAVED_REGS * 8;
 }
 
 static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,

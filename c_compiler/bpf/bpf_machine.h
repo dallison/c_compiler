@@ -32,6 +32,11 @@
 #define BPF_FIRST_SAVED_REG BPF_REG_6
 #define BPF_LAST_SAVED_REG BPF_REG_9
 #define BPF_NUM_SAVED_REGS 4
+// One word between the callee-saved registers (r10-8 .. r10-32) and the
+// locals.  A memory offset that does not fit in imm16 is added in a register
+// parked here, which itself is always imm16-addressable.
+#define BPF_WIDE_MEM_SLOT (-(BPF_NUM_SAVED_REGS * 8 + 8))
+#define BPF_WIDE_MEM_BYTES 8
 
 #define BPF_CLASS(code) ((code) & 0x07)
 #define BPF_LD 0x00

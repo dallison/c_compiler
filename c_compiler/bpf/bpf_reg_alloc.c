@@ -201,10 +201,6 @@ static BPFRegister* ObtainReg(BPFRegisterAllocator* alloc,
 static void EmitSpill(BPFRegisterAllocator* alloc, TargetInstruction* value,
                       TargetInstruction* before) {
   int off = SpillByteOffset(alloc, EnsureSpillSlot(alloc, value));
-  if (off < -32768 || off > 32767) {
-    fprintf(stderr, "eBPF backend: spill offset %d does not fit in imm16\n",
-            off);
-  }
   TargetGenerator* gen = &alloc->bpf->base;
   TargetInstruction* spill = TargetNewInstruction3(
       (TargetOpcode)BPF_OP(spill), TargetFramePointer(gen),

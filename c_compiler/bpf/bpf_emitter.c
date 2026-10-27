@@ -231,32 +231,84 @@ static int LocalOffset(BPFEmitter* emitter, int var_offset) {
   return -(emitter->bpf->base.stack_frame_size - var_offset);
 }
 
-static void PrintMemAddr(FILE* fp, int reg, int off);
-
 static int ImmFits32(int64_t v) {
   return (int64_t)(int32_t)v == v;
 }
 
 static int ScratchSlot(BPFEmitter* emitter) {
-  int off = -(emitter->bpf->base.stack_frame_size + emitter->spill_bytes + 8);
-  if (off < -32768 || off > 32767) {
-    fprintf(stderr,
-            "eBPF backend: wide immediate scratch offset %d does not fit\n",
-            off);
+  return -(emitter->bpf->base.stack_frame_size + emitter->spill_bytes + 8);
+}
+
+// BPF memory offsets are signed 16-bit.  A larger displacement is added to a
+// copy of the base in a callee-saved register.  That register's current value
+// is parked in BPF_WIDE_MEM_SLOT, which the frame reserves for this.
+typedef struct {
+  int base;
+  int scratch;
+} MemAddr;
+
+static MemAddr BeginMem(FILE* fp, int base, int off, int avoid0, int avoid1) {
+  MemAddr m;
+  m.base = base;
+  m.scratch = -1;
+  if (off >= -32768 && off <= 32767) {
+    return m;
   }
-  return off;
+  int scratch = BPF_REG_6;
+  for (int r = BPF_FIRST_SAVED_REG; r <= BPF_LAST_SAVED_REG; r++) {
+    if (r != avoid0 && r != avoid1) {
+      scratch = r;
+      break;
+    }
+  }
+  fprintf(fp, "\tstxdw [r10%d], r%d\n", BPF_WIDE_MEM_SLOT, scratch);
+  if (scratch != base) {
+    fprintf(fp, "\tmov64 r%d, r%d\n", scratch, base);
+  }
+  fprintf(fp, "\tadd64 r%d, %d\n", scratch, off);
+  m.base = scratch;
+  m.scratch = scratch;
+  return m;
+}
+
+static void EndMem(FILE* fp, MemAddr m) {
+  if (m.scratch >= 0) {
+    fprintf(fp, "\tldxdw r%d, [r10%d]\n", m.scratch, BPF_WIDE_MEM_SLOT);
+  }
+}
+
+static void PrintBracket(FILE* fp, int base, int off) {
+  if (off == 0) {
+    fprintf(fp, "[r%d]", base);
+  } else if (off < 0) {
+    fprintf(fp, "[r%d%d]", base, off);
+  } else {
+    fprintf(fp, "[r%d+%d]", base, off);
+  }
+}
+
+static void PrintLoad(FILE* fp, const char* op, int dst, int base, int off) {
+  MemAddr m = BeginMem(fp, base, off, dst, -1);
+  fprintf(fp, "\t%s r%d, ", op, dst);
+  PrintBracket(fp, m.base, m.scratch < 0 ? off : 0);
+  fprintf(fp, "\n");
+  EndMem(fp, m);
+}
+
+static void PrintStore(FILE* fp, const char* op, int base, int off, int src) {
+  MemAddr m = BeginMem(fp, base, off, src, -1);
+  fprintf(fp, "\t%s ", op);
+  PrintBracket(fp, m.base, m.scratch < 0 ? off : 0);
+  fprintf(fp, ", r%d\n", src);
+  EndMem(fp, m);
 }
 
 static void SaveScratch(FILE* fp, int scratch, int off) {
-  fprintf(fp, "\tstxdw ");
-  PrintMemAddr(fp, 10, off);
-  fprintf(fp, ", r%d\n", scratch);
+  PrintStore(fp, "stxdw", 10, off, scratch);
 }
 
 static void RestoreScratch(FILE* fp, int scratch, int off) {
-  fprintf(fp, "\tldxdw r%d, ", scratch);
-  PrintMemAddr(fp, 10, off);
-  fprintf(fp, "\n");
+  PrintLoad(fp, "ldxdw", scratch, 10, off);
 }
 
 // ALU and mov immediates are signed 32-bit.  A mask such as 0xffffffff is
@@ -363,16 +415,6 @@ static const char* MemWidthName(int width, bool store) {
   }
 }
 
-static void PrintMemAddr(FILE* fp, int reg, int off) {
-  if (off < 0) {
-    fprintf(fp, "[r%d%d]", reg, off);
-  } else if (off > 0) {
-    fprintf(fp, "[r%d+%d]", reg, off);
-  } else {
-    fprintf(fp, "[r%d]", reg);
-  }
-}
-
 // Largest access that stays inside the object and matches its alignment.
 static int AggregateCopyWidth(int offset, int remain, int align) {
   int width = 8;
@@ -393,26 +435,10 @@ static void PrintAggregateArgCopy(int src_reg, int dest_off, int bytes,
   int copied = 0;
   while (copied < bytes) {
     int width = AggregateCopyWidth(copied, bytes - copied, align);
-    fprintf(fp, "\t%s r0, ", MemWidthName(width, false));
-    PrintMemAddr(fp, src_reg, copied);
-    fprintf(fp, "\n\t%s ", MemWidthName(width, true));
-    PrintMemAddr(fp, BPF_REG_10, dest_off + copied);
-    fprintf(fp, ", r0\n");
+    PrintLoad(fp, MemWidthName(width, false), BPF_REG_0, src_reg, copied);
+    PrintStore(fp, MemWidthName(width, true), BPF_REG_10, dest_off + copied,
+               BPF_REG_0);
     copied += width;
-  }
-}
-
-static void PrintMemOff(int base, TargetInstruction* off, FILE* fp) {
-  int64_t o = 0;
-  if (off != NULL && TargetIsConst(off)) {
-    o = TargetIntValue(off);
-  }
-  if (o == 0) {
-    fprintf(fp, "[r%d]", base);
-  } else if (o < 0) {
-    fprintf(fp, "[r%d%" PRId64 "]", base, o);
-  } else {
-    fprintf(fp, "[r%d+%" PRId64 "]", base, o);
   }
 }
 
@@ -453,9 +479,9 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
           // so the named-parameter copies below still use stack_index.
           fprintf(fp, "\tmov64 r6, r9\n");
           fprintf(fp, "\tadd64 r6, %d\n", skip);
-          fprintf(fp, "\tstxdw [r10%d], r6\n", sp);
+          PrintStore(fp, "stxdw", BPF_REG_10, sp, BPF_REG_6);
         } else {
-          fprintf(fp, "\tstxdw [r10%d], r9\n", sp);
+          PrintStore(fp, "stxdw", BPF_REG_10, sp, BPF_REG_9);
         }
       }
       for (size_t i = 0; i < emitter->bpf->saved_args.length; i++) {
@@ -463,17 +489,14 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
         int loff = LocalOffset(emitter, a->offset);
         if (a->stack_index >= 0) {
           int src = BPF_REG_6;
-          fprintf(fp, "\t%s r%d, ", a->copy_bytes > 0 ? "ldxdw" : MemWidthName(a->size, false),
-                  src);
-          PrintMemAddr(fp, BPF_REG_9, a->stack_index * 8);
-          fprintf(fp, "\n");
+          const char* load =
+              a->copy_bytes > 0 ? "ldxdw" : MemWidthName(a->size, false);
+          PrintLoad(fp, load, src, BPF_REG_9, a->stack_index * 8);
           if (a->copy_bytes > 0) {
             PrintAggregateArgCopy(src, loff, a->copy_bytes, a->copy_align, fp);
             continue;
           }
-          fprintf(fp, "\t%s ", MemWidthName(a->size, true));
-          PrintMemAddr(fp, BPF_REG_10, loff);
-          fprintf(fp, ", r%d\n", src);
+          PrintStore(fp, MemWidthName(a->size, true), BPF_REG_10, loff, src);
           continue;
         }
         if (a->copy_bytes > 0) {
@@ -481,9 +504,8 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
                                 fp);
           continue;
         }
-        fprintf(fp, "\t%s ", MemWidthName(a->size <= 0 ? 8 : a->size, true));
-        PrintMemAddr(fp, BPF_REG_10, loff);
-        fprintf(fp, ", r%d\n", a->reg_num);
+        PrintStore(fp, MemWidthName(a->size <= 0 ? 8 : a->size, true),
+                   BPF_REG_10, loff, a->reg_num);
       }
       if (emitter->bpf->dynamic_sp_offset >= 0) {
         // Below the fixed frame and the spill/scratch word.  r10 is not
@@ -492,12 +514,12 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
         int gap = emitter->bpf->base.stack_frame_size + emitter->spill_bytes + 16;
         fprintf(fp, "\tmov64 r6, r10\n");
         fprintf(fp, "\tsub64 r6, %d\n", gap);
-        fprintf(fp, "\tstxdw [r10%d], r6\n", slot);
+        PrintStore(fp, "stxdw", BPF_REG_10, slot, BPF_REG_6);
       }
       if (emitter->bpf->vararg_save_offset >= 0) {
         for (int i = 0; i < BPF_NUM_ARG_REGS; i++) {
           int loff = LocalOffset(emitter, emitter->bpf->vararg_save_offset + i * 8);
-          fprintf(fp, "\tstxdw [r10%d], r%d\n", loff, BPF_REG_1 + i);
+          PrintStore(fp, "stxdw", BPF_REG_10, loff, BPF_REG_1 + i);
         }
       }
       return;
@@ -578,26 +600,32 @@ static void PrintInstruction(BPFEmitter* emitter, TargetInstruction* inst,
     case BPF_OP(ldxh):
     case BPF_OP(ldxw):
     case BPF_OP(ldxdw):
-    case BPF_OP(reload):
-      fprintf(fp, "\t%s r%d, ", LoadName(op == BPF_OP(reload) ? BPF_OP(ldxdw) : op),
-              DestReg(inst));
-      PrintMemOff(RegNum(inst->operand[0]), inst->operand[1], fp);
-      fprintf(fp, "\n");
+    case BPF_OP(reload): {
+      int off = 0;
+      if (inst->operand[1] != NULL && TargetIsConst(inst->operand[1])) {
+        off = (int)TargetIntValue(inst->operand[1]);
+      }
+      PrintLoad(fp, LoadName(op == BPF_OP(reload) ? BPF_OP(ldxdw) : op),
+                DestReg(inst), RegNum(inst->operand[0]), off);
       return;
+    }
     case BPF_OP(stxb):
     case BPF_OP(stxh):
     case BPF_OP(stxw):
     case BPF_OP(stxdw):
     case BPF_OP(spill): {
-      fprintf(fp, "\t%s ", StoreName(op == BPF_OP(spill) ? BPF_OP(stxdw) : op));
-      PrintMemOff(RegNum(inst->operand[0]), inst->operand[1], fp);
+      int off = 0;
+      if (inst->operand[1] != NULL && TargetIsConst(inst->operand[1])) {
+        off = (int)TargetIntValue(inst->operand[1]);
+      }
       // A spill snapshots the source register onto inst->reg.  The value's
       // own register is retargeted when it is reloaded.
       int src = inst->reg != NULL && op == BPF_OP(spill)
                     ? inst->reg->num
                     : RegNum(inst->operand[2] != NULL ? inst->operand[2]
                                                       : inst->operand[1]);
-      fprintf(fp, ", r%d\n", src);
+      PrintStore(fp, StoreName(op == BPF_OP(spill) ? BPF_OP(stxdw) : op),
+                 RegNum(inst->operand[0]), off, src);
       return;
     }
     case BPF_OP(ja):
