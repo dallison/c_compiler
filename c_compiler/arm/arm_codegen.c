@@ -5183,7 +5183,10 @@ static TargetInstruction* LowerCall(ARMGenerator* g, IRNode* node) {
 
 static TargetInstruction* LowerComputedBranch(ARMGenerator* g, IRNode* node) {
   assert(node->inputs.length == 1);
-  TargetInstruction* value = GetLoweredNode(node->inputs.value.p[0]);
+  // A constant index must be a register so `lsl #2` is a shifted-register
+  // operand.  The assembler ignores a shift on an immediate, so
+  // `add r, r, #7, lsl #2` adds 7, and `bx` of that odd address enters Thumb.
+  TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
 
   TargetInstruction* adr =
       Emit(g, SetInstructionSize(NewInstruction1(ARM_OP(adr),

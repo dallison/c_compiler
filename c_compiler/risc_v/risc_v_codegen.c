@@ -4194,7 +4194,10 @@ static TargetInstruction* LowerCall(RVGenerator* rv, IRNode* node) {
 
 static TargetInstruction* LowerComputedBranch(RVGenerator* rv, IRNode* node) {
   assert(node->inputs.length == 1);
-  TargetInstruction* value = GetLoweredNode(node->inputs.value.p[0]);
+  // A constant index (Duff's device folds `count % 8` to 7) must be in a
+  // register.  slli's source is a register operand; printing the constant
+  // there yields `slli t1, 7, 2`, which the assembler rejects.
+  TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
   TargetInstruction* slli =
       Emit(rv, NewInstruction2(RV_OP(slli), value,
                                GetIntConstant(rv, NULL, kTargetType32Bit, 2)));

@@ -4648,7 +4648,9 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
 
 static TargetInstruction* LowerComputedBranch(AARCH64Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
-  TargetInstruction* value = GetLoweredNode(node->inputs.value.p[0]);
+  // A constant index must be a register so the scale (`lsl #2`) is applied.
+  // An immediate add drops the shift and jumps into the middle of the table.
+  TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
 
   TargetInstruction* adr =
       Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(adr),

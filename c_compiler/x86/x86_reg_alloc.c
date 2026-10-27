@@ -1599,6 +1599,16 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
     return;
   }
 
+  // A variable register is left unallocated until something writes it.  A use
+  // of a never-written local (the addends in `foobar = foo + bar`) still has
+  // to name a register, or the emitter prints an empty operand (`addl %, %r10`).
+  for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op != NULL && X86IsVarRegister(op) && op->reg == NULL) {
+      AllocateVariableRegister(allocator, op);
+    }
+  }
+
   // Destination-coalesced instructions return early from allocation, but
   // their source operands still need to be restored from spill slots first.
   ReloadSpills(allocator, inst);

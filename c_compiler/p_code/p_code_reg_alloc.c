@@ -10,6 +10,20 @@
 #include <assert.h>
 #include "p_code_codegen.h"
 #include "p_code_machine.h"
+#include "target_basic_block.h"
+
+// Upper 8 bits of the free high half of flags record which landing-pad epoch
+// a register value belongs to.  A landing pad reloads callee-saved registers
+// from the prologue slots, so a value defined before the pad is gone.
+static int alloc_epoch;
+
+static int InstEpoch(TargetInstruction* inst) {
+  return (inst->flags >> 24) & 0xff;
+}
+
+static void StampEpoch(TargetInstruction* inst) {
+  inst->flags = (inst->flags & 0x00ffffff) | ((alloc_epoch & 0xff) << 24);
+}
 
 static void InitializeRegister(PCodeRegister* reg, int num,
                                PCodeRegisterType type) {
@@ -410,7 +424,95 @@ static bool NeedsRegister(TargetInstruction* inst) {
 }
 
 static void AllocateRegister(PCodeRegisterAllocator* allocator,
+                             TargetInstruction* inst);
+
+static bool CanRematerialize(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return false;
+  }
+  switch ((PCodeOpcode)inst->opcode) {
+    case P_OP(movc):
+    case P_OP(movxc):
+    case P_OP(movfc):
+    case P_OP(movdc):
+      return true;
+    case P_OP(mov):
+    case P_OP(movf):
+    case P_OP(movd):
+      return CanRematerialize(inst->operand[0]);
+    case P_OP(addc):
+      return inst->operand[1] != NULL && TargetIsConst(inst->operand[1]) &&
+             CanRematerialize(inst->operand[0]);
+    default:
+      return false;
+  }
+}
+
+// Rebuild a value the landing pad wiped out.  The copy is inserted just
+// before its use and allocated immediately.  Its use count is held at 1 until
+// that use is attached, so the register is not freed as dead.
+static TargetInstruction* Rematerialize(PCodeRegisterAllocator* allocator,
+                                        TargetInstruction* inst,
+                                        TargetInstruction* before) {
+  TargetInstruction* clone = TargetNewInstruction(inst->opcode);
+  for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* src = inst->operand[i];
+    if (src != NULL && src->reg != NULL && !src->reg->reserved &&
+        InstEpoch(src) != alloc_epoch && CanRematerialize(src)) {
+      src = Rematerialize(allocator, src, before);
+    }
+    clone->operand[i] = src;
+  }
+  TargetUpdateOperandUsers(clone);
+  if (before->block != NULL) {
+    TargetBasicBlockEmitBefore(&allocator->pcode->base, before->block, clone,
+                               before);
+  } else {
+    TargetEmitBefore(&allocator->pcode->base, clone, before);
+    clone->block = before->block;
+  }
+  AllocateRegister(allocator, clone);
+  clone->uses = 1;
+  if (clone->reg != NULL) {
+    clone->reg->owner = clone;
+  }
+  return clone;
+}
+
+static void RefreshStaleOperands(PCodeRegisterAllocator* allocator,
+                                 TargetInstruction* inst) {
+  if (alloc_epoch <= 1) {
+    return;
+  }
+  for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+    TargetInstruction* op = inst->operand[i];
+    if (op == NULL || op->reg == NULL || op->reg->reserved) {
+      continue;
+    }
+    if (InstEpoch(op) == alloc_epoch || !CanRematerialize(op)) {
+      continue;
+    }
+    TargetInstruction* fresh = Rematerialize(allocator, op, inst);
+    // TargetRemoveUser counts this use down.  The allocator may already have
+    // done that while walking earlier users, so keep the count non-negative.
+    if (op->uses <= 0) {
+      op->uses = 1;
+    }
+    TargetReplaceOperand(inst, i, fresh);
+    if (op->uses == 0 && op->reg != NULL && op->reg->owner == op) {
+      FreeRegister(allocator, (PCodeRegister*)op->reg);
+    }
+  }
+}
+
+static void AllocateRegister(PCodeRegisterAllocator* allocator,
                              TargetInstruction* inst) {
+  if ((PCodeOpcode)inst->opcode == P_OP(label) &&
+      (inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0 &&
+      alloc_epoch < 255) {
+    alloc_epoch++;
+  }
+  RefreshStaleOperands(allocator, inst);
   if (inst->reg != NULL) {
     return;
   }
@@ -422,6 +524,7 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
      assert(inst->dest->reg != NULL);
      reg = (PCodeRegister*)inst->dest->reg;
      inst->reg = inst->dest->reg;
+     StampEpoch(inst);
      if (!reg->base.reserved) {
        // The source of an in-place operation can own the same register as the
        // destination. Transfer ownership before releasing operands so the
@@ -441,10 +544,11 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
   }
 #endif
   
-  // Free up any registers we can.
-  FreeRegisters(allocator, inst);
-
+  // Give this result its own register before releasing sources.  Freeing a
+  // source first lets the result reuse that register, which drops a value
+  // the next iteration of a loop still reads (`it != end` overwriting `end`).
   if (!NeedsRegister(inst)) {
+    FreeRegisters(allocator, inst);
     return;
   }
   
@@ -526,7 +630,10 @@ static void AllocateRegister(PCodeRegisterAllocator* allocator,
 
   inst->uses = (int)inst->users.length;
   inst->reg = &reg->base;
+  StampEpoch(inst);
   reg->base.owner = inst;
+
+  FreeRegisters(allocator, inst);
 
   // If nobody is using this register free it up immediately.
   if (inst->uses == 0) {
@@ -566,6 +673,7 @@ const char* PCodeRegisterName(PCodeRegister* reg, char* buf, size_t len) {
 }
 
 void PCodeAllocateRegisters(PCodeRegisterAllocator* allocator) {
+  alloc_epoch = 1;
   TargetInstruction* inst = TargetFirstInstruction(&allocator->pcode->base);
   while (inst != NULL) {
     AllocateRegister(allocator, inst);

@@ -1087,9 +1087,10 @@ static TargetInstruction* ReduceExpressionStrength(PCodeGenerator* pcode,
       } else if (IRIsConst(op1)) {
         int64_t c = ((IRConstant*)op1)->value.ivalue;
         if (c == 0) {
-          // Adding zero is a move instruction.
+          // Adding zero is a move of the other operand.  The constant is on
+          // the left (`0 + x`), so the value to keep is op2.
           inst = (TargetInstruction*)NewInstruction(P_OP(mov));
-          inst->operand[0] = Materialize(pcode, op1);
+          inst->operand[0] = Materialize(pcode, op2);
         } else {
           inst = (TargetInstruction*)NewInstruction(P_OP(addc));
           inst->operand[0] = Materialize(pcode, op2);

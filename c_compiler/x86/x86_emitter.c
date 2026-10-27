@@ -1612,6 +1612,22 @@ static void PrintSseIntConvert(FILE* fp, const char* mnemonic,
   if (!int_to_xmm && inst->operand[0] != NULL) {
     PrepareSseSourceOperand(fp, inst->operand[0], buf1, sizeof(buf1));
   }
+  // cvtsi2ss/cvtsi2sd take a GPR or memory source.  A folded integer constant
+  // (`int a = 0; (float)a`) has no register; park it in r11 first.
+  if (int_to_xmm && inst->operand[0] != NULL &&
+      (TargetIsConst(inst->operand[0]) ||
+       (X86Opcode)inst->operand[0]->opcode == X86_OP(x0))) {
+    fprintf(fp, "\tmovq ");
+    if (TargetIsConst(inst->operand[0])) {
+      PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
+    } else {
+      fprintf(fp, "$0");
+    }
+    fprintf(fp, ", %%r11\n\t%s %%r11, ", mnemonic);
+    PrintPercentRegFromInst(fp, inst, buf2, sizeof(buf2));
+    fprintf(fp, "\n");
+    return;
+  }
   fprintf(fp, "\t%s ", mnemonic);
   if (int_to_xmm) {
     PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
@@ -2701,18 +2717,43 @@ static void PrintInstruction(X86Emitter* emitter, TargetInstruction* inst,
       break;
 
     case X86_OP(jz):
-    case X86_OP(jnz):
+    case X86_OP(jnz): {
       assert(inst->operand[0] != NULL);
       assert(inst->operand[1] != NULL);
-      assert(inst->operand[0]->reg != NULL);
+      // A constant or a value that never received a register (an unread local
+      // used as a condition) cannot be `test`ed.  Decide the branch here.
+      TargetInstruction* tested = inst->operand[0];
+      bool folded = TargetIsConst(tested) ||
+                    (X86Opcode)tested->opcode == X86_OP(x0);
+      int64_t folded_value = 0;
+      if (TargetIsConst(tested)) {
+        folded_value = TargetIntValue(tested);
+      }
+      if (!folded) {
+        char name[32];
+        if (GetRegisterName(tested, name, sizeof(name))[0] == '\0') {
+          folded = true;
+          folded_value = 0;
+        }
+      }
+      if (folded) {
+        bool taken = ((X86Opcode)inst->opcode == X86_OP(jz)) ==
+                     (folded_value == 0);
+        if (taken) {
+          fprintf(fp, "\tjmp .%s_label_%d\n", func_name,
+                  inst->operand[1]->id);
+        }
+        break;
+      }
       fprintf(fp, "\ttest ");
-      PrintPercentRegFromInst(fp, inst->operand[0], buf1, sizeof(buf1));
+      PrintPercentRegFromInst(fp, tested, buf1, sizeof(buf1));
       fprintf(fp, ", ");
-      PrintPercentRegFromInst(fp, inst->operand[0], buf2, sizeof(buf2));
+      PrintPercentRegFromInst(fp, tested, buf2, sizeof(buf2));
       fprintf(fp, "\n\t%s .%s_label_%d\n",
               BranchMnemonic((X86Opcode)inst->opcode),
               func_name, inst->operand[1]->id);
       break;
+    }
 
     case X86_OP(jmp): {
       assert(inst->operand[0] != NULL);
