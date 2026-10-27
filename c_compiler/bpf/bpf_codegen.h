@@ -118,6 +118,9 @@ typedef struct BPFGenerator {
   // Frame offset of the outgoing stack-argument area.  Args past r5 are
   // stored here and r0 points at the first one.
   int outgoing_offset;
+  // Address of the named return object.  -O1 builds it directly in the
+  // caller's buffer, which arrives in r1, instead of copying it on return.
+  TargetInstruction* nrvo_pointer;
   bool not_leaf;
   TargetInstruction* int_argument_registers[BPF_NUM_ARG_REGS];
   Vector var_regs;

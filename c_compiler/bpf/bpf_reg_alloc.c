@@ -346,11 +346,19 @@ static void SpillOwner(BPFRegisterAllocator* alloc, BPFRegister* reg,
                        int nedges) {
   TargetInstruction* owner = reg->base.owner;
   if (owner != NULL && !BPFIsFixedRegister(owner)) {
-    if (LoopInvariantClobber(alloc, owner, before, edges, nedges)) {
-      if ((owner->flags & TARGET_INST_SPILLED) == 0) {
-        EmitSpill(alloc, owner, TargetNext(owner));
+    if ((owner->flags & TARGET_INST_SPILLED) == 0) {
+      // The first store has to sit on every path that reloads the slot.
+      // A store at the clobber is skipped by any branch that left earlier,
+      // and those paths still reload (printf's '%d' compare).  The
+      // instruction after the definition dominates those reloads.  A store
+      // at the clobber is only a refresh, and only when the loop does not
+      // reuse the register for a different value.
+      TargetInstruction* at = TargetNext(owner);
+      if (at == NULL) {
+        at = before;
       }
-    } else {
+      EmitSpill(alloc, owner, at);
+    } else if (!LoopInvariantClobber(alloc, owner, before, edges, nedges)) {
       EmitSpill(alloc, owner, before);
     }
     RestoreAcrossBackEdge(alloc, owner, before, edges, nedges);

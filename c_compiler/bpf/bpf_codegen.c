@@ -396,6 +396,7 @@ void BPFGeneratorInit(BPFGenerator* bpf, Generator* gen) {
   bpf->struct_return_reg = -1;
   bpf->vararg_save_offset = -1;
   bpf->outgoing_offset = 0;
+  bpf->nrvo_pointer = NULL;
   bpf->not_leaf = false;
   bpf->r0 = NULL;
   memset(bpf->int_argument_registers, 0, sizeof(bpf->int_argument_registers));
@@ -638,9 +639,26 @@ static TargetInstruction* Materialize(BPFGenerator* bpf, IRNode* node) {
         return Emit(bpf, NewInstruction1(
             BPF_OP(li), GetIntConstant(bpf, node, kTargetType64Bit,
                                        ((IRConstant*)node)->value.ivalue)));
+      case IR_OP(constf): {
+        float f = (float)((IRConstant*)node)->value.fvalue;
+        uint32_t bits = 0;
+        memcpy(&bits, &f, sizeof(bits));
+        return Emit(bpf, NewInstruction1(
+            BPF_OP(li), GetIntConstant(bpf, node, kTargetType64Bit, (int64_t)bits)));
+      }
+      case IR_OP(constd): {
+        double d = ((IRConstant*)node)->value.fvalue;
+        uint64_t bits = 0;
+        memcpy(&bits, &d, sizeof(bits));
+        return Emit(bpf, NewInstruction1(
+            BPF_OP(li), GetIntConstant(bpf, node, kTargetType64Bit, (int64_t)bits)));
+      }
       default:
         break;
     }
+  }
+  if ((node->flags & kIRNrvoMarker) != 0 && bpf->nrvo_pointer != NULL) {
+    return bpf->nrvo_pointer;
   }
   if (IRIsAutoVariable(node) || IRIsArgument(node)) {
     int32_t var_offset = node->data.ivalue;
@@ -679,6 +697,11 @@ static TargetInstruction* FinishWithDest(BPFGenerator* bpf, IRNode* node,
 static bool GetBaseAndOffset(BPFGenerator* bpf, IRNode* addr_node,
                              TargetInstruction** base,
                              TargetInstruction** offset) {
+  if ((addr_node->flags & kIRNrvoMarker) != 0 && bpf->nrvo_pointer != NULL) {
+    *base = bpf->nrvo_pointer;
+    *offset = GetIntConstant(bpf, NULL, kTargetType32Bit, 0);
+    return true;
+  }
   if (IRIsAutoVariable(addr_node) || IRIsArgument(addr_node)) {
     *base = FramePointer(bpf);
     *offset = GetIntConstant(bpf, NULL, kTargetType32Bit,
@@ -706,6 +729,7 @@ static BPFOpcode LoadOp(IROpcode op) {
       return BPF_OP(ldxh);
     case IR_OP(load32):
     case IR_OP(loadu32):
+    case IR_OP(loadf):
       return BPF_OP(ldxw);
     default:
       return BPF_OP(ldxdw);
@@ -884,15 +908,209 @@ static bool CmpIsUnsigned(IRNode* node) {
   return a->type != NULL && TypeIsUnsigned(a->type);
 }
 
+static Symbol* HelperSymbol(const char* name) {
+  static const char* names[24];
+  static Symbol* syms[24];
+  static int count = 0;
+  for (int i = 0; i < count; i++) {
+    if (strcmp(names[i], name) == 0) {
+      return syms[i];
+    }
+  }
+  Symbol* sym = NewSymbol(name, NULL, kStorage_extern);
+  names[count] = name;
+  syms[count] = sym;
+  count++;
+  return sym;
+}
+
+static TargetInstruction* EmitHelperCall(BPFGenerator* bpf, const char* name,
+                                        TargetInstruction** args, int nargs) {
+  for (int i = 0; i < nargs; i++) {
+    TargetInstruction* dest = IntArgumentRegister(bpf, i);
+    TargetInstruction* move = Emit(bpf, NewInstruction1(BPF_OP(mov), args[i]));
+    move->dest = dest;
+  }
+  TargetInstruction* call = Emit(
+      bpf, NewInstruction1(BPF_OP(call), GetSymbol(bpf, NULL, HelperSymbol(name))));
+  return Emit(bpf, NewInstruction1(BPF_OP(mov), call));
+}
+
+static int FloatOpIs64(IROpcode op) {
+  switch (op) {
+    case IR_OP(addd):
+    case IR_OP(subd):
+    case IR_OP(muld):
+    case IR_OP(divd):
+    case IR_OP(negd):
+    case IR_OP(cmpeqd):
+    case IR_OP(cmpned):
+    case IR_OP(cmpltd):
+    case IR_OP(cmpled):
+    case IR_OP(cmpgtd):
+    case IR_OP(cmpged):
+    case IR_OP(cmp3wayd):
+    case IR_OP(i2d):
+    case IR_OP(d2i):
+    case IR_OP(d2f):
+    case IR_OP(movd):
+    case IR_OP(incd):
+    case IR_OP(decd):
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static TargetInstruction* LowerFloatBinop(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* args[2];
+  args[0] = Materialize(bpf, node->inputs.value.p[0]);
+  args[1] = Materialize(bpf, node->inputs.value.p[1]);
+  const char* name = "__bpf_addsf3";
+  switch (node->opcode) {
+    case IR_OP(subf):
+      name = "__bpf_subsf3";
+      break;
+    case IR_OP(mulf):
+      name = "__bpf_mulsf3";
+      break;
+    case IR_OP(divf):
+      name = "__bpf_divsf3";
+      break;
+    case IR_OP(addd):
+      name = "__bpf_adddf3";
+      break;
+    case IR_OP(subd):
+      name = "__bpf_subdf3";
+      break;
+    case IR_OP(muld):
+      name = "__bpf_muldf3";
+      break;
+    case IR_OP(divd):
+      name = "__bpf_divdf3";
+      break;
+    default:
+      break;
+  }
+  return FinishWithDest(bpf, node, EmitHelperCall(bpf, name, args, 2));
+}
+
+static TargetInstruction* LowerFloatNeg(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* src = Materialize(bpf, node->inputs.value.p[0]);
+  int64_t bit = node->opcode == IR_OP(negd) ? (int64_t)((uint64_t)1 << 63)
+                                            : (int64_t)0x80000000;
+  TargetInstruction* mask = Emit(
+      bpf, NewInstruction1(BPF_OP(li),
+                           GetIntConstant(bpf, NULL, kTargetType64Bit, bit)));
+  return FinishWithDest(
+      bpf, node, Emit(bpf, NewInstruction2(BPF_OP(xor), src, mask)));
+}
+
+static TargetInstruction* LowerFloatConvert(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* src = Materialize(bpf, node->inputs.value.p[0]);
+  const char* name = NULL;
+  IRNode* in = node->inputs.value.p[0];
+  switch (node->opcode) {
+    case IR_OP(i2f):
+    case IR_OP(i2d): {
+      int to_double = node->opcode == IR_OP(i2d);
+      int is_unsigned = in->type != NULL && TypeIsUnsigned(in->type);
+      src = WidenFor64(bpf, src, in);
+      if (is_unsigned) {
+        name = to_double ? "__bpf_u64_to_df" : "__bpf_u64_to_sf";
+      } else {
+        name = to_double ? "__bpf_i64_to_df" : "__bpf_i64_to_sf";
+      }
+      break;
+    }
+    case IR_OP(f2i):
+      name = "__bpf_sf_to_i64";
+      break;
+    case IR_OP(d2i):
+      name = "__bpf_df_to_i64";
+      break;
+    case IR_OP(f2d):
+      name = "__bpf_sf_to_df";
+      break;
+    case IR_OP(d2f):
+      name = "__bpf_df_to_sf";
+      break;
+    default:
+      break;
+  }
+  TargetInstruction* args[1] = {src};
+  return FinishWithDest(bpf, node, EmitHelperCall(bpf, name, args, 1));
+}
+
+static TargetInstruction* FloatCompareValue(BPFGenerator* bpf, IRNode* node) {
+  TargetInstruction* args[2];
+  args[0] = Materialize(bpf, node->inputs.value.p[0]);
+  args[1] = Materialize(bpf, node->inputs.value.p[1]);
+  const char* name =
+      FloatOpIs64(node->opcode) ? "__bpf_cmpdf" : "__bpf_cmpsf";
+  return EmitHelperCall(bpf, name, args, 2);
+}
+
 static TargetInstruction* LowerComparison(BPFGenerator* bpf, IRNode* node) {
-  TargetInstruction* lhs = Materialize(bpf, node->inputs.value.p[0]);
-  TargetInstruction* rhs = Materialize(bpf, node->inputs.value.p[1]);
+  int float_cmp = node->opcode == IR_OP(cmpeqf) || node->opcode == IR_OP(cmpnef) ||
+                  node->opcode == IR_OP(cmpltf) || node->opcode == IR_OP(cmplef) ||
+                  node->opcode == IR_OP(cmpgtf) || node->opcode == IR_OP(cmpgef) ||
+                  node->opcode == IR_OP(cmpeqd) || node->opcode == IR_OP(cmpned) ||
+                  node->opcode == IR_OP(cmpltd) || node->opcode == IR_OP(cmpled) ||
+                  node->opcode == IR_OP(cmpgtd) || node->opcode == IR_OP(cmpged);
+  TargetInstruction* lhs = NULL;
+  TargetInstruction* rhs = NULL;
+  if (float_cmp) {
+    lhs = FloatCompareValue(bpf, node);
+    rhs = Emit(bpf, NewInstruction1(
+                        BPF_OP(li),
+                        GetIntConstant(bpf, NULL, kTargetType32Bit,
+                                       (node->opcode == IR_OP(cmpgtf) ||
+                                        node->opcode == IR_OP(cmpgtd))
+                                           ? 1
+                                           : 0)));
+  } else {
+    lhs = Materialize(bpf, node->inputs.value.p[0]);
+    rhs = Materialize(bpf, node->inputs.value.p[1]);
+    // jsge/jsgt are 64-bit.  A 32-bit neg or sub is zero-extended, so -4
+    // compares as 4294967292 and `0 >= -4` is false.
+    lhs = WidenFor64(bpf, lhs, node->inputs.value.p[0]);
+    rhs = WidenFor64(bpf, rhs, node->inputs.value.p[1]);
+  }
   TargetInstruction* one =
       Emit(bpf, NewInstruction1(BPF_OP(li),
                                 GetIntConstant(bpf, NULL, kTargetType32Bit, 1)));
-  TargetInstruction* br =
-      Emit(bpf, NewInstruction3(CmpBranchOp(node->opcode, CmpIsUnsigned(node)),
-                                lhs, rhs, NULL));
+  BPFOpcode branch = CmpBranchOp(node->opcode, CmpIsUnsigned(node));
+  if (float_cmp) {
+    switch (node->opcode) {
+      case IR_OP(cmpeqf):
+      case IR_OP(cmpeqd):
+      case IR_OP(cmpgtf):
+      case IR_OP(cmpgtd):
+        branch = BPF_OP(jeq);
+        break;
+      case IR_OP(cmpnef):
+      case IR_OP(cmpned):
+        branch = BPF_OP(jne);
+        break;
+      case IR_OP(cmpltf):
+      case IR_OP(cmpltd):
+        branch = BPF_OP(jslt);
+        break;
+      case IR_OP(cmplef):
+      case IR_OP(cmpled):
+        branch = BPF_OP(jsle);
+        break;
+      default:
+        // >= is true for -1? no: results 0 and 1, not the unordered 2.
+        branch = BPF_OP(jle);
+        rhs = Emit(bpf, NewInstruction1(
+                            BPF_OP(li),
+                            GetIntConstant(bpf, NULL, kTargetType32Bit, 1)));
+        break;
+    }
+  }
+  TargetInstruction* br = Emit(bpf, NewInstruction3(branch, lhs, rhs, NULL));
   TargetInstruction* zero =
       Emit(bpf, NewInstruction1(BPF_OP(li),
                                 GetIntConstant(bpf, NULL, kTargetType32Bit, 0)));
@@ -903,8 +1121,25 @@ static TargetInstruction* LowerComparison(BPFGenerator* bpf, IRNode* node) {
 }
 
 static TargetInstruction* LowerThreeWay(BPFGenerator* bpf, IRNode* node) {
-  TargetInstruction* a = Materialize(bpf, node->inputs.value.p[0]);
-  TargetInstruction* b = Materialize(bpf, node->inputs.value.p[1]);
+  if (node->opcode == IR_OP(cmp3wayf) || node->opcode == IR_OP(cmp3wayd)) {
+    TargetInstruction* cmp = FloatCompareValue(bpf, node);
+    TargetInstruction* two =
+        Emit(bpf, NewInstruction1(BPF_OP(li),
+                                  GetIntConstant(bpf, NULL, kTargetType32Bit, 2)));
+    TargetInstruction* unordered =
+        Emit(bpf, NewInstruction3(BPF_OP(jne), cmp, two, NULL));
+    TargetInstruction* zero =
+        Emit(bpf, NewInstruction1(BPF_OP(li),
+                                  GetIntConstant(bpf, NULL, kTargetType32Bit, 0)));
+    zero->dest = cmp;
+    TargetInstruction* done = Emit(bpf, NewInstruction(BPF_OP(label)));
+    unordered->operand[2] = done;
+    return FinishWithDest(bpf, node, cmp);
+  }
+  TargetInstruction* a = WidenFor64(bpf, Materialize(bpf, node->inputs.value.p[0]),
+                                    node->inputs.value.p[0]);
+  TargetInstruction* b = WidenFor64(bpf, Materialize(bpf, node->inputs.value.p[1]),
+                                    node->inputs.value.p[1]);
   bool is_unsigned = node->opcode == IR_OP(cmp3wayu) ||
                      node->opcode == IR_OP(cmp3waya);
   TargetInstruction* one =
@@ -1106,6 +1341,32 @@ static TargetInstruction* LowerZeroExtend(BPFGenerator* bpf, IRNode* node) {
 static TargetInstruction* LowerSignExtendOp(BPFGenerator* bpf, IRNode* node) {
   TargetInstruction* src = Materialize(bpf, node->inputs.value.p[0]);
   return FinishWithDest(bpf, node, SignExtend(bpf, src, ExtendKeepBits(node)));
+}
+
+static TargetInstruction* LowerFloatIncDec(BPFGenerator* bpf, IRNode* node,
+                                          bool inc) {
+  IRNode* addr_node = node->inputs.value.p[0];
+  TargetInstruction* base;
+  TargetInstruction* offset;
+  GetBaseAndOffset(bpf, addr_node, &base, &offset);
+  int is64 = node->opcode == IR_OP(incd) || node->opcode == IR_OP(decd);
+  BPFOpcode ld = is64 ? BPF_OP(ldxdw) : BPF_OP(ldxw);
+  BPFOpcode st = is64 ? BPF_OP(stxdw) : BPF_OP(stxw);
+  TargetInstruction* cur = Emit(bpf, NewInstruction2(ld, base, offset));
+  TargetInstruction* delta =
+      node->inputs.length > 1 ? Materialize(bpf, node->inputs.value.p[1])
+                              : Emit(bpf, NewInstruction1(
+                                              BPF_OP(li),
+                                              GetIntConstant(
+                                                  bpf, NULL, kTargetType64Bit,
+                                                  is64 ? (int64_t)0x3ff0000000000000ULL
+                                                       : (int64_t)0x3f800000)));
+  TargetInstruction* args[2] = {cur, delta};
+  const char* name = inc ? (is64 ? "__bpf_adddf3" : "__bpf_addsf3")
+                         : (is64 ? "__bpf_subdf3" : "__bpf_subsf3");
+  TargetInstruction* updated = EmitHelperCall(bpf, name, args, 2);
+  Emit(bpf, NewInstruction3(st, base, offset, updated));
+  return FinishWithDest(bpf, node, updated);
 }
 
 static TargetInstruction* LowerIncDec(BPFGenerator* bpf, IRNode* node, bool inc) {
@@ -1338,6 +1599,15 @@ static void LowerVariables(BPFGenerator* bpf, Generator* gen) {
         if (align < 1) {
           align = 1;
         }
+        if ((pooled->flags & kIRNrvoMarker) != 0) {
+          // The caller passed the return buffer in r1.  Capture it before
+          // the body reuses that register, and build the object there.
+          TargetInstruction* ptr =
+              Emit(bpf, NewInstruction1(BPF_OP(mov), IntArgumentRegister(bpf, 0)));
+          bpf->nrvo_pointer = ptr;
+          pooled->data.ivalue = 0;
+          break;
+        }
         var_offset = (var_offset + align - 1) & ~(align - 1);
         pooled->data.ivalue = var_offset;
         var_offset += (int32_t)size;
@@ -1528,9 +1798,18 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
     case IR_OP(const64):
       return GetIntConstant(bpf, node, kTargetType64Bit,
                             ((IRConstant*)node)->value.ivalue);
-    case IR_OP(constf):
-    case IR_OP(constd):
-      return GetIntConstant(bpf, node, kTargetType64Bit, 0);
+    case IR_OP(constf): {
+      float f = (float)((IRConstant*)node)->value.fvalue;
+      uint32_t bits = 0;
+      memcpy(&bits, &f, sizeof(bits));
+      return GetIntConstant(bpf, node, kTargetType64Bit, (int64_t)bits);
+    }
+    case IR_OP(constd): {
+      double d = ((IRConstant*)node)->value.fvalue;
+      uint64_t bits = 0;
+      memcpy(&bits, &d, sizeof(bits));
+      return GetIntConstant(bpf, node, kTargetType64Bit, (int64_t)bits);
+    }
 
     case IR_OP(enter):
       Emit(bpf, NewInstruction(BPF_OP(save)));
@@ -1574,9 +1853,10 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
     case IR_OP(uinc32):
     case IR_OP(uinc64):
     case IR_OP(inca):
+      return LowerIncDec(bpf, node, true);
     case IR_OP(incf):
     case IR_OP(incd):
-      return LowerIncDec(bpf, node, true);
+      return LowerFloatIncDec(bpf, node, true);
     case IR_OP(dec8):
     case IR_OP(dec16):
     case IR_OP(dec32):
@@ -1586,9 +1866,10 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
     case IR_OP(udec32):
     case IR_OP(udec64):
     case IR_OP(deca):
+      return LowerIncDec(bpf, node, false);
     case IR_OP(decf):
     case IR_OP(decd):
-      return LowerIncDec(bpf, node, false);
+      return LowerFloatIncDec(bpf, node, false);
 
     case IR_OP(getbit):
     case IR_OP(setbit):
@@ -1617,23 +1898,21 @@ static TargetInstruction* LowerIRNode(BPFGenerator* bpf, Generator* gen,
     case IR_OP(muld):
     case IR_OP(divf):
     case IR_OP(divd):
+      return LowerFloatBinop(bpf, node);
     case IR_OP(negf):
     case IR_OP(negd):
+      return LowerFloatNeg(bpf, node);
     case IR_OP(i2f):
     case IR_OP(i2d):
     case IR_OP(f2d):
     case IR_OP(d2f):
     case IR_OP(f2i):
     case IR_OP(d2i):
+      return LowerFloatConvert(bpf, node);
     case IR_OP(movf):
     case IR_OP(movd):
-      // No floating-point register file.  Integer formatting never executes
-      // these; a float result is the zero bit pattern.
-      return FinishWithDest(
-          bpf, node,
-          Emit(bpf, NewInstruction1(
-                        BPF_OP(li),
-                        GetIntConstant(bpf, NULL, kTargetType64Bit, 0))));
+      return FinishWithDest(bpf, node,
+                            Materialize(bpf, node->inputs.value.p[0]));
 
     case IR_OP(noti):
     case IR_OP(nota):

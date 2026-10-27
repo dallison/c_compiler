@@ -3504,6 +3504,7 @@ genrule(
         "bpf support/*.s",
     ]) + [
         "bpf support/runtime.c",
+        "bpf support/softfloat.c",
         ":davecc",
         ":archivist",
     ],
@@ -3524,6 +3525,7 @@ cflags=(-target bpf -O1 -nostdinc -fno-exceptions -D__DAVECC_HAS_HEAP_LOCK__=1 \
 "$$davecc" "$${cflags[@]}" "bpf support/syscall.s" -o "$$work/bpf_syscall.o"
 "$$davecc" "$${cflags[@]}" "bpf support/cxx_rtti_vtables.s" -o "$$work/cxx_rtti_vtables.o"
 "$$davecc" "$${cflags[@]}" "bpf support/runtime.c" -o "$$work/bpf_runtime.o"
+"$$davecc" "$${cflags[@]}" "bpf support/softfloat.c" -o "$$work/bpf_softfloat.o"
 
 for src in libc/*.c; do
   case "$$src" in
@@ -3538,12 +3540,7 @@ for src in libc/*.c; do
       continue ;;
   esac
   obj="$$work/$$(basename "$${src%.c}").o"
-  source_cflags=()
-  if [[ "$$src" == "libc/printf.c" ]]; then
-    source_cflags+=(-DPRINTF_DISABLE_FLOAT=1)
-  fi
-  "$$davecc" "$${cflags[@]}" $${source_cflags[@]+"$${source_cflags[@]}"} \
-    "$$src" -o "$$obj"
+  "$$davecc" "$${cflags[@]}" "$$src" -o "$$obj"
 done
 
 for src in libc/*.cc; do
