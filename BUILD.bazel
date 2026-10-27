@@ -3532,11 +3532,7 @@ for src in libc/*.c; do
     libc/cxx_tls.c|libc/cxx_tls_stubs.c|libc/dynamic_*|libc/eh_*|\
     libc/gxx_personality.c|libc/linux_*|libc/darwin_*|\
     libc/guest_heap.c|libc/lsda.c|libc/unwind_api.c|libc/wasi_*|\
-    libc/acos.c|libc/asin.c|libc/atan.c|libc/atan2.c|libc/ceil.c|libc/ckdint.c|\
-    libc/complex_*.c|libc/exp.c|libc/fabs.c|libc/fenv.c|libc/floor.c|\
-    libc/frexp.c|libc/ldexp.c|libc/log.c|\
-    libc/long_double.c|libc/math_extra.c|libc/modf.c|libc/pow.c|libc/scanf.c|libc/sincos.c|\
-    libc/sqrt.c|libc/stdlib_extra.c|libc/tan.c|libc/threads.c|libc/time.c|libc/wchar.c) \
+    libc/threads.c) \
       continue ;;
   esac
   obj="$$work/$$(basename "$${src%.c}").o"
