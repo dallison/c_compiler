@@ -377,3 +377,55 @@ if [[ "$invalid_output" != *"Invalid language standard -std=c24"* ]]; then
   echo "invalid_std: missing invalid -std diagnostic" >&2
   exit 1
 fi
+
+# Digraphs (C95) and C23 compound-literal storage-class specifiers.
+expect_compile c95_digraphs \
+  'int a<:2:> = <% 1, 2 %>;
+int main(void) { return a<:0:> + a<:1:> - 3; }' \
+  -std=c99
+
+expect_compile c23_digraph_hash \
+  '%:define N 4
+int a<:2:> = <% 1, N %>;
+int main(void) { return a<:1:> - N; }' \
+  -std=c23
+
+expect_compile c23_compound_literal_storage \
+  'int value = (constexpr int){4};
+int *global = (int[]){1, 2, 3};
+int main(void) {
+  int *p = (static int[]){1, 2, 3};
+  int *local = (int[]){1, 2, 3};
+  int scalar = (int){5};
+  int r = (register int){5};
+  int *q = (static thread_local int[]){7};
+  return value + global[2] + p[2] + local[0] + scalar + r + q[0] - 26;
+}' \
+  -std=c23
+
+expect_compile c23_compound_literal_pointer_address \
+  'int x;
+int *p = (int *){&x};
+int main(void) { return p == &x ? 0 : 1; }' \
+  -std=c23
+
+expect_compile c23_compound_literal_thread_address \
+  'thread_local int x = 7;
+int *p = (int *){&x};
+thread_local int *q = &x;
+int main(void) { return p == &x && q == &x && *p == 7 ? 0 : 1; }' \
+  -std=c23
+
+expect_fail c17_compound_literal_storage \
+  'int main(void) { return ((static int[]){1, 2})[0]; }' \
+  -std=c17
+
+expect_fail_with c23_register_constexpr \
+  "register cannot be combined" \
+  'int main(void) { return (register constexpr int){1}; }' \
+  -std=c23
+
+expect_fail_with c23_register_address \
+  "Cannot take the address of a register object" \
+  'int main(void) { return *(int *)&(register int){1}; }' \
+  -std=c23

@@ -165,7 +165,8 @@ void ParseCXXDefaultDeleteFunctionSpecifier(Syntax* syntax,
 static void ParseOldStyleParameterDeclarations(Syntax* syntax, Symbol* sym) {
   // Stop at end of input as well: the recovery below cannot move past it, so
   // an unparsable argument declaration would repeat forever.
-  while (!LexLookingAt(syntax->lex, TOK(lbrace)) && !LexEof(syntax->lex)) {
+  while (!LexLookingAt(syntax->lex, TOK(lbrace)) &&
+         !LexLookingAt(syntax->lex, TOK(try)) && !LexEof(syntax->lex)) {
     Token token_before = syntax->lex->current_token;
     SourceLocation location_before = syntax->lex->current_token_location;
     int errors_before = NumErrors();
@@ -481,15 +482,24 @@ ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     ParseOldStyleParameterDeclarations(syntax, sym);
   }
 
+  // `try` of a function-try-block precedes the ctor-initializer.
+  bool function_try = CompilerIsCXX() && LexMatch(syntax->lex, TOK(try));
+
   CXXConstructorInitList cxx_initializers;
   SyntaxCXXConstructorInitListInit(&cxx_initializers);
   ParseFunctionConstructorInitializers(syntax, sym, &cxx_initializers);
 
   ASTNode* result = NULL;
   if (sym->type->info.function.is_defaulted) {
+    if (function_try) {
+      SyntaxError(syntax, "a defaulted function cannot have a function-try-block");
+    }
     result = DefineDefaultedFunction(syntax, declarations, sym, old_sym,
                                      &cxx_initializers);
   } else if (sym->type->info.function.is_deleted) {
+    if (function_try) {
+      SyntaxError(syntax, "a deleted function cannot have a function-try-block");
+    }
     if (old_sym != NULL && TypeIsFunction(old_sym->type)) {
       old_sym->type->info.function.is_deleted = true;
     }
@@ -497,6 +507,15 @@ ASTNode* DeclareOrDefineFunction(Syntax* syntax,
     result = DefineFunctionWithBody(syntax, declarations, sym, old_sym,
                                     &cxx_initializers,
                                     definition_errors_before);
+    if (function_try) {
+      SyntaxOpenScope(syntax);
+      AddFunctionScopeSymbols(syntax, sym->type);
+      Vector* catches = SyntaxParseCatchHandlers(syntax, TC(decl));
+      SyntaxCloseScope(syntax);
+      SyntaxWrapFunctionTryBlock(sym->type, catches);
+    }
+  } else if (function_try) {
+    SyntaxError(syntax, "Expected '{' in function-try-block");
   } else {
     // Function is a declaration.  If the old symbol was inline, this is
     // an inline definition in C. C++ emits inline definitions directly.

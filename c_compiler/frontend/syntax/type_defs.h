@@ -353,6 +353,7 @@ typedef struct FunctionInfo {
   bool is_volatile_member : 1;  // C++ trailing volatile qualifier.     // @wire 49
   bool has_explicit_object_parameter : 1;  // C++23 `this T self`.       // @wire 50
   bool is_decltype_auto_return_deduced : 1;  // Return used decltype(auto). // @wire 51
+  bool is_function_try_block : 1;  // C++ function-try-block.             // @wire -
 } FunctionInfo;
 
 extern const FunctionInfoExtra kNoFunctionInfoExtra;

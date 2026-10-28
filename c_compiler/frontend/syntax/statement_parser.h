@@ -19,6 +19,18 @@ ASTNode* SyntaxParseAsmStatement(Syntax* syntax, TokenClass followers);
 // Parses a C++26/29 `consteval { ... }` block and returns a ConstevalBlockASTNode.
 ASTNode* SyntaxParseConstevalBlock(Syntax* syntax, TokenClass followers);
 
+// Parses the handler-seq of a function-try-block (`catch` clauses). The
+// function scope that should see the parameters must already be open.
+Vector* SyntaxParseCatchHandlers(Syntax* syntax, TokenClass followers);
+
+// Wraps `func`'s body in a try statement with `catches`. Constructor and
+// destructor handlers rethrow when control reaches their end.
+void SyntaxWrapFunctionTryBlock(TypeRecord* func, Vector* catches);
+
+// Statements that should receive a constructor preamble. A function-try-block
+// keeps that preamble inside the try, so a constructor exception is caught.
+Vector* FunctionTryBodyStatements(TypeRecord* func);
+
 // Replaces a deferred range-for begin-expr / end-expr (AST_OP(range_begin) /
 // AST_OP(range_end), emitted for a loop whose range type was dependent at parse
 // time) with the form [stmt.ranged] prescribes for the now-known range type.

@@ -963,6 +963,64 @@ bool LoaderInitFromFile(Loader* loader, String* filename,  int32_t flags,
   return ok && LoaderNumErrors() == 0;
 }
 
+// Rewrite pointers to thread-local objects so they hold this thread's address.
+// `main_image` also patches ordinary static data; a later thread only patches
+// pointers that live in its own TLS block.
+static void ApplyTlsAbsoluteFixups(const Loader* loader, void* tls_block,
+                                   uint64_t thread_pointer, size_t block_size,
+                                   bool main_image) {
+  if (loader == NULL || loader->elf_file == NULL || tls_block == NULL ||
+      loader->arch == NULL) {
+    return;
+  }
+  ELFReaderSection* section =
+      ELFReaderFileFindSection(loader->elf_file, ".davecc_tls_abs");
+  if (section == NULL || section->header == NULL || section->header->size < 24) {
+    return;
+  }
+  const unsigned char* bytes = section->contents;
+  if (bytes == NULL && loader->elf_file->base != NULL) {
+    bytes = (const unsigned char*)loader->elf_file->base + section->header->offset;
+  }
+  if (bytes == NULL) {
+    return;
+  }
+  size_t tcb = loader->arch->tls_tcb_size;
+  size_t count = (size_t)section->header->size / 24;
+  for (size_t i = 0; i < count; i++) {
+    const unsigned char* rec = bytes + i * 24;
+    uint64_t place = 0;
+    uint64_t tls_offset = 0;
+    uint32_t place_is_tls = 0;
+    uint32_t pointer_size = 0;
+    memcpy(&place, rec, 8);
+    memcpy(&tls_offset, rec + 8, 8);
+    memcpy(&place_is_tls, rec + 16, 4);
+    memcpy(&pointer_size, rec + 20, 4);
+    if (pointer_size != 4 && pointer_size != 8) {
+      continue;
+    }
+    uint64_t address = thread_pointer + (uint64_t)tcb + tls_offset;
+    if (place_is_tls) {
+      // `place` is an offset in the TLS template, which follows the TCB.
+      uint64_t slot = (uint64_t)tcb + place;
+      if (slot > block_size || pointer_size > block_size - slot) {
+        continue;
+      }
+      StoreGuestPointer((unsigned char*)tls_block + slot, pointer_size, address);
+      continue;
+    }
+    if (!main_image) {
+      continue;
+    }
+    uint64_t runtime = 0;
+    if (!LoaderLinkedAddressToRuntime((Loader*)loader, NULL, place, &runtime)) {
+      continue;
+    }
+    StoreGuestPointer((unsigned char*)(uintptr_t)runtime, pointer_size, address);
+  }
+}
+
 static bool LoaderInitMainThreadTls(Loader* loader) {
   memset(&loader->tls, 0, sizeof(loader->tls));
 
@@ -1024,6 +1082,8 @@ static bool LoaderInitMainThreadTls(Loader* loader) {
   loader->tls.block_size = block_size;
   loader->tls.fs_base = thread_pointer;
   loader->tls.tp_base = thread_pointer;
+  ApplyTlsAbsoluteFixups(loader, block, thread_pointer, block_size,
+                         /*main_image=*/true);
   return true;
 }
 
@@ -1067,6 +1127,8 @@ bool LoaderAllocThreadTlsBlock(const Loader* loader, void** block_out,
            (size_t)loader->tls.filesz);
   }
 
+  ApplyTlsAbsoluteFixups(loader, block, thread_pointer, block_size,
+                         /*main_image=*/false);
   *block_out = block;
   *block_size_out = block_size;
   *fs_base_out = thread_pointer;

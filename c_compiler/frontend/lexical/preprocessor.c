@@ -2085,6 +2085,18 @@ static void Tokenize(Preprocessor* p, String* input, String* output, size_t star
       i++;
       continue;
     }
+    // Digraphs `%:` and `%:%:` are the preprocessing tokens `#` and `##`.
+    if (ch == '%' && i + 1 < input->length && input->value[i + 1] == ':') {
+      if (i + 3 < input->length && input->value[i + 2] == '%' &&
+          input->value[i + 3] == ':') {
+        StringAppendChar(output, PPTOK(hashhash));
+        i += 4;
+      } else {
+        StringAppendChar(output, PPTOK(hash));
+        i += 2;
+      }
+      continue;
+    }
     
     if (ch == '(') {
       StringAppendChar(output, PPTOK(openparen));
@@ -4778,14 +4790,23 @@ bool PreprocessorParseDirective(Preprocessor* p, String* line) {
     pos = SkipToEndOfComment(line, pos);
   }
   pos = SkipSpacesAndComments(p, pos, line, NULL);
-  if (pos >= line->length || line->value[pos] != '#') {
+  // `#` or the digraph `%:`. `%:%:` is `##`, not a directive.
+  bool directive_hash = pos < line->length && line->value[pos] == '#';
+  bool directive_digraph = false;
+  if (!directive_hash && pos + 1 < line->length && line->value[pos] == '%' &&
+      line->value[pos + 1] == ':') {
+    bool hash_hash = pos + 3 < line->length && line->value[pos + 2] == '%' &&
+                     line->value[pos + 3] == ':';
+    directive_digraph = !hash_hash;
+  }
+  if (!directive_hash && !directive_digraph) {
     if (track_guard && src->include_guard_state != kIncludeGuardOpen &&
         LineHasContentFrom(p, line, pos)) {
       src->include_guard_state = kIncludeGuardNone;
     }
     return false;
   }
-  pos++;
+  pos += directive_digraph ? 2 : 1;
   pos = SkipSpacesAndComments(p, pos, line, NULL);
 
   String command_name = {0};

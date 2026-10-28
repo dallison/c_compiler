@@ -3131,9 +3131,41 @@ static IRNode* GenerateInitialization(Generator* gen, BinaryASTNode* node) {
   return dest;
 }
 
+static bool CompoundLiteralResultIsAddress(CompoundLiteralASTNode* node) {
+  return (node->base.flags & kASTNeedAddress) != 0 ||
+         TypeIsArray(node->base.type) || TypeIsFunction(node->base.type) ||
+         TypeIsVector(node->base.type) ||
+         TypeIsStructOrUnion(node->base.type) ||
+         TypeUsesLongDoubleRepresentation(node->base.type) ||
+         TypeIsInt128(node->base.type) ||
+         TypeIsMemberPointerAggregate(node->base.type);
+}
+
 static IRNode* GenerateCompoundLiteral(Generator* gen, CompoundLiteralASTNode* node) {
+  if (node->sym != NULL && node->sym->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node->sym)->symbol;
+    if (symbol != NULL &&
+        (StorageIs(symbol->storage, STO(static)) ||
+         StorageIs(symbol->storage, STO(thread)))) {
+      // The object was constant-initialized in static storage. Evaluating the
+      // literal yields that object; it is not initialized again. A scalar
+      // rvalue is the object's value; an aggregate, or a use that asked for
+      // the address, yields the object itself.
+      if (CompoundLiteralResultIsAddress(node)) {
+        node->sym->flags |= kASTNeedAddress;
+      } else {
+        node->sym->flags &= ~kASTNeedAddress;
+      }
+      return GenerateExpression(gen, node->sym);
+    }
+  }
   assert(node->initializer->op == AST_OP(braced_init));
 
+  // The temporary is stored through its address. A scalar identifier would
+  // otherwise load the uninitialized object and use that value as the pointer.
+  if (node->sym != NULL) {
+    node->sym->flags |= kASTNeedAddress;
+  }
   // Get destination address.
   IRNode* dest = gen->current_struct_address != NULL &&
                          (TypeIsStructOrUnion(node->base.type) ||
@@ -3161,7 +3193,10 @@ static IRNode* GenerateCompoundLiteral(Generator* gen, CompoundLiteralASTNode* n
   }
   GenerateBracedInitializer(gen, (ASTNode*)node, init, dest,
                             destination_was_zeroed);
-  return dest;
+  if (CompoundLiteralResultIsAddress(node)) {
+    return dest;
+  }
+  return EmitObjectLoad(gen, (ASTNode*)node, dest);
 }
 
 /* C++ assignment expressions are lvalues. The outer operation in a

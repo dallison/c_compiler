@@ -1818,6 +1818,27 @@ static void CollectOperator(Lex* lex) {
         } else {
           lex->current_token = TOK(lessless);
         }
+      } else if (ch == '%') {
+        // Digraph `<%` is `{`.
+        lex->current_token = TOK(lbrace);
+        lex->pos++;
+      } else if (ch == ':') {
+        // C++11: `<::` is `<` `::` unless the character after `<::` is `:` or
+        // `>`. Otherwise `<:` is the digraph for `[`.
+        // `pos` already addresses the first character after `<`.
+        bool cxx_scope_not_digraph = false;
+        if (CompilerCXXAtLeast(kLanguageStandardCXX11) &&
+            lex->line.value[lex->pos] == ':' &&
+            lex->line.value[lex->pos + 1] == ':') {
+          char after = lex->line.value[lex->pos + 2];
+          cxx_scope_not_digraph = after != ':' && after != '>';
+        }
+        if (cxx_scope_not_digraph) {
+          lex->current_token = TOK(less);
+        } else {
+          lex->current_token = TOK(lsquare);
+          lex->pos++;
+        }
       } else {
         lex->current_token = TOK(less);
       }
@@ -1827,6 +1848,19 @@ static void CollectOperator(Lex* lex) {
       if (ch == '=') {
         lex->current_token = TOK(percenteq);
         lex->pos++;
+      } else if (ch == '>') {
+        // Digraph `%>` is `}`.
+        lex->current_token = TOK(rbrace);
+        lex->pos++;
+      } else if (ch == ':') {
+        // Digraph `%:` is `#` and `%:%:` is `##`. Directives are recognized
+        // on the raw line. A digraph that survives to phase 7 is a `#` token.
+        lex->pos++;
+        if (lex->line.value[lex->pos] == '%' &&
+            lex->line.value[lex->pos + 1] == ':') {
+          lex->pos += 2;
+        }
+        lex->current_token = TOK(hash);
       } else {
         lex->current_token = TOK(percent);
       }
@@ -1901,7 +1935,11 @@ static void CollectOperator(Lex* lex) {
       break;
     case ':':
       lex->pos++;
-      if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
+      if (lex->line.value[lex->pos] == '>') {
+        // Digraph `:>` is `]`. `::` is longer and is handled below.
+        lex->current_token = TOK(rsquare);
+        lex->pos++;
+      } else if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
           lex->line.value[lex->pos] == ']') {
         lex->current_token = TOK(splice_close);
         lex->pos++;

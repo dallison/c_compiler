@@ -229,7 +229,26 @@ typedef struct Linker {
   LinkerConfig config;
   
   int num_errors;
+  // Absolute data relocations of thread-local symbols. The symbol value is an
+  // offset in the TLS template, so the loader rewrites each place to the
+  // running thread's address. Entries are TlsAbsoluteFixup*.
+  Vector tls_abs_fixups;
 } Linker;
+
+// One pointer in the linked image that must hold a thread's address of a
+// thread-local object. `place` is a link-time virtual address, or a TLS-template
+// offset when `place_is_tls` is set. `tls_offset` is the object's offset in
+// that template.
+typedef struct TlsAbsoluteFixup {
+  uint64_t place;
+  uint64_t tls_offset;
+  uint32_t place_is_tls;
+  uint32_t pointer_size;
+} TlsAbsoluteFixup;
+
+void LinkerRecordTlsAbsoluteFixup(Linker* linker, uint64_t place,
+                                  uint64_t tls_offset, bool place_is_tls,
+                                  uint32_t pointer_size);
 
 // File offset of the section header table: the ELF file header followed by the
 // program segment headers.  Uses the output format's on-disk sizes (ELF32 or
