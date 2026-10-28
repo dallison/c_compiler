@@ -44,14 +44,21 @@ struct __coroutine_traits_impl<R, __coroutine_void_t<typename R::promise_type>> 
 template <class R, class... Args>
 struct coroutine_traits : __coroutine_traits_impl<R> {};
 
-// Prefix of every compiler-generated coroutine frame. The promise object is
-// placed immediately after this header.
+// Prefix of every compiler-generated coroutine frame. The promise is the next
+// member, so its address is this prefix rounded up to alignof(Promise).
 struct __coroutine_frame {
   int __state;
   bool __done;
   void (*__resume)(void*);
   void (*__destroy)(void*);
 };
+
+template <class Promise>
+constexpr size_t __coroutine_promise_offset() noexcept {
+  constexpr size_t header = sizeof(__coroutine_frame);
+  constexpr size_t alignment = alignof(Promise);
+  return (header + alignment - 1) & ~(alignment - 1);
+}
 
 template <class Promise = void>
 struct coroutine_handle;
@@ -126,7 +133,8 @@ struct coroutine_handle {
 
   static coroutine_handle from_promise(Promise& promise) {
     char* promise_address = reinterpret_cast<char*>(&promise);
-    return coroutine_handle(promise_address - sizeof(__coroutine_frame));
+    return coroutine_handle(promise_address -
+                            __coroutine_promise_offset<Promise>());
   }
 
   constexpr void* address() const noexcept { return __handle; }
@@ -137,7 +145,8 @@ struct coroutine_handle {
 
   Promise& promise() const {
     char* frame_address = static_cast<char*>(__handle);
-    return *reinterpret_cast<Promise*>(frame_address + sizeof(__coroutine_frame));
+    return *reinterpret_cast<Promise*>(
+        frame_address + __coroutine_promise_offset<Promise>());
   }
 
   constexpr explicit operator bool() const noexcept { return __handle != nullptr; }
@@ -203,44 +212,33 @@ struct hash<coroutine_handle<Promise>> {
 
 struct noop_coroutine_promise {};
 
+// [coroutine.handle.noop]: there is one noop coroutine. It is never done,
+// resuming or destroying it has no effect, and it cannot be a null handle.
 template <>
 struct coroutine_handle<noop_coroutine_promise> {
-  constexpr coroutine_handle() noexcept : __handle(nullptr) {}
-
-  constexpr coroutine_handle(decltype(nullptr)) noexcept : __handle(nullptr) {}
-
-  coroutine_handle& operator=(decltype(nullptr)) noexcept {
-    __handle = nullptr;
-    return *this;
+  constexpr operator coroutine_handle<void>() const noexcept {
+    return coroutine_handle<void>::from_address(address());
   }
 
-  constexpr void* address() const noexcept { return __handle; }
-
-  constexpr explicit operator bool() const noexcept { return __handle != nullptr; }
+  constexpr explicit operator bool() const noexcept { return true; }
 
   constexpr bool done() const noexcept { return false; }
 
-  constexpr void resume() const noexcept {}
-
   constexpr void operator()() const noexcept {}
+
+  constexpr void resume() const noexcept {}
 
   constexpr void destroy() const noexcept {}
 
   noop_coroutine_promise& promise() const noexcept;
 
-  constexpr operator coroutine_handle<void>() const noexcept {
-    return coroutine_handle<void>::from_address(__handle);
-  }
-
-  static constexpr coroutine_handle from_address(void* address) noexcept {
-    return coroutine_handle(address);
-  }
-
-  void* __handle;
+  constexpr void* address() const noexcept { return __address; }
 
  private:
   explicit constexpr coroutine_handle(void* address) noexcept
-      : __handle(address) {}
+      : __address(address) {}
+
+  void* __address;
 
   friend coroutine_handle<noop_coroutine_promise> noop_coroutine() noexcept;
 };
@@ -259,12 +257,13 @@ inline __noop_coroutine_state __noop_coroutine_state_instance = {
 
 inline noop_coroutine_promise&
 coroutine_handle<noop_coroutine_promise>::promise() const noexcept {
-  return __noop_coroutine_state_instance.__promise;
+  return *reinterpret_cast<noop_coroutine_promise*>(
+      static_cast<char*>(address()) +
+      __coroutine_promise_offset<noop_coroutine_promise>());
 }
 
 inline noop_coroutine_handle noop_coroutine() noexcept {
-  return noop_coroutine_handle::from_address(
-      &__noop_coroutine_state_instance.__frame);
+  return noop_coroutine_handle(&__noop_coroutine_state_instance.__frame);
 }
 
 struct suspend_never {
