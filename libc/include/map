@@ -167,7 +167,6 @@ bool operator==(const map<Key, T, Compare, Allocator>& left,
 #include <memory_resource>
 #endif
 #include <optional>
-#include <vector>
 #include <stddef.h>
 #ifdef __cpp_exceptions
 #include <stdexcept>
@@ -219,6 +218,13 @@ struct __node {
         right(nullptr),
         color(0),
         value(v.first, std::move(v.second)) {}
+
+  __node(Key&& key, T&& mapped)
+      : parent(nullptr),
+        left(nullptr),
+        right(nullptr),
+        color(0),
+        value(std::move(key), std::move(mapped)) {}
 };
 
 template <class Compare, class = void>
@@ -494,15 +500,73 @@ class map {
   class node_type {
    public:
     __node* node_ptr_ = nullptr;
+    // Empty handles are default-constructible even when the allocator is not
+    // ([container.node.overview]).  The allocator is built only while this
+    // handle owns a node.  Public so map can transfer it; the nested class's
+    // members are not accessible to the enclosing class.
+    alignas(__node_allocator) unsigned char alloc_storage_[sizeof(__node_allocator)];
+    bool has_alloc_ = false;
+
+    node_type() noexcept = default;
+    node_type(const node_type&) = delete;
+    node_type& operator=(const node_type&) = delete;
+
+    node_type(node_type&& other) noexcept : node_ptr_(other.node_ptr_) {
+      other.node_ptr_ = nullptr;
+      if (other.has_alloc_) {
+        new (alloc_storage_) __node_allocator(
+            static_cast<__node_allocator&&>(other.__alloc()));
+        has_alloc_ = true;
+        other.__alloc().~__node_allocator();
+        other.has_alloc_ = false;
+      }
+    }
+
+    node_type& operator=(node_type&& other) noexcept {
+      if (this != &other) {
+        __reset();
+        node_ptr_ = other.node_ptr_;
+        other.node_ptr_ = nullptr;
+        if (other.has_alloc_) {
+          new (alloc_storage_) __node_allocator(
+              static_cast<__node_allocator&&>(other.__alloc()));
+          has_alloc_ = true;
+          other.__alloc().~__node_allocator();
+          other.has_alloc_ = false;
+        }
+      }
+      return *this;
+    }
+
+    ~node_type() { __reset(); }
 
     bool empty() const noexcept { return node_ptr_ == nullptr; }
     explicit operator bool() const noexcept { return node_ptr_ != nullptr; }
 
-    allocator_type get_allocator() const { return allocator_type(); }
+    allocator_type get_allocator() const { return allocator_type(__alloc()); }
     key_type& key() const {
       return const_cast<key_type&>(node_ptr_->value.first);
     }
     mapped_type& mapped() const { return node_ptr_->value.second; }
+
+    __node_allocator& __alloc() noexcept {
+      return *reinterpret_cast<__node_allocator*>(alloc_storage_);
+    }
+    const __node_allocator& __alloc() const noexcept {
+      return *reinterpret_cast<const __node_allocator*>(alloc_storage_);
+    }
+
+    void __reset() noexcept {
+      if (node_ptr_ != nullptr) {
+        node_ptr_->~__node();
+        __node_alloc_traits::deallocate(__alloc(), node_ptr_, 1);
+        node_ptr_ = nullptr;
+      }
+      if (has_alloc_) {
+        __alloc().~__node_allocator();
+        has_alloc_ = false;
+      }
+    }
   };
 
   struct insert_return_type {
@@ -683,6 +747,18 @@ class map {
     return node;
   }
 
+  __node* __create_node(key_type&& key, mapped_type&& mapped) {
+    __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
+    __DAVECC_TRY {
+      new (node) __node(static_cast<key_type&&>(key),
+                        static_cast<mapped_type&&>(mapped));
+    } __DAVECC_CATCH_ALL {
+      __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+      __DAVECC_RETHROW;
+    }
+    return node;
+  }
+
   __node* __create_node(const key_type& key, mapped_type&& mapped) {
     __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
     __DAVECC_TRY {
@@ -696,7 +772,7 @@ class map {
 
   void __destroy_node(__node* node) {
     node->~__node();
-    ::operator delete(static_cast<void*>(node));
+    __node_alloc_traits::deallocate(__node_alloc_, node, 1);
   }
 
   static __color __node_color(__node* node) {
@@ -929,6 +1005,10 @@ class map {
   node_type __extract_node(__node* node) {
     node_type result;
     result.node_ptr_ = __detach_node(node);
+    if (result.node_ptr_ != nullptr) {
+      new (result.alloc_storage_) __node_allocator(__node_alloc_);
+      result.has_alloc_ = true;
+    }
     return result;
   }
 
@@ -938,7 +1018,7 @@ class map {
         __size_(0),
         __comp_(),
         __alloc_(),
-        __node_alloc_() {}
+        __node_alloc_(__alloc_) {}
 
   explicit map(const key_compare& comp,
                const allocator_type& alloc = allocator_type())
@@ -946,14 +1026,14 @@ class map {
         __size_(0),
         __comp_(comp),
         __alloc_(alloc),
-        __node_alloc_() {}
+        __node_alloc_(__alloc_) {}
 
   explicit map(const allocator_type& alloc)
       : __root_(nullptr),
         __size_(0),
         __comp_(),
         __alloc_(alloc),
-        __node_alloc_() {}
+        __node_alloc_(__alloc_) {}
 
   template <class InputIt>
   map(InputIt first, InputIt last,
@@ -963,7 +1043,7 @@ class map {
         __size_(0),
         __comp_(comp),
         __alloc_(alloc),
-        __node_alloc_() {
+        __node_alloc_(__alloc_) {
     insert(first, last);
   }
 
@@ -974,7 +1054,7 @@ class map {
         __size_(0),
         __comp_(comp),
         __alloc_(alloc),
-        __node_alloc_() {
+        __node_alloc_(__alloc_) {
     insert(init);
   }
 
@@ -984,7 +1064,7 @@ class map {
         __comp_(other.__comp_),
         __alloc_(__alloc_traits::select_on_container_copy_construction(
             other.__alloc_)),
-        __node_alloc_() {
+        __node_alloc_(__alloc_) {
     __copy_from(other);
   }
 
@@ -993,16 +1073,16 @@ class map {
         __size_(0),
         __comp_(other.__comp_),
         __alloc_(alloc),
-        __node_alloc_() {
+        __node_alloc_(__alloc_) {
     __copy_from(other);
   }
 
-  map(map&& other)
+  map(map&& other) noexcept
       : __root_(other.__root_),
         __size_(other.__size_),
-        __comp_(other.__comp_),
-        __alloc_(other.__alloc_),
-        __node_alloc_() {
+        __comp_(static_cast<key_compare&&>(other.__comp_)),
+        __alloc_(static_cast<allocator_type&&>(other.__alloc_)),
+        __node_alloc_(__alloc_) {
     other.__root_ = nullptr;
     other.__size_ = 0;
   }
@@ -1012,9 +1092,20 @@ class map {
         __size_(0),
         __comp_(other.__comp_),
         __alloc_(alloc),
-        __node_alloc_() {
-    __copy_from(other);
-    other.clear();
+        __node_alloc_(__alloc_) {
+    if (__alloc_ == other.__alloc_) {
+      __root_ = other.__root_;
+      __size_ = other.__size_;
+      other.__root_ = nullptr;
+      other.__size_ = 0;
+    } else {
+      iterator it = other.begin();
+      while (it != other.end()) {
+        insert(value_type(it->first, static_cast<mapped_type&&>(it->second)));
+        ++it;
+      }
+      other.clear();
+    }
   }
 
   ~map() {
@@ -1027,25 +1118,39 @@ class map {
       __comp_ = other.__comp_;
       if (__alloc_traits::__propagate_on_container_copy_assignment()) {
         __alloc_ = other.__alloc_;
-        __node_alloc_ = __node_allocator();
+        __node_alloc_ = __node_allocator(__alloc_);
       }
       __copy_from(other);
     }
     return *this;
   }
 
-  map& operator=(map&& other) {
+  map& operator=(map&& other) noexcept(
+      __alloc_traits::__propagate_on_container_move_assignment() ||
+      __alloc_traits::__is_always_equal()) {
     if (this != &other) {
-      clear();
-      __root_ = other.__root_;
-      __size_ = other.__size_;
-      __comp_ = other.__comp_;
-      if (__alloc_traits::__propagate_on_container_move_assignment()) {
-        __alloc_ = other.__alloc_;
-        __node_alloc_ = __node_allocator();
+      if (__alloc_traits::__propagate_on_container_move_assignment() ||
+          __alloc_ == other.__alloc_) {
+        clear();
+        __comp_ = static_cast<key_compare&&>(other.__comp_);
+        if (__alloc_traits::__propagate_on_container_move_assignment()) {
+          __alloc_ = static_cast<allocator_type&&>(other.__alloc_);
+          __node_alloc_ = __node_allocator(__alloc_);
+        }
+        __root_ = other.__root_;
+        __size_ = other.__size_;
+        other.__root_ = nullptr;
+        other.__size_ = 0;
+      } else {
+        clear();
+        __comp_ = other.__comp_;
+        iterator it = other.begin();
+        while (it != other.end()) {
+          insert(value_type(it->first, static_cast<mapped_type&&>(it->second)));
+          ++it;
+        }
+        other.clear();
       }
-      other.__root_ = nullptr;
-      other.__size_ = 0;
     }
     return *this;
   }
@@ -1078,6 +1183,9 @@ class map {
 
   bool empty() const noexcept { return __size_ == 0; }
   size_type size() const noexcept { return __size_; }
+  size_type max_size() const noexcept {
+    return __node_alloc_traits::max_size(__node_alloc_);
+  }
 
   void clear() noexcept {
     __clear_node(__root_);
@@ -1085,7 +1193,9 @@ class map {
     __size_ = 0;
   }
 
-  void swap(map& other) noexcept {
+  void swap(map& other) noexcept(
+      __alloc_traits::__propagate_on_container_swap() ||
+      __alloc_traits::__is_always_equal()) {
     std::swap(__root_, other.__root_);
     std::swap(__size_, other.__size_);
     std::swap(__comp_, other.__comp_);
@@ -1137,22 +1247,17 @@ class map {
   insert_return_type insert(node_type&& nh) {
     insert_return_type out;
     if (nh.empty()) {
-      typename map::iterator pos(nullptr, __root_);
-      out.position.__node_ = pos.__node_;
-      out.position.__root_ = pos.__root_;
+      out.position = end();
       out.inserted = false;
-      out.node.node_ptr_ = nh.node_ptr_;
       return out;
     }
     pair<iterator, bool> result = __insert_detached_node(nh.node_ptr_);
-    typename map::iterator pos = result.first;
-    out.position.__node_ = pos.__node_;
-    out.position.__root_ = pos.__root_;
+    out.position = result.first;
     out.inserted = result.second;
-    out.node.node_ptr_ = nh.node_ptr_;
     if (result.second) {
       nh.node_ptr_ = nullptr;
-      out.node.node_ptr_ = nullptr;
+    } else {
+      out.node = static_cast<node_type&&>(nh);
     }
     return out;
   }
@@ -1172,6 +1277,25 @@ class map {
   iterator emplace_hint(const_iterator hint, Args&&... args) {
     static_cast<void>(hint);
     return emplace(std::forward<Args>(args)...).first;
+  }
+
+  template <class... Args>
+  pair<iterator, bool> try_emplace(key_type&& key, Args&&... args) {
+    __node* found = __find_node(key);
+    if (found != nullptr) {
+      return pair<iterator, bool>(iterator(found, __root_), false);
+    }
+    mapped_type mapped(std::forward<Args>(args)...);
+    return __insert_node(__create_node(static_cast<key_type&&>(key),
+                                       static_cast<mapped_type&&>(mapped)));
+  }
+
+  template <class... Args>
+  iterator try_emplace(const_iterator hint, key_type&& key, Args&&... args) {
+    static_cast<void>(hint);
+    return try_emplace(static_cast<key_type&&>(key),
+                       std::forward<Args>(args)...)
+        .first;
   }
 
   template <class... Args>
@@ -1205,6 +1329,10 @@ class map {
   iterator insert_or_assign(const_iterator hint, const key_type& key, M&& obj) {
     static_cast<void>(hint);
     return insert_or_assign(key, std::forward<M>(obj)).first;
+  }
+
+  mapped_type& operator[](key_type&& key) {
+    return try_emplace(static_cast<key_type&&>(key)).first->second;
   }
 
   mapped_type& operator[](const key_type& key) {
@@ -1470,46 +1598,710 @@ class map {
 template <class Key, class T, class Compare = less<Key>,
           class Allocator = allocator<pair<const Key, T>>>
 class multimap {
-  typedef vector<pair<Key, T> > storage_type;
-
  public:
-  typedef Key key_type;
-  typedef T mapped_type;
-  typedef pair<Key, T> value_type;
-  typedef Compare key_compare;
-  typedef Allocator allocator_type;
-  typedef typename storage_type::size_type size_type;
-  typedef typename storage_type::difference_type difference_type;
-  typedef value_type& reference;
-  typedef const value_type& const_reference;
-  typedef typename storage_type::iterator iterator;
-  typedef typename storage_type::const_iterator const_iterator;
+  using key_type = Key;
+  using mapped_type = T;
+  using value_type = pair<const Key, T>;
+  using key_compare = Compare;
+  using allocator_type = Allocator;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = value_type&;
+  using const_reference = const value_type&;
+  using pointer = value_type*;
+  using const_pointer = const value_type*;
 
-  explicit multimap(const Compare& compare = Compare(),
-                    const Allocator& = Allocator())
-      : compare_(compare) {}
+  class value_compare {
+    friend class multimap;
+    key_compare comp_;
+    explicit value_compare(key_compare comp) : comp_(comp) {}
 
-  iterator begin() { return values_.begin(); }
-  const_iterator begin() const { return values_.begin(); }
-  iterator end() { return values_.end(); }
-  const_iterator end() const { return values_.end(); }
-  bool empty() const { return values_.empty(); }
-  size_type size() const { return values_.size(); }
-
-  iterator insert(const value_type& value) {
-    values_.push_back(value);
-    return values_.end() - 1;
-  }
-
-  void clear() { values_.clear(); }
-  void swap(multimap& other) {
-    values_.swap(other.values_);
-    std::swap(compare_, other.compare_);
-  }
+   public:
+    bool operator()(const value_type& left, const value_type& right) const {
+      return comp_(left.first, right.first);
+    }
+  };
 
  private:
-  storage_type values_;
-  Compare compare_;
+  using __alloc_traits = allocator_traits<allocator_type>;
+  enum __color { __red, __black };
+  using __node = __map_detail::__node<Key, T>;
+  using __node_allocator = typename __alloc_traits::template rebind_alloc<__node>;
+  using __node_alloc_traits = allocator_traits<__node_allocator>;
+
+  static __color __node_color(__node* node) {
+    return node == nullptr ? __black : static_cast<__color>(node->color);
+  }
+
+ public:
+  class iterator {
+   public:
+    using iterator_category = bidirectional_iterator_tag;
+    using value_type = typename multimap::value_type;
+    using difference_type = typename multimap::difference_type;
+    using pointer = typename multimap::pointer;
+    using reference = typename multimap::reference;
+
+    __node* __node_ = nullptr;
+    __node* __root_ = nullptr;
+
+    iterator() = default;
+    iterator(__node* node, __node* root) : __node_(node), __root_(root) {}
+
+    reference operator*() const { return __node_->value; }
+    pointer operator->() const { return &__node_->value; }
+
+    iterator& operator++() {
+      __node_ = __next(__node_);
+      return *this;
+    }
+    iterator operator++(int) {
+      iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+    iterator& operator--() {
+      __node_ = __node_ == nullptr ? __maximum(__root_) : __prev(__node_);
+      return *this;
+    }
+    iterator operator--(int) {
+      iterator tmp = *this;
+      --(*this);
+      return tmp;
+    }
+    bool operator==(const iterator& other) const { return __node_ == other.__node_; }
+    bool operator!=(const iterator& other) const { return __node_ != other.__node_; }
+
+   private:
+    static __node* __minimum(__node* node) {
+      while (node != nullptr && node->left != nullptr) {
+        node = node->left;
+      }
+      return node;
+    }
+    static __node* __maximum(__node* node) {
+      while (node != nullptr && node->right != nullptr) {
+        node = node->right;
+      }
+      return node;
+    }
+    static __node* __next(__node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      if (node->right != nullptr) {
+        return __minimum(node->right);
+      }
+      __node* parent = node->parent;
+      while (parent != nullptr && node == parent->right) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+    static __node* __prev(__node* node) {
+      if (node->left != nullptr) {
+        return __maximum(node->left);
+      }
+      __node* parent = node->parent;
+      while (parent != nullptr && node == parent->left) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+  };
+
+  class const_iterator {
+   public:
+    using iterator_category = bidirectional_iterator_tag;
+    using value_type = typename multimap::value_type;
+    using difference_type = typename multimap::difference_type;
+    using pointer = typename multimap::const_pointer;
+    using reference = typename multimap::const_reference;
+
+    const __node* __node_ = nullptr;
+    const __node* __root_ = nullptr;
+
+    const_iterator() = default;
+    const_iterator(const __node* node, const __node* root)
+        : __node_(node), __root_(root) {}
+    const_iterator(iterator it) : __node_(it.__node_), __root_(it.__root_) {}
+
+    reference operator*() const { return __node_->value; }
+    pointer operator->() const { return &__node_->value; }
+
+    const_iterator& operator++() {
+      __node_ = __next(__node_);
+      return *this;
+    }
+    const_iterator operator++(int) {
+      const_iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+    const_iterator& operator--() {
+      __node_ = __node_ == nullptr ? __maximum(__root_) : __prev(__node_);
+      return *this;
+    }
+    const_iterator operator--(int) {
+      const_iterator tmp = *this;
+      --(*this);
+      return tmp;
+    }
+    bool operator==(const const_iterator& other) const {
+      return __node_ == other.__node_;
+    }
+    bool operator!=(const const_iterator& other) const {
+      return __node_ != other.__node_;
+    }
+
+   private:
+    static const __node* __minimum(const __node* node) {
+      while (node != nullptr && node->left != nullptr) {
+        node = node->left;
+      }
+      return node;
+    }
+    static const __node* __maximum(const __node* node) {
+      while (node != nullptr && node->right != nullptr) {
+        node = node->right;
+      }
+      return node;
+    }
+    static const __node* __next(const __node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      if (node->right != nullptr) {
+        return __minimum(node->right);
+      }
+      const __node* parent = node->parent;
+      while (parent != nullptr && node == parent->right) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+    static const __node* __prev(const __node* node) {
+      if (node->left != nullptr) {
+        return __maximum(node->left);
+      }
+      const __node* parent = node->parent;
+      while (parent != nullptr && node == parent->left) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+  };
+
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+ private:
+  __node* __root_ = nullptr;
+  size_type __size_ = 0;
+  key_compare __comp_{};
+  allocator_type __alloc_{};
+  __node_allocator __node_alloc_{};
+
+  __node* __create_node(const value_type& value) {
+    __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
+    new (node) __node(value);
+    return node;
+  }
+
+  __node* __create_node(value_type&& value) {
+    __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
+    new (node) __node(static_cast<value_type&&>(value));
+    return node;
+  }
+
+  void __destroy_node(__node* node) {
+    node->~__node();
+    __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+  }
+
+  void __rotate_left(__node* x) {
+    __node* y = x->right;
+    x->right = y->left;
+    if (y->left != nullptr) {
+      y->left->parent = x;
+    }
+    y->parent = x->parent;
+    if (x->parent == nullptr) {
+      __root_ = y;
+    } else if (x == x->parent->left) {
+      x->parent->left = y;
+    } else {
+      x->parent->right = y;
+    }
+    y->left = x;
+    x->parent = y;
+  }
+
+  void __rotate_right(__node* x) {
+    __node* y = x->left;
+    x->left = y->right;
+    if (y->right != nullptr) {
+      y->right->parent = x;
+    }
+    y->parent = x->parent;
+    if (x->parent == nullptr) {
+      __root_ = y;
+    } else if (x == x->parent->left) {
+      x->parent->left = y;
+    } else {
+      x->parent->right = y;
+    }
+    y->right = x;
+    x->parent = y;
+  }
+
+  void __fix_insert(__node* node) {
+    while (node != __root_ && __node_color(node->parent) == __red) {
+      if (node->parent == node->parent->parent->left) {
+        __node* aunt = node->parent->parent->right;
+        if (__node_color(aunt) == __red) {
+          node->parent->color = __black;
+          aunt->color = __black;
+          node->parent->parent->color = __red;
+          node = node->parent->parent;
+        } else {
+          if (node == node->parent->right) {
+            node = node->parent;
+            __rotate_left(node);
+          }
+          node->parent->color = __black;
+          node->parent->parent->color = __red;
+          __rotate_right(node->parent->parent);
+        }
+      } else {
+        __node* aunt = node->parent->parent->left;
+        if (__node_color(aunt) == __red) {
+          node->parent->color = __black;
+          aunt->color = __black;
+          node->parent->parent->color = __red;
+          node = node->parent->parent;
+        } else {
+          if (node == node->parent->left) {
+            node = node->parent;
+            __rotate_right(node);
+          }
+          node->parent->color = __black;
+          node->parent->parent->color = __red;
+          __rotate_left(node->parent->parent);
+        }
+      }
+    }
+    if (__root_ != nullptr) {
+      __root_->color = __black;
+    }
+  }
+
+  // Equivalent keys go to the right, so inorder order keeps earlier
+  // insertions ahead of later ones.
+  iterator __link(__node* fresh) {
+    fresh->parent = nullptr;
+    fresh->left = nullptr;
+    fresh->right = nullptr;
+    fresh->color = __red;
+    __node* parent = nullptr;
+    __node* node = __root_;
+    while (node != nullptr) {
+      parent = node;
+      if (__comp_(fresh->value.first, node->value.first)) {
+        node = node->left;
+      } else {
+        node = node->right;
+      }
+    }
+    fresh->parent = parent;
+    if (parent == nullptr) {
+      __root_ = fresh;
+    } else if (__comp_(fresh->value.first, parent->value.first)) {
+      parent->left = fresh;
+    } else {
+      parent->right = fresh;
+    }
+    ++__size_;
+    __fix_insert(fresh);
+    return iterator(fresh, __root_);
+  }
+
+  static __node* __minimum(__node* node) {
+    while (node != nullptr && node->left != nullptr) {
+      node = node->left;
+    }
+    return node;
+  }
+
+  static __node* __maximum(__node* node) {
+    while (node != nullptr && node->right != nullptr) {
+      node = node->right;
+    }
+    return node;
+  }
+
+  void __transplant(__node* old_node, __node* new_node) {
+    if (old_node->parent == nullptr) {
+      __root_ = new_node;
+    } else if (old_node == old_node->parent->left) {
+      old_node->parent->left = new_node;
+    } else {
+      old_node->parent->right = new_node;
+    }
+    if (new_node != nullptr) {
+      new_node->parent = old_node->parent;
+    }
+  }
+
+  void __erase_node(__node* node) {
+    if (node->left == nullptr) {
+      __transplant(node, node->right);
+    } else if (node->right == nullptr) {
+      __transplant(node, node->left);
+    } else {
+      __node* successor = __minimum(node->right);
+      if (successor->parent != node) {
+        __transplant(successor, successor->right);
+        successor->right = node->right;
+        successor->right->parent = successor;
+      }
+      __transplant(node, successor);
+      successor->left = node->left;
+      successor->left->parent = successor;
+      successor->color = node->color;
+    }
+    --__size_;
+    __destroy_node(node);
+    if (__root_ != nullptr) {
+      __root_->color = __black;
+    }
+  }
+
+  void __clear_node(__node* node) {
+    if (node == nullptr) {
+      return;
+    }
+    __clear_node(node->left);
+    __clear_node(node->right);
+    __destroy_node(node);
+  }
+
+  template <class K>
+  __node* __lower(__node* node, const K& key) const {
+    __node* result = nullptr;
+    while (node != nullptr) {
+      if (__comp_(node->value.first, key)) {
+        node = node->right;
+      } else {
+        result = node;
+        node = node->left;
+      }
+    }
+    return result;
+  }
+
+  template <class K>
+  __node* __upper(__node* node, const K& key) const {
+    __node* result = nullptr;
+    while (node != nullptr) {
+      if (__comp_(key, node->value.first)) {
+        result = node;
+        node = node->left;
+      } else {
+        node = node->right;
+      }
+    }
+    return result;
+  }
+
+  bool __equivalent(const key_type& left, const key_type& right) const {
+    return !__comp_(left, right) && !__comp_(right, left);
+  }
+
+  void __copy_from(const multimap& other) {
+    for (const_iterator it = other.begin(); it != other.end(); ++it) {
+      insert(*it);
+    }
+  }
+
+ public:
+  multimap() : __node_alloc_(__alloc_) {}
+
+  explicit multimap(const key_compare& comp,
+                    const allocator_type& alloc = allocator_type())
+      : __comp_(comp), __alloc_(alloc), __node_alloc_(__alloc_) {}
+
+  explicit multimap(const allocator_type& alloc)
+      : __alloc_(alloc), __node_alloc_(__alloc_) {}
+
+  template <class InputIt>
+  multimap(InputIt first, InputIt last, const key_compare& comp = key_compare(),
+           const allocator_type& alloc = allocator_type())
+      : __comp_(comp), __alloc_(alloc), __node_alloc_(__alloc_) {
+    insert(first, last);
+  }
+
+  multimap(initializer_list<value_type> init, const key_compare& comp = key_compare(),
+           const allocator_type& alloc = allocator_type())
+      : __comp_(comp), __alloc_(alloc), __node_alloc_(__alloc_) {
+    insert(init);
+  }
+
+  multimap(const multimap& other)
+      : __comp_(other.__comp_),
+        __alloc_(__alloc_traits::select_on_container_copy_construction(other.__alloc_)),
+        __node_alloc_(__alloc_) {
+    __copy_from(other);
+  }
+
+  multimap(const multimap& other, const allocator_type& alloc)
+      : __comp_(other.__comp_), __alloc_(alloc), __node_alloc_(__alloc_) {
+    __copy_from(other);
+  }
+
+  multimap(multimap&& other) noexcept
+      : __root_(other.__root_),
+        __size_(other.__size_),
+        __comp_(static_cast<key_compare&&>(other.__comp_)),
+        __alloc_(static_cast<allocator_type&&>(other.__alloc_)),
+        __node_alloc_(__alloc_) {
+    other.__root_ = nullptr;
+    other.__size_ = 0;
+  }
+
+  multimap(multimap&& other, const allocator_type& alloc)
+      : __comp_(static_cast<key_compare&&>(other.__comp_)),
+        __alloc_(alloc),
+        __node_alloc_(__alloc_) {
+    if (__alloc_ == other.__alloc_) {
+      __root_ = other.__root_;
+      __size_ = other.__size_;
+      other.__root_ = nullptr;
+      other.__size_ = 0;
+    } else {
+      __copy_from(other);
+      other.clear();
+    }
+  }
+
+  ~multimap() { clear(); }
+
+  multimap& operator=(const multimap& other) {
+    if (this != &other) {
+      clear();
+      __comp_ = other.__comp_;
+      if (__alloc_traits::__propagate_on_container_copy_assignment()) {
+        __alloc_ = other.__alloc_;
+        __node_alloc_ = __node_allocator(__alloc_);
+      }
+      __copy_from(other);
+    }
+    return *this;
+  }
+
+  multimap& operator=(multimap&& other) noexcept(
+      __alloc_traits::__propagate_on_container_move_assignment() ||
+      __alloc_traits::__is_always_equal()) {
+    if (this != &other) {
+      clear();
+      __comp_ = static_cast<key_compare&&>(other.__comp_);
+      if (__alloc_traits::__propagate_on_container_move_assignment() ||
+          __alloc_ == other.__alloc_) {
+        if (__alloc_traits::__propagate_on_container_move_assignment()) {
+          __alloc_ = static_cast<allocator_type&&>(other.__alloc_);
+          __node_alloc_ = __node_allocator(__alloc_);
+        }
+        __root_ = other.__root_;
+        __size_ = other.__size_;
+        other.__root_ = nullptr;
+        other.__size_ = 0;
+      } else {
+        __copy_from(other);
+        other.clear();
+      }
+    }
+    return *this;
+  }
+
+  multimap& operator=(initializer_list<value_type> init) {
+    clear();
+    insert(init);
+    return *this;
+  }
+
+  allocator_type get_allocator() const { return __alloc_; }
+  key_compare key_comp() const { return __comp_; }
+  value_compare value_comp() const { return value_compare(__comp_); }
+
+  iterator begin() { return iterator(__minimum(__root_), __root_); }
+  const_iterator begin() const {
+    return const_iterator(__minimum(const_cast<__node*>(__root_)), __root_);
+  }
+  const_iterator cbegin() const { return begin(); }
+  iterator end() { return iterator(nullptr, __root_); }
+  const_iterator end() const { return const_iterator(nullptr, __root_); }
+  const_iterator cend() const { return end(); }
+  reverse_iterator rbegin() { return reverse_iterator(end()); }
+  const_reverse_iterator rbegin() const { return const_reverse_iterator(end()); }
+  reverse_iterator rend() { return reverse_iterator(begin()); }
+  const_reverse_iterator rend() const { return const_reverse_iterator(begin()); }
+
+  bool empty() const noexcept { return __size_ == 0; }
+  size_type size() const noexcept { return __size_; }
+  size_type max_size() const noexcept {
+    return __node_alloc_traits::max_size(__node_alloc_);
+  }
+
+  void clear() noexcept {
+    __clear_node(__root_);
+    __root_ = nullptr;
+    __size_ = 0;
+  }
+
+  void swap(multimap& other) noexcept(
+      __alloc_traits::__propagate_on_container_swap() ||
+      __alloc_traits::__is_always_equal()) {
+    __node* root = __root_;
+    __root_ = other.__root_;
+    other.__root_ = root;
+    size_type size = __size_;
+    __size_ = other.__size_;
+    other.__size_ = size;
+    key_compare comp = __comp_;
+    __comp_ = other.__comp_;
+    other.__comp_ = comp;
+    if (__alloc_traits::__propagate_on_container_swap()) {
+      allocator_type alloc = __alloc_;
+      __alloc_ = other.__alloc_;
+      other.__alloc_ = alloc;
+      __node_allocator node_alloc = __node_alloc_;
+      __node_alloc_ = other.__node_alloc_;
+      other.__node_alloc_ = node_alloc;
+    }
+  }
+
+  iterator insert(const value_type& value) { return __link(__create_node(value)); }
+  iterator insert(value_type&& value) {
+    return __link(__create_node(static_cast<value_type&&>(value)));
+  }
+  iterator insert(const_iterator, const value_type& value) { return insert(value); }
+  iterator insert(const_iterator, value_type&& value) {
+    return insert(static_cast<value_type&&>(value));
+  }
+
+  template <class InputIt>
+  void insert(InputIt first, InputIt last) {
+    for (; first != last; ++first) {
+      insert(*first);
+    }
+  }
+
+  void insert(initializer_list<value_type> init) { insert(init.begin(), init.end()); }
+
+  template <class... Args>
+  iterator emplace(Args&&... args) {
+    value_type value(std::forward<Args>(args)...);
+    return insert(static_cast<value_type&&>(value));
+  }
+
+  template <class... Args>
+  iterator emplace_hint(const_iterator hint, Args&&... args) {
+    static_cast<void>(hint);
+    return emplace(std::forward<Args>(args)...);
+  }
+
+  iterator erase(iterator pos) { return erase(const_iterator(pos)); }
+
+  iterator erase(const_iterator pos) {
+    const_iterator next = pos;
+    ++next;
+    __erase_node(const_cast<__node*>(pos.__node_));
+    return iterator(const_cast<__node*>(next.__node_), __root_);
+  }
+
+  iterator erase(const_iterator first, const_iterator last) {
+    while (first != last) {
+      first = erase(first);
+    }
+    return iterator(const_cast<__node*>(first.__node_), __root_);
+  }
+
+  size_type erase(const key_type& key) {
+    size_type removed = 0;
+    iterator it = lower_bound(key);
+    while (it != end() && __equivalent(it->first, key)) {
+      it = erase(it);
+      ++removed;
+    }
+    return removed;
+  }
+
+  iterator find(const key_type& key) {
+    iterator it = lower_bound(key);
+    if (it != end() && __equivalent(it->first, key)) {
+      return it;
+    }
+    return end();
+  }
+  const_iterator find(const key_type& key) const {
+    const_iterator it = lower_bound(key);
+    if (it != end() && __equivalent(it->first, key)) {
+      return it;
+    }
+    return end();
+  }
+
+  bool contains(const key_type& key) const { return find(key) != end(); }
+
+  size_type count(const key_type& key) const {
+    size_type n = 0;
+    for (const_iterator it = lower_bound(key);
+         it != end() && __equivalent(it->first, key); ++it) {
+      ++n;
+    }
+    return n;
+  }
+
+  iterator lower_bound(const key_type& key) {
+    return iterator(__lower(__root_, key), __root_);
+  }
+  const_iterator lower_bound(const key_type& key) const {
+    return const_iterator(__lower(const_cast<__node*>(__root_), key), __root_);
+  }
+  iterator upper_bound(const key_type& key) {
+    return iterator(__upper(__root_, key), __root_);
+  }
+  const_iterator upper_bound(const key_type& key) const {
+    return const_iterator(__upper(const_cast<__node*>(__root_), key), __root_);
+  }
+
+  pair<iterator, iterator> equal_range(const key_type& key) {
+    return pair<iterator, iterator>(lower_bound(key), upper_bound(key));
+  }
+  pair<const_iterator, const_iterator> equal_range(const key_type& key) const {
+    return pair<const_iterator, const_iterator>(lower_bound(key), upper_bound(key));
+  }
+
+  template <class C2>
+  void merge(multimap<Key, T, C2, Allocator>& source) {
+    for (typename multimap<Key, T, C2, Allocator>::iterator it = source.begin();
+         it != source.end();) {
+      typename multimap<Key, T, C2, Allocator>::iterator next = it;
+      ++next;
+      insert(*it);
+      source.erase(it);
+      it = next;
+    }
+  }
+
+  template <class C2>
+  void merge(multimap<Key, T, C2, Allocator>&& source) {
+    merge(source);
+  }
 };
 
 template <class Key, class T, class Compare, class Allocator>
@@ -1547,7 +2339,7 @@ auto operator<=>(const map<Key, T, Compare, Allocator>& left,
 
 template <class Key, class T, class Compare, class Allocator>
 void swap(map<Key, T, Compare, Allocator>& left,
-          map<Key, T, Compare, Allocator>& right) noexcept {
+          map<Key, T, Compare, Allocator>& right) noexcept(noexcept(left.swap(right))) {
   left.swap(right);
 }
 
@@ -1573,6 +2365,11 @@ template <class Key, class T, class Compare = less<Key>>
 using map =
     std::map<Key, T, Compare,
              polymorphic_allocator<pair<const Key, T>>>;
+
+template <class Key, class T, class Compare = less<Key>>
+using multimap =
+    std::multimap<Key, T, Compare,
+                  polymorphic_allocator<pair<const Key, T>>>;
 
 }  // namespace pmr
 #endif

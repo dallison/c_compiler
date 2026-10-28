@@ -115,6 +115,9 @@ bool operator<(const list<T, Allocator>& left,
 #endif
 #include <iterator>
 #include <memory>
+#if __cplusplus >= 202002L
+#include <compare>
+#endif
 #if __cplusplus >= 201703L
 #include <memory_resource>
 #endif
@@ -319,7 +322,7 @@ class list {
  public:
   list() : __size_(0), __node_alloc_() { __init_empty(); }
 
-  explicit list(const allocator_type&) : __size_(0), __node_alloc_() {
+  explicit list(const allocator_type& alloc) : __size_(0), __node_alloc_(alloc) {
     __init_empty();
   }
 
@@ -330,9 +333,17 @@ class list {
     }
   }
 
+  list(size_type count, const allocator_type& alloc)
+      : __size_(0), __node_alloc_(alloc) {
+    __init_empty();
+    for (size_type i = 0; i < count; ++i) {
+      emplace_back();
+    }
+  }
+
   list(size_type count, const value_type& value,
-       const allocator_type& = allocator_type())
-      : __size_(0), __node_alloc_() {
+       const allocator_type& alloc = allocator_type())
+      : __size_(0), __node_alloc_(alloc) {
     __init_empty();
     for (size_type i = 0; i < count; ++i) {
       push_back(value);
@@ -342,8 +353,8 @@ class list {
   template <class InputIt,
             class = typename iterator_traits<InputIt>::iterator_category>
   list(InputIt first, InputIt last,
-       const allocator_type& = allocator_type())
-      : __size_(0), __node_alloc_() {
+       const allocator_type& alloc = allocator_type())
+      : __size_(0), __node_alloc_(alloc) {
     __init_empty();
     for (; first != last; ++first) {
       push_back(*first);
@@ -351,40 +362,80 @@ class list {
   }
 
   list(initializer_list<value_type> init,
-       const allocator_type& = allocator_type())
-      : __size_(0), __node_alloc_() {
+       const allocator_type& alloc = allocator_type())
+      : __size_(0), __node_alloc_(alloc) {
     __init_empty();
     for (const value_type& value : init) {
       push_back(value);
     }
   }
 
-  list(const list& other) : __size_(0), __node_alloc_() {
+  list(const list& other)
+      : __size_(0),
+        __node_alloc_(__node_alloc_traits::select_on_container_copy_construction(
+            other.__node_alloc_)) {
     __init_empty();
     for (const_iterator it = other.begin(); it != other.end(); ++it) {
       push_back(*it);
     }
   }
 
-  list(list&& other) : __size_(0), __node_alloc_(other.__node_alloc_) {
+  list(const list& other, const allocator_type& alloc)
+      : __size_(0), __node_alloc_(alloc) {
+    __init_empty();
+    for (const_iterator it = other.begin(); it != other.end(); ++it) {
+      push_back(*it);
+    }
+  }
+
+  list(list&& other) noexcept
+      : __size_(0), __node_alloc_(static_cast<__node_allocator&&>(other.__node_alloc_)) {
     __init_empty();
     __steal(other);
+  }
+
+  list(list&& other, const allocator_type& alloc)
+      : __size_(0), __node_alloc_(alloc) {
+    __init_empty();
+    if (__node_alloc_ == other.__node_alloc_) {
+      __steal(other);
+    } else {
+      for (iterator it = other.begin(); it != other.end(); ++it) {
+        push_back(static_cast<value_type&&>(*it));
+      }
+    }
   }
 
   ~list() { __clear(); }
 
   list& operator=(const list& other) {
     if (this != &other) {
+      if (__node_alloc_traits::propagate_on_container_copy_assignment::value) {
+        if (!(__node_alloc_ == other.__node_alloc_)) {
+          clear();
+        }
+        __node_alloc_ = other.__node_alloc_;
+      }
       assign(other.begin(), other.end());
     }
     return *this;
   }
 
-  list& operator=(list&& other) {
+  list& operator=(list&& other) noexcept(
+      __node_alloc_traits::propagate_on_container_move_assignment::value ||
+      __node_alloc_traits::is_always_equal::value) {
     if (this != &other) {
-      __clear();
-      __init_empty();
-      __steal(other);
+      if (__node_alloc_traits::propagate_on_container_move_assignment::value ||
+          __node_alloc_ == other.__node_alloc_) {
+        clear();
+        if (__node_alloc_traits::propagate_on_container_move_assignment::value) {
+          __node_alloc_ = static_cast<__node_allocator&&>(other.__node_alloc_);
+        }
+        __steal(other);
+      } else {
+        assign(std::move_iterator<iterator>(other.begin()),
+               std::move_iterator<iterator>(other.end()));
+      }
     }
     return *this;
   }
@@ -417,7 +468,9 @@ class list {
     }
   }
 
-  allocator_type get_allocator() const { return allocator_type(); }
+  allocator_type get_allocator() const noexcept {
+    return allocator_type(__node_alloc_);
+  }
 
   reference front() { return *begin(); }
   const_reference front() const { return *begin(); }
@@ -449,7 +502,7 @@ class list {
   bool empty() const noexcept { return __size_ == 0; }
   size_type size() const noexcept { return __size_; }
   size_type max_size() const noexcept {
-    return static_cast<size_type>(-1) / sizeof(__node);
+    return __node_alloc_traits::max_size(__node_alloc_);
   }
 
   void clear() noexcept {
@@ -576,13 +629,44 @@ class list {
     }
   }
 
-  void swap(list& other) noexcept {
+  void swap(list& other) noexcept(
+      __node_alloc_traits::propagate_on_container_swap::value ||
+      __node_alloc_traits::is_always_equal::value) {
     if (this == &other) {
       return;
     }
-    list tmp(std::move(other));
-    other = std::move(*this);
-    *this = std::move(tmp);
+    bool this_empty = empty();
+    bool other_empty = other.empty();
+    __node_base* a_first = __end_.__next;
+    __node_base* a_last = __end_.__prev;
+    __node_base* b_first = other.__end_.__next;
+    __node_base* b_last = other.__end_.__prev;
+    if (!this_empty) {
+      a_first->__prev = &other.__end_;
+      a_last->__next = &other.__end_;
+      other.__end_.__next = a_first;
+      other.__end_.__prev = a_last;
+    } else {
+      other.__end_.__next = &other.__end_;
+      other.__end_.__prev = &other.__end_;
+    }
+    if (!other_empty) {
+      b_first->__prev = &__end_;
+      b_last->__next = &__end_;
+      __end_.__next = b_first;
+      __end_.__prev = b_last;
+    } else {
+      __end_.__next = &__end_;
+      __end_.__prev = &__end_;
+    }
+    size_type saved = __size_;
+    __size_ = other.__size_;
+    other.__size_ = saved;
+    if (__node_alloc_traits::propagate_on_container_swap::value) {
+      __node_allocator tmp = static_cast<__node_allocator&&>(__node_alloc_);
+      __node_alloc_ = static_cast<__node_allocator&&>(other.__node_alloc_);
+      other.__node_alloc_ = static_cast<__node_allocator&&>(tmp);
+    }
   }
 
   // ---- list operations ----
@@ -739,8 +823,23 @@ class list {
     }
     // Bottom-up merge sort using an array of carry lists indexed by run length
     // (the classic std::list::sort strategy).  Stable and allocation-free.
-    list carry;
-    list counters[64];
+    allocator_type alloc = get_allocator();
+    list carry(alloc);
+    // Counters must use this allocator: destroying one that still holds nodes
+    // (for example if the comparator throws) has to free those nodes with it.
+    // A list array would default-construct the allocator, which is not required
+    // to be possible.  The union supplies aligned storage without constructing
+    // a list.
+    union __slot {
+      list object;
+      __slot() {}
+      ~__slot() {}
+    };
+    __slot slots[64];
+    for (int slot = 0; slot < 64; ++slot) {
+      new (&slots[slot].object) list(alloc);
+    }
+    list* counters = &slots[0].object;
     list* fill = counters;
     do {
       carry.splice(carry.begin(), *this, begin());
@@ -759,6 +858,9 @@ class list {
       counter->merge(*(counter - 1), comp);
     }
     swap(*(fill - 1));
+    for (int slot = 63; slot >= 0; --slot) {
+      slots[slot].object.~list();
+    }
   }
 
   void sort() {
@@ -849,8 +951,43 @@ bool operator>=(const list<T, Allocator>& left,
 }
 
 template <class T, class Allocator>
-void swap(list<T, Allocator>& left, list<T, Allocator>& right) noexcept {
+void swap(list<T, Allocator>& left, list<T, Allocator>& right)
+    noexcept(noexcept(left.swap(right))) {
   left.swap(right);
+}
+
+#if __cplusplus >= 202002L
+template <class T, class Allocator>
+std::strong_ordering operator<=>(const list<T, Allocator>& left,
+                                 const list<T, Allocator>& right) {
+  typename list<T, Allocator>::const_iterator l = left.begin();
+  typename list<T, Allocator>::const_iterator r = right.begin();
+  for (; l != left.end() && r != right.end(); ++l, ++r) {
+    if (*l < *r) {
+      return std::strong_ordering::less;
+    }
+    if (*r < *l) {
+      return std::strong_ordering::greater;
+    }
+  }
+  if (l == left.end() && r == right.end()) {
+    return std::strong_ordering::equal;
+  }
+  return l == left.end() ? std::strong_ordering::less
+                         : std::strong_ordering::greater;
+}
+#endif
+
+template <class T, class Allocator, class U>
+typename list<T, Allocator>::size_type erase(list<T, Allocator>& c,
+                                             const U& value) {
+  return c.remove_if([&value](const T& element) { return element == value; });
+}
+
+template <class T, class Allocator, class Predicate>
+typename list<T, Allocator>::size_type erase_if(list<T, Allocator>& c,
+                                                Predicate pred) {
+  return c.remove_if(pred);
 }
 
 #if __cplusplus >= 201703L

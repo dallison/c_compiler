@@ -10908,6 +10908,17 @@ static ASTNode* CloneTemplateFunctionBodyImpl(TypeParser* parser,
   // example `key_compare()` and `allocator_type()` on a class-template
   // constructor).  Re-clone them with the owner/source mappings instead of
   // retaining the identity clone made while the prototype was built.
+  //
+  // This clone also runs for every member function template while the
+  // enclosing class is instantiated, before any call.  The expression still
+  // has to be rewritten onto that specialization (`allocator_type()` must name
+  // the concrete allocator, not a default template argument of the member
+  // template).  It must not be type-checked yet: [temp.inst] instantiates a
+  // default argument only when a call uses it, and checking `allocator_type()`
+  // here rejects a specialization whose allocator is not default-constructible
+  // even when every call supplies an allocator.
+  bool defer_default_argument_analysis =
+      parser != NULL && parser->substituting_enclosing_template_arguments_only;
   for (size_t i = 0; i < from->info.function.prototype.length; i++) {
     Symbol* from_formal = from->info.function.prototype.value.p[i];
     if (from_formal == NULL ||
@@ -10924,8 +10935,10 @@ static ASTNode* CloneTemplateFunctionBodyImpl(TypeParser* parser,
                      CloneTemplateFunctionBodyNode, &clone, NULL);
     default_argument = ASTNodeVisitAndTransform(
         default_argument, ReanalyzeClonedDependentFunctorCall, NULL);
-    default_argument = ASTNodeVisitAndTransform(
-        default_argument, ReanalyzeClonedResolvedCall, &clone);
+    if (!defer_default_argument_analysis) {
+      default_argument = ASTNodeVisitAndTransform(
+          default_argument, ReanalyzeClonedResolvedCall, &clone);
+    }
     ASTNodeDelete(SymbolExtraOf(to_formal)->default_argument);
     SymbolMutableExtra(to_formal)->default_argument = default_argument;
   }

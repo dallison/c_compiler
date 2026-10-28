@@ -21,7 +21,11 @@
 #include <iterator>
 #if __cplusplus >= 202002L
 #include <memory>
+// Pull the range concepts without the stream views.  Including all of
+// <ranges> from here re-enters <locale> before ostreambuf_iterator exists.
+#define __davecc_skip_ranges_views__
 #include <ranges>
+#undef __davecc_skip_ranges_views__
 #endif
 #include <type_traits>
 #ifdef __cpp_exceptions

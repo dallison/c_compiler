@@ -21,6 +21,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <__ranges_base>
 
 #if __cplusplus >= 202700L && !defined(__cpp_lib_view_interface)
 #define __cpp_lib_view_interface 202606L
@@ -118,9 +119,8 @@ concept __pointer = is_pointer_v<T>;
 
 }  // namespace __access
 
-// [range.range] borrowed-range opt-in (specialized by view types).
-template <class>
-inline constexpr bool enable_borrowed_range = false;
+// enable_borrowed_range lives in <__ranges_base> so <string_view> can
+// specialize it without including the rest of <ranges>.
 
 // [range.access.begin] --------------------------------------------------------
 namespace __begin {
@@ -632,18 +632,7 @@ template <class T>
 concept common_range =
     range<T> && same_as<iterator_t<T>, sentinel_t<T>>;
 
-// [range.view] ----------------------------------------------------------------
-struct view_base {
-  constexpr view_base() = default;
-  constexpr view_base(const view_base&) = default;
-  constexpr view_base(view_base&&) = default;
-  constexpr view_base& operator=(const view_base&) noexcept { return *this; }
-  constexpr view_base& operator=(view_base&&) noexcept { return *this; }
-};
-
-template <class T>
-inline constexpr bool enable_view =
-    derived_from<T, view_base> || false;
+// view_base and enable_view live in <__ranges_base>.
 
 template <class T>
 concept view =
@@ -771,9 +760,17 @@ class __movable_box {
 }  // namespace ranges
 }  // namespace std
 
-// <istream> reaches <string> and <string_view>, which specialize
-// enable_view and enable_borrowed_range.  Those primaries are already
-// declared above.
+#endif /* __davecc_ranges__ core */
+
+// Views below use <istream>.  <string_view> includes this header while
+// <streambuf> is still incomplete and sets __davecc_skip_ranges_views__ so
+// that include does not re-enter the stream headers.  A later #include
+// <ranges> still parses the views, because the skip macro is not an include
+// guard.
+#ifndef __davecc_skip_ranges_views__
+#ifndef __davecc_ranges_views__
+#define __davecc_ranges_views__
+
 #include <istream>
 #ifdef __cpp_exceptions
 #include <stdexcept>
@@ -4914,4 +4911,5 @@ constexpr auto get(const ranges::subrange<I, S, K>& value) {
 
 }  // namespace std
 
-#endif /* __davecc_ranges__ */
+#endif /* __davecc_ranges_views__ */
+#endif /* !__davecc_skip_ranges_views__ */

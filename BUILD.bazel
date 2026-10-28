@@ -22,6 +22,7 @@ filegroup(
         "libc/include/__iostream_input",
         "libc/include/__iostream_output",
         "libc/include/__random_uniform",
+        "libc/include/__ranges_base",
         "libc/include/any",
         "libc/include/atomic",
         "libc/include/array",

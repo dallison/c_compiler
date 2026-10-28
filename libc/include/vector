@@ -838,12 +838,14 @@ class vector {
     return *this;
   }
 
-  __DAVECC_VECTOR_CONSTEXPR vector& operator=(vector&& other) noexcept {
+  __DAVECC_VECTOR_CONSTEXPR vector& operator=(vector&& other) noexcept(
+      __alloc_traits::__propagate_on_container_move_assignment() ||
+      __alloc_traits::__is_always_equal()) {
     if (this != &other) {
       if (__alloc_traits::__propagate_on_container_move_assignment()) {
         __destroy_all();
         __deallocate_storage();
-        __alloc_ = other.__alloc_;
+        __alloc_ = static_cast<allocator_type&&>(other.__alloc_);
         __take_storage_from(other);
       } else if (__alloc_ == other.__alloc_) {
         __destroy_all();
@@ -1070,7 +1072,9 @@ class vector {
     __destroy_one(__data_ + __size_);
   }
 
-  __DAVECC_VECTOR_CONSTEXPR void swap(vector& other) noexcept {
+  __DAVECC_VECTOR_CONSTEXPR void swap(vector& other) noexcept(
+      __alloc_traits::__propagate_on_container_swap() ||
+      __alloc_traits::__is_always_equal()) {
     if (__alloc_traits::__propagate_on_container_swap()) {
       __swap_storage(other);
       allocator_type alloc = __alloc_;
@@ -1083,6 +1087,638 @@ class vector {
       __assign_move_from(other);
       other.__assign_move_from(temp);
     }
+  }
+};
+
+// [vector.bool].  Bits are packed into words.  operator[] yields a proxy,
+// not a bool&, because a single bit has no address.
+template <class Allocator>
+class vector<bool, Allocator> {
+ public:
+  using value_type = bool;
+  using allocator_type = Allocator;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using const_reference = bool;
+
+ private:
+  using __alloc_traits = allocator_traits<allocator_type>;
+  using __word = unsigned long;
+  static constexpr size_type __bits = sizeof(__word) * 8;
+  using __storage_alloc = typename __alloc_traits::template rebind_alloc<__word>;
+  using __storage_traits = allocator_traits<__storage_alloc>;
+
+  static size_type __word_count(size_type bits) {
+    return bits == 0 ? 0 : (bits + __bits - 1) / __bits;
+  }
+
+  static __word __mask_at(size_type index) {
+    return __word(1) << (index % __bits);
+  }
+
+ public:
+  class reference {
+    friend class vector;
+    __word* __word_;
+    __word __mask_;
+
+    reference(__word* word, __word mask) noexcept : __word_(word), __mask_(mask) {}
+
+   public:
+    reference(const reference&) noexcept = default;
+    ~reference() = default;
+
+    operator bool() const noexcept { return (*__word_ & __mask_) != 0; }
+
+    reference& operator=(bool value) noexcept {
+      if (value) {
+        *__word_ |= __mask_;
+      } else {
+        *__word_ &= ~__mask_;
+      }
+      return *this;
+    }
+
+    reference& operator=(const reference& other) noexcept {
+      return *this = bool(other);
+    }
+
+    void flip() noexcept { *__word_ ^= __mask_; }
+
+    friend void swap(reference left, reference right) noexcept {
+      bool value = bool(left);
+      left = bool(right);
+      right = value;
+    }
+
+    friend bool operator==(reference left, reference right) noexcept {
+      return bool(left) == bool(right);
+    }
+    friend bool operator==(reference left, bool right) noexcept {
+      return bool(left) == right;
+    }
+    friend bool operator==(bool left, reference right) noexcept {
+      return left == bool(right);
+    }
+    friend bool operator!=(reference left, reference right) noexcept {
+      return bool(left) != bool(right);
+    }
+    friend bool operator<(reference left, reference right) noexcept {
+      return bool(left) < bool(right);
+    }
+    friend bool operator<(reference left, bool right) noexcept {
+      return bool(left) < right;
+    }
+    friend bool operator<(bool left, reference right) noexcept {
+      return left < bool(right);
+    }
+  };
+
+  class iterator {
+   public:
+    using iterator_category = random_access_iterator_tag;
+    using value_type = bool;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = vector::reference;
+
+    iterator() : __base_(nullptr), __index_(0) {}
+
+    reference operator*() const {
+      return reference(__base_ + (__index_ / __bits), __mask_at(__index_));
+    }
+    reference operator[](difference_type n) const { return *(*this + n); }
+
+    iterator& operator++() {
+      ++__index_;
+      return *this;
+    }
+    iterator operator++(int) {
+      iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+    iterator& operator--() {
+      --__index_;
+      return *this;
+    }
+    iterator operator--(int) {
+      iterator tmp = *this;
+      --(*this);
+      return tmp;
+    }
+    iterator& operator+=(difference_type n) {
+      __index_ = size_type(difference_type(__index_) + n);
+      return *this;
+    }
+    iterator& operator-=(difference_type n) { return *this += -n; }
+    iterator operator+(difference_type n) const {
+      iterator tmp = *this;
+      tmp += n;
+      return tmp;
+    }
+    iterator operator-(difference_type n) const { return *this + (-n); }
+    difference_type operator-(const iterator& other) const {
+      return difference_type(__index_) - difference_type(other.__index_);
+    }
+
+    bool operator==(const iterator& other) const {
+      return __index_ == other.__index_;
+    }
+    bool operator!=(const iterator& other) const { return !(*this == other); }
+    bool operator<(const iterator& other) const { return __index_ < other.__index_; }
+    bool operator>(const iterator& other) const { return other < *this; }
+    bool operator<=(const iterator& other) const { return !(other < *this); }
+    bool operator>=(const iterator& other) const { return !(*this < other); }
+
+   private:
+    friend class vector;
+    friend class const_iterator;
+    __word* __base_;
+    size_type __index_;
+    iterator(__word* base, size_type index) : __base_(base), __index_(index) {}
+  };
+
+  class const_iterator {
+   public:
+    using iterator_category = random_access_iterator_tag;
+    using value_type = bool;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = bool;
+
+    const_iterator() : __base_(nullptr), __index_(0) {}
+    const_iterator(iterator it) : __base_(it.__base_), __index_(it.__index_) {}
+
+    bool operator*() const {
+      return (__base_[__index_ / __bits] & __mask_at(__index_)) != 0;
+    }
+    bool operator[](difference_type n) const { return *(*this + n); }
+
+    const_iterator& operator++() {
+      ++__index_;
+      return *this;
+    }
+    const_iterator operator++(int) {
+      const_iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+    const_iterator& operator--() {
+      --__index_;
+      return *this;
+    }
+    const_iterator operator--(int) {
+      const_iterator tmp = *this;
+      --(*this);
+      return tmp;
+    }
+    const_iterator& operator+=(difference_type n) {
+      __index_ = size_type(difference_type(__index_) + n);
+      return *this;
+    }
+    const_iterator& operator-=(difference_type n) { return *this += -n; }
+    const_iterator operator+(difference_type n) const {
+      const_iterator tmp = *this;
+      tmp += n;
+      return tmp;
+    }
+    const_iterator operator-(difference_type n) const { return *this + (-n); }
+    difference_type operator-(const const_iterator& other) const {
+      return difference_type(__index_) - difference_type(other.__index_);
+    }
+
+    bool operator==(const const_iterator& other) const {
+      return __index_ == other.__index_;
+    }
+    bool operator!=(const const_iterator& other) const { return !(*this == other); }
+    bool operator<(const const_iterator& other) const {
+      return __index_ < other.__index_;
+    }
+    bool operator>(const const_iterator& other) const { return other < *this; }
+    bool operator<=(const const_iterator& other) const { return !(other < *this); }
+    bool operator>=(const const_iterator& other) const { return !(*this < other); }
+
+   private:
+    friend class vector;
+    friend class iterator;
+    const __word* __base_;
+    size_type __index_;
+    const_iterator(const __word* base, size_type index)
+        : __base_(base), __index_(index) {}
+  };
+
+  using pointer = iterator;
+  using const_pointer = const_iterator;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+  __DAVECC_VECTOR_CONSTEXPR vector() noexcept(
+      noexcept(__storage_alloc()))
+      : __data_(nullptr), __size_(0), __cap_(0), __storage_() {}
+
+  __DAVECC_VECTOR_CONSTEXPR explicit vector(const allocator_type& alloc)
+      : __data_(nullptr), __size_(0), __cap_(0), __storage_(alloc) {}
+
+  __DAVECC_VECTOR_CONSTEXPR explicit vector(size_type count,
+                                            const allocator_type& alloc = allocator_type())
+      : __data_(nullptr), __size_(0), __cap_(0), __storage_(alloc) {
+    __resize(count, false);
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR vector(size_type count, const bool& value,
+                                   const allocator_type& alloc = allocator_type())
+      : __data_(nullptr), __size_(0), __cap_(0), __storage_(alloc) {
+    __resize(count, value);
+  }
+
+  template <class InputIt>
+  __DAVECC_VECTOR_CONSTEXPR vector(
+      InputIt first, InputIt last,
+      typename enable_if<!is_integral<InputIt>::value, int>::type = 0)
+      : __data_(nullptr), __size_(0), __cap_(0), __storage_() {
+    __append(first, last);
+  }
+
+  template <class InputIt>
+  __DAVECC_VECTOR_CONSTEXPR vector(
+      InputIt first, InputIt last, const allocator_type& alloc,
+      typename enable_if<!is_integral<InputIt>::value, int>::type = 0)
+      : __data_(nullptr), __size_(0), __cap_(0), __storage_(alloc) {
+    __append(first, last);
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR vector(initializer_list<bool> init,
+                                   const allocator_type& alloc = allocator_type())
+      : __data_(nullptr), __size_(0), __cap_(0), __storage_(alloc) {
+    __append(init.begin(), init.end());
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR vector(const vector& other)
+      : __data_(nullptr),
+        __size_(0),
+        __cap_(0),
+        __storage_(__storage_traits::select_on_container_copy_construction(
+            other.__storage_)) {
+    __append(other.begin(), other.end());
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR vector(const vector& other, const allocator_type& alloc)
+      : __data_(nullptr), __size_(0), __cap_(0), __storage_(alloc) {
+    __append(other.begin(), other.end());
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR vector(vector&& other) noexcept
+      : __data_(other.__data_),
+        __size_(other.__size_),
+        __cap_(other.__cap_),
+        __storage_(static_cast<__storage_alloc&&>(other.__storage_)) {
+    other.__data_ = nullptr;
+    other.__size_ = 0;
+    other.__cap_ = 0;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR vector(vector&& other, const allocator_type& alloc)
+      : __data_(nullptr), __size_(0), __cap_(0), __storage_(alloc) {
+    if (__storage_ == other.__storage_) {
+      __data_ = other.__data_;
+      __size_ = other.__size_;
+      __cap_ = other.__cap_;
+      other.__data_ = nullptr;
+      other.__size_ = 0;
+      other.__cap_ = 0;
+    } else {
+      __append(other.begin(), other.end());
+    }
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR ~vector() { __release(); }
+
+  __DAVECC_VECTOR_CONSTEXPR vector& operator=(const vector& other) {
+    if (this != &other) {
+      if (__alloc_traits::__propagate_on_container_copy_assignment() &&
+          __storage_ != other.__storage_) {
+        __release();
+        __storage_ = other.__storage_;
+      }
+      assign(other.begin(), other.end());
+    }
+    return *this;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR vector& operator=(vector&& other) noexcept(
+      __alloc_traits::__propagate_on_container_move_assignment() ||
+      __alloc_traits::__is_always_equal()) {
+    if (this != &other) {
+      if (__alloc_traits::__propagate_on_container_move_assignment() ||
+          __storage_ == other.__storage_) {
+        __release();
+        if (__alloc_traits::__propagate_on_container_move_assignment()) {
+          __storage_ = static_cast<__storage_alloc&&>(other.__storage_);
+        }
+        __data_ = other.__data_;
+        __size_ = other.__size_;
+        __cap_ = other.__cap_;
+        other.__data_ = nullptr;
+        other.__size_ = 0;
+        other.__cap_ = 0;
+      } else {
+        assign(other.begin(), other.end());
+      }
+    }
+    return *this;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR vector& operator=(initializer_list<bool> init) {
+    assign(init.begin(), init.end());
+    return *this;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void assign(size_type count, const bool& value) {
+    __size_ = 0;
+    __resize(count, value);
+  }
+
+  template <class InputIt>
+  __DAVECC_VECTOR_CONSTEXPR void assign(InputIt first, InputIt last) {
+    __size_ = 0;
+    __append(first, last);
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void assign(initializer_list<bool> init) {
+    assign(init.begin(), init.end());
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR allocator_type get_allocator() const {
+    return allocator_type(__storage_);
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR iterator begin() noexcept { return iterator(__data_, 0); }
+  __DAVECC_VECTOR_CONSTEXPR const_iterator begin() const noexcept {
+    return const_iterator(__data_, 0);
+  }
+  __DAVECC_VECTOR_CONSTEXPR const_iterator cbegin() const noexcept { return begin(); }
+  __DAVECC_VECTOR_CONSTEXPR iterator end() noexcept { return iterator(__data_, __size_); }
+  __DAVECC_VECTOR_CONSTEXPR const_iterator end() const noexcept {
+    return const_iterator(__data_, __size_);
+  }
+  __DAVECC_VECTOR_CONSTEXPR const_iterator cend() const noexcept { return end(); }
+  __DAVECC_VECTOR_CONSTEXPR reverse_iterator rbegin() noexcept {
+    return reverse_iterator(end());
+  }
+  __DAVECC_VECTOR_CONSTEXPR const_reverse_iterator rbegin() const noexcept {
+    return const_reverse_iterator(end());
+  }
+  __DAVECC_VECTOR_CONSTEXPR reverse_iterator rend() noexcept {
+    return reverse_iterator(begin());
+  }
+  __DAVECC_VECTOR_CONSTEXPR const_reverse_iterator rend() const noexcept {
+    return const_reverse_iterator(begin());
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR bool empty() const noexcept { return __size_ == 0; }
+  __DAVECC_VECTOR_CONSTEXPR size_type size() const noexcept { return __size_; }
+  __DAVECC_VECTOR_CONSTEXPR size_type max_size() const noexcept {
+    return __storage_traits::max_size(__storage_) * __bits;
+  }
+  __DAVECC_VECTOR_CONSTEXPR size_type capacity() const noexcept { return __cap_; }
+
+  __DAVECC_VECTOR_CONSTEXPR void reserve(size_type count) {
+    if (count > max_size()) {
+      __vector_detail::__throw_length_error();
+    }
+    __ensure(count);
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void shrink_to_fit() {
+    if (__cap_ == __size_) {
+      return;
+    }
+    allocator_type alloc = get_allocator();
+    vector fresh(alloc);
+    fresh.__append(begin(), end());
+    swap(fresh);
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR reference operator[](size_type index) {
+    return reference(__data_ + (index / __bits), __mask_at(index));
+  }
+  __DAVECC_VECTOR_CONSTEXPR const_reference operator[](size_type index) const {
+    return (__data_[index / __bits] & __mask_at(index)) != 0;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR reference at(size_type index) {
+    if (index >= __size_) {
+      __vector_detail::__throw_out_of_range();
+    }
+    return (*this)[index];
+  }
+  __DAVECC_VECTOR_CONSTEXPR const_reference at(size_type index) const {
+    if (index >= __size_) {
+      __vector_detail::__throw_out_of_range();
+    }
+    return (*this)[index];
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR reference front() { return (*this)[0]; }
+  __DAVECC_VECTOR_CONSTEXPR const_reference front() const { return (*this)[0]; }
+  __DAVECC_VECTOR_CONSTEXPR reference back() { return (*this)[__size_ - 1]; }
+  __DAVECC_VECTOR_CONSTEXPR const_reference back() const {
+    return (*this)[__size_ - 1];
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void push_back(const bool& value) {
+    __ensure(__size_ + 1);
+    (*this)[__size_] = value;
+    ++__size_;
+  }
+  __DAVECC_VECTOR_CONSTEXPR void push_back(bool&& value) { push_back(value); }
+
+  template <class... Args>
+  __DAVECC_VECTOR_CONSTEXPR reference emplace_back(Args&&... args) {
+    bool value(std::forward<Args>(args)...);
+    push_back(value);
+    return back();
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void pop_back() { --__size_; }
+
+  __DAVECC_VECTOR_CONSTEXPR void clear() noexcept { __size_ = 0; }
+
+  __DAVECC_VECTOR_CONSTEXPR void resize(size_type count) { __resize(count, false); }
+  __DAVECC_VECTOR_CONSTEXPR void resize(size_type count, const bool& value) {
+    __resize(count, value);
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR iterator insert(const_iterator pos, const bool& value) {
+    return __insert_n(pos, 1, value);
+  }
+  __DAVECC_VECTOR_CONSTEXPR iterator insert(const_iterator pos, bool&& value) {
+    return insert(pos, value);
+  }
+  __DAVECC_VECTOR_CONSTEXPR iterator insert(const_iterator pos, size_type count,
+                                            const bool& value) {
+    return __insert_n(pos, count, value);
+  }
+  __DAVECC_VECTOR_CONSTEXPR iterator insert(const_iterator pos,
+                                            initializer_list<bool> init) {
+    return insert(pos, init.begin(), init.end());
+  }
+
+  template <class InputIt>
+  __DAVECC_VECTOR_CONSTEXPR iterator insert(const_iterator pos, InputIt first,
+                                            InputIt last) {
+    size_type index = pos.__index_;
+    size_type added = 0;
+    for (; first != last; ++first, ++added) {
+      __ensure(__size_ + 1);
+      __shift_up(index + added, 1);
+      ++__size_;
+      (*this)[index + added] = bool(*first);
+    }
+    return iterator(__data_, index);
+  }
+
+  template <class... Args>
+  __DAVECC_VECTOR_CONSTEXPR iterator emplace(const_iterator pos, Args&&... args) {
+    bool value(std::forward<Args>(args)...);
+    return insert(pos, value);
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR iterator erase(const_iterator pos) {
+    return erase(pos, const_iterator(__data_, pos.__index_ + 1));
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR iterator erase(const_iterator first, const_iterator last) {
+    size_type index = first.__index_;
+    size_type count = last.__index_ - first.__index_;
+    if (count != 0) {
+      __shift_down(index, count);
+      __size_ -= count;
+    }
+    return iterator(__data_, index);
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void flip() noexcept {
+    for (size_type i = 0; i < __size_; ++i) {
+      (*this)[i].flip();
+    }
+  }
+
+  static void swap(reference left, reference right) noexcept {
+    bool value = bool(left);
+    left = bool(right);
+    right = value;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void swap(vector& other) noexcept(
+      __alloc_traits::__propagate_on_container_swap() ||
+      __alloc_traits::__is_always_equal()) {
+    if (__alloc_traits::__propagate_on_container_swap() ||
+        __storage_ == other.__storage_) {
+      __word* data = __data_;
+      __data_ = other.__data_;
+      other.__data_ = data;
+      size_type size = __size_;
+      __size_ = other.__size_;
+      other.__size_ = size;
+      size_type cap = __cap_;
+      __cap_ = other.__cap_;
+      other.__cap_ = cap;
+      if (__alloc_traits::__propagate_on_container_swap()) {
+        __storage_alloc storage = __storage_;
+        __storage_ = other.__storage_;
+        other.__storage_ = storage;
+      }
+    } else {
+      allocator_type alloc = get_allocator();
+      vector fresh(std::move(*this), alloc);
+      assign(other.begin(), other.end());
+      other.assign(fresh.begin(), fresh.end());
+    }
+  }
+
+ private:
+  __word* __data_;
+  size_type __size_;
+  size_type __cap_;
+  __storage_alloc __storage_;
+
+  __DAVECC_VECTOR_CONSTEXPR void __release() noexcept {
+    if (__data_ != nullptr) {
+      __storage_traits::deallocate(__storage_, __data_, __word_count(__cap_));
+      __data_ = nullptr;
+    }
+    __size_ = 0;
+    __cap_ = 0;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void __ensure(size_type bits) {
+    if (bits <= __cap_) {
+      return;
+    }
+    size_type grown = __cap_ == 0 ? __bits : __cap_ * 2;
+    if (grown < bits) {
+      grown = bits;
+    }
+    size_type words = __word_count(grown);
+    __word* fresh = __storage_traits::allocate(__storage_, words);
+    for (size_type i = 0; i < words; ++i) {
+      fresh[i] = 0;
+    }
+    for (size_type i = 0; i < __size_; ++i) {
+      if (((__data_[i / __bits] & __mask_at(i)) != 0)) {
+        fresh[i / __bits] |= __mask_at(i);
+      }
+    }
+    if (__data_ != nullptr) {
+      __storage_traits::deallocate(__storage_, __data_, __word_count(__cap_));
+    }
+    __data_ = fresh;
+    __cap_ = words * __bits;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void __shift_up(size_type index, size_type count) {
+    for (size_type i = __size_; i > index; --i) {
+      (*this)[i + count - 1] = bool((*this)[i - 1]);
+    }
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void __shift_down(size_type index, size_type count) {
+    for (size_type i = index; i + count < __size_; ++i) {
+      (*this)[i] = bool((*this)[i + count]);
+    }
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void __resize(size_type count, bool value) {
+    if (count < __size_) {
+      __size_ = count;
+      return;
+    }
+    __ensure(count);
+    while (__size_ < count) {
+      (*this)[__size_] = value;
+      ++__size_;
+    }
+  }
+
+  template <class InputIt>
+  __DAVECC_VECTOR_CONSTEXPR void __append(InputIt first, InputIt last) {
+    for (; first != last; ++first) {
+      push_back(bool(*first));
+    }
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR iterator __insert_n(const_iterator pos, size_type count,
+                                                bool value) {
+    size_type index = pos.__index_;
+    __ensure(__size_ + count);
+    __shift_up(index, count);
+    for (size_type i = 0; i < count; ++i) {
+      (*this)[index + i] = value;
+    }
+    __size_ += count;
+    return iterator(__data_, index);
   }
 };
 
@@ -1163,8 +1799,49 @@ __DAVECC_VECTOR_CONSTEXPR strong_ordering operator<=>(const vector<T, Allocator>
 #endif
 
 template <class T, class Allocator>
-__DAVECC_VECTOR_CONSTEXPR void swap(vector<T, Allocator>& a, vector<T, Allocator>& b) noexcept {
+__DAVECC_VECTOR_CONSTEXPR void swap(vector<T, Allocator>& a, vector<T, Allocator>& b)
+    noexcept(noexcept(a.swap(b))) {
   a.swap(b);
+}
+
+template <class T, class Allocator, class U>
+__DAVECC_VECTOR_CONSTEXPR typename vector<T, Allocator>::size_type erase(
+    vector<T, Allocator>& c, const U& value) {
+  typename vector<T, Allocator>::iterator out = c.begin();
+  typename vector<T, Allocator>::iterator it = c.begin();
+  typename vector<T, Allocator>::iterator last = c.end();
+  for (; it != last; ++it) {
+    if (!(*it == value)) {
+      if (out != it) {
+        *out = static_cast<T&&>(*it);
+      }
+      ++out;
+    }
+  }
+  typename vector<T, Allocator>::size_type removed =
+      static_cast<typename vector<T, Allocator>::size_type>(last - out);
+  c.erase(out, last);
+  return removed;
+}
+
+template <class T, class Allocator, class Predicate>
+__DAVECC_VECTOR_CONSTEXPR typename vector<T, Allocator>::size_type erase_if(
+    vector<T, Allocator>& c, Predicate pred) {
+  typename vector<T, Allocator>::iterator out = c.begin();
+  typename vector<T, Allocator>::iterator it = c.begin();
+  typename vector<T, Allocator>::iterator last = c.end();
+  for (; it != last; ++it) {
+    if (!pred(*it)) {
+      if (out != it) {
+        *out = static_cast<T&&>(*it);
+      }
+      ++out;
+    }
+  }
+  typename vector<T, Allocator>::size_type removed =
+      static_cast<typename vector<T, Allocator>::size_type>(last - out);
+  c.erase(out, last);
+  return removed;
 }
 
 #if __cplusplus >= 201703L

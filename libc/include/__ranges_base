@@ -1,0 +1,38 @@
+//
+//  __ranges_base
+//
+//  The view opt-in variable templates.  <string_view> specializes these, and
+//  it is included while <streambuf> is still incomplete (ios -> stdexcept ->
+//  string -> string_view).  Including all of <ranges> from there pulls
+//  <istream> and parses <locale> before ostreambuf_iterator exists.
+//
+
+#ifndef __davecc_ranges_base__
+#define __davecc_ranges_base__
+
+#include <concepts>
+
+namespace std {
+namespace ranges {
+
+struct view_base {
+  constexpr view_base() = default;
+  constexpr view_base(const view_base&) = default;
+  constexpr view_base(view_base&&) = default;
+  constexpr view_base& operator=(const view_base&) noexcept { return *this; }
+  constexpr view_base& operator=(view_base&&) noexcept { return *this; }
+};
+
+// [range.range] borrowed-range opt-in (specialized by view types).
+template <class>
+inline constexpr bool enable_borrowed_range = false;
+
+// [range.view]
+template <class T>
+inline constexpr bool enable_view =
+    derived_from<T, view_base> || false;
+
+}  // namespace ranges
+}  // namespace std
+
+#endif /* __davecc_ranges_base__ */
