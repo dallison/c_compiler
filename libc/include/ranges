@@ -15,12 +15,9 @@
 #include <concepts>
 #include <functional>
 #include <initializer_list>
-#include <istream>
 #include <iterator>
+#include <memory>
 #include <new>
-#ifdef __cpp_exceptions
-#include <stdexcept>
-#endif
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -770,6 +767,20 @@ class __movable_box {
   constexpr T* operator->() noexcept { return &__value_; }
   constexpr const T* operator->() const noexcept { return &__value_; }
 };
+
+}  // namespace ranges
+}  // namespace std
+
+// <istream> reaches <string> and <string_view>, which specialize
+// enable_view and enable_borrowed_range.  Those primaries are already
+// declared above.
+#include <istream>
+#ifdef __cpp_exceptions
+#include <stdexcept>
+#endif
+
+namespace std {
+namespace ranges {
 
 // [view.interface] ------------------------------------------------------------
 template <class D>

@@ -16,6 +16,7 @@
 #define __davecc_string__
 
 #include <__char_traits>
+#include <__exception_support>
 #if __cplusplus >= 202002L
 #include <compare>
 #endif
@@ -23,6 +24,7 @@
 // code that calls strerror(errno) after including only <string> relies on it.
 #include <cerrno>
 #include <cstddef>
+#include <initializer_list>
 #include <iterator>
 #include <memory>
 #if __cplusplus >= 201703L
@@ -49,6 +51,10 @@ struct hash;
 template <class CharT, class Traits>
 class basic_string_view;
 
+namespace __string_detail {
+[[noreturn]] constexpr void __throw_out_of_range(const char* what);
+}  // namespace __string_detail
+
 template <class CharT, class Traits = char_traits<CharT>,
           class Allocator = allocator<CharT>>
 class basic_string {
@@ -57,7 +63,7 @@ class basic_string {
   using value_type = CharT;
   using allocator_type = Allocator;
   using size_type = size_t;
-  using difference_type = long;
+  using difference_type = ptrdiff_t;
   using reference = CharT&;
   using const_reference = const CharT&;
   using pointer = CharT*;
@@ -67,7 +73,11 @@ class basic_string {
   using reverse_iterator = std::reverse_iterator<iterator>;
   using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
+#if __cplusplus >= 201703L
+  static constexpr size_type npos = static_cast<size_type>(-1);
+#else
   static const size_type npos = static_cast<size_type>(-1);
+#endif
 
  private:
   static const size_type __sso_capacity = 16;
@@ -85,6 +95,22 @@ class basic_string {
     __size = 0;
     __cap = __sso_capacity;
     __buf[0] = CharT();
+  }
+
+  // Take ownership of other's buffer.  `*this` must not currently own a heap
+  // block: the caller is a constructor, or it has already deallocated.
+  constexpr void __adopt(basic_string& other) noexcept {
+    if (other.__is_small()) {
+      __data = __buf;
+      __cap = __sso_capacity;
+      __size = other.__size;
+      traits_type::copy(__buf, other.__buf, other.__size + 1);
+    } else {
+      __data = other.__data;
+      __cap = other.__cap;
+      __size = other.__size;
+    }
+    other.__set_empty();
   }
 
   // Ensure room for at least `need` characters plus a terminator, preserving
@@ -146,6 +172,12 @@ class basic_string {
     }
   }
 
+  __DAVECC_STRING_CONSTEXPR basic_string(initializer_list<CharT> il)
+      : __alloc(Allocator()) {
+    __set_empty();
+    __assign_raw(il.begin(), static_cast<size_type>(il.size()));
+  }
+
   // Construct from anything that views characters (notably basic_string_view).
   // Requires the complete view type at the point of instantiation.
   __DAVECC_STRING_CONSTEXPR explicit basic_string(basic_string_view<CharT, traits_type> sv)
@@ -173,7 +205,7 @@ class basic_string {
       : __alloc(Allocator()) {
     __set_empty();
     if (pos > other.__size) {
-      pos = other.__size;
+      __string_detail::__throw_out_of_range("basic_string::basic_string");
     }
     size_type avail = other.__size - pos;
     if (n > avail) {
@@ -183,17 +215,7 @@ class basic_string {
   }
 
   __DAVECC_STRING_CONSTEXPR basic_string(basic_string&& other) noexcept : __alloc(other.__alloc) {
-    if (other.__is_small()) {
-      __data = __buf;
-      __cap = __sso_capacity;
-      __size = other.__size;
-      traits_type::copy(__buf, other.__buf, other.__size + 1);
-    } else {
-      __data = other.__data;
-      __cap = other.__cap;
-      __size = other.__size;
-    }
-    other.__set_empty();
+    __adopt(other);
   }
 
   // Allocator-extended constructors.  std::allocator is stateless, so the
@@ -223,6 +245,17 @@ class basic_string {
     __assign_raw(other.__data, other.__size);
   }
 
+  __DAVECC_STRING_CONSTEXPR basic_string(basic_string&& other, const Allocator& a)
+      noexcept(allocator_traits<Allocator>::is_always_equal::value)
+      : __alloc(a) {
+    if (__alloc == other.__alloc) {
+      __adopt(other);
+    } else {
+      __set_empty();
+      __assign_raw(other.__data, other.__size);
+    }
+  }
+
   constexpr ~basic_string() {
     if (!__is_small()) {
       __alloc.deallocate(__data, __cap);
@@ -231,27 +264,37 @@ class basic_string {
 
   __DAVECC_STRING_CONSTEXPR basic_string& operator=(const basic_string& other) {
     if (this != &other) {
+      constexpr bool propagate = allocator_traits<
+          Allocator>::propagate_on_container_copy_assignment::value;
+      if constexpr (propagate) {
+        if (!(__alloc == other.__alloc) && !__is_small()) {
+          __alloc.deallocate(__data, __cap);
+          __set_empty();
+        }
+        __alloc = other.__alloc;
+      }
       __assign_raw(other.__data, other.__size);
     }
     return *this;
   }
 
-  __DAVECC_STRING_CONSTEXPR basic_string& operator=(basic_string&& other) noexcept {
+  __DAVECC_STRING_CONSTEXPR basic_string& operator=(basic_string&& other) noexcept(
+      allocator_traits<Allocator>::propagate_on_container_move_assignment::value ||
+      allocator_traits<Allocator>::is_always_equal::value) {
     if (this != &other) {
-      if (!__is_small()) {
-        __alloc.deallocate(__data, __cap);
-      }
-      if (other.__is_small()) {
-        __data = __buf;
-        __cap = __sso_capacity;
-        __size = other.__size;
-        traits_type::copy(__buf, other.__buf, other.__size + 1);
+      constexpr bool propagate = allocator_traits<
+          Allocator>::propagate_on_container_move_assignment::value;
+      if (propagate || __alloc == other.__alloc) {
+        if (!__is_small()) {
+          __alloc.deallocate(__data, __cap);
+        }
+        __adopt(other);
+        if constexpr (propagate) {
+          __alloc = static_cast<Allocator&&>(other.__alloc);
+        }
       } else {
-        __data = other.__data;
-        __cap = other.__cap;
-        __size = other.__size;
+        __assign_raw(other.__data, other.__size);
       }
-      other.__set_empty();
     }
     return *this;
   }
@@ -259,6 +302,15 @@ class basic_string {
   __DAVECC_STRING_CONSTEXPR basic_string& operator=(const CharT* s) {
     __assign_raw(s, traits_type::length(s));
     return *this;
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& operator=(
+      basic_string_view<CharT, Traits> sv) {
+    return assign(sv.data(), sv.size());
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& operator=(initializer_list<CharT> il) {
+    return assign(il.begin(), static_cast<size_type>(il.size()));
   }
 
   __DAVECC_STRING_CONSTEXPR basic_string& operator=(CharT c) {
@@ -274,8 +326,18 @@ class basic_string {
   // Element access.
   __DAVECC_STRING_CONSTEXPR reference operator[](size_type pos) { return __data[pos]; }
   __DAVECC_STRING_CONSTEXPR const_reference operator[](size_type pos) const { return __data[pos]; }
-  __DAVECC_STRING_CONSTEXPR reference at(size_type pos) { return __data[pos]; }
-  __DAVECC_STRING_CONSTEXPR const_reference at(size_type pos) const { return __data[pos]; }
+  __DAVECC_STRING_CONSTEXPR reference at(size_type pos) {
+    if (pos >= __size) {
+      __string_detail::__throw_out_of_range("basic_string::at");
+    }
+    return __data[pos];
+  }
+  __DAVECC_STRING_CONSTEXPR const_reference at(size_type pos) const {
+    if (pos >= __size) {
+      __string_detail::__throw_out_of_range("basic_string::at");
+    }
+    return __data[pos];
+  }
   __DAVECC_STRING_CONSTEXPR reference front() { return __data[0]; }
   __DAVECC_STRING_CONSTEXPR const_reference front() const { return __data[0]; }
   __DAVECC_STRING_CONSTEXPR reference back() { return __data[__size - 1]; }
@@ -371,7 +433,7 @@ class basic_string {
   __DAVECC_STRING_CONSTEXPR basic_string& append(const basic_string& s, size_type pos,
                        size_type n = npos) {
     if (pos > s.__size) {
-      return *this;
+      __string_detail::__throw_out_of_range("basic_string::append");
     }
     if (n > s.__size - pos) {
       n = s.__size - pos;
@@ -381,7 +443,7 @@ class basic_string {
 
   __DAVECC_STRING_CONSTEXPR basic_string& insert(size_type pos, size_type n, CharT c) {
     if (pos > __size) {
-      return *this;
+      __string_detail::__throw_out_of_range("basic_string::insert");
     }
     __reserve_for(__size + n);
     size_type tail = __size - pos;
@@ -400,7 +462,7 @@ class basic_string {
                                                   const CharT* s,
                                                   size_type n) {
     if (pos > __size) {
-      return *this;
+      __string_detail::__throw_out_of_range("basic_string::insert");
     }
     // Preserve the source when it points into this string and reserve() moves
     // the allocation or shifting the suffix overlaps the source range.
@@ -437,7 +499,7 @@ class basic_string {
       size_type pos, const basic_string& s, size_type subpos,
       size_type n = npos) {
     if (subpos > s.__size) {
-      return *this;
+      __string_detail::__throw_out_of_range("basic_string::insert");
     }
     size_type available = s.__size - subpos;
     if (n > available) {
@@ -470,6 +532,28 @@ class basic_string {
     return assign(s.__data, s.__size);
   }
 
+  __DAVECC_STRING_CONSTEXPR basic_string& assign(
+      basic_string_view<CharT, Traits> sv) {
+    return assign(sv.data(), sv.size());
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& assign(
+      basic_string_view<CharT, Traits> sv, size_type pos,
+      size_type n = npos) {
+    if (pos > sv.size()) {
+      __string_detail::__throw_out_of_range("basic_string::assign");
+    }
+    size_type available = sv.size() - pos;
+    if (n > available) {
+      n = available;
+    }
+    return assign(sv.data() + pos, n);
+  }
+
+  __DAVECC_STRING_CONSTEXPR basic_string& assign(initializer_list<CharT> il) {
+    return assign(il.begin(), static_cast<size_type>(il.size()));
+  }
+
   __DAVECC_STRING_CONSTEXPR basic_string& assign(size_type n, CharT c) {
     __size = 0;
     __data[0] = CharT();
@@ -480,7 +564,7 @@ class basic_string {
   // through the end, which is what `erase(index)` means.
   __DAVECC_STRING_CONSTEXPR basic_string& erase(size_type index = 0, size_type count = npos) {
     if (index > __size) {
-      return *this;
+      __string_detail::__throw_out_of_range("basic_string::erase");
     }
     if (count > __size - index) {
       count = __size - index;
@@ -507,7 +591,7 @@ class basic_string {
 
   __DAVECC_STRING_CONSTEXPR basic_string& replace(size_type pos, size_type count, size_type n, CharT c) {
     if (pos > __size) {
-      pos = __size;
+      __string_detail::__throw_out_of_range("basic_string::replace");
     }
     if (count > __size - pos) {
       count = __size - pos;
@@ -530,7 +614,7 @@ class basic_string {
   __DAVECC_STRING_CONSTEXPR basic_string& replace(
       size_type pos, size_type count, const CharT* s, size_type n) {
     if (pos > __size) {
-      pos = __size;
+      __string_detail::__throw_out_of_range("basic_string::replace");
     }
     if (count > __size - pos) {
       count = __size - pos;
@@ -582,12 +666,21 @@ class basic_string {
 
   __DAVECC_STRING_CONSTEXPR basic_string& operator+=(const basic_string& s) { return append(s); }
   __DAVECC_STRING_CONSTEXPR basic_string& operator+=(const CharT* s) { return append(s); }
+  __DAVECC_STRING_CONSTEXPR basic_string& operator+=(
+      basic_string_view<CharT, Traits> sv) {
+    return append(sv);
+  }
+  __DAVECC_STRING_CONSTEXPR basic_string& operator+=(initializer_list<CharT> il) {
+    return append(il.begin(), static_cast<size_type>(il.size()));
+  }
   __DAVECC_STRING_CONSTEXPR basic_string& operator+=(CharT c) {
     push_back(c);
     return *this;
   }
 
-  __DAVECC_STRING_CONSTEXPR void swap(basic_string& other) noexcept {
+  __DAVECC_STRING_CONSTEXPR void swap(basic_string& other) noexcept(
+      allocator_traits<Allocator>::propagate_on_container_swap::value ||
+      allocator_traits<Allocator>::is_always_equal::value) {
     basic_string tmp(static_cast<basic_string&&>(*this));
     *this = static_cast<basic_string&&>(other);
     other = static_cast<basic_string&&>(tmp);
@@ -615,10 +708,14 @@ class basic_string {
     return 0;
   }
 
+  __DAVECC_STRING_CONSTEXPR int compare(basic_string_view<CharT, Traits> sv) const {
+    return compare(0, __size, sv.data(), sv.size());
+  }
+
   __DAVECC_STRING_CONSTEXPR int compare(size_type pos, size_type count, const CharT* s,
               size_type n) const {
     if (pos > __size) {
-      pos = __size;
+      __string_detail::__throw_out_of_range("basic_string::compare");
     }
     if (count > __size - pos) {
       count = __size - pos;
@@ -643,6 +740,26 @@ class basic_string {
 
   __DAVECC_STRING_CONSTEXPR int compare(size_type pos, size_type count, const basic_string& other) const {
     return compare(pos, count, other.__data, other.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR int compare(size_type pos, size_type count,
+                                        basic_string_view<CharT, Traits> sv) const {
+    return compare(pos, count, sv.data(), sv.size());
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type copy(CharT* dest, size_type count,
+                                         size_type pos = 0) const {
+    if (pos > __size) {
+      __string_detail::__throw_out_of_range("basic_string::copy");
+    }
+    size_type rlen = __size - pos;
+    if (count < rlen) {
+      rlen = count;
+    }
+    if (rlen != 0) {
+      traits_type::copy(dest, __data + pos, rlen);
+    }
+    return rlen;
   }
 
   __DAVECC_STRING_CONSTEXPR int compare(const CharT* s) const {
@@ -723,6 +840,11 @@ class basic_string {
     return find(s.__data, pos, s.__size);
   }
 
+  __DAVECC_STRING_CONSTEXPR size_type find(basic_string_view<CharT, Traits> sv,
+                                           size_type pos = 0) const {
+    return find(sv.data(), pos, sv.size());
+  }
+
   __DAVECC_STRING_CONSTEXPR size_type find(const CharT* s, size_type pos = 0) const {
     return find(s, pos, traits_type::length(s));
   }
@@ -752,6 +874,11 @@ class basic_string {
 
   __DAVECC_STRING_CONSTEXPR size_type find_first_of(const basic_string& s, size_type pos = 0) const {
     return find_first_of(s.__data, pos, s.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_first_of(
+      basic_string_view<CharT, Traits> sv, size_type pos = 0) const {
+    return find_first_of(sv.data(), pos, sv.size());
   }
 
   __DAVECC_STRING_CONSTEXPR size_type find_first_of(const CharT* s, size_type pos = 0) const {
@@ -784,6 +911,11 @@ class basic_string {
   __DAVECC_STRING_CONSTEXPR size_type find_last_of(
       const basic_string& s, size_type pos = npos) const {
     return find_last_of(s.__data, pos, s.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_last_of(
+      basic_string_view<CharT, Traits> sv, size_type pos = npos) const {
+    return find_last_of(sv.data(), pos, sv.size());
   }
 
   __DAVECC_STRING_CONSTEXPR size_type find_last_of(
@@ -834,6 +966,11 @@ class basic_string {
     return rfind(s.__data, pos, s.__size);
   }
 
+  __DAVECC_STRING_CONSTEXPR size_type rfind(basic_string_view<CharT, Traits> sv,
+                                            size_type pos = npos) const {
+    return rfind(sv.data(), pos, sv.size());
+  }
+
   __DAVECC_STRING_CONSTEXPR size_type rfind(const CharT* s,
                                             size_type pos = npos) const {
     return rfind(s, pos, traits_type::length(s));
@@ -852,6 +989,11 @@ class basic_string {
   __DAVECC_STRING_CONSTEXPR size_type find_first_not_of(
       const basic_string& s, size_type pos = 0) const {
     return find_first_not_of(s.__data, pos, s.__size);
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_first_not_of(
+      basic_string_view<CharT, Traits> sv, size_type pos = 0) const {
+    return find_first_not_of(sv.data(), pos, sv.size());
   }
 
   __DAVECC_STRING_CONSTEXPR size_type find_first_not_of(
@@ -887,6 +1029,11 @@ class basic_string {
   }
 
   __DAVECC_STRING_CONSTEXPR size_type find_last_not_of(
+      basic_string_view<CharT, Traits> sv, size_type pos = npos) const {
+    return find_last_not_of(sv.data(), pos, sv.size());
+  }
+
+  __DAVECC_STRING_CONSTEXPR size_type find_last_not_of(
       const CharT* s, size_type pos = npos) const {
     return find_last_not_of(s, pos, traits_type::length(s));
   }
@@ -912,9 +1059,45 @@ namespace pmr {
 
 using string =
     basic_string<char, char_traits<char>, polymorphic_allocator<char>>;
+using wstring =
+    basic_string<wchar_t, char_traits<wchar_t>, polymorphic_allocator<wchar_t>>;
+#if __cplusplus >= 202002L
+using u8string =
+    basic_string<char8_t, char_traits<char8_t>, polymorphic_allocator<char8_t>>;
+#endif
+using u16string = basic_string<char16_t, char_traits<char16_t>,
+                               polymorphic_allocator<char16_t>>;
+using u32string = basic_string<char32_t, char_traits<char32_t>,
+                               polymorphic_allocator<char32_t>>;
 
 }  // namespace pmr
 #endif
+
+inline namespace literals {
+inline namespace string_literals {
+
+__DAVECC_STRING_CONSTEXPR string operator""s(const char* str, size_t len) {
+  return string(str, len);
+}
+__DAVECC_STRING_CONSTEXPR wstring operator""s(const wchar_t* str, size_t len) {
+  return wstring(str, len);
+}
+#if __cplusplus >= 202002L
+__DAVECC_STRING_CONSTEXPR u8string operator""s(const char8_t* str, size_t len) {
+  return u8string(str, len);
+}
+#endif
+#if __cplusplus >= 201103L
+__DAVECC_STRING_CONSTEXPR u16string operator""s(const char16_t* str, size_t len) {
+  return u16string(str, len);
+}
+__DAVECC_STRING_CONSTEXPR u32string operator""s(const char32_t* str, size_t len) {
+  return u32string(str, len);
+}
+#endif
+
+}  // namespace string_literals
+}  // namespace literals
 
 string to_string(int value);
 string to_string(unsigned int value);
@@ -968,6 +1151,66 @@ __DAVECC_STRING_CONSTEXPR basic_string<CharT, Traits, Allocator> operator+(
   basic_string<CharT, Traits, Allocator> result(a);
   result.push_back(b);
   return result;
+}
+
+template <class CharT, class Traits, class Allocator>
+__DAVECC_STRING_CONSTEXPR basic_string<CharT, Traits, Allocator> operator+(
+    CharT a, const basic_string<CharT, Traits, Allocator>& b) {
+  basic_string<CharT, Traits, Allocator> result(1, a);
+  result.append(b);
+  return result;
+}
+
+template <class CharT, class Traits, class Allocator>
+__DAVECC_STRING_CONSTEXPR basic_string<CharT, Traits, Allocator> operator+(
+    basic_string<CharT, Traits, Allocator>&& a,
+    const basic_string<CharT, Traits, Allocator>& b) {
+  a.append(b);
+  return static_cast<basic_string<CharT, Traits, Allocator>&&>(a);
+}
+
+template <class CharT, class Traits, class Allocator>
+__DAVECC_STRING_CONSTEXPR basic_string<CharT, Traits, Allocator> operator+(
+    const basic_string<CharT, Traits, Allocator>& a,
+    basic_string<CharT, Traits, Allocator>&& b) {
+  b.insert(0, a);
+  return static_cast<basic_string<CharT, Traits, Allocator>&&>(b);
+}
+
+template <class CharT, class Traits, class Allocator>
+__DAVECC_STRING_CONSTEXPR basic_string<CharT, Traits, Allocator> operator+(
+    basic_string<CharT, Traits, Allocator>&& a,
+    basic_string<CharT, Traits, Allocator>&& b) {
+  a.append(b);
+  return static_cast<basic_string<CharT, Traits, Allocator>&&>(a);
+}
+
+template <class CharT, class Traits, class Allocator>
+__DAVECC_STRING_CONSTEXPR basic_string<CharT, Traits, Allocator> operator+(
+    const CharT* a, basic_string<CharT, Traits, Allocator>&& b) {
+  b.insert(0, a);
+  return static_cast<basic_string<CharT, Traits, Allocator>&&>(b);
+}
+
+template <class CharT, class Traits, class Allocator>
+__DAVECC_STRING_CONSTEXPR basic_string<CharT, Traits, Allocator> operator+(
+    basic_string<CharT, Traits, Allocator>&& a, const CharT* b) {
+  a.append(b);
+  return static_cast<basic_string<CharT, Traits, Allocator>&&>(a);
+}
+
+template <class CharT, class Traits, class Allocator>
+__DAVECC_STRING_CONSTEXPR basic_string<CharT, Traits, Allocator> operator+(
+    CharT a, basic_string<CharT, Traits, Allocator>&& b) {
+  b.insert(0, 1, a);
+  return static_cast<basic_string<CharT, Traits, Allocator>&&>(b);
+}
+
+template <class CharT, class Traits, class Allocator>
+__DAVECC_STRING_CONSTEXPR basic_string<CharT, Traits, Allocator> operator+(
+    basic_string<CharT, Traits, Allocator>&& a, CharT b) {
+  a.push_back(b);
+  return static_cast<basic_string<CharT, Traits, Allocator>&&>(a);
 }
 
 // Comparisons.
@@ -1102,7 +1345,7 @@ __DAVECC_STRING_CONSTEXPR std::strong_ordering operator<=>(
 
 template <class CharT, class Traits, class Allocator>
 __DAVECC_STRING_CONSTEXPR void swap(basic_string<CharT, Traits, Allocator>& a,
-          basic_string<CharT, Traits, Allocator>& b) {
+          basic_string<CharT, Traits, Allocator>& b) noexcept(noexcept(a.swap(b))) {
   a.swap(b);
 }
 
@@ -1114,13 +1357,28 @@ size_t __fnv1a(const char* data, size_t n) noexcept;
 
 }  // namespace __string_hash_detail
 
-template <>
-struct hash<basic_string<char>> {
-  size_t operator()(const basic_string<char>& s) const noexcept {
-    return __string_hash_detail::__fnv1a(s.data(), s.size());
+template <class CharT, class Traits, class Allocator>
+struct hash<basic_string<CharT, Traits, Allocator>> {
+  size_t operator()(const basic_string<CharT, Traits, Allocator>& s) const noexcept {
+    return __string_hash_detail::__fnv1a(
+        reinterpret_cast<const char*>(s.data()), s.size() * sizeof(CharT));
   }
 };
 
+}  // namespace std
+
+#ifdef __cpp_exceptions
+#include <stdexcept>
+#endif
+
+namespace std {
+namespace __string_detail {
+
+[[noreturn]] inline constexpr void __throw_out_of_range(const char* what) {
+  __DAVECC_THROW(out_of_range(what));
+}
+
+}  // namespace __string_detail
 }  // namespace std
 
 #if __cplusplus >= 201703L

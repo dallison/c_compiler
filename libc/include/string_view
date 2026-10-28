@@ -19,6 +19,10 @@
 #include <cstddef>
 #include <functional>
 #include <iterator>
+#if __cplusplus >= 202002L
+#include <memory>
+#include <ranges>
+#endif
 #include <type_traits>
 #ifdef __cpp_exceptions
 #include <stdexcept>
@@ -59,6 +63,36 @@ class basic_string_view {
 
   constexpr basic_string_view(const CharT* s)
       : __data(s), __size(traits_type::length(s)) {}
+
+#if __cplusplus >= 202302L
+  basic_string_view(nullptr_t) = delete;
+#endif
+
+#if __cplusplus >= 202002L
+  // [string.view.cons] iterator/sentinel.  End is excluded when it converts to
+  // size_type so the (pointer, count) constructor stays the better match.
+  template <class It, class End>
+    requires contiguous_iterator<It> && sized_sentinel_for<End, It> &&
+             is_same_v<iter_value_t<It>, CharT> &&
+             (!is_convertible_v<End, size_type>)
+  constexpr basic_string_view(It first, End last)
+      : __data(to_address(first)),
+        __size(static_cast<size_type>(last - first)) {}
+#endif
+
+#if __cplusplus >= 202302L
+  template <class R>
+    requires(!is_same_v<remove_cvref_t<R>, basic_string_view>) &&
+            ranges::contiguous_range<R> && ranges::sized_range<R> &&
+            is_same_v<ranges::range_value_t<R>, CharT> &&
+            (!is_convertible_v<R, const CharT*>) &&
+            (!requires { typename remove_reference_t<R>::traits_type; } ||
+             is_same_v<typename remove_reference_t<R>::traits_type, Traits>)
+  explicit constexpr basic_string_view(R&& r)
+      : basic_string_view(ranges::data(static_cast<R&&>(r)),
+                          static_cast<size_type>(
+                              ranges::size(static_cast<R&&>(r)))) {}
+#endif
 
   // Iterators.
   constexpr const_iterator begin() const noexcept { return __data; }
@@ -173,6 +207,20 @@ class basic_string_view {
     return compare(basic_string_view(s));
   }
 
+  constexpr int compare(size_type pos1, size_type n1, basic_string_view other,
+                        size_type pos2, size_type n2) const {
+    return substr(pos1, n1).compare(other.substr(pos2, n2));
+  }
+
+  constexpr int compare(size_type pos1, size_type n1, const CharT* s) const {
+    return substr(pos1, n1).compare(basic_string_view(s));
+  }
+
+  constexpr int compare(size_type pos1, size_type n1, const CharT* s,
+                        size_type n2) const {
+    return substr(pos1, n1).compare(basic_string_view(s, n2));
+  }
+
   constexpr bool starts_with(basic_string_view prefix) const noexcept {
     return __size >= prefix.__size &&
            traits_type::compare(__data, prefix.__data, prefix.__size) == 0;
@@ -229,6 +277,10 @@ class basic_string_view {
       }
     }
     return npos;
+  }
+
+  constexpr size_type find(const CharT* s, size_type pos, size_type n) const {
+    return find(basic_string_view(s, n), pos);
   }
 
   constexpr size_type find(const CharT* s, size_type pos = 0) const {
@@ -292,8 +344,26 @@ class basic_string_view {
     return find(c, pos);
   }
 
+  constexpr size_type find_first_of(const CharT* s, size_type pos,
+                                    size_type n) const {
+    return find_first_of(basic_string_view(s, n), pos);
+  }
+
+  constexpr size_type find_first_of(const CharT* s, size_type pos = 0) const {
+    return find_first_of(basic_string_view(s), pos);
+  }
+
   constexpr size_type find_last_of(CharT c, size_type pos = npos) const noexcept {
     return rfind(c, pos);
+  }
+
+  constexpr size_type find_last_of(const CharT* s, size_type pos,
+                                   size_type n) const {
+    return find_last_of(basic_string_view(s, n), pos);
+  }
+
+  constexpr size_type find_last_of(const CharT* s, size_type pos = npos) const {
+    return find_last_of(basic_string_view(s), pos);
   }
 
   constexpr size_type find_last_of(basic_string_view v, size_type pos = npos) const
@@ -332,6 +402,16 @@ class basic_string_view {
     return npos;
   }
 
+  constexpr size_type find_first_not_of(const CharT* s, size_type pos,
+                                        size_type n) const {
+    return find_first_not_of(basic_string_view(s, n), pos);
+  }
+
+  constexpr size_type find_first_not_of(const CharT* s,
+                                        size_type pos = 0) const {
+    return find_first_not_of(basic_string_view(s), pos);
+  }
+
   constexpr size_type find_first_not_of(CharT c, size_type pos = 0) const noexcept {
     for (size_type i = pos; i < __size; i++) {
       if (!traits_type::eq(__data[i], c)) {
@@ -363,6 +443,16 @@ class basic_string_view {
       }
       i--;
     }
+  }
+
+  constexpr size_type find_last_not_of(const CharT* s, size_type pos,
+                                       size_type n) const {
+    return find_last_not_of(basic_string_view(s, n), pos);
+  }
+
+  constexpr size_type find_last_not_of(const CharT* s,
+                                       size_type pos = npos) const {
+    return find_last_not_of(basic_string_view(s), pos);
   }
 
   constexpr size_type find_last_not_of(CharT c, size_type pos = npos) const noexcept {
@@ -450,12 +540,24 @@ size_t __fnv1a(const char* data, size_t n) noexcept;
 
 }  // namespace __string_hash_detail
 
-template <>
-struct hash<basic_string_view<char>> {
-  size_t operator()(basic_string_view<char> s) const noexcept {
-    return __string_hash_detail::__fnv1a(s.data(), s.size());
+template <class CharT, class Traits>
+struct hash<basic_string_view<CharT, Traits>> {
+  size_t operator()(basic_string_view<CharT, Traits> s) const noexcept {
+    return __string_hash_detail::__fnv1a(
+        reinterpret_cast<const char*>(s.data()), s.size() * sizeof(CharT));
   }
 };
+
+#if __cplusplus >= 202002L
+// string_view is a borrowed view: it does not own its characters.
+namespace ranges {
+template <class CharT, class Traits>
+inline constexpr bool enable_view<basic_string_view<CharT, Traits>> = true;
+template <class CharT, class Traits>
+inline constexpr bool enable_borrowed_range<basic_string_view<CharT, Traits>> =
+    true;
+}  // namespace ranges
+#endif
 
 }  // namespace std
 

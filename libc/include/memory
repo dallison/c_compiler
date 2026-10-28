@@ -309,6 +309,41 @@ struct pointer_traits<T*> {
   }
 };
 
+// [pointer.conversion] std::to_address.  Fancy pointers may provide
+// pointer_traits<Ptr>::to_address; otherwise the pointer is reached through
+// operator->().
+template <class Ptr, class = void>
+struct __ptr_has_to_address : false_type {};
+
+template <class Ptr>
+struct __ptr_has_to_address<
+    Ptr, __void_t<decltype(pointer_traits<Ptr>::to_address(
+             declval<const Ptr&>()))>> : true_type {};
+
+template <class T>
+constexpr T* to_address(T* p) noexcept {
+  static_assert(!is_function<T>::value, "to_address of a function pointer");
+  return p;
+}
+
+template <class Ptr>
+constexpr auto __to_address_fancy(const Ptr& p) noexcept {
+  if constexpr (__ptr_has_to_address<Ptr>::value) {
+    return pointer_traits<Ptr>::to_address(p);
+  } else {
+    return to_address(p.operator->());
+  }
+}
+
+template <class Ptr, enable_if_t<!is_pointer<Ptr>::value, int> = 0>
+constexpr auto to_address(const Ptr& p) noexcept {
+  return __to_address_fancy(p);
+}
+
+#if __cplusplus >= 202002L && !defined(__cpp_lib_to_address)
+#define __cpp_lib_to_address 201711L
+#endif
+
 #if __cplusplus >= 202600L
 template <class T>
 constexpr void start_lifetime(T& object) noexcept {
