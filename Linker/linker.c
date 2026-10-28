@@ -123,6 +123,7 @@ void LinkerInit(Linker* linker) {
   VectorInit(&linker->dynamic_libraries);
   VectorInit(&linker->needed_libraries);
   VectorInit(&linker->rpath);
+  VectorInit(&linker->tls_abs_fixups);
   StringInit(&linker->interpreter, "/lib/ld.so");
   StringInit(&linker->entry_symbol, "_start");
   
@@ -200,7 +201,19 @@ void LinkerDestruct(Linker* linker) {
   VectorDestructWithContents(&linker->library_search_path, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
   VectorDestructWithContents(&linker->needed_libraries, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
   VectorDestructWithContents(&linker->rpath, (VectorElementDestructor)StringDestruct, /*free_element=*/true);
+  VectorDestructWithContents(&linker->tls_abs_fixups, NULL, /*free_element=*/true);
   LinkerConfigDestruct(&linker->config);
+}
+
+void LinkerRecordTlsAbsoluteFixup(Linker* linker, uint64_t place,
+                                  uint64_t tls_offset, bool place_is_tls,
+                                  uint32_t pointer_size) {
+  TlsAbsoluteFixup* fixup = calloc(1, sizeof(TlsAbsoluteFixup));
+  fixup->place = place;
+  fixup->tls_offset = tls_offset;
+  fixup->place_is_tls = place_is_tls ? 1 : 0;
+  fixup->pointer_size = pointer_size;
+  VectorAppend(&linker->tls_abs_fixups, fixup);
 }
 
 void LinkerInitArchitecture(Linker* linker) {
@@ -2461,6 +2474,24 @@ static void BuildSections(Linker* linker, ELFWriterFile* elf) {
                       8,
                       bss_contents, linker->nobits_address);
   StringDestruct(&bss_name);
+
+  // Not allocated: the loader reads it from the file and patches the running
+  // thread's copy. Putting it in a load segment would change addresses.
+  if (linker->tls_abs_fixups.length != 0) {
+    ELFWriterSectionContents* contents =
+        NewELFWriterSectionContents(kSectionContentsBuffered);
+    for (size_t i = 0; i < linker->tls_abs_fixups.length; i++) {
+      TlsAbsoluteFixup* fixup = linker->tls_abs_fixups.value.p[i];
+      BufferAppendLongLE(&contents->data.buffered, fixup->place);
+      BufferAppendLongLE(&contents->data.buffered, fixup->tls_offset);
+      BufferAppendWordLE(&contents->data.buffered, fixup->place_is_tls);
+      BufferAppendWordLE(&contents->data.buffered, fixup->pointer_size);
+    }
+    String name;
+    StringInit(&name, ".davecc_tls_abs");
+    ELFWriterAddSection(elf, &name, SHT(progbits), 0, 8, contents, 0);
+    StringDestruct(&name);
+  }
 }
 
 static void AssignSectionIndexes(Linker* linker, ELFWriterFile* elf) {

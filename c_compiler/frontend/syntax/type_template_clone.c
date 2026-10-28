@@ -11298,18 +11298,27 @@ void SyntaxInsertClonedTemplateConstructorPreamble(TypeParser* parser,
   }
   MapDestruct(&preamble_clone.symbol_map);
   MapDestructWithContents(&preamble_clone.pack_symbol_map, DeleteMappedVector);
-  CompoundStatementASTNode* body =
-      (CompoundStatementASTNode*)symbol->type->info.function.body;
-  size_t first_new_statement = body->statements->length;
+  Vector* statements = FunctionTryBodyStatements(symbol->type);
+  if (statements == NULL) {
+    SyntaxCXXConstructorInitListDestruct(initializers);
+    free(initializers);
+    if (combined_args != NULL) {
+      VectorDeleteWithContents(combined_args,
+                               (VectorElementDestructor)TemplateArgumentDelete,
+                               /*free_element=*/false);
+    }
+    return;
+  }
+  size_t first_new_statement = statements->length;
   Struct* saved_access_context = compiler->current_class_access_context;
   compiler->current_class_access_context =
       symbol->type->info.function.cxx_member_owner;
   SyntaxInsertCXXConstructorPreamble(parser->syntax, symbol->type,
-                                     body->statements, initializers,
+                                     statements, initializers,
                                      symbol->location);
   AnalyzeInsertedConstructorPreamble(
-      parser, from_func, source_owner, symbol->type, body->statements,
-      body->statements->length - first_new_statement, args,
+      parser, from_func, source_owner, symbol->type, statements,
+      statements->length - first_new_statement, args,
       combined_args != NULL);
   compiler->current_class_access_context = saved_access_context;
   SyntaxCXXConstructorInitListDestruct(initializers);

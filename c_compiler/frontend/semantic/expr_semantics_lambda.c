@@ -688,9 +688,34 @@ void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
   FinishAutoLambdaCaptureFields(node);
   ExpandLambdaArrayCaptureCopies(node);
   MaterializeBracedClassTemplateTemporary(node);
+  Symbol* literal_symbol = NULL;
+  Storage saved_storage = STO(implicit);
+  bool saved_temp = false;
+  bool saved_constexpr = false;
+  if (node->sym != NULL && node->sym->op == AST_OP(identifier)) {
+    literal_symbol = ((IdentifierASTNode*)node->sym)->symbol;
+  }
+  bool static_duration =
+      literal_symbol != NULL &&
+      (StorageIs(literal_symbol->storage, STO(static)) ||
+       StorageIs(literal_symbol->storage, STO(thread)));
+  if (static_duration) {
+    saved_storage = literal_symbol->storage;
+    saved_temp = literal_symbol->flags.is_temp;
+    saved_constexpr = literal_symbol->flags.is_constexpr;
+    literal_symbol->storage = STO(implicit);
+    literal_symbol->flags.is_temp = true;
+    literal_symbol->flags.is_constexpr = false;
+  }
   node->initializer =
       AnalyzeInitialization(&node->base, node->sym,
                             node->initializer);
+  if (static_duration) {
+    literal_symbol->storage = saved_storage;
+    literal_symbol->flags.is_temp = false;
+    literal_symbol->flags.is_constexpr = saved_constexpr;
+    (void)saved_temp;
+  }
   // A C++ lambda-expression is a prvalue that materializes a temporary closure.
   // Keep that category so forwarding-reference deduction of `F&&` / `T&&` works.
   // A temporary materialized for reference binding is an xvalue.  Reanalyzing a
@@ -701,5 +726,23 @@ void AnalyzeCompoundLiteral(CompoundLiteralASTNode* node) {
     node->base.value_category = kValueCategoryPrvalue;
   } else if (node->base.value_category != kValueCategoryXvalue) {
     node->base.value_category = kValueCategoryLvalue;
+  }
+  if (node->sym != NULL && node->sym->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)node->sym)->symbol;
+    if (symbol != NULL &&
+        (symbol->flags.is_constexpr ||
+         StorageIs(symbol->storage, STO(static)) ||
+         StorageIs(symbol->storage, STO(thread)))) {
+      ASTNode* image =
+          CompilerRegisterStaticObject(symbol, node->initializer);
+      if (image == NULL) {
+        SemanticError((ASTNode*)node,
+                      "static compound literal requires a constant initializer");
+      } else if (image != node->initializer) {
+        ASTNode* old = node->initializer;
+        node->initializer = image;
+        ASTNodeDelete(old);
+      }
+    }
   }
 }

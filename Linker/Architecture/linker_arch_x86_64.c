@@ -91,9 +91,49 @@ static void HandlePICRelocation(
   }
 }
 
+static bool X86_64AbsoluteAddressSize(int type, uint32_t* pointer_size) {
+  switch (type) {
+    case R_X86_64_64:
+      *pointer_size = 8;
+      return true;
+    case R_X86_64_32:
+    case R_X86_64_32S:
+      *pointer_size = 4;
+      return true;
+    default:
+      return false;
+  }
+}
+
+static void NoteTlsAbsoluteAddress(Linker* linker, ObjectFile* file,
+                                   Relocation* reloc, LinkerSymbol* symbol,
+                                   uint64_t S, int64_t A) {
+  (void)file;
+  uint32_t pointer_size = 0;
+  if (reloc == NULL || reloc->section == NULL ||
+      reloc->section->header == NULL ||
+      !X86_64AbsoluteAddressSize(reloc->type, &pointer_size)) {
+    return;
+  }
+  bool tls_target = LinkerSymbolIsTLS(symbol);
+  if (!tls_target && reloc->symbol_section != NULL &&
+      reloc->symbol_section->header != NULL &&
+      (reloc->symbol_section->header->flags & SHF(tls)) != 0) {
+    tls_target = true;
+  }
+  if (!tls_target) {
+    return;
+  }
+  LinkerRecordTlsAbsoluteFixup(
+      linker, (uint64_t)reloc->section->address + (uint64_t)reloc->offset,
+      (uint64_t)((int64_t)S + A),
+      (reloc->section->header->flags & SHF(tls)) != 0, pointer_size);
+}
+
 static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
                             LinkerSymbol* symbol, char* target_address,
                             uint64_t S, int64_t A) {
+  NoteTlsAbsoluteAddress(linker, file, reloc, symbol, S, A);
   uint64_t P = reloc->section->address + reloc->offset;
   int32_t pc32;
 

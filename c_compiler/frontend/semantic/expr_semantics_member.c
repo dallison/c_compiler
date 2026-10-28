@@ -1054,6 +1054,16 @@ void AnalyzeAddressOperator(UnaryASTNode* node) {
     SemanticEnsureAutoReturnTypeDeduced(node->sub->type);
   }
   TypeRecord* ptr = NewPointerTypeRecord(kQualPlain);
+  ASTNode* addressed = node->sub;
+  if (addressed != NULL && addressed->op == AST_OP(compound_literal)) {
+    addressed = ((CompoundLiteralASTNode*)addressed)->sym;
+  }
+  if (addressed != NULL && addressed->op == AST_OP(identifier)) {
+    Symbol* symbol = ((IdentifierASTNode*)addressed)->symbol;
+    if (symbol != NULL && StorageIs(symbol->storage, STO(register))) {
+      SemanticError(node->sub, "Cannot take the address of a register object");
+    }
+  }
   if (!HasAddress(node->sub)) {
     SemanticError(node->sub, "Cannot take the address of this expression");
     // Make a void* pointer type for this node.

@@ -1794,6 +1794,17 @@ static bool SkipConstructorInitializersAndBody(TypeParser* parser) {
   return SkipInlineMemberFunctionBody(parser);
 }
 
+static void SkipCatchHandlers(TypeParser* parser) {
+  while (LexMatch(parser->lex, TOK(catch))) {
+    if (LexLookingAt(parser->lex, TOK(lparen))) {
+      SkipBalanced(parser, TOK(lparen), TOK(rparen));
+    }
+    if (LexLookingAt(parser->lex, TOK(lbrace))) {
+      SkipBalanced(parser, TOK(lbrace), TOK(rbrace));
+    }
+  }
+}
+
 static void AddTemplateParameterScopeSymbols(
     Syntax* syntax, const Vector* template_parameters) {
   if (template_parameters == NULL) {
@@ -2259,7 +2270,16 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
 
   CXXConstructorInitList cxx_initializers;
   SyntaxCXXConstructorInitListInit(&cxx_initializers);
+  // `try` of a function-try-block is captured with the body when parsing is
+  // deferred, so the handlers are re-parsed in complete-class context.
+  bool function_try = false;
+  // A function-try-block is parsed immediately. Deferring it drops the
+  // handler-seq from the captured body.
+  if (LexMatch(parser->lex, TOK(try))) {
+    function_try = true;
+  }
   bool defer_mem_initializers =
+      !function_try &&
       ShouldDeferInlineMemberBody(parser, member_symbol) &&
       LexLookingAt(parser->lex, TOK(colon));
   if (!defer_mem_initializers) {
@@ -2278,6 +2298,12 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
       ConstraintExprDelete(constraint);
     }
   }
+  if (!function_try && !defer_mem_initializers &&
+      LexMatch(parser->lex, TOK(try))) {
+    function_try = true;
+    SyntaxParseCXXConstructorInitializerList(syntax, member_symbol->type,
+                                             &cxx_initializers);
+  }
   if (!defer_mem_initializers && !LexLookingAt(parser->lex, TOK(lbrace))) {
     SyntaxCloseScope(syntax);
     syntax->context = old_context;
@@ -2295,7 +2321,7 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
   member_symbol->type->info.function.is_user_provided = true;
   member_symbol->value.func_defn = member_symbol;
 
-  if (ShouldDeferInlineMemberBody(parser, member_symbol)) {
+  if (!function_try && ShouldDeferInlineMemberBody(parser, member_symbol)) {
     // Capture the body's already-expanded text (from the '{') and skip it; it is
     // re-parsed by FlushDeferredInlineMemberBodies once every member is known.
     // The constructor member-initializer list, already parsed above, is carried
@@ -2312,9 +2338,14 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
     deferred->initializers = cxx_initializers;  // ownership moved
     deferred->old_context = old_context;
     if (defer_mem_initializers) {
+      LexMatch(parser->lex, TOK(try));
       SkipConstructorInitializersAndBody(parser);
+      SkipCatchHandlers(parser);
     } else {
       SkipInlineMemberFunctionBody(parser);
+      if (function_try) {
+        SkipCatchHandlers(parser);
+      }
     }
     LexEndCapture(lex);
     LexMatch(lex, TOK(semicolon));
@@ -2326,6 +2357,14 @@ static bool ParseInlineMemberFunctionBody(TypeParser* parser,
 
   FinishInlineMemberFunctionBody(parser, member_symbol, &cxx_initializers,
                                  old_context);
+  if (function_try) {
+    SyntaxOpenScope(syntax);
+    AddInlineFunctionScopeSymbols(syntax, member_symbol->type);
+    Vector* catches = SyntaxParseCatchHandlers(syntax, TC(decl));
+    SyntaxCloseScope(syntax);
+    SyntaxWrapFunctionTryBlock(member_symbol->type, catches);
+    LexMatch(parser->lex, TOK(semicolon));
+  }
   return true;
 }
 
@@ -2454,11 +2493,20 @@ static void FlushDeferredInlineMemberBodies(TypeParser* parser,
     // names such as `&Class::LaterMember<T>` resolve in complete-class context.
     TypeRecord* saved_fn = compiler->current_function;
     compiler->current_function = entry->member_symbol->type;
+    bool function_try = LexMatch(lex, TOK(try));
     SyntaxParseCXXConstructorInitializerList(syntax, entry->member_symbol->type,
                                              &entry->initializers);
     compiler->current_function = saved_fn;
     FinishInlineMemberFunctionBody(parser, entry->member_symbol,
                                    &entry->initializers, entry->old_context);
+    if (function_try) {
+      SyntaxOpenScope(syntax);
+      AddInlineFunctionScopeSymbols(syntax, entry->member_symbol->type);
+      Vector* catches = SyntaxParseCatchHandlers(syntax, TC(decl));
+      SyntaxCloseScope(syntax);
+      SyntaxWrapFunctionTryBlock(entry->member_symbol->type, catches);
+      LexMatch(lex, TOK(semicolon));
+    }
     syntax->cxx_class_head = saved_class_head;
 
     syntax->current_template_parameters = old_template_parameters;
@@ -2731,9 +2779,11 @@ void FinalizePendingInlineConstructorPreambles(TypeParser* parser,
         func->info.function.body->op != AST_OP(compound)) {
       continue;
     }
-    CompoundStatementASTNode* body =
-        (CompoundStatementASTNode*)func->info.function.body;
-    SyntaxInsertCXXConstructorPreamble(parser->syntax, func, body->statements,
+    Vector* statements = FunctionTryBodyStatements(func);
+    if (statements == NULL) {
+      continue;
+    }
+    SyntaxInsertCXXConstructorPreamble(parser->syntax, func, statements,
                                        pending->initializers,
                                        pending->symbol->location);
     SyntaxCXXConstructorInitListDestruct(pending->initializers);

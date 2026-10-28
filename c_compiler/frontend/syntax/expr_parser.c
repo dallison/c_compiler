@@ -935,14 +935,44 @@ static ASTNode* ParseFunctionCall(ASTNode* left, Syntax* syntax,
 // involves a template parameter), in which case a member named with a trailing
 // template-argument list needs the `template` disambiguator under the standard.
 
+// Storage class parsed for a C23 compound literal, applied when the literal's
+// temporary is created. Nested literals snapshot and clear these first.
+static Storage pending_compound_literal_storage = STO(implicit);
+static bool pending_compound_literal_constexpr = false;
+
 static ASTNode* ParseCompoundLiteral(Syntax* syntax, TypeRecord* type) {
   SourceLocation location = syntax->lex->current_token_location;
+  Storage storage = pending_compound_literal_storage;
+  bool is_constexpr = pending_compound_literal_constexpr;
+  pending_compound_literal_storage = STO(implicit);
+  pending_compound_literal_constexpr = false;
+  if (is_constexpr) {
+    type = TypeRecordAddQualifiers(type, kQualConst);
+  }
   type = TypeRecordCalculateSize(type);
   Symbol* sym = SyntaxNewTemporary(syntax, type);
+  // A scalar is initialized by storing through its address. Mark that before
+  // codegen so an optimizer does not keep the temporary in a register.
+  if (!TypeIsArray(type) && !TypeIsStructOrUnion(type)) {
+    sym->flags.address_taken = true;
+  }
   // The temporary is not the enclosing declarator.  Passing leftover
   // `typedef` / `extern` storage here rejects `return (T){...}` after a
-  // typedef, which is how CMPLX() is spelled.
-  ASTNode* initializer = SyntaxParseInitializer(syntax, sym, sym->storage);
+  // typedef, which is how CMPLX() is spelled.  Static duration is applied
+  // after the initializer is parsed.
+  ASTNode* initializer = SyntaxParseInitializer(syntax, sym, STO(implicit));
+  if (storage != STO(implicit) || is_constexpr) {
+    sym->storage = storage != STO(implicit) ? storage : STO(static);
+    sym->flags.is_defined = true;
+    sym->flags.is_local = syntax->local_symbol_stack != NULL;
+    if (StorageIs(sym->storage, STO(static)) ||
+        StorageIs(sym->storage, STO(thread))) {
+      sym->flags.is_temp = false;
+    }
+    if (is_constexpr) {
+      sym->flags.is_constexpr = true;
+    }
+  }
   return NewCompoundLiteralASTNode(NewIdentifierASTNode(sym, location),
                                    location, initializer);
 }
@@ -1948,11 +1978,123 @@ static bool CastOrCompoundLiteralFollows(Lex* lex) {
 }
 
 
+static bool C23CompoundLiteralStorageToken(Token tok) {
+  return !CompilerIsCXX() && CompilerCAtLeast(kLanguageStandardC23) &&
+         (tok == TOK(static) || tok == TOK(register) ||
+          tok == TOK(thread_local) || tok == TOK(constexpr));
+}
+
+// Parses `constexpr` / `static` / `register` / `thread_local` inside
+// `( storage-class-specifiers type-name ) { ... }`. The opening '(' is
+// already consumed.
+static ASTNode* ParseC23StorageCompoundLiteral(Syntax* syntax,
+                                              TokenClass followers) {
+  SourceLocation location = syntax->lex->current_token_location;
+  bool saw_static = false;
+  bool saw_register = false;
+  bool saw_thread = false;
+  bool saw_constexpr = false;
+  while (C23CompoundLiteralStorageToken(syntax->lex->current_token)) {
+    Token tok = syntax->lex->current_token;
+    if (tok == TOK(static)) {
+      if (saw_static) {
+        SyntaxError(syntax, "Duplicate 'static' specifier");
+      }
+      saw_static = true;
+    } else if (tok == TOK(register)) {
+      if (saw_register) {
+        SyntaxError(syntax, "Duplicate 'register' specifier");
+      }
+      saw_register = true;
+    } else if (tok == TOK(thread_local)) {
+      if (saw_thread) {
+        SyntaxError(syntax, "Duplicate 'thread_local' specifier");
+      }
+      saw_thread = true;
+    } else {
+      if (saw_constexpr) {
+        SyntaxError(syntax, "Duplicate 'constexpr' specifier");
+      }
+      saw_constexpr = true;
+    }
+    LexNextToken(syntax->lex);
+  }
+  bool at_file_scope = syntax->local_symbol_stack == NULL;
+  if (saw_register && (saw_static || saw_thread || saw_constexpr)) {
+    SyntaxError(syntax,
+                "register cannot be combined with static, thread_local, "
+                "or constexpr");
+  }
+  if (saw_register && at_file_scope) {
+    SyntaxError(syntax, "register compound literal is not allowed at file scope");
+    saw_register = false;
+  }
+  if (saw_thread && !at_file_scope && !saw_static && !saw_constexpr) {
+    SyntaxError(syntax,
+                "thread_local compound literal at block scope requires static");
+    saw_static = true;
+  }
+  if (!SyntaxLookingAtType(syntax)) {
+    SyntaxError(syntax, "Expected type name in compound literal");
+    SyntaxRecover(syntax, followers | TC(closebra));
+    return NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  }
+  TypeParser parser;
+  Symbol* sym = NULL;
+  bool parse_completed = TrialParseTypeName(syntax, &parser, &sym);
+  if (!parse_completed || sym == NULL ||
+      !LexLookingAt(syntax->lex, TOK(rparen))) {
+    if (parse_completed) {
+      if (sym != NULL) {
+        SymbolDelete(sym);
+      }
+      TypeParserDestruct(&parser);
+    }
+    SyntaxError(syntax, "Invalid compound literal type");
+    SyntaxRecover(syntax, followers | TC(closebra));
+    return NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  }
+  TypeRecord* type = sym->type;
+  sym->type = NULL;
+  SymbolDelete(sym);
+  TypeParserDestruct(&parser);
+  SyntaxNeedBracket(syntax, TOK(rparen), followers);
+  if (!LexLookingAt(syntax->lex, TOK(lbrace))) {
+    SyntaxError(syntax,
+                "Storage-class specifier in a compound literal requires a "
+                "braced initializer");
+    return NewIntConstantASTNode(
+        0, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  }
+  Storage storage = STO(implicit);
+  if (saw_constexpr || saw_static) {
+    storage = (Storage)(storage | STO(static));
+  }
+  if (saw_thread) {
+    storage = (Storage)(storage | STO(thread));
+  }
+  if (saw_register) {
+    storage = STO(register);
+  }
+  pending_compound_literal_storage = storage;
+  pending_compound_literal_constexpr = saw_constexpr;
+  TypeRecord* saved_type = syntax->compound_literal_type;
+  syntax->compound_literal_type = type;
+  ASTNode* result = ParseCastExpression(syntax, followers);
+  syntax->compound_literal_type = saved_type;
+  return result;
+}
+
 // The '(' of a possible cast has already been consumed. A type-name makes
 // this a cast or a compound literal; anything else is a parenthesized
 // expression, with `found_open_paren` set so the primary parser does not
 // consume another '('.
 static ASTNode* ParseParenthesizedCast(Syntax* syntax, TokenClass followers) {
+  if (C23CompoundLiteralStorageToken(syntax->lex->current_token)) {
+    return ParseC23StorageCompoundLiteral(syntax, followers);
+  }
 
   // A leading __attribute__ (GCC extension) only appears in type names, so
   // treat "( __attribute__((...)) type-name )" as a cast / compound literal.

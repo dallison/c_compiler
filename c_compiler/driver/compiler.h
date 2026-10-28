@@ -743,6 +743,10 @@ bool CompilerExceptionsEnabled(void);
 void CompilerMarkFunctionReferenced(struct Symbol* symbol);
 void CompilerMarkVariableReferenced(struct Symbol* symbol);
 void CompilerRegisterMetaPromotedStatic(struct Symbol* symbol, struct ASTNode* initializer);
+// Places `initializer` in the static image of `symbol`. Returns the simplified
+// braced image, or NULL when the initializer is not a constant image.
+struct ASTNode* CompilerRegisterStaticObject(struct Symbol* symbol,
+                                            struct ASTNode* initializer);
 void CompilerRegisterTemplateParameterObject(struct Symbol* symbol,
                                              struct ASTNode* initializer);
 bool CompilerSymbolIsMetaPromotedStatic(struct Symbol* symbol);

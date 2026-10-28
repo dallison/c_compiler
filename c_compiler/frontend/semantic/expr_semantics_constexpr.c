@@ -574,6 +574,9 @@ bool EvaluateConstantForSymbol(Symbol* symbol, ASTNode* initializer) {
 // constant-ness from the analyzed shape; may mutate the AST during analysis.
 bool IsConstantExpression(ASTNode* node) {
   node = AnalyzeExpression(node);
+  if (node == NULL) {
+    return false;
+  }
   switch (node->op) {
     case AST_OP(number):
     case AST_OP(charconst):
@@ -613,11 +616,19 @@ bool IsConstantExpression(ASTNode* node) {
       return false;
     }
     case AST_OP(address): {
-      // Address of a static variable is a constant.
+      // Address of an object with static storage duration is a constant.
+      // A file-scope definition has that duration without the static keyword.
       UnaryASTNode* addr = (UnaryASTNode*)node;
-      if (addr->sub->op == AST_OP(identifier)) {
+      if (addr->sub != NULL && addr->sub->op == AST_OP(identifier)) {
         IdentifierASTNode* id_node = (IdentifierASTNode*)addr->sub;
-        if (StorageIs(id_node->symbol->storage, STO(static)|STO(extern))) {
+        Symbol* symbol = id_node->symbol;
+        // File-scope objects and explicit static, extern, or thread_local
+        // objects have a link-time address. A thread_local address is the
+        // current thread's object; the loader fills that in.
+        if (symbol != NULL && !symbol->flags.is_argument &&
+            (StorageIs(symbol->storage,
+                       STO(static) | STO(extern) | STO(thread)) ||
+             !symbol->flags.is_block_scope)) {
           return true;
         }
       }

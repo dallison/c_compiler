@@ -850,6 +850,7 @@ static void InitFloatingPoint(ASTNode* expr,
 static void InitScalar(ASTNode* expr, ASTNode* subinit, int offset,
                        Vector* initializers);
 static ASTNode* InitCompoundLiteral(ASTNode* node);
+static bool InitializedStaticAlreadyRegistered(Symbol* symbol);
 
 static int StringLiteralElementSize(ASTNode* expr) {
   if (expr != NULL && TypeIsArray(expr->type) && expr->type->next != NULL) {
@@ -1363,7 +1364,14 @@ static int SymbolEffectiveAlignment(Symbol* sym) {
 static ASTNode* InitCompoundLiteral(ASTNode* node) {
   CompoundLiteralASTNode* lit = (CompoundLiteralASTNode*)node;
   IdentifierASTNode* sym_node = (IdentifierASTNode*)lit->sym;
-  
+  if (sym_node != NULL && sym_node->symbol != NULL &&
+      InitializedStaticAlreadyRegistered(sym_node->symbol)) {
+    return lit->initializer;
+  }
+  if (lit->initializer == NULL || lit->initializer->op != AST_OP(braced_init)) {
+    return lit->initializer;
+  }
+
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
   var->symbol = sym_node->symbol;
   var->is_global = !StorageIs(sym_node->symbol->storage, STO(static));
@@ -1429,7 +1437,11 @@ static void ExpandBracedInitializer(BracedInitializerASTNode* init,
     }
     if (bitfield != NULL) {
       InitBitField(designated_init->init, bitfield, offset, initializers);
-    } else if (designated_init->init->op == AST_OP(compound_literal)) {
+    } else if (designated_init->init->op == AST_OP(compound_literal) &&
+               !(TypeIsPointer(designated_init->base.type) &&
+                 TypeIsArray(designated_init->init->type))) {
+      // The literal fills this aggregate or scalar slot. A pointer initialized
+      // from an array literal is the array's address, handled by InitScalar.
       ASTNode* initval = InitCompoundLiteral(designated_init->init);
       ExpandBracedInitializer((BracedInitializerASTNode*)initval, offset, initializers);
     } else if (TypeIsArray(designated_init->base.type)) {
@@ -1521,22 +1533,28 @@ static bool InitializedStaticAlreadyRegistered(Symbol* symbol) {
   return false;
 }
 
-static void CompilerRegisterConstexprStatic(Symbol* symbol,
-                                            ASTNode* initializer) {
+static ASTNode* CompilerRegisterConstexprStatic(Symbol* symbol,
+                                                 ASTNode* initializer,
+                                                 bool claim_symbol) {
   if (compiler == NULL || symbol == NULL || initializer == NULL) {
-    return;
+    return NULL;
   }
   if (InitializedStaticAlreadyRegistered(symbol)) {
-    return;
+    return initializer;
   }
-  SyntaxAddSymbol(&compiler->syntax, symbol);
+  if (claim_symbol) {
+    SyntaxAddSymbol(&compiler->syntax, symbol);
+  }
   ASTNode* init = initializer;
-  if (init->op == AST_OP(expr_init)) {
+  if (init->op == AST_OP(init)) {
+    init = ((BinaryASTNode*)init)->right;
+  }
+  if (init != NULL && init->op == AST_OP(expr_init)) {
     init = ((ExpressionInitializerASTNode*)init)->expr;
   }
   ASTNode* simplified = AnalyzeInitializer(symbol->type, init, true);
   if (simplified == NULL || simplified->op != AST_OP(braced_init)) {
-    return;
+    return NULL;
   }
   InitializedStaticVariable* var = malloc(sizeof(InitializedStaticVariable));
   var->symbol = symbol;
@@ -1552,18 +1570,24 @@ static void CompilerRegisterConstexprStatic(Symbol* symbol,
   VectorAppend(&compiler->initialized_static_variables, var);
   AssignScalarValueToConst(symbol, (BracedInitializerASTNode*)simplified);
   CompilerMarkVariableReferenced(symbol);
+  return simplified;
+}
+
+ASTNode* CompilerRegisterStaticObject(Symbol* symbol, ASTNode* initializer) {
+  // The compound-literal symbol is already in the syntax symbol list.
+  return CompilerRegisterConstexprStatic(symbol, initializer, false);
 }
 
 void CompilerRegisterMetaPromotedStatic(Symbol* symbol, ASTNode* initializer) {
   if (symbol != NULL && !SymbolHasAttribute(symbol, "meta_promoted_static")) {
     SymbolAddAttribute(symbol, NewAttribute("meta_promoted_static"));
   }
-  CompilerRegisterConstexprStatic(symbol, initializer);
+  CompilerRegisterConstexprStatic(symbol, initializer, true);
 }
 
 void CompilerRegisterTemplateParameterObject(Symbol* symbol,
                                              ASTNode* initializer) {
-  CompilerRegisterConstexprStatic(symbol, initializer);
+  CompilerRegisterConstexprStatic(symbol, initializer, true);
 }
 
 bool CompilerSymbolIsMetaPromotedStatic(Symbol* symbol) {

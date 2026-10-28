@@ -2403,6 +2403,95 @@ static ASTNode* ParseContractAssertStatement(Syntax* syntax,
   return NewContractAssertASTNode(predicate, &attributes, location);
 }
 
+Vector* SyntaxParseCatchHandlers(Syntax* syntax, TokenClass followers) {
+  Vector* catches = NewVector();
+  while (LexMatch(syntax->lex, TOK(catch))) {
+    ASTNode* handler = ParseCatchHandler(syntax, followers);
+    if (handler != NULL) {
+      VectorAppend(catches, handler);
+    }
+  }
+  if (catches->length == 0) {
+    SyntaxError(syntax, "function-try-block requires a handler");
+  }
+  return catches;
+}
+
+static void DiagnoseCtorDtorFunctionTryReturn(ASTNode* node, void* data,
+                                              int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL || node->op != AST_OP(return)) {
+    return;
+  }
+  SyntaxErrorAtLocation((Syntax*)data, node->location,
+                        "a constructor or destructor function-try-block "
+                        "handler cannot return");
+}
+
+void SyntaxWrapFunctionTryBlock(TypeRecord* func, Vector* catches) {
+  if (func == NULL || catches == NULL || catches->length == 0) {
+    VectorDelete(catches);
+    return;
+  }
+  ASTNode* old_body = func->info.function.body;
+  if (old_body == NULL) {
+    VectorDelete(catches);
+    return;
+  }
+  bool ctor_or_dtor = func->info.function.is_constructor ||
+                      func->info.function.is_destructor;
+  for (int i = 0; i < catches->length; i++) {
+    CatchASTNode* handler = VectorGet(catches, i);
+    if (handler == NULL || handler->stmt == NULL) {
+      continue;
+    }
+    if (ctor_or_dtor) {
+      ASTNodeVisit(handler->stmt, DiagnoseCtorDtorFunctionTryReturn, 0,
+                   &compiler->syntax);
+      if (handler->stmt->op == AST_OP(compound)) {
+        VectorAppend(
+            ((CompoundStatementASTNode*)handler->stmt)->statements,
+            NewExpressionStatementASTNode(
+                NewThrowASTNode(NULL, handler->stmt->location),
+                handler->stmt->location));
+      }
+    }
+  }
+  SourceLocation location = old_body->location;
+  ASTNode* try_stmt = (ASTNode*)NewTryASTNode(old_body, catches, location);
+  Vector* statements = NewVector();
+  VectorAppend(statements, try_stmt);
+  ASTNode* new_body =
+      (ASTNode*)NewCompoundStatementASTNode(statements, location);
+  func->info.function.body = new_body;
+  func->info.function.is_function_try_block = true;
+  for (size_t i = 0; i < compiler->declaration_asts.length; i++) {
+    if (compiler->declaration_asts.value.p[i] == old_body) {
+      compiler->declaration_asts.value.p[i] = new_body;
+    }
+  }
+}
+
+Vector* FunctionTryBodyStatements(TypeRecord* func) {
+  if (func == NULL || func->info.function.body == NULL ||
+      func->info.function.body->op != AST_OP(compound)) {
+    return NULL;
+  }
+  CompoundStatementASTNode* body =
+      (CompoundStatementASTNode*)func->info.function.body;
+  if (func->info.function.is_function_try_block && body->statements != NULL &&
+      body->statements->length > 0) {
+    ASTNode* first = VectorGet(body->statements, 0);
+    if (first != NULL && first->op == AST_OP(try)) {
+      ASTNode* inner = ((TryASTNode*)first)->try_stmt;
+      if (inner != NULL && inner->op == AST_OP(compound)) {
+        return ((CompoundStatementASTNode*)inner)->statements;
+      }
+    }
+  }
+  return body->statements;
+}
+
 // Table of statement parsers.
 struct StatementParser {
   Token token;
