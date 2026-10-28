@@ -109,8 +109,9 @@ static void SetEnumFixedUnderlying(Enum* e, TypeRecord* type) {
 }
 
 static TypeRecord* ParseEnumUnderlyingType(TypeParser* parser) {
-  if (!(CompilerIsCXX() || CompilerCAtLeast(kLanguageStandardC23)) ||
-      !LexLookingAt(parser->lex, TOK(colon))) {
+  // C23 and C++ specify the underlying type.  Apple's SDK also uses
+  // `enum E : uint64_t` in C11 headers, so accept it whenever a type follows.
+  if (!LexLookingAt(parser->lex, TOK(colon))) {
     return NULL;
   }
 

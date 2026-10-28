@@ -4593,6 +4593,22 @@ static void PrintSseIntConvertI386(FILE* fp, const char* mnemonic,
   if (!int_to_xmm && inst->operand[0] != NULL) {
     PrepareSseSourceOperandI386(fp, inst->operand[0], buf1, sizeof(buf1));
   }
+  // cvtsi2ss/cvtsi2sd take a GPR or memory source.  A folded integer constant
+  // has no register; park it in ebx, the i386 scratch, first.
+  if (int_to_xmm && inst->operand[0] != NULL &&
+      (TargetIsConst(inst->operand[0]) ||
+       (X86Opcode)inst->operand[0]->opcode == X86_OP(x0))) {
+    fprintf(fp, "\tmovl ");
+    if (TargetIsConst(inst->operand[0])) {
+      PrintAsmImmediate(fp, TargetIntValue(inst->operand[0]));
+    } else {
+      fprintf(fp, "$0");
+    }
+    fprintf(fp, ", %%ebx\n\t%s %%ebx, ", mnemonic);
+    PrintPercentRegFromInstI386(fp, inst, buf2, sizeof(buf2));
+    fprintf(fp, "\n");
+    return;
+  }
   fprintf(fp, "\t%s ", mnemonic);
   if (int_to_xmm) {
     PrintAttOperandI386(fp, inst->operand[0], buf1, sizeof(buf1));

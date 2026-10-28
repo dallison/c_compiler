@@ -10,11 +10,14 @@
 #include <fcntl.h>
 #include <stdlib.h>
 
+extern void __davecc_memstream_detach(FILE* stream);
+
 int fclose(FILE* fp) {
   if (fp == NULL) {
     return EOF;
   }
   int e = fflush(fp);
+  __davecc_memstream_detach(fp);
   if (e == EOF) {
     return EOF;
   }

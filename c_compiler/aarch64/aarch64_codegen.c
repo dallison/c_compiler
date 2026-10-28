@@ -3522,22 +3522,16 @@ static TargetInstruction* LowerLiteralReference(AARCH64Generator* g, IRNode* nod
   TargetInstruction* literal =
       Emit(g, SetInstructionSize(TargetNewLiteral((int)id_node->value.ivalue), kSize64Bit));
 
-  // Mach-O has no ADR reloc (R_AARCH64_ADR_PREL_LO21).  Use the same
-  // adrp/add pair as static addresses so Apple ld can apply PAGE21+PAGEOFF12.
-  TargetInstruction* result;
-  if (compiler != NULL && compiler->native_object) {
-    TargetInstruction* page = Emit(
-        g, SetInstructionSize(NewInstruction1(AARCH64_OP(adrp), literal),
-                              kSize64Bit));
-    result = Emit(g, SetInstructionSize(
-                         NewInstruction2(AARCH64_OP(add), page, literal),
-                         kSize64Bit));
-    result->flags |= AARCH64_LO_RELOC;
-  } else {
-    result = Emit(
-        g, SetInstructionSize(NewInstruction1(AARCH64_OP(adr), literal),
-                              kSize64Bit));
-  }
+  // adr reaches ±1MB.  A large image puts .rodata farther away than that,
+  // so take the page with adrp and the low 12 bits with add, the same pair
+  // used for static symbols.
+  TargetInstruction* page = Emit(
+      g, SetInstructionSize(NewInstruction1(AARCH64_OP(adrp), literal),
+                            kSize64Bit));
+  TargetInstruction* result = Emit(
+      g, SetInstructionSize(NewInstruction2(AARCH64_OP(add), page, literal),
+                            kSize64Bit));
+  result->flags |= AARCH64_LO_RELOC;
 
   // Route the result into a destination tmp when this literalref is a ?: / && /
   // || branch (the "-> $n" annotation); otherwise the merge tmp is never

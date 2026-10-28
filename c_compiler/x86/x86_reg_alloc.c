@@ -901,10 +901,23 @@ static X86Register* AllocateRegisterWithType(X86RegisterAllocator* allocator,
     TargetInstruction* unsafe = NULL;
     // i386 has only five allocatable GPRs.  When every one holds a fixed or
     // already-emitted value, still compute into the spill-address scratch
-    // rather than aborting.
-    bool allow_scratch =
-        scratch != NULL &&
-        (CanSpillAfterDefinition(inst) || !X86_IS_64BIT(allocator->rv));
+    // rather than aborting.  A variable register must not take that path: its
+    // assignment is an rmov, which returns before the spill-after-definition
+    // flag is consumed, so the variable keeps the scratch and the next
+    // instruction both spills itself and later reuses ecx (i386
+    // `cout << char` passed a null streambuf to sputn).
+    bool scratch_ok_for_inst =
+        CanSpillAfterDefinition(inst) ||
+        (!X86_IS_64BIT(allocator->rv) && inst != NULL &&
+         !X86IsVarRegister(inst) && !X86IsFixedRegister(inst) &&
+         (inst->dest == NULL || !X86IsVarRegister(inst->dest)));
+    if (scratch != NULL && scratch->base.owner != NULL &&
+        (scratch->base.owner->uses <= 0 ||
+         (scratch->base.owner->flags & TARGET_INST_SPILLED) != 0)) {
+      scratch->base.owner = NULL;
+    }
+    bool allow_scratch = scratch != NULL && scratch_ok_for_inst &&
+                         scratch->base.owner == NULL;
     TargetInstruction* victim = FindSpillVictim(
         allocator, type, can_use_temp, block,
         scratch != NULL ? &unsafe : NULL);

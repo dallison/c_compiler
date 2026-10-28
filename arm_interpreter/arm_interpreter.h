@@ -117,6 +117,7 @@
 #define ARM_SYSCALL_UNLINK DAVE_SYS_UNLINK
 #define ARM_SYSCALL_DUP DAVE_SYS_DUP
 #define ARM_SYSCALL_DUP2 DAVE_SYS_DUP2
+#define ARM_SYSCALL_UNAME DAVE_SYS_UNAME
 
 #define ARM_VALIDATE_DAVE_SYSCALL(name)                                  \
   typedef char arm_dave_syscall_##name[                                 \

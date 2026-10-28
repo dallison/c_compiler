@@ -268,6 +268,8 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__DAVECC_LDBL_FORMAT__", fmt.value);
     StringDestruct(&fmt);
   }
+  PreprocessorDefineMacro(p, "__FLT_MIN__", "1.17549435082228750797e-38F");
+  PreprocessorDefineMacro(p, "__DBL_MIN__", "2.22507385850720138309e-308");
   if (long_double_format == kLongDoubleFormatIEEEf128) {
     PreprocessorDefineMacro(p, "__LDBL_MANT_DIG__", "113");
     PreprocessorDefineMacro(p, "__LDBL_DIG__", "33");
@@ -276,6 +278,7 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__LDBL_MAX_EXP__", "16384");
     PreprocessorDefineMacro(p, "__LDBL_MAX_10_EXP__", "4932");
     PreprocessorDefineMacro(p, "__LDBL_DECIMAL_DIG__", "36");
+    PreprocessorDefineMacro(p, "__LDBL_MIN__", "3.36210314311209350626e-4932L");
   } else if (long_double_format == kLongDoubleFormatIntel80) {
     PreprocessorDefineMacro(p, "__LDBL_MANT_DIG__", "64");
     PreprocessorDefineMacro(p, "__LDBL_DIG__", "18");
@@ -284,6 +287,7 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__LDBL_MAX_EXP__", "16384");
     PreprocessorDefineMacro(p, "__LDBL_MAX_10_EXP__", "4932");
     PreprocessorDefineMacro(p, "__LDBL_DECIMAL_DIG__", "21");
+    PreprocessorDefineMacro(p, "__LDBL_MIN__", "3.36210314311209350626e-4932L");
   } else if (long_double_format == kLongDoubleFormatFloat32) {
     PreprocessorDefineMacro(p, "__LDBL_MANT_DIG__", "24");
     PreprocessorDefineMacro(p, "__LDBL_DIG__", "6");
@@ -292,6 +296,7 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__LDBL_MAX_EXP__", "128");
     PreprocessorDefineMacro(p, "__LDBL_MAX_10_EXP__", "38");
     PreprocessorDefineMacro(p, "__LDBL_DECIMAL_DIG__", "9");
+    PreprocessorDefineMacro(p, "__LDBL_MIN__", "1.17549435082228750797e-38L");
   } else {
     PreprocessorDefineMacro(p, "__LDBL_MANT_DIG__", "53");
     PreprocessorDefineMacro(p, "__LDBL_DIG__", "15");
@@ -300,6 +305,7 @@ static void PredefineGCCTypeLimitMacros(Preprocessor* p) {
     PreprocessorDefineMacro(p, "__LDBL_MAX_EXP__", "1024");
     PreprocessorDefineMacro(p, "__LDBL_MAX_10_EXP__", "308");
     PreprocessorDefineMacro(p, "__LDBL_DECIMAL_DIG__", "17");
+    PreprocessorDefineMacro(p, "__LDBL_MIN__", "2.22507385850720138309e-308L");
   }
 
   PreprocessorDefineMacro(p, "__ORDER_LITTLE_ENDIAN__", "1234");
@@ -1738,6 +1744,13 @@ static size_t AppendOtherToken(String* input, String* output, size_t pos) {
   size_t start = pos;
   while (pos < input->length) {
     if (input->value[pos] == ',') {
+      break;
+    }
+    // `/*` and `//` start a comment even when glued to the previous
+    // punctuator (`not_port;/* NAME */`).  Swallowing the slash into this
+    // token lets a macro inside the comment expand.
+    if (input->value[pos] == '/' && pos + 1 < input->length &&
+        (input->value[pos + 1] == '*' || input->value[pos + 1] == '/')) {
       break;
     }
     if (CanStartToken(input, pos)) {

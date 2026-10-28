@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <errno.h>
 
+extern int __davecc_memstream_sync(FILE* stream);
+
 int fflush(FILE *stream) {
   if (stream == NULL) {
     // Flush all files.
@@ -43,6 +45,10 @@ int fflush(FILE *stream) {
       remaining -= n;
       buf += n;
     }
+  }
+  if (__davecc_memstream_sync(stream) != 0) {
+    stream->error_flag = 1;
+    return EOF;
   }
   return 0;
 }

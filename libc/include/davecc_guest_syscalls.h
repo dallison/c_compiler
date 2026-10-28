@@ -98,6 +98,11 @@
 #define DAVE_SYS_UNLINK 88
 #define DAVE_SYS_DUP 89
 #define DAVE_SYS_DUP2 90
+#define DAVE_SYS_UNAME 91
+
+// Guest `struct utsname` field width.  The host copies each uname field into
+// a buffer of this size; the layout lives in sys/utsname.h.
+#define DAVE_UTSNAME_LENGTH 65
 
 #define DAVE_SYS_6502_EXIT 1
 #define DAVE_SYS_6502_ABORT 8
@@ -191,6 +196,7 @@
   X(GETHOSTNAME)                    \
   X(UNLINK)                         \
   X(DUP)                            \
-  X(DUP2)
+  X(DUP2)                           \
+  X(UNAME)
 
 #endif

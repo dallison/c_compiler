@@ -325,7 +325,7 @@ static void* X86GuestPtr(void* context, uint64_t guest, size_t size) {
 int64_t X86_64HandleSyscall(X86_64Interpreter* interpreter, int64_t number,
                             int64_t a0, int64_t a1, int64_t a2, int64_t a3,
                             int64_t a4, int64_t a5) {
-  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_DUP2) {
+  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_UNAME) {
     int bits = interpreter->ia32 ? 32 : 64;
     int pointer = interpreter->ia32 ? 4 : 8;
     return DaveHostPosixSyscall(number, pointer, bits, X86GuestPtr, interpreter,

@@ -234,7 +234,7 @@ static void HandleHostTrap(XtensaInterpreter* interpreter) {
   uint32_t a3 = ReadRegister(interpreter, 3);
   uint32_t a4 = ReadRegister(interpreter, 4);
   uint32_t a5 = ReadRegister(interpreter, 5);
-  if (service >= DAVE_SYS_MMAP && service <= DAVE_SYS_DUP2) {
+  if (service >= DAVE_SYS_MMAP && service <= DAVE_SYS_UNAME) {
     int64_t result = DaveHostPosixSyscall(service, 4, 32, XtensaGuestPtr,
                                           interpreter, a2, a3, a4, a5, 0, 0);
     WriteRegister(interpreter, 2, (uint32_t)result);

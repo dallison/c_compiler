@@ -88,12 +88,12 @@
 #define LINKER_CODE_SEGMENT_START_ADDRESS 0x400000000LL
 #define LINKER_DATA_SEGMENT_START_ADDRESS 0x410000000LL
 #define LINKER_SEGMENT_ALIGNMENT 0x1000LL
-#elif defined(__linux__)
+#else
+// Apple reserves the low 4GB.  Every other host, including a compiler
+// built for a guest interpreter, uses the 32-bit-friendly layout.
 #define LINKER_CODE_SEGMENT_START_ADDRESS 0x40000000LL
 #define LINKER_DATA_SEGMENT_START_ADDRESS 0x41000000LL
 #define LINKER_SEGMENT_ALIGNMENT 0x1000LL
-#else
-#error "Unknown operating system"
 #endif
 
 // For a Dynamic Shared Object the addresses are not absolute.

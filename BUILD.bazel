@@ -435,6 +435,8 @@ LIBC_SRCS = [
     "libc/posix_read.c",
     "libc/posix_poll.c",
     "libc/posix_ipc.c",
+    "libc/uname.c",
+    "libc/memstream.c",
     "libc/posix_events.c",
     "libc/regex.c",
     "libc/pow.c",
@@ -1993,6 +1995,8 @@ libc_srcs=(
   "libc/posix_read.c"
   "libc/posix_poll.c"
   "libc/posix_ipc.c"
+  "libc/uname.c"
+  "libc/memstream.c"
   "libc/posix_events.c"
   "libc/regex.c"
   "libc/printf.c"
@@ -2196,6 +2200,8 @@ libc_srcs=(
   "libc/posix_read.c"
   "libc/posix_poll.c"
   "libc/posix_ipc.c"
+  "libc/uname.c"
+  "libc/memstream.c"
   "libc/posix_events.c"
   "libc/regex.c"
   "libc/printf.c"
@@ -2397,6 +2403,8 @@ libc_srcs=(
   "libc/posix_read.c"
   "libc/posix_poll.c"
   "libc/posix_ipc.c"
+  "libc/uname.c"
+  "libc/memstream.c"
   "libc/posix_events.c"
   "libc/regex.c"
   "libc/printf.c"
@@ -2594,6 +2602,8 @@ libc_srcs=(
   "libc/posix_read.c"
   "libc/posix_poll.c"
   "libc/posix_ipc.c"
+  "libc/uname.c"
+  "libc/memstream.c"
   "libc/posix_events.c"
   "libc/regex.c"
   "libc/printf.c"
@@ -2793,6 +2803,8 @@ libc_srcs=(
   "libc/posix_read.c"
   "libc/posix_poll.c"
   "libc/posix_ipc.c"
+  "libc/uname.c"
+  "libc/memstream.c"
   "libc/posix_events.c"
   "libc/regex.c"
   "libc/printf.c"
@@ -2947,6 +2959,7 @@ for src in libc/*.c; do
 done
 
 "$$davecc" "$${cflags[@]}" xtensa_support/heap.c -o "$$work/heap.o"
+"$$davecc" "$${cflags[@]}" xtensa_support/eh_stubs.c -o "$$work/eh_stubs.o"
 
 # ESP32 has no frame unwinder, so the C++ runtime is built without exceptions.
 # iostream, locale, and the coroutine helpers still have to be present.
@@ -3344,6 +3357,8 @@ libc_srcs=(
   "libc/posix_read.c"
   "libc/posix_poll.c"
   "libc/posix_ipc.c"
+  "libc/uname.c"
+  "libc/memstream.c"
   "libc/posix_events.c"
   "libc/regex.c"
   "libc/printf.c"

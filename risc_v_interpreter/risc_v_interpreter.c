@@ -293,7 +293,7 @@ static void* RiscvGuestPtr(void* context, uint64_t guest, size_t size) {
 
 static void HandleEcall(RISCVInterpreter* interpreter) {
   int64_t number = interpreter->iregs[REG(t6)];
-  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_DUP2) {
+  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_UNAME) {
     int bits = interpreter->xlen32 ? 32 : 64;
     int pointer = interpreter->xlen32 ? 4 : 8;
     interpreter->iregs[REG(a0)] = (uint64_t)DaveHostPosixSyscall(

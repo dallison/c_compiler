@@ -1697,6 +1697,14 @@ static bool ArmMemOffsetInRange(ARMOpcode opcode, int offset) {
   if (opcode == ARM_OP(fldr) || opcode == ARM_OP(fstr)) {
     return VfpDispInRange(offset);
   }
+  // Halfword and signed-byte transfers encode an 8-bit magnitude.  A frame
+  // bias can push a codegen offset that fit in 12 bits past that.
+  if (opcode == ARM_OP(ldrh) || opcode == ARM_OP(strh) ||
+      opcode == ARM_OP(ldrsh) || opcode == ARM_OP(ldrsb) ||
+      opcode == ARM_OP(ldurh) || opcode == ARM_OP(sturh) ||
+      opcode == ARM_OP(ldursh) || opcode == ARM_OP(ldursb)) {
+    return offset >= -255 && offset <= 255;
+  }
   return ARMIsPossibleImmediate(offset);
 }
 
@@ -2241,6 +2249,12 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
 
   TrapInstruction(inst);
 
+  // A data-processing source has to be a register.  A folded constant in that
+  // position (`lsl r7, #5, #24`) is staged through ip, which is reserved.
+  bool stage_reg_imm = inst->operand[0] != NULL &&
+                       TargetIsConst(inst->operand[0]) &&
+                       inst->operand[1] != NULL;
+
   // Print opcode.
   switch ((ARMOpcode)inst->opcode) {
     case ARM_OP(b):
@@ -2298,6 +2312,9 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       break;
     }
     default:
+      if (stage_reg_imm) {
+        MoveImmediate(emitter, "ip", TargetIntValue(inst->operand[0]), fp);
+      }
       fprintf(fp, "\t%-12s", LoadStoreMnemonic((ARMOpcode)inst->opcode));
       break;
   }
@@ -2541,7 +2558,9 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       }
       for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
         if (inst->operand[i] != NULL) {
-          if (TargetIsConst(inst->operand[i])) {
+          if (i == 0 && stage_reg_imm) {
+            fprintf(fp, "%sip", sep);
+          } else if (TargetIsConst(inst->operand[i])) {
             fprintf(fp, "%s#%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
           } else if (((int)inst->operand[i]->opcode == (int)ARM_OP(symbol))) {
             char symbuf[256];

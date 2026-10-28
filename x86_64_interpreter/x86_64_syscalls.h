@@ -99,6 +99,7 @@
 #define X86_64_SYSCALL_UNLINK DAVE_SYS_UNLINK
 #define X86_64_SYSCALL_DUP DAVE_SYS_DUP
 #define X86_64_SYSCALL_DUP2 DAVE_SYS_DUP2
+#define X86_64_SYSCALL_UNAME DAVE_SYS_UNAME
 
 #define X86_64_VALIDATE_DAVE_SYSCALL(name)                               \
   typedef char x86_64_dave_syscall_##name[                              \

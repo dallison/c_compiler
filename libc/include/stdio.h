@@ -187,6 +187,8 @@ int fputc(int c, FILE *stream);
 int fputs(const char * restrict s,
      FILE * restrict stream);
 int getc(FILE *stream);
+int getc_unlocked(FILE *stream);
+FILE *open_memstream(char **bufp, size_t *sizep);
 int getchar(void);
 char *gets(char *s);
 int putchar(int c);

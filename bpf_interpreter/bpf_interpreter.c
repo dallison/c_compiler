@@ -143,7 +143,7 @@ static int64_t BpfHostSyscall(BPFInterpreter* interp) {
   uint64_t a1 = interp->r[3];
   uint64_t a2 = interp->r[4];
   uint64_t a3 = interp->r[5];
-  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_DUP2) {
+  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_UNAME) {
     return DaveHostPosixSyscall((int)number, 8, 64, BpfGuestPtr, interp, a0, a1,
                                 a2, a3, 0, 0);
   }
@@ -346,6 +346,11 @@ int BPFInterpreterRun(BPFInterpreter* interp, Loader* loader, uint64_t entry) {
           return 1;
         }
         interp->pc = target;
+        continue;
+      }
+      // gotol: BPF_JMP32 | BPF_JA carries a 32-bit instruction delta in imm.
+      if (class == BPF_JMP32 && op == BPF_JA) {
+        interp->pc += BPF_INSN_SIZE + (int64_t)insn.imm * BPF_INSN_SIZE;
         continue;
       }
       if (op == BPF_EXIT) {

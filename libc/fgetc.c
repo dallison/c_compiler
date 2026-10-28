@@ -18,6 +18,10 @@ static void SetErrorOrEof(FILE* stream, ssize_t n) {
   }
 }
 
+int getc_unlocked(FILE* stream) {
+  return getc(stream);
+}
+
 int getc(FILE* stream) {
   if (stream->orientation == 0) {
     stream->orientation = -1;

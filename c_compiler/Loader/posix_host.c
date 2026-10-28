@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 // Guest errno values from the non-native branch of libc/include/errno.h.
@@ -526,6 +527,19 @@ static int64_t DoSendRecvMsg(int send, int pointer_size,
   return (int64_t)n;
 }
 
+static void CopyUtsField(char* dst, const char* src) {
+  size_t i = 0;
+  if (src != NULL) {
+    while (i + 1 < DAVE_UTSNAME_LENGTH && src[i] != '\0') {
+      dst[i] = src[i];
+      i++;
+    }
+  }
+  while (i < DAVE_UTSNAME_LENGTH) {
+    dst[i++] = '\0';
+  }
+}
+
 int64_t DaveHostPosixSyscall(int number, int pointer_size, int address_bits,
                              DaveHostGuestPtr guest_ptr, void* context,
                              uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
@@ -729,6 +743,18 @@ int64_t DaveHostPosixSyscall(int number, int pointer_size, int address_bits,
     case DAVE_SYS_DUP2: {
       int fd = dup2((int)a0, (int)a1);
       return fd < 0 ? Fail() : fd;
+    }
+    case DAVE_SYS_UNAME: {
+      struct utsname host_name;
+      char* guest_name = guest_ptr(context, a0, (size_t)DAVE_UTSNAME_LENGTH * 5);
+      if (guest_name == NULL) return -kGuestEFAULT;
+      if (uname(&host_name) != 0) return Fail();
+      CopyUtsField(guest_name, host_name.sysname);
+      CopyUtsField(guest_name + DAVE_UTSNAME_LENGTH, host_name.nodename);
+      CopyUtsField(guest_name + DAVE_UTSNAME_LENGTH * 2, host_name.release);
+      CopyUtsField(guest_name + DAVE_UTSNAME_LENGTH * 3, host_name.version);
+      CopyUtsField(guest_name + DAVE_UTSNAME_LENGTH * 4, host_name.machine);
+      return 0;
     }
     default:
       return -kGuestENOSYS;

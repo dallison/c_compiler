@@ -147,8 +147,9 @@ bool DAsmDisassembleBPF(const void* bytes, size_t length, uint64_t address,
       DAsmFormat(inst, "exit");
       return true;
     }
-    uint64_t target =
-        address + BPF_INSN_SIZE + (int64_t)insn.off * BPF_INSN_SIZE;
+    int64_t span = (class == BPF_JMP32 && op == BPF_JA) ? (int64_t)insn.imm
+                                                       : (int64_t)insn.off;
+    uint64_t target = address + BPF_INSN_SIZE + span * BPF_INSN_SIZE;
     DAsmSetTarget(inst, target);
     if (op == BPF_JA) {
       DAsmFormat(inst, "ja 0x%" PRIx64, target);

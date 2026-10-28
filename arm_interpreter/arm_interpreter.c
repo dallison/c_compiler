@@ -734,7 +734,7 @@ static void* ArmGuestPtr(void* context, uint64_t guest, size_t size) {
 static int32_t HandleSyscall(ARMInterpreter* interpreter, int32_t number,
                              int32_t a0, int32_t a1, int32_t a2, int32_t a3,
                              int32_t a4, int32_t a5, bool* pc_updated) {
-  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_DUP2) {
+  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_UNAME) {
     // ARM passes the syscall number in r7 and the arguments in r1-r5.
     return (int32_t)DaveHostPosixSyscall(
         number, 4, 32, ArmGuestPtr, interpreter, (uint64_t)(uint32_t)a1,

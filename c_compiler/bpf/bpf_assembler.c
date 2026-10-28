@@ -1,6 +1,7 @@
 #include "bpf_assembler.h"
 
 #include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "bpf_machine.h"
@@ -63,19 +64,68 @@ static bool ParseMem(BPFAssembler* assembler, int* base, int16_t* off) {
   return true;
 }
 
-static int16_t BranchOffset(BPFAssembler* assembler, int64_t target) {
+// Instruction delta from the instruction about to be emitted.  0 and an
+// error if the target is not instruction-aligned.
+static int64_t BranchInsns(BPFAssembler* assembler, int64_t target) {
   int64_t pc = AssemblerCurrentAddress(&ASM);
   int64_t delta = target - (pc + BPF_INSN_SIZE);
   if (delta % BPF_INSN_SIZE != 0) {
     AssemblerError(&ASM, "unaligned branch target");
     return 0;
   }
-  int64_t insns = delta / BPF_INSN_SIZE;
-  if (insns < -32768 || insns > 32767) {
-    AssemblerError(&ASM, "branch out of range");
-    return 0;
+  return delta / BPF_INSN_SIZE;
+}
+
+// `ja` encodes the offset in 16 bits.  A longer span uses the BPF_JMP32
+// form, whose 32-bit immediate is the instruction delta (gotol).
+static void EmitGoto(BPFAssembler* assembler, int64_t insns) {
+  if (insns >= -32768 && insns <= 32767) {
+    BpfEmit(assembler, BPF_JMP | BPF_JA, 0, 0, (int16_t)insns, 0);
+    return;
   }
-  return (int16_t)insns;
+  if (insns < (int64_t)INT32_MIN || insns > (int64_t)INT32_MAX) {
+    AssemblerError(&ASM, "branch out of range");
+    return;
+  }
+  BpfEmit(assembler, BPF_JMP32 | BPF_JA, 0, 0, 0, (int32_t)insns);
+}
+
+static uint8_t InvertJcc(uint8_t op) {
+  switch (op) {
+    case BPF_JEQ: return BPF_JNE;
+    case BPF_JNE: return BPF_JEQ;
+    case BPF_JGT: return BPF_JLE;
+    case BPF_JGE: return BPF_JLT;
+    case BPF_JLT: return BPF_JGE;
+    case BPF_JLE: return BPF_JGT;
+    case BPF_JSGT: return BPF_JSLE;
+    case BPF_JSGE: return BPF_JSLT;
+    case BPF_JSLT: return BPF_JSGE;
+    case BPF_JSLE: return BPF_JSGT;
+    default: return 0;
+  }
+}
+
+// A conditional branch past ±32767 instructions becomes "skip a long goto
+// when the condition is false".  jset has no inverse, so it jumps to the
+// goto and an unconditional ja skips it otherwise.
+static void EmitJcc(BPFAssembler* assembler, uint8_t code, uint8_t dst,
+                    uint8_t src, int32_t imm, int64_t target) {
+  int64_t insns = BranchInsns(assembler, target);
+  if (insns >= -32768 && insns <= 32767) {
+    BpfEmit(assembler, code, dst, src, (int16_t)insns, imm);
+    return;
+  }
+  uint8_t inverse = InvertJcc(BPF_ALU_OP(code));
+  if (inverse != 0) {
+    uint8_t skip = (uint8_t)((code & 0x0fu) | inverse);
+    BpfEmit(assembler, skip, dst, src, 1, imm);
+    EmitGoto(assembler, insns - 1);
+    return;
+  }
+  BpfEmit(assembler, code, dst, src, 1, imm);
+  BpfEmit(assembler, BPF_JMP | BPF_JA, 0, 0, 1, 0);
+  EmitGoto(assembler, insns - 2);
 }
 
 typedef enum {
@@ -239,7 +289,7 @@ static void AssembleStore(BPFAssembler* assembler, uint8_t code) {
 
 static void AssembleJa(BPFAssembler* assembler) {
   int64_t target = AssemblerEvaluateExpression(&ASM);
-  BpfEmit(assembler, BPF_JMP | BPF_JA, 0, 0, BranchOffset(assembler, target), 0);
+  EmitGoto(assembler, BranchInsns(assembler, target));
 }
 
 static void AssembleJcc(BPFAssembler* assembler, uint8_t base_code) {
@@ -269,8 +319,7 @@ static void AssembleJcc(BPFAssembler* assembler, uint8_t base_code) {
     return;
   }
   int64_t target = AssemblerEvaluateExpression(&ASM);
-  BpfEmit(assembler, code, (uint8_t)dst, src, BranchOffset(assembler, target),
-          imm);
+  EmitJcc(assembler, code, (uint8_t)dst, src, imm, target);
 }
 
 static bool IdentifierIsRegister(const char* name) {

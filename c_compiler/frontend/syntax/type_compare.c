@@ -1088,7 +1088,6 @@ bool TypeIsVoidFunction(TypeRecord* type);
 
 bool TypeIsPointerToSameType(TypeRecord* ptr1, TypeRecord* ptr2);
 bool TypeIsStructOrUnion(TypeRecord* type);
-bool TypeIsScalar(TypeRecord* type);
 bool TypeIsVoidPointer(TypeRecord* type);
 bool TypeIsArray(TypeRecord* type);
 bool TypeIsConst(TypeRecord* type);

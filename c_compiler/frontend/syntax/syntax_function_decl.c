@@ -414,8 +414,12 @@ static ASTNode* DefineFunctionWithBody(Syntax* syntax, Vector* declarations,
   AddFunctionScopeSymbols(syntax, sym->type);
   MarkFunctionDefinedWithBody(sym, old_sym);
 
-  // Parse the function body.
+  // Parse the function body.  `__func__` reads the function symbol off this
+  // type.  A declarator parsed before the name was bound leaves it null.
   TypeRecord* old_current_function = compiler->current_function;
+  if (sym->type->info.function.symbol == NULL) {
+    sym->type->info.function.symbol = sym;
+  }
   compiler->current_function = sym->type;
   Vector* body = NewVector();
   SourceLocation body_begin = syntax->lex->current_token_location;

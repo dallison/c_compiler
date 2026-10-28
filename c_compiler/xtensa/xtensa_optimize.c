@@ -214,28 +214,9 @@ static void RemoveUnusedExpressions(XTENSAGenerator* rv) {
                               kTraversePostOrder, &data);
 }
 
-// The output from the codegen for loading and storing symbols is this:
-// la x, symbol_name
-// lw y, 0(x)  (any other load or store)
-//
-// The 'la' instruction is a macro for loading the symbol address
-// via a relocation and expands to:
-// auipc x, %pcrel_hi(symbol_name)
-// addi x, x, %pcrel_lo(symbol_name)
-// lw y, 0(x)
-//
-// The addi can be combined with the load(store):
-// auipc x, %pcrel_hi(symbol_name)
-// lw y, %pcrel_lo(symbol_name), x
-//
-//
-// Also, the sequence:
-// addi x1, x2, n
-// ld x, a(x1)  - any load or store
-//
-// can become:
-// ld x, (n+a)(x2)
-// as long as n+a is a possible immediate value.
+// Fold addi into a following load or store when the combined displacement
+// still fits the Xtensa memory immediate.  Symbol addresses stay as `la`:
+// Xtensa has no auipc/%pcrel_hi form.
 
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
@@ -249,25 +230,10 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
 
     if (XTENSAIsLoad(inst)) {
       TargetInstruction* base = inst->operand[0];
-      if (base->opcode == (TargetOpcode)XTENSA_OP(la) && !compiler->pic &&
-          XTENSAIntValue(inst->operand[1]) == 0 && base->users.length == 1) {
-        // Fold the la's %pcrel_lo into the load.  Only safe when the load
-        // reads exactly the symbol (offset 0 -- %pcrel_lo cannot carry an
-        // extra constant) and the la feeds nothing else.  A la shared by
-        // several loads/stores (e.g. copying a multi-word struct) must keep
-        // materializing the full address: folding would replace this access's
-        // offset with the relocation and leave the other accesses reading from
-        // the bare auipc (high bits only).
-        // Insert label for auipc instruction.
-        TargetInstruction* label =
-            TargetNewInstruction((TargetOpcode)XTENSA_OP(label));
-        label->flags = XTENSA_EXPORTED_LABEL;
-        TargetBasicBlockEmitBefore(&rv->base, block, label, base);
-        base->opcode = (TargetOpcode)XTENSA_OP(auipc);
-        base->flags |= XTENSA_PCREL_HI_RELOC;
-        TargetReplaceOperand(inst, 1, label);
-        inst->flags |= XTENSA_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)XTENSA_OP(addi)) {
+      // Xtensa materializes a symbol with `la` (an l32r literal).  That is not
+      // the RISC-V auipc/%pcrel_hi pair, and rewriting it produces an
+      // instruction the assembler rejects.
+      if (base->opcode == (TargetOpcode)XTENSA_OP(addi)) {
         // Load from an address calculated using an addi instruction.  See if we
         // can combine them.
         int offset = XTENSAIntValue(inst->operand[1]);
@@ -289,25 +255,7 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       }
     } else if (XTENSAIsStore(inst)) {
       TargetInstruction* base = inst->operand[1];
-      if (base->opcode == (TargetOpcode)XTENSA_OP(la) && !compiler->pic &&
-          XTENSAIntValue(inst->operand[2]) == 0 && base->users.length == 1) {
-        // Fold only for a zero-offset store whose la feeds nothing else; see
-        // the load case above for why a nonzero offset or a shared la base
-        // (e.g. a multi-word struct copy) must not be folded.
-        // Insert label for auipc instruction.  Use the basic-block-aware
-        // helper (as in the load case): inserting via the raw list helper
-        // fails to update block->code when the auipc is the first instruction
-        // in its block, which orphans the label so it is never emitted and
-        // leaves the paired %pcrel_lo relocation dangling.
-        TargetInstruction* label =
-            TargetNewInstruction((TargetOpcode)XTENSA_OP(label));
-        label->flags = XTENSA_EXPORTED_LABEL;
-        TargetBasicBlockEmitBefore(&rv->base, block, label, base);
-        base->opcode = (TargetOpcode)XTENSA_OP(auipc);
-        base->flags |= XTENSA_PCREL_HI_RELOC;
-        TargetReplaceOperand(inst, 2, label);
-        inst->flags |= XTENSA_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)XTENSA_OP(addi)) {
+      if (base->opcode == (TargetOpcode)XTENSA_OP(addi)) {
         // Store to an address calculated using an addi instruction.  See if we
         // can combine them.
         int offset = XTENSAIntValue(inst->operand[2]);
@@ -543,8 +491,6 @@ void XTENSAOptimize(XTENSAGenerator* rv) {
   RemoveUnusedExpressions(rv);
   // XTENSAPrintBasicBlocks(rv, stdout);
 
-  // A load or store from an address calculated using the 'la' instruction can
-  // be combined with the 'la'.
   CombineLoadOrStores(rv);
   // XTENSAPrintBasicBlocks(rv, stdout);
 

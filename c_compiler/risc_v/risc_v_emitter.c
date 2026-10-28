@@ -1436,6 +1436,16 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
 
   // General case for instruction printing.
 
+  // A register source that folded to a constant (`slli a6, 5, 56`) is
+  // staged through t0, which the allocator reserves.
+  bool stage_reg_imm = inst->operand[0] != NULL &&
+                       TargetIsConst(inst->operand[0]) &&
+                       inst->operand[1] != NULL;
+  if (stage_reg_imm) {
+    fprintf(fp, "\t%-12st0, %" PRId64 "\n", "li",
+            TargetIntValue(inst->operand[0]));
+  }
+
   // Print opcode.
   fprintf(fp, "\t%-12s", RVOpcodeName(inst->opcode));
 
@@ -1627,7 +1637,9 @@ static void PrintInstruction(RVEmitter* emitter, TargetInstruction* inst,
       }
       for (int i = 0; i < 2; i++) {
         if (inst->operand[i] != NULL) {
-          if (TargetIsConst(inst->operand[i])) {
+          if (i == 0 && stage_reg_imm) {
+            fprintf(fp, "%st0", sep);
+          } else if (TargetIsConst(inst->operand[i])) {
             fprintf(fp, "%s%" PRId64 "", sep, TargetIntValue(inst->operand[i]));
           } else if (((int)inst->operand[i]->opcode == (int)RV_OP(symbol))) {
             if ((inst->flags & RV_HI_RELOC) != 0) {

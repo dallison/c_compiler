@@ -1640,7 +1640,11 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
             TargetLiteral* literal = (TargetLiteral*)inst->operand[i];
             char litname[64];
             LiteralAsmName(literal->literal_id, litname, sizeof(litname));
-            fprintf(fp, "%s%s", sep, litname);
+            if ((inst->flags & AARCH64_LO_RELOC) != 0) {
+              fprintf(fp, "%s:lo12:%s", sep, litname);
+            } else {
+              fprintf(fp, "%s%s", sep, litname);
+            }
           } else if (((int)inst->operand[i]->opcode == (int)AARCH64_OP(oplsl))) {
             fprintf(fp, ", lsl ");
             sep = "";
@@ -2365,6 +2369,24 @@ static bool ProgramShiftAmount(TargetInstruction* inst, int* amount) {
   return true;
 }
 
+// Move elimination can replace a register operand with the constant it moved.
+// A zero constant is wzr.  Any other constant is materialized into dest (or
+// x8 when the instruction has no destination) and then used as the source.
+static int ProgramConstSourceReg(AsmModule* module, TargetInstruction* operand,
+                                 int dest, bool is_64bit) {
+  int reg = ProgramRegNum(operand);
+  if (reg >= 0 || operand == NULL || !TargetIsConst(operand)) {
+    return reg;
+  }
+  int64_t constant = TargetIntValue(operand);
+  if (constant == 0) {
+    return 31;
+  }
+  int temp = dest >= 0 ? dest : 8;
+  ProgramMoveImmediate(module, temp, is_64bit, (uint64_t)constant);
+  return temp;
+}
+
 static void ProgramEmitAddSub(TargetInstruction* inst, AsmModule* module,
                               bool subtract, bool set_flags,
                               bool compare_alias) {
@@ -2373,15 +2395,15 @@ static void ProgramEmitAddSub(TargetInstruction* inst, AsmModule* module,
   TargetInstruction* right_value;
   bool is_64bit;
   if (compare_alias) {
-    left = ProgramRegNum(inst->operand[0]);
     right_value = inst->operand[1];
     is_64bit = ProgramIs64(inst);
     dest = 31;
+    left = ProgramConstSourceReg(module, inst->operand[0], 8, is_64bit);
   } else {
     dest = ProgramRegNum(inst);
-    left = ProgramRegNum(inst->operand[0]);
     right_value = inst->operand[1];
     is_64bit = ProgramIs64(inst);
+    left = ProgramConstSourceReg(module, inst->operand[0], dest, is_64bit);
   }
   AARCH64AsmRegister rd = {
       .num = dest,
@@ -2461,7 +2483,8 @@ static void ProgramEmitLogical(TargetInstruction* inst, AsmModule* module,
                                int opc, bool invert, bool test_alias) {
   bool is_64bit = ProgramIs64(inst);
   int dest = test_alias ? 31 : ProgramRegNum(inst);
-  int left = ProgramRegNum(inst->operand[0]);
+  int left = ProgramConstSourceReg(module, inst->operand[0],
+                                   test_alias ? 8 : dest, is_64bit);
   TargetInstruction* right_value = inst->operand[1];
   AARCH64AsmRegister rd = {
       .num = dest,
@@ -2971,11 +2994,12 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
     case AARCH64_OP(lsl):
     case AARCH64_OP(lsr):
     case AARCH64_OP(asr): {
-      int source = ProgramRegNum(inst->operand[0]);
       int shift = (int)TargetIntValue(inst->operand[1]);
       if (shift > 31) {
         is_64bit = true;
       }
+      int source =
+          ProgramConstSourceReg(module, inst->operand[0], dest, is_64bit);
       int maximum = is_64bit ? 63 : 31;
       int opc = inst->opcode == (TargetOpcode)AARCH64_OP(asr) ? 0 : 2;
       int immr = inst->opcode == (TargetOpcode)AARCH64_OP(lsl)

@@ -36,7 +36,7 @@
 typedef struct PCodeInterpreter {
   Loader* loader;
   int64_t iregs[PCODE_NUM_INT_REGS];
-  float fregs[PCODE_NUM_FLOAT_REGS];;
+  float fregs[PCODE_NUM_FLOAT_REGS];
   double dregs[PCODE_NUM_DOUBLE_REGS];
 
   int32_t startup_code[4];

@@ -1155,17 +1155,24 @@ ASTNode* ParseIdentifier(Syntax* syntax,
       const char* simple_name = FullyQualifiedIdentifierLast(&name);
       if (compiler->current_function != NULL &&
           TypeIsFunction(compiler->current_function) &&
-          compiler->current_function->info.function.symbol != NULL &&
           (strcmp(simple_name, "__func__") == 0 ||
            strcmp(simple_name, "__FUNCTION__") == 0)) {
-        String replacement;
-        StringInit(&replacement, NULL);
-        StringPrintf(
-            &replacement, "\"%s\"",
-            compiler->current_function->info.function.symbol->name.value);
+        const char* func_name = "";
+        if (compiler->current_function->info.function.symbol != NULL &&
+            compiler->current_function->info.function.symbol->name.value !=
+                NULL) {
+          func_name =
+              compiler->current_function->info.function.symbol->name.value;
+        }
+        // C99 declares `__func__` as `static const char __func__[]`.
+        String* contents = NewString(func_name);
+        TypeRecord* array = NewBasicArrayTypeRecord(
+            kQualPlain, (int)contents->length + 1, false);
+        TypeRecord* element = NewTypeRecordWithSize(kTypeChar, kQualConst);
+        TypeRecordChain(array, element);
+        TypeRecordCalculateSize(array);
         ASTNode* result = NewStringConstantASTNode(
-            NewString(replacement.value), NULL, lex->current_token_location);
-        StringDestruct(&replacement);
+            contents, array, lex->current_token_location);
         FullyQualifiedIdentifierDestruct(&name);
         return result;
       }

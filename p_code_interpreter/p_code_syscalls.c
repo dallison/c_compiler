@@ -78,7 +78,7 @@ static void* PCodeGuestPtr(void* context, uint64_t guest, size_t size) {
 int64_t PCodeHandleSyscall(PCodeInterpreter* interpreter, int64_t number,
                            int64_t a0, int64_t a1, int64_t a2, int64_t a3,
                            int64_t a4, int64_t a5) {
-  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_DUP2) {
+  if (number >= DAVE_SYS_MMAP && number <= DAVE_SYS_UNAME) {
     (void)interpreter;
     return DaveHostPosixSyscall((int)number, 8, 64, PCodeGuestPtr, interpreter,
                                 (uint64_t)a0, (uint64_t)a1, (uint64_t)a2,
@@ -375,6 +375,7 @@ int64_t PCodeHandlePackedSyscall(PCodeInterpreter* interpreter,
     case DAVE_SYS_GETSOCKOPT:
     case DAVE_SYS_PIPE:
     case DAVE_SYS_UNLINK:
+    case DAVE_SYS_UNAME:
       a0 = ReadPackedLong(&cursor);
       break;
     case DAVE_SYS_MUNMAP:

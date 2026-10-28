@@ -303,6 +303,8 @@ static const TargetRuntime target_runtimes[] = {
      "//:libc_riscv32_shared", false, false},
     {"esp32", kTargetOSNone, "libcxtensa.a", "//:libc_xtensa",
      "esp32_start.o", "//:esp32_start", NULL, false, true},
+    {"bpf", kTargetOSNone, "libcbpf.a", "//:libc_bpf",
+     "bpf_start.o", "//:bpf_start", NULL, false, true},
     {"aarch64", kTargetOSNone, "libcaarch64.a", "//:libc_aarch64", NULL, NULL,
      "//:libc_aarch64_shared", true, false},
     {"arm", kTargetOSNone, "libcarm.a", "//:libc_arm", NULL, NULL,
