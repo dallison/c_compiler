@@ -127,7 +127,6 @@ bool operator==(const set<Key, Compare, Allocator>& left,
 #endif
 #include <cstddef>
 #include <utility>
-#include <vector>
 
 namespace std {
 
@@ -1321,44 +1320,659 @@ class set {
 template <class Key, class Compare = less<Key>,
           class Allocator = allocator<Key>>
 class multiset {
-  typedef vector<Key> storage_type;
-
  public:
-  typedef Key key_type;
-  typedef Key value_type;
-  typedef Compare key_compare;
-  typedef Compare value_compare;
-  typedef Allocator allocator_type;
-  typedef typename storage_type::size_type size_type;
-  typedef typename storage_type::difference_type difference_type;
-  typedef const value_type& reference;
-  typedef const value_type& const_reference;
-  typedef typename storage_type::const_iterator iterator;
-  typedef typename storage_type::const_iterator const_iterator;
-
-  explicit multiset(const Compare& compare = Compare(),
-                    const Allocator& = Allocator())
-      : compare_(compare) {}
-
-  iterator begin() const { return values_.begin(); }
-  iterator end() const { return values_.end(); }
-  bool empty() const { return values_.empty(); }
-  size_type size() const { return values_.size(); }
-
-  iterator insert(const value_type& value) {
-    values_.push_back(value);
-    return values_.end() - 1;
-  }
-
-  void clear() { values_.clear(); }
-  void swap(multiset& other) {
-    values_.swap(other.values_);
-    std::swap(compare_, other.compare_);
-  }
+  using key_type = Key;
+  using value_type = Key;
+  using key_compare = Compare;
+  using value_compare = Compare;
+  using allocator_type = Allocator;
+  using size_type = size_t;
+  using difference_type = ptrdiff_t;
+  using reference = const value_type&;
+  using const_reference = const value_type&;
+  using pointer = const value_type*;
+  using const_pointer = const value_type*;
 
  private:
-  mutable storage_type values_;
-  Compare compare_;
+  using __alloc_traits = allocator_traits<allocator_type>;
+
+  enum __color {
+    __red,
+    __black
+  };
+
+  using __node = __set_detail::__node<Key>;
+  using __node_allocator = typename __alloc_traits::template rebind_alloc<__node>;
+  using __node_alloc_traits = allocator_traits<__node_allocator>;
+
+ public:
+  // Keys are immutable.  iterator and const_iterator are the same type so a
+  // multiset can be walked from a const object without a second node pointer.
+  class iterator {
+   public:
+    using iterator_category = bidirectional_iterator_tag;
+    using value_type = typename multiset::value_type;
+    using difference_type = typename multiset::difference_type;
+    using pointer = typename multiset::const_pointer;
+    using reference = typename multiset::const_reference;
+
+    const __node* __node_;
+    const __node* __root_;
+
+    iterator() : __node_(nullptr), __root_(nullptr) {}
+    iterator(const __node* node, const __node* root)
+        : __node_(node), __root_(root) {}
+
+    reference operator*() const { return __node_->value; }
+    pointer operator->() const { return &__node_->value; }
+
+    iterator& operator++() {
+      __node_ = __next(__node_);
+      return *this;
+    }
+    iterator operator++(int) {
+      iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+    iterator& operator--() {
+      if (__node_ == nullptr) {
+        __node_ = __maximum(__root_);
+      } else {
+        __node_ = __prev(__node_);
+      }
+      return *this;
+    }
+    iterator operator--(int) {
+      iterator tmp = *this;
+      --(*this);
+      return tmp;
+    }
+    bool operator==(const iterator& other) const {
+      return __node_ == other.__node_;
+    }
+    bool operator!=(const iterator& other) const {
+      return __node_ != other.__node_;
+    }
+
+   private:
+    static const __node* __minimum(const __node* node) {
+      while (node != nullptr && node->left != nullptr) {
+        node = node->left;
+      }
+      return node;
+    }
+    static const __node* __maximum(const __node* node) {
+      while (node != nullptr && node->right != nullptr) {
+        node = node->right;
+      }
+      return node;
+    }
+    static const __node* __next(const __node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      if (node->right != nullptr) {
+        return __minimum(node->right);
+      }
+      const __node* parent = node->parent;
+      while (parent != nullptr && node == parent->right) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+    static const __node* __prev(const __node* node) {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      if (node->left != nullptr) {
+        return __maximum(node->left);
+      }
+      const __node* parent = node->parent;
+      while (parent != nullptr && node == parent->left) {
+        node = parent;
+        parent = parent->parent;
+      }
+      return parent;
+    }
+  };
+
+  using const_iterator = iterator;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+ private:
+  __node* __root_ = nullptr;
+  size_type __size_ = 0;
+  key_compare __comp_{};
+  allocator_type __alloc_{};
+  __node_allocator __node_alloc_{};
+
+  static __color __node_color(__node* node) {
+    return node == nullptr ? __black : static_cast<__color>(node->color);
+  }
+
+  static __node* __minimum(__node* node) {
+    while (node != nullptr && node->left != nullptr) {
+      node = node->left;
+    }
+    return node;
+  }
+
+  __node* __create_node(const value_type& value) {
+    __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
+    __DAVECC_TRY {
+      new (node) __node(value);
+    } __DAVECC_CATCH_ALL {
+      __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+      __DAVECC_RETHROW;
+    }
+    return node;
+  }
+
+  __node* __create_node(value_type&& value) {
+    __node* node = __node_alloc_traits::allocate(__node_alloc_, 1);
+    __DAVECC_TRY {
+      new (node) __node(static_cast<value_type&&>(value));
+    } __DAVECC_CATCH_ALL {
+      __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+      __DAVECC_RETHROW;
+    }
+    return node;
+  }
+
+  void __destroy_node(__node* node) {
+    node->~__node();
+    __node_alloc_traits::deallocate(__node_alloc_, node, 1);
+  }
+
+  void __rotate_left(__node* x) {
+    __node* y = x->right;
+    x->right = y->left;
+    if (y->left != nullptr) {
+      y->left->parent = x;
+    }
+    y->parent = x->parent;
+    if (x->parent == nullptr) {
+      __root_ = y;
+    } else if (x == x->parent->left) {
+      x->parent->left = y;
+    } else {
+      x->parent->right = y;
+    }
+    y->left = x;
+    x->parent = y;
+  }
+
+  void __rotate_right(__node* x) {
+    __node* y = x->left;
+    x->left = y->right;
+    if (y->right != nullptr) {
+      y->right->parent = x;
+    }
+    y->parent = x->parent;
+    if (x->parent == nullptr) {
+      __root_ = y;
+    } else if (x == x->parent->left) {
+      x->parent->left = y;
+    } else {
+      x->parent->right = y;
+    }
+    y->right = x;
+    x->parent = y;
+  }
+
+  void __fix_insert(__node* node) {
+    while (node != __root_ && __node_color(node->parent) == __red) {
+      if (node->parent == node->parent->parent->left) {
+        __node* aunt = node->parent->parent->right;
+        if (__node_color(aunt) == __red) {
+          node->parent->color = __black;
+          aunt->color = __black;
+          node->parent->parent->color = __red;
+          node = node->parent->parent;
+        } else {
+          if (node == node->parent->right) {
+            node = node->parent;
+            __rotate_left(node);
+          }
+          node->parent->color = __black;
+          node->parent->parent->color = __red;
+          __rotate_right(node->parent->parent);
+        }
+      } else {
+        __node* aunt = node->parent->parent->left;
+        if (__node_color(aunt) == __red) {
+          node->parent->color = __black;
+          aunt->color = __black;
+          node->parent->parent->color = __red;
+          node = node->parent->parent;
+        } else {
+          if (node == node->parent->left) {
+            node = node->parent;
+            __rotate_right(node);
+          }
+          node->parent->color = __black;
+          node->parent->parent->color = __red;
+          __rotate_left(node->parent->parent);
+        }
+      }
+    }
+    if (__root_ != nullptr) {
+      __root_->color = __black;
+    }
+  }
+
+  void __fix_erase(__node* node, __node* parent, bool is_left) {
+    while (node != __root_ && __node_color(node) == __black) {
+      if (node != nullptr) {
+        parent = node->parent;
+      }
+      if (parent == nullptr) {
+        break;
+      }
+      if (node != nullptr) {
+        is_left = parent->left == node;
+      }
+      __node* sibling = is_left ? parent->right : parent->left;
+      if (sibling == nullptr) {
+        break;
+      }
+      if (is_left) {
+        if (sibling->color == __red) {
+          sibling->color = __black;
+          parent->color = __red;
+          __rotate_left(parent);
+          sibling = parent->right;
+          if (sibling == nullptr) {
+            break;
+          }
+        }
+        if (__node_color(sibling->left) == __black &&
+            __node_color(sibling->right) == __black) {
+          sibling->color = __red;
+          node = parent;
+        } else {
+          if (__node_color(sibling->right) == __black) {
+            sibling->left->color = __black;
+            sibling->color = __red;
+            __rotate_right(sibling);
+            sibling = parent->right;
+          }
+          sibling->color = parent->color;
+          parent->color = __black;
+          if (sibling->right != nullptr) {
+            sibling->right->color = __black;
+          }
+          __rotate_left(parent);
+          node = __root_;
+        }
+      } else {
+        if (sibling->color == __red) {
+          sibling->color = __black;
+          parent->color = __red;
+          __rotate_right(parent);
+          sibling = parent->left;
+          if (sibling == nullptr) {
+            break;
+          }
+        }
+        if (__node_color(sibling->left) == __black &&
+            __node_color(sibling->right) == __black) {
+          sibling->color = __red;
+          node = parent;
+        } else {
+          if (__node_color(sibling->left) == __black) {
+            sibling->right->color = __black;
+            sibling->color = __red;
+            __rotate_left(sibling);
+            sibling = parent->left;
+          }
+          sibling->color = parent->color;
+          parent->color = __black;
+          if (sibling->left != nullptr) {
+            sibling->left->color = __black;
+          }
+          __rotate_right(parent);
+          node = __root_;
+        }
+      }
+    }
+    if (node != nullptr) {
+      node->color = __black;
+    }
+  }
+
+  void __unlink(__node* node) {
+    __color removed_color = static_cast<__color>(node->color);
+    __node* child = nullptr;
+    __node* child_parent = node->parent;
+    bool child_is_left =
+        node->parent != nullptr && node == node->parent->left;
+    if (node->left == nullptr) {
+      child = node->right;
+      __transplant(node, node->right);
+    } else if (node->right == nullptr) {
+      child = node->left;
+      __transplant(node, node->left);
+    } else {
+      __node* successor = __minimum(node->right);
+      removed_color = static_cast<__color>(successor->color);
+      child = successor->right;
+      if (successor->parent == node) {
+        child_parent = successor;
+        child_is_left = false;
+      } else {
+        child_parent = successor->parent;
+        child_is_left = true;
+        __transplant(successor, successor->right);
+        successor->right = node->right;
+        successor->right->parent = successor;
+      }
+      __transplant(node, successor);
+      successor->left = node->left;
+      successor->left->parent = successor;
+      successor->color = node->color;
+    }
+    --__size_;
+    if (removed_color == __black) {
+      __fix_erase(child, child_parent, child_is_left);
+    } else if (__root_ != nullptr) {
+      __root_->color = __black;
+    }
+  }
+
+  void __transplant(__node* old_node, __node* new_node) {
+    if (old_node->parent == nullptr) {
+      __root_ = new_node;
+    } else if (old_node == old_node->parent->left) {
+      old_node->parent->left = new_node;
+    } else {
+      old_node->parent->right = new_node;
+    }
+    if (new_node != nullptr) {
+      new_node->parent = old_node->parent;
+    }
+  }
+
+  void __erase_node(__node* node) {
+    __unlink(node);
+    __destroy_node(node);
+  }
+
+  void __clear_node(__node* node) {
+    if (node == nullptr) {
+      return;
+    }
+    __clear_node(node->left);
+    __clear_node(node->right);
+    __destroy_node(node);
+  }
+
+  // Equal keys go right, so an earlier insertion stays to the left of a later
+  // equivalent one and inorder iteration preserves that order.
+  iterator __link(__node* fresh) {
+    fresh->parent = nullptr;
+    fresh->left = nullptr;
+    fresh->right = nullptr;
+    fresh->color = __red;
+    bool linked = false;
+    __DAVECC_TRY {
+      __node* parent = nullptr;
+      __node* node = __root_;
+      while (node != nullptr) {
+        parent = node;
+        if (__comp_(fresh->value, node->value)) {
+          node = node->left;
+        } else {
+          node = node->right;
+        }
+      }
+      fresh->parent = parent;
+      if (parent == nullptr) {
+        __root_ = fresh;
+      } else if (__comp_(fresh->value, parent->value)) {
+        parent->left = fresh;
+      } else {
+        parent->right = fresh;
+      }
+      linked = true;
+      ++__size_;
+      __fix_insert(fresh);
+    } __DAVECC_CATCH_ALL {
+      if (!linked) {
+        __destroy_node(fresh);
+      }
+      __DAVECC_RETHROW;
+    }
+    return iterator(fresh, __root_);
+  }
+
+  __node* __lower_node(const key_type& key) const {
+    __node* node = __root_;
+    __node* result = nullptr;
+    while (node != nullptr) {
+      if (__comp_(node->value, key)) {
+        node = node->right;
+      } else {
+        result = node;
+        node = node->left;
+      }
+    }
+    return result;
+  }
+
+  __node* __upper_node(const key_type& key) const {
+    __node* node = __root_;
+    __node* result = nullptr;
+    while (node != nullptr) {
+      if (__comp_(key, node->value)) {
+        result = node;
+        node = node->left;
+      } else {
+        node = node->right;
+      }
+    }
+    return result;
+  }
+
+  bool __equivalent(const key_type& left, const key_type& right) const {
+    return !__comp_(left, right) && !__comp_(right, left);
+  }
+
+ public:
+  multiset() : __node_alloc_(__alloc_) {}
+
+  explicit multiset(const key_compare& comp,
+                    const allocator_type& alloc = allocator_type())
+      : __comp_(comp), __alloc_(alloc), __node_alloc_(__alloc_) {}
+
+  explicit multiset(const allocator_type& alloc)
+      : __alloc_(alloc), __node_alloc_(__alloc_) {}
+
+  template <class InputIt>
+  multiset(InputIt first, InputIt last, const key_compare& comp = key_compare(),
+           const allocator_type& alloc = allocator_type())
+      : __comp_(comp), __alloc_(alloc), __node_alloc_(__alloc_) {
+    insert(first, last);
+  }
+
+  multiset(initializer_list<value_type> init,
+           const key_compare& comp = key_compare(),
+           const allocator_type& alloc = allocator_type())
+      : __comp_(comp), __alloc_(alloc), __node_alloc_(__alloc_) {
+    insert(init);
+  }
+
+  multiset(const multiset& other)
+      : __comp_(other.__comp_),
+        __alloc_(__alloc_traits::select_on_container_copy_construction(
+            other.__alloc_)),
+        __node_alloc_(__alloc_) {
+    for (const_iterator it = other.begin(); it != other.end(); ++it) {
+      insert(*it);
+    }
+  }
+
+  multiset(multiset&& other)
+      : __root_(other.__root_),
+        __size_(other.__size_),
+        __comp_(other.__comp_),
+        __alloc_(other.__alloc_),
+        __node_alloc_(__alloc_) {
+    other.__root_ = nullptr;
+    other.__size_ = 0;
+  }
+
+  ~multiset() { clear(); }
+
+  multiset& operator=(const multiset& other) {
+    if (this != &other) {
+      clear();
+      __comp_ = other.__comp_;
+      if (__alloc_traits::__propagate_on_container_copy_assignment()) {
+        __alloc_ = other.__alloc_;
+        __node_alloc_ = __node_allocator(__alloc_);
+      }
+      for (const_iterator it = other.begin(); it != other.end(); ++it) {
+        insert(*it);
+      }
+    }
+    return *this;
+  }
+
+  multiset& operator=(multiset&& other) {
+    if (this != &other) {
+      clear();
+      __root_ = other.__root_;
+      __size_ = other.__size_;
+      __comp_ = other.__comp_;
+      if (__alloc_traits::__propagate_on_container_move_assignment()) {
+        __alloc_ = other.__alloc_;
+        __node_alloc_ = __node_allocator(__alloc_);
+      }
+      other.__root_ = nullptr;
+      other.__size_ = 0;
+    }
+    return *this;
+  }
+
+  allocator_type get_allocator() const { return __alloc_; }
+  key_compare key_comp() const { return __comp_; }
+  value_compare value_comp() const { return __comp_; }
+
+  iterator begin() const { return iterator(__minimum(__root_), __root_); }
+  iterator end() const { return iterator(nullptr, __root_); }
+  const_iterator cbegin() const { return begin(); }
+  const_iterator cend() const { return end(); }
+  reverse_iterator rbegin() const { return reverse_iterator(end()); }
+  reverse_iterator rend() const { return reverse_iterator(begin()); }
+
+  bool empty() const { return __size_ == 0; }
+  size_type size() const { return __size_; }
+
+  iterator insert(const value_type& value) {
+    return __link(__create_node(value));
+  }
+  iterator insert(value_type&& value) {
+    return __link(__create_node(static_cast<value_type&&>(value)));
+  }
+  iterator insert(const_iterator, const value_type& value) { return insert(value); }
+  iterator insert(const_iterator, value_type&& value) {
+    return insert(static_cast<value_type&&>(value));
+  }
+  template <class InputIt>
+  void insert(InputIt first, InputIt last) {
+    for (; first != last; ++first) {
+      insert(*first);
+    }
+  }
+  void insert(initializer_list<value_type> init) { insert(init.begin(), init.end()); }
+
+  template <class... Args>
+  iterator emplace(Args&&... args) {
+    return insert(value_type(std::forward<Args>(args)...));
+  }
+  template <class... Args>
+  iterator emplace_hint(const_iterator, Args&&... args) {
+    return emplace(std::forward<Args>(args)...);
+  }
+
+  iterator erase(iterator pos) {
+    const __node* next = pos.__node_;
+    if (next != nullptr) {
+      iterator step(next, __root_);
+      ++step;
+      next = step.__node_;
+    }
+    __erase_node(const_cast<__node*>(pos.__node_));
+    return iterator(next, __root_);
+  }
+
+  iterator erase(iterator first, iterator last) {
+    while (first != last) {
+      first = erase(first);
+    }
+    return iterator(last.__node_, __root_);
+  }
+
+  size_type erase(const key_type& key) {
+    size_type removed = 0;
+    while (true) {
+      __node* node = __lower_node(key);
+      if (node == nullptr || !__equivalent(node->value, key)) {
+        break;
+      }
+      __erase_node(node);
+      ++removed;
+    }
+    return removed;
+  }
+
+  void clear() noexcept {
+    __clear_node(__root_);
+    __root_ = nullptr;
+    __size_ = 0;
+  }
+
+  void swap(multiset& other) noexcept {
+    std::swap(__root_, other.__root_);
+    std::swap(__size_, other.__size_);
+    std::swap(__comp_, other.__comp_);
+    if (__alloc_traits::__propagate_on_container_swap()) {
+      std::swap(__alloc_, other.__alloc_);
+      std::swap(__node_alloc_, other.__node_alloc_);
+    }
+  }
+
+  iterator find(const key_type& key) const {
+    __node* node = __lower_node(key);
+    if (node != nullptr && __equivalent(node->value, key)) {
+      return iterator(node, __root_);
+    }
+    return end();
+  }
+
+  size_type count(const key_type& key) const {
+    size_type n = 0;
+    for (iterator it = lower_bound(key); it != upper_bound(key); ++it) {
+      ++n;
+    }
+    return n;
+  }
+
+  bool contains(const key_type& key) const { return find(key) != end(); }
+
+  iterator lower_bound(const key_type& key) const {
+    return iterator(__lower_node(key), __root_);
+  }
+  iterator upper_bound(const key_type& key) const {
+    return iterator(__upper_node(key), __root_);
+  }
+  pair<iterator, iterator> equal_range(const key_type& key) const {
+    return pair<iterator, iterator>(lower_bound(key), upper_bound(key));
+  }
 };
 
 template <class Key, class Compare, class Allocator>
@@ -1400,6 +2014,30 @@ void swap(set<Key, Compare, Allocator>& left,
   left.swap(right);
 }
 
+template <class Key, class Compare, class Allocator>
+bool operator==(const multiset<Key, Compare, Allocator>& left,
+                const multiset<Key, Compare, Allocator>& right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  typename multiset<Key, Compare, Allocator>::const_iterator left_it =
+      left.begin();
+  typename multiset<Key, Compare, Allocator>::const_iterator right_it =
+      right.begin();
+  for (; left_it != left.end(); ++left_it, ++right_it) {
+    if (!(*left_it == *right_it)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class Key, class Compare, class Allocator>
+void swap(multiset<Key, Compare, Allocator>& left,
+          multiset<Key, Compare, Allocator>& right) noexcept {
+  left.swap(right);
+}
+
 template <class Key, class Compare, class Allocator, class Predicate>
 typename set<Key, Compare, Allocator>::size_type erase_if(
     set<Key, Compare, Allocator>& c, Predicate pred) {
@@ -1420,6 +2058,9 @@ namespace pmr {
 
 template <class Key, class Compare = less<Key>>
 using set = std::set<Key, Compare, polymorphic_allocator<Key>>;
+
+template <class Key, class Compare = less<Key>>
+using multiset = std::multiset<Key, Compare, polymorphic_allocator<Key>>;
 
 }  // namespace pmr
 #endif

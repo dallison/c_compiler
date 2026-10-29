@@ -22,6 +22,7 @@ int main() {
   std::pmr::list<int> list_values;
   std::pmr::map<int, long> map_values;
   std::pmr::set<int> set_values;
+  std::pmr::multiset<int> multiset_values;
   std::pmr::unordered_map<int, long> unordered_map_values;
   std::pmr::unordered_set<int> unordered_set_values;
   std::pmr::string text;
@@ -30,6 +31,7 @@ int main() {
   (void)list_values;
   (void)map_values;
   (void)set_values;
+  (void)multiset_values;
   (void)unordered_map_values;
   (void)unordered_set_values;
   (void)text;
