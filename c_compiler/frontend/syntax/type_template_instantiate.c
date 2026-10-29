@@ -2196,7 +2196,38 @@ TypeRecord* SubstituteNestedStructTemplateParameters(TypeParser* parser,
       local_class_body_args != NULL ? local_class_body_args : args;
   for (size_t i = 0; i < pending_member_bodies.length; i++) {
     PendingMemberBody* pmb = pending_member_bodies.value.p[i];
-    if (defer_nested_bodies) {
+    // A generic lambda in a class-template member is rebuilt with the class
+    // arguments here.  Leaving operator() deferred makes the later call
+    // instantiate it with only its own `auto` arguments, so
+    // `if constexpr (std::is_pointer<T>::value)` never substitutes `T` and the
+    // discarded branch is code-generated untyped.  Clone while those class
+    // arguments are still available.  An enclosing-only clone of a member
+    // function template does not have that template's own parameters yet, and
+    // a lambda that does not name an enclosing parameter must stay deferred so
+    // its `auto` parameters are not renumbered early.
+    bool clone_enclosing_dependent_lambda = false;
+    Symbol* enclosing_function = from->access_enclosing_function;
+    bool enclosing_function_template =
+        enclosing_function != NULL && enclosing_function->type != NULL &&
+        TypeIsFunction(enclosing_function->type) &&
+        (enclosing_function->flags.is_template ||
+         FunctionExtraOf(&enclosing_function->type->info.function)
+                 ->template_parameters.length > 0);
+    // Only a non-template member of a class template has no argument vector
+    // of its own to carry the class parameters into the later call.  A
+    // function template already instantiates the lambda with those parameters
+    // (`decltype` of the lambda's own `auto` must stay dependent until that
+    // call).
+    if (defer_nested_bodies && !enclosing_function_template && parser != NULL &&
+        !parser->substituting_enclosing_template_arguments_only &&
+        from->tag_symbol != NULL && from->tag_symbol->flags.invented &&
+        pmb->symbol != NULL && pmb->symbol->flags.is_template &&
+        pmb->template_definition != NULL) {
+      clone_enclosing_dependent_lambda =
+          LambdaCallOperatorBodyDependsOnEnclosingTemplate(
+              pmb->template_definition);
+    }
+    if (defer_nested_bodies && !clone_enclosing_dependent_lambda) {
       DeferNestedMemberBody(str, pmb, body_args);
       continue;
     }
