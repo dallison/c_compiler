@@ -469,12 +469,15 @@ __DAVECC_HASH_INTEGRAL(unsigned long long);
 
 #undef __DAVECC_HASH_INTEGRAL
 
+#ifndef __davecc_hash_pointer__
+#define __davecc_hash_pointer__
 template <class T>
 struct hash<T*> {
   size_t operator()(T* value) const noexcept {
     return static_cast<size_t>(reinterpret_cast<uintptr_t>(value));
   }
 };
+#endif
 
 namespace __functional_detail {
 

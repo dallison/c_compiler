@@ -1,0 +1,28 @@
+//
+//  __range_results
+//
+//  std::ranges result types shared by <algorithm> and <memory>.  <memory>
+//  cannot include <algorithm> (and the reverse is equally heavy), but
+//  uninitialized_copy_result is specified to be ranges::in_out_result.
+//
+
+#ifndef __davecc_range_results__
+#define __davecc_range_results__
+
+#if __cplusplus >= 202002L
+
+namespace std {
+namespace ranges {
+
+template <class I, class O>
+struct in_out_result {
+  I in;
+  O out;
+};
+
+}  // namespace ranges
+}  // namespace std
+
+#endif
+
+#endif  // __davecc_range_results__

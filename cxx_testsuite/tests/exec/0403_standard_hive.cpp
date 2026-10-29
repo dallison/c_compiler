@@ -94,11 +94,11 @@ struct counting_allocator {
   }
   template <class U, class... Args>
   void construct(U* pointer, Args&&... args) {
-    std::allocator<U>().construct(pointer, std::forward<Args>(args)...);
+    ::new (static_cast<void*>(pointer)) U(std::forward<Args>(args)...);
   }
   template <class U>
   void destroy(U* pointer) {
-    std::allocator<U>().destroy(pointer);
+    pointer->~U();
   }
 
   template <class U>

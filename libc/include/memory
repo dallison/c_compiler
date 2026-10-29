@@ -141,10 +141,24 @@ class auto_ptr {
 #include <__construct_at>
 #include <__exception_support>
 #include <exception>
+#if __cplusplus >= 202002L
+#include <compare>
+#endif
 #include <iterator>
 #include <new>
+#include <stdint.h>
+#include <tuple>
 #include <type_traits>
 #include <utility>
+#include <__memory_base>
+#if __cplusplus >= 202002L
+#include <__range_results>
+// The range concepts live in the core of <ranges>. The views half includes
+// <istream>, which includes <memory> again before allocator is declared.
+#define __davecc_skip_ranges_views__
+#include <ranges>
+#undef __davecc_skip_ranges_views__
+#endif
 
 #if __cplusplus >= 202600L && !defined(__cpp_lib_start_lifetime)
 #define __cpp_lib_start_lifetime 202603L
@@ -154,47 +168,227 @@ class auto_ptr {
 #define __cpp_lib_constexpr_dynamic_alloc 201907L
 #endif
 
+#if __cplusplus >= 201402L && !defined(__cpp_lib_make_unique)
+#define __cpp_lib_make_unique 201304L
+#endif
+#if __cplusplus >= 201703L && !defined(__cpp_lib_addressof_constexpr)
+#define __cpp_lib_addressof_constexpr 201603L
+#endif
+#if __cplusplus >= 201703L && !defined(__cpp_lib_allocator_traits_is_always_equal)
+#define __cpp_lib_allocator_traits_is_always_equal 201411L
+#endif
+#if __cplusplus >= 201703L && !defined(__cpp_lib_enable_shared_from_this)
+#define __cpp_lib_enable_shared_from_this 201603L
+#endif
+#if __cplusplus >= 201703L && !defined(__cpp_lib_raw_memory_algorithms)
+#define __cpp_lib_raw_memory_algorithms 201606L
+#endif
+#if __cplusplus >= 201703L && !defined(__cpp_lib_shared_ptr_arrays)
+#define __cpp_lib_shared_ptr_arrays 201707L
+#endif
+#if __cplusplus >= 201703L && !defined(__cpp_lib_shared_ptr_weak_type)
+#define __cpp_lib_shared_ptr_weak_type 201606L
+#endif
+#if __cplusplus >= 202002L && !defined(__cpp_lib_assume_aligned)
+#define __cpp_lib_assume_aligned 201811L
+#endif
+#if __cplusplus >= 202002L && !defined(__cpp_lib_smart_ptr_for_overwrite)
+#define __cpp_lib_smart_ptr_for_overwrite 202002L
+#endif
+#if __cplusplus >= 202002L && !defined(__6502__) && !defined(__W65C02__) && \
+    !defined(__cpp_lib_atomic_shared_ptr)
+#define __cpp_lib_atomic_shared_ptr 201711L
+#endif
+#if __cplusplus >= 202302L && !defined(__cpp_lib_allocate_at_least)
+#define __cpp_lib_allocate_at_least 202302L
+#endif
+#if __cplusplus >= 202302L && !defined(__cpp_lib_out_ptr)
+#define __cpp_lib_out_ptr 202106L
+#endif
+
 namespace std {
 
-template <class T>
-constexpr T* addressof(T& value) noexcept {
-  return reinterpret_cast<T*>(
-      &const_cast<char&>(reinterpret_cast<const volatile char&>(value)));
+// A constructor that throws destroys objects already constructed in [first, current).
+template <class ForwardIt>
+constexpr void __destroy_constructed(ForwardIt first, ForwardIt current) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  for (; first != current; ++first) {
+    addressof(*first)->~value_type();
+  }
 }
 
 template <class InputIt, class ForwardIt>
 ForwardIt uninitialized_copy(InputIt first, InputIt last, ForwardIt output) {
   typedef typename iterator_traits<ForwardIt>::value_type value_type;
-  for (; first != last; ++first, ++output) {
-    ::new (static_cast<void*>(&*output)) value_type(*first);
+  ForwardIt current = output;
+  __DAVECC_TRY {
+    for (; first != last; ++first, ++current) {
+      ::new (static_cast<void*>(addressof(*current))) value_type(*first);
+    }
+    return current;
   }
-  return output;
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(output, current);
+    __DAVECC_RETHROW;
+  }
 }
 
 template <class InputIt, class Size, class ForwardIt>
 ForwardIt uninitialized_copy_n(InputIt first, Size count, ForwardIt output) {
   typedef typename iterator_traits<ForwardIt>::value_type value_type;
-  for (; count > 0; --count, ++first, ++output) {
-    ::new (static_cast<void*>(&*output)) value_type(*first);
+  ForwardIt current = output;
+  __DAVECC_TRY {
+    for (; count > 0; --count, ++first, ++current) {
+      ::new (static_cast<void*>(addressof(*current))) value_type(*first);
+    }
+    return current;
   }
-  return output;
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(output, current);
+    __DAVECC_RETHROW;
+  }
 }
 
 template <class ForwardIt, class T>
 void uninitialized_fill(ForwardIt first, ForwardIt last, const T& value) {
   typedef typename iterator_traits<ForwardIt>::value_type value_type;
-  for (; first != last; ++first) {
-    ::new (static_cast<void*>(&*first)) value_type(value);
+  ForwardIt current = first;
+  __DAVECC_TRY {
+    for (; current != last; ++current) {
+      ::new (static_cast<void*>(addressof(*current))) value_type(value);
+    }
+  }
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(first, current);
+    __DAVECC_RETHROW;
   }
 }
 
 template <class ForwardIt, class Size, class T>
 ForwardIt uninitialized_fill_n(ForwardIt first, Size count, const T& value) {
   typedef typename iterator_traits<ForwardIt>::value_type value_type;
-  for (; count > 0; --count, ++first) {
-    ::new (static_cast<void*>(&*first)) value_type(value);
+  ForwardIt current = first;
+  __DAVECC_TRY {
+    for (; count > 0; --count, ++current) {
+      ::new (static_cast<void*>(addressof(*current))) value_type(value);
+    }
+    return current;
   }
-  return first;
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(first, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <class InputIt, class ForwardIt>
+ForwardIt uninitialized_move(InputIt first, InputIt last, ForwardIt output) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  typedef typename iterator_traits<InputIt>::value_type source_type;
+  ForwardIt current = output;
+  __DAVECC_TRY {
+    for (; first != last; ++first, ++current) {
+      ::new (static_cast<void*>(addressof(*current)))
+          value_type(static_cast<source_type&&>(*first));
+    }
+    return current;
+  }
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(output, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <class InputIt, class Size, class ForwardIt>
+pair<InputIt, ForwardIt> uninitialized_move_n(InputIt first, Size count,
+                                              ForwardIt output) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  typedef typename iterator_traits<InputIt>::value_type source_type;
+  ForwardIt current = output;
+  __DAVECC_TRY {
+    for (; count > 0; --count, ++first, ++current) {
+      ::new (static_cast<void*>(addressof(*current)))
+          value_type(static_cast<source_type&&>(*first));
+    }
+    return pair<InputIt, ForwardIt>(first, current);
+  }
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(output, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <class ForwardIt>
+#if __cplusplus >= 202002L
+constexpr
+#endif
+void uninitialized_default_construct(ForwardIt first, ForwardIt last) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  ForwardIt current = first;
+  __DAVECC_TRY {
+    for (; current != last; ++current) {
+      ::new (static_cast<void*>(addressof(*current))) value_type;
+    }
+  }
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(first, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <class ForwardIt, class Size>
+#if __cplusplus >= 202002L
+constexpr
+#endif
+ForwardIt uninitialized_default_construct_n(ForwardIt first, Size count) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  ForwardIt current = first;
+  __DAVECC_TRY {
+    for (; count > 0; --count, ++current) {
+      ::new (static_cast<void*>(addressof(*current))) value_type;
+    }
+    return current;
+  }
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(first, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <class ForwardIt>
+#if __cplusplus >= 202002L
+constexpr
+#endif
+void uninitialized_value_construct(ForwardIt first, ForwardIt last) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  ForwardIt current = first;
+  __DAVECC_TRY {
+    for (; current != last; ++current) {
+      ::new (static_cast<void*>(addressof(*current))) value_type();
+    }
+  }
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(first, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <class ForwardIt, class Size>
+#if __cplusplus >= 202002L
+constexpr
+#endif
+ForwardIt uninitialized_value_construct_n(ForwardIt first, Size count) {
+  typedef typename iterator_traits<ForwardIt>::value_type value_type;
+  ForwardIt current = first;
+  __DAVECC_TRY {
+    for (; count > 0; --count, ++current) {
+      ::new (static_cast<void*>(addressof(*current))) value_type();
+    }
+    return current;
+  }
+  __DAVECC_CATCH_ALL {
+    __destroy_constructed(first, current);
+    __DAVECC_RETHROW;
+  }
 }
 
 template <class T>
@@ -366,24 +560,36 @@ struct __allocator_destroy_impl<U, false> {
   static constexpr void apply(U* ptr) { (void)ptr; }
 };
 
+#if __cplusplus >= 202302L
+template <class Pointer, class SizeType = size_t>
+struct allocation_result {
+  Pointer ptr;
+  SizeType count;
+};
+#endif
+
 template <class T>
 struct allocator {
   using value_type = T;
   using size_type = size_t;
   using difference_type = ptrdiff_t;
+#if __cplusplus < 201703L
   using pointer = T*;
   using const_pointer = const T*;
   using reference = T&;
   using const_reference = const T&;
-  using propagate_on_container_copy_assignment = false_type;
-  using propagate_on_container_move_assignment = false_type;
-  using propagate_on_container_swap = false_type;
+#endif
+  using propagate_on_container_move_assignment = true_type;
+#if __cplusplus >= 201703L
   using is_always_equal = true_type;
+#endif
 
+#if __cplusplus < 201703L
   template <class U>
   struct rebind {
     using other = allocator<U>;
   };
+#endif
 
   constexpr allocator() noexcept {
   }
@@ -396,13 +602,40 @@ struct allocator {
   }
 
   constexpr T* allocate(size_type n) {
+#if __cplusplus >= 202002L
+    if (n > static_cast<size_type>(-1) / sizeof(T)) {
+#else
+    if (n > max_size()) {
+#endif
+      __DAVECC_THROW(bad_array_new_length());
+    }
+#if __cplusplus >= 201703L
+    if constexpr (alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+      return static_cast<T*>(::operator new(
+          n * sizeof(T), std::align_val_t(alignof(T))));
+    }
+#endif
     return static_cast<T*>(::operator new(n * sizeof(T)));
   }
 
+#if __cplusplus >= 202302L
+  constexpr allocation_result<T*, size_type> allocate_at_least(size_type n) {
+    return {allocate(n), n};
+  }
+#endif
+
   constexpr void deallocate(T* ptr, size_type) noexcept {
+#if __cplusplus >= 201703L
+    if constexpr (alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+      ::operator delete(static_cast<void*>(ptr),
+                        std::align_val_t(alignof(T)));
+      return;
+    }
+#endif
     ::operator delete(static_cast<void*>(ptr));
   }
 
+#if __cplusplus < 202002L
   constexpr void construct(T* ptr, const T& value) {
     std::__construct_at(ptr, value);
   }
@@ -425,6 +658,7 @@ struct allocator {
   constexpr size_type max_size() const noexcept {
     return static_cast<size_type>(-1) / sizeof(T);
   }
+#endif
 };
 
 struct allocator_arg_t {
@@ -701,6 +935,17 @@ struct __alloc_has_destroy<
     Alloc, T, __void_t<decltype(declval<Alloc&>().destroy(declval<T*>()))>>
     : true_type {};
 
+#if __cplusplus >= 202302L
+template <class Alloc, class SizeType, class = void>
+struct __alloc_has_allocate_at_least : false_type {};
+
+template <class Alloc, class SizeType>
+struct __alloc_has_allocate_at_least<
+    Alloc, SizeType,
+    __void_t<decltype(declval<Alloc&>().allocate_at_least(
+        declval<SizeType>()))>> : true_type {};
+#endif
+
 template <bool Has>
 struct __alloc_destroy_dispatch;
 
@@ -776,6 +1021,17 @@ struct allocator_traits {
                                  const_void_pointer>::call(alloc, n, hint);
   }
 
+#if __cplusplus >= 202302L
+  static constexpr allocation_result<pointer, size_type> allocate_at_least(
+      Alloc& alloc, size_type n) {
+    if constexpr (__alloc_has_allocate_at_least<Alloc, size_type>::value) {
+      return alloc.allocate_at_least(n);
+    } else {
+      return {allocate(alloc, n), n};
+    }
+  }
+#endif
+
   static constexpr void deallocate(Alloc& alloc, pointer ptr, size_type n) {
     alloc.deallocate(ptr, n);
   }
@@ -826,23 +1082,6 @@ struct allocator_traits {
 };
 
 #if __cplusplus >= 201703L
-template <class T>
-#if __cplusplus >= 202002L
-constexpr void destroy_at(T* location) {
-  if constexpr (is_array<T>::value) {
-    for (auto& element : *location) {
-      std::destroy_at(&element);
-    }
-  } else {
-    location->~T();
-  }
-}
-#else
-void destroy_at(T* location) {
-  location->~T();
-}
-#endif
-
 template <class ForwardIt>
 #if __cplusplus >= 202002L
 constexpr
@@ -883,6 +1122,10 @@ struct default_delete {
   constexpr default_delete(void) noexcept {
   }
 
+  template <class U, enable_if_t<is_convertible<U*, T*>::value, int> = 0>
+  default_delete(const default_delete<U>&) noexcept {
+  }
+
   void operator()(T* ptr) const {
     delete ptr;
   }
@@ -893,77 +1136,133 @@ struct default_delete<T[]> {
   constexpr default_delete(void) noexcept {
   }
 
+  template <class U,
+            enable_if_t<is_convertible<U (*)[], T (*)[]>::value, int> = 0>
+  default_delete(const default_delete<U[]>&) noexcept {
+  }
+
   void operator()(T* ptr) const {
     delete[] ptr;
   }
 };
 
+// [unique.ptr.single.general] pointer is Deleter::pointer when that type exists.
+template <class Deleter, class Element, class = void>
+struct __unique_pointer {
+  using type = Element*;
+};
+
+template <class Deleter, class Element>
+struct __unique_pointer<
+    Deleter, Element,
+    __void_t<typename remove_reference<Deleter>::type::pointer>> {
+  using type = typename remove_reference<Deleter>::type::pointer;
+};
+
+// A reference deleter converts only from the same type. A value deleter
+// converts from anything convertible to it.
+template <class Deleter, class E>
+struct __unique_deleter_convert
+    : bool_constant<(is_reference<Deleter>::value &&
+                      is_same<Deleter, E>::value) ||
+                     (!is_reference<Deleter>::value &&
+                      is_convertible<E, Deleter>::value)> {};
+
+template <class Deleter>
+struct __unique_default_deleter
+    : bool_constant<is_default_constructible<Deleter>::value &&
+                    !is_pointer<Deleter>::value> {};
+
 template <class T, class Deleter = default_delete<T>>
 struct unique_ptr {
-  using pointer = T*;
+  using pointer = typename __unique_pointer<Deleter, T>::type;
   using element_type = T;
   using deleter_type = Deleter;
 
-  T* __ptr;
+ private:
+  pointer __ptr;
   Deleter __deleter;
 
-  constexpr unique_ptr(void) noexcept : __ptr(0) {
+  using __deleter_object = remove_reference_t<Deleter>;
+
+ public:
+  template <class D2 = Deleter,
+            enable_if_t<__unique_default_deleter<D2>::value, int> = 0>
+  constexpr unique_ptr() noexcept : __ptr() {
   }
 
-  constexpr unique_ptr(decltype(nullptr)) noexcept : __ptr(0) {
+  template <class D2 = Deleter,
+            enable_if_t<__unique_default_deleter<D2>::value, int> = 0>
+  constexpr unique_ptr(decltype(nullptr)) noexcept : __ptr() {
   }
 
-  explicit unique_ptr(T* ptr) noexcept : __ptr(ptr) {
+  template <class D2 = Deleter,
+            enable_if_t<__unique_default_deleter<D2>::value, int> = 0>
+  explicit unique_ptr(pointer ptr) noexcept : __ptr(ptr) {
   }
 
-  unique_ptr(T* ptr, Deleter deleter) noexcept
+  // [unique.ptr.single.ctor]: lvalue deleters bind, rvalue deleters move.
+  // An rvalue bound to a reference deleter is ill-formed.
+  unique_ptr(pointer ptr,
+             conditional_t<is_reference<Deleter>::value, Deleter,
+                           const Deleter&>
+                 deleter) noexcept
       : __ptr(ptr), __deleter(deleter) {
   }
 
-  unique_ptr(T* ptr, Deleter& deleter) noexcept
-      : __ptr(ptr), __deleter(deleter) {
+  unique_ptr(pointer ptr, __deleter_object&& deleter) noexcept
+      : __ptr(ptr),
+        __deleter(static_cast<__deleter_object&&>(deleter)) {
+    static_assert(!is_reference<Deleter>::value,
+                  "rvalue deleter cannot bind to a reference deleter");
   }
 
   unique_ptr(const unique_ptr& other) = delete;
 
-  unique_ptr(unique_ptr&& other) noexcept : __ptr(other.release()) {
-    __deleter = std::move(other.__deleter);
+  unique_ptr(unique_ptr&& other) noexcept
+      : __ptr(other.release()),
+        __deleter(static_cast<Deleter&&>(other.__deleter)) {
   }
 
-  // unique_ptr<Derived> converts to unique_ptr<Base>. The non-template
-  // move constructor is a better match for the same type, so this only
-  // fires for a different element type. default_delete is stateless.
-  template <class U, class E>
-  unique_ptr(unique_ptr<U, E>&& other) noexcept : __ptr(other.release()) {
+  template <class U, class E,
+            enable_if_t<!is_array<U>::value &&
+                            is_convertible<typename unique_ptr<U, E>::pointer,
+                                           pointer>::value &&
+                            __unique_deleter_convert<Deleter, E>::value,
+                        int> = 0>
+  unique_ptr(unique_ptr<U, E>&& other) noexcept
+      : __ptr(other.release()),
+        __deleter(static_cast<E&&>(other.get_deleter())) {
   }
 
   ~unique_ptr(void) {
-    if (__ptr != 0) {
+    if (__ptr) {
       __deleter(__ptr);
-      __ptr = 0;
     }
   }
 
   unique_ptr& operator=(const unique_ptr& other) = delete;
 
   unique_ptr& operator=(unique_ptr&& other) noexcept {
-    if (this != &other) {
-      T* old = __ptr;
-      __ptr = other.release();
-      if (old != 0) {
-        __deleter(old);
-      }
-      __deleter = std::move(other.__deleter);
-    }
+    reset(other.release());
+    __deleter = static_cast<Deleter&&>(other.__deleter);
+    return *this;
+  }
+
+  template <class U, class E,
+            enable_if_t<!is_array<U>::value &&
+                            is_convertible<typename unique_ptr<U, E>::pointer,
+                                           pointer>::value &&
+                            is_assignable<Deleter&, E&&>::value,
+                        int> = 0>
+  unique_ptr& operator=(unique_ptr<U, E>&& other) noexcept {
+    reset(other.release());
+    __deleter = static_cast<E&&>(other.get_deleter());
     return *this;
   }
 
   unique_ptr& operator=(decltype(nullptr)) noexcept {
-    T* old = __ptr;
-    __ptr = 0;
-    if (old != 0) {
-      __deleter(old);
-    }
+    reset();
     return *this;
   }
 
@@ -971,144 +1270,193 @@ struct unique_ptr {
     return *__ptr;
   }
 
-  T* operator->(void) const noexcept {
+  pointer operator->(void) const noexcept {
     return __ptr;
   }
 
-  T* get(void) const noexcept {
+  pointer get(void) const noexcept {
     return __ptr;
   }
 
   explicit operator bool() const noexcept {
-    return __ptr != 0;
+    return static_cast<bool>(__ptr);
   }
 
   Deleter& get_deleter(void) noexcept {
     return __deleter;
   }
 
-  T* release(void) noexcept {
-    T* ptr = __ptr;
-    __ptr = 0;
+  const Deleter& get_deleter(void) const noexcept {
+    return __deleter;
+  }
+
+  pointer release(void) noexcept {
+    pointer ptr = __ptr;
+    __ptr = pointer();
     return ptr;
   }
 
-  void reset(T* ptr = 0) noexcept {
-    T* old = __ptr;
+  void reset(pointer ptr = pointer()) noexcept {
+    pointer old = __ptr;
     __ptr = ptr;
-    if (old != 0) {
+    if (old) {
       __deleter(old);
     }
   }
 
   void swap(unique_ptr& other) noexcept {
-    T* ptr = __ptr;
+    pointer ptr = __ptr;
     __ptr = other.__ptr;
     other.__ptr = ptr;
-    Deleter deleter = std::move(__deleter);
-    __deleter = std::move(other.__deleter);
-    other.__deleter = std::move(deleter);
+    Deleter deleter = static_cast<Deleter&&>(__deleter);
+    __deleter = static_cast<Deleter&&>(other.__deleter);
+    other.__deleter = static_cast<Deleter&&>(deleter);
   }
-
 };
 
 template <class T, class Deleter>
 struct unique_ptr<T[], Deleter> {
-  using pointer = T*;
+  using pointer = typename __unique_pointer<Deleter, T>::type;
   using element_type = T;
   using deleter_type = Deleter;
 
-  T* __ptr;
+ private:
+  pointer __ptr;
   Deleter __deleter;
 
-  constexpr unique_ptr(void) noexcept : __ptr(0) {
+  using __deleter_object = remove_reference_t<Deleter>;
+
+ public:
+  template <class D2 = Deleter,
+            enable_if_t<__unique_default_deleter<D2>::value, int> = 0>
+  constexpr unique_ptr() noexcept : __ptr() {
   }
 
-  constexpr unique_ptr(decltype(nullptr)) noexcept : __ptr(0) {
+  template <class D2 = Deleter,
+            enable_if_t<__unique_default_deleter<D2>::value, int> = 0>
+  constexpr unique_ptr(decltype(nullptr)) noexcept : __ptr() {
   }
 
-  explicit unique_ptr(T* ptr) noexcept : __ptr(ptr) {
+  template <class D2 = Deleter,
+            enable_if_t<__unique_default_deleter<D2>::value, int> = 0>
+  explicit unique_ptr(pointer ptr) noexcept : __ptr(ptr) {
   }
 
-  unique_ptr(T* ptr, Deleter deleter) noexcept
+  unique_ptr(pointer ptr,
+             conditional_t<is_reference<Deleter>::value, Deleter,
+                           const Deleter&>
+                 deleter) noexcept
       : __ptr(ptr), __deleter(deleter) {
   }
 
-  unique_ptr(T* ptr, Deleter& deleter) noexcept
-      : __ptr(ptr), __deleter(deleter) {
+  unique_ptr(pointer ptr, __deleter_object&& deleter) noexcept
+      : __ptr(ptr),
+        __deleter(static_cast<__deleter_object&&>(deleter)) {
+    static_assert(!is_reference<Deleter>::value,
+                  "rvalue deleter cannot bind to a reference deleter");
   }
 
   unique_ptr(const unique_ptr& other) = delete;
 
-  unique_ptr(unique_ptr&& other) noexcept : __ptr(other.release()) {
-    __deleter = std::move(other.__deleter);
+  unique_ptr(unique_ptr&& other) noexcept
+      : __ptr(other.release()),
+        __deleter(static_cast<Deleter&&>(other.__deleter)) {
+  }
+
+  template <class U, class E,
+            enable_if_t<is_convertible<U (*)[], T (*)[]>::value &&
+                            is_same<typename unique_ptr<U[], E>::pointer,
+                                    U*>::value &&
+                            is_same<pointer, T*>::value &&
+                            __unique_deleter_convert<Deleter, E>::value,
+                        int> = 0>
+  unique_ptr(unique_ptr<U[], E>&& other) noexcept
+      : __ptr(other.release()),
+        __deleter(static_cast<E&&>(other.get_deleter())) {
   }
 
   ~unique_ptr(void) {
-    if (__ptr != 0) {
+    if (__ptr) {
       __deleter(__ptr);
-      __ptr = 0;
     }
   }
 
   unique_ptr& operator=(const unique_ptr& other) = delete;
 
   unique_ptr& operator=(unique_ptr&& other) noexcept {
-    if (this != &other) {
-      T* old = __ptr;
-      __ptr = other.release();
-      if (old != 0) {
-        __deleter(old);
-      }
-      __deleter = std::move(other.__deleter);
-    }
+    reset(other.release());
+    __deleter = static_cast<Deleter&&>(other.__deleter);
+    return *this;
+  }
+
+  template <class U, class E,
+            enable_if_t<is_convertible<U (*)[], T (*)[]>::value &&
+                            is_same<typename unique_ptr<U[], E>::pointer,
+                                    U*>::value &&
+                            is_same<pointer, T*>::value &&
+                            is_assignable<Deleter&, E&&>::value,
+                        int> = 0>
+  unique_ptr& operator=(unique_ptr<U[], E>&& other) noexcept {
+    reset(other.release());
+    __deleter = static_cast<E&&>(other.get_deleter());
     return *this;
   }
 
   unique_ptr& operator=(decltype(nullptr)) noexcept {
-    T* old = __ptr;
-    __ptr = 0;
-    if (old != 0) {
-      __deleter(old);
-    }
+    reset();
     return *this;
   }
 
-  T& operator[](unsigned long index) const {
+  T& operator[](size_t index) const {
     return __ptr[index];
   }
 
-  T* get(void) const noexcept {
+  pointer get(void) const noexcept {
     return __ptr;
+  }
+
+  explicit operator bool() const noexcept {
+    return static_cast<bool>(__ptr);
   }
 
   Deleter& get_deleter(void) noexcept {
     return __deleter;
   }
 
-  T* release(void) noexcept {
-    T* ptr = __ptr;
-    __ptr = 0;
+  const Deleter& get_deleter(void) const noexcept {
+    return __deleter;
+  }
+
+  pointer release(void) noexcept {
+    pointer ptr = __ptr;
+    __ptr = pointer();
     return ptr;
   }
 
-  void reset(T* ptr = 0) noexcept {
-    T* old = __ptr;
+  void reset(pointer ptr = pointer()) noexcept {
+    pointer old = __ptr;
     __ptr = ptr;
-    if (old != 0) {
+    if (old) {
       __deleter(old);
     }
   }
 
+  // Reject reset(new Derived) for unique_ptr<Base[]>: the pointer would
+  // otherwise convert and then be deleted as Base[].
+  template <class U,
+            enable_if_t<!is_same<U, pointer>::value &&
+                            !is_same<U, decltype(nullptr)>::value,
+                        int> = 0>
+  void reset(U) = delete;
+
   void swap(unique_ptr& other) noexcept {
-    T* ptr = __ptr;
+    pointer ptr = __ptr;
     __ptr = other.__ptr;
     other.__ptr = ptr;
-    Deleter deleter = std::move(__deleter);
-    __deleter = std::move(other.__deleter);
-    other.__deleter = std::move(deleter);
+    Deleter deleter = static_cast<Deleter&&>(__deleter);
+    __deleter = static_cast<Deleter&&>(other.__deleter);
+    other.__deleter = static_cast<Deleter&&>(deleter);
   }
-
 };
 
 template <class T1, class D1, class T2, class D2>
@@ -1164,6 +1512,87 @@ make_unique(size_t n) {
   unique_ptr<T> result;
   result.reset(new remove_extent_t<T>[n]());
   return result;
+}
+
+template <class T, class... Args,
+          enable_if_t<is_array<T>::value && extent<T>::value != 0, int> = 0>
+void make_unique(Args&&...) = delete;
+
+template <class T, enable_if_t<!is_array<T>::value, int> = 0>
+static inline unique_ptr<T> make_unique_for_overwrite() {
+  return unique_ptr<T>(new T);
+}
+
+template <class T,
+          enable_if_t<is_array<T>::value && extent<T>::value == 0, int> = 0>
+static inline unique_ptr<T> make_unique_for_overwrite(size_t n) {
+  return unique_ptr<T>(new remove_extent_t<T>[n]);
+}
+
+template <class T, class... Args,
+          enable_if_t<is_array<T>::value && extent<T>::value != 0, int> = 0>
+void make_unique_for_overwrite(Args&&...) = delete;
+
+template <class T>
+struct hash;
+
+#ifndef __davecc_hash_pointer__
+#define __davecc_hash_pointer__
+template <class T>
+struct hash<T*> {
+  size_t operator()(T* value) const noexcept {
+    return static_cast<size_t>(reinterpret_cast<uintptr_t>(value));
+  }
+};
+#endif
+
+template <class T, class Deleter>
+struct hash<unique_ptr<T, Deleter>> {
+  size_t operator()(const unique_ptr<T, Deleter>& ptr) const noexcept {
+    return hash<typename unique_ptr<T, Deleter>::pointer>()(ptr.get());
+  }
+};
+
+#if __cplusplus >= 202002L
+template <class T1, class D1, class T2, class D2>
+strong_ordering operator<=>(const unique_ptr<T1, D1>& left,
+                            const unique_ptr<T2, D2>& right) noexcept {
+  if (left.get() < right.get()) {
+    return strong_ordering::less;
+  }
+  if (right.get() < left.get()) {
+    return strong_ordering::greater;
+  }
+  return strong_ordering::equal;
+}
+#endif
+
+template <class T, class Deleter>
+bool operator<(const unique_ptr<T, Deleter>& ptr, decltype(nullptr)) noexcept {
+  return ptr.get() < typename unique_ptr<T, Deleter>::pointer();
+}
+
+template <class T, class Deleter>
+bool operator<(decltype(nullptr), const unique_ptr<T, Deleter>& ptr) noexcept {
+  return typename unique_ptr<T, Deleter>::pointer() < ptr.get();
+}
+
+template <class T1, class D1, class T2, class D2>
+bool operator>(const unique_ptr<T1, D1>& left,
+               const unique_ptr<T2, D2>& right) noexcept {
+  return right < left;
+}
+
+template <class T1, class D1, class T2, class D2>
+bool operator<=(const unique_ptr<T1, D1>& left,
+                const unique_ptr<T2, D2>& right) noexcept {
+  return !(right < left);
+}
+
+template <class T1, class D1, class T2, class D2>
+bool operator>=(const unique_ptr<T1, D1>& left,
+                const unique_ptr<T2, D2>& right) noexcept {
+  return !(left < right);
 }
 
 template <class T, class Deleter>
@@ -1342,6 +1771,8 @@ struct __pointer_control_block : __control_block {
   }
 };
 
+struct __for_overwrite_t {};
+
 template <class T>
 struct __inplace_control_block : __control_block {
   alignas(T) unsigned char __storage[sizeof(T)];
@@ -1349,6 +1780,10 @@ struct __inplace_control_block : __control_block {
   template <class... Args>
   explicit __inplace_control_block(Args&&... args) {
     new (static_cast<void*>(__storage)) T(std::forward<Args>(args)...);
+  }
+
+  explicit __inplace_control_block(__for_overwrite_t) {
+    new (static_cast<void*>(__storage)) T;
   }
 
   T* __get() noexcept {
@@ -1379,6 +1814,11 @@ struct __allocator_control_block : __control_block {
                                                std::forward<Args>(args)...);
   }
 
+  explicit __allocator_control_block(const Alloc& alloc, __for_overwrite_t)
+      : __alloc(alloc) {
+    ::new (static_cast<void*>(__get())) T;
+  }
+
   T* __get() noexcept {
     return reinterpret_cast<T*>(__storage);
   }
@@ -1391,6 +1831,220 @@ struct __allocator_control_block : __control_block {
     __block_alloc block_alloc(__alloc);
     this->~__allocator_control_block();
     allocator_traits<__block_alloc>::deallocate(block_alloc, this, 1);
+  }
+};
+
+enum class __array_init { __value, __overwrite, __copy };
+
+// One allocation holds the control block and then the array elements.
+template <class U>
+struct __array_block : __control_block {
+  size_t __count;
+
+  __array_block(size_t count, __array_init how, const U* source)
+      : __count(count) {
+    U* data = __data();
+    size_t built = 0;
+    __DAVECC_TRY {
+      for (; built < count; ++built) {
+        if (how == __array_init::__copy) {
+          ::new (static_cast<void*>(data + built)) U(*source);
+        } else if (how == __array_init::__overwrite) {
+          ::new (static_cast<void*>(data + built)) U;
+        } else {
+          ::new (static_cast<void*>(data + built)) U();
+        }
+      }
+    }
+    __DAVECC_CATCH_ALL {
+      while (built > 0) {
+        --built;
+        data[built].~U();
+      }
+      __DAVECC_RETHROW;
+    }
+  }
+
+  U* __data() noexcept {
+    unsigned char* base = reinterpret_cast<unsigned char*>(this);
+    size_t lead =
+        (sizeof(__array_block) + alignof(U) - 1) & ~(alignof(U) - 1);
+    return reinterpret_cast<U*>(base + lead);
+  }
+
+  void __destroy_object() noexcept override {
+    U* data = __data();
+    for (size_t index = __count; index > 0; --index) {
+      data[index - 1].~U();
+    }
+  }
+};
+
+// allocate_shared for an array: the control block and the elements come from
+// the caller's allocator. The allocation unit is aligned for both the block
+// and the element type.
+template <class U, class Alloc>
+struct __alloc_array_block : __control_block {
+  struct __unit {
+    alignas(U) alignas(size_t) alignas(__control_block) unsigned char __byte;
+  };
+  using __value_alloc =
+      typename allocator_traits<Alloc>::template rebind_alloc<U>;
+  using __unit_alloc =
+      typename allocator_traits<Alloc>::template rebind_alloc<__unit>;
+
+  __value_alloc __alloc;
+  size_t __count;
+  size_t __units;
+
+  __alloc_array_block(size_t count, __array_init how, const U* source,
+                      const Alloc& alloc, size_t units)
+      : __alloc(alloc), __count(count), __units(units) {
+    U* data = __data();
+    size_t built = 0;
+    __DAVECC_TRY {
+      for (; built < count; ++built) {
+        if (how == __array_init::__copy) {
+          allocator_traits<__value_alloc>::construct(__alloc, data + built,
+                                                     *source);
+        } else if (how == __array_init::__overwrite) {
+          ::new (static_cast<void*>(data + built)) U;
+        } else {
+          allocator_traits<__value_alloc>::construct(__alloc, data + built);
+        }
+      }
+    }
+    __DAVECC_CATCH_ALL {
+      while (built > 0) {
+        --built;
+        allocator_traits<__value_alloc>::destroy(__alloc, data + built);
+      }
+      __DAVECC_RETHROW;
+    }
+  }
+
+  U* __data() noexcept {
+    unsigned char* base = reinterpret_cast<unsigned char*>(this);
+    size_t lead =
+        (sizeof(__alloc_array_block) + alignof(U) - 1) & ~(alignof(U) - 1);
+    return reinterpret_cast<U*>(base + lead);
+  }
+
+  void __destroy_object() noexcept override {
+    U* data = __data();
+    for (size_t index = __count; index > 0; --index) {
+      allocator_traits<__value_alloc>::destroy(__alloc, data + index - 1);
+    }
+  }
+
+  void __destroy_self() noexcept override {
+    __unit_alloc units(__alloc);
+    size_t count = __units;
+    __unit* raw = reinterpret_cast<__unit*>(this);
+    this->~__alloc_array_block();
+    allocator_traits<__unit_alloc>::deallocate(units, raw, count);
+  }
+};
+
+template <class U>
+struct __built_array {
+  __control_block* __control;
+  U* __data;
+};
+
+template <class U>
+__built_array<U> __make_array(size_t count, __array_init how, const U* source) {
+  size_t lead =
+      (sizeof(__array_block<U>) + alignof(U) - 1) & ~(alignof(U) - 1);
+  size_t element_bytes = sizeof(U);
+  if (element_bytes != 0 &&
+      count > (static_cast<size_t>(-1) - lead) / element_bytes) {
+    __DAVECC_THROW(bad_array_new_length());
+  }
+  size_t bytes = lead + count * element_bytes;
+  void* raw = ::operator new(bytes == 0 ? 1 : bytes);
+  __DAVECC_TRY {
+    __array_block<U>* block =
+        ::new (raw) __array_block<U>(count, how, source);
+    __built_array<U> built;
+    built.__control = block;
+    built.__data = block->__data();
+    return built;
+  }
+  __DAVECC_CATCH_ALL {
+    ::operator delete(raw);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <class U, class Alloc>
+__built_array<U> __make_alloc_array(const Alloc& alloc, size_t count,
+                                   __array_init how, const U* source) {
+  using __block = __alloc_array_block<U, Alloc>;
+  using __unit = typename __block::__unit;
+  using __unit_alloc = typename __block::__unit_alloc;
+  size_t lead =
+      (sizeof(__block) + alignof(U) - 1) & ~(alignof(U) - 1);
+  size_t element_bytes = sizeof(U);
+  if (element_bytes != 0 &&
+      count > (static_cast<size_t>(-1) - lead) / element_bytes) {
+    __DAVECC_THROW(bad_array_new_length());
+  }
+  size_t bytes = lead + count * element_bytes;
+  size_t unit_size = sizeof(__unit);
+  size_t units = unit_size == 0 ? 1 : (bytes + unit_size - 1) / unit_size;
+  if (units == 0) {
+    units = 1;
+  }
+  __unit_alloc units_alloc(alloc);
+  __unit* raw = allocator_traits<__unit_alloc>::allocate(units_alloc, units);
+  __DAVECC_TRY {
+    __block* block = ::new (static_cast<void*>(raw))
+        __block(count, how, source, alloc, units);
+    __built_array<U> built;
+    built.__control = block;
+    built.__data = block->__data();
+    return built;
+  }
+  __DAVECC_CATCH_ALL {
+    allocator_traits<__unit_alloc>::deallocate(units_alloc, raw, units);
+    __DAVECC_RETHROW;
+  }
+}
+
+// shared_ptr(pointer, deleter, allocator): the control block is allocated
+// from the allocator. __alloc is initialized before the deleter is moved, so
+// a throwing allocator copy still has a deleter to run on the pointer.
+template <class Pointer, class Deleter, class Alloc>
+struct __alloc_pointer_block : __control_block {
+  using __self_alloc = typename allocator_traits<Alloc>::template rebind_alloc<
+      __alloc_pointer_block>;
+
+  Alloc __alloc;
+  Pointer __pointer;
+  Deleter __deleter;
+
+  __alloc_pointer_block(Pointer pointer, Deleter&& incoming, const Alloc& alloc)
+      : __alloc(alloc),
+        __pointer(pointer),
+        __deleter(static_cast<Deleter&&>(incoming)) {
+  }
+
+  void __destroy_object() noexcept override {
+    __deleter(__pointer);
+  }
+
+  void* __get_deleter(const void* token) noexcept override {
+    if (token == &__type_token<Deleter>::__value) {
+      return &__deleter;
+    }
+    return 0;
+  }
+
+  void __destroy_self() noexcept override {
+    __self_alloc block_alloc(__alloc);
+    this->~__alloc_pointer_block();
+    allocator_traits<__self_alloc>::deallocate(block_alloc, this, 1);
   }
 };
 
@@ -1429,6 +2083,15 @@ class shared_ptr {
   friend shared_ptr<U> make_shared(Args&&... args);
   template <class U, class Alloc, class... Args>
   friend shared_ptr<U> allocate_shared(const Alloc& alloc, Args&&... args);
+  template <class U, class Alloc>
+  friend shared_ptr<U> allocate_shared_for_overwrite(const Alloc& alloc);
+  template <class U, class Alloc>
+  friend shared_ptr<U> allocate_shared_for_overwrite(const Alloc& alloc,
+                                                     size_t count);
+  template <class U>
+  friend shared_ptr<U> make_shared_for_overwrite();
+  template <class U>
+  friend shared_ptr<U> make_shared_for_overwrite(size_t);
 
   shared_ptr(element_type* pointer,
              __shared_ptr_detail::__control_block* control,
@@ -1447,6 +2110,27 @@ class shared_ptr {
       deleter(pointer);
       __DAVECC_RETHROW;
     }
+    __pointer = pointer;
+    __enable_weak_this(pointer, pointer);
+  }
+
+  template <class U, class Deleter, class Alloc>
+  void __construct_allocated(U* pointer, Deleter&& deleter, const Alloc& alloc) {
+    using __block =
+        __shared_ptr_detail::__alloc_pointer_block<U*, Deleter, Alloc>;
+    using __block_alloc = typename __block::__self_alloc;
+    __block_alloc block_alloc(alloc);
+    __block* raw = allocator_traits<__block_alloc>::allocate(block_alloc, 1);
+    __DAVECC_TRY {
+      ::new (static_cast<void*>(raw))
+          __block(pointer, static_cast<Deleter&&>(deleter), alloc);
+    }
+    __DAVECC_CATCH_ALL {
+      allocator_traits<__block_alloc>::deallocate(block_alloc, raw, 1);
+      deleter(pointer);
+      __DAVECC_RETHROW;
+    }
+    __control = raw;
     __pointer = pointer;
     __enable_weak_this(pointer, pointer);
   }
@@ -1490,6 +2174,24 @@ class shared_ptr {
   shared_ptr(decltype(nullptr), Deleter deleter)
       : __pointer(0), __control(0) {
     __construct(static_cast<element_type*>(0), std::move(deleter));
+  }
+
+  template <class U, class Deleter, class Alloc,
+            enable_if_t<is_convertible<U*, element_type*>::value &&
+                            !is_same<Alloc, __shared_ptr_detail::__adopt_shared_t>::value,
+                        int> = 0>
+  shared_ptr(U* pointer, Deleter deleter, Alloc alloc)
+      : __pointer(0), __control(0) {
+    __construct_allocated(pointer, static_cast<Deleter&&>(deleter), alloc);
+  }
+
+  template <class Deleter, class Alloc,
+            enable_if_t<!is_same<Alloc, __shared_ptr_detail::__adopt_shared_t>::value,
+                        int> = 0>
+  shared_ptr(decltype(nullptr), Deleter deleter, Alloc alloc)
+      : __pointer(0), __control(0) {
+    __construct_allocated(static_cast<element_type*>(0),
+                          static_cast<Deleter&&>(deleter), alloc);
   }
 
   shared_ptr(const shared_ptr& other) noexcept
@@ -1621,6 +2323,11 @@ class shared_ptr {
     shared_ptr(pointer, std::move(deleter)).swap(*this);
   }
 
+  template <class U, class Deleter, class Alloc>
+  void reset(U* pointer, Deleter deleter, Alloc alloc) {
+    shared_ptr(pointer, static_cast<Deleter&&>(deleter), alloc).swap(*this);
+  }
+
   void swap(shared_ptr& other) noexcept {
     std::swap(__pointer, other.__pointer);
     std::swap(__control, other.__control);
@@ -1653,9 +2360,11 @@ class shared_ptr {
     return __control == 0 ? 0 : __control->__use_count();
   }
 
+#if __cplusplus < 202002L
   bool unique() const noexcept {
     return use_count() == 1;
   }
+#endif
 
   explicit operator bool() const noexcept {
     return __pointer != 0;
@@ -1857,36 +2566,217 @@ class enable_shared_from_this {
   mutable weak_ptr<T> __weak_this;
 };
 
+namespace __shared_ptr_detail {
+
+template <class T>
+__built_array<remove_extent_t<T>> __shared_array_args(size_t count) {
+  return __make_array<remove_extent_t<T>>(count, __array_init::__value,
+                                          static_cast<remove_extent_t<T>*>(0));
+}
+
+template <class T>
+__built_array<remove_extent_t<T>> __shared_array_args(
+    size_t count, const remove_extent_t<T>& value) {
+  return __make_array<remove_extent_t<T>>(count, __array_init::__copy, &value);
+}
+
+template <class T>
+__built_array<remove_extent_t<T>> __shared_array_bounded() {
+  return __make_array<remove_extent_t<T>>(extent<T>::value, __array_init::__value,
+                                          static_cast<remove_extent_t<T>*>(0));
+}
+
+template <class T>
+__built_array<remove_extent_t<T>> __shared_array_bounded(
+    const remove_extent_t<T>& value) {
+  return __make_array<remove_extent_t<T>>(extent<T>::value, __array_init::__copy,
+                                          &value);
+}
+
+template <class T>
+__built_array<remove_extent_t<T>> __shared_array_overwrite(size_t count) {
+  return __make_array<remove_extent_t<T>>(
+      count, __array_init::__overwrite, static_cast<remove_extent_t<T>*>(0));
+}
+
+template <class T>
+__built_array<remove_extent_t<T>> __shared_array_overwrite_bounded() {
+  return __make_array<remove_extent_t<T>>(extent<T>::value,
+                                          __array_init::__overwrite,
+                                          static_cast<remove_extent_t<T>*>(0));
+}
+
+template <class T, class Alloc>
+__built_array<remove_extent_t<T>> __shared_alloc_array(const Alloc& alloc,
+                                                      size_t count) {
+  return __make_alloc_array<remove_extent_t<T>>(
+      alloc, count, __array_init::__value,
+      static_cast<remove_extent_t<T>*>(0));
+}
+
+template <class T, class Alloc>
+__built_array<remove_extent_t<T>> __shared_alloc_array(
+    const Alloc& alloc, size_t count, const remove_extent_t<T>& value) {
+  return __make_alloc_array<remove_extent_t<T>>(alloc, count,
+                                               __array_init::__copy, &value);
+}
+
+template <class T, class Alloc>
+__built_array<remove_extent_t<T>> __shared_alloc_array_bounded(
+    const Alloc& alloc) {
+  return __make_alloc_array<remove_extent_t<T>>(
+      alloc, extent<T>::value, __array_init::__value,
+      static_cast<remove_extent_t<T>*>(0));
+}
+
+template <class T, class Alloc>
+__built_array<remove_extent_t<T>> __shared_alloc_array_bounded(
+    const Alloc& alloc, const remove_extent_t<T>& value) {
+  return __make_alloc_array<remove_extent_t<T>>(
+      alloc, extent<T>::value, __array_init::__copy, &value);
+}
+
+template <class T, class Alloc>
+__built_array<remove_extent_t<T>> __shared_alloc_array_overwrite(
+    const Alloc& alloc, size_t count) {
+  return __make_alloc_array<remove_extent_t<T>>(
+      alloc, count, __array_init::__overwrite,
+      static_cast<remove_extent_t<T>*>(0));
+}
+
+template <class T, class Alloc>
+__built_array<remove_extent_t<T>> __shared_alloc_array_overwrite_bounded(
+    const Alloc& alloc) {
+  return __make_alloc_array<remove_extent_t<T>>(
+      alloc, extent<T>::value, __array_init::__overwrite,
+      static_cast<remove_extent_t<T>*>(0));
+}
+
+}  // namespace __shared_ptr_detail
+
 template <class T, class... Args>
 shared_ptr<T> make_shared(Args&&... args) {
-  static_assert(!is_array<T>::value,
-                "make_shared array overloads are not implemented");
-  using __block = __shared_ptr_detail::__inplace_control_block<T>;
-  __block* control = new __block(std::forward<Args>(args)...);
-  shared_ptr<T> result(control->__get(), control,
+  if constexpr (!is_array<T>::value) {
+    using __block = __shared_ptr_detail::__inplace_control_block<T>;
+    __block* control = new __block(std::forward<Args>(args)...);
+    shared_ptr<T> result(control->__get(), control,
+                         __shared_ptr_detail::__adopt_shared_t());
+    result.__enable_weak_this(control->__get(), control->__get());
+    return result;
+  } else if constexpr (extent<T>::value == 0) {
+    auto built = __shared_ptr_detail::__shared_array_args<T>(
+        std::forward<Args>(args)...);
+    return shared_ptr<T>(built.__data, built.__control,
+                         __shared_ptr_detail::__adopt_shared_t());
+  } else {
+    auto built = __shared_ptr_detail::__shared_array_bounded<T>(
+        std::forward<Args>(args)...);
+    return shared_ptr<T>(built.__data, built.__control,
+                         __shared_ptr_detail::__adopt_shared_t());
+  }
+}
+
+template <class T>
+shared_ptr<T> make_shared_for_overwrite() {
+  if constexpr (!is_array<T>::value) {
+    using __block = __shared_ptr_detail::__inplace_control_block<T>;
+    __block* control = new __block(__shared_ptr_detail::__for_overwrite_t());
+    shared_ptr<T> result(control->__get(), control,
+                         __shared_ptr_detail::__adopt_shared_t());
+    result.__enable_weak_this(control->__get(), control->__get());
+    return result;
+  } else {
+    static_assert(extent<T>::value != 0,
+                  "make_shared_for_overwrite<T[]> requires a count");
+    auto built =
+        __shared_ptr_detail::__shared_array_overwrite_bounded<T>();
+    return shared_ptr<T>(built.__data, built.__control,
+                         __shared_ptr_detail::__adopt_shared_t());
+  }
+}
+
+template <class T>
+shared_ptr<T> make_shared_for_overwrite(size_t count) {
+  static_assert(is_array<T>::value && extent<T>::value == 0,
+                "make_shared_for_overwrite(count) is for an unbounded array");
+  auto built = __shared_ptr_detail::__shared_array_overwrite<T>(count);
+  return shared_ptr<T>(built.__data, built.__control,
                        __shared_ptr_detail::__adopt_shared_t());
-  result.__enable_weak_this(control->__get(), control->__get());
-  return result;
 }
 
 template <class T, class Alloc, class... Args>
 shared_ptr<T> allocate_shared(const Alloc& alloc, Args&&... args) {
-  static_assert(!is_array<T>::value,
-                "allocate_shared array overloads are not implemented");
+  if constexpr (!is_array<T>::value) {
   using __block = __shared_ptr_detail::__allocator_control_block<T, Alloc>;
   using __block_alloc = typename __block::__block_alloc;
   __block_alloc block_alloc(alloc);
   __block* control = allocator_traits<__block_alloc>::allocate(block_alloc, 1);
-  try {
+  __DAVECC_TRY {
     ::new (static_cast<void*>(control)) __block(alloc, std::forward<Args>(args)...);
-  } catch (...) {
+  }
+  __DAVECC_CATCH_ALL {
     allocator_traits<__block_alloc>::deallocate(block_alloc, control, 1);
-    throw;
+    __DAVECC_RETHROW;
   }
   shared_ptr<T> result(control->__get(), control,
                        __shared_ptr_detail::__adopt_shared_t());
   result.__enable_weak_this(control->__get(), control->__get());
   return result;
+  } else if constexpr (extent<T>::value == 0) {
+    static_assert(sizeof...(Args) == 1 || sizeof...(Args) == 2,
+                  "allocate_shared<T[]> takes a count and an optional value");
+    auto built = __shared_ptr_detail::__shared_alloc_array<T>(
+        alloc, std::forward<Args>(args)...);
+    return shared_ptr<T>(built.__data, built.__control,
+                         __shared_ptr_detail::__adopt_shared_t());
+  } else {
+    static_assert(sizeof...(Args) <= 1,
+                  "allocate_shared<T[N]> takes an optional initial value");
+    auto built = __shared_ptr_detail::__shared_alloc_array_bounded<T>(
+        alloc, std::forward<Args>(args)...);
+    return shared_ptr<T>(built.__data, built.__control,
+                         __shared_ptr_detail::__adopt_shared_t());
+  }
+}
+
+template <class T, class Alloc>
+shared_ptr<T> allocate_shared_for_overwrite(const Alloc& alloc) {
+  if constexpr (!is_array<T>::value) {
+    using __block = __shared_ptr_detail::__allocator_control_block<T, Alloc>;
+    using __block_alloc = typename __block::__block_alloc;
+    __block_alloc block_alloc(alloc);
+    __block* control =
+        allocator_traits<__block_alloc>::allocate(block_alloc, 1);
+    __DAVECC_TRY {
+      ::new (static_cast<void*>(control))
+          __block(alloc, __shared_ptr_detail::__for_overwrite_t());
+    }
+    __DAVECC_CATCH_ALL {
+      allocator_traits<__block_alloc>::deallocate(block_alloc, control, 1);
+      __DAVECC_RETHROW;
+    }
+    shared_ptr<T> result(control->__get(), control,
+                         __shared_ptr_detail::__adopt_shared_t());
+    result.__enable_weak_this(control->__get(), control->__get());
+    return result;
+  } else {
+    static_assert(extent<T>::value != 0,
+                  "allocate_shared_for_overwrite<T[]> requires a count");
+    auto built =
+        __shared_ptr_detail::__shared_alloc_array_overwrite_bounded<T>(alloc);
+    return shared_ptr<T>(built.__data, built.__control,
+                         __shared_ptr_detail::__adopt_shared_t());
+  }
+}
+
+template <class T, class Alloc>
+shared_ptr<T> allocate_shared_for_overwrite(const Alloc& alloc, size_t count) {
+  static_assert(is_array<T>::value && extent<T>::value == 0,
+                "allocate_shared_for_overwrite(count) is for an unbounded array");
+  auto built =
+      __shared_ptr_detail::__shared_alloc_array_overwrite<T>(alloc, count);
+  return shared_ptr<T>(built.__data, built.__control,
+                       __shared_ptr_detail::__adopt_shared_t());
 }
 
 template <class Deleter, class T>
@@ -1987,6 +2877,837 @@ template <class T>
 void swap(weak_ptr<T>& left, weak_ptr<T>& right) noexcept {
   left.swap(right);
 }
+
+template <class T, class U>
+bool operator<(const shared_ptr<T>& left, const shared_ptr<U>& right) noexcept {
+  using pointer = common_type_t<typename shared_ptr<T>::element_type*,
+                                typename shared_ptr<U>::element_type*>;
+  return static_cast<pointer>(left.get()) < static_cast<pointer>(right.get());
+}
+
+template <class T, class U>
+bool operator>(const shared_ptr<T>& left, const shared_ptr<U>& right) noexcept {
+  return right < left;
+}
+
+template <class T, class U>
+bool operator<=(const shared_ptr<T>& left,
+                const shared_ptr<U>& right) noexcept {
+  return !(right < left);
+}
+
+template <class T, class U>
+bool operator>=(const shared_ptr<T>& left,
+                const shared_ptr<U>& right) noexcept {
+  return !(left < right);
+}
+
+template <class T>
+bool operator<(const shared_ptr<T>& pointer, decltype(nullptr)) noexcept {
+  return pointer.get() < static_cast<typename shared_ptr<T>::element_type*>(0);
+}
+
+template <class T>
+bool operator<(decltype(nullptr), const shared_ptr<T>& pointer) noexcept {
+  return static_cast<typename shared_ptr<T>::element_type*>(0) < pointer.get();
+}
+
+#if __cplusplus >= 202002L
+template <class T, class U>
+strong_ordering operator<=>(const shared_ptr<T>& left,
+                            const shared_ptr<U>& right) noexcept {
+  if (left < right) {
+    return strong_ordering::less;
+  }
+  if (right < left) {
+    return strong_ordering::greater;
+  }
+  return strong_ordering::equal;
+}
+#endif
+
+template <class T>
+struct hash<shared_ptr<T>> {
+  size_t operator()(const shared_ptr<T>& pointer) const noexcept {
+    return hash<typename shared_ptr<T>::element_type*>()(pointer.get());
+  }
+};
+
+template <class T = void>
+struct owner_less;
+
+template <class T>
+struct owner_less<shared_ptr<T>> {
+  bool operator()(const shared_ptr<T>& left,
+                  const shared_ptr<T>& right) const noexcept {
+    return left.owner_before(right);
+  }
+  bool operator()(const shared_ptr<T>& left,
+                  const weak_ptr<T>& right) const noexcept {
+    return left.owner_before(right);
+  }
+  bool operator()(const weak_ptr<T>& left,
+                  const shared_ptr<T>& right) const noexcept {
+    return left.owner_before(right);
+  }
+  bool operator()(const weak_ptr<T>& left,
+                  const weak_ptr<T>& right) const noexcept {
+    return left.owner_before(right);
+  }
+};
+
+template <class T>
+struct owner_less<weak_ptr<T>> {
+  bool operator()(const weak_ptr<T>& left,
+                  const weak_ptr<T>& right) const noexcept {
+    return left.owner_before(right);
+  }
+  bool operator()(const shared_ptr<T>& left,
+                  const weak_ptr<T>& right) const noexcept {
+    return left.owner_before(right);
+  }
+  bool operator()(const weak_ptr<T>& left,
+                  const shared_ptr<T>& right) const noexcept {
+    return left.owner_before(right);
+  }
+  bool operator()(const shared_ptr<T>& left,
+                  const shared_ptr<T>& right) const noexcept {
+    return left.owner_before(right);
+  }
+};
+
+template <>
+struct owner_less<void> {
+  template <class T, class U>
+  bool operator()(const shared_ptr<T>& left,
+                  const shared_ptr<U>& right) const noexcept {
+    return left.owner_before(right);
+  }
+  template <class T, class U>
+  bool operator()(const shared_ptr<T>& left,
+                  const weak_ptr<U>& right) const noexcept {
+    return left.owner_before(right);
+  }
+  template <class T, class U>
+  bool operator()(const weak_ptr<T>& left,
+                  const shared_ptr<U>& right) const noexcept {
+    return left.owner_before(right);
+  }
+  template <class T, class U>
+  bool operator()(const weak_ptr<T>& left,
+                  const weak_ptr<U>& right) const noexcept {
+    return left.owner_before(right);
+  }
+};
+
+#if !defined(__6502__) && !defined(__W65C02__)
+// shared_ptr and weak_ptr are not trivially copyable, so the word-sized
+// atomic operations cannot own one. A spin lock plus a version counter gives
+// the C++20 atomic specializations and the older shared_ptr atomic functions
+// the same ownership comparison the standard requires.
+template <class Ptr>
+struct __atomic_shared_owner {
+  using value_type = Ptr;
+  static constexpr bool is_always_lock_free = false;
+
+  constexpr __atomic_shared_owner() noexcept = default;
+
+  __atomic_shared_owner(Ptr desired) noexcept
+      : __value(static_cast<Ptr&&>(desired)) {}
+
+  __atomic_shared_owner(const __atomic_shared_owner&) = delete;
+  __atomic_shared_owner& operator=(const __atomic_shared_owner&) = delete;
+
+  bool is_lock_free() const noexcept { return false; }
+
+  void store(Ptr desired, memory_order = memory_order_seq_cst) noexcept {
+    __acquire();
+    __value = static_cast<Ptr&&>(desired);
+    __release();
+    __publish();
+  }
+
+  Ptr load(memory_order = memory_order_seq_cst) const noexcept {
+    __acquire();
+    Ptr result = __value;
+    __release();
+    return result;
+  }
+
+  Ptr exchange(Ptr desired, memory_order = memory_order_seq_cst) noexcept {
+    __acquire();
+    Ptr previous = static_cast<Ptr&&>(__value);
+    __value = static_cast<Ptr&&>(desired);
+    __release();
+    __publish();
+    return previous;
+  }
+
+  bool compare_exchange_strong(Ptr& expected, Ptr desired, memory_order,
+                               memory_order) noexcept {
+    __acquire();
+    if (__same(__value, expected)) {
+      __value = static_cast<Ptr&&>(desired);
+      __release();
+      __publish();
+      return true;
+    }
+    expected = __value;
+    __release();
+    return false;
+  }
+
+  bool compare_exchange_strong(
+      Ptr& expected, Ptr desired,
+      memory_order order = memory_order_seq_cst) noexcept {
+    return compare_exchange_strong(expected, static_cast<Ptr&&>(desired), order,
+                                   order);
+  }
+
+  bool compare_exchange_weak(Ptr& expected, Ptr desired, memory_order success,
+                             memory_order failure) noexcept {
+    return compare_exchange_strong(expected, static_cast<Ptr&&>(desired),
+                                   success, failure);
+  }
+
+  bool compare_exchange_weak(
+      Ptr& expected, Ptr desired,
+      memory_order order = memory_order_seq_cst) noexcept {
+    return compare_exchange_strong(expected, static_cast<Ptr&&>(desired), order,
+                                   order);
+  }
+
+  void wait(Ptr old, memory_order order = memory_order_seq_cst) const noexcept {
+    unsigned seen = __version.load(order);
+    __acquire();
+    bool same = __same(__value, old);
+    __release();
+    if (!same) {
+      return;
+    }
+    __version.wait(seen, order);
+  }
+
+  void notify_one() noexcept { __publish(); }
+
+  void notify_all() noexcept { __publish(); }
+
+  operator Ptr() const noexcept { return load(); }
+
+  Ptr operator=(Ptr desired) noexcept {
+    store(desired);
+    return desired;
+  }
+
+ private:
+  static bool __same(const Ptr& left, const Ptr& right) noexcept {
+    return !left.owner_before(right) && !right.owner_before(left);
+  }
+
+  void __acquire() const noexcept {
+    while (__lock.test_and_set(memory_order_acquire)) {
+    }
+  }
+
+  void __release() const noexcept { __lock.clear(memory_order_release); }
+
+  void __publish() const noexcept {
+    __version.fetch_add(1, memory_order_release);
+    __version.notify_all();
+  }
+
+  mutable atomic_flag __lock{};
+  Ptr __value{};
+  mutable atomic<unsigned> __version{0};
+};
+
+#if __cplusplus >= 202002L
+template <class T>
+struct atomic<shared_ptr<T>> : __atomic_shared_owner<shared_ptr<T>> {
+  using __atomic_shared_owner<shared_ptr<T>>::__atomic_shared_owner;
+};
+
+template <class T>
+struct atomic<weak_ptr<T>> : __atomic_shared_owner<weak_ptr<T>> {
+  using __atomic_shared_owner<weak_ptr<T>>::__atomic_shared_owner;
+};
+#endif
+
+#if __cplusplus < 202603L
+namespace __shared_ptr_atomic {
+
+inline atomic_flag* __locks() noexcept {
+  static atomic_flag locks[32];
+  return locks;
+}
+
+struct __guard {
+  atomic_flag& flag;
+  explicit __guard(const void* address) noexcept
+      : flag(__locks()[(reinterpret_cast<uintptr_t>(address) >> 4) & 31]) {
+    while (flag.test_and_set(memory_order_acquire)) {
+    }
+  }
+  ~__guard() { flag.clear(memory_order_release); }
+};
+
+}  // namespace __shared_ptr_atomic
+
+template <class T>
+bool atomic_is_lock_free(const shared_ptr<T>*) noexcept {
+  return false;
+}
+
+template <class T>
+shared_ptr<T> atomic_load(const shared_ptr<T>* pointer) noexcept {
+  __shared_ptr_atomic::__guard guard(pointer);
+  return *pointer;
+}
+
+template <class T>
+shared_ptr<T> atomic_load_explicit(const shared_ptr<T>* pointer,
+                                   memory_order) noexcept {
+  return atomic_load(pointer);
+}
+
+template <class T>
+void atomic_store(shared_ptr<T>* pointer, shared_ptr<T> value) noexcept {
+  __shared_ptr_atomic::__guard guard(pointer);
+  *pointer = static_cast<shared_ptr<T>&&>(value);
+}
+
+template <class T>
+void atomic_store_explicit(shared_ptr<T>* pointer, shared_ptr<T> value,
+                           memory_order) noexcept {
+  atomic_store(pointer, static_cast<shared_ptr<T>&&>(value));
+}
+
+template <class T>
+shared_ptr<T> atomic_exchange(shared_ptr<T>* pointer,
+                              shared_ptr<T> value) noexcept {
+  __shared_ptr_atomic::__guard guard(pointer);
+  shared_ptr<T> previous = static_cast<shared_ptr<T>&&>(*pointer);
+  *pointer = static_cast<shared_ptr<T>&&>(value);
+  return previous;
+}
+
+template <class T>
+shared_ptr<T> atomic_exchange_explicit(shared_ptr<T>* pointer,
+                                       shared_ptr<T> value,
+                                       memory_order) noexcept {
+  return atomic_exchange(pointer, static_cast<shared_ptr<T>&&>(value));
+}
+
+template <class T>
+bool atomic_compare_exchange_strong(shared_ptr<T>* pointer,
+                                    shared_ptr<T>* expected,
+                                    shared_ptr<T> desired) noexcept {
+  __shared_ptr_atomic::__guard guard(pointer);
+  if (!pointer->owner_before(*expected) && !expected->owner_before(*pointer)) {
+    *pointer = static_cast<shared_ptr<T>&&>(desired);
+    return true;
+  }
+  *expected = *pointer;
+  return false;
+}
+
+template <class T>
+bool atomic_compare_exchange_strong_explicit(shared_ptr<T>* pointer,
+                                             shared_ptr<T>* expected,
+                                             shared_ptr<T> desired, memory_order,
+                                             memory_order) noexcept {
+  return atomic_compare_exchange_strong(pointer, expected,
+                                        static_cast<shared_ptr<T>&&>(desired));
+}
+
+template <class T>
+bool atomic_compare_exchange_weak(shared_ptr<T>* pointer,
+                                  shared_ptr<T>* expected,
+                                  shared_ptr<T> desired) noexcept {
+  return atomic_compare_exchange_strong(pointer, expected,
+                                        static_cast<shared_ptr<T>&&>(desired));
+}
+
+template <class T>
+bool atomic_compare_exchange_weak_explicit(shared_ptr<T>* pointer,
+                                           shared_ptr<T>* expected,
+                                           shared_ptr<T> desired, memory_order,
+                                           memory_order) noexcept {
+  return atomic_compare_exchange_strong(pointer, expected,
+                                        static_cast<shared_ptr<T>&&>(desired));
+}
+#endif
+#endif
+
+inline void* align(size_t alignment, size_t size, void*& ptr,
+                   size_t& space) noexcept {
+  uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
+  uintptr_t aligned = (address + alignment - 1) & ~(alignment - 1);
+  size_t padding = static_cast<size_t>(aligned - address);
+  if (alignment == 0 || (alignment & (alignment - 1)) != 0 ||
+      padding > space || size > space - padding) {
+    return 0;
+  }
+  space -= padding;
+  ptr = reinterpret_cast<void*>(aligned);
+  return ptr;
+}
+
+#if __cplusplus >= 202002L
+template <size_t Alignment, class T>
+[[nodiscard]] constexpr T* assume_aligned(T* ptr) noexcept {
+  static_assert(Alignment != 0 && (Alignment & (Alignment - 1)) == 0,
+                "assume_aligned alignment must be a power of two");
+  return ptr;
+}
+
+namespace ranges {
+
+template <class I, class O>
+using uninitialized_copy_result = in_out_result<I, O>;
+template <class I, class O>
+using uninitialized_move_result = in_out_result<I, O>;
+template <class I, class O>
+using uninitialized_copy_n_result = in_out_result<I, O>;
+template <class I, class O>
+using uninitialized_move_n_result = in_out_result<I, O>;
+template <class I>
+using uninitialized_fill_n_result = I;
+template <class I>
+using uninitialized_value_construct_n_result = I;
+template <class I>
+using uninitialized_default_construct_n_result = I;
+
+template <input_iterator I, sentinel_for<I> S1, forward_iterator O,
+          sentinel_for<O> S2>
+  requires constructible_from<iter_value_t<O>, iter_reference_t<I>>
+uninitialized_copy_result<I, O> uninitialized_copy(I first, S1 last, O result,
+                                                   S2 result_last) {
+  O current = result;
+  __DAVECC_TRY {
+    for (; first != last && current != result_last; ++first, ++current) {
+      ::new (static_cast<void*>(addressof(*current)))
+          iter_value_t<O>(*first);
+    }
+    return {static_cast<I&&>(first), static_cast<O&&>(current)};
+  }
+  __DAVECC_CATCH_ALL {
+    std::destroy(result, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <input_iterator I, forward_iterator O, sentinel_for<O> S>
+  requires constructible_from<iter_value_t<O>, iter_reference_t<I>>
+uninitialized_copy_n_result<I, O> uninitialized_copy_n(I first,
+                                                       iter_difference_t<I> count,
+                                                       O result, S result_last) {
+  O current = result;
+  __DAVECC_TRY {
+    for (; count > 0 && current != result_last; --count, ++first, ++current) {
+      ::new (static_cast<void*>(addressof(*current)))
+          iter_value_t<O>(*first);
+    }
+    return {static_cast<I&&>(first), static_cast<O&&>(current)};
+  }
+  __DAVECC_CATCH_ALL {
+    std::destroy(result, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <input_iterator I, sentinel_for<I> S1, forward_iterator O,
+          sentinel_for<O> S2>
+  requires constructible_from<iter_value_t<O>, iter_rvalue_reference_t<I>>
+uninitialized_move_result<I, O> uninitialized_move(I first, S1 last, O result,
+                                                   S2 result_last) {
+  O current = result;
+  __DAVECC_TRY {
+    for (; first != last && current != result_last; ++first, ++current) {
+      ::new (static_cast<void*>(addressof(*current)))
+          iter_value_t<O>(static_cast<iter_rvalue_reference_t<I>>(*first));
+    }
+    return {static_cast<I&&>(first), static_cast<O&&>(current)};
+  }
+  __DAVECC_CATCH_ALL {
+    std::destroy(result, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <forward_iterator I, sentinel_for<I> S>
+  requires default_initializable<iter_value_t<I>>
+constexpr I uninitialized_value_construct(I first, S last) {
+  I current = first;
+  __DAVECC_TRY {
+    for (; current != last; ++current) {
+      ::new (static_cast<void*>(addressof(*current))) iter_value_t<I>();
+    }
+    return current;
+  }
+  __DAVECC_CATCH_ALL {
+    std::destroy(first, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <forward_iterator I>
+  requires default_initializable<iter_value_t<I>>
+constexpr I uninitialized_value_construct_n(I first,
+                                            iter_difference_t<I> count) {
+  I current = first;
+  __DAVECC_TRY {
+    for (; count > 0; --count, ++current) {
+      ::new (static_cast<void*>(addressof(*current))) iter_value_t<I>();
+    }
+    return current;
+  }
+  __DAVECC_CATCH_ALL {
+    std::destroy(first, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <forward_iterator I, sentinel_for<I> S>
+  requires default_initializable<iter_value_t<I>>
+constexpr I uninitialized_default_construct(I first, S last) {
+  I current = first;
+  __DAVECC_TRY {
+    for (; current != last; ++current) {
+      ::new (static_cast<void*>(addressof(*current))) iter_value_t<I>;
+    }
+    return current;
+  }
+  __DAVECC_CATCH_ALL {
+    std::destroy(first, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <forward_iterator I>
+  requires default_initializable<iter_value_t<I>>
+constexpr I uninitialized_default_construct_n(I first,
+                                              iter_difference_t<I> count) {
+  I current = first;
+  __DAVECC_TRY {
+    for (; count > 0; --count, ++current) {
+      ::new (static_cast<void*>(addressof(*current))) iter_value_t<I>;
+    }
+    return current;
+  }
+  __DAVECC_CATCH_ALL {
+    std::destroy(first, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <class T, forward_iterator I, sentinel_for<I> S>
+  requires constructible_from<iter_value_t<I>, const T&>
+constexpr I uninitialized_fill(I first, S last, const T& value) {
+  I current = first;
+  __DAVECC_TRY {
+    for (; current != last; ++current) {
+      ::new (static_cast<void*>(addressof(*current))) iter_value_t<I>(value);
+    }
+    return current;
+  }
+  __DAVECC_CATCH_ALL {
+    std::destroy(first, current);
+    __DAVECC_RETHROW;
+  }
+}
+
+template <input_range IR, forward_range OR>
+  requires constructible_from<range_value_t<OR>, range_reference_t<IR>>
+uninitialized_copy_result<borrowed_iterator_t<IR>, borrowed_iterator_t<OR>>
+uninitialized_copy(IR&& in_range, OR&& out_range) {
+  auto raw = uninitialized_copy(std::ranges::begin(in_range),
+                                std::ranges::end(in_range),
+                                std::ranges::begin(out_range),
+                                std::ranges::end(out_range));
+  return {borrowed_iterator_t<IR>(static_cast<decltype(raw.in)&&>(raw.in)),
+          borrowed_iterator_t<OR>(static_cast<decltype(raw.out)&&>(raw.out))};
+}
+
+template <input_range IR, forward_range OR>
+  requires constructible_from<range_value_t<OR>, range_rvalue_reference_t<IR>>
+uninitialized_move_result<borrowed_iterator_t<IR>, borrowed_iterator_t<OR>>
+uninitialized_move(IR&& in_range, OR&& out_range) {
+  auto raw = uninitialized_move(std::ranges::begin(in_range),
+                                std::ranges::end(in_range),
+                                std::ranges::begin(out_range),
+                                std::ranges::end(out_range));
+  return {borrowed_iterator_t<IR>(static_cast<decltype(raw.in)&&>(raw.in)),
+          borrowed_iterator_t<OR>(static_cast<decltype(raw.out)&&>(raw.out))};
+}
+
+template <forward_range R>
+  requires default_initializable<range_value_t<R>>
+constexpr borrowed_iterator_t<R> uninitialized_value_construct(R&& range) {
+  return borrowed_iterator_t<R>(uninitialized_value_construct(
+      std::ranges::begin(range), std::ranges::end(range)));
+}
+
+template <forward_range R>
+  requires default_initializable<range_value_t<R>>
+constexpr borrowed_iterator_t<R> uninitialized_default_construct(R&& range) {
+  return borrowed_iterator_t<R>(uninitialized_default_construct(
+      std::ranges::begin(range), std::ranges::end(range)));
+}
+
+template <class T, forward_range R>
+  requires constructible_from<range_value_t<R>, const T&>
+constexpr borrowed_iterator_t<R> uninitialized_fill(R&& range, const T& value) {
+  return borrowed_iterator_t<R>(uninitialized_fill(
+      std::ranges::begin(range), std::ranges::end(range), value));
+}
+
+}  // namespace ranges
+
+template <class T>
+struct __is_std_pair : false_type {};
+
+template <class A, class B>
+struct __is_std_pair<pair<A, B>> : true_type {};
+
+template <class T, class Alloc, class... Args>
+constexpr auto uses_allocator_construction_args(const Alloc& alloc,
+                                                Args&&... args) noexcept {
+  if constexpr (__is_std_pair<T>::value) {
+    return __uses_allocator_pair_args<T>(alloc, static_cast<Args&&>(args)...);
+  } else if constexpr (!uses_allocator<T, Alloc>::value) {
+    return forward_as_tuple(static_cast<Args&&>(args)...);
+  } else if constexpr (is_constructible<T, allocator_arg_t, const Alloc&,
+                                        Args...>::value) {
+    return tuple<allocator_arg_t, const Alloc&, Args&&...>(
+        allocator_arg, alloc, static_cast<Args&&>(args)...);
+  } else {
+    static_assert(is_constructible<T, Args..., const Alloc&>::value,
+                  "no uses-allocator constructor");
+    return forward_as_tuple(static_cast<Args&&>(args)..., alloc);
+  }
+}
+
+template <class Pair, class Alloc, class Tuple1, class Tuple2>
+constexpr auto __uses_allocator_pair_args(const Alloc& alloc,
+                                          piecewise_construct_t,
+                                          Tuple1&& first, Tuple2&& second) noexcept {
+  using T1 = typename Pair::first_type;
+  using T2 = typename Pair::second_type;
+  return tuple<piecewise_construct_t,
+               decltype(apply(
+                   [&alloc](auto&&... piece) {
+                     return uses_allocator_construction_args<T1>(
+                         alloc, static_cast<decltype(piece)&&>(piece)...);
+                   },
+                   static_cast<Tuple1&&>(first))),
+               decltype(apply(
+                   [&alloc](auto&&... piece) {
+                     return uses_allocator_construction_args<T2>(
+                         alloc, static_cast<decltype(piece)&&>(piece)...);
+                   },
+                   static_cast<Tuple2&&>(second)))>(
+      piecewise_construct,
+      apply(
+          [&alloc](auto&&... piece) {
+            return uses_allocator_construction_args<T1>(
+                alloc, static_cast<decltype(piece)&&>(piece)...);
+          },
+          static_cast<Tuple1&&>(first)),
+      apply(
+          [&alloc](auto&&... piece) {
+            return uses_allocator_construction_args<T2>(
+                alloc, static_cast<decltype(piece)&&>(piece)...);
+          },
+          static_cast<Tuple2&&>(second)));
+}
+
+template <class Pair, class Alloc>
+constexpr auto __uses_allocator_pair_args(const Alloc& alloc) noexcept {
+  return __uses_allocator_pair_args<Pair>(alloc, piecewise_construct,
+                                          tuple<>(), tuple<>());
+}
+
+template <class Pair, class Alloc, class U, class V,
+          enable_if_t<!__is_std_pair<remove_cvref_t<U>>::value &&
+                          !is_same<remove_cvref_t<U>, piecewise_construct_t>::value,
+                      int> = 0>
+constexpr auto __uses_allocator_pair_args(const Alloc& alloc, U&& first,
+                                          V&& second) noexcept {
+  return __uses_allocator_pair_args<Pair>(
+      alloc, piecewise_construct, forward_as_tuple(static_cast<U&&>(first)),
+      forward_as_tuple(static_cast<V&&>(second)));
+}
+
+template <class Pair, class Alloc, class U, class V>
+constexpr auto __uses_allocator_pair_args(const Alloc& alloc,
+                                          const pair<U, V>& value) noexcept {
+  return __uses_allocator_pair_args<Pair>(alloc, piecewise_construct,
+                                          forward_as_tuple(value.first),
+                                          forward_as_tuple(value.second));
+}
+
+template <class Pair, class Alloc, class U, class V>
+constexpr auto __uses_allocator_pair_args(const Alloc& alloc,
+                                          pair<U, V>&& value) noexcept {
+  return __uses_allocator_pair_args<Pair>(
+      alloc, piecewise_construct, forward_as_tuple(static_cast<U&&>(value.first)),
+      forward_as_tuple(static_cast<V&&>(value.second)));
+}
+
+template <class T, class Alloc, class... Args>
+constexpr T make_obj_using_allocator(const Alloc& alloc, Args&&... args) {
+  return make_from_tuple<T>(uses_allocator_construction_args<T>(
+      alloc, static_cast<Args&&>(args)...));
+}
+
+template <class T, class Alloc, class... Args>
+constexpr T* uninitialized_construct_using_allocator(T* location,
+                                                     const Alloc& alloc,
+                                                     Args&&... args) {
+  return apply(
+      [location](auto&&... piece) {
+        return construct_at(location, static_cast<decltype(piece)&&>(piece)...);
+      },
+      uses_allocator_construction_args<T>(alloc, static_cast<Args&&>(args)...));
+}
+#endif
+
+#if __cplusplus >= 202302L
+template <class Smart, class = void>
+struct __has_smart_release : false_type {};
+
+template <class Smart>
+struct __has_smart_release<
+    Smart, __void_t<decltype(declval<Smart&>().release())>> : true_type {};
+
+template <class Smart, class = void>
+struct __smart_named_pointer {
+  using type = typename Smart::element_type*;
+};
+
+template <class Smart>
+struct __smart_named_pointer<Smart, __void_t<typename Smart::pointer>> {
+  using type = typename Smart::pointer;
+};
+
+template <class Smart, bool IsPointer = is_pointer<Smart>::value>
+struct __smart_default_pointer {
+  using type = typename __smart_named_pointer<Smart>::type;
+};
+
+template <class Smart>
+struct __smart_default_pointer<Smart, true> {
+  using type = Smart;
+};
+
+template <class Smart, class Pointer, bool UseDefault = is_void<Pointer>::value>
+struct __out_ptr_pointer {
+  using type = Pointer;
+};
+
+template <class Smart, class Pointer>
+struct __out_ptr_pointer<Smart, Pointer, true> {
+  using type = typename __smart_default_pointer<Smart>::type;
+};
+
+template <class P>
+bool __out_ptr_present(const P& value) {
+  if constexpr (is_pointer<P>::value) {
+    return value != nullptr;
+  } else {
+    return value != P();
+  }
+}
+
+// out_ptr releases nothing: the callee writes a new pointer and the destructor
+// reset() deletes whatever the smart pointer already owned. inout_ptr releases
+// a unique_ptr first, and its destructor always resets, including to null.
+template <class Smart, class Pointer, bool In, class... Args>
+class __out_ptr_holder {
+ public:
+  explicit __out_ptr_holder(Smart& smart, Args... args)
+      : __smart(smart), __args(static_cast<Args&&>(args)...) {
+    if constexpr (In) {
+      if constexpr (is_pointer<Smart>::value) {
+        __p = static_cast<Pointer>(smart);
+      } else if constexpr (__has_smart_release<Smart>::value) {
+        __p = static_cast<Pointer>(smart.release());
+      } else {
+        __p = static_cast<Pointer>(smart.get());
+      }
+    }
+  }
+
+  __out_ptr_holder(const __out_ptr_holder&) = delete;
+  __out_ptr_holder& operator=(const __out_ptr_holder&) = delete;
+
+  __out_ptr_holder(__out_ptr_holder&& other) noexcept
+      : __smart(other.__smart),
+        __args(static_cast<tuple<Args...>&&>(other.__args)),
+        __p(other.__p),
+        __engaged(other.__engaged) {
+    other.__engaged = false;
+  }
+
+  ~__out_ptr_holder() {
+    if (!__engaged) {
+      return;
+    }
+    if constexpr (!In) {
+      if (!__out_ptr_present(__p)) {
+        return;
+      }
+    }
+    if constexpr (is_pointer<Smart>::value) {
+      __smart = static_cast<Smart>(__p);
+    } else if constexpr (sizeof...(Args) == 0) {
+      __smart.reset(static_cast<Pointer>(__p));
+    } else {
+      apply(
+          [this](auto&&... unpacked) {
+            __smart.reset(static_cast<Pointer>(__p),
+                          static_cast<decltype(unpacked)&&>(unpacked)...);
+          },
+          __args);
+    }
+  }
+
+  operator Pointer*() const noexcept { return &__p; }
+
+  template <class P = Pointer,
+            class = typename enable_if<!is_same<P, void*>::value>::type>
+  operator void**() const noexcept {
+    return reinterpret_cast<void**>(&__p);
+  }
+
+ private:
+  Smart& __smart;
+  tuple<Args...> __args;
+  mutable Pointer __p{};
+  bool __engaged = true;
+};
+
+template <class Smart, class Pointer, class... Args>
+using out_ptr_t = __out_ptr_holder<Smart, Pointer, false, Args...>;
+
+template <class Smart, class Pointer, class... Args>
+using inout_ptr_t = __out_ptr_holder<Smart, Pointer, true, Args...>;
+
+template <class Pointer = void, class Smart, class... Args>
+auto out_ptr(Smart& smart, Args&&... args) {
+  using Stored = typename __out_ptr_pointer<Smart, Pointer>::type;
+  return out_ptr_t<Smart, Stored, remove_cvref_t<Args>...>(
+      smart, static_cast<Args&&>(args)...);
+}
+
+template <class Pointer = void, class Smart, class... Args>
+auto inout_ptr(Smart& smart, Args&&... args) {
+  using Stored = typename __out_ptr_pointer<Smart, Pointer>::type;
+  return inout_ptr_t<Smart, Stored, remove_cvref_t<Args>...>(
+      smart, static_cast<Args&&>(args)...);
+}
+#endif
 
 }  // namespace std
 

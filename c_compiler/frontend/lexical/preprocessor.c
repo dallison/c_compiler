@@ -390,6 +390,14 @@ static void PredefineMacros(Preprocessor* p) {
         break;
     }
     PreprocessorDefineMacro(p, "__cplusplus", cplusplus);
+    // Alignment guaranteed by the replaceable `operator new(size_t)`.
+    // `malloc` is 16-byte aligned except on 6502, where it is 2.
+    if (StringEqual(compiler->target_name, "6502") ||
+        StringEqual(compiler->target_name, "65c02")) {
+      PreprocessorDefineMacro(p, "__STDCPP_DEFAULT_NEW_ALIGNMENT__", "2");
+    } else {
+      PreprocessorDefineMacro(p, "__STDCPP_DEFAULT_NEW_ALIGNMENT__", "16");
+    }
 
     if (CompilerExceptionsEnabled()) {
       PreprocessorDefineMacro(p, "__cpp_exceptions", "199711L");

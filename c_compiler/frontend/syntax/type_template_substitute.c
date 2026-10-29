@@ -2256,6 +2256,18 @@ TypeRecord* SubstituteTemplateIdType(TypeParser* parser,
             grouped, (VectorElementDestructor)TemplateArgumentDelete,
             /*free_element=*/false);
       }
+      // The typedef's type is still the dependent placeholder (`using A =
+      // rebind_alloc<Block>` inside the class template).  Substituting it
+      // here does not expand that placeholder, and returning it drops the
+      // `Class<args>::member` encoding.  A later clone that only has the
+      // enclosing class arguments then materializes the injected-class-name
+      // as the primary template, so `allocator<Block<T*, D, A>>` becomes
+      // `allocator<Block>`.  Leave the member access deferred.
+      if (subst != NULL && (TypeIsUnknown(member->symbol->type) ||
+                            TypeIsUnknown(subst))) {
+        TypeRecordDelete(subst);
+        subst = NULL;
+      }
       if (subst != NULL) {
         subst = TypeRecordAddQualifiers(subst, GetQualifiers(type));
         VectorDeleteWithContents(

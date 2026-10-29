@@ -16,7 +16,7 @@
 #include <functional>
 #include <initializer_list>
 #include <iterator>
-#include <memory>
+#include <__memory_base>
 #include <new>
 #include <tuple>
 #include <type_traits>
@@ -658,8 +658,7 @@ using borrowed_iterator_t =
     conditional_t<borrowed_range<R>, iterator_t<R>, dangling>;
 
 // [specialized.destroy] -------------------------------------------------------
-// These belong to <memory>, but <memory> cannot include <ranges>, which
-// includes <memory>.
+// Range overloads of the algorithms in <memory>.
 template <destructible T>
 constexpr void destroy_at(T* location) noexcept {
   std::destroy_at(location);

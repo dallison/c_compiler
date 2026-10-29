@@ -1,0 +1,35 @@
+#ifndef __davecc_memory_base__
+#define __davecc_memory_base__
+
+#include <type_traits>
+
+namespace std {
+
+template <class T>
+constexpr T* addressof(T& value) noexcept {
+  return reinterpret_cast<T*>(
+      &const_cast<char&>(reinterpret_cast<const volatile char&>(value)));
+}
+
+#if __cplusplus >= 201703L
+template <class T>
+#if __cplusplus >= 202002L
+constexpr void destroy_at(T* location) {
+  if constexpr (is_array<T>::value) {
+    for (auto& element : *location) {
+      std::destroy_at(addressof(element));
+    }
+  } else {
+    location->~T();
+  }
+}
+#else
+void destroy_at(T* location) {
+  location->~T();
+}
+#endif
+#endif
+
+}  // namespace std
+
+#endif

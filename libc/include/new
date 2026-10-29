@@ -65,6 +65,11 @@ class bad_array_new_length : public bad_alloc {
 #endif
 
 #if __cplusplus >= 201703L
+// [support.dynamic] alignment argument of the aligned allocation functions.
+enum class align_val_t : size_t {};
+#endif
+
+#if __cplusplus >= 201703L
 #ifndef __cpp_lib_launder
 #define __cpp_lib_launder 201606L
 #endif
@@ -100,6 +105,29 @@ void operator delete(void* ptr, const std::nothrow_t&)
     __DAVECC_NEW_NOEXCEPT;
 void operator delete[](void* ptr, const std::nothrow_t&)
     __DAVECC_NEW_NOEXCEPT;
+
+#if __cplusplus >= 201703L
+void* operator new(size_t size, std::align_val_t alignment);
+void* operator new[](size_t size, std::align_val_t alignment);
+void operator delete(void* ptr, std::align_val_t alignment)
+    __DAVECC_NEW_NOEXCEPT;
+void operator delete[](void* ptr, std::align_val_t alignment)
+    __DAVECC_NEW_NOEXCEPT;
+void* operator new(size_t size, std::align_val_t alignment,
+                   const std::nothrow_t&) __DAVECC_NEW_NOEXCEPT;
+void* operator new[](size_t size, std::align_val_t alignment,
+                     const std::nothrow_t&) __DAVECC_NEW_NOEXCEPT;
+void operator delete(void* ptr, std::align_val_t alignment,
+                     const std::nothrow_t&) __DAVECC_NEW_NOEXCEPT;
+void operator delete[](void* ptr, std::align_val_t alignment,
+                       const std::nothrow_t&) __DAVECC_NEW_NOEXCEPT;
+#if __cplusplus >= 201402L
+void operator delete(void* ptr, size_t size, std::align_val_t alignment)
+    __DAVECC_NEW_NOEXCEPT;
+void operator delete[](void* ptr, size_t size, std::align_val_t alignment)
+    __DAVECC_NEW_NOEXCEPT;
+#endif
+#endif
 
 // Placement new / delete. The matching placement deletes are no-ops, invoked
 // only when a placement-new constructor throws.

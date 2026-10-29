@@ -279,6 +279,7 @@ bool binary_search(ForwardIt first, ForwardIt last, const T& value) {
 #include <optional>
 #endif
 #if __cplusplus >= 202002L
+#include <__range_results>
 #include <ranges>
 #endif
 #include <stddef.h>
@@ -2181,11 +2182,6 @@ constexpr __projected_comparator<Comp, Proj> __project_comparator(Comp comp,
   return {comp, proj};
 }
 
-template <class I, class O>
-struct in_out_result {
-  I in;
-  O out;
-};
 template <class I1, class I2>
 using in_in_result = in_out_result<I1, I2>;
 template <class I, class F>
