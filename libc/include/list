@@ -784,15 +784,19 @@ class list {
         __node_base* next2 = first2->__next;
         __list_detail::__transfer(first1, first2, next2);
         first2 = next2;
+        // Count the node as it moves.  A throw from `comp` on a later
+        // comparison must leave both lists' sizes matching their nodes.
+        ++__size_;
+        --other.__size_;
       } else {
         first1 = first1->__next;
       }
     }
     if (first2 != &other.__end_) {
       __list_detail::__transfer(&__end_, first2, &other.__end_);
+      __size_ += other.__size_;
+      other.__size_ = 0;
     }
-    __size_ += other.__size_;
-    other.__size_ = 0;
   }
 
   void merge(list& other) {
@@ -825,40 +829,55 @@ class list {
     // (the classic std::list::sort strategy).  Stable and allocation-free.
     allocator_type alloc = get_allocator();
     list carry(alloc);
-    // Counters must use this allocator: destroying one that still holds nodes
-    // (for example if the comparator throws) has to free those nodes with it.
-    // A list array would default-construct the allocator, which is not required
-    // to be possible.  The union supplies aligned storage without constructing
-    // a list.
+    // Counters must use this allocator.  A list array would default-construct
+    // the allocator, which is not required to be possible.  The union supplies
+    // aligned storage without constructing a list.  If the comparator throws,
+    // the nodes are spliced back before these lists are destroyed.
     union __slot {
       list object;
       __slot() {}
       ~__slot() {}
     };
     __slot slots[64];
-    for (int slot = 0; slot < 64; ++slot) {
-      new (&slots[slot].object) list(alloc);
-    }
-    list* counters = &slots[0].object;
-    list* fill = counters;
-    do {
-      carry.splice(carry.begin(), *this, begin());
-      list* counter = counters;
-      while (counter != fill && !counter->empty()) {
-        counter->merge(carry, comp);
+    int constructed = 0;
+    __DAVECC_TRY {
+      for (int slot = 0; slot < 64; ++slot) {
+        new (&slots[slot].object) list(alloc);
+        ++constructed;
+      }
+      list* counters = &slots[0].object;
+      list* fill = counters;
+      do {
+        carry.splice(carry.begin(), *this, begin());
+        list* counter = counters;
+        while (counter != fill && !counter->empty()) {
+          counter->merge(carry, comp);
+          carry.swap(*counter);
+          ++counter;
+        }
         carry.swap(*counter);
-        ++counter;
+        if (counter == fill) {
+          ++fill;
+        }
+      } while (!empty());
+      for (list* counter = counters + 1; counter != fill; ++counter) {
+        counter->merge(*(counter - 1), comp);
       }
-      carry.swap(*counter);
-      if (counter == fill) {
-        ++fill;
+      swap(*(fill - 1));
+    } __DAVECC_CATCH_ALL {
+      // `comp` threw with nodes parked in the carry list and the runs.
+      // Splice them back so *this still contains every element; their order
+      // is unspecified, which is what list::sort allows.
+      for (int slot = 0; slot < constructed; ++slot) {
+        splice(end(), slots[slot].object);
       }
-    } while (!empty());
-    for (list* counter = counters + 1; counter != fill; ++counter) {
-      counter->merge(*(counter - 1), comp);
+      splice(end(), carry);
+      for (int slot = 0; slot < constructed; ++slot) {
+        slots[slot].object.~list();
+      }
+      __DAVECC_RETHROW;
     }
-    swap(*(fill - 1));
-    for (int slot = 63; slot >= 0; --slot) {
+    for (int slot = 0; slot < constructed; ++slot) {
       slots[slot].object.~list();
     }
   }

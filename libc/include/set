@@ -751,17 +751,110 @@ class set {
     }
   }
 
-  void __erase_node(__node* node) {
-    if (node == nullptr) {
-      return;
+  // `node` replaced a black node and may be null.  `parent` is its parent.
+  // `is_left` is which side the hole is on when `node` is null.
+  void __fix_erase(__node* node, __node* parent, bool is_left) {
+    while (node != __root_ && __node_color(node) == __black) {
+      if (node != nullptr) {
+        parent = node->parent;
+      }
+      if (parent == nullptr) {
+        break;
+      }
+      if (node != nullptr) {
+        is_left = parent->left == node;
+      }
+      __node* sibling = is_left ? parent->right : parent->left;
+      if (sibling == nullptr) {
+        break;
+      }
+      if (is_left) {
+        if (sibling->color == __red) {
+          sibling->color = __black;
+          parent->color = __red;
+          __rotate_left(parent);
+          sibling = parent->right;
+          if (sibling == nullptr) {
+            break;
+          }
+        }
+        if (__node_color(sibling->left) == __black &&
+            __node_color(sibling->right) == __black) {
+          sibling->color = __red;
+          node = parent;
+        } else {
+          if (__node_color(sibling->right) == __black) {
+            sibling->left->color = __black;
+            sibling->color = __red;
+            __rotate_right(sibling);
+            sibling = parent->right;
+          }
+          sibling->color = parent->color;
+          parent->color = __black;
+          if (sibling->right != nullptr) {
+            sibling->right->color = __black;
+          }
+          __rotate_left(parent);
+          node = __root_;
+        }
+      } else {
+        if (sibling->color == __red) {
+          sibling->color = __black;
+          parent->color = __red;
+          __rotate_right(parent);
+          sibling = parent->left;
+          if (sibling == nullptr) {
+            break;
+          }
+        }
+        if (__node_color(sibling->left) == __black &&
+            __node_color(sibling->right) == __black) {
+          sibling->color = __red;
+          node = parent;
+        } else {
+          if (__node_color(sibling->left) == __black) {
+            sibling->right->color = __black;
+            sibling->color = __red;
+            __rotate_left(sibling);
+            sibling = parent->left;
+          }
+          sibling->color = parent->color;
+          parent->color = __black;
+          if (sibling->left != nullptr) {
+            sibling->left->color = __black;
+          }
+          __rotate_right(parent);
+          node = __root_;
+        }
+      }
     }
+    if (node != nullptr) {
+      node->color = __black;
+    }
+  }
+
+  void __unlink(__node* node) {
+    __color removed_color = node->color;
+    __node* child = nullptr;
+    __node* child_parent = node->parent;
+    bool child_is_left =
+        node->parent != nullptr && node == node->parent->left;
     if (node->left == nullptr) {
+      child = node->right;
       __transplant(node, node->right);
     } else if (node->right == nullptr) {
+      child = node->left;
       __transplant(node, node->left);
     } else {
       __node* successor = __minimum(node->right);
-      if (successor->parent != node) {
+      removed_color = successor->color;
+      child = successor->right;
+      if (successor->parent == node) {
+        child_parent = successor;
+        child_is_left = false;
+      } else {
+        child_parent = successor->parent;
+        child_is_left = true;
         __transplant(successor, successor->right);
         successor->right = node->right;
         successor->right->parent = successor;
@@ -772,36 +865,26 @@ class set {
       successor->color = node->color;
     }
     __size_--;
-    __destroy_node(node);
-    if (__root_ != nullptr) {
+    if (removed_color == __black) {
+      __fix_erase(child, child_parent, child_is_left);
+    } else if (__root_ != nullptr) {
       __root_->color = __black;
     }
+  }
+
+  void __erase_node(__node* node) {
+    if (node == nullptr) {
+      return;
+    }
+    __unlink(node);
+    __destroy_node(node);
   }
 
   __node* __detach_node(__node* node) {
     if (node == nullptr) {
       return nullptr;
     }
-    if (node->left == nullptr) {
-      __transplant(node, node->right);
-    } else if (node->right == nullptr) {
-      __transplant(node, node->left);
-    } else {
-      __node* successor = __minimum(node->right);
-      if (successor->parent != node) {
-        __transplant(successor, successor->right);
-        successor->right = node->right;
-        successor->right->parent = successor;
-      }
-      __transplant(node, successor);
-      successor->left = node->left;
-      successor->left->parent = successor;
-      successor->color = node->color;
-    }
-    __size_--;
-    if (__root_ != nullptr) {
-      __root_->color = __black;
-    }
+    __unlink(node);
     node->parent = nullptr;
     node->left = nullptr;
     node->right = nullptr;
