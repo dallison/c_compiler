@@ -9,6 +9,7 @@
 #include "semantics.h"
 #include <string.h>
 #include "compiler.h"
+#include "symbol_table.h"
 #include "contracts.h"
 #include "coro_semantics.h"
 #include "errors.h"
@@ -676,6 +677,217 @@ static void RetypeNullPointerLiteral(ASTNode* from, TypeRecord* to) {
   }
 }
 
+typedef struct {
+  TypeRecord* function;
+  Vector* locals;
+} LambdaCaptureDiag;
+
+static bool FunctionIsLambdaCallOperator(TypeRecord* func) {
+  if (func == NULL || !TypeIsFunction(func)) {
+    return false;
+  }
+  FunctionInfo* info = &func->info.function;
+  Symbol* symbol = info->symbol;
+  Struct* owner = info->cxx_member_owner;
+  return owner != NULL && owner->tag_symbol != NULL &&
+         owner->tag_symbol->flags.invented && symbol != NULL &&
+         symbol->name.value != NULL &&
+         strcmp(symbol->name.value, "operator()") == 0;
+}
+
+static bool FunctionPrototypeContainsSymbol(TypeRecord* func, Symbol* symbol) {
+  if (func == NULL || symbol == NULL || !TypeIsFunction(func)) {
+    return false;
+  }
+  Vector* prototype = &func->info.function.prototype;
+  for (size_t i = 0; i < prototype->length; i++) {
+    if (prototype->value.p[i] == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool LambdaBodyDeclaresSymbol(Vector* locals, Symbol* symbol) {
+  if (locals == NULL || symbol == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < locals->length; i++) {
+    if (locals->value.p[i] == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A local automatic of an enclosing function.  The lambda's own parameters and
+// body locals are excluded by the caller.  Constants, globals, and functions
+// are not objects that need a capture.
+static bool SymbolRequiresLambdaCapture(Symbol* symbol) {
+  if (symbol == NULL || symbol->name.value == NULL) {
+    return false;
+  }
+  if (symbol->flags.is_template_parameter || symbol->flags.is_template ||
+      symbol->flags.is_concept ||
+      (symbol->type != NULL && TypeIsFunction(symbol->type))) {
+    return false;
+  }
+  if (StorageIs(symbol->storage, STO(static) | STO(extern) | STO(typedef))) {
+    return false;
+  }
+  bool is_this = symbol->flags.is_argument &&
+                 strcmp(symbol->name.value, "this") == 0;
+  if (symbol->flags.invented && !is_this) {
+    return false;
+  }
+  if (symbol->flags.value_set && symbol->storage == STO(implicit) &&
+      !(symbol->flags.is_constexpr && symbol->type != NULL &&
+        (TypeIsArray(symbol->type) || TypeIsStructOrUnion(symbol->type)))) {
+    return false;
+  }
+  if (!symbol->flags.is_argument && !symbol->flags.is_local &&
+      !symbol->flags.is_block_scope) {
+    return false;
+  }
+  Symbol* global = FindGlobalSymbol(&symbol->name);
+  return global != symbol;
+}
+
+static void CollectLambdaBodyLocal(ASTNode* node, void* data, int child_id,
+                                   VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  Vector* locals = data;
+  if (node->op == AST_OP(vardecl)) {
+    Symbol* symbol = ((VariableDeclarationASTNode*)node)->symbol;
+    if (symbol != NULL) {
+      VectorAppend(locals, symbol);
+    }
+    return;
+  }
+  if (node->op == AST_OP(catch)) {
+    Symbol* symbol = ((CatchASTNode*)node)->symbol;
+    if (symbol != NULL) {
+      VectorAppend(locals, symbol);
+    }
+    return;
+  }
+  if (node->op == AST_OP(structured_binding)) {
+    StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
+    if (binding->symbols != NULL) {
+      for (size_t i = 0; i < binding->symbols->length; i++) {
+        Symbol* symbol = binding->symbols->value.p[i];
+        if (symbol != NULL) {
+          VectorAppend(locals, symbol);
+        }
+      }
+    }
+    if (binding->condition_symbol != NULL) {
+      VectorAppend(locals, binding->condition_symbol);
+    }
+  }
+}
+
+static bool ConstexprIfConditionIsDependent(ASTNode* cond) {
+  if (cond == NULL) {
+    return true;
+  }
+  if (ExpressionIsTemplateDependent(cond)) {
+    return true;
+  }
+  return cond->type != NULL &&
+         (TypeIsUnknown(cond->type) ||
+          TypeContainsTemplateParameter(cond->type));
+}
+
+// `selected` is set only when the condition is already a constant.  A
+// dependent condition has not chosen a branch, so neither branch is an
+// odr-use yet.
+static bool ConstexprIfSelectedBranch(IfStatementASTNode* if_node,
+                                      ASTNode** selected) {
+  *selected = NULL;
+  ASTNode* cond = if_node->cond;
+  if (cond == NULL || ConstexprIfConditionIsDependent(cond)) {
+    return false;
+  }
+  int64_t value = 0;
+  bool folded = false;
+  if (cond->op == AST_OP(number)) {
+    value = ((ConstantASTNode*)cond)->value.ivalue;
+    folded = true;
+  } else if (EvaluateIntegerExpression(cond, &value)) {
+    folded = true;
+  }
+  if (!folded) {
+    return false;
+  }
+  *selected = value != 0 ? if_node->if_part : if_node->else_part;
+  return true;
+}
+
+static ASTNode* DiagnoseUncapturedLambdaNode(ASTNode* node, void* data,
+                                            ASTNodeTransformAction* action) {
+  if (node == NULL) {
+    return node;
+  }
+  // Operands of these operators are not potentially evaluated, so naming an
+  // automatic there does not require a capture.
+  if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof) ||
+      node->op == AST_OP(noexcept_expr) || node->op == AST_OP(typeid) ||
+      node->op == AST_OP(requires_expr)) {
+    *action = kASTTransformSkipChildren;
+    return node;
+  }
+  if (node->op == AST_OP(if)) {
+    IfStatementASTNode* if_node = (IfStatementASTNode*)node;
+    if (if_node->is_constexpr) {
+      ASTNodeVisitAndTransform(if_node->cond, DiagnoseUncapturedLambdaNode,
+                              data);
+      ASTNode* selected = NULL;
+      if (ConstexprIfSelectedBranch(if_node, &selected)) {
+        ASTNodeVisitAndTransform(selected, DiagnoseUncapturedLambdaNode, data);
+      }
+      *action = kASTTransformSkipChildren;
+      return node;
+    }
+  }
+  if (node->op != AST_OP(identifier)) {
+    return node;
+  }
+  LambdaCaptureDiag* diag = data;
+  IdentifierASTNode* id = (IdentifierASTNode*)node;
+  Symbol* symbol = id->symbol;
+  if (symbol == NULL ||
+      FunctionPrototypeContainsSymbol(diag->function, symbol) ||
+      LambdaBodyDeclaresSymbol(diag->locals, symbol) ||
+      !SymbolRequiresLambdaCapture(symbol)) {
+    return node;
+  }
+  SemanticError(node, "'%s' is not captured", symbol->name.value);
+  return node;
+}
+
+// An automatic variable from an enclosing function that is odr-used in this
+// lambda and was not rewritten to a capture access.  Code generation would
+// otherwise look the enclosing parameter up in this function's prototype and
+// abort.  Uses in a discarded `if constexpr` branch, or in an unevaluated
+// operand, are not odr-uses.
+static void DiagnoseUncapturedLambdaAutomatics(TypeRecord* func) {
+  if (!CompilerIsCXX() || !FunctionIsLambdaCallOperator(func) ||
+      func->info.function.body == NULL) {
+    return;
+  }
+  Vector locals;
+  VectorInit(&locals);
+  ASTNodeVisit(func->info.function.body, CollectLambdaBodyLocal, 0, &locals);
+  LambdaCaptureDiag diag = {func, &locals};
+  ASTNodeVisitAndTransform(func->info.function.body,
+                           DiagnoseUncapturedLambdaNode, &diag);
+  VectorDestruct(&locals);
+}
+
 void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   TypeRecord* saved_current_function = compiler->current_function;
   Struct* saved_class_access_context =
@@ -742,6 +954,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
     node->type->info.function.body =
         StatementPruneConstexprIfTree(node->type->info.function.body);
   }
+  DiagnoseUncapturedLambdaAutomatics(node->type);
   AnalyzeStatement(node->type->info.function.body);
   StatementFinishAutoReturnDeduction(node->type, node);
   StatementValidateNamedReturnObjects(node->type);
