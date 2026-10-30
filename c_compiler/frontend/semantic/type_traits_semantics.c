@@ -1809,6 +1809,10 @@ bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,
       result = type_args != NULL && type_args->length == 1 &&
                TypeTraitIsStandardLayout((TypeRecord*)type_args->value.p[0]);
       break;
+    case kCXXTypeTraitIsImplicitLifetime:
+      result = type_args != NULL && type_args->length == 1 &&
+               CXXTypeIsImplicitLifetime((TypeRecord*)type_args->value.p[0]);
+      break;
   }
   SyntaxCloseScope(syntax);
   return result;

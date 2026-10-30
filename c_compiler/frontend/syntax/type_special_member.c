@@ -2790,6 +2790,44 @@ bool CXXTypeSpecialMemberIsDeleted(TypeRecord* type,
                                                   kind));
 }
 
+bool CXXTypeIsImplicitLifetime(TypeRecord* type) {
+  if (type == NULL) {
+    return false;
+  }
+  if (type->declarator == kDeclArray) {
+    return true;
+  }
+  if (TypeIsPointer(type) || TypeIsMemberPointer(type) ||
+      TypeIsNullPointer(type) || TypeIsIntegral(type) ||
+      TypeIsFloatingPoint(type) || TypeIsComplex(type)) {
+    return true;
+  }
+  if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL) {
+    return false;
+  }
+  Struct* str = type->info.struct_info;
+  CXXSpecialMemberInfo dtor =
+      CXXFindSpecialMember(str, kCXXSpecialMemberDestructor);
+  if (str->is_aggregate && (!dtor.found || !dtor.is_user_provided)) {
+    return true;
+  }
+  if (!CXXTypeSpecialMemberIsTrivial(type, kCXXSpecialMemberDestructor)) {
+    return false;
+  }
+  static const CXXSpecialMemberKind constructors[] = {
+      kCXXSpecialMemberDefaultConstructor,
+      kCXXSpecialMemberCopyConstructor,
+      kCXXSpecialMemberMoveConstructor,
+  };
+  for (size_t i = 0; i < sizeof(constructors) / sizeof(constructors[0]);
+       i++) {
+    if (CXXTypeSpecialMemberIsTrivial(type, constructors[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool CXXTypeIsImplicitLifetimeAggregate(TypeRecord* type) {
   if (type == NULL) {
     return false;

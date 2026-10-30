@@ -104,6 +104,7 @@ static const TypeTraitName kTypeTraitNames[] = {
     {"__davecc_is_empty", kCXXTypeTraitIsEmpty},
     {"__davecc_is_enum", kCXXTypeTraitIsEnum},
     {"__davecc_is_final", kCXXTypeTraitIsFinal},
+    {"__davecc_is_implicit_lifetime", kCXXTypeTraitIsImplicitLifetime},
     {"__davecc_is_invocable", kCXXTypeTraitIsInvocable},
     {"__davecc_is_invocable_r", kCXXTypeTraitIsInvocableR},
     {"__davecc_is_member_function_pointer",

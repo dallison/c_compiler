@@ -21,6 +21,12 @@ bool CXXTypeSpecialMemberIsTrivial(TypeRecord* type, CXXSpecialMemberKind kind);
 bool CXXTypeSpecialMemberIsDeleted(TypeRecord* type, CXXSpecialMemberKind kind);
 bool CXXTypeIsImplicitLifetimeAggregate(TypeRecord* type);
 
+// [basic.types.general] / [class.prop]: scalars, arrays, cv-qualified versions
+// of those, and implicit-lifetime classes (an aggregate whose destructor is
+// not user-provided, or a class with a trivial eligible constructor and a
+// trivial non-deleted destructor).
+bool CXXTypeIsImplicitLifetime(TypeRecord* type);
+
 // Declares the implicit special members of `str` that its completion
 // deferred.  Anything that looks for a constructor, destructor or assignment
 // operator in the member list or lookup tables calls this first.

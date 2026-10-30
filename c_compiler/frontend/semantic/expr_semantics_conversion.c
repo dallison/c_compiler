@@ -193,10 +193,19 @@ static int OverloadBaseConversionRank(TypeRecord* actual, TypeRecord* target) {
 // Contract: Pure standard conversion rank on materialized types; read-only.
 static int OverloadBaseConversionRankMaterialized(TypeRecord* actual,
                                                   TypeRecord* target) {
-  if (TypeIsPointer(actual) && TypeIsPointer(target) &&
-      actual->next != NULL && target->next != NULL) {
+  // Array-to-pointer decay produces a pointer to the element.  A const or
+  // volatile array cannot convert to a pointer that drops that qualifier,
+  // just as `const T*` cannot convert to `void*`.
+  if (actual != NULL && TypeIsPointer(target) && target->next != NULL &&
+      (TypeIsPointer(actual) || actual->declarator == kDeclArray) &&
+      actual->next != NULL) {
+    Qualifiers source_quals =
+        GetQualifiers(actual->next) & (kQualConst | kQualVolatile);
+    if (actual->declarator == kDeclArray) {
+      source_quals |= GetQualifiers(actual) & (kQualConst | kQualVolatile);
+    }
     Qualifiers discarded =
-        (GetQualifiers(actual->next) & (kQualConst | kQualVolatile)) &
+        source_quals &
         ~(GetQualifiers(target->next) & (kQualConst | kQualVolatile));
     if (discarded != 0) {
       return -1;
@@ -910,21 +919,36 @@ static int OverloadConversionRankStandardValue(ASTNode* actual,
   // `get_if<0>(variant<...>*)` between the `variant<Types...>*` and
   // `const variant<Types...>*` overloads).  The same tie-break applies when
   // both sequences also perform a derived-to-base or object-to-void pointer
-  // conversion.  This applies to either const or volatile qualification;
-  // otherwise the standard volatile overloads of the atomic free functions
-  // are ambiguous for non-volatile objects.  Each added qualifier contributes
-  // one sub-tier so adding const is better than adding both const and volatile,
-  // without outweighing a genuine conversion in another argument.
+  // conversion, including after an array-to-pointer conversion: `unsigned
+  // char[N]` to `void*` beats `const void*`.  This applies to either const or
+  // volatile qualification; otherwise the standard volatile overloads of the
+  // atomic free functions are ambiguous for non-volatile objects.  Each added
+  // qualifier contributes one sub-tier so adding const is better than adding
+  // both const and volatile, without outweighing a genuine conversion in
+  // another argument.
+  TypeRecord* source_pointee = NULL;
+  Qualifiers source_quals = 0;
+  if (actual->type != NULL && TypeIsPointer(target) && target->next != NULL) {
+    if (TypeIsPointer(actual->type) ||
+        actual->type->declarator == kDeclArray) {
+      source_pointee = actual->type->next;
+      if (source_pointee != NULL) {
+        source_quals =
+            GetQualifiers(source_pointee) & (kQualConst | kQualVolatile);
+      }
+      if (actual->type->declarator == kDeclArray) {
+        source_quals |=
+            GetQualifiers(actual->type) & (kQualConst | kQualVolatile);
+      }
+    }
+  }
   Qualifiers added_pointer_qualifiers =
-      (target->next != NULL && actual->type->next != NULL)
+      source_pointee != NULL
           ? ((GetQualifiers(target->next) & (kQualConst | kQualVolatile)) &
-             ~(GetQualifiers(actual->type->next) &
-               (kQualConst | kQualVolatile)))
+             ~source_quals)
           : 0;
-  bool pointer_qualification_conversion =
-      TypeIsPointer(actual->type) && TypeIsPointer(target) &&
-      actual->type->next != NULL && target->next != NULL &&
-      added_pointer_qualifiers != 0;
+  bool pointer_qualification_conversion = source_pointee != NULL &&
+                                          added_pointer_qualifiers != 0;
   int qualification_penalty =
       pointer_qualification_conversion
           ? ((added_pointer_qualifiers & kQualConst) != 0) +

@@ -538,6 +538,82 @@ constexpr auto to_address(const Ptr& p) noexcept {
 #define __cpp_lib_to_address 201711L
 #endif
 
+#if __cplusplus >= 202302L
+#ifndef __cpp_lib_start_lifetime_as
+#define __cpp_lib_start_lifetime_as 202207L
+#endif
+
+namespace __start_lifetime_detail {
+
+template <class T>
+void __require_implicit_lifetime() {
+  static_assert(sizeof(T) > 0, "start_lifetime_as requires a complete type");
+  static_assert(is_implicit_lifetime<T>::value,
+                "start_lifetime_as requires an implicit-lifetime type");
+}
+
+}  // namespace __start_lifetime_detail
+
+// The object representation is already in the storage.  These functions name
+// an object of type T there; they do not change the bytes.
+template <class T>
+T* start_lifetime_as(void* p) noexcept {
+  __start_lifetime_detail::__require_implicit_lifetime<T>();
+  return static_cast<T*>(p);
+}
+
+template <class T>
+const T* start_lifetime_as(const void* p) noexcept {
+  __start_lifetime_detail::__require_implicit_lifetime<T>();
+  return static_cast<const T*>(p);
+}
+
+template <class T>
+volatile T* start_lifetime_as(volatile void* p) noexcept {
+  __start_lifetime_detail::__require_implicit_lifetime<T>();
+  return static_cast<volatile T*>(p);
+}
+
+template <class T>
+const volatile T* start_lifetime_as(const volatile void* p) noexcept {
+  __start_lifetime_detail::__require_implicit_lifetime<T>();
+  return static_cast<const volatile T*>(p);
+}
+
+template <class T>
+T* start_lifetime_as_array(void* p, size_t n) noexcept {
+  static_assert(sizeof(T) > 0,
+                "start_lifetime_as_array requires a complete type");
+  (void)n;
+  return static_cast<T*>(p);
+}
+
+template <class T>
+const T* start_lifetime_as_array(const void* p, size_t n) noexcept {
+  static_assert(sizeof(T) > 0,
+                "start_lifetime_as_array requires a complete type");
+  (void)n;
+  return static_cast<const T*>(p);
+}
+
+template <class T>
+volatile T* start_lifetime_as_array(volatile void* p, size_t n) noexcept {
+  static_assert(sizeof(T) > 0,
+                "start_lifetime_as_array requires a complete type");
+  (void)n;
+  return static_cast<volatile T*>(p);
+}
+
+template <class T>
+const volatile T*
+start_lifetime_as_array(const volatile void* p, size_t n) noexcept {
+  static_assert(sizeof(T) > 0,
+                "start_lifetime_as_array requires a complete type");
+  (void)n;
+  return static_cast<const volatile T*>(p);
+}
+#endif
+
 #if __cplusplus >= 202600L
 template <class T>
 constexpr void start_lifetime(T& object) noexcept {

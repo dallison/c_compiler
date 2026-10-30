@@ -40,6 +40,7 @@ typedef enum {
   kCXXTypeTraitIsFinal,
   kCXXTypeTraitIsStandardLayout,
   kCXXTypeTraitIsInvocableR,
+  kCXXTypeTraitIsImplicitLifetime,
 } CXXTypeTraitKind;
 
 bool CXXTypeTraitEvaluateBool(Syntax* syntax, CXXTypeTraitKind kind,
