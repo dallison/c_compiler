@@ -19,7 +19,6 @@
 #include <memory_resource>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace std {
 
@@ -180,7 +179,12 @@ class unordered_set {
 template <class Key, class Hash = hash<Key>, class KeyEqual = equal_to<Key>,
           class Allocator = allocator<Key>>
 class unordered_multiset {
-  typedef vector<Key> storage_type;
+ private:
+  using __table =
+      __hash_detail::__hash_table<Key, Key, __hash_detail::__identity_key<Key>,
+                                  Hash, KeyEqual, Allocator>;
+
+  __table __table_;
 
  public:
   using key_type = Key;
@@ -190,29 +194,190 @@ class unordered_multiset {
   using allocator_type = Allocator;
   using size_type = size_t;
   using difference_type = ptrdiff_t;
-  using reference = const value_type&;
+  using reference = value_type&;
   using const_reference = const value_type&;
-  using const_iterator = typename storage_type::const_iterator;
+  using pointer = value_type*;
+  using const_pointer = const value_type*;
+  using const_iterator = typename __table::const_iterator;
   using iterator = const_iterator;
 
-  unordered_multiset() {}
+  unordered_multiset() : __table_() { __table_.__set_multi(true); }
 
-  iterator begin() const { return values_.begin(); }
-  iterator end() const { return values_.end(); }
-  bool empty() const { return values_.empty(); }
-  size_type size() const { return values_.size(); }
-
-  iterator insert(const value_type& value) {
-    values_.push_back(value);
-    return values_.end() - 1;
+  explicit unordered_multiset(size_type bucket_count,
+                              const hasher& hash = hasher(),
+                              const key_equal& equal = key_equal(),
+                              const allocator_type& alloc = allocator_type())
+      : __table_(hash, equal, alloc) {
+    __table_.__set_multi(true);
+    __table_.rehash(bucket_count);
   }
 
-  void clear() { values_.clear(); }
-  void swap(unordered_multiset& other) { values_.swap(other.values_); }
+  explicit unordered_multiset(const allocator_type& alloc)
+      : __table_(hasher(), key_equal(), alloc) {
+    __table_.__set_multi(true);
+  }
 
- private:
-  mutable storage_type values_;
+  template <class InputIt>
+  unordered_multiset(InputIt first, InputIt last, size_type bucket_count = 0,
+                     const hasher& hash = hasher(),
+                     const key_equal& equal = key_equal(),
+                     const allocator_type& alloc = allocator_type())
+      : __table_(hash, equal, alloc) {
+    __table_.__set_multi(true);
+    if (bucket_count != 0) {
+      __table_.rehash(bucket_count);
+    }
+    insert(first, last);
+  }
+
+  unordered_multiset(initializer_list<value_type> init,
+                     size_type bucket_count = 0, const hasher& hash = hasher(),
+                     const key_equal& equal = key_equal(),
+                     const allocator_type& alloc = allocator_type())
+      : __table_(hash, equal, alloc) {
+    __table_.__set_multi(true);
+    if (bucket_count != 0) {
+      __table_.rehash(bucket_count);
+    }
+    insert(init);
+  }
+
+  allocator_type get_allocator() const { return __table_.get_allocator(); }
+  hasher hash_function() const { return __table_.hash_function(); }
+  key_equal key_eq() const { return __table_.key_eq(); }
+
+  iterator begin() noexcept { return __table_.cbegin(); }
+  const_iterator begin() const noexcept { return __table_.begin(); }
+  const_iterator cbegin() const noexcept { return __table_.cbegin(); }
+  iterator end() noexcept { return __table_.cend(); }
+  const_iterator end() const noexcept { return __table_.end(); }
+  const_iterator cend() const noexcept { return __table_.cend(); }
+
+  bool empty() const noexcept { return __table_.empty(); }
+  size_type size() const noexcept { return __table_.size(); }
+  size_type max_size() const noexcept { return __table_.max_size(); }
+
+  void clear() noexcept { __table_.clear(); }
+
+  iterator insert(const value_type& value) {
+    return __table_.__insert_multi(value);
+  }
+
+  iterator insert(value_type&& value) {
+    return __table_.__insert_multi(std::move(value));
+  }
+
+  iterator insert(const_iterator hint, const value_type& value) {
+    static_cast<void>(hint);
+    return insert(value);
+  }
+
+  iterator insert(const_iterator hint, value_type&& value) {
+    static_cast<void>(hint);
+    return insert(std::move(value));
+  }
+
+  template <class InputIt>
+  void insert(InputIt first, InputIt last) {
+    for (; first != last; ++first) {
+      insert(*first);
+    }
+  }
+
+  void insert(initializer_list<value_type> init) {
+    insert(init.begin(), init.end());
+  }
+
+  template <class... Args>
+  iterator emplace(Args&&... args) {
+    return __table_.__emplace_multi(std::forward<Args>(args)...);
+  }
+
+  template <class... Args>
+  iterator emplace_hint(const_iterator hint, Args&&... args) {
+    static_cast<void>(hint);
+    return emplace(std::forward<Args>(args)...);
+  }
+
+  iterator find(const key_type& key) { return __table_.find(key); }
+  const_iterator find(const key_type& key) const { return __table_.find(key); }
+  size_type count(const key_type& key) const { return __table_.count(key); }
+  bool contains(const key_type& key) const { return __table_.contains(key); }
+
+  pair<iterator, iterator> equal_range(const key_type& key) {
+    return __table_.equal_range(key);
+  }
+
+  pair<const_iterator, const_iterator> equal_range(const key_type& key) const {
+    return __table_.equal_range(key);
+  }
+
+  iterator erase(const_iterator pos) { return __table_.__erase(pos); }
+
+  iterator erase(const_iterator first, const_iterator last) {
+    return __table_.__erase_range(first, last);
+  }
+
+  size_type erase(const key_type& key) { return __table_.__erase_key(key); }
+
+  void swap(unordered_multiset& other) noexcept {
+    __table_.swap(other.__table_);
+  }
+
+  size_type bucket_count() const noexcept { return __table_.bucket_count(); }
+  size_type max_bucket_count() const noexcept {
+    return __table_.max_bucket_count();
+  }
+  size_type bucket_size(size_type n) const { return __table_.bucket_size(n); }
+  size_type bucket(const key_type& key) const { return __table_.bucket(key); }
+  float load_factor() const noexcept { return __table_.load_factor(); }
+  float max_load_factor() const noexcept { return __table_.max_load_factor(); }
+  void max_load_factor(float factor) { __table_.max_load_factor(factor); }
+  void rehash(size_type count) { __table_.rehash(count); }
+  void reserve(size_type count) { __table_.reserve(count); }
 };
+
+template <class Key, class Hash, class KeyEqual, class Allocator>
+bool operator==(
+    const unordered_multiset<Key, Hash, KeyEqual, Allocator>& left,
+    const unordered_multiset<Key, Hash, KeyEqual, Allocator>& right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (typename unordered_multiset<Key, Hash, KeyEqual, Allocator>::
+           const_iterator it = left.begin();
+       it != left.end(); ++it) {
+    if (left.count(*it) != right.count(*it)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class Key, class Hash, class KeyEqual, class Allocator>
+void swap(unordered_multiset<Key, Hash, KeyEqual, Allocator>& left,
+          unordered_multiset<Key, Hash, KeyEqual, Allocator>& right) noexcept {
+  left.swap(right);
+}
+
+template <class Key, class Hash, class KeyEqual, class Allocator,
+          class Predicate>
+typename unordered_multiset<Key, Hash, KeyEqual, Allocator>::size_type
+erase_if(unordered_multiset<Key, Hash, KeyEqual, Allocator>& c,
+         Predicate pred) {
+  typename unordered_multiset<Key, Hash, KeyEqual, Allocator>::size_type
+      old_size = c.size();
+  for (typename unordered_multiset<Key, Hash, KeyEqual, Allocator>::iterator
+           it = c.begin();
+       it != c.end();) {
+    if (pred(*it)) {
+      it = c.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return old_size - c.size();
+}
 
 template <class Key, class Hash, class KeyEqual, class Allocator>
 bool operator==(const unordered_set<Key, Hash, KeyEqual, Allocator>& left,
@@ -261,6 +426,11 @@ template <class Key, class Hash = hash<Key>,
           class KeyEqual = equal_to<Key>>
 using unordered_set =
     std::unordered_set<Key, Hash, KeyEqual, polymorphic_allocator<Key>>;
+
+template <class Key, class Hash = hash<Key>,
+          class KeyEqual = equal_to<Key>>
+using unordered_multiset =
+    std::unordered_multiset<Key, Hash, KeyEqual, polymorphic_allocator<Key>>;
 
 }  // namespace pmr
 #endif

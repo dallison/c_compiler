@@ -24,7 +24,9 @@ int main() {
   std::pmr::set<int> set_values;
   std::pmr::multiset<int> multiset_values;
   std::pmr::unordered_map<int, long> unordered_map_values;
+  std::pmr::unordered_multimap<int, long> unordered_multimap_values;
   std::pmr::unordered_set<int> unordered_set_values;
+  std::pmr::unordered_multiset<int> unordered_multiset_values;
   std::pmr::string text;
   (void)values;
   (void)deque_values;
@@ -33,7 +35,9 @@ int main() {
   (void)set_values;
   (void)multiset_values;
   (void)unordered_map_values;
+  (void)unordered_multimap_values;
   (void)unordered_set_values;
+  (void)unordered_multiset_values;
   (void)text;
   return 0;
 }

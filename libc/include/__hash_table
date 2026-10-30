@@ -149,6 +149,7 @@ class __hash_table {
   size_type __bucket_count_;
   size_type __size_;
   float __max_load_factor_;
+  bool __multi_;
   hasher __hash_;
   key_equal __equal_;
   KeyOfValue __key_of_;
@@ -217,10 +218,41 @@ class __hash_table {
     }
   }
 
+  // Inserts beside an equivalent key. The comparison runs before the node is
+  // linked, so a throwing predicate leaves the table unchanged.
+  void __link_multi(__node* fresh, size_t hash, const key_type& key) {
+    size_type bucket = hash % __bucket_count_;
+    __node** link = &__buckets_[bucket];
+    while (*link != nullptr &&
+           !((*link)->__hash == hash &&
+             __equal_(__key_of_((*link)->__value), key))) {
+      link = &(*link)->__next;
+    }
+    fresh->__next = *link;
+    *link = fresh;
+  }
+
+  void __unlink_node(__node* fresh) {
+    size_type bucket = fresh->__hash % __bucket_count_;
+    __node** link = &__buckets_[bucket];
+    while (*link != nullptr) {
+      if (*link == fresh) {
+        *link = fresh->__next;
+        return;
+      }
+      link = &(*link)->__next;
+    }
+  }
+
   void __copy_from(const __hash_table& other) {
+    __multi_ = other.__multi_;
     reserve(other.__size_);
     for (const_iterator it = other.begin(); it != other.end(); ++it) {
-      __insert_unique(*it);
+      if (__multi_) {
+        __insert_multi(*it);
+      } else {
+        __insert_unique(*it);
+      }
     }
   }
 
@@ -230,6 +262,7 @@ class __hash_table {
         __bucket_count_(0),
         __size_(0),
         __max_load_factor_(1.0f),
+        __multi_(false),
         __hash_(),
         __equal_(),
         __key_of_(),
@@ -243,6 +276,7 @@ class __hash_table {
         __bucket_count_(0),
         __size_(0),
         __max_load_factor_(1.0f),
+        __multi_(false),
         __hash_(hash),
         __equal_(equal),
         __key_of_(),
@@ -255,6 +289,7 @@ class __hash_table {
         __bucket_count_(0),
         __size_(0),
         __max_load_factor_(other.__max_load_factor_),
+        __multi_(other.__multi_),
         __hash_(other.__hash_),
         __equal_(other.__equal_),
         __key_of_(other.__key_of_),
@@ -270,6 +305,7 @@ class __hash_table {
         __bucket_count_(other.__bucket_count_),
         __size_(other.__size_),
         __max_load_factor_(other.__max_load_factor_),
+        __multi_(other.__multi_),
         __hash_(other.__hash_),
         __equal_(other.__equal_),
         __key_of_(other.__key_of_),
@@ -307,6 +343,7 @@ class __hash_table {
       __bucket_count_ = other.__bucket_count_;
       __size_ = other.__size_;
       __max_load_factor_ = other.__max_load_factor_;
+      __multi_ = other.__multi_;
       __hash_ = other.__hash_;
       __equal_ = other.__equal_;
       other.__buckets_ = nullptr;
@@ -434,7 +471,22 @@ class __hash_table {
   }
 
   size_type count(const key_type& key) const {
-    return __find_node(key) != nullptr ? 1 : 0;
+    if (!__multi_) {
+      return __find_node(key) != nullptr ? 1 : 0;
+    }
+    if (__bucket_count_ == 0) {
+      return 0;
+    }
+    size_t hash = __hash_(key);
+    size_type bucket = hash % __bucket_count_;
+    size_type total = 0;
+    for (__node* node = __buckets_[bucket]; node != nullptr;
+         node = node->__next) {
+      if (node->__hash == hash && __equal_(__key_of_(node->__value), key)) {
+        ++total;
+      }
+    }
+    return total;
   }
 
   bool contains(const key_type& key) const {
@@ -447,7 +499,13 @@ class __hash_table {
       return pair<iterator, iterator>(first, first);
     }
     iterator last = first;
-    ++last;
+    if (!__multi_) {
+      ++last;
+      return pair<iterator, iterator>(first, last);
+    }
+    while (last != end() && __equal_(__key_of_(*last), key)) {
+      ++last;
+    }
     return pair<iterator, iterator>(first, last);
   }
 
@@ -457,7 +515,13 @@ class __hash_table {
       return pair<const_iterator, const_iterator>(first, first);
     }
     const_iterator last = first;
-    ++last;
+    if (!__multi_) {
+      ++last;
+      return pair<const_iterator, const_iterator>(first, last);
+    }
+    while (last != end() && __equal_(__key_of_(*last), key)) {
+      ++last;
+    }
     return pair<const_iterator, const_iterator>(first, last);
   }
 
@@ -484,6 +548,46 @@ class __hash_table {
     ++__size_;
     return pair<iterator, bool>(
         iterator(__buckets_, __bucket_count_, bucket, fresh), true);
+  }
+
+  // Equivalent keys stay contiguous in the bucket so equal_range can walk
+  // them with ordinary iterator increments.
+  template <class V>
+  iterator __insert_multi(V&& value) {
+    __node* fresh = __construct_node(static_cast<V&&>(value));
+    return __link_new_multi(fresh);
+  }
+
+  template <class... Args>
+  iterator __emplace_multi(Args&&... args) {
+    __node* fresh = __construct_node(static_cast<Args&&>(args)...);
+    return __link_new_multi(fresh);
+  }
+
+  iterator __link_new_multi(__node* fresh) {
+    bool linked = false;
+    __DAVECC_TRY {
+      const key_type& key = __key_of_(fresh->__value);
+      size_t hash = __hash_(key);
+      fresh->__hash = hash;
+      if (__bucket_count_ == 0) {
+        __rehash_for_insert(__size_ + 1);
+      }
+      __link_multi(fresh, hash, key);
+      linked = true;
+      ++__size_;
+      __rehash_for_insert(__size_);
+      size_type bucket = hash % __bucket_count_;
+      return iterator(__buckets_, __bucket_count_, bucket, fresh);
+    } __DAVECC_CATCH_ALL {
+      if (linked) {
+        __unlink_node(fresh);
+        --__size_;
+      }
+      __destroy_node(fresh);
+      __DAVECC_RETHROW;
+    }
+    return end();
   }
 
   template <class... Args>
@@ -569,24 +673,32 @@ class __hash_table {
     size_t hash = __hash_(key);
     size_type bucket = hash % __bucket_count_;
     __node** link = &__buckets_[bucket];
+    size_type removed = 0;
     while (*link != nullptr) {
       __node* node = *link;
       if (node->__hash == hash && __equal_(__key_of_(node->__value), key)) {
         *link = node->__next;
         __destroy_node(node);
         --__size_;
-        return 1;
+        ++removed;
+        if (!__multi_) {
+          return removed;
+        }
+      } else {
+        link = &node->__next;
       }
-      link = &node->__next;
     }
-    return 0;
+    return removed;
   }
+
+  void __set_multi(bool multi) { __multi_ = multi; }
 
   void swap(__hash_table& other) noexcept {
     std::swap(__buckets_, other.__buckets_);
     std::swap(__bucket_count_, other.__bucket_count_);
     std::swap(__size_, other.__size_);
     std::swap(__max_load_factor_, other.__max_load_factor_);
+    std::swap(__multi_, other.__multi_);
     std::swap(__hash_, other.__hash_);
     std::swap(__equal_, other.__equal_);
     std::swap(__alloc_, other.__alloc_);
