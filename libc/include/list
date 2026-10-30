@@ -15,76 +15,570 @@
 
 #if __cplusplus < 201103L
 
-#include <vector>
+#include <algorithm>
+#include <iterator>
+#include <memory>
+#include <utility>
 
 namespace std {
 
+namespace __list98 {
+
+struct __node_base {
+  __node_base* __prev;
+  __node_base* __next;
+};
+
+template <class T>
+struct __node : __node_base {
+  T __value;
+  explicit __node(const T& value) : __value(value) {}
+};
+
+}  // namespace __list98
+
 template <class T, class Allocator = allocator<T> >
 class list {
-  typedef vector<T, Allocator> storage_type;
+  typedef __list98::__node_base __node_base;
+  typedef __list98::__node<T> __node;
+  typedef typename Allocator::template rebind<__node>::other __node_allocator;
 
  public:
   typedef T value_type;
   typedef Allocator allocator_type;
-  typedef typename storage_type::size_type size_type;
-  typedef typename storage_type::difference_type difference_type;
-  typedef typename storage_type::reference reference;
-  typedef typename storage_type::const_reference const_reference;
-  typedef typename storage_type::iterator iterator;
-  typedef typename storage_type::const_iterator const_iterator;
+  typedef size_t size_type;
+  typedef ptrdiff_t difference_type;
+  typedef value_type& reference;
+  typedef const value_type& const_reference;
+  typedef value_type* pointer;
+  typedef const value_type* const_pointer;
 
-  explicit list(const Allocator& allocator_value = Allocator())
-      : values_(allocator_value) {}
-  explicit list(size_type count, const T& value = T(),
-                const Allocator& allocator_value = Allocator())
-      : values_(count, value, allocator_value) {}
-  template <class InputIt>
-  list(InputIt first, InputIt last,
-       const Allocator& allocator_value = Allocator())
-      : values_(first, last, allocator_value) {}
+  class iterator;
+  class const_iterator;
 
-  iterator begin() { return values_.begin(); }
-  const_iterator begin() const { return values_.begin(); }
-  iterator end() { return values_.end(); }
-  const_iterator end() const { return values_.end(); }
-  bool empty() const { return values_.empty(); }
-  size_type size() const { return values_.size(); }
-  reference front() { return values_.front(); }
-  const_reference front() const { return values_.front(); }
-  reference back() { return values_.back(); }
-  const_reference back() const { return values_.back(); }
-  void push_back(const T& value) { values_.push_back(value); }
-  void push_front(const T& value) { values_.insert(values_.begin(), value); }
-  void pop_back() { values_.pop_back(); }
-  void pop_front() { values_.erase(values_.begin()); }
-  iterator insert(iterator position, const T& value) {
-    return values_.insert(position, value);
-  }
-  iterator erase(iterator position) { return values_.erase(position); }
-  iterator erase(iterator first, iterator last) {
-    return values_.erase(first, last);
-  }
-  void clear() { values_.clear(); }
-  void resize(size_type count, T value = T()) { values_.resize(count, value); }
-  void reverse() { std::reverse(begin(), end()); }
-  void sort() { std::sort(begin(), end()); }
-  template <class Compare>
-  void sort(Compare compare) { std::sort(begin(), end(), compare); }
-  void remove(const T& value) {
-    values_.erase(std::remove(values_.begin(), values_.end(), value),
-                  values_.end());
-  }
-  template <class Predicate>
-  void remove_if(Predicate predicate) {
-    values_.erase(std::remove_if(values_.begin(), values_.end(), predicate),
-                  values_.end());
-  }
-  void swap(list& other) { values_.swap(other.values_); }
-  allocator_type get_allocator() const { return values_.get_allocator(); }
+  class iterator {
+   public:
+    typedef bidirectional_iterator_tag iterator_category;
+    typedef T value_type;
+    typedef ptrdiff_t difference_type;
+    typedef T* pointer;
+    typedef T& reference;
+
+    __node_base* __node_;
+
+    iterator() : __node_(0) {}
+    explicit iterator(__node_base* node) : __node_(node) {}
+
+    reference operator*() const {
+      return static_cast<__node*>(__node_)->__value;
+    }
+    pointer operator->() const { return &static_cast<__node*>(__node_)->__value; }
+
+    iterator& operator++() {
+      __node_ = __node_->__next;
+      return *this;
+    }
+    iterator operator++(int) {
+      iterator tmp(*this);
+      __node_ = __node_->__next;
+      return tmp;
+    }
+    iterator& operator--() {
+      __node_ = __node_->__prev;
+      return *this;
+    }
+    iterator operator--(int) {
+      iterator tmp(*this);
+      __node_ = __node_->__prev;
+      return tmp;
+    }
+
+    // map's C++98 insert returns begin() + index. The walk is linear.
+    iterator operator+(difference_type count) const {
+      iterator it(*this);
+      while (count > 0) {
+        ++it;
+        --count;
+      }
+      while (count < 0) {
+        --it;
+        ++count;
+      }
+      return it;
+    }
+
+    bool operator==(const iterator& other) const { return __node_ == other.__node_; }
+    bool operator!=(const iterator& other) const { return __node_ != other.__node_; }
+    bool operator==(const const_iterator& other) const;
+    bool operator!=(const const_iterator& other) const;
+  };
+
+  class const_iterator {
+   public:
+    typedef bidirectional_iterator_tag iterator_category;
+    typedef T value_type;
+    typedef ptrdiff_t difference_type;
+    typedef const T* pointer;
+    typedef const T& reference;
+
+    const __node_base* __node_;
+
+    const_iterator() : __node_(0) {}
+    explicit const_iterator(const __node_base* node) : __node_(node) {}
+    const_iterator(const iterator& other) : __node_(other.__node_) {}
+
+    reference operator*() const {
+      return static_cast<const __node*>(__node_)->__value;
+    }
+    pointer operator->() const {
+      return &static_cast<const __node*>(__node_)->__value;
+    }
+
+    const_iterator& operator++() {
+      __node_ = __node_->__next;
+      return *this;
+    }
+    const_iterator operator++(int) {
+      const_iterator tmp(*this);
+      __node_ = __node_->__next;
+      return tmp;
+    }
+    const_iterator& operator--() {
+      __node_ = __node_->__prev;
+      return *this;
+    }
+    const_iterator operator--(int) {
+      const_iterator tmp(*this);
+      __node_ = __node_->__prev;
+      return tmp;
+    }
+
+    const_iterator operator+(difference_type count) const {
+      const_iterator it(*this);
+      while (count > 0) {
+        ++it;
+        --count;
+      }
+      while (count < 0) {
+        --it;
+        ++count;
+      }
+      return it;
+    }
+
+    bool operator==(const const_iterator& other) const {
+      return __node_ == other.__node_;
+    }
+    bool operator!=(const const_iterator& other) const {
+      return __node_ != other.__node_;
+    }
+    bool operator==(const iterator& other) const { return __node_ == other.__node_; }
+    bool operator!=(const iterator& other) const { return __node_ != other.__node_; }
+  };
 
  private:
-  storage_type values_;
+  template <class U>
+  struct __less {
+    bool operator()(const U& left, const U& right) const { return left < right; }
+  };
+
+  struct __equal {
+    bool operator()(const T& left, const T& right) const { return left == right; }
+  };
+
+  struct __equal_to {
+    T __value;
+    explicit __equal_to(const T& value) : __value(value) {}
+    bool operator()(const T& other) const { return other == __value; }
+  };
+
+  __node_base __end_;
+  size_type __size_;
+  allocator_type __alloc_;
+
+  void __init_empty() {
+    __end_.__next = &__end_;
+    __end_.__prev = &__end_;
+    __size_ = 0;
+  }
+
+  void __fix_sentinel() {
+    __end_.__next->__prev = &__end_;
+    __end_.__prev->__next = &__end_;
+  }
+
+  __node* __create(const T& value) {
+    __node_allocator node_alloc(__alloc_);
+    __node* node = node_alloc.allocate(1);
+    try {
+      ::new (static_cast<void*>(node)) __node(value);
+    } catch (...) {
+      node_alloc.deallocate(node, 1);
+      throw;
+    }
+    return node;
+  }
+
+  void __destroy(__node* node) {
+    __node_allocator node_alloc(__alloc_);
+    node->~__node();
+    node_alloc.deallocate(node, 1);
+  }
+
+  iterator __link_before(__node_base* pos, __node* node) {
+    node->__prev = pos->__prev;
+    node->__next = pos;
+    pos->__prev->__next = node;
+    pos->__prev = node;
+    ++__size_;
+    return iterator(node);
+  }
+
+  void __unlink(__node_base* node) {
+    node->__prev->__next = node->__next;
+    node->__next->__prev = node->__prev;
+    --__size_;
+  }
+
+  // Splice the half-open link range [first, last) in front of pos.
+  static void __transfer(__node_base* pos, __node_base* first, __node_base* last) {
+    if (pos == first || first == last) {
+      return;
+    }
+    __node_base* last_prev = last->__prev;
+    first->__prev->__next = last;
+    last->__prev = first->__prev;
+    __node_base* pos_prev = pos->__prev;
+    pos_prev->__next = first;
+    first->__prev = pos_prev;
+    last_prev->__next = pos;
+    pos->__prev = last_prev;
+  }
+
+ public:
+  explicit list(const allocator_type& allocator_value = allocator_type())
+      : __size_(0), __alloc_(allocator_value) {
+    __init_empty();
+  }
+
+  explicit list(size_type count, const value_type& value = value_type(),
+                const allocator_type& allocator_value = allocator_type())
+      : __size_(0), __alloc_(allocator_value) {
+    __init_empty();
+    try {
+      for (size_type i = 0; i < count; ++i) {
+        push_back(value);
+      }
+    } catch (...) {
+      clear();
+      throw;
+    }
+  }
+
+  template <class InputIt>
+  list(InputIt first, InputIt last,
+       const allocator_type& allocator_value = allocator_type())
+      : __size_(0), __alloc_(allocator_value) {
+    __init_empty();
+    try {
+      while (first != last) {
+        push_back(*first++);
+      }
+    } catch (...) {
+      clear();
+      throw;
+    }
+  }
+
+  list(const list& other) : __size_(0), __alloc_(other.__alloc_) {
+    __init_empty();
+    try {
+      for (const_iterator it = other.begin(); it != other.end(); ++it) {
+        push_back(*it);
+      }
+    } catch (...) {
+      clear();
+      throw;
+    }
+  }
+
+  ~list() { clear(); }
+
+  list& operator=(const list& other) {
+    if (this != &other) {
+      list copy(other);
+      swap(copy);
+    }
+    return *this;
+  }
+
+  allocator_type get_allocator() const { return __alloc_; }
+
+  iterator begin() { return iterator(__end_.__next); }
+  const_iterator begin() const { return const_iterator(__end_.__next); }
+  iterator end() { return iterator(&__end_); }
+  const_iterator end() const { return const_iterator(&__end_); }
+
+  bool empty() const { return __size_ == 0; }
+  size_type size() const { return __size_; }
+  size_type max_size() const { return size_type(-1) / sizeof(__node); }
+
+  reference front() { return *begin(); }
+  const_reference front() const { return *begin(); }
+  reference back() { return static_cast<__node*>(__end_.__prev)->__value; }
+  const_reference back() const {
+    return static_cast<const __node*>(__end_.__prev)->__value;
+  }
+
+  void push_front(const value_type& value) { insert(begin(), value); }
+  void push_back(const value_type& value) { insert(end(), value); }
+  void pop_front() { erase(begin()); }
+  void pop_back() { erase(iterator(__end_.__prev)); }
+
+  iterator insert(iterator position, const value_type& value) {
+    return __link_before(position.__node_, __create(value));
+  }
+
+  void insert(iterator position, size_type count, const value_type& value) {
+    for (; count > 0; --count) {
+      position = insert(position, value);
+      ++position;
+    }
+  }
+
+  template <class InputIt>
+  void insert(iterator position, InputIt first, InputIt last) {
+    for (; first != last; ++first) {
+      position = insert(position, *first);
+      ++position;
+    }
+  }
+
+  iterator erase(iterator position) {
+    __node_base* next = position.__node_->__next;
+    __unlink(position.__node_);
+    __destroy(static_cast<__node*>(position.__node_));
+    return iterator(next);
+  }
+
+  iterator erase(iterator first, iterator last) {
+    while (first != last) {
+      first = erase(first);
+    }
+    return last;
+  }
+
+  void clear() {
+    __node_base* node = __end_.__next;
+    while (node != &__end_) {
+      __node_base* next = node->__next;
+      __destroy(static_cast<__node*>(node));
+      node = next;
+    }
+    __init_empty();
+  }
+
+  void resize(size_type count, value_type value = value_type()) {
+    while (__size_ > count) {
+      pop_back();
+    }
+    while (__size_ < count) {
+      push_back(value);
+    }
+  }
+
+  // Move the chain only. sort parks nodes in temporary lists that must not
+  // take this list's allocator.
+  void __swap_nodes(list& other) {
+    if (this == &other) {
+      return;
+    }
+    if (empty() && other.empty()) {
+      return;
+    }
+    if (empty()) {
+      __end_.__next = other.__end_.__next;
+      __end_.__prev = other.__end_.__prev;
+      __size_ = other.__size_;
+      __fix_sentinel();
+      other.__init_empty();
+      return;
+    }
+    if (other.empty()) {
+      other.__swap_nodes(*this);
+      return;
+    }
+    std::swap(__size_, other.__size_);
+    std::swap(__end_.__next, other.__end_.__next);
+    std::swap(__end_.__prev, other.__end_.__prev);
+    __fix_sentinel();
+    other.__fix_sentinel();
+  }
+
+  void swap(list& other) {
+    __swap_nodes(other);
+    std::swap(__alloc_, other.__alloc_);
+  }
+
+  void splice(iterator position, list& other) {
+    if (other.empty() || this == &other) {
+      return;
+    }
+    __transfer(position.__node_, other.__end_.__next, &other.__end_);
+    __size_ += other.__size_;
+    other.__size_ = 0;
+  }
+
+  void splice(iterator position, list& other, iterator element) {
+    __node_base* node = element.__node_;
+    if (position.__node_ == node || position.__node_ == node->__next) {
+      return;
+    }
+    __transfer(position.__node_, node, node->__next);
+    if (this != &other) {
+      ++__size_;
+      --other.__size_;
+    }
+  }
+
+  void splice(iterator position, list& other, iterator first, iterator last) {
+    if (first == last) {
+      return;
+    }
+    size_type moved = 0;
+    for (iterator it = first; it != last; ++it) {
+      ++moved;
+    }
+    __transfer(position.__node_, first.__node_, last.__node_);
+    if (this != &other) {
+      __size_ += moved;
+      other.__size_ -= moved;
+    }
+  }
+
+  void remove(const value_type& value) { remove_if(__equal_to(value)); }
+
+  template <class Predicate>
+  void remove_if(Predicate predicate) {
+    __node_base* node = __end_.__next;
+    while (node != &__end_) {
+      __node_base* next = node->__next;
+      if (predicate(static_cast<__node*>(node)->__value)) {
+        __unlink(node);
+        __destroy(static_cast<__node*>(node));
+      }
+      node = next;
+    }
+  }
+
+  void unique() { unique(__equal()); }
+
+  template <class BinaryPredicate>
+  void unique(BinaryPredicate predicate) {
+    if (__size_ < 2) {
+      return;
+    }
+    __node_base* node = __end_.__next;
+    __node_base* next = node->__next;
+    while (next != &__end_) {
+      if (predicate(static_cast<__node*>(node)->__value,
+                    static_cast<__node*>(next)->__value)) {
+        __node_base* dead = next;
+        next = next->__next;
+        __unlink(dead);
+        __destroy(static_cast<__node*>(dead));
+      } else {
+        node = next;
+        next = next->__next;
+      }
+    }
+  }
+
+  void merge(list& other) { merge(other, __less<T>()); }
+
+  template <class Compare>
+  void merge(list& other, Compare compare) {
+    if (this == &other || other.empty()) {
+      return;
+    }
+    __node_base* first = __end_.__next;
+    __node_base* second = other.__end_.__next;
+    while (first != &__end_ && second != &other.__end_) {
+      if (compare(static_cast<__node*>(second)->__value,
+                  static_cast<__node*>(first)->__value)) {
+        __node_base* next = second->__next;
+        __transfer(first, second, next);
+        second = next;
+        ++__size_;
+        --other.__size_;
+      } else {
+        first = first->__next;
+      }
+    }
+    if (second != &other.__end_) {
+      __transfer(&__end_, second, &other.__end_);
+      __size_ += other.__size_;
+      other.__size_ = 0;
+    }
+  }
+
+  void reverse() {
+    __node_base* node = &__end_;
+    do {
+      __node_base* next = node->__next;
+      node->__next = node->__prev;
+      node->__prev = next;
+      node = next;
+    } while (node != &__end_);
+  }
+
+  void sort() { sort(__less<T>()); }
+
+  template <class Compare>
+  void sort(Compare compare) {
+    if (__size_ < 2) {
+      return;
+    }
+    list carry;
+    list counters[64];
+    int fill = 0;
+    try {
+      do {
+        carry.splice(carry.begin(), *this, begin());
+        int counter = 0;
+        while (counter != fill && !counters[counter].empty()) {
+          counters[counter].merge(carry, compare);
+          carry.__swap_nodes(counters[counter]);
+          ++counter;
+        }
+        carry.__swap_nodes(counters[counter]);
+        if (counter == fill) {
+          ++fill;
+        }
+      } while (!empty());
+      for (int counter = 1; counter < fill; ++counter) {
+        counters[counter].merge(counters[counter - 1], compare);
+      }
+      __swap_nodes(counters[fill - 1]);
+    } catch (...) {
+      for (int slot = 0; slot < 64; ++slot) {
+        splice(end(), counters[slot]);
+      }
+      splice(end(), carry);
+      throw;
+    }
+  }
 };
+
+template <class T, class Allocator>
+bool list<T, Allocator>::iterator::operator==(const const_iterator& other) const {
+  return __node_ == other.__node_;
+}
+
+template <class T, class Allocator>
+bool list<T, Allocator>::iterator::operator!=(const const_iterator& other) const {
+  return __node_ != other.__node_;
+}
 
 template <class T, class Allocator>
 bool operator==(const list<T, Allocator>& left,

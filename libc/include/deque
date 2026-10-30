@@ -18,66 +18,459 @@
 
 #if __cplusplus < 201103L
 
-#include <vector>
+#include <algorithm>
+#include <iterator>
+#include <memory>
+#include <stdexcept>
+#include <utility>
 
 namespace std {
 
+// Elements live in their own allocations. The slot array only stores pointers,
+// so growing it or inserting at either end does not move an existing element.
 template <class T, class Allocator = allocator<T> >
 class deque {
-  typedef vector<T, Allocator> storage_type;
+  typedef typename Allocator::template rebind<T*>::other __pointer_allocator;
 
  public:
   typedef T value_type;
   typedef Allocator allocator_type;
-  typedef typename storage_type::size_type size_type;
-  typedef typename storage_type::difference_type difference_type;
-  typedef typename storage_type::reference reference;
-  typedef typename storage_type::const_reference const_reference;
-  typedef typename storage_type::iterator iterator;
-  typedef typename storage_type::const_iterator const_iterator;
+  typedef size_t size_type;
+  typedef ptrdiff_t difference_type;
+  typedef value_type& reference;
+  typedef const value_type& const_reference;
+  typedef value_type* pointer;
+  typedef const value_type* const_pointer;
 
-  explicit deque(const Allocator& allocator_value = Allocator())
-      : values_(allocator_value) {}
-  explicit deque(size_type count, const T& value = T(),
-                 const Allocator& allocator_value = Allocator())
-      : values_(count, value, allocator_value) {}
-  template <class InputIt>
-  deque(InputIt first, InputIt last,
-        const Allocator& allocator_value = Allocator())
-      : values_(first, last, allocator_value) {}
+  class iterator {
+   public:
+    typedef random_access_iterator_tag iterator_category;
+    typedef T value_type;
+    typedef ptrdiff_t difference_type;
+    typedef T* pointer;
+    typedef T& reference;
 
-  iterator begin() { return values_.begin(); }
-  const_iterator begin() const { return values_.begin(); }
-  iterator end() { return values_.end(); }
-  const_iterator end() const { return values_.end(); }
-  bool empty() const { return values_.empty(); }
-  size_type size() const { return values_.size(); }
-  reference operator[](size_type index) { return values_[index]; }
-  const_reference operator[](size_type index) const { return values_[index]; }
-  reference at(size_type index) { return values_.at(index); }
-  const_reference at(size_type index) const { return values_.at(index); }
-  reference front() { return values_.front(); }
-  const_reference front() const { return values_.front(); }
-  reference back() { return values_.back(); }
-  const_reference back() const { return values_.back(); }
-  void push_back(const T& value) { values_.push_back(value); }
-  void push_front(const T& value) { values_.insert(values_.begin(), value); }
-  void pop_back() { values_.pop_back(); }
-  void pop_front() { values_.erase(values_.begin()); }
-  iterator insert(iterator position, const T& value) {
-    return values_.insert(position, value);
-  }
-  iterator erase(iterator position) { return values_.erase(position); }
-  iterator erase(iterator first, iterator last) {
-    return values_.erase(first, last);
-  }
-  void clear() { values_.clear(); }
-  void resize(size_type count, T value = T()) { values_.resize(count, value); }
-  void swap(deque& other) { values_.swap(other.values_); }
-  allocator_type get_allocator() const { return values_.get_allocator(); }
+    T** __slot_;
+
+    iterator() : __slot_(0) {}
+    explicit iterator(T** slot) : __slot_(slot) {}
+
+    reference operator*() const { return **__slot_; }
+    pointer operator->() const { return *__slot_; }
+
+    iterator& operator++() {
+      ++__slot_;
+      return *this;
+    }
+    iterator operator++(int) {
+      iterator tmp(*this);
+      ++__slot_;
+      return tmp;
+    }
+    iterator& operator--() {
+      --__slot_;
+      return *this;
+    }
+    iterator operator--(int) {
+      iterator tmp(*this);
+      --__slot_;
+      return tmp;
+    }
+
+    iterator& operator+=(difference_type count) {
+      __slot_ += count;
+      return *this;
+    }
+    iterator& operator-=(difference_type count) {
+      __slot_ -= count;
+      return *this;
+    }
+    iterator operator+(difference_type count) const {
+      iterator it(*this);
+      it += count;
+      return it;
+    }
+    iterator operator-(difference_type count) const {
+      iterator it(*this);
+      it -= count;
+      return it;
+    }
+    difference_type operator-(const iterator& other) const {
+      return __slot_ - other.__slot_;
+    }
+    reference operator[](difference_type count) const { return *(*this + count); }
+
+    bool operator==(const iterator& other) const { return __slot_ == other.__slot_; }
+    bool operator!=(const iterator& other) const { return __slot_ != other.__slot_; }
+    bool operator<(const iterator& other) const { return __slot_ < other.__slot_; }
+    bool operator>(const iterator& other) const { return other < *this; }
+    bool operator<=(const iterator& other) const { return !(other < *this); }
+    bool operator>=(const iterator& other) const { return !(*this < other); }
+  };
+
+  class const_iterator {
+   public:
+    typedef random_access_iterator_tag iterator_category;
+    typedef T value_type;
+    typedef ptrdiff_t difference_type;
+    typedef const T* pointer;
+    typedef const T& reference;
+
+    T** __slot_;
+
+    const_iterator() : __slot_(0) {}
+    explicit const_iterator(T** slot) : __slot_(slot) {}
+    const_iterator(const iterator& other) : __slot_(other.__slot_) {}
+
+    reference operator*() const { return **__slot_; }
+    pointer operator->() const { return *__slot_; }
+
+    const_iterator& operator++() {
+      ++__slot_;
+      return *this;
+    }
+    const_iterator operator++(int) {
+      const_iterator tmp(*this);
+      ++__slot_;
+      return tmp;
+    }
+    const_iterator& operator--() {
+      --__slot_;
+      return *this;
+    }
+    const_iterator operator--(int) {
+      const_iterator tmp(*this);
+      --__slot_;
+      return tmp;
+    }
+
+    const_iterator& operator+=(difference_type count) {
+      __slot_ += count;
+      return *this;
+    }
+    const_iterator& operator-=(difference_type count) {
+      __slot_ -= count;
+      return *this;
+    }
+    const_iterator operator+(difference_type count) const {
+      const_iterator it(*this);
+      it += count;
+      return it;
+    }
+    const_iterator operator-(difference_type count) const {
+      const_iterator it(*this);
+      it -= count;
+      return it;
+    }
+    difference_type operator-(const const_iterator& other) const {
+      return __slot_ - other.__slot_;
+    }
+    reference operator[](difference_type count) const { return *(*this + count); }
+
+    bool operator==(const const_iterator& other) const {
+      return __slot_ == other.__slot_;
+    }
+    bool operator!=(const const_iterator& other) const {
+      return __slot_ != other.__slot_;
+    }
+    bool operator<(const const_iterator& other) const {
+      return __slot_ < other.__slot_;
+    }
+    bool operator>(const const_iterator& other) const { return other < *this; }
+    bool operator<=(const const_iterator& other) const { return !(other < *this); }
+    bool operator>=(const const_iterator& other) const { return !(*this < other); }
+  };
 
  private:
-  storage_type values_;
+  T** __slots_;
+  size_type __cap_;
+  size_type __start_;
+  size_type __size_;
+  allocator_type __alloc_;
+
+  T** __slot_at(size_type index) const {
+    return __slots_ == 0 ? 0 : __slots_ + index;
+  }
+
+  T* __create(const value_type& value) {
+    T* element = __alloc_.allocate(1);
+    try {
+      __alloc_.construct(element, value);
+    } catch (...) {
+      __alloc_.deallocate(element, 1);
+      throw;
+    }
+    return element;
+  }
+
+  void __destroy(T* element) {
+    __alloc_.destroy(element);
+    __alloc_.deallocate(element, 1);
+  }
+
+  void __grow() {
+    size_type new_cap = __cap_ == 0 ? 8 : __cap_ * 2;
+    size_type new_start = (new_cap - __size_) / 2;
+    __pointer_allocator pointer_alloc(__alloc_);
+    T** fresh = pointer_alloc.allocate(new_cap);
+    for (size_type i = 0; i < new_cap; ++i) {
+      fresh[i] = 0;
+    }
+    for (size_type i = 0; i < __size_; ++i) {
+      fresh[new_start + i] = __slots_[__start_ + i];
+    }
+    if (__slots_ != 0) {
+      pointer_alloc.deallocate(__slots_, __cap_);
+    }
+    __slots_ = fresh;
+    __cap_ = new_cap;
+    __start_ = new_start;
+  }
+
+  void __free_all() {
+    clear();
+    if (__slots_ != 0) {
+      __pointer_allocator pointer_alloc(__alloc_);
+      pointer_alloc.deallocate(__slots_, __cap_);
+      __slots_ = 0;
+      __cap_ = 0;
+    }
+  }
+
+  size_type __index_of(T** slot) const {
+    if (__size_ == 0) {
+      return 0;
+    }
+    return static_cast<size_type>(slot - (__slots_ + __start_));
+  }
+
+ public:
+  explicit deque(const allocator_type& allocator_value = allocator_type())
+      : __slots_(0),
+        __cap_(0),
+        __start_(0),
+        __size_(0),
+        __alloc_(allocator_value) {}
+
+  explicit deque(size_type count, const value_type& value = value_type(),
+                 const allocator_type& allocator_value = allocator_type())
+      : __slots_(0),
+        __cap_(0),
+        __start_(0),
+        __size_(0),
+        __alloc_(allocator_value) {
+    try {
+      for (size_type i = 0; i < count; ++i) {
+        push_back(value);
+      }
+    } catch (...) {
+      __free_all();
+      throw;
+    }
+  }
+
+  template <class InputIt>
+  deque(InputIt first, InputIt last,
+        const allocator_type& allocator_value = allocator_type())
+      : __slots_(0),
+        __cap_(0),
+        __start_(0),
+        __size_(0),
+        __alloc_(allocator_value) {
+    try {
+      while (first != last) {
+        push_back(*first++);
+      }
+    } catch (...) {
+      __free_all();
+      throw;
+    }
+  }
+
+  deque(const deque& other)
+      : __slots_(0),
+        __cap_(0),
+        __start_(0),
+        __size_(0),
+        __alloc_(other.__alloc_) {
+    try {
+      for (size_type i = 0; i < other.size(); ++i) {
+        push_back(other[i]);
+      }
+    } catch (...) {
+      __free_all();
+      throw;
+    }
+  }
+
+  ~deque() { __free_all(); }
+
+  deque& operator=(const deque& other) {
+    if (this != &other) {
+      deque copy(other);
+      swap(copy);
+    }
+    return *this;
+  }
+
+  allocator_type get_allocator() const { return __alloc_; }
+
+  iterator begin() { return iterator(__slot_at(__start_)); }
+  const_iterator begin() const { return const_iterator(__slot_at(__start_)); }
+  iterator end() { return iterator(__slot_at(__start_ + __size_)); }
+  const_iterator end() const {
+    return const_iterator(__slot_at(__start_ + __size_));
+  }
+
+  bool empty() const { return __size_ == 0; }
+  size_type size() const { return __size_; }
+  size_type max_size() const { return __alloc_.max_size(); }
+
+  reference operator[](size_type index) { return *__slots_[__start_ + index]; }
+  const_reference operator[](size_type index) const {
+    return *__slots_[__start_ + index];
+  }
+
+  reference at(size_type index) {
+    if (index >= __size_) {
+      throw out_of_range("deque::at");
+    }
+    return (*this)[index];
+  }
+  const_reference at(size_type index) const {
+    if (index >= __size_) {
+      throw out_of_range("deque::at");
+    }
+    return (*this)[index];
+  }
+
+  reference front() { return (*this)[0]; }
+  const_reference front() const { return (*this)[0]; }
+  reference back() { return (*this)[__size_ - 1]; }
+  const_reference back() const { return (*this)[__size_ - 1]; }
+
+  void push_back(const value_type& value) {
+    T* element = __create(value);
+    try {
+      if (__cap_ == 0 || __start_ + __size_ == __cap_) {
+        __grow();
+      }
+    } catch (...) {
+      __destroy(element);
+      throw;
+    }
+    __slots_[__start_ + __size_] = element;
+    ++__size_;
+  }
+
+  void push_front(const value_type& value) {
+    T* element = __create(value);
+    try {
+      if (__cap_ == 0 || __start_ == 0) {
+        __grow();
+      }
+    } catch (...) {
+      __destroy(element);
+      throw;
+    }
+    --__start_;
+    __slots_[__start_] = element;
+    ++__size_;
+  }
+
+  void pop_back() {
+    --__size_;
+    __destroy(__slots_[__start_ + __size_]);
+    __slots_[__start_ + __size_] = 0;
+  }
+
+  void pop_front() {
+    __destroy(__slots_[__start_]);
+    __slots_[__start_] = 0;
+    ++__start_;
+    --__size_;
+  }
+
+  iterator insert(iterator position, const value_type& value) {
+    size_type index = __index_of(position.__slot_);
+    if (index == 0) {
+      push_front(value);
+      return begin();
+    }
+    if (index == __size_) {
+      push_back(value);
+      return iterator(__slot_at(__start_ + __size_ - 1));
+    }
+    T* element = __create(value);
+    try {
+      if (__start_ + __size_ == __cap_) {
+        __grow();
+      }
+    } catch (...) {
+      __destroy(element);
+      throw;
+    }
+    for (size_type i = __size_; i > index; --i) {
+      __slots_[__start_ + i] = __slots_[__start_ + i - 1];
+    }
+    __slots_[__start_ + index] = element;
+    ++__size_;
+    return iterator(__slot_at(__start_ + index));
+  }
+
+  iterator erase(iterator position) {
+    size_type index = __index_of(position.__slot_);
+    __destroy(__slots_[__start_ + index]);
+    for (size_type i = index; i + 1 < __size_; ++i) {
+      __slots_[__start_ + i] = __slots_[__start_ + i + 1];
+    }
+    --__size_;
+    __slots_[__start_ + __size_] = 0;
+    return iterator(__slot_at(__start_ + index));
+  }
+
+  iterator erase(iterator first, iterator last) {
+    size_type begin_index = __index_of(first.__slot_);
+    size_type end_index = __index_of(last.__slot_);
+    size_type count = end_index - begin_index;
+    for (size_type i = 0; i < count; ++i) {
+      __destroy(__slots_[__start_ + begin_index + i]);
+    }
+    for (size_type i = end_index; i < __size_; ++i) {
+      __slots_[__start_ + i - count] = __slots_[__start_ + i];
+    }
+    __size_ -= count;
+    for (size_type i = 0; i < count; ++i) {
+      __slots_[__start_ + __size_ + i] = 0;
+    }
+    return iterator(__slot_at(__start_ + begin_index));
+  }
+
+  void clear() {
+    for (size_type i = 0; i < __size_; ++i) {
+      __destroy(__slots_[__start_ + i]);
+      __slots_[__start_ + i] = 0;
+    }
+    __size_ = 0;
+    __start_ = __cap_ / 2;
+  }
+
+  void resize(size_type count, value_type value = value_type()) {
+    while (__size_ > count) {
+      pop_back();
+    }
+    while (__size_ < count) {
+      push_back(value);
+    }
+  }
+
+  void swap(deque& other) {
+    std::swap(__slots_, other.__slots_);
+    std::swap(__cap_, other.__cap_);
+    std::swap(__start_, other.__start_);
+    std::swap(__size_, other.__size_);
+    std::swap(__alloc_, other.__alloc_);
+  }
 };
 
 template <class T, class Allocator>
