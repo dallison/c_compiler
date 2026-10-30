@@ -73,25 +73,11 @@ class map {
   size_type count(const key_type& key) const { return find(key) == end() ? 0 : 1; }
 
   pair<iterator, bool> insert(const value_type& value) {
-    iterator existing = find(value.first);
-    if (existing != end()) return pair<iterator, bool>(existing, false);
-    storage_type replacement(get_allocator());
-    size_type index = 0;
-    bool added = false;
-    for (const_iterator current = begin(); current != end(); ++current) {
-      if (!added && compare_(value.first, current->first)) {
-        replacement.push_back(value);
-        added = true;
-      }
-      if (!added) ++index;
-      replacement.push_back(*current);
+    iterator position = lower_bound(value.first);
+    if (position != end() && !compare_(value.first, position->first)) {
+      return pair<iterator, bool>(position, false);
     }
-    if (!added) {
-      index = replacement.size();
-      replacement.push_back(value);
-    }
-    values_.swap(replacement);
-    return pair<iterator, bool>(begin() + index, true);
+    return pair<iterator, bool>(values_.insert(position, value), true);
   }
 
   mapped_type& operator[](const key_type& key) {
@@ -125,13 +111,7 @@ class map {
   size_type erase(const key_type& key) {
     iterator target = find(key);
     if (target == end()) return 0;
-    storage_type replacement(get_allocator());
-    for (const_iterator current = begin(); current != end(); ++current) {
-      if (compare_(current->first, key) || compare_(key, current->first)) {
-        replacement.push_back(*current);
-      }
-    }
-    values_.swap(replacement);
+    values_.erase(target);
     return 1;
   }
   void clear() { values_.clear(); }
