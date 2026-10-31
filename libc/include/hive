@@ -700,8 +700,13 @@ class hive {
   }
 
   void assign(size_type count, const T& value) {
+    if (count == 0) {
+      clear();
+      return;
+    }
+    T copied(value);
     clear();
-    insert(count, value);
+    insert(count, copied);
   }
 
   void assign(initializer_list<T> values) {
@@ -1132,8 +1137,9 @@ void swap(hive<T, Allocator>& left,
 template <class T, class Allocator, class U>
 typename hive<T, Allocator>::size_type erase(hive<T, Allocator>& container,
                                               const U& value) {
+  U copied(value);
   return erase_if(container,
-                  [&](const auto& element) { return element == value; });
+                  [&](const auto& element) { return element == copied; });
 }
 
 template <class T, class Allocator, class Predicate>

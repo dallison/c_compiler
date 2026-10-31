@@ -88,14 +88,16 @@ class path {
       __value = other.__value;
       return *this;
     }
+    // `other` may be *this. Copy before the separator is inserted.
+    string_type appended(other.__value);
     if (__value.empty()) {
-      __value = other.__value;
+      __value = appended;
       return *this;
     }
     if (__value.back() != preferred_separator) {
       __value.push_back(preferred_separator);
     }
-    __value.append(other.__value);
+    __value.append(appended);
     return *this;
   }
 
@@ -137,19 +139,21 @@ class path {
     return *this;
   }
   path& replace_filename(const path& replacement) {
+    path copied(replacement);
     remove_filename();
-    return *this /= replacement;
+    return *this /= copied;
   }
   path& replace_extension(const path& replacement = path()) {
+    path copied(replacement);
     path extension_value = extension();
     if (!extension_value.empty()) {
       __value.resize(__value.size() - extension_value.__value.size());
     }
-    if (!replacement.empty()) {
-      if (replacement.__value[0] != '.') {
+    if (!copied.empty()) {
+      if (copied.__value[0] != '.') {
         __value.push_back('.');
       }
-      __value.append(replacement.__value);
+      __value.append(copied.__value);
     }
     return *this;
   }

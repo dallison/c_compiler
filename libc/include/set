@@ -1918,10 +1918,11 @@ class multiset {
   }
 
   size_type erase(const key_type& key) {
+    key_type copied(key);
     size_type removed = 0;
     while (true) {
-      __node* node = __lower_node(key);
-      if (node == nullptr || !__equivalent(node->value, key)) {
+      __node* node = __lower_node(copied);
+      if (node == nullptr || !__equivalent(node->value, copied)) {
         break;
       }
       __erase_node(node);

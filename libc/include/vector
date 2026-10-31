@@ -469,6 +469,62 @@ class vector {
     }
   }
 
+  // Construct the new element before relocating [__data_, __data_ + __size_).
+  // The arguments may refer to an element of this vector.
+  template <class... Args>
+  __DAVECC_VECTOR_CONSTEXPR void __emplace_back_realloc(Args&&... args) {
+    size_type new_cap = __recommend(__cap_, __size_ + 1);
+    pointer fresh = __allocate(new_cap);
+    bool placed = false;
+    __DAVECC_TRY {
+      __construct_one(fresh + __size_, std::forward<Args>(args)...);
+      placed = true;
+      if (__size_ != 0) {
+        __construct_move(fresh, __data_, __data_ + __size_);
+      }
+    } __DAVECC_CATCH_ALL {
+      if (placed) {
+        __destroy_one(fresh + __size_);
+      }
+      __deallocate(fresh, new_cap);
+      __DAVECC_RETHROW;
+    }
+    if (__size_ != 0) {
+      __destroy_range(__data_, __data_ + __size_);
+    }
+    __deallocate_storage();
+    __data_ = fresh;
+    __cap_ = new_cap;
+    ++__size_;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void __resize_realloc(size_type count, const T& value) {
+    size_type new_cap = __recommend(__cap_, count);
+    size_type extra = count - __size_;
+    pointer fresh = __allocate(new_cap);
+    bool filled = false;
+    __DAVECC_TRY {
+      __construct_fill(fresh + __size_, extra, value);
+      filled = true;
+      if (__size_ != 0) {
+        __construct_move(fresh, __data_, __data_ + __size_);
+      }
+    } __DAVECC_CATCH_ALL {
+      if (filled) {
+        __destroy_range(fresh + __size_, fresh + __size_ + extra);
+      }
+      __deallocate(fresh, new_cap);
+      __DAVECC_RETHROW;
+    }
+    if (__size_ != 0) {
+      __destroy_range(__data_, __data_ + __size_);
+    }
+    __deallocate_storage();
+    __data_ = fresh;
+    __cap_ = new_cap;
+    __size_ = count;
+  }
+
   __DAVECC_VECTOR_CONSTEXPR void __take_storage_from(vector& other) noexcept {
     __data_ = other.__data_;
     __size_ = other.__size_;
@@ -612,11 +668,123 @@ class vector {
     __cap_ = cap;
   }
 
+  // Construct one element at `index` without reallocating. The arguments are
+  // read before any existing element is moved, so they may refer to *this.
+  template <class... Args>
+  __DAVECC_VECTOR_CONSTEXPR iterator __insert_inplace_one(size_type index, Args&&... args) {
+    if (index == __size_) {
+      __construct_one(__data_ + __size_, std::forward<Args>(args)...);
+      ++__size_;
+      return __data_ + index;
+    }
+    __construct_one(__data_ + __size_, std::forward<Args>(args)...);
+    ++__size_;
+    T placed(std::move(__data_[__size_ - 1]));
+    for (size_type j = __size_ - 1; j > index; --j) {
+      __data_[j] = std::move(__data_[j - 1]);
+    }
+    __data_[index] = std::move(placed);
+    return __data_ + index;
+  }
+
+  // Move the tail starting at `index` up by `count` slots. `count` slots at
+  // `index` are then occupied by moved-from objects or raw memory. New objects
+  // constructed at or past the old size are destroyed if a later move throws.
+  __DAVECC_VECTOR_CONSTEXPR void __shift_tail(size_type index, size_type count) {
+    size_type old_size = __size_;
+    size_type tail = old_size - index;
+    size_type constructed = 0;
+    __DAVECC_TRY {
+      for (size_type k = tail; k > 0;) {
+        --k;
+        size_type src = index + k;
+        size_type dst = src + count;
+        if (dst >= old_size) {
+          __construct_move_one(__data_ + dst, std::move(__data_[src]));
+          ++constructed;
+        } else {
+          __data_[dst] = std::move(__data_[src]);
+        }
+      }
+    } __DAVECC_CATCH_ALL {
+      if (constructed != 0) {
+        __destroy_range(__data_ + (old_size + count - constructed),
+                        __data_ + (old_size + count));
+      }
+      __DAVECC_RETHROW;
+    }
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR void __destroy_open_tail(size_type old_size, size_type index,
+                                 size_type count, size_type placed_raw) {
+    if (placed_raw != 0) {
+      __destroy_range(__data_ + old_size, __data_ + old_size + placed_raw);
+    }
+    size_type tail_begin = index + count;
+    if (tail_begin < old_size) {
+      tail_begin = old_size;
+    }
+    size_type tail_end = old_size + count;
+    if (tail_end > tail_begin) {
+      __destroy_range(__data_ + tail_begin, __data_ + tail_end);
+    }
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR iterator __insert_inplace_fill(size_type index, size_type count,
+                                 const T& value) {
+    T copied(value);
+    size_type old_size = __size_;
+    __shift_tail(index, count);
+    size_type placed_raw = 0;
+    __DAVECC_TRY {
+      for (size_type i = 0; i < count; ++i) {
+        size_type dst = index + i;
+        if (dst >= old_size) {
+          __construct_copy_one(__data_ + dst, copied);
+          ++placed_raw;
+        } else {
+          __data_[dst] = copied;
+        }
+      }
+    } __DAVECC_CATCH_ALL {
+      __destroy_open_tail(old_size, index, count, placed_raw);
+      __DAVECC_RETHROW;
+    }
+    __size_ = old_size + count;
+    return __data_ + index;
+  }
+
+  __DAVECC_VECTOR_CONSTEXPR iterator __insert_inplace_range(size_type index, const_pointer first,
+                                  size_type count) {
+    size_type old_size = __size_;
+    __shift_tail(index, count);
+    size_type placed_raw = 0;
+    __DAVECC_TRY {
+      for (size_type i = 0; i < count; ++i) {
+        size_type dst = index + i;
+        if (dst >= old_size) {
+          __construct_copy_one(__data_ + dst, first[i]);
+          ++placed_raw;
+        } else {
+          __data_[dst] = first[i];
+        }
+      }
+    } __DAVECC_CATCH_ALL {
+      __destroy_open_tail(old_size, index, count, placed_raw);
+      __DAVECC_RETHROW;
+    }
+    __size_ = old_size + count;
+    return __data_ + index;
+  }
+
   __DAVECC_VECTOR_CONSTEXPR iterator __insert_copies(iterator pos, const_pointer first,
                            const_pointer last, size_type count) {
     size_type index = __index_of(pos);
     if (count == 0) {
       return __data_ + index;
+    }
+    if (__size_ + count <= __cap_) {
+      return __insert_inplace_range(index, first, count);
     }
     size_type new_size = __size_ + count;
     size_type new_cap = __recommend(__cap_, new_size);
@@ -673,6 +841,12 @@ class vector {
     if (count == 0) {
       return __data_ + index;
     }
+    if (__size_ + count <= __cap_) {
+      if (count == 1) {
+        return __insert_inplace_one(index, value);
+      }
+      return __insert_inplace_fill(index, count, value);
+    }
     size_type new_size = __size_ + count;
     size_type new_cap = __recommend(__cap_, new_size);
     pointer fresh = __allocate(new_cap);
@@ -702,6 +876,9 @@ class vector {
 
   __DAVECC_VECTOR_CONSTEXPR iterator __insert_move(iterator pos, T&& value) {
     size_type index = __index_of(pos);
+    if (__size_ < __cap_) {
+      return __insert_inplace_one(index, static_cast<T&&>(value));
+    }
     size_type new_size = __size_ + 1;
     size_type new_cap = __recommend(__cap_, new_size);
     pointer fresh = __allocate(new_cap);
@@ -731,6 +908,9 @@ class vector {
   template <class... Args>
   __DAVECC_VECTOR_CONSTEXPR iterator __insert_emplace(iterator pos, Args&&... args) {
     size_type index = __index_of(pos);
+    if (__size_ < __cap_) {
+      return __insert_inplace_one(index, std::forward<Args>(args)...);
+    }
     size_type new_size = __size_ + 1;
     size_type new_cap = __recommend(__cap_, new_size);
     pointer fresh = __allocate(new_cap);
@@ -1014,9 +1194,12 @@ class vector {
       __destroy_range(__data_ + count, __data_ + __size_);
       __size_ = count;
     } else if (count > __size_) {
-      __grow_for(count);
-      __construct_fill(__data_ + __size_, count - __size_, value);
-      __size_ = count;
+      if (count <= __cap_) {
+        __construct_fill(__data_ + __size_, count - __size_, value);
+        __size_ = count;
+      } else {
+        __resize_realloc(count, value);
+      }
     }
   }
 
@@ -1078,23 +1261,20 @@ class vector {
     return __data_ + index;
   }
 
-  __DAVECC_VECTOR_CONSTEXPR void push_back(const T& value) {
-    __grow_for(__size_ + 1);
-    __construct_copy_one(__data_ + __size_, value);
-    __size_++;
-  }
+  __DAVECC_VECTOR_CONSTEXPR void push_back(const T& value) { emplace_back(value); }
 
   __DAVECC_VECTOR_CONSTEXPR void push_back(T&& value) {
-    __grow_for(__size_ + 1);
-    __construct_move_one(__data_ + __size_, std::move(value));
-    __size_++;
+    emplace_back(static_cast<T&&>(value));
   }
 
   template <class... Args>
   __DAVECC_VECTOR_CONSTEXPR reference emplace_back(Args&&... args) {
-    __grow_for(__size_ + 1);
-    __construct_one(__data_ + __size_, std::forward<Args>(args)...);
-    __size_++;
+    if (__size_ < __cap_) {
+      __construct_one(__data_ + __size_, std::forward<Args>(args)...);
+      ++__size_;
+      return back();
+    }
+    __emplace_back_realloc(std::forward<Args>(args)...);
     return back();
   }
 
@@ -1838,11 +2018,12 @@ __DAVECC_VECTOR_CONSTEXPR void swap(vector<T, Allocator>& a, vector<T, Allocator
 template <class T, class Allocator, class U>
 __DAVECC_VECTOR_CONSTEXPR typename vector<T, Allocator>::size_type erase(
     vector<T, Allocator>& c, const U& value) {
+  U copied(value);
   typename vector<T, Allocator>::iterator out = c.begin();
   typename vector<T, Allocator>::iterator it = c.begin();
   typename vector<T, Allocator>::iterator last = c.end();
   for (; it != last; ++it) {
-    if (!(*it == value)) {
+    if (!(*it == copied)) {
       if (out != it) {
         *out = static_cast<T&&>(*it);
       }

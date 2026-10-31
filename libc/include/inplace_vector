@@ -861,10 +861,11 @@ constexpr void swap(inplace_vector<T, N>& left,
 template <class T, size_t N, class U = T>
 constexpr typename inplace_vector<T, N>::size_type erase(
     inplace_vector<T, N>& container, const U& value) {
+  U copied(value);
   auto old_size = container.size();
   auto out = container.begin();
   for (auto it = container.begin(); it != container.end(); ++it) {
-    if (!(*it == value)) {
+    if (!(*it == copied)) {
       if (out != it) {
         *out = std::move(*it);
       }

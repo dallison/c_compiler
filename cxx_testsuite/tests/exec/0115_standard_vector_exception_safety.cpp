@@ -227,7 +227,8 @@ int test_middle_emplace_inserted_failure(void) {
     values.emplace_back(2);
     values.emplace_back(3);
     int active_before = active_constructed_objects();
-    alloc_state_throw_after_construct = 2;
+    // Spare capacity: the new element's constructor runs before any shift.
+    alloc_state_throw_after_construct = 1;
     try {
       values.emplace(values.begin() + 1, 9);
       return 20;
@@ -253,16 +254,20 @@ int test_middle_emplace_suffix_failure(void) {
     values.emplace_back(1);
     values.emplace_back(2);
     values.emplace_back(3);
+    values.emplace_back(4);
     int active_before = active_constructed_objects();
+    // size == capacity, so emplace allocates. Construct 3 is the first
+    // relocated element after the inserted value. A throw leaves the
+    // original elements in place.
     alloc_state_throw_after_construct = 3;
     try {
       values.emplace(values.begin() + 1, 9);
       return 30;
     } catch (...) {
     }
-    int result = verify_three(values, 31);
-    if (result != 0) {
-      return result;
+    if (values.size() != 4 || values[0].value != 1 || values[1].value != 2 ||
+        values[2].value != 3 || values[3].value != 4) {
+      return 31;
     }
     if (active_constructed_objects() != active_before) {
       return 33;

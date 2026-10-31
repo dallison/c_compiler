@@ -171,44 +171,6 @@ class forward_list {
     return const_cast<__node_base*>(node);
   }
 
-  template <class Compare>
-  static __node_base* __merge_chains(__node_base* left, __node_base* right,
-                                     Compare& comp) {
-    __node_base result = {nullptr};
-    __node_base* tail = &result;
-    while (left != nullptr && right != nullptr) {
-      if (comp(static_cast<__node*>(right)->__value,
-               static_cast<__node*>(left)->__value)) {
-        tail->__next = right;
-        right = right->__next;
-      } else {
-        tail->__next = left;
-        left = left->__next;
-      }
-      tail = tail->__next;
-    }
-    tail->__next = left != nullptr ? left : right;
-    return result.__next;
-  }
-
-  template <class Compare>
-  static __node_base* __sort_chain(__node_base* first, Compare& comp) {
-    if (first == nullptr || first->__next == nullptr) {
-      return first;
-    }
-    __node_base* slow = first;
-    __node_base* fast = first->__next;
-    while (fast != nullptr && fast->__next != nullptr) {
-      slow = slow->__next;
-      fast = fast->__next->__next;
-    }
-    __node_base* second = slow->__next;
-    slow->__next = nullptr;
-    first = __sort_chain(first, comp);
-    second = __sort_chain(second, comp);
-    return __merge_chains(first, second, comp);
-  }
-
   void __clear() noexcept {
     __node_base* node = __before_.__next;
     while (node != nullptr) {
@@ -310,8 +272,13 @@ class forward_list {
   }
 
   void assign(size_type count, const value_type& value) {
+    if (count == 0) {
+      clear();
+      return;
+    }
+    value_type copied(value);
     clear();
-    insert_after(before_begin(), count, value);
+    insert_after(before_begin(), count, copied);
   }
 
   template <class InputIt,
@@ -531,8 +498,9 @@ class forward_list {
   }
 
   size_type remove(const value_type& value) {
-    return remove_if([&value](const value_type& item) {
-      return item == value;
+    value_type copied(value);
+    return remove_if([&copied](const value_type& item) {
+      return item == copied;
     });
   }
 
@@ -629,7 +597,40 @@ class forward_list {
 
   template <class Compare>
   void sort(Compare comp) {
-    __before_.__next = __sort_chain(__before_.__next, comp);
+    __node_base* node = __before_.__next;
+    if (node == nullptr || node->__next == nullptr) {
+      return;
+    }
+    // Bottom-up merge sort. Every node stays in *this or in one of the run
+    // lists, so a throwing comparison can splice them all back.
+    forward_list carry;
+    forward_list counters[64];
+    int fill = 0;
+    __DAVECC_TRY {
+      while (!empty()) {
+        carry.splice_after(carry.before_begin(), *this, before_begin());
+        int index = 0;
+        while (index < fill && !counters[index].empty()) {
+          counters[index].merge(carry, comp);
+          carry.swap(counters[index]);
+          ++index;
+        }
+        carry.swap(counters[index]);
+        if (index == fill) {
+          ++fill;
+        }
+      }
+      for (int index = 1; index < fill; ++index) {
+        counters[index].merge(counters[index - 1], comp);
+      }
+      swap(counters[fill - 1]);
+    } __DAVECC_CATCH_ALL {
+      for (int index = 0; index < fill; ++index) {
+        splice_after(before_begin(), counters[index]);
+      }
+      splice_after(before_begin(), carry);
+      __DAVECC_RETHROW;
+    }
   }
 
   void sort() {
@@ -702,7 +703,8 @@ void swap(forward_list<T, Allocator>& left,
 template <class T, class Allocator, class U>
 typename forward_list<T, Allocator>::size_type erase(
     forward_list<T, Allocator>& list, const U& value) {
-  return list.remove_if([&value](const T& item) { return item == value; });
+  U copied(value);
+  return list.remove_if([&copied](const T& item) { return item == copied; });
 }
 
 template <class T, class Allocator, class Predicate>

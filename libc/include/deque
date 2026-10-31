@@ -1147,9 +1147,14 @@ class deque {
   }
 
   void assign(size_type count, const T& value) {
+    if (count == 0) {
+      clear();
+      return;
+    }
+    T copied(value);
     clear();
     for (size_type i = 0; i < count; i++) {
-      push_back(value);
+      push_back(copied);
     }
   }
 
@@ -1309,11 +1314,18 @@ class deque {
 
   iterator insert(const_iterator pos, const T& value) {
     size_type index = pos.__i_;
-    push_back(value);
+    if (index == __size_) {
+      push_back(value);
+      return iterator(this, index);
+    }
+    // The shift below assigns over existing elements, so keep a copy before
+    // that happens. `value` may be one of those elements.
+    T copied(value);
+    push_back(copied);
     for (size_type j = __size_ - 1; j > index; j--) {
       __ref(j) = std::move(__ref(j - 1));
     }
-    __ref(index) = value;
+    __ref(index) = std::move(copied);
     return iterator(this, index);
   }
 
@@ -1330,8 +1342,12 @@ class deque {
 
   iterator insert(const_iterator pos, size_type count, const T& value) {
     size_type index = pos.__i_;
+    if (count == 0) {
+      return iterator(this, index);
+    }
+    T copied(value);
     for (size_type k = 0; k < count; k++) {
-      insert(const_iterator(this, index + k), value);
+      insert(const_iterator(this, index + k), copied);
     }
     return iterator(this, index);
   }

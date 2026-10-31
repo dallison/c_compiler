@@ -179,11 +179,14 @@ OutputIt transform(InputIt1 first1, InputIt1 last1, InputIt2 first2,
 
 template <class ForwardIt, class T>
 ForwardIt remove(ForwardIt first, ForwardIt last, const T& value) {
-  first = std::find(first, last, value);
+  // `value` may refer to an element of [first, last). Later assignments
+  // overwrite that element, so compare against a copy.
+  T copied(value);
+  first = std::find(first, last, copied);
   if (first == last) return first;
   ForwardIt output = first;
   while (++first != last) {
-    if (!(*first == value)) *output++ = *first;
+    if (!(*first == copied)) *output++ = *first;
   }
   return output;
 }
@@ -979,18 +982,21 @@ constexpr It generate_n(It first, Size n, Gen gen) {
 template <class It, class T>
 constexpr void replace(It first, It last, const T& old_value,
                        const T& new_value) {
+  T old_copied(old_value);
+  T new_copied(new_value);
   for (; first != last; ++first) {
-    if (*first == old_value) {
-      *first = new_value;
+    if (*first == old_copied) {
+      *first = new_copied;
     }
   }
 }
 
 template <class It, class Pred, class T>
 constexpr void replace_if(It first, It last, Pred pred, const T& new_value) {
+  T new_copied(new_value);
   for (; first != last; ++first) {
     if (pred(*first)) {
-      *first = new_value;
+      *first = new_copied;
     }
   }
 }
@@ -1037,14 +1043,15 @@ constexpr Out remove_copy_if(In first, In last, Out result, Pred pred) {
 
 template <class It, class T>
 constexpr It remove(It first, It last, const T& value) {
-  first = std::find(first, last, value);
+  T copied(value);
+  first = std::find(first, last, copied);
   if (first == last) {
     return first;
   }
   It result = first;
   ++first;
   for (; first != last; ++first) {
-    if (!(*first == value)) {
+    if (!(*first == copied)) {
       *result = std::move(*first);
       ++result;
     }
@@ -2699,11 +2706,12 @@ constexpr O generate_n(O first, iter_difference_t<O> n, Gen gen) {
 
 template <class I, class S, class T, class Proj = identity>
 constexpr I remove(I first, S last, const T& value, Proj proj = {}) {
-  first = ranges::find(first, last, value, proj);
+  T copied(value);
+  first = ranges::find(first, last, copied, proj);
   if (first == last) return first;
   I out = first;
   for (++first; first != last; ++first) {
-    if (!(__project(proj, *first) == value)) {
+    if (!(__project(proj, *first) == copied)) {
       *out = ranges::iter_move(first);
       ++out;
     }
@@ -2737,8 +2745,10 @@ constexpr borrowed_iterator_t<R> remove_if(R&& r, Pred pred,
 template <class I, class S, class T1, class T2, class Proj = identity>
 constexpr I replace(I first, S last, const T1& old_value,
                     const T2& new_value, Proj proj = {}) {
+  T1 old_copied(old_value);
+  T2 new_copied(new_value);
   for (; first != last; ++first)
-    if (__project(proj, *first) == old_value) *first = new_value;
+    if (__project(proj, *first) == old_copied) *first = new_copied;
   return first;
 }
 template <range R, class T1, class T2, class Proj = identity>
@@ -2751,8 +2761,9 @@ constexpr borrowed_iterator_t<R> replace(R&& r, const T1& old_value,
 template <class I, class S, class Pred, class T, class Proj = identity>
 constexpr I replace_if(I first, S last, Pred pred, const T& new_value,
                        Proj proj = {}) {
+  T new_copied(new_value);
   for (; first != last; ++first)
-    if (pred(__project(proj, *first))) *first = new_value;
+    if (pred(__project(proj, *first))) *first = new_copied;
   return first;
 }
 template <range R, class Pred, class T, class Proj = identity>

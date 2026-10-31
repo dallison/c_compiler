@@ -2396,9 +2396,10 @@ class multimap {
   }
 
   size_type erase(const key_type& key) {
+    key_type copied(key);
     size_type removed = 0;
-    iterator it = lower_bound(key);
-    while (it != end() && __equivalent(it->first, key)) {
+    iterator it = lower_bound(copied);
+    while (it != end() && __equivalent(it->first, copied)) {
       it = erase(it);
       ++removed;
     }

@@ -667,6 +667,16 @@ class __hash_table {
   }
 
   size_type __erase_key(const key_type& key) {
+    if (__multi_) {
+      // A multi-erase keeps comparing after the first match is destroyed.
+      // `key` may be that element.
+      key_type copied(key);
+      return __erase_key_with(copied);
+    }
+    return __erase_key_with(key);
+  }
+
+  size_type __erase_key_with(const key_type& key) {
     if (__bucket_count_ == 0) {
       return 0;
     }

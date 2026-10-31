@@ -940,9 +940,14 @@ class list {
   }
 
   void assign(size_type count, const value_type& value) {
+    if (count == 0) {
+      clear();
+      return;
+    }
+    value_type copied(value);
     clear();
     for (size_type i = 0; i < count; ++i) {
-      push_back(value);
+      push_back(copied);
     }
   }
 
@@ -1166,7 +1171,7 @@ class list {
   // ---- list operations ----
 
   void splice(const_iterator pos, list& other) {
-    if (other.empty()) {
+    if (other.empty() || this == &other) {
       return;
     }
     __list_detail::__transfer(__as_mutable(pos.__node_), other.__end_.__next,
@@ -1214,7 +1219,10 @@ class list {
   }
 
   size_type remove(const value_type& value) {
-    return remove_if([&value](const value_type& x) { return x == value; });
+    // `value` may refer to an element of this list. Copy it before any node
+    // is destroyed.
+    value_type copied(value);
+    return remove_if([&copied](const value_type& x) { return x == copied; });
   }
 
   template <class Predicate>
@@ -1494,7 +1502,8 @@ std::strong_ordering operator<=>(const list<T, Allocator>& left,
 template <class T, class Allocator, class U>
 typename list<T, Allocator>::size_type erase(list<T, Allocator>& c,
                                              const U& value) {
-  return c.remove_if([&value](const T& element) { return element == value; });
+  U copied(value);
+  return c.remove_if([&copied](const T& element) { return element == copied; });
 }
 
 template <class T, class Allocator, class Predicate>

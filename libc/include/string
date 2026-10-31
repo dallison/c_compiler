@@ -135,12 +135,24 @@ class basic_string {
     __cap = newcap;
   }
 
-  // Replace the whole contents with `n` characters copied from `src` (which may
-  // alias nothing inside this object).
+  // True when [s, s + n) refers to characters this string already owns.
+  // `*offset` is the index of s. Call this before any reallocation.
+  constexpr bool __interior(const CharT* s, size_type n, size_type* offset) const {
+    if (n == 0 || s < __data || s > __data + __size) {
+      return false;
+    }
+    *offset = static_cast<size_type>(s - __data);
+    return true;
+  }
+
+  // Replace the whole contents with `n` characters copied from `src`. `src`
+  // may point into this string.
   constexpr void __assign_raw(const CharT* src, size_type n) {
+    size_type offset = 0;
+    const bool inside = __interior(src, n, &offset);
     __reserve_for(n);
     if (n != 0) {
-      traits_type::copy(__data, src, n);
+      traits_type::copy(__data, inside ? __data + offset : src, n);
     }
     __size = n;
     __data[n] = CharT();
@@ -408,9 +420,11 @@ class basic_string {
 
   // Modifiers.
   __DAVECC_STRING_CONSTEXPR basic_string& append(const CharT* s, size_type n) {
+    size_type offset = 0;
+    const bool inside = __interior(s, n, &offset);
     __reserve_for(__size + n);
     if (n != 0) {
-      traits_type::copy(__data + __size, s, n);
+      traits_type::copy(__data + __size, inside ? __data + offset : s, n);
     }
     __size += n;
     __data[__size] = CharT();
@@ -519,9 +533,8 @@ class basic_string {
   }
 
   __DAVECC_STRING_CONSTEXPR basic_string& assign(const CharT* s, size_type n) {
-    __size = 0;
-    __data[0] = CharT();
-    return append(s, n);
+    __assign_raw(s, n);
+    return *this;
   }
 
   __DAVECC_STRING_CONSTEXPR basic_string& assign(const CharT* s) {
@@ -555,9 +568,13 @@ class basic_string {
   }
 
   __DAVECC_STRING_CONSTEXPR basic_string& assign(size_type n, CharT c) {
-    __size = 0;
-    __data[0] = CharT();
-    return append(n, c);
+    __reserve_for(n);
+    if (n != 0) {
+      traits_type::assign(__data, n, c);
+    }
+    __size = n;
+    __data[n] = CharT();
+    return *this;
   }
 
   // Erases `count` characters starting at `index`.  A count of `npos` erases
