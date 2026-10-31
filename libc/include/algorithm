@@ -262,6 +262,94 @@ bool binary_search(ForwardIt first, ForwardIt last, const T& value) {
   return std::binary_search(first, last, value, std::less<value_type>());
 }
 
+namespace __algorithm_detail {
+
+template <class RandomIt, class Distance, class Compare>
+void __sift_down(RandomIt first, Distance start, Distance length, Compare compare) {
+  Distance root = start;
+  for (;;) {
+    Distance child = 2 * root + 1;
+    if (child >= length) break;
+    if (child + 1 < length && compare(first[child], first[child + 1])) ++child;
+    if (!compare(first[root], first[child])) break;
+    std::iter_swap(first + root, first + child);
+    root = child;
+  }
+}
+
+template <class RandomIt, class Distance, class Compare>
+void __sift_up(RandomIt first, Distance child, Compare compare) {
+  while (child > 0) {
+    Distance parent = (child - 1) / 2;
+    if (!compare(first[parent], first[child])) break;
+    std::iter_swap(first + parent, first + child);
+    child = parent;
+  }
+}
+
+}  // namespace __algorithm_detail
+
+template <class RandomIt, class Compare>
+void push_heap(RandomIt first, RandomIt last, Compare compare) {
+  typedef typename iterator_traits<RandomIt>::difference_type difference_type;
+  difference_type length = last - first;
+  if (length > 1) __algorithm_detail::__sift_up(first, length - 1, compare);
+}
+
+template <class RandomIt>
+void push_heap(RandomIt first, RandomIt last) {
+  typedef typename iterator_traits<RandomIt>::value_type value_type;
+  std::push_heap(first, last, std::less<value_type>());
+}
+
+template <class RandomIt, class Compare>
+void pop_heap(RandomIt first, RandomIt last, Compare compare) {
+  typedef typename iterator_traits<RandomIt>::difference_type difference_type;
+  difference_type length = last - first;
+  if (length > 1) {
+    std::iter_swap(first, last - 1);
+    __algorithm_detail::__sift_down(first, difference_type(0), length - 1, compare);
+  }
+}
+
+template <class RandomIt>
+void pop_heap(RandomIt first, RandomIt last) {
+  typedef typename iterator_traits<RandomIt>::value_type value_type;
+  std::pop_heap(first, last, std::less<value_type>());
+}
+
+template <class RandomIt, class Compare>
+void make_heap(RandomIt first, RandomIt last, Compare compare) {
+  typedef typename iterator_traits<RandomIt>::difference_type difference_type;
+  difference_type length = last - first;
+  if (length <= 1) return;
+  difference_type start = length / 2;
+  do {
+    --start;
+    __algorithm_detail::__sift_down(first, start, length, compare);
+  } while (start != 0);
+}
+
+template <class RandomIt>
+void make_heap(RandomIt first, RandomIt last) {
+  typedef typename iterator_traits<RandomIt>::value_type value_type;
+  std::make_heap(first, last, std::less<value_type>());
+}
+
+template <class RandomIt, class Compare>
+void sort_heap(RandomIt first, RandomIt last, Compare compare) {
+  while (last - first > 1) {
+    std::pop_heap(first, last, compare);
+    --last;
+  }
+}
+
+template <class RandomIt>
+void sort_heap(RandomIt first, RandomIt last) {
+  typedef typename iterator_traits<RandomIt>::value_type value_type;
+  std::sort_heap(first, last, std::less<value_type>());
+}
+
 }  // namespace std
 
 #else

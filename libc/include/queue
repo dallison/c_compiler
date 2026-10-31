@@ -57,7 +57,7 @@ class priority_queue {
   explicit priority_queue(const Compare& compare = Compare(),
                           const Container& container = Container())
       : c(container), comp(compare) {
-    std::sort(c.begin(), c.end(), comp);
+    std::make_heap(c.begin(), c.end(), comp);
   }
   template <class InputIt>
   priority_queue(InputIt first, InputIt last,
@@ -65,16 +65,19 @@ class priority_queue {
                  const Container& container = Container())
       : c(container), comp(compare) {
     while (first != last) c.push_back(*first++);
-    std::sort(c.begin(), c.end(), comp);
+    std::make_heap(c.begin(), c.end(), comp);
   }
   bool empty() const { return c.empty(); }
   size_type size() const { return c.size(); }
-  const_reference top() const { return c.back(); }
+  const_reference top() const { return c.front(); }
   void push(const T& value) {
     c.push_back(value);
-    std::sort(c.begin(), c.end(), comp);
+    std::push_heap(c.begin(), c.end(), comp);
   }
-  void pop() { c.pop_back(); }
+  void pop() {
+    std::pop_heap(c.begin(), c.end(), comp);
+    c.pop_back();
+  }
 
  protected:
   Container c;
