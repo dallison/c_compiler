@@ -18,7 +18,9 @@
 #include <locale>
 #include <__char_traits>
 #include <type_traits>
+#include <limits>
 #include <stdlib.h>
+#include <errno.h>
 
 namespace std {
 
@@ -446,13 +448,14 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
     return true;
   }
 
-  bool __extract_int(long long& out, bool is_signed) {
+  // Reads one integer field into `buf` and reports the scanf-style base.
+  // A leading sign is kept for both signed and unsigned targets.
+  bool __collect_integer(char* buf, size_t cap, int* base_out) {
     sentry s(*this);
     if (!s) {
       return false;
     }
     basic_streambuf<CharT, Traits>* b = this->rdbuf();
-    char buf[72];
     size_t len = 0;
     int base = 10;
     ios_base::fmtflags bf = this->flags() & ios_base::basefield;
@@ -463,10 +466,11 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
     } else if (bf == 0) {
       base = 0;  // auto-detect (0x -> hex, leading 0 -> oct)
     }
+    *base_out = base;
     int_type c = b->sgetc();
     if (!Traits::eq_int_type(c, Traits::eof())) {
       char ch = Traits::to_char_type(c);
-      if (ch == '+' || (is_signed && ch == '-')) {
+      if (ch == '+' || ch == '-') {
         buf[len++] = ch;
         c = b->snextc();
       }
@@ -484,7 +488,7 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
         }
       }
     }
-    while (!Traits::eq_int_type(c, Traits::eof()) && len + 1 < sizeof(buf)) {
+    while (!Traits::eq_int_type(c, Traits::eof()) && len + 1 < cap) {
       char ch = Traits::to_char_type(c);
       if (!__is_digit_for(ch, base)) {
         break;
@@ -494,16 +498,6 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
     }
     buf[len] = '\0';
     __check_eof(c);
-    char* endp = nullptr;
-    if (is_signed) {
-      out = strtoll(buf, &endp, base);
-    } else {
-      out = static_cast<long long>(strtoull(buf, &endp, base));
-    }
-    if (endp == buf) {
-      this->setstate(ios_base::failbit);
-      return false;
-    }
     return true;
   }
 
@@ -579,17 +573,52 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
 
   template <class T>
   basic_istream& __get_signed(T& v) {
-    long long tmp = 0;
-    if (__extract_int(tmp, /*is_signed=*/true)) {
+    char buf[72];
+    int base = 10;
+    if (!__collect_integer(buf, sizeof(buf), &base)) {
+      return *this;
+    }
+    errno = 0;
+    char* endp = nullptr;
+    long long tmp = strtoll(buf, &endp, base);
+    if (endp == buf) {
+      this->setstate(ios_base::failbit);
+      return *this;
+    }
+    if (errno == ERANGE) {
+      v = tmp < 0 ? numeric_limits<T>::min() : numeric_limits<T>::max();
+      this->setstate(ios_base::failbit);
+    } else if (tmp < static_cast<long long>(numeric_limits<T>::min())) {
+      v = numeric_limits<T>::min();
+      this->setstate(ios_base::failbit);
+    } else if (tmp > static_cast<long long>(numeric_limits<T>::max())) {
+      v = numeric_limits<T>::max();
+      this->setstate(ios_base::failbit);
+    } else {
       v = static_cast<T>(tmp);
     }
     return *this;
   }
   template <class T>
   basic_istream& __get_unsigned(T& v) {
-    long long tmp = 0;
-    if (__extract_int(tmp, /*is_signed=*/false)) {
-      v = static_cast<T>(static_cast<unsigned long long>(tmp));
+    char buf[72];
+    int base = 10;
+    if (!__collect_integer(buf, sizeof(buf), &base)) {
+      return *this;
+    }
+    errno = 0;
+    char* endp = nullptr;
+    unsigned long long tmp = strtoull(buf, &endp, base);
+    if (endp == buf) {
+      this->setstate(ios_base::failbit);
+      return *this;
+    }
+    if (errno == ERANGE ||
+        tmp > static_cast<unsigned long long>(numeric_limits<T>::max())) {
+      v = numeric_limits<T>::max();
+      this->setstate(ios_base::failbit);
+    } else {
+      v = static_cast<T>(tmp);
     }
     return *this;
   }

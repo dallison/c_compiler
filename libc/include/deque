@@ -1391,6 +1391,9 @@ class deque {
   iterator erase(const_iterator first, const_iterator last) {
     size_type index = first.__i_;
     size_type count = last.__i_ - first.__i_;
+    if (count == 0) {
+      return iterator(this, index);
+    }
     for (size_type j = index; j + count < __size_; j++) {
       __ref(j) = std::move(__ref(j + count));
     }

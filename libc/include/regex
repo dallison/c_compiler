@@ -286,11 +286,9 @@ class basic_regex {
   template <class ForwardIterator>
   basic_regex& assign(ForwardIterator first, ForwardIterator last,
                       flag_type flags = ECMAScript) {
-    __pattern_.clear();
-    while (first != last) __pattern_.push_back(*first++);
-    __flags_ = flags;
-    __validate();
-    return *this;
+    // The iterators may point into the current pattern. Copy them first.
+    string_type copied(first, last);
+    return assign(copied.data(), copied.size(), flags);
   }
 
   unsigned mark_count() const { return __marks_; }

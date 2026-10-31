@@ -3275,7 +3275,11 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
           value = GeneratorEmit(gen, NewIR1(IR_OP(addressof), value));
         }
       }
-      CheckForVarUse(value, node->right);
+      // A long double reference is already a `loada` marked as a variable use.
+      // Marking that same instruction again trips IRSetVarUse.
+      if (value != NULL && (value->flags & kIRVarUse) == 0) {
+        CheckForVarUse(value, node->right);
+      }
       assignment = GeneratorEmit(
           gen,
           NewIR3(IR_OP(memcpy), dest, value,

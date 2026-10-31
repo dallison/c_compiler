@@ -696,13 +696,17 @@ class __flat_map_base {
 
   template <class K, class M>
   constexpr iterator __insert_at(size_type index, K&& key, M&& mapped) {
+    // `key` may refer to a mapped element. Copy it before either container
+    // grows or shifts.
+    key_type held_key(static_cast<K&&>(key));
+    mapped_type held_mapped(static_cast<M&&>(mapped));
     auto mapped_position =
         __values.insert(
             __values.begin() + static_cast<difference_type>(index),
-            static_cast<M&&>(mapped));
+            std::move(held_mapped));
     __DAVECC_TRY {
       __keys.insert(__keys.begin() + static_cast<difference_type>(index),
-                    static_cast<K&&>(key));
+                    std::move(held_key));
     } __DAVECC_CATCH_ALL {
       __values.erase(mapped_position);
       __DAVECC_RETHROW;

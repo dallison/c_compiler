@@ -75,12 +75,8 @@ class path {
   path& assign(const value_type* source) { return *this = source; }
   template <class InputIt>
   path& assign(InputIt first, InputIt last) {
-    __value.clear();
-    while (first != last) {
-      __value.push_back(static_cast<value_type>(*first));
-      ++first;
-    }
-    return *this;
+    // The iterators may point into *this. Build the replacement first.
+    return *this = path(first, last);
   }
 
   path& operator/=(const path& other) {
@@ -198,14 +194,33 @@ class path {
   std::u32string generic_u32string() const { return u32string(); }
 
   int compare(const path& other) const noexcept {
-    return __value.compare(other.__value);
+    size_t left_index = 0;
+    size_t right_index = 0;
+    bool left_first = true;
+    bool right_first = true;
+    for (;;) {
+      const value_type* left_data = nullptr;
+      const value_type* right_data = nullptr;
+      size_t left_length = 0;
+      size_t right_length = 0;
+      bool left_ok = __next_component(__value, &left_index, &left_first,
+                                      &left_data, &left_length);
+      bool right_ok = __next_component(other.__value, &right_index, &right_first,
+                                       &right_data, &right_length);
+      if (!left_ok && !right_ok) return 0;
+      if (!left_ok) return -1;
+      if (!right_ok) return 1;
+      size_t n = left_length < right_length ? left_length : right_length;
+      if (n != 0) {
+        int part = string_type::traits_type::compare(left_data, right_data, n);
+        if (part != 0) return part;
+      }
+      if (left_length < right_length) return -1;
+      if (left_length > right_length) return 1;
+    }
   }
-  int compare(const string_type& other) const noexcept {
-    return __value.compare(other);
-  }
-  int compare(const value_type* other) const noexcept {
-    return __value.compare(other);
-  }
+  int compare(const string_type& other) const { return compare(path(other)); }
+  int compare(const value_type* other) const { return compare(path(other)); }
 
   path root_name() const { return path(); }
   path root_directory() const {
@@ -243,14 +258,16 @@ class path {
     path name = filename();
     size_t dot = name.__value.size();
     while (dot > 0 && name.__value[dot - 1] != '.') --dot;
-    if (dot == 0 || dot == 1 || dot == name.__value.size()) return name;
+    // A trailing '.' is the extension. "." and ".." have none, and a leading
+    // '.' with no later dot (".hidden") is part of the stem.
+    if (dot == 0 || dot == 1 || name.__value == "..") return name;
     return path(name.__value.substr(0, dot - 1));
   }
   path extension() const {
     path name = filename();
     size_t dot = name.__value.size();
     while (dot > 0 && name.__value[dot - 1] != '.') --dot;
-    if (dot == 0 || dot == 1 || dot == name.__value.size()) return path();
+    if (dot == 0 || dot == 1 || name.__value == "..") return path();
     return path(name.__value.substr(dot - 1));
   }
 
@@ -322,6 +339,46 @@ class path {
 
  private:
   string_type __value;
+
+  // The next element of a path, matching begin()/end(). Duplicate separators
+  // are not elements. A trailing separator is one empty element.
+  static bool __next_component(const string_type& value, size_t* index,
+                               bool* first, const value_type** data,
+                               size_t* length) noexcept {
+    if (value.empty() || *index > value.size()) {
+      return false;
+    }
+    if (*first) {
+      *first = false;
+      if (value[0] == preferred_separator) {
+        *data = value.data();
+        *length = 1;
+        *index = 1;
+        return true;
+      }
+    }
+    size_t position = *index;
+    while (position < value.size() && value[position] == preferred_separator) {
+      ++position;
+    }
+    size_t start = position;
+    while (position < value.size() && value[position] != preferred_separator) {
+      ++position;
+    }
+    if (start != position) {
+      *data = value.data() + start;
+      *length = position - start;
+      *index = position;
+      return true;
+    }
+    if (value.size() > 1 && value.back() == preferred_separator) {
+      *data = value.data();
+      *length = 0;
+      *index = value.size() + 1;
+      return true;
+    }
+    return false;
+  }
 
   size_t __component_count() const {
     if (__value.empty()) return 0;
@@ -447,8 +504,17 @@ inline path path::lexically_proximate(const path& base) const {
 inline void swap(path& left, path& right) noexcept { left.swap(right); }
 inline size_t hash_value(const path& value) noexcept {
   size_t result = 1469598103934665603ULL;
-  for (char item : value.__value) {
-    result ^= static_cast<unsigned char>(item);
+  size_t index = 0;
+  bool first = true;
+  const path::value_type* data = nullptr;
+  size_t length = 0;
+  while (path::__next_component(value.__value, &index, &first, &data,
+                                &length)) {
+    for (size_t i = 0; i < length; ++i) {
+      result ^= static_cast<unsigned char>(data[i]);
+      result *= 1099511628211ULL;
+    }
+    result ^= static_cast<size_t>(0xff);
     result *= 1099511628211ULL;
   }
   return result;
