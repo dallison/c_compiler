@@ -139,11 +139,7 @@ class vector {
     while (size_ < count) push_back(value);
   }
 
-  void push_back(const T& value) {
-    if (size_ == capacity_) reserve(capacity_ == 0 ? 1 : capacity_ * 2);
-    allocator_.construct(data_ + size_, value);
-    ++size_;
-  }
+  void push_back(const T& value) { insert(end(), value); }
 
   void pop_back() {
     --size_;
@@ -152,15 +148,50 @@ class vector {
 
   iterator insert(iterator position, const T& value) {
     size_type index = static_cast<size_type>(position - begin());
-    if (size_ == capacity_) reserve(capacity_ == 0 ? 1 : capacity_ * 2);
-    if (index == size_) {
-      push_back(value);
+    if (size_ < capacity_) {
+      if (index == size_) {
+        allocator_.construct(data_ + size_, value);
+        ++size_;
+        return begin() + index;
+      }
+      // The source may sit in the range the shift is about to overwrite.
+      T copied(value);
+      allocator_.construct(data_ + size_, data_[size_ - 1]);
+      ++size_;
+      for (size_type i = size_ - 1; i > index; --i) data_[i] = data_[i - 1];
+      data_[index] = copied;
       return begin() + index;
     }
-    allocator_.construct(data_ + size_, data_[size_ - 1]);
-    ++size_;
-    for (size_type i = size_ - 1; i > index; --i) data_[i] = data_[i - 1];
-    data_[index] = value;
+
+    // Build the new buffer while the old one is still alive, so `value` can
+    // refer to an element of this vector. Commit only after every new element
+    // exists; a throwing copy leaves this vector unchanged.
+    size_type requested = capacity_ == 0 ? 1 : capacity_ * 2;
+    pointer replacement = allocator_.allocate(requested);
+    size_type constructed = 0;
+    try {
+      size_type i = 0;
+      for (; i < index; ++i, ++constructed) {
+        allocator_.construct(replacement + constructed, data_[i]);
+      }
+      allocator_.construct(replacement + constructed, value);
+      ++constructed;
+      for (; i < size_; ++i, ++constructed) {
+        allocator_.construct(replacement + constructed, data_[i]);
+      }
+    } catch (...) {
+      while (constructed != 0) {
+        --constructed;
+        allocator_.destroy(replacement + constructed);
+      }
+      allocator_.deallocate(replacement, requested);
+      throw;
+    }
+    for (size_type i = 0; i < size_; ++i) allocator_.destroy(data_ + i);
+    if (data_ != 0) allocator_.deallocate(data_, capacity_);
+    data_ = replacement;
+    size_ = constructed;
+    capacity_ = requested;
     return begin() + index;
   }
 
