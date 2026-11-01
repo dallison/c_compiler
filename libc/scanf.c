@@ -15,7 +15,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "_fpfuncs.h"
 
 
 #if 1
@@ -632,15 +631,11 @@ STATIC bool ReadScanSet(Getter get, Ungetter unget, void* data, void* ptr, ScanS
   return true;
 }
 
-// See strtod.c for the algorithm used here.
+// The characters of one floating field are collected here and converted by
+// strtod/strtof/strtold, so overflow and underflow match those functions.
 STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, ConversionFormat* fmt) {
-  uint64_t fx[FIXED_SIZE_WORDS] = {0};
-  uint64_t n[FIXED_SIZE_HALF] = {0};
-  double v = 0;
   char text[512];
   int text_len = 0;
-  
-  uint8_t negative = 0;
   bool present = false;
 
 #define SCANF_TAKE(ch)                                                 \
@@ -649,161 +644,96 @@ STATIC bool ReadDouble (Getter get, Ungetter unget, void* data, void* ptr, Conve
       text[text_len++] = (char)(ch);                                   \
     }                                                                  \
   } while (0)
-  
+
   int ch = get(data);
   if (ch == EOF) {
     goto done;
   }
-  if (ch == '-') {
-    SCANF_TAKE(ch);
-    ch = get(data);
-    if (ch == EOF) {
-      goto done;
-    }
-    negative = 0x80;
-  }
-  if (ch == '+') {
+  if (ch == '-' || ch == '+') {
     SCANF_TAKE(ch);
     ch = get(data);
     if (ch == EOF) {
       goto done;
     }
   }
-  
-  // Convert integral part to binary.  This is put into the top
-  // half of the fixed point number - the integral part.
-  int fraction_digits = 0;
-  while (isdigit(ch) && ch != '.' && ch != 'e' && ch != 'E') {
+
+  while (isdigit(ch)) {
     SCANF_TAKE(ch);
-    n[0] = ch - '0';
-    __MultiplyBy10Half(fx + FIXED_SIZE_HALF);
-    __AddHalf(fx + FIXED_SIZE_HALF, n);
-    ch = get(data);
-    if (ch == EOF) {
-      goto done;
-    }
     present = true;
+    ch = get(data);
+    if (ch == EOF) {
+      goto convert;
+    }
   }
-  
+
   if (ch == '.') {
     SCANF_TAKE(ch);
     ch = get(data);
     if (ch == EOF) {
-      goto done;
+      goto convert;
     }
-    // We have a fractional part, continue accumulating and count the
-    // number of fractional digits.
-    while (isdigit(ch) && ch != 'e' && ch != 'E') {
+    while (isdigit(ch)) {
       SCANF_TAKE(ch);
-      n[0] = ch - '0';
-      __MultiplyBy10Half(fx + FIXED_SIZE_HALF);
-      __AddHalf(fx + FIXED_SIZE_HALF, n);
+      present = true;
       ch = get(data);
       if (ch == EOF) {
-        goto done;
+        goto convert;
       }
-      present = true;
-      fraction_digits++;
-    }
-    
-    // Now shift the fractional part down to the lower half - to the right
-    // of the binary point.
-    for (int i = 0; i < fraction_digits; i++) {
-      __DivideBy10(fx);
     }
   }
-  
-  // Check for exponent.
+
   if (ch == 'e' || ch == 'E') {
+    int exponent_at = text_len;
     SCANF_TAKE(ch);
     ch = get(data);
     if (ch == EOF) {
-      goto done;
+      text_len = exponent_at;
+      goto convert;
     }
-    bool negative_exp = ch == '-';
-    if (ch == '+' || ch =='-') {
+    if (ch == '+' || ch == '-') {
       SCANF_TAKE(ch);
       ch = get(data);
       if (ch == EOF) {
-        goto done;
+        text_len = exponent_at;
+        goto convert;
       }
     }
-    int exp = 0;
-    while (isdigit(ch)) {
-      SCANF_TAKE(ch);
-      exp = exp * 10 + ch - '0';
-      ch = get(data);
-      if (ch == EOF) {
-        goto done;
-      }
-    }
-    
-    // Multiply or divide by the exponent.
-    if (negative_exp) {
-      for (int i = 0; i < exp; i++) {
-        __DivideBy10(fx);
-      }
+    if (!isdigit(ch)) {
+      // No exponent digits follow. Drop the marker from the converted text.
+      // Only the rejected character is put back; one unget cannot also
+      // return the 'e'.
+      text_len = exponent_at;
     } else {
-      for (int i = 0; i < exp; i++) {
-        __MultiplyBy10(fx);
+      while (isdigit(ch)) {
+        SCANF_TAKE(ch);
+        ch = get(data);
+        if (ch == EOF) {
+          goto convert;
+        }
       }
     }
   }
-  // We will always go one char too far.
-  unget(ch, data);
-  
-  // We now have a fixed point binary number. Float the binary point to normalize
-  // the number.
-  int exp = EXP_BIAS;
-  if (__IsZero(fx)) {
-    return 0;
-  }
-  
-  // Normalize by making the integer part 1.
-  if (__IsZeroHalf(fx + FIXED_SIZE_HALF)) {
-    // Number is less than one, shift left.
-    while (!__IsOneHalf(fx + FIXED_SIZE_HALF)) {
-      __LShift(fx);
-      exp--;
-    }
-  } else {
-    // Number is greater than one, shift right.
-    while (!__IsOneHalf(fx + FIXED_SIZE_HALF)) {
-      __RShift(fx);
-      exp++;
-    }
-  }
-  
-  // The mantissa is the upper bits of the fractional part.
-  uint64_t mantissa = fx[FIXED_SIZE_HALF-1];
-#if DOUBLE_IS_SINGLE
-  // Single precision - 23 bit mantissa.
-#if defined(__6502__)
-  // 6502 is slow for multiple shifts.  This is in assembly language.
-  v = __packIEEE754(negative, exp, mantissa);
-#else
-  uint32_t packed = (mantissa >> (32 - 23)) | (exp << 23) | negative << 24;
-  v = *(double*)&packed;
-#endif
-#else
-  // Double precision.
-  uint64_t packed = (mantissa >> (64LL - 52LL)) |
-          ((uint64_t)exp << 52LL) |
-          (uint64_t)negative << 56LL;
-  v = *(double*)&packed;
-#endif
+  unget((char)ch, data);
 
+convert:
+  if (!present) {
+    goto done;
+  }
+  text[text_len] = '\0';
   if (!fmt->suppress) {
     if (fmt->modifier == kModLongDouble &&
         sizeof(long double) > sizeof(double)) {
-      text[text_len] = '\0';
       long double ld = strtold(text, NULL);
       memcpy(ptr, &ld, sizeof(ld));
+    } else if (fmt->modifier == kModNone) {
+      float narrowed = strtof(text, NULL);
+      memcpy(ptr, &narrowed, sizeof(narrowed));
     } else {
-      *(double*)ptr = v;
+      double value = strtod(text, NULL);
+      memcpy(ptr, &value, sizeof(value));
     }
   }
-  
+
 done:
 #undef SCANF_TAKE
   return present;

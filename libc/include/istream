@@ -101,7 +101,14 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
   basic_istream& operator>>(float& v) {
     double d = 0;
     if (__extract_float(d)) {
-      v = static_cast<float>(d);
+      float narrowed = static_cast<float>(d);
+      // Store the saturated value first. failbit may throw.
+      v = narrowed;
+      if (errno == ERANGE || narrowed > numeric_limits<float>::max() ||
+          narrowed < numeric_limits<float>::lowest() ||
+          (narrowed == 0 && d != 0)) {
+        this->setstate(ios_base::failbit);
+      }
     }
     return *this;
   }
@@ -109,6 +116,9 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
     double d = 0;
     if (__extract_float(d)) {
       v = d;
+      if (errno == ERANGE) {
+        this->setstate(ios_base::failbit);
+      }
     }
     return *this;
   }
@@ -550,6 +560,7 @@ class basic_istream : public virtual basic_ios<CharT, Traits> {
     buf[len] = '\0';
     __check_eof(c);
     char* endp = nullptr;
+    errno = 0;
     out = strtod(buf, &endp);
     if (endp == buf) {
       this->setstate(ios_base::failbit);

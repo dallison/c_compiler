@@ -1,11 +1,13 @@
 #include <locale>
 
 #include <__itoa.h>
+#include <cerrno>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <ios>
 #include <istream>
+#include <limits>
 #include <streambuf>
 
 // Numeric facet formatting and parsing are kept separate from the locale core
@@ -519,15 +521,26 @@ istreambuf_iterator __davecc_classic_get_float(
     ios_base::iostate& err, float& v) {
   double tmp = 0;
   in = __davecc_classic_get_double(in, end, f, err, tmp);
-  if ((err & ios_base::failbit) == 0) {
-    v = static_cast<float>(tmp);
+  // A field that did not convert leaves `tmp` untouched and does not set
+  // ERANGE. Overflow and underflow set ERANGE and still store a value.
+  bool parsed = (err & ios_base::failbit) == 0 || errno == ERANGE;
+  if (!parsed) {
+    return in;
   }
+  float narrowed = static_cast<float>(tmp);
+  if (narrowed > numeric_limits<float>::max() ||
+      narrowed < numeric_limits<float>::lowest() ||
+      (narrowed == 0 && tmp != 0)) {
+    err |= ios_base::failbit;
+  }
+  v = narrowed;
   return in;
 }
 
 istreambuf_iterator __davecc_classic_get_double(
     istreambuf_iterator in, istreambuf_iterator end, ios_base& f,
     ios_base::iostate& err, double& v) {
+  errno = 0;
   const numpunct<char>& np = use_facet<numpunct<char>>(f.getloc());
   char thousands = np.thousands_sep();
   char decimal = np.decimal_point();
@@ -558,8 +571,14 @@ istreambuf_iterator __davecc_classic_get_double(
     return in;
   }
   char* endptr = nullptr;
-  v = strtod(buf, &endptr);
+  errno = 0;
+  double parsed = strtod(buf, &endptr);
   if (endptr == buf) {
+    err = ios_base::failbit;
+    return in;
+  }
+  v = parsed;
+  if (errno == ERANGE) {
     err = ios_base::failbit;
   }
   return in;

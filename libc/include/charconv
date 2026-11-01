@@ -743,20 +743,37 @@ constexpr from_chars_result __from_chars_hex(const char* first, const char* last
   if (exp_negative) {
     exponent = -exponent;
   }
+  if (exp_overflow) {
+    if (significand == 0) {
+      value = negative ? -static_cast<T>(0) : static_cast<T>(0);
+      return {current, errc()};
+    }
+    if (exp_negative) {
+      value = negative ? -static_cast<T>(0) : static_cast<T>(0);
+      return {current, errc::result_out_of_range};
+    }
+    value = negative ? -numeric_limits<T>::infinity()
+                     : numeric_limits<T>::infinity();
+    return {current, errc::result_out_of_range};
+  }
   int binary_exp = exponent - 4 * frac_digits;
   double parsed = static_cast<double>(significand);
   parsed = __mul_pow2(parsed, binary_exp);
   if (negative) {
     parsed = -parsed;
   }
-  if (exp_overflow) {
-    value = negative ? -numeric_limits<T>::infinity()
-                     : numeric_limits<T>::infinity();
-    return {current, errc::result_out_of_range};
-  }
   T converted = static_cast<T>(parsed);
   if (__fp_is_inf(converted) && significand != 0) {
     value = converted;
+    return {current, errc::result_out_of_range};
+  }
+  // A nonzero field that became zero is smaller than the destination type.
+  // Long double is parsed through double, so a zero there can still be a
+  // value that the wider type could have held.
+  if (significand != 0 && converted == static_cast<T>(0) &&
+      numeric_limits<T>::max_exponent10 <=
+          numeric_limits<double>::max_exponent10) {
+    value = negative ? -static_cast<T>(0) : static_cast<T>(0);
     return {current, errc::result_out_of_range};
   }
   value = converted;
@@ -794,6 +811,7 @@ constexpr from_chars_result __from_chars_float(const char* first, const char* la
   int extra_integer = 0;
   bool saw_digit = false;
   bool saw_point = false;
+  bool nonzero = false;
   for (; current != last; ++current) {
     if (*current == '.' && !saw_point) {
       saw_point = true;
@@ -803,6 +821,9 @@ constexpr from_chars_result __from_chars_float(const char* first, const char* la
       break;
     }
     saw_digit = true;
+    if (*current != '0') {
+      nonzero = true;
+    }
     if (stored < 19 && significand <= (18446744073709551615ull - 9ull) / 10ull) {
       significand = significand * 10ull + static_cast<unsigned int>(*current - '0');
       ++stored;
@@ -853,9 +874,21 @@ constexpr from_chars_result __from_chars_float(const char* first, const char* la
   }
 
   int magnitude = exponent - frac_digits + extra_integer;
+  // 0e9999 and 0e-9999 are exact zeros. A huge exponent must not turn them
+  // into an infinity or walk a thousand divisions of zero.
+  if (!nonzero) {
+    value = negative ? -static_cast<T>(0) : static_cast<T>(0);
+    return {current, errc()};
+  }
   if (magnitude > numeric_limits<T>::max_exponent10) {
     value = negative ? -numeric_limits<T>::infinity()
                      : numeric_limits<T>::infinity();
+    return {current, errc::result_out_of_range};
+  }
+  // Below the smallest subnormal. Reject before scaling digit by digit.
+  if (magnitude < numeric_limits<T>::min_exponent10 -
+                      numeric_limits<T>::max_digits10 - 2) {
+    value = negative ? -static_cast<T>(0) : static_cast<T>(0);
     return {current, errc::result_out_of_range};
   }
 
@@ -890,6 +923,12 @@ constexpr from_chars_result __from_chars_float(const char* first, const char* la
   T converted = static_cast<T>(parsed);
   if (__fp_is_inf(converted)) {
     value = converted;
+    return {current, errc::result_out_of_range};
+  }
+  if (nonzero && converted == static_cast<T>(0) &&
+      numeric_limits<T>::max_exponent10 <=
+          numeric_limits<double>::max_exponent10) {
+    value = negative ? -static_cast<T>(0) : static_cast<T>(0);
     return {current, errc::result_out_of_range};
   }
   value = converted;
