@@ -9,6 +9,7 @@
 #include <istream>
 #include <limits>
 #include <streambuf>
+#include <type_traits>
 
 // Numeric facet formatting and parsing are kept separate from the locale core
 // so streambuf vtables do not retain the entire numeric implementation.
@@ -197,7 +198,12 @@ Iter __get_unsigned_integer(Iter in, Iter end, ios_base& str,
     base = 8;
   }
   Iter start = in;
-  T result = 0;
+  bool negative = false;
+  if (in != end &&
+      (traits::eq(*in, CharT('+')) || traits::eq(*in, CharT('-')))) {
+    negative = traits::eq(*in, CharT('-'));
+    ++in;
+  }
   bool any = false;
   if (in != end && traits::eq(*in, CharT('0')) &&
       (base == 8 || base == 16)) {
@@ -210,6 +216,8 @@ Iter __get_unsigned_integer(Iter in, Iter end, ios_base& str,
       any = false;
     }
   }
+  unsigned long long result = 0;
+  bool overflow = false;
   while (in != end) {
     CharT c = static_cast<CharT>(*in);
     if (grouped && base == 10 && traits::eq(c, thousands)) {
@@ -220,7 +228,15 @@ Iter __get_unsigned_integer(Iter in, Iter end, ios_base& str,
     if (!__read_digit<CharT, Iter>(c, base, digit_value)) {
       break;
     }
-    result = static_cast<T>(result * base + static_cast<T>(digit_value));
+    unsigned long long digit = static_cast<unsigned long long>(digit_value);
+    if (!overflow) {
+      if (result > (numeric_limits<unsigned long long>::max() - digit) /
+                       static_cast<unsigned long long>(base)) {
+        overflow = true;
+      } else {
+        result = result * static_cast<unsigned long long>(base) + digit;
+      }
+    }
     any = true;
     ++in;
   }
@@ -228,7 +244,40 @@ Iter __get_unsigned_integer(Iter in, Iter end, ios_base& str,
     err = ios_base::failbit;
     return start;
   }
-  value = result;
+  if (overflow) {
+    value = is_signed<T>::value && negative ? numeric_limits<T>::min()
+                                            : numeric_limits<T>::max();
+    err = ios_base::failbit;
+    return in;
+  }
+  if (is_signed<T>::value) {
+    unsigned long long limit =
+        static_cast<unsigned long long>(numeric_limits<T>::max()) + 1ull;
+    if (negative) {
+      if (result > limit) {
+        value = numeric_limits<T>::min();
+        err = ios_base::failbit;
+      } else if (result == limit) {
+        value = numeric_limits<T>::min();
+      } else {
+        value = static_cast<T>(-static_cast<long long>(result));
+      }
+    } else if (result > static_cast<unsigned long long>(
+                            numeric_limits<T>::max())) {
+      value = numeric_limits<T>::max();
+      err = ios_base::failbit;
+    } else {
+      value = static_cast<T>(result);
+    }
+  } else {
+    unsigned long long stored = negative ? (0ull - result) : result;
+    if (stored > static_cast<unsigned long long>(numeric_limits<T>::max())) {
+      value = numeric_limits<T>::max();
+      err = ios_base::failbit;
+    } else {
+      value = static_cast<T>(stored);
+    }
+  }
   return in;
 }
 
@@ -481,7 +530,8 @@ istreambuf_iterator __davecc_classic_get_long(
     ios_base::iostate& err, long& v) {
   long long tmp = 0;
   in = __davecc_classic_get_llong(in, end, f, err, tmp);
-  if ((err & ios_base::failbit) == 0) {
+  // A failed field leaves `tmp` at 0. Overflow stores a nonzero limit.
+  if ((err & ios_base::failbit) == 0 || tmp != 0) {
     v = static_cast<long>(tmp);
   }
   return in;
@@ -492,7 +542,7 @@ istreambuf_iterator __davecc_classic_get_ulong(
     ios_base::iostate& err, unsigned long& v) {
   unsigned long long tmp = 0;
   in = __davecc_classic_get_ullong(in, end, f, err, tmp);
-  if ((err & ios_base::failbit) == 0) {
+  if ((err & ios_base::failbit) == 0 || tmp != 0) {
     v = static_cast<unsigned long>(tmp);
   }
   return in;
@@ -793,7 +843,7 @@ wistreambuf_iterator __davecc_classic_wget_long(
     ios_base::iostate& err, long& v) {
   long long tmp = 0;
   in = __davecc_classic_wget_llong(in, end, f, err, tmp);
-  if ((err & ios_base::failbit) == 0) {
+  if ((err & ios_base::failbit) == 0 || tmp != 0) {
     v = static_cast<long>(tmp);
   }
   return in;
@@ -804,7 +854,7 @@ wistreambuf_iterator __davecc_classic_wget_ulong(
     ios_base::iostate& err, unsigned long& v) {
   unsigned long long tmp = 0;
   in = __davecc_classic_wget_ullong(in, end, f, err, tmp);
-  if ((err & ios_base::failbit) == 0) {
+  if ((err & ios_base::failbit) == 0 || tmp != 0) {
     v = static_cast<unsigned long>(tmp);
   }
   return in;
