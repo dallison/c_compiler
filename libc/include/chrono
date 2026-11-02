@@ -511,6 +511,32 @@ class hh_mm_ss {
         __seconds_(0),
         __fraction_(0) {
     if (__negative_) {
+      // Negating the most negative integer representation overflows. The
+      // absolute value still fits in hours when each tick is one second or
+      // shorter, so split that magnitude in unsigned arithmetic.
+      if constexpr (is_integral_v<typename Duration::rep> &&
+                    Duration::period::num == 1) {
+        if (value.count() == numeric_limits<typename Duration::rep>::min()) {
+          using unsigned_rep = make_unsigned_t<typename Duration::rep>;
+          unsigned long long magnitude = static_cast<unsigned long long>(
+              static_cast<unsigned_rep>(0) -
+              static_cast<unsigned_rep>(value.count()));
+          unsigned long long denominator =
+              static_cast<unsigned long long>(Duration::period::den);
+          unsigned long long whole_seconds = magnitude / denominator;
+          unsigned long long fraction_ticks = magnitude % denominator;
+          __hours_ = chrono::hours(static_cast<chrono::hours::rep>(
+              whole_seconds / 3600ull));
+          unsigned long long remainder = whole_seconds % 3600ull;
+          __minutes_ = chrono::minutes(
+              static_cast<chrono::minutes::rep>(remainder / 60ull));
+          __seconds_ = chrono::seconds(
+              static_cast<chrono::seconds::rep>(remainder % 60ull));
+          __fraction_ =
+              precision(static_cast<typename precision::rep>(fraction_ticks));
+          return;
+        }
+      }
       value = -value;
     }
     __hours_ = duration_cast<chrono::hours>(value);
@@ -550,13 +576,19 @@ class day {
   constexpr explicit day(unsigned value) noexcept : __d_(static_cast<unsigned char>(value)) {}
   constexpr explicit operator unsigned() const noexcept { return __d_; }
   constexpr bool ok() const noexcept { return __d_ >= 1 && __d_ <= 31; }
-  constexpr day operator++() noexcept { return day{static_cast<unsigned>(++__d_)}; }
+  constexpr day& operator++() noexcept {
+    ++__d_;
+    return *this;
+  }
   constexpr day operator++(int) noexcept {
     day old(*this);
     ++*this;
     return old;
   }
-  constexpr day operator--() noexcept { return day{static_cast<unsigned>(--__d_)}; }
+  constexpr day& operator--() noexcept {
+    --__d_;
+    return *this;
+  }
   constexpr day operator--(int) noexcept {
     day old(*this);
     --*this;
@@ -612,13 +644,19 @@ class month {
   constexpr month& operator-=(const months& value) noexcept {
     return *this += -value;
   }
-  constexpr month operator++() noexcept { return month{__m_ == 12 ? 1u : static_cast<unsigned>(__m_ + 1)}; }
+  constexpr month& operator++() noexcept {
+    __m_ = static_cast<unsigned char>(__m_ == 12 ? 1u : static_cast<unsigned>(__m_ + 1));
+    return *this;
+  }
   constexpr month operator++(int) noexcept {
     month old(*this);
     ++*this;
     return old;
   }
-  constexpr month operator--() noexcept { return month{__m_ == 1 ? 12u : static_cast<unsigned>(__m_ - 1)}; }
+  constexpr month& operator--() noexcept {
+    __m_ = static_cast<unsigned char>(__m_ == 1 ? 12u : static_cast<unsigned>(__m_ - 1));
+    return *this;
+  }
   constexpr month operator--(int) noexcept {
     month old(*this);
     --*this;
@@ -672,20 +710,26 @@ class year {
   }
   constexpr year operator+() const noexcept { return *this; }
   constexpr year operator-() const noexcept { return year(-__y_); }
-  constexpr year operator++() noexcept { return year{++__y_}; }
+  constexpr year& operator++() noexcept {
+    ++__y_;
+    return *this;
+  }
   constexpr year operator++(int) noexcept {
     year old(*this);
     ++*this;
     return old;
   }
-  constexpr year operator--() noexcept { return year{--__y_}; }
+  constexpr year& operator--() noexcept {
+    --__y_;
+    return *this;
+  }
   constexpr year operator--(int) noexcept {
     year old(*this);
     --*this;
     return old;
   }
   constexpr year& operator+=(const years& value) noexcept {
-    __y_ += static_cast<int>(value.count());
+    __y_ = static_cast<int>(static_cast<long long>(__y_) + value.count());
     return *this;
   }
   constexpr year& operator-=(const years& value) noexcept { return *this += -value; }
@@ -726,7 +770,7 @@ class weekday {
   constexpr bool ok() const noexcept { return __wd_ <= 6; }
   weekday_indexed operator[](unsigned index) const noexcept;
   weekday_last operator[](last_spec) const noexcept;
-  constexpr weekday operator++() noexcept {
+  constexpr weekday& operator++() noexcept {
     __wd_ = static_cast<unsigned char>((__wd_ + 1) % 7);
     return *this;
   }
@@ -735,8 +779,9 @@ class weekday {
     ++*this;
     return old;
   }
-  constexpr weekday operator--() noexcept {
-    return weekday{static_cast<unsigned>(__wd_ + 6)};
+  constexpr weekday& operator--() noexcept {
+    __wd_ = static_cast<unsigned char>((__wd_ + 6u) % 7u);
+    return *this;
   }
   constexpr weekday operator--(int) noexcept {
     weekday old(*this);
@@ -744,11 +789,12 @@ class weekday {
     return old;
   }
   constexpr weekday& operator+=(const days& value) noexcept {
-    int w = (static_cast<int>(__wd_) + static_cast<int>(value.count())) % 7;
-    if (w < 0) {
-      w += 7;
+    long long count = value.count() % 7;
+    if (count < 0) {
+      count += 7;
     }
-    __wd_ = static_cast<unsigned char>(w);
+    __wd_ = static_cast<unsigned char>(
+        (static_cast<long long>(__wd_) + count) % 7);
     return *this;
   }
   constexpr weekday& operator-=(const days& value) noexcept { return *this += -value; }

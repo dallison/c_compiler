@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 
 #if 1
@@ -168,7 +169,100 @@ STATIC bool IsWidthModifier(const ConversionFormat* fmt) {
   return fmt->modifier == kModWidth || fmt->modifier == kModWidthFast;
 }
 
-STATIC void WriteInt(unsigned long long v, bool is_unsigned, void* ptr, ConversionFormat* fmt) {
+STATIC int IntegerWidth(const ConversionFormat* fmt) {
+  if (IsWidthModifier(fmt)) {
+    return fmt->modifier_width;
+  }
+  switch (fmt->modifier) {
+    case kModChar:
+      return 8;
+    case kModShort:
+      return 16;
+    case kModLong:
+      return (int)(sizeof(long) * 8);
+    case kModLongLong:
+      return 64;
+    case kModSize_t:
+      return (int)(sizeof(size_t) * 8);
+    case kModPtrdiff_t:
+      return (int)(sizeof(ptrdiff_t) * 8);
+    default:
+      return (int)(sizeof(int) * 8);
+  }
+}
+
+STATIC bool IntegerIsUnsigned(bool is_unsigned, const ConversionFormat* fmt) {
+  if (fmt->modifier == kModSize_t) {
+    return true;
+  }
+  if (fmt->modifier == kModPtrdiff_t || fmt->modifier == kModIntMax) {
+    return false;
+  }
+  return is_unsigned;
+}
+
+// `magnitude` is the parsed absolute value. A negative signed result is
+// returned as a two's-complement bit pattern in the low `width` bits.
+STATIC unsigned long long FitInteger(unsigned long long magnitude,
+                                     bool is_unsigned, bool negative,
+                                     bool overflow, int width) {
+  unsigned long long umax = width >= 64 ? ~0ULL : ((1ULL << width) - 1ULL);
+  if (is_unsigned) {
+    if (overflow || (!negative && magnitude > umax) ||
+        (negative && magnitude > umax)) {
+      errno = ERANGE;
+      return umax;
+    }
+    if (!negative || magnitude == 0) {
+      return magnitude;
+    }
+    if (width >= 64) {
+      return 0ULL - magnitude;
+    }
+    return (umax + 1ULL - magnitude) & umax;
+  }
+  unsigned long long smax = umax >> 1;
+  unsigned long long min_bits = width >= 64 ? (1ULL << 63) : (1ULL << (width - 1));
+  if (overflow || (!negative && magnitude > smax) ||
+      (negative && magnitude > smax + 1ULL)) {
+    errno = ERANGE;
+    return negative ? min_bits : smax;
+  }
+  if (!negative) {
+    return magnitude;
+  }
+  if (magnitude == smax + 1ULL) {
+    return min_bits;
+  }
+  return 0ULL - magnitude;
+}
+
+STATIC void PushDigit(unsigned long long* value, int base_or_shift, int digit,
+                      bool multiply, bool* overflow) {
+  if (*overflow) {
+    return;
+  }
+  unsigned long long unit = (unsigned long long)base_or_shift;
+  unsigned long long add = (unsigned long long)digit;
+  if (multiply) {
+    if (*value > (~0ULL - add) / unit) {
+      *overflow = true;
+      return;
+    }
+    *value = *value * unit + add;
+    return;
+  }
+  if (base_or_shift >= 64 || *value > (~0ULL >> base_or_shift)) {
+    *overflow = true;
+    return;
+  }
+  *value = (*value << base_or_shift) | add;
+}
+
+STATIC void WriteInt(unsigned long long v, bool is_unsigned, bool negative,
+                     bool overflow, void* ptr, ConversionFormat* fmt) {
+  v = FitInteger(v, IntegerIsUnsigned(is_unsigned, fmt), negative, overflow,
+                 IntegerWidth(fmt));
   if (IsWidthModifier(fmt)) {
     switch (fmt->modifier_width) {
       case 8:
@@ -265,6 +359,7 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
   bool negative = false;
   bool prefix_ok = false;
   bool prefix_done = false;
+  bool overflow = false;
   while (length < max_length) {
     int ch = get(data);
     if (ch == EOF) {
@@ -283,7 +378,7 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
       switch (base) {
         case 8:
           if (ch >= '0' && ch <= '7') {
-            v = v << 3 | ch - '0';
+            PushDigit(&v, 3, ch - '0', false, &overflow);
             digits++;
           } else {
             unget(ch, data);
@@ -293,7 +388,7 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
           break;
         case 10:
           if (isdigit(ch)) {
-            v = v * 10 + ch - '0';
+            PushDigit(&v, 10, ch - '0', true, &overflow);
             digits++;
           } else {
             unget(ch, data);
@@ -302,10 +397,8 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
           }
           break;
         case 16:
-          if (ch == '0') {
-            if (!prefix_done) {
-              prefix_ok = true;
-            }
+          if (ch == '0' && !prefix_done) {
+            prefix_ok = true;
             digits++;
           } else if (prefix_ok && (ch == 'X' || ch == 'x')) {
             prefix_ok = false;
@@ -313,11 +406,10 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
             digits = 0;
           } else if (isxdigit(ch)) {
             char uch = toupper(ch);
-            if (uch >= 'A') {
-              v = v << 4 | uch - 'A' + 10;
-            } else {
-              v = v << 4 | ch - '0';
-            }
+            int digit = uch >= 'A' ? uch - 'A' + 10 : ch - '0';
+            PushDigit(&v, 4, digit, false, &overflow);
+            prefix_ok = false;
+            prefix_done = true;
             digits++;
           } else {
             unget(ch, data);
@@ -334,7 +426,7 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
             prefix_done = true;
             digits = 0;
           } else if (ch == '0' || ch == '1') {
-            v = v << 1 | ch - '0';
+            PushDigit(&v, 1, ch - '0', false, &overflow);
             digits++;
           } else {
             unget(ch, data);
@@ -344,10 +436,8 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
           break;
         // No base specified, determine prefix
         case 0:
-          if (ch == '0') {
-            if (!prefix_done) {
-              prefix_ok = true;
-            }
+          if (ch == '0' && !prefix_done) {
+            prefix_ok = true;
             digits++;
           } else if (prefix_ok && (ch == 'X' || ch == 'x')) {
             prefix_ok = false;
@@ -362,7 +452,7 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
           } else if (prefix_ok) {
             base = 8;
             if (ch >= '0' && ch <= '7') {
-              v = v << 3 | ch - '0';
+              PushDigit(&v, 3, ch - '0', false, &overflow);
               digits++;
             } else {
               unget(ch, data);
@@ -370,7 +460,7 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
               goto done;
             }
           } else if (isdigit(ch)) {
-            v = v * 10 + ch - '0';
+            PushDigit(&v, 10, ch - '0', true, &overflow);
             base = 10;
             digits++;
           } else {
@@ -383,11 +473,8 @@ STATIC bool ConvertDecimal(Getter get, Ungetter unget, int base, bool is_unsigne
     }
   }
 done:
-  if (negative) {
-    v = -v;
-  }
   if (!fmt->suppress) {
-    WriteInt(v, is_unsigned, ptr, fmt);
+    WriteInt(v, is_unsigned, negative, overflow, ptr, fmt);
   }
   return digits > 0;
 }
@@ -398,6 +485,7 @@ STATIC bool ReadPointer(Getter get, Ungetter unget, void* data, void* ptr, Conve
   unsigned long long v = 0;
   bool prefix_done = false;
   bool prefix_ok = false;
+  bool overflow = false;
   int null_index = 1;
   bool is_null = false;
   const char null_literal[] = "(null)";
@@ -416,20 +504,17 @@ STATIC bool ReadPointer(Getter get, Ungetter unget, void* data, void* ptr, Conve
       is_null = true;
       continue;
     }
-    if (ch == '0') {
-      if (!prefix_done) {
-        prefix_ok = true;
-      }
+    if (ch == '0' && !prefix_done) {
+      prefix_ok = true;
     } else if (prefix_ok && (ch == 'X' || ch == 'x')) {
       prefix_ok = false;
       prefix_done = true;
     } else if (isxdigit(ch)) {
       char uch = toupper(ch);
-      if (uch > 'A') {
-        v = v << 4 | uch - 'A' + 10;
-      } else {
-        v = v << 4 | ch - '0';
-      }
+      int digit = uch >= 'A' ? uch - 'A' + 10 : ch - '0';
+      PushDigit(&v, 4, digit, false, &overflow);
+      prefix_ok = false;
+      prefix_done = true;
     } else if (is_null) {
       if (null_index == sizeof(null_literal) - 1) {
         v = 0;
@@ -445,6 +530,10 @@ STATIC bool ReadPointer(Getter get, Ungetter unget, void* data, void* ptr, Conve
       break;
     }
     
+  }
+  if (overflow) {
+    v = ~0ULL;
+    errno = ERANGE;
   }
   if (!fmt->suppress) {
     *(void**)ptr = (void*)v;
@@ -879,7 +968,7 @@ STATIC int Scanf(Getter get, Ungetter unget, void* data, const char* format, va_
           break;
         case 'n':
           // Number of input characters consumed so far.
-          WriteInt((unsigned long long)input.count, false, ptr, &fmt);
+          WriteInt((unsigned long long)input.count, false, false, false, ptr, &fmt);
           p++;
          break;
         case '[': {
