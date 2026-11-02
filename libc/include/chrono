@@ -947,7 +947,7 @@ class month_day_last {
   constexpr explicit month_day_last(const chrono::month& m) noexcept : __m_(m) {}
   constexpr chrono::month month() const noexcept { return __m_; }
   constexpr chrono::day day() const noexcept {
-    static constexpr unsigned char __days[] = {31, 28, 31, 30, 31, 30,
+    static constexpr unsigned char __days[] = {31, 29, 31, 30, 31, 30,
                                                31, 31, 30, 31, 30, 31};
     return chrono::day{__days[static_cast<unsigned>(__m_) - 1]};
   }
@@ -1018,7 +1018,12 @@ class year_month_day_last {
   constexpr chrono::year year() const noexcept { return __y_; }
   constexpr chrono::month month() const noexcept { return __mdl_.month(); }
   constexpr chrono::month_day_last month_day_last() const noexcept { return __mdl_; }
-  constexpr chrono::day day() const noexcept { return __mdl_.day(); }
+  constexpr chrono::day day() const noexcept {
+    if (static_cast<unsigned>(month()) == 2u && !__y_.is_leap()) {
+      return chrono::day{28};
+    }
+    return __mdl_.day();
+  }
   constexpr year_month_day_last& operator+=(const months& value) noexcept {
     const year_month ym = year_month{__y_, __mdl_.month()} + value;
     __y_ = ym.year();
@@ -1727,8 +1732,16 @@ constexpr year_month_day __civil_from_days(days day_count) {
                         chrono::day(d)};
 }
 
+constexpr unsigned __weekday_index(days::rep day_count) noexcept {
+  days::rep index = (day_count + 4) % 7;
+  if (index < 0) {
+    index += 7;
+  }
+  return static_cast<unsigned>(index);
+}
+
 constexpr weekday __weekday_from_days(days day_count) {
-  return weekday{static_cast<unsigned>((day_count.count() + 4) % 7)};
+  return weekday{__weekday_index(day_count.count())};
 }
 
 constexpr int __months_from_year_month(int year_value, unsigned month_value) {
@@ -1745,7 +1758,7 @@ inline sys_days __sys_days_from_indexed_weekday(int year_value, unsigned month_v
                                                 unsigned wd, unsigned index) {
   const days::rep first_count =
       __days_from_civil(year_value, month_value, 1u).count();
-  const unsigned first_wd = static_cast<unsigned>((first_count + 4) % 7);
+  const unsigned first_wd = __weekday_index(first_count);
   int delta = static_cast<int>(wd) - static_cast<int>(first_wd);
   if (delta < 0) {
     delta += 7;
@@ -1781,7 +1794,7 @@ inline sys_days __sys_days_from_last_weekday(int year_value, unsigned month_valu
   }
   const days::rep last_count =
       __days_from_civil(year_value, month_value, last_day).count();
-  const unsigned last_wd = static_cast<unsigned>((last_count + 4) % 7);
+  const unsigned last_wd = __weekday_index(last_count);
   int delta = static_cast<int>(wd) - static_cast<int>(last_wd);
   if (delta > 0) {
     delta -= 7;

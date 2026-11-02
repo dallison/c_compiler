@@ -1683,6 +1683,12 @@ static size_t ConstexprPCodeArgumentSize(TypeRecord* type) {
       TypeIsFunction(type)) {
     return 8;
   }
+  // The pcode callee places a class argument at its exact type size, with no
+  // padding between parameters. Rounding a one-byte class up to a word puts
+  // the next argument in that padding, so the callee reads it as zero.
+  if (TypeIsStructOrUnion(type) && type->size > 0) {
+    return (size_t)type->size;
+  }
   return type->size < 4 ? 4 : type->size;
 }
 
