@@ -1,6 +1,10 @@
 # Bazel output directories and symlinks
 /bazel-*
 
+# Machine-local Bazel flags (e.g. build --config=apple_silicon)
+user.bazelrc
+
+
 # CMake out-of-tree build directories
 /build/
 /cmake-build*/

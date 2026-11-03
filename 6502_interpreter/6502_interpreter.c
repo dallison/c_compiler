@@ -1978,7 +1978,7 @@ SET_FLAGS(interpreter->reg = *(addr));
 
 #define ALU_OP_ZP_INDIRECT(op) {\
   uint16_t addr = OP8();\
-  uint8_t value = INDIRECT(addr);\
+  uint8_t value = *INDIRECT_ADDR(addr);\
   SET_FLAGS(interpreter->a op##= value);\
   INC_PC(2);\
 }

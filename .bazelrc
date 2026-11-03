@@ -1,0 +1,14 @@
+# Host/exec tools (davecc used by genrules) miscompile libc headers when built
+# at -c opt: typedefs and #define stop working. Keep host tools on fastbuild.
+build --host_compilation_mode=fastbuild
+
+# Apple Silicon. Opt in with --config=apple_silicon, or put that line in a
+# gitignored user.bazelrc (see try-import below). Forces native arm64 host/exec
+# tools so a Rosetta shell does not build x86_64 davecc.
+build:apple_silicon --cpu=darwin_arm64
+build:apple_silicon --host_cpu=darwin_arm64
+build:apple_silicon --features=oso_prefix_is_pwd
+
+# Machine-local overrides (not checked in), e.g.:
+#   build --config=apple_silicon
+try-import %workspace%/user.bazelrc
