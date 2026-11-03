@@ -2438,6 +2438,83 @@ static void AddSubIntegerLoop(W65C02Generator* g, IRNode* node,
   SetAddrMode(dest, dest_mode);
 }
 
+// Byte registers occupy one zero-page location.  __b0+1 is the next
+// register, not the high half of __b0, so a multi-byte add must widen a
+// narrower operand instead of reading past it.
+static int ZeroPageValueBytes(TargetInstruction* inst) {
+  switch ((W65C02Opcode)inst->opcode) {
+    case W65C02_OP(expr1):
+    case W65C02_OP(bvarreg):
+      return 1;
+    case W65C02_OP(expr2):
+    case W65C02_OP(ivarreg):
+      return 2;
+    case W65C02_OP(expr4):
+    case W65C02_OP(lvarreg):
+    case W65C02_OP(exprf):
+    case W65C02_OP(fvarreg):
+    case W65C02_OP(exprd):
+    case W65C02_OP(dvarreg):
+      return 4;
+    case W65C02_OP(expr8):
+    case W65C02_OP(xvarreg):
+      return 8;
+    default:
+      return -1;
+  }
+}
+
+static TargetInstruction* WidenForArithmetic(W65C02Generator* g,
+                                             TargetInstruction* src,
+                                             IRNode* src_node, int dest_size) {
+  int inst_size = ZeroPageValueBytes(src);
+  AddressingMode mode = GetAddrMode(src);
+  bool indirect = mode == kAddrModeIndirect || mode == kAddrModeIndirectIndexed;
+  int src_size = inst_size;
+  // An indirect operand is a pointer to the value.  A one-byte variable is
+  // two bytes of address, and the byte after the variable is unrelated.
+  if (indirect && src_node != NULL && src_node->type != NULL) {
+    src_size = Sizeof(src_node->type);
+  } else if (src_node != NULL && src_node->type != NULL && inst_size > 0) {
+    int ir_size = Sizeof(src_node->type);
+    if (ir_size > 0 && ir_size < inst_size) {
+      src_size = ir_size;
+    }
+  }
+  if (src_size < 1 || src_size >= dest_size) {
+    return src;
+  }
+  bool is_signed = false;
+  if (src_node != NULL && src_node->type != NULL &&
+      Sizeof(src_node->type) == src_size) {
+    is_signed = TypeIsSigned(src_node->type);
+  }
+  TargetInstruction* dest =
+      TempRegister(g, src_node != NULL ? src_node->type : NULL, dest_size);
+  AddReloadPoint(g, src);
+  for (int i = 0; i < src_size; i++) {
+    SetIndexReg(g, src, dest, i);
+    lda(g, src, i);
+    sta(g, dest, i);
+  }
+  if (is_signed) {
+    andi(g, 0x80);
+    TargetInstruction* positive =
+        NewInstruction(W65C02_OP(label), kAddrModeImplied);
+    EmitResolvedBranch(g, W65C02_OP(beq), positive);
+    ldai(g, 255);
+    Emit(g, positive);
+  } else {
+    ldai(g, 0);
+  }
+  for (int i = src_size; i < dest_size; i++) {
+    SetIndexReg(g, dest, dest, i);
+    sta(g, dest, i);
+  }
+  AddSpillPoint(g, dest);
+  return dest;
+}
+
 static TargetInstruction* AddSubInteger(W65C02Generator* g, IRNode* node,
                                         W65C02Opcode op, W65C02Opcode carry_ctl,
                                         int size, TargetInstruction* dest,
@@ -3502,10 +3579,14 @@ static void LowerExpression(W65C02Generator* g, IRNode* node) {
 
   switch (op) {
     case IR_OP(addi):
+      ops[0] = WidenForArithmetic(g, ops[0], node->inputs.value.p[0], size);
+      ops[1] = WidenForArithmetic(g, ops[1], node->inputs.value.p[1], size);
       inst = AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), size, dest,
                            ops[0], ops[1]);
       break;
     case IR_OP(adda):
+      ops[0] = WidenForArithmetic(g, ops[0], node->inputs.value.p[0], 2);
+      ops[1] = WidenForArithmetic(g, ops[1], node->inputs.value.p[1], 2);
       inst = AddSubInteger(g, node, W65C02_OP(adc), W65C02_OP(clc), 2, dest,
                            ops[0], ops[1]);
       break;
@@ -3519,10 +3600,14 @@ static void LowerExpression(W65C02Generator* g, IRNode* node) {
       break;
 
     case IR_OP(subi):
+      ops[0] = WidenForArithmetic(g, ops[0], node->inputs.value.p[0], size);
+      ops[1] = WidenForArithmetic(g, ops[1], node->inputs.value.p[1], size);
       inst = AddSubInteger(g, node, W65C02_OP(sbc), W65C02_OP(sec), size, dest,
                            ops[0], ops[1]);
       break;
     case IR_OP(suba):
+      ops[0] = WidenForArithmetic(g, ops[0], node->inputs.value.p[0], 2);
+      ops[1] = WidenForArithmetic(g, ops[1], node->inputs.value.p[1], 2);
       inst = AddSubInteger(g, node, W65C02_OP(sbc), W65C02_OP(sec), 2, dest,
                            ops[0], ops[1]);
       break;

@@ -53,3 +53,4 @@ tolower
 toupper
 _ZNSt6localeC1Ev
 _ZNSt15basic_streambufIcSt17char_traits_char_E5imbueERKSt6locale
+_ZNSt15__fd_ostreambuf6xsputnEPKci

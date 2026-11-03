@@ -28,7 +28,12 @@ __paged_rom_init:
   JSR copy_mailbox
   LDA #1
   STA __paged_ready
+  ; Extra images are ROM. Their constructors store into this bank, and
+  ; those stores do not stick. The patched call they used to make hung
+  ; startup for every program, including ones that never use C++.
+#ifndef PAGED_EXTRA
   JSR run_init_array
+#endif
 init_done:
   RTS
 
@@ -96,26 +101,37 @@ init_loop:
   CMP #%hi(__init_array_end)
   BEQ init_arrays_done
 init_call:
+  ; The address has to live in zero page. Patching the JSR operand would
+  ; be a store into this bank, and every image except a sideways-RAM
+  ; image 0 ignores stores.
   LDY #0
   LDA (__t0), Y
-  STA init_jsr+1
+  STA __t2
   INY
   LDA (__t0), Y
-  STA init_jsr+2
-  JSR init_jsr
+  STA __t3
   CLC
   LDA __t0
   ADC #2
   STA __t0
-  BCC init_loop
+  BCC init_saved
   INC __t0+1
+init_saved:
+  LDA __t0
+  PHA
+  LDA __t0+1
+  PHA
+  JSR init_go
+  PLA
+  STA __t0+1
+  PLA
+  STA __t0
   JMP init_loop
 init_arrays_done:
   RTS
 
-init_jsr:
-  .byte 0x20, 0x00, 0x00
-  RTS
+init_go:
+  JMP (__t2)
 
 .comm __paged_heap_start, 2
 .comm __paged_heap_limit, 2

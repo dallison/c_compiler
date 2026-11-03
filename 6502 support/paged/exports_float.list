@@ -6,6 +6,3 @@ pf_general
 pf_hex
 pf_scientific
 pf_strtod
-strtod
-strtof
-strtold

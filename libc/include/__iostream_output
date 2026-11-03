@@ -16,6 +16,7 @@ class __fd_ostreambuf : public basic_streambuf<char, char_traits<char>> {
  protected:
   int_type overflow(int_type c = traits_type::eof()) override;
   int sync() override;
+  streamsize xsputn(const char_type* s, streamsize n) override;
 
  private:
   static const int __buffer_size_ = 64;

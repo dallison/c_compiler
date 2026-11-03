@@ -52,3 +52,4 @@ strtok
 strtok_r
 write
 strnlen
+memalignment

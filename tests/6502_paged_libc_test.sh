@@ -101,7 +101,7 @@ if "0xf4" not in text:
 print("bank switch ok")
 PY
 
-for extra in libm math_a math_b cxx stdio float; do
+for extra in libm math_a math_b cxx stdio float strtod; do
   python3 - "$WORK/libc6502_paged_$extra.bin" "$extra" <<'PY'
 import sys
 image = open(sys.argv[1], "rb").read()

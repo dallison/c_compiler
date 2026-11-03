@@ -3,7 +3,7 @@
 
 // Main-RAM side of a call into the sideways libc.
 //
-// All seven images share one physical socket. Bits 0-3 of the ROM select
+// All eight images share one physical socket. Bits 0-3 of the ROM select
 // latch are that socket. Bits 4-6 are the virtual image (0 = the language
 // ROM MOS sees, 1 = libm, 2 = math_a, 3 = math_b, 4 = C++, 5 = printf
 // and scanf, 6 = float). Bit 7 is the Master's ANDY overlay and is left
@@ -115,7 +115,7 @@ gate_ptr_ok:
   LDA __libc_gate_vec+1
   STA gate_call+2
   JSR gate_call
-  JSR __libc_paged_leave
+  JSR __libc_paged_unwind
   PLA
   STA __libc_gate_vec+1
   PLA
@@ -264,10 +264,18 @@ __libc_paged_load_select:
 .global __libc_paged_enter
 
 // A is the virtual image. X and Y pass through to the callee.
-// At the TSX below, 0x101,X is Y, then X, the previous &F4, the previous
-// &FE30, and the target select. Those last three stay for leave. Leave
-// pushes X and Y again before its own TSX, so it reads &F4 at 0x103,X,
-// the previous latch at 0x104,X, and the target at 0x105,X.
+//
+// The user stubs reach leave with JMP. Leave expects the stack, top
+// first, to be the previous &F4, the previous &FE30, and the target
+// select, with the caller's return address under those three. Pushing
+// the three after this routine was entered would leave them on top of
+// that return, and RTS would pop them as the return address. Park the
+// return in main RAM, push the three, switch the bank, then push the
+// return again. The cross-image gate uses __libc_paged_unwind instead,
+// because it still has its own cleanup to run.
+//
+// Leave pushes X and Y before its TSX, so it reads &F4 at 0x103,X, the
+// previous latch at 0x104,X, and the target at 0x105,X.
 __libc_paged_enter:
   PHA
   TXA
@@ -283,6 +291,14 @@ __libc_paged_enter:
   STA __libc_virt_id
   JSR __libc_paged_load_select
   STA __libc_virt_select
+  ; The caller's return is on top. Hold it while the bank state is pushed
+  ; underneath, with interrupts off so the parked address stays put.
+  SEI
+  PLA
+  STA __libc_enter_ret
+  PLA
+  STA __libc_enter_ret+1
+  LDA __libc_virt_select
   PHA
   LDA PAGED_ROMSEL
   PHA
@@ -290,14 +306,12 @@ __libc_paged_enter:
   PHA
   TXA
   PHA
-  TYA
-  PHA
   TSX
-  LDA 0x104, X
-  CMP 0x105, X
+  ; 0x101,X is the saved X. Then &F4, &FE30, and the target select.
+  LDA 0x103, X
+  CMP 0x104, X
   BEQ enter_irq
-  SEI
-  LDA 0x105, X
+  LDA 0x104, X
   STA PAGED_ROMSEL
   LDA __libc_socket
   STA PAGED_ROM_ID
@@ -310,9 +324,11 @@ enter_sei:
   SEI
 enter_restore:
   PLA
-  TAY
-  PLA
   TAX
+  LDA __libc_enter_ret+1
+  PHA
+  LDA __libc_enter_ret
+  PHA
   RTS
 
 .section ".text.__libc_paged_leave", "ax", @progbits
@@ -368,6 +384,66 @@ leave_pop:
   PLA
   RTS
 
+// JSR'd by the cross-image gate. The return address is on top of the three
+// bank bytes enter left behind. Pop those, restore the previous image, and
+// return to the gate. X and Y are the callee's result.
+__libc_paged_unwind:
+  SEI
+  PLA
+  STA __libc_enter_ret
+  PLA
+  STA __libc_enter_ret+1
+  TXA
+  PHA
+  TYA
+  PHA
+  TSX
+  LDA 0x104, X
+  CMP 0x105, X
+  BEQ unwind_which
+  LDA 0x104, X
+  STA PAGED_ROMSEL
+  LDA 0x103, X
+  STA PAGED_ROM_ID
+unwind_which:
+  LDA PAGED_ROMSEL
+  AND #$0f
+  CMP __libc_socket
+  BNE unwind_outside
+  LDA PAGED_ROMSEL
+  LSR
+  LSR
+  LSR
+  LSR
+  AND #7
+  STA __libc_virt_id
+  LDA PAGED_ROMSEL
+  STA __libc_virt_select
+  JMP unwind_irq
+unwind_outside:
+  LDA #0
+  STA __libc_virt_id
+unwind_irq:
+  LDA __libc_virt_id
+  BNE unwind_sei
+  CLI
+  JMP unwind_pop
+unwind_sei:
+  SEI
+unwind_pop:
+  PLA
+  TAY
+  PLA
+  TAX
+  PLA
+  PLA
+  PLA
+  LDA __libc_enter_ret+1
+  PHA
+  LDA __libc_enter_ret
+  PHA
+  RTS
+
 // Heap bounds are filled in by the user-program link (_end and
 // __bbc_stack_cap). The three stream slots are unused: stdin, stdout,
 // and stderr are the words at &09E0 in the cassette buffer, which the
@@ -407,3 +483,5 @@ __libc_gate_vec:
   .hword __libc_paged_ensure_init
   .hword __libc_paged_gate
   .hword __libc_mos_call
+__libc_enter_ret:
+  .hword 0

@@ -22,6 +22,25 @@ int __fd_ostreambuf::overflow(int c) {
   return c;
 }
 
+streamsize __fd_ostreambuf::xsputn(const char* s, streamsize n) {
+  streamsize put =
+      basic_streambuf<char, char_traits<char>>::xsputn(s, n);
+#if defined(__6502__)
+  // cout is not tied to a C FILE, and returning from main does not flush
+  // it. A newline is the usual end of a line on this machine, so write the
+  // buffer through before the cursor moves on.
+  for (streamsize i = 0; i < put; i++) {
+    if (s[i] == '\n') {
+      sync();
+      break;
+    }
+  }
+#else
+  (void)put;
+#endif
+  return put;
+}
+
 int __fd_ostreambuf::sync() {
   char* current = pbase();
   char* end = pptr();

@@ -13,16 +13,24 @@
 
 // Numeric facet formatting and parsing are kept separate from the locale core
 // so streambuf vtables do not retain the entire numeric implementation.
+//
+// A paged 6502 link of this file keeps the char integer inserter. The wide
+// and floating conversions do not fit in a 16 KiB sideways bank, and their
+// references would still have to be satisfied when the whole object is
+// pulled for put_long.
 
+#if !defined(DAVECC_PAGED_LIBC)
 extern "C" char* __PrintFloatFormat(double, int, char*, size_t);
 extern "C" char* __PrintScientificFormat(double, int, char*, size_t);
 extern "C" char* __PrintGeneralFormat(double, int, char*, size_t);
 extern "C" char* __PrintFloatFormatL(long double, int, char*, size_t);
 extern "C" char* __PrintScientificFormatL(long double, int, char*, size_t);
 extern "C" char* __PrintGeneralFormatL(long double, int, char*, size_t);
+#endif
 
 namespace std {
 
+#if !defined(DAVECC_PAGED_LIBC)
 // ftoa writes from the end of `buf` and returns a pointer to the first
 // character of the NUL-terminated result (the same contract printf uses).
 static char* __locale_format_double(char* buf, size_t cap, ios_base& f,
@@ -64,6 +72,7 @@ static char* __locale_format_ldouble(char* buf, size_t cap, ios_base& f,
   *len = strlen(start);
   return start;
 }
+#endif
 
 ostreambuf_iterator __write_chars(ostreambuf_iterator out, ios_base& str,
                                   char fill, const char* buf, size_t len) {
@@ -95,6 +104,7 @@ ostreambuf_iterator __write_chars(ostreambuf_iterator out, ios_base& str,
   return out;
 }
 
+#if !defined(DAVECC_PAGED_LIBC)
 wostreambuf_iterator __write_wchars(wostreambuf_iterator out, ios_base& str,
                                     wchar_t fill, const wchar_t* buf,
                                     size_t len) {
@@ -125,12 +135,14 @@ wostreambuf_iterator __write_wchars(wostreambuf_iterator out, ios_base& str,
   }
   return out;
 }
+#endif
 
 ostreambuf_iterator __write_c_string(ostreambuf_iterator out, ios_base& str,
                                      char fill, const char* buf, size_t len) {
   return __write_chars(out, str, fill, buf, len);
 }
 
+#if !defined(DAVECC_PAGED_LIBC)
 wostreambuf_iterator __write_wc_string(wostreambuf_iterator out, ios_base& str,
                                        wchar_t fill, const char* buf,
                                        size_t len) {
@@ -161,6 +173,7 @@ wostreambuf_iterator __write_wc_string(wostreambuf_iterator out, ios_base& str,
   }
   return out;
 }
+#endif
 
 template <class CharT, class Iter>
 bool __read_digit(CharT c, int base, int& value) {
@@ -290,6 +303,7 @@ static size_t __locale_format_ll(char* buf, long long v, int base,
   return __itoa_longlong(buf, v, static_cast<unsigned char>(base), flags);
 }
 
+#if !defined(DAVECC_PAGED_LIBC)
 static size_t __locale_format_ull(char* buf, unsigned long long v, int base,
                                   bool uppercase) {
   unsigned char flags = 0;
@@ -302,6 +316,7 @@ static size_t __locale_format_ull(char* buf, unsigned long long v, int base,
 static size_t __locale_format_ptr(char* buf, const void* v) {
   return __ptrtoa(buf, v);
 }
+#endif
 
 static size_t __insert_grouping(char* buf, size_t len, size_t cap,
                                  const string& grouping, char thousands_sep) {
@@ -378,6 +393,7 @@ static size_t __apply_numpunct_char(char* buf, size_t len, size_t cap,
   return len;
 }
 
+#if !defined(DAVECC_PAGED_LIBC)
 static size_t __apply_numpunct_wchar(char* buf, size_t len, size_t cap,
                                      ios_base& str, int base) {
   const numpunct<wchar_t>& np = use_facet<numpunct<wchar_t>>(str.getloc());
@@ -400,8 +416,10 @@ static size_t __apply_numpunct_wchar(char* buf, size_t len, size_t cap,
   }
   return len;
 }
+#endif
 
 
+#if !defined(DAVECC_PAGED_LIBC)
 ostreambuf_iterator __davecc_classic_put_bool(ostreambuf_iterator s, ios_base& f, char fill, bool v) {
   const numpunct<char>& np = use_facet<numpunct<char>>(f.getloc());
   if ((f.flags() & ios_base::boolalpha) != 0) {
@@ -410,14 +428,17 @@ ostreambuf_iterator __davecc_classic_put_bool(ostreambuf_iterator s, ios_base& f
   }
   return __davecc_classic_put_long(s, f, fill, static_cast<long>(v ? 1 : 0));
 }
+#endif
 
 ostreambuf_iterator __davecc_classic_put_long(ostreambuf_iterator s, ios_base& f, char fill, long v) {
   return __davecc_classic_put_llong(s, f, fill, static_cast<long long>(v));
 }
 
+#if !defined(DAVECC_PAGED_LIBC)
 ostreambuf_iterator __davecc_classic_put_ulong(ostreambuf_iterator s, ios_base& f, char fill, unsigned long v) {
   return __davecc_classic_put_ullong(s, f, fill, static_cast<unsigned long long>(v));
 }
+#endif
 
 ostreambuf_iterator __davecc_classic_put_llong(ostreambuf_iterator s, ios_base& f, char fill, long long v) {
   char buf[__DAVECC_ITOA_CAPACITY(long long) + 32];
@@ -446,6 +467,7 @@ ostreambuf_iterator __davecc_classic_put_llong(ostreambuf_iterator s, ios_base& 
   return __write_c_string(s, f, fill, buf, len);
 }
 
+#if !defined(DAVECC_PAGED_LIBC)
 ostreambuf_iterator __davecc_classic_put_ullong(ostreambuf_iterator s, ios_base& f, char fill, unsigned long long v) {
   char buf[__DAVECC_ITOA_CAPACITY(unsigned long long) + 32];
   ios_base::fmtflags flags = f.flags();
@@ -1009,5 +1031,6 @@ wistreambuf_iterator __davecc_classic_wget_ptr(
   v = reinterpret_cast<void*>(strtoull(buf, nullptr, 16));
   return in;
 }
+#endif
 
 }  // namespace std

@@ -11,6 +11,10 @@ extern char* __PrintHexFormat(double f, int precision, int upper,
                               int alternate, char* buf, unsigned size);
 extern double strtod(const char* str, char** endptr);
 
+double atof(const char* str) {
+  return strtod(str, 0);
+}
+
 char* pf_fixed(double f, int precision, char* buf, unsigned size) {
   return __PrintFloatFormat(f, precision, buf, size);
 }

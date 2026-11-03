@@ -37,10 +37,12 @@
 #define PAGED_VIRT_CXX 4
 #define PAGED_VIRT_STDIO 5
 #define PAGED_VIRT_FLOAT 6
+#define PAGED_VIRT_STRTOD 7
 
-// How many images ensure_init brings up.
+// How many images ensure_init brings up. Image 7 is strtod: the float
+// printers and the 4096-bit converter do not fit in one bank.
 #ifndef PAGED_ROM_COUNT
-#define PAGED_ROM_COUNT 7
+#define PAGED_ROM_COUNT 8
 #endif
 
 // Title of image 0. rom_header.s places "DaveCC libc" here; the socket

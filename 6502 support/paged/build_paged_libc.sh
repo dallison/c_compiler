@@ -10,7 +10,7 @@
 # <outdir>/bbc.ld. Each shim is its own section, so --gc-sections drops
 # the ones the program does not call.
 #
-# The seven images share one socket. Bits 4-6 of the ROM select latch
+# The eight images share one socket. Bits 4-6 of the ROM select latch
 # choose the image; startup scans for the socket.
 set -euo pipefail
 
@@ -39,7 +39,7 @@ cflags=(-target 6502 -c -DDAVECC_BBC -DDAVECC_PAGED_LIBC
 # libc, libm, two halves of math_extra, the C++ bodies, printf/scanf,
 # and the float printers those call. Virtual image 0 is the language ROM.
 asmflags=(-target 6502 -c -I"$sup" -I"$paged" -I"$out/gen" \
-          -DPAGED_ROM_COUNT=7)
+          -DPAGED_ROM_COUNT=8)
 
 runtime_srcs=(
   enter.s var_addr.s var_value.s load_indirect.s load_indirect8.s
@@ -82,6 +82,8 @@ libc_srcs=(
 for src in "${libc_srcs[@]}"; do
   "$davecc" "${cflags[@]}" "$root/libc/$src" -o "$out/libc/$(basename "${src%.c}").o"
 done
+# fflush calls this. open_memstream itself does not fit in the bank.
+"$davecc" "${cflags[@]}" "$paged/memstream_sync.c" -o "$out/libc/memstream_sync.o"
 
 # What does not fit beside the first image. libm, the rest of the C
 # library that is not already exported, and the C++ bodies that live in
@@ -94,6 +96,7 @@ extra_c=(
   ctype.c
   cxx_new.c cxx_guard.c cxx_rtti.c
   exit.c davecc_lifecycle.c
+  free_sized.c
 )
 extra_cc=(
   iostream.cc iostream_cin.cc iostream_cout.cc iostream_cerr.cc
@@ -148,7 +151,7 @@ done
 # those sections and --gc-sections could no longer drop an unused stub.
 shim_members=("$out/gen/shim_funcs.o" "$out/gen/shim_runtime.o")
 
-"$davecc" "${asmflags[@]}" -DPAGED_SKIP_STREAMS "$paged/rom_init.s" \
+"$davecc" "${asmflags[@]}" -DPAGED_SKIP_STREAMS -DPAGED_EXTRA "$paged/rom_init.s" \
   -o "$out/gen/rom_init_extra.o"
 
 # name, rom index, title, cross-export list, cross rom, subset flag, objects...
@@ -322,23 +325,26 @@ link_extra math_b 3 "DaveCC math" "$paged/exports_libm.list" 1 subset \
 cxx_objs=()
 for src in iostream iostream_cin iostream_cout iostream_cerr iostream_clog \
            iostream_input cxx_new cxx_new_overloads cxx_guard cxx_rtti \
-           exception stdexcept locale bad_cast ctype exit davecc_lifecycle; do
+           exception stdexcept locale bad_cast ctype exit davecc_lifecycle \
+           free_sized; do
   cxx_objs+=("$out/extra/$src.o")
 done
 # Subset: exporting every locale method overflows the bank. The list is
 # the public entry points. Methods iostream calls stay in the image.
 link_extra cxx 4 "DaveCC c++" "$paged/exports.list" 0 subset "${cxx_objs[@]}"
 
-# The float printers do not fit beside the formatter. They live in the
-# next image, under names the assembly can call across the gate.
+# The float printers do not fit beside the formatter, and strtod does not
+# fit beside the printers. Image 7 holds the converter. pf_strtod and atof
+# call it through the gate.
 for src in ftoa fpfuncs strtod; do
   "$davecc" "${cflags[@]}" "$root/libc/$src.c" -o "$out/extra/$src.o"
 done
+link_extra strtod 7 "DaveCC strtod" none 0 subset \
+  "$out/extra/fpfuncs.o" "$out/extra/strtod.o"
 "$davecc" "${cflags[@]}" "$paged/float_export.c" -o "$out/extra/float_export.o"
 link_extra float 6 "DaveCC float" \
-  "0:$paged/exports.list,4:$paged/exports_cxx.list" 0 all \
-  "$out/extra/float_export.o" "$out/extra/ftoa.o" "$out/extra/fpfuncs.o" \
-  "$out/extra/strtod.o"
+  "0:$paged/exports.list,4:$paged/exports_cxx.list,7:$paged/exports_strtod.list" 0 all \
+  "$out/extra/float_export.o" "$out/extra/ftoa.o" "$out/extra/fpfuncs.o"
 "$davecc" "${asmflags[@]}" "$paged/printf.s" -o "$out/extra/printf.o"
 link_extra stdio 5 "DaveCC stdio" \
   "0:$paged/exports.list,6:$paged/exports_float.list" 0 all \
@@ -437,7 +443,7 @@ if end > 0xC000:
 print("paged libc _end = 0x%x (%d bytes free)" % (end, 0xC000 - end))
 PY
 
-for name in libm math_a math_b cxx stdio float; do
+for name in libm math_a math_b cxx stdio float strtod; do
   python3 - "$out/libc6502_paged_$name.elf" "$out/libc6502_paged_$name.bin" <<'PY'
 import struct
 import sys
@@ -481,4 +487,4 @@ print("wrote %s (%d bytes)" % (bin_path, len(image)))
 PY
 done
 
-echo "Wrote $out/libc6502_paged.elf and the libm, math, c++, stdio, and float images"
+echo "Wrote $out/libc6502_paged.elf and the libm, math, c++, stdio, float, and strtod images"

@@ -1863,6 +1863,7 @@ genrule(
         "libc/libc6502_paged_cxx.bin",
         "libc/libc6502_paged_stdio.bin",
         "libc/libc6502_paged_float.bin",
+        "libc/libc6502_paged_strtod.bin",
     ],
     cmd = """
 set -euo pipefail
@@ -1884,6 +1885,7 @@ cp "$$work/libc6502_paged_math_b.bin" "$(location libc/libc6502_paged_math_b.bin
 cp "$$work/libc6502_paged_cxx.bin" "$(location libc/libc6502_paged_cxx.bin)"
 cp "$$work/libc6502_paged_stdio.bin" "$(location libc/libc6502_paged_stdio.bin)"
 cp "$$work/libc6502_paged_float.bin" "$(location libc/libc6502_paged_float.bin)"
+cp "$$work/libc6502_paged_strtod.bin" "$(location libc/libc6502_paged_strtod.bin)"
 """,
 )
 
@@ -6068,6 +6070,24 @@ sh_test(
     srcs = ["tests/6502_indirect_copy_test.sh"],
     args = ["$(rootpath :davecc)"],
     data = [":davecc"],
+)
+
+sh_test(
+    name = "6502_byte_index_test",
+    srcs = ["tests/6502_byte_index_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "$(rootpath :6502)",
+        "$(rootpath :support_rom_65c02)",
+    ],
+    data = [
+        ":6502",
+        ":davecc",
+        ":libc_6502",
+        ":libc_65c02",
+        ":libc_headers",
+        ":support_rom_65c02",
+    ],
 )
 
 sh_test(
