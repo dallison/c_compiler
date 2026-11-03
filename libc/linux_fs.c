@@ -13,7 +13,9 @@
 #define AT_EMPTY_PATH 0x1000
 #define STATX_BASIC_STATS 0x7ff
 #define O_PATH 0x200000
+#ifndef O_CLOEXEC
 #define O_CLOEXEC 0x80000
+#endif
 
 typedef struct {
   int64_t seconds;

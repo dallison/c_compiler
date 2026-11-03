@@ -111,7 +111,7 @@ void StringDelete(String* str);
 char StringCharAt(String* str, size_t index);
 
 // Comparison.
-bool StringEqual(String* str1, const char* str2);
+bool StringEqual(const String* str1, const char* str2);
 int StringCompare(String* str1, const char* str2);
 bool StringEqualString(String* str1, String* str2);
 int StringCompareString(String* str1, String* str2);

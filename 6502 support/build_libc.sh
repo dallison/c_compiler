@@ -92,6 +92,7 @@ libc_srcs=(
   "libc/exit.c"
   "libc/fclose.c"
   "libc/fflush.c"
+  "libc/memstream.c"
   "libc/fgetc.c"
   "libc/fgets.c"
   "libc/fopen.c"

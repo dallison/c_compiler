@@ -25,6 +25,7 @@
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <malloc/malloc.h>
+#include <sys/sysctl.h>
 #endif
 #include "codegen.h"
 #include "constexpr.h"
@@ -550,6 +551,17 @@ static const char* MapHostMachineToArch(const char* machine) {
   return NULL;
 }
 
+#ifdef __APPLE__
+// uname -m is x86_64 under Rosetta; prefer the real hardware arch so host
+// tools still select AArch64 Darwin (needed for //:libc_aarch64_darwin).
+static bool DarwinHostIsAppleSilicon(void) {
+  int arm64 = 0;
+  size_t size = sizeof(arm64);
+  return sysctlbyname("hw.optional.arm64", &arm64, &size, NULL, 0) == 0 &&
+         arm64 != 0;
+}
+#endif
+
 static const char* HostDefaultFromNames(const char* sysname,
                                         const char* machine) {
   const char* arch = MapHostMachineToArch(machine);
@@ -558,8 +570,18 @@ static const char* HostDefaultFromNames(const char* sysname,
   }
   bool darwin = sysname != NULL && strcmp(sysname, "Darwin") == 0;
   bool linux = sysname != NULL && strcmp(sysname, "Linux") == 0;
-  if (darwin && strcmp(arch, "aarch64") == 0) {
-    return "aarch64-apple-darwin-davecc";
+  if (darwin) {
+#ifdef __APPLE__
+    if (DarwinHostIsAppleSilicon() || strcmp(arch, "aarch64") == 0) {
+      return "aarch64-apple-darwin-davecc";
+    }
+#else
+    if (strcmp(arch, "aarch64") == 0) {
+      return "aarch64-apple-darwin-davecc";
+    }
+#endif
+    // Intel Macs: bare arch until x86_64 Darwin Mach-O is supported.
+    return arch;
   }
   if (linux && (strcmp(arch, "x86_64") == 0 || strcmp(arch, "aarch64") == 0 ||
                 strcmp(arch, "arm") == 0 || strcmp(arch, "riscv") == 0 ||
@@ -4460,11 +4482,19 @@ static void DeclarePredefinedTypesAndMacros(Preprocessor* preprocessor) {
       "#define __asm__ asm\n"
       "#define __volatile__ volatile\n"
       "#define __attribute __attribute__\n"
-      "#define __inline inline\n"
-      "#define __signed signed\n"
-      "#define __restrict restrict\n"
-      "#define __restrict__ restrict\n"
-      "\n");
+      "#define __signed signed\n");
+  // Darwin's <sys/cdefs.h> defines __inline / __restrict itself.  Emitting our
+  // own copies first triggers -Wmacro-redefined when compiling -fnative code
+  // that includes the SDK.  The lexer already recognizes those tokens as
+  // keywords, so the macros are only needed for freestanding / non-native
+  // targets.
+  if (!compiler->native_object) {
+    StringAppend(code,
+        "#define __inline inline\n"
+        "#define __restrict restrict\n"
+        "#define __restrict__ restrict\n");
+  }
+  StringAppend(code, "\n");
   if (CompilerIsCXX()) {
     StringAppend(code,
                  "extern \"C\" int __cxa_guard_acquire(unsigned long long*);\n"

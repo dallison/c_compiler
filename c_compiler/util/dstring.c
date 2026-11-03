@@ -114,9 +114,14 @@ char StringCharAt(String* str, size_t index) {
 }
 
 // Comparion.
-bool StringEqual(String* str1, const char* str2) {
-  LazyInit(str1);
-  return str1 != NULL && strcmp(str1->value, str2) == 0;
+bool StringEqual(const String* str1, const char* str2) {
+  if (str1 == NULL || str2 == NULL) {
+    return false;
+  }
+  // Uninitialized Strings have a NULL value; LazyInit would point them at an
+  // empty buffer.  Treat that as "" without mutating through a const pointer.
+  const char* value = str1->value != NULL ? str1->value : "";
+  return strcmp(value, str2) == 0;
 }
 
 bool StringEqualCaseBlind(String* str1, const char* str2) {

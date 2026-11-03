@@ -2226,10 +2226,10 @@ static uint64_t TypeInternHash(const TypeRecord* type, Qualifiers quals) {
   h = TypeInternMix(h, TypeInternHashArguments(type->template_arguments));
   if (type->declarator == kDeclArray || type->declarator == kDeclVector) {
     h = TypeInternMix(h, (uint64_t)type->info.array.size.fixed);
-  } else if (TypeIsStructOrUnion(type) ||
+  } else if (TypeIsStructOrUnion((TypeRecord*)type) ||
              type->declarator == kDeclMemberPointer) {
     h = TypeInternMix(h, (uintptr_t)type->info.struct_info);
-  } else if (TypeIsEnum(type)) {
+  } else if (TypeIsEnum((TypeRecord*)type)) {
     h = TypeInternMix(h, (uintptr_t)type->info.enum_info);
   } else if (type->declarator == kDeclFunction) {
     // A function type used as a template argument is interned.  The
@@ -2369,12 +2369,12 @@ static bool TypeInternEqual(const TypeRecord* type, Qualifiers quals,
         a->template_parameter_index != b->template_parameter_index) {
       return false;
     }
-  } else if (TypeIsStructOrUnion(type) ||
+  } else if (TypeIsStructOrUnion((TypeRecord*)type) ||
              type->declarator == kDeclMemberPointer) {
     if (type->info.struct_info != canonical->info.struct_info) {
       return false;
     }
-  } else if (TypeIsEnum(type)) {
+  } else if (TypeIsEnum((TypeRecord*)type)) {
     if (type->info.enum_info != canonical->info.enum_info) {
       return false;
     }

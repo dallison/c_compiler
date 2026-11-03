@@ -301,10 +301,18 @@ LINUX_COPTS = select({
     "//conditions:default": [],
 })
 
+# Match APIs used by the host tools (open_memstream, utimensat).  Apple's
+# default deployment target is older than 10.13 and triggers availability
+# warnings without an explicit minimum.
+MACOS_COPTS = select({
+    "@platforms//os:macos": ["-mmacosx-version-min=10.13"],
+    "//conditions:default": [],
+})
+
 COMMON_COPTS = [
     "-std=c99",
     "-fPIC",
-] + LINUX_COPTS
+] + LINUX_COPTS + MACOS_COPTS
 
 COMMON_INCLUDES = [
     "6502_interpreter",

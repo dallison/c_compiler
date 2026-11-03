@@ -4159,10 +4159,10 @@ static TargetInstruction* LowerSignExtend(ARMGenerator* g, IRNode* node) {
   // long long source.
   int keep_bits = node->type != NULL ? (int)node->type->size * 8 : 32;
   bool already_extended =
-      (value->opcode == ARM_OP(ldrsb) && keep_bits >= 8) ||
-      (value->opcode == ARM_OP(ldrsh) && keep_bits >= 16) ||
-      (value->opcode == ARM_OP(ldrb) && keep_bits > 8) ||
-      (value->opcode == ARM_OP(ldrh) && keep_bits > 16);
+      (value->opcode == (TargetOpcode)ARM_OP(ldrsb) && keep_bits >= 8) ||
+      (value->opcode == (TargetOpcode)ARM_OP(ldrsh) && keep_bits >= 16) ||
+      (value->opcode == (TargetOpcode)ARM_OP(ldrb) && keep_bits > 8) ||
+      (value->opcode == (TargetOpcode)ARM_OP(ldrh) && keep_bits > 16);
   if (already_extended) {
     return FinishSignExtend(g, node, value);
   }
