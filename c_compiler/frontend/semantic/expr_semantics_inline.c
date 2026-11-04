@@ -58,6 +58,8 @@ static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mod
 static void FindNRVOLocal(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static bool FunctionTypeIsBeingAnalyzed(TypeRecord* func_type);
+static bool IsStdCoroutineHandleControlMethod(FunctionInfo* func);
+static bool MemberBodyCallsMemberFunction(FunctionInfo* func);
 static bool InliningBlockedByCalleeOrCompilerFlags(FunctionInfo* func);
 static bool InliningBlockedByCallerTemplateParameters(void);
 static bool InliningBlockedByCallerSharingTemplateBody(void);
@@ -886,6 +888,73 @@ static bool InliningBlockedByUnsafeBody(FunctionInfo* func) {
   ASTNodeVisit(func->body, FindInlineUnsafeLocal, 0, &found);
   return found;
 }
+
+// `std::coroutine_handle<Promise>::{done,resume,destroy}`.  These only load
+// the frame prefix and, for resume and destroy, indirect-call the function
+// pointer stored there.  They do not call other member functions, which is
+// the case the member-inlining ban exists for.
+static bool IsStdCoroutineHandleControlMethod(FunctionInfo* func) {
+  if (func == NULL || func->symbol == NULL || func->cxx_member_owner == NULL) {
+    return false;
+  }
+  if (!StringEqual(&func->symbol->name, "done") &&
+      !StringEqual(&func->symbol->name, "resume") &&
+      !StringEqual(&func->symbol->name, "destroy")) {
+    return false;
+  }
+  Struct* owner = func->cxx_member_owner;
+  // A specialization's tag is `coroutine_handle<Promise>`, not the template
+  // name alone.
+  const char* tag = owner->tag_name != NULL ? owner->tag_name->value : NULL;
+  static const char kHandle[] = "coroutine_handle";
+  const size_t kHandleLen = sizeof(kHandle) - 1;
+  if (tag == NULL || strncmp(tag, kHandle, kHandleLen) != 0 ||
+      (tag[kHandleLen] != '\0' && tag[kHandleLen] != '<')) {
+    return false;
+  }
+  Symbol* tag_symbol = owner->tag_symbol;
+  Namespace* ns = tag_symbol != NULL ? tag_symbol->namespace_ : NULL;
+  return ns != NULL && StringEqual(&ns->name, "std");
+}
+
+// True when an analyzed body calls another member function.  Cloning that
+// call takes the address of a member access that is already an address.
+static void FindMemberFunctionCall(ASTNode* node, void* data, int child_id,
+                                   VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node->op != AST_OP(call)) {
+    return;
+  }
+  ASTNode* callee = ((VectorASTNode*)node)->left;
+  if (callee == NULL || callee->op != AST_OP(identifier)) {
+    return;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)callee)->symbol;
+  if (symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type) &&
+      symbol->type->info.function.cxx_member_owner != NULL) {
+    *(bool*)data = true;
+  }
+}
+
+static bool MemberBodyCallsMemberFunction(FunctionInfo* func) {
+  if (func->body == NULL) {
+    return false;
+  }
+  bool found = false;
+  ASTNodeVisit(func->body, FindMemberFunctionCall, 0, &found);
+  return found;
+}
+
+// The instantiation owns this body.  Analyzing the primary template's body
+// would rewrite every later specialization.
+static bool CoroutineHandleControlBodyIsPrivate(FunctionInfo* func) {
+  if (func->template_origin == NULL || func->template_origin->type == NULL ||
+      !TypeIsFunction(func->template_origin->type)) {
+    return true;
+  }
+  return func->body != func->template_origin->type->info.function.body;
+}
+
 // Returns true when inlining must not proceed (caller should return false).
 static bool InliningBlockedByCalleeOrCompilerFlags(FunctionInfo* func) {
   if (func == NULL || !OptLevel2()) {
@@ -911,12 +980,13 @@ static bool InliningBlockedByCalleeOrCompilerFlags(FunctionInfo* func) {
   }
   // Constructor and destructor bodies are tied to the object's lifetime.
   // Cloning them drops or repeats the body relative to the initializer and
-  // the caller's cleanup.  Other member functions are not inlined either:
-  // a cloned member access is an address (`adda`) that argument lowering
-  // then takes the address of again, and the resulting call reads the wrong
-  // object (`path::compare`, `map` node lookup).
-  if (func->is_constructor || func->is_destructor ||
-      func->cxx_member_owner != NULL) {
+  // the caller's cleanup, except a trivial special member whose body is only
+  // the memberwise copy.  Other member functions are inlined only when the
+  // analyzed body does not call another member: a cloned member access is an
+  // address (`adda`) that argument lowering then takes the address of again
+  // (`path::compare`, `map` node lookup).
+  if ((func->is_constructor || func->is_destructor) &&
+      !func->is_trivial_special_member) {
     return true;
   }
   if (func->symbol != NULL && func->symbol->type != NULL &&
@@ -964,9 +1034,25 @@ static bool EnsureInlinedCalleeBodyIsAnalyzed(FunctionInfo* func) {
   if (func->body == NULL || (func->body->flags & kASTAnalyzed) != 0) {
     return true;
   }
+  // A small member instantiation owns its body, so analyzing it here does not
+  // rewrite the primary template.  Shared template bodies stay deferred.
+  bool private_body = CoroutineHandleControlBodyIsPrivate(func);
+  bool small_body = false;
+  if (private_body && func->body != NULL && func->body->op == AST_OP(compound)) {
+    CompoundStatementASTNode* compound = (CompoundStatementASTNode*)func->body;
+    small_body = compound->statements == NULL ||
+                 compound->statements->length <= 12;
+  }
+  bool early_member =
+      small_body && func->cxx_member_owner != NULL &&
+      !func->is_constructor && !func->is_destructor;
+  bool early_trivial = small_body && func->is_trivial_special_member;
+  bool handle_method = IsStdCoroutineHandleControlMethod(func) && private_body;
   bool analyze_now = func->is_constructor || func->is_destructor ||
-                     compiler->lto;
-  if (func->template_origin != NULL) {
+                     compiler->lto || early_member || early_trivial ||
+                     handle_method;
+  if (func->template_origin != NULL && !early_member && !early_trivial &&
+      !handle_method) {
     analyze_now = false;
   }
   if (!analyze_now) {
@@ -1134,6 +1220,17 @@ bool FunctionCanBeInlined(FunctionInfo* func) {
     return false;
   }
   if (!EnsureInlinedCalleeBodyIsAnalyzed(func)) {
+    return false;
+  }
+  // Member-function inlining stays limited to coroutine_handle::{done,resume,
+  // destroy}.  A cloned member access is already an address, and argument
+  // lowering takes that address again (path::compare, map node lookup).
+  // Inlining the rest of a class also duplicates bodies into every caller.
+  if (func->cxx_member_owner != NULL &&
+      !IsStdCoroutineHandleControlMethod(func)) {
+    return false;
+  }
+  if (func->cxx_member_owner != NULL && MemberBodyCallsMemberFunction(func)) {
     return false;
   }
   // Analyzing the body can mark it noinline (`__builtin_alloca`).

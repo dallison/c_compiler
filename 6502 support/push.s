@@ -2,6 +2,7 @@
 // Functions are emitted in per-symbol ELF sections.
 
 .global __pusha
+.global __pushas
 .global __pushxy
 .global __pushxy0
 .global __pushreg1
@@ -175,8 +176,10 @@ __incsp16:
   JMP __incsp
 
 
-// A: byte to push.
-// Pushed as 2 bytes with top byte 0.
+// A: byte to push as a 2-byte int slot (C integer promotion).
+// __pusha zero-extends (unsigned char / bool / unsigned _BitInt).
+// __pushas sign-extends (signed char / signed _BitInt).
+.global __pushas
 .section ".text.__pusha", "ax", @progbits
 __pusha:
   PHA
@@ -185,6 +188,21 @@ __pusha:
   LDY #0
   STA (__sp),Y
   LDA #0
+  INY
+  STA (__sp),Y
+  RTS
+
+.section ".text.__pushas", "ax", @progbits
+__pushas:
+  PHA
+  JSR __decsp2
+  PLA
+  LDY #0
+  STA (__sp),Y
+  AND #$80
+  BEQ pushas_pos
+  LDA #$ff
+pushas_pos:
   INY
   STA (__sp),Y
   RTS

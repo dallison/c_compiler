@@ -4,7 +4,8 @@
 #include <stdint.h>
 
 // The frame prefix ends at 24 bytes on LP64. A 16-byte-aligned promise starts
-// on the next 16-byte boundary, not at sizeof(prefix).
+// on the next 16-byte boundary, not at sizeof(prefix). 6502 and 65c02 are
+// byte-addressed, so alignas is ignored and alignof stays 1.
 
 struct alignas(16) Promise;
 
@@ -35,7 +36,11 @@ Task aligned_promise() {
 }
 
 int main() {
+#if defined(__6502__)
+  static_assert(alignof(Promise) == 1, "6502 should ignore alignas");
+#else
   static_assert(alignof(Promise) == 16, "alignas did not reach alignof");
+#endif
   Task task = aligned_promise();
   if (!task.handle) {
     return 1;

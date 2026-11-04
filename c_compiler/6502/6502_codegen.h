@@ -536,6 +536,7 @@ typedef struct W65C02Generator {
   Symbol* push_arg8;
   Symbol* push_arg8b;
   Symbol* pusha;
+  Symbol* pushas;
   Symbol* pushxy;
   Symbol* pushxy0;    // Y == 0
   Symbol* pushreg1;

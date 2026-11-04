@@ -2,7 +2,8 @@
 
 // Language ROM header. MOS validates a sideways ROM by reading this
 // image at &8000: two JMP entry points, a type byte with the language
-// and service bits set, and a copyright string containing "(C)".
+// and service bits set, and a copyright pointer that lands on a 0 byte
+// immediately followed by "(C)" (Acorn's &E3AA check).
 //
 // The header section is padded to PAGED_HEADER_SIZE bytes so the vector
 // table that follows it is linked at PAGED_VECTOR_BASE.
@@ -29,6 +30,7 @@ paged_rom_entry:
 #endif
   .asciz "1.00"
 copyright:
+  .byte 0
   .asciz "(C)2026 DaveCC"
   .hword __paged_vectors
 header_end:

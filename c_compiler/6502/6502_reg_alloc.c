@@ -580,6 +580,20 @@ static W65C02RegisterType RegisterTypeFromTypeRecord(TypeRecord* type) {
     return k6502RegTypeB;
   } else if (TypeIsCharFamily(type)) {
     return k6502RegTypeB;
+  } else if (TypeIsBitInt(type)) {
+    // Match storage size: 1-byte _BitInt uses B regs (like char) so the
+    // existing __arg_value1_bN helpers apply; wider widths follow int/long.
+    int bytes = type->size;
+    if (bytes <= 1) {
+      return k6502RegTypeB;
+    }
+    if (bytes <= 2) {
+      return k6502RegTypeI;
+    }
+    if (bytes <= 4) {
+      return k6502RegTypeL;
+    }
+    return k6502RegTypeX;
   } else if (TypeIsLong(type)) {
     return k6502RegTypeL;
   } else if (TypeIsLongLong(type)) {

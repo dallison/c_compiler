@@ -6854,17 +6854,29 @@ static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node, IRNode* input) 
 
 }
 
+static int IntegerTypeBitWidth(TypeRecord* type) {
+  if (type != NULL && TypeIsBitInt(type) && type->bit_width > 0) {
+    return type->bit_width;
+  }
+  return type != NULL ? (int)type->size * 8 : 0;
+}
+
 static IRNode* GenerateSignExtend(Generator* gen, IRNode* from, ASTNode* to) {
-  int diff = to->type->size - from->type->size;  // Difference in bytes.
-  if (diff == 0) {
+  // Use bit_width for _BitInt so e.g. signed _BitInt(5) extends from bit 4,
+  // not from the storage byte's bit 7.
+  int from_bits = IntegerTypeBitWidth(from->type);
+  int to_bits = IntegerTypeBitWidth(to->type);
+  int diff_bits = to_bits - from_bits;
+  int diff_bytes = to->type->size - from->type->size;
+  if (diff_bits == 0 && diff_bytes == 0) {
     return IRSetType(from, to->type);
   }
   
   if (IRIsConst(from)) {
     IRConstant* c = (IRConstant*)from;
     uint64_t value = (uint64_t)c->value.ivalue;
-    if (diff < 0) {
-      int bits = to->type->size * 8;
+    if (diff_bits < 0) {
+      int bits = to_bits;
       uint64_t mask =
           bits == 64 ? ~(uint64_t)0 : ((uint64_t)1 << bits) - 1;
       value &= mask;
@@ -6873,7 +6885,7 @@ static IRNode* GenerateSignExtend(Generator* gen, IRNode* from, ASTNode* to) {
         value |= ~mask;
       }
     } else {
-      int bits = from->type->size * 8;
+      int bits = from_bits;
       uint64_t mask =
           bits == 64 ? ~(uint64_t)0 : ((uint64_t)1 << bits) - 1;
       value &= mask;
@@ -6883,9 +6895,17 @@ static IRNode* GenerateSignExtend(Generator* gen, IRNode* from, ASTNode* to) {
     }
     return GeneratorGetIntConstant(gen, to->type, (int64_t)value);
   }
+  // LowerSignExtend consumes a bit count and converts to bytes; pass the
+  // storage-size delta in bits so the copy loop still matches allocated size.
+  // For equal storage with a narrower BitInt payload, still emit an extend
+  // of the payload width into the destination storage.
+  int emit_bits = diff_bytes != 0 ? diff_bytes * 8 : diff_bits;
+  if (emit_bits == 0) {
+    return IRSetType(from, to->type);
+  }
   return IRSetType(GeneratorEmit(gen,
                        NewIR2(IR_OP(signextendi), from,
-                              GeneratorGetIntConstant(gen, to->type, diff*8))), to->type);
+                              GeneratorGetIntConstant(gen, to->type, emit_bits))), to->type);
 }
 
 static IRNode* GenerateToInt(Generator* gen, ASTNode* node, IROpcode op,

@@ -142,6 +142,10 @@ __libc_paged_ensure_init:
   JSR __libc_paged_find_socket
   LDA #1
   STA __libc_paged_ready
+  // No DaveCC libc ROM: leave socket 0 and skip image init. Calling
+  // init_one on the language ROM BRKs straight into BASIC ("Bad program").
+  LDA __libc_socket
+  BEQ ensure_restore
   LDX #0
 ensure_loop:
   TXA
@@ -152,6 +156,7 @@ ensure_loop:
   INX
   CPX #PAGED_ROM_COUNT
   BNE ensure_loop
+ensure_restore:
   PLA
   TAY
   PLA

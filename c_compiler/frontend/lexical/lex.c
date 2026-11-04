@@ -161,6 +161,9 @@ static CReservedWord c_reserved_words[] = {
 // C++ reserved words and alternative operator spellings.  This table is sorted
 // alphabetically by spelling and is only used when a C++ -std= mode is active.
 static CXXReservedWord cxx_reserved_words[] = {
+  // C23 _BitInt as a C++ extension (Clang-compatible). Sorts before "__*"
+  // because 'B' < '_'.
+  {"_BitInt", TOK(bitint), kLanguageStandardCXX98},
   // GNU keyword aliases.  `__restrict` is not a C++ keyword, but GCC and Clang
   // accept it (and the other `__foo__` spellings) as extensions so that C
   // headers can be included from C++.  These sort before "alignas" because

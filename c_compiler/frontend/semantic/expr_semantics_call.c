@@ -35,6 +35,7 @@
 #include "type_inheritance.h"
 #include "type_special_member.h"
 #include "type_template.h"
+#include "type_core.h"
 
 static void RenumberVectorChildren(VectorASTNode* node);
 static bool CurrentFunctionIsCXXCtorOrDtor(void);
@@ -3875,6 +3876,137 @@ static void FunctionCallCheckFormatAndPrintf(VectorASTNode* node, bool call_ok) 
   }
 }
 
+static int AlignUpSize(int value, int alignment) {
+  if (alignment <= 1) {
+    return value;
+  }
+  return (value + alignment - 1) & ~(alignment - 1);
+}
+
+/* Byte offset of the promise inside a coroutine frame. Matches
+ * std::__coroutine_promise_offset: sizeof(__coroutine_frame) rounded up to
+ * alignof(Promise). */
+static int CoroutinePromisePrefixOffset(TypeRecord* promise) {
+  TypeRecord* int_type =
+      TypeRecordCalculateSize(NewTypeRecordWithSize(kTypeInt, kQualPlain));
+  TypeRecord* bool_type =
+      TypeRecordCalculateSize(NewTypeRecordWithSize(kTypeBool, kQualPlain));
+  TypeRecord* pointer_type = TypeRecordCalculateSize(NewPointerTo(
+      kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain)));
+  int struct_align = 1;
+  int header = 0;
+  int fields[3][2] = {
+      {int_type->size, TypeRecordAlignment(int_type)},
+      {bool_type->size, TypeRecordAlignment(bool_type)},
+      {pointer_type->size, TypeRecordAlignment(pointer_type)},
+  };
+  for (int i = 0; i < 3; i++) {
+    int size = fields[i][0] > 0 ? fields[i][0] : 1;
+    int align = fields[i][1] > 0 ? fields[i][1] : 1;
+    if (i == 2) {
+      /* resume and destroy function pointers. */
+      for (int slot = 0; slot < 2; slot++) {
+        if (align > struct_align) {
+          struct_align = align;
+        }
+        header = AlignUpSize(header, align) + size;
+      }
+      continue;
+    }
+    if (align > struct_align) {
+      struct_align = align;
+    }
+    header = AlignUpSize(header, align) + size;
+  }
+  header = AlignUpSize(header, struct_align);
+  int promise_align =
+      promise != NULL ? TypeRecordAlignment(promise) : 1;
+  if (promise_align <= 0) {
+    promise_align = 1;
+  }
+  return AlignUpSize(header, promise_align);
+}
+
+static bool IsStdCoroutineHandleFromPromise(FunctionInfo* func) {
+  if (func == NULL || func->symbol == NULL || func->cxx_member_owner == NULL ||
+      !StringEqual(&func->symbol->name, "from_promise")) {
+    return false;
+  }
+  Struct* owner = func->cxx_member_owner;
+  const char* tag = owner->tag_name != NULL ? owner->tag_name->value : NULL;
+  static const char kHandle[] = "coroutine_handle";
+  const size_t kHandleLen = sizeof(kHandle) - 1;
+  if (tag == NULL || strncmp(tag, kHandle, kHandleLen) != 0 ||
+      (tag[kHandleLen] != '\0' && tag[kHandleLen] != '<')) {
+    return false;
+  }
+  Symbol* tag_symbol = owner->tag_symbol;
+  Namespace* ns = tag_symbol != NULL ? tag_symbol->namespace_ : NULL;
+  return ns != NULL && StringEqual(&ns->name, "std");
+}
+
+/* `coroutine_handle<P>::from_promise(p)` is `p`'s address minus the frame
+ * prefix. Build that pointer as a handle prvalue so the call, the offset
+ * helper, and the handle constructor are not emitted. */
+static ASTNode* TryLowerCoroutineFromPromise(VectorASTNode* node) {
+  if (node->left == NULL || node->left->op != AST_OP(identifier) ||
+      node->children == NULL || node->children->length != 1) {
+    return NULL;
+  }
+  Symbol* symbol = ((IdentifierASTNode*)node->left)->symbol;
+  if (symbol == NULL || symbol->type == NULL ||
+      !TypeIsFunction(symbol->type) ||
+      !IsStdCoroutineHandleFromPromise(&symbol->type->info.function)) {
+    return NULL;
+  }
+  TypeRecord* handle_type = symbol->type->next;
+  if (handle_type == NULL || !TypeIsStructOrUnion(handle_type) ||
+      handle_type->info.struct_info == NULL) {
+    return NULL;
+  }
+  StructMember* handle_member =
+      FindStructMemberByName(handle_type->info.struct_info, "__handle");
+  if (handle_member == NULL) {
+    return NULL;
+  }
+  Symbol* formal = symbol->type->info.function.prototype.length > 0
+                       ? symbol->type->info.function.prototype.value.p[0]
+                       : NULL;
+  TypeRecord* promise_type = formal != NULL ? formal->type : NULL;
+  if (promise_type != NULL && TypeIsReference(promise_type)) {
+    promise_type = promise_type->next;
+  }
+  int offset = CoroutinePromisePrefixOffset(promise_type);
+  SourceLocation location = node->base.location;
+  ASTNode* promise = ASTNodeMove(node->children->value.p[0]);
+  if (!TypeIsPointer(promise->type)) {
+    promise = NewAnalyzedBuiltinAddressOf(promise, location);
+  }
+  TypeRecord* char_type = NewTypeRecordWithSize(kTypeChar, kQualPlain);
+  TypeRecord* char_pointer = NewPointerTo(kQualPlain, char_type);
+  ASTNode* as_char = AnalyzeExpression(
+      NewCastASTNode(char_pointer, location, promise));
+  ASTNode* delta = NewIntConstantASTNode(
+      offset, NewTypeRecordWithSize(kTypeInt, kQualPlain), location);
+  ASTNode* subtracted = AnalyzeExpression(NewBinaryASTNode(
+      AST_OP(minus), TypeRecordCopy(char_pointer), location, as_char, delta));
+  TypeRecord* void_pointer = NewPointerTo(
+      kQualPlain, NewTypeRecordWithSize(kTypeVoid, kQualPlain));
+  ASTNode* address = AnalyzeExpression(
+      NewCastASTNode(void_pointer, location, subtracted));
+  Vector* designators = NewVector();
+  VectorAppend(designators, NewStructMemberDesignator(handle_member));
+  ASTNode* designated = NewDesignatedInitializerASTNode(
+      designators, NewExpressionInitializerASTNode(address, location),
+      location);
+  Vector* initializers = NewVector();
+  VectorAppend(initializers, designated);
+  ASTNode* braced = NewBracedInitializerASTNode(
+      initializers, TypeRecordCopy(handle_type), location);
+  return CXXFunctionalConstructionSpliceCompoundLiteralAndAnalyze(
+      node, TypeRecordCopy(handle_type), braced);
+}
+
 // Caller contracts and inlining run last; may replace the call in its parent.
 static ASTNode* FunctionCallTryLowerContractsOrInline(VectorASTNode* node,
                                                       TypeRecord* subtype,
@@ -3883,6 +4015,12 @@ static ASTNode* FunctionCallTryLowerContractsOrInline(VectorASTNode* node,
   if (call_ok && node->caller_contract_function != NULL &&
       compiler->constant_evaluation_required_depth == 0) {
     return LowerVirtualCallerContracts(node);
+  }
+  if (call_ok) {
+    ASTNode* from_promise = TryLowerCoroutineFromPromise(node);
+    if (from_promise != NULL) {
+      return from_promise;
+    }
   }
   if (call_ok && TypeIsFunction(node->left->type) &&
       CalleeNamesItsFunction(node->left)) {

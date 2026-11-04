@@ -71,8 +71,10 @@ __push_arg1:
   LDY #0
 __push_arg1b:
   JSR __argaddr
+// Char/bool/_BitInt(≤8) are passed in a 2-byte slot (GetPushedSize == 2).
+// The old __decsp1 path left the stack one byte short of the caller's cleanup.
 push_frame1:
-  JSR __decsp1
+  JSR __decsp2
 #ifdef __65c02__
   LDA (__t0)
 #else
@@ -94,6 +96,11 @@ push_frame1:
   LDY __nmos_tmp
   PLP
 #endif
+  // High byte: zero-extend. Signed values that need the high byte are
+  // pushed via __pushas from expression/constant paths instead.
+  LDA #0
+  LDY #1
+  STA (__sp),Y
   RTS
 
 .section ".text.__push_var2", "ax", @progbits

@@ -1092,7 +1092,8 @@ int TypeRecordAlignment(TypeRecord* record) {
     return 1;
   }
   if (compiler->alignment == 1) {
-    // No alignment necessary for this target.
+    // A byte-addressed target has no alignment. alignas is ignored, so
+    // alignof stays 1 even when a class asks for a stricter boundary.
     return 1;
   }
   switch (record->declarator) {

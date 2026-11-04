@@ -602,6 +602,7 @@ void W65C02GeneratorInit(W65C02Generator* g, Generator* gen) {
   RUNTIME_SYM(push_arg8);
   RUNTIME_SYM(push_arg8b);
   RUNTIME_SYM(pusha);
+  RUNTIME_SYM(pushas);
   RUNTIME_SYM(pushxy);
   RUNTIME_SYM(pushxy0);
   RUNTIME_SYM(pushreg1);
@@ -5493,7 +5494,14 @@ static TargetInstruction* PushExpression(W65C02Generator* g, IRNode* node,
   
   switch (size) {
     case 1:
+      // C promotes char/_BitInt(≤8) to int: 2-byte stack slot.  Signed
+      // sources must sign-extend the high byte (__pushas); unsigned/bool
+      // zero-extend (__pusha).  Using __pusha for signed left the high byte
+      // 0, so a later 16-bit read of the slot saw 0x00FF for -1.
       lda(g, inst, 0);
+      if (node->type != NULL && TypeIsSigned(node->type)) {
+        return jsr(g, g->pushas);
+      }
       return jsr(g, g->pusha);     // Pushed as 2 bytes.
     case 2:
       return Emit(g, NewInstruction1(W65C02_OP(pushreg2), inst, kAddrModeImplied));
@@ -5522,6 +5530,9 @@ static TargetInstruction* PushConstant(W65C02Generator* g, IRNode* node, int siz
                   W65C02_OP(lda),
                   ByteConst(g, value & 0xff),
                   kAddrModeImmediate));
+      if (node->type != NULL && TypeIsSigned(node->type)) {
+        return jsr(g, g->pushas);
+      }
       return jsr(g, g->pusha);           // Pushes 2 bytes.
       break;
     case 2:
@@ -8185,6 +8196,17 @@ static RegisterVariableSet* TypeToRegisterVarSet(W65C02Generator* g, TypeRecord*
     reg_type = k6502RegTypeF;
   } else if (TypeIsCharFamily(type) || TypeIsBool(type)) {
     reg_type = k6502RegTypeB;
+  } else if (TypeIsBitInt(type)) {
+    int bytes = type->size;
+    if (bytes <= 1) {
+      reg_type = k6502RegTypeB;
+    } else if (bytes <= 2) {
+      reg_type = k6502RegTypeI;
+    } else if (bytes <= 4) {
+      reg_type = k6502RegTypeL;
+    } else {
+      reg_type = k6502RegTypeX;
+    }
   } else if (TypeIsLong(type) || TypeIsMemberPointerAggregate(type)) {
     reg_type = k6502RegTypeL;
   } else if (TypeIsLongLong(type)) {
