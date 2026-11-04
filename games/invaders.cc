@@ -364,7 +364,8 @@ class Text {
   static void centre(u8 row, u8 colour, const char* line);
 };
 
-// The top row reads "SC 0000 L3 W1"; hud_digits fills in the numbers.
+// SCORE on the left, WAVE in the middle and LIVES on the right of the top
+// row; hud_digits draws the numbers under them.
 class Hud {
  public:
   static void labels();
@@ -493,12 +494,12 @@ static u16 rng_next() {
 void Hud::labels() {
   bbc::colour(128);
   bbc::colour(ColGreen);
-  bbc::tab(0, 0);
-  Text::write("SC");
-  bbc::tab(8, 0);
-  Text::write("L");
-  bbc::tab(11, 0);
-  Text::write("W");
+  bbc::tab(2, 0);
+  Text::write("SCORE");
+  bbc::tab(18, 0);
+  Text::write("WAVE");
+  bbc::tab(33, 0);
+  Text::write("LIVES");
 }
 
 void Hud::banner(const char* line, u8 colour, u8 row) {

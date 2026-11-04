@@ -48,10 +48,10 @@ frame_wait:
   LDA #19
   JMP OSBYTE
 
-// Score (to 9999), lives and wave (to 9) in white beside the labels
-// Hud::labels writes on the top text row: score in text columns 3..6,
-// lives in 9, wave in 12. A text column is two byte columns. Drawing them
-// through OSWRCH cost more than a frame. hud_places is in invaders.cc.
+// Score (to 9999), lives and wave (to 9) in white under the labels
+// Hud::labels writes, at the byte columns in invaders.h. A text column is
+// two byte columns. Drawing them through OSWRCH cost more than a frame.
+// hud_places is in invaders.cc.
 .global hud_digits
 hud_digits:
   LDA score
@@ -124,7 +124,7 @@ hud_glyph:
   CLC
   ADC #2
   STA E_C
-  LDA #0
+  LDA #HUD_ROW
   STA fx_row
   LDA #16
   STA fx_len

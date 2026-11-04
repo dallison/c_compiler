@@ -52,7 +52,9 @@
 // Keys keys_read scans: key_codes and key_masks in invaders.cc.
 #define KEY_COUNT 9
 
-// Byte columns of the score, lives and wave digits on the top row.
-#define HUD_SCORE_COL 6
-#define HUD_LIVES_COL 18
-#define HUD_WAVE_COL 24
+// The HUD's values sit on character row HUD_ROW, each centred under its
+// label on the top row: these are the byte columns of their first digits.
+#define HUD_ROW 1
+#define HUD_SCORE_COL 5
+#define HUD_WAVE_COL 39
+#define HUD_LIVES_COL 70
