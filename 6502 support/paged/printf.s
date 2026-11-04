@@ -3574,6 +3574,8 @@ __sn_store:
 __sn_nospace:
   JMP __sn_store
 
+// The va_list entries have fixed arguments, so unlike the variadic ones they
+// pop them on return, as a compiled C callee would.
 .section ".text.vprintf", "ax", @progbits
 .global vprintf
 .type vprintf, @function
@@ -3595,7 +3597,8 @@ vprintf:
   LDX #0
   LDA #1
   JSR __pf_bind
-  JMP __pf_run
+  JSR __pf_run
+  JMP __incsp4
 
 .section ".text.vfprintf", "ax", @progbits
 .global vfprintf
@@ -3612,7 +3615,8 @@ vfprintf:
   LDX #2
   LDA #1
   JSR __pf_bind
-  JMP __pf_run
+  JSR __pf_run
+  JMP __incsp6
 
 .section ".text.vsprintf", "ax", @progbits
 .global vsprintf
@@ -3640,7 +3644,8 @@ vsprintf:
   LDX #2
   LDA #1
   JSR __pf_bind
-  JMP __pf_run
+  JSR __pf_run
+  JMP __incsp6
 
 .section ".text.vsnprintf", "ax", @progbits
 .global vsnprintf
@@ -3676,7 +3681,8 @@ __vsn_store:
   LDX #4
   LDA #1
   JSR __pf_bind
-  JMP __pf_run
+  JSR __pf_run
+  JMP __incsp8
 __vsn_nospace:
   JMP __vsn_store
 
@@ -3761,7 +3767,8 @@ vscanf:
   LDX #0
   LDA #1
   JSR __pf_bind
-  JMP __pf_scan
+  JSR __pf_scan
+  JMP __incsp4
 
 .section ".text.vfscanf", "ax", @progbits
 .global vfscanf
@@ -3778,7 +3785,8 @@ vfscanf:
   LDX #2
   LDA #1
   JSR __pf_bind
-  JMP __pf_scan
+  JSR __pf_scan
+  JMP __incsp6
 
 .section ".text.vsscanf", "ax", @progbits
 .global vsscanf
@@ -3798,7 +3806,8 @@ vsscanf:
   LDX #2
   LDA #1
   JSR __pf_bind
-  JMP __pf_scan
+  JSR __pf_scan
+  JMP __incsp6
 
 .section ".text.fgetc", "ax", @progbits
 .global fgetc

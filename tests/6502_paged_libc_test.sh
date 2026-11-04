@@ -243,6 +243,45 @@ if bad:
 print("stdio scratch is in main RAM")
 PY
 
+# A fixed-arity callee returning a scalar pops its own arguments; a variadic
+# one leaves them to the caller.
+python3 - "$WORK/stdio.dis" <<'PY'
+import re
+import sys
+pops = {"vprintf": 4, "vfprintf": 6, "vsprintf": 6, "vsnprintf": 8,
+        "vscanf": 4, "vfscanf": 6, "vsscanf": 6,
+        "printf": 0, "fprintf": 0, "sprintf": 0, "snprintf": 0,
+        "scanf": 0, "fscanf": 0, "sscanf": 0}
+bodies = {}
+name = None
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    label = re.match(r"^(\S+):$", line.strip())
+    if label:
+        name = label.group(1)
+        bodies[name] = []
+    elif name is not None:
+        m = re.search(r"\s(jsr|jmp) (\S+)", line)
+        if m:
+            bodies[name].append(m.group(1) + " " + m.group(2))
+bad = []
+for fn, n in pops.items():
+    calls = bodies.get(fn, [])
+    engine = [i for i, c in enumerate(calls) if c.split()[1] in ("__pf_run", "__pf_scan")]
+    if not engine:
+        bad.append(fn + ": no call into the engine")
+        continue
+    i = engine[0]
+    if n == 0:
+        ok = calls[i].startswith("jmp ")
+    else:
+        ok = calls[i].startswith("jsr ") and calls[i + 1:i + 2] == ["jmp __incsp%d" % n]
+    if not ok:
+        bad.append("%s: expected to pop %d bytes, got %s" % (fn, n, calls[i:i + 2]))
+if bad:
+    raise SystemExit("stdio argument cleanup:\n  " + "\n  ".join(bad))
+print("v*printf and v*scanf pop their arguments")
+PY
+
 echo "paged libc test ok"
 
 # The target tuple is the whole command: no -nostdlib, no -T, no archive list.
