@@ -78,7 +78,7 @@
 #define ORIENT_OFF 17
 #define UNGET_BUF_OFF 18
 
-// 126 bytes from PAGED_STDIO_SCRATCH.
+// 129 bytes from PAGED_STDIO_SCRATCH.
 .set __pf_val PAGED_STDIO_SCRATCH+0
 .set __pf_digs PAGED_STDIO_SCRATCH+8
 .set __pf_ndig PAGED_STDIO_SCRATCH+32
@@ -91,6 +91,8 @@
 .set __pf_i PAGED_STDIO_SCRATCH+89
 .set __pf_set PAGED_STDIO_SCRATCH+90
 .set __pf_ftmp PAGED_STDIO_SCRATCH+122
+.set __pf_pfx PAGED_STDIO_SCRATCH+126
+.set __pf_lpad PAGED_STDIO_SCRATCH+127
 
 .section ".text.__pf_engine", "ax", @progbits
 
@@ -906,9 +908,10 @@ __pf_number_rev:
   JSR __pf_reverse
   JSR __pf_lower_digits
 __pf_number_emit:
-  // Prefix length in __t2. Precision zeros in __pf_len.
+  // Prefix length in __pf_pfx (__pf_emit overwrites __t2). Precision
+  // zeros in __pf_len.
   LDA #0
-  STA __t2
+  STA __pf_pfx
   STA __pf_len
   STA __pf_len+1
   LDA __pf_ch
@@ -921,7 +924,7 @@ __pf_number_emit:
   AND #PF_ALT
   BEQ __pf_number_hex_no
   LDA #2
-  STA __t2
+  STA __pf_pfx
 __pf_number_hex_no:
   JMP __pf_number_zpad
 __pf_number_oct:
@@ -939,7 +942,7 @@ __pf_number_oct:
   BEQ __pf_number_zpad
 __pf_number_oct_one:
   LDA #1
-  STA __t2
+  STA __pf_pfx
 __pf_number_zpad:
   LDY #F_PRE
   LDA (__sp),Y
@@ -966,7 +969,7 @@ __pf_number_prec:
 __pf_number_widths:
   JSR __pf_sign_len
   CLC
-  ADC __t2
+  ADC __pf_pfx
   ADC __pf_ndig
   ADC __pf_len
   STA __t0
@@ -974,6 +977,11 @@ __pf_number_widths:
   ADC __pf_len+1
   STA __t0+1
   JSR __pf_pad
+  // The precision zeros reuse __pf_repn, so a left pad keeps its own copy.
+  LDA __pf_repn
+  STA __pf_lpad
+  LDA __pf_repn+1
+  STA __pf_lpad+1
   // Space pad if not left, and not (zero flag with default precision).
   LDY #F_FL
   LDA (__sp),Y
@@ -994,17 +1002,19 @@ __pf_number_sp:
   JSR __pf_spaces
 __pf_number_body:
   JSR __pf_emit_sign
-  LDA __t2
+  LDA __pf_pfx
   CMP #2
   BNE __pf_number_octpfx
   LDA #'0'
   JSR __pf_emit
-  LDA #'x'
   LDY #F_FL
   LDA (__sp),Y
   AND #PF_UPPER
-  BEQ __pf_number_x
+  BEQ __pf_number_lx
   LDA #'X'
+  JMP __pf_number_x
+__pf_number_lx:
+  LDA #'x'
 __pf_number_x:
   JSR __pf_emit
   JMP __pf_number_zflag
@@ -1055,6 +1065,10 @@ __pf_number_left:
   LDA (__sp),Y
   AND #PF_LEFT
   BEQ __pf_number_done
+  LDA __pf_lpad
+  STA __pf_repn
+  LDA __pf_lpad+1
+  STA __pf_repn+1
   JSR __pf_spaces
 __pf_number_done:
   RTS
@@ -2681,6 +2695,7 @@ __sc_set_clear_loop:
   BPL __sc_set_clear_loop
   RTS
 
+// A = character, kept. X and Y are clobbered.
 __sc_set_bit:
   PHA
   LSR A
@@ -2688,11 +2703,13 @@ __sc_set_bit:
   LSR A
   TAX
   PLA
+  PHA
   AND #7
   TAY
   LDA __pf_set,X
   ORA __pf_bits,Y
   STA __pf_set,X
+  PLA
   RTS
 
 __sc_scan_done:
