@@ -26,13 +26,6 @@
 #include "invaders.h"
 
 // Bit-precise ints (C23 _BitInt as a C++ extension): no integer promotions.
-// Play is four dieted coroutines (player / laser / hazards / fleet), each
-// one co_await Frame per vsync, resumed in that order every frame. Keep a
-// single await per coro — a second co_await in fleet overflowed play_pool
-// and smashed ZP (text garbage, quit to BASIC).
-#ifndef INVADERS_USE_CORO
-#define INVADERS_USE_CORO 1
-#endif
 typedef unsigned _BitInt(8) u8;
 typedef _BitInt(8) i8;
 typedef unsigned _BitInt(16) u16;
@@ -304,7 +297,10 @@ extern const u8 key_masks[KEY_COUNT] = {KeyLeft,  KeyLeft,  KeyLeft,
 extern const u16 hud_places[4] = {1000, 100, 10, 1};
 }
 
-#if INVADERS_USE_CORO
+// Play is four dieted coroutines (player / laser / hazards / fleet), each
+// one co_await Frame per vsync, resumed in that order every frame. Keep a
+// single await per coro — a second co_await in fleet overflowed play_pool
+// and smashed ZP (text garbage, quit to BASIC).
 struct Frame {
   bool await_ready() const noexcept { return false; }
   void await_suspend(std::coroutine_handle<>) const noexcept {}
@@ -355,7 +351,6 @@ struct Play {
   Play(const Play&) = delete;
   Play& operator=(const Play&) = delete;
 };
-#endif
 
 class Text {
  public:
@@ -430,7 +425,6 @@ static u8 death_t;
 static u8 wave_t;
 static u8 over_t;
 
-#if INVADERS_USE_CORO
 static Play player_job;
 static Play laser_job;
 static Play hazard_job;
@@ -467,7 +461,6 @@ Play fleet_coro() {
 // Set once per session when all four frames fit in play_pool, so the
 // per-frame resumes skip coroutine_handle::operator bool (1K cycles each).
 static u8 jobs_ok;
-#endif
 
 void Text::write(const char* text) {
   while (*text != 0) {
@@ -887,7 +880,6 @@ void beat_fleet() {
 }
 
 static void play_frame() {
-#if INVADERS_USE_CORO
   if (jobs_ok) {
     player_job.h.resume();
     laser_job.h.resume();
@@ -895,7 +887,6 @@ static void play_frame() {
     fleet_job.h.resume();
     return;
   }
-#endif
   beat_player();
   beat_laser();
   beat_hazards();
@@ -956,23 +947,19 @@ static void session() {
   cannon_x = Metrics::PlayerX;
   bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
   deploy();
-#if INVADERS_USE_CORO
   play_used = 0;
   player_job = player_coro();
   laser_job = laser_coro();
   hazard_job = hazard_coro();
   fleet_job = fleet_coro();
   jobs_ok = player_job.h && laser_job.h && hazard_job.h && fleet_job.h;
-#endif
   while (tick() == 0) {
   }
-#if INVADERS_USE_CORO
   jobs_ok = 0;
   player_job = Play{};
   laser_job = Play{};
   hazard_job = Play{};
   fleet_job = Play{};
-#endif
 }
 
 void run() {
