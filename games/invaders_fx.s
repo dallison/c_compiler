@@ -1,12 +1,15 @@
-// Per-frame Space Invaders work for invaders.cc: keys, the fleet's march,
-// the laser, the bombs, and their collisions. invaders.cc keeps the rules
-// (scoring, lives, waves, timers) and calls these once per vsync.
+// Space Invaders play for invaders.cc: each frame's keys, cannon, fleet
+// march, laser, bombs, saucer, and their collisions, and what can happen
+// on top of that in a frame of play: firing, dropping a bomb, the fleet's
+// new bounds after a kill, and the score. davecc's C++ took 4K-12K cycles
+// for each of those, enough to push a busy frame past the vsync.
+// invaders.cc keeps the rules, the state and tables, and everything else.
 //
-// Lives in .text.blitter with its state so it stays below &3000 next to
-// screen1.s. Units are screen1's: byte columns (4 px), character rows
-// (8 px), and pixel rows. The fleet is 5 ranks x 11 columns; alien i is
-// rank i / 11, column i % 11, at byte column origin + 5 * column and
-// character row origin + 2 * rank.
+// Lives in .text.blitter so it stays below &3000 next to screen1.s, with
+// shot_pat, which fx_strip reads while the shadow screen is mapped. Units
+// and the fleet's layout are in invaders.h.
+
+#include "invaders.h"
 
 .set OSBYTE 0xfff4
 .set SYSVIA_LATCH 0xfe40
@@ -28,190 +31,17 @@
 .set E_RANK 0x84
 .set E_X 0x85
 
-.set SHOT_LEN 6
-.set SHOT_STEP 4
-.set SHOT_SPAN 10
-.set SHOT_START 202
-.set SHOT_TOP 28
-.set BOMB_STEP 2
-.set BOMB_LEN 8
-.set GROUND_Y 232
-.set PLAYER_Y 208
-.set PLAYER_ROW 26
-.set UFO_Y 32
-.set UFO_ROW 4
-.set BUNKER_TOP 176
-.set BUNKER_END 192
-.set KEY_FIRE 4
-.set CANNON_MIN 8
-.set CANNON_MAX 296
-.set CANNON_STEP 2
-.set UFO_MIN 4
-.set UFO_MAX 300
-.set UFO_STEP 2
-.set HUD_SCORE_COL 6
-.set HUD_LIVES_COL 18
-.set HUD_WAVE_COL 24
-
 .section ".text.blitter", "ax", @progbits
 
-// ---------------------------------------------------------------- state
-
-.global key_bits
-key_bits:
-.byte 0
-
-.global alive
-alive:
-.byte 0
-.global fl_on
-fl_on:
-.space 55
-.global fl_col
-fl_col:
-.byte 0
-.global fl_row
-fl_row:
-.byte 0
-fl_old_col:
-.byte 0
-fl_old_row:
-.byte 0
-// Next alien the sweep redraws. 255 between sweeps, which also makes
-// "index < fl_mover" mean "already at the new origin" for every alien.
-.global fl_mover
-fl_mover:
-.byte 255
-fl_dir:
-.byte 1
-fl_dx:
-.byte 0
-fl_dy:
-.byte 0
-fl_frame:
-.byte 0
-.global fl_lo
-fl_lo:
-.byte 0
-.global fl_hi
-fl_hi:
-.byte 10
-.global fl_bot
-fl_bot:
-.byte 4
-.global fl_quota
-fl_quota:
-.byte 1
-.global fl_landed
-fl_landed:
-.byte 0
-
-.global cannon_x
-cannon_x:
-.hword 152
-// Fire seen since the last shot went up.
-fire_want:
-.byte 0
-.global ufo_x
-ufo_x:
-.hword 0
-.global ufo_on
-ufo_on:
-.byte 0
-// 1 right, 255 left.
-.global ufo_dir
-ufo_dir:
-.byte 1
-
-.global shot_on
-shot_on:
-.byte 0
-shot_x:
-.hword 0
-shot_col:
-.byte 0
-shot_y:
-.byte 0
+// The laser's strip for fx_strip: SHOT_LEN rows of its pixel, which
+// shot_fire sets, then the dark rows that wipe its tail.
 shot_pat:
 .space SHOT_SPAN
-.global shot_event
-shot_event:
-.byte 0
-.global shot_hit_col
-shot_hit_col:
-.byte 0
-.global shot_hit_row
-shot_hit_row:
-.byte 0
-.global shot_hit_rank
-shot_hit_rank:
-.byte 0
-
-bomb_on:
-.space 3
-bomb_col:
-.space 3
-bomb_y:
-.space 3
-bomb_anim:
-.space 3
-.global bomb_hit
-bomb_hit:
-.byte 0
-.global drop_col
-drop_col:
-.byte 0
-
-// ---------------------------------------------------------------- tables
-
-idx_rank:
-.byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-.byte 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
-.byte 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
-.byte 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3
-.byte 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4
-idx_col5:
-.byte 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
-.byte 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
-.byte 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
-.byte 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
-.byte 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
-rank11:
-.byte 0, 11, 22, 33, 44
-
-// (rank * 2 + frame) -> 6-column window
-alien_spr:
-.hword k_squid0
-.hword k_squid1
-.hword k_crab0
-.hword k_crab1
-.hword k_crab0
-.hword k_crab1
-.hword k_oct0
-.hword k_oct1
-.hword k_oct0
-.hword k_oct1
-
-bomb_pat:
-.hword k_bomb0
-.hword k_bomb1
-.hword k_bomb2
-
-// Internal key numbers, and the key_bits they set: 1 left (Z A cursor),
-// 2 right (X D cursor), 4 fire (Space Return), 8 Escape.
-key_codes:
-.byte 0x61, 0x41, 0x19, 0x42, 0x32, 0x79, 0x62, 0x49, 0x70
-key_masks:
-.byte 1, 1, 1, 2, 2, 2, 4, 4, 8
-
-// 1000, 100, 10, 1
-place_lo:
-.byte 0xe8, 0x64, 0x0a, 0x01
-place_hi:
-.byte 0x03, 0x00, 0x00, 0x00
 
 // ---------------------------------------------------------------- misc
 
+// OSBYTE 19 straight: through bbc::osbyte it cost 2K cycles a frame after
+// the vsync.
 .global frame_wait
 frame_wait:
   LDA #19
@@ -220,7 +50,7 @@ frame_wait:
 // Score (to 9999), lives and wave (to 9) in white beside the labels
 // Hud::labels writes on the top text row: score in text columns 3..6,
 // lives in 9, wave in 12. A text column is two byte columns. Drawing them
-// through OSWRCH cost more than a frame.
+// through OSWRCH cost more than a frame. hud_places is in invaders.cc.
 .global hud_digits
 hud_digits:
   LDA score
@@ -247,10 +77,10 @@ hd_place:
 hd_sub:
   SEC
   LDA E_T0
-  SBC place_lo, X
+  SBC hud_places, X
   STA E_R
   LDA E_T1
-  SBC place_hi, X
+  SBC hud_places+1, X
   BCC hd_digit
   STA E_T1
   LDA E_R
@@ -263,7 +93,8 @@ hd_digit:
   JSR hud_glyph
   LDX E_IDX
   INX
-  CPX #4
+  INX
+  CPX #8
   BNE hd_place
   LDA lives
   LDX #HUD_LIVES_COL
@@ -298,10 +129,13 @@ hud_glyph:
   STA fx_len
   JMP fx_cell
 
+// ---------------------------------------------------------------- keys
+
 // Scans the keys on the System VIA the way the MOS does for a single key:
 // keyboard auto-scan off, key number out on port A, bit 7 back set when it
 // is down. OSBYTE &79 per key cost 2.5K cycles a frame. Interrupts stay
 // off throughout, since the MOS interrupt code drives the same port.
+// key_codes and key_masks are in invaders.cc.
 .global keys_read
 keys_read:
   LDA #0
@@ -311,7 +145,7 @@ keys_read:
   STA SYSVIA_DDRA
   LDA #0x03
   STA SYSVIA_LATCH
-  LDX #8
+  LDX #KEY_COUNT-1
 kr_loop:
   LDA key_codes, X
   STA SYSVIA_PORTA
@@ -330,55 +164,7 @@ kr_up:
 
 // ---------------------------------------------------------------- fleet
 
-// fl_row is the starting character row; everything else starts over.
-.global fleet_reset
-fleet_reset:
-  LDX #54
-  LDA #1
-fr_loop:
-  STA fl_on, X
-  DEX
-  BPL fr_loop
-  LDA #55
-  STA alive
-  LDA #13
-  STA fl_col
-  STA fl_old_col
-  LDA fl_row
-  STA fl_old_row
-  LDA #1
-  STA fl_dir
-  LDA #0
-  STA fl_frame
-  STA fl_dy
-  STA fl_landed
-  STA fl_lo
-  LDA #10
-  STA fl_hi
-  LDA #4
-  STA fl_bot
-  LDA #255
-  STA fl_mover
-  RTS
-
-.global fleet_draw
-fleet_draw:
-  LDA #0
-  STA fl_dy
-  LDX #0
-fd_loop:
-  LDA fl_on, X
-  BEQ fd_next
-  STX E_IDX
-  JSR alien_redraw
-  LDX E_IDX
-fd_next:
-  INX
-  CPX #55
-  BNE fd_loop
-  RTS
-
-// Redraw up to fl_quota live aliens of the current sweep, one step on.
+// Redraw up to FLEET_QUOTA live aliens of the current sweep, one step on.
 // Starts the next sweep when the last one finished; fl_landed is set
 // instead when that sweep would bring the fleet down onto the cannon.
 .global fleet_march
@@ -386,12 +172,12 @@ fleet_march:
   LDA alive
   BEQ fm_out
   LDA fl_mover
-  CMP #55
+  CMP #FLEET_SIZE
   BCC fm_run
   JSR fleet_turn
   BCS fm_out
 fm_run:
-  LDA fl_quota
+  LDA #FLEET_QUOTA
   STA E_LEFT
 fm_loop:
   LDX fl_mover
@@ -402,7 +188,7 @@ fm_loop:
 fm_next:
   INC fl_mover
   LDA fl_mover
-  CMP #55
+  CMP #FLEET_SIZE
   BCS fm_end
   LDA E_LEFT
   BNE fm_loop
@@ -414,10 +200,11 @@ fm_end:
   RTS
 
 // Next step: a byte sideways, or at a wall a character row down and an
-// about-face. Carry set when that lands the fleet.
+// about-face. Carry set when that lands the fleet. E_T0 is the step
+// sideways.
 fleet_turn:
   LDA #0
-  STA fl_dx
+  STA E_T0
   STA fl_dy
   LDA fl_dir
   BMI ft_left
@@ -429,7 +216,7 @@ fleet_turn:
   CMP #79
   BCS ft_down
   LDA #1
-  STA fl_dx
+  STA E_T0
   JMP ft_check
 ft_left:
   LDX fl_lo
@@ -439,7 +226,7 @@ ft_left:
   CMP #3
   BCC ft_down
   LDA #255
-  STA fl_dx
+  STA E_T0
   JMP ft_check
 ft_down:
   LDA #1
@@ -464,7 +251,7 @@ ft_go:
   LDA fl_col
   STA fl_old_col
   CLC
-  ADC fl_dx
+  ADC E_T0
   STA fl_col
   LDA fl_row
   STA fl_old_row
@@ -533,12 +320,12 @@ fb_lo:
   JSR column_live
   BNE fb_lo_found
   INX
-  CPX #11
+  CPX #FLEET_COLS
   BNE fb_lo
   RTS
 fb_lo_found:
   STX fl_lo
-  LDX #10
+  LDX #FLEET_COLS-1
 fb_hi:
   JSR column_live
   BNE fb_hi_found
@@ -546,7 +333,7 @@ fb_hi:
   BPL fb_hi
 fb_hi_found:
   STX fl_hi
-  LDX #54
+  LDX #FLEET_SIZE-1
 fb_bot:
   LDA fl_on, X
   BNE fb_bot_found
@@ -570,7 +357,6 @@ column_live:
 
 // A 1 px line, SHOT_LEN rows, from the cannon's turret. Does nothing while
 // one is already up.
-.global shot_fire
 shot_fire:
   LDA shot_on
   BNE sf_out
@@ -718,7 +504,7 @@ hit_aliens:
   JSR probe_fleet
   BCS ha_hit
   LDA fl_mover
-  CMP #55
+  CMP #FLEET_SIZE
   BCS ha_miss
   LDA fl_old_col
   STA E_OC
@@ -820,7 +606,7 @@ pf_miss:
 
 // A bomb in the line's byte column that the span meets: both go.
 hit_bombs:
-  LDX #2
+  LDX #BOMBS-1
 hb_loop:
   LDA bomb_on, X
   BEQ hb_next
@@ -911,10 +697,10 @@ hk_miss:
 
 // Drop from the lowest live alien in fleet column drop_col (0..10), or
 // above the cannon when drop_col is 11 or more. An empty column passes to
-// the next. Nothing happens with three bombs already falling.
+// the next. Nothing happens with every bomb already falling.
 .global bomb_drop
 bomb_drop:
-  LDX #2
+  LDX #BOMBS-1
 bd_slot:
   LDA bomb_on, X
   BEQ bd_free
@@ -924,12 +710,12 @@ bd_slot:
 bd_free:
   STX E_IDX
   LDA drop_col
-  CMP #11
+  CMP #FLEET_COLS
   BCC bd_have_col
   JSR column_above_cannon
 bd_have_col:
   STA E_C
-  LDA #11
+  LDA #FLEET_COLS
   STA E_LEFT
 bd_column:
   LDA #4
@@ -946,7 +732,7 @@ bd_rank:
   BPL bd_rank
   INC E_C
   LDA E_C
-  CMP #11
+  CMP #FLEET_COLS
   BCC bd_wrap
   LDA #0
   STA E_C
@@ -1017,9 +803,9 @@ ca_div:
   JMP ca_div
 ca_done:
   TXA
-  CMP #11
+  CMP #FLEET_COLS
   BCC ca_out
-  LDA #10
+  LDA #FLEET_COLS-1
 ca_out:
   RTS
 
@@ -1029,7 +815,7 @@ ca_out:
 bombs_step:
   LDA #0
   STA bomb_hit
-  LDX #2
+  LDX #BOMBS-1
 bs_loop:
   STX E_IDX
   LDA bomb_on, X
@@ -1196,36 +982,6 @@ bomb_spent:
   STA fx_len
   JMP fx_blank
 
-// Laser and bombs off, and no shot queued; volley_clear also wipes them.
-.global volley_reset
-volley_reset:
-  LDA #0
-  STA fire_want
-  STA shot_on
-  STA bomb_on
-  STA bomb_on+1
-  STA bomb_on+2
-  RTS
-
-.global volley_clear
-volley_clear:
-  LDA shot_on
-  BEQ vc_bombs
-  LDA #0
-  JSR shot_spent
-vc_bombs:
-  LDX #2
-vc_loop:
-  STX E_IDX
-  LDA bomb_on, X
-  BEQ vc_next
-  JSR bomb_spent
-vc_next:
-  LDX E_IDX
-  DEX
-  BPL vc_loop
-  RTS
-
 // ---------------------------------------------------------------- sprites
 
 // 6-column window for a 16 px sprite at even pixel x = E_X: the image at
@@ -1272,8 +1028,9 @@ cannon_at:
   STA fx_row
   RTS
 
-// The cannon steps CANNON_STEP px while left or right is held (left wins).
-// Fire is latched, so a press while the laser is up queues the next shot.
+// The cannon steps CANNON_STEP px while left or right is held (left wins;
+// KEY_LEFT and KEY_RIGHT are bits 0 and 1). Fire is latched, so a press
+// while the laser is up queues the next shot.
 .global player_step
 player_step:
   LDA key_bits
@@ -1305,7 +1062,7 @@ ps_right:
   LDA cannon_x+1
   BEQ ps_go_right
   LDA cannon_x
-  CMP #%lo(CANNON_MAX)
+  CMP #(CANNON_MAX & 0xff)
   BCS ps_fire
 ps_go_right:
   CLC
@@ -1329,29 +1086,14 @@ ps_out:
 
 .global cannon_draw
 cannon_draw:
-  JSR cannon_at
   LDA #%lo(k_cannon)
   STA fx_src
   LDA #%hi(k_cannon)
   STA fx_src+1
-  JMP window_draw
-
-.global cannon_draw_red
-cannon_draw_red:
+// The window at fx_src, over the cannon.
+.global cannon_image
+cannon_image:
   JSR cannon_at
-  LDA #%lo(k_cannon_red)
-  STA fx_src
-  LDA #%hi(k_cannon_red)
-  STA fx_src+1
-  JMP window_draw
-
-.global cannon_draw_blast
-cannon_draw_blast:
-  JSR cannon_at
-  LDA #%lo(k_blast)
-  STA fx_src
-  LDA #%hi(k_blast)
-  STA fx_src+1
   JMP window_draw
 
 .global cannon_erase
@@ -1382,23 +1124,6 @@ ufo_erase:
   JSR ufo_at
   JMP window_wipe
 
-// Brings the saucer in at the side it leaves ufo_dir from.
-.global ufo_launch
-ufo_launch:
-  LDA #0
-  STA ufo_x+1
-  LDA #UFO_MIN
-  LDX ufo_dir
-  BPL ul_set
-  LDA #1
-  STA ufo_x+1
-  LDA #%lo(UFO_MAX)
-ul_set:
-  STA ufo_x
-  LDA #1
-  STA ufo_on
-  JMP ufo_draw
-
 // UFO_STEP px along ufo_dir; off the far side it is wiped and gone.
 .global ufo_step
 ufo_step:
@@ -1409,7 +1134,7 @@ ufo_step:
   LDA ufo_x+1
   BEQ us_go_right
   LDA ufo_x
-  CMP #%lo(UFO_MAX)
+  CMP #(UFO_MAX & 0xff)
   BCS us_gone
 us_go_right:
   CLC

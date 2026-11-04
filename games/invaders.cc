@@ -6,10 +6,12 @@
 // Sprites are mode-1 bytes (logical 1 green, 2 red, 3 white after remap).
 //
 // screen1.s and invaders_fx.s, below &3000, paint the shadow screen and do
-// the per-frame work: keys, cannon, fleet, laser, bombs, saucer, and their
-// collisions. This file keeps the rules: scoring, lives, waves, and timers.
-// A frame is one vsync and everything moves every frame, so play holds
-// 50 Hz.
+// the work of a frame of play: keys, cannon, fleet, laser, bombs, saucer,
+// their collisions, firing, dropping bombs, and the score. This file keeps
+// the rules (scoring, lives, waves, and timers), the state and tables the
+// engine works on, and the rest: setting up a wave, the cannon's death,
+// and launching the saucer. A frame is one vsync and everything moves
+// every frame, so play holds 50 Hz.
 //
 // The per-frame code below takes no arguments and keeps its state at file
 // scope: davecc spends about 1K cycles a call entering a function that
@@ -20,6 +22,8 @@
 #include <bbc.h>
 #include <coroutine>
 #include <stddef.h>
+
+#include "invaders.h"
 
 // Bit-precise ints (C23 _BitInt as a C++ extension): no integer promotions.
 // Play is four dieted coroutines (player / laser / hazards / fleet), each
@@ -57,15 +61,16 @@ class Metrics {
  public:
   // Plain unsigned — not _BitInt — so enum constants promote like normal ints.
   // Columns are bytes (4 px) and rows characters (8 px), as in screen1.s.
-  // invaders_fx.s has the cannon and saucer limits.
+  // invaders.h has what invaders_fx.s shares.
   enum : unsigned {
+    FleetCol = 13,
     FleetRow = 6,
     PlayerX = 152,
     BunkerCol = 8,
     BunkerGap = 18,
-    BunkerRow = 22,
+    BunkerRow = BUNKER_ROW,
     LineY = 24,
-    GroundY = 232
+    GroundY = GROUND_Y
   };
 };
 
@@ -91,10 +96,12 @@ class Pace {
 extern "C" {
 extern u8 fx_col;
 extern u8 fx_row;
+extern u8 fx_y;
 extern u8 fx_len;
 extern const unsigned char* fx_src;
 void fx_cell();
 void fx_wipe();
+void fx_blank();
 }
 
 class Screen {
@@ -102,47 +109,132 @@ class Screen {
   static void fill(int x, int y, int width, int height, int colour);
 };
 
-// invaders_fx.s, and sprites.s for the bitmaps drawn from here.
+// invaders_fx.s, and sprites.s for the bitmaps.
 extern "C" {
-extern u8 key_bits;
-extern u8 alive;
-extern u8 fl_row;
-extern u8 fl_landed;
-extern u16 cannon_x;
-extern u8 ufo_on;
-extern u8 ufo_dir;
-extern u8 shot_event;
-extern u8 shot_hit_col;
-extern u8 shot_hit_row;
-extern u8 shot_hit_rank;
-extern u8 bomb_hit;
-extern u8 drop_col;
 void frame_wait();
 void keys_read();
 void hud_digits();
 void player_step();
-void fleet_reset();
-void fleet_draw();
+void cannon_draw();
+void cannon_image();
+void cannon_erase();
 void fleet_march();
 void fleet_bounds();
 void shot_step();
 void bomb_drop();
 void bombs_step();
-void volley_reset();
-void volley_clear();
-void cannon_draw();
-void cannon_draw_red();
-void cannon_draw_blast();
-void cannon_erase();
-void ufo_launch();
+void ufo_draw();
 void ufo_step();
+extern const unsigned char k_squid0[];
+extern const unsigned char k_squid1[];
+extern const unsigned char k_crab0[];
+extern const unsigned char k_crab1[];
+extern const unsigned char k_oct0[];
+extern const unsigned char k_oct1[];
+extern const unsigned char k_cannon_red[];
+extern const unsigned char k_blast[];
+extern const unsigned char k_bomb0[];
+extern const unsigned char k_bomb1[];
+extern const unsigned char k_bomb2[];
 extern const unsigned char k_boom[];
+extern const unsigned char k_digits[];
 extern const unsigned char k_bunker_top[];
 extern const unsigned char k_bunker_base[];
 }
 
-enum { KeyLeft = 1, KeyRight = 2, KeyFire = 4, KeyEscape = 8 };
+enum { KeyLeft = KEY_LEFT, KeyRight = KEY_RIGHT, KeyFire = KEY_FIRE, KeyEscape = KEY_ESCAPE };
 enum { ShotFlying = 0, ShotAlien = 1, ShotUfo = 2, ShotSpent = 3 };
+
+// The engine's state: invaders_fx.s reads and writes it every frame, and
+// the rules below set it up. The fleet's layout is in invaders.h.
+extern "C" {
+// KeyLeft | KeyRight | KeyFire | KeyEscape, held this frame (keys_read).
+u8 key_bits;
+
+// fl_on[i] while alien i lives; alive counts them.
+u8 alive;
+u8 fl_on[FLEET_SIZE];
+// The origin, and where it stood before this sweep began.
+u8 fl_col;
+u8 fl_row;
+u8 fl_old_col;
+u8 fl_old_row;
+// Next alien the sweep redraws. 255 between sweeps, which also makes
+// "index < fl_mover" mean "already at the new origin" for every alien.
+u8 fl_mover;
+// 1 marching right, 255 left. fl_dy is set for a sweep that steps down.
+u8 fl_dir;
+u8 fl_dy;
+// Which of each alien's two images the sweep draws.
+u8 fl_frame;
+// The outermost live columns and the lowest live rank.
+u8 fl_lo;
+u8 fl_hi;
+u8 fl_bot;
+// Set when a sweep would bring the fleet down onto the cannon.
+u8 fl_landed;
+
+// Pixel x of the cannon's left edge, and fire seen since the last shot
+// went up.
+u16 cannon_x;
+u8 fire_want;
+
+// The saucer's pixel x, and 1 for right or 255 for left.
+u16 ufo_x;
+u8 ufo_on;
+u8 ufo_dir;
+
+// The laser: pixel x, byte column, and top row of the line.
+u8 shot_on;
+u16 shot_x;
+u8 shot_col;
+u8 shot_y;
+// What shot_step found (ShotFlying..ShotSpent), and for ShotAlien where
+// the alien stood.
+u8 shot_event;
+u8 shot_hit_col;
+u8 shot_hit_row;
+u8 shot_hit_rank;
+
+// Falling bombs: byte column, top row, and a count that picks the image.
+u8 bomb_on[BOMBS];
+u8 bomb_col[BOMBS];
+u8 bomb_y[BOMBS];
+u8 bomb_anim[BOMBS];
+// Set by bombs_step when a bomb meets the cannon.
+u8 bomb_hit;
+// The fleet column bomb_drop drops from; 11 or more means over the cannon.
+u8 drop_col;
+
+// Each alien's rank and 5 * column, and the first alien of each rank.
+extern const u8 idx_rank[FLEET_SIZE] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  //
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  //
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,  //
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,  //
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4};
+extern const u8 idx_col5[FLEET_SIZE] = {
+    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,  //
+    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,  //
+    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,  //
+    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,  //
+    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50};
+extern const u8 rank11[5] = {0, 11, 22, 33, 44};
+// rank * 2 + fl_frame -> the alien's 6-column window.
+extern const unsigned char* const alien_spr[10] = {
+    k_squid0, k_squid1, k_crab0, k_crab1, k_crab0,
+    k_crab1,  k_oct0,   k_oct1,  k_oct0,  k_oct1};
+extern const unsigned char* const bomb_pat[3] = {k_bomb0, k_bomb1, k_bomb2};
+// Internal key numbers and what they set: Z, A and cursor left; X, D and
+// cursor right; Space and Return; Escape.
+extern const u8 key_codes[KEY_COUNT] = {0x61, 0x41, 0x19, 0x42, 0x32,
+                                        0x79, 0x62, 0x49, 0x70};
+extern const u8 key_masks[KEY_COUNT] = {KeyLeft,  KeyLeft,  KeyLeft,
+                                        KeyRight, KeyRight, KeyRight,
+                                        KeyFire,  KeyFire,  KeyEscape};
+// The score's places, for hud_digits.
+extern const u16 hud_places[4] = {1000, 100, 10, 1};
+}
 
 #if INVADERS_USE_CORO
 struct Frame {
@@ -212,6 +304,20 @@ class Hud {
 class Title {
  public:
   static u8 show();
+};
+
+// Setting the fleet up for a wave; invaders_fx.s marches it.
+class Fleet {
+ public:
+  static void reset();
+  static void draw();
+};
+
+// The laser and the bombs, at the start of a wave or a life.
+class Volley {
+ public:
+  static void reset();
+  static void clear();
 };
 
 namespace Game {
@@ -305,6 +411,66 @@ void Hud::banner(const char* line, u8 colour, u8 row) {
   Text::write(line);
 }
 
+// fl_row is the starting character row; everything else starts over.
+void Fleet::reset() {
+  u8 i;
+  for (i = 0; i < FLEET_SIZE; i++) {
+    fl_on[i] = 1;
+  }
+  alive = FLEET_SIZE;
+  fl_col = Metrics::FleetCol;
+  fl_old_col = Metrics::FleetCol;
+  fl_old_row = fl_row;
+  fl_dir = 1;
+  fl_frame = 0;
+  fl_dy = 0;
+  fl_landed = 0;
+  fl_lo = 0;
+  fl_hi = FLEET_COLS - 1;
+  fl_bot = 4;
+  fl_mover = 255;
+}
+
+// Every live alien where it stands: a sweep that goes nowhere, since
+// fleet_march only moves the origin between sweeps.
+void Fleet::draw() {
+  fl_dy = 0;
+  fl_mover = 0;
+  while (alive != 0 && fl_mover < FLEET_SIZE) {
+    fleet_march();
+  }
+}
+
+// Laser and bombs off, and no shot queued; clear also wipes them.
+void Volley::reset() {
+  u8 b;
+  fire_want = 0;
+  shot_on = 0;
+  for (b = 0; b < BOMBS; b++) {
+    bomb_on[b] = 0;
+  }
+}
+
+void Volley::clear() {
+  u8 b;
+  if (shot_on != 0) {
+    shot_on = 0;
+    fx_col = shot_col;
+    fx_y = shot_y;
+    fx_len = SHOT_LEN;
+    fx_blank();
+  }
+  for (b = 0; b < BOMBS; b++) {
+    if (bomb_on[b] != 0) {
+      bomb_on[b] = 0;
+      fx_col = bomb_col[b];
+      fx_y = bomb_y[b];
+      fx_len = BOMB_LEN;
+      fx_blank();
+    }
+  }
+}
+
 u8 Title::show() {
   u8 frames;
   phase = PhaseTitle;
@@ -342,6 +508,11 @@ static void present() {
   hud_dirty = 0;
 }
 
+static void show_cannon(const unsigned char* image) {
+  fx_src = image;
+  cannon_image();
+}
+
 static void draw_bunkers() {
   u8 i;
   u8 col = Metrics::BunkerCol;
@@ -367,10 +538,10 @@ static void deploy() {
   }
   phase = PhasePlay;
   ufo_on = 0;
-  volley_reset();
+  Volley::reset();
   boom_t = 0;
   fl_row = (u8)(Metrics::FleetRow + drop);
-  fleet_reset();
+  Fleet::reset();
   bomb_t = Pace::FirstBomb;
   ufo_wait = Pace::Ufo;
   bbc::cls();
@@ -379,7 +550,7 @@ static void deploy() {
   Screen::fill(0, Metrics::LineY, 320, 2, ColGreen);
   Screen::fill(0, Metrics::GroundY, 320, 2, ColGreen);
   draw_bunkers();
-  fleet_draw();
+  Fleet::draw();
   cannon_draw();
   Hud::labels();
   present();
@@ -400,7 +571,7 @@ static void kill_player() {
   if (phase != PhasePlay) {
     return;
   }
-  volley_clear();
+  Volley::clear();
   clear_boom();
   phase = PhaseDying;
   death_t = Pace::Death;
@@ -408,16 +579,12 @@ static void kill_player() {
     lives--;
   }
   hud_dirty = 1;
-  cannon_draw_blast();
+  show_cannon(k_blast);
 }
 
 static void dying() {
   if ((death_t & 7) == 0) {
-    if ((death_t & 8) != 0) {
-      cannon_draw_red();
-    } else {
-      cannon_draw_blast();
-    }
+    show_cannon((death_t & 8) != 0 ? k_cannon_red : k_blast);
   }
   if (death_t > 0) {
     death_t--;
@@ -436,7 +603,7 @@ static void dying() {
     return;
   }
   cannon_x = Metrics::PlayerX;
-  volley_reset();
+  Volley::reset();
   phase = PhasePlay;
   cannon_draw();
 }
@@ -473,10 +640,18 @@ static void launch_bomb() {
   bomb_drop();
 }
 
+// Brings the saucer in at the side it leaves from.
 static void launch_ufo() {
   ufo_wait = Pace::Ufo;
-  ufo_dir = (rng_next() & 0x8000) != 0 ? 255 : 1;
-  ufo_launch();
+  if ((rng_next() & 0x8000) != 0) {
+    ufo_dir = 255;
+    ufo_x = UFO_MAX;
+  } else {
+    ufo_dir = 1;
+    ufo_x = UFO_MIN;
+  }
+  ufo_on = 1;
+  ufo_draw();
 }
 
 void beat_player() {
