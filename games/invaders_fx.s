@@ -11,6 +11,7 @@
 
 #include "invaders.h"
 
+.set OSWORD 0xfff1
 .set OSBYTE 0xfff4
 .set SYSVIA_LATCH 0xfe40
 .set SYSVIA_DDRA 0xfe43
@@ -169,6 +170,10 @@ kr_up:
 // instead when that sweep would bring the fleet down onto the cannon.
 .global fleet_march
 fleet_march:
+  LDA march_gap
+  BEQ fm_marching
+  DEC march_gap
+fm_marching:
   LDA alive
   BEQ fm_out
   LDA fl_mover
@@ -263,7 +268,28 @@ ft_go:
   STA fl_frame
   LDA #0
   STA fl_mover
+  JSR march_note
   CLC
+  RTS
+
+// The next of the march's four notes, unless one sounded in the last
+// MARCH_GAP frames.
+march_note:
+  LDA march_gap
+  BNE mn_out
+  LDA #MARCH_GAP
+  STA march_gap
+  LDX march_step
+  LDA march_pitch, X
+  STA snd_march+4
+  INX
+  TXA
+  AND #3
+  STA march_step
+  LDX #%lo(snd_march)
+  LDY #%hi(snd_march)
+  JMP sound_play
+mn_out:
   RTS
 
 // X = alien. Its window at the current origin; on a step down, also the
@@ -399,6 +425,9 @@ sf_dark:
   STA shot_y
   LDA #1
   STA shot_on
+  LDX #%lo(snd_shot)
+  LDY #%hi(snd_shot)
+  JMP sound_play
 sf_out:
   RTS
 
@@ -1119,10 +1148,12 @@ ufo_draw:
   STA fx_src+1
   JMP window_draw
 
+// The saucer off the screen, and its warble with it.
 .global ufo_erase
 ufo_erase:
   JSR ufo_at
-  JMP window_wipe
+  JSR window_wipe
+  JMP sound_ufo_off
 
 // UFO_STEP px along ufo_dir; off the far side it is wiped and gone.
 .global ufo_step
@@ -1166,3 +1197,42 @@ us_gone:
   JMP ufo_erase
 us_out:
   RTS
+
+// ---------------------------------------------------------------- sound
+
+// SOUND (OSWORD 7) with one of the blocks in invaders.cc, at Y:X. Each
+// flushes its channel, so the MOS starts it at once rather than waiting
+// for room in the channel's queue.
+sound_play:
+  LDA #7
+  JMP OSWORD
+
+.global sound_boom
+sound_boom:
+  LDX #%lo(snd_boom)
+  LDY #%hi(snd_boom)
+  JMP sound_play
+
+.global sound_death
+sound_death:
+  LDX #%lo(snd_death)
+  LDY #%hi(snd_death)
+  JMP sound_play
+
+.global sound_ufo
+sound_ufo:
+  LDX #%lo(snd_ufo)
+  LDY #%hi(snd_ufo)
+  JMP sound_play
+
+.global sound_ufo_off
+sound_ufo_off:
+  LDX #%lo(snd_ufo_off)
+  LDY #%hi(snd_ufo_off)
+  JMP sound_play
+
+.global sound_ufo_boom
+sound_ufo_boom:
+  LDX #%lo(snd_ufo_boom)
+  LDY #%hi(snd_ufo_boom)
+  JMP sound_play

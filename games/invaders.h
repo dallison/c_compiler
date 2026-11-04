@@ -10,6 +10,9 @@
 #define FLEET_COLS 11
 // Live aliens the fleet redraws a frame, a step on.
 #define FLEET_QUOTA 1
+// The march plays a note a step, but no closer together than this many
+// frames once the fleet is small.
+#define MARCH_GAP 5
 
 // The laser: a 1 px line SHOT_LEN rows long, SHOT_STEP rows a frame. Its
 // strip is SHOT_SPAN rows, the line and then the rows it leaves behind.

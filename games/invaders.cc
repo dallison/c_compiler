@@ -125,6 +125,11 @@ void bomb_drop();
 void bombs_step();
 void ufo_draw();
 void ufo_step();
+void sound_boom();
+void sound_death();
+void sound_ufo();
+void sound_ufo_off();
+void sound_ufo_boom();
 extern const unsigned char k_squid0[];
 extern const unsigned char k_squid1[];
 extern const unsigned char k_crab0[];
@@ -144,6 +149,52 @@ extern const unsigned char k_bunker_base[];
 
 enum { KeyLeft = KEY_LEFT, KeyRight = KEY_RIGHT, KeyFire = KEY_FIRE, KeyEscape = KEY_ESCAPE };
 enum { ShotFlying = 0, ShotAlien = 1, ShotUfo = 2, ShotSpent = 3 };
+
+// A SOUND block for OSWORD 7. channel + Flush cuts off what the channel is
+// playing, so the sound starts at once and OSWORD never waits for room in
+// the channel's queue. amplitude is -15 (loudest) to 0, or an envelope.
+// pitch is in quarter semitones, 53 being middle C; on channel 0, 4 to 6
+// are high, middle and low white noise. duration is in twentieths of a
+// second, or -1 for until the channel's next sound.
+struct Note {
+  u16 channel;
+  i16 amplitude;
+  u16 pitch;
+  i16 duration;
+};
+
+// An ENVELOPE block for OSWORD 8. step is a step's length in centiseconds,
+// plus NoRepeat to play the pitch sections once rather than over and over.
+// Then the pitch change a step in each of three sections and the steps in
+// each; the amplitude change a step in attack, decay, sustain and release;
+// and the levels (0 to 126) that attack and decay end at.
+struct Envelope {
+  u8 number;
+  u8 step;
+  i8 pitch[3];
+  u8 steps[3];
+  i8 attack;
+  i8 decay;
+  i8 sustain;
+  i8 release;
+  u8 attack_to;
+  u8 decay_to;
+};
+
+// Channel 0 is noise, for the explosions. 1 has the march, 2 the laser and
+// 3 the saucer.
+enum { Flush = 0x10, NoRepeat = 0x80 };
+enum { EnvShot = 1, EnvBoom = 2, EnvDeath = 3, EnvUfo = 4 };
+
+static const Envelope envelopes[4] = {
+    // The laser: a fast slide down that dies away.
+    {EnvShot, NoRepeat | 1, {-6, 0, 0}, {15, 0, 0}, 126, -6, 0, -126, 110, 0},
+    // An alien: a short burst of noise.
+    {EnvBoom, NoRepeat | 1, {0, 0, 0}, {0, 0, 0}, 126, -5, 0, -126, 120, 0},
+    // The cannon or the saucer: a longer one.
+    {EnvDeath, NoRepeat | 2, {0, 0, 0}, {0, 0, 0}, 126, -2, 0, -126, 126, 0},
+    // The saucer: up six semitones and back, eight times a second.
+    {EnvUfo, 1, {4, -4, 0}, {6, 6, 0}, 126, -1, 0, -126, 90, 80}};
 
 // The engine's state: invaders_fx.s reads and writes it every frame, and
 // the rules below set it up. The fleet's layout is in invaders.h.
@@ -205,6 +256,21 @@ u8 bomb_anim[BOMBS];
 u8 bomb_hit;
 // The fleet column bomb_drop drops from; 11 or more means over the cannon.
 u8 drop_col;
+
+// Frames before the march may sound again, and which of its notes is next.
+u8 march_gap;
+u8 march_step;
+// The march's note; march_note in invaders_fx.s sets the pitch.
+Note snd_march = {Flush | 1, -12, 0, 2};
+
+// The sounds invaders_fx.s plays.
+extern const Note snd_shot = {Flush | 2, EnvShot, 180, 4};
+extern const Note snd_boom = {Flush | 0, EnvBoom, 5, 5};
+extern const Note snd_death = {Flush | 0, EnvDeath, 6, 30};
+extern const Note snd_ufo = {Flush | 3, EnvUfo, 120, -1};
+extern const Note snd_ufo_off = {Flush | 3, 0, 0, 1};
+extern const Note snd_ufo_boom = {Flush | 0, EnvDeath, 4, 20};
+extern const u8 march_pitch[4] = {20, 12, 4, 0};
 
 // Each alien's rank and 5 * column, and the first alien of each rank.
 extern const u8 idx_rank[FLEET_SIZE] = {
@@ -429,6 +495,8 @@ void Fleet::reset() {
   fl_hi = FLEET_COLS - 1;
   fl_bot = 4;
   fl_mover = 255;
+  march_gap = 0;
+  march_step = 0;
 }
 
 // Every live alien where it stands: a sweep that goes nowhere, since
@@ -580,6 +648,8 @@ static void kill_player() {
   }
   hud_dirty = 1;
   show_cannon(k_blast);
+  sound_ufo_off();
+  sound_death();
 }
 
 static void dying() {
@@ -606,6 +676,9 @@ static void dying() {
   Volley::reset();
   phase = PhasePlay;
   cannon_draw();
+  if (ufo_on) {
+    sound_ufo();
+  }
 }
 
 static void alien_hit() {
@@ -620,10 +693,12 @@ static void alien_hit() {
   fx_src = k_boom;
   fx_len = 32;
   fx_cell();
+  sound_boom();
   fleet_bounds();
   if (alive == 0) {
     phase = PhaseWave;
     wave_t = Pace::Wave;
+    sound_ufo_off();
   }
 }
 
@@ -652,6 +727,7 @@ static void launch_ufo() {
   }
   ufo_on = 1;
   ufo_draw();
+  sound_ufo();
 }
 
 void beat_player() {
@@ -669,6 +745,7 @@ void beat_laser() {
     alien_hit();
   } else if (shot_event == ShotUfo) {
     add_score(100);
+    sound_ufo_boom();
   }
 }
 
@@ -731,6 +808,7 @@ static void play_frame() {
 }
 
 static void quit() {
+  sound_ufo_off();
   bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
   bbc::cls();
   bbc::cursor(1);
@@ -803,6 +881,7 @@ static void session() {
 }
 
 void run() {
+  u8 i;
   bbc::palette(0, ColBlack);
   bbc::palette(1, 2);
   bbc::palette(2, 1);
@@ -811,6 +890,9 @@ void run() {
   bbc::cursor(0);
   rng_state = 1;
   bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
+  for (i = 0; i < 4; i++) {
+    bbc::osword(bbc::osword_command::envelope, const_cast<Envelope*>(&envelopes[i]));
+  }
   for (;;) {
     session();
   }
