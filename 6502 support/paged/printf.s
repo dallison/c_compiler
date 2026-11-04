@@ -12,9 +12,10 @@
 // Conversions: c s d i u x X o p n f e g a (and the uppercase forms),
 // flags -+ #0 and space, width and precision including *, lengths
 // hh h l ll z j t. scanf adds those conversions plus a scanset.
-// %f/%e/%g/%a call the C float printers. The digit buffer is sideways
-// RAM, so a printf that calls printf while a conversion is in progress
-// would share it; fputc does not do that.
+// %f/%e/%g/%a call the C float printers. The scratch below is one static
+// block in main RAM (this image is ROM, so its own .bss ignores stores).
+// A printf that calls printf while a conversion is in progress would
+// share it; fputc does not do that.
 
 // First 24 bytes are the scan/print state. The next 48 hold the
 // callee-saved registers (b2-b5, i4-i7, l2-l3, x1-x2, f1-f3), which a
@@ -77,18 +78,19 @@
 #define ORIENT_OFF 17
 #define UNGET_BUF_OFF 18
 
-.comm __pf_val, 8
-.comm __pf_digs, 24
-.comm __pf_ndig, 1
-.comm __pf_fbuf, 48
-.comm __pf_repn, 2
-.comm __pf_ptr, 2
-.comm __pf_len, 2
-.comm __pf_ch, 1
-.comm __pf_zero, 1
-.comm __pf_i, 1
-.comm __pf_set, 32
-.comm __pf_ftmp, 4
+// 126 bytes from PAGED_STDIO_SCRATCH.
+.set __pf_val PAGED_STDIO_SCRATCH+0
+.set __pf_digs PAGED_STDIO_SCRATCH+8
+.set __pf_ndig PAGED_STDIO_SCRATCH+32
+.set __pf_fbuf PAGED_STDIO_SCRATCH+33
+.set __pf_repn PAGED_STDIO_SCRATCH+81
+.set __pf_ptr PAGED_STDIO_SCRATCH+83
+.set __pf_len PAGED_STDIO_SCRATCH+85
+.set __pf_ch PAGED_STDIO_SCRATCH+87
+.set __pf_zero PAGED_STDIO_SCRATCH+88
+.set __pf_i PAGED_STDIO_SCRATCH+89
+.set __pf_set PAGED_STDIO_SCRATCH+90
+.set __pf_ftmp PAGED_STDIO_SCRATCH+122
 
 .section ".text.__pf_engine", "ax", @progbits
 

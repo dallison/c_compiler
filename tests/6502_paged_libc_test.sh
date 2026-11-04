@@ -218,6 +218,31 @@ if "lda #0xe2" not in text or "lda #0x09" not in text:
 print("stdout is the cassette pointer")
 PY
 
+# Images 1-7 are ROM, so a store into the bank is lost. printf/scanf keep
+# their scratch in main RAM; only rom_init's flags are left in the image.
+"$ELFDUMP" -s "$WORK/libc6502_paged_stdio.elf" >"$WORK/stdio.symbols"
+"$ELFDUMP" -c "$WORK/libc6502_paged_stdio.elf" >"$WORK/stdio.dis"
+python3 - "$WORK/stdio.symbols" "$WORK/stdio.dis" <<'PY'
+import re
+import sys
+init_only = {"__paged_ready", "__paged_heap_start", "__paged_heap_limit"}
+allowed = set()
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    parts = line.split()
+    if len(parts) >= 7 and parts[-1] in init_only:
+        base = int(parts[1], 16)
+        allowed.update(range(base, base + max(int(parts[2]), 1)))
+store = re.compile(r"\s(sta|stx|sty|inc|dec|asl|lsr|rol|ror) 0x([89ab][0-9a-f]{3})\b")
+bad = []
+for line in open(sys.argv[2], encoding="utf-8", errors="replace"):
+    m = store.search(line)
+    if m and int(m.group(2), 16) not in allowed:
+        bad.append(line.strip())
+if bad:
+    raise SystemExit("stdio image stores into its own bank:\n  " + "\n  ".join(bad[:8]))
+print("stdio scratch is in main RAM")
+PY
+
 echo "paged libc test ok"
 
 # The target tuple is the whole command: no -nostdlib, no -T, no archive list.

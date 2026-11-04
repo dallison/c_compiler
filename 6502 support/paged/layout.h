@@ -67,6 +67,12 @@
 #define PAGED_STDOUT_PTR 0x09e2
 #define PAGED_STDERR_PTR 0x09e4
 
+// Images 1-7 are ROM, so printf/scanf keep their scratch in main RAM: the
+// MOS cassette/RS423 input buffer (&0A00-&0AFF), idle on a disc system
+// like the output buffer above. No other image may use it: the float
+// printers run while a conversion holds state there.
+#define PAGED_STDIO_SCRATCH 0x0a00
+
 // Main-RAM entry a paged ROM uses to call a function in another image.
 // The return address of that call points into the caller's bank, which
 // is switched out for the duration of the call. bbc.ld places the MOS
