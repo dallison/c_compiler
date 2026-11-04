@@ -46,6 +46,8 @@ __fassemble:
 // sp+2: exponent
 // sp+4: mantissa (8 bytes).  Take top 3 bytes at offset sp+9
 // X: offset into zero page for result
+// Pops its 12 argument bytes: callers expect that of any fixed-arity
+// function returning a scalar.
 .section ".text.__packIEEE754", "ax", @progbits
 __packIEEE754:
 #ifdef __65c02__
@@ -77,7 +79,8 @@ __packIEEE754:
   LSR fmantissa+3
   ROR fmantissa+2
   ROR fmantissa+1
-  JMP __fassemble
+  JSR __fassemble
+  JMP __incsp12
   
 .section ".text.__fzero", "ax", @progbits
 __fzero:

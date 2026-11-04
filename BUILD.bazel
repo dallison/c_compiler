@@ -6289,6 +6289,7 @@ filegroup(
         "tests/regression/shift_left_6502_test.c",
         "tests/regression/shift_right_6502_test.c",
         "tests/regression/signed_divmod_6502_test.c",
+        "tests/regression/strtod_frame_6502_test.c",
         "libc/floor.c",
         "libc/frexp.c",
         "libc/ldexp.c",
