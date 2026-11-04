@@ -78,7 +78,8 @@ class Metrics {
 class Pace {
  public:
   enum : unsigned {
-    Title = 60,
+    Title = 200,
+    TitleStep = 25,
     FirstBomb = 60,
     Bomb = 50,
     BombFew = 30,
@@ -136,6 +137,7 @@ extern const unsigned char k_crab0[];
 extern const unsigned char k_crab1[];
 extern const unsigned char k_oct0[];
 extern const unsigned char k_oct1[];
+extern const unsigned char k_ufo[];
 extern const unsigned char k_cannon_red[];
 extern const unsigned char k_blast[];
 extern const unsigned char k_bomb0[];
@@ -357,7 +359,9 @@ struct Play {
 
 class Text {
  public:
+  enum : unsigned { Cols = 40 };
   static void write(const char* text);
+  static void centre(u8 row, u8 colour, const char* line);
 };
 
 // The top row reads "SC 0000 L3 W1"; hud_digits fills in the numbers.
@@ -367,9 +371,26 @@ class Hud {
   static void banner(const char* line, u8 colour, u8 row);
 };
 
+// The splash: the name, a big invader, the score table, the keys and the
+// credit, each line centred. It stays up for Pace::Title frames, or until
+// a fresh press of fire, and the invaders step as they do in the march.
 class Title {
  public:
   static u8 show();
+
+ private:
+  // The big invader is a sprite window's 16 x 8 pixels, each Scale pixels
+  // square, centred across the screen from pixel row BigY. The score
+  // table's sprites sit at text column TableCol from text row TableRow.
+  enum : unsigned {
+    Scale = 8,
+    BigX = (320 - 16 * Scale) / 2,
+    BigY = 40,
+    TableCol = 12,
+    TableRow = 15
+  };
+  static void invader(const unsigned char* image, const unsigned char* last);
+  static void table(u8 look);
 };
 
 // Setting the fleet up for a wave; invaders_fx.s marches it.
@@ -454,6 +475,16 @@ void Text::write(const char* text) {
   }
 }
 
+void Text::centre(u8 row, u8 colour, const char* line) {
+  u8 len = 0;
+  while (line[len] != 0) {
+    len++;
+  }
+  bbc::colour(colour);
+  bbc::tab((u8)((u8)(Cols - len) >> 1), row);
+  write(line);
+}
+
 static u16 rng_next() {
   rng_state = (unsigned)(rng_state + (rng_state << 5) + 13849);
   return rng_state;
@@ -472,9 +503,7 @@ void Hud::labels() {
 
 void Hud::banner(const char* line, u8 colour, u8 row) {
   bbc::colour(128);
-  bbc::tab(12, row);
-  bbc::colour(colour);
-  Text::write(line);
+  Text::centre(row, colour, line);
 }
 
 // fl_row is the starting character row; everything else starts over.
@@ -539,27 +568,94 @@ void Volley::clear() {
   }
 }
 
+// A row of the score table: its sprite's two images, and what it scores.
+struct ScoreLine {
+  const unsigned char* look[2];
+  const char* points;
+};
+
+static const ScoreLine score_table[4] = {{{k_ufo, k_ufo}, "= 100 POINTS"},
+                                         {{k_squid0, k_squid1}, "= 30 POINTS"},
+                                         {{k_crab0, k_crab1}, "= 20 POINTS"},
+                                         {{k_oct0, k_oct1}, "= 10 POINTS"}};
+
+// image's sprite, Scale times the size, painting only the pixels that
+// differ from last's; with no last, the lit ones on a clear screen. Window
+// byte 8 + i is scanline i & 7 of byte column 1 + (i >> 3). A byte is four
+// pixels, left first: bits 7 and 3 are the leftmost one's colour, and a
+// shift left brings up the next.
+void Title::invader(const unsigned char* image, const unsigned char* last) {
+  u8 i;
+  u8 p;
+  for (i = 0; i < 32; i++) {
+    u8 now = image[8 + i];
+    u8 was = last != 0 ? last[8 + i] : 0;
+    if (now == was) {
+      continue;
+    }
+    for (p = 0; p < 4; p++) {
+      u8 ink = (u8)(((now & 0x80) != 0 ? 2 : 0) | ((now & 0x08) != 0 ? 1 : 0));
+      u8 old = (u8)(((was & 0x80) != 0 ? 2 : 0) | ((was & 0x08) != 0 ? 1 : 0));
+      if (ink != old) {
+        Screen::fill(BigX + ((i >> 3) * 4 + p) * Scale, BigY + (i & 7) * Scale, Scale, Scale,
+                     ink);
+      }
+      now = (u8)(now << 1);
+      was = (u8)(was << 1);
+    }
+  }
+}
+
+void Title::table(u8 look) {
+  u8 i;
+  for (i = 0; i < 4; i++) {
+    fx_col = TableCol * 2;
+    fx_row = (u8)(TableRow + i * 2);
+    fx_src = score_table[i].look[look];
+    fx_len = 48;
+    fx_cell();
+  }
+}
+
 u8 Title::show() {
   u8 frames;
+  u8 i;
+  u8 look = 0;
+  u8 step_t = Pace::TitleStep;
+  u8 armed = 0;
   phase = PhaseTitle;
   bbc::cursor(0);
   bbc::cls();
-  bbc::tab(1, 8);
-  bbc::colour(3);
-  Text::write("SPACE INVADERS");
-  bbc::tab(2, 14);
-  bbc::colour(1);
-  Text::write("Z X OR ARROWS");
-  bbc::tab(3, 16);
-  bbc::colour(2);
-  Text::write("SPACE FIRES");
-  bbc::tab(2, 20);
-  bbc::colour(3);
-  Text::write("ESCAPE QUITS");
+  Text::centre(2, ColWhite, "DAVECC INVADERS");
+  invader(k_crab0, 0);
+  table(look);
+  bbc::colour(ColWhite);
+  for (i = 0; i < 4; i++) {
+    bbc::tab(TableCol + 4, (u8)(TableRow + i * 2));
+    Text::write(score_table[i].points);
+  }
+  Text::centre(24, ColGreen, "Z X OR ARROWS MOVE");
+  Text::centre(25, ColGreen, "RETURN/SPACE FIRES, ESCAPE QUITS");
+  Text::centre(28, ColRed, "WRITTEN IN C++20 WITH DAVECC");
+  Text::centre(29, ColRed, "BY DAVE ALLISON");
   bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
-  // Timed splash only — no key gate (waiting on Space was aborting to BASIC).
   for (frames = 0; frames < Pace::Title; frames++) {
     frame_wait();
+    keys_read();
+    // The Return that ran the game may still be down, so only a press
+    // after fire has been up skips the rest.
+    if ((key_bits & KeyFire) == 0) {
+      armed = 1;
+    } else if (armed) {
+      break;
+    }
+    step_t--;
+    if (step_t == 0) {
+      step_t = Pace::TitleStep;
+      look ^= 1;
+      invader(look ? k_crab1 : k_crab0, look ? k_crab0 : k_crab1);
+      table(look);
+    }
   }
   return 1;
 }
@@ -667,9 +763,7 @@ static void dying() {
     phase = PhaseOver;
     over_t = Pace::Over;
     Hud::banner(landed ? " INVADED " : "GAME OVER", ColRed, 12);
-    bbc::tab(13, 15);
-    bbc::colour(ColWhite);
-    Text::write("PRESS SPACE");
+    Text::centre(15, ColWhite, "PRESS SPACE");
     return;
   }
   cannon_x = Metrics::PlayerX;
