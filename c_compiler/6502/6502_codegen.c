@@ -2887,6 +2887,9 @@ static TargetInstruction* ConstantShiftOp(W65C02Generator* g, IRNode* node,
                                   int size, TargetInstruction* dest,
                                   TargetInstruction* op1, int count) {
   if (count == 0) {
+    if (dest != op1) {
+      Copy(g, dest, op1, 0, 0, size, GetAddrMode(dest), GetAddrMode(op1));
+    }
     return dest;
   }
   if (count >= size * 8) {
@@ -2948,30 +2951,40 @@ static TargetInstruction* ShiftOp(W65C02Generator* g, IRNode* node,
   }
   
   // ldx count
-  // beq skip
-  // shift once
+  // beq zero
+  // shift once, op1 to dest
   // dex
+  // beq done
   // loop:
   // shift once
   // dex
   // bne loop
-  // skip:
+  // beq done        ; leaving the loop leaves Z set
+  // zero:
+  // copy op1 to dest
+  // done:
+  // When dest is op1 a zero count leaves nothing to do, so zero is done.
   AddReloadPoint(g, op1);
   AddReloadPoint(g, dest);
   AddReloadPoint(g, count);
   ldx(g, count, 0);
-  TargetInstruction* skip = NewInstruction(W65C02_OP(label), kAddrModeImplied);
-  EmitResolvedBranch(g, W65C02_OP(beq), skip);
+  TargetInstruction* done = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  TargetInstruction* zero =
+      dest == op1 ? done : NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  EmitResolvedBranch(g, W65C02_OP(beq), zero);
   ShiftOnce(g, node, op, second_op, size, dest, op1);
   dex(g);
-  TargetInstruction* done = NewInstruction(W65C02_OP(label), kAddrModeImplied);
   EmitResolvedBranch(g, W65C02_OP(beq), done);
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
   ShiftOnce(g, node, op, second_op, size, dest, dest);
   dex(g);
   EmitResolvedBranch(g, W65C02_OP(bne), loop);
+  if (zero != done) {
+    EmitResolvedBranch(g, W65C02_OP(beq), done);
+    Emit(g, zero);
+    Copy(g, dest, op1, 0, 0, size, GetAddrMode(dest), GetAddrMode(op1));
+  }
   Emit(g, done);
-  Emit(g, skip);
   return dest;
 }
 
@@ -3086,29 +3099,35 @@ static TargetInstruction* ArithmeticRightShiftOp(W65C02Generator* g,
     return ConstantArithmeticRightShiftOp(g, node, size, dest, src, (int)TargetIntValue(count));
   }
   // ldx count
-  // beq skip
+  // beq zero
   // lda hi
   // cmp $0x80
   // ror hi
   // ror lo
-  // dex:
+  // dex
+  // beq done
   // loop:
   // shift
   // dex
-  // bne skip
-  // skip:
+  // bne loop
+  // beq done        ; leaving the loop leaves Z set
+  // zero:
+  // copy src to dest
+  // done:
+  // When dest is src a zero count leaves nothing to do, so zero is done.
   AddReloadPoint(g, src);
   AddReloadPoint(g, dest);
   AddReloadPoint(g, count);
   ldx(g, count, 0);
-  TargetInstruction* skip = NewInstruction(W65C02_OP(label), kAddrModeImplied);
-  EmitResolvedBranch(g, W65C02_OP(beq), skip);
+  TargetInstruction* done = NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  TargetInstruction* zero =
+      dest == src ? done : NewInstruction(W65C02_OP(label), kAddrModeImplied);
+  EmitResolvedBranch(g, W65C02_OP(beq), zero);
   SetIndexReg(g, src, dest, size-1);
   lda(g, src, size-1);
 
   ShiftOnceArithmeticRight(g, node, size, dest, src);
   dex(g);
-  TargetInstruction* done = NewInstruction(W65C02_OP(label), kAddrModeImplied);
   EmitResolvedBranch(g, W65C02_OP(beq), done);
   TargetInstruction* loop = Emit(g, NewInstruction(W65C02_OP(label), kAddrModeImplied));
   SetIndexReg(g, dest, dest, size-1);
@@ -3116,8 +3135,12 @@ static TargetInstruction* ArithmeticRightShiftOp(W65C02Generator* g,
   ShiftOnceArithmeticRight(g, node, size, dest, dest);
   dex(g);
   EmitResolvedBranch(g, W65C02_OP(bne), loop);
+  if (zero != done) {
+    EmitResolvedBranch(g, W65C02_OP(beq), done);
+    Emit(g, zero);
+    Copy(g, dest, src, 0, 0, size, GetAddrMode(dest), GetAddrMode(src));
+  }
   Emit(g, done);
-  Emit(g, skip);
   return dest;
 }
 
