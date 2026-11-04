@@ -753,11 +753,14 @@ ha_hit:
 // Carry set and X = alien when the span meets a live alien that stands at
 // origin (E_OC, E_OR): aliens below fl_mover when E_OLD is 0, the rest
 // when it is 1. The lowest rank wins.
+//
+// With the left columns gone the fleet marches on past the left edge and
+// the origin goes negative, so the column is taken mod 256: a shot left of
+// the origin comes out at 186 or more and fails the test against 55.
 probe_fleet:
   LDA shot_col
   SEC
   SBC E_OC
-  BCC pf_miss
   CMP #55
   BCS pf_miss
   LDX #0
@@ -965,9 +968,8 @@ bd_found:
 bd_origin:
   LDX E_IDX
   LDA idx_col5, Y
-  CLC
+  SEC
   ADC E_OC
-  ADC #1
   STA bomb_col, X
   LDA idx_rank, Y
   ASL A
@@ -986,7 +988,9 @@ bd_origin:
   STA bomb_on, X
   RTS
 
-// A = the fleet column over the cannon's turret, clamped to 0..10.
+// A = the fleet column over the cannon's turret, clamped to 0..10. The
+// turret is at byte column 4..76 and fl_col is -48..74, so the difference
+// is negative exactly when bit 7 is set.
 column_above_cannon:
   CLC
   LDA cannon_x
@@ -1000,7 +1004,7 @@ column_above_cannon:
   LSR A
   SEC
   SBC fl_col
-  BCS ca_right
+  BPL ca_right
   LDA #0
   RTS
 ca_right:
