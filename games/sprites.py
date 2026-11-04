@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Write games/sprites.s, the Mode 1 bitmaps for invaders.cc / invaders_fx.s.
+
+Pixels: . black, G green (logical 1), R red (logical 2), W white (logical 3).
+
+A Mode 1 byte is four pixels; pixel p (0 = left) is bit 7-p (high colour
+bit) and bit 3-p (low bit). A character cell is eight such bytes, one per
+scanline, so an 8-row sprite on a character row is column-major: each
+byte column is eight consecutive screen bytes, and the columns of one
+character row follow each other. The engine copies those cells in one run.
+
+Windows are six byte columns: a blank column either side of a 16-pixel
+sprite, so redrawing one 4 px or 2 px further along also wipes the edge it
+left. Moving sprites come as a pair, the second shifted 2 px right, which
+lets them step 2 px at a time.
+
+Usage: python3 games/sprites.py > games/sprites.s
+"""
+
+SQUID = (
+    """
+    ....WW....WW....
+    ...WWWWWWWWWW...
+    ..WW.WWW.WWW.WW.
+    .WWWWWWWWWWWWWW.
+    .WW.W.WWWWWW.W.W
+    ....WW....WW....
+    ...WW......WW...
+    ..W..........W..
+    """,
+    """
+    ....WW....WW....
+    ...WWWWWWWWWW...
+    ..WW.WWW.WWW.WW.
+    .WWWWWWWWWWWWWW.
+    .WW.W.WWWWWW.W.W
+    ...W.W....W.W...
+    ....WW....WW....
+    ...W........W...
+    """,
+)
+
+CRAB = (
+    """
+    ..R..........R..
+    ...R........R...
+    ..RRRRRRRRRRRR..
+    .RR..RRRRRR..RR.
+    RRRRRRRRRRRRRRRR
+    ..RRR..RR..RRR..
+    .R..R......R..R.
+    ..R..........R..
+    """,
+    """
+    ..R..........R..
+    .R.R........R.R.
+    ..RRRRRRRRRRRR..
+    .RR..RRRRRR..RR.
+    RRRRRRRRRRRRRRRR
+    ...RR..RR..RR...
+    ..R.R......R.R..
+    .R...R....R...R.
+    """,
+)
+
+OCTOPUS = (
+    """
+    ...G........G...
+    ....G......G....
+    ..GGGGGGGGGGGG..
+    .GGG.GG..GG.GGG.
+    GGGGGGGGGGGGGGGG
+    ..G.GGG..GGG.G..
+    ...G........G...
+    ..G..........G..
+    """,
+    """
+    ...G........G...
+    G...G......G...G
+    ..GGGGGGGGGGGG..
+    .GGG.GG..GG.GGG.
+    GGGGGGGGGGGGGGGG
+    ....GG....GG....
+    ...G.G....G.G...
+    ..G..........G..
+    """,
+)
+
+CANNON = """
+    ......GGGG......
+    ......GGGG......
+    ......GGGG......
+    ....GGGGGGGG....
+    ..GGGGGGGGGGGG..
+    .GGGGGGGGGGGGGG.
+    GGGGGGGGGGGGGGGG
+    GGGGGGGGGGGGGGGG
+    """
+
+UFO = """
+    .....RRRRRR.....
+    ...RRRRRRRRRR...
+    ..RRRRRRRRRRRR..
+    .RR.R.RR.RR.R.RR
+    .RRRRRRRRRRRRRR.
+    ...RRR....RRR...
+    ..R........R....
+    ................
+    """
+
+BOOM = """
+    W...W......W...W
+    .W...W....W...W.
+    ..W...W..W...W..
+    ...W...WW...W...
+    ..W...W..W...W..
+    .W...W....W...W.
+    W...W......W...W
+    ................
+    """
+
+BOMBS = (
+    """
+    RR..
+    ..RR
+    RR..
+    ..RR
+    RR..
+    ..RR
+    RR..
+    ..RR
+    """,
+    """
+    ..RR
+    RR..
+    ..RR
+    RR..
+    ..RR
+    RR..
+    ..RR
+    RR..
+    """,
+    """
+    .RR.
+    .RR.
+    ..RR
+    ..RR
+    ..RR
+    ..RR
+    ..RR
+    .RR.
+    """,
+)
+
+BUNKER = """
+    .G.GGGGGGGGGGGGGGGGGG.G.
+    GGGGGGGGGGGGGGGGGGGGGGGG
+    GGGGGGGGGGGGGGGGGGGGGGGG
+    GGGGGGGGGGGGGGGGGGGGGGGG
+    GGGGGGGGGGGGGGGGGGGGGGGG
+    GGGGGGGGGGGGGGGGGGGGGGGG
+    GGGGGGGGGGGGGGGGGGGGGGGG
+    GGGGGGGGGGGGGGGGGGGGGGGG
+    GGGGGGGGG.G..G.GGGGGGGGG
+    GGGGGGGG........GGGGGGGG
+    GGGGGGGG........GGGGGGGG
+    GGGGGGGG........GGGGGGGG
+    GGGGGGGG........GGGGGGGG
+    GGGGGGGG........GGGGGGGG
+    GGGGGGGG........GGGGGGGG
+    GGGGGGGG........GGGGGGGG
+    """
+
+# The Master's 8x8 digits, a row per byte (bit 7 left), so the HUD digits
+# drawn from here match the OS text beside them.
+DIGITS = (
+    "3C 66 6E 7E 76 66 3C 00",
+    "18 38 18 18 18 18 7E 00",
+    "3C 66 06 0C 18 30 7E 00",
+    "3C 66 06 1C 06 66 3C 00",
+    "0C 1C 3C 6C 7E 0C 0C 00",
+    "7E 60 7C 06 06 66 3C 00",
+    "1C 30 60 7C 66 66 3C 00",
+    "7E 06 0C 18 30 30 30 00",
+    "3C 66 66 3C 66 66 3C 00",
+    "3C 66 66 3E 06 0C 38 00",
+)
+
+COLOUR = {".": 0, "G": 1, "R": 2, "W": 3}
+
+
+def rows(art):
+    return [line.strip() for line in art.strip().splitlines()]
+
+
+def encode(pixels):
+    out = []
+    for i in range(0, len(pixels), 4):
+        value = 0
+        for p, ch in enumerate(pixels[i : i + 4]):
+            c = COLOUR[ch]
+            value |= ((c >> 1) & 1) << (7 - p)
+            value |= (c & 1) << (3 - p)
+        out.append(value)
+    return out
+
+
+def column_major(byte_rows):
+    return [byte_rows[r][c] for c in range(len(byte_rows[0])) for r in range(len(byte_rows))]
+
+
+def cell(art):
+    return column_major([encode(r) for r in rows(art)])
+
+
+def window(art, shift):
+    padded = ["...." + "." * shift + r + "." * (4 - shift) for r in rows(art)]
+    return column_major([encode(r) for r in padded])
+
+
+def pair(art):
+    return window(art, 0) + window(art, 2)
+
+
+def strip(art):
+    return [0, 0] + [encode(r)[0] for r in rows(art)]
+
+
+def glyph(hex_rows, ink="W"):
+    bits = [int(h, 16) for h in hex_rows.split()]
+    art = "\n".join(
+        "".join(ink if b & (0x80 >> p) else "." for p in range(8)) for b in bits
+    )
+    return cell(art)
+
+
+def emit(name, data, per_line=8):
+    print(".global %s" % name)
+    print("%s:" % name)
+    for i in range(0, len(data), per_line):
+        print("  .byte " + ", ".join("0x%02x" % b for b in data[i : i + per_line]))
+    print()
+
+
+def main():
+    print("// Generated by games/sprites.py; edit the art there and rerun it.")
+    print("// Parked in .text.blitter with the screen helpers so they stay below")
+    print("// &3000, where they can be read while the shadow screen is mapped.")
+    print()
+    print('.section ".text.blitter", "ax", @progbits')
+    print()
+    for name, frames in (("squid", SQUID), ("crab", CRAB), ("oct", OCTOPUS)):
+        for frame, art in enumerate(frames):
+            emit("k_%s%d" % (name, frame), window(art, 0))
+    emit("k_cannon", pair(CANNON))
+    emit("k_cannon_red", pair(CANNON.replace("G", "R")))
+    emit("k_blast", pair(BOOM))
+    emit("k_ufo", pair(UFO))
+    emit("k_boom", cell(BOOM))
+    bunker = rows(BUNKER)
+    emit("k_bunker_top", column_major([encode(r) for r in bunker[:8]]))
+    emit("k_bunker_base", column_major([encode(r) for r in bunker[8:]]))
+    for frame, art in enumerate(BOMBS):
+        emit("k_bomb%d" % frame, strip(art), per_line=10)
+    emit("k_digits", [b for d in DIGITS for b in glyph(d)])
+
+
+if __name__ == "__main__":
+    main()

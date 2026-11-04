@@ -5,45 +5,57 @@
 // Mode 1 is 320x256, four colours, 4 pixels per byte. With ACCCON bit X
 // set, stores at &3000 reach the shadow picture while this code, which
 // lives below &3000, keeps running. Bit D (display shadow) is left alone.
+// Everything read while bit X is set (sources, tables, the fx_* variables)
+// must also sit below &3000, and the MOS must not run, so interrupts are
+// off for the length of each paint.
 //
-// A command is 5 bytes then the pixels: x low, x high, y, bytes per row,
-// height, then (bytes * height) mode-1 bytes. batch_flush walks from
-// batch_base up to the pointer it is given, in one shadow session.
+// Screen layout: character row r starts at &3000 + r*640. Byte column c
+// (pixels 4c..4c+3) of that row is 8 bytes, one per scanline, at +c*8, so
+// an 8-row cell is contiguous and so are the columns of one character row.
+//
+// fx_cell / fx_wipe work on cells: fx_len bytes from (fx_col, fx_row),
+// column-major, at most 128 and within one character row.
+// fx_strip / fx_blank / fx_peek walk fx_len scanlines (1..255) down byte
+// column fx_col from pixel row fx_y.
 
-.set SRC 0x8c
-.set DST 0x8e
+.set FX_DST 0x70
+.set FX_SRC 0x72
+.set FX_T0 0x74
+.set FX_T1 0x75
+.set FX_T2 0x76
+.set FX_T3 0x77
 
 .section ".text.blitter", "ax", @progbits
 
-.global batch_base
-.global batch_limit
-batch_base:
-// Must hold a full-width mode-1 span: 320px / 4 = 80 bytes/row, plus header.
-// A 128-byte buffer overflowed on deploy's 320x2 ground lines and corrupted
-// the following blitter state — that returned to BASIC right after startup.
-.space 256
-batch_limit:
+.global fx_col
+fx_col:
+.byte 0
+.global fx_row
+fx_row:
+.byte 0
+.global fx_y
+fx_y:
+.byte 0
+.global fx_len
+fx_len:
+.byte 0
+.global fx_src
+fx_src:
+.hword 0
 
-blit_x:
-.word 0
-blit_y:
-.byte 0
-blit_wb:
-.byte 0
-blit_h:
-.byte 0
-blit_ptr:
-.word 0
-blit_s0:
-.word 0
-blit_s1:
-.word 0
-stream:
-.word 0
-stream_end:
-.word 0
-cmd_count:
-.byte 0
+row_lo:
+.byte 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80
+.byte 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80
+.byte 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80
+.byte 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80
+row_hi:
+.byte 0x30, 0x32, 0x35, 0x37, 0x3a, 0x3c, 0x3f, 0x41
+.byte 0x44, 0x46, 0x49, 0x4b, 0x4e, 0x50, 0x53, 0x55
+.byte 0x58, 0x5a, 0x5d, 0x5f, 0x62, 0x64, 0x67, 0x69
+.byte 0x6c, 0x6e, 0x71, 0x73, 0x76, 0x78, 0x7b, 0x7d
+
+paint_tab:
+.byte 0x00, 0x0f, 0xf0, 0xff
 
 .global note_acccon
 note_acccon:
@@ -51,211 +63,7 @@ note_acccon:
   STA acccon_copy
   RTS
 
-.global batch_flush
-batch_flush:
-  LDA 0x8c
-  PHA
-  LDA 0x8d
-  PHA
-  LDA 0x8e
-  PHA
-  LDA 0x8f
-  PHA
-  LDY #0
-  LDA (__sp), Y
-  STA stream_end
-  INY
-  LDA (__sp), Y
-  STA stream_end+1
-  LDA #%lo(batch_base)
-  STA stream
-  LDA #%hi(batch_base)
-  STA stream+1
-  JSR shadow_on
-flush_cmd:
-  LDA stream+1
-  CMP stream_end+1
-  BCC flush_go
-  BNE flush_done
-  LDA stream
-  CMP stream_end
-  BCS flush_done
-flush_go:
-  LDA stream
-  STA SRC
-  LDA stream+1
-  STA SRC+1
-  LDY #0
-  LDA (SRC), Y
-  STA blit_x
-  INY
-  LDA (SRC), Y
-  STA blit_x+1
-  INY
-  LDA (SRC), Y
-  STA blit_y
-  INY
-  LDA (SRC), Y
-  STA blit_wb
-  INY
-  LDA (SRC), Y
-  STA blit_h
-  JSR stream_add5
-  LDA blit_h
-  BEQ flush_cmd
-  LDA blit_wb
-  BEQ flush_cmd
-  JSR paint_rows
-  JMP flush_cmd
-flush_done:
-  JSR shadow_off
-  PLA
-  STA 0x8f
-  PLA
-  STA 0x8e
-  PLA
-  STA 0x8d
-  PLA
-  STA 0x8c
-  RTS
-
-// Advance the stream by 5. Shadow may be on; this uses only low memory.
-stream_add5:
-  CLC
-  LDA stream
-  ADC #5
-  STA stream
-  BCC sa5
-  INC stream+1
-sa5:
-  RTS
-
-// Paint blit_h rows of blit_wb bytes from the stream. Each row is contiguous
-// in the stream. On screen, the next byte in a row is 8 bytes away.
-paint_rows:
-  LDA stream
-  STA SRC
-  LDA stream+1
-  STA SRC+1
-  LDA #0
-  STA cmd_count
-pr_row:
-  LDA blit_h
-  BEQ pr_done
-  JSR make_addr
-  LDA #0
-  STA blit_s0
-pr_col:
-  LDA blit_s0
-  CMP blit_wb
-  BEQ pr_next
-  LDY cmd_count
-  LDA (SRC), Y
-  JSR poke
-  INC cmd_count
-  INC blit_s0
-  JMP pr_col
-pr_next:
-  INC blit_y
-  DEC blit_h
-  JMP pr_row
-pr_done:
-  CLC
-  LDA stream
-  ADC cmd_count
-  STA stream
-  LDA stream+1
-  ADC #0
-  STA stream+1
-  RTS
-
-// Write A to blit_ptr and step to the next byte of this scanline.
-poke:
-  PHA
-  LDA blit_ptr
-  STA DST
-  LDA blit_ptr+1
-  STA DST+1
-  LDY #0
-  PLA
-  STA (DST), Y
-  CLC
-  LDA blit_ptr
-  ADC #8
-  STA blit_ptr
-  BCC poke_nc
-  INC blit_ptr+1
-poke_nc:
-  RTS
-
-// blit_ptr = &3000 + (y >> 3) * 640 + (y & 7) + (x >> 2) * 8
-make_addr:
-  LDA blit_x
-  STA blit_s0
-  LDA blit_x+1
-  STA blit_s0+1
-  LSR blit_s0+1
-  ROR blit_s0
-  LSR blit_s0+1
-  ROR blit_s0
-  ASL blit_s0
-  ROL blit_s0+1
-  ASL blit_s0
-  ROL blit_s0+1
-  ASL blit_s0
-  ROL blit_s0+1
-  LDA blit_y
-  LSR A
-  LSR A
-  LSR A
-  STA blit_s1
-  LDA #0
-  STA blit_s1+1
-  LDX #7
-ma_sh:
-  ASL blit_s1
-  ROL blit_s1+1
-  DEX
-  BNE ma_sh
-  LDA blit_s1
-  STA blit_ptr
-  LDA blit_s1+1
-  STA blit_ptr+1
-  ASL blit_s1
-  ROL blit_s1+1
-  ASL blit_s1
-  ROL blit_s1+1
-  CLC
-  LDA blit_s1
-  ADC blit_ptr
-  STA blit_s1
-  LDA blit_s1+1
-  ADC blit_ptr+1
-  STA blit_s1+1
-  CLC
-  LDA blit_s1
-  ADC #0x00
-  STA blit_ptr
-  LDA blit_s1+1
-  ADC #0x30
-  STA blit_ptr+1
-  LDA blit_y
-  AND #7
-  CLC
-  ADC blit_ptr
-  STA blit_ptr
-  BCC ma_sc
-  INC blit_ptr+1
-ma_sc:
-  CLC
-  LDA blit_ptr
-  ADC blit_s0
-  STA blit_ptr
-  LDA blit_ptr+1
-  ADC blit_s0+1
-  STA blit_ptr+1
-  RTS
-
+.global shadow_on
 shadow_on:
   SEI
   LDA 0xfe34
@@ -263,6 +71,7 @@ shadow_on:
   STA 0xfe34
   RTS
 
+.global shadow_off
 shadow_off:
   LDA 0xfe34
   AND #0xfb
@@ -270,348 +79,240 @@ shadow_off:
   CLI
   RTS
 
-// ---------------------------------------------------------------------------
-// C++ Screen::{close,fill,stamp} — hand-written to avoid the fat ABI helpers
-// that inflate the compiled methods (~1.1 KiB → a few hundred bytes).
-// Args are on the software stack at entry (caller-cleaned void).
-// ---------------------------------------------------------------------------
-
-.global _ZN6Screen4pen_E
-_ZN6Screen4pen_E:
-scr_pen:
-.word batch_base
-
-scr_paint:
-.byte 0
-scr_across:
-.byte 0
-scr_h:
-.byte 0
-scr_bytes:
-.word 0
-scr_dst:
-.word 0
-scr_src:
-.word 0
-
-.global _ZN6Screen5closeEv
-_ZN6Screen5closeEv:
-  LDA scr_pen
-  CMP #%lo(batch_base)
-  BNE sc_flush
-  LDA scr_pen+1
-  CMP #%hi(batch_base)
-  BEQ sc_done
-sc_flush:
-  LDA __sp
-  SEC
-  SBC #2
-  STA __sp
-  LDA __sp+1
-  SBC #0
-  STA __sp+1
+// FX_DST = start of byte column A (0..79) on character row X (0..31).
+cell_addr:
   LDY #0
-  LDA scr_pen
-  STA (__sp), Y
-  INY
-  LDA scr_pen+1
-  STA (__sp), Y
-  JSR batch_flush
+  STY FX_T0
+  ASL A
+  ROL FX_T0
+  ASL A
+  ROL FX_T0
+  ASL A
+  ROL FX_T0
   CLC
-  LDA __sp
-  ADC #2
-  STA __sp
-  LDA __sp+1
-  ADC #0
-  STA __sp+1
-sc_done:
-  LDA #%lo(batch_base)
-  STA scr_pen
-  LDA #%hi(batch_base)
-  STA scr_pen+1
+  ADC row_lo, X
+  STA FX_DST
+  LDA FX_T0
+  ADC row_hi, X
+  STA FX_DST+1
   RTS
 
-// Ensure room for A = header(5) + payload size in scr_bytes.
-scr_room:
+// FX_DST = cell of (fx_col, fx_y), Y = scanline within it.
+strip_addr:
+  LDA fx_y
+  LSR A
+  LSR A
+  LSR A
+  TAX
+  LDA fx_col
+  JSR cell_addr
+  LDA fx_y
+  AND #7
+  TAY
+  RTS
+
+// Below scanline 7 a byte column continues at the top of the next
+// character row, 640 bytes on.
+next_char_row:
+  LDY #0
   CLC
-  LDA scr_pen
-  ADC #5
-  STA scr_dst
-  LDA scr_pen+1
-  ADC #0
-  STA scr_dst+1
-  CLC
-  LDA scr_dst
-  ADC scr_bytes
-  STA scr_dst
-  LDA scr_dst+1
-  ADC scr_bytes+1
-  STA scr_dst+1
-  LDA scr_dst+1
-  CMP #%hi(batch_limit)
-  BCC scr_room_ok
-  BNE scr_room_flush
-  LDA scr_dst
-  CMP #%lo(batch_limit)
-  BCC scr_room_ok
-  BEQ scr_room_ok
-scr_room_flush:
-  JSR _ZN6Screen5closeEv
-  // After flush, re-check. If it still does not fit, clamp payload so we
-  // never write past batch_limit (corrupt blit_* / code → BRK to BASIC).
-  CLC
-  LDA scr_pen
-  ADC #5
-  STA scr_dst
-  LDA scr_pen+1
-  ADC #0
-  STA scr_dst+1
-  CLC
-  LDA scr_dst
-  ADC scr_bytes
-  STA __t0
-  LDA scr_dst+1
-  ADC scr_bytes+1
-  STA __t1
-  LDA __t1
-  CMP #%hi(batch_limit)
-  BCC scr_room_ok
-  BNE scr_room_clamp
-  LDA __t0
-  CMP #%lo(batch_limit)
-  BCC scr_room_ok
-  BEQ scr_room_ok
-scr_room_clamp:
+  LDA FX_DST
+  ADC #0x80
+  STA FX_DST
+  LDA FX_DST+1
+  ADC #0x02
+  STA FX_DST+1
+  RTS
+
+.global fx_cell
+fx_cell:
+  LDA fx_src
+  STA FX_SRC
+  LDA fx_src+1
+  STA FX_SRC+1
+  LDX fx_row
+  LDA fx_col
+  JSR cell_addr
+  JSR shadow_on
+  LDY fx_len
+  DEY
+fc_loop:
+  LDA (FX_SRC), Y
+  STA (FX_DST), Y
+  DEY
+  BPL fc_loop
+  JMP shadow_off
+
+.global fx_wipe
+fx_wipe:
+  LDX fx_row
+  LDA fx_col
+  JSR cell_addr
+  JSR shadow_on
+  LDY fx_len
+  DEY
   LDA #0
-  STA scr_bytes
-  STA scr_bytes+1
-scr_room_ok:
+fw_loop:
+  STA (FX_DST), Y
+  DEY
+  BPL fw_loop
+  JMP shadow_off
+
+.global fx_strip
+fx_strip:
+  LDA fx_src
+  STA fs_src+1
+  LDA fx_src+1
+  STA fs_src+2
+  JSR strip_addr
+  JSR shadow_on
+  LDX #0
+fs_loop:
+fs_src:
+  LDA 0xffff, X
+  STA (FX_DST), Y
+  INX
+  CPX fx_len
+  BEQ fs_done
+  INY
+  CPY #8
+  BNE fs_loop
+  JSR next_char_row
+  JMP fs_loop
+fs_done:
+  JMP shadow_off
+
+.global fx_blank
+fx_blank:
+  JSR strip_addr
+  JSR shadow_on
+  LDX fx_len
+fb_loop:
+  LDA #0
+  STA (FX_DST), Y
+  DEX
+  BEQ fb_done
+  INY
+  CPY #8
+  BNE fb_loop
+  JSR next_char_row
+  JMP fb_loop
+fb_done:
+  JMP shadow_off
+
+// A = the OR of the bytes under the strip: nonzero when anything is lit.
+.global fx_peek
+fx_peek:
+  JSR strip_addr
+  JSR shadow_on
+  LDX fx_len
+  LDA #0
+  STA FX_T1
+fp_loop:
+  LDA (FX_DST), Y
+  ORA FX_T1
+  STA FX_T1
+  DEX
+  BEQ fp_done
+  INY
+  CPY #8
+  BNE fp_loop
+  JSR next_char_row
+  JMP fp_loop
+fp_done:
+  JSR shadow_off
+  LDA FX_T1
   RTS
 
-// Write 5-byte command header from stack args: x(0), y(2 low), across, h.
-// Uses __i0 as temp pointer to header.
-scr_header:
-  LDA scr_pen
-  STA __i0
-  LDA scr_pen+1
-  STA __i0+1
-  LDY #0
-  LDA (__sp), Y
-  STA (__i0), Y
-  INY
-  LDA (__sp), Y
-  STA (__i0), Y
-  INY
-  LDA (__sp), Y
-  STA (__i0), Y
-  INY
-  LDA scr_across
-  STA (__i0), Y
-  INY
-  LDA scr_h
-  STA (__i0), Y
-  CLC
-  LDA scr_pen
-  ADC #5
-  STA scr_dst
-  LDA scr_pen+1
-  ADC #0
-  STA scr_dst+1
+// ---------------------------------------------------------------------------
+// C++ Screen::fill(x, y, w, h, colour): ints at __sp + 0,2,4,6,8, caller
+// cleaned. x and w are pixels and multiples of 4; y and h are any rows.
+// ---------------------------------------------------------------------------
+
+sf_across:
+.byte 0
+sf_rows:
+.byte 0
+sf_ink:
+.byte 0
+
+sf_out:
   RTS
 
 .global _ZN6Screen4fillEiiiii
-// fill(x, y, w, h, colour) — ints at __sp + 0,2,4,6,8
 _ZN6Screen4fillEiiiii:
   LDY #4
   LDA (__sp), Y
   INY
   ORA (__sp), Y
-  BNE sf_w_ok
-  RTS
-sf_w_ok:
+  BEQ sf_out
   LDY #6
   LDA (__sp), Y
-  INY
-  ORA (__sp), Y
-  BNE sf_h_ok
-  RTS
-sf_h_ok:
-  // Width is a 16-bit int. Using only the low byte made fill(..., 320, ...)
-  // paint a 64px stub (320 & 0xff == 64) — the green strip on the left edge.
+  BEQ sf_out
+  STA sf_rows
+  // Width is a 16-bit int: 320 & 0xff alone would paint a 64px stub.
   LDY #4
   LDA (__sp), Y
-  STA __t0
+  STA FX_T0
   INY
   LDA (__sp), Y
   LSR A
-  ROR __t0
+  ROR FX_T0
   LSR A
-  ROR __t0
-  LDA __t0
-  STA scr_across
-  LDY #6
-  LDA (__sp), Y
-  STA scr_h
-  LDA #0
-  STA scr_bytes+1
-  STA scr_bytes
-  LDX scr_h
-sf_mul:
-  BEQ sf_mul_done
-  CLC
-  LDA scr_bytes
-  ADC scr_across
-  STA scr_bytes
-  LDA scr_bytes+1
-  ADC #0
-  STA scr_bytes+1
-  DEX
-  JMP sf_mul
-sf_mul_done:
+  ROR FX_T0
+  LDA FX_T0
+  BEQ sf_out
+  STA sf_across
   LDY #8
   LDA (__sp), Y
-  LDX #0
-  CMP #1
-  BNE sf_c2
-  LDX #0x0f
-  JMP sf_paint
-sf_c2:
-  CMP #2
-  BNE sf_c3
-  LDX #0xf0
-  JMP sf_paint
-sf_c3:
-  CMP #3
-  BNE sf_paint
-  LDX #0xff
-sf_paint:
-  STX scr_paint
-  JSR scr_room
-  JSR scr_header
-  LDA scr_dst
-  STA __i0
-  LDA scr_dst+1
-  STA __i0+1
-  LDA scr_bytes
-  STA __i1
-  LDA scr_bytes+1
-  STA __i1+1
-sf_loop:
-  LDA __i1
-  ORA __i1+1
+  AND #3
+  TAX
+  LDA paint_tab, X
+  STA sf_ink
+  LDY #2
+  LDA (__sp), Y
+  STA fx_y
+  LDY #1
+  LDA (__sp), Y
+  LSR A
+  DEY
+  LDA (__sp), Y
+  ROR A
+  LSR A
+  STA fx_col
+  JSR strip_addr
+  STY FX_T2
+  JSR shadow_on
+sf_row:
+  CLC
+  LDA FX_DST
+  ADC FX_T2
+  STA FX_SRC
+  LDA FX_DST+1
+  ADC #0
+  STA FX_SRC+1
+  LDX sf_across
+  LDY #0
+sf_byte:
+  LDA sf_ink
+  STA (FX_SRC), Y
+  CLC
+  LDA FX_SRC
+  ADC #8
+  STA FX_SRC
+  BCC sf_nc
+  INC FX_SRC+1
+sf_nc:
+  DEX
+  BNE sf_byte
+  DEC sf_rows
   BEQ sf_done
-  LDA scr_paint
-  LDY #0
-  STA (__i0), Y
-  INC __i0
-  BNE sf_dec
-  INC __i0+1
-sf_dec:
-  LDA __i1
-  BNE sf_dec1
-  DEC __i1+1
-sf_dec1:
-  DEC __i1
-  JMP sf_loop
+  INC FX_T2
+  LDA FX_T2
+  CMP #8
+  BNE sf_row
+  JSR next_char_row
+  STY FX_T2
+  JMP sf_row
 sf_done:
-  LDA __i0
-  STA scr_pen
-  LDA __i0+1
-  STA scr_pen+1
-  RTS
-
-.global _ZN6Screen5stampEiiPKhii
-// stamp(x, y, bits*, w, h) — ints/ptr at __sp + 0,2,4,6,8
-_ZN6Screen5stampEiiPKhii:
-  LDY #6
-  LDA (__sp), Y
-  INY
-  ORA (__sp), Y
-  BNE ss_w_ok
-  RTS
-ss_w_ok:
-  LDY #8
-  LDA (__sp), Y
-  INY
-  ORA (__sp), Y
-  BNE ss_h_ok
-  RTS
-ss_h_ok:
-  // Same 16-bit width handling as fill (pixels → mode-1 bytes).
-  LDY #6
-  LDA (__sp), Y
-  STA __t0
-  INY
-  LDA (__sp), Y
-  LSR A
-  ROR __t0
-  LSR A
-  ROR __t0
-  LDA __t0
-  STA scr_across
-  LDY #8
-  LDA (__sp), Y
-  STA scr_h
-  LDA #0
-  STA scr_bytes+1
-  STA scr_bytes
-  LDX scr_h
-ss_mul:
-  BEQ ss_mul_done
-  CLC
-  LDA scr_bytes
-  ADC scr_across
-  STA scr_bytes
-  LDA scr_bytes+1
-  ADC #0
-  STA scr_bytes+1
-  DEX
-  JMP ss_mul
-ss_mul_done:
-  LDY #4
-  LDA (__sp), Y
-  STA scr_src
-  INY
-  LDA (__sp), Y
-  STA scr_src+1
-  JSR scr_room
-  JSR scr_header
-  LDA scr_dst
-  STA __i0
-  LDA scr_dst+1
-  STA __i0+1
-  LDA scr_src
-  STA __i2
-  LDA scr_src+1
-  STA __i2+1
-  LDA scr_bytes
-  STA __i1
-  LDA scr_bytes+1
-  STA __i1+1
-ss_loop:
-  LDA __i1
-  ORA __i1+1
-  BEQ ss_done
-  LDY #0
-  LDA (__i2), Y
-  STA (__i0), Y
-  INC __i0
-  BNE ss_a
-  INC __i0+1
-ss_a:
-  INC __i2
-  BNE ss_dec
-  INC __i2+1
-ss_dec:
-  LDA __i1
-  BNE ss_dec1
-  DEC __i1+1
-ss_dec1:
-  DEC __i1
-  JMP ss_loop
-ss_done:
-  LDA __i0
-  STA scr_pen
-  LDA __i0+1
-  STA scr_pen+1
-  RTS
+  JMP shadow_off

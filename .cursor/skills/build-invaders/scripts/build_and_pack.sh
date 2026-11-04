@@ -26,12 +26,14 @@ asm "$SUP/bbc_vdu.s" "$WORK/bbc_vdu.o"
 asm "$SUP/screen1.s" "$WORK/screen1.o"
 asm "$SUP/push.s" "$WORK/push.o"
 asm "$ROOT/games/sprites.s" "$WORK/sprites.o"
+asm "$ROOT/games/invaders_fx.s" "$WORK/invaders_fx.o"
 
 "$DAVECC" -target "$TARGET" -std=c++20 -fno-exceptions -Os \
   -ffunction-sections -Wl,--gc-sections \
   -Wl,-T -Wl,"$SUP/bbc_mode2_e00.ld" \
   "$ROOT/games/invaders.cc" \
-  "$WORK/bbc_vdu.o" "$WORK/screen1.o" "$WORK/sprites.o" "$WORK/push.o" \
+  "$WORK/bbc_vdu.o" "$WORK/screen1.o" "$WORK/sprites.o" "$WORK/invaders_fx.o" \
+  "$WORK/push.o" \
   -o "$WORK/invaders.elf"
 
 python3 - <<PY
@@ -50,26 +52,30 @@ if room < 512:
     print(f"warning: only {room} bytes under &7C00", file=sys.stderr)
 PY
 
-# Sprite bitmaps + blitter must stay below Mode 1 screen RAM at &3000.
+# Everything screen1.s, sprites.s and invaders_fx.s define is read or run
+# while the shadow screen is mapped at &3000, so it must sit below &3000.
 if command -v nm >/dev/null 2>&1; then
+  nm "$WORK/screen1.o" "$WORK/sprites.o" "$WORK/invaders_fx.o" |
+    awk 'NF == 3 && $2 ~ /[TDB]/ {print $3}' | sort -u >"$WORK/low_syms.txt"
   nm "$WORK/invaders.elf" | python3 -c '
 import sys
-need = ("k_cannon", "k_squid0", "batch_base")
+want = set(open(sys.argv[1]).read().split())
 found = {}
 for line in sys.stdin:
     parts = line.split()
-    if len(parts) >= 3 and parts[-1] in need:
-        found[parts[-1]] = int(parts[0], 16)
-for n in need:
-    if n not in found:
-        print(f"missing symbol {n}", file=sys.stderr)
-        sys.exit(1)
-    a = found[n]
-    ok = a < 0x3000
-    print(f"{n}=0x{a:x} below_3000={ok}")
-    if not ok:
-        sys.exit(1)
-'
+    if len(parts) == 3 and parts[2] in want:
+        found[parts[2]] = int(parts[0], 16)
+missing = sorted(want - set(found))
+if missing:
+    print("missing low symbols: " + " ".join(missing), file=sys.stderr)
+    sys.exit(1)
+high = max(found, key=found.get)
+print(f"highest low symbol {high}=0x{found[high]:x}")
+over = sorted(n for n, a in found.items() if a >= 0x3000)
+if over:
+    print("at or above &3000: " + " ".join(over), file=sys.stderr)
+    sys.exit(1)
+' "$WORK/low_syms.txt"
 fi
 
 if [[ -f "$WORK/snake.elf" ]]; then

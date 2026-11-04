@@ -4,7 +4,8 @@ description: >-
   Build BBC Master Space Invaders with davecc, link at &E00, and pack
   INVADER onto ~/bbc_micro/games.ssd for the emulator. Use when rebuilding
   invaders, updating games.ssd, packing INVADER/SNAKE, or after editing
-  games/invaders.cc, games/sprites.s, screen1.s, or bbc_mode2_e00.ld.
+  games/invaders.cc, games/invaders_fx.s, games/sprites.py, screen1.s, or
+  bbc_mode2_e00.ld.
 ---
 
 # Build Master Invaders → games.ssd
@@ -43,19 +44,29 @@ mkdir -p "$WORK"
 "$DAVECC" -target 6502-acorn-bbc-davecc -c "$SUP/screen1.s" -o "$WORK/screen1.o"
 "$DAVECC" -target 6502-acorn-bbc-davecc -c "$SUP/push.s" -o "$WORK/push.o"
 "$DAVECC" -target 6502-acorn-bbc-davecc -c "$ROOT/games/sprites.s" -o "$WORK/sprites.o"
+"$DAVECC" -target 6502-acorn-bbc-davecc -c "$ROOT/games/invaders_fx.s" -o "$WORK/invaders_fx.o"
 
 "$DAVECC" -target 6502-acorn-bbc-davecc -std=c++20 -fno-exceptions -Os \
   -ffunction-sections -Wl,--gc-sections \
   -Wl,-T -Wl,"$SUP/bbc_mode2_e00.ld" \
   "$ROOT/games/invaders.cc" \
-  "$WORK/bbc_vdu.o" "$WORK/screen1.o" "$WORK/sprites.o" "$WORK/push.o" \
-  -o "$WORK/invaders.elf"
+  "$WORK/bbc_vdu.o" "$WORK/screen1.o" "$WORK/sprites.o" "$WORK/invaders_fx.o" \
+  "$WORK/push.o" -o "$WORK/invaders.elf"
 
 python3 "$SUP/elf2ssd.py" "$HOME/bbc_micro/games.ssd" \
   "SNAKE=$WORK/snake.elf" "INVADER=$WORK/invaders.elf"
 ```
 
-Omit `SNAKE=...` only if `snake.elf` is absent. Always prefer keeping both names on the disc.
+Omit `SNAKE=...` only if `snake.elf` is absent. Always prefer keeping both names on the disc. To rebuild Snake:
+
+```bash
+"$DAVECC" -target 6502-acorn-bbc-davecc -std=c++20 -fno-exceptions \
+  -Wl,-T -Wl,"$SUP/bbc_mode2.ld" "$ROOT/games/snake.cc" \
+  "$WORK/bbc_vdu.o" "$WORK/push.o" -o "$WORK/snake.elf"
+```
+
+`games/sprites.s` is generated: edit `games/sprites.py` and run
+`python3 games/sprites.py > games/sprites.s`.
 
 ## Verify before packing
 
@@ -64,28 +75,20 @@ Omit `SNAKE=...` only if `snake.elf` is absent. Always prefer keeping both names
 | ELF load | `0xE00` (`bbc_mode2_e00.ld`) |
 | Image end | `end ≤ 0x7C00` (soft stack grows down from `&7C00`) |
 | Headroom | Prefer `room_7c00 ≥ ~2K` |
-| `k_cannon`, `k_squid0`, `batch_base` | Addresses `< 0x3000` (Mode 1 screen) |
+| Global symbols of `screen1.o`, `sprites.o`, `invaders_fx.o` | All `< 0x3000` (the script prints the highest) |
 
-```bash
-python3 - <<'PY'
-import sys
-sys.path.insert(0, "/Users/dallison/c_compiler/6502 support")
-from elf2ssd import read_elf
-_, load, img = read_elf("/Users/dallison/c_compiler/games/build/invaders.elf")
-end = load + len(img)
-print(f"load=0x{load:x} end=0x{end:x} room_7c00={0x7c00-end}")
-PY
-nm games/build/invaders.elf | rg 'k_cannon|k_squid0|batch_base'
-```
+The script does these checks; it fails if any of those symbols lands at or above `&3000`.
 
 ## Layout (do not “fix” casually)
 
 - **Link**: `6502 support/bbc_mode2_e00.ld` — image at `&E00`; `elf2ssd` wraps a reloc stub loaded at DFS `&1F00` that copies down to `&E00`.
-- **Sprites**: `games/sprites.s` in `.text.blitter` / low rodata — must stay under `&3000`. High `.rodata` sprites get shredded by the soft stack.
-- **Blitter**: `6502 support/screen1.s` — `Screen::fill` / `stamp` / `close`; 256-byte batch auto-flushes when full.
-- **Coros**: three `Play` jobs, **one** `co_await Frame` each; `play_pool[96]` only. A second await in `fleet_coro` overflowed the pool and smashed ZP (garbled text, quit to BASIC). Do not grow `play_pool` without checking high BSS vs `lives`/`score`.
+- **Shadow screen**: Mode 129 draws by setting ACCCON bit X (`&FE34`) with interrupts off, which maps shadow RAM over `&3000–&7FFF`. Any code, table or variable touched while it is set must live below `&3000`: all of `screen1.s`, `sprites.s` and `invaders_fx.s`.
+- **Engine**: `games/invaders_fx.s` does everything per-frame: direct keyboard scan (`keys_read`), cannon, laser and collision (O(1) cell tests, no fleet scan), bombs, fleet march, UFO, HUD digits. Sprites in `sprites.s` are column-major and pre-shifted so a draw is straight stores.
+- **C++ side**: `games/invaders.cc` keeps game flow (phases, waves, scoring, deaths) and calls the engine through no-argument functions on globals. davecc spends about 1K cycles entering a function that loads `this` or arguments, and `coroutine_handle::operator bool` costs about 1.2K, so hot paths avoid both.
+- **Coros**: four `Play` jobs (player, laser, hazards, fleet), each with **one** `co_await Frame` per vsync, resumed in that order every tick; `play_pool[96]` only. A second await in a job overflows the pool and smashes ZP (garbled text, quit to BASIC). Do not grow `play_pool` without checking high BSS vs `lives`/`score`. `-DINVADERS_USE_CORO=0` runs the same beats as plain calls.
+- **Budget**: a tick is one vsync (about 40K cycles); play uses about 16–23K including the MOS. Deploying a wave takes about 9 vsyncs (CLS + full redraw).
+- **Assembler**: in davecc `.s` files `.word` is **4 bytes**; use `.hword` for 16-bit pointers and values.
 - **Mode**: call `bbc::mode(129)` **once** in `main`. A second `mode()` re-parks the soft stack and returns to BASIC.
-- **Laser**: `hop_shot` flushes each hop for a smooth climb; bombs move in `beat_hazards` before the fleet beat (bombs can pause briefly during the bolt).
 
 ## Snake (optional companion on the same SSD)
 
