@@ -946,15 +946,18 @@ static void AssembleMemoryInstruction(W65C02Assembler* assembler, int opcode) {
             }
             NeedIndexReg(assembler, index);
 
-            // zp,X or abs,X depending on size of value.
-            if (!absolute && operand >= 0 && operand < 256 && operand_size == 1 && index[0] == 'X') {
+            // zp,X or abs,X depending on size of value.  LDX and STX index
+            // by Y in the same slots: LDX zp,Y B6 and abs,Y BE; STX has
+            // only zp,Y (96).
+            bool is_zero_page =
+                !absolute && operand >= 0 && operand < 256 && operand_size == 1;
+            if (opcode == W65C02_OPCODE(stx) && !is_zero_page) {
+              AssemblerError(&ASM, "STX has no abs,Y mode");
+            }
+            if (is_zero_page) {
               bbb = W65C02_ADDR_MODE(10, zpx);
             } else {
-              if (index[0] == 'X') {
-                bbb = W65C02_ADDR_MODE(10, absx);
-              } else {
-                bbb = W65C02_ADDR_MODE(01, absy);
-              }
+              bbb = W65C02_ADDR_MODE(10, absx);
               operand_size = 2;
             }
           } else {
