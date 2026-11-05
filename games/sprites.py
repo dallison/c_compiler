@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write games/sprites.s, the Mode 1 bitmaps for invaders.cc / invaders_fx.s.
+"""Write games/sprites.s, the Mode 1 bitmaps for invaders and snake.
 
 Pixels: . black, G green (logical 1), R red (logical 2), W white (logical 3).
 
@@ -171,6 +171,138 @@ BUNKER = """
     GGGGGGGG........GGGGGGGG
     """
 
+# Snake's 8x8 cells: one Mode-1 character cell each (two byte columns).
+SN_HEAD_U = """
+..GGGG..
+.GGGGGG.
+GGWWGGGG
+GGGGGGGG
+GGGGGGGG
+.GGGGGG.
+..GGGG..
+...GG...
+"""
+
+SN_HEAD_D = """
+...GG...
+..GGGG..
+.GGGGGG.
+GGGGGGGG
+GGGGGGGG
+GGGGWWGG
+.GGGGGG.
+..GGGG..
+"""
+
+SN_HEAD_L = """
+..GGGG..
+.GGGGGG.
+WWGGGGGG
+GGGGGGGG
+GGGGGGGG
+.GGGGGG.
+..GGGG..
+...GG...
+"""
+
+SN_HEAD_R = """
+..GGGG..
+.GGGGGG.
+GGGGGGWW
+GGGGGGGG
+GGGGGGGG
+.GGGGGG.
+..GGGG..
+...GG...
+"""
+
+SN_BODY = """
+..GGGG..
+.GGGGGG.
+GGGWGGGG
+GGGGWGGG
+GGGGWGGG
+.GGGGGG.
+..GGGG..
+...GG...
+"""
+
+SN_TAIL = """
+........
+...GG...
+..GGGG..
+.GGGGGG.
+.GGGGGG.
+..GGGG..
+...GG...
+........
+"""
+
+SN_APPLE0 = """
+...G....
+..GG....
+.RRRR...
+RRWWRR..
+.RRRRR..
+..RRR...
+...R....
+........
+"""
+
+SN_APPLE1 = """
+...G....
+..GGG...
+.RRRRR..
+RRWWRRR.
+.RRRRRR.
+..RRRR..
+...RR...
+........
+"""
+
+SN_BONUS0 = """
+........
+.R..R...
+.RRRRR..
+RRWWRRR.
+.RRRRR..
+..RRR...
+...R....
+........
+"""
+
+SN_BONUS1 = """
+........
+R....R..
+RRRRRRR.
+RWWRWRR.
+RRRRRRR.
+.RRRRR..
+..RRR...
+........
+"""
+
+SN_ROCK = """
+........
+..WWWW..
+.WW.WWW.
+WWWW.WWW
+WWW.WWWW
+.WWWWWW.
+..WWWW..
+........
+"""
+
+SN_WALL = """
+WWWWWWWW
+W.W.W.W.
+WWWWWWWW
+.W.W.W.W
+WWWWWWWW
+W.W.W.W.
+WWWWWWWW
+.W.W.W.W
+"""
 # The Master's 8x8 digits, a row per byte (bit 7 left), so the HUD digits
 # drawn from here match the OS text beside them.
 DIGITS = (
@@ -263,6 +395,19 @@ def main():
     for frame, art in enumerate(BOMBS):
         emit("k_bomb%d" % frame, strip(art), per_line=10)
     emit("k_digits", [b for d in DIGITS for b in glyph(d)])
+    # Snake board cells — one character cell (16 bytes) each.
+    emit("k_sn_head_u", cell(SN_HEAD_U))
+    emit("k_sn_head_d", cell(SN_HEAD_D))
+    emit("k_sn_head_l", cell(SN_HEAD_L))
+    emit("k_sn_head_r", cell(SN_HEAD_R))
+    emit("k_sn_body", cell(SN_BODY))
+    emit("k_sn_tail", cell(SN_TAIL))
+    emit("k_sn_apple0", cell(SN_APPLE0))
+    emit("k_sn_apple1", cell(SN_APPLE1))
+    emit("k_sn_bonus0", cell(SN_BONUS0))
+    emit("k_sn_bonus1", cell(SN_BONUS1))
+    emit("k_sn_rock", cell(SN_ROCK))
+    emit("k_sn_wall", cell(SN_WALL))
 
 
 if __name__ == "__main__":

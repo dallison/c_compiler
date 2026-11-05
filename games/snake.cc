@@ -1,695 +1,973 @@
-// Snake for the BBC Micro, linked with the sideways libc.
+// Snake for the BBC Master, linked with the sideways libc.
 //
-// The 16-colour screen is mode 2 (160x256). Mode 5 has the same pixels
-// and only four colours. A Model B mode 2 screen starts at &3000, and
-// this program does not fit under it, so main selects mode 130: mode 2
-// drawn from the Master's shadow RAM, with HIMEM left at &8000.
+// Shadow mode 1 (VDU 22,129): 320x256, four colours, HIMEM at &8000.
+// Title and play share that mode — do not call mode() twice (it re-parks
+// the software stack and returns to BASIC).
 //
-//   ZX:/ or arrows or WASD steer. Space starts. Escape returns to BASIC.
+// screen1.s and snake_fx.s, below &3000, paint the shadow screen and scan
+// keys. This file keeps the rules, the board state, and the rest: waves,
+// fruits, rocks, scoring, and the coroutines that drive a frame of play.
+// A frame is one vsync; the snake steps every few frames so steering stays
+// responsive at 50 Hz.
 //
-// Build:
-//   DAVECC_LIB_DIR=<paged-libc> davecc -target 6502-acorn-bbc-davecc \
-//     -std=c++20 -fno-exceptions -Wl,-T -Wl,bbc_mode2.ld games/snake.cc
+// Z X / A D / arrows / WASD steer. Space starts or fires a new life.
+// Escape returns to BASIC.
+//
+// Build: .cursor/skills/build-invaders/scripts/build_and_pack.sh
 
 #include <bbc.h>
+#include <coroutine>
+#include <stddef.h>
+
+#include "snake.h"
+
+typedef unsigned _BitInt(8) u8;
+typedef _BitInt(8) i8;
+typedef unsigned _BitInt(16) u16;
+typedef _BitInt(16) i16;
 
 extern "C" void bbc_return(void);
+extern "C" void note_acccon(void);
+extern "C" int __davecc_cxa_atexit(void*, void*, unsigned long, unsigned long,
+                                   int) {
+  return 0;
+}
 
-// Plain names so a RAM dump can see how far a headless run got.
-extern "C" unsigned score;
-extern "C" unsigned char lives;
-extern "C" unsigned char snake_state;
+extern "C" {
+u16 score;
+u16 best;
+u8 lives;
+u8 level;
+u8 phase;
+u8 acccon_copy;
+}
 
-enum class Direction : unsigned char { Up = 0, Right = 1, Down = 2, Left = 3 };
+enum {
+  PhaseTitle = 1,
+  PhasePlay = 2,
+  PhaseDying = 3,
+  PhaseWave = 4,
+  PhaseOver = 5
+};
+enum { ColBlack = 0, ColGreen = 1, ColRed = 2, ColWhite = 3 };
+enum { DirUp = 0, DirRight = 1, DirDown = 2, DirLeft = 3 };
+enum { StepMoved = 0, StepAte = 1, StepBonus = 2, StepDied = 3 };
 
-enum class Step : unsigned char { Moved = 0, Ate = 1, Died = 2 };
-
-class Metrics {
+class Pace {
  public:
-  enum : int {
-    Cell = 32,
-    Cols = 24,
-    Rows = 22,
-    Max = 128,
-    OriginX = 256,
-    OriginY = 160,
-    Heart = 224
+  enum : unsigned {
+    Title = 200,
+    TitleBlink = 20,
+    Death = 60,
+    Wave = 80,
+    Over = 80,
+    EscapeGuard = 30,
+    FruitAnim = 8,
+    BonusLife = 200,
+    BonusGap = 350
   };
 };
 
-class Keys {
+extern "C" {
+extern u8 fx_col;
+extern u8 fx_row;
+extern u8 fx_y;
+extern u8 fx_len;
+extern const unsigned char* fx_src;
+void fx_cell();
+void fx_wipe();
+void fx_blank();
+}
+
+class Screen {
  public:
-  static int pressed(unsigned char code);
-  static int escape();
+  static void fill(int x, int y, int width, int height, int colour);
 };
 
-class Sound {
- public:
-  static void vsync();
-  static void tone(unsigned char pitch, unsigned char duration);
-  static void wait(int frames);
+extern "C" {
+void frame_wait();
+void keys_read();
+void hud_digits();
+void cell_draw();
+void cell_wipe();
+
+extern const unsigned char k_sn_head_u[];
+extern const unsigned char k_sn_head_d[];
+extern const unsigned char k_sn_head_l[];
+extern const unsigned char k_sn_head_r[];
+extern const unsigned char k_sn_body[];
+extern const unsigned char k_sn_tail[];
+extern const unsigned char k_sn_apple0[];
+extern const unsigned char k_sn_apple1[];
+extern const unsigned char k_sn_bonus0[];
+extern const unsigned char k_sn_bonus1[];
+extern const unsigned char k_sn_rock[];
+extern const unsigned char k_sn_wall[];
+extern const unsigned char k_digits[];
+}
+
+enum {
+  KeyLeft = KEY_LEFT,
+  KeyRight = KEY_RIGHT,
+  KeyUp = KEY_UP,
+  KeyDown = KEY_DOWN,
+  KeyFire = KEY_FIRE,
+  KeyEscape = KEY_ESCAPE
+};
+
+struct Note {
+  u16 channel;
+  i16 amplitude;
+  u16 pitch;
+  i16 duration;
+};
+
+struct Envelope {
+  u8 number;
+  u8 step;
+  i8 pitch[3];
+  u8 steps[3];
+  i8 attack;
+  i8 decay;
+  i8 sustain;
+  i8 release;
+  u8 attack_to;
+  u8 decay_to;
+};
+
+enum { Flush = 0x10, NoRepeat = 0x80 };
+enum { EnvEat = 1, EnvBonus = 2, EnvDeath = 3 };
+
+static const Envelope envelopes[3] = {
+    {EnvEat, NoRepeat | 1, {8, 0, 0}, {4, 0, 0}, 126, -8, 0, -126, 110, 0},
+    {EnvBonus, NoRepeat | 1, {12, -4, 0}, {6, 4, 0}, 126, -4, 0, -126, 120, 0},
+    {EnvDeath, NoRepeat | 2, {0, 0, 0}, {0, 0, 0}, 126, -2, 0, -126, 126, 0}};
+
+extern "C" {
+u8 key_bits;
+
+u8 sn_col;
+u8 sn_row;
+const unsigned char* sn_src;
+
+u8 snake_col[SN_MAX];
+u8 snake_row[SN_MAX];
+u8 snake_head;
+u8 snake_len;
+u8 snake_dir;
+u8 snake_next;
+
+u8 fruit_kind[SN_FRUITS];
+u8 fruit_col[SN_FRUITS];
+u8 fruit_row[SN_FRUITS];
+u8 fruit_life[SN_FRUITS];
+
+u8 rock_col[SN_ROCKS];
+u8 rock_row[SN_ROCKS];
+u8 rock_n;
+
+u8 fruit_look;
+u8 move_gap;
+u8 move_wait;
+u8 anim_wait;
+u8 bonus_wait;
+u8 ate_count;
+u8 frames_played;
+u8 death_t;
+u8 wave_t;
+u8 over_t;
+u8 hud_dirty;
+
+extern const u16 hud_places[4] = {1000, 100, 10, 1};
+
+// Z/A/left, X/D/right, cursor-up/*/W, cursor-down/?/S, Space/Return, Escape.
+extern const u8 key_codes[KEY_COUNT] = {0x61, 0x41, 0x19, 0x42, 0x32, 0x79,
+                                        0x39, 0x21, 0x48, 0x29, 0x51, 0x68,
+                                        0x62, 0x49, 0x70};
+extern const u8 key_masks[KEY_COUNT] = {
+    KeyLeft, KeyLeft,  KeyLeft,  KeyRight, KeyRight, KeyRight,
+    KeyUp,   KeyUp,    KeyUp,    KeyDown,  KeyDown,  KeyDown,
+    KeyFire, KeyFire,  KeyEscape};
+}
+
+struct Frame {
+  bool await_ready() const noexcept { return false; }
+  void await_suspend(std::coroutine_handle<>) const noexcept {}
+  void await_resume() const noexcept {}
+};
+
+static unsigned char play_pool[96];
+static unsigned play_used;
+
+struct Play {
+  struct promise_type {
+    Play get_return_object() {
+      return Play{std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+    static Play get_return_object_on_allocation_failure() noexcept {
+      return Play{};
+    }
+    std::suspend_never initial_suspend() noexcept { return {}; }
+    std::suspend_always final_suspend() noexcept { return {}; }
+    void return_void() {}
+    void unhandled_exception() {}
+    static void* operator new(size_t n) noexcept {
+      if (play_used + (unsigned)n > sizeof(play_pool)) {
+        return 0;
+      }
+      void* p = play_pool + play_used;
+      play_used += (unsigned)n;
+      return p;
+    }
+    static void operator delete(void*) noexcept {}
+    static void operator delete(void*, size_t) noexcept {}
+  };
+
+  std::coroutine_handle<promise_type> h{};
+  Play() = default;
+  explicit Play(std::coroutine_handle<promise_type> handle) : h(handle) {}
+  Play(Play&& other) noexcept : h(other.h) { other.h = {}; }
+  Play& operator=(Play&& other) noexcept {
+    h = other.h;
+    other.h = {};
+    return *this;
+  }
+  Play(const Play&) = delete;
+  Play& operator=(const Play&) = delete;
 };
 
 class Text {
  public:
-  static void put(const char* text);
-  static void put4(unsigned value);
-  static void spaces(int count);
-};
-
-class Board {
- public:
-  static int column(unsigned char col);
-  static int row(unsigned char line);
-  static void rect(int x0, int y0, int x1, int y1);
-  static void erase(unsigned char col, unsigned char line);
-  static void body(int x, int y);
-  static void head(int x, int y, Direction facing, int colour);
-  static void apple(int x, int y);
-  static void frame();
-  static void title_word();
-  static void title_preview();
-
- private:
-  static void blit(int x, int y, int index, int pix, int colour);
-};
-
-class Rng {
- public:
-  unsigned next();
-
- private:
-  unsigned state_;
-};
-
-class Snake {
- public:
-  void reset();
-  void draw() const;
-  void sample();
-  int covers(unsigned char col, unsigned char line, int ignore_tail) const;
-  Step step(unsigned char apple_col, unsigned char apple_row);
-  void paint_dead() const;
-  void paint_move(unsigned char previous) const;
-
-  unsigned char head_index() const { return head_; }
-
- private:
-  void queue(Direction turn);
-  unsigned char col_[Metrics::Max];
-  unsigned char row_[Metrics::Max];
-  unsigned char head_;
-  unsigned char length_;
-  Direction dir_;
-  Direction next_;
-};
-
-class Apple {
- public:
-  void reset();
-  void place(const Snake& snake, Rng& rng);
-  void draw() const;
-  unsigned char column() const { return col_; }
-  unsigned char line() const { return row_; }
-
- private:
-  unsigned char col_;
-  unsigned char row_;
+  enum : unsigned { Cols = 40 };
+  static void write(const char* text);
+  static void centre(u8 row, u8 colour, const char* line);
 };
 
 class Hud {
  public:
-  static void install();
-  static void show(unsigned points, unsigned best, unsigned char left);
-  static void hint();
-  static void game_over();
+  static void labels();
+  static void banner(const char* line, u8 colour, u8 row);
 };
 
 class Title {
  public:
-  static int show();
+  static u8 show();
 };
 
-class Game {
- public:
-  void run();
+namespace Game {
+void run();
+u8 tick();
+void beat_input();
+void beat_snake();
+void beat_fruit();
+}  // namespace Game
 
- private:
-  void deal();
-  int pace() const;
-  int tick();
-  void over();
-  void match();
+static u16 rng_state;
+static Play input_job;
+static Play snake_job;
+static Play fruit_job;
+static u8 jobs_ok;
 
-  Snake snake_;
-  Apple apple_;
-  Rng rng_;
-  unsigned best_;
-};
-
-// OSBYTE &79: internal matrix code EOR &80 (not negative-INKEY numbers).
-int Keys::pressed(unsigned char code) {
-  bbc::os_regs regs =
-      bbc::osbyte(bbc::osbyte_command::keyboard_scan, (unsigned char)(code ^ 0x80), 0);
-  return (regs.x & 0x80) != 0;
-}
-
-int Keys::escape() { return pressed(0x70); }
-
-void Sound::vsync() { bbc::osbyte(bbc::osbyte_command::wait_vsync, 0, 0); }
-
-void Sound::tone(unsigned char pitch, unsigned char duration) {
-  unsigned char block[8];
-  block[0] = 1;
-  block[1] = 0;
-  block[2] = 0xf1;
-  block[3] = 0xff;
-  block[4] = pitch;
-  block[5] = 0;
-  block[6] = duration;
-  block[7] = 0;
-  bbc::osword(7, block);
-}
-
-void Sound::wait(int frames) {
-  while (frames > 0) {
-    vsync();
-    frames--;
+Play input_coro() {
+  for (;;) {
+    co_await Frame{};
+    Game::beat_input();
   }
 }
 
-void Text::put(const char* text) {
+Play snake_coro() {
+  for (;;) {
+    co_await Frame{};
+    Game::beat_snake();
+  }
+}
+
+Play fruit_coro() {
+  for (;;) {
+    co_await Frame{};
+    Game::beat_fruit();
+  }
+}
+
+void Text::write(const char* text) {
   while (*text != 0) {
     bbc::oswrch((unsigned char)*text);
     text++;
   }
 }
 
-void Text::put4(unsigned value) {
-  static const unsigned place_value[4] = {1000, 100, 10, 1};
-  int i;
-  if (value > 9999) {
-    value = 9999;
+void Text::centre(u8 row, u8 colour, const char* line) {
+  u8 len = 0;
+  while (line[len] != 0) {
+    len++;
   }
-  for (i = 0; i < 4; i++) {
-    unsigned place = place_value[i];
-    unsigned char digit = '0';
-    while (value >= place) {
-      value -= place;
-      digit++;
+  bbc::colour(colour);
+  bbc::tab((u8)((u8)(Cols - len) >> 1), row);
+  write(line);
+}
+
+static u16 rng_next() {
+  rng_state = (unsigned)(rng_state + (rng_state << 5) + 13849);
+  return rng_state;
+}
+
+void Hud::labels() {
+  bbc::colour(128);
+  bbc::colour(ColGreen);
+  bbc::tab(2, 0);
+  Text::write("SCORE");
+  bbc::tab(16, 0);
+  Text::write("BEST");
+  bbc::tab(33, 0);
+  Text::write("LIVES");
+}
+
+void Hud::banner(const char* line, u8 colour, u8 row) {
+  bbc::colour(128);
+  Text::centre(row, colour, line);
+}
+
+static void paint(u8 col, u8 row, const unsigned char* image) {
+  sn_col = col;
+  sn_row = row;
+  sn_src = image;
+  cell_draw();
+}
+
+static void wipe(u8 col, u8 row) {
+  sn_col = col;
+  sn_row = row;
+  cell_wipe();
+}
+
+static const unsigned char* head_image(u8 dir) {
+  if (dir == DirUp) {
+    return k_sn_head_u;
+  }
+  if (dir == DirDown) {
+    return k_sn_head_d;
+  }
+  if (dir == DirLeft) {
+    return k_sn_head_l;
+  }
+  return k_sn_head_r;
+}
+
+static const unsigned char* fruit_image(u8 kind, u8 look) {
+  // Pointer ternaries crash davecc's 6502 codegen (AssignRegisterOrOffset).
+  if (kind == FRUIT_BONUS) {
+    if (look != 0) {
+      return k_sn_bonus1;
     }
-    bbc::oswrch(digit);
+    return k_sn_bonus0;
   }
-}
-
-void Text::spaces(int count) {
-  while (count > 0) {
-    bbc::oswrch(' ');
-    count--;
+  if (look != 0) {
+    return k_sn_apple1;
   }
+  return k_sn_apple0;
 }
 
-int Board::column(unsigned char col) {
-  return Metrics::OriginX + (col << 5);
+static void sound(const Note* note) {
+  bbc::osword(bbc::osword_command::sound, const_cast<Note*>(note));
 }
 
-int Board::row(unsigned char line) {
-  return Metrics::OriginY + (line << 5);
+static void sound_eat() {
+  static const Note n = {Flush | 2, EnvEat, 160, 3};
+  sound(&n);
 }
 
-void Board::rect(int x0, int y0, int x1, int y1) {
-  bbc::move(x0, y0);
-  bbc::move(x1, y0);
-  bbc::triangle(x0, y1);
-  bbc::move(x1, y0);
-  bbc::move(x1, y1);
-  bbc::triangle(x0, y1);
+static void sound_bonus() {
+  static const Note n = {Flush | 2, EnvBonus, 200, 6};
+  sound(&n);
 }
 
-void Board::erase(unsigned char col, unsigned char line) {
-  bbc::gcol(BBC_GCOL_SET, 0);
-  rect(column(col), row(line), column(col) + Metrics::Cell - 1,
-       row(line) + Metrics::Cell - 1);
+static void sound_death() {
+  static const Note n = {Flush | 0, EnvDeath, 6, 25};
+  sound(&n);
 }
 
-void Board::body(int x, int y) {
-  bbc::gcol(BBC_GCOL_SET, 2);
-  rect(x + 4, y + 4, x + Metrics::Cell - 5, y + Metrics::Cell - 5);
-  bbc::gcol(BBC_GCOL_SET, 3);
-  rect(x + 12, y + 12, x + Metrics::Cell - 13, y + Metrics::Cell - 13);
-}
-
-void Board::head(int x, int y, Direction facing, int colour) {
-  int cx = x + 16;
-  int cy = y + 16;
-  int ax = cx;
-  int ay = cy;
-  bbc::gcol(BBC_GCOL_SET, colour);
-  rect(x + 2, y + 2, x + Metrics::Cell - 3, y + Metrics::Cell - 3);
-  if (facing == Direction::Up) {
-    ay += 4;
-  } else if (facing == Direction::Down) {
-    ay -= 4;
-  } else if (facing == Direction::Left) {
-    ax -= 4;
-  } else {
-    ax += 4;
-  }
-  bbc::gcol(BBC_GCOL_SET, 0);
-  if (facing == Direction::Left || facing == Direction::Right) {
-    rect(ax, ay - 8, ax + 6, ay - 2);
-    rect(ax, ay + 2, ax + 6, ay + 8);
-  } else {
-    rect(ax - 8, ay, ax - 2, ay + 6);
-    rect(ax + 2, ay, ax + 8, ay + 6);
-  }
-  bbc::gcol(BBC_GCOL_SET, 7);
-  rect(ax - 2, ay - 2, ax + 2, ay + 2);
-}
-
-void Board::apple(int x, int y) {
-  int cx = x + 16;
-  int cy = y + 13;
-  bbc::gcol(BBC_GCOL_SET, 1);
-  bbc::move(cx, cy + 11);
-  bbc::move(cx + 9, cy);
-  bbc::triangle(cx, cy - 9);
-  bbc::move(cx + 9, cy);
-  bbc::move(cx, cy - 9);
-  bbc::triangle(cx - 9, cy);
-  bbc::gcol(BBC_GCOL_SET, 7);
-  rect(cx - 7, cy + 1, cx - 2, cy + 5);
-  bbc::gcol(BBC_GCOL_SET, 2);
-  rect(cx - 1, cy + 9, cx + 2, cy + 15);
-  bbc::move(cx, cy + 11);
-  bbc::move(cx + 9, cy + 15);
-  bbc::triangle(cx + 1, cy + 8);
-}
-
-void Board::frame() {
-  int x0 = Metrics::OriginX - 24;
-  int y0 = Metrics::OriginY - 24;
-  int x1 = Metrics::OriginX + Metrics::Cols * Metrics::Cell + 23;
-  int y1 = Metrics::OriginY + Metrics::Rows * Metrics::Cell + 23;
-  bbc::gcol(BBC_GCOL_SET, 6);
-  rect(x0, y0, x1, y1);
-  bbc::gcol(BBC_GCOL_SET, 4);
-  rect(x0 + 8, y0 + 8, x1 - 8, y1 - 8);
-  bbc::gcol(BBC_GCOL_SET, 0);
-  rect(Metrics::OriginX, Metrics::OriginY,
-       Metrics::OriginX + Metrics::Cols * Metrics::Cell - 1,
-       Metrics::OriginY + Metrics::Rows * Metrics::Cell - 1);
-  bbc::gcol(BBC_GCOL_SET, 3);
-  rect(x0 + 4, y1 - 16, x0 + 16, y1 - 4);
-  rect(x1 - 16, y1 - 16, x1 - 4, y1 - 4);
-  rect(x0 + 4, y0 + 4, x0 + 16, y0 + 16);
-  rect(x1 - 16, y0 + 4, x1 - 4, y0 + 16);
-}
-
-void Board::blit(int x, int y, int index, int pix, int colour) {
-  static const unsigned char glyphs[25] = {
-      0x0e, 0x10, 0x0e, 0x01, 0x1e,  // S
-      0x11, 0x19, 0x15, 0x13, 0x11,  // N
-      0x0e, 0x11, 0x1f, 0x11, 0x11,  // A
-      0x11, 0x12, 0x1c, 0x12, 0x11,  // K
-      0x1f, 0x10, 0x1e, 0x10, 0x1f   // E
-  };
-  int line;
-  bbc::gcol(BBC_GCOL_SET, colour);
-  for (line = 0; line < 5; line++) {
-    unsigned char bits = glyphs[index + line];
-    int col;
-    for (col = 0; col < 5; col++) {
-      if ((bits & (0x10 >> col)) != 0) {
-        int px = x + col * pix;
-        int py = y + (4 - line) * pix;
-        rect(px, py, px + pix - 4, py + pix - 4);
-      }
-    }
-  }
-}
-
-void Board::title_word() {
-  int i;
-  int x = 360;
-  for (i = 0; i < 5; i++) {
-    blit(x + 8, 672, i * 5, 20, 3);
-    blit(x, 680, i * 5, 20, 2);
-    x += 112;
-  }
-}
-
-void Board::title_preview() {
-  int i;
-  int x = 488;
-  for (i = 0; i < 6; i++) {
-    body(x, 440);
-    x += Metrics::Cell;
-  }
-  head(x, 440, Direction::Right, 3);
-  apple(x + Metrics::Cell + 16, 440);
-}
-
-unsigned Rng::next() {
-  state_ = (unsigned)(state_ * 25173 + 13849);
-  return state_;
-}
-
-void Snake::reset() {
-  unsigned char i;
-  length_ = 5;
-  head_ = 4;
-  dir_ = Direction::Right;
-  next_ = Direction::Right;
-  for (i = 0; i < length_; i++) {
-    col_[i] = (unsigned char)(4 + i);
-    row_[i] = 10;
-  }
-}
-
-void Snake::draw() const {
-  unsigned char i;
-  for (i = length_ - 1; i > 0; i--) {
-    unsigned char index = (unsigned char)((head_ - i) & (Metrics::Max - 1));
-    Board::body(Board::column(col_[index]), Board::row(row_[index]));
-  }
-  Board::head(Board::column(col_[head_]), Board::row(row_[head_]), dir_, 3);
-}
-
-void Snake::queue(Direction turn) {
-  unsigned char dir = (unsigned char)dir_;
-  unsigned char next = (unsigned char)next_;
-  unsigned char want = (unsigned char)turn;
-  if (((dir + 2) & 3) == want) {
-    return;
-  }
-  if (((next + 2) & 3) == want) {
-    return;
-  }
-  next_ = turn;
-}
-
-void Snake::sample() {
-  if (Keys::pressed(0x39) || Keys::pressed(0x21) || Keys::pressed(0x48)) {
-    queue(Direction::Up);
-  } else if (Keys::pressed(0x29) || Keys::pressed(0x51) || Keys::pressed(0x68)) {
-    queue(Direction::Down);
-  } else if (Keys::pressed(0x19) || Keys::pressed(0x41) || Keys::pressed(0x61)) {
-    queue(Direction::Left);
-  } else if (Keys::pressed(0x79) || Keys::pressed(0x32) || Keys::pressed(0x42)) {
-    queue(Direction::Right);
-  }
-}
-
-int Snake::covers(unsigned char col, unsigned char line, int ignore_tail) const {
-  unsigned char count = length_;
-  unsigned char i;
+static int snake_covers(u8 col, u8 row, u8 ignore_tail) {
+  u8 count = snake_len;
+  u8 i;
   if (ignore_tail && count > 0) {
     count--;
   }
   for (i = 0; i < count; i++) {
-    unsigned char index = (unsigned char)((head_ - i) & (Metrics::Max - 1));
-    if (col_[index] == col && row_[index] == line) {
+    u8 index = (u8)((snake_head - i) & (SN_MAX - 1));
+    if (snake_col[index] == col && snake_row[index] == row) {
       return 1;
     }
   }
   return 0;
 }
 
-Step Snake::step(unsigned char apple_col, unsigned char apple_row) {
-  unsigned char x = col_[head_];
-  unsigned char y = row_[head_];
-  int eat;
-  dir_ = next_;
-  if (dir_ == Direction::Up) {
-    y++;
-  } else if (dir_ == Direction::Right) {
-    x++;
-  } else if (dir_ == Direction::Down) {
+static int is_rock(u8 col, u8 row) {
+  u8 i;
+  for (i = 0; i < rock_n; i++) {
+    if (rock_col[i] == col && rock_row[i] == row) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int occupied(u8 col, u8 row, u8 ignore_tail) {
+  return snake_covers(col, row, ignore_tail) || is_rock(col, row);
+}
+
+static int fruit_blocks(u8 col, u8 row) {
+  u8 f;
+  for (f = 0; f < SN_FRUITS; f++) {
+    if (fruit_kind[f] != FRUIT_NONE && fruit_col[f] == col &&
+        fruit_row[f] == row) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void place_free(u8* col, u8* row) {
+  u8 guard = 0;
+  u8 c;
+  u8 r;
+  do {
+    c = (u8)(1 + (rng_next() & 31));
+    r = (u8)(1 + (rng_next() & 15));
+    if (c >= SN_COLS - 1) {
+      c = (u8)(SN_COLS - 2);
+    }
+    if (r >= SN_ROWS - 1) {
+      r = (u8)(SN_ROWS - 2);
+    }
+    guard++;
+  } while ((occupied(c, r, 0) || fruit_blocks(c, r)) && guard < 48);
+  if (!occupied(c, r, 0) && !fruit_blocks(c, r) && c < SN_COLS &&
+      r < SN_ROWS) {
+    *col = c;
+    *row = r;
+    return;
+  }
+  for (r = 1; r < SN_ROWS - 1; r++) {
+    for (c = 1; c < SN_COLS - 1; c++) {
+      if (!occupied(c, r, 0) && !fruit_blocks(c, r)) {
+        *col = c;
+        *row = r;
+        return;
+      }
+    }
+  }
+  *col = SN_COLS / 2;
+  *row = SN_ROWS / 2;
+}
+
+static void snake_reset() {
+  u8 i;
+  snake_len = 5;
+  snake_head = 4;
+  snake_dir = DirRight;
+  snake_next = DirRight;
+  for (i = 0; i < snake_len; i++) {
+    snake_col[i] = (u8)(6 + i);
+    snake_row[i] = SN_ROWS / 2;
+  }
+}
+
+static void snake_draw() {
+  u8 i;
+  for (i = snake_len - 1; i > 0; i--) {
+    u8 index = (u8)((snake_head - i) & (SN_MAX - 1));
+    if (i + 1 == snake_len) {
+      paint(snake_col[index], snake_row[index], k_sn_tail);
+    } else {
+      paint(snake_col[index], snake_row[index], k_sn_body);
+    }
+  }
+  paint(snake_col[snake_head], snake_row[snake_head], head_image(snake_dir));
+}
+
+static void queue_dir(u8 want) {
+  if (((snake_dir + 2) & 3) == want) {
+    return;
+  }
+  if (((snake_next + 2) & 3) == want) {
+    return;
+  }
+  snake_next = want;
+}
+
+static void sample_keys() {
+  if (key_bits & KeyUp) {
+    queue_dir(DirUp);
+  } else if (key_bits & KeyDown) {
+    queue_dir(DirDown);
+  } else if (key_bits & KeyLeft) {
+    queue_dir(DirLeft);
+  } else if (key_bits & KeyRight) {
+    queue_dir(DirRight);
+  }
+}
+
+static u8 fruit_at(u8 col, u8 row) {
+  u8 f;
+  for (f = 0; f < SN_FRUITS; f++) {
+    if (fruit_kind[f] != FRUIT_NONE && fruit_col[f] == col &&
+        fruit_row[f] == row) {
+      return f;
+    }
+  }
+  return 255;
+}
+
+static void spawn_fruit(u8 kind) {
+  u8 f;
+  for (f = 0; f < SN_FRUITS; f++) {
+    if (fruit_kind[f] == FRUIT_NONE) {
+      place_free(&fruit_col[f], &fruit_row[f]);
+      fruit_kind[f] = kind;
+      fruit_life[f] = kind == FRUIT_BONUS ? (u8)Pace::BonusLife : 0;
+      paint(fruit_col[f], fruit_row[f], fruit_image(kind, fruit_look));
+      return;
+    }
+  }
+}
+
+static void clear_fruits() {
+  u8 f;
+  for (f = 0; f < SN_FRUITS; f++) {
+    fruit_kind[f] = FRUIT_NONE;
+    fruit_life[f] = 0;
+  }
+}
+
+static void draw_fruits() {
+  u8 f;
+  for (f = 0; f < SN_FRUITS; f++) {
+    if (fruit_kind[f] != FRUIT_NONE) {
+      paint(fruit_col[f], fruit_row[f],
+            fruit_image(fruit_kind[f], fruit_look));
+    }
+  }
+}
+
+static void draw_rocks() {
+  u8 i;
+  for (i = 0; i < rock_n; i++) {
+    paint(rock_col[i], rock_row[i], k_sn_rock);
+  }
+}
+
+static void draw_border() {
+  u8 c;
+  u8 r;
+  for (c = 0; c < SN_COLS; c++) {
+    paint(c, 0, k_sn_wall);
+    paint(c, SN_ROWS - 1, k_sn_wall);
+  }
+  for (r = 1; r < SN_ROWS - 1; r++) {
+    paint(0, r, k_sn_wall);
+    paint(SN_COLS - 1, r, k_sn_wall);
+  }
+}
+
+// Border is an edge test; rock_* holds interior obstacles that grow with
+// the level. Keep the spawn corridor clear so a new life is fair.
+static void build_rocks() {
+  u8 extras = (u8)(2 + level * 2);
+  u8 i;
+  rock_n = 0;
+  if (extras > 16) {
+    extras = 16;
+  }
+  for (i = 0; i < extras && rock_n < SN_ROCKS; i++) {
+    u8 c;
+    u8 r;
+    u8 guard = 0;
+    do {
+      c = (u8)(1 + (rng_next() & 31));
+      r = (u8)(1 + (rng_next() & 15));
+      if (c >= SN_COLS - 1) {
+        c = (u8)(SN_COLS - 2);
+      }
+      if (r >= SN_ROWS - 1) {
+        r = (u8)(SN_ROWS - 2);
+      }
+      guard++;
+    } while ((snake_covers(c, r, 0) ||
+              (c >= 4 && c <= 12 && r >= SN_ROWS / 2 - 1 &&
+               r <= SN_ROWS / 2 + 1)) &&
+             guard < 32);
+    rock_col[rock_n] = c;
+    rock_row[rock_n] = r;
+    rock_n++;
+  }
+}
+
+static int on_edge(u8 col, u8 row) {
+  return col == 0 || row == 0 || col == SN_COLS - 1 || row == SN_ROWS - 1;
+}
+
+static u8 snake_step() {
+  u8 x = snake_col[snake_head];
+  u8 y = snake_row[snake_head];
+  u8 prev = snake_head;
+  u8 slot;
+  snake_dir = snake_next;
+  if (snake_dir == DirUp) {
     y--;
+  } else if (snake_dir == DirRight) {
+    x++;
+  } else if (snake_dir == DirDown) {
+    y++;
   } else {
     x--;
   }
-  eat = x == apple_col && y == apple_row;
-  if (x >= Metrics::Cols || y >= Metrics::Rows ||
-      covers(x, y, eat ? 0 : 1)) {
-    return Step::Died;
+  if (on_edge(x, y) || is_rock(x, y) || snake_covers(x, y, 1)) {
+    return StepDied;
   }
-  head_ = (unsigned char)((head_ + 1) & (Metrics::Max - 1));
-  col_[head_] = x;
-  row_[head_] = y;
-  if (eat) {
-    if (length_ < Metrics::Max - 1) {
-      length_++;
+  slot = fruit_at(x, y);
+  snake_head = (u8)((snake_head + 1) & (SN_MAX - 1));
+  snake_col[snake_head] = x;
+  snake_row[snake_head] = y;
+  paint(snake_col[prev], snake_row[prev], k_sn_body);
+  paint(x, y, head_image(snake_dir));
+  if (slot != 255) {
+    u8 kind = fruit_kind[slot];
+    fruit_kind[slot] = FRUIT_NONE;
+    fruit_life[slot] = 0;
+    if (snake_len < SN_MAX - 1) {
+      snake_len++;
     }
-    return Step::Ate;
+    return kind == FRUIT_BONUS ? StepBonus : StepAte;
   }
   {
-    unsigned char tail = (unsigned char)((head_ - length_) & (Metrics::Max - 1));
-    Board::erase(col_[tail], row_[tail]);
+    u8 tail = (u8)((snake_head - snake_len) & (SN_MAX - 1));
+    u8 new_tail = (u8)((snake_head - (snake_len - 1)) & (SN_MAX - 1));
+    wipe(snake_col[tail], snake_row[tail]);
+    if (snake_len > 1) {
+      paint(snake_col[new_tail], snake_row[new_tail], k_sn_tail);
+    }
   }
-  return Step::Moved;
+  return StepMoved;
 }
 
-void Snake::paint_dead() const {
-  Board::head(Board::column(col_[head_]), Board::row(row_[head_]), dir_, 1);
-}
-
-void Snake::paint_move(unsigned char previous) const {
-  Board::body(Board::column(col_[previous]), Board::row(row_[previous]));
-  Board::head(Board::column(col_[head_]), Board::row(row_[head_]), dir_, 3);
-}
-
-void Apple::reset() {
-  col_ = 14;
-  row_ = 10;
-}
-
-void Apple::place(const Snake& snake, Rng& rng) {
-  unsigned char col;
-  unsigned char line;
-  int guard = 0;
-  do {
-    col_ = (unsigned char)(rng.next() & 31);
-    row_ = (unsigned char)(rng.next() & 31);
-    guard++;
-  } while ((col_ >= Metrics::Cols || row_ >= Metrics::Rows ||
-            snake.covers(col_, row_, 0)) &&
-           guard < 40);
-  if (col_ < Metrics::Cols && row_ < Metrics::Rows &&
-      !snake.covers(col_, row_, 0)) {
-    return;
+static u8 pace_for_score() {
+  if (score >= 400) {
+    return 2;
   }
-  for (line = 0; line < Metrics::Rows; line++) {
-    for (col = 0; col < Metrics::Cols; col++) {
-      if (!snake.covers(col, line, 0)) {
-        col_ = col;
-        row_ = line;
-        return;
+  if (score >= 250) {
+    return 3;
+  }
+  if (score >= 120) {
+    return 4;
+  }
+  if (score >= 50) {
+    return 5;
+  }
+  return 6;
+}
+
+static void present() {
+  hud_digits();
+  hud_dirty = 0;
+}
+
+static void deploy() {
+  u8 n;
+  phase = PhasePlay;
+  move_gap = pace_for_score();
+  move_wait = move_gap;
+  anim_wait = Pace::FruitAnim;
+  bonus_wait = Pace::BonusGap;
+  fruit_look = 0;
+  ate_count = 0;
+  clear_fruits();
+  snake_reset();
+  build_rocks();
+  bbc::cls();
+  bbc::cursor(0);
+  bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
+  draw_border();
+  draw_rocks();
+  snake_draw();
+  for (n = 0; n < 3; n++) {
+    spawn_fruit(FRUIT_APPLE);
+  }
+  Hud::labels();
+  present();
+}
+
+u8 Title::show() {
+  u8 frames;
+  u8 armed = 0;
+  u8 blink = Pace::TitleBlink;
+  u8 look = 0;
+  phase = PhaseTitle;
+  bbc::cursor(0);
+  bbc::cls();
+  Text::centre(3, ColWhite, "DAVECC SNAKE");
+  paint(16, 8, k_sn_tail);
+  paint(17, 8, k_sn_body);
+  paint(18, 8, k_sn_body);
+  paint(19, 8, k_sn_body);
+  paint(20, 8, k_sn_head_r);
+  paint(23, 8, k_sn_apple0);
+  paint(26, 8, k_sn_bonus0);
+  paint(14, 10, k_sn_rock);
+  paint(28, 10, k_sn_rock);
+  Text::centre(14, ColGreen, "EAT THE APPLES, DODGE THE ROCKS");
+  Text::centre(16, ColGreen, "BONUS FRUIT IS WORTH MORE");
+  Text::centre(22, ColWhite, "Z X / WASD / ARROWS STEER");
+  Text::centre(23, ColWhite, "SPACE STARTS, ESCAPE QUITS");
+  Text::centre(28, ColRed, "WRITTEN IN C++20 WITH DAVECC");
+  bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
+  for (frames = 0; frames < Pace::Title; frames++) {
+    frame_wait();
+    keys_read();
+    if ((key_bits & KeyFire) == 0) {
+      armed = 1;
+    } else if (armed) {
+      break;
+    }
+    if ((key_bits & KeyEscape) != 0) {
+      return 0;
+    }
+    blink--;
+    if (blink == 0) {
+      blink = Pace::TitleBlink;
+      look ^= 1;
+      if (look != 0) {
+        paint(23, 8, k_sn_apple1);
+        paint(26, 8, k_sn_bonus1);
+      } else {
+        paint(23, 8, k_sn_apple0);
+        paint(26, 8, k_sn_bonus0);
       }
     }
   }
-}
-
-void Apple::draw() const {
-  Board::apple(Board::column(col_), Board::row(row_));
-}
-
-void Hud::install() {
-  static const unsigned char bits[8] = {0x6c, 0xfe, 0xfe, 0x7c,
-                                        0x38, 0x10, 0x00, 0x00};
-  bbc::defchar(Metrics::Heart, bits);
-}
-
-void Hud::show(unsigned points, unsigned best, unsigned char left) {
-  int i;
-  bbc::colour(128);
-  bbc::tab(0, 0);
-  bbc::colour(3);
-  Text::put("SCORE ");
-  bbc::colour(7);
-  Text::put4(points);
-  bbc::colour(6);
-  Text::put(" BEST ");
-  bbc::colour(7);
-  Text::put4(best);
-  bbc::tab(0, 1);
-  bbc::colour(7);
-  Text::put("LIVES ");
-  for (i = 0; i < 3; i++) {
-    bbc::colour(i < left ? 1 : 4);
-    bbc::oswrch(Metrics::Heart);
-  }
-  Text::spaces(11);
-}
-
-void Hud::hint() {
-  bbc::colour(128);
-  bbc::tab(0, 31);
-  bbc::colour(6);
-  // Mode 2 is 20 columns. A 20th character on the last row scrolls the
-  // bitmap by one text line and leaves the opening snake behind.
-  Text::put("ZX:/ ARROWS WASD");
-}
-
-void Hud::game_over() {
-  bbc::colour(128);
-  bbc::tab(5, 14);
-  bbc::colour(1);
-  Text::put("GAME OVER");
-  bbc::tab(4, 16);
-  bbc::colour(3);
-  Text::put("SPACE PLAYS");
-}
-
-int Title::show() {
-  int frames = 0;
-  bbc::cls();
-  bbc::cursor(0);
-  bbc::colour(128);
-  snake_state = 1;
-  Board::title_word();
-  Board::title_preview();
-  bbc::gcol(BBC_GCOL_SET, 6);
-  Board::rect(360, 636, 908, 644);
-  bbc::tab(1, 28);
-  bbc::colour(3);
-  Text::put("SPACE STARTS");
-  bbc::tab(1, 29);
-  bbc::colour(7);
-  Text::put("ARROWS OR ZX:/");
-  bbc::tab(1, 30);
-  bbc::colour(6);
-  Text::put("WASD STEERS");
-  bbc::tab(1, 31);
-  bbc::colour(1);
-  Text::put("ESCAPE QUITS");
-  for (;;) {
-    Sound::vsync();
-    if (Keys::escape()) {
-      return 0;
-    }
-    if (Keys::pressed(0x62) || Keys::pressed(0x39) || Keys::pressed(0x29) ||
-        Keys::pressed(0x19) || Keys::pressed(0x79)) {
-      return 1;
-    }
-    frames++;
-    if (frames >= 90) {
-      return 1;
-    }
-  }
-}
-
-void Game::deal() {
-  snake_.reset();
-  apple_.reset();
-  bbc::cls();
-  bbc::cursor(0);
-  Board::frame();
-  snake_.draw();
-  apple_.draw();
-  Hud::show(score, best_, lives);
-  Hud::hint();
-}
-
-int Game::pace() const {
-  if (score >= 150) {
-    return 3;
-  }
-  if (score >= 70) {
-    return 5;
-  }
-  if (score >= 30) {
-    return 6;
-  }
-  return 8;
-}
-
-int Game::tick() {
-  unsigned char previous = snake_.head_index();
-  Step outcome = snake_.step(apple_.column(), apple_.line());
-  if (outcome == Step::Died) {
-    snake_state = 3;
-    if (lives > 0) {
-      lives--;
-    }
-    Hud::show(score, best_, lives);
-    snake_.paint_dead();
-    Sound::tone(28, 12);
-    Sound::wait(20);
-    return 0;
-  }
-  if (outcome == Step::Ate) {
-    score += 10;
-    if (score > best_) {
-      best_ = score;
-    }
-    Sound::tone(140, 2);
-    Sound::tone(180, 2);
-    apple_.place(snake_, rng_);
-    apple_.draw();
-    Hud::show(score, best_, lives);
-  }
-  snake_.paint_move(previous);
   return 1;
 }
 
-void Game::over() {
-  snake_state = 4;
-  Hud::game_over();
-  for (;;) {
-    Sound::vsync();
-    if (Keys::escape()) {
-      bbc_return();
-    }
-    if (Keys::pressed(0x62)) {
-      return;
-    }
+namespace Game {
+
+static void add_score(u16 points) {
+  score = (unsigned)(score + points);
+  if (score > best) {
+    best = score;
+  }
+  move_gap = pace_for_score();
+  hud_dirty = 1;
+}
+
+static void kill_player() {
+  if (phase != PhasePlay) {
+    return;
+  }
+  phase = PhaseDying;
+  death_t = Pace::Death;
+  if (lives > 0) {
+    lives--;
+  }
+  hud_dirty = 1;
+  paint(snake_col[snake_head], snake_row[snake_head], k_sn_rock);
+  sound_death();
+}
+
+static void dying() {
+  if (death_t > 0) {
+    death_t--;
+  }
+  if (death_t != 0) {
+    return;
+  }
+  if (lives == 0) {
+    phase = PhaseOver;
+    over_t = Pace::Over;
+    Hud::banner("GAME OVER", ColRed, 12);
+    Text::centre(15, ColWhite, "PRESS SPACE");
+    return;
+  }
+  deploy();
+}
+
+void beat_input() {
+  if (phase == PhasePlay) {
+    sample_keys();
   }
 }
 
-void Game::match() {
-  snake_state = 2;
+void beat_snake() {
+  u8 outcome;
+  if (phase != PhasePlay) {
+    return;
+  }
+  if (move_wait > 0) {
+    move_wait--;
+    return;
+  }
+  move_wait = move_gap;
+  outcome = snake_step();
+  if (outcome == StepDied) {
+    kill_player();
+    return;
+  }
+  if (outcome == StepAte) {
+    add_score(10);
+    sound_eat();
+    ate_count++;
+    spawn_fruit(FRUIT_APPLE);
+    if (ate_count >= 8) {
+      ate_count = 0;
+      phase = PhaseWave;
+      wave_t = Pace::Wave;
+      Hud::banner("NEXT LEVEL", ColWhite, 14);
+    }
+  } else if (outcome == StepBonus) {
+    add_score(50);
+    sound_bonus();
+  }
+}
+
+void beat_fruit() {
+  u8 f;
+  if (phase != PhasePlay) {
+    return;
+  }
+  if (anim_wait > 0) {
+    anim_wait--;
+  } else {
+    anim_wait = Pace::FruitAnim;
+    fruit_look ^= 1;
+    draw_fruits();
+  }
+  for (f = 0; f < SN_FRUITS; f++) {
+    if (fruit_kind[f] == FRUIT_BONUS) {
+      if (fruit_life[f] > 0) {
+        fruit_life[f]--;
+      }
+      if (fruit_life[f] == 0) {
+        wipe(fruit_col[f], fruit_row[f]);
+        fruit_kind[f] = FRUIT_NONE;
+      }
+    }
+  }
+  if (bonus_wait > 0) {
+    bonus_wait--;
+  } else {
+    bonus_wait = Pace::BonusGap;
+    spawn_fruit(FRUIT_BONUS);
+  }
+}
+
+static void play_frame() {
+  if (jobs_ok) {
+    input_job.h.resume();
+    snake_job.h.resume();
+    fruit_job.h.resume();
+    return;
+  }
+  beat_input();
+  beat_snake();
+  beat_fruit();
+}
+
+static void quit() {
+  bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
+  bbc::cls();
+  bbc::cursor(1);
+  bbc_return();
+}
+
+u8 tick() {
+  if (frames_played < 255) {
+    frames_played++;
+  }
+  frame_wait();
+  keys_read();
+  if (frames_played > Pace::EscapeGuard && (key_bits & KeyEscape) != 0) {
+    quit();
+  }
+  if (phase == PhasePlay) {
+    play_frame();
+  } else if (phase == PhaseDying) {
+    dying();
+  } else if (phase == PhaseWave) {
+    if (wave_t > 0) {
+      wave_t--;
+    }
+    if (wave_t == 0) {
+      level++;
+      deploy();
+    }
+  } else if (phase == PhaseOver) {
+    if (over_t > 0) {
+      over_t--;
+    } else if ((key_bits & KeyFire) != 0) {
+      return 1;
+    }
+  }
+  if (hud_dirty) {
+    present();
+  }
+  return 0;
+}
+
+static void session() {
   score = 0;
   lives = 3;
-  deal();
-  Sound::tone(100, 2);
-  Sound::tone(140, 2);
+  level = 1;
+  frames_played = 0;
+  bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
+  deploy();
+  play_used = 0;
+  input_job = input_coro();
+  snake_job = snake_coro();
+  fruit_job = fruit_coro();
+  jobs_ok = input_job.h && snake_job.h && fruit_job.h;
+  while (tick() == 0) {
+  }
+  jobs_ok = 0;
+  input_job = Play{};
+  snake_job = Play{};
+  fruit_job = Play{};
+}
+
+void run() {
+  u8 i;
+  bbc::palette(0, ColBlack);
+  bbc::palette(1, 2);
+  bbc::palette(2, 1);
+  bbc::palette(3, 7);
+  bbc::colour(128);
+  bbc::cursor(0);
+  rng_state = 1;
+  bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
+  for (i = 0; i < 3; i++) {
+    bbc::osword(bbc::osword_command::envelope,
+                const_cast<Envelope*>(&envelopes[i]));
+  }
   for (;;) {
-    int frames = pace();
-    while (frames > 0) {
-      Sound::vsync();
-      if (Keys::escape()) {
-        bbc_return();
-      }
-      snake_.sample();
-      frames--;
-    }
-    if (!tick()) {
-      if (lives == 0) {
-        over();
-        return;
-      }
-      deal();
-    }
+    session();
   }
 }
 
-void Game::run() {
-  Hud::install();
-  for (;;) {
-    if (!Title::show()) {
-      return;
-    }
-    match();
-  }
-}
-
-static Game game;
+}  // namespace Game
 
 int main() {
-  bbc::mode(130);
-  game.run();
+  bbc::mode(129);
+  bbc::osbyte(bbc::osbyte_command::escape_status, 1, 0);
+  bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
+  note_acccon();
+  bbc::palette(0, ColBlack);
+  bbc::palette(1, 2);
+  bbc::palette(2, 1);
+  bbc::palette(3, 7);
+  bbc::colour(128);
+  if (!Title::show()) {
+    bbc_return();
+    return 0;
+  }
+  bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
+  Game::run();
   bbc_return();
   return 0;
 }

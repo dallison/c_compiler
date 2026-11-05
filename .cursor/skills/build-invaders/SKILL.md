@@ -92,9 +92,11 @@ The script does these checks; it fails if any of those symbols lands at or above
 - **Assembler**: in davecc `.s` files `.word` is **4 bytes**; use `.hword` for 16-bit pointers and values.
 - **Mode**: call `bbc::mode(129)` **once** in `main`. A second `mode()` re-parks the soft stack and returns to BASIC.
 
-## Snake (optional companion on the same SSD)
+## Snake (same SSD, same link)
 
-Snake uses `bbc_mode2.ld` (not `_e00`) historically; keep an existing `games/build/snake.elf` when packing. Rebuild snake only if that ELF is missing or the user asks.
+Snake now matches Invaders: shadow mode 1, `screen1.s` blitter, sprites in
+`sprites.s`, play helpers in `snake_fx.s`, C++20 coroutines in `snake.cc`,
+linked at `&E00` with `bbc_mode2_e00.ld`. The pack script builds both.
 
 ## After packing
 
