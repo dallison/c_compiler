@@ -64,7 +64,7 @@ class Pace {
     ShotSpeed = 10,
     ThrustMax = 4,
     TurnGap = 2,
-    ThrustGap = 2,
+    ThrustGap = 3,
     FrictionGap = 20
   };
 };
@@ -100,8 +100,14 @@ void soft_draw_large();
 void soft_wipe_large();
 void soft_draw_small();
 void soft_wipe_small();
-void soft_draw_ship();
 void soft_wipe_ship();
+void ship_blit();
+void ship_paint();
+void rocks_step();
+extern u8 as_hit;
+void shots_step();
+extern u8 as_shot_dead;
+extern u8 as_shot_victim[];
 
 extern const unsigned char k_as_ship0[];
 extern const unsigned char k_as_ship1[];
@@ -465,19 +471,6 @@ static const i8 k_thrust_dy[8] = {(i8)-1, (i8)-1, 0, 1, 1, 1, 0, (i8)-1};
 static i8 thrust_dx(u8 dir) { return k_thrust_dx[dir]; }
 static i8 thrust_dy(u8 dir) { return k_thrust_dy[dir]; }
 
-static const unsigned char* const k_rock_img[6] = {
-    k_as_rock_l0, k_as_rock_l1, k_as_rock_m0,
-    k_as_rock_m1, k_as_rock_s0, k_as_rock_s1};
-
-static const unsigned char* rock_image(u8 size, u8 look, u8 phase) {
-  (void)phase;
-  return k_rock_img[(u8)(size * 2 + (look != 0 ? 1 : 0))];
-}
-
-static const u8 k_rock_radius[3] = {10, 6, 3};
-
-static u8 rock_radius(u8 size) { return k_rock_radius[size]; }
-
 static void paint_cell(u8 col, u8 row, const unsigned char* image) {
   as_col = col;
   as_row = row;
@@ -491,25 +484,14 @@ static void wipe_cell(u8 col, u8 row) {
   cell_wipe();
 }
 
-static void paint_large(u8 col, u8 row, const unsigned char* image) {
-  as_col = col;
-  as_row = row;
+// Title-screen ship display at cell (18, 10): the blit draw writes
+// every byte of the window, so spinning to the next heading needs no
+// separate wipe.
+static void paint_title_ship(const unsigned char* image) {
+  as_col = 36;
+  as_y = 80;
   as_src = image;
-  cell_draw_large();
-}
-
-static void wipe_large(u8 col, u8 row) {
-  as_col = col;
-  as_row = row;
-  cell_wipe_large();
-}
-
-static u8 soft_left_col(u16 x) {
-  u8 col = pix_col(x);
-  if (col > 0) {
-    col = (u8)(col - 1);
-  }
-  return col;
+  ship_blit();
 }
 
 static void ship_erase() {
@@ -524,38 +506,27 @@ static void ship_erase() {
 static void ship_present() {
   u8 ncol;
   u8 sy;
-  u8 changed;
   if (!ship_on) {
     ship_erase();
     return;
   }
   ncol = pix_col(ship_x);
   sy = (u8)ship_y;
-  changed = (u8)(ncol != ship_px || sy != ship_py || ship_dir != ship_dir_shown ||
-                 ship_thrusting != ship_thrust_shown);
-  if (ship_shown && changed) {
-    ship_erase();
-  }
+  // Repaint every tick: a rock (or shot) wipe can clobber part of a
+  // stationary ship's window — during the post-respawn invulnerable
+  // seconds rocks pass straight through it — and with an unchanged-
+  // ship skip the damage would never be repaired. The blit makes the
+  // repaint cheap, and wipe+draw land in the same displayed frame.
+  // ship_blit reads ship_px/ship_py/ship_shown, so update them after.
+  as_col = ncol;
+  as_y = sy;
+  as_src = ship_image(ship_dir, ship_thrusting);
+  ship_blit();
   ship_px = ncol;
   ship_py = sy;
   ship_dir_shown = ship_dir;
   ship_thrust_shown = ship_thrusting;
-  as_col = ncol;
-  as_y = sy;
-  as_src = ship_image(ship_dir, ship_thrusting);
-  soft_draw_ship();
   ship_shown = 1;
-}
-
-static void rock_paint_at(u8 i, u8 col, u8 sy, u8 phase) {
-  as_col = col;
-  as_y = sy;
-  as_src = rock_image(rock_size[i], rock_look[i], phase);
-  if (rock_size[i] == ROCK_LARGE) {
-    soft_draw_large();
-  } else {
-    soft_draw_small();
-  }
 }
 
 static void rock_erase(u8 i) {
@@ -572,34 +543,10 @@ static void rock_erase(u8 i) {
   rock_shown[i] = 0;
 }
 
-static void rock_present(u8 i, u8 anim) {
-  u8 col;
-  u8 sy;
-  u8 phase;
-  if (!rock_on[i]) {
-    rock_erase(i);
-    return;
-  }
-  col = soft_left_col(rock_x[i]);
-  sy = (u8)rock_y[i];
-  phase = 0;
-  // Wipe-then-draw. Paint-first edge clears nested too much soft-stack
-  // under &7C00 and produced "Bad program".
-  if (rock_shown[i] && (col != rock_col[i] || sy != rock_sy[i])) {
-    rock_erase(i);
-  }
-  rock_col[i] = col;
-  rock_sy[i] = sy;
-  rock_phase[i] = phase;
-  rock_paint_at(i, col, sy, phase);
-  rock_shown[i] = 1;
-  (void)anim;
-}
-
-static void rock_spawn_draw(u8 i) {
-  rock_shown[i] = 0;
-  rock_present(i, 0);
-}
+// Rocks are painted by beat_rocks (folded into its loop — a chain of
+// per-rock C++ calls here cost more than the paint itself). A spawn just
+// marks the rock unshown and the next beat paints it.
+static void rock_spawn_draw(u8 i) { rock_shown[i] = 0; }
 
 static const unsigned char* shot_image(u8 phase) {
   if (phase == 0) {
@@ -634,6 +581,9 @@ static void shot_erase(u8 i) {
   }
 }
 
+static const unsigned char* const k_shot_img[4] = {k_as_shot0, k_as_shot1,
+                                                   k_as_shot2, k_as_shot3};
+
 static void shot_present(u8 i) {
   u8 ncol;
   u8 ny;
@@ -642,18 +592,26 @@ static void shot_present(u8 i) {
     shot_erase(i);
     return;
   }
-  ncol = pix_col(shot_x[i]);
+  // Inline the paint chain: this runs per shot per tick, and the
+  // pix_col/wipe_shot/paint_shot/shot_image calls cost more than the
+  // strip paint itself.
+  ncol = (u8)(shot_x[i] >> 2);
   ny = (u8)shot_y[i];
   phase = (u8)(shot_x[i] & 3);
   if (shot_shown[i] &&
       (ncol != shot_col[i] || ny != shot_sy[i] || phase != shot_phase[i])) {
-    wipe_shot(shot_col[i], shot_sy[i]);
+    as_col = shot_col[i];
+    as_y = shot_sy[i];
+    shot_wipe();
     shot_shown[i] = 0;
   }
   shot_col[i] = ncol;
   shot_sy[i] = ny;
   shot_phase[i] = phase;
-  paint_shot(ncol, ny, phase);
+  as_col = ncol;
+  as_y = ny;
+  as_src = k_shot_img[phase];
+  shot_draw();
   shot_shown[i] = 1;
 }
 
@@ -689,18 +647,6 @@ static void friction(i8* v) {
   } else {
     (*v) = (i8)(u + 1);
   }
-}
-
-static int hits(u16 ax, u16 ay, u8 ar, u16 bx, u16 by, u8 br) {
-  i16 dx = (i16)(ax - bx);
-  i16 dy = (i16)(ay - by);
-  if (dx < 0) {
-    dx = (i16)(-dx);
-  }
-  if (dy < 0) {
-    dy = (i16)(-dy);
-  }
-  return dx < (i16)(ar + br) && dy < (i16)(ar + br);
 }
 
 static u8 free_rock() {
@@ -900,7 +846,7 @@ u8 Title::show() {
   as_y = 64;
   as_src = k_as_rock_l0;
   soft_draw_large();
-  paint_large(18, 10, k_as_ship0);
+  paint_title_ship(k_as_ship0);
   paint_shot(28, 88, 0);
   as_col = 49;
   as_y = 100;
@@ -929,9 +875,8 @@ u8 Title::show() {
     spin--;
     if (spin == 0) {
       spin = Pace::TitleSpin;
-      wipe_large(18, 10);
       dir = (u8)((dir + 1) & 7);
-      paint_large(18, 10, ship_image(dir, 0));
+      paint_title_ship(ship_image(dir, 0));
     }
   }
   return 1;
@@ -983,7 +928,6 @@ static void dying() {
 }
 
 void beat_ship() {
-  u8 turned = 0;
   if (phase != PhasePlay || !ship_on) {
     return;
   }
@@ -994,11 +938,9 @@ void beat_ship() {
     if (key_bits & KeyLeft) {
       ship_dir = (u8)((ship_dir + 7) & 7);
       ship_turn_t = Pace::TurnGap;
-      turned = 1;
     } else if (key_bits & KeyRight) {
       ship_dir = (u8)((ship_dir + 1) & 7);
       ship_turn_t = Pace::TurnGap;
-      turned = 1;
     }
   }
   ship_thrusting = 0;
@@ -1035,18 +977,44 @@ void beat_ship() {
       fire_held = 0;
     }
   }
-  ship_x = advance_x(ship_x, ship_vx);
-  ship_y = advance_y(ship_y, ship_vy);
+  // Move in byte arithmetic; advance_x/advance_y are 16-bit helper
+  // calls that cost more than the move when called every tick.
+  if ((u8)ship_vx != 0) {
+    u8 uv = (u8)ship_vx;
+    if (uv < 128) {
+      ship_x = (u16)(ship_x + uv);
+      if (ship_x >= FieldW) {
+        ship_x = (u16)(ship_x - FieldW);
+      }
+    } else if (ship_x >= (u8)(0 - uv)) {
+      ship_x = (u16)(ship_x - (u8)(0 - uv));
+    } else {
+      ship_x = (u16)(ship_x + (FieldW - (u8)(0 - uv)));
+    }
+  }
+  if ((u8)ship_vy != 0) {
+    u8 uv = (u8)ship_vy;
+    if (uv < 128) {
+      ship_y = (u16)(ship_y + uv);
+      if (ship_y >= FieldY1) {
+        ship_y = (u16)(ship_y - (FieldY1 - FieldY0));
+      }
+    } else if (ship_y >= (u8)(FieldY0 + (u8)(0 - uv))) {
+      ship_y = (u16)(ship_y - (u8)(0 - uv));
+    } else {
+      ship_y = (u16)(ship_y + ((FieldY1 - FieldY0) - (u8)(0 - uv)));
+    }
+  }
   if (ship_invuln > 0) {
     ship_invuln--;
   }
-  ship_present();
-  (void)turned;
+  // The paint decision (including the every-other-tick repair
+  // repaint of a stationary ship) is ship_paint in asteroids_fx.s;
+  // the C++ version of this check cost ~8K cycles a call.
+  ship_paint();
 }
 
 void beat_rocks() {
-  u8 i;
-  u8 anim = 0;
   if (phase != PhasePlay) {
     return;
   }
@@ -1054,24 +1022,13 @@ void beat_rocks() {
     anim_t--;
   } else {
     anim_t = Pace::Anim;
-    anim = 1;
   }
-  for (i = 0; i < AS_ROCKS; i++) {
-    if (!rock_on[i]) {
-      continue;
-    }
-    rock_x[i] = advance_x(rock_x[i], rock_vx[i]);
-    rock_y[i] = advance_y(rock_y[i], rock_vy[i]);
-    // Keep a fixed rock frame — swapping looks every few frames read as
-    // flicker on top of the cell-step motion.
-    rock_present(i, anim);
-    if (ship_on && ship_invuln == 0 &&
-        hits(ship_x + 8, ship_y + 8, 5, rock_x[i] + rock_radius(rock_size[i]),
-             rock_y[i] + rock_radius(rock_size[i]),
-             rock_radius(rock_size[i]))) {
-      kill_player();
-      return;
-    }
+  // The step itself is rocks_step in asteroids_fx.s: doing it in C++
+  // cost several vsyncs a tick in call and register-save overhead.
+  rocks_step();
+  if (as_hit != 0) {
+    kill_player();
+    return;
   }
   if (rock_alive == 0) {
     phase = PhaseWave;
@@ -1082,40 +1039,26 @@ void beat_rocks() {
 
 void beat_shots() {
   u8 i;
-  u8 r;
+  u16 claimed = 0;
   if (phase != PhasePlay) {
     return;
   }
+  // Movement, wrapping, the shot/rock box test and the repaint of
+  // surviving shots are shots_step in asteroids_fx.s; this loop only
+  // does the bookkeeping for shots that died (erase, and split the
+  // victim rock).
+  shots_step();
   for (i = 0; i < AS_SHOTS; i++) {
-    if (!shot_on[i]) {
-      continue;
-    }
-    if (shot_life[i] > 0) {
-      shot_life[i]--;
-    }
-    if (shot_life[i] == 0) {
+    if (as_shot_dead & (u8)(1 << i)) {
+      u8 v = as_shot_victim[i];
       shot_erase(i);
-      shot_on[i] = 0;
-      continue;
-    }
-    shot_x[i] = advance_x(shot_x[i], shot_vx[i]);
-    shot_y[i] = advance_y(shot_y[i], shot_vy[i]);
-    for (r = 0; r < AS_ROCKS; r++) {
-      if (!rock_on[r]) {
-        continue;
+      // Two shots can claim the same rock in one step; split it once.
+      // (split_rock may also reuse the slot for a child rock, which a
+      // second claimant must not split again.)
+      if (v != 0xFF && !(claimed & (u16)((u16)1 << v)) && rock_on[v]) {
+        claimed = (u16)(claimed | (u16)((u16)1 << v));
+        split_rock(v);
       }
-      if (hits(shot_x[i] + 4, shot_y[i] + 4, 2,
-               rock_x[r] + rock_radius(rock_size[r]),
-               rock_y[r] + rock_radius(rock_size[r]),
-               rock_radius(rock_size[r]))) {
-        shot_erase(i);
-        shot_on[i] = 0;
-        split_rock(r);
-        break;
-      }
-    }
-    if (shot_on[i]) {
-      shot_present(i);
     }
   }
 }

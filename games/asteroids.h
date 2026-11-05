@@ -29,7 +29,7 @@
 
 #define AS_HUD_ROW 1
 #define AS_HUD_SCORE_COL 5
-#define AS_HUD_BEST_COL 39
+#define AS_HUD_BEST_COL 32
 #define AS_HUD_LIVES_COL 70
 
 // key_bits from keys_read.

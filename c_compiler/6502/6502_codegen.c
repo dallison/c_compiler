@@ -1380,16 +1380,22 @@ static void SetIndexReg2(W65C02Generator* g, TargetInstruction* src1,
 
 static void SetIndexRegDown(W65C02Generator* g, TargetInstruction* src,
                             TargetInstruction* dest, int index, int limit) {
+  (void)limit;  // Callers pass the byte count for context; Y tracks index.
   if (!Is65c02()) {
     if (GetAddrMode(src) == kAddrModeIndirect ||
         GetAddrMode(dest) == kAddrModeIndirect) {
-      ldyi(g, limit - 1);
+      // Y must hold the byte currently being accessed.  Loading it with
+      // limit - 1 here made every iteration of a descending loop through
+      // a pointer re-access the top byte, so e.g. a 16-bit unsigned
+      // compare of a global against a byte compared the high byte twice
+      // and never the low byte.
+      ldyi(g, index);
       return;
     }
   }
   if (GetAddrMode(src) == kAddrModeIndirectIndexed ||
       GetAddrMode(dest) == kAddrModeIndirectIndexed) {
-    ldyi(g, limit - 1);
+    ldyi(g, index);
   }
 }
 
@@ -6862,39 +6868,19 @@ static void LowerSignExtend(W65C02Generator* g, IRNode* node) {
       }
     }
   } else {
-    // Shorten
-    // Say from 4 to 2 bytes
-    // we just need to set the top bit of the second byte of the dest if the top
-    // bit of the 4th byte of the src is set.
-    //
-    // lda src+0
-    // sta dest+0
-    // lda src+3
-    // AND #0x80
-    // ORA src+1
-    // sta dest+1
-
-    for (int i = 0; i < dest_size - 1; i++) {
+    // Shorten: a narrowing conversion keeps the low dest_size bytes of
+    // the source (the value modulo 2^(8*dest_size)).  The destination's
+    // sign bit is already bit 7 of src[dest_size - 1]; the higher source
+    // bytes hold only discarded multiples of the destination modulus.
+    // OR-ing the *source's* top sign bit into the destination instead
+    // corrupted values whose discarded bits were negative but whose
+    // kept low byte was small: (unsigned _BitInt(8))(0 - 255) gave
+    // 0x81, not 0x01.
+    for (int i = 0; i < dest_size; i++) {
       SetIndexReg(g, src, dest, i);
       lda(g, src, i);
       sta(g, dest, i);
     }
-
-    Emit(g,
-         NewInstruction2(W65C02_OP(lda), src,
-                         ByteConst(g, src_size - 1),
-                         GetAddrMode(src)));
-    Emit(g, NewInstruction1(W65C02_OP(and),
-                            ByteConst(g, 0x80),
-                            kAddrModeImmediate));
-    Emit(g, NewInstruction2(
-                W65C02_OP(ora), src,
-                ByteConst(g,  dest_size - 1),
-                GetAddrMode(src)));
-    Emit(g, NewInstruction2(
-                W65C02_OP(sta), dest,
-                ByteConst(g, dest_size - 1),
-                GetAddrMode(dest)));
   }
   SetLoweredNode(node, dest);
   AddSpillPoint(g, dest);
