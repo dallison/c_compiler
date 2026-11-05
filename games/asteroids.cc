@@ -266,11 +266,11 @@ struct Play {
     void return_void() {}
     void unhandled_exception() {}
     static void* operator new(size_t n) noexcept {
-      if (play_used + (unsigned)n > sizeof(play_pool)) {
+      if (play_used + static_cast<unsigned>(n) > sizeof(play_pool)) {
         return 0;
       }
       void* p = play_pool + play_used;
-      play_used += (unsigned)n;
+      play_used += static_cast<unsigned>(n);
       return p;
     }
     static void operator delete(void*) noexcept {}
@@ -345,7 +345,7 @@ Play shot_coro() {
 
 void Text::write(const char* text) {
   while (*text != 0) {
-    bbc::oswrch((unsigned char)*text);
+    bbc::oswrch(static_cast<unsigned char>(*text));
     text++;
   }
 }
@@ -356,12 +356,12 @@ void Text::centre(u8 row, u8 colour, const char* line) {
     len++;
   }
   bbc::colour(colour);
-  bbc::tab((u8)((u8)(Cols - len) >> 1), row);
+  bbc::tab(static_cast<u8>(static_cast<u8>(Cols - len) >> 1), row);
   write(line);
 }
 
 static u16 rng_next() {
-  rng_state = (unsigned)(rng_state + (rng_state << 5) + 13849);
+  rng_state = static_cast<unsigned>(rng_state + (rng_state << 5) + 13849);
   return rng_state;
 }
 
@@ -407,7 +407,7 @@ static void sound_death() {
 
 static u16 wrap_x(u16 x) {
   while (x >= FieldW) {
-    x = (u16)(x - FieldW);
+    x = static_cast<u16>(x - FieldW);
   }
   return x;
 }
@@ -415,10 +415,10 @@ static u16 wrap_x(u16 x) {
 static u16 wrap_y(u16 y) {
   // Keep the HUD clear and the 16x16 blit on the last character rows.
   while (y < FieldY0) {
-    y = (u16)(y + (FieldY1 - FieldY0));
+    y = static_cast<u16>(y + (FieldY1 - FieldY0));
   }
   while (y >= FieldY1) {
-    y = (u16)(y - (FieldY1 - FieldY0));
+    y = static_cast<u16>(y - (FieldY1 - FieldY0));
   }
   return y;
 }
@@ -427,31 +427,31 @@ static u16 wrap_y(u16 y) {
 // old unsigned wrap treated a leftover x>=320 as "still on screen" and let
 // large sprites paint off the right/bottom — that hung the machine.
 static u16 advance_x(u16 x, i8 v) {
-  i16 n = (i16)((i16)x + (i16)v);
+  i16 n = static_cast<i16>(static_cast<i16>(x) + static_cast<i16>(v));
   while (n < 0) {
-    n = (i16)(n + FieldW);
+    n = static_cast<i16>(n + FieldW);
   }
   while (n >= FieldW) {
-    n = (i16)(n - FieldW);
+    n = static_cast<i16>(n - FieldW);
   }
-  return (u16)n;
+  return static_cast<u16>(n);
 }
 
 static u16 advance_y(u16 y, i8 v) {
-  i16 n = (i16)((i16)y + (i16)v);
-  i16 h = (i16)(FieldY1 - FieldY0);
+  i16 n = static_cast<i16>(static_cast<i16>(y) + static_cast<i16>(v));
+  i16 h = static_cast<i16>(FieldY1 - FieldY0);
   while (n < FieldY0) {
-    n = (i16)(n + h);
+    n = static_cast<i16>(n + h);
   }
   while (n >= FieldY1) {
-    n = (i16)(n - h);
+    n = static_cast<i16>(n - h);
   }
-  return (u16)n;
+  return static_cast<u16>(n);
 }
 
-static u8 pix_col(u16 x) { return (u8)(x >> 2); }
+static u8 pix_col(u16 x) { return static_cast<u8>(x >> 2); }
 
-static u8 pix_row(u16 y) { return (u8)(y >> 3); }
+static u8 pix_row(u16 y) { return static_cast<u8>(y >> 3); }
 
 // Tables beat long if-ladders for size under HIMEM (thrust frames cost
 // 512 bytes of art; every code byte counts).
@@ -462,11 +462,13 @@ static const unsigned char* const k_ship_img[16] = {
     k_as_ship_t4, k_as_ship_t5, k_as_ship_t6, k_as_ship_t7};
 
 static const unsigned char* ship_image(u8 dir, u8 thrusting) {
-  return k_ship_img[(u8)(dir + (thrusting ? 8 : 0))];
+  return k_ship_img[static_cast<u8>(dir + (thrusting ? 8 : 0))];
 }
 
-static const i8 k_thrust_dx[8] = {0, 1, 1, 1, 0, (i8)-1, (i8)-1, (i8)-1};
-static const i8 k_thrust_dy[8] = {(i8)-1, (i8)-1, 0, 1, 1, 1, 0, (i8)-1};
+static const i8 k_thrust_dx[8] = {0, 1, 1, 1, 0, static_cast<i8>(-1),
+                                    static_cast<i8>(-1), static_cast<i8>(-1)};
+static const i8 k_thrust_dy[8] = {static_cast<i8>(-1), static_cast<i8>(-1), 0, 1,
+                                    1, 1, 0, static_cast<i8>(-1)};
 
 static i8 thrust_dx(u8 dir) { return k_thrust_dx[dir]; }
 static i8 thrust_dy(u8 dir) { return k_thrust_dy[dir]; }
@@ -511,7 +513,7 @@ static void ship_present() {
     return;
   }
   ncol = pix_col(ship_x);
-  sy = (u8)ship_y;
+  sy = static_cast<u8>(ship_y);
   // Repaint every tick: a rock (or shot) wipe can clobber part of a
   // stationary ship's window — during the post-respawn invulnerable
   // seconds rocks pass straight through it — and with an unchanged-
@@ -595,9 +597,9 @@ static void shot_present(u8 i) {
   // Inline the paint chain: this runs per shot per tick, and the
   // pix_col/wipe_shot/paint_shot/shot_image calls cost more than the
   // strip paint itself.
-  ncol = (u8)(shot_x[i] >> 2);
-  ny = (u8)shot_y[i];
-  phase = (u8)(shot_x[i] & 3);
+  ncol = static_cast<u8>(shot_x[i] >> 2);
+  ny = static_cast<u8>(shot_y[i]);
+  phase = static_cast<u8>(shot_x[i] & 3);
   if (shot_shown[i] &&
       (ncol != shot_col[i] || ny != shot_sy[i] || phase != shot_phase[i])) {
     as_col = shot_col[i];
@@ -624,28 +626,28 @@ static void shot_spawn_draw(u8 i) {
 // `v < 0` / `v > max` wrong inside clamp — every negative speed became
 // +ThrustMax, so thrust felt random. Stay in unsigned byte space.
 static i8 clamp_vel(i8 v) {
-  u8 u = (u8)v;
-  if (u <= (u8)Pace::ThrustMax) {
+  u8 u = static_cast<u8>(v);
+  if (u <= static_cast<u8>(Pace::ThrustMax)) {
     return v;
   }
-  if (u >= (u8)(256 - Pace::ThrustMax)) {
+  if (u >= static_cast<u8>(256 - Pace::ThrustMax)) {
     return v;
   }
   if (u < 128) {
-    return (i8)Pace::ThrustMax;
+    return static_cast<i8>(Pace::ThrustMax);
   }
-  return (i8)(-Pace::ThrustMax);
+  return static_cast<i8>(-Pace::ThrustMax);
 }
 
 static void friction(i8* v) {
-  u8 u = (u8)(*v);
+  u8 u = static_cast<u8>(*v);
   if (u == 0) {
     return;
   }
   if (u < 128) {
-    (*v) = (i8)(u - 1);
+    (*v) = static_cast<i8>(u - 1);
   } else {
-    (*v) = (i8)(u + 1);
+    (*v) = static_cast<i8>(u + 1);
   }
 }
 
@@ -670,18 +672,18 @@ static void spawn_rock(u8 size, u16 x, u16 y) {
   rock_size[i] = size;
   rock_x[i] = wrap_x(x);
   rock_y[i] = wrap_y(y);
-  rock_look[i] = (u8)(rng_next() & 1);
-  speed = (i8)(1 + (rng_next() & 1));
+  rock_look[i] = static_cast<u8>(rng_next() & 1);
+  speed = static_cast<i8>(1 + (rng_next() & 1));
   if (size == ROCK_SMALL) {
-    speed = (i8)(speed + 1);
+    speed = static_cast<i8>(speed + 1);
   }
   if ((rng_next() & 1) != 0) {
-    speed = (i8)(-speed);
+    speed = static_cast<i8>(-speed);
   }
   rock_vx[i] = speed;
-  speed = (i8)(1 + (rng_next() & 1));
+  speed = static_cast<i8>(1 + (rng_next() & 1));
   if ((rng_next() & 1) != 0) {
-    speed = (i8)(-speed);
+    speed = static_cast<i8>(-speed);
   }
   rock_vy[i] = speed;
   // Keep rocks from racing — large ones drift, small ones a little faster.
@@ -735,15 +737,15 @@ static void split_rock(u8 i) {
   }
   sound_boom();
   if (size == ROCK_LARGE) {
-    score = (unsigned)(score + 20);
+    score = static_cast<unsigned>(score + 20);
     spawn_rock(ROCK_MED, x + 4, y);
     spawn_rock(ROCK_MED, x, y + 4);
   } else if (size == ROCK_MED) {
-    score = (unsigned)(score + 50);
+    score = static_cast<unsigned>(score + 50);
     spawn_rock(ROCK_SMALL, x + 2, y);
     spawn_rock(ROCK_SMALL, x, y + 2);
   } else {
-    score = (unsigned)(score + 100);
+    score = static_cast<unsigned>(score + 100);
   }
   if (score > best) {
     best = score;
@@ -757,14 +759,14 @@ static void fire_shot() {
     if (!shot_on[i]) {
       shot_on[i] = 1;
       // Spawn from the nose of the 16x16 hull.
-      shot_x[i] = advance_x(ship_x, (i8)(8 + thrust_dx(ship_dir) * 6));
-      shot_y[i] = advance_y(ship_y, (i8)(8 + thrust_dy(ship_dir) * 6));
+      shot_x[i] = advance_x(ship_x, static_cast<i8>(8 + thrust_dx(ship_dir) * 6));
+      shot_y[i] = advance_y(ship_y, static_cast<i8>(8 + thrust_dy(ship_dir) * 6));
       shot_vx[i] =
-          (i8)(ship_vx + thrust_dx(ship_dir) * (i8)Pace::ShotSpeed);
+          static_cast<i8>(ship_vx + thrust_dx(ship_dir) * static_cast<i8>(Pace::ShotSpeed));
       shot_vy[i] =
-          (i8)(ship_vy + thrust_dy(ship_dir) * (i8)Pace::ShotSpeed);
+          static_cast<i8>(ship_vy + thrust_dy(ship_dir) * static_cast<i8>(Pace::ShotSpeed));
       if (shot_vx[i] == 0 && shot_vy[i] == 0) {
-        shot_vy[i] = (i8)(-Pace::ShotSpeed);
+        shot_vy[i] = static_cast<i8>(-Pace::ShotSpeed);
       }
       shot_life[i] = Pace::ShotLife;
       shot_spawn_draw(i);
@@ -776,15 +778,15 @@ static void fire_shot() {
 }
 
 static void place_wave() {
-  u8 n = (u8)(3 + wave);
+  u8 n = static_cast<u8>(3 + wave);
   u8 i;
   if (n > 6) {
     n = 6;
   }
   clear_rocks();
   for (i = 0; i < n; i++) {
-    u16 x = (u16)(20 + (rng_next() & 255));
-    u16 y = (u16)(24 + (rng_next() & 127));
+    u16 x = static_cast<u16>(20 + (rng_next() & 255));
+    u16 y = static_cast<u16>(24 + (rng_next() & 127));
     if (x > 280) {
       x = 280;
     }
@@ -875,7 +877,7 @@ u8 Title::show() {
     spin--;
     if (spin == 0) {
       spin = Pace::TitleSpin;
-      dir = (u8)((dir + 1) & 7);
+      dir = static_cast<u8>((dir + 1) & 7);
       paint_title_ship(ship_image(dir, 0));
     }
   }
@@ -900,7 +902,7 @@ static void kill_player() {
   clear_shots();
   paint_cell(pix_col(ship_x), pix_row(ship_y), k_as_boom0);
   sound_death();
-  (void)i;
+  static_cast<void>(i);
 }
 
 static void dying() {
@@ -936,10 +938,10 @@ void beat_ship() {
   }
   if (ship_turn_t == 0) {
     if (key_bits & KeyLeft) {
-      ship_dir = (u8)((ship_dir + 7) & 7);
+      ship_dir = static_cast<u8>((ship_dir + 7) & 7);
       ship_turn_t = Pace::TurnGap;
     } else if (key_bits & KeyRight) {
-      ship_dir = (u8)((ship_dir + 1) & 7);
+      ship_dir = static_cast<u8>((ship_dir + 1) & 7);
       ship_turn_t = Pace::TurnGap;
     }
   }
@@ -949,8 +951,8 @@ void beat_ship() {
     if (ship_thrust_t > 0) {
       ship_thrust_t--;
     } else {
-      ship_vx = clamp_vel((i8)(ship_vx + thrust_dx(ship_dir)));
-      ship_vy = clamp_vel((i8)(ship_vy + thrust_dy(ship_dir)));
+      ship_vx = clamp_vel(static_cast<i8>(ship_vx + thrust_dx(ship_dir)));
+      ship_vy = clamp_vel(static_cast<i8>(ship_vy + thrust_dy(ship_dir)));
       sound_thrust();
       ship_thrust_t = Pace::ThrustGap;
     }
@@ -964,7 +966,7 @@ void beat_ship() {
   }
   // Tap = one shot (even mid-gap). Hold = autofire when ship_fire_t hits 0.
   {
-    u8 down = (u8)(key_bits & KeyFire);
+    u8 down = static_cast<u8>(key_bits & KeyFire);
     if (ship_fire_t > 0) {
       ship_fire_t--;
     }
@@ -979,30 +981,30 @@ void beat_ship() {
   }
   // Move in byte arithmetic; advance_x/advance_y are 16-bit helper
   // calls that cost more than the move when called every tick.
-  if ((u8)ship_vx != 0) {
-    u8 uv = (u8)ship_vx;
+  if (static_cast<u8>(ship_vx) != 0) {
+    u8 uv = static_cast<u8>(ship_vx);
     if (uv < 128) {
-      ship_x = (u16)(ship_x + uv);
+      ship_x = static_cast<u16>(ship_x + uv);
       if (ship_x >= FieldW) {
-        ship_x = (u16)(ship_x - FieldW);
+        ship_x = static_cast<u16>(ship_x - FieldW);
       }
-    } else if (ship_x >= (u8)(0 - uv)) {
-      ship_x = (u16)(ship_x - (u8)(0 - uv));
+    } else if (ship_x >= static_cast<u8>(0 - uv)) {
+      ship_x = static_cast<u16>(ship_x - static_cast<u8>(0 - uv));
     } else {
-      ship_x = (u16)(ship_x + (FieldW - (u8)(0 - uv)));
+      ship_x = static_cast<u16>(ship_x + (FieldW - static_cast<u8>(0 - uv)));
     }
   }
-  if ((u8)ship_vy != 0) {
-    u8 uv = (u8)ship_vy;
+  if (static_cast<u8>(ship_vy) != 0) {
+    u8 uv = static_cast<u8>(ship_vy);
     if (uv < 128) {
-      ship_y = (u16)(ship_y + uv);
+      ship_y = static_cast<u16>(ship_y + uv);
       if (ship_y >= FieldY1) {
-        ship_y = (u16)(ship_y - (FieldY1 - FieldY0));
+        ship_y = static_cast<u16>(ship_y - (FieldY1 - FieldY0));
       }
-    } else if (ship_y >= (u8)(FieldY0 + (u8)(0 - uv))) {
-      ship_y = (u16)(ship_y - (u8)(0 - uv));
+    } else if (ship_y >= static_cast<u8>(FieldY0 + static_cast<u8>(0 - uv))) {
+      ship_y = static_cast<u16>(ship_y - static_cast<u8>(0 - uv));
     } else {
-      ship_y = (u16)(ship_y + ((FieldY1 - FieldY0) - (u8)(0 - uv)));
+      ship_y = static_cast<u16>(ship_y + ((FieldY1 - FieldY0) - static_cast<u8>(0 - uv)));
     }
   }
   if (ship_invuln > 0) {
@@ -1049,14 +1051,14 @@ void beat_shots() {
   // victim rock).
   shots_step();
   for (i = 0; i < AS_SHOTS; i++) {
-    if (as_shot_dead & (u8)(1 << i)) {
+    if (as_shot_dead & static_cast<u8>(1 << i)) {
       u8 v = as_shot_victim[i];
       shot_erase(i);
       // Two shots can claim the same rock in one step; split it once.
       // (split_rock may also reuse the slot for a child rock, which a
       // second claimant must not split again.)
-      if (v != 0xFF && !(claimed & (u16)((u16)1 << v)) && rock_on[v]) {
-        claimed = (u16)(claimed | (u16)((u16)1 << v));
+      if (v != 0xFF && !(claimed & static_cast<u16>(static_cast<u16>(1) << v)) && rock_on[v]) {
+        claimed = static_cast<u16>(claimed | static_cast<u16>(static_cast<u16>(1) << v));
         split_rock(v);
       }
     }

@@ -328,11 +328,11 @@ struct Play {
     void return_void() {}
     void unhandled_exception() {}
     static void* operator new(size_t n) noexcept {
-      if (play_used + (unsigned)n > sizeof(play_pool)) {
+      if (play_used + static_cast<unsigned>(n) > sizeof(play_pool)) {
         return 0;
       }
       void* p = play_pool + play_used;
-      play_used += (unsigned)n;
+      play_used += static_cast<unsigned>(n);
       return p;
     }
     static void operator delete(void*) noexcept {}
@@ -464,7 +464,7 @@ static u8 jobs_ok;
 
 void Text::write(const char* text) {
   while (*text != 0) {
-    bbc::oswrch((unsigned char)*text);
+    bbc::oswrch(static_cast<unsigned char>(*text));
     text++;
   }
 }
@@ -475,12 +475,12 @@ void Text::centre(u8 row, u8 colour, const char* line) {
     len++;
   }
   bbc::colour(colour);
-  bbc::tab((u8)((u8)(Cols - len) >> 1), row);
+  bbc::tab(static_cast<u8>(static_cast<u8>(Cols - len) >> 1), row);
   write(line);
 }
 
 static u16 rng_next() {
-  rng_state = (unsigned)(rng_state + (rng_state << 5) + 13849);
+  rng_state = static_cast<unsigned>(rng_state + (rng_state << 5) + 13849);
   return rng_state;
 }
 
@@ -588,14 +588,14 @@ void Title::invader(const unsigned char* image, const unsigned char* last) {
       continue;
     }
     for (p = 0; p < 4; p++) {
-      u8 ink = (u8)(((now & 0x80) != 0 ? 2 : 0) | ((now & 0x08) != 0 ? 1 : 0));
-      u8 old = (u8)(((was & 0x80) != 0 ? 2 : 0) | ((was & 0x08) != 0 ? 1 : 0));
+      u8 ink = static_cast<u8>(((now & 0x80) != 0 ? 2 : 0) | ((now & 0x08) != 0 ? 1 : 0));
+      u8 old = static_cast<u8>(((was & 0x80) != 0 ? 2 : 0) | ((was & 0x08) != 0 ? 1 : 0));
       if (ink != old) {
         Screen::fill(BigX + ((i >> 3) * 4 + p) * Scale, BigY + (i & 7) * Scale, Scale, Scale,
                      ink);
       }
-      now = (u8)(now << 1);
-      was = (u8)(was << 1);
+      now = static_cast<u8>(now << 1);
+      was = static_cast<u8>(was << 1);
     }
   }
 }
@@ -604,7 +604,7 @@ void Title::table(u8 look) {
   u8 i;
   for (i = 0; i < 4; i++) {
     fx_col = TableCol * 2;
-    fx_row = (u8)(TableRow + i * 2);
+    fx_row = static_cast<u8>(TableRow + i * 2);
     fx_src = score_table[i].look[look];
     fx_len = 48;
     fx_cell();
@@ -625,7 +625,7 @@ u8 Title::show() {
   table(look);
   bbc::colour(ColWhite);
   for (i = 0; i < 4; i++) {
-    bbc::tab(TableCol + 4, (u8)(TableRow + i * 2));
+    bbc::tab(TableCol + 4, static_cast<u8>(TableRow + i * 2));
     Text::write(score_table[i].points);
   }
   Text::centre(24, ColGreen, "Z X OR ARROWS MOVE");
@@ -657,7 +657,7 @@ u8 Title::show() {
 namespace Game {
 
 static void add_score(u16 points) {
-  score = (unsigned)(score + points);
+  score = static_cast<unsigned>(score + points);
   hud_dirty = 1;
 }
 
@@ -690,7 +690,7 @@ static void draw_bunkers() {
 }
 
 static void deploy() {
-  u8 drop = (u8)(wave - 1);
+  u8 drop = static_cast<u8>(wave - 1);
   if (drop > 5) {
     drop = 5;
   }
@@ -698,7 +698,7 @@ static void deploy() {
   ufo_on = 0;
   Volley::reset();
   boom_t = 0;
-  fl_row = (u8)(Metrics::FleetRow + drop);
+  fl_row = static_cast<u8>(Metrics::FleetRow + drop);
   Fleet::reset();
   bomb_t = Pace::FirstBomb;
   ufo_wait = Pace::Ufo;
@@ -799,7 +799,7 @@ static void launch_bomb() {
     bomb_t -= Pace::BombFast;
   }
   // 11..15 drop over the cannon: about one bomb in three is aimed.
-  drop_col = (u8)((rng_next() >> 8) & 15);
+  drop_col = static_cast<u8>((rng_next() >> 8) & 15);
   bomb_drop();
 }
 

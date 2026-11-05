@@ -212,11 +212,11 @@ struct Play {
     void return_void() {}
     void unhandled_exception() {}
     static void* operator new(size_t n) noexcept {
-      if (play_used + (unsigned)n > sizeof(play_pool)) {
+      if (play_used + static_cast<unsigned>(n) > sizeof(play_pool)) {
         return 0;
       }
       void* p = play_pool + play_used;
-      play_used += (unsigned)n;
+      play_used += static_cast<unsigned>(n);
       return p;
     }
     static void operator delete(void*) noexcept {}
@@ -291,7 +291,7 @@ Play fruit_coro() {
 
 void Text::write(const char* text) {
   while (*text != 0) {
-    bbc::oswrch((unsigned char)*text);
+    bbc::oswrch(static_cast<unsigned char>(*text));
     text++;
   }
 }
@@ -302,12 +302,12 @@ void Text::centre(u8 row, u8 colour, const char* line) {
     len++;
   }
   bbc::colour(colour);
-  bbc::tab((u8)((u8)(Cols - len) >> 1), row);
+  bbc::tab(static_cast<u8>(static_cast<u8>(Cols - len) >> 1), row);
   write(line);
 }
 
 static u16 rng_next() {
-  rng_state = (unsigned)(rng_state + (rng_state << 5) + 13849);
+  rng_state = static_cast<unsigned>(rng_state + (rng_state << 5) + 13849);
   return rng_state;
 }
 
@@ -393,7 +393,7 @@ static int snake_covers(u8 col, u8 row, u8 ignore_tail) {
     count--;
   }
   for (i = 0; i < count; i++) {
-    u8 index = (u8)((snake_head - i) & (SN_MAX - 1));
+    u8 index = static_cast<u8>((snake_head - i) & (SN_MAX - 1));
     if (snake_col[index] == col && snake_row[index] == row) {
       return 1;
     }
@@ -431,13 +431,13 @@ static void place_free(u8* col, u8* row) {
   u8 c;
   u8 r;
   do {
-    c = (u8)(1 + (rng_next() & 31));
-    r = (u8)(1 + (rng_next() & 15));
+    c = static_cast<u8>(1 + (rng_next() & 31));
+    r = static_cast<u8>(1 + (rng_next() & 15));
     if (c >= SN_COLS - 1) {
-      c = (u8)(SN_COLS - 2);
+      c = static_cast<u8>(SN_COLS - 2);
     }
     if (r >= SN_ROWS - 1) {
-      r = (u8)(SN_ROWS - 2);
+      r = static_cast<u8>(SN_ROWS - 2);
     }
     guard++;
   } while ((occupied(c, r, 0) || fruit_blocks(c, r)) && guard < 48);
@@ -467,7 +467,7 @@ static void snake_reset() {
   snake_dir = DirRight;
   snake_next = DirRight;
   for (i = 0; i < snake_len; i++) {
-    snake_col[i] = (u8)(6 + i);
+    snake_col[i] = static_cast<u8>(6 + i);
     snake_row[i] = SN_ROWS / 2;
   }
 }
@@ -475,7 +475,7 @@ static void snake_reset() {
 static void snake_draw() {
   u8 i;
   for (i = snake_len - 1; i > 0; i--) {
-    u8 index = (u8)((snake_head - i) & (SN_MAX - 1));
+    u8 index = static_cast<u8>((snake_head - i) & (SN_MAX - 1));
     if (i + 1 == snake_len) {
       paint(snake_col[index], snake_row[index], k_sn_tail);
     } else {
@@ -524,7 +524,7 @@ static void spawn_fruit(u8 kind) {
     if (fruit_kind[f] == FRUIT_NONE) {
       place_free(&fruit_col[f], &fruit_row[f]);
       fruit_kind[f] = kind;
-      fruit_life[f] = kind == FRUIT_BONUS ? (u8)Pace::BonusLife : 0;
+      fruit_life[f] = kind == FRUIT_BONUS ? static_cast<u8>(Pace::BonusLife) : 0;
       paint(fruit_col[f], fruit_row[f], fruit_image(kind, fruit_look));
       return;
     }
@@ -572,7 +572,7 @@ static void draw_border() {
 // Border is an edge test; rock_* holds interior obstacles that grow with
 // the level. Keep the spawn corridor clear so a new life is fair.
 static void build_rocks() {
-  u8 extras = (u8)(2 + level * 2);
+  u8 extras = static_cast<u8>(2 + level * 2);
   u8 i;
   rock_n = 0;
   if (extras > 16) {
@@ -583,13 +583,13 @@ static void build_rocks() {
     u8 r;
     u8 guard = 0;
     do {
-      c = (u8)(1 + (rng_next() & 31));
-      r = (u8)(1 + (rng_next() & 15));
+      c = static_cast<u8>(1 + (rng_next() & 31));
+      r = static_cast<u8>(1 + (rng_next() & 15));
       if (c >= SN_COLS - 1) {
-        c = (u8)(SN_COLS - 2);
+        c = static_cast<u8>(SN_COLS - 2);
       }
       if (r >= SN_ROWS - 1) {
-        r = (u8)(SN_ROWS - 2);
+        r = static_cast<u8>(SN_ROWS - 2);
       }
       guard++;
     } while ((snake_covers(c, r, 0) ||
@@ -625,7 +625,7 @@ static u8 snake_step() {
     return StepDied;
   }
   slot = fruit_at(x, y);
-  snake_head = (u8)((snake_head + 1) & (SN_MAX - 1));
+  snake_head = static_cast<u8>((snake_head + 1) & (SN_MAX - 1));
   snake_col[snake_head] = x;
   snake_row[snake_head] = y;
   paint(snake_col[prev], snake_row[prev], k_sn_body);
@@ -640,8 +640,8 @@ static u8 snake_step() {
     return kind == FRUIT_BONUS ? StepBonus : StepAte;
   }
   {
-    u8 tail = (u8)((snake_head - snake_len) & (SN_MAX - 1));
-    u8 new_tail = (u8)((snake_head - (snake_len - 1)) & (SN_MAX - 1));
+    u8 tail = static_cast<u8>((snake_head - snake_len) & (SN_MAX - 1));
+    u8 new_tail = static_cast<u8>((snake_head - (snake_len - 1)) & (SN_MAX - 1));
     wipe(snake_col[tail], snake_row[tail]);
     if (snake_len > 1) {
       paint(snake_col[new_tail], snake_row[new_tail], k_sn_tail);
@@ -750,7 +750,7 @@ u8 Title::show() {
 namespace Game {
 
 static void add_score(u16 points) {
-  score = (unsigned)(score + points);
+  score = static_cast<unsigned>(score + points);
   if (score > best) {
     best = score;
   }
